@@ -1,0 +1,71 @@
+section,values...
+Rasterizer: triangle throughput & limit,16,20.5k,0.81,3.82,0.99,0.87,25.3
+Rasterizer: triangle throughput & limit,64,81.9k,1.27,10.04,1.73,1.31,64.6
+Rasterizer: triangle throughput & limit,256,327.7k,2.51,28.26,3.88,2.66,130.5
+Rasterizer: triangle throughput & limit,1024,1.31M,7.10,90.31,11.71,7.44,184.5
+Rasterizer: triangle throughput & limit,2048,2.62M,13.43,168.54,22.41,13.54,195.2
+Rasterizer: triangle throughput & limit,4096,5.24M,26.61,325.56,45.10,26.46,197.1
+Rasterizer: triangle throughput & limit,8192,10.49M,51.20,627.65,86.69,51.39,204.8
+Rasterizer: triangle throughput & limit,16384,20.97M,101.37,1239.60,172.90,102.52,206.9
+Rasterizer: tile size sweep,16,9.60
+Rasterizer: tile size sweep,32,7.64
+Rasterizer: tile size sweep,64,7.15
+Rasterizer: tile size sweep,128,7.47
+Rasterizer: tile size sweep,256,10.35
+Rasterizer: resolution scaling (fill rate),640x360,0.23,2.18,105.6
+Rasterizer: resolution scaling (fill rate),1280x720,0.92,2.64,349.3
+Rasterizer: resolution scaling (fill rate),1920x1080,2.07,3.54,585.7
+Rasterizer: resolution scaling (fill rate),2560x1440,3.69,4.74,777.9
+Rasterizer: resolution scaling (fill rate),3840x2160,8.29,8.87,935.2
+Scene graph: world-matrix updates,flat (all roots),1000,0.01,0.02,1.7x
+Scene graph: world-matrix updates,flat (all roots),10000,0.09,0.14,1.6x
+Scene graph: world-matrix updates,flat (all roots),100000,1.76,3.18,1.8x
+Scene graph: world-matrix updates,deep chain,1000,0.04,14.23,321.2x
+Scene graph: world-matrix updates,deep chain,4000,0.19,239.34,1271.0x
+Scene graph: world-matrix updates,deep chain,10000,0.52,1438.45,2782.7x
+Scene graph: world-matrix updates,tree (fan-out 4),1000,0.03,0.13,3.8x
+Scene graph: world-matrix updates,tree (fan-out 4),10000,0.38,1.81,4.7x
+Scene graph: world-matrix updates,tree (fan-out 4),100000,6.90,23.18,3.4x
+Picking: ray casting vs id buffer,100,148.0,5.0,0.0027
+Picking: ray casting vs id buffer,1000,1389.1,42.3,0.0033
+Picking: ray casting vs id buffer,10000,(skipped),415.0,0.0040
+Catmull-Clark subdivision: limit,1,24,26,0.0,1.1 KB
+Catmull-Clark subdivision: limit,2,96,98,0.0,3.3 KB
+Catmull-Clark subdivision: limit,3,384,386,0.0,12.3 KB
+Catmull-Clark subdivision: limit,4,1.5k,1.5k,0.1,48.3 KB
+Catmull-Clark subdivision: limit,5,6.1k,6.1k,0.3,192.3 KB
+Catmull-Clark subdivision: limit,6,24.6k,24.6k,1.2,768.3 KB
+Catmull-Clark subdivision: limit,7,98.3k,98.3k,3.6,3.0 MB
+Catmull-Clark subdivision: limit,8,393.2k,393.2k,14.1,12.0 MB
+Catmull-Clark subdivision: limit,9,1.57M,1.57M,62.2,48.0 MB
+Catmull-Clark subdivision: limit,10,6.29M,6.29M,344.1,192.0 MB
+Topology: building the edge table,1.5k,0.3,0.3,0.0,9.4x
+Topology: building the edge table,24.6k,5.8,5.5,0.5,10.0x
+Topology: building the edge table,393.2k,158.5,101.1,11.4,8.9x
+Topology: building the edge table,1.57M,984.7,437.2,51.4,8.5x
+Merge by Distance: spatial hash vs O(n^2),9.6k,7.2,1.1,6.5x,7.9k
+Merge by Distance: spatial hash vs O(n^2),38.4k,110.8,4.5,24.4x,31.8k
+Merge by Distance: spatial hash vs O(n^2),153.6k,1789.8,19.3,92.9x,127.7k
+Merge by Distance: spatial hash vs O(n^2),614.4k,(skipped: too slow),115.1,-,511.4k
+Merge by Distance: spatial hash vs O(n^2),2.46M,(skipped: too slow),589.5,-,2.05M
+Scene save / load (text format),1000 objects (shared cube),209.8 KB,1.4,3.9,54.5
+Scene save / load (text format),10000 objects (shared cube),2.1 MB,11.2,37.3,58.1
+Scene save / load (text format),50000 objects (shared cube),10.4 MB,59.8,185.0,59.1
+Scene save / load (text format),1 mesh, 393.2k verts,21.9 MB,60.6,73.4,312.9
+Undo snapshots: copy-on-write vs deep copy,10,983.1k,0.02,4.8,30.0 MB
+Undo snapshots: copy-on-write vs deep copy,100,9.83M,0.05,48.7,300.0 MB
+Undo snapshots: copy-on-write vs deep copy,500,49.15M,0.27,416.9,1.46 GB
+Job system: parallel scaling,1,16.02,1.0x,100%
+Job system: parallel scaling,2,9.35,1.7x,86%
+Job system: parallel scaling,3,7.83,2.0x,68%
+Job system: parallel scaling,4,7.61,2.1x,53%
+Job system: parallel scaling,8,7.60,2.1x,26%
+Job system: parallel scaling,16,7.33,2.2x,14%
+Job system: parallel scaling,32,7.25,2.2x,7%
+Editor UI: Hierarchy virtualisation & frame cost,1000,3.08,324.4
+Editor UI: Hierarchy virtualisation & frame cost,10000,3.40,2944.5
+Editor UI: Hierarchy virtualisation & frame cost,100000,7.73,12936.3
+Editor robustness: random input fuzzing,6000,10621,30,0.96,no crash
+Memory footprint,empty GameObject,312.7
+Memory footprint,GameObject + MeshFilter + MeshRenderer (shared mesh),504.8
+Memory footprint,mesh vertex (incl. render cache),171.8

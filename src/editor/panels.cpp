@@ -1,0 +1,1232 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Hierarchy (Blender: Outliner), Inspector (Blender: Properties editor),
+// Project (Blender: File/Asset Browser), Console (Blender: Info editor),
+// Profiler (Blender: Statistics overlay / --debug timings).
+#include "editor.h"
+
+#include "../core/core.h"
+#include "../core/jobs.h"
+#include "../research/research.h"
+
+#include <algorithm>
+#include <cmath>
+#include <ctime>
+#include <functional>
+
+namespace bl {
+
+using namespace platform;
+using ui::Icon;
+
+static Icon object_icon(const GameObject &g) {
+  if (g.get<Camera>()) return Icon::Camera;
+  if (g.get<Light>()) return Icon::Light;
+  if (g.get<MeshFilter>()) return Icon::Cube;
+  return Icon::Empty;
+}
+
+/* ===================================================================== */
+/* Hierarchy                                                              */
+/* ===================================================================== */
+
+void Editor::draw_hierarchy(const Recti &r) {
+  auto &u = ui_;
+  auto &in = u.in;
+  int bh = u.row_h() + u.px(6);
+  Recti bar{r.x, r.y, r.w, bh};
+  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  int h = bh - u.px(8);
+  Recti plus{bar.x + u.px(5), bar.y + u.px(4), h + u.px(16), h};
+  bool plus_hot = u.hovered(plus);
+  u.frame(plus, plus_hot ? u.theme.button_hover : u.theme.button, u.theme.border, u.px(3));
+  u.draw_icon(Icon::Plus, {plus.x + u.px(3), plus.y + u.px(3), h - u.px(6), h - u.px(6)}, u.theme.text_bright);
+  u.draw_icon(Icon::ArrowDown, {plus.x + h, plus.y + u.px(5), u.px(9), u.px(9)}, u.theme.text);
+  ui::Id create_menu = u.id("hier_create");
+  if (plus_hot && in.pressed[0]) { u.open_popup(create_menu, plus); u.consume_click(); }
+  auto create_body = [this](bool child) {
+    auto &u = ui_;
+    if (u.menu_item("Create Empty")) create_object("Empty", child);
+    u.submenu("3D Object", u.px(170), [this, child] {
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad"})
+        if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
+    });
+    u.submenu("Light", u.px(190), [this, child] {
+      if (ui_.menu_item("Directional Light", nullptr, false, true, Icon::Light)) create_object("Directional Light", child);
+      if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light", child);
+    });
+    if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera", child);
+  };
+  u.popup(create_menu, u.px(200), [create_body] { create_body(false); });
+  u.text_field(u.id("hier_search"), {plus.right() + u.px(6), bar.y + u.px(4), bar.right() - plus.right() - u.px(12), h},
+               hierarchy_search_, nullptr, "Search...");
+
+  /* Flatten the visible tree (only expanded branches; virtualised drawing). */
+  struct Row { GameObject *g; int depth; };
+  std::vector<Row> rows;
+  std::string filter = to_lower(hierarchy_search_);
+  if (!filter.empty()) {
+    scene_->for_each_ordered([&](GameObject &g, int) {
+      if (to_lower(g.name).find(filter) != std::string::npos) rows.push_back({&g, 0});
+    });
+  }
+  else {
+    std::function<void(GameObject *, int)> walk = [&](GameObject *g, int d) {
+      rows.push_back({g, d});
+      if (expanded_.count(g->id))
+        for (GameObject *c : g->children) walk(c, d + 1);
+    };
+    for (GameObject *g : scene_->roots) walk(g, 0);
+  }
+
+  int rh = u.row_h();
+  Recti list{r.x, bar.bottom(), r.w, r.h - bh};
+  /* Scene header row like Unity ("SampleScene" with its own foldout). */
+  Recti head{list.x, list.y, list.w, rh + u.px(2)};
+  u.canvas.fill_rect(head, Color::hex(0x323232));
+  int a = u.font.line_height() - u.px(2);
+  u.draw_icon(Icon::Scene, {head.x + u.px(8), head.y + (head.h - a) / 2, a, a}, u.theme.text);
+  u.label({head.x + u.px(14) + a, head.y, head.w - a - u.px(20), head.h}, scene_->name + (scene_dirty_ ? "*" : ""), u.theme.text_bright);
+  Recti body{list.x, head.bottom(), list.w, list.bottom() - head.bottom()};
+
+  int content_h = (int)rows.size() * rh + rh * 2;
+  ui::Id sid = u.id("hier_scroll");
+  if (scroll_to_active_) {
+    for (size_t i = 0; i < rows.size(); i++)
+      if (rows[i].g->id == active_) {
+        int cur = u.scroll_offset(sid), y = (int)i * rh;
+        if (y < cur || y + rh > cur + body.h) u.scroll_to(sid, std::max(0, y - body.h / 2));
+        break;
+      }
+    scroll_to_active_ = false;
+  }
+  int off = u.begin_scroll(sid, body, content_h);
+  int first = std::max(0, off / rh), last = std::min((int)rows.size(), (off + body.h) / rh + 2);
+  GameObject *drop_target = nullptr;
+  int drop_mode = -1;  // 0 into, 1 before, 2 after
+  bool hovered_row = false;
+  for (int i = first; i < last; i++) {
+    GameObject *g = rows[i].g;
+    Recti row{body.x, body.y + i * rh - off, body.w, rh};
+    bool sel = is_selected(g->id);
+    bool hot = u.hovered(row);
+    if (sel) u.canvas.fill_rect(row, focused_ == WindowKind::Hierarchy ? u.theme.selection : u.theme.selection_dim);
+    else if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
+    int x = row.x + u.px(6) + rows[i].depth * u.px(14);
+    int arrow = u.font.line_height() - u.px(5);
+    if (!g->children.empty() && filter.empty()) {
+      Recti ar{x, row.y, arrow + u.px(4), rh};
+      u.draw_icon(expanded_.count(g->id) ? Icon::ArrowDown : Icon::ArrowRight, {x, row.y + (rh - arrow) / 2, arrow, arrow}, u.theme.text_dim);
+      if (u.hovered(ar) && in.pressed[0]) {
+        if (expanded_.count(g->id)) expanded_.erase(g->id);
+        else expanded_.insert(g->id);
+        u.consume_click();
+      }
+    }
+    x += arrow + u.px(4);
+    int ic = u.font.line_height() - u.px(2);
+    bool on = g->active_in_hierarchy();
+    u.draw_icon(object_icon(*g), {x, row.y + (rh - ic) / 2, ic, ic}, on ? u.theme.text : u.theme.text_dim);
+    x += ic + u.px(5);
+    if (rename_id_ == g->id) {
+      ui::Id rid = u.id("rename") ^ g->id;
+      if (!u.editing(rid)) u.begin_edit(rid, rename_buf_, true);
+      bool done = false;
+      u.text_field(rid, {x, row.y + 1, row.right() - x - u.px(4), rh - 2}, rename_buf_, &done);
+      if (done || !u.editing(rid)) {
+        if (!rename_buf_.empty() && rename_buf_ != g->name) {
+          g->name = rename_buf_;
+          mark_changed("Rename");
+        }
+        rename_id_ = 0;
+      }
+    }
+    else {
+      u.label({x, row.y, row.right() - x, rh}, g->name, on ? (sel ? u.theme.text_bright : u.theme.text) : u.theme.text_dim);
+    }
+    if (hot) {
+      hovered_row = true;
+      if (in.pressed[0]) {
+        if (in.shift() && last_clicked_) {
+          /* Range select in visible order. */
+          int a0 = -1, a1 = i;
+          for (int k = 0; k < (int)rows.size(); k++)
+            if (rows[k].g->id == last_clicked_) a0 = k;
+          if (a0 >= 0) {
+            if (!in.ctrl()) selection_.clear();
+            for (int k = std::min(a0, a1); k <= std::max(a0, a1); k++) select(rows[k].g->id, SEL_ADD);
+          }
+        }
+        else if (in.ctrl()) select(g->id, SEL_TOGGLE);
+        else if (!sel) select(g->id);
+        else active_ = g->id;
+        last_clicked_ = g->id;
+        hier_drag_ = g->id;
+        hier_dragging_ = false;
+        hier_press_y_ = in.my;
+      }
+      if (in.released[0] && !hier_dragging_ && sel && !in.ctrl() && !in.shift() && hier_drag_ == g->id && selection_.size() > 1) select(g->id);
+      if (in.double_clicked[0]) frame_selected();
+      if (in.pressed[1]) {
+        if (!sel) select(g->id);
+        u.open_popup(u.id("hier_ctx"), {in.mx, in.my, 0, 0});
+      }
+      if (hier_dragging_ && hier_drag_ != g->id) {
+        int ry = in.my - row.y;
+        drop_target = g;
+        drop_mode = ry < rh / 4 ? 1 : (ry > rh * 3 / 4 ? 2 : 0);
+      }
+    }
+  }
+  if (hier_drag_ && in.down[0] && std::abs(in.my - hier_press_y_) > u.px(5)) hier_dragging_ = true;
+  if (hier_dragging_) {
+    u.cursor = Cursor::Hand;
+    if (drop_target) {
+      int i = 0;
+      for (int k = first; k < last; k++)
+        if (rows[k].g == drop_target) i = k;
+      Recti row{body.x, body.y + i * rh - off, body.w, rh};
+      if (drop_mode == 0) u.canvas.rect_outline(row, u.theme.focus, u.px(2));
+      else u.canvas.fill_rect({row.x + u.px(20), drop_mode == 1 ? row.y : row.bottom() - u.px(2), row.w - u.px(20), u.px(2)}, u.theme.focus);
+    }
+    if (in.released[0]) {
+      auto moving = selected_objects(true);
+      if (drop_target) {
+        bool valid = true;
+        for (GameObject *mv : moving)
+          if (scene_->is_ancestor(mv, drop_target)) valid = false;
+        if (valid) {
+          for (GameObject *mv : moving) {
+            if (drop_mode == 0) {
+              scene_->set_parent(mv, drop_target);
+              expanded_.insert(drop_target->id);
+            }
+            else {
+              GameObject *p = drop_target->parent;
+              auto &sib = p ? p->children : scene_->roots;
+              if (mv->parent == p) sib.erase(std::remove(sib.begin(), sib.end(), mv), sib.end());
+              int idx = (int)(std::find(sib.begin(), sib.end(), drop_target) - sib.begin()) + (drop_mode == 2 ? 1 : 0);
+              if (mv->parent == p) {
+                sib.insert(sib.begin() + std::min(idx, (int)sib.size()), mv);
+              }
+              else scene_->set_parent(mv, p, idx);
+            }
+          }
+          mark_changed("Reparent");
+        }
+      }
+      else if (!hovered_row && u.hovered(body)) {
+        for (GameObject *mv : moving) scene_->set_parent(mv, nullptr);  // drop on empty space = unparent
+        mark_changed("Unparent");
+      }
+    }
+  }
+  if (!in.down[0]) {
+    hier_drag_ = 0;
+    hier_dragging_ = false;
+  }
+  /* Click on empty space clears selection; right-click opens create menu. */
+  if (!hovered_row && u.hovered(body) && in.pressed[0] && !edit_mode_) clear_selection();
+  if (!hovered_row && u.hovered(body) && in.pressed[1]) u.open_popup(create_menu, {in.mx, in.my, 0, 0});
+  u.end_scroll();
+
+  bool has_sel = !selection_.empty();
+  u.popup(u.id("hier_ctx"), u.px(220), [this, has_sel, create_body] {
+    auto &u = ui_;
+    if (u.menu_item("Rename", "F2", false, has_sel)) {
+      rename_id_ = active_;
+      if (GameObject *g = scene_->find(active_)) rename_buf_ = g->name;
+    }
+    if (u.menu_item("Duplicate", "Ctrl+D", false, has_sel)) duplicate_selected();
+    if (u.menu_item("Delete", "Del", false, has_sel)) delete_selected();
+    if (u.menu_item("Frame Selected", "F", false, has_sel)) frame_selected();
+    u.menu_separator();
+    u.menu_label("Create Child");
+    create_body(true);
+  });
+
+  /* Keyboard navigation (Unity: arrows move selection, left/right fold). */
+  if (focused_ == WindowKind::Hierarchy && !u.wants_keyboard() && !rows.empty()) {
+    int cur = -1;
+    for (int i = 0; i < (int)rows.size(); i++)
+      if (rows[i].g->id == active_) cur = i;
+    if (in.key_pressed[KEY_DOWN]) select(rows[std::min((int)rows.size() - 1, cur + 1)].g->id);
+    if (in.key_pressed[KEY_UP] && cur > 0) select(rows[cur - 1].g->id);
+    if (in.key_pressed[KEY_RIGHT] && cur >= 0) expanded_.insert(rows[cur].g->id);
+    if (in.key_pressed[KEY_LEFT] && cur >= 0) expanded_.erase(rows[cur].g->id);
+  }
+}
+
+/* ===================================================================== */
+/* Inspector                                                              */
+/* ===================================================================== */
+
+/* Draws any component through the Reflector interface (Unity's default
+ * inspector / Blender's RNA-driven property panels). */
+struct InspectorReflector : Reflector {
+  Editor &ed;
+  ui::Context &u;
+  ui::Layout &lay;
+  bool changed = false;
+  int label_w;
+  InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
+  ui::Id fid(const char *n) { return u.id(n); }
+  Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
+  Recti label_rect(Recti row) { return {row.x + u.px(4), row.y, label_w - u.px(8), row.h}; }
+  void field(const char *n, float &v, float speed, float mn, float mx) override {
+    Recti row = lay.row();
+    changed |= u.drag_label(fid(n) ^ 0xAB, label_rect(row), n, v, speed);
+    v = clampf(v, mn, mx);
+    changed |= u.float_field(fid(n), field_rect(row), v, speed, mn, mx);
+  }
+  void field(const char *n, int &v, int mn, int mx) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    changed |= u.int_field(fid(n), field_rect(row), v, mn, mx);
+  }
+  void field(const char *n, bool &v) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    changed |= u.checkbox(field_rect(row), v);
+  }
+  void field(const char *n, Vec3 &v) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    changed |= u.vec3_field(fid(n), field_rect(row), v, 0.05f);
+  }
+  void color(const char *n, Vec3 &v) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    changed |= u.color_field(fid(n), field_rect(row), v);
+  }
+  void enumeration(const char *n, int &v, const char *const *opts, int count) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    changed |= u.combo(fid(n), field_rect(row), v, opts, count);
+  }
+  void text(const char *n, std::string &v) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    changed |= u.text_field(fid(n), field_rect(row), v);
+  }
+  void mesh(const char *n, MeshPtr &m) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    Recti f = field_rect(row);
+    u.frame(f, u.theme.field, u.theme.field_border, u.px(3));
+    int a = u.font.line_height() - u.px(4);
+    u.draw_icon(Icon::Mesh, {f.x + u.px(4), f.y + (f.h - a) / 2, a, a}, u.theme.text);
+    u.label({f.x + a + u.px(8), f.y, f.w - a - u.px(10), f.h}, m ? m->name : "None (Mesh)");
+    if (m) {
+      Recti info = lay.row();
+      u.label({info.x + label_w, info.y, info.w - label_w, info.h},
+              strprintf("%zu verts, %zu faces, %zu tris", m->vert_count(), m->face_count(), m->render_mesh().tri_count()), u.theme.text_dim);
+    }
+  }
+  void help(const char *t) override { u.tooltip(t); }
+
+  /* Texture slot: thumbnail + name; click for a picker (Unity's object field /
+   * Blender's image browse menu). Popup results arrive on the next frame. */
+  void texture(const char *n, TextureRef &t) override {
+    static std::unordered_map<ui::Id, TextureRef> results;
+    ui::Id pid = u.id(n) ^ 0x7E7E7ull;
+    auto res = results.find(pid);
+    if (res != results.end()) {
+      t = res->second;
+      results.erase(res);
+      changed = true;
+      invalidate_material_textures();
+    }
+    Recti row = lay.row(u.row_h() + u.px(4));
+    u.label(label_rect(row), n);
+    Recti f = field_rect(row);
+    Recti thumb{f.x, f.y, f.h, f.h};
+    TexturePtr tex;
+    if (t.path == "generated:UV Grid") tex = texture_uv_grid();
+    else if (t.path == "generated:Color Grid") tex = texture_color_grid();
+    else if (!t.empty()) tex = texture_load(resolve_asset_path(t.path), !t.non_color);
+    draw_texture_thumb(u, tex, thumb);
+    Recti name{f.x + f.h + u.px(4), f.y, f.w - f.h - u.px(4), f.h};
+    bool hot = u.hovered(name) || u.hovered(thumb);
+    u.frame(name, u.theme.field, hot ? u.theme.field_hover : u.theme.field_border, u.px(3));
+    std::string label = t.empty() ? "None (Texture)" : (starts_with(t.path, "generated:") ? t.path.substr(10) : fs::filename(t.path));
+    if (!t.empty() && !tex) label += "  (missing)";
+    if (t.non_color && !t.empty()) label += "  [Non-Color]";
+    u.label({name.x + u.px(5), name.y, name.w - u.px(8), name.h}, label, tex || t.empty() ? u.theme.text : u.theme.error);
+    u.tooltip(t.empty() ? std::string("Click to pick an image from Assets, or drop an image file onto the window.") : t.path);
+    if (hot && u.in.pressed[0]) {
+      u.open_popup(pid, name);
+      u.consume_click();
+    }
+    TextureRef cur = t;
+    Editor *e = &ed;
+    u.popup(pid, std::max(name.w, u.px(260)), [uc = &u, pid, cur, e] {
+      auto pick = [&](const std::string &path, bool non_color) {
+        results[pid] = TextureRef{path, non_color};
+        uc->redraw = true;
+      };
+      if (uc->menu_item("None")) pick("", cur.non_color);
+      if (uc->menu_item("UV Grid (generated)", nullptr, cur.path == "generated:UV Grid")) pick("generated:UV Grid", false);
+      if (uc->menu_item("Color Grid (generated)", nullptr, cur.path == "generated:Color Grid")) pick("generated:Color Grid", false);
+      if (!cur.empty() && uc->menu_item(cur.non_color ? "Color Space: Non-Color (click for sRGB)" : "Color Space: sRGB (click for Non-Color)"))
+        pick(cur.path, !cur.non_color);
+      uc->menu_separator();
+      const auto &imgs = e->image_assets();
+      if (imgs.empty()) uc->menu_label("No images in Assets yet - drop some onto the window");
+      for (const std::string &p : imgs)
+        if (uc->menu_item(p, nullptr, p == cur.path, true, Icon::Eye)) pick(p, cur.non_color);
+    });
+  }
+
+  /* Unity's MeshRenderer > Materials array + inline material inspectors. */
+  void material_list(const char *n, std::vector<MaterialPtr> &mats) override {
+    struct Pick {
+      MaterialPtr m;
+      bool none = false;
+    };
+    static std::unordered_map<ui::Id, Pick> results;
+    Recti row = lay.row();
+    u.label(label_rect(row), strprintf("%s  (%zu slot%s)", n, mats.size(), mats.size() == 1 ? "" : "s"));
+    Recti f = field_rect(row);
+    if (u.button({f.right() - u.px(50), f.y, u.px(24), f.h}, "+")) {
+      mats.push_back(mats.empty() || !mats.back() ? make_material("Material", Vec3(0.8f)) : mats.back());
+      changed = true;
+    }
+    u.tooltip("Add a material slot. Faces choose slots by material index (Edit Mode > Assign).");
+    if (!mats.empty() && u.button({f.right() - u.px(24), f.y, u.px(24), f.h}, "-")) {
+      mats.pop_back();
+      changed = true;
+    }
+    for (size_t i = 0; i < mats.size(); i++) {
+      ui::Id pid = u.id((uint64_t)i * 977 + 13) ^ 0x3A7Eull;
+      auto res = results.find(pid);
+      if (res != results.end()) {
+        mats[i] = res->second.none ? nullptr : res->second.m;
+        results.erase(res);
+        changed = true;
+      }
+      Recti r = lay.row();
+      u.label(label_rect(r), strprintf("  Element %zu", i), u.theme.text_dim);
+      Recti fr = field_rect(r);
+      bool hot = u.hovered(fr);
+      u.frame(fr, u.theme.field, hot ? u.theme.field_hover : u.theme.field_border, u.px(3));
+      int a = u.font.line_height() - u.px(4);
+      Vec3 sw = mats[i] ? mats[i]->base_color : Vec3(0.8f);
+      u.canvas.fill_round_rect({fr.x + u.px(4), fr.y + (fr.h - a) / 2, a, a}, u.px(2), Color::from(Vec3(linear_to_srgb(sw.x), linear_to_srgb(sw.y), linear_to_srgb(sw.z))));
+      u.label({fr.x + a + u.px(10), fr.y, fr.w - a - u.px(14), fr.h}, mats[i] ? mats[i]->name : "None (Default-Material)");
+      if (hot && u.in.pressed[0]) {
+        u.open_popup(pid, fr);
+        u.consume_click();
+      }
+      Editor *e = &ed;
+      MaterialPtr cur = mats[i];
+      u.popup(pid, std::max(fr.w, u.px(240)), [uc = &u, pid, e, cur] {
+        if (uc->menu_item("New Material", nullptr, false, true, Icon::Plus)) {
+          auto m = cur ? std::make_shared<Material>(*cur) : make_material("Material", Vec3(0.8f));
+          m->name = cur ? cur->name + " (copy)" : "Material";
+          results[pid] = {m, false};
+          uc->redraw = true;
+        }
+        if (uc->menu_item("None")) {
+          results[pid] = {nullptr, true};
+          uc->redraw = true;
+        }
+        uc->menu_separator();
+        uc->menu_label("Materials in this scene");
+        for (const MaterialPtr &m : e->scene_materials())
+          if (uc->menu_item(m->name, nullptr, m == cur)) {
+            results[pid] = {m, false};
+            uc->redraw = true;
+          }
+      });
+    }
+    /* Inline editors, one per distinct material (shared slots edit once). */
+    std::vector<Material *> seen;
+    for (auto &m : mats) {
+      if (!m || std::find(seen.begin(), seen.end(), m.get()) != seen.end()) continue;
+      seen.push_back(m.get());
+      lay.space(u.px(4));
+      Recti h = lay.row(u.row_h() + u.px(4));
+      u.canvas.fill_rect(h, Color::hex(0x333740));
+      bool &open = ed.foldouts_.emplace("mat_" + std::to_string((uintptr_t)m.get()), true).first->second;
+      u.foldout({h.x + u.px(4), h.y, h.w - u.px(8), h.h}, "Material  " + m->name, open, Icon::Eye);
+      u.tooltip("Blender: Material Properties (Principled BSDF). Unity: the material inspector at the bottom of the Inspector.");
+      if (!open) continue;
+      u.push_id((uint64_t)(uintptr_t)m.get());
+      InspectorReflector sub(ed, u, lay);
+      sub.label_w = label_w;
+      m->reflect(sub);
+      u.pop_id();
+      if (sub.changed) {
+        m->touch();
+        changed = true;
+      }
+    }
+  }
+
+  static void draw_texture_thumb(ui::Context &u, const TexturePtr &t, const Recti &r) {
+    if (!t || t->levels.empty()) {
+      int c = std::max(2, r.w / 4);
+      for (int y = 0; y < r.h; y += c)
+        for (int x = 0; x < r.w; x += c)
+          u.canvas.fill_rect({r.x + x, r.y + y, std::min(c, r.w - x), std::min(c, r.h - y)}, ((x + y) / c) & 1 ? Color::hex(0x3A3A3A) : Color::hex(0x2A2A2A));
+      u.canvas.rect_outline(r, u.theme.border);
+      return;
+    }
+    int lv = 0;
+    while (lv + 1 < (int)t->levels.size() && t->levels[lv + 1].w >= r.w) lv++;
+    const Texture::Level &L = t->levels[lv];
+    Recti c = r.intersect(u.canvas.clip());
+    Image *img = u.canvas.target();
+    for (int y = c.y; y < c.bottom(); y++)
+      for (int x = c.x; x < c.right(); x++) {
+        int sx = (x - r.x) * L.w / std::max(1, r.w), sy = (y - r.y) * L.h / std::max(1, r.h);
+        Vec4 v = t->fetch(lv, sx, sy, TexWrap::Extend);
+        img->row(y)[x] = to_display_pixel(v.xyz(), ViewTransform::Standard, 0.0f);
+      }
+    u.canvas.rect_outline(r, u.theme.border);
+  }
+};
+
+void Editor::draw_inspector(const Recti &r) {
+  auto &u = ui_;
+  GameObject *g = active_object();
+  if (!g) {
+    /* Project file selected? Show file info, like Unity's asset inspector. */
+    if (!project_selected_.empty()) {
+      ui::Layout lay{r.shrink(u.px(8)), r.y + u.px(8)};
+      lay.row_h = u.row_h();
+      u.label(lay.row(), fs::filename(project_selected_), u.theme.text_bright);
+      std::string ext = fs::extension(project_selected_);
+      u.label(lay.row(), "Type: " + (ext.empty() ? std::string("folder") : ext), u.theme.text_dim);
+      u.label(lay.row(), project_selected_, u.theme.text_dim);
+      if (ext == ".pdf" || starts_with(project_selected_, papers_dir_)) {
+        lay.space(u.px(6));
+        u.label(lay.row(), "Research paper", u.theme.accent);
+        u.label(lay.row(), "Ask Claude: \"implement <technique> from research/papers/" + fs::filename(project_selected_) + "\"", u.theme.text);
+      }
+      if (u.button(lay.row(u.row_h() + u.px(4)), "Open with system viewer")) fs::open_external(project_selected_);
+      return;
+    }
+    u.label({r.x, r.y + u.px(20), r.w, u.row_h()}, "Select a GameObject to inspect it.", u.theme.text_dim, ui::Align::Center);
+    u.label({r.x, r.y + u.px(20) + u.row_h(), r.w, u.row_h()}, "(Blender: the Properties editor)", u.theme.text_dim, ui::Align::Center);
+    return;
+  }
+  ui::Id sid = u.id("insp_scroll");
+  static int last_content_h = 0;
+  int off = u.begin_scroll(sid, r, last_content_h);
+  ui::Layout lay{{r.x + u.px(6), r.y, r.w - u.px(18), r.h}, r.y + u.px(6) - off};
+  lay.row_h = u.row_h();
+  u.push_id(g->id);
+
+  /* Header: active toggle + name (Unity) */
+  Recti hr = lay.row(u.row_h() + u.px(6));
+  int ic = u.row_h();
+  u.draw_icon(object_icon(*g), {hr.x, hr.y + u.px(3), ic, ic}, u.theme.text);
+  bool active = g->active;
+  if (u.checkbox({hr.x + ic + u.px(6), hr.y, ic, hr.h}, active)) {
+    g->active = active;
+    mark_changed("Toggle Active");
+  }
+  u.tooltip("Active: inactive objects are not drawn or updated.\nBlender: Disable in Viewports (monitor icon).");
+  std::string name = g->name;
+  bool committed = false;
+  if (u.text_field(u.id("name"), {hr.x + ic * 2 + u.px(12), hr.y + u.px(2), hr.w - ic * 2 - u.px(14), hr.h - u.px(4)}, name, &committed)) {
+    g->name = name;
+    if (committed) mark_changed("Rename");
+  }
+  if (selection_.size() > 1) u.label(lay.row(), strprintf("%zu objects selected (editing the active one)", selection_.size()), u.theme.text_dim);
+  lay.space(u.px(4));
+
+  auto section = [&](const std::string &title, const std::string &key, bool *enabled, Icon icon, const std::string &tip,
+                     std::function<void()> menu) {
+    Recti h = lay.row(u.row_h() + u.px(4));
+    u.canvas.fill_rect({r.x, h.y, r.w, h.h}, u.theme.header);
+    u.canvas.hline(r.x, r.right(), h.y, u.theme.border);
+    bool &open = foldouts_.emplace(key, true).first->second;
+    int a = u.font.line_height() - u.px(4);
+    Recti fr{h.x, h.y, a + u.px(4), h.h};
+    if (u.hovered(fr) && u.in.pressed[0]) open = !open;
+    u.draw_icon(open ? Icon::ArrowDown : Icon::ArrowRight, {h.x, h.y + (h.h - a) / 2, a, a}, u.theme.text);
+    int x = h.x + a + u.px(6);
+    u.draw_icon(icon, {x, h.y + (h.h - a) / 2, a, a}, u.theme.text);
+    x += a + u.px(6);
+    if (enabled) {
+      if (u.checkbox({x, h.y, a + u.px(2), h.h}, *enabled)) mark_changed("Toggle Component");
+      x += a + u.px(8);
+    }
+    Recti tr{x, h.y, h.right() - x - u.px(24), h.h};
+    u.label(tr, title, u.theme.text_bright);
+    if (u.hovered(tr) && u.in.pressed[0]) open = !open;
+    u.tooltip(tip);
+    if (menu) {
+      Recti kr{h.right() - u.px(20), h.y + u.px(2), u.px(18), h.h - u.px(4)};
+      ui::Id mid = u.id(key + "_menu");
+      if (u.icon_button(kr, Icon::Menu, false, "Component menu")) u.open_popup(mid, kr);
+      u.popup(mid, u.px(200), menu);
+    }
+    return open;
+  };
+
+  /* Transform (always first, like Unity) */
+  if (section("Transform", "Transform", nullptr, Icon::Move,
+              "Position / Rotation / Scale relative to the parent.\nBlender: Object Properties > Transform (Location, Rotation, Scale).\nTheory: FoCG ch. 7, GEA Vol. I ch. 5.3.",
+              [this, g] {
+                if (ui_.menu_item("Reset")) {
+                  g->set_local(Transform());
+                  mark_changed("Reset Transform");
+                }
+              })) {
+    InspectorReflector ir(*this, u, lay);
+    Transform t = g->local();
+    Recti row = lay.row();
+    u.label(ir.label_rect(row), "Position");
+    bool ch = u.vec3_field(u.id("pos"), ir.field_rect(row), t.position, 0.05f);
+    u.tooltip("Local position. Unity is Y-up left-handed; Blender is Z-up right-handed.");
+    row = lay.row();
+    u.label(ir.label_rect(row), "Rotation");
+    Vec3 e = t.euler_hint;
+    bool rch = u.vec3_field(u.id("rot"), ir.field_rect(row), e, 0.5f);
+    u.tooltip("Euler angles in degrees, applied Z, X, then Y (Unity order).\nStored internally as a quaternion (GEA Vol. I 5.4).");
+    row = lay.row();
+    u.label(ir.label_rect(row), "Scale");
+    ch |= u.vec3_field(u.id("scl"), ir.field_rect(row), t.scale, 0.01f);
+    if (ch) {
+      g->set_local_position(t.position);
+      g->set_local_scale(t.scale);
+      mark_changed("Transform");
+    }
+    if (rch) {
+      g->set_local_euler(e);
+      mark_changed("Rotate");
+    }
+  }
+
+  /* Components */
+  int remove_idx = -1, move_up = -1;
+  for (size_t ci = 0; ci < g->components.size(); ci++) {
+    Component *c = g->components[ci].get();
+    const ComponentInfo *info = find_component_info(c->type_name());
+    std::string tip = info ? info->help + "\nBlender: " + info->blender : std::string();
+    Icon icon = std::string(c->type_name()) == "Camera" ? Icon::Camera : (std::string(c->type_name()) == "Light" ? Icon::Light : (c->is_modifier() ? Icon::Gear : Icon::File));
+    if (std::string(c->type_name()) == "MeshFilter" || std::string(c->type_name()) == "MeshRenderer") icon = Icon::Mesh;
+    u.push_id((uint64_t)ci + 1000);
+    bool en = c->enabled;
+    size_t idx = ci;
+    bool open = section(c->type_name(), std::string(c->type_name()) + std::to_string(ci), &en, icon, tip, [&, idx] {
+      if (ui_.menu_item("Remove Component")) remove_idx = (int)idx;
+      if (ui_.menu_item("Move Up", nullptr, false, idx > 0)) move_up = (int)idx;
+      if (ui_.menu_item("Reset")) {
+        if (auto fresh = create_component(g->components[idx]->type_name())) {
+          fresh->owner = g;
+          if (auto *mf = dynamic_cast<MeshFilter *>(g->components[idx].get())) static_cast<MeshFilter *>(fresh.get())->mesh = mf->mesh;
+          g->components[idx] = std::move(fresh);
+          mark_changed("Reset Component");
+        }
+      }
+    });
+    if (en != c->enabled) c->enabled = en;
+    if (open) {
+      InspectorReflector ir(*this, u, lay);
+      c->reflect(ir);
+      if (ir.changed) mark_changed(std::string("Edit ") + c->type_name());
+      /* Mesh tools (Blender's Edit Mode operators, object-level). */
+      if (auto *mf = dynamic_cast<MeshFilter *>(c)) {
+        lay.space(u.px(4));
+        u.label(lay.row(), "Mesh Tools (Blender operators)", u.theme.accent);
+        int bw = (lay.area.w - u.px(12)) / 2;
+        auto two = [&](const char *a, const char *opa, const char *ta, const char *b, const char *opb, const char *tb) {
+          Recti row = lay.row(u.row_h() + u.px(2));
+          if (u.button({row.x + u.px(4), row.y, bw, row.h}, a)) mesh_op(opa);
+          u.tooltip(ta);
+          if (b && u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, b)) mesh_op(opb);
+          if (b) u.tooltip(tb);
+        };
+        two("Subdivide", "subdivide", "Catmull-Clark subdivision (each face -> quads).\nBlender: Subdivision Surface / Subdivide Smooth.",
+            "Subdivide Simple", "subdivide_simple", "Split faces without smoothing.");
+        two("Smooth", "smooth", "Laplacian smoothing, one iteration (FoCG ch. 12).\nBlender: Smooth Vertices.",
+            "Triangulate", "triangulate", "Convert n-gons to triangles (ear clipping).\nBlender: Ctrl+T.");
+        two("Merge by Distance", "merge", "Weld vertices closer than the threshold (spatial hash).\nBlender: M > By Distance.",
+            "Flip Normals", "flip", "Reverse face winding.\nBlender: Alt+N > Flip.");
+        two(mf->mesh && mf->mesh->smooth ? "Shade Flat" : "Shade Smooth", mf->mesh && mf->mesh->smooth ? "shade_flat" : "shade_smooth",
+            "Per-face vs interpolated vertex normals (Gouraud, FoCG ch. 9).", "Apply Modifiers", "apply_modifiers",
+            "Bake the modifier stack into the mesh.\nBlender: Ctrl+A > Apply modifier.");
+        Recti row = lay.row(u.row_h() + u.px(2));
+        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, edit_mode_ ? "Exit Edit Mode (Tab)" : "Enter Edit Mode (Tab)", edit_mode_, Icon::Vertex)) {
+          if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
+        }
+        if (edit_mode_ && g->id == edit_obj_) {
+          InspectorReflector er(*this, u, lay);
+          er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
+          er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
+          Recti r2 = lay.row(u.row_h() + u.px(2));
+          int w3 = (r2.w - u.px(16)) / 3;
+          if (u.button({r2.x + u.px(4), r2.y, w3, r2.h}, "Extrude")) edit_op("extrude");
+          u.tooltip("Extrude selected faces (Ctrl+E). Blender: E.");
+          if (u.button({r2.x + u.px(8) + w3, r2.y, w3, r2.h}, "Inset")) edit_op("inset");
+          u.tooltip("Inset selected faces (Ctrl+I). Blender: I.");
+          if (u.button({r2.x + u.px(12) + w3 * 2, r2.y, w3, r2.h}, "Delete")) edit_op("delete");
+          u.tooltip("Delete selected faces (Del). Blender: X > Faces.");
+          Recti r4 = lay.row(u.row_h() + u.px(2));
+          if (u.button({r4.x + u.px(4), r4.y, w3, r4.h}, "Fill")) edit_op("fill");
+          u.tooltip("Make a face from the selected vertices (Alt+F). Blender: F.");
+          if (u.button({r4.x + u.px(8) + w3, r4.y, w3, r4.h}, "Merge")) edit_op("merge_center");
+          u.tooltip("Weld the selected vertices at their center (Alt+M). Blender: M > At Center.");
+          if (u.button({r4.x + u.px(12) + w3 * 2, r4.y, w3, r4.h}, "Normals")) edit_op("recalc_normals");
+          u.tooltip("Make all faces point outward (Shift+N). Blender: Mesh > Normals > Recalculate Outside.");
+          er.field("Loop Cuts", loop_cuts_, 1, 64);
+          er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
+          Recti r5 = lay.row(u.row_h() + u.px(2));
+          int w2 = (r5.w - u.px(12)) / 2;
+          if (u.button({r5.x + u.px(4), r5.y, w2, r5.h}, "Loop Cut")) edit_op("loopcut");
+          u.tooltip("Cut the quad ring across the selected edge. Hover an edge in the Scene view\nand press Ctrl+R to cut there. Blender: Ctrl+R (Loop Cut and Slide).");
+          if (u.button({r5.x + u.px(8) + w2, r5.y, w2, r5.h}, "Select Loop")) edit_op("select_loop");
+          u.tooltip("Extend the selected edge to its edge loop (or double-click an edge). Blender: Alt+click.");
+          er.field("Proportional Editing", proportional_);
+          if (proportional_) {
+            er.field("Proportional Radius", prop_radius_, 0.01f, 0.001f, 10000.0f);
+            static const char *kFalloff[] = {"Smooth", "Sphere", "Root", "Sharp", "Linear", "Constant"};
+            er.enumeration("Falloff", prop_falloff_, kFalloff, 6);
+          }
+          Recti r3 = lay.row(u.row_h() + u.px(2));
+          u.label({r3.x + u.px(4), r3.y, er.label_w - u.px(8), r3.h}, "Material Slot");
+          u.int_field(u.id("assign_slot"), {r3.x + er.label_w, r3.y, u.px(60), r3.h}, assign_slot_, 0, 63);
+          if (u.button({r3.x + er.label_w + u.px(66), r3.y, r3.w - er.label_w - u.px(70), r3.h}, "Assign to Faces")) assign_material_to_faces(assign_slot_);
+          u.tooltip("Blender: Material Properties > Assign. Unity: sub-mesh per material.");
+        }
+        auto &feats = research::features();
+        if (!feats.empty()) {
+          lay.space(u.px(2));
+          u.label(lay.row(), "Research features", u.theme.accent);
+          for (auto &f : feats) {
+            Recti fr = lay.row(u.row_h() + u.px(2));
+            if (u.button({fr.x + u.px(4), fr.y, fr.w - u.px(8), fr.h}, f.name, false, Icon::Flask)) mesh_op("research:" + f.id);
+            u.tooltip(f.description + "\nSource: " + f.citation);
+          }
+        }
+      }
+    }
+    u.pop_id();
+  }
+  if (remove_idx >= 0) {
+    g->components.erase(g->components.begin() + remove_idx);
+    mark_changed("Remove Component");
+  }
+  if (move_up > 0) {
+    std::swap(g->components[move_up], g->components[move_up - 1]);
+    mark_changed("Reorder Components");
+  }
+
+  /* Add Component (Unity's searchable menu). */
+  lay.space(u.px(10));
+  Recti ar = lay.row(u.row_h() + u.px(6));
+  Recti ab{ar.x + ar.w / 2 - u.px(110), ar.y, u.px(220), ar.h};
+  ui::Id add_id = u.id("add_component");
+  if (u.button(ab, "Add Component")) {
+    add_component_search_.clear();
+    u.open_popup(add_id, ab);
+  }
+  u.tooltip("Blender equivalent: Add Modifier / Add Constraint / Physics tab.");
+  u.popup(add_id, u.px(220), [this, add_id] {
+    auto &u = ui_;
+    Recti sr = u.popup_row(u.row_h() + u.px(6));
+    ui::Id fid = u.id("add_comp_search");
+    if (!u.editing(fid) && add_component_search_.empty()) u.begin_edit(fid, "", false);
+    u.text_field(fid, sr.shrink(u.px(3)), add_component_search_, nullptr, "Search");
+    std::string f = to_lower(add_component_search_);
+    std::string last_cat;
+    for (auto &ci : component_registry()) {
+      if (!f.empty() && to_lower(ci.name).find(f) == std::string::npos) continue;
+      if (ci.category != last_cat) {
+        u.menu_label(ci.category);
+        last_cat = ci.category;
+      }
+      if (u.menu_item(ci.name)) add_component_to_selection(ci.name);
+      u.tooltip(ci.help + "\nBlender: " + ci.blender);
+    }
+    (void)add_id;
+  });
+  lay.space(u.px(30));
+  u.pop_id();
+  last_content_h = lay.y + off - r.y;
+  u.end_scroll();
+}
+
+/* ===================================================================== */
+/* Project                                                                */
+/* ===================================================================== */
+
+void Editor::draw_project(const Recti &r) {
+  auto &u = ui_;
+  auto &in = u.in;
+  if (u.time - project_listed_ > 2.0) {
+    project_entries_ = fs::list(project_dir_);
+    project_listed_ = u.time;
+  }
+  int bh = u.row_h() + u.px(6);
+  Recti bar{r.x, r.y, r.w, bh};
+  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  /* Breadcrumb relative to the project root. */
+  std::string rel = project_dir_.size() > project_root_.size() ? project_dir_.substr(project_root_.size() + 1) : "";
+  int x = bar.x + u.px(6);
+  std::string acc = project_root_;
+  std::vector<std::string> parts;
+  size_t s = 0, e;
+  while ((e = rel.find('/', s)) != std::string::npos) { parts.push_back(rel.substr(s, e - s)); s = e + 1; }
+  if (s < rel.size()) parts.push_back(rel.substr(s));
+  for (size_t i = 0; i < parts.size(); i++) {
+    acc = fs::join(acc, parts[i]);
+    int w = u.font.text_width(parts[i]) + u.px(10);
+    Recti pr{x, bar.y, w, bar.h};
+    bool hot = u.hovered(pr);
+    u.label(pr, parts[i], hot ? u.theme.text_bright : u.theme.text, ui::Align::Center);
+    if (hot && in.pressed[0]) { project_dir_ = acc; project_listed_ = -100; }
+    x += w;
+    if (i + 1 < parts.size()) {
+      u.draw_icon(Icon::ArrowRight, {x, bar.y + bh / 2 - u.px(4), u.px(8), u.px(8)}, u.theme.text_dim);
+      x += u.px(10);
+    }
+  }
+  int sw = std::min(u.px(200), r.w / 3);
+  u.text_field(u.id("proj_search"), {bar.right() - sw - u.px(6), bar.y + u.px(4), sw, bh - u.px(8)}, project_search_, nullptr, "Search");
+
+  /* Left: favourites / folders tree */
+  int lw = std::min(u.px(190), r.w / 3);
+  Recti left{r.x, bar.bottom(), lw, r.h - bh};
+  Recti right{r.x + lw + 1, bar.bottom(), r.w - lw - 1, r.h - bh};
+  u.canvas.fill_rect(left, Color::hex(0x333333));
+  u.canvas.vline(left.right(), left.y, left.bottom(), u.theme.border);
+  int rh = u.row_h();
+  struct Fav { const char *label; std::string path; Icon icon; };
+  Fav favs[] = {{"Assets", assets_dir_, Icon::Folder},
+                {"Scenes", fs::join(assets_dir_, "Scenes"), Icon::Scene},
+                {"Research Papers", papers_dir_, Icon::Paper},
+                {"Screenshots", screenshots_dir_, Icon::Folder}};
+  int y = left.y + u.px(4);
+  for (auto &f : favs) {
+    Recti fr{left.x, y, left.w, rh};
+    bool cur = project_dir_ == f.path;
+    bool hot = u.hovered(fr);
+    if (cur) u.canvas.fill_rect(fr, u.theme.selection_dim);
+    else if (hot) u.canvas.fill_rect(fr, Color::hex(0x404040));
+    int a = u.font.line_height() - u.px(3);
+    u.draw_icon(f.icon, {fr.x + u.px(10), fr.y + (rh - a) / 2, a, a}, f.icon == Icon::Paper ? u.theme.accent : u.theme.text);
+    u.label({fr.x + u.px(16) + a, fr.y, fr.w - a - u.px(20), rh}, f.label);
+    if (hot && in.pressed[0]) {
+      fs::make_dirs(f.path);
+      project_dir_ = f.path;
+      project_listed_ = -100;
+    }
+    y += rh;
+  }
+  /* Subfolders of Assets */
+  y += u.px(6);
+  u.label({left.x + u.px(10), y, left.w, rh}, "Folders", u.theme.text_dim);
+  y += rh;
+  for (auto &d : fs::list(assets_dir_)) {
+    if (!d.is_dir) continue;
+    Recti fr{left.x, y, left.w, rh};
+    std::string p = fs::join(assets_dir_, d.name);
+    bool hot = u.hovered(fr);
+    if (project_dir_ == p) u.canvas.fill_rect(fr, u.theme.selection_dim);
+    else if (hot) u.canvas.fill_rect(fr, Color::hex(0x404040));
+    int a = u.font.line_height() - u.px(3);
+    u.draw_icon(Icon::Folder, {fr.x + u.px(18), fr.y + (rh - a) / 2, a, a}, u.theme.text);
+    u.label({fr.x + u.px(24) + a, fr.y, fr.w - a - u.px(28), rh}, d.name);
+    if (hot && in.pressed[0]) { project_dir_ = p; project_listed_ = -100; }
+    y += rh;
+    if (y > left.bottom()) break;
+  }
+
+  /* Right: file list */
+  std::string f = to_lower(project_search_);
+  std::vector<const DirEntry *> shown;
+  for (auto &en : project_entries_)
+    if (f.empty() || to_lower(en.name).find(f) != std::string::npos) shown.push_back(&en);
+  bool can_up = project_dir_ != project_root_ && project_dir_.size() > project_root_.size();
+  int rows = (int)shown.size() + (can_up ? 1 : 0);
+  ui::Id sid = u.id("proj_scroll");
+  int off = u.begin_scroll(sid, right, rows * rh + rh);
+  int i = 0;
+  auto row_rect = [&](int k) { return Recti{right.x, right.y + k * rh - off + u.px(2), right.w, rh}; };
+  if (can_up) {
+    Recti rr = row_rect(i++);
+    bool hot = u.hovered(rr);
+    if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
+    u.label({rr.x + u.px(10), rr.y, rr.w, rr.h}, "..", u.theme.text_dim);
+    if (hot && in.double_clicked[0]) { project_dir_ = fs::parent(project_dir_); project_listed_ = -100; }
+  }
+  for (const DirEntry *en : shown) {
+    Recti rr = row_rect(i++);
+    if (rr.bottom() < right.y || rr.y > right.bottom()) continue;
+    std::string full = fs::join(project_dir_, en->name);
+    bool sel = project_selected_ == full;
+    bool hot = u.hovered(rr);
+    if (sel) u.canvas.fill_rect(rr, u.theme.selection);
+    else if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
+    std::string ext = fs::extension(en->name);
+    Icon ic = en->is_dir ? Icon::Folder : (ext == ".scene" ? Icon::Scene : (ext == ".obj" ? Icon::Mesh : (ext == ".pdf" ? Icon::Paper : (ext == ".png" ? Icon::Eye : Icon::File))));
+    int a = u.font.line_height() - u.px(2);
+    u.draw_icon(ic, {rr.x + u.px(10), rr.y + (rh - a) / 2, a, a}, ext == ".pdf" ? u.theme.accent : u.theme.text);
+    u.label({rr.x + u.px(16) + a, rr.y, rr.w / 2, rh}, en->name);
+    if (!en->is_dir) u.label({rr.x, rr.y, rr.w - u.px(12), rh}, format_bytes(en->size), u.theme.text_dim, ui::Align::Right);
+    if (hot && in.pressed[0]) {
+      project_selected_ = full;
+      clear_selection();
+    }
+    if (hot && in.double_clicked[0]) {
+      if (en->is_dir) { project_dir_ = full; project_listed_ = -100; }
+      else if (ext == ".scene") open_scene(full);
+      else if (ext == ".obj" || ext == ".fbx") import_model_file(full, false);
+      else fs::open_external(full);
+    }
+    if (hot && in.pressed[1]) {
+      project_selected_ = full;
+      u.open_popup(u.id("proj_ctx"), {in.mx, in.my, 0, 0});
+    }
+  }
+  if (shown.empty()) {
+    bool papers = project_dir_ == papers_dir_;
+    u.label({right.x, right.y + rh, right.w, rh}, papers ? "Drop research papers (PDF, TXT, MD...) onto this window." : "This folder is empty.", u.theme.text_dim, ui::Align::Center);
+  }
+  u.end_scroll();
+  std::string sel = project_selected_;
+  u.popup(u.id("proj_ctx"), u.px(230), [this, sel] {
+    auto &u = ui_;
+    std::string ext = fs::extension(sel);
+    if (ext == ".scene" && u.menu_item("Open Scene")) open_scene(sel);
+    if (ext == ".obj" && u.menu_item("Import into Scene")) import_obj_file(sel);
+    if (u.menu_item("Open with system viewer")) fs::open_external(sel);
+    if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::parent(sel));
+    if (u.menu_item("Refresh")) project_listed_ = -100;
+  });
+}
+
+/* ===================================================================== */
+/* Console                                                                */
+/* ===================================================================== */
+
+void Editor::draw_console(const Recti &r) {
+  auto &u = ui_;
+  auto &in = u.in;
+  int bh = u.row_h() + u.px(6);
+  Recti bar{r.x, r.y, r.w, bh};
+  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  int h = bh - u.px(8), x = bar.x + u.px(6), y = bar.y + u.px(4);
+  if (u.button({x, y, u.px(56), h}, "Clear")) Log::clear();
+  x += u.px(60);
+  if (u.button({x, y, u.px(72), h}, "Collapse", collapse_)) collapse_ = !collapse_;
+  u.tooltip("Merge identical consecutive messages (Unity console).");
+  size_t ni = 0, nw = 0, ne = 0;
+  for (auto &e : log_) (e.level == LogLevel::Info ? ni : e.level == LogLevel::Warning ? nw : ne)++;
+  int bw = u.px(64);
+  int rx = bar.right() - bw * 3 - u.px(12);
+  if (u.button({rx, y, bw, h}, std::to_string(ni), show_info_, Icon::Info)) show_info_ = !show_info_;
+  if (u.button({rx + bw + u.px(2), y, bw, h}, std::to_string(nw), show_warn_, Icon::Warning)) show_warn_ = !show_warn_;
+  if (u.button({rx + 2 * (bw + u.px(2)), y, bw, h}, std::to_string(ne), show_error_, Icon::Error)) show_error_ = !show_error_;
+
+  /* Command line (Blender has a Python console; this is a tiny command shell). */
+  int ch = u.row_h() + u.px(6);
+  Recti cmd{r.x + u.px(4), r.bottom() - ch + u.px(2), r.w - u.px(8), ch - u.px(4)};
+  Recti list{r.x, bar.bottom(), r.w, r.h - bh - ch};
+  struct Line { const LogEntry *e; int count; };
+  std::vector<Line> lines;
+  for (auto &e : log_) {
+    if ((e.level == LogLevel::Info && !show_info_) || (e.level == LogLevel::Warning && !show_warn_) || (e.level == LogLevel::Error && !show_error_)) continue;
+    if (collapse_ && !lines.empty() && lines.back().e->text == e.text && lines.back().e->level == e.level) { lines.back().count++; continue; }
+    lines.push_back({&e, 1});
+  }
+  int rh = u.row_h();
+  ui::Id sid = u.id("console_scroll");
+  int content = (int)lines.size() * rh;
+  static size_t last_count = 0;
+  if (lines.size() != last_count && console_autoscroll_) u.scroll_to(sid, std::max(0, content - list.h));
+  last_count = lines.size();
+  int off = u.begin_scroll(sid, list, content);
+  console_autoscroll_ = off >= content - list.h - rh;
+  int first = std::max(0, off / rh), last = std::min((int)lines.size(), (off + list.h) / rh + 2);
+  for (int i = first; i < last; i++) {
+    Recti row{list.x, list.y + i * rh - off, list.w, rh};
+    const LogEntry &e = *lines[i].e;
+    if (console_sel_ == i) u.canvas.fill_rect(row, u.theme.selection);
+    else if (i % 2) u.canvas.fill_rect(row, Color::hex(0x3C3C3C));
+    Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
+    uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
+    int a = u.font.line_height() - u.px(4);
+    u.draw_icon(ic, {row.x + u.px(6), row.y + (rh - a) / 2, a, a}, col);
+    std::string ts = strprintf("[%02d:%02d] ", (int)(e.time / 60) % 60, (int)e.time % 60);
+    u.label({row.x + u.px(12) + a, row.y, row.w - a - u.px(60), rh}, ts + e.text, e.level == LogLevel::Info ? u.theme.text : col);
+    if (lines[i].count > 1) u.label({row.x, row.y, row.w - u.px(10), rh}, std::to_string(lines[i].count), u.theme.text_dim, ui::Align::Right);
+    if (u.hovered(row) && in.pressed[0]) console_sel_ = i;
+    if (u.hovered(row) && in.double_clicked[0] && u.clipboard_set) {
+      u.clipboard_set(e.text);
+      Log::info("Copied message to clipboard");
+    }
+  }
+  u.end_scroll();
+  u.canvas.hline(r.x, r.right(), cmd.y - u.px(2), u.theme.border);
+  bool done = false;
+  ui::Id cid = u.id("console_cmd");
+  u.text_field(cid, cmd, console_input_, &done, "Type a command (help) and press Enter");
+  if (done && !console_input_.empty()) {
+    console_history_.push_back(console_input_);
+    std::string c = console_input_;
+    console_input_.clear();
+    run_console_command(c);
+    u.begin_edit(cid, "", false);  // keep focus for the next command
+  }
+}
+
+/* ===================================================================== */
+/* Profiler                                                               */
+/* ===================================================================== */
+
+void Editor::draw_profiler(const Recti &r) {
+  auto &u = ui_;
+  ui::Id sid = u.id("prof_scroll");
+  static int content_h = 0;
+  int off = u.begin_scroll(sid, r, content_h);
+  ui::Layout lay{{r.x + u.px(10), r.y, r.w - u.px(30), r.h}, r.y + u.px(8) - off};
+  lay.row_h = u.row_h();
+  u.label(lay.row(), "CPU frame time (ms) - editor frame (blue) and scene render (orange)", u.theme.text_bright);
+  Recti graph = lay.row(u.px(120));
+  u.frame(graph, Color::hex(0x242424), u.theme.border, u.px(3));
+  float maxv = 33.3f;
+  for (float v : frame_history_) maxv = std::max(maxv, v * 1.1f);
+  auto plot = [&](const std::vector<float> &hist, uint32_t col) {
+    for (size_t i = 1; i < hist.size(); i++) {
+      float x0 = graph.x + (i - 1) * graph.w / 240.0f, x1 = graph.x + i * graph.w / 240.0f;
+      float y0 = graph.bottom() - hist[i - 1] / maxv * graph.h, y1 = graph.bottom() - hist[i] / maxv * graph.h;
+      u.canvas.line(x0, y0, x1, y1, col, 1.5f);
+    }
+  };
+  for (float ref : {16.67f, 33.3f}) {
+    int yy = graph.bottom() - (int)(ref / maxv * graph.h);
+    u.canvas.hline(graph.x, graph.right(), yy, Color::hex(0x555555));
+    u.canvas.text(u.font, graph.x + u.px(4), yy - u.font.line_height(), ref < 20 ? "60 FPS" : "30 FPS", u.theme.text_dim);
+  }
+  plot(frame_history_, Color::hex(0x5AA0E6));
+  plot(raster_history_, u.theme.accent);
+
+  const RasterStats &s = scene_stats_;
+  lay.space(u.px(6));
+  u.label(lay.row(), "Scene view render breakdown (last frame)", u.theme.text_bright);
+  auto stat = [&](const std::string &k, const std::string &v) {
+    Recti row = lay.row();
+    u.label({row.x, row.y, row.w / 2, row.h}, k, u.theme.text_dim);
+    u.label({row.x + row.w / 2, row.y, row.w / 2, row.h}, v);
+  };
+  stat("Vertex stage", strprintf("%.2f ms", s.ms_vertex));
+  stat("Clip / cull / bin", strprintf("%.2f ms", s.ms_setup));
+  stat("Raster (tiles)", strprintf("%.2f ms", s.ms_raster));
+  stat("Total 3D", strprintf("%.2f ms", s.ms_total));
+  stat("Editor frame (incl. UI)", strprintf("%.2f ms", frame_ms_));
+  stat("Triangles submitted / rasterized", strprintf("%zu / %zu", s.tris_submitted, s.tris_rasterized));
+  stat("Objects submitted / frustum-culled", strprintf("%d / %d", s.objects_submitted, s.objects_culled));
+  stat("Worker threads", strprintf("%d", JobSystem::global().thread_count()));
+  stat("Scene memory (approx.)", format_bytes(scene_->memory_bytes()));
+  stat("Undo steps", strprintf("%zu", undo_.size()));
+
+  lay.space(u.px(6));
+  u.label(lay.row(), "Renderer options (toggle to see the cost of each optimization)", u.theme.text_bright);
+  u.toggle_row(lay.row(), "Multithreaded tiles (GEA Vol. I ch. 4)", raster_opt_.multithreaded);
+  u.toggle_row(lay.row(), "Back-face culling (FoCG ch. 9.4)", raster_opt_.backface_culling);
+  u.toggle_row(lay.row(), "Frustum culling (FoCG ch. 9.4 / GEA Vol. II 11.5)", raster_opt_.frustum_culling);
+  Recti tr = lay.row();
+  u.label({tr.x, tr.y, tr.w / 2, tr.h}, "Tile size (px)");
+  static const char *tiles[] = {"16", "32", "64", "128", "256"};
+  int ti = raster_opt_.tile_size <= 16 ? 0 : raster_opt_.tile_size <= 32 ? 1 : raster_opt_.tile_size <= 64 ? 2 : raster_opt_.tile_size <= 128 ? 3 : 4;
+  if (u.combo(u.id("tile"), {tr.x + tr.w / 2, tr.y, u.px(100), tr.h}, ti, tiles, 5)) raster_opt_.tile_size = std::atoi(tiles[ti]);
+
+  lay.space(u.px(6));
+  u.label(lay.row(), "Live stress test", u.theme.text_bright);
+  Recti sr = lay.row(u.row_h() + u.px(2));
+  u.label({sr.x, sr.y, u.px(70), sr.h}, "Count");
+  u.int_field(u.id("stress_n"), {sr.x + u.px(70), sr.y, u.px(90), sr.h}, stress_count_, 1, 200000);
+  static const char *kinds[] = {"Sphere", "Cube", "Icosphere", "Torus"};
+  u.combo(u.id("stress_kind"), {sr.x + u.px(170), sr.y, u.px(110), sr.h}, stress_kind_, kinds, 4);
+  if (u.button({sr.x + u.px(290), sr.y, u.px(90), sr.h}, "Spawn")) spawn_stress_grid(stress_count_, kinds[stress_kind_]);
+  u.tooltip("Creates a grid of objects that share one mesh, then watch the graph.\nFull headless suite: blendity_stress (see README).");
+  if (u.button({sr.x + u.px(388), sr.y, u.px(110), sr.h}, "Benchmark")) run_console_command("bench 20");
+  u.tooltip("Renders the Scene view 20x with each optimization disabled in turn; results go to the Console.");
+  lay.space(u.px(20));
+  content_h = lay.y + off - r.y;
+  u.end_scroll();
+}
+
+/* ===================================================================== */
+/* Research                                                               */
+/* ===================================================================== */
+
+void Editor::draw_research(const Recti &r) {
+  auto &u = ui_;
+  if (u.time - papers_listed_ > 2.0) {
+    papers_ = fs::list(papers_dir_);
+    papers_.erase(std::remove_if(papers_.begin(), papers_.end(), [](const DirEntry &e) { return e.is_dir || to_lower(e.name) == "readme.md"; }), papers_.end());
+    papers_listed_ = u.time;
+  }
+  ui::Id sid = u.id("research_scroll");
+  static int content_h = 0;
+  int off = u.begin_scroll(sid, r, content_h);
+  ui::Layout lay{{r.x + u.px(12), r.y, r.w - u.px(34), r.h}, r.y + u.px(10) - off};
+  lay.row_h = u.row_h();
+  Recti title = lay.row(u.row_h() + u.px(6));
+  u.draw_icon(Icon::Flask, {title.x, title.y + u.px(3), u.row_h(), u.row_h()}, u.theme.accent);
+  u.label({title.x + u.row_h() + u.px(8), title.y, title.w, title.h}, "Research: turn your papers into editor features", u.theme.text_bright);
+  const char *intro[] = {
+      "1. Drop papers (PDF / TXT / MD / TeX) onto this window, or copy them into the folder below.",
+      "2. Ask Claude Code: \"Read research/papers/<file> and implement <technique> as a Blendity feature.\"",
+      "3. New features register in src/research/ and appear here, in the Mesh menu and the Inspector.",
+      "4. Track progress in research/FEATURES.md (paper -> feature -> status -> source file)."};
+  for (const char *t : intro) u.label(lay.row(), t, u.theme.text);
+  Recti br = lay.row(u.row_h() + u.px(4));
+  if (u.button({br.x, br.y, u.px(190), br.h}, "Open papers folder", false, Icon::Folder)) fs::open_external(papers_dir_);
+  if (u.button({br.x + u.px(198), br.y, u.px(190), br.h}, "Open FEATURES.md", false, Icon::File)) fs::open_external(fs::join(project_root_, "research/FEATURES.md"));
+  u.label(lay.row(), papers_dir_, u.theme.text_dim);
+
+  lay.space(u.px(8));
+  u.label(lay.row(), strprintf("Papers (%zu)", papers_.size()), u.theme.accent);
+  if (papers_.empty()) u.label(lay.row(), "No papers yet - drag & drop one onto the editor.", u.theme.text_dim);
+  for (auto &p : papers_) {
+    Recti row = lay.row(u.row_h() + u.px(2));
+    bool hot = u.hovered(row);
+    if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
+    int a = u.font.line_height() - u.px(2);
+    u.draw_icon(Icon::Paper, {row.x + u.px(4), row.y + (row.h - a) / 2, a, a}, u.theme.accent);
+    u.label({row.x + a + u.px(10), row.y, row.w * 6 / 10, row.h}, p.name);
+    u.label({row.x, row.y, row.w - u.px(80), row.h}, format_bytes(p.size), u.theme.text_dim, ui::Align::Right);
+    if (u.button({row.right() - u.px(70), row.y + u.px(1), u.px(66), row.h - u.px(2)}, "Open")) fs::open_external(fs::join(papers_dir_, p.name));
+    if (hot && u.in.double_clicked[0]) fs::open_external(fs::join(papers_dir_, p.name));
+  }
+
+  lay.space(u.px(10));
+  auto &feats = research::features();
+  u.label(lay.row(), strprintf("Implemented research features (%zu)", feats.size()), u.theme.accent);
+  for (auto &f : feats) {
+    Recti row = lay.row(u.row_h() + u.px(4));
+    u.canvas.fill_rect(row, Color::hex(0x323232));
+    u.label({row.x + u.px(6), row.y, row.w - u.px(140), row.h}, f.name, u.theme.text_bright);
+    if (u.button({row.right() - u.px(130), row.y + u.px(2), u.px(126), row.h - u.px(4)}, "Apply to selection", false, Icon::Flask)) mesh_op("research:" + f.id);
+    u.label(lay.row(), "  " + f.citation, u.theme.text_dim);
+    u.label(lay.row(), "  " + f.description, u.theme.text);
+    u.label(lay.row(), "  Status: " + f.status + "   |   Source: " + f.source_file, u.theme.text_dim);
+    lay.space(u.px(4));
+  }
+  lay.space(u.px(20));
+  content_h = lay.y + off - r.y;
+  u.end_scroll();
+}
+
+
+/* ===================================================================== */
+/* Render window (Blender: Render Result + Render/Output/World properties;
+ * Unity: Lighting window + Recorder)                                     */
+/* ===================================================================== */
+
+void Editor::draw_render_window(const Recti &r) {
+  auto &u = ui_;
+  int lw = std::min(u.px(340), r.w * 2 / 5);
+  Recti left{r.x, r.y, lw, r.h};
+  Recti right{r.x + lw + 1, r.y, r.w - lw - 1, r.h};
+  u.canvas.fill_rect(left, Color::hex(0x333333));
+  u.canvas.vline(left.right(), left.y, left.bottom(), u.theme.border);
+
+  /* ---- settings column ---- */
+  static int content_h = 0;
+  int off = u.begin_scroll(u.id("render_settings"), left, content_h);
+  ui::Layout lay{{left.x + u.px(8), left.y, left.w - u.px(20), left.h}, left.y + u.px(8) - off};
+  lay.row_h = u.row_h();
+  Recti b = lay.row(u.row_h() + u.px(8));
+  int bw = (b.w - u.px(8)) / 3;
+  if (u.button({b.x, b.y, bw, b.h}, rendering_ ? "Restart" : "Render", false, Icon::Camera)) start_final_render();
+  u.tooltip("Render Image (F12) from the Main Camera. Blender: Render > Render Image.");
+  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Stop", false, Icon::Pause) && rendering_) {
+    rendering_ = false;
+    render_linear_ = final_pt_.linear_rgb(scene_->render.denoise);
+    final_pt_.resolve(render_img_.pixels.data(), render_img_.width, scene_->render.denoise);
+    render_status_ += "  (stopped)";
+  }
+  if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Save", false, Icon::File)) save_render();
+  u.tooltip("Saves to Renders/ in the chosen File Format.");
+  if (!render_status_.empty()) {
+    for (const std::string &part : {render_status_})
+      u.label(lay.row(), part, rendering_ ? u.theme.accent : u.theme.text_dim);
+  }
+  if (rendering_) {
+    Recti pr = lay.row(u.px(6));
+    float t = std::min(1.0f, final_pt_.samples() / (float)std::max(1, scene_->render.samples));
+    u.canvas.fill_round_rect(pr, u.px(3), Color::hex(0x252525));
+    u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * t), pr.h}, u.px(3), u.theme.accent);
+    u.redraw = true;
+  }
+  lay.space(u.px(6));
+  auto header = [&](const char *t) {
+    Recti h = lay.row(u.row_h() + u.px(4));
+    u.canvas.fill_rect({left.x, h.y, left.w, h.h}, u.theme.header);
+    u.label({h.x + u.px(4), h.y, h.w, h.h}, t, u.theme.text_bright);
+  };
+  header("Render Settings");
+  {
+    InspectorReflector ir(*this, u, lay);
+    u.push_id("rs");
+    scene_->render.reflect(ir);
+    u.pop_id();
+    if (ir.changed) mark_changed("Render Settings");
+  }
+  lay.space(u.px(6));
+  header("World / Environment Lighting");
+  {
+    InspectorReflector ir(*this, u, lay);
+    u.push_id("world");
+    scene_->environment.reflect(ir);
+    u.pop_id();
+    if (ir.changed) {
+      mark_changed("World Settings");
+      vp_pt_hash_ = 0;
+    }
+  }
+  lay.space(u.px(6));
+  GameObject *owner = nullptr;
+  main_camera(*scene_, &owner);
+  u.label(lay.row(), owner ? "Camera: " + owner->name : "No camera - rendering from the Scene view", u.theme.text_dim);
+  u.label(lay.row(), "Tip: Scene view > Rendered previews the path tracer live.", u.theme.text_dim);
+  lay.space(u.px(16));
+  content_h = lay.y + off - left.y;
+  u.end_scroll();
+
+  /* ---- image view ---- */
+  u.canvas.push_clip(right);
+  /* Transparency-style checker behind the image. */
+  for (int y = right.y; y < right.bottom(); y += u.px(16))
+    for (int x = right.x; x < right.right(); x += u.px(16))
+      u.canvas.fill_rect({x, y, u.px(16), u.px(16)}, ((x - right.x) / u.px(16) + (y - right.y) / u.px(16)) & 1 ? Color::hex(0x2A2A2A) : Color::hex(0x303030));
+  if (!render_has_result_ || render_img_.width == 0) {
+    u.label(right, "Press Render (F12) to render the Main Camera", u.theme.text_dim, ui::Align::Center);
+    u.canvas.pop_clip();
+    return;
+  }
+  const int iw = render_img_.width, ih = render_img_.height;
+  float fit = std::min((right.w - u.px(20)) / (float)iw, (right.h - u.px(20)) / (float)ih);
+  if (u.hovered(right) && u.in.wheel_y != 0) {
+    if (render_zoom_ <= 0) render_zoom_ = fit;
+    render_zoom_ = clampf(render_zoom_ * std::pow(1.2f, u.in.wheel_y), 0.05f, 16.0f);
+  }
+  if (u.hovered(right) && u.in.down[2]) render_pan_ += Vec2((float)u.in.dx(), (float)u.in.dy());
+  if (u.hovered(right) && u.in.double_clicked[0]) { render_zoom_ = 0; render_pan_ = Vec2(0, 0); }
+  float sc = render_zoom_ > 0 ? render_zoom_ : fit;
+  int dw = (int)(iw * sc), dh = (int)(ih * sc);
+  int ox = right.x + (right.w - dw) / 2 + (int)render_pan_.x, oy = right.y + (right.h - dh) / 2 + (int)render_pan_.y;
+  Recti dst = Recti{ox, oy, dw, dh}.intersect(right);
+  Image *fb = u.canvas.target();
+  for (int y = dst.y; y < dst.bottom(); y++) {
+    int sy = std::min(ih - 1, (int)((y - oy) / sc));
+    const uint32_t *src = render_img_.row(sy);
+    uint32_t *drow = fb->row(y);
+    for (int x = dst.x; x < dst.right(); x++) drow[x] = src[std::min(iw - 1, (int)((x - ox) / sc))];
+  }
+  u.canvas.rect_outline({ox - 1, oy - 1, dw + 2, dh + 2}, Color::hex(0x101010));
+  u.label({right.x + u.px(8), right.bottom() - u.row_h() - u.px(4), right.w, u.row_h()},
+          strprintf("%d x %d  |  %.0f%%  |  wheel zoom, middle-drag pan, double-click fit", iw, ih, sc * 100.0f), u.theme.text_dim);
+  u.canvas.pop_clip();
+}
+
+}  // namespace bl

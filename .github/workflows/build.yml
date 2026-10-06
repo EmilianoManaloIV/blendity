@@ -1,0 +1,78 @@
+# Builds Blendity for Windows, Linux and macOS, runs the unit tests and a quick
+# stress pass, and uploads the three executables as artifacts.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (MSVC, no CMake needed)
+        shell: cmd
+        run: build.bat release all
+      - name: Unit tests
+        run: dist\windows\blendity_tests.exe
+      - name: Quick stress test
+        run: dist\windows\blendity_stress.exe --quick --out stress\results\ci
+      - name: Headless screenshot
+        run: dist\windows\Blendity.exe --headless-screenshot screenshot-windows.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendity-windows
+          path: |
+            dist/windows/*.exe
+            screenshot-windows.png
+            stress/results/ci
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler + X11 headers
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core
+      - name: Build
+        run: ./build.sh release all
+      - name: Unit tests
+        run: ./dist/linux/blendity_tests
+      - name: Quick stress test
+        run: ./dist/linux/blendity_stress --quick --out stress/results/ci
+      - name: Headless screenshot
+        run: ./dist/linux/Blendity --headless-screenshot screenshot-linux.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendity-linux
+          path: |
+            dist/linux/Blendity
+            dist/linux/blendity_stress
+            dist/linux/blendity_tests
+            screenshot-linux.png
+            stress/results/ci
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: ./build.sh release all
+      - name: Unit tests
+        run: ./dist/macos/blendity_tests
+      - name: Quick stress test
+        run: ./dist/macos/blendity_stress --quick --out stress/results/ci
+      - name: Headless screenshot
+        run: ./dist/macos/Blendity --headless-screenshot screenshot-macos.png
+      - name: Zip app bundle
+        run: cd dist/macos && zip -r Blendity-macos.zip Blendity.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendity-macos
+          path: |
+            dist/macos/Blendity-macos.zip
+            dist/macos/blendity_stress
+            dist/macos/blendity_tests
+            screenshot-macos.png
+            stress/results/ci
