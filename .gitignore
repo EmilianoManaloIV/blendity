@@ -9,3 +9,4 @@ dist/
 # Per-user files the editor writes at runtime
 Screenshots/*.png
 Renders/
+Assets/**/*.bak
