@@ -14,15 +14,20 @@
 #include "../src/core/jobs.h"
 #include "../src/editor/editor.h"
 #include "../src/image/image.h"
+#include "../src/render/colormanagement.h"
+#include "../src/render/display.h"
+#include "../src/core/cpu.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/raster.h"
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
+#include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
 #include "../src/scene/uv.h"
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -146,7 +151,8 @@ struct Bench3D {
 static void test_raster_scaling(Report &rep, const Options &o) {
   rep.title("Rasterizer: triangle throughput & limit",
             "Grid of icospheres (1,280 tris each) at 1280x720. Optimised = all cores + back-face + frustum culling + "
-            "exact row spans. Each optimisation is then disabled in turn. Limit = largest triangle count under the budget.");
+            "exact row spans + fast setup (AVX2 rejection of 8 triangles at a time, small-triangle cull, lazy vertex "
+            "shading). Each optimisation is then disabled in turn. Limit = largest triangle count under the budget.");
   auto mesh = primitives::ico_sphere(0.5f, 3);
   size_t tris_per = mesh->render_mesh().tri_count();
   Bench3D b(1280, 720);
@@ -155,23 +161,34 @@ static void test_raster_scaling(Report &rep, const Options &o) {
   RasterOptions single = best; single.multithreaded = false;
   RasterOptions nocull = best; nocull.backface_culling = false;
   RasterOptions nospan = best; nospan.span_rows = false;
-  Cfg cfgs[] = {{"optimised", best}, {"single thread", single}, {"no backface cull", nocull}, {"no row spans", nospan}};
-  rep.table({"objects", "triangles", "optimised ms", "1 thread ms", "no-cull ms", "no-span ms", "Mtris/s (opt)"});
+  RasterOptions nofast = best; nofast.fast_setup = false;
+  Cfg cfgs[] = {{"optimised", best}, {"single thread", single}, {"no backface cull", nocull}, {"no row spans", nospan},
+                {"no fast setup", nofast}};
+  rep.table({"objects", "triangles", "optimised ms", "1 thread ms", "no-cull ms", "no-span ms", "no fast setup ms", "Mtris/s (opt)"});
   std::vector<int> counts = o.quick ? std::vector<int>{16, 128, 512} : std::vector<int>{16, 64, 256, 1024, 2048, 4096, 8192, 16384};
   size_t limit_opt = 0, limit_single = 0;
+  std::vector<std::vector<std::string>> phases;
   for (int n : counts) {
     Scene s = make_grid_scene(n, mesh, 1.3f);
     float extent = std::sqrt((float)n) * 0.65f + 2.0f;
-    double ms[4];
-    for (int c = 0; c < 4; c++) ms[c] = b.render(s, cfgs[c].opt, extent, n > 4096 ? 2 : 3);
+    double ms[5];
+    RasterStats st;
+    for (int c = 0; c < 5; c++) {
+      ms[c] = b.render(s, cfgs[c].opt, extent, n > 4096 ? 2 : 3);
+      if (c == 0) st = b.r3d.stats();
+    }
+    phases.push_back({std::to_string(n), f2(st.ms_vertex), f2(st.ms_setup), f2(st.ms_raster), f2(st.ms_total),
+                      f1(100.0 * st.tris_rasterized / std::max<size_t>(1, st.tris_submitted)) + "%"});
     size_t tris = (size_t)n * tris_per;
     if (ms[0] <= o.budget) limit_opt = tris;
     if (ms[1] <= o.budget) limit_single = tris;
-    rep.row({std::to_string(n), num((double)tris), f2(ms[0]), f2(ms[1]), f2(ms[2]), f2(ms[3]), f1(tris / ms[0] / 1000.0)});
+    rep.row({std::to_string(n), num((double)tris), f2(ms[0]), f2(ms[1]), f2(ms[2]), f2(ms[3]), f2(ms[4]), f1(tris / ms[0] / 1000.0)});
     if (ms[1] > 2000) break;
   }
   rep.note(strprintf("60 FPS limit at 1280x720: ~%s triangles optimised vs ~%s single-threaded (%d threads available).",
                      num((double)limit_opt).c_str(), num((double)limit_single).c_str(), JobSystem::global().thread_count()));
+  rep.table({"objects", "vertex ms", "assembly + binning ms", "raster ms", "total ms", "triangles kept"});
+  for (auto &r : phases) rep.row(r);
 }
 
 static void test_tile_size(Report &rep, const Options &o) {
@@ -299,6 +316,24 @@ static void test_subdivision(Report &rep, const Options &o) {
     double ms = time_ms([&] { m = meshops::subdivide_catmull_clark(m); });
     rep.row({std::to_string(level), num((double)m.face_count()), num((double)m.vert_count()), f1(ms), format_bytes(m.memory_bytes())});
     if (ms > 2000) { rep.note(strprintf("Level %d exceeded 2 s - practical interactive limit reached.", level)); break; }
+  }
+  if (!meshops::subdiv_opensubdiv_available()) return;
+  /* Blendity's Catmull-Clark vs OpenSubdiv (Blender's Subdivision Surface), all
+   * levels at once from a 6-face cube and a 5k-face torus with UVs. */
+  rep.table({"mesh", "levels", "faces", "Blendity ms", "OpenSubdiv ms", "OpenSubdiv speed-up"});
+  for (auto [name, src] : {std::pair<const char *, MeshPtr>{"cube", primitives::cube()}, {"torus (UVs)", primitives::torus(0.5f, 0.2f, 64, 32)}}) {
+    Mesh base = *src;
+    base.seams.clear();
+    for (int levels : o.quick ? std::vector<int>{2, 4} : std::vector<int>{2, 4, 6}) {
+      double ms[2];
+      size_t faces = 0;
+      for (int k = 0; k < 2; k++) {
+        meshops::set_subdiv_opensubdiv(k == 1);
+        ms[k] = time_ms([&] { faces = meshops::subdivide(base, levels, true).face_count(); });
+      }
+      meshops::set_subdiv_opensubdiv(false);
+      rep.row({name, std::to_string(levels), num((double)faces), f1(ms[0]), f1(ms[1]), f2(ms[0] / ms[1]) + "x"});
+    }
   }
 }
 
@@ -455,6 +490,52 @@ static void test_jobs(Report &rep, const Options &o) {
   }
   js.set_max_threads(1 << 30);
   rep.note("Memory bandwidth, not core count, limits this kind of streaming kernel (GEA Vol. I 3.5 Memory Architectures).");
+  if (!JobSystem::tbb_available()) return;
+  /* Built-in pool vs oneTBB (what Blender uses), all threads. */
+  rep.table({"workload", "built-in pool ms", "oneTBB ms", "TBB speed-up"});
+  auto compare = [&](const char *name, const std::function<void()> &work, int reps) {
+    double ms[2];
+    for (int k = 0; k < 2; k++) {
+      js.set_backend(k == 0 ? JobSystem::Backend::Builtin : JobSystem::Backend::TBB);
+      work();  // warm-up (thread start, caches)
+      ms[k] = time_ms(work, reps);
+    }
+    rep.row({name, f2(ms[0]), f2(ms[1]), f2(ms[0] / ms[1]) + "x"});
+  };
+  compare("stream 8M vertices", [&] {
+    js.parallel_for((int64_t)n, 65536, [&](int64_t b, int64_t e) {
+      for (int64_t i = b; i < e; i++) out[i] = m.point(in[i]);
+    });
+  }, 5);
+  std::vector<double> acc(4096);
+  compare("imbalanced compute (cost grows 64x)", [&] {
+    js.parallel_for(4096, 16, [&](int64_t b, int64_t e) {
+      for (int64_t i = b; i < e; i++) {
+        double s = 0;
+        int iters = 200 + (int)(i * 12600 / 4096);  // last items cost 64x the first
+        for (int k = 0; k < iters; k++) s += std::sin(k * 0.001 + i);
+        acc[i] = s;
+      }
+    });
+  }, 3);
+  compare("10,000 small parallel_for calls", [&] {
+    for (int c = 0; c < 10000; c++)
+      js.parallel_for(4096, 256, [&](int64_t b, int64_t e) {
+        for (int64_t i = b; i < e; i++) out[i] = m.point(in[i]);
+      });
+  }, 1);
+  compare("nested: 32 x parallel_for(250k)", [&] {
+    js.parallel_for(32, 1, [&](int64_t b, int64_t e) {
+      for (int64_t o = b; o < e; o++)
+        js.parallel_for(250000, 4096, [&](int64_t b2, int64_t e2) {
+          for (int64_t i = b2; i < e2; i++) out[(o * 250000 + i) % n] = m.point(in[i]);
+        });
+    });
+  }, 3);
+  js.set_backend(JobSystem::Backend::TBB);
+  rep.note("TBB's clear win is dispatch cost: many small loops (typical of editor operators) start much faster. "
+           "Streaming and imbalanced work are a wash: memory bandwidth limits the first, and the built-in pool already hands out "
+           "small chunks dynamically. Nested loops gain a little because TBB runs the inner loops in parallel too.");
 }
 
 static void test_editor(Report &rep, const Options &o) {
@@ -616,78 +697,257 @@ static void test_shading_cost(Report &rep, const Options &o) {
     rep.row({strprintf("%dx%d", w, h), f2(g), f2(d), f2(ds), f2(shadow_ms), f2(shade_ms)});
   }
   rep.note("The shadow map only needs re-rendering when lights or casters move (render_view.cpp caches it by scene hash).");
+  /* View transforms: per-frame cost of turning scene light into display pixels. */
+  rep.table({"view transform (1920x1080)", "ms / frame", "Mpix/s"});
+  std::vector<Vec3> hdr((size_t)1920 * 1080);
+  uint32_t rng = 3;
+  for (Vec3 &c : hdr) {
+    rng = rng * 1664525u + 1013904223u;
+    float l = std::exp2(((rng >> 8) & 0xFFFF) / 65536.0f * 14.0f - 8.0f);
+    c = Vec3(l, l * 0.7f, l * 0.4f);
+  }
+  std::vector<uint32_t> outpx(hdr.size());
+  auto run_vt = [&](const std::string &name, ViewTransform vt) {
+    to_display_pixel(hdr[0], vt, 0.0f);  // bakes an OpenColorIO LUT on first use
+    double ms = time_ms([&] {
+      JobSystem::global().parallel_for((int64_t)hdr.size(), 8192, [&](int64_t b, int64_t e) {
+        for (int64_t i = b; i < e; i++) outpx[i] = to_display_pixel(hdr[i], vt, 0.0f);
+      });
+    }, 5);
+    rep.row({name, f2(ms), f1(hdr.size() / ms / 1000.0)});
+  };
+  run_vt("Filmic (built-in curve)", ViewTransform::Filmic);
+  if (colormanagement::available()) {
+    for (const char *name : {"AgX", "Filmic", "Khronos PBR Neutral"}) {
+      int v = colormanagement::view_index(name);
+      if (v >= 0) run_vt(std::string(name) + " (OCIO 97^3 LUT)", (ViewTransform)((int)ViewTransform::OcioView + v));
+    }
+    /* The exact OpenColorIO CPU processor on the same frame, for comparison. */
+    int agx = colormanagement::view_index("AgX");
+    std::vector<float> in(hdr.size() * 3), out(hdr.size() * 3);
+    for (size_t i = 0; i < hdr.size(); i++)
+      for (int k = 0; k < 3; k++) in[i * 3 + k] = hdr[i][k];
+    double ms = time_ms([&] {
+      JobSystem::global().parallel_for((int64_t)hdr.size(), 65536, [&](int64_t b, int64_t e) {
+        colormanagement::reference(agx, &in[b * 3], &out[b * 3], (size_t)(e - b));
+      });
+    }, 2);
+    rep.row({"AgX (OCIO CPU processor, exact)", f2(ms), f1(hdr.size() / ms / 1000.0)});
+  }
+
+  /* Hand-written display kernels (display.cpp) on one thread, against the
+   * per-pixel pow() version Blendity used before. All give identical sRGB. */
+  rep.table({"Filmic encode, 1 thread", "ms / 1080p frame", "Mpix/s", "vs pow()"});
+  auto pow_pixel = [](Vec3 c) {
+    c = tonemap(c, ViewTransform::Filmic, 0.0f);
+    auto q = [](float v) { return (uint32_t)std::clamp((int)(linear_to_srgb(saturate(v)) * 255.0f + 0.5f), 0, 255); };
+    return 0xFF000000u | (q(c.x) << 16) | (q(c.y) << 8) | q(c.z);
+  };
+  double pow_ms = time_ms([&] {
+    for (size_t i = 0; i < hdr.size(); i++) outpx[i] = pow_pixel(hdr[i]);
+  }, 2);
+  rep.row({"scalar, pow() per channel", f2(pow_ms), f1(hdr.size() / pow_ms / 1000.0), "1.00x"});
+  for (display::Kernel k : {display::Kernel::Scalar, display::Kernel::SSE41, display::Kernel::AVX2}) {
+    display::set_kernel(k);
+    if (display::active_kernel() != k) continue;  // CPU lacks it
+    double ms = time_ms([&] { display::encode_span(&hdr[0].x, outpx.data(), hdr.size(), ViewTransform::Filmic, 0.0f); }, 5);
+    rep.row({std::string(display::kernel_name(k)) + ", sRGB table", f2(ms), f1(hdr.size() / ms / 1000.0), f2(pow_ms / ms) + "x"});
+  }
+  display::set_kernel(display::Kernel::Auto);
+  double par_ms = time_ms([&] {
+    JobSystem::global().parallel_for((int64_t)hdr.size(), 16384, [&](int64_t b, int64_t e) {
+      display::encode_span(&hdr[b].x, outpx.data() + b, (size_t)(e - b), ViewTransform::Filmic, 0.0f);
+    });
+  }, 5);
+  rep.row({std::string(display::kernel_name(display::active_kernel())) + ", all threads", f2(par_ms), f1(hdr.size() / par_ms / 1000.0),
+           f2(pow_ms / par_ms) + "x"});
+  rep.note("CPU: " + cpu::describe() + ". The sRGB table is correctly rounded for every float in [0, 1] (checked in the unit tests).");
 }
 
 static void test_pathtracer(Report &rep, const Options &o) {
-  rep.title("Path tracer: BVH build and ray throughput",
-            "Grids of icospheres traced at 320x180, 1 sample per pass, 4 bounces (Cycles-like: binned-SAH BVH, NEE, MIS). "
-            "Mrays/s counts every camera, bounce and shadow ray.");
+  rep.title("Path tracer: BVH build and ray throughput (Blendity BVH vs Embree)",
+            "Grids of icospheres traced at 320x180, 4 bounces (Cycles-like: NEE, MIS). Mrays/s counts every camera, bounce "
+            "and shadow ray actually cast. Each scene runs on Blendity's two-level SAH BVH and, when built with Blender's "
+            "libraries, on Embree (Cycles' CPU ray tracing kernels).");
   auto mesh = primitives::ico_sphere(0.5f, 3);
   const RenderMesh &rm = mesh->render_mesh_tangents();
   std::vector<MaterialPtr> mats = {make_material("bench", {0.8f, 0.8f, 0.8f})};
-  rep.table({"objects", "triangles", "BVH build ms", "BVH nodes", "ms / sample", "Mrays/s"});
   Environment env;
   RenderLight sun;
   sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
   sun.intensity = 3.0f;
-  for (int n : o.quick ? std::vector<int>{16, 256} : std::vector<int>{16, 256, 1024, 4096, 16384}) {
-    std::vector<PTObject> objs;
-    int side = (int)std::ceil(std::sqrt((double)n));
-    for (int i = 0; i < n; i++) objs.push_back({&rm, Mat4::translate({(i % side - side * 0.5f) * 1.3f, 0, (i / side - side * 0.5f) * 1.3f}), &mats});
+  const bool embree = PathTracer::embree_available();
+  struct Run {
+    double build_ms, ms_per_sample, mrays;
+  };
+  auto run = [&](const std::vector<PTObject> &objs, int side, bool use_embree) {
     PathTracer pt;
+    PTSettings st;
+    st.use_embree = use_embree;
+    pt.set_settings(st);
     pt.build(objs, {sun}, env);
+    double build = pt.stats().bvh_build_ms;
     float ext = side * 0.65f + 2.0f;
-    pt.set_camera(Mat4::look_at({0, ext * 0.9f, -ext * 1.1f}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, 16.0f / 9.0f, 0.1f, 1000), 320, 180);
+    pt.set_camera(Mat4::look_at({0, ext * 0.9f, -ext * 1.1f}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, 16.0f / 9.0f, 0.1f, 1000),
+                  320, 180);
     pt.render(0, 1);  // warm-up
     pt.reset();
     ScopedTimer t;
     int spp = pt.render(o.quick ? 300 : 1000, 64);
-    double ms = t.ms();
-    rep.row({std::to_string(n), num((double)pt.stats().triangles), f1(pt.stats().bvh_build_ms), num((double)pt.stats().bvh_nodes),
-             f1(ms / std::max(1, spp)), f1(pt.stats().mrays_per_s())});
-  }
-  rep.note("Ray cost grows ~logarithmically with triangle count thanks to the BVH. All objects share one mesh here, so the "
-           "two-level BVH builds a single bottom-level tree (Cycles instancing).");
-  /* Worst case for instancing: every object has its own mesh. */
-  rep.table({"unique meshes", "triangles", "first build ms", "move 1 object ms", "edit 1 mesh ms", "rebuilt"});
-  for (int n : o.quick ? std::vector<int>{64} : std::vector<int>{64, 256, 1024}) {
-    std::vector<MeshPtr> meshes;
+    return Run{build, t.ms() / std::max(1, spp), pt.stats().mrays_per_s()};
+  };
+  rep.table({"objects", "triangles", "BVH build ms", "Embree build ms", "BVH Mrays/s", "Embree Mrays/s", "Embree speed-up"});
+  for (int n : o.quick ? std::vector<int>{16, 256} : std::vector<int>{16, 256, 1024, 4096, 16384}) {
     std::vector<PTObject> objs;
     int side = (int)std::ceil(std::sqrt((double)n));
-    for (int i = 0; i < n; i++) meshes.push_back(std::make_shared<Mesh>(*mesh));
-    for (int i = 0; i < n; i++)
-      objs.push_back({&meshes[i]->render_mesh_tangents(), Mat4::translate({(i % side - side * 0.5f) * 1.3f, 0, (i / side - side * 0.5f) * 1.3f}), &mats});
-    PathTracer pt;
-    pt.build(objs, {sun}, env);
-    double first = pt.stats().bvh_build_ms;
-    objs[0].model = Mat4::translate({0, 3, 0});
-    pt.build(objs, {sun}, env);
-    double moved = pt.stats().bvh_build_ms;
-    meshes[1]->positions[0].y += 0.2f;
-    meshes[1]->touch();
-    objs[1].mesh = &meshes[1]->render_mesh_tangents();
-    pt.build(objs, {sun}, env);
-    rep.row({std::to_string(n), num((double)pt.stats().triangles), f1(first), f1(moved), f1(pt.stats().bvh_build_ms),
-             std::to_string(pt.stats().meshes_rebuilt)});
+    for (int i = 0; i < n; i++) objs.push_back({&rm, Mat4::translate({(i % side - side * 0.5f) * 1.3f, 0, (i / side - side * 0.5f) * 1.3f}), &mats});
+    Run a = run(objs, side, false);
+    Run b = embree ? run(objs, side, true) : Run{0, 0, 0};
+    rep.row({std::to_string(n), num((double)n * rm.tri_count()), f1(a.build_ms), embree ? f1(b.build_ms) : "-", f1(a.mrays),
+             embree ? f1(b.mrays) : "-", embree ? f2(b.mrays / std::max(1e-9, a.mrays)) + "x" : "-"});
   }
-  rep.note("Bottom-level BVHs are cached by mesh content hash: moving an object only rebuilds the small top level; "
-           "editing a mesh rebuilds just that mesh. The first version rebuilt one flat BVH over all triangles on any change "
-           "(1.85 s at 1.3M triangles).");
+  rep.note("Every object shares one mesh, so both backends build a single bottom-level tree (Cycles instancing).");
+  /* Worst case for instancing: every object has its own mesh. */
+  rep.table({"unique meshes", "triangles", "backend", "first build ms", "move 1 object ms", "edit 1 mesh ms", "rebuilt"});
+  for (int n : o.quick ? std::vector<int>{64} : std::vector<int>{64, 256, 1024}) {
+    for (bool use_embree : {false, true}) {
+      if (use_embree && !embree) continue;
+      std::vector<MeshPtr> meshes;
+      std::vector<PTObject> objs;
+      int side = (int)std::ceil(std::sqrt((double)n));
+      for (int i = 0; i < n; i++) meshes.push_back(std::make_shared<Mesh>(*mesh));
+      for (int i = 0; i < n; i++)
+        objs.push_back({&meshes[i]->render_mesh_tangents(), Mat4::translate({(i % side - side * 0.5f) * 1.3f, 0, (i / side - side * 0.5f) * 1.3f}),
+                        &mats});
+      PathTracer pt;
+      PTSettings st;
+      st.use_embree = use_embree;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      double first = pt.stats().bvh_build_ms;
+      objs[0].model = Mat4::translate({0, 3, 0});
+      pt.build(objs, {sun}, env);
+      double moved = pt.stats().bvh_build_ms;
+      meshes[1]->positions[0].y += 0.2f;
+      meshes[1]->touch();
+      objs[1].mesh = &meshes[1]->render_mesh_tangents();
+      pt.build(objs, {sun}, env);
+      rep.row({std::to_string(n), num((double)pt.stats().triangles), pt.ray_backend(), f1(first), f1(moved), f1(pt.stats().bvh_build_ms),
+               std::to_string(pt.stats().meshes_rebuilt)});
+    }
+  }
+  rep.note("Bottom-level trees are cached by mesh content hash in both backends: moving an object only rebuilds the top level; "
+           "editing a mesh rebuilds just that mesh.");
+  /* Path guiding (OpenPGL): two rooms joined by a doorway with the light in the
+   * far one, at a realistic resolution so the field gets enough training samples. */
+  if (PathTracer::guiding_available()) {
+    /* Two rooms joined by a doorway, the light only in the far one. */
+    auto cube = primitives::cube(1.0f);
+    auto panel = primitives::quad(1.0f);
+    std::vector<MaterialPtr> grey = {make_material("grey", {0.6f, 0.6f, 0.6f})};
+    std::vector<MaterialPtr> light = {make_material("light", {0, 0, 0})};
+    light[0]->emission = {1, 1, 1};
+    light[0]->emission_strength = 40.0f;
+    std::vector<PTObject> robjs;
+    auto wall = [&](Vec3 lo, Vec3 hi) { robjs.push_back({&cube->render_mesh_tangents(), Mat4::trs((lo + hi) * 0.5f, Quat(), hi - lo), &grey}); };
+    wall({-3.1f, -0.1f, -3.1f}, {3.1f, 0.0f, 9.1f});
+    wall({-3.1f, 4.0f, -3.1f}, {3.1f, 4.1f, 9.1f});
+    wall({-3.1f, 0.0f, -3.1f}, {-3.0f, 4.0f, 9.1f});
+    wall({3.0f, 0.0f, -3.1f}, {3.1f, 4.0f, 9.1f});
+    wall({-3.0f, 0.0f, -3.1f}, {3.0f, 4.0f, -3.0f});
+    wall({-3.0f, 0.0f, 9.0f}, {3.0f, 4.0f, 9.1f});
+    wall({-3.0f, 0.0f, 2.95f}, {-0.5f, 4.0f, 3.05f});
+    wall({0.5f, 0.0f, 2.95f}, {3.0f, 4.0f, 3.05f});
+    wall({-0.5f, 2.0f, 2.95f}, {0.5f, 4.0f, 3.05f});
+    robjs.push_back({&panel->render_mesh_tangents(), Mat4::trs({0, 3.95f, 6.0f}, Quat::euler({90, 0, 0}), {1, 1, 1}), &light});
+    Environment dark;
+    dark.mode = Environment::Color;
+    dark.color = Vec3(0.0f);
+    const int W = o.quick ? 160 : 320, H = o.quick ? 120 : 240;
+    auto render_room = [&](int spp, bool guiding, double *ms, bool mesh_lights = true) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_guiding = guiding;
+      st.sample_mesh_lights = mesh_lights;
+      st.max_bounces = 6;
+      st.clamp_indirect = 0;
+      pt.set_settings(st);
+      pt.build(robjs, {}, dark);
+      pt.set_camera(Mat4::look_at({0, 1.6f, -2.6f}, {0, 1.0f, 3.0f}, {0, 1, 0}), Mat4::perspective(70 * kDeg2Rad, 4.0f / 3.0f, 0.05f, 50), W, H);
+      ScopedTimer t;
+      pt.render(1e9, spp);
+      if (ms) *ms = t.ms();
+      return pt.linear_rgb(false);
+    };
+    auto rmse = [](const std::vector<float> &a, const std::vector<float> &b) {
+      double e = 0;
+      for (size_t i = 0; i < a.size(); i++) e += (a[i] - b[i]) * (a[i] - b[i]);
+      return std::sqrt(e / a.size());
+    };
+    std::vector<float> ref = render_room(o.quick ? 1024 : 4096, false, nullptr);
+    rep.table({"samples", "unguided RMSE", "guided RMSE", "unguided ms", "guided ms", "efficiency gain"});
+    for (int spp : {256, 512}) {
+      double tu = 0, tg = 0;
+      double eu = rmse(render_room(spp, false, &tu), ref), eg = rmse(render_room(spp, true, &tg), ref);
+      /* Efficiency = 1 / (error^2 x time): how much faster guiding reaches the same noise. */
+      rep.row({std::to_string(spp), strprintf("%.4f", eu), strprintf("%.4f", eg), f1(tu), f1(tg), f2((eu * eu * tu) / (eg * eg * tg)) + "x"});
+    }
+    /* The bigger win in this scene: sampling the emissive panel directly. */
+    {
+      double tb = 0, tn = 0;
+      double eb = rmse(render_room(256, false, &tb, false), ref), en = rmse(render_room(256, false, &tn, true), ref);
+      rep.row({"256, BSDF-only vs mesh-light NEE", strprintf("%.4f", eb), strprintf("%.4f", en), f1(tb), f1(tn),
+               f2((eb * eb * tb) / (en * en * tn)) + "x"});
+    }
+    rep.note("Guiding trains on the first 128 samples, then steers diffuse bounces toward the light it learned (Cycles: "
+             "Light Paths > Path Guiding). It is unbiased and learns (10x more guided samples point at the doorway than cosine "
+             "sampling), but here the OpenPGL lookups cost more than the noise it removes - it stays opt-in, as in Cycles.");
+  }
+  /* Denoisers: time per frame (quality is checked by the unit tests). */
+  rep.table({"resolution", "A-Trous ms", "OpenImageDenoise ms"});
+  const bool oidn = PathTracer::oidn_available();
+  std::vector<PTObject> objs;
+  for (int i = 0; i < 64; i++) objs.push_back({&rm, Mat4::translate({(i % 8 - 4) * 1.3f, 0, (i / 8 - 4) * 1.3f}), &mats});
+  std::vector<std::pair<int, int>> sizes = {{640, 360}, {1280, 720}};
+  if (!o.quick) sizes.push_back({1920, 1080});
+  for (auto [w, h] : sizes) {
+    double ms[2] = {0, 0};
+    for (int k = 0; k < (oidn ? 2 : 1); k++) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_oidn = k == 1;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 8, -9}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, w / (float)h, 0.1f, 1000), w, h);
+      pt.render(0, 2);
+      pt.linear_rgb(true);  // warm-up (OIDN loads its weights once)
+      ms[k] = time_ms([&] { pt.linear_rgb(true); }, 2);
+    }
+    rep.row({strprintf("%dx%d", w, h), f1(ms[0]), oidn ? f1(ms[1]) : "-"});
+  }
 }
 
 static void test_uv_unwrap(Report &rep, const Options &o) {
   rep.title("UV: LSCM unwrap and packing",
-            "LSCM (block-Jacobi conjugate gradients on the assembled normal equations, parallel sparse mat-vec) on an "
-            "n x n grid - one island - and Smart UV Project + pack on a subdivided torus. Blender uses a sparse direct "
-            "solver; CG iterations grow with the island's diameter, so very large single islands stay the slow case.");
-  rep.table({"case", "faces", "islands", "ms"});
-  for (int g : o.quick ? std::vector<int>{16, 64} : std::vector<int>{16, 64, 128, 256}) {
-    Mesh m = *primitives::grid(10.0f, g, g);
-    for (auto &p : m.positions) p.y = 0.3f * std::sin(p.x) * std::cos(p.z);  // not flat
+            "LSCM on an n x n grid (one island): block-Jacobi conjugate gradients on the assembled normal equations "
+            "(parallel sparse mat-vec) vs Eigen's sparse Cholesky, the direct-solver route Blender takes. Then Smart UV "
+            "Project + pack on a subdivided torus.");
+  rep.table({"case", "faces", "islands", "CG ms", "Eigen ms", "Eigen speed-up"});
+  const bool eigen = std::string(uvops::lscm_solver_name()) != "conjugate gradients";
+  for (int g : o.quick ? std::vector<int>{16, 64} : std::vector<int>{16, 64, 128, 256, 512}) {
+    Mesh src = *primitives::grid(10.0f, g, g);
+    for (auto &p : src.positions) p.y = 0.3f * std::sin(p.x) * std::cos(p.z);  // not flat
     int islands = 0;
-    double ms = time_ms([&] { islands = uvops::unwrap_lscm(m, nullptr); });
-    rep.row({strprintf("LSCM grid %dx%d", g, g), num((double)m.face_count()), std::to_string(islands), f1(ms)});
-    if (ms > 5000) break;
+    double ms[2] = {-1, -1};
+    for (int k = 0; k < (eigen ? 2 : 1); k++) {
+      if (k == 0 && g > 256) continue;  // CG takes ~10 s at 512^2
+      uvops::set_lscm_solver(k == 0 ? uvops::LscmSolver::ConjugateGradient : uvops::LscmSolver::Auto);
+      Mesh m = src;
+      ms[k] = time_ms([&] { islands = uvops::unwrap_lscm(m, nullptr); });
+    }
+    uvops::set_lscm_solver(uvops::LscmSolver::Auto);
+    rep.row({strprintf("LSCM grid %dx%d", g, g), num((double)src.face_count()), std::to_string(islands), ms[0] < 0 ? "(skipped)" : f1(ms[0]),
+             ms[1] < 0 ? "-" : f1(ms[1]), ms[0] > 0 && ms[1] > 0 ? f1(ms[0] / ms[1]) + "x" : "-"});
   }
   for (int lv : o.quick ? std::vector<int>{0, 1} : std::vector<int>{0, 1, 2, 3}) {
     Mesh m = *primitives::torus();
@@ -721,6 +981,92 @@ static void test_texture_sampling(Report &rep, const Options &o) {
       });
     rep.row({std::to_string(size), f1(build), format_bytes(t->memory_bytes()), f1(N / ms[0] / 1000.0), f1(N / ms[1] / 1000.0),
              f1(N / ms[2] / 1000.0)});
+  }
+}
+
+static void test_codecs(Report &rep, const Options &o) {
+  rep.title("Image codecs and scene compression",
+            "Decoding a 3840x2160 photo-like image (gradients + noise) with Blendity's own decoders vs Blender's libjpeg-turbo "
+            "and libpng, then Zstandard on a text scene.");
+  const int w = o.quick ? 1920 : 3840, h = o.quick ? 1080 : 2160;
+  std::vector<uint32_t> px((size_t)w * h);
+  uint32_t rng = 7;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      rng = rng * 1664525u + 1013904223u;
+      int n = (int)((rng >> 24) & 31) - 16;
+      auto c = [&](int v) { return (uint32_t)std::clamp(v + n, 0, 255); };
+      px[(size_t)y * w + x] = 0xFF000000u | c(x * 255 / w) << 16 | c(y * 255 / h) << 8 | c((x + y) * 128 / (w + h) + 64);
+    }
+  /* Scratch files go to the system temp folder, not next to the reports. */
+  std::error_code tmp_ec;
+  std::string dir = (std::filesystem::temp_directory_path(tmp_ec) / "blendity_stress_codecs").string();
+  fs::make_dirs(dir);
+  std::string png = fs::join(dir, "img.png"), jpg = fs::join(dir, "img.jpg");
+  write_png(png, px.data(), w, h, w);
+  write_jpeg(jpg, px.data(), w, h, w, 92);
+  rep.table({"format", "file size", "Blendity ms", "library ms", "library speed-up"});
+  for (const std::string &path : {png, jpg}) {
+    std::string bytes, err;
+    fs::read_file(path, bytes);
+    double ms[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      set_image_library_codecs(k == 1);
+      Bitmap b;
+      ms[k] = time_ms([&] { decode_image(bytes, b, err); }, 3);
+    }
+    set_image_library_codecs(true);
+    const bool jpeg = path == jpg;
+    rep.row({jpeg ? "JPEG (libjpeg-turbo)" : "PNG (libpng + zlib)", format_bytes(bytes.size()), f1(ms[0]), f1(ms[1]), f2(ms[0] / ms[1]) + "x"});
+  }
+  if (scene_compression_available()) {
+    Scene s = make_grid_scene(o.quick ? 2000 : 10000, primitives::ico_sphere(0.5f, 2));
+    std::string text = save_scene_text(s);
+    s.compress = true;
+    std::string path = fs::join(dir, "big.scene"), packed, err;
+    double save_ms = time_ms([&] { save_scene(s, path); });
+    fs::read_file(path, packed);
+    Scene l;
+    double load_ms = time_ms([&] { load_scene(path, l, err); });
+    rep.table({"scene", "text size", "zstd size", "ratio", "save ms", "load ms"});
+    rep.row({strprintf("%zu objects", s.object_count()), format_bytes(text.size()), format_bytes(packed.size()),
+             f1((double)text.size() / packed.size()) + "x", f1(save_ms), f1(load_ms)});
+  }
+}
+
+static void test_physics(Report &rep, const Options &o) {
+  rep.title("Physics: Blendity's sphere physics vs Jolt",
+            "N rigid boxes dropped in a pile onto a plane; average ms per 60 Hz frame over 2 simulated seconds. Blendity's "
+            "fallback tests every pair (O(n^2)); Jolt uses a broad phase, sleeping and a multithreaded solver.");
+  rep.table({"bodies", "Blendity ms/frame", "Jolt ms/frame", "Jolt speed-up"});
+  for (int n : o.quick ? std::vector<int>{100, 500} : std::vector<int>{100, 500, 2000, 5000}) {
+    double ms[2] = {-1, -1};
+    for (int k = 0; k < 2; k++) {
+      if (k == 1 && !physics_jolt_available()) continue;
+      if (k == 0 && n > 2000) continue;  // O(n^2): minutes
+      Scene s;
+      GameObject *ground = s.create("Ground");
+      ground->add<MeshFilter>()->mesh = primitives::plane(200.0f, 1);
+      ground->add<MeshRenderer>();
+      auto cube = primitives::cube();
+      int side = (int)std::ceil(std::cbrt((double)n));
+      for (int i = 0; i < n; i++) {
+        GameObject *g = s.create("Box");
+        g->add<MeshFilter>()->mesh = cube;
+        g->add<MeshRenderer>();
+        g->add<Rigidbody>();
+        g->set_local_position({(i % side) * 1.1f - side * 0.55f, 1.0f + (i / (side * side)) * 1.1f, ((i / side) % side) * 1.1f - side * 0.55f});
+      }
+      PlayContext ctx;
+      ctx.dt = 1.0f / 60.0f;
+      s.start(ctx);
+      if (k == 0) s.physics.reset();  // force the fallback
+      ScopedTimer t;
+      for (int f = 0; f < 120; f++) s.update(ctx);
+      ms[k] = t.ms() / 120.0;
+    }
+    rep.row({std::to_string(n), ms[0] < 0 ? "(skipped)" : f2(ms[0]), ms[1] < 0 ? "-" : f2(ms[1]),
+             ms[0] > 0 && ms[1] > 0 ? f1(ms[0] / ms[1]) + "x" : "-"});
   }
 }
 
@@ -781,7 +1127,7 @@ int main(int argc, char **argv) {
                {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
-               {"modeling", test_modeling_tools}};
+               {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

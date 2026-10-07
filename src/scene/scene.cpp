@@ -3,6 +3,9 @@
 
 #include "../core/core.h"
 #include "../platform/platform.h"
+#include "../render/colormanagement.h"
+#include "../render/shading.h"
+#include "physics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -54,6 +57,8 @@ void register_builtin_components() {
   reg<MirrorModifier>("Mesh", "Mirrors the mesh across its local X / Y / Z planes.", "Mirror modifier");
   reg<ArrayModifier>("Mesh", "Repeats the mesh with an offset.", "Array modifier");
   reg<SolidifyModifier>("Mesh", "Gives surfaces thickness (a shell with rim faces).", "Solidify modifier (Simple)");
+  reg<BooleanModifier>("Mesh", "Cuts, joins or intersects with another object (Manifold).", "Boolean modifier (Manifold solver)");
+  reg<DecimateModifier>("Mesh", "Reduces the triangle count (meshoptimizer).", "Decimate modifier (Collapse)");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
   reg<Camera>("Rendering", "Renders the Game view.", "Camera object (the active scene camera)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
@@ -102,8 +107,7 @@ void EnvironmentSettings::reflect(Reflector &r) {
 
 void RenderSettings::reflect(Reflector &r) {
   static const char *engines[] = {"Rasterized (EEVEE-like)", "Path Traced (Cycles-like)"};
-  static const char *vts[] = {"Standard", "Filmic", "ACES"};
-  static const char *formats[] = {"PNG", "JPEG", "Radiance HDR"};
+  static const char *formats[] = {"PNG", "JPEG", "Radiance HDR", "OpenEXR (half float)"};
   r.enumeration("Render Engine", engine, engines, 2);
   r.help("Rasterized: real-time deferred PBR with shadow maps. Path Traced: unbiased Monte Carlo light transport.");
   r.field("Resolution X", width, 16, 16384);
@@ -116,17 +120,31 @@ void RenderSettings::reflect(Reflector &r) {
     r.field("Clamp Indirect", clamp_indirect, 0.1f, 0.0f, 1000.0f);
     r.help("Limits bright indirect samples to remove fireflies (0 = off). Blender: Light Paths > Clamping.");
     r.field("Denoise", denoise);
+    static const char *denoisers[] = {"OpenImageDenoise", "A-Trous (built-in)"};
+    r.enumeration("Denoiser", denoiser, denoisers, 2);
+    r.help("OpenImageDenoise is Cycles' default AI denoiser (needs Blender's libraries). A-Trous is the built-in edge-avoiding filter.");
+    r.field("Embree Ray Tracing", use_embree);
+    r.help("Use Embree, Cycles' CPU ray tracing kernels, instead of Blendity's own BVH (needs Blender's libraries).");
+    r.field("Path Guiding", path_guiding);
+    r.help("Learns where light comes from and steers bounces there (OpenPGL, as Cycles' Light Paths > Path Guiding). Helps light that arrives indirectly or from small emissive surfaces.");
   }
   if (r.all_fields() || engine != 1) {
     r.field("Anti-Aliasing (SSAA)", raster_aa, 1, 4);
     r.field("Shadows", shadows);
     r.field("Shadow Resolution", shadow_resolution, 256, 8192);
   }
-  r.enumeration("View Transform", view_transform, vts, 3);
+  /* Built-in curves, then Blender's OpenColorIO views when available. */
+  static const std::vector<const char *> vts = [] {
+    std::vector<const char *> v;
+    for (const std::string &n : view_transform_names()) v.push_back(n.c_str());
+    return v;
+  }();
+  r.enumeration("View Transform", view_transform, vts.data(), (int)vts.size());
   r.help("Tone mapping from scene light to display (FoCG ch. 20). Blender: Color Management > View Transform.");
   r.field("Exposure", exposure, 0.02f, -10.0f, 10.0f);
-  r.enumeration("File Format", file_format, formats, 3);
-  if (file_format == 1) r.field("JPEG Quality", jpeg_quality, 1, 100);
+  r.enumeration("File Format", file_format, formats, 4);
+  r.help("Radiance HDR and OpenEXR keep linear light (path-traced renders). OpenEXR needs Blender's libraries.");
+  if (r.all_fields() || file_format == 1) r.field("JPEG Quality", jpeg_quality, 1, 100);
 }
 
 Material &MeshRenderer::main_material() {
@@ -207,7 +225,7 @@ void SubdivisionSurface::reflect(Reflector &r) {
   r.field("Smooth (Catmull-Clark)", smooth);
 }
 void SubdivisionSurface::modify(Mesh &m) const {
-  for (int i = 0; i < levels; i++) m = smooth ? meshops::subdivide_catmull_clark(m) : meshops::subdivide_simple(m);
+  m = meshops::subdivide(m, levels, smooth);
   if (smooth && levels > 0) m.smooth = true;
 }
 
@@ -247,6 +265,63 @@ void SolidifyModifier::reflect(Reflector &r) {
   r.field("Fill Rim", fill_rim);
 }
 void SolidifyModifier::modify(Mesh &m) const { meshops::solidify(m, thickness, offset, even_thickness, fill_rim); }
+
+void BooleanModifier::reflect(Reflector &r) {
+  r.text("Object", object);
+  r.help("Name of the GameObject to cut with (Blender: Boolean > Object). Both meshes must be closed.");
+  static const char *ops[] = {"Difference", "Union", "Intersect"};
+  r.enumeration("Operation", operation, ops, 3);
+  if (!meshops::boolean_available()) r.help("This build has no Manifold (needs Blender's libraries): the modifier does nothing.");
+}
+
+/* The cutter's evaluated mesh, guarding against cycles (A cuts B cuts A). */
+static const GameObject *boolean_target(const BooleanModifier &b, const Mesh **mesh) {
+  thread_local int depth = 0;
+  *mesh = nullptr;
+  if (!b.owner || !b.owner->scene || b.object.empty() || depth > 8) return nullptr;
+  const GameObject *t = b.owner->scene->find_by_name(b.object);
+  if (!t || t == b.owner) return nullptr;
+  depth++;
+  *mesh = t->evaluated_mesh();
+  depth--;
+  return t;
+}
+
+void BooleanModifier::modify(Mesh &m) const {
+  const Mesh *tm = nullptr;
+  const GameObject *t = boolean_target(*this, &tm);
+  if (!t || !tm) return;
+  Mat4 b_to_a = owner->world_matrix().inverse() * t->world_matrix();
+  std::string err;
+  if (!meshops::boolean_op(m, *tm, b_to_a, (meshops::BooleanOp)operation, &err)) {
+    if (err != last_error) Log::warn("Boolean on '%s': %s", owner->name.c_str(), err.c_str());
+    last_error = err;
+  }
+  else last_error.clear();
+}
+
+uint64_t BooleanModifier::modifier_dependency_hash() const {
+  const Mesh *tm = nullptr;
+  const GameObject *t = boolean_target(*this, &tm);
+  if (!t) return 0;
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](const void *p, size_t n) {
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
+  };
+  /* Relative placement + the cutter's mesh: moving either object re-cuts. */
+  Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
+  mix(rel.m, sizeof(rel.m));
+  mix(&tm, sizeof(tm));
+  if (tm) mix(&tm->version, sizeof(tm->version));
+  return h;
+}
+
+void DecimateModifier::reflect(Reflector &r) {
+  r.field("Ratio", ratio, 0.01f, 0.0f, 1.0f);
+  r.help("Fraction of triangles to keep (Blender: Decimate > Collapse > Ratio). Uses meshoptimizer; UV seams and material borders are kept.");
+  if (!meshops::decimate_available()) r.help("This build has no meshoptimizer (needs Blender's libraries): the modifier does nothing.");
+}
+void DecimateModifier::modify(Mesh &m) const { meshops::decimate(m, ratio); }
 
 /* ===================================================================== */
 /* Hashing reflector                                                      */
@@ -408,6 +483,7 @@ const Mesh *GameObject::evaluated_mesh() const {
     if (c->is_modifier() && c->enabled) {
       any = true;
       mix(hash_component(*c));
+      mix(c->modifier_dependency_hash());
     }
   if (!any) return mf->mesh.get();
   if (eval_mesh_ && eval_key_ == key) return eval_mesh_.get();
@@ -434,8 +510,26 @@ AABB GameObject::world_bounds() const {
 /* Scene                                                                  */
 /* ===================================================================== */
 
+void Scene::move_from(Scene &o) {
+  name = std::move(o.name);
+  path = std::move(o.path);
+  compress = o.compress;
+  environment = std::move(o.environment);
+  render = o.render;
+  roots = std::move(o.roots);
+  objects_ = std::move(o.objects_);
+  by_id_ = std::move(o.by_id_);
+  physics = std::move(o.physics);
+  next_id_ = o.next_id_;
+  for (auto &g : objects_) g->scene = this;
+  o.roots.clear();
+  o.objects_.clear();
+  o.by_id_.clear();
+}
+
 GameObject *Scene::adopt(std::unique_ptr<GameObject> go, uint64_t id) {
   go->id = id;
+  go->scene = this;
   go->index_in_scene = objects_.size();
   GameObject *raw = go.get();
   by_id_[id] = raw;
@@ -542,6 +636,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   auto s = std::make_unique<Scene>();
   s->name = name;
   s->path = path;
+  s->compress = compress;
   s->environment = environment;
   s->render = render;
   s->objects_.reserve(objects_.size());
@@ -618,6 +713,8 @@ void Scene::start(PlayContext &ctx) {
     if (o->active_in_hierarchy())
       for (auto &c : o->components)
         if (c->enabled) c->start(ctx);
+  /* Jolt world for this play session (null without Jolt or rigid bodies). */
+  physics = physics_create(*this);
 }
 
 void Scene::update(PlayContext &ctx) {
@@ -630,7 +727,8 @@ void Scene::update(PlayContext &ctx) {
     if (o->active_in_hierarchy())
       for (auto &c : o->components)
         if (c->enabled) c->update(ctx);
-  physics_step(*this, ctx.dt);
+  if (physics) physics_world_step(*physics, ctx.dt);
+  else physics_step(*this, ctx.dt);
 }
 
 /* ===================================================================== */
@@ -743,6 +841,9 @@ GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *
 void build_default_scene(Scene &scene) {
   scene.clear();
   scene.name = "SampleScene";
+  /* Blender's default view transform is AgX (OpenColorIO); built-in Filmic otherwise. */
+  const int agx = colormanagement::view_index("AgX");
+  scene.render.view_transform = agx >= 0 ? 3 + agx : 1;
   GameObject *cam = create_primitive(scene, "Camera");
   cam->name = "Main Camera";
   cam->set_local_position({0, 2.2f, -6.5f});

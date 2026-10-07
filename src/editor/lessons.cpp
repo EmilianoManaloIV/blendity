@@ -429,6 +429,42 @@ They stack with SubdivisionSurface: Mirror, then Solidify, then Subdivision is a
 ! cmd:select Plane; edit edge | Edit the Plane in edge mode
 ! cmd:select Cube; component MirrorModifier | Add a MirrorModifier to the Cube
 )"},
+    {"Libraries and Performance", "Blender's external libraries, and making the CPU go fast", R"(
+Blender doesn't write everything itself. It builds on about 40 external libraries: ray tracing, denoising, colour science and image formats. Blendity uses the same prebuilt set when it finds a blender/lib folder next to the project. Without it, every feature falls back to Blendity's own dependency-free code. Type libs in the Console to see which backends are active.
+| Library | Used for in Blendity | Used in Blender for | Fallback
+| Embree | Path tracer ray casts (2-3x faster) | Cycles CPU BVH | Built-in BVH
+| OpenImageDenoise | Final-frame denoising | Cycles denoiser | A-Trous filter
+| TBB | Job system (parallel_for) | BLI_task, Cycles threads | Built-in thread pool
+| Eigen | LSCM unwrap solver | UV unwrap, IK, deform | Conjugate gradient
+| OpenColorIO | AgX / Filmic view transforms | Colour management | Built-in curves
+| Manifold | Boolean modifier | Boolean (Manifold solver) | (needs the library)
+| OpenPGL | Path guiding (opt-in) | Cycles path guiding | Off
+| Jolt | Play-mode rigid bodies | (in the library set) | Built-in physics
+| OpenEXR, libpng, libjpeg-turbo, zstd | Images, compressed .scene files | Image I/O, .blend compression | Built-in codecs
+@ blender/build_files/build_environment/cmake  (how Blender builds each library)
+@ blender/intern/cycles/bvh/embree.cpp, intern/cycles/integrator/denoiser_oidn.cpp, intern/cycles/integrator/guiding.h
+@ blender/source/blender/geometry/intern/mesh_boolean_manifold.cc
+> [GEA2] 14.2 Collision/Physics Middleware, 14.5 Integrating a Physics Engine into Your Game
+# Measure first
+Every optimisation in Blendity started with the stress suite (blendity_stress) and the Profiler window. Guesses are often wrong. Blendity's rasterizer looked memory-bound, but regrouping its work changed nothing. Timing each stage showed the real cost: per-vertex lighting for triangles that were then thrown away.
+> [GEA1] 2.3 Profiling Tools
+> [FoCG] 22.3 Optimization Techniques
+# Do less work
+The biggest wins skip work rather than speed it up. A triangle whose bounding box holds no pixel centre can never cover a pixel, so it is dropped before it is stored. Vertices are lit only when a surviving triangle needs them. Each triangle's interpolation setup happens once, not once per pixel. Together these made a 21-million-triangle frame about 5x faster.
+> [FoCG] 9.4 Culling Primitives for Efficiency, 12.3 Spatial Data Structures
+# SIMD: one instruction, many values
+Modern CPUs have vector registers: SSE holds 4 floats, AVX2 holds 8. One instruction adds, compares or gathers all lanes at once. Blendity checks the CPU at start-up and picks a kernel, the way Cycles keeps SSE4.1 and AVX2 kernel variants. Its triangle setup rejects 8 triangles per step. Its display encoder converts 8 pixels per step, and an exact lookup table replaces pow() for the sRGB curve: 16x faster on one core, same 8-bit result.
+> [GEA1] 4.10 SIMD/Vector Processing, 3.5 Memory Architectures, 3.3 Data, Code and Memory Layout
+@ blender/intern/cycles/util/simd.h, blender/source/blender/blenlib/intern/math_color.cc
+# Many cores
+The job system splits loops across every core: tiles in the rasterizer, rows when shading, pixel blocks in the path tracer. TBB's scheduler steals work from busy threads, so dispatching tens of thousands of small jobs costs about 7x less than a simple thread pool.
+> [GEA1] 4.3 Explicit Parallelism, 4.8 Some Rules of Thumb for Concurrency
+@ blender/source/blender/blenlib/BLI_task.hh
+? Why does the sRGB table give exactly the same bytes as pow()? | Inside each table bucket the curve moves by less than one 8-bit step, so at most one rounding boundary falls inside it. The table stores the bucket's value plus that one threshold.
+? Why can a faster algorithm make a scene slower? | Overhead. OpenSubdiv is built for animated meshes and GPUs, and on small one-off subdivisions Blendity's direct Catmull-Clark is about 3x faster. Measure at the sizes you actually use.
+! cmd:libs | List the active libraries in the Console
+! cmd:select Cube; component DecimateModifier | Add a Decimate modifier (meshoptimizer) to the Cube
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

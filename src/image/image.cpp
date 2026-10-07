@@ -816,12 +816,27 @@ static bool decode_hdr(const uint8_t *d, size_t n, Bitmap &out, std::string &err
   return true;
 }
 
+/* image_libs.cpp: Blender's codec libraries (false = unavailable or failed). */
+bool decode_exr_lib(const std::string &bytes, Bitmap &out, std::string &error);
+bool decode_jpeg_lib(const uint8_t *data, size_t size, Bitmap &out, std::string &error);
+bool decode_png_lib(const uint8_t *data, size_t size, Bitmap &out, std::string &error);
+
 bool decode_image(const std::string &bytes, Bitmap &out, std::string &error) {
   const uint8_t *d = (const uint8_t *)bytes.data();
   size_t n = bytes.size();
   out = Bitmap();
-  if (n >= 8 && !std::memcmp(d, "\x89PNG", 4)) return decode_png(d, n, out, error);
-  if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8) return decode_jpeg(d, n, out, error);
+  std::string lib_error;
+  if (n >= 8 && !std::memcmp(d, "\x89PNG", 4)) {
+    if (decode_png_lib(d, n, out, lib_error)) return true;
+    out = Bitmap();
+    return decode_png(d, n, out, error);
+  }
+  if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8) {
+    if (decode_jpeg_lib(d, n, out, lib_error)) return true;
+    out = Bitmap();
+    return decode_jpeg(d, n, out, error);
+  }
+  if (n >= 4 && d[0] == 0x76 && d[1] == 0x2F && d[2] == 0x31 && d[3] == 0x01) return decode_exr_lib(bytes, out, error);
   if (n >= 2 && d[0] == 'B' && d[1] == 'M') return decode_bmp(d, n, out, error);
   if (n >= 2 && d[0] == '#' && d[1] == '?') return decode_hdr(d, n, out, error);
   if (n >= 18) return decode_tga(d, n, out, error);  // TGA has no magic number
@@ -839,7 +854,8 @@ bool load_image(const std::string &path, Bitmap &out, std::string &error) {
 }
 
 bool image_extension_supported(const std::string &ext) {
-  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".hdr";
+  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".hdr" ||
+         (ext == ".exr" && exr_available());
 }
 
 /* ===================================================================== */

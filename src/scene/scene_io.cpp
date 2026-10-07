@@ -19,6 +19,10 @@
 #include <sstream>
 #include <unordered_map>
 
+#ifdef BL_WITH_ZSTD
+#  include <zstd.h>
+#endif
+
 namespace bl {
 
 namespace {
@@ -504,8 +508,28 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
   return true;
 }
 
+bool scene_compression_available() {
+#ifdef BL_WITH_ZSTD
+  return true;
+#else
+  return false;
+#endif
+}
+
 bool save_scene(const Scene &scene, const std::string &path) {
-  return fs::write_file(path, save_scene_text(scene));
+  std::string text = save_scene_text(scene);
+#ifdef BL_WITH_ZSTD
+  if (scene.compress) {
+    /* Level 3, as Blender's writefile.cc (ZSTD_COMPRESSION_LEVEL). */
+    std::string packed(ZSTD_compressBound(text.size()), '\0');
+    size_t n = ZSTD_compress(packed.data(), packed.size(), text.data(), text.size(), 3);
+    if (!ZSTD_isError(n)) {
+      packed.resize(n);
+      return fs::write_file(path, packed);
+    }
+  }
+#endif
+  return fs::write_file(path, text);
 }
 
 bool load_scene(const std::string &path, Scene &scene, std::string &error) {
@@ -514,8 +538,32 @@ bool load_scene(const std::string &path, Scene &scene, std::string &error) {
     error = "Cannot read " + path;
     return false;
   }
+  /* Zstandard frame magic 28 B5 2F FD: a compressed scene. */
+  const bool compressed = text.size() >= 4 && (uint8_t)text[0] == 0x28 && (uint8_t)text[1] == 0xB5 && (uint8_t)text[2] == 0x2F &&
+                          (uint8_t)text[3] == 0xFD;
+  if (compressed) {
+#ifdef BL_WITH_ZSTD
+    unsigned long long size = ZSTD_getFrameContentSize(text.data(), text.size());
+    if (size == ZSTD_CONTENTSIZE_ERROR || size == ZSTD_CONTENTSIZE_UNKNOWN || size > (1ull << 34)) {
+      error = "Corrupt compressed scene " + path;
+      return false;
+    }
+    std::string plain((size_t)size, '\0');
+    size_t n = ZSTD_decompress(plain.data(), plain.size(), text.data(), text.size());
+    if (ZSTD_isError(n)) {
+      error = std::string("Cannot decompress scene: ") + ZSTD_getErrorName(n);
+      return false;
+    }
+    plain.resize(n);
+    text.swap(plain);
+#else
+    error = "This scene is Zstandard-compressed; this build has no zstd (needs Blender's libraries)";
+    return false;
+#endif
+  }
   if (!load_scene_text(text, scene, error)) return false;
   scene.path = path;
+  scene.compress = compressed;  // keep saving it the way it was (Blender does too)
   return true;
 }
 

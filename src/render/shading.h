@@ -17,6 +17,7 @@
 #include "../scene/material.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace bl {
@@ -86,8 +87,14 @@ struct ShadowMap {
 };
 
 /* --- view transform --- */
-enum class ViewTransform { Standard = 0, Filmic = 1, ACES = 2 };
+/* Built-in curves, plus Blender's OpenColorIO views (colormanagement.h)
+ * numbered from OcioView: OcioView + i is views()[i]. */
+enum class ViewTransform { Standard = 0, Filmic = 1, ACES = 2, OcioView = 16 };
 Vec3 tonemap(Vec3 hdr, ViewTransform vt, float exposure_stops);
 uint32_t to_display_pixel(Vec3 hdr, ViewTransform vt, float exposure_stops);
+/* RenderSettings::view_transform is an index into view_transform_names():
+ * the three built-ins, then (with OpenColorIO) Blender's views. */
+const std::vector<std::string> &view_transform_names();
+ViewTransform view_transform_from_setting(int index);
 
 }  // namespace bl

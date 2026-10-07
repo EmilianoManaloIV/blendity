@@ -2,11 +2,24 @@
 #include "raster.h"
 
 #include "../core/core.h"
+#include "../core/cpu.h"
 #include "../core/jobs.h"
+#include "display.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+
+#if defined(_M_X64) || defined(__x86_64__)
+#  define BL_RASTER_X86 1
+#  include <immintrin.h>
+#  ifdef _MSC_VER
+#    include <intrin.h>
+#    define BL_TARGET_AVX2
+#  else
+#    define BL_TARGET_AVX2 __attribute__((target("avx2")))
+#  endif
+#endif
 
 namespace bl {
 
@@ -70,11 +83,14 @@ void Renderer3D::clear_environment(const Mat4 &inv_vp, const Environment &env, V
       float ny = 1.0f - 2.0f * (y + 0.5f) / H;
       Vec3 a0 = unproject(-1, ny, 0), a1 = unproject(-1, ny, 1), b0 = unproject(1, ny, 0), b1 = unproject(1, ny, 1);
       uint32_t *row = rt_->color + (size_t)y * rt_->stride;
+      static thread_local std::vector<Vec3> hdr;
+      hdr.resize((size_t)W);
       for (int x = 0; x < W; x++) {
         float u = (x + 0.5f) / W;
         Vec3 d = normalize(lerp(a1, b1, u) - lerp(a0, b0, u));
-        row[x] = to_display_pixel(env.radiance(d), vt, exposure);
+        hdr[x] = env.radiance(d);
       }
+      display::encode_span(&hdr[0].x, row, (size_t)W, vt, exposure);
     }
   });
   js.set_max_threads(saved);
@@ -154,6 +170,52 @@ static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Ve
   return albedo * diff + spec;
 }
 
+#ifdef BL_RASTER_X86
+static inline int ctz32(uint32_t m) {
+#  ifdef _MSC_VER
+  unsigned long i;
+  _BitScanForward(&i, m);
+  return (int)i;
+#  else
+  return __builtin_ctz(m);
+#  endif
+}
+
+/* The fast path's rejection tests for 8 consecutive triangles at once.
+ * Returns a bit per triangle that still needs the scalar code: survivors,
+ * plus any that need near-plane clipping. Uses the same float operations as
+ * the scalar tests (no FMA), so it rejects exactly the same triangles. */
+BL_TARGET_AVX2 static uint32_t needs_scalar8_avx2(const uint32_t *idx, const Vec4 *cp, const Vec4 *sp, float W, float H,
+                                                  bool two_sided) {
+  const __m256i lane3 = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
+  const float *c = &cp[0].x, *s = &sp[0].x;
+  __m256 x[3], y[3], z[3];
+  __m256 near_ok = _mm256_castsi256_ps(_mm256_set1_epi32(-1));
+  for (int k = 0; k < 3; k++) {
+    __m256i v4 = _mm256_slli_epi32(_mm256_i32gather_epi32((const int *)idx, _mm256_add_epi32(lane3, _mm256_set1_epi32(k)), 4), 2);
+    near_ok = _mm256_and_ps(near_ok, _mm256_cmp_ps(_mm256_i32gather_ps(c + 2, v4, 4), _mm256_setzero_ps(), _CMP_GE_OQ));
+    x[k] = _mm256_i32gather_ps(s, v4, 4);
+    y[k] = _mm256_i32gather_ps(s + 1, v4, 4);
+    z[k] = _mm256_i32gather_ps(s + 2, v4, 4);
+  }
+  const __m256 zero = _mm256_setzero_ps(), half = _mm256_set1_ps(0.5f);
+  __m256 area = _mm256_sub_ps(_mm256_mul_ps(_mm256_sub_ps(x[1], x[0]), _mm256_sub_ps(y[2], y[0])),
+                              _mm256_mul_ps(_mm256_sub_ps(x[2], x[0]), _mm256_sub_ps(y[1], y[0])));
+  __m256 rej = _mm256_cmp_ps(area, zero, _CMP_EQ_OQ);
+  if (!two_sided) rej = _mm256_or_ps(rej, _mm256_cmp_ps(area, zero, _CMP_LT_OQ));
+  __m256 minx = _mm256_min_ps(_mm256_min_ps(x[0], x[1]), x[2]), maxx = _mm256_max_ps(_mm256_max_ps(x[0], x[1]), x[2]);
+  __m256 miny = _mm256_min_ps(_mm256_min_ps(y[0], y[1]), y[2]), maxy = _mm256_max_ps(_mm256_max_ps(y[0], y[1]), y[2]);
+  rej = _mm256_or_ps(rej, _mm256_or_ps(_mm256_cmp_ps(maxx, zero, _CMP_LT_OQ), _mm256_cmp_ps(maxy, zero, _CMP_LT_OQ)));
+  rej = _mm256_or_ps(rej, _mm256_or_ps(_mm256_cmp_ps(minx, _mm256_set1_ps(W), _CMP_GE_OQ), _mm256_cmp_ps(miny, _mm256_set1_ps(H), _CMP_GE_OQ)));
+  rej = _mm256_or_ps(rej, _mm256_cmp_ps(_mm256_ceil_ps(_mm256_sub_ps(minx, half)), _mm256_floor_ps(_mm256_sub_ps(maxx, half)), _CMP_GT_OQ));
+  rej = _mm256_or_ps(rej, _mm256_cmp_ps(_mm256_ceil_ps(_mm256_sub_ps(miny, half)), _mm256_floor_ps(_mm256_sub_ps(maxy, half)), _CMP_GT_OQ));
+  const __m256 one = _mm256_set1_ps(1.0f);
+  rej = _mm256_or_ps(rej, _mm256_and_ps(_mm256_and_ps(_mm256_cmp_ps(z[0], one, _CMP_GT_OQ), _mm256_cmp_ps(z[1], one, _CMP_GT_OQ)),
+                                        _mm256_cmp_ps(z[2], one, _CMP_GT_OQ)));
+  return (uint32_t)~_mm256_movemask_ps(_mm256_and_ps(near_ok, rej)) & 0xFFu;
+}
+#endif
+
 static inline bool outside_all(const Vec4 &a, const Vec4 &b, const Vec4 &c) {
   if (a.x > a.w && b.x > b.w && c.x > c.w) return true;
   if (a.x < -a.w && b.x < -b.w && c.x < -c.w) return true;
@@ -195,11 +257,11 @@ void Renderer3D::flush() {
   ScopedTimer tv;
   const size_t n_items = items_.size();
   clip_pos_.resize(n_items);
+  screen_pos_.resize(n_items);
   colors_.resize(n_items);
   std::vector<uint8_t> visible(n_items, 1);
-  struct VJob { uint32_t item, begin, end; };
-  std::vector<VJob> vjobs;
   stats_.objects_submitted = (int)n_items;
+  size_t total_tris = 0;
   for (size_t i = 0; i < n_items; i++) {
     const DrawItem &it = items_[i];
     if (!it.mesh || it.mesh->indices.empty()) { visible[i] = 0; continue; }
@@ -208,135 +270,254 @@ void Renderer3D::flush() {
       stats_.objects_culled++;
       continue;
     }
-    size_t nv = it.mesh->positions.size();
-    clip_pos_[i].resize(nv);
-    if (opt_.shade == ShadeMode::Gouraud) colors_[i].resize(nv);
-    for (size_t b = 0; b < nv; b += 4096) vjobs.push_back({(uint32_t)i, (uint32_t)b, (uint32_t)std::min(nv, b + 4096)});
+    total_tris += it.mesh->tri_count();
   }
-  js.parallel_for((int64_t)vjobs.size(), 1, [&](int64_t j0, int64_t j1) {
-    for (int64_t j = j0; j < j1; j++) {
-      const VJob &vj = vjobs[j];
-      const DrawItem &it = items_[vj.item];
-      Mat4 mvp = vp_ * it.model;
-      Mat4 nmat = it.model.inverse().transposed();
-      const auto &P = it.mesh->positions;
-      const auto &N = it.mesh->normals;
-      Vec4 *cp = clip_pos_[vj.item].data();
-      Vec3 *col = colors_[vj.item].data();
-      if (opt_.shade != ShadeMode::Gouraud) {
-        for (uint32_t v = vj.begin; v < vj.end; v++) cp[v] = mvp * Vec4(P[v], 1.0f);
-        continue;
-      }
-      for (uint32_t v = vj.begin; v < vj.end; v++) {
-        cp[v] = mvp * Vec4(P[v], 1.0f);
-        if (it.unlit) col[v] = it.albedo;
-        else col[v] = shade(env_, it.albedo, it.specular, normalize(nmat.dir(N[v])), it.model.point(P[v]));
-      }
-    }
-  });
-  stats_.ms_vertex = tv.ms();
-  normal_mats_.resize(n_items);
-  for (size_t i = 0; i < n_items; i++)
-    if (visible[i]) normal_mats_[i] = items_[i].model.inverse().transposed();
+  stats_.tris_submitted += total_tris;
+  const bool gouraud = opt_.shade == ShadeMode::Gouraud;
 
-  /* ---- Primitive assembly, clipping, culling, binning ---- */
-  ScopedTimer ts;
+  /* Chunks of triangles for the setup stage: enough to keep every thread
+   * busy, few enough that the per-tile walk over chunks stays cheap. Objects
+   * that fit in a chunk are never split, so their vertices can be transformed
+   * right where their triangles are assembled (still in cache) instead of
+   * written out and read back; only bigger meshes take the separate vertex
+   * stage. */
+  const uint32_t chunk_tris = (uint32_t)std::clamp<size_t>(total_tris / ((size_t)js.thread_count() * 4 + 1), 2048, kMaxChunkTris);
+  std::vector<uint8_t> big(n_items, 0);
   size_t nchunks = 0;
-  const uint32_t kChunkTris = 8192;
+  uint32_t fill = chunk_tris;  // triangles in the open chunk
+  auto open_chunk = [&] {
+    if (chunks_.size() <= nchunks) chunks_.emplace_back();
+    chunks_[nchunks++].ranges.clear();
+    fill = 0;
+  };
   for (size_t i = 0; i < n_items; i++) {
     if (!visible[i]) continue;
     uint32_t nt = (uint32_t)items_[i].mesh->tri_count();
-    stats_.tris_submitted += nt;
-    for (uint32_t b = 0; b < nt; b += kChunkTris) {
-      if (chunks_.size() <= nchunks) chunks_.emplace_back();
-      Chunk &c = chunks_[nchunks++];
-      c.item = (int)i;
-      c.tri_begin = b;
-      c.tri_end = std::min(nt, b + kChunkTris);
+    if (nt <= chunk_tris) {
+      if (fill + nt > chunk_tris) open_chunk();
+      chunks_[nchunks - 1].ranges.push_back({(uint32_t)i, 0, nt});
+      fill += nt;
+      continue;
+    }
+    big[i] = 1;
+    for (uint32_t b = 0; b < nt; b += chunk_tris) {
+      open_chunk();
+      chunks_[nchunks - 1].ranges.push_back({(uint32_t)i, b, std::min(nt, b + chunk_tris)});
+      fill = chunk_tris;  // full: the next object starts a new chunk
     }
   }
-  const bool cull = opt_.backface_culling;
+
+  normal_mats_.resize(n_items);
+  js.parallel_for((int64_t)n_items, 64, [&](int64_t i0, int64_t i1) {
+    for (int64_t i = i0; i < i1; i++)
+      if (visible[i]) normal_mats_[i] = items_[i].model.inverse().transposed();
+  });
+  /* Clip-space and screen positions (and Gouraud vertex colours) for
+   * vertices [b, e). The perspective divide happens once per vertex here
+   * rather than once per triangle corner (~6 per vertex on closed meshes). */
+  const float fW = (float)W, fH = (float)H;
+  auto to_screen = [fW, fH](const Vec4 &c, Vec4 &s) {
+    float iw = 1.0f / c.w;
+    s = Vec4((c.x * iw * 0.5f + 0.5f) * fW, (0.5f - c.y * iw * 0.5f) * fH, c.z * iw, iw);
+  };
+  auto shade_vertex = [&](uint32_t item, uint32_t v) {
+    const DrawItem &it = items_[item];
+    if (it.unlit) return it.albedo;
+    const Vec3 &p = it.mesh->positions[v];
+    return shade(env_, it.albedo, it.specular, normalize(normal_mats_[item].dir(it.mesh->normals[v])), it.model.point(p));
+  };
+  /* col == nullptr: positions only (Gouraud colours are then shaded lazily). */
+  auto transform = [&](uint32_t item, uint32_t b, uint32_t e, Vec4 *cp, Vec4 *sp, Vec3 *col) {
+    const Mat4 mvp = vp_ * items_[item].model;
+    const Vec3 *P = items_[item].mesh->positions.data();
+    for (uint32_t v = b; v < e; v++) to_screen(cp[v] = mvp * Vec4(P[v], 1.0f), sp[v]);
+    if (gouraud && col)
+      for (uint32_t v = b; v < e; v++) col[v] = shade_vertex(item, v);
+  };
+  struct VJob { uint32_t item, begin, end; };
+  std::vector<VJob> vjobs;
+  for (size_t i = 0; i < n_items; i++) {
+    if (!big[i]) continue;
+    size_t nv = items_[i].mesh->positions.size();
+    clip_pos_[i].resize(nv);
+    screen_pos_[i].resize(nv);
+    if (gouraud) colors_[i].resize(nv);
+    for (size_t b = 0; b < nv; b += 4096) vjobs.push_back({(uint32_t)i, (uint32_t)b, (uint32_t)std::min(nv, b + 4096)});
+  }
+  js.parallel_for((int64_t)vjobs.size(), 1, [&](int64_t j0, int64_t j1) {
+    for (int64_t j = j0; j < j1; j++)
+      transform(vjobs[j].item, vjobs[j].begin, vjobs[j].end, clip_pos_[vjobs[j].item].data(), screen_pos_[vjobs[j].item].data(),
+                colors_[vjobs[j].item].data());
+  });
+  stats_.ms_vertex = tv.ms();
+
+  /* ---- Primitive assembly, clipping, culling, binning ---- */
+  ScopedTimer ts;
+  const bool cull = opt_.backface_culling, fast = opt_.fast_setup;
+#ifdef BL_RASTER_X86
+  const bool avx2 = opt_.fast_setup && cpu::features().avx2;
+#endif
   js.parallel_for((int64_t)nchunks, 1, [&](int64_t c0, int64_t c1) {
     std::vector<uint32_t> tile_of;  // scratch
+    static thread_local std::vector<Vec4> local_cp, local_sp;
+    static thread_local std::vector<Vec3> local_col;
+    static thread_local std::vector<uint32_t> local_stamp;  // == stamp: local_col[v] is shaded
+    static thread_local uint32_t stamp = 0;
     for (int64_t ci = c0; ci < c1; ci++) {
       Chunk &ch = chunks_[ci];
       ch.tris.clear();
-      const DrawItem &it = items_[ch.item];
-      const auto &idx = it.mesh->indices;
-      const Vec4 *cp = clip_pos_[ch.item].data();
-      const bool gouraud = opt_.shade == ShadeMode::Gouraud;
-      const Vec3 *col = gouraud ? colors_[ch.item].data() : nullptr;
-      const bool two_sided = it.double_sided || !cull;
-      for (uint32_t t = ch.tri_begin; t < ch.tri_end; t++) {
-        uint32_t i0 = idx[t * 3], i1 = idx[t * 3 + 1], i2 = idx[t * 3 + 2];
-        Vec4 v[3] = {cp[i0], cp[i1], cp[i2]};
-        if (outside_all(v[0], v[1], v[2])) continue;
-        Vec3 c[3] = {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
-        if (gouraud) {
-          c[0] = col[i0];
-          c[1] = col[i1];
-          c[2] = col[i2];
+      for (const ChunkRange &range : ch.ranges) {
+        const DrawItem &it = items_[range.item];
+        const auto &idx = it.mesh->indices;
+        const Vec4 *cp = clip_pos_[range.item].data(), *sp = screen_pos_[range.item].data();
+        const Vec3 *col = gouraud ? colors_[range.item].data() : nullptr;
+        if (!big[range.item]) {  // fused vertex stage
+          uint32_t nv = (uint32_t)it.mesh->positions.size();
+          if (local_cp.size() < nv) local_cp.resize(nv), local_sp.resize(nv);
+          if (gouraud && local_col.size() < nv) local_col.resize(nv), local_stamp.resize(nv, 0);
+          transform(range.item, 0, nv, local_cp.data(), local_sp.data(), nullptr);
+          if (++stamp == 0) std::fill(local_stamp.begin(), local_stamp.end(), 0u), stamp = 1;
+          sp = local_sp.data();
+          cp = local_cp.data();
+          col = nullptr;  // shaded on demand: most vertices of distant objects only touch culled triangles
         }
-        if (gouraud && it.face_highlight && !it.mesh->tri_face.empty()) {
-          uint32_t f = it.mesh->tri_face[t];
-          if (f < it.face_highlight->size() && (*it.face_highlight)[f])
-            for (auto &cc : c) cc = lerp(cc, it.highlight_color, 0.45f);
-        }
-        /* Near-plane clipping (z >= 0 in our [0,1] depth convention). */
-        Vec4 pv[4];
-        Vec3 pc[4];
-        int np = 0;
-        if (v[0].z >= 0 && v[1].z >= 0 && v[2].z >= 0) {
-          for (int k = 0; k < 3; k++) { pv[k] = v[k]; pc[k] = c[k]; }
-          np = 3;
-        }
-        else {
-          for (int k = 0; k < 3; k++) {
-            int k2 = (k + 1) % 3;
-            bool in0 = v[k].z >= 0, in1 = v[k2].z >= 0;
-            if (in0) { pv[np] = v[k]; pc[np] = c[k]; np++; }
-            if (in0 != in1) {
-              float s = v[k].z / (v[k].z - v[k2].z);
-              pv[np] = lerp(v[k], v[k2], s);
-              pc[np] = lerp(c[k], c[k2], s);
-              np++;
+        const bool two_sided = it.double_sided || !cull;
+        auto vcol = [&](uint32_t v) -> Vec3 {
+          if (col) return col[v];
+          if (local_stamp[v] != stamp) {
+            local_col[v] = shade_vertex(range.item, v);
+            local_stamp[v] = stamp;
+          }
+          return local_col[v];
+        };
+        auto process = [&](uint32_t t) {
+          uint32_t i0 = idx[t * 3], i1 = idx[t * 3 + 1], i2 = idx[t * 3 + 2];
+          if (fast && cp[i0].z >= 0 && cp[i1].z >= 0 && cp[i2].z >= 0) {
+            /* Fast path (no near clipping): cheapest rejections first, on
+             * the per-vertex screen positions. Same triangles, same order,
+             * same values as the general path below. */
+            const Vec4 &s0 = sp[i0], &s1 = sp[i1], &s2 = sp[i2];
+            float area = (s1.x - s0.x) * (s2.y - s0.y) - (s2.x - s0.x) * (s1.y - s0.y);
+            if (area == 0.0f || (area < 0.0f && !two_sided)) return;
+            float minx = std::min({s0.x, s1.x, s2.x}), maxx = std::max({s0.x, s1.x, s2.x});
+            float miny = std::min({s0.y, s1.y, s2.y}), maxy = std::max({s0.y, s1.y, s2.y});
+            if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) return;
+            if (std::ceil(minx - 0.5f) > std::floor(maxx - 0.5f) || std::ceil(miny - 0.5f) > std::floor(maxy - 0.5f)) return;
+            if (s0.z > 1.0f && s1.z > 1.0f && s2.z > 1.0f) return;  // beyond the far plane
+            const uint32_t vi[3] = {i0, area < 0.0f ? i2 : i1, area < 0.0f ? i1 : i2};
+            ScreenTri st;
+            for (int q = 0; q < 3; q++) {
+              const Vec4 &s = sp[vi[q]];
+              st.x[q] = s.x;
+              st.y[q] = s.y;
+              st.z[q] = s.z;
+              st.iw[q] = s.w;
             }
+            if (gouraud) {
+              Vec3 c[3] = {vcol(i0), vcol(i1), vcol(i2)};
+              if (it.face_highlight && !it.mesh->tri_face.empty()) {
+                uint32_t f = it.mesh->tri_face[t];
+                if (f < it.face_highlight->size() && (*it.face_highlight)[f])
+                  for (auto &cc : c) cc = lerp(cc, it.highlight_color, 0.45f);
+              }
+              const int ord[3] = {0, area < 0.0f ? 2 : 1, area < 0.0f ? 1 : 2};
+              for (int q = 0; q < 3; q++) st.c[q] = c[ord[q]] * st.iw[q];  // premultiplied by 1/w
+            }
+            else {
+              st.c[0] = Vec3(1, 0, 0);
+              st.c[1] = area < 0.0f ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+              st.c[2] = area < 0.0f ? Vec3(0, 1, 0) : Vec3(0, 0, 1);
+            }
+            st.id = it.id;
+            st.item = range.item;
+            st.prim = t;
+            ch.tris.push_back(st);
+            return;
           }
-          if (np < 3) continue;
-        }
-        float sx[4], sy[4], sz[4], siw[4];
-        for (int k = 0; k < np; k++) {
-          float iw = 1.0f / pv[k].w;
-          sx[k] = (pv[k].x * iw * 0.5f + 0.5f) * W;
-          sy[k] = (0.5f - pv[k].y * iw * 0.5f) * H;
-          sz[k] = pv[k].z * iw;
-          siw[k] = iw;
-        }
-        for (int k = 1; k + 1 < np; k++) {
-          int a = 0, b = k, d = k + 1;
-          float area = (sx[b] - sx[a]) * (sy[d] - sy[a]) - (sx[d] - sx[a]) * (sy[b] - sy[a]);
-          if (area == 0.0f) continue;
-          if (area < 0.0f) {
-            if (!two_sided) continue;
-            std::swap(b, d);
+          Vec4 v[3] = {cp[i0], cp[i1], cp[i2]};
+          if (outside_all(v[0], v[1], v[2])) return;
+          Vec3 c[3] = {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+          if (gouraud) {
+            c[0] = vcol(i0);
+            c[1] = vcol(i1);
+            c[2] = vcol(i2);
           }
-          float minx = std::min({sx[a], sx[b], sx[d]}), maxx = std::max({sx[a], sx[b], sx[d]});
-          float miny = std::min({sy[a], sy[b], sy[d]}), maxy = std::max({sy[a], sy[b], sy[d]});
-          if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) continue;
-          ScreenTri st;
-          int ord[3] = {a, b, d};
-          for (int q = 0; q < 3; q++) {
-            st.x[q] = sx[ord[q]];
-            st.y[q] = sy[ord[q]];
-            st.z[q] = sz[ord[q]];
-            st.iw[q] = siw[ord[q]];
-            st.c[q] = gouraud ? pc[ord[q]] * siw[ord[q]] : pc[ord[q]];  // Gouraud: premultiplied by 1/w
+          if (gouraud && it.face_highlight && !it.mesh->tri_face.empty()) {
+            uint32_t f = it.mesh->tri_face[t];
+            if (f < it.face_highlight->size() && (*it.face_highlight)[f])
+              for (auto &cc : c) cc = lerp(cc, it.highlight_color, 0.45f);
           }
-          st.id = it.id;
-          st.item = (uint32_t)ch.item;
-          st.prim = t;
-          ch.tris.push_back(st);
-        }
+          /* Near-plane clipping (z >= 0 in our [0,1] depth convention). */
+          Vec4 pv[4];
+          Vec3 pc[4];
+          int np = 0;
+          if (v[0].z >= 0 && v[1].z >= 0 && v[2].z >= 0) {
+            for (int k = 0; k < 3; k++) { pv[k] = v[k]; pc[k] = c[k]; }
+            np = 3;
+          }
+          else {
+            for (int k = 0; k < 3; k++) {
+              int k2 = (k + 1) % 3;
+              bool in0 = v[k].z >= 0, in1 = v[k2].z >= 0;
+              if (in0) { pv[np] = v[k]; pc[np] = c[k]; np++; }
+              if (in0 != in1) {
+                float s = v[k].z / (v[k].z - v[k2].z);
+                pv[np] = lerp(v[k], v[k2], s);
+                pc[np] = lerp(c[k], c[k2], s);
+                np++;
+              }
+            }
+            if (np < 3) return;
+          }
+          float sx[4], sy[4], sz[4], siw[4];
+          for (int k = 0; k < np; k++) {
+            float iw = 1.0f / pv[k].w;
+            sx[k] = (pv[k].x * iw * 0.5f + 0.5f) * W;
+            sy[k] = (0.5f - pv[k].y * iw * 0.5f) * H;
+            sz[k] = pv[k].z * iw;
+            siw[k] = iw;
+          }
+          for (int k = 1; k + 1 < np; k++) {
+            int a = 0, b = k, d = k + 1;
+            float area = (sx[b] - sx[a]) * (sy[d] - sy[a]) - (sx[d] - sx[a]) * (sy[b] - sy[a]);
+            if (area == 0.0f) continue;
+            if (area < 0.0f) {
+              if (!two_sided) continue;
+              std::swap(b, d);
+            }
+            float minx = std::min({sx[a], sx[b], sx[d]}), maxx = std::max({sx[a], sx[b], sx[d]});
+            float miny = std::min({sy[a], sy[b], sy[d]}), maxy = std::max({sy[a], sy[b], sy[d]});
+            if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) continue;
+            /* Small-triangle cull: no pixel centre (x + 0.5) inside the
+             * bounding box means no pixel can be covered. Dense meshes far
+             * away are mostly such triangles; skipping them here saves
+             * storing, binning and re-reading each one. Exact. */
+            if (std::ceil(minx - 0.5f) > std::floor(maxx - 0.5f) || std::ceil(miny - 0.5f) > std::floor(maxy - 0.5f)) continue;
+            ScreenTri st;
+            int ord[3] = {a, b, d};
+            for (int q = 0; q < 3; q++) {
+              st.x[q] = sx[ord[q]];
+              st.y[q] = sy[ord[q]];
+              st.z[q] = sz[ord[q]];
+              st.iw[q] = siw[ord[q]];
+              st.c[q] = gouraud ? pc[ord[q]] * siw[ord[q]] : pc[ord[q]];  // Gouraud: premultiplied by 1/w
+            }
+            st.id = it.id;
+            st.item = range.item;
+            st.prim = t;
+            ch.tris.push_back(st);
+          }
+        };
+        uint32_t t = range.tri_begin;
+#ifdef BL_RASTER_X86
+        /* AVX2: reject 8 triangles at a time; only survivors (and triangles
+         * needing near clipping) take the scalar path, in the same order. */
+        if (avx2)
+          for (; t + 8 <= range.tri_end; t += 8)
+            for (uint32_t m = needs_scalar8_avx2(idx.data() + (size_t)t * 3, cp, sp, (float)W, (float)H, two_sided); m; m &= m - 1)
+              process(t + (uint32_t)ctz32(m));
+#endif
+        for (; t < range.tri_end; t++) process(t);
       }
       /* Counting-sort the chunk's triangles into tiles. */
       ch.tile_offsets.assign(ntiles + 1, 0);
@@ -409,7 +590,7 @@ void Renderer3D::raster_tile(int tile_index) {
     uint32_t b = ch.tile_offsets[tile_index], e = ch.tile_offsets[tile_index + 1];
     for (uint32_t k = b; k < e; k++) {
       const uint32_t local = ch.tile_tris[k];
-      const uint32_t ref = (((uint32_t)ci << 14) | local) + 1u;
+      const uint32_t ref = (((uint32_t)ci << kRefShift) | local) + 1u;
       const ScreenTri &st = ch.tris[local];
       const float x0 = st.x[0], y0 = st.y[0], x1 = st.x[1], y1 = st.y[1], x2 = st.x[2], y2 = st.y[2];
       int minx = std::max(rx0, (int)std::floor(std::min({x0, x1, x2})));
@@ -601,55 +782,121 @@ void Renderer3D::shade_deferred() {
     fallback_env.ground = env_.ground;
   }
   const Vec3 eye = env_.camera_pos;
+  /* Everything about a visible triangle that does not vary per pixel. */
+  struct TriSetup {
+    uint32_t ref = 0;
+    bool valid = false, has_uv = false, has_tangent = false, highlighted = false;
+    const DrawItem *item = nullptr;
+    const Material *mat = nullptr;
+    float ox = 0, oy = 0;  // screen position of vertex 0: the planes' origin (keeps them precise)
+    Vec3 na, nb, nc;       // sum(c_k * q_k), q_k = screen barycentric / w
+    float sa = 0, sb = 0, sc = 0;  // sum(q_k)
+    Vec3 p[3], n[3], wp[3], wn[3], wt[3], geo_normal;
+    Vec2 uv[3];
+    float tangent_w = 1.0f;
+    AABB bounds;
+  };
+  auto setup_tri = [&](TriSetup &T, uint32_t ref) {
+    T.ref = ref;
+    T.valid = false;
+    const ScreenTri &st = chunks_[(ref - 1) >> kRefShift].tris[(ref - 1) & ((1u << kRefShift) - 1)];
+    const float area = (st.x[1] - st.x[0]) * (st.y[2] - st.y[0]) - (st.x[2] - st.x[0]) * (st.y[1] - st.y[0]);
+    if (area == 0.0f) return;
+    const float ia = 1.0f / area;
+    /* Screen barycentrics relative to vertex 0: w0 = 1 + a0 dx + b0 dy, w1 = a1 dx + b1 dy, w2 = a2 dx + b2 dy. */
+    const float a[3] = {(st.y[1] - st.y[2]) * ia, (st.y[2] - st.y[0]) * ia, (st.y[0] - st.y[1]) * ia};
+    const float b[3] = {(st.x[2] - st.x[1]) * ia, (st.x[0] - st.x[2]) * ia, (st.x[1] - st.x[0]) * ia};
+    T.ox = st.x[0];
+    T.oy = st.y[0];
+    T.na = T.nb = Vec3(0.0f);
+    T.sa = T.sb = 0;
+    for (int k = 0; k < 3; k++) {
+      T.na += st.c[k] * (st.iw[k] * a[k]);
+      T.nb += st.c[k] * (st.iw[k] * b[k]);
+      T.sa += st.iw[k] * a[k];
+      T.sb += st.iw[k] * b[k];
+    }
+    T.nc = st.c[0] * st.iw[0];
+    T.sc = st.iw[0];
+    const DrawItem &it = items_[st.item];
+    const RenderMesh &rm = *it.mesh;
+    const Mat4 &nm = normal_mats_[st.item];
+    const uint32_t *tri = &rm.indices[(size_t)st.prim * 3];
+    for (int k = 0; k < 3; k++) {
+      T.p[k] = rm.positions[tri[k]];
+      T.n[k] = rm.normals[tri[k]];
+      /* Affine maps keep barycentric combinations, and normalising after the
+       * normal matrix is the same as before it: transform the corners once. */
+      T.wp[k] = it.model.point(T.p[k]);
+      T.wn[k] = nm.dir(T.n[k]);
+    }
+    T.geo_normal = normalize(nm.dir(cross(T.p[1] - T.p[0], T.p[2] - T.p[0])));
+    T.bounds = rm.bounds;
+    T.has_uv = !rm.uvs.empty();
+    if (T.has_uv)
+      for (int k = 0; k < 3; k++) T.uv[k] = rm.uvs[tri[k]];
+    T.has_tangent = !rm.tangents.empty();
+    if (T.has_tangent) {
+      for (int k = 0; k < 3; k++) T.wt[k] = nm.dir(rm.tangents[tri[k]].xyz());
+      T.tangent_w = rm.tangents[tri[0]].w;
+    }
+    int slot = rm.tri_material.empty() ? 0 : rm.tri_material[st.prim];
+    T.mat = default_material().get();
+    if (it.materials && !it.materials->empty()) {
+      const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
+      if (mp) T.mat = mp.get();
+    }
+    T.highlighted = false;
+    if (it.face_highlight && !rm.tri_face.empty()) {
+      uint32_t f = rm.tri_face[st.prim];
+      T.highlighted = f < it.face_highlight->size() && (*it.face_highlight)[f];
+    }
+    T.item = &it;
+    T.valid = true;
+  };
   JobSystem &js = JobSystem::global();
   js.parallel_for(H, 4, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) {
       const uint32_t *vrow = rt_->vis.data() + (size_t)y * W;
       uint32_t *crow = rt_->color + (size_t)y * rt_->stride;
+      /* Shaded colours are encoded for display a whole row at a time (SIMD). */
+      static thread_local std::vector<Vec3> row_hdr;
+      static thread_local std::vector<int> row_x;
+      static thread_local std::vector<uint32_t> row_px;
+      row_hdr.clear();
+      row_x.clear();
+      TriSetup T;
       for (int x = 0; x < W; x++) {
         uint32_t ref = vrow[x];
         if (!ref) continue;
-        ref -= 1;
-        const Chunk &ch = chunks_[ref >> 14];
-        const ScreenTri &st = ch.tris[ref & 16383];
-        const DrawItem &it = items_[st.item];
-        const RenderMesh &rm = *it.mesh;
-        /* Perspective-correct barycentrics in the source triangle at a screen
-         * position (also used one pixel right / down for UV derivatives). */
-        const float area = (st.x[1] - st.x[0]) * (st.y[2] - st.y[0]) - (st.x[2] - st.x[0]) * (st.y[1] - st.y[0]);
-        if (area == 0.0f) continue;
-        auto bary = [&](float px, float py) {
-          float w0 = ((st.x[1] - px) * (st.y[2] - py) - (st.x[2] - px) * (st.y[1] - py)) / area;
-          float w1 = ((st.x[2] - px) * (st.y[0] - py) - (st.x[0] - px) * (st.y[2] - py)) / area;
-          float w2 = 1.0f - w0 - w1;
-          float q0 = w0 * st.iw[0], q1 = w1 * st.iw[1], q2 = w2 * st.iw[2];
-          float s = q0 + q1 + q2;
-          if (std::fabs(s) < 1e-20f) s = 1e-20f;
-          q0 /= s; q1 /= s; q2 /= s;
-          return st.c[0] * q0 + st.c[1] * q1 + st.c[2] * q2;
-        };
+        /* Neighbouring pixels mostly share a triangle: set it up once. */
+        if (ref != T.ref) setup_tri(T, ref);
+        if (!T.valid) continue;
+        const DrawItem &it = *T.item;
         float px = x + 0.5f, py = y + 0.5f;
-        Vec3 B = bary(px, py);
-        const uint32_t *tri = &rm.indices[(size_t)st.prim * 3];
-        const Vec3 &p0 = rm.positions[tri[0]], &p1 = rm.positions[tri[1]], &p2 = rm.positions[tri[2]];
+        /* Perspective-correct barycentrics in the source triangle: a ratio of
+         * two screen-linear functions, so the pixel right / below (for UV
+         * derivatives) is one add away. */
+        const float dx = px - T.ox, dy = py - T.oy;
+        Vec3 N = T.na * dx + T.nb * dy + T.nc;
+        float S = T.sa * dx + T.sb * dy + T.sc;
+        auto ratio = [](Vec3 n, float s) { return n * (1.0f / (std::fabs(s) < 1e-20f ? 1e-20f : s)); };
+        Vec3 B = ratio(N, S);
         SurfacePoint sp;
-        sp.local_position = p0 * B.x + p1 * B.y + p2 * B.z;
-        sp.local_normal = normalize(rm.normals[tri[0]] * B.x + rm.normals[tri[1]] * B.y + rm.normals[tri[2]] * B.z);
-        sp.local_bounds = rm.bounds;
-        sp.position = it.model.point(sp.local_position);
-        const Mat4 &nm = normal_mats_[st.item];
-        sp.normal = normalize(nm.dir(sp.local_normal));
-        sp.geo_normal = normalize(nm.dir(cross(p1 - p0, p2 - p0)));
-        if (!rm.uvs.empty()) {
-          const Vec2 &t0 = rm.uvs[tri[0]], &t1 = rm.uvs[tri[1]], &t2 = rm.uvs[tri[2]];
-          auto uv_at = [&](Vec3 b) { return t0 * b.x + t1 * b.y + t2 * b.z; };
+        sp.local_position = T.p[0] * B.x + T.p[1] * B.y + T.p[2] * B.z;
+        sp.local_normal = normalize(T.n[0] * B.x + T.n[1] * B.y + T.n[2] * B.z);
+        sp.local_bounds = T.bounds;
+        sp.position = T.wp[0] * B.x + T.wp[1] * B.y + T.wp[2] * B.z;
+        sp.normal = normalize(T.wn[0] * B.x + T.wn[1] * B.y + T.wn[2] * B.z);
+        sp.geo_normal = T.geo_normal;
+        if (T.has_uv) {
+          auto uv_at = [&](Vec3 b) { return T.uv[0] * b.x + T.uv[1] * b.y + T.uv[2] * b.z; };
           sp.uv = uv_at(B);
-          sp.duvdx = uv_at(bary(px + 1.0f, py)) - sp.uv;
-          sp.duvdy = uv_at(bary(px, py + 1.0f)) - sp.uv;
+          sp.duvdx = uv_at(ratio(N + T.na, S + T.sa)) - sp.uv;
+          sp.duvdy = uv_at(ratio(N + T.nb, S + T.sb)) - sp.uv;
         }
-        if (!rm.tangents.empty()) {
-          Vec4 tg = rm.tangents[tri[0]] * B.x + rm.tangents[tri[1]] * B.y + rm.tangents[tri[2]] * B.z;
-          sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);
+        if (T.has_tangent) {
+          sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
         }
         Vec3 V = normalize(eye - sp.position);
@@ -657,17 +904,8 @@ void Renderer3D::shade_deferred() {
           sp.normal = -sp.normal;
           sp.geo_normal = -sp.geo_normal;
         }
-        int slot = rm.tri_material.empty() ? 0 : rm.tri_material[st.prim];
-        const Material *mat = default_material().get();
-        if (it.materials && !it.materials->empty()) {
-          const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
-          if (mp) mat = mp.get();
-        }
-        SurfaceSample s = evaluate_material(*mat, sp);
-        if (it.face_highlight && !rm.tri_face.empty()) {
-          uint32_t f = rm.tri_face[st.prim];
-          if (f < it.face_highlight->size() && (*it.face_highlight)[f]) s.albedo = lerp(s.albedo, it.highlight_color, 0.45f);
-        }
+        SurfaceSample s = evaluate_material(*T.mat, sp);
+        if (T.highlighted) s.albedo = lerp(s.albedo, it.highlight_color, 0.45f);
         Vec3 color;
         if (s.unlit) color = s.albedo + s.emission;
         else {
@@ -700,8 +938,13 @@ void Renderer3D::shade_deferred() {
           Vec3 diff = env.irradiance(n) * s.albedo * (1.0f - s.metallic);
           color = lo + diff + spec + s.emission;
         }
-        crow[x] = to_display_pixel(color, env_.view_transform, env_.exposure);
+        row_hdr.push_back(color);
+        row_x.push_back(x);
       }
+      if (row_hdr.empty()) continue;
+      row_px.resize(row_hdr.size());
+      display::encode_span(&row_hdr[0].x, row_px.data(), row_hdr.size(), env_.view_transform, env_.exposure);
+      for (size_t i = 0; i < row_x.size(); i++) crow[row_x[i]] = row_px[i];
     }
   });
 }

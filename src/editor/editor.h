@@ -332,6 +332,8 @@ class Editor {
   uint64_t vp_pt_hash_ = 0;
   Mat4 vp_pt_view_, vp_pt_proj_;
   Image vp_pt_img_;
+  uint64_t vp_pt_shown_ = 0;  // samples + display settings of vp_pt_img_ (skip re-resolving)
+  bool vp_pt_guiding_ = false;
   PathTracer final_pt_;
   Image render_img_;
   bool rendering_ = false, render_has_result_ = false;

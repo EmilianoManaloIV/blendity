@@ -37,6 +37,13 @@ bool image_extension_supported(const std::string &ext);
 bool write_jpeg(const std::string &path, const uint32_t *pixels, int width, int height, int stride, int quality = 92);
 /* Linear float RGB (3 floats per pixel) as Radiance RGBE. */
 bool write_hdr(const std::string &path, const float *rgb, int width, int height);
+/* OpenEXR (when built with Blender's libraries): linear RGB, half or full float. */
+bool write_exr(const std::string &path, const float *rgb, int width, int height, bool half = true);
+bool exr_available();
+/* Use libjpeg-turbo / libpng for decoding when built with them (default on);
+ * off = Blendity's own decoders (stress tests compare both). */
+void set_image_library_codecs(bool on);
+bool image_library_codecs();
 /* zlib inflate (RFC 1950/1951); used by PNG, exposed for tests. */
 bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, bool has_zlib_header = true);
 

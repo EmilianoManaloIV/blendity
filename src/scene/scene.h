@@ -24,6 +24,7 @@ namespace bl {
 
 class GameObject;
 class Scene;
+struct PhysicsWorld;  // physics.h
 
 /* ------------------------------------------------------------ Reflection */
 /* One description of a component's fields drives the Inspector, the scene
@@ -71,6 +72,9 @@ struct Component {
   /* Modifier components transform the mesh non-destructively (Blender's modifier stack). */
   virtual bool is_modifier() const { return false; }
   virtual void modify(Mesh &) const {}
+  /* Modifiers that read other objects (Boolean) mix those objects' state in
+   * here so the cached evaluated mesh updates when they move or change. */
+  virtual uint64_t modifier_dependency_hash() const { return 0; }
   /* Only one instance per GameObject (Transform-like components). */
   virtual bool unique() const { return true; }
 };
@@ -237,6 +241,29 @@ struct SolidifyModifier : ComponentBase<SolidifyModifier> {
   bool unique() const override { return false; }
 };
 
+/* Blender: Boolean modifier (Manifold solver). Needs Blender's libraries. */
+struct BooleanModifier : ComponentBase<BooleanModifier> {
+  static constexpr const char *kName = "BooleanModifier";
+  std::string object;  // the cutter, by GameObject name (Blender: Object field)
+  int operation = 0;   // 0 Difference, 1 Union, 2 Intersect
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  uint64_t modifier_dependency_hash() const override;
+  bool unique() const override { return false; }
+  mutable std::string last_error;  // shown once in the Console, not every frame
+};
+
+/* Blender: Decimate modifier (Collapse), through meshoptimizer. */
+struct DecimateModifier : ComponentBase<DecimateModifier> {
+  static constexpr const char *kName = "DecimateModifier";
+  float ratio = 0.5f;  // fraction of triangles to keep
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
 /* ------------------------------------------------------------ GameObject */
 
 struct Transform {
@@ -289,6 +316,7 @@ class GameObject {
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
+  Scene *scene = nullptr;  // owning scene (kept up to date by Scene)
 
  private:
   Transform local_;
@@ -326,23 +354,41 @@ struct RenderSettings {
   int max_bounces = 4;
   float clamp_indirect = 10.0f;
   bool denoise = true;
+  int denoiser = 0;           // 0 OpenImageDenoise (when built with it), 1 A-Trous
+  bool use_embree = true;     // Embree ray tracing (when built with it)
+  bool path_guiding = false;  // OpenPGL path guiding (when built with it)
   int raster_aa = 2;          // supersampling factor for the rasterized engine
   bool shadows = true;
   int shadow_resolution = 2048;
-  int view_transform = 1;     // 0 Standard, 1 Filmic, 2 ACES
+  int view_transform = 1;     // index into view_transform_names(): 0 Standard, 1 Filmic, 2 ACES, 3+ OpenColorIO views
   float exposure = 0.0f;
-  int file_format = 0;        // 0 PNG, 1 JPEG, 2 Radiance HDR
+  int file_format = 0;        // 0 PNG, 1 JPEG, 2 Radiance HDR, 3 OpenEXR
   int jpeg_quality = 92;
   void reflect(Reflector &r);
 };
 
 class Scene {
  public:
+  Scene() = default;
+  /* Moving a scene re-points its objects at the new owner (GameObject::scene). */
+  Scene(Scene &&other) noexcept { move_from(other); }
+  Scene &operator=(Scene &&other) noexcept {
+    if (this != &other) move_from(other);
+    return *this;
+  }
+  Scene(const Scene &) = delete;
+  Scene &operator=(const Scene &) = delete;
+
   std::string name = "SampleScene";
   std::string path;
+  /* Save compressed with Zstandard (Blender: File > Save > Compress, which
+   * also uses zstd). Loading detects compressed files automatically. */
+  bool compress = false;
   EnvironmentSettings environment;
   RenderSettings render;
   std::vector<GameObject *> roots;
+  /* Play mode: the Jolt world while playing (null otherwise or without Jolt). */
+  std::shared_ptr<PhysicsWorld> physics;
 
   GameObject *create(const std::string &name, GameObject *parent = nullptr);
   void destroy(GameObject *go);
@@ -368,6 +414,7 @@ class Scene {
   void update(PlayContext &ctx);
 
  private:
+  void move_from(Scene &other);
   GameObject *adopt(std::unique_ptr<GameObject> go, uint64_t id);
   std::vector<std::unique_ptr<GameObject>> objects_;
   std::unordered_map<uint64_t, GameObject *> by_id_;
@@ -389,6 +436,8 @@ void append_float(std::string &s, float v);
 bool load_scene_text(const std::string &text, Scene &scene, std::string &error);
 bool save_scene(const Scene &scene, const std::string &path);
 bool load_scene(const std::string &path, Scene &scene, std::string &error);
+/* Zstandard scene compression is compiled in (Blender's zstd library). */
+bool scene_compression_available();
 
 /* Wavefront OBJ (blender/source/blender/io/wavefront_obj). Converts between
  * OBJ's right-handed space and our left-handed one by mirroring X, the same

@@ -2,11 +2,29 @@
 #include "pathtracer.h"
 
 #include "../core/core.h"
+#include "../core/cpu.h"
+#include "display.h"
 #include "../core/jobs.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <mutex>
+
+#ifdef BL_WITH_EMBREE
+#  include <embree4/rtcore.h>
+#endif
+#ifdef BL_WITH_OIDN
+#  include <OpenImageDenoise/oidn.hpp>
+#endif
+#ifdef BL_WITH_OPENPGL
+#  include <openpgl/cpp/OpenPGL.h>
+#endif
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#  include <pmmintrin.h>
+#  include <xmmintrin.h>
+#  define BL_HAS_MXCSR 1
+#endif
 
 namespace bl {
 
@@ -31,6 +49,68 @@ static inline void onb(Vec3 n, Vec3 &t, Vec3 &b) {
   float a = -1.0f / (sign + n.z), bb = n.x * n.y * a;
   t = {1.0f + sign * n.x * n.x * a, sign * bb, -sign * n.x};
   b = {bb, sign + n.y * n.y * a, -n.y};
+}
+
+/* ===================================================================== */
+/* Path guiding (OpenPGL, as Cycles: intern/cycles/kernel/integrator/     */
+/* guiding.h and integrator/path_trace.cpp)                               */
+/* ===================================================================== */
+
+#ifdef BL_WITH_OPENPGL
+struct PTGuidingData {
+  std::unique_ptr<openpgl::cpp::Device> device;
+  std::unique_ptr<openpgl::cpp::Field> field;
+  openpgl::cpp::SampleStorage storage;  // training samples since the last field update
+  std::mutex mutex;
+  int trained_samples = 0;
+};
+/* Per worker chunk: the current path's segments, a sampling distribution
+ * and the training samples it produced. */
+struct PTGuidingThread {
+  openpgl::cpp::PathSegmentStorage segments;
+  openpgl::cpp::SurfaceSamplingDistribution ssd;
+  openpgl::cpp::SampleStorage local;
+  const openpgl::cpp::Field *field;
+  bool train = false, guide = false;
+  explicit PTGuidingThread(const openpgl::cpp::Field *f) : ssd(f), field(f) {}
+};
+static inline pgl_point3f pgl_p(Vec3 v) { return {v.x, v.y, v.z}; }
+static inline pgl_vec3f pgl_v(Vec3 v) { return {v.x, v.y, v.z}; }
+#else
+struct PTGuidingData {};
+struct PTGuidingThread {};
+#endif
+
+bool PathTracer::guiding_available() {
+#ifdef BL_WITH_OPENPGL
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool PathTracer::guiding_active() const {
+#ifdef BL_WITH_OPENPGL
+  return guiding_ && guiding_->field && guiding_->field->GetIteration() > 0;
+#else
+  return false;
+#endif
+}
+
+/* A fresh field for a new scene (the field is in world space, so camera
+ * moves keep it; Cycles resets it when the scene changes). */
+void PathTracer::guiding_begin_scene() {
+#ifdef BL_WITH_OPENPGL
+  stats_.guiding_updates = 0;
+  if (!settings_.use_guiding || objects_.empty()) {
+    guiding_.reset();
+    return;
+  }
+  auto g = std::make_shared<PTGuidingData>();
+  /* Cycles picks the 8-wide device on AVX2 machines, else the 4-wide one. */
+  g->device = std::make_unique<openpgl::cpp::Device>(cpu::features().avx2 ? PGL_DEVICE_TYPE_CPU_8 : PGL_DEVICE_TYPE_CPU_4);
+  guiding_ = g;  // the field itself is created by render(), once the image size is known
+#endif
 }
 
 /* ===================================================================== */
@@ -59,6 +139,15 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   env_ = env;
   normal_mats_.clear();
   for (const PTObject &ob : objects_) normal_mats_.push_back(ob.model.inverse().transposed());
+  use_embree_ = embree_available() && settings_.use_embree;
+  if (use_embree_) {
+    double ms = 0;
+    build_embree(ms);
+    stats_.bvh_build_ms = t.ms();
+    collect_mesh_lights();
+    guiding_begin_scene();
+    return;
+  }
   /* 1. Bottom level: one object-space BVH per unique mesh (Cycles builds
    *    instanced geometry the same way). Cached across builds and keyed by a
    *    content hash, so moving objects or editing one mesh only rebuilds what
@@ -131,6 +220,8 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   stats_.unique_meshes = used.size();
   stats_.meshes_rebuilt = rebuild.size();
   stats_.bvh_build_ms = t.ms();
+  collect_mesh_lights();
+  guiding_begin_scene();
 }
 
 void PathTracer::build_sah(const std::vector<AABB> &tb, std::vector<Node> &nodes, std::vector<uint32_t> &idx, uint32_t max_leaf) {
@@ -302,7 +393,15 @@ bool PathTracer::intersect_blas(const Blas &bl, const Ray &r, Hit &h) {
   return hit;
 }
 
+#ifdef BL_WITH_EMBREE
+static bool embree_intersect(const PTEmbreeData *e, const Ray &r, PathTracer::Hit &h);
+static bool embree_occluded(const PTEmbreeData *e, const Ray &r, float tmax);
+#endif
+
 bool PathTracer::intersect(const Ray &r, Hit &h) const {
+#ifdef BL_WITH_EMBREE
+  if (use_embree_) return embree_intersect(embree_.get(), r, h);
+#endif
   if (tlas_.empty()) return false;
   Vec3 inv = safe_inverse(r.dir);
   uint32_t stack[64];
@@ -339,6 +438,9 @@ bool PathTracer::intersect(const Ray &r, Hit &h) const {
 }
 
 bool PathTracer::occluded(const Ray &r, float tmax) const {
+#ifdef BL_WITH_EMBREE
+  if (use_embree_) return embree_occluded(embree_.get(), r, tmax);
+#endif
   Hit h;
   h.t = tmax;
   return intersect(r, h);  // any hit closer than tmax
@@ -393,15 +495,107 @@ struct GGX {
 };
 }  // namespace
 
-Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out) const {
+/* World-space surface data at barycentrics (u, v) of a mesh triangle. */
+const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const {
+  const PTObject &ob = objects_[object];
+  const RenderMesh &rm = *ob.mesh;
+  const uint32_t *tri = &rm.indices[(size_t)prim * 3];
+  const float w = 1.0f - u - v;
+  sp.local_position = rm.positions[tri[0]] * w + rm.positions[tri[1]] * u + rm.positions[tri[2]] * v;
+  sp.position = ob.model.point(sp.local_position);
+  sp.local_normal = normalize(rm.normals[tri[0]] * w + rm.normals[tri[1]] * u + rm.normals[tri[2]] * v);
+  sp.local_bounds = rm.bounds;
+  const Mat4 &nm = normal_mats_[object];
+  sp.normal = normalize(nm.dir(sp.local_normal));
+  /* Geometric normal from the object-space triangle, like Cycles instancing. */
+  Vec3 p0 = rm.positions[tri[0]];
+  sp.geo_normal = normalize(nm.dir(cross(rm.positions[tri[1]] - p0, rm.positions[tri[2]] - p0)));
+  if (!rm.uvs.empty()) sp.uv = rm.uvs[tri[0]] * w + rm.uvs[tri[1]] * u + rm.uvs[tri[2]] * v;
+  if (!rm.tangents.empty()) {
+    Vec4 tg = rm.tangents[tri[0]] * w + rm.tangents[tri[1]] * u + rm.tangents[tri[2]] * v;
+    sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);
+    sp.has_tangent = true;
+  }
+  int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
+  const Material *mat = default_material().get();
+  if (ob.materials && !ob.materials->empty()) {
+    const MaterialPtr &mp = (*ob.materials)[(size_t)std::min(slot, (int)ob.materials->size() - 1)];
+    if (mp) mat = mp.get();
+  }
+  return mat;
+}
+
+/* Emissive triangles become lights, picked in proportion to their power
+ * (Cycles: mesh lights in the light tree). Emission is two-sided here, as in
+ * the rest of the integrator. */
+void PathTracer::collect_mesh_lights() {
+  mesh_lights_.clear();
+  light_cdf_.clear();
+  light_of_.clear();
+  light_power_ = 0.0f;
+  if (!settings_.sample_mesh_lights) return;
+  for (size_t o = 0; o < objects_.size(); o++) {
+    const PTObject &ob = objects_[o];
+    if (!ob.mesh || !ob.materials || ob.materials->empty()) continue;
+    const RenderMesh &rm = *ob.mesh;
+    for (uint32_t t = 0; t < (uint32_t)rm.tri_count(); t++) {
+      int slot = rm.tri_material.empty() ? 0 : rm.tri_material[t];
+      const MaterialPtr &mp = (*ob.materials)[(size_t)std::min(slot, (int)ob.materials->size() - 1)];
+      if (!mp || mp->emission_strength <= 0.0f || mp->unlit) continue;
+      /* Importance estimate: an emission texture is taken as white. */
+      float lum = mp->emission_map.empty() ? luminance(mp->emission) : 1.0f;
+      if (lum <= 0.0f) continue;
+      Vec3 a = ob.model.point(rm.positions[rm.indices[t * 3]]), b = ob.model.point(rm.positions[rm.indices[t * 3 + 1]]),
+           c = ob.model.point(rm.positions[rm.indices[t * 3 + 2]]);
+      float area = 0.5f * length(cross(b - a, c - a));
+      if (area <= 1e-12f) continue;
+      float power = lum * mp->emission_strength * area;
+      light_of_[((uint64_t)o << 32) | t] = (uint32_t)mesh_lights_.size();
+      mesh_lights_.push_back({(uint32_t)o, t, area, power});
+      light_power_ += power;
+      light_cdf_.push_back(light_power_);
+    }
+  }
+}
+
+/* Solid-angle pdf of picking the point at distance `dist` on light `li` seen
+ * at cos_light, through mesh-light sampling. */
+float PathTracer::mesh_light_pdf(uint32_t li, float dist, float cos_light) const {
+  const MeshLight &l = mesh_lights_[li];
+  return cos_light > 1e-6f ? (l.power / light_power_) * dist * dist / (l.area * cos_light) : 0.0f;
+}
+
+Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint64_t &rays,
+                       PTGuidingThread *guide) const {
   Vec3 L(0.0f), beta(1.0f);
   const float clamp = settings_.clamp_indirect;
-  uint64_t rays = 0;
+  float last_pdf = 0.0f;  // solid-angle pdf of the direction that led here (0 = camera ray)
+#ifdef BL_WITH_OPENPGL
+  /* Training records each vertex with local (not throughput-weighted) values;
+   * OpenPGL turns the chain into radiance samples (Cycles: guiding.h). */
+  const bool record = guide && guide->train;
+  openpgl::cpp::PathSegment *seg = nullptr;
+#else
+  (void)guide;
+#endif
   for (int bounce = 0; bounce <= settings_.max_bounces; bounce++) {
     Hit h;
     rays++;
     if (!intersect(ray, h)) {
-      Vec3 c = beta * env_.radiance(ray.dir);
+      const Vec3 Le = env_.radiance(ray.dir);
+#ifdef BL_WITH_OPENPGL
+      if (record) {
+        /* The environment as a far-away virtual vertex (GUIDING_MAX_LIGHT_DISTANCE). */
+        openpgl::cpp::PathSegment bg;
+        openpgl::cpp::SetPosition(&bg, pgl_p(ray.origin + ray.dir * 1e6f));
+        openpgl::cpp::SetNormal(&bg, pgl_v(Vec3(0, 0, 1)));
+        openpgl::cpp::SetDirectionOut(&bg, pgl_v(-ray.dir));
+        openpgl::cpp::SetDirectContribution(&bg, pgl_v(Le));
+        openpgl::cpp::SetMiWeight(&bg, 1.0f);
+        guide->segments.AddSegment(bg);
+      }
+#endif
+      Vec3 c = beta * Le;
       if (bounce > 0 && clamp > 0) {
         float m = std::max({c.x, c.y, c.z});
         if (m > clamp) c = c * (clamp / m);
@@ -414,35 +608,13 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
       break;
     }
-    const PTObject &ob = objects_[h.object];
-    const RenderMesh &rm = *ob.mesh;
-    const uint32_t *tri = &rm.indices[(size_t)h.tri * 3];
-    float w = 1.0f - h.u - h.v;
     SurfacePoint sp;
-    sp.position = ray.origin + ray.dir * h.t;
-    sp.local_position = rm.positions[tri[0]] * w + rm.positions[tri[1]] * h.u + rm.positions[tri[2]] * h.v;
-    sp.local_normal = normalize(rm.normals[tri[0]] * w + rm.normals[tri[1]] * h.u + rm.normals[tri[2]] * h.v);
-    sp.local_bounds = rm.bounds;
-    const Mat4 &nm = normal_mats_[h.object];
-    sp.normal = normalize(nm.dir(sp.local_normal));
-    /* Geometric normal from the object-space triangle, like Cycles instancing. */
-    Vec3 p0 = rm.positions[tri[0]];
-    sp.geo_normal = normalize(nm.dir(cross(rm.positions[tri[1]] - p0, rm.positions[tri[2]] - p0)));
-    if (!rm.uvs.empty()) sp.uv = rm.uvs[tri[0]] * w + rm.uvs[tri[1]] * h.u + rm.uvs[tri[2]] * h.v;
-    if (!rm.tangents.empty()) {
-      Vec4 tg = rm.tangents[tri[0]] * w + rm.tangents[tri[1]] * h.u + rm.tangents[tri[2]] * h.v;
-      sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);
-      sp.has_tangent = true;
-    }
+    const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+    sp.position = ray.origin + ray.dir * h.t;  // more precise than re-interpolating
     Vec3 V = -ray.dir;
+    const float cos_hit = std::fabs(dot(sp.geo_normal, V));
     if (dot(sp.geo_normal, V) < 0) sp.geo_normal = -sp.geo_normal;
     if (dot(sp.normal, sp.geo_normal) < 0) sp.normal = -sp.normal;
-    int slot = rm.tri_material.empty() ? 0 : rm.tri_material[h.tri];
-    const Material *mat = default_material().get();
-    if (ob.materials && !ob.materials->empty()) {
-      const MaterialPtr &mp = (*ob.materials)[(size_t)std::min(slot, (int)ob.materials->size() - 1)];
-      if (mp) mat = mp.get();
-    }
     SurfaceSample s = evaluate_material(*mat, sp);
     Vec3 n = s.normal;
     if (dot(n, V) < 0) n = normalize(n + sp.geo_normal * (-dot(n, V) + 0.01f));
@@ -458,22 +630,97 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
       L += c;
     };
-    add(beta * s.emission);
+    /* Emission found by BSDF sampling, weighted against mesh-light sampling
+     * (power heuristic; camera rays see it unweighted). */
+    float w_emit = 1.0f;
+    if (last_pdf > 0.0f && !mesh_lights_.empty() && luminance(s.emission) > 0.0f) {
+      auto it = light_of_.find(((uint64_t)h.object << 32) | h.tri);
+      if (it != light_of_.end()) {
+        float pl = mesh_light_pdf(it->second, h.t, cos_hit);
+        w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
+      }
+    }
+    add(beta * s.emission * w_emit);
+#ifdef BL_WITH_OPENPGL
+    if (record) {
+      seg = guide->segments.NextSegment();
+      if (seg) {
+        openpgl::cpp::SetPosition(seg, pgl_p(sp.position));
+        openpgl::cpp::SetDirectionOut(seg, pgl_v(V));
+        openpgl::cpp::SetNormal(seg, pgl_v(n));
+        openpgl::cpp::SetVolumeScatter(seg, false);
+        openpgl::cpp::SetScatteredContribution(seg, pgl_v(Vec3(0.0f)));
+        openpgl::cpp::SetDirectContribution(seg, pgl_v(s.unlit ? s.emission + s.albedo : s.emission));
+        openpgl::cpp::SetMiWeight(seg, w_emit);
+        openpgl::cpp::SetTransmittanceWeight(seg, pgl_v(Vec3(1.0f)));
+        openpgl::cpp::SetEta(seg, 1.0f);
+      }
+    }
+#endif
     if (s.unlit) {
       add(beta * s.albedo);
       break;
     }
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
-    /* Next-event estimation for every light (Cycles: light tree / NEE). */
+
+    /* BSDF sampling setup (one-sample MIS between the diffuse and GGX lobes),
+     * needed before direct lighting: light-sample MIS weights use the same pdf. */
+    Vec3 f0 = fresnel_f0(s);
+    float nv = std::max(dot(n, V), 1e-4f);
+    float spec_w = luminance(f0 + (Vec3(1.0f) - f0) * std::pow(1.0f - nv, 5.0f));
+    float diff_w = luminance(s.albedo) * (1.0f - s.metallic);
+    float p_spec = diff_w + spec_w > 0 ? clampf(spec_w / (spec_w + diff_w), 0.1f, 0.9f) : 0.5f;
+    if (s.metallic >= 0.999f) p_spec = 1.0f;
+    Vec3 tt, bb;
+    onb(n, tt, bb);
+    GGX g{std::max(s.roughness * s.roughness, 0.002f), 0};
+    g.a2 = g.a * g.a;
+    /* Path guiding: with probability pg the direction comes from the learned
+     * incident-radiance distribution (times cosine), else from the BSDF; the
+     * pdf is the mixture of both (one-sample MIS, balance heuristic - Cycles'
+     * surface_shader_bsdf_guided_sample). Near-mirror surfaces stay unguided. */
+    float pg = 0.0f;
+#ifdef BL_WITH_OPENPGL
+    if (guide && guide->guide && s.roughness >= 0.15f) {
+      float u = rnd(rng);
+      if (guide->ssd.Init(guide->field, pgl_p(sp.position), u)) {
+        if (guide->ssd.SupportsApplyCosineProduct()) guide->ssd.ApplyCosineProduct(pgl_v(n));
+        /* Cycles' product-MIS mode: guide only the diffuse share of the
+         * sampling; glossy lobes stay with the BSDF. */
+        pg = settings_.guiding_probability * (1.0f - p_spec);
+      }
+    }
+#endif
+    /* Solid-angle pdf with which this vertex samples `dir` (BSDF lobes and guiding). */
+    auto sampling_pdf = [&](Vec3 dir) {
+      float nl = dot(n, dir);
+      if (nl <= 0) return 0.0f;
+      Vec3 hh = normalize(V + dir);
+      float pdf_spec = g.D(std::max(dot(n, hh), 0.0f)) * g.G1(nv) / (4.0f * nv);
+      float pdf = p_spec * pdf_spec + (1.0f - p_spec) * (nl / kPi);
+#ifdef BL_WITH_OPENPGL
+      if (pg > 0.0f) pdf = (1.0f - pg) * pdf + pg * guide->ssd.PDF(pgl_v(dir));
+#endif
+      return pdf;
+    };
+    auto record_nee = [&](Vec3 Lo) {
+#ifdef BL_WITH_OPENPGL
+      if (record && seg) openpgl::cpp::AddScatteredContribution(seg, pgl_v(Lo));
+#else
+      (void)Lo;
+#endif
+    };
+
+    /* Next-event estimation for sun and point lights (Cycles: NEE). */
     for (const RenderLight &l : lights_) {
       Vec3 dir;
       float dist = 1e30f, power = l.intensity * kPi;
       if (l.type == RenderLight::Directional) {
-        Vec3 c = -l.direction, tt, bb;
-        onb(c, tt, bb);
+        Vec3 c = -l.direction, ct3, cb3;
+        onb(c, ct3, cb3);
         float cos_max = std::cos(settings_.sun_angle_deg * 0.5f * kDeg2Rad);
         float ct = 1.0f - rnd(rng) * (1.0f - cos_max), st = std::sqrt(std::max(0.0f, 1.0f - ct * ct)), ph = 2 * kPi * rnd(rng);
-        dir = normalize(tt * (st * std::cos(ph)) + bb * (st * std::sin(ph)) + c * ct);
+        dir = normalize(ct3 * (st * std::cos(ph)) + cb3 * (st * std::sin(ph)) + c * ct);
       }
       else {
         float z = 1 - 2 * rnd(rng), ph = 2 * kPi * rnd(rng), rr = std::sqrt(std::max(0.0f, 1 - z * z));
@@ -488,22 +735,54 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       if (power <= 0 || dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) continue;
       rays++;
       if (occluded({origin, dir}, dist)) continue;
-      add(beta * brdf_eval(s, n, V, dir) * l.color * power);
+      const Vec3 Lo = brdf_eval(s, n, V, dir) * l.color * power;  // scattered toward V, before throughput
+      add(beta * Lo);
+      record_nee(Lo);
+    }
+
+    /* Next-event estimation for emissive meshes: one triangle by power, a
+     * uniform point on it, MIS against BSDF sampling (power heuristic). */
+    if (!mesh_lights_.empty()) {
+      float r = rnd(rng) * light_power_;
+      uint32_t li = (uint32_t)std::min<size_t>(std::upper_bound(light_cdf_.begin(), light_cdf_.end(), r) - light_cdf_.begin(),
+                                               mesh_lights_.size() - 1);
+      float su = rnd(rng), sv = rnd(rng);
+      if (su + sv > 1.0f) {
+        su = 1.0f - su;
+        sv = 1.0f - sv;
+      }
+      SurfacePoint lp;
+      const Material *lmat = surface_at(mesh_lights_[li].object, mesh_lights_[li].prim, su, sv, lp);
+      Vec3 d = lp.position - origin;
+      float dist = length(d);
+      if (dist > 1e-5f) {
+        Vec3 dir = d / dist;
+        float cos_l = std::fabs(dot(lp.geo_normal, dir));
+        float pl = mesh_light_pdf(li, dist, cos_l);
+        if (pl > 0.0f && dot(n, dir) > 0 && dot(sp.geo_normal, dir) > 0) {
+          rays++;
+          if (!occluded({origin, dir}, dist * (1.0f - 1e-4f))) {
+            const Vec3 Le = evaluate_material(*lmat, lp).emission;
+            float pb = sampling_pdf(dir);
+            float w = pl * pl / (pl * pl + pb * pb);
+            const Vec3 Lo = brdf_eval(s, n, V, dir) * Le * (w / pl);
+            add(beta * Lo);
+            record_nee(Lo);
+          }
+        }
+      }
     }
     if (bounce == settings_.max_bounces) break;
-    /* Sample the BSDF: one-sample MIS between the diffuse and GGX lobes. */
-    Vec3 f0 = fresnel_f0(s);
-    float nv = std::max(dot(n, V), 1e-4f);
-    float spec_w = luminance(f0 + (Vec3(1.0f) - f0) * std::pow(1.0f - nv, 5.0f));
-    float diff_w = luminance(s.albedo) * (1.0f - s.metallic);
-    float p_spec = diff_w + spec_w > 0 ? clampf(spec_w / (spec_w + diff_w), 0.1f, 0.9f) : 0.5f;
-    if (s.metallic >= 0.999f) p_spec = 1.0f;
-    Vec3 tt, bb;
-    onb(n, tt, bb);
-    GGX g{std::max(s.roughness * s.roughness, 0.002f), 0};
-    g.a2 = g.a * g.a;
+
     Vec3 dir;
-    if (rnd(rng) < p_spec) {
+    const bool guided = pg > 0.0f && rnd(rng) < pg;
+    if (guided) {
+#ifdef BL_WITH_OPENPGL
+      pgl_vec3f d = guide->ssd.Sample({rnd(rng), rnd(rng)});
+      dir = normalize(Vec3(d.x, d.y, d.z));
+#endif
+    }
+    else if (rnd(rng) < p_spec) {
       Vec3 vl{dot(V, tt), dot(V, bb), dot(V, n)};
       Vec3 hl = g.sample_vndf(vl, rnd(rng), rnd(rng));
       Vec3 hw = normalize(tt * hl.x + bb * hl.y + n * hl.z);
@@ -514,34 +793,76 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       float rr = std::sqrt(r1), ph = 2 * kPi * r2;
       dir = normalize(tt * (rr * std::cos(ph)) + bb * (rr * std::sin(ph)) + n * std::sqrt(std::max(0.0f, 1 - r1)));
     }
-    float nl = dot(n, dir);
-    if (nl <= 0 || dot(sp.geo_normal, dir) <= 0) break;
-    Vec3 hh = normalize(V + dir);
-    float pdf_spec = g.D(std::max(dot(n, hh), 0.0f)) * g.G1(nv) / (4.0f * nv);
-    float pdf_diff = nl / kPi;
-    float pdf = p_spec * pdf_spec + (1.0f - p_spec) * pdf_diff;
+    if (dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) break;
+    const float pdf = sampling_pdf(dir);
     if (pdf < 1e-8f) break;
-    beta = beta * brdf_eval(s, n, V, dir) / pdf;
+    const Vec3 f = brdf_eval(s, n, V, dir);
+    beta = beta * f / pdf;
+    last_pdf = pdf;
+#ifdef BL_WITH_OPENPGL
+    if (record && seg) {
+      openpgl::cpp::SetDirectionIn(seg, pgl_v(dir));
+      openpgl::cpp::SetPDFDirectionIn(seg, pdf);
+      openpgl::cpp::SetScatteringWeight(seg, pgl_v(f / pdf));
+      openpgl::cpp::SetIsDelta(seg, false);
+      openpgl::cpp::SetRoughness(seg, s.roughness);
+    }
+#endif
     /* Russian roulette (Cycles starts after a few bounces too). */
     if (bounce >= 3) {
       float q = std::min(0.95f, std::max({beta.x, beta.y, beta.z}));
+#ifdef BL_WITH_OPENPGL
+      if (record && seg) openpgl::cpp::SetRussianRouletteProbability(seg, q);
+#endif
       if (rnd(rng) > q) break;
       beta = beta / q;
     }
     ray = {origin, dir};
   }
-  (void)rays;
   return L;
 }
 
 int PathTracer::render(double budget_ms, int max_samples) {
   if (w_ <= 0 || h_ <= 0) return samples_;
+#ifdef BL_WITH_OPENPGL
+  if (guiding_ && !guiding_->field) {
+    /* Cycles' configuration (integrator/path_trace.cpp): KD-tree of
+     * parallax-aware VMMs, OpenPGL's default 32k samples per leaf (smaller
+     * leaves measured no better at preview sizes). */
+    openpgl::cpp::FieldConfig cfg;
+    cfg.Init(PGL_SPATIAL_STRUCTURE_KDTREE, PGL_DIRECTIONAL_DISTRIBUTION_PARALLAX_AWARE_VMM, false);
+    cfg.SetSpatialStructureArgMaxDepth(16);  // as Cycles
+    guiding_->field = std::make_unique<openpgl::cpp::Field>(guiding_->device.get(), cfg);
+    /* No SetSceneBounds: like Cycles, the field takes its bounds from the samples. */
+  }
+#endif
   ScopedTimer t;
   JobSystem &js = JobSystem::global();
   while (samples_ < max_samples) {
     std::atomic<uint64_t> rays{0};
     int s = samples_;
+#ifdef BL_WITH_OPENPGL
+    /* Guiding: train the field for the first samples, steer once it has learned. */
+    const bool train = guiding_ && guiding_->trained_samples < settings_.guiding_training_samples;
+    const bool steer = guiding_active();
+#endif
     js.parallel_for(h_, 2, [&](int64_t y0, int64_t y1) {
+      std::unique_ptr<PTGuidingThread> guide;
+#ifdef BL_WITH_OPENPGL
+      if (guiding_ && (train || steer)) {
+        guide = std::make_unique<PTGuidingThread>(guiding_->field.get());
+        guide->train = train;
+        guide->guide = steer;
+        guide->segments.Reserve((size_t)(2 * settings_.max_bounces + 4));
+      }
+#endif
+#ifdef BL_HAS_MXCSR
+      /* Flush denormals to zero while tracing (Embree's recommendation; the
+       * x87/SSE microcode path for denormals is ~100x slower). */
+      const unsigned csr = _mm_getcsr();
+      _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+      _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
       uint64_t local = 0;
       for (int64_t y = y0; y < y1; y++)
         for (int x = 0; x < w_; x++) {
@@ -553,18 +874,56 @@ int PathTracer::render(double budget_ms, int max_samples) {
           Ray r{pa, normalize(pb - pa)};
           Vec3 alb, nrm;
           float dep;
-          Vec3 c = trace(r, rng, &alb, &nrm, &dep);
+#ifdef BL_WITH_OPENPGL
+          if (guide && guide->train) guide->segments.Clear();
+#endif
+          Vec3 c = trace(r, rng, &alb, &nrm, &dep, local, guide.get());
+#ifdef BL_WITH_OPENPGL
+          if (guide && guide->train) {
+            /* The path's segments become radiance samples for training. */
+            guide->segments.PrepareSamples(true, true, false);  // MIS weights: train on what the estimator uses
+            size_t ns = 0;
+            const openpgl::cpp::SampleData *sd = guide->segments.GetSamples(ns);
+            if (ns) guide->local.AddSamples(sd, ns);
+            /* Zero-value samples tell the fit where no light arrives. */
+            size_t nz = 0;
+            const openpgl::cpp::ZeroValueSampleData *zd = guide->segments.GetZeroValueSamples(nz);
+            if (nz) guide->local.AddZeroValueSamples(zd, nz);
+          }
+#endif
           if (!(c.x == c.x) || !(c.y == c.y) || !(c.z == c.z)) c = Vec3(0.0f);  // NaN guard
           size_t i = (size_t)y * w_ + x;
           accum_[i] += c;
           albedo_[i] += alb;
           normal_[i] += nrm;
           depth_[i] += dep;
-          local += 2 + settings_.max_bounces;  // approximate rays per path
         }
       rays += local;
+#ifdef BL_WITH_OPENPGL
+      if (guide && guide->train) {
+        std::lock_guard<std::mutex> lock(guiding_->mutex);
+        guiding_->storage.Merge(guide->local);
+      }
+#endif
+#ifdef BL_HAS_MXCSR
+      _mm_setcsr(csr);
+#endif
     });
     samples_++;
+#ifdef BL_WITH_OPENPGL
+    if (train) {
+      guiding_->trained_samples++;
+      /* Like Cycles: update once at least 1024 samples are in - and use what
+       * a hard scene (small emitters: few non-zero paths) collected by the
+       * end of training rather than nothing. */
+      const size_t have = guiding_->storage.GetSizeSurface();
+      if (have >= 1024 || (guiding_->trained_samples >= settings_.guiding_training_samples && have >= 128)) {
+        guiding_->field->Update(guiding_->storage);
+        guiding_->storage.Clear();
+        stats_.guiding_updates++;
+      }
+    }
+#endif
     stats_.rays += rays.load();
     if (t.ms() >= budget_ms) break;
   }
@@ -575,6 +934,10 @@ int PathTracer::render(double budget_ms, int max_samples) {
 /* Edge-avoiding A-Trous wavelet denoiser (Dammertz et al. 2010) on
  * albedo-demodulated radiance, guided by normal and depth. */
 std::vector<float> PathTracer::denoised() const {
+  if (settings_.use_oidn && oidn_available()) {
+    std::vector<float> r = denoised_oidn();
+    if (!r.empty()) return r;
+  }
   const int W = w_, H = h_;
   const size_t n = (size_t)W * H;
   float inv = 1.0f / std::max(1, samples_);
@@ -607,7 +970,8 @@ std::vector<float> PathTracer::denoised() const {
               size_t q = (size_t)qy * W + qx;
               float dl = std::fabs(luminance(irr[q]) - lp) / (lp + 0.1f);
               float wc = std::exp(-dl * dl / (sigma_c * sigma_c));
-              float wn = std::pow(std::max(0.0f, dot(nrm[p], nrm[q])), 64.0f);
+              float wn = std::max(0.0f, dot(nrm[p], nrm[q]));
+              for (int sq = 0; sq < 6; sq++) wn *= wn;  // ^64 by squaring
               if (length_sq(nrm[p]) == 0 && length_sq(nrm[q]) == 0) wn = 1;
               float wz = std::exp(-std::fabs(dep[p] - dep[q]) / (0.02f * dep[p] * step + 1e-3f));
               float wgt = kh[dx + 2] * kh[dy + 2] * wc * wn * wz;
@@ -641,13 +1005,277 @@ std::vector<float> PathTracer::linear_rgb(bool denoise) {
   return out;
 }
 
-void PathTracer::resolve(uint32_t *out, int stride, bool denoise) {
-  std::vector<float> rgb = linear_rgb(denoise);
-  for (int y = 0; y < h_; y++)
-    for (int x = 0; x < w_; x++) {
-      size_t i = (size_t)y * w_ + x;
-      out[(size_t)y * stride + x] = to_display_pixel({rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]}, settings_.view_transform, settings_.exposure);
+/* ===================================================================== */
+/* Embree backend (Cycles: intern/cycles/bvh/embree.cpp)                  */
+/* ===================================================================== */
+
+#ifdef BL_WITH_EMBREE
+struct PTEmbreeData {
+  struct MeshScene {
+    RTCScene scene = nullptr;
+    uint64_t hash = 0;
+    size_t tris = 0;
+  };
+  std::unordered_map<const RenderMesh *, MeshScene> meshes;  // bottom level, cached like Blas
+  RTCScene top = nullptr;
+  std::vector<uint32_t> inst_object;  // top-level geometry id -> object index
+  ~PTEmbreeData() {
+    if (top) rtcReleaseScene(top);
+    for (auto &kv : meshes)
+      if (kv.second.scene) rtcReleaseScene(kv.second.scene);
+  }
+};
+
+/* One device for the whole process: Embree shares its TBB thread pool. */
+static RTCDevice embree_device() {
+  static RTCDevice dev = [] {
+    RTCDevice d = rtcNewDevice(nullptr);
+    if (d)
+      rtcSetDeviceErrorFunction(
+          d, [](void *, RTCError code, const char *msg) { Log::warn("Embree error %d: %s", (int)code, msg ? msg : ""); },
+          nullptr);
+    return d;
+  }();
+  return dev;
+}
+
+void PathTracer::build_embree(double &ms) {
+  ScopedTimer t;
+  if (!embree_) embree_ = std::make_shared<PTEmbreeData>();
+  PTEmbreeData &E = *embree_;
+  RTCDevice dev = embree_device();
+  std::unordered_map<const RenderMesh *, RTCScene> used;
+  std::vector<std::pair<const RenderMesh *, PTEmbreeData::MeshScene *>> rebuild;
+  size_t tri_total = 0;
+  for (const PTObject &ob : objects_) {
+    if (!ob.mesh || ob.mesh->tri_count() == 0 || used.count(ob.mesh)) continue;
+    PTEmbreeData::MeshScene &m = E.meshes[ob.mesh];
+    uint64_t h = mesh_hash(*ob.mesh);
+    if (!m.scene || m.hash != h || m.tris != ob.mesh->tri_count()) {
+      if (m.scene) rtcReleaseScene(m.scene);
+      m.scene = rtcNewScene(dev);
+      m.hash = h;
+      m.tris = ob.mesh->tri_count();
+      rebuild.push_back({ob.mesh, &m});
     }
+    used[ob.mesh] = m.scene;
+  }
+  /* Bottom-level builds run in parallel: committing many small scenes one by
+   * one spent most of its time in per-commit overhead (the stress test
+   * measured 2 s for 1,024 small meshes). Large meshes build one at a time
+   * with Embree's own threading. */
+  auto build_mesh = [&](const RenderMesh &rm, PTEmbreeData::MeshScene &m) {
+    {
+      /* Cycles uses high quality (SAH + spatial splits) for static geometry;
+       * small meshes don't gain from it and build much faster at medium. */
+      rtcSetSceneBuildQuality(m.scene, rm.tri_count() >= 50000 ? RTC_BUILD_QUALITY_HIGH : RTC_BUILD_QUALITY_MEDIUM);
+      RTCGeometry g = rtcNewGeometry(dev, RTC_GEOMETRY_TYPE_TRIANGLE);
+      auto *vb = static_cast<float *>(rtcSetNewGeometryBuffer(g, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 3 * sizeof(float),
+                                                              rm.positions.size()));
+      for (size_t i = 0; i < rm.positions.size(); i++) {
+        vb[i * 3] = rm.positions[i].x;
+        vb[i * 3 + 1] = rm.positions[i].y;
+        vb[i * 3 + 2] = rm.positions[i].z;
+      }
+      auto *ib = static_cast<unsigned *>(rtcSetNewGeometryBuffer(g, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof(unsigned),
+                                                                 rm.tri_count()));
+      std::memcpy(ib, rm.indices.data(), rm.tri_count() * 3 * sizeof(unsigned));
+      rtcCommitGeometry(g);
+      rtcAttachGeometry(m.scene, g);
+      rtcReleaseGeometry(g);
+      rtcCommitScene(m.scene);  // multithreaded build inside Embree
+    }
+  };
+  std::vector<size_t> small;
+  for (size_t k = 0; k < rebuild.size(); k++) {
+    if (rebuild[k].first->tri_count() < 50000) small.push_back(k);
+    else build_mesh(*rebuild[k].first, *rebuild[k].second);
+  }
+  JobSystem::global().parallel_for((int64_t)small.size(), 4, [&](int64_t b, int64_t e) {
+    for (int64_t k = b; k < e; k++) build_mesh(*rebuild[small[k]].first, *rebuild[small[k]].second);
+  });
+  const size_t rebuilt = rebuild.size();
+  for (auto it = E.meshes.begin(); it != E.meshes.end();) {
+    if (used.count(it->first)) { ++it; continue; }
+    if (it->second.scene) rtcReleaseScene(it->second.scene);
+    it = E.meshes.erase(it);
+  }
+  /* Top level: one instance per object (Cycles: object instancing). */
+  if (E.top) rtcReleaseScene(E.top);
+  E.top = rtcNewScene(dev);
+  E.inst_object.clear();
+  for (size_t o = 0; o < objects_.size(); o++) {
+    auto it = used.find(objects_[o].mesh);
+    if (it == used.end()) continue;
+    RTCGeometry inst = rtcNewGeometry(dev, RTC_GEOMETRY_TYPE_INSTANCE);
+    rtcSetGeometryInstancedScene(inst, it->second);
+    rtcSetGeometryTransform(inst, 0, RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR, objects_[o].model.m);
+    rtcCommitGeometry(inst);
+    unsigned id = rtcAttachGeometry(E.top, inst);
+    rtcReleaseGeometry(inst);
+    if (id >= E.inst_object.size()) E.inst_object.resize(id + 1, UINT32_MAX);
+    E.inst_object[id] = (uint32_t)o;
+    tri_total += objects_[o].mesh->tri_count();
+  }
+  rtcCommitScene(E.top);
+  stats_.triangles = tri_total;
+  stats_.bvh_nodes = 0;  // internal to Embree
+  stats_.unique_meshes = used.size();
+  stats_.meshes_rebuilt = rebuilt;
+  ms = t.ms();
+}
+
+static bool embree_intersect(const PTEmbreeData *e, const Ray &r, PathTracer::Hit &h) {
+  if (!e || !e->top) return false;
+  RTCRayHit rh;
+  rh.ray.org_x = r.origin.x;
+  rh.ray.org_y = r.origin.y;
+  rh.ray.org_z = r.origin.z;
+  rh.ray.tnear = 1e-5f;  // same self-intersection epsilon as the built-in BVH
+  rh.ray.dir_x = r.dir.x;
+  rh.ray.dir_y = r.dir.y;
+  rh.ray.dir_z = r.dir.z;
+  rh.ray.time = 0.0f;
+  rh.ray.tfar = h.t;
+  rh.ray.mask = ~0u;
+  rh.ray.id = 0;
+  rh.ray.flags = 0;
+  rh.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+  rh.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
+  rtcIntersect1(e->top, &rh);
+  if (rh.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
+  h.t = rh.ray.tfar;
+  h.u = rh.hit.u;  // Embree's barycentrics weight v1 and v2, as Moller-Trumbore's do
+  h.v = rh.hit.v;
+  h.tri = rh.hit.primID;
+  h.object = e->inst_object[rh.hit.instID[0]];
+  return true;
+}
+
+static bool embree_occluded(const PTEmbreeData *e, const Ray &r, float tmax) {
+  if (!e || !e->top) return false;
+  RTCRay ray;
+  ray.org_x = r.origin.x;
+  ray.org_y = r.origin.y;
+  ray.org_z = r.origin.z;
+  ray.tnear = 1e-5f;
+  ray.dir_x = r.dir.x;
+  ray.dir_y = r.dir.y;
+  ray.dir_z = r.dir.z;
+  ray.time = 0.0f;
+  ray.tfar = tmax;
+  ray.mask = ~0u;
+  ray.id = 0;
+  ray.flags = 0;
+  rtcOccluded1(e->top, &ray);
+  return ray.tfar < 0.0f;  // Embree sets tfar to -inf on a hit
+}
+#else
+struct PTEmbreeData {};
+void PathTracer::build_embree(double &ms) { ms = 0; }
+#endif
+
+bool PathTracer::embree_available() {
+#ifdef BL_WITH_EMBREE
+  return embree_device() != nullptr;
+#else
+  return false;
+#endif
+}
+
+const char *PathTracer::ray_backend() const { return use_embree_ ? "Embree" : "Blendity BVH"; }
+
+/* ===================================================================== */
+/* OpenImageDenoise (Cycles' default denoiser)                           */
+/* ===================================================================== */
+
+#ifdef BL_WITH_OIDN
+namespace {
+struct OidnState {
+  std::mutex mutex;
+  oidn::DeviceRef device;
+  bool tried = false, ok = false;
+  bool init() {
+    if (tried) return ok;
+    tried = true;
+    device = oidn::newDevice(oidn::DeviceType::CPU);
+    device.commit();
+    const char *msg = nullptr;
+    ok = device.getError(msg) == oidn::Error::None;
+    if (!ok) Log::warn("OpenImageDenoise unavailable: %s", msg ? msg : "unknown error");
+    return ok;
+  }
+};
+OidnState &oidn_state() {
+  static OidnState s;
+  return s;
+}
+}  // namespace
+#endif
+
+bool PathTracer::oidn_available() {
+#ifdef BL_WITH_OIDN
+  OidnState &s = oidn_state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  return s.init();
+#else
+  return false;
+#endif
+}
+
+const char *PathTracer::denoise_backend() const {
+  return settings_.use_oidn && oidn_available() ? "OpenImageDenoise" : "A-Trous";
+}
+
+std::vector<float> PathTracer::denoised_oidn() const {
+#ifdef BL_WITH_OIDN
+  const int W = w_, H = h_;
+  const size_t n = (size_t)W * H;
+  const float inv = 1.0f / std::max(1, samples_);
+  /* Inputs as Cycles passes them: noisy HDR colour, first-hit albedo and
+   * normal (the "prefiltered" auxiliary passes are noise-free enough here). */
+  std::vector<float> color(n * 3), albedo(n * 3), normal(n * 3), out(n * 3);
+  for (size_t i = 0; i < n; i++) {
+    Vec3 c = accum_[i] * inv, a = albedo_[i] * inv, nn = normal_[i] * inv;
+    a = Vec3(saturate(a.x), saturate(a.y), saturate(a.z));
+    if (length_sq(nn) > 0) nn = normalize(nn);
+    for (int k = 0; k < 3; k++) {
+      color[i * 3 + k] = c[k];
+      albedo[i * 3 + k] = a[k];
+      normal[i * 3 + k] = nn[k];
+    }
+  }
+  OidnState &s = oidn_state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  if (!s.init()) return {};
+  oidn::FilterRef f = s.device.newFilter("RT");
+  f.setImage("color", color.data(), oidn::Format::Float3, W, H);
+  f.setImage("albedo", albedo.data(), oidn::Format::Float3, W, H);
+  f.setImage("normal", normal.data(), oidn::Format::Float3, W, H);
+  f.setImage("output", out.data(), oidn::Format::Float3, W, H);
+  f.set("hdr", true);
+  f.commit();
+  f.execute();
+  const char *msg = nullptr;
+  if (s.device.getError(msg) != oidn::Error::None) {
+    Log::warn("OpenImageDenoise failed: %s", msg ? msg : "unknown error");
+    return {};
+  }
+  return out;
+#else
+  return {};
+#endif
+}
+
+void PathTracer::resolve(uint32_t *out, int stride, bool denoise) { resolve_rgb(linear_rgb(denoise), out, stride); }
+
+void PathTracer::resolve_rgb(const std::vector<float> &rgb, uint32_t *out, int stride) const {
+  if (rgb.size() < (size_t)w_ * h_ * 3) return;
+  /* Tone mapping is per pixel and independent: rows in parallel. */
+  JobSystem::global().parallel_for(h_, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      display::encode_span(&rgb[(size_t)y * w_ * 3], out + (size_t)y * stride, (size_t)w_, settings_.view_transform, settings_.exposure);
+  });
 }
 
 }  // namespace bl

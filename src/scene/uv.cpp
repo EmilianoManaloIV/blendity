@@ -8,7 +8,21 @@
 #include <numeric>
 #include <unordered_map>
 
+#ifdef BL_WITH_EIGEN
+#  include <Eigen/Sparse>
+#  include <Eigen/SparseCholesky>
+#endif
+
 namespace bl::uvops {
+
+static LscmSolver g_lscm_solver = LscmSolver::Auto;
+void set_lscm_solver(LscmSolver s) { g_lscm_solver = s; }
+const char *lscm_solver_name() {
+#ifdef BL_WITH_EIGEN
+  if (g_lscm_solver != LscmSolver::ConjugateGradient) return "Eigen sparse Cholesky";
+#endif
+  return "conjugate gradients";
+}
 
 namespace {
 
@@ -89,38 +103,52 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
    * joined only across non-seam edges, so a seam inside the island (e.g. the
    * vertical cut of a cylinder side) splits the vertex in two (Blender's
    * parametrizer does the same with its PVert splitting). */
-  std::vector<uint32_t> corners;
+  /* Corners are addressed by "slot": their position in face order within the
+   * island, so every table below is a dense array. The first version used hash
+   * maps keyed by mesh corner (0.6 s of setup for a 262k-face island). */
+  std::vector<uint32_t> corners;  // slot -> mesh corner
   for (uint32_t f : faces)
     for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) corners.push_back(c);
-  std::unordered_map<uint32_t, int> corner_slot;
-  corner_slot.reserve(corners.size());
-  for (size_t i = 0; i < corners.size(); i++) corner_slot[corners[i]] = (int)i;
-  UnionFind fan(corners.size());
+  const size_t ns = corners.size();
+  UnionFind fan(ns);
   {
-    /* edge key -> (corner of lower vertex, corner of higher vertex) per face side */
-    std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> first;
-    first.reserve(corners.size());
+    /* Each face side as (edge key, slot of the lower vertex, slot of the
+     * higher vertex); sorting by key puts the two sides of an edge together. */
+    struct Side {
+      uint64_t key;
+      uint32_t lo, hi;
+    };
+    std::vector<Side> sides;
+    sides.reserve(ns);
+    uint32_t s = 0;
     for (uint32_t f : faces) {
       uint32_t b = m.face_offsets[f], n = m.face_size(f);
       for (uint32_t i = 0; i < n; i++) {
-        uint32_t ca = b + i, cb = b + (i + 1) % n;
-        uint32_t va = m.corner_verts[ca], vb = m.corner_verts[cb];
+        uint32_t sa = s + i, sb = s + (i + 1) % n;
+        uint32_t va = m.corner_verts[b + i], vb = m.corner_verts[b + (i + 1) % n];
         if (va == vb || m.is_seam(va, vb)) continue;
-        if (va > vb) std::swap(ca, cb);
-        auto [it, inserted] = first.emplace(Mesh::edge_key(va, vb), std::make_pair(ca, cb));
-        if (inserted) continue;
-        fan.unite(corner_slot[it->second.first], corner_slot[ca]);
-        fan.unite(corner_slot[it->second.second], corner_slot[cb]);
+        if (va > vb) std::swap(sa, sb);
+        sides.push_back({Mesh::edge_key(va, vb), sa, sb});
       }
+      s += n;
     }
+    std::sort(sides.begin(), sides.end(), [](const Side &a, const Side &b) { return a.key < b.key; });
+    for (size_t i = 0; i + 1 < sides.size(); i++)
+      if (sides[i].key == sides[i + 1].key) {
+        fan.unite((int)sides[i].lo, (int)sides[i + 1].lo);
+        fan.unite((int)sides[i].hi, (int)sides[i + 1].hi);
+      }
   }
-  std::unordered_map<int, int> root_local;
-  std::unordered_map<uint32_t, int> local;  // corner -> unknown
-  std::vector<uint32_t> verts;               // unknown -> mesh vertex
-  for (size_t i = 0; i < corners.size(); i++) {
-    auto [it, inserted] = root_local.emplace(fan.find((int)i), (int)verts.size());
-    if (inserted) verts.push_back(m.corner_verts[corners[i]]);
-    local[corners[i]] = it->second;
+  std::vector<int> root_local(ns, -1);
+  std::vector<int> local(ns);    // slot -> unknown
+  std::vector<uint32_t> verts;   // unknown -> mesh vertex
+  for (size_t i = 0; i < ns; i++) {
+    int r = fan.find((int)i);
+    if (root_local[r] < 0) {
+      root_local[r] = (int)verts.size();
+      verts.push_back(m.corner_verts[corners[i]]);
+    }
+    local[i] = root_local[r];
   }
   const int nv = (int)verts.size();
   Vec3 nsum(0.0f);
@@ -169,13 +197,14 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
   };
   std::vector<Tri> tris;
   tris.reserve(faces.size() * 2);
+  uint32_t slot = 0;
   for (uint32_t f : faces) {
-    uint32_t base = m.face_offsets[f], fn = m.face_size(f);
+    const uint32_t fn = m.face_size(f);
     for (uint32_t k = 1; k + 1 < fn; k++) {
       Tri t;
-      t.v[0] = local[base];
-      t.v[1] = local[base + k];
-      t.v[2] = local[base + k + 1];
+      t.v[0] = local[slot];
+      t.v[1] = local[slot + k];
+      t.v[2] = local[slot + k + 1];
       Vec3 p0 = m.positions[verts[t.v[0]]], p1 = m.positions[verts[t.v[1]]], p2 = m.positions[verts[t.v[2]]];
       Vec3 e1 = p1 - p0, e2 = p2 - p0;
       float l1 = length(e1);
@@ -193,25 +222,34 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
       }
       tris.push_back(t);
     }
+    slot += fn;
   }
-  /* Sparsity: neighbours of each free unknown (incl. itself), sorted. */
-  std::vector<std::vector<int>> nb((size_t)nfree);
-  for (const Tri &t : tris)
-    for (int j = 0; j < 3; j++)
-      if (col[t.v[j]] >= 0)
-        for (int k = 0; k < 3; k++)
-          if (col[t.v[k]] >= 0) nb[col[t.v[j]]].push_back(col[t.v[k]]);
+  /* Sparsity: neighbours of each free unknown (incl. itself), sorted, built
+   * with two counting passes into one flat array (CSR) - no per-row vectors. */
   std::vector<int> row_off((size_t)nfree + 1, 0), cols;
-  for (int i = 0; i < nfree; i++) {
-    auto &l = nb[i];
-    std::sort(l.begin(), l.end());
-    l.erase(std::unique(l.begin(), l.end()), l.end());
-    row_off[i + 1] = row_off[i] + (int)l.size();
+  {
+    std::vector<int> cnt((size_t)nfree + 1, 0);
+    for (const Tri &t : tris)
+      for (int j = 0; j < 3; j++)
+        if (col[t.v[j]] >= 0) cnt[col[t.v[j]] + 1] += 3;
+    for (int i = 0; i < nfree; i++) cnt[i + 1] += cnt[i];
+    std::vector<int> raw((size_t)cnt[nfree]), fill(cnt.begin(), cnt.end() - 1);
+    for (const Tri &t : tris)
+      for (int j = 0; j < 3; j++) {
+        int r = col[t.v[j]];
+        if (r < 0) continue;
+        for (int k = 0; k < 3; k++) raw[fill[r]++] = col[t.v[k]];  // -1 marks a pinned neighbour
+      }
+    cols.reserve(raw.size() / 2);
+    for (int i = 0; i < nfree; i++) {
+      int *b = raw.data() + cnt[i], *e = raw.data() + cnt[i + 1];
+      std::sort(b, e);
+      e = std::unique(b, e);
+      for (int *p = b; p < e; p++)
+        if (*p >= 0) cols.push_back(*p);
+      row_off[i + 1] = (int)cols.size();
+    }
   }
-  cols.reserve(row_off[nfree]);
-  for (auto &l : nb) cols.insert(cols.end(), l.begin(), l.end());
-  nb.clear();
-  nb.shrink_to_fit();
   std::vector<double> blocks((size_t)row_off[nfree] * 4, 0.0), rhs((size_t)nfree * 2, 0.0);
   auto block = [&](int i, int j) -> double * {
     const int *b = cols.data() + row_off[i], *e = cols.data() + row_off[i + 1];
@@ -288,44 +326,81 @@ void lscm_island(Mesh &m, const std::vector<uint32_t> &faces, bool parallel) {
       z[(size_t)i * 2 + 1] = M[2] * r0v + M[3] * r1v;
     }
   };
-  spmv(x, ap);
-  double bnorm = 0;
-  for (int i = 0; i < nx; i++) {
-    r[i] = rhs[i] - ap[i];
-    bnorm += rhs[i] * rhs[i];
-  }
-  precondition();
-  p = z;
-  double rz = 0;
-  for (int i = 0; i < nx; i++) rz += r[i] * z[i];
-  /* Stop at a relative residual of 1e-6 against |A^T b| (sub-texel for any
-   * reasonable texture), not against the initial residual: a good initial
-   * guess must not make the solver work harder. */
-  const double tol = 1e-12 * std::max(bnorm, 1e-30);
-  int max_iter = std::min(20000, 50 + nx * 2);
-  for (int it = 0; it < max_iter && bnorm > 0; it++) {
-    spmv(p, ap);
-    double pap = 0;
-    for (int i = 0; i < nx; i++) pap += p[i] * ap[i];
-    if (std::fabs(pap) < 1e-300) break;
-    double alpha = rz / pap, rr = 0;
-    for (int i = 0; i < nx; i++) {
-      x[i] += alpha * p[i];
-      r[i] -= alpha * ap[i];
-      rr += r[i] * r[i];
+  /* Blender factors the normal equations directly (Eigen SparseLU in
+   * intern/eigen/intern/linear_solver.cc). They are symmetric positive
+   * definite, so a sparse Cholesky (LDLT, AMD ordering) gives the same
+   * answer for less work. Conjugate gradients remain the fallback. */
+  bool solved = false;
+#ifdef BL_WITH_EIGEN
+  if (g_lscm_solver != LscmSolver::ConjugateGradient) {
+    std::vector<Eigen::Triplet<double>> trip;
+    trip.reserve((size_t)row_off[nfree] * 4);
+    for (int i = 0; i < nfree; i++)
+      for (int k = row_off[i]; k < row_off[i + 1]; k++) {
+        const double *B = blocks.data() + (size_t)k * 4;
+        const int j = cols[k];
+        trip.emplace_back(2 * i, 2 * j, B[0]);
+        trip.emplace_back(2 * i, 2 * j + 1, B[1]);
+        trip.emplace_back(2 * i + 1, 2 * j, B[2]);
+        trip.emplace_back(2 * i + 1, 2 * j + 1, B[3]);
+      }
+    Eigen::SparseMatrix<double> N(nx, nx);
+    N.setFromTriplets(trip.begin(), trip.end());
+    /* Measured on a 256^2 grid: SimplicialLDLT 1.1 s, SparseLU (Blender's
+     * choice) 3.4 s, CG + incomplete Cholesky 11 s. */
+    Eigen::Map<const Eigen::VectorXd> bvec(rhs.data(), nx);
+    Eigen::VectorXd sol;
+    bool ok = false;
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> ldlt(N);
+    if (ldlt.info() == Eigen::Success) {
+      sol = ldlt.solve(bvec);
+      ok = ldlt.info() == Eigen::Success;
     }
-    if (rr < tol) break;
+    if (ok && sol.allFinite()) {
+      for (int i = 0; i < nx; i++) x[i] = sol[i];
+      solved = true;
+    }
+  }
+#endif
+  if (!solved) {
+    spmv(x, ap);
+    double bnorm = 0;
+    for (int i = 0; i < nx; i++) {
+      r[i] = rhs[i] - ap[i];
+      bnorm += rhs[i] * rhs[i];
+    }
     precondition();
-    double rz2 = 0;
-    for (int i = 0; i < nx; i++) rz2 += r[i] * z[i];
-    double beta = rz2 / rz;
-    rz = rz2;
-    for (int i = 0; i < nx; i++) p[i] = z[i] + beta * p[i];
+    p = z;
+    double rz = 0;
+    for (int i = 0; i < nx; i++) rz += r[i] * z[i];
+    /* Stop at a relative residual of 1e-6 against |A^T b| (sub-texel for any
+     * reasonable texture), not against the initial residual: a good initial
+     * guess must not make the solver work harder. */
+    const double tol = 1e-12 * std::max(bnorm, 1e-30);
+    int max_iter = std::min(20000, 50 + nx * 2);
+    for (int it = 0; it < max_iter && bnorm > 0; it++) {
+      spmv(p, ap);
+      double pap = 0;
+      for (int i = 0; i < nx; i++) pap += p[i] * ap[i];
+      if (std::fabs(pap) < 1e-300) break;
+      double alpha = rz / pap, rr = 0;
+      for (int i = 0; i < nx; i++) {
+        x[i] += alpha * p[i];
+        r[i] -= alpha * ap[i];
+        rr += r[i] * r[i];
+      }
+      if (rr < tol) break;
+      precondition();
+      double rz2 = 0;
+      for (int i = 0; i < nx; i++) rz2 += r[i] * z[i];
+      double beta = rz2 / rz;
+      rz = rz2;
+      for (int i = 0; i < nx; i++) p[i] = z[i] + beta * p[i];
+    }
   }
   std::vector<Vec2> sol(nv);
   for (int i = 0; i < nv; i++) sol[i] = col[i] >= 0 ? Vec2((float)x[col[i] * 2], (float)x[col[i] * 2 + 1]) : x0[i];
-  for (uint32_t f : faces)
-    for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) m.uvs[c] = sol[local[c]];
+  for (size_t i = 0; i < ns; i++) m.uvs[corners[i]] = sol[local[i]];
   /* Keep islands front-facing in UV space (no mirrored islands). */
   float signed_area = 0;
   for (uint32_t f : faces) signed_area += face_area_uv(m, f);
@@ -371,26 +446,35 @@ int compute_islands(const Mesh &m, const Mask *mask, bool by_seams, std::vector<
   const size_t nf = m.face_count();
   face_island.assign(nf, -1);
   UnionFind uf(nf);
-  std::unordered_map<uint64_t, std::vector<uint32_t>> edge_corners;
-  edge_corners.reserve(m.corner_count());
+  /* Face sides sorted by edge key: the corners sharing an edge end up next to
+   * each other (a sort instead of an edge -> corners hash map). */
+  struct Side {
+    uint64_t key;
+    uint32_t corner;
+  };
+  std::vector<Side> sides;
+  sides.reserve(m.corner_count());
   for (size_t f = 0; f < nf; f++) {
     if (!in_mask(mask, f)) continue;
     uint32_t b = m.face_offsets[f], n = m.face_size(f);
-    for (uint32_t i = 0; i < n; i++)
-      edge_corners[Mesh::edge_key(m.corner_verts[b + i], m.corner_verts[b + (i + 1) % n])].push_back(b + i);
+    for (uint32_t i = 0; i < n; i++) sides.push_back({Mesh::edge_key(m.corner_verts[b + i], m.corner_verts[b + (i + 1) % n]), b + i});
   }
+  std::sort(sides.begin(), sides.end(), [](const Side &x, const Side &y) { return x.key < y.key || (x.key == y.key && x.corner < y.corner); });
   std::vector<uint32_t> cf = corner_faces(m);
   const bool uv = m.has_uvs();
   auto next = [&](uint32_t c) {
     uint32_t f = cf[c], b = m.face_offsets[f];
     return b + (c - b + 1) % m.face_size(f);
   };
-  for (auto &[key, corners] : edge_corners) {
-    if (corners.size() < 2) continue;
+  for (size_t s0 = 0, s1; s0 < sides.size(); s0 = s1) {
+    s1 = s0 + 1;
+    while (s1 < sides.size() && sides[s1].key == sides[s0].key) s1++;
+    if (s1 - s0 < 2) continue;
+    const uint64_t key = sides[s0].key;
     uint32_t a = (uint32_t)(key >> 32), bb = (uint32_t)(key & 0xFFFFFFFF);
     if (by_seams && m.is_seam(a, bb)) continue;
-    for (size_t i = 1; i < corners.size(); i++) {
-      uint32_t c1 = corners[0], c2 = corners[i];
+    for (size_t i = s0 + 1; i < s1; i++) {
+      uint32_t c1 = sides[s0].corner, c2 = sides[i].corner;
       if (!by_seams) {
         if (!uv) continue;
         /* UV of each edge vertex as seen from both faces must match. */
@@ -401,14 +485,15 @@ int compute_islands(const Mesh &m, const Mask *mask, bool by_seams, std::vector<
       uf.unite((int)cf[c1], (int)cf[c2]);
     }
   }
-  std::unordered_map<int, int> ids;
+  std::vector<int> ids(nf, -1);
+  int count = 0;
   for (size_t f = 0; f < nf; f++) {
     if (!in_mask(mask, f)) continue;
     int r = uf.find((int)f);
-    auto it = ids.emplace(r, (int)ids.size()).first;
-    face_island[f] = it->second;
+    if (ids[r] < 0) ids[r] = count++;
+    face_island[f] = ids[r];
   }
-  return (int)ids.size();
+  return count;
 }
 
 int unwrap_lscm(Mesh &m, const Mask *mask, float margin) {

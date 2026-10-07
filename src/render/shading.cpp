@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shading.h"
 
+#include "colormanagement.h"
+#include "display.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -110,7 +113,8 @@ Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l) {
   float D = a2 / (kPi * d * d);
   float vis = 0.5f / (nl * std::sqrt(nv * nv * (1 - a2) + a2) + nv * std::sqrt(nl * nl * (1 - a2) + a2));
   Vec3 f0 = fresnel_f0(s);
-  float fw = std::pow(1.0f - vh, 5.0f);
+  float fw = (1.0f - vh) * (1.0f - vh);
+  fw = fw * fw * (1.0f - vh);  // (1 - v.h)^5 without pow()
   Vec3 F = f0 + (Vec3(1.0f) - f0) * fw;
   Vec3 spec = F * (D * vis);
   Vec3 diff = s.albedo * ((1.0f - s.metallic) / kPi);
@@ -144,8 +148,8 @@ Vec3 equirect_to_dir(Vec2 uv, float rot) {
 
 static Vec3 gradient(const Environment &e, Vec3 d) {
   float t = d.y;
-  if (t >= 0) return lerp(e.equator, e.sky, std::pow(saturate(t), 0.5f));
-  return lerp(e.equator, e.ground, std::pow(saturate(-t * 4.0f), 0.5f));
+  if (t >= 0) return lerp(e.equator, e.sky, std::sqrt(saturate(t)));
+  return lerp(e.equator, e.ground, std::sqrt(saturate(-t * 4.0f)));
 }
 
 Vec3 Environment::radiance(Vec3 dir, float lod) const {
@@ -260,13 +264,28 @@ Vec3 tonemap(Vec3 c, ViewTransform vt, float exposure) {
   }
 }
 
+const std::vector<std::string> &view_transform_names() {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> n = {"Standard (built-in)", "Filmic (built-in)", "ACES (built-in)"};
+    for (const std::string &v : colormanagement::views()) n.push_back(v + " (OpenColorIO)");
+    return n;
+  }();
+  return names;
+}
+
+ViewTransform view_transform_from_setting(int index) {
+  if (index >= 0 && index <= 2) return (ViewTransform)index;
+  int ocio = index - 3;
+  if (ocio >= 0 && ocio < (int)colormanagement::views().size()) return (ViewTransform)((int)ViewTransform::OcioView + ocio);
+  return ViewTransform::Filmic;  // e.g. a scene saved with OpenColorIO, opened without it
+}
+
 uint32_t to_display_pixel(Vec3 hdr, ViewTransform vt, float exposure) {
-  Vec3 c = tonemap(hdr, vt, exposure);
-  auto q = [](float v) {
-    int i = (int)(linear_to_srgb(saturate(v)) * 255.0f + 0.5f);
-    return (uint32_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
-  };
-  return 0xFF000000u | (q(c.x) << 16) | (q(c.y) << 8) | q(c.z);
+  if ((int)vt >= (int)ViewTransform::OcioView)
+    return colormanagement::display_pixel((int)vt - (int)ViewTransform::OcioView, hdr * std::exp2(exposure));
+  uint32_t px;
+  display::encode_span(&hdr.x, &px, 1, vt, exposure);  // exact sRGB table, no pow()
+  return px;
 }
 
 }  // namespace bl

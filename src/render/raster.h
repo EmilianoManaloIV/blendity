@@ -83,6 +83,10 @@ struct RasterOptions {
   bool frustum_culling = true;
   /* Solve each row's exact inside span instead of scanning the whole bounding box. */
   bool span_rows = true;
+  /* Fast triangle setup: AVX2 rejection of 8 triangles at a time (when the CPU
+   * has it) and a no-clipping fast path. Off = the general path only (tests
+   * check both give the same image). */
+  bool fast_setup = true;
   int tile_size = 64;
   ShadeMode shade = ShadeMode::Gouraud;
 };
@@ -143,9 +147,16 @@ class Renderer3D {
     uint32_t id;
     uint32_t item, prim;
   };
+  /* A unit of setup work: up to kMaxChunkTris source triangles, from one or
+   * many draw items (packing small objects keeps the per-chunk tile tables,
+   * which every tile walks, few and small). */
+  struct ChunkRange {
+    uint32_t item, tri_begin, tri_end;
+  };
+  static constexpr uint32_t kRefShift = 16;  // vis / ref = (chunk << 16 | screen tri) + 1
+  static constexpr uint32_t kMaxChunkTris = 32767;  // near clipping can double it: < 65536
   struct Chunk {
-    int item;
-    uint32_t tri_begin, tri_end;
+    std::vector<ChunkRange> ranges;
     std::vector<ScreenTri> tris;
     std::vector<uint32_t> tile_offsets;  // size tiles+1
     std::vector<uint32_t> tile_tris;
@@ -161,6 +172,7 @@ class Renderer3D {
   std::vector<DrawItem> items_;
   std::vector<Mat4> normal_mats_;
   std::vector<std::vector<Vec4>> clip_pos_;
+  std::vector<std::vector<Vec4>> screen_pos_;  // x, y, depth, 1/w (valid where clip z >= 0)
   std::vector<std::vector<Vec3>> colors_;
   std::vector<Chunk> chunks_;
   size_t active_chunks_ = 0;

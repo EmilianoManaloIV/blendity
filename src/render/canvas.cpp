@@ -4,7 +4,13 @@
 #include "../core/core.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
+
+#ifdef BL_WITH_LIBPNG
+#  include <zlib.h>
+#endif
 
 namespace bl {
 
@@ -904,19 +910,66 @@ void chunk(std::string &png, const char *type, const std::string &data) {
 
 }  // namespace
 
-bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride) {
-  std::string raw;
-  raw.reserve((size_t)(width * 3 + 1) * height);
+/* zlib (level 6, dynamic Huffman) when built with Blender's libraries; else
+ * Blendity's LZ77 + fixed-Huffman encoder. */
+static std::string png_deflate(const std::string &raw) {
+#ifdef BL_WITH_LIBPNG
+  uLongf len = compressBound((uLong)raw.size());
+  std::string out(len, 0);
+  if (compress2((Bytef *)out.data(), &len, (const Bytef *)raw.data(), (uLong)raw.size(), 6) == Z_OK) {
+    out.resize(len);
+    return out;
+  }
+#endif
+  return zlib_compress(raw);
+}
+
+/* PNG row filters (PNG spec 9.2), chosen per row by the smallest sum of
+ * absolute residuals - libpng's adaptive heuristic. The first writer always
+ * used filter 0 (None): gradients barely compressed (22 MB for a 4K image). */
+static std::string png_filtered_rows(const uint32_t *pixels, int width, int height, int stride) {
+  const size_t rb = (size_t)width * 3;
+  std::vector<uint8_t> prev(rb, 0), cur(rb), cand[5];
+  for (auto &c : cand) c.resize(rb);
+  std::vector<std::string> rows((size_t)height);
+  auto paeth = [](int a, int b, int c) {
+    int p = a + b - c, pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
+    return pa <= pb && pa <= pc ? a : (pb <= pc ? b : c);
+  };
+  std::string out;
+  out.reserve((rb + 1) * height);
   for (int y = 0; y < height; y++) {
-    raw += (char)0;
     const uint32_t *row = pixels + (size_t)y * stride;
     for (int x = 0; x < width; x++) {
-      uint32_t p = row[x];
-      raw += (char)((p >> 16) & 255);
-      raw += (char)((p >> 8) & 255);
-      raw += (char)(p & 255);
+      cur[x * 3] = (uint8_t)(row[x] >> 16);
+      cur[x * 3 + 1] = (uint8_t)(row[x] >> 8);
+      cur[x * 3 + 2] = (uint8_t)row[x];
     }
+    int best = 0;
+    uint64_t best_cost = UINT64_MAX;
+    for (int f = 0; f < 5; f++) {
+      uint64_t cost = 0;
+      for (size_t i = 0; i < rb; i++) {
+        int a = i >= 3 ? cur[i - 3] : 0, b = prev[i], c = i >= 3 ? prev[i - 3] : 0;
+        int pred = f == 0 ? 0 : f == 1 ? a : f == 2 ? b : f == 3 ? (a + b) / 2 : paeth(a, b, c);
+        uint8_t v = (uint8_t)(cur[i] - pred);
+        cand[f][i] = v;
+        cost += (uint64_t)std::abs((int)(int8_t)v);
+      }
+      if (cost < best_cost) {
+        best_cost = cost;
+        best = f;
+      }
+    }
+    out += (char)best;
+    out.append((const char *)cand[best].data(), rb);
+    prev.swap(cur);
   }
+  return out;
+}
+
+bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride) {
+  std::string raw = png_filtered_rows(pixels, width, height, stride);
   std::string png("\x89PNG\r\n\x1a\n", 8);
   std::string ihdr;
   be32(ihdr, (uint32_t)width);
@@ -927,7 +980,7 @@ bool write_png(const std::string &path, const uint32_t *pixels, int width, int h
   ihdr += (char)0;
   ihdr += (char)0;
   chunk(png, "IHDR", ihdr);
-  chunk(png, "IDAT", zlib_compress(raw));
+  chunk(png, "IDAT", png_deflate(raw));
   chunk(png, "IEND", "");
   return fs::write_file(path, png);
 }

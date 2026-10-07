@@ -7,10 +7,13 @@
 #include "../src/render/raster.h"
 #include "../src/research/research.h"
 #include "../src/image/image.h"
+#include "../src/render/colormanagement.h"
+#include "../src/render/display.h"
 #include "../src/render/pathtracer.h"
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
+#include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
 #include "../src/scene/uv.h"
 
@@ -18,9 +21,12 @@
 #include <atomic>
 #include <unordered_map>
 #include <cmath>
+#include <cstring>
+#include <limits>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -101,9 +107,14 @@ static std::vector<uint8_t> select_verts(const Mesh &m, std::initializer_list<ui
 
 static void modeling_tests();
 static void uv_tests();
+static void subdiv_tests();
+static void physics_tests();
+static void library_modeling_tests();
 static void image_tests();
 static void import_and_material_tests();
 static void render_tests();
+static void file_tests();
+static void colormanagement_tests();
 
 int main() {
   register_builtin_components();
@@ -355,6 +366,58 @@ int main() {
     r.flush();
     CHECK(rt.id_at(32, 32) == 7);
   });
+  test("render: fast triangle setup (AVX2 + no-clip path) gives the same image as the general path", [] {
+    /* Many small far objects (mostly sub-pixel triangles), a big mesh that
+     * takes the separate vertex stage, a double-sided plane, and a floor that
+     * crosses the near plane (clipping). */
+    std::vector<MeshPtr> keep;
+    std::vector<DrawItem> items;
+    auto add = [&](MeshPtr m, Mat4 model, uint32_t id, bool two_sided = false) {
+      keep.push_back(m);
+      DrawItem it;
+      it.mesh = &m->render_mesh();
+      it.model = model;
+      it.id = id;
+      it.double_sided = two_sided;
+      it.albedo = Vec3(0.2f + 0.1f * (id % 7), 0.5f, 0.8f - 0.05f * (id % 9));
+      items.push_back(it);
+    };
+    auto ico = primitives::ico_sphere(0.5f, 2);
+    for (int i = 0; i < 400; i++)
+      add(ico, Mat4::translate({(i % 20 - 10) * 1.5f, (i / 20 - 10) * 1.5f, 25.0f + (i % 3) * 10.0f}), 10 + i);
+    add(primitives::ico_sphere(1.5f, 5), Mat4::translate({0, 0, 4}), 2);
+    add(primitives::plane(20.0f), Mat4::translate({0, -1.5f, 0}), 3, true);
+    add(primitives::quad(3.0f), Mat4::translate({3, 1, 6}), 4, true);
+    Mat4 v = Mat4::look_at({0, 0, -3}, {0, 0, 10}, {0, 1, 0});
+    Mat4 p = Mat4::perspective(70 * kDeg2Rad, 320 / 200.0f, 0.1f, 100);
+    LightingEnv env;
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.3f, -1, 0.4f));
+    env.lights.push_back(sun);
+    env.camera_pos = {0, 0, -3};
+    for (ShadeMode mode : {ShadeMode::Gouraud, ShadeMode::Deferred}) {
+      Image img[2];
+      RenderTarget rt[2];
+      for (int k = 0; k < 2; k++) {
+        img[k].resize(320, 200);
+        rt[k].attach(img[k], {0, 0, 320, 200});
+        Renderer3D r;
+        RasterOptions opt;
+        opt.shade = mode;
+        opt.fast_setup = k == 0;
+        opt.multithreaded = k == 0;
+        r.begin(&rt[k], v, p, env, opt);
+        r.clear(0xFF000000);
+        for (auto &it : items) r.add(it);
+        r.flush();
+      }
+      CHECK(img[0].pixels == img[1].pixels);
+      CHECK(rt[0].depth == rt[1].depth);
+      CHECK(rt[0].ids == rt[1].ids);
+      std::set<uint32_t> seen(rt[0].ids.begin(), rt[0].ids.end());
+      CHECK(seen.count(2) && seen.count(3) && seen.count(4) && seen.size() > 100);  // all kinds drawn
+    }
+  });
   test("jobs: parallel_for covers every index exactly once", [] {
     for (int64_t n : {1, 7, 1000, 123457}) {
       std::vector<std::atomic<int>> hits((size_t)n);
@@ -409,9 +472,14 @@ int main() {
 
   modeling_tests();
   uv_tests();
+  subdiv_tests();
+  physics_tests();
+  library_modeling_tests();
   image_tests();
   import_and_material_tests();
   render_tests();
+  file_tests();
+  colormanagement_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -542,6 +610,133 @@ static void modeling_tests() {
   });
 }
 
+static double mesh_volume(const Mesh &m) {
+  double v = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *c = m.face_verts(f);
+    for (uint32_t k = 1; k + 1 < m.face_size(f); k++)
+      v += dot(m.positions[c[0]], cross(m.positions[c[k]], m.positions[c[k + 1]]));
+  }
+  return v / 6.0;
+}
+
+static void library_modeling_tests() {
+  test("boolean: Manifold difference / union / intersect", [] {
+    if (!meshops::boolean_available()) return;
+    Mesh a = *primitives::cube();  // unit cube at the origin
+    const Mat4 corner = Mat4::translate({0.5f, 0.5f, 0.5f});
+    Mesh d = a;
+    CHECK(meshops::boolean_op(d, *primitives::cube(), corner, meshops::BooleanOp::Difference));
+    CHECK_NEAR(mesh_volume(d), 1.0 - 0.125, 1e-4);
+    CHECK(closed_manifold(d));
+    CHECK(d.face_count() <= 12);  // faces rebuilt as polygons, not a triangle soup
+    Mesh u = a;
+    CHECK(meshops::boolean_op(u, *primitives::cube(), corner, meshops::BooleanOp::Union));
+    CHECK_NEAR(mesh_volume(u), 2.0 - 0.125, 1e-4);
+    Mesh i = a;
+    CHECK(meshops::boolean_op(i, *primitives::cube(), corner, meshops::BooleanOp::Intersect));
+    CHECK_NEAR(mesh_volume(i), 0.125, 1e-4);
+    /* An open mesh is refused and left untouched. */
+    Mesh keep = a;
+    std::string err;
+    CHECK(!meshops::boolean_op(keep, *primitives::plane(2.0f, 1), Mat4::identity(), meshops::BooleanOp::Difference, &err));
+    CHECK(!err.empty() && keep.face_count() == 6);
+    /* As a modifier: follows the cutter object. */
+    Scene s;
+    GameObject *target = s.create("Target");
+    target->add<MeshFilter>()->mesh = primitives::cube();
+    GameObject *cutter = s.create("Cutter");
+    cutter->add<MeshFilter>()->mesh = primitives::cube();
+    cutter->set_local_position({0.5f, 0.5f, 0.5f});
+    target->add<BooleanModifier>()->object = "Cutter";
+    CHECK_NEAR(mesh_volume(*target->evaluated_mesh()), 0.875, 1e-4);
+    cutter->set_local_position({5, 0, 0});  // moved away: nothing to cut
+    CHECK_NEAR(mesh_volume(*target->evaluated_mesh()), 1.0, 1e-4);
+  });
+  test("decimate: meshoptimizer keeps the shape at a quarter of the triangles", [] {
+    if (!meshops::decimate_available()) return;
+    Mesh m = *primitives::ico_sphere(0.5f, 4);
+    size_t before = 0;
+    for (size_t f = 0; f < m.face_count(); f++) before += m.face_size(f) - 2;
+    double vol = mesh_volume(m);
+    CHECK(meshops::decimate(m, 0.25f));
+    CHECK(m.face_count() <= before / 4 + 2 && m.face_count() >= before / 5);
+    CHECK(closed_manifold(m));
+    CHECK_NEAR(mesh_volume(m) / vol, 1.0, 0.03);
+    float maxr = 0, minr = 1e9f;
+    for (Vec3 p : m.positions) { maxr = std::max(maxr, length(p)); minr = std::min(minr, length(p)); }
+    CHECK(maxr < 0.505f && minr > 0.47f);  // still a sphere
+  });
+}
+
+static void physics_tests() {
+  test("physics: Jolt drops a box onto a plane and it comes to rest", [] {
+    if (!physics_jolt_available()) return;
+    Scene s;
+    GameObject *ground = s.create("Ground");
+    ground->add<MeshFilter>()->mesh = primitives::plane(10.0f, 1);
+    ground->add<MeshRenderer>();
+    GameObject *box = s.create("Box");
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->add<MeshRenderer>();
+    box->add<Rigidbody>()->bounciness = 0.0f;
+    box->set_local_position({0, 3, 0});
+    PlayContext ctx;
+    s.start(ctx);
+    CHECK(s.physics != nullptr);
+    ctx.dt = 1.0f / 60.0f;
+    float lowest = 3;
+    for (int i = 0; i < 240; i++) {  // 4 s
+      s.update(ctx);
+      lowest = std::min(lowest, box->world_position().y);
+    }
+    CHECK_NEAR(box->world_position().y, 0.5f, 0.05f);  // a 1 m cube resting on y = 0
+    CHECK(lowest > 0.3f);                              // never fell through
+    CHECK(length(box->get<Rigidbody>()->velocity) < 0.05f);
+  });
+}
+
+static void subdiv_tests() {
+  test("subdivision: OpenSubdiv matches Blendity's Catmull-Clark", [] {
+    if (!meshops::subdiv_opensubdiv_available()) return;
+    for (auto src : {primitives::cube(), primitives::ico_sphere(0.5f, 1), primitives::cylinder(0.5f, 1.0f, 8)}) {
+      Mesh base = *src;
+      base.seams.clear();
+      meshops::set_subdiv_opensubdiv(false);
+      Mesh ours = meshops::subdivide(base, 2, true);
+      meshops::set_subdiv_opensubdiv(true);
+      Mesh osd = meshops::subdivide(base, 2, true);
+      meshops::set_subdiv_opensubdiv(false);
+      CHECK(ours.vert_count() == osd.vert_count());
+      CHECK(ours.face_count() == osd.face_count());
+      CHECK(euler_characteristic(osd) == 2);
+      CHECK(closed_manifold(osd));
+      /* Same limit-approaching surface: every vertex of one has a twin in the other. */
+      float worst = 0;
+      for (Vec3 p : osd.positions) {
+        float best = 1e30f;
+        for (Vec3 q : ours.positions) best = std::min(best, length_sq(p - q));
+        worst = std::max(worst, best);
+      }
+      CHECK(std::sqrt(worst) < 1e-4f);
+    }
+    /* UVs (face-varying) and material slots come through. */
+    Mesh g = *primitives::grid(2.0f, 3, 3);
+    g.face_material.assign(g.face_count(), 0);
+    g.face_material[4] = 2;
+    meshops::set_subdiv_opensubdiv(true);
+    Mesh s = meshops::subdivide(g, 1, true);
+    meshops::set_subdiv_opensubdiv(false);
+    CHECK(s.has_uvs() && s.face_count() == 36);
+    int with_mat = 0;
+    for (size_t f = 0; f < s.face_count(); f++) with_mat += s.material_of(f) == 2;
+    CHECK(with_mat == 4);
+    bool inside = true;
+    for (Vec2 t : s.uvs) inside = inside && t.x >= -1e-5f && t.y >= -1e-5f && t.x <= 1 + 1e-5f && t.y <= 1 + 1e-5f;
+    CHECK(inside);
+  });
+}
+
 static void uv_tests() {
   test("uv: LSCM unrolls a cut cylinder into a rectangle", [] {
     Mesh m = *primitives::cylinder(0.5f, 2.0f, 24);
@@ -644,6 +839,48 @@ static void image_tests() {
     }
     CHECK(worst < 1.0f / 128.0f);
   });
+  test("image: library codecs agree with Blendity's decoders", [] {
+    const int w = 64, h = 48;
+    std::vector<uint32_t> px((size_t)w * h);
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) px[(size_t)y * w + x] = 0xFF000000u | (uint32_t)(x * 4) << 16 | (uint32_t)(y * 5) << 8 | (uint32_t)((x * y) & 255);
+    std::string png = fs::join(test_dir(), "lib_rt.png"), jpg = fs::join(test_dir(), "lib_rt.jpg"), bytes, err;
+    CHECK(write_png(png, px.data(), w, h, w) && write_jpeg(jpg, px.data(), w, h, w, 95));
+    for (const std::string &path : {png, jpg}) {
+      Bitmap a, b;
+      CHECK(fs::read_file(path, bytes));
+      set_image_library_codecs(true);
+      CHECK(decode_image(bytes, a, err));
+      set_image_library_codecs(false);
+      CHECK(decode_image(bytes, b, err));
+      set_image_library_codecs(true);
+      CHECK(a.width == b.width && a.height == b.height && a.rgba8.size() == b.rgba8.size());
+      int worst = 0;
+      for (size_t i = 0; i < a.rgba8.size() && a.rgba8.size() == b.rgba8.size(); i++) worst = std::max(worst, std::abs((int)a.rgba8[i] - (int)b.rgba8[i]));
+      /* PNG is lossless: identical. JPEG decoders may round the IDCT and
+       * chroma upsampling differently by a few levels. */
+      CHECK(worst <= (path == png ? 0 : 8));
+    }
+  });
+  test("image: OpenEXR round-trip (half float)", [] {
+    if (!exr_available()) return;
+    const int w = 33, h = 17;
+    std::vector<float> rgb((size_t)w * h * 3);
+    for (size_t i = 0; i < rgb.size(); i++) rgb[i] = 0.01f + (float)(i % 101) * 0.73f;  // up to ~73: true HDR
+    std::string path = fs::join(test_dir(), "rt.exr"), bytes, err;
+    CHECK(write_exr(path, rgb.data(), w, h, true));
+    Bitmap b;
+    CHECK(fs::read_file(path, bytes) && decode_image(bytes, b, err));
+    CHECK(b.is_float && b.width == w && b.height == h);
+    float worst = 0;
+    for (int i = 0; i < w * h && b.width == w; i++)
+      for (int c = 0; c < 3; c++) {
+        float a = rgb[(size_t)i * 3 + c];
+        worst = std::max(worst, std::fabs(b.rgbaf[(size_t)i * 4 + c] - a) / a);
+      }
+    CHECK(worst < 1e-3f);  // half float: 11-bit mantissa
+    CHECK(image_extension_supported(".exr"));
+  });
   test("image: mipmapped texture sampling", [] {
     Bitmap b;
     b.width = 64;
@@ -727,35 +964,289 @@ static void import_and_material_tests() {
   });
 }
 
+static void file_tests() {
+  test("io: Zstandard-compressed scenes", [] {
+    if (!scene_compression_available()) return;
+    Scene s;
+    build_default_scene(s);
+    for (int i = 0; i < 4; i++) s.find_by_name("Cube")->add<SubdivisionSurface>()->levels = 1;
+    s.compress = true;
+    std::string path = fs::join(test_dir(), "compressed.scene"), raw, err;
+    CHECK(save_scene(s, path));
+    CHECK(fs::read_file(path, raw) && raw.size() > 4 && (uint8_t)raw[0] == 0x28 && (uint8_t)raw[3] == 0xFD);
+    CHECK(raw.size() * 2 < save_scene_text(s).size());  // text scenes compress well
+    Scene l;
+    CHECK(load_scene(path, l, err));
+    CHECK(l.compress);
+    CHECK(save_scene_text(l) == save_scene_text(s));
+  });
+}
+
+static void colormanagement_tests() {
+  test("display: exact sRGB table and SIMD encoders", [] {
+    /* Every 61st float in [0, 1] (17M values) against the double-precision
+     * curve; also count how often single-precision powf rounds differently. */
+    std::atomic<int64_t> bad{0}, powf_off{0}, powf_far{0};
+    const uint32_t one = 0x3F800000u;
+    const int64_t n = one / 61 + 1;
+    JobSystem::global().parallel_for(n, 1 << 16, [&](int64_t b, int64_t e) {
+      int64_t lb = 0, lo = 0, lf = 0;
+      for (int64_t i = b; i < e; i++) {
+        uint32_t u = (uint32_t)std::min<int64_t>(i * 61, one);
+        float v;
+        std::memcpy(&v, &u, 4);
+        int t = display::linear_to_srgb8(v), ref = display::srgb8_reference(v);
+        int pf = std::clamp((int)(linear_to_srgb(v) * 255.0f + 0.5f), 0, 255);
+        lb += t != ref;
+        lo += pf != ref;
+        lf += std::abs(pf - ref) > 1;
+      }
+      bad += lb;
+      powf_off += lo;
+      powf_far += lf;
+    });
+    CHECK(bad == 0);
+    CHECK(powf_far == 0);
+    std::printf("    sRGB table: exact on %lld floats; float powf rounds to the neighbouring step on %lld (1 in %lld)\n",
+                (long long)n, (long long)powf_off.load(), (long long)(powf_off ? n / powf_off : 0));
+    CHECK(display::linear_to_srgb8(-1.0f) == 0 && display::linear_to_srgb8(2.0f) == 255 && display::linear_to_srgb8(1.0f) == 255);
+    CHECK(display::linear_to_srgb8(std::numeric_limits<float>::quiet_NaN()) == 0);
+    CHECK(display::linear_to_srgb8(std::numeric_limits<float>::infinity()) == 255);
+    /* All kernels agree (Standard exactly; curves within one step, FMA rounding). */
+    uint32_t rng = 7;
+    std::vector<float> rgb(3 * 1003);
+    for (float &f : rgb) {
+      rng = rng * 1664525u + 1013904223u;
+      f = std::exp2(((rng >> 8) & 0xFFFF) / 65536.0f * 16.0f - 10.0f);
+    }
+    rgb[5] = -1.0f;
+    rgb[7] = std::numeric_limits<float>::quiet_NaN();
+    for (ViewTransform vt : {ViewTransform::Standard, ViewTransform::Filmic, ViewTransform::ACES}) {
+      std::vector<uint32_t> ref(1003), got(1003);
+      display::set_kernel(display::Kernel::Scalar);
+      display::encode_span(rgb.data(), ref.data(), ref.size(), vt, 0.5f);
+      for (display::Kernel k : {display::Kernel::SSE41, display::Kernel::AVX2}) {
+        display::set_kernel(k);
+        display::encode_span(rgb.data(), got.data(), got.size(), vt, 0.5f);
+        int worst = 0;
+        for (size_t i = 0; i < ref.size(); i++)
+          for (int s = 0; s < 32; s += 8) worst = std::max(worst, std::abs((int)((ref[i] >> s) & 255) - (int)((got[i] >> s) & 255)));
+        CHECK(worst <= (vt == ViewTransform::Standard ? 0 : 1));
+      }
+    }
+    display::set_kernel(display::Kernel::Auto);
+    std::printf("    display kernel: %s\n", display::kernel_name(display::active_kernel()));
+  });
+  test("colour: OpenColorIO views baked into LUTs match OCIO", [] {
+    if (!colormanagement::available()) return;
+    CHECK(colormanagement::view_index("AgX") >= 0);
+    CHECK(colormanagement::view_index("Filmic") >= 0);
+    uint32_t rng = 99;
+    auto rnd = [&] { rng = rng * 1664525u + 1013904223u; return (rng >> 8) / 16777216.0f; };
+    std::vector<float> in, ref(3 * 2000);
+    for (int i = 0; i < 2000; i++)
+      for (int k = 0; k < 3; k++) in.push_back(std::exp2(rnd() * 16.0f - 10.0f) * (rnd() < 0.05f ? 0.0f : 1.0f));  // 2^-10 .. 2^6, some zeros
+    for (const char *name : {"AgX", "Filmic", "Khronos PBR Neutral", "Standard"}) {
+      int v = colormanagement::view_index(name);
+      if (v < 0) continue;
+      CHECK(colormanagement::reference(v, in.data(), ref.data(), 2000));
+      std::vector<float> errs;
+      for (int i = 0; i < 2000; i++) {
+        Vec3 d = colormanagement::display_rgb(v, {in[i * 3], in[i * 3 + 1], in[i * 3 + 2]});
+        float e = 0;
+        for (int k = 0; k < 3; k++)  // compare what reaches the screen: both clamped
+          e = std::max(e, std::fabs(std::clamp(d[k], 0.0f, 1.0f) - std::clamp(ref[i * 3 + k], 0.0f, 1.0f)));
+        errs.push_back(e * 255.0f);
+      }
+      std::sort(errs.begin(), errs.end());
+      float p99 = errs[errs.size() * 99 / 100], worst = errs.back();
+      std::printf("    %-20s LUT vs OpenColorIO: 99%% within %.2f / 255, worst %.2f / 255\n", name, p99, worst);
+      /* The worst cases are near-pure primaries (one channel ~300x below the
+       * others), where AgX / PBR Neutral gamut-compress with hard kinks. */
+      CHECK(p99 < 1.5f);
+      CHECK(worst < 6.0f);
+    }
+    /* The setting index maps through the names list. */
+    int agx = colormanagement::view_index("AgX");
+    CHECK((int)view_transform_from_setting(3 + agx) == (int)ViewTransform::OcioView + agx);
+    CHECK(view_transform_from_setting(1) == ViewTransform::Filmic);
+  });
+}
+
 static void render_tests() {
-  test("pathtracer: BVH matches brute force", [] {
+  test("pathtracer: BVH and Embree match brute force", [] {
     auto sphere = primitives::ico_sphere(0.5f, 3);
     auto torus = primitives::torus();
     const RenderMesh &rs = sphere->render_mesh_tangents(), &rt = torus->render_mesh_tangents();
     Mat4 ms = Mat4::translate({0.3f, 0.1f, 0}), mt = Mat4::trs({-0.6f, 0, 0.4f}, Quat::euler({30, 10, 0}), {1, 1, 1});
-    PathTracer pt;
-    Environment env;
-    pt.build({{&rs, ms, nullptr}, {&rt, mt, nullptr}}, {}, env);
-    uint32_t rng = 12345;
-    auto rnd = [&] { rng = rng * 1664525u + 1013904223u; return (rng >> 8) / 16777216.0f; };
-    int mismatches = 0, hits = 0;
-    for (int i = 0; i < 2000; i++) {
-      Vec3 o{rnd() * 4 - 2, rnd() * 4 - 2, -3};
-      Ray r{o, normalize(Vec3(rnd() - 0.5f, rnd() - 0.5f, 1.0f) + (Vec3(0, 0, 0) - o) * 0.2f)};
-      float best = 1e30f;
-      for (auto [mesh, model] : {std::pair{&rs, ms}, std::pair{&rt, mt}})
-        for (size_t t = 0; t < mesh->tri_count(); t++) {
-          float d = ray_triangle(r, model.point(mesh->positions[mesh->indices[t * 3]]), model.point(mesh->positions[mesh->indices[t * 3 + 1]]),
-                                 model.point(mesh->positions[mesh->indices[t * 3 + 2]]));
-          if (d > 0 && d < best) best = d;
+    for (bool embree : {false, true}) {
+      if (embree && !PathTracer::embree_available()) continue;
+      PathTracer pt;
+      PTSettings ps;
+      ps.use_embree = embree;
+      pt.set_settings(ps);
+      Environment env;
+      pt.build({{&rs, ms, nullptr}, {&rt, mt, nullptr}}, {}, env);
+      CHECK(std::string(pt.ray_backend()) == (embree ? "Embree" : "Blendity BVH"));
+      /* object and triangle ids must agree with the brute-force hit too */
+      uint32_t rng = 12345;
+      auto rnd = [&] { rng = rng * 1664525u + 1013904223u; return (rng >> 8) / 16777216.0f; };
+      int mismatches = 0, hits = 0;
+      for (int i = 0; i < 2000; i++) {
+        Vec3 o{rnd() * 4 - 2, rnd() * 4 - 2, -3};
+        Ray r{o, normalize(Vec3(rnd() - 0.5f, rnd() - 0.5f, 1.0f) + (Vec3(0, 0, 0) - o) * 0.2f)};
+        float best = 1e30f;
+        uint32_t best_obj = UINT32_MAX, best_tri = UINT32_MAX;
+        const std::pair<const RenderMesh *, Mat4> objs[2] = {{&rs, ms}, {&rt, mt}};
+        for (uint32_t ob = 0; ob < 2; ob++) {
+          auto [mesh, model] = objs[ob];
+          for (size_t t = 0; t < mesh->tri_count(); t++) {
+            float d = ray_triangle(r, model.point(mesh->positions[mesh->indices[t * 3]]), model.point(mesh->positions[mesh->indices[t * 3 + 1]]),
+                                   model.point(mesh->positions[mesh->indices[t * 3 + 2]]));
+            if (d > 0 && d < best) { best = d; best_obj = ob; best_tri = (uint32_t)t; }
+          }
         }
-      PathTracer::Hit h;
-      bool got = pt.intersect(r, h);
-      hits += got;
-      if (got != (best < 1e29f) || (got && std::fabs(h.t - best) > 1e-3f)) mismatches++;
+        PathTracer::Hit h;
+        bool got = pt.intersect(r, h);
+        hits += got;
+        if (got != (best < 1e29f) || (got && std::fabs(h.t - best) > 1e-3f)) mismatches++;
+        else if (got && (h.object != best_obj || h.tri != best_tri)) mismatches++;
+      }
+      CHECK(hits > 200);
+      CHECK(mismatches == 0);
     }
-    CHECK(hits > 200);
-    CHECK(mismatches == 0);
+  });
+  test("pathtracer: denoisers move a 4-sample render toward the reference", [] {
+    auto sphere = primitives::uv_sphere(0.5f, 32, 24);
+    auto plane = primitives::plane(6.0f, 1);
+    std::vector<MaterialPtr> mats = {make_material("grey", {0.7f, 0.7f, 0.7f})};
+    Environment env;
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.5f, -1.0f, 0.3f));
+    sun.intensity = 2.0f;
+    std::vector<PTObject> objs = {{&sphere->render_mesh_tangents(), Mat4::translate({0, 0.5f, 0}), &mats},
+                                  {&plane->render_mesh_tangents(), Mat4::identity(), &mats}};
+    const int W = 48, H = 48;
+    auto render = [&](int spp, bool denoise, bool oidn) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_oidn = oidn;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 1.5f, -3}, {0, 0.4f, 0}, {0, 1, 0}), Mat4::perspective(45 * kDeg2Rad, 1, 0.1f, 50), W, H);
+      pt.render(1e9, spp);
+      return pt.linear_rgb(denoise);
+    };
+    auto rmse = [](const std::vector<float> &a, const std::vector<float> &b) {
+      double e = 0;
+      for (size_t i = 0; i < a.size(); i++) e += (a[i] - b[i]) * (a[i] - b[i]);
+      return std::sqrt(e / a.size());
+    };
+    std::vector<float> ref = render(512, false, false), noisy = render(4, false, false);
+    double e_noisy = rmse(noisy, ref), e_atrous = rmse(render(4, true, false), ref);
+    CHECK(e_atrous < e_noisy * 0.8);
+    if (PathTracer::oidn_available()) {
+      double e_oidn = rmse(render(4, true, true), ref);
+      std::printf("    RMSE vs 512 spp: noisy %.4f, A-Trous %.4f, OpenImageDenoise %.4f\n", e_noisy, e_atrous, e_oidn);
+      CHECK(e_oidn < e_noisy * 0.6);
+    }
+  });
+  test("pathtracer: mesh-light sampling with MIS is unbiased and cuts noise", [] {
+    /* A large emissive panel over a floor and a box: BSDF sampling alone also
+     * converges here, so both estimators must agree on the mean. */
+    auto cube = primitives::cube(1.0f);
+    auto panel = primitives::quad(1.0f);
+    std::vector<MaterialPtr> grey = {make_material("grey", {0.6f, 0.6f, 0.6f})};
+    std::vector<MaterialPtr> light = {make_material("light", {0, 0, 0})};
+    light[0]->emission = {1.0f, 0.9f, 0.8f};
+    light[0]->emission_strength = 5.0f;
+    std::vector<PTObject> objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, -0.05f, 0}, Quat(), {8, 0.1f, 8}), &grey},
+                                  {&cube->render_mesh_tangents(), Mat4::trs({0.3f, 0.5f, 0}, Quat::euler({0, 25, 0}), {1, 1, 1}), &grey},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({0, 3, 0}, Quat::euler({90, 0, 0}), {3, 3, 1}), &light}};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    auto render = [&](int spp, bool nee) {
+      PathTracer pt;
+      PTSettings st;
+      st.sample_mesh_lights = nee;
+      st.max_bounces = 4;
+      st.clamp_indirect = 0;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 2, -4}, {0, 0.5f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 4.0f / 3.0f, 0.05f, 50), 32, 24);
+      pt.render(1e9, spp);
+      return pt.linear_rgb(false);
+    };
+    auto mean = [](const std::vector<float> &a) {
+      double s = 0;
+      for (float v : a) s += v;
+      return s / a.size();
+    };
+    auto rmse = [](const std::vector<float> &a, const std::vector<float> &b) {
+      double e = 0;
+      for (size_t i = 0; i < a.size(); i++) e += (a[i] - b[i]) * (a[i] - b[i]);
+      return std::sqrt(e / a.size());
+    };
+    std::vector<float> bsdf_ref = render(8192, false), nee_ref = render(8192, true);
+    std::printf("    mean radiance: BSDF-only %.4f, mesh-light NEE + MIS %.4f\n", mean(bsdf_ref), mean(nee_ref));
+    CHECK(std::fabs(mean(nee_ref) / mean(bsdf_ref) - 1.0) < 0.01);
+    double e_bsdf = rmse(render(64, false), nee_ref), e_nee = rmse(render(64, true), nee_ref);
+    std::printf("    RMSE at 64 spp: BSDF-only %.4f, NEE + MIS %.4f\n", e_bsdf, e_nee);
+    CHECK(e_nee < e_bsdf * 0.7);
+  });
+  test("pathtracer: OpenPGL path guiding learns and stays unbiased", [] {
+    if (!PathTracer::guiding_available()) return;
+    /* Two rooms joined by a doorway, the light only in the far one: the camera
+     * room is lit through the opening - the case path guiding is for. */
+    auto cube = primitives::cube(1.0f);
+    auto panel = primitives::quad(1.0f);
+    std::vector<MaterialPtr> grey = {make_material("grey", {0.6f, 0.6f, 0.6f})};
+    std::vector<MaterialPtr> light = {make_material("light", {0, 0, 0})};
+    light[0]->emission = {1, 1, 1};
+    light[0]->emission_strength = 40.0f;
+    std::vector<PTObject> objs;
+    auto wall = [&](Vec3 lo, Vec3 hi) { objs.push_back({&cube->render_mesh_tangents(), Mat4::trs((lo + hi) * 0.5f, Quat(), hi - lo), &grey}); };
+    wall({-3.1f, -0.1f, -3.1f}, {3.1f, 0.0f, 9.1f});   // floor
+    wall({-3.1f, 4.0f, -3.1f}, {3.1f, 4.1f, 9.1f});    // ceiling
+    wall({-3.1f, 0.0f, -3.1f}, {-3.0f, 4.0f, 9.1f});   // side walls
+    wall({3.0f, 0.0f, -3.1f}, {3.1f, 4.0f, 9.1f});
+    wall({-3.0f, 0.0f, -3.1f}, {3.0f, 4.0f, -3.0f});   // end walls
+    wall({-3.0f, 0.0f, 9.0f}, {3.0f, 4.0f, 9.1f});
+    wall({-3.0f, 0.0f, 2.95f}, {-0.5f, 4.0f, 3.05f});  // divider with a doorway
+    wall({0.5f, 0.0f, 2.95f}, {3.0f, 4.0f, 3.05f});
+    wall({-0.5f, 2.0f, 2.95f}, {0.5f, 4.0f, 3.05f});
+    objs.push_back({&panel->render_mesh_tangents(), Mat4::trs({0, 3.95f, 6.0f}, Quat::euler({90, 0, 0}), {1, 1, 1}), &light});
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const int W = 64, H = 48;
+    auto render = [&](int spp, bool guiding) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_guiding = guiding;
+      st.guiding_training_samples = 128;
+      st.max_bounces = 6;
+      st.clamp_indirect = 0;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 1.6f, -2.6f}, {0, 1.0f, 3.0f}, {0, 1, 0}), Mat4::perspective(70 * kDeg2Rad, 4.0f / 3.0f, 0.05f, 50), W, H);
+      pt.render(1e9, spp);
+      if (guiding) CHECK(pt.guiding_active() && pt.stats().guiding_updates > 0);
+      return pt.linear_rgb(false);
+    };
+    auto mean = [](const std::vector<float> &a) {
+      double s = 0;
+      for (float v : a) s += v;
+      return s / a.size();
+    };
+    /* Unbiased: guiding changes which directions are sampled, never the mean.
+     * (Whether it lowers the error depends on how much the field learned: at
+     * this tiny size it trains on ~10k samples, too few - the stress suite
+     * measures the benefit at a realistic resolution.) */
+    std::vector<float> ref = render(4096, false), guided = render(512, true);
+    std::printf("    mean radiance: guided %.4f vs reference %.4f\n", mean(guided), mean(ref));
+    CHECK(std::fabs(mean(guided) / mean(ref) - 1.0) < 0.04);
   });
   test("pathtracer: white furnace (energy conservation)", [] {
     auto sphere = primitives::uv_sphere(0.5f, 32, 24);

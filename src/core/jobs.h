@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Minimal fork/join thread pool. Mirrors blender::threading::parallel_for
-// (blender/source/blender/blenlib/BLI_task.hh) without TBB.
+// Fork/join parallel_for. Mirrors blender::threading::parallel_for
+// (blender/source/blender/blenlib/BLI_task.hh): built with Blender's libraries
+// it runs on oneTBB's work-stealing scheduler, exactly as Blender does, and
+// shares TBB's threads with Embree, OpenImageDenoise and OpenSubdiv. Without
+// TBB it uses the minimal thread pool below.
 // Theory: Game Engine Architecture Vol. I, ch. 4 "Parallelism and Concurrent
 // Programming" (4.3 Explicit Parallelism, 4.6 Thread Synchronization Primitives).
 #pragma once
@@ -17,26 +20,42 @@ namespace bl {
 
 class JobSystem {
  public:
+  enum class Backend { Builtin, TBB };
+
   /* threads == 0 -> hardware_concurrency - 1 workers (+ the calling thread). */
   explicit JobSystem(int threads = 0);
   ~JobSystem();
   JobSystem(const JobSystem &) = delete;
   JobSystem &operator=(const JobSystem &) = delete;
 
-  /* Calls fn(begin, end) over [0, count) in chunks of `grain`, on all threads,
-   * and returns once every chunk is done. Re-entrant calls run inline. */
+  /* Calls fn(begin, end) over [0, count) in chunks of at least `grain`, on
+   * all threads, and returns once every chunk is done. With the built-in pool
+   * nested calls run inline; with TBB they run in parallel too. */
   void parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn);
 
-  int thread_count() const { return (int)workers_.size() + 1; }
+  int thread_count() const;
   /* Restrict parallelism (1 = serial), used by profiler toggles & stress tests. */
   void set_max_threads(int n) { max_threads_ = n < 1 ? 1 : n; }
   int max_threads() const { return max_threads_; }
 
+  /* TBB when built with it (the default), else the built-in pool. */
+  static bool tbb_available();
+  Backend backend() const { return backend_; }
+  void set_backend(Backend b);
+  const char *backend_name() const { return backend_ == Backend::TBB ? "oneTBB" : "built-in pool"; }
+
   static JobSystem &global();
 
  private:
+  void start_workers();
   void worker_main();
   bool run_one_chunk();
+
+  Backend backend_ = Backend::Builtin;
+  int requested_threads_ = 0;
+  std::once_flag workers_started_;
+  struct TbbState;
+  TbbState *tbb_ = nullptr;
 
   std::vector<std::thread> workers_;
   std::mutex mutex_;

@@ -1,23 +1,26 @@
 # Architecture and Blender mapping
 
-Blendity rebuilds the parts of Blender you use for modeling, UV mapping, texturing and rendering, and wraps them in Unity's editor workflow. It isn't a fork. Blender can't be built without ~40 third-party libraries (Python, OpenImageIO, OpenSubdiv, TBB, Boost, Embree…), so each subsystem was re-implemented in C++, following Blender's design. The only outside code is four small libraries that Blender itself bundles (see below). The matching Blender source is listed for every module. Paths are relative to the `blender/` folder that sits next to this project.
+Blendity rebuilds the parts of Blender you use for modeling, UV mapping, texturing and rendering, and wraps them in Unity's editor workflow. It isn't a fork. Each subsystem is re-implemented in C++, following Blender's design, so the editor builds and runs with nothing but a compiler. When Blender's prebuilt libraries are present (`blender/lib/<platform>`), Blendity also links the same ones Blender uses (Embree, OpenImageDenoise, TBB, OpenColorIO and more, see below), each behind a `BL_WITH_*` switch with Blendity's own code as the fallback. The matching Blender source is listed for every module. Paths are relative to the `blender/` folder that sits next to this project.
 
 ```
 src/
-├── core/       math (Unity conventions), logging, filesystem, thread pool
+├── core/       math (Unity conventions), logging, filesystem, job system (TBB or own pool),
+│               CPU feature detection for SIMD dispatch
 ├── platform/   one window + input: Win32 / X11 / Cocoa          (Blender: intern/ghost)
 ├── image/      PNG/JPEG/TGA/BMP/HDR decoding, JPEG/HDR encoding, mipmapped textures
 ├── render/     2D canvas, fonts, rasterizer (Gouraud / deferred PBR / depth), shading,
+│               SIMD display encoding, OpenColorIO views,
 │               shadow maps, Hosek-Wilkie sky, path tracer
 ├── scene/      Mesh (Blender layout) + operators, UV tools, materials, model import,
 │               GameObject/Component scene, scene IO
 ├── editor/     IMGUI toolkit, docking, Scene/Game views, UV Editor, Render window,
 │               asset handling, panels, Learn tab
 ├── research/   paper-derived features (registry)
+├── deps/       registry of the optional Blender libraries (the Console's `libs` command)
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - 324 checks
+tests/          blendity_tests   - 430 checks with Blender's libraries, 358 without
 ```
 
 ## Libraries borrowed from Blender's tree
@@ -31,13 +34,44 @@ tests/          blendity_tests   - 324 checks
 
 Everything else (image codecs, zlib inflate, JPEG Huffman coding, the rasterizer, the path tracer, LSCM, packing) is written here, so nothing else needs installing. See `licenses/README.md` for what the Apache-2.0 part means for the executables.
 
+## Blender's prebuilt libraries (phase 3, optional)
+
+Blender's full build uses about 40 external libraries, prebuilt per platform at `projects.blender.org/blender/lib-<platform>`. If that folder is at `blender/lib/<platform>`, `build.bat`, `build.sh` and `CMakeLists.txt` detect each library and define `BL_WITH_<NAME>`. They also link it, copy its runtime files next to the executables, and switch to the shared C++ runtime. With `BLENDITY_NO_LIBS=1`, or without the folder, you get the dependency-free build. Every feature below has a fallback or simply isn't offered. `src/deps/deps.cpp` lists what was compiled in, and the Console command `libs` prints it.
+
+| Library | `BL_WITH_` | Blendity code | Fallback | Blender uses it in |
+|---|---|---|---|---|
+| Embree 4 | `EMBREE` | `render/pathtracer.cpp` (`build_embree`): instanced two-level scene, BLAS cached by mesh hash, built in parallel | own SAH BVH | `intern/cycles/bvh/embree.cpp` |
+| OpenImageDenoise 2 | `OIDN` | `PathTracer::denoised_oidn` (beauty + albedo + normal) | À-Trous filter | `intern/cycles/integrator/denoiser_oidn.cpp` |
+| Open PGL | `OPENPGL` | path guiding: field trained per render, product-MIS with the BSDF (opt-in) | off | `intern/cycles/integrator/guiding.h` |
+| oneTBB | `TBB` | `core/jobs.cpp` backend (`tbb::parallel_for` in a `task_arena`) | own thread pool | `source/blender/blenlib/BLI_task.hh` |
+| Eigen | `EIGEN` | `scene/uv.cpp` LSCM: `SimplicialLDLT` direct solve | block-Jacobi CG | `intern/slim`, `intern/itasc` |
+| OpenSubdiv | `OPENSUBDIV` | `scene/subdiv_osd.cpp` (selectable, off by default) | own Catmull-Clark | `intern/opensubdiv` |
+| OpenColorIO | `OCIO` | `render/colormanagement.cpp`: Blender's config, views baked into 97³ tetrahedral LUTs over a log2 shaper | Standard / Filmic / ACES curves | `source/blender/imbuf/intern/colormanagement.cc` |
+| Manifold | `MANIFOLD` | `scene/boolean.cpp`, `BooleanModifier` (n-gons rebuilt by face id) | (no Boolean) | `source/blender/geometry/intern/mesh_boolean_manifold.cc` |
+| meshoptimizer | `MESHOPT` | `scene/decimate.cpp`, `DecimateModifier` (attribute-aware, per material) | (no Decimate) | Blender's library set |
+| Jolt Physics | `JOLT` | `scene/physics_jolt.cpp`: Play-mode rigid bodies (convex hulls, static mesh colliders) | O(n²) sphere physics | Blender's library set |
+| OpenEXR + Imath | `OPENEXR` | `image/image_libs.cpp`: EXR read, EXR render output (half/float, ZIP) | (no EXR) | `source/blender/imbuf/intern/oiio` |
+| libjpeg-turbo, libpng + zlib | `LIBJPEG`, `LIBPNG` | decoding; zlib for the PNG writer (adaptive filters) | own decoders / deflate | `source/blender/imbuf` |
+| Zstandard | `ZSTD` | `scene/scene_io.cpp`: compressed `.scene` (detected by magic on load) | plain text | `.blend` compression |
+
+**ABI settings.** The libraries were built with specific defines that Blendity must match (`blender/build_files/build_environment/cmake`, and each library's exported `*Config.cmake`): `IMATH_DLL`/`OPENEXR_DLL` on Windows, `MANIFOLD_PAR=1`, and Jolt's `JPH_DOUBLE_PRECISION`, `JPH_CROSS_PLATFORM_DETERMINISTIC`, `JPH_OBJECT_STREAM`, `JPH_USE_SSE4_x`. `JPH_FLOATING_POINT_EXCEPTIONS_ENABLED` is set **only on Windows**, because Jolt enables it only for MSVC builds. A mismatch makes Jolt's version check abort at start-up. Runtime-only dependencies are deployed too: OpenJPH (for OpenEXR) and Intel's SYCL runtime (for Embree).
+
+## Hand-written SIMD (phase 3)
+
+The baseline target is plain x86-64 (Linux builds with Blender's libraries use SSE4.2, as Blender does). Wider kernels are chosen at run time from `core/cpu.cpp` (CPUID + XGETBV), the way Cycles keeps SSE4.1 and AVX2 kernel variants (`intern/cycles/util/simd.h`). Each function is compiled for its own target (`__attribute__((target))` on GCC/Clang; MSVC needs no flag), so the executables still run on older CPUs. Other architectures use the scalar code.
+
+| Kernel | What it does | Check |
+|---|---|---|
+| `render/display.cpp` | HDR → view transform → 8-bit sRGB, 4 px (SSE4.1) or 8 px (AVX2 + FMA) per step; the sRGB curve is an exact table (exponent + 7 mantissa bits → value + rounding threshold) | unit test: correctly rounded on 17M floats; kernels agree within one step |
+| `render/raster.cpp` `needs_scalar8_avx2` | Rejects 8 triangles at a time in setup (back-face, off-screen, no pixel centre, beyond far plane) with gathers and vector compares; survivors go through the scalar path in order | unit test: identical colour, depth and id buffers with `RasterOptions::fast_setup` on and off |
+
 ## Module map
 
 | Blendity | What it does | Blender source it mirrors | Unity equivalent |
 |---|---|---|---|
 | `platform/platform_win32.cpp`, `platform_x11.cpp`, `platform_cocoa.mm` | Window, input, drag & drop, clipboard, DPI | `intern/ghost/intern/GHOST_SystemWin32.cc`, `GHOST_SystemX11.cc`, `GHOST_SystemCocoa.mm` | Editor platform layer |
 | `core/math.h` | Vectors, quaternions, column-major matrices | `source/blender/blenlib/BLI_math_matrix.hh` | `Vector3`, `Quaternion`, `Matrix4x4` (left-handed, Y-up, ZXY Euler) |
-| `core/jobs.*` | `parallel_for` thread pool | `source/blender/blenlib/BLI_task.hh` (TBB) | Job System |
+| `core/jobs.*` | `parallel_for`: oneTBB when available, else its own thread pool | `source/blender/blenlib/BLI_task.hh` (TBB) | Job System |
 | `render/canvas.*` | UI drawing, anti-aliased TrueType text from OS fonts | `source/blender/blenfont/intern/blf_glyph.cc` (FreeType) | IMGUI drawing |
 | `render/raster.*` | Tile-binned multithreaded rasterizer, z-buffer, ID buffer, outlines | `source/blender/draw/intern/draw_manager.cc`, `draw/engines/overlay`, `gpu/intern/gpu_select.cc` | Built-in render pipeline |
 | `scene/mesh.*` | `positions` + `face_offsets` + `corner_verts` (n-gons), render cache | `makesdna/DNA_mesh_types.h`, `blenkernel/BKE_mesh.hh`, `blenkernel/intern/mesh_normals.cc` | `Mesh` (triangles only) |
@@ -59,7 +93,7 @@ Everything else (image codecs, zlib inflate, JPEG Huffman coding, the rasterizer
 | `draw_project` | Assets folder browser | `editors/space_file` | Project |
 | `draw_console` | Log + command line | `editors/space_info`, `editors/space_console` | Console |
 | `UndoState` snapshots | Global undo | `editors/undo` (memfile undo) | `Undo.RecordObject` |
-| `editor/learn.cpp`, `lessons.cpp` | 23 lessons linking Unity ↔ Blender ↔ theory | — | Learn window |
+| `editor/learn.cpp`, `lessons.cpp` | 24 lessons linking Unity ↔ Blender ↔ theory | — | Learn window |
 
 ## Modeling, UVs, texturing and rendering (phase 2)
 

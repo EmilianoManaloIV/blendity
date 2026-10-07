@@ -114,8 +114,16 @@ namespace meshops {
 Mesh subdivide_catmull_clark(const Mesh &in);
 /* Midpoint subdivision without smoothing (Blender: Subdivide, simple). */
 Mesh subdivide_simple(const Mesh &in);
+/* Several levels at once, configured like Blender's Subdivision Surface
+ * modifier. Blendity's parallel Catmull-Clark by default; OpenSubdiv (when
+ * built with Blender's libraries) on request, for meshes without UV seams. */
+Mesh subdivide(const Mesh &in, int levels, bool smooth);
+void set_subdiv_opensubdiv(bool on);  // stress tests compare both
+bool subdiv_opensubdiv_available();
 /* Fan/ear triangulation (blender/source/blender/bmesh/operators/bmo_triangulate.cc). */
 void triangulate(Mesh &m);
+/* One face's triangles as local corner indices (3 per triangle). */
+void triangulate_face_local(const Mesh &m, size_t f, std::vector<uint32_t> &local);
 void flip_normals(Mesh &m);
 /* Merge vertices closer than `dist` using a spatial hash
  * (blender/source/blender/bmesh/operators/bmo_removedoubles.cc). Returns removed count. */
@@ -157,6 +165,17 @@ bool fill(Mesh &m, const std::vector<uint8_t> &vert_sel);
 size_t merge_at_center(Mesh &m, const std::vector<uint8_t> &vert_sel);
 /* Recalculate Outside (Shift+N): consistent winding, then outward. */
 void recalc_normals_outside(Mesh &m);
+/* Boolean (Blender: Boolean modifier, Manifold solver; needs Blender's
+ * libraries). b is placed into a's object space by b_to_a. Both must be
+ * closed manifolds; on failure a is unchanged and error explains why. */
+/* Decimate (Blender: Decimate modifier, Collapse) via meshoptimizer: keeps
+ * ratio of the triangles. Returns false (mesh unchanged) without it. */
+bool decimate_available();
+bool decimate(Mesh &m, float ratio);
+enum class BooleanOp { Difference = 0, Union = 1, Intersect = 2 };
+bool boolean_available();
+bool boolean_op(Mesh &a, const Mesh &b, const Mat4 &b_to_a, BooleanOp op, std::string *error = nullptr);
+
 /* Generative modifiers (blender/source/blender/modifiers/intern/MOD_mirror.cc,
  * MOD_array.cc, MOD_solidify_extrude.cc), in object space. */
 void mirror(Mesh &m, bool x, bool y, bool z, float merge_dist);

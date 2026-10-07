@@ -22,6 +22,11 @@ int compute_islands(const Mesh &m, const Mask *mask, bool by_seams, std::vector<
 /* Unwrap (Least Squares Conformal Maps, Levy et al. 2002 - Blender's
  * "Conformal" method) per seam-bounded island, then pack. Returns islands. */
 int unwrap_lscm(Mesh &m, const Mask *mask, float margin = 0.02f);
+/* LSCM solver: Auto = Eigen sparse Cholesky when built with Blender's
+ * libraries (Blender uses Eigen too), otherwise conjugate gradients. */
+enum class LscmSolver { Auto, ConjugateGradient };
+void set_lscm_solver(LscmSolver s);
+const char *lscm_solver_name();
 /* Smart UV Project: cluster faces by normal, planar-project, pack. */
 int smart_project(Mesh &m, const Mask *mask, float angle_limit_deg = 66.0f, float margin = 0.02f);
 void project_cube(Mesh &m, const Mask *mask, float cube_size = 1.0f);

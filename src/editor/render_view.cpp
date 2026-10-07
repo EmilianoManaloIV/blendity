@@ -7,6 +7,7 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 #include "../render/sky.h"
 
 #include <algorithm>
@@ -62,7 +63,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
   env.equator = es.equator;
   env.ground = es.ground;
   env.camera_pos = eye;
-  env.view_transform = (ViewTransform)scene_->render.view_transform;
+  env.view_transform = view_transform_from_setting(scene_->render.view_transform);
   env.exposure = scene_->render.exposure;
   if (!use_scene_lights) {
     /* Blender "Studio" style headlight so unlit scenes stay readable. */
@@ -251,7 +252,10 @@ static PTSettings pt_settings(const RenderSettings &rs) {
   s.max_bounces = rs.max_bounces;
   s.clamp_indirect = rs.clamp_indirect;
   s.denoise = rs.denoise;
-  s.view_transform = (ViewTransform)rs.view_transform;
+  s.use_oidn = rs.denoiser == 0;
+  s.use_embree = rs.use_embree;
+  s.use_guiding = rs.path_guiding;
+  s.view_transform = view_transform_from_setting(rs.view_transform);
   s.exposure = rs.exposure;
   return s;
 }
@@ -281,7 +285,17 @@ void Editor::render_pathtraced_view(const Recti &view) {
   int pw = std::max(1, view.w / div), ph = std::max(1, view.h / div);
   uint64_t hash = scene_render_hash();
   bool rebuilt = false;
-  if (hash != vp_pt_hash_) {
+  const RenderSettings &rs = scene_->render;
+  const int target = std::max(1, rs.viewport_samples);
+  PTSettings ps = pt_settings(rs);
+  /* While samples accumulate the viewport uses the fast A-Trous filter; the
+   * slower OpenImageDenoise runs once when the view converges (~70 ms at
+   * half resolution, too slow for every frame). */
+  ps.use_oidn = ps.use_oidn && vp_pt_.samples() + 1 >= target;
+  vp_pt_.set_settings(ps);
+  const bool want_embree = rs.use_embree && PathTracer::embree_available();
+  if (hash != vp_pt_hash_ || (std::strcmp(vp_pt_.ray_backend(), "Embree") == 0) != want_embree || vp_pt_guiding_ != rs.path_guiding) {
+    vp_pt_guiding_ = rs.path_guiding;
     LightingEnv env = make_lighting(cam_.position(), scene_lighting_);
     Environment world = env_;
     if (!scene_lighting_) {
@@ -292,37 +306,50 @@ void Editor::render_pathtraced_view(const Recti &view) {
     vp_pt_hash_ = hash;
     rebuilt = true;
   }
-  vp_pt_.set_settings(pt_settings(scene_->render));
   bool cam_changed = std::memcmp(v.m, vp_pt_view_.m, sizeof(v.m)) || std::memcmp(p.m, vp_pt_proj_.m, sizeof(p.m));
   if (rebuilt || cam_changed || vp_pt_.width() != pw || vp_pt_.height() != ph) {
     vp_pt_.set_camera(v, p, pw, ph);
     vp_pt_view_ = v;
     vp_pt_proj_ = p;
+    vp_pt_shown_ = 0;
   }
-  int target = std::max(1, scene_->render.viewport_samples);
   vp_pt_.render(18.0, target);
-  if (vp_pt_img_.width != pw || vp_pt_img_.height != ph) vp_pt_img_.resize(pw, ph);
-  vp_pt_.resolve(vp_pt_img_.pixels.data(), pw, scene_->render.denoise);
-  /* Upscale into the viewport (bilinear). */
-  for (int y = 0; y < view.h; y++) {
-    uint32_t *row = scene_rt_.color + (size_t)y * scene_rt_.stride;
-    float fy = std::min((float)ph - 1.001f, std::max(0.0f, (y + 0.5f) / div - 0.5f));
-    int y0 = (int)fy;
-    float ty = fy - y0;
-    const uint32_t *r0 = vp_pt_img_.row(y0), *r1 = vp_pt_img_.row(std::min(ph - 1, y0 + 1));
-    for (int x = 0; x < view.w; x++) {
-      float fx = std::min((float)pw - 1.001f, std::max(0.0f, (x + 0.5f) / div - 0.5f));
-      int x0 = (int)fx;
-      float tx = fx - x0;
-      int x1 = std::min(pw - 1, x0 + 1);
-      auto ch = [&](int s) {
-        float a = ((r0[x0] >> s) & 255) * (1 - tx) + ((r0[x1] >> s) & 255) * tx;
-        float b = ((r1[x0] >> s) & 255) * (1 - tx) + ((r1[x1] >> s) & 255) * tx;
-        return (uint32_t)(a * (1 - ty) + b * ty + 0.5f);
-      };
-      row[x] = 0xFF000000u | (ch(16) << 16) | (ch(8) << 8) | ch(0);
-    }
+  if (vp_pt_img_.width != pw || vp_pt_img_.height != ph) {
+    vp_pt_img_.resize(pw, ph);
+    vp_pt_shown_ = 0;
   }
+  /* Resolve (denoise + tone map) only when something it depends on changed:
+   * once converged, the viewport costs just the upscale below. */
+  uint64_t key = 1469598103934665603ull;
+  for (uint64_t part : {(uint64_t)vp_pt_.samples(), (uint64_t)rs.denoise, (uint64_t)ps.use_oidn, (uint64_t)rs.view_transform,
+                        (uint64_t)std::llround(rs.exposure * 1000.0f)})
+    key = (key ^ part) * 1099511628211ull;
+  if (key != vp_pt_shown_) {
+    vp_pt_.resolve(vp_pt_img_.pixels.data(), pw, rs.denoise);
+    vp_pt_shown_ = key;
+  }
+  /* Upscale into the viewport (bilinear), rows in parallel. */
+  JobSystem::global().parallel_for(view.h, 32, [&](int64_t yb, int64_t ye) {
+    for (int64_t y = yb; y < ye; y++) {
+      uint32_t *row = scene_rt_.color + (size_t)y * scene_rt_.stride;
+      float fy = std::min((float)ph - 1.001f, std::max(0.0f, (y + 0.5f) / div - 0.5f));
+      int y0 = (int)fy;
+      float ty = fy - y0;
+      const uint32_t *r0 = vp_pt_img_.row(y0), *r1 = vp_pt_img_.row(std::min(ph - 1, y0 + 1));
+      for (int x = 0; x < view.w; x++) {
+        float fx = std::min((float)pw - 1.001f, std::max(0.0f, (x + 0.5f) / div - 0.5f));
+        int x0 = (int)fx;
+        float tx = fx - x0;
+        int x1 = std::min(pw - 1, x0 + 1);
+        auto ch = [&](int s) {
+          float a = ((r0[x0] >> s) & 255) * (1 - tx) + ((r0[x1] >> s) & 255) * tx;
+          float b = ((r1[x0] >> s) & 255) * (1 - tx) + ((r1[x1] >> s) & 255) * tx;
+          return (uint32_t)(a * (1 - ty) + b * ty + 0.5f);
+        };
+        row[x] = 0xFF000000u | (ch(16) << 16) | (ch(8) << 8) | ch(0);
+      }
+    }
+  });
   scene_stats_ = scene_r3d_.stats();
 }
 
@@ -373,11 +400,12 @@ void Editor::start_final_render() {
   }
   LightingEnv env = make_lighting(eye, true);
   std::vector<DrawItem> items = collect_items(true, true);
+  final_pt_.set_settings(pt_settings(rs));  // before build(): it picks the ray backend
   build_pt(final_pt_, *this, items, env, env_);
-  final_pt_.set_settings(pt_settings(rs));
   final_pt_.set_camera(v, p, w, h);
   rendering_ = true;
-  render_status_ = strprintf("Path tracing %dx%d: BVH %zu tris in %.0f ms", w, h, final_pt_.stats().triangles, final_pt_.stats().bvh_build_ms);
+  render_status_ = strprintf("Path tracing %dx%d: %s scene of %zu tris built in %.0f ms", w, h, final_pt_.ray_backend(), final_pt_.stats().triangles,
+                             final_pt_.stats().bvh_build_ms);
   Log::info("%s", render_status_.c_str());
 }
 
@@ -388,13 +416,20 @@ void Editor::step_final_render() {
   int done = final_pt_.render(40.0, target);
   render_time_ = now_seconds() - render_start_;
   bool finished = done >= target;
-  final_pt_.resolve(render_img_.pixels.data(), render_img_.width, finished && rs.denoise);
-  render_status_ = strprintf("Path tracing: sample %d / %d  |  %.1f s  |  %.1f Mrays/s%s", done, target, render_time_,
-                             final_pt_.stats().mrays_per_s(), finished ? (rs.denoise ? "  |  denoised" : "") : "");
+  if (finished) {
+    /* Denoise once and keep the linear result for HDR / EXR saving. */
+    render_linear_ = final_pt_.linear_rgb(rs.denoise);
+    final_pt_.resolve_rgb(render_linear_, render_img_.pixels.data(), render_img_.width);
+  }
+  else {
+    final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
+  }
+  render_status_ = strprintf("Path tracing: sample %d / %d  |  %.1f s  |  %.1f Mrays/s  |  %s%s", done, target, render_time_,
+                             final_pt_.stats().mrays_per_s(), final_pt_.ray_backend(),
+                             finished && rs.denoise ? strprintf("  |  denoised (%s)", final_pt_.denoise_backend()).c_str() : "");
   if (finished) {
     rendering_ = false;
-    render_linear_ = final_pt_.linear_rgb(rs.denoise);
-    Log::info("Render finished: %d samples in %.1f s", done, render_time_);
+    Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.ray_backend());
   }
 }
 
@@ -408,15 +443,22 @@ void Editor::save_render() {
   std::time_t t = std::time(nullptr);
   char buf[64];
   std::strftime(buf, sizeof(buf), "render_%Y%m%d_%H%M%S", std::localtime(&t));
-  int fmt = scene_->render.file_format;
-  if (fmt == 2 && render_linear_.empty()) {
-    Log::warn("Radiance HDR needs the path-traced engine (linear light); saving PNG instead");
+  int fmt = scene_->render.file_format;  // 0 PNG, 1 JPEG, 2 Radiance HDR, 3 OpenEXR
+  if (fmt == 3 && !exr_available()) {
+    Log::warn("This build has no OpenEXR (needs Blender's libraries); saving Radiance HDR instead");
+    fmt = 2;
+  }
+  if (fmt >= 2 && render_linear_.empty()) {
+    Log::warn("Float formats need the path-traced engine (linear light); saving PNG instead");
     fmt = 0;
   }
-  std::string path = fs::join(dir, std::string(buf) + (fmt == 0 ? ".png" : fmt == 1 ? ".jpg" : ".hdr"));
-  bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), render_img_.width, render_img_.height, render_img_.width)
-            : fmt == 1 ? write_jpeg(path, render_img_.pixels.data(), render_img_.width, render_img_.height, render_img_.width, scene_->render.jpeg_quality)
-                       : write_hdr(path, render_linear_.data(), render_img_.width, render_img_.height);
+  static const char *exts[] = {".png", ".jpg", ".hdr", ".exr"};
+  std::string path = fs::join(dir, std::string(buf) + exts[fmt]);
+  const int w = render_img_.width, h = render_img_.height;
+  bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), w, h, w)
+            : fmt == 1 ? write_jpeg(path, render_img_.pixels.data(), w, h, w, scene_->render.jpeg_quality)
+            : fmt == 2 ? write_hdr(path, render_linear_.data(), w, h)
+                       : write_exr(path, render_linear_.data(), w, h, true);
   if (ok) Log::info("Saved render: %s", path.c_str());
   else Log::error("Could not write %s", path.c_str());
   project_listed_ = -100;

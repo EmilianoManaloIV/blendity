@@ -926,6 +926,9 @@ struct FaceBuilder {
   }
 };
 
+/* Ear-clipping triangulation of one face: local corner indices, 3 per triangle. */
+void triangulate_face_local(const Mesh &m, size_t f, std::vector<uint32_t> &local) { bl::triangulate_face(m, f, local); }
+
 void triangulate(Mesh &m) {
   FaceBuilder fb(m);
   std::vector<uint32_t> local;

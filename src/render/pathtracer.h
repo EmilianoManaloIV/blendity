@@ -28,6 +28,12 @@
 
 namespace bl {
 
+/* Embree scenes and device (defined in pathtracer.cpp when built with Embree). */
+struct PTEmbreeData;
+/* OpenPGL guiding field and per-thread recorders (pathtracer.cpp). */
+struct PTGuidingData;
+struct PTGuidingThread;
+
 struct PTObject {
   const RenderMesh *mesh = nullptr;  // needs tangents for normal maps
   Mat4 model;
@@ -42,6 +48,21 @@ struct PTSettings {
   bool denoise = true;
   ViewTransform view_transform = ViewTransform::Filmic;
   float exposure = 0.0f;
+  /* Library backends (used when compiled in, see deps/deps.h). Like Cycles:
+   * Embree for ray queries, OpenImageDenoise for denoising. Changing
+   * use_embree takes effect on the next build(). */
+  bool use_embree = true;
+  bool use_oidn = true;
+  /* Path guiding with OpenPGL (Cycles: Light Paths > Path Guiding): learns
+   * where light comes from during the first training samples and steers
+   * bounces there, mixed with BSDF sampling (one-sample MIS). Opt-in, as in
+   * Cycles. */
+  bool use_guiding = false;
+  /* Sample emissive meshes directly (Cycles: mesh lights in the light tree),
+   * MIS-combined with BSDF hits. Off only for comparisons. Takes effect on build(). */
+  bool sample_mesh_lights = true;
+  float guiding_probability = 0.5f;  // Cycles' "Surface Guiding Probability"
+  int guiding_training_samples = 128;
 };
 
 struct PTStats {
@@ -51,6 +72,7 @@ struct PTStats {
   uint64_t rays = 0;
   double render_ms = 0;
   double mrays_per_s() const { return render_ms > 0 ? rays / (render_ms * 1000.0) : 0.0; }
+  int guiding_updates = 0;  // OpenPGL field updates so far
 };
 
 class PathTracer {
@@ -71,6 +93,8 @@ class PathTracer {
 
   /* Tone-mapped output (optionally denoised). */
   void resolve(uint32_t *out, int stride, bool denoise);
+  /* Same, from a buffer linear_rgb() returned (avoids denoising twice). */
+  void resolve_rgb(const std::vector<float> &rgb, uint32_t *out, int stride) const;
   /* Linear float RGB (3 per pixel), for .hdr export. */
   std::vector<float> linear_rgb(bool denoise);
 
@@ -84,7 +108,33 @@ class PathTracer {
   bool occluded(const Ray &r, float tmax) const;
   const PTStats &stats() const { return stats_; }
 
+  static bool embree_available();
+  static bool oidn_available();
+  static bool guiding_available();
+  bool guiding_active() const;  // the field has learned something and steers bounces
+  /* "Embree" or "Blendity BVH", and "OpenImageDenoise" or "A-Trous". */
+  const char *ray_backend() const;
+  const char *denoise_backend() const;
+
  private:
+  void build_embree(double &ms);
+  bool use_embree_ = false;  // decided at build()
+  std::shared_ptr<PTEmbreeData> embree_;
+  std::shared_ptr<PTGuidingData> guiding_;
+  void guiding_begin_scene();
+  /* Emissive triangles sampled as lights (Cycles: mesh lights). */
+  struct MeshLight {
+    uint32_t object, prim;
+    float area, power;
+  };
+  std::vector<MeshLight> mesh_lights_;
+  std::vector<float> light_cdf_;  // cumulative power
+  float light_power_ = 0.0f;
+  std::unordered_map<uint64_t, uint32_t> light_of_;  // (object << 32 | triangle) -> mesh light
+  void collect_mesh_lights();
+  float mesh_light_pdf(uint32_t light, float dist, float cos_light) const;
+  const Material *surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const;
+  std::vector<float> denoised_oidn() const;
   struct Tri {
     Vec3 v0, e1, e2;
   };
@@ -109,7 +159,7 @@ class PathTracer {
   };
   static void build_sah(const std::vector<AABB> &boxes, std::vector<Node> &nodes, std::vector<uint32_t> &order, uint32_t max_leaf);
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
-  Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth) const;
+  Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint64_t &rays, PTGuidingThread *guide) const;
   std::vector<float> denoised() const;
 
   std::vector<PTObject> objects_;

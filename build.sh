@@ -25,10 +25,72 @@ else
   OUT="dist/linux"
 fi
 
-OBJ="build/obj_${CONFIG}_$(echo "$OS" | tr '[:upper:]' '[:lower:]')"
-mkdir -p "$OBJ" "$OUT"
+# --- Blender's prebuilt libraries (optional) -----------------------------------
+# Used when ../blender/lib/<platform> exists (Blender's own layout, from
+# projects.blender.org/blender/lib-linux_x64 or lib-macos_arm64). Otherwise the
+# dependency-free versions are built. BLENDITY_NO_LIBS=1 forces that build.
+if [ "$OS" = "Darwin" ]; then LIBPLAT=macos_arm64; SOEXT=dylib; else LIBPLAT=linux_x64; SOEXT=so; fi
+LIBDIR="${BLENDITY_LIBDIR:-../blender/lib/$LIBPLAT}"
+USE_LIBS=0
+LIBFLAGS=""
+LIBLINK=""
+LIBDIRS=""
+addlib() {  # folder define "include dirs" "libraries (lib/ relative files)"
+  [ -d "$LIBDIR/$1" ] || return 0
+  LIBFLAGS="$LIBFLAGS -D$2"
+  for i in $3; do LIBFLAGS="$LIBFLAGS -isystem $LIBDIR/$i"; done
+  for l in $4; do LIBLINK="$LIBLINK $LIBDIR/$l"; done
+  LIBDIRS="$LIBDIRS $1"
+}
+if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
+  USE_LIBS=1
+  addlib tbb              BL_WITH_TBB        "tbb/include"                    "tbb/lib/libtbb.$SOEXT"
+  addlib embree           BL_WITH_EMBREE     "embree/include"                 "embree/lib/libembree4.$SOEXT"
+  addlib openimagedenoise BL_WITH_OIDN       "openimagedenoise/include"       "openimagedenoise/lib/libOpenImageDenoise.$SOEXT"
+  addlib eigen            BL_WITH_EIGEN      "eigen/include/eigen3"           ""
+  addlib opensubdiv       BL_WITH_OPENSUBDIV "opensubdiv/include"             "opensubdiv/lib/libosdCPU.$SOEXT"
+  addlib openexr          BL_WITH_OPENEXR    "openexr/include openexr/include/OpenEXR imath/include imath/include/Imath" \
+                                             "openexr/lib/libOpenEXR.$SOEXT openexr/lib/libOpenEXRCore.$SOEXT openexr/lib/libIex.$SOEXT openexr/lib/libIlmThread.$SOEXT imath/lib/libImath.$SOEXT"
+  addlib opencolorio      BL_WITH_OCIO       "opencolorio/include"            "opencolorio/lib/libOpenColorIO.$SOEXT"
+  addlib manifold         BL_WITH_MANIFOLD   "manifold/include"               "manifold/lib/libmanifold.a"
+  addlib meshoptimizer    BL_WITH_MESHOPT    "meshoptimizer/include"          "meshoptimizer/lib/libmeshoptimizer.$SOEXT"
+  addlib openpgl          BL_WITH_OPENPGL    "openpgl/include"                "openpgl/lib/libopenpgl.a"
+  addlib jolt             BL_WITH_JOLT       "jolt/include"                   "jolt/lib/libJolt.$SOEXT"
+  addlib jpeg             BL_WITH_LIBJPEG    "jpeg/include"                   "jpeg/lib/libjpeg.a"
+  addlib png              BL_WITH_LIBPNG     "png/include zlib/include"       "png/lib/libpng.a zlib/lib/libz.a"
+  addlib zstd             BL_WITH_ZSTD       "zstd/include"                   "zstd/lib/libzstd.a"
+  # Static libraries (manifold, openpgl) use TBB: list it again after them.
+  LIBLINK="$LIBLINK $LIBDIR/tbb/lib/libtbb.$SOEXT"
+  # ABI settings the libraries were built with (blender/build_files/build_environment/cmake).
+  # (Jolt only enables JPH_FLOATING_POINT_EXCEPTIONS_ENABLED for MSVC builds; a
+  # mismatch makes its version check abort at start-up - see JoltConfig.cmake.)
+  LIBFLAGS="$LIBFLAGS -DMANIFOLD_PAR=1 -DJPH_SHARED_LIBRARY -DJPH_DOUBLE_PRECISION"
+  LIBFLAGS="$LIBFLAGS -DJPH_CROSS_PLATFORM_DETERMINISTIC -DJPH_USE_CPU_COMPUTE -DJPH_OBJECT_STREAM"
+  [ "$OS" = "Darwin" ] || LIBFLAGS="$LIBFLAGS -DJPH_USE_SSE4_1 -DJPH_USE_SSE4_2 -msse4.2 -mpopcnt"
+  FLAGS="$FLAGS $LIBFLAGS"
+  # The libraries link the shared C++ runtime, so the executables must too; they
+  # find the libraries in ./lib next to themselves.
+  LIBS="${LIBS/ -static-libstdc++ -static-libgcc/} $LIBLINK -Wl,-rpath,\$ORIGIN/lib"
+  [ "$OS" = "Darwin" ] && LIBS="${LIBS/\$ORIGIN/@executable_path}"
+  # Transitive runtime libraries for the linker (OpenEXR -> OpenJPH, Embree -> SYCL runtime).
+  [ "$OS" = "Darwin" ] || LIBS="$LIBS -Wl,-rpath-link,$LIBDIR/openjph/lib:$LIBDIR/dpcpp/lib:$LIBDIR/tbb/lib:$LIBDIR/imath/lib"
+  echo "[blendity] Using Blender libraries from $LIBDIR:$LIBDIRS"
+else
+  echo "[blendity] Dependency-free build (no $LIBDIR)"
+fi
 
-LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/editor/*.cpp src/research/*.cpp) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC"
+OBJ="build/obj_${CONFIG}_$(echo "$OS" | tr '[:upper:]' '[:lower:]')$([ "$USE_LIBS" = 1 ] && echo _libs)"
+mkdir -p "$OBJ" "$OUT"
+# License texts and notices travel with the binaries (licenses/README.md).
+rm -rf "$OUT/licenses" && cp -r licenses "$OUT/licenses"
+# Objects are only rebuilt when sources change, so a change of compiler flags
+# (e.g. a library's ABI defines) must start the object folder afresh.
+if [ "$(cat "$OBJ/flags.txt" 2>/dev/null)" != "$CXX $FLAGS" ]; then
+  rm -f "$OBJ"/*.o
+  echo "$CXX $FLAGS" > "$OBJ/flags.txt"
+fi
+
+LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC"
 
 compile() {  # src -> object path (only rebuilds when the source or any header is newer)
   local src="$1"
@@ -69,6 +131,22 @@ esac
 case "$TARGET" in
   tests|all) link tests/test_main.cpp blendity_tests ;;
 esac
+
+if [ "$USE_LIBS" = 1 ]; then
+  # Ship the shared libraries (release only: no debug, GPU-device or Python files).
+  mkdir -p "$OUT/lib"
+  for d in $LIBDIRS imath openjph dpcpp; do
+    [ -d "$LIBDIR/$d/lib" ] || continue
+    find "$LIBDIR/$d/lib" -maxdepth 1 -name "*.$SOEXT*" ! -name "*_d.*" ! -name "*debug*" ! -name "*_cuda*" \
+      ! -name "*_hip*" ! -name "*_sycl*" -exec cp -a {} "$OUT/lib/" \;
+  done
+  # Blender's colour management config (OpenColorIO views: AgX, Filmic, ...).
+  OCIO_CFG="../blender/release/datafiles/colormanagement"
+  if [ -d "$LIBDIR/opencolorio" ] && [ -f "$OCIO_CFG/config.ocio" ]; then
+    mkdir -p "$OUT/datafiles"
+    cp -r "$OCIO_CFG" "$OUT/datafiles/"
+  fi
+fi
 
 if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; then
   # Wrap the editor in a minimal .app bundle so it can be double-clicked in Finder.

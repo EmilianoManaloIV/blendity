@@ -3,6 +3,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../deps/deps.h"
 #include "../research/research.h"
 
 #include <algorithm>
@@ -469,6 +470,8 @@ void Editor::draw_menubar(const Recti &r) {
     u.menu_separator();
     if (u.menu_item("Save", "Ctrl+S")) save_scene_cmd(false);
     if (u.menu_item("Save As...", "Ctrl+Shift+S")) save_scene_cmd(true);
+    if (u.menu_item("Compress Scene (Zstandard)", nullptr, scene_->compress, scene_compression_available())) scene_->compress = !scene_->compress;
+    u.tooltip("Save this scene compressed, like Blender's File > Save > Compress (zstd).\nNeeds Blender's libraries; compressed scenes load automatically.");
     u.menu_separator();
     if (u.menu_item("Import Model (OBJ / FBX)...")) dialog_ = Dialog::ImportObj;
     if (u.menu_item("Export Selected as OBJ", nullptr, false, has_sel)) export_selected_obj();
@@ -1429,8 +1432,8 @@ void Editor::mesh_op(const std::string &op) {
       continue;
     }
     Mesh &m = *mesh_make_mutable(mf->mesh);
-    if (op == "subdivide") m = meshops::subdivide_catmull_clark(m);
-    else if (op == "subdivide_simple") m = meshops::subdivide_simple(m);
+    if (op == "subdivide") m = meshops::subdivide(m, 1, true);
+    else if (op == "subdivide_simple") m = meshops::subdivide(m, 1, false);
     else if (op == "smooth") meshops::smooth_laplacian(m, smooth_factor_, 1);
     else if (op == "triangulate") meshops::triangulate(m);
     else if (op == "merge") Log::info("Merged %zu vertices", meshops::merge_by_distance(m, merge_dist_));
@@ -1520,7 +1523,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  screenshot [file.png], bench [frames], lesson <n>, research, window <name>, tool <move|rotate|...>,");
     Log::info("  edit [vertex|edge|face] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
     Log::info("  vsel <verts...>, editop <fill|merge_center|recalc_normals|loopcut|select_loop|extrude|inset|delete>,");
-    Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>");
+    Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -1592,6 +1595,12 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "component") add_component_to_selection(arg(1, "MirrorModifier"));
   else if (c == "applymods") mesh_op("apply_modifiers");
+  else if (c == "libs") {
+    /* Which of Blender's libraries this build uses (deps/deps.h). */
+    for (const deps::Library &l : deps::libraries())
+      Log::info("%-18s %-10s %s%s", l.name, l.enabled ? l.version.c_str() : "-", l.enabled ? l.used_for : "not built in; using ",
+                l.enabled ? "" : l.fallback);
+  }
   else if (c == "camera" && t.size() >= 4) {
     cam_.yaw = (float)std::atof(t[1].c_str());
     cam_.pitch = (float)std::atof(t[2].c_str());
