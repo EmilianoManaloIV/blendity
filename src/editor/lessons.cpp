@@ -470,6 +470,7 @@ Blender's edge tools change topology rather than just moving vertices. Each one 
 | Tool | Blendity | Blender | ProBuilder / Unity
 | Bevel | Ctrl+B (edges selected) | Ctrl+B | Bevel
 | Bridge | Ctrl+Shift+B (two faces or two holes) | Edge > Bridge Edge Loops | Bridge Edges
+| Push/Pull (SketchUp) | P, drag a face | (Extrude + Boolean) | ProBuilder Extrude
 | Push Through | Alt+P (a face) | (a Boolean difference) | (none)
 | Connect | J (two vertices of a face) | J | Connect Edges
 | Dissolve / Collapse | Ctrl+X / Edge menu | Ctrl+X / Merge > Collapse | Delete Edges / Collapse
@@ -480,6 +481,8 @@ A bevel replaces a sharp edge with a strip of faces. Each face beside the edge p
 Bridging removes two faces and joins their outlines with a tube. The outlines must be matched vertex to vertex, which is easy when they face each other and hard when they don't. Blendity rotates one outline onto the other's plane, scales both to unit size, and picks the pairing with the smallest total distance. If the counts differ, the shorter outline gets extra vertices on its longest edges. With more segments the tube follows a curve that leaves one face along its normal and arrives at the other. For opposite faces that curve runs straight through the inside (a tunnel); otherwise it arches outside (a handle).
 @ blender/source/blender/bmesh/operators/bmo_bridge.cc
 > [FoCG] 15.5 Cubics (the Hermite curve the tube follows), 12.1 Triangle Meshes
+# Push/Pull (SketchUp)
+The Push/Pull tool (P) moves a face along its normal as you drag. For each side of the face it looks at the neighbouring face. If that face lies in the plane the side moves through, the neighbour stretches or shrinks instead of getting a new wall, the way SketchUp merges coplanar faces. That is why pulling the top of a box makes it taller rather than stacking a second box on it. Pushing past the far side switches to Push Through, and pulling onto a face in front lands every vertex on that face's plane, so a tilted face is met at its own angle, and joins the two. Ctrl always adds walls (SketchUp's "new starting face").
 # Push Through, and extruding onto a face
 Push Through casts a ray from each outline vertex along the face's inward normal and finds where it leaves the object. It cuts that projected shape out of the exit face, so a tilted or curved-in back works too, and joins the two openings with a tube. Extruding (or moving) a face until it lies on another face does the matching join: the face it lands on gets an opening, and the prism becomes part of the solid. When the faces are the same shape, their vertices are welded instead.
 > [FoCG] 21.5 Constructive Solid Geometry

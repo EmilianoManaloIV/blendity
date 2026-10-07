@@ -852,6 +852,262 @@ bool push_through(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::st
 }
 
 /* ===================================================================== */
+/* Push / Pull (SketchUp)                                                 */
+/* ===================================================================== */
+
+namespace {
+
+/* Rays from every vertex of a face region along its normal (pull) or
+ * against it (push), against all other faces. */
+struct RegionRays {
+  std::vector<uint32_t> verts;  // region vertices (outline first)
+  std::vector<float> t;          // hit distance per vertex (-1 = none)
+  std::vector<uint32_t> face;    // hit face per vertex
+  std::vector<uint8_t> facing;   // the hit face faces back toward the region (an entry face for pulls, exit for pushes)
+};
+
+RegionRays cast_region(const Mesh &m, const Region &r, Vec3 dir, bool want_exit) {
+  RegionRays out;
+  std::vector<uint8_t> in_region(m.face_count(), 0), seen(m.vert_count(), 0);
+  for (uint32_t f : r.faces) in_region[f] = 1;
+  for (uint32_t v : r.loops[0]) if (!seen[v]) { seen[v] = 1; out.verts.push_back(v); }
+  for (uint32_t f : r.faces)
+    for (uint32_t i = 0; i < m.face_size(f); i++)
+      if (!seen[m.face_verts(f)[i]]) { seen[m.face_verts(f)[i]] = 1; out.verts.push_back(m.face_verts(f)[i]); }
+  struct Tri { Vec3 a, b, c; uint32_t face; };
+  std::vector<Tri> tris;
+  std::vector<uint32_t> local;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (in_region[f]) continue;
+    triangulate_face_local(m, f, local);
+    const uint32_t *v = m.face_verts(f);
+    for (size_t i = 0; i + 2 < local.size(); i += 3)
+      tris.push_back({m.positions[v[local[i]]], m.positions[v[local[i + 1]]], m.positions[v[local[i + 2]]], (uint32_t)f});
+  }
+  const float scale = mesh_scale(m);
+  for (uint32_t v : out.verts) {
+    /* Start a hair inside the region (rays from a corner run along edges)
+     * and off the surface. */
+    Vec3 o = m.positions[v] + (r.center - m.positions[v]) * 1e-3f + dir * (1e-4f * scale);
+    Ray ray{o, dir};
+    float best = 1e30f;
+    uint32_t bf = UINT32_MAX;
+    for (const Tri &tr : tris) {
+      float h = ray_triangle(ray, tr.a, tr.b, tr.c);
+      if (h > 0 && h < best) { best = h; bf = tr.face; }
+    }
+    out.t.push_back(bf == UINT32_MAX ? -1.0f : best + 1e-4f * scale);
+    out.face.push_back(bf);
+    bool fac = bf != UINT32_MAX && (want_exit ? dot(m.face_normal(bf), dir) > 0 : dot(m.face_normal(bf), dir) < 0);
+    out.facing.push_back(fac);
+  }
+  return out;
+}
+
+}  // namespace
+
+PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_sel) {
+  PushPullLimits lim;
+  std::vector<Region> regions = face_regions(m, face_sel);
+  if (regions.size() != 1 || regions[0].loops.size() != 1) return lim;
+  const Region &r = regions[0];
+  /* A face whose every side continues into a coplanar wall (the whole top of a
+   * box) just moves; holes and joins are for faces inside a larger surface. */
+  EdgeFaces ef(m);
+  bool inside_surface = false;
+  const std::vector<uint32_t> &L = r.loops[0];
+  std::vector<uint8_t> in_region(m.face_count(), 0);
+  for (uint32_t f : r.faces) in_region[f] = 1;
+  for (size_t i = 0; i < L.size(); i++)
+    for (uint32_t g : ef.at(L[i], L[(i + 1) % L.size()]))
+      if (!in_region[g] && std::fabs(dot(m.face_normal(g), r.normal)) > 0.01f) inside_surface = true;
+  if (!inside_surface) return lim;
+  /* Push: the far side, where every ray leaves the object. */
+  RegionRays down = cast_region(m, r, -r.normal, true);
+  bool ok = !down.verts.empty();
+  float tmin = 1e30f;
+  for (size_t i = 0; i < down.verts.size(); i++) {
+    ok = ok && down.t[i] > 0 && down.facing[i];
+    tmin = std::min(tmin, down.t[i]);
+  }
+  if (ok) lim.through = tmin;
+  /* Pull: a face of the mesh in front, facing back (all rays on one face). */
+  RegionRays up = cast_region(m, r, r.normal, false);
+  ok = !up.verts.empty();
+  tmin = 1e30f;
+  for (size_t i = 0; i < up.verts.size(); i++) {
+    ok = ok && up.t[i] > 0 && up.facing[i] && up.face[i] == up.face[0];
+    tmin = std::min(tmin, up.t[i]);
+  }
+  if (ok) {
+    lim.contact = tmin;
+    lim.contact_face = up.face[0];
+  }
+  return lim;
+}
+
+bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, PushPullResult *result, std::string *err) {
+  if (result) *result = PushPullResult::Moved;
+  face_sel.resize(m.face_count(), 0);
+  std::vector<Region> regions = face_regions(m, face_sel);
+  if (regions.size() != 1 || regions[0].loops.size() != 1) {
+    if (err) *err = "Push/Pull works on one face (or one connected group of faces)";
+    return false;
+  }
+  if (std::fabs(distance) < 1e-7f) return true;
+  const Region r = regions[0];
+  const float scale = mesh_scale(m);
+  PushPullLimits lim = push_pull_limits(m, face_sel);
+  const float snap = 1e-3f * scale;
+  /* Pushed to (or past) the far side: a hole, cut into the exit face at its
+   * own angle (SketchUp makes a hole when the push meets the back face). */
+  if (distance < 0 && lim.through > 0 && -distance >= lim.through - snap) {
+    if (!push_through(m, face_sel, 1, err)) return false;
+    if (result) *result = PushPullResult::Hole;
+    return true;
+  }
+  /* New positions: along the normal, or, when pulled onto a face in front,
+   * each vertex lands on that face where its ray meets it (any angle). */
+  std::unordered_map<uint32_t, Vec3> target;
+  bool joining = distance > 0 && lim.contact > 0 && distance >= lim.contact - snap;
+  if (joining) {
+    RegionRays up = cast_region(m, r, r.normal, false);
+    const Vec3 nT = m.face_normal(lim.contact_face), pT = m.positions[m.face_verts(lim.contact_face)[0]];
+    for (uint32_t v : up.verts) {
+      /* Exact intersection with the target plane (the ray cast started off the vertex). */
+      float denom = dot(r.normal, nT);
+      float tt = std::fabs(denom) > 1e-8f ? dot(pT - m.positions[v], nT) / denom : 0.0f;
+      target[v] = m.positions[v] + r.normal * tt;
+    }
+  }
+  const Vec3 dvec = r.normal * distance;
+  auto moved = [&](uint32_t v) {
+    auto it = target.find(v);
+    return it != target.end() ? it->second : m.positions[v] + dvec;
+  };
+  EdgeFaces ef(m);
+  std::vector<uint8_t> in_region(m.face_count(), 0);
+  for (uint32_t f : r.faces) in_region[f] = 1;
+  std::unordered_map<uint32_t, uint32_t> newv;
+  for (uint32_t f : r.faces)
+    for (uint32_t i = 0; i < m.face_size(f); i++) {
+      uint32_t v = m.face_verts(f)[i];
+      if (!newv.count(v)) newv[v] = UINT32_MAX;
+    }
+  for (auto &[v, nv] : newv) nv = m.add_vert(moved(v));
+  /* Each side of the outline: a new wall, or - when the face beyond that side
+   * lies in the wall's plane - the side's moved copy is inserted into that
+   * face, which stretches or shrinks (SketchUp merges coplanar faces). */
+  const std::vector<uint32_t> &L = r.loops[0];
+  std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> insert;  // directed edge in the neighbour -> (b', a')
+  struct Wall { uint32_t v[4]; int mat; };
+  std::vector<Wall> walls;
+  std::unordered_set<uint32_t> touched;
+  for (size_t i = 0; i < L.size(); i++) {
+    uint32_t a = L[i], b = L[(i + 1) % L.size()];
+    uint32_t N = UINT32_MAX;
+    for (uint32_t g : ef.at(a, b))
+      if (!in_region[g]) N = g;
+    bool coplanar = false;
+    if (merge_coplanar && N != UINT32_MAX) {
+      Vec3 nN = m.face_normal(N), pN = m.positions[a];
+      coplanar = std::fabs(dot(m.positions[newv[a]] - pN, nN)) < snap && std::fabs(dot(m.positions[newv[b]] - pN, nN)) < snap;
+    }
+    if (coplanar) {
+      insert[((uint64_t)b << 32) | a] = {newv[b], newv[a]};
+      touched.insert(a);
+      touched.insert(b);
+      touched.insert(newv[a]);
+      touched.insert(newv[b]);
+    }
+    else {
+      int mat = m.material_of(N != UINT32_MAX ? N : r.faces[0]);
+      walls.push_back({{a, b, newv[b], newv[a]}, mat});
+    }
+  }
+  FaceBuilder fb(m);
+  std::vector<uint32_t> verts;
+  std::vector<Vec2> uv;
+  std::vector<uint8_t> was_touched;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const uint32_t n = m.face_size(f), b0 = m.face_offsets[f];
+    verts.clear();
+    uv.clear();
+    bool t = false;
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t a = v[i], c = v[(i + 1) % n];
+      verts.push_back(in_region[f] ? newv[a] : a);
+      if (fb.has_uv) uv.push_back(m.uvs[b0 + i]);
+      if (in_region[f]) continue;
+      auto it = insert.find(((uint64_t)a << 32) | c);
+      if (it == insert.end()) continue;
+      verts.push_back(it->second.first);
+      verts.push_back(it->second.second);
+      if (fb.has_uv) {
+        uv.push_back(m.uvs[b0 + i]);
+        uv.push_back(m.uvs[b0 + (i + 1) % n]);
+      }
+      t = true;
+    }
+    fb.add(verts.data(), verts.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f));
+    was_touched.push_back(t);
+  }
+  for (const Wall &w : walls) {
+    fb.add(w.v, 4, nullptr, w.mat);
+    was_touched.push_back(0);
+  }
+  fb.commit(m);
+  std::vector<uint32_t> remap;
+  /* Stretched faces: drop corners that now sit on a straight line or fold
+   * back on themselves (a box top pushed down leaves both kinds). */
+  {
+    FaceBuilder clean(m);
+    remap.assign(m.face_count(), UINT32_MAX);
+    std::vector<uint32_t> keep;
+    std::vector<Vec2> kuv;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t b0 = m.face_offsets[f];
+      std::vector<uint32_t> loop(m.face_verts(f), m.face_verts(f) + m.face_size(f));
+      std::vector<Vec2> luv;
+      if (clean.has_uv) luv.assign(m.uvs.begin() + b0, m.uvs.begin() + b0 + loop.size());
+      if (f < was_touched.size() && was_touched[f]) {
+        for (bool changed = true; changed && loop.size() > 2;) {
+          changed = false;
+          for (size_t i = 0; i < loop.size() && loop.size() > 2; i++) {
+            uint32_t p = loop[(i + loop.size() - 1) % loop.size()], v = loop[i], q = loop[(i + 1) % loop.size()];
+            if (!touched.count(v)) continue;
+            Vec3 e1 = m.positions[v] - m.positions[p], e2 = m.positions[q] - m.positions[v];
+            float l1 = length(e1), l2 = length(e2);
+            bool degenerate = l1 < snap || l2 < snap || length(cross(e1, e2)) < 1e-4f * l1 * l2;
+            if (!degenerate) continue;
+            loop.erase(loop.begin() + i);
+            if (clean.has_uv) luv.erase(luv.begin() + i);
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (loop.size() < 3) continue;  // squashed flat
+      remap[f] = (uint32_t)(clean.offs.size() - 1);
+      clean.add(loop.data(), loop.size(), clean.has_uv ? luv.data() : nullptr, m.material_of(f));
+    }
+    clean.commit(m);
+  }
+  remove_loose_verts(m);
+  face_sel.assign(m.face_count(), 0);
+  for (uint32_t f : r.faces)
+    if (f < remap.size() && remap[f] != UINT32_MAX) face_sel[remap[f]] = 1;
+  if (result) *result = walls.empty() ? PushPullResult::Moved : PushPullResult::Extruded;
+  if (joining) {
+    /* The cap now lies on the face in front: join them (an opening there). */
+    if (fuse_contacts(m, face_sel) && result) *result = PushPullResult::Joined;
+  }
+  m.touch();
+  return true;
+}
+
+/* ===================================================================== */
 /* Subdivide, dissolve, connect, collapse                                 */
 /* ===================================================================== */
 

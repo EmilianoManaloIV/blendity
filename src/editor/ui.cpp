@@ -20,6 +20,7 @@ using namespace platform;
 void Context::begin_frame(Image *target, double now) {
   canvas.begin(target);
   frame_++;
+  order_last_ = 0;
   time = now;
   cursor = Cursor::Arrow;
   overlays_.clear();
@@ -357,6 +358,13 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   bool hot = hovered(r);
   last_widget_ = r;
   last_hovered_ = hot;
+  const Id before = order_last_;
+  order_last_ = i;
+  if (edit_id_ != i && (focus_next_ || focus_request_ == i)) {
+    focus_next_ = false;
+    focus_request_ = 0;
+    begin_edit(i, s, true);
+  }
   if (edit_id_ != i) {
     if (hot) cursor = Cursor::IBeam;
     frame(r, theme.field, hot ? theme.field_hover : theme.field_border, px(3));
@@ -367,6 +375,7 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
     canvas.pop_clip();
     if (hot && in.pressed[0]) {
       edit_id_ = i;
+      edit_seen_ = true;
       edit_buf_ = s;
       edit_original_ = s;
       edit_scroll_ = 0;
@@ -378,6 +387,7 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   }
   int res = edit_text(i, r, edit_buf_);
   bool changed = false;
+  if (res == 2) tab_to(before);
   if (res == 1) {
     s = edit_buf_;
     changed = true;
@@ -396,8 +406,20 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   return changed;
 }
 
+/* Tab moves to the next number or text field, Shift+Tab to the previous one
+ * (Unity). The key is consumed so the next field doesn't commit at once. */
+void Context::tab_to(Id previous) {
+  if (!in.key_pressed[KEY_TAB]) return;
+  in.key_pressed[KEY_TAB] = false;
+  in.text.clear();
+  if (in.shift()) focus_request_ = previous;
+  else focus_next_ = true;
+  redraw = true;
+}
+
 void Context::begin_edit(Id i, const std::string &text, bool select_all) {
   edit_id_ = i;
+  edit_seen_ = true;  // started after the field was drawn this frame: don't let end_frame() cancel it
   edit_buf_ = text;
   edit_original_ = text;
   edit_cursor_ = text.size();
@@ -594,11 +616,19 @@ bool Context::scrub(Id i, const Recti &r, float &v, float speed, float mn, float
 bool Context::float_field(Id i, const Recti &r, float &v, float speed, float mn, float mx, const char *fmt) {
   last_widget_ = r;
   last_hovered_ = hovered(r);
+  const Id before = order_last_;  // the field drawn before this one (Shift+Tab)
+  order_last_ = i;
+  if (edit_id_ != i && (focus_next_ || focus_request_ == i)) {
+    focus_next_ = false;
+    focus_request_ = 0;
+    begin_edit(i, strprintf("%g", v), true);
+  }
   if (edit_id_ == i) {
     int res = edit_text(i, r, edit_buf_);
     if (res == 2 || res == 3) {
       edit_id_ = 0;
       double d;
+      tab_to(before);
       if (res == 2 && eval_number(edit_buf_, d, v)) {
         commit_ = {i, edit_buf_, -1, frame_};
         float nv = clampf((float)d, mn, mx);
@@ -1066,6 +1096,11 @@ void Context::draw_icon(Icon icon, const Recti &r, uint32_t c) {
     case Icon::Flask: L(6, 2, 10, 2); L(6.5f, 2, 6.5f, 7); L(9.5f, 2, 9.5f, 7); L(6.5f, 7, 2, 14); L(9.5f, 7, 14, 14); L(2, 14, 14, 14); T(4, 11, 12, 11, 13.5f, 13.5f); T(4, 11, 13.5f, 13.5f, 2.5f, 13.5f); break;
     case Icon::Search: C(6.5f, 6.5f, 4.5f, false); L(10, 10, 14, 14, 2); break;
     case Icon::Menu: R(2, 3, 12, 2); R(2, 7, 12, 2); R(2, 11, 12, 2); break;
+    case Icon::PushPull:  /* a slab with a face lifted off it (SketchUp's Push/Pull) */
+      L(2, 11, 9, 14); L(9, 14, 14, 11); L(2, 11, 2, 13); L(14, 11, 14, 13); L(2, 13, 9, 15.5f); L(9, 15.5f, 14, 13);
+      L(2, 7, 9, 10); L(9, 10, 14, 7); L(14, 7, 7, 4); L(7, 4, 2, 7);
+      L(8, 1, 8, 5, 1.4f); T(8, 0, 5.5f, 2.5f, 10.5f, 2.5f);
+      break;
   }
 }
 

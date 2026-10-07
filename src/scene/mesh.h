@@ -189,6 +189,25 @@ bool fuse_contacts(Mesh &m, std::vector<uint8_t> &face_sel);
  * out of it, and joined to the opening by a tube. Several exit faces use the
  * Boolean solver when available. */
 bool push_through(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *error = nullptr);
+/* SketchUp's Push/Pull on one face region, by `distance` along its normal
+ * (negative pushes in):
+ *  - sides whose neighbouring face lies in the moved wall's plane stretch
+ *    that face instead of adding a wall, so a box top just moves and a
+ *    face at the edge of a surface makes a clean notch or step;
+ *  - pushed to the far side of the object: a hole, cut into the exit face
+ *    at whatever angle it has (push_through);
+ *  - pulled onto a face in front: every vertex lands on that face (tilted
+ *    or not) and the two are joined (fuse_contacts).
+ * merge_coplanar = false always adds walls (SketchUp's Ctrl: keep the face). */
+enum class PushPullResult { Moved, Extruded, Hole, Joined };
+struct PushPullLimits {
+  float through = -1.0f;  // push distance that reaches the far side (-1: none)
+  float contact = -1.0f;  // pull distance that reaches a face in front (-1: none)
+  uint32_t contact_face = UINT32_MAX;
+};
+PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_sel);
+bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar = true,
+               PushPullResult *result = nullptr, std::string *error = nullptr);
 size_t subdivide_edges(Mesh &m, std::vector<uint8_t> &vert_sel, int cuts);  // Blender: Subdivide (edges only)
 size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel);             // Blender: Dissolve Edges
 size_t connect_vertices(Mesh &m, std::vector<uint8_t> &vert_sel);           // Blender: J (Connect Vertex Path)

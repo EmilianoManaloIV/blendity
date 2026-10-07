@@ -498,6 +498,109 @@ int main() {
     CHECK(ev("abc") == -12345.0);
     CHECK(ev("1/0") == 0);  // division by zero gives 0, not inf
   });
+  test("ui: click a number field and type into it; Tab / Shift+Tab move between fields", [] {
+    ui::Context u;
+    Image img;
+    img.resize(300, 120);
+    float a = 1, b = 2, c = 3;
+    const Recti ra{10, 10, 100, 20}, rb{10, 40, 100, 20}, rc{10, 70, 100, 20};
+    auto frame = [&](const std::function<void(ui::Input &)> &setup) {
+      setup(u.in);
+      u.begin_frame(&img, 0.0);
+      u.float_field(1001, ra, a);
+      u.float_field(1002, rb, b);
+      u.float_field(1003, rc, c);
+      u.end_frame();
+      for (bool &p : u.in.pressed) p = false;
+      for (bool &r : u.in.released) r = false;
+      for (bool &k : u.in.key_pressed) k = false;
+      u.in.text.clear();
+      u.in.pmx = u.in.mx;
+      u.in.pmy = u.in.my;
+    };
+    /* A click without dragging starts typing, with the old value selected. */
+    frame([](ui::Input &in) { in.mx = 50; in.my = 20; in.down[0] = in.pressed[0] = true; });
+    frame([](ui::Input &in) { in.down[0] = false; in.released[0] = true; });
+    CHECK(u.wants_keyboard());
+    frame([](ui::Input &in) { in.text = "2*3"; });
+    frame([](ui::Input &in) { in.key_pressed[platform::KEY_TAB] = true; });
+    CHECK_NEAR(a, 6.0f, 1e-6f);   // typed expression committed by Tab
+    CHECK(u.wants_keyboard());    // ...and the next field is being edited
+    frame([](ui::Input &in) { in.text = "+=5"; });
+    frame([](ui::Input &in) { in.key_pressed[platform::KEY_ENTER] = true; });
+    CHECK_NEAR(b, 7.0f, 1e-6f);   // relative to its own value
+    CHECK(!u.wants_keyboard());
+    CHECK_NEAR(c, 3.0f, 1e-6f);   // untouched
+    /* Shift+Tab goes back. */
+    frame([](ui::Input &in) { in.mx = 50; in.my = 80; in.down[0] = in.pressed[0] = true; });
+    frame([](ui::Input &in) { in.down[0] = false; in.released[0] = true; });
+    frame([](ui::Input &in) { in.text = "10"; });
+    frame([](ui::Input &in) {
+      in.key_pressed[platform::KEY_TAB] = true;
+      in.mods = platform::MOD_SHIFT;
+    });
+    frame([](ui::Input &in) { in.mods = 0; });
+    CHECK_NEAR(c, 10.0f, 1e-6f);
+    frame([](ui::Input &in) { in.text = "-1"; });
+    frame([](ui::Input &in) { in.key_pressed[platform::KEY_ENTER] = true; });
+    CHECK_NEAR(b, -1.0f, 1e-6f);  // Shift+Tab landed on the field above
+    /* Escape cancels typing; a bad expression leaves the value alone. */
+    frame([](ui::Input &in) { in.mx = 50; in.my = 20; in.down[0] = in.pressed[0] = true; });
+    frame([](ui::Input &in) { in.down[0] = false; in.released[0] = true; });
+    frame([](ui::Input &in) { in.text = "99"; });
+    frame([](ui::Input &in) { in.key_pressed[platform::KEY_ESCAPE] = true; });
+    CHECK_NEAR(a, 6.0f, 1e-6f);
+  });
+  test("editor: the Push/Pull tool drags a face with the mouse", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    /* Snapshot every mesh so we can tell which one the drag changed. */
+    std::vector<std::pair<uint64_t, std::vector<Vec3>>> before;
+    ed.scene().for_each([&](GameObject &g) {
+      if (auto *mf = g.get<MeshFilter>())
+        if (mf->mesh) before.push_back({g.id, mf->mesh->positions});
+    });
+    ed.command("tool pushpull");
+    Recti r = ed.scene_view_rect();
+    int cx = r.x + r.w / 2, cy = r.y + r.h / 2;  // the scene's Cube sits at the view centre
+    auto ev = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t;
+      e.x = x;
+      e.y = y;
+      return e;
+    };
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx, cy)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown, cx, cy)});
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 10, cy - 30)});
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 20, cy - 60)});
+    ed.step_frame_headless({ev(platform::EventType::MouseUp, cx + 20, cy - 60)});
+    ed.step_frame_headless();
+    const Mesh *changed = nullptr;
+    for (auto &[id, pos] : before)
+      if (GameObject *g = ed.scene().find(id))
+        if (g->get<MeshFilter>()->mesh->positions != pos) changed = g->get<MeshFilter>()->mesh.get();
+    CHECK(changed != nullptr);
+    if (changed) CHECK(closed_manifold(*changed));
+    /* The distance can then be typed exactly (Adjust Last Operation). */
+    ed.command("redo amount 0.25");
+    ed.step_frame_headless();
+    if (changed) {
+      for (auto &[id, pos] : before)
+        if (GameObject *g = ed.scene().find(id))
+          if (g->get<MeshFilter>()->mesh->positions != pos) CHECK(closed_manifold(*g->get<MeshFilter>()->mesh));
+    }
+    platform::Event z;
+    z.type = platform::EventType::KeyDown;
+    z.key = platform::KEY_Z;
+    z.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({z});
+    bool restored = true;
+    for (auto &[id, pos] : before)
+      if (GameObject *g = ed.scene().find(id)) restored = restored && g->get<MeshFilter>()->mesh->positions == pos;
+    CHECK(restored);  // one undo step for the drag and its adjustment
+  });
   test("editor: adjust last operation re-runs extrude, moves it, and stays one undo step", [] {
     Editor ed;
     ed.init_headless(800, 500);
@@ -708,6 +811,105 @@ static void edge_tool_tests() {
       CHECK(closed_manifold(m));
       CHECK(euler_characteristic(m) == 2);  // one solid now
       CHECK_NEAR(vol(m), c.volume, 1e-3f);
+    }
+  });
+  test("push/pull: moves, notches, holes and joins like SketchUp", [&] {
+    using meshops::PushPullResult;
+    auto one = [](const Mesh &m, size_t f) {
+      std::vector<uint8_t> s(m.face_count(), 0);
+      s[f] = 1;
+      return s;
+    };
+    PushPullResult res;
+    {  /* The whole top of a box: the box just gets taller or shorter. */
+      for (float d : {0.5f, -0.3f}) {
+        Mesh m = *primitives::cube();
+        auto fs = one(m, face_facing(m, {0, 1, 0}));
+        CHECK(meshops::push_pull(m, fs, d, true, &res));
+        CHECK(res == PushPullResult::Moved);
+        CHECK(m.face_count() == 6 && m.vert_count() == 8);
+        CHECK(closed_manifold(m));
+        CHECK_NEAR(vol(m), 1.0f + d, 1e-4f);
+      }
+    }
+    {  /* A face inside the top: a boss when pulled, a recess when pushed. */
+      for (float d : {0.4f, -0.3f}) {
+        Mesh m = *primitives::cube();
+        auto fs = one(m, face_facing(m, {0, 1, 0}));
+        meshops::inset_faces(m, fs, 0.4f);
+        CHECK(meshops::push_pull(m, fs, d, true, &res));
+        CHECK(res == PushPullResult::Extruded);
+        CHECK(closed_manifold(m));
+        CHECK_NEAR(vol(m), 1.0f + 0.36f * d, 1e-4f);
+      }
+    }
+    {  /* Half of a split top: pushing makes a notch, pulling a step - the
+        * side faces stretch instead of getting walls inside them. */
+      for (float d : {-0.3f, 0.3f}) {
+        Mesh m = *primitives::cube();
+        size_t top = face_facing(m, {0, 1, 0});
+        uint32_t tv[4];
+        for (int k = 0; k < 4; k++) tv[k] = m.face_verts(top)[k];
+        std::vector<uint8_t> vs(m.vert_count(), 0);
+        vs[tv[0]] = vs[tv[1]] = 1;
+        meshops::subdivide_edges(m, vs, 1);
+        uint32_t mid1 = (uint32_t)m.vert_count() - 1;
+        vs.assign(m.vert_count(), 0);
+        vs[tv[2]] = vs[tv[3]] = 1;
+        meshops::subdivide_edges(m, vs, 1);
+        uint32_t mid2 = (uint32_t)m.vert_count() - 1;
+        vs.assign(m.vert_count(), 0);
+        vs[mid1] = vs[mid2] = 1;
+        CHECK(meshops::connect_vertices(m, vs) == 1);
+        size_t half = SIZE_MAX;
+        for (size_t f = 0; f < m.face_count(); f++)
+          if (dot(m.face_normal(f), Vec3(0, 1, 0)) > 0.99f) half = f;
+        auto fs = one(m, half);
+        CHECK(meshops::push_pull(m, fs, d, true, &res));
+        CHECK(closed_manifold(m));
+        CHECK(euler_characteristic(m) == 2);
+        CHECK_NEAR(vol(m), 1.0f + 0.5f * d, 1e-4f);
+      }
+    }
+    {  /* Pushed through to the far side (straight or slanted): a hole. */
+      for (int slanted = 0; slanted < 2; slanted++) {
+        Mesh m = *primitives::cube();
+        size_t front = face_facing(m, {0, 0, -1}), back = face_facing(m, {0, 0, 1});
+        if (slanted)
+          for (uint32_t i = 0; i < m.face_size(back); i++) m.positions[m.face_verts(back)[i]].z += m.positions[m.face_verts(back)[i]].x * 0.6f;
+        auto fs = one(m, front);
+        meshops::inset_faces(m, fs, 0.4f);
+        meshops::PushPullLimits lim = meshops::push_pull_limits(m, fs);
+        CHECK(lim.through > 0.5f);
+        CHECK(meshops::push_pull(m, fs, -(lim.through + 0.5f), true, &res));
+        CHECK(res == PushPullResult::Hole);
+        CHECK(closed_manifold(m));
+        CHECK(euler_characteristic(m) == 0);
+        CHECK(ray_misses(m, {0, 0, -5}, {0, 0, 1}));
+      }
+    }
+    {  /* Pulled onto a tilted face of another box: the end takes that face's
+        * angle and the two become one solid. */
+      Mesh m = *primitives::cube();
+      Mesh b = *primitives::cube(3.0f);
+      Mat4 tb = Mat4::trs({3.5f, 0, 0}, Quat::euler({0, 0, 20}), {1, 1, 1});
+      uint32_t base = (uint32_t)m.vert_count();
+      for (Vec3 p : b.positions) m.add_vert(tb.point(p));
+      for (size_t f = 0; f < b.face_count(); f++) {
+        std::vector<uint32_t> v(b.face_verts(f), b.face_verts(f) + b.face_size(f));
+        for (uint32_t &x : v) x += base;
+        m.add_face(v.data(), v.size());
+      }
+      float v0 = vol(m);
+      auto fs = one(m, face_facing(m, {1, 0, 0}));
+      meshops::inset_faces(m, fs, 0.3f);
+      meshops::PushPullLimits lim = meshops::push_pull_limits(m, fs);
+      CHECK(lim.contact > 0.5f);
+      CHECK(meshops::push_pull(m, fs, lim.contact + 1.0f, true, &res));
+      CHECK(res == PushPullResult::Joined);
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 2);  // one solid
+      CHECK(vol(m) > v0);
     }
   });
   test("edges: subdivide, connect, dissolve, collapse", [&] {

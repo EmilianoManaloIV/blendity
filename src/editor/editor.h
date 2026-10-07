@@ -34,7 +34,7 @@ enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Lea
 const char *window_title(WindowKind k);
 ui::Icon window_icon(WindowKind k);
 
-enum class Tool { View, Move, Rotate, Scale, Transform };
+enum class Tool { View, Move, Rotate, Scale, Transform, PushPull };
 enum class EditElement { Vertex, Edge, Face };
 /* Scene view draw modes. Unity: Shaded / Wireframe / Shaded Wireframe.
  * Blender: Wireframe / Solid / Material Preview / Rendered. */
@@ -98,6 +98,7 @@ class Editor {
   Scene &scene() { return *scene_; }
   /* Runs a console command (also used by --headless-screenshot and tests). */
   void command(const std::string &c) { run_console_command(c); }
+  Recti scene_view_rect() const { return scene_rect_; }  // tests drive the Scene view with mouse events
 
  private:
   friend struct InspectorReflector;
@@ -218,6 +219,25 @@ class Editor {
   void run_last_op(bool first);
   void draw_last_op_panel(const Recti &view);
   bool try_auto_fuse(Mesh &m);
+  /* SketchUp's Push/Pull tool (P): hover a face, drag along its normal. */
+  struct PushPullDrag {
+    bool active = false;
+    uint64_t obj = 0;
+    MeshPtr before;
+    std::vector<uint8_t> fsel;
+    Vec3 origin, axis;     // world: where the face was grabbed, the direction it moves
+    float units = 1.0f;    // world length of one local unit along the axis
+    float start = 0.0f;    // mouse position along the axis at the press
+    float distance = 0.0f; // local units
+    bool keep = false;     // Ctrl: always add walls (keep the original face, SketchUp)
+    meshops::PushPullLimits lim;
+    meshops::PushPullResult result = meshops::PushPullResult::Moved;
+  };
+  bool pick_mesh_face(const Recti &view, int mx, int my, GameObject *&g, uint32_t &face, Vec3 &hit);
+  bool pushpull_update(const Recti &view);  // true while the tool owns the mouse
+  void pushpull_apply(float distance);
+  void pushpull_finish();
+  void draw_pushpull(const Recti &view);
 
   /* ---- selection ---- */
   enum SelectMode { SEL_REPLACE = 0, SEL_ADD = 1, SEL_TOGGLE = 2 };
@@ -356,6 +376,10 @@ class Editor {
   bool last_op_open_ = true;
   Recti last_op_rect_{};  // last frame's panel area (keeps clicks off the scene)
   uint64_t redo_serial_ = 0;
+  PushPullDrag pp_;
+  uint64_t pp_hover_obj_ = 0;
+  int64_t pp_hover_face_ = -1;
+  float pp_last_distance_ = 0.0f;
   std::vector<uint8_t> vert_sel_, face_sel_;
 
   /* ---- game view ---- */

@@ -569,6 +569,7 @@ void Editor::draw_menubar(const Recti &r) {
     if (edit_mode_) {
       if (u.menu_item("Extrude Faces", "Ctrl+E")) edit_op("extrude");
       if (u.menu_item("Inset Faces", "Ctrl+I")) edit_op("inset");
+      if (u.menu_item("Push/Pull Tool (like SketchUp)", "P", tool_ == Tool::PushPull)) tool_ = Tool::PushPull;
       if (u.menu_item("Push Through (hole along normal)", "Alt+P")) edit_op("push_through");
       if (u.menu_item("Bridge Faces / Edge Loops", "Ctrl+Shift+B")) edit_op("bridge");
       if (u.menu_item("Fuse onto Touching Face")) edit_op("fuse");
@@ -678,9 +679,13 @@ void Editor::draw_toolbar(const Recti &r) {
       {Tool::Move, Icon::Move, "Move Tool (W)\nBlender: G or the Move tool (FoCG ch. 7.3 translation)."},
       {Tool::Rotate, Icon::Rotate, "Rotate Tool (E)\nBlender: R. Hold Ctrl to snap 15 degrees."},
       {Tool::Scale, Icon::Scale, "Scale Tool (R)\nBlender: S."},
-      {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."}};
+      {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."},
+      {Tool::PushPull, Icon::PushPull,
+       "Push/Pull Tool (P) - like SketchUp\nDrag a face along its normal. Pushed to the far side it makes a hole;\n"
+       "pulled onto another face it joins it, even a slanted one. Ctrl keeps the original face,\n"
+       "double-click repeats the last distance, Esc cancels. Type an exact distance in the F9 panel."}};
   /* Grouped segmented control, like Unity's tool strip. */
-  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 5 + u.px(2), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
+  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 6 + u.px(2), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
   for (const T &t : tools) {
     if (u.icon_button({x, y, bh, bh}, t.i, tool_ == t.t, t.tip)) tool_ = t.t;
     x += bh + u.px(2);
@@ -833,6 +838,7 @@ void Editor::handle_shortcuts() {
     if (P(KEY_E)) tool_ = Tool::Rotate;
     if (P(KEY_R)) tool_ = Tool::Scale;
     if (P(KEY_Y)) tool_ = Tool::Transform;
+    if (P(KEY_P) && !alt) tool_ = Tool::PushPull;  // SketchUp: P
     if (P(KEY_F) && !(alt && edit_mode_)) frame_selected();
     if (P(KEY_TAB)) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
     if (P(KEY_DELETE) || (P(KEY_BACKSPACE) && focused_ != WindowKind::Hierarchy)) {
@@ -1591,7 +1597,8 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "tool") {
     std::string w = to_lower(arg(1, "move"));
-    tool_ = w == "view" ? Tool::View : w == "rotate" ? Tool::Rotate : w == "scale" ? Tool::Scale : w == "transform" ? Tool::Transform : Tool::Move;
+    tool_ = w == "view" ? Tool::View : w == "rotate" ? Tool::Rotate : w == "scale" ? Tool::Scale : w == "transform" ? Tool::Transform
+            : w == "pushpull" ? Tool::PushPull : Tool::Move;
   }
   else if (c == "edit") {
     if (!edit_mode_) enter_edit_mode();
@@ -1627,6 +1634,11 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("Select objects with a MeshRenderer first");
   }
   else if (c == "preview") start_final_render(true);
+  else if (c == "pushpull") {
+    /* pushpull <distance>: Push/Pull the selected faces (edit mode), like the P tool. */
+    pp_last_distance_ = (float)std::atof(arg(1, "0.5").c_str());
+    edit_op("push_pull");
+  }
   else if (c == "fsel") {
     /* fsel <f0> <f1> ... | fsel facing <x> <y> <z> [more directions...]: select faces (edit mode). */
     if (!edit_mode_) enter_edit_mode();

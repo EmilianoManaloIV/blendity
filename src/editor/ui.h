@@ -56,7 +56,7 @@ struct Theme {
 enum class Icon {
   None, Hand, Move, Rotate, Scale, Transform, Play, Pause, Step, Cube, Camera, Light, Folder, File, Scene, Eye,
   Plus, Gear, Book, Paper, Chart, Info, Warning, Error, ArrowRight, ArrowDown, Check, Close, Grid, Vertex, Face,
-  Magnet, Globe, Local, Pivot, Center, Empty, Mesh, Terminal, Flask, Lightbulb, Search, Menu
+  Magnet, Globe, Local, Pivot, Center, Empty, Mesh, Terminal, Flask, Lightbulb, Search, Menu, PushPull
 };
 
 struct Input {
@@ -232,6 +232,10 @@ class Context {
   bool edit_seen_ = false;
   bool dragging_value_ = false;
   uint64_t frame_ = 0;
+  Id order_last_ = 0;      // last number / text field drawn this frame (Tab order)
+  bool focus_next_ = false;  // Tab: the next field drawn starts editing
+  Id focus_request_ = 0;   // Shift+Tab: this field starts editing
+  void tab_to(Id previous);
   struct NumberCommit {
     Id id = 0;
     std::string expr;
