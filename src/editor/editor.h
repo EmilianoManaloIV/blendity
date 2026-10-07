@@ -154,7 +154,11 @@ class Editor {
   void render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                        bool scene_lights, const Camera *cam);
   void render_pathtraced_view(const Recti &view);
-  void start_final_render();
+  /* preview: the Preview Resolution % and Preview Samples settings (a quick look
+   * before the real render). open_window: bring the Render window forward. */
+  void start_final_render(bool preview = false, bool open_window = true);
+  uint64_t live_preview_hash();
+  void draw_camera_preview(const Recti &view);  // Unity's Camera Preview inset
   void step_final_render();
   void save_render();
   uint64_t scene_render_hash();
@@ -187,6 +191,33 @@ class Editor {
   void set_edit_element(EditElement e);
   /* Proportional editing weights for the vertices being transformed. */
   void compute_proportional_weights(const Mat4 &world);
+  /* Blender's "Adjust Last Operation" panel (F9): the last edit operator
+   * re-runs from a copy of the mesh taken before it, with new parameters
+   * and an optional move (X/Y/Z or along the normal). Amends one undo step. */
+  struct LastOp {
+    std::string op;  // empty = none
+    uint64_t obj = 0;
+    MeshPtr before;
+    const Mesh *result = nullptr;  // the mesh it produced (panel hides once anything else edits it)
+    uint64_t result_version = 0;
+    std::vector<uint8_t> vsel, fsel;
+    EditElement elem = EditElement::Face;
+    float amount = 0.5f;  // extrude distance, inset amount, bevel width, smooth factor, loop slide
+    int segments = 1;     // bevel / bridge / push-through segments, subdivide and loop cuts
+    int twist = 0;
+    float smooth = 1.0f;
+    int path = 0;         // bridge: 0 auto, 1 outside, 2 inside
+    Vec3 move{0, 0, 0};
+    float along_normal = 0.0f;
+    int orientation = 0;  // 0 global, 1 local
+    bool fuse = true;     // extrude / move onto another face fuses them
+    std::string message;
+  };
+  bool edit_op_redoable(const std::string &op) const;
+  bool last_op_valid();
+  void run_last_op(bool first);
+  void draw_last_op_panel(const Recti &view);
+  bool try_auto_fuse(Mesh &m);
 
   /* ---- selection ---- */
   enum SelectMode { SEL_REPLACE = 0, SEL_ADD = 1, SEL_TOGGLE = 2 };
@@ -316,6 +347,15 @@ class Editor {
   std::vector<float> gizmo_vert_w_;
   int loop_cuts_ = 1;
   float loop_slide_ = 0.5f;
+  float bevel_width_ = 0.1f;
+  int bevel_segments_ = 1;
+  int bridge_segments_ = 1;
+  int subdivide_cuts_ = 1;
+  bool auto_fuse_ = true;  // a face moved or extruded onto another face merges into it
+  LastOp last_op_;
+  bool last_op_open_ = true;
+  Recti last_op_rect_{};  // last frame's panel area (keeps clicks off the scene)
+  uint64_t redo_serial_ = 0;
   std::vector<uint8_t> vert_sel_, face_sel_;
 
   /* ---- game view ---- */
@@ -337,6 +377,12 @@ class Editor {
   PathTracer final_pt_;
   Image render_img_;
   bool rendering_ = false, render_has_result_ = false;
+  bool render_preview_ = false;  // the current / last render is a preview
+  uint64_t live_preview_hash_ = 0;
+  double live_preview_time_ = -100;
+  Image cam_preview_img_;
+  RenderTarget cam_preview_rt_;
+  Renderer3D cam_preview_r3d_;
   double render_start_ = 0, render_time_ = 0;
   std::string render_status_;
   float render_zoom_ = 0;  // 0 = fit

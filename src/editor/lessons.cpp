@@ -465,6 +465,34 @@ The job system splits loops across every core: tiles in the rasterizer, rows whe
 ! cmd:libs | List the active libraries in the Console
 ! cmd:select Cube; component DecimateModifier | Add a Decimate modifier (meshoptimizer) to the Cube
 )"},
+    {"Bevel, Bridge and Push Through", "Edge tools, joining faces, and adjusting the last operation", R"(
+Blender's edge tools change topology rather than just moving vertices. Each one is an operator: it reads the selection, rebuilds part of the mesh, and leaves the new geometry selected so you can keep working.
+| Tool | Blendity | Blender | ProBuilder / Unity
+| Bevel | Ctrl+B (edges selected) | Ctrl+B | Bevel
+| Bridge | Ctrl+Shift+B (two faces or two holes) | Edge > Bridge Edge Loops | Bridge Edges
+| Push Through | Alt+P (a face) | (a Boolean difference) | (none)
+| Connect | J (two vertices of a face) | J | Connect Edges
+| Dissolve / Collapse | Ctrl+X / Edge menu | Ctrl+X / Merge > Collapse | Delete Edges / Collapse
+# Bevel
+A bevel replaces a sharp edge with a strip of faces. Each face beside the edge pulls its corners back along its other edges by the width. The new strip follows a curve through the old corner, with one face per segment. Where several beveled edges meet, a small patch closes the corner.
+@ blender/source/blender/bmesh/tools/bmesh_bevel.cc, blender/source/blender/editors/mesh/editmesh_bevel.cc
+# Bridge, at any angle
+Bridging removes two faces and joins their outlines with a tube. The outlines must be matched vertex to vertex, which is easy when they face each other and hard when they don't. Blendity rotates one outline onto the other's plane, scales both to unit size, and picks the pairing with the smallest total distance. If the counts differ, the shorter outline gets extra vertices on its longest edges. With more segments the tube follows a curve that leaves one face along its normal and arrives at the other. For opposite faces that curve runs straight through the inside (a tunnel); otherwise it arches outside (a handle).
+@ blender/source/blender/bmesh/operators/bmo_bridge.cc
+> [FoCG] 15.5 Cubics (the Hermite curve the tube follows), 12.1 Triangle Meshes
+# Push Through, and extruding onto a face
+Push Through casts a ray from each outline vertex along the face's inward normal and finds where it leaves the object. It cuts that projected shape out of the exit face, so a tilted or curved-in back works too, and joins the two openings with a tube. Extruding (or moving) a face until it lies on another face does the matching join: the face it lands on gets an opening, and the prism becomes part of the solid. When the faces are the same shape, their vertices are welded instead.
+> [FoCG] 21.5 Constructive Solid Geometry
+# Adjust Last Operation
+After an operator runs, a panel at the bottom left of the Scene view shows its settings (F9 toggles it). Changing one doesn't stack a second operation. Blendity keeps a copy of the mesh from before the operator, runs it again with the new values, and replaces the same undo step. The panel also moves the result in X, Y, Z or along the normal, the way Blender lets you adjust an extrude afterwards.
+@ blender/source/blender/windowmanager/intern/wm_operators.cc  (WM_operator_last_redo)
+@ blender/source/blender/editors/undo/ed_undo.cc
+> [GEA1] 1.6 Tools and the Asset Pipeline
+? You bevel one edge of a cube with 3 segments. How many faces does it have? | 9. The six faces stay, and the edge becomes a strip of 3 faces. The two faces at its ends take the curve's extra vertices instead of growing new faces.
+? Why does a hole through a cube change Euler's formula? | V - E + F = 2 - 2g, where g is the number of holes (the genus). A cube with a tunnel has g = 1, so V - E + F = 0.
+! cmd:select Cube; edit edge all; editop bevel | Bevel every edge of the Cube
+! cmd:select Cube; edit face; fsel facing 0 0 -1; editop inset; editop push_through | Inset the Cube's front face and push it through
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

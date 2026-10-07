@@ -165,6 +165,34 @@ bool fill(Mesh &m, const std::vector<uint8_t> &vert_sel);
 size_t merge_at_center(Mesh &m, const std::vector<uint8_t> &vert_sel);
 /* Recalculate Outside (Shift+N): consistent winding, then outward. */
 void recalc_normals_outside(Mesh &m);
+
+/* --- edge and face tools (mesh_tools.cpp). Selections are updated to the result. --- */
+/* Bevel the selected edges (both ends selected, two faces each). width is
+ * measured along the neighbouring edges; segments > 1 rounds the profile.
+ * Blender: Ctrl+B (bmesh_bevel.cc). */
+bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, float width, int segments,
+                 std::string *error = nullptr);
+/* Joins two selected face regions (removed) or two open edge loops with a
+ * tube. Loops may differ in vertex count and face any direction: the second
+ * loop is rotated onto the first's plane to match vertices, and segments > 1
+ * curve the tube along the faces' normals (smooth scales the bend; path 0
+ * auto, 1 outside as a handle, 2 inside as a tunnel). Regions
+ * touching face to face are fused instead. Blender: Bridge Edge Loops. */
+bool bridge(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, int segments, int twist, float smooth, int path = 0,
+            std::string *error = nullptr);
+/* Selected regions lying on another face (e.g. extruded onto it) merge into
+ * it: the face gets a hole the shape of the region, or the region shrinks to
+ * a ring around a smaller face, or both are welded when they match. */
+bool fuse_contacts(Mesh &m, std::vector<uint8_t> &face_sel);
+/* Cuts a hole through the object along the selected region's normal: the
+ * outline is projected onto the face it exits through (at any angle), cut
+ * out of it, and joined to the opening by a tube. Several exit faces use the
+ * Boolean solver when available. */
+bool push_through(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *error = nullptr);
+size_t subdivide_edges(Mesh &m, std::vector<uint8_t> &vert_sel, int cuts);  // Blender: Subdivide (edges only)
+size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel);             // Blender: Dissolve Edges
+size_t connect_vertices(Mesh &m, std::vector<uint8_t> &vert_sel);           // Blender: J (Connect Vertex Path)
+size_t collapse_edges(Mesh &m, std::vector<uint8_t> &vert_sel);             // Blender: Collapse
 /* Boolean (Blender: Boolean modifier, Manifold solver; needs Blender's
  * libraries). b is placed into a's object space by b_to_a. Both must be
  * closed manifolds; on failure a is unchanged and error explains why. */

@@ -34,7 +34,17 @@ void Material::reflect(Reflector &r) {
   static const char *procs[] = {"None (use Base Map)", "Checker", "Noise", "UV Grid", "Color Grid"};
   static const char *wraps[] = {"Repeat", "Extend", "Clip", "Mirror"};
   static const char *filters[] = {"Closest", "Linear", "Trilinear (Mipmaps)"};
+  static const char *surfaces[] = {"Opaque (Solid)", "Cutout (Alpha Clip)", "Transparent (Alpha Blend)", "Glass (Refraction)"};
   r.text("Name", name);
+  r.enumeration("Surface Type", surface, surfaces, 4);
+  r.help("Opaque: solid. Cutout: holes where Alpha (or the Base Map's alpha) is below the threshold.\n"
+         "Transparent: see-through by Alpha. Glass: clear refracting material tinted by Base Color.\n"
+         "Unity: Surface Type + Alpha Clipping. Blender: Blend Mode / Glass BSDF.");
+  if (r.all_fields() || surface == (int)MaterialSurface::Cutout) r.field("Alpha Clip Threshold", alpha_clip, 0.01f, 0.0f, 1.0f);
+  if (r.all_fields() || surface == (int)MaterialSurface::Glass) {
+    r.field("IOR", ior, 0.01f, 1.0f, 4.0f);
+    r.help("Index of refraction: 1.0 air, 1.33 water, 1.45 Blender's default, 1.5 window glass, 2.42 diamond.");
+  }
   r.color("Base Color", base_color);
   r.help("Albedo. Blender: Principled BSDF > Base Color. Unity: Base Map tint.");
   r.texture("Base Map", base_map);
@@ -56,7 +66,10 @@ void Material::reflect(Reflector &r) {
   r.color("Emission", emission);
   r.field("Emission Strength", emission_strength, 0.05f, 0.0f, 1000.0f);
   r.texture("Emission Map", emission_map);
-  r.field("Alpha", alpha, 0.01f, 0.0f, 1.0f);
+  if (r.all_fields() || surface == (int)MaterialSurface::Cutout || surface == (int)MaterialSurface::Transparent) {
+    r.field("Alpha", alpha, 0.01f, 0.0f, 1.0f);
+    r.help("Opacity: 1 = solid, 0 = invisible. Multiplied by the Base Map's alpha.");
+  }
   r.enumeration("Mapping", mapping, mappings, 3);
   r.help("UV = use the mesh's UV map. Box = triplanar projection (no UVs needed). Generated = object-space bounds.");
   r.field("Tiling", tiling);
@@ -97,6 +110,48 @@ MaterialPtr make_material(const std::string &name, Vec3 color) {
   auto m = std::make_shared<Material>();
   m->name = name;
   m->base_color = color;
+  return m;
+}
+
+const std::vector<std::string> &material_presets() {
+  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit"};
+  return names;
+}
+
+MaterialPtr make_material_preset(const std::string &preset) {
+  auto m = make_material(preset, Vec3(0.8f));
+  if (preset == "Transparent") {
+    m->surface = (int)MaterialSurface::Transparent;
+    m->base_color = {0.2f, 0.5f, 0.9f};
+    m->alpha = 0.4f;
+    m->double_sided = true;
+  }
+  else if (preset == "Cutout") {
+    m->surface = (int)MaterialSurface::Cutout;
+    m->procedural = (int)Procedural::Checker;  // something to cut until a texture with alpha is assigned
+    m->alpha = 1.0f;
+    m->double_sided = true;
+  }
+  else if (preset == "Glass" || preset == "Frosted Glass") {
+    m->surface = (int)MaterialSurface::Glass;
+    m->base_color = {0.95f, 0.98f, 1.0f};
+    m->roughness = preset == "Glass" ? 0.0f : 0.35f;
+    m->ior = 1.5f;
+  }
+  else if (preset == "Metal") {
+    m->base_color = {0.91f, 0.92f, 0.92f};  // aluminium-like
+    m->metallic = 1.0f;
+    m->roughness = 0.25f;
+  }
+  else if (preset == "Emissive") {
+    m->base_color = {0.05f, 0.05f, 0.05f};
+    m->emission = {1.0f, 0.75f, 0.45f};
+    m->emission_strength = 5.0f;
+  }
+  else if (preset == "Unlit") {
+    m->unlit = true;
+    m->base_color = {1.0f, 0.5f, 0.1f};
+  }
   return m;
 }
 

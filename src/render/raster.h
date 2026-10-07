@@ -163,6 +163,11 @@ class Renderer3D {
   };
   void raster_tile(int tile_index);
   void shade_deferred();
+  /* Cutout / Transparent / Glass triangles: a sorted forward pass after the
+   * opaque one (Unity: the Transparent queue; EEVEE: blended materials). */
+  void draw_see_through(const std::vector<uint8_t> &see_through);
+  /* Lights + image-based lighting for one shaded point (deferred and forward). */
+  Vec3 light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const;
 
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;

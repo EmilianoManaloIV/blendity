@@ -106,6 +106,7 @@ static std::vector<uint8_t> select_verts(const Mesh &m, std::initializer_list<ui
 }
 
 static void modeling_tests();
+static void edge_tool_tests();
 static void uv_tests();
 static void subdiv_tests();
 static void physics_tests();
@@ -469,8 +470,78 @@ int main() {
     ed.command("stop");
     CHECK(ed.scene().object_count() == n + 3);  // play-mode changes reverted
   });
+  test("ui: number fields evaluate expressions, relative input and Unity's L() / R()", [] {
+    auto ev = [](const char *s, double cur = 0, int i = 0, int n = 1) {
+      double d = -12345;
+      return ui::eval_number(s, d, cur, i, n) ? d : -12345.0;
+    };
+    CHECK_NEAR(ev("2*3+1"), 7, 1e-9);
+    CHECK_NEAR(ev("(1+2)^2"), 9, 1e-9);
+    CHECK_NEAR(ev("2^3^2"), 512, 1e-9);  // right associative
+    CHECK_NEAR(ev("-2^2"), -4, 1e-9);
+    CHECK_NEAR(ev("2**3"), 8, 1e-9);
+    CHECK_NEAR(ev("10 % 3"), 1, 1e-9);
+    CHECK_NEAR(ev("sqrt(16) + max(1, 5, 3)"), 9, 1e-9);
+    CHECK_NEAR(ev("sin(pi/2)"), 1, 1e-9);
+    CHECK_NEAR(ev("deg(pi)"), 180, 1e-9);
+    CHECK_NEAR(ev("+=5", 3), 8, 1e-9);
+    CHECK_NEAR(ev("-=1.5", 3), 1.5, 1e-9);
+    CHECK_NEAR(ev("*=2", 4), 8, 1e-9);
+    CHECK_NEAR(ev("/=4", 2), 0.5, 1e-9);
+    CHECK_NEAR(ev("*=2+1", 4), 12, 1e-9);  // the right side is a whole expression
+    CHECK_NEAR(ev("L(0, 10)", 0, 0, 3), 0, 1e-9);
+    CHECK_NEAR(ev("L(0, 10)", 0, 1, 3), 5, 1e-9);
+    CHECK_NEAR(ev("L(0, 10)", 0, 2, 3), 10, 1e-9);
+    double r = ev("R(1, 2)");
+    CHECK(r >= 1 && r <= 2);
+    CHECK(ev("2+") == -12345.0);
+    CHECK(ev("abc") == -12345.0);
+    CHECK(ev("1/0") == 0);  // division by zero gives 0, not inf
+  });
+  test("editor: adjust last operation re-runs extrude, moves it, and stays one undo step", [] {
+    Editor ed;
+    ed.init_headless(800, 500);
+    ed.command("create Cube");  // selected and active after creation
+    ed.step_frame_headless();
+    GameObject *cube = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name == "Cube" && (!cube || g.id > cube->id)) cube = &g;
+    });
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    uint64_t id = cube->id;
+    auto mesh = [&]() -> const Mesh & { return *ed.scene().find(id)->get<MeshFilter>()->mesh; };
+    auto top_y = [&] {
+      float y = -1e9f;
+      for (Vec3 p : mesh().positions) y = std::max(y, p.y);
+      return y;
+    };
+    ed.command("fsel facing 0 1 0");
+    ed.command("editop extrude");
+    ed.step_frame_headless();
+    CHECK(mesh().face_count() == 10);
+    CHECK_NEAR(top_y(), 0.5f + 0.5f, 1e-4f);  // default distance 0.5
+    ed.command("redo amount 2");
+    ed.step_frame_headless();
+    CHECK(mesh().face_count() == 10);  // re-run from the original, not extruded twice
+    CHECK_NEAR(top_y(), 2.5f, 1e-4f);
+    ed.command("redo normal 0.5");
+    ed.step_frame_headless();
+    CHECK_NEAR(top_y(), 3.0f, 1e-4f);
+    ed.command("redo move 0 -1 0");
+    ed.step_frame_headless();
+    CHECK_NEAR(top_y(), 2.0f, 1e-4f);
+    platform::Event z;
+    z.type = platform::EventType::KeyDown;
+    z.key = platform::KEY_Z;
+    z.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({z});
+    CHECK(mesh().face_count() == 6);  // one undo step for the extrude and all its adjustments
+    CHECK_NEAR(top_y(), 0.5f, 1e-4f);
+  });
 
   modeling_tests();
+  edge_tool_tests();
   uv_tests();
   subdiv_tests();
   physics_tests();
@@ -486,6 +557,187 @@ int main() {
 }
 
 /* ===================================================================== */
+
+/* Signed volume (divergence theorem over fan triangles): > 0 when faces point outward. */
+static float signed_volume(const Mesh &m) {
+  double v = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *fv = m.face_verts(f);
+    for (uint32_t i = 1; i + 1 < m.face_size(f); i++)
+      v += dot(m.positions[fv[0]], cross(m.positions[fv[i]], m.positions[fv[i + 1]]));
+  }
+  return (float)(v / 6.0);
+}
+
+static size_t face_facing(const Mesh &m, Vec3 n) {
+  for (size_t f = 0; f < m.face_count(); f++)
+    if (dot(m.face_normal(f), n) > 0.99f) return f;
+  return SIZE_MAX;
+}
+
+/* True when a ray along d through p passes through the mesh without hitting it. */
+static bool ray_misses(const Mesh &m, Vec3 p, Vec3 d) {
+  const RenderMesh &rm = m.render_mesh();
+  Ray r{p, normalize(d)};
+  for (size_t t = 0; t < rm.tri_count(); t++)
+    if (ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]) > 0) return false;
+  return true;
+}
+
+static void edge_tool_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  test("bevel: one edge, rounded and all edges stay watertight", [&] {
+    for (int seg : {1, 4}) {
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> vs(m.vert_count(), 0), fs;
+      auto e = m.edge_cache()[0];
+      vs[e.first] = vs[e.second] = 1;
+      CHECK(meshops::bevel_edges(m, vs, fs, 0.1f, seg));
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 2);
+      CHECK(m.face_count() == (size_t)(6 + seg));
+      float v = vol(m);
+      CHECK(v > 0.99f && v < 1.0f);   // a sliver along one edge is gone
+      if (seg == 1) CHECK_NEAR(v, 1.0f - 0.1f * 0.1f / 2.0f, 1e-3f);
+    }
+    for (int seg : {1, 3}) {
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> vs(m.vert_count(), 1), fs;
+      CHECK(meshops::bevel_edges(m, vs, fs, 0.1f, seg));
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 2);
+      if (seg == 1) CHECK(m.face_count() == 6 + 12 + 8);
+      CHECK(vol(m) > 0.9f && vol(m) < 1.0f);
+    }
+  });
+  test("push through: a hole along the normal, also through a slanted far side", [&] {
+    for (int slanted = 0; slanted < 2; slanted++) {
+      Mesh m = *primitives::cube();
+      size_t front = face_facing(m, {0, 0, -1}), back = face_facing(m, {0, 0, 1});
+      if (slanted)
+        for (uint32_t i = 0; i < m.face_size(back); i++) m.positions[m.face_verts(back)[i]].z += m.positions[m.face_verts(back)[i]].x * 0.6f;
+      std::vector<uint8_t> fs(m.face_count(), 0);
+      fs[front] = 1;
+      meshops::inset_faces(m, fs, 0.4f);
+      std::string err;
+      CHECK(meshops::push_through(m, fs, 1, &err));
+      CHECK(err.empty());
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 0);  // genus 1: a hole all the way through
+      CHECK(ray_misses(m, {0, 0, -5}, {0, 0, 1}));
+      CHECK(!ray_misses(m, {0.45f, 0.45f, -5}, {0, 0, 1}));
+      if (!slanted) CHECK_NEAR(vol(m), 1.0f - 0.6f * 0.6f, 1e-3f);
+      else CHECK(vol(m) > 0.0f);
+    }
+  });
+  test("bridge: opposite faces, non-parallel faces, unequal outlines and open edge loops", [&] {
+    {  /* Front and back: a straight tunnel, same as push-through. */
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> fs(m.face_count(), 0), vs;
+      fs[face_facing(m, {0, 0, -1})] = fs[face_facing(m, {0, 0, 1})] = 1;
+      meshops::inset_faces(m, fs, 0.4f);
+      CHECK(meshops::bridge(m, vs, fs, 1, 0, 1.0f));
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 0);
+      CHECK_NEAR(vol(m), 1.0f - 0.36f, 1e-3f);
+    }
+    {  /* Top and front (90 degrees apart): a curved handle outside the cube. */
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> fs(m.face_count(), 0), vs;
+      fs[face_facing(m, {0, 1, 0})] = fs[face_facing(m, {0, 0, -1})] = 1;
+      meshops::inset_faces(m, fs, 0.4f);
+      CHECK(meshops::bridge(m, vs, fs, 8, 0, 1.0f));
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 0);
+      std::printf("    handle volume %.4f\n", vol(m));
+      CHECK(vol(m) > 1.0f);  // the handle adds material
+    }
+    {  /* A five-sided outline bridged to a quad. */
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> fs(m.face_count(), 0), vs;
+      size_t top = face_facing(m, {0, 1, 0}), bottom = face_facing(m, {0, -1, 0});
+      fs[top] = fs[bottom] = 1;
+      meshops::inset_faces(m, fs, 0.4f);
+      size_t inner_top = face_facing(m, {0, 1, 0});
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (fs[f] && m.face_center(f).y > 0) inner_top = f;
+      vs.assign(m.vert_count(), 0);
+      vs[m.face_verts(inner_top)[0]] = vs[m.face_verts(inner_top)[1]] = 1;
+      meshops::subdivide_edges(m, vs, 1);
+      fs.resize(m.face_count(), 0);
+      CHECK(m.face_size(inner_top) == 5);
+      vs.assign(m.vert_count(), 0);
+      CHECK(meshops::bridge(m, vs, fs, 2, 0, 1.0f));
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 0);
+    }
+    {  /* Two holes (open edge loops) joined through the inside. */
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> del(m.face_count(), 0);
+      del[face_facing(m, {0, 1, 0})] = del[face_facing(m, {0, -1, 0})] = 1;
+      meshops::inset_faces(m, del, 0.4f);  // the inner faces stay selected: delete them
+      meshops::delete_faces(m, del);
+      std::vector<uint8_t> vs(m.vert_count(), 1), fs;
+      CHECK(meshops::bridge(m, vs, fs, 1, 0, 1.0f));
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 0);
+    }
+  });
+  test("extrude onto another face fuses the two (hole, ring and weld cases)", [&] {
+    auto two_boxes = [](float big, float gap_x) {
+      Mesh m = *primitives::cube();
+      Mesh b = *primitives::cube(big);
+      uint32_t base = (uint32_t)m.vert_count();
+      for (Vec3 p : b.positions) m.add_vert(p + Vec3(gap_x, 0, 0));
+      for (size_t f = 0; f < b.face_count(); f++) {
+        std::vector<uint32_t> v(b.face_verts(f), b.face_verts(f) + b.face_size(f));
+        for (uint32_t &x : v) x += base;
+        m.add_face(v.data(), v.size());
+      }
+      return m;
+    };
+    struct Case { float big, x, volume; };
+    for (Case c : {Case{3.0f, 3.0f, 1 + 27 + 1}, Case{1.0f, 2.0f, 3.0f}, Case{0.6f, 1.8f, 1 + 1 + 0.216f}}) {
+      Mesh m = two_boxes(c.big, c.x);
+      std::vector<uint8_t> fs(m.face_count(), 0);
+      fs[face_facing(m, {1, 0, 0})] = 1;  // the first box's +X face
+      float gap = c.x - c.big * 0.5f - 0.5f;
+      meshops::extrude_faces(m, fs, gap);
+      CHECK(meshops::fuse_contacts(m, fs));
+      CHECK(closed_manifold(m));
+      CHECK(euler_characteristic(m) == 2);  // one solid now
+      CHECK_NEAR(vol(m), c.volume, 1e-3f);
+    }
+  });
+  test("edges: subdivide, connect, dissolve, collapse", [&] {
+    Mesh m = *primitives::cube();
+    std::vector<uint8_t> vs(m.vert_count(), 0);
+    auto e = m.edge_cache()[0];
+    vs[e.first] = vs[e.second] = 1;
+    CHECK(meshops::subdivide_edges(m, vs, 2) == 1);
+    CHECK(m.vert_count() == 10);
+    CHECK(closed_manifold(m));
+    Mesh c = *primitives::cube();
+    size_t top = face_facing(c, {0, 1, 0});
+    vs.assign(c.vert_count(), 0);
+    vs[c.face_verts(top)[0]] = vs[c.face_verts(top)[2]] = 1;  // a diagonal
+    CHECK(meshops::connect_vertices(c, vs) == 1);
+    CHECK(c.face_count() == 7);
+    CHECK(closed_manifold(c));
+    CHECK(meshops::dissolve_edges(c, vs) == 1);
+    CHECK(c.face_count() == 6);
+    CHECK(closed_manifold(c));
+    Mesh k = *primitives::cube();
+    vs.assign(k.vert_count(), 0);
+    auto e2 = k.edge_cache()[0];
+    vs[e2.first] = vs[e2.second] = 1;
+    CHECK(meshops::collapse_edges(k, vs) == 1);
+    CHECK(k.vert_count() == 7);
+    CHECK(closed_manifold(k));
+    CHECK(euler_characteristic(k) == 2);
+  });
+}
 
 static void modeling_tests() {
   test("modeling: loop cut splits the ring and patches the caps", [] {
@@ -1272,6 +1524,166 @@ static void render_tests() {
     centre /= 16;
     CHECK_NEAR(rgb[1], 0.5f, 0.01f);   // background
     CHECK_NEAR(centre, 0.5, 0.05);     // albedo 1 sphere vanishes into the furnace
+  });
+  test("pathtracer: transparent, cutout and glass surfaces", [] {
+    /* A quad in front of a uniform white environment: the centre pixel shows
+     * how much of the background gets through it. */
+    auto quad = primitives::quad(2.0f);
+    auto centre = [&](const MaterialPtr &mat, int spp = 256) {
+      std::vector<MaterialPtr> mats = {mat};
+      Environment env;
+      env.mode = Environment::Color;
+      env.color = {1, 1, 1};
+      PathTracer pt;
+      pt.build({{&quad->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+      PTSettings st;
+      st.max_bounces = 4;
+      st.clamp_indirect = 0;
+      st.denoise = false;
+      pt.set_settings(st);
+      pt.set_camera(Mat4::look_at({0, 0, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(20 * kDeg2Rad, 1, 0.1f, 10), 8, 8);
+      pt.render(1e9, spp);
+      auto rgb = pt.linear_rgb(false);
+      Vec3 c(0.0f);
+      for (int y = 2; y < 6; y++)
+        for (int x = 2; x < 6; x++) c += Vec3(rgb[((size_t)y * 8 + x) * 3], rgb[((size_t)y * 8 + x) * 3 + 1], rgb[((size_t)y * 8 + x) * 3 + 2]);
+      return c / 16.0f;
+    };
+    auto black = [](int surface, float alpha) {
+      MaterialPtr m = make_material("m", {0, 0, 0});
+      m->specular = 0;
+      m->roughness = 1;
+      m->surface = surface;
+      m->alpha = alpha;
+      m->double_sided = true;
+      return m;
+    };
+    CHECK(centre(black((int)MaterialSurface::Opaque, 1.0f)).y < 0.02f);
+    CHECK_NEAR(centre(black((int)MaterialSurface::Transparent, 0.25f)).y, 0.75f, 0.05f);
+    CHECK_NEAR(centre(black((int)MaterialSurface::Transparent, 0.75f)).y, 0.25f, 0.05f);
+    CHECK_NEAR(centre(black((int)MaterialSurface::Cutout, 0.3f)).y, 1.0f, 0.02f);  // below the threshold: a hole
+    CHECK(centre(black((int)MaterialSurface::Cutout, 0.7f)).y < 0.02f);
+    /* Clear glass is lossless: in a uniform environment it disappears (what
+     * it reflects and what it lets through add up to 1). Tinted glass tints
+     * only what passes through. */
+    MaterialPtr glass = make_material("glass", {1, 1, 1});
+    glass->surface = (int)MaterialSurface::Glass;
+    glass->roughness = 0;
+    glass->ior = 1.5f;
+    Vec3 clear = centre(glass);
+    CHECK_NEAR(clear.y, 1.0f, 0.03f);
+    glass->base_color = {0.25f, 1.0f, 1.0f};
+    Vec3 tinted = centre(glass);
+    CHECK(tinted.x > 0.2f && tinted.x < 0.4f);  // ~F + (1-F) * 0.25 for one pass through a sheet
+    CHECK_NEAR(tinted.y, 1.0f, 0.03f);
+    glass->roughness = 0.4f;  // rough (frosted) glass: still energy conserving
+    glass->base_color = {1, 1, 1};
+    CHECK_NEAR(centre(glass).y, 1.0f, 0.05f);
+  });
+  test("pathtracer: shadows through transparent surfaces", [] {
+    /* Sun from straight above, a ground plane, and a half-transparent black
+     * quad over part of it: the shadow keeps half of the direct light. */
+    auto plane = primitives::plane(8.0f, 1);
+    auto quad = primitives::plane(2.0f, 1);
+    std::vector<MaterialPtr> ground = {make_material("ground", {0.8f, 0.8f, 0.8f})};
+    ground[0]->specular = 0;
+    MaterialPtr veil = make_material("veil", {0, 0, 0});
+    veil->surface = (int)MaterialSurface::Transparent;
+    veil->alpha = 0.5f;
+    veil->specular = 0;
+    veil->double_sided = true;
+    std::vector<MaterialPtr> veil_mats = {veil};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0, 0, 0};
+    RenderLight sun;
+    sun.direction = {0, -1, 0};
+    PathTracer pt;
+    pt.build({{&plane->render_mesh_tangents(), Mat4::identity(), &ground},
+              {&quad->render_mesh_tangents(), Mat4::translate({-2, 1, 0}), &veil_mats}},
+             {sun}, env);
+    PTSettings st;
+    st.max_bounces = 1;
+    st.denoise = false;
+    pt.set_settings(st);
+    /* Look straight down at the ground beside the veil: left half shadowed, right half open. */
+    pt.set_camera(Mat4::look_at({-1, 0.5f, 0}, {-1, 0, 0}, {0, 0, 1}), Mat4::perspective(60 * kDeg2Rad, 1, 0.01f, 10), 16, 16);
+    pt.render(1e9, 64);
+    auto rgb = pt.linear_rgb(false);
+    auto px = [&](int x, int y) { return rgb[((size_t)y * 16 + x) * 3 + 1]; };
+    float shadowed = 0, open = 0;
+    for (int y = 6; y < 10; y++) {
+      shadowed += px(2, y) + px(3, y);
+      open += px(12, y) + px(13, y);
+    }
+    CHECK(open > 0.01f);
+    std::printf("    shadow under alpha 0.5: %.3f of the open ground\n", shadowed / std::max(open, 1e-6f));
+    CHECK_NEAR(shadowed / open, 0.5f, 0.08f);
+  });
+  test("render: rasterized transparent, cutout and glass materials", [] {
+    auto quad = primitives::quad(2.0f);
+    auto draw = [&](const MaterialPtr &mat, uint32_t &centre, float &depth) {
+      Image img;
+      img.resize(32, 32);
+      RenderTarget rt;
+      rt.attach(img, {0, 0, 32, 32});
+      Renderer3D r;
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      LightingEnv env;
+      env.view_transform = ViewTransform::Standard;
+      env.camera_pos = {0, 0, -3};
+      std::vector<MaterialPtr> mats = {mat};
+      r.begin(&rt, Mat4::look_at({0, 0, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1, 0.1f, 10), env, opt);
+      r.clear(0xFFFFFFFF);
+      DrawItem it;
+      it.mesh = &quad->render_mesh_tangents();
+      it.materials = &mats;
+      it.double_sided = true;
+      r.add(it);
+      r.flush();
+      centre = img.pixels[16 * 32 + 16];
+      depth = rt.depth_at(16, 16);
+    };
+    auto red = [](int surface, float alpha) {
+      MaterialPtr m = make_material("red", {1, 0, 0});
+      m->unlit = true;
+      m->surface = surface;
+      m->alpha = alpha;
+      return m;
+    };
+    auto ch = [](uint32_t c, int s) { return (int)((c >> s) & 255); };
+    uint32_t c;
+    float d;
+    draw(red((int)MaterialSurface::Opaque, 1), c, d);
+    CHECK(ch(c, 16) == 255 && ch(c, 8) == 0 && d < 1.0f);
+    draw(red((int)MaterialSurface::Transparent, 0.5f), c, d);
+    CHECK(ch(c, 16) == 255 && std::abs(ch(c, 8) - 128) <= 2 && std::abs(ch(c, 0) - 128) <= 2);  // half over white
+    CHECK(d == 1.0f);  // transparent surfaces don't write depth
+    draw(red((int)MaterialSurface::Cutout, 0.3f), c, d);
+    CHECK(c == 0xFFFFFFFFu && d == 1.0f);  // a hole
+    draw(red((int)MaterialSurface::Cutout, 0.7f), c, d);
+    CHECK(ch(c, 16) == 255 && ch(c, 8) == 0 && d < 1.0f);
+    MaterialPtr glass = make_material("glass", {0.5f, 1.0f, 1.0f});
+    glass->surface = (int)MaterialSurface::Glass;
+    draw(glass, c, d);
+    CHECK(ch(c, 16) < 160 && ch(c, 8) > 200);  // tinted view of the white behind
+    /* Shadow maps: transparent and glass surfaces don't cast, cutout does. */
+    for (int surface : {(int)MaterialSurface::Transparent, (int)MaterialSurface::Glass, (int)MaterialSurface::Cutout}) {
+      std::vector<MaterialPtr> mats = {red(surface, 0.7f)};
+      DrawItem it;
+      auto cube = primitives::cube();
+      it.mesh = &cube->render_mesh();
+      it.model = Mat4::translate({0, 1, 0});
+      it.materials = &mats;
+      ShadowMap sm;
+      AABB bounds;
+      bounds.add({-3, 0, -3});
+      bounds.add({3, 2, 3});
+      render_shadow_map(sm, {it}, {0, -1, 0}, bounds, 256);
+      float lit = sm.lookup({0, 0, 0}, 1.0f);
+      CHECK(surface == (int)MaterialSurface::Cutout ? lit < 0.05f : lit > 0.95f);
+    }
   });
   test("render: sun shadow map shadows what is under a caster", [] {
     auto cube = primitives::cube();

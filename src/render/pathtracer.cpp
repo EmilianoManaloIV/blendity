@@ -135,6 +135,10 @@ static uint64_t mesh_hash(const RenderMesh &rm) {
 void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<RenderLight> &lights, const Environment &env) {
   ScopedTimer t;
   objects_ = objects;
+  see_through_ = false;
+  for (const PTObject &o : objects_)
+    if (o.materials)
+      for (const MaterialPtr &mp : *o.materials) see_through_ = see_through_ || (mp && !mp->opaque());
   lights_ = lights;
   env_ = env;
   normal_mats_.clear();
@@ -446,6 +450,33 @@ bool PathTracer::occluded(const Ray &r, float tmax) const {
   return intersect(r, h);  // any hit closer than tmax
 }
 
+Vec3 PathTracer::transmittance(const Ray &r, float tmax) const {
+  if (!see_through_) return occluded(r, tmax) ? Vec3(0.0f) : Vec3(1.0f);
+  /* Step through see-through surfaces (Cycles: transparent shadows). Glass
+   * blocks, as in Cycles without caustics: its light arrives through paths. */
+  Vec3 T(1.0f);
+  Ray ray = r;
+  float left = tmax;
+  for (int i = 0; i < 32 && left > 0; i++) {
+    Hit h;
+    h.t = left;
+    if (!intersect(ray, h)) return T;
+    SurfacePoint sp;
+    const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+    if (mat->opaque() || mat->surface == (int)MaterialSurface::Glass) return Vec3(0.0f);
+    const float a = evaluate_material(*mat, sp).alpha;
+    if (mat->surface == (int)MaterialSurface::Cutout) {
+      if (a >= mat->alpha_clip) return Vec3(0.0f);
+    }
+    else T = T * (1.0f - a);
+    if (std::max({T.x, T.y, T.z}) < 1e-4f) return Vec3(0.0f);
+    const float step = h.t + 1e-4f * (1.0f + h.t);
+    ray.origin = ray.origin + ray.dir * step;
+    left -= step;
+  }
+  return T;
+}
+
 /* ===================================================================== */
 /* Camera & integrator                                                    */
 /* ===================================================================== */
@@ -570,6 +601,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
   Vec3 L(0.0f), beta(1.0f);
   const float clamp = settings_.clamp_indirect;
   float last_pdf = 0.0f;  // solid-angle pdf of the direction that led here (0 = camera ray)
+  int see_through_hits = 0, glass_hits = 0;  // these get their own budgets (Cycles: transparent / transmission bounces)
 #ifdef BL_WITH_OPENPGL
   /* Training records each vertex with local (not throughput-weighted) values;
    * OpenPGL turns the chain into radiance samples (Cycles: guiding.h). */
@@ -612,10 +644,22 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
     sp.position = ray.origin + ray.dir * h.t;  // more precise than re-interpolating
     Vec3 V = -ray.dir;
+    const bool front_face = dot(sp.geo_normal, V) >= 0;  // entering the object (glass)
     const float cos_hit = std::fabs(dot(sp.geo_normal, V));
     if (dot(sp.geo_normal, V) < 0) sp.geo_normal = -sp.geo_normal;
     if (dot(sp.normal, sp.geo_normal) < 0) sp.normal = -sp.normal;
     SurfaceSample s = evaluate_material(*mat, sp);
+    /* Cutout and Transparent: alpha decides, per path, whether the ray passes
+     * the surface untouched (Cycles' Transparent BSDF; unbiased alpha blending). */
+    if ((mat->surface == (int)MaterialSurface::Cutout || mat->surface == (int)MaterialSurface::Transparent) && see_through_hits < 64) {
+      const bool pass = mat->surface == (int)MaterialSurface::Cutout ? s.alpha < mat->alpha_clip : rnd(rng) >= s.alpha;
+      if (pass) {
+        see_through_hits++;
+        ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+        bounce--;
+        continue;
+      }
+    }
     Vec3 n = s.normal;
     if (dot(n, V) < 0) n = normalize(n + sp.geo_normal * (-dot(n, V) + 0.01f));
     if (bounce == 0 && albedo_out) {
@@ -660,6 +704,46 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (s.unlit) {
       add(beta * s.albedo);
       break;
+    }
+    if (mat->surface == (int)MaterialSurface::Glass) {
+      /* Dielectric (Blender's Glass BSDF): reflect or refract by the Fresnel
+       * term, about a GGX microfacet normal when rough (Walter et al. 2007
+       * sampling with the visible-normal distribution). Specular, so no
+       * light sampling here; light seen through it arrives on the path. */
+      const float ior = std::max(1.0001f, mat->ior), eta = front_face ? 1.0f / ior : ior;
+      Vec3 m = n, gt, gb;
+      if (s.roughness > 0.02f) {
+        onb(n, gt, gb);
+        GGX gg{std::max(s.roughness * s.roughness, 0.002f), 0};
+        gg.a2 = gg.a * gg.a;
+        Vec3 hl = gg.sample_vndf({dot(V, gt), dot(V, gb), dot(V, n)}, rnd(rng), rnd(rng));
+        m = normalize(gt * hl.x + gb * hl.y + n * hl.z);
+      }
+      const float cosi = clampf(dot(V, m), 0.0f, 1.0f), sint2 = eta * eta * (1.0f - cosi * cosi);
+      float F = 1.0f, cost = 0.0f;
+      if (sint2 < 1.0f) {
+        cost = std::sqrt(1.0f - sint2);
+        float rs = (eta * cosi - cost) / (eta * cosi + cost), rp = (cosi - eta * cost) / (cosi + eta * cost);
+        F = 0.5f * (rs * rs + rp * rp);
+      }
+      const bool reflect = rnd(rng) < F;  // total internal reflection: F = 1
+      Vec3 dir = reflect ? m * (2.0f * cosi) - V : normalize(-V * eta + m * (eta * cosi - cost));
+      if (reflect ? dot(dir, sp.geo_normal) <= 0 : dot(dir, sp.geo_normal) >= 0) break;  // sampled below the surface
+      if (!reflect) beta = beta * s.albedo;  // Base Color tints what passes through
+#ifdef BL_WITH_OPENPGL
+      if (record && seg) {
+        openpgl::cpp::SetDirectionIn(seg, pgl_v(dir));
+        openpgl::cpp::SetPDFDirectionIn(seg, 1.0f);
+        openpgl::cpp::SetScatteringWeight(seg, pgl_v(reflect ? Vec3(1.0f) : s.albedo));
+        openpgl::cpp::SetIsDelta(seg, true);
+        openpgl::cpp::SetRoughness(seg, s.roughness);
+        if (!reflect) openpgl::cpp::SetEta(seg, eta);
+      }
+#endif
+      ray = {sp.position + sp.geo_normal * ((reflect ? 1.0f : -1.0f) * (1e-4f + h.t * 1e-5f)), dir};
+      last_pdf = 0.0f;  // emission seen through glass counts in full
+      if (glass_hits++ < 32) bounce--;  // transmission has its own bounce budget
+      continue;
     }
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
 
@@ -734,8 +818,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
       if (power <= 0 || dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) continue;
       rays++;
-      if (occluded({origin, dir}, dist)) continue;
-      const Vec3 Lo = brdf_eval(s, n, V, dir) * l.color * power;  // scattered toward V, before throughput
+      const Vec3 Tr = transmittance({origin, dir}, dist);
+      if (std::max({Tr.x, Tr.y, Tr.z}) <= 0.0f) continue;
+      const Vec3 Lo = brdf_eval(s, n, V, dir) * l.color * Tr * power;  // scattered toward V, before throughput
       add(beta * Lo);
       record_nee(Lo);
     }
@@ -761,8 +846,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         float pl = mesh_light_pdf(li, dist, cos_l);
         if (pl > 0.0f && dot(n, dir) > 0 && dot(sp.geo_normal, dir) > 0) {
           rays++;
-          if (!occluded({origin, dir}, dist * (1.0f - 1e-4f))) {
-            const Vec3 Le = evaluate_material(*lmat, lp).emission;
+          const Vec3 Tr = transmittance({origin, dir}, dist * (1.0f - 1e-4f));
+          if (std::max({Tr.x, Tr.y, Tr.z}) > 0.0f) {
+            const Vec3 Le = evaluate_material(*lmat, lp).emission * Tr;
             float pb = sampling_pdf(dir);
             float w = pl * pl / (pl * pl + pb * pb);
             const Vec3 Lo = brdf_eval(s, n, V, dir) * Le * (w / pl);

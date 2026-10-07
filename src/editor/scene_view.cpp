@@ -11,6 +11,7 @@
 #include "../core/core.h"
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <unordered_map>
 #include <cmath>
@@ -35,7 +36,7 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_rect_ = view;
   draw_scene_overlay_bar(bar);
   if (view.w < 8 || view.h < 8) return;
-  scene_hovered_ = u.hovered(view) && !u.any_popup_open();
+  scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my));
   scene_navigation(view);
 
   /* Gizmo math and picking need this frame's camera matrices before we
@@ -121,6 +122,9 @@ void Editor::draw_scene_view(const Recti &r) {
       y += u.font.line_height();
     }
   }
+  if (show_gizmos_ && !playing_) draw_camera_preview(view);
+  if (edit_mode_ && last_op_valid()) draw_last_op_panel(view);
+  else last_op_rect_ = Recti{};
   if (playing_) u.canvas.rect_outline(view, Color::hex(0x3A79BB, 120), u.px(2));
 }
 
@@ -900,6 +904,13 @@ bool Editor::gizmo_update(const Recti &view) {
     if (!in.down[0]) {
       drag_ = Drag::None;
       gizmo_axis_ = -1;
+      /* Faces dropped onto another face of the mesh merge into it. */
+      if (edit_mode_ && auto_fuse_ && elem_ == EditElement::Face)
+        if (MeshPtr *mp = edit_mesh_ptr())
+          if (try_auto_fuse(*mesh_make_mutable(*mp))) {
+            (*mp)->touch();
+            mark_changed("Fuse on Contact");
+          }
     }
     return true;
   }
@@ -1168,13 +1179,47 @@ void Editor::edit_op(const std::string &op) {
     }
   }
   size_t nsel = std::count(face_sel_.begin(), face_sel_.end(), 1);
-  if (op == "extrude" || op == "inset") {
-    if (!nsel) { Log::warn("Select faces first (press 3 for face mode)"); return; }
-    if (op == "extrude") meshops::extrude_faces(m, face_sel_, extrude_dist_);
-    else meshops::inset_faces(m, face_sel_, inset_amount_);
-    vert_sel_.assign(m.vert_count(), 0);
-    sync_vert_face_selection(true);
-    Log::info("%s %zu face(s)", op == "extrude" ? "Extruded" : "Inset", nsel);
+  if (edit_op_redoable(op)) {
+    if ((op == "extrude" || op == "inset" || op == "push_through") && !nsel) {
+      Log::warn("Select faces first (press 3 for face mode)");
+      return;
+    }
+    LastOp L;
+    L.op = op;
+    L.obj = g->id;
+    L.before = std::make_shared<Mesh>(m);
+    L.vsel = vert_sel_;
+    L.fsel = face_sel_;
+    L.elem = elem_;
+    L.fuse = auto_fuse_;
+    if (op == "extrude") L.amount = extrude_dist_;
+    else if (op == "inset") L.amount = inset_amount_;
+    else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; }
+    else if (op == "bridge") L.segments = bridge_segments_;
+    else if (op == "subdivide_edges") L.segments = subdivide_cuts_;
+    else if (op == "loopcut") { L.segments = loop_cuts_; L.amount = loop_slide_; }
+    else if (op == "smooth") L.amount = smooth_factor_;
+    last_op_ = std::move(L);
+    run_last_op(true);
+    return;
+  }
+  if (op == "dissolve" || op == "connect" || op == "collapse") {
+    size_t n = op == "dissolve" ? meshops::dissolve_edges(m, vert_sel_)
+               : op == "connect" ? meshops::connect_vertices(m, vert_sel_)
+                                 : meshops::collapse_edges(m, vert_sel_);
+    if (!n) {
+      Log::warn(op == "connect" ? "Connect: select two vertices of one face that aren't neighbours (Blender: J)"
+                                : "Select edges first (press 2 for edge mode)");
+      return;
+    }
+    vert_sel_.resize(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    sync_vert_face_selection(false);
+    Log::info("%s: %zu %s", op == "dissolve" ? "Dissolved" : op == "connect" ? "Connected" : "Collapsed", n,
+              op == "connect" ? "face split(s)" : "edge(s)");
+  }
+  else if (op == "fuse") {
+    if (!try_auto_fuse(m)) { Log::warn("Fuse: the selected faces don't lie on another face of the mesh"); return; }
   }
   else if (op == "delete") {
     if (elem_ != EditElement::Face) {
@@ -1300,18 +1345,13 @@ void Editor::edit_loop_cut_at(const Recti &view, int mx, int my) {
     edit_op("loopcut");  // fall back to the selected edge
     return;
   }
-  MeshPtr &mp = *edit_mesh_ptr();
-  Mesh &m = *mesh_make_mutable(mp);
-  auto made = meshops::loop_cut(m, a, b, loop_cuts_, loop_slide_);
-  if (made.empty()) { Log::warn("Loop Cut needs quads around the edge"); return; }
+  /* Cut at the hovered edge: select it and run the (re-adjustable) operator. */
+  const Mesh &m = **edit_mesh_ptr();
   vert_sel_.assign(m.vert_count(), 0);
-  for (uint32_t v : made) vert_sel_[v] = 1;
+  vert_sel_[a] = vert_sel_[b] = 1;
   face_sel_.assign(m.face_count(), 0);
   if (elem_ == EditElement::Face) elem_ = EditElement::Edge;
-  sync_vert_face_selection(false);
-  m.touch();
-  mark_changed("Loop Cut");
-  Log::info("Loop Cut: %d cut(s), %zu new vertices", loop_cuts_, made.size());
+  edit_op("loopcut");
 }
 
 void Editor::compute_proportional_weights(const Mat4 &world) {
@@ -1413,6 +1453,223 @@ void Editor::draw_game_view(const Recti &r) {
   if (playing_ && focused_ != WindowKind::Game) {
     u.label({view.x, view.bottom() - u.row_h() - u.px(6), view.w, u.row_h()}, "Click the Game view to give it keyboard focus (WASD / arrows drive PlayerController)", Color::hex(0xFFFFFF, 200), ui::Align::Center);
   }
+}
+
+/* ===================================================================== */
+/* Adjust Last Operation (Blender's redo panel, F9)                       */
+/* ===================================================================== */
+
+bool Editor::edit_op_redoable(const std::string &op) const {
+  return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" ||
+         op == "loopcut" || op == "smooth";
+}
+
+bool Editor::last_op_valid() {
+  if (last_op_.op.empty() || !edit_mode_ || edit_obj_ != last_op_.obj) return false;
+  MeshPtr *mp = edit_mesh_ptr();
+  return mp && mp->get() == last_op_.result && (*mp)->version == last_op_.result_version;
+}
+
+bool Editor::try_auto_fuse(Mesh &m) {
+  face_sel_.resize(m.face_count(), 0);
+  if (std::find(face_sel_.begin(), face_sel_.end(), 1) == face_sel_.end()) return false;
+  std::vector<uint8_t> fs = face_sel_;
+  if (!meshops::fuse_contacts(m, fs)) return false;
+  face_sel_.assign(m.face_count(), 0);
+  vert_sel_.assign(m.vert_count(), 0);
+  Log::info("Fused: the selection touched another face, so the two were joined (the touching area became an opening)");
+  return true;
+}
+
+void Editor::run_last_op(bool first) {
+  LastOp &L = last_op_;
+  GameObject *g = scene_->find(L.obj);
+  MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  if (!mf || !L.before) {
+    L.op.clear();
+    return;
+  }
+  /* Start again from the mesh as it was before the operator. */
+  mf->mesh = std::make_shared<Mesh>(*L.before);
+  Mesh &m = *mf->mesh;
+  m.version = L.before->version + 1 + (++redo_serial_);  // never reuse an old version number
+  vert_sel_ = L.vsel;
+  face_sel_ = L.fsel;
+  elem_ = L.elem;
+  std::string err;
+  bool ok = true;
+  const std::string &op = L.op;
+  if (op == "extrude" || op == "inset") {
+    if (op == "extrude") meshops::extrude_faces(m, face_sel_, L.amount);
+    else meshops::inset_faces(m, face_sel_, L.amount);
+    vert_sel_.assign(m.vert_count(), 0);
+    sync_vert_face_selection(true);
+  }
+  else if (op == "bevel") ok = meshops::bevel_edges(m, vert_sel_, face_sel_, L.amount, L.segments, &err);
+  else if (op == "bridge") {
+    ok = meshops::bridge(m, vert_sel_, face_sel_, L.segments, L.twist, L.smooth, L.path, &err);
+    if (ok && L.elem == EditElement::Face) sync_vert_face_selection(true);
+  }
+  else if (op == "push_through") {
+    ok = meshops::push_through(m, face_sel_, L.segments, &err);
+    if (ok) sync_vert_face_selection(true);
+  }
+  else if (op == "subdivide_edges") {
+    ok = meshops::subdivide_edges(m, vert_sel_, L.segments) > 0;
+    if (!ok) err = "Select edges first (press 2 for edge mode)";
+    face_sel_.assign(m.face_count(), 0);
+    sync_vert_face_selection(false);
+  }
+  else if (op == "loopcut") {
+    uint32_t a = UINT32_MAX, b = UINT32_MAX;
+    for (auto &e : m.edge_cache())
+      if (e.first < vert_sel_.size() && e.second < vert_sel_.size() && vert_sel_[e.first] && vert_sel_[e.second]) {
+        if (a != UINT32_MAX) {
+          a = UINT32_MAX;
+          break;
+        }
+        a = e.first;
+        b = e.second;
+      }
+    std::vector<uint32_t> made;
+    if (a != UINT32_MAX) made = meshops::loop_cut(m, a, b, L.segments, L.amount);
+    ok = !made.empty();
+    if (!ok) err = a == UINT32_MAX ? "Select exactly one edge (press 2 for edge mode)" : "Loop Cut needs quads around the edge";
+    vert_sel_.assign(m.vert_count(), 0);
+    for (uint32_t v : made) vert_sel_[v] = 1;
+    face_sel_.assign(m.face_count(), 0);
+    sync_vert_face_selection(false);
+  }
+  else if (op == "smooth") {
+    meshops::smooth_laplacian(m, L.amount, std::max(1, L.segments), &vert_sel_);
+  }
+  if (!ok) {
+    mf->mesh = L.before;  // back to the untouched mesh (copied on the next edit)
+    vert_sel_ = L.vsel;
+    face_sel_ = L.fsel;
+    Log::warn("%s", err.c_str());
+    L.message = err;
+    if (first) {
+      L.op.clear();
+      return;
+    }
+  }
+  else {
+    L.message.clear();
+    vert_sel_.resize(m.vert_count(), 0);
+    face_sel_.resize(m.face_count(), 0);
+    /* The panel's Move: shift the result in X/Y/Z (global or local) and along
+     * the selection's normal, like adjusting Blender's extrude afterwards. */
+    if (length_sq(L.move) > 0 || L.along_normal != 0) {
+      Vec3 n(0.0f);
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (face_sel_[f]) n += m.face_normal(f);
+      if (length_sq(n) < 1e-12f) {
+        std::vector<Vec3> vn = meshops::vertex_normals(m);
+        for (size_t v = 0; v < m.vert_count(); v++)
+          if (vert_sel_[v]) n += vn[v];
+      }
+      n = length_sq(n) > 1e-12f ? normalize(n) : Vec3(0.0f);
+      Vec3 d = (L.orientation == 0 ? g->world_matrix().inverse().dir(L.move) : L.move) + n * L.along_normal;
+      for (size_t v = 0; v < m.vert_count(); v++)
+        if (vert_sel_[v]) m.positions[v] += d;
+    }
+    if (L.fuse && op == "extrude") try_auto_fuse(m);
+    m.touch();
+  }
+  L.result = mf->mesh.get();
+  L.result_version = mf->mesh->version;
+  std::string label = "Edit: " + op;
+  if (first) {
+    if (ok) Log::info("%s done. Adjust it in the panel at the bottom left of the Scene view (F9).", op.c_str());
+  }
+  else if (!pending_change_ && !undo_.empty() && undo_.back().label == label) {
+    /* Amend the operator's undo step instead of stacking a new one. */
+    stable_ = std::move(undo_.back().scene);
+    undo_.pop_back();
+  }
+  mark_changed(label);
+}
+
+void Editor::draw_last_op_panel(const Recti &view) {
+  auto &u = ui_;
+  LastOp &L = last_op_;
+  static const std::map<std::string, std::string> titles = {
+      {"extrude", "Extrude Faces"},    {"inset", "Inset Faces"},
+      {"bevel", "Bevel"},              {"bridge", "Bridge"},
+      {"push_through", "Push Through"}, {"subdivide_edges", "Subdivide Edges"},
+      {"loopcut", "Loop Cut"},         {"smooth", "Smooth Vertices"}};
+  auto it = titles.find(L.op);
+  std::string title = it == titles.end() ? L.op : it->second;
+  const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
+  /* Rows: the operator's own fields, then Move, Along Normal, Orientation. */
+  int fields = L.op == "extrude" || L.op == "bevel" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
+  int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
+  int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
+  Recti r{view.x + u.px(10), view.bottom() - h - u.px(10), w, h};
+  last_op_rect_ = r;
+  u.frame(r, Color::hex(0x262626, 235), Color::hex(0x101010), u.px(4));
+  Recti hr{r.x + pad, r.y + u.px(3), r.w - pad * 2, rh};
+  int a = u.font.line_height() - u.px(4);
+  u.draw_icon(last_op_open_ ? ui::Icon::ArrowDown : ui::Icon::ArrowRight, {hr.x, hr.y + (rh - a) / 2, a, a}, u.theme.text);
+  u.label({hr.x + a + u.px(6), hr.y, hr.w - a, rh}, title, u.theme.text_bright);
+  if (u.hovered(hr) && u.in.pressed[0]) {
+    last_op_open_ = !last_op_open_;
+    u.consume_click();
+  }
+  u.tooltip("Adjust Last Operation (Blender: F9). Changing a value re-runs the operator\non the mesh as it was before it, as one undo step.");
+  if (!last_op_open_) return;
+  u.push_id("last_op");
+  int y = hr.bottom() + u.px(3);
+  const int lw = r.w * 2 / 5;
+  bool changed = false;
+  auto row = [&](const char *label) {
+    Recti rr{r.x + pad, y, r.w - pad * 2, rh};
+    y += rh + u.px(2);
+    u.label({rr.x, rr.y, lw - u.px(4), rr.h}, label, u.theme.text);
+    return Recti{rr.x + lw, rr.y, rr.w - lw, rr.h};
+  };
+  auto fl = [&](const char *label, float &v, float speed, float mn, float mx) {
+    changed |= u.float_field(u.id(label), row(label), v, speed, mn, mx);
+  };
+  auto ifield = [&](const char *label, int &v, int mn, int mx) { changed |= u.int_field(u.id(label), row(label), v, mn, mx); };
+  if (L.op == "extrude") {
+    fl("Distance", L.amount, 0.01f, -1000.0f, 1000.0f);
+    Recti cr = row("Fuse on Contact");
+    changed |= u.checkbox({cr.x, cr.y, cr.h, cr.h}, L.fuse);
+    u.tooltip("When the extruded face ends on another face of the mesh, join them\n(the touching area becomes an opening, like Bridge).");
+  }
+  else if (L.op == "inset") fl("Thickness", L.amount, 0.005f, 0.0f, 1.0f);
+  else if (L.op == "bevel") {
+    fl("Width", L.amount, 0.005f, 0.0001f, 1000.0f);
+    ifield("Segments", L.segments, 1, 64);
+  }
+  else if (L.op == "bridge") {
+    ifield("Segments", L.segments, 1, 256);
+    ifield("Twist", L.twist, -1000, 1000);
+    fl("Smoothness", L.smooth, 0.01f, 0.0f, 10.0f);
+    static const char *paths[] = {"Auto", "Outside (handle)", "Inside (tunnel)"};
+    changed |= u.combo(u.id("path"), row("Path"), L.path, paths, 3);
+  }
+  else if (L.op == "push_through") ifield("Segments", L.segments, 1, 256);
+  else if (L.op == "subdivide_edges") ifield("Number of Cuts", L.segments, 1, 100);
+  else if (L.op == "loopcut") {
+    ifield("Number of Cuts", L.segments, 1, 64);
+    fl("Slide", L.amount, 0.01f, 0.0f, 1.0f);
+  }
+  else if (L.op == "smooth") {
+    fl("Factor", L.amount, 0.01f, 0.0f, 1.0f);
+    ifield("Repeat", L.segments, 1, 100);
+  }
+  changed |= u.vec3_field(u.id("move"), row("Move X Y Z"), L.move, 0.01f);
+  u.tooltip("Moves the result afterwards (Blender's Move in the operator panel).");
+  fl("Along Normal", L.along_normal, 0.01f, -1000.0f, 1000.0f);
+  u.tooltip("Moves the result along the average normal of the selected faces.");
+  static const char *orients[] = {"Global", "Local"};
+  changed |= u.combo(u.id("orient"), row("Orientation"), L.orientation, orients, 2);
+  if (!L.message.empty()) u.label({r.x + pad, y, r.w - pad * 2, rh}, L.message, u.theme.warning);
+  u.pop_id();
+  if (changed) run_last_op(false);
 }
 
 }  // namespace bl

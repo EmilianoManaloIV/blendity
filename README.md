@@ -47,17 +47,19 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-Each build produces **`Blendity`** (the editor), **`blendity_tests`** (430 unit checks; 358 in the dependency-free build) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems.
+Each build produces **`Blendity`** (the editor), **`blendity_tests`** (554 unit checks with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems.
 
 ## What you can do
 
-**Model (Blender's Edit Mode, Unity's handles).** Primitives (cube, UV/ico sphere, cylinder, cone, torus, plane, quad). Vertex, edge and face selection, box select, edge loops, gizmo editing with **proportional editing**. Extrude, inset, **loop cut** (any number of cuts, slide), **fill**, **merge at center**, **recalculate normals**, delete, subdivide, smooth, triangulate, merge by distance. Non-destructive modifier components: **Mirror, Array, Solidify**, Subdivision Surface, Smooth, plus **Boolean** (Manifold) and **Decimate** (meshoptimizer) with Blender's libraries.
+**Model (Blender's Edit Mode, Unity's handles).** Primitives (cube, UV/ico sphere, cylinder, cone, torus, plane, quad). Vertex, edge and face selection, box select, edge loops, gizmo editing with **proportional editing**. Extrude, inset, **loop cut** (any number of cuts, slide), **fill**, **merge at center**, **recalculate normals**, delete, subdivide, smooth, triangulate, merge by distance. Edge tools: **bevel** (rounded with segments), **bridge** two faces or two holes with a tube (at any angle, with different vertex counts, curved with segments), subdivide, connect (J), dissolve and collapse. **Push Through** cuts a hole along a face's normal and joins it to wherever it comes out, even a slanted far side. Extruding or moving a face **onto another face fuses them** into one solid. After each tool an **Adjust Last Operation** panel (Blender's F9) lets you change its settings and move the result in X / Y / Z or along the normal, as one undo step. Non-destructive modifier components: **Mirror, Array, Solidify**, Subdivision Surface, Smooth, plus **Boolean** (Manifold) and **Decimate** (meshoptimizer) with Blender's libraries.
 
 **UV map.** A UV Editor window (Ctrl+9) with move/rotate/scale, box select, linked select, snapping, a stretch overlay and background images. **Unwrap (LSCM)** with seams, **Smart UV Project**, cube / cylinder / sphere / view projections, reset, **pack islands** (with rotation) and average island scale.
 
-**Texture.** Unity-style Materials evaluating Blender's **Principled BSDF**: base colour, metallic, roughness, specular, normal and emission maps with tiling/offset, UV / box / generated mapping, procedural checker, noise and Blender's UV Grid / Color Grid test images. Multiple material slots per mesh, assigned per face. PNG, JPEG, TGA, BMP, Radiance HDR and (with Blender's libraries) OpenEXR images, with mipmaps and trilinear filtering. Drag and drop images, **OBJ + MTL** and **FBX** files (via ufbx, which Blender bundles) and their textures come along.
+**Texture.** Unity-style Materials evaluating Blender's **Principled BSDF**: base colour, metallic, roughness, specular, normal and emission maps with tiling/offset, UV / box / generated mapping, procedural checker, noise and Blender's UV Grid / Color Grid test images. **Surface types**: Opaque (solid), Cutout (alpha clip), Transparent (alpha blend) and Glass (refraction by IOR, clear or frosted), in both render engines, plus Metal, Emissive and Unlit presets (Element > New Material of Type). Multiple material slots per mesh, assigned per face. PNG, JPEG, TGA, BMP, Radiance HDR and (with Blender's libraries) OpenEXR images, with mipmaps and trilinear filtering. Drag and drop images, **OBJ + MTL** and **FBX** files (via ufbx, which Blender bundles) and their textures come along.
 
-**Render.** Four Scene view modes: Wireframe, Solid, **Shaded** (deferred PBR with sun shadow maps and image-based lighting) and **Rendered** (progressive path tracing). World: gradient, **Hosek-Wilkie physical sky**, **HDRI** or flat colour. View transforms: Standard, Filmic, ACES, plus exposure, and with OpenColorIO **Blender's own views (AgX, the default, Filmic, Khronos PBR Neutral…)**. **F12** renders the Main Camera with either engine (rasterized with supersampling, or path traced with denoising) to PNG, JPEG, HDR or EXR. With Blender's libraries the path tracer runs on **Embree**, denoises with **OpenImageDenoise**, samples emissive meshes as lights, and offers Cycles-style **path guiding** (Open PGL).
+**Render.** Four Scene view modes: Wireframe, Solid, **Shaded** (deferred PBR with sun shadow maps and image-based lighting) and **Rendered** (progressive path tracing). World: gradient, **Hosek-Wilkie physical sky**, **HDRI** or flat colour. View transforms: Standard, Filmic, ACES, plus exposure, and with OpenColorIO **Blender's own views (AgX, the default, Filmic, Khronos PBR Neutral…)**. **Preview** renders a quick low-resolution, low-sample version first (Live Preview re-renders it as you edit), and selecting a camera shows a Unity-style **Camera Preview** in the Scene view. Sample counts have halve / double buttons and power-of-two presets (16, 32, 64, 128 ...). **F12** renders the Main Camera with either engine (rasterized with supersampling, or path traced with denoising) to PNG, JPEG, HDR or EXR. With Blender's libraries the path tracer runs on **Embree**, denoises with **OpenImageDenoise**, samples emissive meshes as lights, and offers Cycles-style **path guiding** (Open PGL).
+
+**Inspector.** Unity-style **multi-object editing**: change a field and every selected object follows. Number fields take expressions: `2*pi`, `sqrt(2)`, `+=1`, `-=0.5`, `*=2`, `/=4` (relative to each object's own value), Unity's `L(0,10)` (spread evenly across the selection) and `R(0,1)` (random per object).
 
 **Scene and play.** GameObjects with Transform hierarchies and Components (MeshFilter, MeshRenderer, Light, Camera, Rotator, Oscillator, PlayerController, Rigidbody). Play mode copies the scene and restores it on Stop, as in Unity; rigid bodies use **Jolt Physics** when available. Undo/redo, a text `.scene` format, OBJ export, PNG screenshots (Shift+F12).
 
@@ -75,6 +77,9 @@ Each build produces **`Blendity`** (the editor), **`blendity_tests`** (430 unit 
 | Extrude / Inset | Ctrl+E / Ctrl+I | E / I |
 | Select edge loop | double-click an edge | Alt+click |
 | Loop cut | Ctrl+R over an edge | Ctrl+R |
+| Bevel / Bridge / Push Through | Ctrl+B / Ctrl+Shift+B / Alt+P | Ctrl+B / Bridge Edge Loops / (a Boolean) |
+| Connect / Dissolve edges | J / Ctrl+X | J / Ctrl+X |
+| Adjust Last Operation | F9 (panel at the Scene view's bottom left) | F9 |
 | Fill / Merge at center / Recalculate normals | Alt+F / Alt+M / Shift+N | F / M / Shift+N |
 | Proportional editing | O (scroll while dragging to resize) | O |
 | UV Editor / Unwrap | Ctrl+9 / U | UV Editing workspace / U |
@@ -86,12 +91,12 @@ Each build produces **`Blendity`** (the editor), **`blendity_tests`** (430 unit 
 
 ## The Learn tab
 
-24 lessons, each linking the **Unity concept ↔ Blender concept and source file ↔ theory**, with chapter citations from the books in *Blender Documents*:
+25 lessons, each linking the **Unity concept ↔ Blender concept and source file ↔ theory**, with chapter citations from the books in *Blender Documents*:
 
 - **[FoCG]** Marschner & Shirley, *Fundamentals of Computer Graphics*, 5th ed.
 - **[GEA1]** / **[GEA2]** Gregory, *Game Engine Architecture* Vol. I and II
 
-They cover the editor layout, navigation, GameObjects vs Objects, scene graphs, transforms, handedness, mesh storage, Edit Mode, modifiers, cameras, the rasterizer, lighting, the game loop, files, undo, performance and research, **UV Mapping**, **Materials and Textures**, **Render Engines**, **Light, Sky and Tone Mapping**, **Advanced Modeling Tools**, and new in this release **Libraries and Performance** (Blender's external libraries, profiling, SIMD and multithreading). Lessons have "Try it" buttons that drive the editor, reveal-on-click self-checks and links into the matching folder of the Blender source tree. The text is my own wording; the books are cited, not reproduced.
+They cover the editor layout, navigation, GameObjects vs Objects, scene graphs, transforms, handedness, mesh storage, Edit Mode, modifiers, cameras, the rasterizer, lighting, the game loop, files, undo, performance and research, **UV Mapping**, **Materials and Textures**, **Render Engines**, **Light, Sky and Tone Mapping**, **Advanced Modeling Tools**, **Libraries and Performance**, and new in this release **Bevel, Bridge and Push Through** (Blender's external libraries, profiling, SIMD and multithreading). Lessons have "Try it" buttons that drive the editor, reveal-on-click self-checks and links into the matching folder of the Blender source tree. The text is my own wording; the books are cited, not reproduced.
 
 ## Your research papers
 

@@ -20,7 +20,7 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - 430 checks with Blender's libraries, 358 without
+tests/          blendity_tests   - 554 checks with Blender's libraries
 ```
 
 ## Libraries borrowed from Blender's tree
@@ -93,7 +93,7 @@ The baseline target is plain x86-64 (Linux builds with Blender's libraries use S
 | `draw_project` | Assets folder browser | `editors/space_file` | Project |
 | `draw_console` | Log + command line | `editors/space_info`, `editors/space_console` | Console |
 | `UndoState` snapshots | Global undo | `editors/undo` (memfile undo) | `Undo.RecordObject` |
-| `editor/learn.cpp`, `lessons.cpp` | 24 lessons linking Unity ↔ Blender ↔ theory | — | Learn window |
+| `editor/learn.cpp`, `lessons.cpp` | 25 lessons linking Unity ↔ Blender ↔ theory | — | Learn window |
 
 ## Modeling, UVs, texturing and rendering (phase 2)
 
@@ -116,6 +116,20 @@ The baseline target is plain x86-64 (Linux builds with Blender's libraries use S
 | `editor/render_view.cpp` | Shaded / Rendered viewport modes, F12 final render, Render window, saving PNG/JPEG/HDR | `editors/render/render_internal.cc`, `editors/space_image` (render result) | Game view / Recorder |
 | `editor/assets.cpp` | Image asset scan, drag-and-drop import into Assets, texture assignment | `editors/space_file`, `io` operators | Project window import |
 
+## Edge tools, Inspector editing, preview and surface types (phase 4)
+
+| Blendity | What it does | Blender source it mirrors | Unity equivalent |
+|---|---|---|---|
+| `scene/mesh_tools.cpp` `bevel_edges` | Bevel with width and segments; neighbouring faces take the curve's vertices, corner patches where beveled edges meet | `bmesh/tools/bmesh_bevel.cc` | ProBuilder Bevel |
+| `scene/mesh_tools.cpp` `bridge` | Joins two face regions or two holes with a tube. Matches vertices after rotating one outline onto the other's plane, adds vertices to the shorter outline, and curves the tube (Hermite) as a tunnel or a handle | `bmesh/operators/bmo_bridge.cc` | ProBuilder Bridge Edges |
+| `push_through`, `fuse_contacts` | Hole along a face's normal, imprinted on whatever face it exits through (an annulus of faces cut into it; the Boolean solver for several exit faces). Faces extruded or moved onto another face merge into it | `bmesh/operators/bmo_*` + Boolean (`geometry/intern/mesh_boolean_manifold.cc`) | — |
+| `subdivide_edges`, `connect_vertices`, `dissolve_edges`, `collapse_edges` | Edge Subdivide, Connect (J), Dissolve, Collapse | `bmo_subdivide.cc`, `bmo_connect.cc`, `bmo_dissolve.cc` | ProBuilder edge actions |
+| `scene/mesh_internal.h` | Shared topology helpers (FaceBuilder, EdgeFaces) | BMesh's radial loop cycles | — |
+| `Editor::LastOp`, `run_last_op`, `draw_last_op_panel` | Adjust Last Operation: re-runs the operator from a copy of the mesh with new values and an X / Y / Z / normal move, replacing one undo step | `windowmanager/intern/wm_operators.cc` (`WM_operator_last_redo`), `editors/undo` | — |
+| `ui::eval_number`, `FieldEdit` / `ApplyEditReflector` (`editor/panels.cpp`) | Expressions in number fields (`+=`, `*=`, functions, `L()`, `R()`) and multi-object editing through the same reflection that draws the Inspector | `editors/interface` (numeric input), RNA multi-editing (Alt+drag) | Inspector expressions, multi-object editing |
+| `Reflector::samples`, `RenderSettings::preview_*`, `Editor::draw_camera_preview` | Sample counts with halve / double and power-of-two presets; Preview and Live Preview renders; Camera Preview inset | Cycles Sampling panel, `editors/render` | Camera Preview |
+| `MaterialSurface` (`scene/material.h`) | Opaque / Cutout / Transparent / Glass. Path tracer: stochastic alpha, transparent shadows, rough dielectric BSDF. Rasterizer: sorted forward pass after the opaque pass | `intern/cycles/kernel/closure/bsdf_microfacet.h` (glass), EEVEE blend modes | URP Surface Type, Alpha Clipping |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.
@@ -126,4 +140,4 @@ The baseline target is plain x86-64 (Linux builds with Blender's libraries use S
 
 ## What isn't recreated
 
-Rendering runs on the CPU (Blender's EEVEE uses the GPU; Cycles can use either), and materials are a fixed Principled BSDF rather than node graphs. Out of scope so far: sculpting, rigging/animation/NLA, the node systems (shader, geometry, compositor), grease pencil, the video sequencer, the Python API, `.blend` and glTF IO, volumes, hair, and caustics/subsurface/transmission in the path tracer. The Learn tab explains the concepts behind several of them where they relate to Unity.
+Rendering runs on the CPU (Blender's EEVEE uses the GPU; Cycles can use either), and materials are a fixed Principled BSDF rather than node graphs. Out of scope so far: sculpting, rigging/animation/NLA, the node systems (shader, geometry, compositor), grease pencil, the video sequencer, the Python API, `.blend` and glTF IO, volumes, hair, and caustics or subsurface scattering in the path tracer (glass refracts, but light through it reaches surfaces only along paths, as in Cycles without caustics). The Learn tab explains the concepts behind several of them where they relate to Unity.

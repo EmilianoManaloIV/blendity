@@ -260,6 +260,67 @@ void Editor::draw_hierarchy(const Recti &r) {
 /* Inspector                                                              */
 /* ===================================================================== */
 
+/* One edited Inspector field, so the same edit can be applied to every
+ * selected object (Unity's multi-object editing). A typed expression is kept
+ * and re-evaluated per object: "+=1" adds 1 to each object's own value. */
+struct FieldEdit {
+  enum Kind { Float, Int, Bool, Vec, Color, Enum, Text } kind = Float;
+  std::string name;
+  float f_old = 0, f_new = 0;
+  int i_new = 0;
+  bool b_new = false;
+  Vec3 v_old, v_new;
+  std::string s_new;
+  std::string expr;    // typed text, empty when dragged / picked
+  int component = -1;  // vec3: which axis was edited (-1: unknown / all)
+};
+
+/* Applies a FieldEdit to another object's matching field. */
+struct ApplyEditReflector : Reflector {
+  const FieldEdit &e;
+  int index, count;
+  bool use_old;  // evaluate from the recorded old value (the object the edit was made on)
+  bool applied = false;
+  ApplyEditReflector(const FieldEdit &edit, int i, int n, bool from_old) : e(edit), index(i), count(n), use_old(from_old) {}
+  bool match(const char *n, FieldEdit::Kind k) const { return e.kind == k && e.name == n; }
+  float eval(float current, float fallback) const {
+    double d;
+    if (!e.expr.empty() && ui::eval_number(e.expr, d, current, index, count)) return (float)d;
+    return fallback;
+  }
+  void field(const char *n, float &v, float, float mn, float mx) override {
+    if (!match(n, FieldEdit::Float)) return;
+    v = clampf(eval(use_old ? e.f_old : v, e.f_new), mn, mx);
+    applied = true;
+  }
+  void field(const char *n, int &v, int mn, int mx) override {
+    if (!match(n, FieldEdit::Int)) return;
+    v = std::max(mn, std::min(mx, (int)std::lround(eval(use_old ? e.f_old : (float)v, (float)e.i_new))));
+    applied = true;
+  }
+  void field(const char *n, bool &v) override {
+    if (match(n, FieldEdit::Bool)) { v = e.b_new; applied = true; }
+  }
+  void field(const char *n, Vec3 &v) override {
+    if (!match(n, FieldEdit::Vec)) return;
+    Vec3 cur = use_old ? e.v_old : v;
+    for (int k = 0; k < 3; k++)
+      if (e.component < 0 ? e.v_new[k] != e.v_old[k] : k == e.component) v[k] = eval(cur[k], e.v_new[k]);
+    applied = true;
+  }
+  void color(const char *n, Vec3 &v) override {
+    if (match(n, FieldEdit::Color)) { v = e.v_new; applied = true; }
+  }
+  void enumeration(const char *n, int &v, const char *const *, int) override {
+    if (match(n, FieldEdit::Enum)) { v = e.i_new; applied = true; }
+  }
+  void text(const char *n, std::string &v) override {
+    if (match(n, FieldEdit::Text)) { v = e.s_new; applied = true; }
+  }
+  void mesh(const char *, MeshPtr &) override {}
+  void texture(const char *, TextureRef &) override {}
+};
+
 /* Draws any component through the Reflector interface (Unity's default
  * inspector / Blender's RNA-driven property panels). */
 struct InspectorReflector : Reflector {
@@ -267,46 +328,127 @@ struct InspectorReflector : Reflector {
   ui::Context &u;
   ui::Layout &lay;
   bool changed = false;
+  std::vector<FieldEdit> edits;  // what changed this frame (for multi-object editing)
   int label_w;
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
   ui::Id fid(const char *n) { return u.id(n); }
   Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
   Recti label_rect(Recti row) { return {row.x + u.px(4), row.y, label_w - u.px(8), row.h}; }
+  FieldEdit &record(FieldEdit::Kind k, const char *n) {
+    edits.emplace_back();
+    edits.back().kind = k;
+    edits.back().name = n;
+    return edits.back();
+  }
   void field(const char *n, float &v, float speed, float mn, float mx) override {
     Recti row = lay.row();
-    changed |= u.drag_label(fid(n) ^ 0xAB, label_rect(row), n, v, speed);
+    float old = v;
+    bool ch = u.drag_label(fid(n) ^ 0xAB, label_rect(row), n, v, speed);
     v = clampf(v, mn, mx);
-    changed |= u.float_field(fid(n), field_rect(row), v, speed, mn, mx);
+    ch |= u.float_field(fid(n), field_rect(row), v, speed, mn, mx);
+    if (ch) {
+      FieldEdit &e = record(FieldEdit::Float, n);
+      e.f_old = old;
+      e.f_new = v;
+      u.number_committed(fid(n), &e.expr);
+    }
+    changed |= ch;
   }
   void field(const char *n, int &v, int mn, int mx) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    changed |= u.int_field(fid(n), field_rect(row), v, mn, mx);
+    int old = v;
+    bool ch = u.int_field(fid(n), field_rect(row), v, mn, mx);
+    if (ch) {
+      FieldEdit &e = record(FieldEdit::Int, n);
+      e.f_old = (float)old;
+      e.i_new = v;
+      u.number_committed(fid(n), &e.expr);
+    }
+    changed |= ch;
+  }
+  /* Sample counts: type any number, halve / double it, or pick a power of two
+   * (16, 32, 64 ... like Cycles' presets). Noise falls as 1/sqrt(samples). */
+  void samples(const char *n, int &v, int mn, int mx) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    Recti f = field_rect(row);
+    const int bw = u.px(24), gap = u.px(2), cw = std::max(u.px(64), f.w * 2 / 5);
+    int old = v;
+    bool ch = u.int_field(fid(n), {f.x, f.y, f.w - cw - 2 * bw - 3 * gap, f.h}, v, mn, mx);
+    Recti half{f.right() - cw - 2 * bw - 2 * gap, f.y, bw, f.h}, dbl{half.right() + gap, f.y, bw, f.h};
+    if (u.button(half, "/2")) { v = std::max(mn, v / 2); ch = true; }
+    u.tooltip("Halve the samples (about 1.4x more noise, twice as fast).");
+    if (u.button(dbl, "x2")) { v = std::min(mx, v * 2); ch = true; }
+    u.tooltip("Double the samples (about 30% less noise, twice as long).");
+    static const char *const presets[] = {"1",   "2",   "4",    "8",    "16",   "32",    "64",    "128",  "256",
+                                          "512", "1024", "2048", "4096", "8192", "16384", "32768", "65536"};
+    int pi = -1;
+    for (int k = 0; k < 17; k++)
+      if (v == (1 << k)) pi = k;
+    int sel = pi < 0 ? 0 : pi;
+    ui::Id cid = fid(n) ^ 0x5A5Aull;
+    Recti cr{dbl.right() + gap, f.y, f.right() - dbl.right() - gap, f.h};
+    if (pi < 0) {
+      /* Not a power of two: show "Custom" over the dropdown. */
+      if (u.combo(cid, cr, sel, presets, 17)) { v = 1 << sel; ch = true; }
+      u.canvas.fill_rect(cr.shrink(u.px(2)), u.theme.field);
+      u.label({cr.x + u.px(5), cr.y, cr.w - u.px(16), cr.h}, "Custom", u.theme.text_dim);
+    }
+    else if (u.combo(cid, cr, sel, presets, 17)) { v = 1 << sel; ch = true; }
+    u.tooltip("Power-of-two presets: each step doubles the samples.");
+    v = std::max(mn, std::min(mx, v));
+    if (ch && v != old) {
+      FieldEdit &e = record(FieldEdit::Int, n);
+      e.f_old = (float)old;
+      e.i_new = v;
+      u.number_committed(fid(n), &e.expr);
+      changed = true;
+    }
   }
   void field(const char *n, bool &v) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    changed |= u.checkbox(field_rect(row), v);
+    if (u.checkbox(field_rect(row), v)) {
+      record(FieldEdit::Bool, n).b_new = v;
+      changed = true;
+    }
   }
   void field(const char *n, Vec3 &v) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    changed |= u.vec3_field(fid(n), field_rect(row), v, 0.05f);
+    Vec3 old = v;
+    if (u.vec3_field(fid(n), field_rect(row), v, 0.05f)) {
+      FieldEdit &e = record(FieldEdit::Vec, n);
+      e.v_old = old;
+      e.v_new = v;
+      u.number_committed(fid(n), &e.expr, &e.component);
+      changed = true;
+    }
   }
   void color(const char *n, Vec3 &v) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    changed |= u.color_field(fid(n), field_rect(row), v);
+    if (u.color_field(fid(n), field_rect(row), v)) {
+      record(FieldEdit::Color, n).v_new = v;
+      changed = true;
+    }
   }
   void enumeration(const char *n, int &v, const char *const *opts, int count) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    changed |= u.combo(fid(n), field_rect(row), v, opts, count);
+    if (u.combo(fid(n), field_rect(row), v, opts, count)) {
+      record(FieldEdit::Enum, n).i_new = v;
+      changed = true;
+    }
   }
   void text(const char *n, std::string &v) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    changed |= u.text_field(fid(n), field_rect(row), v);
+    if (u.text_field(fid(n), field_rect(row), v)) {
+      record(FieldEdit::Text, n).s_new = v;
+      changed = true;
+    }
   }
   void mesh(const char *n, MeshPtr &m) override {
     Recti row = lay.row();
@@ -426,6 +568,13 @@ struct InspectorReflector : Reflector {
           results[pid] = {m, false};
           uc->redraw = true;
         }
+        uc->submenu("New Material of Type", uc->px(200), [uc, pid] {
+          for (const std::string &p : material_presets())
+            if (uc->menu_item(p)) {
+              results[pid] = {make_material_preset(p), false};
+              uc->redraw = true;
+            }
+        });
         if (uc->menu_item("None")) {
           results[pid] = {nullptr, true};
           uc->redraw = true;
@@ -534,7 +683,16 @@ void Editor::draw_inspector(const Recti &r) {
     g->name = name;
     if (committed) mark_changed("Rename");
   }
-  if (selection_.size() > 1) u.label(lay.row(), strprintf("%zu objects selected (editing the active one)", selection_.size()), u.theme.text_dim);
+  /* Unity-style multi-object editing: every selected object, in selection order. */
+  std::vector<GameObject *> multi;
+  for (uint64_t id : selection_)
+    if (GameObject *o = scene_->find(id)) multi.push_back(o);
+  if (multi.size() > 1) {
+    u.label(lay.row(), strprintf("%zu objects selected: edits apply to all of them", multi.size()), u.theme.text_dim);
+    u.tooltip("Type +=1, -=1, *=2 or /=2 to change each object relative to its own value,\n"
+              "L(0,10) to spread values evenly across the selection, R(0,1) for random values.\n"
+              "Any expression works: 2*pi, sqrt(2), max(1,2).");
+  }
   lay.space(u.px(4));
 
   auto section = [&](const std::string &title, const std::string &key, bool *enabled, Icon icon, const std::string &tip,
@@ -578,6 +736,7 @@ void Editor::draw_inspector(const Recti &r) {
               })) {
     InspectorReflector ir(*this, u, lay);
     Transform t = g->local();
+    const Vec3 pos_before = t.position, euler_before = t.euler_hint, scale_before = t.scale;
     Recti row = lay.row();
     u.label(ir.label_rect(row), "Position");
     bool ch = u.vec3_field(u.id("pos"), ir.field_rect(row), t.position, 0.05f);
@@ -598,6 +757,33 @@ void Editor::draw_inspector(const Recti &r) {
     if (rch) {
       g->set_local_euler(e);
       mark_changed("Rotate");
+    }
+    /* Multi-object editing (Unity): the edited axis goes to every selected
+     * object; typed expressions are evaluated per object ("+=1", L(0,10)). */
+    if ((ch || rch) && multi.size() > 1) {
+      Transform t0 = g->local();
+      auto make = [&](const char *name, ui::Id id, Vec3 old, Vec3 now) {
+        FieldEdit fe;
+        fe.kind = FieldEdit::Vec;
+        fe.name = name;
+        fe.v_old = old;
+        fe.v_new = now;
+        u.number_committed(id, &fe.expr, &fe.component);
+        return fe;
+      };
+      FieldEdit fp = make("Position", u.id("pos"), pos_before, t.position), fr = make("Rotation", u.id("rot"), euler_before, e),
+                fs = make("Scale", u.id("scl"), scale_before, t.scale);
+      for (size_t i = 0; i < multi.size(); i++) {
+        GameObject *o = multi[i];
+        bool self = o == g;
+        if (self && fp.expr.empty() && fr.expr.empty() && fs.expr.empty()) continue;  // already set
+        Transform ot = self ? t0 : o->local();
+        Vec3 p = self ? pos_before : ot.position, r = self ? euler_before : ot.euler_hint, s = self ? scale_before : ot.scale;
+        if (fp.v_old != fp.v_new) { ApplyEditReflector a(fp, (int)i, (int)multi.size(), false); a.field("Position", p); o->set_local_position(p); }
+        if (fs.v_old != fs.v_new) { ApplyEditReflector a(fs, (int)i, (int)multi.size(), false); a.field("Scale", s); o->set_local_scale(s); }
+        if (fr.v_old != fr.v_new) { ApplyEditReflector a(fr, (int)i, (int)multi.size(), false); a.field("Rotation", r); o->set_local_euler(r); }
+      }
+      mark_changed("Transform (multiple objects)");
     }
   }
 
@@ -629,6 +815,28 @@ void Editor::draw_inspector(const Recti &r) {
       InspectorReflector ir(*this, u, lay);
       c->reflect(ir);
       if (ir.changed) mark_changed(std::string("Edit ") + c->type_name());
+      /* Multi-object editing: the same field of the same component (the nth
+       * of its type) on every other selected object. */
+      if (ir.changed && multi.size() > 1) {
+        int nth = 0;
+        for (size_t k = 0; k < ci; k++) nth += std::string(g->components[k]->type_name()) == c->type_name();
+        for (const FieldEdit &fe : ir.edits)
+          for (size_t i = 0; i < multi.size(); i++) {
+            GameObject *o = multi[i];
+            bool self = o == g;
+            if (self && fe.expr.empty()) continue;  // the active object already has the value
+            int seen = 0;
+            Component *oc = nullptr;
+            for (auto &cc : o->components)
+              if (std::string(cc->type_name()) == c->type_name() && seen++ == nth) {
+                oc = cc.get();
+                break;
+              }
+            if (!oc) continue;
+            ApplyEditReflector a(fe, (int)i, (int)multi.size(), self);
+            oc->reflect(a);
+          }
+      }
       /* Mesh tools (Blender's Edit Mode operators, object-level). */
       if (auto *mf = dynamic_cast<MeshFilter *>(c)) {
         lay.space(u.px(4));
@@ -681,6 +889,29 @@ void Editor::draw_inspector(const Recti &r) {
           u.tooltip("Cut the quad ring across the selected edge. Hover an edge in the Scene view\nand press Ctrl+R to cut there. Blender: Ctrl+R (Loop Cut and Slide).");
           if (u.button({r5.x + u.px(8) + w2, r5.y, w2, r5.h}, "Select Loop")) edit_op("select_loop");
           u.tooltip("Extend the selected edge to its edge loop (or double-click an edge). Blender: Alt+click.");
+          er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
+          er.field("Bevel Segments", bevel_segments_, 1, 64);
+          er.field("Bridge Segments", bridge_segments_, 1, 256);
+          er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
+          Recti r6 = lay.row(u.row_h() + u.px(2));
+          if (u.button({r6.x + u.px(4), r6.y, w3, r6.h}, "Bevel")) edit_op("bevel");
+          u.tooltip("Bevel the selected edges (Ctrl+B). Blender: Ctrl+B.");
+          if (u.button({r6.x + u.px(8) + w3, r6.y, w3, r6.h}, "Bridge")) edit_op("bridge");
+          u.tooltip("Join two selected faces (or two holes) with a tube (Ctrl+Shift+B).\nWorks at any angle and with different vertex counts.\nBlender: Edge > Bridge Edge Loops.");
+          if (u.button({r6.x + u.px(12) + w3 * 2, r6.y, w3, r6.h}, "Push Through")) edit_op("push_through");
+          u.tooltip("Cut a hole through the object along the selected face's normal (Alt+P).\nThe outline is projected onto whatever face it comes out of, even a slanted one.\nTip: Inset first so the hole has a rim.");
+          Recti r7 = lay.row(u.row_h() + u.px(2));
+          int w4 = (r7.w - u.px(20)) / 4;
+          if (u.button({r7.x + u.px(4), r7.y, w4, r7.h}, "Subdivide")) edit_op("subdivide_edges");
+          u.tooltip("Split the selected edges into equal parts. Blender: Subdivide.");
+          if (u.button({r7.x + u.px(8) + w4, r7.y, w4, r7.h}, "Connect")) edit_op("connect");
+          u.tooltip("Split a face between two selected vertices (J). Blender: J.");
+          if (u.button({r7.x + u.px(12) + w4 * 2, r7.y, w4, r7.h}, "Dissolve")) edit_op("dissolve");
+          u.tooltip("Remove the selected edges, merging their faces (Ctrl+X). Blender: Dissolve Edges.");
+          if (u.button({r7.x + u.px(16) + w4 * 3, r7.y, w4, r7.h}, "Collapse")) edit_op("collapse");
+          u.tooltip("Merge each selected edge (or connected group) to its centre. Blender: Collapse.");
+          er.field("Auto Fuse on Contact", auto_fuse_);
+          u.tooltip("Faces extruded or moved onto another face of the mesh merge into it\n(the touching area becomes an opening): bridging by extrusion.");
           er.field("Proportional Editing", proportional_);
           if (proportional_) {
             er.field("Proportional Radius", prop_radius_, 0.01f, 0.001f, 10000.0f);
@@ -1136,16 +1367,20 @@ void Editor::draw_render_window(const Recti &r) {
   ui::Layout lay{{left.x + u.px(8), left.y, left.w - u.px(20), left.h}, left.y + u.px(8) - off};
   lay.row_h = u.row_h();
   Recti b = lay.row(u.row_h() + u.px(8));
-  int bw = (b.w - u.px(8)) / 3;
-  if (u.button({b.x, b.y, bw, b.h}, rendering_ ? "Restart" : "Render", false, Icon::Camera)) start_final_render();
+  int bw = (b.w - u.px(12)) / 4;
+  if (u.button({b.x, b.y, bw, b.h}, rendering_ && !render_preview_ ? "Restart" : "Render", false, Icon::Camera)) start_final_render();
   u.tooltip("Render Image (F12) from the Main Camera. Blender: Render > Render Image.");
-  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Stop", false, Icon::Pause) && rendering_) {
+  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Preview", render_preview_ && render_has_result_, Icon::Eye)) start_final_render(true);
+  u.tooltip(strprintf("A quick look before rendering: %d%% of the resolution, %d samples (Preview settings below).\n"
+                      "Turn on Live Preview to update it whenever the scene changes.",
+                      scene_->render.preview_percent, scene_->render.preview_samples));
+  if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", false, Icon::Pause) && rendering_) {
     rendering_ = false;
     render_linear_ = final_pt_.linear_rgb(scene_->render.denoise);
     final_pt_.resolve(render_img_.pixels.data(), render_img_.width, scene_->render.denoise);
     render_status_ += "  (stopped)";
   }
-  if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Save", false, Icon::File)) save_render();
+  if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save", false, Icon::File)) save_render();
   u.tooltip("Saves to Renders/ in the chosen File Format.");
   if (!render_status_.empty()) {
     for (const std::string &part : {render_status_})
@@ -1200,7 +1435,7 @@ void Editor::draw_render_window(const Recti &r) {
     for (int x = right.x; x < right.right(); x += u.px(16))
       u.canvas.fill_rect({x, y, u.px(16), u.px(16)}, ((x - right.x) / u.px(16) + (y - right.y) / u.px(16)) & 1 ? Color::hex(0x2A2A2A) : Color::hex(0x303030));
   if (!render_has_result_ || render_img_.width == 0) {
-    u.label(right, "Press Render (F12) to render the Main Camera", u.theme.text_dim, ui::Align::Center);
+    u.label(right, "Press Render (F12) to render the Main Camera, or Preview for a quick look", u.theme.text_dim, ui::Align::Center);
     u.canvas.pop_clip();
     return;
   }
@@ -1224,6 +1459,11 @@ void Editor::draw_render_window(const Recti &r) {
     for (int x = dst.x; x < dst.right(); x++) drow[x] = src[std::min(iw - 1, (int)((x - ox) / sc))];
   }
   u.canvas.rect_outline({ox - 1, oy - 1, dw + 2, dh + 2}, Color::hex(0x101010));
+  if (render_preview_) {
+    Recti badge{right.x + u.px(8), right.y + u.px(8), u.font.text_width("PREVIEW") + u.px(12), u.row_h()};
+    u.canvas.fill_round_rect(badge, u.px(3), Color::hex(0xE87D0D, 220));
+    u.label(badge, "PREVIEW", 0xFF000000u, ui::Align::Center);
+  }
   u.label({right.x + u.px(8), right.bottom() - u.row_h() - u.px(4), right.w, u.row_h()},
           strprintf("%d x %d  |  %.0f%%  |  wheel zoom, middle-drag pan, double-click fit", iw, ih, sc * 100.0f), u.theme.text_dim);
   u.canvas.pop_clip();

@@ -106,6 +106,9 @@ class PathTracer {
   };
   bool intersect(const Ray &r, Hit &h) const;
   bool occluded(const Ray &r, float tmax) const;
+  /* Light passing along a shadow ray: 0 when blocked, partial through
+   * transparent surfaces, full through cutout holes. */
+  Vec3 transmittance(const Ray &r, float tmax) const;
   const PTStats &stats() const { return stats_; }
 
   static bool embree_available();
@@ -163,6 +166,7 @@ class PathTracer {
   std::vector<float> denoised() const;
 
   std::vector<PTObject> objects_;
+  bool see_through_ = false;  // any Cutout / Transparent / Glass material (shadow rays must look closer)
   std::vector<Mat4> normal_mats_;
   std::vector<RenderLight> lights_;
   Environment env_;

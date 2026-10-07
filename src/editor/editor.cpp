@@ -329,6 +329,11 @@ void Editor::frame(std::vector<Event> &events) {
     }
   }
   if (cam_.update(now)) ui_.redraw = true;
+  /* Live preview: re-render the preview when anything it depends on changes
+   * (at most 4 times a second, never over a full render in progress). */
+  if (scene_->render.live_preview && !playing_ && (!rendering_ || render_preview_) && now - live_preview_time_ > 0.25 &&
+      live_preview_hash() != live_preview_hash_)
+    start_final_render(true, false);
   step_final_render();
 
   /* Pull new console lines. */
@@ -564,6 +569,22 @@ void Editor::draw_menubar(const Recti &r) {
     if (edit_mode_) {
       if (u.menu_item("Extrude Faces", "Ctrl+E")) edit_op("extrude");
       if (u.menu_item("Inset Faces", "Ctrl+I")) edit_op("inset");
+      if (u.menu_item("Push Through (hole along normal)", "Alt+P")) edit_op("push_through");
+      if (u.menu_item("Bridge Faces / Edge Loops", "Ctrl+Shift+B")) edit_op("bridge");
+      if (u.menu_item("Fuse onto Touching Face")) edit_op("fuse");
+      u.submenu("Edge", u.px(260), [this] {
+        auto &u = ui_;
+        if (u.menu_item("Bevel Edges", "Ctrl+B")) edit_op("bevel");
+        if (u.menu_item("Bridge Edge Loops", "Ctrl+Shift+B")) edit_op("bridge");
+        if (u.menu_item("Subdivide Edges")) edit_op("subdivide_edges");
+        if (u.menu_item("Connect Vertex Path", "J")) edit_op("connect");
+        if (u.menu_item("Dissolve Edges", "Ctrl+X")) edit_op("dissolve");
+        if (u.menu_item("Collapse Edges")) edit_op("collapse");
+        if (u.menu_item("Fill", "Alt+F")) edit_op("fill");
+        if (u.menu_item("Loop Cut", "Ctrl+R")) edit_op("loopcut");
+      });
+      if (u.menu_item("Auto Fuse on Contact", nullptr, auto_fuse_)) auto_fuse_ = !auto_fuse_;
+      if (u.menu_item("Adjust Last Operation", "F9", last_op_open_)) last_op_open_ = !last_op_open_;
       if (u.menu_item("Delete Selected", "Del")) edit_op("delete");
       if (u.menu_item("Loop Cut (selected edge)", "Ctrl+R")) edit_op("loopcut");
       if (u.menu_item("Fill", "Alt+F")) edit_op("fill");
@@ -784,6 +805,8 @@ void Editor::handle_shortcuts() {
     }
     if (P(KEY_E) && edit_mode_) edit_op("extrude");
     if (P(KEY_I) && edit_mode_) edit_op("inset");
+    if (P(KEY_B) && edit_mode_) edit_op(shift ? "bridge" : "bevel");
+    if (P(KEY_X) && edit_mode_ && !shift) edit_op("dissolve");
     if (P(KEY_F) && alt) {
       for (GameObject *g : selected_objects(true)) g->set_world_position(cam_.pivot);
       mark_changed("Move To View");
@@ -800,6 +823,7 @@ void Editor::handle_shortcuts() {
     else start_final_render();  // Blender: F12 = Render Image
   }
   if (P(KEY_F11)) dock_open(WindowKind::Render);
+  if (P(KEY_F9) && edit_mode_) last_op_open_ = !last_op_open_;
   if (alt && shift && P(KEY_N)) create_object("Empty", true);
   bool scene_ctx = focused_ == WindowKind::Scene || focused_ == WindowKind::Hierarchy || scene_hovered_;
   if (!scene_ctx) return;
@@ -827,6 +851,8 @@ void Editor::handle_shortcuts() {
       if (P(KEY_F) && alt) edit_op("fill");
       if (P(KEY_M) && alt) edit_op("merge_center");
       if (P(KEY_N) && shift && !alt) edit_op("recalc_normals");
+      if (P(KEY_P) && alt) edit_op("push_through");
+      if (P(KEY_J) && !alt) edit_op("connect");
     }
   }
 }
@@ -1522,7 +1548,9 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
     Log::info("  screenshot [file.png], bench [frames], lesson <n>, research, window <name>, tool <move|rotate|...>,");
     Log::info("  edit [vertex|edge|face] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
-    Log::info("  vsel <verts...>, editop <fill|merge_center|recalc_normals|loopcut|select_loop|extrude|inset|delete>,");
+    Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation),");
+    Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
+    Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
   }
   else if (c == "clear") Log::clear();
@@ -1585,6 +1613,60 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "editop") edit_op(arg(1, "fill"));
+  else if (c == "material") {
+    /* material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>: new material on the selection. */
+    std::string preset = line.size() > 9 ? line.substr(9) : "Solid";
+    int n = 0;
+    for (GameObject *g : selected_objects(false))
+      if (auto *mr = g->get<MeshRenderer>()) {
+        if (mr->materials.empty()) mr->materials.resize(1);
+        mr->materials[0] = make_material_preset(preset);
+        n++;
+      }
+    if (n) mark_changed("Material " + preset);
+    else Log::warn("Select objects with a MeshRenderer first");
+  }
+  else if (c == "preview") start_final_render(true);
+  else if (c == "fsel") {
+    /* fsel <f0> <f1> ... | fsel facing <x> <y> <z> [more directions...]: select faces (edit mode). */
+    if (!edit_mode_) enter_edit_mode();
+    if (edit_object()) {
+      const Mesh &m = **edit_mesh_ptr();
+      elem_ = EditElement::Face;
+      face_sel_.assign(m.face_count(), 0);
+      if (arg(1, "") == "facing") {
+        for (size_t i = 2; i + 2 < t.size(); i += 3) {
+          Vec3 d = normalize(Vec3((float)std::atof(t[i].c_str()), (float)std::atof(t[i + 1].c_str()), (float)std::atof(t[i + 2].c_str())));
+          for (size_t f = 0; f < m.face_count(); f++)
+            if (dot(m.face_normal(f), d) > 0.99f) face_sel_[f] = 1;
+        }
+      }
+      else
+        for (size_t i = 1; i < t.size(); i++) {
+          size_t f = std::strtoull(t[i].c_str(), nullptr, 10);
+          if (f < face_sel_.size()) face_sel_[f] = 1;
+        }
+      sync_vert_face_selection(true);
+    }
+  }
+  else if (c == "redo") {
+    /* redo <amount|segments|twist|smooth|path|normal|orientation|fuse> <value> | redo move <x> <y> <z>:
+     * change the last edit operator's parameters (the Adjust Last Operation panel). */
+    if (!last_op_valid()) { Log::warn("Nothing to adjust: run an edit operator first"); return; }
+    std::string k = arg(1, "");
+    float v = (float)std::atof(arg(2, "0").c_str());
+    if (k == "amount") last_op_.amount = v;
+    else if (k == "segments") last_op_.segments = (int)v;
+    else if (k == "twist") last_op_.twist = (int)v;
+    else if (k == "smooth") last_op_.smooth = v;
+    else if (k == "path") last_op_.path = (int)v;
+    else if (k == "normal") last_op_.along_normal = v;
+    else if (k == "orientation") last_op_.orientation = (int)v;
+    else if (k == "fuse") last_op_.fuse = v != 0;
+    else if (k == "move") last_op_.move = Vec3(v, (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str()));
+    else { Log::warn("redo: unknown parameter '%s'", k.c_str()); return; }
+    run_last_op(false);
+  }
   else if (c == "loopcuts") {
     loop_cuts_ = std::max(1, std::atoi(arg(1, "1").c_str()));
     loop_slide_ = (float)std::atof(arg(2, "0.5").c_str());

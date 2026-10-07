@@ -4,7 +4,10 @@
 #include "../core/core.h"
 
 #include <cmath>
+#include <cctype>
 #include <cstring>
+#include <ctime>
+#include <vector>
 
 namespace bl::ui {
 
@@ -16,6 +19,7 @@ using namespace platform;
 
 void Context::begin_frame(Image *target, double now) {
   canvas.begin(target);
+  frame_++;
   time = now;
   cursor = Cursor::Arrow;
   overlays_.clear();
@@ -402,36 +406,120 @@ void Context::begin_edit(Id i, const std::string &text, bool select_all) {
   redraw = true;
 }
 
-/* Tiny recursive-descent calculator so number fields accept "2*3+1",
- * like Unity's and Blender's numeric inputs. */
+/* Number fields accept expressions, like Unity's and Blender's numeric inputs:
+ *   2*3+1   (1+2)^2   10 % 3   sqrt(2)   sin(pi/4)   max(1, 2, 3)
+ *   +=5  -=1  *=2  /=4      relative to the field's current value
+ *   L(0, 10)                Unity: spread linearly across the selected objects
+ *   R(-1, 1)                Unity: a random value per selected object
+ * Functions: sin cos tan asin acos atan atan2 sqrt abs floor ceil round
+ * min max pow exp log log10 clamp lerp deg rad; constants pi tau e. */
 namespace {
 struct Calc {
   const char *p;
+  double current = 0;
+  int index = 0, count = 1;
   bool ok = true;
-  void ws() { while (*p == ' ') p++; }
-  double prim() {
+  void ws() {
+    while (*p == ' ' || *p == '\t') p++;
+  }
+  bool eat(char c) {
     ws();
-    if (*p == '(') {
-      p++;
-      double v = expr();
-      ws();
-      if (*p == ')') p++; else ok = false;
+    if (*p != c) return false;
+    p++;
+    return true;
+  }
+  double call(const std::string &f, const std::vector<double> &a) {
+    auto need = [&](size_t n) {
+      if (a.size() != n) ok = false;
+      return a.size() == n;
+    };
+    if (f == "sin" && need(1)) return std::sin(a[0]);
+    if (f == "cos" && need(1)) return std::cos(a[0]);
+    if (f == "tan" && need(1)) return std::tan(a[0]);
+    if (f == "asin" && need(1)) return std::asin(a[0]);
+    if (f == "acos" && need(1)) return std::acos(a[0]);
+    if (f == "atan" && need(1)) return std::atan(a[0]);
+    if (f == "atan2" && need(2)) return std::atan2(a[0], a[1]);
+    if (f == "sqrt" && need(1)) return std::sqrt(a[0]);
+    if (f == "abs" && need(1)) return std::fabs(a[0]);
+    if (f == "floor" && need(1)) return std::floor(a[0]);
+    if (f == "ceil" && need(1)) return std::ceil(a[0]);
+    if (f == "round" && need(1)) return std::round(a[0]);
+    if (f == "exp" && need(1)) return std::exp(a[0]);
+    if (f == "log" && need(1)) return std::log(a[0]);
+    if (f == "log10" && need(1)) return std::log10(a[0]);
+    if (f == "pow" && need(2)) return std::pow(a[0], a[1]);
+    if (f == "deg" && need(1)) return a[0] * 180.0 / 3.14159265358979323846;
+    if (f == "rad" && need(1)) return a[0] * 3.14159265358979323846 / 180.0;
+    if (f == "lerp" && need(3)) return a[0] + (a[1] - a[0]) * a[2];
+    if (f == "clamp" && need(3)) return std::max(a[1], std::min(a[2], a[0]));
+    if ((f == "min" || f == "max") && !a.empty()) {
+      double v = a[0];
+      for (double x : a) v = f == "min" ? std::min(v, x) : std::max(v, x);
       return v;
     }
-    if (*p == '-') { p++; return -prim(); }
-    if (*p == '+') { p++; return prim(); }
+    if (f == "l" && need(2)) return count > 1 ? a[0] + (a[1] - a[0]) * index / (double)(count - 1) : a[0];
+    if (f == "r" && need(2)) {
+      static uint32_t seed = 0x9E3779B9u ^ (uint32_t)std::time(nullptr);
+      seed = seed * 1664525u + 1013904223u;
+      return a[0] + (a[1] - a[0]) * ((seed >> 8) / 16777216.0);
+    }
+    ok = false;
+    return 0;
+  }
+  double prim() {
+    ws();
+    if (eat('(')) {
+      double v = expr();
+      if (!eat(')')) ok = false;
+      return v;
+    }
+    if (std::isalpha((unsigned char)*p)) {
+      std::string name;
+      while (std::isalnum((unsigned char)*p) || *p == '_') name += (char)std::tolower((unsigned char)*p++);
+      if (eat('(')) {
+        std::vector<double> args;
+        if (!eat(')')) {
+          do args.push_back(expr());
+          while (eat(','));
+          if (!eat(')')) ok = false;
+        }
+        return call(name, args);
+      }
+      if (name == "pi") return 3.14159265358979323846;
+      if (name == "tau") return 6.28318530717958647692;
+      if (name == "e") return 2.71828182845904523536;
+      ok = false;
+      return 0;
+    }
     char *end;
     double v = std::strtod(p, &end);
     if (end == p) ok = false;
     p = end;
     return v;
   }
-  double term() {
+  double unary() {
+    ws();
+    if (*p == '-') { p++; return -unary(); }
+    if (*p == '+') { p++; return unary(); }
+    return power();
+  }
+  double power() {
     double v = prim();
+    ws();
+    if (p[0] == '^' || (p[0] == '*' && p[1] == '*')) {
+      p += p[0] == '^' ? 1 : 2;
+      return std::pow(v, unary());  // right associative, binds tighter than unary minus on its left
+    }
+    return v;
+  }
+  double term() {
+    double v = unary();
     for (;;) {
       ws();
-      if (*p == '*') { p++; v *= prim(); }
-      else if (*p == '/') { p++; double d = prim(); v = d != 0 ? v / d : 0; }
+      if (*p == '*' && p[1] != '*') { p++; v *= unary(); }
+      else if (*p == '/') { p++; double d = unary(); v = d != 0 ? v / d : 0; }
+      else if (*p == '%') { p++; double d = unary(); v = d != 0 ? std::fmod(v, d) : 0; }
       else return v;
     }
   }
@@ -447,11 +535,28 @@ struct Calc {
 };
 }  // namespace
 
-bool eval_number(const std::string &s, double &out) {
+bool eval_number(const std::string &s, double &out, double current, int index, int count) {
   Calc c{s.c_str()};
+  c.current = current;
+  c.index = index;
+  c.count = std::max(1, count);
+  c.ws();
+  /* Relative input: "+=2", "-=2", "*=2", "/=2" (Unity, Blender). */
+  char rel = 0;
+  if ((c.p[0] == '+' || c.p[0] == '-' || c.p[0] == '*' || c.p[0] == '/') && c.p[1] == '=') {
+    rel = c.p[0];
+    c.p += 2;
+  }
   double v = c.expr();
   c.ws();
-  if (!c.ok || *c.p) return false;
+  if (!c.ok || *c.p || !std::isfinite(v)) return false;
+  switch (rel) {
+    case '+': v = current + v; break;
+    case '-': v = current - v; break;
+    case '*': v = current * v; break;
+    case '/': v = v != 0 ? current / v : current; break;
+    default: break;
+  }
   out = v;
   return true;
 }
@@ -494,7 +599,8 @@ bool Context::float_field(Id i, const Recti &r, float &v, float speed, float mn,
     if (res == 2 || res == 3) {
       edit_id_ = 0;
       double d;
-      if (res == 2 && eval_number(edit_buf_, d)) {
+      if (res == 2 && eval_number(edit_buf_, d, v)) {
+        commit_ = {i, edit_buf_, -1, frame_};
         float nv = clampf((float)d, mn, mx);
         bool changed = nv != v;
         v = nv;
@@ -543,8 +649,16 @@ bool Context::vec3_field(Id i, const Recti &r, Vec3 &v, float speed) {
     Id ki = i * 31 + k + 1;
     changed |= drag_label(ki ^ 0x55, {c.x, c.y, lw, c.h}, names[k], v[k], speed, Color::mix(theme.text, cols[k], 0.35f));
     changed |= float_field(ki, {c.x + lw, c.y, c.w - lw, c.h}, v[k], speed);
+    if (commit_.frame == frame_ && commit_.id == ki) commit_ = {i, commit_.expr, k, frame_};  // report as the vec3 field
   }
   return changed;
+}
+
+bool Context::number_committed(Id i, std::string *expr, int *component) const {
+  if (commit_.frame != frame_ || commit_.id != i) return false;
+  if (expr) *expr = commit_.expr;
+  if (component) *component = commit_.component;
+  return true;
 }
 
 bool Context::slider(Id i, const Recti &r, float &v, float mn, float mx) {

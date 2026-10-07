@@ -33,6 +33,13 @@ struct TextureRef {
 
 enum class MaterialMapping { UV = 0, Box = 1, Generated = 2 };
 enum class Procedural { None = 0, Checker = 1, Noise = 2, UVGrid = 3, ColorGrid = 4 };
+/* How the surface lets light through.
+ *   Unity URP Lit       Blender (EEVEE / Cycles)
+ *   Opaque              Blend Mode Opaque
+ *   Alpha Clipping      Alpha Clip (cutout: holes where alpha < threshold)
+ *   Transparent         Alpha Blend (see-through by alpha)
+ *   (HDRP refraction)   Glass BSDF / Principled Transmission (refracts by IOR) */
+enum class MaterialSurface { Opaque = 0, Cutout = 1, Transparent = 2, Glass = 3 };
 
 struct Material {
   std::string name = "Material";
@@ -41,6 +48,10 @@ struct Material {
   float roughness = 0.5f;
   float specular = 0.5f;  // Principled "IOR Level"; 0.5 = F0 of 4% (IOR 1.5)
   float alpha = 1.0f;
+  int surface = 0;          // MaterialSurface
+  float alpha_clip = 0.5f;  // Cutout threshold
+  float ior = 1.45f;        // Glass index of refraction (Blender's default)
+  bool opaque() const { return surface == (int)MaterialSurface::Opaque; }
   Vec3 emission{1.0f, 1.0f, 1.0f};
   float emission_strength = 0.0f;
   float normal_strength = 1.0f;
@@ -76,6 +87,10 @@ using MaterialPtr = std::shared_ptr<Material>;
 
 MaterialPtr make_material(const std::string &name, Vec3 color);
 const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
+/* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",
+ * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */
+const std::vector<std::string> &material_presets();
+MaterialPtr make_material_preset(const std::string &preset);
 
 /* Root used to resolve relative texture paths (the project folder). */
 void set_asset_root(const std::string &dir);

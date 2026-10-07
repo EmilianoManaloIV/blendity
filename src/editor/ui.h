@@ -155,6 +155,10 @@ class Context {
   /* A label that scrubs a value when dragged (Unity's prefix labels). */
   bool drag_label(Id i, const Recti &r, const std::string &text, float &v, float speed, uint32_t color = 0);
   bool vec3_field(Id i, const Recti &r, Vec3 &v, float speed = 0.05f);
+  /* True when number field i (or vec3 field i, component set) was committed
+   * by typing this frame; expr is the text, so multi-object editing can
+   * evaluate "+=1" or L(0,10) against each object's own value. */
+  bool number_committed(Id i, std::string *expr = nullptr, int *component = nullptr) const;
   bool slider(Id i, const Recti &r, float &v, float mn, float mx);
   bool combo(Id i, const Recti &r, int &v, const char *const *options, int count);
   bool color_field(Id i, const Recti &r, Vec3 &c);
@@ -227,6 +231,13 @@ class Context {
   bool edit_select_all_ = false;
   bool edit_seen_ = false;
   bool dragging_value_ = false;
+  uint64_t frame_ = 0;
+  struct NumberCommit {
+    Id id = 0;
+    std::string expr;
+    int component = -1;
+    uint64_t frame = ~0ull;
+  } commit_;
   float drag_start_value_ = 0;
   int drag_press_x_ = 0;
   std::unordered_map<Id, int> scroll_;
@@ -250,7 +261,8 @@ class Context {
   std::unordered_map<Id, Vec3> color_edit_;
 };
 
-/* Evaluates "2*3+1"-style input of number fields. */
-bool eval_number(const std::string &s, double &out);
+/* Evaluates number-field input: "2*3+1", "sqrt(2)", "+=1" / "*=2" (relative to
+ * current), Unity's L(a,b) / R(a,b) across `count` selected objects (this one is `index`). */
+bool eval_number(const std::string &s, double &out, double current = 0, int index = 0, int count = 1);
 
 }  // namespace bl::ui

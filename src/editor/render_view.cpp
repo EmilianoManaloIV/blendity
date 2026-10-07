@@ -357,9 +357,13 @@ void Editor::render_pathtraced_view(const Recti &view) {
 /* Final render (F12)                                                     */
 /* ===================================================================== */
 
-void Editor::start_final_render() {
+void Editor::start_final_render(bool preview, bool open_window) {
   const RenderSettings &rs = scene_->render;
-  int w = std::max(16, rs.width * rs.percent / 100), h = std::max(16, rs.height * rs.percent / 100);
+  const int pct = preview ? std::max(1, rs.percent * rs.preview_percent / 100) : rs.percent;
+  int w = std::max(16, rs.width * pct / 100), h = std::max(16, rs.height * pct / 100);
+  render_preview_ = preview;
+  live_preview_hash_ = live_preview_hash();
+  live_preview_time_ = now_seconds();
   Mat4 v, p;
   camera_for_render(v, p, w / (float)h);
   GameObject *owner = nullptr;
@@ -369,10 +373,10 @@ void Editor::start_final_render() {
   render_linear_.clear();
   render_start_ = now_seconds();
   render_has_result_ = true;
-  dock_open(WindowKind::Render);
+  if (open_window) dock_open(WindowKind::Render);
   if (rs.engine == 0) {
     /* Rasterized: supersample then box-filter down (SSAA). */
-    int aa = std::max(1, std::min(4, rs.raster_aa));
+    int aa = preview ? 1 : std::max(1, std::min(4, rs.raster_aa));
     Image big;
     big.resize(w * aa, h * aa);
     RenderTarget rt;
@@ -394,8 +398,9 @@ void Editor::start_final_render() {
       }
     render_time_ = now_seconds() - render_start_;
     rendering_ = false;
-    render_status_ = strprintf("Rasterized %dx%d, %dx SSAA, %.0f ms (%zu tris)", w, h, aa, render_time_ * 1000.0, r3d.stats().tris_submitted);
-    Log::info("Render finished: %s", render_status_.c_str());
+    render_status_ = strprintf("%s %dx%d, %dx SSAA, %.0f ms (%zu tris)", preview ? "Preview (rasterized)" : "Rasterized", w, h, aa,
+                               render_time_ * 1000.0, r3d.stats().tris_submitted);
+    if (!preview) Log::info("Render finished: %s", render_status_.c_str());
     return;
   }
   LightingEnv env = make_lighting(eye, true);
@@ -404,15 +409,16 @@ void Editor::start_final_render() {
   build_pt(final_pt_, *this, items, env, env_);
   final_pt_.set_camera(v, p, w, h);
   rendering_ = true;
-  render_status_ = strprintf("Path tracing %dx%d: %s scene of %zu tris built in %.0f ms", w, h, final_pt_.ray_backend(), final_pt_.stats().triangles,
+  render_status_ = strprintf("%s %dx%d: %s scene of %zu tris built in %.0f ms", preview ? "Preview" : "Path tracing", w, h, final_pt_.ray_backend(),
+                             final_pt_.stats().triangles,
                              final_pt_.stats().bvh_build_ms);
-  Log::info("%s", render_status_.c_str());
+  if (!preview) Log::info("%s", render_status_.c_str());
 }
 
 void Editor::step_final_render() {
   if (!rendering_) return;
   const RenderSettings &rs = scene_->render;
-  int target = std::max(1, rs.samples);
+  int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
   int done = final_pt_.render(40.0, target);
   render_time_ = now_seconds() - render_start_;
   bool finished = done >= target;
@@ -424,12 +430,13 @@ void Editor::step_final_render() {
   else {
     final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
   }
-  render_status_ = strprintf("Path tracing: sample %d / %d  |  %.1f s  |  %.1f Mrays/s  |  %s%s", done, target, render_time_,
+  render_status_ = strprintf("%s: sample %d / %d  |  %.1f s  |  %.1f Mrays/s  |  %s%s", render_preview_ ? "Preview" : "Path tracing", done,
+                             target, render_time_,
                              final_pt_.stats().mrays_per_s(), final_pt_.ray_backend(),
                              finished && rs.denoise ? strprintf("  |  denoised (%s)", final_pt_.denoise_backend()).c_str() : "");
   if (finished) {
     rendering_ = false;
-    Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.ray_backend());
+    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.ray_backend());
   }
 }
 
@@ -438,6 +445,7 @@ void Editor::save_render() {
     Log::warn("Nothing rendered yet - press Render Image (F12) first");
     return;
   }
+  if (render_preview_) Log::warn("Saving a preview (%d%% resolution) - press Render for the full image", scene_->render.preview_percent);
   std::string dir = fs::join(project_root_, "Renders");
   fs::make_dirs(dir);
   std::time_t t = std::time(nullptr);
@@ -462,6 +470,59 @@ void Editor::save_render() {
   if (ok) Log::info("Saved render: %s", path.c_str());
   else Log::error("Could not write %s", path.c_str());
   project_listed_ = -100;
+}
+
+/* What a live preview depends on: geometry, lights, materials, the camera
+ * and every render / world setting. */
+uint64_t Editor::live_preview_hash() {
+  uint64_t h = scene_render_hash();
+  GameObject *owner = nullptr;
+  if (Camera *cam = main_camera(*scene_, &owner)) {
+    Mat4 w = owner->world_matrix();
+    uint64_t c = hash_component(*cam);
+    h ^= c + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    for (float f : w.m) {
+      uint32_t b;
+      std::memcpy(&b, &f, 4);
+      h = (h ^ b) * 1099511628211ull;
+    }
+  }
+  h ^= hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }) * 31;
+  h ^= hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) * 131;
+  return h;
+}
+
+/* Unity's Camera Preview: selecting a camera shows what it sees in a corner
+ * of the Scene view (rasterized, so it costs little). */
+void Editor::draw_camera_preview(const Recti &view) {
+  GameObject *g = active_object();
+  Camera *cam = g ? g->get<Camera>() : nullptr;
+  if (!cam || !cam->enabled || edit_mode_) return;
+  auto &u = ui_;
+  const RenderSettings &rs = scene_->render;
+  float aspect = rs.width / (float)std::max(1, rs.height);
+  int w = std::max(u.px(120), std::min(u.px(360), view.w / 4)), h = (int)(w / aspect);
+  if (h > view.h / 3) {
+    h = view.h / 3;
+    w = (int)(h * aspect);
+  }
+  if (w < 32 || h < 24) return;
+  cam_preview_img_.resize(w, h);
+  cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
+  Quat q = g->world_rotation();
+  Vec3 eye = g->world_position();
+  Mat4 v = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
+  Mat4 p = cam->orthographic ? Mat4::ortho(cam->ortho_size, aspect, cam->near_clip, cam->far_clip)
+                             : Mat4::perspective(cam->fov * kDeg2Rad, aspect, cam->near_clip, cam->far_clip);
+  render_deferred(cam_preview_r3d_, cam_preview_rt_, v, p, eye, true, true, cam);
+  Recti box{view.right() - w - u.px(12), view.bottom() - h - u.px(12) - u.row_h(), w, h};
+  u.canvas.fill_rect({box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)}, Color::hex(0x222222, 230));
+  u.label({box.x, box.y - u.row_h(), w, u.row_h()}, "Camera Preview - " + g->name, u.theme.text);
+  Image *fb = u.canvas.target();
+  Recti dst = box.intersect(view);
+  for (int y = dst.y; y < dst.bottom(); y++)
+    std::memcpy(fb->row(y) + dst.x, cam_preview_img_.row(y - box.y) + (dst.x - box.x), sizeof(uint32_t) * dst.w);
+  u.canvas.rect_outline(box, Color::hex(0x101010));
 }
 
 }  // namespace bl

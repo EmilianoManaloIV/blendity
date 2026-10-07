@@ -240,6 +240,17 @@ static bool aabb_outside_frustum(const AABB &box, const Mat4 &mvp) {
          all([](const Vec4 &v) { return v.z > v.w; }) || all([](const Vec4 &v) { return v.z < 0; });
 }
 
+/* The material of one triangle of a draw item (slot clamped like Unity). */
+static const Material *item_material(const DrawItem &it, uint32_t prim) {
+  const RenderMesh &rm = *it.mesh;
+  int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
+  if (it.materials && !it.materials->empty()) {
+    const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
+    if (mp) return mp.get();
+  }
+  return default_material().get();
+}
+
 void Renderer3D::flush() {
   ScopedTimer total;
   JobSystem &js = JobSystem::global();
@@ -353,6 +364,21 @@ void Renderer3D::flush() {
 
   /* ---- Primitive assembly, clipping, culling, binning ---- */
   ScopedTimer ts;
+  /* Items with Cutout / Transparent / Glass materials: those triangles are
+   * drawn afterwards, sorted, by draw_see_through(). Depth-only passes
+   * (shadow maps) keep Cutout triangles and drop the see-through ones. */
+  std::vector<uint8_t> see_through(n_items, 0);
+  bool any_see_through = false;
+  for (size_t i = 0; i < n_items; i++)
+    if (visible[i] && items_[i].materials)
+      for (const MaterialPtr &mp : *items_[i].materials)
+        if (mp && !mp->opaque()) see_through[i] = 1, any_see_through = true;
+  const bool depth_only = opt_.shade == ShadeMode::DepthOnly;
+  auto skip_tri = [&](uint32_t item, uint32_t prim) {
+    const Material *m = item_material(items_[item], prim);
+    if (m->opaque()) return false;
+    return depth_only ? m->surface != (int)MaterialSurface::Cutout : true;
+  };
   const bool cull = opt_.backface_culling, fast = opt_.fast_setup;
 #ifdef BL_RASTER_X86
   const bool avx2 = opt_.fast_setup && cpu::features().avx2;
@@ -391,6 +417,7 @@ void Renderer3D::flush() {
           return local_col[v];
         };
         auto process = [&](uint32_t t) {
+          if (see_through[range.item] && skip_tri(range.item, t)) return;
           uint32_t i0 = idx[t * 3], i1 = idx[t * 3 + 1], i2 = idx[t * 3 + 2];
           if (fast && cp[i0].z >= 0 && cp[i1].z >= 0 && cp[i2].z >= 0) {
             /* Fast path (no near clipping): cheapest rejections first, on
@@ -560,6 +587,11 @@ void Renderer3D::flush() {
     ScopedTimer tsh;
     shade_deferred();
     stats_.ms_shade = tsh.ms();
+  }
+  if (any_see_through && !depth_only && rt_->color) {
+    ScopedTimer tst;
+    draw_see_through(see_through);
+    stats_.ms_shade += tst.ms();
   }
   stats_.ms_total = total.ms();
   items_.clear();
@@ -906,38 +938,7 @@ void Renderer3D::shade_deferred() {
         }
         SurfaceSample s = evaluate_material(*T.mat, sp);
         if (T.highlighted) s.albedo = lerp(s.albedo, it.highlight_color, 0.45f);
-        Vec3 color;
-        if (s.unlit) color = s.albedo + s.emission;
-        else {
-          Vec3 n = s.normal;
-          float nv = std::max(dot(n, V), 1e-4f);
-          Vec3 lo(0.0f);
-          for (size_t li = 0; li < env_.lights.size(); li++) {
-            const RenderLight &l = env_.lights[li];
-            Vec3 L;
-            float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
-            if (l.type == RenderLight::Directional) L = -l.direction;
-            else {
-              Vec3 d = l.position - sp.position;
-              float dist = length(d);
-              L = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
-              float f = saturate(1.0f - dist / std::max(1e-3f, l.range));
-              atten *= f * f;
-            }
-            float ndl = dot(n, L);
-            if (ndl <= 0 || atten <= 0) continue;
-            float vis = 1.0f;
-            if ((int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
-              vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
-            if (vis <= 0) continue;
-            lo += brdf_eval(s, n, V, L) * l.color * (atten * vis);
-          }
-          Vec3 f0 = fresnel_f0(s);
-          Vec3 R = n * (2.0f * dot(n, V)) - V;
-          Vec3 spec = env.specular(R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);
-          Vec3 diff = env.irradiance(n) * s.albedo * (1.0f - s.metallic);
-          color = lo + diff + spec + s.emission;
-        }
+        Vec3 color = light_surface(s, sp, V, it, env);
         row_hdr.push_back(color);
         row_x.push_back(x);
       }
@@ -945,6 +946,228 @@ void Renderer3D::shade_deferred() {
       row_px.resize(row_hdr.size());
       display::encode_span(&row_hdr[0].x, row_px.data(), row_hdr.size(), env_.view_transform, env_.exposure);
       for (size_t i = 0; i < row_x.size(); i++) crow[row_x[i]] = row_px[i];
+    }
+  });
+}
+
+Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const {
+  if (s.unlit) return s.albedo + s.emission;
+  Vec3 n = s.normal;
+  float nv = std::max(dot(n, V), 1e-4f);
+  Vec3 lo(0.0f);
+  for (size_t li = 0; li < env_.lights.size(); li++) {
+    const RenderLight &l = env_.lights[li];
+    Vec3 L;
+    float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
+    if (l.type == RenderLight::Directional) L = -l.direction;
+    else {
+      Vec3 d = l.position - sp.position;
+      float dist = length(d);
+      L = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
+      float f = saturate(1.0f - dist / std::max(1e-3f, l.range));
+      atten *= f * f;
+    }
+    float ndl = dot(n, L);
+    if (ndl <= 0 || atten <= 0) continue;
+    float vis = 1.0f;
+    if ((int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
+      vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
+    if (vis <= 0) continue;
+    lo += brdf_eval(s, n, V, L) * l.color * (atten * vis);
+  }
+  Vec3 f0 = fresnel_f0(s);
+  Vec3 R = n * (2.0f * dot(n, V)) - V;
+  Vec3 spec = env.specular(R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);
+  Vec3 diff = env.irradiance(n) * s.albedo * (1.0f - s.metallic);
+  return lo + diff + spec + s.emission;
+}
+
+/* ===================================================================== */
+/* See-through materials (forward pass)                                   */
+/* ===================================================================== */
+
+void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
+  const int W = rt_->width, H = rt_->height;
+  const bool gouraud = opt_.shade == ShadeMode::Gouraud;
+  static thread_local Environment fallback_env;
+  const Environment &env = env_.environment ? *env_.environment : fallback_env;
+  if (!env_.environment) {
+    fallback_env.sky = env_.sky;
+    fallback_env.equator = env_.equator;
+    fallback_env.ground = env_.ground;
+  }
+  const Vec3 eye = env_.camera_pos;
+  /* Screen triangles, clipped against the near plane, with barycentrics in
+   * the source triangle (like the opaque path) and a depth for sorting. */
+  struct FTri {
+    float x[3], y[3], z[3], iw[3];
+    Vec3 c[3];
+    uint32_t item, prim;
+    const Material *mat;
+    float depth;
+  };
+  std::vector<FTri> tris;
+  std::vector<Vec4> cp;
+  for (size_t i = 0; i < items_.size(); i++) {
+    if (i >= see_through.size() || !see_through[i]) continue;
+    const DrawItem &it = items_[i];
+    const RenderMesh &rm = *it.mesh;
+    const Mat4 mvp = vp_ * it.model;
+    cp.resize(rm.positions.size());
+    for (size_t v = 0; v < rm.positions.size(); v++) cp[v] = mvp * Vec4(rm.positions[v], 1.0f);
+    const bool two_sided = it.double_sided || !opt_.backface_culling;
+    for (uint32_t prim = 0; prim < (uint32_t)rm.tri_count(); prim++) {
+      const Material *mat = item_material(it, prim);
+      if (mat->opaque()) continue;
+      const uint32_t *tri = &rm.indices[(size_t)prim * 3];
+      Vec4 v[3] = {cp[tri[0]], cp[tri[1]], cp[tri[2]]};
+      if (outside_all(v[0], v[1], v[2])) continue;
+      Vec4 pv[4];
+      Vec3 pc[4];
+      const Vec3 basis[3] = {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+      int np = 0;
+      for (int k = 0; k < 3; k++) {
+        int k2 = (k + 1) % 3;
+        bool in0 = v[k].z >= 0, in1 = v[k2].z >= 0;
+        if (in0) { pv[np] = v[k]; pc[np] = basis[k]; np++; }
+        if (in0 != in1) {
+          float s = v[k].z / (v[k].z - v[k2].z);
+          pv[np] = lerp(v[k], v[k2], s);
+          pc[np] = lerp(basis[k], basis[k2], s);
+          np++;
+        }
+      }
+      if (np < 3) continue;
+      float sx[4], sy[4], sz[4], siw[4];
+      for (int k = 0; k < np; k++) {
+        float iw = 1.0f / pv[k].w;
+        sx[k] = (pv[k].x * iw * 0.5f + 0.5f) * W;
+        sy[k] = (0.5f - pv[k].y * iw * 0.5f) * H;
+        sz[k] = pv[k].z * iw;
+        siw[k] = iw;
+      }
+      for (int k = 1; k + 1 < np; k++) {
+        int a = 0, b = k, d = k + 1;
+        float area = (sx[b] - sx[a]) * (sy[d] - sy[a]) - (sx[d] - sx[a]) * (sy[b] - sy[a]);
+        if (area == 0.0f || (area < 0.0f && !two_sided)) continue;
+        if (area < 0.0f) std::swap(b, d);
+        FTri t;
+        int ord[3] = {a, b, d};
+        for (int q = 0; q < 3; q++) {
+          t.x[q] = sx[ord[q]];
+          t.y[q] = sy[ord[q]];
+          t.z[q] = sz[ord[q]];
+          t.iw[q] = siw[ord[q]];
+          t.c[q] = pc[ord[q]];
+        }
+        t.item = (uint32_t)i;
+        t.prim = prim;
+        t.mat = mat;
+        t.depth = (t.z[0] + t.z[1] + t.z[2]) / 3.0f;
+        tris.push_back(t);
+      }
+    }
+  }
+  if (tris.empty()) return;
+  /* Back to front (the painter's algorithm, as Unity's transparent queue). */
+  std::stable_sort(tris.begin(), tris.end(), [](const FTri &a, const FTri &b) { return a.depth > b.depth; });
+  float *depth = rt_->depth.data();
+  uint32_t *ids = rt_->ids.data();
+  auto unpack = [](uint32_t c) { return Vec3(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f); };
+  auto pack = [](Vec3 c) {
+    auto q = [](float v) { return (uint32_t)std::lround(clampf(v, 0.0f, 1.0f) * 255.0f); };
+    return 0xFF000000u | (q(c.x) << 16) | (q(c.y) << 8) | q(c.z);
+  };
+  /* Row bands in parallel; inside a band every triangle in sorted order, so
+   * blending order stays exact. */
+  JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
+    for (const FTri &t : tris) {
+      float minx = std::min({t.x[0], t.x[1], t.x[2]}), maxx = std::max({t.x[0], t.x[1], t.x[2]});
+      float miny = std::min({t.y[0], t.y[1], t.y[2]}), maxy = std::max({t.y[0], t.y[1], t.y[2]});
+      int ix0 = std::max(0, (int)std::floor(minx)), ix1 = std::min(W - 1, (int)std::ceil(maxx));
+      int iy0 = std::max((int)y0, (int)std::floor(miny)), iy1 = std::min((int)y1 - 1, (int)std::ceil(maxy));
+      if (ix0 > ix1 || iy0 > iy1) continue;
+      const float area = (t.x[1] - t.x[0]) * (t.y[2] - t.y[0]) - (t.x[2] - t.x[0]) * (t.y[1] - t.y[0]);
+      if (area <= 0.0f) continue;
+      const float ia = 1.0f / area;
+      const DrawItem &it = items_[t.item];
+      const RenderMesh &rm = *it.mesh;
+      const Mat4 &nm = normal_mats_[t.item];
+      const uint32_t *tri = &rm.indices[(size_t)t.prim * 3];
+      const Material &mat = *t.mat;
+      const bool highlighted = it.face_highlight && !rm.tri_face.empty() && rm.tri_face[t.prim] < it.face_highlight->size() &&
+                               (*it.face_highlight)[rm.tri_face[t.prim]];
+      for (int y = iy0; y <= iy1; y++) {
+        const float py = y + 0.5f;
+        for (int x = ix0; x <= ix1; x++) {
+          const float px = x + 0.5f;
+          float w0 = ((t.x[1] - px) * (t.y[2] - py) - (t.x[2] - px) * (t.y[1] - py)) * ia;
+          float w1 = ((t.x[2] - px) * (t.y[0] - py) - (t.x[0] - px) * (t.y[2] - py)) * ia;
+          float w2 = 1.0f - w0 - w1;
+          if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+          const size_t pi = (size_t)y * W + x;
+          float z = w0 * t.z[0] + w1 * t.z[1] + w2 * t.z[2];
+          if (z < 0.0f || z >= depth[pi]) continue;
+          /* Perspective-correct barycentrics in the source triangle. */
+          float q0 = w0 * t.iw[0], q1 = w1 * t.iw[1], q2 = w2 * t.iw[2], s = q0 + q1 + q2;
+          Vec3 B = (t.c[0] * q0 + t.c[1] * q1 + t.c[2] * q2) * (1.0f / (std::fabs(s) < 1e-20f ? 1e-20f : s));
+          SurfacePoint sp;
+          const Vec3 &p0 = rm.positions[tri[0]], &p1 = rm.positions[tri[1]], &p2 = rm.positions[tri[2]];
+          sp.local_position = p0 * B.x + p1 * B.y + p2 * B.z;
+          sp.local_normal = normalize(rm.normals[tri[0]] * B.x + rm.normals[tri[1]] * B.y + rm.normals[tri[2]] * B.z);
+          sp.local_bounds = rm.bounds;
+          sp.position = it.model.point(sp.local_position);
+          sp.normal = normalize(nm.dir(sp.local_normal));
+          sp.geo_normal = normalize(nm.dir(cross(p1 - p0, p2 - p0)));
+          if (!rm.uvs.empty()) sp.uv = rm.uvs[tri[0]] * B.x + rm.uvs[tri[1]] * B.y + rm.uvs[tri[2]] * B.z;
+          if (!rm.tangents.empty()) {
+            Vec4 tg = rm.tangents[tri[0]] * B.x + rm.tangents[tri[1]] * B.y + rm.tangents[tri[2]] * B.z;
+            sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);
+            sp.has_tangent = true;
+          }
+          Vec3 V = normalize(eye - sp.position);
+          if (dot(sp.geo_normal, V) < 0) {
+            sp.normal = -sp.normal;
+            sp.geo_normal = -sp.geo_normal;
+          }
+          SurfaceSample sm = evaluate_material(mat, sp);
+          if (highlighted) sm.albedo = lerp(sm.albedo, it.highlight_color, 0.45f);
+          auto lit = [&](const SurfaceSample &ss) {
+            if (gouraud) return pack(shade(env_, ss.albedo, it.specular, ss.normal, sp.position));
+            Vec3 c = light_surface(ss, sp, V, it, env);
+            uint32_t out;
+            display::encode_span(&c.x, &out, 1, env_.view_transform, env_.exposure);
+            return out;
+          };
+          uint32_t *dst = rt_->color + (size_t)y * rt_->stride + x;
+          if (mat.surface == (int)MaterialSurface::Cutout) {
+            if (sm.alpha < mat.alpha_clip) continue;  // a hole
+            *dst = lit(sm);
+            depth[pi] = z;
+            ids[pi] = it.id;
+          }
+          else if (mat.surface == (int)MaterialSurface::Transparent) {
+            float a = saturate(sm.alpha);
+            if (a <= 0.002f) continue;
+            *dst = pack(lerp(unpack(*dst), unpack(lit(sm)), a));
+            if (a >= 0.3f) ids[pi] = it.id;  // still clickable
+          }
+          else {
+            /* Glass: what is behind, tinted and dimmed by the Fresnel term,
+             * plus the reflection (EEVEE without screen-space refraction). */
+            float f0 = (mat.ior - 1.0f) / (mat.ior + 1.0f);
+            f0 *= f0;
+            float nv = saturate(dot(sm.normal, V)), F = f0 + (1.0f - f0) * std::pow(1.0f - nv, 5.0f);
+            SurfaceSample refl = sm;
+            refl.albedo = Vec3(0.0f);
+            refl.metallic = 0.0f;
+            refl.specular = f0 / 0.08f;  // Principled: F0 = 0.08 * specular
+            Vec3 behind = unpack(*dst) * sm.albedo * (1.0f - F);
+            *dst = pack(behind + unpack(lit(refl)));
+            ids[pi] = it.id;
+          }
+        }
+      }
     }
   });
 }

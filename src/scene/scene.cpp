@@ -113,9 +113,16 @@ void RenderSettings::reflect(Reflector &r) {
   r.field("Resolution X", width, 16, 16384);
   r.field("Resolution Y", height, 16, 16384);
   r.field("Resolution %", percent, 1, 400);
+  r.field("Preview Resolution %", preview_percent, 5, 100);
+  r.help("Size of the Preview render, as a percentage of the output resolution.");
+  r.samples("Preview Samples", preview_samples, 1, 65536);
+  r.help("Path-traced samples for the Preview render (the rasterized engine ignores it).");
+  r.field("Live Preview", live_preview);
+  r.help("Re-render the preview automatically whenever the scene, camera or settings change.");
   if (r.all_fields() || engine == 1) {
-    r.field("Samples", samples, 1, 65536);
-    r.field("Viewport Samples", viewport_samples, 1, 65536);
+    r.samples("Samples", samples, 1, 65536);
+    r.help("Samples per pixel for the final render. Noise falls as 1/sqrt(samples): each doubling cuts it by ~30%.\nBlender: Sampling > Render > Max Samples.");
+    r.samples("Viewport Samples", viewport_samples, 1, 65536);
     r.field("Max Bounces", max_bounces, 0, 64);
     r.field("Clamp Indirect", clamp_indirect, 0.1f, 0.0f, 1000.0f);
     r.help("Limits bright indirect samples to remove fireflies (0 = off). Blender: Light Paths > Clamping.");
@@ -366,6 +373,12 @@ uint64_t hash_component(Component &c) {
   hr.mix(c.type_name(), std::strlen(c.type_name()));
   hr.mix(&c.enabled, 1);
   c.reflect(hr);
+  return hr.h;
+}
+
+uint64_t hash_reflect(const std::function<void(Reflector &)> &fn) {
+  HashReflector hr;
+  fn(hr);
   return hr.h;
 }
 

@@ -34,6 +34,8 @@ struct Reflector {
   virtual ~Reflector() = default;
   virtual void field(const char *name, float &v, float speed = 0.05f, float min = -FLT_MAX, float max = FLT_MAX) = 0;
   virtual void field(const char *name, int &v, int min = INT32_MIN, int max = INT32_MAX) = 0;
+  /* A sample count: the Inspector adds halve / double buttons and power-of-two presets. */
+  virtual void samples(const char *name, int &v, int min, int max) { field(name, v, min, max); }
   virtual void field(const char *name, bool &v) = 0;
   virtual void field(const char *name, Vec3 &v) = 0;
   virtual void color(const char *name, Vec3 &v) = 0;
@@ -351,6 +353,9 @@ struct RenderSettings {
   int percent = 100;
   int samples = 128;          // path tracer final samples
   int viewport_samples = 64;  // Rendered viewport shading
+  int preview_samples = 16;   // Preview button / live preview
+  int preview_percent = 25;   // preview resolution, % of the output size
+  bool live_preview = false;  // re-render the preview whenever the scene changes
   int max_bounces = 4;
   float clamp_indirect = 10.0f;
   bool denoise = true;
@@ -447,5 +452,7 @@ std::string export_obj(const std::vector<std::pair<const Mesh *, Mat4>> &meshes)
 
 /* Change detection for modifier caches & undo grouping. */
 uint64_t hash_component(Component &c);
+/* Hash of every field a reflect function visits (settings change detection). */
+uint64_t hash_reflect(const std::function<void(Reflector &)> &fn);
 
 }  // namespace bl
