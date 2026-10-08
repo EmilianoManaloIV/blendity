@@ -123,6 +123,7 @@ static void render_tests();
 static void file_tests();
 static void colormanagement_tests();
 static void modeling_round9_tests();
+static void modeling_round10_tests();
 
 int main() {
   register_builtin_components();
@@ -709,6 +710,7 @@ int main() {
   file_tests();
   colormanagement_tests();
   modeling_round9_tests();
+  modeling_round10_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -3289,5 +3291,235 @@ static void modeling_round9_tests() {
     std::vector<uint8_t> region;
     meshops::coplanar_region(q, face_facing(q, {0, 1, 0}), 1.0f, region);
     CHECK(std::count(region.begin(), region.end(), 1) == 2);
+  });
+}
+
+/* ===================================================================== */
+/* Shift-drag extrude, seams from sharp, light aiming, material assets,    */
+/* drawing, Follow / Spin / Slice, Reset XForm, the pivot fix              */
+/* ===================================================================== */
+
+static void set_env(const char *k, const std::string &v) {
+#ifdef _WIN32
+  _putenv_s(k, v.c_str());
+#else
+  setenv(k, v.c_str(), 1);
+#endif
+}
+
+static void modeling_round10_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  auto mouse = [](platform::EventType t, int x, int y, int mods = 0) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    e.mods = mods;
+    return e;
+  };
+  test("gizmo: Shift + drag on a face extrudes it first (scale makes an inset face)", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("camera 0 0 5 0 1 0");  // looking at the top face's centre from the front
+    ed.command("edit face");
+    ed.command("fsel facing 0 1 0");
+    ed.command("tool move");
+    ed.step_frame_headless();
+    Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    using ET = platform::EventType;
+    ed.step_frame_headless({mouse(ET::MouseMove, cx, cy - 55)});
+    ed.step_frame_headless({mouse(ET::MouseDown, cx, cy - 55, platform::MOD_SHIFT)});
+    ed.step_frame_headless({mouse(ET::MouseMove, cx, cy - 95, platform::MOD_SHIFT)});
+    ed.step_frame_headless({mouse(ET::MouseUp, cx, cy - 95)});
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    float top = -1e9f;
+    for (const Vec3 &p : m.positions) top = std::max(top, p.y);
+    std::printf("    shift-drag: %zu faces, top at %.3f\n", m.face_count(), top);
+    CHECK(m.face_count() == 10);  // the top moved up on four new walls
+    CHECK(top > 0.6f);
+    CHECK(closed_manifold(m));
+  });
+  test("seams: Seams from Sharp Edges marks the cube's edges and a cylinder's rims only", [&] {
+    Mesh cube = *primitives::cube();
+    CHECK(meshops::seams_from_sharp(cube, 30.0f) == 12);
+    Mesh cyl = *primitives::cylinder(0.5f, 1.0f, 24);
+    const size_t n = meshops::seams_from_sharp(cyl, 30.0f);
+    std::printf("    cylinder (24 sides): %zu seams\n", n);
+    CHECK(n == 48);  // the two rims; sides meet at 15 degrees
+    cyl.set_sharp(cyl.face_verts(0)[0], cyl.face_verts(0)[1], true);
+    CHECK(meshops::sharp_edges_by_angle(cyl, 30.0f, true).size() >= 48);
+  });
+  test("lights: aiming at a point turns the light's +Z to it, keeps X level and reaches it", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Spot Light");
+    GameObject *l = ed.selected_object();
+    l->set_world_position({2, 4, -1});
+    l->get<Light>()->range = 1.0f;
+    ed.command("aimlight -1 0 3");
+    const Vec3 want = normalize(Vec3(-1, 0, 3) - Vec3(2, 4, -1));
+    const Vec3 fwd = l->world_rotation().rotate({0, 0, 1}), right = l->world_rotation().rotate({1, 0, 0});
+    std::printf("    forward (%.3f %.3f %.3f) want (%.3f %.3f %.3f), right.y %.4f, range %.2f\n", fwd.x, fwd.y, fwd.z, want.x, want.y, want.z,
+                right.y, l->get<Light>()->range);
+    CHECK(dot(fwd, want) > 0.9999f);
+    CHECK(std::fabs(right.y) < 1e-3f);
+    CHECK(l->get<Light>()->range >= length(Vec3(-1, 0, 3) - Vec3(2, 4, -1)));
+  });
+  test("materials: a .mat asset is shared, written back when edited, survives save / load, and slots can be removed", [&] {
+    const std::string proj = fs::join(test_dir(), "matproject");
+    fs::make_dirs(fs::join(proj, "Assets"));
+    fs::make_dirs(fs::join(proj, "research"));
+    set_env("BLENDITY_PROJECT", proj);
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("newmat Brick");
+    const std::string path = "Assets/Materials/Brick.mat";
+    CHECK(fs::exists(fs::join(proj, path)));
+    MaterialPtr brick = material_asset(path);
+    CHECK(brick != nullptr);
+    if (!brick) return;
+    ed.command("select Cube");
+    ed.command("assignmat Assets/Materials/Brick.mat 0");
+    ed.command("select Sphere");
+    ed.command("assignmat Assets/Materials/Brick.mat 1");  // a new slot 1
+    GameObject *cube = by_name(ed.scene(), "Cube"), *sphere = by_name(ed.scene(), "Sphere");
+    CHECK(cube->get<MeshRenderer>()->materials[0] == brick && sphere->get<MeshRenderer>()->materials[1] == brick);
+    /* Editing the asset changes both and is written back to the file. */
+    brick->base_color = {0.7f, 0.2f, 0.1f};
+    brick->touch();
+    ed.commit_change("Edit Brick");
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, 5, 5)});
+    std::string text;
+    CHECK(fs::read_file(fs::join(proj, path), text) && text.find("0.7") != std::string::npos);
+    /* The scene file names the asset; loading links back to the one instance. */
+    const std::string scene_text = save_scene_text(ed.scene());
+    CHECK(scene_text.find("Brick.mat") != std::string::npos);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(scene_text, back, err));
+    relink_material_assets(back, false);
+    CHECK(back.find_by_name("Cube")->get<MeshRenderer>()->materials[0] == brick);
+    /* Removing a slot moves its faces down; Remove Unused drops slots no face uses. */
+    ed.command("select Sphere");
+    CHECK(sphere->get<MeshRenderer>()->materials.size() == 2);
+    ed.command("removeunusedslots");
+    CHECK(sphere->get<MeshRenderer>()->materials.size() == 1);
+    ed.command("select Cube");
+    ed.command("assignmat Assets/Materials/Brick.mat 2");
+    CHECK(cube->get<MeshRenderer>()->materials.size() == 3);
+    ed.command("removeslot 1");
+    CHECK(cube->get<MeshRenderer>()->materials.size() == 2 && cube->get<MeshRenderer>()->materials[1] == brick);
+    set_env("BLENDITY_PROJECT", "");
+  });
+  test("draw: a rectangle on a face is cut into it, a line splits it, a circle on the ground is a face", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    ed.command("drawpoint -0.25 1 -0.25");
+    ed.command("drawpoint 0.25 1 0.25");
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    std::printf("    rectangle on the top: %zu faces, closed %d\n", m.face_count(), (int)closed_manifold(m));
+    CHECK(m.face_count() == 6 - 1 + 4 + 1);
+    CHECK(closed_manifold(m));
+    CHECK_NEAR(vol(m), 1.0f, 1e-4f);
+    /* A bent line across the front face, from one edge's middle to the opposite one's. */
+    ed.command("draw polyline");
+    ed.command("drawpoint 0 1 -0.5");
+    ed.command("drawpoint 0.1 0.5 -0.5");
+    ed.command("drawpoint 0 0 -0.5");
+    ed.command("drawpoint 0 0 -0.5 finish");
+    const Mesh &m2 = *g->get<MeshFilter>()->mesh;
+    std::printf("    polyline across the front: %zu faces, closed %d\n", m2.face_count(), (int)closed_manifold(m2));
+    CHECK(m2.face_count() == 11);
+    CHECK(closed_manifold(m2));
+    ed.command("edit off");
+    /* With nothing selected, drawing starts a new mesh on the ground. */
+    ed.command("select Main Camera");
+    ed.command("delete");
+    ed.step_frame_headless();
+    platform::Event esc;
+    ed.command("draw circle 16");
+    GameObject *d = ed.selected_object();
+    CHECK(d && d->name == "Drawing");
+    ed.command("drawpoint 3 0 3");
+    ed.command("drawpoint 4 0 3");
+    if (d) {
+      const Mesh &c = *d->get<MeshFilter>()->mesh;
+      CHECK(c.face_count() == 1 && c.face_size(0) == 16);
+      CHECK(c.face_count() && c.face_normal(0).y > 0.99f);  // facing up, toward the camera
+    }
+    (void)esc;
+  });
+  test("follow, spin and slice: sweep a face along a path, lathe a profile, cut by a plane", [&] {
+    /* Follow: a square swept along an L-shaped path makes a closed bent bar. */
+    Mesh m;
+    for (Vec3 p : {Vec3(-0.1f, 0, -0.1f), Vec3(0.1f, 0, -0.1f), Vec3(0.1f, 0, 0.1f), Vec3(-0.1f, 0, 0.1f)}) m.add_vert(p);
+    m.add_face({0, 3, 2, 1});
+    const uint32_t a = m.add_vert({0, 0, 0}), b = m.add_vert({0, 1, 0}), c = m.add_vert({1, 1, 0});
+    m.add_loose_edge(a, b);
+    m.add_loose_edge(b, c);
+    std::string err;
+    CHECK(meshops::follow(m, 0, &err));
+    if (!err.empty()) std::printf("    follow: %s\n", err.c_str());
+    meshops::merge_by_distance(m, 1e-6f);
+    std::printf("    follow: %zu faces, closed %d, volume %.4f\n", m.face_count(), (int)closed_manifold(m), std::fabs(vol(m)));
+    CHECK(closed_manifold(m) && m.loose_edges.empty());
+    CHECK(vol(m) > 0.0f);
+    CHECK_NEAR(vol(m), 0.04f * 2.0f, 0.01f);  // a 0.2 x 0.2 bar, 2 m long (the mitre keeps the corner)
+    /* Spin: a vertical edge at x = 0.5 turned 360 degrees round Y is a tube. */
+    Mesh s;
+    s.add_vert({0.5f, 0, 0});
+    s.add_vert({0.5f, 1, 0});
+    s.add_loose_edge(0, 1);
+    std::vector<uint8_t> sel = {1, 1};
+    CHECK(meshops::spin(s, sel, Vec3(0.0f), {0, 1, 0}, 360.0f, 12) > 0);
+    CHECK(s.face_count() == 12 && s.vert_count() == 24);
+    /* Slice: a cube cut through the middle stays closed; clearing one side leaves the other half. */
+    Mesh q = *primitives::cube();
+    CHECK(meshops::slice(q, {0, 0, 0}, {0, 1, 0}) > 0);
+    CHECK(q.face_count() == 10 && closed_manifold(q));
+    CHECK_NEAR(vol(q), 1.0f, 1e-4f);
+    Mesh h = *primitives::cube();
+    meshops::slice(h, {0, 0.1f, 0}, {0, 1, 0}, 1);
+    float top = -1e9f;
+    for (const Vec3 &p : h.positions) top = std::max(top, p.y);
+    CHECK_NEAR(top, 0.1f, 1e-4f);
+  });
+  test("objects: Reset XForm bakes rotation and scale, and the gizmo pivots on the origin", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_local_euler({0, 30, 0});
+    g->set_local_scale({2, 1, 1});
+    g->set_world_position({1, 0.5f, 0});
+    const AABB before = g->world_bounds();
+    ed.command("select Cube");
+    ed.select_object(g->id);
+    ed.select_object(g->id);
+    /* mesh_op through the console's generic path */
+    ed.command("meshop apply_transform");
+    const AABB after = g->world_bounds();
+    CHECK(length(g->local().scale - Vec3(1.0f)) < 1e-5f && std::fabs(g->local().rotation.w) > 0.99999f);
+    CHECK(length(after.min - before.min) < 1e-4f && length(after.max - before.max) < 1e-4f);
+    /* The origin is where transforms happen: Set Origin to the bottom, then the gizmo sits there. */
+    ed.command("origin bottom");
+    CHECK(std::fabs(g->world_position().y - before.min.y) < 1e-4f);
+    CHECK(!ed.pivot_is_center());
   });
 }

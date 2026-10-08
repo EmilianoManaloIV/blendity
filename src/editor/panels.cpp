@@ -115,6 +115,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     Recti row{body.x, body.y + i * rh - off, body.w, rh};
     bool sel = is_selected(g->id);
     bool hot = u.hovered(row);
+    if (row.intersect(body).h > 0) drop_rows_.push_back({row.intersect(body), g->id});  // material assets drop here
     if (sel) u.canvas.fill_rect(row, focused_ == WindowKind::Hierarchy ? u.theme.selection : u.theme.selection_dim);
     else if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
     int x = row.x + u.px(6) + rows[i].depth * u.px(14);
@@ -363,6 +364,7 @@ struct InspectorReflector : Reflector {
   ui::Context &u;
   ui::Layout &lay;
   bool changed = false;
+  Material *material = nullptr;  // the material being edited (texture drops touch it)
   std::vector<FieldEdit> edits;  // what changed this frame (for multi-object editing)
   int label_w;
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
@@ -539,6 +541,7 @@ struct InspectorReflector : Reflector {
     else if (!t.empty()) tex = texture_load(resolve_asset_path(t.path), !t.non_color);
     draw_texture_thumb(u, tex, thumb);
     Recti name{f.x + f.h + u.px(4), f.y, f.w - f.h - u.px(4), f.h};
+    ed.drop_textures_.push_back({f, &t, material});  // an image dragged from the Project window lands here
     bool hot = u.hovered(name) || u.hovered(thumb);
     u.frame(name, u.theme.field, hot ? u.theme.field_hover : u.theme.field_border, u.px(3));
     std::string label = t.empty() ? "None (Texture)" : (starts_with(t.path, "generated:") ? t.path.substr(10) : fs::filename(t.path));
@@ -589,6 +592,17 @@ struct InspectorReflector : Reflector {
       mats.pop_back();
       changed = true;
     }
+    u.tooltip("Remove the last slot. Each slot's x removes that one; faces on it move to the slot before.");
+    GameObject *owner = ed.active_object();
+    int remove_slot = -1;
+    if (owner && mats.size() > 1) {
+      Recti ur = lay.row();
+      if (u.button({ur.x + label_w, ur.y, ur.w - label_w - u.px(6), ur.h}, "Remove Unused Slots")) {
+        ed.remove_unused_material_slots(owner);
+        return;
+      }
+      u.tooltip("Remove every slot no face uses (Blender: Material Specials > Remove Unused Slots).");
+    }
     for (size_t i = 0; i < mats.size(); i++) {
       ui::Id pid = u.id((uint64_t)i * 977 + 13) ^ 0x3A7Eull;
       auto res = results.find(pid);
@@ -600,6 +614,13 @@ struct InspectorReflector : Reflector {
       Recti r = lay.row();
       u.label(label_rect(r), strprintf("  Element %zu", i), u.theme.text_dim);
       Recti fr = field_rect(r);
+      if (owner) {
+        /* An x per slot (Blender's "-" on the selected slot), and a drop target for material assets. */
+        Recti xr{fr.right() - fr.h, fr.y, fr.h, fr.h};
+        if (u.icon_button(xr, Icon::Close, false, "Remove this material slot")) remove_slot = (int)i;
+        fr.w -= fr.h + u.px(2);
+        ed.drop_slots_.push_back({fr, owner->id, (int)i});
+      }
       bool hot = u.hovered(fr);
       u.frame(fr, u.theme.field, hot ? u.theme.field_hover : u.theme.field_border, u.px(3));
       int a = u.font.line_height() - u.px(4);
@@ -630,6 +651,21 @@ struct InspectorReflector : Reflector {
           results[pid] = {nullptr, true};
           uc->redraw = true;
         }
+        if (cur && cur->asset_path.empty() && uc->menu_item("Save as Material Asset", nullptr, false, true, Icon::File)) {
+          /* Unity: drag a material into the Project window. The slot (and every
+           * other slot sharing it) now uses the asset. */
+          if (MaterialPtr a = e->new_material_asset(cur, true)) results[pid] = {a, false};
+          uc->redraw = true;
+        }
+        uc->tooltip("Write this material to Assets/Materials as a .mat you can drag onto other objects.");
+        uc->menu_separator();
+        uc->menu_label("Material assets (Assets/Materials)");
+        for (const auto &de : fs::list(fs::join(e->assets_dir_, "Materials")))
+          if (!de.is_dir && fs::extension(de.name) == ".mat")
+            if (uc->menu_item(fs::stem(de.name), nullptr, cur && cur->asset_path == "Assets/Materials/" + de.name)) {
+              if (MaterialPtr a = material_asset("Assets/Materials/" + de.name)) results[pid] = {a, false};
+              uc->redraw = true;
+            }
         uc->menu_separator();
         uc->menu_label("Materials in this scene");
         for (const MaterialPtr &m : e->scene_materials())
@@ -638,6 +674,10 @@ struct InspectorReflector : Reflector {
             uc->redraw = true;
           }
       });
+    }
+    if (remove_slot >= 0 && owner) {
+      ed.remove_material_slot(owner, remove_slot);
+      return;
     }
     /* Inline editors, one per distinct material (shared slots edit once). */
     std::vector<Material *> seen;
@@ -654,6 +694,7 @@ struct InspectorReflector : Reflector {
       u.push_id((uint64_t)(uintptr_t)m.get());
       InspectorReflector sub(ed, u, lay);
       sub.label_w = label_w;
+      sub.material = m.get();
       m->reflect(sub);
       u.pop_id();
       if (sub.changed) {
@@ -699,6 +740,31 @@ void Editor::draw_inspector(const Recti &r) {
       std::string ext = fs::extension(project_selected_);
       u.label(lay.row(), "Type: " + (ext.empty() ? std::string("folder") : ext), u.theme.text_dim);
       u.label(lay.row(), project_selected_, u.theme.text_dim);
+      if (ext == ".mat") {
+        /* Unity's material asset inspector: edit the shared material itself. */
+        if (MaterialPtr m = material_asset(make_asset_relative(project_selected_))) {
+          lay.space(u.px(6));
+          u.label(lay.row(), "Material asset - drag it from the Project window onto an object, a face or a slot", u.theme.accent);
+          ui::Id sid = u.id("mat_asset_scroll");
+          static int content_h = 0;
+          Recti area{r.x, lay.y, r.w, r.bottom() - lay.y};
+          const int off = u.begin_scroll(sid, area, content_h);
+          ui::Layout ml{{r.x + u.px(6), area.y, r.w - u.px(18), area.h}, area.y + u.px(4) - off};
+          ml.row_h = u.row_h();
+          u.push_id((uint64_t)(uintptr_t)m.get());
+          InspectorReflector mr(*this, u, ml);
+          mr.material = m.get();
+          m->reflect(mr);
+          u.pop_id();
+          if (mr.changed) {
+            m->touch();
+            mark_changed("Edit Material " + m->name);  // saved to the .mat when the edit finishes
+          }
+          content_h = ml.y + off - area.y + u.px(20);
+          u.end_scroll();
+          return;
+        }
+      }
       if (ext == ".pdf" || starts_with(project_selected_, papers_dir_)) {
         lay.space(u.px(6));
         u.label(lay.row(), "Research paper", u.theme.accent);
@@ -934,6 +1000,17 @@ void Editor::draw_inspector(const Recti &r) {
         u.tooltip("Eyedropper: click a surface in the Scene view and the focus distance becomes that point's\n"
                   "distance from this camera (along its view). Turns Depth of Field on.");
       }
+      /* Light: the same eyedropper aims it (Blender: Track To / Point At; Unity: LookAt). */
+      if (auto *lc = dynamic_cast<Light *>(c)) {
+        Recti row = lay.row(u.row_h() + u.px(2));
+        const bool picking = focus_pick_cam_ == g->id;
+        const char *label = lc->type == 1 ? "Pick Point to Reach (sets Range)" : "Aim at Point";
+        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, picking ? "Click a point in the Scene view... (Esc cancels)" : label,
+                     picking, Icon::Light))
+          focus_pick_cam_ = picking ? 0 : g->id;
+        u.tooltip("Eyedropper: click a surface in the Scene view and the light turns to shine at that point\n"
+                  "(its range grows to reach it if needed). Like the camera's Pick Focus Point.");
+      }
       /* Mesh tools (Blender's Edit Mode operators, object-level). */
       if (auto *mf = dynamic_cast<MeshFilter *>(c)) {
         lay.space(u.px(4));
@@ -1003,6 +1080,24 @@ void Editor::draw_inspector(const Recti &r) {
               edit_tool("knife");
             u.tooltip("Split a face along a line between two points on its edges or corners.\nSketchUp: Line tool. Blender: Knife (K).");
           }
+          {
+            /* Drawing tools (UModeler / SketchUp): shapes drawn onto the mesh with snapping. */
+            Recti dr = lay.row(u.row_h() + u.px(2));
+            u.label({dr.x + u.px(4), dr.y, u.px(40), dr.h}, "Draw", u.theme.accent);
+            const int x0 = dr.x + u.px(44), dw = (dr.right() - x0 - u.px(4) - 4 * u.px(3)) / 5;
+            for (int k = 0; k < 5; k++) {
+              const bool on = draw_.active && draw_.shape == k;
+              if (u.button({x0 + k * (dw + u.px(3)), dr.y, dw, dr.h}, kDrawShapes[k], on)) {
+                if (on) draw_.active = false;
+                else draw_begin(k);
+              }
+              u.tooltip("Draw onto the mesh (or the ground) with snapping to corners, midpoints, edges, faces and the grid.\n"
+                        "A closed shape inside a face is cut into it, ready for Push/Pull; a line between edges splits the face;\n"
+                        "anything else becomes new faces or wire edges. UModeler: drawing tools. SketchUp: Line, Rectangle, Circle, Arc, Polygon.");
+            }
+            if (draw_.active && (draw_.shape == 2 || draw_.shape == 3)) er.field("Circle / Arc Segments", draw_segments_, 3, 256);
+            if (draw_.active && draw_.shape == 4) er.field("Polygon Sides", draw_sides_, 3, 64);
+          }
           if (elem_ == EditElement::Face) {
             er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
             er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
@@ -1017,6 +1112,8 @@ void Editor::draw_inspector(const Recti &r) {
             er.field("Loop Cuts", loop_cuts_, 1, 64);
             er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
             er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
+            er.field("Sharp Angle", seam_angle_, 0.5f, 0.0f, 180.0f);
+            u.tooltip("Seams from Sharp and Select Sharp Edges use edges whose faces meet at more than this (Blender: 30).");
             er.field("Bridge Segments", bridge_segments_, 1, 256);
           }
           else {
@@ -1042,6 +1139,16 @@ void Editor::draw_inspector(const Recti &r) {
             grid(mine);
             grid(common);
           }
+          static const char *kAxesXYZ[] = {"X", "Y", "Z", "View"};
+          if (elem_ != EditElement::Face) {
+            er.field("Spin Angle", spin_angle_, 1.0f, -3600.0f, 3600.0f);
+            er.field("Spin Steps", spin_steps_, 1, 512);
+            er.enumeration("Spin Axis", spin_axis_, kAxesXYZ, 3);
+            u.tooltip("Spin / Lathe turns round this axis of the object, through its origin.");
+          }
+          er.enumeration("Slice Axis", slice_axis_, kAxesXYZ, 4);
+          static const char *kClear[] = {"Keep Both Sides", "Remove Above", "Remove Below"};
+          er.enumeration("Slice Keeps", slice_clear_, kClear, 3);
           er.field("Proportional Editing", proportional_);
           if (proportional_) {
             er.field("Proportional Radius", prop_radius_, 0.01f, 0.001f, 10000.0f);
@@ -1423,14 +1530,25 @@ void Editor::draw_project(const Recti &r) {
     if (sel) u.canvas.fill_rect(rr, u.theme.selection);
     else if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
     std::string ext = fs::extension(en->name);
-    Icon ic = en->is_dir ? Icon::Folder : (ext == ".scene" ? Icon::Scene : (model_extension_supported(ext) ? Icon::Mesh : (ext == ".pdf" ? Icon::Paper : (ext == ".png" ? Icon::Eye : Icon::File))));
+    Icon ic = en->is_dir ? Icon::Folder : ext == ".mat" ? Icon::None : (ext == ".scene" ? Icon::Scene : (model_extension_supported(ext) ? Icon::Mesh : (ext == ".pdf" ? Icon::Paper : (ext == ".png" ? Icon::Eye : Icon::File))));
     int a = u.font.line_height() - u.px(2);
     u.draw_icon(ic, {rr.x + u.px(10), rr.y + (rh - a) / 2, a, a}, ext == ".pdf" ? u.theme.accent : u.theme.text);
     u.label({rr.x + u.px(16) + a, rr.y, rr.w / 2, rh}, en->name);
     if (!en->is_dir) u.label({rr.x, rr.y, rr.w - u.px(12), rh}, format_bytes(en->size), u.theme.text_dim, ui::Align::Right);
+    if (ext == ".mat") {
+      /* A material asset: its colour as a swatch, like Unity's preview ball. */
+      if (MaterialPtr mm = material_asset(make_asset_relative(full))) {
+        const int sw = u.font.line_height() - u.px(4);
+        const Vec3 c = mm->base_color;
+        u.canvas.fill_circle((float)(rr.x + u.px(10) + sw / 2), (float)(rr.y + rh / 2), sw * 0.5f,
+                             Color::from(Vec3(linear_to_srgb(c.x), linear_to_srgb(c.y), linear_to_srgb(c.z))));
+      }
+    }
     if (hot && in.pressed[0]) {
       project_selected_ = full;
       clear_selection();
+      /* Materials and images can be dragged onto objects, faces and Inspector slots (Unity). */
+      if (ext == ".mat" || image_extension_supported(ext)) asset_drag_ = {true, false, full, in.mx, in.my};
     }
     if (hot && in.double_clicked[0]) {
       if (en->is_dir) { project_dir_ = full; project_listed_ = -100; }
@@ -1454,6 +1572,11 @@ void Editor::draw_project(const Recti &r) {
     std::string ext = fs::extension(sel);
     if (ext == ".scene" && u.menu_item("Open Scene")) open_scene(sel);
     if (model_extension_supported(ext) && u.menu_item("Import into Scene")) import_obj_file(sel);
+    if (ext == ".mat" && u.menu_item("Assign to Selection", nullptr, false, !selection_.empty()))
+      if (MaterialPtr m = material_asset(make_asset_relative(sel)))
+        for (GameObject *g : selected_objects(false)) assign_material(g, 0, m);
+    if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
+    u.tooltip("A new Material asset in Assets/Materials. Drag it onto objects, faces or Inspector slots (Unity: Create > Material).");
     if (u.menu_item("Open with system viewer")) fs::open_external(sel);
     if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::parent(sel));
     if (u.menu_item("Refresh")) project_listed_ = -100;

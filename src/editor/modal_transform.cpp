@@ -59,6 +59,14 @@ bool Editor::transform_begin(int mode) {
       n++;
     }
     if (GameObject *a = active_object()) t.local_rot = a->world_rotation();
+    if (pivot_center_ && n) {
+      /* The toolbar's Center: around the selection's bounds, like the gizmo. */
+      AABB b;
+      for (GameObject *g : selected_objects(true)) b.add(g->world_bounds());
+      if (b.valid()) {
+        pivot = b.center() * (float)n;
+      }
+    }
   }
   if (!n) {
     Log::warn("%s: select something first", kModeNames[mode]);

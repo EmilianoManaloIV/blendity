@@ -77,6 +77,8 @@ Editor::~Editor() {
 void Editor::resolve_project_paths() {
   auto is_root = [](const std::string &d) { return fs::is_dir(fs::join(d, "Assets")) && fs::is_dir(fs::join(d, "research")); };
   std::vector<std::string> starts = {fs::executable_dir(), fs::current_dir()};
+  if (const char *env = std::getenv("BLENDITY_PROJECT")) project_root_ = env;  // tests: a scratch project
+  if (!project_root_.empty()) starts.clear();
   for (std::string d : starts) {
     for (int i = 0; i < 6 && !d.empty(); i++) {
       if (is_root(d)) { project_root_ = d; break; }
@@ -97,6 +99,7 @@ void Editor::resolve_project_paths() {
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
+  clear_material_assets();  // assets belong to one project
   project_dir_ = assets_dir_;
 }
 
@@ -371,6 +374,9 @@ void Editor::frame(std::vector<Event> &events) {
   Recti status{0, fb_.height - sh, fb_.width, sh};
   Recti dock_area{ui_.px(2), toolbar.bottom() + ui_.px(2), fb_.width - ui_.px(4), status.y - toolbar.bottom() - ui_.px(4)};
 
+  drop_slots_.clear();  // drop targets register again as the windows draw
+  drop_textures_.clear();
+  drop_rows_.clear();
   draw_toolbar(toolbar);
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
@@ -379,6 +385,7 @@ void Editor::frame(std::vector<Event> &events) {
   draw_statusbar(status);
   draw_menubar(menubar);  // last so its popups are declared after windows (they draw on top anyway)
   draw_dialogs();
+  update_asset_drag();
   handle_drop();
   handle_shortcuts();
 
@@ -555,6 +562,8 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Assets"), u.px(260), [this] {
     auto &u = ui_;
     if (u.menu_item("Import Model...")) import_dialog();
+    if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
+    u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
     if (u.menu_item("Refresh", "Ctrl+R")) { project_listed_ = -100; papers_listed_ = -100; }
     u.menu_separator();
     if (u.menu_item("Open Assets Folder")) fs::open_external(assets_dir_);
@@ -669,6 +678,12 @@ void Editor::draw_menubar(const Recti &r) {
       u.tooltip("Select the cutter(s), then Ctrl+click the object to cut last.\n"
                 "Blender: the Boolean modifier / Bool Tool (Auto and Brush). Solver: Manifold, as Blender's.");
     }
+    u.submenu("Draw", u.px(200), [this] {
+      for (int k = 0; k < 5; k++)
+        if (ui_.menu_item(kDrawShapes[k], nullptr, draw_.active && draw_.shape == k)) draw_begin(k);
+    });
+    u.tooltip("Draw a polyline, rectangle, circle, arc or polygon onto the mesh (or the ground) with snapping.\n"
+              "With nothing selected it starts a new mesh. UModeler / SketchUp drawing tools.");
     u.submenu("Separate", u.px(200), [this] {
       if (ui_.menu_item("Selection", nullptr, false, edit_mode_)) separate("selection");
       ui_.tooltip("Edit Mode: move the selected faces into a new object (Blender: P > Selection).");
@@ -685,6 +700,13 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Shade Smooth", nullptr, false, has_sel)) mesh_op("shade_smooth");
     if (u.menu_item("Shade Flat", nullptr, false, has_sel)) mesh_op("shade_flat");
     if (u.menu_item("Apply Modifiers", nullptr, false, has_sel)) mesh_op("apply_modifiers");
+    if (u.menu_item("Reset XForm (Apply Rotation & Scale)", nullptr, false, has_sel)) mesh_op("apply_transform");
+    u.tooltip("Bake the rotation and scale into the mesh; the object keeps its place (UModeler: Reset XForm. Blender: Ctrl+A).");
+    u.submenu("Mirror", u.px(170), [this, has_sel] {
+      for (const char *a : {"X", "Y", "Z"})
+        if (ui_.menu_item(std::string("Mirror ") + a, nullptr, false, has_sel)) mesh_op(std::string("mirror_") + (char)std::tolower(a[0]));
+    });
+    u.tooltip("Add the mirrored half for good, welded at the middle (UModeler: Mirror; Blender: an applied Mirror modifier).");
     u.menu_separator();
     u.submenu("UV", u.px(240), [this] {
       auto &u = ui_;
@@ -701,6 +723,10 @@ void Editor::draw_menubar(const Recti &r) {
       u.menu_separator();
       if (u.menu_item("Mark Seam", nullptr, false, edit_mode_)) uv_op("mark_seam");
       if (u.menu_item("Clear Seam", nullptr, false, edit_mode_)) uv_op("clear_seam");
+      if (u.menu_item("Seams from Sharp Edges")) uv_op("seams_from_sharp");
+      u.tooltip("Mark a seam on every edge sharper than the Seam Angle (30 degrees) and every edge marked sharp.\n"
+                "Blender: Select > Select Sharp Edges, then Edge > Mark Seam.");
+      if (u.menu_item("Seams from Sharp Edges + Unwrap")) uv_op("seams_from_sharp_unwrap");
       if (u.menu_item("Open UV Editor", "Ctrl+9")) dock_open(WindowKind::UVEditor);
     });
     if (!research::features().empty()) {
@@ -768,7 +794,10 @@ void Editor::draw_toolbar(const Recti &r) {
   }
   x += u.px(14);
   int pw = u.font.text_width("Center") + bh + u.px(10);
-  if (u.button({x, y, pw, bh}, pivot_center_ ? "Center" : "Pivot", false, pivot_center_ ? Icon::Center : Icon::Pivot)) pivot_center_ = !pivot_center_;
+  if (u.button({x, y, pw, bh}, pivot_center_ ? "Center" : "Pivot", false, pivot_center_ ? Icon::Center : Icon::Pivot)) {
+    pivot_center_ = !pivot_center_;
+    save_prefs();
+  }
   u.tooltip("Tool handle position: selection bounds Center or the active object's Pivot.");
   x += pw + u.px(4);
   int gw = u.font.text_width("Global") + bh + u.px(10);
@@ -1393,6 +1422,7 @@ void Editor::commit_undo() {
   redo_.clear();
   stable_ = scene_->clone();
   pending_change_ = false;
+  if (save_dirty_material_assets()) project_listed_ = -100;  // edited material assets go back to their .mat files
 }
 
 void Editor::undo() {
@@ -1410,6 +1440,8 @@ void Editor::undo() {
   scene_ = std::move(s.scene);
   selection_ = s.selection;
   active_ = s.active;
+  relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
+  save_dirty_material_assets();
   stable_ = scene_->clone();
   prune_selection();
   scene_dirty_ = true;
@@ -1429,6 +1461,8 @@ void Editor::redo() {
   scene_ = std::move(s.scene);
   selection_ = s.selection;
   active_ = s.active;
+  relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
+  save_dirty_material_assets();
   stable_ = scene_->clone();
   prune_selection();
   scene_dirty_ = true;
@@ -1464,6 +1498,7 @@ bool Editor::open_scene(const std::string &path) {
     return false;
   }
   scene_ = std::move(s);
+  relink_material_assets(*scene_, false);  // slots naming a .mat use the asset file
   stable_ = scene_->clone();
   undo_.clear();
   redo_.clear();
@@ -1893,6 +1928,33 @@ void Editor::mesh_op(const std::string &op) {
   for (GameObject *g : selected_objects(false)) {
     auto *mf = g->get<MeshFilter>();
     if (!mf || !mf->mesh) continue;
+    if (op == "apply_transform") {
+      /* Reset XForm (UModeler) / Apply Rotation & Scale (Blender Ctrl+A): the
+       * rotation and scale go into the vertices; the object keeps its place. */
+      Transform t = g->local();
+      const Mat4 rs = Mat4::trs(Vec3(0.0f), t.rotation, t.scale);
+      std::vector<std::pair<GameObject *, Mat4>> kids;
+      for (GameObject *c : g->children) kids.push_back({c, c->world_matrix()});
+      Mesh &m = *mesh_make_mutable(mf->mesh);
+      for (Vec3 &p : m.positions) p = rs.point(p);
+      if (t.scale.x * t.scale.y * t.scale.z < 0) meshops::flip_normals(m);  // a mirrored scale turns faces inside out
+      m.touch();
+      t.rotation = Quat();
+      t.euler_hint = Vec3(0.0f);
+      t.scale = Vec3(1.0f);
+      g->set_local(t);
+      for (auto &k : kids) k.first->set_world_matrix(k.second);
+      n++;
+      continue;
+    }
+    if (op == "mirror_x" || op == "mirror_y" || op == "mirror_z") {
+      /* UModeler's Mirror: the mirrored half added for good (the Mirror modifier, applied). */
+      Mesh &m = *mesh_make_mutable(mf->mesh);
+      meshops::mirror(m, op == "mirror_x", op == "mirror_y", op == "mirror_z", merge_dist_);
+      m.touch();
+      n++;
+      continue;
+    }
     if (op == "apply_modifiers") {
       const Mesh *ev = g->evaluated_mesh();
       if (ev == mf->mesh.get()) continue;
@@ -2176,8 +2238,8 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "pickfocus") {
     /* pickfocus: the selected Camera's focus eyedropper (then click in the Scene view) */
     GameObject *a = active_object();
-    if (a && a->get<Camera>()) focus_pick_cam_ = a->id;
-    else Log::warn("pickfocus: select a Camera first");
+    if (a && (a->get<Camera>() || a->get<Light>())) focus_pick_cam_ = a->id;  // a Light: aim it at the clicked point
+    else Log::warn("pickfocus: select a Camera or a Light first");
   }
   else if (c == "export") {
     /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [path]: the selection (or the whole scene) */
@@ -2197,6 +2259,52 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "join") join_selected();
+  else if (c == "meshop") mesh_op(arg(1, ""));  // meshop <apply_transform|mirror_x|...>: an object-level mesh operator
+  else if (c == "aimlight") {
+    /* aimlight <x> <y> <z>: turn the selected light to shine at that point */
+    GameObject *a = active_object();
+    if (a && a->get<Light>())
+      aim_light(*a, Vec3((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str())));
+    else Log::warn("aimlight: select a Light first");
+  }
+  else if (c == "newmat") {
+    /* newmat [name]: a Material asset in Assets/Materials (a copy of the selection's first material) */
+    GameObject *a = active_object();
+    MaterialPtr src = a && a->get<MeshRenderer>() && !a->get<MeshRenderer>()->materials.empty() ? a->get<MeshRenderer>()->materials[0] : nullptr;
+    MaterialPtr base = src ? std::make_shared<Material>(*src) : make_material("New Material", Vec3(0.8f));
+    if (t.size() > 1) base->name = line.substr(line.find(' ') + 1);
+    base->asset_path.clear();
+    new_material_asset(base, false);
+  }
+  else if (c == "assignmat") {
+    /* assignmat <Assets/Materials/x.mat> [slot]: put the asset in a slot of every selected object */
+    MaterialPtr m = material_asset(arg(1, ""));
+    if (!m) Log::warn("assignmat: no material asset %s", arg(1, "").c_str());
+    else
+      for (GameObject *g : selected_objects(false)) assign_material(g, std::atoi(arg(2, "0").c_str()), m);
+  }
+  else if (c == "removeslot") {
+    if (GameObject *a = active_object()) remove_material_slot(a, std::atoi(arg(1, "0").c_str()));
+  }
+  else if (c == "removeunusedslots") {
+    if (GameObject *a = active_object()) remove_unused_material_slots(a);
+  }
+  else if (c == "draw") {
+    /* draw <polyline|rectangle|circle|arc|polygon> [segments / sides] */
+    const std::string s = to_lower(arg(1, "polyline"));
+    int k = 0;
+    for (int i = 0; i < 5; i++)
+      if (s == to_lower(kDrawShapes[i])) k = i;
+    if (t.size() > 2) (k == 4 ? draw_sides_ : draw_segments_) = std::max(3, std::atoi(t[2].c_str()));
+    draw_begin(k);
+  }
+  else if (c == "drawpoint") {
+    /* drawpoint <x> <y> <z> [close|finish]: a click of the drawing tool at a world point (scripts, tests) */
+    if (draw_.active) {
+      const Vec3 p((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
+      draw_point(p, to_lower(arg(4, "")));
+    }
+  }
   else if (c == "exportoptions") {
     /* exportoptions <obj|fbx|glb|gltf|stl|ply|usda>: File > Export > that format (the options, then Save As) */
     std::string fmt = to_lower(arg(1, "obj"));
@@ -2610,6 +2718,7 @@ void Editor::load_prefs() {
     else if (k == "snap_move") snap_move_ = (float)std::atof(v.c_str());
     else if (k == "snap_rot") snap_rot_ = (float)std::atof(v.c_str());
     else if (k == "blender_transform_keys") blender_keys_ = v == "1";
+    else if (k == "pivot_center") pivot_center_ = v == "1";
     else if (k == "render_devices_off") {
       render_devices_off_.clear();
       size_t a = 0;
@@ -2629,9 +2738,10 @@ void Editor::save_prefs() {
   for (int l : lessons_done_) done += std::to_string(l) + " ";
   std::string off;
   for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
-  std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n",
+  std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
+                            "blender_transform_keys=%d\npivot_center=%d\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
-                            show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0);
+                            show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0);
   fs::write_file(prefs_path_, s);
 }
 

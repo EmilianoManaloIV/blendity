@@ -329,6 +329,24 @@ std::unordered_set<uint64_t> coplanar_edges(const Mesh &m, float angle_deg);
 /* Blender: Limited Dissolve. Coplanar faces become one n-gon; corners on a
  * straight run vanish. Returns how many edges and vertices went. */
 size_t dissolve_limited(Mesh &m, float angle_deg = 1.0f);
+/* Blender: Select > Select Sharp Edges (faces meeting at more than angle_deg; edges
+ * marked sharp when include_marked), as sorted edge keys. */
+std::vector<uint64_t> sharp_edges_by_angle(const Mesh &m, float angle_deg, bool include_marked = true);
+/* Select Sharp Edges + Mark Seam in one step (optionally only on masked faces). Returns new seams. */
+size_t seams_from_sharp(Mesh &m, float angle_deg, const std::vector<uint8_t> *face_mask = nullptr);
+/* Polyline / shape drawing (UModeler, SketchUp). Points in mesh space. */
+long imprint_loop(Mesh &m, size_t face, const std::vector<Vec3> &loop, std::string *error = nullptr);  // returns the new inner face
+bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vector<Vec3> &interior);
+/* UModeler's Slice / Follow / Lathe (mesh_tools4.cpp). */
+/* Cut every face crossing the plane through p with normal n (Blender: Bisect). clear: 0 keep both
+ * sides, 1 remove the side n points to, 2 the other. Returns new vertices + cuts. */
+size_t slice(Mesh &m, Vec3 p, Vec3 n, int clear = 0);
+/* Sweep a face along the open chain of wire edges that starts nearest it (SketchUp's Follow Me);
+ * the face becomes the start cap, the path's wire edges are used up. */
+bool follow(Mesh &m, size_t face, std::string *error = nullptr);
+/* Blender's Spin / UModeler's Lathe: the selected edges (and lone vertices) turned round an axis
+ * through center in `steps` copies; 360 degrees closes. The last copy becomes the selection. */
+size_t spin(Mesh &m, std::vector<uint8_t> &vert_sel, Vec3 center, Vec3 axis, float angle_deg, int steps);
 }  // namespace meshops
 
 }  // namespace bl

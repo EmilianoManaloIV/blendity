@@ -68,6 +68,13 @@ void Editor::uv_op(const std::string &op) {
       }
     Log::info("%s %d seam edge(s)", op == "mark_seam" ? "Marked" : "Cleared", n);
   }
+  else if (op == "seams_from_sharp" || op == "seams_from_sharp_unwrap") {
+    /* Blender: Select Sharp Edges (30 degrees by default) then Mark Seam. In Edit
+     * Mode with faces selected, only their edges; otherwise the whole mesh. */
+    const size_t n = meshops::seams_from_sharp(m, seam_angle_, pm);
+    Log::info("Seams from sharp edges (> %.0f deg): %zu new seam(s)", seam_angle_, n);
+    if (op == "seams_from_sharp_unwrap") islands = uvops::unwrap_lscm(m, pm);
+  }
   else {
     Log::warn("Unknown UV operation '%s'", op.c_str());
     return;
@@ -98,7 +105,9 @@ void Editor::draw_uv_editor(const Recti &r) {
       {"Pack", "pack", "Pack Islands into 0-1 with margin and rotation."},
       {"Avg Scale", "average", "Average Islands Scale: equal texel density."},
       {"Mark Seam", "mark_seam", "Mark the edges between selected vertices as seams (Edit Mode).\nBlender: Edge > Mark Seam."},
-      {"Clear Seam", "clear_seam", "Clear seams between selected vertices."}};
+      {"Clear Seam", "clear_seam", "Clear seams between selected vertices."},
+      {"Seams from Sharp", "seams_from_sharp_unwrap", "Mark a seam on every sharp edge (faces meeting at more than the Seam Angle, or marked sharp),\n"
+       "then unwrap. Blender: Select Sharp Edges, Mark Seam, Unwrap."}};
   for (const B &b : buttons) {
     int w = u.font.text_width(b.label) + u.px(14);
     if (x + w > bar.right() - u.px(260)) break;

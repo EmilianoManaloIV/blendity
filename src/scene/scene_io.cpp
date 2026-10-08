@@ -268,7 +268,9 @@ std::string save_scene_text(const Scene &scene) {
     }
   });
   for (size_t i = 0; i < mat_order.size(); i++) {
-    os << "material " << i << "\n";
+    os << "material " << i;
+    if (!mat_order[i]->asset_path.empty()) os << " " << quote(mat_order[i]->asset_path);  // a Material asset (values kept as a fallback)
+    os << "\n";
     WriteReflector wr(os, mesh_ids, &mat_ids);
     mat_order[i]->reflect(wr);
     os << "end\n";
@@ -402,6 +404,7 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
     }
     if (k == "material" && t.size() >= 2) {
       pending_mat = std::make_shared<Material>();
+      if (t.size() >= 3) pending_mat->asset_path = t[2];
       materials[std::atoi(t[1].c_str())] = pending_mat;
       rr = std::make_unique<ReadReflector>(meshes, &materials);
       continue;
@@ -539,6 +542,127 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
   scene = std::move(fresh);
   return true;
 }
+
+
+/* ===================================================================== */
+/* Material assets (.mat)                                                 */
+/* ===================================================================== */
+
+std::string save_material_text(Material &m) {
+  Out os;
+  os << "blendity_material 1\n";
+  const std::unordered_map<const Mesh *, int> no_meshes;
+  WriteReflector wr(os, no_meshes);
+  m.reflect(wr);
+  return os.str();
+}
+
+bool load_material_text(const std::string &text, Material &m) {
+  LineReader is{text.data(), text.data() + text.size()};
+  std::string_view line;
+  if (!is.next(line) || tokenize(line).empty() || tokenize(line)[0] != "blendity_material") return false;
+  const std::unordered_map<int, MeshPtr> no_meshes;
+  ReadReflector rr(no_meshes);
+  while (is.next(line)) {
+    auto t = tokenize(line);
+    if (t.empty()) continue;
+    rr.values[t[0]] = std::vector<std::string>(t.begin() + 1, t.end());
+  }
+  m.reflect(rr);
+  m.touch();
+  return true;
+}
+
+namespace {
+struct AssetEntry {
+  MaterialPtr m;
+  uint64_t saved_version = 0;
+};
+std::unordered_map<std::string, AssetEntry> &asset_library() {
+  static std::unordered_map<std::string, AssetEntry> lib;
+  return lib;
+}
+std::string asset_key(const std::string &path) {
+  std::string k = path;
+  for (char &c : k)
+    if (c == '\\') c = '/';
+  return k;
+}
+}  // namespace
+
+MaterialPtr material_asset(const std::string &path_in) {
+  if (path_in.empty()) return nullptr;
+  const std::string path = asset_key(path_in);
+  auto &lib = asset_library();
+  auto it = lib.find(path);
+  if (it != lib.end()) return it->second.m;
+  std::string text;
+  if (!fs::read_file(resolve_asset_path(path), text)) return nullptr;
+  auto m = std::make_shared<Material>();
+  m->name = fs::stem(path);
+  if (!load_material_text(text, *m)) return nullptr;
+  m->asset_path = path;
+  lib[path] = {m, m->version};
+  return m;
+}
+
+MaterialPtr create_material_asset(const Material &src, const std::string &path_in) {
+  const std::string path = asset_key(path_in);
+  auto m = std::make_shared<Material>(src);
+  m->asset_path = path;
+  if (m->name.empty() || m->name == "Material") m->name = fs::stem(path);
+  const std::string file = resolve_asset_path(path);
+  fs::make_dirs(fs::parent(file));
+  if (!fs::write_file(file, save_material_text(*m))) return nullptr;
+  asset_library()[path] = {m, m->version};
+  return m;
+}
+
+size_t save_dirty_material_assets() {
+  size_t n = 0;
+  for (auto &kv : asset_library()) {
+    AssetEntry &e = kv.second;
+    if (!e.m || e.m->version == e.saved_version) continue;
+    if (fs::write_file(resolve_asset_path(kv.first), save_material_text(*e.m))) {
+      e.saved_version = e.m->version;
+      n++;
+    }
+  }
+  return n;
+}
+
+void relink_material_assets(Scene &scene, bool take_scene_values) {
+  auto &lib = asset_library();
+  scene.for_each([&](GameObject &g) {
+    auto *mr = g.get<MeshRenderer>();
+    if (!mr) return;
+    for (MaterialPtr &m : mr->materials) {
+      if (!m || m->asset_path.empty()) continue;
+      const std::string key = asset_key(m->asset_path);
+      auto it = lib.find(key);
+      if (it == lib.end()) {
+        MaterialPtr loaded = material_asset(key);  // from disk if it's there
+        if (!loaded) {
+          lib[key] = {m, 0};  // a missing file: this copy becomes the asset (saved on the next save)
+          continue;
+        }
+        it = lib.find(key);
+      }
+      MaterialPtr &shared = it->second.m;
+      if (shared != m) {
+        if (take_scene_values && shared->version != m->version) {
+          /* An undo / redo brought back other values: the asset takes them. */
+          const uint64_t v = std::max(shared->version, m->version) + 1;
+          *shared = *m;
+          shared->version = v;
+        }
+        m = shared;
+      }
+    }
+  });
+}
+
+void clear_material_assets() { asset_library().clear(); }
 
 bool scene_compression_available() {
 #ifdef BL_WITH_ZSTD

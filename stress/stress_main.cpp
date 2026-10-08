@@ -1716,6 +1716,34 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
       const Mesh copy = m;
       meshops::append_mesh(m, copy, Mat4::trs({s, 0, 0}, Quat::euler({0, 30, 0}), {-1, 1, 1}), {0, 1});
     });
+    /* This round's tools: Slice, Spin, Seams from Sharp, imprinting shapes and bent cuts. */
+    for (int axis = 0; axis < 3; axis++)
+      for (int clear = 0; clear < 3; clear++)
+        run("slice", [&](Mesh &m) {
+          Vec3 n(0.0f);
+          n[axis] = 1.0f;
+          meshops::slice(m, (bb.min + bb.max) * 0.5f + Vec3(0.013f, 0.017f, 0.011f) * s, n, clear);
+        });
+    run("slice, NaN plane", [&](Mesh &m) { meshops::slice(m, Vec3(nan), {0, 1, 0}, 0); });
+    for (float ang : {360.0f, 90.0f, -45.0f})
+      run("spin", [&](Mesh &m) {
+        std::vector<uint8_t> sel(m.vert_count(), 0);
+        for (size_t v = 0; v < sel.size(); v += 3) sel[v] = 1;
+        meshops::spin(m, sel, (bb.min + bb.max) * 0.5f, {0, 1, 0}, ang, 6);
+      });
+    run("seams from sharp", [&](Mesh &m) { meshops::seams_from_sharp(m, 30.0f); });
+    for (size_t f = 0; f < std::min<size_t>(base.face_count(), o.quick ? 3 : 8); f++)
+      run("imprint a square", [&](Mesh &m) {
+        const Vec3 c = m.face_center(f), n = normalize(m.face_normal(f));
+        Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), v = cross(n, u);
+        const float r = 0.02f * s;
+        meshops::imprint_loop(m, f, {c - u * r - v * r, c + u * r - v * r, c + u * r + v * r, c - u * r + v * r});
+      });
+    run("bent cut", [&](Mesh &m) {
+      if (!m.face_count() || m.face_size(0) < 4) return;
+      const uint32_t *fv = m.face_verts(0);
+      meshops::split_face_path(m, 0, fv[0], fv[2], {m.face_center(0)});
+    });
     run("separate loose parts", [&](Mesh &m) {
       std::vector<int> part;
       const size_t n = meshops::loose_parts(m, part);

@@ -645,6 +645,21 @@ bool scene_compression_available();
 std::vector<MeshPtr> import_obj(const std::string &text, std::string &error);
 std::string export_obj(const std::vector<std::pair<const Mesh *, Mat4>> &meshes);
 
+
+/* Material assets (.mat; Unity's Material asset, Blender's material datablock
+ * kept in a library): a text file of the Material's fields. Paths are
+ * project-relative (Assets/Materials/Red.mat). One shared instance per file. */
+std::string save_material_text(Material &m);
+bool load_material_text(const std::string &text, Material &m);
+MaterialPtr material_asset(const std::string &path);  // cached; null when the file is missing
+MaterialPtr create_material_asset(const Material &src, const std::string &path);  // writes it, returns the shared instance
+size_t save_dirty_material_assets();  // writes the assets changed since they were saved
+/* After undo / redo / load: every slot naming an asset uses the library's
+ * instance (taking the restored values), so assets stay shared. */
+/* take_scene_values: true after undo / redo (the restored values win), false after
+ * loading a scene (the .mat file wins, as in Unity). */
+void relink_material_assets(Scene &scene, bool take_scene_values);
+void clear_material_assets();  // a different project
 /* Change detection for modifier caches & undo grouping. */
 uint64_t hash_component(Component &c);
 /* Hash of every field a reflect function visits (settings change detection). */

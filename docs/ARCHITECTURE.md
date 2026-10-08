@@ -196,6 +196,20 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `ProceduralShape` (`scene/procedural.cpp`), `Editor::update_procedural_shapes` | Thirteen shapes built from their settings (grid boxes welded at the seams, lathed profiles, ring solids for pipes and arches, extruded side profiles for stairs and wedges), made safe first (finite, clamped). The editor rebuilds when the settings' hash changes and drops the component once the mesh's version moves on (an edit; copy-on-write clones keep the version) | ProBuilder Shapes; Add Mesh + Adjust Last Operation; Extra Objects |
 | `meshops::split_edge`, `split_face`, `coplanar_region`, `coplanar_edges`, `dissolve_limited`; `editor/knife.cpp` | N-gon Mode hides edges between coplanar faces and selects whole flat regions; Merge Coplanar dissolves those edges and the corners left on straight runs; the Knife splits a face between two points on its outline with endpoint / midpoint / on-edge inference | Limited Dissolve (`bmo_dissolve.cc`), the Knife (`editmesh_knife.cc`); SketchUp's faces and Line tool |
 
+## Material assets, drawing, UModeler tools, the pivot (phase 10)
+
+| Blendity | What it does | Blender / Unity equivalent |
+|---|---|---|
+| `Material::asset_path`, `material_asset`, `create_material_asset`, `save_dirty_material_assets`, `relink_material_assets` (`scene_io.cpp`) | `.mat` files hold a material's reflected fields. One shared instance per file; edits are written back after each finished change; scenes name the file (values kept as a fallback). Undo snapshots copy materials, so after undo / redo the restored values go into the shared instance and the slots point back at it; after loading, the file wins | Unity Material assets; Blender material datablocks |
+| `Editor::update_asset_drag`, `drop_asset`, `drop_slots_` / `drop_textures_` / `drop_rows_` | Dragging a `.mat` or an image out of the Project window. Inspector slots, texture fields and Hierarchy rows register their rectangles as they draw; the drop resolves after the frame. In the Scene view the object under the mouse (id buffer) and its face (ray cast) choose the slot | Unity drag and drop; Blender's Assign |
+| `remove_material_slot`, `remove_unused_material_slots` | Faces on a removed slot move to the one before; later slots shift down | Blender's Remove Material Slot / Remove Unused Slots |
+| `editor/draw_tool.cpp`, `meshops::imprint_loop`, `split_face_path` | Polyline, Rectangle, Circle, Arc (through three points), Polygon. The first click fixes the plane (the face's, else the ground's). Closed shapes inside a face are imprinted with the `annulus` ring builder; open lines cut faces between points on their outlines (edges split where needed), else become wire edges | UModeler / SketchUp drawing tools; Blender's Knife |
+| `meshops::follow`, `spin`, `slice` (`mesh_tools4.cpp`) | Follow: the face's corners carried along the path by parallel transport, mitred at bends by 1 / cos(half the turn). Spin: copies round an axis, quads between them, 360 degrees closes. Slice: vertices where edges cross the plane, faces cut between them, an optional side removed | UModeler Follow / Lathe / Slice; SketchUp Follow Me; Blender Spin and Bisect |
+| `meshops::sharp_edges_by_angle`, `seams_from_sharp` | Edges between faces meeting at more than the angle, edges marked sharp, and edges on three or more faces | Select Sharp Edges + Mark Seam |
+| `Editor::aim_light` | Shortest turn from +Z to the target, then a twist that levels the X axis; the range grows to reach | Track To / Point At; Unity `Transform.LookAt` |
+| Shift + gizmo drag (`gizmo_update`) | Extrude (faces, or edges / vertices) before the drag, so the handle moves, turns or scales the new geometry | Blender's E then G / S; ProBuilder / UModeler Shift-drag |
+| `pivot_center_` | Pivot by default (saved); Center now scales about the bounds centre as it rotates; G / R / S use the same point | Unity's Pivot / Center; Blender's Pivot Point |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

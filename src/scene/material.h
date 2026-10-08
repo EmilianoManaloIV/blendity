@@ -68,6 +68,9 @@ struct Material {
   bool unlit = false;   // Unity "Unlit" shader / Blender Emission-only
   bool cast_shadows = true;
   uint64_t version = 1;
+  /* Project-relative .mat file when this is a Material asset (Unity: a material in the
+   * Project window, shared by every renderer that uses it); empty for a scene material. */
+  std::string asset_path;
 
   void reflect(Reflector &r);
   void touch() { version++; }

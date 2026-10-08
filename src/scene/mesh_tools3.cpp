@@ -343,4 +343,102 @@ size_t dissolve_limited(Mesh &m, float angle_deg) {
   return removed;
 }
 
+
+/* ------------------------------------------------- Sharp edges and seams */
+
+std::vector<uint64_t> sharp_edges_by_angle(const Mesh &m, float angle_deg, bool include_marked) {
+  const float cos_limit = std::cos(clampf(angle_deg, 0.0f, 180.0f) * kDeg2Rad);
+  std::unordered_map<uint64_t, std::vector<uint32_t>> faces_of;
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (uint32_t k = 0; k < m.face_size(f); k++)
+      faces_of[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])].push_back((uint32_t)f);
+  std::vector<uint64_t> out;
+  for (auto &kv : faces_of) {
+    const auto &fs = kv.second;
+    bool sharp = include_marked && m.is_sharp((uint32_t)(kv.first >> 32), (uint32_t)(kv.first & 0xFFFFFFFF));
+    /* Two faces meeting at more than the angle (Blender: Select Sharp Edges);
+     * an edge on three or more faces is sharp too. */
+    if (!sharp && fs.size() == 2) sharp = dot(m.face_normal(fs[0]), m.face_normal(fs[1])) < cos_limit;
+    if (!sharp && fs.size() > 2) sharp = true;
+    if (sharp) out.push_back(kv.first);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+size_t seams_from_sharp(Mesh &m, float angle_deg, const std::vector<uint8_t> *face_mask) {
+  size_t n = 0;
+  for (uint64_t k : sharp_edges_by_angle(m, angle_deg, true)) {
+    const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+    if (face_mask) {
+      /* Only edges of the masked faces. */
+      bool in = false;
+      for (size_t f = 0; f < m.face_count() && !in; f++) {
+        if (f >= face_mask->size() || !(*face_mask)[f]) continue;
+        const uint32_t *v = m.face_verts(f);
+        for (uint32_t i = 0; i < m.face_size(f) && !in; i++) in = Mesh::edge_key(v[i], v[(i + 1) % m.face_size(f)]) == k;
+      }
+      if (!in) continue;
+    }
+    if (!m.is_seam(a, b)) {
+      m.set_seam(a, b, true);
+      n++;
+    }
+  }
+  if (n) m.touch();
+  return n;
+}
+
+/* A cut through face f from corner va to corner vb along new interior points
+ * (the knife / polyline with bends). Both halves keep the face's material,
+ * shading and (interpolated-free) UVs of the corners they keep. */
+bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vector<Vec3> &interior) {
+  if (interior.empty()) return split_face(m, f, va, vb);
+  if (f >= m.face_count() || va == vb) return false;
+  const uint32_t n = m.face_size(f);
+  int ia = -1, ib = -1;
+  for (uint32_t k = 0; k < n; k++) {
+    if (m.face_verts(f)[k] == va) ia = (int)k;
+    if (m.face_verts(f)[k] == vb) ib = (int)k;
+  }
+  if (ia < 0 || ib < 0) return false;
+  std::vector<uint32_t> mid;
+  for (const Vec3 &p : interior) mid.push_back(m.add_vert(p));
+  const std::vector<uint32_t> corners(m.face_verts(f), m.face_verts(f) + n);
+  const uint32_t base = m.face_offsets[f];
+  FaceBuilder fb(m);
+  for (size_t g = 0; g < m.face_count(); g++) {
+    if (g != f) {
+      fb.add(m.face_verts(g), m.face_size(g), fb.has_uv ? &m.uvs[m.face_offsets[g]] : nullptr, m.material_of(g), m.smooth_of(g));
+      continue;
+    }
+    /* va .. vb along the face, then back to va through the path (reversed);
+     * vb .. va along the face, then to vb through the path. */
+    for (int half = 0; half < 2; half++) {
+      std::vector<uint32_t> fv;
+      std::vector<Vec2> ft;
+      const int from = half ? ib : ia, to = half ? ia : ib;
+      for (int k = from;; k = (k + 1) % (int)n) {
+        fv.push_back(corners[(size_t)k]);
+        if (fb.has_uv) ft.push_back(m.uvs[base + (uint32_t)k]);
+        if (k == to) break;
+      }
+      if (half == 0)
+        for (size_t i = mid.size(); i-- > 0;) {
+          fv.push_back(mid[i]);
+          if (fb.has_uv) ft.push_back(ft.back());
+        }
+      else
+        for (uint32_t v : mid) {
+          fv.push_back(v);
+          if (fb.has_uv) ft.push_back(ft.back());
+        }
+      if (fv.size() >= 3) fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    }
+  }
+  fb.commit(m);
+  m.touch();
+  return true;
+}
+
 }  // namespace bl::meshops

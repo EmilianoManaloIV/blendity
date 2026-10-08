@@ -33,6 +33,8 @@
 
 namespace bl {
 
+extern const char *const kDrawShapes[5];  // draw_tool.cpp: Polyline, Rectangle, Circle, Arc, Polygon
+
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Count };
 const char *window_title(WindowKind k);
 ui::Icon window_icon(WindowKind k);
@@ -116,6 +118,7 @@ class Editor {
   void select_object(uint64_t id) { select(id); }
   void select_object_add(uint64_t id) { select(id, SEL_ADD); }  // Ctrl+click: the last one added is active
   bool origin_editing() const { return origin_edit_; }
+  bool pivot_is_center() const { return pivot_center_; }
   GameObject *selected_object() const { return active_object(); }
   void commit_change(const std::string &what) { mark_changed(what); }
 
@@ -372,6 +375,34 @@ class Editor {
   void mesh_op(const std::string &op);
   /* object_ops.cpp: Join (Ctrl+J), Boolean (0 Difference, 1 Union, 2 Intersect; apply = Bool Tool's
    * Auto, else a live modifier), Separate ("selection" in Edit Mode, "loose"). */
+  /* ---- Material assets and drag & drop (material_assets.cpp) ---- */
+  MaterialPtr new_material_asset(const MaterialPtr &src, bool replace_in_scene);  // Assets/Materials/<name>.mat
+  void assign_material(GameObject *g, int slot, const MaterialPtr &m);
+  void assign_material_to_face(GameObject *g, uint32_t face, const MaterialPtr &m);  // the face's slot (added if needed)
+  void remove_material_slot(GameObject *g, int slot);  // faces on it move to the slot before
+  size_t remove_unused_material_slots(GameObject *g);
+  /* Something dragged from the Project window: a .mat or an image. Drop targets
+   * register their rectangles while they draw; the drop is resolved after. */
+  struct AssetDrag {
+    bool pending = false, dragging = false;
+    std::string path;
+    int x = 0, y = 0;
+  } asset_drag_;
+  struct SlotTarget {
+    Recti r;
+    uint64_t object;
+    int slot;
+  };
+  struct TextureTarget {
+    Recti r;
+    TextureRef *tex;
+    Material *owner;
+  };
+  std::vector<SlotTarget> drop_slots_;
+  std::vector<TextureTarget> drop_textures_;
+  std::vector<std::pair<Recti, uint64_t>> drop_rows_;  // Hierarchy rows
+  void update_asset_drag();
+  bool drop_asset(const std::string &path, int mx, int my);
   void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
   void join_selected();
   void boolean_selected(int op, bool apply);
@@ -382,7 +413,8 @@ class Editor {
   bool origin_hover_ = false;  // the Inspector's Origin row is in use: the Scene view previews the new origin
   bool origin_target(const GameObject &g, int mode, Vec3 world_point, Vec3 &c) const;
   void draw_origins(const Recti &view);
-  uint64_t focus_pick_cam_ = 0;  // a Camera waiting for its focus point (eyedropper)
+  uint64_t focus_pick_cam_ = 0;  // a Camera waiting for its focus point, or a Light for its target (eyedroppers)
+  void aim_light(GameObject &g, Vec3 target);
   bool focus_pick_update(const Recti &view);
   bool raycast_scene(const Ray &ray, Vec3 &hit);
   /* Blender's Alt+click (loop) and Ctrl+Alt+click (ring) in Edit Mode: a click
@@ -445,7 +477,7 @@ class Editor {
 
   /* ---- tools ---- */
   Tool tool_ = Tool::Move;
-  bool pivot_center_ = true;
+  bool pivot_center_ = false;  // Pivot (the origin) by default, as Blender transforms one object about its origin
   bool space_local_ = false;
   bool snap_ = false;
   float snap_move_ = 0.25f, snap_rot_ = 15.0f, snap_scale_ = 0.1f;
@@ -533,6 +565,38 @@ class Editor {
   void knife_begin();
   bool knife_update(const Recti &view);
   void knife_draw(const Recti &view);
+  float spin_angle_ = 360.0f;  // Spin / Lathe
+  int spin_steps_ = 12, spin_axis_ = 1;
+  int slice_axis_ = 1;   // X, Y, Z, View
+  int slice_clear_ = 0;  // keep both, remove above, remove below
+  float seam_angle_ = 30.0f;  // Seams from Sharp Edges / Select Sharp Edges (Blender: Sharpness 30)
+  /* ---- Drawing tool: polyline, rectangle, circle, arc, polygon (draw_tool.cpp) ---- */
+  struct DrawTool {
+    bool active = false;
+    int shape = 0;  // kDrawShapes
+    std::vector<Vec3> pts;        // clicked points (world)
+    std::vector<KnifePoint> snaps;  // what each one snapped to (a corner / an edge, or not)
+    Vec3 plane_p, plane_n;
+    bool has_plane = false;
+    int face = -1;  // the face of the edited mesh the shape is drawn on (-1: the ground / free)
+  } draw_;
+  int draw_segments_ = 24, draw_sides_ = 6;
+  struct DrawHit {
+    bool ok = false;
+    Vec3 world;
+    const char *label = "";
+    uint32_t color = 0;
+    int face = -1;
+    KnifePoint snap;
+  };
+  DrawHit draw_hit(const Recti &view, int mx, int my);
+  void draw_begin(int shape);
+  bool draw_update(const Recti &view);
+  void draw_preview(const Recti &view);
+  std::vector<Vec3> draw_outline(Vec3 cursor, bool final_point, bool &closed) const;
+  void draw_commit(const std::vector<Vec3> &outline, bool closed);
+  void draw_add(Vec3 world, int face, int action);
+  void draw_point(Vec3 world, const std::string &mode);
   bool origin_edit_ = false;
   std::vector<std::pair<uint64_t, MeshPtr>> origin_mesh_starts_;
   std::vector<std::pair<uint64_t, Mat4>> origin_child_starts_;

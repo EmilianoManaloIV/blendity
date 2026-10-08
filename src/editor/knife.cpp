@@ -125,6 +125,7 @@ Editor::KnifePoint Editor::knife_hit(const Recti &view, int mx, int my) {
 
 void Editor::knife_begin() {
   if (!edit_mode_ || !edit_object()) return;
+  draw_.active = false;
   knife_ = KnifeState{};
   knife_.active = true;
   Log::info("Knife / Line: click a corner or an edge, then another on the same face to split it. Esc or Enter ends.");

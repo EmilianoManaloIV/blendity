@@ -1790,4 +1790,41 @@ void translate(Mesh &m, Vec3 offset) {
   m.touch();
 }
 
+/* Drawing a closed shape onto a face (SketchUp's Rectangle / Circle on a face,
+ * UModeler's drawing tools): the face gets a ring of faces around a new inner
+ * face, which can then be pushed or pulled. Points are in mesh space. */
+long imprint_loop(Mesh &m, size_t face, const std::vector<Vec3> &pts_in, std::string *error) {
+  auto fail = [&](const char *e) {
+    if (error) *error = e;
+    return -1L;
+  };
+  if (face >= m.face_count() || pts_in.size() < 3) return fail("a closed shape needs 3 or more points on a face");
+  const Vec3 n = normalize(m.face_normal(face));
+  const Vec3 p0 = m.positions[m.face_verts(face)[0]];
+  const std::vector<uint32_t> outer = face_loop(m, face);
+  const float eps = 1e-4f * std::max(1.0f, mesh_scale(m));
+  std::vector<Vec3> pts;
+  for (Vec3 p : pts_in) {
+    p -= n * dot(p - p0, n);  // onto the face's plane
+    if (!inside_loop(m, outer, p, n, eps)) return fail("the shape must lie inside the face it is drawn on");
+    pts.push_back(p);
+  }
+  const int mat = m.material_of(face);
+  const bool smooth = m.smooth_of(face);
+  std::vector<uint32_t> inner;
+  for (const Vec3 &p : pts) inner.push_back(m.add_vert(p));
+  std::vector<uint32_t> made;
+  annulus(m, outer, inner, n, mat, made);
+  if (dot(loop_newell(m, inner), n) < 0) std::reverse(inner.begin(), inner.end());
+  m.add_face(inner.data(), inner.size(), nullptr, mat);
+  if (!m.face_smooth.empty())
+    for (size_t f = m.face_count() - made.size() - 1; f < m.face_count(); f++) m.face_smooth[f] = smooth ? 1 : 0;
+  /* The old face goes; everything after it moves down one. */
+  std::vector<uint8_t> drop(m.face_count(), 0);
+  drop[face] = 1;
+  delete_faces(m, drop);
+  m.touch();
+  return (long)m.face_count() - 1;  // the new inner face
+}
+
 }  // namespace bl::meshops

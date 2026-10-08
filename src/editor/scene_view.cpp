@@ -51,6 +51,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (transform_update(view)) gizmo_busy = true;
   if (focus_pick_update(view)) gizmo_busy = true;
   if (knife_update(view)) gizmo_busy = true;
+  if (draw_update(view)) gizmo_busy = true;
 
   auto &in = u.in;
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
@@ -97,6 +98,7 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_scene_icons(view);
   draw_origins(view);
   knife_draw(view);
+  draw_preview(view);
   if (show_gizmos_) draw_gizmo(view);
   draw_pushpull(view);
   draw_modal(view);
@@ -595,6 +597,34 @@ bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
   return true;
 }
 
+/* Turns a light so its +Z (the way it shines) points at `target`, keeping its
+ * X horizontal (Unity's LookAt), and makes sure its range reaches. A point
+ * light has no direction: only the range changes. */
+void Editor::aim_light(GameObject &g, Vec3 target) {
+  Light *l = g.get<Light>();
+  if (!l) return;
+  const Vec3 pos = g.world_position();
+  const float dist = length(target - pos);
+  if (dist < 1e-5f) return;
+  const Vec3 d = (target - pos) / dist;
+  if (l->type != 1) {
+    /* Shortest turn from +Z to d, then a twist that levels the X axis. */
+    const Vec3 z(0, 0, 1);
+    Vec3 axis = cross(z, d);
+    Quat q1 = length(axis) > 1e-6f ? Quat::axis_angle(normalize(axis), std::acos(clampf(dot(z, d), -1.0f, 1.0f)))
+                                   : (dot(z, d) > 0 ? Quat() : Quat::axis_angle({0, 1, 0}, kPi));
+    Vec3 want = cross(Vec3(0, 1, 0), d);
+    if (length(want) < 1e-5f) want = cross(Vec3(1, 0, 0), d);  // straight up or down: any level X
+    want = normalize(want);
+    const Vec3 have = q1.rotate({1, 0, 0});
+    const float twist = std::atan2(dot(cross(have, want), d), dot(have, want));
+    g.set_world_rotation(normalize(Quat::axis_angle(d, twist) * q1));
+  }
+  if (l->type != 0 && l->range < dist * 1.25f) l->range = dist * 1.25f;  // directional lights have no range
+  Log::info("Aimed '%s' at the point %.2f m away", g.name.c_str(), dist);
+  mark_changed("Aim Light");
+}
+
 /* The Camera's focus eyedropper: the next click in the Scene view sets the
  * focus distance to that point's depth in front of the camera. */
 bool Editor::focus_pick_update(const Recti &view) {
@@ -603,9 +633,27 @@ bool Editor::focus_pick_update(const Recti &view) {
   auto &in = u.in;
   GameObject *g = scene_->find(focus_pick_cam_);
   Camera *cam = g ? g->get<Camera>() : nullptr;
-  if (!cam || in.key_pressed[platform::KEY_ESCAPE]) {
+  Light *light = g && !cam ? g->get<Light>() : nullptr;
+  if ((!cam && !light) || in.key_pressed[platform::KEY_ESCAPE]) {
     focus_pick_cam_ = 0;
     return false;
+  }
+  if (light) {
+    /* A light's eyedropper: aim it at the clicked point (Blender: a Track To
+     * constraint, or Light > Point At; Unity: Transform.LookAt). */
+    if (!scene_hovered_) return false;
+    u.cursor = Cursor::Hand;
+    if (!in.pressed[0]) return true;
+    u.consume_click();
+    Vec3 p;
+    const Ray r = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
+    if (!raycast_scene({r.origin, normalize(r.dir)}, p)) {
+      Log::warn("Aim Light: click on a surface");
+      return true;
+    }
+    aim_light(*g, p);
+    focus_pick_cam_ = 0;
+    return true;
   }
   if (!scene_hovered_) return false;
   u.cursor = Cursor::Hand;  // picking
@@ -1014,7 +1062,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1157,6 +1205,31 @@ bool Editor::gizmo_update(const Recti &view) {
     gizmo_live_scale_ = Vec3(1.0f);
     gizmo_starts_.clear();
     gizmo_vert_starts_.clear();
+    if (eo && in.shift()) {
+      /* Shift + drag: extrude first, then the handle moves, turns or scales the new
+       * geometry - scaling a face this way makes a new face inside it (an inset), as
+       * Blender's E then S does and ProBuilder / UModeler's Shift-drag. */
+      MeshPtr &mp = *edit_mesh_ptr();
+      Mesh &mm = *mesh_make_mutable(mp);
+      sync_vert_face_selection(elem_ == EditElement::Face);
+      bool made = false;
+      if (elem_ == EditElement::Face && std::count(face_sel_.begin(), face_sel_.end(), 1) > 0) {
+        meshops::extrude_faces(mm, face_sel_, 0.0f);
+        sync_vert_face_selection(true);
+        made = true;
+      }
+      else if (elem_ != EditElement::Face) {
+        const std::unordered_set<uint64_t> edges = edge_sel_;
+        meshops::EdgeSelectionScope scope(elem_ == EditElement::Edge ? &edges : nullptr);
+        made = meshops::extrude_verts_edges(mm, vert_sel_) > 0;
+        face_sel_.assign(mm.face_count(), 0);
+        if (elem_ == EditElement::Edge) edges_from_verts();
+      }
+      if (made) {
+        mm.touch();
+        mark_changed("Extrude (Shift + drag)");
+      }
+    }
     if (eo) {
       const Mesh &mm = **edit_mesh_ptr();
       for (size_t i = 0; i < mm.vert_count(); i++) gizmo_vert_starts_.push_back(eo->world_matrix().point(mm.positions[i]));
@@ -1300,7 +1373,7 @@ bool Editor::gizmo_update(const Recti &view) {
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) {
             g->set_local_scale(s.scale * f);
-            if (gizmo_starts_.size() > 1) {
+            if (gizmo_starts_.size() > 1 || pivot_center_) {  // around the gizmo, wherever it is
               Vec3 d = s.pos - pivot;
               Vec3 l{dot(d, axis[0]) * f.x, dot(d, axis[1]) * f.y, dot(d, axis[2]) * f.z};
               g->set_world_position(pivot + axis[0] * l.x + axis[1] * l.y + axis[2] * l.z);
@@ -1726,6 +1799,89 @@ void Editor::edit_op(const std::string &op) {
   else if (op == "fuse") {
     if (!try_auto_fuse(m)) { Log::warn("Fuse: the selected faces don't lie on another face of the mesh"); return; }
   }
+  else if (op == "spin") {
+    static const Vec3 kAx[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const size_t n = meshops::spin(m, vert_sel_, Vec3(0.0f), kAx[std::max(0, std::min(spin_axis_, 2))], spin_angle_, std::max(1, spin_steps_));
+    if (!n) {
+      Log::warn("Spin: select edges or vertices first (a profile; the object's origin is the centre)");
+      return;
+    }
+    face_sel_.assign(m.face_count(), 0);
+    if (elem_ == EditElement::Edge) edges_from_verts();
+    Log::info("Spin: %.0f degrees in %d steps", spin_angle_, spin_steps_);
+  }
+  else if (op == "follow") {
+    size_t face = SIZE_MAX;
+    for (size_t f = 0; f < face_sel_.size() && face == SIZE_MAX; f++)
+      if (face_sel_[f]) face = f;
+    std::string err;
+    if (face == SIZE_MAX || !meshops::follow(m, face, &err)) {
+      Log::warn("Follow: %s", face == SIZE_MAX ? "select the face to sweep (and draw its path as wire edges)" : err.c_str());
+      return;
+    }
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    Log::info("Follow: swept along the path");
+  }
+  else if (op == "slice") {
+    /* Through the selection's centre (else the origin), across the chosen axis or the view. */
+    Vec3 c(0.0f);
+    int k = 0;
+    for (size_t v = 0; v < vert_sel_.size() && v < m.vert_count(); v++)
+      if (vert_sel_[v]) c += m.positions[v], k++;
+    if (k) c = c / (float)k;
+    static const Vec3 kAx[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const Vec3 n = slice_axis_ < 3 ? kAx[slice_axis_] : g->world_matrix().inverse().dir(cam_.forward());
+    const size_t n_cut = meshops::slice(m, c, n, slice_clear_);
+    if (!n_cut && !slice_clear_) {
+      Log::warn("Slice: the plane doesn't cross the mesh");
+      return;
+    }
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    edge_sel_.clear();
+    Log::info("Slice: %zu cut(s)", n_cut);
+  }
+  else if (op == "select_similar_normal" || op == "select_similar_area" || op == "select_by_material") {
+    std::vector<size_t> sel;
+    for (size_t f = 0; f < face_sel_.size() && f < m.face_count(); f++)
+      if (face_sel_[f]) sel.push_back(f);
+    if (sel.empty()) {
+      Log::warn("Select a face first");
+      return;
+    }
+    auto area = [&](size_t f) {  /* half the Newell vector's length */
+      Vec3 s(0.0f);
+      const uint32_t *v = m.face_verts(f);
+      for (uint32_t i = 0; i < m.face_size(f); i++) s += cross(m.positions[v[i]], m.positions[v[(i + 1) % m.face_size(f)]]);
+      return 0.5f * length(s);
+    };
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (size_t s : sel) {
+        bool same = false;
+        if (op == "select_similar_normal") same = dot(m.face_normal(f), m.face_normal(s)) > std::cos(5.0f * kDeg2Rad);
+        else if (op == "select_similar_area") {
+          const float a = area(f), b = area(s);
+          same = std::fabs(a - b) <= 0.05f * std::max(a, b) + 1e-9f;
+        }
+        else same = m.material_of(f) == m.material_of(s);
+        if (same) {
+          face_sel_[f] = 1;
+          break;
+        }
+      }
+    sync_vert_face_selection(true);
+    return;
+  }
+  else if (op == "select_sharp") {
+    /* Blender's Select Sharp Edges: switches to edge mode with them selected. */
+    if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
+    edge_sel_.clear();
+    for (uint64_t k : meshops::sharp_edges_by_angle(m, seam_angle_, true)) edge_sel_.insert(k);
+    verts_from_edges();
+    Log::info("Selected %zu sharp edge(s) (> %.0f deg)", edge_sel_.size(), seam_angle_);
+    return;
+  }
   else if (op == "dissolve_limited") {
     const size_t n = meshops::dissolve_limited(m, kNgonAngle);
     if (!n) {
@@ -1930,6 +2086,19 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"collapse", "Collapse", "", "Merge each selected edge (or connected group) into one vertex at its centre. Blender: Collapse.", E},
       {"mark_seam", "Mark Seam", "", "UV unwrapping cuts the mesh along these edges. Blender: Mark Seam.", E},
       {"clear_seam", "Clear Seam", "", "Remove UV seams from the selected edges.", E},
+      {"spin", "Spin / Lathe", "", "Turn the selected edges (or vertices) round the object's axis into a surface of revolution.\n"
+       "UModeler: Lathe. Blender: Spin.", V | E},
+      {"follow", "Follow", "", "Sweep the selected face along a path of wire edges that starts at it (draw the path with the Polyline tool).\n"
+       "UModeler: Follow. SketchUp: Follow Me.", F},
+      {"select_similar_normal", "Similar Normal", "", "Select the faces facing the same way as the selected ones. Blender: Select Similar > Normal.", F},
+      {"select_similar_area", "Similar Area", "", "Select the faces of about the same area. Blender: Select Similar > Area.", F},
+      {"select_by_material", "Same Material", "", "Select every face using the selected faces' material slots. Blender: Material > Select.", F},
+      {"seams_from_sharp", "Seams from Sharp", "", "Mark a seam on every sharp edge: faces meeting at more than the Sharp Angle, or edges marked sharp.\n"
+       "Blender: Select Sharp Edges, then Mark Seam.", E},
+      {"slice", "Slice", "", "Cut the mesh with a plane through the selection (or the origin) across the Slice Axis.\n"
+       "UModeler: Slice. Blender: Bisect.", ALL},
+      {"select_sharp", "Select Sharp Edges", "", "Select the edges whose faces meet at more than the Sharp Angle (and edges marked sharp).\n"
+       "Blender: Select > Select Sharp Edges.", ALL},
       {"mark_sharp", "Mark Sharp", "", "Smooth shading stops at these edges (a hard edge). Blender: Edge > Mark Sharp.", E},
       {"clear_sharp", "Clear Sharp", "", "Let smooth shading run across the selected edges again.", E},
       {"edge_split", "Edge Split", "", "Disconnect the faces along the selected edges (hard edges, or to pull pieces apart). Blender: Edge Split.", E},
@@ -1996,7 +2165,7 @@ void Editor::edit_tool(const std::string &op) {
   if (op == "push_pull") pushpull_begin();
   else if (op == "origin_to_selection") set_origin(6);
   else if (op == "knife") knife_begin();
-  else if (op == "mark_seam" || op == "clear_seam") uv_op(op);
+  else if (op == "mark_seam" || op == "clear_seam" || op == "seams_from_sharp") uv_op(op);
   else if (op == "mark_sharp" || op == "clear_sharp" || op == "shade_smooth" || op == "shade_flat") mesh_op(op);
   else edit_op(op);
 }

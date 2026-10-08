@@ -75,6 +75,10 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Set Origin could only use fixed points (or Edit Mode's selection, hidden in a menu). | Edit Origin with Handles: the gizmo moves the origin alone, and a click snaps it to a vertex, edge midpoint or face centre. Edit Mode has Origin to Selection as a button. |
 | Modifiers were scattered among the components, with only an on/off switch. | One Blender-style modifier stack with Edit Mode / Viewport / Render toggles, Apply per modifier, Duplicate, Copy to Selected and reordering. |
 | A shape could only start from a primitive: there was no way to extrude a vertex or an edge. | E / Ctrl+E in vertex and edge mode, with wire edges as in Blender. |
+| A new origin didn't act as the transform point: the gizmo sat at the bounds centre (the toolbar defaulted to Center) and scaling used the origin anyway. | Pivot (the origin) is the default and remembered; Center uses the bounds for the gizmo, rotation and scale alike, and so do G / R / S. |
+| Materials lived only inside objects; reusing one meant picking it from a list per slot. | Material assets (.mat) dragged from the Project window onto objects, faces, Hierarchy rows or slots, as in Unity. |
+| Only the last material slot could be removed. | An x on every slot, and Remove Unused Slots. |
+| Shapes could only come from primitives or extrusion. | Draw polylines, rectangles, circles, arcs and polygons onto faces (cut into them) or the ground (new faces), with SketchUp-style snapping. |
 
 ## Still worth doing
 

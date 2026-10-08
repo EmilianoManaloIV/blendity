@@ -386,6 +386,8 @@ Far-away surfaces cover many texels per pixel. Sampling only one texel then flic
 > [FoCG] 11.3 Antialiasing Texture Lookups, 11.4 Applications of Texture Mapping, 11.5 Procedural 3D Textures
 > [FoCG] 18.2 Color Spaces
 > [GEA2] 11.3 Foundations of 3D Rendering (textures, materials)
+# Materials as assets
+In Unity a material is a file in the Project window that many objects share; change it once and they all change. Blendity works the same way: Assets > Create Material (or a slot's Save as Material Asset) writes a .mat file in Assets/Materials. Drag it onto an object, a face, a Hierarchy row or a slot; drag an image onto a texture field. Blender keeps materials as datablocks that objects link to, which is the same idea inside one .blend file.
 @ blender/source/blender/nodes/shader/nodes/node_shader_bsdf_principled.cc
 @ blender/intern/cycles/kernel/svm/checker.h, noise.h
 # Getting textures in
@@ -572,7 +574,12 @@ Join (Ctrl+J) puts several meshes into one object; they still don't touch. A Boo
 @ blender/source/blender/geometry/intern/mesh_boolean_manifold.cc
 ? Why does a Boolean need closed meshes? | It has to know which side of every face is inside the solid. With a hole in the mesh, "inside" isn't defined.
 ? You join a cube and a sphere that overlap. How many objects, and do their surfaces merge? | One object, but the two surfaces still pass through each other; only a Boolean Union merges them.
+# Drawing onto faces
+SketchUp and UModeler build models by drawing: a rectangle drawn on a face splits off a new face you can Push/Pull, a line across a face cuts it in two, and a profile pushed along a path (Follow) makes mouldings and pipes. Blendity's Draw tools do the same, snapping to corners (green), midpoints (cyan), edges (red) and faces (blue). Draw a polyline on the ground for a path, select a face and use Follow; or draw half a vase outline and Spin it.
+@ blender/source/blender/editors/mesh/editmesh_bisect.cc
+? You draw a rectangle inside the top face of a cube. How many faces does the cube have now, and why? | 10: the top face becomes a ring of 4 faces around the new inner face, because a face here can't have a hole in it.
 ! cmd:create Shape: Stairs | Create parametric Stairs (change Steps in the Inspector)
+! cmd:select Cube; edit face; draw rectangle | Draw a rectangle onto the Cube (click two corners on a face, then press P to Push/Pull it)
 ! cmd:select Sphere; selectadd Cube; boolean difference modifier | Cut the Sphere out of the Cube as a live Boolean modifier
 ! cmd:create Shape: Box; edit face; ngon on | A Box in Edit Mode with N-gon Mode on
 )"},
