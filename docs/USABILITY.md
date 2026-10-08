@@ -85,6 +85,13 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Placing one object on another meant nudging it by eye. | Ctrl+Shift while moving (or dragging from the Hierarchy) drops it onto the surface; V snaps vertex to vertex, as in Unity. |
 | Framing a shot meant moving the camera by numbers and checking the preview. | Pilot Camera: fly the Scene view and the camera follows, Ctrl+wheel sets its FOV, with a frame and thirds guides. |
 | The modeling tools were only in the Inspector of a selected object. | The Modeling Tools window holds them all, including creating and drawing with nothing selected. |
+| A circle drawn over several faces became a separate face lying on top of them. | It is cut into every face it covers; the pieces inside come out selected for Push/Pull. |
+| Piloting a camera narrower than the view showed the wrong frame, and moving the camera from the Inspector was undone by the view. | The frame is exactly the camera's view, and changes made elsewhere move the view with the camera. |
+| Assets lived in flat folders and couldn't be moved, renamed or deleted from the editor; renaming a material left its file's old name. | Unity's Project window: folders, drag to move, F2, Delete to the Recycle Bin / Trash, and the name is the file name. |
+| Faces took materials by slot number. | The Face Material field picks the material itself from preview spheres. |
+| Rectangles only went corner to corner and circles only from the centre. | Plasticity's centre / 3-point rectangles (optionally square) and 2- / 3-point circles. |
+| Nothing to line drawings up with except existing edges and the axes. | Guide lines (drawn, or from edges) with snapping to their crossings and along them. |
+| Every mouse move drew a frame, with no way to limit the cost. | A frame rate cap and redraw mode in Preferences, with the measured cost and what each setting trades. |
 
 ## Still worth doing
 

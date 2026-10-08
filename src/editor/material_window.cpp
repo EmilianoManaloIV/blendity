@@ -94,11 +94,9 @@ void Editor::draw_materials_window(const Recti &r) {
   };
   std::vector<Entry> list;
   std::unordered_set<const Material *> seen;
-  const std::string dir = fs::join(assets_dir_, "Materials");
-  for (const DirEntry &de : fs::list(dir))
-    if (!de.is_dir && fs::extension(de.name) == ".mat")
-      if (MaterialPtr m = material_asset("Assets/Materials/" + de.name))
-        if (seen.insert(m.get()).second) list.push_back({m, 0});
+  for (const std::string &path : material_asset_paths())
+    if (MaterialPtr m = material_asset(path))
+      if (seen.insert(m.get()).second) list.push_back({m, 0});
   for (const MaterialPtr &m : scene_materials())
     if (seen.insert(m.get()).second) list.push_back({m, 0});
   scene_->for_each([&](GameObject &g) {
@@ -196,6 +194,87 @@ void Editor::draw_materials_window(const Recti &r) {
   u.pop_id();
   content_h = lay.y + eoff - ed.y + u.px(20);
   u.end_scroll();
+}
+
+/* Everything a face or slot can use: the object's own slots first, then the
+ * material assets (every folder), then the scene's other materials. */
+std::vector<MaterialPtr> Editor::pickable_materials(GameObject *g) {
+  std::vector<MaterialPtr> out;
+  std::unordered_set<const Material *> seen;
+  auto add = [&](const MaterialPtr &m) {
+    if (m && seen.insert(m.get()).second) out.push_back(m);
+  };
+  if (g)
+    if (auto *mr = g->get<MeshRenderer>())
+      for (auto &m : mr->materials) add(m);
+  for (const std::string &path : material_asset_paths()) add(material_asset(path));
+  for (const MaterialPtr &m : scene_materials()) add(m);
+  return out;
+}
+
+bool Editor::assign_material_to_selected_faces(const MaterialPtr &m) {
+  GameObject *g = edit_object();
+  if (!g || !m) return false;
+  for (size_t f = 0; f < face_sel_.size(); f++)
+    if (face_sel_[f]) {
+      assign_material_to_face(g, (uint32_t)f, m);  // all selected faces, through a selected one
+      return true;
+    }
+  Log::warn("Select faces first (press 3 for face mode)");
+  return false;
+}
+
+/* A popup grid of material previews (Unity's object picker for materials):
+ * the materials themselves, not slot numbers. */
+void Editor::material_picker_popup(ui::Id pid, GameObject *g, std::function<void(const MaterialPtr &)> pick) {
+  auto &u = ui_;
+  u.popup(pid, u.px(380), [this, g, pick] {
+    auto &u = ui_;
+    Recti sr = u.popup_row(u.row_h() + u.px(6));
+    u.text_field(u.id("matpick_search"), {sr.x + u.px(6), sr.y + u.px(3), sr.w - u.px(12), sr.h - u.px(6)}, material_pick_search_, nullptr,
+                 "Search materials");
+    const std::string f = to_lower(material_pick_search_);
+    std::vector<MaterialPtr> list = pickable_materials(g);
+    list.erase(std::remove_if(list.begin(), list.end(), [&](const MaterialPtr &m) { return !f.empty() && to_lower(m->name).find(f) == std::string::npos; }),
+               list.end());
+    std::vector<MaterialPtr> slots;
+    if (g)
+      if (auto *mr = g->get<MeshRenderer>()) slots = mr->materials;
+    const int tile = u.px(64), pad = u.px(6);
+    const int cols = 5;
+    for (size_t i = 0; i < list.size(); i += cols) {
+      Recti row = u.popup_row(tile + u.row_h() + pad);
+      for (size_t k = i; k < std::min(list.size(), i + cols); k++) {
+        const MaterialPtr &m = list[k];
+        Recti cell{row.x + pad + (int)(k - i) * (tile + pad), row.y + pad / 2, tile, tile + u.row_h()};
+        const bool hot = u.hovered(cell);
+        if (hot) u.canvas.fill_round_rect(cell, u.px(4), Color::hex(0x4A4A4A));
+        blit(u, material_preview(*m, tile - u.px(6)), {cell.x + u.px(3), cell.y + u.px(3), tile - u.px(6), tile - u.px(6)});
+        u.label({cell.x, cell.y + tile, cell.w, u.row_h()}, m->name, u.theme.text, ui::Align::Center);
+        int slot = -1;
+        for (size_t s = 0; s < slots.size(); s++)
+          if (slots[s] == m && slot < 0) slot = (int)s;
+        if (slot >= 0) u.canvas.text(u.font, cell.x + u.px(4), cell.y + u.px(2), strprintf("%d", slot), u.theme.text_bright);
+        else if (!m->asset_path.empty()) u.draw_icon(Icon::File, {cell.x + u.px(4), cell.y + u.px(4), u.px(12), u.px(12)}, u.theme.accent);
+        u.tooltip(m->name + (slot >= 0 ? strprintf("  (slot %d of this object)", slot) : m->asset_path.empty() ? "  (scene material)" : "  (" + m->asset_path + ")"));
+        if (hot && u.in.pressed[0]) {
+          pick(m);
+          u.close_popups();
+          u.consume_click();
+          return;
+        }
+      }
+    }
+    if (list.empty()) {
+      Recti r = u.popup_row();
+      u.label(r, "No materials match.", u.theme.text_dim, ui::Align::Center);
+    }
+    Recti b = u.popup_row(u.row_h() + u.px(6));
+    if (u.button({b.x + u.px(6), b.y + u.px(3), b.w - u.px(12), b.h - u.px(6)}, "New Material Asset", false, Icon::Plus)) {
+      if (MaterialPtr m = new_material_asset(nullptr, false)) pick(m);
+      u.close_popups();
+    }
+  });
 }
 
 }  // namespace bl

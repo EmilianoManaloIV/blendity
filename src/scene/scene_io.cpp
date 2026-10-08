@@ -8,6 +8,7 @@
 #include "../core/core.h"
 #include "../../extern/fast_float/fast_float.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -231,6 +232,9 @@ std::string save_scene_text(const Scene &scene) {
   os << "environment " << fmt(e.sky.x) << " " << fmt(e.sky.y) << " " << fmt(e.sky.z) << " " << fmt(e.equator.x) << " "
      << fmt(e.equator.y) << " " << fmt(e.equator.z) << " " << fmt(e.ground.x) << " " << fmt(e.ground.y) << " "
      << fmt(e.ground.z) << "\n";
+  for (const GuideLine &gl : scene.guides)
+    os << "guide " << fmt(gl.p.x) << " " << fmt(gl.p.y) << " " << fmt(gl.p.z) << " " << fmt(gl.d.x) << " " << fmt(gl.d.y) << " " << fmt(gl.d.z)
+       << "\n";
   /* Meshes first (shared between objects, like Blender's ID datablocks). */
   std::unordered_map<const Mesh *, int> mesh_ids;
   std::vector<const Mesh *> order;
@@ -416,6 +420,15 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       fresh.environment.equator = {f(4), f(5), f(6)};
       fresh.environment.ground = {f(7), f(8), f(9)};
     }
+    else if (k == "guide" && t.size() >= 7) {
+      auto f = [&](int i) { return std::strtof(t[i].c_str(), nullptr); };
+      GuideLine gl{{f(1), f(2), f(3)}, {f(4), f(5), f(6)}};
+      const float l = length(gl.d);
+      if (l > 1e-9f && std::isfinite(l) && std::isfinite(gl.p.x + gl.p.y + gl.p.z)) {
+        gl.d = gl.d / l;
+        fresh.guides.push_back(gl);
+      }
+    }
     else if (k == "mesh" && t.size() >= 6) {
       auto m = std::make_shared<Mesh>();
       int id = std::atoi(t[1].c_str());
@@ -588,11 +601,30 @@ std::string asset_key(const std::string &path) {
     if (c == '\\') c = '/';
   return k;
 }
+/* Assets moved, renamed or deleted this session (to "" when deleted): an undo
+ * can bring back a material with the old path, which must follow the file
+ * rather than recreate it where it was. */
+std::vector<std::pair<std::string, std::string>> &asset_redirects() {
+  static std::vector<std::pair<std::string, std::string>> r;
+  return r;
+}
+bool path_under(const std::string &path, const std::string &prefix) {
+  return path == prefix || (path.size() > prefix.size() && path.compare(0, prefix.size(), prefix) == 0 && path[prefix.size()] == '/');
+}
+std::string follow_redirects(std::string key) {
+  for (const auto &r : asset_redirects())
+    if (path_under(key, r.first)) {
+      if (r.second.empty()) return std::string();
+      key = r.second + key.substr(r.first.size());
+    }
+  return key;
+}
 }  // namespace
 
 MaterialPtr material_asset(const std::string &path_in) {
   if (path_in.empty()) return nullptr;
-  const std::string path = asset_key(path_in);
+  const std::string path = follow_redirects(asset_key(path_in));
+  if (path.empty()) return nullptr;
   auto &lib = asset_library();
   auto it = lib.find(path);
   if (it != lib.end()) return it->second.m;
@@ -601,6 +633,7 @@ MaterialPtr material_asset(const std::string &path_in) {
   auto m = std::make_shared<Material>();
   m->name = fs::stem(path);
   if (!load_material_text(text, *m)) return nullptr;
+  m->name = fs::stem(path);  // Unity: the file's name is the material's name (a copied file keeps the old one inside)
   m->asset_path = path;
   lib[path] = {m, m->version};
   return m;
@@ -638,7 +671,12 @@ void relink_material_assets(Scene &scene, bool take_scene_values) {
     if (!mr) return;
     for (MaterialPtr &m : mr->materials) {
       if (!m || m->asset_path.empty()) continue;
-      const std::string key = asset_key(m->asset_path);
+      const std::string key = follow_redirects(asset_key(m->asset_path));
+      if (key.empty()) {  // its file was deleted: a scene material now
+        m->asset_path.clear();
+        continue;
+      }
+      m->asset_path = key;
       auto it = lib.find(key);
       if (it == lib.end()) {
         MaterialPtr loaded = material_asset(key);  // from disk if it's there
@@ -662,7 +700,57 @@ void relink_material_assets(Scene &scene, bool take_scene_values) {
   });
 }
 
-void clear_material_assets() { asset_library().clear(); }
+void clear_material_assets() {
+  asset_library().clear();
+  asset_redirects().clear();
+}
+
+std::vector<std::pair<std::string, MaterialPtr>> loaded_material_assets() {
+  std::vector<std::pair<std::string, MaterialPtr>> out;
+  for (auto &kv : asset_library())
+    if (kv.second.m) out.push_back({kv.first, kv.second.m});
+  std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  return out;
+}
+
+size_t retarget_material_assets(const std::string &from_in, const std::string &to_in) {
+  const std::string from = asset_key(from_in), to = asset_key(to_in);
+  if (from.empty() || from == to) return 0;
+  auto &lib = asset_library();
+  asset_redirects().push_back({from, to});
+  std::vector<std::pair<std::string, AssetEntry>> moved;
+  for (auto it = lib.begin(); it != lib.end();) {
+    if (path_under(it->first, from)) {
+      moved.push_back({to + it->first.substr(from.size()), it->second});
+      it = lib.erase(it);
+    }
+    else ++it;
+  }
+  for (auto &kv : moved) {
+    if (kv.second.m) {
+      kv.second.m->asset_path = kv.first;
+      if (fs::extension(kv.first) == ".mat") kv.second.m->name = fs::stem(kv.first);  // Unity: the file name is the name
+    }
+    lib[kv.first] = kv.second;
+  }
+  return moved.size();
+}
+
+size_t forget_material_assets(const std::string &path_in) {
+  const std::string path = asset_key(path_in);
+  auto &lib = asset_library();
+  asset_redirects().push_back({path, std::string()});
+  size_t n = 0;
+  for (auto it = lib.begin(); it != lib.end();) {
+    if (path_under(it->first, path)) {
+      if (it->second.m) it->second.m->asset_path.clear();
+      it = lib.erase(it);
+      n++;
+    }
+    else ++it;
+  }
+  return n;
+}
 
 bool scene_compression_available() {
 #ifdef BL_WITH_ZSTD
@@ -688,14 +776,13 @@ bool save_scene(const Scene &scene, const std::string &path) {
   return fs::write_file(path, text);
 }
 
-bool load_scene(const std::string &path, Scene &scene, std::string &error) {
-  std::string text;
+static bool read_scene_file(const std::string &path, std::string &text, bool &compressed, std::string &error) {
   if (!fs::read_file(path, text)) {
     error = "Cannot read " + path;
     return false;
   }
   /* Zstandard frame magic 28 B5 2F FD: a compressed scene. */
-  const bool compressed = text.size() >= 4 && (uint8_t)text[0] == 0x28 && (uint8_t)text[1] == 0xB5 && (uint8_t)text[2] == 0x2F &&
+  compressed = text.size() >= 4 && (uint8_t)text[0] == 0x28 && (uint8_t)text[1] == 0xB5 && (uint8_t)text[2] == 0x2F &&
                           (uint8_t)text[3] == 0xFD;
   if (compressed) {
 #ifdef BL_WITH_ZSTD
@@ -717,10 +804,56 @@ bool load_scene(const std::string &path, Scene &scene, std::string &error) {
     return false;
 #endif
   }
+  return true;
+}
+
+bool load_scene(const std::string &path, Scene &scene, std::string &error) {
+  std::string text;
+  bool compressed = false;
+  if (!read_scene_file(path, text, compressed, error)) return false;
   if (!load_scene_text(text, scene, error)) return false;
   scene.path = path;
   scene.compress = compressed;  // keep saving it the way it was (Blender does too)
   return true;
+}
+
+size_t retarget_scene_files(const std::string &dir, const std::string &from_in, const std::string &to_in) {
+  const std::string from = asset_key(from_in), to = asset_key(to_in);
+  if (from.empty() || from == to) return 0;
+  size_t changed = 0;
+  for (const DirEntry &de : fs::list(dir)) {
+    const std::string p = fs::join(dir, de.name);
+    if (de.is_dir) {
+      changed += retarget_scene_files(p, from, to);
+      continue;
+    }
+    if (fs::extension(de.name) != ".scene") continue;
+    std::string text, err;
+    bool compressed = false;
+    if (!read_scene_file(p, text, compressed, err)) continue;
+    /* "from" exactly, or "from/..." for a folder; written quoted by save_scene_text. */
+    const std::string a = quote(from), b = quote(to);
+    const std::string fa = a.substr(0, a.size() - 1) + "/", fb = b.substr(0, b.size() - 1) + "/";
+    size_t n = 0;
+    for (const auto &rep : {std::make_pair(a, b), std::make_pair(fa, fb)})
+      for (size_t at = text.find(rep.first); at != std::string::npos; at = text.find(rep.first, at + rep.second.size())) {
+        text.replace(at, rep.first.size(), rep.second);
+        n++;
+      }
+    if (!n) continue;
+    std::string out = text;
+#ifdef BL_WITH_ZSTD
+    if (compressed) {
+      std::string packed(ZSTD_compressBound(text.size()), '\0');
+      const size_t k = ZSTD_compress(packed.data(), packed.size(), text.data(), text.size(), 3);
+      if (ZSTD_isError(k)) continue;
+      packed.resize(k);
+      out.swap(packed);
+    }
+#endif
+    if (fs::write_file(p, out)) changed++;
+  }
+  return changed;
 }
 
 /* ---------------------------------------------------------------- OBJ */

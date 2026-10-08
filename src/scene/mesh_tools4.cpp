@@ -323,4 +323,197 @@ std::vector<Vec3> fillet_polygon(const std::vector<Vec3> &pts, bool closed, floa
   return out;
 }
 
+
+/* A closed shape drawn across several coplanar faces (a circle over a grid of
+ * quads, SketchUp's drawing over existing edges): where the shape crosses an
+ * edge that edge gets a vertex, then each piece of the shape between two such
+ * vertices splits the face it runs through. The faces enclosed by the shape
+ * come back (to select for Push/Pull). Pieces outside every face become wire
+ * edges. Points in mesh space; -1 when no face in the plane is touched. */
+long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop_in, Vec3 n, std::vector<size_t> *inner_faces, std::string *error) {
+  auto fail = [&](const char *e) {
+    if (error) *error = e;
+    return -1L;
+  };
+  if (inner_faces) inner_faces->clear();
+  if (loop_in.size() < 3 || length(n) < 1e-9f) return fail("a closed shape needs 3 or more points");
+  n = normalize(n);
+  const Vec3 p0 = loop_in[0];
+  const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+  auto on_plane = [&](Vec3 p) { return std::fabs(dot(p - p0, n)) < eps; };
+  std::vector<Vec3> loop;
+  for (Vec3 p : loop_in) loop.push_back(p - n * dot(p - p0, n));
+  /* The faces lying in the plane. */
+  auto in_plane = [&](size_t f) {
+    if (std::fabs(dot(normalize(m.face_normal(f)), n)) < 0.9999f) return false;
+    for (uint32_t k = 0; k < m.face_size(f); k++)
+      if (!on_plane(m.positions[m.face_verts(f)[k]])) return false;
+    return true;
+  };
+  bool any = false;
+  for (size_t f = 0; f < m.face_count() && !any; f++) any = in_plane(f);
+  if (!any) return fail("no face lies in the shape's plane");
+  const Vec3 ax = std::fabs(n.y) < 0.9f ? normalize(cross(Vec3(0, 1, 0), n)) : normalize(cross(Vec3(1, 0, 0), n));
+  const Vec3 ay = cross(n, ax);
+  auto flat = [&](Vec3 p) { return Vec2(dot(p - p0, ax), dot(p - p0, ay)); };
+  /* Edges of in-plane faces, as they are now. */
+  auto plane_edges = [&]() {
+    std::vector<std::pair<uint32_t, uint32_t>> es;
+    std::unordered_map<uint64_t, int> seen;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (!in_plane(f)) continue;
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        const uint32_t a = m.face_verts(f)[k], b = m.face_verts(f)[(k + 1) % m.face_size(f)];
+        if (seen.emplace(Mesh::edge_key(a, b), 1).second) es.push_back({a, b});
+      }
+    }
+    return es;
+  };
+  /* 1. The shape's points plus every crossing with an edge, in order. */
+  const auto edges0 = plane_edges();
+  std::vector<Vec3> nodes;
+  for (size_t i = 0; i < loop.size(); i++) {
+    const Vec3 a = loop[i], b = loop[(i + 1) % loop.size()];
+    if (nodes.empty() || length(a - nodes.back()) > eps) nodes.push_back(a);
+    const Vec2 a2 = flat(a), d2 = flat(b) - a2;
+    std::vector<std::pair<float, Vec3>> hits;
+    for (auto &e : edges0) {
+      const Vec2 c2 = flat(m.positions[e.first]), e2 = flat(m.positions[e.second]) - c2;
+      const float den = d2.x * e2.y - d2.y * e2.x;
+      if (std::fabs(den) < 1e-12f) continue;  // parallel: along an edge or apart
+      const Vec2 w = c2 - a2;
+      const float s = (w.x * e2.y - w.y * e2.x) / den, t = (w.x * d2.y - w.y * d2.x) / den;
+      if (s <= 1e-5f || s >= 1.0f - 1e-5f || t < -1e-5f || t > 1.0f + 1e-5f) continue;
+      hits.push_back({s, lerp(m.positions[e.first], m.positions[e.second], clampf(t, 0.0f, 1.0f))});
+    }
+    std::sort(hits.begin(), hits.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
+    for (auto &h : hits)
+      if (length(h.second - nodes.back()) > eps && length(h.second - b) > eps) nodes.push_back(h.second);
+  }
+  if (nodes.size() > 1 && length(nodes.back() - nodes.front()) < eps) nodes.pop_back();
+  if (nodes.size() < 3) return fail("the shape is too small");
+  /* 2. Which nodes sit on the mesh: an existing corner, or a new one on an edge. */
+  std::vector<uint32_t> vid(nodes.size(), UINT32_MAX);
+  for (size_t i = 0; i < nodes.size(); i++) {
+    const Vec3 p = nodes[i];
+    const auto es = plane_edges();
+    for (auto &e : es) {
+      for (uint32_t v : {e.first, e.second})
+        if (length(m.positions[v] - p) < eps) vid[i] = v;
+      if (vid[i] != UINT32_MAX) break;
+    }
+    if (vid[i] != UINT32_MAX) continue;
+    for (auto &e : es) {
+      const Vec3 a = m.positions[e.first], d = m.positions[e.second] - a;
+      const float l2 = dot(d, d);
+      if (l2 < 1e-12f) continue;
+      const float t = dot(p - a, d) / l2;
+      if (t > 0 && t < 1 && length(a + d * t - p) < eps) {
+        vid[i] = split_edge(m, e.first, e.second, t);
+        break;
+      }
+    }
+  }
+  size_t start = SIZE_MAX;
+  for (size_t i = 0; i < nodes.size() && start == SIZE_MAX; i++)
+    if (vid[i] != UINT32_MAX) start = i;
+  if (start == SIZE_MAX) {
+    /* Never touches an edge: inside one face (or around all of them). */
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (in_plane(f) && point_in_face(m, f, loop[0], eps)) {
+        const long inner = imprint_loop(m, f, loop, error);
+        if (inner >= 0 && inner_faces) inner_faces->push_back((size_t)inner);
+        return inner;
+      }
+    return fail("the shape doesn't overlap a face");
+  }
+  /* 3. Each piece between two nodes on the mesh splits the face it runs through. */
+  auto has_edge = [&](uint32_t a, uint32_t b) {
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        const uint32_t x = m.face_verts(f)[k], y = m.face_verts(f)[(k + 1) % m.face_size(f)];
+        if ((x == a && y == b) || (x == b && y == a)) return true;
+      }
+    return false;
+  };
+  size_t pieces = 0;
+  const size_t N = nodes.size();
+  size_t i = start;
+  do {
+    size_t j = (i + 1) % N;
+    std::vector<Vec3> interior;
+    while (vid[j] == UINT32_MAX) {
+      interior.push_back(nodes[j]);
+      j = (j + 1) % N;
+    }
+    const uint32_t va = vid[i], vb = vid[j];
+    bool done = va == vb || (interior.empty() && has_edge(va, vb));
+    if (!done) {
+      const Vec3 test = ((interior.empty() ? m.positions[vb] : interior[0]) + m.positions[va]) * 0.5f;
+      for (size_t f = 0; f < m.face_count() && !done; f++) {
+        if (!in_plane(f)) continue;
+        bool ha = false, hb = false;
+        for (uint32_t k = 0; k < m.face_size(f); k++) {
+          ha = ha || m.face_verts(f)[k] == va;
+          hb = hb || m.face_verts(f)[k] == vb;
+        }
+        if (!ha || !hb || !point_in_face(m, f, test, eps)) continue;
+        bool inside = true;
+        for (const Vec3 &p : interior) inside = inside && point_in_face(m, f, p, eps);
+        if (inside && split_face_path(m, f, va, vb, interior)) {
+          done = true;
+          pieces++;
+        }
+      }
+    }
+    if (!done) {
+      /* Off the faces: wire edges. */
+      uint32_t prev = va;
+      for (const Vec3 &p : interior) {
+        const uint32_t v = m.add_vert(p);
+        m.add_loose_edge(prev, v);
+        prev = v;
+      }
+      m.add_loose_edge(prev, vb);
+    }
+    i = j;
+  } while (i != start);
+  m.prune_loose_edges();
+  /* 4. The faces inside the shape. */
+  std::vector<Vec2> poly;
+  for (const Vec3 &p : loop) poly.push_back(flat(p));
+  auto inside_poly = [&](Vec2 q) {
+    bool in = false;
+    for (size_t a = 0, b = poly.size() - 1; a < poly.size(); b = a++)
+      if ((poly[a].y > q.y) != (poly[b].y > q.y) && q.x < (poly[b].x - poly[a].x) * (q.y - poly[a].y) / (poly[b].y - poly[a].y) + poly[a].x)
+        in = !in;
+    return in;
+  };
+  long last = -1;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (!in_plane(f)) continue;
+    const uint32_t *fv = m.face_verts(f);
+    const uint32_t fn = m.face_size(f);
+    Vec3 c(0.0f);
+    for (uint32_t k = 0; k < fn; k++) c += m.positions[fv[k]];
+    c = c / (float)fn;
+    if (!point_in_face(m, f, c, eps)) {  // a concave piece: a point just inside a corner
+      for (uint32_t k = 0; k < fn; k++) {
+        const Vec3 q = m.positions[fv[k]] * 0.98f + (m.positions[fv[(k + 1) % fn]] + m.positions[fv[(k + fn - 1) % fn]]) * 0.01f;
+        if (point_in_face(m, f, q, eps)) {
+          c = q;
+          break;
+        }
+      }
+    }
+    if (inside_poly(flat(c))) {
+      if (inner_faces) inner_faces->push_back(f);
+      last = (long)f;
+    }
+  }
+  m.touch();
+  if (last < 0 && pieces == 0) return fail("the shape doesn't overlap a face");
+  return last;
+}
+
 }  // namespace bl::meshops

@@ -77,14 +77,43 @@ void Editor::draw_tools_window(const Recti &r) {
   }
   if (section("Draw")) {
     std::vector<B> bs;
-    for (int k = 0; k < 5; k++)
-      bs.push_back({kDrawShapes[k], "Draw onto the mesh or the ground, with snapping (corners, midpoints, edges, faces, axes,\n"
-                                    "parallel and perpendicular edges). With nothing selected it starts a new mesh.",
+    for (int k = 0; k < kDrawShapeCount; k++)
+      bs.push_back({kDrawShapes[k], k == 5 ? "A construction line through two points: drawing snaps to it, to where guides cross and to its\n"
+                                             "direction (Plasticity's lines, SketchUp's guides). Not part of the mesh."
+                                           : "Draw onto the mesh or the ground, with snapping (corners, midpoints, edges, faces, axes,\n"
+                                             "parallel and perpendicular edges, guides). With nothing selected it starts a new mesh.",
                     true, [this, k] {
                       if (draw_.active && draw_.shape == k) draw_.active = false;
                       else draw_begin(k);
                     }});
-    grid(bs, 5);
+    grid(bs, 3);
+    auto choice = [&](const char *label, int &v, const char *const *opts, const char *id, const char *tip) {
+      Recti rr = lay.row(u.row_h() + u.px(2));
+      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, label);
+      u.combo(u.id(id), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, v, opts, 3);
+      u.tooltip(tip);
+    };
+    choice("Rectangle From", draw_rect_mode_, kRectModes, "tools_rectmode",
+           "Corner: two opposite corners. Center: the middle, then a corner. 3 Points: one side at any angle, then the width.");
+    choice("Circle / Polygon From", draw_circle_mode_, kCircleModes, "tools_circmode",
+           "Center: the middle, then the radius. 2 Points: across it. 3 Points: three points on it.");
+    {
+      Recti rr = lay.row(u.row_h() + u.px(2));
+      if (u.button({rr.x + u.px(4), rr.y, rr.w - u.px(8), rr.h}, draw_uniform_ ? "Square Rectangles (on)" : "Square Rectangles (off)", draw_uniform_))
+        draw_uniform_ = !draw_uniform_;
+      u.tooltip("Rectangles keep equal sides: a square from its corner, centre or one side.");
+    }
+    {
+      Recti rr = lay.row(u.row_h() + u.px(2));
+      const int gw = (rr.w - u.px(12)) / 3;
+      if (u.button({rr.x + u.px(4), rr.y, gw, rr.h}, "Guides from Edges")) guides_from_selected_edges();
+      u.tooltip("Edit Mode: a construction line along each selected edge.");
+      if (u.button({rr.x + u.px(6) + gw, rr.y, gw, rr.h}, show_guides_ ? "Hide Guides" : "Show Guides", show_guides_)) show_guides_ = !show_guides_;
+      if (u.button({rr.x + u.px(8) + 2 * gw, rr.y, gw, rr.h}, strprintf("Clear (%zu)", scene_->guides.size()))) {
+        scene_->guides.clear();
+        mark_changed("Clear Guides");
+      }
+    }
     Recti row = lay.row();
     u.label({row.x + u.px(4), row.y, row.w / 2, row.h}, "Corner Radius");
     u.float_field(u.id("tools_fillet"), {row.x + row.w / 2, row.y, row.w / 2 - u.px(6), row.h}, draw_fillet_, 0.005f, 0.0f, 1000.0f);

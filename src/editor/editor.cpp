@@ -172,25 +172,38 @@ bool Editor::wants_continuous_redraw() const {
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
 
+double Editor::frame_wait_seconds(double now, double last_frame) const {
+  if (max_fps_ <= 0) return 0.0;
+  return std::max(0.0, last_frame + 1.0 / (double)max_fps_ - now);
+}
+
 int Editor::run() {
-  std::vector<Event> events;
+  std::vector<Event> events, more;
   double last_frame = 0;
   bool first = true;
   while (running_) {
     events.clear();
     double now = now_seconds();
+    const bool continuous = always_redraw_ || wants_continuous_redraw();
     int timeout = 1000;
-    if (wants_continuous_redraw()) timeout = std::max(0, (int)((last_frame + 1.0 / 120.0 - now) * 1000.0));
+    if (continuous) timeout = (int)std::ceil(frame_wait_seconds(now, last_frame) * 1000.0);
     else if (ui_.next_wakeup > 0) timeout = std::max(1, (int)((ui_.next_wakeup - now) * 1000.0) + 1);
     if (ui_.redraw || first) timeout = 0;
     poll_events(window_, events, timeout);
     now = now_seconds();
-    bool need = first || !events.empty() || ui_.redraw || wants_continuous_redraw() ||
-                (ui_.next_wakeup > 0 && now >= ui_.next_wakeup);
+    bool need = first || !events.empty() || ui_.redraw || continuous || (ui_.next_wakeup > 0 && now >= ui_.next_wakeup);
     /* Pick up log lines written from other threads/systems. */
     std::vector<LogEntry> tmp;
     if (Log::fetch(log_seen_ + log_.size(), tmp) > log_seen_ + log_.size()) need = true;
     if (!need) continue;
+    /* The cap holds for input too: mouse moves arriving sooner are gathered
+     * into the next frame instead of each drawing one. */
+    for (double wait = first ? 0.0 : frame_wait_seconds(now, last_frame); wait > 0.0005; wait = frame_wait_seconds(now, last_frame)) {
+      more.clear();
+      poll_events(window_, more, std::max(1, (int)(wait * 1000.0)));
+      events.insert(events.end(), more.begin(), more.end());
+      now = now_seconds();
+    }
     first = false;
     last_frame = now;
     frame(events);
@@ -310,6 +323,10 @@ void Editor::apply_ui_scale() {
 void Editor::frame(std::vector<Event> &events) {
   double now = now_seconds();
   ScopedTimer frame_timer;
+  /* Frames in the last second: the measured rate (Preferences > Performance). */
+  frame_stamps_.push_back(now);
+  while (!frame_stamps_.empty() && frame_stamps_.front() < now - 1.0) frame_stamps_.erase(frame_stamps_.begin());
+  measured_fps_ = (float)frame_stamps_.size();
   process_events(events);
   update_procedural_shapes();
   if (scene_ && scene_->render.device == 1) gpu::prewarm();  // once; compiles the GPU kernel off the UI thread
@@ -377,6 +394,8 @@ void Editor::frame(std::vector<Event> &events) {
   drop_slots_.clear();  // drop targets register again as the windows draw
   drop_textures_.clear();
   drop_rows_.clear();
+  drop_folders_.clear();
+  sync_material_asset_names();
   draw_toolbar(toolbar);
   dock_layout(dock_.get(), dock_area);
   dock_draw(dock_.get());
@@ -679,7 +698,7 @@ void Editor::draw_menubar(const Recti &r) {
                 "Blender: the Boolean modifier / Bool Tool (Auto and Brush). Solver: Manifold, as Blender's.");
     }
     u.submenu("Draw", u.px(200), [this] {
-      for (int k = 0; k < 5; k++)
+      for (int k = 0; k < kDrawShapeCount; k++)
         if (ui_.menu_item(kDrawShapes[k], nullptr, draw_.active && draw_.shape == k)) draw_begin(k);
     });
     u.tooltip("Draw a polyline, rectangle, circle, arc or polygon onto the mesh (or the ground) with snapping.\n"
@@ -2300,13 +2319,60 @@ void Editor::run_console_command(const std::string &line) {
     if (GameObject *a = active_object()) remove_unused_material_slots(a);
   }
   else if (c == "draw") {
-    /* draw <polyline|rectangle|circle|arc|polygon> [segments / sides] */
+    /* draw <polyline|rectangle|circle|arc|polygon|guide> [segments / sides] */
     const std::string s = to_lower(arg(1, "polyline"));
     int k = 0;
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < kDrawShapeCount; i++)
       if (s == to_lower(kDrawShapes[i])) k = i;
     if (t.size() > 2) (k == 4 ? draw_sides_ : draw_segments_) = std::max(3, std::atoi(t[2].c_str()));
     draw_begin(k);
+  }
+  else if (c == "drawmode") {
+    /* drawmode rect <corner|center|3point>, drawmode circle <center|2point|3point>, drawmode square <on|off> */
+    const std::string s = to_lower(arg(1, "")), v = to_lower(arg(2, ""));
+    if (s == "square") draw_uniform_ = v != "off";
+    else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
+    else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
+    else Log::warn("drawmode rect <corner|center|3point> | circle <center|2point|3point> | square <on|off>");
+  }
+  else if (c == "fps") {
+    /* fps <n | 0 / unlimited>: the editor's frame rate cap */
+    const std::string v = to_lower(arg(1, "120"));
+    max_fps_ = v == "unlimited" || v == "off" ? 0 : std::max(0, std::min(1000, std::atoi(v.c_str())));
+    Log::info("Editor frame rate: %s", max_fps_ ? strprintf("up to %d fps", max_fps_).c_str() : "unlimited");
+  }
+  else if (c == "redraw") always_redraw_ = to_lower(arg(1, "changes")) == "always";  // redraw always | changes
+  else if (c == "preferences") dialog_ = Dialog::Preferences;
+  else if (c == "guide") {
+    /* guide <px> <py> <pz> <dx> <dy> <dz>: a construction line through p along d */
+    auto f = [&](int i) { return (float)std::atof(arg(i, "0").c_str()); };
+    const Vec3 d(f(4), f(5), f(6));
+    if (length(d) > 1e-9f) {
+      scene_->guides.push_back({Vec3(f(1), f(2), f(3)), normalize(d)});
+      show_guides_ = true;
+      mark_changed("Add Guide Line");
+    }
+  }
+  else if (c == "clearguides") {
+    scene_->guides.clear();
+    mark_changed("Clear Guides");
+  }
+  else if (c == "guidesfromedges") guides_from_selected_edges();
+  else if (c == "mkfolder") {  // mkfolder [Assets/dir]: that folder, or "New Folder" in Assets
+    if (arg(1, "").empty()) create_project_folder(assets_dir_);
+    else if (fs::make_dirs(fs::join(project_root_, arg(1, "")))) invalidate_project_listing();
+  }
+  else if (c == "moveasset") move_project_entry(fs::join(project_root_, arg(1, "")), fs::join(project_root_, arg(2, "Assets")));  // moveasset <Assets/x> <Assets/dir>
+  else if (c == "renameasset") rename_project_entry(fs::join(project_root_, arg(1, "")), arg(2, ""));  // renameasset <Assets/x.mat> <new name>
+  else if (c == "deleteasset") delete_project_entry(fs::join(project_root_, arg(1, "")));  // deleteasset <Assets/x>: to the Recycle Bin / Trash
+  else if (c == "facemat") {
+    /* facemat <Assets/x.mat | scene material name>: the selected faces use that material */
+    MaterialPtr m = material_asset(arg(1, ""));
+    if (!m)
+      for (const MaterialPtr &sm : scene_materials())
+        if (sm->name == arg(1, "")) m = sm;
+    if (m) assign_material_to_selected_faces(m);
+    else Log::warn("facemat: no material %s", arg(1, "").c_str());
   }
   else if (c == "drawpoint") {
     /* drawpoint <x> <y> <z> [close|finish]: a click of the drawing tool at a world point (scripts, tests) */
@@ -2581,7 +2647,7 @@ void Editor::draw_dialogs() {
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
-  int w = u.px(dialog_ == Dialog::About ? 460 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : dialog_ == Dialog::Preferences ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -2695,6 +2761,7 @@ void Editor::draw_dialogs() {
         Recti r3 = u.popup_row(u.row_h() + u.px(4));
         u.label({r3.x + u.px(12), r3.y, u.px(140), r3.h}, "Rotate snap");
         u.float_field(u.id("pref_rsnap"), {r3.x + u.px(160), r3.y + u.px(2), u.px(80), r3.h - u.px(4)}, snap_rot_, 0.5f, 0.1f, 180.0f, "%.3g");
+        draw_performance_settings(nullptr);
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -2729,6 +2796,8 @@ void Editor::load_prefs() {
     else if (k == "snap_rot") snap_rot_ = (float)std::atof(v.c_str());
     else if (k == "blender_transform_keys") blender_keys_ = v == "1";
     else if (k == "pivot_center") pivot_center_ = v == "1";
+    else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str())));
+    else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "render_devices_off") {
       render_devices_off_.clear();
       size_t a = 0;
@@ -2749,9 +2818,10 @@ void Editor::save_prefs() {
   std::string off;
   for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
-                            "blender_transform_keys=%d\npivot_center=%d\n",
+                            "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
-                            show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0);
+                            show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0, max_fps_,
+                            always_redraw_ ? 1 : 0);
   fs::write_file(prefs_path_, s);
 }
 

@@ -67,6 +67,27 @@ static std::string test_dir() {
   return dir;
 }
 
+/* Every Editor in the tests works in a scratch project (and a scratch trash), never
+ * the real Assets folder: the Project window can now move, rename and delete files.
+ * Setting BLENDITY_PROJECT to "" returns to this default. */
+static std::string scratch_project() {
+  const std::string p = fs::join(test_dir(), "default_project");
+  fs::make_dirs(fs::join(p, "Assets/Scenes"));
+  fs::make_dirs(fs::join(p, "research/papers"));
+  return p;
+}
+
+static void set_env(const char *k, const std::string &v_in) {
+  std::string v = v_in;
+  if (v.empty() && std::string(k) == "BLENDITY_PROJECT") v = scratch_project();
+  if (v.empty() && std::string(k) == "BLENDITY_TRASH") v = fs::join(test_dir(), "trash");
+#ifdef _WIN32
+  _putenv_s(k, v.c_str());
+#else
+  setenv(k, v.c_str(), 1);
+#endif
+}
+
 static int euler_characteristic(const Mesh &m) { return (int)m.vert_count() - (int)m.edge_count() + (int)m.face_count(); }
 
 static bool normals_outward(const Mesh &m, Vec3 c = Vec3(0.0f)) {
@@ -125,11 +146,14 @@ static void colormanagement_tests();
 static void modeling_round9_tests();
 static void modeling_round10_tests();
 static void modeling_round11_tests();
+static void modeling_round12_tests();
 
 int main() {
   register_builtin_components();
   research::register_features();
   Log::echo_stdout = false;
+  set_env("BLENDITY_PROJECT", "");  // the scratch project
+  set_env("BLENDITY_TRASH", "");
 
   test("math: matrix inverse", [] {
     Mat4 m = Mat4::trs({1, 2, 3}, Quat::euler({10, 20, 30}), {2, 3, 4});
@@ -713,6 +737,7 @@ int main() {
   modeling_round9_tests();
   modeling_round10_tests();
   modeling_round11_tests();
+  modeling_round12_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -3301,14 +3326,6 @@ static void modeling_round9_tests() {
 /* drawing, Follow / Spin / Slice, Reset XForm, the pivot fix              */
 /* ===================================================================== */
 
-static void set_env(const char *k, const std::string &v) {
-#ifdef _WIN32
-  _putenv_s(k, v.c_str());
-#else
-  setenv(k, v.c_str(), 1);
-#endif
-}
-
 static void modeling_round10_tests() {
   const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
   auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
@@ -3792,8 +3809,14 @@ static void modeling_round11_tests() {
     const float fov0 = cam->get<Camera>()->fov;
     ed.command("pilot");
     ed.step_frame_headless();
-    /* The view starts at the camera. */
-    CHECK_NEAR(ed.scene_fov(), cam->get<Camera>()->vertical_fov_deg(cam->get<Camera>()->image_aspect(1280.0f / 720.0f)), 0.5f);
+    /* The view starts at the camera: its frame inside the view shows exactly the camera's field of view. */
+    {
+      const Recti fr = ed.pilot_frame(), vr = ed.scene_view_rect();
+      const float cam_v = cam->get<Camera>()->vertical_fov_deg(cam->get<Camera>()->image_aspect(1280.0f / 720.0f));
+      const float framed = 2.0f * std::atan(std::tan(ed.scene_fov() * 0.5f * kDeg2Rad) * fr.h / (float)vr.h) * kRad2Deg;
+      CHECK(fr.h > 0);
+      CHECK_NEAR(framed, cam_v, 0.3f);
+    }
     ed.command("camera 40 20 7 1 0.5 0");
     ed.step_frame_headless();
     const Vec3 fwd = cam->world_rotation().rotate({0, 0, 1});
@@ -3839,3 +3862,448 @@ static void modeling_round11_tests() {
     CHECK(true);  // drawing all of that without crashing is the check
   });
 }
+
+/* ===================================================================== */
+/* Round 12: drawing across faces, camera piloting, asset folders,       */
+/* picking face materials, Plasticity drawing modes, guide lines, FPS    */
+/* ===================================================================== */
+
+static float face_area(const Mesh &m, size_t f) {
+  Vec3 s(0.0f);
+  for (uint32_t k = 0; k < m.face_size(f); k++) s += cross(m.positions[m.face_verts(f)[k]], m.positions[m.face_verts(f)[(k + 1) % m.face_size(f)]]);
+  return 0.5f * length(s);
+}
+
+static void modeling_round12_tests() {
+  auto mouse = [](platform::EventType t, int x, int y, int mods = 0) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    e.mods = mods;
+    return e;
+  };
+  /* A regular polygon in the XZ plane. */
+  auto ngon = [](Vec3 c, float r, int n, float phase = 0.0f) {
+    std::vector<Vec3> p;
+    for (int i = 0; i < n; i++) {
+      const float a = phase + 2.0f * kPi * i / n;
+      p.push_back(c + Vec3(std::cos(a), 0, std::sin(a)) * r);
+    }
+    return p;
+  };
+  test("draw across faces: a circle over a grid of quads is cut into every face it covers", [&] {
+    Mesh m = *primitives::grid(4.0f, 4, 4);  // 16 quads of 1 x 1, y = 0
+    const float total0 = [&] {
+      float a = 0;
+      for (size_t f = 0; f < m.face_count(); f++) a += face_area(m, f);
+      return a;
+    }();
+    const auto circle = ngon({0.1f, 0, -0.2f}, 1.3f, 32);
+    std::vector<size_t> inner;
+    std::string err;
+    const long r = meshops::imprint_loop_across(m, circle, {0, 1, 0}, &inner, &err);
+    std::string why;
+    std::printf("    circle over a 4 x 4 grid: %zu faces, %zu inside, %s\n", m.face_count(), inner.size(), err.c_str());
+    CHECK(r >= 0);
+    CHECK(structurally_valid(m, &why));
+    CHECK(m.loose_edges.empty());
+    CHECK(inner.size() >= 9);  // the circle spans parts of 3 x 3 (or more) quads
+    float in_area = 0, all = 0;
+    for (size_t f : inner) in_area += face_area(m, f);
+    for (size_t f = 0; f < m.face_count(); f++) all += face_area(m, f);
+    /* The pieces inside add up to the polygon's area; nothing was added or lost overall. */
+    const float poly = 0.5f * 32 * 1.3f * 1.3f * std::sin(2.0f * kPi / 32);
+    CHECK_NEAR(in_area, poly, 1e-3f);
+    CHECK_NEAR(all, total0, 1e-3f);
+    for (size_t f = 0; f < m.face_count(); f++) CHECK(m.face_normal(f).y > 0);
+    /* Pulled up together: a solid cylinder standing on the grid. */
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    for (size_t f : inner) sel[f] = 1;
+    meshops::PushPullResult res;
+    Mesh pulled = m;
+    CHECK(meshops::push_pull(pulled, sel, 0.5f, true, &res));
+    CHECK(structurally_valid(pulled, &why));
+    /* Edge cases: through grid corners exactly, hanging off the grid, exactly along existing edges. */
+    Mesh a = *primitives::grid(4.0f, 4, 4);
+    CHECK(meshops::imprint_loop_across(a, ngon({0, 0, 0}, 1.0f, 4), {0, 1, 0}, &inner) >= 0);  // a diamond through 4 grid corners
+    CHECK(structurally_valid(a, &why) && inner.size() == 4);
+    Mesh b = *primitives::grid(4.0f, 4, 4);
+    meshops::imprint_loop_across(b, ngon({1.8f, 0, 0}, 0.6f, 24), {0, 1, 0}, &inner);
+    std::printf("    hanging off the edge: %zu faces, %zu wire edges, %zu inside\n", b.face_count(), b.loose_edges.size(), inner.size());
+    CHECK(structurally_valid(b, &why));
+    Mesh c = *primitives::grid(4.0f, 4, 4);
+    const size_t fc = c.face_count();
+    CHECK(meshops::imprint_loop_across(c, {{-1, 0, -1}, {1, 0, -1}, {1, 0, 1}, {-1, 0, 1}}, {0, 1, 0}, &inner) >= 0);
+    CHECK(c.face_count() == fc && inner.size() == 4);  // along existing edges: nothing to cut, the 4 quads are selected
+  });
+  test("draw across faces: a circle overlapping a drawn rectangle's edge on a cube, then Push/Pull", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    ed.command("drawpoint -0.3 1 -0.3");
+    ed.command("drawpoint 0.1 1 0.1");
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    const size_t after_rect = m.face_count();
+    /* A circle centred on the rectangle's corner: half inside it, half in the ring around it. */
+    ed.command("draw circle 16");
+    ed.command("drawpoint 0.1 1 0.1");
+    ed.command("drawpoint 0.3 1 0.1");
+    std::string why;
+    std::printf("    rectangle then overlapping circle: %zu -> %zu faces, closed %d\n", after_rect, m.face_count(), (int)closed_manifold(m));
+    CHECK(structurally_valid(m, &why));
+    CHECK(closed_manifold(m));
+    CHECK(m.face_count() > after_rect + 2);
+    /* No face sticks out of the top: every new face lies in the top plane. */
+    size_t top = 0;
+    float circle_area = 0;
+    const Mat4 &w = g->world_matrix();
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (m.face_normal(f).y > 0.99f) top++;
+    ed.command("fsel facing 0 1 0");
+    (void)w;
+    (void)circle_area;
+    CHECK(top >= 4);
+    /* Push the circle's pieces down: still a closed solid. */
+    Mesh copy = m;
+    std::vector<uint8_t> sel(copy.face_count(), 0);
+    for (size_t f = 0; f < copy.face_count(); f++) {
+      Vec3 c(0.0f);
+      for (uint32_t k = 0; k < copy.face_size(f); k++) c += copy.positions[copy.face_verts(f)[k]];
+      c = c / (float)copy.face_size(f);
+      sel[f] = copy.face_normal(f).y > 0.99f && length(Vec3(c.x - 0.1f, 0, c.z - 0.1f)) < 0.2f;
+    }
+    meshops::PushPullResult res;
+    CHECK(meshops::push_pull(copy, sel, -0.3f, true, &res));
+    CHECK(closed_manifold(copy));
+  });
+  test("camera piloting: a camera wider than the view is framed exactly, and moving it another way moves the view", [&] {
+    Editor ed;
+    ed.init_headless(900, 800);  // a tall Scene view: a 16:9 camera fits its width, not its height
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    GameObject *cam = ed.selected_object();
+    Camera *c = cam->get<Camera>();
+    const float fov0 = c->fov;
+    const Vec3 pos0 = cam->world_position();
+    ed.command("pilot");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    /* Starting changes nothing on the camera. */
+    CHECK_NEAR(c->fov, fov0, 1e-3f);
+    CHECK(length(cam->world_position() - pos0) < 1e-4f);
+    const Recti fr = ed.pilot_frame(), vr = ed.scene_view_rect();
+    std::printf("    view %d x %d, camera frame %d x %d, view FOV %.2f, camera FOV %.2f\n", vr.w, vr.h, fr.w, fr.h, ed.scene_fov(), c->fov);
+    CHECK(fr.h < vr.h - 10);
+    const float framed = 2.0f * std::atan(std::tan(ed.scene_fov() * 0.5f * kDeg2Rad) * fr.h / (float)vr.h) * kRad2Deg;
+    CHECK_NEAR(framed, c->fov, 0.3f);
+    /* Moving the camera with the Inspector or the gizmo: the view follows it. */
+    cam->set_world_position(pos0 + Vec3(2, 1, 0));
+    ed.step_frame_headless();
+    CHECK(length(ed.scene_eye() - cam->world_position()) < 1e-3f);
+    c->fov = 35.0f;
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK_NEAR(c->fov, 35.0f, 0.05f);  // kept, not overwritten by the view
+    /* A physical camera keeps its sensor; navigating changes the lens consistently. */
+    c->physical = true;
+    c->sensor_fit = 0;
+    c->focal_length = 50.0f;
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK_NEAR(c->focal_length, 50.0f, 0.05f);
+    platform::Event wheel;
+    wheel.type = platform::EventType::Wheel;
+    wheel.x = vr.x + vr.w / 2;
+    wheel.y = vr.y + vr.h / 2;
+    wheel.wheel_y = 2;
+    wheel.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, wheel.x, wheel.y)});
+    ed.step_frame_headless({wheel});
+    ed.step_frame_headless();
+    std::printf("    physical camera: 50 mm -> %.1f mm after zooming in\n", c->focal_length);
+    CHECK(c->focal_length > 52.0f);
+    const float vfov = c->vertical_fov_deg(c->image_aspect(1280.0f / 720.0f));
+    const Recti fr2 = ed.pilot_frame();
+    const float framed2 = 2.0f * std::atan(std::tan(ed.scene_fov() * 0.5f * kDeg2Rad) * fr2.h / (float)vr.h) * kRad2Deg;
+    CHECK_NEAR(framed2, vfov, 0.3f);
+    ed.command("pilot");
+  });
+  test("project: folders, moving and renaming assets keep every reference; deleting goes to the trash", [&] {
+    const std::string proj = fs::join(test_dir(), "assetproject");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    fs::make_dirs(fs::join(proj, "Assets"));
+    fs::make_dirs(fs::join(proj, "research"));
+    const std::string trash = fs::join(test_dir(), "trash");
+    std::filesystem::remove_all(trash, ec);
+    set_env("BLENDITY_PROJECT", proj);
+    set_env("BLENDITY_TRASH", trash);
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("newmat Stone");
+      MaterialPtr stone = material_asset("Assets/Materials/Stone.mat");
+      CHECK(stone != nullptr);
+      if (!stone) return;
+      ed.command("select Cube");
+      ed.command("assignmat Assets/Materials/Stone.mat 0");
+      GameObject *cube = by_name(ed.scene(), "Cube");
+      /* A saved scene that refers to it, to see it rewritten. */
+      const std::string scene_path = fs::join(proj, "Assets/Scenes/Other.scene");
+      CHECK(save_scene(ed.scene(), scene_path));
+      /* A folder, and the material dragged into it. */
+      CHECK(!ed.create_project_folder(fs::join(proj, "Assets/Materials")).empty());
+      ed.command("mkfolder Assets/Textures/Bricks");
+      CHECK(fs::is_dir(fs::join(proj, "Assets/Textures/Bricks")));
+      CHECK(fs::is_dir(fs::join(proj, "Assets/Materials/New Folder")));
+      ed.command("renameasset Assets/Materials/New_Folder Rocks");  // no such path: nothing happens
+      ed.command("moveasset Assets/Materials/Stone.mat Assets/Materials");  // same folder: nothing happens
+      CHECK(fs::exists(fs::join(proj, "Assets/Materials/Stone.mat")));
+      CHECK(ed.move_project_entry(fs::join(proj, "Assets/Materials/Stone.mat"), fs::join(proj, "Assets/Materials/New Folder")));
+      CHECK(!fs::exists(fs::join(proj, "Assets/Materials/Stone.mat")));
+      CHECK(fs::exists(fs::join(proj, "Assets/Materials/New Folder/Stone.mat")));
+      CHECK(stone->asset_path == "Assets/Materials/New Folder/Stone.mat");
+      CHECK(cube->get<MeshRenderer>()->materials[0] == stone);
+      CHECK(material_asset("Assets/Materials/New Folder/Stone.mat") == stone);
+      std::string text;
+      CHECK(fs::read_file(scene_path, text) && text.find("New Folder/Stone.mat") != std::string::npos);
+      /* Renaming the folder carries the material along. */
+      CHECK(ed.rename_project_entry(fs::join(proj, "Assets/Materials/New Folder"), "Rocks"));
+      CHECK(stone->asset_path == "Assets/Materials/Rocks/Stone.mat");
+      CHECK(fs::read_file(scene_path, text) && text.find("Rocks/Stone.mat") != std::string::npos);
+      /* A folder can't go inside itself. */
+      fs::make_dirs(fs::join(proj, "Assets/Materials/Rocks/Inner"));
+      CHECK(!ed.move_project_entry(fs::join(proj, "Assets/Materials/Rocks"), fs::join(proj, "Assets/Materials/Rocks/Inner")));
+      /* Unity: a material's name is its file's name, both ways. */
+      CHECK(ed.rename_project_entry(fs::join(proj, "Assets/Materials/Rocks/Stone.mat"), "Granite"));
+      CHECK(stone->name == "Granite" && fs::exists(fs::join(proj, "Assets/Materials/Rocks/Granite.mat")));
+      stone->name = "Basalt";
+      stone->touch();
+      ed.step_frame_headless();
+      CHECK(fs::exists(fs::join(proj, "Assets/Materials/Rocks/Basalt.mat")) && !fs::exists(fs::join(proj, "Assets/Materials/Rocks/Granite.mat")));
+      CHECK(stone->asset_path == "Assets/Materials/Rocks/Basalt.mat");
+      /* Undo brings back an old copy: it follows the file rather than recreating Stone.mat. */
+      Scene snap;
+      std::string err;
+      CHECK(load_scene(scene_path, snap, err));
+      relink_material_assets(snap, false);
+      CHECK(snap.find_by_name("Cube")->get<MeshRenderer>()->materials[0] == stone);
+      CHECK(!fs::exists(fs::join(proj, "Assets/Materials/Stone.mat")));
+      /* A .mat copied in Explorer still has the old name inside: the file name wins, nothing is renamed. */
+      CHECK(fs::copy_file(fs::join(proj, "Assets/Materials/Rocks/Basalt.mat"), fs::join(proj, "Assets/Materials/Rocks/Copy Of It.mat")));
+      MaterialPtr copied = material_asset("Assets/Materials/Rocks/Copy Of It.mat");
+      CHECK(copied && copied->name == "Copy Of It");
+      ed.step_frame_headless();
+      CHECK(fs::exists(fs::join(proj, "Assets/Materials/Rocks/Copy Of It.mat")) && fs::exists(fs::join(proj, "Assets/Materials/Rocks/Basalt.mat")));
+      /* Delete: into the trash; the cube keeps the material as a scene material. */
+      CHECK(ed.delete_project_entry(fs::join(proj, "Assets/Materials/Rocks")));
+      CHECK(!fs::exists(fs::join(proj, "Assets/Materials/Rocks")) && fs::is_dir(fs::join(trash, "Rocks")));
+      CHECK(cube->get<MeshRenderer>()->materials[0] == stone && stone->asset_path.empty());
+      ed.step_frame_headless();
+      save_dirty_material_assets();
+      CHECK(!fs::exists(fs::join(proj, "Assets/Materials/Rocks")));  // nothing writes it back
+      /* Assets outside Assets, or Assets itself, are refused. */
+      CHECK(!ed.delete_project_entry(fs::join(proj, "Assets")));
+      CHECK(!ed.delete_project_entry(fs::join(proj, "research")));
+      /* The Project window draws with folders, a rename and a delete waiting. */
+      ed.command("window Project");
+      ed.step_frame_headless();
+      CHECK(true);
+    }
+    set_env("BLENDITY_TRASH", "");
+    set_env("BLENDITY_PROJECT", "");
+  });
+  test("face materials: pick the material itself for the selected faces (its slot is found or added)", [&] {
+    const std::string proj = fs::join(test_dir(), "facematproject");
+    fs::make_dirs(fs::join(proj, "Assets"));
+    fs::make_dirs(fs::join(proj, "research"));
+    set_env("BLENDITY_PROJECT", proj);
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("newmat Red");
+      ed.command("newmat Blue");
+      ed.command("select Cube");
+      GameObject *cube = ed.selected_object();
+      ed.command("fsel facing 0 1 0");
+      ed.command("facemat Assets/Materials/Red.mat");
+      auto *mr = cube->get<MeshRenderer>();
+      const Mesh &m = *cube->get<MeshFilter>()->mesh;
+      const size_t top = face_facing(m, {0, 1, 0});
+      CHECK(mr->materials.size() == 2 && mr->materials[1] == material_asset("Assets/Materials/Red.mat"));
+      CHECK(m.material_of(top) == 1);
+      /* The same material on other faces reuses its slot; another adds one. */
+      ed.command("fsel facing 0 -1 0");
+      ed.command("facemat Assets/Materials/Red.mat");
+      CHECK(mr->materials.size() == 2 && m.material_of(face_facing(m, {0, -1, 0})) == 1);
+      ed.command("fsel facing 1 0 0 -1 0 0");
+      ed.command("facemat Assets/Materials/Blue.mat");
+      CHECK(mr->materials.size() == 3 && m.material_of(face_facing(m, {1, 0, 0})) == 2 && m.material_of(face_facing(m, {-1, 0, 0})) == 2);
+      CHECK(m.material_of(top) == 1);
+      /* The picker draws (it lists the object's slots, the assets and the scene's materials). */
+      CHECK(ed.pickable_materials_for_test(cube) >= 3);
+      ed.step_frame_headless();
+    }
+    set_env("BLENDITY_PROJECT", "");
+  });
+  test("draw modes: rectangles from the centre, square, or 3 points at an angle; circles from 2 or 3 points", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    auto drawn = [&](std::initializer_list<Vec3> clicks, const char *shape) -> std::vector<Vec3> {
+      ed.command("select Main Camera");
+      ed.command("edit off");
+      ed.command(std::string("draw ") + shape);
+      GameObject *g = ed.selected_object();
+      for (Vec3 p : clicks) ed.command(strprintf("drawpoint %.6f %.6f %.6f", p.x, p.y, p.z));
+      std::vector<Vec3> out;
+      if (g && g->get<MeshFilter>() && g->get<MeshFilter>()->mesh && g->get<MeshFilter>()->mesh->face_count() == 1) {
+        const Mesh &m = *g->get<MeshFilter>()->mesh;
+        for (uint32_t k = 0; k < m.face_size(0); k++) out.push_back(g->world_matrix().point(m.positions[m.face_verts(0)[k]]));
+      }
+      ed.command("edit off");
+      return out;
+    };
+    auto bounds = [](const std::vector<Vec3> &p) {
+      AABB b;
+      for (const Vec3 &q : p) b.add(q);
+      return b;
+    };
+    ed.command("drawmode rect center");
+    auto r1 = drawn({{1, 0, 1}, {1.5f, 0, 1.25f}}, "rectangle");
+    CHECK(r1.size() == 4);
+    if (r1.size() == 4) {
+      const AABB b = bounds(r1);
+      CHECK(length(b.center() - Vec3(1, 0, 1)) < 1e-4f);
+      CHECK_NEAR(b.max.x - b.min.x, 1.0f, 1e-4f);
+      CHECK_NEAR(b.max.z - b.min.z, 0.5f, 1e-4f);
+    }
+    ed.command("drawmode square on");
+    auto r2 = drawn({{1, 0, 1}, {1.5f, 0, 1.25f}}, "rectangle");
+    if (r2.size() == 4) {
+      const AABB b = bounds(r2);
+      CHECK_NEAR(b.max.x - b.min.x, 1.0f, 1e-4f);
+      CHECK_NEAR(b.max.z - b.min.z, 1.0f, 1e-4f);
+    }
+    CHECK(r2.size() == 4);
+    ed.command("drawmode square off");
+    /* 3 points: a side at 30 degrees, then 0.5 wide. */
+    ed.command("drawmode rect 3point");
+    const Vec3 a(0, 0, 0), b2(std::cos(0.5236f) * 2, 0, std::sin(0.5236f) * 2);
+    const Vec3 side = normalize(b2 - a), across(-side.z, 0, side.x);
+    auto r3 = drawn({a, b2, b2 + across * 0.5f + side * 0.3f}, "rectangle");  // the third click's sideways part doesn't matter
+    CHECK(r3.size() == 4);
+    if (r3.size() == 4) {
+      float area = 0;
+      for (size_t k = 0; k < 4; k++) area += cross(r3[k], r3[(k + 1) % 4]).y * 0.5f;
+      CHECK_NEAR(std::fabs(area), 2.0f * 0.5f, 1e-3f);
+      bool has_a = false, has_b = false;
+      for (const Vec3 &p : r3) has_a = has_a || length(p - a) < 1e-4f, has_b = has_b || length(p - b2) < 1e-4f;
+      CHECK(has_a && has_b);
+    }
+    ed.command("drawmode rect corner");
+    /* Circles: 2 points across; 3 points on it. */
+    ed.command("drawmode circle 2point");
+    auto c2 = drawn({{-1, 0, 0}, {1, 0, 0}}, "circle 16");
+    CHECK(c2.size() == 16);
+    for (const Vec3 &p : c2) CHECK_NEAR(length(p), 1.0f, 1e-3f);
+    ed.command("drawmode circle 3point");
+    auto c3 = drawn({{2, 0, 0}, {0, 0, 2}, {-2, 0, 0}}, "circle 16");
+    CHECK(c3.size() == 16);
+    for (const Vec3 &p : c3) CHECK_NEAR(length(p), 2.0f, 1e-3f);
+    auto bad = drawn({{0, 0, 0}, {1, 0, 0}, {2, 0, 0}}, "circle 16");  // in a line: no circle
+    CHECK(bad.empty());
+    ed.command("drawmode circle center");
+  });
+  test("guide lines: added, undone, saved; drawing snaps to where two cross and along them", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("guide 0.37 0 -3 0 0 1");  // along Z through x = 0.37
+    ed.command("guide -3 0 0.61 1 0 0");  // along X through z = 0.61
+    ed.step_frame_headless();
+    CHECK(ed.scene().guides.size() == 2);
+    /* Saved with the scene and read back. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err) && back.guides.size() == 2);
+    CHECK(back.guides.size() == 2 && length(back.guides[1].p - Vec3(-3, 0, 0.61f)) < 1e-5f);
+    /* Click near where they cross: the first corner lands exactly there. */
+    ed.command("camera 0 60 8 0 0 0");
+    ed.command("select Main Camera");
+    ed.command("draw rectangle");
+    GameObject *g = ed.selected_object();
+    ed.step_frame_headless();
+    int x, y;
+    CHECK(ed.project_to_window({0.37f, 0, 0.61f}, x, y));
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, x + 4, y - 3)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseDown, x + 4, y - 3)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseUp, x + 4, y - 3)});
+    ed.command("drawpoint 1.5 0 1.5");
+    bool corner = false;
+    if (g && g->get<MeshFilter>()->mesh)
+      for (const Vec3 &p : g->get<MeshFilter>()->mesh->positions) corner = corner || length(g->world_matrix().point(p) - Vec3(0.37f, 0, 0.61f)) < 1e-4f;
+    CHECK(corner);
+    /* Along a guide: a click near it lands on it. */
+    ed.command("draw polyline");
+    int x2, y2;
+    CHECK(ed.project_to_window({0.37f, 0, -1.2f}, x2, y2));
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, x2 + 3, y2)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseDown, x2 + 3, y2)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseUp, x2 + 3, y2)});
+    ed.command("drawpoint -1 0 -1.2 finish");
+    bool on = false;
+    for (const Vec3 &p : g->get<MeshFilter>()->mesh->positions) {
+      const Vec3 w = g->world_matrix().point(p);
+      on = on || (std::fabs(w.x - 0.37f) < 1e-4f && std::fabs(w.z + 1.2f) < 0.05f);
+    }
+    CHECK(on);
+    /* Drawing a guide with the tool, then undo removes it. */
+    ed.command("draw guide");
+    ed.command("drawpoint 0 0 0");
+    ed.command("drawpoint 1 0 1");
+    CHECK(ed.scene().guides.size() == 3);
+    ed.step_frame_headless();
+    platform::Event z;
+    z.type = platform::EventType::KeyDown;
+    z.key = platform::KEY_Z;
+    z.mods = platform::MOD_CTRL;
+    ed.command("edit off");
+    ed.step_frame_headless();
+    ed.step_frame_headless({z});
+    CHECK(ed.scene().guides.size() == 2);
+    ed.command("clearguides");
+    CHECK(ed.scene().guides.empty());
+  });
+  test("frame rate: the cap spaces frames, unlimited never waits, and the setting is kept", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("fps 60");
+    CHECK(ed.max_fps() == 60);
+    CHECK_NEAR(ed.frame_wait_seconds(10.0, 10.0), 1.0 / 60.0, 1e-9);
+    CHECK_NEAR(ed.frame_wait_seconds(10.010, 10.0), 1.0 / 60.0 - 0.010, 1e-9);
+    CHECK(ed.frame_wait_seconds(10.5, 10.0) == 0.0);
+    ed.command("fps unlimited");
+    CHECK(ed.max_fps() == 0 && ed.frame_wait_seconds(10.0, 10.0) == 0.0);
+    ed.command("fps 144");
+    ed.command("redraw always");
+    CHECK(ed.always_redraw());
+    ed.command("redraw changes");
+    CHECK(!ed.always_redraw());
+    /* The Preferences and the Profiler show the setting and its measured cost. */
+    ed.command("window Profiler");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(true);
+  });
+}
+

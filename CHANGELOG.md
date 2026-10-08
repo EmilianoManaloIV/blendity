@@ -2,6 +2,55 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-08 (round 12): drawing across faces, camera piloting fixes, asset folders, face material picker, drawing modes, guide lines, frame rate
+
+**Asked:** commit and push round 11; make the camera actually adjust while piloting; fix drawing a circle onto a surface whose faces overlap inside the circle; renaming a material should rename its file; organise assets into folders like Unity; pick the material itself when assigning faces; draw shapes uniformly (from the centre), not only corner to corner, as in Plasticity; set the editor's frame rate and explain the performance cost; delete things in the Project window; construction lines to line drawings up with, as in Plasticity.
+
+**Done first:** round 11 committed and pushed.
+
+**Fixed**
+- **A circle (or any closed shape) drawn over several faces** used to be added as a separate face lying over them. It is now cut into every face it covers, with a vertex wherever it crosses an edge, and all the pieces inside come out selected for Push/Pull. Parts hanging off the surface become wire edges.
+- **Piloting a camera:**
+  - When the camera's frame was narrower than the view, the frame didn't match what the camera saw, and starting to pilot changed the camera's field of view. The frame is now exactly the camera's view, and starting changes nothing.
+  - A physical camera's lens was worked out from the wrong side of the sensor; it now follows the camera's Sensor Fit.
+  - Moving the camera any other way while piloting (gizmo, Inspector, undo) now moves the view with it, instead of being overwritten.
+- **Copied materials kept the wrong name.** A `.mat` copied outside Blendity kept the old name inside it. The file name now wins, as in Unity, so nothing gets renamed by surprise.
+
+**Added**
+- **Project window like Unity's:**
+  - A nested folder tree, and a **+** menu or right-click for **Create > Folder / Material** in the current folder.
+  - Drag files or folders onto a folder, a breadcrumb or `..` to move them. Dragging a scene material from the Materials window onto a folder saves it there as an asset.
+  - **F2 / Rename** renames in place.
+  - **Delete / Del** asks first, then sends the item to the **Recycle Bin** (Trash on Linux and macOS), where it can be restored. Only things inside Assets, research papers or screenshots can be deleted.
+  - Moving or renaming keeps everything working: the shared material, texture paths, `.scene` files that mention it, and undo. A deleted material stays on its objects as a scene material.
+- **Material name = file name**, both ways: renaming a material renames its `.mat`, and renaming the file renames the material.
+- **Face Material** field in Edit Mode (Inspector and Modeling Tools): a grid of preview spheres with every material asset (from any folder), the object's slots and the scene's materials. Pick one and the selected faces use it; its slot is found or added for you.
+- **Drawing modes from Plasticity:**
+  - Rectangles from a **Corner**, the **Center**, or **3 Points** (one side at any angle, then the width), with **Square** to keep the sides equal.
+  - Circles and polygons from the **Center**, **2 Points** (across) or **3 Points** (on the circle).
+- **Guide lines**, Plasticity's lines and SketchUp's guides:
+  - The new **Guide** draw shape, or **Guides from Edges**. They show as dashed lines and are saved with the scene, and adding them can be undone.
+  - Drawing snaps to where two guides cross (or where one pierces the drawing plane), along a guide, and parallel to it.
+- **Editor frame rate** (Preferences > Performance, and the Profiler):
+  - A cap from 30 to 240 fps or Unlimited, now applied to mouse movement too (before, every mouse move drew a frame).
+  - Redraw **only when something changes** (the default) or **always**.
+  - It shows the measured frame cost and what that reaches on this machine, warns when the cap is over budget, and explains what each setting costs (CPU, battery, input lag, path-tracing samples). The stats overlay shows the live rate.
+- Console: `drawmode`, `guide`, `clearguides`, `guidesfromedges`, `fps`, `redraw`, `preferences`, `facemat`, `mkfolder`, `moveasset`, `renameasset`, `deleteasset`.
+
+**Checked:**
+- 1209 unit checks on Windows and 1185 on Linux, 0 failed. New tests cover:
+  - Circles across a 4 x 4 grid: the pieces' areas add up, and pulling them makes a solid.
+  - The circle through grid corners, hanging off the edge, and along existing edges.
+  - A circle overlapping a drawn rectangle on a cube, then Push/Pull, which stays closed.
+  - Piloting in a tall view, moving the camera from the Inspector, and a physical camera's lens.
+  - Folder move and rename, scene-file rewrites, undo after a move, a copied `.mat`, delete to a scratch trash, and refusing to delete outside Assets.
+  - Face material picking.
+  - Every drawing mode.
+  - Guide snapping with real mouse clicks, save and load, and undo.
+  - The frame-cap timing.
+- Stress: the modeling section now also draws random circles and squares across faces on all 26 awkward meshes, plus degenerate loops: 5,716 operations, 0 problems. Push/Pull still has only its 2 long-standing problems. The editor fuzzer ran 6,000 frames with no crash.
+- **Safety:** the tests and the fuzzer now work in a scratch project and a scratch trash, because the Project window can move and delete files. Your `Assets` folder was checked to be unchanged after full runs.
+
 ## 2026-10-08 (round 11): snapping, a Materials window, Modeling Tools, camera piloting, Plasticity tools
 
 **Asked:** commit and push round 10 and remove old Blendity builds; drawing that snaps to edges parallel to a rotated object, not only world axes; test edge cases (a rectangle, an arc on its side, then Push/Pull); materials as objects you can see and adjust outside any object (Unity); drag a mesh onto another and snap it to the surface, and Unity's vertex snapping; move and frame a camera through the Scene view, including its FOV; useful tools from Plasticity; a separate tools window like UModeler's; sanity and edge-case testing.

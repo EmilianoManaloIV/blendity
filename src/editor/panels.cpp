@@ -663,13 +663,17 @@ struct InspectorReflector : Reflector {
         }
         uc->tooltip("Write this material to Assets/Materials as a .mat you can drag onto other objects.");
         uc->menu_separator();
-        uc->menu_label("Material assets (Assets/Materials)");
-        for (const auto &de : fs::list(fs::join(e->assets_dir_, "Materials")))
-          if (!de.is_dir && fs::extension(de.name) == ".mat")
-            if (uc->menu_item(fs::stem(de.name), nullptr, cur && cur->asset_path == "Assets/Materials/" + de.name)) {
-              if (MaterialPtr a = material_asset("Assets/Materials/" + de.name)) results[pid] = {a, false};
-              uc->redraw = true;
-            }
+        uc->menu_label("Material assets");
+        for (const std::string &path : e->material_asset_paths()) {
+          /* Folders show as a prefix: "Bricks/Red" for Assets/Materials/Bricks/Red.mat. */
+          std::string shown = path.substr(0, path.size() - 4);
+          if (starts_with(shown, "Assets/Materials/")) shown = shown.substr(17);
+          else if (starts_with(shown, "Assets/")) shown = shown.substr(7);
+          if (uc->menu_item(shown, nullptr, cur && cur->asset_path == path)) {
+            if (MaterialPtr a = material_asset(path)) results[pid] = {a, false};
+            uc->redraw = true;
+          }
+        }
         uc->menu_separator();
         uc->menu_label("Materials in this scene");
         for (const MaterialPtr &m : e->scene_materials())
@@ -1324,168 +1328,6 @@ void Editor::draw_inspector(const Recti &r) {
 /* Project                                                                */
 /* ===================================================================== */
 
-void Editor::draw_project(const Recti &r) {
-  auto &u = ui_;
-  auto &in = u.in;
-  if (u.time - project_listed_ > 2.0) {
-    project_entries_ = fs::list(project_dir_);
-    project_listed_ = u.time;
-  }
-  int bh = u.row_h() + u.px(6);
-  Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
-  /* Breadcrumb relative to the project root. */
-  std::string rel = project_dir_.size() > project_root_.size() ? project_dir_.substr(project_root_.size() + 1) : "";
-  int x = bar.x + u.px(6);
-  std::string acc = project_root_;
-  std::vector<std::string> parts;
-  size_t s = 0, e;
-  while ((e = rel.find('/', s)) != std::string::npos) { parts.push_back(rel.substr(s, e - s)); s = e + 1; }
-  if (s < rel.size()) parts.push_back(rel.substr(s));
-  for (size_t i = 0; i < parts.size(); i++) {
-    acc = fs::join(acc, parts[i]);
-    int w = u.font.text_width(parts[i]) + u.px(10);
-    Recti pr{x, bar.y, w, bar.h};
-    bool hot = u.hovered(pr);
-    u.label(pr, parts[i], hot ? u.theme.text_bright : u.theme.text, ui::Align::Center);
-    if (hot && in.pressed[0]) { project_dir_ = acc; project_listed_ = -100; }
-    x += w;
-    if (i + 1 < parts.size()) {
-      u.draw_icon(Icon::ArrowRight, {x, bar.y + bh / 2 - u.px(4), u.px(8), u.px(8)}, u.theme.text_dim);
-      x += u.px(10);
-    }
-  }
-  int sw = std::min(u.px(200), r.w / 3);
-  u.text_field(u.id("proj_search"), {bar.right() - sw - u.px(6), bar.y + u.px(4), sw, bh - u.px(8)}, project_search_, nullptr, "Search");
-
-  /* Left: favourites / folders tree */
-  int lw = std::min(u.px(190), r.w / 3);
-  Recti left{r.x, bar.bottom(), lw, r.h - bh};
-  Recti right{r.x + lw + 1, bar.bottom(), r.w - lw - 1, r.h - bh};
-  u.canvas.fill_rect(left, Color::hex(0x333333));
-  u.canvas.vline(left.right(), left.y, left.bottom(), u.theme.border);
-  int rh = u.row_h();
-  struct Fav { const char *label; std::string path; Icon icon; };
-  Fav favs[] = {{"Assets", assets_dir_, Icon::Folder},
-                {"Scenes", fs::join(assets_dir_, "Scenes"), Icon::Scene},
-                {"Research Papers", papers_dir_, Icon::Paper},
-                {"Screenshots", screenshots_dir_, Icon::Folder}};
-  int y = left.y + u.px(4);
-  for (auto &f : favs) {
-    Recti fr{left.x, y, left.w, rh};
-    bool cur = project_dir_ == f.path;
-    bool hot = u.hovered(fr);
-    if (cur) u.canvas.fill_rect(fr, u.theme.selection_dim);
-    else if (hot) u.canvas.fill_rect(fr, Color::hex(0x404040));
-    int a = u.font.line_height() - u.px(3);
-    u.draw_icon(f.icon, {fr.x + u.px(10), fr.y + (rh - a) / 2, a, a}, f.icon == Icon::Paper ? u.theme.accent : u.theme.text);
-    u.label({fr.x + u.px(16) + a, fr.y, fr.w - a - u.px(20), rh}, f.label);
-    if (hot && in.pressed[0]) {
-      fs::make_dirs(f.path);
-      project_dir_ = f.path;
-      project_listed_ = -100;
-    }
-    y += rh;
-  }
-  /* Subfolders of Assets */
-  y += u.px(6);
-  u.label({left.x + u.px(10), y, left.w, rh}, "Folders", u.theme.text_dim);
-  y += rh;
-  for (auto &d : fs::list(assets_dir_)) {
-    if (!d.is_dir) continue;
-    Recti fr{left.x, y, left.w, rh};
-    std::string p = fs::join(assets_dir_, d.name);
-    bool hot = u.hovered(fr);
-    if (project_dir_ == p) u.canvas.fill_rect(fr, u.theme.selection_dim);
-    else if (hot) u.canvas.fill_rect(fr, Color::hex(0x404040));
-    int a = u.font.line_height() - u.px(3);
-    u.draw_icon(Icon::Folder, {fr.x + u.px(18), fr.y + (rh - a) / 2, a, a}, u.theme.text);
-    u.label({fr.x + u.px(24) + a, fr.y, fr.w - a - u.px(28), rh}, d.name);
-    if (hot && in.pressed[0]) { project_dir_ = p; project_listed_ = -100; }
-    y += rh;
-    if (y > left.bottom()) break;
-  }
-
-  /* Right: file list */
-  std::string f = to_lower(project_search_);
-  std::vector<const DirEntry *> shown;
-  for (auto &en : project_entries_)
-    if (f.empty() || to_lower(en.name).find(f) != std::string::npos) shown.push_back(&en);
-  bool can_up = project_dir_ != project_root_ && project_dir_.size() > project_root_.size();
-  int rows = (int)shown.size() + (can_up ? 1 : 0);
-  ui::Id sid = u.id("proj_scroll");
-  int off = u.begin_scroll(sid, right, rows * rh + rh);
-  int i = 0;
-  auto row_rect = [&](int k) { return Recti{right.x, right.y + k * rh - off + u.px(2), right.w, rh}; };
-  if (can_up) {
-    Recti rr = row_rect(i++);
-    bool hot = u.hovered(rr);
-    if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
-    u.label({rr.x + u.px(10), rr.y, rr.w, rr.h}, "..", u.theme.text_dim);
-    if (hot && in.double_clicked[0]) { project_dir_ = fs::parent(project_dir_); project_listed_ = -100; }
-  }
-  for (const DirEntry *en : shown) {
-    Recti rr = row_rect(i++);
-    if (rr.bottom() < right.y || rr.y > right.bottom()) continue;
-    std::string full = fs::join(project_dir_, en->name);
-    bool sel = project_selected_ == full;
-    bool hot = u.hovered(rr);
-    if (sel) u.canvas.fill_rect(rr, u.theme.selection);
-    else if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
-    std::string ext = fs::extension(en->name);
-    Icon ic = en->is_dir ? Icon::Folder : ext == ".mat" ? Icon::None : (ext == ".scene" ? Icon::Scene : (model_extension_supported(ext) ? Icon::Mesh : (ext == ".pdf" ? Icon::Paper : (ext == ".png" ? Icon::Eye : Icon::File))));
-    int a = u.font.line_height() - u.px(2);
-    u.draw_icon(ic, {rr.x + u.px(10), rr.y + (rh - a) / 2, a, a}, ext == ".pdf" ? u.theme.accent : u.theme.text);
-    u.label({rr.x + u.px(16) + a, rr.y, rr.w / 2, rh}, en->name);
-    if (!en->is_dir) u.label({rr.x, rr.y, rr.w - u.px(12), rh}, format_bytes(en->size), u.theme.text_dim, ui::Align::Right);
-    if (ext == ".mat") {
-      /* A material asset: its colour as a swatch, like Unity's preview ball. */
-      if (MaterialPtr mm = material_asset(make_asset_relative(full))) {
-        const int sw = u.font.line_height() - u.px(4);
-        const Vec3 c = mm->base_color;
-        u.canvas.fill_circle((float)(rr.x + u.px(10) + sw / 2), (float)(rr.y + rh / 2), sw * 0.5f,
-                             Color::from(Vec3(linear_to_srgb(c.x), linear_to_srgb(c.y), linear_to_srgb(c.z))));
-      }
-    }
-    if (hot && in.pressed[0]) {
-      project_selected_ = full;
-      clear_selection();
-      /* Materials and images can be dragged onto objects, faces and Inspector slots (Unity). */
-      if (ext == ".mat" || image_extension_supported(ext)) asset_drag_ = {true, false, full, nullptr, in.mx, in.my};
-    }
-    if (hot && in.double_clicked[0]) {
-      if (en->is_dir) { project_dir_ = full; project_listed_ = -100; }
-      else if (ext == ".scene") open_scene(full);
-      else if (model_extension_supported(ext)) import_model_file(full, false);
-      else fs::open_external(full);
-    }
-    if (hot && in.pressed[1]) {
-      project_selected_ = full;
-      u.open_popup(u.id("proj_ctx"), {in.mx, in.my, 0, 0});
-    }
-  }
-  if (shown.empty()) {
-    bool papers = project_dir_ == papers_dir_;
-    u.label({right.x, right.y + rh, right.w, rh}, papers ? "Drop research papers (PDF, TXT, MD...) onto this window." : "This folder is empty.", u.theme.text_dim, ui::Align::Center);
-  }
-  u.end_scroll();
-  std::string sel = project_selected_;
-  u.popup(u.id("proj_ctx"), u.px(230), [this, sel] {
-    auto &u = ui_;
-    std::string ext = fs::extension(sel);
-    if (ext == ".scene" && u.menu_item("Open Scene")) open_scene(sel);
-    if (model_extension_supported(ext) && u.menu_item("Import into Scene")) import_obj_file(sel);
-    if (ext == ".mat" && u.menu_item("Assign to Selection", nullptr, false, !selection_.empty()))
-      if (MaterialPtr m = material_asset(make_asset_relative(sel)))
-        for (GameObject *g : selected_objects(false)) assign_material(g, 0, m);
-    if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
-    u.tooltip("A new Material asset in Assets/Materials. Drag it onto objects, faces or Inspector slots (Unity: Create > Material).");
-    if (u.menu_item("Open with system viewer")) fs::open_external(sel);
-    if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::parent(sel));
-    if (u.menu_item("Refresh")) project_listed_ = -100;
-  });
-}
-
 /* ===================================================================== */
 /* Console                                                                */
 /* ===================================================================== */
@@ -1610,6 +1452,9 @@ void Editor::draw_profiler(const Recti &r) {
   stat("Worker threads", strprintf("%d", JobSystem::global().thread_count()));
   stat("Scene memory (approx.)", format_bytes(scene_->memory_bytes()));
   stat("Undo steps", strprintf("%zu", undo_.size()));
+
+  lay.space(u.px(6));
+  draw_performance_settings(&lay);
 
   lay.space(u.px(6));
   u.label(lay.row(), "Renderer options (toggle to see the cost of each optimization)", u.theme.text_bright);
@@ -1956,10 +1801,12 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
         /* Drawing tools (UModeler / SketchUp): shapes drawn onto the mesh with snapping. */
         Recti dr = lay.row(u.row_h() + u.px(2));
         u.label({dr.x + u.px(4), dr.y, u.px(40), dr.h}, "Draw", u.theme.accent);
-        const int x0 = dr.x + u.px(44), dw = (dr.right() - x0 - u.px(4) - 4 * u.px(3)) / 5;
-        for (int k = 0; k < 5; k++) {
+        /* Two rows of three, so the names fit. */
+        const int per = 3, x0 = dr.x + u.px(44), dw = (dr.right() - x0 - u.px(4) - (per - 1) * u.px(3)) / per;
+        for (int k = 0; k < kDrawShapeCount; k++) {
+          if (k == per) dr = lay.row(u.row_h() + u.px(2));
           const bool on = draw_.active && draw_.shape == k;
-          if (u.button({x0 + k * (dw + u.px(3)), dr.y, dw, dr.h}, kDrawShapes[k], on)) {
+          if (u.button({x0 + (k % per) * (dw + u.px(3)), dr.y, dw, dr.h}, kDrawShapes[k], on)) {
             if (on) draw_.active = false;
             else draw_begin(k);
           }
@@ -1967,9 +1814,33 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
                     "A closed shape inside a face is cut into it, ready for Push/Pull; a line between edges splits the face;\n"
                     "anything else becomes new faces or wire edges. UModeler: drawing tools. SketchUp: Line, Rectangle, Circle, Arc, Polygon.");
         }
+        if (draw_.active && draw_.shape == 1) {
+          er.enumeration("Rectangle From", draw_rect_mode_, kRectModes, 3);
+          u.tooltip("Corner: two opposite corners. Center: the middle, then a corner (grows evenly both ways).\n"
+                    "3 Points: one side at any angle, then the width (Plasticity's rectangle modes).");
+          er.field("Square", draw_uniform_);
+          u.tooltip("Keep the sides equal (Plasticity: hold for a square).");
+        }
+        if (draw_.active && (draw_.shape == 2 || draw_.shape == 4)) {
+          er.enumeration("Circle From", draw_circle_mode_, kCircleModes, 3);
+          u.tooltip("Center: the middle, then the radius. 2 Points: across its diameter. 3 Points: any three points on it\n"
+                    "(Plasticity's circle modes).");
+        }
         if (draw_.active && (draw_.shape == 2 || draw_.shape == 3)) er.field("Circle / Arc Segments", draw_segments_, 3, 256);
         if (draw_.active && draw_.shape == 4) er.field("Polygon Sides", draw_sides_, 3, 64);
-        if (draw_.active && draw_.shape != 2 && draw_.shape != 3) {
+        {
+          /* Construction lines (Plasticity's lines / SketchUp's guides) to line drawings up with. */
+          Recti gr = lay.row(u.row_h() + u.px(2));
+          const int gw = (gr.w - u.px(12)) / 3;
+          if (u.button({gr.x + u.px(4), gr.y, gw, gr.h}, "Guides from Edges")) guides_from_selected_edges();
+          u.tooltip("A construction line along each selected edge, to draw against.");
+          if (u.button({gr.x + u.px(6) + gw, gr.y, gw, gr.h}, show_guides_ ? "Hide Guides" : "Show Guides", show_guides_)) show_guides_ = !show_guides_;
+          if (u.button({gr.x + u.px(8) + 2 * gw, gr.y, gw, gr.h}, strprintf("Clear Guides (%zu)", scene_->guides.size()))) {
+            scene_->guides.clear();
+            mark_changed("Clear Guides");
+          }
+        }
+        if (draw_.active && draw_.shape != 2 && draw_.shape != 3 && draw_.shape != 5) {
           er.field("Corner Radius", draw_fillet_, 0.005f, 0.0f, 1000.0f);
           u.tooltip("Round the corners of rectangles, polygons and closed polylines (Plasticity: Fillet Curve). 0 keeps them sharp.");
         }
@@ -2034,6 +1905,39 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
         er.enumeration("Falloff", prop_falloff_, kFalloff, 6);
       }
       if (elem_ == EditElement::Face) {  // materials go on faces
+        /* The material itself (Unity's object picker): the selected faces' material, click for every material. */
+        Recti rm = lay.row(u.row_h() + u.px(2));
+        u.label({rm.x + u.px(4), rm.y, er.label_w - u.px(8), rm.h}, "Face Material");
+        Recti fr{rm.x + er.label_w, rm.y, rm.w - er.label_w - u.px(4), rm.h};
+        MaterialPtr cur;
+        bool any_face = false;
+        {
+          GameObject *eo = edit_object();
+          const Mesh &em = **edit_mesh_ptr();
+          auto *mr = eo ? eo->get<MeshRenderer>() : nullptr;
+          for (size_t f = 0; f < face_sel_.size() && f < em.face_count() && !cur; f++)
+            if (face_sel_[f] && mr) {
+              any_face = true;
+              const int s = em.material_of(f);
+              if (s >= 0 && s < (int)mr->materials.size()) cur = mr->materials[(size_t)s];
+              if (!cur) break;
+            }
+        }
+        const bool hot = u.hovered(fr);
+        u.frame(fr, u.theme.field, hot ? u.theme.field_hover : u.theme.field_border, u.px(3));
+        const int sw = u.font.line_height() - u.px(4);
+        const Vec3 c = cur ? cur->base_color : Vec3(0.8f);
+        u.canvas.fill_circle((float)(fr.x + u.px(4) + sw / 2), (float)(fr.y + fr.h / 2), sw * 0.5f, Color::from(Vec3(linear_to_srgb(c.x), linear_to_srgb(c.y), linear_to_srgb(c.z))));
+        u.label({fr.x + sw + u.px(10), fr.y, fr.w - sw - u.px(14), fr.h}, cur ? cur->name : any_face ? "None (Default-Material)" : "Select faces, then pick a material");
+        const ui::Id pid = u.id("face_mat_pick");
+        if (hot && u.in.pressed[0]) {
+          material_pick_search_.clear();
+          u.open_popup(pid, fr);
+          u.consume_click();
+        }
+        u.tooltip("Pick the material itself for the selected faces: its slot is found or added for you.\n"
+                  "You can also drag a material from the Materials or Project window onto a face.");
+        material_picker_popup(pid, edit_object(), [this](const MaterialPtr &m) { assign_material_to_selected_faces(m); });
         Recti r3 = lay.row(u.row_h() + u.px(2));
         u.label({r3.x + u.px(4), r3.y, er.label_w - u.px(8), r3.h}, "Material Slot");
         u.int_field(u.id("assign_slot"), {r3.x + er.label_w, r3.y, u.px(60), r3.h}, assign_slot_, 0, 63);
@@ -2052,6 +1956,95 @@ void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m) {
     m->touch();
     mark_changed("Edit Material " + m->name);  // an asset is written back when the edit finishes
   }
+}
+
+/* The editor's frame rate cap, with what it costs measured on this machine.
+ * Blendity draws on the CPU, so frames are not free: the notes say what each
+ * setting trades (smoothness, CPU and battery, path-tracing samples). */
+void Editor::draw_performance_settings(ui::Layout *lay) {
+  auto &u = ui_;
+  auto row = [&](int h = -1) {
+    if (lay) return lay->row(h);
+    Recti r = u.popup_row(h);
+    return Recti{r.x + u.px(12), r.y, r.w - u.px(24), r.h};
+  };
+  auto text = [&](const std::string &t, uint32_t c) {
+    /* Word-wrapped to the row's width (continuation lines indented under a "- " bullet). */
+    Recti r = row();
+    const bool bullet = t.size() > 2 && t[0] == '-' && t[1] == ' ';
+    const int indent = bullet ? u.font.text_width("- ") : 0;
+    std::string line, word;
+    bool first = true;
+    auto flush = [&] {
+      u.label({r.x + (first ? 0 : indent), r.y, r.w - (first ? 0 : indent), r.h}, line, c);
+      first = false;
+      line.clear();
+    };
+    for (size_t i = 0; i <= t.size(); i++) {
+      if (i < t.size() && t[i] != ' ') {
+        word += t[i];
+        continue;
+      }
+      const std::string next = line.empty() ? word : line + " " + word;
+      if (!line.empty() && u.font.text_width(next) > r.w - (first ? 0 : indent)) {
+        flush();
+        r = row();
+        line = word;
+      }
+      else line = next;
+      word.clear();
+    }
+    if (!line.empty()) flush();
+  };
+  Recti head = row(u.row_h() + u.px(4));
+  u.label(head, "Editor frame rate", u.theme.text_bright);
+  static const char *kCaps[] = {"30 fps", "60 fps", "90 fps", "120 fps", "144 fps", "165 fps", "240 fps", "Unlimited"};
+  static const int kCapValues[] = {30, 60, 90, 120, 144, 165, 240, 0};
+  int ci = 3;
+  for (int k = 0; k < 8; k++)
+    if (kCapValues[k] == max_fps_) ci = k;
+  Recti r1 = row(u.row_h() + u.px(4));
+  u.label({r1.x, r1.y, u.px(150), r1.h}, "Frame rate cap");
+  if (u.combo(u.id("pref_fps"), {r1.x + u.px(150), r1.y + u.px(2), u.px(120), r1.h - u.px(4)}, ci, kCaps, 8)) max_fps_ = kCapValues[ci];
+  u.tooltip("The most frames per second the editor draws (Unity: Preferences > General > Interaction Mode).");
+  static const char *kRedraw[] = {"When something changes", "Always"};
+  int ri = always_redraw_ ? 1 : 0;
+  Recti r2 = row(u.row_h() + u.px(4));
+  u.label({r2.x, r2.y, u.px(150), r2.h}, "Redraw");
+  if (u.combo(u.id("pref_redraw"), {r2.x + u.px(150), r2.y + u.px(2), u.px(200), r2.h - u.px(4)}, ri, kRedraw, 2)) always_redraw_ = ri == 1;
+  u.tooltip("When something changes: idle costs nothing (the default). Always: a steady rate at the cap even when idle.");
+  /* Measured: the last 60 frames' cost. */
+  float avg = 0, worst = 0;
+  const size_t n = std::min<size_t>(60, frame_history_.size());
+  for (size_t k = frame_history_.size() - n; k < frame_history_.size(); k++) {
+    avg += frame_history_[k];
+    worst = std::max(worst, frame_history_[k]);
+  }
+  avg = n ? avg / (float)n : 0.0f;
+  const float reachable = avg > 0.01f ? 1000.0f / avg : 0.0f;
+  text(strprintf("Now: %.0f fps; a frame costs %.1f ms on average (worst %.1f ms) at %d x %d", measured_fps_, avg, worst, fb_.width, fb_.height),
+       u.theme.text);
+  const float budget = max_fps_ > 0 ? 1000.0f / (float)max_fps_ : 0.0f;
+  if (max_fps_ > 0 && avg > budget)
+    text(strprintf("Over budget: %d fps leaves %.1f ms a frame, this machine needs ~%.1f ms here, so it tops out near %.0f fps.", max_fps_, budget, avg,
+                   reachable),
+         u.theme.warning);
+  else if (max_fps_ > 0 && avg > 0.01f)
+    text(strprintf("Within budget: %d fps leaves %.1f ms a frame; this machine could draw about %.0f fps here.", max_fps_, budget, reachable),
+         u.theme.text_dim);
+  const uint32_t dim = u.theme.text_dim;
+  text("What it costs:", u.theme.text);
+  text("- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded / Rendered views cost more per frame.", dim);
+  if (max_fps_ == 0)
+    text("- Unlimited: a CPU core runs flat out while anything moves; fans and battery suffer, and frames beyond the monitor's refresh rate are never seen.", dim);
+  else if (max_fps_ > 144)
+    text("- Above 144 fps: smoother only on a high-refresh monitor; elsewhere it is CPU and battery for frames you can't see.", dim);
+  else if (max_fps_ <= 30)
+    text("- 30 fps: about half the CPU of 60 while you drag, but the mouse feels up to 33 ms behind and orbiting looks steppy.", dim);
+  else
+    text(strprintf("- %d fps: dragging and orbiting draw up to %d frames a second; idle costs nothing unless Redraw is Always.", max_fps_, max_fps_), dim);
+  text("- Rendered (path-traced) viewport: editor frames share the CPU with sampling; a lower cap leaves more for samples.", dim);
+  if (always_redraw_) text("- Always redraw: the cap's CPU cost continues while idle (handy with the Profiler; otherwise wasted power).", u.theme.warning);
 }
 
 }  // namespace bl

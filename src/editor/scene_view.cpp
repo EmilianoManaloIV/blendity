@@ -98,6 +98,7 @@ void Editor::draw_scene_view(const Recti &r) {
 
   draw_scene_icons(view);
   draw_origins(view);
+  draw_guides(view);
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
@@ -127,6 +128,7 @@ void Editor::draw_scene_view(const Recti &r) {
     }
     lines.push_back(strprintf("Triangles %zu (%zu drawn)", scene_stats_.tris_submitted, scene_stats_.tris_rasterized));
     lines.push_back(strprintf("Render    %.2f ms  (%d culled)", scene_stats_.ms_total, scene_stats_.objects_culled));
+    lines.push_back(strprintf("Editor    %.0f fps (cap %s), frame %.1f ms", measured_fps_, max_fps_ ? std::to_string(max_fps_).c_str() : "none", frame_ms_));
     if (shading_ == Shading::Rendered) {
       lines.push_back(strprintf("Path tracing  %d / %d samples", vp_pt_.samples(), scene_->render.viewport_samples));
       lines.push_back("Device    " + vp_pt_.device_summary());

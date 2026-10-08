@@ -839,6 +839,7 @@ void Scene::move_from(Scene &o) {
   compress = o.compress;
   environment = std::move(o.environment);
   render = o.render;
+  guides = std::move(o.guides);
   roots = std::move(o.roots);
   objects_ = std::move(o.objects_);
   by_id_ = std::move(o.by_id_);
@@ -962,6 +963,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->compress = compress;
   s->environment = environment;
   s->render = render;
+  s->guides = guides;
   s->objects_.reserve(objects_.size());
   std::unordered_map<const Material *, MaterialPtr> mat_copy;
   for (auto &o : objects_) {

@@ -133,6 +133,7 @@ class Context {
   void clear_active() { active_ = 0; }
   bool wants_keyboard() const { return edit_id_ != 0; }
   bool editing(Id i) const { return edit_id_ == i; }
+  bool any_editing() const { return edit_id_ != 0; }
   void stop_editing() { edit_id_ = 0; }
   /* Programmatically start editing a text/number field (e.g. F2 rename). */
   void begin_edit(Id i, const std::string &text, bool select_all);

@@ -1766,6 +1766,36 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
       if (meshops::point_in_face(m, 0, mid + out * 0.01f * s, 1e-4f * s)) out = out * -1.0f;
       meshops::attach_face(m, 0, a, b, {mid + out * 0.1f * s});
     });
+    /* Shapes drawn across several faces: circles and squares of random size and
+     * place over each face's plane, crossing its edges, corners and outline. */
+    for (int k = 0; k < (o.quick ? 6 : 24); k++)
+      run("imprint across faces", [&](Mesh &m) {
+        if (!m.face_count()) return;
+        rng = rng * 1664525u + 1013904223u;
+        const size_t f = (rng >> 8) % m.face_count();
+        const Vec3 n = normalize(m.face_normal(f));
+        if (!std::isfinite(n.x)) return;
+        Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), v = cross(n, u);
+        const float r = (0.05f + 0.6f * (float)((rng >> 4) % 1000) / 1000.0f) * s;
+        const Vec3 c = m.face_center(f) + u * (0.3f * s * ((float)((rng >> 12) % 100) / 100.0f - 0.5f));
+        const int sides = k % 3 == 0 ? 4 : 5 + (int)((rng >> 20) % 20);
+        std::vector<Vec3> loop;
+        for (int i = 0; i < sides; i++) {
+          const float a = 2.0f * kPi * i / sides + (k % 3 == 0 ? kPi / 4 : 0.1f * k);
+          loop.push_back(c + (u * std::cos(a) + v * std::sin(a)) * r);
+        }
+        std::vector<size_t> inner;
+        meshops::imprint_loop_across(m, loop, n, &inner);
+        for (size_t g : inner)
+          if (g >= m.face_count()) m.positions.assign(1, Vec3(nan));  // flag a bad index through the check
+      });
+    run("imprint across faces, degenerate loop", [&](Mesh &m) {
+      if (!m.face_count()) return;
+      const Vec3 c = m.face_center(0), n = m.face_normal(0);
+      meshops::imprint_loop_across(m, {c, c, c, c}, n);
+      meshops::imprint_loop_across(m, {c, c + Vec3(1, 0, 0) * s, c + Vec3(2, 0, 0) * s}, n);
+      meshops::imprint_loop_across(m, {Vec3(nan), c, c + Vec3(0, 0, 1)}, n);
+    });
     run("fillet a face's outline", [&](Mesh &m) {
       if (!m.face_count()) return;
       std::vector<Vec3> loop;
@@ -1851,6 +1881,22 @@ int main(int argc, char **argv) {
   }
   register_builtin_components();
   Log::echo_stdout = true;
+  {
+    /* The editor fuzzer clicks and types at random, and the Project window can move,
+     * rename and delete files: it works in a scratch project, never the real Assets. */
+    std::error_code ec;
+    const std::string tmp = (std::filesystem::temp_directory_path(ec) / "blendity_stress").string();
+    const std::string proj = fs::join(tmp, "project"), trash = fs::join(tmp, "trash");
+    fs::make_dirs(fs::join(proj, "Assets/Scenes"));
+    fs::make_dirs(fs::join(proj, "research/papers"));
+#ifdef _WIN32
+    _putenv_s("BLENDITY_PROJECT", proj.c_str());
+    _putenv_s("BLENDITY_TRASH", trash.c_str());
+#else
+    setenv("BLENDITY_PROJECT", proj.c_str(), 1);
+    setenv("BLENDITY_TRASH", trash.c_str(), 1);
+#endif
+  }
   std::printf("Blendity stress test - %d hardware threads, budget %.1f ms%s\n", JobSystem::global().thread_count(),
               o.budget, o.quick ? " (quick)" : "");
   Report rep;

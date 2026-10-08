@@ -570,6 +570,13 @@ struct RenderSettings {
   void reflect(Reflector &r);
 };
 
+/* A construction line (Plasticity's lines, SketchUp's guides): an infinite line
+ * through p along d that drawing snaps to. Not rendered or exported. */
+struct GuideLine {
+  Vec3 p;
+  Vec3 d{1, 0, 0};
+};
+
 class Scene {
  public:
   Scene() = default;
@@ -589,6 +596,7 @@ class Scene {
   bool compress = false;
   EnvironmentSettings environment;
   RenderSettings render;
+  std::vector<GuideLine> guides;  // construction lines for drawing (editor only)
   std::vector<GameObject *> roots;
   /* Play mode: the Jolt world while playing (null otherwise or without Jolt). */
   std::shared_ptr<PhysicsWorld> physics;
@@ -657,6 +665,15 @@ bool load_material_text(const std::string &text, Material &m);
 MaterialPtr material_asset(const std::string &path);  // cached; null when the file is missing
 MaterialPtr create_material_asset(const Material &src, const std::string &path);  // writes it, returns the shared instance
 size_t save_dirty_material_assets();  // writes the assets changed since they were saved
+/* The material assets loaded so far (path, shared instance). */
+std::vector<std::pair<std::string, MaterialPtr>> loaded_material_assets();
+/* A .mat (or a folder of them) moved or renamed on disk: the shared instances follow
+ * (asset_path, library key). Paths are project-relative ("Assets/..."). Returns how many. */
+size_t retarget_material_assets(const std::string &from, const std::string &to);
+/* A .mat (or folder) deleted: materials that used it become scene materials (they keep their values). */
+size_t forget_material_assets(const std::string &path);
+/* Rewrites references to a moved asset (or folder) in every .scene file under dir. Returns files changed. */
+size_t retarget_scene_files(const std::string &dir, const std::string &from, const std::string &to);
 /* After undo / redo / load: every slot naming an asset uses the library's
  * instance (taking the restored values), so assets stay shared. */
 /* take_scene_values: true after undo / redo (the restored values win), false after

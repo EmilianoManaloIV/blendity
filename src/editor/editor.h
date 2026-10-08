@@ -33,7 +33,10 @@
 
 namespace bl {
 
-extern const char *const kDrawShapes[5];  // draw_tool.cpp: Polyline, Rectangle, Circle, Arc, Polygon
+constexpr int kDrawShapeCount = 6;
+extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyline, Rectangle, Circle, Arc, Polygon, Guide
+extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
+extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Count };
 const char *window_title(WindowKind k);
@@ -129,8 +132,16 @@ class Editor {
     return true;
   }
   float scene_fov() const { return cam_.fov; }
+  Vec3 scene_eye() const { return cam_.position(); }
+  /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
+  Recti pilot_frame() const {
+    GameObject *g = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr;
+    const Camera *c = g ? g->get<Camera>() : nullptr;
+    return c ? pilot_frame_rect(scene_rect_, *c) : Recti{0, 0, 0, 0};
+  }
   GameObject *selected_object() const { return active_object(); }
   void commit_change(const std::string &what) { mark_changed(what); }
+  size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
 
  private:
   friend struct InspectorReflector;
@@ -388,7 +399,7 @@ class Editor {
   /* object_ops.cpp: Join (Ctrl+J), Boolean (0 Difference, 1 Union, 2 Intersect; apply = Bool Tool's
    * Auto, else a live modifier), Separate ("selection" in Edit Mode, "loose"). */
   /* ---- Material assets and drag & drop (material_assets.cpp) ---- */
-  MaterialPtr new_material_asset(const MaterialPtr &src, bool replace_in_scene);  // Assets/Materials/<name>.mat
+  MaterialPtr new_material_asset(const MaterialPtr &src, bool replace_in_scene, const std::string &dir = "");  // <dir or Assets/Materials>/<name>.mat
   void assign_material(GameObject *g, int slot, const MaterialPtr &m);
   void assign_material_to_face(GameObject *g, uint32_t face, const MaterialPtr &m);  // the face's slot (added if needed)
   void remove_material_slot(GameObject *g, int slot);  // faces on it move to the slot before
@@ -418,6 +429,14 @@ class Editor {
   bool drop_asset(const std::string &path, int mx, int my, MaterialPtr mat = nullptr);
   /* Materials window (material_window.cpp): every material as a thing of its own (Unity). */
   void draw_materials_window(const Recti &r);
+  std::vector<MaterialPtr> pickable_materials(GameObject *g);
+  void material_picker_popup(ui::Id pid, GameObject *g, std::function<void(const MaterialPtr &)> pick);
+  std::string material_pick_search_;
+
+ public:
+  bool assign_material_to_selected_faces(const MaterialPtr &m);  // Edit Mode: the material itself, not a slot number
+
+ private:
   void draw_tools_window(const Recti &r);  // Modeling Tools window (UModeler's tool panel)
   MaterialPtr material_selected_;
   std::string material_search_;
@@ -426,6 +445,11 @@ class Editor {
   uint64_t pilot_cam_ = 0;      // the camera the Scene view is flying
   SceneCamera pilot_saved_cam_;
   uint64_t pilot_last_hash_ = 0;
+  Vec3 pilot_cam_pos_;          // the camera as piloting last left it
+  Quat pilot_cam_rot_;
+  float pilot_cam_lens_ = 0.0f;
+  Recti pilot_frame_rect(const Recti &view, const Camera &c) const;
+  void pilot_view_from_camera(GameObject *g, Camera *c);
   bool gizmo_vsnap_ = false;    // V held when the move started: vertex snapping
   Vec3 gizmo_vsnap_anchor_;
   bool gizmo_snap_shown_ = false;  // a vertex / surface target to draw this frame
@@ -489,6 +513,20 @@ class Editor {
   double frame_start_ = 0;
   float frame_ms_ = 0, ui_ms_ = 0;
   std::vector<float> frame_history_, raster_history_;
+  /* Editor frame rate (Preferences > Performance). */
+  int max_fps_ = 120;           // 0: unlimited
+  bool always_redraw_ = false;  // keep drawing at the cap even when nothing changes
+  std::vector<double> frame_stamps_;  // the last second's frame start times
+  float measured_fps_ = 0;
+  void draw_performance_settings(ui::Layout *lay);  // Preferences and the Profiler
+
+ public:
+  /* Seconds to wait before the next frame may start (the cap), given the last frame's start. */
+  double frame_wait_seconds(double now, double last_frame) const;
+  int max_fps() const { return max_fps_; }
+  bool always_redraw() const { return always_redraw_; }
+
+ private:
   int frames_ = 0;
   std::string last_title_;
   std::vector<platform::Event> pending_events_;
@@ -622,6 +660,14 @@ class Editor {
     bool guide = false;
   } draw_;
   int draw_segments_ = 24, draw_sides_ = 6;
+  int draw_rect_mode_ = 0;    // kRectModes: from a corner, from the centre, or 3 points (any angle)
+  int draw_circle_mode_ = 0;  // kCircleModes: centre + radius, 2 points across, 3 points on it
+  bool draw_uniform_ = false; // rectangles come out square
+  bool show_guides_ = true;   // construction lines (Scene::guides)
+  size_t draw_points_needed() const;
+  void draw_guide_line(const Recti &view, const GuideLine &gl, uint32_t color);
+  void draw_guides(const Recti &view);
+  size_t guides_from_selected_edges();
   struct DrawHit {
     bool ok = false;
     Vec3 world;
@@ -740,6 +786,25 @@ class Editor {
   double project_listed_ = -100;
   std::string project_selected_;
   std::string project_search_;
+  /* ---- Project window: folders, rename, delete (project_window.cpp) ---- */
+  std::string project_rename_;  // the entry being renamed (absolute path)
+  std::string project_rename_buf_;
+  std::string project_delete_;  // waiting for the user to confirm
+  std::vector<std::pair<Recti, std::string>> drop_folders_;  // folders a dragged asset moves into
+  std::vector<std::string> material_paths_;
+  double material_paths_listed_ = -100;
+
+ public:
+  const std::vector<std::string> &material_asset_paths();  // every .mat under Assets, project-relative
+  bool move_project_entry(const std::string &from, const std::string &to_dir, const std::string &new_name = "");
+  bool rename_project_entry(const std::string &path, const std::string &new_name);
+  bool delete_project_entry(const std::string &path);
+  std::string create_project_folder(const std::string &dir);
+  void sync_material_asset_names();  // a material's new name renames its file (Unity)
+  void invalidate_project_listing();
+  void retarget_asset_references(const std::string &from, const std::string &to);
+
+ private:
 
   /* ---- console ---- */
   std::vector<LogEntry> log_;

@@ -361,6 +361,10 @@ size_t draft(Mesh &m, const std::vector<uint8_t> &face_sel, float angle_deg, Vec
 void radial_array(Mesh &m, int count, int axis, float angle_deg, float merge_dist);
 /* Rounded corners for a drawn outline (Plasticity's curve fillet): each corner becomes an arc. */
 std::vector<Vec3> fillet_polygon(const std::vector<Vec3> &pts, bool closed, float radius, int segments, Vec3 normal);
+/* A closed shape drawn across several coplanar faces: cut into all of them. inner_faces gets the
+ * faces it encloses; returns one of them, or -1 when no face in the plane is touched. */
+long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop, Vec3 normal, std::vector<size_t> *inner_faces = nullptr,
+                         std::string *error = nullptr);
 }  // namespace meshops
 
 }  // namespace bl

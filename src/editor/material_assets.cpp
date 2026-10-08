@@ -21,8 +21,8 @@ static std::string unique_path(const std::string &dir, const std::string &base, 
   return p;
 }
 
-MaterialPtr Editor::new_material_asset(const MaterialPtr &src, bool replace_in_scene) {
-  const std::string dir = fs::join(assets_dir_, "Materials");
+MaterialPtr Editor::new_material_asset(const MaterialPtr &src, bool replace_in_scene, const std::string &dir_in) {
+  const std::string dir = dir_in.empty() ? fs::join(assets_dir_, "Materials") : dir_in;
   fs::make_dirs(dir);
   const Material base = src ? *src : *make_material("New Material", Vec3(0.8f));
   const std::string abs = unique_path(dir, base.name == "Material" ? "New Material" : base.name, ".mat");
@@ -43,7 +43,7 @@ MaterialPtr Editor::new_material_asset(const MaterialPtr &src, bool replace_in_s
     });
     mark_changed("Save Material as Asset");
   }
-  project_listed_ = -100;
+  invalidate_project_listing();
   Log::info("Material asset: %s", make_asset_relative(abs).c_str());
   return m;
 }
@@ -130,10 +130,16 @@ void Editor::update_asset_drag() {
   if (!d.pending) return;
   if (!d.dragging && (std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6))) d.dragging = true;
   if (d.dragging) {
-    const bool image = !d.mat && fs::extension(d.path) != ".mat";
-    const std::string label = (image ? "Texture: " : "Material: ") + (d.mat ? d.mat->name : fs::stem(d.path));
+    const bool image = !d.mat && image_extension_supported(fs::extension(d.path));
+    const bool material = d.mat || fs::extension(d.path) == ".mat";
+    const std::string label = (image ? "Texture: " : material ? "Material: " : fs::is_dir(d.path) ? "Folder: " : "") +
+                              (d.mat ? d.mat->name : fs::filename(d.path));
     /* Highlight what it would land on. */
     Recti target{0, 0, 0, 0};
+    if (!image && !material) {
+      for (auto &f : drop_folders_)
+        if (f.first.contains(in.mx, in.my)) target = f.first;
+    }
     for (auto &s : drop_slots_)
       if (!image && s.r.contains(in.mx, in.my)) target = s.r;
     for (auto &t : drop_textures_)
@@ -150,7 +156,21 @@ void Editor::update_asset_drag() {
     ui_.cursor = platform::Cursor::Hand;
   }
   if (!in.down[0]) {
-    if (d.dragging) drop_asset(d.path, in.mx, in.my, d.mat);
+    if (d.dragging) {
+      /* Onto a folder in the Project window: move it there (a scene material is saved there as an asset). */
+      const std::pair<Recti, std::string> *folder = nullptr;
+      for (auto &f : drop_folders_)
+        if (f.first.contains(in.mx, in.my)) folder = &f;
+      if (folder) {
+        if (d.mat && d.mat->asset_path.empty()) new_material_asset(d.mat, true, folder->second);
+        else {
+          const std::string src = d.mat ? resolve_asset_path(d.mat->asset_path) : d.path;
+          if (fs::normalize(fs::parent(src)) != fs::normalize(folder->second)) move_project_entry(src, folder->second);
+        }
+      }
+      else if (d.mat || fs::extension(d.path) == ".mat" || image_extension_supported(fs::extension(d.path)))
+        drop_asset(d.path, in.mx, in.my, d.mat);
+    }
     d = AssetDrag{};
   }
 }

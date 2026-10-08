@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstring>
 #include <cstdarg>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -205,6 +206,19 @@ bool copy_file(const std::string &from, const std::string &to) {
   return !ec;
 }
 
+bool move(const std::string &from, const std::string &to) {
+  std::error_code ec;
+  if (stdfs::exists(P(to), ec)) return false;
+  stdfs::rename(P(from), P(to), ec);
+  if (!ec) return true;
+  /* Another drive: copy, then remove the original. */
+  ec.clear();
+  stdfs::copy(P(from), P(to), stdfs::copy_options::recursive, ec);
+  if (ec) return false;
+  stdfs::remove_all(P(from), ec);
+  return true;
+}
+
 std::string current_dir() {
   std::error_code ec;
   return S(stdfs::current_path(ec));
@@ -235,6 +249,38 @@ std::string home_dir() {
   return up ? std::string(up) : current_dir();
 }
 
+bool move_to_trash(const std::string &path, std::string *error) {
+  if (!exists(path)) {
+    if (error) *error = "not found";
+    return false;
+  }
+  if (const char *dir = std::getenv("BLENDITY_TRASH")) {  // tests: a scratch folder instead of the user's Trash
+    if (*dir) {
+      make_dirs(dir);
+      std::string target = join(dir, filename(normalize(path)));
+      for (int i = 2; exists(target); i++) target = join(dir, strprintf("%s.%d", filename(normalize(path)).c_str(), i));
+      if (move(path, target)) return true;
+      if (error) *error = "could not move it to BLENDITY_TRASH";
+      return false;
+    }
+  }
+  /* SHFileOperation with FOF_ALLOWUNDO: the Recycle Bin (double-NUL-terminated path). */
+  std::wstring w = widen(normalize(path));
+  for (auto &c : w)
+    if (c == L'/') c = L'\\';
+  w.push_back(L'\0');
+  SHFILEOPSTRUCTW op{};
+  op.wFunc = FO_DELETE;
+  op.pFrom = w.c_str();
+  op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+  const int r = SHFileOperationW(&op);
+  if (r != 0 || op.fAnyOperationsAborted) {
+    if (error) *error = strprintf("the Recycle Bin refused it (code %d)", r);
+    return false;
+  }
+  return !exists(path);
+}
+
 void open_external(const std::string &path) {
   std::wstring w = widen(path);
   for (auto &c : w)
@@ -258,6 +304,57 @@ std::string executable_dir() {
 std::string home_dir() {
   const char *h = std::getenv("HOME");
   return h ? std::string(h) : current_dir();
+}
+
+/* The freedesktop.org Trash (~/.local/share/Trash: files/ and info/), which
+ * file managers on Linux show and restore from; ~/.Trash on macOS. */
+bool move_to_trash(const std::string &path, std::string *error) {
+  if (!exists(path)) {
+    if (error) *error = "not found";
+    return false;
+  }
+  if (const char *dir = std::getenv("BLENDITY_TRASH")) {  // tests: a scratch folder instead of the user's Trash
+    if (*dir) {
+      make_dirs(dir);
+      std::string target = join(dir, filename(normalize(path)));
+      for (int i = 2; exists(target); i++) target = join(dir, strprintf("%s.%d", filename(normalize(path)).c_str(), i));
+      if (move(path, target)) return true;
+      if (error) *error = "could not move it to BLENDITY_TRASH";
+      return false;
+    }
+  }
+#  ifdef __APPLE__
+  const std::string files = join(home_dir(), ".Trash"), info;
+#  else
+  const char *xdg = std::getenv("XDG_DATA_HOME");
+  const std::string base = xdg && *xdg ? join(xdg, "Trash") : join(home_dir(), ".local/share/Trash");
+  const std::string files = join(base, "files"), info = join(base, "info");
+  make_dirs(info);
+#  endif
+  make_dirs(files);
+  const std::string name = filename(normalize(path));
+  std::string target = join(files, name), leaf = name;
+  for (int i = 2; exists(target) || (!info.empty() && exists(join(info, leaf + ".trashinfo"))); i++) {
+    leaf = strprintf("%s.%d", name.c_str(), i);
+    target = join(files, leaf);
+  }
+  if (!info.empty()) {
+    char when[32];
+    const time_t t = time(nullptr);
+    struct tm lt;
+    localtime_r(&t, &lt);
+    strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S", &lt);
+    write_file(join(info, leaf + ".trashinfo"), "[Trash Info]\nPath=" + normalize(path) + "\nDeletionDate=" + when + "\n");
+  }
+  if (!move(path, target)) {
+    if (!info.empty()) {
+      std::error_code ec;
+      stdfs::remove(P(join(info, leaf + ".trashinfo")), ec);
+    }
+    if (error) *error = "could not move it to " + files;
+    return false;
+  }
+  return true;
 }
 
 void open_external(const std::string &path) {

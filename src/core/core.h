@@ -75,6 +75,10 @@ std::vector<DirEntry> list(const std::string &dir);
 bool read_file(const std::string &path, std::string &out);
 bool write_file(const std::string &path, const std::string &data);
 bool copy_file(const std::string &from, const std::string &to);
+/* Moves or renames a file or folder (also across drives). Fails if `to` exists. */
+bool move(const std::string &from, const std::string &to);
+/* Sends a file or folder to the Recycle Bin / Trash so it can be restored. */
+bool move_to_trash(const std::string &path, std::string *error = nullptr);
 std::string executable_dir();
 std::string current_dir();
 std::string home_dir();
