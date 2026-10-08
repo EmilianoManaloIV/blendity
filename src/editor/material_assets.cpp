@@ -130,8 +130,8 @@ void Editor::update_asset_drag() {
   if (!d.pending) return;
   if (!d.dragging && (std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6))) d.dragging = true;
   if (d.dragging) {
-    const bool image = fs::extension(d.path) != ".mat";
-    const std::string label = (image ? "Texture: " : "Material: ") + fs::stem(d.path);
+    const bool image = !d.mat && fs::extension(d.path) != ".mat";
+    const std::string label = (image ? "Texture: " : "Material: ") + (d.mat ? d.mat->name : fs::stem(d.path));
     /* Highlight what it would land on. */
     Recti target{0, 0, 0, 0};
     for (auto &s : drop_slots_)
@@ -150,14 +150,14 @@ void Editor::update_asset_drag() {
     ui_.cursor = platform::Cursor::Hand;
   }
   if (!in.down[0]) {
-    if (d.dragging) drop_asset(d.path, in.mx, in.my);
+    if (d.dragging) drop_asset(d.path, in.mx, in.my, d.mat);
     d = AssetDrag{};
   }
 }
 
-bool Editor::drop_asset(const std::string &path, int mx, int my) {
+bool Editor::drop_asset(const std::string &path, int mx, int my, MaterialPtr given) {
   const std::string ext = fs::extension(path);
-  if (ext != ".mat") {
+  if (!given && ext != ".mat") {
     /* An image onto a material's texture field. */
     for (auto &t : drop_textures_)
       if (t.r.contains(mx, my)) {
@@ -171,7 +171,7 @@ bool Editor::drop_asset(const std::string &path, int mx, int my) {
     Log::warn("Drop an image onto a material's texture field (Base Map, Normal Map...)");
     return false;
   }
-  MaterialPtr m = material_asset(make_asset_relative(path));
+  MaterialPtr m = given ? given : material_asset(make_asset_relative(path));
   if (!m) {
     Log::error("Could not read the material %s", path.c_str());
     return false;

@@ -35,7 +35,7 @@ namespace bl {
 
 extern const char *const kDrawShapes[5];  // draw_tool.cpp: Polyline, Rectangle, Circle, Arc, Polygon
 
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Count };
 const char *window_title(WindowKind k);
 ui::Icon window_icon(WindowKind k);
 
@@ -119,6 +119,16 @@ class Editor {
   void select_object_add(uint64_t id) { select(id, SEL_ADD); }  // Ctrl+click: the last one added is active
   bool origin_editing() const { return origin_edit_; }
   bool pivot_is_center() const { return pivot_center_; }
+  /* Tests: where a world point is in the window (after a frame has drawn the Scene view). */
+  bool project_to_window(Vec3 w, int &x, int &y) {
+    Vec2 s;
+    float z;
+    if (!scene_r3d_.project(w, s, z)) return false;
+    x = scene_rect_.x + (int)std::lround(s.x);
+    y = scene_rect_.y + (int)std::lround(s.y);
+    return true;
+  }
+  float scene_fov() const { return cam_.fov; }
   GameObject *selected_object() const { return active_object(); }
   void commit_change(const std::string &what) { mark_changed(what); }
 
@@ -367,6 +377,8 @@ class Editor {
   std::string export_dir_;  // the folder the last export went to
   std::string import_dir_;  // the folder the last import came from
   void draw_export_options();  // panels.cpp
+  void draw_edit_tools(ui::Layout &lay);
+  void draw_material_fields(ui::Layout &lay, const MaterialPtr &m);  // panels.cpp: Edit Mode tools (Inspector and Modeling Tools)
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();
@@ -386,6 +398,7 @@ class Editor {
   struct AssetDrag {
     bool pending = false, dragging = false;
     std::string path;
+    MaterialPtr mat;  // a material dragged from the Materials window (no file needed)
     int x = 0, y = 0;
   } asset_drag_;
   struct SlotTarget {
@@ -402,7 +415,29 @@ class Editor {
   std::vector<TextureTarget> drop_textures_;
   std::vector<std::pair<Recti, uint64_t>> drop_rows_;  // Hierarchy rows
   void update_asset_drag();
-  bool drop_asset(const std::string &path, int mx, int my);
+  bool drop_asset(const std::string &path, int mx, int my, MaterialPtr mat = nullptr);
+  /* Materials window (material_window.cpp): every material as a thing of its own (Unity). */
+  void draw_materials_window(const Recti &r);
+  void draw_tools_window(const Recti &r);  // Modeling Tools window (UModeler's tool panel)
+  MaterialPtr material_selected_;
+  std::string material_search_;
+  /* ---- Object snapping and camera piloting (object_snap.cpp) ---- */
+  bool surface_align_ = false;  // surface snap also turns the object's up to the normal
+  uint64_t pilot_cam_ = 0;      // the camera the Scene view is flying
+  SceneCamera pilot_saved_cam_;
+  uint64_t pilot_last_hash_ = 0;
+  bool gizmo_vsnap_ = false;    // V held when the move started: vertex snapping
+  Vec3 gizmo_vsnap_anchor_;
+  bool gizmo_snap_shown_ = false;  // a vertex / surface target to draw this frame
+  Vec3 gizmo_snap_point_;
+  bool raycast_surface(const Ray &ray, Vec3 &hit, Vec3 &normal, const std::vector<GameObject *> &exclude);
+  Vec3 rest_on_surface(GameObject *g, Vec3 p, Vec3 n, const Quat &start_rot, bool align, Quat &rot);
+  void drop_objects_on_surface(const std::vector<GameObject *> &objs, int mx, int my);
+  bool nearest_vertex_on_screen(const Recti &view, int mx, int my, float radius, bool selected_only, bool skip_selected, Vec3 &out);
+  void toggle_pilot_camera();
+  void update_pilot_camera();
+  void align_camera_to_view();
+  void draw_pilot_frame(const Recti &view);
   void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
   void join_selected();
   void boolean_selected(int op, bool apply);
@@ -565,6 +600,9 @@ class Editor {
   void knife_begin();
   bool knife_update(const Recti &view);
   void knife_draw(const Recti &view);
+  float shell_thickness_ = 0.05f;  // Shell / Thicken
+  float draft_angle_ = 5.0f;       // Draft
+  float draw_fillet_ = 0.0f;       // corner radius of drawn shapes (Plasticity curve fillet)
   float spin_angle_ = 360.0f;  // Spin / Lathe
   int spin_steps_ = 12, spin_axis_ = 1;
   int slice_axis_ = 1;   // X, Y, Z, View
@@ -579,6 +617,9 @@ class Editor {
     Vec3 plane_p, plane_n;
     bool has_plane = false;
     int face = -1;  // the face of the edited mesh the shape is drawn on (-1: the ground / free)
+    Vec3 axis_u{1, 0, 0};  // the plane's first axis: along the face's longest edge or the object's X
+    Vec3 guide_dir;        // the direction the last inference locked to (drawn as a guide)
+    bool guide = false;
   } draw_;
   int draw_segments_ = 24, draw_sides_ = 6;
   struct DrawHit {

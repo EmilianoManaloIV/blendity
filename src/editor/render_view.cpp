@@ -594,7 +594,7 @@ void Editor::draw_camera_preview(const Recti &view) {
   }
   Camera *cam = g ? g->get<Camera>() : nullptr;
   cam_preview_rect_ = Recti{};
-  if (!cam || !cam->enabled || (edit_mode_ && !cam_preview_lock_)) {
+  if (!cam || !cam->enabled || (edit_mode_ && !cam_preview_lock_) || (g && g->id == pilot_cam_)) {  // piloting: the view is the preview
     cam_preview_pt_hash_ = 0;
     return;
   }

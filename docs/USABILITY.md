@@ -79,13 +79,19 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Materials lived only inside objects; reusing one meant picking it from a list per slot. | Material assets (.mat) dragged from the Project window onto objects, faces, Hierarchy rows or slots, as in Unity. |
 | Only the last material slot could be removed. | An x on every slot, and Remove Unused Slots. |
 | Shapes could only come from primitives or extrusion. | Draw polylines, rectangles, circles, arcs and polygons onto faces (cut into them) or the ground (new faces), with SketchUp-style snapping. |
+| Drawing on a rotated object snapped only to the world's axes. | The drawing plane follows the face's edges (or the object's rotation), and from the last point it snaps parallel or perpendicular to the mesh's edges and square to the previous segment, with a dotted guide (SketchUp inference). |
+| An arc drawn on a rectangle's side, then Push/Pull, gave a broken face and an open bottom. | The arc becomes a second face sharing that side, and Push/Pull on a free-standing face closes the solid. |
+| Materials could only be seen and changed inside an object's Inspector. | The Materials window shows every material and asset as a preview sphere to edit, drag or assign. |
+| Placing one object on another meant nudging it by eye. | Ctrl+Shift while moving (or dragging from the Hierarchy) drops it onto the surface; V snaps vertex to vertex, as in Unity. |
+| Framing a shot meant moving the camera by numbers and checking the preview. | Pilot Camera: fly the Scene view and the camera follows, Ctrl+wheel sets its FOV, with a frame and thirds guides. |
+| The modeling tools were only in the Inspector of a selected object. | The Modeling Tools window holds them all, including creating and drawing with nothing selected. |
 
 ## Still worth doing
 
 1. **A Blender navigation preference**: MMB orbit, Shift+MMB pan and numpad views, for users who want Blender navigation too. It shares no keys with modeling, so it is independent of everything above.
 2. **A context menu on right-click without dragging** (Unity's Scene view menu, Blender's W menu): the current mode's operators under the cursor. Right-click is already split between fly (drag) and cancel (during operators), so a click without movement is free.
 3. **Pie menus or a search** (Blender's F3): with about 50 operators now, a type-to-find box is the fastest way to reach a rare one.
-4. **Snapping during G** to vertices, edges and faces (Blender's snap targets), not just the grid increment.
+4. **Snapping during G** to vertices, edges and faces (Blender's snap targets): the move gizmo now has vertex (V) and surface (Ctrl+Shift) snapping; G itself still snaps only to the grid.
 5. **Proportional editing during G / R / S** (it already works with the gizmos), with the wheel changing its radius.
 6. **Spin** (an interactive Screw on the selection) and **Knife cuts through several faces** in one stroke: the Knife and the Screw modifier are in; these are their next steps.
-7. **The Inspector's operator grids are long.** Collapsible groups (Select, Transform, Topology), or showing only the operators the current selection can use, would help.
+7. **The Inspector's operator grids are long.** The Modeling Tools window now has collapsible sections; collapsible groups (Select, Transform, Topology), or showing only the operators the current selection can use, would help.

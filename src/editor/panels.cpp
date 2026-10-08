@@ -225,6 +225,10 @@ void Editor::draw_hierarchy(const Recti &r) {
         for (GameObject *mv : moving) scene_->set_parent(mv, nullptr);  // drop on empty space = unparent
         mark_changed("Unparent");
       }
+      else if (scene_rect_.contains(in.mx, in.my)) {
+        /* Dragged into the Scene view: drop it onto the surface under the mouse (Unity). */
+        drop_objects_on_surface(moving, in.mx, in.my);
+      }
     }
   }
   if (!in.down[0]) {
@@ -999,6 +1003,14 @@ void Editor::draw_inspector(const Recti &r) {
           focus_pick_cam_ = picking ? 0 : g->id;
         u.tooltip("Eyedropper: click a surface in the Scene view and the focus distance becomes that point's\n"
                   "distance from this camera (along its view). Turns Depth of Field on.");
+        row = lay.row(u.row_h() + u.px(2));
+        const int hw = (row.w - u.px(12)) / 2;
+        const bool piloting = pilot_cam_ == g->id;
+        if (u.button({row.x + u.px(4), row.y, hw, row.h}, piloting ? "Stop Piloting (Esc)" : "Pilot Camera", piloting, Icon::Camera)) toggle_pilot_camera();
+        u.tooltip("Look through this camera in the Scene view and frame the shot by navigating: orbit, pan, fly and the wheel\n"
+                  "move the camera itself, Ctrl + wheel changes its field of view (its lens). Blender: Lock Camera to View.");
+        if (u.button({row.x + u.px(8) + hw, row.y, hw, row.h}, "Align to View")) align_camera_to_view();
+        u.tooltip("Move this camera to where the Scene view is looking from (Unity: GameObject > Align With View).");
       }
       /* Light: the same eyedropper aims it (Blender: Track To / Point At; Unity: LookAt). */
       if (auto *lc = dynamic_cast<Light *>(c)) {
@@ -1052,116 +1064,7 @@ void Editor::draw_inspector(const Recti &r) {
           if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
         }
         if (edit_mode_ && g->id == edit_obj_) {
-          InspectorReflector er(*this, u, lay);
-          /* Selection mode, then only that mode's operators and their settings
-           * (ProBuilder's Vertex / Edge / Face actions). */
-          {
-            Recti mr = lay.row(u.row_h() + u.px(4));
-            static const char *kModes[] = {"Vertex (1)", "Edge (2)", "Face (3)"};
-            const Icon kIcons[] = {Icon::Vertex, Icon::Grid, Icon::Face};
-            int w3m = (mr.w - u.px(16)) / 3;
-            for (int k = 0; k < 3; k++) {
-              if (u.button({mr.x + u.px(4) + k * (w3m + u.px(4)), mr.y, w3m, mr.h}, kModes[k], (int)elem_ == k, kIcons[k]))
-                set_edit_element((EditElement)k);
-              u.tooltip(k == 0 ? "Vertex select mode: vertex operations." : k == 1 ? "Edge select mode: edge operations." : "Face select mode: face operations.");
-            }
-          }
-          {
-            /* SketchUp-style n-gon editing. */
-            Recti nr = lay.row(u.row_h() + u.px(2));
-            const int nw = (nr.w - u.px(16)) / 3;
-            if (u.button({nr.x + u.px(4), nr.y, nw, nr.h}, ngon_mode_ ? "N-gon Mode: On" : "N-gon Mode: Off", ngon_mode_, Icon::Face))
-              ngon_mode_ = !ngon_mode_;
-            u.tooltip("SketchUp-style faces: a flat region of faces acts as one face (inner edges hidden,\n"
-                      "one click selects it all, Push/Pull moves it all).");
-            if (u.button({nr.x + u.px(8) + nw, nr.y, nw, nr.h}, "Merge Coplanar")) edit_tool("dissolve_limited");
-            u.tooltip("Make each flat region one real n-gon and drop corners on straight edges.\nBlender: Limited Dissolve.");
-            if (u.button({nr.x + u.px(12) + 2 * nw, nr.y, nw, nr.h}, knife_.active ? "Knife (on)" : "Knife / Line (K)", knife_.active))
-              edit_tool("knife");
-            u.tooltip("Split a face along a line between two points on its edges or corners.\nSketchUp: Line tool. Blender: Knife (K).");
-          }
-          {
-            /* Drawing tools (UModeler / SketchUp): shapes drawn onto the mesh with snapping. */
-            Recti dr = lay.row(u.row_h() + u.px(2));
-            u.label({dr.x + u.px(4), dr.y, u.px(40), dr.h}, "Draw", u.theme.accent);
-            const int x0 = dr.x + u.px(44), dw = (dr.right() - x0 - u.px(4) - 4 * u.px(3)) / 5;
-            for (int k = 0; k < 5; k++) {
-              const bool on = draw_.active && draw_.shape == k;
-              if (u.button({x0 + k * (dw + u.px(3)), dr.y, dw, dr.h}, kDrawShapes[k], on)) {
-                if (on) draw_.active = false;
-                else draw_begin(k);
-              }
-              u.tooltip("Draw onto the mesh (or the ground) with snapping to corners, midpoints, edges, faces and the grid.\n"
-                        "A closed shape inside a face is cut into it, ready for Push/Pull; a line between edges splits the face;\n"
-                        "anything else becomes new faces or wire edges. UModeler: drawing tools. SketchUp: Line, Rectangle, Circle, Arc, Polygon.");
-            }
-            if (draw_.active && (draw_.shape == 2 || draw_.shape == 3)) er.field("Circle / Arc Segments", draw_segments_, 3, 256);
-            if (draw_.active && draw_.shape == 4) er.field("Polygon Sides", draw_sides_, 3, 64);
-          }
-          if (elem_ == EditElement::Face) {
-            er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
-            er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
-            er.field("Bridge Segments", bridge_segments_, 1, 256);
-            er.field("Auto Fuse on Contact", auto_fuse_);
-            u.tooltip("Faces extruded or moved onto another face of the mesh merge into it\n(the touching area becomes an opening): bridging by extrusion.");
-          }
-          else if (elem_ == EditElement::Edge) {
-            er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
-            er.field("Bevel Segments", bevel_segments_, 1, 64);
-            er.field("Bevel Clamp Overlap", bevel_clamp_);
-            er.field("Loop Cuts", loop_cuts_, 1, 64);
-            er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
-            er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
-            er.field("Sharp Angle", seam_angle_, 0.5f, 0.0f, 180.0f);
-            u.tooltip("Seams from Sharp and Select Sharp Edges use edges whose faces meet at more than this (Blender: 30).");
-            er.field("Bridge Segments", bridge_segments_, 1, 256);
-          }
-          else {
-            er.field("Smooth Factor", smooth_factor_, 0.01f, 0.0f, 1.0f);
-          }
-          {
-            /* The mode's operators, three to a row; then the ones every mode has. */
-            std::vector<const EditOpInfo *> mine, common;
-            for (const EditOpInfo &op : edit_op_table())
-              (op.elements == 7 ? common : mine).push_back(&op);
-            mine.erase(std::remove_if(mine.begin(), mine.end(), [&](const EditOpInfo *o) { return !edit_op_available(o->op); }), mine.end());
-            auto grid = [&](const std::vector<const EditOpInfo *> &list) {
-              for (size_t i = 0; i < list.size(); i += 3) {
-                Recti row = lay.row(u.row_h() + u.px(2));
-                int bw3 = (row.w - u.px(16)) / 3;
-                for (size_t k = i; k < std::min(list.size(), i + 3); k++) {
-                  int x = row.x + u.px(4) + (int)(k - i) * (bw3 + u.px(4));
-                  if (u.button({x, row.y, bw3, row.h}, list[k]->label)) edit_tool(list[k]->op);
-                  u.tooltip(list[k]->keys[0] ? strprintf("%s (%s)", list[k]->tip, list[k]->keys) : std::string(list[k]->tip));
-                }
-              }
-            };
-            grid(mine);
-            grid(common);
-          }
-          static const char *kAxesXYZ[] = {"X", "Y", "Z", "View"};
-          if (elem_ != EditElement::Face) {
-            er.field("Spin Angle", spin_angle_, 1.0f, -3600.0f, 3600.0f);
-            er.field("Spin Steps", spin_steps_, 1, 512);
-            er.enumeration("Spin Axis", spin_axis_, kAxesXYZ, 3);
-            u.tooltip("Spin / Lathe turns round this axis of the object, through its origin.");
-          }
-          er.enumeration("Slice Axis", slice_axis_, kAxesXYZ, 4);
-          static const char *kClear[] = {"Keep Both Sides", "Remove Above", "Remove Below"};
-          er.enumeration("Slice Keeps", slice_clear_, kClear, 3);
-          er.field("Proportional Editing", proportional_);
-          if (proportional_) {
-            er.field("Proportional Radius", prop_radius_, 0.01f, 0.001f, 10000.0f);
-            static const char *kFalloff[] = {"Smooth", "Sphere", "Root", "Sharp", "Linear", "Constant"};
-            er.enumeration("Falloff", prop_falloff_, kFalloff, 6);
-          }
-          if (elem_ == EditElement::Face) {  // materials go on faces
-            Recti r3 = lay.row(u.row_h() + u.px(2));
-            u.label({r3.x + u.px(4), r3.y, er.label_w - u.px(8), r3.h}, "Material Slot");
-            u.int_field(u.id("assign_slot"), {r3.x + er.label_w, r3.y, u.px(60), r3.h}, assign_slot_, 0, 63);
-            if (u.button({r3.x + er.label_w + u.px(66), r3.y, r3.w - er.label_w - u.px(70), r3.h}, "Assign to Faces")) assign_material_to_faces(assign_slot_);
-            u.tooltip("Blender: Material Properties > Assign. Unity: sub-mesh per material.");
-          }
+          draw_edit_tools(lay);
         }
         auto &feats = research::features();
         if (!feats.empty()) {
@@ -1548,7 +1451,7 @@ void Editor::draw_project(const Recti &r) {
       project_selected_ = full;
       clear_selection();
       /* Materials and images can be dragged onto objects, faces and Inspector slots (Unity). */
-      if (ext == ".mat" || image_extension_supported(ext)) asset_drag_ = {true, false, full, in.mx, in.my};
+      if (ext == ".mat" || image_extension_supported(ext)) asset_drag_ = {true, false, full, nullptr, in.mx, in.my};
     }
     if (hot && in.double_clicked[0]) {
       if (en->is_dir) { project_dir_ = full; project_listed_ = -100; }
@@ -2014,6 +1917,141 @@ void Editor::draw_export_options() {
     export_opts_ = o;
   }
   export_panel_h_ = lay.y - area.y + u.px(2);
+}
+
+
+/* Edit Mode's tools: selection mode, n-gon / knife / drawing, the mode's settings and
+ * operators. Shared by the Inspector and the Modeling Tools window. */
+void Editor::draw_edit_tools(ui::Layout &lay) {
+  auto &u = ui_;
+      InspectorReflector er(*this, u, lay);
+      /* Selection mode, then only that mode's operators and their settings
+       * (ProBuilder's Vertex / Edge / Face actions). */
+      {
+        Recti mr = lay.row(u.row_h() + u.px(4));
+        static const char *kModes[] = {"Vertex (1)", "Edge (2)", "Face (3)"};
+        const Icon kIcons[] = {Icon::Vertex, Icon::Grid, Icon::Face};
+        int w3m = (mr.w - u.px(16)) / 3;
+        for (int k = 0; k < 3; k++) {
+          if (u.button({mr.x + u.px(4) + k * (w3m + u.px(4)), mr.y, w3m, mr.h}, kModes[k], (int)elem_ == k, kIcons[k]))
+            set_edit_element((EditElement)k);
+          u.tooltip(k == 0 ? "Vertex select mode: vertex operations." : k == 1 ? "Edge select mode: edge operations." : "Face select mode: face operations.");
+        }
+      }
+      {
+        /* SketchUp-style n-gon editing. */
+        Recti nr = lay.row(u.row_h() + u.px(2));
+        const int nw = (nr.w - u.px(16)) / 3;
+        if (u.button({nr.x + u.px(4), nr.y, nw, nr.h}, ngon_mode_ ? "N-gon Mode: On" : "N-gon Mode: Off", ngon_mode_, Icon::Face))
+          ngon_mode_ = !ngon_mode_;
+        u.tooltip("SketchUp-style faces: a flat region of faces acts as one face (inner edges hidden,\n"
+                  "one click selects it all, Push/Pull moves it all).");
+        if (u.button({nr.x + u.px(8) + nw, nr.y, nw, nr.h}, "Merge Coplanar")) edit_tool("dissolve_limited");
+        u.tooltip("Make each flat region one real n-gon and drop corners on straight edges.\nBlender: Limited Dissolve.");
+        if (u.button({nr.x + u.px(12) + 2 * nw, nr.y, nw, nr.h}, knife_.active ? "Knife (on)" : "Knife / Line (K)", knife_.active))
+          edit_tool("knife");
+        u.tooltip("Split a face along a line between two points on its edges or corners.\nSketchUp: Line tool. Blender: Knife (K).");
+      }
+      {
+        /* Drawing tools (UModeler / SketchUp): shapes drawn onto the mesh with snapping. */
+        Recti dr = lay.row(u.row_h() + u.px(2));
+        u.label({dr.x + u.px(4), dr.y, u.px(40), dr.h}, "Draw", u.theme.accent);
+        const int x0 = dr.x + u.px(44), dw = (dr.right() - x0 - u.px(4) - 4 * u.px(3)) / 5;
+        for (int k = 0; k < 5; k++) {
+          const bool on = draw_.active && draw_.shape == k;
+          if (u.button({x0 + k * (dw + u.px(3)), dr.y, dw, dr.h}, kDrawShapes[k], on)) {
+            if (on) draw_.active = false;
+            else draw_begin(k);
+          }
+          u.tooltip("Draw onto the mesh (or the ground) with snapping to corners, midpoints, edges, faces and the grid.\n"
+                    "A closed shape inside a face is cut into it, ready for Push/Pull; a line between edges splits the face;\n"
+                    "anything else becomes new faces or wire edges. UModeler: drawing tools. SketchUp: Line, Rectangle, Circle, Arc, Polygon.");
+        }
+        if (draw_.active && (draw_.shape == 2 || draw_.shape == 3)) er.field("Circle / Arc Segments", draw_segments_, 3, 256);
+        if (draw_.active && draw_.shape == 4) er.field("Polygon Sides", draw_sides_, 3, 64);
+        if (draw_.active && draw_.shape != 2 && draw_.shape != 3) {
+          er.field("Corner Radius", draw_fillet_, 0.005f, 0.0f, 1000.0f);
+          u.tooltip("Round the corners of rectangles, polygons and closed polylines (Plasticity: Fillet Curve). 0 keeps them sharp.");
+        }
+      }
+      if (elem_ == EditElement::Face) {
+        er.field("Shell Thickness", shell_thickness_, 0.005f, 0.0001f, 1000.0f);
+        er.field("Draft Angle", draft_angle_, 0.25f, -80.0f, 80.0f);
+        er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
+        er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
+        er.field("Bridge Segments", bridge_segments_, 1, 256);
+        er.field("Auto Fuse on Contact", auto_fuse_);
+        u.tooltip("Faces extruded or moved onto another face of the mesh merge into it\n(the touching area becomes an opening): bridging by extrusion.");
+      }
+      else if (elem_ == EditElement::Edge) {
+        er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
+        er.field("Bevel Segments", bevel_segments_, 1, 64);
+        er.field("Bevel Clamp Overlap", bevel_clamp_);
+        er.field("Loop Cuts", loop_cuts_, 1, 64);
+        er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
+        er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
+        er.field("Sharp Angle", seam_angle_, 0.5f, 0.0f, 180.0f);
+        u.tooltip("Seams from Sharp and Select Sharp Edges use edges whose faces meet at more than this (Blender: 30).");
+        er.field("Bridge Segments", bridge_segments_, 1, 256);
+      }
+      else {
+        er.field("Smooth Factor", smooth_factor_, 0.01f, 0.0f, 1.0f);
+      }
+      {
+        /* The mode's operators, three to a row; then the ones every mode has. */
+        std::vector<const EditOpInfo *> mine, common;
+        for (const EditOpInfo &op : edit_op_table())
+          (op.elements == 7 ? common : mine).push_back(&op);
+        mine.erase(std::remove_if(mine.begin(), mine.end(), [&](const EditOpInfo *o) { return !edit_op_available(o->op); }), mine.end());
+        auto grid = [&](const std::vector<const EditOpInfo *> &list) {
+          for (size_t i = 0; i < list.size(); i += 3) {
+            Recti row = lay.row(u.row_h() + u.px(2));
+            int bw3 = (row.w - u.px(16)) / 3;
+            for (size_t k = i; k < std::min(list.size(), i + 3); k++) {
+              int x = row.x + u.px(4) + (int)(k - i) * (bw3 + u.px(4));
+              if (u.button({x, row.y, bw3, row.h}, list[k]->label)) edit_tool(list[k]->op);
+              u.tooltip(list[k]->keys[0] ? strprintf("%s (%s)", list[k]->tip, list[k]->keys) : std::string(list[k]->tip));
+            }
+          }
+        };
+        grid(mine);
+        grid(common);
+      }
+      static const char *kAxesXYZ[] = {"X", "Y", "Z", "View"};
+      if (elem_ != EditElement::Face) {
+        er.field("Spin Angle", spin_angle_, 1.0f, -3600.0f, 3600.0f);
+        er.field("Spin Steps", spin_steps_, 1, 512);
+        er.enumeration("Spin Axis", spin_axis_, kAxesXYZ, 3);
+        u.tooltip("Spin / Lathe turns round this axis of the object, through its origin.");
+      }
+      er.enumeration("Slice Axis", slice_axis_, kAxesXYZ, 4);
+      static const char *kClear[] = {"Keep Both Sides", "Remove Above", "Remove Below"};
+      er.enumeration("Slice Keeps", slice_clear_, kClear, 3);
+      er.field("Proportional Editing", proportional_);
+      if (proportional_) {
+        er.field("Proportional Radius", prop_radius_, 0.01f, 0.001f, 10000.0f);
+        static const char *kFalloff[] = {"Smooth", "Sphere", "Root", "Sharp", "Linear", "Constant"};
+        er.enumeration("Falloff", prop_falloff_, kFalloff, 6);
+      }
+      if (elem_ == EditElement::Face) {  // materials go on faces
+        Recti r3 = lay.row(u.row_h() + u.px(2));
+        u.label({r3.x + u.px(4), r3.y, er.label_w - u.px(8), r3.h}, "Material Slot");
+        u.int_field(u.id("assign_slot"), {r3.x + er.label_w, r3.y, u.px(60), r3.h}, assign_slot_, 0, 63);
+        if (u.button({r3.x + er.label_w + u.px(66), r3.y, r3.w - er.label_w - u.px(70), r3.h}, "Assign to Faces")) assign_material_to_faces(assign_slot_);
+        u.tooltip("Blender: Material Properties > Assign. Unity: sub-mesh per material.");
+      }
+}
+
+/* A material's fields anywhere (the Materials window, a .mat's inspector). */
+void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m) {
+  if (!m) return;
+  InspectorReflector ir(*this, ui_, lay);
+  ir.material = m.get();
+  m->reflect(ir);
+  if (ir.changed) {
+    m->touch();
+    mark_changed("Edit Material " + m->name);  // an asset is written back when the edit finishes
+  }
 }
 
 }  // namespace bl

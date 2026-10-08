@@ -260,7 +260,9 @@ void annulus(Mesh &m, std::vector<uint32_t> outer, std::vector<uint32_t> inner, 
     pending = false;
   };
   while (i < no || j < ni) {
-    bool step_outer = j >= ni || (i < no && ao[i + 1] <= ai[j + 1]);
+    /* Equal angles (an inner shape lined up with the outer one) count as the outer
+     * step first, so float noise can't turn a clean quad into two triangles. */
+    bool step_outer = j >= ni || (i < no && ao[i + 1] <= ai[j + 1] + 1e-4f);
     uint32_t oi = outer[i % no], oi1 = outer[(i + 1) % no], ij = inner[j % ni], ij1 = inner[(j + 1) % ni];
     if (step_outer) {
       flush();
@@ -1244,7 +1246,7 @@ PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_
   return lim;
 }
 
-bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, PushPullResult *result, std::string *err) {
+static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, PushPullResult *result, std::string *err) {
   if (result) *result = PushPullResult::Moved;
   face_sel.resize(m.face_count(), 0);
   std::vector<Region> regions = face_regions(m, face_sel);
@@ -1554,6 +1556,79 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
   return true;
 }
 
+/* SketchUp's rule for a free-standing face (nothing attached along its
+ * outline, like a rectangle drawn on the ground): Push/Pull makes a closed
+ * solid, keeping the original face as its floor (or lid, when pushed). */
+bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, PushPullResult *result, std::string *err) {
+  face_sel.resize(m.face_count(), 0);
+  std::unordered_map<uint64_t, int> uses, sel_uses;
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const uint64_t e = Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]);
+      uses[e]++;
+      if (face_sel[f]) sel_uses[e]++;
+    }
+  /* Free-standing: every edge of the selection's outline belongs to no other face. */
+  bool free_standing = !sel_uses.empty() && std::isfinite(distance) && std::fabs(distance) > 0;
+  for (auto &kv : sel_uses)
+    if (kv.second == 1 && uses[kv.first] != 1) free_standing = false;
+  struct Poly {
+    std::vector<Vec3> p;
+    std::vector<Vec2> t;
+    int mat;
+    bool smooth;
+  };
+  std::vector<Poly> base;
+  if (free_standing)
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (face_sel[f]) {
+        Poly q;
+        for (uint32_t k = 0; k < m.face_size(f); k++) {
+          q.p.push_back(m.positions[m.face_verts(f)[k]]);
+          if (m.has_uvs()) q.t.push_back(m.uvs[m.face_offsets[f] + k]);
+        }
+        q.mat = m.material_of(f);
+        q.smooth = m.smooth_of(f);
+        base.push_back(std::move(q));
+      }
+  PushPullResult res = PushPullResult::Moved;
+  if (!push_pull_impl(m, face_sel, distance, merge_coplanar, &res, err)) return false;
+  if (result) *result = res;
+  if (!free_standing || res != PushPullResult::Extruded) return true;
+  /* Close the solid: the original faces come back at their old place, facing
+   * away from the solid; pushed (negative), the moved faces were the solid's
+   * bottom and turn to face down. */
+  const float eps = 1e-5f * std::max(1.0f, mesh_scale(m));
+  auto find_or_add = [&](Vec3 p) {
+    for (uint32_t v = 0; v < m.vert_count(); v++)
+      if (length_sq(m.positions[v] - p) < eps * eps) return v;
+    return m.add_vert(p);
+  };
+  if (distance < 0) {
+    std::vector<uint8_t> moved = face_sel;
+    moved.resize(m.face_count(), 0);
+    flip_faces(m, moved);
+  }
+  for (Poly &q : base) {
+    /* A face with no area (a sliver) gets no copy: it would only add another sliver. */
+    Vec3 nw(0.0f);
+    for (size_t k = 0; k < q.p.size(); k++) nw += cross(q.p[k] - q.p[0], q.p[(k + 1) % q.p.size()] - q.p[0]);
+    if (length(nw) * 0.5f < 1e-9f * mesh_scale(m) * mesh_scale(m)) continue;
+    std::vector<uint32_t> fv;
+    for (const Vec3 &p : q.p) fv.push_back(find_or_add(p));
+    std::vector<Vec2> ft = q.t;
+    if (distance > 0) {
+      std::reverse(fv.begin(), fv.end());
+      std::reverse(ft.begin(), ft.end());
+    }
+    m.add_face(fv.data(), fv.size(), ft.size() == fv.size() ? ft.data() : nullptr, q.mat);
+    if (!m.face_smooth.empty()) m.face_smooth.back() = q.smooth ? 1 : 0;
+  }
+  face_sel.resize(m.face_count(), 0);
+  m.touch();
+  return true;
+}
+
 /* ===================================================================== */
 /* Subdivide, dissolve, connect, collapse                                 */
 /* ===================================================================== */
@@ -1825,6 +1900,57 @@ long imprint_loop(Mesh &m, size_t face, const std::vector<Vec3> &pts_in, std::st
   delete_faces(m, drop);
   m.touch();
   return (long)m.face_count() - 1;  // the new inner face
+}
+
+bool point_in_face(const Mesh &m, size_t f, Vec3 p, float eps) {
+  if (f >= m.face_count()) return false;
+  const Vec3 n = normalize(m.face_normal(f));
+  if (std::fabs(dot(p - m.positions[m.face_verts(f)[0]], n)) > eps) return false;
+  return inside_loop(m, face_loop(m, f), p, n, eps);
+}
+
+/* A path from corner va to corner vb of face f that runs OUTSIDE it, in its
+ * plane (an arc drawn onto a rectangle's side): a new face closed by f's own
+ * outline between the two corners, sharing those edges with f the other way
+ * round. Only where those edges are open (no face on their other side). */
+long attach_face(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vector<Vec3> &interior) {
+  if (f >= m.face_count() || va == vb || interior.empty()) return -1;
+  const std::vector<uint32_t> loop = face_loop(m, f);
+  const int n = (int)loop.size();
+  int ia = -1, ib = -1;
+  for (int k = 0; k < n; k++) {
+    if (loop[(size_t)k] == va) ia = k;
+    if (loop[(size_t)k] == vb) ib = k;
+  }
+  if (ia < 0 || ib < 0) return -1;
+  /* Walk f's outline backwards from vb to va, or from va to vb: whichever is shorter.
+   * The new face then runs along those edges the opposite way to f. */
+  const int back_b = (ib - ia + n) % n, back_a = (ia - ib + n) % n;
+  std::vector<uint32_t> fv;
+  std::vector<Vec3> mid = interior;
+  uint32_t from = va, to = vb;
+  int start = ib, steps = back_b;
+  if (back_a < back_b) {
+    from = vb, to = va;
+    std::reverse(mid.begin(), mid.end());
+    start = ia, steps = back_a;
+  }
+  /* The shared edges must be open, or the result would not be a surface. */
+  std::unordered_map<uint64_t, int> uses;
+  for (size_t g = 0; g < m.face_count(); g++)
+    for (uint32_t k = 0; k < m.face_size(g); k++) uses[Mesh::edge_key(m.face_verts(g)[k], m.face_verts(g)[(k + 1) % m.face_size(g)])]++;
+  for (int s = 0; s < steps; s++) {
+    const uint32_t a = loop[(size_t)((start - s + n) % n)], b = loop[(size_t)((start - s - 1 + 2 * n) % n)];
+    if (uses[Mesh::edge_key(a, b)] != 1) return -1;
+  }
+  fv.push_back(from);
+  for (const Vec3 &p : mid) fv.push_back(m.add_vert(p));
+  for (int s = 0; s < steps; s++) fv.push_back(loop[(size_t)((start - s + n) % n)]);  // to, then back along f
+  (void)to;
+  m.add_face(fv.data(), fv.size(), nullptr, m.material_of(f));
+  if (!m.face_smooth.empty()) m.face_smooth.back() = m.smooth_of(f) ? 1 : 0;
+  m.touch();
+  return (long)m.face_count() - 1;
 }
 
 }  // namespace bl::meshops

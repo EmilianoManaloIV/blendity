@@ -203,4 +203,124 @@ size_t spin(Mesh &m, std::vector<uint8_t> &vert_sel, Vec3 center, Vec3 axis, flo
   return edges.size() + verts.size();
 }
 
+/* ---------------------------------------------- Plasticity-style tools */
+
+bool shell(Mesh &m, const std::vector<uint8_t> &open_faces, float thickness, std::string *error) {
+  if (!std::isfinite(thickness) || thickness <= 0) {
+    if (error) *error = "the thickness must be more than 0";
+    return false;
+  }
+  size_t open = 0;
+  for (size_t f = 0; f < m.face_count() && f < open_faces.size(); f++) open += open_faces[f] != 0;
+  if (open == m.face_count()) {
+    if (error) *error = "leave some faces: those become the walls";
+    return false;
+  }
+  /* Plasticity / CAD Shell: the chosen faces go, the rest becomes a wall
+   * `thickness` thick, inward, with rims round the openings. */
+  if (open) delete_faces(m, open_faces);
+  solidify(m, thickness, -1.0f, true, true);
+  m.touch();
+  return true;
+}
+
+size_t draft(Mesh &m, const std::vector<uint8_t> &face_sel, float angle_deg, Vec3 pull) {
+  if (!std::isfinite(angle_deg) || length(pull) < 1e-9f) return 0;
+  pull = normalize(pull);
+  const float t = std::tan(clampf(angle_deg, -80.0f, 80.0f) * kDeg2Rad);
+  /* The neutral plane: the lowest point of the selection along the pull direction. */
+  float base = 1e30f;
+  for (size_t f = 0; f < m.face_count() && f < face_sel.size(); f++)
+    if (face_sel[f])
+      for (uint32_t k = 0; k < m.face_size(f); k++) base = std::min(base, dot(m.positions[m.face_verts(f)[k]], pull));
+  if (base > 1e29f) return 0;
+  std::vector<Vec3> move(m.vert_count(), Vec3(0.0f));
+  size_t n = 0;
+  for (size_t f = 0; f < m.face_count() && f < face_sel.size(); f++) {
+    if (!face_sel[f]) continue;
+    Vec3 out = m.face_normal(f);
+    out = out - pull * dot(out, pull);  // tilt sideways only: faces along the pull get no draft
+    if (length(out) < 1e-4f) continue;
+    out = normalize(out);
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const uint32_t v = m.face_verts(f)[k];
+      /* Higher up the pull, further in (a positive angle tapers toward the top, like a mould). */
+      move[v] -= out * ((dot(m.positions[v], pull) - base) * t);
+    }
+    n++;
+  }
+  for (size_t v = 0; v < m.vert_count(); v++) m.positions[v] += move[v];
+  if (n) m.touch();
+  return n;
+}
+
+void radial_array(Mesh &m, int count, int axis, float angle_deg, float merge_dist) {
+  count = std::max(1, std::min(count, 1000));
+  if (count == 1 || !std::isfinite(angle_deg)) return;
+  Vec3 ax(0.0f);
+  ax[std::max(0, std::min(axis, 2))] = 1.0f;
+  const bool full = std::fabs(std::fabs(angle_deg) - 360.0f) < 1e-3f;
+  const float step = angle_deg / (float)(full ? count : count - 1);
+  const Mesh src = m;
+  const uint32_t nv = (uint32_t)src.vert_count();
+  const bool has_uv = src.has_uvs();
+  for (int c = 1; c < count; c++) {
+    const Quat q = Quat::axis_angle(ax, step * (float)c * kDeg2Rad);
+    const uint32_t off = (uint32_t)m.vert_count();
+    for (uint32_t i = 0; i < nv; i++) m.add_vert(q.rotate(src.positions[i]));
+    std::vector<uint32_t> fv;
+    for (size_t f = 0; f < src.face_count(); f++) {
+      fv.assign(src.face_verts(f), src.face_verts(f) + src.face_size(f));
+      for (uint32_t &v : fv) v += off;
+      m.add_face(fv.data(), fv.size(), has_uv ? src.uvs.data() + src.face_offsets[f] : nullptr, src.material_of(f));
+    }
+    for (uint64_t k : src.loose_edges) m.add_loose_edge((uint32_t)(k >> 32) + off, (uint32_t)(k & 0xFFFFFFFF) + off);
+  }
+  if (merge_dist > 0) merge_by_distance(m, merge_dist);
+  m.sync_attributes();
+  m.touch();
+}
+
+std::vector<Vec3> fillet_polygon(const std::vector<Vec3> &pts, bool closed, float radius, int segments, Vec3 n) {
+  if (radius <= 0 || !std::isfinite(radius) || pts.size() < 3) return pts;
+  segments = std::max(1, segments);
+  std::vector<Vec3> out;
+  const size_t count = pts.size();
+  for (size_t i = 0; i < count; i++) {
+    const bool end = !closed && (i == 0 || i + 1 == count);
+    if (end) {
+      out.push_back(pts[i]);
+      continue;
+    }
+    const Vec3 p = pts[i], a = pts[(i + count - 1) % count], b = pts[(i + 1) % count];
+    Vec3 da = a - p, db = b - p;
+    const float la = length(da), lb = length(db);
+    if (la < 1e-6f || lb < 1e-6f) {
+      out.push_back(p);
+      continue;
+    }
+    da = da / la;
+    db = db / lb;
+    const float cosang = clampf(dot(da, db), -1.0f, 1.0f), ang = std::acos(cosang);
+    if (ang < 1e-3f || ang > kPi - 1e-3f) {
+      out.push_back(p);  // straight (or folded back): no corner to round
+      continue;
+    }
+    /* Tangent points a distance d along each side; the radius shrinks to fit half of each side. */
+    float d = radius / std::tan(ang * 0.5f);
+    d = std::min(d, std::min(la, lb) * 0.5f);
+    const float r = d * std::tan(ang * 0.5f);
+    const Vec3 ta = p + da * d, tb = p + db * d;
+    const Vec3 bis = normalize(da + db);
+    const Vec3 c = p + bis * (r / std::sin(ang * 0.5f));
+    const Vec3 e0 = ta - c, e1 = tb - c;
+    Vec3 ax = cross(e0, e1);
+    if (length(ax) < 1e-9f) ax = n;
+    ax = normalize(ax);
+    const float sweep = std::atan2(dot(cross(e0, e1), ax), dot(e0, e1));
+    for (int s = 0; s <= segments; s++) out.push_back(c + Quat::axis_angle(ax, sweep * (float)s / (float)segments).rotate(e0));
+  }
+  return out;
+}
+
 }  // namespace bl::meshops

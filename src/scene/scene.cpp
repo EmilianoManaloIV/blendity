@@ -451,15 +451,28 @@ void MirrorModifier::reflect(Reflector &r) {
 void MirrorModifier::modify(Mesh &m) const { meshops::mirror(m, x, y, z, merge ? merge_distance : 0.0f); }
 
 void ArrayModifier::reflect(Reflector &r) {
+  static const char *kModes[] = {"Offset", "Radial"};
+  r.enumeration("Mode", mode, kModes, 2);
+  r.help("Offset: copies in a row. Radial: copies round an axis through the origin (Plasticity / UModeler radial array;\nBlender does this with an Empty as the Object Offset).");
   r.field("Count", count, 1, 1000);
-  r.field("Relative Offset", relative_offset);
-  r.help("Offset as a multiple of the mesh size (Blender: Relative Offset > Factor).");
-  r.field("Constant Offset", constant_offset);
+  const bool all = r.all_fields();
+  if (all || mode == 0) {
+    r.field("Relative Offset", relative_offset);
+    r.help("Offset as a multiple of the mesh size (Blender: Relative Offset > Factor).");
+    r.field("Constant Offset", constant_offset);
+  }
+  if (all || mode == 1) {
+    static const char *kAxes3[] = {"X", "Y", "Z"};
+    r.enumeration("Axis", radial_axis, kAxes3, 3);
+    r.field("Angle", radial_angle, 1.0f, -3600.0f, 3600.0f);
+    r.help("360 spreads the copies evenly round a full turn.");
+  }
   r.field("Merge", merge);
   r.field("Merge Distance", merge_distance, 0.0005f, 0.0f, 1.0f);
 }
 void ArrayModifier::modify(Mesh &m) const {
-  meshops::make_array(m, count, relative_offset, constant_offset, merge ? merge_distance : 0.0f);
+  if (mode == 1) meshops::radial_array(m, count, radial_axis, radial_angle, merge ? merge_distance : 0.0f);
+  else meshops::make_array(m, count, relative_offset, constant_offset, merge ? merge_distance : 0.0f);
 }
 
 void SolidifyModifier::reflect(Reflector &r) {

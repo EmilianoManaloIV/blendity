@@ -39,6 +39,7 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
   scene_navigation(view);
+  update_pilot_camera();  // flying a camera: it follows the view
 
   /* Gizmo math and picking need this frame's camera matrices before we
    * render, so transforms applied by a drag show up in the same frame. */
@@ -97,6 +98,7 @@ void Editor::draw_scene_view(const Recti &r) {
 
   draw_scene_icons(view);
   draw_origins(view);
+  draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
   if (show_gizmos_) draw_gizmo(view);
@@ -259,8 +261,19 @@ void Editor::scene_navigation(const Recti &view) {
   }
   if (scene_hovered_ && drag_ == Drag::None && in.wheel_y != 0 && !modal_.active) {  // a running Bevel takes the wheel
     cam_.animating = false;
-    cam_.distance = clampf(cam_.distance * std::pow(0.88f, in.wheel_y), 0.01f, 100000.0f);
+    if (pilot_cam_ && in.ctrl()) {
+      /* Piloting a camera: Ctrl + wheel zooms the lens (its field of view), not the position. */
+      cam_.fov = clampf(cam_.fov * std::pow(0.93f, in.wheel_y), 1.0f, 170.0f);
+    }
+    else {
+      /* Dolly toward the pivot; while piloting, the camera keeps looking at the same point. */
+      const Vec3 eye = cam_.position();
+      cam_.distance = clampf(cam_.distance * std::pow(0.88f, in.wheel_y), 0.01f, 100000.0f);
+      (void)eye;
+    }
   }
+  if (pilot_cam_ && in.key_pressed[platform::KEY_ESCAPE] && !pp_.active && !modal_.active && !xf_.active && !draw_.active && !knife_.active)
+    toggle_pilot_camera();
 }
 
 Camera *Editor::main_camera(const Scene &s, GameObject **owner) {
@@ -1194,6 +1207,9 @@ bool Editor::gizmo_update(const Recti &view) {
     }
   }
 
+  /* Holding V (Unity's vertex snapping): a press anywhere starts a free move
+   * from the selection's vertex nearest the mouse. */
+  if (drag_ != Drag::Gizmo && in.key_down[platform::KEY_V] && do_move && scene_hovered_ && !u.wants_keyboard()) gizmo_hot_ = H_MOVE_FREE;
   /* Start drag. */
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt()) {
     drag_ = Drag::Gizmo;
@@ -1205,6 +1221,25 @@ bool Editor::gizmo_update(const Recti &view) {
     gizmo_live_scale_ = Vec3(1.0f);
     gizmo_starts_.clear();
     gizmo_vert_starts_.clear();
+    /* V held: vertex snapping from the selection's vertex nearest the mouse. */
+    gizmo_vsnap_ = in.key_down[platform::KEY_V] && gizmo_hot_ <= H_MOVE_FREE;
+    if (gizmo_vsnap_) {
+      if (eo) {
+        const Mesh &mm = **edit_mesh_ptr();
+        float best = 1e30f;
+        for (size_t i = 0; i < mm.vert_count() && i < vert_sel_.size(); i++) {
+          if (!vert_sel_[i]) continue;
+          Vec2 s;
+          float z;
+          const Vec3 wv = eo->world_matrix().point(mm.positions[i]);
+          if (!scene_r3d_.project(wv, s, z)) continue;
+          const float d = length(Vec2(view.x + s.x - in.mx, view.y + s.y - in.my));
+          if (d < best) best = d, gizmo_vsnap_anchor_ = wv;
+        }
+        gizmo_vsnap_ = best < 1e29f;
+      }
+      else gizmo_vsnap_ = nearest_vertex_on_screen(view, in.mx, in.my, 1e9f, true, false, gizmo_vsnap_anchor_);
+    }
     if (eo && in.shift()) {
       /* Shift + drag: extrude first, then the handle moves, turns or scales the new
        * geometry - scaling a face this way makes a new face inside it (an inset), as
@@ -1279,11 +1314,40 @@ bool Editor::gizmo_update(const Recti &view) {
         hit = ray_plane(ray, pivot, n, t) ? ray.origin + ray.dir * t : gizmo_start_hit_;
       }
       Vec3 delta = hit - gizmo_start_hit_;
-      if (snap) {
+      const bool surface = !eo && in.ctrl() && in.shift() && !origin_edit_;
+      if (snap && !surface && !gizmo_vsnap_) {
         /* Snap the delta in gizmo space (Unity increment snapping). */
         Vec3 local{dot(delta, axis[0]), dot(delta, axis[1]), dot(delta, axis[2])};
         for (int k = 0; k < 3; k++) local[k] = std::round(local[k] / snap_move_) * snap_move_;
         delta = axis[0] * local.x + axis[1] * local.y + axis[2] * local.z;
+      }
+      gizmo_snap_shown_ = false;
+      if (gizmo_vsnap_ && in.key_down[platform::KEY_V]) {
+        /* Vertex snapping (Unity's V): the anchor vertex lands on the vertex under the mouse. */
+        Vec3 target;
+        if (nearest_vertex_on_screen(view, in.mx, in.my, (float)u.px(24), false, !eo, target)) {
+          delta = target - gizmo_vsnap_anchor_;
+          gizmo_snap_shown_ = true;
+          gizmo_snap_point_ = target;
+        }
+      }
+      else if (surface && !gizmo_starts_.empty()) {
+        /* Surface snapping (Unity's Ctrl+Shift): rest the objects on what is under the mouse. */
+        std::vector<GameObject *> moving;
+        for (auto &s : gizmo_starts_)
+          if (GameObject *g = scene_->find(s.id)) moving.push_back(g);
+        const Ray r2 = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
+        Vec3 p, n;
+        if (!moving.empty() && raycast_surface({r2.origin, normalize(r2.dir)}, p, n, moving)) {
+          GameObject *lead = moving.back();
+          const GizmoStart &ls = gizmo_starts_.back();
+          Quat rot;
+          const Vec3 to = rest_on_surface(lead, p, n, ls.rot, surface_align_, rot);
+          delta = to - ls.pos;
+          if (surface_align_) lead->set_world_rotation(rot);
+          gizmo_snap_shown_ = true;
+          gizmo_snap_point_ = p;
+        }
       }
       gizmo_live_delta_ = delta;
       if (eo) {
@@ -1407,6 +1471,21 @@ void Editor::draw_gizmo(const Recti &view) {
   if (tool_ == Tool::View) return;
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
   if (!has_target) return;
+  /* Snapping markers: the vertex / surface point a move is snapping to, and with V
+   * held (before dragging) the vertex the move would start from - Unity's square. */
+  {
+    Vec3 mark;
+    bool show = false;
+    if (drag_ == Drag::Gizmo && gizmo_snap_shown_) mark = gizmo_snap_point_, show = true;
+    else if (drag_ != Drag::Gizmo && u.in.key_down[platform::KEY_V] && scene_hovered_ && !edit_mode_)
+      show = nearest_vertex_on_screen(view, u.in.mx, u.in.my, 1e9f, true, false, mark);
+    Vec2 s;
+    float z;
+    if (show && scene_r3d_.project(mark, s, z)) {
+      const float x = view.x + s.x, y = view.y + s.y, h = (float)u.px(5);
+      u.canvas.rect_outline({(int)(x - h), (int)(y - h), (int)(2 * h), (int)(2 * h)}, Color::hex(0xFFE040), u.px(2));
+    }
+  }
   Vec3 pivot = gizmo_pivot_;
   Quat orient = gizmo_orient_;
   float size = gizmo_size_;
@@ -1810,6 +1889,30 @@ void Editor::edit_op(const std::string &op) {
     if (elem_ == EditElement::Edge) edges_from_verts();
     Log::info("Spin: %.0f degrees in %d steps", spin_angle_, spin_steps_);
   }
+  else if (op == "shell" || op == "thicken") {
+    std::string err;
+    std::vector<uint8_t> open(m.face_count(), 0);
+    if (op == "shell") open = face_sel_;
+    if (op == "shell" && std::count(open.begin(), open.end(), 1) == 0) {
+      Log::warn("Shell: select the faces to open (they are removed; the rest gets walls)");
+      return;
+    }
+    if (!meshops::shell(m, open, shell_thickness_, &err)) {
+      Log::warn("%s: %s", op == "shell" ? "Shell" : "Thicken", err.c_str());
+      return;
+    }
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    edge_sel_.clear();
+    Log::info("%s: %.3g thick", op == "shell" ? "Shell" : "Thicken", shell_thickness_);
+  }
+  else if (op == "draft") {
+    if (!meshops::draft(m, face_sel_, draft_angle_, {0, 1, 0})) {
+      Log::warn("Draft: select side faces (faces facing along the object's Y have no draft)");
+      return;
+    }
+    Log::info("Draft: %.1f degrees", draft_angle_);
+  }
   else if (op == "follow") {
     size_t face = SIZE_MAX;
     for (size_t f = 0; f < face_sel_.size() && face == SIZE_MAX; f++)
@@ -2095,6 +2198,11 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"select_by_material", "Same Material", "", "Select every face using the selected faces' material slots. Blender: Material > Select.", F},
       {"seams_from_sharp", "Seams from Sharp", "", "Mark a seam on every sharp edge: faces meeting at more than the Sharp Angle, or edges marked sharp.\n"
        "Blender: Select Sharp Edges, then Mark Seam.", E},
+      {"shell", "Shell", "", "Hollow the solid: the selected faces open up and the rest becomes a wall of the Shell Thickness.\n"
+       "Plasticity / CAD: Shell.", F},
+      {"draft", "Draft", "", "Tilt the selected side faces by the Draft Angle so they narrow toward the top (a mould's draft).\n"
+       "Plasticity: Draft Face.", F},
+      {"thicken", "Thicken", "", "Give the whole surface the Shell Thickness (a flat face becomes a slab). Plasticity: Thicken.", ALL},
       {"slice", "Slice", "", "Cut the mesh with a plane through the selection (or the origin) across the Slice Axis.\n"
        "UModeler: Slice. Blender: Bisect.", ALL},
       {"select_sharp", "Select Sharp Edges", "", "Select the edges whose faces meet at more than the Sharp Angle (and edges marked sharp).\n"

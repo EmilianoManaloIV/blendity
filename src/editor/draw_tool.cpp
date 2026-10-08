@@ -97,24 +97,74 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       if (h.face < 0) h.label = "In Plane";
     }
   }
+  draw_.guide = false;
   if (!h.snap.ok) {
     Vec3 n = draw_.has_plane ? draw_.plane_n : (h.face >= 0 ? normalize(w.dir(m.face_normal((size_t)h.face))) : Vec3(0, 1, 0));
     Vec3 u, v;
-    plane_axes(n, u, v);
+    if (draw_.has_plane) {
+      u = draw_.axis_u;
+      v = normalize(cross(n, u));
+    }
+    else plane_axes(n, u, v);
     const Vec3 origin = draw_.has_plane ? draw_.plane_p : Vec3(0.0f);
+    if (!draw_.pts.empty() && !ui_.in.ctrl()) {
+      /* SketchUp-style inference from the last point: the plane's axes (which
+       * follow the face or the rotated object), directions parallel or
+       * perpendicular to the mesh's edges in this plane, and square to the
+       * previous segment. Near one (on screen) the point locks onto it; Shift
+       * locks to the closest whatever the distance. */
+      const Vec3 last = draw_.pts.back();
+      struct Dir {
+        Vec3 d;
+        const char *label;
+        uint32_t color;
+      };
+      std::vector<Dir> dirs = {{u, "On Red Axis", Color::hex(0xFF5050)}, {v, "On Green Axis", Color::hex(0x50E050)}};
+      if (draw_.pts.size() >= 2) {
+        const Vec3 prev = draw_.pts.back() - draw_.pts[draw_.pts.size() - 2];
+        if (length(prev) > 1e-6f) dirs.push_back({normalize(cross(n, normalize(prev))), "Perpendicular", Color::hex(0xFF40FF)});
+      }
+      for (auto &e : m.edge_cache()) {
+        Vec3 d = w.dir(m.positions[e.second] - m.positions[e.first]);
+        if (length(d) < 1e-6f) continue;
+        d = normalize(d);
+        if (std::fabs(dot(d, n)) > 0.02f) continue;  // only edges lying in the drawing plane
+        bool dup = false;
+        for (auto &k : dirs) dup = dup || std::fabs(dot(k.d, d)) > 0.9995f;
+        if (!dup) dirs.push_back({d, "Parallel to Edge", Color::hex(0xFF40FF)});
+        const Vec3 p = normalize(cross(n, d));
+        dup = false;
+        for (auto &k : dirs) dup = dup || std::fabs(dot(k.d, p)) > 0.9995f;
+        if (!dup) dirs.push_back({p, "Perpendicular to Edge", Color::hex(0xFF40FF)});
+        if (dirs.size() > 64) break;  // enough candidates on big meshes
+      }
+      const Vec2 mouse((float)(mx - view.x), (float)(my - view.y));
+      float best = ui_.in.shift() ? 1e30f : (float)ui_.px(8);
+      const Dir *pick = nullptr;
+      Vec3 snapped;
+      for (const Dir &k : dirs) {
+        const Vec3 q = last + k.d * dot(h.world - last, k.d);
+        Vec2 s;
+        float z;
+        if (!scene_r3d_.project(q, s, z)) continue;
+        const float dist = length(s - mouse);
+        if (dist < best) best = dist, pick = &k, snapped = q;
+      }
+      if (pick) {
+        h.world = snapped;
+        h.label = pick->label;
+        h.color = pick->color;
+        draw_.guide = true;
+        draw_.guide_dir = pick->d;
+        return h;
+      }
+    }
     if (ui_.in.ctrl()) {
       /* Grid snap within the plane (the Move snap size). */
       const Vec3 d = h.world - origin;
       const float s = std::max(1e-4f, snap_move_);
       h.world = origin + u * (std::round(dot(d, u) / s) * s) + v * (std::round(dot(d, v) / s) * s) + n * dot(d, n);
       h.label = "Grid";
-    }
-    if (ui_.in.shift() && !draw_.pts.empty()) {
-      /* Lock to the nearer plane axis from the last point (SketchUp's red / green). */
-      const Vec3 last = draw_.pts.back(), d = h.world - last;
-      h.world = std::fabs(dot(d, u)) >= std::fabs(dot(d, v)) ? last + u * dot(d, u) : last + v * dot(d, v);
-      h.label = "On Axis";
-      h.color = Color::hex(0xFFD040);
     }
   }
   return h;
@@ -128,6 +178,10 @@ std::vector<Vec3> Editor::draw_outline(Vec3 cursor, bool final_point, bool &clos
   const Vec3 n = draw_.has_plane ? draw_.plane_n : Vec3(0, 1, 0);
   Vec3 u, v;
   plane_axes(n, u, v);
+  if (draw_.has_plane) {  // the plane's own axes: a rectangle lines up with a rotated object
+    u = draw_.axis_u;
+    v = normalize(cross(n, u));
+  }
   auto flat = [&](Vec3 q) { return draw_.has_plane ? q - n * dot(q - draw_.plane_p, n) : q; };
   cursor = flat(cursor);
   switch (draw_.shape) {
@@ -186,6 +240,7 @@ std::vector<Vec3> Editor::draw_outline(Vec3 cursor, bool final_point, bool &clos
       if (!final_point) out.push_back(cursor);
       break;
   }
+  if (closed && draw_fillet_ > 0 && (draw_.shape == 1 || draw_.shape == 4)) out = meshops::fillet_polygon(out, true, draw_fillet_, 6, n);
   return out;
 }
 
@@ -261,7 +316,20 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
             has_a = has_a || m.face_verts(f)[k] == on_mesh[i];
             has_b = has_b || m.face_verts(f)[k] == on_mesh[j];
           }
-          if (has_a && has_b && meshops::split_face_path(m, f, on_mesh[i], on_mesh[j], interior)) cut = true;
+          if (!has_a || !has_b) continue;
+          /* Through the face: split it. Outside it, in its plane (an arc on a
+           * rectangle's side): a new face against it. */
+          const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+          bool inside = true;
+          if (interior.empty()) inside = meshops::point_in_face(m, f, (pts[i] + pts[j]) * 0.5f, eps);
+          for (const Vec3 &p : interior) inside = inside && meshops::point_in_face(m, f, p, eps);
+          if (inside && meshops::split_face_path(m, f, on_mesh[i], on_mesh[j], interior)) cut = true;
+          else if (!inside) {
+            bool coplanar = true;
+            const Vec3 fnrm = normalize(m.face_normal(f)), f0 = m.positions[m.face_verts(f)[0]];
+            for (const Vec3 &p : interior) coplanar = coplanar && std::fabs(dot(p - f0, fnrm)) < eps;
+            if (coplanar && !interior.empty() && meshops::attach_face(m, f, on_mesh[i], on_mesh[j], interior) >= 0) cut = true;
+          }
         }
       }
       if (cut) {
@@ -355,6 +423,27 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     draw_.plane_p = world;
     draw_.plane_n = face >= 0 && (size_t)face < m.face_count() ? normalize(g->world_matrix().dir(m.face_normal((size_t)face))) : Vec3(0, 1, 0);
     draw_.has_plane = true;
+    /* The plane's axes follow the geometry, not the world: the face's longest
+     * edge, else the object's own X (or Z) laid into the plane. */
+    const Vec3 n = draw_.plane_n;
+    auto in_plane = [&](Vec3 d) { return d - n * dot(d, n); };
+    Vec3 best(0.0f);
+    if (face >= 0 && (size_t)face < m.face_count()) {
+      float bl = 0;
+      for (uint32_t k = 0; k < m.face_size((size_t)face); k++) {
+        const Vec3 e = in_plane(g->world_matrix().dir(m.positions[m.face_verts((size_t)face)[(k + 1) % m.face_size((size_t)face)]] -
+                                                     m.positions[m.face_verts((size_t)face)[k]]));
+        if (length(e) > bl) bl = length(e), best = e;
+      }
+    }
+    if (length(best) < 1e-6f) {
+      const Quat r = g->world_rotation();
+      best = in_plane(r.rotate({1, 0, 0}));
+      if (length(best) < 0.3f) best = in_plane(r.rotate({0, 0, 1}));
+    }
+    Vec3 pu, pv;
+    plane_axes(n, pu, pv);
+    draw_.axis_u = length(best) > 1e-6f ? normalize(best) : pu;
   }
   auto reset = [&] {
     draw_.pts.clear();
@@ -363,11 +452,12 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     draw_.face = -1;
   };
   if (action == 1 && draw_.pts.size() >= 3) {
-    draw_commit(draw_.pts, true);
+    draw_commit(draw_fillet_ > 0 ? meshops::fillet_polygon(draw_.pts, true, draw_fillet_, 6, draw_.plane_n) : draw_.pts, true);
     reset();
     return;
   }
   if (action == 2) {
+    if (draw_.pts.empty() || length(draw_.pts.back() - world) > 1e-6f) draw_.pts.push_back(world);  // the last point, then finish
     if (draw_.pts.size() >= 2) draw_commit(draw_.pts, false);
     reset();
     return;
@@ -436,6 +526,20 @@ void Editor::draw_preview(const Recti &view) {
     for (const Vec3 &p : draw_.pts) {
       Vec2 s;
       if (to_screen(p, s)) u.canvas.fill_circle(s.x, s.y, (float)u.px(3.5f), Color::hex(0xFFD040));
+    }
+  }
+  if (h.ok && draw_.guide && !draw_.pts.empty()) {
+    /* The inference guide: a dotted line through the last point in the locked direction. */
+    const Vec3 last = draw_.pts.back();
+    const float reach = std::max(1.0f, length(h.world - last)) * 4.0f;
+    Vec2 a, b;
+    if (to_screen(last - draw_.guide_dir * reach, a) && to_screen(last + draw_.guide_dir * reach, b)) {
+      const Vec2 d = b - a;
+      const float len = length(d);
+      for (float t = 0; t < len; t += 8.0f) {
+        const Vec2 p = a + d * (t / len), q = a + d * (std::min(len, t + 4.0f) / len);
+        u.canvas.line(p.x, p.y, q.x, q.y, (h.color & 0x00FFFFFFu) | 0xB0000000u, 1.0f);
+      }
     }
   }
   if (h.ok) {

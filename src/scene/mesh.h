@@ -347,6 +347,20 @@ bool follow(Mesh &m, size_t face, std::string *error = nullptr);
 /* Blender's Spin / UModeler's Lathe: the selected edges (and lone vertices) turned round an axis
  * through center in `steps` copies; 360 degrees closes. The last copy becomes the selection. */
 size_t spin(Mesh &m, std::vector<uint8_t> &vert_sel, Vec3 center, Vec3 axis, float angle_deg, int steps);
+bool point_in_face(const Mesh &m, size_t f, Vec3 p, float eps);  // in f's plane and inside its outline
+/* A path between two corners of face f that runs outside it (in its plane) becomes a new face
+ * against f's outline between them. -1 when those edges aren't open. */
+long attach_face(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vector<Vec3> &interior);
+/* Plasticity-style tools (mesh_tools4.cpp). */
+/* Shell: remove the chosen faces and give the rest an inward wall `thickness` thick. */
+bool shell(Mesh &m, const std::vector<uint8_t> &open_faces, float thickness, std::string *error = nullptr);
+/* Draft: tilt the selected side faces by angle_deg about the selection's lowest point along `pull`
+ * (positive narrows toward the top, a mould's draft). Returns faces drafted. */
+size_t draft(Mesh &m, const std::vector<uint8_t> &face_sel, float angle_deg, Vec3 pull);
+/* Copies round an axis through the origin (360 degrees spreads them evenly). */
+void radial_array(Mesh &m, int count, int axis, float angle_deg, float merge_dist);
+/* Rounded corners for a drawn outline (Plasticity's curve fillet): each corner becomes an arc. */
+std::vector<Vec3> fillet_polygon(const std::vector<Vec3> &pts, bool closed, float radius, int segments, Vec3 normal);
 }  // namespace meshops
 
 }  // namespace bl

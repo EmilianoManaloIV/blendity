@@ -280,6 +280,9 @@ struct ArrayModifier : ComponentBase<ArrayModifier> {
   int count = 3;
   Vec3 relative_offset{1, 0, 0};  // in multiples of the mesh size
   Vec3 constant_offset{0, 0, 0};  // in object units
+  int mode = 0;            // 0 Offset, 1 Radial
+  int radial_axis = 1;     // X, Y, Z
+  float radial_angle = 360.0f;
   bool merge = false;
   float merge_distance = 0.001f;
   void reflect(Reflector &r) override;

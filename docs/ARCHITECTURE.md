@@ -210,6 +210,20 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | Shift + gizmo drag (`gizmo_update`) | Extrude (faces, or edges / vertices) before the drag, so the handle moves, turns or scales the new geometry | Blender's E then G / S; ProBuilder / UModeler Shift-drag |
 | `pivot_center_` | Pivot by default (saved); Center now scales about the bounds centre as it rotates; G / R / S use the same point | Unity's Pivot / Center; Blender's Pivot Point |
 
+## Snapping, the Materials and Modeling Tools windows, camera piloting, Plasticity tools (phase 11)
+
+| Blendity | What it does | Blender / Unity / SketchUp equivalent |
+|---|---|---|
+| `draw_hit` inference, `DrawTool::axis_u` | The plane's axes come from the face's longest edge or the object's rotation. Candidate directions from the last point (the axes, in-plane edge directions and their perpendiculars, square to the last segment) snap when within 8 px on screen; Shift takes the nearest | SketchUp inference (red / green axes, parallel and perpendicular) |
+| `meshops::attach_face`, `point_in_face` | A drawn path between two corners of a face that runs outside it becomes a face closed by the face's own outline (shorter way round), sharing those edges the other way; only where they are open | SketchUp: drawing on a face's edge |
+| `push_pull` wrapper (free-standing faces) | When every edge of the selection's outline has no other face, the original faces come back as the floor (pull) or the moved faces flip into it (push), so the result is closed; zero-area faces are skipped | SketchUp Push/Pull on a lone face |
+| `annulus` tie tolerance | Equal angles step the outer loop first, so aligned shapes ring with quads | - |
+| `meshops::shell`, `draft`, `radial_array`, `fillet_polygon` (`mesh_tools4.cpp`) | Shell = remove faces + inward solidify with rims; Draft moves each vertex of a side face in by its height above the selection's base times tan(angle); Radial copies about an axis; fillets replace corners with arcs tangent to both sides, shrinking to fit | Plasticity Shell, Thicken, Draft Face, Radial Array, Fillet Curve |
+| `editor/material_window.cpp` | A software-shaded preview sphere per material (Lambert + Blinn-Phong, its base texture wrapped on, alpha over a checker), cached by version; a grid to pick, drag or right-click, and the material's own fields underneath | Unity Project previews + material Inspector; Blender's Material Browser |
+| `editor/tools_window.cpp`, `Editor::draw_edit_tools` | A dockable window of all modeling tools; Edit Mode's tools are one function shared with the Inspector | UModeler / ProBuilder tool windows |
+| `editor/object_snap.cpp` (`raycast_surface`, `rest_on_surface`, `nearest_vertex_on_screen`) | Surface snap: the hit point and normal (excluding what moves); the object turns to the normal by the shortest arc if asked, then its lowest point along the normal touches the surface. Vertex snap: the selection's vertex nearest the press is the anchor, the nearest other vertex on screen (24 px) the target | Unity Ctrl+Shift surface snap and V vertex snap; Blender snapping |
+| `toggle_pilot_camera`, `update_pilot_camera`, `draw_pilot_frame` | The Scene camera takes the camera's position, yaw / pitch and vertical FOV; afterwards the camera object follows the view each frame (FOV, or focal length on a physical camera); a passepartout with thirds guides | Blender Lock Camera to View; Unity Align With View |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

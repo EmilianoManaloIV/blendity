@@ -22,12 +22,12 @@ using ui::Icon;
 static const char *kVersion = "0.10.0";
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools"};
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex};
   return icons[(int)k];
 }
 
@@ -740,7 +740,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn Research Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9"};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr};
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if (u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
@@ -1116,11 +1116,11 @@ void Editor::dock_fix_parents(DockNode *n, DockNode *parent) {
 
 void Editor::dock_reset(const std::string &preset) {
   /* Window ids: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 7 Research 8 Profiler */
-  std::string s = "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,5,7,8,9:0)),L(3:0))";
-  if (preset == "2 by 3") s = "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,5,7,8:0),L(3:0))))";
-  else if (preset == "Tall") s = "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,5,7,8,9:0))),L(3:0))";
-  else if (preset == "Wide") s = "V(0.7,H(0.8,L(0,1,6,10:0),L(3:0)),H(0.3,L(2:0),L(4,5,7,8,9:0)))";
-  else if (preset == "Learning") s = "H(0.40,L(6,7:0),V(0.64,L(0,1,10:0),H(0.45,L(2:0),L(3,4,5,8,9:0))))";
+  std::string s = "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,7,8,9:0)),L(3,12:0))";
+  if (preset == "2 by 3") s = "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,7,8:0),L(3,12:0))))";
+  else if (preset == "Tall") s = "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,7,8,9:0))),L(3,12:0))";
+  else if (preset == "Wide") s = "V(0.7,H(0.8,L(0,1,6,10:0),L(3,12:0)),H(0.3,L(2:0),L(4,11,5,7,8,9:0)))";
+  else if (preset == "Learning") s = "H(0.40,L(6,7:0),V(0.64,L(0,1,10:0),H(0.45,L(2:0),L(3,12,4,11,5,8,9:0))))";
   else if (preset.size() > 2 && (preset[0] == 'H' || preset[0] == 'V' || preset[0] == 'L') && preset[1] == '(') s = preset;
   static const char *names[] = {"Default", "2 by 3", "Tall", "Wide", "Learning"};
   for (int i = 0; i < 5; i++)
@@ -1241,6 +1241,8 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Profiler: draw_profiler(r); break;
     case WindowKind::Render: draw_render_window(r); break;
     case WindowKind::UVEditor: draw_uv_editor(r); break;
+    case WindowKind::Materials: draw_materials_window(r); break;
+    case WindowKind::Tools: draw_tools_window(r); break;
     default: break;
   }
   ui_.pop_id();
@@ -2259,7 +2261,15 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "join") join_selected();
-  else if (c == "meshop") mesh_op(arg(1, ""));  // meshop <apply_transform|mirror_x|...>: an object-level mesh operator
+  else if (c == "meshop") mesh_op(arg(1, ""));
+  else if (c == "drawfillet") draw_fillet_ = std::max(0.0f, (float)std::atof(arg(1, "0").c_str()));  // corner radius of drawn shapes
+  else if (c == "pilot") toggle_pilot_camera();  // fly the selected camera with the Scene view
+  else if (c == "alignview") align_camera_to_view();
+  else if (c == "droponsurface") {
+    /* droponsurface <x> <y>: drop the selection onto the surface under that Scene view pixel */
+    drop_objects_on_surface(selected_objects(true), std::atoi(arg(1, "0").c_str()), std::atoi(arg(2, "0").c_str()));
+  }
+  else if (c == "surfacealign") surface_align_ = to_lower(arg(1, surface_align_ ? "off" : "on")) == "on";  // meshop <apply_transform|mirror_x|...>: an object-level mesh operator
   else if (c == "aimlight") {
     /* aimlight <x> <y> <z>: turn the selected light to shine at that point */
     GameObject *a = active_object();

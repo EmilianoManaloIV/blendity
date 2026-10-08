@@ -1744,6 +1744,37 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
       const uint32_t *fv = m.face_verts(0);
       meshops::split_face_path(m, 0, fv[0], fv[2], {m.face_center(0)});
     });
+    /* Plasticity tools and attaching drawn shapes to faces. */
+    for (float th : {0.02f * s, 0.0f, 5.0f * s, nan})
+      run("shell", [&](Mesh &m) {
+        std::vector<uint8_t> open(m.face_count(), 0);
+        if (!open.empty()) open[0] = 1;
+        meshops::shell(m, open, th);
+      });
+    for (float ang : {5.0f, -30.0f, 89.0f, nan})
+      run("draft", [&](Mesh &m) {
+        std::vector<uint8_t> sel(m.face_count(), 1);
+        meshops::draft(m, sel, ang, {0, 1, 0});
+      });
+    for (int count : {1, 3, 12}) run("radial array", [&](Mesh &m) { meshops::radial_array(m, count, 1, 360.0f, 1e-5f * s); });
+    run("attach an arc to a face's side", [&](Mesh &m) {
+      if (!m.face_count() || m.face_size(0) < 3) return;
+      const uint32_t a = m.face_verts(0)[0], b = m.face_verts(0)[1];
+      const Vec3 n = normalize(m.face_normal(0)), mid = (m.positions[a] + m.positions[b]) * 0.5f;
+      Vec3 out = normalize(cross(m.positions[b] - m.positions[a], n));
+      if (!std::isfinite(out.x)) return;
+      if (meshops::point_in_face(m, 0, mid + out * 0.01f * s, 1e-4f * s)) out = out * -1.0f;
+      meshops::attach_face(m, 0, a, b, {mid + out * 0.1f * s});
+    });
+    run("fillet a face's outline", [&](Mesh &m) {
+      if (!m.face_count()) return;
+      std::vector<Vec3> loop;
+      for (uint32_t k = 0; k < m.face_size(0); k++) loop.push_back(m.positions[m.face_verts(0)[k]]);
+      auto f = meshops::fillet_polygon(loop, true, 0.05f * s, 4, m.face_normal(0));
+      std::vector<uint32_t> fv;
+      for (const Vec3 &p : f) fv.push_back(m.add_vert(p + m.face_normal(0) * s));
+      if (fv.size() >= 3) m.add_face(fv.data(), fv.size());
+    });
     run("separate loose parts", [&](Mesh &m) {
       std::vector<int> part;
       const size_t n = meshops::loose_parts(m, part);

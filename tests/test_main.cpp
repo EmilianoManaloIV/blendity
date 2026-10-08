@@ -124,6 +124,7 @@ static void file_tests();
 static void colormanagement_tests();
 static void modeling_round9_tests();
 static void modeling_round10_tests();
+static void modeling_round11_tests();
 
 int main() {
   register_builtin_components();
@@ -711,6 +712,7 @@ int main() {
   colormanagement_tests();
   modeling_round9_tests();
   modeling_round10_tests();
+  modeling_round11_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -3521,5 +3523,319 @@ static void modeling_round10_tests() {
     ed.command("origin bottom");
     CHECK(std::fabs(g->world_position().y - before.min.y) < 1e-4f);
     CHECK(!ed.pivot_is_center());
+  });
+}
+
+/* ===================================================================== */
+/* Drawing on rotated objects and drawing edge cases, Plasticity tools,     */
+/* surface / vertex snapping, camera piloting, the new windows              */
+/* ===================================================================== */
+
+static bool structurally_valid(const Mesh &m, std::string *why = nullptr) {
+  for (Vec3 p : m.positions)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+      if (why) *why = "non-finite position";
+      return false;
+    }
+  std::unordered_map<uint64_t, int> uses;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t n = m.face_size(f), *v = m.face_verts(f);
+    if (n < 3) {
+      if (why) *why = "face with < 3 corners";
+      return false;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+      if (v[i] >= m.vert_count() || v[i] == v[(i + 1) % n]) {
+        if (why) *why = "bad corner";
+        return false;
+      }
+      if (++uses[Mesh::edge_key(v[i], v[(i + 1) % n])] > 2) {
+        if (why) *why = "an edge on three faces";
+        return false;
+      }
+    }
+  }
+  if (!m.uvs.empty() && m.uvs.size() != m.corner_verts.size()) {
+    if (why) *why = "UV count";
+    return false;
+  }
+  return true;
+}
+
+static void modeling_round11_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  test("draw: a rectangle on a rotated object's face lines up with the object, not the world", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_local_euler({0, 30, 0});
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    /* Two opposite corners of a smaller square in the cube's own frame, in world space. */
+    const Mat4 &w = g->world_matrix();
+    const Vec3 a = w.point({-0.25f, 0.5f, -0.25f}), b = w.point({0.25f, 0.5f, 0.25f});
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", a.x, a.y, a.z));
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", b.x, b.y, b.z));
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(m.face_count() == 10 && closed_manifold(m));
+    /* The inner face is a square in the cube's frame: its edges run along local X and Z. */
+    const size_t inner = m.face_count() - 1;
+    bool aligned = m.face_size(inner) == 4;
+    for (uint32_t k = 0; k < m.face_size(inner) && aligned; k++) {
+      const Vec3 e = normalize(m.positions[m.face_verts(inner)[(k + 1) % 4]] - m.positions[m.face_verts(inner)[k]]);
+      aligned = std::fabs(e.x) > 0.999f || std::fabs(e.z) > 0.999f;
+    }
+    CHECK(aligned);
+    /* Push it through the cube: a square hole, still a closed solid. */
+    ed.command("fsel " + std::to_string(inner));
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    sel[inner] = 1;
+    Mesh copy = m;
+    meshops::PushPullResult res;
+    CHECK(meshops::push_pull(copy, sel, -1.0f, true, &res));
+    CHECK(closed_manifold(copy));
+    CHECK_NEAR(vol(copy), 1.0f - 0.25f, 1e-3f);
+  });
+  test("draw edge cases: an arc on a rectangle's side makes a second face; push / pull the pair", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");  // nothing with a mesh selected: a new Drawing
+    ed.command("draw rectangle");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->name == "Drawing");
+    if (!g) return;
+    ed.command("drawpoint 0 0 0");
+    ed.command("drawpoint 2 0 1");
+    /* An arc on the rectangle's right side (x = 2, z 0..1), bulging out to x = 2.5. */
+    ed.command("draw arc 16");
+    ed.command("drawpoint 2 0 0");
+    ed.command("drawpoint 2 0 1");
+    ed.command("drawpoint 2.5 0 0.5");
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    std::string why;
+    std::printf("    rectangle + arc: %zu faces, %zu wire edges\n", m.face_count(), m.loose_edges.size());
+    CHECK(structurally_valid(m, &why));
+    if (!why.empty()) std::printf("    %s\n", why.c_str());
+    CHECK(m.face_count() == 2 && m.loose_edges.empty());
+    CHECK(dot(m.face_normal(0), m.face_normal(1)) > 0.999f);  // one flat surface, both facing the same way
+    /* Area: 2 x 1 plus a half disc of radius 0.5. */
+    auto area = [&](size_t f) {
+      Vec3 s(0.0f);
+      for (uint32_t k = 0; k < m.face_size(f); k++) s += cross(m.positions[m.face_verts(f)[k]], m.positions[m.face_verts(f)[(k + 1) % m.face_size(f)]]);
+      return 0.5f * length(s);
+    };
+    const float total = area(0) + area(1);
+    CHECK_NEAR(total, 2.0f + 0.5f * kPi * 0.25f, 0.02f);
+    /* Pull both faces up together: one closed solid of that footprint. */
+    Mesh both = m;
+    std::vector<uint8_t> sel(both.face_count(), 1);
+    meshops::PushPullResult res;
+    CHECK(meshops::push_pull(both, sel, 0.5f, true, &res));
+    std::printf("    pulled pair: %zu faces, closed %d, volume %.4f\n", both.face_count(), (int)closed_manifold(both), std::fabs(vol(both)));
+    CHECK(structurally_valid(both) && closed_manifold(both));
+    CHECK_NEAR(std::fabs(vol(both)), total * 0.5f, 0.02f);
+    /* Pull only the arc's face: still a valid surface (open where the rectangle stays flat). */
+    Mesh one = m;
+    std::vector<uint8_t> s1(one.face_count(), 0);
+    s1[1] = 1;
+    CHECK(meshops::push_pull(one, s1, 0.3f, true, &res));
+    CHECK(structurally_valid(one, &why));
+  });
+  test("draw edge cases: degenerate shapes, lines off the mesh, fillets, drawing on a drawing", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("edit face");
+    const auto mesh = [&]() -> const Mesh & { return *g->get<MeshFilter>()->mesh; };
+    const size_t f0 = mesh().face_count();
+    /* A zero-size rectangle and a zero-radius circle change nothing. */
+    ed.command("draw rectangle");
+    ed.command("drawpoint 0.1 1 0.1");
+    ed.command("drawpoint 0.1 1 0.1");
+    ed.command("draw circle");
+    ed.command("drawpoint 0 1 0");
+    ed.command("drawpoint 0 1 0");
+    CHECK(structurally_valid(mesh()));
+    CHECK(mesh().face_count() == f0);
+    /* A shape hanging off the face's edge can't be cut in: it goes in as its own face. */
+    ed.command("draw rectangle");
+    ed.command("drawpoint 0.3 1 0.3");
+    ed.command("drawpoint 0.8 1 0.8");
+    CHECK(structurally_valid(mesh()));
+    /* A line from an edge out into the air: wire edges, nothing broken. */
+    ed.command("draw polyline");
+    ed.command("drawpoint -0.5 1 0");
+    ed.command("drawpoint -1.5 1 0");
+    ed.command("drawpoint -1.5 1 -1 finish");
+    CHECK(structurally_valid(mesh()));
+    CHECK(mesh().loose_edges.size() >= 2);
+    /* A rounded rectangle: each corner becomes an arc (4 x 7 corners). */
+    ed.command("edit off");
+    ed.command("select Main Camera");
+    ed.command("draw rectangle");
+    GameObject *d = ed.selected_object();
+    /* draw_fillet_ through the console's draw settings */
+    ed.command("drawfillet 0.25");
+    ed.command("drawpoint 3 0 3");
+    ed.command("drawpoint 5 0 4");
+    if (d) {
+      const Mesh &dm = *d->get<MeshFilter>()->mesh;
+      CHECK(dm.face_count() == 1 && dm.face_size(0) == 28);
+      /* Then a circle inside that rounded face, cut into it. */
+      ed.command("drawfillet 0");
+      ed.command("draw circle 12");
+      ed.command("drawpoint 4 0 3.5");
+      ed.command("drawpoint 4.3 0 3.5");
+      CHECK(structurally_valid(dm));
+      CHECK(dm.face_count() > 2);
+    }
+  });
+  test("plasticity tools: shell, draft, thicken and a radial array", [&] {
+    Mesh box = *primitives::cube();
+    std::vector<uint8_t> top(box.face_count(), 0);
+    top[face_facing(box, {0, 1, 0})] = 1;
+    std::string err;
+    CHECK(meshops::shell(box, top, 0.1f, &err));
+    std::printf("    shell: %zu faces, closed %d, volume %.4f\n", box.face_count(), (int)closed_manifold(box), vol(box));
+    CHECK(closed_manifold(box));
+    CHECK(vol(box) > 0.2f && vol(box) < 0.6f);  // walls only: 1 - 0.8 * 0.8 * 0.9 = 0.424
+    /* Draft: the four sides lean in 10 degrees toward the top. */
+    Mesh d = *primitives::cube();
+    std::vector<uint8_t> sides(d.face_count(), 0);
+    for (size_t f = 0; f < d.face_count(); f++) sides[f] = std::fabs(d.face_normal(f).y) < 0.5f;
+    CHECK(meshops::draft(d, sides, 10.0f, {0, 1, 0}) == 4);
+    float top_w = 0, bot_w = 0;
+    for (const Vec3 &p : d.positions) (p.y > 0 ? top_w : bot_w) = std::max(p.y > 0 ? top_w : bot_w, std::fabs(p.x));
+    CHECK_NEAR(bot_w, 0.5f, 1e-4f);
+    CHECK_NEAR(top_w, 0.5f - std::tan(10.0f * kDeg2Rad), 1e-3f);
+    CHECK(closed_manifold(d));
+    /* Thicken a plane into a slab. */
+    Mesh p = *primitives::grid(1.0f, 1, 1);
+    std::vector<uint8_t> none(p.face_count(), 0);
+    CHECK(meshops::shell(p, none, 0.2f, &err));
+    CHECK(closed_manifold(p) && std::fabs(vol(p)) > 0.19f);
+    /* Radial array: six copies of an offset cube around Y. */
+    Mesh r = *primitives::cube(0.5f);
+    meshops::translate(r, {2, 0, 0});
+    meshops::radial_array(r, 6, 1, 360.0f, 0.0f);
+    CHECK(r.face_count() == 36);
+    AABB b = r.bounds();
+    CHECK(b.max.x > 2.2f && b.min.x < -2.2f && b.max.z > 1.9f && b.min.z < -1.9f);
+    /* A fillet on a triangle and on a straight run leaves straight runs alone. */
+    auto f = meshops::fillet_polygon({{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {1, 0, 1}}, true, 0.1f, 4, {0, 1, 0});
+    CHECK(f.size() == 1 + 5 + 5 + 5);  // three rounded corners; the collinear point stays one point
+  });
+  test("snapping: drop on a surface, Ctrl+Shift move onto a face, V snaps vertex to vertex", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *base = ed.selected_object();
+    base->name = "Base";
+    base->set_world_position({0, 0.5f, 0});
+    ed.command("create Sphere");
+    GameObject *ball = ed.selected_object();
+    ball->name = "Ball";
+    ball->set_world_position({3, 2, 0});
+    ed.command("camera 0 30 6 0 0.5 0");
+    ed.step_frame_headless();
+    int x, y;
+    CHECK(ed.project_to_window({0.1f, 1.0f, 0.05f}, x, y));  // on the cube's top
+    ed.command("select Ball");
+    ed.command(strprintf("droponsurface %d %d", x, y));
+    const AABB bb = ball->world_bounds();
+    std::printf("    ball on the cube: bottom at y %.4f (cube top 1.0)\n", bb.min.y);
+    CHECK_NEAR(bb.min.y, 1.0f, 2e-3f);
+    /* V: drag a corner of a second cube onto a corner of the first. */
+    ed.command("create Cube");
+    GameObject *c2 = ed.selected_object();
+    c2->name = "Second";
+    c2->set_world_position({2.2f, 0.5f, -0.3f});
+    ed.command("tool move");
+    ed.step_frame_headless();
+    const Vec3 from = c2->world_matrix().point({-0.5f, 0.5f, -0.5f}), to = base->world_matrix().point({0.5f, 0.5f, -0.5f});
+    int fx, fy, tx, ty;
+    CHECK(ed.project_to_window(from, fx, fy) && ed.project_to_window(to, tx, ty));
+    using ET = platform::EventType;
+    auto ev = [](ET t, int px, int py, int key = 0) {
+      platform::Event e;
+      e.type = t;
+      e.x = px;
+      e.y = py;
+      e.key = key;
+      return e;
+    };
+    ed.step_frame_headless({ev(ET::MouseMove, fx, fy), ev(ET::KeyDown, fx, fy, platform::KEY_V)});
+    ed.step_frame_headless({ev(ET::MouseDown, fx, fy)});
+    ed.step_frame_headless({ev(ET::MouseMove, (fx + tx) / 2, (fy + ty) / 2)});
+    ed.step_frame_headless({ev(ET::MouseMove, tx, ty)});
+    ed.step_frame_headless({ev(ET::MouseUp, tx, ty)});
+    ed.step_frame_headless({ev(ET::KeyUp, tx, ty, platform::KEY_V)});
+    const Vec3 now = c2->world_matrix().point({-0.5f, 0.5f, -0.5f});
+    std::printf("    vertex snap: corner (%.3f %.3f %.3f), target (%.3f %.3f %.3f)\n", now.x, now.y, now.z, to.x, to.y, to.z);
+    CHECK(length(now - to) < 1e-3f);
+  });
+  test("camera: piloting moves the camera with the view, Ctrl + wheel sets its field of view", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    GameObject *cam = ed.selected_object();
+    const float fov0 = cam->get<Camera>()->fov;
+    ed.command("pilot");
+    ed.step_frame_headless();
+    /* The view starts at the camera. */
+    CHECK_NEAR(ed.scene_fov(), cam->get<Camera>()->vertical_fov_deg(cam->get<Camera>()->image_aspect(1280.0f / 720.0f)), 0.5f);
+    ed.command("camera 40 20 7 1 0.5 0");
+    ed.step_frame_headless();
+    const Vec3 fwd = cam->world_rotation().rotate({0, 0, 1});
+    const Vec3 to_pivot = normalize(Vec3(1, 0.5f, 0) - cam->world_position());
+    std::printf("    camera at (%.2f %.2f %.2f), looking %.4f toward the pivot\n", cam->world_position().x, cam->world_position().y,
+                cam->world_position().z, dot(fwd, to_pivot));
+    CHECK(dot(fwd, to_pivot) > 0.9999f);
+    Recti r = ed.scene_view_rect();
+    platform::Event mv, wheel;
+    mv.type = platform::EventType::MouseMove;
+    mv.x = wheel.x = r.x + r.w / 2;
+    mv.y = wheel.y = r.y + r.h / 2;
+    wheel.type = platform::EventType::Wheel;
+    wheel.wheel_y = 3;
+    wheel.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({wheel});
+    ed.step_frame_headless();
+    std::printf("    field of view %.1f -> %.1f\n", fov0, cam->get<Camera>()->fov);
+    CHECK(cam->get<Camera>()->fov < fov0 - 1.0f);
+    ed.command("pilot");  // stop
+    ed.step_frame_headless();
+    const Vec3 kept = cam->world_position();
+    ed.command("camera 0 10 20 0 0 0");
+    ed.step_frame_headless();
+    CHECK(length(cam->world_position() - kept) < 1e-5f);  // no longer follows the view
+  });
+  test("windows: Materials and Modeling Tools draw, with and without a selection or Edit Mode", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    for (const char *w : {"Materials", "Modeling Tools"}) {
+      ed.command(std::string("window ") + w);
+      ed.step_frame_headless();
+      ed.command("select Cube");
+      ed.step_frame_headless();
+      ed.command("edit face");
+      ed.step_frame_headless();
+      ed.command("edit off");
+      ed.command("select Main Camera");
+      ed.step_frame_headless();
+    }
+    CHECK(true);  // drawing all of that without crashing is the check
   });
 }
