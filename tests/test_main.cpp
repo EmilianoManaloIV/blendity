@@ -2552,6 +2552,140 @@ static void render_tests() {
     CHECK(find_edit_op("bevel") && find_edit_op("bevel")->elements == 2);
     CHECK(find_edit_op("merge_center") && find_edit_op("merge_center")->elements == 1);
   });
+  test("export: OBJ + MTL and FBX read back through Blender's importer (ufbx)", [] {
+    Mesh m = *primitives::cube();
+    meshops::translate(m, {0.25f, 0.5f, 0.0f});  // off-centre, so a mirrored axis would show
+    MaterialPtr red = make_material("Red", {0.9f, 0.1f, 0.05f});
+    red->alpha = 0.5f;
+    ExportItem it;
+    it.name = "Box";
+    it.mesh = &m;
+    it.world = Mat4::translate({1, 0, 0});
+    it.materials = {red};
+    auto check = [&](const ImportResult &r, const char *what) {
+      size_t faces = 0;
+      AABB b;
+      MaterialPtr mat;
+      for (const ImportedNode &n : r.nodes) {
+        if (!n.mesh) continue;
+        const Mat4 w = Mat4::trs(n.position, n.rotation, n.scale);
+        faces += n.mesh->face_count();
+        CHECK(signed_volume(*n.mesh) * signed_volume(*primitives::cube()) > 0);  // faces still point out
+        for (Vec3 p : n.mesh->positions) b.add(w.point(p));
+        if (!n.materials.empty()) mat = n.materials[0];
+      }
+      std::printf("    %s: %zu faces, bounds (%.2f %.2f %.2f) - (%.2f %.2f %.2f)\n", what, faces, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+      CHECK(faces == 6);
+      /* Back in our space: x 1.25 +- 0.5, y 0.5 +- 0.5, z 0 +- 0.5. */
+      CHECK(length(b.min - Vec3(0.75f, 0.0f, -0.5f)) < 1e-3f);
+      CHECK(length(b.max - Vec3(1.75f, 1.0f, 0.5f)) < 1e-3f);
+      CHECK(mat != nullptr);
+      if (mat) {
+        CHECK_NEAR(mat->base_color.x, 0.9f, 0.02f);
+        CHECK_NEAR(mat->base_color.y, 0.1f, 0.02f);
+      }
+    };
+    std::string obj, mtl;
+    export_obj_mtl({it}, "box_test.mtl", obj, mtl);
+    const std::string op = fs::join(test_dir(), "box_test.obj");
+    CHECK(fs::write_file(op, obj) && fs::write_file(fs::join(test_dir(), "box_test.mtl"), mtl));
+    CHECK(mtl.find("d 0.5") != std::string::npos);  // the alpha
+    ImportResult ro;
+    CHECK(import_model(op, ro));
+    check(ro, "OBJ");
+    const std::string fp = fs::join(test_dir(), "box_test.fbx");
+    CHECK(fs::write_file(fp, export_fbx({it})));
+    ImportResult rf;
+    CHECK(import_model(fp, rf));
+    if (!rf.error.empty()) std::printf("    FBX import: %s\n", rf.error.c_str());
+    check(rf, "FBX");
+  });
+  test("lights: colour temperature, spot cone and area facing (CPU and GPU agree)", [] {
+    const Vec3 w = kelvin_to_rgb(6500), warm = kelvin_to_rgb(2000), cool = kelvin_to_rgb(12000);
+    std::printf("    6500 K (%.2f %.2f %.2f)  2000 K (%.2f %.2f %.2f)  12000 K (%.2f %.2f %.2f)\n", w.x, w.y, w.z, warm.x, warm.y,
+                warm.z, cool.x, cool.y, cool.z);
+    CHECK(std::min({w.x, w.y, w.z}) > 0.9f);  // daylight is (nearly) white
+    CHECK(warm.x > 0.99f && warm.z < 0.3f);    // candle-ish: red, little blue
+    CHECK(cool.z > 0.99f && cool.x < 0.85f);   // blue sky
+    /* A floor lit only by a light 2 m above it, pointing down: brightness at
+     * the centre and 1.8 m to the side. */
+    auto plane = primitives::plane(8.0f, 1);
+    std::vector<MaterialPtr> mats = {make_material("floor", {0.8f, 0.8f, 0.8f})};
+    mats[0]->specular = 0;
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0, 0, 0};
+    auto brightness = [&](const RenderLight &l, std::vector<int> gpus) {
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false;
+      st.use_embree = false;
+      st.max_bounces = 1;
+      st.gpus = gpus;
+      st.use_cpu = gpus.empty();
+      pt.set_settings(st);
+      pt.build({{&plane->render_mesh_tangents(), Mat4::identity(), &mats}}, {l}, env);
+      pt.set_camera(Mat4::look_at({0, 6, -0.01f}, {0, 0, 0}, {0, 1, 0}), Mat4::ortho(2.5f, 1.0f, 0.1f, 20), 32, 32);
+      pt.render(1e9, 64);
+      auto rgb = pt.linear_rgb(false);
+      auto px = [&](int x, int y) { return rgb[((size_t)y * 32 + x) * 3 + 1]; };
+      return std::pair<float, float>(px(16, 16), px(16 + 11, 16));  // centre, ~1.7 m out
+    };
+    RenderLight spot;
+    spot.type = RenderLight::Spot;
+    spot.position = {0, 2, 0};
+    spot.direction = {0, -1, 0};
+    spot.right = {1, 0, 0};
+    spot.range = 10;
+    spot.intensity = 2;
+    spot.cos_outer = std::cos(20 * kDeg2Rad);  // 40 degree cone: about 0.73 m radius on the floor
+    spot.cos_inner = std::cos(15 * kDeg2Rad);
+    auto [sc, se] = brightness(spot, {});
+    std::printf("    spot: centre %.3f, outside the cone %.3f\n", sc, se);
+    CHECK(sc > 0.05f && se < sc * 0.02f);
+    RenderLight area = spot;
+    area.type = RenderLight::Area;
+    area.width = area.height = 1.0f;
+    auto [ac, ae] = brightness(area, {});
+    RenderLight up = area;
+    up.direction = {0, 1, 0};  // facing away from the floor
+    auto [uc, ue] = brightness(up, {});
+    std::printf("    area: centre %.3f, side %.3f; turned away %.4f\n", ac, ae, uc);
+    CHECK(ac > ae && ae > 0.0f && uc < 1e-4f);
+    if (gpu::available())
+      for (const RenderLight &l : {spot, area}) {
+        auto [gc, ge] = brightness(l, {gpu::devices()[0].index});
+        auto [cc, ce] = brightness(l, {});
+        std::printf("    GPU %s: centre %.3f (CPU %.3f), side %.3f (CPU %.3f)\n", l.type == RenderLight::Spot ? "spot" : "area", gc, cc, ge, ce);
+        CHECK(std::fabs(gc - cc) < 0.1f * cc + 1e-3f);
+        CHECK(std::fabs(ge - ce) < 0.1f * cc + 1e-3f);
+      }
+  });
+  test("editor: the camera focus eyedropper sets the distance to the clicked surface", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    GameObject *cam = ed.selected_object();
+    CHECK(cam && cam->get<Camera>());
+    if (!cam || !cam->get<Camera>()) return;
+    cam->get<Camera>()->focus_distance = 999.0f;
+    ed.command("pickfocus");
+    Recti r = ed.scene_view_rect();
+    platform::Event mv, dn, upe;
+    mv.type = platform::EventType::MouseMove;
+    dn.type = platform::EventType::MouseDown;
+    upe.type = platform::EventType::MouseUp;
+    mv.x = dn.x = upe.x = r.x + r.w / 2;
+    mv.y = dn.y = upe.y = r.y + r.h * 3 / 4;  // the floor in front of the default view
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({dn});
+    ed.step_frame_headless({upe});
+    const Camera *c = cam->get<Camera>();
+    std::printf("    picked focus distance %.3f m\n", c->focus_distance);
+    CHECK(c->focus_distance > 0.5f && c->focus_distance < 50.0f);
+    CHECK(c->dof);
+  });
   test("pathtracer: shadows through transparent surfaces", [] {
     /* Sun from straight above, a ground plane, and a half-transparent black
      * quad over part of it: the shadow keeps half of the direct light. */

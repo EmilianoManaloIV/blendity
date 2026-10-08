@@ -19,6 +19,7 @@
 #include "../platform/platform.h"
 #include "../render/pathtracer.h"
 #include "../render/raster.h"
+#include "../scene/export.h"
 #include "../scene/scene.h"
 #include "ui.h"
 
@@ -37,6 +38,7 @@ ui::Icon window_icon(WindowKind k);
 enum class Tool { View, Move, Rotate, Scale, Transform };
 enum class EditElement { Vertex, Edge, Face };
 /* One Edit Mode operator: which selection modes offer it (1 vertex, 2 edge, 4 face). */
+RenderLight to_render_light(const GameObject &g, const Light &l);  // render_view.cpp
 struct EditOpInfo {
   const char *op, *label, *keys, *tip;
   int elements;
@@ -181,6 +183,7 @@ class Editor {
   void draw_grid(Renderer3D &r3d);
   void draw_scene_icons(const Recti &r);
   void draw_view_gizmo(const Recti &r);
+  Recti view_gizmo_rect(const Recti &view) const;
   void draw_scene_overlay_bar(const Recti &r);
   bool gizmo_update(const Recti &r);  // returns true if the gizmo owns the mouse
   void draw_gizmo(const Recti &r);
@@ -237,6 +240,7 @@ class Editor {
   };
   bool edit_op_redoable(const std::string &op) const;
   bool last_op_valid();
+  bool last_op_hidden_ = false;  // put away (x, Esc, a selection click) until the next operator or F9
   void run_last_op(bool first);
   void draw_last_op_panel(const Recti &view);
   bool try_auto_fuse(Mesh &m);
@@ -327,7 +331,7 @@ class Editor {
   bool open_scene(const std::string &path);
   void save_scene_cmd(bool save_as);
   void import_obj_file(const std::string &path);
-  void export_selected_obj();
+  std::string export_model(const std::string &format, bool selection_only);  // "obj" / "fbx"; returns the file
   void screenshot(const std::string &path = "");
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();
@@ -336,6 +340,17 @@ class Editor {
   void mesh_op(const std::string &op);
   void set_origin(int mode, Vec3 world_point = Vec3(0.0f));  // kOriginModes; world_point for "Origin to Point"
   int origin_mode_ = 0;
+  bool origin_hover_ = false;  // the Inspector's Origin row is in use: the Scene view previews the new origin
+  bool origin_target(const GameObject &g, int mode, Vec3 world_point, Vec3 &c) const;
+  void draw_origins(const Recti &view);
+  uint64_t focus_pick_cam_ = 0;  // a Camera waiting for its focus point (eyedropper)
+  bool focus_pick_update(const Recti &view);
+  bool raycast_scene(const Ray &ray, Vec3 &hit);
+  /* Blender's Alt+click (loop) and Ctrl+Alt+click (ring) in Edit Mode: a click
+   * that didn't move the mouse, so Unity's Alt+drag orbit / pan stay. */
+  bool alt_click_ = false, alt_click_ring_ = false;
+  void alt_click_release(const Recti &view);
+  void edit_select_ring(const Recti &view, int mx, int my, bool add);
   Vec3 origin_target_;
   /* Assets used by material / texture pickers (cached directory scan). */
   const std::vector<std::string> &image_assets();
@@ -490,6 +505,7 @@ class Editor {
   RenderTarget cam_preview_rt_;
   Renderer3D cam_preview_r3d_;
   bool cam_preview_rendered_ = false;  // Camera Preview shows the render engine (path traced)
+  uint64_t cam_preview_lock_ = 0;      // Camera Preview pinned to this camera (0: the selected one)
   PathTracer cam_preview_pt_;
   uint64_t cam_preview_pt_hash_ = 0;
   bool cam_preview_done_ = false;

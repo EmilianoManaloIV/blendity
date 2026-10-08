@@ -167,6 +167,17 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `bevel_edges(..., clamp_overlap)` | Clamp Overlap: one even width, at most half of any edge that slides from both ends | `bmesh_bevel.cc` (`clamp_overlap`) |
 | `ui::Context::color_field(..., alpha)`, `Reflector::color_alpha` | Unity's colour field (alpha bar) and Color window (SV square, hue strip, RGB 0-255 / 0-1 / HSV, alpha, hex RRGGBBAA, swatches). Files keep the colour and its alpha as two fields | Unity `EditorGUI.ColorField`, `ColorPicker` |
 
+## Lights, export, selection and viewport polish (phase 8)
+
+| Blendity | What it does | Blender / Unity equivalent |
+|---|---|---|
+| `Light` (spot, area, `use_temperature`), `RenderLight`, `light_falloff`, `to_render_light` | Spot cones with a soft edge and area rectangles or discs, in the rasterizer, the CPU path tracer and the GPU kernel. Area lights are sampled over their surface; every light type draws 2 random numbers, so CPU and GPU stay in step. `kelvin_to_rgb` follows the Planckian locus (Kang et al. 2002) to linear RGB | Blender Spot / Area lamps, the Blackbody node; Unity Light Type, HDRP Color Temperature |
+| `scene/export.cpp` (`export_obj_mtl`, `export_fbx`) | OBJ + MTL (UVs, smooth / flat normals, `usemtl` groups, Phong + PBR terms, texture maps) and ASCII FBX 7.4 (geometry, normals, UVs, per-face materials, one model per object), mirrored in X to right-handed. FBX import mirrors X the same way (Unity's convention) instead of ufbx's left-handed target | `io/wavefront_obj/exporter`, `io_scene_fbx`; Unity's FBX Exporter |
+| `Editor::alt_click_release`, `edit_select_ring`, face loops in `edit_select_loop` | Alt+click a loop and Ctrl+Alt+click a ring; in face mode these give face loops. They only count when the mouse didn't move, so Alt+drag still orbits and pans | `editmesh_select.cc` (loop / ring select) |
+| `view_gizmo_rect`, `draw_view_gizmo` | The scene gizmo keeps its clicks: axes give the named views, and the label or centre switches between perspective and isometric | Unity Scene Gizmo; Blender's navigation gizmo |
+| `draw_origins`, `origin_target` | An origin dot on selected objects, and a preview of where Set Origin will move it | Blender's object origins |
+| `cam_preview_lock_`, `focus_pick_update` / `raycast_scene` | A Camera Preview that stays while you edit, and a focus-distance eyedropper | Unity Camera Preview; Blender's Focus Distance eyedropper |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

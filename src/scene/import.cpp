@@ -5,6 +5,7 @@
 #include "../../extern/fast_float/fast_float.h"
 #include "../../extern/ufbx/ufbx.h"
 
+#include <algorithm>
 #include <cstring>
 #include <unordered_map>
 
@@ -278,10 +279,13 @@ static std::string ustr(const ufbx_string &s) { return std::string(s.data, s.len
 
 bool import_fbx_file(const std::string &path, ImportResult &out) {
   ufbx_load_opts opts{};
-  opts.target_axes = ufbx_axes_left_handed_y_up;  // Unity's space
+  /* ufbx brings any file to right-handed Y-up (Z-up Blender files stand up);
+   * then X is mirrored here, which is exactly what Unity's importer does (and
+   * the inverse of our exporter). Asking ufbx for a left-handed target instead
+   * also turns the model 180 degrees about Y. */
+  opts.target_axes = ufbx_axes_right_handed_y_up;
   opts.target_unit_meters = 1.0f;
   opts.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
-  opts.handedness_conversion_axis = UFBX_MIRROR_AXIS_X;  // mirror X like Unity's importer
   opts.generate_missing_normals = true;
   ufbx_error err;
   ufbx_scene *scene = ufbx_load_file(path.c_str(), &opts, &err);
@@ -334,8 +338,9 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
     node.name = ustr(n->name);
     if (node.name.empty()) node.name = "Node";
     const ufbx_transform &t = n->local_transform;
-    node.position = {(float)t.translation.x, (float)t.translation.y, (float)t.translation.z};
-    node.rotation = normalize(Quat((float)t.rotation.x, (float)t.rotation.y, (float)t.rotation.z, (float)t.rotation.w));
+    /* Mirrored in X: positions negate x; a rotation keeps its x and negates y and z. */
+    node.position = {-(float)t.translation.x, (float)t.translation.y, (float)t.translation.z};
+    node.rotation = normalize(Quat((float)t.rotation.x, -(float)t.rotation.y, -(float)t.rotation.z, (float)t.rotation.w));
     node.scale = {(float)t.scale.x, (float)t.scale.y, (float)t.scale.z};
     if (const ufbx_mesh *fm = n->mesh) {
       auto m = std::make_shared<Mesh>();
@@ -344,7 +349,7 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
       const ufbx_matrix &g = n->geometry_to_node;
       for (size_t vi = 0; vi < fm->vertices.count; vi++) {
         ufbx_vec3 p = fm->vertices.data[vi];
-        m->add_vert({(float)(g.m00 * p.x + g.m01 * p.y + g.m02 * p.z + g.m03), (float)(g.m10 * p.x + g.m11 * p.y + g.m12 * p.z + g.m13),
+        m->add_vert({-(float)(g.m00 * p.x + g.m01 * p.y + g.m02 * p.z + g.m03), (float)(g.m10 * p.x + g.m11 * p.y + g.m12 * p.z + g.m13),
                      (float)(g.m20 * p.x + g.m21 * p.y + g.m22 * p.z + g.m23)});
       }
       bool has_uv = fm->vertex_uv.exists;
@@ -363,6 +368,9 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
             fuv.push_back({(float)uv.x, (float)uv.y});
           }
         }
+        /* The mirror flips the winding: reverse it so faces still point out. */
+        std::reverse(fv.begin(), fv.end());
+        std::reverse(fuv.begin(), fuv.end());
         int slot = fi < fm->face_material.count ? (int)fm->face_material.data[fi] : 0;
         m->add_face(fv.data(), fv.size(), has_uv ? fuv.data() : nullptr, slot);
       }

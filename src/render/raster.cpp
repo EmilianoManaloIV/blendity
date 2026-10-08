@@ -154,8 +154,7 @@ static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Ve
       Vec3 d = l.position - wp;
       float dist = length(d);
       L = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
-      float f = saturate(1.0f - dist / std::max(1e-3f, l.range));
-      atten *= f * f;
+      atten *= light_falloff(l, wp, L);  // range, spot cone, area facing
     }
     float ndl = dot(n, L);
     if (ndl <= 0) continue;
@@ -964,8 +963,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
       Vec3 d = l.position - sp.position;
       float dist = length(d);
       L = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
-      float f = saturate(1.0f - dist / std::max(1e-3f, l.range));
-      atten *= f * f;
+      atten *= light_falloff(l, sp.position, L);  // range, spot cone, area facing
     }
     float ndl = dot(n, L);
     if (ndl <= 0 || atten <= 0) continue;

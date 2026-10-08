@@ -642,7 +642,8 @@ bool Context::float_field(Id i, const Recti &r, float &v, float speed, float mn,
   bool clicked = false;
   bool changed = scrub(i, r, v, speed, mn, mx, &clicked);
   frame(r, theme.field, last_hovered_ || active_ == i ? theme.field_hover : theme.field_border, px(3));
-  std::string s = strprintf(fmt, v);
+  /* %.3g would show 2000 as "2e+03": large values get their digits. */
+  std::string s = strprintf(std::fabs(v) >= 1000.0f && std::fabs(v) < 1e9f && std::strcmp(fmt, "%.3g") == 0 ? "%.7g" : fmt, v);
   canvas.push_clip(r.shrink(px(1)));
   canvas.text(font, r.x + px(4), r.y + (r.h - font.line_height()) / 2, s, theme.text);
   canvas.pop_clip();
@@ -1050,6 +1051,9 @@ void Context::open_popup(Id i, const Recti &anchor, bool submenu_of_top) {
   p.id = i;
   p.anchor = anchor;
   p.submenu = submenu_of_top;
+  /* Survives this frame even when its owner already declared its menus
+   * (opened after the popup() call, e.g. a right-click on empty space). */
+  p.declared = true;
   popups_.push_back(p);
   redraw = true;
 }

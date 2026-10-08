@@ -56,6 +56,29 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   return items;
 }
 
+/* A Light component as the renderers see it (all four types, temperature applied). */
+RenderLight to_render_light(const GameObject &g, const Light &l) {
+  RenderLight rl;
+  rl.type = l.type == 1 ? RenderLight::Point : l.type == 2 ? RenderLight::Spot : l.type == 3 ? RenderLight::Area : RenderLight::Directional;
+  const Quat q = g.world_rotation();
+  rl.direction = normalize(q.rotate({0, 0, 1}));
+  rl.right = normalize(q.rotate({1, 0, 0}));
+  rl.position = g.world_position();
+  rl.color = l.final_color();
+  rl.intensity = l.intensity;
+  rl.range = l.range;
+  const float outer = std::max(1.0f, std::min(179.0f, l.spot_angle)) * 0.5f;
+  const float inner = std::min(outer, std::max(0.0f, l.inner_spot_angle) * 0.5f);
+  rl.cos_outer = std::cos(outer * kDeg2Rad);
+  rl.cos_inner = std::cos(inner * kDeg2Rad);
+  rl.disk = l.area_shape == 1;
+  /* The object's scale stretches an area light, as in Blender. */
+  const Mat4 &w = g.world_matrix();
+  rl.width = l.area_width * length(w.dir({1, 0, 0}));
+  rl.height = l.area_height * length(w.dir({0, 1, 0}));
+  return rl;
+}
+
 LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
   LightingEnv env;
   const EnvironmentSettings &es = scene_->environment;
@@ -78,14 +101,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
     if (!l || !l->enabled) return;
-    RenderLight rl;
-    rl.type = l->type == 1 ? RenderLight::Point : RenderLight::Directional;
-    rl.direction = normalize(g.world_rotation().rotate({0, 0, 1}));
-    rl.position = g.world_position();
-    rl.color = l->color;
-    rl.intensity = l->intensity;
-    rl.range = l->range;
-    env.lights.push_back(rl);
+    env.lights.push_back(to_render_light(g, *l));
   });
   update_environment();
   env.environment = &env_;
@@ -542,10 +558,16 @@ uint64_t Editor::live_preview_hash() {
  * render engine at the inset's size, progressively, like a small render
  * preview (path traced with the camera's depth of field and exposure). */
 void Editor::draw_camera_preview(const Recti &view) {
-  GameObject *g = active_object();
+  /* Locked: the same camera stays up whatever is selected, in Edit Mode too,
+   * so the shot can be watched while the mesh is changed. */
+  GameObject *g = cam_preview_lock_ ? scene_->find(cam_preview_lock_) : active_object();
+  if (cam_preview_lock_ && (!g || !g->get<Camera>())) {
+    cam_preview_lock_ = 0;
+    g = active_object();
+  }
   Camera *cam = g ? g->get<Camera>() : nullptr;
   cam_preview_rect_ = Recti{};
-  if (!cam || !cam->enabled || edit_mode_) {
+  if (!cam || !cam->enabled || (edit_mode_ && !cam_preview_lock_)) {
     cam_preview_pt_hash_ = 0;
     return;
   }
@@ -606,9 +628,13 @@ void Editor::draw_camera_preview(const Recti &view) {
   u.canvas.fill_rect({box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)}, Color::hex(0x222222, 230));
   /* Header: the camera's name, then a Shaded / Rendered switch. */
   const char *mode = cam_preview_rendered_ ? "Rendered" : "Shaded";
-  int bw = u.font.text_width("Rendered") + u.px(12);
+  int bw = u.font.text_width("Rendered") + u.px(12), lw = u.font.text_width("Locked") + u.px(12);
   Recti mb{box.right() - bw, box.y - u.row_h() - u.px(2), bw, u.row_h()};
-  u.label({box.x, box.y - u.row_h(), w - bw - u.px(4), u.row_h()}, g->name + status, u.theme.text);
+  Recti lb{mb.x - lw - u.px(4), mb.y, lw, mb.h};
+  u.label({box.x, box.y - u.row_h(), w - bw - lw - u.px(8), u.row_h()}, g->name + status, u.theme.text);
+  if (u.button(lb, cam_preview_lock_ ? "Locked" : "Lock", cam_preview_lock_ != 0)) cam_preview_lock_ = cam_preview_lock_ ? 0 : g->id;
+  u.tooltip("Lock: keep this camera's preview up while you select other objects and edit meshes\n"
+            "(Edit Mode too), so you can see the shot change as you model. Click again to unlock.");
   if (u.button(mb, mode, cam_preview_rendered_)) {
     cam_preview_rendered_ = !cam_preview_rendered_;
     cam_preview_pt_hash_ = 0;

@@ -225,6 +225,9 @@ A real lens focuses at one distance. With Depth of Field on, each camera ray sta
 @ blender/intern/cycles/kernel/sample/mapping.h  (regular_polygon_sample: bladed apertures)
 > [FoCG] 4.3 Computing Viewing Rays, 13.4 Choosing Random Points (on the aperture), 14.10 Monte Carlo Ray Tracing
 ? With a 50 mm lens, what is the aperture's diameter at f/2? | 25 mm: the f-number is the focal length divided by the aperture's diameter.
+# Focusing, and watching the shot
+The Camera's Pick Focus Point button is an eyedropper. Click a surface in the Scene view and the focus distance becomes how far that point is in front of the camera. Lock on the Camera Preview keeps that camera's preview up while you select other things and edit meshes, so you can model while you watch the shot.
+! cmd:select Main Camera; pickfocus | Pick the Main Camera's focus point (then click a surface)
 ! cmd:select Main Camera; set Camera.PhysicalCamera 1; set Camera.DepthOfField 1; set Camera.FStop 1.4; camerapreview rendered | Make the Main Camera physical with a shallow depth of field and preview it
 # Depth precision
 Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits close to the near plane, so a tiny near clip value causes z-fighting in the distance. Keep Near as large as you can.
@@ -266,6 +269,16 @@ Blendity's MeshRenderer uses the classic shading model: Lambertian diffuse, a Bl
 > [GEA2] 12.3 The Rendering Equation, 12.4 The Shading Equation, 12.5 Lighting with Triangle Rasterization
 ? Why does a directional light's position not matter, only its rotation? | It models a source infinitely far away (the sun). All rays are parallel, so only the direction affects N . L.
 ! create:Point Light | Add a Point Light
+# Light types and colour temperature
+| Type | Blendity | Blender | Unity
+| Sun | Directional | Sun | Directional
+| Bulb | Point (Range) | Point | Point
+| Cone | Spot (Spot Angle, Inner Spot Angle) | Spot (Size, Blend) | Spot
+| Panel | Area (Rectangle / Disc, Width, Height) | Area | Area (HDRP / baked)
+A spot light lights a cone along its forward axis and fades between the inner and outer angles. An area light lights only the side its arrow points to. In path-traced renders it is sampled across its whole surface, so its shadows are soft: the larger the panel, the softer they get. Real lights have a colour temperature. Tick Use Color Temperature and the colour is tinted like a black body at that many kelvin. The tint runs warm to cool: 1900 K is candlelight, 2700 K a bulb, 5500 K noon sun and 6500 K white, while 10000 K and above is the blue of shade.
+@ blender/intern/cycles/kernel/light/spot.h, blender/intern/cycles/kernel/light/area.h
+@ blender/intern/cycles/kernel/svm/blackbody.h
+! cmd:create Spot Light; set Light.UseColorTemperature 1; set Light.Temperature 2700 | Add a warm spot light above the scene
 )"},
     {"Play Mode and the Game Loop", "Update, physics and why changes revert", R"(
 Press Play (Ctrl+P). Blendity copies the scene and starts the game loop. Every frame it updates the components (Rotator, Oscillator, PlayerController) and then steps physics (Rigidbody). Press Stop to restore the copy, so edits made while playing are lost. That matches Unity's behaviour, and it surprises everyone the first time.

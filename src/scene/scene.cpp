@@ -175,11 +175,60 @@ Material &MeshRenderer::main_material() {
 }
 
 void Light::reflect(Reflector &r) {
-  static const char *types[] = {"Directional", "Point"};
-  r.enumeration("Type", type, types, 2);
+  const bool all = r.all_fields();
+  static const char *types[] = {"Directional", "Point", "Spot", "Area"};
+  r.enumeration("Type", type, types, 4);
+  r.help("Directional: the sun, parallel rays. Point: all directions from a point. Spot: a cone along the light's\n"
+         "forward (blue) axis. Area: a rectangle or disc that lights its front, with soft shadows when path traced.\n"
+         "Unity: Light Type. Blender: Sun / Point / Spot / Area.");
+  if (type == 2 || all) {
+    r.field("Spot Angle", spot_angle, 0.5f, 1.0f, 179.0f);
+    r.help("The full width of the cone, in degrees (Unity's Spot Angle; Blender's Spot Size).");
+    r.field("Inner Spot Angle", inner_spot_angle, 0.5f, 0.0f, 179.0f);
+    r.help("Inside this cone the light is at full brightness; it fades out to the Spot Angle\n"
+           "(Unity's Inner Spot Angle; Blender's Spot Blend).");
+  }
+  if (type == 3 || all) {
+    static const char *shapes[] = {"Rectangle", "Disc"};
+    r.enumeration("Shape", area_shape, shapes, 2);
+    r.field("Width", area_width, 0.01f, 0.001f, 1000.0f);
+    r.field("Height", area_height, 0.01f, 0.001f, 1000.0f);
+  }
   r.color("Color", color);
+  r.field("Use Color Temperature", use_temperature);
+  r.help("Tint the light with a black body's colour at the temperature below, as photographers and\n"
+         "lighting artists do (Unity HDRP: Color Temperature; Blender: a Blackbody node).");
+  if (use_temperature || all) {
+    r.field("Temperature (K)", temperature, 25.0f, 1000.0f, 40000.0f);
+    r.help("Kelvin: 1900 candle, 2700 tungsten bulb, 3500 halogen, 4000 moonlight / fluorescent,\n"
+           "5500 noon sun, 6500 overcast sky (white), 9000+ blue sky in shade.");
+  }
   r.field("Intensity", intensity, 0.01f, 0.0f, 8.0f);
-  if (r.all_fields() || type == 1) r.field("Range", range, 0.05f, 0.01f, 1000.0f);
+  if (r.all_fields() || type != 0) r.field("Range", range, 0.05f, 0.01f, 1000.0f);
+}
+
+Vec3 Light::final_color() const { return use_temperature ? Vec3(color.x, color.y, color.z) * kelvin_to_rgb(temperature) : color; }
+
+Vec3 kelvin_to_rgb(float kelvin) {
+  /* The Planckian locus (Kang et al. 2002, as used by colour scientists for
+   * 1667 - 25000 K) to CIE xy, then XYZ with Y = 1, then linear sRGB. */
+  const double t = std::max(1000.0, std::min(40000.0, (double)kelvin));
+  const double t2 = t * t, t3 = t2 * t;
+  const double x = t <= 4000.0 ? -0.2661239e9 / t3 - 0.2343589e6 / t2 + 0.8776956e3 / t + 0.179910
+                               : -3.0258469e9 / t3 + 2.1070379e6 / t2 + 0.2226347e3 / t + 0.240390;
+  const double x2 = x * x, x3 = x2 * x;
+  const double y = t <= 2222.0   ? -1.1063814 * x3 - 1.34811020 * x2 + 2.18555832 * x - 0.20219683
+                   : t <= 4000.0 ? -0.9549476 * x3 - 1.37418593 * x2 + 2.09137015 * x - 0.16748867
+                                 : 3.0817580 * x3 - 5.87338670 * x2 + 3.75112997 * x - 0.37001483;
+  const double X = x / y, Y = 1.0, Z = (1.0 - x - y) / y;
+  double r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z;
+  double g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
+  double b = 0.0557 * X - 0.2040 * Y + 1.0570 * Z;
+  r = std::max(0.0, r);
+  g = std::max(0.0, g);
+  b = std::max(0.0, b);
+  const double m = std::max({r, g, b, 1e-9});
+  return Vec3((float)(r / m), (float)(g / m), (float)(b / m));
 }
 
 /* Camera sensor sizes in mm (Blender: scripts/presets/camera; Unity's Sensor Type list). */
@@ -973,10 +1022,16 @@ GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *
     go->add<MeshFilter>()->mesh = mesh;
     go->add<MeshRenderer>();
   }
-  else if (kind == "Directional Light" || kind == "Point Light") {
+  else if (kind == "Directional Light" || kind == "Point Light" || kind == "Spot Light" || kind == "Area Light") {
     auto *l = go->add<Light>();
-    l->type = kind == "Point Light" ? 1 : 0;
+    l->type = kind == "Point Light" ? 1 : kind == "Spot Light" ? 2 : kind == "Area Light" ? 3 : 0;
     if (l->type == 0) go->set_local_euler({50, -30, 0});
+    if (l->type >= 2) {
+      go->set_local_position({0, 3, 0});
+      go->set_local_euler({90, 0, 0});  // pointing down at the scene
+      l->color = {1, 1, 1};
+      l->intensity = 2.0f;
+    }
   }
   else if (kind == "Camera") {
     go->add<Camera>();

@@ -37,7 +37,7 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_scene_overlay_bar(bar);
   if (view.w < 8 || view.h < 8) return;
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
-                   !cam_preview_rect_.contains(u.in.mx, u.in.my);
+                   !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
   scene_navigation(view);
 
   /* Gizmo math and picking need this frame's camera matrices before we
@@ -49,6 +49,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (pushpull_update(view)) gizmo_busy = true;
   if (modal_update(view)) gizmo_busy = true;
   if (transform_update(view)) gizmo_busy = true;
+  if (focus_pick_update(view)) gizmo_busy = true;
 
   auto &in = u.in;
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
@@ -93,6 +94,7 @@ void Editor::draw_scene_view(const Recti &r) {
   }
 
   draw_scene_icons(view);
+  draw_origins(view);
   if (show_gizmos_) draw_gizmo(view);
   draw_pushpull(view);
   draw_modal(view);
@@ -133,7 +135,7 @@ void Editor::draw_scene_view(const Recti &r) {
   }
   if (show_gizmos_ && !playing_) draw_camera_preview(view);
   else cam_preview_rect_ = Recti{};
-  if (edit_mode_ && last_op_valid()) draw_last_op_panel(view);
+  if (edit_mode_ && last_op_valid() && !last_op_hidden_) draw_last_op_panel(view);
   else last_op_rect_ = Recti{};
   if (playing_) u.canvas.rect_outline(view, Color::hex(0x3A79BB, 120), u.px(2));
 }
@@ -185,7 +187,11 @@ void Editor::scene_navigation(const Recti &view) {
       fly_accel_ = 1.0f;
     }
     else if (in.pressed[2]) drag_ = Drag::Pan;
-    else if (in.pressed[0] && in.alt()) drag_ = in.ctrl() ? Drag::Pan : Drag::Orbit;
+    else if (in.pressed[0] && in.alt()) {
+      drag_ = in.ctrl() ? Drag::Pan : Drag::Orbit;
+      alt_click_ = true;  // a click without moving selects a loop (Blender's Alt+click) instead
+      alt_click_ring_ = in.ctrl();
+    }
     else if (in.pressed[0] && tool_ == Tool::View) drag_ = Drag::ViewTool;
     if (drag_ != Drag::None) {
       cam_.animating = false;
@@ -221,14 +227,22 @@ void Editor::scene_navigation(const Recti &view) {
       break;
     }
     case Drag::Orbit:
-      if (!in.down[0]) { drag_ = Drag::None; break; }
+      if (!in.down[0]) {
+        alt_click_release(view);
+        drag_ = Drag::None;
+        break;
+      }
       u.cursor = Cursor::Move;
       cam_.yaw += dx * 0.3f;
       cam_.pitch = clampf(cam_.pitch + dy * 0.3f, -89.9f, 89.9f);
       break;
     case Drag::Pan:
     case Drag::ViewTool:
-      if (!in.down[2] && !in.down[0]) { drag_ = Drag::None; break; }
+      if (!in.down[2] && !in.down[0]) {
+        alt_click_release(view);
+        drag_ = Drag::None;
+        break;
+      }
       u.cursor = Cursor::Hand;
       cam_.pivot -= cam_.right() * (dx * k_pan);
       cam_.pivot += cam_.up() * (dy * k_pan);
@@ -267,14 +281,7 @@ static LightingEnv build_env(const Scene &s) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
     if (!l || !l->enabled) return;
-    RenderLight rl;
-    rl.type = l->type == 1 ? RenderLight::Point : RenderLight::Directional;
-    rl.direction = normalize(g.world_rotation().rotate({0, 0, 1}));
-    rl.position = g.world_position();
-    rl.color = l->color;
-    rl.intensity = l->intensity;
-    rl.range = l->range;
-    env.lights.push_back(rl);
+    env.lights.push_back(to_render_light(g, *l));
   });
   return env;
 }
@@ -457,6 +464,47 @@ void Editor::draw_scene_icons(const Recti &view) {
       Vec3 p = g.world_position(), d = g.world_rotation().rotate({0, 0, 1});
       scene_r3d_.line(p, p + d * 2.0f, Color::hex(0xFFE27A), false);
     }
+    if (sel && l && l->type == 2) {
+      /* The spot's cone out to its range, and the inner (full brightness) cone. */
+      const RenderLight rl = to_render_light(g, *l);
+      const Vec3 p = rl.position, d = rl.direction, r = rl.right, up = cross(d, r);
+      const float len = std::min(l->range, 6.0f);
+      for (int ring = 0; ring < 2; ring++) {
+        const float c = ring ? rl.cos_inner : rl.cos_outer, s = std::sqrt(std::max(0.0f, 1.0f - c * c));
+        const float rad = len * s / std::max(1e-3f, c);
+        const uint32_t col = Color::hex(0xFFE27A, ring ? 110 : 220);
+        Vec3 prev;
+        for (int k = 0; k <= 32; k++) {
+          const float a = k / 32.0f * 2.0f * kPi;
+          const Vec3 q = p + d * len + (r * std::cos(a) + up * std::sin(a)) * rad;
+          if (k) scene_r3d_.line(prev, q, col, false);
+          if (!ring && k % 8 == 0) scene_r3d_.line(p, q, col, false);
+          prev = q;
+        }
+      }
+    }
+    if (sel && l && l->type == 3) {
+      /* The area's rectangle (or disc), and its normal: it lights the side the arrow points to. */
+      const RenderLight rl = to_render_light(g, *l);
+      const Vec3 p = rl.position, d = rl.direction, r = rl.right, up = cross(d, r);
+      const uint32_t col = Color::hex(0xFFE27A);
+      Vec3 prev;
+      const int n = rl.disk ? 32 : 4;
+      for (int k = 0; k <= n; k++) {
+        Vec3 q;
+        if (rl.disk) {
+          const float a = k / (float)n * 2.0f * kPi;
+          q = p + r * (std::cos(a) * rl.width * 0.5f) + up * (std::sin(a) * rl.height * 0.5f);
+        }
+        else {
+          const float sx = (k % 4 == 1 || k % 4 == 2) ? 0.5f : -0.5f, sy = (k % 4 >= 2) ? 0.5f : -0.5f;
+          q = p + r * (sx * rl.width) + up * (sy * rl.height);
+        }
+        if (k) scene_r3d_.line(prev, q, col, false);
+        prev = q;
+      }
+      scene_r3d_.line(p, p + d * std::max(0.5f, 0.5f * (rl.width + rl.height)), col, false);
+    }
     if (sel && c) {
       /* Camera frustum (FoCG ch. 8.5). */
       Quat q = g.world_rotation();
@@ -492,6 +540,127 @@ void Editor::draw_scene_icons(const Recti &view) {
   });
 }
 
+/* The nearest mesh surface along a world-space ray (what the mouse points at). */
+bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
+  float best = 1e30f;
+  scene_->for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    auto *mr = g.get<MeshRenderer>();
+    const Mesh *m = mr && mr->enabled ? g.evaluated_mesh() : nullptr;
+    if (!m) return;
+    const Mat4 &w = g.world_matrix();
+    const Mat4 inv = w.inverse();
+    Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};  // unnormalised: t stays a world parameter
+    const RenderMesh &rm = m->render_mesh();
+    if (ray_aabb({lr.origin, normalize(lr.dir)}, rm.bounds) < 0) return;
+    for (size_t t = 0; t < rm.tri_count(); t++) {
+      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      if (d > 0 && d < best) best = d;
+    }
+  });
+  if (best >= 1e30f) return false;
+  hit = ray.origin + ray.dir * best;
+  return true;
+}
+
+/* The Camera's focus eyedropper: the next click in the Scene view sets the
+ * focus distance to that point's depth in front of the camera. */
+bool Editor::focus_pick_update(const Recti &view) {
+  if (!focus_pick_cam_) return false;
+  auto &u = ui_;
+  auto &in = u.in;
+  GameObject *g = scene_->find(focus_pick_cam_);
+  Camera *cam = g ? g->get<Camera>() : nullptr;
+  if (!cam || in.key_pressed[platform::KEY_ESCAPE]) {
+    focus_pick_cam_ = 0;
+    return false;
+  }
+  if (!scene_hovered_) return false;
+  u.cursor = Cursor::Hand;  // picking
+  if (!in.pressed[0]) return true;
+  u.consume_click();
+  Vec3 p;
+  const Ray r = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
+  if (!raycast_scene({r.origin, normalize(r.dir)}, p)) {
+    Log::warn("Pick Focus Point: click on a surface");
+    return true;
+  }
+  const Vec3 fwd = normalize(g->world_rotation().rotate({0, 0, 1}));
+  const float d = dot(p - g->world_position(), fwd);
+  if (d <= 0.0f) {
+    Log::warn("Pick Focus Point: that point is behind the camera");
+    return true;
+  }
+  cam->focus_distance = d;
+  cam->dof = true;
+  focus_pick_cam_ = 0;
+  Log::info("Focus distance: %.3f m", d);
+  mark_changed("Pick Focus Point");
+  return true;
+}
+
+/* Object origins (Blender's origin dots): where each selected object's pivot
+ * is. While the Inspector's Origin row is in use, a marker shows where Set
+ * Origin would move it, before Apply. */
+void Editor::draw_origins(const Recti &view) {
+  auto &u = ui_;
+  auto to_screen = [&](Vec3 p, Vec2 &s) {
+    float z;
+    if (!scene_r3d_.project(p, s, z)) return false;
+    s.x += view.x;
+    s.y += view.y;
+    return true;
+  };
+  u.canvas.push_clip(view);
+  if (!playing_)
+    for (GameObject *g : selected_objects(false)) {
+      if (edit_mode_ && g->id != edit_obj_) continue;
+      Vec2 s;
+      if (!to_screen(g->world_position(), s)) continue;
+      const bool active = g->id == active_;
+      u.canvas.fill_circle(s.x, s.y, (float)u.px(4.5f), 0xFF000000);
+      u.canvas.fill_circle(s.x, s.y, (float)u.px(3.0f), active ? Color::hex(0xFFA733) : Color::hex(0xE07020));
+    }
+  GameObject *a = active_object();
+  Vec3 c;
+  if (origin_hover_ && a && !playing_ && origin_target(*a, origin_mode_, origin_target_, c)) {
+    const Mat4 &w = a->world_matrix();
+    const Vec3 now = a->world_position();
+    /* Geometry to Origin moves the mesh, not the pivot: its new centre lands on the origin. */
+    const Vec3 to = origin_mode_ == 8 ? now : w.point(c);
+    const Vec3 from = origin_mode_ == 8 ? w.point(c) : now;
+    Vec2 s0, s1;
+    if (to_screen(from, s0) && to_screen(to, s1)) {
+      const Vec2 d = s1 - s0;
+      const float len = length(d);
+      for (float t = 0; t < len; t += 10.0f) {
+        const Vec2 p = s0 + d * (t / std::max(1.0f, len)), q = s0 + d * (std::min(len, t + 5.0f) / std::max(1.0f, len));
+        u.canvas.line(p.x, p.y, q.x, q.y, Color::hex(0x40D0FF, 200), (float)u.px(1.0f));
+      }
+      const float r = (float)u.px(7);
+      const Vec2 dia[4] = {{s1.x, s1.y - r}, {s1.x + r, s1.y}, {s1.x, s1.y + r}, {s1.x - r, s1.y}};
+      u.canvas.fill_polygon(dia, 4, Color::hex(0x40D0FF, 220));
+      u.canvas.line(s1.x - r * 1.8f, s1.y, s1.x + r * 1.8f, s1.y, 0xFF000000, 1.0f);
+      u.canvas.line(s1.x, s1.y - r * 1.8f, s1.x, s1.y + r * 1.8f, 0xFF000000, 1.0f);
+      const std::string label = origin_mode_ == 8 ? "Geometry moves to the origin" : "New origin";
+      const int tw = u.font.text_width(label) + u.px(10);
+      Recti box{(int)s1.x + u.px(12), (int)s1.y - u.row_h() - u.px(4), tw, u.row_h()};
+      u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 220));
+      u.label(box, label, Color::hex(0x40D0FF), ui::Align::Center);
+    }
+  }
+  origin_hover_ = false;  // the Inspector sets it again while its row is in use
+  u.canvas.pop_clip();
+}
+
+/* The scene gizmo's area, label included: clicks there belong to the gizmo,
+ * not to selection (they used to start a box select and never reach it). */
+Recti Editor::view_gizmo_rect(const Recti &view) const {
+  const int size = ui_.px(84);
+  const float cx = view.right() - size * 0.62f, cy = view.y + size * 0.62f;
+  return {(int)(cx - size * 0.6f), (int)(cy - size * 0.6f), (int)(size * 1.2f), (int)(size * 1.2f) + ui_.row_h() + ui_.px(4)};
+}
+
 void Editor::draw_view_gizmo(const Recti &view) {
   auto &u = ui_;
   int size = u.px(84);
@@ -511,7 +680,7 @@ void Editor::draw_view_gizmo(const Recti &view) {
     depth[i] = d.z;
   }
   std::sort(order, order + 6, [&](int a, int b) { return depth[a] > depth[b]; });
-  Recti area{(int)(cx - size * 0.6f), (int)(cy - size * 0.6f), (int)(size * 1.2f), (int)(size * 1.4f)};
+  Recti area = view_gizmo_rect(view);
   bool hover_area = u.hovered(area);
   int hot = -1;
   float best = (float)u.px(11);
@@ -535,9 +704,24 @@ void Editor::draw_view_gizmo(const Recti &view) {
     }
   }
   u.canvas.fill_round_rect({(int)cx - u.px(6), (int)cy - u.px(6), u.px(12), u.px(12)}, u.px(2), hot_center ? u.theme.axis_hot : Color::hex(0xCFCFCF));
-  u.label({(int)(cx - size * 0.5f), (int)(cy + rad + u.px(10)), size, u.row_h()}, cam_.ortho ? "< Iso" : "< Persp", u.theme.text, ui::Align::Center);
+  /* Unity's label: the view's name when it looks along an axis, and the projection. */
+  const Vec3 fwd = cam_.forward();
+  const char *name = nullptr;
+  static const char *const names[6] = {"Left", "Right", "Bottom", "Top", "Back", "Front"};
+  const Vec3 dirs[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, -1}, {0, 0, 1}};
+  for (int i = 0; i < 6; i++)
+    if (dot(fwd, dirs[i]) > 0.999f) name = names[i];
+  const std::string label = strprintf("< %s%s", name ? name : "", name ? (cam_.ortho ? "" : " (Persp)") : (cam_.ortho ? "Iso" : "Persp"));
+  Recti lr{(int)(cx - size * 0.5f), (int)(cy + rad + u.px(10)), size, u.row_h()};
+  const bool hot_label = u.hovered(lr);
+  {
+    const int tw = u.font.text_width(label) + u.px(10);
+    u.canvas.fill_round_rect({lr.x + (lr.w - tw) / 2, lr.y + u.px(1), tw, lr.h - u.px(2)}, u.px(3), Color::hex(0x000000, hot_label ? 150 : 100));
+  }
+  u.label(lr, label, hot_label ? u.theme.text_bright : u.theme.text, ui::Align::Center);
   if (hover_area && u.in.pressed[0] && drag_ == Drag::None) {
-    if (hot >= 0) {
+    if (hot_label) cam_.ortho = !cam_.ortho;  // Unity: click the label to switch projection
+    else if (hot >= 0) {
       cam_.animate_to(cam_.pivot, axes[hot].yaw, axes[hot].pitch, cam_.distance, now_seconds());
       cam_.ortho = true;
     }
@@ -1149,12 +1333,44 @@ void Editor::edit_select_all(bool sel) {
 }
 
 void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
+  last_op_hidden_ = true;  // selecting something else puts the last operator's panel away
   GameObject *g = edit_object();
   if (!g) return;
   const Mesh &m = **edit_mesh_ptr();
   vert_sel_.resize(m.vert_count(), 0);
   face_sel_.resize(m.face_count(), 0);
   const Mat4 &w = g->world_matrix();
+  /* Clicking another object works as it does outside Edit Mode (Unity): a mesh
+   * becomes the one being edited (same vertex / edge / face mode); a light or
+   * camera icon leaves Edit Mode and selects it. */
+  {
+    uint64_t other = 0;
+    float best = (float)ui_.px(14);
+    scene_->for_each([&](GameObject &o) {
+      if (!o.active_in_hierarchy() || (!o.get<Light>() && !o.get<Camera>())) return;
+      Vec2 sp;
+      float z;
+      if (!scene_r3d_.project(o.world_position(), sp, z)) return;
+      float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
+      if (d < best) { best = d; other = o.id; }
+    });
+    if (other) {
+      exit_edit_mode();
+      select(other, mode);
+      return;
+    }
+    const uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);
+    GameObject *o = id ? scene_->find(id) : nullptr;
+    if (o && o->id != edit_obj_ && o->get<MeshFilter>() && o->get<MeshFilter>()->mesh) {
+      const EditElement keep = elem_;
+      exit_edit_mode();
+      select(o->id);
+      enter_edit_mode();
+      set_edit_element(keep);
+      Log::info("Editing '%s'", o->name.c_str());
+      return;
+    }
+  }
   if (mode == SEL_REPLACE) edit_select_all(false);
   if (elem_ == EditElement::Vertex) {
     int best = -1;
@@ -1200,6 +1416,7 @@ void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
 }
 
 void Editor::edit_box_select(const Recti &view, Recti box, int mode) {
+  last_op_hidden_ = true;
   GameObject *g = edit_object();
   if (!g) return;
   const Mesh &m = **edit_mesh_ptr();
@@ -1577,8 +1794,27 @@ void Editor::edit_select_loop(const Recti &view, int mx, int my, bool add) {
   const Mesh &m = **edit_mesh_ptr();
   vert_sel_.resize(m.vert_count(), 0);
   if (!add) edit_select_all(false);
+  if (elem_ == EditElement::Face) {
+    /* Face mode: the face loop - the quads between the clicked edge's ring (Blender). */
+    face_sel_.resize(m.face_count(), 0);
+    const auto ring = meshops::edge_ring_edges(m, a, b);
+    std::unordered_set<uint64_t> ring_keys;
+    for (auto &e : ring) ring_keys.insert(Mesh::edge_key(e.first, e.second));
+    size_t n = 0;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      int hits = 0;
+      for (uint32_t i = 0; i < m.face_size(f); i++)
+        hits += ring_keys.count(Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])) ? 1 : 0;
+      if (hits >= 2 || (hits == 1 && ring.size() == 1)) {
+        face_sel_[f] = 1;
+        n++;
+      }
+    }
+    sync_vert_face_selection(true);
+    Log::info("Face loop: %zu faces", n);
+    return;
+  }
   auto loop = meshops::edge_loop(m, a, b);
-  if (elem_ == EditElement::Face) set_edit_element(EditElement::Edge);
   if (elem_ == EditElement::Edge) {
     /* The loop's own edges (consecutive vertices), not every edge among them. */
     std::unordered_set<uint64_t> all;
@@ -1594,6 +1830,40 @@ void Editor::edit_select_loop(const Recti &view, int mx, int my, bool add) {
     sync_vert_face_selection(false);
   }
   Log::info("Edge loop: %zu vertices", loop.size());
+}
+
+/* Blender's Ctrl+Alt+click: the edge ring through the edge under the mouse
+ * (the rungs of the ladder); in face mode the same face loop as Alt+click. */
+void Editor::edit_select_ring(const Recti &view, int mx, int my, bool add) {
+  if (elem_ == EditElement::Face) {
+    edit_select_loop(view, mx, my, add);
+    return;
+  }
+  GameObject *g = edit_object();
+  uint32_t a, b;
+  if (!g || !edit_pick_edge(view, mx, my, a, b)) return;
+  const Mesh &m = **edit_mesh_ptr();
+  vert_sel_.resize(m.vert_count(), 0);
+  if (!add) edit_select_all(false);
+  const auto ring = meshops::edge_ring_edges(m, a, b);
+  if (elem_ == EditElement::Edge) {
+    for (auto &e : ring) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
+    verts_from_edges();
+  }
+  else {
+    for (auto &e : ring) vert_sel_[e.first] = vert_sel_[e.second] = 1;
+    sync_vert_face_selection(false);
+  }
+  Log::info("Edge ring: %zu edges", ring.size());
+}
+
+void Editor::alt_click_release(const Recti &view) {
+  if (!alt_click_) return;
+  alt_click_ = false;
+  auto &in = ui_.in;
+  if (!edit_mode_ || std::abs(in.mx - drag_x_) > ui_.px(3) || std::abs(in.my - drag_y_) > ui_.px(3)) return;  // it was an orbit / pan
+  if (alt_click_ring_) edit_select_ring(view, drag_x_, drag_y_, in.shift());
+  else edit_select_loop(view, drag_x_, drag_y_, in.shift());
 }
 
 void Editor::edit_loop_cut_at(const Recti &view, int mx, int my) {
@@ -1750,6 +2020,7 @@ bool Editor::try_auto_fuse(Mesh &m) {
 
 void Editor::run_last_op(bool first) {
   LastOp &L = last_op_;
+  if (first) last_op_hidden_ = false;  // a new operator shows its panel again
   GameObject *g = scene_->find(L.obj);
   MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf || !L.before) {
@@ -1906,7 +2177,16 @@ void Editor::draw_last_op_panel(const Recti &view) {
   Recti hr{r.x + pad, r.y + u.px(3), r.w - pad * 2, rh};
   int a = u.font.line_height() - u.px(4);
   u.draw_icon(last_op_open_ ? ui::Icon::ArrowDown : ui::Icon::ArrowRight, {hr.x, hr.y + (rh - a) / 2, a, a}, u.theme.text);
-  u.label({hr.x + a + u.px(6), hr.y, hr.w - a, rh}, title, u.theme.text_bright);
+  u.label({hr.x + a + u.px(6), hr.y, hr.w - a - rh, rh}, title, u.theme.text_bright);
+  /* x: put the panel away (F9 brings it back; so does the next operator). */
+  Recti xr{hr.right() - rh, hr.y, rh, rh};
+  const bool x_hot = u.hovered(xr);
+  u.draw_icon(ui::Icon::Close, xr.shrink(u.px(4)), x_hot ? u.theme.text_bright : u.theme.text_dim);
+  if (x_hot && u.in.pressed[0]) {
+    last_op_hidden_ = true;
+    u.consume_click();
+    return;
+  }
   if (u.hovered(hr) && u.in.pressed[0]) {
     last_op_open_ = !last_op_open_;
     u.consume_click();
@@ -2291,6 +2571,7 @@ void Editor::pushpull_finish() {
   L.result_version = mf->mesh->version;
   last_op_ = std::move(L);
   pp_last_distance_ = pp_.distance;
+  last_op_hidden_ = false;
   static const char *what[] = {"moved", "extruded", "made a hole through the object", "joined to the face in front"};
   Log::info("Push/Pull: %.4g (%s)", pp_.distance * pp_.units, what[(int)pp_.result]);
   mark_changed("Edit: push_pull");

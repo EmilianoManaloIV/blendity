@@ -38,14 +38,37 @@ struct RenderMesh {
 };
 
 struct RenderLight {
-  enum Type { Directional = 0, Point = 1 } type = Directional;
-  Vec3 direction{0, -1, 0};  // directional: direction light travels
+  enum Type { Directional = 0, Point = 1, Spot = 2, Area = 3 } type = Directional;
+  Vec3 direction{0, -1, 0};  // the way the light points (directional, spot, area)
+  Vec3 right{1, 0, 0};       // area: the rectangle's width direction (height = cross(direction, right))
+  float cos_outer = 0.0f, cos_inner = 0.0f;  // spot cone (cosines of the half angles)
+  float width = 1.0f, height = 1.0f;         // area size
+  bool disk = false;                          // area shape: ellipse instead of rectangle
   Vec3 position;
   Vec3 color{1, 1, 1};
   float intensity = 1.0f;
   float range = 10.0f;
   bool shadows = true;
 };
+
+/* How much of a point, spot or area light reaches p, besides the N.L term:
+ * the range falloff (Unity's built-in curve), the spot cone with its soft
+ * edge, and an area light's one-sided cosine. L points from p toward the light. */
+inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
+  if (l.type == RenderLight::Directional) return 1.0f;
+  const float dist = length(l.position - p);
+  float f = 1.0f - dist / (l.range > 1e-3f ? l.range : 1e-3f);
+  f = f > 0.0f ? f * f : 0.0f;
+  const float c = -(l.direction.x * L.x + l.direction.y * L.y + l.direction.z * L.z);  // toward p, from the light
+  if (l.type == RenderLight::Spot) {
+    const float d = l.cos_inner - l.cos_outer;
+    float t = d > 1e-6f ? (c - l.cos_outer) / d : (c >= l.cos_outer ? 1.0f : 0.0f);
+    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+    f *= t * t * (3.0f - 2.0f * t);
+  }
+  else if (l.type == RenderLight::Area) f *= c > 0.0f ? c : 0.0f;
+  return f;
+}
 
 struct LightingEnv {
   Vec3 sky{0.45f, 0.52f, 0.62f};

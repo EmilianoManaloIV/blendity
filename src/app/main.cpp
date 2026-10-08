@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace bl;
@@ -21,16 +22,17 @@ static int headless(int argc, char **argv) {
   std::string out;
   int w = 1600, h = 900, frames = 3;
   std::vector<std::string> cmds;
-  std::vector<std::pair<int, int>> clicks;  // --click X Y: a left click after the commands
+  std::vector<std::tuple<int, int, int, int>> clicks;  // --click / --rclick / --altclick / --ctrlaltclick X Y, after the commands
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--headless-screenshot" && i + 1 < argc) out = argv[++i];
     else if (a == "--size" && i + 1 < argc) std::sscanf(argv[++i], "%dx%d", &w, &h);
     else if (a == "--cmd" && i + 1 < argc) cmds.push_back(argv[++i]);
     else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
-    else if (a == "--click" && i + 2 < argc) {
+    else if ((a == "--click" || a == "--rclick" || a == "--altclick" || a == "--ctrlaltclick") && i + 2 < argc) {
       int x = std::atoi(argv[++i]);
-      clicks.push_back({x, std::atoi(argv[++i])});
+      const int mods = a == "--altclick" ? platform::MOD_ALT : a == "--ctrlaltclick" ? (platform::MOD_ALT | platform::MOD_CTRL) : 0;
+      clicks.push_back({x, std::atoi(argv[++i]), a == "--rclick" ? 1 : 0, mods});
     }
   }
   Editor ed;
@@ -42,10 +44,12 @@ static int headless(int argc, char **argv) {
   park.y = -100;
   ed.step_frame_headless({park});
   for (auto &c : cmds) ed.command(c);
-  for (auto [x, y] : clicks) {
+  for (auto [x, y, button, mods] : clicks) {
     platform::Event e;
     e.x = x;
     e.y = y;
+    e.button = button;
+    e.mods = mods;
     e.type = platform::EventType::MouseMove;
     ed.step_frame_headless({e});
     e.type = platform::EventType::MouseDown;

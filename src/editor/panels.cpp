@@ -53,6 +53,8 @@ void Editor::draw_hierarchy(const Recti &r) {
     u.submenu("Light", u.px(190), [this, child] {
       if (ui_.menu_item("Directional Light", nullptr, false, true, Icon::Light)) create_object("Directional Light", child);
       if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light", child);
+      if (ui_.menu_item("Spot Light", nullptr, false, true, Icon::Light)) create_object("Spot Light", child);
+      if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light", child);
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera", child);
   };
@@ -239,6 +241,25 @@ void Editor::draw_hierarchy(const Recti &r) {
     if (u.menu_item("Duplicate", "Ctrl+D", false, has_sel)) duplicate_selected();
     if (u.menu_item("Delete", "Del", false, has_sel)) delete_selected();
     if (u.menu_item("Frame Selected", "F", false, has_sel)) frame_selected();
+    if (u.menu_item("Select Children", nullptr, false, has_sel)) {
+      /* Unity: Select Children - the selection and everything under it. */
+      std::vector<GameObject *> stack = selected_objects(false);
+      while (!stack.empty()) {
+        GameObject *g = stack.back();
+        stack.pop_back();
+        for (GameObject *c : g->children) {
+          if (!is_selected(c->id)) selection_.push_back(c->id);
+          stack.push_back(c);
+          expanded_.insert(g->id);
+        }
+      }
+    }
+    if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
+      for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
+      mark_changed("Clear Parent");
+    }
+    if (u.menu_item("Export Selection as OBJ...", nullptr, false, has_sel)) export_model("obj", true);
+    if (u.menu_item("Export Selection as FBX...", nullptr, false, has_sel)) export_model("fbx", true);
     u.menu_separator();
     u.menu_label("Create Child");
     create_body(true);
@@ -781,6 +802,7 @@ void Editor::draw_inspector(const Recti &r) {
       Recti fr = ir.field_rect(row);
       int bw = u.font.text_width("Apply") + u.px(16);
       u.combo(u.id("origin_mode"), {fr.x, fr.y, fr.w - bw - u.px(4), fr.h}, origin_mode_, kOriginModes, kOriginModeCount);
+      origin_hover_ = u.hovered(row) || u.popup_open(u.id("origin_mode"));
       u.tooltip("Where the object's origin (pivot) goes. The mesh moves the other way, so nothing\n"
                 "moves on screen. Volume uses the enclosed volume's centre of mass (surface for open meshes).\n"
                 "Blender: Object > Set Origin. Unity: ProBuilder's Center Pivot.");
@@ -789,6 +811,7 @@ void Editor::draw_inspector(const Recti &r) {
         row = lay.row();
         u.label(ir.label_rect(row), "  Point (world)");
         u.vec3_field(u.id("origin_pt"), ir.field_rect(row), origin_target_, 0.05f);
+        origin_hover_ = origin_hover_ || u.hovered(row);
         u.tooltip("The world position the origin moves to. Expressions work, e.g. \"+=1\".");
       }
     }
@@ -870,6 +893,17 @@ void Editor::draw_inspector(const Recti &r) {
             ApplyEditReflector a(fe, (int)i, (int)multi.size(), self);
             oc->reflect(a);
           }
+      }
+      /* Camera: an eyedropper for the focus distance (Blender: the Focus Distance
+       * eyedropper; Unity HDRP: Focus Distance). */
+      if (dynamic_cast<Camera *>(c)) {
+        Recti row = lay.row(u.row_h() + u.px(2));
+        const bool picking = focus_pick_cam_ == g->id;
+        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, picking ? "Click a point in the Scene view... (Esc cancels)" : "Pick Focus Point",
+                     picking, Icon::Eye))
+          focus_pick_cam_ = picking ? 0 : g->id;
+        u.tooltip("Eyedropper: click a surface in the Scene view and the focus distance becomes that point's\n"
+                  "distance from this camera (along its view). Turns Depth of Field on.");
       }
       /* Mesh tools (Blender's Edit Mode operators, object-level). */
       if (auto *mf = dynamic_cast<MeshFilter *>(c)) {

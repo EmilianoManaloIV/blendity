@@ -309,6 +309,17 @@ void Editor::frame(std::vector<Event> &events) {
   ScopedTimer frame_timer;
   process_events(events);
   if (scene_ && scene_->render.device == 1) gpu::prewarm();  // once; compiles the GPU kernel off the UI thread
+  /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
+   * mesh instead, or leave Edit Mode for anything without one. */
+  if (edit_mode_ && active_ && active_ != edit_obj_ && !pp_.active && !modal_.active && !xf_.active) {
+    GameObject *a = scene_->find(active_);
+    const EditElement keep = elem_;
+    exit_edit_mode();
+    if (a && a->get<MeshFilter>() && a->get<MeshFilter>()->mesh) {
+      enter_edit_mode();
+      set_edit_element(keep);
+    }
+  }
   if (window_) {
     int w, h;
     get_framebuffer_size(window_, w, h);
@@ -483,7 +494,13 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("Save this scene compressed, like Blender's File > Save > Compress (zstd).\nNeeds Blender's libraries; compressed scenes load automatically.");
     u.menu_separator();
     if (u.menu_item("Import Model (OBJ / FBX)...")) dialog_ = Dialog::ImportObj;
-    if (u.menu_item("Export Selected as OBJ", nullptr, false, has_sel)) export_selected_obj();
+    u.submenu("Export", u.px(230), [this, has_sel] {
+      if (ui_.menu_item("Selection as OBJ (.obj + .mtl)", nullptr, false, has_sel)) export_model("obj", true);
+      if (ui_.menu_item("Selection as FBX (.fbx)", nullptr, false, has_sel)) export_model("fbx", true);
+      ui_.menu_separator();
+      if (ui_.menu_item("Scene as OBJ")) export_model("obj", false);
+      if (ui_.menu_item("Scene as FBX")) export_model("fbx", false);
+    });
     if (u.menu_item("Render Image", "F12", false, true, Icon::Camera)) start_final_render();
     if (u.menu_item("Save Render", nullptr, false, render_has_result_)) save_render();
     if (u.menu_item("Save Screenshot", "Shift+F12")) screenshot();
@@ -541,6 +558,8 @@ void Editor::draw_menubar(const Recti &r) {
     u.submenu("Light", u.px(190), [this] {
       if (ui_.menu_item("Directional Light", nullptr, false, true, Icon::Light)) create_object("Directional Light");
       if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light");
+      if (ui_.menu_item("Spot Light", nullptr, false, true, Icon::Light)) create_object("Spot Light");
+      if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light");
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera");
     u.menu_separator();
@@ -848,7 +867,13 @@ void Editor::handle_shortcuts() {
     else start_final_render();  // Blender: F12 = Render Image
   }
   if (P(KEY_F11)) dock_open(WindowKind::Render);
-  if (P(KEY_F9) && edit_mode_) last_op_open_ = !last_op_open_;
+  if (P(KEY_F9) && edit_mode_) {
+    if (last_op_hidden_) {
+      last_op_hidden_ = false;
+      last_op_open_ = true;
+    }
+    else last_op_open_ = !last_op_open_;
+  }
   if (alt && shift && P(KEY_N)) create_object("Empty", true);
   bool scene_ctx = focused_ == WindowKind::Scene || focused_ == WindowKind::Hierarchy || scene_hovered_;
   if (!scene_ctx) return;
@@ -867,6 +892,7 @@ void Editor::handle_shortcuts() {
     if (P(KEY_P) && !alt && edit_mode_) edit_tool("push_pull");  // SketchUp: P (a face operation)
     if (P(KEY_F) && !(alt && edit_mode_)) frame_selected();
     if (P(KEY_TAB)) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
+    if (P(KEY_ESCAPE) && edit_mode_) last_op_hidden_ = true;  // Esc puts the Adjust Last Operation panel away
     if (P(KEY_DELETE) || (P(KEY_BACKSPACE) && focused_ != WindowKind::Hierarchy)) {
       if (edit_mode_) edit_op("delete");
       else delete_selected();
@@ -886,6 +912,10 @@ void Editor::handle_shortcuts() {
       if (P(KEY_P) && alt) edit_tool("push_through");
       if (P(KEY_J) && !alt) edit_tool("connect");
       if (P(KEY_D) && shift && !alt) edit_tool("duplicate");          // Blender: Shift+D
+      if (P(KEY_L) && !alt && scene_hovered_) {  // Blender: L picks what is under the mouse and everything linked to it
+        edit_pick(scene_rect_, in.mx, in.my, shift ? SEL_TOGGLE : SEL_ADD);
+        edit_tool("select_linked");
+      }
       if (P(KEY_J) && alt) edit_tool("tris_to_quads");                  // Blender: Alt+J
       if (P(KEY_S) && alt) edit_tool(shift ? "to_sphere" : "shrink_fatten");  // Blender: Alt+S / Shift+Alt+S
       if (P(KEY_I) && !alt) modal_begin("inset");  // Blender's I (Ctrl+I works too)
@@ -1408,19 +1438,58 @@ void Editor::save_scene_cmd(bool save_as) {
 
 void Editor::import_obj_file(const std::string &path) { import_model_file(path, false); }
 
-void Editor::export_selected_obj() {
-  std::vector<std::pair<const Mesh *, Mat4>> list;
-  for (GameObject *g : selected_objects(false))
-    if (const Mesh *m = g->evaluated_mesh()) list.push_back({m, g->world_matrix()});
-  if (list.empty()) {
-    Log::warn("Select objects with meshes to export");
-    return;
+/* File > Export (Blender: File > Export > Wavefront / FBX; Unity: the FBX
+ * Exporter). The selection - or the whole scene - with modifiers applied,
+ * world transforms baked in, materials and UVs, into Assets/Exports. */
+std::string Editor::export_model(const std::string &format, bool selection_only) {
+  std::vector<ExportItem> items;
+  auto add = [&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    const Mesh *m = g.evaluated_mesh();
+    if (!m || !m->face_count()) return;
+    ExportItem it;
+    it.name = g.name;
+    it.mesh = m;
+    it.world = g.world_matrix();
+    if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
+    items.push_back(it);
+  };
+  if (selection_only) {
+    /* The selected objects and everything under them. */
+    std::vector<GameObject *> stack = selected_objects(true);
+    while (!stack.empty()) {
+      GameObject *g = stack.back();
+      stack.pop_back();
+      add(*g);
+      for (GameObject *c : g->children) stack.push_back(c);
+    }
   }
-  fs::make_dirs(fs::join(assets_dir_, "Exports"));
+  else scene_->for_each([&](GameObject &g) { add(g); });
+  if (items.empty()) {
+    Log::warn(selection_only ? "Export: select objects with meshes first" : "Export: the scene has no meshes");
+    return "";
+  }
+  const std::string dir = fs::join(assets_dir_, "Exports");
+  fs::make_dirs(dir);
   GameObject *a = active_object();
-  std::string path = fs::join(assets_dir_, "Exports/" + (a ? a->name : std::string("export")) + ".obj");
-  if (fs::write_file(path, export_obj(list))) Log::info("Exported %zu mesh(es) to %s", list.size(), path.c_str());
+  std::string base = selection_only && a ? a->name : scene_->name;
+  for (char &c : base)
+    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+  const std::string path = fs::join(dir, base + "." + format);
+  bool ok;
+  if (format == "fbx") ok = fs::write_file(path, export_fbx(items));
+  else {
+    std::string obj, mtl;
+    export_obj_mtl(items, base + ".mtl", obj, mtl);
+    ok = fs::write_file(path, obj) && fs::write_file(fs::join(dir, base + ".mtl"), mtl);
+  }
   project_listed_ = -100;
+  if (!ok) {
+    Log::error("Could not write %s", path.c_str());
+    return "";
+  }
+  Log::info("Exported %zu mesh(es) to %s", items.size(), path.c_str());
+  return path;
 }
 
 void Editor::screenshot(const std::string &path_in) {
@@ -1439,8 +1508,9 @@ void Editor::screenshot(const std::string &path_in) {
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
   GameObject *g = kind == "Empty" ? scene_->create("GameObject", parent) : create_primitive(*scene_, kind, parent);
-  if (kind == "Directional Light" || kind == "Point Light" || kind == "Camera") g->name = kind;
-  if (!parent) g->set_world_position(cam_.pivot);
+  if (kind == "Directional Light" || kind == "Point Light" || kind == "Spot Light" || kind == "Area Light" || kind == "Camera") g->name = kind;
+  /* At the view's centre; spot and area lights 3 m above it, pointing down at it. */
+  if (!parent) g->set_world_position(cam_.pivot + (kind == "Spot Light" || kind == "Area Light" ? Vec3(0, 3, 0) : Vec3(0.0f)));
   if (parent) expanded_.insert(parent->id);
   select(g->id);
   mark_changed("Create " + kind);
@@ -1484,35 +1554,47 @@ const char *const kOriginModes[kOriginModeCount] = {
     "Origin to Center of Mass (Volume)",  "Origin to Bottom Center",           "Origin to Point",
     "Origin to Edit Selection",           "Origin to Scene View Pivot",        "Geometry to Origin"};
 
+/* Where Set Origin would put g's origin, in mesh space (false: it can't). */
+bool Editor::origin_target(const GameObject &g, int mode, Vec3 world_point, Vec3 &c) const {
+  auto *mf = g.get<MeshFilter>();
+  if (!mf || !mf->mesh || mf->mesh->positions.empty() || mode < 0 || mode >= kOriginModeCount) return false;
+  const Mesh &m = *mf->mesh;
+  switch (mode) {
+    case 0: c = meshops::origin_point(m, meshops::OriginPoint::BoundsCenter); break;
+    case 1: c = meshops::origin_point(m, meshops::OriginPoint::Median); break;
+    case 2: c = meshops::origin_point(m, meshops::OriginPoint::SurfaceCenter); break;
+    case 3: c = meshops::origin_point(m, meshops::OriginPoint::VolumeCenter); break;
+    case 4: c = meshops::origin_point(m, meshops::OriginPoint::BoundsBottom); break;
+    case 5: c = g.world_matrix().inverse().point(world_point); break;
+    case 6: {
+      if (!edit_mode_ || g.id != edit_obj_) return false;
+      Vec3 s(0.0f);
+      int k = 0;
+      for (size_t v = 0; v < m.vert_count() && v < vert_sel_.size(); v++)
+        if (vert_sel_[v]) { s += m.positions[v]; k++; }
+      if (!k) return false;
+      c = s / (float)k;
+      break;
+    }
+    case 7: c = g.world_matrix().inverse().point(cam_.pivot); break;
+    default: c = meshops::origin_point(m, meshops::OriginPoint::BoundsCenter); break;  // Geometry to Origin
+  }
+  return std::isfinite(c.x) && std::isfinite(c.y) && std::isfinite(c.z);
+}
+
 void Editor::set_origin(int mode, Vec3 world_point) {
   if (mode < 0 || mode >= kOriginModeCount) return;
   int n = 0;
   for (GameObject *g : selected_objects(false)) {
-    auto *mf = g->get<MeshFilter>();
-    if (!mf || !mf->mesh || mf->mesh->positions.empty()) continue;
-    const Mesh &m = *mf->mesh;
     Vec3 c;  // the new origin, in mesh space
-    switch (mode) {
-      case 0: c = meshops::origin_point(m, meshops::OriginPoint::BoundsCenter); break;
-      case 1: c = meshops::origin_point(m, meshops::OriginPoint::Median); break;
-      case 2: c = meshops::origin_point(m, meshops::OriginPoint::SurfaceCenter); break;
-      case 3: c = meshops::origin_point(m, meshops::OriginPoint::VolumeCenter); break;
-      case 4: c = meshops::origin_point(m, meshops::OriginPoint::BoundsBottom); break;
-      case 5: c = g->world_matrix().inverse().point(world_point); break;
-      case 6: {
-        if (!edit_mode_ || g->id != edit_obj_) continue;
-        Vec3 s(0.0f);
-        int k = 0;
-        for (size_t v = 0; v < m.vert_count() && v < vert_sel_.size(); v++)
-          if (vert_sel_[v]) { s += m.positions[v]; k++; }
-        if (!k) { Log::warn("Set Origin: select vertices, edges or faces in Edit Mode first"); return; }
-        c = s / (float)k;
-        break;
+    if (!origin_target(*g, mode, world_point, c)) {
+      if (mode == 6 && edit_mode_ && g->id == edit_obj_) {
+        Log::warn("Set Origin: select vertices, edges or faces in Edit Mode first");
+        return;
       }
-      case 7: c = g->world_matrix().inverse().point(cam_.pivot); break;
-      default: c = meshops::origin_point(m, meshops::OriginPoint::BoundsCenter); break;  // Geometry to Origin
+      continue;
     }
-    if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z)) continue;
+    auto *mf = g->get<MeshFilter>();
     meshops::translate(*mesh_make_mutable(mf->mesh), -c);
     if (mode != 8) {
       /* Move the object by the same offset through its own rotation and
@@ -1762,8 +1844,14 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
-    int n = std::max(1, std::atoi(arg(2, "1").c_str()));
-    for (int i = 0; i < n; i++) create_object(arg(1, "Cube"));
+    /* create <kind words...> [count]: "create Spot Light", "create Cube 3" */
+    std::string kind;
+    int n = 1;
+    for (size_t i = 1; i < t.size(); i++) {
+      if (i + 1 == t.size() && !t[i].empty() && std::isdigit((unsigned char)t[i][0])) n = std::max(1, std::atoi(t[i].c_str()));
+      else kind += (kind.empty() ? "" : " ") + t[i];
+    }
+    for (int i = 0; i < n; i++) create_object(kind.empty() ? "Cube" : kind);
   }
   else if (c == "stress") spawn_stress_grid(std::max(1, std::atoi(arg(1, "1000").c_str())), arg(2, "Sphere"));
   else if (c == "select") {
@@ -1810,6 +1898,16 @@ void Editor::run_console_command(const std::string &line) {
     if (arg(1, "") == "edge") elem_ = EditElement::Edge;
     if (arg(1, "") == "vertex") elem_ = EditElement::Vertex;
     if (arg(1, "") == "all" || arg(2, "") == "all") edit_select_all(true);
+  }
+  else if (c == "pickfocus") {
+    /* pickfocus: the selected Camera's focus eyedropper (then click in the Scene view) */
+    GameObject *a = active_object();
+    if (a && a->get<Camera>()) focus_pick_cam_ = a->id;
+    else Log::warn("pickfocus: select a Camera first");
+  }
+  else if (c == "export") {
+    /* export obj|fbx [all]: the selection (or the whole scene) into Assets/Exports */
+    export_model(to_lower(arg(1, "obj")) == "fbx" ? "fbx" : "obj", to_lower(arg(2, "")) != "all");
   }
   else if (c == "esel") {
     /* esel <a> <b> [<c> <d> ...]: select exactly these edges (vertex pairs), edge mode */
@@ -1865,8 +1963,17 @@ void Editor::run_console_command(const std::string &line) {
     edit_op("push_pull");
   }
   else if (c == "camerapreview") {
-    cam_preview_rendered_ = to_lower(arg(1, "rendered")) == "rendered";  // the Scene view's Camera Preview inset
-    cam_preview_pt_hash_ = 0;
+    /* camerapreview rendered|shaded|lock|unlock (the Scene view's Camera Preview inset) */
+    const std::string w = to_lower(arg(1, "rendered"));
+    if (w == "lock") {
+      GameObject *a = active_object();
+      if (a && a->get<Camera>()) cam_preview_lock_ = a->id;
+    }
+    else if (w == "unlock") cam_preview_lock_ = 0;
+    else {
+      cam_preview_rendered_ = w == "rendered";
+      cam_preview_pt_hash_ = 0;
+    }
   }
   else if (c == "set") {
     /* set <Component>.<Field> <value...> (a Vec3 takes three numbers) */
@@ -1876,11 +1983,14 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "origin") {
     /* origin bounds|median|surface|volume|bottom|selection|pivot|geometry, or origin point <x> <y> <z> */
     static const char *names[kOriginModeCount] = {"bounds", "median", "surface", "volume", "bottom", "point", "selection", "pivot", "geometry"};
-    std::string w = to_lower(arg(1, "bounds"));
+    /* origin mode <name>: choose the Inspector's mode without applying it (the Scene view previews it). */
+    const bool choose = to_lower(arg(1, "")) == "mode";
+    std::string w = to_lower(arg(choose ? 2 : 1, "bounds"));
     int mode = -1;
     for (int k = 0; k < kOriginModeCount; k++)
       if (w == names[k]) mode = k;
     if (mode < 0) Log::warn("origin: use bounds, median, surface, volume, bottom, selection, pivot, geometry or point x y z");
+    else if (choose) origin_mode_ = mode;
     else
       set_origin(mode, Vec3((float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str())));
   }

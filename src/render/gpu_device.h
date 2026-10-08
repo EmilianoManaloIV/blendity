@@ -61,7 +61,7 @@ struct GMaterial {
   float base_color[4], emission[4], params[4], tiling[4], offset[4], color2[4];
   int32_t tex0[4], tex1[4], flags[4];
 };
-struct GLight { float a[4], b[4], c[4]; };
+struct GLight { float a[4], b[4], c[4], d[4], e[4]; };  // see gpu_kernel.h Light
 struct GMeshLight { uint32_t obj, prim; float area, power; };
 struct GTexInfo { uint32_t offset; int32_t w, h; uint32_t flags; };
 /* One unique mesh, for hardware acceleration structures. */

@@ -876,14 +876,29 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         dir = normalize(ct3 * (st * std::cos(ph)) + cb3 * (st * std::sin(ph)) + c * ct);
       }
       else {
-        float z = 1 - 2 * rnd(rng), ph = 2 * kPi * rnd(rng), rr = std::sqrt(std::max(0.0f, 1 - z * z));
-        Vec3 p = l.position + Vec3(rr * std::cos(ph), rr * std::sin(ph), z) * settings_.point_radius;
+        /* Two random numbers for every light type, as in the GPU kernel. */
+        const float r1 = rnd(rng), r2 = rnd(rng);
+        Vec3 p;
+        if (l.type == RenderLight::Area) {
+          /* A point on the rectangle (or ellipse): soft shadows. */
+          float x = r1 - 0.5f, y = r2 - 0.5f;
+          if (l.disk) {
+            const float rr = 0.5f * std::sqrt(r1), ph = 2 * kPi * r2;
+            x = rr * std::cos(ph);
+            y = rr * std::sin(ph);
+          }
+          const Vec3 up = cross(l.direction, l.right);
+          p = l.position + l.right * (x * l.width) + up * (y * l.height);
+        }
+        else {
+          const float z = 1 - 2 * r1, ph = 2 * kPi * r2, rr = std::sqrt(std::max(0.0f, 1 - z * z));
+          p = l.position + Vec3(rr * std::cos(ph), rr * std::sin(ph), z) * settings_.point_radius;
+        }
         Vec3 d = p - origin;
         dist = length(d);
         if (dist < 1e-5f) continue;
         dir = d / dist;
-        float f = saturate(1.0f - length(l.position - sp.position) / std::max(1e-3f, l.range));
-        power *= f * f;
+        power *= light_falloff(l, sp.position, dir);  // range, spot cone, area facing
       }
       if (power <= 0 || dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) continue;
       rays++;
@@ -1646,12 +1661,16 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
   for (const RenderLight &l : lights_) {
     gpu::GLight g{};
     Vec3 v = l.type == RenderLight::Directional ? l.direction : l.position;
-    float a[4] = {v.x, v.y, v.z, l.type == RenderLight::Directional ? 0.0f : 1.0f};
+    float a[4] = {v.x, v.y, v.z, (float)l.type};
     float b[4] = {l.color.x, l.color.y, l.color.z, l.intensity};
-    float c[4] = {l.range, 0, 0, 0};
+    float c[4] = {l.range, l.cos_outer, l.cos_inner, l.disk ? 1.0f : 0.0f};
+    float d[4] = {l.direction.x, l.direction.y, l.direction.z, l.width};
+    float e[4] = {l.right.x, l.right.y, l.right.z, l.height};
     std::memcpy(g.a, a, 16);
     std::memcpy(g.b, b, 16);
     std::memcpy(g.c, c, 16);
+    std::memcpy(g.d, d, 16);
+    std::memcpy(g.e, e, 16);
     s.lights.push_back(g);
   }
   for (const MeshLight &ml : mesh_lights_) s.mesh_lights.push_back({ml.object, ml.prim, ml.area, ml.power});

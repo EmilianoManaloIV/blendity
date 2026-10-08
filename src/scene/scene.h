@@ -137,12 +137,26 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
 
 struct Light : ComponentBase<Light> {
   static constexpr const char *kName = "Light";
-  int type = 0;  // 0 directional, 1 point
+  int type = 0;  // 0 directional, 1 point, 2 spot, 3 area
   Vec3 color{1.0f, 0.957f, 0.839f};  // Unity's default warm sun
   float intensity = 1.0f;
   float range = 10.0f;
+  /* Spot: Unity's Spot Angle (the full cone) and Inner Spot Angle (full brightness). */
+  float spot_angle = 30.0f, inner_spot_angle = 21.8f;
+  /* Area: a rectangle or disc facing the light's forward (+Z), lit on that side only. */
+  int area_shape = 0;  // 0 rectangle, 1 disc
+  float area_width = 1.0f, area_height = 1.0f;
+  /* Colour temperature (Unity HDRP / Blender's Blackbody node): the colour is
+   * multiplied by a black body's colour at this many kelvin. */
+  bool use_temperature = false;
+  float temperature = 6500.0f;
   void reflect(Reflector &r) override;
+  Vec3 final_color() const;  // colour x temperature tint
 };
+
+/* A black body's colour at `kelvin` (1000 - 40000 K) in linear RGB, brightest
+ * channel 1: candle 1900 K, tungsten 2700 K, noon sun 5500 K, overcast 6500 K. */
+Vec3 kelvin_to_rgb(float kelvin);
 
 struct Camera : ComponentBase<Camera> {
   static constexpr const char *kName = "Camera";

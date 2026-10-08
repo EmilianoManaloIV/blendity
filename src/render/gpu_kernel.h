@@ -42,7 +42,7 @@ struct Material {
   ivec4 tex1;       // emission, mapping, procedural, surface
   ivec4 flags;      // unlit, wrap, filter, -
 };
-struct Light { vec4 a; vec4 b; vec4 c; };  // a: type, xyz dir/pos; b: color * intensity; c: range
+struct Light { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; };  // a: dir/pos + type (0 sun, 1 point, 2 spot, 3 area); b: colour, intensity; c: range, spot cos outer / inner, disk; d: direction, width; e: right, height
 struct MeshLight { uint obj; uint prim; float area; float power; };
 struct TexInfo { uint offset; int w; int h; uint flags; };  // flags: 1 sRGB, 2 float
 
@@ -584,14 +584,34 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
         dir = normalize(ct3 * (st * cos(ph)) + cb3 * (st * sin(ph)) + cdir * ct);
       }
       else {
-        float z = 1.0 - 2.0 * rnd(rng), ph = 2.0 * PI * rnd(rng), rr = sqrt(max(0.0, 1.0 - z * z));
-        vec3 p = l.a.xyz + vec3(rr * cos(ph), rr * sin(ph), z) * P.settings.z;
+        float r1 = rnd(rng), r2 = rnd(rng);
+        vec3 p;
+        if (l.a.w > 2.5) {  // area: a point on the rectangle or ellipse
+          float x = r1 - 0.5, y = r2 - 0.5;
+          if (l.c.w > 0.5) {
+            float rr = 0.5 * sqrt(r1), ph = 2.0 * PI * r2;
+            x = rr * cos(ph);
+            y = rr * sin(ph);
+          }
+          p = l.a.xyz + l.e.xyz * (x * l.d.w) + cross(l.d.xyz, l.e.xyz) * (y * l.e.w);
+        }
+        else {
+          float z = 1.0 - 2.0 * r1, ph = 2.0 * PI * r2, rr = sqrt(max(0.0, 1.0 - z * z));
+          p = l.a.xyz + vec3(rr * cos(ph), rr * sin(ph), z) * P.settings.z;
+        }
         vec3 dd = p - origin;
         dist = length(dd);
         if (dist < 1e-5) continue;
         dir = dd / dist;
+        /* As light_falloff on the CPU: range, the spot cone, an area's facing. */
         float f = saturate1(1.0 - length(l.a.xyz - sp.position) / max(1e-3, l.c.x));
         power *= f * f;
+        float c = -dot(l.d.xyz, dir);
+        if (l.a.w > 1.5 && l.a.w < 2.5) {
+          float t = l.c.z - l.c.y > 1e-6 ? saturate1((c - l.c.y) / (l.c.z - l.c.y)) : (c >= l.c.y ? 1.0 : 0.0);
+          power *= t * t * (3.0 - 2.0 * t);
+        }
+        else if (l.a.w > 2.5) power *= max(c, 0.0);
       }
       if (power <= 0.0 || dot(n, dir) <= 0.0 || dot(sp.geo_normal, dir) <= 0.0) continue;
       vec3 Tr = transmittance(origin, dir, dist);

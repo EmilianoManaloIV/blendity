@@ -46,7 +46,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Ctrl+Z / Y | Undo / Redo | Undo / Shift+Ctrl+Z | Both work |
 | RMB | Fly / context menu | Cancel, or a context menu | **Fly**, except while an operator runs, when it cancels |
 | MMB | Pan | Orbit | Pan, with orbit on Alt+LMB |
-| Alt+LMB | Orbit | (emulated 3-button) | Orbit |
+| Alt+LMB | Orbit | Loop select (click) | **Orbit when dragged, loop select when clicked** in Edit Mode; Ctrl+Alt+click selects a ring |
 
 **Why this is the best compromise:**
 - Nothing Unity users already know changes by default.
@@ -59,6 +59,10 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 |---|---|
 | Selecting two opposite edges selected all four edges of the quad. Mark Seam, Bevel and the edge highlight all saw four. | Edge mode keeps edges themselves, as Blender does (`edge_sel_`). The edge tools read exactly those edges (`meshops::EdgeSelectionScope`). |
 | Shade Smooth on some faces smoothed the whole object. | Shading is per face (`Mesh::face_smooth`). Smoothing stops at flat faces, at edges marked sharp (Mark Sharp / Clear Sharp), at the Smooth by Angle limit, and optionally at UV seams ("Seams Are Hard Edges"). |
+| In Edit Mode, clicking another mesh did nothing. | It now becomes the mesh being edited (as in Unity, where a click always selects); picking another object in the Hierarchy does the same. |
+| The scene gizmo's axes and label ignored clicks (the click started a box select first). | The gizmo keeps its clicks: named views, and Persp / Iso on the label. |
+| Right-clicking empty Hierarchy space opened nothing (the menu closed in the same frame). | Popups opened after their owner declared its menus survive their first frame. |
+| The Adjust Last Operation panel (e.g. after Push/Pull) never went away. | An x button, Esc and the next selection click put it away; F9 brings it back. |
 | The Camera Preview's Shaded / Rendered button did nothing. | The click fell through to the Scene view and deselected the camera, and Rendered showed the rasterizer when the engine was Rasterized. The inset now keeps its clicks, and Rendered always path-traces. |
 | Inset and Bevel ran at a fixed amount. | Both follow the mouse, as in Blender. Bevel takes the wheel for segments and has Clamp Overlap. |
 | Colours were RGB only, with a bare popup. | Colours work like Unity's: a swatch with an alpha bar, and a Color window with a saturation / value square, hue strip, RGB 0-255 / 0-1 / HSV modes, alpha, hex RRGGBBAA, and preset and recent swatches. Base Color carries the material's alpha. |
