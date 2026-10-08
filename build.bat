@@ -86,8 +86,8 @@ for %%d in (core image render scene editor research platform deps) do (
 rem Blender's own bundled dependencies (see extern\README.md)
 set LIBSRC=!LIBSRC! extern\ufbx\ufbx.c extern\sky\source\sky_hosek.cpp
 set OBJ=build\obj_%CONFIG%
-set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib %LIBLINK%
-if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib %LIBLINK%
+set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib %LIBLINK%
+if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto app

@@ -37,8 +37,10 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | G | (unused) | Move | **Move, as in Blender** |
 | R | Scale tool | Rotate | Scale tool by default. With **Edit > Blender Transform Keys**, R rotates and the Scale tool moves to **T**. During a G, R always switches to rotate. |
 | S | (unused) | Scale | Scale with Blender Transform Keys on. During a G, it always switches to scale. |
-| E | Rotate tool | Extrude | Rotate tool; **Ctrl+E** extrudes Blender-style (extrude, then move along the normal) |
+| E | Rotate tool | Extrude | Rotate tool; **Ctrl+E** extrudes Blender-style: faces move along the normal; in vertex / edge mode edges grow faces and lone vertices grow edges, then move freely |
 | I | (unused) | Inset | **Inset**, drag to adjust (Ctrl+I too) |
+| K | (unused) | Knife | **Knife / Line**: click two points on a face's edges to split it (SketchUp's Line tool, with endpoint / midpoint / on-edge snapping) |
+| Ctrl+J | (unused) | Join | **Join** the selected meshes into the active one (Object Mode) |
 | X | (unused) | Delete menu | An axis lock during a transform. Ctrl+X dissolves whatever the current selection mode selects; Del deletes. |
 | Y | Transform tool | Split | Transform tool. Split is in the Mesh menu and the Inspector. |
 | P | (unused) | Separate | **Push/Pull** (SketchUp) |
@@ -67,6 +69,12 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Inset and Bevel ran at a fixed amount. | Both follow the mouse, as in Blender. Bevel takes the wheel for segments and has Clamp Overlap. |
 | Colours were RGB only, with a bare popup. | Colours work like Unity's: a swatch with an alpha bar, and a Color window with a saturation / value square, hue strip, RGB 0-255 / 0-1 / HSV modes, alpha, hex RRGGBBAA, and preset and recent swatches. Base Color carries the material's alpha. |
 | High render resolutions took typing. | Resolution presets from 640 x 360 to 8K, plus print sizes, each with its megapixels. The output size shows in MP and MB. |
+| Exported FBX files did not open in Blender ("ASCII FBX files are not supported"). | FBX is written in binary like Blender's own exporter (ASCII stays as an option for Unity). Every export format is now checked by importing it into Blender 5.2 itself. |
+| Exports, screenshots and renders always went to fixed project folders. | Each one asks where to save with the system's Save As dialog (after Blender's export options); File > Import Model and Open Scene use the Open dialog. |
+| An OBJ object could pick up an extra, unused material slot from the object before it. | The carried-over material is only added when a face uses it before any `usemtl`. |
+| Set Origin could only use fixed points (or Edit Mode's selection, hidden in a menu). | Edit Origin with Handles: the gizmo moves the origin alone, and a click snaps it to a vertex, edge midpoint or face centre. Edit Mode has Origin to Selection as a button. |
+| Modifiers were scattered among the components, with only an on/off switch. | One Blender-style modifier stack with Edit Mode / Viewport / Render toggles, Apply per modifier, Duplicate, Copy to Selected and reordering. |
+| A shape could only start from a primitive: there was no way to extrude a vertex or an edge. | E / Ctrl+E in vertex and edge mode, with wire edges as in Blender. |
 
 ## Still worth doing
 
@@ -75,5 +83,5 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 3. **Pie menus or a search** (Blender's F3): with about 50 operators now, a type-to-find box is the fastest way to reach a rare one.
 4. **Snapping during G** to vertices, edges and faces (Blender's snap targets), not just the grid increment.
 5. **Proportional editing during G / R / S** (it already works with the gizmos), with the wheel changing its radius.
-6. **Knife (K) and Spin / Screw**: the main Blender tools still missing.
+6. **Spin** (an interactive Screw on the selection) and **Knife cuts through several faces** in one stroke: the Knife and the Screw modifier are in; these are their next steps.
 7. **The Inspector's operator grids are long.** Collapsible groups (Select, Transform, Topology), or showing only the operators the current selection can use, would help.

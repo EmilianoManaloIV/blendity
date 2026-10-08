@@ -34,8 +34,11 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     auto *mr = g.get<MeshRenderer>();
     auto *mf = g.get<MeshFilter>();
     if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (game ? !mr->show_in_renders : mr->display_as != 0) return;  // wire / bounds: drawn as overlays
     bool editing = !game && edit_mode_ && g.id == edit_obj_;
-    const Mesh *m = editing ? mf->mesh.get() : g.evaluated_mesh();
+    /* Edit Mode shows the modifiers set to Show in Edit Mode over the cage; renders use Show in Renders. */
+    const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
+    if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
     DrawItem it;
     it.mesh = want_tangents && needs_tangents(mr->materials) ? &m->render_mesh_tangents(editing) : &m->render_mesh(editing);
@@ -162,8 +165,11 @@ uint64_t Editor::scene_render_hash() {
     mix(&g.id, 8);
     mix(g.world_matrix().m, sizeof(float) * 16);
     if (mr && mr->enabled) {
-      const Mesh *m = g.evaluated_mesh();
+      const Mesh *m = g.evaluated_mesh(1);  // renders: Show in Renders
       mix(&m, sizeof(m));
+      const Mesh *mv = g.evaluated_mesh(0);  // the Rendered viewport: the viewport toggles
+      mix(&mv, sizeof(mv));
+      if (mv) mix(&mv->version, 8);
       if (m) mix(&m->version, 8);
       for (auto &mp : mr->materials) {
         const void *p = mp.get();
@@ -518,6 +524,27 @@ void Editor::save_render() {
   }
   static const char *exts[] = {".png", ".jpg", ".hdr", ".exr"};
   std::string path = fs::join(dir, std::string(buf) + exts[fmt]);
+  /* Ask where (Blender: Image > Save As); the file type follows the name or the filter. */
+  std::vector<platform::FileFilter> filters = {{"PNG", {".png"}}, {"JPEG", {".jpg", ".jpeg"}}, {"Radiance HDR", {".hdr"}}};
+  if (exr_available()) filters.push_back({"OpenEXR", {".exr"}});
+  int filter = std::min(fmt, (int)filters.size() - 1);
+  std::string chosen;
+  switch (pick_save_path("Save Render", path, filters, chosen, &filter)) {
+    case PathPick::Cancelled: return;
+    case PathPick::Unavailable: break;
+    case PathPick::Chosen: {
+      path = chosen;
+      const std::string ext = fs::extension(path);
+      int by_name = ext == ".png" ? 0 : (ext == ".jpg" || ext == ".jpeg") ? 1 : ext == ".hdr" ? 2 : ext == ".exr" && exr_available() ? 3 : -1;
+      fmt = by_name >= 0 ? by_name : filter;
+      if (fmt >= 2 && render_linear_.empty()) {
+        Log::warn("Float formats need the path-traced engine (linear light); saving PNG instead");
+        fmt = 0;
+        path = fs::join(fs::parent(path), fs::stem(path) + ".png");
+      }
+      break;
+    }
+  }
   const int w = render_img_.width, h = render_img_.height;
   bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), w, h, w)
             : fmt == 1 ? write_jpeg(path, render_img_.pixels.data(), w, h, w, scene_->render.jpeg_quality)

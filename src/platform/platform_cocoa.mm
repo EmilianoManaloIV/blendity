@@ -8,6 +8,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace bl::platform {
@@ -345,6 +346,67 @@ void set_clipboard(Window *, const std::string &utf8) {
 }
 
 void set_refresh_callback(Window *w, std::function<void()> cb) { w->refresh = std::move(cb); }
+
+/* ------------------------------------------------------------ File dialogs */
+
+bool file_dialogs_available() { return true; }
+
+static NSArray *dialog_types(const std::vector<FileFilter> &filters) {
+  NSMutableArray *types = [NSMutableArray array];
+  for (const FileFilter &f : filters)
+    for (const std::string &e : f.extensions) [types addObject:[NSString stringWithUTF8String:e.c_str() + 1]];
+  return types;
+}
+
+bool save_file_dialog(Window *, const std::string &title, const std::string &initial_path, const std::vector<FileFilter> &filters,
+                      std::string &out_path, int *filter_index) {
+  @autoreleasepool {
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.title = [NSString stringWithUTF8String:title.c_str()];
+    std::string dir = initial_path, name;
+    size_t slash = dir.find_last_of('/');
+    if (slash != std::string::npos) {
+      name = dir.substr(slash + 1);
+      dir = dir.substr(0, slash);
+      panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:dir.c_str()]];
+    }
+    else
+      name = dir;
+    panel.nameFieldStringValue = [NSString stringWithUTF8String:name.c_str()];
+    /* NSSavePanel has no filter popup of its own: the chosen filter's types. */
+    const int k = filter_index ? std::max(0, std::min(*filter_index, (int)filters.size() - 1)) : 0;
+    if (!filters.empty()) {
+      std::vector<FileFilter> one(1, filters[(size_t)k]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+      panel.allowedFileTypes = dialog_types(one);
+#pragma clang diagnostic pop
+    }
+    if ([panel runModal] != NSModalResponseOK) return false;
+    out_path = [[panel.URL path] UTF8String];
+    if (filter_index) *filter_index = k;
+    return true;
+  }
+}
+
+bool open_file_dialog(Window *, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
+                      std::string &out_path) {
+  @autoreleasepool {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = [NSString stringWithUTF8String:title.c_str()];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    if (!initial_dir.empty()) panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:initial_dir.c_str()]];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (!filters.empty()) panel.allowedFileTypes = dialog_types(filters);
+#pragma clang diagnostic pop
+    if ([panel runModal] != NSModalResponseOK) return false;
+    out_path = [[panel.URL path] UTF8String];
+    return true;
+  }
+}
 
 }  // namespace bl::platform
 

@@ -304,7 +304,33 @@ void Editor::draw_transform(const Recti &view) {
  * cap with the mouse along their normal (X / Y / Z still re-lock; a typed
  * number is the distance). Esc takes the extrusion back too. */
 void Editor::extrude_and_move() {
-  if (!edit_mode_ || !edit_op_available("extrude")) {
+  if (!edit_mode_) return;
+  bool whole_faces = false;
+  if (elem_ != EditElement::Face && edit_object()) {
+    /* Blender's Extrude Region: faces whose corners (vertex mode) or edges (edge mode)
+     * are all selected extrude as faces; only open vertices and edges grow new ones. */
+    const Mesh &m = **edit_mesh_ptr();
+    for (size_t f = 0; f < m.face_count() && !whole_faces; f++) {
+      bool all = true;
+      const uint32_t *v = m.face_verts(f);
+      const uint32_t n = m.face_size(f);
+      for (uint32_t k = 0; k < n && all; k++)
+        all = elem_ == EditElement::Vertex ? (v[k] < vert_sel_.size() && vert_sel_[v[k]] != 0) : edge_sel_.count(Mesh::edge_key(v[k], v[(k + 1) % n])) > 0;
+      whole_faces = all;
+    }
+  }
+  if (elem_ != EditElement::Face && !whole_faces) {
+    /* Vertex / edge mode: edges grow faces, lone vertices grow edges; then a
+     * free move, like Blender (X / Y / Z lock, a typed number). As in Blender,
+     * Esc ends the move and leaves the new geometry where it started (Ctrl+Z removes it). */
+    if (!edit_object()) return;
+    const size_t before = (*edit_mesh_ptr())->vert_count();
+    edit_op("extrude_edges");
+    if ((*edit_mesh_ptr())->vert_count() == before) return;
+    transform_begin(0);
+    return;
+  }
+  if (!whole_faces && !edit_op_available("extrude")) {
     edit_tool("extrude");  // explains which mode it needs
     return;
   }

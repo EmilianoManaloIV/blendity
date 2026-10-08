@@ -198,7 +198,11 @@ Navigation stays Unity's (hold RMB to fly, Alt+LMB orbit, MMB pan), and so do th
 )"},
     {"Modifiers vs Components", "Non-destructive editing and Catmull-Clark", R"(
 Blender's modifier stack changes a mesh on the fly without touching the original: Subdivision Surface, Mirror, Smooth... Each modifier feeds the next. Unity has no modifier stack. Any procedural change is done by a script component.
-Blendity combines the two ideas: modifier components. Add SubdivisionSurface or SmoothModifier from Add Component. The renderer evaluates them in order, and the result is cached until the mesh or a setting changes. "Apply Modifiers" bakes the result into the mesh, like Blender's Ctrl+A on a modifier.
+Blendity combines the two ideas: modifiers are components, shown together in the Inspector's Modifiers panel as Blender's stack. Add Modifier lists them by Blender's groups: Edit (Weld), Generate (Array, Bevel, Boolean, Decimate, Mirror, Screw, Solidify, Subdivision Surface, Triangulate, Wireframe) and Deform (Cast, Displace, Simple Deform, Smooth). They run from the top down, and the result is cached until the mesh or a setting changes. Each header has Blender's three toggles: Edit Mode (draw the result while you edit the cage), Viewport and Render. Its menu applies, duplicates, copies to the other selected objects or moves the modifier. Apply bakes one modifier into the mesh, like Blender's Ctrl+A; Apply All bakes the whole stack.
+# Order matters
+Mirror then Bevel bevels the seam in the middle; Bevel then Mirror doesn't, because the seam doesn't exist yet when the bevel runs. Array then Simple Deform bends the whole row; Simple Deform then Array repeats one bent copy. Move a modifier up or down and watch.
+# A lathe from a line
+Screw sweeps edges round an axis. Draw a profile with wire edges (Edit Mode, vertex mode: select a vertex and press Ctrl+E repeatedly to grow a line), add Screw, and the outline becomes a vase or a bottle. Screw > Screw raises each turn: springs and threads.
 # Catmull-Clark in three rules
 - Face point = average of the face's corners.
 - Edge point = average of the edge's two ends and the two neighbouring face points.
@@ -550,6 +554,27 @@ With several devices ticked, they share one counter of sample numbers. Each devi
 ? Why can adding the CPU make a render slower? | One CPU sample can take 30x longer than a GPU sample. If the CPU is still finishing a sample after the GPUs are done, everyone waits. Blendity stops the CPU from taking new samples near the end, but a fast GPU pair still does better alone.
 ! cmd:engine path; device gpu +cpu; window Render | Switch to path tracing on the GPU, with the CPU helping
 ! cmd:engine path; device gpu; render; window Render | Render the Main Camera on the GPUs only
+)"},
+    {"Points, Lines, N-gons and Booleans", "Building from a vertex, SketchUp faces, combining solids", R"(
+Blender can start a model from a single vertex. Ctrl+E (Blender's E) on a vertex grows an edge: a "wire" or loose edge that no face uses yet. Ctrl+E on that edge grows a face. Blendity keeps those wire edges in the mesh (Mesh::loose_edges), saves them, and lets the Screw modifier sweep them into a solid.
+@ blender/source/blender/bmesh/operators/bmo_extrude.cc
+# SketchUp's faces
+SketchUp has no triangles or quads to think about: a face is any flat polygon, and drawing a line across it splits it in two. Blender can do the same with n-gons. Blendity's N-gon Mode shows a flat region of faces as the one face SketchUp would show: its inner edges hide and one click selects all of it. Merge Coplanar (Blender's Limited Dissolve) makes that one real n-gon. The Knife (K) draws a line between two points on a face's outline and splits it, snapping like SketchUp: endpoints green, midpoints cyan, anywhere on an edge red.
+| | SketchUp | Blender | Blendity
+| A face | any flat polygon | an n-gon | an n-gon (N-gon Mode hides coplanar edges)
+| Split a face | Line tool | Knife (K) | Knife / Line (K)
+| Merge flat faces | erase the edge | Limited Dissolve | Merge Coplanar
+| Push a face | Push/Pull | Extrude | Push/Pull (P)
+@ blender/source/blender/editors/mesh/editmesh_knife.cc
+@ blender/source/blender/bmesh/operators/bmo_dissolve.cc
+# Combining solids
+Join (Ctrl+J) puts several meshes into one object; they still don't touch. A Boolean actually merges them: Union keeps the outside of both, Difference cuts the second out of the first, Intersect keeps only the overlap. The solver needs closed, watertight meshes. Blendity uses Manifold, the same library as Blender's default Boolean solver. Applying it removes the cutters; as a modifier, the cutter becomes a wire outline you can keep moving, and renders leave it out.
+@ blender/source/blender/geometry/intern/mesh_boolean_manifold.cc
+? Why does a Boolean need closed meshes? | It has to know which side of every face is inside the solid. With a hole in the mesh, "inside" isn't defined.
+? You join a cube and a sphere that overlap. How many objects, and do their surfaces merge? | One object, but the two surfaces still pass through each other; only a Boolean Union merges them.
+! cmd:create Shape: Stairs | Create parametric Stairs (change Steps in the Inspector)
+! cmd:select Sphere; selectadd Cube; boolean difference modifier | Cut the Sphere out of the Cube as a live Boolean modifier
+! cmd:create Shape: Box; edit face; ngon on | A Box in Edit Mode with N-gon Mode on
 )"},
 };
 

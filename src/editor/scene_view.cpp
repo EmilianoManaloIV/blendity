@@ -50,6 +50,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (modal_update(view)) gizmo_busy = true;
   if (transform_update(view)) gizmo_busy = true;
   if (focus_pick_update(view)) gizmo_busy = true;
+  if (knife_update(view)) gizmo_busy = true;
 
   auto &in = u.in;
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
@@ -95,6 +96,7 @@ void Editor::draw_scene_view(const Recti &r) {
 
   draw_scene_icons(view);
   draw_origins(view);
+  knife_draw(view);
   if (show_gizmos_) draw_gizmo(view);
   draw_pushpull(view);
   draw_modal(view);
@@ -292,9 +294,12 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
     auto *mr = g.get<MeshRenderer>();
     auto *mf = g.get<MeshFilter>();
     if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (game ? !mr->show_in_renders : mr->display_as != 0) return;  // wire / bounds: drawn as overlays
     DrawItem it;
     bool editing = !game && edit_mode_ && g.id == edit_obj_;
-    const Mesh *m = editing ? mf->mesh.get() : g.evaluated_mesh();
+    /* Edit Mode shows the modifiers set to Show in Edit Mode over the cage; renders use Show in Renders. */
+    const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
+    if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
     it.mesh = &m->render_mesh(editing);
     it.model = g.world_matrix();
@@ -392,12 +397,28 @@ void Editor::render_overlays(const Recti &) {
     auto *mr = g.get<MeshRenderer>();
     if (!mr || !mr->enabled) return;
     if (edit_mode_ && g.id == edit_obj_) return;
-    if (!all_wire && !mr->show_wireframe) return;
     const Mesh *m = g.evaluated_mesh();
     if (!m) return;
     const Mat4 &w = g.world_matrix();
+    if (!m->loose_edges.empty() && !all_wire && !mr->show_wireframe && mr->display_as == 0) {
+      /* Wire edges have no faces to shade: always drawn (Blender does too). */
+      const uint32_t lc = is_selected(g.id) ? kSelectOrange : Color::hex(0x202020, 220);
+      for (uint64_t k : m->loose_edges)
+        if ((k >> 32) < m->vert_count() && (k & 0xFFFFFFFF) < m->vert_count())
+          scene_r3d_.line(w.point(m->positions[(size_t)(k >> 32)]), w.point(m->positions[(size_t)(k & 0xFFFFFFFF)]), lc, true, 2e-4f);
+    }
+    if (!all_wire && !mr->show_wireframe && mr->display_as == 0) return;
     uint32_t col = is_selected(g.id) ? kSelectOrange : (shading_ == Shading::Wireframe ? Color::hex(0xD8D8D8, 200) : Color::hex(0x101010, 150));
+    if (mr->display_as != 0 && !is_selected(g.id)) col = Color::hex(0xC8C8C8, 220);  // Blender draws wire objects light
     bool depth = shading_ != Shading::Wireframe;
+    if (mr->display_as == 2) {  // Bounds: the box's 12 edges
+      const AABB b = m->render_mesh().bounds;
+      Vec3 c[8];
+      for (int k = 0; k < 8; k++) c[k] = w.point({k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z});
+      static const int kE[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+      for (auto &e : kE) scene_r3d_.line(c[e[0]], c[e[1]], col, depth, 2e-4f);
+      return;
+    }
     const auto &edges = m->edge_cache();
     if (edges.size() > 400000) return;  // keep the editor responsive on enormous meshes
     for (auto &e : edges) scene_r3d_.line(w.point(m->positions[e.first]), w.point(m->positions[e.second]), col, depth, 2e-4f);
@@ -426,8 +447,11 @@ void Editor::render_overlays(const Recti &) {
       const Mat4 &w = g->world_matrix();
       vert_sel_.resize(m.vert_count(), 0);
       face_sel_.resize(m.face_count(), 0);
+      /* N-gon mode (SketchUp): edges inside a flat region are hidden, as SketchUp hides coplanar edges. */
+      if (ngon_mode_) ngon_cache(m);
       for (auto &e : m.edge_cache()) {
         bool s = edge_is_selected(e.first, e.second);
+        if (ngon_mode_ && !s && ngon_hidden_.count(Mesh::edge_key(e.first, e.second))) continue;
         bool seam = !m.seams.empty() && m.is_seam(e.first, e.second);
         uint32_t col = s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
         scene_r3d_.line(w.point(m.positions[e.first]), w.point(m.positions[e.second]), col, true, 5e-4f);
@@ -436,6 +460,14 @@ void Editor::render_overlays(const Recti &) {
         float rad = std::max(1.5f, ui_.px(2.5f) * 1.0f);
         for (size_t i = 0; i < m.vert_count(); i++)
           scene_r3d_.point(w.point(m.positions[i]), rad, vert_sel_[i] ? Color::hex(0xFFA733) : Color::hex(0x000000), true);
+      }
+      else if (elem_ == EditElement::Face && ngon_mode_) {
+        /* One dot per flat region: the "face" SketchUp would show. */
+        std::vector<uint8_t> rsel(ngon_region_center_.size(), 0);
+        for (size_t f = 0; f < m.face_count() && f < ngon_region_.size(); f++)
+          if (face_sel_[f] && ngon_region_[f] >= 0) rsel[(size_t)ngon_region_[f]] = 1;
+        for (size_t r = 0; r < ngon_region_center_.size(); r++)
+          scene_r3d_.point(w.point(ngon_region_center_[r]), ui_.px(2.5f), rsel[r] ? Color::hex(0xFFA733) : Color::hex(0x202020), true);
       }
       else if (elem_ == EditElement::Face) {
         for (size_t f = 0; f < m.face_count(); f++)
@@ -546,7 +578,7 @@ bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
-    const Mesh *m = mr && mr->enabled ? g.evaluated_mesh() : nullptr;
+    const Mesh *m = mr && mr->enabled && mr->display_as == 0 ? g.evaluated_mesh() : nullptr;
     if (!m) return;
     const Mat4 &w = g.world_matrix();
     const Mat4 inv = w.inverse();
@@ -649,6 +681,29 @@ void Editor::draw_origins(const Recti &view) {
       u.label(box, label, Color::hex(0x40D0FF), ui::Align::Center);
     }
   }
+  /* Edit Origin: what a click would snap to, and how to get out. */
+  if (origin_edit_ && !edit_mode_ && !playing_) {
+    if (selection_.empty()) origin_edit_ = false;
+    Vec3 p;
+    std::string what;
+    Vec2 s1, s0;
+    if (a && scene_hovered_ && drag_ == Drag::None && gizmo_hot_ < 0 && origin_snap_target(view, u.in.mx, u.in.my, p, what) && to_screen(p, s1)) {
+      if (to_screen(a->world_position(), s0)) u.canvas.line(s0.x, s0.y, s1.x, s1.y, Color::hex(0x40D0FF, 160), (float)u.px(1.0f));
+      const float r = (float)u.px(6);
+      const Vec2 dia[4] = {{s1.x, s1.y - r}, {s1.x + r, s1.y}, {s1.x, s1.y + r}, {s1.x - r, s1.y}};
+      u.canvas.fill_polygon(dia, 4, Color::hex(0x40D0FF, 230));
+      const std::string label = "Snap origin to " + what;
+      const int tw = u.font.text_width(label) + u.px(10);
+      Recti box{(int)s1.x + u.px(12), (int)s1.y - u.row_h() - u.px(4), tw, u.row_h()};
+      u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 220));
+      u.label(box, label, Color::hex(0x40D0FF), ui::Align::Center);
+    }
+    const std::string hint = "Editing the origin: drag the handles, or click a vertex, edge or face to snap it there.  Esc: done";
+    const int hw = u.font.text_width(hint) + u.px(16);
+    Recti hb{view.x + (view.w - hw) / 2, view.y + u.px(8), hw, u.row_h()};
+    u.canvas.fill_round_rect(hb, u.px(3), Color::hex(0x103040, 230));
+    u.label(hb, hint, Color::hex(0x9FE4FF), ui::Align::Center);
+  }
   origin_hover_ = false;  // the Inspector sets it again while its row is in use
   u.canvas.pop_clip();
 }
@@ -735,7 +790,97 @@ void Editor::draw_view_gizmo(const Recti &view) {
 /* Picking                                                                */
 /* ===================================================================== */
 
+/* Edit Origin: put the meshes and children back in the world while the gizmo
+ * moves or turns their objects, so only the origins change. */
+void Editor::compensate_origin_drag() {
+  for (auto &s : gizmo_starts_) {
+    GameObject *g = scene_->find(s.id);
+    if (!g) continue;
+    const Mat4 corr = g->world_matrix().inverse() * s.world;
+    for (auto &ms : origin_mesh_starts_)
+      if (ms.first == s.id && ms.second)
+        if (auto *mf = g->get<MeshFilter>()) {
+          auto m = std::make_shared<Mesh>(*ms.second);
+          for (Vec3 &p : m->positions) p = corr.point(p);
+          m->version = ms.second->version + 1 + (++redo_serial_);
+          m->touch();
+          mf->mesh = m;
+        }
+  }
+  for (auto &c : origin_child_starts_)
+    if (GameObject *ch = scene_->find(c.first)) ch->set_world_matrix(c.second);
+}
+
+/* What a click snaps the origin to: the nearest vertex, else an edge's
+ * midpoint, else the centre of the face under the mouse (the active object). */
+bool Editor::origin_snap_target(const Recti &view, int mx, int my, Vec3 &world, std::string &what) {
+  GameObject *a = active_object();
+  if (!a) return false;
+  const Mesh *m = a->evaluated_mesh();
+  if (!m || m->positions.empty() || m->vert_count() > 400000) return false;
+  const Mat4 &w = a->world_matrix();
+  const Vec2 mouse((float)(mx - view.x), (float)(my - view.y));
+  auto screen = [&](Vec3 p, Vec2 &s) {
+    float z;
+    return scene_r3d_.project(w.point(p), s, z);
+  };
+  float best = (float)ui_.px(12);
+  bool found = false;
+  for (const Vec3 &p : m->positions) {
+    Vec2 s;
+    if (screen(p, s) && length(s - mouse) < best) {
+      best = length(s - mouse);
+      world = w.point(p);
+      found = true;
+    }
+  }
+  if (found) {
+    what = "Vertex";
+    return true;
+  }
+  best = (float)ui_.px(12);
+  for (auto &e : m->edge_cache()) {
+    const Vec3 mid = (m->positions[e.first] + m->positions[e.second]) * 0.5f;
+    Vec2 s;
+    if (screen(mid, s) && length(s - mouse) < best) {
+      best = length(s - mouse);
+      world = w.point(mid);
+      found = true;
+    }
+  }
+  if (found) {
+    what = "Edge Midpoint";
+    return true;
+  }
+  const Ray ray = scene_r3d_.screen_ray(mouse.x, mouse.y);
+  const Mat4 inv = w.inverse();
+  const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
+  const RenderMesh &rm = m->render_mesh();
+  float t_best = 1e30f;
+  uint32_t face = UINT32_MAX;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    if (d > 0 && d < t_best) {
+      t_best = d;
+      face = t < rm.tri_face.size() ? rm.tri_face[t] : UINT32_MAX;
+    }
+  }
+  if (face == UINT32_MAX || face >= m->face_count()) return false;
+  world = w.point(m->face_center(face));
+  what = "Face Center";
+  return true;
+}
+
 void Editor::pick(const Recti &view, int mx, int my, int mode) {
+  if (origin_edit_ && !edit_mode_ && mode == SEL_REPLACE) {
+    Vec3 p;
+    std::string what;
+    if (origin_snap_target(view, mx, my, p, what)) {
+      set_origin(5, p);  // Origin to Point
+      Log::info("Origin snapped to the %s", to_lower(what).c_str());
+      return;
+    }
+  }
   /* Icon gizmos first (lights & cameras have no pixels in the id buffer). */
   uint64_t hit = 0;
   float best = (float)ui_.px(14);
@@ -747,6 +892,7 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
     float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
     if (d < best) { best = d; hit = g.id; }
   });
+  if (!hit) hit = pick_wire_object(view, mx, my, ui_.px(6));
   if (!hit) {
     uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);
     if (id)
@@ -754,6 +900,44 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
   }
   if (hit) select(hit, mode);
   else if (mode == SEL_REPLACE) clear_selection();
+}
+
+/* Wire and Bounds objects have no pixels in the id buffer: pick them by
+ * their drawn edges, like Blender selects a wire cutter by clicking a line. */
+uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius) {
+  uint64_t hit = 0;
+  float best = (float)radius;
+  scene_->for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    auto *mr = g.get<MeshRenderer>();
+    if (!mr || !mr->enabled || mr->display_as == 0) return;
+    const Mesh *m = g.evaluated_mesh();
+    if (!m) return;
+    const Mat4 &w = g.world_matrix();
+    auto seg = [&](Vec3 a, Vec3 b) {
+      Vec2 sa, sb;
+      float za, zb;
+      if (!scene_r3d_.project(w.point(a), sa, za) || !scene_r3d_.project(w.point(b), sb, zb)) return;
+      const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
+      const float len2 = dot(d, d);
+      const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
+      const float dist = length(p - (sa + d * t));
+      if (dist < best) {
+        best = dist;
+        hit = g.id;
+      }
+    };
+    if (mr->display_as == 2) {
+      const AABB b = m->render_mesh().bounds;
+      Vec3 c[8];
+      for (int k = 0; k < 8; k++) c[k] = {k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z};
+      static const int kE[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+      for (auto &e : kE) seg(c[e[0]], c[e[1]]);
+    }
+    else
+      for (auto &e : m->edge_cache()) seg(m->positions[e.first], m->positions[e.second]);
+  });
+  return hit;
 }
 
 void Editor::box_select(const Recti &view, Recti box, int mode) {
@@ -830,7 +1014,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -864,6 +1048,11 @@ bool Editor::gizmo_update(const Recti &view) {
       pivot = (a ? a : objs.back())->world_position();
     }
   }
+  if (origin_edit_ && !eo) {
+    /* Editing origins: the handles sit on the active object's origin. */
+    GameObject *a = active_object();
+    pivot = (a ? a : objs.back())->world_position();
+  }
   if (drag_ == Drag::Gizmo) pivot = gizmo_pivot_;
   Quat orient;
   GameObject *ref = eo ? eo : active_object();
@@ -893,7 +1082,7 @@ bool Editor::gizmo_update(const Recti &view) {
   if (!proj(pivot, ps)) return false;
   bool do_move = tool_ == Tool::Move || tool_ == Tool::Transform;
   bool do_rot = tool_ == Tool::Rotate || tool_ == Tool::Transform;
-  bool do_scale = tool_ == Tool::Scale || tool_ == Tool::Transform;
+  bool do_scale = (tool_ == Tool::Scale || tool_ == Tool::Transform) && !(origin_edit_ && !eo);  // an origin has no size
   float thr = (float)u.px(7);
 
   /* Hover test (skip while dragging). */
@@ -976,6 +1165,13 @@ bool Editor::gizmo_update(const Recti &view) {
     else {
       for (GameObject *g : objs) gizmo_starts_.push_back({g->id, g->world_matrix(), g->world_position(), g->world_rotation(), g->local().scale});
     }
+    origin_mesh_starts_.clear();
+    origin_child_starts_.clear();
+    if (origin_edit_ && !eo)
+      for (GameObject *g : objs) {
+        if (auto *mf = g->get<MeshFilter>()) origin_mesh_starts_.push_back({g->id, mf->mesh});
+        for (GameObject *c : g->children) origin_child_starts_.push_back({c->id, c->world_matrix()});
+      }
     Ray ray = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
     int h = gizmo_axis_;
     if (h <= H_MOVE_Z) gizmo_start_hit_ = pivot + axis[h] * closest_on_line_to_ray(pivot, axis[h], ray);
@@ -1110,6 +1306,11 @@ bool Editor::gizmo_update(const Recti &view) {
               g->set_world_position(pivot + axis[0] * l.x + axis[1] * l.y + axis[2] * l.z);
             }
           }
+    }
+    if (origin_edit_ && !eo) {
+      /* Only the origins move: the meshes (and children) are put back where they were in the world. */
+      compensate_origin_drag();
+      label = h <= H_MOVE_FREE ? "Move Origin" : "Rotate Origin";
     }
     mark_changed(label);
     if (!in.down[0]) {
@@ -1410,7 +1611,15 @@ void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
         float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
         if (d > 0 && d < bt) { bt = d; bf = (int)rm.tri_face[t]; }
       }
-    if (bf >= 0) face_sel_[bf] = mode == SEL_TOGGLE ? !face_sel_[bf] : 1;
+    if (bf >= 0 && ngon_mode_) {
+      /* N-gon mode: the whole flat region is one face (SketchUp). */
+      std::vector<uint8_t> region;
+      meshops::coplanar_region(m, (size_t)bf, kNgonAngle, region);
+      const uint8_t to = mode == SEL_TOGGLE ? !face_sel_[bf] : 1;
+      for (size_t f = 0; f < region.size(); f++)
+        if (region[f]) face_sel_[f] = to;
+    }
+    else if (bf >= 0) face_sel_[bf] = mode == SEL_TOGGLE ? !face_sel_[bf] : 1;
     sync_vert_face_selection(true);
   }
 }
@@ -1517,6 +1726,27 @@ void Editor::edit_op(const std::string &op) {
   else if (op == "fuse") {
     if (!try_auto_fuse(m)) { Log::warn("Fuse: the selected faces don't lie on another face of the mesh"); return; }
   }
+  else if (op == "dissolve_limited") {
+    const size_t n = meshops::dissolve_limited(m, kNgonAngle);
+    if (!n) {
+      Log::info("Merge Coplanar: nothing to merge (no flat regions of several faces)");
+      return;
+    }
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    edge_sel_.clear();
+    Log::info("Merge Coplanar: %zu edges / vertices dissolved, %zu faces left", n, m.face_count());
+  }
+  else if (op == "extrude_edges") {
+    const size_t n = meshops::extrude_verts_edges(m, vert_sel_);
+    if (!n) {
+      Log::warn("Extrude: select vertices or edges first");
+      return;
+    }
+    face_sel_.assign(m.face_count(), 0);
+    if (elem_ == EditElement::Edge) edges_from_verts();
+    Log::info("Extruded %zu %s", n, elem_ == EditElement::Edge ? "edge(s)" : "edge(s) / vertices");
+  }
   else if (op == "delete") {
     if (elem_ != EditElement::Face) {
       /* Vertex mode: faces using a selected vertex; edge mode: faces using a selected edge. */
@@ -1528,6 +1758,15 @@ void Editor::edit_op(const std::string &op) {
           any = any || (elem_ == EditElement::Vertex ? vert_sel_[v[k]] : meshops::edge_selected(v[k], v[(k + 1) % n], vert_sel_));
         face_sel_[f] = any;
       }
+      /* Wire edges: those at a selected vertex, or selected themselves. */
+      m.loose_edges.erase(std::remove_if(m.loose_edges.begin(), m.loose_edges.end(),
+                                         [&](uint64_t k) {
+                                           const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+                                           if (a >= vert_sel_.size() || b >= vert_sel_.size()) return true;
+                                           return elem_ == EditElement::Vertex ? (vert_sel_[a] || vert_sel_[b]) != 0
+                                                                               : meshops::edge_selected(a, b, vert_sel_);
+                                         }),
+                          m.loose_edges.end());
     }
     meshops::delete_faces(m, face_sel_);
     vert_sel_.assign(m.vert_count(), 0);
@@ -1538,6 +1777,7 @@ void Editor::edit_op(const std::string &op) {
   }
   else if (op == "fill") {
     if (!meshops::fill(m, vert_sel_)) { Log::warn("Fill needs 3 or more selected vertices (Blender: F)"); return; }
+    m.prune_loose_edges();  // wire edges the new face now uses
     face_sel_.resize(m.face_count(), 0);
     face_sel_.back() = 1;
     Log::info("Filled a %u-sided face", m.face_size(m.face_count() - 1));
@@ -1675,6 +1915,8 @@ void Editor::edit_op(const std::string &op) {
 const std::vector<EditOpInfo> &edit_op_table() {
   enum { V = 1, E = 2, F = 4, ALL = 7 };
   static const std::vector<EditOpInfo> ops = {
+      {"extrude_edges", "Extrude", "E", "Extrude the selected vertices and edges, then move them: an edge grows a face, a lone vertex\n"
+       "a new edge (start a shape from one vertex). Blender: E in vertex / edge mode.", V | E},
       {"merge_center", "Merge at Center", "Alt+M", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
       {"connect", "Connect Vertex Path", "J", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
       {"fill", "Make Face", "Alt+F", "Make a face from the selected vertices (in edge mode: fill the selected hole). Blender: F.", V | E},
@@ -1713,6 +1955,12 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"shrink_fatten", "Shrink/Fatten", "Alt+S", "Move the selected vertices along their normals (F9 sets the distance). Blender: Alt+S.", ALL},
       {"to_sphere", "To Sphere", "Shift+Alt+S", "Pull the selected vertices onto a sphere around their centre (F9 sets how far). Blender: Shift+Alt+S.", ALL},
       {"randomize", "Randomize", "", "Jitter the selected vertices (F9: amount and seed). Blender: Transform > Randomize.", ALL},
+      {"knife", "Knife / Line", "K", "Draw a line across a face to split it: click a corner or an edge, then another on the same face.\n"
+       "Snaps to endpoints (green), midpoints (cyan) and edges (red). SketchUp: Line tool. Blender: K.", ALL},
+      {"dissolve_limited", "Merge Coplanar", "", "Turn every flat region into one n-gon and drop corners on straight edges.\n"
+       "Blender: Delete > Limited Dissolve. SketchUp shows flat regions this way.", ALL},
+      {"origin_to_selection", "Origin to Selection", "", "Move the object's origin to the centre of the selected elements (the mesh stays put).\n"
+       "Blender: Shift+S > Cursor to Selected, then Set Origin > Origin to 3D Cursor.", ALL},
       {"select_linked", "Select Linked", "Ctrl+L", "Select everything connected to the selection. Blender: Ctrl+L.", ALL},
       {"select_more", "Select More", "Ctrl+=", "Grow the selection by one ring. Blender: Ctrl+Numpad +.", ALL},
       {"select_less", "Select Less", "Ctrl+-", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
@@ -1746,6 +1994,8 @@ void Editor::edit_tool(const std::string &op) {
     return;
   }
   if (op == "push_pull") pushpull_begin();
+  else if (op == "origin_to_selection") set_origin(6);
+  else if (op == "knife") knife_begin();
   else if (op == "mark_seam" || op == "clear_seam") uv_op(op);
   else if (op == "mark_sharp" || op == "clear_sharp" || op == "shade_smooth" || op == "shade_flat") mesh_op(op);
   else edit_op(op);

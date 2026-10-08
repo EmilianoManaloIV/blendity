@@ -122,6 +122,7 @@ static void import_and_material_tests();
 static void render_tests();
 static void file_tests();
 static void colormanagement_tests();
+static void modeling_round9_tests();
 
 int main() {
   register_builtin_components();
@@ -707,6 +708,7 @@ int main() {
   render_tests();
   file_tests();
   colormanagement_tests();
+  modeling_round9_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -2527,14 +2529,18 @@ static void render_tests() {
       m.type = platform::EventType::MouseMove;
       ed.step_frame_headless({m, d});
     };
-    /* Vertex mode: Bevel (edges) and Extrude (faces) are refused. */
+    /* Vertex mode: Bevel (edges) is refused. Extrude works on vertices now (with the
+     * whole cube selected it is Blender's region extrude); Esc cancels its move. */
     ed.command("edit vertex all");
     key(platform::KEY_B, platform::MOD_CTRL);
-    key(platform::KEY_E, platform::MOD_CTRL);
     CHECK(faces() == 6);
-    /* Edge mode: Bevel works, Extrude still doesn't. */
+    key(platform::KEY_E, platform::MOD_CTRL);
+    key(platform::KEY_ESCAPE, 0);
+    CHECK(faces() == 6);
+    /* Edge mode: Bevel works (Extrude too, cancelled here). */
     ed.command("edit edge all");
     key(platform::KEY_E, platform::MOD_CTRL);
+    key(platform::KEY_ESCAPE, 0);
     CHECK(faces() == 6);
     key(platform::KEY_B, platform::MOD_CTRL);
     CHECK(faces() > 6);
@@ -2599,6 +2605,139 @@ static void render_tests() {
     CHECK(import_model(fp, rf));
     if (!rf.error.empty()) std::printf("    FBX import: %s\n", rf.error.c_str());
     check(rf, "FBX");
+  });
+  test("export: every Blender format (OBJ FBX GLB glTF STL PLY USD) reads back in place", [] {
+    Mesh box = *primitives::cube();
+    meshops::translate(box, {0.25f, 0.5f, 0.0f});
+    Mesh can = *primitives::cylinder(0.5f, 1.0f, 12);
+    /* Caps in a second material slot (the n-gons) */
+    can.face_material.assign(can.face_count(), 0);
+    for (size_t f = 0; f < can.face_count(); f++)
+      if (can.face_size(f) > 4) can.face_material[f] = 1;
+    MaterialPtr red = make_material("Red", {0.9f, 0.1f, 0.05f}), blue = make_material("Blue", {0.1f, 0.2f, 0.9f}),
+                green = make_material("Green", {0.1f, 0.8f, 0.2f});
+    std::vector<ExportItem> items(2);
+    items[0].name = "Box";
+    items[0].mesh = &box;
+    items[0].world = Mat4::translate({1, 0, 0});
+    items[0].materials = {red};
+    /* A base colour texture: OBJ (map_Kd) and glTF (embedded / copied) carry it. */
+    const std::string tex = fs::join(test_dir(), "checker_tex.png");
+    {
+      std::vector<uint32_t> px(16 * 16);
+      for (int i = 0; i < 256; i++) px[(size_t)i] = ((i / 16 + i % 16) & 1) ? 0xFFFFFFFFu : 0xFF202020u;
+      CHECK(write_png(tex, px.data(), 16, 16, 16));
+    }
+    red->base_map.path = tex;
+    items[1].name = "Can";
+    items[1].mesh = &can;
+    items[1].world = Mat4::trs({-2, 0.5f, 1}, Quat::euler({0, 30, 0}), {1, 1.5f, 1});
+    items[1].materials = {blue, green};
+    AABB want;
+    for (const ExportItem &it : items)
+      for (Vec3 p : it.mesh->positions) want.add(it.world.point(p));
+    const char *dump = std::getenv("BLENDITY_EXPORT_DIR");  // for checking the files in Blender
+    const std::string dir = dump ? std::string(dump) : fs::join(test_dir(), "formats");
+    fs::make_dirs(dir);
+    for (int f = 0; f < (int)ExportFormat::Count; f++) {
+      for (int ascii = 0; ascii < ((f == (int)ExportFormat::STL || f == (int)ExportFormat::PLY || f == (int)ExportFormat::FBX) ? 2 : 1); ascii++) {
+        ExportOptions o = export_defaults(f);
+        o.ascii = ascii != 0;
+        const std::string path = fs::join(dir, std::string("formats") + (ascii ? "_ascii" : "") + export_format_extension(f));
+        std::string err;
+        CHECK(export_file(path, items, o, &err));
+        ImportResult r;
+        const bool ok = import_model(path, r);
+        CHECK(ok);
+        if (!ok) {
+          std::printf("    %s: %s\n", path.c_str(), r.error.c_str());
+          continue;
+        }
+        AABB b;
+        bool outward = true;
+        size_t faces = 0;
+        std::vector<Vec3> colors;
+        /* World matrices through the node hierarchy. */
+        std::vector<Mat4> world(r.nodes.size());
+        for (size_t i = 0; i < r.nodes.size(); i++) {
+          const ImportedNode &n = r.nodes[i];
+          world[i] = (n.parent >= 0 ? world[(size_t)n.parent] : Mat4::identity()) * Mat4::trs(n.position, n.rotation, n.scale);
+          if (!n.mesh) continue;
+          faces += n.mesh->face_count();
+          for (Vec3 p : n.mesh->positions) b.add(world[i].point(p));
+          /* Two closed solids: the signed volume is positive when faces point out. */
+          outward = outward && signed_volume(*n.mesh) * signed_volume(*primitives::cube()) > 0;
+          for (auto &m : n.materials)
+            if (m) colors.push_back(m->base_color);
+        }
+        std::printf("    %-34s %4zu faces, bounds (%.2f %.2f %.2f) - (%.2f %.2f %.2f), %zu material(s)\n", export_format_name(f), faces,
+                    b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z, colors.size());
+        CHECK(length(b.min - want.min) < 2e-3f && length(b.max - want.max) < 2e-3f);
+        CHECK(outward);
+        const bool has_mats = f != (int)ExportFormat::STL && f != (int)ExportFormat::PLY;
+        if (has_mats) {
+          auto has = [&](Vec3 c) {
+            for (Vec3 k : colors)
+              if (length(k - c) < 0.02f) return true;
+            return false;
+          };
+          CHECK(has(red->base_color) && has(blue->base_color) && has(green->base_color));
+        }
+        /* The texture travels with OBJ and glTF (the file it points at must exist). */
+        if (f == (int)ExportFormat::OBJ || f == (int)ExportFormat::GLB || f == (int)ExportFormat::GLTF) {
+          bool textured = false;
+          for (const ImportedNode &n : r.nodes)
+            for (auto &m : n.materials)
+              if (m && !m->base_map.empty() && fs::exists(m->base_map.path)) textured = true;
+          CHECK(textured);
+        }
+      }
+    }
+  });
+  test("import: files Blender 5.2 exported (set BLENDITY_BLENDER_DIR)", [] {
+    const char *dir = std::getenv("BLENDITY_BLENDER_DIR");  // made by Blender: see docs/USABILITY.md
+    if (!dir) {
+      std::printf("    skipped: BLENDITY_BLENDER_DIR is not set\n");
+      return;
+    }
+    std::string exp;
+    CHECK(fs::read_file(fs::join(dir, "expected.txt"), exp));
+    float e[6] = {};
+    std::sscanf(exp.c_str(), "%f %f %f %f %f %f", &e[0], &e[1], &e[2], &e[3], &e[4], &e[5]);
+    const Vec3 want_min(e[0], e[1], e[2]), want_max(e[3], e[4], e[5]);
+    int files = 0;
+    for (const DirEntry &de : fs::list(dir)) {
+      const std::string ext = fs::extension(de.name);
+      if (de.is_dir || !model_extension_supported(ext)) continue;
+      files++;
+      ImportResult r;
+      const bool ok = import_model(fs::join(dir, de.name), r);
+      CHECK(ok);
+      if (!ok) {
+        std::printf("    %s: %s\n", de.name.c_str(), r.error.c_str());
+        continue;
+      }
+      std::vector<Mat4> world(r.nodes.size());
+      AABB b;
+      bool outward = true;
+      std::vector<std::string> mats;
+      for (size_t i = 0; i < r.nodes.size(); i++) {
+        const ImportedNode &n = r.nodes[i];
+        world[i] = (n.parent >= 0 ? world[(size_t)n.parent] : Mat4::identity()) * Mat4::trs(n.position, n.rotation, n.scale);
+        if (!n.mesh) continue;
+        for (Vec3 p : n.mesh->positions) b.add(world[i].point(p));
+        outward = outward && signed_volume(*n.mesh) * signed_volume(*primitives::cube()) > 0;
+        for (auto &m : n.materials)
+          if (m) mats.push_back(strprintf("%s(%.2f %.2f %.2f)", m->name.c_str(), m->base_color.x, m->base_color.y, m->base_color.z));
+      }
+      std::printf("    %-18s %s | bounds (%.2f %.2f %.2f) - (%.2f %.2f %.2f) |", de.name.c_str(), r.summary.c_str(), b.min.x, b.min.y, b.min.z,
+                  b.max.x, b.max.y, b.max.z);
+      for (auto &s : mats) std::printf(" %s", s.c_str());
+      std::printf("\n");
+      CHECK(length(b.min - want_min) < 2e-3f && length(b.max - want_max) < 2e-3f);
+      CHECK(outward);
+    }
+    CHECK(files >= 9);
   });
   test("lights: colour temperature, spot cone and area facing (CPU and GPU agree)", [] {
     const Vec3 w = kelvin_to_rgb(6500), warm = kelvin_to_rgb(2000), cool = kelvin_to_rgb(12000);
@@ -2805,5 +2944,350 @@ static void render_tests() {
     CHECK(sm.lookup({0, 0, 0}, 1.0f) < 0.05f);   // directly below the cube
     CHECK(sm.lookup({2, 0, 2}, 1.0f) > 0.95f);   // open ground
     CHECK(sm.lookup({0, 1.5f, 0}, 1.0f) > 0.95f);  // the cube's own lit top
+  });
+}
+
+/* ===================================================================== */
+/* Join / Boolean / Separate, vertex & edge extrusion, origins, modifiers, */
+/* parametric shapes, n-gon editing                                        */
+/* ===================================================================== */
+
+static GameObject *by_name(Scene &s, const char *n) { return s.find_by_name(n); }
+
+static void modeling_round9_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  test("object: Join keeps placement and materials; Separate By Loose Parts undoes it", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *a = ed.selected_object();
+    a->name = "A";
+    a->set_world_position({3, 0, 0});
+    a->get<MeshRenderer>()->materials = {make_material("Red", {1, 0, 0})};
+    ed.command("create Cube");
+    GameObject *b = ed.selected_object();
+    b->name = "B";
+    b->set_world_position({5, 1, 0});
+    b->set_local_scale({1, 2, 1});
+    b->get<MeshRenderer>()->materials = {make_material("Blue", {0, 0, 1})};
+    AABB before = a->world_bounds();
+    before.add(b->world_bounds());
+    ed.select_object(a->id);
+    ed.select_object_add(b->id);  // B is active: it keeps the result
+    const size_t objects = ed.scene().object_count();
+    ed.command("join");
+    CHECK(ed.scene().object_count() == objects - 1);
+    GameObject *j = ed.selected_object();
+    CHECK(j == b);
+    const Mesh &m = *j->get<MeshFilter>()->mesh;
+    CHECK(m.face_count() == 12);
+    CHECK(j->get<MeshRenderer>()->materials.size() == 2);
+    CHECK(m.material_count() == 2);
+    AABB after = j->world_bounds();
+    std::printf("    joined: %zu faces, bounds (%.2f %.2f %.2f) - (%.2f %.2f %.2f)\n", m.face_count(), after.min.x, after.min.y, after.min.z,
+                after.max.x, after.max.y, after.max.z);
+    CHECK(length(after.min - before.min) < 1e-4f && length(after.max - before.max) < 1e-4f);
+    CHECK(vol(m) > 0);
+    ed.command("separate loose");
+    CHECK(ed.scene().object_count() == objects);
+    CHECK(j->get<MeshFilter>()->mesh->face_count() == 6);
+  });
+  test("object: Boolean difference applied, and as a live modifier (cutter as wire, not rendered)", [&] {
+    if (!meshops::boolean_available()) {
+      std::printf("    skipped: built without Manifold\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *box = ed.selected_object();
+    box->name = "Box";
+    box->set_local_scale({2, 2, 2});
+    ed.command("create Cylinder");
+    GameObject *cut = ed.selected_object();
+    cut->name = "Cutter";
+    cut->set_world_position(box->world_position());
+    cut->set_local_scale({0.6f, 2, 0.6f});
+    ed.select_object(cut->id);
+    ed.select_object_add(box->id);
+    ed.command("boolean difference modifier");
+    CHECK(box->get<BooleanModifier>() != nullptr);
+    CHECK(cut->get<MeshRenderer>()->display_as == 1 && !cut->get<MeshRenderer>()->show_in_renders);
+    const Mesh *live = box->evaluated_mesh();
+    const float v_live = live ? vol(*live) : 0.0f;
+    std::printf("    live: %zu faces, volume %.3f (a 2 m box is 8)\n", live ? live->face_count() : 0, v_live);
+    /* Object space (the box is scaled 2x): a unit cube less a hole of radius 0.15: 1 - pi 0.15^2 = 0.929. */
+    CHECK_NEAR(v_live, 1.0f - kPi * 0.15f * 0.15f, 0.01f);
+    /* Applied (Bool Tool's Auto): the cutter is used up. */
+    box->remove_component(box->get<BooleanModifier>());
+    ed.select_object(cut->id);
+    ed.select_object_add(box->id);
+    ed.command("boolean difference");
+    CHECK(by_name(ed.scene(), "Cutter") == nullptr);
+    const Mesh &m = *box->get<MeshFilter>()->mesh;
+    CHECK_NEAR(vol(m), v_live, 1e-2f);
+    CHECK(closed_manifold(m));
+  });
+  test("extrude: a lone vertex grows a wire edge, the wire edge a face (and files keep wire edges)", [&] {
+    Mesh m;
+    m.add_vert({0, 0, 0});
+    std::vector<uint8_t> sel = {1};
+    CHECK(meshops::extrude_verts_edges(m, sel) == 1);
+    CHECK(m.vert_count() == 2 && m.loose_edges.size() == 1 && m.face_count() == 0);
+    m.positions[1] = {1, 0, 0};
+    CHECK(m.edge_cache().size() == 1);
+    /* Extrude the edge (both ends selected): a quad, and the wire edge is no longer loose. */
+    sel.assign(2, 1);
+    CHECK(meshops::extrude_verts_edges(m, sel) == 1);
+    CHECK(m.face_count() == 1 && m.loose_edges.empty() && m.vert_count() == 4);
+    CHECK(sel[2] && sel[3] && !sel[0]);
+    for (size_t v = 2; v < 4; v++) m.positions[v].z += 1.0f;
+    /* Wire edges survive a save and load. */
+    Mesh w;
+    w.add_vert({0, 0, 0});
+    w.add_vert({0, 1, 0});
+    w.add_loose_edge(0, 1);
+    Scene s;
+    GameObject *g = s.create("Wire");
+    g->add<MeshFilter>()->mesh = std::make_shared<Mesh>(w);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    GameObject *bg = back.find_by_name("Wire");
+    CHECK(bg && bg->get<MeshFilter>() && bg->get<MeshFilter>()->mesh->loose_edges.size() == 1);
+    /* Edge extrusion on an open edge (one face): the new face agrees with its neighbour. */
+    Mesh c = *primitives::grid(1.0f, 1, 1);
+    const size_t top = 0;
+    std::vector<uint8_t> vs(c.vert_count(), 0);
+    vs[c.face_verts(top)[0]] = vs[c.face_verts(top)[1]] = 1;
+    CHECK(meshops::extrude_verts_edges(c, vs) == 1);
+    /* Pull the new edge straight out, in the top's plane: the fin continues the top. */
+    const Vec3 mid = (c.positions[c.face_verts(top)[0]] + c.positions[c.face_verts(top)[1]]) * 0.5f;
+    const Vec3 out = normalize(Vec3(mid.x, 0.0f, mid.z) - Vec3(c.face_center(top).x, 0.0f, c.face_center(top).z));
+    for (size_t v = 0; v < vs.size(); v++)
+      if (vs[v]) c.positions[v] += out;
+    const Vec3 nf = c.face_normal(c.face_count() - 1), nt = c.face_normal(top);
+    std::printf("    fin normal (%.2f %.2f %.2f) next to the top (%.2f %.2f %.2f)\n", nf.x, nf.y, nf.z, nt.x, nt.y, nt.z);
+    CHECK(dot(nf, nt) > 0.99f);  // the same way up as the face it grew from
+  });
+  test("origin: Edit Origin snaps to the face under a click and nothing moves in the world", [&] {
+    Editor ed;
+    ed.init_headless(900, 650);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.step_frame_headless();
+    const AABB before = g->world_bounds();
+    const Vec3 o0 = g->world_position();
+    ed.command("origin edit on");
+    CHECK(ed.origin_editing());
+    Recti r = ed.scene_view_rect();
+    platform::Event mv, dn, up;
+    mv.type = platform::EventType::MouseMove;
+    dn.type = platform::EventType::MouseDown;
+    up.type = platform::EventType::MouseUp;
+    mv.x = dn.x = up.x = r.x + r.w / 2 - 28;  // on the front face, clear of the gizmo at the origin
+    mv.y = dn.y = up.y = r.y + r.h / 2 + 22;
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({dn});
+    ed.step_frame_headless({up});
+    ed.step_frame_headless();
+    const Vec3 o1 = g->world_position();
+    const AABB after = g->world_bounds();
+    std::printf("    origin (%.2f %.2f %.2f) -> (%.2f %.2f %.2f)\n", o0.x, o0.y, o0.z, o1.x, o1.y, o1.z);
+    CHECK(length(o1 - o0) > 0.2f);  // moved onto the front face, an edge or a corner
+    CHECK(length(after.min - before.min) < 1e-4f && length(after.max - before.max) < 1e-4f);
+    CHECK(ed.selected_object() == g);  // the click snapped; it didn't change the selection
+    /* Dragging the gizmo's X arrow moves only the origin. */
+    ed.command("origin bounds");
+    ed.step_frame_headless();
+    const Vec3 p0 = g->world_position();
+    const AABB b0 = g->world_bounds();
+    platform::Event d2, mv2, up2;
+    d2.type = platform::EventType::MouseDown;
+    mv2.type = platform::EventType::MouseMove;
+    up2.type = platform::EventType::MouseUp;
+    mv.x = r.x + r.w / 2 + 45;
+    mv.y = r.y + r.h / 2;
+    d2.x = mv.x;
+    d2.y = mv.y;
+    mv2.x = up2.x = mv.x + 60;
+    mv2.y = up2.y = mv.y;
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({d2});
+    ed.step_frame_headless({mv2});
+    ed.step_frame_headless({up2});
+    ed.step_frame_headless();
+    const Vec3 p1 = g->world_position();
+    const AABB b1 = g->world_bounds();
+    std::printf("    gizmo drag: origin (%.2f %.2f %.2f) -> (%.2f %.2f %.2f)\n", p0.x, p0.y, p0.z, p1.x, p1.y, p1.z);
+    CHECK(std::fabs(p1.x - p0.x) > 0.2f && std::fabs(p1.y - p0.y) < 1e-3f && std::fabs(p1.z - p0.z) < 1e-3f);
+    CHECK(length(b1.min - b0.min) < 1e-3f && length(b1.max - b0.max) < 1e-3f);
+  });
+  test("modifiers: Bevel, Triangulate, Weld, Wireframe, Displace, Simple Deform, Cast, Screw", [&] {
+    {
+      Mesh m = *primitives::cube();
+      CHECK(meshops::bevel_modifier(m, 0.1f, 2, 30.0f));
+      std::printf("    bevel: %zu faces, volume %.3f\n", m.face_count(), vol(m));
+      CHECK(m.face_count() > 6 && closed_manifold(m) && vol(m) < 1.0f && vol(m) > 0.9f);
+    }
+    {
+      Mesh m = *primitives::cylinder(0.5f, 1.0f, 12);
+      meshops::triangulate_min(m, 5);  // only the n-gon caps
+      size_t quads = 0, tris = 0;
+      for (size_t f = 0; f < m.face_count(); f++) (m.face_size(f) == 4 ? quads : tris) += m.face_size(f) <= 4;
+      CHECK(quads == 12 && tris == 20);
+    }
+    {
+      Mesh m = *primitives::cube();
+      Mesh copy = m;
+      meshops::append_mesh(m, copy, Mat4::identity());
+      CHECK(meshops::merge_by_distance(m, 1e-4f) == 8);
+    }
+    {
+      Mesh m = *primitives::cube();
+      meshops::wireframe(m, 0.05f, true, false);
+      std::printf("    wireframe: %zu faces, closed %d\n", m.face_count(), (int)closed_manifold(m));
+      CHECK(m.face_count() > 24 && vol(m) > 0.0f && vol(m) < 0.5f);
+    }
+    {
+      Mesh m = *primitives::ico_sphere(1.0f, 3);
+      const Mesh before = m;
+      meshops::displace(m, 0.3f, 0.5f, 0.5f, 0, 3, 7);
+      float moved = 0;
+      for (size_t v = 0; v < m.vert_count(); v++) moved = std::max(moved, length(m.positions[v] - before.positions[v]));
+      CHECK(moved > 0.02f && moved < 0.31f);
+    }
+    {
+      /* Twist a tall box 90 degrees about Y: the top turns a quarter, the bottom stays. */
+      Mesh m = *primitives::cube();
+      for (Vec3 &p : m.positions) p.y *= 4.0f;
+      const Mesh before = m;
+      meshops::simple_deform(m, 0, 90.0f, 1, 0.0f, 1.0f);
+      /* Each corner turns by its height's share of 90 degrees: top vs bottom differ by 90. */
+      float turn_top = 0, turn_bot = 0;
+      for (size_t i = 0; i < m.vert_count(); i++) {
+        const Vec3 a = before.positions[i], b = m.positions[i];
+        float d = (std::atan2(b.z, b.x) - std::atan2(a.z, a.x)) * kRad2Deg;
+        while (d > 180) d -= 360;
+        while (d < -180) d += 360;
+        (a.y > 0 ? turn_top : turn_bot) = d;
+      }
+      std::printf("    twist: bottom turned %.1f deg, top %.1f deg\n", turn_bot, turn_top);
+      CHECK_NEAR(std::fabs(turn_top - turn_bot), 90.0f, 0.5f);
+      /* Bend and Taper keep the vertex count and stay finite. */
+      for (int mode : {1, 2, 3}) {
+        Mesh d = *primitives::cylinder(0.2f, 3.0f, 8);
+        d = meshops::subdivide(d, 1, false);
+        meshops::simple_deform(d, mode, mode == 1 ? 90.0f : 0.5f, mode == 1 ? 2 : 1, 0.0f, 1.0f);
+        bool finite = true;
+        for (const Vec3 &p : d.positions) finite = finite && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        CHECK(finite);
+      }
+    }
+    {
+      Mesh m = *primitives::cube(2.0f);
+      meshops::cast(m, 0, 1.0f, 1.5f, 1);
+      float lo = 1e9f, hi = 0;
+      for (const Vec3 &p : m.positions) lo = std::min(lo, length(p)), hi = std::max(hi, length(p));
+      CHECK_NEAR(lo, 1.5f, 1e-3f);
+      CHECK_NEAR(hi, 1.5f, 1e-3f);
+    }
+    {
+      /* Lathe a wire profile (a vase outline from pole to pole) into a closed solid. */
+      Mesh p;
+      const Vec2 prof[] = {{0, 0}, {0.5f, 0}, {0.6f, 0.4f}, {0.3f, 1.0f}, {0, 1.0f}};
+      for (const Vec2 &q : prof) p.add_vert({q.x, q.y, 0});
+      for (uint32_t i = 0; i + 1 < 5; i++) p.add_loose_edge(i, i + 1);
+      meshops::screw(p, 360.0f, 16, 0.0f, 1, 1, true, false);
+      meshops::recalc_normals_outside(p);
+      std::printf("    screw: %zu verts, %zu faces, closed %d, volume %.3f\n", p.vert_count(), p.face_count(), (int)closed_manifold(p), vol(p));
+      CHECK(closed_manifold(p));
+      CHECK(vol(p) > 0.4f && vol(p) < 0.9f);
+    }
+  });
+  test("modifiers: stack order matters, and viewport / render / edit-mode toggles pick what applies", [&] {
+    Scene s;
+    GameObject *g = s.create("Stack");
+    g->add<MeshFilter>()->mesh = primitives::cube();
+    g->add<MeshRenderer>();
+    auto *arr = static_cast<ArrayModifier *>(g->add_component(create_component("ArrayModifier")));
+    arr->count = 2;
+    auto *tri = static_cast<TriangulateModifier *>(g->add_component(create_component("TriangulateModifier")));
+    (void)tri;
+    CHECK(g->evaluated_mesh()->face_count() == 24);  // 2 cubes, triangulated
+    arr->enabled = false;  // viewport off, render on
+    CHECK(g->evaluated_mesh(0)->face_count() == 12);
+    CHECK(g->evaluated_mesh(1)->face_count() == 24);
+    arr->enabled = true;
+    arr->show_in_editmode = false;
+    CHECK(g->evaluated_mesh(2)->face_count() == 12);
+    /* Toggles survive a save. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    GameObject *bg = back.find_by_name("Stack");
+    CHECK(bg && bg->get<ArrayModifier>() && !bg->get<ArrayModifier>()->show_in_editmode && bg->get<ArrayModifier>()->show_in_render);
+  });
+  test("shapes: every parametric shape is a closed outward solid; edits rebuild, mesh edits convert", [&] {
+    for (int k = 0; k < kShapeCount; k++) {
+      ProceduralShape ps;
+      ps.shape = k;
+      if (k == (int)ShapeKind::Plane) ps.size = {2, 0, 2};
+      MeshPtr m = ps.build();
+      const bool plane = k == (int)ShapeKind::Plane;
+      const bool closed = closed_manifold(*m);
+      std::printf("    %-9s %4zu faces, closed %d, volume %.3f\n", kShapeNames[k], m->face_count(), (int)closed, vol(*m));
+      CHECK(m->face_count() > 0 && m->has_uvs());
+      if (!plane) {
+        CHECK(closed);
+        CHECK(vol(*m) > 0.0f);
+      }
+    }
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Shape: Stairs");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<ProceduralShape>());
+    if (!g || !g->get<ProceduralShape>()) return;
+    const size_t f8 = g->get<MeshFilter>()->mesh->face_count();
+    g->get<ProceduralShape>()->steps = 12;
+    ed.step_frame_headless();
+    CHECK(g->get<MeshFilter>()->mesh->face_count() > f8);  // rebuilt with more steps
+    /* Editing the mesh by hand makes it an ordinary mesh. */
+    meshops::flip_normals(*mesh_make_mutable(g->get<MeshFilter>()->mesh));
+    ed.step_frame_headless();
+    CHECK(g->get<ProceduralShape>() == nullptr);
+  });
+  test("n-gon: Merge Coplanar makes flat regions single faces; the knife splits a face again", [&] {
+    Mesh grid = *primitives::grid(2.0f, 4, 4);
+    CHECK(meshops::dissolve_limited(grid, 1.0f) > 0);
+    std::printf("    4x4 grid -> %zu face(s), %zu corners\n", grid.face_count(), grid.face_count() ? (size_t)grid.face_size(0) : 0);
+    CHECK(grid.face_count() == 1 && grid.face_size(0) == 4);
+    /* A subdivided box stays a box of six faces. */
+    Mesh box = meshops::subdivide(*primitives::cube(), 2, false);
+    meshops::dissolve_limited(box, 1.0f);
+    CHECK(box.face_count() == 6 && box.vert_count() == 8);
+    CHECK(closed_manifold(box) && vol(box) > 0.99f);
+    /* SketchUp's line across a face: midpoints of two opposite edges. */
+    Mesh q = *primitives::cube();
+    const size_t top = face_facing(q, {0, 1, 0});
+    const uint32_t *v = q.face_verts(top);
+    const uint32_t a0 = v[0], a1 = v[1], b0 = v[2], b1 = v[3];
+    const uint32_t m0 = meshops::split_edge(q, a0, a1, 0.5f);
+    const uint32_t m1 = meshops::split_edge(q, b0, b1, 0.5f);
+    CHECK(meshops::split_face(q, top, m0, m1));
+    CHECK(q.face_count() == 7 && closed_manifold(q));
+    CHECK_NEAR(vol(q), 1.0f, 1e-4f);
+    /* In n-gon terms the two halves are still one flat region. */
+    std::vector<uint8_t> region;
+    meshops::coplanar_region(q, face_facing(q, {0, 1, 0}), 1.0f, region);
+    CHECK(std::count(region.begin(), region.end(), 1) == 2);
   });
 }

@@ -50,6 +50,10 @@ void Editor::draw_hierarchy(const Recti &r) {
       for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
+    u.submenu("Shapes (Parametric)", u.px(190), [this, child] {
+      for (int k = 0; k < kShapeCount; k++)
+        if (ui_.menu_item(kShapeNames[k], nullptr, false, true, Icon::Cube)) create_object(std::string("Shape: ") + kShapeNames[k], child);
+    });
     u.submenu("Light", u.px(190), [this, child] {
       if (ui_.menu_item("Directional Light", nullptr, false, true, Icon::Light)) create_object("Directional Light", child);
       if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light", child);
@@ -258,8 +262,18 @@ void Editor::draw_hierarchy(const Recti &r) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
       mark_changed("Clear Parent");
     }
-    if (u.menu_item("Export Selection as OBJ...", nullptr, false, has_sel)) export_model("obj", true);
-    if (u.menu_item("Export Selection as FBX...", nullptr, false, has_sel)) export_model("fbx", true);
+    if (u.menu_item("Join", "Ctrl+J", false, selection_.size() > 1)) join_selected();
+    u.submenu("Boolean", u.px(220), [this] {
+      static const char *kOps[] = {"Difference", "Union", "Intersect"};
+      for (int op : {1, 0, 2})
+        if (ui_.menu_item(kOps[op], nullptr, false, selection_.size() > 1)) boolean_selected(op, true);
+      ui_.menu_separator();
+      for (int op : {1, 0, 2})
+        if (ui_.menu_item(std::string(kOps[op]) + " Modifier", nullptr, false, selection_.size() > 1)) boolean_selected(op, false);
+    });
+    u.tooltip("The active object (selected last) is cut by the others. Modifier: the cut stays live.");
+    if (u.menu_item("Separate By Loose Parts", nullptr, false, has_sel)) separate("loose");
+    if (u.menu_item("Export Selection...", nullptr, false, has_sel)) open_export_dialog(export_opts_.format);
     u.menu_separator();
     u.menu_label("Create Child");
     create_body(true);
@@ -807,6 +821,20 @@ void Editor::draw_inspector(const Recti &r) {
                 "moves on screen. Volume uses the enclosed volume's centre of mass (surface for open meshes).\n"
                 "Blender: Object > Set Origin. Unity: ProBuilder's Center Pivot.");
       if (u.button({fr.right() - bw, fr.y, bw, fr.h}, "Apply")) set_origin(origin_mode_, origin_target_);
+      if (!edit_mode_) {
+        row = lay.row(u.row_h() + u.px(2));
+        if (u.button({fr.x, row.y, fr.w, row.h}, origin_edit_ ? "Done Editing Origin (Esc)" : "Edit Origin with Handles...", origin_edit_, Icon::Move))
+          origin_edit_ = !origin_edit_;
+        u.tooltip("Move or rotate only the origin with the gizmo (the mesh stays put), or click a vertex,\n"
+                  "an edge (its midpoint) or a face (its centre) in the Scene view to snap the origin there.\n"
+                  "Blender: Options > Affect Only > Origins.");
+      }
+      else {
+        row = lay.row(u.row_h() + u.px(2));
+        if (u.button({fr.x, row.y, fr.w, row.h}, "Origin to Selected Elements", false, Icon::Vertex)) set_origin(6);
+        u.tooltip("The origin moves to the centre of the selected vertices, edges or faces.\n"
+                  "Blender: Shift+S > Cursor to Selected, then Set Origin > Origin to 3D Cursor.");
+      }
       if (origin_mode_ == 5) {
         row = lay.row();
         u.label(ir.label_rect(row), "  Point (world)");
@@ -848,6 +876,7 @@ void Editor::draw_inspector(const Recti &r) {
   int remove_idx = -1, move_up = -1;
   for (size_t ci = 0; ci < g->components.size(); ci++) {
     Component *c = g->components[ci].get();
+    if (c->is_modifier()) continue;  // drawn together in the Modifiers stack below
     const ComponentInfo *info = find_component_info(c->type_name());
     std::string tip = info ? info->help + "\nBlender: " + info->blender : std::string();
     Icon icon = std::string(c->type_name()) == "Camera" ? Icon::Camera : (std::string(c->type_name()) == "Light" ? Icon::Light : (c->is_modifier() ? Icon::Gear : Icon::File));
@@ -960,6 +989,20 @@ void Editor::draw_inspector(const Recti &r) {
               u.tooltip(k == 0 ? "Vertex select mode: vertex operations." : k == 1 ? "Edge select mode: edge operations." : "Face select mode: face operations.");
             }
           }
+          {
+            /* SketchUp-style n-gon editing. */
+            Recti nr = lay.row(u.row_h() + u.px(2));
+            const int nw = (nr.w - u.px(16)) / 3;
+            if (u.button({nr.x + u.px(4), nr.y, nw, nr.h}, ngon_mode_ ? "N-gon Mode: On" : "N-gon Mode: Off", ngon_mode_, Icon::Face))
+              ngon_mode_ = !ngon_mode_;
+            u.tooltip("SketchUp-style faces: a flat region of faces acts as one face (inner edges hidden,\n"
+                      "one click selects it all, Push/Pull moves it all).");
+            if (u.button({nr.x + u.px(8) + nw, nr.y, nw, nr.h}, "Merge Coplanar")) edit_tool("dissolve_limited");
+            u.tooltip("Make each flat region one real n-gon and drop corners on straight edges.\nBlender: Limited Dissolve.");
+            if (u.button({nr.x + u.px(12) + 2 * nw, nr.y, nw, nr.h}, knife_.active ? "Knife (on)" : "Knife / Line (K)", knife_.active))
+              edit_tool("knife");
+            u.tooltip("Split a face along a line between two points on its edges or corners.\nSketchUp: Line tool. Blender: Knife (K).");
+          }
           if (elem_ == EditElement::Face) {
             er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
             er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
@@ -1034,6 +1077,202 @@ void Editor::draw_inspector(const Recti &r) {
   if (move_up > 0) {
     std::swap(g->components[move_up], g->components[move_up - 1]);
     mark_changed("Reorder Components");
+  }
+
+  /* The modifier stack (Blender's Modifier Properties): applied top to
+   * bottom, each with Blender's header toggles and menu. */
+  if (g->get<MeshFilter>()) {
+    std::vector<size_t> mods;
+    for (size_t ci = 0; ci < g->components.size(); ci++)
+      if (g->components[ci]->is_modifier()) mods.push_back(ci);
+    const std::string title = mods.empty() ? std::string("Modifiers") : strprintf("Modifiers (%zu)", mods.size());
+    if (section(title, "ModifierStack", nullptr, Icon::Gear,
+                "Non-destructive changes to the mesh, applied from the top down (Blender: Modifier Properties).\n"
+                "Edit the mesh underneath any time; Apply makes a modifier's result permanent.",
+                nullptr)) {
+      /* Add Modifier, by Blender's categories. */
+      Recti ar2 = lay.row(u.row_h() + u.px(4));
+      const int half = (ar2.w - u.px(12)) / 2;
+      Recti ab2{ar2.x + u.px(4), ar2.y, half, ar2.h};
+      ui::Id add_mod = u.id("add_modifier");
+      if (u.button(ab2, "Add Modifier", false, Icon::Plus)) u.open_popup(add_mod, ab2);
+      u.tooltip("Blender: Modifier Properties > Add Modifier (Edit / Generate / Deform).");
+      if (u.button({ab2.right() + u.px(4), ar2.y, half, ar2.h}, "Apply All", false, Icon::Check) && !mods.empty()) mesh_op("apply_modifiers");
+      u.tooltip("Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
+      u.popup(add_mod, u.px(230), [this] {
+        auto &u = ui_;
+        struct Item { const char *label, *type; };
+        static const Item kEdit[] = {{"Weld", "WeldModifier"}};
+        static const Item kGenerate[] = {{"Array", "ArrayModifier"},           {"Bevel", "BevelModifier"},
+                                         {"Boolean", "BooleanModifier"},       {"Decimate", "DecimateModifier"},
+                                         {"Mirror", "MirrorModifier"},         {"Screw", "ScrewModifier"},
+                                         {"Solidify", "SolidifyModifier"},     {"Subdivision Surface", "SubdivisionSurface"},
+                                         {"Triangulate", "TriangulateModifier"}, {"Wireframe", "WireframeModifier"}};
+        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Displace", "DisplaceModifier"},
+                                       {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"}};
+        auto group = [&](const char *name, const Item *items, size_t n) {
+          u.menu_label(name);
+          for (size_t i = 0; i < n; i++) {
+            if (u.menu_item(items[i].label, nullptr, false, true, Icon::Gear)) add_component_to_selection(items[i].type);
+            if (const ComponentInfo *info = find_component_info(items[i].type)) u.tooltip(info->help + "\nBlender: " + info->blender);
+          }
+        };
+        group("Edit", kEdit, 1);
+        group("Generate", kGenerate, sizeof(kGenerate) / sizeof(kGenerate[0]));
+        group("Deform", kDeform, sizeof(kDeform) / sizeof(kDeform[0]));
+      });
+      enum Act { None, Apply, Duplicate, CopyToSelected, Up, Down, First, Last, Remove, Reset };
+      Act act = None;
+      size_t act_ci = 0;
+      for (size_t k = 0; k < mods.size(); k++) {
+        const size_t ci = mods[k];
+        Component *c = g->components[ci].get();
+        u.push_id((uint64_t)ci + 5000);
+        /* Header: fold arrow, name, the three toggles, menu, delete. */
+        lay.space(u.px(2));
+        Recti h = lay.row(u.row_h() + u.px(4));
+        h.x += u.px(4);
+        h.w -= u.px(8);
+        u.canvas.fill_round_rect(h, u.px(3), u.theme.header);
+        const int a = u.font.line_height() - u.px(4);
+        Recti fr{h.x, h.y, a + u.px(6), h.h};
+        if (u.hovered(fr) && u.in.pressed[0]) c->ui_expanded = !c->ui_expanded;
+        u.draw_icon(c->ui_expanded ? Icon::ArrowDown : Icon::ArrowRight, {h.x + u.px(2), h.y + (h.h - a) / 2, a, a}, u.theme.text);
+        std::string name = c->type_name();
+        if (name.size() > 8 && name.compare(name.size() - 8, 8, "Modifier") == 0) name.resize(name.size() - 8);
+        std::string pretty;
+        for (size_t i = 0; i < name.size(); i++) {
+          if (i && std::isupper((unsigned char)name[i]) && !std::isupper((unsigned char)name[i - 1])) pretty += ' ';
+          pretty += name[i];
+        }
+        const int bs = h.h - u.px(4);
+        int bx = h.right() - u.px(2) - bs;
+        auto icon_at = [&](Icon ic, bool on, const char *tip) {
+          Recti br{bx, h.y + u.px(2), bs, bs};
+          bx -= bs + u.px(2);
+          return u.icon_button(br, ic, on, tip);
+        };
+        if (icon_at(Icon::Close, false, "Delete (Blender: X, Ctrl+X)")) act = Remove, act_ci = ci;
+        Recti mr{bx, h.y + u.px(2), bs, bs};
+        bx -= bs + u.px(6);
+        ui::Id mid = u.id("mod_menu");
+        if (u.icon_button(mr, Icon::Menu, false, "Apply, duplicate, copy to selected, move")) u.open_popup(mid, mr);
+        if (icon_at(Icon::Camera, c->show_in_render, "Show in Renders (the Game view and Render Image)")) {
+          c->show_in_render = !c->show_in_render;
+          mark_changed("Modifier: Render");
+        }
+        if (icon_at(Icon::Eye, c->enabled, "Show in Viewport")) {
+          c->enabled = !c->enabled;
+          mark_changed("Modifier: Viewport");
+        }
+        if (icon_at(Icon::Vertex, c->show_in_editmode, "Show in Edit Mode (the result is drawn while you edit the mesh)")) {
+          c->show_in_editmode = !c->show_in_editmode;
+          mark_changed("Modifier: Edit Mode");
+        }
+        Recti tr{fr.right() + u.px(2), h.y, bx + bs - fr.right(), h.h};
+        u.label(tr, pretty, c->enabled ? u.theme.text_bright : u.theme.text_dim);
+        if (u.hovered(tr) && u.in.pressed[0]) c->ui_expanded = !c->ui_expanded;
+        if (const ComponentInfo *info = find_component_info(c->type_name())) u.tooltip(info->help + "\nBlender: " + info->blender);
+        const size_t kk = k;
+        u.popup(mid, u.px(210), [&, ci, kk] {
+          auto &u = ui_;
+          if (u.menu_item("Apply", "Ctrl+A")) act = Apply, act_ci = ci;
+          u.tooltip("Bake this modifier into the mesh and remove it (Blender: Apply).");
+          if (u.menu_item("Duplicate", "Shift+D")) act = Duplicate, act_ci = ci;
+          if (u.menu_item("Copy to Selected", nullptr, false, selection_.size() > 1)) act = CopyToSelected, act_ci = ci;
+          u.menu_separator();
+          if (u.menu_item("Move Up", nullptr, false, kk > 0)) act = Up, act_ci = ci;
+          if (u.menu_item("Move Down", nullptr, false, kk + 1 < mods.size())) act = Down, act_ci = ci;
+          if (u.menu_item("Move to First", nullptr, false, kk > 0)) act = First, act_ci = ci;
+          if (u.menu_item("Move to Last", nullptr, false, kk + 1 < mods.size())) act = Last, act_ci = ci;
+          u.menu_separator();
+          if (u.menu_item("Reset")) act = Reset, act_ci = ci;
+        });
+        if (c->ui_expanded) {
+          lay.indent += u.px(10);
+          InspectorReflector ir(*this, u, lay);
+          c->reflect(ir);
+          if (ir.changed) mark_changed(std::string("Edit ") + c->type_name());
+          lay.indent -= u.px(10);
+          if (auto *bm = dynamic_cast<BooleanModifier *>(c); bm && !bm->last_error.empty()) {
+            Recti er = lay.row();
+            u.label({er.x + u.px(14), er.y, er.w - u.px(18), er.h}, bm->last_error, u.theme.warning);
+          }
+        }
+        u.pop_id();
+      }
+      if (mods.empty()) {
+        Recti er = lay.row();
+        u.label({er.x + u.px(8), er.y, er.w - u.px(16), er.h}, "No modifiers. Add Modifier to start a stack.", u.theme.text_dim);
+      }
+      /* Apply the chosen action after drawing (it changes the component list). */
+      if (act != None && act_ci < g->components.size()) {
+        auto it = std::find(mods.begin(), mods.end(), act_ci);
+        const size_t pos = (size_t)(it - mods.begin());
+        auto move_to = [&](size_t target_pos) {
+          std::unique_ptr<Component> c = std::move(g->components[act_ci]);
+          g->components.erase(g->components.begin() + (long)act_ci);
+          /* Recompute where the target modifier sits now. */
+          std::vector<size_t> now;
+          for (size_t i = 0; i < g->components.size(); i++)
+            if (g->components[i]->is_modifier()) now.push_back(i);
+          size_t at = target_pos < now.size() ? now[target_pos] : (now.empty() ? g->components.size() : now.back() + 1);
+          g->components.insert(g->components.begin() + (long)at, std::move(c));
+        };
+        switch (act) {
+          case Apply: {
+            auto *mf = g->get<MeshFilter>();
+            if (mf && mf->mesh) {
+              bool first = true;
+              for (size_t i = 0; i < pos; i++) first = first && !g->components[mods[i]]->enabled;
+              if (!first) Log::warn("Applied a modifier that isn't first in the stack: the ones above it are skipped (as in Blender)");
+              Mesh m = *mf->mesh;
+              g->components[act_ci]->modify(m);
+              m.touch();
+              mf->mesh = std::make_shared<Mesh>(std::move(m));
+              Log::info("Applied %s", g->components[act_ci]->type_name());
+              g->components.erase(g->components.begin() + (long)act_ci);
+              mark_changed("Apply Modifier");
+            }
+            break;
+          }
+          case Duplicate: {
+            auto copy = g->components[act_ci]->clone();
+            copy->owner = g;
+            g->components.insert(g->components.begin() + (long)act_ci + 1, std::move(copy));
+            mark_changed("Duplicate Modifier");
+            break;
+          }
+          case CopyToSelected: {
+            int n = 0;
+            for (GameObject *o : selected_objects(false))
+              if (o != g && o->get<MeshFilter>()) {
+                o->add_component(g->components[act_ci]->clone());
+                n++;
+              }
+            Log::info("Copied %s to %d object(s)", g->components[act_ci]->type_name(), n);
+            mark_changed("Copy Modifier to Selected");
+            break;
+          }
+          case Up: if (pos > 0) move_to(pos - 1); mark_changed("Move Modifier"); break;
+          case Down: move_to(pos + 1); mark_changed("Move Modifier"); break;
+          case First: move_to(0); mark_changed("Move Modifier"); break;
+          case Last: move_to(mods.size()); mark_changed("Move Modifier"); break;
+          case Remove:
+            g->components.erase(g->components.begin() + (long)act_ci);
+            mark_changed("Remove Modifier");
+            break;
+          case Reset:
+            if (auto fresh = create_component(g->components[act_ci]->type_name())) {
+              fresh->owner = g;
+              g->components[act_ci] = std::move(fresh);
+              mark_changed("Reset Modifier");
+            }
+            break;
+          default: break;
+        }
+      }
+    }
   }
 
   /* Add Component (Unity's searchable menu). */
@@ -1184,7 +1423,7 @@ void Editor::draw_project(const Recti &r) {
     if (sel) u.canvas.fill_rect(rr, u.theme.selection);
     else if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
     std::string ext = fs::extension(en->name);
-    Icon ic = en->is_dir ? Icon::Folder : (ext == ".scene" ? Icon::Scene : (ext == ".obj" ? Icon::Mesh : (ext == ".pdf" ? Icon::Paper : (ext == ".png" ? Icon::Eye : Icon::File))));
+    Icon ic = en->is_dir ? Icon::Folder : (ext == ".scene" ? Icon::Scene : (model_extension_supported(ext) ? Icon::Mesh : (ext == ".pdf" ? Icon::Paper : (ext == ".png" ? Icon::Eye : Icon::File))));
     int a = u.font.line_height() - u.px(2);
     u.draw_icon(ic, {rr.x + u.px(10), rr.y + (rh - a) / 2, a, a}, ext == ".pdf" ? u.theme.accent : u.theme.text);
     u.label({rr.x + u.px(16) + a, rr.y, rr.w / 2, rh}, en->name);
@@ -1196,7 +1435,7 @@ void Editor::draw_project(const Recti &r) {
     if (hot && in.double_clicked[0]) {
       if (en->is_dir) { project_dir_ = full; project_listed_ = -100; }
       else if (ext == ".scene") open_scene(full);
-      else if (ext == ".obj" || ext == ".fbx") import_model_file(full, false);
+      else if (model_extension_supported(ext)) import_model_file(full, false);
       else fs::open_external(full);
     }
     if (hot && in.pressed[1]) {
@@ -1214,7 +1453,7 @@ void Editor::draw_project(const Recti &r) {
     auto &u = ui_;
     std::string ext = fs::extension(sel);
     if (ext == ".scene" && u.menu_item("Open Scene")) open_scene(sel);
-    if (ext == ".obj" && u.menu_item("Import into Scene")) import_obj_file(sel);
+    if (model_extension_supported(ext) && u.menu_item("Import into Scene")) import_obj_file(sel);
     if (u.menu_item("Open with system viewer")) fs::open_external(sel);
     if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::parent(sel));
     if (u.menu_item("Refresh")) project_listed_ = -100;
@@ -1469,7 +1708,7 @@ void Editor::draw_render_window(const Recti &r) {
     final_pt_.resolve(render_img_.pixels.data(), render_img_.width, scene_->render.denoise);
     render_status_ += "  (stopped)";
   }
-  if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save", false, Icon::File)) save_render();
+  if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", false, Icon::File)) defer([this] { save_render(); });
   u.tooltip("Saves to Renders/ in the chosen File Format.");
   if (!render_status_.empty()) {
     for (const std::string &part : {render_status_})
@@ -1631,6 +1870,27 @@ void Editor::draw_render_window(const Recti &r) {
   u.label({right.x + u.px(8), right.bottom() - u.row_h() - u.px(4), right.w, u.row_h()},
           strprintf("%d x %d  |  %.0f%%  |  wheel zoom, middle-drag pan, double-click fit", iw, ih, sc * 100.0f), u.theme.text_dim);
   u.canvas.pop_clip();
+}
+
+/* File > Export's options: the side panel of Blender's export dialogs. Drawn
+ * inside the Export popup; its height is measured for the next frame. */
+void Editor::draw_export_options() {
+  auto &u = ui_;
+  Recti area = u.popup_row(std::max(export_panel_h_, u.row_h()));
+  ui::Layout lay{{area.x + u.px(6), area.y, area.w - u.px(12), area.h}, area.y + u.px(2)};
+  lay.row_h = u.row_h();
+  InspectorReflector ir(*this, u, lay);
+  const ExportOptions before = export_opts_;
+  export_opts_.reflect(ir);
+  if (export_opts_.format != before.format) {
+    /* A new format starts from its own defaults (Blender remembers these per format). */
+    ExportOptions o = export_defaults(export_opts_.format);
+    o.selection_only = before.selection_only;
+    o.apply_modifiers = before.apply_modifiers;
+    o.scale = before.scale;
+    export_opts_ = o;
+  }
+  export_panel_h_ = lay.y - area.y + u.px(2);
 }
 
 }  // namespace bl

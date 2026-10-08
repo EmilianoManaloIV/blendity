@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Win32 backend (compare blender/intern/ghost/intern/GHOST_SystemWin32.cc).
-// Links only against system DLLs: user32, gdi32, shell32.
+// Links only against system DLLs: user32, gdi32, shell32, comdlg32.
 #ifdef _WIN32
 
 #include "platform.h"
@@ -12,13 +12,17 @@
 #  define NOMINMAX
 #endif
 #include <windows.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <windowsx.h>
+
+#include <algorithm>
 
 #ifdef _MSC_VER
 #  pragma comment(lib, "user32.lib")
 #  pragma comment(lib, "gdi32.lib")
 #  pragma comment(lib, "shell32.lib")
+#  pragma comment(lib, "comdlg32.lib")
 #endif
 
 namespace bl::platform {
@@ -452,6 +456,88 @@ void set_clipboard(Window *w, const std::string &utf8) {
 }
 
 void set_refresh_callback(Window *w, std::function<void()> cb) { w->refresh = std::move(cb); }
+
+/* ------------------------------------------------------------ File dialogs */
+
+bool file_dialogs_available() { return true; }
+
+/* "Name (*.a;*.b)\0*.a;*.b\0...\0\0" */
+static std::wstring dialog_filter(const std::vector<FileFilter> &filters) {
+  std::wstring f;
+  for (const FileFilter &ff : filters) {
+    std::string pat;
+    for (const std::string &e : ff.extensions) pat += (pat.empty() ? "*" : ";*") + e;
+    if (pat.empty()) pat = "*.*";
+    f += widen(ff.name + " (" + pat + ")");
+    f += L'\0';
+    f += widen(pat);
+    f += L'\0';
+  }
+  f += L'\0';
+  return f;
+}
+
+static bool run_file_dialog(Window *w, bool save, const std::string &title, const std::string &initial, const std::vector<FileFilter> &filters,
+                            std::string &out, int *filter_index) {
+  std::wstring path = widen(initial);
+  for (wchar_t &c : path)
+    if (c == L'/') c = L'\\';
+  std::wstring dir, name = path;
+  if (!save) {
+    dir = path;
+    name.clear();
+  }
+  else {
+    size_t slash = path.find_last_of(L'\\');
+    if (slash != std::wstring::npos) {
+      dir = path.substr(0, slash);
+      name = path.substr(slash + 1);
+    }
+  }
+  std::vector<wchar_t> buf(32768, L'\0');
+  std::copy(name.begin(), name.begin() + std::min(name.size(), buf.size() - 1), buf.begin());
+  const std::wstring filter = dialog_filter(filters), wtitle = widen(title);
+  const int start = filter_index ? std::max(0, std::min(*filter_index, (int)filters.size() - 1)) : 0;
+  std::wstring def_ext;
+  if (!filters.empty() && !filters[(size_t)start].extensions.empty()) def_ext = widen(filters[(size_t)start].extensions[0].substr(1));
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = w ? w->hwnd : nullptr;
+  ofn.lpstrFilter = filters.empty() ? nullptr : filter.c_str();
+  ofn.nFilterIndex = (DWORD)start + 1;
+  ofn.lpstrFile = buf.data();
+  ofn.nMaxFile = (DWORD)buf.size();
+  ofn.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
+  ofn.lpstrTitle = wtitle.c_str();
+  ofn.lpstrDefExt = def_ext.empty() ? nullptr : def_ext.c_str();  // appended when the name has no extension
+  ofn.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST : OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST);
+  /* The dialog runs its own message loop: no repaints of our window from
+   * inside it (the editor is in the middle of a frame), and no stale capture. */
+  const bool was = w ? w->in_refresh : false;
+  if (w) {
+    w->in_refresh = true;
+    if (w->buttons_down) {
+      w->buttons_down = 0;
+      ReleaseCapture();
+    }
+  }
+  const BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
+  if (w) w->in_refresh = was;
+  if (!ok) return false;
+  out = narrow(buf.data());
+  if (filter_index) *filter_index = (int)ofn.nFilterIndex - 1;
+  return true;
+}
+
+bool save_file_dialog(Window *w, const std::string &title, const std::string &initial_path, const std::vector<FileFilter> &filters,
+                      std::string &out_path, int *filter_index) {
+  return run_file_dialog(w, true, title, initial_path, filters, out_path, filter_index);
+}
+
+bool open_file_dialog(Window *w, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
+                      std::string &out_path) {
+  return run_file_dialog(w, false, title, initial_dir, filters, out_path, nullptr);
+}
 
 }  // namespace bl::platform
 

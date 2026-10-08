@@ -56,10 +56,10 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
     std::string dst = fs::join(mesh_dir, fs::filename(path));
     if (fs::normalize(dst) != fs::normalize(path)) fs::copy_file(path, dst);
     std::string ext = fs::extension(path);
-    if (ext == ".obj") {
-      /* Bring the .mtl along too. */
-      std::string mtl = fs::join(fs::parent(path), fs::stem(path) + ".mtl");
-      if (fs::exists(mtl)) fs::copy_file(mtl, fs::join(mesh_dir, fs::filename(mtl)));
+    if (ext == ".obj" || ext == ".gltf") {
+      /* Bring the .mtl (OBJ) or the .bin buffer (glTF) along too. */
+      std::string side = fs::join(fs::parent(path), fs::stem(path) + (ext == ".obj" ? ".mtl" : ".bin"));
+      if (fs::exists(side)) fs::copy_file(side, fs::join(mesh_dir, fs::filename(side)));
     }
     for (const std::string &tp : r.textures) {
       if (!fs::exists(tp) || tex_map.count(tp)) continue;

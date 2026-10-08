@@ -59,6 +59,15 @@ void register_builtin_components() {
   reg<SolidifyModifier>("Mesh", "Gives surfaces thickness (a shell with rim faces).", "Solidify modifier (Simple)");
   reg<BooleanModifier>("Mesh", "Cuts, joins or intersects with another object (Manifold).", "Boolean modifier (Manifold solver)");
   reg<DecimateModifier>("Mesh", "Reduces the triangle count (meshoptimizer).", "Decimate modifier (Collapse)");
+  reg<BevelModifier>("Mesh", "Rounds off edges sharper than an angle (or every edge).", "Bevel modifier");
+  reg<TriangulateModifier>("Mesh", "Splits quads and n-gons into triangles.", "Triangulate modifier");
+  reg<WeldModifier>("Mesh", "Merges vertices closer than a distance.", "Weld modifier");
+  reg<WireframeModifier>("Mesh", "Turns every edge into a strut (a lattice).", "Wireframe modifier");
+  reg<DisplaceModifier>("Mesh", "Pushes vertices along their normals by a noise texture.", "Displace modifier (procedural texture)");
+  reg<SimpleDeformModifier>("Mesh", "Twists, bends, tapers or stretches the mesh along an axis.", "Simple Deform modifier");
+  reg<CastModifier>("Mesh", "Pulls the mesh towards a sphere, cylinder or box.", "Cast modifier");
+  reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
+  reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
   reg<Camera>("Rendering", "Renders the Game view.", "Camera object (the active scene camera)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
@@ -79,6 +88,13 @@ void MeshRenderer::reflect(Reflector &r) {
   r.field("Cast Shadows", cast_shadows);
   r.field("Receive Shadows", receive_shadows);
   r.field("Show Wireframe", show_wireframe);
+  static const char *kDisplay[] = {"Solid", "Wire", "Bounds"};
+  r.enumeration("Display As", display_as, kDisplay, 3);
+  r.help("How the Scene view draws the object: shaded, as its edges only, or as its bounding box\n"
+         "(Blender: Object > Viewport Display > Display As). Wire and Bounds objects are still selectable.");
+  r.field("Show in Renders", show_in_renders);
+  r.help("Off: the Game view and rendered images leave the object out, as Blender does for Boolean cutters\n"
+         "(Object > Visibility > Renders).");
 }
 
 void EnvironmentSettings::reflect(Reflector &r) {
@@ -512,6 +528,101 @@ void DecimateModifier::reflect(Reflector &r) {
 }
 void DecimateModifier::modify(Mesh &m) const { meshops::decimate(m, ratio); }
 
+static const char *const kAxes[] = {"X", "Y", "Z"};
+
+void BevelModifier::reflect(Reflector &r) {
+  r.field("Width", width, 0.005f, 0.0f, 1000.0f);
+  r.help("How far the bevel reaches along the faces on each side (Blender: Amount).");
+  r.field("Segments", segments, 1, 32);
+  r.help("1 cuts a flat chamfer; more segments round it.");
+  static const char *kLimit[] = {"None (every edge)", "Angle"};
+  r.enumeration("Limit Method", limit_method, kLimit, 2);
+  if (r.all_fields() || limit_method == 1) {
+    r.field("Angle", angle, 0.5f, 0.0f, 180.0f);
+    r.help("Only edges whose faces meet at more than this many degrees are bevelled (Blender: 30 by default).");
+  }
+}
+void BevelModifier::modify(Mesh &m) const { meshops::bevel_modifier(m, width, segments, limit_method == 1 ? angle : -1.0f); }
+
+void TriangulateModifier::reflect(Reflector &r) {
+  r.field("Minimum Vertices", min_vertices, 4, 1000);
+  r.help("Faces with at least this many corners are split: 4 does quads and n-gons, 5 only n-gons.");
+}
+void TriangulateModifier::modify(Mesh &m) const { meshops::triangulate_min(m, min_vertices); }
+
+void WeldModifier::reflect(Reflector &r) {
+  r.field("Distance", distance, 0.0005f, 0.0f, 1000.0f);
+  r.help("Vertices closer than this become one (Blender: Weld > Distance).");
+}
+void WeldModifier::modify(Mesh &m) const {
+  if (std::isfinite(distance) && distance >= 0.0f) meshops::merge_by_distance(m, distance);
+}
+
+void WireframeModifier::reflect(Reflector &r) {
+  r.field("Thickness", thickness, 0.002f, 0.0f, 100.0f);
+  r.field("Even Thickness", even_thickness);
+  r.field("Replace Original", replace_original);
+  r.help("Off: the faces stay and the frame is added around them.");
+}
+void WireframeModifier::modify(Mesh &m) const { meshops::wireframe(m, thickness, even_thickness, !replace_original); }
+
+void DisplaceModifier::reflect(Reflector &r) {
+  r.field("Strength", strength, 0.01f, -100.0f, 100.0f);
+  r.field("Midlevel", midlevel, 0.01f, 0.0f, 1.0f);
+  r.help("The texture value that leaves a vertex where it is; above pushes out, below pulls in.");
+  r.field("Noise Size", noise_scale, 0.01f, 0.001f, 1000.0f);
+  r.help("The size of the noise's bumps in object units (Blender: Clouds texture > Size).");
+  r.field("Detail", octaves, 1, 8);
+  r.field("Seed", seed, 0, 100000);
+  static const char *kDir[] = {"Normal", "X", "Y", "Z"};
+  r.enumeration("Direction", direction, kDir, 4);
+}
+void DisplaceModifier::modify(Mesh &m) const {
+  meshops::displace(m, strength, midlevel, noise_scale, direction, octaves, (uint32_t)std::max(0, seed));
+}
+
+void SimpleDeformModifier::reflect(Reflector &r) {
+  static const char *kModes[] = {"Twist", "Bend", "Taper", "Stretch"};
+  r.enumeration("Mode", mode, kModes, 4);
+  if (r.all_fields() || mode <= 1) {
+    r.field("Angle", angle, 0.5f, -3600.0f, 3600.0f);
+    r.help("Degrees of twist or bend across the limited length.");
+  }
+  if (r.all_fields() || mode >= 2) r.field("Factor", factor, 0.01f, -10.0f, 10.0f);
+  r.enumeration("Axis", axis, kAxes, 3);
+  r.help(mode == 1 ? "The axis the mesh bends around." : "The axis the deformation runs along (Y is up here; Blender's default is its up, Z).");
+  r.field("Lower Limit", lower, 0.01f, 0.0f, 1.0f);
+  r.field("Upper Limit", upper, 0.01f, 0.0f, 1.0f);
+  r.help("The part of the mesh (0 = one end, 1 = the other) that deforms; the rest follows rigidly.");
+}
+void SimpleDeformModifier::modify(Mesh &m) const { meshops::simple_deform(m, mode, mode <= 1 ? angle : factor, axis, lower, upper); }
+
+void CastModifier::reflect(Reflector &r) {
+  static const char *kShapes[] = {"Sphere", "Cylinder", "Cuboid"};
+  r.enumeration("Shape", shape, kShapes, 3);
+  r.field("Factor", factor, 0.01f, -10.0f, 10.0f);
+  r.help("0 leaves the mesh alone, 1 makes it the shape (negative pushes the other way).");
+  r.field("Radius", radius, 0.01f, 0.0f, 10000.0f);
+  r.help("0 uses the vertices' average distance from the origin.");
+  if (r.all_fields() || shape == 1) r.enumeration("Axis", axis, kAxes, 3);
+}
+void CastModifier::modify(Mesh &m) const { meshops::cast(m, shape, factor, radius, axis); }
+
+void ScrewModifier::reflect(Reflector &r) {
+  r.field("Angle", angle, 1.0f, -36000.0f, 36000.0f);
+  r.field("Steps", steps, 2, 512);
+  r.help("Copies round the turn (Blender: Steps Viewport).");
+  r.field("Screw", screw, 0.01f, -1000.0f, 1000.0f);
+  r.help("How far each turn rises along the axis: springs and threads.");
+  r.field("Iterations", iterations, 1, 100);
+  r.enumeration("Axis", axis, kAxes, 3);
+  r.field("Merge", merge);
+  r.help("Weld the vertices that lie on the axis.");
+  r.field("Flip", flip);
+  r.help("Turn the result's faces around.");
+}
+void ScrewModifier::modify(Mesh &m) const { meshops::screw(m, angle, steps, screw, axis, iterations, merge, flip); }
+
 /* ===================================================================== */
 /* Hashing reflector                                                      */
 /* ===================================================================== */
@@ -666,7 +777,8 @@ void GameObject::remove_component(Component *c) {
     }
 }
 
-const Mesh *GameObject::evaluated_mesh() const {
+const Mesh *GameObject::evaluated_mesh(int kind) const {
+  kind = std::max(0, std::min(kind, 2));
   auto *mf = get<MeshFilter>();
   if (!mf || !mf->mesh) return nullptr;
   uint64_t key = 1469598103934665603ull;
@@ -674,21 +786,24 @@ const Mesh *GameObject::evaluated_mesh() const {
   auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
+  auto on = [kind](const Component &c) {
+    return c.is_modifier() && (kind == 1 ? c.show_in_render : c.enabled && (kind == 0 || c.show_in_editmode));
+  };
   for (auto &c : components)
-    if (c->is_modifier() && c->enabled) {
+    if (on(*c)) {
       any = true;
       mix(hash_component(*c));
       mix(c->modifier_dependency_hash());
     }
   if (!any) return mf->mesh.get();
-  if (eval_mesh_ && eval_key_ == key) return eval_mesh_.get();
+  if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
   auto m = std::make_shared<Mesh>(*mf->mesh);
   for (auto &c : components)
-    if (c->is_modifier() && c->enabled) c->modify(*m);
+    if (on(*c)) c->modify(*m);
   m->touch();
-  eval_mesh_ = m;
-  eval_key_ = key;
-  return eval_mesh_.get();
+  eval_mesh_[kind] = m;
+  eval_key_[kind] = key;
+  return eval_mesh_[kind].get();
 }
 
 AABB GameObject::world_bounds() const {
@@ -843,8 +958,10 @@ std::unique_ptr<Scene> Scene::clone() const {
     c->local_ = o->local_;
     c->world_ = o->world_;
     c->world_dirty_ = o->world_dirty_;
-    c->eval_mesh_ = o->eval_mesh_;
-    c->eval_key_ = o->eval_key_;
+    for (int k = 0; k < 3; k++) {
+      c->eval_mesh_[k] = o->eval_mesh_[k];
+      c->eval_key_[k] = o->eval_key_[k];
+    }
     for (auto &comp : o->components) {
       auto cc = comp->clone();
       cc->owner = c.get();

@@ -11,6 +11,7 @@
 #include <functional>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../../extern/mikktspace_shim.hh"
 
@@ -29,7 +30,29 @@ void Mesh::clear() {
   seams.clear();
   face_smooth.clear();
   sharp_edges.clear();
+  loose_edges.clear();
   touch();
+}
+
+void Mesh::add_loose_edge(uint32_t a, uint32_t b) {
+  if (a == b) return;
+  const uint64_t k = edge_key(a, b);
+  auto it = std::lower_bound(loose_edges.begin(), loose_edges.end(), k);
+  if (it == loose_edges.end() || *it != k) loose_edges.insert(it, k);
+}
+
+void Mesh::prune_loose_edges() {
+  if (loose_edges.empty()) return;
+  std::unordered_set<uint64_t> face_edges;
+  for (size_t f = 0; f < face_count(); f++) {
+    const uint32_t *v = face_verts(f);
+    const uint32_t n = face_size(f);
+    for (uint32_t i = 0; i < n; i++) face_edges.insert(edge_key(v[i], v[(i + 1) % n]));
+  }
+  const uint32_t nv = (uint32_t)positions.size();
+  loose_edges.erase(std::remove_if(loose_edges.begin(), loose_edges.end(),
+                                   [&](uint64_t k) { return face_edges.count(k) || (k >> 32) >= nv || (k & 0xFFFFFFFF) >= nv; }),
+                    loose_edges.end());
 }
 
 void Mesh::add_face(std::initializer_list<uint32_t> verts) { add_face(verts.begin(), verts.size()); }
@@ -53,6 +76,11 @@ void Mesh::add_face(const uint32_t *verts, size_t n, const Vec2 *uv, int mat) {
 }
 
 void Mesh::sync_attributes() {
+  if (!loose_edges.empty()) {
+    const uint64_t nv = positions.size();
+    loose_edges.erase(std::remove_if(loose_edges.begin(), loose_edges.end(), [&](uint64_t k) { return (k >> 32) >= nv || (k & 0xFFFFFFFF) >= nv; }),
+                      loose_edges.end());
+  }
   if (!uvs.empty()) uvs.resize(corner_verts.size());
   if (!face_material.empty()) face_material.resize(face_count(), 0);
   if (!face_smooth.empty()) face_smooth.resize(face_count(), smooth ? 1 : 0);
@@ -167,6 +195,15 @@ void Mesh::edges(std::vector<std::pair<uint32_t, uint32_t>> &out) const {
       for (uint32_t *q = p; q > b && q[-1] > q[0]; q--) std::swap(q[-1], q[0]);
     for (uint32_t *p = b; p < e; p++)
       if (p == b || p[-1] != p[0]) out.emplace_back(a, *p);
+  }
+  /* Wire edges that no face has (Blender: loose edges). */
+  if (!loose_edges.empty()) {
+    std::unordered_set<uint64_t> have;
+    for (auto &e : out) have.insert(edge_key(e.first, e.second));
+    for (uint64_t k : loose_edges) {
+      const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+      if (a < nv && b < nv && !have.count(k)) out.emplace_back(a, b);
+    }
   }
 }
 
@@ -1018,7 +1055,7 @@ void flip_normals(Mesh &m) {
 
 /* Seams and sharp edges follow their vertices to new indices. */
 static void remap_seams(Mesh &m, const std::vector<uint32_t> &remap) {
-  for (std::vector<uint64_t> *edges : {&m.seams, &m.sharp_edges}) {
+  for (std::vector<uint64_t> *edges : {&m.seams, &m.sharp_edges, &m.loose_edges}) {
     std::vector<uint64_t> out;
     for (uint64_t k : *edges) {
       uint32_t a = remap[(size_t)(k >> 32)], b = remap[(size_t)(k & 0xFFFFFFFF)];
@@ -1034,6 +1071,8 @@ std::vector<uint32_t> remove_loose_verts(Mesh &m) {
   std::vector<uint32_t> remap(m.vert_count(), UINT32_MAX);
   std::vector<uint8_t> used(m.vert_count(), 0);
   for (uint32_t v : m.corner_verts) used[v] = 1;
+  for (uint64_t k : m.loose_edges)  // wire edges keep their vertices
+    if ((k >> 32) < used.size() && (k & 0xFFFFFFFF) < used.size()) used[(size_t)(k >> 32)] = used[(size_t)(k & 0xFFFFFFFF)] = 1;
   std::vector<Vec3> np;
   np.reserve(m.vert_count());
   for (size_t i = 0; i < m.vert_count(); i++)

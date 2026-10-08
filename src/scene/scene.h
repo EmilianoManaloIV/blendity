@@ -70,6 +70,11 @@ struct PlayContext {
 /* ------------------------------------------------------------- Component */
 struct Component {
   bool enabled = true;
+  /* Modifier stack toggles (Blender's modifier header): `enabled` shows a modifier
+   * in the viewport; these add Edit Mode (the result drawn while editing) and renders. */
+  bool show_in_editmode = true;
+  bool show_in_render = true;
+  bool ui_expanded = true;  // Inspector panel open (not saved)
   GameObject *owner = nullptr;
   virtual ~Component() = default;
   virtual const char *type_name() const = 0;
@@ -125,6 +130,10 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
   bool cast_shadows = true;
   bool receive_shadows = true;
   bool show_wireframe = false;
+  /* Blender: Object > Viewport Display > Display As (0 Solid, 1 Wire, 2 Bounds) and
+   * Visibility > Renders. Boolean cutters are shown as wire and kept out of renders. */
+  int display_as = 0;
+  bool show_in_renders = true;
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();
@@ -314,6 +323,139 @@ struct DecimateModifier : ComponentBase<DecimateModifier> {
   bool unique() const override { return false; }
 };
 
+
+/* Blender: Bevel modifier. */
+struct BevelModifier : ComponentBase<BevelModifier> {
+  static constexpr const char *kName = "BevelModifier";
+  float width = 0.05f;
+  int segments = 1;
+  int limit_method = 1;  // 0 None (every edge), 1 Angle
+  float angle = 30.0f;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Blender: Triangulate modifier. */
+struct TriangulateModifier : ComponentBase<TriangulateModifier> {
+  static constexpr const char *kName = "TriangulateModifier";
+  int min_vertices = 4;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Blender: Weld modifier (merge by distance). */
+struct WeldModifier : ComponentBase<WeldModifier> {
+  static constexpr const char *kName = "WeldModifier";
+  float distance = 0.001f;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Blender: Wireframe modifier. */
+struct WireframeModifier : ComponentBase<WireframeModifier> {
+  static constexpr const char *kName = "WireframeModifier";
+  float thickness = 0.02f;
+  bool even_thickness = true;
+  bool replace_original = true;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Blender: Displace modifier with a procedural noise texture. */
+struct DisplaceModifier : ComponentBase<DisplaceModifier> {
+  static constexpr const char *kName = "DisplaceModifier";
+  float strength = 0.2f;
+  float midlevel = 0.5f;
+  float noise_scale = 0.5f;
+  int octaves = 3;
+  int seed = 1;
+  int direction = 0;  // Normal, X, Y, Z
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Blender: Simple Deform modifier (Twist, Bend, Taper, Stretch). */
+struct SimpleDeformModifier : ComponentBase<SimpleDeformModifier> {
+  static constexpr const char *kName = "SimpleDeformModifier";
+  int mode = 0;          // Twist, Bend, Taper, Stretch
+  float angle = 45.0f;   // Twist / Bend (degrees)
+  float factor = 0.5f;   // Taper / Stretch
+  int axis = 1;          // X, Y, Z (Y is up here; Blender's default is its up, Z)
+  float lower = 0.0f, upper = 1.0f;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Blender: Cast modifier. */
+struct CastModifier : ComponentBase<CastModifier> {
+  static constexpr const char *kName = "CastModifier";
+  int shape = 0;  // Sphere, Cylinder, Cuboid
+  float factor = 0.5f;
+  float radius = 0.0f;
+  int axis = 1;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Blender: Screw modifier (lathe). */
+struct ScrewModifier : ComponentBase<ScrewModifier> {
+  static constexpr const char *kName = "ScrewModifier";
+  float angle = 360.0f;
+  int steps = 24;
+  float screw = 0.0f;   // rise per turn
+  int iterations = 1;
+  int axis = 1;
+  bool merge = true;
+  bool flip = false;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* Parametric shapes (procedural.cpp): Unity ProBuilder's Shape component /
+ * Blender's Add Mesh with Adjust Last Operation. The editor rebuilds the
+ * MeshFilter's mesh when a setting changes, and drops this component (the
+ * mesh becomes an ordinary one) as soon as the mesh itself is edited. */
+enum class ShapeKind { Box, Plane, Cylinder, Cone, Sphere, Icosphere, Torus, Capsule, Pipe, Arch, Stairs, Wedge, Prism };
+constexpr int kShapeCount = 13;
+extern const char *const kShapeNames[kShapeCount];
+
+struct ProceduralShape : ComponentBase<ProceduralShape> {
+  static constexpr const char *kName = "ProceduralShape";
+  int shape = 0;            // ShapeKind
+  Vec3 size{1, 1, 1};       // Box, Plane, Stairs, Wedge
+  int subdivisions = 1;     // Box / Plane faces per side, Icosphere level
+  float radius = 0.5f;      // round shapes; Torus: major radius
+  float radius2 = 0.25f;    // Cone: top radius; Torus: minor radius
+  float thickness = 0.1f;   // Pipe, Arch
+  float height = 1.0f;      // Cylinder, Cone, Capsule, Pipe, Prism; Arch: depth
+  float angle = 180.0f;     // Arch
+  int segments = 24, rings = 12, sides = 6, steps = 8;
+  bool fill_under = true;   // Stairs
+  bool smooth = true;
+  /* What the editor last built (not saved): the settings' hash and the mesh it made. */
+  uint64_t built_hash = 0;
+  const Mesh *built_mesh = nullptr;
+  uint64_t built_version = 0;
+  void reflect(Reflector &r) override;
+  MeshPtr build() const;      // settings made safe first (finite, in range)
+  MeshPtr build_raw() const;  // as they are
+};
 /* ------------------------------------------------------------ GameObject */
 
 struct Transform {
@@ -361,8 +503,10 @@ class GameObject {
   template<class T> T *add() { return static_cast<T *>(add_component(std::make_unique<T>())); }
   void remove_component(Component *c);
 
-  /* Mesh after the modifier stack; cached by source version + params hash. */
-  const Mesh *evaluated_mesh() const;
+  /* Mesh after the modifier stack; cached by source version + params hash.
+   * kind: 0 the viewport (enabled modifiers), 1 renders (Show in Renders),
+   * 2 Edit Mode (enabled and Show in Edit Mode). */
+  const Mesh *evaluated_mesh(int kind = 0) const;
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
@@ -372,8 +516,8 @@ class GameObject {
   Transform local_;
   mutable Mat4 world_;
   mutable bool world_dirty_ = true;
-  mutable std::shared_ptr<Mesh> eval_mesh_;
-  mutable uint64_t eval_key_ = 0;
+  mutable std::shared_ptr<Mesh> eval_mesh_[3];
+  mutable uint64_t eval_key_[3] = {0, 0, 0};
   friend class Scene;
 };
 

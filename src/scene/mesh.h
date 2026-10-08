@@ -44,6 +44,13 @@ struct Mesh {
   std::vector<uint64_t> sharp_edges;
   /* UV seams also act as hard edges (a Unity-style habit; Blender keeps them apart). */
   bool seams_sharp = false;
+  /* Edges with no face (Blender's wire / loose edges), sorted edge keys: what
+   * extruding a lone vertex makes. Edit Mode selects and extrudes them like
+   * any edge; edge_cache() includes them; extruding one gives a face. */
+  std::vector<uint64_t> loose_edges;
+  void add_loose_edge(uint32_t a, uint32_t b);
+  /* Drops loose edges that a face now uses, or whose vertices are gone. */
+  void prune_loose_edges();
 
   size_t vert_count() const { return positions.size(); }
   size_t face_count() const { return face_offsets.size() - 1; }
@@ -282,6 +289,46 @@ bool boolean_op(Mesh &a, const Mesh &b, const Mat4 &b_to_a, BooleanOp op, std::s
 void mirror(Mesh &m, bool x, bool y, bool z, float merge_dist);
 void make_array(Mesh &m, int count, Vec3 relative_offset, Vec3 constant_offset, float merge_dist);
 void solidify(Mesh &m, float thickness, float offset, bool even, bool rim);
+
+/* Object and extrusion tools (mesh_tools3.cpp). */
+/* Object > Join (Ctrl+J): src appended to dst, through xf (src's space into
+ * dst's); slot_remap[i] is dst's material slot for src's slot i. */
+void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap = {});
+/* Separate > Selection: a new mesh of the selected faces (the caller deletes them from m). */
+Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel);
+/* Separate > By Loose Parts: a part index per face; returns the number of parts. */
+size_t loose_parts(const Mesh &m, std::vector<int> &face_part);
+/* E on vertices / edges (Blender's extrude in vertex and edge select mode):
+ * each selected edge grows a quad, each lone selected vertex a wire edge,
+ * all still where they started (the editor then moves them). The selection
+ * becomes the new vertices. Returns how many edges / vertices were extruded. */
+size_t extrude_verts_edges(Mesh &m, std::vector<uint8_t> &vert_sel);
+/* More of Blender's modifiers (modifiers.cpp), all in object space. */
+bool bevel_modifier(Mesh &m, float width, int segments, float angle_limit_deg, std::string *error = nullptr);  // angle < 0: every edge
+void triangulate_min(Mesh &m, int min_vertices);  // faces with at least this many corners (4 = quads too)
+void wireframe(Mesh &m, float thickness, bool even, bool keep_original);
+float fbm_noise(Vec3 p, int octaves, uint32_t seed);  // 0..1 value noise
+/* direction: 0 normal, 1 X, 2 Y, 3 Z. */
+void displace(Mesh &m, float strength, float midlevel, float scale, int direction, int octaves, uint32_t seed);
+/* mode: 0 Twist, 1 Bend (degrees), 2 Taper, 3 Stretch (factor); axis 0 X, 1 Y, 2 Z; limits 0..1 of the extent. */
+void simple_deform(Mesh &m, int mode, float amount, int axis, float lower, float upper);
+/* shape: 0 Sphere, 1 Cylinder (around axis), 2 Cuboid; radius 0 = the average distance. */
+void cast(Mesh &m, int shape, float factor, float radius, int axis);
+/* Lathe: every edge (wire edges too) swept round the axis through the origin. */
+void screw(Mesh &m, float angle_deg, int steps, float screw_offset, int axis, int iterations, bool merge, bool flip);
+/* SketchUp-style n-gon editing (mesh_tools3.cpp). */
+/* Inserts a vertex at lerp(a, b, t) into every face along edge a-b (UVs, seams
+ * and sharp marks follow). t at either end returns that end. */
+uint32_t split_edge(Mesh &m, uint32_t a, uint32_t b, float t);
+/* Splits face f along a new edge between two of its corners (not neighbours). */
+bool split_face(Mesh &m, size_t f, uint32_t va, uint32_t vb);
+/* The connected faces lying in face f's plane (SketchUp treats them as one face). */
+void coplanar_region(const Mesh &m, size_t f, float angle_deg, std::vector<uint8_t> &face_sel);
+/* Edges whose two faces are coplanar (and share a material). */
+std::unordered_set<uint64_t> coplanar_edges(const Mesh &m, float angle_deg);
+/* Blender: Limited Dissolve. Coplanar faces become one n-gon; corners on a
+ * straight run vanish. Returns how many edges and vertices went. */
+size_t dissolve_limited(Mesh &m, float angle_deg = 1.0f);
 }  // namespace meshops
 
 }  // namespace bl

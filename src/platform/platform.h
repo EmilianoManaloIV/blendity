@@ -71,6 +71,23 @@ void set_clipboard(Window *w, const std::string &utf8);
  * so the app can keep repainting. */
 void set_refresh_callback(Window *w, std::function<void()> cb);
 
+
+/* Native file dialogs (Blender's file browser plays this role; Unity uses
+ * the OS dialogs): the Win32 common dialog, NSSavePanel / NSOpenPanel on
+ * macOS, zenity or kdialog on Linux. A filter is a name and extensions with
+ * their dot ({"Wavefront OBJ", {".obj"}}). Both return false when the user
+ * cancels or no dialog is available (file_dialogs_available()). The save
+ * dialog appends the chosen filter's extension when the name has none, and
+ * reports which filter was chosen in *filter_index (0-based, in and out). */
+struct FileFilter {
+  std::string name;
+  std::vector<std::string> extensions;
+};
+bool file_dialogs_available();
+bool save_file_dialog(Window *w, const std::string &title, const std::string &initial_path, const std::vector<FileFilter> &filters,
+                      std::string &out_path, int *filter_index = nullptr);
+bool open_file_dialog(Window *w, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
+                      std::string &out_path);
 /* UTF-8 helper shared by backends. */
 void append_utf8(std::string &s, uint32_t cp);
 

@@ -164,7 +164,7 @@ void Editor::init_headless(int width, int height) {
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
-  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ ||
+  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || !deferred_.empty() ||
          (shading_ == Shading::Rendered && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
@@ -308,6 +308,7 @@ void Editor::frame(std::vector<Event> &events) {
   double now = now_seconds();
   ScopedTimer frame_timer;
   process_events(events);
+  update_procedural_shapes();
   if (scene_ && scene_->render.device == 1) gpu::prewarm();  // once; compiles the GPU kernel off the UI thread
   /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
    * mesh instead, or leave Edit Mode for anything without one. */
@@ -447,6 +448,18 @@ void Editor::frame(std::vector<Event> &events) {
   raster_history_.push_back((float)scene_stats_.ms_total);
   if (raster_history_.size() > 240) raster_history_.erase(raster_history_.begin());
   frames_++;
+  /* Deferred work: native dialogs open here, between frames, never inside one. */
+  if (!deferred_.empty()) {
+    std::vector<Deferred> due;
+    for (size_t i = 0; i < deferred_.size();)
+      if (--deferred_[i].frames <= 0) {
+        due.push_back(std::move(deferred_[i]));
+        deferred_.erase(deferred_.begin() + (long)i);
+      }
+      else i++;
+    for (Deferred &d : due) d.fn();
+    ui_.redraw = true;
+  }
 }
 
 std::string Editor::scene_display_name() const { return scene_ ? scene_->name : "Untitled"; }
@@ -486,24 +499,24 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("File"), u.px(260), [this, has_sel] {
     auto &u = ui_;
     if (u.menu_item("New Scene", "Ctrl+N")) new_scene();
-    if (u.menu_item("Open Scene...", "Ctrl+O")) dialog_ = Dialog::OpenScene;
+    if (u.menu_item("Open Scene...", "Ctrl+O")) open_scene_dialog();
     u.menu_separator();
     if (u.menu_item("Save", "Ctrl+S")) save_scene_cmd(false);
     if (u.menu_item("Save As...", "Ctrl+Shift+S")) save_scene_cmd(true);
     if (u.menu_item("Compress Scene (Zstandard)", nullptr, scene_->compress, scene_compression_available())) scene_->compress = !scene_->compress;
     u.tooltip("Save this scene compressed, like Blender's File > Save > Compress (zstd).\nNeeds Blender's libraries; compressed scenes load automatically.");
     u.menu_separator();
-    if (u.menu_item("Import Model (OBJ / FBX)...")) dialog_ = Dialog::ImportObj;
-    u.submenu("Export", u.px(230), [this, has_sel] {
-      if (ui_.menu_item("Selection as OBJ (.obj + .mtl)", nullptr, false, has_sel)) export_model("obj", true);
-      if (ui_.menu_item("Selection as FBX (.fbx)", nullptr, false, has_sel)) export_model("fbx", true);
-      ui_.menu_separator();
-      if (ui_.menu_item("Scene as OBJ")) export_model("obj", false);
-      if (ui_.menu_item("Scene as FBX")) export_model("fbx", false);
+    if (u.menu_item("Import Model...")) import_dialog();
+    u.tooltip("OBJ, FBX, glTF (.glb / .gltf), STL, PLY or USD (.usda): the formats Blender exports.");
+    u.submenu("Export", u.px(290), [this] {
+      /* Blender's File > Export list (the mesh formats). */
+      for (int f = 0; f < (int)ExportFormat::Count; f++)
+        if (ui_.menu_item(std::string(export_format_name(f)) + "...")) open_export_dialog(f);
     });
+    u.menu_separator();
     if (u.menu_item("Render Image", "F12", false, true, Icon::Camera)) start_final_render();
-    if (u.menu_item("Save Render", nullptr, false, render_has_result_)) save_render();
-    if (u.menu_item("Save Screenshot", "Shift+F12")) screenshot();
+    if (u.menu_item("Save Render...", nullptr, false, render_has_result_)) defer([this] { save_render(); });
+    if (u.menu_item("Save Screenshot...", "Shift+F12")) screenshot_dialog();
     u.menu_separator();
     if (u.menu_item("Exit", "Alt+F4")) request_close();
   });
@@ -541,7 +554,7 @@ void Editor::draw_menubar(const Recti &r) {
   });
   u.popup(u.id("Assets"), u.px(260), [this] {
     auto &u = ui_;
-    if (u.menu_item("Import Model (OBJ / FBX)...")) dialog_ = Dialog::ImportObj;
+    if (u.menu_item("Import Model...")) import_dialog();
     if (u.menu_item("Refresh", "Ctrl+R")) { project_listed_ = -100; papers_listed_ = -100; }
     u.menu_separator();
     if (u.menu_item("Open Assets Folder")) fs::open_external(assets_dir_);
@@ -555,6 +568,12 @@ void Editor::draw_menubar(const Recti &r) {
       for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
     });
+    u.submenu("Shapes (Parametric)", u.px(190), [this] {
+      for (int k = 0; k < kShapeCount; k++)
+        if (ui_.menu_item(kShapeNames[k], nullptr, false, true, Icon::Cube)) create_object(std::string("Shape: ") + kShapeNames[k]);
+    });
+    u.tooltip("Shapes that keep their settings (size, steps, radius...) in the Inspector until you edit the mesh.\n"
+              "Unity: ProBuilder Shapes. Blender: Add Mesh + Adjust Last Operation.");
     u.submenu("Light", u.px(190), [this] {
       if (ui_.menu_item("Directional Light", nullptr, false, true, Icon::Light)) create_object("Directional Light");
       if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light");
@@ -569,6 +588,10 @@ void Editor::draw_menubar(const Recti &r) {
         if (k == 6 && !edit_mode_) continue;
         if (ui_.menu_item(kOriginModes[k], nullptr, false, has_sel)) set_origin(k);
       }
+      ui_.menu_separator();
+      if (ui_.menu_item("Edit Origin (Handles)", nullptr, origin_edit_, has_sel && !edit_mode_)) origin_edit_ = !origin_edit_;
+      ui_.tooltip("Move and rotate only the origin with the gizmo, or click a vertex, edge or face to snap it there.\n"
+                  "Blender: Options > Affect Only > Origins.");
     });
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
@@ -621,9 +644,38 @@ void Editor::draw_menubar(const Recti &r) {
       if (u.menu_item("Select All", "Ctrl+A")) edit_select_all(true);
       if (elem_ == EditElement::Face && u.menu_item("Auto Fuse on Contact", nullptr, auto_fuse_)) auto_fuse_ = !auto_fuse_;
       if (u.menu_item("Proportional Editing", "O", proportional_)) proportional_ = !proportional_;
+      if (u.menu_item("N-gon Mode (SketchUp)", nullptr, ngon_mode_)) ngon_mode_ = !ngon_mode_;
+      u.tooltip("A flat region of faces acts as one face: its inner edges hide and a click selects all of it.\n"
+                "Merge Coplanar turns those regions into real n-gons; the Knife (K) splits them again.");
       if (u.menu_item("Adjust Last Operation", "F9", last_op_open_)) last_op_open_ = !last_op_open_;
       u.menu_separator();
     }
+    if (!edit_mode_) {
+      const bool two = selection_.size() > 1;
+      if (u.menu_item("Join", "Ctrl+J", false, two)) join_selected();
+      u.tooltip("Combine the selected meshes into the active one (selected last), keeping their materials.\n"
+                "Blender: Object > Join (Ctrl+J). ProBuilder: Merge Objects.");
+      u.submenu("Boolean", u.px(250), [this, two] {
+        auto &u = ui_;
+        static const char *kOps[] = {"Difference", "Union", "Intersect"};
+        u.menu_label("Apply now (cutters are removed)");
+        for (int op : {1, 0, 2})
+          if (u.menu_item(kOps[op], nullptr, false, two)) boolean_selected(op, true);
+        u.menu_separator();
+        u.menu_label("Live modifier (cutter stays as wire)");
+        for (int op : {1, 0, 2})
+          if (u.menu_item(std::string(kOps[op]) + " Modifier", nullptr, false, two)) boolean_selected(op, false);
+      });
+      u.tooltip("Select the cutter(s), then Ctrl+click the object to cut last.\n"
+                "Blender: the Boolean modifier / Bool Tool (Auto and Brush). Solver: Manifold, as Blender's.");
+    }
+    u.submenu("Separate", u.px(200), [this] {
+      if (ui_.menu_item("Selection", nullptr, false, edit_mode_)) separate("selection");
+      ui_.tooltip("Edit Mode: move the selected faces into a new object (Blender: P > Selection).");
+      if (ui_.menu_item("By Loose Parts")) separate("loose");
+      ui_.tooltip("Every unconnected piece becomes its own object (Blender: P > By Loose Parts).");
+    });
+    u.menu_separator();
     if (u.menu_item("Subdivide (Catmull-Clark)", nullptr, false, has_sel)) mesh_op("subdivide");
     if (u.menu_item("Subdivide (Simple)", nullptr, false, has_sel)) mesh_op("subdivide_simple");
     if (u.menu_item("Smooth Vertices", nullptr, false, has_sel)) mesh_op("smooth");
@@ -808,7 +860,8 @@ void Editor::handle_shortcuts() {
     if (P(KEY_S)) save_scene_cmd(shift);
     if (P(KEY_N) && !shift) new_scene();
     if (P(KEY_N) && shift) create_object("Empty");
-    if (P(KEY_O)) dialog_ = Dialog::OpenScene;
+    if (P(KEY_O)) open_scene_dialog();
+    if (P(KEY_J) && !edit_mode_) join_selected();  // Blender: Object > Join
     if (P(KEY_Z) && !shift) undo();
     if (P(KEY_Y) || (P(KEY_Z) && shift)) redo();
     if (P(KEY_D)) {
@@ -863,7 +916,7 @@ void Editor::handle_shortcuts() {
   }
   if (P(KEY_F1)) dock_open(WindowKind::Learn);
   if (P(KEY_F12)) {
-    if (shift) screenshot();
+    if (shift) screenshot_dialog();
     else start_final_render();  // Blender: F12 = Render Image
   }
   if (P(KEY_F11)) dock_open(WindowKind::Render);
@@ -893,6 +946,7 @@ void Editor::handle_shortcuts() {
     if (P(KEY_F) && !(alt && edit_mode_)) frame_selected();
     if (P(KEY_TAB)) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
     if (P(KEY_ESCAPE) && edit_mode_) last_op_hidden_ = true;  // Esc puts the Adjust Last Operation panel away
+    if (P(KEY_ESCAPE) && origin_edit_) origin_edit_ = false;  // done editing the origin
     if (P(KEY_DELETE) || (P(KEY_BACKSPACE) && focused_ != WindowKind::Hierarchy)) {
       if (edit_mode_) edit_op("delete");
       else delete_selected();
@@ -917,6 +971,7 @@ void Editor::handle_shortcuts() {
         edit_tool("select_linked");
       }
       if (P(KEY_J) && alt) edit_tool("tris_to_quads");                  // Blender: Alt+J
+      if (P(KEY_K) && !alt && !shift) edit_tool("knife");  // Blender: K (SketchUp: L, the Line tool)
       if (P(KEY_S) && alt) edit_tool(shift ? "to_sphere" : "shrink_fatten");  // Blender: Alt+S / Shift+Alt+S
       if (P(KEY_I) && !alt) modal_begin("inset");  // Blender's I (Ctrl+I works too)
     }
@@ -928,7 +983,7 @@ void Editor::handle_drop() {
   for (const std::string &path : ui_.in.dropped) {
     std::string ext = fs::extension(path);
     std::string name = fs::filename(path);
-    if (ext == ".obj" || ext == ".fbx") {
+    if (model_extension_supported(ext)) {
       import_model_file(path, true);  // copies model + textures into Assets like Unity
     }
     else if (image_extension_supported(ext)) {
@@ -1424,8 +1479,22 @@ void Editor::save_scene_cmd(bool save_as) {
     return;
   }
   if (save_as || scene_->path.empty()) {
-    dialog_ = Dialog::SaveAs;
-    dialog_text_ = scene_->name;
+    defer([this] {
+      const std::string dir = scene_->path.empty() ? fs::join(assets_dir_, "Scenes") : fs::parent(scene_->path);
+      fs::make_dirs(dir);
+      std::string path;
+      switch (pick_save_path("Save Scene As", fs::join(dir, scene_->name + ".scene"), {{"Blendity Scene", {".scene"}}}, path)) {
+        case PathPick::Cancelled: return;
+        case PathPick::Unavailable:
+          dialog_ = Dialog::SaveAs;  // our own name prompt, saving into Assets/Scenes
+          dialog_text_ = scene_->name;
+          return;
+        case PathPick::Chosen: break;
+      }
+      scene_->name = fs::stem(path);
+      scene_->path = path;
+      save_scene_cmd(false);
+    });
     return;
   }
   if (save_scene(*scene_, scene_->path)) {
@@ -1438,14 +1507,43 @@ void Editor::save_scene_cmd(bool save_as) {
 
 void Editor::import_obj_file(const std::string &path) { import_model_file(path, false); }
 
-/* File > Export (Blender: File > Export > Wavefront / FBX; Unity: the FBX
- * Exporter). The selection - or the whole scene - with modifiers applied,
- * world transforms baked in, materials and UVs, into Assets/Exports. */
-std::string Editor::export_model(const std::string &format, bool selection_only) {
+void Editor::import_dialog() {
+  defer([this] {
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda"}}};
+    for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
+    std::string path;
+    switch (pick_open_path("Import Model", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {
+      case PathPick::Cancelled: return;
+      case PathPick::Unavailable: dialog_ = Dialog::ImportObj; return;  // the Assets list
+      case PathPick::Chosen: break;
+    }
+    import_dir_ = fs::parent(path);
+    import_model_file(path, false);
+  });
+}
+
+void Editor::open_scene_dialog() {
+  defer([this] {
+    std::string path;
+    switch (pick_open_path("Open Scene", scene_->path.empty() ? fs::join(assets_dir_, "Scenes") : fs::parent(scene_->path),
+                           {{"Blendity Scene", {".scene"}}}, path)) {
+      case PathPick::Cancelled: return;
+      case PathPick::Unavailable: dialog_ = Dialog::OpenScene; return;
+      case PathPick::Chosen: break;
+    }
+    open_scene(path);
+  });
+}
+
+/* File > Export (Blender: File > Export; Unity: the FBX Exporter). The
+ * selection - or the whole scene - with world transforms baked in, materials
+ * and UVs, in any of the formats Blender exports meshes to. */
+std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
   std::vector<ExportItem> items;
   auto add = [&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
-    const Mesh *m = g.evaluated_mesh();
+    auto *mf = g.get<MeshFilter>();
+    const Mesh *m = o.apply_modifiers ? g.evaluated_mesh() : (mf && mf->mesh ? mf->mesh.get() : nullptr);
     if (!m || !m->face_count()) return;
     ExportItem it;
     it.name = g.name;
@@ -1454,7 +1552,7 @@ std::string Editor::export_model(const std::string &format, bool selection_only)
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
     items.push_back(it);
   };
-  if (selection_only) {
+  if (o.selection_only) {
     /* The selected objects and everything under them. */
     std::vector<GameObject *> stack = selected_objects(true);
     while (!stack.empty()) {
@@ -1466,30 +1564,82 @@ std::string Editor::export_model(const std::string &format, bool selection_only)
   }
   else scene_->for_each([&](GameObject &g) { add(g); });
   if (items.empty()) {
-    Log::warn(selection_only ? "Export: select objects with meshes first" : "Export: the scene has no meshes");
+    Log::warn(o.selection_only ? "Export: select objects with meshes first" : "Export: the scene has no meshes");
     return "";
   }
-  const std::string dir = fs::join(assets_dir_, "Exports");
-  fs::make_dirs(dir);
+  std::string path = path_in;
+  if (path.empty()) {
+    GameObject *a = active_object();
+    std::string base = o.selection_only && a ? a->name : scene_->name;
+    for (char &c : base)
+      if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+    const std::string dir = export_dir_.empty() ? fs::join(assets_dir_, "Exports") : export_dir_;
+    path = fs::join(dir, base + export_format_extension(o.format));
+  }
+  std::string err;
+  project_listed_ = -100;
+  if (!export_file(path, items, o, &err)) {
+    Log::error("Export failed: %s", err.c_str());
+    return "";
+  }
+  export_dir_ = fs::parent(path);
+  Log::info("Exported %zu mesh(es) as %s to %s", items.size(), export_format_name(o.format), path.c_str());
+  return path;
+}
+
+std::string Editor::export_model(const std::string &format_in, bool selection_only) {
+  std::string format = to_lower(format_in);
+  if (!format.empty() && format[0] != '.') format = "." + format;
+  int f = export_format_from_extension(format);
+  if (f < 0) {
+    Log::warn("Export: unknown format %s (obj, fbx, glb, gltf, stl, ply, usda)", format_in.c_str());
+    return "";
+  }
+  ExportOptions o = export_defaults(f);
+  o.selection_only = selection_only;
+  return export_model(o);
+}
+
+void Editor::open_export_dialog(int format) {
+  const bool sel = export_opts_.selection_only;
+  const bool had = export_opts_.format == format;
+  if (!had) export_opts_ = export_defaults(format);
+  export_opts_.selection_only = had ? sel : !selection_.empty();
+  dialog_ = Dialog::Export;
+}
+
+static std::vector<platform::FileFilter> export_filters() {
+  std::vector<platform::FileFilter> f;
+  for (int i = 0; i < (int)ExportFormat::Count; i++) f.push_back({export_format_name(i), {export_format_extension(i)}});
+  if (!f.empty()) f[(size_t)ExportFormat::USD].extensions.push_back(".usd");
+  return f;
+}
+
+void Editor::export_with_dialog() {
   GameObject *a = active_object();
-  std::string base = selection_only && a ? a->name : scene_->name;
+  std::string base = export_opts_.selection_only && a ? a->name : scene_->name;
   for (char &c : base)
     if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-  const std::string path = fs::join(dir, base + "." + format);
-  bool ok;
-  if (format == "fbx") ok = fs::write_file(path, export_fbx(items));
-  else {
-    std::string obj, mtl;
-    export_obj_mtl(items, base + ".mtl", obj, mtl);
-    ok = fs::write_file(path, obj) && fs::write_file(fs::join(dir, base + ".mtl"), mtl);
+  const std::string dir = export_dir_.empty() ? fs::join(assets_dir_, "Exports") : export_dir_;
+  fs::make_dirs(dir);
+  std::string path;
+  int filter = export_opts_.format;
+  switch (pick_save_path("Export", fs::join(dir, base + export_format_extension(filter)), export_filters(), path, &filter)) {
+    case PathPick::Cancelled: return;
+    case PathPick::Unavailable: export_model(export_opts_); return;
+    case PathPick::Chosen: break;
   }
-  project_listed_ = -100;
-  if (!ok) {
-    Log::error("Could not write %s", path.c_str());
-    return "";
+  /* The format follows the file name the user typed, else the filter they picked. */
+  int f = export_format_from_extension(fs::extension(path));
+  if (f < 0) f = filter;
+  if (f != export_opts_.format) {
+    ExportOptions o = export_defaults(f);
+    o.selection_only = export_opts_.selection_only;
+    o.apply_modifiers = export_opts_.apply_modifiers;
+    o.scale = export_opts_.scale;
+    export_opts_ = o;
   }
-  Log::info("Exported %zu mesh(es) to %s", items.size(), path.c_str());
-  return path;
+  export_model(export_opts_, path);
 }
 
 void Editor::screenshot(const std::string &path_in) {
@@ -1505,8 +1655,132 @@ void Editor::screenshot(const std::string &path_in) {
   else Log::error("Could not save screenshot to %s", path.c_str());
 }
 
+void Editor::screenshot_dialog() {
+  /* Two frames on, so the menu that asked has closed; the pixels are copied
+   * before the dialog opens over the window. */
+  defer(
+      [this] {
+        const std::vector<uint32_t> pixels = fb_.pixels;
+        const int w = fb_.width, h = fb_.height;
+        fs::make_dirs(screenshots_dir_);
+        std::time_t t = std::time(nullptr);
+        char buf[64];
+        std::strftime(buf, sizeof(buf), "blendity_%Y%m%d_%H%M%S.png", std::localtime(&t));
+        std::string path;
+        switch (pick_save_path("Save Screenshot", fs::join(screenshots_dir_, buf), {{"PNG image", {".png"}}}, path)) {
+          case PathPick::Cancelled: return;
+          case PathPick::Unavailable: path = fs::join(screenshots_dir_, buf); break;
+          case PathPick::Chosen: break;
+        }
+        if (write_png(path, pixels.data(), w, h, w)) Log::info("Screenshot saved: %s", path.c_str());
+        else Log::error("Could not save screenshot to %s", path.c_str());
+        project_listed_ = -100;
+      },
+      2);
+}
+
+void Editor::defer(std::function<void()> fn, int frames) {
+  deferred_.push_back({frames, std::move(fn)});
+  ui_.redraw = true;
+}
+
+Editor::PathPick Editor::pick_save_path(const std::string &title, const std::string &suggested, const std::vector<platform::FileFilter> &filters,
+                                        std::string &out, int *filter) {
+  static int available = -1;  // asking may run a shell on Linux: once
+  if (headless_ || !window_) return PathPick::Unavailable;
+  if (available < 0) available = platform::file_dialogs_available() ? 1 : 0;
+  if (!available) return PathPick::Unavailable;
+  const bool ok = platform::save_file_dialog(window_, title, suggested, filters, out, filter);
+  /* The dialog ate the mouse and keyboard releases: start clean. */
+  const int mx = ui_.in.mx, my = ui_.in.my;
+  ui_.in = ui::Input{};
+  ui_.in.mx = ui_.in.pmx = mx;
+  ui_.in.my = ui_.in.pmy = my;
+  ui_.redraw = true;
+  return ok ? PathPick::Chosen : PathPick::Cancelled;
+}
+
+Editor::PathPick Editor::pick_open_path(const std::string &title, const std::string &dir, const std::vector<platform::FileFilter> &filters,
+                                        std::string &out) {
+  static int available = -1;
+  if (headless_ || !window_) return PathPick::Unavailable;
+  if (available < 0) available = platform::file_dialogs_available() ? 1 : 0;
+  if (!available) return PathPick::Unavailable;
+  const bool ok = platform::open_file_dialog(window_, title, dir, filters, out);
+  const int mx = ui_.in.mx, my = ui_.in.my;
+  ui_.in = ui::Input{};
+  ui_.in.mx = ui_.in.pmx = mx;
+  ui_.in.my = ui_.in.pmy = my;
+  ui_.redraw = true;
+  return ok ? PathPick::Chosen : PathPick::Cancelled;
+}
+
+/* Parametric shapes: (re)build meshes whose settings changed, and let go of
+ * shapes whose mesh was edited by hand (it is an ordinary mesh from then on). */
+void Editor::update_procedural_shapes() {
+  if (playing_) return;
+  std::vector<GameObject *> converted;
+  scene_->for_each([&](GameObject &g) {
+    auto *ps = g.get<ProceduralShape>();
+    if (!ps) return;
+    auto *mf = g.get<MeshFilter>();
+    if (!mf) mf = g.add<MeshFilter>();
+    if (!g.get<MeshRenderer>()) g.add<MeshRenderer>();
+    const uint64_t h = hash_component(*ps);
+    /* Edits bump the version; a copy-on-write clone (undo, Edit Mode) keeps it. */
+    const bool edited = ps->built_mesh && mf->mesh && mf->mesh->version != ps->built_version;
+    if (edited && h == ps->built_hash) {
+      converted.push_back(&g);
+      return;
+    }
+    if (h != ps->built_hash || !mf->mesh || !ps->built_mesh) {
+      mf->mesh = ps->build();
+      ps->built_hash = h;
+      ps->built_mesh = mf->mesh.get();
+      ps->built_version = mf->mesh->version;
+      ui_.redraw = true;
+    }
+  });
+  for (GameObject *g : converted) {
+    if (Component *c = g->get<ProceduralShape>()) g->remove_component(c);
+    Log::info("'%s' is now an ordinary mesh (its shape settings were dropped because the mesh was edited)", g->name.c_str());
+  }
+}
+
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
+  if (starts_with(kind, "Shape:")) {
+    std::string name = kind.substr(6);
+    while (!name.empty() && name[0] == ' ') name.erase(0, 1);
+    int k = -1;
+    for (int i = 0; i < kShapeCount; i++)
+      if (to_lower(name) == to_lower(kShapeNames[i])) k = i;
+    if (k < 0) {
+      Log::warn("No shape called '%s'", name.c_str());
+      return nullptr;
+    }
+    GameObject *g = scene_->create(kShapeNames[k], parent);
+    auto *ps = g->add<ProceduralShape>();
+    ps->shape = k;
+    /* Sensible starting sizes, like ProBuilder's. */
+    if (k == (int)ShapeKind::Plane) ps->size = {2, 0, 2};
+    if (k == (int)ShapeKind::Stairs) ps->size = {1, 1, 2};
+    if (k == (int)ShapeKind::Arch) ps->radius = 1.0f, ps->thickness = 0.2f, ps->height = 0.5f, ps->segments = 16;
+    if (k == (int)ShapeKind::Pipe) ps->radius = 0.5f, ps->thickness = 0.1f;
+    if (k == (int)ShapeKind::Capsule) ps->height = 2.0f, ps->rings = 12;
+    if (k == (int)ShapeKind::Prism) ps->sides = 3, ps->smooth = false;
+    if (k == (int)ShapeKind::Icosphere) ps->subdivisions = 2;
+    g->add<MeshFilter>()->mesh = ps->build();
+    g->add<MeshRenderer>();
+    ps->built_hash = hash_component(*ps);
+    ps->built_mesh = g->get<MeshFilter>()->mesh.get();
+    ps->built_version = ps->built_mesh->version;
+    if (!parent) g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create " + std::string(kShapeNames[k]));
+    return g;
+  }
   GameObject *g = kind == "Empty" ? scene_->create("GameObject", parent) : create_primitive(*scene_, kind, parent);
   if (kind == "Directional Light" || kind == "Point Light" || kind == "Spot Light" || kind == "Area Light" || kind == "Camera") g->name = kind;
   /* At the view's centre; spot and area lights 3 m above it, pointing down at it. */
@@ -1906,9 +2180,41 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("pickfocus: select a Camera first");
   }
   else if (c == "export") {
-    /* export obj|fbx [all]: the selection (or the whole scene) into Assets/Exports */
-    export_model(to_lower(arg(1, "obj")) == "fbx" ? "fbx" : "obj", to_lower(arg(2, "")) != "all");
+    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [path]: the selection (or the whole scene) */
+    std::string fmt = to_lower(arg(1, "obj"));
+    if (fmt.empty() || fmt[0] != '.') fmt = "." + fmt;
+    const int fi = export_format_from_extension(fmt);
+    if (fi < 0) Log::warn("export: formats are obj, fbx, glb, gltf, stl, ply, usda");
+    else {
+      ExportOptions o = export_defaults(fi);
+      size_t at = 2;
+      o.selection_only = !(t.size() > at && to_lower(t[at]) == "all");
+      if (!o.selection_only) at++;
+      if (t.size() > at && to_lower(t[at]) == "ascii") o.ascii = true, at++;
+      std::string path;
+      for (size_t k = at; k < t.size(); k++) path += (path.empty() ? "" : " ") + t[k];
+      export_model(o, path);
+    }
   }
+  else if (c == "join") join_selected();
+  else if (c == "exportoptions") {
+    /* exportoptions <obj|fbx|glb|gltf|stl|ply|usda>: File > Export > that format (the options, then Save As) */
+    std::string fmt = to_lower(arg(1, "obj"));
+    if (fmt[0] != '.') fmt = "." + fmt;
+    const int fi = export_format_from_extension(fmt);
+    if (fi >= 0) open_export_dialog(fi);
+  }
+  else if (c == "selectadd") {
+    /* selectadd <name>: Ctrl+click it (it becomes the active object) */
+    if (GameObject *g = scene_->find_by_name(line.substr(line.find(' ') + 1))) select(g->id, SEL_ADD);
+    else Log::warn("No object named that");
+  }
+  else if (c == "boolean") {
+    /* boolean <difference|union|intersect> [modifier]: the active object is cut by the other selected ones */
+    const std::string o = to_lower(arg(1, "difference"));
+    boolean_selected(o == "union" ? 1 : o == "intersect" ? 2 : 0, to_lower(arg(2, "")) != "modifier");
+  }
+  else if (c == "separate") separate(to_lower(arg(1, "loose")) == "selection" ? "selection" : "loose");
   else if (c == "esel") {
     /* esel <a> <b> [<c> <d> ...]: select exactly these edges (vertex pairs), edge mode */
     if (!edit_mode_) enter_edit_mode();
@@ -1932,7 +2238,12 @@ void Editor::run_console_command(const std::string &line) {
       sync_vert_face_selection(false);
     }
   }
-  else if (c == "editop") edit_op(arg(1, "fill"));
+  else if (c == "editop") {
+    const std::string op = arg(1, "fill");
+    if (op == "knife" || op == "origin_to_selection") edit_tool(op);  /* tools, not mesh operators */
+    else edit_op(op);
+  }
+  else if (c == "ngon") ngon_mode_ = to_lower(arg(1, ngon_mode_ ? "off" : "on")) == "on";  // ngon [on|off]: SketchUp-style faces
   else if (c == "material") {
     /* material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>: new material on the selection. */
     std::string preset = line.size() > 9 ? line.substr(9) : "Solid";
@@ -1985,6 +2296,11 @@ void Editor::run_console_command(const std::string &line) {
     static const char *names[kOriginModeCount] = {"bounds", "median", "surface", "volume", "bottom", "point", "selection", "pivot", "geometry"};
     /* origin mode <name>: choose the Inspector's mode without applying it (the Scene view previews it). */
     const bool choose = to_lower(arg(1, "")) == "mode";
+    if (to_lower(arg(1, "")) == "edit") {  // origin edit [on|off]: move the origin with the gizmo / click to snap
+      const std::string v = to_lower(arg(2, ""));
+      origin_edit_ = v.empty() ? !origin_edit_ : v == "on";
+      return;
+    }
     std::string w = to_lower(arg(choose ? 2 : 1, "bounds"));
     int mode = -1;
     for (int k = 0; k < kOriginModeCount; k++)
@@ -2161,8 +2477,7 @@ void Editor::draw_dialogs() {
     dialog_files_.clear();
     if (dialog_ == Dialog::OpenScene) scan_files(assets_dir_, ".scene", dialog_files_);
     if (dialog_ == Dialog::ImportObj) {
-      scan_files(assets_dir_, ".obj", dialog_files_);
-      scan_files(assets_dir_, ".fbx", dialog_files_);
+      for (const char *ext : {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda"}) scan_files(assets_dir_, ext, dialog_files_);
     }
   }
   u.popup(id, w, [this, id] {
@@ -2199,10 +2514,10 @@ void Editor::draw_dialogs() {
       }
       case Dialog::OpenScene:
       case Dialog::ImportObj: {
-        title(dialog_ == Dialog::OpenScene ? "Open Scene" : "Import Model (OBJ / FBX)");
+        title(dialog_ == Dialog::OpenScene ? "Open Scene" : "Import Model");
         if (dialog_files_.empty()) {
           Recti r = u.popup_row();
-          u.label({r.x + u.px(10), r.y, r.w, r.h}, dialog_ == Dialog::OpenScene ? "No .scene files in Assets yet." : "No .obj files in Assets. Drag one onto the window.", u.theme.text_dim);
+          u.label({r.x + u.px(10), r.y, r.w, r.h}, dialog_ == Dialog::OpenScene ? "No .scene files in Assets yet." : "No models in Assets. Drag one onto the window.", u.theme.text_dim);
         }
         for (auto &f : dialog_files_) {
           std::string rel = f.substr(std::min(f.size(), project_root_.size() + 1));
@@ -2215,6 +2530,19 @@ void Editor::draw_dialogs() {
           }
         }
         Recti b = u.popup_row(u.row_h() + u.px(10));
+        if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
+        break;
+      }
+      case Dialog::Export: {
+        title("Export");
+        draw_export_options();
+        Recti hint = u.popup_row();
+        u.label({hint.x + u.px(10), hint.y, hint.w - u.px(20), hint.h}, "Next, choose where to save it.", u.theme.text_dim);
+        Recti b = u.popup_row(u.row_h() + u.px(10));
+        if (u.button({b.right() - u.px(200), b.y + u.px(4), u.px(100), b.h - u.px(8)}, "Export...")) {
+          close();
+          defer([this] { export_with_dialog(); });
+        }
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
         break;
       }

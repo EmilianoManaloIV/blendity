@@ -21,6 +21,7 @@ using namespace bl;
 static int headless(int argc, char **argv) {
   std::string out;
   int w = 1600, h = 900, frames = 3;
+  int hover_x = -100, hover_y = -100;
   std::vector<std::string> cmds;
   std::vector<std::tuple<int, int, int, int>> clicks;  // --click / --rclick / --altclick / --ctrlaltclick X Y, after the commands
   for (int i = 1; i < argc; i++) {
@@ -29,6 +30,10 @@ static int headless(int argc, char **argv) {
     else if (a == "--size" && i + 1 < argc) std::sscanf(argv[++i], "%dx%d", &w, &h);
     else if (a == "--cmd" && i + 1 < argc) cmds.push_back(argv[++i]);
     else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
+    else if (a == "--hover" && i + 2 < argc) {  // where the mouse rests at the end (tool previews)
+      hover_x = std::atoi(argv[++i]);
+      hover_y = std::atoi(argv[++i]);
+    }
     else if ((a == "--click" || a == "--rclick" || a == "--altclick" || a == "--ctrlaltclick") && i + 2 < argc) {
       int x = std::atoi(argv[++i]);
       const int mods = a == "--altclick" ? platform::MOD_ALT : a == "--ctrlaltclick" ? (platform::MOD_ALT | platform::MOD_CTRL) : 0;
@@ -55,6 +60,13 @@ static int headless(int argc, char **argv) {
     e.type = platform::EventType::MouseDown;
     ed.step_frame_headless({e});
     e.type = platform::EventType::MouseUp;
+    ed.step_frame_headless({e});
+  }
+  if (hover_x >= 0) {
+    platform::Event e;
+    e.type = platform::EventType::MouseMove;
+    e.x = hover_x;
+    e.y = hover_y;
     ed.step_frame_headless({e});
   }
   for (int i = 0; i < frames; i++) ed.step_frame_headless();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Model import (Unity: drop a model into Assets; Blender: File > Import).
 //   .obj + .mtl  - own parser (blender/source/blender/io/wavefront_obj)
+//   .glb .gltf .stl .ply .usda - import_formats.cpp
 //   .fbx         - ufbx, the FBX loader Blender itself uses (blender/extern/ufbx,
 //                  blender/source/blender/io/fbx)
 // Everything is converted to Unity's left-handed Y-up metre space by
@@ -37,6 +38,10 @@ struct ImportResult {
 bool import_model(const std::string &path, ImportResult &out);
 bool import_obj_file(const std::string &path, ImportResult &out);
 bool import_fbx_file(const std::string &path, ImportResult &out);
+bool import_gltf_file(const std::string &path, ImportResult &out);  // import_formats.cpp
+bool import_stl_file(const std::string &path, ImportResult &out);   // Z up, like Blender writes it
+bool import_ply_file(const std::string &path, ImportResult &out);   // Z up, like Blender writes it
+bool import_usda_file(const std::string &path, ImportResult &out);  // text USD; the stage says its up axis
 bool model_extension_supported(const std::string &ext);
 
 /* Creates GameObjects for an import result under `parent` (may be null). */

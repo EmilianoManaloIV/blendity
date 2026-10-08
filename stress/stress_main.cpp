@@ -1623,6 +1623,157 @@ static void test_pushpull_stress(Report &rep, const Options &o) {
   rep.note(total_bad ? strprintf("%zu interactive Push/Pulls did not restore exactly", total_bad)
                      : "every interactive Push/Pull was undone or cancelled back to the exact mesh");
 }
+
+/* The modifiers and tools added with the modifier stack (Bevel, Weld,
+ * Triangulate, Wireframe, Displace, Simple Deform, Cast, Screw), vertex /
+ * edge extrusion, Limited Dissolve, the knife's edge / face splits, Join and
+ * Separate, and every parametric shape - on the same awkward meshes as
+ * Push/Pull, with ordinary, zero, negative, huge and NaN settings. Nothing may
+ * crash, and every result must be a structurally valid mesh. */
+static void test_modifier_tools_stress(Report &rep, const Options &o) {
+  using namespace ppstress;
+  rep.title("Modifiers, n-gon tools and shapes on odd meshes",
+            "Every new modifier with ordinary and hostile settings (0, negative, huge, NaN), vertex / edge extrusion on random "
+            "selections, Limited Dissolve, random knife cuts, Join and Separate, on the 26 Push/Pull meshes; then every "
+            "parametric shape with random and extreme settings. Each result is checked for broken structure.");
+  rep.table({"mesh", "ops", "problems", "max ms"});
+  const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+  size_t total_ops = 0, total_problems = 0;
+  std::map<std::string, int> problem_types;
+  std::vector<std::string> examples;
+  for (Case &cs : cases()) {
+    const Mesh &base = cs.mesh;
+    AABB bb;
+    for (Vec3 p : base.positions) bb.add(p);
+    const float s = std::max(1e-6f, length(bb.max - bb.min));
+    size_t ops = 0, problems = 0;
+    double max_ms = 0;
+    auto run = [&](const char *what, const std::function<void(Mesh &)> &fn) {
+      Mesh m = base;
+      ScopedTimer t;
+      fn(m);
+      max_ms = std::max(max_ms, t.ms());
+      ops++;
+      const std::string bad = invalid(m);
+      if (!bad.empty()) {
+        problems++;
+        problem_types[bad]++;
+        if (examples.size() < 60) examples.push_back(strprintf("%s: %s -> %s", cs.name.c_str(), what, bad.c_str()));
+      }
+    };
+    for (float w : {0.02f * s, 0.0f, -0.1f * s, 10.0f * s, nan})
+      for (int seg : {1, 3}) run("bevel", [&](Mesh &m) { meshops::bevel_modifier(m, w, seg, 30.0f); });
+    run("bevel all edges", [&](Mesh &m) { meshops::bevel_modifier(m, 0.01f * s, 2, -1.0f); });
+    for (int mv : {3, 4, 5, 100}) run("triangulate", [&](Mesh &m) { meshops::triangulate_min(m, mv); });
+    for (float d : {0.0f, 1e-4f * s, 0.5f * s, 10.0f * s}) run("weld", [&](Mesh &m) { meshops::merge_by_distance(m, d); });
+    for (float th : {0.01f * s, 0.0f, 5.0f * s, nan})
+      for (int keep = 0; keep < 2; keep++) run("wireframe", [&](Mesh &m) { meshops::wireframe(m, th, true, keep != 0); });
+    for (float st : {0.1f * s, -1.0f * s, 0.0f, 1e6f, nan})
+      for (int dir = 0; dir < 4; dir++) run("displace", [&](Mesh &m) { meshops::displace(m, st, 0.5f, 0.3f * s, dir, 3, 5); });
+    for (int mode = 0; mode < 4; mode++)
+      for (float amt : {45.0f, -720.0f, 0.0f, 1e-8f, nan})
+        for (int axis = 0; axis < 3; axis++)
+          run("simple deform", [&](Mesh &m) { meshops::simple_deform(m, mode, mode <= 1 ? amt : amt / 90.0f, axis, 0.2f, 0.8f); });
+    run("simple deform, inverted limits", [&](Mesh &m) { meshops::simple_deform(m, 1, 90.0f, 2, 0.9f, 0.1f); });
+    for (int shape = 0; shape < 3; shape++)
+      for (float f : {1.0f, -2.0f, 0.0f, nan}) run("cast", [&](Mesh &m) { meshops::cast(m, shape, f, 0.0f, 1); });
+    for (float ang : {360.0f, 90.0f, -720.0f, 0.0f})
+      for (int steps : {2, 16})
+        run("screw", [&](Mesh &m) { meshops::screw(m, ang, steps, ang == 90.0f ? 0.5f * s : 0.0f, 1, ang == 0.0f ? 3 : 1, true, false); });
+    /* Vertex / edge extrusion from random selections (wire edges included). */
+    uint32_t rng = 99991u + (uint32_t)cs.name.size();
+    for (int k = 0; k < (o.quick ? 4 : 12); k++)
+      run("extrude verts / edges", [&](Mesh &m) {
+        std::vector<uint8_t> sel(m.vert_count(), 0);
+        for (size_t v = 0; v < sel.size(); v++) {
+          rng = rng * 1664525u + 1013904223u;
+          sel[v] = (rng >> 24) < (uint32_t)(k * 20 + 10);
+        }
+        meshops::extrude_verts_edges(m, sel);
+        for (size_t v = 0; v < sel.size(); v++)
+          if (sel[v]) m.positions[v] += Vec3(0.1f, 0.2f, 0.0f) * s;
+        meshops::extrude_verts_edges(m, sel);  // again, from the new ends
+      });
+    run("limited dissolve", [&](Mesh &m) { meshops::dissolve_limited(m, 1.0f); });
+    run("limited dissolve 30", [&](Mesh &m) { meshops::dissolve_limited(m, 30.0f); });
+    /* Knife: split random edges and then their face, the way the tool does. */
+    for (int k = 0; k < (o.quick ? 4 : 16); k++)
+      run("knife", [&](Mesh &m) {
+        if (!m.face_count()) return;
+        rng = rng * 1664525u + 1013904223u;
+        const size_t f = (rng >> 8) % m.face_count();
+        const uint32_t n = m.face_size(f);
+        if (n < 3) return;
+        const uint32_t i = (rng >> 4) % n, j = (i + 1 + (rng >> 12) % std::max(1u, n - 1)) % n;
+        const uint32_t a0 = m.face_verts(f)[i], a1 = m.face_verts(f)[(i + 1) % n];
+        const uint32_t b0 = m.face_verts(f)[j], b1 = m.face_verts(f)[(j + 1) % n];
+        const float ta = (float)((rng >> 16) % 100) / 100.0f, tb = (float)((rng >> 20) % 100) / 100.0f;
+        const uint32_t va = meshops::split_edge(m, a0, a1, ta);
+        const uint32_t vb = (Mesh::edge_key(a0, a1) == Mesh::edge_key(b0, b1)) ? va : meshops::split_edge(m, b0, b1, tb);
+        meshops::split_face(m, f, va, vb);
+      });
+    run("join with itself", [&](Mesh &m) {
+      const Mesh copy = m;
+      meshops::append_mesh(m, copy, Mat4::trs({s, 0, 0}, Quat::euler({0, 30, 0}), {-1, 1, 1}), {0, 1});
+    });
+    run("separate loose parts", [&](Mesh &m) {
+      std::vector<int> part;
+      const size_t n = meshops::loose_parts(m, part);
+      for (size_t k = 0; k < n && k < 8; k++) {
+        std::vector<uint8_t> sel(m.face_count(), 0);
+        for (size_t f = 0; f < m.face_count(); f++) sel[f] = part[f] == (int)k;
+        Mesh piece = meshops::extract_faces(m, sel);
+        if (!invalid(piece).empty()) m.positions.assign(1, Vec3(nan));  // flag it through the check
+      }
+    });
+    total_ops += ops;
+    total_problems += problems;
+    rep.row({cs.name, num((double)ops), num((double)problems), f2(max_ms)});
+  }
+  /* Parametric shapes: every shape with its defaults, random settings and extremes. */
+  size_t shape_ops = 0, shape_problems = 0;
+  uint32_t rng = 4242u;
+  auto rnd = [&](float lo, float hi) {
+    rng = rng * 1664525u + 1013904223u;
+    return lo + (hi - lo) * (float)(rng >> 8) / 16777216.0f;
+  };
+  for (int k = 0; k < kShapeCount; k++)
+    for (int trial = 0; trial < (o.quick ? 6 : 30); trial++) {
+      ProceduralShape ps;
+      ps.shape = k;
+      if (trial > 0) {
+        ps.size = {rnd(-2, 5), rnd(-2, 5), rnd(-2, 5)};
+        ps.radius = rnd(0, 3);
+        ps.radius2 = rnd(0, 3);
+        ps.thickness = rnd(0, 4);
+        ps.height = rnd(0, 4);
+        ps.angle = rnd(-10, 400);
+        ps.segments = (int)rnd(-3, 70);
+        ps.rings = (int)rnd(-3, 40);
+        ps.sides = (int)rnd(-3, 20);
+        ps.steps = (int)rnd(-3, 60);
+        ps.subdivisions = (int)rnd(-3, 9);
+        ps.fill_under = trial % 2 == 0;
+      }
+      if (trial == 1) ps.radius = ps.height = ps.thickness = ps.radius2 = 0.0f, ps.size = {0, 0, 0};
+      if (trial == 2) ps.radius = ps.height = 1e6f, ps.size = {1e6f, 1e6f, 1e6f};
+      ScopedTimer t;
+      MeshPtr m = ps.build();
+      shape_ops++;
+      const std::string bad = m ? invalid(*m) : "no mesh";
+      if (!bad.empty() || !m->face_count()) {
+        shape_problems++;
+        problem_types[bad.empty() ? "a shape with no faces" : bad]++;
+        if (examples.size() < 80) examples.push_back(strprintf("shape %s trial %d: %s", kShapeNames[k], trial, bad.empty() ? "no faces" : bad.c_str()));
+      }
+    }
+  rep.row({"parametric shapes", num((double)shape_ops), num((double)shape_problems), "-"});
+  rep.note(strprintf("%zu operations on odd meshes, %zu problems; %zu shapes built, %zu problems", total_ops, total_problems, shape_ops,
+                     shape_problems));
+  for (auto &[type, n] : problem_types) rep.note(strprintf("problem %d x: %s", n, type.c_str()));
+  for (const std::string &e : examples) rep.note(e);
+  (void)inf;
+}
 /* ------------------------------------------------------------------ main */
 
 int main(int argc, char **argv) {
@@ -1657,7 +1808,7 @@ int main(int argc, char **argv) {
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
-               {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}};
+               {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

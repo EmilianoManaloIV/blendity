@@ -13,6 +13,9 @@
 #include <X11/keysym.h>
 #include <sys/select.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -470,6 +473,96 @@ void set_clipboard(Window *w, const std::string &utf8) {
 }
 
 void set_refresh_callback(Window *w, std::function<void()> cb) { w->refresh = std::move(cb); }
+
+/* ------------------------------------------------------------ File dialogs */
+/* X11 has no dialog of its own: zenity (GTK) or kdialog (KDE) when installed. */
+
+static bool have_tool(const char *name) {
+  std::string cmd = std::string("command -v ") + name + " >/dev/null 2>&1";
+  return std::system(cmd.c_str()) == 0;
+}
+
+static std::string sh_quote(const std::string &s) {
+  std::string r = "'";
+  for (char c : s) r += c == '\'' ? std::string("'\\''") : std::string(1, c);
+  return r + "'";
+}
+
+static bool run_dialog_command(const std::string &cmd, std::string &out) {
+  FILE *p = popen(cmd.c_str(), "r");
+  if (!p) return false;
+  std::string s;
+  char buf[4096];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), p)) > 0) s.append(buf, n);
+  const int status = pclose(p);
+  while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+  if (status != 0 || s.empty()) return false;
+  out = s;
+  return true;
+}
+
+bool file_dialogs_available() { return have_tool("zenity") || have_tool("kdialog"); }
+
+static bool x11_file_dialog(bool save, const std::string &title, const std::string &initial, const std::vector<FileFilter> &filters,
+                            std::string &out, int *filter_index) {
+  std::string cmd;
+  if (have_tool("zenity")) {
+    cmd = "zenity --file-selection --title=" + sh_quote(title);
+    if (save) cmd += " --save --confirm-overwrite";
+    cmd += " --filename=" + sh_quote(initial);
+    const int start = filter_index ? *filter_index : 0;
+    /* zenity shows the first filter first. */
+    for (size_t k = 0; k < filters.size(); k++) {
+      const FileFilter &f = filters[(k + (size_t)std::max(0, start)) % filters.size()];
+      std::string pat;
+      for (const std::string &e : f.extensions) pat += " *" + e;
+      cmd += " --file-filter=" + sh_quote(f.name + " |" + pat);
+    }
+  }
+  else if (have_tool("kdialog")) {
+    std::string pat;
+    for (const FileFilter &f : filters) {
+      std::string p;
+      for (const std::string &e : f.extensions) p += (p.empty() ? "*" : " *") + e;
+      pat += (pat.empty() ? "" : "\n") + p + "|" + f.name;
+    }
+    cmd = std::string("kdialog --title ") + sh_quote(title) + (save ? " --getsavefilename " : " --getopenfilename ") + sh_quote(initial) + " " +
+          sh_quote(pat);
+  }
+  else
+    return false;
+  cmd += " 2>/dev/null";
+  if (!run_dialog_command(cmd, out)) return false;
+  /* The filter is whichever one the extension belongs to; none typed: the first. */
+  size_t dot = out.find_last_of('.'), slash = out.find_last_of('/');
+  std::string ext = dot != std::string::npos && (slash == std::string::npos || dot > slash) ? out.substr(dot) : "";
+  for (char &c : ext) c = (char)std::tolower((unsigned char)c);
+  int chosen = filter_index ? *filter_index : 0;
+  bool matched = false;
+  for (size_t k = 0; k < filters.size() && !matched; k++)
+    for (const std::string &e : filters[k].extensions)
+      if (e == ext) {
+        chosen = (int)k;
+        matched = true;
+      }
+  if (save && !matched && !filters.empty() && chosen >= 0 && chosen < (int)filters.size() && !filters[(size_t)chosen].extensions.empty())
+    out += filters[(size_t)chosen].extensions[0];
+  if (filter_index) *filter_index = chosen;
+  return true;
+}
+
+bool save_file_dialog(Window *, const std::string &title, const std::string &initial_path, const std::vector<FileFilter> &filters,
+                      std::string &out_path, int *filter_index) {
+  return x11_file_dialog(true, title, initial_path, filters, out_path, filter_index);
+}
+
+bool open_file_dialog(Window *, const std::string &title, const std::string &initial_dir, const std::vector<FileFilter> &filters,
+                      std::string &out_path) {
+  std::string dir = initial_dir;
+  if (!dir.empty() && dir.back() != '/') dir += '/';
+  return x11_file_dialog(false, title, dir, filters, out_path, nullptr);
+}
 
 }  // namespace bl::platform
 

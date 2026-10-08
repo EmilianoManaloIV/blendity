@@ -20,9 +20,11 @@
 #include "../render/pathtracer.h"
 #include "../render/raster.h"
 #include "../scene/export.h"
+#include "../scene/import.h"
 #include "../scene/scene.h"
 #include "ui.h"
 
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -112,6 +114,8 @@ class Editor {
   Recti scene_view_rect() const { return scene_rect_; }  // tests drive the Scene view with mouse events
   /* Tests: select an object, and record a change they made to the scene directly as one undo step. */
   void select_object(uint64_t id) { select(id); }
+  void select_object_add(uint64_t id) { select(id, SEL_ADD); }  // Ctrl+click: the last one added is active
+  bool origin_editing() const { return origin_edit_; }
   GameObject *selected_object() const { return active_object(); }
   void commit_change(const std::string &what) { mark_changed(what); }
 
@@ -189,6 +193,7 @@ class Editor {
   void draw_gizmo(const Recti &r);
   void pick(const Recti &r, int mx, int my, int mode);
   void box_select(const Recti &r, Recti box, int mode);
+  uint64_t pick_wire_object(const Recti &r, int mx, int my, int radius);  // Display As Wire / Bounds objects
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
 
@@ -331,13 +336,47 @@ class Editor {
   bool open_scene(const std::string &path);
   void save_scene_cmd(bool save_as);
   void import_obj_file(const std::string &path);
-  std::string export_model(const std::string &format, bool selection_only);  // "obj" / "fbx"; returns the file
-  void screenshot(const std::string &path = "");
+  /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
+  std::string export_model(const ExportOptions &o, const std::string &path = "");
+  std::string export_model(const std::string &format, bool selection_only);  // "obj" "fbx" "glb" "gltf" "stl" "ply" "usda"
+  void open_export_dialog(int format);  // the options, then the Save As dialog
+  void import_dialog();      // File > Import Model: the OS Open dialog (or the Assets list)
+  void open_scene_dialog();  // Ctrl+O
+  void export_with_dialog();
+  void screenshot(const std::string &path = "");  // now, to path (or Screenshots/)
+  void screenshot_dialog();                       // after this frame, asking where to save it
+  /* Native file dialogs (platform::save_file_dialog). Unavailable when headless
+   * or when the OS has none (Linux without zenity / kdialog): callers then
+   * fall back to their default folder. */
+  enum class PathPick { Chosen, Cancelled, Unavailable };
+  PathPick pick_save_path(const std::string &title, const std::string &suggested, const std::vector<platform::FileFilter> &filters,
+                          std::string &out, int *filter = nullptr);
+  PathPick pick_open_path(const std::string &title, const std::string &dir, const std::vector<platform::FileFilter> &filters, std::string &out);
+  /* Work that must run outside the UI frame (native dialogs, screenshots of a
+   * frame without the menu that asked for them): after `frames` presents. */
+  void defer(std::function<void()> fn, int frames = 1);
+  struct Deferred {
+    int frames;
+    std::function<void()> fn;
+  };
+  std::vector<Deferred> deferred_;
+  ExportOptions export_opts_;
+  std::string export_dir_;  // the folder the last export went to
+  std::string import_dir_;  // the folder the last import came from
+  void draw_export_options();  // panels.cpp
+  int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();
   void delete_selected();
   void add_component_to_selection(const std::string &name);
   void mesh_op(const std::string &op);
+  /* object_ops.cpp: Join (Ctrl+J), Boolean (0 Difference, 1 Union, 2 Intersect; apply = Bool Tool's
+   * Auto, else a live modifier), Separate ("selection" in Edit Mode, "loose"). */
+  void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
+  void join_selected();
+  void boolean_selected(int op, bool apply);
+  void separate(const std::string &mode);
+  GameObject *spawn_part(GameObject *g, Mesh mesh);
   void set_origin(int mode, Vec3 world_point = Vec3(0.0f));  // kOriginModes; world_point for "Origin to Point"
   int origin_mode_ = 0;
   bool origin_hover_ = false;  // the Inspector's Origin row is in use: the Scene view previews the new origin
@@ -467,6 +506,38 @@ class Editor {
   Recti last_op_rect_{};  // last frame's panel area (keeps clicks off the scene)
   Recti cam_preview_rect_{};  // last frame's Camera Preview inset (same)
   uint64_t redo_serial_ = 0;
+  /* Edit Origin (Blender: Options > Affect Only > Origins): the gizmo moves and
+   * turns only the origin; a click snaps it to a vertex, edge or face. */
+  /* ---- N-gon mode and the Knife / Line tool (knife.cpp) ---- */
+  static constexpr float kNgonAngle = 1.0f;  // degrees: faces this close count as one flat face
+  bool ngon_mode_ = false;                   // SketchUp: a flat region is one face; its inner edges hide
+  std::unordered_set<uint64_t> ngon_hidden_;
+  std::vector<int> ngon_region_;
+  std::vector<Vec3> ngon_region_center_;
+  const Mesh *ngon_cache_mesh_ = nullptr;
+  uint64_t ngon_cache_version_ = 0;
+  void ngon_cache(const Mesh &m);
+  struct KnifePoint {
+    bool ok = false;
+    int kind = 0;  // 0 a vertex, 1 a point on an edge
+    uint32_t v = 0, a = 0, b = 0;
+    float t = 0;
+    Vec3 world;
+    const char *label = "";
+  };
+  struct KnifeState {
+    bool active = false, has_first = false;
+    KnifePoint first;
+  } knife_;
+  KnifePoint knife_hit(const Recti &view, int mx, int my);
+  void knife_begin();
+  bool knife_update(const Recti &view);
+  void knife_draw(const Recti &view);
+  bool origin_edit_ = false;
+  std::vector<std::pair<uint64_t, MeshPtr>> origin_mesh_starts_;
+  std::vector<std::pair<uint64_t, Mat4>> origin_child_starts_;
+  void compensate_origin_drag();
+  bool origin_snap_target(const Recti &view, int mx, int my, Vec3 &world, std::string &what);
   PushPullDrag pp_;
   float pp_last_distance_ = 0.0f;
   std::vector<uint8_t> vert_sel_, face_sel_;
@@ -587,7 +658,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export } dialog_ = Dialog::None;
   std::string dialog_text_;
   std::vector<std::string> dialog_files_;
 };

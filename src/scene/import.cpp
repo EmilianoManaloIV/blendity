@@ -11,12 +11,18 @@
 
 namespace bl {
 
-bool model_extension_supported(const std::string &ext) { return ext == ".obj" || ext == ".fbx"; }
+bool model_extension_supported(const std::string &ext) {
+  return ext == ".obj" || ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".stl" || ext == ".ply" || ext == ".usda";
+}
 
 bool import_model(const std::string &path, ImportResult &out) {
   std::string ext = fs::extension(path);
   if (ext == ".obj") return import_obj_file(path, out);
   if (ext == ".fbx") return import_fbx_file(path, out);
+  if (ext == ".glb" || ext == ".gltf") return import_gltf_file(path, out);
+  if (ext == ".stl") return import_stl_file(path, out);
+  if (ext == ".ply") return import_ply_file(path, out);
+  if (ext == ".usda" || ext == ".usd") return import_usda_file(path, out);
   out.error = "unsupported model format " + ext;
   return false;
 }
@@ -157,6 +163,7 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
     cur_slot = 0;
   };
   std::string current_mat;
+  bool inherit_mat = false;
   auto use_material = [&](const std::string &name) {
     current_mat = name;
     if (!node) begin_node(pending_name);
@@ -195,6 +202,10 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
     }
     else if (q[0] == 'f' && q + 1 < le && (q[1] == ' ' || q[1] == '\t')) {
       if (!node) begin_node(pending_name);
+      if (inherit_mat) {
+        inherit_mat = false;
+        if (!current_mat.empty()) use_material(current_mat);
+      }
       fv.clear();
       fuv.clear();
       face_has_uv = true;
@@ -234,7 +245,7 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
       if (q[0] == 'o' || !node || node->mesh->face_count() > 0) {
         pending_name = name.empty() ? fs::stem(path) : name;
         begin_node(pending_name);
-        if (!current_mat.empty()) use_material(current_mat);
+        inherit_mat = true;  // the material carries over, but only if a face uses it before any usemtl
       }
     }
     else if (q[0] == 's' && q + 1 < le && (q[1] == ' ' || q[1] == '\t')) {
@@ -243,6 +254,7 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
       if (node) node->mesh->smooth = smooth;
     }
     else if (le - q > 6 && !std::strncmp(q, "usemtl", 6)) {
+      inherit_mat = false;
       use_material(rest_of_line(q + 6, le));
     }
     else if (le - q > 6 && !std::strncmp(q, "mtllib", 6)) {
