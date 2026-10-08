@@ -742,46 +742,246 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   return changed;
 }
 
-bool Context::color_field(Id i, const Recti &r, Vec3 &c) {
+/* HSV <-> RGB for the colour picker (h, s, v in 0..1). */
+static Vec3 hsv_to_rgb(float h, float s, float v) {
+  h = (h - std::floor(h)) * 6.0f;
+  const int i = (int)h % 6;
+  const float f = h - std::floor(h), p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+  switch (i) {
+    case 0: return {v, t, p};
+    case 1: return {q, v, p};
+    case 2: return {p, v, t};
+    case 3: return {p, q, v};
+    case 4: return {t, p, v};
+    default: return {v, p, q};
+  }
+}
+static Vec3 rgb_to_hsv(Vec3 c) {
+  const float mx = std::max({c.x, c.y, c.z}), mn = std::min({c.x, c.y, c.z}), d = mx - mn;
+  float h = 0;
+  if (d > 1e-6f) {
+    if (mx == c.x) h = (c.y - c.z) / d + (c.y < c.z ? 6.0f : 0.0f);
+    else if (mx == c.y) h = (c.z - c.x) / d + 2.0f;
+    else h = (c.x - c.y) / d + 4.0f;
+    h /= 6.0f;
+  }
+  return {h, mx > 0 ? d / mx : 0.0f, mx};
+}
+
+/* A transparency checkerboard behind a colour with alpha. */
+static void checker(Canvas &c, const Recti &r, int cell) {
+  c.fill_rect(r, Color::hex(0xCCCCCC));
+  c.push_clip(r);
+  for (int y = r.y; y < r.bottom(); y += cell)
+    for (int x = r.x + (((y - r.y) / cell) % 2) * cell; x < r.right(); x += cell * 2) c.fill_rect({x, y, cell, cell}, Color::hex(0x8C8C8C));
+  c.pop_clip();
+}
+
+/* Unity's colour field: the colour, with the alpha as a white bar along the
+ * bottom (black for the transparent part). Clicking opens a Color window: a
+ * saturation / value square with a hue strip, RGB 0-255 / RGB 0-1 / HSV
+ * sliders, Alpha, Hex (RRGGBB or RRGGBBAA), and a palette of presets and
+ * recently used colours. alpha may be null (no alpha channel). */
+bool Context::color_field(Id i, const Recti &r, Vec3 &c, float *alpha) {
   bool changed = false;
   auto it = color_results_.find(i);
   if (it != color_results_.end()) {
-    changed = c != it->second;
-    c = it->second;
+    const Vec4 res = it->second;
+    changed = c != res.xyz() || (alpha && *alpha != res.w);
+    c = res.xyz();
+    if (alpha) *alpha = res.w;
     color_results_.erase(it);
   }
   bool hot = hovered(r);
-  frame(r, Color::from(c), hot ? theme.text_bright : theme.border, px(2));
+  const Recti inner = r.shrink(px(1));
+  canvas.fill_rect(inner, Color::from(c));
+  if (alpha) {
+    const int bh = std::max(2, px(3));
+    Recti bar{inner.x, inner.bottom() - bh, inner.w, bh};
+    canvas.fill_rect(bar, 0xFF000000);
+    canvas.fill_rect({bar.x, bar.y, (int)(bar.w * saturate(*alpha) + 0.5f), bar.h}, 0xFFFFFFFF);
+  }
+  canvas.rect_outline(r, hot ? theme.text_bright : theme.border);
   if (hot && in.pressed[0]) {
-    color_edit_[i] = c;
+    color_edit_[i] = Vec4(c.x, c.y, c.z, alpha ? *alpha : 1.0f);
+    color_has_alpha_[i] = alpha != nullptr;
+    color_before_[i] = color_edit_[i];
     open_popup(i, r);
     consume_click();
   }
-  popup(i, px(230), [this, i] {
-    Vec3 &e = color_edit_[i];
-    Recti sw = popup_row(px(26));
-    canvas.fill_rect(sw.shrink(px(4)), Color::from(e));
-    const char *names[3] = {"R", "G", "B"};
+  popup(i, px(270), [this, i] {
+    Vec4 &e = color_edit_[i];
+    const bool has_alpha = color_has_alpha_[i];
+    Vec3 hsv = rgb_to_hsv(e.xyz());
+    if (color_hue_.count(i) && hsv.y < 1e-4f) hsv.x = color_hue_[i];  // keep the hue of a grey
     bool ch = false;
+    /* New colour beside the one it started as (click the old one to go back). */
+    Recti sw = popup_row(px(28)).shrink(px(4));
+    Recti now{sw.x, sw.y, sw.w / 2, sw.h}, was{sw.x + sw.w / 2, sw.y, sw.w - sw.w / 2, sw.h};
+    checker(canvas, sw, px(5));
+    canvas.fill_rect(now, Color::from(e.xyz(), has_alpha ? e.w : 1.0f));
+    const Vec4 old = color_before_[i];
+    canvas.fill_rect(was, Color::from(old.xyz(), has_alpha ? old.w : 1.0f));
+    canvas.rect_outline(sw, theme.border);
+    if (hovered(was) && in.pressed[0]) {
+      e = old;
+      ch = true;
+      consume_click();
+    }
+    /* Saturation (across) and value (up) for the current hue, and the hue strip. */
+    Recti area = popup_row(px(150)).shrink(px(4));
+    const int strip = px(18);
+    Recti sq{area.x, area.y, area.w - strip - px(6), area.h}, hue{area.right() - strip, area.y, strip, area.h};
+    Image &img = color_square_;
+    if (img.width != sq.w || img.height != sq.h || color_square_hue_ != hsv.x) {
+      img.resize(sq.w, sq.h);
+      for (int y = 0; y < sq.h; y++)
+        for (int x = 0; x < sq.w; x++)
+          img.row(y)[x] = Color::from(hsv_to_rgb(hsv.x, x / (float)std::max(1, sq.w - 1), 1.0f - y / (float)std::max(1, sq.h - 1)));
+      color_square_hue_ = hsv.x;
+    }
+    canvas.blit(img, sq.x, sq.y);
+    for (int y = 0; y < hue.h; y++) canvas.hline(hue.x, hue.right(), hue.y + y, Color::from(hsv_to_rgb(1.0f - y / (float)hue.h, 1, 1)));
+    const Id sq_id = i ^ 0x5A5A1ull, hue_id = i ^ 0x5A5A2ull;
+    if (hovered(sq) && in.pressed[0]) active_ = sq_id;
+    if (hovered(hue) && in.pressed[0]) active_ = hue_id;
+    if (active_ == sq_id || active_ == hue_id) {
+      if (active_ == sq_id) {
+        hsv.y = saturate((in.mx - sq.x) / (float)std::max(1, sq.w - 1));
+        hsv.z = saturate(1.0f - (in.my - sq.y) / (float)std::max(1, sq.h - 1));
+      }
+      else hsv.x = saturate(1.0f - (in.my - hue.y) / (float)std::max(1, hue.h));
+      color_hue_[i] = hsv.x;
+      const Vec3 rgb = hsv_to_rgb(hsv.x, hsv.y, hsv.z);
+      e = Vec4(rgb.x, rgb.y, rgb.z, e.w);
+      ch = true;
+      if (in.released[0] || !in.down[0]) active_ = 0;
+    }
+    /* Markers: a ring at the colour, a bar on the hue. */
+    const float mx = sq.x + hsv.y * (sq.w - 1), my = sq.y + (1.0f - hsv.z) * (sq.h - 1);
+    canvas.circle(mx, my, (float)px(5), hsv.z > 0.5f ? 0xFF000000 : 0xFFFFFFFF, (float)px(1.5f));
+    const int hy = hue.y + (int)((1.0f - hsv.x) * hue.h);
+    canvas.rect_outline({hue.x - px(2), hy - px(2), hue.w + px(4), px(4)}, 0xFFFFFFFF);
+    /* Channels: RGB 0-255 (Unity's default), RGB 0-1, or HSV. */
+    static const char *modes[] = {"RGB 0-255", "RGB 0-1.0", "HSV"};
+    Recti mr = popup_row(row_h() + px(2));
+    combo(i * 31 + 5, {mr.x + px(8), mr.y + px(1), mr.w - px(16), mr.h - px(2)}, color_mode_, modes, 3);
+    const char *names[3] = {color_mode_ == 2 ? "H" : "R", color_mode_ == 2 ? "S" : "G", color_mode_ == 2 ? "V" : "B"};
     for (int k = 0; k < 3; k++) {
       Recti row = popup_row(row_h());
       label({row.x + px(8), row.y, px(16), row.h}, names[k]);
-      ch |= slider(i * 7 + k, {row.x + px(26), row.y, row.w - px(90), row.h}, e[k], 0, 1);
-      ch |= float_field(i * 13 + k, {row.right() - px(58), row.y + px(1), px(50), row.h - px(2)}, e[k], 0.005f, 0, 1, "%.2f");
-    }
-    Recti hr = popup_row(row_h() + px(4));
-    std::string hex = strprintf("#%02X%02X%02X", (int)(e.x * 255 + 0.5f), (int)(e.y * 255 + 0.5f), (int)(e.z * 255 + 0.5f));
-    label({hr.x + px(8), hr.y, px(40), hr.h}, "Hex");
-    bool done = false;
-    if (text_field(i * 17, {hr.x + px(50), hr.y + px(2), hr.w - px(58), hr.h - px(4)}, hex, &done) && done) {
-      unsigned v = 0;
-      if (std::sscanf(hex.c_str() + (hex[0] == '#' ? 1 : 0), "%x", &v) == 1) {
-        e = {((v >> 16) & 255) / 255.0f, ((v >> 8) & 255) / 255.0f, (v & 255) / 255.0f};
+      Recti sl{row.x + px(26), row.y, row.w - px(90), row.h};
+      /* The slider's track shows where that channel takes the colour. */
+      Recti track = sl.shrink(px(5));
+      for (int x = 0; x < track.w; x++) {
+        const float t = x / (float)std::max(1, track.w - 1);
+        Vec3 cc;
+        if (color_mode_ == 2) {
+          Vec3 h2 = hsv;
+          h2[k] = t;
+          cc = hsv_to_rgb(h2.x, h2.y, h2.z);
+        }
+        else {
+          cc = e.xyz();
+          cc[k] = t;
+        }
+        canvas.vline(track.x + x, track.y, track.bottom(), Color::from(cc));
+      }
+      float v = color_mode_ == 2 ? hsv[k] : e[k];
+      bool cv = slider(i * 7 + k, sl, v, 0, 1);
+      if (color_mode_ == 0) {
+        int b = (int)(v * 255.0f + 0.5f);
+        if (int_field(i * 13 + k, {row.right() - px(58), row.y + px(1), px(50), row.h - px(2)}, b, 0, 255)) {
+          v = b / 255.0f;
+          cv = true;
+        }
+      }
+      else cv |= float_field(i * 13 + k, {row.right() - px(58), row.y + px(1), px(50), row.h - px(2)}, v, 0.005f, 0, 1, "%.3f");
+      if (cv) {
+        if (color_mode_ == 2) {
+          hsv[k] = v;
+          color_hue_[i] = hsv.x;
+          const Vec3 rgb = hsv_to_rgb(hsv.x, hsv.y, hsv.z);
+          e = Vec4(rgb.x, rgb.y, rgb.z, e.w);
+        }
+        else e[k] = v;
         ch = true;
+      }
+    }
+    if (has_alpha) {
+      Recti row = popup_row(row_h());
+      label({row.x + px(8), row.y, px(16), row.h}, "A");
+      Recti sl{row.x + px(26), row.y, row.w - px(90), row.h};
+      Recti track = sl.shrink(px(5));
+      checker(canvas, track, px(4));
+      for (int x = 0; x < track.w; x++) canvas.vline(track.x + x, track.y, track.bottom(), Color::from(e.xyz(), x / (float)std::max(1, track.w - 1)));
+      float a = e.w;
+      bool ca = slider(i * 7 + 3, sl, a, 0, 1);
+      if (color_mode_ == 0) {
+        int b = (int)(a * 255.0f + 0.5f);
+        if (int_field(i * 13 + 3, {row.right() - px(58), row.y + px(1), px(50), row.h - px(2)}, b, 0, 255)) {
+          a = b / 255.0f;
+          ca = true;
+        }
+      }
+      else ca |= float_field(i * 13 + 3, {row.right() - px(58), row.y + px(1), px(50), row.h - px(2)}, a, 0.005f, 0, 1, "%.3f");
+      if (ca) {
+        e.w = a;
+        ch = true;
+      }
+    }
+    /* Hex, as Unity shows it: RRGGBB, plus AA when there is an alpha. */
+    Recti hr = popup_row(row_h() + px(4));
+    auto b8 = [](float v) { return (int)(saturate(v) * 255 + 0.5f); };
+    std::string hex = has_alpha ? strprintf("%02X%02X%02X%02X", b8(e.x), b8(e.y), b8(e.z), b8(e.w))
+                                : strprintf("%02X%02X%02X", b8(e.x), b8(e.y), b8(e.z));
+    label({hr.x + px(8), hr.y, px(70), hr.h}, "Hexadecimal");
+    bool done = false;
+    if (text_field(i * 17, {hr.x + px(84), hr.y + px(2), hr.w - px(92), hr.h - px(4)}, hex, &done) && done) {
+      std::string h = hex[0] == '#' ? hex.substr(1) : hex;
+      unsigned v = 0;
+      if ((h.size() == 6 || h.size() == 8) && std::sscanf(h.c_str(), "%x", &v) == 1) {
+        if (h.size() == 8) {
+          e = Vec4(((v >> 24) & 255) / 255.0f, ((v >> 16) & 255) / 255.0f, ((v >> 8) & 255) / 255.0f, (v & 255) / 255.0f);
+          if (!has_alpha) e.w = 1.0f;
+        }
+        else e = Vec4(((v >> 16) & 255) / 255.0f, ((v >> 8) & 255) / 255.0f, (v & 255) / 255.0f, e.w);
+        ch = true;
+      }
+    }
+    /* Swatches: presets, then the colours used most recently. */
+    static const uint32_t presets[] = {0xFFFFFF, 0x808080, 0x000000, 0xE53935, 0xFB8C00, 0xFDD835,
+                                       0x43A047, 0x00ACC1, 0x1E88E5, 0x8E24AA, 0xD81B60, 0x795548};
+    std::vector<Vec4> swatches;
+    for (uint32_t p : presets) {
+      Vec3 v = Color::to_vec(p);
+      swatches.push_back(Vec4(v.x, v.y, v.z, 1.0f));
+    }
+    for (const Vec4 &rc : color_recent_) swatches.push_back(rc);
+    const int cell = px(18), per_row = std::max(1, (px(270) - px(16)) / (cell + px(3)));
+    for (size_t s = 0; s < swatches.size(); s += (size_t)per_row) {
+      Recti row = popup_row(cell + px(3));
+      for (size_t k = s; k < std::min(swatches.size(), s + (size_t)per_row); k++) {
+        Recti b{row.x + px(8) + (int)(k - s) * (cell + px(3)), row.y + px(1), cell, cell};
+        checker(canvas, b, px(3));
+        canvas.fill_rect(b, Color::from(swatches[k].xyz(), has_alpha ? swatches[k].w : 1.0f));
+        canvas.rect_outline(b, hovered(b) ? theme.text_bright : theme.border);
+        if (hovered(b) && in.pressed[0]) {
+          e = Vec4(swatches[k].x, swatches[k].y, swatches[k].z, has_alpha ? swatches[k].w : e.w);
+          ch = true;
+          consume_click();
+        }
       }
     }
     if (ch) {
       color_results_[i] = e;
+      /* Remember it among the recent colours (most recent first, 12 kept). */
+      auto same = [&](const Vec4 &a) { return length(a.xyz() - e.xyz()) < 1e-3f && std::fabs(a.w - e.w) < 1e-3f; };
+      color_recent_.erase(std::remove_if(color_recent_.begin(), color_recent_.end(), same), color_recent_.end());
+      if (active_ != (i ^ 0x5A5A1ull) && active_ != (i ^ 0x5A5A2ull)) {  // not while dragging in the square
+        color_recent_.insert(color_recent_.begin(), e);
+        if (color_recent_.size() > 12) color_recent_.resize(12);
+      }
       redraw = true;
     }
   });

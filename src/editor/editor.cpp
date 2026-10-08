@@ -492,6 +492,14 @@ void Editor::draw_menubar(const Recti &r) {
   });
   u.popup(u.id("Edit"), u.px(270), [this, has_sel] {
     auto &u = ui_;
+    if (u.menu_item("Blender Transform Keys (R rotate, S scale, T Scale tool)", nullptr, blender_keys_)) {
+      blender_keys_ = !blender_keys_;
+      save_prefs();
+    }
+    u.tooltip("G always grabs (move with the mouse, X / Y / Z to lock an axis).\n"
+              "On: R and S also rotate and scale the Blender way, and Unity's Scale tool moves from R to T.\n"
+              "Off: R stays Unity's Scale tool; press R or S during a grab to rotate or scale.");
+    u.menu_separator();
     if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), "Ctrl+Z", false, !undo_.empty() || pending_change_)) undo();
     if (u.menu_item("Redo", "Ctrl+Y", false, !redo_.empty())) redo();
     u.menu_separator();
@@ -774,7 +782,7 @@ void Editor::draw_statusbar(const Recti &r) {
 
 void Editor::handle_shortcuts() {
   auto &in = ui_.in;
-  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active) return;  // a running Push/Pull takes the keys
+  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active) return;  // a running Push/Pull, Inset or Bevel takes the keys
   auto P = [&](int k) { return in.key_pressed[k]; };
   bool ctrl = in.ctrl(), shift = in.shift(), alt = in.alt();
   if (ctrl) {
@@ -784,7 +792,10 @@ void Editor::handle_shortcuts() {
     if (P(KEY_O)) dialog_ = Dialog::OpenScene;
     if (P(KEY_Z) && !shift) undo();
     if (P(KEY_Y) || (P(KEY_Z) && shift)) redo();
-    if (P(KEY_D)) duplicate_selected();
+    if (P(KEY_D)) {
+      if (edit_mode_) edit_tool("duplicate");  // Edit Mode: the selected faces (Unity's Ctrl+D, Blender's Shift+D)
+      else duplicate_selected();
+    }
     if (P(KEY_R)) {
       /* In Edit Mode over the Scene view Ctrl+R is Blender's Loop Cut;
        * elsewhere it keeps Unity's meaning (refresh assets). */
@@ -808,10 +819,19 @@ void Editor::handle_shortcuts() {
         scene_->for_each([&](GameObject &g) { selection_.push_back(g.id); });
       }
     }
-    if (P(KEY_E) && edit_mode_) edit_tool("extrude");
-    if (P(KEY_I) && edit_mode_) edit_tool("inset");
-    if (P(KEY_B) && edit_mode_) edit_tool(shift ? "bridge" : "bevel");
-    if (P(KEY_X) && edit_mode_ && !shift) edit_tool("dissolve");
+    if (P(KEY_E) && edit_mode_) extrude_and_move();  // Blender's E: extrude, then move along the normal
+    if (P(KEY_I) && edit_mode_ && !shift) modal_begin("inset");  // drag to adjust, like Blender's I
+    if (P(KEY_B) && edit_mode_) {
+      if (shift) edit_tool("bridge");
+      else modal_begin("bevel");  // drag to adjust, wheel for segments (Blender's Ctrl+B)
+    }
+    if (P(KEY_X) && edit_mode_ && !shift)  /* Blender's Ctrl+X dissolves what the mode selects */
+      edit_tool(elem_ == EditElement::Vertex ? "dissolve_vertices" : elem_ == EditElement::Edge ? "dissolve" : "dissolve_faces");
+    if (P(KEY_T) && edit_mode_) edit_tool("triangulate_faces");
+    if (P(KEY_L) && edit_mode_) edit_tool("select_linked");
+    if (P(KEY_I) && edit_mode_ && shift) edit_tool("select_invert");
+    if (P(KEY_EQUALS) && edit_mode_) edit_tool("select_more");
+    if (P(KEY_MINUS) && edit_mode_) edit_tool("select_less");
     if (P(KEY_F) && alt) {
       for (GameObject *g : selected_objects(true)) g->set_world_position(cam_.pivot);
       mark_changed("Move To View");
@@ -836,7 +856,13 @@ void Editor::handle_shortcuts() {
     if (P(KEY_Q)) tool_ = Tool::View;
     if (P(KEY_W)) tool_ = Tool::Move;
     if (P(KEY_E)) tool_ = Tool::Rotate;
-    if (P(KEY_R)) tool_ = Tool::Scale;
+    if (P(KEY_R) && !alt) {
+      if (blender_keys_) transform_begin(1);  // Blender: R rotates (the Scale tool is on T)
+      else tool_ = Tool::Scale;
+    }
+    if (P(KEY_T) && blender_keys_) tool_ = Tool::Scale;
+    if (P(KEY_G) && !alt && !shift) transform_begin(0);  // Blender's grab: no Unity key to clash with
+    if (P(KEY_S) && blender_keys_ && !alt) transform_begin(2);
     if (P(KEY_Y)) tool_ = Tool::Transform;
     if (P(KEY_P) && !alt && edit_mode_) edit_tool("push_pull");  // SketchUp: P (a face operation)
     if (P(KEY_F) && !(alt && edit_mode_)) frame_selected();
@@ -859,6 +885,10 @@ void Editor::handle_shortcuts() {
       if (P(KEY_N) && shift && !alt) edit_tool("recalc_normals");
       if (P(KEY_P) && alt) edit_tool("push_through");
       if (P(KEY_J) && !alt) edit_tool("connect");
+      if (P(KEY_D) && shift && !alt) edit_tool("duplicate");          // Blender: Shift+D
+      if (P(KEY_J) && alt) edit_tool("tris_to_quads");                  // Blender: Alt+J
+      if (P(KEY_S) && alt) edit_tool(shift ? "to_sphere" : "shrink_fatten");  // Blender: Alt+S / Shift+Alt+S
+      if (P(KEY_I) && !alt) modal_begin("inset");  // Blender's I (Ctrl+I works too)
     }
   }
 }
@@ -1524,8 +1554,27 @@ void Editor::mesh_op(const std::string &op) {
     else if (op == "triangulate") meshops::triangulate(m);
     else if (op == "merge") Log::info("Merged %zu vertices", meshops::merge_by_distance(m, merge_dist_));
     else if (op == "flip") meshops::flip_normals(m);
-    else if (op == "shade_smooth") m.smooth = true;
-    else if (op == "shade_flat") m.smooth = false;
+    else if (op == "shade_smooth" || op == "shade_flat") {
+      /* In Edit Mode with faces selected: just those faces (Blender: Face >
+       * Shade Smooth). Otherwise the whole object. */
+      const bool on = op == "shade_smooth";
+      const bool faces = edit_mode_ && g->id == edit_obj_ && face_sel_.size() == m.face_count() &&
+                         std::count(face_sel_.begin(), face_sel_.end(), 1) > 0;
+      if (faces) {
+        for (size_t f = 0; f < m.face_count(); f++)
+          if (face_sel_[f]) m.set_face_smooth(f, on);
+      }
+      else {
+        m.smooth = on;
+        m.face_smooth.clear();
+      }
+    }
+    else if (op == "mark_sharp" || op == "clear_sharp") {
+      if (!edit_mode_ || g->id != edit_obj_) continue;
+      std::vector<std::pair<uint32_t, uint32_t>> edges(m.edge_cache().begin(), m.edge_cache().end());
+      for (auto &e : edges)
+        if (edge_is_selected(e.first, e.second)) m.set_sharp(e.first, e.second, op == "mark_sharp");
+    }
     else if (starts_with(op, "research:")) {
       if (!research::apply(op.substr(9), m)) continue;
     }
@@ -1762,6 +1811,17 @@ void Editor::run_console_command(const std::string &line) {
     if (arg(1, "") == "vertex") elem_ = EditElement::Vertex;
     if (arg(1, "") == "all" || arg(2, "") == "all") edit_select_all(true);
   }
+  else if (c == "esel") {
+    /* esel <a> <b> [<c> <d> ...]: select exactly these edges (vertex pairs), edge mode */
+    if (!edit_mode_) enter_edit_mode();
+    if (edit_object()) {
+      if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
+      edge_sel_.clear();
+      for (size_t i = 1; i + 1 < t.size(); i += 2)
+        edge_sel_.insert(Mesh::edge_key((uint32_t)std::strtoul(t[i].c_str(), nullptr, 10), (uint32_t)std::strtoul(t[i + 1].c_str(), nullptr, 10)));
+      verts_from_edges();
+    }
+  }
   else if (c == "vsel") {
     /* vsel <v0> <v1> ... : select exactly these vertices (edit mode) */
     if (!edit_mode_) enter_edit_mode();
@@ -1860,6 +1920,7 @@ void Editor::run_console_command(const std::string &line) {
     else if (k == "normal") last_op_.along_normal = v;
     else if (k == "orientation") last_op_.orientation = (int)v;
     else if (k == "fuse") last_op_.fuse = v != 0;
+    else if (k == "clamp") last_op_.clamp = v != 0;
     else if (k == "move") last_op_.move = Vec3(v, (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str()));
     else { Log::warn("redo: unknown parameter '%s'", k.c_str()); return; }
     run_last_op(false);
@@ -2110,6 +2171,7 @@ void Editor::load_prefs() {
     else if (k == "stats") show_stats_ = v == "1";
     else if (k == "snap_move") snap_move_ = (float)std::atof(v.c_str());
     else if (k == "snap_rot") snap_rot_ = (float)std::atof(v.c_str());
+    else if (k == "blender_transform_keys") blender_keys_ = v == "1";
     else if (k == "render_devices_off") {
       render_devices_off_.clear();
       size_t a = 0;
@@ -2131,7 +2193,7 @@ void Editor::save_prefs() {
   for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
-                            show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str());
+                            show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0);
   fs::write_file(prefs_path_, s);
 }
 

@@ -39,6 +39,12 @@ struct Reflector {
   virtual void field(const char *name, bool &v) = 0;
   virtual void field(const char *name, Vec3 &v) = 0;
   virtual void color(const char *name, Vec3 &v) = 0;
+  /* A colour with an alpha (Unity's Color): the Inspector shows one field with an
+   * alpha bar; files, undo and hashing see the colour and a float named alpha_name. */
+  virtual void color_alpha(const char *name, Vec3 &rgb, const char *alpha_name, float &alpha) {
+    color(name, rgb);
+    field(alpha_name, alpha, 0.01f, 0.0f, 1.0f);
+  }
   virtual void enumeration(const char *name, int &v, const char *const *options, int count) = 0;
   virtual void text(const char *name, std::string &v) = 0;
   virtual void mesh(const char *name, MeshPtr &m) = 0;

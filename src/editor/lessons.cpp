@@ -191,6 +191,10 @@ Region extrude duplicates the selected faces' vertices and moves the copies alon
 ? You extrude one face of a cube. How many faces does the cube have now? | 10. The original face moves up as the cap and 4 side quads are added: 6 + 4 = 10.
 ! create:Cube | Create a Cube
 ! edit | Enter Edit Mode on the active object
+# Blender's modal keys, Unity's navigation
+Navigation stays Unity's (hold RMB to fly, Alt+LMB orbit, MMB pan), and so do the W / E / R gizmo tools. Editing works the Blender way. G grabs the selection and moves it with the mouse. During a G, R rotates and S scales. X, Y or Z lock to an axis (press twice for the object's own axis), and Shift+X / Y / Z lock to the plane without it. Type a number for an exact value, hold Ctrl to snap, then click or press Enter to keep it, or press Esc to cancel. Ctrl+E extrudes and then moves along the normal, I insets as you move toward the centre, and Ctrl+B bevels as you move away (the wheel sets the segments). Edit > Blender Transform Keys makes R and S rotate and scale directly. docs/USABILITY.md explains how the two keymaps share the keyboard.
+@ blender/source/blender/editors/transform/transform_mode_translate.cc
+! cmd:select Cube; edit face; fsel facing 0 1 0 | Select the Cube's top face, then press G, Z, type 0.5 and Enter in the Scene view
 )"},
     {"Modifiers vs Components", "Non-destructive editing and Catmull-Clark", R"(
 Blender's modifier stack changes a mesh on the fly without touching the original: Subdivision Surface, Mirror, Smooth... Each modifier feeds the next. Unity has no modifier stack. Any procedural change is done by a script component.

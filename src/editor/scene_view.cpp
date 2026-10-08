@@ -36,7 +36,8 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_rect_ = view;
   draw_scene_overlay_bar(bar);
   if (view.w < 8 || view.h < 8) return;
-  scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my));
+  scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
+                   !cam_preview_rect_.contains(u.in.mx, u.in.my);
   scene_navigation(view);
 
   /* Gizmo math and picking need this frame's camera matrices before we
@@ -46,6 +47,8 @@ void Editor::draw_scene_view(const Recti &r) {
   bool gizmo_busy = gizmo_update(view);
   /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
   if (pushpull_update(view)) gizmo_busy = true;
+  if (modal_update(view)) gizmo_busy = true;
+  if (transform_update(view)) gizmo_busy = true;
 
   auto &in = u.in;
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
@@ -92,6 +95,8 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_scene_icons(view);
   if (show_gizmos_) draw_gizmo(view);
   draw_pushpull(view);
+  draw_modal(view);
+  draw_transform(view);
   draw_view_gizmo(view);
 
   /* Statistics overlay (Blender: Viewport Overlays > Statistics). */
@@ -127,6 +132,7 @@ void Editor::draw_scene_view(const Recti &r) {
     }
   }
   if (show_gizmos_ && !playing_) draw_camera_preview(view);
+  else cam_preview_rect_ = Recti{};
   if (edit_mode_ && last_op_valid()) draw_last_op_panel(view);
   else last_op_rect_ = Recti{};
   if (playing_) u.canvas.rect_outline(view, Color::hex(0x3A79BB, 120), u.px(2));
@@ -173,7 +179,7 @@ void Editor::scene_navigation(const Recti &view) {
   float k_pan = (2.0f * cam_.distance * std::tan(cam_.fov * 0.5f * kDeg2Rad)) / std::max(1, view.h);
 
   if (drag_ == Drag::None && scene_hovered_ && !u.any_active()) {
-    if (in.pressed[1] && !pp_.active) {  // a right-click cancels a running Push/Pull instead
+    if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active) {  // a right-click cancels a running Push/Pull, Inset or Bevel instead
       drag_ = in.alt() ? Drag::Zoom : Drag::Fly;
       fly_last_ = now;
       fly_accel_ = 1.0f;
@@ -233,7 +239,7 @@ void Editor::scene_navigation(const Recti &view) {
       break;
     default: break;
   }
-  if (scene_hovered_ && drag_ == Drag::None && in.wheel_y != 0) {
+  if (scene_hovered_ && drag_ == Drag::None && in.wheel_y != 0 && !modal_.active) {  // a running Bevel takes the wheel
     cam_.animating = false;
     cam_.distance = clampf(cam_.distance * std::pow(0.88f, in.wheel_y), 0.01f, 100000.0f);
   }
@@ -414,7 +420,7 @@ void Editor::render_overlays(const Recti &) {
       vert_sel_.resize(m.vert_count(), 0);
       face_sel_.resize(m.face_count(), 0);
       for (auto &e : m.edge_cache()) {
-        bool s = vert_sel_[e.first] && vert_sel_[e.second];
+        bool s = edge_is_selected(e.first, e.second);
         bool seam = !m.seams.empty() && m.is_seam(e.first, e.second);
         uint32_t col = s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
         scene_r3d_.line(w.point(m.positions[e.first]), w.point(m.positions[e.second]), col, true, 5e-4f);
@@ -640,7 +646,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1073,6 +1079,7 @@ void Editor::enter_edit_mode() {
   const Mesh &m = *g->get<MeshFilter>()->mesh;
   vert_sel_.assign(m.vert_count(), 0);
   face_sel_.assign(m.face_count(), 0);
+  edge_sel_.clear();
   Log::info("Edit Mode on '%s': 1 vertices, 2 edges, 3 faces - each mode has its own tools (Mesh menu, Inspector). P Push/Pull faces, Tab to exit.", g->name.c_str());
 }
 
@@ -1100,12 +1107,45 @@ void Editor::sync_vert_face_selection(bool from_faces) {
       face_sel_[f] = all;
     }
   }
+  if (elem_ == EditElement::Edge) edges_from_verts();
+}
+
+bool Editor::edge_is_selected(uint32_t a, uint32_t b) const {
+  if (elem_ == EditElement::Edge) return edge_sel_.count(Mesh::edge_key(a, b)) > 0;
+  return a < vert_sel_.size() && b < vert_sel_.size() && vert_sel_[a] && vert_sel_[b];
+}
+
+void Editor::edges_from_verts() {
+  edge_sel_.clear();
+  if (!edit_object()) return;
+  const Mesh &m = **edit_mesh_ptr();
+  for (auto &e : m.edge_cache())
+    if (e.first < vert_sel_.size() && e.second < vert_sel_.size() && vert_sel_[e.first] && vert_sel_[e.second])
+      edge_sel_.insert(Mesh::edge_key(e.first, e.second));
+}
+
+void Editor::verts_from_edges() {
+  if (!edit_object()) return;
+  const Mesh &m = **edit_mesh_ptr();
+  vert_sel_.assign(m.vert_count(), 0);
+  face_sel_.assign(m.face_count(), 0);
+  for (auto &e : m.edge_cache())
+    if (edge_sel_.count(Mesh::edge_key(e.first, e.second))) vert_sel_[e.first] = vert_sel_[e.second] = 1;
+  /* A face is selected when all of its edges are (Blender's edge-mode flush). */
+  for (size_t f = 0; f < m.face_count(); f++) {
+    bool all = m.face_size(f) > 0;
+    for (uint32_t k = 0; k < m.face_size(f) && all; k++)
+      all = edge_sel_.count(Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])) > 0;
+    face_sel_[f] = all;
+  }
 }
 
 void Editor::edit_select_all(bool sel) {
   if (!edit_object()) return;
   std::fill(vert_sel_.begin(), vert_sel_.end(), sel ? 1 : 0);
   std::fill(face_sel_.begin(), face_sel_.end(), sel ? 1 : 0);
+  if (sel) edges_from_verts();
+  else edge_sel_.clear();
 }
 
 void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
@@ -1134,11 +1174,13 @@ void Editor::edit_pick(const Recti &view, int mx, int my, int mode) {
   }
   else if (elem_ == EditElement::Edge) {
     uint32_t a, b;
+    /* The edge itself, not its two ends: two opposite sides of a quad stay two edges. */
     if (edit_pick_edge(view, mx, my, a, b)) {
-      uint8_t on = mode == SEL_TOGGLE ? !(vert_sel_[a] && vert_sel_[b]) : 1;
-      vert_sel_[a] = vert_sel_[b] = on;
+      const uint64_t k = Mesh::edge_key(a, b);
+      if (mode == SEL_TOGGLE && edge_sel_.count(k)) edge_sel_.erase(k);
+      else edge_sel_.insert(k);
     }
-    sync_vert_face_selection(false);
+    verts_from_edges();
   }
   else {
     Ray ray = scene_r3d_.screen_ray((float)(mx - view.x), (float)(my - view.y));
@@ -1172,7 +1214,12 @@ void Editor::edit_box_select(const Recti &view, Recti box, int mode) {
     if (!box.contains((int)(view.x + s.x), (int)(view.y + s.y))) return false;
     return z <= scene_rt_.depth_at((int)s.x, (int)s.y) + 2e-3f;
   };
-  if (elem_ != EditElement::Face) {
+  if (elem_ == EditElement::Edge) {
+    for (auto &e : m.edge_cache())
+      if (visible_in_box(m.positions[e.first]) && visible_in_box(m.positions[e.second])) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
+    verts_from_edges();
+  }
+  else if (elem_ != EditElement::Face) {
     for (size_t i = 0; i < m.vert_count(); i++)
       if (visible_in_box(m.positions[i])) vert_sel_[i] = 1;
     sync_vert_face_selection(false);
@@ -1191,7 +1238,11 @@ void Editor::edit_op(const std::string &op) {
   Mesh &m = *mesh_make_mutable(mp);
   vert_sel_.resize(m.vert_count(), 0);
   face_sel_.resize(m.face_count(), 0);
-  if (elem_ != EditElement::Face) {
+  /* In edge mode the tools read exactly the selected edges. */
+  const std::unordered_set<uint64_t> edges = edge_sel_;
+  meshops::EdgeSelectionScope scope(elem_ == EditElement::Edge ? &edges : nullptr);
+  if (elem_ == EditElement::Edge) verts_from_edges();
+  else if (elem_ != EditElement::Face) {
     /* Derive faces from vertices like Blender does when switching modes. */
     for (size_t f = 0; f < m.face_count(); f++) {
       bool all = true;
@@ -1201,7 +1252,7 @@ void Editor::edit_op(const std::string &op) {
   }
   size_t nsel = std::count(face_sel_.begin(), face_sel_.end(), 1);
   if (edit_op_redoable(op)) {
-    if ((op == "extrude" || op == "inset" || op == "push_through" || op == "push_pull") && !nsel) {
+    if ((op == "extrude" || op == "inset" || op == "push_through" || op == "push_pull" || op == "poke" || op == "extrude_individual") && !nsel) {
       Log::warn("Select faces first (press 3 for face mode)");
       return;
     }
@@ -1211,15 +1262,21 @@ void Editor::edit_op(const std::string &op) {
     L.before = std::make_shared<Mesh>(m);
     L.vsel = vert_sel_;
     L.fsel = face_sel_;
+    L.esel = edges;
     L.elem = elem_;
     L.fuse = auto_fuse_;
     if (op == "extrude") L.amount = extrude_dist_;
     else if (op == "inset") L.amount = inset_amount_;
-    else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; }
+    else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; L.clamp = bevel_clamp_; }
     else if (op == "bridge") L.segments = bridge_segments_;
     else if (op == "subdivide_edges") L.segments = subdivide_cuts_;
     else if (op == "loopcut") { L.segments = loop_cuts_; L.amount = loop_slide_; }
     else if (op == "smooth") L.amount = smooth_factor_;
+    else if (op == "poke") L.amount = 0.0f;
+    else if (op == "extrude_individual") L.amount = extrude_dist_;
+    else if (op == "shrink_fatten") L.amount = 0.1f;
+    else if (op == "to_sphere") L.amount = 1.0f;
+    else if (op == "randomize") { L.amount = 0.05f; L.segments = 1; }
     else if (op == "push_pull") L.amount = pp_last_distance_ != 0 ? pp_last_distance_ : extrude_dist_;
     last_op_ = std::move(L);
     run_last_op(true);
@@ -1251,7 +1308,7 @@ void Editor::edit_op(const std::string &op) {
         uint32_t n = m.face_size(f);
         bool any = false;
         for (uint32_t k = 0; k < n; k++)
-          any = any || (elem_ == EditElement::Vertex ? vert_sel_[v[k]] : vert_sel_[v[k]] && vert_sel_[v[(k + 1) % n]]);
+          any = any || (elem_ == EditElement::Vertex ? vert_sel_[v[k]] : meshops::edge_selected(v[k], v[(k + 1) % n], vert_sel_));
         face_sel_[f] = any;
       }
     }
@@ -1279,11 +1336,96 @@ void Editor::edit_op(const std::string &op) {
     meshops::recalc_normals_outside(m);
     Log::info("Recalculated normals (outside)");
   }
+  else if (op == "triangulate_faces" || op == "tris_to_quads" || op == "flip_faces" || op == "duplicate" || op == "split" ||
+           op == "dissolve_faces") {
+    if (!nsel) {
+      Log::warn("Select faces first (press 3 for face mode)");
+      return;
+    }
+    size_t n = op == "triangulate_faces" ? meshops::triangulate_faces(m, face_sel_)
+               : op == "tris_to_quads"   ? meshops::tris_to_quads(m, face_sel_)
+               : op == "flip_faces"      ? meshops::flip_faces(m, face_sel_)
+               : op == "duplicate"       ? meshops::duplicate_faces(m, face_sel_)
+               : op == "split"           ? meshops::split_faces(m, face_sel_)
+                                         : meshops::dissolve_faces(m, face_sel_);
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.resize(m.face_count(), 0);
+    sync_vert_face_selection(true);
+    Log::info("%s: %zu", op.c_str(), n);
+    if (op == "duplicate") {
+      /* Blender's Shift+D: the copy is selected, ready to move (W). */
+      m.touch();
+      mark_changed("Edit: " + op);
+      tool_ = Tool::Move;
+      Log::info("Duplicated - move it with the gizmo (W)");
+      return;
+    }
+  }
+  else if (op == "dissolve_vertices") {
+    size_t n = meshops::dissolve_vertices(m, vert_sel_);
+    if (!n) {
+      Log::warn("Select vertices to dissolve first (press 1 for vertex mode)");
+      return;
+    }
+    face_sel_.assign(m.face_count(), 0);
+    Log::info("Dissolved vertices");
+  }
+  else if (op == "edge_split") {
+    if (!meshops::edge_split(m, vert_sel_)) {
+      Log::warn("Select edges between two faces first (press 2 for edge mode)");
+      return;
+    }
+    vert_sel_.resize(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    sync_vert_face_selection(false);
+    Log::info("Edge Split");
+  }
+  else if (op == "select_linked" || op == "select_more" || op == "select_less" || op == "select_invert" ||
+           op == "select_non_manifold" || op == "select_ring") {
+    /* Selection only: no undo step, nothing touched. */
+    if (op == "select_ring") {
+      std::vector<uint64_t> sel(edge_sel_.begin(), edge_sel_.end());
+      if (elem_ != EditElement::Edge || sel.empty()) {
+        Log::warn("Select Edge Ring: select an edge first (press 2 for edge mode)");
+        return;
+      }
+      for (uint64_t k : sel)
+        for (auto &e : meshops::edge_ring_edges(m, (uint32_t)(k >> 32), (uint32_t)(k & 0xFFFFFFFF))) edge_sel_.insert(Mesh::edge_key(e.first, e.second));
+      verts_from_edges();
+      return;
+    }
+    if (elem_ == EditElement::Face && op != "select_non_manifold") {
+      /* Faces: through the vertices, then back to whole faces. */
+      sync_vert_face_selection(true);
+    }
+    if (op == "select_linked") meshops::select_linked(m, vert_sel_);
+    else if (op == "select_more") meshops::grow_selection(m, vert_sel_, true);
+    else if (op == "select_less") meshops::grow_selection(m, vert_sel_, false);
+    else if (op == "select_invert") {
+      if (elem_ == EditElement::Face) {
+        for (auto &f : face_sel_) f = !f;
+        sync_vert_face_selection(true);
+        return;
+      }
+      if (elem_ == EditElement::Edge) {
+        std::unordered_set<uint64_t> inv;
+        for (auto &e : m.edge_cache())
+          if (!edge_sel_.count(Mesh::edge_key(e.first, e.second))) inv.insert(Mesh::edge_key(e.first, e.second));
+        edge_sel_ = inv;
+        verts_from_edges();
+        return;
+      }
+      for (auto &v : vert_sel_) v = !v;
+    }
+    else meshops::select_non_manifold(m, vert_sel_);
+    sync_vert_face_selection(false);  // faces: those whose corners are all selected
+    return;
+  }
   else if (op == "loopcut" || op == "select_loop") {
     /* Uses the selected edge (exactly two adjacent selected vertices). */
     uint32_t a = UINT32_MAX, b = UINT32_MAX;
     for (auto &e : m.edge_cache())
-      if (vert_sel_[e.first] && vert_sel_[e.second]) {
+      if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
         if (a != UINT32_MAX) { a = UINT32_MAX; break; }
         a = e.first;
         b = e.second;
@@ -1320,6 +1462,7 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"connect", "Connect Vertex Path", "J", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
       {"fill", "Make Face", "Alt+F", "Make a face from the selected vertices (in edge mode: fill the selected hole). Blender: F.", V | E},
       {"smooth", "Smooth Vertices", "", "Laplacian smoothing of the selected vertices. Blender: Smooth Vertices.", V},
+      {"dissolve_vertices", "Dissolve Vertices", "Ctrl+X", "Remove the selected vertices; the faces around each one merge (a vertex on a straight edge just goes).\nBlender: Dissolve Vertices.", V},
       {"bevel", "Bevel", "Ctrl+B", "Round off the selected edges with a strip of faces. Blender: Ctrl+B.", E},
       {"loopcut", "Loop Cut", "Ctrl+R", "Cut the quad ring across the selected edge (or hover an edge and press Ctrl+R). Blender: Ctrl+R.", E},
       {"select_loop", "Select Edge Loop", "Double-click", "Extend the selected edge to its whole loop. Blender: Alt+click.", E},
@@ -1328,14 +1471,36 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"collapse", "Collapse", "", "Merge each selected edge (or connected group) into one vertex at its centre. Blender: Collapse.", E},
       {"mark_seam", "Mark Seam", "", "UV unwrapping cuts the mesh along these edges. Blender: Mark Seam.", E},
       {"clear_seam", "Clear Seam", "", "Remove UV seams from the selected edges.", E},
+      {"mark_sharp", "Mark Sharp", "", "Smooth shading stops at these edges (a hard edge). Blender: Edge > Mark Sharp.", E},
+      {"clear_sharp", "Clear Sharp", "", "Let smooth shading run across the selected edges again.", E},
+      {"edge_split", "Edge Split", "", "Disconnect the faces along the selected edges (hard edges, or to pull pieces apart). Blender: Edge Split.", E},
+      {"select_ring", "Select Edge Ring", "", "Extend the selected edges across their quads (the rungs of a ladder). Blender: Ctrl+Alt+click.", E},
       {"push_pull", "Push/Pull", "P", "Move the selected faces along their normal like SketchUp: sides stretch into coplanar\nneighbours, pushing to the far side makes a hole, pulling onto a face joins it.\nMove the mouse or type a distance, click to confirm, Esc to cancel.", F},
       {"extrude", "Extrude", "Ctrl+E", "Extrude the selected faces along their normals. Blender: E.", F},
       {"inset", "Inset", "Ctrl+I", "Make a smaller copy of each selected face inside it. Blender: I.", F},
       {"push_through", "Push Through", "Alt+P", "Cut a hole through the object along the selected face's normal.\nTip: Inset first so the hole has a rim.", F},
       {"fuse", "Fuse onto Face", "", "Join selected faces that lie on another face of the mesh (the touching area becomes an opening).", F},
+      {"extrude_individual", "Extrude Individual", "", "Extrude each selected face on its own, with its own walls. Blender: Extrude Individual Faces.", F},
+      {"poke", "Poke Faces", "", "Split each selected face into a fan of triangles around its centre. Blender: Face > Poke Faces.", F},
+      {"triangulate_faces", "Triangulate", "Ctrl+T", "Split the selected faces into triangles. Blender: Ctrl+T.", F},
+      {"tris_to_quads", "Tris to Quads", "Alt+J", "Join pairs of selected triangles into quads where they are nearly flat. Blender: Alt+J.", F},
+      {"dissolve_faces", "Dissolve Faces", "Ctrl+X", "Merge each connected group of selected faces into one face. Blender: Dissolve Faces.", F},
+      {"flip_faces", "Flip Normals", "", "Turn the selected faces around (their normals point the other way). Blender: Mesh > Normals > Flip.", F},
+      {"duplicate", "Duplicate", "Shift+D", "Copy the selected faces in place; the copy is selected, ready to move. Blender: Shift+D. Unity: Ctrl+D.", F},
+      {"split", "Split", "", "Detach the selected faces from the rest of the mesh (same place, own vertices). Blender: Y.", F},
+      {"shade_smooth", "Shade Smooth", "", "Smooth shading on the selected faces only (Blender: Face > Shade Smooth).\nIt stops at flat faces and at edges marked sharp.", F},
+      {"shade_flat", "Shade Flat", "", "Flat (faceted) shading on the selected faces only.", F},
       {"bridge", "Bridge", "Ctrl+Shift+B", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
       {"delete", "Delete", "Del", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
       {"recalc_normals", "Recalculate Normals", "Shift+N", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
+      {"shrink_fatten", "Shrink/Fatten", "Alt+S", "Move the selected vertices along their normals (F9 sets the distance). Blender: Alt+S.", ALL},
+      {"to_sphere", "To Sphere", "Shift+Alt+S", "Pull the selected vertices onto a sphere around their centre (F9 sets how far). Blender: Shift+Alt+S.", ALL},
+      {"randomize", "Randomize", "", "Jitter the selected vertices (F9: amount and seed). Blender: Transform > Randomize.", ALL},
+      {"select_linked", "Select Linked", "Ctrl+L", "Select everything connected to the selection. Blender: Ctrl+L.", ALL},
+      {"select_more", "Select More", "Ctrl+=", "Grow the selection by one ring. Blender: Ctrl+Numpad +.", ALL},
+      {"select_less", "Select Less", "Ctrl+-", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
+      {"select_invert", "Invert Selection", "Ctrl+Shift+I", "Select what isn't, deselect what is. Blender: Ctrl+I.", ALL},
+      {"select_non_manifold", "Select Non-Manifold", "", "Select holes and edges shared by more than two faces. Blender: Select > All by Trait > Non Manifold.", ALL},
   };
   return ops;
 }
@@ -1365,6 +1530,7 @@ void Editor::edit_tool(const std::string &op) {
   }
   if (op == "push_pull") pushpull_begin();
   else if (op == "mark_seam" || op == "clear_seam") uv_op(op);
+  else if (op == "mark_sharp" || op == "clear_sharp" || op == "shade_smooth" || op == "shade_flat") mesh_op(op);
   else edit_op(op);
 }
 
@@ -1373,6 +1539,7 @@ void Editor::set_edit_element(EditElement e) {
   elem_ = e;
   if (e == EditElement::Face) sync_vert_face_selection(false);
   else if (old == EditElement::Face) sync_vert_face_selection(true);
+  if (e == EditElement::Edge && old != EditElement::Edge) edges_from_verts();  // from here on edges are kept themselves
 }
 
 bool Editor::edit_pick_edge(const Recti &view, int mx, int my, uint32_t &a, uint32_t &b) {
@@ -1411,9 +1578,21 @@ void Editor::edit_select_loop(const Recti &view, int mx, int my, bool add) {
   vert_sel_.resize(m.vert_count(), 0);
   if (!add) edit_select_all(false);
   auto loop = meshops::edge_loop(m, a, b);
-  for (uint32_t v : loop) vert_sel_[v] = 1;
-  if (elem_ == EditElement::Face) elem_ = EditElement::Edge;
-  sync_vert_face_selection(false);
+  if (elem_ == EditElement::Face) set_edit_element(EditElement::Edge);
+  if (elem_ == EditElement::Edge) {
+    /* The loop's own edges (consecutive vertices), not every edge among them. */
+    std::unordered_set<uint64_t> all;
+    for (auto &e : m.edge_cache()) all.insert(Mesh::edge_key(e.first, e.second));
+    for (size_t i = 0; i < loop.size(); i++) {
+      const uint64_t k = Mesh::edge_key(loop[i], loop[(i + 1) % loop.size()]);
+      if (all.count(k)) edge_sel_.insert(k);
+    }
+    verts_from_edges();
+  }
+  else {
+    for (uint32_t v : loop) vert_sel_[v] = 1;
+    sync_vert_face_selection(false);
+  }
   Log::info("Edge loop: %zu vertices", loop.size());
 }
 
@@ -1427,10 +1606,9 @@ void Editor::edit_loop_cut_at(const Recti &view, int mx, int my) {
   }
   /* Cut at the hovered edge: select it and run the (re-adjustable) operator. */
   const Mesh &m = **edit_mesh_ptr();
-  vert_sel_.assign(m.vert_count(), 0);
-  vert_sel_[a] = vert_sel_[b] = 1;
-  face_sel_.assign(m.face_count(), 0);
-  if (elem_ == EditElement::Face) elem_ = EditElement::Edge;
+  if (elem_ != EditElement::Edge) set_edit_element(EditElement::Edge);
+  edge_sel_ = {Mesh::edge_key(a, b)};
+  verts_from_edges();
   edit_op("loopcut");
 }
 
@@ -1549,7 +1727,8 @@ void Editor::draw_game_view(const Recti &r) {
 
 bool Editor::edit_op_redoable(const std::string &op) const {
   return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" ||
-         op == "loopcut" || op == "smooth" || op == "push_pull";
+         op == "loopcut" || op == "smooth" || op == "push_pull" || op == "poke" || op == "extrude_individual" ||
+         op == "shrink_fatten" || op == "to_sphere" || op == "randomize";
 }
 
 bool Editor::last_op_valid() {
@@ -1584,6 +1763,7 @@ void Editor::run_last_op(bool first) {
   vert_sel_ = L.vsel;
   face_sel_ = L.fsel;
   elem_ = L.elem;
+  meshops::EdgeSelectionScope scope(L.elem == EditElement::Edge ? &L.esel : nullptr);
   std::string err;
   bool ok = true;
   const std::string &op = L.op;
@@ -1593,7 +1773,7 @@ void Editor::run_last_op(bool first) {
     vert_sel_.assign(m.vert_count(), 0);
     sync_vert_face_selection(true);
   }
-  else if (op == "bevel") ok = meshops::bevel_edges(m, vert_sel_, face_sel_, L.amount, L.segments, &err);
+  else if (op == "bevel") ok = meshops::bevel_edges(m, vert_sel_, face_sel_, L.amount, L.segments, &err, L.clamp);
   else if (op == "bridge") {
     ok = meshops::bridge(m, vert_sel_, face_sel_, L.segments, L.twist, L.smooth, L.path, &err);
     if (ok && L.elem == EditElement::Face) sync_vert_face_selection(true);
@@ -1611,7 +1791,7 @@ void Editor::run_last_op(bool first) {
   else if (op == "loopcut") {
     uint32_t a = UINT32_MAX, b = UINT32_MAX;
     for (auto &e : m.edge_cache())
-      if (e.first < vert_sel_.size() && e.second < vert_sel_.size() && vert_sel_[e.first] && vert_sel_[e.second]) {
+      if (meshops::edge_selected(e.first, e.second, vert_sel_)) {
         if (a != UINT32_MAX) {
           a = UINT32_MAX;
           break;
@@ -1634,6 +1814,25 @@ void Editor::run_last_op(bool first) {
   }
   else if (op == "smooth") {
     meshops::smooth_laplacian(m, L.amount, std::max(1, L.segments), &vert_sel_);
+  }
+  else if (op == "poke") {
+    ok = meshops::poke_faces(m, face_sel_, L.amount) > 0;
+    if (!ok) err = "Select faces first (press 3 for face mode)";
+    vert_sel_.assign(m.vert_count(), 0);
+    sync_vert_face_selection(true);
+  }
+  else if (op == "extrude_individual") {
+    ok = meshops::extrude_individual(m, face_sel_, L.amount) > 0;
+    if (!ok) err = "Select faces first (press 3 for face mode)";
+    vert_sel_.assign(m.vert_count(), 0);
+    sync_vert_face_selection(true);
+  }
+  else if (op == "shrink_fatten" || op == "to_sphere" || op == "randomize") {
+    ok = std::count(vert_sel_.begin(), vert_sel_.end(), 1) > 0;
+    if (!ok) err = "Select vertices first";
+    else if (op == "shrink_fatten") meshops::shrink_fatten(m, vert_sel_, L.amount);
+    else if (op == "to_sphere") meshops::to_sphere(m, vert_sel_, L.amount);
+    else meshops::randomize(m, vert_sel_, L.amount, (uint32_t)std::max(1, L.segments));
   }
   if (!ok) {
     mf->mesh = L.before;  // back to the untouched mesh (copied on the next edit)
@@ -1691,12 +1890,14 @@ void Editor::draw_last_op_panel(const Recti &view) {
       {"bevel", "Bevel"},              {"bridge", "Bridge"},
       {"push_through", "Push Through"}, {"subdivide_edges", "Subdivide Edges"},
       {"loopcut", "Loop Cut"},         {"smooth", "Smooth Vertices"},
-      {"push_pull", "Push/Pull"}};
+      {"push_pull", "Push/Pull"},     {"poke", "Poke Faces"},
+      {"extrude_individual", "Extrude Individual Faces"}, {"shrink_fatten", "Shrink/Fatten"},
+      {"to_sphere", "To Sphere"},      {"randomize", "Randomize"}};
   auto it = titles.find(L.op);
   std::string title = it == titles.end() ? L.op : it->second;
   const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
   /* Rows: the operator's own fields, then Move, Along Normal, Orientation. */
-  int fields = L.op == "extrude" || L.op == "bevel" || L.op == "loopcut" || L.op == "smooth" || L.op == "push_pull" ? 2 : L.op == "bridge" ? 4 : 1;
+  int fields = L.op == "bevel" ? 3 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" || L.op == "push_pull" ? 2 : L.op == "bridge" ? 4 : 1;
   int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
   Recti r{view.x + u.px(10), view.bottom() - h - u.px(10), w, h};
@@ -1736,6 +1937,9 @@ void Editor::draw_last_op_panel(const Recti &view) {
   else if (L.op == "bevel") {
     fl("Width", L.amount, 0.005f, 0.0001f, 1000.0f);
     ifield("Segments", L.segments, 1, 64);
+    Recti cr = row("Clamp Overlap");
+    changed |= u.checkbox({cr.x, cr.y, cr.h, cr.h}, L.clamp);
+    u.tooltip("On: the whole bevel narrows evenly so no new vertices pass each other on short edges.\nOff: the exact width, which can fold over. Blender: Clamp Overlap.");
   }
   else if (L.op == "bridge") {
     ifield("Segments", L.segments, 1, 256);
@@ -1755,6 +1959,14 @@ void Editor::draw_last_op_panel(const Recti &view) {
               "Off: always add walls (SketchUp's Ctrl).");
   }
   else if (L.op == "subdivide_edges") ifield("Number of Cuts", L.segments, 1, 100);
+  else if (L.op == "poke") fl("Offset", L.amount, 0.01f, -1000.0f, 1000.0f);
+  else if (L.op == "extrude_individual") fl("Distance", L.amount, 0.01f, -1000.0f, 1000.0f);
+  else if (L.op == "shrink_fatten") fl("Distance", L.amount, 0.005f, -1000.0f, 1000.0f);
+  else if (L.op == "to_sphere") fl("Factor", L.amount, 0.01f, 0.0f, 1.0f);
+  else if (L.op == "randomize") {
+    fl("Amount", L.amount, 0.005f, 0.0f, 1000.0f);
+    ifield("Seed", L.segments, 1, 100000);
+  }
   else if (L.op == "loopcut") {
     ifield("Number of Cuts", L.segments, 1, 64);
     fl("Slide", L.amount, 0.01f, 0.0f, 1.0f);
@@ -1777,6 +1989,180 @@ void Editor::draw_last_op_panel(const Recti &view) {
 /* ===================================================================== */
 /* Push/Pull tool (SketchUp)                                              */
 /* ===================================================================== */
+
+/* ===================================================================== */
+/* Drag to adjust (Blender's modal Inset I and Bevel Ctrl+B)              */
+/* ===================================================================== */
+
+/* The operator runs at once; then the mouse's distance from the selection's
+ * centre sets its amount until a click or Enter (Esc / right-click undoes
+ * it). Inset: toward the centre makes it thicker, as in Blender. Bevel:
+ * away from the centre widens it, and the wheel changes the segments. Shift
+ * is fine control; typing a number sets the amount exactly. */
+void Editor::modal_begin(const std::string &op) {
+  if (modal_.active || pp_.active) return;
+  if (!edit_mode_ || !edit_op_available(op)) {
+    edit_tool(op);  // explains which mode it needs
+    return;
+  }
+  const float start = op == "inset" ? 0.0f : bevel_width_;
+  edit_op(op);
+  if (!last_op_valid() || last_op_.op != op) return;  // refused (nothing selected, ...)
+  GameObject *g = edit_object();
+  const LastOp &L = last_op_;
+  const Mesh &before = *L.before;
+  /* The centre of what was selected, on screen. */
+  Vec3 c(0.0f);
+  int k = 0;
+  for (size_t v = 0; v < before.vert_count() && v < L.vsel.size(); v++)
+    if (L.vsel[v]) {
+      c += before.positions[v];
+      k++;
+    }
+  if (!k)
+    for (size_t f = 0; f < before.face_count() && f < L.fsel.size(); f++)
+      if (L.fsel[f]) {
+        c += before.face_center(f);
+        k++;
+      }
+  const Mat4 &w = g->world_matrix();
+  const Vec3 wc = w.point(k ? c / (float)k : Vec3(0.0f));
+  Vec2 s;
+  float z;
+  modal_ = ModalAdjust{};
+  modal_.op = op;
+  modal_.center = scene_r3d_.project(wc, s, z) ? Vec2(scene_rect_.x + s.x, scene_rect_.y + s.y)
+                                                : Vec2(scene_rect_.x + scene_rect_.w * 0.5f, scene_rect_.y + scene_rect_.h * 0.5f);
+  const Vec2 m0((float)ui_.in.mx, (float)ui_.in.my);
+  modal_.start_len = std::max((float)ui_.px(24), length(m0 - modal_.center));
+  const float world_per_px = cam_.ortho ? cam_.distance * 2.0f / std::max(1, scene_rect_.h)
+                                        : length(cam_.position() - wc) * 2.0f * std::tan(cam_.fov * 0.5f * kDeg2Rad) / std::max(1, scene_rect_.h);
+  const float units = std::max(1e-6f, length(w.dir({1, 0, 0})));  // world length of one mesh unit
+  modal_.px_size = world_per_px / units;
+  modal_.start_amount = start;
+  modal_.amount = start;
+  modal_.active = true;
+  last_op_.amount = start;
+  run_last_op(false);
+}
+
+void Editor::modal_finish(bool keep) {
+  if (!modal_.active) return;
+  modal_.active = false;
+  if (keep) {
+    if (modal_.op == "inset") inset_amount_ = last_op_.amount;
+    else if (modal_.op == "bevel") {
+      bevel_width_ = last_op_.amount;
+      bevel_segments_ = last_op_.segments;
+    }
+    Log::info("%s: %.4g", modal_.op == "inset" ? "Inset" : "Bevel", last_op_.amount);
+    return;
+  }
+  /* Cancelled: the mesh as it was, and no undo step left behind. */
+  LastOp &L = last_op_;
+  if (GameObject *g = scene_->find(L.obj))
+    if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = L.before;
+  vert_sel_ = L.vsel;
+  face_sel_ = L.fsel;
+  edge_sel_ = L.esel;
+  const std::string label = "Edit: " + L.op;
+  if (pending_change_ && pending_label_ == label) pending_change_ = false;
+  else if (!undo_.empty() && undo_.back().label == label) {
+    stable_ = std::move(undo_.back().scene);
+    undo_.pop_back();
+  }
+  L.op.clear();
+  Log::info("%s cancelled", modal_.op == "inset" ? "Inset" : "Bevel");
+}
+
+bool Editor::modal_update(const Recti &view) {
+  if (!modal_.active) return false;
+  auto &u = ui_;
+  auto &in = u.in;
+  if (!edit_mode_ || !last_op_valid() || last_op_.op != modal_.op) {  // undone or left Edit Mode
+    modal_.active = false;
+    return false;
+  }
+  if (in.key_pressed[platform::KEY_ESCAPE] || in.pressed[1]) {
+    modal_finish(false);
+    u.consume_click();
+    return true;
+  }
+  for (char c : in.text)
+    if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == '*' || c == '/' || c == '(' || c == ')') modal_.typed += c;
+  in.text.clear();
+  if (in.key_pressed[platform::KEY_BACKSPACE] && !modal_.typed.empty()) modal_.typed.pop_back();
+  float amount;
+  double typed = 0;
+  const float d = length(Vec2((float)in.mx, (float)in.my) - modal_.center);
+  if (!modal_.typed.empty() && ui::eval_number(modal_.typed, typed)) amount = (float)typed;
+  else {
+    /* Shift: a tenth of the speed from where it was pressed (Blender). */
+    if (in.shift() && !modal_.precise) {
+      modal_.precise = true;
+      modal_.precise_from = modal_.amount;
+      modal_.precise_len = d;
+    }
+    else if (!in.shift() && modal_.precise) {
+      modal_.precise = false;
+      modal_.start_amount = modal_.amount;
+      modal_.start_len = d;
+    }
+    const float from = modal_.precise ? modal_.precise_from : modal_.start_amount;
+    const float base = modal_.precise ? modal_.precise_len : modal_.start_len;
+    const float speed = modal_.precise ? 0.1f : 1.0f;
+    if (modal_.op == "inset") amount = from + (base - d) / std::max(1.0f, modal_.start_len) * speed;
+    else amount = from + (d - base) * modal_.px_size * speed;
+    if (in.ctrl()) amount = std::round(amount / (modal_.op == "inset" ? 0.05f : snap_move_)) * (modal_.op == "inset" ? 0.05f : snap_move_);
+  }
+  amount = modal_.op == "inset" ? std::max(0.0f, std::min(0.99f, amount)) : std::max(0.0f, amount);
+  if (!std::isfinite(amount)) amount = 0.0f;
+  bool changed = amount != last_op_.amount;
+  if (modal_.op == "bevel" && in.wheel_y != 0) {
+    last_op_.segments = std::max(1, std::min(64, last_op_.segments + (in.wheel_y > 0 ? 1 : -1)));
+    in.wheel_y = 0;  // the wheel adjusts segments instead of zooming
+    changed = true;
+  }
+  if (changed) {
+    modal_.amount = amount;
+    last_op_.amount = amount;
+    run_last_op(false);
+  }
+  u.redraw = true;
+  if (in.pressed[0] || in.key_pressed[platform::KEY_ENTER]) {
+    modal_finish(true);
+    u.consume_click();
+  }
+  return true;
+}
+
+void Editor::draw_modal(const Recti &view) {
+  if (!modal_.active) return;
+  auto &u = ui_;
+  u.canvas.push_clip(view);
+  /* A dashed line from the centre to the cursor, as Blender draws it. */
+  const Vec2 m((float)u.in.mx, (float)u.in.my);
+  const Vec2 d = m - modal_.center;
+  const float len = length(d);
+  for (float t = 0; t < len; t += 12.0f) {
+    Vec2 a = modal_.center + d * (t / std::max(1.0f, len)), b = modal_.center + d * (std::min(len, t + 6.0f) / std::max(1.0f, len));
+    u.canvas.line(a.x, a.y, b.x, b.y, Color::hex(0xFFFFFF, 160), (float)u.px(1.0f));
+  }
+  std::string text = modal_.op == "inset" ? strprintf("Inset  %.3f", last_op_.amount)
+                                          : strprintf("Bevel  width %.3f   segments %d", last_op_.amount, last_op_.segments);
+  if (!modal_.typed.empty()) text += "   [" + modal_.typed + "]";
+  int tw = u.font.text_width(text) + u.px(12);
+  Recti box{u.in.mx + u.px(16), u.in.my + u.px(12), tw, u.row_h()};
+  u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 230));
+  u.label(box, text, u.theme.text_bright, ui::Align::Center);
+  std::string hint = modal_.op == "inset" ? "Inset:  move toward the centre to thicken, or type  |  Shift fine  |  Ctrl snap  |  Click / Enter confirm  |  Esc cancel"
+                                          : "Bevel:  move away to widen, or type  |  Wheel segments  |  Shift fine  |  Ctrl snap  |  Click / Enter confirm  |  Esc cancel";
+  int hw = u.font.text_width(hint) + u.px(16);
+  Recti hb{view.x + (view.w - hw) / 2, view.bottom() - u.row_h() - u.px(10), hw, u.row_h()};
+  u.canvas.fill_round_rect(hb, u.px(3), Color::hex(0x202020, 220));
+  u.label(hb, hint, u.theme.text, ui::Align::Center);
+  u.canvas.pop_clip();
+}
 
 /* Push/Pull is a modal operator like Blender's G or E: P starts it on the
  * selected faces, the mouse (or a typed number) sets the distance, and a

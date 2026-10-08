@@ -544,6 +544,7 @@ uint64_t Editor::live_preview_hash() {
 void Editor::draw_camera_preview(const Recti &view) {
   GameObject *g = active_object();
   Camera *cam = g ? g->get<Camera>() : nullptr;
+  cam_preview_rect_ = Recti{};
   if (!cam || !cam->enabled || edit_mode_) {
     cam_preview_pt_hash_ = 0;
     return;
@@ -561,7 +562,7 @@ void Editor::draw_camera_preview(const Recti &view) {
   Vec3 eye = g->world_position();
   Mat4 v = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
   Mat4 p = cam->projection(aspect);
-  const bool traced = cam_preview_rendered_ && rs.engine == 1;
+  const bool traced = cam_preview_rendered_;  // Rendered is always the path tracer, whatever the final engine
   std::string status;
   if (traced) {
     /* Rebuild when the scene, this camera or the inset size changes; then add
@@ -601,6 +602,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     render_deferred(cam_preview_r3d_, cam_preview_rt_, v, p, eye, true, true, cam);
   }
   Recti box{view.right() - w - u.px(12), view.bottom() - h - u.px(12) - u.row_h(), w, h};
+  cam_preview_rect_ = {box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)};  // clicks here stay off the scene
   u.canvas.fill_rect({box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)}, Color::hex(0x222222, 230));
   /* Header: the camera's name, then a Shaded / Rendered switch. */
   const char *mode = cam_preview_rendered_ ? "Rendered" : "Shaded";
@@ -611,10 +613,8 @@ void Editor::draw_camera_preview(const Recti &view) {
     cam_preview_rendered_ = !cam_preview_rendered_;
     cam_preview_pt_hash_ = 0;
   }
-  u.tooltip(rs.engine == 1 ? "Shaded: the fast rasterized view.\nRendered: a small path-traced render preview through this camera\n"
-                             "(depth of field, exposure, the Preview Samples count; denoised when done)."
-                           : "Shaded / Rendered. With the Rasterized engine both show the rasterizer;\n"
-                             "set Render Engine to Path Traced for a path-traced preview.");
+  u.tooltip("Click to switch. Shaded: the fast rasterized view.\nRendered: a small path-traced render preview through this camera\n"
+            "(depth of field, exposure, Preview Samples; denoised when done).");
   Image *fb = u.canvas.target();
   Recti dst = box.intersect(view);
   for (int y = dst.y; y < dst.bottom(); y++)

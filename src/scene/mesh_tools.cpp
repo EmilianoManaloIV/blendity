@@ -24,6 +24,20 @@
 
 namespace bl::meshops {
 
+/* The edge selection the editor set for this thread (nullptr: derive edges
+ * from the selected vertices). */
+static thread_local const std::unordered_set<uint64_t> *t_edge_selection = nullptr;
+
+EdgeSelectionScope::EdgeSelectionScope(const std::unordered_set<uint64_t> *edges) : previous(t_edge_selection) {
+  t_edge_selection = edges;
+}
+EdgeSelectionScope::~EdgeSelectionScope() { t_edge_selection = previous; }
+
+bool edge_selected(uint32_t a, uint32_t b, const std::vector<uint8_t> &vert_sel) {
+  if (t_edge_selection) return t_edge_selection->count(Mesh::edge_key(a, b)) > 0;
+  return a < vert_sel.size() && b < vert_sel.size() && vert_sel[a] && vert_sel[b];
+}
+
 namespace {
 
 /* Unnormalised Newell normal of a vertex loop (length = 2 x area). */
@@ -153,7 +167,7 @@ void apply_edge_splits(Mesh &m, EdgeSplits &splits) {
         }
       }
     }
-    fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f));
+    fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f), m.smooth_of(f));
   }
   fb.commit(m);
 }
@@ -290,7 +304,7 @@ bool inside_loop(const Mesh &m, const std::vector<uint32_t> &loop, Vec3 p, Vec3 
 void drop_faces(Mesh &m, const std::vector<uint8_t> &drop) {
   FaceBuilder fb(m);
   for (size_t f = 0; f < m.face_count(); f++)
-    if (f >= drop.size() || !drop[f]) fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f));
+    if (f >= drop.size() || !drop[f]) fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
   fb.commit(m);
 }
 
@@ -312,7 +326,7 @@ float mesh_scale(const Mesh &m) { return std::max(1e-3f, length(m.bounds().exten
 std::vector<std::pair<uint32_t, uint32_t>> selected_edges(const Mesh &m, const std::vector<uint8_t> &vsel) {
   std::vector<std::pair<uint32_t, uint32_t>> out;
   for (auto &e : m.edge_cache())
-    if (e.first < vsel.size() && e.second < vsel.size() && vsel[e.first] && vsel[e.second]) out.push_back(e);
+    if (edge_selected(e.first, e.second, vsel)) out.push_back(e);
   return out;
 }
 
@@ -322,7 +336,8 @@ std::vector<std::pair<uint32_t, uint32_t>> selected_edges(const Mesh &m, const s
 /* Bevel                                                                  */
 /* ===================================================================== */
 
-bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, float width, int segments, std::string *err) {
+bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, float width, int segments, std::string *err,
+                 bool clamp_overlap) {
   segments = std::max(1, std::min(64, segments));
   EdgeFaces ef(m);
   std::unordered_set<uint64_t> bev;
@@ -339,11 +354,32 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
   }
   width = std::max(width, 1e-6f);
   auto is_bev = [&](uint32_t a, uint32_t b) { return bev.count(Mesh::edge_key(a, b)) > 0; };
+  /* Clamp Overlap (Blender's default): the whole bevel narrows evenly to the
+   * widest it can be without two new vertices passing each other on an edge -
+   * half an edge whose both ends slide, nearly all of one where only one does.
+   * Off: the exact width, which can fold over on short edges. */
+  if (clamp_overlap) {
+    float limit = width;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      for (uint32_t i = 0; i < n; i++) {
+        const uint32_t v = fv[i], o = fv[(i + 1) % n];
+        if (!at_vert[v] && !at_vert[o]) continue;
+        const float len = length(m.positions[o] - m.positions[v]);
+        /* Along a beveled edge only corners where two bevels meet slide, from both ends. */
+        limit = std::min(limit, len * (is_bev(v, o) || (at_vert[v] && at_vert[o]) ? 0.49f : 0.98f));
+      }
+    }
+    width = std::max(limit, 1e-6f);
+  }
   /* A new vertex `s` along edge (v, o) from v. Every face that shares that
    * edge end asks for the same one, so the result stays connected. */
   std::unordered_map<uint64_t, uint32_t> slides;
   std::unordered_map<uint32_t, uint32_t> origin;  // new vertex -> beveled vertex it came from
-  auto dist_along = [&](uint32_t v, uint32_t o) { return std::min(width, 0.45f * length(m.positions[o] - m.positions[v])); };
+  auto dist_along = [&](uint32_t v, uint32_t o) {
+    const float len = length(m.positions[o] - m.positions[v]);
+    return clamp_overlap ? width : std::min(width, 0.999f * len);  // clamped: already within every edge
+  };
   auto slide = [&](uint32_t v, uint32_t o) {
     uint64_t k = ((uint64_t)v << 32) | o;
     auto it = slides.find(k);
@@ -486,7 +522,7 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
         uv[i] = uv[s] + (uv[e] - uv[s]) * ex[i].second;
       }
     }
-    fb.add(verts.data(), verts.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f));
+    fb.add(verts.data(), verts.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f), m.smooth_of(f));
   }
   std::vector<uint32_t> bevel_faces;
   for (const Strip &st : strips)
@@ -713,7 +749,7 @@ bool bridge(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_
       uint32_t n = m.face_size(f);
       for (uint32_t i = 0; i < n; i++) {
         uint32_t a = v[i], b = v[(i + 1) % n];
-        if (vert_sel[a] && vert_sel[b] && ef.at(a, b).size() == 1) next[b] = a;
+        if (edge_selected(a, b, vert_sel) && ef.at(a, b).size() == 1) next[b] = a;
       }
     }
     std::unordered_set<uint32_t> used;
@@ -1135,7 +1171,7 @@ static std::vector<uint32_t> tidy_new_geometry(Mesh &m, const std::vector<Vec3> 
   for (size_t f = 0; f < loops.size(); f++) {
     if (drop[f] || loops[f].size() < 3) continue;
     remap[f] = (uint32_t)(fb.offs.size() - 1);
-    fb.add(loops[f].data(), loops[f].size(), fb.has_uv ? luvs[f].data() : nullptr, m.material_of(f));
+    fb.add(loops[f].data(), loops[f].size(), fb.has_uv ? luvs[f].data() : nullptr, m.material_of(f), m.smooth_of(f));
   }
   fb.commit(m);
   remove_loose_verts(m);
@@ -1440,7 +1476,7 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
       }
       t = true;
     }
-    fb.add(verts.data(), verts.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f));
+    fb.add(verts.data(), verts.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f), m.smooth_of(f));
     was_touched.push_back(t);
   }
   for (const Wall &w : walls) {
@@ -1500,7 +1536,7 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
     for (size_t f = 0; f < m.face_count(); f++) {
       if (loops[f].size() < 3) continue;  // squashed flat
       remap[f] = (uint32_t)(clean.offs.size() - 1);
-      clean.add(loops[f].data(), loops[f].size(), clean.has_uv ? luvs[f].data() : nullptr, m.material_of(f));
+      clean.add(loops[f].data(), loops[f].size(), clean.has_uv ? luvs[f].data() : nullptr, m.material_of(f), m.smooth_of(f));
     }
     clean.commit(m);
   }
@@ -1563,7 +1599,7 @@ size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
   for (auto &[root, faces] : groups) {
     if (faces.size() == 1) {
       uint32_t f = faces[0];
-      fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f));
+      fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
       continue;
     }
     /* Outline of the merged faces: directed edges whose reverse is not in the group. */
@@ -1592,7 +1628,7 @@ size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
       ok = v == start && loop.size() == next.size();
     }
     if (!ok || loop.size() < 3) {  // the faces enclose a hole: keep them
-      for (uint32_t f : faces) fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f));
+      for (uint32_t f : faces) fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
       continue;
     }
     /* Blender's "Dissolve Vertices": drop corners left between two edges on a line. */
@@ -1607,7 +1643,7 @@ size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
     }
     std::vector<Vec2> uv;
     for (uint32_t v : kept) uv.push_back(uv_at[v]);
-    fb.add(kept.data(), kept.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(faces[0]));
+    fb.add(kept.data(), kept.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(faces[0]), m.smooth_of(faces[0]));
   }
   fb.commit(m);
   remove_loose_verts(m);
@@ -1630,7 +1666,7 @@ size_t connect_vertices(Mesh &m, std::vector<uint8_t> &vert_sel) {
       }
     bool adjacent = count == 2 && ((s1 - s0) == 1 || (s0 == 0 && s1 == (int)n - 1));
     if (count != 2 || adjacent) {
-      fb.add(v, n, fb.has_uv ? &m.uvs[b] : nullptr, m.material_of(f));
+      fb.add(v, n, fb.has_uv ? &m.uvs[b] : nullptr, m.material_of(f), m.smooth_of(f));
       continue;
     }
     /* Split along s0 - s1 (Blender: J, Connect Vertex Path). */
@@ -1643,7 +1679,7 @@ size_t connect_vertices(Mesh &m, std::vector<uint8_t> &vert_sel) {
         if (fb.has_uv) pt.push_back(m.uvs[b + i]);
         if (i == to) break;
       }
-      fb.add(pv.data(), pv.size(), fb.has_uv ? pt.data() : nullptr, m.material_of(f));
+      fb.add(pv.data(), pv.size(), fb.has_uv ? pt.data() : nullptr, m.material_of(f), m.smooth_of(f));
     }
     made++;
   }

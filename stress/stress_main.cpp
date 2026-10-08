@@ -604,7 +604,9 @@ static void test_fuzz(Report &rep, const Options &o) {
                                    platform::KEY_Z, platform::KEY_Y, platform::KEY_P, platform::KEY_LEFT, platform::KEY_DOWN,
                                    /* phase 2: edge mode, proportional, merge, normals, UV Editor, render window */
                                    platform::KEY_2, platform::KEY_O, platform::KEY_M, platform::KEY_N, platform::KEY_U,
-                                   platform::KEY_L, platform::KEY_9, platform::KEY_F11, platform::KEY_I};
+                                   platform::KEY_L, platform::KEY_9, platform::KEY_F11, platform::KEY_I,
+                                   /* phase 7: modal G / S, axis X, bevel B, triangulate T */
+                                   platform::KEY_G, platform::KEY_X, platform::KEY_S, platform::KEY_B, platform::KEY_T};
         e.type = platform::EventType::KeyDown;
         e.key = keys[rnd(sizeof(keys) / sizeof(keys[0]))];
         int mods = rnd(10);

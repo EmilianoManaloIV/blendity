@@ -15,9 +15,15 @@ struct FaceBuilder {
   std::vector<uint32_t> offs{0}, cv;
   std::vector<Vec2> uv;
   std::vector<int32_t> mat;
-  bool has_uv, has_mat;
-  FaceBuilder(const Mesh &m) : has_uv(m.has_uvs()), has_mat(!m.face_material.empty()) { cv.reserve(m.corner_count()); }
-  void add(const uint32_t *v, size_t n, const Vec2 *t, int material) {
+  std::vector<uint8_t> sm;  // per-face smooth shading, when the mesh has it
+  bool has_uv, has_mat, has_smooth, default_smooth;
+  FaceBuilder(const Mesh &m)
+      : has_uv(m.has_uvs()), has_mat(!m.face_material.empty()), has_smooth(!m.face_smooth.empty()), default_smooth(m.smooth) {
+    cv.reserve(m.corner_count());
+  }
+  /* smooth: the shading of the face this one comes from (-1: the mesh default). */
+  void add(const uint32_t *v, size_t n, const Vec2 *t, int material, int smooth = -1) {
+    if (has_smooth) sm.push_back(smooth < 0 ? default_smooth : smooth != 0);
     cv.insert(cv.end(), v, v + n);
     offs.push_back((uint32_t)cv.size());
     if (has_uv) {
@@ -31,6 +37,7 @@ struct FaceBuilder {
     m.corner_verts = std::move(cv);
     if (has_uv) m.uvs = std::move(uv);
     if (has_mat) m.face_material = std::move(mat);
+    if (has_smooth) m.face_smooth = std::move(sm);
   }
 };
 

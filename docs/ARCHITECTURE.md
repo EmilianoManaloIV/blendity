@@ -155,6 +155,18 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `Editor::draw_camera_preview` | Shaded (rasterized) or Rendered: a progressive path tracer at the inset's size, rebuilt when the scene or the camera changes, denoised when it reaches the preview sample count | Unity Camera Preview; Blender's camera view in Rendered shading |
 | `set <Component>.<Field> <value>` console command | Sets any reflected field by name (unique prefix, enums by text) | `bpy` property access |
 
+## Blender's modal editing, per-face shading, Unity colours (phase 7)
+
+| Blendity | What it does | Blender / Unity equivalent |
+|---|---|---|
+| `modal_transform.cpp` (`transform_begin / _update / _finish`, `extrude_and_move`) | G / R / S on objects or selected vertices. The mouse moves the selection on the view plane or along an axis, rotates it around the pivot, or scales it by distance. X / Y / Z lock an axis (twice: local), Shift+axis locks a plane. It takes typed values, Ctrl snap and Shift fine control. Ctrl+E extrudes, then moves along the normal as one undo step | `editors/transform` (`transform_mode_translate.cc`, `_rotate.cc`, `_resize.cc`, constraints) |
+| `Editor::modal_begin / modal_update` | Inset (I) and Bevel (Ctrl+B) follow the mouse's distance from the selection's centre. Bevel takes the wheel for segments. Esc removes the operator's undo step | `editmesh_inset.cc`, `editmesh_bevel.cc` (modal) |
+| `edge_sel_`, `meshops::EdgeSelectionScope` | Edge mode keeps the selected edges themselves. While a scope is alive, every edge tool reads that set instead of "both ends selected" | BMesh's per-edge select flags |
+| `Mesh::face_smooth`, `sharp_edges`, `seams_sharp` | Smooth shading per face. Normals average within fans that are joined across smooth edges (union-find over corners), and stop at flat faces, sharp edges, the angle limit and, optionally, seams | `sharp_face` / `sharp_edge` attributes, `mesh_normals.cc` |
+| `mesh_tools2.cpp` | Poke, triangulate and tris-to-quads on a selection, flip, duplicate, split, dissolve faces and vertices, extrude individual, shrink/fatten, to sphere, randomize, edge split; select linked, more / less, non-manifold and edge ring | `bmesh/operators/bmo_*.cc`, `editmesh_select.cc` |
+| `bevel_edges(..., clamp_overlap)` | Clamp Overlap: one even width, at most half of any edge that slides from both ends | `bmesh_bevel.cc` (`clamp_overlap`) |
+| `ui::Context::color_field(..., alpha)`, `Reflector::color_alpha` | Unity's colour field (alpha bar) and Color window (SV square, hue strip, RGB 0-255 / 0-1 / HSV, alpha, hex RRGGBBAA, swatches). Files keep the colour and its alpha as two fields | Unity `EditorGUI.ColorField`, `ColorPicker` |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

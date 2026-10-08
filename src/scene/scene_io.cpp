@@ -291,6 +291,11 @@ std::string save_scene_text(const Scene &scene) {
     if (!m.face_material.empty())
       for (int32_t mi : m.face_material) os << "g " << mi << '\n';
     for (uint64_t k : m.seams) os << "s " << (uint32_t)(k >> 32) << ' ' << (uint32_t)(k & 0xFFFFFFFF) << '\n';
+    /* Per-face smooth shading ("fs"), sharp edges ("e"), seams as hard edges. */
+    if (!m.face_smooth.empty())
+      for (uint8_t s : m.face_smooth) os << "fs " << (s ? 1 : 0) << '\n';
+    for (uint64_t k : m.sharp_edges) os << "e " << (uint32_t)(k >> 32) << ' ' << (uint32_t)(k & 0xFFFFFFFF) << '\n';
+    if (m.seams_sharp) os << "seamsharp 1\n";
     os << "end\n";
   }
   scene.for_each_ordered([&](GameObject &g, int) {
@@ -451,12 +456,26 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
           parse_uint(p, le, b);
           if (a < nv && b < nv) m->seams.push_back(Mesh::edge_key((uint32_t)a, (uint32_t)b));
         }
+        else if (line.size() > 2 && p[0] == 'f' && p[1] == 's' && p[2] == ' ') {
+          uint64_t s;
+          parse_uint(p + 3, le, s);
+          m->face_smooth.push_back(s == 1 ? 1 : 0);
+        }
+        else if (line.size() > 1 && p[0] == 'e' && p[1] == ' ') {
+          uint64_t a, b;
+          p = parse_uint(p + 2, le, a);
+          parse_uint(p, le, b);
+          if (a < nv && b < nv) m->sharp_edges.push_back(Mesh::edge_key((uint32_t)a, (uint32_t)b));
+        }
+        else if (line.substr(0, 10) == "seamsharp ") m->seams_sharp = true;
         else if (line.substr(0, 6) == "angle ") {
           parse_float(p + 6, le, m->smooth_angle);
         }
         else if (line.substr(0, 3) == "end") break;
       }
       std::sort(m->seams.begin(), m->seams.end());
+      std::sort(m->sharp_edges.begin(), m->sharp_edges.end());
+      if (!m->face_smooth.empty()) m->face_smooth.resize(m->face_count(), m->smooth ? 1 : 0);
       if (!m->uvs.empty() && m->uvs.size() != m->corner_verts.size()) m->uvs.clear();
       if (!m->face_material.empty()) m->face_material.resize(m->face_count(), 0);
       m->touch();

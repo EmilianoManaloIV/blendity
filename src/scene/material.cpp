@@ -45,8 +45,10 @@ void Material::reflect(Reflector &r) {
     r.field("IOR", ior, 0.01f, 1.0f, 4.0f);
     r.help("Index of refraction: 1.0 air, 1.33 water, 1.45 Blender's default, 1.5 window glass, 2.42 diamond.");
   }
-  r.color("Base Color", base_color);
-  r.help("Albedo. Blender: Principled BSDF > Base Color. Unity: Base Map tint.");
+  r.color_alpha("Base Color", base_color, "Alpha", alpha);
+  r.help("Albedo and opacity. The alpha (the bar under the colour) makes Cutout and Transparent surfaces\n"
+         "see-through; it is multiplied by the Base Map's alpha. Blender: Principled BSDF > Base Color / Alpha.\n"
+         "Unity: Base Map colour.");
   r.texture("Base Map", base_map);
   r.enumeration("Procedural", procedural, procs, 5);
   r.help("Procedural base colour (Cycles SVM checker / noise nodes) or Blender's generated test images.");
@@ -66,10 +68,6 @@ void Material::reflect(Reflector &r) {
   r.color("Emission", emission);
   r.field("Emission Strength", emission_strength, 0.05f, 0.0f, 1000.0f);
   r.texture("Emission Map", emission_map);
-  if (r.all_fields() || surface == (int)MaterialSurface::Cutout || surface == (int)MaterialSurface::Transparent) {
-    r.field("Alpha", alpha, 0.01f, 0.0f, 1.0f);
-    r.help("Opacity: 1 = solid, 0 = invisible. Multiplied by the Base Map's alpha.");
-  }
   r.enumeration("Mapping", mapping, mappings, 3);
   r.help("UV = use the mesh's UV map. Box = triplanar projection (no UVs needed). Generated = object-space bounds.");
   r.field("Tiling", tiling);

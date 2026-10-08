@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <unordered_set>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
@@ -1036,6 +1037,326 @@ static void edge_tool_tests() {
       CHECK(closed_manifold(m));
       CHECK_NEAR(vol(m), 1.2f, 1e-4f);
     }
+  });
+  test("edge selection: two opposite edges of a quad stay two edges (bevel, seams)", [&] {
+    /* Picking two opposite sides selects all four corners; the tools must
+     * still see two edges, not the four between those corners. */
+    Mesh m = *primitives::cube();
+    size_t top = face_facing(m, {0, 1, 0});
+    const uint32_t *v = m.face_verts(top);
+    std::unordered_set<uint64_t> two = {Mesh::edge_key(v[0], v[1]), Mesh::edge_key(v[2], v[3])};
+    std::vector<uint8_t> vs(m.vert_count(), 0), fs(m.face_count(), 0);
+    vs[v[0]] = vs[v[1]] = vs[v[2]] = vs[v[3]] = 1;
+    {
+      meshops::EdgeSelectionScope scope(&two);
+      CHECK(meshops::bevel_edges(m, vs, fs, 0.1f, 1));
+    }
+    CHECK(m.face_count() == 8);  // six faces + one strip per beveled edge
+    CHECK(closed_manifold(m));
+    /* In the editor: esel picks edges; Mark Seam marks just those. */
+    Editor ed;
+    ed.init_headless(800, 500);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    GameObject *cube = ed.selected_object();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const Mesh &cm = *cube->get<MeshFilter>()->mesh;
+    size_t t2 = face_facing(cm, {0, 1, 0});
+    const uint32_t *w = cm.face_verts(t2);
+    ed.command(strprintf("esel %u %u %u %u", w[0], w[1], w[2], w[3]));
+    ed.command("uv mark_seam");
+    CHECK(ed.scene().find(cube->id)->get<MeshFilter>()->mesh->seams.size() == 2);
+  });
+  test("shading: smooth per face, hard at flat faces, sharp edges and (optionally) seams", [&] {
+    auto normals_at = [](const Mesh &m, uint32_t v) {
+      /* The distinct render normals of vertex v. */
+      std::vector<Vec3> out;
+      const RenderMesh &rm = m.render_mesh();
+      for (size_t i = 0; i < rm.positions.size(); i++)
+        if (length(rm.positions[i] - m.positions[v]) < 1e-6f) {
+          bool seen = false;
+          for (Vec3 n : out) seen = seen || length(n - rm.normals[i]) < 1e-4f;
+          if (!seen) out.push_back(rm.normals[i]);
+        }
+      return out;
+    };
+    Mesh c = *primitives::cylinder(0.5f, 1.0f, 16);
+    /* Sides smooth, caps flat: a cap corner keeps the cap's normal. */
+    for (size_t f = 0; f < c.face_count(); f++) c.set_face_smooth(f, std::fabs(c.face_normal(f).y) < 0.5f);
+    c.touch();
+    uint32_t rim = 0;
+    for (uint32_t i = 0; i < c.vert_count(); i++)
+      if (c.positions[i].y > 0.4f) rim = i;
+    auto ns = normals_at(c, rim);
+    CHECK(ns.size() == 2);  // the cap's and the (smooth) side's
+    bool cap = false, side = false;
+    for (Vec3 n : ns) {
+      cap = cap || n.y > 0.99f;
+      side = side || std::fabs(n.y) < 0.01f;
+    }
+    CHECK(cap && side);
+    /* A sharp edge splits the smooth sides there. */
+    uint32_t below = UINT32_MAX;
+    for (auto &e : c.edge_cache())
+      if ((e.first == rim || e.second == rim) && c.positions[e.first == rim ? e.second : e.first].y < 0)
+        below = e.first == rim ? e.second : e.first;
+    CHECK(below != UINT32_MAX);
+    c.set_sharp(rim, below, true);
+    c.touch();
+    CHECK(normals_at(c, rim).size() == 3);
+    /* Seams count as hard edges when asked. */
+    Mesh s = *primitives::cylinder(0.5f, 1.0f, 16);
+    for (size_t f = 0; f < s.face_count(); f++) s.set_face_smooth(f, std::fabs(s.face_normal(f).y) < 0.5f);
+    s.set_seam(rim, below, true);
+    s.touch();
+    const size_t before = normals_at(s, rim).size();
+    s.seams_sharp = true;
+    s.touch();
+    CHECK(normals_at(s, rim).size() == before + 1);
+    /* Saved and loaded with the scene. */
+    Scene sc;
+    GameObject *go = create_primitive(sc, "Cube");
+    go->get<MeshFilter>()->mesh = std::make_shared<Mesh>(c);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(sc), back, err));
+    const Mesh *lm = nullptr;
+    back.for_each([&](GameObject &g) {
+      if (g.get<MeshFilter>() && g.get<MeshFilter>()->mesh) lm = g.get<MeshFilter>()->mesh.get();
+    });
+    CHECK(lm && lm->face_smooth == c.face_smooth && lm->sharp_edges == c.sharp_edges);
+  });
+  test("bevel: Clamp Overlap narrows evenly; off keeps the exact width", [&] {
+    Mesh a = *primitives::cube();
+    std::vector<uint8_t> vs(a.vert_count(), 1), fs(a.face_count(), 0);
+    Mesh b = a;
+    std::vector<uint8_t> vs2 = vs, fs2 = fs;
+    CHECK(meshops::bevel_edges(a, vs, fs, 0.8f, 1, nullptr, true));
+    CHECK(closed_manifold(a));
+    std::printf("    clamped bevel of every edge at width 0.8: volume %.3f\n", vol(a));
+    CHECK(vol(a) > 0.1f && vol(a) < 1.0f);  // clamped to under half an edge: chamfered, not folded
+    CHECK(meshops::bevel_edges(b, vs2, fs2, 0.3f, 1, nullptr, false));
+    CHECK(closed_manifold(b));
+  });
+  test("tools: poke, triangulate, tris to quads, duplicate, split, dissolve, extrude individual", [&] {
+    auto one = [](const Mesh &m, Vec3 n) {
+      std::vector<uint8_t> s(m.face_count(), 0);
+      s[face_facing(m, n)] = 1;
+      return s;
+    };
+    {
+      Mesh m = *primitives::cube();
+      auto fs = one(m, {0, 1, 0});
+      CHECK(meshops::poke_faces(m, fs, 0.2f) == 1);
+      CHECK(m.face_count() == 9 && closed_manifold(m));
+      CHECK(vol(m) > 1.0f);  // the poke point stands out
+    }
+    {
+      Mesh m = *primitives::cube();
+      auto fs = one(m, {0, 1, 0});
+      CHECK(meshops::triangulate_faces(m, fs) == 1);
+      CHECK(m.face_count() == 7);
+      std::vector<uint8_t> all(m.face_count(), 1);
+      CHECK(meshops::tris_to_quads(m, all) == 1);
+      CHECK(m.face_count() == 6 && closed_manifold(m));
+    }
+    {
+      Mesh m = *primitives::cube();
+      auto fs = one(m, {0, 1, 0});
+      CHECK(meshops::duplicate_faces(m, fs) == 1);
+      CHECK(m.face_count() == 7 && m.vert_count() == 12);
+      CHECK(std::count(fs.begin(), fs.end(), 1) == 1 && fs.back() == 1);  // the copy is selected
+    }
+    {
+      Mesh m = *primitives::cube();
+      auto fs = one(m, {0, 1, 0});
+      CHECK(meshops::split_faces(m, fs) == 4);
+      CHECK(m.vert_count() == 12 && !closed_manifold(m));
+    }
+    {
+      Mesh m = meshops::subdivide(*primitives::cube(), 1, false);  // 24 quads, 4 per side
+      std::vector<uint8_t> fs(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++) fs[f] = m.face_normal(f).y > 0.99f;
+      CHECK(meshops::dissolve_faces(m, fs) == 1);
+      CHECK(m.face_count() == 21 && closed_manifold(m));
+    }
+    {
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> fs(m.face_count(), 0);
+      fs[face_facing(m, {0, 1, 0})] = fs[face_facing(m, {1, 0, 0})] = 1;
+      CHECK(meshops::extrude_individual(m, fs, 0.25f) == 2);
+      CHECK(m.face_count() == 6 + 8 && closed_manifold(m));
+    }
+    {
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> vs(m.vert_count(), 1);
+      meshops::to_sphere(m, vs, 1.0f);
+      float r0 = length(m.positions[0]);
+      for (Vec3 p : m.positions) CHECK_NEAR(length(p), r0, 1e-4f);
+      Mesh g = *primitives::grid(2.0f, 4, 4);
+      std::vector<uint8_t> one_v(g.vert_count(), 0);
+      one_v[0] = 1;
+      meshops::select_linked(g, one_v);
+      CHECK(std::count(one_v.begin(), one_v.end(), 1) == (long)g.vert_count());
+      std::vector<uint8_t> nm;
+      meshops::select_non_manifold(g, nm);
+      CHECK(std::count(nm.begin(), nm.end(), 1) == 16);  // the grid's open border
+      auto e = g.edge_cache()[0];
+      CHECK(meshops::edge_ring_edges(g, e.first, e.second).size() >= 4);
+    }
+    {
+      Mesh m = *primitives::cube();
+      /* One edge of a closed cube can't come apart (the faces still meet around
+       * its ends); the whole border of the top face can. */
+      std::vector<uint8_t> vs(m.vert_count(), 0);
+      const uint32_t *tv = m.face_verts(face_facing(m, {0, 1, 0}));
+      for (int k = 0; k < 4; k++) vs[tv[k]] = 1;
+      CHECK(meshops::edge_split(m, vs) == 4);
+      CHECK(m.vert_count() == 12 && !closed_manifold(m));
+    }
+  });
+  test("editor: Inset follows the mouse until a click; Esc leaves no trace", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    GameObject *cube = ed.selected_object();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const uint64_t id = cube->id;
+    auto faces = [&] { return ed.scene().find(id)->get<MeshFilter>()->mesh->face_count(); };
+    Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto ev = [](platform::EventType t, int x, int y, int key = 0) {
+      platform::Event e;
+      e.type = t;
+      e.x = x;
+      e.y = y;
+      e.key = key;
+      return e;
+    };
+    ed.command("edit face");
+    ed.command("fsel facing 0 1 0");
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 200, cy)});
+    ed.step_frame_headless({ev(platform::EventType::KeyDown, cx + 200, cy, platform::KEY_I)});
+    CHECK(faces() == 10);  // running already
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 120, cy)});
+    ed.step_frame_headless({ev(platform::EventType::KeyDown, cx + 120, cy, platform::KEY_ESCAPE)});
+    CHECK(faces() == 6);  // cancelled: back to the cube
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 200, cy)});
+    ed.step_frame_headless({ev(platform::EventType::KeyDown, cx + 200, cy, platform::KEY_I)});
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 100, cy)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown, cx + 100, cy)});
+    ed.step_frame_headless({ev(platform::EventType::MouseUp, cx + 100, cy)});
+    CHECK(faces() == 10);  // confirmed
+    const Mesh &m = *ed.scene().find(id)->get<MeshFilter>()->mesh;
+    float top_x = 1e9f;  // the inner face: the smallest of the top faces
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (m.face_normal(f).y < 0.99f) continue;
+      float w = 0;
+      for (uint32_t k = 0; k < m.face_size(f); k++) w = std::max(w, std::fabs(m.positions[m.face_verts(f)[k]].x));
+      top_x = std::min(top_x, w);
+    }
+    CHECK(top_x < 0.45f);  // the inner face moved in: about half way toward the centre
+    platform::Event z = ev(platform::EventType::KeyDown, cx, cy, platform::KEY_Z);
+    z.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({z});
+    CHECK(faces() == 6);  // one undo step
+  });
+  test("editor: Blender's G / R / S with axis locks and typed values, Unity navigation kept", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    GameObject *cube = ed.selected_object();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const uint64_t id = cube->id;
+    const Vec3 p0 = cube->world_position();
+    Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto key = [&](int k, int mods = 0) {
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove;
+      m.x = d.x = u.x = cx + 40;
+      m.y = d.y = u.y = cy;
+      d.type = platform::EventType::KeyDown;
+      d.key = u.key = k;
+      d.mods = u.mods = mods;  // modifiers are still held on key-up
+      u.type = platform::EventType::KeyUp;
+      ed.step_frame_headless({m, d, u});
+    };
+    auto type = [&](const char *s) {
+      for (const char *c = s; *c; c++) {
+        platform::Event t;
+        t.type = platform::EventType::Text;
+        t.codepoint = (uint32_t)*c;
+        t.x = cx + 40;
+        t.y = cy;
+        ed.step_frame_headless({t});
+      }
+    };
+    auto pos = [&] { return ed.scene().find(id)->world_position(); };
+    /* G, X, 2, Enter: two units along X. */
+    key(platform::KEY_G);
+    key(platform::KEY_X);
+    type("2");
+    key(platform::KEY_ENTER);
+    CHECK(length(pos() - (p0 + Vec3(2, 0, 0))) < 1e-4f);
+    /* G, Z, 5 then Esc: nothing moves. */
+    key(platform::KEY_G);
+    key(platform::KEY_Z);
+    type("5");
+    key(platform::KEY_ESCAPE);
+    CHECK(length(pos() - (p0 + Vec3(2, 0, 0))) < 1e-4f);
+    /* During a grab, R switches to rotate: R, Y, 90 turns it about Y. */
+    key(platform::KEY_G);
+    key(platform::KEY_R);
+    key(platform::KEY_Y);
+    type("90");
+    key(platform::KEY_ENTER);
+    const Vec3 fwd = ed.scene().find(id)->world_rotation().rotate({0, 0, 1});
+    CHECK(std::fabs(std::fabs(fwd.x) - 1.0f) < 1e-3f);
+    /* Without the preference R is still Unity's Scale tool; with it, R rotates and S scales. */
+    ed.command("edit off");
+    key(platform::KEY_S, 0);
+    CHECK(length(ed.scene().find(id)->local().scale - Vec3(1, 1, 1)) < 1e-5f);  // S alone: nothing
+    /* Edit Mode: G Y 0.5 moves the selected vertices only. */
+    ed.command("edit face");
+    ed.command("fsel facing 0 1 0");
+    float top0 = -1e9f;
+    for (Vec3 p : ed.scene().find(id)->get<MeshFilter>()->mesh->positions) top0 = std::max(top0, p.y);
+    key(platform::KEY_G);
+    key(platform::KEY_Y);
+    type("0.5");
+    key(platform::KEY_ENTER);
+    float top1 = -1e9f, bottom = 1e9f;
+    for (Vec3 p : ed.scene().find(id)->get<MeshFilter>()->mesh->positions) {
+      top1 = std::max(top1, p.y);
+      bottom = std::min(bottom, p.y);
+    }
+    CHECK_NEAR(top1, top0 + 0.5f, 1e-4f);
+    CHECK_NEAR(bottom, -0.5f, 1e-4f);
+    /* Ctrl+E: extrude, then the mouse (or a typed distance) moves it along the normal;
+     * Esc takes the extrusion back, and a confirmed one is one undo step. */
+    auto faces = [&] { return ed.scene().find(id)->get<MeshFilter>()->mesh->face_count(); };
+    ed.command("fsel facing 0 1 0");
+    const size_t f0 = faces();
+    key(platform::KEY_E, platform::MOD_CTRL);
+    CHECK(faces() == f0 + 4);
+    key(platform::KEY_ESCAPE);
+    CHECK(faces() == f0);
+    ed.command("fsel facing 0 1 0");
+    key(platform::KEY_E, platform::MOD_CTRL);
+    type("0.25");
+    key(platform::KEY_ENTER);
+    float top2 = -1e9f;
+    for (Vec3 p : ed.scene().find(id)->get<MeshFilter>()->mesh->positions) top2 = std::max(top2, p.y);
+    CHECK(faces() == f0 + 4);
+    CHECK_NEAR(top2, top1 + 0.25f, 1e-4f);
+    key(platform::KEY_Z, platform::MOD_CTRL);
+    CHECK(faces() == f0);
   });
   test("edges: subdivide, connect, dissolve, collapse", [&] {
     Mesh m = *primitives::cube();
@@ -2217,6 +2538,7 @@ static void render_tests() {
     CHECK(faces() == 6);
     key(platform::KEY_B, platform::MOD_CTRL);
     CHECK(faces() > 6);
+    key(platform::KEY_ENTER, 0);  // Bevel is interactive now: confirm it
     const size_t beveled = faces();
     /* Face mode: Extrude works, Bevel doesn't. */
     ed.command("edit face");

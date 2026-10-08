@@ -57,7 +57,15 @@ void Editor::uv_op(const std::string &op) {
       Log::warn("Mark Seam works on selected edges in Edit Mode (Tab, then select vertices along the cut)");
       return;
     }
-    int n = uvops::set_seams_from_vertices(m, vert_sel_, op == "mark_seam");
+    /* The selected edges themselves: in edge mode two opposite sides of a quad
+     * are two seams, not the four edges between their corners. */
+    int n = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> edges(m.edge_cache().begin(), m.edge_cache().end());
+    for (auto &e : edges)
+      if (edge_is_selected(e.first, e.second)) {
+        m.set_seam(e.first, e.second, op == "mark_seam");
+        n++;
+      }
     Log::info("%s %d seam edge(s)", op == "mark_seam" ? "Marked" : "Cleared", n);
   }
   else {

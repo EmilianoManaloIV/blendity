@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace bl {
@@ -35,6 +36,14 @@ struct Mesh {
   std::vector<int32_t> face_material;
   /* UV seams as sorted edge keys (lo << 32 | hi) - Blender's ".uv_seam" edge attribute. */
   std::vector<uint64_t> seams;
+  /* Face-domain smooth shading (Blender stores the inverse, "sharp_face"); empty =
+   * every face follows `smooth`. Shade Smooth / Flat on selected faces fills it. */
+  std::vector<uint8_t> face_smooth;
+  /* Hard edges as sorted edge keys (Blender: Mark Sharp, "sharp_edge"): smooth
+   * shading stops at them. */
+  std::vector<uint64_t> sharp_edges;
+  /* UV seams also act as hard edges (a Unity-style habit; Blender keeps them apart). */
+  bool seams_sharp = false;
 
   size_t vert_count() const { return positions.size(); }
   size_t face_count() const { return face_offsets.size() - 1; }
@@ -47,6 +56,11 @@ struct Mesh {
   static uint64_t edge_key(uint32_t a, uint32_t b) { return a < b ? ((uint64_t)a << 32) | b : ((uint64_t)b << 32) | a; }
   bool is_seam(uint32_t a, uint32_t b) const;
   void set_seam(uint32_t a, uint32_t b, bool on);
+  bool is_sharp(uint32_t a, uint32_t b) const;
+  void set_sharp(uint32_t a, uint32_t b, bool on);
+  bool smooth_of(size_t f) const { return f < face_smooth.size() ? face_smooth[f] != 0 : smooth; }
+  bool any_smooth() const;  // any face shaded smooth
+  void set_face_smooth(size_t f, bool on);  // fills face_smooth from `smooth` the first time
 
   void clear();
   uint32_t add_vert(Vec3 p) { positions.push_back(p); return (uint32_t)positions.size() - 1; }
@@ -109,6 +123,19 @@ MeshPtr grid(float size, int nx, int nz);
 /* --------------------------------------------------------------- Operators */
 /* The "Edit Mode" toolset. Each mirrors a Blender operator. */
 namespace meshops {
+/* An explicit edge selection for the edge tools. Normally an edge counts as
+ * selected when both its vertices are, so two opposite sides of a quad would
+ * select all four. In edge select mode Blender keeps edges themselves; while
+ * a scope is alive, every tool that reads edges from vert_sel uses this set
+ * (Mesh::edge_key values) instead. */
+struct EdgeSelectionScope {
+  explicit EdgeSelectionScope(const std::unordered_set<uint64_t> *edges);
+  ~EdgeSelectionScope();
+  EdgeSelectionScope(const EdgeSelectionScope &) = delete;
+  EdgeSelectionScope &operator=(const EdgeSelectionScope &) = delete;
+  const std::unordered_set<uint64_t> *previous;
+};
+bool edge_selected(uint32_t a, uint32_t b, const std::vector<uint8_t> &vert_sel);
 /* Catmull-Clark subdivision (Blender: Subdivision Surface modifier,
  * blender/source/blender/blenkernel/intern/subdiv_mesh.cc via OpenSubdiv). */
 Mesh subdivide_catmull_clark(const Mesh &in);
@@ -171,7 +198,7 @@ void recalc_normals_outside(Mesh &m);
  * measured along the neighbouring edges; segments > 1 rounds the profile.
  * Blender: Ctrl+B (bmesh_bevel.cc). */
 bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, float width, int segments,
-                 std::string *error = nullptr);
+                 std::string *error = nullptr, bool clamp_overlap = true);  // Blender: Clamp Overlap
 /* Joins two selected face regions (removed) or two open edge loops with a
  * tube. Loops may differ in vertex count and face any direction: the second
  * loop is rotated onto the first's plane to match vertices, and segments > 1
@@ -215,6 +242,24 @@ size_t subdivide_edges(Mesh &m, std::vector<uint8_t> &vert_sel, int cuts);  // B
 size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel);             // Blender: Dissolve Edges
 size_t connect_vertices(Mesh &m, std::vector<uint8_t> &vert_sel);           // Blender: J (Connect Vertex Path)
 size_t collapse_edges(Mesh &m, std::vector<uint8_t> &vert_sel);             // Blender: Collapse
+/* More Blender operators (mesh_tools2.cpp). Selections follow the result. */
+size_t poke_faces(Mesh &m, std::vector<uint8_t> &face_sel, float offset = 0.0f);       // Face > Poke Faces
+size_t triangulate_faces(Mesh &m, std::vector<uint8_t> &face_sel);                     // Ctrl+T on a selection
+size_t tris_to_quads(Mesh &m, std::vector<uint8_t> &face_sel, float max_angle_deg = 40.0f);  // Alt+J
+size_t flip_faces(Mesh &m, const std::vector<uint8_t> &face_sel);                      // Normals > Flip (selected)
+size_t duplicate_faces(Mesh &m, std::vector<uint8_t> &face_sel);                       // Shift+D: the copy is selected
+size_t split_faces(Mesh &m, std::vector<uint8_t> &face_sel);                           // Y: detach from the rest
+size_t dissolve_faces(Mesh &m, std::vector<uint8_t> &face_sel);                        // each region -> one n-gon
+size_t dissolve_vertices(Mesh &m, std::vector<uint8_t> &vert_sel);                     // Dissolve Vertices
+size_t extrude_individual(Mesh &m, std::vector<uint8_t> &face_sel, float distance);   // Extrude Individual Faces
+void shrink_fatten(Mesh &m, const std::vector<uint8_t> &vert_sel, float distance);    // Alt+S
+void to_sphere(Mesh &m, const std::vector<uint8_t> &vert_sel, float factor);          // Shift+Alt+S
+void randomize(Mesh &m, const std::vector<uint8_t> &vert_sel, float amount, uint32_t seed = 1);
+size_t edge_split(Mesh &m, std::vector<uint8_t> &vert_sel);                            // Edge Split (selected edges)
+void select_linked(const Mesh &m, std::vector<uint8_t> &vert_sel);                     // Ctrl+L
+void grow_selection(const Mesh &m, std::vector<uint8_t> &vert_sel, bool grow);         // Ctrl+Numpad +/-
+void select_non_manifold(const Mesh &m, std::vector<uint8_t> &vert_sel);
+std::vector<std::pair<uint32_t, uint32_t>> edge_ring_edges(const Mesh &m, uint32_t a, uint32_t b);  // Select Edge Ring
 /* Blender's Set Origin reference points, in mesh space. Volume falls back to
  * Surface for open meshes (no enclosed volume), Surface to Median for meshes
  * without area. */

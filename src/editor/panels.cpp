@@ -434,6 +434,22 @@ struct InspectorReflector : Reflector {
       changed = true;
     }
   }
+  void color_alpha(const char *n, Vec3 &v, const char *alpha_name, float &a) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    const Vec3 old_rgb = v;
+    const float old_a = a;
+    if (u.color_field(fid(n), field_rect(row), v, &a)) {
+      /* Recorded as the two fields they are saved as, so multi-object editing works too. */
+      if (v != old_rgb) record(FieldEdit::Color, n).v_new = v;
+      if (a != old_a) {
+        FieldEdit &e = record(FieldEdit::Float, alpha_name);
+        e.f_old = old_a;
+        e.f_new = a;
+      }
+      changed = true;
+    }
+  }
   void enumeration(const char *n, int &v, const char *const *opts, int count) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
@@ -876,6 +892,21 @@ void Editor::draw_inspector(const Recti &r) {
         two(mf->mesh && mf->mesh->smooth ? "Shade Flat" : "Shade Smooth", mf->mesh && mf->mesh->smooth ? "shade_flat" : "shade_smooth",
             "Per-face vs interpolated vertex normals (Gouraud, FoCG ch. 9).", "Apply Modifiers", "apply_modifiers",
             "Bake the modifier stack into the mesh.\nBlender: Ctrl+A > Apply modifier.");
+        if (mf->mesh) {
+          /* Hard edges at UV seams: Unity users expect a seam to split the
+           * shading; Blender keeps the two apart (Mark Sharp). */
+          InspectorReflector sr(*this, u, lay);
+          bool hard = mf->mesh->seams_sharp;
+          sr.field("Seams Are Hard Edges", hard);
+          u.tooltip("Smooth shading stops at UV seams as well as at edges marked sharp.\n"
+                    "Blender keeps these separate: seams only cut UVs, Mark Sharp makes hard edges.");
+          if (hard != mf->mesh->seams_sharp) {
+            Mesh &mm = *mesh_make_mutable(mf->mesh);
+            mm.seams_sharp = hard;
+            mm.touch();
+            mark_changed("Seams Are Hard Edges");
+          }
+        }
         Recti row = lay.row(u.row_h() + u.px(2));
         if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, edit_mode_ ? "Exit Edit Mode (Tab)" : "Enter Edit Mode (Tab)", edit_mode_, Icon::Vertex)) {
           if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
@@ -905,6 +936,7 @@ void Editor::draw_inspector(const Recti &r) {
           else if (elem_ == EditElement::Edge) {
             er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
             er.field("Bevel Segments", bevel_segments_, 1, 64);
+            er.field("Bevel Clamp Overlap", bevel_clamp_);
             er.field("Loop Cuts", loop_cuts_, 1, 64);
             er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
             er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
@@ -1423,6 +1455,44 @@ void Editor::draw_render_window(const Recti &r) {
     u.label({h.x + u.px(4), h.y, h.w, h.h}, t, u.theme.text_bright);
   };
   header("Render Settings");
+  {
+    /* Resolution presets (Blender: Format presets), with the image's size in
+     * megapixels so high resolutions are one click away. */
+    struct Res { int w, h; const char *name; };
+    static const Res kRes[] = {{640, 360, "nHD"},           {1280, 720, "HD 720p"},        {1920, 1080, "Full HD 1080p"},
+                               {2560, 1440, "QHD 1440p"},   {3840, 2160, "4K UHD"},        {4096, 2160, "DCI 4K"},
+                               {5120, 2880, "5K"},          {7680, 4320, "8K UHD"},        {1080, 1080, "Square 1:1"},
+                               {1080, 1350, "Portrait 4:5"}, {1080, 1920, "Vertical 9:16"}, {2048, 2048, "2K texture"},
+                               {4096, 4096, "4K texture"},  {3000, 2000, "Photo 3:2"},     {6000, 4000, "24 MP photo"},
+                               {3508, 2480, "A4 at 300 dpi"}, {7016, 4961, "A2 at 300 dpi"}};
+    constexpr int kResCount = (int)(sizeof(kRes) / sizeof(kRes[0]));
+    static std::vector<std::string> labels;
+    static std::vector<const char *> ptrs;
+    if (labels.empty()) {
+      labels.push_back("Presets...");
+      for (const Res &r : kRes) labels.push_back(strprintf("%d x %d  %s  (%.1f MP)", r.w, r.h, r.name, r.w * (double)r.h / 1e6));
+      for (const std::string &l : labels) ptrs.push_back(l.c_str());
+    }
+    RenderSettings &rs0 = scene_->render;
+    InspectorReflector pr(*this, u, lay);
+    Recti row = lay.row(u.row_h() + u.px(2));
+    u.label(pr.label_rect(row), "Resolution Preset");
+    int pick = 0;
+    for (int k = 0; k < kResCount; k++)
+      if (kRes[k].w == rs0.width && kRes[k].h == rs0.height) pick = k + 1;
+    if (u.combo(u.id("res_preset"), pr.field_rect(row), pick, ptrs.data(), kResCount + 1) && pick > 0) {
+      rs0.width = kRes[pick - 1].w;
+      rs0.height = kRes[pick - 1].h;
+      rs0.percent = 100;
+      mark_changed("Resolution Preset");
+    }
+    u.tooltip("Common render sizes. MP = megapixels (width x height / 1,000,000):\n"
+              "memory and render time grow with it.");
+    const int fw = rs0.width * rs0.percent / 100, fh = rs0.height * rs0.percent / 100;
+    u.label(lay.row(), strprintf("Output %d x %d = %.2f MP (%.0f MB of float pixels)", fw, fh, fw * (double)fh / 1e6,
+                                 fw * (double)fh * 12.0 / (1024.0 * 1024.0)),
+            u.theme.text_dim);
+  }
   {
     InspectorReflector ir(*this, u, lay);
     u.push_id("rs");

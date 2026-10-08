@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <numeric>
 #include <unordered_map>
 
@@ -26,6 +27,8 @@ void Mesh::clear() {
   uvs.clear();
   face_material.clear();
   seams.clear();
+  face_smooth.clear();
+  sharp_edges.clear();
   touch();
 }
 
@@ -43,11 +46,16 @@ void Mesh::add_face(const uint32_t *verts, size_t n, const Vec2 *uv, int mat) {
     face_material.resize(face_count() - 1, 0);
     face_material.push_back(std::max(0, mat));
   }
+  if (!face_smooth.empty()) {
+    face_smooth.resize(face_count() - 1, smooth ? 1 : 0);
+    face_smooth.push_back(smooth ? 1 : 0);
+  }
 }
 
 void Mesh::sync_attributes() {
   if (!uvs.empty()) uvs.resize(corner_verts.size());
   if (!face_material.empty()) face_material.resize(face_count(), 0);
+  if (!face_smooth.empty()) face_smooth.resize(face_count(), smooth ? 1 : 0);
 }
 
 int Mesh::material_count() const {
@@ -64,6 +72,28 @@ void Mesh::set_seam(uint32_t a, uint32_t b, bool on) {
   bool has = it != seams.end() && *it == k;
   if (on && !has) seams.insert(it, k);
   if (!on && has) seams.erase(it);
+}
+
+bool Mesh::is_sharp(uint32_t a, uint32_t b) const { return std::binary_search(sharp_edges.begin(), sharp_edges.end(), edge_key(a, b)); }
+
+void Mesh::set_sharp(uint32_t a, uint32_t b, bool on) {
+  uint64_t k = edge_key(a, b);
+  auto it = std::lower_bound(sharp_edges.begin(), sharp_edges.end(), k);
+  bool has = it != sharp_edges.end() && *it == k;
+  if (on && !has) sharp_edges.insert(it, k);
+  if (!on && has) sharp_edges.erase(it);
+}
+
+bool Mesh::any_smooth() const {
+  if (face_smooth.empty()) return smooth;
+  for (uint8_t s : face_smooth)
+    if (s) return true;
+  return false;
+}
+
+void Mesh::set_face_smooth(size_t f, bool on) {
+  if (face_smooth.size() != face_count()) face_smooth.assign(face_count(), smooth ? 1 : 0);
+  if (f < face_smooth.size()) face_smooth[f] = on ? 1 : 0;
 }
 
 /* Reverses a face's winding together with its corner attributes. */
@@ -224,8 +254,9 @@ static void triangulate_face(const Mesh &m, size_t f, std::vector<uint32_t> &out
 }
 
 const RenderMesh &Mesh::render_mesh(bool force_flat) const {
-  bool flat = force_flat || !smooth;
-  const int ci = force_flat && smooth ? 1 : 0;
+  const bool has_smooth = any_smooth();
+  bool flat = force_flat || !has_smooth;
+  const int ci = force_flat && has_smooth ? 1 : 0;
   if (cache_version_[ci] == version) return cache_[ci];
   RenderMesh &rm = cache_[ci];
   rm.positions.clear();
@@ -262,7 +293,53 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
       }
       fweighted[f] = w;
     }
-    if (smooth_angle >= 179.9f) {
+    const bool per_face = !face_smooth.empty() || !sharp_edges.empty() || (seams_sharp && !seams.empty());
+    if (per_face) {
+      /* Smooth fans, as Blender builds them: around each vertex, the corners of
+       * two faces join when the edge between them is smooth - both faces
+       * shaded smooth, the edge not marked sharp (or a seam, if seams are
+       * sharp) and the angle within smooth_angle. Each fan averages its faces. */
+      std::vector<uint32_t> parent(corner_verts.size());
+      for (size_t c = 0; c < parent.size(); c++) parent[c] = (uint32_t)c;
+      std::function<uint32_t(uint32_t)> root = [&](uint32_t c) {
+        while (parent[c] != c) c = parent[c] = parent[parent[c]];
+        return c;
+      };
+      struct Side { uint32_t face, ca, cb; };  // the face and its corners at the edge's two ends
+      std::unordered_map<uint64_t, std::vector<Side>> by_edge;
+      by_edge.reserve(corner_verts.size());
+      for (size_t f = 0; f < nf; f++) {
+        const uint32_t b0 = face_offsets[f], n = face_size(f);
+        for (uint32_t i = 0; i < n; i++)
+          by_edge[edge_key(corner_verts[b0 + i], corner_verts[b0 + (i + 1) % n])].push_back({(uint32_t)f, b0 + i, b0 + (i + 1) % n});
+      }
+      const float cos_limit = smooth_angle >= 179.9f ? -2.0f : std::cos(smooth_angle * kDeg2Rad);
+      for (auto &[k, sides] : by_edge) {
+        if (sides.size() != 2) continue;  // open or non-manifold: hard
+        const Side &s = sides[0], &t = sides[1];
+        if (!smooth_of(s.face) || !smooth_of(t.face)) continue;
+        const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFFu);
+        if (is_sharp(a, b) || (seams_sharp && is_seam(a, b))) continue;
+        if (dot(fnormal[s.face], fnormal[t.face]) < cos_limit) continue;
+        /* Join the corners that sit on the same vertex. */
+        auto join = [&](uint32_t c1, uint32_t c2) { parent[root(c1)] = root(c2); };
+        if (corner_verts[s.ca] == corner_verts[t.ca]) {
+          join(s.ca, t.ca);
+          join(s.cb, t.cb);
+        }
+        else {
+          join(s.ca, t.cb);
+          join(s.cb, t.ca);
+        }
+      }
+      std::vector<Vec3> sum(corner_verts.size(), Vec3(0.0f));
+      for (size_t f = 0; f < nf; f++)
+        for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) sum[root(c)] += fweighted[f];
+      for (size_t f = 0; f < nf; f++)
+        for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++)
+          cnormal[c] = smooth_of(f) ? normalize(sum[root(c)]) : fnormal[f];
+    }
+    else if (smooth_angle >= 179.9f) {
       std::vector<Vec3> vn(positions.size(), Vec3(0.0f));
       for (size_t f = 0; f < nf; f++)
         for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) vn[corner_verts[c]] += fweighted[f];
@@ -368,7 +445,7 @@ struct MikkAdapter {
 
 const RenderMesh &Mesh::render_mesh_tangents(bool force_flat) const {
   const RenderMesh &rm0 = render_mesh(force_flat);
-  const int ci = force_flat && smooth ? 1 : 0;
+  const int ci = force_flat && any_smooth() ? 1 : 0;
   if (cache_tangents_[ci]) return rm0;
   RenderMesh &rm = cache_[ci];
   rm.tangents.assign(rm.positions.size(), Vec4(1, 0, 0, 1));
@@ -859,6 +936,7 @@ static Mesh subdivide_impl(const Mesh &in, bool smooth) {
   const bool uv = in.has_uvs();
   if (uv) out.uvs.resize(nc * 4);
   if (!in.face_material.empty()) out.face_material.resize(nc);
+  if (!in.face_smooth.empty()) out.face_smooth.resize(nc);
   const uint32_t ebase = (uint32_t)nv, fbase = (uint32_t)(nv + ne);
   js.parallel_for((int64_t)nf, 2048, [&](int64_t b, int64_t e) {
     for (int64_t f = b; f < e; f++) {
@@ -884,21 +962,27 @@ static Mesh subdivide_impl(const Mesh &in, bool smooth) {
           t[3] = (in.uvs[cprev] + in.uvs[c]) * 0.5f;
         }
         if (!out.face_material.empty()) out.face_material[c] = in.material_of((size_t)f);
+        if (!out.face_smooth.empty()) out.face_smooth[c] = in.smooth_of((size_t)f) ? 1 : 0;
       }
     }
   });
   out.face_offsets[0] = 0;
-  /* Seams split along with their edge. */
-  for (uint64_t k : in.seams) {
-    uint32_t a = (uint32_t)(k >> 32), bb = (uint32_t)(k & 0xFFFFFFFF);
-    auto lo = std::lower_bound(edge_lo.begin(), edge_lo.end(), a);
-    for (size_t e = (size_t)(lo - edge_lo.begin()); e < ne && edge_lo[e] == a; e++)
-      if (edge_hi[e] == bb) {
-        out.seams.push_back(Mesh::edge_key(a, ebase + (uint32_t)e));
-        out.seams.push_back(Mesh::edge_key(ebase + (uint32_t)e, bb));
-      }
-  }
-  std::sort(out.seams.begin(), out.seams.end());
+  /* Seams and sharp edges split along with their edge. */
+  auto split = [&](const std::vector<uint64_t> &src, std::vector<uint64_t> &dst) {
+    for (uint64_t k : src) {
+      uint32_t a = (uint32_t)(k >> 32), bb = (uint32_t)(k & 0xFFFFFFFF);
+      auto lo = std::lower_bound(edge_lo.begin(), edge_lo.end(), a);
+      for (size_t e = (size_t)(lo - edge_lo.begin()); e < ne && edge_lo[e] == a; e++)
+        if (edge_hi[e] == bb) {
+          dst.push_back(Mesh::edge_key(a, ebase + (uint32_t)e));
+          dst.push_back(Mesh::edge_key(ebase + (uint32_t)e, bb));
+        }
+    }
+    std::sort(dst.begin(), dst.end());
+  };
+  split(in.seams, out.seams);
+  split(in.sharp_edges, out.sharp_edges);
+  out.seams_sharp = in.seams_sharp;
   out.touch();
   return out;
 }
@@ -920,7 +1004,7 @@ void triangulate(Mesh &m) {
       Vec2 tt[3];
       if (fb.has_uv)
         for (int k = 0; k < 3; k++) tt[k] = m.uvs[m.face_offsets[f] + local[i + k]];
-      fb.add(tv, 3, fb.has_uv ? tt : nullptr, m.material_of(f));
+      fb.add(tv, 3, fb.has_uv ? tt : nullptr, m.material_of(f), m.smooth_of(f));
     }
   }
   fb.commit(m);
@@ -932,15 +1016,18 @@ void flip_normals(Mesh &m) {
   m.touch();
 }
 
+/* Seams and sharp edges follow their vertices to new indices. */
 static void remap_seams(Mesh &m, const std::vector<uint32_t> &remap) {
-  std::vector<uint64_t> out;
-  for (uint64_t k : m.seams) {
-    uint32_t a = remap[(size_t)(k >> 32)], b = remap[(size_t)(k & 0xFFFFFFFF)];
-    if (a != UINT32_MAX && b != UINT32_MAX && a != b) out.push_back(Mesh::edge_key(a, b));
+  for (std::vector<uint64_t> *edges : {&m.seams, &m.sharp_edges}) {
+    std::vector<uint64_t> out;
+    for (uint64_t k : *edges) {
+      uint32_t a = remap[(size_t)(k >> 32)], b = remap[(size_t)(k & 0xFFFFFFFF)];
+      if (a != UINT32_MAX && b != UINT32_MAX && a != b) out.push_back(Mesh::edge_key(a, b));
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    *edges = std::move(out);
   }
-  std::sort(out.begin(), out.end());
-  out.erase(std::unique(out.begin(), out.end()), out.end());
-  m.seams = std::move(out);
 }
 
 std::vector<uint32_t> remove_loose_verts(Mesh &m) {
@@ -980,7 +1067,7 @@ void cleanup_faces(Mesh &m) {
       v.pop_back();
       if (fb.has_uv) t.pop_back();
     }
-    if (v.size() >= 3) fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f));
+    if (v.size() >= 3) fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f), m.smooth_of(f));
   }
   fb.commit(m);
 }
@@ -1115,7 +1202,7 @@ void inset_faces(Mesh &m, std::vector<uint8_t> &face_sel, float amount) {
     uint32_t b = m.face_offsets[f], n = m.face_size(f);
     const Vec2 *t = fb.has_uv ? &m.uvs[b] : nullptr;
     if (!face_sel[f]) {
-      fb.add(v, n, t, m.material_of(f));
+      fb.add(v, n, t, m.material_of(f), m.smooth_of(f));
       sel.push_back(0);
       continue;
     }
@@ -1136,10 +1223,10 @@ void inset_faces(Mesh &m, std::vector<uint8_t> &face_sel, float amount) {
       uint32_t q[4] = {v[i], v[j], inner[j], inner[i]};
       Vec2 tq[4];
       if (t) { tq[0] = t[i]; tq[1] = t[j]; tq[2] = tin[j]; tq[3] = tin[i]; }
-      fb.add(q, 4, t ? tq : nullptr, m.material_of(f));
+      fb.add(q, 4, t ? tq : nullptr, m.material_of(f), m.smooth_of(f));
       sel.push_back(0);
     }
-    fb.add(inner.data(), n, t ? tin.data() : nullptr, m.material_of(f));
+    fb.add(inner.data(), n, t ? tin.data() : nullptr, m.material_of(f), m.smooth_of(f));
     sel.push_back(1);
   }
   fb.commit(m);
@@ -1151,7 +1238,7 @@ void delete_faces(Mesh &m, const std::vector<uint8_t> &face_sel) {
   FaceBuilder fb(m);
   for (size_t f = 0; f < m.face_count(); f++) {
     if (f < face_sel.size() && face_sel[f]) continue;
-    fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f));
+    fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
   }
   fb.commit(m);
   remove_loose_verts(m);
@@ -1373,7 +1460,7 @@ std::vector<uint32_t> loop_cut(Mesh &m, uint32_t a, uint32_t b, int cuts, float 
       for (size_t k = 0; k + 1 < side0.size(); k++) {
         uint32_t q[4] = {side0[k], side0[k + 1], side1[k + 1], side1[k]};
         Vec2 qt[4] = {uv0[k], uv0[k + 1], uv1[k + 1], uv1[k]};
-        fb.add(q, 4, has_uv ? qt : nullptr, m.material_of(f));
+        fb.add(q, 4, has_uv ? qt : nullptr, m.material_of(f), m.smooth_of(f));
       }
       continue;
     }
@@ -1387,7 +1474,7 @@ std::vector<uint32_t> loop_cut(Mesh &m, uint32_t a, uint32_t b, int cuts, float 
       uint32_t w = v[(i + 1) % n];
       if (split.count(Mesh::edge_key(v[i], w))) points(v[i], w, uv(i), uv(i + 1), fv, ft);
     }
-    fb.add(fv.data(), fv.size(), has_uv ? ft.data() : nullptr, m.material_of(f));
+    fb.add(fv.data(), fv.size(), has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f));
   }
   fb.commit(m);
   m.touch();

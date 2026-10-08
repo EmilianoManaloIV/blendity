@@ -198,6 +198,9 @@ class Editor {
   void edit_box_select(const Recti &r, Recti box, int mode);
   void edit_select_all(bool select);
   void sync_vert_face_selection(bool from_faces);
+  bool edge_is_selected(uint32_t a, uint32_t b) const;  // explicit in edge mode, else both ends
+  void edges_from_verts();  // edge_sel_ = edges with both ends selected
+  void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
   void edit_op(const std::string &op);
   void edit_tool(const std::string &op);  // edit_op, if the current selection mode offers it
   bool edit_op_available(const std::string &op) const;
@@ -218,6 +221,7 @@ class Editor {
     const Mesh *result = nullptr;  // the mesh it produced (panel hides once anything else edits it)
     uint64_t result_version = 0;
     std::vector<uint8_t> vsel, fsel;
+    std::unordered_set<uint64_t> esel;  // edge select mode
     EditElement elem = EditElement::Face;
     float amount = 0.5f;  // extrude distance, inset amount, bevel width, smooth factor, loop slide
     int segments = 1;     // bevel / bridge / push-through segments, subdivide and loop cuts
@@ -228,6 +232,7 @@ class Editor {
     float along_normal = 0.0f;
     int orientation = 0;  // 0 global, 1 local
     bool fuse = true;     // extrude / move onto another face fuses them
+    bool clamp = true;    // bevel: Clamp Overlap
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
@@ -251,6 +256,52 @@ class Editor {
     meshops::PushPullLimits lim;
     meshops::PushPullResult result = meshops::PushPullResult::Moved;
   };
+  /* Blender's modal Inset (I) and Bevel (Ctrl+B): the mouse adjusts the amount until a click. */
+  struct ModalAdjust {
+    bool active = false;
+    std::string op;
+    Vec2 center;              // the selection's centre on screen
+    float start_len = 1.0f;   // mouse distance from it when the drag started
+    float px_size = 0.01f;    // mesh units per pixel there
+    float start_amount = 0.0f, amount = 0.0f;
+    bool precise = false;     // Shift held
+    float precise_from = 0.0f, precise_len = 0.0f;
+    std::string typed;
+  };
+  ModalAdjust modal_;
+  /* Blender's modal G / R / S (modal_transform.cpp). */
+  struct ModalTransform {
+    bool active = false;
+    int mode = 0;               // 0 move, 1 rotate, 2 scale
+    bool edit = false;          // Edit Mode: the selected vertices; otherwise the selected objects
+    uint64_t obj = 0;
+    MeshPtr mesh_before;
+    std::vector<std::pair<uint64_t, Mat4>> objects;  // id, world matrix at the start
+    Vec3 pivot;
+    Vec2 pivot_screen;
+    Quat local_rot;             // the active object's axes (X / Y / Z pressed twice)
+    int start_mx = 0, start_my = 0;
+    int axis = -1;              // locked axis (3: normal_axis)
+    Vec3 normal_axis{0, 1, 0};  // world direction for Extrude's move along the normal
+    bool plane = false, local = false;
+    std::string typed;
+    Vec3 current;               // move so far
+    float value = 0.0f;         // degrees or scale factor so far
+    bool from_extrude = false;  // started by Extrude (E): one undo step with it
+  };
+  ModalTransform xf_;
+  bool blender_keys_ = false;  // preference: R / S start rotate / scale (the Scale tool moves to T)
+  bool transform_begin(int mode);
+  void extrude_and_move();  // Blender's E: extrude, then follow the mouse along the normal
+  Mat4 transform_delta(const Recti &view);
+  void transform_apply(const Mat4 &d);
+  void transform_finish(bool keep);
+  bool transform_update(const Recti &view);
+  void draw_transform(const Recti &view);
+  void modal_begin(const std::string &op);
+  bool modal_update(const Recti &view);
+  void modal_finish(bool keep);
+  void draw_modal(const Recti &view);
   void pushpull_begin();
   void pushpull_cancel();
   bool pushpull_update(const Recti &view);  // true while the tool owns the mouse
@@ -392,16 +443,21 @@ class Editor {
   float loop_slide_ = 0.5f;
   float bevel_width_ = 0.1f;
   int bevel_segments_ = 1;
+  bool bevel_clamp_ = true;  // Blender's Clamp Overlap
   int bridge_segments_ = 1;
   int subdivide_cuts_ = 1;
   bool auto_fuse_ = true;  // a face moved or extruded onto another face merges into it
   LastOp last_op_;
   bool last_op_open_ = true;
   Recti last_op_rect_{};  // last frame's panel area (keeps clicks off the scene)
+  Recti cam_preview_rect_{};  // last frame's Camera Preview inset (same)
   uint64_t redo_serial_ = 0;
   PushPullDrag pp_;
   float pp_last_distance_ = 0.0f;
   std::vector<uint8_t> vert_sel_, face_sel_;
+  /* Edge select mode keeps edges themselves (Mesh::edge_key), as Blender does:
+   * vert_sel_ then holds their ends. */
+  std::unordered_set<uint64_t> edge_sel_;
 
   /* ---- game view ---- */
   RenderTarget game_rt_;

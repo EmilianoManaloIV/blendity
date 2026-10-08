@@ -161,7 +161,7 @@ class Context {
   bool number_committed(Id i, std::string *expr = nullptr, int *component = nullptr) const;
   bool slider(Id i, const Recti &r, float &v, float mn, float mx);
   bool combo(Id i, const Recti &r, int &v, const char *const *options, int count);
-  bool color_field(Id i, const Recti &r, Vec3 &c);
+  bool color_field(Id i, const Recti &r, Vec3 &c, float *alpha = nullptr);  // Unity's colour field + Color window
   bool foldout(const Recti &r, const std::string &label, bool &open, Icon icon = Icon::None);
   void tooltip(const std::string &text);  // for the most recent hovered widget
   void separator(const Recti &r);
@@ -261,8 +261,14 @@ class Context {
   bool last_hovered_ = false;
   std::vector<std::function<void()>> overlays_;
   std::unordered_map<Id, int> int_results_;
-  std::unordered_map<Id, Vec3> color_results_;
-  std::unordered_map<Id, Vec3> color_edit_;
+  std::unordered_map<Id, Vec4> color_results_;
+  std::unordered_map<Id, Vec4> color_edit_, color_before_;
+  std::unordered_map<Id, bool> color_has_alpha_;
+  std::unordered_map<Id, float> color_hue_;  // keeps the hue while saturation is 0
+  Image color_square_;                       // the picker's saturation / value square
+  float color_square_hue_ = -1.0f;
+  int color_mode_ = 0;                       // RGB 0-255, RGB 0-1, HSV
+  std::vector<Vec4> color_recent_;
 };
 
 /* Evaluates number-field input: "2*3+1", "sqrt(2)", "+=1" / "*=2" (relative to
