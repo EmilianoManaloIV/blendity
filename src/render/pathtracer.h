@@ -19,6 +19,8 @@
 #pragma once
 
 #include "raster.h"
+#include "../core/core.h"
+#include "gpu_device.h"
 #include "shading.h"
 
 #include <atomic>
@@ -38,6 +40,14 @@ struct PTObject {
   const RenderMesh *mesh = nullptr;  // needs tangents for normal maps
   Mat4 model;
   const std::vector<MaterialPtr> *materials = nullptr;
+};
+
+/* A thin lens for depth of field (Cycles: kernel/camera/camera.h). */
+struct PTLens {
+  float radius = 0.0f;           // world units; 0 = pinhole
+  float focus_distance = 10.0f;  // along the view direction
+  int blades = 0;                // 0 round, 3+ polygonal
+  float rotation = 0.0f;         // radians
 };
 
 struct PTSettings {
@@ -61,6 +71,13 @@ struct PTSettings {
   /* Sample emissive meshes directly (Cycles: mesh lights in the light tree),
    * MIS-combined with BSDF hits. Off only for comparisons. Takes effect on build(). */
   bool sample_mesh_lights = true;
+  /* Render devices (Cycles: Preferences > System > Render Devices plus the
+   * scene's Device). Every enabled device renders whole samples of the frame;
+   * their sums are averaged, so the CPU and any number of GPUs combine. */
+  bool use_cpu = true;
+  std::vector<int> gpus;         // gpu::devices() indices (empty = CPU only)
+  bool gpu_hardware_rt = true;   // use ray tracing hardware where a GPU has it
+  double merge_interval_ms = 100.0;  // how often GPU results are read back for display
   float guiding_probability = 0.5f;  // Cycles' "Surface Guiding Probability"
   int guiding_training_samples = 128;
 };
@@ -73,13 +90,15 @@ struct PTStats {
   double render_ms = 0;
   double mrays_per_s() const { return render_ms > 0 ? rays / (render_ms * 1000.0) : 0.0; }
   int guiding_updates = 0;  // OpenPGL field updates so far
+  int cpu_samples = 0;             // samples per device (combined rendering)
+  std::vector<int> gpu_samples;
 };
 
 class PathTracer {
  public:
   /* Scene input (world space). Environment and lights are copied. */
   void build(const std::vector<PTObject> &objects, const std::vector<RenderLight> &lights, const Environment &env);
-  void set_camera(const Mat4 &view, const Mat4 &proj, int width, int height);
+  void set_camera(const Mat4 &view, const Mat4 &proj, int width, int height, const PTLens &lens = PTLens());
   void set_settings(const PTSettings &s) { settings_ = s; }
   const PTSettings &settings() const { return settings_; }
   void reset();
@@ -118,6 +137,11 @@ class PathTracer {
   /* "Embree" or "Blendity BVH", and "OpenImageDenoise" or "A-Trous". */
   const char *ray_backend() const;
   const char *denoise_backend() const;
+  /* "CPU", "NVIDIA GeForce RTX 4070 SUPER (RT cores)", "CPU + 2 GPUs" ... */
+  std::string device_summary() const;
+  static bool gpu_available();
+  /* Errors from GPU devices that had to drop out (empty if none). */
+  const std::string &gpu_error() const { return gpu_error_; }
 
  private:
   void build_embree(double &ms);
@@ -164,6 +188,30 @@ class PathTracer {
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
   Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint64_t &rays, PTGuidingThread *guide) const;
   std::vector<float> denoised() const;
+  int render_cpu(double budget_ms, int max_samples, std::atomic<int> *claim);
+  /* GPU devices (gpu_device.h): their renderers, kept across builds. */
+  struct GpuSlot {
+    std::unique_ptr<gpu::Renderer> r;
+    int index = 0;
+    bool hw_rt = false;
+    int samples = 0;
+    double ms_per_sample = 0;
+  };
+  std::vector<std::unique_ptr<GpuSlot>> gpus_;
+  gpu::GParams gpu_params_{};
+  std::string gpu_error_;
+  int cpu_samples_ = 0;
+  double cpu_ms_per_sample_ = 0;  // measured, for sharing samples with GPUs
+  bool aux_merged_ = true;        // albedo / normal / depth include the GPUs' sums
+  int done_total_ = 0;            // samples finished on every device (samples_ = merged into accum_)
+  ScopedTimer merge_clock_;
+  void merge_gpus();
+  void merge_aux();
+  std::vector<Vec3> cpu_accum_, cpu_albedo_, cpu_normal_;
+  std::vector<float> cpu_depth_;
+  void build_gpu_scene(gpu::Scene &s) const;
+  void sync_gpus();
+  void upload_gpus();
 
   std::vector<PTObject> objects_;
   bool see_through_ = false;  // any Cutout / Transparent / Glass material (shadow rays must look closer)
@@ -176,6 +224,8 @@ class PathTracer {
   PTSettings settings_;
   Mat4 inv_vp_;
   Vec3 cam_pos_;
+  PTLens lens_;
+  Vec3 cam_right_{1, 0, 0}, cam_up_{0, 1, 0}, cam_fwd_{0, 0, 1};
   int w_ = 0, h_ = 0;
   int samples_ = 0;
   std::vector<Vec3> accum_, albedo_, normal_;

@@ -129,6 +129,10 @@ A transform is an affine matrix built as Translate x Rotate x Scale (FoCG 7.3). 
 > [GEA1] 5.3 Matrices, 5.4 Quaternions, 5.5 Comparison of Rotational Representations
 @ blender/source/blender/editors/transform  (the modal G/R/S system)
 @ blender/source/blender/editors/gizmo_library
+# The origin (pivot)
+Every object rotates and scales around its origin, the point its Transform position names. Imported meshes often have it in an odd place. Set Origin (GameObject menu, or Inspector > Transform > Origin) moves it without moving anything on screen: the mesh shifts one way, the object the other, and children stay where they are. Bounds Center and Median are geometric middles. Center of Mass (Surface) weights each face by its area. Center of Mass (Volume) uses the enclosed volume, where a solid would balance. Bottom Center puts the pivot on the floor, the way Unity likes characters and props. Origin to Point takes coordinates you type, and Geometry to Origin moves the mesh instead of the pivot.
+@ blender/source/blender/editors/object/object_transform.cc  (object_origin_set_exec)
+! cmd:select Cube; origin bottom | Put the Cube's origin at the centre of its base
 ? Why might rotating 90 degrees on X then 90 on Y give a different result from Y then X? | Matrix multiplication is not commutative. Order matters, which is why Unity documents its Z-X-Y order and Blender lets you choose a rotation mode.
 ! tool:Move | Move tool (W)
 ! tool:Rotate | Rotate tool (E)
@@ -209,6 +213,15 @@ The Scene view has its own editor camera. The Game view renders through the Came
 | Orthographic | Size (half height in units) | Orthographic Scale (full width)
 | Clipping | Near / Far | Clip Start / End
 Blender's lens setting converts to a field of view with FOV = 2 atan(sensor / (2 x focal)). The default 50 mm lens on a 36 mm sensor gives about 39.6 degrees horizontal.
+# Physical cameras
+Tick Physical Camera (Unity's name; Blender's Lens Unit = Millimeters) and the view comes from a real lens: a focal length, a sensor size (full frame, APS-C, Super 35, IMAX ...), and which image side the sensor spans (Sensor Fit). Lens Shift slides the image without tilting the camera, which keeps an architect's vertical lines straight. Each camera can also have its own Aspect Ratio. The final render keeps the width and sets the height, and the Game view letterboxes.
+# Depth of field and exposure
+A real lens focuses at one distance. With Depth of Field on, each camera ray starts at a random point on the aperture and aims at the focus plane, so things nearer or farther blur. The aperture's diameter is focal length / f-stop: f/1.4 blurs a lot, f/16 hardly at all. With Aperture Blades the aperture becomes a polygon, and so do the highlights (bokeh). Physical Exposure brightens or darkens the image the way a camera does: double the ISO or the shutter time for one stop more, and close the aperture one stop (f/2.8 to f/4) for one less.
+@ blender/intern/cycles/kernel/camera/camera.h  (thin lens: camera_sample_perspective)
+@ blender/intern/cycles/kernel/sample/mapping.h  (regular_polygon_sample: bladed apertures)
+> [FoCG] 4.3 Computing Viewing Rays, 13.4 Choosing Random Points (on the aperture), 14.10 Monte Carlo Ray Tracing
+? With a 50 mm lens, what is the aperture's diameter at f/2? | 25 mm: the f-number is the focal length divided by the aperture's diameter.
+! cmd:select Main Camera; set Camera.PhysicalCamera 1; set Camera.DepthOfField 1; set Camera.FStop 1.4; camerapreview rendered | Make the Main Camera physical with a shallow depth of field and preview it
 # Depth precision
 Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits close to the near plane, so a tiny near clip value causes z-fighting in the distance. Keep Near as large as you can.
 > [FoCG] 8.3 Perspective Projection, 8.4 Some Properties of the Perspective Transform, 8.5 Field-of-View
@@ -470,7 +483,7 @@ Blender's edge tools change topology rather than just moving vertices. Each one 
 | Tool | Blendity | Blender | ProBuilder / Unity
 | Bevel | Ctrl+B (edges selected) | Ctrl+B | Bevel
 | Bridge | Ctrl+Shift+B (two faces or two holes) | Edge > Bridge Edge Loops | Bridge Edges
-| Push/Pull (SketchUp) | P, drag a face | (Extrude + Boolean) | ProBuilder Extrude
+| Push/Pull (SketchUp) | P in face mode, then move or type; click to confirm | (Extrude + Boolean) | ProBuilder Extrude
 | Push Through | Alt+P (a face) | (a Boolean difference) | (none)
 | Connect | J (two vertices of a face) | J | Connect Edges
 | Dissolve / Collapse | Ctrl+X / Edge menu | Ctrl+X / Merge > Collapse | Delete Edges / Collapse
@@ -482,7 +495,10 @@ Bridging removes two faces and joins their outlines with a tube. The outlines mu
 @ blender/source/blender/bmesh/operators/bmo_bridge.cc
 > [FoCG] 15.5 Cubics (the Hermite curve the tube follows), 12.1 Triangle Meshes
 # Push/Pull (SketchUp)
-The Push/Pull tool (P) moves a face along its normal as you drag. For each side of the face it looks at the neighbouring face. If that face lies in the plane the side moves through, the neighbour stretches or shrinks instead of getting a new wall, the way SketchUp merges coplanar faces. That is why pulling the top of a box makes it taller rather than stacking a second box on it. Pushing past the far side switches to Push Through, and pulling onto a face in front lands every vertex on that face's plane, so a tilted face is met at its own angle, and joins the two. Ctrl always adds walls (SketchUp's "new starting face").
+Push/Pull is a face operation. Select faces in face mode (3), press P, and move the mouse or type a distance; click or press Enter to keep it, Esc or a right-click to cancel. It moves the faces along their normal. For each side of the face it looks at the neighbouring face. If that face lies in the plane the side moves through, the neighbour stretches or shrinks instead of getting a new wall, the way SketchUp merges coplanar faces. That is why pulling the top of a box makes it taller rather than stacking a second box on it. Pushing past the far side switches to Push Through, and pulling onto a face in front lands every vertex on that face's plane, so a tilted face is met at its own angle, and joins the two. Ctrl always adds walls (SketchUp's "new starting face").
+It never cuts through the solid. A push stops at the far side, or at anything inside (a tunnel under the face), unless it can make a clean hole. When the faces around it lean over it, like the slanted top of a wedge, walls would come out through them, so the corners slide along those faces instead, as Blender moves a face. A stress test runs it on every face of 26 awkward meshes at hundreds of distances and checks that no result is broken.
+# Tools follow the selection mode
+Vertex mode (1) offers vertex operations: merge, connect, make face, smooth. Edge mode (2) offers edge operations: bevel, loop cut, bridge, subdivide, dissolve, collapse and seams. Face mode (3) offers face operations: Push/Pull, extrude, inset, push through, bridge, fuse and materials. The Mesh menu, the Inspector and the shortcuts all show only the current mode's list, as ProBuilder and Blender's Vertex / Edge / Face menus do. A shortcut from another mode says which mode it needs.
 # Push Through, and extruding onto a face
 Push Through casts a ray from each outline vertex along the face's inward normal and finds where it leaves the object. It cuts that projected shape out of the exit face, so a tilted or curved-in back works too, and joins the two openings with a tube. Extruding (or moving) a face until it lies on another face does the matching join: the face it lands on gets an opening, and the prism becomes part of the solid. When the faces are the same shape, their vertices are welded instead.
 > [FoCG] 21.5 Constructive Solid Geometry
@@ -495,6 +511,28 @@ After an operator runs, a panel at the bottom left of the Scene view shows its s
 ? Why does a hole through a cube change Euler's formula? | V - E + F = 2 - 2g, where g is the number of holes (the genus). A cube with a tunnel has g = 1, so V - E + F = 0.
 ! cmd:select Cube; edit edge all; editop bevel | Bevel every edge of the Cube
 ! cmd:select Cube; edit face; fsel facing 0 0 -1; editop inset; editop push_through | Inset the Cube's front face and push it through
+)"},
+    {"Rendering on the GPU", "Vulkan, ray tracing hardware and combined CPU + GPU rendering", R"(
+A path tracer does the same small job millions of times: follow one ray, bounce it, add up the light. A GPU runs tens of thousands of these at once, so the same render finishes many times faster. Cycles has a backend for each vendor (CUDA and OptiX for NVIDIA, HIP for AMD, oneAPI for Intel, Metal for Apple). Blendity uses one portable API, Vulkan, which every one of those GPUs supports.
+| | Blendity | Blender (Cycles) | Unity (HDRP)
+| Choose the GPU | Render Settings > Device: GPU Compute | Render Properties > Device: GPU Compute | DirectX 12 / Vulkan backend
+| Pick devices | Render window > Render Devices | Preferences > System > Cycles Render Devices | (one GPU)
+| RT cores | Hardware Ray Tracing | OptiX / HIP RT / Embree GPU | DXR ray tracing
+| CPU + GPU | tick the CPU under Render Devices | tick the CPU in Preferences | (none)
+# One kernel on two kinds of processor
+The GPU runs a compute shader that is a line-for-line copy of the CPU path tracer, and both use the same random number sequence for each sample. Sample 37 of a pixel gives the same light path whichever device traces it. That is why CPU and GPU samples can simply be averaged. The shader is compiled from GLSL to SPIR-V by shaderc as soon as you choose GPU Compute. That takes a few seconds once, and the result is cached in ~/.blendity/cache.
+@ blender/intern/cycles/device
+@ blender/intern/cycles/kernel/integrator
+# Ray tracing hardware
+Most of a path tracer's time goes into finding which triangle a ray hits first. Recent GPUs have fixed-function units for exactly this: NVIDIA's RT cores, AMD's ray accelerators and Intel's ray tracing units. Through VK_KHR_ray_query Blendity builds the GPU's own acceleration structures, one per unique mesh plus one over the objects, so moving an object only rebuilds the small one. On an RTX 4070 SUPER this is about 7x faster than walking Blendity's BVH in the shader. GPUs without the hardware still work, through the software BVH.
+> [FoCG] 12.3 Spatial Data Structures
+# Combined rendering
+With several devices ticked, they share one counter of sample numbers. Each device takes the next few samples it hasn't rendered, and fast devices take bigger batches. The CPU stops taking samples once the GPUs would finish the rest sooner, so it never holds up the end of a frame. Every 100 ms the devices' sums are added together for the display. With fast GPUs the CPU adds little, and switching it off can be quicker. It helps more alongside a GPU without ray tracing hardware.
+@ blender/intern/cycles/integrator/path_trace.cpp, blender/intern/cycles/integrator/work_balancer.cpp
+? Why can the CPU and GPU render the same frame without seams or blotches? | They don't split the image. Each one renders whole samples of every pixel, from the same random sequences, so averaging their sums gives exactly what one device would.
+? Why can adding the CPU make a render slower? | One CPU sample can take 30x longer than a GPU sample. If the CPU is still finishing a sample after the GPUs are done, everyone waits. Blendity stops the CPU from taking new samples near the end, but a fast GPU pair still does better alone.
+! cmd:engine path; device gpu +cpu; window Render | Switch to path tracing on the GPU, with the CPU helping
+! cmd:engine path; device gpu; render; window Render | Render the Main Camera on the GPUs only
 )"},
 };
 

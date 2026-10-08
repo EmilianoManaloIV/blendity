@@ -204,6 +204,9 @@ struct PushPullLimits {
   float through = -1.0f;  // push distance that reaches the far side (-1: none)
   float contact = -1.0f;  // pull distance that reaches a face in front (-1: none)
   uint32_t contact_face = UINT32_MAX;
+  float behind = -1.0f;   // nearest surface behind the region (pushes stop there unless they make a hole)
+  float ahead = -1.0f;    // nearest surface in front (pulls stop there unless they join it)
+  float behind_sweep = -1.0f;  // the same, from geometry inside the swept outline only
 };
 PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_sel);
 bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar = true,
@@ -212,6 +215,12 @@ size_t subdivide_edges(Mesh &m, std::vector<uint8_t> &vert_sel, int cuts);  // B
 size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel);             // Blender: Dissolve Edges
 size_t connect_vertices(Mesh &m, std::vector<uint8_t> &vert_sel);           // Blender: J (Connect Vertex Path)
 size_t collapse_edges(Mesh &m, std::vector<uint8_t> &vert_sel);             // Blender: Collapse
+/* Blender's Set Origin reference points, in mesh space. Volume falls back to
+ * Surface for open meshes (no enclosed volume), Surface to Median for meshes
+ * without area. */
+enum class OriginPoint { BoundsCenter, Median, SurfaceCenter, VolumeCenter, BoundsBottom };
+Vec3 origin_point(const Mesh &m, OriginPoint mode);
+void translate(Mesh &m, Vec3 offset);
 /* Boolean (Blender: Boolean modifier, Manifold solver; needs Blender's
  * libraries). b is placed into a's object space by b_to_a. Both must be
  * closed manifolds; on failure a is unchanged and error explains why. */

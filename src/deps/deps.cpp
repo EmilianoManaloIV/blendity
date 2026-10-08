@@ -139,6 +139,12 @@ const std::vector<Library> &libraries() {
       {"Zstandard", false, "",
 #endif
        "Compressed .scene files (like Blender's .blend compression)", "Uncompressed text scenes"},
+#ifdef BL_WITH_VULKAN
+      {"Vulkan + shaderc", true, "1.4",
+#else
+      {"Vulkan + shaderc", false, "",
+#endif
+       "GPU path tracing on any vendor's GPU, hardware ray tracing (ray queries) where present", "CPU rendering only"},
   };
   return libs;
 }

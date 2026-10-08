@@ -44,8 +44,8 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
   bool gizmo_busy = gizmo_update(view);
-  /* SketchUp-style Push/Pull owns clicks on faces while it is the tool. */
-  if (tool_ == Tool::PushPull && pushpull_update(view)) gizmo_busy = true;
+  /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
+  if (pushpull_update(view)) gizmo_busy = true;
 
   auto &in = u.in;
   /* Selection clicks / box select (LMB without Alt). Uses last frame's id buffer. */
@@ -91,7 +91,7 @@ void Editor::draw_scene_view(const Recti &r) {
 
   draw_scene_icons(view);
   if (show_gizmos_) draw_gizmo(view);
-  if (tool_ == Tool::PushPull) draw_pushpull(view);
+  draw_pushpull(view);
   draw_view_gizmo(view);
 
   /* Statistics overlay (Blender: Viewport Overlays > Statistics). */
@@ -114,9 +114,10 @@ void Editor::draw_scene_view(const Recti &r) {
     }
     lines.push_back(strprintf("Triangles %zu (%zu drawn)", scene_stats_.tris_submitted, scene_stats_.tris_rasterized));
     lines.push_back(strprintf("Render    %.2f ms  (%d culled)", scene_stats_.ms_total, scene_stats_.objects_culled));
-    if (shading_ == Shading::Rendered)
-      lines.push_back(strprintf("Path tracing  %d / %d samples  %.1f Mrays/s", vp_pt_.samples(),
-                                scene_->render.viewport_samples, vp_pt_.stats().mrays_per_s()));
+    if (shading_ == Shading::Rendered) {
+      lines.push_back(strprintf("Path tracing  %d / %d samples", vp_pt_.samples(), scene_->render.viewport_samples));
+      lines.push_back("Device    " + vp_pt_.device_summary());
+    }
     if (shading_ == Shading::Shaded) lines.push_back(strprintf("Shading   %.2f ms (deferred PBR)", scene_stats_.ms_shade));
     int y = view.y + u.px(8);
     for (auto &l : lines) {
@@ -172,7 +173,7 @@ void Editor::scene_navigation(const Recti &view) {
   float k_pan = (2.0f * cam_.distance * std::tan(cam_.fov * 0.5f * kDeg2Rad)) / std::max(1, view.h);
 
   if (drag_ == Drag::None && scene_hovered_ && !u.any_active()) {
-    if (in.pressed[1]) {
+    if (in.pressed[1] && !pp_.active) {  // a right-click cancels a running Push/Pull instead
       drag_ = in.alt() ? Drag::Zoom : Drag::Fly;
       fly_last_ = now;
       fly_accel_ = 1.0f;
@@ -455,14 +456,31 @@ void Editor::draw_scene_icons(const Recti &view) {
       Quat q = g.world_rotation();
       Vec3 p = g.world_position();
       float far_d = std::min(c->far_clip, 4.0f);
-      float aspect = game_rect_.h > 0 ? game_rect_.w / (float)game_rect_.h : 16.0f / 9.0f;
-      float hh = c->orthographic ? c->ortho_size : std::tan(c->fov * 0.5f * kDeg2Rad) * far_d, hw = hh * aspect;
-      Vec3 corners[4] = {{-hw, -hh, far_d}, {hw, -hh, far_d}, {hw, hh, far_d}, {-hw, hh, far_d}};
+      float aspect = c->image_aspect(scene_->render.width / (float)std::max(1, scene_->render.height));
+      float tan_v = c->orthographic ? 0.0f : std::tan(c->vertical_fov_deg(aspect) * 0.5f * kDeg2Rad);
+      float sx = c->physical && !c->orthographic ? c->shift_x * 2.0f : 0.0f, sy = c->physical && !c->orthographic ? c->shift_y * 2.0f : 0.0f;
+      auto rect_at = [&](float d, Vec3 *out) {  // the image rectangle at distance d (lens shift included)
+        float hh = c->orthographic ? c->ortho_size : tan_v * d, hw = hh * aspect;
+        float cx = sx * hw, cy = sy * hh;
+        out[0] = {cx - hw, cy - hh, d};
+        out[1] = {cx + hw, cy - hh, d};
+        out[2] = {cx + hw, cy + hh, d};
+        out[3] = {cx - hw, cy + hh, d};
+      };
+      Vec3 corners[4];
+      rect_at(far_d, corners);
       for (int i = 0; i < 4; i++) {
         Vec3 a = p + q.rotate(corners[i]), b = p + q.rotate(corners[(i + 1) % 4]);
         Vec3 o = c->orthographic ? p + q.rotate({corners[i].x, corners[i].y, 0}) : p;
         scene_r3d_.line(o, a, Color::hex(0xDDDDDD, 200), false);
         scene_r3d_.line(a, b, Color::hex(0xDDDDDD, 200), false);
+      }
+      if (c->dof && !c->orthographic) {
+        /* The focus plane (Blender draws it as Limits > Focus). */
+        Vec3 fc[4];
+        rect_at(c->focus_distance, fc);
+        for (int i = 0; i < 4; i++)
+          scene_r3d_.line(p + q.rotate(fc[i]), p + q.rotate(fc[(i + 1) % 4]), Color::hex(0xF0C040, 200), false);
       }
     }
   });
@@ -622,7 +640,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || tool_ == Tool::View || tool_ == Tool::PushPull || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1055,7 +1073,7 @@ void Editor::enter_edit_mode() {
   const Mesh &m = *g->get<MeshFilter>()->mesh;
   vert_sel_.assign(m.vert_count(), 0);
   face_sel_.assign(m.face_count(), 0);
-  Log::info("Edit Mode on '%s' (Blender workflow): 1 = vertices, 3 = faces, Ctrl+E extrude, Ctrl+I inset, Tab to exit.", g->name.c_str());
+  Log::info("Edit Mode on '%s': 1 vertices, 2 edges, 3 faces - each mode has its own tools (Mesh menu, Inspector). P Push/Pull faces, Tab to exit.", g->name.c_str());
 }
 
 void Editor::exit_edit_mode() {
@@ -1292,6 +1310,64 @@ void Editor::edit_op(const std::string &op) {
   mark_changed("Edit: " + op);
 }
 
+/* Edit Mode operators by selection mode (ProBuilder's Vertex / Edge / Face
+ * actions, Blender's Vertex / Edge / Face menus). The Mesh menu, the
+ * Inspector and the shortcuts all offer only the current mode's operators. */
+const std::vector<EditOpInfo> &edit_op_table() {
+  enum { V = 1, E = 2, F = 4, ALL = 7 };
+  static const std::vector<EditOpInfo> ops = {
+      {"merge_center", "Merge at Center", "Alt+M", "Weld the selected vertices at their centre. Blender: M > At Center.", V},
+      {"connect", "Connect Vertex Path", "J", "Split a face between two selected vertices that aren't neighbours. Blender: J.", V},
+      {"fill", "Make Face", "Alt+F", "Make a face from the selected vertices (in edge mode: fill the selected hole). Blender: F.", V | E},
+      {"smooth", "Smooth Vertices", "", "Laplacian smoothing of the selected vertices. Blender: Smooth Vertices.", V},
+      {"bevel", "Bevel", "Ctrl+B", "Round off the selected edges with a strip of faces. Blender: Ctrl+B.", E},
+      {"loopcut", "Loop Cut", "Ctrl+R", "Cut the quad ring across the selected edge (or hover an edge and press Ctrl+R). Blender: Ctrl+R.", E},
+      {"select_loop", "Select Edge Loop", "Double-click", "Extend the selected edge to its whole loop. Blender: Alt+click.", E},
+      {"subdivide_edges", "Subdivide", "", "Split the selected edges into equal parts. Blender: Subdivide.", E},
+      {"dissolve", "Dissolve", "Ctrl+X", "Remove the selected edges, merging the faces on both sides. Blender: Dissolve Edges.", E},
+      {"collapse", "Collapse", "", "Merge each selected edge (or connected group) into one vertex at its centre. Blender: Collapse.", E},
+      {"mark_seam", "Mark Seam", "", "UV unwrapping cuts the mesh along these edges. Blender: Mark Seam.", E},
+      {"clear_seam", "Clear Seam", "", "Remove UV seams from the selected edges.", E},
+      {"push_pull", "Push/Pull", "P", "Move the selected faces along their normal like SketchUp: sides stretch into coplanar\nneighbours, pushing to the far side makes a hole, pulling onto a face joins it.\nMove the mouse or type a distance, click to confirm, Esc to cancel.", F},
+      {"extrude", "Extrude", "Ctrl+E", "Extrude the selected faces along their normals. Blender: E.", F},
+      {"inset", "Inset", "Ctrl+I", "Make a smaller copy of each selected face inside it. Blender: I.", F},
+      {"push_through", "Push Through", "Alt+P", "Cut a hole through the object along the selected face's normal.\nTip: Inset first so the hole has a rim.", F},
+      {"fuse", "Fuse onto Face", "", "Join selected faces that lie on another face of the mesh (the touching area becomes an opening).", F},
+      {"bridge", "Bridge", "Ctrl+Shift+B", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
+      {"delete", "Delete", "Del", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
+      {"recalc_normals", "Recalculate Normals", "Shift+N", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
+  };
+  return ops;
+}
+
+static int element_bit(EditElement e) { return e == EditElement::Vertex ? 1 : e == EditElement::Edge ? 2 : 4; }
+
+const EditOpInfo *find_edit_op(const std::string &op) {
+  for (const EditOpInfo &i : edit_op_table())
+    if (op == i.op) return &i;
+  return nullptr;
+}
+
+bool Editor::edit_op_available(const std::string &op) const {
+  const EditOpInfo *i = find_edit_op(op);
+  return !i || (i->elements & element_bit(elem_));
+}
+
+/* An operator chosen from the menu, the Inspector or a shortcut. */
+void Editor::edit_tool(const std::string &op) {
+  if (!edit_mode_) return;
+  if (!edit_op_available(op)) {
+    const EditOpInfo *i = find_edit_op(op);
+    const char *mode = (i->elements & 4) ? "a face" : (i->elements & 2) ? "an edge" : "a vertex";
+    const char *key = (i->elements & 4) ? "3" : (i->elements & 2) ? "2" : "1";
+    Log::warn("%s is %s operation: press %s to switch modes", i->label, mode, key);
+    return;
+  }
+  if (op == "push_pull") pushpull_begin();
+  else if (op == "mark_seam" || op == "clear_seam") uv_op(op);
+  else edit_op(op);
+}
+
 void Editor::set_edit_element(EditElement e) {
   EditElement old = elem_;
   elem_ = e;
@@ -1432,13 +1508,21 @@ void Editor::draw_game_view(const Recti &r) {
     return;
   }
   ScopedTimer t;
-  game_rt_.attach(fb_, view);
-  float aspect = view.w / (float)view.h;
+  /* A camera with its own aspect ratio is letterboxed (Unity: Game view aspect). */
+  Recti img = view;
+  const float aspect = cam->image_aspect(view.w / (float)view.h);
+  if (cam->aspect_mode != 0) {
+    if (view.w / (float)view.h > aspect) img.w = std::max(8, (int)std::lround(view.h * aspect));
+    else img.h = std::max(8, (int)std::lround(view.w / aspect));
+    img.x = view.x + (view.w - img.w) / 2;
+    img.y = view.y + (view.h - img.h) / 2;
+    u.canvas.fill_rect(view, 0xFF000000);
+  }
+  game_rt_.attach(fb_, img);
   Quat q = owner->world_rotation();
   Vec3 eye = owner->world_position();
   Mat4 v = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
-  Mat4 p = cam->orthographic ? Mat4::ortho(cam->ortho_size, aspect, cam->near_clip, cam->far_clip)
-                             : Mat4::perspective(cam->fov * kDeg2Rad, aspect, cam->near_clip, cam->far_clip);
+  Mat4 p = cam->projection(aspect);
   /* The Game view always uses the full material pipeline with shadows (Unity Game view). */
   render_deferred(game_r3d_, game_rt_, v, p, eye, true, true, cam);
   game_stats_ = game_r3d_.stats();
@@ -1694,47 +1778,101 @@ void Editor::draw_last_op_panel(const Recti &view) {
 /* Push/Pull tool (SketchUp)                                              */
 /* ===================================================================== */
 
-bool Editor::pick_mesh_face(const Recti &view, int mx, int my, GameObject *&best, uint32_t &face, Vec3 &hit) {
-  Ray ray = scene_r3d_.screen_ray((float)(mx - view.x), (float)(my - view.y));
-  float bt = 1e30f;
-  best = nullptr;
-  scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    MeshFilter *mf = g.get<MeshFilter>();
-    if (!mf || !mf->mesh || !g.get<MeshRenderer>()) return;
-    const Mat4 &w = g.world_matrix();
-    Mat4 inv = w.inverse();
-    Ray lr{inv.point(ray.origin), normalize(inv.dir(ray.dir))};
-    const RenderMesh &rm = mf->mesh->render_mesh(true);
-    if (ray_aabb(lr, rm.bounds) < 0) return;
-    for (size_t t = 0; t < rm.tri_count(); t++) {
-      float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
-      if (d <= 0) continue;
-      Vec3 p = w.point(lr.origin + lr.dir * d);
-      float dist = length(p - ray.origin);
-      if (dist < bt) {
-        bt = dist;
-        best = &g;
-        face = rm.tri_face[t];
-        hit = p;
-      }
+/* Push/Pull is a modal operator like Blender's G or E: P starts it on the
+ * selected faces, the mouse (or a typed number) sets the distance, and a
+ * click or Enter confirms; Esc or a right-click cancels. */
+void Editor::pushpull_begin() {
+  if (pp_.active) return;
+  GameObject *g = edit_object();
+  if (!edit_mode_ || !g) {
+    Log::warn("Push/Pull works on faces: select an object, press Tab, then 3 for face mode");
+    return;
+  }
+  if (elem_ != EditElement::Face) {
+    Log::warn("Push/Pull is a face operation: press 3 for face mode and select faces");
+    return;
+  }
+  const Mesh &m = **edit_mesh_ptr();
+  face_sel_.resize(m.face_count(), 0);
+  vert_sel_.resize(m.vert_count(), 0);
+  if (std::count(face_sel_.begin(), face_sel_.end(), 1) == 0) {
+    Log::warn("Push/Pull: select one face (or a connected group of faces) first");
+    return;
+  }
+  {
+    /* Same check push_pull makes: one connected region with one outline. */
+    Mesh probe = m;
+    std::vector<uint8_t> fs = face_sel_;
+    std::string err;
+    if (!meshops::push_pull(probe, fs, 0.0f, true, nullptr, &err)) {
+      Log::warn("Push/Pull: %s", err.c_str());
+      return;
     }
-  });
-  return best != nullptr;
+  }
+  pp_ = PushPullDrag{};
+  pp_.obj = g->id;
+  pp_.before = std::make_shared<Mesh>(m);
+  pp_.fsel = face_sel_;
+  /* The axis: the region's area-weighted normal, as the object's transform moves it. */
+  Vec3 nl(0.0f), centre(0.0f);
+  float area = 0.0f;
+  for (size_t k = 0; k < m.face_count(); k++) {
+    if (!pp_.fsel[k]) continue;
+    const uint32_t *fv = m.face_verts(k);
+    const uint32_t n = m.face_size(k);
+    Vec3 c(0.0f), an(0.0f);
+    for (uint32_t i = 0; i < n; i++) {
+      c += m.positions[fv[i]];
+      an += cross(m.positions[fv[i]], m.positions[fv[(i + 1) % n]]);  // Newell: 2 x area x normal
+    }
+    float a = std::max(1e-12f, length(an) * 0.5f);
+    nl += m.face_normal(k) * a;
+    centre += c / (float)n * a;
+    area += a;
+  }
+  size_t first = std::find(pp_.fsel.begin(), pp_.fsel.end(), 1) - pp_.fsel.begin();
+  nl = length_sq(nl) > 1e-20f ? normalize(nl) : m.face_normal(first);
+  const Mat4 &w = g->world_matrix();
+  Vec3 wd = w.dir(nl);
+  pp_.units = std::max(1e-6f, length(wd));
+  pp_.axis = wd / pp_.units;
+  pp_.origin = w.point(centre / std::max(area, 1e-12f));
+  auto &in = ui_.in;
+  pp_.start = closest_on_line_to_ray(pp_.origin, pp_.axis,
+                                     scene_r3d_.screen_ray((float)(in.mx - scene_rect_.x), (float)(in.my - scene_rect_.y)));
+  pp_.lim = meshops::push_pull_limits(m, pp_.fsel);
+  pp_.keep = in.ctrl();
+  pp_.active = true;
+  ui_.redraw = true;
+}
+
+void Editor::pushpull_cancel() {
+  if (!pp_.active) return;
+  if (GameObject *g = scene_->find(pp_.obj))
+    if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = pp_.before;
+  face_sel_ = pp_.fsel;
+  vert_sel_.assign(pp_.before->vert_count(), 0);
+  sync_vert_face_selection(true);
+  pp_.active = false;
+  Log::info("Push/Pull cancelled");
 }
 
 void Editor::pushpull_apply(float distance) {
   GameObject *g = scene_->find(pp_.obj);
   MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf || !pp_.before) return;
-  /* Always from the mesh as it was at the press, so dragging back and forth is exact. */
+  /* Always from the mesh as it was at the start, so moving back and forth is exact. */
   mf->mesh = std::make_shared<Mesh>(*pp_.before);
   Mesh &m = *mf->mesh;
   m.version = pp_.before->version + 1 + (++redo_serial_);
   std::vector<uint8_t> fs = pp_.fsel;
   std::string err;
+  pp_.distance = distance;
+  pp_.refused.clear();
   if (!meshops::push_pull(m, fs, distance, !pp_.keep, &pp_.result, &err)) {
     mf->mesh = pp_.before;
+    pp_.distance = 0.0f;
+    pp_.refused = err;
     return;
   }
   m.touch();
@@ -1742,7 +1880,6 @@ void Editor::pushpull_apply(float distance) {
   face_sel_.resize(m.face_count(), 0);
   vert_sel_.assign(m.vert_count(), 0);
   sync_vert_face_selection(true);
-  pp_.distance = distance;
 }
 
 void Editor::pushpull_finish() {
@@ -1751,10 +1888,10 @@ void Editor::pushpull_finish() {
   MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf || std::fabs(pp_.distance) < 1e-7f) {
     if (mf) mf->mesh = pp_.before;
+    face_sel_ = pp_.fsel;
     return;
   }
-  /* Hand it to Adjust Last Operation, so the distance can be typed exactly
-   * afterwards (SketchUp's Measurements box). */
+  /* Hand it to Adjust Last Operation, so the distance can be changed afterwards. */
   LastOp L;
   L.op = "push_pull";
   L.obj = pp_.obj;
@@ -1774,20 +1911,30 @@ void Editor::pushpull_finish() {
 }
 
 bool Editor::pushpull_update(const Recti &view) {
+  if (!pp_.active) return false;
   auto &u = ui_;
   auto &in = u.in;
-  if (pp_.active) {
-    if (in.key_pressed[platform::KEY_ESCAPE]) {
-      if (GameObject *g = scene_->find(pp_.obj))
-        if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = pp_.before;
-      pp_.active = false;
-      face_sel_.assign(pp_.before->face_count(), 0);
-      vert_sel_.assign(pp_.before->vert_count(), 0);
-      return true;
-    }
+  GameObject *g = scene_->find(pp_.obj);
+  if (!g || !edit_mode_ || edit_obj_ != pp_.obj) {  // the object went away (undo, play, ...)
+    pp_.active = false;
+    return false;
+  }
+  if (in.key_pressed[platform::KEY_ESCAPE] || in.pressed[1]) {
+    pushpull_cancel();
+    u.consume_click();
+    return true;
+  }
+  /* Typed distance (Blender's numeric input): digits and an expression. */
+  for (char c : in.text)
+    if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == '*' || c == '/' || c == '(' || c == ')') pp_.typed += c;
+  in.text.clear();
+  if (in.key_pressed[platform::KEY_BACKSPACE] && !pp_.typed.empty()) pp_.typed.pop_back();
+  float d;
+  double typed = 0;
+  if (!pp_.typed.empty() && ui::eval_number(pp_.typed, typed)) d = (float)typed / pp_.units;
+  else {
     Ray ray = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
-    float s = closest_on_line_to_ray(pp_.origin, pp_.axis, ray);
-    float d = (s - pp_.start) / pp_.units;
+    d = (closest_on_line_to_ray(pp_.origin, pp_.axis, ray) - pp_.start) / pp_.units;
     /* Snap to the far side (hole) and to the face in front (join) within
      * ~10 pixels, and to the grid increment when snapping is on. */
     float world_per_px = cam_.ortho ? cam_.distance * 2.0f / view.h
@@ -1796,65 +1943,23 @@ bool Editor::pushpull_update(const Recti &view) {
     if (snap_) d = std::round(d * pp_.units / snap_move_) * snap_move_ / pp_.units;
     if (pp_.lim.through > 0 && std::fabs(-d - pp_.lim.through) < tol) d = -pp_.lim.through;
     if (pp_.lim.contact > 0 && std::fabs(d - pp_.lim.contact) < tol) d = pp_.lim.contact;
-    bool keep = in.ctrl();
-    if (d != pp_.distance || keep != pp_.keep) {
-      pp_.keep = keep;
-      pushpull_apply(d);
-    }
-    u.redraw = true;
-    if (in.released[0] || !in.down[0]) pushpull_finish();
-    return true;
   }
-  GameObject *g = nullptr;
-  uint32_t f = 0;
-  Vec3 hit;
-  bool over = scene_hovered_ && drag_ == Drag::None && !in.alt() && pick_mesh_face(view, in.mx, in.my, g, f, hit);
-  pp_hover_obj_ = over ? g->id : 0;
-  pp_hover_face_ = over ? (int64_t)f : -1;
-  if (!over) return false;
-  if (in.pressed[0]) {
-    /* Work on that object's mesh (entering Edit Mode on it, faces). */
-    if (!edit_mode_ || edit_obj_ != g->id) {
-      if (edit_mode_) exit_edit_mode();
-      select(g->id);
-      enter_edit_mode();
-      if (!edit_mode_) return true;
-    }
-    elem_ = EditElement::Face;
-    const Mesh &m = **edit_mesh_ptr();
-    face_sel_.resize(m.face_count(), 0);
-    vert_sel_.resize(m.vert_count(), 0);
-    pp_ = PushPullDrag{};
-    pp_.obj = g->id;
-    pp_.before = std::make_shared<Mesh>(m);
-    pp_.fsel.assign(m.face_count(), 0);
-    if (f < face_sel_.size() && face_sel_[f]) pp_.fsel = face_sel_;  // a selected group moves together
-    else pp_.fsel[f] = 1;
-    /* The axis: the region's normal, as the object's transform moves it. */
-    Vec3 nl(0.0f);
-    for (size_t k = 0; k < m.face_count(); k++)
-      if (pp_.fsel[k]) nl += m.face_normal(k) * std::max(1e-6f, length(cross(m.positions[m.face_verts(k)[1]] - m.positions[m.face_verts(k)[0]],
-                                                                                m.positions[m.face_verts(k)[2]] - m.positions[m.face_verts(k)[0]])));
-    nl = length_sq(nl) > 1e-20f ? normalize(nl) : m.face_normal(f);
-    Vec3 wd = g->world_matrix().dir(nl);
-    pp_.units = std::max(1e-6f, length(wd));
-    pp_.axis = wd / pp_.units;
-    pp_.origin = hit;
-    pp_.start = closest_on_line_to_ray(pp_.origin, pp_.axis, scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y)));
-    pp_.lim = meshops::push_pull_limits(m, pp_.fsel);
-    pp_.active = true;
-    pp_.keep = in.ctrl();
+  if (!std::isfinite(d)) d = 0.0f;
+  bool keep = in.ctrl();
+  if (d != pp_.distance || keep != pp_.keep) {
+    pp_.keep = keep;
+    pushpull_apply(d);
+  }
+  u.redraw = true;
+  if (in.pressed[0] || in.key_pressed[platform::KEY_ENTER]) {
+    pushpull_finish();
     u.consume_click();
-    if (in.double_clicked[0] && pp_last_distance_ != 0) {
-      /* SketchUp: double-click repeats the last Push/Pull distance. */
-      pushpull_apply(pp_last_distance_);
-      pushpull_finish();
-    }
   }
   return true;
 }
 
 void Editor::draw_pushpull(const Recti &view) {
+  if (!pp_.active) return;
   auto &u = ui_;
   auto proj = [&](Vec3 p, Vec2 &s) {
     float z;
@@ -1864,24 +1969,6 @@ void Editor::draw_pushpull(const Recti &view) {
     return ok;
   };
   const uint32_t col = Color::hex(0xF0A030);
-  /* The face under the cursor (SketchUp's highlight). */
-  if (!pp_.active && pp_hover_face_ >= 0)
-    if (GameObject *g = scene_->find(pp_hover_obj_))
-      if (MeshFilter *mf = g->get<MeshFilter>())
-        if (mf->mesh && (size_t)pp_hover_face_ < mf->mesh->face_count()) {
-          const Mesh &m = *mf->mesh;
-          const Mat4 &w = g->world_matrix();
-          const uint32_t *fv = m.face_verts((size_t)pp_hover_face_);
-          const uint32_t n = m.face_size((size_t)pp_hover_face_);
-          u.canvas.push_clip(view);
-          for (uint32_t i = 0; i < n; i++) {
-            Vec2 a, b;
-            if (proj(w.point(m.positions[fv[i]]), a) && proj(w.point(m.positions[fv[(i + 1) % n]]), b))
-              u.canvas.line(a.x, a.y, b.x, b.y, col, (float)u.px(2.5f));
-          }
-          u.canvas.pop_clip();
-        }
-  if (!pp_.active) return;
   /* The axis and the live distance, next to the cursor. */
   Vec2 a, b;
   float L = std::max(0.5f, std::fabs(pp_.distance * pp_.units) + 1.0f);
@@ -1889,12 +1976,25 @@ void Editor::draw_pushpull(const Recti &view) {
   if (proj(pp_.origin - pp_.axis * L, a) && proj(pp_.origin + pp_.axis * L, b))
     u.canvas.line(a.x, a.y, b.x, b.y, Color::hex(0x3A7AF8, 200), (float)u.px(1.5f));
   static const char *modes[] = {"Push/Pull", "Push/Pull", "Hole through", "Join to face"};
-  std::string text = strprintf("%s  %.3f%s", modes[(int)pp_.result], pp_.distance * pp_.units, pp_.keep ? "  (new face)" : "");
+  std::string text = pp_.typed.empty() ? strprintf("%s  %.3f%s", modes[(int)pp_.result], pp_.distance * pp_.units, pp_.keep ? "  (new face)" : "")
+                                       : strprintf("%s  [%s]  = %.3f", modes[(int)pp_.result], pp_.typed.c_str(), pp_.distance * pp_.units);
   int tw = u.font.text_width(text) + u.px(12), th = u.row_h();
   Recti box{u.in.mx + u.px(16), u.in.my + u.px(12), tw, th};
   u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 230));
   u.label(box, text, pp_.result == meshops::PushPullResult::Hole || pp_.result == meshops::PushPullResult::Joined ? col : u.theme.text_bright,
           ui::Align::Center);
+  if (!pp_.refused.empty()) {
+    std::string why = pp_.refused.rfind("Push/Pull: ", 0) == 0 ? pp_.refused.substr(11) : pp_.refused;
+    Recti wb{box.x, box.bottom() + u.px(2), u.font.text_width(why) + u.px(12), th};
+    u.canvas.fill_round_rect(wb, u.px(3), Color::hex(0x202020, 230));
+    u.label(wb, why, u.theme.warning, ui::Align::Center);
+  }
+  /* Blender's header hint for a running operator. */
+  std::string hint = "Push/Pull:  move the mouse or type a distance  |  Click / Enter confirm  |  Esc / Right-click cancel  |  Ctrl new face";
+  int hw = u.font.text_width(hint) + u.px(16);
+  Recti hb{view.x + (view.w - hw) / 2, view.bottom() - u.row_h() - u.px(10), hw, u.row_h()};
+  u.canvas.fill_round_rect(hb, u.px(3), Color::hex(0x202020, 220));
+  u.label(hb, hint, u.theme.text, ui::Align::Center);
   u.canvas.pop_clip();
 }
 

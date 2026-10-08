@@ -59,6 +59,8 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   addlib jpeg             BL_WITH_LIBJPEG    "jpeg/include"                   "jpeg/lib/libjpeg.a"
   addlib png              BL_WITH_LIBPNG     "png/include zlib/include"       "png/lib/libpng.a zlib/lib/libz.a"
   addlib zstd             BL_WITH_ZSTD       "zstd/include"                   "zstd/lib/libzstd.a"
+  # GPU rendering: Vulkan headers (the loader comes with the GPU driver, opened at run time) and shaderc.
+  [ -d "$LIBDIR/vulkan/include" ] && addlib shaderc BL_WITH_VULKAN "shaderc/include vulkan/include" "shaderc/lib/libshaderc_combined.a"
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
   LIBLINK="$LIBLINK $LIBDIR/tbb/lib/libtbb.$SOEXT"
   # ABI settings the libraries were built with (blender/build_files/build_environment/cmake).

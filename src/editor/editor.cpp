@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <cctype>
+#include <cstdio>
 #include <functional>
 #include <sstream>
 
@@ -163,7 +165,8 @@ void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
   return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ ||
-         (shading_ == Shading::Rendered && scene_ && vp_pt_.samples() < scene_->render.viewport_samples);
+         (shading_ == Shading::Rendered && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
+         (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
 
 int Editor::run() {
@@ -305,6 +308,7 @@ void Editor::frame(std::vector<Event> &events) {
   double now = now_seconds();
   ScopedTimer frame_timer;
   process_events(events);
+  if (scene_ && scene_->render.device == 1) gpu::prewarm();  // once; compiles the GPU kernel off the UI thread
   if (window_) {
     int w, h;
     get_framebuffer_size(window_, w, h);
@@ -532,6 +536,13 @@ void Editor::draw_menubar(const Recti &r) {
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera");
     u.menu_separator();
+    u.submenu("Set Origin", u.px(270), [this, has_sel] {
+      for (int k = 0; k < kOriginModeCount; k++) {
+        if (k == 5) continue;  // Origin to Point needs coordinates: Inspector > Transform
+        if (k == 6 && !edit_mode_) continue;
+        if (ui_.menu_item(kOriginModes[k], nullptr, false, has_sel)) set_origin(k);
+      }
+    });
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
       mark_changed("Clear Parent");
@@ -567,33 +578,23 @@ void Editor::draw_menubar(const Recti &r) {
     }
     u.menu_separator();
     if (edit_mode_) {
-      if (u.menu_item("Extrude Faces", "Ctrl+E")) edit_op("extrude");
-      if (u.menu_item("Inset Faces", "Ctrl+I")) edit_op("inset");
-      if (u.menu_item("Push/Pull Tool (like SketchUp)", "P", tool_ == Tool::PushPull)) tool_ = Tool::PushPull;
-      if (u.menu_item("Push Through (hole along normal)", "Alt+P")) edit_op("push_through");
-      if (u.menu_item("Bridge Faces / Edge Loops", "Ctrl+Shift+B")) edit_op("bridge");
-      if (u.menu_item("Fuse onto Touching Face")) edit_op("fuse");
-      u.submenu("Edge", u.px(260), [this] {
-        auto &u = ui_;
-        if (u.menu_item("Bevel Edges", "Ctrl+B")) edit_op("bevel");
-        if (u.menu_item("Bridge Edge Loops", "Ctrl+Shift+B")) edit_op("bridge");
-        if (u.menu_item("Subdivide Edges")) edit_op("subdivide_edges");
-        if (u.menu_item("Connect Vertex Path", "J")) edit_op("connect");
-        if (u.menu_item("Dissolve Edges", "Ctrl+X")) edit_op("dissolve");
-        if (u.menu_item("Collapse Edges")) edit_op("collapse");
-        if (u.menu_item("Fill", "Alt+F")) edit_op("fill");
-        if (u.menu_item("Loop Cut", "Ctrl+R")) edit_op("loopcut");
-      });
-      if (u.menu_item("Auto Fuse on Contact", nullptr, auto_fuse_)) auto_fuse_ = !auto_fuse_;
-      if (u.menu_item("Adjust Last Operation", "F9", last_op_open_)) last_op_open_ = !last_op_open_;
-      if (u.menu_item("Delete Selected", "Del")) edit_op("delete");
-      if (u.menu_item("Loop Cut (selected edge)", "Ctrl+R")) edit_op("loopcut");
-      if (u.menu_item("Fill", "Alt+F")) edit_op("fill");
-      if (u.menu_item("Merge at Center", "Alt+M")) edit_op("merge_center");
-      if (u.menu_item("Recalculate Normals Outside", "Shift+N")) edit_op("recalc_normals");
-      if (u.menu_item("Select Edge Loop (selected edge)", "Double-click")) edit_op("select_loop");
-      if (u.menu_item("Proportional Editing", "O", proportional_)) proportional_ = !proportional_;
+      /* Only the current selection mode's operators (Blender's Vertex / Edge /
+       * Face menus; ProBuilder's per-mode actions). */
+      static const char *kModes[] = {"Vertex", "Edge", "Face"};
+      u.menu_label(strprintf("%s operations  (1 / 2 / 3 switch)", kModes[(int)elem_]));
+      for (int k = 0; k < 3; k++)
+        if (u.menu_item(strprintf("%s Select Mode", kModes[k]), k == 0 ? "1" : k == 1 ? "2" : "3", (int)elem_ == k))
+          set_edit_element((EditElement)k);
+      u.menu_separator();
+      for (const EditOpInfo &op : edit_op_table())
+        if (op.elements != 7 && edit_op_available(op.op) && u.menu_item(op.label, op.keys[0] ? op.keys : nullptr)) edit_tool(op.op);
+      u.menu_separator();
+      for (const EditOpInfo &op : edit_op_table())
+        if (op.elements == 7 && u.menu_item(op.label, op.keys[0] ? op.keys : nullptr)) edit_tool(op.op);
       if (u.menu_item("Select All", "Ctrl+A")) edit_select_all(true);
+      if (elem_ == EditElement::Face && u.menu_item("Auto Fuse on Contact", nullptr, auto_fuse_)) auto_fuse_ = !auto_fuse_;
+      if (u.menu_item("Proportional Editing", "O", proportional_)) proportional_ = !proportional_;
+      if (u.menu_item("Adjust Last Operation", "F9", last_op_open_)) last_op_open_ = !last_op_open_;
       u.menu_separator();
     }
     if (u.menu_item("Subdivide (Catmull-Clark)", nullptr, false, has_sel)) mesh_op("subdivide");
@@ -679,13 +680,9 @@ void Editor::draw_toolbar(const Recti &r) {
       {Tool::Move, Icon::Move, "Move Tool (W)\nBlender: G or the Move tool (FoCG ch. 7.3 translation)."},
       {Tool::Rotate, Icon::Rotate, "Rotate Tool (E)\nBlender: R. Hold Ctrl to snap 15 degrees."},
       {Tool::Scale, Icon::Scale, "Scale Tool (R)\nBlender: S."},
-      {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."},
-      {Tool::PushPull, Icon::PushPull,
-       "Push/Pull Tool (P) - like SketchUp\nDrag a face along its normal. Pushed to the far side it makes a hole;\n"
-       "pulled onto another face it joins it, even a slanted one. Ctrl keeps the original face,\n"
-       "double-click repeats the last distance, Esc cancels. Type an exact distance in the F9 panel."}};
+      {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."}};
   /* Grouped segmented control, like Unity's tool strip. */
-  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 6 + u.px(2), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
+  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 5 + u.px(2), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
   for (const T &t : tools) {
     if (u.icon_button({x, y, bh, bh}, t.i, tool_ == t.t, t.tip)) tool_ = t.t;
     x += bh + u.px(2);
@@ -777,7 +774,7 @@ void Editor::draw_statusbar(const Recti &r) {
 
 void Editor::handle_shortcuts() {
   auto &in = ui_.in;
-  if (ui_.wants_keyboard() || dialog_ != Dialog::None) return;
+  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active) return;  // a running Push/Pull takes the keys
   auto P = [&](int k) { return in.key_pressed[k]; };
   bool ctrl = in.ctrl(), shift = in.shift(), alt = in.alt();
   if (ctrl) {
@@ -791,7 +788,10 @@ void Editor::handle_shortcuts() {
     if (P(KEY_R)) {
       /* In Edit Mode over the Scene view Ctrl+R is Blender's Loop Cut;
        * elsewhere it keeps Unity's meaning (refresh assets). */
-      if (edit_mode_ && scene_hovered_) edit_loop_cut_at(scene_rect_, in.mx, in.my);
+      if (edit_mode_ && scene_hovered_) {
+        if (edit_op_available("loopcut")) edit_loop_cut_at(scene_rect_, in.mx, in.my);
+        else edit_tool("loopcut");  // explains that it is an edge operation
+      }
       else { project_listed_ = -100; papers_listed_ = -100; }
     }
     if (P(KEY_P)) {
@@ -808,10 +808,10 @@ void Editor::handle_shortcuts() {
         scene_->for_each([&](GameObject &g) { selection_.push_back(g.id); });
       }
     }
-    if (P(KEY_E) && edit_mode_) edit_op("extrude");
-    if (P(KEY_I) && edit_mode_) edit_op("inset");
-    if (P(KEY_B) && edit_mode_) edit_op(shift ? "bridge" : "bevel");
-    if (P(KEY_X) && edit_mode_ && !shift) edit_op("dissolve");
+    if (P(KEY_E) && edit_mode_) edit_tool("extrude");
+    if (P(KEY_I) && edit_mode_) edit_tool("inset");
+    if (P(KEY_B) && edit_mode_) edit_tool(shift ? "bridge" : "bevel");
+    if (P(KEY_X) && edit_mode_ && !shift) edit_tool("dissolve");
     if (P(KEY_F) && alt) {
       for (GameObject *g : selected_objects(true)) g->set_world_position(cam_.pivot);
       mark_changed("Move To View");
@@ -838,7 +838,7 @@ void Editor::handle_shortcuts() {
     if (P(KEY_E)) tool_ = Tool::Rotate;
     if (P(KEY_R)) tool_ = Tool::Scale;
     if (P(KEY_Y)) tool_ = Tool::Transform;
-    if (P(KEY_P) && !alt) tool_ = Tool::PushPull;  // SketchUp: P
+    if (P(KEY_P) && !alt && edit_mode_) edit_tool("push_pull");  // SketchUp: P (a face operation)
     if (P(KEY_F) && !(alt && edit_mode_)) frame_selected();
     if (P(KEY_TAB)) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
     if (P(KEY_DELETE) || (P(KEY_BACKSPACE) && focused_ != WindowKind::Hierarchy)) {
@@ -854,11 +854,11 @@ void Editor::handle_shortcuts() {
       if (P(KEY_2)) set_edit_element(EditElement::Edge);
       if (P(KEY_3)) set_edit_element(EditElement::Face);
       if (P(KEY_O) && !alt) proportional_ = !proportional_;
-      if (P(KEY_F) && alt) edit_op("fill");
-      if (P(KEY_M) && alt) edit_op("merge_center");
-      if (P(KEY_N) && shift && !alt) edit_op("recalc_normals");
-      if (P(KEY_P) && alt) edit_op("push_through");
-      if (P(KEY_J) && !alt) edit_op("connect");
+      if (P(KEY_F) && alt) edit_tool("fill");
+      if (P(KEY_M) && alt) edit_tool("merge_center");
+      if (P(KEY_N) && shift && !alt) edit_tool("recalc_normals");
+      if (P(KEY_P) && alt) edit_tool("push_through");
+      if (P(KEY_J) && !alt) edit_tool("connect");
     }
   }
 }
@@ -1447,6 +1447,60 @@ void Editor::add_component_to_selection(const std::string &name) {
   if (n) mark_changed("Add " + name);
 }
 
+/* Blender's Object > Set Origin. The mesh moves one way and the object the
+ * other, so nothing moves on screen; children keep their place too. */
+const char *const kOriginModes[kOriginModeCount] = {
+    "Origin to Geometry (Bounds Center)", "Origin to Geometry (Median Point)", "Origin to Center of Mass (Surface)",
+    "Origin to Center of Mass (Volume)",  "Origin to Bottom Center",           "Origin to Point",
+    "Origin to Edit Selection",           "Origin to Scene View Pivot",        "Geometry to Origin"};
+
+void Editor::set_origin(int mode, Vec3 world_point) {
+  if (mode < 0 || mode >= kOriginModeCount) return;
+  int n = 0;
+  for (GameObject *g : selected_objects(false)) {
+    auto *mf = g->get<MeshFilter>();
+    if (!mf || !mf->mesh || mf->mesh->positions.empty()) continue;
+    const Mesh &m = *mf->mesh;
+    Vec3 c;  // the new origin, in mesh space
+    switch (mode) {
+      case 0: c = meshops::origin_point(m, meshops::OriginPoint::BoundsCenter); break;
+      case 1: c = meshops::origin_point(m, meshops::OriginPoint::Median); break;
+      case 2: c = meshops::origin_point(m, meshops::OriginPoint::SurfaceCenter); break;
+      case 3: c = meshops::origin_point(m, meshops::OriginPoint::VolumeCenter); break;
+      case 4: c = meshops::origin_point(m, meshops::OriginPoint::BoundsBottom); break;
+      case 5: c = g->world_matrix().inverse().point(world_point); break;
+      case 6: {
+        if (!edit_mode_ || g->id != edit_obj_) continue;
+        Vec3 s(0.0f);
+        int k = 0;
+        for (size_t v = 0; v < m.vert_count() && v < vert_sel_.size(); v++)
+          if (vert_sel_[v]) { s += m.positions[v]; k++; }
+        if (!k) { Log::warn("Set Origin: select vertices, edges or faces in Edit Mode first"); return; }
+        c = s / (float)k;
+        break;
+      }
+      case 7: c = g->world_matrix().inverse().point(cam_.pivot); break;
+      default: c = meshops::origin_point(m, meshops::OriginPoint::BoundsCenter); break;  // Geometry to Origin
+    }
+    if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z)) continue;
+    meshops::translate(*mesh_make_mutable(mf->mesh), -c);
+    if (mode != 8) {
+      /* Move the object by the same offset through its own rotation and
+       * scale, and the children back by it in this object's space. */
+      Transform t = g->local();
+      g->set_local_position(t.position + g->local_matrix().dir(c));
+      for (GameObject *ch : g->children) ch->set_local_position(ch->local().position - c);
+    }
+    n++;
+  }
+  if (!n) {
+    Log::warn("Set Origin needs a selected object with a mesh");
+    return;
+  }
+  Log::info("%s: %d object%s", kOriginModes[mode], n, n == 1 ? "" : "s");
+  mark_changed("Set Origin");
+}
+
 void Editor::mesh_op(const std::string &op) {
   int n = 0;
   ScopedTimer t;
@@ -1543,6 +1597,103 @@ void Editor::exit_play() {
   Log::info("Exited Play mode (scene restored).");
 }
 
+/* `set Camera.FocalLength 85`: sets a reflected field by name (letters and
+ * digits only, case-insensitive; a unique prefix will do). Enumerations take
+ * an index or the option's text. Blender's Python: bpy.data...prop = value. */
+namespace {
+std::string field_key(const std::string &s) {
+  std::string k;
+  for (char c : s)
+    if (std::isalnum((unsigned char)c)) k += (char)std::tolower((unsigned char)c);
+  return k;
+}
+
+struct SetFieldReflector : Reflector {
+  std::string key, value;
+  std::vector<std::string> names;  // pass 1: every field
+  std::string target;              // pass 2: the field to set
+  bool done = false;
+  bool all_fields() const override { return true; }
+  bool hit(const char *n) {
+    if (target.empty()) {
+      names.push_back(n);
+      return false;
+    }
+    if (done || target != n) return false;
+    done = true;
+    return true;
+  }
+  void field(const char *n, float &v, float, float mn, float mx) override {
+    if (hit(n)) v = std::max(mn, std::min(mx, (float)std::atof(value.c_str())));
+  }
+  void field(const char *n, int &v, int mn, int mx) override {
+    if (hit(n)) v = std::max(mn, std::min(mx, std::atoi(value.c_str())));
+  }
+  void field(const char *n, bool &v) override {
+    if (hit(n)) v = value == "1" || field_key(value) == "true" || field_key(value) == "on";
+  }
+  void field(const char *n, Vec3 &v) override {
+    if (!hit(n)) return;
+    float x = v.x, y = v.y, z = v.z;
+    if (std::sscanf(value.c_str(), "%f %f %f", &x, &y, &z) == 3) v = {x, y, z};
+  }
+  void color(const char *n, Vec3 &v) override { field(n, v); }
+  void enumeration(const char *n, int &v, const char *const *opts, int count) override {
+    if (!hit(n)) return;
+    for (int k = 0; k < count; k++)
+      if (field_key(opts[k]).rfind(field_key(value), 0) == 0 && !field_key(value).empty()) {
+        v = k;
+        return;
+      }
+    if (!value.empty() && std::isdigit((unsigned char)value[0])) v = std::max(0, std::min(count - 1, std::atoi(value.c_str())));
+  }
+  void text(const char *n, std::string &v) override {
+    if (hit(n)) v = value;
+  }
+  void mesh(const char *, MeshPtr &) override {}
+};
+}  // namespace
+
+bool Editor::set_field_command(const std::string &path, const std::string &value) {
+  size_t dot = path.find('.');
+  if (dot == std::string::npos) {
+    Log::warn("set: use set <Component>.<Field> <value>, e.g. set Camera.FStop 1.4 (or Render.Samples, World.Strength)");
+    return false;
+  }
+  const std::string owner = field_key(path.substr(0, dot));
+  SetFieldReflector sr;
+  sr.key = field_key(path.substr(dot + 1));
+  sr.value = value;
+  auto apply = [&](const std::function<void(Reflector &)> &reflect) {
+    sr.target.clear();
+    sr.names.clear();
+    sr.done = false;
+    reflect(sr);
+    for (int pass = 0; pass < 2 && sr.target.empty(); pass++)
+      for (const std::string &n : sr.names)
+        if (pass == 0 ? field_key(n) == sr.key : field_key(n).rfind(sr.key, 0) == 0) {
+          sr.target = n;
+          break;
+        }
+    if (sr.target.empty()) return false;
+    reflect(sr);
+    return sr.done;
+  };
+  int n = 0;
+  if (owner == "render") n += apply([&](Reflector &r) { scene_->render.reflect(r); });
+  else if (owner == "world") n += apply([&](Reflector &r) { scene_->environment.reflect(r); });
+  else
+    for (GameObject *g : selected_objects(false))
+      for (auto &c : g->components)
+        if (field_key(c->type_name()) == owner) n += apply([&](Reflector &r) { c->reflect(r); });
+  if (!n) {
+    Log::warn("set: no field '%s' on %s (selected objects)", path.substr(dot + 1).c_str(), path.substr(0, dot).c_str());
+    return false;
+  }
+  mark_changed("Set " + path);
+  return true;
+}
+
 void Editor::run_console_command(const std::string &line) {
   auto t = split_ws(line);
   if (t.empty()) return;
@@ -1553,11 +1704,12 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("Commands: help, clear, create <Cube|Sphere|...> [count], stress <count> [Cube|Sphere|Icosphere|Torus], select <name>,");
     Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
     Log::info("  screenshot [file.png], bench [frames], lesson <n>, research, window <name>, tool <move|rotate|...>,");
-    Log::info("  edit [vertex|edge|face] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
+    Log::info("  edit [vertex|edge|face|off] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
     Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation),");
     Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
+    Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -1598,7 +1750,10 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "tool") {
     std::string w = to_lower(arg(1, "move"));
     tool_ = w == "view" ? Tool::View : w == "rotate" ? Tool::Rotate : w == "scale" ? Tool::Scale : w == "transform" ? Tool::Transform
-            : w == "pushpull" ? Tool::PushPull : Tool::Move;
+            : Tool::Move;
+  }
+  else if (c == "edit" && arg(1, "") == "off") {
+    if (edit_mode_) exit_edit_mode();
   }
   else if (c == "edit") {
     if (!edit_mode_) enter_edit_mode();
@@ -1634,10 +1789,40 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("Select objects with a MeshRenderer first");
   }
   else if (c == "preview") start_final_render(true);
+  else if (c == "device") {
+    /* device cpu | device gpu [+cpu] [nort]: Render Properties > Device (path tracing). */
+    RenderSettings &rs = scene_->render;
+    rs.device = arg(1, "cpu") == "gpu" ? 1 : 0;
+    rs.gpu_with_cpu = line.find("+cpu") != std::string::npos;
+    rs.hardware_rt = line.find("nort") == std::string::npos;
+    mark_changed("Render Device");
+    Log::info("Device: %s%s", rs.device ? "GPU Compute" : "CPU", rs.device ? (rs.gpu_with_cpu ? " + CPU" : "") : "");
+    Log::info("%s", gpu::status().c_str());
+  }
   else if (c == "pushpull") {
     /* pushpull <distance>: Push/Pull the selected faces (edit mode), like the P tool. */
     pp_last_distance_ = (float)std::atof(arg(1, "0.5").c_str());
     edit_op("push_pull");
+  }
+  else if (c == "camerapreview") {
+    cam_preview_rendered_ = to_lower(arg(1, "rendered")) == "rendered";  // the Scene view's Camera Preview inset
+    cam_preview_pt_hash_ = 0;
+  }
+  else if (c == "set") {
+    /* set <Component>.<Field> <value...> (a Vec3 takes three numbers) */
+    size_t at = t.size() > 2 ? line.find(t[2], line.find(t[1]) + t[1].size()) : std::string::npos;
+    set_field_command(arg(1, ""), at == std::string::npos ? "" : line.substr(at));
+  }
+  else if (c == "origin") {
+    /* origin bounds|median|surface|volume|bottom|selection|pivot|geometry, or origin point <x> <y> <z> */
+    static const char *names[kOriginModeCount] = {"bounds", "median", "surface", "volume", "bottom", "point", "selection", "pivot", "geometry"};
+    std::string w = to_lower(arg(1, "bounds"));
+    int mode = -1;
+    for (int k = 0; k < kOriginModeCount; k++)
+      if (w == names[k]) mode = k;
+    if (mode < 0) Log::warn("origin: use bounds, median, surface, volume, bottom, selection, pivot, geometry or point x y z");
+    else
+      set_origin(mode, Vec3((float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str())));
   }
   else if (c == "fsel") {
     /* fsel <f0> <f1> ... | fsel facing <x> <y> <z> [more directions...]: select faces (edit mode). */
@@ -1694,6 +1879,7 @@ void Editor::run_console_command(const std::string &line) {
     for (const deps::Library &l : deps::libraries())
       Log::info("%-18s %-10s %s%s", l.name, l.enabled ? l.version.c_str() : "-", l.enabled ? l.used_for : "not built in; using ",
                 l.enabled ? "" : l.fallback);
+    Log::info("%s", gpu::status().c_str());
   }
   else if (c == "camera" && t.size() >= 4) {
     cam_.yaw = (float)std::atof(t[1].c_str());
@@ -1924,6 +2110,16 @@ void Editor::load_prefs() {
     else if (k == "stats") show_stats_ = v == "1";
     else if (k == "snap_move") snap_move_ = (float)std::atof(v.c_str());
     else if (k == "snap_rot") snap_rot_ = (float)std::atof(v.c_str());
+    else if (k == "render_devices_off") {
+      render_devices_off_.clear();
+      size_t a = 0;
+      while (a < v.size()) {
+        size_t b = v.find('|', a);
+        if (b == std::string::npos) b = v.size();
+        if (b > a) render_devices_off_.insert(v.substr(a, b - a));
+        a = b + 1;
+      }
+    }
   }
 }
 
@@ -1931,9 +2127,11 @@ void Editor::save_prefs() {
   if (headless_) return;
   std::string done;
   for (int l : lessons_done_) done += std::to_string(l) + " ";
-  std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\n",
+  std::string off;
+  for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
+  std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
-                            show_stats_ ? 1 : 0, snap_move_, snap_rot_);
+                            show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str());
   fs::write_file(prefs_path_, s);
 }
 

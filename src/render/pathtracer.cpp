@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 #ifdef BL_WITH_EMBREE
 #  include <embree4/rtcore.h>
@@ -42,6 +43,27 @@ static inline float rnd(uint32_t &s) {
   return (s >> 8) * (1.0f / 16777216.0f);
 }
 static inline float luminance(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+
+/* A point on a unit aperture: a disk, or a regular polygon with `blades`
+ * sides for polygonal bokeh (Cycles: kernel/sample/mapping.h,
+ * regular_polygon_sample). The GPU kernel has the same function. */
+static inline Vec2 sample_aperture(float u, float v, int blades, float rotation) {
+  if (blades < 3) {
+    float r = std::sqrt(u), phi = 2.0f * kPi * v;
+    return {r * std::cos(phi), r * std::sin(phi)};
+  }
+  const float corners = (float)blades;
+  float corner = std::floor(u * corners);
+  u = u * corners - corner;
+  u = std::sqrt(u);  // uniform over the corner's triangle
+  v = v * u;
+  u = 1.0f - u;
+  const float angle = kPi / corners;
+  Vec2 p{(u + v) * std::cos(angle), (u - v) * std::sin(angle)};
+  rotation += corner * 2.0f * angle;
+  const float cr = std::cos(rotation), sr = std::sin(rotation);
+  return {cr * p.x - sr * p.y, sr * p.x + cr * p.y};
+}
 
 /* Branchless orthonormal basis (Duff et al. 2017). */
 static inline void onb(Vec3 n, Vec3 &t, Vec3 &b) {
@@ -143,14 +165,26 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   env_ = env;
   normal_mats_.clear();
   for (const PTObject &ob : objects_) normal_mats_.push_back(ob.model.inverse().transposed());
+  /* GPU devices first: one without ray tracing hardware traverses Blendity's
+   * own BVH, so that is built even when the CPU uses Embree. */
+  gpu_error_.clear();
+  if (!settings_.gpus.empty() && gpu::available()) sync_gpus();
+  else gpus_.clear();
+  bool software_gpu = false;
+  for (auto &g : gpus_) software_gpu = software_gpu || !g->hw_rt;
   use_embree_ = embree_available() && settings_.use_embree;
   if (use_embree_) {
     double ms = 0;
     build_embree(ms);
-    stats_.bvh_build_ms = t.ms();
-    collect_mesh_lights();
-    guiding_begin_scene();
-    return;
+    if (!software_gpu) {
+      tlas_.clear();
+      instances_.clear();
+      stats_.bvh_build_ms = t.ms();
+      collect_mesh_lights();
+      guiding_begin_scene();
+      upload_gpus();
+      return;
+    }
   }
   /* 1. Bottom level: one object-space BVH per unique mesh (Cycles builds
    *    instanced geometry the same way). Cached across builds and keyed by a
@@ -226,6 +260,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   stats_.bvh_build_ms = t.ms();
   collect_mesh_lights();
   guiding_begin_scene();
+  upload_gpus();
 }
 
 void PathTracer::build_sah(const std::vector<AABB> &tb, std::vector<Node> &nodes, std::vector<uint32_t> &idx, uint32_t max_leaf) {
@@ -481,9 +516,16 @@ Vec3 PathTracer::transmittance(const Ray &r, float tmax) const {
 /* Camera & integrator                                                    */
 /* ===================================================================== */
 
-void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int height) {
+void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int height, const PTLens &lens) {
   inv_vp_ = (proj * view).inverse();
-  cam_pos_ = view.inverse().translation();
+  const Mat4 cam = view.inverse();
+  cam_pos_ = cam.translation();
+  cam_right_ = normalize(cam.dir({1, 0, 0}));
+  cam_up_ = normalize(cam.dir({0, 1, 0}));
+  cam_fwd_ = normalize(cam.dir({0, 0, 1}));
+  lens_ = lens;
+  if (!(lens_.radius > 0.0f) || !std::isfinite(lens_.radius)) lens_.radius = 0.0f;
+  lens_.focus_distance = std::max(1e-4f, lens_.focus_distance);
   if (width != w_ || height != h_) {
     w_ = width;
     h_ = height;
@@ -500,6 +542,33 @@ void PathTracer::reset() {
   depth_.assign(n, 0.0f);
   stats_.rays = 0;
   stats_.render_ms = 0;
+  /* Combined rendering: the CPU's own sums, and every GPU starts over. */
+  cpu_samples_ = 0;
+  done_total_ = 0;
+  stats_.cpu_samples = 0;
+  stats_.gpu_samples.clear();
+  if (!gpus_.empty()) {
+    cpu_accum_.assign(n, Vec3(0.0f));
+    cpu_albedo_.assign(n, Vec3(0.0f));
+    cpu_normal_.assign(n, Vec3(0.0f));
+    cpu_depth_.assign(n, 0.0f);
+    std::memcpy(gpu_params_.inv_vp, inv_vp_.m, 64);
+    gpu_params_.cam_pos[0] = cam_pos_.x;
+    gpu_params_.cam_pos[1] = cam_pos_.y;
+    gpu_params_.cam_pos[2] = cam_pos_.z;
+    const float lens[4] = {lens_.radius, lens_.focus_distance, (float)lens_.blades, lens_.rotation};
+    std::memcpy(gpu_params_.lens, lens, 16);
+    auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };
+    v4(gpu_params_.cam_right, cam_right_);
+    v4(gpu_params_.cam_up, cam_up_);
+    v4(gpu_params_.cam_fwd, cam_fwd_);
+    gpu_params_.size[0] = w_;
+    gpu_params_.size[1] = h_;
+    for (auto &g : gpus_) {
+      g->samples = 0;
+      g->r->set_params(gpu_params_);  // clears its buffers
+    }
+  }
 }
 
 namespace {
@@ -908,8 +977,13 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
   return L;
 }
 
-int PathTracer::render(double budget_ms, int max_samples) {
+int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *claim) {
   if (w_ <= 0 || h_ <= 0) return samples_;
+  /* Combined rendering: sample indices come from the counter the GPUs share,
+   * and the CPU keeps its own sums (merged afterwards). */
+  Vec3 *A = claim ? cpu_accum_.data() : accum_.data(), *AL = claim ? cpu_albedo_.data() : albedo_.data();
+  Vec3 *NR = claim ? cpu_normal_.data() : normal_.data();
+  float *DP = claim ? cpu_depth_.data() : depth_.data();
 #ifdef BL_WITH_OPENPGL
   if (guiding_ && !guiding_->field) {
     /* Cycles' configuration (integrator/path_trace.cpp): KD-tree of
@@ -924,13 +998,21 @@ int PathTracer::render(double budget_ms, int max_samples) {
 #endif
   ScopedTimer t;
   JobSystem &js = JobSystem::global();
-  while (samples_ < max_samples) {
+  for (;;) {
+    int s;
+    if (claim) {
+      s = claim->fetch_add(1);
+      if (s >= max_samples) break;
+    }
+    else {
+      if (samples_ >= max_samples) break;
+      s = samples_;
+    }
     std::atomic<uint64_t> rays{0};
-    int s = samples_;
 #ifdef BL_WITH_OPENPGL
     /* Guiding: train the field for the first samples, steer once it has learned. */
-    const bool train = guiding_ && guiding_->trained_samples < settings_.guiding_training_samples;
-    const bool steer = guiding_active();
+    const bool train = !claim && guiding_ && guiding_->trained_samples < settings_.guiding_training_samples;  // CPU-only feature
+    const bool steer = !claim && guiding_active();
 #endif
     js.parallel_for(h_, 2, [&](int64_t y0, int64_t y1) {
       std::unique_ptr<PTGuidingThread> guide;
@@ -958,6 +1040,16 @@ int PathTracer::render(double budget_ms, int max_samples) {
           Vec4 a = inv_vp_ * Vec4(nx, ny, 0.0f, 1.0f), b = inv_vp_ * Vec4(nx, ny, 1.0f, 1.0f);
           Vec3 pa = a.xyz() / a.w, pb = b.xyz() / b.w;
           Ray r{pa, normalize(pb - pa)};
+          if (lens_.radius > 0.0f) {
+            /* Thin lens: start on the aperture, aim at where the pinhole ray
+             * crosses the focus plane (Cycles: camera_sample_perspective). */
+            float lu = rnd(rng), lv = rnd(rng);
+            Vec2 l = sample_aperture(lu, lv, lens_.blades, lens_.rotation) * lens_.radius;
+            float t = (lens_.focus_distance - dot(pa - cam_pos_, cam_fwd_)) / std::max(1e-6f, dot(r.dir, cam_fwd_));
+            Vec3 focus = pa + r.dir * t;
+            r.origin = pa + cam_right_ * l.x + cam_up_ * l.y;
+            r.dir = normalize(focus - r.origin);
+          }
           Vec3 alb, nrm;
           float dep;
 #ifdef BL_WITH_OPENPGL
@@ -979,10 +1071,10 @@ int PathTracer::render(double budget_ms, int max_samples) {
 #endif
           if (!(c.x == c.x) || !(c.y == c.y) || !(c.z == c.z)) c = Vec3(0.0f);  // NaN guard
           size_t i = (size_t)y * w_ + x;
-          accum_[i] += c;
-          albedo_[i] += alb;
-          normal_[i] += nrm;
-          depth_[i] += dep;
+          A[i] += c;
+          AL[i] += alb;
+          NR[i] += nrm;
+          DP[i] += dep;
         }
       rays += local;
 #ifdef BL_WITH_OPENPGL
@@ -995,7 +1087,8 @@ int PathTracer::render(double budget_ms, int max_samples) {
       _mm_setcsr(csr);
 #endif
     });
-    samples_++;
+    if (claim) cpu_samples_++;
+    else samples_++;
 #ifdef BL_WITH_OPENPGL
     if (train) {
       guiding_->trained_samples++;
@@ -1080,7 +1173,10 @@ std::vector<float> PathTracer::denoised() const {
 }
 
 std::vector<float> PathTracer::linear_rgb(bool denoise) {
-  if (denoise && samples_ > 0) return denoised();
+  if (denoise && samples_ > 0) {
+    merge_aux();  // the denoiser's albedo and normals, from every device
+    return denoised();
+  }
   std::vector<float> out((size_t)w_ * h_ * 3);
   float inv = 1.0f / std::max(1, samples_);
   for (size_t i = 0; i < accum_.size(); i++) {
@@ -1362,6 +1458,389 @@ void PathTracer::resolve_rgb(const std::vector<float> &rgb, uint32_t *out, int s
     for (int64_t y = y0; y < y1; y++)
       display::encode_span(&rgb[(size_t)y * w_ * 3], out + (size_t)y * stride, (size_t)w_, settings_.view_transform, settings_.exposure);
   });
+}
+
+/* ===================================================================== */
+/* GPU devices and combined rendering (Cycles: device/multi)              */
+/* ===================================================================== */
+
+bool PathTracer::gpu_available() { return gpu::available(); }
+
+void PathTracer::sync_gpus() {
+  const auto &devs = gpu::devices();
+  std::vector<int> want;
+  for (int i : settings_.gpus)
+    if (i >= 0 && i < (int)devs.size() && std::find(want.begin(), want.end(), i) == want.end()) want.push_back(i);
+  /* Drop devices no longer wanted (or whose ray tracing mode changed). */
+  for (size_t k = 0; k < gpus_.size();) {
+    GpuSlot &s = *gpus_[k];
+    bool keep = std::find(want.begin(), want.end(), s.index) != want.end() &&
+                s.hw_rt == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt);
+    if (keep) k++;
+    else gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+  }
+  /* Opened in parallel: on a cold driver cache, building each device's
+   * pipeline takes seconds. */
+  std::vector<int> add;
+  for (int i : want) {
+    bool have = false;
+    for (auto &s : gpus_) have = have || s->index == i;
+    if (!have) add.push_back(i);
+  }
+  std::vector<std::unique_ptr<gpu::Renderer>> made(add.size());
+  std::vector<std::string> errs(add.size());
+  std::vector<std::thread> threads;
+  for (size_t k = 0; k < add.size(); k++)
+    threads.emplace_back([&, k] { made[k] = gpu::Renderer::create(add[k], settings_.gpu_hardware_rt, &errs[k]); });
+  for (std::thread &th : threads) th.join();
+  for (size_t k = 0; k < add.size(); k++) {
+    const int i = add[k];
+    if (!made[k]) {
+      gpu_error_ += (gpu_error_.empty() ? "" : "; ") + devs[(size_t)i].name + ": " + errs[k];
+      Log::warn("GPU %s unavailable: %s", devs[(size_t)i].name.c_str(), errs[k].c_str());
+      continue;
+    }
+    auto slot = std::make_unique<GpuSlot>();
+    slot->index = i;
+    slot->hw_rt = made[k]->using_hardware_rt();
+    slot->r = std::move(made[k]);
+    gpus_.push_back(std::move(slot));
+  }
+}
+
+/* The scene in the GPU kernel's layouts: Blendity's own BVH (for GPUs that
+ * trace in software), meshes, objects, materials, textures and lights. */
+void PathTracer::build_gpu_scene(gpu::Scene &s) const {
+  auto put_node = [](const Node &n) {
+    gpu::GNode g;
+    g.bmin[0] = n.box.min.x; g.bmin[1] = n.box.min.y; g.bmin[2] = n.box.min.z;
+    g.bmax[0] = n.box.max.x; g.bmax[1] = n.box.max.y; g.bmax[2] = n.box.max.z;
+    g.left = n.left_or_first;
+    g.count = n.count;
+    return g;
+  };
+  const bool own_bvh = !tlas_.empty() && !instances_.empty();
+  if (own_bvh)
+    for (const Node &n : tlas_) s.nodes.push_back(put_node(n));
+  /* Textures (level 0, which is what the CPU path tracer samples too). */
+  std::unordered_map<const Texture *, int> tex_id;
+  auto texture = [&](const TexturePtr &t) -> int {
+    if (!t || t->levels.empty()) return -1;
+    auto it = tex_id.find(t.get());
+    if (it != tex_id.end()) return it->second;
+    const Texture::Level &l = t->levels[0];
+    gpu::GTexInfo ti{};
+    ti.w = l.w;
+    ti.h = l.h;
+    if (t->is_float) {
+      ti.offset = (uint32_t)(s.texf.size() / 4);
+      ti.flags = 2;
+      for (const Vec4 &p : l.pxf) s.texf.insert(s.texf.end(), {p.x, p.y, p.z, p.w});
+    }
+    else {
+      ti.offset = (uint32_t)s.tex8.size();
+      ti.flags = t->srgb ? 1 : 0;
+      s.tex8.insert(s.tex8.end(), l.px8.begin(), l.px8.end());
+    }
+    int id = (int)s.textures.size();
+    s.textures.push_back(ti);
+    tex_id[t.get()] = id;
+    return id;
+  };
+  auto material = [&](const Material &m) {
+    gpu::GMaterial g{};
+    const Material::Resolved &tx = m.textures();
+    float base[4] = {m.base_color.x, m.base_color.y, m.base_color.z, m.alpha};
+    float em[4] = {m.emission.x * m.emission_strength, m.emission.y * m.emission_strength, m.emission.z * m.emission_strength, m.normal_strength};
+    float par[4] = {m.metallic, m.roughness, m.specular, m.ior};
+    float til[4] = {m.tiling.x, m.tiling.y, m.tiling.z, m.alpha_clip};
+    float off[4] = {m.offset.x, m.offset.y, m.offset.z, m.procedural_scale};
+    float c2[4] = {m.procedural_color2.x, m.procedural_color2.y, m.procedural_color2.z, 0};
+    std::memcpy(g.base_color, base, 16);
+    std::memcpy(g.emission, em, 16);
+    std::memcpy(g.params, par, 16);
+    std::memcpy(g.tiling, til, 16);
+    std::memcpy(g.offset, off, 16);
+    std::memcpy(g.color2, c2, 16);
+    g.tex0[0] = texture(tx.base);
+    g.tex0[1] = texture(tx.metallic);
+    g.tex0[2] = texture(tx.roughness);
+    g.tex0[3] = texture(tx.normal);
+    g.tex1[0] = texture(tx.emission);
+    g.tex1[1] = m.mapping;
+    g.tex1[2] = m.procedural;
+    g.tex1[3] = m.surface;
+    g.flags[0] = m.unlit ? 1 : 0;
+    g.flags[1] = m.wrap;
+    g.flags[2] = m.filter;
+    s.materials.push_back(g);
+  };
+  material(*default_material());  // index 0
+  struct MeshRec { uint32_t node_off, tri_off, vtx_off, idx_off, blas; };
+  std::unordered_map<const RenderMesh *, MeshRec> meshes;
+  s.instances.resize(objects_.size());
+  s.object_blas.assign(objects_.size(), UINT32_MAX);
+  for (size_t o = 0; o < objects_.size(); o++) {
+    const PTObject &ob = objects_[o];
+    gpu::GInstance &gi = s.instances[o];
+    std::memset(&gi, 0, sizeof(gi));
+    std::memcpy(gi.to_world, ob.model.m, 64);
+    Mat4 inv = ob.model.inverse();
+    std::memcpy(gi.to_local, inv.m, 64);
+    std::memcpy(gi.normal_mat, normal_mats_[o].m, 64);
+    if (!ob.mesh || ob.mesh->tri_count() == 0) continue;
+    const RenderMesh &rm = *ob.mesh;
+    auto it = meshes.find(&rm);
+    if (it == meshes.end()) {
+      MeshRec r{0, 0, (uint32_t)s.verts.size(), (uint32_t)(s.idx.size() / 4), (uint32_t)s.blas.size()};
+      for (size_t v = 0; v < rm.positions.size(); v++) {
+        gpu::GVertex gv{};
+        gv.p[0] = rm.positions[v].x; gv.p[1] = rm.positions[v].y; gv.p[2] = rm.positions[v].z;
+        if (v < rm.normals.size()) { gv.n[0] = rm.normals[v].x; gv.n[1] = rm.normals[v].y; gv.n[2] = rm.normals[v].z; }
+        if (v < rm.tangents.size()) { gv.t[0] = rm.tangents[v].x; gv.t[1] = rm.tangents[v].y; gv.t[2] = rm.tangents[v].z; gv.t[3] = rm.tangents[v].w; }
+        if (v < rm.uvs.size()) { gv.uv[0] = rm.uvs[v].x; gv.uv[1] = rm.uvs[v].y; }
+        s.verts.push_back(gv);
+      }
+      for (size_t t = 0; t < rm.tri_count(); t++)
+        s.idx.insert(s.idx.end(), {rm.indices[t * 3], rm.indices[t * 3 + 1], rm.indices[t * 3 + 2],
+                                   (uint32_t)(rm.tri_material.empty() ? 0 : rm.tri_material[t])});
+      /* Blendity's BVH for this mesh (software traversal). */
+      auto bit = blas_cache_.find(&rm);
+      if (own_bvh && bit != blas_cache_.end()) {
+        r.node_off = (uint32_t)s.nodes.size();
+        r.tri_off = (uint32_t)s.tris.size();
+        for (const Node &n : bit->second->nodes) s.nodes.push_back(put_node(n));
+        const Blas &bl = *bit->second;
+        for (size_t i = 0; i < bl.tris.size(); i++) {
+          gpu::GTri gt{};
+          const Tri &tr = bl.tris[i];
+          float prim_bits;
+          uint32_t prim = bl.prim[i];
+          std::memcpy(&prim_bits, &prim, 4);
+          float v0[4] = {tr.v0.x, tr.v0.y, tr.v0.z, prim_bits}, e1[4] = {tr.e1.x, tr.e1.y, tr.e1.z, 0}, e2[4] = {tr.e2.x, tr.e2.y, tr.e2.z, 0};
+          std::memcpy(gt.v0, v0, 16);
+          std::memcpy(gt.e1, e1, 16);
+          std::memcpy(gt.e2, e2, 16);
+          s.tris.push_back(gt);
+        }
+      }
+      s.blas.push_back({r.vtx_off, (uint32_t)rm.positions.size(), r.idx_off, (uint32_t)rm.tri_count()});
+      it = meshes.emplace(&rm, r).first;
+    }
+    const MeshRec &r = it->second;
+    s.object_blas[o] = r.blas;
+    gi.bmin[0] = rm.bounds.min.x; gi.bmin[1] = rm.bounds.min.y; gi.bmin[2] = rm.bounds.min.z;
+    gi.bmax[0] = rm.bounds.max.x; gi.bmax[1] = rm.bounds.max.y; gi.bmax[2] = rm.bounds.max.z;
+    gi.off[0] = r.node_off;
+    gi.off[1] = r.tri_off;
+    gi.off[2] = r.vtx_off;
+    gi.off[3] = r.idx_off;
+    gi.info[0] = (uint32_t)s.materials.size();
+    gi.info[1] = ob.materials ? (uint32_t)ob.materials->size() : 0;
+    if (ob.materials)
+      for (const MaterialPtr &mp : *ob.materials) material(mp ? *mp : *default_material());
+    gi.info[2] = rm.uvs.empty() ? 0 : 1;
+    gi.info[3] = rm.tangents.empty() ? 0 : 1;
+  }
+  for (const Instance &in : instances_) s.tlas_order.push_back(in.object);
+  for (const RenderLight &l : lights_) {
+    gpu::GLight g{};
+    Vec3 v = l.type == RenderLight::Directional ? l.direction : l.position;
+    float a[4] = {v.x, v.y, v.z, l.type == RenderLight::Directional ? 0.0f : 1.0f};
+    float b[4] = {l.color.x, l.color.y, l.color.z, l.intensity};
+    float c[4] = {l.range, 0, 0, 0};
+    std::memcpy(g.a, a, 16);
+    std::memcpy(g.b, b, 16);
+    std::memcpy(g.c, c, 16);
+    s.lights.push_back(g);
+  }
+  for (const MeshLight &ml : mesh_lights_) s.mesh_lights.push_back({ml.object, ml.prim, ml.area, ml.power});
+  s.mesh_cdf = light_cdf_;
+  gpu::GParams &p = s.params;
+  std::memset(&p, 0, sizeof(p));
+  p.size[2] = settings_.max_bounces;
+  p.size[3] = (int32_t)objects_.size();
+  p.settings[0] = settings_.clamp_indirect;
+  p.settings[1] = std::cos(settings_.sun_angle_deg * 0.5f * kDeg2Rad);
+  p.settings[2] = settings_.point_radius;
+  p.settings[3] = light_power_;
+  p.counts[0] = (int32_t)s.lights.size();
+  p.counts[1] = (int32_t)s.mesh_lights.size();
+  p.counts[2] = see_through_ ? 1 : 0;
+  p.counts[3] = own_bvh ? (int32_t)tlas_.size() : 0;
+  p.env_i[0] = (int32_t)env_.mode;
+  p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map) : -1;
+  p.env_f[0] = env_.strength;
+  p.env_f[1] = env_.rotation;
+  auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };
+  v4(p.env_sky, env_.sky);
+  v4(p.env_equator, env_.equator);
+  v4(p.env_ground, env_.ground);
+  v4(p.env_color, env_.color);
+}
+
+void PathTracer::upload_gpus() {
+  if (gpus_.empty()) return;
+  ScopedTimer t;
+  gpu::Scene gs;
+  build_gpu_scene(gs);
+  gpu_params_ = gs.params;
+  for (size_t k = 0; k < gpus_.size();) {
+    std::string err;
+    if (gpus_[k]->r->upload(gs, &err)) {
+      k++;
+      continue;
+    }
+    gpu_error_ += (gpu_error_.empty() ? "" : "; ") + err;
+    Log::warn("GPU %s dropped: %s", gpus_[k]->r->info().name.c_str(), err.c_str());
+    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+  }
+  stats_.bvh_build_ms += t.ms();
+  if (w_ > 0 && h_ > 0) reset();  // camera and buffers for the new scene
+}
+
+void PathTracer::merge_aux() {
+  if (aux_merged_ || gpus_.empty()) return;
+  const size_t n = (size_t)w_ * h_;
+  std::vector<std::vector<float>> ga(gpus_.size()), gn(gpus_.size());
+  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_aux(ga[k], gn[k]);
+  JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
+    for (int64_t i = b; i < e; i++) {
+      Vec3 al = cpu_albedo_[i], nr = cpu_normal_[i];
+      float d = cpu_depth_[i];
+      for (size_t k = 0; k < ga.size(); k++) {
+        al += Vec3(ga[k][i * 4], ga[k][i * 4 + 1], ga[k][i * 4 + 2]);
+        nr += Vec3(gn[k][i * 4], gn[k][i * 4 + 1], gn[k][i * 4 + 2]);
+        d += gn[k][i * 4 + 3];
+      }
+      albedo_[i] = al;
+      normal_[i] = nr;
+      depth_[i] = d;
+    }
+  });
+  aux_merged_ = true;
+}
+
+std::string PathTracer::device_summary() const {
+  std::string s;
+  if (settings_.use_cpu || gpus_.empty()) s = std::string("CPU (") + ray_backend() + ")";
+  for (const auto &g : gpus_)
+    s += (s.empty() ? "" : " + ") + g->r->info().name + (g->hw_rt ? " (RT hardware)" : " (GPU compute)");
+  return s;
+}
+
+int PathTracer::render(double budget_ms, int max_samples) {
+  if (gpus_.empty()) {
+    stats_.cpu_samples = samples_;
+    return render_cpu(budget_ms, max_samples, nullptr);
+  }
+  if (w_ <= 0 || h_ <= 0) return samples_;
+  if (done_total_ >= max_samples) {
+    if (samples_ < done_total_) merge_gpus();  // finished: show everything
+    return done_total_;
+  }
+  /* Every device claims whole samples of the frame from one counter until the
+   * target or the time budget is reached; their sums are added afterwards
+   * (an average of independent samples, so no seams between devices). */
+  ScopedTimer t;
+  std::atomic<int> next{done_total_};
+  std::atomic<bool> any{false};
+  std::vector<std::thread> threads;
+  std::mutex err_mutex;
+  std::vector<size_t> failed;
+  for (size_t k = 0; k < gpus_.size(); k++)
+    threads.emplace_back([&, k] {
+      GpuSlot &g = *gpus_[k];
+      for (;;) {
+        double left = budget_ms - t.ms();
+        if (left <= 0 && any.load()) break;
+        /* Guided self-scheduling: claim half of this device's fair share of
+         * what is left (by measured speed), so chunks shrink toward the end
+         * and fast and slow devices finish together. Never more than fits
+         * the time budget. */
+        int n = 1;
+        if (g.ms_per_sample > 0) {
+          double rate = 1.0 / g.ms_per_sample, total = settings_.use_cpu && cpu_ms_per_sample_ > 0 ? 1.0 / cpu_ms_per_sample_ : 0.0;
+          for (auto &o : gpus_) total += o->ms_per_sample > 0 ? 1.0 / o->ms_per_sample : rate;
+          double share = (max_samples - next.load()) * rate / std::max(total, 1e-9) * 0.5;
+          n = (int)std::max(1.0, std::min({64.0, share, left > 0 ? left / g.ms_per_sample : 1.0}));
+        }
+        int first = next.fetch_add(n);
+        if (first >= max_samples) break;
+        n = std::min(n, max_samples - first);
+        ScopedTimer bt;
+        std::string err;
+        if (!g.r->render(first, n, &err)) {
+          std::lock_guard<std::mutex> lock(err_mutex);
+          gpu_error_ = err;
+          failed.push_back(k);
+          break;
+        }
+        double ms = bt.ms() / n;
+        g.ms_per_sample = g.ms_per_sample > 0 ? g.ms_per_sample * 0.5 + ms * 0.5 : ms;
+        g.samples += n;
+        any = true;
+      }
+    });
+  if (settings_.use_cpu) {
+    /* The CPU renders one sample per pass; it stops at the budget like the
+     * GPUs, and doesn't take a sample when the GPUs would finish everything
+     * left before it could finish that one (everyone would wait for it). */
+    for (;;) {
+      if (t.ms() >= budget_ms && any.load()) break;
+      if (cpu_ms_per_sample_ > 0) {
+        double gpu_rate = 0;  // samples per ms, all GPUs
+        for (auto &g : gpus_) gpu_rate += g->ms_per_sample > 0 ? 1.0 / g->ms_per_sample : 0.0;
+        int remaining = max_samples - next.load();
+        if (gpu_rate > 0 && remaining < cpu_ms_per_sample_ * gpu_rate) break;
+      }
+      int before = cpu_samples_;
+      ScopedTimer ct;
+      render_cpu(0.0, max_samples, &next);  // one pass (budget 0 = stop after it)
+      if (cpu_samples_ == before) break;
+      double ms = ct.ms();
+      cpu_ms_per_sample_ = cpu_ms_per_sample_ > 0 ? cpu_ms_per_sample_ * 0.5 + ms * 0.5 : ms;
+      any = true;
+    }
+  }
+  for (auto &th : threads) th.join();
+  /* A device that failed (driver reset, out of memory) leaves; the others go on.
+   * Its partial sums are dropped with it, so the average stays consistent. */
+  std::sort(failed.begin(), failed.end());
+  for (size_t k = failed.size(); k-- > 0;) {
+    Log::warn("GPU %s stopped: %s", gpus_[failed[k]]->r->info().name.c_str(), gpu_error_.c_str());
+    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)failed[k]);
+  }
+  done_total_ = cpu_samples_;
+  stats_.gpu_samples.clear();
+  for (auto &g : gpus_) {
+    done_total_ += g->samples;
+    stats_.gpu_samples.push_back(g->samples);
+  }
+  stats_.cpu_samples = cpu_samples_;
+  /* Reading the GPUs back costs time, so the picture is merged only when it
+   * is shown: at the end, at first, and every merge interval in between. */
+  if (done_total_ >= max_samples || samples_ == 0 || merge_clock_.ms() >= settings_.merge_interval_ms) merge_gpus();
+  stats_.render_ms += t.ms();
+  return done_total_;
+}
+
+/* The CPU's colour sums plus each GPU's (read back). Albedo and normals are
+ * only needed by the denoiser, so they merge on demand (merge_aux). */
+void PathTracer::merge_gpus() {
+  const size_t n = (size_t)w_ * h_;
+  std::vector<std::vector<float>> gsum(gpus_.size());
+  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_accum(gsum[k]);
+  JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
+    for (int64_t i = b; i < e; i++) {
+      Vec3 c = cpu_accum_[i];
+      for (const auto &g : gsum) c += Vec3(g[i * 4], g[i * 4 + 1], g[i * 4 + 2]);
+      accum_[i] = c;
+    }
+  });
+  aux_merged_ = false;
+  samples_ = done_total_;
+  merge_clock_ = ScopedTimer();
 }
 
 }  // namespace bl

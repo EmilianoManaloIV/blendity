@@ -34,6 +34,8 @@ When `blender/lib/<platform>` exists next to this project, the build scripts lin
 | [zlib](https://zlib.net) | 1.3.1 | PNG compression | Zlib (`Zlib.txt`) |
 | [Zstandard](https://github.com/facebook/zstd) | 1.5.7 | compressed `.scene` files | BSD-3-Clause |
 | [DPC++ runtime](https://github.com/intel/llvm) | 7.1.0 | runtime dependency of Embree's build (SYCL) | Apache-2.0 with LLVM exception (`LLVM-exception.txt`) |
+| [shaderc](https://github.com/google/shaderc) (with glslang, SPIRV-Tools) | v2025.4 | compiles the GPU path-tracing kernel (GLSL to SPIR-V) at run time | Apache-2.0 (glslang also BSD-3-Clause / MIT parts) |
+| [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | 1.4.341 | GPU rendering API declarations (headers only; the Vulkan loader comes with the GPU driver) | Apache-2.0 / MIT |
 
 All of these are permissive or weak-copyleft licenses that are compatible with GPL-3.0. MPL-2.0 (Eigen) only asks that changes to Eigen's own files stay available; Blendity doesn't modify them. A binary build that includes them is therefore also distributed under GPL-3.0-or-later, as Blender's is.
 

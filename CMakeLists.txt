@@ -87,6 +87,9 @@ if(BLENDITY_USE_LIBS)
   bl_lib(png BL_WITH_LIBPNG INC png/include zlib/include WIN png/lib/libpng.lib zlib/lib/libz_st.lib
          UNIX png/lib/libpng.a zlib/lib/libz.a)
   bl_lib(zstd BL_WITH_ZSTD INC zstd/include WIN zstd/lib/zstd_static.lib UNIX zstd/lib/libzstd.a)
+  if(EXISTS "${BLENDITY_LIBDIR}/vulkan/include")  # GPU rendering; the loader comes with the driver
+    bl_lib(shaderc BL_WITH_VULKAN INC shaderc/include vulkan/include WIN shaderc/lib/shaderc_shared.lib UNIX shaderc/lib/libshaderc_combined.a)
+  endif()
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
   if(NOT WIN32)
     list(APPEND BL_LIB_LINK "${BLENDITY_LIBDIR}/tbb/lib/libtbb${CMAKE_SHARED_LIBRARY_SUFFIX}")

@@ -34,8 +34,17 @@ enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Lea
 const char *window_title(WindowKind k);
 ui::Icon window_icon(WindowKind k);
 
-enum class Tool { View, Move, Rotate, Scale, Transform, PushPull };
+enum class Tool { View, Move, Rotate, Scale, Transform };
 enum class EditElement { Vertex, Edge, Face };
+/* One Edit Mode operator: which selection modes offer it (1 vertex, 2 edge, 4 face). */
+struct EditOpInfo {
+  const char *op, *label, *keys, *tip;
+  int elements;
+};
+const std::vector<EditOpInfo> &edit_op_table();
+const EditOpInfo *find_edit_op(const std::string &op);
+constexpr int kOriginModeCount = 9;
+extern const char *const kOriginModes[kOriginModeCount];
 /* Scene view draw modes. Unity: Shaded / Wireframe / Shaded Wireframe.
  * Blender: Wireframe / Solid / Material Preview / Rendered. */
 enum class Shading { Wireframe = 0, Solid = 1, Shaded = 2, Rendered = 3, ShadedWireframe = 4 };
@@ -99,6 +108,10 @@ class Editor {
   /* Runs a console command (also used by --headless-screenshot and tests). */
   void command(const std::string &c) { run_console_command(c); }
   Recti scene_view_rect() const { return scene_rect_; }  // tests drive the Scene view with mouse events
+  /* Tests: select an object, and record a change they made to the scene directly as one undo step. */
+  void select_object(uint64_t id) { select(id); }
+  GameObject *selected_object() const { return active_object(); }
+  void commit_change(const std::string &what) { mark_changed(what); }
 
  private:
   friend struct InspectorReflector;
@@ -159,6 +172,7 @@ class Editor {
    * before the real render). open_window: bring the Render window forward. */
   void start_final_render(bool preview = false, bool open_window = true);
   uint64_t live_preview_hash();
+  uint64_t camera_render_hash(const GameObject *owner, Camera *cam);
   void draw_camera_preview(const Recti &view);  // Unity's Camera Preview inset
   void step_final_render();
   void save_render();
@@ -185,6 +199,8 @@ class Editor {
   void edit_select_all(bool select);
   void sync_vert_face_selection(bool from_faces);
   void edit_op(const std::string &op);
+  void edit_tool(const std::string &op);  // edit_op, if the current selection mode offers it
+  bool edit_op_available(const std::string &op) const;
   /* Nearest visible edge to the mouse (edge mode / loop select / loop cut). */
   bool edit_pick_edge(const Recti &view, int mx, int my, uint32_t &a, uint32_t &b);
   void edit_select_loop(const Recti &view, int mx, int my, bool add);
@@ -219,7 +235,7 @@ class Editor {
   void run_last_op(bool first);
   void draw_last_op_panel(const Recti &view);
   bool try_auto_fuse(Mesh &m);
-  /* SketchUp's Push/Pull tool (P): hover a face, drag along its normal. */
+  /* SketchUp's Push/Pull as a modal face operator (P): mouse or typed distance, click to confirm. */
   struct PushPullDrag {
     bool active = false;
     uint64_t obj = 0;
@@ -227,13 +243,16 @@ class Editor {
     std::vector<uint8_t> fsel;
     Vec3 origin, axis;     // world: where the face was grabbed, the direction it moves
     float units = 1.0f;    // world length of one local unit along the axis
-    float start = 0.0f;    // mouse position along the axis at the press
+    float start = 0.0f;    // mouse position along the axis when it started
+    std::string typed;     // numeric input (Blender: type a value while transforming)
+    std::string refused;   // why the current distance can't be applied (shown by the cursor)
     float distance = 0.0f; // local units
     bool keep = false;     // Ctrl: always add walls (keep the original face, SketchUp)
     meshops::PushPullLimits lim;
     meshops::PushPullResult result = meshops::PushPullResult::Moved;
   };
-  bool pick_mesh_face(const Recti &view, int mx, int my, GameObject *&g, uint32_t &face, Vec3 &hit);
+  void pushpull_begin();
+  void pushpull_cancel();
   bool pushpull_update(const Recti &view);  // true while the tool owns the mouse
   void pushpull_apply(float distance);
   void pushpull_finish();
@@ -264,6 +283,9 @@ class Editor {
   void delete_selected();
   void add_component_to_selection(const std::string &name);
   void mesh_op(const std::string &op);
+  void set_origin(int mode, Vec3 world_point = Vec3(0.0f));  // kOriginModes; world_point for "Origin to Point"
+  int origin_mode_ = 0;
+  Vec3 origin_target_;
   /* Assets used by material / texture pickers (cached directory scan). */
   const std::vector<std::string> &image_assets();
   std::vector<MaterialPtr> scene_materials();
@@ -272,6 +294,7 @@ class Editor {
   void assign_material_to_faces(int slot);
   void spawn_stress_grid(int count, const std::string &kind);
   void run_console_command(const std::string &cmd);
+  bool set_field_command(const std::string &path, const std::string &value);  // console: set Camera.FStop 1.4
   void enter_play();
   void exit_play();
   void request_close();
@@ -377,8 +400,6 @@ class Editor {
   Recti last_op_rect_{};  // last frame's panel area (keeps clicks off the scene)
   uint64_t redo_serial_ = 0;
   PushPullDrag pp_;
-  uint64_t pp_hover_obj_ = 0;
-  int64_t pp_hover_face_ = -1;
   float pp_last_distance_ = 0.0f;
   std::vector<uint8_t> vert_sel_, face_sel_;
 
@@ -398,6 +419,11 @@ class Editor {
   Image vp_pt_img_;
   uint64_t vp_pt_shown_ = 0;  // samples + display settings of vp_pt_img_ (skip re-resolving)
   bool vp_pt_guiding_ = false;
+  uint64_t vp_pt_device_key_ = 0;
+  /* GPU render devices the user unticked (names; machine-specific, kept in the prefs). */
+  std::set<std::string> render_devices_off_;
+  std::vector<int> enabled_gpus() const;
+  PTSettings make_pt_settings(const RenderSettings &rs) const;
   PathTracer final_pt_;
   Image render_img_;
   bool rendering_ = false, render_has_result_ = false;
@@ -407,6 +433,10 @@ class Editor {
   Image cam_preview_img_;
   RenderTarget cam_preview_rt_;
   Renderer3D cam_preview_r3d_;
+  bool cam_preview_rendered_ = false;  // Camera Preview shows the render engine (path traced)
+  PathTracer cam_preview_pt_;
+  uint64_t cam_preview_pt_hash_ = 0;
+  bool cam_preview_done_ = false;
   double render_start_ = 0, render_time_ = 0;
   std::string render_status_;
   float render_zoom_ = 0;  // 0 = fit

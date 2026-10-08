@@ -10,6 +10,77 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 5: Push/Pull on odd meshes
+
+`blendity_stress --only pushpull` runs `meshops::push_pull` on 26 awkward meshes:
+- **Shapes:** cylinders with 32- and 128-gon caps, a cone apex, UV and ico spheres, a torus, an L-shaped and a star-shaped (concave) prism, a non-planar face, a sheared box, a wedge, a subdivided cube, a cube with a tunnel, and a thin wall.
+- **Broken or unusual topology:** an open quad and grid, a cube with inside-out normals, unwelded faces, collinear corners plus a sliver, and a non-manifold fin.
+- **Scale and position:** cubes at 0.1 mm and 10 km, and one 200 km from the origin.
+
+Every face is tried, plus random groups of 2 - 6 faces, the whole mesh and disconnected pairs. The distances run from 1e-9 to 1,000 x the mesh size, exactly at and around the hole and join limits, and include NaN and infinity, each with and without Ctrl (new face). Every result is checked for:
+- bad indices, NaN and repeated corners;
+- a closed mesh coming out open;
+- volume moving the wrong way, or the solid turning inside out;
+- new zero-area faces.
+
+A second part drives the interactive operator in a headless editor: P, a mouse sweep through the snaps, then a click, Esc or a right-click. Undo or the cancel must restore the exact mesh.
+
+| Round | Problems in ~27,000 operations | Fixed |
+|---|---|---|
+| First run | 7,088 | — |
+| Non-finite distances refused | 3,344 fewer | NaN / inf filled the mesh with NaN |
+| Neighbour-stretch cleanup kept shared corners | 347 open meshes → 0 | a T-junction where a stretched face dropped a corner its neighbour still used |
+| Stop at the nearest geometry behind / in front | 704 inside-out → 64 | pushing a whole side past the far side inverted the box |
+| Weld new vertices, cancel twin faces | 2,390 zero-area faces → 175 | hole cuts landing exactly on existing corners duplicated them |
+| Ignore the region's own neighbours as "in front" | 48 collapses → 0 | a 5-face selection "joined" onto its own neighbour and vanished |
+| Sweep the whole outline, not just corner rays | tunnel cases → 0 | a face over a tunnel was pushed straight through it |
+| Corners slide along leaning neighbours | 80 inside-out → 0 | a wedge's slanted face pushed in sent walls out through the base |
+| Precision-aware tolerances, relative Newell normals | 199 far-from-origin → 2 | 200 km from the origin floats step 2 cm; normals summed raw coordinates |
+| Holes that leave slivers fall back to stopping | 46 → 0 | needle triangles from cuts on curved faces |
+| **Now** | **2** | both on the cube 200 km from the origin (below) |
+
+The interactive part: every Push/Pull on every mesh was undone or cancelled back to the exact mesh, at about 7 ms a frame (1000 x 700, headless).
+
+### Honest negatives (pass 5)
+
+- **Some selections are refused rather than guessed.** About 6% of the attempts are refused, almost all of them because the faces around the selection lean over it and no slide keeps every neighbour flat. Examples are a whole band of faces, or a group whose corners touch three or more unselected planes. Refusing beats a broken mesh, and the cursor shows the reason.
+- **200 km from the origin** a 1 m cube is only about 50 float steps wide, and 2 of 26,620 results still came out open. Model near the origin, as in every float-based editor.
+- `push_through` itself still leaves slivers on some curved meshes. Push/Pull doesn't show them, because it falls back to stopping at the far side, but Alt+P (Push Through on its own) can still produce them.
+
+## Pass 4: GPU render devices (Vulkan)
+
+`blendity_stress --only gpu` renders the same frame on every device: 400 textured spheres on a checker floor, with sun + sky, 4 bounces and 128 samples at 1280×720. The GPUs are an RTX 4070 SUPER and an RTX 3060 Ti in the same machine. A unit test checks that every device, and CPU + GPU together, matches the CPU render (mean within 3%, per-pixel difference under 6%). Two runs agreed within 1%.
+
+| Device | samples/s | vs CPU |
+|---|---|---|
+| CPU (Embree, 32 threads) | 21.0 | 1.00× |
+| RTX 4070 SUPER, compute shader (Blendity BVH) | 157 | 7.5× |
+| RTX 4070 SUPER, ray tracing hardware | 1,150 | **55×** |
+| RTX 3060 Ti, compute shader | 80.5 | 3.8× |
+| RTX 3060 Ti, ray tracing hardware | 347 | 16.5× |
+| Both GPUs | 1,268 | **60×** (samples split 96 : 32) |
+| CPU + both GPUs | 1,070–1,160 | 51–55× (CPU takes 1–2 samples) |
+
+### Efficiencies found and applied
+
+- **Ray tracing hardware is 7.3× the software BVH** on the same GPU (`VK_KHR_ray_query`, one BLAS per unique mesh plus a TLAS). The software-BVH kernel stays for GPUs without RT cores.
+- **Optimised SPIR-V, cached on disk.** An early build skipped shaderc's optimiser: the kernel compiled in 70 ms and seemed just as fast. That was only because the driver's shader cache was already warm. On a cold cache, NVIDIA's driver took **~105 s per GPU** to build the pipeline from unoptimised SPIR-V, so the first GPU render took 212 s. Optimised SPIR-V fixed two things:
+  - The driver builds the pipeline in 2.7 s.
+  - The software-BVH kernel runs **1.7× faster**, and the RT kernel 1.6×.
+
+  shaderc's optimiser takes 6 s, so its output is cached in `~/.blendity/cache` (keyed by a hash of the source and options). The editor starts compiling in the background as soon as Device is set to GPU Compute, and each GPU builds its pipeline on its own thread. First GPU render on a new machine: **212 s → 9.3 s**. After an update: 3.4 s. After that: 0.2 s.
+- **Multi-GPU went from slower than one GPU to faster** through four changes:
+  - Guided self-scheduling batches replaced fixed batch sizes.
+  - Buffers are merged only at the 100 ms display interval rather than after every batch.
+  - Albedo and normal are read back only when the denoiser runs.
+  - Readback moved into **host-cached** memory. Reading 15 MB from the default uncached host-visible memory took about 50 ms, a big share of a 100 ms frame.
+- **The CPU stops claiming samples** once the GPUs would finish the remaining ones sooner, so a slow CPU sample no longer holds up the frame.
+
+### Honest negatives (pass 4)
+
+- **Adding the CPU to two RT GPUs is 9–16% slower** in this scene. One CPU sample takes 47 ms while a GPU sample takes under 1 ms, so the frame waits for the CPU's last sample. The CPU still helps alongside GPUs without ray tracing hardware, or a single slow GPU. As in Blender, it is a tick box, and off is the right choice with fast GPUs.
+- **The second GPU adds only 10%**, not the 30% its standalone speed suggests. The whole 128-sample frame takes about 100 ms, so each batch's submit-and-wait and the final readback are a large fixed share. Overlapping batches across two command buffers is the next step.
+
 ## Pass 3: Blender's libraries and bare-metal optimisation
 
 This pass linked 16 of Blender's prebuilt libraries (each optional, each compared with Blendity's own fallback in the stress suite). It then hand-optimised the hottest CPU paths with SIMD and by skipping work. Same-session A/B builds were used for the before/after numbers below, because background load on this machine drifts by ~20% between runs.

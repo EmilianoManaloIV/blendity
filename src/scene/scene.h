@@ -147,7 +147,35 @@ struct Camera : ComponentBase<Camera> {
   float ortho_size = 5.0f;
   int clear_flags = 0;  // 0 skybox, 1 solid color
   Vec3 background{0.19f, 0.30f, 0.47f};
+  /* Unity's Physical Camera / Blender's lens and sensor: the field of view
+   * comes from the focal length and the sensor size. */
+  bool physical = false;
+  float focal_length = 50.0f;   // mm
+  int sensor_preset = 1;        // kSensorPresets (0 custom)
+  float sensor_width = 36.0f;   // mm
+  float sensor_height = 24.0f;  // mm
+  int sensor_fit = 0;           // Auto (width spans the larger side), Horizontal, Vertical
+  float shift_x = 0.0f, shift_y = 0.0f;  // lens shift, fraction of the image width / height
+  int aspect_mode = 0;          // kAspectModes: 0 the render resolution's
+  float custom_aspect = 1.85f;
+  /* Depth of field (Cycles: thin lens; Blender's Aperture panel). */
+  bool dof = false;
+  float f_stop = 2.8f;
+  float focus_distance = 10.0f; // m
+  int blades = 0;               // 0 round, 3+ polygonal bokeh
+  float blade_rotation = 0.0f;  // degrees
+  /* Exposure from ISO, shutter speed and f-stop (Unity's Physical Camera). */
+  bool physical_exposure = false;
+  float iso = 100.0f;
+  float shutter = 60.0f;        // 1 / seconds
   void reflect(Reflector &r) override;
+  /* The image's width / height: the render resolution's unless the camera sets one. */
+  float image_aspect(float render_aspect) const;
+  float vertical_fov_deg(float aspect) const;
+  float focal_length_mm(float aspect) const;   // also for a field-of-view camera (36 mm sensor)
+  Mat4 projection(float aspect) const;         // perspective or orthographic, with lens shift
+  float aperture_radius(float aspect) const;   // world units (metres); 0 = pinhole
+  float exposure_stops() const;                // added to the render exposure
 };
 
 struct Rotator : ComponentBase<Rotator> {
@@ -362,6 +390,9 @@ struct RenderSettings {
   int denoiser = 0;           // 0 OpenImageDenoise (when built with it), 1 A-Trous
   bool use_embree = true;     // Embree ray tracing (when built with it)
   bool path_guiding = false;  // OpenPGL path guiding (when built with it)
+  int device = 0;             // 0 CPU, 1 GPU Compute (Cycles: Render Properties > Device)
+  bool gpu_with_cpu = false;  // GPU Compute: the CPU renders samples too (combined)
+  bool hardware_rt = true;    // GPU Compute: ray tracing hardware (RT cores) when a GPU has it
   int raster_aa = 2;          // supersampling factor for the rasterized engine
   bool shadows = true;
   int shadow_resolution = 2048;

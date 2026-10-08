@@ -187,8 +187,7 @@ bool Editor::camera_for_render(Mat4 &view, Mat4 &proj, float aspect) {
   Quat q = owner->world_rotation();
   Vec3 eye = owner->world_position();
   view = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
-  proj = cam->orthographic ? Mat4::ortho(cam->ortho_size, aspect, cam->near_clip, cam->far_clip)
-                           : Mat4::perspective(cam->fov * kDeg2Rad, aspect, cam->near_clip, cam->far_clip);
+  proj = cam->projection(aspect);
   return true;
 }
 
@@ -222,6 +221,7 @@ void Editor::update_shadow_map(const std::vector<DrawItem> &items, const Lightin
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                              bool scene_lights, const Camera *cam) {
   LightingEnv env = make_lighting(eye, scene_lights);
+  if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   std::vector<DrawItem> items = collect_items(game, true);
   if (scene_lights && scene_->render.shadows) {
     update_shadow_map(items, env);
@@ -247,8 +247,22 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
 /* Path traced (Cycles-like)                                              */
 /* ===================================================================== */
 
-static PTSettings pt_settings(const RenderSettings &rs) {
+std::vector<int> Editor::enabled_gpus() const {
+  std::vector<int> out;
+  for (const gpu::DeviceInfo &d : gpu::devices())
+    if (!render_devices_off_.count(d.name)) out.push_back(d.index);
+  return out;
+}
+
+PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   PTSettings s;
+  /* GPU Compute: the ticked GPUs (and the CPU too when asked). With no GPU
+   * available it quietly stays on the CPU. */
+  if (rs.device == 1 && gpu::available()) {
+    s.gpus = enabled_gpus();
+    s.use_cpu = rs.gpu_with_cpu || s.gpus.empty();
+    s.gpu_hardware_rt = rs.hardware_rt;
+  }
   s.max_bounces = rs.max_bounces;
   s.clamp_indirect = rs.clamp_indirect;
   s.denoise = rs.denoise;
@@ -281,21 +295,26 @@ void Editor::render_pathtraced_view(const Recti &view) {
     for (const DrawItem &it : items) scene_r3d_.add(it);
     scene_r3d_.flush();
   }
-  const int div = 2;
+  /* Half resolution on the CPU; GPUs are fast enough for the full view. */
+  const int div = scene_->render.device == 1 && gpu::available() && !enabled_gpus().empty() ? 1 : 2;
   int pw = std::max(1, view.w / div), ph = std::max(1, view.h / div);
   uint64_t hash = scene_render_hash();
   bool rebuilt = false;
   const RenderSettings &rs = scene_->render;
   const int target = std::max(1, rs.viewport_samples);
-  PTSettings ps = pt_settings(rs);
+  PTSettings ps = make_pt_settings(rs);
   /* While samples accumulate the viewport uses the fast A-Trous filter; the
    * slower OpenImageDenoise runs once when the view converges (~70 ms at
    * half resolution, too slow for every frame). */
   ps.use_oidn = ps.use_oidn && vp_pt_.samples() + 1 >= target;
   vp_pt_.set_settings(ps);
   const bool want_embree = rs.use_embree && PathTracer::embree_available();
-  if (hash != vp_pt_hash_ || (std::strcmp(vp_pt_.ray_backend(), "Embree") == 0) != want_embree || vp_pt_guiding_ != rs.path_guiding) {
+  uint64_t device_key = (uint64_t)rs.device * 7 + (rs.gpu_with_cpu ? 3 : 0) + (rs.hardware_rt ? 11 : 0);
+  for (int g : ps.gpus) device_key = device_key * 131 + (uint64_t)g + 1;
+  if (hash != vp_pt_hash_ || (std::strcmp(vp_pt_.ray_backend(), "Embree") == 0) != want_embree || vp_pt_guiding_ != rs.path_guiding ||
+      device_key != vp_pt_device_key_) {
     vp_pt_guiding_ = rs.path_guiding;
+    vp_pt_device_key_ = device_key;
     LightingEnv env = make_lighting(cam_.position(), scene_lighting_);
     Environment world = env_;
     if (!scene_lighting_) {
@@ -357,6 +376,17 @@ void Editor::render_pathtraced_view(const Recti &view) {
 /* Final render (F12)                                                     */
 /* ===================================================================== */
 
+/* The camera's thin lens for the path tracer (Cycles: camera_sample_aperture). */
+static PTLens camera_lens(const Camera *cam, float aspect) {
+  PTLens l;
+  if (!cam) return l;
+  l.radius = cam->aperture_radius(aspect);
+  l.focus_distance = cam->focus_distance;
+  l.blades = cam->blades >= 3 ? cam->blades : 0;
+  l.rotation = cam->blade_rotation * kDeg2Rad;
+  return l;
+}
+
 void Editor::start_final_render(bool preview, bool open_window) {
   const RenderSettings &rs = scene_->render;
   const int pct = preview ? std::max(1, rs.percent * rs.preview_percent / 100) : rs.percent;
@@ -364,10 +394,12 @@ void Editor::start_final_render(bool preview, bool open_window) {
   render_preview_ = preview;
   live_preview_hash_ = live_preview_hash();
   live_preview_time_ = now_seconds();
-  Mat4 v, p;
-  camera_for_render(v, p, w / (float)h);
   GameObject *owner = nullptr;
   Camera *cam = main_camera(*scene_, &owner);
+  /* A camera with its own aspect ratio keeps the width and sets the height. */
+  if (cam) h = std::max(16, (int)std::lround(w / cam->image_aspect(w / (float)h)));
+  Mat4 v, p;
+  camera_for_render(v, p, w / (float)h);
   Vec3 eye = owner ? owner->world_position() : cam_.position();
   render_img_.resize(w, h);
   render_linear_.clear();
@@ -405,11 +437,13 @@ void Editor::start_final_render(bool preview, bool open_window) {
   }
   LightingEnv env = make_lighting(eye, true);
   std::vector<DrawItem> items = collect_items(true, true);
-  final_pt_.set_settings(pt_settings(rs));  // before build(): it picks the ray backend
+  PTSettings ps = make_pt_settings(rs);
+  if (cam) ps.exposure += cam->exposure_stops();
+  final_pt_.set_settings(ps);  // before build(): it picks the ray backend
   build_pt(final_pt_, *this, items, env, env_);
-  final_pt_.set_camera(v, p, w, h);
+  final_pt_.set_camera(v, p, w, h, camera_lens(cam, w / (float)h));
   rendering_ = true;
-  render_status_ = strprintf("%s %dx%d: %s scene of %zu tris built in %.0f ms", preview ? "Preview" : "Path tracing", w, h, final_pt_.ray_backend(),
+  render_status_ = strprintf("%s %dx%d: %s scene of %zu tris built in %.0f ms", preview ? "Preview" : "Path tracing", w, h, final_pt_.device_summary().c_str(),
                              final_pt_.stats().triangles,
                              final_pt_.stats().bvh_build_ms);
   if (!preview) Log::info("%s", render_status_.c_str());
@@ -430,13 +464,19 @@ void Editor::step_final_render() {
   else {
     final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
   }
-  render_status_ = strprintf("%s: sample %d / %d  |  %.1f s  |  %.1f Mrays/s  |  %s%s", render_preview_ ? "Preview" : "Path tracing", done,
-                             target, render_time_,
-                             final_pt_.stats().mrays_per_s(), final_pt_.ray_backend(),
+  /* Samples per second, and how they were shared when several devices render. */
+  std::string split;
+  if (!final_pt_.stats().gpu_samples.empty()) {
+    split = strprintf("  (CPU %d", final_pt_.stats().cpu_samples);
+    for (size_t g = 0; g < final_pt_.stats().gpu_samples.size(); g++) split += strprintf(", GPU%zu %d", g + 1, final_pt_.stats().gpu_samples[g]);
+    split += ")";
+  }
+  render_status_ = strprintf("%s: sample %d / %d%s  |  %.1f s  |  %.1f samples/s  |  %s%s", render_preview_ ? "Preview" : "Path tracing", done,
+                             target, split.c_str(), render_time_, done / std::max(1e-3, render_time_), final_pt_.device_summary().c_str(),
                              finished && rs.denoise ? strprintf("  |  denoised (%s)", final_pt_.denoise_backend()).c_str() : "");
   if (finished) {
     rendering_ = false;
-    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.ray_backend());
+    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.device_summary().c_str());
   }
 }
 
@@ -472,12 +512,11 @@ void Editor::save_render() {
   project_listed_ = -100;
 }
 
-/* What a live preview depends on: geometry, lights, materials, the camera
- * and every render / world setting. */
-uint64_t Editor::live_preview_hash() {
+/* What a render through one camera depends on: geometry, lights, materials,
+ * the camera and every render / world setting. */
+uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam) {
   uint64_t h = scene_render_hash();
-  GameObject *owner = nullptr;
-  if (Camera *cam = main_camera(*scene_, &owner)) {
+  if (owner && cam) {
     Mat4 w = owner->world_matrix();
     uint64_t c = hash_component(*cam);
     h ^= c + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
@@ -492,32 +531,90 @@ uint64_t Editor::live_preview_hash() {
   return h;
 }
 
+uint64_t Editor::live_preview_hash() {
+  GameObject *owner = nullptr;
+  Camera *cam = main_camera(*scene_, &owner);
+  return camera_render_hash(owner, cam);
+}
+
 /* Unity's Camera Preview: selecting a camera shows what it sees in a corner
- * of the Scene view (rasterized, so it costs little). */
+ * of the Scene view. Shaded is the rasterizer (cheap); Rendered runs the
+ * render engine at the inset's size, progressively, like a small render
+ * preview (path traced with the camera's depth of field and exposure). */
 void Editor::draw_camera_preview(const Recti &view) {
   GameObject *g = active_object();
   Camera *cam = g ? g->get<Camera>() : nullptr;
-  if (!cam || !cam->enabled || edit_mode_) return;
+  if (!cam || !cam->enabled || edit_mode_) {
+    cam_preview_pt_hash_ = 0;
+    return;
+  }
   auto &u = ui_;
   const RenderSettings &rs = scene_->render;
-  float aspect = rs.width / (float)std::max(1, rs.height);
+  const float aspect = cam->image_aspect(rs.width / (float)std::max(1, rs.height));
   int w = std::max(u.px(120), std::min(u.px(360), view.w / 4)), h = (int)(w / aspect);
   if (h > view.h / 3) {
     h = view.h / 3;
     w = (int)(h * aspect);
   }
   if (w < 32 || h < 24) return;
-  cam_preview_img_.resize(w, h);
-  cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
   Quat q = g->world_rotation();
   Vec3 eye = g->world_position();
   Mat4 v = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
-  Mat4 p = cam->orthographic ? Mat4::ortho(cam->ortho_size, aspect, cam->near_clip, cam->far_clip)
-                             : Mat4::perspective(cam->fov * kDeg2Rad, aspect, cam->near_clip, cam->far_clip);
-  render_deferred(cam_preview_r3d_, cam_preview_rt_, v, p, eye, true, true, cam);
+  Mat4 p = cam->projection(aspect);
+  const bool traced = cam_preview_rendered_ && rs.engine == 1;
+  std::string status;
+  if (traced) {
+    /* Rebuild when the scene, this camera or the inset size changes; then add
+     * a few milliseconds of samples every frame until the preview count. */
+    uint64_t hash = camera_render_hash(g, cam) ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
+    if (hash != cam_preview_pt_hash_) {
+      cam_preview_pt_hash_ = hash;
+      LightingEnv env = make_lighting(eye, true);
+      std::vector<DrawItem> items = collect_items(true, true);
+      PTSettings ps = make_pt_settings(rs);
+      ps.exposure += cam->exposure_stops();
+      cam_preview_pt_.set_settings(ps);
+      build_pt(cam_preview_pt_, *this, items, env, env_);
+      cam_preview_pt_.set_camera(v, p, w, h, camera_lens(cam, aspect));
+      cam_preview_done_ = false;
+    }
+    if (cam_preview_img_.width != w || cam_preview_img_.height != h) cam_preview_img_.resize(w, h);  // keeps a finished preview
+    const int target = std::max(1, rs.preview_samples);
+    if (!cam_preview_done_) {
+      int done = cam_preview_pt_.render(12.0, target);
+      if (done >= target) {
+        std::vector<float> lin = cam_preview_pt_.linear_rgb(rs.denoise);
+        cam_preview_pt_.resolve_rgb(lin, cam_preview_img_.pixels.data(), w);
+        cam_preview_done_ = true;
+      }
+      else {
+        cam_preview_pt_.resolve(cam_preview_img_.pixels.data(), w, false);
+        u.redraw = true;
+      }
+    }
+    status = strprintf("  %d / %d", std::min(cam_preview_pt_.samples(), target), target);
+  }
+  else {
+    cam_preview_pt_hash_ = 0;
+    cam_preview_img_.resize(w, h);
+    cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
+    render_deferred(cam_preview_r3d_, cam_preview_rt_, v, p, eye, true, true, cam);
+  }
   Recti box{view.right() - w - u.px(12), view.bottom() - h - u.px(12) - u.row_h(), w, h};
   u.canvas.fill_rect({box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)}, Color::hex(0x222222, 230));
-  u.label({box.x, box.y - u.row_h(), w, u.row_h()}, "Camera Preview - " + g->name, u.theme.text);
+  /* Header: the camera's name, then a Shaded / Rendered switch. */
+  const char *mode = cam_preview_rendered_ ? "Rendered" : "Shaded";
+  int bw = u.font.text_width("Rendered") + u.px(12);
+  Recti mb{box.right() - bw, box.y - u.row_h() - u.px(2), bw, u.row_h()};
+  u.label({box.x, box.y - u.row_h(), w - bw - u.px(4), u.row_h()}, g->name + status, u.theme.text);
+  if (u.button(mb, mode, cam_preview_rendered_)) {
+    cam_preview_rendered_ = !cam_preview_rendered_;
+    cam_preview_pt_hash_ = 0;
+  }
+  u.tooltip(rs.engine == 1 ? "Shaded: the fast rasterized view.\nRendered: a small path-traced render preview through this camera\n"
+                             "(depth of field, exposure, the Preview Samples count; denoised when done)."
+                           : "Shaded / Rendered. With the Rasterized engine both show the rasterizer;\n"
+                             "set Render Engine to Path Traced for a path-traced preview.");
   Image *fb = u.canvas.target();
   Recti dst = box.intersect(view);
   for (int y = dst.y; y < dst.bottom(); y++)

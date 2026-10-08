@@ -9,6 +9,7 @@
 #include "../src/image/image.h"
 #include "../src/render/colormanagement.h"
 #include "../src/render/display.h"
+#include "../src/render/gpu_device.h"
 #include "../src/render/pathtracer.h"
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
@@ -21,6 +22,7 @@
 #include <atomic>
 #include <unordered_map>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <cstdio>
@@ -44,6 +46,9 @@ static int g_fail = 0, g_checks = 0;
 #define CHECK_NEAR(a, b, eps) CHECK(std::fabs((double)(a) - (double)(b)) <= (eps))
 
 static void test(const char *name, const std::function<void()> &fn) {
+  /* BLENDITY_TEST_FILTER=text runs only the tests whose name contains it. */
+  static const char *filter = std::getenv("BLENDITY_TEST_FILTER");
+  if (filter && !std::strstr(name, filter)) return;
   int before = g_fail;
   fn();
   std::printf("%s %s\n", g_fail == before ? "[ ok ]" : "[FAIL]", name);
@@ -551,19 +556,26 @@ int main() {
     frame([](ui::Input &in) { in.key_pressed[platform::KEY_ESCAPE] = true; });
     CHECK_NEAR(a, 6.0f, 1e-6f);
   });
-  test("editor: the Push/Pull tool drags a face with the mouse", [] {
+  test("editor: Push/Pull is a confirmed face operation (P, mouse or typed distance, Esc cancels)", [] {
     Editor ed;
     ed.init_headless(1000, 700);
+    ed.command("create Cube");  // selected and active after creation
     ed.step_frame_headless();
-    /* Snapshot every mesh so we can tell which one the drag changed. */
-    std::vector<std::pair<uint64_t, std::vector<Vec3>>> before;
+    GameObject *cube = nullptr;
     ed.scene().for_each([&](GameObject &g) {
-      if (auto *mf = g.get<MeshFilter>())
-        if (mf->mesh) before.push_back({g.id, mf->mesh->positions});
+      if (g.name == "Cube" && (!cube || g.id > cube->id)) cube = &g;
     });
-    ed.command("tool pushpull");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const uint64_t id = cube->id;
+    auto mesh = [&]() -> const Mesh & { return *ed.scene().find(id)->get<MeshFilter>()->mesh; };
+    auto top_y = [&] {
+      float y = -1e9f;
+      for (Vec3 p : mesh().positions) y = std::max(y, p.y);
+      return y;
+    };
     Recti r = ed.scene_view_rect();
-    int cx = r.x + r.w / 2, cy = r.y + r.h / 2;  // the scene's Cube sits at the view centre
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
     auto ev = [](platform::EventType t, int x, int y) {
       platform::Event e;
       e.type = t;
@@ -571,35 +583,75 @@ int main() {
       e.y = y;
       return e;
     };
-    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx, cy)});
-    ed.step_frame_headless({ev(platform::EventType::MouseDown, cx, cy)});
-    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 10, cy - 30)});
-    ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + 20, cy - 60)});
-    ed.step_frame_headless({ev(platform::EventType::MouseUp, cx + 20, cy - 60)});
-    ed.step_frame_headless();
-    const Mesh *changed = nullptr;
-    for (auto &[id, pos] : before)
-      if (GameObject *g = ed.scene().find(id))
-        if (g->get<MeshFilter>()->mesh->positions != pos) changed = g->get<MeshFilter>()->mesh.get();
-    CHECK(changed != nullptr);
-    if (changed) CHECK(closed_manifold(*changed));
-    /* The distance can then be typed exactly (Adjust Last Operation). */
-    ed.command("redo amount 0.25");
-    ed.step_frame_headless();
-    if (changed) {
-      for (auto &[id, pos] : before)
-        if (GameObject *g = ed.scene().find(id))
-          if (g->get<MeshFilter>()->mesh->positions != pos) CHECK(closed_manifold(*g->get<MeshFilter>()->mesh));
+    auto key = [&](int k) {
+      platform::Event d = ev(platform::EventType::KeyDown, cx, cy), u = d;
+      d.key = u.key = k;
+      u.type = platform::EventType::KeyUp;
+      ed.step_frame_headless({d, u});
+    };
+    auto click = [&](int button, int x, int y) {
+      platform::Event d = ev(platform::EventType::MouseDown, x, y), u = ev(platform::EventType::MouseUp, x, y);
+      d.button = u.button = button;
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+    };
+    auto move = [&](int x, int y) { ed.step_frame_headless({ev(platform::EventType::MouseMove, x, y)}); };
+    move(cx, cy);
+    const float y0 = top_y();
+    /* Object mode: P is not a tool any more, so nothing follows the mouse. */
+    key(platform::KEY_P);
+    move(cx, cy - 80);
+    CHECK_NEAR(top_y(), y0, 1e-6f);
+    /* Vertex mode: Push/Pull is a face operation, so it refuses. */
+    ed.command("edit vertex all");
+    move(cx, cy);
+    key(platform::KEY_P);
+    move(cx, cy - 80);
+    CHECK_NEAR(top_y(), y0, 1e-6f);
+    /* Face mode with the top selected: it follows the mouse until the click. */
+    ed.command("edit face");
+    ed.command("fsel facing 0 1 0");
+    move(cx, cy);
+    key(platform::KEY_P);
+    move(cx, cy - 40);
+    move(cx, cy - 90);
+    const float live = top_y();
+    CHECK(live > y0 + 0.05f);
+    click(0, cx, cy - 90);
+    move(cx, cy + 200);  // confirmed: moving on changes nothing
+    CHECK_NEAR(top_y(), live, 1e-5f);
+    CHECK(closed_manifold(mesh()));
+    /* A typed distance, confirmed with Enter. */
+    const float y1 = top_y();
+    move(cx, cy);
+    key(platform::KEY_P);
+    platform::Event t = ev(platform::EventType::Text, cx, cy);
+    for (char c : std::string("0.25")) {
+      t.codepoint = (uint32_t)c;
+      ed.step_frame_headless({t});
     }
-    platform::Event z;
-    z.type = platform::EventType::KeyDown;
+    key(platform::KEY_ENTER);
+    CHECK_NEAR(top_y(), y1 + 0.25f, 1e-4f);
+    /* Esc and a right-click both cancel and restore the mesh. */
+    const float y2 = top_y();
+    move(cx, cy);
+    key(platform::KEY_P);
+    move(cx, cy - 120);
+    CHECK(top_y() != y2);
+    key(platform::KEY_ESCAPE);
+    CHECK_NEAR(top_y(), y2, 1e-6f);
+    move(cx, cy);
+    key(platform::KEY_P);
+    move(cx, cy - 120);
+    click(1, cx, cy - 120);
+    CHECK_NEAR(top_y(), y2, 1e-6f);
+    CHECK(closed_manifold(mesh()));
+    /* Each confirmed Push/Pull is one undo step. */
+    platform::Event z = ev(platform::EventType::KeyDown, cx, cy);
     z.key = platform::KEY_Z;
     z.mods = platform::MOD_CTRL;
     ed.step_frame_headless({z});
-    bool restored = true;
-    for (auto &[id, pos] : before)
-      if (GameObject *g = ed.scene().find(id)) restored = restored && g->get<MeshFilter>()->mesh->positions == pos;
-    CHECK(restored);  // one undo step for the drag and its adjustment
+    CHECK_NEAR(top_y(), y1, 1e-5f);
   });
   test("editor: adjust last operation re-runs extrude, moves it, and stays one undo step", [] {
     Editor ed;
@@ -910,6 +962,79 @@ static void edge_tool_tests() {
       CHECK(closed_manifold(m));
       CHECK(euler_characteristic(m) == 2);  // one solid
       CHECK(vol(m) > v0);
+    }
+  });
+  test("push/pull: odd cases found by the stress test stay valid", [&] {
+    using meshops::PushPullResult;
+    auto one = [](const Mesh &m, size_t f) {
+      std::vector<uint8_t> s(m.face_count(), 0);
+      s[f] = 1;
+      return s;
+    };
+    PushPullResult res;
+    std::string err;
+    {  /* Not a number: refused, mesh untouched. */
+      Mesh m = *primitives::cube();
+      auto fs = one(m, face_facing(m, {0, 1, 0}));
+      CHECK(!meshops::push_pull(m, fs, std::numeric_limits<float>::quiet_NaN(), true, &res, &err));
+      CHECK(!meshops::push_pull(m, fs, std::numeric_limits<float>::infinity(), true, &res, &err));
+      CHECK(m.positions == primitives::cube()->positions);
+    }
+    {  /* A whole side pushed past the far side stops just short of it (it used to come out inside out). */
+      Mesh m = *primitives::cube();
+      auto fs = one(m, face_facing(m, {0, 1, 0}));
+      CHECK(meshops::push_pull(m, fs, -5.0f, true, &res));
+      CHECK(closed_manifold(m));
+      CHECK(vol(m) > 0 && vol(m) < 0.01f);
+    }
+    {  /* A face over a tunnel stops at the tunnel: rays from its corners alone miss it. */
+      Mesh m = *primitives::cube();
+      auto fs = one(m, face_facing(m, {0, 0, -1}));
+      meshops::inset_faces(m, fs, 0.3f);
+      meshops::push_through(m, fs, 1);
+      auto bottom = one(m, face_facing(m, {0, -1, 0}));
+      float v0 = vol(m);
+      CHECK(meshops::push_pull(m, bottom, -0.9f, true, &res));
+      CHECK(closed_manifold(m));
+      CHECK(vol(m) > v0 - 0.15f - 1e-3f);  // stopped by the tunnel floor 0.15 up, not the top
+    }
+    {  /* A wedge's slanted face pushed in: the neighbours lean over it, so its
+        * corners slide along the edges instead of walls inverting the solid. */
+      Mesh m;
+      for (Vec3 p : {Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(0, 1.2f, 0), Vec3(0, 0, 1), Vec3(2, 0, 1), Vec3(0, 1.2f, 1)}) m.add_vert(p);
+      m.add_face({0, 1, 2});
+      m.add_face({3, 5, 4});
+      m.add_face({0, 3, 4, 1});
+      m.add_face({1, 4, 5, 2});
+      m.add_face({0, 2, 5, 3});
+      meshops::recalc_normals_outside(m);
+      float v0 = vol(m);
+      size_t slant = SIZE_MAX;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (m.face_normal(f).x > 0.3f && m.face_normal(f).y > 0.3f) slant = f;
+      auto fs = one(m, slant);
+      CHECK(meshops::push_pull(m, fs, -0.3f, true, &res));
+      CHECK(res == PushPullResult::Moved);
+      CHECK(closed_manifold(m));
+      std::printf("    wedge: volume %.4f -> %.4f\n", v0, vol(m));
+      CHECK(vol(m) < v0 && vol(m) > 0);
+    }
+    {  /* Top and two sides pushed up with Ctrl: no flat walls along the sides that slide on themselves. */
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> fs(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++) fs[f] = std::fabs(m.face_normal(f).x) > 0.9f || m.face_normal(f).y > 0.9f;
+      CHECK(meshops::push_pull(m, fs, 0.25f, false, &res));
+      CHECK(closed_manifold(m));
+      for (size_t f = 0; f < m.face_count(); f++) CHECK(length(m.face_normal(f)) > 0.5f);  // no zero-area faces
+    }
+    {  /* An inset face's neighbour stretches without leaving a T-junction. */
+      Mesh m = *primitives::cube();
+      auto top = one(m, face_facing(m, {0, 1, 0}));
+      meshops::inset_faces(m, top, 0.3f);
+      auto front = one(m, face_facing(m, {0, 0, -1}));
+      CHECK(meshops::push_pull(m, front, 0.2f, true, &res));
+      CHECK(closed_manifold(m));
+      CHECK_NEAR(vol(m), 1.2f, 1e-4f);
     }
   });
   test("edges: subdivide, connect, dissolve, collapse", [&] {
@@ -1781,6 +1906,329 @@ static void render_tests() {
     glass->roughness = 0.4f;  // rough (frosted) glass: still energy conserving
     glass->base_color = {1, 1, 1};
     CHECK_NEAR(centre(glass).y, 1.0f, 0.05f);
+  });
+  test("gpu: every device (software BVH and ray tracing hardware) and CPU+GPU match the CPU", [] {
+    std::printf("    %s\n", gpu::status().c_str());
+    if (!gpu::available()) return;  // no Vulkan GPU on this machine: nothing to compare
+    auto plane = primitives::plane(6.0f, 1);
+    auto sphere = primitives::uv_sphere(0.5f, 32, 16);
+    auto cube = primitives::cube(0.6f);
+    auto quad = primitives::quad(1.0f);
+    std::vector<MaterialPtr> m_plane = {make_material("floor", {0.8f, 0.8f, 0.8f})}, m_sphere = {make_material("ball", {1, 1, 1})},
+                             m_glass = {make_material_preset("Glass")}, m_veil = {make_material_preset("Transparent")},
+                             m_lamp = {make_material_preset("Emissive")};
+    m_plane[0]->procedural = (int)Procedural::Checker;
+    m_sphere[0]->procedural = (int)Procedural::UVGrid;  // a texture
+    m_sphere[0]->roughness = 0.3f;
+    std::vector<PTObject> objs = {
+        {&plane->render_mesh_tangents(), Mat4::identity(), &m_plane},
+        {&sphere->render_mesh_tangents(), Mat4::translate({-0.6f, 0.5f, 0.2f}), &m_sphere},
+        {&sphere->render_mesh_tangents(), Mat4::translate({0.6f, 0.5f, 0.0f}), &m_glass},
+        {&cube->render_mesh_tangents(), Mat4::translate({0.0f, 0.3f, -0.8f}), &m_veil},
+        {&quad->render_mesh_tangents(), Mat4::trs({0, 1.8f, 0.5f}, Quat::euler({90, 0, 0}), {1, 1, 1}), &m_lamp}};
+    RenderLight sun, lamp;
+    sun.direction = normalize(Vec3(-0.4f, -1, 0.3f));
+    lamp.type = RenderLight::Point;
+    lamp.position = {1.2f, 1.2f, -1.0f};
+    lamp.intensity = 2.0f;
+    lamp.range = 6.0f;
+    Environment env;
+    const int W = 48, H = 32, SPP = 128;
+    auto render = [&](bool cpu, std::vector<int> gpus, bool hw, int *cpu_samples = nullptr) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = cpu;
+      st.gpus = gpus;
+      st.gpu_hardware_rt = hw;
+      st.denoise = false;
+      st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {sun, lamp}, env);
+      pt.set_camera(Mat4::look_at({0, 1.5f, -3.5f}, {0, 0.4f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 50), W, H);
+      int done = pt.render(1e9, SPP);
+      CHECK(done == SPP);
+      if (cpu_samples) *cpu_samples = pt.stats().cpu_samples;
+      return pt.linear_rgb(false);
+    };
+    std::vector<float> ref = render(true, {}, false);
+    double ref_mean = 0;
+    for (float v : ref) ref_mean += v;
+    ref_mean /= ref.size();
+    auto compare = [&](const std::vector<float> &img, const char *what) {
+      double mean = 0, err = 0;
+      for (size_t i = 0; i < img.size(); i++) {
+        mean += img[i];
+        err += std::fabs(img[i] - ref[i]);
+      }
+      mean /= img.size();
+      err /= img.size();
+      std::printf("    %-46s mean %.4f (CPU %.4f), mean |difference| %.4f\n", what, mean, ref_mean, err);
+      CHECK(std::fabs(mean - ref_mean) < 0.03 * ref_mean);  // no bias
+      CHECK(err < 0.06 * ref_mean);                          // same paths: close per pixel too
+    };
+    for (const gpu::DeviceInfo &d : gpu::devices()) {
+      compare(render(false, {d.index}, false), (d.name + ", software BVH").c_str());
+      if (d.hardware_rt) compare(render(false, {d.index}, true), (d.name + ", ray tracing hardware").c_str());
+    }
+    /* CPU + every GPU: the samples are split, the picture is the same. */
+    std::vector<int> all;
+    for (const gpu::DeviceInfo &d : gpu::devices()) all.push_back(d.index);
+    int cpu_samples = 0;
+    compare(render(true, all, true, &cpu_samples), "CPU + all GPUs combined");
+    std::printf("    combined: the CPU rendered %d of %d samples\n", cpu_samples, SPP);
+    CHECK(cpu_samples < SPP);
+  });
+  test("camera: focal length, sensor fit, lens shift, aperture, exposure and aspect ratio", [] {
+    Camera c;
+    c.physical = true;
+    c.focal_length = 50.0f;
+    const float a = 16.0f / 9.0f;
+    /* Auto fit, landscape: the 36 mm sensor width spans the image width. */
+    float h = 2.0f * std::atan(18.0f / 50.0f);
+    CHECK_NEAR(c.vertical_fov_deg(a), 2.0f * std::atan(std::tan(h * 0.5f) / a) * kRad2Deg, 1e-3f);
+    /* Portrait: the width spans the taller side; Vertical fit uses the 24 mm height. */
+    CHECK_NEAR(c.vertical_fov_deg(0.5f), 2.0f * std::atan(18.0f / 50.0f) * kRad2Deg, 1e-3f);
+    c.sensor_fit = 2;
+    CHECK_NEAR(c.vertical_fov_deg(a), 2.0f * std::atan(12.0f / 50.0f) * kRad2Deg, 1e-3f);
+    c.sensor_fit = 0;
+    /* A field-of-view camera as a lens: the same view either way. */
+    Camera f;
+    f.fov = 40.0f;
+    Camera p;
+    p.physical = true;
+    p.focal_length = f.focal_length_mm(a);
+    CHECK_NEAR(p.vertical_fov_deg(a), 40.0f, 1e-3f);
+    /* Lens shift moves the image, not the view direction. */
+    c.shift_x = 0.25f;
+    Vec4 q = c.projection(a) * Vec4(0, 0, 5, 1);
+    CHECK_NEAR(q.x / q.w, -0.5f, 1e-5f);
+    c.shift_x = 0.0f;
+    /* Aperture: diameter = focal length / f-number (f/2.8 at 50 mm: 8.9 mm radius). */
+    CHECK(c.aperture_radius(a) == 0.0f);  // depth of field off
+    c.dof = true;
+    c.f_stop = 2.8f;
+    CHECK_NEAR(c.aperture_radius(a), 0.05f / 5.6f, 1e-6f);
+    /* Exposure: 0 stops at ISO 100, 1/60 s, f/2.8; doubling ISO or time adds one, f/5.6 takes two. */
+    c.physical_exposure = true;
+    CHECK_NEAR(c.exposure_stops(), 0.0f, 1e-4f);
+    c.iso = 200.0f;
+    CHECK_NEAR(c.exposure_stops(), 1.0f, 1e-4f);
+    c.shutter = 30.0f;
+    CHECK_NEAR(c.exposure_stops(), 2.0f, 1e-4f);
+    c.f_stop = 5.6f;
+    CHECK_NEAR(c.exposure_stops(), 0.0f, 1e-4f);
+    /* Aspect ratio: the render resolution's, the sensor's or a fixed one. */
+    CHECK_NEAR(c.image_aspect(1.25f), 1.25f, 1e-6f);
+    c.aspect_mode = 1;
+    CHECK_NEAR(c.image_aspect(1.25f), 1.5f, 1e-6f);
+    c.aspect_mode = 8;
+    CHECK_NEAR(c.image_aspect(1.25f), 2.39f, 1e-6f);
+    /* Every new field is saved and loaded with the scene. */
+    Scene s;
+    GameObject *go = create_primitive(s, "Camera");
+    Camera *cc = go->get<Camera>();
+    cc->physical = true;
+    cc->focal_length = 85.0f;
+    cc->sensor_preset = 3;
+    cc->dof = true;
+    cc->f_stop = 1.4f;
+    cc->focus_distance = 4.5f;
+    cc->blades = 7;
+    cc->aspect_mode = 8;
+    cc->shift_y = 0.1f;
+    std::string text = save_scene_text(s);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err));
+    Camera *bc = nullptr;
+    back.for_each([&](GameObject &g) {
+      if (g.get<Camera>()) bc = g.get<Camera>();
+    });
+    CHECK(bc != nullptr);
+    if (bc) {
+      CHECK(bc->physical && bc->dof);
+      CHECK_NEAR(bc->focal_length, 85.0f, 1e-4f);
+      CHECK_NEAR(bc->sensor_width, 22.3f, 1e-4f);
+      CHECK_NEAR(bc->f_stop, 1.4f, 1e-4f);
+      CHECK_NEAR(bc->focus_distance, 4.5f, 1e-4f);
+      CHECK(bc->blades == 7 && bc->aspect_mode == 8);
+      CHECK_NEAR(bc->shift_y, 0.1f, 1e-5f);
+    }
+  });
+  test("pathtracer: depth of field blurs off the focus plane, the same on CPU and GPU", [] {
+    /* A glowing square on black. With a pinhole, and in focus, its edge is
+     * sharp; focused far behind it, the edge spreads over many pixels. */
+    auto quad = primitives::quad(1.0f);
+    MaterialPtr glow = make_material_preset("Emissive");
+    glow->double_sided = true;
+    std::vector<MaterialPtr> mats = {glow};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0, 0, 0};
+    const int W = 64, H = 32;
+    auto render = [&](const PTLens &lens, std::vector<int> gpus, int spp) {
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false;
+      st.use_embree = false;
+      st.gpus = gpus;
+      st.use_cpu = gpus.empty();
+      pt.set_settings(st);
+      pt.build({{&quad->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+      pt.set_camera(Mat4::look_at({0, 0, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, W / (float)H, 0.1f, 100), W, H, lens);
+      pt.render(1e9, spp);
+      return pt.linear_rgb(false);
+    };
+    /* Pixels across the middle row between 10% and 90% of the brightest: the edge's width. */
+    auto edge_width = [&](const std::vector<float> &rgb) {
+      float mx = 0;
+      for (int x = 0; x < W; x++) mx = std::max(mx, rgb[((size_t)(H / 2) * W + x) * 3 + 1]);
+      int n = 0;
+      for (int x = 0; x < W; x++) {
+        float v = rgb[((size_t)(H / 2) * W + x) * 3 + 1];
+        if (v > 0.1f * mx && v < 0.9f * mx) n++;
+      }
+      return n;
+    };
+    PTLens pinhole, focused, blurred;
+    focused.radius = blurred.radius = 0.2f;
+    focused.focus_distance = 3.0f;
+    blurred.focus_distance = 30.0f;
+    blurred.blades = 6;
+    const int sharp = edge_width(render(pinhole, {}, 64)), in_focus = edge_width(render(focused, {}, 64));
+    const std::vector<float> cpu = render(blurred, {}, 256);
+    const int soft = edge_width(cpu);
+    std::printf("    edge width: pinhole %d px, in focus %d px, focused behind %d px\n", sharp, in_focus, soft);
+    CHECK(sharp <= 4 && in_focus <= 4);
+    CHECK(soft >= 3 * std::max(1, sharp));
+    /* The GPU kernel samples the same lens. */
+    if (gpu::available()) {
+      double mean_c = 0, mean_g = 0, err = 0;
+      const std::vector<float> g = render(blurred, {gpu::devices()[0].index}, 256);
+      for (size_t i = 0; i < cpu.size(); i++) {
+        mean_c += cpu[i];
+        mean_g += g[i];
+        err += std::fabs(cpu[i] - g[i]);
+      }
+      std::printf("    GPU: mean %.4f (CPU %.4f), mean |difference| %.4f, edge %d px\n", mean_g / cpu.size(), mean_c / cpu.size(), err / cpu.size(), edge_width(g));
+      CHECK(std::fabs(mean_g - mean_c) < 0.03 * mean_c);
+      CHECK(err < 0.06 * mean_c);  // the same lens samples, close per pixel too
+      CHECK(std::abs(edge_width(g) - soft) <= 2);
+    }
+  });
+  test("set origin: bounds, median, surface and volume centres; nothing moves on screen", [] {
+    /* Two boxes: [0,2]x[0,1]x[0,1] and [0,1]x[1,2]x[0,1]. */
+    Mesh m;
+    auto add_box = [&](Vec3 c, Vec3 s) {
+      Mesh b = *primitives::cube();
+      uint32_t base = (uint32_t)m.vert_count();
+      for (Vec3 p : b.positions) m.add_vert(c + Vec3(p.x * s.x, p.y * s.y, p.z * s.z));
+      for (size_t f = 0; f < b.face_count(); f++) {
+        std::vector<uint32_t> v(b.face_verts(f), b.face_verts(f) + b.face_size(f));
+        for (uint32_t &x : v) x += base;
+        m.add_face(v.data(), v.size());
+      }
+    };
+    add_box({1, 0.5f, 0.5f}, {2, 1, 1});
+    add_box({0.5f, 1.5f, 0.5f}, {1, 1, 1});
+    auto near3 = [](Vec3 a, Vec3 b) { return length(a - b) < 1e-4f; };
+    using meshops::OriginPoint;
+    CHECK(near3(meshops::origin_point(m, OriginPoint::BoundsCenter), {1, 1, 0.5f}));
+    CHECK(near3(meshops::origin_point(m, OriginPoint::BoundsBottom), {1, 0, 0.5f}));
+    CHECK(near3(meshops::origin_point(m, OriginPoint::Median), {0.75f, 1, 0.5f}));
+    CHECK(near3(meshops::origin_point(m, OriginPoint::SurfaceCenter), {13.0f / 16, 14.0f / 16, 0.5f}));
+    CHECK(near3(meshops::origin_point(m, OriginPoint::VolumeCenter), {2.5f / 3, 2.5f / 3, 0.5f}));
+    /* Far from the origin it is just as exact. */
+    Mesh far = m;
+    meshops::translate(far, {1e5f, 0, 0});
+    CHECK(length(meshops::origin_point(far, OriginPoint::VolumeCenter) - Vec3(1e5f + 2.5f / 3, 2.5f / 3, 0.5f)) < 0.02f);
+    /* An open mesh has no volume: the surface centre instead. */
+    Mesh open = *primitives::plane(2.0f, 2);
+    meshops::translate(open, {3, 0, 0});
+    CHECK(near3(meshops::origin_point(open, OriginPoint::VolumeCenter), {3, 0, 0}));
+    /* In the editor: the vertices and a child keep their world positions. */
+    Editor ed;
+    ed.init_headless(800, 500);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    GameObject *cube = ed.selected_object();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const uint64_t id = cube->id;
+    cube->get<MeshFilter>()->mesh = std::make_shared<Mesh>(m);
+    cube->set_local_position({5, 1, -2});
+    cube->set_local_euler({0, 30, 10});
+    cube->set_local_scale({2, 1, 0.5f});
+    GameObject *child = create_primitive(ed.scene(), "Empty");
+    ed.scene().set_parent(child, cube);
+    child->set_local_position({0.3f, 0.2f, 0.1f});
+    ed.commit_change("test setup");
+    const Mat4 w0 = cube->world_matrix();
+    std::vector<Vec3> world0;
+    for (Vec3 pp : m.positions) world0.push_back(w0.point(pp));
+    const Vec3 child0 = child->world_position();
+    ed.select_object(id);
+    ed.command("origin volume");
+    GameObject *after = ed.scene().find(id);
+    const Mesh &am = *after->get<MeshFilter>()->mesh;
+    const Mat4 w1 = after->world_matrix();
+    float worst = 0;
+    for (size_t i = 0; i < am.vert_count(); i++) worst = std::max(worst, length(w1.point(am.positions[i]) - world0[i]));
+    CHECK(worst < 1e-4f);
+    CHECK(length(after->world_position() - w0.point({2.5f / 3, 2.5f / 3, 0.5f})) < 1e-4f);
+    CHECK(near3(meshops::origin_point(am, OriginPoint::VolumeCenter), {0, 0, 0}));
+    CHECK(length(after->children[0]->world_position() - child0) < 1e-4f);
+    ed.command("origin point 7 0 0");
+    CHECK(length(ed.scene().find(id)->world_position() - Vec3(7, 0, 0)) < 1e-4f);
+    ed.command("origin geometry");  // the mesh moves to the origin; the object stays
+    CHECK(length(ed.scene().find(id)->world_position() - Vec3(7, 0, 0)) < 1e-4f);
+    CHECK(near3(meshops::origin_point(*ed.scene().find(id)->get<MeshFilter>()->mesh, OriginPoint::BoundsCenter), {0, 0, 0}));
+  });
+  test("editor: each selection mode offers only its own operators", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    GameObject *cube = ed.selected_object();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const uint64_t id = cube->id;
+    auto faces = [&] { return ed.scene().find(id)->get<MeshFilter>()->mesh->face_count(); };
+    Recti r = ed.scene_view_rect();
+    auto key = [&](int k, int mods) {
+      platform::Event d;
+      d.type = platform::EventType::KeyDown;
+      d.key = k;
+      d.mods = mods;
+      d.x = r.x + r.w / 2;
+      d.y = r.y + r.h / 2;
+      platform::Event m = d;
+      m.type = platform::EventType::MouseMove;
+      ed.step_frame_headless({m, d});
+    };
+    /* Vertex mode: Bevel (edges) and Extrude (faces) are refused. */
+    ed.command("edit vertex all");
+    key(platform::KEY_B, platform::MOD_CTRL);
+    key(platform::KEY_E, platform::MOD_CTRL);
+    CHECK(faces() == 6);
+    /* Edge mode: Bevel works, Extrude still doesn't. */
+    ed.command("edit edge all");
+    key(platform::KEY_E, platform::MOD_CTRL);
+    CHECK(faces() == 6);
+    key(platform::KEY_B, platform::MOD_CTRL);
+    CHECK(faces() > 6);
+    const size_t beveled = faces();
+    /* Face mode: Extrude works, Bevel doesn't. */
+    ed.command("edit face");
+    ed.command("fsel 0");
+    key(platform::KEY_B, platform::MOD_CTRL);
+    CHECK(faces() == beveled);
+    key(platform::KEY_E, platform::MOD_CTRL);
+    CHECK(faces() > beveled);
+    /* The table: Push/Pull is a face operator, Bevel an edge one, Merge a vertex one. */
+    CHECK(find_edit_op("push_pull") && find_edit_op("push_pull")->elements == 4);
+    CHECK(find_edit_op("bevel") && find_edit_op("bevel")->elements == 2);
+    CHECK(find_edit_op("merge_center") && find_edit_op("merge_center")->elements == 1);
   });
   test("pathtracer: shadows through transparent surfaces", [] {
     /* Sun from straight above, a ground plane, and a half-transparent black

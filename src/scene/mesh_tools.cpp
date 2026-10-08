@@ -12,6 +12,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <set>
@@ -904,6 +907,248 @@ RegionRays cast_region(const Mesh &m, const Region &r, Vec3 dir, bool want_exit)
   return out;
 }
 
+/* How far the region can travel along dir before it meets other geometry:
+ * the nearest point of any other face's edges inside the prism the outline
+ * sweeps (vertices inside it, and edges crossing its sides). Rays from the
+ * corners alone miss obstacles in the middle (a tunnel under a face).
+ * Returns -1 when nothing is in the way. */
+float sweep_limit(const Mesh &m, const Region &r, Vec3 dir, float tol) {
+  const std::vector<uint32_t> &L = r.loops[0];
+  if (L.size() < 3) return -1.0f;
+  /* A basis across dir: the outline is tested in that plane. */
+  const Vec3 u = normalize(cross(dir, std::fabs(dir.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0))), w = cross(dir, u);
+  const Vec3 o = m.positions[L[0]];
+  std::vector<Vec2> poly;
+  poly.reserve(L.size());
+  Vec2 lo{1e30f, 1e30f}, hi{-1e30f, -1e30f};
+  for (uint32_t v : L) {
+    Vec3 d = m.positions[v] - o;
+    Vec2 p{dot(d, u), dot(d, w)};
+    poly.push_back(p);
+    lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)};
+    hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
+  }
+  /* The region's own plane height along dir: obstacles must be beyond it. */
+  float h0 = -1e30f;
+  for (uint32_t v : L) h0 = std::max(h0, dot(m.positions[v] - o, dir));
+  auto seg_dist = [](Vec2 p, Vec2 a, Vec2 b) {
+    Vec2 ab = b - a, ap = p - a;
+    float t = std::max(0.0f, std::min(1.0f, (ap.x * ab.x + ap.y * ab.y) / std::max(1e-30f, ab.x * ab.x + ab.y * ab.y)));
+    Vec2 c{a.x + ab.x * t - p.x, a.y + ab.y * t - p.y};
+    return std::sqrt(c.x * c.x + c.y * c.y);
+  };
+  auto inside = [&](Vec2 p) {
+    if (p.x < lo.x - tol || p.y < lo.y - tol || p.x > hi.x + tol || p.y > hi.y + tol) return false;
+    bool in = false;
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+      const Vec2 a = poly[i], b = poly[j];
+      if (seg_dist(p, a, b) <= tol) return true;  // on the outline counts
+      if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) in = !in;
+    }
+    return in;
+  };
+  std::vector<uint8_t> in_region(m.face_count(), 0);
+  for (uint32_t f : r.faces) in_region[f] = 1;
+  float best = -1.0f;
+  auto take = [&](float h) {
+    h -= h0;
+    if (h > tol && (best < 0 || h < best)) best = h;
+  };
+  std::unordered_set<uint64_t> done;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (in_region[f]) continue;
+    const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+    for (uint32_t i = 0; i < n; i++) {
+      const uint32_t a = fv[i], b = fv[(i + 1) % n];
+      if (!done.insert(Mesh::edge_key(a, b)).second) continue;
+      const Vec3 da = m.positions[a] - o, db = m.positions[b] - o;
+      const Vec2 pa{dot(da, u), dot(da, w)}, pb{dot(db, u), dot(db, w)};
+      if (std::max(pa.x, pb.x) < lo.x - tol || std::min(pa.x, pb.x) > hi.x + tol || std::max(pa.y, pb.y) < lo.y - tol ||
+          std::min(pa.y, pb.y) > hi.y + tol)
+        continue;
+      const float ha = dot(da, dir), hb = dot(db, dir);
+      if (inside(pa)) take(ha);
+      if (inside(pb)) take(hb);
+      /* Crossings with the outline's sides. */
+      for (size_t k = 0, j = poly.size() - 1; k < poly.size(); j = k++) {
+        const Vec2 c = poly[j], d = poly[k];
+        const Vec2 e = pb - pa, g = d - c;
+        const float den = e.x * g.y - e.y * g.x;
+        if (std::fabs(den) < 1e-20f) continue;
+        const float s = ((c.x - pa.x) * g.y - (c.y - pa.y) * g.x) / den, t = ((c.x - pa.x) * e.y - (c.y - pa.y) * e.x) / den;
+        if (s > 0.0f && s < 1.0f && t >= 0.0f && t <= 1.0f) take(ha + (hb - ha) * s);
+      }
+    }
+  }
+  return best;
+}
+
+
+/* Faces with (next to) no area: what a clean result must not add. */
+static size_t sliver_faces(const Mesh &m, float scale) {
+  size_t n = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const Vec3 o = m.positions[v[0]];
+    Vec3 an(0.0f);
+    for (uint32_t i = 0; i < m.face_size(f); i++) an += cross(m.positions[v[i]] - o, m.positions[v[(i + 1) % m.face_size(f)]] - o);
+    if (length(an) * 0.5f < 1e-8f * scale * scale) n++;
+  }
+  return n;
+}
+
+/* Every edge used by exactly two faces, in opposite directions. */
+static bool closed_manifold(const Mesh &m) {
+  std::unordered_map<uint64_t, int> dir;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const uint32_t n = m.face_size(f);
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t a = v[i], b = v[(i + 1) % n];
+      dir[Mesh::edge_key(a, b)] += a < b ? 1 : 16;
+    }
+  }
+  for (auto &[k, c] : dir)
+    if (c != 17) return false;
+  return true;
+}
+
+/* Tidies what an operator just built. A cut or a moved face can land exactly
+ * on an existing corner or face; then the new geometry
+ *  - welds any new vertex onto a vertex within eps (old ones preferred),
+ *  - drops corners that repeat and faces left with fewer than 3,
+ *  - removes pairs of faces on the same corners facing opposite ways (a new
+ *    wall lying on an existing face: the two cancel, as solids do).
+ * Vertices whose positions were in `old` are never welded to each other, so
+ * deliberately unwelded geometry elsewhere is left alone. Returns the face
+ * remap (old face -> new face, UINT32_MAX = removed). */
+static std::vector<uint32_t> tidy_new_geometry(Mesh &m, const std::vector<Vec3> &old, float eps) {
+  struct Key {
+    uint32_t x, y, z;
+    bool operator==(const Key &o) const { return x == o.x && y == o.y && z == o.z; }
+  };
+  struct KeyHash {
+    size_t operator()(const Key &k) const { return ((size_t)k.x * 73856093u) ^ ((size_t)k.y * 19349663u) ^ ((size_t)k.z * 83492791u); }
+  };
+  auto key = [](Vec3 p) {
+    Key k;
+    std::memcpy(&k.x, &p.x, 4);
+    std::memcpy(&k.y, &p.y, 4);
+    std::memcpy(&k.z, &p.z, 4);
+    return k;
+  };
+  /* New vertices: at a position nothing had before, or more of them at one
+   * than before (a cut landing exactly on an existing corner). */
+  std::unordered_map<Key, int, KeyHash> had;
+  had.reserve(old.size());
+  for (Vec3 p : old) had[key(p)]++;
+  const uint32_t nv = (uint32_t)m.vert_count();
+  std::vector<uint8_t> is_new(nv, 0);
+  bool any_new = false;
+  for (uint32_t v = 0; v < nv; v++) {
+    auto it = had.find(key(m.positions[v]));
+    if (it != had.end() && it->second > 0) it->second--;
+    else {
+      is_new[v] = 1;
+      any_new = true;
+    }
+  }
+  std::vector<uint32_t> identity(m.face_count());
+  for (size_t f = 0; f < identity.size(); f++) identity[f] = (uint32_t)f;
+  if (!any_new || !(eps > 0)) return identity;
+  /* Weld: a grid of eps-sized cells; each new vertex looks at its 27 neighbours. */
+  std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+  auto cell = [&](Vec3 p, int dx, int dy, int dz) {
+    int64_t x = (int64_t)std::floor(p.x / eps) + dx, y = (int64_t)std::floor(p.y / eps) + dy, z = (int64_t)std::floor(p.z / eps) + dz;
+    return ((uint64_t)(x & 0x1FFFFF) << 42) | ((uint64_t)(y & 0x1FFFFF) << 21) | (uint64_t)(z & 0x1FFFFF);
+  };
+  for (uint32_t v = 0; v < nv; v++) grid[cell(m.positions[v], 0, 0, 0)].push_back(v);
+  std::vector<uint32_t> to(nv);
+  for (uint32_t v = 0; v < nv; v++) to[v] = v;
+  bool welded = false;
+  for (uint32_t v = 0; v < nv; v++) {
+    if (!is_new[v]) continue;
+    uint32_t best = v;
+    for (int dx = -1; dx <= 1; dx++)
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++) {
+          auto it = grid.find(cell(m.positions[v], dx, dy, dz));
+          if (it == grid.end()) continue;
+          for (uint32_t u : it->second) {
+            if (u == v || length(m.positions[u] - m.positions[v]) > eps) continue;
+            /* Prefer an old vertex, then the lowest index (new ones settle in order). */
+            bool better = best == v || (!is_new[u] && is_new[best]) || (is_new[u] == is_new[best] && u < best);
+            if (better && (!is_new[u] || u < v)) best = u;
+          }
+        }
+    if (best != v) {
+      to[v] = to[best];
+      welded = true;
+    }
+  }
+  /* Rebuild the faces through the weld, dropping repeats and collapsed faces. */
+  std::vector<std::vector<uint32_t>> loops(m.face_count());
+  std::vector<std::vector<Vec2>> luvs(m.face_count());
+  const bool has_uv = m.has_uvs();
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t b0 = m.face_offsets[f];
+    for (uint32_t i = 0; i < m.face_size(f); i++) {
+      uint32_t v = to[m.face_verts(f)[i]];
+      if (!loops[f].empty() && loops[f].back() == v) continue;
+      loops[f].push_back(v);
+      if (has_uv) luvs[f].push_back(m.uvs[b0 + i]);
+    }
+    while (loops[f].size() > 1 && loops[f].front() == loops[f].back()) {
+      loops[f].pop_back();
+      if (has_uv) luvs[f].pop_back();
+    }
+  }
+  /* Opposite twins: the same corners, reversed. */
+  std::map<std::vector<uint32_t>, std::vector<uint32_t>> by_set;
+  for (size_t f = 0; f < loops.size(); f++) {
+    if (loops[f].size() < 3) continue;
+    std::vector<uint32_t> s = loops[f];
+    std::sort(s.begin(), s.end());
+    by_set[s].push_back((uint32_t)f);
+  }
+  std::vector<uint8_t> drop(loops.size(), 0);
+  for (auto &[s, faces] : by_set) {
+    if (faces.size() < 2) continue;
+    for (size_t i = 0; i < faces.size(); i++)
+      for (size_t j = i + 1; j < faces.size(); j++) {
+        uint32_t a = faces[i], b = faces[j];
+        if (drop[a] || drop[b] || loops[a].size() != loops[b].size()) continue;
+        /* Reversed cyclic order: b read backwards is a rotation of a. */
+        const auto &la = loops[a], &lb = loops[b];
+        const size_t n = la.size();
+        size_t start = std::find(lb.begin(), lb.end(), la[0]) - lb.begin();
+        bool reversed = start < n;
+        for (size_t k = 0; reversed && k < n; k++) reversed = la[k] == lb[(start + n - k) % n];
+        if (reversed) drop[a] = drop[b] = 1;
+      }
+  }
+  bool changed = welded;
+  for (size_t f = 0; f < loops.size(); f++) changed = changed || drop[f] || loops[f].size() != m.face_size(f);
+  if (!changed) return identity;
+  FaceBuilder fb(m);
+  std::vector<uint32_t> remap(m.face_count(), UINT32_MAX);
+  for (size_t f = 0; f < loops.size(); f++) {
+    if (drop[f] || loops[f].size() < 3) continue;
+    remap[f] = (uint32_t)(fb.offs.size() - 1);
+    fb.add(loops[f].data(), loops[f].size(), fb.has_uv ? luvs[f].data() : nullptr, m.material_of(f));
+  }
+  fb.commit(m);
+  remove_loose_verts(m);
+  return remap;
+}
+
+static void remap_selection(std::vector<uint8_t> &sel, const std::vector<uint32_t> &remap, size_t faces) {
+  std::vector<uint8_t> out(faces, 0);
+  for (size_t f = 0; f < sel.size() && f < remap.size(); f++)
+    if (sel[f] && remap[f] != UINT32_MAX && remap[f] < faces) out[remap[f]] = 1;
+  sel = std::move(out);
+}
+
 }  // namespace
 
 PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_sel) {
@@ -911,6 +1156,25 @@ PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_
   std::vector<Region> regions = face_regions(m, face_sel);
   if (regions.size() != 1 || regions[0].loops.size() != 1) return lim;
   const Region &r = regions[0];
+  /* The nearest surface behind and in front of the region: Push/Pull stops
+   * there rather than passing through the mesh (which would turn it inside
+   * out or make it intersect itself). */
+  RegionRays down = cast_region(m, r, -r.normal, true);
+  RegionRays up = cast_region(m, r, r.normal, false);
+  /* Hits right at the start are the region's own neighbours (a corner on the
+   * face next to it), not something in the way. */
+  const float near = 1e-3f * mesh_scale(m);
+  for (float t : down.t)
+    if (t > near && (lim.behind < 0 || t < lim.behind)) lim.behind = t;
+  for (float t : up.t)
+    if (t > near && (lim.ahead < 0 || t < lim.ahead)) lim.ahead = t;
+  {
+    const float tol = 1e-4f * mesh_scale(m);
+    const float sb = sweep_limit(m, r, -r.normal, tol), sa = sweep_limit(m, r, r.normal, tol);
+    lim.behind_sweep = sb;
+    if (sb > 0 && (lim.behind < 0 || sb < lim.behind)) lim.behind = sb;
+    if (sa > 0 && (lim.ahead < 0 || sa < lim.ahead)) lim.ahead = sa;
+  }
   /* A face whose every side continues into a coplanar wall (the whole top of a
    * box) just moves; holes and joins are for faces inside a larger surface. */
   EdgeFaces ef(m);
@@ -923,20 +1187,18 @@ PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_
       if (!in_region[g] && std::fabs(dot(m.face_normal(g), r.normal)) > 0.01f) inside_surface = true;
   if (!inside_surface) return lim;
   /* Push: the far side, where every ray leaves the object. */
-  RegionRays down = cast_region(m, r, -r.normal, true);
   bool ok = !down.verts.empty();
   float tmin = 1e30f;
   for (size_t i = 0; i < down.verts.size(); i++) {
-    ok = ok && down.t[i] > 0 && down.facing[i];
+    ok = ok && down.t[i] > near && down.facing[i];
     tmin = std::min(tmin, down.t[i]);
   }
   if (ok) lim.through = tmin;
   /* Pull: a face of the mesh in front, facing back (all rays on one face). */
-  RegionRays up = cast_region(m, r, r.normal, false);
   ok = !up.verts.empty();
   tmin = 1e30f;
   for (size_t i = 0; i < up.verts.size(); i++) {
-    ok = ok && up.t[i] > 0 && up.facing[i] && up.face[i] == up.face[0];
+    ok = ok && up.t[i] > near && up.facing[i] && up.face[i] == up.face[0];
     tmin = std::min(tmin, up.t[i]);
   }
   if (ok) {
@@ -954,22 +1216,68 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
     if (err) *err = "Push/Pull works on one face (or one connected group of faces)";
     return false;
   }
+  if (!std::isfinite(distance)) {
+    if (err) *err = "Push/Pull: the distance must be a finite number";
+    return false;
+  }
   if (std::fabs(distance) < 1e-7f) return true;
   const Region r = regions[0];
   const float scale = mesh_scale(m);
+  /* Far from the origin a float can't tell nearby positions apart (2 cm steps
+   * at 200 km): tolerances grow with that, and a move smaller than a few
+   * steps can't be represented, so it does nothing. */
+  float extent = 0.0f;
+  for (Vec3 p : m.positions) extent = std::max({extent, std::fabs(p.x), std::fabs(p.y), std::fabs(p.z)});
+  const float ulp = extent * 1.2e-7f;
+  if (std::fabs(distance) < 8.0f * ulp) return true;
   PushPullLimits lim = push_pull_limits(m, face_sel);
-  const float snap = 1e-3f * scale;
+  const float snap = std::max(1e-3f * scale, 8.0f * ulp);
+  /* What the result is checked against: new geometry is welded to what was
+   * there, and a closed solid must stay closed. */
+  const std::vector<Vec3> old_positions = m.positions;
+  const bool was_closed = closed_manifold(m);
+  const size_t slivers_before = sliver_faces(m, scale);
+  const float weld = std::max(5e-4f * scale, 4.0f * ulp);  // cuts on curved faces land a hair off existing corners
   /* Pushed to (or past) the far side: a hole, cut into the exit face at its
    * own angle (SketchUp makes a hole when the push meets the back face). */
   if (distance < 0 && lim.through > 0 && -distance >= lim.through - snap) {
-    if (!push_through(m, face_sel, 1, err)) return false;
-    if (result) *result = PushPullResult::Hole;
-    return true;
+    Mesh before = m;
+    std::vector<uint8_t> sel_before = face_sel;
+    if (push_through(m, face_sel, 1, err)) {
+      remap_selection(face_sel, tidy_new_geometry(m, old_positions, weld), m.face_count());
+      if ((!was_closed || closed_manifold(m)) && sliver_faces(m, scale) <= slivers_before) {
+        if (result) *result = PushPullResult::Hole;
+        m.touch();
+        return true;
+      }
+    }
+    m = std::move(before);  // no clean hole there: stop at the far side instead
+    face_sel = std::move(sel_before);
+    if (err) err->clear();
   }
   /* New positions: along the normal, or, when pulled onto a face in front,
    * each vertex lands on that face where its ray meets it (any angle). */
   std::unordered_map<uint32_t, Vec3> target;
-  bool joining = distance > 0 && lim.contact > 0 && distance >= lim.contact - snap;
+  bool joining = distance > 0 && lim.contact > 0 && distance >= lim.contact - snap && (lim.ahead < 0 || lim.ahead >= lim.contact - snap);
+  EdgeFaces ef(m);
+  std::vector<uint8_t> in_region(m.face_count(), 0);
+  for (uint32_t f : r.faces) in_region[f] = 1;
+  /* Neighbours that lean over the region (a wedge's slanted face, a sheared
+   * box): a wall pushed in along the normal would come out through them and
+   * turn the solid inside out, so the corners slide instead (below). */
+  bool exits = false;
+  if (distance < 0 && !joining) {
+    const std::vector<uint32_t> &L = r.loops[0];
+    for (size_t i = 0; i < L.size() && !exits; i++)
+      for (uint32_t g : ef.at(L[i], L[(i + 1) % L.size()]))
+        if (!in_region[g] && dot(-r.normal, m.face_normal(g)) > 0.02f) exits = true;
+  }
+  /* Otherwise never through the mesh: a push stops just short of the surface
+   * behind (the far side), a pull just short of one in front - passing them
+   * would turn the solid inside out or make it cut through itself. */
+  if (distance < 0 && !exits && lim.behind > 0) distance = std::max(distance, -std::max(0.0f, lim.behind - 2.0f * snap));
+  if (distance > 0 && !joining && lim.ahead > 0) distance = std::min(distance, std::max(0.0f, lim.ahead - 2.0f * snap));
+  if (std::fabs(distance) < 1e-7f) return true;
   if (joining) {
     RegionRays up = cast_region(m, r, r.normal, false);
     const Vec3 nT = m.face_normal(lim.contact_face), pT = m.positions[m.face_verts(lim.contact_face)[0]];
@@ -985,9 +1293,85 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
     auto it = target.find(v);
     return it != target.end() ? it->second : m.positions[v] + dvec;
   };
-  EdgeFaces ef(m);
-  std::vector<uint8_t> in_region(m.face_count(), 0);
-  for (uint32_t f : r.faces) in_region[f] = 1;
+  /* Leaning neighbours: the region moves the way Blender's face move does -
+   * inner corners along the normal, each outline corner sliding within the
+   * planes of the faces around it, so every neighbour keeps its plane. */
+  if (exits) {
+    const std::vector<uint32_t> &L = r.loops[0];
+    {
+      std::unordered_set<uint64_t> region_edges;
+      std::unordered_set<uint32_t> region_verts;
+      for (uint32_t f : r.faces)
+        for (uint32_t i = 0; i < m.face_size(f); i++) {
+          region_edges.insert(Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)]));
+          region_verts.insert(m.face_verts(f)[i]);
+        }
+      std::unordered_set<uint32_t> outline(L.begin(), L.end());
+      /* Each outline corner keeps to the planes of the unselected faces
+       * around it: along the one plane, or the line where two meet (the edge
+       * between them). `step` is its move per unit of push along the normal. */
+      std::unordered_map<uint32_t, std::vector<Vec3>> planes;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        if (in_region[f]) continue;
+        for (uint32_t i = 0; i < m.face_size(f); i++) {
+          const uint32_t v = m.face_verts(f)[i];
+          if (!outline.count(v)) continue;
+          const Vec3 nf = m.face_normal(f);
+          auto &ps = planes[v];
+          bool dup = false;
+          for (Vec3 q : ps) dup = dup || std::fabs(dot(q, nf)) > 0.9999f;
+          if (!dup) ps.push_back(nf);
+        }
+      }
+      bool ok = true;
+      std::unordered_map<uint32_t, Vec3> step;
+      for (uint32_t v : L) {
+        const auto &ps = planes[v];
+        Vec3 t;
+        if (ps.size() == 1) t = r.normal - ps[0] * dot(r.normal, ps[0]);
+        else if (ps.size() >= 2) t = cross(ps[0], ps[1]);
+        else { ok = false; break; }
+        const float tn = dot(t, r.normal);
+        if (std::fabs(tn) < 1e-3f * length(t) || length(t) < 1e-6f) { ok = false; break; }
+        t = t / tn;  // one unit along the normal
+        if (length(t) > 20.0f) { ok = false; break; }  // a plane almost along the normal: corners would fly sideways
+        for (size_t k = 2; k < ps.size() && ok; k++) ok = std::fabs(dot(t, ps[k])) < 1e-3f * length(t);
+        step[v] = t;
+      }
+      /* How far before a corner would slide past the end of an edge leaving it. */
+      float reach = 1e30f;
+      if (ok)
+        for (const auto &e : m.edge_cache()) {
+          if (region_edges.count(Mesh::edge_key(e.first, e.second))) continue;
+          for (int k = 0; k < 2; k++) {
+            const uint32_t v = k ? e.second : e.first, w = k ? e.first : e.second;
+            if (!outline.count(v)) continue;
+            const float along = dot(m.positions[w] - m.positions[v], r.normal);
+            if (along < 0.0f) reach = std::min(reach, -along);
+          }
+        }
+      if (!ok) {
+        if (err) *err = "Push/Pull: the faces around the selection lean over it, so pushing it in would turn the solid inside out";
+        return false;
+      }
+      /* Only what lies inside the swept outline stops it: the corner rays hit
+       * the leaning neighbours at once, but those slide along. */
+      const float d = std::max(distance, -std::max(0.0f, std::min(reach, lim.behind_sweep > 0 ? lim.behind_sweep : 1e30f) - 2.0f * snap));
+      if (std::fabs(d) < 1e-7f) return true;
+      std::vector<Vec3> to;
+      std::vector<uint32_t> which;
+      for (uint32_t v : region_verts) {
+        Vec3 p = m.positions[v];
+        p = outline.count(v) ? p + step[v] * d : p + r.normal * d;
+        which.push_back(v);
+        to.push_back(p);
+      }
+      for (size_t i = 0; i < which.size(); i++) m.positions[which[i]] = to[i];
+      if (result) *result = PushPullResult::Moved;
+      m.touch();
+      return true;
+    }
+  }
   std::unordered_map<uint32_t, uint32_t> newv;
   for (uint32_t f : r.faces)
     for (uint32_t i = 0; i < m.face_size(f); i++) {
@@ -1008,8 +1392,14 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
     uint32_t N = UINT32_MAX;
     for (uint32_t g : ef.at(a, b))
       if (!in_region[g]) N = g;
+    /* A side along the push direction would get a wall with no area: the side
+     * just slides along itself, so its neighbour stretches even with Ctrl. */
+    const Vec3 pa = m.positions[a], pb = m.positions[b], qa = m.positions[newv[a]], qb = m.positions[newv[b]];
+    const float side = length(pb - pa), travel = std::max(length(qa - pa), length(qb - pb));
+    const bool flat_wall = length(cross(qa - pb, qb - pa)) * 0.5f < 1e-4f * side * travel;
+    if (flat_wall && N == UINT32_MAX) continue;  // an open edge: no wall needed
     bool coplanar = false;
-    if (merge_coplanar && N != UINT32_MAX) {
+    if ((merge_coplanar || flat_wall) && N != UINT32_MAX) {
       Vec3 nN = m.face_normal(N), pN = m.positions[a];
       coplanar = std::fabs(dot(m.positions[newv[a]] - pN, nN)) < snap && std::fabs(dot(m.positions[newv[b]] - pN, nN)) < snap;
     }
@@ -1060,37 +1450,57 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
   fb.commit(m);
   std::vector<uint32_t> remap;
   /* Stretched faces: drop corners that now sit on a straight line or fold
-   * back on themselves (a box top pushed down leaves both kinds). */
+   * back on themselves (a box top pushed down leaves both kinds). A corner
+   * that some other face still uses stays, or the two would no longer share
+   * an edge (a T-junction opens the mesh). */
   {
-    FaceBuilder clean(m);
-    remap.assign(m.face_count(), UINT32_MAX);
-    std::vector<uint32_t> keep;
-    std::vector<Vec2> kuv;
-    for (size_t f = 0; f < m.face_count(); f++) {
-      const uint32_t b0 = m.face_offsets[f];
-      std::vector<uint32_t> loop(m.face_verts(f), m.face_verts(f) + m.face_size(f));
-      std::vector<Vec2> luv;
-      if (clean.has_uv) luv.assign(m.uvs.begin() + b0, m.uvs.begin() + b0 + loop.size());
-      if (f < was_touched.size() && was_touched[f]) {
+    std::vector<std::vector<uint32_t>> loops(m.face_count());
+    std::vector<std::vector<Vec2>> luvs(m.face_count());
+    const bool has_uv = m.has_uvs();
+    std::unordered_set<uint32_t> pinned;
+    for (int round = 0; round < 8; round++) {
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t b0 = m.face_offsets[f];
+        std::vector<uint32_t> &loop = loops[f];
+        loop.assign(m.face_verts(f), m.face_verts(f) + m.face_size(f));
+        if (has_uv) luvs[f].assign(m.uvs.begin() + b0, m.uvs.begin() + b0 + loop.size());
+        if (f >= was_touched.size() || !was_touched[f]) continue;
         for (bool changed = true; changed && loop.size() > 2;) {
           changed = false;
           for (size_t i = 0; i < loop.size() && loop.size() > 2; i++) {
             uint32_t p = loop[(i + loop.size() - 1) % loop.size()], v = loop[i], q = loop[(i + 1) % loop.size()];
-            if (!touched.count(v)) continue;
+            if (!touched.count(v) || pinned.count(v)) continue;
             Vec3 e1 = m.positions[v] - m.positions[p], e2 = m.positions[q] - m.positions[v];
             float l1 = length(e1), l2 = length(e2);
             bool degenerate = l1 < snap || l2 < snap || length(cross(e1, e2)) < 1e-4f * l1 * l2;
             if (!degenerate) continue;
             loop.erase(loop.begin() + i);
-            if (clean.has_uv) luv.erase(luv.begin() + i);
+            if (has_uv) luvs[f].erase(luvs[f].begin() + i);
             changed = true;
             break;
           }
         }
       }
-      if (loop.size() < 3) continue;  // squashed flat
+      /* A corner dropped from one face but kept by another must stay everywhere. */
+      std::unordered_set<uint32_t> used;
+      for (const auto &loop : loops)
+        if (loop.size() >= 3) used.insert(loop.begin(), loop.end());
+      size_t before = pinned.size();
+      for (size_t f = 0; f < m.face_count(); f++) {
+        if (loops[f].size() == m.face_size(f)) continue;
+        for (uint32_t i = 0; i < m.face_size(f); i++) {
+          uint32_t v = m.face_verts(f)[i];
+          if (used.count(v) && std::find(loops[f].begin(), loops[f].end(), v) == loops[f].end()) pinned.insert(v);
+        }
+      }
+      if (pinned.size() == before) break;
+    }
+    FaceBuilder clean(m);
+    remap.assign(m.face_count(), UINT32_MAX);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (loops[f].size() < 3) continue;  // squashed flat
       remap[f] = (uint32_t)(clean.offs.size() - 1);
-      clean.add(loop.data(), loop.size(), clean.has_uv ? luv.data() : nullptr, m.material_of(f));
+      clean.add(loops[f].data(), loops[f].size(), clean.has_uv ? luvs[f].data() : nullptr, m.material_of(f));
     }
     clean.commit(m);
   }
@@ -1098,6 +1508,7 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
   face_sel.assign(m.face_count(), 0);
   for (uint32_t f : r.faces)
     if (f < remap.size() && remap[f] != UINT32_MAX) face_sel[remap[f]] = 1;
+  remap_selection(face_sel, tidy_new_geometry(m, old_positions, weld), m.face_count());
   if (result) *result = walls.empty() ? PushPullResult::Moved : PushPullResult::Extruded;
   if (joining) {
     /* The cap now lies on the face in front: join them (an opening there). */
@@ -1267,6 +1678,80 @@ size_t collapse_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
   vert_sel.assign(m.vert_count(), 0);
   m.touch();
   return n;
+}
+
+
+/* ===================================================================== */
+/* Set Origin (Blender: object/object_transform.cc, ED_object_origin_set)  */
+/* ===================================================================== */
+
+Vec3 origin_point(const Mesh &m, OriginPoint mode) {
+  if (m.positions.empty()) return Vec3(0.0f);
+  if (mode == OriginPoint::BoundsCenter || mode == OriginPoint::BoundsBottom) {
+    AABB b;
+    for (Vec3 p : m.positions) b.add(p);
+    Vec3 c = b.center();
+    if (mode == OriginPoint::BoundsBottom) c.y = b.min.y;  // Unity's "pivot at the base"
+    return c;
+  }
+  /* Accumulated in double: large meshes far from the origin lose float precision. */
+  double cx = 0, cy = 0, cz = 0, wsum = 0;
+  /* Tetrahedra apex and centroids relative to the first vertex: far from the
+   * origin the products would cancel. */
+  const Vec3 o = m.positions[0];
+  if (mode == OriginPoint::VolumeCenter) {
+    /* Each triangle with the origin forms a tetrahedron; the signed volumes
+     * weight the tetrahedra's centroids (Blender: BKE_mesh_center_of_volume). */
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t *v = m.face_verts(f);
+      const Vec3 a = m.positions[v[0]] - o;
+      for (uint32_t i = 1; i + 1 < m.face_size(f); i++) {
+        const Vec3 b = m.positions[v[i]] - o, c = m.positions[v[i + 1]] - o;
+        double vol = (double)dot(a, cross(b, c)) / 6.0;
+        Vec3 g = (a + b + c) * 0.25f;
+        cx += g.x * vol;
+        cy += g.y * vol;
+        cz += g.z * vol;
+        wsum += vol;
+      }
+    }
+    AABB b;
+    for (Vec3 p : m.positions) b.add(p);
+    Vec3 e = b.max - b.min;
+    double box = (double)std::max(e.x, 1e-6f) * std::max(e.y, 1e-6f) * std::max(e.z, 1e-6f);
+    if (std::fabs(wsum) > 1e-6 * box) return o + Vec3((float)(cx / wsum), (float)(cy / wsum), (float)(cz / wsum));
+    mode = OriginPoint::SurfaceCenter;  // open or flat: no volume to speak of
+    cx = cy = cz = wsum = 0;
+  }
+  if (mode == OriginPoint::SurfaceCenter) {
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t *v = m.face_verts(f);
+      const Vec3 a = m.positions[v[0]];
+      for (uint32_t i = 1; i + 1 < m.face_size(f); i++) {
+        const Vec3 b = m.positions[v[i]], c = m.positions[v[i + 1]];
+        double area = 0.5 * (double)length(cross(b - a, c - a));
+        Vec3 g = (a + b + c) * (1.0f / 3.0f);
+        cx += g.x * area;
+        cy += g.y * area;
+        cz += g.z * area;
+        wsum += area;
+      }
+    }
+    if (wsum > 0) return Vec3((float)(cx / wsum), (float)(cy / wsum), (float)(cz / wsum));
+    cx = cy = cz = 0;
+  }
+  for (Vec3 p : m.positions) {
+    cx += p.x;
+    cy += p.y;
+    cz += p.z;
+  }
+  const double n = (double)m.positions.size();
+  return Vec3((float)(cx / n), (float)(cy / n), (float)(cz / n));
+}
+
+void translate(Mesh &m, Vec3 offset) {
+  for (Vec3 &p : m.positions) p += offset;
+  m.touch();
 }
 
 }  // namespace bl::meshops

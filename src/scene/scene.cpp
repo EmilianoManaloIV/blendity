@@ -120,6 +120,18 @@ void RenderSettings::reflect(Reflector &r) {
   r.field("Live Preview", live_preview);
   r.help("Re-render the preview automatically whenever the scene, camera or settings change.");
   if (r.all_fields() || engine == 1) {
+    static const char *devices[] = {"CPU", "GPU Compute"};
+    r.enumeration("Device", device, devices, 2);
+    r.help("GPU Compute renders on the GPUs ticked under Render Devices (Vulkan: NVIDIA, AMD, Intel).\n"
+           "Blender: Render Properties > Device, with the GPUs chosen in Preferences > System.");
+    if (r.all_fields() || device == 1) {
+      r.field("Also Use the CPU", gpu_with_cpu);
+      r.help("Combined rendering: the CPU renders samples alongside the GPUs and the results are averaged\n"
+             "(Blender: tick the CPU in the Render Devices list).");
+      r.field("Hardware Ray Tracing", hardware_rt);
+      r.help("Use the GPU's ray tracing hardware (NVIDIA RT cores, AMD ray accelerators, Intel RTUs) when it has it,\n"
+             "instead of traversing Blendity's BVH in a compute shader (Blender: OptiX vs CUDA, HIP RT vs HIP).");
+    }
     r.samples("Samples", samples, 1, 65536);
     r.help("Samples per pixel for the final render. Noise falls as 1/sqrt(samples): each doubling cuts it by ~30%.\nBlender: Sampling > Render > Max Samples.");
     r.samples("Viewport Samples", viewport_samples, 1, 65536);
@@ -170,18 +182,139 @@ void Light::reflect(Reflector &r) {
   if (r.all_fields() || type == 1) r.field("Range", range, 0.05f, 0.01f, 1000.0f);
 }
 
+/* Camera sensor sizes in mm (Blender: scripts/presets/camera; Unity's Sensor Type list). */
+static const char *const kSensorPresets[] = {"Custom",
+                                             "Full Frame 35mm (36 x 24)",
+                                             "APS-C (23.6 x 15.6)",
+                                             "APS-C Canon (22.3 x 14.9)",
+                                             "Micro Four Thirds (17.3 x 13)",
+                                             "Super 35 (24.89 x 18.66)",
+                                             "1 inch (13.2 x 8.8)",
+                                             "Medium Format (43.8 x 32.9)",
+                                             "IMAX 65mm (70.41 x 52.63)",
+                                             "Phone (6.17 x 4.55)"};
+static const float kSensorSizes[][2] = {{36, 24},       {36, 24},       {23.6f, 15.6f}, {22.3f, 14.9f},  {17.3f, 13.0f},
+                                        {24.89f, 18.66f}, {13.2f, 8.8f}, {43.8f, 32.9f}, {70.41f, 52.63f}, {6.17f, 4.55f}};
+static const char *const kAspectModes[] = {"Render Resolution", "Sensor", "16:9", "16:10", "4:3", "3:2", "1:1",
+                                           "21:9", "2.39:1 (Anamorphic)", "9:16 (Portrait)", "Custom"};
+static const float kAspects[] = {0, 0, 16.0f / 9.0f, 1.6f, 4.0f / 3.0f, 1.5f, 1.0f, 21.0f / 9.0f, 2.39f, 9.0f / 16.0f, 0};
+constexpr int kSensorPresetCount = sizeof(kSensorPresets) / sizeof(kSensorPresets[0]);
+constexpr int kAspectModeCount = sizeof(kAspectModes) / sizeof(kAspectModes[0]);
+
 void Camera::reflect(Reflector &r) {
+  const bool all = r.all_fields();
   static const char *clear[] = {"Skybox", "Solid Color"};
   r.enumeration("Clear Flags", clear_flags, clear, 2);
-  if (clear_flags == 1) r.color("Background", background);
+  if (clear_flags == 1 || all) r.color("Background", background);
   r.field("Orthographic", orthographic);
-  if (orthographic) r.field("Size", ortho_size, 0.05f, 0.01f, 1000.0f);
-  else {
+  if (orthographic || all) r.field("Size", ortho_size, 0.05f, 0.01f, 1000.0f);
+  if (!orthographic || all) {
+    r.field("Physical Camera", physical);
+    r.help("Set the view from a real lens and sensor: focal length, sensor size and lens shift.\n"
+           "Unity: Physical Camera. Blender: Lens Unit = Millimeters.");
+  }
+  if ((!orthographic && !physical) || all) {
     r.field("Field Of View", fov, 0.2f, 1.0f, 179.0f);
     r.help("Vertical field of view in degrees (FoCG ch. 8.5).");
   }
+  if ((!orthographic && physical) || all) {
+    r.field("Focal Length (mm)", focal_length, 0.5f, 1.0f, 5000.0f);
+    r.help("Longer lenses see less of the scene (zoom in) and blur the background more.\n"
+           "The field of view follows from this and the sensor size.");
+    r.enumeration("Sensor", sensor_preset, kSensorPresets, kSensorPresetCount);
+    r.help("Sensor (film gate) size. Smaller sensors crop the image (a longer effective focal length).");
+    if (sensor_preset > 0 && sensor_preset < kSensorPresetCount) {
+      sensor_width = kSensorSizes[sensor_preset][0];
+      sensor_height = kSensorSizes[sensor_preset][1];
+    }
+    if (sensor_preset == 0 || all) {
+      r.field("Sensor Width (mm)", sensor_width, 0.1f, 1.0f, 200.0f);
+      r.field("Sensor Height (mm)", sensor_height, 0.1f, 1.0f, 200.0f);
+    }
+    static const char *fit[] = {"Auto", "Horizontal", "Vertical"};
+    r.enumeration("Sensor Fit", sensor_fit, fit, 3);
+    r.help("Which image side the sensor spans. Auto: the sensor width covers the larger side (Blender).\n"
+           "Unity calls this Gate Fit.");
+    r.field("Lens Shift X", shift_x, 0.005f, -2.0f, 2.0f);
+    r.field("Lens Shift Y", shift_y, 0.005f, -2.0f, 2.0f);
+    r.help("Moves the image without tilting the camera (architectural shots keep verticals straight).\n"
+           "In fractions of the image width / height.");
+  }
+  r.enumeration("Aspect Ratio", aspect_mode, kAspectModes, kAspectModeCount);
+  r.help("The shape of the image this camera renders. Render Resolution keeps Render Settings' width and height;\n"
+         "anything else keeps the width and sets the height (the Game view letterboxes to it).");
+  if (aspect_mode == kAspectModeCount - 1 || all) r.field("Custom Aspect", custom_aspect, 0.01f, 0.1f, 10.0f);
   r.field("Near", near_clip, 0.01f, 0.001f, 100.0f);
   r.field("Far", far_clip, 1.0f, 0.1f, 100000.0f);
+  r.field("Depth of Field", dof);
+  r.help("Blur what is nearer or farther than the focus distance, like a real lens (path-traced renders).\n"
+         "Blender: Camera > Depth of Field. Unity: HDRP Physical Camera aperture.");
+  if (dof || all) {
+    r.field("Focus Distance (m)", focus_distance, 0.05f, 0.01f, 100000.0f);
+    r.field("F-Stop", f_stop, 0.05f, 0.1f, 128.0f);
+    r.help("Aperture as a focal ratio: lower numbers (f/1.4) blur more, higher ones (f/16) keep more sharp.\n"
+           "The aperture's diameter is focal length / f-stop.");
+    r.field("Aperture Blades", blades, 0, 16);
+    r.help("0: a round aperture. 3 or more: polygonal bokeh with that many sides.");
+    r.field("Blade Rotation", blade_rotation, 0.5f, -180.0f, 180.0f);
+  }
+  r.field("Physical Exposure", physical_exposure);
+  r.help("Brightness from ISO, shutter speed and f-stop, like a real camera. 0 stops at ISO 100, 1/60 s, f/2.8;\n"
+         "each doubling of ISO or exposure time adds a stop. Unity: Physical Camera exposure.");
+  if (physical_exposure || all) {
+    r.field("ISO", iso, 10.0f, 1.0f, 409600.0f);
+    r.field("Shutter Speed (1/s)", shutter, 1.0f, 0.001f, 100000.0f);
+    if (!dof && !all) r.field("F-Stop", f_stop, 0.05f, 0.1f, 128.0f);  // shown with Depth of Field otherwise
+  }
+}
+
+float Camera::image_aspect(float render_aspect) const {
+  if (aspect_mode <= 0 || aspect_mode >= kAspectModeCount) return render_aspect;
+  if (aspect_mode == 1) return sensor_width / std::max(1e-3f, sensor_height);
+  if (aspect_mode == kAspectModeCount - 1) return std::max(0.05f, custom_aspect);
+  return kAspects[aspect_mode];
+}
+
+float Camera::vertical_fov_deg(float aspect) const {
+  if (!physical) return fov;
+  const float f = std::max(0.1f, focal_length);
+  int fit = sensor_fit;
+  if (fit == 0) fit = aspect >= 1.0f ? 1 : 2;  // Auto: the sensor width spans the larger side
+  const float size = sensor_fit == 2 ? sensor_height : sensor_width;
+  float half = std::atan(size / (2.0f * f));
+  if (fit == 1) half = std::atan(std::tan(half) / std::max(1e-3f, aspect));  // horizontal -> vertical
+  return std::min(179.0f, 2.0f * half * kRad2Deg);
+}
+
+float Camera::focal_length_mm(float aspect) const {
+  if (physical) return focal_length;
+  /* A field-of-view camera as a lens on a 36 mm sensor (Blender's default). */
+  float half_v = fov * 0.5f * kDeg2Rad;
+  float half = aspect >= 1.0f ? std::atan(std::tan(half_v) * aspect) : half_v;
+  return 36.0f / (2.0f * std::tan(std::max(1e-4f, half)));
+}
+
+Mat4 Camera::projection(float aspect) const {
+  Mat4 p = orthographic ? Mat4::ortho(ortho_size, aspect, near_clip, far_clip)
+                        : Mat4::perspective(vertical_fov_deg(aspect) * kDeg2Rad, aspect, near_clip, far_clip);
+  if (physical && !orthographic && (shift_x != 0.0f || shift_y != 0.0f)) {
+    /* Off-axis projection: the image moves by the shift, the view direction doesn't. */
+    p.m[8] -= 2.0f * shift_x;
+    p.m[9] -= 2.0f * shift_y;
+  }
+  return p;
+}
+
+float Camera::aperture_radius(float aspect) const {
+  if (!dof || orthographic || f_stop <= 0.0f) return 0.0f;
+  return focal_length_mm(aspect) / (2.0f * f_stop) * 0.001f;  // mm -> m (Cycles: blender_camera.cpp)
+}
+
+float Camera::exposure_stops() const {
+  if (!physical_exposure) return 0.0f;
+  /* EV relative to ISO 100, 1/60 s, f/2.8: log2(t * S/100 / N^2). */
+  const float t = 1.0f / std::max(1e-3f, shutter), n = std::max(0.1f, f_stop);
+  return std::log2(t * (iso / 100.0f) / (n * n)) - std::log2((1.0f / 60.0f) / (2.8f * 2.8f));
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }

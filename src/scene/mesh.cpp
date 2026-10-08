@@ -76,8 +76,11 @@ Vec3 Mesh::face_normal(size_t f) const {
   const uint32_t *v = face_verts(f);
   uint32_t n = face_size(f);
   Vec3 nrm(0.0f);
+  /* Relative to the first corner: the same result, but a face far from the
+   * origin keeps its precision (the sums below would cancel otherwise). */
+  const Vec3 o = n ? positions[v[0]] : Vec3(0.0f);
   for (uint32_t i = 0; i < n; i++) {
-    Vec3 a = positions[v[i]], b = positions[v[(i + 1) % n]];
+    Vec3 a = positions[v[i]] - o, b = positions[v[(i + 1) % n]] - o;
     /* Newell's method; for a triangle equals cross(b - a, c - a). */
     nrm.x += (a.y - b.y) * (a.z + b.z);
     nrm.y += (a.z - b.z) * (a.x + b.x);

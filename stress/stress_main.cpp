@@ -16,6 +16,7 @@
 #include "../src/image/image.h"
 #include "../src/render/colormanagement.h"
 #include "../src/render/display.h"
+#include "../src/render/gpu_device.h"
 #include "../src/core/cpu.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/raster.h"
@@ -34,6 +35,9 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <limits>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -1034,6 +1038,66 @@ static void test_codecs(Report &rep, const Options &o) {
   }
 }
 
+static void test_gpu_devices(Report &rep, const Options &o) {
+  rep.title("Render devices: CPU vs GPU (Vulkan) vs combined",
+            "The same path-traced frame on every device: the CPU (Embree when built with it), each GPU tracing Blendity's "
+            "BVH in a compute shader, each GPU using its ray tracing hardware (VK_KHR_ray_query), and CPU + all GPUs "
+            "together. 400 textured spheres on a checker floor, sun + sky, 4 bounces. Samples per second at 1280x720.");
+  rep.note(gpu::status());
+  if (!gpu::available()) return;
+  auto sphere = primitives::uv_sphere(0.5f, 32, 16);
+  auto floor = primitives::plane(40.0f, 1);
+  std::vector<MaterialPtr> m_floor = {make_material("floor", {0.8f, 0.8f, 0.8f})}, m_ball = {make_material("ball", {1, 1, 1})},
+                           m_glass = {make_material_preset("Glass")};
+  m_floor[0]->procedural = (int)Procedural::Checker;
+  m_ball[0]->procedural = (int)Procedural::UVGrid;
+  std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::identity(), &m_floor}};
+  for (int i = 0; i < 400; i++)
+    objs.push_back({&sphere->render_mesh_tangents(), Mat4::translate({(i % 20 - 9.5f) * 1.3f, 0.5f, (i / 20 - 9.5f) * 1.3f}), i % 7 == 0 ? &m_glass : &m_ball});
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.4f, -1, 0.3f));
+  Environment env;
+  const int W = o.quick ? 640 : 1280, H = o.quick ? 360 : 720, SPP = o.quick ? 8 : 128;
+  struct Run { std::string name; bool cpu; std::vector<int> gpus; bool hw; };
+  std::vector<Run> runs = {{"CPU", true, {}, false}};
+  std::vector<int> all;
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    runs.push_back({d.name + " (compute, Blendity BVH)", false, {d.index}, false});
+    if (d.hardware_rt) runs.push_back({d.name + " (ray tracing hardware)", false, {d.index}, true});
+    all.push_back(d.index);
+  }
+  if (all.size() > 1) runs.push_back({"All GPUs", false, all, true});
+  runs.push_back({"CPU + all GPUs", true, all, true});
+  rep.table({"device", "samples/s", "ms / sample", "vs CPU", "samples per device"});
+  double cpu_rate = 0;
+  for (const Run &r : runs) {
+    PathTracer pt;
+    PTSettings st;
+    st.use_cpu = r.cpu;
+    st.gpus = r.gpus;
+    st.gpu_hardware_rt = r.hw;
+    st.denoise = false;
+    pt.set_settings(st);
+    pt.build(objs, {sun}, env);
+    pt.set_camera(Mat4::look_at({0, 6, -16}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(55 * kDeg2Rad, W / (float)H, 0.1f, 200), W, H);
+    pt.render(1e9, 8);  // warm-up: kernel compile, caches, GPU clocks
+    pt.set_camera(Mat4::look_at({0, 6, -16}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(55 * kDeg2Rad, W / (float)H, 0.1f, 200), W, H);
+    ScopedTimer t;
+    int done = 0;
+    while (done < SPP) done = pt.render(1e9, SPP);
+    double ms = t.ms(), rate = done / (ms / 1000.0);
+    if (r.name == "CPU") cpu_rate = rate;
+    std::string share = "-";
+    if (r.gpus.size() + (r.cpu ? 1 : 0) > 1) {
+      share = r.cpu ? strprintf("CPU %d", pt.stats().cpu_samples) : "";
+      for (size_t g = 0; g < pt.stats().gpu_samples.size(); g++) share += strprintf("%sGPU%zu %d", share.empty() ? "" : ", ", g + 1, pt.stats().gpu_samples[g]);
+    }
+    rep.row({r.name, f1(rate), f2(ms / done), f2(rate / std::max(cpu_rate, 1e-9)) + "x", share});
+  }
+  rep.note("Every device renders whole samples of the frame and the sums are averaged, so devices of any speed combine "
+           "without seams (Cycles splits work across devices the same way). The unit tests check each device against the CPU.");
+}
+
 static void test_physics(Report &rep, const Options &o) {
   rep.title("Physics: Blendity's sphere physics vs Jolt",
             "N rigid boxes dropped in a pile onto a plane; average ms per 60 Hz frame over 2 simulated seconds. Blendity's "
@@ -1094,6 +1158,469 @@ static void test_modeling_tools(Report &rep, const Options &o) {
   }
 }
 
+/* ------------------------------------------------------- Push/Pull stress */
+
+namespace ppstress {
+
+double signed_volume(const Mesh &m) {
+  /* In double, relative to the first vertex: a mesh far from the origin
+   * would otherwise lose everything to cancellation. */
+  if (m.positions.empty()) return 0;
+  const Vec3 o = m.positions[0];
+  auto d3 = [&](uint32_t i, double *out) {
+    out[0] = (double)m.positions[i].x - o.x;
+    out[1] = (double)m.positions[i].y - o.y;
+    out[2] = (double)m.positions[i].z - o.z;
+  };
+  double v = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *fv = m.face_verts(f);
+    double a[3], b[3], c[3];
+    d3(fv[0], a);
+    for (uint32_t i = 1; i + 1 < m.face_size(f); i++) {
+      d3(fv[i], b);
+      d3(fv[i + 1], c);
+      v += a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+  }
+  return v / 6.0;
+}
+
+/* Every edge used by exactly two faces, in opposite directions. */
+bool closed_manifold(const Mesh &m) {
+  std::unordered_map<uint64_t, int> dir;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    uint32_t n = m.face_size(f);
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t a = v[i], b = v[(i + 1) % n];
+      dir[Mesh::edge_key(a, b)] += a < b ? 1 : 16;
+    }
+  }
+  for (auto &[k, c] : dir)
+    if (c != 17) return false;
+  return true;
+}
+
+/* Structural problems: bad indices, short faces, repeated corners, NaN. */
+std::string invalid(const Mesh &m) {
+  for (Vec3 p : m.positions)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return "non-finite position";
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t n = m.face_size(f), *v = m.face_verts(f);
+    if (n < 3) return "face with < 3 corners";
+    for (uint32_t i = 0; i < n; i++) {
+      if (v[i] >= m.vert_count()) return "index out of range";
+      if (v[i] == v[(i + 1) % n]) return "repeated corner";
+    }
+  }
+  if (!m.uvs.empty() && m.uvs.size() != m.corner_verts.size()) return "UV count mismatch";
+  return "";
+}
+
+size_t degenerate_faces(const Mesh &m, float scale) {
+  size_t n = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    Vec3 an(0.0f);
+    const Vec3 o = m.positions[v[0]];  // relative: far from the origin the products would cancel
+    for (uint32_t i = 0; i < m.face_size(f); i++) an += cross(m.positions[v[i]] - o, m.positions[v[(i + 1) % m.face_size(f)]] - o);
+    if (length(an) * 0.5f < 1e-9f * scale * scale) n++;
+  }
+  return n;
+}
+
+Mesh from(const MeshPtr &p) { return *p; }
+
+void append(Mesh &m, const Mesh &b, const Mat4 &t) {
+  uint32_t base = (uint32_t)m.vert_count();
+  for (Vec3 p : b.positions) m.add_vert(t.point(p));
+  for (size_t f = 0; f < b.face_count(); f++) {
+    std::vector<uint32_t> v(b.face_verts(f), b.face_verts(f) + b.face_size(f));
+    for (uint32_t &x : v) x += base;
+    m.add_face(v.data(), v.size());
+  }
+}
+
+/* A closed prism from a 2D outline (counter-clockwise seen from +Y). */
+Mesh prism(const std::vector<Vec2> &outline, float h) {
+  Mesh m;
+  const uint32_t n = (uint32_t)outline.size();
+  for (Vec2 p : outline) m.add_vert({p.x, 0, p.y});
+  for (Vec2 p : outline) m.add_vert({p.x, h, p.y});
+  std::vector<uint32_t> bottom, top;
+  for (uint32_t i = 0; i < n; i++) {
+    top.push_back(n + i);
+    bottom.push_back(n - 1 - i);
+  }
+  m.add_face(top.data(), top.size());
+  m.add_face(bottom.data(), bottom.size());
+  for (uint32_t i = 0; i < n; i++) {
+    uint32_t j = (i + 1) % n;
+    m.add_face({i, j, n + j, n + i});
+  }
+  meshops::recalc_normals_outside(m);
+  return m;
+}
+
+struct Case {
+  std::string name;
+  Mesh mesh;
+};
+
+std::vector<Case> cases() {
+  std::vector<Case> c;
+  c.push_back({"cube", from(primitives::cube())});
+  {
+    Mesh m = from(primitives::cube());
+    std::vector<uint8_t> fs(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) fs[f] = dot(m.face_normal(f), Vec3(0, 1, 0)) > 0.99f;
+    meshops::inset_faces(m, fs, 0.3f);
+    c.push_back({"cube, inset top", m});
+  }
+  c.push_back({"cylinder (32-gon caps)", from(primitives::cylinder(0.5f, 2.0f, 32))});
+  c.push_back({"cylinder (128-gon caps)", from(primitives::cylinder(0.5f, 1.0f, 128))});
+  c.push_back({"cone (point apex)", from(primitives::cone(0.5f, 1.0f, 16))});
+  c.push_back({"UV sphere (tris + quads)", from(primitives::uv_sphere(0.5f, 12, 8))});
+  c.push_back({"icosphere (all tris)", from(primitives::ico_sphere(0.5f, 1))});
+  c.push_back({"torus (genus 1)", from(primitives::torus(0.5f, 0.2f, 12, 8))});
+  c.push_back({"single quad (open)", from(primitives::quad(1.0f))});
+  c.push_back({"grid 6x6 (open surface)", from(primitives::grid(2.0f, 6, 6))});
+  c.push_back({"L-prism (concave cap)", prism({{0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2}}, 1.0f)});
+  {
+    std::vector<Vec2> star;
+    for (int i = 0; i < 10; i++) {
+      float r = i % 2 ? 0.35f : 1.0f, a = i * kPi / 5;
+      star.push_back({r * std::cos(a), r * std::sin(a)});
+    }
+    c.push_back({"star prism (very concave)", prism(star, 0.5f)});
+  }
+  {
+    Mesh m = from(primitives::cube());
+    for (Vec3 &p : m.positions)
+      if (p.y > 0 && p.x > 0 && p.z > 0) p.y += 0.35f;  // one corner up: a non-planar top
+    c.push_back({"cube, non-planar top", m});
+  }
+  {
+    Mesh m = from(primitives::cube());
+    for (Vec3 &p : m.positions) p.x += p.y * 0.8f;  // sheared: sides lean over
+    c.push_back({"sheared box", m});
+  }
+  c.push_back({"wedge (slanted faces)", prism({{0, 0}, {2, 0}, {0, 1.2f}}, 1.0f)});
+  {
+    Mesh m = from(primitives::cube());
+    meshops::flip_normals(m);
+    c.push_back({"cube, inside-out normals", m});
+  }
+  {
+    /* Every face with its own vertices: a cube that isn't connected. */
+    Mesh src = from(primitives::cube()), m;
+    for (size_t f = 0; f < src.face_count(); f++) {
+      std::vector<uint32_t> v;
+      for (uint32_t i = 0; i < src.face_size(f); i++) v.push_back(m.add_vert(src.positions[src.face_verts(f)[i]]));
+      m.add_face(v.data(), v.size());
+    }
+    c.push_back({"cube, unwelded faces", m});
+  }
+  {
+    /* A sliver face (zero area) and collinear corners on the top. */
+    Mesh m = from(primitives::cube());
+    std::vector<uint8_t> vs(m.vert_count(), 0);
+    auto e = m.edge_cache()[0];
+    vs[e.first] = vs[e.second] = 1;
+    meshops::subdivide_edges(m, vs, 2);  // collinear corners on two faces
+    uint32_t a = m.add_vert({-0.5f, 0.5f, -0.5f}), b = m.add_vert({0.5f, 0.5f, -0.5f}), d = m.add_vert({0.0f, 0.5f, -0.5f});
+    m.add_face({a, d, b});  // zero area, floating
+    c.push_back({"collinear corners + sliver", m});
+  }
+  {
+    /* Non-manifold: a fin sharing an edge with the cube (three faces on one edge). */
+    Mesh m = from(primitives::cube());
+    auto e = m.edge_cache()[0];
+    Vec3 pa = m.positions[e.first], pb = m.positions[e.second];
+    Vec3 out = normalize((pa + pb) * 0.5f) * 0.8f;
+    uint32_t c0 = m.add_vert(pb + out), c1 = m.add_vert(pa + out);
+    m.add_face({e.first, e.second, c0, c1});
+    c.push_back({"non-manifold fin", m});
+  }
+  {
+    Mesh m = from(primitives::cube());
+    for (Vec3 &p : m.positions) p = p * 1e-4f;
+    c.push_back({"tiny cube (0.1 mm)", m});
+  }
+  {
+    Mesh m = from(primitives::cube());
+    for (Vec3 &p : m.positions) p = p * 1e4f;
+    c.push_back({"huge cube (10 km)", m});
+  }
+  {
+    Mesh m = from(primitives::cube());
+    for (Vec3 &p : m.positions) p += Vec3(1e5f, -3e4f, 2e5f);
+    c.push_back({"cube far from origin", m});
+  }
+  {
+    Mesh m = from(primitives::cube());
+    append(m, *primitives::cube(2.0f), Mat4::trs({2.6f, 0.3f, 0}, Quat::euler({0, 25, 15}), {1, 1, 1}));
+    c.push_back({"two boxes, tilted target", m});
+  }
+  {
+    Mesh m = from(primitives::cube());
+    for (Vec3 &p : m.positions) p.z *= 0.02f;  // a 2 cm wall
+    c.push_back({"thin wall", m});
+  }
+  c.push_back({"subdivided cube (curved quads)", meshops::subdivide(*primitives::cube(), 2, true)});
+  {
+    /* A cube with a tunnel through it (genus 1, faces inside the hole). */
+    Mesh m = from(primitives::cube());
+    std::vector<uint8_t> fs(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) fs[f] = dot(m.face_normal(f), Vec3(0, 0, -1)) > 0.99f;
+    meshops::inset_faces(m, fs, 0.3f);
+    meshops::push_through(m, fs, 1);
+    c.push_back({"cube with a tunnel", m});
+  }
+  return c;
+}
+
+/* Connected face regions grown from a seed (random walk over shared edges). */
+std::vector<uint8_t> grow_region(const Mesh &m, uint32_t seed, int faces, uint32_t &rng) {
+  std::vector<uint8_t> sel(m.face_count(), 0);
+  sel[seed] = 1;
+  std::unordered_map<uint64_t, std::vector<uint32_t>> by_edge;
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (uint32_t i = 0; i < m.face_size(f); i++)
+      by_edge[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])].push_back((uint32_t)f);
+  std::vector<uint32_t> in{seed};
+  for (int k = 1; k < faces; k++) {
+    std::vector<uint32_t> cand;
+    for (uint32_t f : in)
+      for (uint32_t i = 0; i < m.face_size(f); i++)
+        for (uint32_t g : by_edge[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])])
+          if (!sel[g]) cand.push_back(g);
+    if (cand.empty()) break;
+    rng = rng * 1664525u + 1013904223u;
+    uint32_t g = cand[(rng >> 8) % cand.size()];
+    sel[g] = 1;
+    in.push_back(g);
+  }
+  return sel;
+}
+
+}  // namespace ppstress
+
+static void test_pushpull_stress(Report &rep, const Options &o) {
+  using namespace ppstress;
+  using meshops::PushPullResult;
+  rep.title("Push/Pull on odd meshes",
+            "SketchUp-style Push/Pull (meshops::push_pull) on every face and on random face groups of 26 awkward meshes "
+            "(n-gons, concave and non-planar caps, open surfaces, inside-out normals, unwelded and non-manifold "
+            "geometry, slivers, 0.1 mm to 10 km scales, far from the origin), at distances from tiny to huge, "
+            "exactly at the hole and join limits, and NaN / infinity. Every result is checked for broken structure, "
+            "closed meshes for staying closed, and volume for moving the right way.");
+  rep.table({"mesh", "ops", "applied / refused", "moved / walls / hole / join", "problems", "max ms"});
+  const char *kinds[] = {"moved", "walls", "hole", "join"};
+  size_t total_ops = 0, total_problems = 0;
+  std::vector<std::string> examples;
+  std::map<std::string, int> refusals, problem_types;
+  std::set<std::string> seen;
+  for (Case &cs : cases()) {
+    const Mesh &base = cs.mesh;
+    AABB bb;
+    for (Vec3 p : base.positions) bb.add(p);
+    const float scale = std::max(1e-12f, length(bb.max - bb.min));
+    const bool closed = closed_manifold(base);
+    const double v0 = signed_volume(base);
+    /* Volume in the solid's own terms: a pull along the face normal adds solid,
+     * whichever way the normals point (an inside-out cube's solid is outside). */
+    static const double csign = signed_volume(*primitives::cube()) >= 0 ? 1.0 : -1.0;
+    /* Selections: every face (up to 48), then random groups of 2 - 6 faces. */
+    std::vector<std::vector<uint8_t>> sels;
+    uint32_t rng = 1234567u + (uint32_t)cs.name.size();
+    const size_t nf = base.face_count();
+    for (size_t f = 0; f < nf && sels.size() < (o.quick ? 12u : 48u); f++) {
+      size_t pick = nf <= 48 ? f : (f * 7919u) % nf;
+      std::vector<uint8_t> s(nf, 0);
+      s[pick] = 1;
+      sels.push_back(s);
+    }
+    for (int k = 0; k < (o.quick ? 4 : 16); k++) {
+      rng = rng * 1664525u + 1013904223u;
+      sels.push_back(grow_region(base, (rng >> 8) % (uint32_t)nf, 2 + k % 5, rng));
+    }
+    sels.push_back(std::vector<uint8_t>(nf, 1));  // everything: no outline, must refuse
+    if (nf >= 4) {
+      std::vector<uint8_t> two(nf, 0);  // two faces far apart: usually disconnected
+      two[0] = two[nf - 1] = 1;
+      sels.push_back(two);
+    }
+    size_t ops = 0, applied = 0, refused = 0, problems = 0;
+    size_t kind_count[4] = {};
+    double max_ms = 0;
+    for (const auto &sel0 : sels) {
+      meshops::PushPullLimits lim = meshops::push_pull_limits(base, sel0);
+      std::vector<float> ds = {0.0f, 1e-9f * scale, 0.01f * scale, -0.01f * scale, 0.2f * scale, -0.2f * scale, 0.6f * scale,
+                               -0.6f * scale, 3.0f * scale, -3.0f * scale, 1e3f * scale,
+                               std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()};
+      if (lim.through > 0) for (float d : {-lim.through, -lim.through * 0.999f, -lim.through * 1.5f}) ds.push_back(d);
+      if (lim.contact > 0) for (float d : {lim.contact, lim.contact * 0.999f, lim.contact * 1.5f}) ds.push_back(d);
+      for (float d : ds)
+        for (int keep = 0; keep < 2; keep++) {
+          Mesh m = base;
+          std::vector<uint8_t> sel = sel0;
+          PushPullResult res = PushPullResult::Moved;
+          std::string err;
+          ScopedTimer t;
+          bool ok = meshops::push_pull(m, sel, d, keep == 0, &res, &err);
+          max_ms = std::max(max_ms, t.ms());
+          ops++;
+          auto problem = [&](const std::string &what) {
+            problems++;
+            const std::string type = what.substr(0, what.find(" ("));
+            problem_types[type]++;
+            if (const char *dbg = std::getenv("BLENDITY_PP_DEBUG")) {
+              std::string q = dbg;
+              size_t bar = q.find('|');
+              static bool dumped = false;
+              if (!dumped && cs.name.find(q.substr(0, bar)) != std::string::npos && what.find(q.substr(bar + 1)) != std::string::npos) {
+                dumped = true;
+                auto dump = [](const char *title, const Mesh &mm, const std::vector<uint8_t> &fs) {
+                  std::printf("--- %s: %zu verts, %zu faces\n", title, mm.vert_count(), mm.face_count());
+                  for (size_t i = 0; i < mm.vert_count(); i++) std::printf("v%zu %.5f %.5f %.5f\n", i, mm.positions[i].x, mm.positions[i].y, mm.positions[i].z);
+                  for (size_t f = 0; f < mm.face_count(); f++) {
+                    std::printf("f%zu%s n(%.2f %.2f %.2f):", f, f < fs.size() && fs[f] ? "*" : "", mm.face_normal(f).x, mm.face_normal(f).y, mm.face_normal(f).z);
+                    for (uint32_t k = 0; k < mm.face_size(f); k++) std::printf(" %u", mm.face_verts(f)[k]);
+                    std::printf("\n");
+                  }
+                };
+                std::printf("=== %s: %s, d = %g, keep = %d\n", cs.name.c_str(), what.c_str(), d, keep);
+                dump("before", base, sel0);
+                dump("after", m, sel);
+                std::fflush(stdout);
+              }
+            }
+            if (seen.insert(cs.name + "|" + type).second && examples.size() < 150)
+              examples.push_back(strprintf("%s: %s (d = %g, %s, %zu faces selected, result %s)", cs.name.c_str(), what.c_str(), d,
+                                           keep ? "new face" : "merge", (size_t)std::count(sel0.begin(), sel0.end(), 1), kinds[(int)res]));
+          };
+          if (!ok) {
+            refused++;
+            refusals[err]++;
+            if (base.positions != m.positions || base.corner_verts != m.corner_verts) problem("refused but changed the mesh");
+            if (!std::isfinite(d) || std::count(sel0.begin(), sel0.end(), 1) == (long long)nf) continue;
+            continue;
+          }
+          applied++;
+          kind_count[(int)res]++;
+          if (!std::isfinite(d)) { problem("accepted a non-finite distance"); continue; }
+          std::string bad = invalid(m);
+          if (!bad.empty()) { problem(bad); continue; }
+          if (std::count(sel.begin(), sel.end(), 1) == 0 && std::fabs(d) > 1e-7f && res != PushPullResult::Hole && res != PushPullResult::Joined)
+            problem("lost the selection");
+          if (closed && !closed_manifold(m)) problem("a closed mesh came out open / non-manifold");
+          if (closed && std::fabs(d) > 1e-6f * scale) {
+            const double v1 = signed_volume(m), dv = (v1 - v0) * csign;
+            double tol = 1e-4 * (double)scale * scale * scale;
+            if (res == PushPullResult::Hole && dv > tol) problem("a hole added volume");
+            else if (res == PushPullResult::Joined && dv < -tol) problem("a join removed volume");
+            else if ((res == PushPullResult::Moved || res == PushPullResult::Extruded) && dv * d < -tol)
+              problem(strprintf("volume moved the wrong way (%+.3g)", dv));
+            if (v0 * v1 < 0 && std::fabs(v1) > tol) problem("turned inside out");
+          }
+          size_t degen = degenerate_faces(m, scale);
+          if (degen > degenerate_faces(base, scale)) problem(strprintf("new zero-area faces (%zu)", degen - degenerate_faces(base, scale)));
+        }
+    }
+    total_ops += ops;
+    total_problems += problems;
+    rep.row({cs.name, num((double)ops), strprintf("%zu / %zu", applied, refused),
+             strprintf("%zu / %zu / %zu / %zu", kind_count[0], kind_count[1], kind_count[2], kind_count[3]), num((double)problems), f2(max_ms)});
+  }
+  rep.note(strprintf("%zu Push/Pull operations, %zu problems", total_ops, total_problems));
+  for (auto &[why, n] : refusals) rep.note(strprintf("refused %d x: %s", n, why.c_str()));
+  for (auto &[type, n] : problem_types) rep.note(strprintf("problem %d x: %s", n, type.c_str()));
+  for (const std::string &e : examples) rep.note(e);
+
+  /* The interactive operator on the same meshes: P, the mouse swept back and
+   * forth across the view (through the hole and join snaps), then a click,
+   * Esc or a right-click; undo must give the mesh back exactly. */
+  rep.table({"mesh (editor)", "faces tried", "confirmed", "cancelled", "undo exact", "avg frame ms"});
+  Editor ed;
+  ed.init_headless(1000, 700);
+  ed.command("create Cube");
+  ed.step_frame_headless();
+  GameObject *obj = nullptr;
+  ed.scene().for_each([&](GameObject &g) {
+    if (g.name == "Cube" && (!obj || g.id > obj->id)) obj = &g;
+  });
+  if (!obj) return;
+  const uint64_t id = obj->id;
+  const Recti view = ed.scene_view_rect();
+  const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+  auto ev = [](platform::EventType t, int x, int y, int key = 0, int button = 0) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    e.key = key;
+    e.button = button;
+    return e;
+  };
+  size_t total_bad = 0;
+  for (Case &cs : cases()) {
+    if (o.quick && cs.mesh.face_count() > 200) continue;
+    ed.command("edit off");  // out of Edit Mode while the mesh is swapped
+    GameObject *g = ed.scene().find(id);
+    if (!g) break;
+    g->get<MeshFilter>()->mesh = std::make_shared<Mesh>(cs.mesh);
+    ed.commit_change("Push/Pull test mesh");  // one undo step, so undo comes back to this mesh
+    ed.select_object(id);
+    ed.command("edit face");
+    const size_t nf = cs.mesh.face_count();
+    int tried = 0, confirmed = 0, cancelled = 0, exact = 0;
+    ScopedTimer t;
+    int frames = 0;
+    for (size_t k = 0; k < nf && tried < (o.quick ? 3 : 8); k += std::max<size_t>(1, nf / 8), tried++) {
+      GameObject *cur = ed.scene().find(id);
+      if (!cur) break;
+      const std::vector<Vec3> before = cur->get<MeshFilter>()->mesh->positions;
+      ed.command(strprintf("fsel %zu", k));
+      ed.step_frame_headless({ev(platform::EventType::MouseMove, cx, cy)});
+      ed.step_frame_headless({ev(platform::EventType::KeyDown, cx, cy, platform::KEY_P), ev(platform::EventType::KeyUp, cx, cy, platform::KEY_P)});
+      for (int s = 0; s < 24; s++) {  // sweep: up past the join, down past the hole
+        int y = cy + (int)(std::sin(s * 0.55f) * view.h * 0.45f);
+        ed.step_frame_headless({ev(platform::EventType::MouseMove, cx + s * 3, y)});
+        frames++;
+      }
+      const int how = tried % 3;  // click, Esc, right-click
+      if (how == 0) {
+        ed.step_frame_headless({ev(platform::EventType::MouseDown, cx, cy - 60, 0, 0)});
+        ed.step_frame_headless({ev(platform::EventType::MouseUp, cx, cy - 60, 0, 0)});
+        confirmed++;
+        GameObject *after = ed.scene().find(id);
+        if (!after || after->get<MeshFilter>()->mesh->positions == before) { frames += 2; exact++; continue; }  // refused: nothing to undo
+        platform::Event z = ev(platform::EventType::KeyDown, cx, cy, platform::KEY_Z);
+        z.mods = platform::MOD_CTRL;
+        ed.step_frame_headless({z});
+      }
+      else if (how == 1) {
+        ed.step_frame_headless({ev(platform::EventType::KeyDown, cx, cy, platform::KEY_ESCAPE)});
+        cancelled++;
+      }
+      else {
+        ed.step_frame_headless({ev(platform::EventType::MouseDown, cx, cy, 0, 1)});
+        ed.step_frame_headless({ev(platform::EventType::MouseUp, cx, cy, 0, 1)});
+        cancelled++;
+      }
+      frames += 4;
+      GameObject *now = ed.scene().find(id);
+      if (now && now->get<MeshFilter>()->mesh->positions == before) exact++;
+    }
+    total_bad += (size_t)(tried - exact);
+    rep.row({cs.name, std::to_string(tried), std::to_string(confirmed), std::to_string(cancelled), strprintf("%d / %d", exact, tried),
+             f2(t.ms() / std::max(1, frames))});
+  }
+  rep.note(total_bad ? strprintf("%zu interactive Push/Pulls did not restore exactly", total_bad)
+                     : "every interactive Push/Pull was undone or cancelled back to the exact mesh");
+}
 /* ------------------------------------------------------------------ main */
 
 int main(int argc, char **argv) {
@@ -1127,7 +1654,8 @@ int main(int argc, char **argv) {
                {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
-               {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics}};
+               {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
+               {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

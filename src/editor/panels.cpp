@@ -758,6 +758,24 @@ void Editor::draw_inspector(const Recti &r) {
       g->set_local_euler(e);
       mark_changed("Rotate");
     }
+    /* Set Origin (Blender: Object > Set Origin): pick where the pivot goes. */
+    if (g->get<MeshFilter>()) {
+      row = lay.row(u.row_h() + u.px(2));
+      u.label(ir.label_rect(row), "Origin");
+      Recti fr = ir.field_rect(row);
+      int bw = u.font.text_width("Apply") + u.px(16);
+      u.combo(u.id("origin_mode"), {fr.x, fr.y, fr.w - bw - u.px(4), fr.h}, origin_mode_, kOriginModes, kOriginModeCount);
+      u.tooltip("Where the object's origin (pivot) goes. The mesh moves the other way, so nothing\n"
+                "moves on screen. Volume uses the enclosed volume's centre of mass (surface for open meshes).\n"
+                "Blender: Object > Set Origin. Unity: ProBuilder's Center Pivot.");
+      if (u.button({fr.right() - bw, fr.y, bw, fr.h}, "Apply")) set_origin(origin_mode_, origin_target_);
+      if (origin_mode_ == 5) {
+        row = lay.row();
+        u.label(ir.label_rect(row), "  Point (world)");
+        u.vec3_field(u.id("origin_pt"), ir.field_rect(row), origin_target_, 0.05f);
+        u.tooltip("The world position the origin moves to. Expressions work, e.g. \"+=1\".");
+      }
+    }
     /* Multi-object editing (Unity): the edited axis goes to every selected
      * object; typed expressions are evaluated per object ("+=1", L(0,10)). */
     if ((ch || rch) && multi.size() > 1) {
@@ -864,65 +882,70 @@ void Editor::draw_inspector(const Recti &r) {
         }
         if (edit_mode_ && g->id == edit_obj_) {
           InspectorReflector er(*this, u, lay);
-          er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
-          er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
-          Recti r2 = lay.row(u.row_h() + u.px(2));
-          int w3 = (r2.w - u.px(16)) / 3;
-          if (u.button({r2.x + u.px(4), r2.y, w3, r2.h}, "Extrude")) edit_op("extrude");
-          u.tooltip("Extrude selected faces (Ctrl+E). Blender: E.");
-          if (u.button({r2.x + u.px(8) + w3, r2.y, w3, r2.h}, "Inset")) edit_op("inset");
-          u.tooltip("Inset selected faces (Ctrl+I). Blender: I.");
-          if (u.button({r2.x + u.px(12) + w3 * 2, r2.y, w3, r2.h}, "Delete")) edit_op("delete");
-          u.tooltip("Delete selected faces (Del). Blender: X > Faces.");
-          Recti r4 = lay.row(u.row_h() + u.px(2));
-          if (u.button({r4.x + u.px(4), r4.y, w3, r4.h}, "Fill")) edit_op("fill");
-          u.tooltip("Make a face from the selected vertices (Alt+F). Blender: F.");
-          if (u.button({r4.x + u.px(8) + w3, r4.y, w3, r4.h}, "Merge")) edit_op("merge_center");
-          u.tooltip("Weld the selected vertices at their center (Alt+M). Blender: M > At Center.");
-          if (u.button({r4.x + u.px(12) + w3 * 2, r4.y, w3, r4.h}, "Normals")) edit_op("recalc_normals");
-          u.tooltip("Make all faces point outward (Shift+N). Blender: Mesh > Normals > Recalculate Outside.");
-          er.field("Loop Cuts", loop_cuts_, 1, 64);
-          er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
-          Recti r5 = lay.row(u.row_h() + u.px(2));
-          int w2 = (r5.w - u.px(12)) / 2;
-          if (u.button({r5.x + u.px(4), r5.y, w2, r5.h}, "Loop Cut")) edit_op("loopcut");
-          u.tooltip("Cut the quad ring across the selected edge. Hover an edge in the Scene view\nand press Ctrl+R to cut there. Blender: Ctrl+R (Loop Cut and Slide).");
-          if (u.button({r5.x + u.px(8) + w2, r5.y, w2, r5.h}, "Select Loop")) edit_op("select_loop");
-          u.tooltip("Extend the selected edge to its edge loop (or double-click an edge). Blender: Alt+click.");
-          er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
-          er.field("Bevel Segments", bevel_segments_, 1, 64);
-          er.field("Bridge Segments", bridge_segments_, 1, 256);
-          er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
-          Recti r6 = lay.row(u.row_h() + u.px(2));
-          if (u.button({r6.x + u.px(4), r6.y, w3, r6.h}, "Bevel")) edit_op("bevel");
-          u.tooltip("Bevel the selected edges (Ctrl+B). Blender: Ctrl+B.");
-          if (u.button({r6.x + u.px(8) + w3, r6.y, w3, r6.h}, "Bridge")) edit_op("bridge");
-          u.tooltip("Join two selected faces (or two holes) with a tube (Ctrl+Shift+B).\nWorks at any angle and with different vertex counts.\nBlender: Edge > Bridge Edge Loops.");
-          if (u.button({r6.x + u.px(12) + w3 * 2, r6.y, w3, r6.h}, "Push Through")) edit_op("push_through");
-          u.tooltip("Cut a hole through the object along the selected face's normal (Alt+P).\nThe outline is projected onto whatever face it comes out of, even a slanted one.\nTip: Inset first so the hole has a rim.");
-          Recti r7 = lay.row(u.row_h() + u.px(2));
-          int w4 = (r7.w - u.px(20)) / 4;
-          if (u.button({r7.x + u.px(4), r7.y, w4, r7.h}, "Subdivide")) edit_op("subdivide_edges");
-          u.tooltip("Split the selected edges into equal parts. Blender: Subdivide.");
-          if (u.button({r7.x + u.px(8) + w4, r7.y, w4, r7.h}, "Connect")) edit_op("connect");
-          u.tooltip("Split a face between two selected vertices (J). Blender: J.");
-          if (u.button({r7.x + u.px(12) + w4 * 2, r7.y, w4, r7.h}, "Dissolve")) edit_op("dissolve");
-          u.tooltip("Remove the selected edges, merging their faces (Ctrl+X). Blender: Dissolve Edges.");
-          if (u.button({r7.x + u.px(16) + w4 * 3, r7.y, w4, r7.h}, "Collapse")) edit_op("collapse");
-          u.tooltip("Merge each selected edge (or connected group) to its centre. Blender: Collapse.");
-          er.field("Auto Fuse on Contact", auto_fuse_);
-          u.tooltip("Faces extruded or moved onto another face of the mesh merge into it\n(the touching area becomes an opening): bridging by extrusion.");
+          /* Selection mode, then only that mode's operators and their settings
+           * (ProBuilder's Vertex / Edge / Face actions). */
+          {
+            Recti mr = lay.row(u.row_h() + u.px(4));
+            static const char *kModes[] = {"Vertex (1)", "Edge (2)", "Face (3)"};
+            const Icon kIcons[] = {Icon::Vertex, Icon::Grid, Icon::Face};
+            int w3m = (mr.w - u.px(16)) / 3;
+            for (int k = 0; k < 3; k++) {
+              if (u.button({mr.x + u.px(4) + k * (w3m + u.px(4)), mr.y, w3m, mr.h}, kModes[k], (int)elem_ == k, kIcons[k]))
+                set_edit_element((EditElement)k);
+              u.tooltip(k == 0 ? "Vertex select mode: vertex operations." : k == 1 ? "Edge select mode: edge operations." : "Face select mode: face operations.");
+            }
+          }
+          if (elem_ == EditElement::Face) {
+            er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
+            er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
+            er.field("Bridge Segments", bridge_segments_, 1, 256);
+            er.field("Auto Fuse on Contact", auto_fuse_);
+            u.tooltip("Faces extruded or moved onto another face of the mesh merge into it\n(the touching area becomes an opening): bridging by extrusion.");
+          }
+          else if (elem_ == EditElement::Edge) {
+            er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
+            er.field("Bevel Segments", bevel_segments_, 1, 64);
+            er.field("Loop Cuts", loop_cuts_, 1, 64);
+            er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
+            er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
+            er.field("Bridge Segments", bridge_segments_, 1, 256);
+          }
+          else {
+            er.field("Smooth Factor", smooth_factor_, 0.01f, 0.0f, 1.0f);
+          }
+          {
+            /* The mode's operators, three to a row; then the ones every mode has. */
+            std::vector<const EditOpInfo *> mine, common;
+            for (const EditOpInfo &op : edit_op_table())
+              (op.elements == 7 ? common : mine).push_back(&op);
+            mine.erase(std::remove_if(mine.begin(), mine.end(), [&](const EditOpInfo *o) { return !edit_op_available(o->op); }), mine.end());
+            auto grid = [&](const std::vector<const EditOpInfo *> &list) {
+              for (size_t i = 0; i < list.size(); i += 3) {
+                Recti row = lay.row(u.row_h() + u.px(2));
+                int bw3 = (row.w - u.px(16)) / 3;
+                for (size_t k = i; k < std::min(list.size(), i + 3); k++) {
+                  int x = row.x + u.px(4) + (int)(k - i) * (bw3 + u.px(4));
+                  if (u.button({x, row.y, bw3, row.h}, list[k]->label)) edit_tool(list[k]->op);
+                  u.tooltip(list[k]->keys[0] ? strprintf("%s (%s)", list[k]->tip, list[k]->keys) : std::string(list[k]->tip));
+                }
+              }
+            };
+            grid(mine);
+            grid(common);
+          }
           er.field("Proportional Editing", proportional_);
           if (proportional_) {
             er.field("Proportional Radius", prop_radius_, 0.01f, 0.001f, 10000.0f);
             static const char *kFalloff[] = {"Smooth", "Sphere", "Root", "Sharp", "Linear", "Constant"};
             er.enumeration("Falloff", prop_falloff_, kFalloff, 6);
           }
-          Recti r3 = lay.row(u.row_h() + u.px(2));
-          u.label({r3.x + u.px(4), r3.y, er.label_w - u.px(8), r3.h}, "Material Slot");
-          u.int_field(u.id("assign_slot"), {r3.x + er.label_w, r3.y, u.px(60), r3.h}, assign_slot_, 0, 63);
-          if (u.button({r3.x + er.label_w + u.px(66), r3.y, r3.w - er.label_w - u.px(70), r3.h}, "Assign to Faces")) assign_material_to_faces(assign_slot_);
-          u.tooltip("Blender: Material Properties > Assign. Unity: sub-mesh per material.");
+          if (elem_ == EditElement::Face) {  // materials go on faces
+            Recti r3 = lay.row(u.row_h() + u.px(2));
+            u.label({r3.x + u.px(4), r3.y, er.label_w - u.px(8), r3.h}, "Material Slot");
+            u.int_field(u.id("assign_slot"), {r3.x + er.label_w, r3.y, u.px(60), r3.h}, assign_slot_, 0, 63);
+            if (u.button({r3.x + er.label_w + u.px(66), r3.y, r3.w - er.label_w - u.px(70), r3.h}, "Assign to Faces")) assign_material_to_faces(assign_slot_);
+            u.tooltip("Blender: Material Properties > Assign. Unity: sub-mesh per material.");
+          }
         }
         auto &feats = research::features();
         if (!feats.empty()) {
@@ -1406,6 +1429,43 @@ void Editor::draw_render_window(const Recti &r) {
     scene_->render.reflect(ir);
     u.pop_id();
     if (ir.changed) mark_changed("Render Settings");
+  }
+  lay.space(u.px(6));
+  /* Blender: Preferences > System > Cycles Render Devices. Machine-specific,
+   * so the ticks live in the editor prefs, not the scene. */
+  header("Render Devices");
+  {
+    const auto &devs = gpu::devices();
+    RenderSettings &rs = scene_->render;
+    const bool gpu_mode = rs.device == 1;
+    auto device_row = [&](const std::string &title, const std::string &detail, bool on, bool enabled) {
+      Recti row = lay.row(u.row_h() * 2);
+      bool v = on;
+      bool clicked = enabled && u.checkbox({row.x + u.px(4), row.y + u.px(2), u.row_h() - u.px(4), u.row_h() - u.px(4)}, v);
+      u.label({row.x + u.row_h() + u.px(6), row.y, row.w - u.row_h() - u.px(6), u.row_h()}, title, enabled ? u.theme.text_bright : u.theme.text_dim);
+      u.label({row.x + u.row_h() + u.px(6), row.y + u.row_h() - u.px(3), row.w - u.row_h() - u.px(6), u.row_h()}, detail, u.theme.text_dim);
+      return clicked;
+    };
+    if (device_row("CPU", strprintf("%d threads, %s", JobSystem::global().thread_count(), PathTracer::embree_available() && rs.use_embree ? "Embree" : "Blendity BVH"),
+                   !gpu_mode || rs.gpu_with_cpu, gpu_mode)) {
+      rs.gpu_with_cpu = !rs.gpu_with_cpu;
+      mark_changed("Render Devices");
+    }
+    u.tooltip(gpu_mode ? "Tick to render on the CPU alongside the GPUs (combined rendering)." : "Set Device to GPU Compute to use the GPUs.");
+    for (const gpu::DeviceInfo &d : devs) {
+      bool on = !render_devices_off_.count(d.name);
+      std::string detail = strprintf("%s, %s, %llu MB, %s", d.vendor.c_str(), d.type.c_str(), (unsigned long long)d.memory_mb,
+                                     d.hardware_rt ? (rs.hardware_rt ? "ray tracing hardware" : "ray tracing hardware (off)") : "compute (no RT hardware)");
+      if (device_row(d.name, detail, on && gpu_mode, gpu_mode)) {
+        if (on) render_devices_off_.insert(d.name);
+        else render_devices_off_.erase(d.name);
+        save_prefs();
+        vp_pt_hash_ = 0;
+      }
+    }
+    if (devs.empty()) u.label(lay.row(), gpu::compiled_in() ? "No Vulkan GPU found - rendering on the CPU" : "This build has no GPU rendering", u.theme.text_dim);
+    else if (!gpu_mode) u.label(lay.row(), "Device is CPU: set it to GPU Compute above to use these", u.theme.text_dim);
+    if (!final_pt_.gpu_error().empty()) u.label(lay.row(), final_pt_.gpu_error(), u.theme.warning);
   }
   lay.space(u.px(6));
   header("World / Environment Lighting");
