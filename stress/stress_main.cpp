@@ -1420,7 +1420,7 @@ static void test_pushpull_stress(Report &rep, const Options &o) {
             "closed meshes for staying closed, and volume for moving the right way.");
   rep.table({"mesh", "ops", "applied / refused", "moved / walls / hole / join", "problems", "max ms"});
   const char *kinds[] = {"moved", "walls", "hole", "join"};
-  size_t total_ops = 0, total_problems = 0;
+  size_t total_ops = 0, total_problems = 0, overlap_results = 0;
   std::vector<std::string> examples;
   std::map<std::string, int> refusals, problem_types;
   std::set<std::string> seen;
@@ -1496,6 +1496,11 @@ static void test_pushpull_stress(Report &rep, const Options &o) {
                 std::printf("=== %s: %s, d = %g, keep = %d\n", cs.name.c_str(), what.c_str(), d, keep);
                 dump("before", base, sel0);
                 dump("after", m, sel);
+                {
+                  std::vector<std::pair<uint32_t, uint32_t>> pairs;
+                  meshops::overlapping_faces(m, 2e-3f * scale, &pairs);
+                  for (auto &pr : pairs) std::printf("overlap f%u f%u\n", pr.first, pr.second);
+                }
                 std::fflush(stdout);
               }
             }
@@ -1529,6 +1534,14 @@ static void test_pushpull_stress(Report &rep, const Options &o) {
           }
           size_t degen = degenerate_faces(m, scale);
           if (degen > degenerate_faces(base, scale)) problem(strprintf("new zero-area faces (%zu)", degen - degenerate_faces(base, scale)));
+          /* Faces on top of each other (or a hair apart): the z-fighting artifacts. */
+          if (m.face_count() < 400) {
+            const size_t ov = meshops::overlapping_faces(m, 2e-3f * scale), ov0 = meshops::overlapping_faces(base, 2e-3f * scale);
+            if (ov > ov0) {
+              overlap_results++;
+              if (std::getenv("BLENDITY_PP_DEBUG")) problem(strprintf("new overlapping faces (%zu)", ov - ov0));
+            }
+          }
         }
     }
     total_ops += ops;
@@ -1537,6 +1550,9 @@ static void test_pushpull_stress(Report &rep, const Options &o) {
              strprintf("%zu / %zu / %zu / %zu", kind_count[0], kind_count[1], kind_count[2], kind_count[3]), num((double)problems), f2(max_ms)});
   }
   rep.note(strprintf("%zu Push/Pull operations, %zu problems", total_ops, total_problems));
+  rep.note(strprintf("%zu results with faces newly on top of each other (z-fighting; 1,502 before round 13's fixes): mostly holes "
+                     "through curved surfaces and the deliberately broken inputs (unwelded faces, inside-out normals)",
+                     overlap_results));
   for (auto &[why, n] : refusals) rep.note(strprintf("refused %d x: %s", n, why.c_str()));
   for (auto &[type, n] : problem_types) rep.note(strprintf("problem %d x: %s", n, type.c_str()));
   for (const std::string &e : examples) rep.note(e);

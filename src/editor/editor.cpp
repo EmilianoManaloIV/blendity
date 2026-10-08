@@ -365,6 +365,7 @@ void Editor::frame(std::vector<Event> &events) {
     }
   }
   if (cam_.update(now)) ui_.redraw = true;
+  update_camera_focus();
   /* Live preview: re-render the preview when anything it depends on changes
    * (at most 4 times a second, never over a full render in progress). */
   if (scene_->render.live_preview && !playing_ && (!rendering_ || render_preview_) && now - live_preview_time_ > 0.25 &&
@@ -1968,6 +1969,13 @@ void Editor::mesh_op(const std::string &op) {
       n++;
       continue;
     }
+    if (op == "delete_loose") {
+      Mesh &m = *mesh_make_mutable(mf->mesh);
+      const meshops::LooseCounts c = meshops::delete_loose(m);
+      if (c.verts || c.edges) n++;
+      Log::info("Delete Loose on '%s': %zu vertices, %zu wire edges", g->name.c_str(), c.verts, c.edges);
+      continue;
+    }
     if (op == "mirror_x" || op == "mirror_y" || op == "mirror_z") {
       /* UModeler's Mirror: the mirrored half added for good (the Mirror modifier, applied). */
       Mesh &m = *mesh_make_mutable(mf->mesh);
@@ -2331,6 +2339,7 @@ void Editor::run_console_command(const std::string &line) {
     /* drawmode rect <corner|center|3point>, drawmode circle <center|2point|3point>, drawmode square <on|off> */
     const std::string s = to_lower(arg(1, "")), v = to_lower(arg(2, ""));
     if (s == "square") draw_uniform_ = v != "off";
+    else if (s == "facecenter") draw_face_center_ = v != "off";
     else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
     else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
     else Log::warn("drawmode rect <corner|center|3point> | circle <center|2point|3point> | square <on|off>");
@@ -2365,6 +2374,16 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "moveasset") move_project_entry(fs::join(project_root_, arg(1, "")), fs::join(project_root_, arg(2, "Assets")));  // moveasset <Assets/x> <Assets/dir>
   else if (c == "renameasset") rename_project_entry(fs::join(project_root_, arg(1, "")), arg(2, ""));  // renameasset <Assets/x.mat> <new name>
   else if (c == "deleteasset") delete_project_entry(fs::join(project_root_, arg(1, "")));  // deleteasset <Assets/x>: to the Recycle Bin / Trash
+  else if (c == "newslotmat") {
+    /* newslotmat <slot> [preset]: the Inspector's New Material (of Type) on a slot of the selection */
+    if (GameObject *a = active_object()) {
+      const int slot = std::max(0, std::atoi(arg(1, "0").c_str()));
+      auto *mr = a->get<MeshRenderer>();
+      MaterialPtr cur = mr && slot < (int)mr->materials.size() ? mr->materials[(size_t)slot] : nullptr;
+      std::string preset = t.size() > 2 ? line.substr(line.find(t[2])) : "";
+      assign_material(a, slot, new_slot_material(preset.empty() ? cur : nullptr, preset));
+    }
+  }
   else if (c == "facemat") {
     /* facemat <Assets/x.mat | scene material name>: the selected faces use that material */
     MaterialPtr m = material_asset(arg(1, ""));
@@ -2421,6 +2440,31 @@ void Editor::run_console_command(const std::string &line) {
       }
       sync_vert_face_selection(false);
     }
+  }
+  else if (c == "position" && t.size() >= 4) {
+    /* position <x> <y> <z>: the selected objects' world position */
+    const Vec3 p((float)std::atof(t[1].c_str()), (float)std::atof(t[2].c_str()), (float)std::atof(t[3].c_str()));
+    for (GameObject *g : selected_objects(false)) g->set_world_position(p);
+    mark_changed("Position");
+  }
+  else if (c == "focus") {
+    /* focus <x> <y> <z> [fstop]: the selected camera keeps that point in focus (depth of field on) */
+    GameObject *a = active_object();
+    Camera *cam = a ? a->get<Camera>() : nullptr;
+    if (!cam) Log::warn("focus: select a camera");
+    else {
+      cam->dof = true;
+      cam->focus_track = true;
+      cam->focus_point = Vec3((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
+      if (t.size() > 4) cam->f_stop = std::max(0.1f, (float)std::atof(t[4].c_str()));
+      update_camera_focus();
+      mark_changed("Camera Focus");
+    }
+  }
+  else if (c == "insetmode") {
+    /* insetmode individual|region [amount]: Inset's Individual switch and its amount (a fraction) or thickness */
+    inset_individual_ = to_lower(arg(1, "individual")) != "region";
+    if (t.size() > 2) (inset_individual_ ? inset_amount_ : inset_thickness_) = std::max(0.0f, (float)std::atof(t[2].c_str()));
   }
   else if (c == "editop") {
     const std::string op = arg(1, "fill");

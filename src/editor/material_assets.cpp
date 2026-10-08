@@ -48,6 +48,18 @@ MaterialPtr Editor::new_material_asset(const MaterialPtr &src, bool replace_in_s
   return m;
 }
 
+/* The Inspector's New Material: an asset in Assets/Materials from the start (Unity),
+ * a copy of the slot's material or of a preset. */
+MaterialPtr Editor::new_slot_material(const MaterialPtr &cur, const std::string &preset) {
+  MaterialPtr m = !preset.empty() ? make_material_preset(preset)
+                  : cur           ? std::make_shared<Material>(*cur)
+                                  : make_material("New Material", Vec3(0.8f));
+  m->name = !preset.empty() ? preset : cur ? cur->name + " Copy" : "New Material";
+  m->asset_path.clear();
+  MaterialPtr a = new_material_asset(m, false);
+  return a ? a : m;
+}
+
 void Editor::assign_material(GameObject *g, int slot, const MaterialPtr &m) {
   if (!g || slot < 0) return;
   auto *mr = g->get<MeshRenderer>();

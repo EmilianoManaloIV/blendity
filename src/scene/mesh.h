@@ -361,6 +361,19 @@ size_t draft(Mesh &m, const std::vector<uint8_t> &face_sel, float angle_deg, Vec
 void radial_array(Mesh &m, int count, int axis, float angle_deg, float merge_dist);
 /* Rounded corners for a drawn outline (Plasticity's curve fillet): each corner becomes an arc. */
 std::vector<Vec3> fillet_polygon(const std::vector<Vec3> &pts, bool closed, float radius, int segments, Vec3 normal);
+/* Inset the selected faces as one region (Blender: Inset Faces, Individual off): the outline moves
+ * in by `thickness`; the inner faces stay selected. */
+void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness);
+/* Blender's Clean Up > Delete Loose. vmask (optional): only within these vertices. */
+struct LooseCounts {
+  size_t verts = 0, edges = 0, faces = 0;
+};
+LooseCounts delete_loose(Mesh &m, bool verts = true, bool edges = true, bool faces = false, const std::vector<uint8_t> *vmask = nullptr);
+/* Pairs of faces lying in one plane (within plane_dist; <= 0: 1e-4 of the mesh's size) and covering
+ * some of the same area: z-fighting "overlapping faces". */
+size_t overlapping_faces(const Mesh &m, float plane_dist = 0.0f, std::vector<std::pair<uint32_t, uint32_t>> *pairs = nullptr);
+/* The face's area-weighted centre (Plasticity's face centre snap), not the average of its corners. */
+Vec3 face_area_center(const Mesh &m, size_t f);
 /* A closed shape drawn across several coplanar faces: cut into all of them. inner_faces gets the
  * faces it encloses; returns one of them, or -1 when no face in the plane is touched. */
 long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop, Vec3 normal, std::vector<size_t> *inner_faces = nullptr,

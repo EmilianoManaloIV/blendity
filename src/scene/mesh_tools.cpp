@@ -975,15 +975,32 @@ float sweep_limit(const Mesh &m, const Region &r, Vec3 dir, float tol) {
     Vec2 c{a.x + ab.x * t - p.x, a.y + ab.y * t - p.y};
     return std::sqrt(c.x * c.x + c.y * c.y);
   };
-  auto inside = [&](Vec2 p) {
+  auto on_outline = [&](Vec2 p) {
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+      if (seg_dist(p, poly[i], poly[j]) <= tol) return true;
+    return false;
+  };
+  auto strictly_inside = [&](Vec2 p) {
     if (p.x < lo.x - tol || p.y < lo.y - tol || p.x > hi.x + tol || p.y > hi.y + tol) return false;
     bool in = false;
     for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
       const Vec2 a = poly[i], b = poly[j];
-      if (seg_dist(p, a, b) <= tol) return true;  // on the outline counts
       if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) in = !in;
     }
     return in;
+  };
+  /* A point is in the way when it is inside the swept outline. One on the
+   * outline only counts if its edge heads inward: a neighbouring wall the
+   * outline slides along (its edges lie on the outline or lead away from it)
+   * is not an obstacle - stopping there left a hair-thin wall behind. */
+  auto in_way = [&](Vec2 p, Vec2 other) {
+    if (!on_outline(p)) return strictly_inside(p);
+    const Vec2 d = other - p;
+    const float len = std::sqrt(d.x * d.x + d.y * d.y);
+    if (len < 1e-20f) return false;
+    const float step = std::min(len * 0.5f, std::max(4.0f * tol, len * 1e-3f));
+    const Vec2 q{p.x + d.x / len * step, p.y + d.y / len * step};
+    return !on_outline(q) && strictly_inside(q);
   };
   std::vector<uint8_t> in_region(m.face_count(), 0);
   for (uint32_t f : r.faces) in_region[f] = 1;
@@ -1005,8 +1022,8 @@ float sweep_limit(const Mesh &m, const Region &r, Vec3 dir, float tol) {
           std::min(pa.y, pb.y) > hi.y + tol)
         continue;
       const float ha = dot(da, dir), hb = dot(db, dir);
-      if (inside(pa)) take(ha);
-      if (inside(pb)) take(hb);
+      if (in_way(pa, pb)) take(ha);
+      if (in_way(pb, pa)) take(hb);
       /* Crossings with the outline's sides. */
       for (size_t k = 0, j = poly.size() - 1; k < poly.size(); j = k++) {
         const Vec2 c = poly[j], d = poly[k];
@@ -1140,6 +1157,27 @@ static std::vector<uint32_t> tidy_new_geometry(Mesh &m, const std::vector<Vec3> 
       loops[f].pop_back();
       if (has_uv) luvs[f].pop_back();
     }
+    /* Out and straight back (a b a): a spike with no area, left where a stretched
+     * face's moved side landed on its own far side. Both corners go. */
+    for (bool again = true; again && loops[f].size() >= 3;) {
+      again = false;
+      auto &lp = loops[f];
+      const size_t n = lp.size();
+      for (size_t i = 0; i < n; i++) {
+        const size_t prev = (i + n - 1) % n, next = (i + 1) % n;
+        if (lp[prev] != lp[next]) continue;
+        /* Remove the tip and one copy of the corner it returns to. */
+        size_t first = std::min(i, next), second = std::max(i, next);
+        lp.erase(lp.begin() + (long)second);
+        lp.erase(lp.begin() + (long)first);
+        if (has_uv) {
+          luvs[f].erase(luvs[f].begin() + (long)second);
+          luvs[f].erase(luvs[f].begin() + (long)first);
+        }
+        again = true;
+        break;
+      }
+    }
   }
   /* Opposite twins: the same corners, reversed. */
   std::map<std::vector<uint32_t>, std::vector<uint32_t>> by_set;
@@ -1185,6 +1223,91 @@ static void remap_selection(std::vector<uint8_t> &sel, const std::vector<uint32_
   for (size_t f = 0; f < sel.size() && f < remap.size(); f++)
     if (sel[f] && remap[f] != UINT32_MAX && remap[f] < faces) out[remap[f]] = 1;
   sel = std::move(out);
+}
+
+/* Blender's Dissolve Degenerate for faces flattened onto a line (a side a push
+ * or pull has reduced to no width): the face goes and its corners are threaded
+ * into the face across its longest edge, so every edge keeps two faces and no
+ * zero-area face is left to flicker or turn inside out. Returns faces removed. */
+static size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float eps, const std::vector<Vec3> &old) {
+  /* Only faces this operation changed (a corner moved or new), never the selection
+   * itself: slivers that were there before are the user's to keep. */
+  auto changed = [&](uint32_t v) { return v >= old.size() || length(m.positions[v] - old[v]) > eps * 1e-3f; };
+  size_t removed = 0;
+  for (int round = 0; round < 64; round++) {
+    size_t victim = SIZE_MAX;
+    uint32_t ea = 0, eb = 0;
+    for (size_t f = 0; f < m.face_count() && victim == SIZE_MAX; f++) {
+      const uint32_t n = m.face_size(f), *v = m.face_verts(f);
+      if (n < 3 || (f < face_sel.size() && face_sel[f])) continue;
+      bool any = false;
+      for (uint32_t i = 0; i < n; i++) any = any || changed(v[i]);
+      if (!any) continue;
+      /* The longest edge, and every corner within eps of its line. */
+      float best = -1;
+      uint32_t bi = 0;
+      for (uint32_t i = 0; i < n; i++) {
+        const float l = length(m.positions[v[(i + 1) % n]] - m.positions[v[i]]);
+        if (l > best) best = l, bi = i;
+      }
+      if (best < eps) continue;
+      const Vec3 a = m.positions[v[bi]], d = (m.positions[v[(bi + 1) % n]] - a) / best;
+      bool line = true;
+      for (uint32_t i = 0; i < n && line; i++) {
+        const Vec3 q = m.positions[v[i]] - a;
+        line = length(q - d * dot(q, d)) < eps;
+      }
+      if (!line) continue;
+      victim = f;
+      ea = v[bi];
+      eb = v[(bi + 1) % n];
+    }
+    if (victim == SIZE_MAX) break;
+    /* The face across the long edge (it runs eb -> ea there). */
+    size_t across = SIZE_MAX;
+    uint32_t at = 0;
+    for (size_t g = 0; g < m.face_count() && across == SIZE_MAX; g++) {
+      if (g == victim) continue;
+      const uint32_t n = m.face_size(g), *v = m.face_verts(g);
+      for (uint32_t i = 0; i < n; i++)
+        if (v[i] == eb && v[(i + 1) % n] == ea) {
+          across = g;
+          at = i;
+          break;
+        }
+    }
+    /* The rest of the flattened face, from eb round to ea. */
+    const uint32_t vn = m.face_size(victim), *vv = m.face_verts(victim);
+    uint32_t start = 0;
+    for (uint32_t i = 0; i < vn; i++)
+      if (vv[i] == eb) start = i;
+    std::vector<uint32_t> path;
+    for (uint32_t k = 1; k + 1 < vn; k++) path.push_back(vv[(start + k) % vn]);
+    FaceBuilder fb(m);
+    std::vector<uint8_t> sel;
+    for (size_t g = 0; g < m.face_count(); g++) {
+      if (g == victim) continue;
+      const uint32_t n = m.face_size(g), *v = m.face_verts(g), b0 = m.face_offsets[g];
+      std::vector<uint32_t> loop;
+      std::vector<Vec2> uv;
+      for (uint32_t i = 0; i < n; i++) {
+        loop.push_back(v[i]);
+        if (fb.has_uv) uv.push_back(m.uvs[b0 + i]);
+        if (g == across && i == at)
+          for (uint32_t p : path) {
+            loop.push_back(p);
+            if (fb.has_uv) uv.push_back(m.uvs[b0 + i]);
+          }
+      }
+      fb.add(loop.data(), loop.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(g), m.smooth_of(g));
+      sel.push_back(g < face_sel.size() ? face_sel[g] : 0);
+    }
+    fb.commit(m);
+    face_sel = std::move(sel);
+    removed++;
+  }
+  if (removed) m.touch();
+  return removed;
 }
 
 }  // namespace
@@ -1246,7 +1369,8 @@ PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_
   return lim;
 }
 
-static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, PushPullResult *result, std::string *err) {
+static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, PushPullResult *result, std::string *err,
+                           int depth = 0) {
   if (result) *result = PushPullResult::Moved;
   face_sel.resize(m.face_count(), 0);
   std::vector<Region> regions = face_regions(m, face_sel);
@@ -1310,11 +1434,61 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
       for (uint32_t g : ef.at(L[i], L[(i + 1) % L.size()]))
         if (!in_region[g] && dot(-r.normal, m.face_normal(g)) > 0.02f) exits = true;
   }
+  /* Flush: walls beside the region that run the way it moves (a pulled block
+   * pushed back down, a pocket pulled back up, the next block's side) end
+   * at some distance. There the region is level with the surface they lead
+   * to, and those walls have no height left: it goes exactly there, the
+   * walls vanish and the faces merge back (SketchUp). Asked for more, it
+   * carries on from there as a second step, so no wall is ever turned
+   * inside out and no hair-thin wall or doubled face is left behind. */
+  bool to_flush = false;
+  bool flat_region = true;  // flush steps only for a flat selection (a curved one has no single plane to be level with)
+  for (uint32_t f : r.faces) flat_region = flat_region && dot(normalize(m.face_normal(f)), r.normal) > 0.9999f;
+  if (!exits && !joining && depth < 8 && flat_region) {
+    const Vec3 dir = r.normal * (distance > 0 ? 1.0f : -1.0f);
+    float flush = -1.0f;
+    const std::vector<uint32_t> &L = r.loops[0];
+    const std::unordered_set<uint32_t> outline_set(L.begin(), L.end());
+    /* Side walls: faces at the outline (along a side or at a corner) that contain the direction. */
+    for (size_t g = 0; g < m.face_count(); g++) {
+      if (in_region[g] || std::fabs(dot(normalize(m.face_normal(g)), r.normal)) > 0.01f) continue;
+      uint32_t at = UINT32_MAX;
+      for (uint32_t k = 0; k < m.face_size(g) && at == UINT32_MAX; k++)
+        if (outline_set.count(m.face_verts(g)[k])) at = m.face_verts(g)[k];
+      if (at == UINT32_MAX) continue;
+      float ext = 0.0f;
+      for (uint32_t k = 0; k < m.face_size(g); k++) ext = std::max(ext, dot(m.positions[m.face_verts(g)[k]] - m.positions[at], dir));
+      if (ext > 2.0f * snap && (flush < 0 || ext < flush)) flush = ext;
+    }
+    const float other = distance < 0 ? lim.behind : lim.ahead;  // the surface beyond: the usual stop
+    if (flush > 0 && (other < 0 || flush < other - 2.0f * snap)) {
+      if (std::fabs(distance) > flush + snap) {
+        const float first = distance > 0 ? flush : -flush;
+        if (!push_pull_impl(m, face_sel, first, merge_coplanar, result, err, depth + 1)) return false;
+        PushPullResult rest = PushPullResult::Moved;
+        std::string e2;
+        std::vector<uint8_t> keep = face_sel;
+        const size_t nsel = std::count(face_sel.begin(), face_sel.end(), 1);
+        if (nsel && push_pull_impl(m, face_sel, distance - first, merge_coplanar, &rest, &e2, depth + 1)) {
+          if (result && rest != PushPullResult::Moved) *result = rest;
+        }
+        else face_sel = keep;  // nothing more to do from there (merged away, or blocked)
+        m.touch();
+        return true;
+      }
+      if (std::fabs(distance) >= flush - snap) {
+        distance = distance > 0 ? flush : -flush;
+        to_flush = true;
+      }
+    }
+  }
   /* Otherwise never through the mesh: a push stops just short of the surface
    * behind (the far side), a pull just short of one in front - passing them
    * would turn the solid inside out or make it cut through itself. */
-  if (distance < 0 && !exits && lim.behind > 0) distance = std::max(distance, -std::max(0.0f, lim.behind - 2.0f * snap));
-  if (distance > 0 && !joining && lim.ahead > 0) distance = std::min(distance, std::max(0.0f, lim.ahead - 2.0f * snap));
+  if (!to_flush) {
+    if (distance < 0 && !exits && lim.behind > 0) distance = std::max(distance, -std::max(0.0f, lim.behind - 2.0f * snap));
+    if (distance > 0 && !joining && lim.ahead > 0) distance = std::min(distance, std::max(0.0f, lim.ahead - 2.0f * snap));
+  }
   if (std::fabs(distance) < 1e-7f) return true;
   if (joining) {
     RegionRays up = cast_region(m, r, r.normal, false);
@@ -1410,6 +1584,41 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
       return true;
     }
   }
+  /* Every face around the outline (along its sides and at its corners) contains
+   * the direction, and every side has one: no wall is needed anywhere, so the
+   * region's corners simply slide and those faces stretch or shrink with them
+   * (Blender's move along the normal). Inserting moved copies instead left the
+   * old corners in faces that touch the outline only at a corner - a fold that
+   * lay outside the solid, on top of other faces. */
+  if (!joining) {
+    const std::vector<uint32_t> &L = r.loops[0];
+    const std::unordered_set<uint32_t> outline_set(L.begin(), L.end());
+    bool slide = true;
+    for (size_t i = 0; i < L.size() && slide; i++) {
+      bool has = false;
+      for (uint32_t g : ef.at(L[i], L[(i + 1) % L.size()])) has = has || !in_region[g];
+      slide = has;
+    }
+    for (size_t g = 0; g < m.face_count() && slide; g++) {
+      if (in_region[g]) continue;
+      bool touches = false;
+      for (uint32_t k = 0; k < m.face_size(g) && !touches; k++) touches = outline_set.count(m.face_verts(g)[k]) > 0;
+      if (touches && std::fabs(dot(normalize(m.face_normal(g)), r.normal)) > 1e-3f) slide = false;
+    }
+    if (slide && (merge_coplanar || dot(dvec, r.normal) < 0.0f)) {
+      std::unordered_set<uint32_t> rv;
+      for (uint32_t f : r.faces)
+        for (uint32_t i = 0; i < m.face_size(f); i++) rv.insert(m.face_verts(f)[i]);
+      for (uint32_t v : rv) m.positions[v] += dvec;
+      m.touch();
+      const size_t keep_faces = m.face_count();
+      remap_selection(face_sel, tidy_new_geometry(m, old_positions, weld), m.face_count());
+      dissolve_line_faces(m, face_sel, weld, old_positions);
+      if (result) *result = m.face_count() < keep_faces && std::count(face_sel.begin(), face_sel.end(), 1) == 0 ? PushPullResult::Hole : PushPullResult::Moved;
+      m.touch();
+      return true;
+    }
+  }
   std::unordered_map<uint32_t, uint32_t> newv;
   for (uint32_t f : r.faces)
     for (uint32_t i = 0; i < m.face_size(f); i++) {
@@ -1425,6 +1634,11 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
   struct Wall { uint32_t v[4]; int mat; };
   std::vector<Wall> walls;
   std::unordered_set<uint32_t> touched;
+  struct Side {
+    uint32_t a, b, N;
+    bool in_plane, coplanar, skip;
+  };
+  std::vector<Side> sides;
   for (size_t i = 0; i < L.size(); i++) {
     uint32_t a = L[i], b = L[(i + 1) % L.size()];
     uint32_t N = UINT32_MAX;
@@ -1435,13 +1649,32 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
     const Vec3 pa = m.positions[a], pb = m.positions[b], qa = m.positions[newv[a]], qb = m.positions[newv[b]];
     const float side = length(pb - pa), travel = std::max(length(qa - pa), length(qb - pb));
     const bool flat_wall = length(cross(qa - pb, qb - pa)) * 0.5f < 1e-4f * side * travel;
-    if (flat_wall && N == UINT32_MAX) continue;  // an open edge: no wall needed
-    bool coplanar = false;
-    if ((merge_coplanar || flat_wall) && N != UINT32_MAX) {
+    Side sd{a, b, N, false, false, flat_wall && N == UINT32_MAX};  // an open edge sliding along itself: no wall needed
+    if (!sd.skip && N != UINT32_MAX) {
       Vec3 nN = m.face_normal(N), pN = m.positions[a];
-      coplanar = std::fabs(dot(m.positions[newv[a]] - pN, nN)) < snap && std::fabs(dot(m.positions[newv[b]] - pN, nN)) < snap;
+      sd.in_plane = std::fabs(dot(m.positions[newv[a]] - pN, nN)) < snap && std::fabs(dot(m.positions[newv[b]] - pN, nN)) < snap;
+      /* Moving into the neighbour's own area (a push along a coplanar side): a new
+       * wall would lie on top of it - two faces in one place. The neighbour shrinks
+       * instead, even with Merge Coplanar off. */
+      const Vec3 into = m.face_center(N) - (pa + pb) * 0.5f;
+      const bool onto_neighbour = sd.in_plane && dot(dvec, into) > 0.0f;
+      sd.coplanar = sd.in_plane && (merge_coplanar || flat_wall || onto_neighbour);
     }
-    if (coplanar) {
+    sides.push_back(sd);
+  }
+  /* A neighbour that stretches along one side stretches along all of its sides that
+   * stay in its plane: a separate wall there would cover the strip it grows into. */
+  {
+    std::unordered_set<uint32_t> stretched;
+    for (const Side &sd : sides)
+      if (sd.coplanar) stretched.insert(sd.N);
+    for (Side &sd : sides)
+      if (sd.in_plane && !sd.coplanar && stretched.count(sd.N)) sd.coplanar = true;
+  }
+  for (const Side &sd : sides) {
+    if (sd.skip) continue;
+    const uint32_t a = sd.a, b = sd.b, N = sd.N;
+    if (sd.coplanar) {
       insert[((uint64_t)b << 32) | a] = {newv[b], newv[a]};
       touched.insert(a);
       touched.insert(b);
@@ -1547,6 +1780,7 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
   for (uint32_t f : r.faces)
     if (f < remap.size() && remap[f] != UINT32_MAX) face_sel[remap[f]] = 1;
   remap_selection(face_sel, tidy_new_geometry(m, old_positions, weld), m.face_count());
+  dissolve_line_faces(m, face_sel, weld, old_positions);
   if (result) *result = walls.empty() ? PushPullResult::Moved : PushPullResult::Extruded;
   if (joining) {
     /* The cap now lies on the face in front: join them (an opening there). */

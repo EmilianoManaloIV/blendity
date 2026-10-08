@@ -5,6 +5,7 @@
 //   * Rendered viewport + final render: progressive path tracer (Blender: Cycles)
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
+#include "../render/dof.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -409,6 +410,30 @@ static PTLens camera_lens(const Camera *cam, float aspect) {
   return l;
 }
 
+void Editor::camera_dof(RenderTarget &rt, const Mat4 &view, const Mat4 &proj, Vec3 eye, Vec3 forward, const Camera *cam, float aspect, float vfov_deg) {
+  if (!cam || !cam->dof || cam->orthographic) return;
+  DofParams d;
+  d.inv_view_proj = (proj * view).inverse();
+  d.eye = eye;
+  d.forward = normalize(forward);
+  d.aperture_radius = cam->aperture_radius(aspect);
+  d.focus_distance = std::max(0.01f, cam->focus_distance);
+  d.tan_half_vfov = std::tan(std::max(0.1f, vfov_deg) * 0.5f * kDeg2Rad);
+  d.far_distance = cam->far_clip;
+  d.max_radius_px = std::max(4.0f, rt.height * 0.05f);
+  d.samples = rt.width * rt.height > 600000 ? 48 : 64;
+  apply_depth_of_field(rt, d);
+}
+
+void Editor::update_camera_focus() {
+  scene_->for_each([&](GameObject &g) {
+    Camera *c = g.get<Camera>();
+    if (!c || !c->dof || !c->focus_track) return;
+    const float d = dot(c->focus_point - g.world_position(), normalize(g.world_rotation().rotate({0, 0, 1})));
+    if (d > 0.01f && std::fabs(d - c->focus_distance) > 1e-5f) c->focus_distance = d;
+  });
+}
+
 void Editor::start_final_render(bool preview, bool open_window) {
   const RenderSettings &rs = scene_->render;
   const int pct = preview ? std::max(1, rs.percent * rs.preview_percent / 100) : rs.percent;
@@ -649,6 +674,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     cam_preview_img_.resize(w, h);
     cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
     render_deferred(cam_preview_r3d_, cam_preview_rt_, v, p, eye, true, true, cam);
+    camera_dof(cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), cam, aspect, cam->vertical_fov_deg(aspect));
   }
   Recti box{view.right() - w - u.px(12), view.bottom() - h - u.px(12) - u.row_h(), w, h};
   cam_preview_rect_ = {box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)};  // clicks here stay off the scene

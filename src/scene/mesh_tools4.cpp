@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <unordered_map>
 
 namespace bl::meshops {
@@ -515,5 +516,258 @@ long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop_in, Vec3 n, std:
   if (last < 0 && pieces == 0) return fail("the shape doesn't overlap a face");
   return last;
 }
+
+
+/* Inset as one region (Blender's Inset Faces with Individual off): only the
+ * outline of the selected faces moves inward, by `thickness` measured in each
+ * face's plane (mitred at corners); edges between selected faces stay where
+ * they are, and a ring of quads joins the old outline to the new one. */
+void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness) {
+  face_sel.resize(m.face_count(), 0);
+  if (!std::isfinite(thickness)) return;
+  /* Outline edges: used by exactly one selected face. */
+  std::unordered_map<uint64_t, int> sel_uses;
+  for (size_t f = 0; f < m.face_count(); f++)
+    if (face_sel[f])
+      for (uint32_t k = 0; k < m.face_size(f); k++) sel_uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+  /* Each outline vertex moves along the mean of its outline edges' inward directions. */
+  std::unordered_map<uint32_t, Vec3> dir_sum;
+  std::unordered_map<uint32_t, std::vector<Vec3>> dirs;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (!face_sel[f]) continue;
+    const Vec3 n = normalize(m.face_normal(f));
+    const uint32_t fn = m.face_size(f), *fv = m.face_verts(f);
+    for (uint32_t k = 0; k < fn; k++) {
+      const uint32_t a = fv[k], b = fv[(k + 1) % fn];
+      if (sel_uses[Mesh::edge_key(a, b)] != 1) continue;
+      const Vec3 e = m.positions[b] - m.positions[a];
+      if (length(e) < 1e-12f || !std::isfinite(n.x)) continue;
+      const Vec3 in = normalize(cross(n, e));  // left of the edge: into the face
+      for (uint32_t v : {a, b}) {
+        dir_sum[v] += in;
+        dirs[v].push_back(in);
+      }
+    }
+  }
+  if (dir_sum.empty()) return;
+  std::unordered_map<uint32_t, uint32_t> inner;
+  for (auto &kv : dir_sum) {
+    const float l = length(kv.second);
+    if (l < 1e-6f) continue;  // a hairpin: leave it
+    const Vec3 d = kv.second / l;
+    float c = 1.0f;
+    for (const Vec3 &e : dirs[kv.first]) c = std::min(c, dot(d, e));
+    inner[kv.first] = m.add_vert(m.positions[kv.first] + d * (thickness / std::max(0.25f, c)));
+  }
+  FaceBuilder fb(m);
+  std::vector<uint8_t> sel;
+  std::vector<uint32_t> nv;
+  std::vector<Vec2> nt;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t fn = m.face_size(f), *fv = m.face_verts(f), base = m.face_offsets[f];
+    const Vec2 *t = fb.has_uv ? &m.uvs[base] : nullptr;
+    if (!face_sel[f]) {
+      fb.add(fv, fn, t, m.material_of(f), m.smooth_of(f));
+      sel.push_back(0);
+      continue;
+    }
+    auto moved = [&](uint32_t v) {
+      auto it = inner.find(v);
+      return it == inner.end() ? v : it->second;
+    };
+    /* The ring quad on each outline edge, wound like the face. */
+    for (uint32_t k = 0; k < fn; k++) {
+      const uint32_t j = (k + 1) % fn, a = fv[k], b = fv[j];
+      if (sel_uses[Mesh::edge_key(a, b)] != 1 || moved(a) == a || moved(b) == b) continue;
+      const uint32_t q[4] = {a, b, moved(b), moved(a)};
+      Vec2 tq[4];
+      if (t) tq[0] = tq[3] = t[k], tq[1] = tq[2] = t[j];
+      fb.add(q, 4, t ? tq : nullptr, m.material_of(f), m.smooth_of(f));
+      sel.push_back(0);
+    }
+    nv.clear();
+    nt.clear();
+    for (uint32_t k = 0; k < fn; k++) {
+      nv.push_back(moved(fv[k]));
+      if (t) nt.push_back(t[k]);
+    }
+    fb.add(nv.data(), fn, t ? nt.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    sel.push_back(1);
+  }
+  fb.commit(m);
+  face_sel = std::move(sel);
+  m.touch();
+}
+
+/* Blender's Mesh > Clean Up > Delete Loose: vertices no edge or face uses, wire
+ * edges (no face), and optionally faces sharing no edge with another face. With
+ * a vertex mask only what lies inside it goes (an edge when both ends do). */
+LooseCounts delete_loose(Mesh &m, bool verts, bool edges, bool faces, const std::vector<uint8_t> *vmask) {
+  LooseCounts c;
+  auto in_mask = [&](uint32_t v) { return !vmask || (v < vmask->size() && (*vmask)[v]); };
+  if (faces && m.face_count()) {
+    std::unordered_map<uint64_t, int> uses;
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = 0; k < m.face_size(f); k++) uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+    std::vector<uint8_t> drop(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool lone = true, all_in = true;
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        lone = lone && uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])] == 1;
+        all_in = all_in && in_mask(m.face_verts(f)[k]);
+      }
+      if (lone && all_in) {
+        drop[f] = 1;
+        c.faces++;
+      }
+    }
+    if (c.faces) {
+      FaceBuilder fb(m);
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (!drop[f]) fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+      fb.commit(m);
+    }
+  }
+  if (edges && !m.loose_edges.empty()) {
+    const size_t before = m.loose_edges.size();
+    m.loose_edges.erase(std::remove_if(m.loose_edges.begin(), m.loose_edges.end(),
+                                       [&](uint64_t k) { return in_mask((uint32_t)(k >> 32)) && in_mask((uint32_t)(k & 0xFFFFFFFFu)); }),
+                        m.loose_edges.end());
+    c.edges = before - m.loose_edges.size();
+  }
+  if (verts || c.edges || c.faces) {
+    /* Unused vertices (inside the mask; with a mask, the others stay by marking them used). */
+    std::vector<uint8_t> used(m.vert_count(), 0);
+    for (uint32_t v : m.corner_verts) used[v] = 1;
+    for (uint64_t k : m.loose_edges) {
+      const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFFu);
+      if (a < used.size()) used[a] = 1;
+      if (b < used.size()) used[b] = 1;
+    }
+    size_t unused = 0;
+    for (uint32_t v = 0; v < m.vert_count(); v++)
+      if (!used[v] && in_mask(v) && verts) unused++;
+    if (unused || c.edges || c.faces) {
+      /* All the unused vertices may go: the usual compaction; otherwise only those allowed (by hand). */
+      bool all_allowed = verts;
+      for (uint32_t v = 0; v < m.vert_count() && all_allowed; v++)
+        if (!used[v] && !in_mask(v)) all_allowed = false;
+      if (all_allowed) {
+        const size_t n0 = m.vert_count();
+        remove_loose_verts(m);
+        c.verts = n0 - m.vert_count();
+      }
+      else {
+        /* Remove only the allowed unused ones: compact by hand. */
+        std::vector<uint32_t> remap(m.vert_count(), UINT32_MAX);
+        std::vector<Vec3> np;
+        for (uint32_t v = 0; v < m.vert_count(); v++)
+          if (used[v] || !verts || !in_mask(v)) {
+            remap[v] = (uint32_t)np.size();
+            np.push_back(m.positions[v]);
+          }
+        c.verts = m.vert_count() - np.size();
+        if (c.verts) {
+          for (uint32_t &v : m.corner_verts) v = remap[v];
+          for (uint64_t &k : m.loose_edges) k = Mesh::edge_key(remap[(uint32_t)(k >> 32)], remap[(uint32_t)(k & 0xFFFFFFFFu)]);
+          std::sort(m.loose_edges.begin(), m.loose_edges.end());
+          for (std::vector<uint64_t> *es : {&m.seams, &m.sharp_edges}) {
+            std::vector<uint64_t> keep;
+            for (uint64_t k : *es) {
+              const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFFu);
+              if (a < remap.size() && b < remap.size() && remap[a] != UINT32_MAX && remap[b] != UINT32_MAX) keep.push_back(Mesh::edge_key(remap[a], remap[b]));
+            }
+            std::sort(keep.begin(), keep.end());
+            *es = std::move(keep);
+          }
+          m.positions = std::move(np);
+        }
+      }
+    }
+  }
+  m.sync_attributes();
+  m.touch();
+  return c;
+}
+
+Vec3 face_area_center(const Mesh &m, size_t f) {
+  if (f >= m.face_count()) return Vec3(0.0f);
+  const uint32_t n = m.face_size(f), *v = m.face_verts(f);
+  const Vec3 nrm = m.face_normal(f), p0 = m.positions[v[0]];
+  Vec3 acc(0.0f);
+  float area = 0.0f;
+  for (uint32_t k = 1; k + 1 < n; k++) {  // a fan; signed areas make concave faces come out right
+    const Vec3 a = m.positions[v[k]], b = m.positions[v[k + 1]];
+    const float w = dot(cross(a - p0, b - p0), nrm);
+    acc += (p0 + a + b) * (w / 3.0f);
+    area += w;
+  }
+  return std::fabs(area) > 1e-20f ? acc / area : m.face_center(f);
+}
+
+/* Pairs of faces that lie in one plane and cover some of the same area (z-fighting,
+ * "overlapping face artifacts"): compared triangle by triangle in 2D. */
+size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<uint32_t, uint32_t>> *out) {
+  const RenderMesh &rm = m.render_mesh(true);
+  const size_t T = rm.tri_count();
+  const float scale = std::max(1e-3f, length(m.bounds().extent()));
+  const float eps_d = plane_dist > 0 ? plane_dist : 1e-4f * scale, eps_a = 1e-6f * scale * scale;
+  std::vector<Vec3> n(T);
+  std::vector<AABB> box(T);
+  for (size_t t = 0; t < T; t++) {
+    const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+    const Vec3 cr = cross(b - a, c - a);
+    n[t] = length(cr) > 1e-20f ? normalize(cr) : Vec3(0.0f);
+    box[t].add(a);
+    box[t].add(b);
+    box[t].add(c);
+  }
+  auto clip_area = [](std::vector<Vec2> poly, const Vec2 *tri) {
+    /* Sutherland-Hodgman: poly clipped by the (counter-clockwise) triangle. */
+    for (int e = 0; e < 3 && !poly.empty(); e++) {
+      const Vec2 a = tri[e], b = tri[(e + 1) % 3];
+      auto side = [&](Vec2 p) { return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x); };
+      std::vector<Vec2> out;
+      for (size_t i = 0; i < poly.size(); i++) {
+        const Vec2 p = poly[i], q = poly[(i + 1) % poly.size()];
+        const float sp = side(p), sq = side(q);
+        if (sp >= 0) out.push_back(p);
+        if ((sp >= 0) != (sq >= 0)) out.push_back(p + (q - p) * (sp / (sp - sq)));
+      }
+      poly = out;
+    }
+    float a2 = 0;
+    for (size_t i = 0; i < poly.size(); i++) a2 += poly[i].x * poly[(i + 1) % poly.size()].y - poly[(i + 1) % poly.size()].x * poly[i].y;
+    return 0.5f * std::fabs(a2);
+  };
+  std::set<std::pair<uint32_t, uint32_t>> pairs;
+  for (size_t i = 0; i < T; i++)
+    for (size_t j = i + 1; j < T; j++) {
+      const uint32_t fi = rm.tri_face[i], fj = rm.tri_face[j];
+      if (fi == fj || std::fabs(dot(n[i], n[j])) < 0.999f || length(n[i]) < 0.5f) continue;
+      if (box[i].max.x < box[j].min.x - eps_d || box[j].max.x < box[i].min.x - eps_d || box[i].max.y < box[j].min.y - eps_d ||
+          box[j].max.y < box[i].min.y - eps_d || box[i].max.z < box[j].min.z - eps_d || box[j].max.z < box[i].min.z - eps_d)
+        continue;
+      const Vec3 a0 = rm.positions[rm.indices[i * 3]];
+      /* Facing the same way within plane_dist: they z-fight. Facing opposite ways
+       * they are the two sides of a thin slab - only a problem when they coincide. */
+      const float within = dot(n[i], n[j]) > 0 ? eps_d : 1e-5f * scale;
+      bool coplanar = true;
+      for (int k = 0; k < 3; k++) coplanar = coplanar && std::fabs(dot(rm.positions[rm.indices[j * 3 + k]] - a0, n[i])) < within;
+      if (!coplanar) continue;
+      const Vec3 u = normalize(std::fabs(n[i].y) < 0.9f ? cross(Vec3(0, 1, 0), n[i]) : cross(Vec3(1, 0, 0), n[i])), v = cross(n[i], u);
+      auto flat = [&](size_t t, int k) {
+        const Vec3 p = rm.positions[rm.indices[t * 3 + k]];
+        return Vec2(dot(p, u), dot(p, v));
+      };
+      Vec2 ti[3] = {flat(i, 0), flat(i, 1), flat(i, 2)};
+      std::vector<Vec2> pj = {flat(j, 0), flat(j, 1), flat(j, 2)};
+      if ((ti[1].x - ti[0].x) * (ti[2].y - ti[0].y) - (ti[1].y - ti[0].y) * (ti[2].x - ti[0].x) < 0) std::swap(ti[1], ti[2]);
+      if (clip_area(pj, ti) > eps_a) pairs.insert({std::min(fi, fj), std::max(fi, fj)});
+    }
+  if (out) out->assign(pairs.begin(), pairs.end());
+  return pairs.size();
+}
+
 
 }  // namespace bl::meshops

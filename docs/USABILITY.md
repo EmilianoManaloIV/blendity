@@ -92,6 +92,13 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Rectangles only went corner to corner and circles only from the centre. | Plasticity's centre / 3-point rectangles (optionally square) and 2- / 3-point circles. |
 | Nothing to line drawings up with except existing edges and the axes. | Guide lines (drawn, or from edges) with snapping to their crossings and along them. |
 | Every mouse move drew a frame, with no way to limit the cost. | A frame rate cap and redraw mode in Preferences, with the measured cost and what each setting trades. |
+| Push/Pull left faces on top of each other or a hair apart (a block pushed back flush hovered over the surface; halves pulled level left a sliver). | It goes exactly to flush and merges faces back, continues from there when asked for more, and never builds a wall over a neighbour; Select Overlapping finds any left over. |
+| No way to remove stray vertices and wire edges. | Delete Loose (Blender's Clean Up). |
+| Several faces could only be inset one by one. | Inset Individual off insets the selection as one face. |
+| Clearing a number field and pressing Enter kept the old value. | It gives 0 (or the field's minimum), as in Unity. |
+| A New Material made in an Inspector slot lived only in the scene. | It is saved as an asset in Assets/Materials. |
+| Centring a shape on a face meant eyeballing it. | The face's exact centre snaps; Start at Face Center puts circles and polygons there. |
+| Depth of field only showed in path-traced renders, and piloting reset the focus. | The Game view, Camera Preview and piloted view blur by depth (foreground too), and the picked point stays in focus. |
 
 ## Still worth doing
 

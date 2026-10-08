@@ -238,6 +238,21 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `Scene::guides`, `draw_hit` guide snapping, `draw_guide_line` | Infinite lines saved with the scene. Snaps: guide-guide crossings (closest points of two lines meeting) and a guide piercing the drawing plane first; then the mesh's own snaps; then the point of a guide nearest the mouse ray; guide directions join the inference directions. Drawn dashed, clipped to the near plane and the view | Plasticity lines; SketchUp Tape Measure guides |
 | `frame_wait_seconds`, `Editor::run` | Frames start at most `1 / max_fps` apart; input arriving sooner is gathered into the next frame; Redraw Always keeps the cap while idle. `draw_performance_settings` shows the measured average / worst frame cost against the budget | Unity Interaction Mode; Blender's viewport frame rate |
 
+## Push/Pull clean-up, Delete Loose, region inset, face centres, rasterized depth of field (phase 13)
+
+| Blendity | What it does | Blender / SketchUp / Unity equivalent |
+|---|---|---|
+| `meshops::overlapping_faces` | Triangles of different faces lying in one plane (same-facing within a distance, opposite-facing coincident) whose 2D clip (Sutherland-Hodgman) has area: z-fighting pairs. The stress suite counts new ones per Push/Pull; Edit Mode's Select Overlapping uses it | (none; SketchUp merges such faces) |
+| `push_pull_impl` flush steps | Side walls at the outline (along a side or at a corner) that run the way the region moves end at some distance; the move goes exactly there (welding the walls away) and continues from there as a second step, rather than stopping 2 x snap short | SketchUp Push/Pull flush |
+| `sweep_limit` outline rule | A point on the swept outline counts only if its edge heads inward: neighbouring walls the outline slides along are not obstacles | - |
+| neighbour consistency, slide | A neighbour that stretches along one side stretches along every side in its plane; when every face around the outline contains the direction, the region's corners just move | Blender: move along normal |
+| `dissolve_line_faces`, spike removal in `tidy_new_geometry` | A changed face whose corners lie on one line goes, its corners threaded into the face across its longest edge; welded loops lose a b a spikes | Blender: Dissolve Degenerate |
+| `meshops::delete_loose` | Unused vertices and wire edges (optionally faces sharing no edge), within a vertex mask | Blender: Clean Up > Delete Loose |
+| `meshops::inset_region` | Outline edges (one selected face) move in along the face-plane inward direction, mitred at corners; a quad ring joins old and new outline | Blender: Inset Faces, Individual off |
+| `meshops::face_area_center`, draw_hit's Face Center | The fan-triangle area centroid (signed, right for concave faces); snaps within 10 px, or takes a centre-based shape's first click with Start at Face Center | Plasticity: face centre snap |
+| `render/dof.cpp` `apply_depth_of_field` | Linear depth from the depth buffer; CoC `R abs(d - s) / d / (s tan(fov/2)) * H/2` (the path tracer's thin lens); a Vogel-disc gather where a sample counts if its CoC reaches the pixel, a sample behind the pixel only by the pixel's own CoC; in linear light | EEVEE / HDRP scatter-as-gather DOF |
+| `Camera::focus_track`, `update_camera_focus` | Pick Focus Point stores the world point; each frame the focus distance is its depth along the camera's forward | Blender: Depth of Field > Focus Object |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

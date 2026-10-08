@@ -135,6 +135,35 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       return h;
     }
   }
+  /* The face under the mouse: its centre is a snap (Plasticity), and with Start at Face
+   * Center a centre-based shape's first click goes there wherever it lands on the face. */
+  if (!ui_.in.ctrl()) {
+    const Mat4 inv = w.inverse();
+    const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
+    const RenderMesh &rm = m.render_mesh(true);
+    float best = 1e30f;
+    int under = -1;
+    for (size_t t = 0; t < rm.tri_count(); t++) {
+      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      if (d > 0 && d < best) best = d, under = (int)rm.tri_face[t];
+    }
+    if (under >= 0 && (size_t)under < m.face_count()) {
+      const Vec3 c = w.point(meshops::face_area_center(m, (size_t)under));
+      const bool in_plane = !draw_.has_plane || std::fabs(dot(c - draw_.plane_p, draw_.plane_n)) < 1e-4f * std::max(1.0f, length(c));
+      Vec2 s;
+      float z;
+      const bool near = scene_r3d_.project(c, s, z) && length(s - Vec2((float)(mx - view.x), (float)(my - view.y))) < (float)ui_.px(10);
+      const bool centred_shape = (draw_.shape == 1 && draw_rect_mode_ == 1) || ((draw_.shape == 2 || draw_.shape == 4) && draw_circle_mode_ == 0);
+      if (in_plane && (near || (draw_face_center_ && centred_shape && draw_.pts.empty()))) {
+        h.ok = true;
+        h.world = c;
+        h.face = under;
+        h.label = "Face Center";
+        h.color = Color::hex(0xFF9A20);
+        return h;
+      }
+    }
+  }
   const KnifePoint k = knife_hit(view, mx, my);
   if (k.ok) {
     h.ok = true;
@@ -621,6 +650,15 @@ void Editor::draw_add(Vec3 world, int face, int action) {
 /* A scripted click at a world point (the `drawpoint` command): the face it lies on, found geometrically. */
 void Editor::draw_point(Vec3 world, const std::string &mode) {
   if (mode == "close") return draw_add(world, -1, 1);
+  if (mode == "facecenter" && draw_.pts.empty())
+    if (GameObject *g = edit_object()) {
+      /* The face this point lies on, then its centre (what Start at Face Center does with a click). */
+      const Mesh &m = **edit_mesh_ptr();
+      const Vec3 p = g->world_matrix().inverse().point(world);
+      const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (meshops::point_in_face(m, f, p, eps)) return draw_add(g->world_matrix().point(meshops::face_area_center(m, f)), (int)f, 0);
+    }
   if (mode == "finish") return draw_add(world, -1, 2);
   int face = -1;
   if (draw_.pts.empty())

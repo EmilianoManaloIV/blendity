@@ -638,16 +638,16 @@ struct InspectorReflector : Reflector {
       Editor *e = &ed;
       MaterialPtr cur = mats[i];
       u.popup(pid, std::max(fr.w, u.px(240)), [uc = &u, pid, e, cur] {
+        /* Unity: a new material is an asset (Assets/Materials/<name>.mat) from the start. */
         if (uc->menu_item("New Material", nullptr, false, true, Icon::Plus)) {
-          auto m = cur ? std::make_shared<Material>(*cur) : make_material("Material", Vec3(0.8f));
-          m->name = cur ? cur->name + " (copy)" : "Material";
-          results[pid] = {m, false};
+          results[pid] = {e->new_slot_material(cur, ""), false};
           uc->redraw = true;
         }
-        uc->submenu("New Material of Type", uc->px(200), [uc, pid] {
+        uc->tooltip("A new material, saved as an asset in Assets/Materials (a copy of this slot's material, if it has one).");
+        uc->submenu("New Material of Type", uc->px(200), [uc, pid, e] {
           for (const std::string &p : material_presets())
             if (uc->menu_item(p)) {
-              results[pid] = {make_material_preset(p), false};
+              results[pid] = {e->new_slot_material(nullptr, p), false};
               uc->redraw = true;
             }
         });
@@ -1821,6 +1821,12 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
           er.field("Square", draw_uniform_);
           u.tooltip("Keep the sides equal (Plasticity: hold for a square).");
         }
+        if (draw_.active && (draw_.shape == 1 || draw_.shape == 2 || draw_.shape == 4)) {
+          er.field("Start at Face Center", draw_face_center_);
+          u.tooltip("Centre-based shapes (Center rectangles, circles and polygons from their centre) start at the exact\n"
+                    "centre of the face you click, wherever on it you click (Plasticity). The centre also snaps (orange) when the\n"
+                    "mouse is near it, with this off.");
+        }
         if (draw_.active && (draw_.shape == 2 || draw_.shape == 4)) {
           er.enumeration("Circle From", draw_circle_mode_, kCircleModes, 3);
           u.tooltip("Center: the middle, then the radius. 2 Points: across its diameter. 3 Points: any three points on it\n"
@@ -1849,7 +1855,11 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
         er.field("Shell Thickness", shell_thickness_, 0.005f, 0.0001f, 1000.0f);
         er.field("Draft Angle", draft_angle_, 0.25f, -80.0f, 80.0f);
         er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
-        er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
+        er.field("Inset Individual", inset_individual_);
+        u.tooltip("On: each selected face is inset on its own. Off: the selection is inset as one face\n"
+                  "(its outline moves in, edges between selected faces stay). Blender: Inset > Individual.");
+        if (inset_individual_) er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
+        else er.field("Inset Thickness", inset_thickness_, 0.005f, 0.0f, 1000.0f);
         er.field("Bridge Segments", bridge_segments_, 1, 256);
         er.field("Auto Fuse on Contact", auto_fuse_);
         u.tooltip("Faces extruded or moved onto another face of the mesh merge into it\n(the touching area becomes an opening): bridging by extrusion.");

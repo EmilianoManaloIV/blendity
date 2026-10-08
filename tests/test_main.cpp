@@ -5,6 +5,7 @@
 #include "../src/editor/editor.h"
 #include "../src/render/canvas.h"
 #include "../src/render/raster.h"
+#include "../src/render/dof.h"
 #include "../src/research/research.h"
 #include "../src/image/image.h"
 #include "../src/render/colormanagement.h"
@@ -147,6 +148,8 @@ static void modeling_round9_tests();
 static void modeling_round10_tests();
 static void modeling_round11_tests();
 static void modeling_round12_tests();
+static void modeling_round13_tests();
+static void round13_feature_tests();
 
 int main() {
   register_builtin_components();
@@ -738,6 +741,8 @@ int main() {
   modeling_round10_tests();
   modeling_round11_tests();
   modeling_round12_tests();
+  modeling_round13_tests();
+  round13_feature_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -4302,6 +4307,454 @@ static void modeling_round12_tests() {
     CHECK(!ed.always_redraw());
     /* The Preferences and the Profiler show the setting and its measured cost. */
     ed.command("window Profiler");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(true);
+  });
+}
+
+/* ===================================================================== */
+/* Round 13: Push/Pull sequences without overlapping faces, Delete Loose, */
+/* region inset, empty number fields, face centres, depth of field        */
+/* ===================================================================== */
+
+static size_t overlapping_face_pairs(const Mesh &m, std::string *first = nullptr) {
+  std::vector<std::pair<uint32_t, uint32_t>> pairs;
+  const size_t n = meshops::overlapping_faces(m, 0.0f, &pairs);
+  if (first && n) *first = strprintf("faces %u and %u", pairs[0].first, pairs[0].second);
+  return n;
+}
+
+static void modeling_round13_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  /* A cube whose top is cut into a smaller square (the drawing tool's imprint). */
+  auto cube_with_square = [](float half) {
+    Mesh m = *primitives::cube();
+    const size_t top = face_facing(m, {0, 1, 0});
+    meshops::imprint_loop(m, top, {{-half, 0.5f, -half}, {half, 0.5f, -half}, {half, 0.5f, half}, {-half, 0.5f, half}});
+    return m;
+  };
+  /* A cube whose top is split into two halves along x = 0. */
+  auto cube_halves = [] {
+    Mesh m = *primitives::cube();
+    const size_t top = face_facing(m, {0, 1, 0});
+    const uint32_t *fv = m.face_verts(top);
+    /* The two top edges running along X get a midpoint each; then the face splits between them. */
+    std::vector<std::pair<uint32_t, uint32_t>> along_x;
+    for (uint32_t k = 0; k < 4; k++) {
+      const uint32_t a = fv[k], b = fv[(k + 1) % 4];
+      if (std::fabs(m.positions[a].x - m.positions[b].x) > 0.5f) along_x.push_back({a, b});
+    }
+    const uint32_t m0 = meshops::split_edge(m, along_x[0].first, along_x[0].second, 0.5f);
+    const uint32_t m1 = meshops::split_edge(m, along_x[1].first, along_x[1].second, 0.5f);
+    meshops::split_face(m, face_facing(m, {0, 1, 0}), m0, m1);
+    return m;
+  };
+  auto top_faces = [](const Mesh &m, float cx_sign) {
+    /* Selection: upward faces whose centre is on the given side of x = 0 (0: any). */
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++)
+      sel[f] = m.face_normal(f).y > 0.99f && (cx_sign == 0 || m.face_center(f).x * cx_sign > 0);
+    return sel;
+  };
+  auto highest_up = [](const Mesh &m, float cx_sign) {
+    /* The highest upward face; at the same height, the one whose centre is nearest the
+     * middle of that side (x = 0.25 * cx_sign, z = 0). */
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    const Vec3 want(0.25f * cx_sign, 0, 0);
+    size_t pick = SIZE_MAX;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (m.face_normal(f).y < 0.99f) continue;
+      const Vec3 c = m.face_center(f);
+      if (cx_sign != 0 && c.x * cx_sign <= 0) continue;
+      if (pick == SIZE_MAX) { pick = f; continue; }
+      const Vec3 b = m.face_center(pick);
+      const float dy = c.y - b.y;
+      if (dy > 1e-4f || (std::fabs(dy) <= 1e-4f && length(Vec3(c.x, 0, c.z) - want) < length(Vec3(b.x, 0, b.z) - want))) pick = f;
+    }
+    if (pick != SIZE_MAX) sel[pick] = 1;
+    return sel;
+  };
+  struct Step {
+    const char *what;
+    std::function<std::vector<uint8_t>(const Mesh &)> select;
+    float d;
+  };
+  auto run = [&](const char *name, Mesh m, std::vector<Step> steps, float expect_volume) {
+    test((std::string("push/pull sequence: ") + name).c_str(), [&] {
+      std::string why;
+      for (const Step &s : steps) {
+        std::vector<uint8_t> sel = s.select(m);
+        meshops::PushPullResult res;
+        std::string err;
+        const bool ok = meshops::push_pull(m, sel, s.d, true, &res, &err);
+        std::string ov;
+        const size_t overlaps = overlapping_face_pairs(m, &ov);
+        std::printf("    %-34s %s: %zu faces, closed %d, volume %.4f, overlapping pairs %zu %s\n", s.what, ok ? "ok" : err.c_str(), m.face_count(),
+                    (int)closed_manifold(m), vol(m), overlaps, ov.c_str());
+        CHECK(structurally_valid(m, &why));
+        CHECK(overlaps == 0);
+        CHECK(closed_manifold(m));
+      }
+      if (expect_volume > 0) CHECK_NEAR(vol(m), expect_volume, 2e-3f);
+    });
+  };
+  /* The drawn square wherever it is now: the upward face whose centre is nearest the middle. */
+  const auto inner_top = [&](const Mesh &m) {
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    size_t pick = SIZE_MAX;
+    float best = 1e30f;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (m.face_normal(f).y < 0.99f) continue;
+      const Vec3 c = m.face_center(f);
+      const float d = std::sqrt(c.x * c.x + c.z * c.z);
+      if (d < best - 1e-4f) best = d, pick = f;
+    }
+    if (pick != SIZE_MAX) sel[pick] = 1;
+    return sel;
+  };
+  run("pull a drawn square up, then push it back flush", cube_with_square(0.25f),
+      {{"pull up 0.5", inner_top, 0.5f}, {"push back down 0.5", inner_top, -0.5f}}, 1.0f);
+  run("push a drawn square in, then pull it back flush", cube_with_square(0.25f),
+      {{"push in 0.3", inner_top, -0.3f}, {"pull back up 0.3", inner_top, 0.3f}}, 1.0f);
+  run("pull a drawn square up, then push it below the top", cube_with_square(0.25f),
+      {{"pull up 0.5", inner_top, 0.5f}, {"push down 0.8", inner_top, -0.8f}}, 1.0f - 0.25f * 0.3f);
+  run("pull both halves of the top to the same height, one after the other", cube_halves(),
+      {{"pull the left half 0.5", [&](const Mesh &m) { return top_faces(m, -1); }, 0.5f},
+       {"pull the right half 0.5", [&](const Mesh &m) { return highest_up(m, 1); }, 0.5f}},
+      1.5f);
+  run("pull the halves to different heights", cube_halves(),
+      {{"pull the left half 0.5", [&](const Mesh &m) { return top_faces(m, -1); }, 0.5f},
+       {"pull the right half 0.3", [&](const Mesh &m) { return highest_up(m, 1); }, 0.3f}},
+      1.0f + 0.25f + 0.15f);
+  run("pull the halves past each other", cube_halves(),
+      {{"pull the left half 0.3", [&](const Mesh &m) { return top_faces(m, -1); }, 0.3f},
+       {"pull the right half 0.6", [&](const Mesh &m) { return highest_up(m, 1); }, 0.6f}},
+      1.0f + 0.15f + 0.3f);
+  run("pull one half, push the other in", cube_halves(),
+      {{"pull the left half 0.4", [&](const Mesh &m) { return top_faces(m, -1); }, 0.4f},
+       {"push the right half 0.4", [&](const Mesh &m) { return highest_up(m, 1); }, -0.4f}},
+      1.0f);
+  run("pull the whole top up and back down", *primitives::cube(),
+      {{"pull up 0.5", inner_top, 0.5f}, {"push down 0.5", inner_top, -0.5f}, {"push down 0.25", inner_top, -0.25f}}, 0.75f);
+  test("push/pull sequence: inset, push in, pull back flush", [&] {
+    Mesh m = *primitives::cube();
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    sel[face_facing(m, {0, 1, 0})] = 1;
+    meshops::inset_faces(m, sel, 0.4f);
+    meshops::PushPullResult res;
+    CHECK(meshops::push_pull(m, sel, -0.3f, true, &res));
+    CHECK(meshops::push_pull(m, sel, 0.3f, true, &res));
+    std::string ov;
+    const size_t n = overlapping_face_pairs(m, &ov);
+    std::printf("    inset, in, back: %zu faces, overlapping pairs %zu %s, closed %d, volume %.4f\n", m.face_count(), n, ov.c_str(), (int)closed_manifold(m), vol(m));
+    CHECK(n == 0 && closed_manifold(m));
+    CHECK_NEAR(vol(m), 1.0f, 2e-3f);
+  });
+}
+
+static void round13_feature_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  auto mouse = [](platform::EventType t, int x, int y, int mods = 0) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    e.mods = mods;
+    return e;
+  };
+  test("delete loose: stray vertices and wire edges go, faces stay; only inside a selection when there is one", [&] {
+    Mesh m = *primitives::cube();
+    const uint32_t a = m.add_vert({3, 0, 0}), b = m.add_vert({4, 0, 0});
+    m.add_loose_edge(a, b);
+    m.add_vert({5, 5, 5});  // a lone point
+    m.add_loose_edge(0, 7);  // a wire edge between two cube corners: its vertices stay (faces use them)
+    CHECK(m.vert_count() == 11 && m.loose_edges.size() == 2);
+    Mesh sel_only = m;
+    std::vector<uint8_t> mask(sel_only.vert_count(), 0);
+    mask[a] = mask[b] = 1;
+    meshops::LooseCounts c1 = meshops::delete_loose(sel_only, true, true, false, &mask);
+    CHECK(c1.edges == 1 && c1.verts == 2 && sel_only.vert_count() == 9 && sel_only.loose_edges.size() == 1);
+    meshops::LooseCounts c = meshops::delete_loose(m);
+    std::printf("    delete loose: %zu vertices, %zu wire edges; %zu verts and %zu faces left\n", c.verts, c.edges, m.vert_count(), m.face_count());
+    CHECK(c.verts == 3 && c.edges == 2);
+    CHECK(m.vert_count() == 8 && m.face_count() == 6 && m.loose_edges.empty() && closed_manifold(m));
+    /* Loose faces (sharing no edge) go only when asked. */
+    Mesh two = *primitives::cube();
+    const uint32_t q0 = two.add_vert({3, 0, 0}), q1 = two.add_vert({4, 0, 0}), q2 = two.add_vert({4, 1, 0});
+    const uint32_t tri[3] = {q0, q1, q2};
+    two.add_face(tri, 3);
+    CHECK(meshops::delete_loose(two, true, true, true).faces == 1 && two.face_count() == 6 && two.vert_count() == 8);
+    /* The editor's operator, in Edit Mode. */
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    Mesh &gm = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+    gm.add_vert({9, 9, 9});
+    gm.touch();
+    ed.command("edit vertex");
+    ed.command("editop delete_loose");
+    ed.command("edit off");
+    CHECK(g->get<MeshFilter>()->mesh->vert_count() == 8);
+  });
+  test("inset: individual faces, or the selection as one region (only its outline moves in)", [&] {
+    /* Two neighbouring quads of a 2 x 1 strip on a box top. */
+    Mesh base = *primitives::cube();
+    {
+      const size_t top = face_facing(base, {0, 1, 0});
+      const uint32_t *fv = base.face_verts(top);
+      std::vector<std::pair<uint32_t, uint32_t>> along_x;
+      for (uint32_t k = 0; k < 4; k++)
+        if (std::fabs(base.positions[fv[k]].x - base.positions[fv[(k + 1) % 4]].x) > 0.5f) along_x.push_back({fv[k], fv[(k + 1) % 4]});
+      const uint32_t m0 = meshops::split_edge(base, along_x[0].first, along_x[0].second, 0.5f);
+      const uint32_t m1 = meshops::split_edge(base, along_x[1].first, along_x[1].second, 0.5f);
+      meshops::split_face(base, face_facing(base, {0, 1, 0}), m0, m1);
+    }
+    auto tops = [](const Mesh &m) {
+      std::vector<uint8_t> s(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++) s[f] = m.face_normal(f).y > 0.99f;
+      return s;
+    };
+    Mesh ind = base, reg = base;
+    std::vector<uint8_t> si = tops(ind), sr = tops(reg);
+    meshops::inset_faces(ind, si, 0.2f);
+    meshops::inset_region(reg, sr, 0.1f);
+    std::printf("    individual: %zu faces; region: %zu faces\n", ind.face_count(), reg.face_count());
+    CHECK(ind.face_count() == 7 - 2 + 2 * 5);  // each of the 2 faces: 4 ring quads + its inner face
+    CHECK(reg.face_count() == 7 + 6);          // one ring of 6 quads round the pair (the shared edge has none)
+    CHECK(closed_manifold(ind) && closed_manifold(reg));
+    CHECK_NEAR(vol(reg), 1.0f, 1e-4f);
+    /* The region's inner faces: still two, together 0.8 x 0.8, sharing their middle edge. */
+    float inner = 0;
+    size_t n_sel = 0;
+    for (size_t f = 0; f < reg.face_count(); f++)
+      if (sr[f]) {
+        n_sel++;
+        Vec3 sa(0.0f);
+        for (uint32_t k = 0; k < reg.face_size(f); k++) sa += cross(reg.positions[reg.face_verts(f)[k]], reg.positions[reg.face_verts(f)[(k + 1) % reg.face_size(f)]]);
+        inner += 0.5f * length(sa);
+      }
+    CHECK(n_sel == 2);
+    CHECK_NEAR(inner, 0.8f * 0.8f, 1e-4f);
+    /* In the editor: the Individual switch, and F9 flips it. */
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    *mesh_make_mutable(g->get<MeshFilter>()->mesh) = base;
+    g->get<MeshFilter>()->mesh->touch();
+    ed.command("fsel facing 0 1 0");
+    ed.command("insetmode region 0.1");
+    ed.command("editop inset");
+    CHECK(g->get<MeshFilter>()->mesh->face_count() == 13);
+    ed.command("edit off");
+    *mesh_make_mutable(g->get<MeshFilter>()->mesh) = base;
+    g->get<MeshFilter>()->mesh->touch();
+    ed.command("fsel facing 0 1 0");
+    ed.command("insetmode individual 0.2");
+    ed.command("editop inset");
+    CHECK(g->get<MeshFilter>()->mesh->face_count() == 15);
+  });
+  test("number fields: clearing one and pressing Enter gives 0 (Unity), within the field's limits", [&] {
+    double d = -1;
+    CHECK(ui::eval_number("", d, 5.0) && d == 0.0);
+    CHECK(ui::eval_number("   ", d, 5.0) && d == 0.0);
+    /* A real field: click it (its text is selected), delete, Enter. */
+    ui::Context u;
+    Image img;
+    img.resize(300, 80);
+    float v = 7.5f, lim = 4.0f;
+    int n = 12;
+    auto frame = [&](const std::function<void(ui::Input &)> &setup) {
+      setup(u.in);
+      u.begin_frame(&img, 0.0);
+      u.float_field(2001, {10, 10, 100, 20}, v);
+      u.float_field(2002, {10, 35, 100, 20}, lim, 0.1f, 1.0f, 10.0f);  // at least 1
+      u.int_field(2003, {10, 60, 100, 18}, n, -5, 50);
+      u.end_frame();
+      for (bool &p : u.in.pressed) p = false;
+      for (bool &r : u.in.released) r = false;
+      for (bool &k : u.in.key_pressed) k = false;
+      u.in.text.clear();
+    };
+    auto clear_and_enter = [&](int y) {
+      frame([y](ui::Input &in) { in.mx = 50; in.my = y; in.down[0] = in.pressed[0] = true; });
+      frame([](ui::Input &in) { in.down[0] = false; in.released[0] = true; });
+      frame([](ui::Input &in) { in.key_pressed[platform::KEY_BACKSPACE] = true; });
+      frame([](ui::Input &in) { in.key_pressed[platform::KEY_ENTER] = true; });
+    };
+    clear_and_enter(20);
+    clear_and_enter(45);
+    clear_and_enter(69);
+    std::printf("    cleared fields: %.3f, %.3f (min 1), %d\n", v, lim, n);
+    CHECK(v == 0.0f);
+    CHECK(lim == 1.0f);
+    CHECK(n == 0);
+  });
+  test("materials: New Material in an Inspector slot is saved as an asset in Assets/Materials", [&] {
+    const std::string proj = fs::join(test_dir(), "newslotproject");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    fs::make_dirs(fs::join(proj, "Assets"));
+    fs::make_dirs(fs::join(proj, "research"));
+    set_env("BLENDITY_PROJECT", proj);
+    {
+      Editor ed;
+      ed.init_headless(800, 600);
+      ed.step_frame_headless();
+      ed.command("select Cube");
+      ed.command("newslotmat 0");
+      ed.command("newslotmat 1 Glass");
+      GameObject *g = ed.selected_object();
+      auto &mats = g->get<MeshRenderer>()->materials;
+      CHECK(mats.size() == 2 && mats[0] && mats[1]);
+      if (mats.size() == 2 && mats[0] && mats[1]) {
+        std::printf("    slot 0: %s, slot 1: %s\n", mats[0]->asset_path.c_str(), mats[1]->asset_path.c_str());
+        CHECK(starts_with(mats[0]->asset_path, "Assets/Materials/") && fs::exists(fs::join(proj, mats[0]->asset_path)));
+        CHECK(starts_with(mats[1]->asset_path, "Assets/Materials/") && fs::exists(fs::join(proj, mats[1]->asset_path)));
+        CHECK(mats[1]->name == "Glass");
+      }
+    }
+    set_env("BLENDITY_PROJECT", "");
+  });
+  test("draw: centre-based shapes start at the face's exact centre (Plasticity), and the centre snaps", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("camera 0 60 5 0 0.5 0");
+    ed.command("edit face");
+    /* An L-shaped top would have its centre away from the corner average; a plain square is enough
+     * to check the snap lands exactly on (0, 1, 0) from a click well off it. */
+    ed.command("drawmode facecenter on");
+    ed.command("draw circle 12");
+    ed.step_frame_headless();
+    int x, y;
+    CHECK(ed.project_to_window({0.3f, 1.0f, -0.25f}, x, y));
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, x, y)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseDown, x, y)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseUp, x, y)});
+    ed.command("drawpoint 0.3 1 0");
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    /* The circle's centre: the average of the newest face's corners. */
+    Vec3 c(0.0f);
+    const size_t f = m.face_count() - 1;
+    for (uint32_t k = 0; k < m.face_size(f); k++) c += g->world_matrix().point(m.positions[m.face_verts(f)[k]]);
+    c = c / (float)m.face_size(f);
+    std::printf("    circle centre (%.4f %.4f %.4f), %u corners\n", c.x, c.y, c.z, m.face_size(f));
+    CHECK(m.face_size(f) == 12);
+    CHECK(length(c - Vec3(0, 1, 0)) < 1e-3f);
+    /* The area centre of a concave face is not its corner average. */
+    Mesh l;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(2, 0, 1), Vec3(1, 0, 1), Vec3(1, 0, 2), Vec3(0, 0, 2)}) l.add_vert(p);
+    const uint32_t lv[6] = {0, 5, 4, 3, 2, 1};
+    l.add_face(lv, 6);
+    const Vec3 ac = meshops::face_area_center(l, 0);
+    CHECK(length(ac - Vec3(5.0f / 6.0f, 0, 5.0f / 6.0f)) < 1e-4f);
+  });
+  test("depth of field (rasterized): a near object blurs over a sharp background in focus", [&] {
+    /* A 160 x 100 image: a checker far away (8 m), a white bar near the camera (1 m)
+     * covering the middle columns; focused on the background. */
+    const int W = 160, H = 100;
+    Image img;
+    img.resize(W, H);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, W, H});
+    rt.resize_planes();
+    const Mat4 view = Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
+    const Mat4 proj = Mat4::perspective(40.0f * kDeg2Rad, W / (float)H, 0.1f, 100.0f);
+    auto ndc_z = [&](float depth) {
+      const Vec4 c = (proj * view) * Vec4(0, 0, depth, 1);
+      return c.z / c.w;
+    };
+    const float zfar = ndc_z(8.0f), znear = ndc_z(1.0f);
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < W; x++) {
+        const bool bar = x >= 70 && x < 90;
+        const bool chk = ((x / 4) + (y / 4)) & 1;
+        img.row(y)[x] = bar ? 0xFFFFFFFFu : chk ? 0xFF000000u : 0xFFC0C0C0u;
+        rt.depth[(size_t)y * W + x] = bar ? znear : zfar;
+      }
+    DofParams d;
+    d.inv_view_proj = (proj * view).inverse();
+    d.eye = {0, 0, 0};
+    d.forward = {0, 0, 1};
+    d.aperture_radius = 0.05f;
+    d.focus_distance = 8.0f;
+    d.tan_half_vfov = std::tan(20.0f * kDeg2Rad);
+    d.far_distance = 100.0f;
+    d.max_radius_px = 12.0f;
+    std::printf("    circle of confusion: background %.2f px, bar %.2f px\n", dof_coc_pixels(d, 8.0f, H), dof_coc_pixels(d, 1.0f, H));
+    CHECK(dof_coc_pixels(d, 8.0f, H) < 0.01f && dof_coc_pixels(d, 1.0f, H) > 4.0f);
+    std::vector<uint32_t> before(img.pixels.begin(), img.pixels.end());
+    CHECK(apply_depth_of_field(rt, d));
+    auto lum = [](uint32_t c) { return ((c & 255) + ((c >> 8) & 255) + ((c >> 16) & 255)) / 3; };
+    /* Far from the bar the checker is untouched (in focus). */
+    int changed_far = 0;
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < 30; x++) changed_far += img.row(y)[x] != before[(size_t)y * W + x];
+    /* Just left of the bar, over the background, the bar's blur spills: brighter on average than the
+     * checker there (whose black and grey average ~96). */
+    double spill = 0;
+    for (int y = 10; y < 90; y++) spill += lum(img.row(y)[67]);
+    spill /= 80.0;
+    /* Inside the bar's edge the bar is softened (no longer pure white next to the dark squares). */
+    int soft = 0;
+    for (int y = 10; y < 90; y++) soft += lum(img.row(y)[70]) < 250;
+    std::printf("    unchanged far pixels: %d changed; spill beside the bar %.1f (checker ~96); softened bar edge rows %d / 80\n", changed_far, spill, soft);
+    CHECK(changed_far == 0);
+    CHECK(spill > 125.0);
+    CHECK(soft > 40);
+    /* Focused on the bar instead: the bar stays crisp and the background blurs, never over the bar. */
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < W; x++) img.row(y)[x] = before[(size_t)y * W + x];
+    d.focus_distance = 1.0f;
+    CHECK(apply_depth_of_field(rt, d));
+    int bar_changed = 0;
+    for (int y = 0; y < H; y++)
+      for (int x = 70; x < 90; x++) bar_changed += img.row(y)[x] != 0xFFFFFFFFu;
+    int bg_blurred = 0;
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < 30; x++) bg_blurred += img.row(y)[x] != before[(size_t)y * W + x];
+    std::printf("    focused near: bar pixels changed %d, background pixels blurred %d\n", bar_changed, bg_blurred);
+    CHECK(bar_changed == 0);
+    CHECK(bg_blurred > 1000);
+  });
+  test("camera focus: a picked point stays in focus as the camera moves; piloting keeps it", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    GameObject *cam = ed.selected_object();
+    Camera *c = cam->get<Camera>();
+    c->dof = true;
+    c->focus_track = true;
+    c->focus_point = {0, 0.5f, 0};
+    cam->set_world_position({0, 1, -6});
+    cam->set_world_rotation(Quat::euler({0, 0, 0}));
+    ed.step_frame_headless();
+    CHECK_NEAR(c->focus_distance, 6.0f, 1e-3f);
+    cam->set_world_position({0, 1, -3});
+    ed.step_frame_headless();
+    CHECK_NEAR(c->focus_distance, 3.0f, 1e-3f);
+    /* Piloting no longer moves the focus to the orbit pivot. */
+    ed.command("pilot");
+    ed.step_frame_headless();
+    ed.command("camera 10 15 9 1 0.5 0");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const float expect = dot(c->focus_point - cam->world_position(), normalize(cam->world_rotation().rotate({0, 0, 1})));
+    std::printf("    piloted: focus %.3f m, the picked point is %.3f m ahead\n", c->focus_distance, expect);
+    CHECK_NEAR(c->focus_distance, expect, 1e-3f);
+    ed.command("pilot");
+    /* The Game view and the Camera Preview draw with it (no crash, something blurred). */
+    ed.command("window Game");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(true);
   });

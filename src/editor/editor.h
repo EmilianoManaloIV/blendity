@@ -265,6 +265,7 @@ class Editor {
     int orientation = 0;  // 0 global, 1 local
     bool fuse = true;     // extrude / move onto another face fuses them
     bool clamp = true;    // bevel: Clamp Overlap
+    bool individual = true;  // inset: each face on its own, or the selection as one region
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
@@ -434,7 +435,8 @@ class Editor {
   std::string material_pick_search_;
 
  public:
-  bool assign_material_to_selected_faces(const MaterialPtr &m);  // Edit Mode: the material itself, not a slot number
+  bool assign_material_to_selected_faces(const MaterialPtr &m);
+  MaterialPtr new_slot_material(const MaterialPtr &cur, const std::string &preset);  // Inspector > New Material: saved as an asset  // Edit Mode: the material itself, not a slot number
 
  private:
   void draw_tools_window(const Recti &r);  // Modeling Tools window (UModeler's tool panel)
@@ -462,6 +464,9 @@ class Editor {
   void update_pilot_camera();
   void align_camera_to_view();
   void draw_pilot_frame(const Recti &view);
+  /* Depth of field on a rasterized view through `cam` (Game view, Camera Preview, a piloted Scene view). */
+  void camera_dof(RenderTarget &rt, const Mat4 &view, const Mat4 &proj, Vec3 eye, Vec3 forward, const Camera *cam, float aspect, float vfov_deg);
+  void update_camera_focus();  // cameras keeping a picked point in focus
   void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
   void join_selected();
   void boolean_selected(int op, bool apply);
@@ -779,6 +784,9 @@ class Editor {
   std::unordered_map<std::string, bool> foldouts_;
   std::string add_component_search_;
   float subdiv_levels_ = 1, smooth_factor_ = 0.5f, extrude_dist_ = 0.5f, inset_amount_ = 0.3f, merge_dist_ = 0.001f;
+  bool inset_individual_ = true;  // Blender's Inset > Individual: each face on its own, or the selection as one region
+  float inset_thickness_ = 0.1f;  // region inset: how far the outline moves in (local units)
+  bool draw_face_center_ = false; // centre-based shapes start at the face's centre (Plasticity)
 
   /* ---- project ---- */
   std::string project_dir_;

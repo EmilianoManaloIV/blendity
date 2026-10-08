@@ -312,10 +312,16 @@ void Camera::reflect(Reflector &r) {
   r.field("Near", near_clip, 0.01f, 0.001f, 100.0f);
   r.field("Far", far_clip, 1.0f, 0.1f, 100000.0f);
   r.field("Depth of Field", dof);
-  r.help("Blur what is nearer or farther than the focus distance, like a real lens (path-traced renders).\n"
+  r.help("Blur what is nearer or farther than the focus distance, like a real lens (renders, the Game view and the Camera Preview).\n"
          "Blender: Camera > Depth of Field. Unity: HDRP Physical Camera aperture.");
   if (dof || all) {
     r.field("Focus Distance (m)", focus_distance, 0.05f, 0.01f, 100000.0f);
+    r.help("How far in front of the camera things are sharp. Nearer things blur as well as farther ones:\n"
+           "focus on something behind another object and the one in front goes soft.");
+    r.field("Keep Focus on Point", focus_track);
+    r.help("Pick Focus Point turns this on: the picked point stays in focus while the camera moves\n"
+           "(Blender: Depth of Field > Focus Object). Turn it off to set the distance by hand.");
+    if (focus_track || all) r.field("Focus Point", focus_point);
     r.field("F-Stop", f_stop, 0.05f, 0.1f, 128.0f);
     r.help("Aperture as a focal ratio: lower numbers (f/1.4) blur more, higher ones (f/16) keep more sharp.\n"
            "The aperture's diameter is focal length / f-stop.");

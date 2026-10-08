@@ -240,7 +240,6 @@ void Editor::update_pilot_camera() {
   g->set_world_rotation(rot);
   if (c->physical) c->focal_length = focal_for_vfov(*c, aspect, cam_vfov);  // keeps its sensor, changes the lens
   else c->fov = clampf(cam_vfov, 1.0f, 170.0f);
-  if (c->dof) c->focus_distance = cam_.distance;  // the pivot is where it focuses
   pilot_cam_pos_ = g->world_position();
   pilot_cam_rot_ = g->world_rotation();
   pilot_cam_lens_ = c->physical ? c->focal_length : c->fov;

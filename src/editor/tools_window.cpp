@@ -105,6 +105,14 @@ void Editor::draw_tools_window(const Recti &r) {
     }
     {
       Recti rr = lay.row(u.row_h() + u.px(2));
+      if (u.button({rr.x + u.px(4), rr.y, rr.w - u.px(8), rr.h}, draw_face_center_ ? "Start at Face Center (on)" : "Start at Face Center (off)",
+                   draw_face_center_))
+        draw_face_center_ = !draw_face_center_;
+      u.tooltip("Circles, polygons and centre rectangles start at the exact centre of the face you click (Plasticity).\n"
+                "With this off, the centre still snaps (orange) when the mouse is near it.");
+    }
+    {
+      Recti rr = lay.row(u.row_h() + u.px(2));
       const int gw = (rr.w - u.px(12)) / 3;
       if (u.button({rr.x + u.px(4), rr.y, gw, rr.h}, "Guides from Edges")) guides_from_selected_edges();
       u.tooltip("Edit Mode: a construction line along each selected edge.");
@@ -145,6 +153,8 @@ void Editor::draw_tools_window(const Recti &r) {
         {"Shade Flat", "Flat shading.", has_sel, [this] { mesh_op("shade_flat"); }},
         {"Subdivide", "Catmull-Clark, one level.", has_sel, [this] { mesh_op("subdivide"); }},
         {"Merge by Distance", "Weld close vertices.", has_sel, [this] { mesh_op("merge"); }},
+        {"Delete Loose", "Remove vertices and wire edges no face uses (Blender: Clean Up > Delete Loose).", has_sel && !edit_mode_,
+         [this] { mesh_op("delete_loose"); }},
         {"Origin to Bottom", "Set Origin to the bottom centre.", has_sel, [this] { set_origin(4); }},
         {origin_edit_ ? "Done (Origin)" : "Edit Origin", "Move the origin with the gizmo, or click a vertex / edge / face to snap it there.", has_sel && !edit_mode_,
          [this] { origin_edit_ = !origin_edit_; }},

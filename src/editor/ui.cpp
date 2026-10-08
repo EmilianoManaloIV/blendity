@@ -563,6 +563,11 @@ bool eval_number(const std::string &s, double &out, double current, int index, i
   c.index = index;
   c.count = std::max(1, count);
   c.ws();
+  /* Cleared and confirmed: zero, as in Unity (the field's limits still apply). */
+  if (!*c.p) {
+    out = 0.0;
+    return true;
+  }
   /* Relative input: "+=2", "-=2", "*=2", "/=2" (Unity, Blender). */
   char rel = 0;
   if ((c.p[0] == '+' || c.p[0] == '-' || c.p[0] == '*' || c.p[0] == '/') && c.p[1] == '=') {

@@ -380,6 +380,12 @@ void Editor::render_scene_view(const Recti &view) {
   else if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
     render_deferred(scene_r3d_, scene_rt_, v, p, cam_.position(), false, scene_lighting_, nullptr);
     scene_stats_ = scene_r3d_.stats();
+    /* Piloting a camera: its depth of field shows while framing the shot. */
+    if (GameObject *pg = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr)
+      if (const Camera *pc = pg->get<Camera>()) {
+        const float ra = scene_->render.height > 0 ? scene_->render.width / (float)scene_->render.height : 16.0f / 9.0f;
+        camera_dof(scene_rt_, v, p, cam_.position(), cam_.forward(), pc, pc->image_aspect(ra), cam_.fov);
+      }
   }
   else render_solid(view, v, p);
   if (show_grid_) draw_grid(scene_r3d_);
@@ -687,6 +693,8 @@ bool Editor::focus_pick_update(const Recti &view) {
     return true;
   }
   cam->focus_distance = d;
+  cam->focus_point = p;
+  cam->focus_track = true;  // stays on that point as the camera moves
   cam->dof = true;
   focus_pick_cam_ = 0;
   Log::info("Focus distance: %.3f m", d);
@@ -1846,7 +1854,10 @@ void Editor::edit_op(const std::string &op) {
     L.elem = elem_;
     L.fuse = auto_fuse_;
     if (op == "extrude") L.amount = extrude_dist_;
-    else if (op == "inset") L.amount = inset_amount_;
+    else if (op == "inset") {
+      L.individual = inset_individual_;
+      L.amount = inset_individual_ ? inset_amount_ : inset_thickness_;
+    }
     else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; L.clamp = bevel_clamp_; }
     else if (op == "bridge") L.segments = bridge_segments_;
     else if (op == "subdivide_edges") L.segments = subdivide_cuts_;
@@ -2007,6 +2018,31 @@ void Editor::edit_op(const std::string &op) {
     face_sel_.assign(m.face_count(), 0);
     if (elem_ == EditElement::Edge) edges_from_verts();
     Log::info("Extruded %zu %s", n, elem_ == EditElement::Edge ? "edge(s)" : "edge(s) / vertices");
+  }
+  else if (op == "select_overlapping") {
+    std::vector<std::pair<uint32_t, uint32_t>> pairs;
+    const size_t n = meshops::overlapping_faces(m, 1e-3f * std::max(1e-3f, length(m.bounds().extent())), &pairs);
+    set_edit_element(EditElement::Face);
+    face_sel_.assign(m.face_count(), 0);
+    for (auto &p : pairs) face_sel_[p.first] = face_sel_[p.second] = 1;
+    sync_vert_face_selection(true);
+    Log::info(n ? "Select Overlapping: %zu pair(s) of faces on top of each other" : "Select Overlapping: none found", n);
+    return;
+  }
+  else if (op == "delete_loose") {
+    const bool any = std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end();
+    const meshops::LooseCounts c = meshops::delete_loose(m, true, true, false, any ? &vert_sel_ : nullptr);
+    if (!c.verts && !c.edges) {
+      Log::info("Delete Loose: nothing loose %s", any ? "in the selection" : "in the mesh");
+      return;
+    }
+    vert_sel_.assign(m.vert_count(), 0);
+    if (elem_ == EditElement::Face) sync_vert_face_selection(true);
+    else {
+      face_sel_.assign(m.face_count(), 0);
+      if (elem_ == EditElement::Edge) edges_from_verts();
+    }
+    Log::info("Delete Loose: removed %zu vertices and %zu wire edges", c.verts, c.edges);
   }
   else if (op == "delete") {
     if (elem_ != EditElement::Face) {
@@ -2215,7 +2251,8 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"select_ring", "Select Edge Ring", "", "Extend the selected edges across their quads (the rungs of a ladder). Blender: Ctrl+Alt+click.", E},
       {"push_pull", "Push/Pull", "P", "Move the selected faces along their normal like SketchUp: sides stretch into coplanar\nneighbours, pushing to the far side makes a hole, pulling onto a face joins it.\nMove the mouse or type a distance, click to confirm, Esc to cancel.", F},
       {"extrude", "Extrude", "Ctrl+E", "Extrude the selected faces along their normals. Blender: E.", F},
-      {"inset", "Inset", "Ctrl+I", "Make a smaller copy of each selected face inside it. Blender: I.", F},
+      {"inset", "Inset", "Ctrl+I", "Make a smaller copy of the selected faces inside them: each face on its own (Individual),\n"
+       "or the whole selection as one face (Inset Individual off). F9 switches between them. Blender: I.", F},
       {"push_through", "Push Through", "Alt+P", "Cut a hole through the object along the selected face's normal.\nTip: Inset first so the hole has a rim.", F},
       {"fuse", "Fuse onto Face", "", "Join selected faces that lie on another face of the mesh (the touching area becomes an opening).", F},
       {"extrude_individual", "Extrude Individual", "", "Extrude each selected face on its own, with its own walls. Blender: Extrude Individual Faces.", F},
@@ -2230,6 +2267,10 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"shade_flat", "Shade Flat", "", "Flat (faceted) shading on the selected faces only.", F},
       {"bridge", "Bridge", "Ctrl+Shift+B", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
       {"delete", "Delete", "Del", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
+      {"select_overlapping", "Select Overlapping", "", "Select faces that lie on top of each other (or a hair apart) and flicker:\n"
+       "delete or move them to clean up. They come from geometry stacked by hand or imported.", ALL},
+      {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
+       "or in the whole mesh when nothing is selected. Blender: Mesh > Clean Up > Delete Loose.", ALL},
       {"recalc_normals", "Recalculate Normals", "Shift+N", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
       {"shrink_fatten", "Shrink/Fatten", "Alt+S", "Move the selected vertices along their normals (F9 sets the distance). Blender: Alt+S.", ALL},
       {"to_sphere", "To Sphere", "Shift+Alt+S", "Pull the selected vertices onto a sphere around their centre (F9 sets how far). Blender: Shift+Alt+S.", ALL},
@@ -2502,6 +2543,7 @@ void Editor::draw_game_view(const Recti &r) {
   Mat4 p = cam->projection(aspect);
   /* The Game view always uses the full material pipeline with shadows (Unity Game view). */
   render_deferred(game_r3d_, game_rt_, v, p, eye, true, true, cam);
+  camera_dof(game_rt_, v, p, eye, q.rotate({0, 0, 1}), cam, aspect, cam->vertical_fov_deg(aspect));
   game_stats_ = game_r3d_.stats();
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};
@@ -2569,7 +2611,8 @@ void Editor::run_last_op(bool first) {
   const std::string &op = L.op;
   if (op == "extrude" || op == "inset") {
     if (op == "extrude") meshops::extrude_faces(m, face_sel_, L.amount);
-    else meshops::inset_faces(m, face_sel_, L.amount);
+    else if (L.individual) meshops::inset_faces(m, face_sel_, L.amount);
+    else meshops::inset_region(m, face_sel_, std::max(0.0f, L.amount));
     vert_sel_.assign(m.vert_count(), 0);
     sync_vert_face_selection(true);
   }
@@ -2742,7 +2785,17 @@ void Editor::draw_last_op_panel(const Recti &view) {
     changed |= u.checkbox({cr.x, cr.y, cr.h, cr.h}, L.fuse);
     u.tooltip("When the extruded face ends on another face of the mesh, join them\n(the touching area becomes an opening, like Bridge).");
   }
-  else if (L.op == "inset") fl("Thickness", L.amount, 0.005f, 0.0f, 1.0f);
+  else if (L.op == "inset") {
+    Recti cr = row("Individual");
+    if (u.checkbox({cr.x, cr.y, cr.h, cr.h}, L.individual)) {
+      changed = true;
+      L.amount = L.individual ? inset_amount_ : inset_thickness_;  // each mode keeps its own amount
+    }
+    u.tooltip("On: each selected face gets its own inset. Off: the selection is inset as one face\n"
+              "(only its outline moves in). Blender: Inset Faces > Individual.");
+    if (L.individual) fl("Amount", L.amount, 0.005f, 0.0f, 1.0f);
+    else fl("Thickness", L.amount, 0.005f, 0.0f, 1000.0f);
+  }
   else if (L.op == "bevel") {
     fl("Width", L.amount, 0.005f, 0.0001f, 1000.0f);
     ifield("Segments", L.segments, 1, 64);
@@ -2859,7 +2912,7 @@ void Editor::modal_finish(bool keep) {
   if (!modal_.active) return;
   modal_.active = false;
   if (keep) {
-    if (modal_.op == "inset") inset_amount_ = last_op_.amount;
+    if (modal_.op == "inset") (last_op_.individual ? inset_amount_ : inset_thickness_) = last_op_.amount;
     else if (modal_.op == "bevel") {
       bevel_width_ = last_op_.amount;
       bevel_segments_ = last_op_.segments;
@@ -2920,7 +2973,8 @@ bool Editor::modal_update(const Recti &view) {
     const float from = modal_.precise ? modal_.precise_from : modal_.start_amount;
     const float base = modal_.precise ? modal_.precise_len : modal_.start_len;
     const float speed = modal_.precise ? 0.1f : 1.0f;
-    if (modal_.op == "inset") amount = from + (base - d) / std::max(1.0f, modal_.start_len) * speed;
+    if (modal_.op == "inset" && last_op_.individual) amount = from + (base - d) / std::max(1.0f, modal_.start_len) * speed;
+    else if (modal_.op == "inset") amount = std::max(0.0f, from + (base - d) * modal_.px_size * speed);
     else amount = from + (d - base) * modal_.px_size * speed;
     if (in.ctrl()) amount = std::round(amount / (modal_.op == "inset" ? 0.05f : snap_move_)) * (modal_.op == "inset" ? 0.05f : snap_move_);
   }
