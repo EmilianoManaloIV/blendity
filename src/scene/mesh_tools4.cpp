@@ -770,4 +770,246 @@ size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<
 }
 
 
+
+/* Vertex b becomes a everywhere (faces, wire edges, seams); faces that lose a
+ * corner keep the rest, and ones left with fewer than 3 go. */
+void merge_verts(Mesh &m, uint32_t a, uint32_t b) {
+  if (a == b || a >= m.vert_count() || b >= m.vert_count()) return;
+  for (uint32_t &v : m.corner_verts)
+    if (v == b) v = a;
+  for (std::vector<uint64_t> *es : {&m.loose_edges, &m.seams, &m.sharp_edges}) {
+    std::vector<uint64_t> keep;
+    for (uint64_t k : *es) {
+      uint32_t x = (uint32_t)(k >> 32), y = (uint32_t)(k & 0xFFFFFFFFu);
+      if (x == b) x = a;
+      if (y == b) y = a;
+      if (x != y) keep.push_back(Mesh::edge_key(x, y));
+    }
+    std::sort(keep.begin(), keep.end());
+    keep.erase(std::unique(keep.begin(), keep.end()), keep.end());
+    *es = std::move(keep);
+  }
+  cleanup_faces(m);
+  remove_loose_verts(m);
+  m.touch();
+}
+
+/* Smart Fill (Blender's Fill / Fill Holes, SketchUp closing a hole): open edges -
+ * sides of faces with nothing on the other side, and wire edges - are chained
+ * into loops, and each loop is closed the way that suits it:
+ *   - a loop with no area (a crack between unwelded copies of an edge, a slit,
+ *     corners that converge on one point) is welded shut: its corners at the
+ *     same place merge, so no zero-area face is ever made;
+ *   - a flat loop becomes one face, wound against the faces around it so the
+ *     surface stays consistent (and a closed solid again when it was one hole);
+ *   - a bent loop gets a fan of triangles from its centre, which follows the
+ *     shape instead of one face twisting across it;
+ *   - a loop that is only a line (no surface possible) is left, and counted.
+ * With a vertex selection only loops wholly inside it are filled. */
+SmartFillResult smart_fill(Mesh &m, const std::vector<uint8_t> *vert_sel, float weld_eps) {
+  SmartFillResult res;
+  const float scale = std::max(1e-6f, length(m.bounds().extent()));
+  const float eps = weld_eps > 0 ? weld_eps : 1e-5f * scale;
+  auto selected = [&](uint32_t v) { return !vert_sel || (v < vert_sel->size() && (*vert_sel)[v]); };
+  for (int pass = 0; pass < 64; pass++) {
+    /* Directed open sides: an edge used once by a face, in that face's direction. */
+    std::unordered_map<uint64_t, int> uses;
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = 0; k < m.face_size(f); k++) uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+    std::vector<std::pair<uint32_t, uint32_t>> sides;  // a -> b as the face runs; the fill runs b -> a
+    std::vector<size_t> side_face;
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        const uint32_t a = m.face_verts(f)[k], b = m.face_verts(f)[(k + 1) % m.face_size(f)];
+        if (uses[Mesh::edge_key(a, b)] == 1 && selected(a) && selected(b)) {
+          sides.push_back({a, b});
+          side_face.push_back(f);
+        }
+      }
+    std::vector<uint64_t> wires;
+    for (uint64_t key : m.loose_edges) {
+      const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFFu);
+      if (selected(a) && selected(b) && !uses.count(key)) wires.push_back(key);
+    }
+    if (sides.empty() && wires.empty()) break;
+    /* Chain them: open sides reversed (b -> a), wires either way. */
+    std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, int>>> next;  // vertex -> (next vertex, edge id)
+    std::vector<std::pair<uint32_t, uint32_t>> edges;
+    std::vector<uint8_t> is_wire;
+    std::vector<size_t> edge_face;
+    for (size_t k = 0; k < sides.size(); k++) {
+      const auto &sd = sides[k];
+      next[sd.second].push_back({sd.first, (int)edges.size()});
+      edges.push_back({sd.second, sd.first});
+      is_wire.push_back(0);
+      edge_face.push_back(side_face[k]);
+    }
+    for (uint64_t key : wires) {
+      const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFFu);
+      next[a].push_back({b, (int)edges.size()});
+      next[b].push_back({a, (int)edges.size()});
+      edges.push_back({a, b});
+      is_wire.push_back(1);
+      edge_face.push_back(SIZE_MAX);
+    }
+    std::vector<uint8_t> used(edges.size(), 0);
+    bool changed = false;
+    for (size_t e0 = 0; e0 < edges.size() && !changed; e0++) {
+      if (used[e0]) continue;
+      /* Walk from this edge until it comes back (or dead-ends: an open chain, not a hole). */
+      std::vector<uint32_t> loop = {edges[e0].first};
+      std::vector<int> loop_edges = {(int)e0};
+      used[e0] = 1;
+      uint32_t at = edges[e0].second;
+      const uint32_t start = edges[e0].first;
+      bool closed = false;
+      for (int guard = 0; guard < 100000; guard++) {
+        if (at == start) {
+          closed = true;
+          break;
+        }
+        loop.push_back(at);
+        int pick = -1;
+        uint32_t to = 0;
+        for (auto &cand : next[at])
+          if (!used[cand.second]) {
+            pick = cand.second;
+            to = cand.first;
+            break;
+          }
+        if (pick < 0) break;
+        used[pick] = 1;
+        loop_edges.push_back(pick);
+        at = to;
+      }
+      if (!closed || loop.size() < 2) {
+        if (!closed) res.open_chains++;
+        continue;
+      }
+      /* The outline of one face on its own (a lone face, or one just filled): filling it
+       * would only put a second face back to back with it. */
+      bool one_face = !is_wire[(size_t)loop_edges[0]];
+      for (int e : loop_edges) one_face = one_face && !is_wire[(size_t)e] && edge_face[(size_t)e] == edge_face[(size_t)loop_edges[0]];
+      if (one_face) continue;
+      /* 1. Converging corners: neighbours (in loop order) at the same place merge. */
+      bool welded = false;
+      for (size_t i = 0; i < loop.size() && loop.size() > 1; i++) {
+        const uint32_t a = loop[i], b = loop[(i + 1) % loop.size()];
+        if (a != b && length(m.positions[a] - m.positions[b]) <= eps) {
+          merge_verts(m, a, b);  // b becomes a everywhere
+          welded = true;
+          res.welded++;
+          break;
+        }
+      }
+      if (welded) {
+        changed = true;
+        continue;
+      }
+      /* 2. A slit: corners pairing up across it (the loop runs out and back the same way). */
+      Vec3 nw(0.0f);
+      for (size_t i = 0; i < loop.size(); i++) nw += cross(m.positions[loop[i]], m.positions[loop[(i + 1) % loop.size()]]);
+      float extent = 0.0f;
+      for (size_t i = 0; i < loop.size(); i++) extent = std::max(extent, length(m.positions[loop[i]] - m.positions[loop[0]]));
+      const float area = 0.5f * length(nw);
+      if (area <= 1e-6f * std::max(extent * extent, 1e-12f) || loop.size() < 3) {
+        for (size_t i = 0; i < loop.size() && !welded; i++)
+          for (size_t j = i + 2; j < loop.size() && !welded; j++) {
+            const uint32_t a = loop[i], b = loop[j];
+            if (a != b && length(m.positions[a] - m.positions[b]) <= eps) {
+              merge_verts(m, a, b);
+              welded = true;
+              res.welded++;
+            }
+          }
+        if (welded) {
+          changed = true;
+          continue;
+        }
+        res.no_area++;  // a line: there is no surface to make
+        continue;
+      }
+      /* 3. Flat: one face. Bent: a fan from the centre. */
+      const Vec3 n = nw / (2.0f * area);
+      Vec3 c(0.0f);
+      for (uint32_t v : loop) c += m.positions[v];
+      c = c / (float)loop.size();
+      float bend = 0.0f;
+      for (uint32_t v : loop) bend = std::max(bend, std::fabs(dot(m.positions[v] - c, n)));
+      /* A loop of wires only has no faces to wind against: face away from the mesh's middle. */
+      bool all_wire = true;
+      for (int e : loop_edges) all_wire = all_wire && is_wire[(size_t)e];
+      if (all_wire) {
+        const Vec3 mid = m.bounds().center();
+        if (dot(n, c - mid) < 0) std::reverse(loop.begin(), loop.end());
+      }
+      int mat = 0;
+      for (size_t f = 0; f < m.face_count(); f++)
+        for (uint32_t k = 0; k < m.face_size(f); k++)
+          if (m.face_verts(f)[k] == loop[0]) mat = m.material_of(f);
+      if (bend <= 1e-3f * std::max(extent, 1e-6f) || loop.size() <= 3) {
+        m.add_face(loop.data(), loop.size(), nullptr, mat);
+        res.faces++;
+      }
+      else {
+        const uint32_t cv = m.add_vert(c);
+        for (size_t i = 0; i < loop.size(); i++) {
+          const uint32_t tri[3] = {loop[i], loop[(i + 1) % loop.size()], cv};
+          m.add_face(tri, 3, nullptr, mat);
+        }
+        res.faces += loop.size();
+        res.fans++;
+      }
+      res.loops++;
+      changed = true;
+    }
+    m.prune_loose_edges();
+    m.sync_attributes();
+    m.touch();
+    if (!changed) break;
+  }
+  /* Corners still sharing a place after the loops closed (a rim pinched to a point
+   * leaves several copies of it, each now inside the surface): one vertex. */
+  if (res.welded) {
+    for (bool again = true; again;) {
+      again = false;
+      for (uint32_t a = 0; a < m.vert_count() && !again; a++)
+        for (uint32_t b = a + 1; b < m.vert_count() && !again; b++)
+          if (selected(a) && selected(b) && length(m.positions[a] - m.positions[b]) <= eps) {
+            merge_verts(m, a, b);
+            res.welded++;
+            again = true;
+          }
+    }
+  }
+  return res;
+}
+
+/* Edges whose two faces meet at more than 1 degree and less than angle_deg: the
+ * facets of a curved surface (a bevel's segments, a pulled circle's walls). */
+size_t shallow_edges(const Mesh &m, float angle_deg) {
+  std::unordered_map<uint64_t, std::pair<int, int>> ef;
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      auto &e = ef.emplace(Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]), std::make_pair(-1, -1)).first->second;
+      (e.first < 0 ? e.first : e.second) = (int)f;
+    }
+  const float lo = std::cos(1.0f * kDeg2Rad), hi = std::cos(angle_deg * kDeg2Rad);
+  size_t n = 0;
+  for (auto &kv : ef) {
+    if (kv.second.second < 0) continue;
+    const float c = dot(normalize(m.face_normal((size_t)kv.second.first)), normalize(m.face_normal((size_t)kv.second.second)));
+    if (c < lo && c > hi) n++;
+  }
+  return n;
+}
+
+/* Blender's Shade Auto Smooth: smooth shading, kept hard where faces meet at more than angle_deg. */
+void shade_auto_smooth(Mesh &m, float angle_deg) {
+  m.smooth = true;
+  if (!m.face_smooth.empty()) std::fill(m.face_smooth.begin(), m.face_smooth.end(), (uint8_t)1);
+  m.smooth_angle = std::max(1.0f, std::min(180.0f, angle_deg));
+  m.touch();
+}
+
 }  // namespace bl::meshops

@@ -372,6 +372,17 @@ LooseCounts delete_loose(Mesh &m, bool verts = true, bool edges = true, bool fac
 /* Pairs of faces lying in one plane (within plane_dist; <= 0: 1e-4 of the mesh's size) and covering
  * some of the same area: z-fighting "overlapping faces". */
 size_t overlapping_faces(const Mesh &m, float plane_dist = 0.0f, std::vector<std::pair<uint32_t, uint32_t>> *pairs = nullptr);
+/* Smart Fill: close open edge loops (holes, wire loops) with faces; loops with no area are welded
+ * shut (cracks, slits, corners meeting at a point) and lines are left. vert_sel: only loops inside it. */
+struct SmartFillResult {
+  size_t loops = 0, faces = 0, fans = 0, welded = 0, no_area = 0, open_chains = 0;
+};
+SmartFillResult smart_fill(Mesh &m, const std::vector<uint8_t> *vert_sel = nullptr, float weld_eps = 0.0f);
+void merge_verts(Mesh &m, uint32_t keep, uint32_t drop);  // drop becomes keep everywhere
+/* Edges between faces meeting at 1..angle_deg degrees (curved surfaces' facets). */
+size_t shallow_edges(const Mesh &m, float angle_deg);
+/* Blender: Shade Auto Smooth - smooth shading, hard where faces meet at more than angle_deg. */
+void shade_auto_smooth(Mesh &m, float angle_deg = 30.0f);
 /* The face's area-weighted centre (Plasticity's face centre snap), not the average of its corners. */
 Vec3 face_area_center(const Mesh &m, size_t f);
 /* A closed shape drawn across several coplanar faces: cut into all of them. inner_faces gets the

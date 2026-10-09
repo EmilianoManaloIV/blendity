@@ -192,6 +192,8 @@ struct Camera : ComponentBase<Camera> {
   float f_stop = 2.8f;
   float focus_distance = 10.0f; // m
   bool focus_track = false;     // keep focus_point in focus as the camera moves (Blender: Focus Object)
+  bool in_sequence = true;      // rendered by Render Camera Sequence
+  int sequence_order = 0;       // its place in the sequence (ties: Hierarchy order)
   Vec3 focus_point{0, 0, 0};    // world space, set by Pick Focus Point
   int blades = 0;               // 0 round, 3+ polygonal bokeh
   float blade_rotation = 0.0f;  // degrees

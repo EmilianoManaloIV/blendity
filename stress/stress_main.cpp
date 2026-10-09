@@ -1805,6 +1805,33 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
         for (size_t g : inner)
           if (g >= m.face_count()) m.positions.assign(1, Vec3(nan));  // flag a bad index through the check
       });
+    /* Smart Fill: holes from random deleted faces, cracks from unwelded copies, wire loops. */
+    for (int k = 0; k < (o.quick ? 4 : 12); k++)
+      run("smart fill holes", [&](Mesh &m) {
+        if (m.face_count() < 2) return;
+        std::vector<uint8_t> drop(m.face_count(), 0);
+        for (int i = 0; i <= k % 3; i++) {
+          rng = rng * 1664525u + 1013904223u;
+          drop[(rng >> 8) % m.face_count()] = 1;
+        }
+        meshops::delete_faces(m, drop);
+        meshops::smart_fill(m);
+      });
+    run("smart fill a crack", [&](Mesh &m) {
+      if (!m.face_count() || m.face_size(0) < 3) return;
+      const uint32_t a = m.face_verts(0)[0], a2 = m.add_vert(m.positions[a]);
+      m.corner_verts[m.face_offsets[0]] = a2;  // face 0 lets go of one corner: a crack along two edges
+      m.touch();
+      meshops::smart_fill(m);
+    });
+    run("smart fill on wires and nothing", [&](Mesh &m) {
+      const uint32_t a = m.add_vert(Vec3(0.0f)), b = m.add_vert(Vec3(s, 0, 0)), c = m.add_vert(Vec3(2 * s, 0, 0));
+      m.add_loose_edge(a, b);
+      m.add_loose_edge(b, c);
+      m.add_loose_edge(c, a);  // a loop on a line: nothing to fill
+      meshops::smart_fill(m);
+      meshops::smart_fill(m);  // and again: nothing new
+    });
     run("imprint across faces, degenerate loop", [&](Mesh &m) {
       if (!m.face_count()) return;
       const Vec3 c = m.face_center(0), n = m.face_normal(0);

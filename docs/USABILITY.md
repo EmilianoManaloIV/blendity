@@ -99,6 +99,10 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A New Material made in an Inspector slot lived only in the scene. | It is saved as an asset in Assets/Materials. |
 | Centring a shape on a face meant eyeballing it. | The face's exact centre snaps; Start at Face Center puts circles and polygons there. |
 | Depth of field only showed in path-traced renders, and piloting reset the focus. | The Game view, Camera Preview and piloted view blur by depth (foreground too), and the picked point stays in focus. |
+| An archway pushed through left flickering faces in its half circle (the exit's ring folded over itself). | Rings around holes are checked and rebuilt with bridges when needed; every archway comes out exact. |
+| Patching an open hole meant drawing a new face corner by corner, and cracks made zero-area faces. | Smart Fill closes holes and welds shut cracks and slits. |
+| Bevelled and round results looked faceted until shaded by hand. | Auto Smooth shades them smooth, with corners kept hard. |
+| Rendering several views meant moving the Main Camera and saving each render. | Render Camera Sequence renders every In Sequence camera, each saved. |
 
 ## Still worth doing
 

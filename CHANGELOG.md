@@ -2,6 +2,51 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-08 (round 14): archways pushed through cleanly, drawing over earlier edges, Smart Fill, Auto Smooth, camera sequences
+
+**Asked:** commit and push round 13; fix the face artifacts in the half circle of an archway pushed through; a Smart Fill that patches open edges into a surface, tested where the edges converge to no area; drawing on a face and pushing or pulling through should work smoothly with edges already on either face (rectangles, circles, arcs); an option to shade bevels and other round surfaces smooth automatically; render the scene from a sequence of cameras.
+
+**Done first:** round 13 committed and pushed.
+
+**Fixed**
+- **Archway artifacts.** Where a hole comes out of a face, the face around it was built by zipping its outline to the hole's outline by angle. Seen from the wall's far corner, an arch's curve runs "backwards", so some faces came out flipped, on top of their neighbours. That's the flicker in the half circle. Now every zipped result is checked: all faces must face the right way and add up to exactly the ring's area. When they don't, the ring is made of two faces joined by bridges, which works for any hole shape. Archways with 4-, 8- and 16-segment arcs, pushed through with Push/Pull or Push Through, now give a closed wall with the exact opening, no overlapping faces and every face triangulated exactly.
+- **A selection reaching the wall's edge** (the doorway, the arch and the wall above it) pushed through left a folded face. Push Through now welds its result like Push/Pull does.
+- **Scripted drawing on non-convex faces.** `drawpoint` found the face under a point with a test that only worked for convex faces, so a point on the ring around an earlier circle counted as "on the ground". Mouse drawing was not affected.
+
+**Added**
+- **Smart Fill** (Edit Mode tools, Mesh menu, Modeling Tools for whole objects). Open edges, whether sides of faces with nothing beyond or wire edges, are chained into loops, inside the selection or across the whole mesh. Each loop is closed the way that suits it:
+  - A flat loop becomes one face, wound like the faces around it, so a box with a missing side is a closed solid again.
+  - A bent loop becomes a fan from its centre.
+  - A loop with no area is welded shut, so no zero-area face is ever made: a crack between unwelded copies of an edge, a slit, or a rim converging on a point (welded into one vertex).
+  - A loop lying on a line is left alone and reported.
+  - A face's own outline is never filled a second time.
+- **Auto Smooth:**
+  - Operators that make curved surfaces (a bevel with 2+ segments, a pulled circle) turn on smooth shading by angle (30 degrees by default) on flat-shaded meshes. Round parts look round and corners stay crisp. Meshes you shaded per face are left alone.
+  - Toggle and angle are in Edit Mode's bevel settings and the Mesh menu, and saved with the preferences.
+  - **Shade Auto Smooth** applies it to whole objects (Mesh menu, Modeling Tools).
+- **Render Camera Sequence** (Render window):
+  - Every camera with **Render in Sequence** on (new in the Camera Inspector) is rendered in **Sequence Order**, using the current settings and engine.
+  - Each image is saved to `Renders/<scene>_sequence_<time>/NN_<camera>.<format>`.
+  - It shows progress and can be stopped. Renders go back to the Main Camera afterwards.
+- Console: `autosmooth`, `rendersequence [folder|stop]`, `editop smart_fill`, `meshop smart_fill`, `meshop shade_auto_smooth`.
+
+**Checked:** 1447 unit checks on Windows and 1423 on Linux, 0 failed. New tests:
+- Archways (three arc sizes) pushed through two ways, plus the notch case.
+- Five "prior edges" cases, each pushed through or pulled out, each a closed solid with the exact volume, no overlaps and clean triangulation:
+  - A rectangle drawn over an earlier circle's edge.
+  - A circle drawn across an earlier rectangle.
+  - A rectangle pushed through where the back has a circle.
+  - An archway pushed through where the back has a rectangle across it.
+  - A rectangle over a circle, pulled out.
+- Smart Fill: one and two holes, a selection, a bent hole, a crack, a pinched rim, a line, a wire triangle, a slit, and the editor operator.
+- Auto Smooth on 1- and 4-segment bevels, per-face shading, off, and by hand.
+- A three-camera sequence in order with one excluded, three different images, and a stopped path-traced sequence.
+
+Stress results:
+- The modeling section, with Smart Fill on holes, cracks and wire loops in all 26 awkward meshes: 6,080 operations, 0 problems.
+- Push/Pull: 0 problems, overlapping results still 676.
+- The editor fuzzer: 6,000 frames, no crash.
+
 ## 2026-10-08 (round 13): Push/Pull without overlapping faces, Delete Loose, region inset, depth of field everywhere
 
 **Asked:** commit and push round 12; check Push/Pull and similar tools for the overlapping-face artifacts still showing up; Blender's Delete Loose; inset several faces individually or as one; clearing a number field and pressing Enter should give 0, as in Unity; a New Material made in the Inspector should appear in the Materials folder; draw polygons from a face's exact centre, as in Plasticity; let depth of field blur the foreground while the background stays sharp.

@@ -666,17 +666,9 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
       const Mesh &m = **edit_mesh_ptr();
       const Vec3 p = g->world_matrix().inverse().point(world);
       const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
-      for (size_t f = 0; f < m.face_count() && face < 0; f++) {
-        const Vec3 n = normalize(m.face_normal(f)), p0 = m.positions[m.face_verts(f)[0]];
-        if (std::fabs(dot(p - p0, n)) > eps) continue;
-        /* Inside: the point is on the same side of every edge (convex faces; good enough for scripts). */
-        bool inside = true;
-        for (uint32_t k = 0; k < m.face_size(f) && inside; k++) {
-          const Vec3 a = m.positions[m.face_verts(f)[k]], b = m.positions[m.face_verts(f)[(k + 1) % m.face_size(f)]];
-          inside = dot(cross(b - a, p - a), n) >= -eps;
-        }
-        if (inside) face = (int)f;
-      }
+      /* Any face shape (a ring around an earlier drawing is concave). */
+      for (size_t f = 0; f < m.face_count() && face < 0; f++)
+        if (meshops::point_in_face(m, f, p, eps)) face = (int)f;
     }
   draw_add(world, face, 0);
 }

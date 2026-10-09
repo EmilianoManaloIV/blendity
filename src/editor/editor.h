@@ -220,6 +220,31 @@ class Editor {
   uint64_t pick_wire_object(const Recti &r, int mx, int my, int radius);  // Display As Wire / Bounds objects
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
+  /* Render Camera Sequence: every camera marked In Sequence, one after another, each saved. */
+  uint64_t render_camera_override_ = 0;  // the camera renders use instead of the Main Camera
+  struct RenderSequence {
+    bool active = false, started = false;
+    std::vector<uint64_t> cams;
+    size_t index = 0;
+    std::string dir;
+    std::vector<std::string> written;
+  } seq_;
+  std::vector<GameObject *> sequence_cameras();
+  void step_render_sequence();
+  bool write_render_file(const std::string &path_without_ext, std::string *written = nullptr);
+
+ public:
+  bool start_render_sequence(const std::string &dir = "");
+  void stop_render_sequence();
+  bool sequence_running() const { return seq_.active; }
+  std::string render_camera_name() {
+    GameObject *o = nullptr;
+    main_camera(*scene_, &o);
+    return o ? o->name : std::string();
+  }
+  const std::vector<std::string> &sequence_files() const { return seq_.written; }
+
+ private:
 
   /* ---- edit mode (Blender's Edit Mode inside a Unity-style editor) ---- */
   void enter_edit_mode();
@@ -784,6 +809,9 @@ class Editor {
   std::unordered_map<std::string, bool> foldouts_;
   std::string add_component_search_;
   float subdiv_levels_ = 1, smooth_factor_ = 0.5f, extrude_dist_ = 0.5f, inset_amount_ = 0.3f, merge_dist_ = 0.001f;
+  bool auto_smooth_ = true;          // operators that make curved surfaces turn on smooth-by-angle shading
+  float auto_smooth_angle_ = 30.0f;  // Blender's Auto Smooth default
+  void auto_smooth_after(Mesh *m, size_t shallow_before);
   bool inset_individual_ = true;  // Blender's Inset > Individual: each face on its own, or the selection as one region
   float inset_thickness_ = 0.1f;  // region inset: how far the outline moves in (local units)
   bool draw_face_center_ = false; // centre-based shapes start at the face's centre (Plasticity)

@@ -167,7 +167,7 @@ void Editor::init_headless(int width, int height) {
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
-  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || !deferred_.empty() ||
+  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || seq_.active || !deferred_.empty() ||
          (shading_ == Shading::Rendered && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
@@ -372,6 +372,7 @@ void Editor::frame(std::vector<Event> &events) {
       live_preview_hash() != live_preview_hash_)
     start_final_render(true, false);
   step_final_render();
+  step_render_sequence();
 
   /* Pull new console lines. */
   if (Log::generation() != log_gen_) {
@@ -718,6 +719,12 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Merge by Distance", nullptr, false, has_sel)) mesh_op("merge");
     if (u.menu_item("Flip Normals", nullptr, false, has_sel)) mesh_op("flip");
     if (u.menu_item("Shade Smooth", nullptr, false, has_sel)) mesh_op("shade_smooth");
+    if (u.menu_item("Shade Auto Smooth", nullptr, false, has_sel)) mesh_op("shade_auto_smooth");
+    u.tooltip("Smooth shading, kept hard where faces meet at more than the Auto Smooth angle (30 degrees):\n"
+              "round parts look round, corners stay crisp. Blender: Object > Shade Auto Smooth.");
+    if (u.menu_item("Auto Smooth New Curved Surfaces", nullptr, auto_smooth_)) auto_smooth_ = !auto_smooth_;
+    u.tooltip("Bevels with several segments, pulled circles and other curved results turn on Auto Smooth by themselves\n"
+              "(only on meshes not shaded per face).");
     if (u.menu_item("Shade Flat", nullptr, false, has_sel)) mesh_op("shade_flat");
     if (u.menu_item("Apply Modifiers", nullptr, false, has_sel)) mesh_op("apply_modifiers");
     if (u.menu_item("Reset XForm (Apply Rotation & Scale)", nullptr, false, has_sel)) mesh_op("apply_transform");
@@ -1969,6 +1976,18 @@ void Editor::mesh_op(const std::string &op) {
       n++;
       continue;
     }
+    if (op == "shade_auto_smooth") {
+      meshops::shade_auto_smooth(*mesh_make_mutable(mf->mesh), auto_smooth_angle_);
+      n++;
+      continue;
+    }
+    if (op == "smart_fill") {
+      Mesh &m = *mesh_make_mutable(mf->mesh);
+      const meshops::SmartFillResult r = meshops::smart_fill(m);
+      if (r.loops || r.welded) n++;
+      Log::info("Smart Fill on '%s': %zu hole(s) filled, %zu crack(s) welded", g->name.c_str(), r.loops, r.welded);
+      continue;
+    }
     if (op == "delete_loose") {
       Mesh &m = *mesh_make_mutable(mf->mesh);
       const meshops::LooseCounts c = meshops::delete_loose(m);
@@ -2461,6 +2480,16 @@ void Editor::run_console_command(const std::string &line) {
       mark_changed("Camera Focus");
     }
   }
+  else if (c == "autosmooth") {
+    /* autosmooth on|off [angle]: Auto Smooth for new curved surfaces */
+    auto_smooth_ = to_lower(arg(1, "on")) != "off";
+    if (t.size() > 2) auto_smooth_angle_ = std::max(1.0f, std::min(180.0f, (float)std::atof(t[2].c_str())));
+  }
+  else if (c == "rendersequence") {
+    /* rendersequence [folder] | rendersequence stop: every In Sequence camera, each saved */
+    if (to_lower(arg(1, "")) == "stop") stop_render_sequence();
+    else start_render_sequence(arg(1, "").empty() ? "" : fs::join(project_root_, arg(1, "")));
+  }
   else if (c == "insetmode") {
     /* insetmode individual|region [amount]: Inset's Individual switch and its amount (a fraction) or thickness */
     inset_individual_ = to_lower(arg(1, "individual")) != "region";
@@ -2842,6 +2871,8 @@ void Editor::load_prefs() {
     else if (k == "pivot_center") pivot_center_ = v == "1";
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str())));
     else if (k == "always_redraw") always_redraw_ = v == "1";
+    else if (k == "auto_smooth") auto_smooth_ = v == "1";
+    else if (k == "auto_smooth_angle") auto_smooth_angle_ = std::max(1.0f, std::min(180.0f, (float)std::atof(v.c_str())));
     else if (k == "render_devices_off") {
       render_devices_off_.clear();
       size_t a = 0;
@@ -2862,10 +2893,10 @@ void Editor::save_prefs() {
   std::string off;
   for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
-                            "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\n",
+                            "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\nauto_smooth=%d\nauto_smooth_angle=%g\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
                             show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0, max_fps_,
-                            always_redraw_ ? 1 : 0);
+                            always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_);
   fs::write_file(prefs_path_, s);
 }
 

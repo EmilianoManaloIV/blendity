@@ -253,6 +253,16 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `render/dof.cpp` `apply_depth_of_field` | Linear depth from the depth buffer; CoC `R abs(d - s) / d / (s tan(fov/2)) * H/2` (the path tracer's thin lens); a Vogel-disc gather where a sample counts if its CoC reaches the pixel, a sample behind the pixel only by the pixel's own CoC; in linear light | EEVEE / HDRP scatter-as-gather DOF |
 | `Camera::focus_track`, `update_camera_focus` | Pick Focus Point stores the world point; each frame the focus distance is its depth along the camera's forward | Blender: Depth of Field > Focus Object |
 
+## Holes of any shape, Smart Fill, Auto Smooth, camera sequences (phase 14)
+
+| Blendity | What it does | Blender / SketchUp equivalent |
+|---|---|---|
+| `annulus` check + `bridged_ring` | The angle zipper's faces must each have positive area along n, be simple, and add up to the ring's area (outer minus inner); otherwise two bridges from outer to inner vertices (crossing no side of either loop, nor each other) split the ring into two simple faces | SketchUp's face with a hole; Blender: Fill with holes |
+| `push_through` wrapper | `push_through_raw`, then `tidy_new_geometry`'s weld and a b a spike removal (not Dissolve Degenerate, which made curved exits worse) | - |
+| `meshops::smart_fill`, `merge_verts` | Open sides (used once, chained against their face's direction) and wire edges form loops; a loop with coincident neighbours or pairs is welded (repeat), one with no area and no pairs is left, one face's own outline is skipped; a flat loop becomes an n-gon, a bent one (> 0.1% off its plane) a fan from its centroid; finally coincident touched corners are welded | Blender: Fill / Fill Holes / Merge by Distance |
+| `meshops::shallow_edges`, `shade_auto_smooth`, `Editor::auto_smooth_after` | An operator that increases the number of edges between faces meeting at 1-30 degrees on a mesh with `smooth` off and no per-face shading sets `smooth` and `smooth_angle` (render normals already split by angle) | Blender: Shade Auto Smooth |
+| `Editor::start_render_sequence`, `step_render_sequence`, `render_camera_override_` | Cameras with `in_sequence`, stable-sorted by `sequence_order`; each frame: start the next camera's render (main_camera returns the override), and when it is no longer rendering write it with `write_render_file` | Blender: rendering several cameras via markers / scripts |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

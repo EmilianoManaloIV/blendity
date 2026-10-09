@@ -150,6 +150,8 @@ static void modeling_round11_tests();
 static void modeling_round12_tests();
 static void modeling_round13_tests();
 static void round13_feature_tests();
+static void round14_tests();
+static void round14_feature_tests();
 
 int main() {
   register_builtin_components();
@@ -743,6 +745,8 @@ int main() {
   modeling_round12_tests();
   modeling_round13_tests();
   round13_feature_tests();
+  round14_tests();
+  round14_feature_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -4757,6 +4761,491 @@ static void round13_feature_tests() {
     ed.command("window Game");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(true);
+  });
+}
+
+/* ===================================================================== */
+/* Round 14: archways pushed through, drawing over existing edges,       */
+/* Smart Fill, auto smooth, camera sequences                             */
+/* ===================================================================== */
+
+/* Faces whose triangles don't add up to the polygon (overlapping or missing
+ * triangles: the "face artifacts" of a bad triangulation), or point the wrong way. */
+static size_t bad_triangulations(const Mesh &m, std::string *first = nullptr) {
+  const RenderMesh &rm = m.render_mesh(true);
+  std::vector<double> tri_area(m.face_count(), 0.0);
+  std::vector<int> flipped(m.face_count(), 0);
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const uint32_t f = rm.tri_face[t];
+    const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+    const Vec3 cr = cross(b - a, c - a);
+    tri_area[f] += 0.5 * length(cr);
+    if (dot(cr, m.face_normal(f)) < -1e-9f * length(m.face_normal(f))) flipped[f]++;
+  }
+  size_t bad = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    Vec3 nw(0.0f);
+    for (uint32_t k = 0; k < m.face_size(f); k++) nw += cross(m.positions[m.face_verts(f)[k]], m.positions[m.face_verts(f)[(k + 1) % m.face_size(f)]]);
+    const double area = 0.5 * length(nw);
+    if (std::fabs(tri_area[f] - area) > 1e-4 * std::max(1.0, area) || flipped[f]) {
+      if (first && !bad) *first = strprintf("face %zu (%u corners): polygon %.5f, triangles %.5f, flipped %d", f, m.face_size(f), area, tri_area[f], flipped[f]);
+      bad++;
+    }
+  }
+  return bad;
+}
+
+static void round14_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  /* A wall 4 wide, 3 tall, 0.5 thick (front at z = -0.25), with an archway drawn on its front:
+   * a 1 x 1 doorway and a half circle on its top. */
+  auto wall_with_arch = [](Editor &ed, int segs) {
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    Mesh &m = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+    for (Vec3 &p : m.positions) p = Vec3(p.x * 4.0f, p.y * 3.0f + 1.5f, p.z * 0.5f);
+    m.touch();
+    g->set_world_position({0, 0, 0});
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    ed.command("drawpoint -0.5 0.5 -0.25");
+    ed.command("drawpoint 0.5 1.5 -0.25");
+    ed.command(strprintf("draw arc %d", segs));
+    ed.command("drawpoint -0.5 1.5 -0.25");
+    ed.command("drawpoint 0.5 1.5 -0.25");
+    ed.command("drawpoint 0 2 -0.25");
+    return g;
+  };
+  auto doorway_faces = [](const Mesh &m) {
+    /* The doorway and the arch: front-facing faces inside |x| < 0.5, y in 0.5..2. */
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool in = m.face_normal(f).z < -0.99f;
+      for (uint32_t k = 0; k < m.face_size(f) && in; k++) {
+        const Vec3 p = m.positions[m.face_verts(f)[k]];
+        in = std::fabs(p.x) < 0.5f + 1e-4f && p.y > 0.5f - 1e-4f && p.y < 2.0f + 1e-4f && p.z < -0.2f;
+      }
+      sel[f] = in;
+    }
+    return sel;
+  };
+  test("archway: a selection reaching the wall's top edge pushed through makes a notch, not a fold", [&] {
+    Editor ed;
+    GameObject *g = wall_with_arch(ed, 33);
+    Mesh h = *g->get<MeshFilter>()->mesh;
+    /* The doorway, the arch and the strip of wall above it up to the top edge. */
+    std::vector<uint8_t> sel(h.face_count(), 0);
+    for (size_t f = 0; f < h.face_count(); f++) {
+      const Vec3 c = h.face_center(f);
+      sel[f] = h.face_normal(f).z < -0.99f && std::fabs(c.x) < 0.5f && c.y > 0.5f && c.y < 2.0f && c.z < -0.2f;
+    }
+    std::string err, why, bt;
+    const bool ok = meshops::push_through(h, sel, 1, &err);
+    const size_t badt = bad_triangulations(h, &bt), ov = meshops::overlapping_faces(h);
+    std::printf("    notch: %s, %zu faces, closed %d, overlapping %zu, bad triangulations %zu %s\n", ok ? "ok" : err.c_str(), h.face_count(),
+                (int)closed_manifold(h), ov, badt, bt.c_str());
+    CHECK(structurally_valid(h, &why));
+    CHECK(badt == 0);
+    CHECK(ov == 0);
+  });
+  for (int segs : {8, 16, 33}) {
+    test(strprintf("archway: drawn on a wall (%d-segment arc), pushed through as a doorway", segs).c_str(), [&] {
+      Editor ed;
+      GameObject *g = wall_with_arch(ed, segs);
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::string why, bt;
+      std::vector<uint8_t> sel = doorway_faces(m);
+      const size_t nsel = (size_t)std::count(sel.begin(), sel.end(), 1);
+      std::printf("    drawn: %zu faces, %zu doorway faces, closed %d, bad triangulations %zu\n", m.face_count(), nsel, (int)closed_manifold(m),
+                  bad_triangulations(m, &bt));
+      CHECK(nsel == 2);
+      CHECK(bad_triangulations(m) == 0);
+      if (std::getenv("BLENDITY_DUMP")) {
+        for (size_t f = 0; f < m.face_count(); f++) {
+          std::printf("    f%zu%s n(%.2f %.2f %.2f) c(%.3f %.3f %.3f):", f, sel[f] ? "*" : "", m.face_normal(f).x, m.face_normal(f).y, m.face_normal(f).z,
+                      m.face_center(f).x, m.face_center(f).y, m.face_center(f).z);
+          for (uint32_t k = 0; k < m.face_size(f); k++) std::printf(" %u", m.face_verts(f)[k]);
+          std::printf("\n");
+        }
+      }
+      /* Push / Pull past the back: a hole. */
+      for (int mode = 0; mode < 2; mode++) {
+        Mesh h = m;
+        std::vector<uint8_t> s2 = sel;
+        meshops::PushPullResult res;
+        std::string err;
+        bool ok = mode == 0 ? meshops::push_pull(h, s2, -0.6f, true, &res, &err) : meshops::push_through(h, s2, 1, &err);
+        std::string ov;
+        const size_t ovn = meshops::overlapping_faces(h, 0.0f);
+        const size_t badt = bad_triangulations(h, &bt);
+        std::printf("    %s: %s, %zu faces, closed %d, volume %.4f, overlapping %zu, bad triangulations %zu %s\n", mode == 0 ? "push/pull -0.6" : "push through",
+                    ok ? (mode == 0 ? (res == meshops::PushPullResult::Hole ? "hole" : "not a hole") : "ok") : err.c_str(), h.face_count(),
+                    (int)closed_manifold(h), vol(h), ovn, badt, bt.c_str());
+        CHECK(ok);
+        CHECK(structurally_valid(h, &why));
+        CHECK(closed_manifold(h));
+        CHECK(ovn == 0);
+        if (ovn && std::getenv("BLENDITY_DUMP")) {
+          std::vector<std::pair<uint32_t, uint32_t>> pr;
+          meshops::overlapping_faces(h, 0.0f, &pr);
+          for (auto &q : pr)
+            for (uint32_t f : {q.first, q.second}) {
+              std::printf("    overlap f%u n(%.2f %.2f %.2f):", f, h.face_normal(f).x, h.face_normal(f).y, h.face_normal(f).z);
+              for (uint32_t k = 0; k < h.face_size(f); k++) {
+                const Vec3 v = h.positions[h.face_verts(f)[k]];
+                std::printf(" (%.3f %.3f %.3f)", v.x, v.y, v.z);
+              }
+              std::printf("\n");
+            }
+        }
+        CHECK(badt == 0);
+        /* The opening: 1 x 1 plus a half disc of radius 0.5 (as a polygon), 0.5 deep. */
+        const int arc_n = std::max(2, segs / 2);  // the arc tool uses half the circle segments
+        const float opening = 1.0f + 0.5f * arc_n * 0.25f * std::sin(kPi / arc_n);
+        CHECK_NEAR(vol(h), 4 * 3 * 0.5f - opening * 0.5f, 2e-3f);
+      }
+    });
+  }
+
+  /* Prior edges on either face: shapes drawn earlier on the front or the back, then a new
+   * shape drawn over them and pushed through (or pulled out). Each result must be a clean
+   * closed solid with the right volume and nothing on top of anything else. */
+  auto plain_wall = [](Editor &ed) {
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    Mesh &m = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+    for (Vec3 &p : m.positions) p = Vec3(p.x * 4.0f, p.y * 3.0f + 1.5f, p.z * 0.5f);
+    m.touch();
+    g->set_world_position({0, 0, 0});
+    ed.command("edit face");
+    return g;
+  };
+  /* Faces on the plane z = zf facing nz whose every corner is inside the box [x0, x1] x [y0, y1]. */
+  auto faces_in = [](const Mesh &m, float zf, float nz, float x0, float x1, float y0, float y1) {
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool in = m.face_normal(f).z * nz > 0.99f;
+      for (uint32_t k = 0; k < m.face_size(f) && in; k++) {
+        const Vec3 p = m.positions[m.face_verts(f)[k]];
+        in = std::fabs(p.z - zf) < 1e-4f && p.x > x0 - 1e-4f && p.x < x1 + 1e-4f && p.y > y0 - 1e-4f && p.y < y1 + 1e-4f;
+      }
+      sel[f] = in;
+    }
+    return sel;
+  };
+  struct Case {
+    const char *name;
+    std::vector<std::string> draw;  // console commands drawing on the wall
+    float x0, x1, y0, y1;           // the region pushed through (on the front)
+    float d;                        // push / pull distance (negative: through the 0.5 thick wall)
+    float hole_area;                // expected opening (or added footprint for pulls)
+  };
+  const std::vector<Case> cases = {
+      {"a rectangle drawn over an earlier circle's edge, pushed through",
+       {"draw circle 24", "drawpoint -0.6 1.5 -0.25", "drawpoint -0.1 1.5 -0.25", "draw rectangle", "drawpoint -0.3 1 -0.25", "drawpoint 0.7 2 -0.25"},
+       -0.3f, 0.7f, 1.0f, 2.0f, -0.6f, 1.0f},
+      {"a circle drawn across an earlier rectangle, pushed through",
+       {"draw rectangle", "drawpoint -1 0.5 -0.25", "drawpoint 0 1.5 -0.25", "draw circle 24", "drawpoint 0 1.5 -0.25", "drawpoint 0.4 1.5 -0.25"},
+       -0.4f, 0.4f, 1.1f, 1.9f, -0.6f, 0.5f * 24 * 0.16f * std::sin(2 * kPi / 24)},
+      {"a rectangle pushed through where the back already has a circle",
+       {"draw circle 24", "drawpoint 0.3 1.5 0.25", "drawpoint 0.8 1.5 0.25", "draw rectangle", "drawpoint -0.5 1 -0.25", "drawpoint 0.5 2 -0.25"},
+       -0.5f, 0.5f, 1.0f, 2.0f, -0.6f, 1.0f},
+      {"an archway pushed through where the back has a rectangle across it",
+       {"draw rectangle", "drawpoint -1 1.2 0.25", "drawpoint 1 1.6 0.25", "draw rectangle", "drawpoint -0.5 0.5 -0.25", "drawpoint 0.5 1.5 -0.25",
+        "draw arc 16", "drawpoint -0.5 1.5 -0.25", "drawpoint 0.5 1.5 -0.25", "drawpoint 0 2 -0.25"},
+       -0.5f, 0.5f, 0.5f, 2.0f, -0.6f, 1.0f + 0.5f * 8 * 0.25f * std::sin(kPi / 8)},
+      {"a rectangle over an earlier circle, pulled out",
+       {"draw circle 24", "drawpoint -0.6 1.5 -0.25", "drawpoint -0.1 1.5 -0.25", "draw rectangle", "drawpoint -0.3 1 -0.25", "drawpoint 0.7 2 -0.25"},
+       -0.3f, 0.7f, 1.0f, 2.0f, 0.4f, 1.0f},
+  };
+  for (const Case &c : cases) {
+    test((std::string("prior edges: ") + c.name).c_str(), [&] {
+      Editor ed;
+      GameObject *g = plain_wall(ed);
+      for (const std::string &cmd : c.draw) {
+        ed.command(cmd);
+        if (std::getenv("BLENDITY_DUMP")) {
+          std::printf("    > %s -> %zu faces\n", cmd.c_str(), g->get<MeshFilter>()->mesh->face_count());
+          std::vector<LogEntry> lines;
+          static size_t seen = 0;
+          Log::fetch(seen, lines);
+          for (size_t k = seen; k < lines.size(); k++) std::printf("      %s\n", lines[k].text.c_str());
+          seen = lines.size();
+        }
+      }
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::string why, bt;
+      CHECK(structurally_valid(m, &why) && closed_manifold(m));
+      CHECK(meshops::overlapping_faces(m) == 0);
+      std::vector<uint8_t> sel = faces_in(m, -0.25f, -1.0f, c.x0, c.x1, c.y0, c.y1);
+      /* Everything inside the new outline is one region: check its area is the expected opening. */
+      float sel_area = 0;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (sel[f]) {
+          Vec3 nw(0.0f);
+          for (uint32_t k = 0; k < m.face_size(f); k++) nw += cross(m.positions[m.face_verts(f)[k]], m.positions[m.face_verts(f)[(k + 1) % m.face_size(f)]]);
+          sel_area += 0.5f * length(nw);
+        }
+      Mesh h = m;
+      meshops::PushPullResult res;
+      std::string err;
+      const bool ok = meshops::push_pull(h, sel, c.d, true, &res, &err);
+      const size_t ov = meshops::overlapping_faces(h), badt = bad_triangulations(h, &bt);
+      const float expect = 4 * 3 * 0.5f + (c.d < 0 ? -c.hole_area * 0.5f : c.hole_area * c.d);
+      static const char *kinds[] = {"moved", "extruded", "hole", "joined"};
+      std::printf("    drawn %zu faces, region %zu faces (area %.4f, expected %.4f); %s: %s, %zu faces, closed %d, volume %.4f (expected %.4f), "
+                  "overlapping %zu, bad triangulations %zu %s\n",
+                  m.face_count(), (size_t)std::count(sel.begin(), sel.end(), 1), sel_area, c.hole_area, c.d < 0 ? "push" : "pull",
+                  ok ? kinds[(int)res] : err.c_str(), h.face_count(), (int)closed_manifold(h), vol(h), expect, ov, badt, bt.c_str());
+      CHECK_NEAR(sel_area, c.hole_area, 1e-3f);
+      CHECK(ok);
+      if (c.d < 0) CHECK(res == meshops::PushPullResult::Hole);
+      CHECK(structurally_valid(h, &why));
+      CHECK(closed_manifold(h));
+      CHECK(ov == 0);
+      CHECK(badt == 0);
+      CHECK_NEAR(vol(h), expect, 2e-3f);
+    });
+  }
+}
+
+static void round14_feature_tests() {
+  const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+  auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
+  auto without = [](Mesh m, std::initializer_list<Vec3> normals) {
+    std::vector<uint8_t> drop(m.face_count(), 0);
+    for (Vec3 n : normals) drop[face_facing(m, n)] = 1;
+    meshops::delete_faces(m, drop);
+    return m;
+  };
+  test("smart fill: holes become faces wound like their neighbours; a closed solid again", [&] {
+    Mesh m = without(*primitives::cube(), {{0, 1, 0}});
+    CHECK(!closed_manifold(m));
+    meshops::SmartFillResult r = meshops::smart_fill(m);
+    std::printf("    one hole: %zu loop(s), %zu face(s); closed %d, volume %.4f\n", r.loops, r.faces, (int)closed_manifold(m), vol(m));
+    CHECK(r.loops == 1 && r.faces == 1 && closed_manifold(m));
+    CHECK_NEAR(vol(m), 1.0f, 1e-4f);
+    CHECK(m.face_normal(m.face_count() - 1).y > 0.99f);  // facing out, like the faces around it
+    Mesh two = without(*primitives::cube(), {{0, 1, 0}, {0, -1, 0}});
+    r = meshops::smart_fill(two);
+    CHECK(r.loops == 2 && closed_manifold(two));
+    CHECK_NEAR(vol(two), 1.0f, 1e-4f);
+    /* Only the hole inside the selection. */
+    Mesh sel_one = without(*primitives::cube(), {{0, 1, 0}, {0, -1, 0}});
+    std::vector<uint8_t> vs(sel_one.vert_count(), 0);
+    for (size_t v = 0; v < vs.size(); v++) vs[v] = sel_one.positions[v].y > 0;
+    r = meshops::smart_fill(sel_one, &vs);
+    CHECK(r.loops == 1 && !closed_manifold(sel_one));
+    /* A bent hole (a cylinder's cap on a twisted rim) is fanned from its centre, not one twisted face. */
+    Mesh cyl = *primitives::cylinder(0.5f, 1.0f, 12);
+    const size_t cap = face_facing(cyl, {0, 1, 0});
+    for (uint32_t k = 0; k < cyl.face_size(cap); k++) cyl.positions[cyl.face_verts(cap)[k]].y += 0.15f * std::sin(k * 2.0f);  // bend the rim
+    cyl.touch();
+    Mesh bent = without(cyl, {{0, 1, 0}});
+    r = meshops::smart_fill(bent);
+    std::string why;
+    std::printf("    bent hole: %zu fan(s), %zu faces added; closed %d, overlapping %zu\n", r.fans, r.faces, (int)closed_manifold(bent),
+                meshops::overlapping_faces(bent));
+    CHECK(r.fans == 1 && r.faces == 12 && closed_manifold(bent) && structurally_valid(bent, &why));
+  });
+  test("smart fill: edges that converge to no area are welded shut, never a zero-area face", [&] {
+    std::string why;
+    /* A crack: two halves of a box whose shared edge has two unwelded copies. */
+    Mesh crack = *primitives::cube();
+    {
+      const size_t top = face_facing(crack, {0, 1, 0});
+      /* Give the top face its own copy of one corner pair: the crack runs along that edge. */
+      const uint32_t *fv = crack.face_verts(top);
+      const uint32_t a = fv[0], b = fv[1];
+      const uint32_t a2 = crack.add_vert(crack.positions[a]), b2 = crack.add_vert(crack.positions[b]);
+      for (uint32_t k = 0; k < crack.face_size(top); k++) {
+        uint32_t &v = crack.corner_verts[crack.face_offsets[top] + k];
+        if (v == a) v = a2;
+        else if (v == b) v = b2;
+      }
+      crack.touch();
+    }
+    CHECK(!closed_manifold(crack));
+    meshops::SmartFillResult r = meshops::smart_fill(crack);
+    std::printf("    crack: %zu weld(s), %zu face(s); closed %d, %zu verts\n", r.welded, r.faces, (int)closed_manifold(crack), crack.vert_count());
+    CHECK(r.welded >= 1 && r.faces == 0);
+    CHECK(closed_manifold(crack) && crack.vert_count() == 8);
+    CHECK_NEAR(vol(crack), 1.0f, 1e-4f);
+    /* Corners converging on one point (a hole whose rim was collapsed): welded into the point. */
+    Mesh pinch = without(*primitives::cube(), {{0, 1, 0}});
+    for (Vec3 &p : pinch.positions)
+      if (p.y > 0) p = Vec3(0, 0.5f, 0);  // the top rim meets at the middle: a pyramid with an empty top
+    pinch.touch();
+    r = meshops::smart_fill(pinch);
+    std::printf("    pinched rim: %zu weld(s), %zu face(s); closed %d, %zu verts, %zu faces\n", r.welded, r.faces, (int)closed_manifold(pinch), pinch.vert_count(),
+                pinch.face_count());
+    CHECK(r.faces == 0 && r.welded >= 2);
+    CHECK(pinch.vert_count() == 5);  // the four rim corners are one apex
+    CHECK(closed_manifold(pinch) && structurally_valid(pinch, &why));
+    for (size_t f = 0; f < pinch.face_count(); f++) {
+      Vec3 nw(0.0f);
+      for (uint32_t k = 0; k < pinch.face_size(f); k++) nw += cross(pinch.positions[pinch.face_verts(f)[k]], pinch.positions[pinch.face_verts(f)[(k + 1) % pinch.face_size(f)]]);
+      CHECK(length(nw) > 1e-6f);  // no face lost all its area
+    }
+    /* A loop of wire edges lying on one line: no surface there; nothing is made. */
+    Mesh line;
+    const uint32_t l0 = line.add_vert({0, 0, 0}), l1 = line.add_vert({1, 0, 0}), l2 = line.add_vert({2, 0, 0});
+    line.add_loose_edge(l0, l1);
+    line.add_loose_edge(l1, l2);
+    line.add_loose_edge(l2, l0);
+    r = meshops::smart_fill(line);
+    CHECK(r.no_area == 1 && line.face_count() == 0);
+    /* A wire triangle (drawn with the polyline): one face. */
+    Mesh tri;
+    const uint32_t t0 = tri.add_vert({0, 0, 0}), t1 = tri.add_vert({1, 0, 0}), t2 = tri.add_vert({0, 0, 1});
+    tri.add_loose_edge(t0, t1);
+    tri.add_loose_edge(t1, t2);
+    tri.add_loose_edge(t2, t0);
+    r = meshops::smart_fill(tri);
+    std::printf("    wire triangle: loops %zu, faces %zu (mesh %zu), wires left %zu, open %zu, no-area %zu\n", r.loops, r.faces, tri.face_count(),
+                tri.loose_edges.size(), r.open_chains, r.no_area);
+    CHECK(r.loops == 1 && tri.face_count() == 1 && tri.loose_edges.empty());
+    /* A slit: a quad strip folded back on itself (out and back along the same line). */
+    Mesh slit;
+    const uint32_t s0 = slit.add_vert({0, 0, 0}), s1 = slit.add_vert({1, 0, 0}), s2 = slit.add_vert({2, 0, 0}), s1b = slit.add_vert({1, 0, 0});
+    slit.add_loose_edge(s0, s1);
+    slit.add_loose_edge(s1, s2);
+    slit.add_loose_edge(s2, s1b);
+    slit.add_loose_edge(s1b, s0);
+    r = meshops::smart_fill(slit);
+    std::printf("    slit: %zu weld(s), %zu face(s), %zu no-area, %zu verts\n", r.welded, r.faces, r.no_area, slit.vert_count());
+    CHECK(slit.face_count() == 0 && r.welded >= 1);
+    /* In the editor. */
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    *mesh_make_mutable(g->get<MeshFilter>()->mesh) = without(*primitives::cube(), {{0, 0, 1}});
+    g->get<MeshFilter>()->mesh->touch();
+    ed.command("edit vertex");
+    ed.command("editop smart_fill");
+    ed.command("edit off");
+    CHECK(closed_manifold(*g->get<MeshFilter>()->mesh));
+  });
+  test("auto smooth: a rounded bevel turns on smooth-by-angle shading; flat results and per-face shading are left alone", [&] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("autosmooth on 30");
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    const Mesh *m0 = g->get<MeshFilter>()->mesh.get();
+    CHECK(!m0->smooth);
+    /* One straight bevel: a 45-degree chamfer, nothing curved. */
+    auto bevel = [&](int segs) {
+      ed.command("edit edge all");
+      ed.command("editop bevel");
+      ed.command("redo amount 0.1");
+      ed.command(strprintf("redo segments %d", segs));
+    };
+    auto mesh = [&]() -> const Mesh & { return *g->get<MeshFilter>()->mesh; };
+    bevel(1);  // one straight bevel: a 45-degree chamfer, nothing curved
+    std::printf("    1-segment bevel: smooth %d, %zu faces\n", (int)mesh().smooth, mesh().face_count());
+    CHECK(mesh().face_count() > 6);
+    CHECK(!mesh().smooth);
+    ed.command("edit off");
+    ed.command("create Cube");
+    g = ed.selected_object();
+    bevel(4);
+    std::printf("    4-segment bevel: smooth %d, angle %.0f, %zu faces\n", (int)mesh().smooth, mesh().smooth_angle, mesh().face_count());
+    CHECK(mesh().smooth);
+    CHECK_NEAR(mesh().smooth_angle, 30.0f, 1e-3f);
+    ed.command("edit off");
+    /* Shaded per face by the user: not touched. */
+    ed.command("create Cube");
+    g = ed.selected_object();
+    Mesh &pf = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+    pf.face_smooth.assign(pf.face_count(), 0);
+    pf.touch();
+    bevel(4);
+    CHECK(!mesh().smooth);
+    ed.command("edit off");
+    /* Off: nothing changes; Shade Auto Smooth by hand. */
+    ed.command("autosmooth off");
+    ed.command("create Cube");
+    g = ed.selected_object();
+    bevel(4);
+    CHECK(!mesh().smooth);
+    ed.command("edit off");
+    ed.command("meshop shade_auto_smooth");
+    CHECK(mesh().smooth && mesh().smooth_angle == 30.0f);
+    /* The render normals: smooth across the bevel's segments, hard at the cube's flat faces. */
+    Mesh b = *primitives::cube();
+    meshops::shade_auto_smooth(b, 30.0f);
+    const RenderMesh &rm = b.render_mesh();
+    CHECK(rm.positions.size() == 24);  // a cube keeps every corner split: 90 degrees > 30
+  });
+  test("camera sequence: every In Sequence camera rendered in order, each saved; Stop and exclusions work", [&] {
+    const std::string proj = fs::join(test_dir(), "seqproject");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    fs::make_dirs(fs::join(proj, "Assets"));
+    fs::make_dirs(fs::join(proj, "research"));
+    set_env("BLENDITY_PROJECT", proj);
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("set Render.RenderEngine Rasterized");  // quick
+      ed.command("set Render.ResolutionX 160");
+      ed.command("set Render.ResolutionY 90");
+      /* Three more cameras round the scene; one is left out, one goes first. */
+      auto add_cam = [&](const char *name, Vec3 at, int order, bool in) {
+        ed.command("create Camera");
+        GameObject *c = ed.selected_object();
+        c->name = name;
+        c->set_world_position(at);
+        Vec3 f = normalize(Vec3(0, 0.5f, 0) - at);
+        c->set_world_rotation(Quat::euler({std::asin(-f.y) * kRad2Deg, std::atan2(f.x, f.z) * kRad2Deg, 0}));
+        c->get<Camera>()->sequence_order = order;
+        c->get<Camera>()->in_sequence = in;
+        return c;
+      };
+      add_cam("Side", {6, 1.5f, 0}, 1, true);
+      add_cam("Top", {0, 8, -0.1f}, -1, true);
+      add_cam("Skipped", {-6, 1, 0}, 0, false);
+      ed.command("rendersequence Renders/test_sequence");
+      for (int i = 0; i < 50 && ed.sequence_running(); i++) ed.step_frame_headless();
+      const auto &files = ed.sequence_files();
+      std::printf("    %zu image(s):", files.size());
+      for (const auto &f : files) std::printf(" %s", fs::filename(f).c_str());
+      std::printf("\n");
+      CHECK(!ed.sequence_running());
+      CHECK(files.size() == 3);
+      if (files.size() == 3) {
+        CHECK(fs::filename(files[0]) == "01_Top.png");
+        CHECK(fs::filename(files[1]) == "02_Main Camera.png");
+        CHECK(fs::filename(files[2]) == "03_Side.png");
+        std::string a, b2, c;
+        CHECK(fs::read_file(files[0], a) && fs::read_file(files[1], b2) && fs::read_file(files[2], c));
+        CHECK(a != b2 && b2 != c && a != c);  // three different views
+      }
+      /* Renders go back to the Main Camera afterwards. */
+      GameObject *owner = nullptr;
+      CHECK(ed.render_camera_name() == "Main Camera");
+      (void)owner;
+      /* Stop part-way: the path tracer, stopped after the first camera. */
+      ed.command("set Render.RenderEngine Path");
+      ed.command("set Render.Samples 4");
+      ed.command("rendersequence Renders/stopped");
+      for (int i = 0; i < 200 && ed.sequence_running() && ed.sequence_files().empty(); i++) ed.step_frame_headless();
+      ed.command("rendersequence stop");
+      CHECK(!ed.sequence_running());
+      CHECK(ed.sequence_files().size() <= 1);
+      CHECK(ed.render_camera_name() == "Main Camera");
+    }
+    set_env("BLENDITY_PROJECT", "");
   });
 }
 

@@ -329,6 +329,13 @@ void Camera::reflect(Reflector &r) {
     r.help("0: a round aperture. 3 or more: polygonal bokeh with that many sides.");
     r.field("Blade Rotation", blade_rotation, 0.5f, -180.0f, 180.0f);
   }
+  r.field("Render in Sequence", in_sequence);
+  r.help("Render Camera Sequence (Render window) renders every camera with this on, one after another,\n"
+         "each to its own image: a shot list of the scene from different angles.");
+  if (in_sequence || all) {
+    r.field("Sequence Order", sequence_order, -1000, 1000);
+    r.help("Lower numbers render first; cameras with the same number go in Hierarchy order.");
+  }
   r.field("Physical Exposure", physical_exposure);
   r.help("Brightness from ISO, shutter speed and f-stop, like a real camera. 0 stops at ISO 100, 1/60 s, f/2.8;\n"
          "each doubling of ISO or exposure time adds a stop. Unity: Physical Camera exposure.");

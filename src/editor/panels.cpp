@@ -1581,6 +1581,25 @@ void Editor::draw_render_window(const Recti &r) {
   }
   if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", false, Icon::File)) defer([this] { save_render(); });
   u.tooltip("Saves to Renders/ in the chosen File Format.");
+  {
+    /* Camera sequence: a shot list rendered one camera after another. */
+    const std::vector<GameObject *> cams = sequence_cameras();
+    Recti sr = lay.row(u.row_h() + u.px(6));
+    if (seq_.active) {
+      if (u.button(sr, strprintf("Stop Camera Sequence (%zu / %zu)", std::min(seq_.index + 1, seq_.cams.size()), seq_.cams.size()), true, Icon::Pause))
+        stop_render_sequence();
+    }
+    else if (u.button(sr, strprintf("Render Camera Sequence (%zu camera%s)", cams.size(), cams.size() == 1 ? "" : "s"), false, Icon::Camera))
+      start_render_sequence();
+    u.tooltip("Render the scene from every camera with Render in Sequence on (Camera Inspector), in Sequence Order,\n"
+              "each saved to Renders/<scene>_sequence_<time>/NN_<camera>.<format> with these settings.");
+    if (!cams.empty() && !seq_.active) {
+      std::string names;
+      for (size_t k = 0; k < cams.size() && k < 6; k++) names += (k ? ", " : "") + cams[k]->name;
+      if (cams.size() > 6) names += strprintf(" and %zu more", cams.size() - 6);
+      u.label(lay.row(), "Order: " + names, u.theme.text_dim);
+    }
+  }
   if (!render_status_.empty()) {
     for (const std::string &part : {render_status_})
       u.label(lay.row(), part, rendering_ ? u.theme.accent : u.theme.text_dim);
@@ -1867,6 +1886,10 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
       else if (elem_ == EditElement::Edge) {
         er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
         er.field("Bevel Segments", bevel_segments_, 1, 64);
+        er.field("Auto Smooth", auto_smooth_);
+        u.tooltip("Rounded results (bevels with 2+ segments, pulled circles...) are shaded smooth, with edges sharper than\n"
+                  "the angle kept hard (Blender: Shade Auto Smooth). Only on meshes not shaded per face.");
+        if (auto_smooth_) er.field("Auto Smooth Angle", auto_smooth_angle_, 0.5f, 1.0f, 180.0f);
         er.field("Bevel Clamp Overlap", bevel_clamp_);
         er.field("Loop Cuts", loop_cuts_, 1, 64);
         er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);

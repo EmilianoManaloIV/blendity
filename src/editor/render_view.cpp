@@ -701,4 +701,119 @@ void Editor::draw_camera_preview(const Recti &view) {
   u.canvas.rect_outline(box, Color::hex(0x101010));
 }
 
+/* ---------------------------------------------------------- Camera sequence */
+
+std::vector<GameObject *> Editor::sequence_cameras() {
+  std::vector<std::pair<GameObject *, int>> list;
+  int order = 0;
+  scene_->for_each_ordered([&](GameObject &g, int) {
+    Camera *c = g.get<Camera>();
+    if (c && c->enabled && c->in_sequence && g.active_in_hierarchy()) list.push_back({&g, order});
+    order++;
+  });
+  std::stable_sort(list.begin(), list.end(), [](const std::pair<GameObject *, int> &a, const std::pair<GameObject *, int> &b) {
+    return a.first->get<Camera>()->sequence_order < b.first->get<Camera>()->sequence_order;
+  });
+  std::vector<GameObject *> out;
+  for (auto &p : list) out.push_back(p.first);
+  return out;
+}
+
+/* The finished render in the scene's File Format, without asking (PNG when a float
+ * format has no float pixels, e.g. from the rasterizer). */
+bool Editor::write_render_file(const std::string &base, std::string *written) {
+  const int w = render_img_.width, h = render_img_.height;
+  if (!w || !h) return false;
+  int fmt = scene_->render.file_format;
+  if (fmt == 3 && !exr_available()) fmt = 2;
+  if (fmt >= 2 && render_linear_.empty()) fmt = 0;
+  static const char *exts[] = {".png", ".jpg", ".hdr", ".exr"};
+  const std::string path = base + exts[fmt];
+  const bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), w, h, w)
+                  : fmt == 1 ? write_jpeg(path, render_img_.pixels.data(), w, h, w, scene_->render.jpeg_quality)
+                  : fmt == 2 ? write_hdr(path, render_linear_.data(), w, h)
+                             : write_exr(path, render_linear_.data(), w, h, true);
+  if (ok && written) *written = path;
+  return ok;
+}
+
+bool Editor::start_render_sequence(const std::string &dir_in) {
+  std::vector<GameObject *> cams = sequence_cameras();
+  if (cams.empty()) {
+    Log::warn("Render Camera Sequence: no camera has Render in Sequence on");
+    return false;
+  }
+  stop_render_sequence();
+  seq_ = RenderSequence{};
+  for (GameObject *g : cams) seq_.cams.push_back(g->id);
+  if (dir_in.empty()) {
+    std::time_t t = std::time(nullptr);
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", std::localtime(&t));
+    std::string scene = scene_->name.empty() ? std::string("Scene") : scene_->name;
+    for (char &c : scene)
+      if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+    seq_.dir = fs::join(fs::join(project_root_, "Renders"), scene + "_sequence_" + buf);
+  }
+  else seq_.dir = dir_in;
+  fs::make_dirs(seq_.dir);
+  seq_.active = true;
+  dock_open(WindowKind::Render);
+  Log::info("Render Camera Sequence: %zu camera(s) into %s", seq_.cams.size(), seq_.dir.c_str());
+  step_render_sequence();
+  return true;
+}
+
+void Editor::stop_render_sequence() {
+  if (seq_.active) {
+    if (rendering_) rendering_ = false;
+    Log::info("Render Camera Sequence stopped after %zu of %zu", seq_.written.size(), seq_.cams.size());
+  }
+  seq_.active = false;
+  seq_.started = false;
+  render_camera_override_ = 0;
+}
+
+/* One camera at a time: start its render, and when it finishes (at once for the
+ * rasterizer, after its samples for the path tracer) save it and go to the next. */
+void Editor::step_render_sequence() {
+  if (!seq_.active) return;
+  for (int guard = 0; guard < 64 && seq_.active; guard++) {
+    if (seq_.index >= seq_.cams.size()) {
+      seq_.active = false;
+      render_camera_override_ = 0;
+      render_status_ = strprintf("Camera sequence: %zu image(s) in %s", seq_.written.size(), seq_.dir.c_str());
+      Log::info("%s", render_status_.c_str());
+      invalidate_project_listing();
+      return;
+    }
+    GameObject *g = scene_->find(seq_.cams[seq_.index]);
+    if (!g || !g->get<Camera>()) {  // deleted meanwhile: skip it
+      seq_.index++;
+      seq_.started = false;
+      continue;
+    }
+    if (!seq_.started) {
+      render_camera_override_ = g->id;
+      start_final_render(false, false);
+      seq_.started = true;
+    }
+    if (rendering_) {
+      render_status_ = strprintf("Camera %zu / %zu: %s  |  %s", seq_.index + 1, seq_.cams.size(), g->name.c_str(), render_status_.c_str());
+      return;  // the path tracer is still sampling: next frame
+    }
+    std::string name = g->name;
+    for (char &c : name)
+      if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+    std::string path;
+    if (write_render_file(fs::join(seq_.dir, strprintf("%02zu_%s", seq_.index + 1, name.c_str())), &path)) {
+      seq_.written.push_back(path);
+      Log::info("Camera %zu / %zu: %s -> %s", seq_.index + 1, seq_.cams.size(), g->name.c_str(), fs::filename(path).c_str());
+    }
+    else Log::error("Render Camera Sequence: could not write the image for '%s'", g->name.c_str());
+    seq_.index++;
+    seq_.started = false;
+  }
+}
+
 }  // namespace bl

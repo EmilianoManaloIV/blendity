@@ -216,9 +216,125 @@ Mat4 rotation_between(Vec3 a, Vec3 b) {
  * with a hole), on a surface with normal n. Walks both loops by angle around
  * the inner loop's centre and zips them together: quads where the two loops
  * advance in step, triangles where one has more vertices. */
+namespace {
+/* Area (along n) of a loop of mesh vertices; positive when it winds around n. */
+float loop_area_along(const Mesh &m, const std::vector<uint32_t> &loop, Vec3 n) {
+  Vec3 s(0.0f);
+  for (size_t k = 0; k < loop.size(); k++) s += cross(m.positions[loop[k]], m.positions[loop[(k + 1) % loop.size()]]);
+  return 0.5f * dot(s, n);
+}
+
+/* Faces fill the ring exactly: each one faces along n, none folds over another
+ * (their areas add up to the ring's), and none crosses itself. */
+bool ring_faces_ok(const Mesh &m, const std::vector<std::vector<uint32_t>> &faces, Vec3 n, float ring_area) {
+  const Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), w = cross(n, u);
+  float sum = 0.0f;
+  for (const auto &f : faces) {
+    if (f.size() < 3) return false;
+    const float a = loop_area_along(m, f, n);
+    if (a <= 0.0f) return false;
+    sum += a;
+    /* Simple: no two non-adjacent sides cross. */
+    const size_t k = f.size();
+    std::vector<Vec2> p(k);
+    for (size_t i = 0; i < k; i++) p[i] = Vec2(dot(m.positions[f[i]], u), dot(m.positions[f[i]], w));
+    auto cross2 = [](Vec2 a2, Vec2 b2, Vec2 c2) { return (b2.x - a2.x) * (c2.y - a2.y) - (b2.y - a2.y) * (c2.x - a2.x); };
+    for (size_t i = 0; i < k; i++)
+      for (size_t j = i + 2; j < k; j++) {
+        if (i == 0 && j == k - 1) continue;
+        const Vec2 a1 = p[i], a2 = p[(i + 1) % k], b1 = p[j], b2 = p[(j + 1) % k];
+        const float d1 = cross2(a1, a2, b1), d2 = cross2(a1, a2, b2), d3 = cross2(b1, b2, a1), d4 = cross2(b1, b2, a2);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return false;
+      }
+  }
+  return std::fabs(sum - ring_area) <= 1e-4f * std::max(1e-6f, ring_area) + 1e-9f;
+}
+
+/* The ring as two faces joined by two bridges from the outer loop to the inner
+ * one (both counter-clockwise about n): works for any shape of hole, where
+ * zipping by angle can fold over (an arch seen from a far corner). */
+bool bridged_ring(const Mesh &m, const std::vector<uint32_t> &O, const std::vector<uint32_t> &I, Vec3 n, float ring_area,
+                  std::vector<std::vector<uint32_t>> &out) {
+  const Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), w = cross(n, u);
+  auto P = [&](uint32_t v) { return Vec2(dot(m.positions[v], u), dot(m.positions[v], w)); };
+  const size_t no = O.size(), ni = I.size();
+  auto cross2 = [](Vec2 a2, Vec2 b2, Vec2 c2) { return (b2.x - a2.x) * (c2.y - a2.y) - (b2.y - a2.y) * (c2.x - a2.x); };
+  auto proper = [&](Vec2 a1, Vec2 a2, Vec2 b1, Vec2 b2) {
+    const float d1 = cross2(a1, a2, b1), d2 = cross2(a1, a2, b2), d3 = cross2(b1, b2, a1), d4 = cross2(b1, b2, a2);
+    return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+  };
+  /* A bridge o-i is usable when it crosses no side of either loop. */
+  auto visible = [&](size_t oi, size_t ii) {
+    const Vec2 a = P(O[oi]), b = P(I[ii]);
+    for (size_t k = 0; k < no; k++)
+      if (proper(a, b, P(O[k]), P(O[(k + 1) % no]))) return false;
+    for (size_t k = 0; k < ni; k++)
+      if (proper(a, b, P(I[k]), P(I[(k + 1) % ni]))) return false;
+    return true;
+  };
+  /* Inner vertices in order of how far out they lie along u (both extremes first). */
+  std::vector<size_t> order(ni);
+  for (size_t i = 0; i < ni; i++) order[i] = i;
+  std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return P(I[x]).x < P(I[y]).x; });
+  std::vector<size_t> tries;
+  for (size_t k = 0; k < ni; k++) tries.push_back(k % 2 ? order[ni - 1 - k / 2] : order[k / 2]);
+  auto nearest_visible = [&](size_t ii, size_t avoid) {
+    std::vector<size_t> os(no);
+    for (size_t k = 0; k < no; k++) os[k] = k;
+    std::sort(os.begin(), os.end(), [&](size_t x, size_t y) { return length(P(O[x]) - P(I[ii])) < length(P(O[y]) - P(I[ii])); });
+    for (size_t o : os)
+      if (o != avoid && visible(o, ii)) return o;
+    return SIZE_MAX;
+  };
+  for (size_t t1 = 0; t1 < tries.size() && t1 < 24; t1++) {
+    const size_t ia = tries[t1];
+    const size_t oa = nearest_visible(ia, SIZE_MAX);
+    if (oa == SIZE_MAX) continue;
+    for (size_t t2 = 0; t2 < tries.size() && t2 < 48; t2++) {
+      const size_t ib = tries[tries.size() - 1 - t2];
+      if (ib == ia) continue;
+      const size_t ob = nearest_visible(ib, oa);
+      if (ob == SIZE_MAX || proper(P(O[oa]), P(I[ia]), P(O[ob]), P(I[ib]))) continue;
+      /* Face A: outer oa -> ob, then the inner loop backwards ib -> ia; face B the rest. */
+      std::vector<uint32_t> A, B;
+      for (size_t k = oa;; k = (k + 1) % no) {
+        A.push_back(O[k]);
+        if (k == ob) break;
+      }
+      for (size_t k = ib;; k = (k + ni - 1) % ni) {
+        A.push_back(I[k]);
+        if (k == ia) break;
+      }
+      for (size_t k = ob;; k = (k + 1) % no) {
+        B.push_back(O[k]);
+        if (k == oa) break;
+      }
+      for (size_t k = ia;; k = (k + ni - 1) % ni) {
+        B.push_back(I[k]);
+        if (k == ib) break;
+      }
+      std::vector<std::vector<uint32_t>> faces = {A, B};
+      if (ring_faces_ok(m, faces, n, ring_area)) {
+        out = std::move(faces);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+}  // namespace
+
+/* Faces between an outer loop and an inner loop lying inside it (a polygon
+ * with a hole), on a surface with normal n. Walks both loops by angle around
+ * the inner loop's centre and zips them together: quads where the two loops
+ * advance in step, triangles where one has more vertices. When that folds
+ * over (an inner shape whose sides face away from the outer corners, like an
+ * arch), the ring is made of two faces joined by bridges instead. */
 void annulus(Mesh &m, std::vector<uint32_t> outer, std::vector<uint32_t> inner, Vec3 n, int mat, std::vector<uint32_t> &made) {
   if (dot(loop_newell(m, outer), n) < 0) std::reverse(outer.begin(), outer.end());
   if (dot(loop_newell(m, inner), n) < 0) std::reverse(inner.begin(), inner.end());
+  const float ring_area = loop_area_along(m, outer, normalize(n)) - loop_area_along(m, inner, normalize(n));
+  const std::vector<uint32_t> O = outer, I = inner;
   const Vec3 c = loop_center(m, inner);
   Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), w = cross(n, u);
   auto ang = [&](uint32_t v) {
@@ -248,13 +364,11 @@ void annulus(Mesh &m, std::vector<uint32_t> outer, std::vector<uint32_t> inner, 
     return a;
   };
   std::vector<float> ao = unwrap(outer, a0), ai = unwrap(inner, a0);
+  std::vector<std::vector<uint32_t>> faces;
   size_t i = 0, j = 0;
   bool pending = false;  // an outer-step triangle waiting to become a quad
   uint32_t pend[3] = {};
-  auto emit = [&](std::initializer_list<uint32_t> f) {
-    m.add_face(f.begin(), f.size(), nullptr, mat);
-    made.push_back((uint32_t)m.face_count() - 1);
-  };
+  auto emit = [&](std::initializer_list<uint32_t> f) { faces.emplace_back(f.begin(), f.end()); };
   auto flush = [&] {
     if (pending) emit({pend[0], pend[1], pend[2]});
     pending = false;
@@ -283,6 +397,14 @@ void annulus(Mesh &m, std::vector<uint32_t> outer, std::vector<uint32_t> inner, 
     }
   }
   flush();
+  if (!ring_faces_ok(m, faces, normalize(n), ring_area)) {
+    std::vector<std::vector<uint32_t>> bridged;
+    if (bridged_ring(m, O, I, normalize(n), ring_area, bridged)) faces = std::move(bridged);
+  }
+  for (const auto &f : faces) {
+    m.add_face(f.data(), f.size(), nullptr, mat);
+    made.push_back((uint32_t)m.face_count() - 1);
+  }
 }
 
 /* Even point-in-polygon test in the plane with normal n. */
@@ -784,7 +906,7 @@ bool bridge(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_
   return true;
 }
 
-bool push_through(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *err) {
+static bool push_through_raw(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *err) {
   face_sel.resize(m.face_count(), 0);
   std::vector<Region> regions = face_regions(m, face_sel);
   if (regions.size() != 1 || regions[0].loops.size() != 1) {
@@ -1311,6 +1433,20 @@ static size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float
 }
 
 }  // namespace
+
+/* Push Through, then a weld: new corners landing on old ones merge and the spikes
+ * that leaves go (a cut reaching the face's own edge left a fold there). Faces
+ * flattened onto a line are not dissolved here: on curved exits that made more
+ * overlaps than it removed. */
+bool push_through(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *err) {
+  const std::vector<Vec3> old = m.positions;
+  if (!push_through_raw(m, face_sel, segments, err)) return false;
+  const float weld = 5e-4f * mesh_scale(m);
+  remap_selection(face_sel, tidy_new_geometry(m, old, weld), m.face_count());
+  m.touch();
+  return true;
+}
+
 
 PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   PushPullLimits lim;

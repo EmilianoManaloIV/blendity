@@ -281,6 +281,14 @@ void Editor::scene_navigation(const Recti &view) {
 Camera *Editor::main_camera(const Scene &s, GameObject **owner) {
   Camera *best = nullptr;
   GameObject *bo = nullptr;
+  /* Rendering a camera sequence: the camera whose turn it is. */
+  if (render_camera_override_ && &s == scene_.get())
+    if (GameObject *g = s.find(render_camera_override_))
+      if (Camera *c = g->get<Camera>())
+        if (c->enabled && g->active_in_hierarchy()) {
+          if (owner) *owner = g;
+          return c;
+        }
   s.for_each_ordered([&](GameObject &g, int) {
     if (!g.active_in_hierarchy()) return;
     auto *c = g.get<Camera>();
@@ -1819,11 +1827,29 @@ void Editor::edit_box_select(const Recti &view, Recti box, int mode) {
   }
 }
 
+/* Auto Smooth: an operator that leaves more shallow-angle edges (a curved surface)
+ * on a flat-shaded mesh turns on smooth shading by angle - curves look round,
+ * hard edges stay hard. Meshes shaded per face are left as they are. */
+void Editor::auto_smooth_after(Mesh *m, size_t before) {
+  if (!auto_smooth_ || !m || m->smooth || !m->face_smooth.empty()) return;
+  if (meshops::shallow_edges(*m, auto_smooth_angle_) <= before) return;
+  meshops::shade_auto_smooth(*m, auto_smooth_angle_);
+  Log::info("Auto Smooth: curved surface shaded smooth (edges sharper than %.0f degrees stay hard)", auto_smooth_angle_);
+}
+
 void Editor::edit_op(const std::string &op) {
   GameObject *g = edit_object();
   if (!g) return;
   MeshPtr &mp = *edit_mesh_ptr();
   Mesh &m = *mesh_make_mutable(mp);
+  struct AutoSmooth {
+    Editor &ed;
+    size_t before;
+    ~AutoSmooth() {
+      if (MeshPtr *p = ed.edit_mesh_ptr())
+        if (*p) ed.auto_smooth_after(p->get(), before);
+    }
+  } auto_smooth{*this, auto_smooth_ ? meshops::shallow_edges(m, auto_smooth_angle_) : (size_t)-1};
   vert_sel_.resize(m.vert_count(), 0);
   face_sel_.resize(m.face_count(), 0);
   /* In edge mode the tools read exactly the selected edges. */
@@ -2018,6 +2044,20 @@ void Editor::edit_op(const std::string &op) {
     face_sel_.assign(m.face_count(), 0);
     if (elem_ == EditElement::Edge) edges_from_verts();
     Log::info("Extruded %zu %s", n, elem_ == EditElement::Edge ? "edge(s)" : "edge(s) / vertices");
+  }
+  else if (op == "smart_fill") {
+    const bool any = std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end();
+    const meshops::SmartFillResult r = meshops::smart_fill(m, any ? &vert_sel_ : nullptr);
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    if (elem_ == EditElement::Edge) edges_from_verts();
+    std::string what = strprintf("Smart Fill: %zu hole(s) filled", r.loops);
+    if (r.fans) what += strprintf(" (%zu bent, filled as fans)", r.fans);
+    if (r.welded) what += strprintf(", %zu crack(s) welded shut", r.welded);
+    if (r.no_area) what += strprintf(", %zu loop(s) with no area left as they are", r.no_area);
+    if (r.open_chains) what += strprintf(", %zu open chain(s) skipped (not a loop)", r.open_chains);
+    if (!r.loops && !r.welded) what = r.no_area ? "Smart Fill: the open edges enclose no area (they lie on a line)" : "Smart Fill: no open edges to fill";
+    Log::info("%s", what.c_str());
   }
   else if (op == "select_overlapping") {
     std::vector<std::pair<uint32_t, uint32_t>> pairs;
@@ -2267,6 +2307,9 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"shade_flat", "Shade Flat", "", "Flat (faceted) shading on the selected faces only.", F},
       {"bridge", "Bridge", "Ctrl+Shift+B", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
       {"delete", "Delete", "Del", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
+      {"smart_fill", "Smart Fill", "", "Close open edges with faces: every hole (or the loops inside the selection) gets a face,\n"
+       "a bent one a fan from its centre; cracks and slits with no area are welded shut instead.\n"
+       "Blender: Fill / Clean Up > Fill Holes. SketchUp: drawing a missing edge closes the face.", ALL},
       {"select_overlapping", "Select Overlapping", "", "Select faces that lie on top of each other (or a hair apart) and flicker:\n"
        "delete or move them to clean up. They come from geometry stacked by hand or imported.", ALL},
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
@@ -2601,6 +2644,14 @@ void Editor::run_last_op(bool first) {
   /* Start again from the mesh as it was before the operator. */
   mf->mesh = std::make_shared<Mesh>(*L.before);
   Mesh &m = *mf->mesh;
+  struct AutoSmooth {
+    Editor &ed;
+    MeshFilter *mf;
+    size_t before;
+    ~AutoSmooth() {
+      if (mf->mesh) ed.auto_smooth_after(mf->mesh.get(), before);
+    }
+  } auto_smooth{*this, mf, auto_smooth_ ? meshops::shallow_edges(*L.before, auto_smooth_angle_) : (size_t)-1};
   m.version = L.before->version + 1 + (++redo_serial_);  // never reuse an old version number
   vert_sel_ = L.vsel;
   face_sel_ = L.fsel;
