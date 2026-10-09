@@ -15,7 +15,8 @@ Records are never rewritten after acceptance; a later decision supersedes an ear
 | [0004](0004-sketchup-push-pull.md) | SketchUp semantics for Push/Pull | accepted |
 | [0005](0005-tool-settings-in-helpers.md) | Tool settings live in the F9 panel and drag helpers | accepted |
 | [0006](0006-subtree-publishing-and-prs.md) | Subtree publishing and human-merged pull requests | accepted |
-| [0007](0007-camera-filters.md) | Camera filters are components with a raster stage and an image stage | accepted |
+| [0007](0007-camera-filters.md) | Camera filters are components with a raster stage and an image stage | accepted, refined by 0008 |
+| [0008](0008-camera-filter-stack.md) | One Camera Filters stack per camera, with effects chosen by category | accepted |
 
 ## Template
 

@@ -2,6 +2,58 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 29): the Camera Filters stack, and the N64, Saturn and DOS looks (task 0005)
+
+**Asked:** make camera filters a general system like Unity's post-processing, where Retro Console is one
+category among others (Color, Lens, Stylize, Bloom & glow come in tasks 0006 and 0007), then start task 0005.
+
+**Changed**
+- **Camera Filters** replaces the separate Retro Console Filter component.
+  - It is one component per camera holding a list of effects (ADR 0008).
+  - **Add Filter** lists the effects by category.
+  - Each effect has its own toggle, foldout and menu (Move Up, Move Down, Reset, Remove Filter).
+  - Order matters: later resolution and texture settings win, the smaller texture cap wins, and colour
+    passes run top to bottom.
+- **Old scenes and habits still work.**
+  - A scene saved with the Retro Console Filter component loads into a stack.
+  - `component Retro Console Filter` adds one to the stack.
+  - `set RetroConsole.Width 160` reaches the first such effect, and `set CameraFilters.E1Width 160` the
+    second.
+- **`redo` with no arguments** now redoes. `redo <param> <value>` still adjusts the last operation. The
+  plain form didn't work in round 28: an older command of the same name caught it first.
+
+**Added**
+- **Retro Console presets:**
+
+  | Console | Resolution | Look |
+  |---|---|---|
+  | Nintendo 64 | 320x240 | the RDP's 3-point texture filter, 64 px textures with mipmaps, 15-bit colour with a Bayer dither, fog |
+  | Sega Saturn | 320x224 | whole-pixel vertices, affine textures, 15-bit colour, see-through surfaces as a checkerboard "mesh" |
+  | DOS PC | 320x200 | 256 colours (a 6x6x6 cube plus 40 greys) with an ordered dither, affine textures |
+
+- **The `filter` console command:** `add <name>` (any case), `remove <i>`, `move <i> <j>`, `reset <i>`
+  and `list` (which lists the available effects for an empty stack).
+
+**Fixed (found by this round's tests and review)**
+- **The DOS palette's nearest-colour table turned 14 palette colours into neighbours**, black among them,
+  so a DOS frame could never be pure black. The nearest colour is now computed exactly from the palette's
+  structure, and it is faster too.
+- **Editing several selected cameras skipped their effects.** Effect edits now carry the same names the
+  files use ("E0 Width"), so they reach each selected camera.
+- **`set CameraFilters.Effects ...` could replace the whole stack.** The type list can only be changed with
+  `filter`.
+- **Screen-door pixels** skip shading for the holes and write depth for the drawn pixels (fog and later
+  surfaces see them).
+
+**Checked**
+- Unit checks: the test-engineer wrote 12 tests (round 29) from the spec, plus a review test that types into
+  the Inspector with two cameras selected. Windows 5029, Linux 5005 and the sanitizer build 4927; 0 failed.
+- Stress `filters` (Windows, 1080p): every preset is 6.5-8.2x faster than unfiltered; 200 random stacks with
+  odd values, 0 problems; every 256-colour frame uses only palette colours.
+- Review (code-reviewer agent, Opus): changes needed. All are fixed above: multi-camera editing, `set` on the
+  type list, screen-door shading and depth, the stress comment, docs and the console nits.
+- Headless screenshots of each preset on the textured scene.
+
 ## 2026-10-09 (round 28): component menus work again, steady macOS CI (task 0008)
 
 **Asked:** components couldn't be removed from an object; the macOS build kept failing in CI.

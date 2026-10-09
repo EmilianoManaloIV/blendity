@@ -73,10 +73,10 @@ void register_builtin_components() {
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
   reg<Camera>("Rendering", "Renders the Game view.", "Camera object (the active scene camera)");
-  reg<RetroConsoleFilter>("Rendering",
-                          "A camera filter: renders this camera the way an old console drew 3D (the PlayStation's wobbling vertices, "
-                          "warping textures, low resolution and dithered 15-bit colour).",
-                          "No direct equivalent (a compositor setup plus pixelation; Unity: a custom post-process)");
+  reg<CameraFilters>("Rendering",
+                     "A stack of filters on this camera, applied top to bottom: Retro Console looks (PS1, N64, Saturn, DOS) and more. "
+                     "Add Filter picks them by category.",
+                     "Compositor nodes on the render (Unity: the Post-processing Layer and Volume profile)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
@@ -404,8 +404,114 @@ float Camera::exposure_stops() const {
 
 /* ------------------------------------------------------- Camera filters */
 
+/* ---------------------------------------------------------- Filter effects */
+
+const std::vector<FilterEffectInfo> &filter_effect_infos() {
+  /* Menu order: by category, then as listed. */
+  static const std::vector<FilterEffectInfo> infos = {
+      {RetroConsoleFilter::kName, "Retro Console",
+       "Render the way an old console drew 3D: PlayStation, Nintendo 64, Sega Saturn or a DOS PC (resolution, wobbling vertices, "
+       "warping textures, texture filtering, colour depth and dither).",
+       [] { return std::make_unique<RetroConsoleFilter>(); }},
+  };
+  return infos;
+}
+
+const FilterEffectInfo *find_filter_effect_info(const std::string &name) {
+  for (const FilterEffectInfo &i : filter_effect_infos())
+    if (i.name == name) return &i;
+  return nullptr;
+}
+
+std::unique_ptr<FilterEffect> create_filter_effect(const std::string &name) {
+  const FilterEffectInfo *i = find_filter_effect_info(name);
+  return i ? i->create() : nullptr;
+}
+
+namespace {
+/* Forwards every field with a prefix on its name ("E0 Width"), so a list of effects shares one
+ * flat key space in files, hashes and `set`. */
+struct PrefixReflector : Reflector {
+  Reflector &in;
+  std::string prefix;
+  PrefixReflector(Reflector &r, std::string p) : in(r), prefix(std::move(p)) {}
+  std::string n(const char *name) const { return prefix + name; }
+  void field(const char *name, float &v, float speed, float mn, float mx) override { in.field(n(name).c_str(), v, speed, mn, mx); }
+  void field(const char *name, int &v, int mn, int mx) override { in.field(n(name).c_str(), v, mn, mx); }
+  void samples(const char *name, int &v, int mn, int mx) override { in.samples(n(name).c_str(), v, mn, mx); }
+  void field(const char *name, bool &v) override { in.field(n(name).c_str(), v); }
+  void field(const char *name, Vec3 &v) override { in.field(n(name).c_str(), v); }
+  void color(const char *name, Vec3 &v) override { in.color(n(name).c_str(), v); }
+  void color_alpha(const char *name, Vec3 &rgb, const char *alpha_name, float &alpha) override {
+    in.color_alpha(n(name).c_str(), rgb, n(alpha_name).c_str(), alpha);
+  }
+  void enumeration(const char *name, int &v, const char *const *options, int count) override {
+    in.enumeration(n(name).c_str(), v, options, count);
+  }
+  void text(const char *name, std::string &v) override { in.text(n(name).c_str(), v); }
+  void mesh(const char *name, MeshPtr &m) override { in.mesh(n(name).c_str(), m); }
+  void help(const char *h) override { in.help(h); }
+  void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
+  void material_list(const char *name, std::vector<MaterialPtr> &m) override { in.material_list(n(name).c_str(), m); }
+  bool all_fields() const override { return in.all_fields(); }
+};
+}  // namespace
+
+void Reflector::filter_effects(const char *name, FilterEffectList &effects) {
+  /* The types, ';'-separated (names have spaces). */
+  std::string types;
+  for (const auto &e : effects) types += std::string(e->type_name()) + ";";
+  const std::string before = types;
+  text(name, types);
+  if (types != before) {  // a reader brought another list: rebuild it (unknown types are skipped)
+    FilterEffectList fresh;
+    size_t a = 0;
+    while (a < types.size()) {
+      size_t b = types.find(';', a);
+      if (b == std::string::npos) b = types.size();
+      if (b > a)
+        if (auto e = create_filter_effect(types.substr(a, b - a))) fresh.push_back(std::move(e));
+      a = b + 1;
+    }
+    effects = std::move(fresh);
+  }
+  for (size_t i = 0; i < effects.size(); i++) {
+    PrefixReflector p(*this, "E" + std::to_string(i) + " ");
+    p.field("Enabled", effects[i]->enabled);
+    effects[i]->reflect(p);
+  }
+}
+
+CameraFilters::CameraFilters(const CameraFilters &o) : ComponentBase<CameraFilters, CameraFilter>(o) {
+  for (const auto &e : o.effects) effects.push_back(e->clone());
+}
+
+CameraFilters &CameraFilters::operator=(const CameraFilters &o) {
+  if (this == &o) return *this;
+  ComponentBase<CameraFilters, CameraFilter>::operator=(o);
+  effects.clear();
+  for (const auto &e : o.effects) effects.push_back(e->clone());
+  return *this;
+}
+
+void CameraFilters::reflect(Reflector &r) { r.filter_effects("Effects", effects); }
+
+void CameraFilters::contribute(FilterStack &s) const {
+  for (const auto &e : effects)
+    if (e->enabled) e->contribute(s);
+}
+
+FilterEffect *CameraFilters::add(const std::string &type) {
+  auto e = create_filter_effect(type);
+  if (!e) return nullptr;
+  effects.push_back(std::move(e));
+  return effects.back().get();
+}
+
 void RetroConsoleFilter::apply_preset(int c) {
   applied_console = c;
+  screen_door = false;
+  fog = false;
   switch (c) {
     default:
     case PS1:
@@ -414,17 +520,44 @@ void RetroConsoleFilter::apply_preset(int c) {
        * GPU's 4x4 dither. No fog by default (games faked it per vertex). */
       width = 320, height = 240, fit = 0;
       vertex_snap = true, snap_grid = 1.0f, affine_textures = true;
-      texture_filter = 1, max_texture_size = 256, mipmaps = false;
+      texture_filter = Nearest, max_texture_size = 256, mipmaps = false;
       color_depth = RetroImageParams::Bits15, dither = RetroImageParams::Ps1;
-      fog = false;
+      break;
+    case N64:
+      /* Nintendo 64 (1996): 320 x 240, sub-pixel vertices and perspective-correct textures, but
+       * tiny textures (4 KB of texture memory: about 64 x 64) smoothed by the RDP's 3-point
+       * filter, with mipmaps, 16-bit colour with a dither, and fog hiding the draw distance. */
+      width = 320, height = 240, fit = 0;
+      vertex_snap = false, snap_grid = 1.0f, affine_textures = false;
+      texture_filter = ThreePoint, max_texture_size = 64, mipmaps = true;
+      color_depth = RetroImageParams::Bits15, dither = RetroImageParams::Bayer4;
+      fog = true, fog_start = 15.0f, fog_end = 60.0f, fog_color = {0.45f, 0.5f, 0.6f};
+      break;
+    case Saturn:
+      /* Sega Saturn (1994): 320 x 224, quads at whole pixels with affine (forward) texture
+       * mapping, nearest texels, 15-bit colour without dither, and see-through surfaces as a
+       * checkerboard mesh (VDP1's half-transparency was slow, so games used the mesh). */
+      width = 320, height = 224, fit = 0;
+      vertex_snap = true, snap_grid = 1.0f, affine_textures = true;
+      texture_filter = Nearest, max_texture_size = 256, mipmaps = false;
+      color_depth = RetroImageParams::Bits15, dither = RetroImageParams::NoDither;
+      screen_door = true;
+      break;
+    case DOS:
+      /* A DOS PC with VGA (early 1990s software 3D): 320 x 200 in 256 colours (mode 13h),
+       * affine texture mapping, nearest texels, an ordered dither into the palette. */
+      width = 320, height = 200, fit = 0;
+      vertex_snap = false, snap_grid = 1.0f, affine_textures = true;
+      texture_filter = Nearest, max_texture_size = 256, mipmaps = false;
+      color_depth = RetroImageParams::Palette256, dither = RetroImageParams::Bayer4;
       break;
   }
 }
 
 void RetroConsoleFilter::reflect(Reflector &r) {
   const bool all = r.all_fields();
-  static const char *consoles[] = {"PlayStation (PS1)"};
-  r.enumeration("Console", console, consoles, 1);
+  static const char *consoles[] = {"PlayStation (PS1)", "Nintendo 64", "Sega Saturn", "DOS PC (VGA)"};
+  r.enumeration("Console", console, consoles, 4);
   r.help("Fills in the fields below with that console's look. Change any of them afterwards.");
   /* Read first, so a preset chosen here (or loaded from a file) is filled in before the fields:
    * a file's own field values then override it. */
@@ -432,30 +565,34 @@ void RetroConsoleFilter::reflect(Reflector &r) {
   r.field("Width", width, 16, 4096);
   r.field("Height", height, 16, 4096);
   r.help("The resolution the camera renders at, scaled up with square pixels.\n"
-         "PS1 games ran at 256-640 x 240 (or 480 interlaced); 320 x 240 was the most common.");
+         "PS1 and N64 games mostly ran at 320 x 240, the Saturn at 320 x 224, DOS games at 320 x 200.");
   static const char *fits[] = {"Fill View", "Letterbox"};
   r.enumeration("Fit", fit, fits, 2);
   r.help("Fill View: keep the height and widen to the view's shape (square pixels).\n"
          "Letterbox: the console's own frame (4:3 for 320 x 240) with black bars.");
   r.field("Vertex Snap", vertex_snap);
-  r.help("Round every vertex to whole pixels, as the PS1 did: edges and shapes jitter as things move.");
+  r.help("Round every vertex to whole pixels, as the PS1 and Saturn did: edges and shapes jitter as things move.");
   if (vertex_snap || all) r.field("Snap Grid (px)", snap_grid, 0.05f, 0.25f, 16.0f);
   r.field("Affine Textures", affine_textures);
-  r.help("Map textures without perspective correction (PS1, Saturn): they bend and swim on polygons\n"
+  r.help("Map textures without perspective correction (PS1, Saturn, early PC 3D): they bend and swim on polygons\n"
          "seen at an angle, most on big ones close to the camera. Rasterized views only.");
-  static const char *filters[] = {"As Material", "Nearest", "Linear", "Trilinear"};
-  r.enumeration("Texture Filter", texture_filter, filters, 4);
+  static const char *filters[] = {"As Material", "Nearest", "Linear", "Trilinear", "3-Point (N64)"};
+  r.enumeration("Texture Filter", texture_filter, filters, 5);
+  r.help("3-Point: the N64's filter, blending three texels instead of four (a slightly jagged smoothness).");
   r.field("Max Texture Size", max_texture_size, 0, 16384);
   r.help("Textures larger than this are drawn from a smaller copy (their mipmap), like a console's small texture memory.\n0: no limit.");
   r.field("Mipmaps", mipmaps);
   r.help("Off: one texture size at every distance (the PS1 had no mipmaps): far textures shimmer.");
-  static const char *depths[] = {"24-bit", "15-bit"};
-  r.enumeration("Colour Depth", color_depth, depths, 2);
-  if (color_depth == RetroImageParams::Bits15 || all) {
+  static const char *depths[] = {"24-bit", "15-bit", "256 colours"};
+  r.enumeration("Colour Depth", color_depth, depths, 3);
+  r.help("15-bit: 32 levels per channel (PS1, N64, Saturn). 256 colours: a fixed VGA-style palette (DOS).");
+  if (color_depth != RetroImageParams::Full || all) {
     static const char *dithers[] = {"Off", "PS1 4x4", "Bayer 4x4"};
     r.enumeration("Dither", dither, dithers, 3);
-    r.help("Hides the 15-bit colour banding with a fixed pattern (the PS1's own matrix, or Bayer's).");
+    r.help("Hides colour banding with a fixed pattern (the PS1's own matrix, or Bayer's).");
   }
+  r.field("Screen-Door Transparency", screen_door);
+  r.help("Draw see-through surfaces as a checkerboard of opaque pixels instead of blending (the Saturn's mesh).");
   r.field("Fog", fog);
   r.help("Fade geometry toward a colour with distance, hiding a short draw distance. The sky is left alone:\n"
          "set the camera's Background to the fog colour for a classic foggy horizon. Not in path-traced renders.");
@@ -469,8 +606,9 @@ void RetroConsoleFilter::reflect(Reflector &r) {
 void RetroConsoleFilter::contribute(FilterStack &s) const {
   if (vertex_snap && finite_bits(snap_grid) && snap_grid > 0.0f) s.vertex_snap = snap_grid;
   if (affine_textures) s.affine_uv = true;
-  static const int kFilter[] = {-1, (int)TexFilter::Closest, (int)TexFilter::Linear, (int)TexFilter::Trilinear};
-  if (texture_filter > 0 && texture_filter < 4) s.tex.filter = kFilter[texture_filter];
+  if (screen_door) s.screen_door = true;
+  static const int kFilter[] = {-1, (int)TexFilter::Closest, (int)TexFilter::Linear, (int)TexFilter::Trilinear, (int)TexFilter::ThreePoint};
+  if (texture_filter > 0 && texture_filter < 5) s.tex.filter = kFilter[texture_filter];
   if (max_texture_size > 0) s.tex.max_size = s.tex.max_size > 0 ? std::min(s.tex.max_size, max_texture_size) : max_texture_size;
   if (!mipmaps) s.tex.mipmaps = false;
   if (width > 0 && height > 0) {

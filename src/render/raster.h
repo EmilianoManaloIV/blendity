@@ -119,6 +119,8 @@ struct RasterOptions {
   float vertex_snap = 0.0f;
   bool affine_uv = false;
   TexOverride tex;
+  /* Transparent materials drawn as a checkerboard of opaque pixels, no blending (Saturn's mesh). */
+  bool screen_door = false;
 };
 
 struct RasterStats {

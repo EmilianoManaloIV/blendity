@@ -546,6 +546,17 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       size_t fi = 2;
       std::string name = t[1];
       while (fi < t.size() && !t[fi].empty() && !std::isdigit((unsigned char)t[fi][0])) name += " " + t[fi++];
+      if (name == "Retro Console Filter") {
+        /* Task 0004 saved the PS1 filter as its own component; it is now an effect in the camera's
+         * filter stack (ADR 0008), with the same field names. */
+        auto *cf = cur->get<CameraFilters>();
+        if (!cf) cf = cur->add<CameraFilters>();
+        FilterEffect *e = cf->add(RetroConsoleFilter::kName);
+        e->enabled = fi >= t.size() || t[fi] != "0";
+        pending_block = [e](Reflector &r) { e->reflect(r); };
+        rr = std::make_unique<ReadReflector>(meshes, &materials);
+        continue;
+      }
       auto c = create_component(name);
       if (!c) {
         Log::warn("Scene: unknown component '%s' skipped (line %d)", name.c_str(), lineno);

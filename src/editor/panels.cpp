@@ -371,6 +371,7 @@ struct InspectorReflector : Reflector {
   bool changed = false;
   Material *material = nullptr;  // the material being edited (texture drops touch it)
   std::vector<FieldEdit> edits;  // what changed this frame (for multi-object editing)
+  std::string record_prefix;     // a filter effect's "E<i> ": edits carry the name other objects' reflectors see
   int label_w;
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
   ui::Id fid(const char *n) { return u.id(n); }
@@ -379,7 +380,7 @@ struct InspectorReflector : Reflector {
   FieldEdit &record(FieldEdit::Kind k, const char *n) {
     edits.emplace_back();
     edits.back().kind = k;
-    edits.back().name = n;
+    edits.back().name = record_prefix + n;
     return edits.back();
   }
   void field(const char *n, float &v, float speed, float mn, float mx) override {
@@ -400,6 +401,7 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     u.label(label_rect(row), n);
     int old = v;
+    ed.inspector_menu_rects_["field:" + record_prefix + n] = field_rect(row);  // tests type into it
     bool ch = u.int_field(fid(n), field_rect(row), v, mn, mx);
     if (ch) {
       FieldEdit &e = record(FieldEdit::Int, n);
@@ -734,6 +736,89 @@ struct InspectorReflector : Reflector {
         img->row(y)[x] = to_display_pixel(v.xyz(), ViewTransform::Standard, 0.0f);
       }
     u.canvas.rect_outline(r, u.theme.border);
+  }
+  /* A camera's filter stack (ADR 0008), like Unity's post-processing profile: each effect a
+   * foldout with its toggle and a menu (Move Up / Down, Reset, Remove), then Add Filter by
+   * category. Menus run at the end of the frame: they edit the stack through filter_stack_op,
+   * by object id. */
+  void filter_effects(const char *, FilterEffectList &effects) override {
+    GameObject *g = ed.active_object();
+    if (!g) return;
+    const uint64_t gid = g->id;
+    const int n = (int)effects.size();
+    if (effects.empty()) {
+      Recti er = lay.row();
+      u.label({er.x + u.px(8), er.y, er.w - u.px(16), er.h}, "No filters. Add Filter to start a stack.", u.theme.text_dim);
+    }
+    for (int i = 0; i < n; i++) {
+      FilterEffect &e = *effects[(size_t)i];
+      u.push_id((uint64_t)i + 7000);
+      lay.space(u.px(2));
+      Recti h = lay.row(u.row_h() + u.px(4));
+      h.x += u.px(4);
+      h.w -= u.px(8);
+      u.canvas.fill_round_rect(h, u.px(3), u.theme.header);
+      const int a = u.font.line_height() - u.px(4);
+      Recti fr{h.x, h.y, a + u.px(6), h.h};
+      if (u.hovered(fr) && u.in.pressed[0]) e.ui_expanded = !e.ui_expanded;
+      u.draw_icon(e.ui_expanded ? Icon::ArrowDown : Icon::ArrowRight, {h.x + u.px(2), h.y + (h.h - a) / 2, a, a}, u.theme.text);
+      if (u.checkbox({fr.right(), h.y, a + u.px(4), h.h}, e.enabled)) {
+        record(FieldEdit::Bool, ("E" + std::to_string(i) + " Enabled").c_str()).b_new = e.enabled;
+        changed = true;
+      }
+      const FilterEffectInfo *info = find_filter_effect_info(e.type_name());
+      Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
+      u.label(tr, e.type_name(), e.enabled ? u.theme.text_bright : u.theme.text_dim);
+      if (u.hovered(tr) && u.in.pressed[0]) e.ui_expanded = !e.ui_expanded;
+      if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
+      const int bs = h.h - u.px(4);
+      Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
+      ui::Id mid = u.id("filter_menu");
+      ed.inspector_menu_rects_["filter" + std::to_string(i)] = mr;
+      if (u.icon_button(mr, Icon::Menu, false, "Move, reset or remove this filter")) u.open_popup(mid, mr);
+      Editor *edp = &ed;
+      u.popup(mid, u.px(200), [edp, gid, i, n] {
+        auto &uu = edp->ui_;
+        if (uu.menu_item("Move Up", nullptr, false, i > 0)) edp->filter_stack_op(gid, "move", i, i - 1);
+        if (uu.menu_item("Move Down", nullptr, false, i + 1 < n)) edp->filter_stack_op(gid, "move", i, i + 1);
+        if (uu.menu_item("Reset")) edp->filter_stack_op(gid, "reset", i);
+        uu.menu_separator();
+        if (uu.menu_item("Remove Filter")) edp->filter_stack_op(gid, "remove", i);
+      });
+      if (e.ui_expanded) {
+        lay.indent += u.px(10);
+        record_prefix = "E" + std::to_string(i) + " ";  // shown as "Width", applied to other cameras as "E0 Width"
+        e.reflect(*this);
+        record_prefix.clear();
+        lay.indent -= u.px(10);
+      }
+      u.pop_id();
+    }
+    /* Add Filter, by category. */
+    lay.space(u.px(4));
+    Recti ar = lay.row(u.row_h() + u.px(4));
+    Recti ab{ar.x + u.px(4), ar.y, std::min(ar.w - u.px(8), u.px(200)), ar.h};
+    ui::Id add = u.id("add_filter");
+    ed.inspector_menu_rects_["add_filter"] = ab;
+    if (u.button(ab, "Add Filter", false, Icon::Plus)) u.open_popup(add, ab);
+    u.tooltip("Add an effect to this camera's stack (Unity: Add Effect in a post-processing profile).");
+    Editor *edp = &ed;
+    std::vector<uint64_t> targets{gid};
+    for (GameObject *o : ed.selected_objects(false))
+      if (o->id != gid && o->get<CameraFilters>()) targets.push_back(o->id);
+    u.popup(add, u.px(240), [edp, targets] {
+      auto &uu = edp->ui_;
+      std::string category;
+      for (const FilterEffectInfo &fi : filter_effect_infos()) {
+        if (fi.category != category) {
+          category = fi.category;
+          uu.menu_label(category);
+        }
+        if (uu.menu_item(fi.name))
+          for (uint64_t id : targets) edp->filter_stack_op(id, "add", 0, 0, fi.name);
+        uu.tooltip(fi.help);
+      }
+    });
   }
 };
 

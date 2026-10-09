@@ -1189,6 +1189,12 @@ Vec4 Texture::sample_level(Vec2 uv, int lv, TexWrap wrap, TexFilter filter) cons
   int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
   float tx = fx - x0, ty = fy - y0;
   Vec4 a = fetch(lv, x0, y0, wrap), b = fetch(lv, x0 + 1, y0, wrap), c = fetch(lv, x0, y0 + 1, wrap), d = fetch(lv, x0 + 1, y0 + 1, wrap);
+  if (filter == TexFilter::ThreePoint) {
+    /* The N64's 3-point filter: the texel square split along its diagonal, each half a plane
+     * through its three corners (cheaper than bilinear; the diagonal shows on magnified texels). */
+    if (tx + ty <= 1.0f) return a + (b - a) * tx + (c - a) * ty;
+    return d + (c - d) * (1.0f - tx) + (b - d) * (1.0f - ty);
+  }
   return lerp(lerp(a, b, tx), lerp(c, d, tx), ty);
 }
 
