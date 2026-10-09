@@ -22,6 +22,15 @@
 
 namespace bl {
 
+/* A camera filter's texture rules (ADR 0007): they replace the material's filter, cap the
+ * texture size (by sampling a smaller mip level) and can switch mipmapping off. */
+struct TexOverride {
+  int filter = -1;      // -1 the material's; else a TexFilter
+  int max_size = 0;     // texels on the longer side; 0 = no cap
+  bool mipmaps = true;
+  bool active() const { return filter >= 0 || max_size > 0 || !mipmaps; }
+};
+
 /* Geometry at a shading point (world space unless noted). */
 struct SurfacePoint {
   Vec3 position;
@@ -34,6 +43,7 @@ struct SurfacePoint {
   Vec3 local_normal;
   AABB local_bounds;
   bool has_tangent = false;
+  const TexOverride *tex = nullptr;  // camera filter (rasterizer only)
 };
 
 /* Material inputs after texture lookups. */

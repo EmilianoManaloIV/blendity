@@ -5,6 +5,7 @@
 #include "scene.h"
 
 #include <atomic>
+#include <mutex>
 #include <cmath>
 
 namespace bl {
@@ -82,6 +83,14 @@ void Material::reflect(Reflector &r) {
 
 const Material::Resolved &Material::textures() const {
   size_t gen = g_texture_gen.load();
+  if (resolved_version_ == version && resolved_cache_gen_ == gen) return resolved_;
+  /* Resolving replaces the shared pointers, which frees textures another thread may be
+   * sampling: the renderers call this on one thread before shading in parallel (sanitizer
+   * finding, task 0004); the lock keeps two first callers from resolving at once. Re-entrant:
+   * a texture load runs parallel_for, whose worker may pick up shading that resolves another
+   * material on this same thread. */
+  static std::recursive_mutex m;
+  std::lock_guard<std::recursive_mutex> lock(m);
   if (resolved_version_ == version && resolved_cache_gen_ == gen) return resolved_;
   auto load = [&](const TextureRef &t) -> TexturePtr {
     if (t.empty()) return nullptr;

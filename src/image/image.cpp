@@ -1179,18 +1179,22 @@ Vec4 Texture::fetch(int level, int x, int y, TexWrap wrap) const {
   return {(c & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, ((c >> 16) & 255) / 255.0f, ((c >> 24) & 255) / 255.0f};
 }
 
+Vec4 Texture::sample_level(Vec2 uv, int lv, TexWrap wrap, TexFilter filter) const {
+  if (levels.empty()) return {1, 0, 1, 1};
+  lv = std::max(0, std::min(lv, (int)levels.size() - 1));
+  /* Blender/OpenGL convention: v = 0 is the bottom row of the image. */
+  const Level &l = levels[lv];
+  float fx = uv.x * l.w - 0.5f, fy = (1.0f - uv.y) * l.h - 0.5f;
+  if (filter == TexFilter::Closest) return fetch(lv, (int)std::floor(fx + 0.5f), (int)std::floor(fy + 0.5f), wrap);
+  int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+  float tx = fx - x0, ty = fy - y0;
+  Vec4 a = fetch(lv, x0, y0, wrap), b = fetch(lv, x0 + 1, y0, wrap), c = fetch(lv, x0, y0 + 1, wrap), d = fetch(lv, x0 + 1, y0 + 1, wrap);
+  return lerp(lerp(a, b, tx), lerp(c, d, tx), ty);
+}
+
 Vec4 Texture::sample(Vec2 uv, float lod, TexWrap wrap, TexFilter filter) const {
   if (levels.empty()) return {1, 0, 1, 1};
-  /* Blender/OpenGL convention: v = 0 is the bottom row of the image. */
-  auto bilinear = [&](int lv) {
-    const Level &l = levels[lv];
-    float fx = uv.x * l.w - 0.5f, fy = (1.0f - uv.y) * l.h - 0.5f;
-    if (filter == TexFilter::Closest) return fetch(lv, (int)std::floor(fx + 0.5f), (int)std::floor(fy + 0.5f), wrap);
-    int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
-    float tx = fx - x0, ty = fy - y0;
-    Vec4 a = fetch(lv, x0, y0, wrap), b = fetch(lv, x0 + 1, y0, wrap), c = fetch(lv, x0, y0 + 1, wrap), d = fetch(lv, x0 + 1, y0 + 1, wrap);
-    return lerp(lerp(a, b, tx), lerp(c, d, tx), ty);
-  };
+  auto bilinear = [&](int lv) { return sample_level(uv, lv, wrap, filter); };
   if (filter != TexFilter::Trilinear || lod <= 0.0f) return bilinear(0);
   int maxl = (int)levels.size() - 1;
   lod = std::min(lod, (float)maxl);

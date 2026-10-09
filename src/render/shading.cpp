@@ -13,8 +13,22 @@ namespace bl {
 /* Material evaluation                                                    */
 /* ===================================================================== */
 
-static inline Vec4 tex_sample(const TexturePtr &t, Vec2 uv, float lod, const Material &m) {
-  return t->sample(uv, lod, (TexWrap)m.wrap, (TexFilter)m.filter);
+static Vec4 tex_sample(const TexturePtr &t, Vec2 uv, float lod, const Material &m, const TexOverride *o = nullptr) {
+  if (!o || !o->active() || t->levels.empty()) return t->sample(uv, lod, (TexWrap)m.wrap, (TexFilter)m.filter);
+  /* A camera filter's rules: the first mip level within the size cap is the "full" texture. */
+  const int maxl = (int)t->levels.size() - 1;
+  int base = 0;
+  if (o->max_size > 0)
+    while (base < maxl && std::max(t->levels[base].w, t->levels[base].h) > o->max_size) base++;
+  const TexFilter f = o->filter >= 0 ? (TexFilter)o->filter : (TexFilter)m.filter;
+  const TexWrap w = (TexWrap)m.wrap;
+  const float l = finite_bits(lod) ? std::max((float)base, std::min(lod, (float)maxl)) : (float)base;
+  if (!o->mipmaps) return t->sample_level(uv, base, w, f);
+  if (f != TexFilter::Trilinear) return t->sample_level(uv, (int)std::floor(l + 0.5f), w, f);  // the nearest level
+  const int l0 = (int)std::floor(l);
+  const float frac = l - l0;
+  const Vec4 a = t->sample_level(uv, l0, w, f);
+  return frac < 1e-3f || l0 >= maxl ? a : lerp(a, t->sample_level(uv, l0 + 1, w, f), frac);
 }
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp) {
@@ -53,12 +67,12 @@ SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp) {
   auto sample = [&](const TexturePtr &t) -> Vec4 {
     if (!box) {
       float lod = (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) ? 0.0f : texture_lod(*t, ddx, ddy);
-      return tex_sample(t, uv, lod, m);
+      return tex_sample(t, uv, lod, m, sp.tex);
     }
     Vec4 r(0, 0, 0, 0);
-    if (bw.x > 0.001f) r = r + tex_sample(t, {bp.z, bp.y}, 0, m) * bw.x;
-    if (bw.y > 0.001f) r = r + tex_sample(t, {bp.x, bp.z}, 0, m) * bw.y;
-    if (bw.z > 0.001f) r = r + tex_sample(t, {bp.x, bp.y}, 0, m) * bw.z;
+    if (bw.x > 0.001f) r = r + tex_sample(t, {bp.z, bp.y}, 0, m, sp.tex) * bw.x;
+    if (bw.y > 0.001f) r = r + tex_sample(t, {bp.x, bp.z}, 0, m, sp.tex) * bw.y;
+    if (bw.z > 0.001f) r = r + tex_sample(t, {bp.x, bp.y}, 0, m, sp.tex) * bw.z;
     return r;
   };
 

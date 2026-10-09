@@ -104,6 +104,8 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Bevelled and round results looked faceted until shaded by hand. | Auto Smooth shades them smooth, with corners kept hard. |
 | Rendering several views meant moving the Main Camera and saving each render. | Render Camera Sequence renders every In Sequence camera, each saved. |
 | Shortcuts were fixed, Unity-style only. | A rebindable keymap with Unity, Blender, Maya, 3ds Max and SketchUp presets. |
+| A camera could only render one look; a retro style meant faking it in materials. | Camera filter components (first: Retro Console Filter, PS1). They apply everywhere that camera's image shows, and the Scene view can preview them with one toggle. |
+| `component` in the console took only one word, so "Retro Console Filter" (or any spaced name) couldn't be added, and such components were dropped when a scene was loaded. | Names with spaces work in the console and in scene files. |
 | Selection tools were scattered across one long grid of 60 buttons. | Grouped tools, Select first; pairs share a button. |
 | Overlapping faces could only be found inside one mesh, with no advice. | The Z-fighting check works across objects and says which faces can go. |
 | The UV editor only picked vertices. | Face and island modes, sync, and rotate / scale / move / flip / fit / align. |

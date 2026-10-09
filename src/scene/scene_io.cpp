@@ -9,6 +9,7 @@
 #include "../../extern/fast_float/fast_float.h"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -540,16 +541,22 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       cur->set_local(tr);
     }
     else if (k == "component" && cur && t.size() >= 2) {
-      auto c = create_component(t[1]);
+      /* The type name may have spaces ("Retro Console Filter"): every word up to the first
+       * number (the enabled flag) is part of it. */
+      size_t fi = 2;
+      std::string name = t[1];
+      while (fi < t.size() && !t[fi].empty() && !std::isdigit((unsigned char)t[fi][0])) name += " " + t[fi++];
+      auto c = create_component(name);
       if (!c) {
-        Log::warn("Scene: unknown component '%s' skipped (line %d)", t[1].c_str(), lineno);
+        Log::warn("Scene: unknown component '%s' skipped (line %d)", name.c_str(), lineno);
         /* Skip its body. */
         while (is.next(line) && line.substr(0, 3) != "end") lineno++;
         continue;
       }
-      c->enabled = t.size() < 3 || t[2] != "0";
-      c->show_in_editmode = t.size() < 4 || t[3] != "0";
-      c->show_in_render = t.size() < 5 ? c->enabled : t[4] != "0";  // older files: renders follow the viewport
+      auto flag = [&](size_t i) { return fi + i < t.size() ? (int)(t[fi + i] != "0") : -1; };
+      c->enabled = flag(0) != 0;
+      c->show_in_editmode = flag(1) != 0;
+      c->show_in_render = flag(2) < 0 ? c->enabled : flag(2) == 1;  // older files: renders follow the viewport
       comp = cur->add_component(std::move(c));
       rr = std::make_unique<ReadReflector>(meshes, &materials);
     }

@@ -2,6 +2,64 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 27): camera filters, with the PS1 look (task 0004)
+
+**Asked:** camera "filters" built from shaders, starting with one that recreates 3D graphics on the
+PlayStation 1 and older consoles. Decisions taken with the user:
+- filters are components on the camera;
+- they show in the Game view and Play mode, the Camera Preview, F12 and sequences, and the Scene view
+  through a toggle;
+- presets for PS1, N64, Saturn and DOS (N64, Saturn and DOS are task 0005).
+
+**Added**
+- **Retro Console Filter** (Add Component > Rendering), with a Console preset (PS1). Its fields:
+  - Width / Height and Fit (Fill View with square pixels, or Letterbox to the console's frame);
+  - Vertex Snap with a grid;
+  - Affine Textures;
+  - Texture Filter, Max Texture Size and Mipmaps;
+  - Colour Depth (24 / 15-bit) and Dither (PS1 4x4 / Bayer);
+  - Fog with start, end and colour.
+- **The PS1 preset:** 320x240, vertices on whole pixels, affine textures, nearest 256 px textures with no
+  mipmaps, 15-bit colour through the PS1's dither matrix.
+- **Where filters render:** everywhere the camera's image shows, through one `Editor::render_camera`.
+  - A path-traced render through a filtered camera traces at the low resolution and gets the colour pass.
+  - The Scene view's new camera button (or `filters on|off`) previews the main camera's filters there.
+- **Speed:** a filtered camera renders fewer pixels: the PS1 look at 1080p took 2.4 ms against 18.3 ms
+  unfiltered.
+- ADR 0007 (camera filters), requirement R-10.
+
+**Fixed**
+- **Components with spaces in their names** couldn't be added from the console (`component Retro Console
+  Filter`), and were dropped when a scene was loaded. Both take the whole name now.
+- **A texture could be freed while it was being drawn.**
+  - When several shading threads met a material whose textures weren't loaded yet, each loaded them and
+    replaced the others' (AddressSanitizer: heap-use-after-free).
+  - Both renderers now load materials' textures before shading in parallel.
+- **NaN checks under `/fp:fast`.** The Windows build is compiled with `/fp:fast`, which lets the compiler
+  assume no NaNs. `display::linear_to_srgb8(NaN)` returned 255 or 0 depending on how the binary was inlined
+  (an existing test failed once new code changed the inlining). NaN tests now read the bits
+  (`nan_bits` / `finite_bits`).
+
+**Checked**
+- Unit checks: Windows with libraries 4280, Linux 4256, sanitizer build 4178; 0 failed.
+  - The test-engineer agent wrote 14 tests from the spec. One of them found the save/load bug.
+  - Two Linux failures were in the tests, not the code, and the tests were fixed:
+    - a straight-edged rectangle can't show sub-pixel creep, so the creep check uses a slanted quad;
+    - the Scene view's log line needs a 1% tolerance.
+- Stress `filters`:
+  - the PS1 look at 1080p: 2.4-2.9 ms against 18.3-24.7 ms unfiltered;
+  - no 15-bit pixel off the 5-bit grid;
+  - 300 runs of odd settings (NaN / infinite snap and fog, 1x1 to 100000 px), 0 problems.
+- Same-session A/B of `shading` against `main` (Linux): equal within noise, so the filter code costs
+  nothing when unused.
+- Headless screenshots of a textured scene: no filter, PS1 Fill, PS1 Letterbox, the Scene view toggle.
+- Review (code-reviewer agent, Opus): changes needed. Fixed:
+  - the texture warm-up now runs in every shade mode (the see-through pass shades materials in Solid
+    view too), and its lock is re-entrant, so a texture load's own parallel_for can't deadlock;
+  - the path tracer resolves textures at the start of every render call, not only at build;
+  - stats survive a filtered render (overlays rebind the renderer without resetting them);
+  - the Scene view always uses Fill, so grid, gizmos and vertex picking match the picture.
+
 ## 2026-10-09 (round 26): sanitizer findings fixed, branch protection on (task 0002)
 
 **Asked:** after merging tasks 0001 and 0003, deal with the current issues before the camera

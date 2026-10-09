@@ -92,7 +92,7 @@ struct Component {
   virtual bool unique() const { return true; }
 };
 
-template<class T> struct ComponentBase : Component {
+template<class T, class Base = Component> struct ComponentBase : Base {
   const char *type_name() const override { return T::kName; }
   std::unique_ptr<Component> clone() const override {
     auto c = std::make_unique<T>(static_cast<const T &>(*this));
@@ -209,6 +209,40 @@ struct Camera : ComponentBase<Camera> {
   Mat4 projection(float aspect) const;         // perspective or orthographic, with lens shift
   float aperture_radius(float aspect) const;   // world units (metres); 0 = pinhole
   float exposure_stops() const;                // added to the render exposure
+};
+
+/* Camera filters (ADR 0007): components on a camera's GameObject that change how it renders,
+ * applied in component order. Each adds its raster settings, resolution and image passes to the
+ * stack (src/render/camera_filter.h). */
+struct FilterStack;
+struct CameraFilter : Component {
+  virtual void contribute(FilterStack &stack) const = 0;
+  bool unique() const override { return false; }
+};
+
+/* 3D graphics as old consoles drew them (task 0004: the PlayStation). The Console preset fills
+ * in the fields; any of them can then be changed. */
+struct RetroConsoleFilter : ComponentBase<RetroConsoleFilter, CameraFilter> {
+  static constexpr const char *kName = "Retro Console Filter";
+  enum Console { PS1 = 0 };
+  int console = PS1;
+  int width = 320, height = 240;
+  int fit = 0;                  // FilterStack::Fit: Fill (square pixels) / Letterbox (the console's frame)
+  bool vertex_snap = true;
+  float snap_grid = 1.0f;       // internal pixels
+  bool affine_textures = true;
+  int texture_filter = 1;       // 0 As Material, 1 Nearest, 2 Linear, 3 Trilinear
+  int max_texture_size = 256;   // 0 = no cap
+  bool mipmaps = false;
+  int color_depth = 1;          // RetroImageParams::Depth
+  int dither = 1;               // RetroImageParams::Dither
+  bool fog = false;
+  float fog_start = 10.0f, fog_end = 60.0f;
+  Vec3 fog_color{0.45f, 0.45f, 0.5f};
+  int applied_console = PS1;    // the preset last filled in (not saved)
+  void apply_preset(int c);
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
 };
 
 struct Rotator : ComponentBase<Rotator> {

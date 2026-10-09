@@ -20,7 +20,7 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - unit checks (1,934 on Windows with Blender's libraries)
+tests/          blendity_tests   - unit checks (4,280 on Windows with Blender's libraries)
 ```
 
 ## System overview
@@ -405,6 +405,19 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 - **Pixels:** `0xAARRGGBB`, so Win32, X11 and CoreGraphics can all blit without conversion.
 - **Idle CPU:** the editor redraws only on input, animation or timers (tooltip, caret). At idle it sleeps in the OS event wait.
 - **Undo:** a scene-graph snapshot after each finished interaction. Meshes are shared and copied on first write.
+
+## Camera filters (round 27, task 0004, ADR 0007)
+
+| Piece | What it does | Reference |
+|---|---|---|
+| `CameraFilter` (`scene/scene.h`), `RetroConsoleFilter` | Components on a camera's GameObject (several allowed, in order). Each adds its raster settings, resolution and image passes to a `FilterStack`. The Console dropdown fills in the fields when it changes (it is reflected first, so a loaded file's values win) | Unity post-processing effects (one component per effect) |
+| `render/camera_filter.h` `FilterStack`, `filter_layout`, `upscale_nearest` | The internal resolution: Fill keeps `height` rows at the view's aspect (square pixels); Letterbox renders `width x height` and fits it with bars. The image is scaled up nearest-neighbour; never larger than the view | - |
+| `RasterOptions::vertex_snap`, `affine_uv`, `tex` (`TexOverride`) | Screen x / y rounded to the snap grid in the vertex stage, the near-clip path and the see-through pass. Affine UVs come from screen-space barycentrics (no 1/w); lighting keeps the perspective-correct position. Texture rules in `tex_sample`: filter override, the first mip level within the size cap as the base, no mipmaps = that one level | psx-spx "GPU Rendering" (integer vertices, affine texture mapping) |
+| `apply_retro_image`, `retro_dither_offset` | Fog by linear depth (geometry only; skipped without depth), then the 4x4 dither offset (PS1 matrix -4..+3, or Bayer) and truncation to 5 bits per channel | psx-spx "Dither Matrix" |
+| `Editor::render_camera`, `camera_filters` | The one camera render path: raster stage, internal-resolution target, DoF, passes, upscale; depth and ids scaled up too, and the renderer rebound (`Renderer3D::rebind`, stats kept) to the full view for overlays. The Scene view always uses Fill, so overlays match. The Game view, Camera Preview, F12 (raster), camera sequences, and the Scene view with `filters on` (the main camera's stack) all use it | - |
+| `resolve_final_render`, the Rendered Camera Preview | A path-traced render through filters traces at the internal resolution, applies the passes (no fog) and scales up; float formats fall back to PNG | - |
+| `nan_bits` / `finite_bits` (`core/math.h`) | NaN and finiteness from the bits, because the Windows build's `/fp:fast` may fold `std::isnan` / `std::isfinite` and NaN-rejecting compares | - |
+| `Material::textures` warm-up | Resolving replaces shared pointers, so it must not happen under shading threads (an ASan use-after-free from the new tests). The rasterizer resolves every drawn material (and the default one) at the start of `flush`, in every shade mode; the path tracer at `build` and at the start of each `render` call (progressive renders span frames). A re-entrant lock covers any other first caller | - |
 
 ## What isn't recreated
 

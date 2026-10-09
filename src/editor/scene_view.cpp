@@ -169,6 +169,11 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   if (u.icon_button({x, y, h, h}, Icon::Move, show_gizmos_, "Toggle Gizmos / transform handles.")) show_gizmos_ = !show_gizmos_;
   x += h + u.px(2);
   if (u.icon_button({x, y, h, h}, Icon::Chart, show_stats_, "Statistics overlay (Blender: Overlays > Statistics).")) show_stats_ = !show_stats_;
+  x += h + u.px(2);
+  if (u.icon_button({x, y, h, h}, Icon::Camera, scene_filters_,
+                    "Camera filters: show the Main Camera's filters (e.g. Retro Console Filter) in the Shaded view.\n"
+                    "Console: filters on / off."))
+    scene_filters_ = !scene_filters_;
   x += h + u.px(10);
   /* Blender-style Edit Mode toggle - Unity has no built-in mesh editing (ProBuilder adds it). */
   int ew = u.font.text_width("Edit Mode (Tab)") + h + u.px(12);
@@ -388,7 +393,11 @@ void Editor::render_scene_view(const Recti &view) {
   Mat4 v = cam_.view(), p = cam_.proj(aspect);
   if (shading_ == Shading::Rendered) render_pathtraced_view(view);
   else if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
-    render_deferred(scene_r3d_, scene_rt_, v, p, cam_.position(), false, scene_lighting_, nullptr);
+    GameObject *fowner = nullptr;
+    if (scene_filters_) main_camera(*scene_, &fowner);
+    if (fowner && !camera_filters(fowner).empty())  // the main camera's filters on the editor's view
+      render_camera(scene_r3d_, scene_rt_, v, p, cam_.position(), cam_.forward(), fowner, nullptr, aspect, false, scene_lighting_);
+    else render_deferred(scene_r3d_, scene_rt_, v, p, cam_.position(), false, scene_lighting_, nullptr);
     scene_stats_ = scene_r3d_.stats();
     /* Piloting a camera: its depth of field shows while framing the shot. */
     if (GameObject *pg = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr)
@@ -2853,9 +2862,9 @@ void Editor::draw_game_view(const Recti &r) {
   Vec3 eye = owner->world_position();
   Mat4 v = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
   Mat4 p = cam->projection(aspect);
-  /* The Game view always uses the full material pipeline with shadows (Unity Game view). */
-  render_deferred(game_r3d_, game_rt_, v, p, eye, true, true, cam);
-  camera_dof(game_rt_, v, p, eye, q.rotate({0, 0, 1}), cam, aspect, cam->vertical_fov_deg(aspect));
+  /* The Game view always uses the full material pipeline with shadows (Unity Game view),
+   * through the camera's filters. */
+  render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect);
   game_stats_ = game_r3d_.stats();
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};

@@ -14,6 +14,7 @@
 #include "../src/core/jobs.h"
 #include "../src/editor/editor.h"
 #include "../src/image/image.h"
+#include "../src/render/camera_filter.h"
 #include "../src/render/colormanagement.h"
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
@@ -544,6 +545,148 @@ static void test_jobs(Report &rep, const Options &o) {
   rep.note("TBB's clear win is dispatch cost: many small loops (typical of editor operators) start much faster. "
            "Streaming and imbalanced work are a wash: memory bandwidth limits the first, and the built-in pool already hands out "
            "small chunks dynamically. Nested loops gain a little because TBB runs the inner loops in parallel too.");
+}
+
+/* ------------------------------------------------------- camera filters */
+
+/* ADR 0007: what the PS1 filter costs, and odd settings (NaN, 1 x 1, huge) never crash. */
+static void test_camera_filters(Report &rep, const Options &o) {
+  rep.title("Camera filters: the PS1 look's cost, and odd settings",
+            "256 textured icospheres (UV Grid, trilinear) at 1920x1080. Plain: no filter. PS1 raster stage at full size: "
+            "vertex snap, affine UVs, nearest 256 px textures without mipmaps. PS1 complete: the same at 320x240, "
+            "15-bit colour with the PS1 dither, scaled up nearest-neighbour.");
+  auto mesh = primitives::ico_sphere(0.5f, 3);
+  Scene s = make_grid_scene(256, mesh, 1.3f);
+  MaterialPtr mat = make_material("grid", {1, 1, 1});
+  mat->base_map.path = "generated:UV Grid";
+  mat->touch();
+  std::vector<MaterialPtr> mats = {mat};
+  std::vector<DrawItem> items;
+  s.for_each([&](GameObject &g) {
+    DrawItem it;
+    it.mesh = &g.get<MeshFilter>()->mesh->render_mesh_tangents();
+    it.model = g.world_matrix();
+    it.id = (uint32_t)g.id;
+    it.materials = &mats;
+    items.push_back(it);
+  });
+  const int W = 1920, H = 1080;
+  Vec3 eye{0, 12 * 0.9f, -12 * 1.1f};
+  Mat4 v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0});
+  Mat4 p = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 1000.0f);
+  LightingEnv env;
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
+  env.lights.push_back(sun);
+  env.camera_pos = eye;
+  FilterStack ps1;
+  ps1.vertex_snap = 1.0f;
+  ps1.affine_uv = true;
+  ps1.tex.filter = (int)TexFilter::Closest;
+  ps1.tex.max_size = 256;
+  ps1.tex.mipmaps = false;
+  ps1.width = 320;
+  ps1.height = 240;
+  RetroImageParams ip;
+  ip.color_depth = RetroImageParams::Bits15;
+  ip.dither = RetroImageParams::Ps1;
+  ps1.passes.push_back([ip](RenderTarget &rt, const FilterFrame *f) { apply_retro_image(rt, ip, f); });
+  Image full, small;
+  full.resize(W, H);
+  RenderTarget frt, srt;
+  frt.attach(full, {0, 0, W, H});
+  Renderer3D r3d;
+  auto draw = [&](RenderTarget &rt, const FilterStack *fs, const Mat4 &proj) {
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    if (fs) fs->apply_raster(opt);
+    r3d.begin(&rt, v, proj, env, opt);
+    r3d.clear(0xFF303030);
+    for (auto &it : items) r3d.add(it);
+    r3d.flush();
+  };
+  const int reps = o.quick ? 3 : 8;
+  const double plain = time_ms([&] { draw(frt, nullptr, p); }, reps);
+  const double raster_only = time_ms([&] { draw(frt, &ps1, p); }, reps);
+  int iw, ih;
+  Recti dst;
+  filter_layout(ps1, W, H, iw, ih, dst);
+  small.resize(iw, ih);
+  srt.attach(small, {0, 0, iw, ih});
+  FilterFrame frame;
+  frame.inv_view_proj = (p * v).inverse();
+  frame.eye = eye;
+  double pass_ms = 0, up_ms = 0;
+  const double complete = time_ms([&] {
+    draw(srt, &ps1, p);
+    ScopedTimer tp;
+    for (auto &pass : ps1.passes) pass(srt, &frame);
+    pass_ms = tp.ms();
+    ScopedTimer tu;
+    upscale_nearest(small.pixels.data(), iw, ih, iw, full.pixels.data(), W, dst);
+    up_ms = tu.ms();
+  }, reps);
+  rep.table({"render", "ms", "vs plain"});
+  rep.row({"plain (no filter)", f2(plain), "1.0x"});
+  rep.row({"PS1 raster stage, full size", f2(raster_only), f2(plain / std::max(1e-6, raster_only)) + "x"});
+  rep.row({strprintf("PS1 complete (%dx%d, colour pass %.2f ms, upscale %.2f ms)", iw, ih, pass_ms, up_ms), f2(complete),
+           f2(plain / std::max(1e-6, complete)) + "x"});
+  /* Every channel of a 15-bit frame is a multiple of 8. */
+  size_t off = 0;
+  for (uint32_t c : small.pixels) off += ((c >> 16) & 7) || ((c >> 8) & 7) || (c & 7);
+  rep.note(strprintf("15-bit check: %zu of %zu pixels with a channel off the 5-bit grid (must be 0)", off, small.pixels.size()));
+
+  /* Odd settings: a small scene with every kind of extreme. Nothing may crash; images keep their size. */
+  int problems = 0, runs = 0;
+  uint32_t seed = 4321;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  const float odd[] = {0.0f, -1.0f, 1e-9f, 0.5f, 1.0f, 3.0f, 1e9f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()};
+  const int sizes[] = {-5, 0, 1, 2, 7, 240, 4096, 100000};
+  std::vector<DrawItem> few(items.begin(), items.begin() + 16);
+  for (int k = 0; k < (o.quick ? 60 : 300); k++) {
+    FilterStack fs;
+    fs.vertex_snap = odd[(int)(rnd() * 9) % 9];
+    fs.affine_uv = rnd() < 0.5f;
+    fs.tex.filter = (int)(rnd() * 5) - 1;
+    fs.tex.max_size = sizes[(int)(rnd() * 8) % 8];
+    fs.tex.mipmaps = rnd() < 0.5f;
+    fs.width = sizes[(int)(rnd() * 8) % 8];
+    fs.height = sizes[(int)(rnd() * 8) % 8];
+    fs.fit = rnd() < 0.5f ? FilterStack::Fill : FilterStack::Letterbox;
+    RetroImageParams q;
+    q.color_depth = (int)(rnd() * 3) - (rnd() < 0.1f ? 5 : 0);
+    q.dither = (int)(rnd() * 4) - 1;
+    q.fog = rnd() < 0.5f;
+    q.fog_start = odd[(int)(rnd() * 9) % 9];
+    q.fog_end = odd[(int)(rnd() * 9) % 9];
+    q.fog_color = Vec3(odd[(int)(rnd() * 9) % 9], 0.5f, 2.0f);
+    const int vw = 1 + (int)(rnd() * 200), vh = 1 + (int)(rnd() * 120);
+    filter_layout(fs, vw, vh, iw, ih, dst);
+    if (iw < 1 || ih < 1 || dst.w < 1 || dst.h < 1 || dst.x < 0 || dst.y < 0 || dst.right() > vw || dst.bottom() > vh || iw > vw || ih > vh) {
+      problems++;
+      continue;
+    }
+    Image a;
+    a.resize(iw, ih);
+    RenderTarget art;
+    art.attach(a, {0, 0, iw, ih});
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    fs.apply_raster(opt);
+    r3d.begin(&art, v, Mat4::perspective(60 * kDeg2Rad, iw / (float)ih, 0.1f, 1000.0f), env, opt);
+    r3d.clear(0xFF303030);
+    for (auto &it : few) r3d.add(it);
+    r3d.flush();
+    apply_retro_image(art, q, rnd() < 0.5f ? &frame : nullptr);
+    Image out;
+    out.resize(vw, vh);
+    upscale_nearest(a.pixels.data(), iw, ih, iw, out.pixels.data(), vw, dst);
+    if (q.color_depth == RetroImageParams::Bits15)
+      for (uint32_t c : a.pixels)
+        if (((c >> 16) & 7) || ((c >> 8) & 7) || (c & 7)) { problems++; break; }
+    runs++;
+  }
+  rep.note(strprintf("Odd settings (NaN / infinite snap and fog, 1x1 to 100000 px, unknown modes): %d runs, %d problems", runs, problems));
 }
 
 static void test_editor(Report &rep, const Options &o) {
@@ -1963,7 +2106,7 @@ int main(int argc, char **argv) {
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
-               {"curved", test_curved_surfaces}};
+               {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

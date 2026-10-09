@@ -89,7 +89,8 @@ static inline int bucket_of(float v) {
 }
 
 uint8_t linear_to_srgb8(float v) {
-  v = v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f;  // NaN -> 0
+  if (nan_bits(v)) return 0;  // not a compare: /fp:fast may assume no NaN
+  v = v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f;
   const Srgb8Table &t = table();
   int b = bucket_of(v);
   return (uint8_t)(t.base[b] + (v >= t.thresh[b] ? 1 : 0));

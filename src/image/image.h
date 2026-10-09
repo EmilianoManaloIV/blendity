@@ -78,6 +78,8 @@ class Texture {
   Vec4 fetch(int level, int x, int y, TexWrap wrap) const;
   /* Filtered lookup; lod = log2(texels per pixel). */
   Vec4 sample(Vec2 uv, float lod, TexWrap wrap = TexWrap::Repeat, TexFilter filter = TexFilter::Trilinear) const;
+  /* One mip level (clamped to the chain), Closest or bilinear (Linear / Trilinear). */
+  Vec4 sample_level(Vec2 uv, int level, TexWrap wrap, TexFilter filter) const;
   size_t memory_bytes() const;
 };
 using TexturePtr = std::shared_ptr<const Texture>;

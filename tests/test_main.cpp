@@ -3,6 +3,7 @@
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
 #include "../src/editor/editor.h"
+#include "../src/render/camera_filter.h"
 #include "../src/render/canvas.h"
 #include "../src/render/raster.h"
 #include "../src/render/dof.h"
@@ -12,6 +13,7 @@
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
 #include "../src/render/pathtracer.h"
+#include "../src/render/shading.h"
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
@@ -26,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <unordered_set>
 #include <cstdio>
 #include <filesystem>
@@ -157,6 +160,7 @@ static void round16_tests();
 static void round17_tests();
 static void round18_tests();
 static void round26_tests();
+static void round27_tests();
 
 int main() {
   register_builtin_components();
@@ -757,6 +761,7 @@ int main() {
   round17_tests();
   round18_tests();
   round26_tests();
+  round27_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -7395,5 +7400,1366 @@ static void round26_tests() {
     CHECK(meshops::merge_by_distance_selected(m, 1e-4f, {1, 1, 0, 0}) == 1 && m.vert_count() == 3);
     Mesh far = pair_at(1.0e6f, 0.25f);
     CHECK(meshops::merge_by_distance_selected(far, 0.5f, {1, 1, 1, 1}) == 1 && far.vert_count() == 3);
+  });
+}
+
+/* ===================================================================== */
+/* Round 27 (task 0004): camera filters, with the PS1 look               */
+/* ===================================================================== */
+
+static bool cf_is_15bit(uint32_t c) { return (c & 0x070707u) == 0; }
+
+/* A tiny scene for direct renders: items keep their meshes and materials alive. */
+struct CfScene {
+  std::vector<MeshPtr> meshes;
+  std::vector<std::vector<MaterialPtr>> mats;
+  std::vector<DrawItem> items;
+  void add(MeshPtr m, const Mat4 &model, uint32_t id, MaterialPtr mat) {
+    meshes.push_back(m);
+    mats.push_back({mat});
+    DrawItem it;
+    it.mesh = &m->render_mesh();
+    it.model = model;
+    it.id = id;
+    it.unlit = mat && mat->unlit;
+    items.push_back(it);
+  }
+  void seal() {  // the material vectors are stable now
+    for (size_t i = 0; i < items.size(); i++) items[i].materials = &mats[i];
+  }
+};
+
+static MaterialPtr cf_unlit(Vec3 c) {
+  auto m = make_material("Unlit", c);
+  m->unlit = true;
+  return m;
+}
+
+static void cf_render(Image &img, RenderTarget &rt, int W, int H, const Mat4 &v, const Mat4 &p, const RasterOptions &opt0, const CfScene &sc,
+                      uint32_t clear = 0xFF204060u, Renderer3D *keep = nullptr) {
+  img.resize(W, H);
+  rt.attach(img, {0, 0, W, H});
+  Renderer3D local;
+  Renderer3D &r = keep ? *keep : local;
+  RasterOptions opt = opt0;
+  opt.shade = ShadeMode::Deferred;
+  LightingEnv env;
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.3f, -1, 0.4f));
+  env.lights.push_back(sun);
+  env.camera_pos = Vec3(0.0f);
+  r.begin(&rt, v, p, env, opt);
+  r.clear(clear);
+  for (const DrawItem &it : sc.items) r.add(it);
+  r.flush();
+}
+
+static uint64_t cf_hash(const Image &img) {
+  uint64_t h = 1469598103934665603ull;
+  for (uint32_t c : img.pixels) h = (h ^ c) * 1099511628211ull;
+  return h;
+}
+
+/* Colour changes along the busiest row, and rows that differ from the one above, inside r. */
+static void cf_blockiness(const uint32_t *px, int stride, const Recti &r, int &max_runs, int &row_changes) {
+  max_runs = 0;
+  row_changes = 0;
+  for (int y = r.y; y < r.bottom(); y++) {
+    const uint32_t *row = px + (size_t)y * stride;
+    int runs = 1;
+    for (int x = r.x + 1; x < r.right(); x++) runs += row[x] != row[x - 1];
+    max_runs = std::max(max_runs, runs);
+    if (y > r.y && std::memcmp(row + r.x, px + (size_t)(y - 1) * stride + r.x, sizeof(uint32_t) * r.w) != 0) row_changes++;
+  }
+}
+
+static void round27_tests() {
+  /* ---------------------------------------------------------------- 1 */
+  test("camera filters: with no filter the rasterizer's image is unchanged (default options, explicit zeros, an empty stack, a neutral component)", [&] {
+    CfScene sc;
+    auto grid = make_material("Grid", {0.9f, 0.9f, 0.9f});
+    grid->base_map.path = "generated:UV Grid";
+    sc.add(primitives::cube(), Mat4::translate({-1.2f, 0, 0}), 1, make_material("Red", {0.8f, 0.2f, 0.2f}));
+    sc.add(primitives::uv_sphere(0.8f, 24, 12), Mat4::translate({1.2f, 0, 0.5f}), 2, grid);
+    sc.add(primitives::plane(12.0f), Mat4::translate({0, -1, 0}), 3, make_material("Floor", {0.5f, 0.6f, 0.5f}));
+    sc.seal();
+    const Mat4 v = Mat4::look_at({0, 1.5f, -6}, {0, 0, 0}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(50 * kDeg2Rad, 160 / 120.0f, 0.1f, 100);
+    Image a, b, c, d;
+    RenderTarget ra, rb, rc, rd;
+    RasterOptions defaults;
+    CHECK(defaults.vertex_snap == 0.0f && !defaults.affine_uv && !defaults.tex.active());
+    cf_render(a, ra, 160, 120, v, p, defaults, sc);
+    RasterOptions zero;
+    zero.vertex_snap = 0.0f;
+    zero.affine_uv = false;
+    zero.tex = TexOverride{};
+    zero.tex.filter = -1;
+    zero.tex.max_size = 0;
+    zero.tex.mipmaps = true;
+    cf_render(b, rb, 160, 120, v, p, zero, sc);
+    FilterStack empty;
+    CHECK(empty.empty());
+    RasterOptions via_stack;
+    empty.apply_raster(via_stack);
+    cf_render(c, rc, 160, 120, v, p, via_stack, sc);
+    /* A Retro Console Filter with every effect off adds nothing to the stack. */
+    RetroConsoleFilter neutral;
+    neutral.vertex_snap = false;
+    neutral.affine_textures = false;
+    neutral.texture_filter = 0;
+    neutral.max_texture_size = 0;
+    neutral.mipmaps = true;
+    neutral.width = neutral.height = 0;
+    neutral.color_depth = RetroImageParams::Full;
+    neutral.fog = false;
+    FilterStack ns;
+    neutral.contribute(ns);
+    CHECK(ns.empty());
+    RasterOptions via_neutral;
+    ns.apply_raster(via_neutral);
+    cf_render(d, rd, 160, 120, v, p, via_neutral, sc);
+    CHECK(a.pixels == b.pixels && a.pixels == c.pixels && a.pixels == d.pixels);
+    CHECK(ra.depth == rb.depth && ra.depth == rc.depth && ra.depth == rd.depth);
+    CHECK(ra.ids == rb.ids && ra.ids == rd.ids);
+    /* The picture isn't trivially empty. */
+    std::set<uint32_t> ids(ra.ids.begin(), ra.ids.end());
+    CHECK(ids.count(1) && ids.count(2) && ids.count(3));
+  });
+
+  /* ---------------------------------------------------------------- 2 */
+  test("camera filters: filter_layout gives the internal size and where it lands in the view (Fill keeps square pixels, Letterbox is 4:3 with bars)", [&] {
+    int iw, ih;
+    Recti dst;
+    FilterStack s;
+    s.width = 320;
+    s.height = 240;
+    s.fit = FilterStack::Fill;
+    filter_layout(s, 1280, 720, iw, ih, dst);
+    CHECK(iw == 427 && ih == 240);
+    CHECK(dst.x == 0 && dst.y == 0 && dst.w == 1280 && dst.h == 720);
+    CHECK_NEAR(1280.0 / iw, 720.0 / ih, 0.02);  // square pixels
+    s.fit = FilterStack::Letterbox;
+    filter_layout(s, 1280, 720, iw, ih, dst);
+    CHECK(iw == 320 && ih == 240);
+    CHECK(dst.w == 960 && dst.h == 720 && dst.x == 160 && dst.y == 0);
+    CHECK_NEAR((double)dst.w / dst.h, 4.0 / 3.0, 0.005);
+    /* A tall view gets bars top and bottom. */
+    filter_layout(s, 600, 900, iw, ih, dst);
+    CHECK(dst.w == 600 && dst.h == 450 && dst.x == 0 && dst.y == 225 && iw == 320 && ih == 240);
+    /* A filter never adds pixels: a view smaller than the internal size is rendered at its own size. */
+    s.fit = FilterStack::Fill;
+    filter_layout(s, 100, 50, iw, ih, dst);
+    CHECK(iw == 100 && ih == 50 && dst.w == 100 && dst.h == 50);
+    s.fit = FilterStack::Letterbox;
+    filter_layout(s, 100, 50, iw, ih, dst);
+    CHECK(iw <= dst.w && ih <= dst.h && dst.w <= 100 && dst.h <= 50 && iw >= 1 && ih >= 1);
+    /* No internal size: the view itself. */
+    FilterStack none;
+    filter_layout(none, 640, 480, iw, ih, dst);
+    CHECK(iw == 640 && ih == 480 && dst.x == 0 && dst.y == 0 && dst.w == 640 && dst.h == 480);
+    /* Odd sizes: 1 x 1 views, zero and negative views, absurd internal sizes. */
+    s.fit = FilterStack::Fill;
+    filter_layout(s, 1, 1, iw, ih, dst);
+    CHECK(iw == 1 && ih == 1 && dst.w == 1 && dst.h == 1);
+    filter_layout(s, 0, -5, iw, ih, dst);
+    CHECK(iw >= 1 && ih >= 1 && dst.w >= 1 && dst.h >= 1);
+    s.fit = FilterStack::Letterbox;
+    filter_layout(s, 1, 1, iw, ih, dst);
+    CHECK(iw == 1 && ih == 1 && dst.w == 1 && dst.h == 1);
+    FilterStack huge;
+    huge.width = 1000000;
+    huge.height = 1000000;
+    for (int fit : {0, 1}) {
+      huge.fit = fit;
+      filter_layout(huge, 1920, 1080, iw, ih, dst);
+      CHECK(iw >= 1 && ih >= 1 && iw <= 1920 && ih <= 1080);
+      CHECK(dst.x >= 0 && dst.y >= 0 && dst.right() <= 1920 && dst.bottom() <= 1080);
+    }
+    FilterStack negative;
+    negative.width = -3;
+    negative.height = 240;
+    negative.fit = FilterStack::Letterbox;  // no width: falls back to Fill
+    filter_layout(negative, 800, 600, iw, ih, dst);
+    CHECK(iw >= 1 && ih == 240 && dst.w == 800 && dst.h == 600);
+  });
+
+  test("camera filters: upscale_nearest copies whole blocks into the destination rectangle only", [&] {
+    const uint32_t src[4] = {1, 2, 3, 4};  // 2 x 2
+    std::vector<uint32_t> dst(8 * 6, 99u);
+    upscale_nearest(src, 2, 2, 2, dst.data(), 8, Recti{2, 1, 4, 4});
+    for (int y = 0; y < 6; y++)
+      for (int x = 0; x < 8; x++) {
+        const bool in = x >= 2 && x < 6 && y >= 1 && y < 5;
+        const uint32_t expect = !in ? 99u : (uint32_t)(1 + ((x - 2) / 2) + 2 * ((y - 1) / 2));
+        CHECK(dst[(size_t)y * 8 + x] == expect);
+      }
+    /* Bad input is ignored, not crashed on. */
+    upscale_nearest(nullptr, 2, 2, 2, dst.data(), 8, Recti{0, 0, 2, 2});
+    upscale_nearest(src, 0, 2, 2, dst.data(), 8, Recti{0, 0, 2, 2});
+    upscale_nearest(src, 2, 2, 2, dst.data(), 8, Recti{0, 0, 0, 2});
+    CHECK(dst[0] == 99u);
+    /* One source pixel fills any size. */
+    const uint32_t one = 7u;
+    std::vector<uint32_t> big(5 * 5, 0u);
+    upscale_nearest(&one, 1, 1, 1, big.data(), 5, Recti{0, 0, 5, 5});
+    CHECK(std::count(big.begin(), big.end(), 7u) == 25);
+  });
+
+  /* ---------------------------------------------------------------- 3 */
+  test("camera filters: the PS1 dither is the console's 4x4 matrix, and flat grey takes exactly those offsets before dropping to 5 bits", [&] {
+    static const int kPs1[4][4] = {{-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};
+    for (int y = 0; y < 8; y++)
+      for (int x = 0; x < 8; x++) {
+        CHECK(retro_dither_offset(RetroImageParams::Ps1, x, y) == kPs1[y & 3][x & 3]);
+        CHECK(retro_dither_offset(RetroImageParams::NoDither, x, y) == 0);
+        const int b = retro_dither_offset(RetroImageParams::Bayer4, x, y);
+        CHECK(b >= -4 && b <= 3);
+      }
+    CHECK(retro_dither_offset(RetroImageParams::Ps1, -1, -1) == kPs1[3][3]);  // the pattern repeats below zero too
+    CHECK(retro_dither_offset(99, 3, 2) == 0);
+    /* Bayer uses every offset of the range exactly twice per tile. */
+    std::map<int, int> hist;
+    for (int y = 0; y < 4; y++)
+      for (int x = 0; x < 4; x++) hist[retro_dither_offset(RetroImageParams::Bayer4, x, y)]++;
+    CHECK(hist.size() == 8);
+    for (auto &kv : hist) CHECK(kv.second == 2);
+    /* Flat grey 128: offsets -4..-1 give 124..127 -> 120, 0..3 give 128..131 -> 128. */
+    Image img;
+    img.resize(8, 8);
+    std::fill(img.pixels.begin(), img.pixels.end(), 0xFF808080u);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 8, 8});
+    RetroImageParams ps1;
+    ps1.color_depth = RetroImageParams::Bits15;
+    ps1.dither = RetroImageParams::Ps1;
+    apply_retro_image(rt, ps1, nullptr);
+    int low = 0, high = 0;
+    for (int y = 0; y < 8; y++)
+      for (int x = 0; x < 8; x++) {
+        const int off = kPs1[y & 3][x & 3];
+        const uint32_t v = off < 0 ? 120u : 128u;
+        CHECK(img.row(y)[x] == (0xFF000000u | v << 16 | v << 8 | v));
+        (off < 0 ? low : high)++;
+      }
+    CHECK(low == 32 && high == 32);
+    /* No dither: every grey truncates the same way (0x87 -> 0x80). */
+    std::fill(img.pixels.begin(), img.pixels.end(), 0xFF878787u);
+    RetroImageParams plain;
+    plain.color_depth = RetroImageParams::Bits15;
+    apply_retro_image(rt, plain, nullptr);
+    for (uint32_t c : img.pixels) CHECK(c == 0xFF808080u);
+    /* The ends stay in range: white (255 + 3 clamps) and black (0 - 4 clamps). */
+    std::fill(img.pixels.begin(), img.pixels.end(), 0xFFFFFFFFu);
+    apply_retro_image(rt, ps1, nullptr);
+    for (uint32_t c : img.pixels) CHECK(c == 0xFFF8F8F8u);
+    std::fill(img.pixels.begin(), img.pixels.end(), 0xFF000000u);
+    apply_retro_image(rt, ps1, nullptr);
+    for (uint32_t c : img.pixels) CHECK(c == 0xFF000000u);
+    /* Channels are quantized independently and alpha is kept. */
+    std::fill(img.pixels.begin(), img.pixels.end(), 0x80FF8A07u);
+    apply_retro_image(rt, plain, nullptr);
+    for (uint32_t c : img.pixels) CHECK(c == 0x80F88800u);
+    /* Full colour depth with no fog does nothing at all. */
+    std::fill(img.pixels.begin(), img.pixels.end(), 0xFF123457u);
+    RetroImageParams off;
+    apply_retro_image(rt, off, nullptr);
+    for (uint32_t c : img.pixels) CHECK(c == 0xFF123457u);
+    /* Empty targets are ignored. */
+    RenderTarget none;
+    apply_retro_image(none, ps1, nullptr);
+    CHECK(true);
+  });
+
+  /* ---------------------------------------------------------------- 4 */
+  test("camera filters: vertex snap puts rendered corners on whole pixels; a sub-pixel camera move leaves the picture alone, a bigger one jumps it", [&] {
+    CfScene sc;
+    sc.add(primitives::quad(2.0f), Mat4::identity(), 9, cf_unlit({1.0f, 0.5f, 0.2f}));
+    sc.seal();
+    const int W = 64, H = 64;
+    const Mat4 p = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 50);
+    const Vec3 corners[4] = {{-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}};
+    struct Step { std::vector<int> key; uint64_t snapped, plain; };
+    std::vector<Step> steps;
+    bool extents_ok = true;
+    for (int i = 0; i < 48; i++) {
+      const float cx = i * 0.004f;  // about 0.055 px per step at this distance
+      const Mat4 v = Mat4::look_at({cx, 0, -5}, {cx, 0, 0}, {0, 1, 0});
+      Step s;
+      RasterOptions snap, plain;
+      snap.vertex_snap = 1.0f;
+      Image a, b;
+      RenderTarget ra, rb;
+      Renderer3D r3d;
+      cf_render(a, ra, W, H, v, p, snap, sc, 0xFF000000u, &r3d);
+      cf_render(b, rb, W, H, v, p, plain, sc);
+      s.snapped = cf_hash(a);
+      s.plain = cf_hash(b);
+      int minx = 1 << 20, maxx = -1, miny = 1 << 20, maxy = -1;
+      float fx0 = 1e9f, fx1 = -1e9f, fy0 = 1e9f, fy1 = -1e9f;
+      for (const Vec3 &c : corners) {
+        Vec2 sp;
+        float z;
+        CHECK(r3d.project(c, sp, z));
+        s.key.push_back((int)std::floor(sp.x + 0.5f));
+        s.key.push_back((int)std::floor(sp.y + 0.5f));
+        fx0 = std::min(fx0, sp.x), fx1 = std::max(fx1, sp.x), fy0 = std::min(fy0, sp.y), fy1 = std::max(fy1, sp.y);
+      }
+      for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+          if (ra.ids[(size_t)y * W + x] == 9) minx = std::min(minx, x), maxx = std::max(maxx, x), miny = std::min(miny, y), maxy = std::max(maxy, y);
+      /* The drawn rectangle is exactly the one between the rounded corners. */
+      if (minx != (int)std::floor(fx0 + 0.5f) || maxx != (int)std::floor(fx1 + 0.5f) - 1 || miny != (int)std::floor(fy0 + 0.5f) ||
+          maxy != (int)std::floor(fy1 + 0.5f) - 1)
+        extents_ok = false;
+      steps.push_back(s);
+    }
+    CHECK(extents_ok);
+    bool same_key_same_image = true, plain_changes_within_key = false, key_changes = false, jump_changes_image = true;
+    for (size_t i = 0; i < steps.size(); i++)
+      for (size_t j = i + 1; j < steps.size(); j++) {
+        const bool same = steps[i].key == steps[j].key;
+        if (same && steps[i].snapped != steps[j].snapped) same_key_same_image = false;
+        if (!same && steps[i].snapped == steps[j].snapped && j == i + 1) jump_changes_image = false;
+        if (!same && j == i + 1) key_changes = true;
+        if (same && steps[i].plain != steps[j].plain) plain_changes_within_key = true;
+      }
+    CHECK(same_key_same_image);     // moves that round to the same corners draw the same picture
+    CHECK(key_changes);             // the sweep does cross whole pixels
+    CHECK(jump_changes_image);      // and when it does the picture changes (by whole pixels)
+    /* An axis-aligned rectangle covers the same pixel centres snapped or not (an edge crosses a
+     * centre exactly when its corner rounds the other way), so the creep shows on slanted edges:
+     * a quad turned 30 degrees. Snapped, moves that keep its corners' rounding draw one picture;
+     * unsnapped, the slanted edges creep across pixel centres in between. */
+    (void)plain_changes_within_key;
+    CfScene tilted;
+    tilted.add(primitives::quad(2.0f), Mat4::trs({0, 0, 0}, Quat::euler({0, 0, 30}), {1, 1, 1}), 9, cf_unlit({1.0f, 0.5f, 0.2f}));
+    tilted.seal();
+    std::vector<Step> tsteps;
+    for (int i = 0; i < 48; i++) {
+      const float cx = i * 0.004f;
+      const Mat4 v = Mat4::look_at({cx, 0, -5}, {cx, 0, 0}, {0, 1, 0});
+      Step s;
+      RasterOptions snap, plain;
+      snap.vertex_snap = 1.0f;
+      Image a, b;
+      RenderTarget ra, rb;
+      Renderer3D r3d;
+      cf_render(a, ra, W, H, v, p, snap, tilted, 0xFF000000u, &r3d);
+      cf_render(b, rb, W, H, v, p, plain, tilted);
+      s.snapped = cf_hash(a);
+      s.plain = cf_hash(b);
+      const Mat4 rot = Mat4::trs({0, 0, 0}, Quat::euler({0, 0, 30}), {1, 1, 1});
+      for (const Vec3 &c : corners) {
+        Vec2 sp;
+        float z;
+        CHECK(r3d.project(rot.point(c), sp, z));
+        s.key.push_back((int)std::floor(sp.x + 0.5f));
+        s.key.push_back((int)std::floor(sp.y + 0.5f));
+      }
+      tsteps.push_back(s);
+    }
+    bool t_same_key_same_image = true, t_plain_creeps = false;
+    for (size_t i = 0; i + 1 < tsteps.size(); i++) {
+      const bool same = tsteps[i].key == tsteps[i + 1].key;
+      if (same && tsteps[i].snapped != tsteps[i + 1].snapped) t_same_key_same_image = false;
+      if (same && tsteps[i].plain != tsteps[i + 1].plain) t_plain_creeps = true;
+    }
+    CHECK(t_same_key_same_image);  // snapped: the picture holds still between whole-pixel jumps
+    CHECK(t_plain_creeps);         // unsnapped: slanted edges creep pixel by pixel in between
+  });
+
+  test("camera filters: vertex snap with NaN, negative, infinite, huge and tiny grids, and on a 1x1 target, doesn't crash or draw garbage", [&] {
+    CfScene sc;
+    sc.add(primitives::cube(), Mat4::identity(), 5, cf_unlit({0.3f, 0.8f, 0.4f}));
+    sc.seal();
+    const Mat4 v = Mat4::look_at({0, 0.5f, -4}, {0, 0, 0}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 50);
+    Image ref;
+    RenderTarget rr;
+    cf_render(ref, rr, 48, 48, v, p, RasterOptions{}, sc);
+    /* A grid that isn't a positive number means no snapping. */
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    for (float g : {nan, -1.0f, 0.0f, -inf, inf}) {
+      RasterOptions o;
+      o.vertex_snap = g;
+      Image im;
+      RenderTarget rt;
+      cf_render(im, rt, 48, 48, v, p, o, sc);
+      std::printf("    snap %g: %s\n", (double)g, im.pixels == ref.pixels ? "same as off" : "different");
+      CHECK(im.pixels == ref.pixels);
+    }
+    /* Extreme positive grids: everything collapses or jumps, but nothing crashes. */
+    for (float g : {1e-12f, 1e-4f, 0.5f, 7.0f, 1e6f, 1e30f, 3e38f}) {
+      RasterOptions o;
+      o.vertex_snap = g;
+      o.affine_uv = true;
+      Image im;
+      RenderTarget rt;
+      cf_render(im, rt, 48, 48, v, p, o, sc);
+      CHECK(im.pixels.size() == 48u * 48u);
+    }
+    /* A 1 x 1 target. */
+    RasterOptions o;
+    o.vertex_snap = 1.0f;
+    o.affine_uv = true;
+    o.tex.filter = 0;
+    o.tex.mipmaps = false;
+    Image one;
+    RenderTarget r1;
+    cf_render(one, r1, 1, 1, v, p, o, sc);
+    CHECK(one.pixels.size() == 1u);
+    /* A camera inside the object (near clipping) with snapping. */
+    const Mat4 inside = Mat4::look_at({0, 0, 0.2f}, {0, 0, 5}, {0, 1, 0});
+    o.vertex_snap = 2.0f;
+    Image in;
+    RenderTarget rin;
+    cf_render(in, rin, 48, 48, inside, p, o, sc);
+    CHECK(in.pixels.size() == 48u * 48u);
+  });
+
+  /* ---------------------------------------------------------------- 5 */
+  test("camera filters: affine textures follow the screen-space (not perspective-correct) interpolation on a slanted quad", [&] {
+    /* A texture whose red channel is the column number, so a pixel's colour tells its u. */
+    const std::string path = fs::join(test_dir(), "cf_gradient.png");
+    std::vector<uint32_t> g(256 * 4);
+    for (int y = 0; y < 4; y++)
+      for (int x = 0; x < 256; x++) g[(size_t)y * 256 + x] = 0xFF000000u | (uint32_t)x << 16 | (uint32_t)x << 8 | (uint32_t)x;
+    CHECK(write_png(path, g.data(), 256, 4, 256));
+    auto mat = cf_unlit({1, 1, 1});
+    mat->base_map.path = path;
+    mat->base_map.non_color = true;
+    mat->wrap = (int)TexWrap::Extend;
+    mat->filter = (int)TexFilter::Linear;
+    CfScene sc;
+    auto quad = primitives::quad(2.0f);
+    const Mat4 model = Mat4::rotate(Quat::euler({0, 70, 0}));  // one side near, one side far
+    sc.add(quad, model, 4, mat);
+    sc.seal();
+    const int W = 160, H = 120;
+    const Mat4 v = Mat4::look_at({0, 0, -3.2f}, {0, 0, 0}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 50);
+    /* The quad's two ends, from its own UVs: screen x and 1/w of the u-minimum and u-maximum corners. */
+    const RenderMesh &rm = quad->render_mesh();
+    CHECK(!rm.uvs.empty());
+    size_t ia = 0, ib = 0;
+    for (size_t i = 0; i < rm.uvs.size(); i++) {
+      if (rm.uvs[i].x < rm.uvs[ia].x) ia = i;
+      if (rm.uvs[i].x > rm.uvs[ib].x) ib = i;
+    }
+    auto end = [&](size_t i, float &sx, float &iw) {
+      const Vec4 c = p * v * model * Vec4(rm.positions[i], 1.0f);
+      sx = (c.x / c.w * 0.5f + 0.5f) * W;
+      iw = 1.0f / c.w;
+    };
+    float xa, xb, iwa, iwb;
+    end(ia, xa, iwa);
+    end(ib, xb, iwb);
+    const float ua = rm.uvs[ia].x, ub = rm.uvs[ib].x;
+    CHECK(std::fabs(xb - xa) > 20.0f && std::fabs(iwa - iwb) > 0.02f);  // slanted enough to matter
+    auto red_for_u = [](float u) {
+      const float lin = std::max(0.0f, std::min(1.0f, (u * 256.0f - 0.5f) / 255.0f));  // texel i holds i
+      return 255.0f * linear_to_srgb(lin);
+    };
+    Image off, on;
+    RenderTarget roff, ron;
+    RasterOptions plain, affine;
+    affine.affine_uv = true;
+    cf_render(off, roff, W, H, v, p, plain, sc);
+    cf_render(on, ron, W, H, v, p, affine, sc);
+    double max_gap = 0;
+    for (float s : {0.2f, 0.35f, 0.5f, 0.65f, 0.8f}) {
+      const int x = (int)std::floor(xa + s * (xb - xa));
+      const float sc_x = ((x + 0.5f) - xa) / (xb - xa);  // where the pixel centre is between the ends
+      const float u_affine = ua + (ub - ua) * sc_x;
+      const float u_persp = ua + (ub - ua) * (sc_x * iwb) / ((1 - sc_x) * iwa + sc_x * iwb);
+      const float want_affine = red_for_u(u_affine), want_persp = red_for_u(u_persp);
+      const float got_affine = (float)((on.row(H / 2)[x] >> 16) & 255), got_persp = (float)((off.row(H / 2)[x] >> 16) & 255);
+      std::printf("    s=%.2f: affine got %.0f want %.0f | perspective got %.0f want %.0f\n", (double)s, (double)got_affine, (double)want_affine,
+                  (double)got_persp, (double)want_persp);
+      CHECK(ron.ids[(size_t)(H / 2) * W + x] == 4 && roff.ids[(size_t)(H / 2) * W + x] == 4);
+      CHECK_NEAR(got_affine, want_affine, 7.0);
+      CHECK_NEAR(got_persp, want_persp, 7.0);
+      max_gap = std::max(max_gap, (double)std::fabs(want_affine - want_persp));
+    }
+    CHECK(max_gap > 20.0);  // the two interpolations really differ here
+    /* Same silhouette, different insides. */
+    CHECK(ron.ids == roff.ids && on.pixels != off.pixels);
+    /* A quad facing the camera has no perspective to correct: both give the same picture. */
+    CfScene flat;
+    flat.add(primitives::quad(2.0f), Mat4::identity(), 4, mat);
+    flat.seal();
+    Image f0, f1;
+    RenderTarget rf0, rf1;
+    cf_render(f0, rf0, W, H, v, p, plain, flat);
+    cf_render(f1, rf1, W, H, v, p, affine, flat);
+    int differ = 0;
+    for (size_t i = 0; i < f0.pixels.size(); i++) differ += std::abs((int)((f0.pixels[i] >> 16) & 255) - (int)((f1.pixels[i] >> 16) & 255)) > 2;
+    CHECK(differ == 0);
+  });
+
+  /* ---------------------------------------------------------------- 6 */
+  test("camera filters: texture override - Nearest gives exact texels, Max Texture Size picks the first mip level within the cap, Mipmaps off uses one level", [&] {
+    /* 16 x 16: red alternates every column, green every 2, blue every 4. After n halvings the channels whose
+     * period is below 2^n have averaged to 0.5, so the colour tells which mip level was sampled. */
+    const std::string path = fs::join(test_dir(), "cf_bits.png");
+    std::vector<uint32_t> px(16 * 16);
+    for (int y = 0; y < 16; y++)
+      for (int x = 0; x < 16; x++)
+        px[(size_t)y * 16 + x] = 0xFF000000u | ((x & 1) ? 0xFF0000u : 0u) | ((x & 2) ? 0xFF00u : 0u) | ((x & 4) ? 0xFFu : 0u);
+    CHECK(write_png(path, px.data(), 16, 16, 16));
+    auto mat = make_material("Bits", {1, 1, 1});
+    mat->base_map.path = path;
+    mat->base_map.non_color = true;
+    mat->filter = (int)TexFilter::Trilinear;
+    auto eval = [&](const TexOverride *o, float u, Vec2 ddx = {0, 0}, Vec2 ddy = {0, 0}) {
+      SurfacePoint sp;
+      sp.uv = {u, 0.5f};
+      sp.duvdx = ddx;
+      sp.duvdy = ddy;
+      sp.normal = sp.geo_normal = {0, 0, 1};
+      sp.tex = o;
+      return evaluate_material(*mat, sp).albedo;
+    };
+    const float u5 = 5.5f / 16.0f;  // the middle of column 5 (binary 101): red 1, green 0, blue 1
+    auto close_to = [](Vec3 c, float r, float g, float b) { return std::fabs(c.x - r) < 0.02f && std::fabs(c.y - g) < 0.02f && std::fabs(c.z - b) < 0.02f; };
+    CHECK(close_to(eval(nullptr, u5), 1, 0, 1));
+    /* Nearest: between columns 4 and 5 (closer to 5) the texel is exact; Linear blends. */
+    const float u_edge = 5.4f / 16.0f;
+    TexOverride nearest;
+    nearest.filter = (int)TexFilter::Closest;
+    CHECK(nearest.active());
+    CHECK(close_to(eval(&nearest, u_edge), 1, 0, 1));
+    mat->filter = (int)TexFilter::Linear;
+    const Vec3 blended = eval(nullptr, u_edge);
+    CHECK(blended.x > 0.8f && blended.x < 0.98f);  // 0.9: a blend of columns 4 (0) and 5 (1)
+    CHECK(close_to(eval(&nearest, u_edge), 1, 0, 1));  // the override beats the material's filter
+    mat->filter = (int)TexFilter::Trilinear;
+    /* Max Texture Size: the first level whose longer side is within the cap. */
+    struct Cap { int cap; float r, g, b; };
+    for (const Cap &c : {Cap{16, 1, 0, 1}, Cap{99, 1, 0, 1}, Cap{8, .5f, 0, 1}, Cap{5, .5f, .5f, 1}, Cap{4, .5f, .5f, 1}, Cap{3, .5f, .5f, .5f},
+                         Cap{2, .5f, .5f, .5f}, Cap{1, .5f, .5f, .5f}}) {
+      TexOverride o;
+      o.filter = (int)TexFilter::Closest;
+      o.max_size = c.cap;
+      const Vec3 got = eval(&o, u5);
+      std::printf("    cap %d -> %.2f %.2f %.2f\n", c.cap, (double)got.x, (double)got.y, (double)got.z);
+      CHECK(close_to(got, c.r, c.g, c.b));
+    }
+    /* Mipmaps off: one level whatever the screen footprint (here 8 texels per pixel, level 3 without the override). */
+    const Vec2 big_x = {0.5f, 0}, big_y = {0, 0.5f};
+    const Vec3 mipped = eval(nullptr, u5, big_x, big_y);
+    CHECK(close_to(mipped, .5f, .5f, .5f));
+    TexOverride no_mips;
+    no_mips.mipmaps = false;
+    no_mips.filter = (int)TexFilter::Closest;
+    CHECK(no_mips.active());
+    CHECK(close_to(eval(&no_mips, u5, big_x, big_y), 1, 0, 1));
+    /* ... and with a cap: that capped level, still one level. */
+    no_mips.max_size = 8;
+    CHECK(close_to(eval(&no_mips, u5, big_x, big_y), .5f, 0, 1));
+    /* A cap alone keeps the mip chain below it (the footprint still picks a coarser level). */
+    TexOverride cap_only;
+    cap_only.max_size = 16;
+    CHECK(close_to(eval(&cap_only, u5, big_x, big_y), .5f, .5f, .5f));
+    /* A default TexOverride is inactive and changes nothing. */
+    TexOverride none;
+    CHECK(!none.active());
+    CHECK(close_to(eval(&none, u5, big_x, big_y), .5f, .5f, .5f));
+    /* NaN footprints don't poison the result when a cap is active. */
+    TexOverride capped;
+    capped.max_size = 4;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const Vec3 poisoned = eval(&capped, u5, {nan, nan}, {nan, nan});
+    CHECK(std::isfinite(poisoned.x) && std::isfinite(poisoned.y) && std::isfinite(poisoned.z));
+  });
+
+  test("camera filters: Texture::sample_level picks the level asked for (clamped), Nearest gives the exact texel", [&] {
+    Bitmap bmp;
+    bmp.width = bmp.height = 4;
+    bmp.rgba8.resize(4 * 4 * 4);
+    for (int y = 0; y < 4; y++)
+      for (int x = 0; x < 4; x++) {
+        uint8_t *p = &bmp.rgba8[(size_t)(y * 4 + x) * 4];
+        p[0] = (uint8_t)(x * 60);
+        p[1] = (uint8_t)(y * 60);
+        p[2] = (x + y) % 2 ? 255 : 0;
+        p[3] = 255;
+      }
+    Texture t;
+    t.build(bmp, false);
+    CHECK(t.levels.size() == 3);  // 4, 2, 1
+    /* v = 0 is the bottom row: texel (x, y) is at u = (x + .5) / 4, v = 1 - (y + .5) / 4. */
+    for (int y = 0; y < 4; y++)
+      for (int x = 0; x < 4; x++) {
+        const Vec4 c = t.sample_level({(x + 0.5f) / 4, 1 - (y + 0.5f) / 4}, 0, TexWrap::Repeat, TexFilter::Closest);
+        CHECK_NEAR(c.x * 255, x * 60, 0.6);
+        CHECK_NEAR(c.y * 255, y * 60, 0.6);
+        CHECK_NEAR(c.z, (x + y) % 2 ? 1.0 : 0.0, 1e-4);
+      }
+    /* Slightly off-centre it is still that texel with Nearest, a blend with Linear. */
+    const Vec4 n = t.sample_level({1.4f / 4, 0.5f}, 0, TexWrap::Repeat, TexFilter::Closest);
+    const Vec4 l = t.sample_level({1.4f / 4, 0.5f}, 0, TexWrap::Repeat, TexFilter::Linear);
+    CHECK_NEAR(n.x * 255, 60, 0.6);
+    CHECK(std::fabs(l.x * 255 - 60) > 5.0);
+    /* Levels clamp to the chain on both ends. */
+    const Vec4 last = t.sample_level({0.3f, 0.3f}, 2, TexWrap::Repeat, TexFilter::Closest);
+    const Vec4 way_past = t.sample_level({0.3f, 0.3f}, 50, TexWrap::Repeat, TexFilter::Closest);
+    const Vec4 first = t.sample_level({0.3f, 0.3f}, 0, TexWrap::Repeat, TexFilter::Closest);
+    const Vec4 way_before = t.sample_level({0.3f, 0.3f}, -7, TexWrap::Repeat, TexFilter::Closest);
+    CHECK(last.x == way_past.x && last.y == way_past.y && last.z == way_past.z);
+    CHECK(first.x == way_before.x && first.y == way_before.y && first.z == way_before.z);
+    /* The 1 x 1 level is the whole picture's average. */
+    CHECK_NEAR(last.x * 255, 90, 1.0);
+    CHECK_NEAR(last.z, 0.5, 0.01);
+    /* A texture with no levels gives the magenta placeholder rather than crashing. */
+    Texture empty;
+    const Vec4 e = empty.sample_level({0, 0}, 0, TexWrap::Repeat, TexFilter::Closest);
+    CHECK(e.x == 1 && e.y == 0 && e.z == 1);
+  });
+
+  /* ---------------------------------------------------------------- 7 */
+  test("camera filters: fog blends geometry toward the fog colour by depth, leaves the sky alone, and needs the camera frame", [&] {
+    CfScene sc;
+    sc.add(primitives::quad(2.0f), Mat4::translate({-1.2f, 0, 4}), 1, cf_unlit({0.2f, 0.6f, 0.2f}));   // 4 m away
+    sc.add(primitives::quad(3.0f), Mat4::translate({2.5f, 0, 10}), 2, cf_unlit({0.9f, 0.9f, 0.2f}));   // 10 m away
+    sc.add(primitives::quad(0.4f), Mat4::translate({0, 0.3f, 1}), 3, cf_unlit({0.2f, 0.2f, 0.9f}));    // 1 m: nearer than Fog Start
+    sc.seal();
+    const int W = 96, H = 96;
+    const Mat4 v = Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(60 * kDeg2Rad, 1.0f, 0.1f, 100);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r3d;
+    cf_render(img, rt, W, H, v, p, RasterOptions{}, sc, 0xFF204060u, &r3d);
+    const std::vector<uint32_t> before = img.pixels;
+    auto pixel_of = [&](Vec3 w) {
+      Vec2 s;
+      float z;
+      CHECK(r3d.project(w, s, z));
+      return std::make_pair((int)s.x, (int)s.y);
+    };
+    const auto pa = pixel_of({-1.2f, 0, 4}), pb = pixel_of({2.5f, 0, 10}), pn = pixel_of({0, 0.3f, 1});
+    CHECK(rt.ids[(size_t)pa.second * W + pa.first] == 1 && rt.ids[(size_t)pb.second * W + pb.first] == 2 && rt.ids[(size_t)pn.second * W + pn.first] == 3);
+    CHECK(rt.depth_at(1, 1) == 1.0f && before[0] == 0xFF204060u);  // the corner is sky
+    FilterFrame frame;
+    frame.inv_view_proj = (p * v).inverse();
+    frame.eye = {0, 0, 0};
+    frame.forward = {0, 0, 1};
+    frame.far_distance = 100.0f;
+    RetroImageParams fog;
+    fog.fog = true;
+    fog.fog_start = 2.0f;
+    fog.fog_end = 6.0f;
+    fog.fog_color = {1.0f, 0.0f, 0.0f};
+    /* No camera frame (the path tracer's passes): no fog, whatever the parameters. */
+    apply_retro_image(rt, fog, nullptr);
+    CHECK(img.pixels == before);
+    apply_retro_image(rt, fog, &frame);
+    auto ch = [](uint32_t c, int s) { return (int)((c >> s) & 255); };
+    const uint32_t a0 = before[(size_t)pa.second * W + pa.first], a1 = img.pixels[(size_t)pa.second * W + pa.first];
+    /* 4 m is halfway between start 2 and end 6. */
+    CHECK_NEAR(ch(a1, 16), (ch(a0, 16) + 255) / 2.0, 4.0);
+    CHECK_NEAR(ch(a1, 8), ch(a0, 8) / 2.0, 4.0);
+    CHECK_NEAR(ch(a1, 0), ch(a0, 0) / 2.0, 4.0);
+    /* Beyond Fog End it is the fog colour, exactly. */
+    CHECK((img.pixels[(size_t)pb.second * W + pb.first] & 0xFFFFFFu) == 0xFF0000u);
+    /* Nearer than Fog Start: untouched. */
+    CHECK(img.pixels[(size_t)pn.second * W + pn.first] == before[(size_t)pn.second * W + pn.first]);
+    /* Sky pixels (depth 1) take no fog. */
+    int sky = 0, sky_changed = 0;
+    for (int i = 0; i < W * H; i++)
+      if (rt.depth[(size_t)i] >= 1.0f) sky++, sky_changed += img.pixels[(size_t)i] != before[(size_t)i];
+    CHECK(sky > 500 && sky_changed == 0);
+    /* Fog gets stronger with distance across a surface that recedes (the floor). */
+    CfScene floor_sc;
+    floor_sc.add(primitives::plane(60.0f), Mat4::translate({0, -1, 15}), 7, cf_unlit({0.4f, 0.8f, 0.4f}));
+    floor_sc.seal();
+    Image fi;
+    RenderTarget fr;
+    cf_render(fi, fr, W, H, v, p, RasterOptions{}, floor_sc);
+    const std::vector<uint32_t> floor_before = fi.pixels;
+    apply_retro_image(fr, fog, &frame);
+    int prev_red = -1;
+    bool monotone = true;
+    for (int y = H - 1; y > H / 2 + 2; y -= 3) {  // bottom of the picture (near) up toward the horizon (far)
+      if (fr.ids[(size_t)y * W + W / 2] != 7) continue;
+      const int red = ch(fi.pixels[(size_t)y * W + W / 2], 16);
+      if (prev_red >= 0 && red < prev_red) monotone = false;
+      prev_red = red;
+    }
+    CHECK(prev_red >= 0 && monotone);
+    /* Degenerate settings: start == end is a hard edge, reversed values are swapped, NaN and infinite ones don't crash. */
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    struct Case { float s, e; };
+    for (const Case &c : {Case{5, 5}, Case{6, 2}, Case{nan, 4}, Case{2, nan}, Case{-inf, inf}, Case{0, 0}, Case{1e30f, 1e30f}}) {
+      std::copy(floor_before.begin(), floor_before.end(), fi.pixels.begin());
+      RetroImageParams q = fog;
+      q.fog_start = c.s;
+      q.fog_end = c.e;
+      q.fog_color = {nan, 2.0f, -1.0f};
+      apply_retro_image(fr, q, &frame);
+      CHECK(fi.pixels.size() == floor_before.size());
+    }
+    /* Fog with a target that has no depth plane is skipped rather than reading out of range. */
+    Image flat;
+    flat.resize(8, 8);
+    std::fill(flat.pixels.begin(), flat.pixels.end(), 0xFF336699u);
+    RenderTarget flat_rt;
+    flat_rt.attach(flat, {0, 0, 8, 8});
+    flat_rt.depth.clear();
+    apply_retro_image(flat_rt, fog, &frame);
+    CHECK(flat.pixels[0] == 0xFF336699u);
+  });
+
+  /* ---------------------------------------------------------------- 8 */
+  test("camera filters: Retro Console Filter contributes the PS1 look to the stack; the preset refills the fields; stacked filters combine", [&] {
+    RetroConsoleFilter f;  // a new component is the PS1 preset
+    CHECK(f.console == RetroConsoleFilter::PS1 && f.applied_console == RetroConsoleFilter::PS1);
+    CHECK(f.width == 320 && f.height == 240 && f.fit == 0);
+    CHECK(f.vertex_snap && f.snap_grid == 1.0f && f.affine_textures);
+    CHECK(f.texture_filter == 1 && f.max_texture_size == 256 && !f.mipmaps);
+    CHECK(f.color_depth == RetroImageParams::Bits15 && f.dither == RetroImageParams::Ps1 && !f.fog);
+    CHECK(std::string(f.type_name()) == "Retro Console Filter");
+    CHECK(!f.unique());  // several filters may sit on one camera
+    FilterStack s;
+    f.contribute(s);
+    CHECK(!s.empty());
+    CHECK(s.vertex_snap == 1.0f && s.affine_uv);
+    CHECK(s.tex.filter == (int)TexFilter::Closest && s.tex.max_size == 256 && !s.tex.mipmaps && s.tex.active());
+    CHECK(s.width == 320 && s.height == 240 && s.fit == FilterStack::Fill);
+    CHECK(s.passes.size() == 1);
+    /* Edited to something else, then the preset puts the console's values back. */
+    f.width = 7, f.height = 9, f.fit = 1, f.vertex_snap = false, f.snap_grid = 5.0f, f.affine_textures = false;
+    f.texture_filter = 3, f.max_texture_size = 0, f.mipmaps = true, f.color_depth = 0, f.dither = 0, f.fog = true;
+    f.apply_preset(RetroConsoleFilter::PS1);
+    CHECK(f.width == 320 && f.height == 240 && f.fit == 0 && f.vertex_snap && f.snap_grid == 1.0f && f.affine_textures);
+    CHECK(f.texture_filter == 1 && f.max_texture_size == 256 && !f.mipmaps);
+    CHECK(f.color_depth == RetroImageParams::Bits15 && f.dither == RetroImageParams::Ps1 && !f.fog);
+    f.apply_preset(f.console);
+    CHECK(f.width == 320 && f.applied_console == RetroConsoleFilter::PS1);
+
+    /* Two filters on one camera: the later size and snap win, the smaller texture cap wins, every colour pass runs. */
+    RetroConsoleFilter g;
+    g.width = 160, g.height = 120, g.snap_grid = 2.0f, g.max_texture_size = 64, g.fit = 1;
+    FilterStack both;
+    f.contribute(both);
+    g.contribute(both);
+    CHECK(both.width == 160 && both.height == 120 && both.fit == FilterStack::Letterbox);
+    CHECK(both.vertex_snap == 2.0f && both.tex.max_size == 64 && both.passes.size() == 2);
+    FilterStack reversed;
+    g.contribute(reversed);
+    f.contribute(reversed);
+    CHECK(reversed.width == 320 && reversed.tex.max_size == 64 && reversed.vertex_snap == 1.0f);
+    /* A cap of 0 means "no cap" and doesn't lift another filter's cap. */
+    RetroConsoleFilter nocap;
+    nocap.max_texture_size = 0;
+    nocap.contribute(both);
+    CHECK(both.tex.max_size == 64);
+    /* A grid that isn't a positive number leaves snapping off; the other effects still apply. */
+    RetroConsoleFilter bad;
+    bad.snap_grid = std::numeric_limits<float>::quiet_NaN();
+    FilterStack bs;
+    bad.contribute(bs);
+    CHECK(bs.vertex_snap == 0.0f && bs.affine_uv && !bs.empty());
+    bad.snap_grid = -2.0f;
+    FilterStack bs2;
+    bad.contribute(bs2);
+    CHECK(bs2.vertex_snap == 0.0f);
+    /* Only the colour pass? Then no raster stage. */
+    RetroConsoleFilter colour_only;
+    colour_only.vertex_snap = false;
+    colour_only.affine_textures = false;
+    colour_only.texture_filter = 0;
+    colour_only.max_texture_size = 0;
+    colour_only.mipmaps = true;
+    colour_only.width = colour_only.height = 0;
+    FilterStack cs;
+    colour_only.contribute(cs);
+    CHECK(cs.vertex_snap == 0.0f && !cs.affine_uv && !cs.tex.active() && cs.height == 0 && cs.passes.size() == 1 && !cs.empty());
+    /* Every texture-filter choice maps to the rasterizer's. */
+    const int expect[4] = {-1, (int)TexFilter::Closest, (int)TexFilter::Linear, (int)TexFilter::Trilinear};
+    for (int k = 0; k < 4; k++) {
+      RetroConsoleFilter t;
+      t.texture_filter = k;
+      FilterStack ts;
+      t.contribute(ts);
+      CHECK(ts.tex.filter == expect[k]);
+    }
+    /* The colour pass the stack carries really quantizes, and its fog colour is entered in linear light. */
+    CfScene sc;
+    sc.add(primitives::quad(40.0f), Mat4::translate({0, 0, 10}), 1, cf_unlit({0.6f, 0.4f, 0.2f}));
+    sc.seal();
+    const Mat4 v = Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(60 * kDeg2Rad, 1.0f, 0.1f, 100);
+    Image img;
+    RenderTarget rt;
+    cf_render(img, rt, 32, 32, v, p, RasterOptions{}, sc);
+    RetroConsoleFilter fogged;
+    fogged.fog = true;
+    fogged.fog_start = 2.0f;
+    fogged.fog_end = 6.0f;
+    fogged.fog_color = {0.5f, 0.0f, 0.0f};
+    fogged.color_depth = RetroImageParams::Full;
+    FilterStack fs;
+    fogged.contribute(fs);
+    CHECK(fs.passes.size() == 1);
+    FilterFrame frame;
+    frame.inv_view_proj = (p * v).inverse();
+    frame.eye = {0, 0, 0};
+    frame.forward = {0, 0, 1};
+    fs.passes[0](rt, &frame);
+    const int red = (int)std::lround(255.0f * linear_to_srgb(0.5f));
+    CHECK_NEAR((img.row(16)[16] >> 16) & 255, red, 1.5);
+    CHECK((img.row(16)[16] & 0xFFFFu) == 0u);
+    RenderTarget rt2;
+    cf_render(img, rt2, 32, 32, v, p, RasterOptions{}, sc);
+    FilterStack ps1;
+    f.contribute(ps1);
+    ps1.passes[0](rt2, &frame);
+    for (uint32_t c : img.pixels) CHECK(cf_is_15bit(c));
+  });
+
+  /* ---------------------------------------------------------------- 9 */
+  test("camera filters: the component is added from the console, its fields are set from the console, and each change undoes", [&] {
+    Editor ed;
+    /* Each console command is its own undo step once a frame has passed. */
+    auto cmd = [&](const char *c) {
+      ed.command(c);
+      ed.step_frame_headless();
+    };
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    cmd("select Main Camera");
+    GameObject *cam = ed.selected_object();
+    CHECK(cam && cam->get<Camera>() && !cam->get<RetroConsoleFilter>());
+    cmd("component Retro Console Filter");  // the name has spaces
+    RetroConsoleFilter *f = cam->get<RetroConsoleFilter>();
+    CHECK(f != nullptr);
+    if (!f) return;
+    CHECK(dynamic_cast<CameraFilter *>(f) != nullptr);
+    CHECK(f->width == 320 && f->height == 240);
+    cmd("set RetroConsoleFilter.Width 64");
+    CHECK(f->width == 64);
+    cmd("set RetroConsoleFilter.Height 48");
+    CHECK(f->height == 48 && f->width == 64);
+    cmd("set RetroConsoleFilter.Fit Letterbox");
+    CHECK(f->fit == 1);
+    cmd("set RetroConsoleFilter.VertexSnap false");
+    CHECK(!f->vertex_snap);
+    cmd("set RetroConsoleFilter.SnapGrid 2");
+    CHECK(f->snap_grid == 2.0f);
+    cmd("set RetroConsoleFilter.AffineTextures off");
+    CHECK(!f->affine_textures);
+    cmd("set RetroConsoleFilter.TextureFilter Linear");
+    CHECK(f->texture_filter == 2);
+    cmd("set RetroConsoleFilter.MaxTextureSize 128");
+    CHECK(f->max_texture_size == 128);
+    cmd("set RetroConsoleFilter.Mipmaps true");
+    CHECK(f->mipmaps);
+    cmd("set RetroConsoleFilter.Dither Bayer");
+    CHECK(f->dither == RetroImageParams::Bayer4);
+    cmd("set RetroConsoleFilter.ColourDepth 24-bit");
+    CHECK(f->color_depth == RetroImageParams::Full);
+    cmd("set RetroConsoleFilter.Fog true");
+    cmd("set RetroConsoleFilter.FogStart 3");
+    cmd("set RetroConsoleFilter.FogEnd 12");
+    CHECK(f->fog && f->fog_start == 3.0f && f->fog_end == 12.0f);
+    /* Setting a field doesn't re-apply the PS1 preset over the others. */
+    CHECK(f->width == 64 && f->height == 48 && f->fit == 1);
+    /* A second filter on the same camera. */
+    cmd("component Retro Console Filter");
+    int count = 0;
+    for (const auto &c : cam->components) count += dynamic_cast<RetroConsoleFilter *>(c.get()) != nullptr;
+    CHECK(count == 2);
+    /* Undo walks back through the changes (Ctrl+Z); the component goes away with the step that added it. */
+    platform::Event z;
+    z.type = platform::EventType::KeyDown;
+    z.key = platform::KEY_Z;
+    z.mods = platform::MOD_CTRL;
+    auto filters_on_camera = [&] {
+      GameObject *c = ed.scene().find_by_name("Main Camera");
+      int n = 0;
+      if (c)
+        for (const auto &comp : c->components) n += dynamic_cast<RetroConsoleFilter *>(comp.get()) != nullptr;
+      return n;
+    };
+    ed.step_frame_headless({z});
+    CHECK(filters_on_camera() == 1);  // the second filter's creation is the last step
+    ed.step_frame_headless({z});      // FogEnd
+    {
+      RetroConsoleFilter *r = ed.scene().find_by_name("Main Camera")->get<RetroConsoleFilter>();
+      CHECK(r && r->fog_end != 12.0f);
+    }
+    for (int i = 0; i < 40 && filters_on_camera() > 0; i++) ed.step_frame_headless({z});
+    CHECK(filters_on_camera() == 0);
+  });
+
+  test("camera filters: the component saves, loads (its own values beat the preset), round-trips twice, and clones", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    auto *a = cam->add<RetroConsoleFilter>();
+    a->width = 64, a->height = 48, a->fit = 1, a->vertex_snap = true, a->snap_grid = 2.5f, a->affine_textures = false;
+    a->texture_filter = 2, a->max_texture_size = 128, a->mipmaps = true, a->color_depth = RetroImageParams::Full, a->dither = RetroImageParams::Bayer4;
+    a->fog = true, a->fog_start = 4.0f, a->fog_end = 22.0f, a->fog_color = {0.1f, 0.2f, 0.3f};
+    auto *b = cam->add<RetroConsoleFilter>();  // untouched: the preset
+    b->enabled = false;
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Retro Console Filter") != std::string::npos);
+    /* Clones (Duplicate, undo snapshots, Play mode) carry every field. */
+    std::unique_ptr<Scene> copy = ed.scene().clone();
+    GameObject *cc = copy->find_by_name("Main Camera");
+    CHECK(cc != nullptr);
+    if (cc) {
+      std::vector<RetroConsoleFilter *> cl;
+      for (const auto &c : cc->components)
+        if (auto *r = dynamic_cast<RetroConsoleFilter *>(c.get())) cl.push_back(r);
+      CHECK(cl.size() == 2);
+      if (cl.size() == 2) {
+        CHECK(cl[0]->width == 64 && cl[0]->snap_grid == 2.5f && cl[0]->fog && cl[0]->fog_end == 22.0f && cl[0]->owner == cc);
+        CHECK(!cl[1]->enabled);
+      }
+    }
+    CHECK(save_scene_text(*copy) == text);
+    /* Duplicate in the editor. */
+    ed.command("select Main Camera");
+    ed.command("duplicate");
+    int owners = 0;
+    ed.scene().for_each([&](GameObject &g) { owners += g.get<RetroConsoleFilter>() != nullptr; });
+    CHECK(owners == 2);
+    Scene loaded;
+    std::string err;
+    CHECK(load_scene_text(text, loaded, err));
+    GameObject *lc = loaded.find_by_name("Main Camera");
+    CHECK(lc != nullptr);
+    if (!lc) return;
+    std::vector<RetroConsoleFilter *> fl;
+    for (const auto &c : lc->components)
+      if (auto *r = dynamic_cast<RetroConsoleFilter *>(c.get())) fl.push_back(r);
+    CHECK(fl.size() == 2);
+    if (fl.size() != 2) return;
+    const RetroConsoleFilter *x = fl[0], *y = fl[1];
+    CHECK(x->width == 64 && x->height == 48 && x->fit == 1 && x->vertex_snap && x->snap_grid == 2.5f && !x->affine_textures);
+    CHECK(x->texture_filter == 2 && x->max_texture_size == 128 && x->mipmaps);
+    CHECK(x->color_depth == RetroImageParams::Full && x->dither == RetroImageParams::Bayer4);
+    CHECK(x->fog && x->fog_start == 4.0f && x->fog_end == 22.0f);
+    CHECK_NEAR(x->fog_color.x, 0.1f, 1e-5);
+    CHECK_NEAR(x->fog_color.y, 0.2f, 1e-5);
+    CHECK_NEAR(x->fog_color.z, 0.3f, 1e-5);
+    CHECK(x->applied_console == x->console);
+    CHECK(y->width == 320 && y->height == 240 && !y->enabled);
+    CHECK(save_scene_text(loaded) == text);
+  });
+
+  /* --------------------------------------------------------------- 10 */
+  test("camera filters: PS1 Game view is 15-bit colour in whole blocks; with no filter, a disabled one or a neutral one it is the old picture", [&] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    ed.step_frame_headless();
+    ed.command("select Cube");  // so adding a component to the camera doesn't change the Inspector
+    ed.command("window Game");
+    auto settle = [&] {
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    };
+    auto grab = [&] { return std::vector<uint32_t>(ed.framebuffer().pixels.begin(), ed.framebuffer().pixels.end()); };
+    settle();
+    const std::vector<uint32_t> base = grab();
+    ed.step_frame_headless();
+    const int FW = ed.framebuffer().width, FH = ed.framebuffer().height;
+    /* The status bar's frame-time text changes every frame, so compare inside the view only. */
+    auto same = [&](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      const Recti r = ed.scene_view_rect();
+      size_t diff = 0;
+      for (int y = r.y; y < r.bottom(); y++)
+        for (int x = r.x; x < r.right(); x++) diff += a[(size_t)y * FW + x] != b[(size_t)y * FW + x];
+      return diff <= (size_t)r.w * r.h / 1000;
+    };
+    CHECK(same(grab(), base));  // the Game view is steady frame to frame
+    auto diff_box = [&](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      Recti box(0, 0, 0, 0);
+      int x0 = FW, y0 = FH, x1 = -1, y1 = -1;
+      const Recti r = ed.scene_view_rect();
+      for (int y = r.y; y < r.bottom(); y++)
+        for (int x = r.x; x < r.right(); x++)
+          if (a[(size_t)y * FW + x] != b[(size_t)y * FW + x]) x0 = std::min(x0, x), x1 = std::max(x1, x), y0 = std::min(y0, y), y1 = std::max(y1, y);
+      if (x1 >= x0) box = Recti(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+      return box;
+    };
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    RetroConsoleFilter *f = cam->add<RetroConsoleFilter>();
+    /* A disabled filter changes nothing. */
+    f->enabled = false;
+    settle();
+    CHECK(same(grab(), base));
+    /* So does one with every effect off. */
+    f->enabled = true;
+    f->vertex_snap = false, f->affine_textures = false, f->texture_filter = 0, f->max_texture_size = 0, f->mipmaps = true;
+    f->width = f->height = 0, f->color_depth = 0, f->fog = false;
+    settle();
+    CHECK(same(grab(), base));
+    /* The PS1 look, at a small internal size so the blocks are big. */
+    f->apply_preset(RetroConsoleFilter::PS1);
+    f->width = 48;
+    f->height = 36;
+    settle();
+    const std::vector<uint32_t> ps1 = grab();
+    const Recti box = ed.scene_view_rect();  // the Game tab takes the Scene view's place
+    const Recti changed = diff_box(base, ps1);
+    std::printf("    the Game view is %d x %d at (%d, %d)\n", box.w, box.h, box.x, box.y);
+    CHECK(box.w > 300 && box.h > 200 && changed.w > 300 && changed.h > 200 && box.contains(changed.x, changed.y));
+    const Recti inner(box.x + 3, box.y + 3, box.w - 6, box.h - 6);
+    int not15 = 0;
+    for (int y = inner.y; y < inner.bottom(); y++)
+      for (int x = inner.x; x < inner.right(); x++) not15 += !cf_is_15bit(ps1[(size_t)y * FW + x]);
+    CHECK(not15 == 0);
+    /* Whole blocks: at most 36 rows' worth of different rows, and as many runs per row as internal columns. */
+    int runs, changes;
+    cf_blockiness(ps1.data(), FW, inner, runs, changes);
+    const int iw = (int)std::lround(36.0 * box.w / box.h);
+    std::printf("    %d colour runs along the busiest row (internal width about %d), %d row changes (internal height 36)\n", runs, iw, changes);
+    CHECK(runs <= iw + 3 && runs > 10);
+    CHECK(changes <= 36 + 1 && changes > 10);
+    /* Square pixels: a block is as wide as it is tall (the view's pixels per internal pixel agree). */
+    CHECK_NEAR((double)box.w / iw, (double)box.h / 36, 0.6);
+    /* Letterbox: 4:3 with black bars in the rest. */
+    f->fit = 1;
+    settle();
+    const std::vector<uint32_t> lb = grab();
+    int bx0 = FW, by0 = FH, bx1 = -1, by1 = -1;
+    for (int y = box.y + 2; y < box.bottom() - 2; y++)
+      for (int x = box.x + 2; x < box.right() - 2; x++)
+        if (lb[(size_t)y * FW + x] != 0xFF000000u) bx0 = std::min(bx0, x), bx1 = std::max(bx1, x), by0 = std::min(by0, y), by1 = std::max(by1, y);
+    const double aspect = (bx1 - bx0 + 1) / (double)(by1 - by0 + 1);
+    std::printf("    letterboxed picture %d x %d (aspect %.3f) inside the %d x %d view\n", bx1 - bx0 + 1, by1 - by0 + 1, aspect, box.w, box.h);
+    CHECK_NEAR(aspect, 4.0 / 3.0, 0.04);
+    CHECK((bx1 - bx0 + 1) < box.w - 8 || (by1 - by0 + 1) < box.h - 8);  // there are bars
+    CHECK(lb[(size_t)(box.y + box.h / 2) * FW + box.x + 3] == 0xFF000000u || lb[(size_t)(box.y + 3) * FW + box.x + box.w / 2] == 0xFF000000u);
+    int lb_not15 = 0;
+    for (int y = by0 + 1; y < by1; y++)
+      for (int x = bx0 + 1; x < bx1; x++) lb_not15 += !cf_is_15bit(lb[(size_t)y * FW + x]);
+    CHECK(lb_not15 == 0);
+    /* Two filters: the later (coarser) one sets the size, and the picture is still 15-bit. */
+    f->fit = 0;
+    RetroConsoleFilter *g = cam->add<RetroConsoleFilter>();
+    g->width = 24;
+    g->height = 18;
+    settle();
+    const std::vector<uint32_t> two = grab();
+    cf_blockiness(two.data(), FW, inner, runs, changes);
+    std::printf("    two filters: %d runs, %d row changes\n", runs, changes);
+    CHECK(runs <= (int)std::lround(18.0 * box.w / box.h) + 3 && changes <= 19);
+    int two_not15 = 0;
+    for (int y = inner.y; y < inner.bottom(); y++)
+      for (int x = inner.x; x < inner.right(); x++) two_not15 += !cf_is_15bit(two[(size_t)y * FW + x]);
+    CHECK(two_not15 == 0 && two != ps1);
+    /* Removing the filters brings the old picture back. */
+    cam->components.erase(std::remove_if(cam->components.begin(), cam->components.end(),
+                                         [](const std::unique_ptr<Component> &c) { return dynamic_cast<RetroConsoleFilter *>(c.get()) != nullptr; }),
+                          cam->components.end());
+    settle();
+    CHECK(same(grab(), base));
+  });
+
+  /* --------------------------------------------------------------- 11 */
+  test("camera filters: `filters on` puts the main camera's filters on the Scene view (15-bit), `filters off` restores it", [&] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_view_rect();
+    CHECK(view.w > 300 && view.h > 200);
+    auto grab = [&] {
+      std::vector<uint32_t> out;
+      const Image &fb = ed.framebuffer();
+      for (int y = view.y; y < view.bottom(); y++) out.insert(out.end(), fb.pixels.data() + (size_t)y * fb.width + view.x, fb.pixels.data() + (size_t)y * fb.width + view.right());
+      return out;
+    };
+    auto fraction15 = [&](const std::vector<uint32_t> &px) {
+      size_t n = 0;
+      for (uint32_t c : px) n += cf_is_15bit(c);
+      return (double)n / px.size();
+    };
+    const std::vector<uint32_t> base = grab();
+    /* The Scene view's overlay text changes a little every frame, and the `filters` command's log line
+     * shows in it for a while (~0.55% of the view on Linux): equal means all but 1% of pixels. The
+     * filtered view differs in ~99% of them. */
+    auto same = [&](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      size_t diff = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) diff += a[i] != b[i];
+      if (std::getenv("BLENDITY_CF_DEBUG")) std::printf("    same(): %zu of %zu pixels differ\n", diff, a.size());
+      return a.size() == b.size() && diff <= a.size() / 100;
+    };
+    /* The toggle with no filter on the camera changes nothing. */
+    ed.command("filters on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(same(grab(), base));
+    ed.command("filters off");
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    RetroConsoleFilter *f = cam->add<RetroConsoleFilter>();
+    f->width = 80;
+    f->height = 60;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<uint32_t> off = grab();
+    CHECK(same(off, base));  // off by default, whatever the camera carries
+    ed.command("filters on");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<uint32_t> on = grab();
+    const double f_off = fraction15(off), f_on = fraction15(on);
+    std::printf("    15-bit pixels in the Scene view: off %.1f%%, on %.1f%%\n", 100.0 * f_off, 100.0 * f_on);
+    CHECK(!same(on, off));
+    CHECK(f_on > 0.75);  // all but the grid, outline and gizmo drawn on top
+    CHECK(f_off < 0.3);
+    /* The camera's other effects reach the Scene view too: blocks of the internal size. */
+    int runs, changes;
+    {
+      std::vector<uint32_t> img(ed.framebuffer().pixels.begin(), ed.framebuffer().pixels.end());
+      /* A strip of sky between the statistics text (left) and the navigation gizmo (right): 25% of the width, 1/12 of the
+       * height. Grid lines drawn over the picture break a few rows, so use the typical row: it has about one colour run
+       * per internal column (100 across the view), and most rows repeat the one above (7 view rows per internal row). */
+      const int sx = view.x + view.w * 11 / 20, sy = view.y + 8, sw = view.w / 4, sh = view.h / 12, stride = ed.framebuffer().width;
+      std::vector<int> run_counts;
+      int repeats = 0;
+      for (int y = sy; y < sy + sh; y++) {
+        int n = 1, same_as_above = 0;
+        for (int x = sx + 1; x < sx + sw; x++) n += img[(size_t)y * stride + x] != img[(size_t)y * stride + x - 1];
+        for (int x = sx; x < sx + sw; x++) same_as_above += img[(size_t)y * stride + x] == img[(size_t)(y - 1) * stride + x];
+        run_counts.push_back(n);
+        repeats += same_as_above * 10 >= sw * 9;
+      }
+      std::sort(run_counts.begin(), run_counts.end());
+      runs = run_counts[run_counts.size() / 2];
+      changes = sh - repeats;
+      std::printf("    Scene view sky strip with filters: %d colour runs in the typical row, %d of %d rows differ from the one above\n", runs, changes, sh);
+      CHECK(runs <= 100 / 4 + 3 && runs > 5 && changes * 4 <= sh);
+    }
+    /* A disabled filter component is ignored there as well. */
+    f->enabled = false;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(same(grab(), base));
+    f->enabled = true;
+    ed.command("filters off");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(same(grab(), base));
+    ed.command("filters");  // no argument: toggles
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(same(grab(), on));
+    ed.command("filters 0");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(same(grab(), base));
+  });
+
+  /* --------------------------------------------------------------- 12 */
+  test("camera filters: F12 (rasterized) and camera sequences through a PS1 camera are 15-bit blocks; a camera without the filter is untouched; path tracing keeps the 15-bit look", [&] {
+    const std::string proj = fs::join(test_dir(), "filterproject");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    fs::make_dirs(fs::join(proj, "Assets"));
+    fs::make_dirs(fs::join(proj, "research"));
+    set_env("BLENDITY_PROJECT", proj);
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("set Render.RenderEngine Rasterized");
+      ed.command("set Render.ResolutionX 160");
+      ed.command("set Render.ResolutionY 90");
+      GameObject *main = ed.scene().find_by_name("Main Camera");
+      CHECK(main != nullptr);
+      if (!main) {
+        set_env("BLENDITY_PROJECT", "");
+        return;
+      }
+      RetroConsoleFilter *f = main->add<RetroConsoleFilter>();
+      f->width = 48;
+      f->height = 27;
+      /* A second camera with no filter, in the sequence after the first. */
+      ed.command("create Camera");
+      GameObject *side = ed.selected_object();
+      side->name = "Side";
+      side->set_world_position({6, 1.5f, 0});
+      const Vec3 fwd = normalize(Vec3(0, 0.5f, 0) - Vec3(6, 1.5f, 0));
+      side->set_world_rotation(Quat::euler({std::asin(-fwd.y) * kRad2Deg, std::atan2(fwd.x, fwd.z) * kRad2Deg, 0}));
+      side->get<Camera>()->sequence_order = 1;
+      main->get<Camera>()->sequence_order = 0;
+      /* Reads a written image: its pixels as 0xAARRGGBB. */
+      auto read_png = [&](const std::string &path, int &w, int &h) {
+        Bitmap bmp;
+        std::string err;
+        std::vector<uint32_t> px;
+        if (!load_image(path, bmp, err) || bmp.is_float) return px;
+        w = bmp.width, h = bmp.height;
+        for (int i = 0; i < w * h; i++) {
+          const uint8_t *q = &bmp.rgba8[(size_t)i * 4];
+          px.push_back(0xFF000000u | (uint32_t)q[0] << 16 | (uint32_t)q[1] << 8 | q[2]);
+        }
+        return px;
+      };
+      auto run_sequence = [&](const char *name, int max_frames) {
+        ed.command(std::string("rendersequence Renders/") + name);
+        for (int i = 0; i < max_frames && ed.sequence_running(); i++) ed.step_frame_headless();
+        return ed.sequence_files();
+      };
+      auto find_file = [&](const std::vector<std::string> &files, const char *camera) {
+        for (const std::string &p : files)
+          if (p.find(camera) != std::string::npos) return p;
+        return std::string();
+      };
+      auto fraction15 = [](const std::vector<uint32_t> &px) {
+        size_t n = 0;
+        for (uint32_t c : px) n += cf_is_15bit(c);
+        return (double)n / std::max<size_t>(1, px.size());
+      };
+      auto check_retro_image = [&](const std::string &path, const char *what) {
+        int w = 0, h = 0;
+        const std::vector<uint32_t> px = read_png(path, w, h);
+        CHECK(w == 160 && h == 90);
+        if (px.empty()) return;
+        size_t bad = 0;
+        for (uint32_t c : px) bad += !cf_is_15bit(c);
+        int runs, changes;
+        cf_blockiness(px.data(), w, Recti(0, 0, w, h), runs, changes);
+        std::printf("    %s: %zu pixels not 15-bit, %d runs, %d row changes\n", what, bad, runs, changes);
+        CHECK(bad == 0);
+        CHECK(runs <= 48 && runs > 8);  // 48 internal columns spread over 160
+        CHECK(changes <= 26 && changes > 8);  // 27 internal rows
+      };
+      /* Rasterized sequence. */
+      auto files = run_sequence("f12_raster", 80);
+      CHECK(files.size() == 2);
+      const std::string main_raster = find_file(files, "Main Camera"), side_raster = find_file(files, "Side");
+      CHECK(!main_raster.empty() && !side_raster.empty());
+      if (!main_raster.empty()) check_retro_image(main_raster, "rasterized, filtered");
+      if (!side_raster.empty()) {
+        int w = 0, h = 0;
+        const std::vector<uint32_t> px = read_png(side_raster, w, h);
+        const double fr = fraction15(px);
+        std::printf("    rasterized, no filter: %.1f%% of pixels 15-bit by chance\n", 100.0 * fr);
+        CHECK(!px.empty() && fr < 0.3);
+      }
+      /* The same camera without its filter renders a different (full colour) picture. */
+      f->enabled = false;
+      files = run_sequence("f12_raster_plain", 80);
+      const std::string plain = find_file(files, "Main Camera");
+      CHECK(!plain.empty());
+      if (!plain.empty()) {
+        int w = 0, h = 0;
+        const std::vector<uint32_t> px = read_png(plain, w, h);
+        CHECK(!px.empty() && fraction15(px) < 0.3);
+      }
+      f->enabled = true;
+      /* Letterbox: black bars at the sides of a 4:3 frame in the 16:9 render. */
+      f->fit = 1;
+      f->width = 40;  // a 4:3 frame (not the render's 16:9)
+      f->height = 30;
+      files = run_sequence("f12_letterbox", 80);
+      const std::string lb = find_file(files, "Main Camera");
+      CHECK(!lb.empty());
+      if (!lb.empty()) {
+        int w = 0, h = 0;
+        const std::vector<uint32_t> px = read_png(lb, w, h);
+        CHECK(w == 160 && h == 90 && !px.empty());
+        if (!px.empty()) {
+          CHECK(px[(size_t)45 * w + 2] == 0xFF000000u && px[(size_t)45 * w + 157] == 0xFF000000u);
+          CHECK(px[(size_t)45 * w + 80] != 0xFF000000u && px[(size_t)45 * w + 30] != 0xFF000000u);  // the 120-wide frame starts at x = 20
+          bool all15 = true;
+          for (uint32_t c : px) all15 = all15 && cf_is_15bit(c);
+          CHECK(all15);
+        }
+      }
+      f->fit = 0;
+      f->width = 48;
+      f->height = 27;
+      /* A single F12 render and the Save Render command. */
+      ed.command("render");
+      ed.command("saverender");
+      std::string newest;
+      for (const auto &e : std::filesystem::directory_iterator(fs::join(proj, "Renders"), ec)) {
+        const std::string name = e.path().filename().string();
+        if (name.rfind("render_", 0) == 0 && e.path().extension() == ".png" && name > newest) newest = name;
+      }
+      CHECK(!newest.empty());
+      if (!newest.empty()) check_retro_image(fs::join(fs::join(proj, "Renders"), newest), "F12");
+      /* Path traced: 1 sample at the internal resolution, then the colour pass, then scaled up. */
+      ed.command("set Render.RenderEngine Path");
+      ed.command("set Render.Samples 1");
+      ed.command("set Render.Denoise false");
+      files = run_sequence("f12_path", 1500);
+      CHECK(!ed.sequence_running() && files.size() == 2);
+      const std::string main_path = find_file(files, "Main Camera"), side_path = find_file(files, "Side");
+      CHECK(!main_path.empty() && !side_path.empty());
+      if (!main_path.empty()) check_retro_image(main_path, "path traced, filtered");
+      if (!side_path.empty()) {
+        int w = 0, h = 0;
+        const std::vector<uint32_t> px = read_png(side_path, w, h);
+        CHECK(!px.empty() && fraction15(px) < 0.3);
+      }
+      /* Extreme: a 1 x 1 internal image and a huge one render without trouble. */
+      ed.command("set Render.RenderEngine Rasterized");
+      for (int size : {1, 4096}) {
+        f->width = size;
+        f->height = size;
+        files = run_sequence("f12_odd", 80);
+        CHECK(!files.empty());
+      }
+    }
+    set_env("BLENDITY_PROJECT", "");
+  });
+
+  /* --------------------------------------------------------------- 13 */
+  test("camera filters: the Camera Preview (Rendered) refreshes when a filter field changes", [&] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("set Render.PreviewSamples 1");
+    ed.command("select Main Camera");
+    GameObject *cam = ed.selected_object();
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    cam->add<RetroConsoleFilter>();
+    ed.command("camerapreview rendered");
+    const Recti view = ed.scene_view_rect();
+    /* The inset sits in the Scene view's lower right corner. */
+    const Recti corner(view.x + view.w * 2 / 3, view.y + view.h * 2 / 3, view.w / 3 - 4, view.h / 3 - 4);
+    auto grab = [&] {
+      std::vector<uint32_t> out;
+      const Image &fb = ed.framebuffer();
+      for (int y = corner.y; y < corner.bottom(); y++) out.insert(out.end(), fb.pixels.data() + (size_t)y * fb.width + corner.x, fb.pixels.data() + (size_t)y * fb.width + corner.right());
+      return out;
+    };
+    auto settle = [&] {
+      std::vector<uint32_t> prev;
+      for (int i = 0; i < 400; i++) {
+        ed.step_frame_headless();
+        std::vector<uint32_t> now = grab();
+        if (!prev.empty() && now == prev && i > 3) return now;
+        prev = now;
+      }
+      return prev;
+    };
+    const std::vector<uint32_t> first = settle();
+    const std::vector<uint32_t> again = settle();
+    CHECK(first == again);  // a finished preview stays put
+    /* A different internal size: the preview is rebuilt at the new resolution. */
+    ed.command("set RetroConsoleFilter.Width 16");
+    ed.command("set RetroConsoleFilter.Height 16");
+    const std::vector<uint32_t> after_size = settle();
+    CHECK(after_size != first);
+    /* Colour depth alone (no change to geometry or size) also refreshes it. */
+    ed.command("set RetroConsoleFilter.ColourDepth 24-bit");
+    const std::vector<uint32_t> after_depth = settle();
+    CHECK(after_depth != after_size);
+    /* Disabling the component refreshes it again. */
+    cam->get<RetroConsoleFilter>()->enabled = false;
+    const std::vector<uint32_t> after_off = settle();
+    CHECK(after_off != after_depth);
   });
 }
