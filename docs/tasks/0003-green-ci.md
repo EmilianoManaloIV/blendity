@@ -1,6 +1,6 @@
 # 0003: Make CI pass on all three platforms (dependency-free build)
 
-- **Status:** draft
+- **Status:** in review (spec approved 2026-10-09)
 - **Requirements:** C-01, C-02, Q-03
 - **Decisions:** ADR 0001 (dependency-free build must work)
 - **Model:** main session (Opus) - build scripts and a geometry fallback
@@ -27,6 +27,31 @@ The `build` workflow has failed on every push to `main` (at least the last 14 ru
    these holes without Manifold, or the two tests are guarded by `BL_WITH_MANIFOLD` with a check of the
    documented fallback behaviour (decide which - the first keeps C-02 honest).
 3. The windows, linux and macos jobs are green on a PR; then branch protection is switched on.
+
+## Outcome (2026-10-09)
+1. `build.sh` line 86: `... && echo _libs || true)`. Linux builds dependency-free; the unit suite,
+   the quick stress pass and the headless screenshot all run (macOS: same script, checked by CI).
+   CI then showed a second cause: `build.sh` was committed without its executable bit (exit 126);
+   now 755.
+   macOS then failed one check: floats were saved with `%.9g` (Apple's libc++ doesn't define
+   `__cpp_lib_to_chars`); `append_float` now writes the shortest form that reads back exactly.
+   The quick stress pass then hung on CI (always had, on Windows): the job-system section's thread
+   loop never ended for 3 or 5 threads. The counts are now listed first; the step also has a 15-minute
+   limit and reports each section on stderr.
+2. The first option: `push_through_flat_exit` (`src/scene/mesh_tools.cpp`) cuts the outline across
+   several exit faces in one plane with `imprint_loop_across` and gives the front outline a corner
+   opposite each new back one, then joins them with a tube. It checks the back corners form the opening's outline edge for edge,
+   and otherwise leaves the mesh as it was (Manifold, when available, then tries). Both builds take this path; Manifold is
+   only used for exits across faces that aren't coplanar. The two tests pass unchanged.
+3. Local results:
+   - Windows dependency-free: 1822 checks, 0 failed.
+   - Linux dependency-free: 1822 checks, 0 failed.
+   - Windows with libraries: 1924 checks, 0 failed.
+   - Push/Pull stress: 0 problems, 394 results with faces newly on top of each other (unchanged).
+4. CI run 34 (branch `task/0003-green-ci`, 2026-10-09): windows, linux and macos all pass (build,
+   unit tests, quick stress, headless screenshot, artifacts) - the first green run of the workflow.
+   `linux-sanitizers` still reports the `merge_by_distance` overflow (task 0002, non-blocking).
+5. Next: merge, then switch on branch protection requiring windows, linux and macos (task 0001).
 
 ## Documentation to update
 - CHANGELOG entry; ADR 0001 consequences if the Manifold-free behaviour differs.

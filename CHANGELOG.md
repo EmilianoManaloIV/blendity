@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 25): CI passes again (task 0003)
+
+**Asked:** continue with the next task, making CI pass on all three platforms so branch protection can
+be switched on.
+
+**Fixed**
+- **`build.sh` stopped before compiling without Blender's libraries.** The object folder's name was
+  built with `[ ... ] && echo _libs`. That command fails when the libraries are absent, and `set -e` ended the
+  script without a message. This broke every Linux and macOS CI run.
+- **`build.sh` was not executable in git** (mode 644, committed from Windows), so CI's
+  `./build.sh` failed with "permission denied" (exit 126) before even reaching that line. It is
+  now 755.
+- **macOS saved numbers with nine digits.** Apple's C++ library doesn't announce floating-point
+  `to_chars`, so scene and material files used `%.9g` there: 0.7 was written as `0.699999988`, and a
+  material test looking for "0.7" failed. The fallback now writes the fewest digits that read back as the
+  same number, as `to_chars` does, so files are identical on all three platforms.
+
+**Changed:** CI's unit-test steps turn each failing check (and each sanitizer report) into a GitHub
+annotation, so failures can be read on the run page without signing in to view the logs.
+The quick stress step has hung on CI until GitHub's 6-hour limit on every Windows run so far (and now
+on Linux), though it takes under 90 s locally even on one core. It now stops after 15 minutes, and
+`blendity_stress` reports each section's start and end on stderr, so the run page shows where it was.
+
+**Fixed: the stress test never ended on 3 or 5 threads.** The job-system section steps through thread
+counts and, to end on the machine's count, stepped back to half of it. With 3 or 5 threads (GitHub's
+macOS and Linux runners) that step-back repeated forever. Now the counts are listed first (1, 2, 3, 4, 8,
+16... then the machine's own). This was the hang that kept every Windows CI run going for 6 hours.
+- **Push Through out through several faces in one plane needed Manifold.** Pushing a rectangle
+  through a wall whose back already had a circle, or an archway where the back had a rectangle across
+  it, was refused in the dependency-free build. Now the outline is cut across the back faces and
+  the front outline gets a corner opposite each new back corner, then a tube joins the two. Both builds
+  take this path, so they agree. Manifold is used only when the exit faces aren't coplanar.
+
+**Checked**
+- Unit checks:
+  - Windows, dependency-free: 1822, 0 failed.
+  - Linux, dependency-free: 1822, 0 failed.
+  - Windows with libraries: 1924, 0 failed.
+  - Linux with libraries: 1900, 0 failed.
+- Linux, dependency-free: the quick stress pass and the headless screenshot run as CI runs them.
+- Push/Pull stress: 0 problems; 394 results with faces newly on top of each other (unchanged).
+- Review (code-reviewer agent, Opus): approved. It suggested the cut be checked to form the opening's outline edge for edge before the tube is built, so a face missed inside it can't leave edges with three faces; that check is in.
+
 ## 2026-10-09 (round 24): engineering setup for agentic development (task 0001)
 
 **Asked:** set the repository up for research-informed agentic development:

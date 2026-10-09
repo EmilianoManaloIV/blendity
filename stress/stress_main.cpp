@@ -481,7 +481,12 @@ static void test_jobs(Report &rep, const Options &o) {
   JobSystem &js = JobSystem::global();
   double base = 0;
   int maxt = js.thread_count();
-  for (int t = 1; t <= maxt; t = t < 4 ? t + 1 : t * 2) {
+  /* 1, 2, 3, 4, 8, 16... and always maxt last. (Stepping back to maxt / 2 inside the loop never
+   * ended for 3 or 5 threads - CI's runners - and the job hung until GitHub's 6-hour limit.) */
+  std::vector<int> counts;
+  for (int t = 1; t < maxt; t = t < 4 ? t + 1 : t * 2) counts.push_back(t);
+  counts.push_back(std::max(1, maxt));
+  for (int t : counts) {
     js.set_max_threads(t);
     double ms = time_ms([&] {
       js.parallel_for((int64_t)n, 65536, [&](int64_t b, int64_t e) {
@@ -490,7 +495,6 @@ static void test_jobs(Report &rep, const Options &o) {
     }, 5);
     if (t == 1) base = ms;
     rep.row({std::to_string(t), f2(ms), f1(base / ms) + "x", strprintf("%.0f%%", base / ms / t * 100)});
-    if (t * 2 > maxt && t != maxt) t = maxt / 2;  // make sure we end on maxt
   }
   js.set_max_threads(1 << 30);
   rep.note("Memory bandwidth, not core count, limits this kind of streaming kernel (GEA Vol. I 3.5 Memory Architectures).");
@@ -1963,7 +1967,11 @@ int main(int argc, char **argv) {
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
+    /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
+    std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
+    std::fflush(stdout);
     t.fn(rep, o);
+    std::fprintf(stderr, "[stress] %s done at %.1f s\n", t.name, total.ms() / 1000.0);
   }
   rep.md += strprintf("\n---\nTotal run time: %.1f s\n", total.ms() / 1000.0);
   fs::make_dirs(o.out);

@@ -1186,6 +1186,112 @@ bool bridge(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_
   return true;
 }
 
+/* Push Through whose rays leave through several faces lying in one plane. hits: where each
+ * outline corner's ray leaves (on the surface). False, with m untouched, when the
+ * exit faces aren't coplanar or the cut doesn't come out as one clean outline. */
+static bool push_through_flat_exit(Mesh &m, std::vector<uint8_t> &face_sel, const Region &r, const std::vector<Vec3> &hits,
+                                   const std::set<uint32_t> &exit_faces) {
+  const std::vector<uint32_t> &L = r.loops[0];
+  const size_t n = L.size();
+  const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+  const Vec3 nb = normalize(m.face_normal(*exit_faces.begin()));
+  for (uint32_t f : exit_faces)
+    if (dot(normalize(m.face_normal(f)), nb) < 0.9999f) return false;
+  const std::vector<Vec3> &back = hits;
+  for (size_t i = 0; i < n; i++)
+    if (std::fabs(dot(back[i] - back[0], nb)) > eps) return false;
+  /* The region's faces, by their corners: the cut renumbers faces. */
+  std::set<std::vector<uint32_t>> region_corners;
+  for (uint32_t f : r.faces) {
+    std::vector<uint32_t> c(m.face_verts(f), m.face_verts(f) + m.face_size(f));
+    std::sort(c.begin(), c.end());
+    region_corners.insert(c);
+  }
+  const int mat = m.material_of(r.faces[0]);
+  Mesh before = m;
+  auto give_up = [&]() {
+    m = std::move(before);
+    return false;
+  };
+  std::vector<size_t> inner;
+  if (imprint_loop_across(m, back, nb, &inner) < 0 || inner.empty()) return give_up();
+  /* The opening's outline on the back: edges used by one inner face only. Each of its corners
+   * sits on a side of the projected outline, at (side, position along it). */
+  std::unordered_map<uint64_t, int> uses;
+  for (size_t f : inner)
+    for (uint32_t k = 0; k < m.face_size(f); k++) uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+  std::map<std::pair<size_t, float>, uint32_t> along;
+  std::unordered_set<uint32_t> outline_verts;
+  for (auto &[key, count] : uses)
+    if (count == 1) {
+      outline_verts.insert((uint32_t)(key >> 32));
+      outline_verts.insert((uint32_t)(key & 0xffffffffu));
+    }
+  for (uint32_t v : outline_verts) {
+    const Vec3 p = m.positions[v];
+    bool placed = false;
+    for (size_t i = 0; i < n && !placed; i++) {
+      const Vec3 a = back[i], e = back[(i + 1) % n] - a;
+      const float l2 = dot(e, e);
+      if (l2 < 1e-12f) continue;
+      const float s = clampf(dot(p - a, e) / l2, 0.0f, 1.0f);
+      if (length(a + e * s - p) > eps) continue;
+      if (s > 1.0f - 1e-4f) continue;  // the next side's start
+      along[{i, s < 1e-4f ? 0.0f : s}] = v;
+      placed = true;
+    }
+    if (!placed) return give_up();  // a corner off the outline: the cut went somewhere else
+  }
+  if (along.size() != outline_verts.size()) return give_up();
+  for (size_t i = 0; i < n; i++)
+    if (!along.count({i, 0.0f})) return give_up();
+  /* What goes: the region and the back faces inside the outline (split_edge below keeps
+   * face numbers). */
+  std::vector<uint8_t> drop(m.face_count(), 0);
+  for (size_t f = 0; f < m.face_count(); f++) {
+    std::vector<uint32_t> c(m.face_verts(f), m.face_verts(f) + m.face_size(f));
+    std::sort(c.begin(), c.end());
+    if (region_corners.count(c)) drop[f] = 1;
+  }
+  for (size_t f : inner) drop[f] = 1;
+  /* The front outline gets a corner opposite each new back one (the sides map linearly). */
+  std::vector<uint32_t> front, rear;
+  for (auto &[at, v] : along) {
+    const size_t i = at.first;
+    uint32_t fv = L[i];
+    if (at.second > 0.0f) {
+      /* After earlier splits on this side, the front corner before this one is front.back(). */
+      const Vec3 want = lerp(m.positions[L[i]], m.positions[L[(i + 1) % n]], at.second);
+      const Vec3 a = m.positions[front.back()], b = m.positions[L[(i + 1) % n]];
+      fv = split_edge(m, front.back(), L[(i + 1) % n], length(want - a) / std::max(length(b - a), 1e-12f));
+    }
+    front.push_back(fv);
+    rear.push_back(v);
+  }
+  /* The back corners in order must be the opening's own outline, edge for edge: a face left
+   * inside it (missed by the enclosure test) would leave edges with three faces. */
+  const size_t k = front.size();
+  size_t outline_edges = 0;
+  for (auto &[key, count] : uses) outline_edges += count == 1;
+  if (outline_edges != k) return give_up();
+  for (size_t i = 0; i < k; i++) {
+    auto it = uses.find(Mesh::edge_key(rear[i], rear[(i + 1) % k]));
+    if (it == uses.end() || it->second != 1) return give_up();
+  }
+  /* The tube, wound like push_through_raw's. */
+  std::vector<uint32_t> made;
+  for (size_t i = 0; i < k; i++) {
+    uint32_t q[4] = {front[i], front[(i + 1) % k], rear[(i + 1) % k], rear[i]};
+    m.add_face(q, 4, nullptr, mat);
+    made.push_back((uint32_t)m.face_count() - 1);
+  }
+  drop.resize(m.face_count(), 0);
+  face_sel = drop_and_select(m, drop, made);
+  remove_loose_verts(m);
+  m.touch();
+  return true;
+}
+
 static bool push_through_raw(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *err) {
   face_sel.resize(m.face_count(), 0);
   std::vector<Region> regions = face_regions(m, face_sel);
@@ -1269,9 +1375,13 @@ static bool push_through_raw(Mesh &m, std::vector<uint8_t> &face_sel, int segmen
     m.touch();
     return true;
   }
-  /* The hole comes out through several faces: subtract a prism instead. */
+  /* Several exit faces in one plane (the back already carries an earlier drawing): cut the
+   * outline across them, give the front outline a corner wherever the back one gained one,
+   * and join the two with a tube. No Boolean needed, so builds without Manifold make it too. */
+  if (push_through_flat_exit(m, face_sel, r, hits, exit_faces)) return true;
+  /* Otherwise subtract a prism instead. */
   if (!boolean_available()) {
-    if (err) *err = "Push Through: the hole exits through several faces; that needs the Boolean solver (Manifold, part of Blender's libraries)";
+    if (err) *err = "Push Through: the hole exits through several faces it can't cut cleanly on its own; that needs the Boolean solver (Manifold, part of Blender's libraries)";
     return false;
   }
   Mesh prism;

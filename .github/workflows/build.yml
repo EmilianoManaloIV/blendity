@@ -23,9 +23,28 @@ jobs:
         shell: cmd
         run: build.bat release all
       - name: Unit tests
-        run: dist\windows\blendity_tests.exe
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          dist/windows/blendity_tests.exe 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
       - name: Quick stress test
-        run: dist\windows\blendity_stress.exe --quick --out stress\results\ci
+        shell: bash
+        timeout-minutes: 20
+        # 15 minutes at most (it takes about one); where it stopped is shown as annotations.
+        run: |
+          set +e
+          perl -e 'alarm shift; exec @ARGV' 900 dist/windows/blendity_stress.exe --quick --out stress/results/ci 2>&1 | tee stress.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "::error::stress exited with $status (142 = timed out)"
+            grep '^\[stress\]' stress.log | tail -3 | sed 's/^/::error::/'
+            tail -5 stress.log | sed 's/^/::error::/'
+          fi
+          exit $status
       - name: Headless screenshot
         run: dist\windows\Blendity.exe --headless-screenshot screenshot-windows.png
       - uses: actions/upload-artifact@v4
@@ -45,9 +64,28 @@ jobs:
       - name: Build
         run: ./build.sh release all
       - name: Unit tests
-        run: ./dist/linux/blendity_tests
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          ./dist/linux/blendity_tests 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
       - name: Quick stress test
-        run: ./dist/linux/blendity_stress --quick --out stress/results/ci
+        shell: bash
+        timeout-minutes: 20
+        # 15 minutes at most (it takes about one); where it stopped is shown as annotations.
+        run: |
+          set +e
+          perl -e 'alarm shift; exec @ARGV' 900 ./dist/linux/blendity_stress --quick --out stress/results/ci 2>&1 | tee stress.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "::error::stress exited with $status (142 = timed out)"
+            grep '^\[stress\]' stress.log | tail -3 | sed 's/^/::error::/'
+            tail -5 stress.log | sed 's/^/::error::/'
+          fi
+          exit $status
       - name: Headless screenshot
         run: ./dist/linux/Blendity --headless-screenshot screenshot-linux.png
       - uses: actions/upload-artifact@v4
@@ -67,9 +105,28 @@ jobs:
       - name: Build
         run: ./build.sh release all
       - name: Unit tests
-        run: ./dist/macos/blendity_tests
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          ./dist/macos/blendity_tests 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
       - name: Quick stress test
-        run: ./dist/macos/blendity_stress --quick --out stress/results/ci
+        shell: bash
+        timeout-minutes: 20
+        # 15 minutes at most (it takes about one); where it stopped is shown as annotations.
+        run: |
+          set +e
+          perl -e 'alarm shift; exec @ARGV' 900 ./dist/macos/blendity_stress --quick --out stress/results/ci 2>&1 | tee stress.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "::error::stress exited with $status (142 = timed out)"
+            grep '^\[stress\]' stress.log | tail -3 | sed 's/^/::error::/'
+            tail -5 stress.log | sed 's/^/::error::/'
+          fi
+          exit $status
       - name: Headless screenshot
         run: ./dist/macos/Blendity --headless-screenshot screenshot-macos.png
       - name: Zip app bundle
@@ -102,4 +159,11 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ./dist/linux/blendity_tests
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          ./dist/linux/blendity_tests 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
