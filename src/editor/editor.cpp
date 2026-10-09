@@ -2650,6 +2650,8 @@ void Editor::run_console_command(const std::string &line) {
                : w == "rendered"                  ? Shading::Rendered
                                                    : Shading::Shaded;
   }
+  else if (c == "undo") undo();  // Ctrl+Z
+  else if (c == "redo") redo();  // Ctrl+Y / Ctrl+Shift+Z
   else if (c == "filters") {
     /* The main camera's filters on the Scene view (Shaded): on / off / toggle. */
     const std::string w = to_lower(arg(1, "toggle"));

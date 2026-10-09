@@ -1,6 +1,6 @@
 # 0002: Fix what AddressSanitizer / UBSan find, then make the job required
 
-- **Status:** in review (spec approved 2026-10-09)
+- **Status:** done (merged as PR #3; linux-sanitizers is a required check since 2026-10-09)
 - **Requirements:** Q-01, Q-03
 - **Decisions:** none needed
 - **Model:** main session (Opus) to triage; implementer (Sonnet) for isolated fixes

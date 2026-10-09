@@ -739,6 +739,10 @@ struct InspectorReflector : Reflector {
 
 void Editor::draw_inspector(const Recti &r) {
   auto &u = ui_;
+  inspector_menu_rects_.clear();
+  /* A menu choice not applied by the next frame (nothing selected, a folded section, an undo in
+   * between) is dropped rather than kept for later. */
+  if (inspector_action_.obj && u.frame_number() > inspector_action_.frame + 2) inspector_action_ = {};
   GameObject *g = active_object();
   if (!g) {
     /* Project file selected? Show file info, like Unity's asset inspector. */
@@ -845,6 +849,7 @@ void Editor::draw_inspector(const Recti &r) {
     if (menu) {
       Recti kr{h.right() - u.px(20), h.y + u.px(2), u.px(18), h.h - u.px(4)};
       ui::Id mid = u.id(key + "_menu");
+      inspector_menu_rects_[key] = kr;
       if (u.icon_button(kr, Icon::Menu, false, "Component menu")) u.open_popup(mid, kr);
       u.popup(mid, u.px(200), menu);
     }
@@ -854,11 +859,12 @@ void Editor::draw_inspector(const Recti &r) {
   /* Transform (always first, like Unity) */
   if (section("Transform", "Transform", nullptr, Icon::Move,
               "Position / Rotation / Scale relative to the parent.\nBlender: Object Properties > Transform (Location, Rotation, Scale).\nTheory: FoCG ch. 7, GEA Vol. I ch. 5.3.",
-              [this, g] {
-                if (ui_.menu_item("Reset")) {
-                  g->set_local(Transform());
-                  mark_changed("Reset Transform");
-                }
+              [this, gid = g->id] {
+                if (ui_.menu_item("Reset"))
+                  if (GameObject *o = scene_->find(gid)) {  // by id: the object may be gone by the end of the frame
+                    o->set_local(Transform());
+                    mark_changed("Reset Transform");
+                  }
               })) {
     InspectorReflector ir(*this, u, lay);
     Transform t = g->local();
@@ -947,8 +953,35 @@ void Editor::draw_inspector(const Recti &r) {
     }
   }
 
-  /* Components */
-  int remove_idx = -1, move_up = -1;
+  /* Components. A menu choice made last frame (see InspectorAction) is applied first. */
+  int remove_idx = -1, move_up = -1, reset_idx = -1;
+  if (inspector_action_.obj && inspector_action_.obj != g->id) inspector_action_ = {};  // chosen on another object
+  if (inspector_action_.obj == g->id && inspector_action_.act >= kCompRemove) {
+    for (size_t ci = 0; ci < g->components.size(); ci++)
+      if (g->components[ci].get() == inspector_action_.comp) {
+        if (inspector_action_.act == kCompRemove) remove_idx = (int)ci;
+        if (inspector_action_.act == kCompMoveUp) move_up = (int)ci;
+        if (inspector_action_.act == kCompReset) reset_idx = (int)ci;
+      }
+    inspector_action_ = {};
+  }
+  if (reset_idx >= 0)
+    if (auto fresh = create_component(g->components[reset_idx]->type_name())) {
+      fresh->owner = g;
+      if (auto *mf = dynamic_cast<MeshFilter *>(g->components[reset_idx].get())) static_cast<MeshFilter *>(fresh.get())->mesh = mf->mesh;
+      g->components[reset_idx] = std::move(fresh);
+      mark_changed("Reset Component");
+    }
+  if (remove_idx >= 0) {
+    g->components.erase(g->components.begin() + remove_idx);
+    mark_changed("Remove Component");
+    remove_idx = -1;
+  }
+  if (move_up > 0) {
+    std::swap(g->components[move_up], g->components[move_up - 1]);
+    mark_changed("Reorder Components");
+    move_up = -1;
+  }
   for (size_t ci = 0; ci < g->components.size(); ci++) {
     Component *c = g->components[ci].get();
     if (c->is_modifier()) continue;  // drawn together in the Modifiers stack below
@@ -959,17 +992,14 @@ void Editor::draw_inspector(const Recti &r) {
     u.push_id((uint64_t)ci + 1000);
     bool en = c->enabled;
     size_t idx = ci;
-    bool open = section(c->type_name(), std::string(c->type_name()) + std::to_string(ci), &en, icon, tip, [&, idx] {
-      if (ui_.menu_item("Remove Component")) remove_idx = (int)idx;
-      if (ui_.menu_item("Move Up", nullptr, false, idx > 0)) move_up = (int)idx;
-      if (ui_.menu_item("Reset")) {
-        if (auto fresh = create_component(g->components[idx]->type_name())) {
-          fresh->owner = g;
-          if (auto *mf = dynamic_cast<MeshFilter *>(g->components[idx].get())) static_cast<MeshFilter *>(fresh.get())->mesh = mf->mesh;
-          g->components[idx] = std::move(fresh);
-          mark_changed("Reset Component");
-        }
-      }
+    bool open = section(c->type_name(), std::string(c->type_name()) + std::to_string(ci), &en, icon, tip, [this, gid = g->id, c, idx] {
+      auto choose = [&](int act) {
+        inspector_action_ = {gid, c, act, ui_.frame_number()};
+        ui_.redraw = true;
+      };
+      if (ui_.menu_item("Remove Component")) choose(kCompRemove);
+      if (ui_.menu_item("Move Up", nullptr, false, idx > 0)) choose(kCompMoveUp);
+      if (ui_.menu_item("Reset")) choose(kCompReset);
     });
     if (en != c->enabled) c->enabled = en;
     if (open) {
@@ -1139,6 +1169,11 @@ void Editor::draw_inspector(const Recti &r) {
       enum Act { None, Apply, Duplicate, CopyToSelected, Up, Down, First, Last, Remove, Reset };
       Act act = None;
       size_t act_ci = 0;
+      if (inspector_action_.obj == g->id && inspector_action_.act > None && inspector_action_.act < kCompRemove) {
+        for (size_t ci = 0; ci < g->components.size(); ci++)
+          if (g->components[ci].get() == inspector_action_.comp) act = (Act)inspector_action_.act, act_ci = ci;
+        inspector_action_ = {};
+      }
       for (size_t k = 0; k < mods.size(); k++) {
         const size_t ci = mods[k];
         Component *c = g->components[ci].get();
@@ -1171,6 +1206,7 @@ void Editor::draw_inspector(const Recti &r) {
         Recti mr{bx, h.y + u.px(2), bs, bs};
         bx -= bs + u.px(6);
         ui::Id mid = u.id("mod_menu");
+        inspector_menu_rects_["mod" + std::to_string(ci)] = mr;
         if (u.icon_button(mr, Icon::Menu, false, "Apply, duplicate, copy to selected, move")) u.open_popup(mid, mr);
         if (icon_at(Icon::Camera, c->show_in_render, "Show in Renders (the Game view and Render Image)")) {
           c->show_in_render = !c->show_in_render;
@@ -1189,19 +1225,23 @@ void Editor::draw_inspector(const Recti &r) {
         if (u.hovered(tr) && u.in.pressed[0]) c->ui_expanded = !c->ui_expanded;
         if (const ComponentInfo *info = find_component_info(c->type_name())) u.tooltip(info->help + "\nBlender: " + info->blender);
         const size_t kk = k;
-        u.popup(mid, u.px(210), [&, ci, kk] {
+        u.popup(mid, u.px(210), [this, gid = g->id, c, kk, nmods = mods.size()] {
           auto &u = ui_;
-          if (u.menu_item("Apply", "Ctrl+A")) act = Apply, act_ci = ci;
+          auto choose = [&](Act a) {
+            inspector_action_ = {gid, c, (int)a, u.frame_number()};
+            u.redraw = true;
+          };
+          if (u.menu_item("Apply", "Ctrl+A")) choose(Apply);
           u.tooltip("Bake this modifier into the mesh and remove it (Blender: Apply).");
-          if (u.menu_item("Duplicate", "Shift+D")) act = Duplicate, act_ci = ci;
-          if (u.menu_item("Copy to Selected", nullptr, false, selection_.size() > 1)) act = CopyToSelected, act_ci = ci;
+          if (u.menu_item("Duplicate", "Shift+D")) choose(Duplicate);
+          if (u.menu_item("Copy to Selected", nullptr, false, selection_.size() > 1)) choose(CopyToSelected);
           u.menu_separator();
-          if (u.menu_item("Move Up", nullptr, false, kk > 0)) act = Up, act_ci = ci;
-          if (u.menu_item("Move Down", nullptr, false, kk + 1 < mods.size())) act = Down, act_ci = ci;
-          if (u.menu_item("Move to First", nullptr, false, kk > 0)) act = First, act_ci = ci;
-          if (u.menu_item("Move to Last", nullptr, false, kk + 1 < mods.size())) act = Last, act_ci = ci;
+          if (u.menu_item("Move Up", nullptr, false, kk > 0)) choose(Up);
+          if (u.menu_item("Move Down", nullptr, false, kk + 1 < nmods)) choose(Down);
+          if (u.menu_item("Move to First", nullptr, false, kk > 0)) choose(First);
+          if (u.menu_item("Move to Last", nullptr, false, kk + 1 < nmods)) choose(Last);
           u.menu_separator();
-          if (u.menu_item("Reset")) act = Reset, act_ci = ci;
+          if (u.menu_item("Reset")) choose(Reset);
         });
         if (c->ui_expanded) {
           lay.indent += u.px(10);

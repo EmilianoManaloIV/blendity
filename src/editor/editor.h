@@ -209,6 +209,13 @@ class Editor {
   size_t draw_point_count() const { return draw_.active ? draw_.pts.size() : SIZE_MAX; }
   const std::vector<Vec3> &draw_points_for_test() const { return draw_.pts; }
   Recti window_rect_for_test(WindowKind k) const { return window_rects_.count(k) ? window_rects_.at(k) : Recti{0, 0, 0, 0}; }
+  /* The Inspector's menu button for a section: a component's key is its type name + its index on
+   * the object ("Rotator2"); a modifier's is "mod" + its index. Empty if not drawn last frame. */
+  Recti inspector_menu_rect_for_test(const std::string &key) const {
+    auto it = inspector_menu_rects_.find(key);
+    return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
+  const ui::Context &ui_for_test() const { return ui_; }
   bool project_delete_pending() const { return !project_delete_.empty(); }
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
@@ -913,6 +920,18 @@ class Editor {
   Image filter_img_;
   RenderTarget filter_rt_;
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution
+  /* A choice from a component's or modifier's menu in the Inspector. Popup menus run at the end
+   * of the frame, after draw_inspector has returned, so they record the choice here and the
+   * next draw applies it (they used to write to draw_inspector's locals: nothing happened). */
+  struct InspectorAction {
+    uint64_t obj = 0;
+    const Component *comp = nullptr;
+    int act = 0;  // the modifier stack's Act values, or kComp* below
+    uint64_t frame = 0;  // ui frame it was chosen in: used on the next draw or dropped
+  };
+  InspectorAction inspector_action_;
+  std::map<std::string, Recti> inspector_menu_rects_;  // each section's menu button, by key (tests click them)
+  static constexpr int kCompRemove = 100, kCompMoveUp = 101, kCompReset = 102;
   bool scene_filters_ = false;
   /* A path-traced render through a filtered camera: traced at the filters' resolution into
    * render_small_, then the image passes, then scaled into render_dst_ of render_img_. */

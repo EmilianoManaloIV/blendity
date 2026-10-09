@@ -257,6 +257,13 @@ class Context {
   int scroll_drag_offset_ = 0;
   std::vector<Popup> popups_;
   std::vector<Recti> popup_rects_prev_;
+
+ public:
+  /* The popups drawn last frame, outermost first (tests click their items). */
+  const std::vector<Recti> &popup_rects() const { return popup_rects_prev_; }
+  uint64_t frame_number() const { return frame_; }
+
+ private:
   int current_layer_ = 0;  // 0 = base UI, k = inside popup k-1
   int popup_cursor_y_ = 0;
   Recti popup_area_;
