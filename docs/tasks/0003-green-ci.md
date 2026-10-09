@@ -48,8 +48,10 @@ The `build` workflow has failed on every push to `main` (at least the last 14 ru
    - Linux dependency-free: 1822 checks, 0 failed.
    - Windows with libraries: 1924 checks, 0 failed.
    - Push/Pull stress: 0 problems, 394 results with faces newly on top of each other (unchanged).
-4. Left for CI on the PR: the macOS job, and the Windows stress and screenshot steps in the
-   dependency-free build.
+4. CI run 34 (branch `task/0003-green-ci`, 2026-10-09): windows, linux and macos all pass (build,
+   unit tests, quick stress, headless screenshot, artifacts) - the first green run of the workflow.
+   `linux-sanitizers` still reports the `merge_by_distance` overflow (task 0002, non-blocking).
+5. Next: merge, then switch on branch protection requiring windows, linux and macos (task 0001).
 
 ## Documentation to update
 - CHANGELOG entry; ADR 0001 consequences if the Manifold-free behaviour differs.
