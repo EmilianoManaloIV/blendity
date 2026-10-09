@@ -93,6 +93,14 @@ void Editor::draw_tools_window(const Recti &r) {
       u.combo(u.id(id), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, v, opts, 3);
       u.tooltip(tip);
     };
+    {
+      static const char *kAxes[] = {"Local", "Global", ""};
+      int ax = draw_global_axes_ ? 1 : 0;
+      Recti rr = lay.row(u.row_h() + u.px(2));
+      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Snap Axes");
+      if (u.combo(u.id("tools_axes"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, ax, kAxes, 2)) draw_global_axes_ = ax == 1;
+      u.tooltip("Local: the face's / object's own axes (follow a rotated object). Global: the world's X / Y / Z.");
+    }
     choice("Rectangle From", draw_rect_mode_, kRectModes, "tools_rectmode",
            "Corner: two opposite corners. Center: the middle, then a corner. 3 Points: one side at any angle, then the width.");
     choice("Circle / Polygon From", draw_circle_mode_, kCircleModes, "tools_circmode",
@@ -176,6 +184,7 @@ void Editor::draw_tools_window(const Recti &r) {
     Recti row = lay.row();
     u.label(row, mesh ? "Press Tab (or Edit Mode above) to edit the mesh." : "Select a mesh to edit it.", u.theme.text_dim);
   }
+  if (section("Check: Z-Fighting")) draw_zfight_panel(lay);
   if (section("UV")) {
     std::vector<B> bs = {
         {"Unwrap", "Unwrap along the seams (U).", mesh, [this] { uv_op("unwrap"); }},

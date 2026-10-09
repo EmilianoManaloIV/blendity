@@ -121,7 +121,9 @@ void Editor::draw_uv_editor(const Recti &r) {
   if (u.button({bar.right() - u.px(94), y, u.px(88), h}, "Stretch", uv_stretch_)) uv_stretch_ = !uv_stretch_;
   u.tooltip("Color faces by area distortion: blue = compressed, green = even, red = stretched.");
 
-  Recti view{r.x, r.y + bh, r.w, r.h - bh};
+  Recti bar2{r.x, r.y + bh, r.w, bh};
+  draw_uv_tool_row(bar2);
+  Recti view{r.x, r.y + 2 * bh, r.w, r.h - 2 * bh};
   u.canvas.fill_rect(view, Color::hex(0x262626));
   u.canvas.push_clip(view);
   GameObject *g = nullptr;
@@ -176,7 +178,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   }
   if (uv_sel_.size() != m.corner_count()) uv_sel_.assign(m.corner_count(), 0);
   /* Faces shown: Edit Mode selection if any (Blender), else all. */
-  bool use_sel = edit_mode_ && g && g->id == edit_obj_ && std::find(face_sel_.begin(), face_sel_.end(), 1) != face_sel_.end();
+  bool use_sel = !uv_sync_ && edit_mode_ && g && g->id == edit_obj_ && std::find(face_sel_.begin(), face_sel_.end(), 1) != face_sel_.end();  // syncing: every face shows
   auto shown = [&](size_t f) { return !use_sel || (f < face_sel_.size() && face_sel_[f]); };
   std::vector<float> stretch;
   if (uv_stretch_) stretch = uvops::face_area_stretch(m);
@@ -234,6 +236,22 @@ void Editor::draw_uv_editor(const Recti &r) {
     }
     return best;
   };
+  /* The face whose UV polygon contains a screen point (the last drawn, i.e. on top). */
+  auto face_under = [&](float mx, float my) {
+    const Vec2 p = to_uv(mx, my);
+    int hit = -1;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (!shown(f)) continue;
+      bool in_poly = false;
+      const uint32_t b0 = m.face_offsets[f], n = m.face_size(f);
+      for (uint32_t i = 0, j = n - 1; i < n; j = i++) {
+        const Vec2 a = m.uvs[b0 + i], c2 = m.uvs[b0 + j];
+        if ((a.y > p.y) != (c2.y > p.y) && p.x < (c2.x - a.x) * (p.y - a.y) / (c2.y - a.y) + a.x) in_poly = !in_poly;
+      }
+      if (in_poly) hit = (int)f;
+    }
+    return hit;
+  };
   /* Sticky selection: corners of the same vertex at the same UV move together. */
   auto select_shared = [&](uint32_t c, uint8_t value) {
     uint32_t v = m.corner_verts[c];
@@ -248,11 +266,23 @@ void Editor::draw_uv_editor(const Recti &r) {
       uv_press_y_ = in.my;
       int c = nearest_corner((float)in.mx, (float)in.my);
       bool on_sel = c >= 0 && uv_sel_[c];
+      const int under = uv_select_mode_ ? face_under((float)in.mx, (float)in.my) : -1;
+      if (under >= 0) {
+        /* Face / Island mode: inside a selected face grabs the selection; an unselected one is picked first. */
+        bool all = true;
+        for (uint32_t k = m.face_offsets[(size_t)under]; k < m.face_offsets[(size_t)under + 1]; k++) all = all && uv_sel_[k];
+        if (all) on_sel = true;
+        else if (tool_ == Tool::Move && !in.shift() && !in.ctrl()) {
+          uv_select(uv_select_mode_ == 2 ? "island" : "face", under);
+          on_sel = true;
+        }
+        if (c < 0) c = (int)m.face_offsets[(size_t)under];
+      }
       bool any_sel = std::find(uv_sel_.begin(), uv_sel_.end(), 1) != uv_sel_.end();
       UvDrag mode = UvDrag::Box;
       if (tool_ == Tool::Move && on_sel) mode = UvDrag::Move;
       else if ((tool_ == Tool::Rotate || tool_ == Tool::Scale) && any_sel) mode = tool_ == Tool::Rotate ? UvDrag::Rotate : UvDrag::Scale;
-      else if (tool_ == Tool::Move && c >= 0 && !in.shift() && !in.ctrl()) {
+      else if (tool_ == Tool::Move && c >= 0 && !in.shift() && !in.ctrl() && uv_select_mode_ == 0) {
         /* Click-drag an unselected vertex: select it and move straight away. */
         std::fill(uv_sel_.begin(), uv_sel_.end(), 0);
         select_shared((uint32_t)c, 1);
@@ -287,7 +317,7 @@ void Editor::draw_uv_editor(const Recti &r) {
       if (!in.down[0]) {
         bool add = in.shift() || in.ctrl();
         if (!add) std::fill(uv_sel_.begin(), uv_sel_.end(), 0);
-        if (moved) {
+        if (moved && uv_select_mode_ == 0) {
           for (size_t f = 0; f < m.face_count(); f++) {
             if (!shown(f)) continue;
             for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
@@ -296,10 +326,44 @@ void Editor::draw_uv_editor(const Recti &r) {
             }
           }
         }
+        else if (moved) {
+          /* Faces (or their islands) whose centre is in the box. */
+          for (size_t f = 0; f < m.face_count(); f++) {
+            if (!shown(f)) continue;
+            Vec2 cen(0, 0);
+            for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) cen += m.uvs[c];
+            const Vec2 p = to_screen(cen / (float)m.face_size(f));
+            if (box.contains((int)p.x, (int)p.y)) {
+              if (uv_select_mode_ == 2) {
+                std::vector<uint8_t> keep = uv_sel_;
+                uv_select("island", (int)f);
+                for (size_t k = 0; k < keep.size() && k < uv_sel_.size(); k++) uv_sel_[k] |= keep[k];
+              }
+              else
+                for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) uv_sel_[c] = 1;
+            }
+          }
+        }
+        else if (uv_select_mode_ != 0) {
+          const int f = face_under((float)in.mx, (float)in.my);
+          if (f >= 0) {
+            bool was = true;
+            for (uint32_t k = m.face_offsets[(size_t)f]; k < m.face_offsets[(size_t)f + 1]; k++) was = was && uv_sel_[k];
+            std::vector<uint8_t> keep = uv_sel_;
+            uv_select(uv_select_mode_ == 2 ? "island" : "face", f);
+            if (add) {
+              std::vector<uint8_t> picked = uv_sel_;
+              uv_sel_ = keep;
+              for (size_t k = 0; k < picked.size(); k++)
+                if (picked[k]) uv_sel_[k] = was ? 0 : 1;  // Shift toggles
+            }
+          }
+        }
         else {
           int c = nearest_corner((float)in.mx, (float)in.my);
           if (c >= 0) select_shared((uint32_t)c, add ? !uv_sel_[c] : 1);
         }
+        uv_sync_to_faces(m);
         uv_drag_ = UvDrag::None;
       }
       break;
@@ -362,6 +426,16 @@ void Editor::draw_uv_editor(const Recti &r) {
       uv_zoom_ = 1.0f;
       uv_pan_ = Vec2(0, 0);
     }
+    /* Arrows nudge the selection by 1/64 (Shift: 1/8), like Blender's UV editor with snapping. */
+    const float step = in.shift() ? 0.125f : 1.0f / 64.0f;
+    if (in.key_pressed[platform::KEY_LEFT]) uv_transform("move", -step, 0);
+    if (in.key_pressed[platform::KEY_RIGHT]) uv_transform("move", step, 0);
+    if (in.key_pressed[platform::KEY_UP]) uv_transform("move", 0, step);
+    if (in.key_pressed[platform::KEY_DOWN]) uv_transform("move", 0, -step);
+    if (in.ctrl() && in.key_pressed[platform::KEY_I]) uv_select("invert");
+    if (in.key_pressed[platform::KEY_1] && !in.ctrl()) uv_select_mode_ = 0;
+    if (in.key_pressed[platform::KEY_2] && !in.ctrl()) uv_select_mode_ = 1;
+    if (in.key_pressed[platform::KEY_3] && !in.ctrl()) uv_select_mode_ = 2;
   }
   /* Island count only changes with the mesh: cache it by mesh + version. */
   static const Mesh *islands_mesh = nullptr;
@@ -375,10 +449,188 @@ void Editor::draw_uv_editor(const Recti &r) {
   }
   size_t nsel = std::count(uv_sel_.begin(), uv_sel_.end(), 1);
   u.label({view.x + u.px(8), view.bottom() - u.row_h() - u.px(4), view.w, u.row_h()},
-          strprintf("%s  |  %zu faces  |  %d UV islands  |  %zu corners selected  |  W/E/R tools, MMB pan, wheel zoom, L linked, U unwrap",
+          strprintf("%s  |  %zu faces  |  %d UV islands  |  %zu corners selected  |  1/2/3 vertex/face/island, W/E/R tools, arrows nudge, L linked, U unwrap",
                     g ? g->name.c_str() : "", m.face_count(), islands, nsel),
           u.theme.text_dim);
   u.canvas.pop_clip();
+}
+
+/* ---------------------------------------------------- selection and transforms */
+
+/* UV Sync Selection (Edit Mode): faces whose corners are all selected in UV are the selected faces. */
+void Editor::uv_sync_to_faces(const Mesh &m) {
+  if (!uv_sync_ || !edit_mode_ || !edit_object() || &m != edit_mesh_ptr()->get() || uv_sel_.size() != m.corner_count()) return;
+  if (uv_select_mode_ == 0) return;  // vertex picks don't decide faces
+  face_sel_.assign(m.face_count(), 0);
+  for (size_t f = 0; f < m.face_count(); f++) {
+    bool all = true;
+    for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) all = all && uv_sel_[k];
+    face_sel_[f] = all;
+  }
+  /* Keep the UV view showing every face (not only the selected ones) while syncing. */
+  sync_vert_face_selection(true);
+}
+
+bool Editor::uv_select(const std::string &what, int face) {
+  MeshPtr *mp = uv_target(nullptr);
+  if (!mp || !*mp || !(*mp)->has_uvs()) return false;
+  const Mesh &m = **mp;
+  if (uv_sel_.size() != m.corner_count()) uv_sel_.assign(m.corner_count(), 0);
+  auto face_corners = [&](size_t f, uint8_t v) {
+    for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) uv_sel_[k] = v;
+  };
+  if (what == "all") std::fill(uv_sel_.begin(), uv_sel_.end(), 1);
+  else if (what == "none") std::fill(uv_sel_.begin(), uv_sel_.end(), 0);
+  else if (what == "invert")
+    for (uint8_t &v : uv_sel_) v = !v;
+  else if (what == "face") {
+    if (face < 0 || (size_t)face >= m.face_count()) return false;
+    std::fill(uv_sel_.begin(), uv_sel_.end(), 0);
+    face_corners((size_t)face, 1);
+  }
+  else if (what == "island" || what == "islands") {
+    std::vector<int> fi;
+    uvops::compute_islands(m, nullptr, false, fi);
+    std::vector<uint8_t> want(fi.empty() ? 0 : (size_t)*std::max_element(fi.begin(), fi.end()) + 1, 0);
+    if (what == "island") {
+      if (face < 0 || (size_t)face >= m.face_count()) return false;
+      want[(size_t)fi[(size_t)face]] = 1;
+      std::fill(uv_sel_.begin(), uv_sel_.end(), 0);
+    }
+    else  // grow: every island with anything selected
+      for (size_t f = 0; f < m.face_count(); f++)
+        for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++)
+          if (uv_sel_[k]) want[(size_t)fi[f]] = 1;
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (want[(size_t)fi[f]]) face_corners(f, 1);
+  }
+  else return false;
+  uv_sync_to_faces(m);
+  return true;
+}
+
+/* Transforms of the selected UV corners about the selection's bounds centre. */
+bool Editor::uv_transform(const std::string &op, float a, float b) {
+  MeshPtr *mp = uv_target(nullptr);
+  if (!mp || !*mp || !(*mp)->has_uvs()) return false;
+  Mesh &m = *mesh_make_mutable(*mp);
+  if (uv_sel_.size() != m.corner_count()) return false;
+  Vec2 lo(1e30f, 1e30f), hi(-1e30f, -1e30f);
+  size_t n = 0;
+  for (size_t k = 0; k < uv_sel_.size(); k++)
+    if (uv_sel_[k]) {
+      lo = Vec2(std::min(lo.x, m.uvs[k].x), std::min(lo.y, m.uvs[k].y));
+      hi = Vec2(std::max(hi.x, m.uvs[k].x), std::max(hi.y, m.uvs[k].y));
+      n++;
+    }
+  if (!n) {
+    Log::warn("UV: select something first (1 / 2 / 3: vertices, faces, islands)");
+    return false;
+  }
+  const Vec2 c = (lo + hi) * 0.5f, size = hi - lo;
+  auto apply = [&](const std::function<Vec2(Vec2)> &fn) {
+    for (size_t k = 0; k < uv_sel_.size(); k++)
+      if (uv_sel_[k]) m.uvs[k] = fn(m.uvs[k]);
+  };
+  if (op == "rotate") {
+    const float r = a * kDeg2Rad, cs = std::cos(r), sn = std::sin(r);
+    apply([&](Vec2 t) {
+      const Vec2 d = t - c;
+      return c + Vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+    });
+  }
+  else if (op == "scale") {
+    const float sx = a, sy = b != 0.0f ? b : a;
+    apply([&](Vec2 t) { return c + Vec2((t.x - c.x) * sx, (t.y - c.y) * sy); });
+  }
+  else if (op == "move") apply([&](Vec2 t) { return t + Vec2(a, b); });
+  else if (op == "flip_u") apply([&](Vec2 t) { return Vec2(2.0f * c.x - t.x, t.y); });
+  else if (op == "flip_v") apply([&](Vec2 t) { return Vec2(t.x, 2.0f * c.y - t.y); });
+  else if (op == "center") apply([&](Vec2 t) { return t + Vec2(0.5f, 0.5f) - c; });
+  else if (op == "fit") {
+    /* Into the 0-1 square, keeping its proportions. */
+    const float k = 1.0f / std::max(1e-6f, std::max(size.x, size.y));
+    apply([&](Vec2 t) { return Vec2(0.5f, 0.5f) + (t - c) * k; });
+  }
+  else if (op == "align_left") apply([&](Vec2 t) { return Vec2(lo.x, t.y); });
+  else if (op == "align_right") apply([&](Vec2 t) { return Vec2(hi.x, t.y); });
+  else if (op == "align_top") apply([&](Vec2 t) { return Vec2(t.x, hi.y); });
+  else if (op == "align_bottom") apply([&](Vec2 t) { return Vec2(t.x, lo.y); });
+  else if (op == "align_u") apply([&](Vec2 t) { return Vec2(c.x, t.y); });   // a straight vertical line
+  else if (op == "align_v") apply([&](Vec2 t) { return Vec2(t.x, c.y); });   // a straight horizontal line
+  else return false;
+  m.touch();
+  mark_changed("UV " + op);
+  return true;
+}
+
+/* The second toolbar row: selection mode and sync, selection, quick transforms. */
+void Editor::draw_uv_tool_row(const Recti &bar) {
+  auto &u = ui_;
+  u.canvas.fill_rect(bar, Color::hex(0x2A2A2A));
+  int x = bar.x + u.px(6);
+  const int y = bar.y + u.px(3), h = bar.h - u.px(6);
+  static const char *kModes[] = {"Vertex", "Face", "Island"};
+  for (int k = 0; k < 3; k++) {
+    const int w = u.font.text_width(kModes[k]) + u.px(14);
+    if (u.button({x, y, w, h}, kModes[k], uv_select_mode_ == k)) uv_select_mode_ = k;
+    u.tooltip(k == 0 ? "Pick UV vertices (1)." : k == 1 ? "Pick whole faces: click inside one, box by centre (2)." : "Pick whole islands: click any face of one; drag to move it (3).");
+    x += w + u.px(2);
+  }
+  {
+    const int w = u.font.text_width("Sync") + u.px(14);
+    if (u.button({x + u.px(4), y, w, h}, "Sync", uv_sync_)) uv_sync_ = !uv_sync_;
+    u.tooltip("Faces picked here are selected in Edit Mode too (Blender: UV Sync Selection).");
+    x += w + u.px(10);
+  }
+  struct B {
+    const char *label;
+    std::function<void()> fn;
+    const char *tip;
+  };
+  const B buttons[] = {
+      {"All", [this] { uv_select("all"); }, "Select everything (Ctrl+A)."},
+      {"None", [this] { uv_select("none"); }, "Deselect (Ctrl+Shift+A)."},
+      {"Invert", [this] { uv_select("invert"); }, "Invert the selection (Ctrl+I)."},
+      {"Islands", [this] { uv_select("islands"); }, "Grow the selection to whole islands (Blender: Select Linked)."},
+      {"-90", [this] { uv_transform("rotate", -90); }, "Rotate the selection 90 degrees clockwise."},
+      {"+90", [this] { uv_transform("rotate", 90); }, "Rotate the selection 90 degrees counter-clockwise."},
+      {"Flip U", [this] { uv_transform("flip_u"); }, "Mirror the selection left to right."},
+      {"Flip V", [this] { uv_transform("flip_v"); }, "Mirror the selection top to bottom."},
+      {"Fit", [this] { uv_transform("fit"); }, "Scale the selection to fill the 0-1 square (keeps its proportions)."},
+      {"Center", [this] { uv_transform("center"); }, "Move the selection to the middle of the 0-1 square."},
+  };
+  for (const B &b : buttons) {
+    const int w = u.font.text_width(b.label) + u.px(12);
+    if (x + w > bar.right() - u.px(330)) break;
+    if (u.button({x, y, w, h}, b.label)) b.fn();
+    u.tooltip(b.tip);
+    x += w + u.px(2);
+  }
+  /* Align: one dropdown instead of six buttons. */
+  if (x + u.px(84) <= bar.right() - u.px(330)) {
+    static const char *kAlign[] = {"Align...", "Left", "Right", "Top", "Bottom", "Straight U", "Straight V"};
+    static const char *kOps[] = {"", "align_left", "align_right", "align_top", "align_bottom", "align_u", "align_v"};
+    int pick = 0;
+    if (u.combo(u.id("uv_align"), {x, y, u.px(80), h}, pick, kAlign, 7) && pick > 0) uv_transform(kOps[pick]);
+    u.tooltip("Line the selected UVs up on an edge of their bounds, or straighten them into one vertical / horizontal line.");
+  }
+  /* Exact values: rotate by, scale by, move by. */
+  int rx = bar.right() - u.px(326);
+  auto num = [&](const char *id, float &v, float speed, const char *tip) {
+    u.float_field(u.id(id), {rx, y, u.px(46), h}, v, speed, -10000.0f, 10000.0f, "%.3g");
+    u.tooltip(tip);
+    rx += u.px(48);
+  };
+  num("uv_rot", uv_rot_field_, 1.0f, "Angle (degrees) for Rotate.");
+  if (u.button({rx, y, u.px(50), h}, "Rotate")) uv_transform("rotate", uv_rot_field_);
+  rx += u.px(54);
+  num("uv_scl", uv_scale_field_, 0.01f, "Factor for Scale.");
+  if (u.button({rx, y, u.px(44), h}, "Scale")) uv_transform("scale", uv_scale_field_);
+  rx += u.px(48);
+  num("uv_mu", uv_move_u_, 0.005f, "U offset for Move.");
+  num("uv_mv", uv_move_v_, 0.005f, "V offset for Move.");
+  if (u.button({rx, y, u.px(40), h}, "Move")) uv_transform("move", uv_move_u_, uv_move_v_);
 }
 
 }  // namespace bl

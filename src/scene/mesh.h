@@ -383,6 +383,16 @@ void merge_verts(Mesh &m, uint32_t keep, uint32_t drop);  // drop becomes keep e
 size_t shallow_edges(const Mesh &m, float angle_deg);
 /* Blender: Shade Auto Smooth - smooth shading, hard where faces meet at more than angle_deg. */
 void shade_auto_smooth(Mesh &m, float angle_deg = 30.0f);
+/* Z-fighting: faces in one plane covering the same area, with how much of each is covered and
+ * which can go (a duplicate: one; back to back: both, an inner wall; one hidden under the other: it).
+ * group (optional, per face): faces with the same negative group are not compared to each other. */
+struct ZFightPair {
+  uint32_t a = 0, b = 0;
+  float area = 0, covered_a = 0, covered_b = 0;
+  bool same_direction = true, identical = false;
+  bool remove_a = false, remove_b = false;
+};
+std::vector<ZFightPair> zfight_pairs(const Mesh &m, float plane_dist = 0.0f, const std::vector<int> *group = nullptr);
 /* The face's area-weighted centre (Plasticity's face centre snap), not the average of its corners. */
 Vec3 face_area_center(const Mesh &m, size_t f);
 /* A closed shape drawn across several coplanar faces: cut into all of them. inner_faces gets the

@@ -162,6 +162,7 @@ void Editor::init_headless(int width, int height) {
   scene_ = std::make_unique<Scene>();
   build_default_scene(*scene_);
   stable_ = scene_->clone();
+  rebuild_keymap();  // headless runs don't read the preferences: the default (Unity) keymap
 }
 
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
@@ -552,6 +553,7 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Blender Transform Keys (R rotate, S scale, T Scale tool)", nullptr, blender_keys_)) {
       blender_keys_ = !blender_keys_;
+      rebuild_keymap();
       save_prefs();
     }
     u.tooltip("G always grabs (move with the mouse, X / Y / Z to lock an axis).\n"
@@ -666,11 +668,12 @@ void Editor::draw_menubar(const Recti &r) {
         if (u.menu_item(strprintf("%s Select Mode", kModes[k]), k == 0 ? "1" : k == 1 ? "2" : "3", (int)elem_ == k))
           set_edit_element((EditElement)k);
       u.menu_separator();
-      for (const EditOpInfo &op : edit_op_table())
-        if (op.elements != 7 && edit_op_available(op.op) && u.menu_item(op.label, op.keys[0] ? op.keys : nullptr)) edit_tool(op.op);
-      u.menu_separator();
-      for (const EditOpInfo &op : edit_op_table())
-        if (op.elements == 7 && u.menu_item(op.label, op.keys[0] ? op.keys : nullptr)) edit_tool(op.op);
+      for (int gi = 0; gi < kEditGroupCount; gi++)
+        u.submenu(kEditGroups[gi], u.px(260), [this, gi] {
+          auto &u = ui_;
+          for (const EditOpInfo &op : edit_op_table())
+            if (edit_op_group(op.op) == gi && edit_op_available(op.op) && u.menu_item(op.label, op.keys[0] ? op.keys : nullptr)) edit_tool(op.op);
+        });
       if (u.menu_item("Select All", "Ctrl+A")) edit_select_all(true);
       if (elem_ == EditElement::Face && u.menu_item("Auto Fuse on Contact", nullptr, auto_fuse_)) auto_fuse_ = !auto_fuse_;
       if (u.menu_item("Proportional Editing", "O", proportional_)) proportional_ = !proportional_;
@@ -906,133 +909,6 @@ void Editor::draw_statusbar(const Recti &r) {
 /* ===================================================================== */
 /* Shortcuts & drag-and-drop                                              */
 /* ===================================================================== */
-
-void Editor::handle_shortcuts() {
-  auto &in = ui_.in;
-  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active) return;  // a running Push/Pull, Inset or Bevel takes the keys
-  auto P = [&](int k) { return in.key_pressed[k]; };
-  bool ctrl = in.ctrl(), shift = in.shift(), alt = in.alt();
-  if (ctrl) {
-    if (P(KEY_S)) save_scene_cmd(shift);
-    if (P(KEY_N) && !shift) new_scene();
-    if (P(KEY_N) && shift) create_object("Empty");
-    if (P(KEY_O)) open_scene_dialog();
-    if (P(KEY_J) && !edit_mode_) join_selected();  // Blender: Object > Join
-    if (P(KEY_Z) && !shift) undo();
-    if (P(KEY_Y) || (P(KEY_Z) && shift)) redo();
-    if (P(KEY_D)) {
-      if (edit_mode_) edit_tool("duplicate");  // Edit Mode: the selected faces (Unity's Ctrl+D, Blender's Shift+D)
-      else duplicate_selected();
-    }
-    if (P(KEY_R)) {
-      /* In Edit Mode over the Scene view Ctrl+R is Blender's Loop Cut;
-       * elsewhere it keeps Unity's meaning (refresh assets). */
-      if (edit_mode_ && scene_hovered_) {
-        if (edit_op_available("loopcut")) edit_loop_cut_at(scene_rect_, in.mx, in.my);
-        else edit_tool("loopcut");  // explains that it is an edge operation
-      }
-      else { project_listed_ = -100; papers_listed_ = -100; }
-    }
-    if (P(KEY_P)) {
-      if (shift) paused_ = !paused_;
-      else if (alt) step_requested_ = true;
-      else if (playing_) exit_play();
-      else enter_play();
-    }
-    if (P(KEY_A)) {
-      if (edit_mode_) edit_select_all(!shift);
-      else if (shift) clear_selection();
-      else {
-        selection_.clear();
-        scene_->for_each([&](GameObject &g) { selection_.push_back(g.id); });
-      }
-    }
-    if (P(KEY_E) && edit_mode_) extrude_and_move();  // Blender's E: extrude, then move along the normal
-    if (P(KEY_I) && edit_mode_ && !shift) modal_begin("inset");  // drag to adjust, like Blender's I
-    if (P(KEY_B) && edit_mode_) {
-      if (shift) edit_tool("bridge");
-      else modal_begin("bevel");  // drag to adjust, wheel for segments (Blender's Ctrl+B)
-    }
-    if (P(KEY_X) && edit_mode_ && !shift)  /* Blender's Ctrl+X dissolves what the mode selects */
-      edit_tool(elem_ == EditElement::Vertex ? "dissolve_vertices" : elem_ == EditElement::Edge ? "dissolve" : "dissolve_faces");
-    if (P(KEY_T) && edit_mode_) edit_tool("triangulate_faces");
-    if (P(KEY_L) && edit_mode_) edit_tool("select_linked");
-    if (P(KEY_I) && edit_mode_ && shift) edit_tool("select_invert");
-    if (P(KEY_EQUALS) && edit_mode_) edit_tool("select_more");
-    if (P(KEY_MINUS) && edit_mode_) edit_tool("select_less");
-    if (P(KEY_F) && alt) {
-      for (GameObject *g : selected_objects(true)) g->set_world_position(cam_.pivot);
-      mark_changed("Move To View");
-    }
-    const WindowKind wk[] = {WindowKind::Scene, WindowKind::Game, WindowKind::Inspector, WindowKind::Hierarchy,
-                             WindowKind::Project, WindowKind::Console, WindowKind::Profiler, WindowKind::Research, WindowKind::UVEditor};
-    for (int k = 0; k < 9; k++)
-      if (P(KEY_1 + k)) dock_open(wk[k]);
-    return;
-  }
-  if (P(KEY_F1)) dock_open(WindowKind::Learn);
-  if (P(KEY_F12)) {
-    if (shift) screenshot_dialog();
-    else start_final_render();  // Blender: F12 = Render Image
-  }
-  if (P(KEY_F11)) dock_open(WindowKind::Render);
-  if (P(KEY_F9) && edit_mode_) {
-    if (last_op_hidden_) {
-      last_op_hidden_ = false;
-      last_op_open_ = true;
-    }
-    else last_op_open_ = !last_op_open_;
-  }
-  if (alt && shift && P(KEY_N)) create_object("Empty", true);
-  bool scene_ctx = focused_ == WindowKind::Scene || focused_ == WindowKind::Hierarchy || scene_hovered_;
-  if (!scene_ctx) return;
-  if (drag_ != Drag::Fly && !in.down[1]) {
-    if (P(KEY_Q)) tool_ = Tool::View;
-    if (P(KEY_W)) tool_ = Tool::Move;
-    if (P(KEY_E)) tool_ = Tool::Rotate;
-    if (P(KEY_R) && !alt) {
-      if (blender_keys_) transform_begin(1);  // Blender: R rotates (the Scale tool is on T)
-      else tool_ = Tool::Scale;
-    }
-    if (P(KEY_T) && blender_keys_) tool_ = Tool::Scale;
-    if (P(KEY_G) && !alt && !shift) transform_begin(0);  // Blender's grab: no Unity key to clash with
-    if (P(KEY_S) && blender_keys_ && !alt) transform_begin(2);
-    if (P(KEY_Y)) tool_ = Tool::Transform;
-    if (P(KEY_P) && !alt && edit_mode_) edit_tool("push_pull");  // SketchUp: P (a face operation)
-    if (P(KEY_F) && !(alt && edit_mode_)) frame_selected();
-    if (P(KEY_TAB)) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
-    if (P(KEY_ESCAPE) && edit_mode_) last_op_hidden_ = true;  // Esc puts the Adjust Last Operation panel away
-    if (P(KEY_ESCAPE) && origin_edit_) origin_edit_ = false;  // done editing the origin
-    if (P(KEY_DELETE) || (P(KEY_BACKSPACE) && focused_ != WindowKind::Hierarchy)) {
-      if (edit_mode_) edit_op("delete");
-      else delete_selected();
-    }
-    if (P(KEY_F2) && active_) {
-      rename_id_ = active_;
-      if (GameObject *g = scene_->find(active_)) rename_buf_ = g->name;
-    }
-    if (edit_mode_) {
-      if (P(KEY_1)) set_edit_element(EditElement::Vertex);
-      if (P(KEY_2)) set_edit_element(EditElement::Edge);
-      if (P(KEY_3)) set_edit_element(EditElement::Face);
-      if (P(KEY_O) && !alt) proportional_ = !proportional_;
-      if (P(KEY_F) && alt) edit_tool("fill");
-      if (P(KEY_M) && alt) edit_tool("merge_center");
-      if (P(KEY_N) && shift && !alt) edit_tool("recalc_normals");
-      if (P(KEY_P) && alt) edit_tool("push_through");
-      if (P(KEY_J) && !alt) edit_tool("connect");
-      if (P(KEY_D) && shift && !alt) edit_tool("duplicate");          // Blender: Shift+D
-      if (P(KEY_L) && !alt && scene_hovered_) {  // Blender: L picks what is under the mouse and everything linked to it
-        edit_pick(scene_rect_, in.mx, in.my, shift ? SEL_TOGGLE : SEL_ADD);
-        edit_tool("select_linked");
-      }
-      if (P(KEY_J) && alt) edit_tool("tris_to_quads");                  // Blender: Alt+J
-      if (P(KEY_K) && !alt && !shift) edit_tool("knife");  // Blender: K (SketchUp: L, the Line tool)
-      if (P(KEY_S) && alt) edit_tool(shift ? "to_sphere" : "shrink_fatten");  // Blender: Alt+S / Shift+Alt+S
-      if (P(KEY_I) && !alt) modal_begin("inset");  // Blender's I (Ctrl+I works too)
-    }
-  }
-}
 
 void Editor::handle_drop() {
   if (ui_.in.dropped.empty()) return;
@@ -2358,6 +2234,7 @@ void Editor::run_console_command(const std::string &line) {
     /* drawmode rect <corner|center|3point>, drawmode circle <center|2point|3point>, drawmode square <on|off> */
     const std::string s = to_lower(arg(1, "")), v = to_lower(arg(2, ""));
     if (s == "square") draw_uniform_ = v != "off";
+    else if (s == "axes") draw_global_axes_ = v == "global" || v == "world";
     else if (s == "facecenter") draw_face_center_ = v != "off";
     else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
     else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
@@ -2484,6 +2361,49 @@ void Editor::run_console_command(const std::string &line) {
     /* autosmooth on|off [angle]: Auto Smooth for new curved surfaces */
     auto_smooth_ = to_lower(arg(1, "on")) != "off";
     if (t.size() > 2) auto_smooth_angle_ = std::max(1.0f, std::min(180.0f, (float)std::atof(t[2].c_str())));
+  }
+  else if (c == "set_extrude_individual") extrude_individual_ = arg(1, "1") == "1";
+  else if (c == "duplicate") duplicate_selected();
+  else if (c == "uvsel") {
+    /* uvsel all|none|invert|islands | uvsel face <f> | uvsel island <f> | uvsel mode vertex|face|island */
+    const std::string w = to_lower(arg(1, "all"));
+    if (w == "mode") {
+      const std::string md = to_lower(arg(2, "vertex"));
+      uv_select_mode_ = md == "face" ? 1 : md == "island" ? 2 : 0;
+    }
+    else uv_select(w, std::atoi(arg(2, "-1").c_str()));
+  }
+  else if (c == "uvxf") {
+    /* uvxf rotate <deg> | scale <k> [ky] | move <du> <dv> | flip_u | flip_v | fit | center | align_left ... */
+    uv_transform(to_lower(arg(1, "")), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
+  }
+  else if (c == "zfight") {
+    /* zfight [scene] | zfight fix [index] */
+    if (to_lower(arg(1, "")) == "fix") zfight_fix(t.size() > 2 ? std::atoi(t[2].c_str()) : -1);
+    else zfight_scan(to_lower(arg(1, "")) == "scene");
+  }
+  else if (c == "keymap") {
+    /* keymap <Unity|Blender|Maya|3ds Max|SketchUp> | keymap bind <action> <chord>[|<chord>] | keymap clear <action> */
+    const std::string sub = to_lower(arg(1, ""));
+    if (sub == "bind" && t.size() >= 4) {
+      std::vector<KeyChord> chords;
+      std::string spec = t[3];
+      size_t p = 0;
+      while (p <= spec.size()) {
+        size_t q = spec.find('|', p);
+        if (q == std::string::npos) q = spec.size();
+        const KeyChord ch = parse_chord(spec.substr(p, q - p));
+        if (ch.key) chords.push_back(ch);
+        p = q + 1;
+      }
+      set_binding(t[2], chords);
+    }
+    else if (sub == "clear" && t.size() >= 3) set_binding(t[2], {});
+    else if (!sub.empty()) {
+      const std::string name = line.substr(line.find(' ') + 1);
+      for (const char *pn : kKeymapPresets)
+        if (to_lower(pn) == to_lower(name)) set_keymap_preset(pn);
+    }
   }
   else if (c == "rendersequence") {
     /* rendersequence [folder] | rendersequence stop: every In Sequence camera, each saved */
@@ -2720,7 +2640,7 @@ void Editor::draw_dialogs() {
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
-  int w = u.px(dialog_ == Dialog::About ? 460 : dialog_ == Dialog::Preferences ? 600 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : dialog_ == Dialog::Preferences ? 640 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -2835,6 +2755,7 @@ void Editor::draw_dialogs() {
         u.label({r3.x + u.px(12), r3.y, u.px(140), r3.h}, "Rotate snap");
         u.float_field(u.id("pref_rsnap"), {r3.x + u.px(160), r3.y + u.px(2), u.px(80), r3.h - u.px(4)}, snap_rot_, 0.5f, 0.1f, 180.0f, "%.3g");
         draw_performance_settings(nullptr);
+        draw_keymap_settings();
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -2851,7 +2772,9 @@ void Editor::draw_dialogs() {
 
 void Editor::load_prefs() {
   std::string text;
+  rebuild_keymap();
   if (!fs::read_file(prefs_path_, text)) return;
+  std::string keymap_text;
   std::istringstream is(text);
   std::string line;
   while (std::getline(is, line)) {
@@ -2872,6 +2795,9 @@ void Editor::load_prefs() {
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str())));
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "auto_smooth") auto_smooth_ = v == "1";
+    else if (k == "draw_axes") draw_global_axes_ = v == "global";
+    else if (k == "keymap_preset" && !v.empty()) keymap_preset_ = v;
+    else if (k == "keymap") keymap_text = v;
     else if (k == "auto_smooth_angle") auto_smooth_angle_ = std::max(1.0f, std::min(180.0f, (float)std::atof(v.c_str())));
     else if (k == "render_devices_off") {
       render_devices_off_.clear();
@@ -2884,6 +2810,7 @@ void Editor::load_prefs() {
       }
     }
   }
+  parse_keymap_overrides(keymap_text);  // also builds the keymap from the preset
 }
 
 void Editor::save_prefs() {
@@ -2893,10 +2820,12 @@ void Editor::save_prefs() {
   std::string off;
   for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
-                            "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\nauto_smooth=%d\nauto_smooth_angle=%g\n",
+                            "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\nauto_smooth=%d\nauto_smooth_angle=%g\n"
+                            "keymap_preset=%s\nkeymap=%s\ndraw_axes=%s\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
                             show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0, max_fps_,
-                            always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_);
+                            always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
+                            keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local");
   fs::write_file(prefs_path_, s);
 }
 

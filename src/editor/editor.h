@@ -33,6 +33,28 @@
 
 namespace bl {
 
+/* A key with modifiers (platform::Mod bits): one binding of a shortcut. */
+struct KeyChord {
+  int key = 0;
+  int mods = 0;
+  bool operator==(const KeyChord &o) const { return key == o.key && mods == o.mods; }
+};
+struct ShortcutAction {
+  const char *id;
+  const char *label;
+  const char *category;
+  int context;  // 0 anywhere, 1 Edit Mode, 2 the Scene view, 3 the Scene view in Edit Mode
+};
+using Keymap = std::unordered_map<std::string, std::vector<KeyChord>>;
+const std::vector<ShortcutAction> &shortcut_actions();
+constexpr int kKeymapPresetCount = 5;
+extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Blender, Maya, 3ds Max, SketchUp
+Keymap keymap_preset(const std::string &name, bool blender_transform_keys = false);
+std::string chord_text(const KeyChord &c);
+KeyChord parse_chord(const std::string &text);
+/* Other actions bound to chord c in a context that overlaps action id's. */
+std::vector<std::string> keymap_conflicts(const Keymap &k, const std::string &id, const KeyChord &c);
+
 constexpr int kDrawShapeCount = 6;
 extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyline, Rectangle, Circle, Arc, Polygon, Guide
 extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
@@ -52,6 +74,15 @@ struct EditOpInfo {
 };
 const std::vector<EditOpInfo> &edit_op_table();
 const EditOpInfo *find_edit_op(const std::string &op);
+/* The tool groups the Edit Mode tools are laid out in (Select first), and an operator's group. */
+constexpr int kEditGroupCount = 7;
+extern const char *const kEditGroups[kEditGroupCount];
+int edit_op_group(const std::string &op);
+/* Operators shown as the two halves of one button: {first, second, short first label, short second label, row label}. */
+struct EditOpPair {
+  const char *a, *b, *label_a, *label_b, *label;
+};
+const std::vector<EditOpPair> &edit_op_pairs();
 constexpr int kOriginModeCount = 9;
 extern const char *const kOriginModes[kOriginModeCount];
 /* Scene view draw modes. Unity: Shaded / Wireframe / Shaded Wireframe.
@@ -142,6 +173,9 @@ class Editor {
   GameObject *selected_object() const { return active_object(); }
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
+  uint64_t render_hash_for_test() { return scene_render_hash(); }
+  bool in_edit_mode() const { return edit_mode_; }
+  bool edit_face_selected(size_t f) const { return f < face_sel_.size() && face_sel_[f]; }
 
  private:
   friend struct InspectorReflector;
@@ -350,6 +384,27 @@ class Editor {
   };
   ModalTransform xf_;
   bool blender_keys_ = false;  // preference: R / S start rotate / scale (the Scale tool moves to T)
+  /* ---- Keymap (keymap.cpp; Preferences > Keymap) ---- */
+  std::string keymap_preset_ = "Unity";
+  Keymap keymap_overrides_;  // the user's own bindings on top of the preset
+  Keymap keymap_;            // what is in force
+  std::string capturing_binding_;  // Preferences: the action waiting for a key press
+  int capturing_slot_ = 0;
+  std::string keymap_search_;
+  void rebuild_keymap();
+  void draw_keymap_settings();
+
+ public:
+  bool run_action(const std::string &id);
+  std::string shortcut_text(const std::string &id) const;
+  void set_binding(const std::string &id, const std::vector<KeyChord> &chords);
+  void set_keymap_preset(const std::string &name);
+  const Keymap &keymap() const { return keymap_; }
+  const std::string &keymap_preset_name() const { return keymap_preset_; }
+  std::string keymap_overrides_text() const;
+  void parse_keymap_overrides(const std::string &text);
+
+ private:
   bool transform_begin(int mode);
   void extrude_and_move();  // Blender's E: extrude, then follow the mouse along the normal
   Mat4 transform_delta(const Recti &view);
@@ -693,6 +748,7 @@ class Editor {
   int draw_rect_mode_ = 0;    // kRectModes: from a corner, from the centre, or 3 points (any angle)
   int draw_circle_mode_ = 0;  // kCircleModes: centre + radius, 2 points across, 3 points on it
   bool draw_uniform_ = false; // rectangles come out square
+  bool draw_global_axes_ = false;  // snap axes: the world's (global) or the face's / object's own (local)
   bool show_guides_ = true;   // construction lines (Scene::guides)
   size_t draw_points_needed() const;
   void draw_guide_line(const Recti &view, const GuideLine &gl, uint32_t color);
@@ -809,10 +865,46 @@ class Editor {
   std::unordered_map<std::string, bool> foldouts_;
   std::string add_component_search_;
   float subdiv_levels_ = 1, smooth_factor_ = 0.5f, extrude_dist_ = 0.5f, inset_amount_ = 0.3f, merge_dist_ = 0.001f;
+  /* ---- Z-fighting check (zfight.cpp) ---- */
+  struct ZFightIssue {
+    uint64_t obj_a = 0, obj_b = 0;
+    uint32_t face_a = 0, face_b = 0;
+    meshops::ZFightPair pair;
+    std::vector<Vec3> outline[2];  // world space, for the overlay
+  };
+  std::vector<ZFightIssue> zfight_;
+  bool zfight_scene_ = false, zfight_show_ = true;
+  std::string zfight_describe(const ZFightIssue &z) const;
+  void zfight_select(int index);
+  void draw_zfight_overlay(const Recti &view);
+  void draw_zfight_panel(ui::Layout &lay);
+
+ public:
+  size_t zfight_scan(bool scene_wide);
+  size_t zfight_fix(int index = -1);  // remove the suggested faces (-1: all)
+  size_t zfight_count() const { return zfight_.size(); }
+
+ private:
+  /* ---- UV editor selection and transforms (uv_editor.cpp) ---- */
+  int uv_select_mode_ = 0;     // 0 vertex, 1 face, 2 island
+  bool uv_sync_ = true;        // UV face selection = Edit Mode face selection (Blender: UV Sync Selection)
+  float uv_rot_field_ = 90.0f, uv_scale_field_ = 2.0f, uv_move_u_ = 0.1f, uv_move_v_ = 0.0f;
+  void uv_sync_to_faces(const Mesh &m);
+  void draw_uv_tool_row(const Recti &bar);
+
+ public:
+  /* The UV editor's selection (all / none / invert / islands / face f / island f) and transforms of it
+   * (rotate deg, scale k, move du dv, flip_u, flip_v, fit, center, align_left|right|top|bottom). */
+  bool uv_select(const std::string &what, int face = -1);
+  bool uv_transform(const std::string &op, float a = 0.0f, float b = 0.0f);
+  size_t uv_selected_corners() const { return (size_t)std::count(uv_sel_.begin(), uv_sel_.end(), 1); }
+
+ private:
   bool auto_smooth_ = true;          // operators that make curved surfaces turn on smooth-by-angle shading
   float auto_smooth_angle_ = 30.0f;  // Blender's Auto Smooth default
   void auto_smooth_after(Mesh *m, size_t shallow_before);
-  bool inset_individual_ = true;  // Blender's Inset > Individual: each face on its own, or the selection as one region
+  bool inset_individual_ = true;
+  bool extrude_individual_ = false;  // Extrude: each face on its own (Blender: Extrude Individual Faces)  // Blender's Inset > Individual: each face on its own, or the selection as one region
   float inset_thickness_ = 0.1f;  // region inset: how far the outline moves in (local units)
   bool draw_face_center_ = false; // centre-based shapes start at the face's centre (Plasticity)
 

@@ -152,6 +152,7 @@ static void modeling_round13_tests();
 static void round13_feature_tests();
 static void round14_tests();
 static void round14_feature_tests();
+static void round15_tests();
 
 int main() {
   register_builtin_components();
@@ -747,6 +748,7 @@ int main() {
   round13_feature_tests();
   round14_tests();
   round14_feature_tests();
+  round15_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -5246,6 +5248,309 @@ static void round14_feature_tests() {
       CHECK(ed.render_camera_name() == "Main Camera");
     }
     set_env("BLENDITY_PROJECT", "");
+  });
+}
+
+/* ===================================================================== */
+/* Round 15: keymaps, draw axes, Z-fighting check, UV tools, light hash  */
+/* ===================================================================== */
+
+static void round15_tests() {
+  auto key = [](int k, int mods = 0) {
+    platform::Event e;
+    e.type = platform::EventType::KeyDown;
+    e.key = k;
+    e.mods = mods;
+    return e;
+  };
+  auto key_up = [](int k) {
+    platform::Event e;
+    e.type = platform::EventType::KeyUp;
+    e.key = k;
+    return e;
+  };
+  auto move = [](int x, int y) {
+    platform::Event e;
+    e.type = platform::EventType::MouseMove;
+    e.x = x;
+    e.y = y;
+    return e;
+  };
+  test("light colour temperature (and every other light setting) re-renders the Camera Preview", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    GameObject *sun = by_name(ed.scene(), "Directional Light");
+    CHECK(sun && sun->get<Light>());
+    if (!sun) return;
+    const uint64_t h0 = ed.render_hash_for_test();
+    sun->get<Light>()->use_temperature = true;
+    const uint64_t h1 = ed.render_hash_for_test();
+    sun->get<Light>()->temperature = 3200.0f;
+    const uint64_t h2 = ed.render_hash_for_test();
+    sun->get<Light>()->spot_angle = 50.0f;
+    const uint64_t h3 = ed.render_hash_for_test();
+    CHECK(h0 != h1 && h1 != h2 && h2 != h3);
+  });
+  test("keymap: presets lay shortcuts out like Unity, Blender, Maya, 3ds Max and SketchUp", [&] {
+    auto bound = [](const Keymap &k, const char *id, const char *chord) {
+      auto it = k.find(id);
+      const KeyChord c = parse_chord(chord);
+      return it != k.end() && std::find(it->second.begin(), it->second.end(), c) != it->second.end();
+    };
+    const Keymap unity = keymap_preset("Unity"), blender = keymap_preset("Blender"), maya = keymap_preset("Maya"), max = keymap_preset("3ds Max"),
+                 su = keymap_preset("SketchUp");
+    CHECK(bound(unity, "tool.move", "W") && bound(unity, "tool.scale", "R") && bound(unity, "edit.undo", "Ctrl+Z") && bound(unity, "view.frame", "F"));
+    CHECK(bound(blender, "transform.grab", "G") && bound(blender, "transform.rotate", "R") && bound(blender, "transform.scale", "S") &&
+          bound(blender, "mesh.extrude", "E") && bound(blender, "edit.delete", "X") && bound(blender, "mesh.merge_center", "M"));
+    CHECK(bound(maya, "mode.edit_toggle", "F8") && bound(maya, "mode.vertex", "F9") && bound(maya, "mode.face", "F11") &&
+          bound(maya, "mesh.proportional", "B") && bound(maya, "edit.redo", "Shift+Z"));
+    CHECK(bound(max, "view.frame", "Z") && bound(max, "mode.face", "4") && bound(max, "mesh.bevel", "Ctrl+Shift+C"));
+    CHECK(bound(su, "mesh.push_pull", "P") && bound(su, "draw.rectangle", "R") && bound(su, "draw.circle", "C") && bound(su, "tool.move", "M"));
+    /* The old "Blender Transform Keys" preference on top of Unity. */
+    const Keymap ub = keymap_preset("Unity", true);
+    CHECK(bound(ub, "transform.rotate", "R") && bound(ub, "tool.scale", "T") && !bound(ub, "tool.scale", "R"));
+    /* No preset has a real clash. */
+    for (const char *pn : kKeymapPresets) {
+      const Keymap k = keymap_preset(pn);
+      size_t clashes = 0;
+      std::string first;
+      for (auto &kv : k)
+        for (const KeyChord &c : kv.second) {
+          const auto cl = keymap_conflicts(k, kv.first, c);
+          if (!cl.empty() && first.empty()) first = kv.first + " / " + cl[0] + " on " + chord_text(c);
+          clashes += cl.size();
+        }
+      std::printf("    %s: %zu clash(es) %s\n", pn, clashes, first.c_str());
+      CHECK(clashes == 0);
+    }
+    /* Chords print and parse both ways. */
+    for (const char *t : {"Ctrl+Shift+Z", "Alt+F", "F12", "Delete", "Ctrl+=", "Shift+.", "Tab", "Space"}) CHECK(chord_text(parse_chord(t)) == t);
+  });
+  test("keymap: the keys pressed run what the preset says; rebinding, clashes and saving work", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const Recti r = ed.scene_view_rect();
+    ed.command("select Cube");
+    ed.step_frame_headless({move(r.x + r.w / 2, r.y + r.h / 2)});
+    auto press = [&](int k, int mods = 0) {
+      ed.step_frame_headless({key(k, mods)});
+      ed.step_frame_headless({key_up(k)});
+    };
+    /* Unity: Tab edits, 3 is face mode, Tab leaves. */
+    press(platform::KEY_TAB);
+    CHECK(ed.in_edit_mode());
+    press(platform::KEY_TAB);
+    CHECK(!ed.in_edit_mode());
+    /* Maya: F8 edits, W is the Move tool. */
+    ed.command("keymap Maya");
+    CHECK(ed.keymap_preset_name() == "Maya");
+    press(platform::KEY_F8);
+    CHECK(ed.in_edit_mode());
+    press(platform::KEY_F8);
+    CHECK(!ed.in_edit_mode());
+    /* Rebind: Edit Mode on Ctrl+Shift+E instead. */
+    ed.command("keymap bind mode.edit_toggle Ctrl+Shift+E");
+    press(platform::KEY_F8);
+    CHECK(!ed.in_edit_mode());
+    press(platform::KEY_E, platform::MOD_CTRL | platform::MOD_SHIFT);
+    CHECK(ed.in_edit_mode());
+    press(platform::KEY_E, platform::MOD_CTRL | platform::MOD_SHIFT);
+    /* A clash is reported: bind Undo's key to Redo too. */
+    const auto clash = keymap_conflicts(ed.keymap(), "edit.redo", parse_chord("Ctrl+Z"));
+    CHECK(!clash.empty() && clash[0] == "edit.undo");
+    /* The user's changes survive a save and load. */
+    const std::string saved = ed.keymap_overrides_text();
+    CHECK(saved.find("mode.edit_toggle=Ctrl+Shift+E") != std::string::npos);
+    Editor ed2;
+    ed2.init_headless(800, 600);
+    ed2.command("keymap Maya");
+    ed2.parse_keymap_overrides(saved);
+    CHECK(ed2.shortcut_text("mode.edit_toggle") == "Ctrl+Shift+E");
+    CHECK(ed2.shortcut_text("tool.move") == "W");
+    /* Blender: G grabs (a modal move). */
+    ed.command("keymap Blender");
+    CHECK(ed.shortcut_text("mode.edit_toggle") == "Tab");  // a preset starts fresh
+    ed.command("keymap Unity");
+  });
+  test("draw: snap axes in local (the rotated object's) or global (the world's) space", [&] {
+    for (int global = 0; global < 2; global++) {
+      Editor ed;
+      ed.init_headless(800, 600);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      g->set_local_euler({0, 30, 0});
+      g->set_world_position({0, 0.5f, 0});
+      ed.command("edit face");
+      ed.command(global ? "drawmode axes global" : "drawmode axes local");
+      ed.command("draw rectangle");
+      const Vec3 a = g->world_matrix().point({-0.2f, 0.5f, -0.2f}), b = g->world_matrix().point({0.2f, 0.5f, 0.2f});
+      ed.command(strprintf("drawpoint %.6f %.6f %.6f", a.x, a.y, a.z));
+      ed.command(strprintf("drawpoint %.6f %.6f %.6f", b.x, b.y, b.z));
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      const size_t inner = m.face_count() - 1;
+      /* The rectangle's sides in world space: along world X / Z (global) or the cube's (local). */
+      bool world_aligned = true, local_aligned = true;
+      for (uint32_t k = 0; k < m.face_size(inner); k++) {
+        const Vec3 e = normalize(g->world_matrix().dir(m.positions[m.face_verts(inner)[(k + 1) % m.face_size(inner)]] - m.positions[m.face_verts(inner)[k]]));
+        world_aligned = world_aligned && (std::fabs(e.x) > 0.999f || std::fabs(e.z) > 0.999f);
+        const Vec3 l = normalize(m.positions[m.face_verts(inner)[(k + 1) % m.face_size(inner)]] - m.positions[m.face_verts(inner)[k]]);
+        local_aligned = local_aligned && (std::fabs(l.x) > 0.999f || std::fabs(l.z) > 0.999f);
+      }
+      std::printf("    %s axes: %u corners, world-aligned %d, object-aligned %d\n", global ? "global" : "local", m.face_size(inner), (int)world_aligned,
+                  (int)local_aligned);
+      CHECK(global ? world_aligned && !local_aligned : local_aligned && !world_aligned);
+    }
+  });
+  test("z-fighting check: duplicates, inner walls and hidden faces found, the right ones removed", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    /* A cube duplicated in place: six pairs, one of each pair goes. */
+    ed.command("select Cube");
+    GameObject *cube = ed.selected_object();
+    ed.command("duplicate");
+    GameObject *copy = ed.selected_object();
+    CHECK(copy && copy != cube);
+    ed.command("zfight scene");
+    const size_t n = ed.zfight_count();
+    std::printf("    duplicated cube: %zu pair(s)\n", n);
+    CHECK(n >= 6);
+    ed.command("zfight fix");
+    std::printf("    after fixing: %zu pair(s); faces %zu + %zu\n", ed.zfight_count(), cube->get<MeshFilter>()->mesh->face_count(),
+                copy->get<MeshFilter>()->mesh->face_count());
+    CHECK(ed.zfight_count() == 0);
+    CHECK(cube->get<MeshFilter>()->mesh->face_count() + copy->get<MeshFilter>()->mesh->face_count() == 6);
+    /* Two boxes joined side by side: the wall between them is two faces back to back; both go. */
+    Mesh two = *primitives::cube();
+    Mesh b2 = *primitives::cube();
+    meshops::append_mesh(two, b2, Mat4::trs({1, 0, 0}, Quat(), {1, 1, 1}));
+    meshops::merge_by_distance(two, 1e-5f);
+    auto pairs = meshops::zfight_pairs(two);
+    std::printf("    joined boxes: %zu pair(s), identical %d, back to back %d, both removable %d\n", pairs.size(), pairs.empty() ? 0 : (int)pairs[0].identical,
+                pairs.empty() ? 0 : (int)!pairs[0].same_direction, pairs.empty() ? 0 : (int)(pairs[0].remove_a && pairs[0].remove_b));
+    CHECK(pairs.size() == 1 && pairs[0].identical && !pairs[0].same_direction && pairs[0].remove_a && pairs[0].remove_b);
+    std::vector<uint8_t> drop(two.face_count(), 0);
+    drop[pairs[0].a] = drop[pairs[0].b] = 1;
+    meshops::delete_faces(two, drop);
+    CHECK(closed_manifold(two) && meshops::zfight_pairs(two).empty());
+    /* A small face lying on a big one (same way): the small one is hidden and can go; a partial overlap can't. */
+    Mesh stack;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(2, 0, 2), Vec3(0, 0, 2), Vec3(0.5f, 0, 0.5f), Vec3(1, 0, 0.5f), Vec3(1, 0, 1), Vec3(0.5f, 0, 1),
+                   Vec3(1.5f, 0, 1.5f), Vec3(3, 0, 1.5f), Vec3(3, 0, 3), Vec3(1.5f, 0, 3)})
+      stack.add_vert(p);
+    const uint32_t big[4] = {0, 3, 2, 1}, small[4] = {4, 7, 6, 5}, part[4] = {8, 11, 10, 9};
+    stack.add_face(big, 4);
+    stack.add_face(small, 4);
+    stack.add_face(part, 4);
+    pairs = meshops::zfight_pairs(stack);
+    size_t hidden = 0, partial = 0;
+    for (const auto &p2 : pairs) {
+      if (p2.remove_a || p2.remove_b) {
+        hidden++;
+        CHECK((p2.remove_a ? p2.a : p2.b) == 1u);  // the small face
+      }
+      else partial++;
+    }
+    std::printf("    stacked faces: %zu pair(s), %zu hidden (removable), %zu partial\n", pairs.size(), hidden, partial);
+    CHECK(hidden == 1 && partial == 1);
+  });
+  test("uv editor: face / island selection, rotate, scale, move, flip, fit, align; synced with Edit Mode", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("edit face");
+    ed.command("uv smart");
+    GameObject *g = ed.selected_object();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(m.has_uvs());
+    ed.command("uvsel mode face");
+    ed.command("uvsel face 0");
+    CHECK(ed.uv_selected_corners() == m.face_size(0));
+    CHECK(ed.edit_face_selected(0) && !ed.edit_face_selected(1));  // synced
+    auto corners = [&]() {
+      std::vector<Vec2> v;
+      for (uint32_t k = m.face_offsets[0]; k < m.face_offsets[1]; k++) v.push_back(m.uvs[k]);
+      return v;
+    };
+    auto bounds = [](const std::vector<Vec2> &v) {
+      Vec2 lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+      for (Vec2 t : v) lo = Vec2(std::min(lo.x, t.x), std::min(lo.y, t.y)), hi = Vec2(std::max(hi.x, t.x), std::max(hi.y, t.y));
+      return std::make_pair(lo, hi);
+    };
+    const auto b0 = bounds(corners());
+    const Vec2 size0 = b0.second - b0.first;
+    ed.command("uvxf rotate 90");
+    const auto b1 = bounds(corners());
+    CHECK_NEAR(b1.second.x - b1.first.x, size0.y, 1e-4f);  // width and height swap
+    CHECK_NEAR(b1.second.y - b1.first.y, size0.x, 1e-4f);
+    ed.command("uvxf scale 2");
+    const auto b2 = bounds(corners());
+    CHECK_NEAR(b2.second.x - b2.first.x, 2 * size0.y, 1e-4f);
+    ed.command("uvxf fit");
+    const auto b3 = bounds(corners());
+    CHECK_NEAR(std::max(b3.second.x - b3.first.x, b3.second.y - b3.first.y), 1.0f, 1e-4f);
+    CHECK_NEAR((b3.first.x + b3.second.x) * 0.5f, 0.5f, 1e-4f);
+    ed.command("uvxf move 0.25 -0.1");
+    const auto b4 = bounds(corners());
+    CHECK_NEAR(b4.first.x - b3.first.x, 0.25f, 1e-4f);
+    CHECK_NEAR(b4.first.y - b3.first.y, -0.1f, 1e-4f);
+    const std::vector<Vec2> before_flip = corners();
+    ed.command("uvxf flip_u");
+    ed.command("uvxf flip_u");
+    const std::vector<Vec2> after_two = corners();
+    for (size_t k = 0; k < before_flip.size(); k++) CHECK(length(before_flip[k] - after_two[k]) < 1e-5f);  // twice = unchanged
+    ed.command("uvxf align_left");
+    for (Vec2 t : corners()) CHECK_NEAR(t.x, b4.first.x, 1e-5f);
+    /* Island selection and select all / invert. */
+    ed.command("uvsel island 2");
+    const size_t island = ed.uv_selected_corners();
+    CHECK(island >= m.face_size(2));
+    ed.command("uvsel invert");
+    CHECK(ed.uv_selected_corners() == m.corner_count() - island);
+    ed.command("uvsel all");
+    CHECK(ed.uv_selected_corners() == m.corner_count());
+    /* The window draws with the new tool row. */
+    ed.command("window UV Editor");
+    ed.step_frame_headless();
+    CHECK(true);
+  });
+  test("edit tools: every operator has a group (selection tools together), and Extrude Individual is a switch", [&] {
+    size_t other = 0, selects = 0;
+    for (const EditOpInfo &op : edit_op_table()) {
+      const int gidx = edit_op_group(op.op);
+      if (gidx == kEditGroupCount - 1) {
+        other++;
+        std::printf("    in Other: %s\n", op.op);
+      }
+      if (starts_with(std::string(op.op), "select_")) {
+        selects++;
+        CHECK(gidx == 0);
+      }
+    }
+    CHECK(selects >= 10);
+    CHECK(other <= 1);  // only Origin to Selection
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("fsel facing 0 1 0 1 0 0");
+    ed.command("set_extrude_individual 1");
+    ed.command("editop extrude");
+    const size_t ind = ed.selected_object()->get<MeshFilter>()->mesh->face_count();
+    ed.command("edit off");
+    ed.command("create Cube");
+    ed.command("fsel facing 0 1 0 1 0 0");
+    ed.command("set_extrude_individual 0");
+    ed.command("editop extrude");
+    const size_t reg = ed.selected_object()->get<MeshFilter>()->mesh->face_count();
+    std::printf("    extrude two faces: individual %zu faces, region %zu faces\n", ind, reg);
+    CHECK(ind > reg);
+    ed.command("window Modeling Tools");
+    ed.step_frame_headless();
   });
 }
 

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <set>
 #include <unordered_map>
 
@@ -1010,6 +1011,116 @@ void shade_auto_smooth(Mesh &m, float angle_deg) {
   if (!m.face_smooth.empty()) std::fill(m.face_smooth.begin(), m.face_smooth.end(), (uint8_t)1);
   m.smooth_angle = std::max(1.0f, std::min(180.0f, angle_deg));
   m.touch();
+}
+
+
+/* Z-fighting pairs with what to do about them: for each pair of faces lying in
+ * one plane and covering some of the same area, how much of each is covered,
+ * whether they face the same way and whether they are the same polygon. */
+std::vector<ZFightPair> zfight_pairs(const Mesh &m, float plane_dist, const std::vector<int> *group) {
+  std::vector<ZFightPair> out;
+  const RenderMesh &rm = m.render_mesh(true);
+  const size_t T = rm.tri_count();
+  if (!T) return out;
+  const float scale = std::max(1e-3f, length(m.bounds().extent()));
+  const float eps_d = plane_dist > 0 ? plane_dist : 1e-4f * scale, eps_a = 1e-6f * scale * scale;
+  std::vector<Vec3> n(T);
+  std::vector<AABB> box(T);
+  std::vector<double> face_area(m.face_count(), 0.0);
+  for (size_t t = 0; t < T; t++) {
+    const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+    const Vec3 cr = cross(b - a, c - a);
+    n[t] = length(cr) > 1e-20f ? normalize(cr) : Vec3(0.0f);
+    face_area[rm.tri_face[t]] += 0.5 * length(cr);
+    box[t].add(a);
+    box[t].add(b);
+    box[t].add(c);
+  }
+  /* Sweep along x: only triangles whose boxes overlap in x are compared. */
+  std::vector<uint32_t> order(T);
+  for (uint32_t t = 0; t < T; t++) order[t] = t;
+  std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return box[a].min.x < box[b].min.x; });
+  auto clip_area = [](std::vector<Vec2> poly, const Vec2 *tri) {
+    for (int e = 0; e < 3 && !poly.empty(); e++) {
+      const Vec2 a = tri[e], b = tri[(e + 1) % 3];
+      auto side = [&](Vec2 p) { return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x); };
+      std::vector<Vec2> o;
+      for (size_t i = 0; i < poly.size(); i++) {
+        const Vec2 p = poly[i], q = poly[(i + 1) % poly.size()];
+        const float sp = side(p), sq = side(q);
+        if (sp >= 0) o.push_back(p);
+        if ((sp >= 0) != (sq >= 0)) o.push_back(p + (q - p) * (sp / (sp - sq)));
+      }
+      poly = o;
+    }
+    double a2 = 0;
+    for (size_t i = 0; i < poly.size(); i++) a2 += (double)poly[i].x * poly[(i + 1) % poly.size()].y - (double)poly[(i + 1) % poly.size()].x * poly[i].y;
+    return 0.5 * std::fabs(a2);
+  };
+  std::map<std::pair<uint32_t, uint32_t>, std::pair<double, bool>> acc;  // face pair -> overlap area, same direction
+  for (size_t oi = 0; oi < T; oi++) {
+    const uint32_t i = order[oi];
+    if (length(n[i]) < 0.5f) continue;
+    for (size_t oj = oi + 1; oj < T; oj++) {
+      const uint32_t j = order[oj];
+      if (box[j].min.x > box[i].max.x + eps_d) break;
+      const uint32_t fi = rm.tri_face[i], fj = rm.tri_face[j];
+      if (fi == fj || length(n[j]) < 0.5f) continue;
+      if (group && (*group)[fi] == (*group)[fj] && (*group)[fi] < 0) continue;
+      const float dn = dot(n[i], n[j]);
+      if (std::fabs(dn) < 0.999f) continue;
+      if (box[i].max.y < box[j].min.y - eps_d || box[j].max.y < box[i].min.y - eps_d || box[i].max.z < box[j].min.z - eps_d ||
+          box[j].max.z < box[i].min.z - eps_d)
+        continue;
+      const Vec3 a0 = rm.positions[rm.indices[i * 3]];
+      const float within = dn > 0 ? eps_d : 1e-5f * scale;
+      bool coplanar = true;
+      for (int k = 0; k < 3; k++) coplanar = coplanar && std::fabs(dot(rm.positions[rm.indices[j * 3 + k]] - a0, n[i])) < within;
+      if (!coplanar) continue;
+      const Vec3 u = normalize(std::fabs(n[i].y) < 0.9f ? cross(Vec3(0, 1, 0), n[i]) : cross(Vec3(1, 0, 0), n[i])), w = cross(n[i], u);
+      auto flat = [&](size_t t, int k) {
+        const Vec3 p = rm.positions[rm.indices[t * 3 + k]];
+        return Vec2(dot(p, u), dot(p, w));
+      };
+      Vec2 ti[3] = {flat(i, 0), flat(i, 1), flat(i, 2)};
+      std::vector<Vec2> pj = {flat(j, 0), flat(j, 1), flat(j, 2)};
+      if ((ti[1].x - ti[0].x) * (ti[2].y - ti[0].y) - (ti[1].y - ti[0].y) * (ti[2].x - ti[0].x) < 0) std::swap(ti[1], ti[2]);
+      const double a = clip_area(pj, ti);
+      if (a <= eps_a * 0.01) continue;
+      auto &e = acc[{std::min(fi, fj), std::max(fi, fj)}];
+      e.first += a;
+      e.second = dn > 0;
+    }
+  }
+  for (auto &kv : acc) {
+    if (kv.second.first <= eps_a) continue;
+    ZFightPair p;
+    p.a = kv.first.first;
+    p.b = kv.first.second;
+    p.area = (float)kv.second.first;
+    p.same_direction = kv.second.second;
+    p.covered_a = (float)std::min(1.0, kv.second.first / std::max(1e-30, face_area[p.a]));
+    p.covered_b = (float)std::min(1.0, kv.second.first / std::max(1e-30, face_area[p.b]));
+    /* The same polygon: the same corner positions (as a set). */
+    if (m.face_size(p.a) == m.face_size(p.b)) {
+      bool same = true;
+      for (uint32_t k = 0; k < m.face_size(p.a) && same; k++) {
+        const Vec3 q = m.positions[m.face_verts(p.a)[k]];
+        bool found = false;
+        for (uint32_t l = 0; l < m.face_size(p.b) && !found; l++) found = length(m.positions[m.face_verts(p.b)[l]] - q) <= eps_d;
+        same = found;
+      }
+      p.identical = same;
+    }
+    /* What to remove. */
+    if (p.identical && !p.same_direction) p.remove_a = p.remove_b = true;  // back to back: an inner wall, both go
+    else if (p.identical) p.remove_b = true;                               // a duplicate: one goes
+    else if (p.same_direction && p.covered_a > 0.999f && p.covered_a >= p.covered_b) p.remove_a = true;  // hidden under the other
+    else if (p.same_direction && p.covered_b > 0.999f) p.remove_b = true;
+    out.push_back(p);
+  }
+  std::sort(out.begin(), out.end(), [](const ZFightPair &x, const ZFightPair &y) { return x.area > y.area; });
+  return out;
 }
 
 }  // namespace bl::meshops

@@ -99,6 +99,7 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_scene_icons(view);
   draw_origins(view);
   draw_guides(view);
+  draw_zfight_overlay(view);
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
@@ -1837,7 +1838,9 @@ void Editor::auto_smooth_after(Mesh *m, size_t before) {
   Log::info("Auto Smooth: curved surface shaded smooth (edges sharper than %.0f degrees stay hard)", auto_smooth_angle_);
 }
 
-void Editor::edit_op(const std::string &op) {
+void Editor::edit_op(const std::string &op_in) {
+  /* Extrude with Individual on is Extrude Individual Faces (one button, one switch). */
+  const std::string op = op_in == "extrude" && extrude_individual_ && elem_ == EditElement::Face ? std::string("extrude_individual") : op_in;
   GameObject *g = edit_object();
   if (!g) return;
   MeshPtr &mp = *edit_mesh_ptr();
@@ -2060,13 +2063,16 @@ void Editor::edit_op(const std::string &op) {
     Log::info("%s", what.c_str());
   }
   else if (op == "select_overlapping") {
-    std::vector<std::pair<uint32_t, uint32_t>> pairs;
-    const size_t n = meshops::overlapping_faces(m, 1e-3f * std::max(1e-3f, length(m.bounds().extent())), &pairs);
+    /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
+    const size_t n = zfight_scan(false);
     set_edit_element(EditElement::Face);
     face_sel_.assign(m.face_count(), 0);
-    for (auto &p : pairs) face_sel_[p.first] = face_sel_[p.second] = 1;
+    for (const ZFightIssue &z : zfight_) {
+      if (z.obj_a == g->id && z.face_a < face_sel_.size()) face_sel_[z.face_a] = 1;
+      if (z.obj_b == g->id && z.face_b < face_sel_.size()) face_sel_[z.face_b] = 1;
+    }
     sync_vert_face_selection(true);
-    Log::info(n ? "Select Overlapping: %zu pair(s) of faces on top of each other" : "Select Overlapping: none found", n);
+    Log::info(n ? "Select Z-Fighting: %zu pair(s) of faces on top of each other selected" : "Select Z-Fighting: none found", n);
     return;
   }
   else if (op == "delete_loose") {
@@ -2249,6 +2255,42 @@ void Editor::edit_op(const std::string &op) {
 /* Edit Mode operators by selection mode (ProBuilder's Vertex / Edge / Face
  * actions, Blender's Vertex / Edge / Face menus). The Mesh menu, the
  * Inspector and the shortcuts all offer only the current mode's operators. */
+const char *const kEditGroups[kEditGroupCount] = {"Select", "Create & Extrude", "Cut & Divide", "Merge & Clean Up", "Deform",
+                                                     "Shading & UV", "Other"};
+
+int edit_op_group(const std::string &op) {
+  if (starts_with(op, "select_")) return 0;
+  static const char *create[] = {"push_pull", "extrude", "extrude_edges", "inset", "push_through", "extrude_individual", "bridge", "fill",
+                                 "smart_fill", "poke", "duplicate", "split", "spin", "follow", "shell", "thicken", "draft", "fuse"};
+  static const char *cut[] = {"loopcut", "knife", "subdivide_edges", "connect", "slice", "bevel", "edge_split"};
+  static const char *clean[] = {"merge_center", "collapse", "dissolve", "dissolve_vertices", "dissolve_faces", "dissolve_limited", "delete",
+                                "delete_loose", "tris_to_quads", "triangulate_faces", "recalc_normals", "flip_faces"};
+  static const char *deform[] = {"smooth", "shrink_fatten", "to_sphere", "randomize"};
+  static const char *shading[] = {"shade_smooth", "shade_flat", "mark_sharp", "clear_sharp", "mark_seam", "clear_seam", "seams_from_sharp"};
+  for (const char *o : create)
+    if (op == o) return 1;
+  for (const char *o : cut)
+    if (op == o) return 2;
+  for (const char *o : clean)
+    if (op == o) return 3;
+  for (const char *o : deform)
+    if (op == o) return 4;
+  for (const char *o : shading)
+    if (op == o) return 5;
+  return 6;
+}
+
+const std::vector<EditOpPair> &edit_op_pairs() {
+  static const std::vector<EditOpPair> p = {
+      {"mark_seam", "clear_seam", "Mark", "Clear", "Seam"},
+      {"mark_sharp", "clear_sharp", "Mark", "Clear", "Sharp"},
+      {"shade_smooth", "shade_flat", "Smooth", "Flat", "Shade"},
+      {"triangulate_faces", "tris_to_quads", "Tris", "Quads", "To"},
+      {"select_more", "select_less", "More", "Less", "Grow"},
+  };
+  return p;
+}
+
 const std::vector<EditOpInfo> &edit_op_table() {
   enum { V = 1, E = 2, F = 4, ALL = 7 };
   static const std::vector<EditOpInfo> ops = {
@@ -2310,8 +2352,8 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"smart_fill", "Smart Fill", "", "Close open edges with faces: every hole (or the loops inside the selection) gets a face,\n"
        "a bent one a fan from its centre; cracks and slits with no area are welded shut instead.\n"
        "Blender: Fill / Clean Up > Fill Holes. SketchUp: drawing a missing edge closes the face.", ALL},
-      {"select_overlapping", "Select Overlapping", "", "Select faces that lie on top of each other (or a hair apart) and flicker:\n"
-       "delete or move them to clean up. They come from geometry stacked by hand or imported.", ALL},
+      {"select_overlapping", "Select Z-Fighting", "", "Find faces on top of each other (they flicker: z-fighting) and select them;\n"
+       "Modeling Tools > Check: Z-Fighting lists them and removes the ones that can go.", ALL},
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
        "or in the whole mesh when nothing is selected. Blender: Mesh > Clean Up > Delete Loose.", ALL},
       {"recalc_normals", "Recalculate Normals", "Shift+N", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},

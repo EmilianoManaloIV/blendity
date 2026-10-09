@@ -602,7 +602,9 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     }
     Vec3 pu, pv;
     plane_axes(n, pu, pv);
-    draw_.axis_u = length(best) > 1e-6f ? normalize(best) : pu;
+    /* Global: the world's axes laid into the plane (X on floors, a horizontal on walls),
+     * whatever the face or object is turned to. Local: the face's / object's own. */
+    draw_.axis_u = draw_global_axes_ || length(best) <= 1e-6f ? pu : normalize(best);
   }
   auto reset = [&] {
     draw_.pts.clear();

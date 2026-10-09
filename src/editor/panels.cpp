@@ -1806,13 +1806,11 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
         /* SketchUp-style n-gon editing. */
         Recti nr = lay.row(u.row_h() + u.px(2));
         const int nw = (nr.w - u.px(16)) / 3;
-        if (u.button({nr.x + u.px(4), nr.y, nw, nr.h}, ngon_mode_ ? "N-gon Mode: On" : "N-gon Mode: Off", ngon_mode_, Icon::Face))
+        if (u.button({nr.x + u.px(4), nr.y, nw * 2 + u.px(4), nr.h}, ngon_mode_ ? "N-gon Mode: On" : "N-gon Mode: Off", ngon_mode_, Icon::Face))
           ngon_mode_ = !ngon_mode_;
         u.tooltip("SketchUp-style faces: a flat region of faces acts as one face (inner edges hidden,\n"
                   "one click selects it all, Push/Pull moves it all).");
-        if (u.button({nr.x + u.px(8) + nw, nr.y, nw, nr.h}, "Merge Coplanar")) edit_tool("dissolve_limited");
-        u.tooltip("Make each flat region one real n-gon and drop corners on straight edges.\nBlender: Limited Dissolve.");
-        if (u.button({nr.x + u.px(12) + 2 * nw, nr.y, nw, nr.h}, knife_.active ? "Knife (on)" : "Knife / Line (K)", knife_.active))
+        if (u.button({nr.x + u.px(12) + 2 * nw, nr.y, nw, nr.h}, knife_.active ? "Knife (on)" : "Knife (K)", knife_.active))
           edit_tool("knife");
         u.tooltip("Split a face along a line between two points on its edges or corners.\nSketchUp: Line tool. Blender: Knife (K).");
       }
@@ -1832,6 +1830,17 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
           u.tooltip("Draw onto the mesh (or the ground) with snapping to corners, midpoints, edges, faces and the grid.\n"
                     "A closed shape inside a face is cut into it, ready for Push/Pull; a line between edges splits the face;\n"
                     "anything else becomes new faces or wire edges. UModeler: drawing tools. SketchUp: Line, Rectangle, Circle, Arc, Polygon.");
+        }
+        if (draw_.active) {
+          static const char *kAxes[] = {"Local (face / object)", "Global (world)"};
+          int ax = draw_global_axes_ ? 1 : 0;
+          er.enumeration("Snap Axes", ax, kAxes, 2);
+          if (ax != (draw_global_axes_ ? 1 : 0)) {
+            draw_global_axes_ = ax == 1;
+          }
+          u.tooltip("The red / green axes drawing snaps to (and rectangles line up with):\n"
+                    "Local follows the face's edges or the object's rotation; Global uses the world's X / Y / Z.\n"
+                    "Edges of the mesh (parallel / perpendicular) and guides snap either way.");
         }
         if (draw_.active && draw_.shape == 1) {
           er.enumeration("Rectangle From", draw_rect_mode_, kRectModes, 3);
@@ -1902,24 +1911,94 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
         er.field("Smooth Factor", smooth_factor_, 0.01f, 0.0f, 1.0f);
       }
       {
-        /* The mode's operators, three to a row; then the ones every mode has. */
-        std::vector<const EditOpInfo *> mine, common;
-        for (const EditOpInfo &op : edit_op_table())
-          (op.elements == 7 ? common : mine).push_back(&op);
-        mine.erase(std::remove_if(mine.begin(), mine.end(), [&](const EditOpInfo *o) { return !edit_op_available(o->op); }), mine.end());
-        auto grid = [&](const std::vector<const EditOpInfo *> &list) {
-          for (size_t i = 0; i < list.size(); i += 3) {
+        /* The tools in groups, Select first (one place for every way of selecting); each
+         * group shows what this selection mode can use. Mark / Clear and similar pairs
+         * share one cell. */
+        std::vector<std::vector<const EditOpInfo *>> groups(kEditGroupCount);
+        for (const EditOpInfo &op : edit_op_table()) {
+          if (std::string(op.op) == "extrude_individual") continue;  // Extrude's Individual switch
+          if (!edit_op_available(op.op)) continue;
+          groups[(size_t)edit_op_group(op.op)].push_back(&op);
+        }
+        for (int gi = 0; gi < kEditGroupCount; gi++) {
+          auto &list = groups[(size_t)gi];
+          if (list.empty() && gi != 0) continue;
+          Recti hr = lay.row(u.row_h() + u.px(2));
+          bool &open = foldouts_.emplace(std::string("edit_grp_") + kEditGroups[gi], true).first->second;
+          const int ah = u.font.line_height() - u.px(4);
+          u.draw_icon(open ? Icon::ArrowDown : Icon::ArrowRight, {hr.x + u.px(2), hr.y + (hr.h - ah) / 2, ah, ah}, u.theme.text_dim);
+          u.label({hr.x + ah + u.px(6), hr.y, hr.w, hr.h}, kEditGroups[gi], u.theme.accent);
+          if (u.hovered(hr) && u.in.pressed[0]) {
+            open = !open;
+            u.consume_click();
+          }
+          if (!open) continue;
+          /* Cells: single operators, or a pair as two half buttons. */
+          struct Cell {
+            const EditOpInfo *a = nullptr, *b = nullptr;
+            const EditOpPair *pair = nullptr;
+          };
+          std::vector<Cell> cells;
+          std::vector<const EditOpInfo *> done;
+          if (gi == 0) cells.push_back(Cell{});  // All / None
+          for (const EditOpInfo *o : list) {
+            if (std::find(done.begin(), done.end(), o) != done.end()) continue;
+            Cell c;
+            c.a = o;
+            for (const EditOpPair &p : edit_op_pairs())
+              if (std::string(p.a) == o->op || std::string(p.b) == o->op) {
+                const EditOpInfo *other = nullptr;
+                for (const EditOpInfo *q : list)
+                  if (q != o && (std::string(q->op) == p.a || std::string(q->op) == p.b)) other = q;
+                if (other) {
+                  c.pair = &p;
+                  c.a = std::string(o->op) == p.a ? o : other;
+                  c.b = std::string(o->op) == p.a ? other : o;
+                  done.push_back(other);
+                }
+              }
+            done.push_back(o);
+            cells.push_back(c);
+          }
+          for (size_t i = 0; i < cells.size(); i += 3) {
             Recti row = lay.row(u.row_h() + u.px(2));
-            int bw3 = (row.w - u.px(16)) / 3;
-            for (size_t k = i; k < std::min(list.size(), i + 3); k++) {
-              int x = row.x + u.px(4) + (int)(k - i) * (bw3 + u.px(4));
-              if (u.button({x, row.y, bw3, row.h}, list[k]->label)) edit_tool(list[k]->op);
-              u.tooltip(list[k]->keys[0] ? strprintf("%s (%s)", list[k]->tip, list[k]->keys) : std::string(list[k]->tip));
+            const int bw3 = (row.w - u.px(16)) / 3;
+            for (size_t k = i; k < std::min(cells.size(), i + 3); k++) {
+              const Cell &c = cells[k];
+              const int x = row.x + u.px(4) + (int)(k - i) * (bw3 + u.px(4));
+              if (!c.a) {  // Select All / None
+                const int hw = (bw3 - u.px(2)) / 2;
+                if (u.button({x, row.y, hw, row.h}, "All")) edit_select_all(true);
+                u.tooltip("Select everything (Ctrl+A).");
+                if (u.button({x + hw + u.px(2), row.y, bw3 - hw - u.px(2), row.h}, "None")) edit_select_all(false);
+                u.tooltip("Deselect everything (Ctrl+Shift+A).");
+                continue;
+              }
+              if (c.pair) {
+                const int lw = u.font.text_width(c.pair->label) + u.px(8);
+                u.label({x, row.y, lw, row.h}, c.pair->label, u.theme.text_dim);
+                const int hw = (bw3 - lw - u.px(2)) / 2;
+                if (u.button({x + lw, row.y, hw, row.h}, c.pair->label_a)) edit_tool(c.a->op);
+                u.tooltip(c.a->keys[0] ? strprintf("%s (%s)", c.a->tip, c.a->keys) : std::string(c.a->tip));
+                if (u.button({x + lw + hw + u.px(2), row.y, bw3 - lw - hw - u.px(2), row.h}, c.pair->label_b)) edit_tool(c.b->op);
+                u.tooltip(c.b->keys[0] ? strprintf("%s (%s)", c.b->tip, c.b->keys) : std::string(c.b->tip));
+                continue;
+              }
+              std::string label = c.a->label;
+              if (gi == 0 && starts_with(label, "Select ")) label = label.substr(7);  // in the Select group the word is implied
+              if (u.button({x, row.y, bw3, row.h}, label)) edit_tool(c.a->op);
+              u.tooltip(c.a->keys[0] ? strprintf("%s (%s)", c.a->tip, c.a->keys) : std::string(c.a->tip));
             }
           }
-        };
-        grid(mine);
-        grid(common);
+          if (gi == 1 && elem_ == EditElement::Face) {
+            Recti tr = lay.row(u.row_h() + u.px(2));
+            if (u.button({tr.x + u.px(4), tr.y, tr.w - u.px(8), tr.h}, extrude_individual_ ? "Extrude: Individual Faces" : "Extrude: Region",
+                         extrude_individual_))
+              extrude_individual_ = !extrude_individual_;
+            u.tooltip("Region: the selected faces extrude together (shared sides stay inside).\n"
+                      "Individual: each face on its own, with its own walls. Blender: Extrude Individual Faces.");
+          }
+        }
       }
       static const char *kAxesXYZ[] = {"X", "Y", "Z", "View"};
       if (elem_ != EditElement::Face) {

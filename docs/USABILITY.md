@@ -103,12 +103,17 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Patching an open hole meant drawing a new face corner by corner, and cracks made zero-area faces. | Smart Fill closes holes and welds shut cracks and slits. |
 | Bevelled and round results looked faceted until shaded by hand. | Auto Smooth shades them smooth, with corners kept hard. |
 | Rendering several views meant moving the Main Camera and saving each render. | Render Camera Sequence renders every In Sequence camera, each saved. |
+| Shortcuts were fixed, Unity-style only. | A rebindable keymap with Unity, Blender, Maya, 3ds Max and SketchUp presets. |
+| Selection tools were scattered across one long grid of 60 buttons. | Grouped tools, Select first; pairs share a button. |
+| Overlapping faces could only be found inside one mesh, with no advice. | The Z-fighting check works across objects and says which faces can go. |
+| The UV editor only picked vertices. | Face and island modes, sync, and rotate / scale / move / flip / fit / align. |
+| Changing a light's colour temperature left the Camera Preview stale. | Every light setting re-renders it. |
 
 ## Still worth doing
 
 1. **A Blender navigation preference**: MMB orbit, Shift+MMB pan and numpad views, for users who want Blender navigation too. It shares no keys with modeling, so it is independent of everything above.
 2. **A context menu on right-click without dragging** (Unity's Scene view menu, Blender's W menu): the current mode's operators under the cursor. Right-click is already split between fly (drag) and cancel (during operators), so a click without movement is free.
-3. **Pie menus or a search** (Blender's F3): with about 50 operators now, a type-to-find box is the fastest way to reach a rare one.
+3. **Pie menus or a search** (Blender's F3; the keymap's action list is a start): with about 50 operators now, a type-to-find box is the fastest way to reach a rare one.
 4. **Snapping during G** to vertices, edges and faces (Blender's snap targets): the move gizmo now has vertex (V) and surface (Ctrl+Shift) snapping; G itself still snaps only to the grid.
 5. **Proportional editing during G / R / S** (it already works with the gizmos), with the wheel changing its radius.
 6. **Spin** (an interactive Screw on the selection) and **Knife cuts through several faces** in one stroke: the Knife and the Screw modifier are in; these are their next steps.

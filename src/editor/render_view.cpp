@@ -179,10 +179,10 @@ uint64_t Editor::scene_render_hash() {
       }
     }
     if (l && l->enabled) {
-      mix(&l->type, 4);
-      mix(&l->color, sizeof(Vec3));
-      mix(&l->intensity, 4);
-      mix(&l->range, 4);
+      /* Every field of the light (colour temperature, spot angles, area size, shadows...):
+       * a change to any of them re-renders the Camera Preview and the Rendered view. */
+      const uint64_t lh = hash_component(*l);
+      mix(&lh, 8);
     }
   });
   const EnvironmentSettings &es = scene_->environment;

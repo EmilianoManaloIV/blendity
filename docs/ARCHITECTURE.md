@@ -263,6 +263,16 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `meshops::shallow_edges`, `shade_auto_smooth`, `Editor::auto_smooth_after` | An operator that increases the number of edges between faces meeting at 1-30 degrees on a mesh with `smooth` off and no per-face shading sets `smooth` and `smooth_angle` (render normals already split by angle) | Blender: Shade Auto Smooth |
 | `Editor::start_render_sequence`, `step_render_sequence`, `render_camera_override_` | Cameras with `in_sequence`, stable-sorted by `sequence_order`; each frame: start the next camera's render (main_camera returns the override), and when it is no longer rendering write it with `write_render_file` | Blender: rendering several cameras via markers / scripts |
 
+## Keymaps, Z-fighting check, UV editing, tool groups (phase 15)
+
+| Blendity | What it does | Blender / Unity equivalent |
+|---|---|---|
+| `editor/keymap.cpp` | `shortcut_actions()` (id, label, category, context); `keymap_preset(name)` builds bindings for Unity / Blender / Maya / 3ds Max / SketchUp; `keymap_` = preset + `keymap_overrides_`; `handle_shortcuts` matches each pressed key + modifiers against the most specific active context first (Scene + Edit, Edit, Scene, anywhere) and calls `run_action`; `keymap_conflicts` checks overlapping contexts | Blender keymap editor and presets; Unity Shortcuts Manager |
+| `meshops::zfight_pairs`, `editor/zfight.cpp` | Triangles of faces in one plane (sorted and swept along x), clipped in 2D for overlap area; per pair: coverage of each face, same direction, same polygon; suggestions (duplicate: one, back-to-back identical: both, fully covered: it). The editor runs it on the selection or the whole scene in world space and skips back-to-back contact between different objects | - |
+| `Editor::uv_select`, `uv_transform`, `uv_sync_to_faces` | Selection by vertex / face (point in UV polygon) / island (`uvops::compute_islands`); transforms about the selection's bounds centre; Sync sets Edit Mode's faces from fully selected UV faces | Blender UV editor selection modes, UV Sync Selection, Align / Rotate / Flip |
+| `edit_op_group`, `edit_op_pairs`, grouped `draw_edit_tools` | Every operator in a group (Select first); paired operators drawn as one split button; Extrude's Individual switch maps `extrude` to `extrude_individual` in `edit_op` | ProBuilder / Blender menus |
+| `scene_render_hash` | Hashes each light with `hash_component` (every reflected field) | - |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.
