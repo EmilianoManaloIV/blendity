@@ -26,6 +26,9 @@ class GameObject;
 class Scene;
 struct PhysicsWorld;  // physics.h
 
+struct FilterEffect;
+using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
+
 /* ------------------------------------------------------------ Reflection */
 /* One description of a component's fields drives the Inspector, the scene
  * file format, undo and change detection - the same trick as Unity's
@@ -54,6 +57,11 @@ struct Reflector {
   virtual void texture(const char *name, TextureRef &t) { text(name, t.path); }
   /* Material slots (Unity MeshRenderer.materials / Blender material slots). */
   virtual void material_list(const char *, std::vector<MaterialPtr> &) {}
+  /* A camera's filter effects (ADR 0008). By default: the effects' type names as one text field,
+   * then each effect's fields with an index prefix ("E0 Width"), which files, undo, hashing and
+   * `set CameraFilters.E0Width` all understand. A reader that changes the names rebuilds the
+   * list. The Inspector draws the stack instead. */
+  virtual void filter_effects(const char *name, FilterEffectList &effects);
   /* Serialization, undo and hashing must see every field, including ones the
    * Inspector hides for the current mode (e.g. path tracer samples while the
    * raster engine is active). */
@@ -211,31 +219,73 @@ struct Camera : ComponentBase<Camera> {
   float exposure_stops() const;                // added to the render exposure
 };
 
-/* Camera filters (ADR 0007): components on a camera's GameObject that change how it renders,
- * applied in component order. Each adds its raster settings, resolution and image passes to the
- * stack (src/render/camera_filter.h). */
+/* Camera filters (ADR 0007, 0008): a component on a camera's GameObject that changes how it
+ * renders, adding raster settings, a resolution and image passes to a FilterStack
+ * (src/render/camera_filter.h). The one in use is CameraFilters, a stack of effects. */
 struct FilterStack;
 struct CameraFilter : Component {
   virtual void contribute(FilterStack &stack) const = 0;
-  bool unique() const override { return false; }
 };
 
-/* 3D graphics as old consoles drew them (task 0004: the PlayStation). The Console preset fills
- * in the fields; any of them can then be changed. */
-struct RetroConsoleFilter : ComponentBase<RetroConsoleFilter, CameraFilter> {
-  static constexpr const char *kName = "Retro Console Filter";
-  enum Console { PS1 = 0 };
+/* One effect in a camera's filter stack (Unity: a post-processing effect in a profile). */
+struct FilterEffect {
+  bool enabled = true;
+  bool ui_expanded = true;  // Inspector foldout (not saved)
+  virtual ~FilterEffect() = default;
+  virtual const char *type_name() const = 0;
+  virtual std::unique_ptr<FilterEffect> clone() const = 0;
+  virtual void reflect(Reflector &r) = 0;
+  virtual void contribute(FilterStack &stack) const = 0;
+};
+template<class T> struct FilterEffectBase : FilterEffect {
+  const char *type_name() const override { return T::kName; }
+  std::unique_ptr<FilterEffect> clone() const override { return std::make_unique<T>(static_cast<const T &>(*this)); }
+};
+struct FilterEffectInfo {
+  std::string name, category, help;
+  std::function<std::unique_ptr<FilterEffect>()> create;
+};
+/* Every effect type, in menu order (grouped by category). */
+const std::vector<FilterEffectInfo> &filter_effect_infos();
+const FilterEffectInfo *find_filter_effect_info(const std::string &name);
+std::unique_ptr<FilterEffect> create_filter_effect(const std::string &name);
+
+/* The camera's filter stack: effects applied top to bottom (Unity's post-processing stack). */
+struct CameraFilters : ComponentBase<CameraFilters, CameraFilter> {
+  static constexpr const char *kName = "Camera Filters";
+  FilterEffectList effects;
+  CameraFilters() = default;
+  CameraFilters(const CameraFilters &o);  // effects are deep-copied (undo snapshots, Duplicate)
+  CameraFilters &operator=(const CameraFilters &o);
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+  FilterEffect *add(const std::string &type);  // appended; null for an unknown type
+  template<class T> T *find() const {
+    for (const auto &e : effects)
+      if (auto *t = dynamic_cast<T *>(e.get())) return t;
+    return nullptr;
+  }
+};
+
+/* 3D graphics as old consoles drew them. The Console preset fills in the fields; any of them
+ * can then be changed. (Task 0004 made it a component, "Retro Console Filter"; scenes saved with
+ * that load into a Camera Filters stack.) */
+struct RetroConsoleFilter : FilterEffectBase<RetroConsoleFilter> {
+  static constexpr const char *kName = "Retro Console";
+  enum Console { PS1 = 0, N64 = 1, Saturn = 2, DOS = 3 };
+  enum TextureFilterChoice { AsMaterial = 0, Nearest = 1, Linear = 2, Trilinear = 3, ThreePoint = 4 };
   int console = PS1;
   int width = 320, height = 240;
   int fit = 0;                  // FilterStack::Fit: Fill (square pixels) / Letterbox (the console's frame)
   bool vertex_snap = true;
   float snap_grid = 1.0f;       // internal pixels
   bool affine_textures = true;
-  int texture_filter = 1;       // 0 As Material, 1 Nearest, 2 Linear, 3 Trilinear
+  int texture_filter = Nearest;
   int max_texture_size = 256;   // 0 = no cap
   bool mipmaps = false;
-  int color_depth = 1;          // RetroImageParams::Depth
+  int color_depth = 1;          // RetroImageParams::Depth: 24-bit, 15-bit, 256 colours
   int dither = 1;               // RetroImageParams::Dither
+  bool screen_door = false;     // transparent surfaces as a checkerboard (Saturn)
   bool fog = false;
   float fog_start = 10.0f, fog_end = 60.0f;
   Vec3 fog_color{0.45f, 0.45f, 0.5f};

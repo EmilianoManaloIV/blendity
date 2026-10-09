@@ -631,6 +631,29 @@ static void test_camera_filters(Report &rep, const Options &o) {
   rep.row({"PS1 raster stage, full size", f2(raster_only), f2(plain / std::max(1e-6, raster_only)) + "x"});
   rep.row({strprintf("PS1 complete (%dx%d, colour pass %.2f ms, upscale %.2f ms)", iw, ih, pass_ms, up_ms), f2(complete),
            f2(plain / std::max(1e-6, complete)) + "x"});
+  /* Each Retro Console preset through a Camera Filters stack (task 0005), complete. */
+  static const char *kConsoles[] = {"PS1", "N64", "Saturn", "DOS"};
+  for (int c = 0; c < 4; c++) {
+    CameraFilters cf;
+    auto *e = static_cast<RetroConsoleFilter *>(cf.add(RetroConsoleFilter::kName));
+    e->console = c;
+    e->apply_preset(c);
+    FilterStack st;
+    cf.contribute(st);
+    int pw, ph;
+    Recti pd;
+    filter_layout(st, W, H, pw, ph, pd);
+    Image pi;
+    pi.resize(pw, ph);
+    RenderTarget prt;
+    prt.attach(pi, {0, 0, pw, ph});
+    const double ms = time_ms([&] {
+      draw(prt, &st, p);
+      for (auto &pass : st.passes) pass(prt, &frame);
+      upscale_nearest(pi.pixels.data(), pw, ph, pw, full.pixels.data(), W, pd);
+    }, reps);
+    rep.row({strprintf("%s preset (%dx%d)", kConsoles[c], pw, ph), f2(ms), f2(plain / std::max(1e-6, ms)) + "x"});
+  }
   /* Every channel of a 15-bit frame is a multiple of 8. */
   size_t off = 0;
   for (uint32_t c : small.pixels) off += ((c >> 16) & 7) || ((c >> 8) & 7) || (c & 7);
@@ -687,6 +710,68 @@ static void test_camera_filters(Report &rep, const Options &o) {
     runs++;
   }
   rep.note(strprintf("Odd settings (NaN / infinite snap and fog, 1x1 to 100000 px, unknown modes): %d runs, %d problems", runs, problems));
+
+  /* Random stacks (task 0005): 0-4 Retro Console effects, random presets and odd fields, some off,
+   * through the stack's own contribute, layout, render, passes and upscale; each stack's copy must
+   * hash the same. A 256-colour frame must use only palette colours. */
+  int sproblems = 0, sruns = 0;
+  const uint32_t *pal = retro_palette();
+  std::vector<uint32_t> palset(pal, pal + 256);
+  std::sort(palset.begin(), palset.end());
+  for (int k = 0; k < (o.quick ? 40 : 200); k++) {
+    CameraFilters cf;
+    const int n = (int)(rnd() * 5);
+    for (int i = 0; i < n; i++) {
+      auto *e = static_cast<RetroConsoleFilter *>(cf.add(RetroConsoleFilter::kName));
+      e->console = (int)(rnd() * 4);
+      e->apply_preset(e->console);
+      e->enabled = rnd() < 0.8f;
+      if (rnd() < 0.3f) e->width = sizes[(int)(rnd() * 8) % 8];
+      if (rnd() < 0.3f) e->height = sizes[(int)(rnd() * 8) % 8];
+      if (rnd() < 0.3f) e->snap_grid = odd[(int)(rnd() * 9) % 9];
+      if (rnd() < 0.3f) e->texture_filter = (int)(rnd() * 7) - 1;
+      if (rnd() < 0.3f) e->color_depth = (int)(rnd() * 4) - (rnd() < 0.2f ? 3 : 0);
+      if (rnd() < 0.3f) e->dither = (int)(rnd() * 4) - 1;
+      if (rnd() < 0.3f) e->fog_start = odd[(int)(rnd() * 9) % 9], e->fog_end = odd[(int)(rnd() * 9) % 9];
+    }
+    /* A copy (undo snapshots) must equal the original field by field: compare their hashes. */
+    CameraFilters copy(cf);
+    if (copy.effects.size() != cf.effects.size() || hash_component(copy) != hash_component(cf)) sproblems++;
+    FilterStack st;
+    cf.contribute(st);
+    const int vw = 1 + (int)(rnd() * 240), vh = 1 + (int)(rnd() * 160);
+    int sw2, sh2;
+    Recti sd;
+    filter_layout(st, vw, vh, sw2, sh2, sd);
+    if (sw2 < 1 || sh2 < 1 || sd.right() > vw || sd.bottom() > vh) {
+      sproblems++;
+      continue;
+    }
+    Image a;
+    a.resize(sw2, sh2);
+    RenderTarget art;
+    art.attach(a, {0, 0, sw2, sh2});
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    st.apply_raster(opt);
+    r3d.begin(&art, v, Mat4::perspective(60 * kDeg2Rad, sw2 / (float)sh2, 0.1f, 1000.0f), env, opt);
+    r3d.clear(0xFF303030);
+    for (auto &it : few) r3d.add(it);
+    r3d.flush();
+    for (auto &pass : st.passes) pass(art, &frame);
+    /* The last enabled 256-colour effect decides: every pixel a palette colour. */
+    const RetroConsoleFilter *last = nullptr;
+    for (auto &e : cf.effects)
+      if (e->enabled) last = static_cast<const RetroConsoleFilter *>(e.get());
+    if (last && last->color_depth == RetroImageParams::Palette256)
+      for (uint32_t c : a.pixels)
+        if (!std::binary_search(palset.begin(), palset.end(), c | 0xFF000000u)) { sproblems++; break; }
+    Image out;
+    out.resize(vw, vh);
+    upscale_nearest(a.pixels.data(), sw2, sh2, sw2, out.pixels.data(), vw, sd);
+    sruns++;
+  }
+  rep.note(strprintf("Random Camera Filters stacks (0-4 effects, random presets and odd fields): %d runs, %d problems", sruns, sproblems));
 }
 
 static void test_editor(Report &rep, const Options &o) {

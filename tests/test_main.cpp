@@ -162,6 +162,8 @@ static void round18_tests();
 static void round26_tests();
 static void round27_tests();
 static void round28_tests();
+static void round29_tests();
+static void round29_review_tests();
 
 int main() {
   register_builtin_components();
@@ -764,6 +766,8 @@ int main() {
   round26_tests();
   round27_tests();
   round28_tests();
+  round29_tests();
+  round29_review_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -7475,6 +7479,25 @@ static void cf_blockiness(const uint32_t *px, int stride, const Recti &r, int &m
   }
 }
 
+/* Task 0005 moved the Retro Console filter into a Camera Filters stack (ADR 0008): these find and
+ * add it there, so round 27's tests keep testing the same behaviour. */
+static RetroConsoleFilter *cf_add_retro(GameObject *cam) {
+  auto *cf = cam->get<CameraFilters>();
+  if (!cf) cf = cam->add<CameraFilters>();
+  return static_cast<RetroConsoleFilter *>(cf->add(RetroConsoleFilter::kName));
+}
+static std::vector<RetroConsoleFilter *> cf_all_retro(const GameObject *cam) {
+  std::vector<RetroConsoleFilter *> out;
+  if (const auto *cf = cam ? cam->get<CameraFilters>() : nullptr)
+    for (const auto &e : cf->effects)
+      if (auto *r = dynamic_cast<RetroConsoleFilter *>(e.get())) out.push_back(r);
+  return out;
+}
+static RetroConsoleFilter *cf_get_retro(const GameObject *cam) {
+  auto all = cf_all_retro(cam);
+  return all.empty() ? nullptr : all[0];
+}
+
 static void round27_tests() {
   /* ---------------------------------------------------------------- 1 */
   test("camera filters: with no filter the rasterizer's image is unchanged (default options, explicit zeros, an empty stack, a neutral component)", [&] {
@@ -8122,8 +8145,8 @@ static void round27_tests() {
     CHECK(f.vertex_snap && f.snap_grid == 1.0f && f.affine_textures);
     CHECK(f.texture_filter == 1 && f.max_texture_size == 256 && !f.mipmaps);
     CHECK(f.color_depth == RetroImageParams::Bits15 && f.dither == RetroImageParams::Ps1 && !f.fog);
-    CHECK(std::string(f.type_name()) == "Retro Console Filter");
-    CHECK(!f.unique());  // several filters may sit on one camera
+    CHECK(std::string(f.type_name()) == "Retro Console");
+    CHECK(find_filter_effect_info(f.type_name()) && find_filter_effect_info(f.type_name())->category == "Retro Console");
     FilterStack s;
     f.contribute(s);
     CHECK(!s.empty());
@@ -8234,12 +8257,12 @@ static void round27_tests() {
     ed.step_frame_headless();
     cmd("select Main Camera");
     GameObject *cam = ed.selected_object();
-    CHECK(cam && cam->get<Camera>() && !cam->get<RetroConsoleFilter>());
+    CHECK(cam && cam->get<Camera>() && !cf_get_retro(cam));
     cmd("component Retro Console Filter");  // the name has spaces
-    RetroConsoleFilter *f = cam->get<RetroConsoleFilter>();
+    RetroConsoleFilter *f = cf_get_retro(cam);
     CHECK(f != nullptr);
     if (!f) return;
-    CHECK(dynamic_cast<CameraFilter *>(f) != nullptr);
+    CHECK(cam->get<CameraFilters>() != nullptr);  // the old name adds a stack holding the effect
     CHECK(f->width == 320 && f->height == 240);
     cmd("set RetroConsoleFilter.Width 64");
     CHECK(f->width == 64);
@@ -8272,7 +8295,7 @@ static void round27_tests() {
     /* A second filter on the same camera. */
     cmd("component Retro Console Filter");
     int count = 0;
-    for (const auto &c : cam->components) count += dynamic_cast<RetroConsoleFilter *>(c.get()) != nullptr;
+    count = (int)cf_all_retro(cam).size();
     CHECK(count == 2);
     /* Undo walks back through the changes (Ctrl+Z); the component goes away with the step that added it. */
     platform::Event z;
@@ -8283,14 +8306,14 @@ static void round27_tests() {
       GameObject *c = ed.scene().find_by_name("Main Camera");
       int n = 0;
       if (c)
-        for (const auto &comp : c->components) n += dynamic_cast<RetroConsoleFilter *>(comp.get()) != nullptr;
+        n = (int)cf_all_retro(c).size();
       return n;
     };
     ed.step_frame_headless({z});
     CHECK(filters_on_camera() == 1);  // the second filter's creation is the last step
     ed.step_frame_headless({z});      // FogEnd
     {
-      RetroConsoleFilter *r = ed.scene().find_by_name("Main Camera")->get<RetroConsoleFilter>();
+      RetroConsoleFilter *r = cf_get_retro(ed.scene().find_by_name("Main Camera"));
       CHECK(r && r->fog_end != 12.0f);
     }
     for (int i = 0; i < 40 && filters_on_camera() > 0; i++) ed.step_frame_headless({z});
@@ -8304,25 +8327,23 @@ static void round27_tests() {
     GameObject *cam = ed.scene().find_by_name("Main Camera");
     CHECK(cam != nullptr);
     if (!cam) return;
-    auto *a = cam->add<RetroConsoleFilter>();
+    auto *a = cf_add_retro(cam);
     a->width = 64, a->height = 48, a->fit = 1, a->vertex_snap = true, a->snap_grid = 2.5f, a->affine_textures = false;
     a->texture_filter = 2, a->max_texture_size = 128, a->mipmaps = true, a->color_depth = RetroImageParams::Full, a->dither = RetroImageParams::Bayer4;
     a->fog = true, a->fog_start = 4.0f, a->fog_end = 22.0f, a->fog_color = {0.1f, 0.2f, 0.3f};
-    auto *b = cam->add<RetroConsoleFilter>();  // untouched: the preset
+    auto *b = cf_add_retro(cam);  // untouched: the preset
     b->enabled = false;
     const std::string text = save_scene_text(ed.scene());
-    CHECK(text.find("Retro Console Filter") != std::string::npos);
+    CHECK(text.find("Camera Filters") != std::string::npos && text.find("Retro Console") != std::string::npos);
     /* Clones (Duplicate, undo snapshots, Play mode) carry every field. */
     std::unique_ptr<Scene> copy = ed.scene().clone();
     GameObject *cc = copy->find_by_name("Main Camera");
     CHECK(cc != nullptr);
     if (cc) {
-      std::vector<RetroConsoleFilter *> cl;
-      for (const auto &c : cc->components)
-        if (auto *r = dynamic_cast<RetroConsoleFilter *>(c.get())) cl.push_back(r);
+      std::vector<RetroConsoleFilter *> cl = cf_all_retro(cc);
       CHECK(cl.size() == 2);
       if (cl.size() == 2) {
-        CHECK(cl[0]->width == 64 && cl[0]->snap_grid == 2.5f && cl[0]->fog && cl[0]->fog_end == 22.0f && cl[0]->owner == cc);
+        CHECK(cl[0]->width == 64 && cl[0]->snap_grid == 2.5f && cl[0]->fog && cl[0]->fog_end == 22.0f && cc->get<CameraFilters>()->owner == cc);
         CHECK(!cl[1]->enabled);
       }
     }
@@ -8331,7 +8352,7 @@ static void round27_tests() {
     ed.command("select Main Camera");
     ed.command("duplicate");
     int owners = 0;
-    ed.scene().for_each([&](GameObject &g) { owners += g.get<RetroConsoleFilter>() != nullptr; });
+    ed.scene().for_each([&](GameObject &g) { owners += cf_get_retro(&g) != nullptr; });
     CHECK(owners == 2);
     Scene loaded;
     std::string err;
@@ -8339,9 +8360,7 @@ static void round27_tests() {
     GameObject *lc = loaded.find_by_name("Main Camera");
     CHECK(lc != nullptr);
     if (!lc) return;
-    std::vector<RetroConsoleFilter *> fl;
-    for (const auto &c : lc->components)
-      if (auto *r = dynamic_cast<RetroConsoleFilter *>(c.get())) fl.push_back(r);
+    std::vector<RetroConsoleFilter *> fl = cf_all_retro(lc);
     CHECK(fl.size() == 2);
     if (fl.size() != 2) return;
     const RetroConsoleFilter *x = fl[0], *y = fl[1];
@@ -8394,7 +8413,7 @@ static void round27_tests() {
     GameObject *cam = ed.scene().find_by_name("Main Camera");
     CHECK(cam != nullptr);
     if (!cam) return;
-    RetroConsoleFilter *f = cam->add<RetroConsoleFilter>();
+    RetroConsoleFilter *f = cf_add_retro(cam);
     /* A disabled filter changes nothing. */
     f->enabled = false;
     settle();
@@ -8448,7 +8467,7 @@ static void round27_tests() {
     CHECK(lb_not15 == 0);
     /* Two filters: the later (coarser) one sets the size, and the picture is still 15-bit. */
     f->fit = 0;
-    RetroConsoleFilter *g = cam->add<RetroConsoleFilter>();
+    RetroConsoleFilter *g = cf_add_retro(cam);
     g->width = 24;
     g->height = 18;
     settle();
@@ -8461,9 +8480,7 @@ static void round27_tests() {
       for (int x = inner.x; x < inner.right(); x++) two_not15 += !cf_is_15bit(two[(size_t)y * FW + x]);
     CHECK(two_not15 == 0 && two != ps1);
     /* Removing the filters brings the old picture back. */
-    cam->components.erase(std::remove_if(cam->components.begin(), cam->components.end(),
-                                         [](const std::unique_ptr<Component> &c) { return dynamic_cast<RetroConsoleFilter *>(c.get()) != nullptr; }),
-                          cam->components.end());
+    if (auto *cf = cam->get<CameraFilters>()) cf->effects.clear();
     settle();
     CHECK(same(grab(), base));
   });
@@ -8510,7 +8527,7 @@ static void round27_tests() {
     GameObject *cam = ed.scene().find_by_name("Main Camera");
     CHECK(cam != nullptr);
     if (!cam) return;
-    RetroConsoleFilter *f = cam->add<RetroConsoleFilter>();
+    RetroConsoleFilter *f = cf_add_retro(cam);
     f->width = 80;
     f->height = 60;
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
@@ -8584,7 +8601,7 @@ static void round27_tests() {
         set_env("BLENDITY_PROJECT", "");
         return;
       }
-      RetroConsoleFilter *f = main->add<RetroConsoleFilter>();
+      RetroConsoleFilter *f = cf_add_retro(main);
       f->width = 48;
       f->height = 27;
       /* A second camera with no filter, in the sequence after the first. */
@@ -8730,7 +8747,7 @@ static void round27_tests() {
     GameObject *cam = ed.selected_object();
     CHECK(cam != nullptr);
     if (!cam) return;
-    cam->add<RetroConsoleFilter>();
+    cf_add_retro(cam);
     ed.command("camerapreview rendered");
     const Recti view = ed.scene_view_rect();
     /* The inset sits in the Scene view's lower right corner. */
@@ -8764,7 +8781,7 @@ static void round27_tests() {
     const std::vector<uint32_t> after_depth = settle();
     CHECK(after_depth != after_size);
     /* Disabling the component refreshes it again. */
-    cam->get<RetroConsoleFilter>()->enabled = false;
+    cf_get_retro(cam)->enabled = false;
     const std::vector<uint32_t> after_off = settle();
     CHECK(after_off != after_depth);
   });
@@ -8882,5 +8899,859 @@ static void round28_tests() {
     const size_t verts1 = cube->get<MeshFilter>()->mesh->vert_count();
     std::printf("    after Apply: %d modifiers left, %zu -> %zu vertices in the mesh\n", arrays, verts0, verts1);
     CHECK(arrays == 1 && verts1 > verts0);
+  });
+}
+
+/* ===================================================================== */
+/* Round 29 (task 0005): the Camera Filters stack, Retro Console presets  */
+/* ===================================================================== */
+
+static CameraFilters *r29_stack(Editor &ed) {
+  GameObject *c = ed.scene().find_by_name("Main Camera");
+  return c ? c->get<CameraFilters>() : nullptr;
+}
+static std::vector<RetroConsoleFilter *> r29_effects(Editor &ed) {
+  return cf_all_retro(ed.scene().find_by_name("Main Camera"));
+}
+
+static void round29_tests() {
+  using ET = platform::EventType;
+  auto ev = [](ET t, int x, int y) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    return e;
+  };
+  auto click = [&](Editor &ed, int x, int y) {
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+  };
+  /* Foldouts closed, so the stack's buttons stay on screen. */
+  auto collapse = [&](Editor &ed) {
+    if (CameraFilters *cf = r29_stack(ed))
+      for (auto &e : cf->effects) e->ui_expanded = false;
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+  };
+  /* Opens a button's popup; returns its rect (empty when the button or popup isn't there). */
+  auto open_menu = [&](Editor &ed, const std::string &key) {
+    collapse(ed);
+    const Recti b = ed.inspector_menu_rect_for_test(key);
+    if (b.w <= 0) return Recti{0, 0, 0, 0};
+    click(ed, b.x + b.w / 2, b.y + b.h / 2);
+    const auto &rects = ed.ui_for_test().popup_rects();
+    return rects.empty() ? Recti{0, 0, 0, 0} : rects.back();
+  };
+  auto pick_row = [&](Editor &ed, const Recti &pop, int row_index) {
+    const int row = ed.ui_for_test().row_h();
+    click(ed, pop.x + pop.w / 2, pop.y + ed.ui_for_test().px(4) + row * row_index + row / 2);
+  };
+  auto pick_last = [&](Editor &ed, const Recti &pop) {  // "Remove Filter", below a separator
+    const int row = ed.ui_for_test().row_h();
+    click(ed, pop.x + pop.w / 2, pop.bottom() - ed.ui_for_test().px(4) - row / 2);
+  };
+  auto cmd = [&](Editor &ed, const char *c) {
+    ed.command(c);
+    ed.step_frame_headless();
+  };
+  auto redo_key = [&](Editor &ed) {  // the console's `redo` adjusts the last edit operator; undo/redo is Ctrl+Z / Ctrl+Y
+    platform::Event y;
+    y.type = ET::KeyDown;
+    y.key = platform::KEY_Y;
+    y.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({y});
+    ed.step_frame_headless();
+  };
+  auto close_popups = [&](Editor &ed) {
+    for (int i = 0; i < 3 && !ed.ui_for_test().popup_rects().empty(); i++) {
+      platform::Event e;
+      e.type = ET::KeyDown;
+      e.key = platform::KEY_ESCAPE;
+      ed.step_frame_headless({e});
+      ed.step_frame_headless();
+    }
+  };
+  auto widths = [&](Editor &ed) {
+    std::vector<int> w;
+    for (RetroConsoleFilter *r : r29_effects(ed)) w.push_back(r->width);
+    return w;
+  };
+
+  /* ---------------------------------------------------------------- 1 */
+  test("filter stack: Add Filter lists Retro Console under its category and a click adds it, as one undo step", [&] {
+    Editor ed;
+    ed.init_headless(1600, 1200);
+    ed.step_frame_headless();
+    cmd(ed, "select Main Camera");
+    cmd(ed, "component Camera Filters");
+    CameraFilters *cf = r29_stack(ed);
+    CHECK(cf != nullptr && cf->effects.empty());
+    if (!cf) return;
+    /* The registry: Retro Console is a known effect in the Retro Console category. */
+    const FilterEffectInfo *info = find_filter_effect_info("Retro Console");
+    CHECK(info && info->category == "Retro Console" && !info->help.empty());
+    CHECK(create_filter_effect("Retro Console") != nullptr && create_filter_effect("No Such Effect") == nullptr);
+    CHECK(find_filter_effect_info("No Such Effect") == nullptr);
+    bool listed = false;
+    for (const FilterEffectInfo &fi : filter_effect_infos()) listed = listed || fi.name == "Retro Console";
+    CHECK(listed);
+    const Recti pop = open_menu(ed, "add_filter");
+    CHECK(pop.w > 0);
+    if (pop.w <= 0) return;
+    pick_row(ed, pop, 1);  // row 0 is the category label
+    cf = r29_stack(ed);
+    CHECK(cf && cf->effects.size() == 1 && std::string(cf->effects[0]->type_name()) == "Retro Console");
+    cmd(ed, "undo");
+    cf = r29_stack(ed);
+    CHECK(cf && cf->effects.empty());  // the click was one undo step
+    redo_key(ed);
+    cf = r29_stack(ed);
+    CHECK(cf && cf->effects.size() == 1);
+  });
+
+  test("filter stack: each effect's menu (Move Up, Move Down, Reset, Remove Filter) works by real clicks, one undo step each", [&] {
+    Editor ed;
+    ed.init_headless(1600, 1200);
+    ed.step_frame_headless();
+    cmd(ed, "select Main Camera");
+    cmd(ed, "filter add Retro Console");
+    cmd(ed, "filter add Retro Console");
+    CHECK(r29_effects(ed).size() == 2);
+    cmd(ed, "set CameraFilters.E0Width 100");
+    cmd(ed, "set CameraFilters.E1Width 200");
+    CHECK((widths(ed) == std::vector<int>{100, 200}));
+    /* Move Down on effect 0. */
+    Recti pop = open_menu(ed, "filter0");
+    CHECK(pop.w > 0);
+    if (pop.w <= 0) return;
+    pick_row(ed, pop, 1);
+    CHECK((widths(ed) == std::vector<int>{200, 100}));
+    cmd(ed, "undo");
+    CHECK((widths(ed) == std::vector<int>{100, 200}));
+    /* Move Up on effect 1. */
+    pop = open_menu(ed, "filter1");
+    CHECK(pop.w > 0);
+    if (pop.w <= 0) return;
+    pick_row(ed, pop, 0);
+    CHECK((widths(ed) == std::vector<int>{200, 100}));
+    cmd(ed, "undo");
+    CHECK((widths(ed) == std::vector<int>{100, 200}));
+    /* Move Up on the first effect is a disabled item: nothing moves. */
+    pop = open_menu(ed, "filter0");
+    if (pop.w > 0) pick_row(ed, pop, 0);
+    close_popups(ed);
+    CHECK((widths(ed) == std::vector<int>{100, 200}));
+    /* Reset: back to the PS1 preset. */
+    pop = open_menu(ed, "filter0");
+    CHECK(pop.w > 0);
+    if (pop.w <= 0) return;
+    pick_row(ed, pop, 2);
+    {
+      const std::vector<int> w = widths(ed);
+      CHECK(w.size() == 2 && w[0] == 320 && w[1] == 200);
+    }
+    cmd(ed, "undo");
+    {
+      const std::vector<int> w = widths(ed);
+      CHECK(w.size() == 2 && w[0] == 100 && w[1] == 200);
+    }
+    /* Remove Filter. */
+    pop = open_menu(ed, "filter0");
+    CHECK(pop.w > 0);
+    if (pop.w <= 0) return;
+    pick_last(ed, pop);
+    CHECK((widths(ed) == std::vector<int>{200}));
+    cmd(ed, "undo");
+    CHECK((widths(ed) == std::vector<int>{100, 200}));
+  });
+
+  test("filter stack: the enabled checkbox toggles an effect by a real click, as one undo step", [&] {
+    Editor ed;
+    ed.init_headless(1600, 1200);
+    ed.step_frame_headless();
+    cmd(ed, "select Main Camera");
+    cmd(ed, "filter add Retro Console");
+    collapse(ed);
+    const Recti mr = ed.inspector_menu_rect_for_test("filter0");
+    CHECK(mr.w > 0);
+    if (mr.w <= 0) return;
+    const Recti insp = ed.window_rect_for_test(WindowKind::Inspector);
+    CHECK(insp.w > 0);
+    CHECK(r29_effects(ed).size() == 1 && r29_effects(ed)[0]->enabled);
+    /* The checkbox isn't recorded: sweep the header row from the left until the flag flips. */
+    const int y = mr.y + mr.h / 2;
+    bool flipped = false;
+    for (int x = std::max(insp.x + 2, mr.x - ed.ui_for_test().px(300)); x < mr.x && !flipped; x += ed.ui_for_test().px(2)) {
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      ed.step_frame_headless();
+      auto fx = r29_effects(ed);
+      flipped = !fx.empty() && !fx[0]->enabled;
+    }
+    CHECK(flipped);
+    if (!flipped) return;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    cmd(ed, "undo");
+    CHECK(r29_effects(ed).size() == 1 && r29_effects(ed)[0]->enabled);
+    redo_key(ed);
+    CHECK(r29_effects(ed).size() == 1 && !r29_effects(ed)[0]->enabled);
+  });
+
+  /* ---------------------------------------------------------------- 2 */
+  test("filter stack: the console's filter add / list / move / reset / remove and set CameraFilters.E0Width, each undoing", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    cmd(ed, "select Main Camera");
+    GameObject *cam = ed.selected_object();
+    CHECK(cam && !cam->get<CameraFilters>());
+    cmd(ed, "filter list");  // with no stack: lists what could be added, doesn't crash
+    cmd(ed, "filter add No Such Effect");
+    CHECK(!ed.scene().find_by_name("Main Camera")->get<CameraFilters>());
+    cmd(ed, "filter add Retro Console");
+    CHECK(r29_stack(ed) != nullptr && r29_effects(ed).size() == 1);
+    cmd(ed, "filter add Retro Console");
+    CHECK(r29_effects(ed).size() == 2);
+    cmd(ed, "filter list");
+    cmd(ed, "set CameraFilters.E0Width 160");
+    CHECK((widths(ed) == std::vector<int>{160, 320}));
+    cmd(ed, "set RetroConsole.Width 96");  // the effect's own name: the first one
+    CHECK(widths(ed)[0] == 96);
+    cmd(ed, "set CameraFilters.E1Height 100");
+    CHECK(r29_effects(ed)[1]->height == 100);
+    cmd(ed, "set CameraFilters.E1Enabled false");
+    CHECK(!r29_effects(ed)[1]->enabled);
+    cmd(ed, "filter move 0 1");
+    CHECK(r29_effects(ed)[0]->height == 100 && r29_effects(ed)[1]->width == 96);
+    cmd(ed, "filter move 0 99");  // clamped to the end
+    CHECK(r29_effects(ed)[1]->height == 100);
+    cmd(ed, "filter move 1 1");   // nothing to do
+    cmd(ed, "filter reset 0");
+    CHECK(r29_effects(ed)[0]->width == 320 && r29_effects(ed)[0]->height == 240 && r29_effects(ed)[0]->enabled);
+    cmd(ed, "filter remove 7");  // out of range: refused
+    cmd(ed, "filter reset -1");
+    CHECK(r29_effects(ed).size() == 2);
+    cmd(ed, "filter remove 1");
+    CHECK(r29_effects(ed).size() == 1);
+    /* Undo walks back through the removal and the reset. */
+    cmd(ed, "undo");
+    CHECK(r29_effects(ed).size() == 2);
+    cmd(ed, "undo");
+    CHECK(r29_effects(ed)[0]->width == 96 && r29_effects(ed)[1]->height == 100);  // before the reset
+    /* A Retro Console effect added with the old component name lands in the same stack. */
+    cmd(ed, "component Retro Console Filter");
+    CHECK(r29_effects(ed).size() == 3 && ed.scene().find_by_name("Main Camera")->get<CameraFilters>()->effects.size() == 3);
+    int stacks = 0;
+    for (auto &c : ed.scene().find_by_name("Main Camera")->components) stacks += std::string(c->type_name()) == "Camera Filters";
+    CHECK(stacks == 1);
+    /* A preset chosen by console fills in its fields. */
+    cmd(ed, "set CameraFilters.E2Console 3");
+    CHECK(r29_effects(ed)[2]->console == RetroConsoleFilter::DOS && r29_effects(ed)[2]->width == 320 && r29_effects(ed)[2]->height == 200);
+    CHECK(r29_effects(ed)[2]->color_depth == RetroImageParams::Palette256);
+  });
+
+  /* ---------------------------------------------------------------- 3 */
+  test("filter stack: a two-effect stack saves, loads and round-trips; clones and Duplicate deep-copy it", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    auto *a = cf_add_retro(cam);
+    a->apply_preset(RetroConsoleFilter::N64);
+    a->console = RetroConsoleFilter::N64;
+    a->width = 160, a->fog_end = 33.0f;
+    auto *b = cf_add_retro(cam);
+    b->console = RetroConsoleFilter::DOS;
+    b->apply_preset(RetroConsoleFilter::DOS);
+    b->height = 100, b->enabled = false;
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("component Camera Filters") != std::string::npos && text.find("component Retro Console Filter") == std::string::npos);
+    Scene loaded;
+    std::string err;
+    CHECK(load_scene_text(text, loaded, err));
+    auto *lc = loaded.find_by_name("Main Camera");
+    CHECK(lc != nullptr);
+    if (!lc) return;
+    auto fl = cf_all_retro(lc);
+    CHECK(fl.size() == 2);
+    if (fl.size() != 2) return;
+    CHECK(fl[0]->enabled && fl[0]->console == RetroConsoleFilter::N64 && fl[0]->width == 160 && fl[0]->fog_end == 33.0f);
+    CHECK(fl[0]->texture_filter == RetroConsoleFilter::ThreePoint && fl[0]->max_texture_size == 64 && fl[0]->mipmaps && fl[0]->fog);
+    CHECK(!fl[1]->enabled && fl[1]->console == RetroConsoleFilter::DOS && fl[1]->height == 100 && fl[1]->width == 320);
+    CHECK(fl[1]->color_depth == RetroImageParams::Palette256 && fl[1]->dither == RetroImageParams::Bayer4);
+    CHECK(save_scene_text(loaded) == text);  // byte for byte
+    /* A scene clone copies the effects, not shares them. */
+    std::unique_ptr<Scene> copy = ed.scene().clone();
+    auto cl = cf_all_retro(copy->find_by_name("Main Camera"));
+    CHECK(cl.size() == 2 && cl[0] != a && cl[1] != b);
+    if (cl.size() == 2) {
+      cl[0]->width = 777;
+      cl[1]->enabled = true;
+      cl[0]->apply_preset(RetroConsoleFilter::Saturn);
+      CHECK(a->width == 160 && !b->enabled && !a->screen_door);
+      CHECK(cl[0]->screen_door && cf_all_retro(cam)[0]->width == 160);
+    }
+    /* The component's copy constructor and assignment deep-copy too. */
+    CameraFilters orig;
+    orig.add("Retro Console");
+    CameraFilters dup(orig);
+    CHECK(dup.effects.size() == 1 && dup.effects[0].get() != orig.effects[0].get());
+    dup.find<RetroConsoleFilter>()->width = 64;
+    CHECK(orig.find<RetroConsoleFilter>()->width == 320);
+    CameraFilters assigned;
+    assigned.add("Retro Console");
+    assigned.add("Retro Console");
+    assigned = orig;
+    CHECK(assigned.effects.size() == 1 && assigned.effects[0].get() != orig.effects[0].get());
+    CHECK(orig.add("No Such Effect") == nullptr && orig.effects.size() == 1);
+    /* Duplicate in the editor, then edit the duplicate: the original keeps its values. */
+    ed.command("select Main Camera");
+    ed.command("duplicate");
+    GameObject *dupe = ed.selected_object();
+    CHECK(dupe != nullptr && dupe != ed.scene().find_by_name("Main Camera"));
+    if (dupe) {
+      auto dl = cf_all_retro(dupe);
+      CHECK(dl.size() == 2);
+      if (dl.size() == 2) {
+        dl[0]->width = 555;
+        CHECK(cf_all_retro(ed.scene().find_by_name("Main Camera"))[0]->width == 160);
+        CHECK(dl[1]->height == 100 && !dl[1]->enabled);
+      }
+    }
+  });
+
+  test("filter stack: the component's hash changes with any effect field, the order, the enabled flag or the count (Camera Preview refresh)", [&] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    auto *a = cf_add_retro(cam);
+    auto *b = cf_add_retro(cam);
+    b->apply_preset(RetroConsoleFilter::DOS);
+    b->console = RetroConsoleFilter::DOS;
+    CameraFilters *cf = cam->get<CameraFilters>();
+    const uint64_t h0 = hash_component(*cf);
+    CHECK(hash_component(*cf) == h0);  // stable
+    a->width = 100;
+    const uint64_t h1 = hash_component(*cf);
+    CHECK(h1 != h0);
+    b->fog_end += 1.0f;
+    const uint64_t h2 = hash_component(*cf);
+    CHECK(h2 != h1);
+    b->enabled = false;
+    const uint64_t h3 = hash_component(*cf);
+    CHECK(h3 != h2);
+    b->enabled = true;
+    CHECK(hash_component(*cf) == h2);
+    std::swap(cf->effects[0], cf->effects[1]);
+    CHECK(hash_component(*cf) != h2);  // order matters
+    std::swap(cf->effects[0], cf->effects[1]);
+    cf->effects.pop_back();
+    CHECK(hash_component(*cf) != h2);
+    /* The Rendered Camera Preview rebuilds when a stack field changes through the console. */
+    ed.command("set Render.PreviewSamples 1");
+    ed.command("select Main Camera");
+    cf_add_retro(ed.scene().find_by_name("Main Camera"));
+    ed.command("camerapreview rendered");
+    const Recti view = ed.scene_view_rect();
+    const Recti corner(view.x + view.w * 2 / 3, view.y + view.h * 2 / 3, view.w / 3 - 4, view.h / 3 - 4);
+    auto grab = [&] {
+      std::vector<uint32_t> out;
+      const Image &fb = ed.framebuffer();
+      for (int y = corner.y; y < corner.bottom(); y++) out.insert(out.end(), fb.pixels.data() + (size_t)y * fb.width + corner.x, fb.pixels.data() + (size_t)y * fb.width + corner.right());
+      return out;
+    };
+    auto settle = [&] {
+      std::vector<uint32_t> prev;
+      for (int i = 0; i < 400; i++) {
+        ed.step_frame_headless();
+        std::vector<uint32_t> now = grab();
+        if (!prev.empty() && now == prev && i > 3) return now;
+        prev = now;
+      }
+      return prev;
+    };
+    const std::vector<uint32_t> first = settle();
+    CHECK(first == settle());
+    ed.command("set CameraFilters.E1Width 16");
+    ed.command("set CameraFilters.E1Height 16");
+    CHECK(settle() != first);
+  });
+
+  test("filter stack: a scene saved with task 0004's Retro Console Filter components loads into a Camera Filters stack", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    std::string text = save_scene_text(ed.scene());
+    const size_t o = text.find("\"Main Camera\"");
+    CHECK(o != std::string::npos);
+    if (o == std::string::npos) return;
+    const size_t t = text.find("\ntransform ", o);
+    CHECK(t != std::string::npos);
+    if (t == std::string::npos) return;
+    const size_t at = text.find('\n', t + 1) + 1;
+    const std::string legacy =
+        "component Retro Console Filter 1\n  Console 1\n  Width 64\n  Height 48\n  Fog 1\n  Fog_Start 4\nend\n"
+        "component Retro Console Filter 0\nend\n";
+    text.insert(at, legacy);
+    Scene loaded;
+    std::string err;
+    CHECK(load_scene_text(text, loaded, err));
+    GameObject *lc = loaded.find_by_name("Main Camera");
+    CHECK(lc != nullptr);
+    if (!lc) return;
+    int stacks = 0, old_components = 0;
+    for (auto &c : lc->components) {
+      stacks += std::string(c->type_name()) == "Camera Filters";
+      old_components += std::string(c->type_name()) == "Retro Console Filter";
+    }
+    CHECK(stacks == 1 && old_components == 0);
+    auto fl = cf_all_retro(lc);
+    CHECK(fl.size() == 2);
+    if (fl.size() != 2) return;
+    /* The block's own values beat the preset it names; the rest follow the preset. */
+    CHECK(fl[0]->enabled && fl[0]->console == RetroConsoleFilter::N64 && fl[0]->width == 64 && fl[0]->height == 48);
+    CHECK(fl[0]->fog && fl[0]->fog_start == 4.0f && fl[0]->texture_filter == RetroConsoleFilter::ThreePoint && fl[0]->max_texture_size == 64);
+    CHECK(!fl[1]->enabled && fl[1]->console == RetroConsoleFilter::PS1 && fl[1]->width == 320 && fl[1]->height == 240);
+    /* Saving again writes the new form, and that loads to the same stack. */
+    const std::string again = save_scene_text(loaded);
+    CHECK(again.find("component Camera Filters") != std::string::npos && again.find("component Retro Console Filter") == std::string::npos);
+    Scene second;
+    CHECK(load_scene_text(again, second, err));
+    CHECK(save_scene_text(second) == again);
+  });
+
+  /* ---------------------------------------------------------------- 4 */
+  test("filter stack: an empty stack, or one with every effect off, gives the same Game view as no component", [&] {
+    /* The stack itself contributes nothing. */
+    {
+      CameraFilters cf;
+      FilterStack s;
+      cf.contribute(s);
+      CHECK(s.empty());
+      cf.add("Retro Console")->enabled = false;
+      cf.add("Retro Console")->enabled = false;
+      FilterStack s2;
+      cf.contribute(s2);
+      CHECK(s2.empty());
+      cf.effects[1]->enabled = true;
+      FilterStack s3;
+      cf.contribute(s3);
+      CHECK(!s3.empty());
+    }
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("window Game");
+    auto settle = [&] {
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    };
+    auto grab = [&] { return std::vector<uint32_t>(ed.framebuffer().pixels.begin(), ed.framebuffer().pixels.end()); };
+    settle();
+    const std::vector<uint32_t> base = grab();
+    const int FW = ed.framebuffer().width;
+    auto diff = [&](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      const Recti r = ed.scene_view_rect();
+      size_t n = 0;
+      for (int y = r.y; y < r.bottom(); y++)
+        for (int x = r.x; x < r.right(); x++) n += a[(size_t)y * FW + x] != b[(size_t)y * FW + x];
+      return n;
+    };
+    const size_t area = (size_t)ed.scene_view_rect().w * ed.scene_view_rect().h;
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    cam->add<CameraFilters>();
+    settle();
+    CHECK(diff(grab(), base) <= area / 1000);  // an empty stack
+    auto *f = cf_add_retro(cam);
+    auto *g = cf_add_retro(cam);
+    f->enabled = g->enabled = false;
+    settle();
+    CHECK(diff(grab(), base) <= area / 1000);  // all off
+    f->enabled = true;
+    f->width = 48, f->height = 36;
+    settle();
+    CHECK(diff(grab(), base) > area / 20);  // the check can fail: one on changes the picture
+  });
+
+  /* ---------------------------------------------------------------- 5 */
+  test("presets: PS1, N64, Saturn and DOS fill in the documented fields and contribute them to the stack", [&] {
+    RetroConsoleFilter p;
+    p.apply_preset(RetroConsoleFilter::PS1);
+    CHECK(p.width == 320 && p.height == 240 && p.vertex_snap && p.affine_textures && p.texture_filter == RetroConsoleFilter::Nearest);
+    CHECK(p.max_texture_size == 256 && !p.mipmaps && p.color_depth == RetroImageParams::Bits15 && p.dither == RetroImageParams::Ps1);
+    CHECK(!p.screen_door && !p.fog);
+    RetroConsoleFilter n;
+    n.apply_preset(RetroConsoleFilter::N64);
+    CHECK(n.width == 320 && n.height == 240 && !n.vertex_snap && !n.affine_textures);
+    CHECK(n.texture_filter == RetroConsoleFilter::ThreePoint && n.max_texture_size == 64 && n.mipmaps);
+    CHECK(n.color_depth == RetroImageParams::Bits15 && n.dither != RetroImageParams::NoDither && n.fog && !n.screen_door);
+    RetroConsoleFilter s;
+    s.apply_preset(RetroConsoleFilter::Saturn);
+    CHECK(s.width == 320 && s.height == 224 && s.vertex_snap && s.affine_textures && s.texture_filter == RetroConsoleFilter::Nearest);
+    CHECK(s.screen_door && s.color_depth == RetroImageParams::Bits15 && !s.fog);
+    RetroConsoleFilter d;
+    d.apply_preset(RetroConsoleFilter::DOS);
+    CHECK(d.width == 320 && d.height == 200 && d.affine_textures && d.texture_filter == RetroConsoleFilter::Nearest);
+    CHECK(d.color_depth == RetroImageParams::Palette256 && d.dither != RetroImageParams::NoDither && !d.screen_door);
+    /* A preset clears the earlier one's extras (Saturn's screen-door, N64's fog). */
+    s.apply_preset(RetroConsoleFilter::PS1);
+    CHECK(!s.screen_door);
+    n.apply_preset(RetroConsoleFilter::DOS);
+    CHECK(!n.fog);
+    /* What N64 hands the stack. */
+    RetroConsoleFilter n64;
+    n64.apply_preset(RetroConsoleFilter::N64);
+    FilterStack fs;
+    n64.contribute(fs);
+    CHECK(fs.vertex_snap == 0.0f && !fs.affine_uv && fs.tex.filter == (int)TexFilter::ThreePoint && fs.tex.max_size == 64 && fs.tex.mipmaps);
+    CHECK(fs.width == 320 && fs.height == 240 && !fs.screen_door && fs.passes.size() == 1);
+    RetroConsoleFilter sat;
+    sat.apply_preset(RetroConsoleFilter::Saturn);
+    FilterStack ss;
+    sat.contribute(ss);
+    CHECK(ss.screen_door && ss.vertex_snap > 0.0f && ss.affine_uv && ss.width == 320 && ss.height == 224);
+    RasterOptions ro;
+    ss.apply_raster(ro);
+    CHECK(ro.screen_door);
+    RetroConsoleFilter dos;
+    dos.apply_preset(RetroConsoleFilter::DOS);
+    FilterStack ds;
+    dos.contribute(ds);
+    CHECK(ds.affine_uv && ds.vertex_snap == 0.0f && ds.width == 320 && ds.height == 200 && ds.passes.size() == 1 && !ds.screen_door);
+    /* Choosing a console (from a file or `set`) applies the preset when the effect is reflected. */
+    RetroConsoleFilter c;
+    c.console = RetroConsoleFilter::Saturn;
+    struct Probe : Reflector {
+      bool all_fields() const override { return false; }
+      void field(const char *, float &, float, float, float) override {}
+      void field(const char *, int &, int, int) override {}
+      void field(const char *, bool &) override {}
+      void field(const char *, Vec3 &) override {}
+      void color(const char *, Vec3 &) override {}
+      void enumeration(const char *, int &, const char *const *, int) override {}
+      void text(const char *, std::string &) override {}
+      void mesh(const char *, MeshPtr &) override {}
+      void texture(const char *, TextureRef &) override {}
+      void material_list(const char *, std::vector<MaterialPtr> &) override {}
+    } probe;
+    c.reflect(probe);
+    CHECK(c.applied_console == RetroConsoleFilter::Saturn && c.screen_door && c.height == 224);
+  });
+
+  test("N64 3-point filter: Texture::sample_level gives the exact 3-texel values on a 2x2 texture and differs from bilinear", [&] {
+    /* Texels (x, y): a=(0,0) b=(1,0) c=(0,1) d=(1,1), in the red channel 0, 100, 200, 250. */
+    Bitmap bmp;
+    bmp.width = bmp.height = 2;
+    bmp.rgba8.resize(2 * 2 * 4);
+    const uint8_t red[2][2] = {{0, 100}, {200, 250}};
+    for (int y = 0; y < 2; y++)
+      for (int x = 0; x < 2; x++) {
+        uint8_t *px = &bmp.rgba8[(size_t)(y * 2 + x) * 4];
+        px[0] = red[y][x], px[1] = 0, px[2] = 0, px[3] = 255;
+      }
+    Texture t;
+    t.build(bmp, false);
+    const float a = 0, b = 100 / 255.0f, c = 200 / 255.0f, d = 250 / 255.0f;
+    /* In texel space (fx, fy) = (tx, ty) between the four centres: u = (tx + .5) / 2, v = 1 - (ty + .5) / 2. */
+    const float pts[][2] = {{0.25f, 0.25f}, {0.75f, 0.75f}, {0.5f, 0.5f}, {0.1f, 0.6f}, {0.9f, 0.3f}, {0.0f, 0.0f}, {0.4f, 0.55f}, {0.8f, 0.8f}};
+    int differs = 0;
+    for (const auto &q : pts) {
+      const float tx = q[0], ty = q[1];
+      const Vec2 uv((tx + 0.5f) / 2, 1.0f - (ty + 0.5f) / 2);
+      const float expect = tx + ty <= 1.0f ? a + (b - a) * tx + (c - a) * ty : d + (c - d) * (1.0f - tx) + (b - d) * (1.0f - ty);
+      const Vec4 three = t.sample_level(uv, 0, TexWrap::Repeat, TexFilter::ThreePoint);
+      const Vec4 lin = t.sample_level(uv, 0, TexWrap::Repeat, TexFilter::Linear);
+      CHECK_NEAR(three.x, expect, 1e-4);
+      CHECK(three.y == 0.0f && three.z == 0.0f);
+      CHECK_NEAR(lin.x, (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty, 1e-4);
+      differs += std::fabs(three.x - lin.x) > 1e-3f;
+    }
+    CHECK(differs >= 5);  // at texel centres and on the diagonal the two can agree; elsewhere they don't
+    /* At a texel centre every filter gives that texel. */
+    CHECK_NEAR(t.sample_level({0.25f, 0.75f}, 0, TexWrap::Repeat, TexFilter::ThreePoint).x, a, 1e-4);
+    CHECK_NEAR(t.sample_level({0.75f, 0.25f}, 0, TexWrap::Repeat, TexFilter::ThreePoint).x, d, 1e-4);
+    /* It never overshoots the texel values. */
+    for (int i = 0; i <= 20; i++)
+      for (int j = 0; j <= 20; j++) {
+        const Vec4 v = t.sample_level({0.25f + 0.5f * i / 20, 0.25f + 0.5f * j / 20}, 0, TexWrap::Repeat, TexFilter::ThreePoint);
+        CHECK(v.x >= -1e-4f && v.x <= d + 1e-4f);
+      }
+  });
+
+  test("Saturn screen-door: a transparent quad over a background is an exact checkerboard of opaque pixels, nothing blended", [&] {
+    const int W = 64, H = 64;
+    const Mat4 v = Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(60 * kDeg2Rad, 1.0f, 0.1f, 100);
+    auto bg_scene = [&](CfScene &sc) { sc.add(primitives::quad(40.0f), Mat4::translate({0, 0, 10}), 1, cf_unlit({0.2f, 0.7f, 0.2f})); };
+    auto veil_mat = [&](int surface, float alpha) {
+      MaterialPtr m = cf_unlit({1.0f, 0.2f, 0.2f});
+      m->surface = surface;
+      m->alpha = alpha;
+      m->double_sided = true;
+      return m;
+    };
+    CfScene bg_only, opaque_veil, veil;
+    bg_scene(bg_only);
+    bg_scene(opaque_veil);
+    bg_scene(veil);
+    opaque_veil.add(primitives::quad(3.0f), Mat4::translate({0, 0, 5}), 2, veil_mat((int)MaterialSurface::Opaque, 1.0f));
+    veil.add(primitives::quad(3.0f), Mat4::translate({0, 0, 5}), 2, veil_mat((int)MaterialSurface::Transparent, 0.5f));
+    bg_only.seal();
+    opaque_veil.seal();
+    veil.seal();
+    Image bg, op, blended, door;
+    RenderTarget rb, ro, rl, rd;
+    RasterOptions plain, sd;
+    sd.screen_door = true;
+    cf_render(bg, rb, W, H, v, p, plain, bg_only);
+    cf_render(op, ro, W, H, v, p, plain, opaque_veil);
+    cf_render(blended, rl, W, H, v, p, plain, veil);
+    cf_render(door, rd, W, H, v, p, sd, veil);
+    /* The quad covers the middle half of the picture. */
+    const int x0 = 24, x1 = 40;
+    int mine = 0, theirs = 0, other = 0, mixed = 0;
+    for (int y = x0; y < x1; y++)
+      for (int x = x0; x < x1; x++) {
+        const uint32_t px = door.row(y)[x];
+        const bool show = ((x + y) & 1) == 0;
+        if (px == (show ? op.row(y)[x] : bg.row(y)[x])) (show ? mine : theirs)++;
+        else other++;
+        mixed += px != op.row(y)[x] && px != bg.row(y)[x];
+      }
+    std::printf("    screen-door: %d veil pixels, %d background pixels, %d wrong, %d blended\n", mine, theirs, other, mixed);
+    CHECK(mine == (x1 - x0) * (x1 - x0) / 2 && theirs == (x1 - x0) * (x1 - x0) / 2 && other == 0 && mixed == 0);
+    /* Without it the same quad blends: every pixel is in between. */
+    int blended_px = 0;
+    for (int y = x0; y < x1; y++)
+      for (int x = x0; x < x1; x++) blended_px += blended.row(y)[x] != op.row(y)[x] && blended.row(y)[x] != bg.row(y)[x];
+    CHECK(blended_px == (x1 - x0) * (x1 - x0));
+    /* Outside the quad nothing changes. */
+    CHECK(door.row(2)[2] == bg.row(2)[2] && door.row(60)[60] == bg.row(60)[60]);
+    /* A nearly clear surface (alpha < 0.1) vanishes instead of dotting the picture. */
+    CfScene clear;
+    bg_scene(clear);
+    clear.add(primitives::quad(3.0f), Mat4::translate({0, 0, 5}), 2, veil_mat((int)MaterialSurface::Transparent, 0.05f));
+    clear.seal();
+    Image cl;
+    RenderTarget rc;
+    cf_render(cl, rc, W, H, v, p, sd, clear);
+    CHECK(cl.pixels == bg.pixels);
+    /* The preset turns it on through the stack. */
+    RetroConsoleFilter sat;
+    sat.apply_preset(RetroConsoleFilter::Saturn);
+    FilterStack fs;
+    sat.contribute(fs);
+    RasterOptions viastack;
+    fs.apply_raster(viastack);
+    CHECK(viastack.screen_door);
+    Image via;
+    RenderTarget rv;
+    viastack.vertex_snap = 0.0f;  // keep the geometry as above; only the transparency rule is under test
+    viastack.affine_uv = false;
+    cf_render(via, rv, W, H, v, p, viastack, veil);
+    CHECK(via.pixels == door.pixels);
+  });
+
+  test("DOS palette: 256 distinct colours, nearest maps each to itself, and every pixel of a DOS frame is one of them", [&] {
+    const uint32_t *pal = retro_palette();
+    std::set<uint32_t> distinct;
+    for (int i = 0; i < 256; i++) distinct.insert(pal[i] & 0xFFFFFFu);
+    CHECK(distinct.size() == 256);
+    int self = 0, shown = 0;
+    for (int i = 0; i < 256; i++) {
+      const uint32_t c = pal[i];
+      const uint32_t got = retro_palette_nearest((c >> 16) & 255, (c >> 8) & 255, c & 255) & 0xFFFFFFu;
+      self += got == (c & 0xFFFFFFu);
+      if (got != (c & 0xFFFFFFu) && shown++ < 6) std::printf("    palette colour %06X maps to %06X\n", c & 0xFFFFFFu, got);
+    }
+    std::printf("    %d of 256 palette colours map to themselves\n", self);
+    CHECK(self == 256);  // each palette colour is its own nearest entry (a 5-bit lookup table got 14 wrong)
+    /* The 6x6x6 cube is in there. */
+    CHECK(distinct.count(0x000000u) && distinct.count(0xFFFFFFu) && distinct.count(0xFF3300u) && distinct.count(0x3399CCu));
+    /* Anything maps to a palette colour; out-of-range channels clamp. */
+    for (int r : {-50, 0, 7, 100, 130, 255, 400})
+      for (int g : {0, 33, 128, 254})
+        for (int b : {0, 90, 255, 1000}) CHECK(distinct.count(retro_palette_nearest(r, g, b) & 0xFFFFFFu));
+    /* Pure black stays black (the old 5-bit lookup table turned it into 060606). */
+    CHECK((retro_palette_nearest(-5, -5, -5) & 0xFFFFFFu) == 0u);
+    CHECK((retro_palette_nearest(999, 999, 999) & 0xFFFFFFu) == 0xFFFFFFu);
+    /* A rendered DOS frame: lit shapes, a textured sphere and the sky, through the preset's pass. */
+    CfScene sc;
+    auto grid = make_material("Grid", {0.9f, 0.9f, 0.9f});
+    grid->base_map.path = "generated:UV Grid";
+    sc.add(primitives::cube(), Mat4::translate({-1.2f, 0, 0}), 1, make_material("Red", {0.8f, 0.2f, 0.2f}));
+    sc.add(primitives::uv_sphere(0.8f, 24, 12), Mat4::translate({1.2f, 0, 0.5f}), 2, grid);
+    sc.add(primitives::plane(12.0f), Mat4::translate({0, -1, 0}), 3, make_material("Floor", {0.5f, 0.6f, 0.5f}));
+    sc.seal();
+    const Mat4 v = Mat4::look_at({0, 1.5f, -6}, {0, 0, 0}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(50 * kDeg2Rad, 320 / 200.0f, 0.1f, 100);
+    RetroConsoleFilter dos;
+    dos.apply_preset(RetroConsoleFilter::DOS);
+    FilterStack fs;
+    dos.contribute(fs);
+    CHECK(fs.passes.size() == 1);
+    RasterOptions ro;
+    fs.apply_raster(ro);
+    CHECK(ro.affine_uv);
+    Image img;
+    RenderTarget rt;
+    cf_render(img, rt, 320, 200, v, p, ro, sc);
+    const std::set<uint32_t> before(img.pixels.begin(), img.pixels.end());
+    CHECK(before.size() > 256);  // more colours than the palette, so the pass has work to do
+    FilterFrame frame;
+    frame.inv_view_proj = (p * v).inverse();
+    frame.eye = {0, 1.5f, -6};
+    frame.forward = normalize(Vec3(0, -1.5f, 6));
+    fs.passes[0](rt, &frame);
+    int outside = 0;
+    std::set<uint32_t> used;
+    for (uint32_t c : img.pixels) {
+      used.insert(c & 0xFFFFFFu);
+      outside += !distinct.count(c & 0xFFFFFFu);
+    }
+    std::printf("    DOS frame: %zu colours before, %zu after, %d pixels outside the palette\n", before.size(), used.size(), outside);
+    CHECK(outside == 0 && used.size() > 8 && used.size() <= 256);
+    /* Palette colours map to themselves, so running the palette pass again changes nothing */
+    const std::vector<uint32_t> once = img.pixels;
+    RetroImageParams again;
+    again.color_depth = RetroImageParams::Palette256;
+    again.dither = RetroImageParams::NoDither;
+    apply_retro_image(rt, again, nullptr);
+    CHECK(img.pixels == once);
+  });
+
+  /* ---------------------------------------------------------------- 6 */
+  test("filter stack: effects combine in list order (later resolution and filter win, the smaller texture cap wins, passes run in order)", [&] {
+    auto make = [&](bool ps1_first) {
+      CameraFilters cf;
+      cf.add("Retro Console");  // PS1
+      auto *b = static_cast<RetroConsoleFilter *>(cf.add("Retro Console"));
+      b->width = 160, b->height = 120, b->fit = 1;
+      b->max_texture_size = 64;
+      b->vertex_snap = false, b->affine_textures = false;
+      b->texture_filter = RetroConsoleFilter::Linear;
+      b->color_depth = RetroImageParams::Full;
+      b->dither = RetroImageParams::NoDither;
+      b->fog = true;
+      if (!ps1_first) std::swap(cf.effects[0], cf.effects[1]);
+      FilterStack s;
+      cf.contribute(s);
+      return s;
+    };
+    const FilterStack ab = make(true), ba = make(false);
+    /* [PS1, B]: B is later. */
+    CHECK(ab.width == 160 && ab.height == 120 && ab.fit == FilterStack::Letterbox);
+    CHECK(ab.tex.filter == (int)TexFilter::Linear && ab.tex.max_size == 64);
+    CHECK(ab.vertex_snap > 0.0f && ab.affine_uv);  // B doesn't undo A's switches
+    CHECK(!ab.tex.mipmaps);
+    CHECK(ab.passes.size() == 2);
+    /* [B, PS1]: PS1 is later. */
+    CHECK(ba.width == 320 && ba.height == 240 && ba.fit == FilterStack::Fill);
+    CHECK(ba.tex.filter == (int)TexFilter::Closest && ba.tex.max_size == 64);  // the smaller cap wins either way
+    CHECK(ba.passes.size() == 2);
+    /* A disabled effect adds nothing, wherever it sits. */
+    {
+      CameraFilters cf;
+      cf.add("Retro Console");
+      auto *off = static_cast<RetroConsoleFilter *>(cf.add("Retro Console"));
+      off->enabled = false;
+      off->width = 16, off->height = 16;
+      FilterStack s;
+      cf.contribute(s);
+      CHECK(s.width == 320 && s.height == 240 && s.passes.size() == 1);
+    }
+    /* Image passes run in list order: 15-bit then palette ends in the palette; palette then 15-bit ends in 15-bit. */
+    auto run = [&](int first_depth, int second_depth) {
+      CameraFilters cf;
+      auto *a = static_cast<RetroConsoleFilter *>(cf.add("Retro Console"));
+      auto *b = static_cast<RetroConsoleFilter *>(cf.add("Retro Console"));
+      a->color_depth = first_depth, a->dither = RetroImageParams::NoDither;
+      b->color_depth = second_depth, b->dither = RetroImageParams::NoDither;
+      FilterStack s;
+      cf.contribute(s);
+      CHECK(s.passes.size() == 2);
+      Image img;
+      img.resize(64, 64);
+      for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) img.row(y)[x] = 0xFF000000u | (uint32_t)(x * 4 + 1) << 16 | (uint32_t)(y * 4 + 3) << 8 | (uint32_t)((x + y) * 2 + 5);
+      RenderTarget rt;
+      rt.attach(img, {0, 0, 64, 64});
+      for (auto &pass : s.passes) pass(rt, nullptr);
+      return img;
+    };
+    const Image pal_last = run(RetroImageParams::Bits15, RetroImageParams::Palette256);
+    const Image b15_last = run(RetroImageParams::Palette256, RetroImageParams::Bits15);
+    std::set<uint32_t> pal;
+    for (int i = 0; i < 256; i++) pal.insert(retro_palette()[i] & 0xFFFFFFu);
+    int in_pal = 0, in_15 = 0, pal_in_15 = 0;
+    for (uint32_t c : pal_last.pixels) in_pal += pal.count(c & 0xFFFFFFu) > 0;
+    for (uint32_t c : b15_last.pixels) in_15 += cf_is_15bit(c), pal_in_15 += pal.count(c & 0xFFFFFFu) > 0;
+    CHECK(in_pal == 64 * 64);
+    CHECK(in_15 == 64 * 64);
+    CHECK(pal_in_15 < 64 * 64);  // 15-bit last leaves colours the palette doesn't have
+    CHECK(pal_last.pixels != b15_last.pixels);
+  });
+}
+
+/* Task 0005 review: an effect's field typed in the Inspector reaches every selected camera's stack
+ * (multi-object editing, as task 0004's separate components did). */
+static void round29_review_tests() {
+  test("filter stack: a Width typed in the Inspector with two cameras selected changes both cameras' effect", [] {
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y, int key = 0) {
+      platform::Event e;
+      e.type = t;
+      e.x = x;
+      e.y = y;
+      e.key = key;
+      return e;
+    };
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    ed.command("filter add Retro Console");
+    ed.command("duplicate");
+    ed.step_frame_headless();
+    GameObject *copy = ed.selected_object();
+    GameObject *main_cam = ed.scene().find_by_name("Main Camera");
+    CHECK(copy && main_cam && copy != main_cam && copy->get<CameraFilters>());
+    if (!copy || !main_cam || copy == main_cam) return;
+    ed.command("select Main Camera");
+    ed.command("selectadd " + copy->name);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti f = ed.inspector_menu_rect_for_test("field:E0 Width");
+    CHECK(f.w > 0);
+    if (f.w <= 0) return;
+    const int x = f.x + f.w / 2, y = f.y + f.h / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+    ed.step_frame_headless({ev(ET::KeyDown, x, y, platform::KEY_A)});  // a click selects the text; type over it
+    std::vector<platform::Event> typed;
+    for (char c : std::string("160")) {
+      platform::Event t = ev(ET::Text, x, y);
+      t.codepoint = (uint32_t)c;
+      typed.push_back(t);
+    }
+    ed.step_frame_headless(typed);
+    ed.step_frame_headless({ev(ET::KeyDown, x, y, platform::KEY_ENTER)});
+    ed.step_frame_headless({ev(ET::KeyUp, x, y, platform::KEY_ENTER)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const auto *a = cf_get_retro(main_cam), *b = cf_get_retro(copy);
+    std::printf("    Width after typing 160: Main Camera %d, its copy %d\n", a ? a->width : -1, b ? b->width : -1);
+    CHECK(a && b && a->width == 160 && b->width == 160);
   });
 }

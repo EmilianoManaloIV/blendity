@@ -61,12 +61,49 @@ int retro_dither_offset(int dither, int x, int y) {
   return 0;
 }
 
+const uint32_t *retro_palette() {
+  static const std::vector<uint32_t> pal = [] {
+    std::vector<uint32_t> v;
+    for (int r = 0; r < 6; r++)
+      for (int g = 0; g < 6; g++)
+        for (int b = 0; b < 6; b++) v.push_back(0xFF000000u | (uint32_t)(r * 51) << 16 | (uint32_t)(g * 51) << 8 | (uint32_t)(b * 51));
+    for (int i = 0; i < 40; i++) {  // greys between the cube's levels
+      const uint32_t c = (uint32_t)((i + 1) * 255 / 41);
+      v.push_back(0xFF000000u | c << 16 | c << 8 | c);
+    }
+    return v;
+  }();
+  return pal.data();
+}
+
+uint32_t retro_palette_nearest(int r, int g, int b) {
+  /* Exact, without a lookup table. The palette is a 6x6x6 cube plus a grey ramp, so the nearest
+   * cube colour rounds each channel to the nearest of its levels (the distance is a sum per
+   * channel), and the nearest grey is the one nearest the colour's mean (where the sum of squares
+   * is smallest). The nearer of the two wins, so a palette colour maps to itself. (A 32x32x32
+   * table of cell centres got 14 palette colours wrong, black among them: a test caught it.) */
+  r = std::max(0, std::min(255, r)), g = std::max(0, std::min(255, g)), b = std::max(0, std::min(255, b));
+  const uint32_t *pal = retro_palette();
+  auto level = [](int v) { return (v + 25) / 51; };  // 0..5: the nearest multiple of 51
+  const int cr = level(r) * 51, cg = level(g) * 51, cb = level(b) * 51;
+  const int dc = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb);
+  const double mean = (r + g + b) / 3.0;
+  int gi = (int)std::lround(mean * 41.0 / 255.0) - 1, best_g = 0, dg = 1 << 30;
+  for (int k = std::max(0, gi - 1); k <= std::min(39, gi + 1); k++) {  // grey k is (k + 1) * 255 / 41
+    const int v = (k + 1) * 255 / 41, d = (r - v) * (r - v) + (g - v) * (g - v) + (b - v) * (b - v);
+    if (d < dg) dg = d, best_g = k;
+  }
+  if (dg < dc) return pal[216 + best_g];
+  return pal[level(r) * 36 + level(g) * 6 + level(b)];
+}
+
 void apply_retro_image(RenderTarget &rt, const RetroImageParams &p, const FilterFrame *frame) {
   const int W = rt.width, H = rt.height;
   if (!rt.color || W <= 0 || H <= 0) return;
   const bool fog = p.fog && frame && (int)rt.depth.size() >= W * H;
-  const bool quantize = p.color_depth == RetroImageParams::Bits15;
-  if (!fog && !quantize) return;
+  const bool quantize = p.color_depth == RetroImageParams::Bits15, palette = p.color_depth == RetroImageParams::Palette256;
+  if (!fog && !quantize && !palette) return;
+  if (palette) retro_palette();  // built before the threads use it
   /* Finiteness from the bits throughout: the Windows build's /fp:fast may fold std::isfinite. */
   float f0 = finite_bits(p.fog_start) ? p.fog_start : 0.0f, f1 = finite_bits(p.fog_end) ? p.fog_end : f0;
   if (f1 < f0) std::swap(f0, f1);
@@ -97,6 +134,13 @@ void apply_retro_image(RenderTarget &rt, const RetroImageParams &p, const Filter
           r = std::max(0, std::min(255, r + d)) & 0xF8;
           g = std::max(0, std::min(255, g + d)) & 0xF8;
           b = std::max(0, std::min(255, b + d)) & 0xF8;
+        }
+        if (palette) {
+          /* The dither spans one step of the colour cube (51), so gradients become patterns of
+           * the two nearest levels instead of bands. */
+          const int d = p.dither == RetroImageParams::NoDither ? 0 : (int)std::lround((retro_dither_offset(p.dither, x, (int)y) + 0.5f) * 51.0f / 8.0f);
+          row[x] = (c & 0xFF000000u) | (retro_palette_nearest(r + d, g + d, b + d) & 0xFFFFFFu);
+          continue;
         }
         row[x] = (c & 0xFF000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
       }

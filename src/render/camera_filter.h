@@ -32,17 +32,19 @@ struct FilterStack {
   float vertex_snap = 0.0f;
   bool affine_uv = false;
   TexOverride tex;
+  bool screen_door = false;
   /* Internal resolution: 0 = the view's own. Fill keeps `height` rows and gives the width the
    * view's aspect (square pixels); Letterbox renders width x height and fits it, with bars. */
   enum Fit { Fill = 0, Letterbox = 1 };
   int width = 0, height = 0, fit = Fill;
   std::vector<FilterPass> passes;
 
-  bool empty() const { return vertex_snap <= 0.0f && !affine_uv && !tex.active() && height <= 0 && passes.empty(); }
+  bool empty() const { return vertex_snap <= 0.0f && !affine_uv && !tex.active() && !screen_door && height <= 0 && passes.empty(); }
   void apply_raster(RasterOptions &o) const {
     o.vertex_snap = vertex_snap;
     o.affine_uv = affine_uv;
     o.tex = tex;
+    o.screen_door = screen_door;
   }
 };
 
@@ -55,7 +57,7 @@ void upscale_nearest(const uint32_t *src, int sw, int sh, int sstride, uint32_t 
 
 /* The retro colour pass. */
 struct RetroImageParams {
-  enum Depth { Full = 0, Bits15 = 1 };
+  enum Depth { Full = 0, Bits15 = 1, Palette256 = 2 };
   enum Dither { NoDither = 0, Ps1 = 1, Bayer4 = 2 };
   int color_depth = Full;
   int dither = NoDither;
@@ -65,8 +67,13 @@ struct RetroImageParams {
 };
 /* The dither offset added to each 8-bit channel at (x, y) before truncation: -4..+3. */
 int retro_dither_offset(int dither, int x, int y);
-/* Fog (needs frame), then dither and truncate to 5 bits per channel. Pixels with nothing drawn
- * (depth 1, the sky) take no fog. */
+/* The 256-colour palette (0xFF RRGGBB): a 6x6x6 colour cube (0, 51 ... 255 per channel, the
+ * "web-safe" layout VGA games often loaded) and 40 greys between its levels. */
+const uint32_t *retro_palette();
+/* The palette entry nearest an 8-bit colour, exactly (each palette colour maps to itself). */
+uint32_t retro_palette_nearest(int r, int g, int b);
+/* Fog (needs frame), then dither and either truncate to 5 bits per channel or map to the
+ * 256-colour palette. Pixels with nothing drawn (depth 1, the sky) take no fog. */
 void apply_retro_image(RenderTarget &rt, const RetroImageParams &p, const FilterFrame *frame);
 
 }  // namespace bl

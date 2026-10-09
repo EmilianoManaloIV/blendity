@@ -210,7 +210,9 @@ class Editor {
   const std::vector<Vec3> &draw_points_for_test() const { return draw_.pts; }
   Recti window_rect_for_test(WindowKind k) const { return window_rects_.count(k) ? window_rects_.at(k) : Recti{0, 0, 0, 0}; }
   /* The Inspector's menu button for a section: a component's key is its type name + its index on
-   * the object ("Rotator2"); a modifier's is "mod" + its index. Empty if not drawn last frame. */
+   * the object ("Rotator2"); a modifier's is "mod" + its index; a filter effect's "filter" + its
+   * index, Add Filter's "add_filter"; an int field's "field:" + its recorded name ("field:E0 Width").
+   * Empty if not drawn last frame. */
   Recti inspector_menu_rect_for_test(const std::string &key) const {
     auto it = inspector_menu_rects_.find(key);
     return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
@@ -291,6 +293,10 @@ class Editor {
                      const Camera *cam, float aspect, bool game = true, bool scene_lights = true);
   /* The enabled filter components on a camera's GameObject, in order. */
   FilterStack camera_filters(const GameObject *owner) const;
+  /* Edits an object's Camera Filters stack (ADR 0008): op "add" (name; creates the component),
+   * "remove" i, "move" i to j, "reset" i. One undo step each. The Inspector's menus and the
+   * `filter` console command both use it. */
+  bool filter_stack_op(uint64_t object_id, const std::string &op, int i = 0, int j = 0, const std::string &name = "");
   void render_pathtraced_view(const Recti &view);
   /* preview: the Preview Resolution % and Preview Samples settings (a quick look
    * before the real render). open_window: bring the Render window forward. */

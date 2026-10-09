@@ -1163,6 +1163,8 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
             sp.normal = -sp.normal;
             sp.geo_normal = -sp.geo_normal;
           }
+          const bool door = opt_.screen_door && mat.surface == (int)MaterialSurface::Transparent;
+          if (door && ((x + y) & 1)) continue;  // the mesh's holes: not even shaded
           SurfaceSample sm = evaluate_material(mat, sp);
           if (highlighted) sm.albedo = lerp(sm.albedo, it.highlight_color, 0.45f);
           auto lit = [&](const SurfaceSample &ss) {
@@ -1182,6 +1184,15 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           else if (mat.surface == (int)MaterialSurface::Transparent) {
             float a = saturate(sm.alpha);
             if (a <= 0.002f) continue;
+            if (door) {
+              /* The Saturn's mesh: every other pixel, opaque, with its depth (fog and later
+               * surfaces see it). Nearly clear surfaces vanish. */
+              if (a < 0.1f) continue;
+              *dst = lit(sm);
+              depth[pi] = z;
+              ids[pi] = it.id;
+              continue;
+            }
             *dst = pack(lerp(unpack(*dst), unpack(lit(sm)), a));
             if (a >= 0.3f) ids[pi] = it.id;  // still clickable
           }

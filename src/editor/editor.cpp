@@ -1751,6 +1751,10 @@ void Editor::delete_selected() {
 }
 
 void Editor::add_component_to_selection(const std::string &name) {
+  if (name == "Retro Console Filter") {  // task 0004's component: now an effect in the filter stack
+    for (GameObject *g : selected_objects(false)) filter_stack_op(g->id, "add", 0, 0, RetroConsoleFilter::kName);
+    return;
+  }
   int n = 0;
   for (GameObject *g : selected_objects(false)) {
     auto c = create_component(name);
@@ -1760,6 +1764,55 @@ void Editor::add_component_to_selection(const std::string &name) {
     n++;
   }
   if (n) mark_changed("Add " + name);
+}
+
+bool Editor::filter_stack_op(uint64_t object_id, const std::string &op, int i, int j, const std::string &name) {
+  GameObject *g = scene_->find(object_id);
+  if (!g) return false;
+  auto *cf = g->get<CameraFilters>();
+  if (op == "add") {
+    auto key = [](const std::string &v) {  // letters and digits, lowercase: any case or spacing matches
+      std::string k;
+      for (char c : v)
+        if (std::isalnum((unsigned char)c)) k += (char)std::tolower((unsigned char)c);
+      return k;
+    };
+    const FilterEffectInfo *info = nullptr;
+    for (const FilterEffectInfo &fi : filter_effect_infos())
+      if (key(fi.name) == key(name)) info = &fi;
+    if (!info) {
+      Log::warn("filter add: no filter called '%s' (filter list shows them)", name.c_str());
+      return false;
+    }
+    if (!cf) cf = g->add<CameraFilters>();
+    cf->add(info->name);
+    mark_changed("Add Filter " + info->name);
+    return true;
+  }
+  if (!cf) return false;
+  const int n = (int)cf->effects.size();
+  if (i < 0 || i >= n) return false;
+  if (op == "remove") {
+    cf->effects.erase(cf->effects.begin() + i);
+    mark_changed("Remove Filter");
+  }
+  else if (op == "move") {
+    j = std::max(0, std::min(n - 1, j));
+    if (j == i) return false;
+    auto e = std::move(cf->effects[(size_t)i]);
+    cf->effects.erase(cf->effects.begin() + i);
+    cf->effects.insert(cf->effects.begin() + j, std::move(e));
+    mark_changed("Move Filter");
+  }
+  else if (op == "reset") {
+    if (auto fresh = create_filter_effect(cf->effects[(size_t)i]->type_name())) cf->effects[(size_t)i] = std::move(fresh);
+    mark_changed("Reset Filter");
+  }
+  else {
+    Log::warn("filter: unknown '%s' (add, remove, move, reset, list)", op.c_str());
+    return false;
+  }
+  return true;
 }
 
 /* Blender's Object > Set Origin. The mesh moves one way and the object the
@@ -2067,7 +2120,7 @@ bool Editor::set_field_command(const std::string &path, const std::string &value
           sr.target = n;
           break;
         }
-    if (sr.target.empty()) return false;
+    if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
     reflect(sr);
     return sr.done;
   };
@@ -2078,6 +2131,14 @@ bool Editor::set_field_command(const std::string &path, const std::string &value
     for (GameObject *g : selected_objects(false))
       for (auto &c : g->components)
         if (field_key(c->type_name()) == owner) n += apply([&](Reflector &r) { c->reflect(r); });
+  if (!n)  // a filter effect by its type ("set RetroConsole.Width 160"; task 0004's "RetroConsoleFilter" too)
+    for (GameObject *g : selected_objects(false))
+      if (auto *cf = g->get<CameraFilters>())
+        for (auto &e : cf->effects)
+          if (field_key(e->type_name()) == owner || (owner == "retroconsolefilter" && dynamic_cast<RetroConsoleFilter *>(e.get()))) {
+            n += apply([&](Reflector &r) { e->reflect(r); });
+            break;
+          }
   if (!n) {
     Log::warn("set: no field '%s' on %s (selected objects)", path.substr(dot + 1).c_str(), path.substr(0, dot).c_str());
     return false;
@@ -2555,6 +2616,7 @@ void Editor::run_console_command(const std::string &line) {
       sync_vert_face_selection(true);
     }
   }
+  else if (c == "redo" && t.size() == 1) redo();  // no arguments: redo the last undo (Ctrl+Y)
   else if (c == "redo") {
     /* redo <amount|segments|twist|smooth|path|normal|orientation|fuse> <value> | redo move <x> <y> <z>:
      * change the last edit operator's parameters (the Adjust Last Operation panel). */
@@ -2650,8 +2712,33 @@ void Editor::run_console_command(const std::string &line) {
                : w == "rendered"                  ? Shading::Rendered
                                                    : Shading::Shaded;
   }
+  else if (c == "filter") {
+    /* filter add <name> | remove <i> | move <i> <j> | reset <i> | list: the selection's Camera Filters stacks. */
+    const std::string sub = to_lower(arg(1, "list"));
+    std::string name;
+    for (size_t k = 2; k < t.size(); k++) name += (k > 2 ? " " : "") + t[k];
+    const int i = std::atoi(arg(2, "0").c_str()), j = std::atoi(arg(3, "0").c_str());
+    if ((sub == "remove" || sub == "reset" || sub == "move") && t.size() < (sub == "move" ? 4u : 3u)) {
+      Log::warn("filter %s: give the filter's number%s (filter list shows them)", sub.c_str(), sub == "move" ? " and where to" : "");
+      return;
+    }
+    for (GameObject *g : selected_objects(false)) {
+      if (sub == "list") {
+        const auto *cf = g->get<CameraFilters>();
+        Log::info("%s: %zu filter(s)", g->name.c_str(), cf ? cf->effects.size() : (size_t)0);
+        if (cf)
+          for (size_t k = 0; k < cf->effects.size(); k++)
+            Log::info("  %zu %s%s", k, cf->effects[k]->type_name(), cf->effects[k]->enabled ? "" : " (off)");
+        if (!cf || cf->effects.empty()) {
+          std::string all;
+          for (const FilterEffectInfo &fi : filter_effect_infos()) all += (all.empty() ? "" : ", ") + fi.category + " > " + fi.name;
+          Log::info("  available: %s", all.c_str());
+        }
+      }
+      else filter_stack_op(g->id, sub, i, j, name);
+    }
+  }
   else if (c == "undo") undo();  // Ctrl+Z
-  else if (c == "redo") redo();  // Ctrl+Y / Ctrl+Shift+Z
   else if (c == "filters") {
     /* The main camera's filters on the Scene view (Shaded): on / off / toggle. */
     const std::string w = to_lower(arg(1, "toggle"));

@@ -20,7 +20,7 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - unit checks (4,280 on Windows with Blender's libraries)
+tests/          blendity_tests   - unit checks (5,029 on Windows with Blender's libraries)
 ```
 
 ## System overview
@@ -418,6 +418,20 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `resolve_final_render`, the Rendered Camera Preview | A path-traced render through filters traces at the internal resolution, applies the passes (no fog) and scales up; float formats fall back to PNG | - |
 | `nan_bits` / `finite_bits` (`core/math.h`) | NaN and finiteness from the bits, because the Windows build's `/fp:fast` may fold `std::isnan` / `std::isfinite` and NaN-rejecting compares | - |
 | `Material::textures` warm-up | Resolving replaces shared pointers, so it must not happen under shading threads (an ASan use-after-free from the new tests). The rasterizer resolves every drawn material (and the default one) at the start of `flush`, in every shade mode; the path tracer at `build` and at the start of each `render` call (progressive renders span frames). A re-entrant lock covers any other first caller | - |
+
+## The Camera Filters stack (round 29, task 0005, ADR 0008)
+
+| Piece | What it does | Reference |
+|---|---|---|
+| `FilterEffect`, `FilterEffectBase<T>`, `filter_effect_infos` (`scene/scene.h/.cpp`) | One effect in a stack: type name, category, help, `reflect`, `contribute`. The registry lists them in menu order by category. A new effect is a subclass plus one entry | Unity post-processing effects |
+| `CameraFilters` | The component: an ordered `FilterEffectList`, deep-copied on clone (undo, Duplicate, Play), contributing its enabled effects to the `FilterStack` in order | Unity Post-process Layer + profile |
+| `Reflector::filter_effects` (default) | The type names as one `;`-separated text field, then each effect's fields through a `PrefixReflector` ("E0 Width"). Files, undo, `hash_component` and `set CameraFilters.E0Width` all work through it. A reader that brings other names rebuilds the list | Blender RNA collections |
+| `InspectorReflector::filter_effects`, `Editor::filter_stack_op` | The stack UI: a foldout per effect (toggle, menu: Move Up / Down, Reset, Remove) and Add Filter grouped by category. Menu items call `filter_stack_op` by object id (they run at the end of the frame); so does the `filter` console command | Unity's Add Effect menu |
+| Legacy load in `load_scene_text`; `component Retro Console Filter`; `set RetroConsole.<Field>` | Task 0004's component loads into a stack holding a Retro Console effect; the old console name adds one; `set` reaches the first effect of a type | - |
+| `RetroConsoleFilter` presets | PS1; N64 (3-point, 64 px textures, mipmaps, dither, fog); Saturn (320x224, snap, affine, screen-door, 15-bit); DOS (320x200, affine, 256 colours with Bayer dither) | psx-spx; N64 RDP docs (3-point filter, 4 KB TMEM); Sega VDP1 manual (mesh); VGA mode 13h |
+| `TexFilter::ThreePoint` (`Texture::sample_level`) | The texel square split on its diagonal: a plane through the three nearest corners | N64 RDP texture filter |
+| `RasterOptions::screen_door` | Transparent surfaces draw every other pixel opaque ((x + y) odd skipped), no blending; alpha < 0.1 vanishes | Saturn VDP1 mesh |
+| `retro_palette`, `retro_palette_nearest`, `Palette256` | A 6x6x6 cube plus 40 greys; the nearest entry computed exactly: each channel rounded to the cube, the nearest grey to the mean, the nearer of the two; the dither spans one cube step | VGA 256-colour palettes |
 
 ## What isn't recreated
 

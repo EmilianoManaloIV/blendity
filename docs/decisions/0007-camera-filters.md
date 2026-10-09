@@ -1,6 +1,7 @@
 # 0007: Camera filters are components with a raster stage and an image stage
 
-- **Status:** accepted (2026-10-09, approved with the plan for tasks 0004 and 0005)
+- **Status:** accepted (2026-10-09, approved with the plan for tasks 0004 and 0005); refined by ADR 0008: the
+  filters became effects in one Camera Filters component (the FilterStack and render paths are unchanged)
 - **Requirements:** R-10, C-02
 
 ## Context

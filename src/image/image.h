@@ -54,7 +54,9 @@ float srgb_byte_to_linear(uint8_t v);
 
 /* ---------------------------------------------------------- textures */
 enum class TexWrap { Repeat = 0, Extend = 1, Clip = 2, Mirror = 3 };
-enum class TexFilter { Closest = 0, Linear = 1, Trilinear = 2 };
+/* ThreePoint: the N64 RDP's filter, three texels instead of four (camera filters only; the
+ * material Filter offers the first three). */
+enum class TexFilter { Closest = 0, Linear = 1, Trilinear = 2, ThreePoint = 3 };
 
 class Texture {
  public:
@@ -78,7 +80,7 @@ class Texture {
   Vec4 fetch(int level, int x, int y, TexWrap wrap) const;
   /* Filtered lookup; lod = log2(texels per pixel). */
   Vec4 sample(Vec2 uv, float lod, TexWrap wrap = TexWrap::Repeat, TexFilter filter = TexFilter::Trilinear) const;
-  /* One mip level (clamped to the chain), Closest or bilinear (Linear / Trilinear). */
+  /* One mip level (clamped to the chain): Closest, 3-point, or bilinear (Linear / Trilinear). */
   Vec4 sample_level(Vec2 uv, int level, TexWrap wrap, TexFilter filter) const;
   size_t memory_bytes() const;
 };
