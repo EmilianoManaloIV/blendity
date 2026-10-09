@@ -1,6 +1,6 @@
 # 0004: Camera filters, with the PS1 look
 
-- **Status:** in review (approved with the plan, 2026-10-09)
+- **Status:** done (merged as PR #4); the filter stack it started is generalised in task 0005 (ADR 0008)
 - **Requirements:** R-10
 - **Decisions:** ADR 0007 (new)
 - **Model:** main session (Opus): rasterizer internals and editor render paths

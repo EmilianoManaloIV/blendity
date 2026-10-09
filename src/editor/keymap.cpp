@@ -728,11 +728,14 @@ void Editor::draw_keymap_settings() {
                "an action or a key (e.g. bevel, Ctrl+B)");
   /* Which actions: those matching the search, else one category at a time. */
   static int category = 0;
-  std::vector<std::string> cats;
-  for (const ShortcutAction &a : shortcut_actions())
-    if (std::find(cats.begin(), cats.end(), a.category) == cats.end()) cats.push_back(a.category);
-  std::vector<const char *> cat_ptrs;
-  for (const std::string &c : cats) cat_ptrs.push_back(c.c_str());
+  /* Static: the combo's popup reads the option strings at the end of the frame. */
+  static std::vector<std::string> cats;
+  static std::vector<const char *> cat_ptrs;
+  if (cats.empty()) {
+    for (const ShortcutAction &a : shortcut_actions())
+      if (std::find(cats.begin(), cats.end(), a.category) == cats.end()) cats.push_back(a.category);
+    for (const std::string &c : cats) cat_ptrs.push_back(c.c_str());
+  }
   const std::string f = to_lower(keymap_search_);
   if (f.empty()) {
     Recti cr = row(u.row_h() + u.px(4));

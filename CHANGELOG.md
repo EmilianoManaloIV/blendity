@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 28): component menus work again, steady macOS CI (task 0008)
+
+**Asked:** components couldn't be removed from an object; the macOS build kept failing in CI.
+
+**Fixed**
+- **Remove Component, Move Up and the modifier menu did nothing.** A component's or modifier's menu runs
+  at the end of the frame, after the Inspector has drawn. Its items wrote to the Inspector's own
+  variables, which by then no longer existed, so the click was lost (and wrote to freed stack memory).
+  The choice is now kept by the editor and applied on the next frame. This covers Remove Component, Move
+  Up and Reset, and the modifier menu's Apply, Duplicate, Copy to Selected, Move and Reset.
+- **macOS CI failed now and then.** The Scene view filter test compared frames pixel by pixel, and the
+  overlay text changes more pixels on slower machines. It now checks whether the view is filtered (its
+  share of 15-bit pixels).
+
+**Added:** console commands `undo` and `redo`.
+
+**Checked**
+- Two new real-event tests: they click a component's menu (Move Up, Reset, Remove Component, then undo)
+  and a modifier's menu (Duplicate, Apply).
+- Unit checks: Windows 4298, Linux 4274, sanitizer build 4196; 0 failed.
+- Review (Opus): approved. Its suggestions are in:
+  - the Keymap window's Category dropdown read freed strings while open (same kind of bug);
+  - a menu choice not applied by the next frame is dropped;
+  - Transform > Reset finds the object by id;
+  - the test now really picks Remove and then selects another object, and the Cube keeps its
+    component.
+
 ## 2026-10-09 (round 27): camera filters, with the PS1 look (task 0004)
 
 **Asked:** camera "filters" built from shaders, starting with one that recreates 3D graphics on the

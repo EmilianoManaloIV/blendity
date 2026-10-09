@@ -95,6 +95,7 @@ run the reviewer.
   From the Bash tool, call `gh` as `"/c/Program Files/GitHub CLI/gh.exe"` (it isn't on Git Bash's PATH);
   in PowerShell it is on the PATH. Read CI with `gh run list` / `gh run view --log-failed`, not by
   polling the anonymous API (60 requests an hour).
-- `main` is protected: PRs only, `windows` / `linux` / `macos` must pass, no force pushes.
+- `main` is protected: PRs only, `windows` / `linux` / `macos` / `linux-sanitizers` must pass on a branch
+  up to date with `main`, no force pushes.
 - After the human merges: `git fetch origin main && git update-ref refs/heads/blendity-root origin/main`.
 - No force pushes, no branch deletions, no history rewrites.
