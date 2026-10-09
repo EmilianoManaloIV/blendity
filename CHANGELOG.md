@@ -24,6 +24,11 @@ annotation, so failures can be read on the run page without signing in to view t
 The quick stress step has hung on CI until GitHub's 6-hour limit on every Windows run so far (and now
 on Linux), though it takes under 90 s locally even on one core. It now stops after 15 minutes, and
 `blendity_stress` reports each section's start and end on stderr, so the run page shows where it was.
+
+**Fixed: the stress test never ended on 3 or 5 threads.** The job-system section steps through thread
+counts and, to end on the machine's count, stepped back to half of it. With 3 or 5 threads (GitHub's
+macOS and Linux runners) that step-back repeated forever. Now the counts are listed first (1, 2, 3, 4, 8,
+16... then the machine's own). This was the hang that kept every Windows CI run going for 6 hours.
 - **Push Through out through several faces in one plane needed Manifold.** Pushing a rectangle
   through a wall whose back already had a circle, or an archway where the back had a rectangle across
   it, was refused in the dependency-free build. Now the outline is cut across the back faces and

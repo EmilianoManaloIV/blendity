@@ -35,6 +35,9 @@ The `build` workflow has failed on every push to `main` (at least the last 14 ru
    now 755.
    macOS then failed one check: floats were saved with `%.9g` (Apple's libc++ doesn't define
    `__cpp_lib_to_chars`); `append_float` now writes the shortest form that reads back exactly.
+   The quick stress pass then hung on CI (always had, on Windows): the job-system section's thread
+   loop never ended for 3 or 5 threads. The counts are now listed first; the step also has a 15-minute
+   limit and reports each section on stderr.
 2. The first option: `push_through_flat_exit` (`src/scene/mesh_tools.cpp`) cuts the outline across
    several exit faces in one plane with `imprint_loop_across` and gives the front outline a corner
    opposite each new back one, then joins them with a tube. It checks the back corners form the opening's outline edge for edge,
