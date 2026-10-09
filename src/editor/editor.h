@@ -166,6 +166,8 @@ class Editor {
   }
   float scene_fov() const { return cam_.fov; }
   Vec3 scene_eye() const { return cam_.position(); }
+  /* Tests: the last F12 render's pixels (the Render window's image). */
+  const Image &render_image_for_test() const { return render_img_; }
   /* Tests: the Scene view's depth at a window pixel (1 = nothing), as the tools read it. */
   float scene_depth_for_test(int wx, int wy) const { return scene_rt_.depth_at(wx - scene_rect_.x, wy - scene_rect_.y); }
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
@@ -292,7 +294,7 @@ class Editor {
    * it is render_deferred + camera_dof. rt keeps full-size depth and ids, and r3d is left bound to
    * rt for overlays. */
   void render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
-                     const Camera *cam, float aspect, bool game = true, bool scene_lights = true);
+                     const Camera *cam, float aspect, bool game = true, bool scene_lights = true, bool animate = false);
   /* The enabled filter components on a camera's GameObject, in order. */
   FilterStack camera_filters(const GameObject *owner) const;
   /* Edits an object's Camera Filters stack (ADR 0008): op "add" (name; creates the component),

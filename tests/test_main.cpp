@@ -23,6 +23,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <unordered_map>
 #include <cmath>
 #include <cstdlib>
@@ -165,6 +167,7 @@ static void round28_tests();
 static void round29_tests();
 static void round29_review_tests();
 static void round30_tests();
+static void round31_tests();
 
 int main() {
   register_builtin_components();
@@ -770,6 +773,7 @@ int main() {
   round29_tests();
   round29_review_tests();
   round30_tests();
+  round31_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -10056,5 +10060,881 @@ static void round30_tests() {
     R.ed.command("edit vertex");
     R.settle();
     CHECK(R.ed.pilot_frame().w == 0);
+  });
+}
+
+/* ===================================================================== */
+/* Round 31 (task 0006): Color, Lens and Stylize camera filters           */
+/* ===================================================================== */
+
+namespace {
+/* A small synthetic target: an Image plus the RenderTarget over it (with depth and ids planes). */
+struct R31Target {
+  Image img;
+  RenderTarget rt;
+  R31Target(int w, int h) {
+    img.resize(w, h);
+    rt.attach(img, {0, 0, w, h});
+  }
+  R31Target(const R31Target &) = delete;
+  R31Target &operator=(const R31Target &) = delete;
+  uint32_t &at(int x, int y) { return img.pixels[(size_t)y * img.width + x]; }
+  void fill(uint32_t c) { std::fill(img.pixels.begin(), img.pixels.end(), c); }
+  void random(uint32_t seed) {
+    uint32_t s = seed * 2654435761u + 12345u;
+    for (uint32_t &p : img.pixels) {
+      s = s * 1664525u + 1013904223u;
+      p = 0xFF000000u | (s >> 8);
+    }
+  }
+  /* Random colours plus random depth and ids, for passes that read them. */
+  void random_planes(uint32_t seed) {
+    random(seed);
+    uint32_t s = seed * 40503u + 7u;
+    for (size_t i = 0; i < rt.depth.size(); i++) {
+      s = s * 1664525u + 1013904223u;
+      rt.depth[i] = (s >> 8) / 16777216.0f;
+      s = s * 1664525u + 1013904223u;
+      rt.ids[i] = (s >> 24) % 5;
+    }
+  }
+};
+inline int r31_ch(uint32_t p, int k) { return (int)((p >> (16 - 8 * k)) & 255); }
+inline float r31_dec(int v) {
+  const float c = v / 255.0f;
+  return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+/* The frame an Edge Outline pass needs: identity camera, so distance == the stored depth value. */
+inline FilterFrame r31_frame() {
+  FilterFrame f;
+  f.eye = {0, 0, 0};
+  f.forward = {0, 0, 1};
+  return f;
+}
+const float kNaN = std::numeric_limits<float>::quiet_NaN();
+const float kInf = std::numeric_limits<float>::infinity();
+
+/* Runs every pass with the given odd number in every float slot (and an odd int in every int slot). */
+void r31_run_all(RenderTarget &rt, float v, int iv, const FilterFrame *frame) {
+  ColorGradingParams cg;
+  cg.exposure = cg.contrast = cg.saturation = cg.temperature = cg.tint = v;
+  cg.lift = Vec3(v);
+  cg.gamma = Vec3(v);
+  cg.gain = Vec3(v);
+  apply_color_grading(rt, cg);
+  apply_posterize(rt, iv);
+  apply_grayscale(rt, false, v);
+  apply_grayscale(rt, true, v);
+  apply_invert(rt, v);
+  VignetteParams vg;
+  vg.intensity = vg.smoothness = vg.roundness = v;
+  vg.color = Vec3(v);
+  apply_vignette(rt, vg);
+  apply_chromatic_aberration(rt, v);
+  GrainParams gp;
+  gp.intensity = gp.size = gp.response = v;
+  apply_film_grain(rt, gp, frame);
+  apply_lens_distortion(rt, v, v);
+  apply_lens_distortion(rt, v, 1.0f);
+  apply_lens_distortion(rt, 0.5f, v);
+  apply_pixelate(rt, iv);
+  OutlineParams op;
+  op.color = Vec3(v);
+  op.thickness = iv;
+  op.depth_sensitivity = v;
+  apply_edge_outline(rt, op, frame);
+  CrtParams cp;
+  cp.scanlines = cp.curvature = cp.mask = cp.flicker = v;
+  apply_crt(rt, cp, frame);
+  apply_sharpen(rt, v);
+}
+
+/* One effect for the registry test: a field to move off its default and how to read it back. */
+struct R31Case {
+  const char *name, *field, *value;
+  std::function<double(FilterEffect *)> read;
+  double expect;
+};
+}  // namespace
+
+static void round31_tests() {
+  auto cmd = [&](Editor &ed, const std::string &c) {
+    ed.command(c);
+    ed.step_frame_headless();
+  };
+
+  /* ---------------------------------------------------------------- 1 */
+  test("color/lens/stylize filters: neutral settings leave the picture bit-identical, for every pass", [] {
+    R31Target t(37, 23);
+    t.random_planes(1);
+    const std::vector<uint32_t> orig = t.img.pixels;
+    FilterFrame fr = r31_frame();
+    auto same = [&](const char *what) {
+      const bool ok = t.img.pixels == orig;
+      if (!ok) std::printf("    changed by neutral %s\n", what);
+      CHECK(ok);
+      t.img.pixels = orig;
+    };
+    apply_color_grading(t.rt, ColorGradingParams{});
+    same("color grading");
+    apply_posterize(t.rt, 256);
+    same("posterize 256");
+    apply_grayscale(t.rt, false, 0.0f);
+    same("grayscale amount 0");
+    apply_grayscale(t.rt, true, 0.0f);
+    same("sepia amount 0");
+    apply_invert(t.rt, 0.0f);
+    same("invert 0");
+    VignetteParams vg;
+    vg.intensity = 0.0f;
+    apply_vignette(t.rt, vg);
+    same("vignette 0");
+    apply_chromatic_aberration(t.rt, 0.0f);
+    same("chromatic aberration 0");
+    GrainParams gp;
+    gp.intensity = 0.0f;
+    apply_film_grain(t.rt, gp, &fr);
+    same("film grain 0");
+    apply_lens_distortion(t.rt, 0.0f, 1.0f);
+    same("lens distortion 0, scale 1");
+    apply_pixelate(t.rt, 1);
+    same("pixelate 1");
+    OutlineParams op;  // no frame (the path tracer): nothing to draw
+    apply_edge_outline(t.rt, op, nullptr);
+    same("edge outline without a frame");
+    op.object_edges = false;  // a constant depth and no object edges: nothing to find
+    for (float &d : t.rt.depth) d = 0.5f;
+    apply_edge_outline(t.rt, op, &fr);
+    same("edge outline with nothing to find");
+    CrtParams cp;
+    cp.scanlines = cp.curvature = cp.mask = cp.flicker = 0.0f;
+    apply_crt(t.rt, cp, &fr);
+    same("crt 0");
+    apply_sharpen(t.rt, 0.0f);
+    same("sharpen 0");
+  });
+
+  /* ---------------------------------------------------------------- 2 */
+  test("posterize leaves exactly `levels` values per channel on a full 0..255 ramp, keeping black and white", [] {
+    for (int L : {2, 3, 4, 6, 16, 64, 255}) {
+      R31Target t(256, 1);
+      for (int x = 0; x < 256; x++) t.at(x, 0) = 0xFF000000u | (uint32_t)x << 16 | (uint32_t)x << 8 | (uint32_t)x;
+      apply_posterize(t.rt, L);
+      for (int k = 0; k < 3; k++) {
+        std::set<int> values;
+        for (int x = 0; x < 256; x++) values.insert(r31_ch(t.at(x, 0), k));
+        if ((int)values.size() != L) std::printf("    levels %d channel %d: %zu distinct values\n", L, k, values.size());
+        CHECK((int)values.size() == L);
+        CHECK(*values.begin() == 0 && *values.rbegin() == 255);
+      }
+    }
+    /* Below 2 levels it still makes two (black and white), never divides by zero. */
+    R31Target t(256, 1);
+    for (int x = 0; x < 256; x++) t.at(x, 0) = 0xFF000000u | (uint32_t)x * 0x010101u;
+    apply_posterize(t.rt, 1);
+    std::set<uint32_t> v;
+    for (int x = 0; x < 256; x++) v.insert(t.at(x, 0));
+    CHECK(v.size() == 2);
+  });
+
+  test("invert at 1 turns 255-v and applied twice is the identity; half way gives grey", [] {
+    R31Target t(41, 17);
+    t.random(2);
+    const std::vector<uint32_t> orig = t.img.pixels;
+    apply_invert(t.rt, 1.0f);
+    CHECK(t.img.pixels != orig);
+    CHECK(t.at(3, 3) == (0xFF000000u | (~orig[3 * 41 + 3] & 0xFFFFFFu)));
+    apply_invert(t.rt, 1.0f);
+    CHECK(t.img.pixels == orig);
+    t.fill(0xFF102030u);
+    apply_invert(t.rt, 0.5f);
+    CHECK(r31_ch(t.at(0, 0), 0) == 128 || r31_ch(t.at(0, 0), 0) == 127);  // (16 + 239) / 2
+  });
+
+  test("grayscale gives equal channels (Rec.709 luma), amount blends, sepia matches the matrix on known pixels", [] {
+    R31Target t(40, 25);
+    t.random(3);
+    apply_grayscale(t.rt, false, 1.0f);
+    int unequal = 0;
+    for (uint32_t p : t.img.pixels) unequal += r31_ch(p, 0) != r31_ch(p, 1) || r31_ch(p, 1) != r31_ch(p, 2);
+    CHECK(unequal == 0);
+    /* A pure green pixel: luma 0.7152 * 255 = 182.4. */
+    t.at(0, 0) = 0xFF00FF00u;
+    apply_grayscale(t.rt, false, 1.0f);
+    CHECK(r31_ch(t.at(0, 0), 0) == 182 && r31_ch(t.at(0, 0), 2) == 182);
+    /* Amount 0.5 on a pure green pixel: half way between (0,255,0) and (182,182,182). */
+    t.at(1, 0) = 0xFF00FF00u;
+    apply_grayscale(t.rt, false, 0.5f);
+    CHECK(std::abs(r31_ch(t.at(1, 0), 0) - 91) <= 1 && std::abs(r31_ch(t.at(1, 0), 1) - 218) <= 1);
+    /* Sepia: (100,150,50) -> (164.1, 146.2, 113.85); white clamps to (255,255,239). */
+    t.at(2, 0) = 0xFF649632u;
+    t.at(3, 0) = 0xFFFFFFFFu;
+    apply_grayscale(t.rt, true, 1.0f);
+    CHECK(r31_ch(t.at(2, 0), 0) == 164 && r31_ch(t.at(2, 0), 1) == 146 && r31_ch(t.at(2, 0), 2) == 114);
+    CHECK(r31_ch(t.at(3, 0), 0) == 255 && r31_ch(t.at(3, 0), 1) == 255 && r31_ch(t.at(3, 0), 2) == 239);
+  });
+
+  test("vignette: the centre is unchanged, the corners darken, and more intensity darkens more; its colour tints the corners", [] {
+    const int W = 41, H = 31;
+    std::vector<int> corner;
+    for (float in : {0.2f, 0.5f, 1.0f}) {
+      R31Target t(W, H);
+      t.fill(0xFFC8C8C8u);
+      VignetteParams p;
+      p.intensity = in;
+      apply_vignette(t.rt, p);
+      CHECK(t.at(W / 2, H / 2) == 0xFFC8C8C8u);
+      const int c = r31_ch(t.at(0, 0), 1);
+      CHECK(c < 200);
+      CHECK(r31_ch(t.at(W - 1, H - 1), 1) == c && r31_ch(t.at(W - 1, 0), 1) == c && r31_ch(t.at(0, H - 1), 1) == c);  // symmetric
+      CHECK(r31_ch(t.at(W / 2, 1), 1) >= c);  // an edge middle is lighter than a corner
+      corner.push_back(c);
+    }
+    CHECK(corner[0] > corner[1] && corner[1] > corner[2]);
+    CHECK(corner[2] <= 8);  // intensity 1 with the default black: nearly black corners
+    R31Target t(W, H);
+    t.fill(0xFFC8C8C8u);
+    VignetteParams p;
+    p.intensity = 1.0f;
+    p.color = Vec3(1, 0, 0);
+    apply_vignette(t.rt, p);
+    CHECK(r31_ch(t.at(0, 0), 0) > 240 && r31_ch(t.at(0, 0), 1) < 8 && r31_ch(t.at(0, 0), 2) < 8);
+  });
+
+  test("chromatic aberration: the centre is unchanged and red / blue slide apart toward the edges", [] {
+    const int W = 201, H = 21;
+    R31Target t(W, H);
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < W; x++) {
+        const uint32_t v = (uint32_t)(x * 255 / (W - 1));
+        t.at(x, y) = 0xFF000000u | v << 16 | v << 8 | v;
+      }
+    const uint32_t centre = t.at(W / 2, H / 2);
+    apply_chromatic_aberration(t.rt, 1.0f);
+    CHECK(t.at(W / 2, H / 2) == centre);
+    /* Green is never moved. On a rising ramp, red sampled outward is brighter on the right edge
+     * side, darker on the left; blue the reverse. */
+    const uint32_t r = t.at(W - 15, H / 2), l = t.at(14, H / 2);
+    CHECK(r31_ch(r, 0) > r31_ch(r, 1) && r31_ch(r, 1) > r31_ch(r, 2));
+    CHECK(r31_ch(l, 0) < r31_ch(l, 1) && r31_ch(l, 1) < r31_ch(l, 2));
+    CHECK(r31_ch(r, 1) == (W - 15) * 255 / (W - 1));
+  });
+
+  test("lens distortion: the centre stays, a straight vertical line bends (both signs), strong barrel blackens the corners", [] {
+    const int W = 61, H = 41;
+    auto line_x = [&](R31Target &t, int y) {  // brightness-weighted x of the line in a row
+      double sum = 0, wsum = 0;
+      for (int x = 0; x < W; x++) {
+        const double b = r31_ch(t.at(x, y), 1);
+        sum += b * x;
+        wsum += b;
+      }
+      return wsum > 0 ? sum / wsum : -1.0;
+    };
+    for (float k : {0.5f, -0.3f}) {
+      R31Target t(W, H);
+      t.fill(0xFF000000u);
+      for (int y = 0; y < H; y++)
+        for (int x = 44; x <= 46; x++) t.at(x, y) = 0xFFFFFFFFu;
+      const double before = line_x(t, 0);
+      CHECK_NEAR(before, line_x(t, H / 2), 1e-9);  // straight
+      t.at(W / 2, H / 2) = 0xFF336699u;            // a marker at the centre
+      apply_lens_distortion(t.rt, k, 1.0f);
+      CHECK(t.at(W / 2, H / 2) == 0xFF336699u);
+      const double mid = line_x(t, H / 2), up = line_x(t, H / 4), down = line_x(t, 3 * H / 4);
+      std::printf("    k=%.1f: line x at the middle row %.2f, a quarter up %.2f, a quarter down %.2f\n", k, mid, up, down);
+      CHECK(std::fabs(mid - up) > 0.5);  // bent
+      CHECK_NEAR(up, down, 0.2);         // symmetric about the middle row
+    }
+    /* Strong barrel (negative intensity in the spec) leaves the corners black. */
+    R31Target t(W, H);
+    t.fill(0xFFFFFFFFu);
+    apply_lens_distortion(t.rt, -1.0f, 1.0f);
+    CHECK((t.at(0, 0) & 0xFFFFFF) == 0 && (t.at(W - 1, H - 1) & 0xFFFFFF) == 0 && (t.at(W - 1, 0) & 0xFFFFFF) == 0);
+    CHECK(t.at(W / 2, H / 2) == 0xFFFFFFFFu);
+    /* Scale zooms in: with scale 2 and no bending, the centre stays and the picture is magnified. */
+    R31Target z(W, H);
+    for (int x = 0; x < W; x++)
+      for (int y = 0; y < H; y++) z.at(x, y) = 0xFF000000u | (uint32_t)(x * 4) << 16;
+    const int before_px = r31_ch(z.at(W / 2 + 10, H / 2), 0);
+    apply_lens_distortion(z.rt, 0.0f, 2.0f);
+    CHECK(r31_ch(z.at(W / 2, H / 2), 0) == 30 * 4);
+    CHECK(r31_ch(z.at(W / 2 + 10, H / 2), 0) < before_px);  // that pixel now shows something nearer the middle
+  });
+
+  test("pixelate: every cell is one colour, taken from the cell's middle pixel; oversized cells make one colour", [] {
+    const int W = 37, H = 23, N = 5;
+    R31Target t(W, H);
+    t.random(4);
+    const std::vector<uint32_t> orig = t.img.pixels;
+    apply_pixelate(t.rt, N);
+    int mixed = 0, wrong_centre = 0;
+    for (int cy = 0; cy < H; cy += N)
+      for (int cx = 0; cx < W; cx += N) {
+        const uint32_t c = t.at(cx, cy);
+        for (int y = cy; y < std::min(H, cy + N); y++)
+          for (int x = cx; x < std::min(W, cx + N); x++) mixed += t.at(x, y) != c;
+        if (cx + N <= W && cy + N <= H) wrong_centre += (c & 0xFFFFFF) != (orig[(size_t)(cy + N / 2) * W + cx + N / 2] & 0xFFFFFF);
+      }
+    CHECK(mixed == 0);
+    CHECK(wrong_centre == 0);
+    t.img.pixels = orig;
+    apply_pixelate(t.rt, 100000);
+    std::set<uint32_t> distinct(t.img.pixels.begin(), t.img.pixels.end());
+    CHECK(distinct.size() == 1);
+  });
+
+  test("edge outline: lines exactly at an id boundary and at a depth step, thickness widens them, nothing on a flat plane or without a frame", [] {
+    const int W = 20, H = 10;
+    FilterFrame fr = r31_frame();
+    auto cols_with_line = [&](R31Target &t) {
+      std::vector<int> cols;
+      for (int x = 0; x < W; x++) {
+        int n = 0;
+        for (int y = 0; y < H; y++) n += (t.at(x, y) & 0xFFFFFF) == 0;
+        if (n == H) cols.push_back(x);
+        else CHECK(n == 0);  // a line is a whole column
+      }
+      return cols;
+    };
+    auto setup = [&](R31Target &t, bool two_ids, bool depth_step) {
+      t.fill(0xFFFFFFFFu);
+      for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+          t.rt.ids[(size_t)y * W + x] = two_ids && x >= 10 ? 2 : 1;
+          t.rt.depth[(size_t)y * W + x] = depth_step && x >= 10 ? 0.6f : 0.3f;
+        }
+    };
+    {  // ids differ, depth flat
+      R31Target t(W, H);
+      setup(t, true, false);
+      OutlineParams p;
+      apply_edge_outline(t.rt, p, &fr);
+      CHECK((cols_with_line(t) == std::vector<int>{9, 10}));
+      /* Object edges off: the id boundary is not an edge any more. */
+      setup(t, true, false);
+      p.object_edges = false;
+      apply_edge_outline(t.rt, p, &fr);
+      CHECK(cols_with_line(t).empty());
+      /* Thickness 2 reaches two pixels each way. */
+      setup(t, true, false);
+      p = OutlineParams{};
+      p.thickness = 2;
+      apply_edge_outline(t.rt, p, &fr);
+      CHECK((cols_with_line(t) == std::vector<int>{8, 9, 10, 11}));
+    }
+    {  // depth step, one id
+      R31Target t(W, H);
+      setup(t, false, true);
+      OutlineParams p;
+      apply_edge_outline(t.rt, p, &fr);
+      CHECK((cols_with_line(t) == std::vector<int>{9, 10}));
+      /* A tolerance larger than the jump (0.3 of 0.6 = 50%) finds no edge. */
+      setup(t, false, true);
+      p.depth_sensitivity = 0.9f;
+      apply_edge_outline(t.rt, p, &fr);
+      CHECK(cols_with_line(t).empty());
+      /* The outline colour is used. */
+      setup(t, false, true);
+      p = OutlineParams{};
+      p.color = Vec3(1, 0, 0);
+      apply_edge_outline(t.rt, p, &fr);
+      CHECK(t.at(9, 4) == 0xFFFF0000u && t.at(0, 0) == 0xFFFFFFFFu);
+    }
+    {  // flat plane (one id, depth constant or gently sloped): nothing
+      R31Target t(W, H);
+      setup(t, false, false);
+      for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) t.rt.depth[(size_t)y * W + x] = 0.5f + 0.0005f * x;
+      OutlineParams p;
+      apply_edge_outline(t.rt, p, &fr);
+      CHECK(cols_with_line(t).empty());
+    }
+    {  // no frame: nothing, whatever the planes hold
+      R31Target t(W, H);
+      setup(t, true, true);
+      apply_edge_outline(t.rt, OutlineParams{}, nullptr);
+      CHECK(cols_with_line(t).empty());
+    }
+    {  // a silhouette against the sky (depth 1) is outlined
+      R31Target t(W, H);
+      setup(t, false, false);
+      for (int y = 0; y < H; y++)
+        for (int x = 10; x < W; x++) t.rt.depth[(size_t)y * W + x] = 1.0f;
+      apply_edge_outline(t.rt, OutlineParams{}, &fr);
+      CHECK((cols_with_line(t) == std::vector<int>{9, 10}));
+    }
+  });
+
+  test("CRT: alternate rows darker, the curved border goes black, the phosphor mask dims channels by column", [] {
+    FilterFrame fr = r31_frame();
+    {  // scanlines only
+      R31Target t(30, 20);
+      t.fill(0xFF646464u);
+      CrtParams p;
+      p.scanlines = 0.5f;
+      p.curvature = 0.0f;
+      p.mask = 0.0f;
+      p.flicker = 0.0f;
+      apply_crt(t.rt, p, &fr);
+      for (int y = 0; y < 20; y++) CHECK(t.at(7, y) == (y & 1 ? 0xFF323232u : 0xFF646464u));
+    }
+    {  // curvature only
+      R31Target t(30, 20);
+      t.fill(0xFFC8C8C8u);
+      CrtParams p;
+      p.scanlines = 0.0f;
+      p.curvature = 1.0f;
+      p.mask = 0.0f;
+      apply_crt(t.rt, p, &fr);
+      CHECK((t.at(0, 0) & 0xFFFFFF) == 0 && (t.at(29, 19) & 0xFFFFFF) == 0 && (t.at(29, 0) & 0xFFFFFF) == 0 && (t.at(0, 19) & 0xFFFFFF) == 0);
+      CHECK(t.at(15, 10) == 0xFFC8C8C8u);
+      CHECK(t.at(15, 0) == 0xFFC8C8C8u);  // the middle of an edge stays on the tube
+    }
+    {  // mask only: one phosphor per column keeps full strength, the other two are dimmed
+      R31Target t(30, 20);
+      t.fill(0xFFC8C8C8u);
+      CrtParams p;
+      p.scanlines = 0.0f;
+      p.curvature = 0.0f;
+      p.mask = 0.5f;
+      apply_crt(t.rt, p, &fr);
+      for (int x = 0; x < 3; x++)
+        for (int k = 0; k < 3; k++) CHECK(r31_ch(t.at(x, 4), k) == (x == k ? 200 : 100));
+      CHECK(t.at(3, 4) == t.at(0, 4) && t.at(4, 4) == t.at(1, 4));
+    }
+  });
+
+  test("sharpen: flat areas are unchanged and the contrast rises on both sides of a step edge", [] {
+    R31Target t(8, 8);
+    t.fill(0xFF808080u);
+    apply_sharpen(t.rt, 2.0f);
+    for (uint32_t p : t.img.pixels) CHECK(p == 0xFF808080u);
+    for (int y = 0; y < 8; y++)
+      for (int x = 0; x < 8; x++) t.at(x, y) = x < 4 ? 0xFF323232u : 0xFFC8C8C8u;
+    apply_sharpen(t.rt, 1.0f);
+    /* Hand values: dark side 50 + (4*50 - (50+200+50+50)) / 4 = 12.5, light side 200 + 37.5 = 237.5. */
+    const int dark = r31_ch(t.at(3, 4), 0), light = r31_ch(t.at(4, 4), 0);
+    CHECK(dark == 12 || dark == 13);
+    CHECK(light == 237 || light == 238);
+    CHECK(t.at(0, 4) == 0xFF323232u && t.at(7, 4) == 0xFFC8C8C8u);  // away from the edge: untouched
+    CHECK(r31_ch(t.at(3, 4), 1) == dark && r31_ch(t.at(4, 4), 2) == light);
+  });
+
+  test("color grading: +1 stop doubles linear light, -1 saturation is grey, temperature warms, tint shifts green, lift raises blacks", [] {
+    const uint32_t greys[] = {0xFF282828u, 0xFF505050u, 0xFF808080u};
+    for (uint32_t g : greys) {
+      R31Target t(2, 2);
+      t.fill(g);
+      ColorGradingParams p;
+      p.exposure = 1.0f;
+      apply_color_grading(t.rt, p);
+      const double ratio = r31_dec(r31_ch(t.at(0, 0), 1)) / r31_dec(r31_ch(g, 1));
+      std::printf("    grey %d: linear light x%.3f\n", r31_ch(g, 1), ratio);
+      CHECK_NEAR(ratio, 2.0, 0.06);
+      CHECK(r31_ch(t.at(0, 0), 0) == r31_ch(t.at(0, 0), 1) && r31_ch(t.at(0, 0), 1) == r31_ch(t.at(0, 0), 2));
+    }
+    {
+      R31Target t(2, 2);
+      t.fill(0xFF808080u);
+      ColorGradingParams p;
+      p.exposure = -1.0f;
+      apply_color_grading(t.rt, p);
+      CHECK_NEAR(r31_dec(r31_ch(t.at(0, 0), 0)) / r31_dec(128), 0.5, 0.03);
+    }
+    {  // saturation -1: equal channels from a vivid colour, at the colour's luma
+      R31Target t(2, 2);
+      t.fill(0xFFC85028u);
+      ColorGradingParams p;
+      p.saturation = -1.0f;
+      apply_color_grading(t.rt, p);
+      const uint32_t o = t.at(0, 0);
+      CHECK(r31_ch(o, 0) == r31_ch(o, 1) && r31_ch(o, 1) == r31_ch(o, 2));
+      const double y = 0.2126 * r31_dec(200) + 0.7152 * r31_dec(80) + 0.0722 * r31_dec(40);
+      CHECK_NEAR(r31_dec(r31_ch(o, 1)), y, 0.01);
+    }
+    {  // temperature
+      R31Target w(2, 2), c(2, 2);
+      w.fill(0xFF808080u);
+      c.fill(0xFF808080u);
+      ColorGradingParams p;
+      p.temperature = 0.5f;
+      apply_color_grading(w.rt, p);
+      p.temperature = -0.5f;
+      apply_color_grading(c.rt, p);
+      CHECK(r31_ch(w.at(0, 0), 0) > 128 && r31_ch(w.at(0, 0), 2) < 128);
+      CHECK(r31_ch(c.at(0, 0), 0) < 128 && r31_ch(c.at(0, 0), 2) > 128);
+    }
+    {  // tint toward magenta lowers green; contrast stretches around middle grey; lift raises black
+      R31Target t(2, 2);
+      t.fill(0xFF808080u);
+      ColorGradingParams p;
+      p.tint = 0.5f;
+      apply_color_grading(t.rt, p);
+      CHECK(r31_ch(t.at(0, 0), 1) < 128 && r31_ch(t.at(0, 0), 0) == 128);
+      R31Target k(2, 2);
+      k.at(0, 0) = 0xFF202020u;
+      k.at(1, 0) = 0xFFE0E0E0u;
+      p = ColorGradingParams{};
+      p.contrast = 0.5f;
+      apply_color_grading(k.rt, p);
+      CHECK(r31_ch(k.at(0, 0), 0) < 0x20 && r31_ch(k.at(1, 0), 0) > 0xE0);
+      R31Target b(2, 2);
+      b.fill(0xFF000000u);
+      p = ColorGradingParams{};
+      p.lift = Vec3(0.2f);
+      apply_color_grading(b.rt, p);
+      CHECK(r31_ch(b.at(0, 0), 1) > 60);
+    }
+  });
+
+  /* ---------------------------------------------------------------- 3 */
+  test("film grain and CRT flicker: identical across time unless animating; change across 1/24 s buckets when animating", [] {
+    R31Target base(32, 32);
+    base.fill(0xFF808080u);
+    GrainParams g;
+    g.intensity = 0.8f;
+    FilterFrame still = r31_frame(), live = r31_frame();
+    live.animate = true;
+    auto run_grain = [&](const FilterFrame *f, float time) {
+      R31Target t(32, 32);
+      t.img.pixels = base.img.pixels;
+      FilterFrame ff;
+      if (f) {
+        ff = *f;
+        ff.time = time;
+      }
+      apply_film_grain(t.rt, g, f ? &ff : nullptr);
+      return t.img.pixels;
+    };
+    const auto n0 = run_grain(nullptr, 0), n1 = run_grain(&still, 0.0f), n2 = run_grain(&still, 7.31f);
+    CHECK(n0 == n1 && n1 == n2);   // not animating: the same grain at any time
+    CHECK(n0 != base.img.pixels);  // and it is grain, not nothing
+    const auto a0 = run_grain(&live, 1.0f), a1 = run_grain(&live, 1.0f + 0.5f / 24.0f), a2 = run_grain(&live, 1.0f + 1.0f / 24.0f + 1e-3f);
+    CHECK(a0 == a1);  // same bucket
+    CHECK(a0 != a2);  // next bucket
+    size_t differ = 0;
+    for (size_t i = 0; i < a0.size(); i++) differ += a0[i] != a2[i];
+    CHECK(differ > a0.size() / 2);  // a new pattern, not a nudge
+    /* A wild time never breaks anything. */
+    for (float tt : {kNaN, kInf, -kInf, 1e30f, -5.0f}) {
+      const auto w = run_grain(&live, tt);
+      CHECK(w.size() == base.img.pixels.size());
+    }
+    /* CRT flicker is the same story. */
+    CrtParams cp;
+    cp.scanlines = cp.curvature = cp.mask = 0.0f;
+    cp.flicker = 1.0f;
+    auto run_crt = [&](const FilterFrame *f, float time) {
+      R31Target t(8, 8);
+      t.fill(0xFF808080u);
+      FilterFrame ff;
+      if (f) {
+        ff = *f;
+        ff.time = time;
+      }
+      apply_crt(t.rt, cp, f ? &ff : nullptr);
+      return t.img.pixels;
+    };
+    const auto c0 = run_crt(nullptr, 0), c1 = run_crt(&still, 0.0f), c2 = run_crt(&still, 1.0f / 120.0f);
+    CHECK(c0 == c1 && c1 == c2);
+    CHECK(c0[0] == 0xFF808080u);  // not animating: full brightness
+    /* Animating: a new brightness every 1/30 s. Within a bucket the same; at 60 fps (frames at n/60
+     * s, where a 30 Hz sine would always sit on a zero crossing) it really flickers. */
+    const auto f0 = run_crt(&live, 0.0f), f1 = run_crt(&live, 1.0f / 120.0f);
+    CHECK(f0 == f1);
+    std::set<uint32_t> at60;
+    for (int n = 0; n < 12; n++) at60.insert(run_crt(&live, n / 60.0f)[0]);
+    std::printf("    CRT flicker at 60 fps: %zu different brightnesses over 12 frames\n", at60.size());
+    CHECK(at60.size() >= 3);
+  });
+
+  test("film grain in the editor: the Game view holds still across frames outside Play mode and changes while playing", [&] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    cmd(ed, "select Main Camera");
+    cmd(ed, "filter add Film Grain");
+    cmd(ed, "set CameraFilters.E0Intensity 1");
+    cmd(ed, "window Game");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto grab = [&] {
+      const Recti v = ed.scene_view_rect();
+      const Image &fb = ed.framebuffer();
+      std::vector<uint32_t> px;
+      for (int y = v.y + 40; y < v.bottom(); y++)  // below any banner / toolbar row
+        for (int x = v.x; x < v.right(); x++) px.push_back(fb.pixels[(size_t)y * fb.width + x]);
+      return px;
+    };
+    auto differing = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      size_t d = 0;
+      for (size_t i = 0; i < std::min(a.size(), b.size()); i++) d += a[i] != b[i];
+      return d;
+    };
+    const auto first = grab();
+    CHECK(first.size() > 10000);
+    for (int i = 0; i < 4; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(60));
+      ed.step_frame_headless();
+      CHECK(differing(first, grab()) == 0);
+    }
+    /* Grain really is on: switching the effect off changes the picture. */
+    cmd(ed, "set CameraFilters.E0Enabled false");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(differing(first, grab()) > first.size() / 10);
+    cmd(ed, "set CameraFilters.E0Enabled true");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(differing(first, grab()) == 0);
+    /* Playing: the grain moves frame to frame. */
+    cmd(ed, "play");
+    ed.step_frame_headless();
+    std::vector<std::vector<uint32_t>> frames;
+    for (int i = 0; i < 6; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(60));
+      ed.step_frame_headless();
+      frames.push_back(grab());
+    }
+    size_t moving_pairs = 0;
+    for (size_t i = 1; i < frames.size(); i++) moving_pairs += differing(frames[i - 1], frames[i]) > frames[i].size() / 10;
+    std::printf("    playing: %zu of %zu consecutive Game view frames changed in over 10%% of their pixels\n", moving_pairs, frames.size() - 1);
+    CHECK(moving_pairs >= 3);
+    cmd(ed, "stop");
+    cmd(ed, "window Game");  // leaving Play puts the Scene view back in the tab; look at the Game view again
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto after = grab();
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    ed.step_frame_headless();
+    CHECK(differing(after, grab()) == 0);  // still again once stopped
+  });
+
+  /* ---------------------------------------------------------------- 4 */
+  test("every Color / Lens / Stylize effect can be added from the console, set, saved, loaded and undone", [&] {
+    const std::vector<R31Case> cases = {
+        {"Color Grading", "Exposure", "1.5", [](FilterEffect *e) { return (double)static_cast<ColorGradingEffect *>(e)->exposure; }, 1.5},
+        {"Posterize", "Levels", "3", [](FilterEffect *e) { return (double)static_cast<PosterizeEffect *>(e)->levels; }, 3},
+        {"Grayscale / Sepia", "Mode", "1", [](FilterEffect *e) { return (double)static_cast<GrayscaleEffect *>(e)->mode; }, 1},
+        {"Invert", "Amount", "0.5", [](FilterEffect *e) { return (double)static_cast<InvertEffect *>(e)->amount; }, 0.5},
+        {"Vignette", "Intensity", "0.7", [](FilterEffect *e) { return (double)static_cast<VignetteEffect *>(e)->intensity; }, 0.7},
+        {"Chromatic Aberration", "Intensity", "0.6", [](FilterEffect *e) { return (double)static_cast<ChromaticAberrationEffect *>(e)->intensity; }, 0.6},
+        {"Film Grain", "Size", "4", [](FilterEffect *e) { return (double)static_cast<FilmGrainEffect *>(e)->size; }, 4},
+        {"Lens Distortion", "Intensity", "-0.4", [](FilterEffect *e) { return (double)static_cast<LensDistortionEffect *>(e)->intensity; }, -0.4},
+        {"Pixelate", "CellSize", "16", [](FilterEffect *e) { return (double)static_cast<PixelateEffect *>(e)->cell_size; }, 16},
+        {"Edge Outline", "Thickness", "3", [](FilterEffect *e) { return (double)static_cast<EdgeOutlineEffect *>(e)->thickness; }, 3},
+        {"CRT", "Flicker", "0.5", [](FilterEffect *e) { return (double)static_cast<CrtEffect *>(e)->flicker; }, 0.5},
+        {"Sharpen", "Amount", "2.5", [](FilterEffect *e) { return (double)static_cast<SharpenEffect *>(e)->amount; }, 2.5},
+    };
+    /* The registry lists all twelve, three categories of four, each with help and a working factory. */
+    std::map<std::string, int> per_cat;
+    for (const R31Case &c : cases) {
+      const FilterEffectInfo *info = find_filter_effect_info(c.name);
+      CHECK(info != nullptr);
+      if (!info) continue;
+      per_cat[info->category]++;
+      CHECK(!info->help.empty());
+      auto e = create_filter_effect(c.name);
+      CHECK(e && std::string(e->type_name()) == c.name);
+    }
+    CHECK(per_cat["Color"] == 4 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 4);
+    {  // menu order is grouped by category (a category is one run)
+      std::vector<std::string> order;
+      for (const FilterEffectInfo &fi : filter_effect_infos())
+        if (order.empty() || order.back() != fi.category) order.push_back(fi.category);
+      std::set<std::string> uniq(order.begin(), order.end());
+      CHECK(uniq.size() == order.size());
+    }
+
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    cmd(ed, "select Main Camera");
+    for (size_t i = 0; i < cases.size(); i++) {
+      cmd(ed, std::string("filter add ") + cases[i].name);
+      CameraFilters *cf = r29_stack(ed);
+      CHECK(cf && cf->effects.size() == i + 1);
+      if (!cf || cf->effects.size() != i + 1) return;
+      CHECK(std::string(cf->effects[i]->type_name()) == cases[i].name);
+    }
+    cmd(ed, "filter list");
+    std::vector<double> defaults;
+    for (size_t i = 0; i < cases.size(); i++) {
+      defaults.push_back(cases[i].read(r29_stack(ed)->effects[i].get()));
+      cmd(ed, "set CameraFilters.E" + std::to_string(i) + cases[i].field + " " + cases[i].value);
+      const double v = cases[i].read(r29_stack(ed)->effects[i].get());
+      if (std::fabs(v - cases[i].expect) > 1e-5) std::printf("    %s %s: expected %g, got %g\n", cases[i].name, cases[i].field, cases[i].expect, v);
+      CHECK_NEAR(v, cases[i].expect, 1e-5);
+      CHECK(std::fabs(defaults[i] - cases[i].expect) > 1e-5);  // the test moved it off its default
+    }
+    /* Save, load, same stack and values; saving again gives the same text. */
+    const std::string text = save_scene_text(ed.scene());
+    Scene loaded;
+    std::string err;
+    CHECK(load_scene_text(text, loaded, err));
+    GameObject *lc = loaded.find_by_name("Main Camera");
+    CHECK(lc != nullptr);
+    if (!lc) return;
+    CameraFilters *lcf = lc->get<CameraFilters>();
+    CHECK(lcf && lcf->effects.size() == cases.size());
+    if (lcf && lcf->effects.size() == cases.size())
+      for (size_t i = 0; i < cases.size(); i++) {
+        CHECK(std::string(lcf->effects[i]->type_name()) == cases[i].name);
+        CHECK_NEAR(cases[i].read(lcf->effects[i].get()), cases[i].expect, 1e-5);
+      }
+    CHECK(save_scene_text(loaded) == text);
+    /* Every set is one undo step, then every add. */
+    for (size_t i = cases.size(); i-- > 0;) {
+      cmd(ed, "undo");
+      CHECK_NEAR(cases[i].read(r29_stack(ed)->effects[i].get()), defaults[i], 1e-6);
+    }
+    for (size_t i = cases.size(); i-- > 0;) {
+      cmd(ed, "undo");
+      CameraFilters *cf = r29_stack(ed);
+      CHECK(cf == nullptr || cf->effects.size() == i);
+    }
+  });
+
+  /* ---------------------------------------------------------------- 5 */
+  test("odd values (NaN, infinity, huge, negative, extreme ints) never crash a pass and the picture keeps its size", [] {
+    const float odd[] = {kNaN, kInf, -kInf, 1e30f, -1e30f, -3.0f, 1e-30f};
+    const int ints[] = {0, -7, 1, 2, 100000, std::numeric_limits<int>::max(), std::numeric_limits<int>::min()};
+    for (int dims = 0; dims < 2; dims++) {
+      const int W = dims ? 64 : 1, H = dims ? 48 : 1;
+      for (float v : odd)
+        for (int iv : ints) {
+          R31Target t(W, H);
+          t.random_planes(5);
+          FilterFrame fr = r31_frame();
+          fr.animate = true;
+          fr.time = v;
+          r31_run_all(t.rt, v, iv, &fr);
+          r31_run_all(t.rt, v, iv, nullptr);
+          CHECK(t.rt.width == W && t.rt.height == H && (int)t.img.pixels.size() == W * H);
+        }
+      /* A frame whose camera data is garbage must not break the outline. */
+      R31Target t(W, H);
+      t.random_planes(6);
+      FilterFrame fr = r31_frame();
+      fr.eye = {kNaN, kInf, 1e30f};
+      fr.forward = {kNaN, 0, 0};
+      fr.far_distance = kNaN;
+      for (float &m : fr.inv_view_proj.m) m = kNaN;
+      apply_edge_outline(t.rt, OutlineParams{}, &fr);
+      CHECK(t.rt.width == W && t.rt.height == H);
+    }
+  });
+
+  test("odd sizes: every pass works on 1 x 1, 1 x N, N x 1 and on a window into a larger image (row stride)", [] {
+    const int sizes[][2] = {{1, 1}, {1, 9}, {9, 1}, {2, 2}, {3, 7}, {64, 48}};
+    for (const auto &sz : sizes) {
+      R31Target t(sz[0], sz[1]);
+      t.random_planes(8);
+      FilterFrame fr = r31_frame();
+      fr.animate = true;
+      ColorGradingParams cg;
+      cg.exposure = 1.0f;
+      cg.saturation = -0.5f;
+      apply_color_grading(t.rt, cg);
+      apply_posterize(t.rt, 4);
+      apply_grayscale(t.rt, true, 0.7f);
+      apply_invert(t.rt, 0.3f);
+      apply_vignette(t.rt, VignetteParams{});
+      apply_chromatic_aberration(t.rt, 0.8f);
+      apply_film_grain(t.rt, GrainParams{}, &fr);
+      apply_lens_distortion(t.rt, 0.4f, 1.1f);
+      apply_pixelate(t.rt, 4);
+      apply_edge_outline(t.rt, OutlineParams{}, &fr);
+      apply_crt(t.rt, CrtParams{}, &fr);
+      apply_sharpen(t.rt, 1.0f);
+      CHECK(t.rt.width == sz[0] && t.rt.height == sz[1]);
+    }
+    /* A target that is a window into a larger image (row stride > width): pixels outside stay put. */
+    Image big;
+    big.resize(20, 12);
+    std::fill(big.pixels.begin(), big.pixels.end(), 0xFF336699u);
+    RenderTarget rt;
+    rt.attach(big, {4, 3, 10, 6});
+    CHECK(rt.width == 10 && rt.height == 6 && rt.stride == 20);
+    apply_invert(rt, 1.0f);
+    apply_sharpen(rt, 1.0f);
+    apply_pixelate(rt, 3);
+    apply_crt(rt, CrtParams{}, nullptr);
+    int outside_changed = 0, inside_changed = 0;
+    for (int y = 0; y < 12; y++)
+      for (int x = 0; x < 20; x++) {
+        const bool inside = x >= 4 && x < 14 && y >= 3 && y < 9;
+        const bool changed = big.pixels[(size_t)y * 20 + x] != 0xFF336699u;
+        (inside ? inside_changed : outside_changed) += changed;
+      }
+    CHECK(outside_changed == 0);
+    CHECK(inside_changed > 0);
+  });
+
+  /* Review of task 0006: grain moves only in the Game view while playing. An F12 render made during
+   * Play (Film Grain on the camera) is the same image a few frames later. */
+  test("film grain: F12 renders made during Play are reproducible (only the Game view animates)", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    ed.command("filter add Film Grain");
+    ed.command("set CameraFilters.E0Intensity 0.8");
+    ed.command("set render.Engine 0");
+    ed.command("play");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("render");
+    const std::vector<uint32_t> first = ed.render_image_for_test().pixels;
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));  // several 1/24 s grain buckets later
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    ed.command("render");
+    const std::vector<uint32_t> second = ed.render_image_for_test().pixels;
+    ed.command("stop");
+    CHECK(!first.empty() && first == second);
+  });
+
+  /* Review of task 0006: a floor seen at a grazing angle is flat, so a thick, sensitive outline draws
+   * nothing on it (a first difference in distance drew a solid band toward the horizon). */
+  test("edge outline: a floor at a grazing angle gets no lines, even thick and sensitive; a box on it still does", [] {
+    CfScene sc;
+    sc.add(primitives::quad(200.0f), Mat4::trs({0, 0, 0}, Quat::euler({90, 0, 0}), {1, 1, 1}), 3, cf_unlit({0.6f, 0.6f, 0.6f}));
+    sc.add(primitives::cube(), Mat4::trs({0, 0.5f, 6}, Quat(), {1, 1, 1}), 4, cf_unlit({0.9f, 0.3f, 0.2f}));
+    sc.seal();
+    const int W = 160, H = 100;
+    const Vec3 eye{0, 0.6f, 0};
+    const Mat4 v = Mat4::look_at(eye, {0, 0.45f, 10}, {0, 1, 0});
+    const Mat4 pr = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 500.0f);
+    Image img;
+    RenderTarget rt;
+    cf_render(img, rt, W, H, v, pr, RasterOptions{}, sc);
+    FilterFrame fr;
+    fr.inv_view_proj = (pr * v).inverse();
+    fr.eye = eye;
+    fr.forward = normalize(Vec3(0, 0.45f, 10) - eye);
+    OutlineParams op;
+    op.color = {1, 0, 1};
+    op.thickness = 8;
+    op.depth_sensitivity = 0.005f;
+    op.object_edges = false;  // only the depth test
+    const std::vector<uint32_t> before = img.pixels;
+    apply_edge_outline(rt, op, &fr);
+    int floor_lines = 0, floor_px = 0, box_lines = 0;
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        const bool line = img.pixels[i] != before[i];
+        if (rt.ids[i] == 3) {
+          /* Floor pixels well away from the box and the horizon (8 px either way). */
+          bool clear = true;
+          for (int dy = -9; dy <= 9 && clear; dy++)
+            for (int dx = -9; dx <= 9 && clear; dx++) {
+              const int xx = x + dx, yy = y + dy;
+              if (xx < 0 || yy < 0 || xx >= W || yy >= H || rt.ids[(size_t)yy * W + xx] != 3) clear = false;
+            }
+          if (clear) floor_px++, floor_lines += line;
+        }
+        if (rt.ids[i] == 4) box_lines += line;
+      }
+    std::printf("    grazing floor: %d of %d interior pixels marked; box: %d marked\n", floor_lines, floor_px, box_lines);
+    CHECK(floor_px > 200);
+    CHECK(floor_lines == 0);
+    CHECK(box_lines > 0);
   });
 }

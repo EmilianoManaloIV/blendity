@@ -287,7 +287,7 @@ template<class T> static void upscale_plane(const std::vector<T> &src, int sw, i
 }
 
 void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
-                           const Camera *cam, float aspect, bool game, bool scene_lights) {
+                           const Camera *cam, float aspect, bool game, bool scene_lights, bool animate) {
   FilterStack fs = camera_filters(owner);
   if (!cam) fs.fit = FilterStack::Fill;  // the Scene view: its overlays and picking use the full view's projection
   if (fs.empty()) {
@@ -316,6 +316,8 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, con
   frame.eye = eye;
   frame.forward = normalize(forward);
   frame.far_distance = cam ? cam->far_clip : 1000.0f;
+  frame.time = play_time_;
+  frame.animate = animate;  // only the Game view while playing: F12, previews and piloting stay reproducible
   for (const FilterPass &pass : fs.passes) pass(*t, &frame);
   if (!scaled) return;
   /* Scale up into the view; its depth and ids follow, so picking and overlays still work. */

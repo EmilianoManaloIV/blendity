@@ -1,6 +1,6 @@
 # 0009: Piloting a camera shows its game view
 
-- **Status:** in review (asked by the user 2026-10-09: "every time you pilot the camera you can see the camera
+- **Status:** in review (PR #7) (asked by the user 2026-10-09: "every time you pilot the camera you can see the camera
   filters ... treat the pilot camera as the game camera"; chosen: pure game look)
 - **Requirements:** R-10
 - **Decisions:** ADR 0007 / 0008 (the render path is `Editor::render_camera`)

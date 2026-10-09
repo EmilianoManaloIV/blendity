@@ -2907,7 +2907,7 @@ void Editor::draw_game_view(const Recti &r) {
   Mat4 p = cam->projection(aspect);
   /* The Game view always uses the full material pipeline with shadows (Unity Game view),
    * through the camera's filters. */
-  render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect);
+  render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_ && !paused_);
   game_stats_ = game_r3d_.stats();
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};

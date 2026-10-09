@@ -295,6 +295,86 @@ struct RetroConsoleFilter : FilterEffectBase<RetroConsoleFilter> {
   void contribute(FilterStack &stack) const override;
 };
 
+/* ---- Color, Lens and Stylize effects (task 0006): each one image pass. ---- */
+struct ColorGradingEffect : FilterEffectBase<ColorGradingEffect> {
+  static constexpr const char *kName = "Color Grading";
+  float exposure = 0.0f, contrast = 0.0f, saturation = 0.0f, temperature = 0.0f, tint = 0.0f;
+  Vec3 lift{0, 0, 0}, gamma{1, 1, 1}, gain{1, 1, 1};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct PosterizeEffect : FilterEffectBase<PosterizeEffect> {
+  static constexpr const char *kName = "Posterize";
+  int levels = 6;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct GrayscaleEffect : FilterEffectBase<GrayscaleEffect> {
+  static constexpr const char *kName = "Grayscale / Sepia";
+  int mode = 0;  // 0 grayscale, 1 sepia
+  float amount = 1.0f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct InvertEffect : FilterEffectBase<InvertEffect> {
+  static constexpr const char *kName = "Invert";
+  float amount = 1.0f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct VignetteEffect : FilterEffectBase<VignetteEffect> {
+  static constexpr const char *kName = "Vignette";
+  float intensity = 0.4f, smoothness = 0.5f, roundness = 1.0f;
+  Vec3 color{0, 0, 0};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct ChromaticAberrationEffect : FilterEffectBase<ChromaticAberrationEffect> {
+  static constexpr const char *kName = "Chromatic Aberration";
+  float intensity = 0.3f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct FilmGrainEffect : FilterEffectBase<FilmGrainEffect> {
+  static constexpr const char *kName = "Film Grain";
+  float intensity = 0.25f, size = 1.0f, response = 0.8f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct LensDistortionEffect : FilterEffectBase<LensDistortionEffect> {
+  static constexpr const char *kName = "Lens Distortion";
+  float intensity = 0.3f, scale = 1.0f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct PixelateEffect : FilterEffectBase<PixelateEffect> {
+  static constexpr const char *kName = "Pixelate";
+  int cell_size = 8;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct EdgeOutlineEffect : FilterEffectBase<EdgeOutlineEffect> {
+  static constexpr const char *kName = "Edge Outline";
+  Vec3 color{0, 0, 0};
+  int thickness = 1;
+  float depth_sensitivity = 0.05f;
+  bool object_edges = true;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct CrtEffect : FilterEffectBase<CrtEffect> {
+  static constexpr const char *kName = "CRT";
+  float scanlines = 0.5f, curvature = 0.2f, mask = 0.3f, flicker = 0.0f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct SharpenEffect : FilterEffectBase<SharpenEffect> {
+  static constexpr const char *kName = "Sharpen";
+  float amount = 0.5f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+
 struct Rotator : ComponentBase<Rotator> {
   static constexpr const char *kName = "Rotator";
   Vec3 degrees_per_second{0, 45, 0};
