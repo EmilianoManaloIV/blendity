@@ -1,6 +1,6 @@
 # 0003: Make CI pass on all three platforms (dependency-free build)
 
-- **Status:** draft
+- **Status:** in review (spec approved 2026-10-09)
 - **Requirements:** C-01, C-02, Q-03
 - **Decisions:** ADR 0001 (dependency-free build must work)
 - **Model:** main session (Opus) - build scripts and a geometry fallback
@@ -27,6 +27,22 @@ The `build` workflow has failed on every push to `main` (at least the last 14 ru
    these holes without Manifold, or the two tests are guarded by `BL_WITH_MANIFOLD` with a check of the
    documented fallback behaviour (decide which - the first keeps C-02 honest).
 3. The windows, linux and macos jobs are green on a PR; then branch protection is switched on.
+
+## Outcome (2026-10-09)
+1. `build.sh` line 86: `... && echo _libs || true)`. Linux builds dependency-free; the unit suite,
+   the quick stress pass and the headless screenshot all run (macOS: same script, checked by CI).
+2. The first option: `push_through_flat_exit` (`src/scene/mesh_tools.cpp`) cuts the outline across
+   several exit faces in one plane with `imprint_loop_across` and gives the front outline a corner
+   opposite each new back one, then joins them with a tube. It checks the back corners form the opening's outline edge for edge,
+   and otherwise leaves the mesh as it was (Manifold, when available, then tries). Both builds take this path; Manifold is
+   only used for exits across faces that aren't coplanar. The two tests pass unchanged.
+3. Local results:
+   - Windows dependency-free: 1822 checks, 0 failed.
+   - Linux dependency-free: 1822 checks, 0 failed.
+   - Windows with libraries: 1924 checks, 0 failed.
+   - Push/Pull stress: 0 problems, 394 results with faces newly on top of each other (unchanged).
+4. Left for CI on the PR: the macOS job, and the Windows stress and screenshot steps in the
+   dependency-free build.
 
 ## Documentation to update
 - CHANGELOG entry; ADR 0001 consequences if the Manifold-free behaviour differs.

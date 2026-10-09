@@ -83,7 +83,7 @@ else
   echo "[blendity] Dependency-free build (no $LIBDIR)"
 fi
 
-OBJ="build/obj_${CONFIG}_$(echo "$OS" | tr '[:upper:]' '[:lower:]')$([ "$USE_LIBS" = 1 ] && echo _libs)"
+OBJ="build/obj_${CONFIG}_$(echo "$OS" | tr '[:upper:]' '[:lower:]')$([ "$USE_LIBS" = 1 ] && echo _libs || true)"
 mkdir -p "$OBJ" "$OUT"
 # License texts and notices travel with the binaries (licenses/README.md).
 rm -rf "$OUT/licenses" && cp -r licenses "$OUT/licenses"

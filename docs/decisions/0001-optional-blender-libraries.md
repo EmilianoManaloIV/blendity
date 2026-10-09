@@ -21,3 +21,6 @@ zlib, zstd, Vulkan / shaderc) from `blender/lib/<platform>`.
 - Two code paths per accelerated feature: both must be tested, and results may differ slightly (tests
   compare with tolerances).
 - Platform-specific ABI details (e.g. Jolt's defines differ per platform) live in the build scripts.
+- Where a fallback is cheap, both builds take it so they behave the same: Push Through leaving through
+  several faces in one plane cuts the outline into them itself (task 0003); only exits across
+  non-coplanar faces still need Manifold.
