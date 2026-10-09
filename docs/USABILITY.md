@@ -108,6 +108,10 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Overlapping faces could only be found inside one mesh, with no advice. | The Z-fighting check works across objects and says which faces can go. |
 | The UV editor only picked vertices. | Face and island modes, sync, and rotate / scale / move / flip / fit / align. |
 | Changing a light's colour temperature left the Camera Preview stale. | Every light setting re-renders it. |
+| Off the mesh, shapes could only be drawn on the ground. | Open Space Plane (ground, front, side, view, last face's plane, offset) and Draw in Open Space Only. |
+| UV islands could only be moved by dragging vertices with a tool. | The Scene view's gizmo in the UV editor, with axis handles. |
+| Merge by Distance only worked on whole objects. | In Edit Mode on the selection, with F9's distance and Unselected. |
+| Delete in the Hierarchy deleted faces while in Edit Mode, and a Project file selected earlier could catch the key. | Delete in the Hierarchy removes objects; the Project window only takes Delete under the mouse. |
 
 ## Still worth doing
 

@@ -162,6 +162,8 @@ void flip_normals(Mesh &m);
 /* Merge vertices closer than `dist` using a spatial hash
  * (blender/source/blender/bmesh/operators/bmo_removedoubles.cc). Returns removed count. */
 size_t merge_by_distance(Mesh &m, float dist);
+/* Only the selected vertices (Blender: Merge > By Distance); `unselected`: they may also weld onto unselected ones. */
+size_t merge_by_distance_selected(Mesh &m, float dist, const std::vector<uint8_t> &vert_sel, bool unselected = false);
 /* Same result, O(n^2) reference implementation (used by stress tests). */
 size_t merge_by_distance_naive(Mesh &m, float dist);
 /* Region extrude of selected faces along their averaged normal

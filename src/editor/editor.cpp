@@ -1124,6 +1124,7 @@ void Editor::dock_draw(DockNode *n) {
   n->active = std::max(0, std::min(n->active, (int)n->tabs.size() - 1));
   Recti content{r.x, r.y + tbh, r.w, r.h - tbh};
   if (u.hovered(content) && (u.in.pressed[0] || u.in.pressed[1] || u.in.pressed[2])) focused_ = n->tabs[n->active];
+  window_rects_[n->tabs[n->active]] = content;
   u.canvas.fill_rect(content, u.theme.panel);
   u.canvas.push_clip(content);
   dock_draw_window(n->tabs[n->active], content);
@@ -2235,6 +2236,14 @@ void Editor::run_console_command(const std::string &line) {
     const std::string s = to_lower(arg(1, "")), v = to_lower(arg(2, ""));
     if (s == "square") draw_uniform_ = v != "off";
     else if (s == "axes") draw_global_axes_ = v == "global" || v == "world";
+    else if (s == "plane") {
+      /* drawmode plane ground|front|side|view|face [offset] */
+      static const char *names[] = {"ground", "front", "side", "view", "face"};
+      for (int k = 0; k < kDrawSpacePlaneCount; k++)
+        if (v == names[k]) draw_space_mode_ = k;
+      if (t.size() > 3) draw_space_offset_ = (float)std::atof(t[3].c_str());
+    }
+    else if (s == "space") draw_space_only_ = v != "off";
     else if (s == "facecenter") draw_face_center_ = v != "off";
     else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
     else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
@@ -2380,7 +2389,11 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "zfight") {
     /* zfight [scene] | zfight fix [index] */
     if (to_lower(arg(1, "")) == "fix") zfight_fix(t.size() > 2 ? std::atoi(t[2].c_str()) : -1);
-    else zfight_scan(to_lower(arg(1, "")) == "scene");
+    else if (to_lower(arg(1, "")) == "clear") zfight_.clear();
+    else {
+      zfight_scan(to_lower(arg(1, "")) == "scene");
+      zfight_from_panel_ = true;
+    }
   }
   else if (c == "keymap") {
     /* keymap <Unity|Blender|Maya|3ds Max|SketchUp> | keymap bind <action> <chord>[|<chord>] | keymap clear <action> */

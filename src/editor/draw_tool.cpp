@@ -18,6 +18,7 @@ namespace bl {
 extern const char *const kDrawShapes[kDrawShapeCount] = {"Polyline", "Rectangle", "Circle", "Arc", "Polygon", "Guide"};
 extern const char *const kRectModes[3] = {"Corner", "Center", "3 Points"};
 extern const char *const kCircleModes[3] = {"Center", "2 Points", "3 Points"};
+extern const char *const kDrawSpacePlanes[kDrawSpacePlaneCount] = {"Ground (XZ)", "Front (XY)", "Side (YZ)", "View (facing you)", "Last Face's Plane"};
 
 /* The circle through three points (in their plane); false when they are in a line. */
 static bool circle_through(Vec3 a, Vec3 b, Vec3 q, Vec3 &c, Vec3 &nn) {
@@ -70,6 +71,25 @@ void Editor::draw_begin(int shape) {
   draw_.shape = std::max(0, std::min(shape, kDrawShapeCount - 1));
   Log::info("Draw %s: click on the mesh or the ground. Ctrl snaps to the grid, Shift to the axes, Esc ends.", kDrawShapes[draw_.shape]);
   show_guides_ = show_guides_ || draw_.shape == 5;
+}
+
+/* The plane drawing uses off the mesh (or always, with Draw in Open Space Only): the ground,
+ * a front or side plane, one facing the view through the point being orbited, or the plane
+ * of the face drawn on last - each moved along its normal by the offset. */
+void Editor::draw_space_plane(Vec3 &p, Vec3 &n) const {
+  switch (draw_space_mode_) {
+    case 1: n = Vec3(0, 0, 1); p = n * draw_space_offset_; break;
+    case 2: n = Vec3(1, 0, 0); p = n * draw_space_offset_; break;
+    case 3: n = normalize(-cam_.forward()); p = cam_.pivot + n * draw_space_offset_; break;
+    case 4:
+      if (draw_last_face_valid_) {
+        n = draw_last_face_n_;
+        p = draw_last_face_p_ + n * draw_space_offset_;
+        break;
+      }
+      [[fallthrough]];
+    default: n = Vec3(0, 1, 0); p = n * draw_space_offset_; break;
+  }
 }
 
 Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
@@ -137,7 +157,7 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
   }
   /* The face under the mouse: its centre is a snap (Plasticity), and with Start at Face
    * Center a centre-based shape's first click goes there wherever it lands on the face. */
-  if (!ui_.in.ctrl()) {
+  if (!ui_.in.ctrl() && !draw_space_only_) {
     const Mat4 inv = w.inverse();
     const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
     const RenderMesh &rm = m.render_mesh(true);
@@ -171,6 +191,17 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
     h.label = k.label;
     h.color = k.kind == 0 ? Color::hex(0x20C020) : std::string(k.label) == "Midpoint" ? Color::hex(0x20C8FF) : Color::hex(0xFF3030);
     h.snap = k;
+    if (draw_space_only_) {
+      /* Open space only: a corner or edge of the mesh guides the point, which stays on the
+       * drawing plane (straight across from what it snapped to). */
+      Vec3 sp, sn;
+      if (draw_.has_plane) sp = draw_.plane_p, sn = draw_.plane_n;
+      else draw_space_plane(sp, sn);
+      h.world -= sn * dot(h.world - sp, sn);
+      h.snap = KnifePoint{};
+      h.on_space_plane = true;
+      h.label = "Snapped (on the plane)";
+    }
   }
   else if (have_on_guide) {
     h.ok = true;
@@ -189,6 +220,7 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
       if (d > 0 && d < best) best = d, h.face = (int)rm.tri_face[t];
     }
+    if (draw_space_only_) h.face = -1;  // open space only: faces don't catch the point
     if (h.face >= 0) {
       h.ok = true;
       h.world = ray.origin + ray.dir * best;  // t is a world parameter (the local ray is unnormalised)
@@ -197,11 +229,15 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
     }
     else {
       float t;
-      if (ray_plane(ray, {0, 0, 0}, {0, 1, 0}, t) && t > 0) {
+      Vec3 sp, sn;
+      draw_space_plane(sp, sn);
+      if (ray_plane(ray, sp, sn, t) && t > 0) {
+        static const char *kOn[] = {"On Ground", "On Front Plane", "On Side Plane", "On View Plane", "On Face's Plane"};
         h.ok = true;
         h.world = ray.origin + ray.dir * t;
-        h.label = "On Ground";
+        h.label = kOn[std::max(0, std::min(draw_space_mode_ == 4 && !draw_last_face_valid_ ? 0 : draw_space_mode_, kDrawSpacePlaneCount - 1))];
         h.color = Color::hex(0xB0B0B0);
+        h.on_space_plane = true;
       }
     }
   }
@@ -223,7 +259,10 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
     }
     else plane_axes(n, u, v);
     const Vec3 origin = draw_.has_plane ? draw_.plane_p : Vec3(0.0f);
-    if (!draw_.pts.empty() && !ui_.in.ctrl()) {
+    /* A corner / centre rectangle's second click is its opposite corner: snapping it onto the first
+     * point's axes could only flatten it (its sides already follow them). */
+    const bool rect_corner = draw_.shape == 1 && draw_rect_mode_ != 2 && draw_.pts.size() == 1;
+    if (!draw_.pts.empty() && !ui_.in.ctrl() && !rect_corner) {
       /* SketchUp-style inference from the last point: the plane's axes (which
        * follow the face or the rotated object), directions parallel or
        * perpendicular to the mesh's edges in this plane, and square to the
@@ -578,9 +617,20 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     /* The first point fixes the plane: the face's, else the ground's. */
     GameObject *g = edit_object();
     const Mesh &m = **edit_mesh_ptr();
+    if (draw_space_only_) face = -1;
     draw_.face = face;
     draw_.plane_p = world;
-    draw_.plane_n = face >= 0 && (size_t)face < m.face_count() ? normalize(g->world_matrix().dir(m.face_normal((size_t)face))) : Vec3(0, 1, 0);
+    if (face >= 0 && (size_t)face < m.face_count()) {
+      draw_.plane_n = normalize(g->world_matrix().dir(m.face_normal((size_t)face)));
+      /* Remembered for "Last Face's Plane": drawing on past the face, in open space. */
+      draw_last_face_valid_ = true;
+      draw_last_face_p_ = world;
+      draw_last_face_n_ = draw_.plane_n;
+    }
+    else {
+      Vec3 sp;
+      draw_space_plane(sp, draw_.plane_n);
+    }
     draw_.has_plane = true;
     /* The plane's axes follow the geometry, not the world: the face's longest
      * edge, else the object's own X (or Z) laid into the plane. */
@@ -663,7 +713,7 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
     }
   if (mode == "finish") return draw_add(world, -1, 2);
   int face = -1;
-  if (draw_.pts.empty())
+  if (draw_.pts.empty() && !draw_space_only_)
     if (GameObject *g = edit_object()) {
       const Mesh &m = **edit_mesh_ptr();
       const Vec3 p = g->world_matrix().inverse().point(world);
@@ -703,6 +753,21 @@ void Editor::draw_preview(const Recti &view) {
       Vec2 s;
       if (to_screen(p, s)) u.canvas.fill_circle(s.x, s.y, (float)u.px(3.5f), Color::hex(0xFFD040));
     }
+  }
+  if (h.ok && h.on_space_plane && draw_.pts.empty()) {
+    /* The construction plane around the cursor: a faint grid (Plasticity shows its CPlane). */
+    Vec3 sp, sn, ax, ay;
+    draw_space_plane(sp, sn);
+    plane_axes(sn, ax, ay);
+    const float step = std::max(0.05f, snap_move_ > 0 ? snap_move_ * 2.0f : 0.5f);
+    const Vec3 c = sp + ax * (std::round(dot(h.world - sp, ax) / step) * step) + ay * (std::round(dot(h.world - sp, ay) / step) * step);
+    for (int k = -4; k <= 4; k++)
+      for (int dir = 0; dir < 2; dir++) {
+        const Vec3 along = dir ? ax : ay, across = dir ? ay : ax;
+        Vec2 a, b;
+        if (to_screen(c + across * (k * step) - along * (4 * step), a) && to_screen(c + across * (k * step) + along * (4 * step), b))
+          u.canvas.line(a.x, a.y, b.x, b.y, Color::hex(0x90B0D0, k == 0 ? 120 : 50), 1.0f);
+      }
   }
   if (h.ok && draw_.guide && !draw_.pts.empty()) {
     /* The inference guide: a dotted line through the last point in the locked direction. */

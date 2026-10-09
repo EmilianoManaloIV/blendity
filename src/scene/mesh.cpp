@@ -1153,6 +1153,55 @@ size_t merge_by_distance(Mesh &m, float dist) {
   return finish_merge(m, target);
 }
 
+/* Blender's Merge by Distance on a selection: selected vertices closer than dist weld
+ * (to the first of them); with `unselected`, a selected vertex may also weld onto an
+ * unselected one nearby (Blender: Merge > By Distance > Unselected). */
+size_t merge_by_distance_selected(Mesh &m, float dist, const std::vector<uint8_t> &sel, bool unselected) {
+  if (!std::isfinite(dist) || dist < 0) return 0;
+  const float cell = std::max(dist, 1e-6f), d2 = dist * dist;
+  auto key = [&](int x, int y, int z) {
+    return ((uint64_t)(uint32_t)(x * 73856093) ^ ((uint64_t)(uint32_t)(y * 19349663) << 21) ^ ((uint64_t)(uint32_t)(z * 83492791) << 42));
+  };
+  auto is_sel = [&](uint32_t v) { return v < sel.size() && sel[v]; };
+  std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+  std::vector<uint32_t> target(m.vert_count());
+  for (uint32_t i = 0; i < (uint32_t)m.vert_count(); i++) target[i] = i;
+  auto cell_of = [&](Vec3 p, int &cx, int &cy, int &cz) {
+    cx = (int)std::floor(p.x / cell);
+    cy = (int)std::floor(p.y / cell);
+    cz = (int)std::floor(p.z / cell);
+  };
+  /* Unselected targets first (they stay where they are), then selected ones in order. */
+  if (unselected)
+    for (uint32_t i = 0; i < (uint32_t)m.vert_count(); i++)
+      if (!is_sel(i)) {
+        int cx, cy, cz;
+        cell_of(m.positions[i], cx, cy, cz);
+        grid[key(cx, cy, cz)].push_back(i);
+      }
+  for (uint32_t i = 0; i < (uint32_t)m.vert_count(); i++) {
+    if (!is_sel(i)) continue;
+    const Vec3 p = m.positions[i];
+    int cx, cy, cz;
+    cell_of(p, cx, cy, cz);
+    uint32_t found = UINT32_MAX;
+    for (int dz = -1; dz <= 1 && found == UINT32_MAX; dz++)
+      for (int dy = -1; dy <= 1 && found == UINT32_MAX; dy++)
+        for (int dx = -1; dx <= 1 && found == UINT32_MAX; dx++) {
+          auto it = grid.find(key(cx + dx, cy + dy, cz + dz));
+          if (it == grid.end()) continue;
+          for (uint32_t k : it->second)
+            if (length_sq(m.positions[k] - p) <= d2) {
+              found = k;
+              break;
+            }
+        }
+    if (found != UINT32_MAX) target[i] = found;
+    else grid[key(cx, cy, cz)].push_back(i);
+  }
+  return finish_merge(m, target);
+}
+
 size_t merge_by_distance_naive(Mesh &m, float dist) {
   const float d2 = dist * dist;
   std::vector<uint32_t> target(m.vert_count());

@@ -116,6 +116,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     bool sel = is_selected(g->id);
     bool hot = u.hovered(row);
     if (row.intersect(body).h > 0) drop_rows_.push_back({row.intersect(body), g->id});  // material assets drop here
+    if (headless_) hierarchy_rows_[g->name] = row;
     if (sel) u.canvas.fill_rect(row, focused_ == WindowKind::Hierarchy ? u.theme.selection : u.theme.selection_dim);
     else if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
     int x = row.x + u.px(6) + rows[i].depth * u.px(14);
@@ -1841,6 +1842,17 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
           u.tooltip("The red / green axes drawing snaps to (and rectangles line up with):\n"
                     "Local follows the face's edges or the object's rotation; Global uses the world's X / Y / Z.\n"
                     "Edges of the mesh (parallel / perpendicular) and guides snap either way.");
+        }
+        if (draw_.active) {
+          er.enumeration("Open Space Plane", draw_space_mode_, kDrawSpacePlanes, kDrawSpacePlaneCount);
+          u.tooltip("Where shapes go when you click off the mesh (UModeler / Plasticity: draw in open space):\n"
+                    "the ground, a front or side plane, a plane facing you through the point you orbit, or the plane of\n"
+                    "the face you drew on last. A closed shape there becomes a new face; an open one, wire edges.");
+          er.field("Plane Offset", draw_space_offset_, 0.01f, -100000.0f, 100000.0f);
+          u.tooltip("Moves the open-space plane along its normal (a height above the ground, a depth in front of the view...).");
+          er.field("Draw in Open Space Only", draw_space_only_);
+          u.tooltip("Ignore surfaces: every point goes on the open-space plane, even over the mesh\n"
+                    "(corners and edges of the mesh still snap). Plasticity: drawing on the construction plane.");
         }
         if (draw_.active && draw_.shape == 1) {
           er.enumeration("Rectangle From", draw_rect_mode_, kRectModes, 3);

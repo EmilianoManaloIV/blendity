@@ -158,6 +158,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"mesh.fill", "Make Face", "Mesh", CTX_SCENE_EDIT},
       {"mesh.smart_fill", "Smart Fill", "Mesh", CTX_SCENE_EDIT},
       {"mesh.merge_center", "Merge at Center", "Mesh", CTX_SCENE_EDIT},
+      {"mesh.merge_distance", "Merge by Distance", "Mesh", CTX_SCENE_EDIT},
       {"mesh.connect", "Connect", "Mesh", CTX_SCENE_EDIT},
       {"mesh.recalc_normals", "Recalculate Normals", "Mesh", CTX_SCENE_EDIT},
       {"mesh.shrink_fatten", "Shrink / Fatten", "Mesh", CTX_SCENE_EDIT},
@@ -264,6 +265,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     b("mesh.fill", {"F"});
     b("mesh.smart_fill", {"Alt+F"});
     b("mesh.merge_center", {"M"});
+    b("mesh.merge_distance", {"Alt+M"});
     b("mesh.connect", {"J"});
     b("mesh.recalc_normals", {"Shift+N"});
     b("mesh.shrink_fatten", {"Alt+S"});
@@ -548,8 +550,13 @@ bool Editor::run_action(const std::string &id) {
     else clear_selection();
   }
   else if (id == "edit.delete") {
-    if (edit_mode_) edit_op("delete");
-    else delete_selected();
+    /* In the Hierarchy, Delete removes objects (Unity), also from Edit Mode; elsewhere in
+     * Edit Mode it deletes the selected vertices / edges / faces. */
+    if (edit_mode_ && focused_ != WindowKind::Hierarchy) edit_op("delete");
+    else {
+      if (edit_mode_) exit_edit_mode();
+      delete_selected();
+    }
   }
   else if (id == "edit.rename") {
     if (!active_) return false;
@@ -617,6 +624,7 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "mesh.fill") edit_tool("fill");
   else if (id == "mesh.smart_fill") edit_tool("smart_fill");
   else if (id == "mesh.merge_center") edit_tool("merge_center");
+  else if (id == "mesh.merge_distance") edit_tool("merge_distance");
   else if (id == "mesh.connect") edit_tool("connect");
   else if (id == "mesh.recalc_normals") edit_tool("recalc_normals");
   else if (id == "mesh.shrink_fatten") edit_tool("shrink_fatten");

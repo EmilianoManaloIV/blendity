@@ -101,6 +101,20 @@ void Editor::draw_tools_window(const Recti &r) {
       if (u.combo(u.id("tools_axes"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, ax, kAxes, 2)) draw_global_axes_ = ax == 1;
       u.tooltip("Local: the face's / object's own axes (follow a rotated object). Global: the world's X / Y / Z.");
     }
+    {
+      Recti rr = lay.row(u.row_h() + u.px(2));
+      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Open Space Plane");
+      u.combo(u.id("tools_space"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, draw_space_mode_, kDrawSpacePlanes, kDrawSpacePlaneCount);
+      u.tooltip("Where shapes go when you click off the mesh: the ground, front / side planes, a plane facing you, or the last face's plane.");
+      rr = lay.row();
+      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Plane Offset");
+      u.float_field(u.id("tools_space_off"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, draw_space_offset_, 0.01f, -100000.0f, 100000.0f);
+      rr = lay.row(u.row_h() + u.px(2));
+      if (u.button({rr.x + u.px(4), rr.y, rr.w - u.px(8), rr.h}, draw_space_only_ ? "Draw in Open Space Only (on)" : "Draw in Open Space Only (off)",
+                   draw_space_only_))
+        draw_space_only_ = !draw_space_only_;
+      u.tooltip("Ignore surfaces: draw on the open-space plane even over the mesh (Plasticity's construction plane).");
+    }
     choice("Rectangle From", draw_rect_mode_, kRectModes, "tools_rectmode",
            "Corner: two opposite corners. Center: the middle, then a corner. 3 Points: one side at any angle, then the width.");
     choice("Circle / Polygon From", draw_circle_mode_, kCircleModes, "tools_circmode",

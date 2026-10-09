@@ -47,7 +47,7 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-Each build produces **`Blendity`** (the editor), **`blendity_tests`** (1527 unit checks with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems.
+Each build produces **`Blendity`** (the editor), **`blendity_tests`** (1573 unit checks with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems.
 
 ## What you can do
 
@@ -70,6 +70,8 @@ Each build produces **`Blendity`** (the editor), **`blendity_tests`** (1527 unit
 **Filling, smoothing and shot lists.** **Smart Fill** closes holes and wire loops with faces (a fan for bent ones) and welds shut cracks and slits that have no area; holes punched through faces stay clean whatever their shape (archways included), and drawings over earlier shapes on either side push through cleanly. **Auto Smooth** shades bevels and other round results smooth by angle (Blender's Shade Auto Smooth). **Render Camera Sequence** renders every camera marked In Sequence, in order, each to its own image.
 
 **Your keys, your layout.** Every shortcut can be rebound in Preferences, starting from a Unity, Blender, Maya, 3ds Max or SketchUp keymap. Edit Mode's tools come in groups with all the selection tools together; a Z-fighting check finds faces on top of each other (also between objects) and removes the ones that can go; the UV editor selects faces and islands and rotates, scales, moves, flips, fits and aligns them; drawing snaps to local or global axes.
+
+**Drawing anywhere.** Shapes drawn off the mesh go onto a chosen plane - the ground, front or side planes, one facing you, or the last face's plane, with an offset - and Draw in Open Space Only treats every click that way (Plasticity's construction plane). The UV editor has the Scene view's move / rotate / scale gizmo, and Edit Mode has Blender's Merge by Distance.
 
 **Modifier stack.** Like Blender's Modifier Properties: modifiers sit together in one panel, are applied top to bottom and each header has Blender's **Edit Mode, Viewport and Render** toggles, a menu (Apply, Duplicate, Copy to Selected, Move Up / Down / First / Last, Reset) and delete. Add Modifier groups them as Blender does: Edit (**Weld**), Generate (**Array, Bevel, Boolean, Decimate, Mirror, Screw, Solidify, Subdivision Surface, Triangulate, Wireframe**) and Deform (**Cast, Displace, Simple Deform** (twist, bend, taper, stretch, ported from Blender's formulas), **Smooth**). Edit Mode draws the result of the modifiers set to show in Edit Mode over the editable cage; renders use the ones set to show in renders.
 

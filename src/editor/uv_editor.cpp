@@ -213,6 +213,91 @@ void Editor::draw_uv_editor(const Recti &r) {
     }
   }
 
+  /* ---- the gizmo (the Scene view's, in 2D): at the selection's bounds centre ---- */
+  struct GizmoHit {
+    UvDrag mode = UvDrag::None;
+    int axis = 0;
+  };
+  Vec2 sel_lo(1e30f, 1e30f), sel_hi(-1e30f, -1e30f);
+  size_t sel_n = 0;
+  for (size_t k = 0; k < uv_sel_.size() && k < m.corner_count(); k++)
+    if (uv_sel_[k]) {
+      sel_lo = Vec2(std::min(sel_lo.x, m.uvs[k].x), std::min(sel_lo.y, m.uvs[k].y));
+      sel_hi = Vec2(std::max(sel_hi.x, m.uvs[k].x), std::max(sel_hi.y, m.uvs[k].y));
+      sel_n++;
+    }
+  const bool gizmo_on = sel_n > 0 && (tool_ == Tool::Move || tool_ == Tool::Rotate || tool_ == Tool::Scale || tool_ == Tool::Transform);
+  const Vec2 gc = to_screen((sel_lo + sel_hi) * 0.5f);
+  const float arm = (float)u.px(64), ring = (float)u.px(48), box = (float)u.px(5);
+  const bool show_move = tool_ == Tool::Move || tool_ == Tool::Transform, show_rot = tool_ == Tool::Rotate || tool_ == Tool::Transform,
+             show_scale = tool_ == Tool::Scale || tool_ == Tool::Transform;
+  const float scale_arm = tool_ == Tool::Transform ? arm * 0.7f : arm;
+  uv_gizmo_valid_ = gizmo_on;
+  uv_gizmo_centre_ = gc;
+  uv_gizmo_arm_ = arm;
+  auto seg_dist = [](Vec2 p, Vec2 a, Vec2 b) {
+    const Vec2 ab = b - a;
+    const float t = clampf(dot(p - a, ab) / std::max(1e-6f, dot(ab, ab)), 0.0f, 1.0f);
+    return length(a + ab * t - p);
+  };
+  auto gizmo_hit = [&](Vec2 p) {
+    GizmoHit h;
+    if (!gizmo_on) return h;
+    const float tol = (float)u.px(6);
+    if (std::fabs(p.x - gc.x) <= box * 1.6f && std::fabs(p.y - gc.y) <= box * 1.6f) {
+      h.mode = show_move ? UvDrag::Move : show_scale ? UvDrag::Scale : UvDrag::None;
+      return h;
+    }
+    if (show_scale) {
+      if (length(p - (gc + Vec2(scale_arm, 0))) <= box * 2) return GizmoHit{UvDrag::Scale, 1};
+      if (length(p - (gc + Vec2(0, -scale_arm))) <= box * 2) return GizmoHit{UvDrag::Scale, 2};
+    }
+    if (show_move) {
+      if (seg_dist(p, gc, gc + Vec2(arm, 0)) <= tol) return GizmoHit{UvDrag::Move, 1};
+      if (seg_dist(p, gc, gc + Vec2(0, -arm)) <= tol) return GizmoHit{UvDrag::Move, 2};
+    }
+    if (show_rot && std::fabs(length(p - gc) - ring) <= tol) return GizmoHit{UvDrag::Rotate, 0};
+    return h;
+  };
+  {
+    const GizmoHit hh = gizmo_hit(Vec2((float)in.mx, (float)in.my));
+    uv_gizmo_hot_ = uv_drag_ != UvDrag::None ? uv_gizmo_hot_ : hh.mode == UvDrag::None ? -1 : (int)hh.mode * 4 + hh.axis;
+  }
+  if (gizmo_on) {
+    auto col = [&](UvDrag md, int axis, uint32_t base) {
+      const int id = (int)md * 4 + axis;
+      return uv_gizmo_hot_ == id ? Color::hex(0xFFE060) : base;
+    };
+    const uint32_t red = Color::hex(0xE04040), green = Color::hex(0x50D050), blue = Color::hex(0x5090FF);
+    if (show_rot) {
+      const int segs = 48;
+      for (int k = 0; k < segs; k++) {
+        const float a0 = 2.0f * kPi * k / segs, a1 = 2.0f * kPi * (k + 1) / segs;
+        u.canvas.line(gc.x + std::cos(a0) * ring, gc.y + std::sin(a0) * ring, gc.x + std::cos(a1) * ring, gc.y + std::sin(a1) * ring,
+                      col(UvDrag::Rotate, 0, blue), 2.0f);
+      }
+    }
+    if (show_move) {
+      const Vec2 ex = gc + Vec2(arm, 0), ey = gc + Vec2(0, -arm);
+      u.canvas.line(gc.x, gc.y, ex.x, ex.y, col(UvDrag::Move, 1, red), 2.5f);
+      u.canvas.fill_triangle(ex + Vec2(8, 0), ex + Vec2(-4, -6), ex + Vec2(-4, 6), col(UvDrag::Move, 1, red));
+      u.canvas.line(gc.x, gc.y, ey.x, ey.y, col(UvDrag::Move, 2, green), 2.5f);
+      u.canvas.fill_triangle(ey + Vec2(0, -8), ey + Vec2(-6, 4), ey + Vec2(6, 4), col(UvDrag::Move, 2, green));
+    }
+    if (show_scale) {
+      const Vec2 sx = gc + Vec2(scale_arm, 0), sy = gc + Vec2(0, -scale_arm);
+      if (!show_move) {
+        u.canvas.line(gc.x, gc.y, sx.x, sx.y, col(UvDrag::Scale, 1, red), 2.5f);
+        u.canvas.line(gc.x, gc.y, sy.x, sy.y, col(UvDrag::Scale, 2, green), 2.5f);
+      }
+      u.canvas.fill_rect({(int)(sx.x - box), (int)(sx.y - box), (int)(2 * box), (int)(2 * box)}, col(UvDrag::Scale, 1, red));
+      u.canvas.fill_rect({(int)(sy.x - box), (int)(sy.y - box), (int)(2 * box), (int)(2 * box)}, col(UvDrag::Scale, 2, green));
+    }
+    const UvDrag centre = show_move ? UvDrag::Move : UvDrag::Scale;
+    if (show_move || show_scale)
+      u.canvas.fill_rect({(int)(gc.x - box), (int)(gc.y - box), (int)(2 * box), (int)(2 * box)}, col(centre, 0, Color::hex(0xDDDDDD, 220)));
+  }
+
   /* ---- interaction ---- */
   bool hot = u.hovered(view) && !u.any_popup_open();
   if (hot && in.pressed[0]) focused_ = WindowKind::UVEditor;
@@ -261,9 +346,22 @@ void Editor::draw_uv_editor(const Recti &r) {
   };
   if (uv_drag_ == UvDrag::None && hot) {
     if (in.pressed[2]) uv_drag_ = UvDrag::Pan;
+    else if (in.pressed[0] && gizmo_hit(Vec2((float)in.mx, (float)in.my)).mode != UvDrag::None) {
+      /* A gizmo handle: that transform, along its axis, about the gizmo's centre. */
+      const GizmoHit gh = gizmo_hit(Vec2((float)in.mx, (float)in.my));
+      uv_press_x_ = in.mx;
+      uv_press_y_ = in.my;
+      uv_drag_ = gh.mode;
+      uv_axis_ = gh.axis;
+      uv_drag_start_.clear();
+      for (size_t k = 0; k < uv_sel_.size(); k++)
+        if (uv_sel_[k]) uv_drag_start_.push_back({(uint32_t)k, m.uvs[k]});
+      uv_pivot_ = (sel_lo + sel_hi) * 0.5f;
+    }
     else if (in.pressed[0]) {
       uv_press_x_ = in.mx;
       uv_press_y_ = in.my;
+      uv_axis_ = 0;
       int c = nearest_corner((float)in.mx, (float)in.my);
       bool on_sel = c >= 0 && uv_sel_[c];
       const int under = uv_select_mode_ ? face_under((float)in.mx, (float)in.my) : -1;
@@ -379,6 +477,8 @@ void Editor::draw_uv_editor(const Recti &r) {
         Vec2 t = start;
         if (uv_drag_ == UvDrag::Move) {
           Vec2 d{(b.x - a.x) / size, -(b.y - a.y) / size};
+          if (uv_axis_ == 1) d.y = 0;
+          if (uv_axis_ == 2) d.x = 0;
           if (snap) d = {std::round(d.x * 64) / 64, std::round(d.y * 64) / 64};
           t = start + d;
         }
@@ -389,9 +489,13 @@ void Editor::draw_uv_editor(const Recti &r) {
           t = uv_pivot_ + Vec2(d.x * std::cos(ang) - d.y * std::sin(ang), d.x * std::sin(ang) + d.y * std::cos(ang));
         }
         else {
+          /* Uniform from the centre box (or anywhere with the Scale tool); along U or V from a handle. */
           float k = length(b - ps) / std::max(1.0f, length(a - ps));
+          if (uv_axis_ == 1) k = (b.x - ps.x) / (std::fabs(a.x - ps.x) > 1.0f ? a.x - ps.x : 1.0f);
+          if (uv_axis_ == 2) k = (b.y - ps.y) / (std::fabs(a.y - ps.y) > 1.0f ? a.y - ps.y : 1.0f);
           if (snap) k = std::round(k * 10) / 10;
-          t = uv_pivot_ + (start - uv_pivot_) * k;
+          const Vec2 d = start - uv_pivot_;
+          t = uv_pivot_ + Vec2(uv_axis_ == 2 ? d.x : d.x * k, uv_axis_ == 1 ? d.y : d.y * k);
         }
         if (c < mm.uvs.size()) mm.uvs[c] = t;
       }
@@ -433,6 +537,13 @@ void Editor::draw_uv_editor(const Recti &r) {
     if (in.key_pressed[platform::KEY_UP]) uv_transform("move", 0, step);
     if (in.key_pressed[platform::KEY_DOWN]) uv_transform("move", 0, -step);
     if (in.ctrl() && in.key_pressed[platform::KEY_I]) uv_select("invert");
+    /* The gizmo's tools, as in the Scene view: W move, E rotate, R scale, Y all three. */
+    if (!in.ctrl() && !in.alt()) {
+      if (in.key_pressed[platform::KEY_W]) tool_ = Tool::Move;
+      if (in.key_pressed[platform::KEY_E]) tool_ = Tool::Rotate;
+      if (in.key_pressed[platform::KEY_R]) tool_ = Tool::Scale;
+      if (in.key_pressed[platform::KEY_Y]) tool_ = Tool::Transform;
+    }
     if (in.key_pressed[platform::KEY_1] && !in.ctrl()) uv_select_mode_ = 0;
     if (in.key_pressed[platform::KEY_2] && !in.ctrl()) uv_select_mode_ = 1;
     if (in.key_pressed[platform::KEY_3] && !in.ctrl()) uv_select_mode_ = 2;

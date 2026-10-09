@@ -1870,6 +1870,7 @@ void Editor::edit_op(const std::string &op_in) {
   size_t nsel = std::count(face_sel_.begin(), face_sel_.end(), 1);
   if (edit_op_redoable(op)) {
     if ((op == "extrude" || op == "inset" || op == "push_through" || op == "push_pull" || op == "poke" || op == "extrude_individual") && !nsel) {
+      /* (Merge by Distance works on everything when nothing is selected.) */
       Log::warn("Select faces first (press 3 for face mode)");
       return;
     }
@@ -1883,6 +1884,10 @@ void Editor::edit_op(const std::string &op_in) {
     L.elem = elem_;
     L.fuse = auto_fuse_;
     if (op == "extrude") L.amount = extrude_dist_;
+    else if (op == "merge_distance") {
+      L.amount = merge_dist_;
+      L.individual = false;  // F9: Unselected
+    }
     else if (op == "inset") {
       L.individual = inset_individual_;
       L.amount = inset_individual_ ? inset_amount_ : inset_thickness_;
@@ -2065,6 +2070,7 @@ void Editor::edit_op(const std::string &op_in) {
   else if (op == "select_overlapping") {
     /* The Z-fighting check on this mesh; its faces selected (the list is in Modeling Tools). */
     const size_t n = zfight_scan(false);
+    zfight_from_panel_ = false;  // outlines only while editing this mesh
     set_edit_element(EditElement::Face);
     face_sel_.assign(m.face_count(), 0);
     for (const ZFightIssue &z : zfight_) {
@@ -2263,7 +2269,7 @@ int edit_op_group(const std::string &op) {
   static const char *create[] = {"push_pull", "extrude", "extrude_edges", "inset", "push_through", "extrude_individual", "bridge", "fill",
                                  "smart_fill", "poke", "duplicate", "split", "spin", "follow", "shell", "thicken", "draft", "fuse"};
   static const char *cut[] = {"loopcut", "knife", "subdivide_edges", "connect", "slice", "bevel", "edge_split"};
-  static const char *clean[] = {"merge_center", "collapse", "dissolve", "dissolve_vertices", "dissolve_faces", "dissolve_limited", "delete",
+  static const char *clean[] = {"merge_center", "merge_distance", "collapse", "dissolve", "dissolve_vertices", "dissolve_faces", "dissolve_limited", "delete",
                                 "delete_loose", "tris_to_quads", "triangulate_faces", "recalc_normals", "flip_faces"};
   static const char *deform[] = {"smooth", "shrink_fatten", "to_sphere", "randomize"};
   static const char *shading[] = {"shade_smooth", "shade_flat", "mark_sharp", "clear_sharp", "mark_seam", "clear_seam", "seams_from_sharp"};
@@ -2349,6 +2355,8 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"shade_flat", "Shade Flat", "", "Flat (faceted) shading on the selected faces only.", F},
       {"bridge", "Bridge", "Ctrl+Shift+B", "Join two selected faces, or two holes, with a tube - at any angle. Blender: Bridge Edge Loops.", E | F},
       {"delete", "Delete", "Del", "Delete the selected elements (and the faces that use them). Blender: X.", ALL},
+      {"merge_distance", "Merge by Distance", "", "Weld the selected vertices that are closer than the Merge Distance (all of them if nothing\n"
+       "is selected). F9: the distance, and Unselected to weld onto unselected vertices too. Blender: Merge > By Distance.", ALL},
       {"smart_fill", "Smart Fill", "", "Close open edges with faces: every hole (or the loops inside the selection) gets a face,\n"
        "a bent one a fan from its centre; cracks and slits with no area are welded shut instead.\n"
        "Blender: Fill / Clean Up > Fill Holes. SketchUp: drawing a missing edge closes the face.", ALL},
@@ -2652,7 +2660,7 @@ void Editor::draw_game_view(const Recti &r) {
 /* ===================================================================== */
 
 bool Editor::edit_op_redoable(const std::string &op) const {
-  return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" ||
+  return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" || op == "merge_distance" ||
          op == "loopcut" || op == "smooth" || op == "push_pull" || op == "poke" || op == "extrude_individual" ||
          op == "shrink_fatten" || op == "to_sphere" || op == "randomize";
 }
@@ -2702,7 +2710,18 @@ void Editor::run_last_op(bool first) {
   std::string err;
   bool ok = true;
   const std::string &op = L.op;
-  if (op == "extrude" || op == "inset") {
+  if (op == "merge_distance") {
+    /* The selection (every vertex when nothing is selected), Blender's way. */
+    std::vector<uint8_t> sel = vert_sel_;
+    sel.resize(m.vert_count(), 0);
+    if (std::find(sel.begin(), sel.end(), 1) == sel.end()) std::fill(sel.begin(), sel.end(), (uint8_t)1);
+    const size_t n = meshops::merge_by_distance_selected(m, std::max(0.0f, L.amount), sel, L.individual);
+    vert_sel_.assign(m.vert_count(), 0);
+    face_sel_.assign(m.face_count(), 0);
+    L.message = strprintf("Removed %zu vertices", n);
+    Log::info("Merge by Distance: removed %zu vertices", n);
+  }
+  else if (op == "extrude" || op == "inset") {
     if (op == "extrude") meshops::extrude_faces(m, face_sel_, L.amount);
     else if (L.individual) meshops::inset_faces(m, face_sel_, L.amount);
     else meshops::inset_region(m, face_sel_, std::max(0.0f, L.amount));
@@ -2877,6 +2896,12 @@ void Editor::draw_last_op_panel(const Recti &view) {
     Recti cr = row("Fuse on Contact");
     changed |= u.checkbox({cr.x, cr.y, cr.h, cr.h}, L.fuse);
     u.tooltip("When the extruded face ends on another face of the mesh, join them\n(the touching area becomes an opening, like Bridge).");
+  }
+  else if (L.op == "merge_distance") {
+    fl("Merge Distance", L.amount, 0.0005f, 0.0f, 1000.0f);
+    Recti cr = row("Unselected");
+    changed |= u.checkbox({cr.x, cr.y, cr.h, cr.h}, L.individual);
+    u.tooltip("Also weld selected vertices onto unselected ones nearby (Blender: Merge > By Distance > Unselected).");
   }
   else if (L.op == "inset") {
     Recti cr = row("Individual");

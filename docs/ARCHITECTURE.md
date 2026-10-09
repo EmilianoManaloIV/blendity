@@ -273,6 +273,15 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `edit_op_group`, `edit_op_pairs`, grouped `draw_edit_tools` | Every operator in a group (Select first); paired operators drawn as one split button; Extrude's Individual switch maps `extrude` to `extrude_individual` in `edit_op` | ProBuilder / Blender menus |
 | `scene_render_hash` | Hashes each light with `hash_component` (every reflected field) | - |
 
+## Open-space drawing, the UV gizmo, selective Merge by Distance (phase 16)
+
+| Blendity | What it does | Blender / Plasticity / UModeler equivalent |
+|---|---|---|
+| `Editor::draw_space_plane`, `draw_hit` | Off the mesh (or always with `draw_space_only_`) the ray meets the chosen plane (ground / XY / YZ / facing the view through the orbit pivot / the last face drawn on), offset along its normal; in open-space-only mode mesh snaps are projected onto the plane | Plasticity construction planes; UModeler drawing off a face |
+| UV gizmo in `draw_uv_editor` | Handles at the selection's bounds centre in screen space; a press on one starts the Move / Rotate / Scale drag with `uv_axis_` (0 free / uniform, 1 U, 2 V) | The Scene view gizmo; Blender's UV editor transform |
+| `meshops::merge_by_distance_selected` | A spatial hash of candidates (unselected vertices first when `unselected`), each selected vertex welding to the first candidate within the distance; `finish_merge` rebuilds faces | Blender: Merge > By Distance (Unselected) |
+| `Editor::zfight_prune`, `zfight_outlines_visible` | Issues keep their meshes' versions; changed or deleted objects drop theirs; outlines show in Edit Mode of an involved object or with the panel open after a panel check | - |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

@@ -153,6 +153,7 @@ static void round13_feature_tests();
 static void round14_tests();
 static void round14_feature_tests();
 static void round15_tests();
+static void round16_tests();
 
 int main() {
   register_builtin_components();
@@ -749,6 +750,7 @@ int main() {
   round14_tests();
   round14_feature_tests();
   round15_tests();
+  round16_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -5551,6 +5553,310 @@ static void round15_tests() {
     CHECK(ind > reg);
     ed.command("window Modeling Tools");
     ed.step_frame_headless();
+  });
+}
+
+/* ===================================================================== */
+/* Round 16: Delete in the Hierarchy, drawing in open space, the UV      */
+/* gizmo, Merge by Distance, Z-fighting highlights                       */
+/* ===================================================================== */
+
+static void round16_tests() {
+  auto ev = [](platform::EventType t, int x, int y, int key = 0, int mods = 0) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    e.key = key;
+    e.mods = mods;
+    return e;
+  };
+  using ET = platform::EventType;
+  test("hierarchy: Delete (and Backspace) removes the objects selected there - never a Project file", [&] {
+    const std::string proj = fs::join(test_dir(), "deleteproject");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    fs::make_dirs(fs::join(proj, "Assets/Scenes"));
+    fs::make_dirs(fs::join(proj, "research"));
+    fs::write_file(fs::join(proj, "Assets/Keep.txt"), "keep me");
+    set_env("BLENDITY_PROJECT", proj);
+    {
+      Editor ed;
+      ed.init_headless(1400, 850);
+      ed.step_frame_headless();
+      /* A file selected in the Project window first: the Delete key later must not reach it. */
+      ed.command("window Project");
+      ed.step_frame_headless();
+      ed.select_project_file_for_test(fs::join(proj, "Assets/Keep.txt"));
+      /* ...and the Project window clicked last (it has the keyboard focus). */
+      const Recti pr = ed.window_rect_for_test(WindowKind::Project);
+      CHECK(pr.w > 0);
+      ed.step_frame_headless({ev(ET::MouseMove, pr.x + pr.w - 20, pr.bottom() - 20)});
+      ed.step_frame_headless({ev(ET::MouseDown, pr.x + pr.w - 20, pr.bottom() - 20)});
+      ed.step_frame_headless({ev(ET::MouseUp, pr.x + pr.w - 20, pr.bottom() - 20)});
+      ed.select_project_file_for_test(fs::join(proj, "Assets/Keep.txt"));
+      int x = 0, y = 0;
+      CHECK(ed.hierarchy_row_for_test("Cube", x, y));
+      const size_t n0 = ed.scene().object_count();
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      CHECK(ed.selected_object() && ed.selected_object()->name == "Cube");
+      ed.step_frame_headless({ev(ET::KeyDown, x, y, platform::KEY_DELETE)});
+      ed.step_frame_headless({ev(ET::KeyUp, x, y, platform::KEY_DELETE)});
+      ed.step_frame_headless();
+      std::printf("    objects %zu -> %zu, Cube %s, Keep.txt %s, delete dialog %d\n", n0, ed.scene().object_count(),
+                  ed.scene().find_by_name("Cube") ? "still there" : "deleted", fs::exists(fs::join(proj, "Assets/Keep.txt")) ? "kept" : "GONE",
+                  (int)ed.project_delete_pending());
+      CHECK(ed.scene().object_count() == n0 - 1 && !ed.scene().find_by_name("Cube"));
+      CHECK(fs::exists(fs::join(proj, "Assets/Keep.txt")));
+      CHECK(!ed.project_delete_pending());
+      /* Backspace too (Unity on macOS), on another row. */
+      CHECK(ed.hierarchy_row_for_test("Sphere", x, y));
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      ed.step_frame_headless({ev(ET::KeyDown, x, y, platform::KEY_BACKSPACE)});
+      ed.step_frame_headless({ev(ET::KeyUp, x, y, platform::KEY_BACKSPACE)});
+      CHECK(!ed.scene().find_by_name("Sphere"));
+      CHECK(fs::exists(fs::join(proj, "Assets/Keep.txt")));
+      /* In Edit Mode: Delete in the Hierarchy still deletes the object (not its faces). */
+      ed.command("select Cylinder");
+      ed.command("edit face all");
+      CHECK(ed.in_edit_mode());
+      CHECK(ed.hierarchy_row_for_test("Cylinder", x, y));
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      ed.step_frame_headless({ev(ET::KeyDown, x, y, platform::KEY_DELETE)});
+      ed.step_frame_headless({ev(ET::KeyUp, x, y, platform::KEY_DELETE)});
+      std::printf("    from Edit Mode: Cylinder %s, edit mode %d\n", ed.scene().find_by_name("Cylinder") ? "still there" : "deleted", (int)ed.in_edit_mode());
+      CHECK(!ed.scene().find_by_name("Cylinder") && !ed.in_edit_mode());
+    }
+    set_env("BLENDITY_PROJECT", "");
+  });
+
+  test("draw in open space: front / view planes and 'open space only' over the mesh (UModeler, Plasticity)", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("camera 0 15 8 0 1 0");
+    ed.command("select Main Camera");
+    ed.command("drawmode plane front 2");  // the XY plane at z = 2
+    ed.command("draw rectangle");
+    GameObject *g = ed.selected_object();
+    ed.step_frame_headless();
+    auto click_world = [&](Vec3 w) {
+      int x, y;
+      if (!ed.project_to_window(w, x, y)) return false;
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      return true;
+    };
+    CHECK(click_world({-1, 0.5f, 2}));
+    CHECK(click_world({1, 1.5f, 2}));
+    const Mesh *m = g ? g->get<MeshFilter>()->mesh.get() : nullptr;
+    CHECK(m && m->face_count() == 1);
+    if (m && m->face_count() == 1) {
+      const Vec3 n = normalize(m->face_normal(0));
+      float zmin = 1e9f, zmax = -1e9f;
+      for (const Vec3 &p2 : m->positions) {
+        const Vec3 wp = g->world_matrix().point(p2);
+        zmin = std::min(zmin, wp.z), zmax = std::max(zmax, wp.z);
+      }
+      std::printf("    front plane: normal (%.2f %.2f %.2f), z %.3f..%.3f\n", n.x, n.y, n.z, zmin, zmax);
+      CHECK(std::fabs(n.z) > 0.999f && std::fabs(zmin - 2) < 1e-3f && std::fabs(zmax - 2) < 1e-3f);
+    }
+    /* The view plane: facing the camera, through the point it orbits. */
+    ed.command("edit off");
+    ed.command("select Main Camera");
+    ed.command("drawmode plane view 0");
+    ed.command("draw polygon 5");
+    GameObject *g2 = ed.selected_object();
+    ed.step_frame_headless();
+    const Vec3 piv(0, 1, 0);
+    CHECK(click_world(piv));
+    CHECK(click_world(piv + Vec3(0.5f, 0, 0)));
+    const Mesh *m2 = g2 ? g2->get<MeshFilter>()->mesh.get() : nullptr;
+    CHECK(m2 && m2->face_count() == 1);
+    if (m2 && m2->face_count() == 1) {
+      const Vec3 n = normalize(g2->world_matrix().dir(m2->face_normal(0)));
+      const Vec3 to_cam = normalize(ed.scene_eye() - piv);
+      std::printf("    view plane: normal . toward camera = %.4f\n", dot(n, to_cam));
+      CHECK(std::fabs(dot(n, to_cam)) > 0.999f);
+    }
+    /* Open space only: a rectangle over the cube goes on the ground plane offset above it, not into the cube. */
+    ed.command("edit off");
+    ed.command("create Cube");
+    GameObject *cube = ed.selected_object();
+    cube->set_world_position({0, 0.5f, 0});
+    const size_t cube_faces = cube->get<MeshFilter>()->mesh->face_count();
+    ed.command("camera 0 55 6 0 1 0");  // looking down at the top
+    ed.command("drawmode plane ground 1.5");
+    ed.command("drawmode space on");
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    ed.step_frame_headless();
+    CHECK(click_world({-0.3f, 1.5f, -0.3f}));
+    CHECK(click_world({0.3f, 1.5f, 0.3f}));
+    if (std::getenv("BLENDITY_DUMP")) {
+      std::vector<LogEntry> lines;
+      Log::fetch(0, lines);
+      for (size_t k = lines.size() > 8 ? lines.size() - 8 : 0; k < lines.size(); k++) std::printf("      log: %s\n", lines[k].text.c_str());
+    }
+    const Mesh &cm = *cube->get<MeshFilter>()->mesh;
+    std::printf("    open space only: cube faces %zu -> %zu\n", cube_faces, cm.face_count());
+    CHECK(cm.face_count() == cube_faces + 1);  // one separate face floating above, the cube's top untouched
+    bool above = false;
+    for (const Vec3 &p2 : cm.positions) above = above || std::fabs(cube->world_matrix().point(p2).y - 1.5f) < 1e-3f;
+    CHECK(above);
+    ed.command("drawmode space off");
+    ed.command("drawmode plane ground 0");
+  });
+  test("merge by distance (Edit Mode): the selected vertices weld; Unselected welds onto the rest; F9 sets the distance", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    /* Two copies of a cube's corners a hair apart: a cube made of unwelded faces. */
+    Mesh &m = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+    Mesh loose;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      std::vector<uint32_t> fv;
+      for (uint32_t k = 0; k < m.face_size(f); k++) fv.push_back(loose.add_vert(m.positions[m.face_verts(f)[k]] + Vec3(0.0001f * (float)f, 0, 0)));
+      loose.add_face(fv.data(), fv.size());
+    }
+    m = loose;
+    m.touch();
+    CHECK(m.vert_count() == 24 && !closed_manifold(m));
+    ed.command("edit vertex all");
+    ed.command("editop merge_distance");
+    ed.command("redo amount 0.001");
+    const Mesh &r = *g->get<MeshFilter>()->mesh;
+    std::printf("    welded: %zu vertices, closed %d\n", r.vert_count(), (int)closed_manifold(r));
+    CHECK(r.vert_count() == 8 && closed_manifold(r));
+    /* A smaller distance (F9) merges less. */
+    ed.command("redo amount 0.00005");
+    CHECK(g->get<MeshFilter>()->mesh->vert_count() > 8);
+    ed.command("edit off");
+    /* Selected only, and Unselected. */
+    Mesh pts;
+    pts.add_vert({0, 0, 0});
+    pts.add_vert({0.0005f, 0, 0});
+    pts.add_vert({1, 0, 0});
+    pts.add_vert({1.0005f, 0, 0});
+    for (int k = 0; k < 4; k++) pts.add_loose_edge((uint32_t)k, (uint32_t)((k + 1) % 4));
+    Mesh a = pts;
+    CHECK(meshops::merge_by_distance_selected(a, 0.001f, {1, 1, 0, 0}) == 1 && a.vert_count() == 3);
+    Mesh b = pts;
+    CHECK(meshops::merge_by_distance_selected(b, 0.001f, {0, 1, 0, 1}) == 0);  // selected ones are far apart
+    Mesh c = pts;
+    CHECK(meshops::merge_by_distance_selected(c, 0.001f, {0, 1, 0, 1}, true) == 2 && c.vert_count() == 2);  // onto the unselected
+  });
+  test("uv gizmo: the Scene view's handles in the UV editor - drag along U, scale along V, rotate", [&] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("edit face");
+    ed.command("uv smart");
+    ed.command("window UV Editor");
+    ed.command("uvsel mode face");
+    ed.command("uvsel face 0");
+    ed.step_frame_headless();
+    GameObject *g = ed.selected_object();
+    auto face_uv = [&]() {  /* the mesh as it is now (edits replace it: copy on write) */
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::vector<Vec2> v;
+      for (uint32_t k = m.face_offsets[0]; k < m.face_offsets[1]; k++) v.push_back(m.uvs[k]);
+      return v;
+    };
+    Vec2 gc;
+    float arm = 0;
+    CHECK(ed.uv_gizmo_for_test(gc, arm));
+    auto drag = [&](Vec2 from, Vec2 to) {
+      ed.step_frame_headless({ev(ET::MouseMove, (int)from.x, (int)from.y)});
+      ed.step_frame_headless({ev(ET::MouseDown, (int)from.x, (int)from.y)});
+      ed.step_frame_headless({ev(ET::MouseMove, (int)((from.x + to.x) / 2), (int)((from.y + to.y) / 2))});
+      ed.step_frame_headless({ev(ET::MouseMove, (int)to.x, (int)to.y)});
+      ed.step_frame_headless({ev(ET::MouseUp, (int)to.x, (int)to.y)});
+    };
+    /* Move tool: drag the U (red) arrow diagonally - only U changes. */
+    ed.command("tool move");
+    ed.step_frame_headless();
+    const std::vector<Vec2> a0 = face_uv();
+    drag(gc + Vec2(arm * 0.6f, 0), gc + Vec2(arm * 0.6f + 40, -30));
+    const std::vector<Vec2> a1 = face_uv();
+    float du = a1[0].x - a0[0].x, dv = a1[0].y - a0[0].y;
+    std::printf("    U arrow: du %.4f, dv %.4f\n", du, dv);
+    CHECK(du > 0.01f && std::fabs(dv) < 1e-6f);
+    for (size_t k = 0; k < a0.size(); k++) CHECK(std::fabs((a1[k].x - a0[k].x) - du) < 1e-5f);
+    /* Scale tool: the V handle stretches only V. */
+    ed.command("tool scale");
+    ed.step_frame_headless();
+    CHECK(ed.uv_gizmo_for_test(gc, arm));
+    const std::vector<Vec2> b0 = face_uv();
+    drag(gc + Vec2(0, -arm), gc + Vec2(0, -arm * 2));
+    const std::vector<Vec2> b1 = face_uv();
+    auto extent = [](const std::vector<Vec2> &v, int axis) {
+      float lo = 1e9f, hi = -1e9f;
+      for (Vec2 t : v) lo = std::min(lo, axis ? t.y : t.x), hi = std::max(hi, axis ? t.y : t.x);
+      return hi - lo;
+    };
+    std::printf("    V handle: width %.4f -> %.4f, height %.4f -> %.4f\n", extent(b0, 0), extent(b1, 0), extent(b0, 1), extent(b1, 1));
+    CHECK_NEAR(extent(b1, 0), extent(b0, 0), 1e-5f);
+    CHECK_NEAR(extent(b1, 1), extent(b0, 1) * 2.0f, 0.05f * extent(b0, 1));
+    /* Rotate tool: dragging round the ring turns it a quarter. */
+    ed.command("tool rotate");
+    ed.step_frame_headless();
+    CHECK(ed.uv_gizmo_for_test(gc, arm));
+    const float ring = arm * 0.75f;  // the ring radius (48 of 64)
+    const std::vector<Vec2> c0 = face_uv();
+    drag(gc + Vec2(ring, 0), gc + Vec2(0, -ring));
+    const std::vector<Vec2> c1 = face_uv();
+    std::printf("    ring: width %.4f -> %.4f\n", extent(c0, 0), extent(c1, 0));
+    CHECK_NEAR(extent(c1, 0), extent(c0, 1), 0.02f * extent(c0, 1));  // width and height swapped
+  });
+  test("z-fighting outlines: not left behind in Object Mode or after the object is deleted", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    {
+      /* A cube with a doubled top face: z-fighting inside one mesh. */
+      GameObject *c0 = ed.selected_object();
+      Mesh &cm0 = *mesh_make_mutable(c0->get<MeshFilter>()->mesh);
+      const size_t top = face_facing(cm0, {0, 1, 0});
+      std::vector<uint32_t> fv(cm0.face_verts(top), cm0.face_verts(top) + cm0.face_size(top));
+      cm0.add_face(fv.data(), fv.size());
+      cm0.touch();
+    }
+    ed.command("duplicate");
+    GameObject *copy = ed.selected_object();
+    ed.command("select Cube");
+    ed.command("edit face");
+    ed.command("editop select_overlapping");  // Select Z-Fighting
+    ed.step_frame_headless();
+    CHECK(ed.zfight_count() > 0 && ed.zfight_outlines_visible());
+    ed.command("edit off");
+    ed.step_frame_headless();
+    std::printf("    object mode: outlines %d\n", (int)ed.zfight_outlines_visible());
+    CHECK(!ed.zfight_outlines_visible());
+    /* From the panel they show in Object Mode; deleting one of the objects drops its pairs. */
+    ed.command("zfight scene");
+    ed.command("window Modeling Tools");
+    ed.step_frame_headless();
+    CHECK(ed.zfight_outlines_visible());
+    ed.select_object(copy->id);
+    ed.command("delete");
+    ed.step_frame_headless();
+    std::printf("    after deleting the copy: %zu pair(s), outlines %d\n", ed.zfight_count(), (int)ed.zfight_outlines_visible());
+    CHECK(ed.zfight_count() == 1);  // only the cube's own doubled top is left
+    ed.command("select Cube");
+    ed.command("delete");
+    ed.step_frame_headless();
+    CHECK(ed.zfight_count() == 0 && !ed.zfight_outlines_visible());
   });
 }
 

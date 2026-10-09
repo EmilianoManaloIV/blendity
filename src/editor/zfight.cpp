@@ -48,6 +48,8 @@ size_t Editor::zfight_scan(bool scene_wide) {
     z.obj_b = owner[p.b].first;
     z.face_b = owner[p.b].second;
     z.pair = p;
+    if (GameObject *ga = scene_->find(z.obj_a)) z.version_a = ga->get<MeshFilter>()->mesh->version;
+    if (GameObject *gb = scene_->find(z.obj_b)) z.version_b = gb->get<MeshFilter>()->mesh->version;
     /* World-space outlines, for drawing them. */
     for (int k = 0; k < 2; k++) {
       const uint32_t f = k ? p.b : p.a;
@@ -131,9 +133,35 @@ void Editor::zfight_select(int index) {
   sync_vert_face_selection(true);
 }
 
+/* An issue lasts while both objects exist with the meshes it was found on. */
+void Editor::zfight_prune() {
+  auto current = [&](uint64_t id, uint64_t version) {
+    GameObject *g = scene_->find(id);
+    const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+    if (!mf || !mf->mesh) return false;
+    const Mesh *m = edit_mode_ && edit_obj_ == id ? edit_mesh_ptr()->get() : mf->mesh.get();
+    return m && m->version == version;
+  };
+  zfight_.erase(std::remove_if(zfight_.begin(), zfight_.end(),
+                               [&](const ZFightIssue &z) { return !current(z.obj_a, z.version_a) || !current(z.obj_b, z.version_b); }),
+                zfight_.end());
+}
+
+/* Outlines only while they mean something: editing one of the objects involved, or with the
+ * Z-Fighting panel open after checking from it - not in Object Mode left over from a selection. */
+bool Editor::zfight_outlines_visible() const {
+  if (zfight_.empty() || !zfight_show_) return false;
+  if (zfight_from_panel_ && frames_ <= zfight_panel_frame_ + 1) return true;
+  if (edit_mode_)
+    for (const ZFightIssue &z : zfight_)
+      if (z.obj_a == edit_obj_ || z.obj_b == edit_obj_) return true;
+  return false;
+}
+
 /* The flagged faces outlined in the Scene view: orange, red for the ones that can go. */
 void Editor::draw_zfight_overlay(const Recti &view) {
-  if (zfight_.empty() || !zfight_show_) return;
+  zfight_prune();
+  if (!zfight_outlines_visible()) return;
   auto &u = ui_;
   u.canvas.push_clip(view);
   for (size_t i = 0; i < zfight_.size() && i < 500; i++) {
@@ -156,11 +184,19 @@ void Editor::draw_zfight_overlay(const Recti &view) {
 /* The panel (Modeling Tools): scan, the list, fix. */
 void Editor::draw_zfight_panel(ui::Layout &lay) {
   auto &u = ui_;
+  zfight_panel_frame_ = frames_;
+  zfight_prune();
   Recti r = lay.row(u.row_h() + u.px(2));
   const int bw = (r.w - u.px(12)) / 3;
-  if (u.button({r.x + u.px(4), r.y, bw, r.h}, "Check Selection")) zfight_scan(false);
+  if (u.button({r.x + u.px(4), r.y, bw, r.h}, "Check Selection")) {
+    zfight_scan(false);
+    zfight_from_panel_ = true;
+  }
   u.tooltip("Find faces on top of each other (they flicker: z-fighting) in the selected objects, or the mesh being edited.");
-  if (u.button({r.x + u.px(6) + bw, r.y, bw, r.h}, "Check Scene")) zfight_scan(true);
+  if (u.button({r.x + u.px(6) + bw, r.y, bw, r.h}, "Check Scene")) {
+    zfight_scan(true);
+    zfight_from_panel_ = true;
+  }
   u.tooltip("The whole scene, including faces of different objects lying on top of each other.");
   size_t removable = 0;
   for (const ZFightIssue &z : zfight_) removable += z.pair.remove_a || z.pair.remove_b;

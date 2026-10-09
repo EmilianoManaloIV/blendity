@@ -426,7 +426,9 @@ void Editor::draw_project(const Recti &r) {
     if (u.hovered(right) && in.pressed[0] && !row_clicked) project_selected_.clear();
   }
   /* Keys while the Project window has focus: F2 renames, Delete deletes (after asking). */
-  if (focused_ == WindowKind::Project && !u.any_editing() && !project_selected_.empty() && fs::exists(project_selected_)) {
+  /* Only with the mouse over the Project window too: a Delete meant for the Hierarchy or the Scene
+   * view must never reach a file selected here earlier. */
+  if (focused_ == WindowKind::Project && u.hovered(r) && !u.any_editing() && !project_selected_.empty() && fs::exists(project_selected_)) {
     if (in.key_pressed[platform::KEY_F2]) {
       project_rename_ = project_selected_;
       project_rename_buf_ = fs::is_dir(project_selected_) ? fs::filename(project_selected_) : fs::stem(project_selected_);

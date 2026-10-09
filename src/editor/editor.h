@@ -25,6 +25,7 @@
 #include "ui.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -59,6 +60,8 @@ constexpr int kDrawShapeCount = 6;
 extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyline, Rectangle, Circle, Arc, Polygon, Guide
 extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
+constexpr int kDrawSpacePlaneCount = 5;
+extern const char *const kDrawSpacePlanes[kDrawSpacePlaneCount];  // Ground (XZ), Front (XY), Side (YZ), View, Last Face's Plane
 
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Count };
 const char *window_title(WindowKind k);
@@ -174,6 +177,22 @@ class Editor {
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
   uint64_t render_hash_for_test() { return scene_render_hash(); }
+  void select_project_file_for_test(const std::string &p) { project_selected_ = p; }
+  bool uv_gizmo_for_test(Vec2 &centre, float &arm) const {
+    if (!uv_gizmo_valid_) return false;
+    centre = uv_gizmo_centre_;
+    arm = uv_gizmo_arm_;
+    return true;
+  }
+  Recti window_rect_for_test(WindowKind k) const { return window_rects_.count(k) ? window_rects_.at(k) : Recti{0, 0, 0, 0}; }
+  bool project_delete_pending() const { return !project_delete_.empty(); }
+  bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
+    auto it = hierarchy_rows_.find(name);
+    if (it == hierarchy_rows_.end()) return false;
+    x = it->second.x + it->second.w / 3;
+    y = it->second.y + it->second.h / 2;
+    return true;
+  }
   bool in_edit_mode() const { return edit_mode_; }
   bool edit_face_selected(size_t f) const { return f < face_sel_.size() && face_sel_[f]; }
 
@@ -749,6 +768,13 @@ class Editor {
   int draw_circle_mode_ = 0;  // kCircleModes: centre + radius, 2 points across, 3 points on it
   bool draw_uniform_ = false; // rectangles come out square
   bool draw_global_axes_ = false;  // snap axes: the world's (global) or the face's / object's own (local)
+  /* Drawing in open space (Plasticity's construction plane, UModeler drawing off a face). */
+  int draw_space_mode_ = 0;        // kDrawSpacePlanes: ground XZ, front XY, side YZ, view, last face's plane
+  float draw_space_offset_ = 0.0f; // along the plane's normal
+  bool draw_space_only_ = false;   // ignore surfaces: always draw on the plane
+  bool draw_last_face_valid_ = false;
+  Vec3 draw_last_face_p_, draw_last_face_n_{0, 1, 0};
+  void draw_space_plane(Vec3 &p, Vec3 &n) const;
   bool show_guides_ = true;   // construction lines (Scene::guides)
   size_t draw_points_needed() const;
   void draw_guide_line(const Recti &view, const GuideLine &gl, uint32_t color);
@@ -761,6 +787,7 @@ class Editor {
     uint32_t color = 0;
     int face = -1;
     KnifePoint snap;
+    bool on_space_plane = false;  // in open space, on the drawing plane
   };
   DrawHit draw_hit(const Recti &view, int mx, int my);
   void draw_begin(int shape);
@@ -852,6 +879,8 @@ class Editor {
 
   /* ---- hierarchy ---- */
   std::unordered_set<uint64_t> expanded_;
+  std::unordered_map<std::string, Recti> hierarchy_rows_;
+  std::map<WindowKind, Recti> window_rects_;  // tests: where each window's content was drawn  // tests: where each object's row was drawn
   uint64_t rename_id_ = 0;
   std::string rename_buf_;
   std::string hierarchy_search_;
@@ -871,9 +900,13 @@ class Editor {
     uint32_t face_a = 0, face_b = 0;
     meshops::ZFightPair pair;
     std::vector<Vec3> outline[2];  // world space, for the overlay
+    uint64_t version_a = 0, version_b = 0;  // the meshes as they were when checked
   };
   std::vector<ZFightIssue> zfight_;
   bool zfight_scene_ = false, zfight_show_ = true;
+  bool zfight_from_panel_ = false;  // the list came from the panel (shown while it is open), not Select Z-Fighting
+  uint64_t zfight_panel_frame_ = 0; // the last frame the panel was drawn
+  void zfight_prune();              // drop issues whose object is gone or whose mesh changed
   std::string zfight_describe(const ZFightIssue &z) const;
   void zfight_select(int index);
   void draw_zfight_overlay(const Recti &view);
@@ -883,10 +916,16 @@ class Editor {
   size_t zfight_scan(bool scene_wide);
   size_t zfight_fix(int index = -1);  // remove the suggested faces (-1: all)
   size_t zfight_count() const { return zfight_.size(); }
+  bool zfight_outlines_visible() const;
 
  private:
   /* ---- UV editor selection and transforms (uv_editor.cpp) ---- */
   int uv_select_mode_ = 0;     // 0 vertex, 1 face, 2 island
+  int uv_axis_ = 0;            // the UV gizmo handle being dragged: 0 free / uniform, 1 U, 2 V
+  int uv_gizmo_hot_ = -1;      // the handle under the mouse (for highlighting)
+  bool uv_gizmo_valid_ = false;  // tests: where the gizmo was drawn
+  Vec2 uv_gizmo_centre_;
+  float uv_gizmo_arm_ = 0;
   bool uv_sync_ = true;        // UV face selection = Edit Mode face selection (Blender: UV Sync Selection)
   float uv_rot_field_ = 90.0f, uv_scale_field_ = 2.0f, uv_move_u_ = 0.1f, uv_move_v_ = 0.0f;
   void uv_sync_to_faces(const Mesh &m);
