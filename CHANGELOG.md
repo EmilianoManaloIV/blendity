@@ -11,6 +11,9 @@ be switched on.
 - **`build.sh` stopped before compiling without Blender's libraries.** The object folder's name was
   built with `[ ... ] && echo _libs`. That command fails when the libraries are absent, and `set -e` ended the
   script without a message. This broke every Linux and macOS CI run.
+- **`build.sh` was not executable in git** (mode 644, committed from Windows), so CI's
+  `./build.sh` failed with "permission denied" (exit 126) before even reaching that line. It is
+  now 755.
 - **Push Through out through several faces in one plane needed Manifold.** Pushing a rectangle
   through a wall whose back already had a circle, or an archway where the back had a rectangle across
   it, was refused in the dependency-free build. Now the outline is cut across the back faces and

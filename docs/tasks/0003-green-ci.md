@@ -31,6 +31,8 @@ The `build` workflow has failed on every push to `main` (at least the last 14 ru
 ## Outcome (2026-10-09)
 1. `build.sh` line 86: `... && echo _libs || true)`. Linux builds dependency-free; the unit suite,
    the quick stress pass and the headless screenshot all run (macOS: same script, checked by CI).
+   CI then showed a second cause: `build.sh` was committed without its executable bit (exit 126);
+   now 755.
 2. The first option: `push_through_flat_exit` (`src/scene/mesh_tools.cpp`) cuts the outline across
    several exit faces in one plane with `imprint_loop_across` and gives the front outline a corner
    opposite each new back one, then joins them with a tube. It checks the back corners form the opening's outline edge for edge,
