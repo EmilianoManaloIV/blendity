@@ -14,6 +14,9 @@ be switched on.
 - **`build.sh` was not executable in git** (mode 644, committed from Windows), so CI's
   `./build.sh` failed with "permission denied" (exit 126) before even reaching that line. It is
   now 755.
+
+**Changed:** CI's unit-test steps turn each failing check (and each sanitizer report) into a GitHub
+annotation, so failures can be read on the run page without signing in to view the logs.
 - **Push Through out through several faces in one plane needed Manifold.** Pushing a rectangle
   through a wall whose back already had a circle, or an archway where the back had a rectangle across
   it, was refused in the dependency-free build. Now the outline is cut across the back faces and

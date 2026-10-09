@@ -23,7 +23,14 @@ jobs:
         shell: cmd
         run: build.bat release all
       - name: Unit tests
-        run: dist\windows\blendity_tests.exe
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          dist/windows/blendity_tests.exe 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
       - name: Quick stress test
         run: dist\windows\blendity_stress.exe --quick --out stress\results\ci
       - name: Headless screenshot
@@ -45,7 +52,14 @@ jobs:
       - name: Build
         run: ./build.sh release all
       - name: Unit tests
-        run: ./dist/linux/blendity_tests
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          ./dist/linux/blendity_tests 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
       - name: Quick stress test
         run: ./dist/linux/blendity_stress --quick --out stress/results/ci
       - name: Headless screenshot
@@ -67,7 +81,14 @@ jobs:
       - name: Build
         run: ./build.sh release all
       - name: Unit tests
-        run: ./dist/macos/blendity_tests
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          ./dist/macos/blendity_tests 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
       - name: Quick stress test
         run: ./dist/macos/blendity_stress --quick --out stress/results/ci
       - name: Headless screenshot
@@ -102,4 +123,11 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ./dist/linux/blendity_tests
+        shell: bash
+        # Each failing check also becomes an annotation, readable without signing in.
+        run: |
+          set +e
+          ./dist/linux/blendity_tests 2>&1 | tee tests.log
+          status=${PIPESTATUS[0]}
+          grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          exit $status
