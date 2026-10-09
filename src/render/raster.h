@@ -112,6 +112,13 @@ struct RasterOptions {
   bool fast_setup = true;
   int tile_size = 64;
   ShadeMode shade = ShadeMode::Gouraud;
+  /* Camera filters' raster stage (ADR 0007), all off by default:
+   * - vertex_snap: screen positions rounded to this many pixels (the PS1's integer vertices);
+   * - affine_uv: UVs interpolated in screen space, without perspective correction (PS1 / Saturn);
+   * - tex: texture filter, size cap and mipmaps instead of the materials'. */
+  float vertex_snap = 0.0f;
+  bool affine_uv = false;
+  TexOverride tex;
 };
 
 struct RasterStats {
@@ -143,6 +150,15 @@ struct RenderTarget {
 class Renderer3D {
  public:
   void begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, const LightingEnv &env, const RasterOptions &opt);
+  /* Points finished drawing at another target and camera for overlays (lines, points, project),
+   * keeping the frame's stats: a camera filter renders small, then draws overlays full size. */
+  void rebind(RenderTarget *rt, const Mat4 &view, const Mat4 &proj) {
+    rt_ = rt;
+    view_ = view;
+    proj_ = proj;
+    vp_ = proj * view;
+    inv_vp_ = vp_.inverse();
+  }
   void clear(uint32_t color);
   /* Unity-style procedural skybox gradient. */
   void clear_sky(const Mat4 &inv_view_proj, Vec3 sky, Vec3 horizon, Vec3 ground);

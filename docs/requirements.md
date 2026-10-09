@@ -16,6 +16,7 @@ What Blendity must do and the constraints it works under. Task specs (`docs/task
 | R-07 | Every tool reachable from the menus, the Inspector / Modeling Tools window, a rebindable shortcut (Unity, Blender, Maya, 3ds Max and SketchUp presets) and the console. |
 | R-08 | Adjustable operations: a tool's numbers live in its F9 panel or drag helper, re-run from the mesh as it was, kept for the tool's next use. |
 | R-09 | A Learn tab citing the reference books in "Blender Documents". |
+| R-10 | Camera filters: components on a camera that change how it renders wherever its image shows (Game view, Camera Preview, F12, sequences, optionally the Scene view), starting with old consoles' 3D looks (PS1, N64, Saturn, DOS). |
 
 ## Quality
 

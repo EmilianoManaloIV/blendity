@@ -17,6 +17,7 @@
 
 #include "../core/core.h"
 #include "../platform/platform.h"
+#include "../render/camera_filter.h"
 #include "../render/pathtracer.h"
 #include "../render/raster.h"
 #include "../scene/export.h"
@@ -274,7 +275,15 @@ class Editor {
   void update_environment();
   void update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env);
   void render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
-                       bool scene_lights, const Camera *cam);
+                       bool scene_lights, const Camera *cam, const FilterStack *filters = nullptr);
+  /* A camera's image through its filter components (ADR 0007): the raster stage, the internal
+   * resolution scaled up nearest-neighbour, depth of field and the image passes. Without filters
+   * it is render_deferred + camera_dof. rt keeps full-size depth and ids, and r3d is left bound to
+   * rt for overlays. */
+  void render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
+                     const Camera *cam, float aspect, bool game = true, bool scene_lights = true);
+  /* The enabled filter components on a camera's GameObject, in order. */
+  FilterStack camera_filters(const GameObject *owner) const;
   void render_pathtraced_view(const Recti &view);
   /* preview: the Preview Resolution % and Preview Samples settings (a quick look
    * before the real render). open_window: bring the Render window forward. */
@@ -899,6 +908,19 @@ class Editor {
   double live_preview_time_ = -100;
   Image cam_preview_img_;
   RenderTarget cam_preview_rt_;
+  /* Camera filters: the internal-resolution image and target (render_camera); the Scene view
+   * shows the main camera's filters when scene_filters_ is on. */
+  Image filter_img_;
+  RenderTarget filter_rt_;
+  Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution
+  bool scene_filters_ = false;
+  /* A path-traced render through a filtered camera: traced at the filters' resolution into
+   * render_small_, then the image passes, then scaled into render_dst_ of render_img_. */
+  bool render_filtered_ = false;
+  FilterStack render_filters_;
+  Image render_small_;
+  Recti render_dst_;
+  void resolve_final_render(bool finished);
   Renderer3D cam_preview_r3d_;
   bool cam_preview_rendered_ = false;  // Camera Preview shows the render engine (path traced)
   uint64_t cam_preview_lock_ = 0;      // Camera Preview pinned to this camera (0: the selected one)

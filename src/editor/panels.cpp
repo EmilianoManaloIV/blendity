@@ -1576,8 +1576,7 @@ void Editor::draw_render_window(const Recti &r) {
                       scene_->render.preview_percent, scene_->render.preview_samples));
   if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", false, Icon::Pause) && rendering_) {
     rendering_ = false;
-    render_linear_ = final_pt_.linear_rgb(scene_->render.denoise);
-    final_pt_.resolve(render_img_.pixels.data(), render_img_.width, scene_->render.denoise);
+    resolve_final_render(true);
     render_status_ += "  (stopped)";
   }
   if (u.button({b.x + 3 * (bw + u.px(4)), b.y, bw, b.h}, "Save...", false, Icon::File)) defer([this] { save_render(); });

@@ -3,6 +3,7 @@
 
 #include "../core/core.h"
 #include "../platform/platform.h"
+#include "../render/camera_filter.h"
 #include "../render/colormanagement.h"
 #include "../render/shading.h"
 #include "physics.h"
@@ -43,6 +44,8 @@ template<class T> static void reg(const char *category, const char *help, const 
   register_component({T::kName, category, help, blender, [] { return std::make_unique<T>(); }});
 }
 
+/* Component names may have spaces, but no word of a name may start with a digit: scene files
+ * write "component <name> <flags...>" and the loader takes words up to the first number. */
 void register_builtin_components() {
   static bool done = false;
   if (done) return;
@@ -70,6 +73,10 @@ void register_builtin_components() {
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
   reg<Camera>("Rendering", "Renders the Game view.", "Camera object (the active scene camera)");
+  reg<RetroConsoleFilter>("Rendering",
+                          "A camera filter: renders this camera the way an old console drew 3D (the PlayStation's wobbling vertices, "
+                          "warping textures, low resolution and dithered 15-bit colour).",
+                          "No direct equivalent (a compositor setup plus pixelation; Unity: a custom post-process)");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
@@ -393,6 +400,93 @@ float Camera::exposure_stops() const {
   /* EV relative to ISO 100, 1/60 s, f/2.8: log2(t * S/100 / N^2). */
   const float t = 1.0f / std::max(1e-3f, shutter), n = std::max(0.1f, f_stop);
   return std::log2(t * (iso / 100.0f) / (n * n)) - std::log2((1.0f / 60.0f) / (2.8f * 2.8f));
+}
+
+/* ------------------------------------------------------- Camera filters */
+
+void RetroConsoleFilter::apply_preset(int c) {
+  applied_console = c;
+  switch (c) {
+    default:
+    case PS1:
+      /* Sony PlayStation (1994): 320 x 240, vertices at whole pixels, affine texture mapping,
+       * nearest texels from at most 256 x 256 pages with no mipmaps, 15-bit colour through the
+       * GPU's 4x4 dither. No fog by default (games faked it per vertex). */
+      width = 320, height = 240, fit = 0;
+      vertex_snap = true, snap_grid = 1.0f, affine_textures = true;
+      texture_filter = 1, max_texture_size = 256, mipmaps = false;
+      color_depth = RetroImageParams::Bits15, dither = RetroImageParams::Ps1;
+      fog = false;
+      break;
+  }
+}
+
+void RetroConsoleFilter::reflect(Reflector &r) {
+  const bool all = r.all_fields();
+  static const char *consoles[] = {"PlayStation (PS1)"};
+  r.enumeration("Console", console, consoles, 1);
+  r.help("Fills in the fields below with that console's look. Change any of them afterwards.");
+  /* Read first, so a preset chosen here (or loaded from a file) is filled in before the fields:
+   * a file's own field values then override it. */
+  if (console != applied_console) apply_preset(console);
+  r.field("Width", width, 16, 4096);
+  r.field("Height", height, 16, 4096);
+  r.help("The resolution the camera renders at, scaled up with square pixels.\n"
+         "PS1 games ran at 256-640 x 240 (or 480 interlaced); 320 x 240 was the most common.");
+  static const char *fits[] = {"Fill View", "Letterbox"};
+  r.enumeration("Fit", fit, fits, 2);
+  r.help("Fill View: keep the height and widen to the view's shape (square pixels).\n"
+         "Letterbox: the console's own frame (4:3 for 320 x 240) with black bars.");
+  r.field("Vertex Snap", vertex_snap);
+  r.help("Round every vertex to whole pixels, as the PS1 did: edges and shapes jitter as things move.");
+  if (vertex_snap || all) r.field("Snap Grid (px)", snap_grid, 0.05f, 0.25f, 16.0f);
+  r.field("Affine Textures", affine_textures);
+  r.help("Map textures without perspective correction (PS1, Saturn): they bend and swim on polygons\n"
+         "seen at an angle, most on big ones close to the camera. Rasterized views only.");
+  static const char *filters[] = {"As Material", "Nearest", "Linear", "Trilinear"};
+  r.enumeration("Texture Filter", texture_filter, filters, 4);
+  r.field("Max Texture Size", max_texture_size, 0, 16384);
+  r.help("Textures larger than this are drawn from a smaller copy (their mipmap), like a console's small texture memory.\n0: no limit.");
+  r.field("Mipmaps", mipmaps);
+  r.help("Off: one texture size at every distance (the PS1 had no mipmaps): far textures shimmer.");
+  static const char *depths[] = {"24-bit", "15-bit"};
+  r.enumeration("Colour Depth", color_depth, depths, 2);
+  if (color_depth == RetroImageParams::Bits15 || all) {
+    static const char *dithers[] = {"Off", "PS1 4x4", "Bayer 4x4"};
+    r.enumeration("Dither", dither, dithers, 3);
+    r.help("Hides the 15-bit colour banding with a fixed pattern (the PS1's own matrix, or Bayer's).");
+  }
+  r.field("Fog", fog);
+  r.help("Fade geometry toward a colour with distance, hiding a short draw distance. The sky is left alone:\n"
+         "set the camera's Background to the fog colour for a classic foggy horizon. Not in path-traced renders.");
+  if (fog || all) {
+    r.field("Fog Start", fog_start, 0.1f, 0.0f, 100000.0f);
+    r.field("Fog End", fog_end, 0.1f, 0.0f, 100000.0f);
+    r.color("Fog Colour", fog_color);
+  }
+}
+
+void RetroConsoleFilter::contribute(FilterStack &s) const {
+  if (vertex_snap && finite_bits(snap_grid) && snap_grid > 0.0f) s.vertex_snap = snap_grid;
+  if (affine_textures) s.affine_uv = true;
+  static const int kFilter[] = {-1, (int)TexFilter::Closest, (int)TexFilter::Linear, (int)TexFilter::Trilinear};
+  if (texture_filter > 0 && texture_filter < 4) s.tex.filter = kFilter[texture_filter];
+  if (max_texture_size > 0) s.tex.max_size = s.tex.max_size > 0 ? std::min(s.tex.max_size, max_texture_size) : max_texture_size;
+  if (!mipmaps) s.tex.mipmaps = false;
+  if (width > 0 && height > 0) {
+    s.width = width;
+    s.height = height;
+    s.fit = fit == 1 ? FilterStack::Letterbox : FilterStack::Fill;
+  }
+  RetroImageParams p;
+  p.color_depth = color_depth;
+  p.dither = dither;
+  p.fog = fog;
+  p.fog_start = fog_start;
+  p.fog_end = fog_end;
+  p.fog_color = {linear_to_srgb(fog_color.x), linear_to_srgb(fog_color.y), linear_to_srgb(fog_color.z)};  // the pass works on display colours
+  if (p.fog || p.color_depth != RetroImageParams::Full)
+    s.passes.push_back([p](RenderTarget &rt, const FilterFrame *frame) { apply_retro_image(rt, p, frame); });
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }

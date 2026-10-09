@@ -160,7 +160,10 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   see_through_ = false;
   for (const PTObject &o : objects_)
     if (o.materials)
-      for (const MaterialPtr &mp : *o.materials) see_through_ = see_through_ || (mp && !mp->opaque());
+      for (const MaterialPtr &mp : *o.materials) {
+        see_through_ = see_through_ || (mp && !mp->opaque());
+        if (mp) mp->textures();  // resolved here, not by the tracing threads (Material::textures)
+      }
   lights_ = lights;
   env_ = env;
   normal_mats_.clear();
@@ -1749,6 +1752,11 @@ std::string PathTracer::device_summary() const {
 }
 
 int PathTracer::render(double budget_ms, int max_samples) {
+  /* A material edited between calls resolves its textures here, not in the tracing threads. */
+  for (const PTObject &o : objects_)
+    if (o.materials)
+      for (const MaterialPtr &mp : *o.materials)
+        if (mp) mp->textures();
   if (gpus_.empty()) {
     stats_.cpu_samples = samples_;
     return render_cpu(budget_ms, max_samples, nullptr);

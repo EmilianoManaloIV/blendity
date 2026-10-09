@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <algorithm>
 
 namespace bl {
@@ -20,6 +21,24 @@ constexpr float kDeg2Rad = kPi / 180.0f;
 constexpr float kRad2Deg = 180.0f / kPi;
 
 inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+/* NaN and finiteness read from the bits. The Windows build uses /fp:fast, under which the
+ * compiler may assume x == x and fold std::isnan / std::isfinite (or a NaN-rejecting compare)
+ * away; integer tests on the bits always hold. */
+inline bool nan_bits(float v) {
+  uint32_t b;
+  std::memcpy(&b, &v, 4);
+  return (b & 0x7FFFFFFFu) > 0x7F800000u;
+}
+inline bool finite_bits(float v) {
+  uint32_t b;
+  std::memcpy(&b, &v, 4);
+  return (b & 0x7F800000u) != 0x7F800000u;
+}
+inline bool finite_bits(double v) {
+  uint64_t b;
+  std::memcpy(&b, &v, 8);
+  return (b & 0x7FF0000000000000ull) != 0x7FF0000000000000ull;
+}
 inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 inline float saturate(float v) { return clampf(v, 0.0f, 1.0f); }
 

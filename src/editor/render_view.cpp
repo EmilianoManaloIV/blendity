@@ -242,7 +242,7 @@ void Editor::update_shadow_map(const std::vector<DrawItem> &items, const Lightin
 }
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
-                             bool scene_lights, const Camera *cam) {
+                             bool scene_lights, const Camera *cam, const FilterStack *filters) {
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   std::vector<DrawItem> items = collect_items(game, true);
@@ -256,6 +256,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   }
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
+  if (filters) filters->apply_raster(opt);
   r3d.begin(&rt, v, p, env, opt);
   Mat4 inv = (p * v).inverse();
   if (cam && cam->clear_flags == 1) r3d.clear(to_display_pixel(cam->background, ViewTransform::Standard, 0.0f));
@@ -264,6 +265,69 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   else r3d.clear_environment(inv, env_, env.view_transform, env.exposure);
   for (const DrawItem &it : items) r3d.add(it);
   r3d.flush();
+}
+
+FilterStack Editor::camera_filters(const GameObject *owner) const {
+  FilterStack s;
+  if (owner)
+    for (const auto &c : owner->components)
+      if (const auto *f = dynamic_cast<const CameraFilter *>(c.get()))
+        if (f->enabled) f->contribute(s);
+  return s;
+}
+
+/* Nearest-neighbour copy of one plane (colour, depth or ids) into r of a w-wide destination. */
+template<class T> static void upscale_plane(const std::vector<T> &src, int sw, int sh, std::vector<T> &dst, int dw, const Recti &r) {
+  if (src.size() < (size_t)sw * sh || dst.empty()) return;
+  for (int y = 0; y < r.h; y++) {
+    const T *s = src.data() + (size_t)std::min(sh - 1, (int)((int64_t)y * sh / r.h)) * sw;
+    T *d = dst.data() + (size_t)(r.y + y) * dw + r.x;
+    for (int x = 0; x < r.w; x++) d[x] = s[std::min(sw - 1, (int)((int64_t)x * sw / r.w))];
+  }
+}
+
+void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
+                           const Camera *cam, float aspect, bool game, bool scene_lights) {
+  FilterStack fs = camera_filters(owner);
+  if (!cam) fs.fit = FilterStack::Fill;  // the Scene view: its overlays and picking use the full view's projection
+  if (fs.empty()) {
+    render_deferred(r3d, rt, v, p, eye, game, scene_lights, cam);
+    if (cam) camera_dof(rt, v, p, eye, forward, cam, aspect, cam->vertical_fov_deg(aspect));
+    return;
+  }
+  int iw, ih;
+  Recti dst;
+  filter_layout(fs, rt.width, rt.height, iw, ih, dst);
+  const bool boxed = dst.x != 0 || dst.y != 0 || dst.w != rt.width || dst.h != rt.height;
+  const bool scaled = iw != rt.width || ih != rt.height;
+  /* Letterboxed: the picture has the console frame's shape, so the projection does too. */
+  const float a2 = boxed ? dst.w / (float)std::max(1, dst.h) : aspect;
+  const Mat4 pp = !boxed ? p : cam ? cam->projection(a2) : cam_.proj(a2);
+  RenderTarget *t = &rt;
+  if (scaled) {
+    if (filter_img_.width != iw || filter_img_.height != ih) filter_img_.resize(iw, ih);
+    filter_rt_.attach(filter_img_, {0, 0, iw, ih});
+    t = &filter_rt_;
+  }
+  render_deferred(r3d, *t, v, pp, eye, game, scene_lights, cam, &fs);
+  if (cam) camera_dof(*t, v, pp, eye, forward, cam, a2, cam->vertical_fov_deg(a2));
+  FilterFrame frame;
+  frame.inv_view_proj = (pp * v).inverse();
+  frame.eye = eye;
+  frame.forward = normalize(forward);
+  frame.far_distance = cam ? cam->far_clip : 1000.0f;
+  for (const FilterPass &pass : fs.passes) pass(*t, &frame);
+  if (!scaled) return;
+  /* Scale up into the view; its depth and ids follow, so picking and overlays still work. */
+  if (boxed) {
+    for (int y = 0; y < rt.height; y++) std::fill(rt.color + (size_t)y * rt.stride, rt.color + (size_t)y * rt.stride + rt.width, 0xFF000000u);
+    std::fill(rt.depth.begin(), rt.depth.end(), 1.0f);
+    std::fill(rt.ids.begin(), rt.ids.end(), 0u);
+  }
+  upscale_nearest(filter_img_.pixels.data(), iw, ih, iw, rt.color, rt.stride, dst);
+  upscale_plane(filter_rt_.depth, iw, ih, rt.depth, rt.width, dst);
+  upscale_plane(filter_rt_.ids, iw, ih, rt.ids, rt.width, dst);
+  r3d.rebind(&rt, v, p);  // overlays (grid, gizmos) draw on the full-size view; the stats stay
 }
 
 /* ===================================================================== */
@@ -453,6 +517,25 @@ void Editor::start_final_render(bool preview, bool open_window) {
   render_start_ = now_seconds();
   render_has_result_ = true;
   if (open_window) dock_open(WindowKind::Render);
+  render_filters_ = camera_filters(cam ? owner : nullptr);
+  render_filtered_ = !render_filters_.empty();
+  if (rs.engine == 0 && render_filtered_) {
+    /* A filtered camera: its own resolution and passes; no supersampling (it would soften
+     * the pixels the filter is there to make). */
+    RenderTarget rt;
+    rt.attach(render_img_, {0, 0, w, h});
+    Renderer3D r3d;
+    render_camera(r3d, rt, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), owner, cam, w / (float)h);
+    render_time_ = now_seconds() - render_start_;
+    rendering_ = false;
+    int iw, ih;
+    Recti dst;
+    filter_layout(render_filters_, w, h, iw, ih, dst);
+    render_status_ = strprintf("%s %dx%d through camera filters (%dx%d), %.0f ms (%zu tris)", preview ? "Preview (rasterized)" : "Rasterized", w, h, iw, ih,
+                               render_time_ * 1000.0, r3d.stats().tris_submitted);
+    if (!preview) Log::info("Render finished: %s", render_status_.c_str());
+    return;
+  }
   if (rs.engine == 0) {
     /* Rasterized: supersample then box-filter down (SSAA). */
     int aa = preview ? 1 : std::max(1, std::min(4, rs.raster_aa));
@@ -488,7 +571,15 @@ void Editor::start_final_render(bool preview, bool open_window) {
   if (cam) ps.exposure += cam->exposure_stops();
   final_pt_.set_settings(ps);  // before build(): it picks the ray backend
   build_pt(final_pt_, *this, items, env, env_);
-  final_pt_.set_camera(v, p, w, h, camera_lens(cam, w / (float)h));
+  int tw = w, th = h;
+  if (render_filtered_) {
+    /* Traced at the filters' resolution (fewer samples to wait for), scaled up when shown. */
+    filter_layout(render_filters_, w, h, tw, th, render_dst_);
+    render_small_.resize(tw, th);
+    if (render_dst_.w != w || render_dst_.h != h) p = cam->projection(render_dst_.w / (float)render_dst_.h);
+    std::fill(render_img_.pixels.begin(), render_img_.pixels.end(), 0xFF000000u);
+  }
+  final_pt_.set_camera(v, p, tw, th, camera_lens(cam, tw / (float)th));
   rendering_ = true;
   render_status_ = strprintf("%s %dx%d: %s scene of %zu tris built in %.0f ms", preview ? "Preview" : "Path tracing", w, h, final_pt_.device_summary().c_str(),
                              final_pt_.stats().triangles,
@@ -503,14 +594,7 @@ void Editor::step_final_render() {
   int done = final_pt_.render(40.0, target);
   render_time_ = now_seconds() - render_start_;
   bool finished = done >= target;
-  if (finished) {
-    /* Denoise once and keep the linear result for HDR / EXR saving. */
-    render_linear_ = final_pt_.linear_rgb(rs.denoise);
-    final_pt_.resolve_rgb(render_linear_, render_img_.pixels.data(), render_img_.width);
-  }
-  else {
-    final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
-  }
+  resolve_final_render(finished);
   /* Samples per second, and how they were shared when several devices render. */
   std::string split;
   if (!final_pt_.stats().gpu_samples.empty()) {
@@ -525,6 +609,28 @@ void Editor::step_final_render() {
     rendering_ = false;
     if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)", done, render_time_, final_pt_.device_summary().c_str());
   }
+}
+
+void Editor::resolve_final_render(bool finished) {
+  const bool denoise = scene_->render.denoise;
+  if (!render_filtered_) {
+    if (finished) {
+      /* Denoise once and keep the linear result for HDR / EXR saving. */
+      render_linear_ = final_pt_.linear_rgb(denoise);
+      final_pt_.resolve_rgb(render_linear_, render_img_.pixels.data(), render_img_.width);
+    }
+    else final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
+    return;
+  }
+  /* Through camera filters: the small image, its passes (no depth: no fog), then scaled up.
+   * No float result: a retro image is an 8-bit one. */
+  Image &s = render_small_;
+  if (finished) final_pt_.resolve_rgb(final_pt_.linear_rgb(denoise), s.pixels.data(), s.width);
+  else final_pt_.resolve(s.pixels.data(), s.width, false);
+  RenderTarget rt;
+  rt.attach(s, {0, 0, s.width, s.height});
+  for (const FilterPass &pass : render_filters_.passes) pass(rt, nullptr);
+  upscale_nearest(s.pixels.data(), s.width, s.height, s.width, render_img_.pixels.data(), render_img_.width, render_dst_);
 }
 
 void Editor::save_render() {
@@ -588,6 +694,11 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam) {
     Mat4 w = owner->world_matrix();
     uint64_t c = hash_component(*cam);
     h ^= c + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    for (const auto &comp : owner->components)  // its camera filters too
+      if (auto *f = dynamic_cast<CameraFilter *>(comp.get())) {
+        const uint64_t fh = hash_component(*f) ^ (uint64_t)f->enabled;
+        h ^= fh + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+      }
     for (float f : w.m) {
       uint32_t b;
       std::memcpy(&b, &f, 4);
@@ -642,6 +753,11 @@ void Editor::draw_camera_preview(const Recti &view) {
     /* Rebuild when the scene, this camera or the inset size changes; then add
      * a few milliseconds of samples every frame until the preview count. */
     uint64_t hash = camera_render_hash(g, cam) ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
+    const FilterStack filters = camera_filters(g);
+    int tw = w, th = h;
+    Recti tdst{0, 0, w, h};
+    if (!filters.empty()) filter_layout(filters, w, h, tw, th, tdst);
+    Image &traced_img = filters.empty() ? cam_preview_img_ : cam_preview_small_;
     if (hash != cam_preview_pt_hash_) {
       cam_preview_pt_hash_ = hash;
       LightingEnv env = make_lighting(eye, true);
@@ -650,21 +766,31 @@ void Editor::draw_camera_preview(const Recti &view) {
       ps.exposure += cam->exposure_stops();
       cam_preview_pt_.set_settings(ps);
       build_pt(cam_preview_pt_, *this, items, env, env_);
-      cam_preview_pt_.set_camera(v, p, w, h, camera_lens(cam, aspect));
+      const float ta = tdst.w / (float)std::max(1, tdst.h);
+      cam_preview_pt_.set_camera(v, tdst.w == w && tdst.h == h ? p : cam->projection(ta), tw, th, camera_lens(cam, ta));
       cam_preview_done_ = false;
     }
     if (cam_preview_img_.width != w || cam_preview_img_.height != h) cam_preview_img_.resize(w, h);  // keeps a finished preview
+    if (traced_img.width != tw || traced_img.height != th) traced_img.resize(tw, th);
     const int target = std::max(1, rs.preview_samples);
     if (!cam_preview_done_) {
       int done = cam_preview_pt_.render(12.0, target);
       if (done >= target) {
         std::vector<float> lin = cam_preview_pt_.linear_rgb(rs.denoise);
-        cam_preview_pt_.resolve_rgb(lin, cam_preview_img_.pixels.data(), w);
+        cam_preview_pt_.resolve_rgb(lin, traced_img.pixels.data(), tw);
         cam_preview_done_ = true;
       }
       else {
-        cam_preview_pt_.resolve(cam_preview_img_.pixels.data(), w, false);
+        cam_preview_pt_.resolve(traced_img.pixels.data(), tw, false);
         u.redraw = true;
+      }
+      if (!filters.empty()) {
+        /* The filters' colour passes (no depth: no fog), scaled up into the inset. */
+        RenderTarget trt;
+        trt.attach(traced_img, {0, 0, tw, th});
+        for (const FilterPass &pass : filters.passes) pass(trt, nullptr);
+        std::fill(cam_preview_img_.pixels.begin(), cam_preview_img_.pixels.end(), 0xFF000000u);
+        upscale_nearest(traced_img.pixels.data(), tw, th, tw, cam_preview_img_.pixels.data(), w, tdst);
       }
     }
     status = strprintf("  %d / %d", std::min(cam_preview_pt_.samples(), target), target);
@@ -673,8 +799,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     cam_preview_pt_hash_ = 0;
     cam_preview_img_.resize(w, h);
     cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
-    render_deferred(cam_preview_r3d_, cam_preview_rt_, v, p, eye, true, true, cam);
-    camera_dof(cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), cam, aspect, cam->vertical_fov_deg(aspect));
+    render_camera(cam_preview_r3d_, cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
   }
   Recti box{view.right() - w - u.px(12), view.bottom() - h - u.px(12) - u.row_h(), w, h};
   cam_preview_rect_ = {box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)};  // clicks here stay off the scene

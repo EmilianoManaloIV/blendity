@@ -284,6 +284,14 @@ void Renderer3D::flush() {
   }
   stats_.tris_submitted += total_tris;
   const bool gouraud = opt_.shade == ShadeMode::Gouraud;
+  /* Materials load their textures here, on one thread: resolving them while the shading
+   * threads sample would free textures in use (Material::textures). Every mode: the
+   * see-through pass shades materials in parallel in Gouraud mode too. */
+  default_material()->textures();
+  for (size_t i = 0; i < n_items; i++)
+    if (visible[i] && items_[i].materials)
+      for (const MaterialPtr &mp : *items_[i].materials)
+        if (mp) mp->textures();
 
   /* Chunks of triangles for the setup stage: enough to keep every thread
    * busy, few enough that the per-tile walk over chunks stays cheap. Objects
@@ -326,9 +334,13 @@ void Renderer3D::flush() {
    * vertices [b, e). The perspective divide happens once per vertex here
    * rather than once per triangle corner (~6 per vertex on closed meshes). */
   const float fW = (float)W, fH = (float)H;
-  auto to_screen = [fW, fH](const Vec4 &c, Vec4 &s) {
+  /* A camera filter's vertex snap (the PS1 drew at whole-pixel positions): x and y round
+   * to the grid; depth and 1/w are left exact. */
+  const float snap = finite_bits(opt_.vertex_snap) && opt_.vertex_snap > 0.0f ? opt_.vertex_snap : 0.0f;
+  auto snapped = [snap](float v) { return snap > 0.0f ? std::floor(v / snap + 0.5f) * snap : v; };
+  auto to_screen = [fW, fH, snapped](const Vec4 &c, Vec4 &s) {
     float iw = 1.0f / c.w;
-    s = Vec4((c.x * iw * 0.5f + 0.5f) * fW, (0.5f - c.y * iw * 0.5f) * fH, c.z * iw, iw);
+    s = Vec4(snapped((c.x * iw * 0.5f + 0.5f) * fW), snapped((0.5f - c.y * iw * 0.5f) * fH), c.z * iw, iw);
   };
   auto shade_vertex = [&](uint32_t item, uint32_t v) {
     const DrawItem &it = items_[item];
@@ -498,8 +510,8 @@ void Renderer3D::flush() {
           float sx[4], sy[4], sz[4], siw[4];
           for (int k = 0; k < np; k++) {
             float iw = 1.0f / pv[k].w;
-            sx[k] = (pv[k].x * iw * 0.5f + 0.5f) * W;
-            sy[k] = (0.5f - pv[k].y * iw * 0.5f) * H;
+            sx[k] = snapped((pv[k].x * iw * 0.5f + 0.5f) * W);
+            sy[k] = snapped((0.5f - pv[k].y * iw * 0.5f) * H);
             sz[k] = pv[k].z * iw;
             siw[k] = iw;
           }
@@ -822,6 +834,7 @@ void Renderer3D::shade_deferred() {
     float ox = 0, oy = 0;  // screen position of vertex 0: the planes' origin (keeps them precise)
     Vec3 na, nb, nc;       // sum(c_k * q_k), q_k = screen barycentric / w
     float sa = 0, sb = 0, sc = 0;  // sum(q_k)
+    Vec3 aa, ab, ac;       // affine_uv: the same barycentrics without the 1/w weighting
     Vec3 p[3], n[3], wp[3], wn[3], wt[3], geo_normal;
     Vec2 uv[3];
     float tangent_w = 1.0f;
@@ -849,6 +862,11 @@ void Renderer3D::shade_deferred() {
     }
     T.nc = st.c[0] * st.iw[0];
     T.sc = st.iw[0];
+    if (opt_.affine_uv) {
+      T.aa = st.c[0] * a[0] + st.c[1] * a[1] + st.c[2] * a[2];
+      T.ab = st.c[0] * b[0] + st.c[1] * b[1] + st.c[2] * b[2];
+      T.ac = st.c[0];
+    }
     const DrawItem &it = items_[st.item];
     const RenderMesh &rm = *it.mesh;
     const Mat4 &nm = normal_mats_[st.item];
@@ -922,10 +940,21 @@ void Renderer3D::shade_deferred() {
         sp.geo_normal = T.geo_normal;
         if (T.has_uv) {
           auto uv_at = [&](Vec3 b) { return T.uv[0] * b.x + T.uv[1] * b.y + T.uv[2] * b.z; };
-          sp.uv = uv_at(B);
-          sp.duvdx = uv_at(ratio(N + T.na, S + T.sa)) - sp.uv;
-          sp.duvdy = uv_at(ratio(N + T.nb, S + T.sb)) - sp.uv;
+          if (opt_.affine_uv) {
+            /* Linear across the screen, as the PS1 drew textures: they swim and bend on
+             * polygons seen at an angle. Lighting still uses the true position. */
+            const Vec3 A = T.aa * dx + T.ab * dy + T.ac;
+            sp.uv = uv_at(A);
+            sp.duvdx = uv_at(A + T.aa) - sp.uv;
+            sp.duvdy = uv_at(A + T.ab) - sp.uv;
+          }
+          else {
+            sp.uv = uv_at(B);
+            sp.duvdx = uv_at(ratio(N + T.na, S + T.sa)) - sp.uv;
+            sp.duvdy = uv_at(ratio(N + T.nb, S + T.sb)) - sp.uv;
+          }
         }
+        if (opt_.tex.active()) sp.tex = &opt_.tex;
         if (T.has_tangent) {
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
@@ -987,6 +1016,8 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
 void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
   const int W = rt_->width, H = rt_->height;
   const bool gouraud = opt_.shade == ShadeMode::Gouraud;
+  const float snap = finite_bits(opt_.vertex_snap) && opt_.vertex_snap > 0.0f ? opt_.vertex_snap : 0.0f;  // as in flush()
+  auto snapped = [snap](float v) { return snap > 0.0f ? std::floor(v / snap + 0.5f) * snap : v; };
   static thread_local Environment fallback_env;
   const Environment &env = env_.environment ? *env_.environment : fallback_env;
   if (!env_.environment) {
@@ -1039,8 +1070,8 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
       float sx[4], sy[4], sz[4], siw[4];
       for (int k = 0; k < np; k++) {
         float iw = 1.0f / pv[k].w;
-        sx[k] = (pv[k].x * iw * 0.5f + 0.5f) * W;
-        sy[k] = (0.5f - pv[k].y * iw * 0.5f) * H;
+        sx[k] = snapped((pv[k].x * iw * 0.5f + 0.5f) * W);
+        sy[k] = snapped((0.5f - pv[k].y * iw * 0.5f) * H);
         sz[k] = pv[k].z * iw;
         siw[k] = iw;
       }
@@ -1117,7 +1148,11 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           sp.position = it.model.point(sp.local_position);
           sp.normal = normalize(nm.dir(sp.local_normal));
           sp.geo_normal = normalize(nm.dir(cross(p1 - p0, p2 - p0)));
-          if (!rm.uvs.empty()) sp.uv = rm.uvs[tri[0]] * B.x + rm.uvs[tri[1]] * B.y + rm.uvs[tri[2]] * B.z;
+          if (!rm.uvs.empty()) {
+            const Vec3 U = opt_.affine_uv ? t.c[0] * w0 + t.c[1] * w1 + t.c[2] * w2 : B;  // affine: screen-linear
+            sp.uv = rm.uvs[tri[0]] * U.x + rm.uvs[tri[1]] * U.y + rm.uvs[tri[2]] * U.z;
+          }
+          if (opt_.tex.active()) sp.tex = &opt_.tex;
           if (!rm.tangents.empty()) {
             Vec4 tg = rm.tangents[tri[0]] * B.x + rm.tangents[tri[1]] * B.y + rm.tangents[tri[2]] * B.z;
             sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);

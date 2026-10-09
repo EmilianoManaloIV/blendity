@@ -2582,7 +2582,12 @@ void Editor::run_console_command(const std::string &line) {
     proportional_ = arg(1, "on") != "off";
     prop_radius_ = (float)std::atof(arg(2, "1").c_str());
   }
-  else if (c == "component") add_component_to_selection(arg(1, "MirrorModifier"));
+  else if (c == "component") {
+    /* Names may have spaces ("Retro Console Filter"): the rest of the line. */
+    std::string name;
+    for (size_t i = 1; i < t.size(); i++) name += (i > 1 ? " " : "") + t[i];
+    add_component_to_selection(name.empty() ? "MirrorModifier" : name);
+  }
   else if (c == "applymods") mesh_op("apply_modifiers");
   else if (c == "libs") {
     /* Which of Blender's libraries this build uses (deps/deps.h). */
@@ -2644,6 +2649,12 @@ void Editor::run_console_command(const std::string &line) {
                : w == "solid"                     ? Shading::Solid
                : w == "rendered"                  ? Shading::Rendered
                                                    : Shading::Shaded;
+  }
+  else if (c == "filters") {
+    /* The main camera's filters on the Scene view (Shaded): on / off / toggle. */
+    const std::string w = to_lower(arg(1, "toggle"));
+    scene_filters_ = w == "on" || w == "1" ? true : w == "off" || w == "0" ? false : !scene_filters_;
+    Log::info("Camera filters in the Scene view: %s", scene_filters_ ? "on" : "off");
   }
   else if (c == "bench") {
     int frames = std::max(1, std::atoi(arg(1, "30").c_str()));
@@ -2834,6 +2845,7 @@ void Editor::load_prefs() {
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
     else if (k == "stats") show_stats_ = v == "1";
+    else if (k == "camera_filters") scene_filters_ = v == "1";
     else if (k == "snap_move") snap_move_ = (float)std::atof(v.c_str());
     else if (k == "snap_rot") snap_rot_ = (float)std::atof(v.c_str());
     else if (k == "blender_transform_keys") blender_keys_ = v == "1";
@@ -2867,11 +2879,11 @@ void Editor::save_prefs() {
   for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
                             "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\nauto_smooth=%d\nauto_smooth_angle=%g\n"
-                            "keymap_preset=%s\nkeymap=%s\ndraw_axes=%s\n",
+                            "keymap_preset=%s\nkeymap=%s\ndraw_axes=%s\ncamera_filters=%d\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
                             show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0, max_fps_,
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
-                            keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local");
+                            keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0);
   fs::write_file(prefs_path_, s);
 }
 
