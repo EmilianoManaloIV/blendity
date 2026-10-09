@@ -1376,6 +1376,7 @@ bool Editor::gizmo_update(const Recti &view) {
         for (size_t i = 0; i < mm.vert_count() && i < gizmo_vert_starts_.size(); i++)
           if (float k = vw(i)) mm.positions[i] = inv.point(gizmo_vert_starts_[i] + delta * k);
         mm.touch();
+        repair_moved_rings(mm);
       }
       else
         for (auto &s : gizmo_starts_)
@@ -1412,6 +1413,7 @@ bool Editor::gizmo_update(const Recti &view) {
           if (float k = vw(i)) /* proportional: the angle fades with the weight */
             mm.positions[i] = inv.point(pivot + (k < 1.0f ? Quat::axis_angle(ax, angle * k) : q).rotate(gizmo_vert_starts_[i] - pivot));
         mm.touch();
+        repair_moved_rings(mm);
       }
       else
         for (auto &s : gizmo_starts_)
@@ -1451,6 +1453,7 @@ bool Editor::gizmo_update(const Recti &view) {
             mm.positions[i] = inv.point(pivot + axis[0] * l.x + axis[1] * l.y + axis[2] * l.z);
           }
         mm.touch();
+        repair_moved_rings(mm);
       }
       else
         for (auto &s : gizmo_starts_)
@@ -1642,6 +1645,19 @@ void Editor::enter_edit_mode() {
 void Editor::exit_edit_mode() {
   edit_mode_ = false;
   edit_obj_ = 0;
+}
+
+void Editor::repair_moved_rings(Mesh &m) {
+  std::vector<uint8_t> moved(m.vert_count(), 0);
+  for (size_t v = 0; v < moved.size() && v < vert_sel_.size(); v++) moved[v] = vert_sel_[v];
+  std::vector<uint8_t> dropped;
+  if (!meshops::repair_rings(m, moved, &dropped)) return;
+  /* The selection follows the faces that stayed; the ring's new faces come last, unselected. */
+  std::vector<uint8_t> sel;
+  for (size_t f = 0; f < dropped.size(); f++)
+    if (!dropped[f]) sel.push_back(f < face_sel_.size() ? face_sel_[f] : 0);
+  sel.resize(m.face_count(), 0);
+  face_sel_ = std::move(sel);
 }
 
 void Editor::sync_vert_face_selection(bool from_faces) {

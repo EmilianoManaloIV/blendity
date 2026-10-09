@@ -49,7 +49,9 @@ struct ShortcutAction {
 using Keymap = std::unordered_map<std::string, std::vector<KeyChord>>;
 const std::vector<ShortcutAction> &shortcut_actions();
 constexpr int kKeymapPresetCount = 5;
-extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Blender, Maya, 3ds Max, SketchUp
+extern const char *const kKeymapPresets[kKeymapPresetCount];
+constexpr int kDrawAxisPlaneCount = 4;
+extern const char *const kDrawAxisPlanes[kDrawAxisPlaneCount];  // Surface, YZ (X), XZ (Y), XY (Z)  // Unity, Blender, Maya, 3ds Max, SketchUp
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys = false);
 std::string chord_text(const KeyChord &c);
 KeyChord parse_chord(const std::string &text);
@@ -184,6 +186,22 @@ class Editor {
     arm = uv_gizmo_arm_;
     return true;
   }
+  Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
+  size_t popup_count_for_test() const { return ui_.popup_count(); }
+  bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
+  MaterialPtr material_selected_for_test() const { return material_selected_; }
+  void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
+  bool material_delete_pending() const { return material_delete_ != nullptr; }
+  void select_faces_for_test(const std::vector<size_t> &fs) {
+    if (!edit_mesh_ptr()) return;
+    face_sel_.assign((*edit_mesh_ptr())->face_count(), 0);
+    for (size_t f : fs)
+      if (f < face_sel_.size()) face_sel_[f] = 1;
+    sync_vert_face_selection(true);
+  }
+  int draw_axis_plane() const { return draw_axis_plane_; }
+  size_t draw_point_count() const { return draw_.active ? draw_.pts.size() : SIZE_MAX; }
+  const std::vector<Vec3> &draw_points_for_test() const { return draw_.pts; }
   Recti window_rect_for_test(WindowKind k) const { return window_rects_.count(k) ? window_rects_.at(k) : Recti{0, 0, 0, 0}; }
   bool project_delete_pending() const { return !project_delete_.empty(); }
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
@@ -308,6 +326,8 @@ class Editor {
   void edit_box_select(const Recti &r, Recti box, int mode);
   void edit_select_all(bool select);
   void sync_vert_face_selection(bool from_faces);
+  /* After the selection moved: a folded ring round a drawn shape is zipped again (meshops::repair_rings). */
+  void repair_moved_rings(Mesh &m);
   bool edge_is_selected(uint32_t a, uint32_t b) const;  // explicit in edge mode, else both ends
   void edges_from_verts();  // edge_sel_ = edges with both ends selected
   void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
@@ -388,6 +408,7 @@ class Editor {
     bool edit = false;          // Edit Mode: the selected vertices; otherwise the selected objects
     uint64_t obj = 0;
     MeshPtr mesh_before;
+    std::vector<uint8_t> fsel_before;  // the face selection at the start (rings rebuilt on the way renumber faces)
     std::vector<std::pair<uint64_t, Mat4>> objects;  // id, world matrix at the start
     Vec3 pivot;
     Vec2 pivot_screen;
@@ -540,6 +561,11 @@ class Editor {
  private:
   void draw_tools_window(const Recti &r);  // Modeling Tools window (UModeler's tool panel)
   MaterialPtr material_selected_;
+  MaterialPtr material_delete_;  // waiting for Delete Material's confirmation
+  /* Delete a material (the Materials window): every slot using it is emptied (its faces
+   * fall back to the default material, Blender's empty slot) and an asset's .mat goes to
+   * the Recycle Bin. Returns the slots emptied. */
+  size_t delete_material(const MaterialPtr &m);
   std::string material_search_;
   /* ---- Object snapping and camera piloting (object_snap.cpp) ---- */
   bool surface_align_ = false;  // surface snap also turns the object's up to the normal
@@ -762,7 +788,12 @@ class Editor {
     Vec3 axis_u{1, 0, 0};  // the plane's first axis: along the face's longest edge or the object's X
     Vec3 guide_dir;        // the direction the last inference locked to (drawn as a guide)
     bool guide = false;
+    bool bent = false;     // the plane turned mid-polyline (X / Y / Z): a 3D path, kept as wire edges
   } draw_;
+  /* X / Y / Z while drawing: lock the drawing plane across that axis (X: the YZ plane, Y: XZ,
+   * Z: XY), like an axis lock on Extrude. 0: the surface's own plane. */
+  int draw_axis_plane_ = 0;
+  void draw_set_axis_plane(int axis);
   int draw_segments_ = 24, draw_sides_ = 6;
   int draw_rect_mode_ = 0;    // kRectModes: from a corner, from the centre, or 3 points (any angle)
   int draw_circle_mode_ = 0;  // kCircleModes: centre + radius, 2 points across, 3 points on it

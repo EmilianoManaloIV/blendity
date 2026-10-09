@@ -182,6 +182,11 @@ class Context {
   /* Declares the popup body for this frame; only runs if open. */
   void popup(Id i, int width, std::function<void()> body);
   bool any_popup_open() const { return !popups_.empty(); }
+  size_t popup_count() const { return popups_.size(); }
+  Recti combo_rect(Id i) const {  // where a combo was last drawn (for tests)
+    auto it = combo_rects_.find(i);
+    return it == combo_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
   /* Rows inside popups/menus. */
   bool menu_item(const std::string &label, const char *shortcut = nullptr, bool checked = false, bool enabled = true,
                  Icon icon = Icon::None);
@@ -205,6 +210,7 @@ class Context {
     Recti anchor;
     Recti rect;
     bool submenu = false;
+    bool dropdown = false;  // a combo's list opened inside a dialog: below its field, closes on its own
     int width = 200;
     int content_h = 0;
     bool declared = false;
@@ -262,6 +268,7 @@ class Context {
   bool last_hovered_ = false;
   std::vector<std::function<void()>> overlays_;
   std::unordered_map<Id, int> int_results_;
+  std::unordered_map<Id, Recti> combo_rects_;
   std::unordered_map<Id, Vec4> color_results_;
   std::unordered_map<Id, Vec4> color_edit_, color_before_;
   std::unordered_map<Id, bool> color_has_alpha_;

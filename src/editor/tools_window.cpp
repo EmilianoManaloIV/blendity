@@ -103,6 +103,15 @@ void Editor::draw_tools_window(const Recti &r) {
     }
     {
       Recti rr = lay.row(u.row_h() + u.px(2));
+      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Axis Plane (X/Y/Z)");
+      int ap = draw_axis_plane_;
+      if (u.combo(u.id("tools_axis_plane"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, ap, kDrawAxisPlanes, kDrawAxisPlaneCount))
+        draw_set_axis_plane(ap);
+      u.tooltip("X, Y or Z while drawing: the YZ, XZ or XY plane (an axis lock). Mid-polyline it turns through the last point,\n"
+                "making a 3D path for Follow.");
+    }
+    {
+      Recti rr = lay.row(u.row_h() + u.px(2));
       u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Open Space Plane");
       u.combo(u.id("tools_space"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, draw_space_mode_, kDrawSpacePlanes, kDrawSpacePlaneCount);
       u.tooltip("Where shapes go when you click off the mesh: the ground, front / side planes, a plane facing you, or the last face's plane.");

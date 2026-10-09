@@ -174,7 +174,51 @@ void Editor::draw_materials_window(const Recti &r) {
       });
       if (!selection_.empty()) active_ = selection_.back();
     }
+    u.menu_separator();
+    if (u.menu_item("Delete Material...", "Del")) material_delete_ = selm;
   });
+  /* Delete (or Backspace) over the window asks to delete the selected material too. */
+  if (u.hovered(r) && material_selected_ && !u.wants_keyboard() && (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE])) {
+    material_delete_ = material_selected_;
+    in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
+  }
+  /* Delete Material's confirmation (like the Project window's). */
+  if (material_delete_) {
+    const ui::Id did = u.id("mat_delete");
+    if (!u.popup_open(did)) u.open_popup(did, {r.x + r.w / 2 - u.px(190), r.y + u.px(40), 0, 0});
+    const MaterialPtr dm = material_delete_;
+    u.popup(did, u.px(380), [this, dm] {
+      auto &u = ui_;
+      size_t users = 0;
+      scene_->for_each([&](GameObject &g) {
+        if (auto *mr = g.get<MeshRenderer>())
+          for (auto &s : mr->materials) users += s == dm;
+      });
+      Recti t = u.popup_row(u.row_h() + u.px(6));
+      u.label({t.x + u.px(10), t.y, t.w - u.px(20), t.h}, "Delete the material " + dm->name + "?", u.theme.text_bright);
+      Recti h1 = u.popup_row();
+      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h},
+              users ? strprintf("%zu slot(s) use it; their faces get the default material.", users) : std::string("No object uses it."), u.theme.text_dim);
+      if (!dm->asset_path.empty()) {
+        Recti h2 = u.popup_row();
+#ifdef _WIN32
+        u.label({h2.x + u.px(10), h2.y, h2.w - u.px(20), h2.h}, "Its file " + fs::filename(dm->asset_path) + " goes to the Recycle Bin.", u.theme.text_dim);
+#else
+        u.label({h2.x + u.px(10), h2.y, h2.w - u.px(20), h2.h}, "Its file " + fs::filename(dm->asset_path) + " goes to the Trash.", u.theme.text_dim);
+#endif
+      }
+      Recti b = u.popup_row(u.row_h() + u.px(10));
+      if (u.button({b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Delete")) {
+        delete_material(dm);
+        material_delete_ = nullptr;
+        u.close_popups();
+      }
+      if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {
+        material_delete_ = nullptr;
+        u.close_popups();
+      }
+    });
+  }
   if (!editing) return;
   /* The material's own inspector, outside any object. */
   Recti ed{r.x, grid.bottom() + 1, r.w, r.bottom() - grid.bottom() - 1};
@@ -194,6 +238,31 @@ void Editor::draw_materials_window(const Recti &r) {
   u.pop_id();
   content_h = lay.y + eoff - ed.y + u.px(20);
   u.end_scroll();
+}
+
+size_t Editor::delete_material(const MaterialPtr &m) {
+  if (!m) return 0;
+  size_t slots = 0;
+  scene_->for_each([&](GameObject &g) {
+    if (auto *mr = g.get<MeshRenderer>())
+      for (MaterialPtr &s : mr->materials)
+        if (s == m) {
+          s = nullptr;  // an empty slot: the default material
+          slots++;
+        }
+  });
+  const std::string name = m->name;
+  bool file = false;
+  if (!m->asset_path.empty()) {
+    const std::string abs = resolve_asset_path(m->asset_path);
+    if (fs::exists(abs)) file = delete_project_entry(abs);
+    else forget_material_assets(m->asset_path);
+  }
+  if (material_selected_ == m) material_selected_ = nullptr;
+  if (material_delete_ == m) material_delete_ = nullptr;
+  mark_changed("Delete Material " + name);
+  Log::info("Deleted the material %s: %zu slot(s) emptied%s", name.c_str(), slots, file ? ", its file is in the Recycle Bin / Trash" : "");
+  return slots;
 }
 
 /* Everything a face or slot can use: the object's own slots first, then the

@@ -640,7 +640,10 @@ class Scene {
 void physics_step(Scene &scene, float dt);
 
 /* Default content (Unity "SampleScene" + Blender's default cube). */
-void build_default_scene(Scene &scene);
+void build_default_scene(Scene &scene);  // the test scene: cube, sphere, cylinder, sun, camera
+/* What a new project and File > New Scene start with: the Utah teapot, a camera
+ * and a point light (Blender's start-up cube, camera and light). */
+void build_starter_scene(Scene &scene);
 /* Adds a primitive like GameObject > 3D Object > Cube. */
 GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *parent = nullptr);
 

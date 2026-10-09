@@ -112,6 +112,11 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | UV islands could only be moved by dragging vertices with a tool. | The Scene view's gizmo in the UV editor, with axis handles. |
 | Merge by Distance only worked on whole objects. | In Edit Mode on the selection, with F9's distance and Unselected. |
 | Delete in the Hierarchy deleted faces while in Edit Mode, and a Project file selected earlier could catch the key. | Delete in the Hierarchy removes objects; the Project window only takes Delete under the mouse. |
+| Polylines could only be drawn on the face clicked or the open-space plane. | X / Y / Z pick the YZ / XZ / XY plane, also mid-line, for 3D Follow paths. |
+| Turning a shape drawn on a face twisted the faces around it. | The ring is zipped again while it turns. |
+| The keymap preset dropdown in Preferences closed the dialog. | Dropdowns open over dialogs and close on their own. |
+| Materials could be made but never deleted. | Delete Material (asks first; slots emptied; asset file to the Recycle Bin). |
+| Extruding or insetting a region that touches itself at a vertex broke the mesh. | One vertex copy per side of the pinch. |
 
 ## Still worth doing
 

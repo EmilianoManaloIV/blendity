@@ -47,7 +47,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Create Empty")) create_object("Empty", child);
     u.submenu("3D Object", u.px(170), [this, child] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad"})
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
     u.submenu("Shapes (Parametric)", u.px(190), [this, child] {
@@ -1844,6 +1844,12 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
                     "Edges of the mesh (parallel / perpendicular) and guides snap either way.");
         }
         if (draw_.active) {
+          int ap = draw_axis_plane_;
+          er.enumeration("Axis Plane (X / Y / Z)", ap, kDrawAxisPlanes, kDrawAxisPlaneCount);
+          if (ap != draw_axis_plane_) draw_set_axis_plane(ap);
+          u.tooltip("Draw on the plane across an axis, like an axis lock on Extrude: X the YZ plane, Y the ground's XZ, Z the XY plane.\n"
+                    "Press X, Y or Z while drawing. Mid-polyline the plane turns through the last point, so the line can go\n"
+                    "up a wall and across a floor: a 3D path for Follow (Enter finishes it as wire edges).");
           er.enumeration("Open Space Plane", draw_space_mode_, kDrawSpacePlanes, kDrawSpacePlaneCount);
           u.tooltip("Where shapes go when you click off the mesh (UModeler / Plasticity: draw in open space):\n"
                     "the ground, a front or side plane, a plane facing you through the point you orbit, or the plane of\n"

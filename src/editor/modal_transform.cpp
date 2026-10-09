@@ -44,6 +44,7 @@ bool Editor::transform_begin(int mode) {
     const Mesh &m = **edit_mesh_ptr();
     t.obj = g->id;
     t.mesh_before = *edit_mesh_ptr();
+    t.fsel_before = face_sel_;
     const Mat4 &w = g->world_matrix();
     for (size_t v = 0; v < m.vert_count() && v < vert_sel_.size(); v++)
       if (vert_sel_[v]) {
@@ -178,6 +179,8 @@ void Editor::transform_apply(const Mat4 &d) {
     for (size_t v = 0; v < m.vert_count() && v < vert_sel_.size(); v++)
       if (vert_sel_[v]) m.positions[v] = to_local.point(m.positions[v]);
     m.touch();
+    face_sel_ = t.fsel_before;
+    repair_moved_rings(m);
     return;
   }
   for (auto &[id, w0] : t.objects)
@@ -214,9 +217,11 @@ void Editor::transform_finish(bool keep) {
     return;
   }
   transform_apply(Mat4::identity());  // everything back where it was
-  if (t.edit)
+  if (t.edit) {
     if (GameObject *g = scene_->find(t.obj))
       if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = t.mesh_before;
+    face_sel_ = t.fsel_before;
+  }
 }
 
 bool Editor::transform_update(const Recti &view) {

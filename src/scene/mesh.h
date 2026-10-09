@@ -125,6 +125,8 @@ MeshPtr cylinder(float radius = 0.5f, float height = 2.0f, int segments = 24);
 MeshPtr cone(float radius = 0.5f, float height = 1.0f, int segments = 24);
 MeshPtr torus(float major = 0.5f, float minor = 0.2f, int major_seg = 32, int minor_seg = 16);
 MeshPtr grid(float size, int nx, int nz);
+/* The Utah teapot (Newell's Bezier patches), base at the origin; res = quads per patch side. */
+MeshPtr teapot(float height = 1.2f, int res = 8);
 }  // namespace primitives
 
 /* --------------------------------------------------------------- Operators */
@@ -346,6 +348,11 @@ size_t slice(Mesh &m, Vec3 p, Vec3 n, int clear = 0);
 /* Sweep a face along the open chain of wire edges that starts nearest it (SketchUp's Follow Me);
  * the face becomes the start cap, the path's wire edges are used up. */
 bool follow(Mesh &m, size_t face, std::string *error = nullptr);
+/* After moving vertices (`moved`): flat rings of faces between a moved shape and an outline
+ * that stayed (a shape drawn on a face, turned) that now fold over are zipped again. Vertices
+ * keep their indices; faces dropped (indices before) are marked in `dropped`, new ones come
+ * last. Returns the rings rebuilt. */
+size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint8_t> *dropped = nullptr);
 /* Blender's Spin / UModeler's Lathe: the selected edges (and lone vertices) turned round an axis
  * through center in `steps` copies; 360 degrees closes. The last copy becomes the selection. */
 size_t spin(Mesh &m, std::vector<uint8_t> &vert_sel, Vec3 center, Vec3 axis, float angle_deg, int steps);

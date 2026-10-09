@@ -13,6 +13,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace bl::meshops {
 
@@ -133,6 +134,15 @@ bool follow(Mesh &m, size_t face, std::string *error) {
       rings[i].push_back(m.add_vert(P[i] + o));
     }
   }
+  /* Is the face part of a solid: each of its sides shared with another face? */
+  bool part_of_solid = true;
+  {
+    std::unordered_set<uint64_t> other;
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (f != face)
+        for (uint32_t k = 0; k < m.face_size(f); k++) other.insert(Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]));
+    for (size_t k = 0; k < np; k++) part_of_solid = part_of_solid && other.count(Mesh::edge_key(prof[k], prof[(k + 1) % np])) > 0;
+  }
   /* Sides (each profile edge a strip), the old face becomes the start cap, and an end cap. */
   const int mat = m.material_of(face);
   for (size_t i = 0; i + 1 < nr; i++)
@@ -142,7 +152,9 @@ bool follow(Mesh &m, size_t face, std::string *error) {
       m.add_face(q, 4, nullptr, mat);
     }
   std::vector<uint32_t> cap0 = prof, cap1(rings[nr - 1].rbegin(), rings[nr - 1].rend());
-  m.add_face(cap0.data(), cap0.size(), nullptr, mat);
+  /* A face of a solid (every side shared with another face) grows the solid, as Extrude
+   * does: no start cap, which would leave three faces on each of its edges. */
+  if (!part_of_solid) m.add_face(cap0.data(), cap0.size(), nullptr, mat);
   m.add_face(cap1.data(), cap1.size(), nullptr, mat);
   /* The path's wire edges are inside the solid now: they go. */
   for (size_t i = 0; i + 1 < path.size(); i++) {
@@ -523,42 +535,47 @@ long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop_in, Vec3 n, std:
  * outline of the selected faces moves inward, by `thickness` measured in each
  * face's plane (mitred at corners); edges between selected faces stay where
  * they are, and a ring of quads joins the old outline to the new one. */
-void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness) {
+namespace {
+/* One inset of the region; src gets each new face's source face. */
+void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness, std::vector<uint32_t> &src) {
   face_sel.resize(m.face_count(), 0);
+  src.clear();
   if (!std::isfinite(thickness)) return;
   /* Outline edges: used by exactly one selected face. */
   std::unordered_map<uint64_t, int> sel_uses;
   for (size_t f = 0; f < m.face_count(); f++)
     if (face_sel[f])
       for (uint32_t k = 0; k < m.face_size(f); k++) sel_uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
-  /* Each outline vertex moves along the mean of its outline edges' inward directions. */
+  /* Each outline corner moves along the mean of its outline edges' inward directions; corners
+   * are grouped into wedges, so a vertex the outline passes twice (a pinch) moves twice. */
+  const std::vector<uint32_t> wedge = region_wedges(m, face_sel);
   std::unordered_map<uint32_t, Vec3> dir_sum;
   std::unordered_map<uint32_t, std::vector<Vec3>> dirs;
   for (size_t f = 0; f < m.face_count(); f++) {
     if (!face_sel[f]) continue;
     const Vec3 n = normalize(m.face_normal(f));
-    const uint32_t fn = m.face_size(f), *fv = m.face_verts(f);
+    const uint32_t fn = m.face_size(f), *fv = m.face_verts(f), base = m.face_offsets[f];
     for (uint32_t k = 0; k < fn; k++) {
       const uint32_t a = fv[k], b = fv[(k + 1) % fn];
       if (sel_uses[Mesh::edge_key(a, b)] != 1) continue;
       const Vec3 e = m.positions[b] - m.positions[a];
       if (length(e) < 1e-12f || !std::isfinite(n.x)) continue;
       const Vec3 in = normalize(cross(n, e));  // left of the edge: into the face
-      for (uint32_t v : {a, b}) {
-        dir_sum[v] += in;
-        dirs[v].push_back(in);
+      for (uint32_t w : {wedge[base + k], wedge[base + (k + 1) % fn]}) {
+        dir_sum[w] += in;
+        dirs[w].push_back(in);
       }
     }
   }
   if (dir_sum.empty()) return;
-  std::unordered_map<uint32_t, uint32_t> inner;
+  std::unordered_map<uint32_t, uint32_t> inner;  // wedge -> its moved vertex
   for (auto &kv : dir_sum) {
     const float l = length(kv.second);
     if (l < 1e-6f) continue;  // a hairpin: leave it
     const Vec3 d = kv.second / l;
     float c = 1.0f;
     for (const Vec3 &e : dirs[kv.first]) c = std::min(c, dot(d, e));
-    inner[kv.first] = m.add_vert(m.positions[kv.first] + d * (thickness / std::max(0.25f, c)));
+    inner[kv.first] = m.add_vert(m.positions[m.corner_verts[kv.first]] + d * (thickness / std::max(0.25f, c)));
   }
   FaceBuilder fb(m);
   std::vector<uint8_t> sel;
@@ -570,34 +587,67 @@ void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness) {
     if (!face_sel[f]) {
       fb.add(fv, fn, t, m.material_of(f), m.smooth_of(f));
       sel.push_back(0);
+      src.push_back(UINT32_MAX);  // untouched
       continue;
     }
-    auto moved = [&](uint32_t v) {
-      auto it = inner.find(v);
-      return it == inner.end() ? v : it->second;
+    auto moved_c = [&](uint32_t k) {  // the vertex of corner k after the inset
+      auto it = inner.find(wedge[base + k]);
+      return it == inner.end() ? fv[k] : it->second;
     };
     /* The ring quad on each outline edge, wound like the face. */
     for (uint32_t k = 0; k < fn; k++) {
       const uint32_t j = (k + 1) % fn, a = fv[k], b = fv[j];
-      if (sel_uses[Mesh::edge_key(a, b)] != 1 || moved(a) == a || moved(b) == b) continue;
-      const uint32_t q[4] = {a, b, moved(b), moved(a)};
+      if (sel_uses[Mesh::edge_key(a, b)] != 1 || moved_c(k) == a || moved_c(j) == b) continue;
+      const uint32_t q[4] = {a, b, moved_c(j), moved_c(k)};
       Vec2 tq[4];
       if (t) tq[0] = tq[3] = t[k], tq[1] = tq[2] = t[j];
       fb.add(q, 4, t ? tq : nullptr, m.material_of(f), m.smooth_of(f));
       sel.push_back(0);
+      src.push_back((uint32_t)f);
     }
     nv.clear();
     nt.clear();
     for (uint32_t k = 0; k < fn; k++) {
-      nv.push_back(moved(fv[k]));
+      nv.push_back(moved_c(k));
       if (t) nt.push_back(t[k]);
     }
     fb.add(nv.data(), fn, t ? nt.data() : nullptr, m.material_of(f), m.smooth_of(f));
     sel.push_back(1);
+    src.push_back((uint32_t)f);
   }
   fb.commit(m);
   face_sel = std::move(sel);
   m.touch();
+}
+}  // namespace
+
+/* Inset further than the region is wide and the outline crosses over itself: the inner
+ * faces turn over and the ring folds onto them. The thickness is halved until every new
+ * face still faces the way its face did (Blender leaves the fold; this keeps the surface). */
+void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness) {
+  if (!std::isfinite(thickness)) {
+    face_sel.resize(m.face_count(), 0);
+    return;
+  }
+  std::vector<uint32_t> src;
+  for (int tries = 0; tries < 10; tries++, thickness *= 0.5f) {
+    Mesh r = m;
+    std::vector<uint8_t> sel = face_sel;
+    inset_region_once(r, sel, thickness, src);
+    bool folded = false;
+    for (size_t f = 0; f < r.face_count() && f < src.size() && !folded; f++) {
+      if (src[f] == UINT32_MAX) continue;
+      const Vec3 was = m.face_normal(src[f]), now = r.face_normal(f);
+      /* Turned over (or squashed flat) against the face it came from. */
+      const float nl = length(now), wl = length(was);
+      if (wl > 1e-12f && (nl < 1e-12f * std::max(1.0f, wl) || dot(now, was) <= 0.0f)) folded = true;
+    }
+    if (!folded || tries == 9) {
+      m = std::move(r);
+      face_sel = std::move(sel);
+      return;
+    }
+  }
 }
 
 /* Blender's Mesh > Clean Up > Delete Loose: vertices no edge or face uses, wire
@@ -887,6 +937,23 @@ SmartFillResult smart_fill(Mesh &m, const std::vector<uint8_t> *vert_sel, float 
         if (!closed) res.open_chains++;
         continue;
       }
+      /* Through a vertex twice (a hole whose outline touches itself, like two lobes meeting at
+       * a point): fill one lobe at a time; the rest of the walk is left for later. */
+      for (bool split = true; split;) {
+        split = false;
+        std::unordered_map<uint32_t, size_t> at_index;
+        for (size_t i = 0; i < loop.size() && !split; i++) {
+          auto ins = at_index.emplace(loop[i], i);
+          if (ins.second) continue;
+          const size_t a = ins.first->second, b = i;  // loop[a] == loop[b]
+          for (size_t k = 0; k < loop_edges.size(); k++)
+            if (k < a || k >= b) used[(size_t)loop_edges[k]] = 0;
+          loop = std::vector<uint32_t>(loop.begin() + (long)a, loop.begin() + (long)b);
+          loop_edges = std::vector<int>(loop_edges.begin() + (long)a, loop_edges.begin() + (long)b);
+          split = true;
+        }
+      }
+      if (loop.size() < 2) continue;
       /* The outline of one face on its own (a lone face, or one just filled): filling it
        * would only put a second face back to back with it. */
       bool one_face = !is_wire[(size_t)loop_edges[0]];

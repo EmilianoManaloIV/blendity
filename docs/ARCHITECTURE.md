@@ -282,6 +282,16 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `meshops::merge_by_distance_selected` | A spatial hash of candidates (unselected vertices first when `unselected`), each selected vertex welding to the first candidate within the distance; `finish_merge` rebuilds faces | Blender: Merge > By Distance (Unselected) |
 | `Editor::zfight_prune`, `zfight_outlines_visible` | Issues keep their meshes' versions; changed or deleted objects drop theirs; outlines show in Edit Mode of an involved object or with the panel open after a panel check | - |
 
+## Axis planes, ring repair, pinched regions, the teapot (phase 17)
+
+| Blendity | What it does | Blender / SketchUp / UModeler equivalent |
+|---|---|---|
+| `Editor::draw_set_axis_plane` | X / Y / Z while drawing: the plane across that axis through the first point (before it) or the last point (mid-polyline); `DrawTool::bent` marks a 3D path, kept as wire edges | Axis locks on Extrude; drawing a Follow Me path |
+| `meshops::repair_rings` | After moving vertices: flat(ish) regions of faces with moved and unmoved corners, bounded by exactly two loops, that fold over are zipped again with `annulus` (by angle, else bridged) | - (UModeler keeps a drawn shape's ring clean) |
+| `meshops::region_wedges` | Corners of a selection grouped per vertex through edges inside it; Extrude and Inset Region make one new vertex per wedge, so a pinched region stays edge-manifold | Blender's bmesh extrude (which leaves the pinch non-manifold) |
+| `primitives::teapot`, `build_starter_scene` | Newell's 32 bicubic patches (306 control points), z-up to y-up, welded through a hash of rounded positions; the starting scene of new projects | Blender's start-up file (cube, camera, light) |
+| `Editor::delete_material` | Empties every slot using it (default material), trashes an asset's .mat, one undo step | Blender: material unlink / Unity: deleting a material asset |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

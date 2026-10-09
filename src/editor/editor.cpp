@@ -140,7 +140,7 @@ bool Editor::init(int argc, char **argv) {
   if (!scene_arg.empty()) open_scene(scene_arg);
   else if (fs::exists(sample)) open_scene(sample);
   else {
-    build_default_scene(*scene_);
+    build_starter_scene(*scene_);
     scene_->path = sample;
     save_scene(*scene_, sample);
   }
@@ -597,7 +597,7 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Create Empty", "Ctrl+Shift+N")) create_object("Empty");
     if (u.menu_item("Create Empty Child", "Alt+Shift+N", false, has_sel)) create_object("Empty", true);
     u.submenu("3D Object", u.px(170), [this] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad"})
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
     });
     u.submenu("Shapes (Parametric)", u.px(190), [this] {
@@ -1383,7 +1383,7 @@ void Editor::new_scene() {
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   scene_ = std::make_unique<Scene>();
-  build_default_scene(*scene_);
+  build_starter_scene(*scene_);
   scene_->name = "Untitled";
   stable_ = scene_->clone();
   undo_.clear();
@@ -2209,6 +2209,16 @@ void Editor::run_console_command(const std::string &line) {
     base->asset_path.clear();
     new_material_asset(base, false);
   }
+  else if (c == "deletemat") {
+    /* deletemat <name | Assets/Materials/x.mat>: delete a material without asking (slots emptied, the file trashed) */
+    const std::string what = t.size() > 1 ? line.substr(line.find(' ') + 1) : std::string();
+    MaterialPtr m = what.find(".mat") != std::string::npos ? material_asset(what) : nullptr;
+    if (!m)
+      for (const MaterialPtr &c2 : pickable_materials(nullptr))
+        if (c2->name == what) m = c2;
+    if (m) delete_material(m);
+    else Log::warn("deletemat: no material %s", what.c_str());
+  }
   else if (c == "assignmat") {
     /* assignmat <Assets/Materials/x.mat> [slot]: put the asset in a slot of every selected object */
     MaterialPtr m = material_asset(arg(1, ""));
@@ -2244,6 +2254,7 @@ void Editor::run_console_command(const std::string &line) {
       if (t.size() > 3) draw_space_offset_ = (float)std::atof(t[3].c_str());
     }
     else if (s == "space") draw_space_only_ = v != "off";
+    else if (s == "axis") draw_set_axis_plane(v == "x" ? 1 : v == "y" ? 2 : v == "z" ? 3 : 0);  // drawmode axis x|y|z|none
     else if (s == "facecenter") draw_face_center_ = v != "off";
     else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
     else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
@@ -2257,6 +2268,7 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "redraw") always_redraw_ = to_lower(arg(1, "changes")) == "always";  // redraw always | changes
   else if (c == "preferences") dialog_ = Dialog::Preferences;
+  else if (c == "newscene") new_scene();  // File > New Scene
   else if (c == "guide") {
     /* guide <px> <py> <pz> <dx> <dy> <dz>: a construction line through p along d */
     auto f = [&](int i) { return (float)std::atof(arg(i, "0").c_str()); };

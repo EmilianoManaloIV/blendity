@@ -154,6 +154,7 @@ static void round14_tests();
 static void round14_feature_tests();
 static void round15_tests();
 static void round16_tests();
+static void round17_tests();
 
 int main() {
   register_builtin_components();
@@ -751,6 +752,7 @@ int main() {
   round14_feature_tests();
   round15_tests();
   round16_tests();
+  round17_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -5860,3 +5862,420 @@ static void round16_tests() {
   });
 }
 
+/* ===================================================================== */
+/* Round 17: dropdowns in dialogs, the starter scene's teapot, drawing on */
+/* any axis plane, rotating imprinted faces, deleting materials, curved   */
+/* surfaces                                                               */
+/* ===================================================================== */
+
+static void round17_tests() {
+  auto ev = [](platform::EventType t, int x, int y, int key = 0, int mods = 0) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    e.key = key;
+    e.mods = mods;
+    return e;
+  };
+  using ET = platform::EventType;
+  test("ui: a dropdown inside Preferences (the keymap preset) opens over the dialog and picks without closing it", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    ed.command("preferences");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
+    const Recti r = ed.combo_rect_for_test("km_preset");
+    std::printf("    preset combo at %d,%d %dx%d\n", r.x, r.y, r.w, r.h);
+    CHECK(r.w > 0 && r.h > 0);
+    if (r.w <= 0) return;
+    auto click = [&](int x, int y) {
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      ed.step_frame_headless();
+    };
+    click(r.x + r.w / 2, r.y + r.h / 2);
+    std::printf("    after clicking it: dialog %d, popups %zu\n", (int)ed.dialog_open_for_test(), ed.popup_count_for_test());
+    CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 2);
+    /* Clicking it again closes only the list. */
+    click(r.x + r.w / 2, r.y + r.h / 2);
+    CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
+    /* Open it and pick "Blender", the list's second row below the field. */
+    click(r.x + r.w / 2, r.y + r.h / 2);
+    CHECK(ed.popup_count_for_test() == 2);
+    const int row = r.h + 4;
+    click(r.x + 20, r.bottom() + 4 + row + row / 2);
+    std::printf("    picked: preset %s, dialog %d, popups %zu\n", ed.keymap_preset_name().c_str(), (int)ed.dialog_open_for_test(),
+                ed.popup_count_for_test());
+    CHECK(ed.keymap_preset_name() == "Blender");
+    CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
+    ed.command("keymap Unity");
+  });
+  test("primitives: the Utah teapot - Newell's 32 patches welded, facing out, with UVs", [&] {
+    MeshPtr m = primitives::teapot(1.2f, 8);
+    std::printf("    teapot: %zu verts, %zu faces\n", m->vert_count(), m->face_count());
+    CHECK(m->face_count() > 1500 && m->vert_count() > 1500);
+    CHECK(structurally_valid(*m));
+    CHECK(m->has_uvs() && m->uvs.size() == m->corner_count());
+    Vec3 lo(1e9f), hi(-1e9f);
+    for (const Vec3 &p : m->positions) lo = vmin(lo, p), hi = vmax(hi, p);
+    std::printf("    bounds %.3f..%.3f x %.3f..%.3f x %.3f..%.3f\n", lo.x, hi.x, lo.y, hi.y, lo.z, hi.z);
+    CHECK_NEAR(lo.y, 0.0f, 1e-4);
+    CHECK_NEAR(hi.y, 1.2f, 1e-3);
+    CHECK(hi.x > 1.25f && lo.x < -1.1f);  // spout to +x, handle to -x
+    /* Faces point out: the body's faces away from the axis, the knob's top up, the base down. */
+    size_t out = 0, body = 0;
+    for (size_t f = 0; f < m->face_count(); f++) {
+      const Vec3 c = m->face_center(f), n = m->face_normal(f);
+      if (std::fabs(c.x) > 0.5f || c.y < 0.2f || c.y > 0.85f) continue;  // the body's sides, clear of the spout and handle
+      body++;
+      if (dot(n, Vec3(c.x, 0, c.z)) > 0) out++;
+    }
+    std::printf("    body faces facing out: %zu of %zu\n", out, body);
+    CHECK(body > 50 && out == body);
+    size_t top = 0, bottom = 0;
+    for (size_t f = 0; f < m->face_count(); f++) {
+      const Vec3 c = m->face_center(f), n = m->face_normal(f);
+      if (c.y > 1.19f && std::fabs(c.x) < 0.05f && std::fabs(c.z) < 0.05f) top += n.y > 0.9f;
+      if (c.y < 0.005f && std::fabs(c.x) < 0.2f && std::fabs(c.z) < 0.2f) bottom += n.y < -0.9f;
+    }
+    CHECK(top > 0 && bottom > 0);
+    /* Patch borders are welded: only the rim, the lid's edge and the ends of the handle
+     * and the spout stay open. */
+    std::map<std::pair<uint32_t, uint32_t>, int> uses;
+    for (size_t f = 0; f < m->face_count(); f++) {
+      const uint32_t *fv = m->face_verts(f);
+      const size_t n = m->face_size(f);
+      for (size_t k = 0; k < n; k++) {
+        const uint32_t a = fv[k], b = fv[(k + 1) % n];
+        uses[{std::min(a, b), std::max(a, b)}]++;
+      }
+    }
+    size_t open = 0, over = 0;
+    for (auto &[e, c] : uses) open += c == 1, over += c > 2;
+    std::printf("    open edges %zu, edges in 3+ faces %zu\n", open, over);
+    CHECK(open <= 8 * 4 * 6 && over == 0);
+    CHECK(primitives::teapot(1.0f, 3)->face_count() < m->face_count());
+  });
+  test("scene: a new scene starts with the Utah teapot, a camera and a point light", [&] {
+    Scene s;
+    build_starter_scene(s);
+    GameObject *pot = s.find_by_name("Utah Teapot"), *cam = s.find_by_name("Main Camera"), *light = s.find_by_name("Point Light");
+    CHECK(pot && pot->get<MeshFilter>() && pot->get<MeshRenderer>());
+    CHECK(cam && cam->get<Camera>());
+    CHECK(light && light->get<Light>() && light->get<Light>()->type == 1);
+    CHECK(s.find_by_name("Directional Light") == nullptr && s.find_by_name("Cube") == nullptr);
+    /* It saves and loads like any scene. */
+    std::string a = save_scene_text(s), err;
+    Scene l;
+    CHECK(load_scene_text(a, l, err) && save_scene_text(l) == a);
+    /* File > New Scene in the editor, and the Teapot under GameObject > 3D Object. */
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("newscene");
+    ed.step_frame_headless();
+    CHECK(by_name(ed.scene(), "Utah Teapot") != nullptr && by_name(ed.scene(), "Point Light") != nullptr);
+    ed.command("create Teapot");
+    ed.step_frame_headless();
+    CHECK(by_name(ed.scene(), "Teapot") != nullptr);
+  });
+  test("draw: X / Y / Z put a polyline on the YZ / XZ / XY plane and turn it mid-line - a 3D path for Follow", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("camera 35 25 7 0 1 0");
+    ed.command("edit face");
+    ed.command("draw polyline");
+    ed.step_frame_headless();
+    auto press = [&](int k) {
+      const Recti r = ed.scene_view_rect();
+      ed.step_frame_headless({ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      ed.step_frame_headless({ev(ET::KeyDown, r.x + r.w / 2, r.y + r.h / 2, k)});
+      ed.step_frame_headless({ev(ET::KeyUp, r.x + r.w / 2, r.y + r.h / 2, k)});
+    };
+    auto click_world = [&](Vec3 w) {
+      int x, y;
+      if (!ed.project_to_window(w, x, y)) return false;
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      return true;
+    };
+    /* Z before the first point: the XY plane; the same key again: back to the surface. */
+    press(platform::KEY_Z);
+    CHECK(ed.draw_axis_plane() == 3);
+    press(platform::KEY_Z);
+    CHECK(ed.draw_axis_plane() == 0);
+    /* From the top face's centre straight up (Z: the XY plane through it), then along +Z (X: the YZ plane through the top). */
+    CHECK(click_world({0, 1, 0}));
+    press(platform::KEY_Z);
+    CHECK(click_world({0, 2, 0}));
+    press(platform::KEY_X);
+    CHECK(ed.draw_axis_plane() == 1);
+    CHECK(click_world({0, 2, 1}));
+    press(platform::KEY_ENTER);
+    const Mesh *m = g->get<MeshFilter>()->mesh.get();
+    std::printf("    path: %zu wire edges, %zu faces\n", m->loose_edges.size(), m->face_count());
+    CHECK(m->loose_edges.size() == 2 && m->face_count() == 6);
+    float top = -1e9f, far_z = -1e9f;
+    for (const Vec3 &p : m->positions) {
+      const Vec3 w = g->world_matrix().point(p);
+      top = std::max(top, w.y);
+      if (std::fabs(w.y - 2) < 1e-2f) far_z = std::max(far_z, w.z);
+    }
+    std::printf("    highest point y %.4f, furthest along z at the top %.4f\n", top, far_z);
+    for (const Vec3 &p : m->positions) {
+      const Vec3 w = g->world_matrix().point(p);
+      if (w.y > 1.01f) std::printf("      point %.4f %.4f %.4f\n", w.x, w.y, w.z);
+    }
+    CHECK(std::fabs(top - 2) < 1e-2f && std::fabs(far_z - 1) < 1e-2f);
+    /* Follow: the top face swept up the path and along it. */
+    size_t topf = SIZE_MAX;
+    for (size_t f = 0; f < m->face_count(); f++)
+      if (m->face_normal(f).y > 0.9f) topf = f;
+    CHECK(topf != SIZE_MAX);
+    press(platform::KEY_ESCAPE);
+    ed.select_faces_for_test({topf});
+    ed.command("editop follow");
+    m = g->get<MeshFilter>()->mesh.get();
+    Mesh copy = *m;
+    meshops::merge_by_distance(copy, 1e-5f);
+    std::printf("    after Follow: %zu faces, closed %d, wires %zu\n", copy.face_count(), (int)closed_manifold(copy), copy.loose_edges.size());
+    CHECK(copy.face_count() > 6 + 4 && copy.loose_edges.empty() && closed_manifold(copy));  // a face of a solid grows it: no start cap inside
+    float ymax = -1e9f, zmax = -1e9f;
+    for (const Vec3 &p : copy.positions) ymax = std::max(ymax, p.y), zmax = std::max(zmax, p.z);
+    CHECK(ymax > 1.9f && zmax > 0.9f);  // (object space) up past the cube, then out along Z
+    /* A closed loop that turned planes stays wire edges (it is not flat): a new, empty drawing. */
+    press(platform::KEY_ESCAPE);
+    ed.command("edit off");
+    ed.command("select Main Camera");
+    ed.command("draw polyline");
+    g = ed.selected_object();
+    ed.step_frame_headless();
+    CHECK(click_world({2, 0, 2}));
+    press(platform::KEY_Z);
+    CHECK(click_world({3, 1, 2}));
+    press(platform::KEY_X);
+    CHECK(click_world({3, 1, 3}));
+    press(platform::KEY_Y);
+    CHECK(click_world({2, 1, 3}));
+    std::printf("    loop points so far: %zu\n", ed.draw_point_count());
+    for (const Vec3 &p : ed.draw_points_for_test()) std::printf("      %.3f %.3f %.3f\n", p.x, p.y, p.z);
+    const size_t faces_before = g->get<MeshFilter>()->mesh->face_count(), verts_before = g->get<MeshFilter>()->mesh->vert_count();
+    CHECK(click_world({2, 0, 2}));  // back on the first point: closes it
+    std::printf("    after closing: %zu points\n", ed.draw_point_count());
+    m = g->get<MeshFilter>()->mesh.get();
+    for (size_t v = verts_before; v < m->vert_count(); v++) {
+      const Vec3 w = g->world_matrix().point(m->positions[v]);
+      std::printf("      new point %.3f %.3f %.3f\n", w.x, w.y, w.z);
+    }
+    std::printf("    bent loop: %zu faces (before %zu), %zu wires\n", m->face_count(), faces_before, m->loose_edges.size());
+    CHECK(m->face_count() == faces_before && m->loose_edges.size() == 4);
+  });
+  test("rotate a shape drawn on a face: the ring around it is zipped again, no twisted faces", [&] {
+    for (float deg : {30.0f, 45.0f, 90.0f, 170.0f}) {
+      Editor ed;
+      ed.init_headless(900, 650);
+      ed.step_frame_headless();
+      ed.command("keymap Blender");  // R: Blender's modal rotate
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      g->set_world_position({0, 0.5f, 0});
+      ed.command("edit face");
+      ed.command("draw rectangle");
+      ed.command("drawpoint -0.3 1 -0.15");
+      ed.command("drawpoint 0.3 1 0.15");
+      {
+        const Recti vr = ed.scene_view_rect();
+        ed.step_frame_headless({ev(ET::MouseMove, vr.x + vr.w / 2, vr.y + vr.h / 2)});
+        ed.step_frame_headless({ev(ET::KeyDown, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+        ed.step_frame_headless({ev(ET::KeyUp, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+      }
+      const Mesh *m = g->get<MeshFilter>()->mesh.get();
+      size_t inner = SIZE_MAX;
+      for (size_t f = 0; f < m->face_count(); f++)
+        if (m->face_normal(f).y > 0.9f && m->face_size(f) == 4 && std::fabs(m->face_center(f).x) < 1e-4f && std::fabs(m->face_center(f).z) < 1e-4f &&
+            length(m->positions[m->face_verts(f)[0]] - Vec3(0, 0.5f, 0)) < 0.4f)
+          inner = f;
+      CHECK(inner != SIZE_MAX);
+      if (inner == SIZE_MAX) return;
+      ed.select_faces_for_test({inner});
+      /* R, Y, the angle, Enter: Blender's modal rotate about Y. */
+      const Recti r = ed.scene_view_rect();
+      const int cx = r.x + r.w / 2 + 60, cy = r.y + r.h / 2;
+      ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+      for (int k : {platform::KEY_R, platform::KEY_Y}) {
+        ed.step_frame_headless({ev(ET::KeyDown, cx, cy, k)});
+        ed.step_frame_headless({ev(ET::KeyUp, cx, cy, k)});
+      }
+      for (char c : strprintf("%g", deg)) {
+        platform::Event t;
+        t.type = ET::Text;
+        t.codepoint = (uint32_t)c;
+        t.x = cx;
+        t.y = cy;
+        ed.step_frame_headless({t});
+      }
+      ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_ENTER)});
+      ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_ENTER)});
+      m = g->get<MeshFilter>()->mesh.get();
+      std::string why, bad, over;
+      const size_t nb = bad_triangulations(*m, &bad), no = overlapping_face_pairs(*m, &over);
+      /* The selected face turned by the angle and is still selected. */
+      size_t sel = 0, turned = 0;
+      for (size_t f = 0; f < m->face_count(); f++)
+        if (ed.edit_face_selected(f)) {
+          sel++;
+          const Vec3 a = m->positions[m->face_verts(f)[0]], b = m->positions[m->face_verts(f)[1]];
+          const Vec3 d = normalize(b - a);
+          for (float sgn : {1.0f, -1.0f}) {
+            const float ang = deg * kDeg2Rad * sgn;
+            for (Vec3 e : {Vec3(1, 0, 0), Vec3(0, 0, 1), Vec3(-1, 0, 0), Vec3(0, 0, -1)}) {
+              const Vec3 rot(e.x * std::cos(ang) + e.z * std::sin(ang), 0, -e.x * std::sin(ang) + e.z * std::cos(ang));
+              if (dot(rot, d) > 0.9999f) turned = 1;
+            }
+          }
+        }
+      std::printf("    %g degrees: %zu faces, valid %d, bad triangulations %zu, overlaps %zu, closed %d, selected %zu (turned %zu)\n", deg,
+                  m->face_count(), (int)structurally_valid(*m, &why), nb, no, (int)closed_manifold(*m), sel, turned);
+      if (nb) std::printf("      %s\n", bad.c_str());
+      if (no) std::printf("      %s\n", over.c_str());
+      CHECK(structurally_valid(*m) && nb == 0 && no == 0 && closed_manifold(*m));
+      CHECK(sel == 1 && turned == 1);
+      /* Undo puts the rectangle back unturned. */
+    }
+    /* The operator itself: a ring zipped round a square turned 45 degrees inside a square. */
+    Mesh q;
+    for (Vec3 p : {Vec3(-1, 0, -1), Vec3(1, 0, -1), Vec3(1, 0, 1), Vec3(-1, 0, 1)}) q.add_vert(p);
+    q.add_face({0, 3, 2, 1});
+    std::string err;
+    const long in = meshops::imprint_loop(q, 0, {Vec3(-0.4f, 0, -0.4f), Vec3(0.4f, 0, -0.4f), Vec3(0.4f, 0, 0.4f), Vec3(-0.4f, 0, 0.4f)}, &err);
+    CHECK(in >= 0);
+    if (in < 0) return;
+    std::vector<uint8_t> moved(q.vert_count(), 0);
+    for (uint32_t k = 0; k < q.face_size((size_t)in); k++) moved[q.face_verts((size_t)in)[k]] = 1;
+    const Quat rot = Quat::axis_angle({0, 1, 0}, 150.0f * kDeg2Rad);
+    for (size_t v = 0; v < q.vert_count(); v++)
+      if (moved[v]) q.positions[v] = rot.rotate(q.positions[v]);
+    const size_t bad_before = bad_triangulations(q);
+    std::vector<uint8_t> dropped;
+    const size_t rebuilt = meshops::repair_rings(q, moved, &dropped);
+    std::printf("    operator: bad before %zu, rebuilt %zu, bad after %zu, overlaps %zu\n", bad_before, rebuilt, bad_triangulations(q), overlapping_face_pairs(q));
+    CHECK(bad_before > 0 && rebuilt == 1 && bad_triangulations(q) == 0 && overlapping_face_pairs(q) == 0);
+    float area = 0;
+    for (size_t f = 0; f < q.face_count(); f++) {
+      Vec3 nw(0.0f);
+      for (uint32_t k = 0; k < q.face_size(f); k++) nw += cross(q.positions[q.face_verts(f)[k]], q.positions[q.face_verts(f)[(k + 1) % q.face_size(f)]]);
+      area += 0.5f * length(nw);
+    }
+    CHECK_NEAR(area, 4.0f, 1e-3f);
+    /* Nothing folded: nothing rebuilt. */
+    CHECK(meshops::repair_rings(q, moved) == 0);
+  });
+  test("materials window: Delete Material empties its slots, trashes an asset's file, asks first and undoes", [&] {
+    const std::string proj = fs::join(test_dir(), "matdelete_project"), trash = fs::join(test_dir(), "matdelete_trash");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    std::filesystem::remove_all(trash, ec);
+    fs::make_dirs(fs::join(proj, "Assets/Scenes"));
+    fs::make_dirs(fs::join(proj, "research"));
+    set_env("BLENDITY_PROJECT", proj);
+    set_env("BLENDITY_TRASH", trash);
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.step_frame_headless();
+      ed.command("select Cube");
+      ed.command("newmat BrickRed");
+      const std::string file = fs::join(proj, "Assets/Materials/BrickRed.mat");
+      CHECK(fs::exists(file));
+      ed.command("assignmat Assets/Materials/BrickRed.mat");
+      ed.command("select Sphere");
+      ed.command("assignmat Assets/Materials/BrickRed.mat");
+      MaterialPtr brick = material_asset("Assets/Materials/BrickRed.mat");
+      CHECK(brick != nullptr);
+      auto users = [&](const MaterialPtr &m) {
+        size_t n = 0;
+        ed.scene().for_each([&](GameObject &g) {
+          if (auto *mr = g.get<MeshRenderer>())
+            for (auto &x : mr->materials) n += x == m;
+        });
+        return n;
+      };
+      CHECK(users(brick) == 2);
+      /* Asking first: the window shows a confirmation; Cancel keeps everything. */
+      ed.command("window Materials");
+      ed.step_frame_headless();
+      ed.ask_delete_material_for_test(brick);
+      ed.step_frame_headless();
+      CHECK(ed.material_delete_pending() && ed.popup_count_for_test() >= 1);
+      /* A scene material, deleted from the console: its slot empties, nothing on disk changes. */
+      GameObject *cyl = by_name(ed.scene(), "Cylinder");
+      MaterialPtr orange = cyl->get<MeshRenderer>()->materials[0];
+      ed.command("deletemat Orange");
+      CHECK(cyl->get<MeshRenderer>()->materials.size() == 1 && cyl->get<MeshRenderer>()->materials[0] == nullptr);
+      ed.step_frame_headless();
+      /* The asset: both slots emptied, the file in the (scratch) trash. */
+      ed.command("deletemat Assets/Materials/BrickRed.mat");
+      ed.step_frame_headless();
+      std::printf("    after deleting: users %zu, file %s, pending %d\n", users(brick), fs::exists(file) ? "still there" : "trashed",
+                  (int)ed.material_delete_pending());
+      CHECK(users(brick) == 0 && !fs::exists(file) && !ed.material_delete_pending());
+      CHECK(ed.material_selected_for_test() == nullptr);
+      /* It still renders (the default material) and saves with empty slots. */
+      ed.step_frame_headless();
+      std::string a = save_scene_text(ed.scene()), err;
+      Scene l;
+      CHECK(load_scene_text(a, l, err));
+      /* Undo puts the slots back. */
+      ed.step_frame_headless({ev(ET::KeyDown, 600, 400, platform::KEY_Z, platform::MOD_CTRL)});
+      ed.step_frame_headless({ev(ET::KeyUp, 600, 400, platform::KEY_Z)});
+      ed.step_frame_headless();
+      size_t restored = 0;
+      ed.scene().for_each([&](GameObject &g) {
+        if (auto *mr = g.get<MeshRenderer>())
+          for (auto &x : mr->materials) restored += x && x->name == "BrickRed";
+      });
+      std::printf("    after undo: %zu slot(s) with BrickRed again\n", restored);
+      CHECK(restored == 2);
+    }
+    set_env("BLENDITY_PROJECT", "");
+    set_env("BLENDITY_TRASH", "");
+  });
+  test("curved: regions touching themselves at a vertex extrude, inset and fill without non-manifold edges", [&] {
+    /* A cone's side triangles 0 and 2 (and the cap): the region meets itself at the apex. */
+    MeshPtr cone = primitives::cone(0.5f, 1.0f, 16);
+    std::vector<uint8_t> sel(cone->face_count(), 0);
+    sel[0] = sel[2] = 1;
+    sel[cone->face_count() - 1] = 1;  // the base joins them into one region
+    for (int op = 0; op < 3; op++) {
+      Mesh m = *cone;
+      std::vector<uint8_t> s2 = sel;
+      if (op == 0) meshops::extrude_faces(m, s2, 0.1f);
+      if (op == 1) meshops::inset_region(m, s2, 0.02f);
+      if (op == 2) {
+        meshops::delete_faces(m, sel);
+        const auto r = meshops::smart_fill(m);
+        std::printf("    smart fill: %zu loops, %zu faces, %zu open chains\n", r.loops, r.faces, r.open_chains);
+      }
+      std::string why;
+      std::printf("    %s: %zu faces, valid %d, closed %d\n", op == 0 ? "extrude" : op == 1 ? "inset region" : "delete + Smart Fill", m.face_count(),
+                  (int)structurally_valid(m, &why), (int)closed_manifold(m));
+      /* Deleting cap and triangles 0 and 2 leaves triangle 1 as a fin: its outline is one face's, which Smart Fill leaves. */
+      CHECK(structurally_valid(m) && (op == 2 || closed_manifold(m)));
+    }
+    /* Two holes meeting at the apex only. */
+    Mesh h = *cone;
+    std::vector<uint8_t> two(h.face_count(), 0);
+    two[0] = two[2] = 1;
+    meshops::delete_faces(h, two);
+    const auto r = meshops::smart_fill(h);
+    std::printf("    two holes at the apex: %zu loops filled, closed %d\n", r.loops, (int)closed_manifold(h));
+    CHECK(r.loops == 2 && closed_manifold(h));
+  });
+}

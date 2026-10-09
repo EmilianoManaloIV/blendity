@@ -2,6 +2,58 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-08 (round 17): drawing on any axis plane, turning drawn shapes cleanly, the keymap dropdown, the Utah teapot, deleting materials, curved surfaces
+
+**Asked:** commit and push round 16; draw polylines on the YX and YZ planes as well as XZ, with an axis-lock workflow like Extrude's, usable with Follow; rotating a face just drawn onto a face left artifacts; the keymap preset dropdown in Preferences disappeared when clicked; the Utah teapot with a camera and a point light as the scene you start with; deleting a material from the Materials window; more edge-case testing on curved surfaces for Push/Pull and the other tools.
+
+**Done first:** round 16 committed and pushed.
+
+**Fixed**
+- **Dropdowns inside dialogs.** A dropdown opened inside Preferences (the keymap preset, the frame-rate cap) closed every popup, the dialog included, so the list vanished. It now opens on top of the dialog. Picking an item, or clicking the field again, closes only the list.
+- **Turning a shape drawn on a face.** Its ring of faces twisted over itself because the inner corners turned while the outer ones stayed. The ring is now rebuilt between the two outlines whenever a move folds it, live during gizmo drags and Blender's G / R / S. The selection follows.
+- **Follow on a face of a solid** no longer leaves the old face inside as a start cap. That cap put three faces on each of its edges. The solid now grows the way Extrude grows it.
+- **Regions that touch themselves at a vertex** (a cone's apex between two arms of a selection, a pinch on a torus) can now be extruded, inset and refilled without an edge ending up in four faces. Each such vertex gets one copy per side.
+- **Smart Fill** fills holes whose outline touches itself one lobe at a time. Before, it made one face that ran through the shared vertex twice.
+- **Inset Region** asked to go further than the region is wide now backs off until no face turns over, instead of folding the ring onto the inner faces.
+- **Bevel** on curved surfaces no longer leaves zero-area patches where two bevels meet. The twin arcs are welded instead.
+- **Push/Pull through a curved region** no longer leaves faces lying on the opening. When the cut can't open the far side cleanly, it stops at the far side, as it already does for other unclean holes.
+
+**Added**
+- **Axis planes while drawing.** X, Y and Z put the shape on the YZ, XZ or XY plane, like an axis lock on Extrude:
+  - Before the first click, the plane goes through the first point. Pressing the same key again goes back to the surface's own plane.
+  - Mid-polyline, the plane turns through the last point, so one line can climb a wall and then run across a floor. Enter keeps it as wire edges: a 3D path for Follow.
+  - A closed loop that turned planes stays a loop of wire edges, since it isn't flat.
+  - Also in the Inspector and Modeling Tools (Axis Plane), and the console: `drawmode axis x|y|z|none`.
+- **The Utah teapot.** GameObject > 3D Object > Teapot is Martin Newell's 32 Bezier patches, tessellated and welded, with UVs. A new project, and File > New Scene, now start with it on a ground plane, along with a Main Camera and a Point Light (Blender's start-up cube, camera and light). Your existing SampleScene is unchanged.
+- **Delete Material** in the Materials window, from the right-click menu or the Delete key over the window:
+  - It asks first and shows how many slots use the material.
+  - Those slots are emptied, so their faces get the default material.
+  - A material asset's .mat file goes to the Recycle Bin.
+  - Undo puts the slots back.
+  - Console: `deletemat <name | Assets/...mat>`.
+- **A curved-surfaces stress section** (`blendity_stress --only curved`). It runs 4,396 operations on 10 curved meshes: UV and ico spheres, a torus, a cylinder, a cone, Catmull-Clark and bevelled boxes, a bumpy blob, the teapot and an open hemisphere. The operations:
+  - Push/Pull on single faces and on curved regions, in, out, through and onto.
+  - Inset (individual and region), Extrude, Bevel, Poke, Triangulate / Tris to Quads.
+  - Shapes drawn on and across curved faces, then turned.
+  - Follow, Smart Fill, Bridge, Push Through, Delete Loose, Merge by Distance and Auto Smooth.
+- Console: `newscene`.
+
+**Checked:** 1643 unit checks on Windows and 1619 on Linux, 0 failed. New tests:
+- The preset dropdown in Preferences opened, closed and picked with real clicks while the dialog stays open.
+- The teapot's welding, facing, UVs and size.
+- The starter scene, including save/load and New Scene.
+- Drawing up and over a cube with Z then X, then Follow along that path into a closed solid.
+- A bent closed loop staying wire edges.
+- A drawn rectangle turned 30, 45, 90 and 170 degrees with R (no bad triangulations, no overlaps, still closed, still selected), and the ring repair on its own.
+- Delete Material with its confirmation, a scene material, an asset going to the (scratch) trash, and undo.
+- A cone region pinched at its apex extruded, inset, and refilled with Smart Fill.
+
+Stress:
+- Curved surfaces went from 59 problems to 4 (zero-area faces in rare corners) and from 283 results with faces on top of each other to 91.
+- Push/Pull: 0 problems, and the results with faces newly on top of each other fell from 676 to 390.
+- The modeling section: 6,080 operations with 0 problems.
+- The editor fuzzer: 6,000 frames with no crash.
+
 ## 2026-10-08 (round 16): drawing in open space, a UV gizmo, Merge by Distance in Edit Mode, Z-fighting highlights, Delete in the Hierarchy
 
 **Asked:** commit and push round 15; draw outside of a face (UModeler) or in open space (Plasticity); the Scene view's gizmo in the UV editor for moving, scaling and rotating; Blender's Merge by Distance; Z-fighting faces stayed highlighted in Object Mode and after the object was deleted; the Delete key for objects in the Hierarchy.

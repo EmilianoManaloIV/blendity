@@ -105,5 +105,12 @@ class EdgeFaces {
 
 /* Shared with mesh_tools.cpp. */
 void cleanup_faces(Mesh &m);
+/* The selected faces' corners grouped, per vertex, into wedges: faces round a vertex joined by
+ * edges inside the region share one. A region that touches itself at a vertex (a cone's apex
+ * between two arms of it) has two there, and each needs its own copy of the vertex when the
+ * region is extruded or inset, or one edge would end up in four faces. Returns, for each
+ * corner (an index into corner_verts; unselected faces' corners get UINT32_MAX), the corner
+ * that represents its wedge. */
+std::vector<uint32_t> region_wedges(const Mesh &m, const std::vector<uint8_t> &face_sel);
 
 }  // namespace bl::meshops

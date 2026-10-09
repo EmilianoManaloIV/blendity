@@ -1162,6 +1162,7 @@ GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *
   else if (kind == "Torus") mesh = primitives::torus();
   else if (kind == "Plane") mesh = primitives::plane();
   else if (kind == "Quad") mesh = primitives::quad();
+  else if (kind == "Teapot") mesh = primitives::teapot();
   GameObject *go = scene.create(kind, parent);
   if (mesh) {
     go->add<MeshFilter>()->mesh = mesh;
@@ -1208,6 +1209,31 @@ void build_default_scene(Scene &scene) {
   cyl->set_local_position({-1.7f, 0.5f, 0.9f});
   cyl->set_local_scale({0.8f, 0.5f, 0.8f});
   cyl->get<MeshRenderer>()->materials = {make_material("Orange", {0.95f, 0.55f, 0.2f})};
+}
+
+void build_starter_scene(Scene &scene) {
+  scene.clear();
+  scene.name = "SampleScene";
+  const int agx = colormanagement::view_index("AgX");
+  scene.render.view_transform = agx >= 0 ? 3 + agx : 1;
+  /* Blender's start-up file has a cube, a camera and a point light; Blendity's
+   * has the Utah teapot on a ground plane, a camera and a point light. */
+  GameObject *cam = create_primitive(scene, "Camera");
+  cam->name = "Main Camera";
+  cam->set_local_position({0, 2.0f, -5.0f});
+  cam->set_local_euler({16, 0, 0});
+  GameObject *light = create_primitive(scene, "Point Light");
+  light->name = "Point Light";
+  light->set_local_position({2.0f, 3.0f, -2.0f});
+  Light *l = light->get<Light>();
+  l->color = {1, 1, 1};
+  l->intensity = 3.0f;
+  l->range = 15.0f;
+  GameObject *ground = create_primitive(scene, "Plane");
+  ground->get<MeshRenderer>()->materials = {make_material("Ground", {0.55f, 0.56f, 0.58f})};
+  GameObject *pot = create_primitive(scene, "Teapot");
+  pot->name = "Utah Teapot";
+  pot->get<MeshRenderer>()->materials = {make_material("Teapot", {0.85f, 0.82f, 0.76f})};
 }
 
 }  // namespace bl

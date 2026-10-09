@@ -1908,6 +1908,8 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
 }
 /* ------------------------------------------------------------------ main */
 
+static void test_curved_surfaces(Report &rep, const Options &o);  // after main, with the crash handler
+
 int main(int argc, char **argv) {
   install_crash_handler();
   Options o;
@@ -1956,7 +1958,8 @@ int main(int argc, char **argv) {
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
-               {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}};
+               {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
+               {"curved", test_curved_surfaces}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
@@ -2017,6 +2020,335 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ep) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif
+
+/* Curved surfaces: Push/Pull and the other modeling tools on meshes whose faces
+ * all lean against each other (spheres, a torus, Catmull-Clark and bevelled
+ * boxes, a bumpy blob, the Utah teapot, a cut-open hemisphere). Regions there are
+ * never flat, which is where outlines, walls and rings go wrong. Every result
+ * must be a valid mesh; closed meshes must stay closed; faces newly lying on top
+ * of each other are counted. */
+static void test_curved_surfaces(Report &rep, const Options &o) {
+  using namespace ppstress;
+  rep.title("Curved surfaces",
+            "Push/Pull (single faces, curved regions, through and onto the far side), Inset (individual and region), Extrude, "
+            "Bevel, Poke, Triangulate, drawing shapes on and across curved faces then turning them, Follow, Smart Fill of holes, "
+            "Bridge, Push Through, Delete Loose, Merge by Distance and Auto Smooth on 10 curved meshes.");
+  rep.table({"mesh", "faces", "ops", "refused", "problems", "new overlaps", "max ms"});
+  struct Curved {
+    std::string name;
+    Mesh mesh;
+  };
+  std::vector<Curved> meshes;
+  meshes.push_back({"UV sphere 24 x 16", from(primitives::uv_sphere(0.5f, 24, 16))});
+  meshes.push_back({"icosphere (3 subdivisions)", from(primitives::ico_sphere(0.5f, 3))});
+  meshes.push_back({"torus 32 x 16", from(primitives::torus(0.5f, 0.2f, 32, 16))});
+  meshes.push_back({"cylinder 48", from(primitives::cylinder(0.5f, 1.0f, 48))});
+  meshes.push_back({"cone 32", from(primitives::cone(0.5f, 1.0f, 32))});
+  meshes.push_back({"Catmull-Clark cube (level 3)", meshops::subdivide(*primitives::cube(), 3, true)});
+  {
+    Mesh m = from(primitives::cube());
+    meshops::bevel_modifier(m, 0.15f, 4, -1.0f);
+    meshes.push_back({"rounded box (bevel 4)", m});
+  }
+  {
+    Mesh m = from(primitives::uv_sphere(0.5f, 20, 12));
+    meshops::randomize(m, 0.04f, 7);
+    meshes.push_back({"bumpy blob", m});
+  }
+  meshes.push_back({"Utah teapot", from(primitives::teapot(1.2f, 4))});
+  {
+    Mesh m = from(primitives::uv_sphere(0.5f, 24, 12));
+    meshops::slice(m, {0, 0.013f, 0}, {0, 1, 0}, 1);  // the top half removed: an open bowl
+    meshes.push_back({"open hemisphere", m});
+  }
+  size_t total_ops = 0, total_problems = 0, total_overlaps = 0;
+  std::map<std::string, int> problem_types, overlap_types;
+  std::vector<std::string> examples, overlap_examples;
+  /* "push/pull face 12 by -0.3" -> "push/pull face": the kind of operation. */
+  auto kind_of = [](const std::string &what) {
+    size_t i = what.find_first_of("0123456789(-");
+    std::string k = what.substr(0, i);
+    while (!k.empty() && k.back() == ' ') k.pop_back();
+    return k;
+  };
+  for (Curved &cv : meshes) {
+    const Mesh &base = cv.mesh;
+    AABB bb;
+    for (Vec3 p : base.positions) bb.add(p);
+    const float s = std::max(1e-6f, length(bb.max - bb.min));
+    const bool closed = closed_manifold(base);
+    const size_t ov0 = base.face_count() < 2000 ? meshops::overlapping_faces(base, 1e-3f * s) : 0;
+    const size_t nf = base.face_count();
+    size_t ops = 0, refused = 0, problems = 0, overlaps = 0;
+    double max_ms = 0;
+    uint32_t rng = 4242u + (uint32_t)cv.name.size() * 31u;
+    auto next = [&] {
+      rng = rng * 1664525u + 1013904223u;
+      return rng >> 8;
+    };
+    auto check = [&](const std::string &what, const Mesh &m, bool must_stay_closed) {
+      std::string bad = invalid(m);
+      if (bad.empty() && must_stay_closed && closed && !closed_manifold(m)) bad = "a closed mesh came out open";
+      if (bad.empty() && degenerate_faces(m, s) > degenerate_faces(base, s)) bad = "new zero-area faces";
+      if (!bad.empty()) {
+        problems++;
+        problem_types[bad + " (" + kind_of(what) + ")"]++;
+        if (const char *dbg = std::getenv("BLENDITY_CURVED_DEBUG"))
+          if ((cv.name + ": " + what).find(dbg) != std::string::npos) {
+            for (size_t f = 0; f < m.face_count(); f++) {
+              const uint32_t *v = m.face_verts(f);
+              Vec3 an(0.0f);
+              const Vec3 o = m.positions[v[0]];
+              for (uint32_t i = 0; i < m.face_size(f); i++) an += cross(m.positions[v[i]] - o, m.positions[v[(i + 1) % m.face_size(f)]] - o);
+              if (length(an) * 0.5f < 1e-9f * s * s) {
+                std::printf("  zero-area f%zu:", f);
+                for (uint32_t i = 0; i < m.face_size(f); i++)
+                  std::printf(" %u(%.4f %.4f %.4f)", v[i], m.positions[v[i]].x, m.positions[v[i]].y, m.positions[v[i]].z);
+                std::printf("\n");
+              }
+            }
+            std::unordered_map<uint64_t, int> dir;
+            for (size_t f = 0; f < m.face_count(); f++)
+              for (uint32_t i = 0; i < m.face_size(f); i++) {
+                const uint32_t a = m.face_verts(f)[i], b = m.face_verts(f)[(i + 1) % m.face_size(f)];
+                dir[Mesh::edge_key(a, b)] += a < b ? 1 : 16;
+              }
+            std::printf("=== %s: %s: %s\n", cv.name.c_str(), what.c_str(), bad.c_str());
+            for (auto &[k, c] : dir)
+              if (c != 17) {
+                const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+                std::printf("  edge %u-%u uses %d fwd %d back: (%.3f %.3f %.3f) (%.3f %.3f %.3f)\n", a, b, c % 16, c / 16, m.positions[a].x, m.positions[a].y,
+                            m.positions[a].z, m.positions[b].x, m.positions[b].y, m.positions[b].z);
+              }
+          }
+        if (examples.size() < 80) examples.push_back(strprintf("%s: %s -> %s", cv.name.c_str(), what.c_str(), bad.c_str()));
+      }
+      if (m.face_count() < 2500 && meshops::overlapping_faces(m, 1e-3f * s) > ov0) {
+        overlaps++;
+        overlap_types[kind_of(what)]++;
+        if (const char *dbg = std::getenv("BLENDITY_CURVED_DEBUG"))
+          if ((cv.name + ": " + what).find(dbg) != std::string::npos) {
+            std::vector<std::pair<uint32_t, uint32_t>> pairs;
+            meshops::overlapping_faces(m, 1e-3f * s, &pairs);
+            std::printf("=== %s: %s: %zu pair(s)\n", cv.name.c_str(), what.c_str(), pairs.size());
+            for (size_t k = 0; k < pairs.size() && k < 6; k++)
+              for (uint32_t f : {pairs[k].first, pairs[k].second}) {
+                std::printf("  f%u n(%.3f %.3f %.3f):", f, m.face_normal(f).x, m.face_normal(f).y, m.face_normal(f).z);
+                for (uint32_t q = 0; q < m.face_size(f); q++) {
+                  const Vec3 p = m.positions[m.face_verts(f)[q]];
+                  std::printf(" %u(%.4f %.4f %.4f)", m.face_verts(f)[q], p.x, p.y, p.z);
+                }
+                std::printf("\n");
+              }
+          }
+        if (overlap_examples.size() < 40) overlap_examples.push_back(strprintf("%s: %s", cv.name.c_str(), what.c_str()));
+      }
+    };
+    auto run = [&](const std::string &what, bool must_stay_closed, const std::function<bool(Mesh &)> &fn) {
+      Mesh m = base;
+      ScopedTimer t;
+      const bool ok = fn(m);
+      max_ms = std::max(max_ms, t.ms());
+      ops++;
+      if (!ok) {
+        refused++;
+        return;
+      }
+      check(what, m, must_stay_closed);
+    };
+    /* Faces to work on: spread over the mesh, and connected curved regions. */
+    std::vector<size_t> singles;
+    for (size_t k = 0; k < (o.quick ? 6u : 16u) && k < nf; k++) singles.push_back((k * 7919u + 13u) % nf);
+    std::vector<std::vector<uint8_t>> regions;
+    for (int k = 0; k < (o.quick ? 3 : 8); k++) regions.push_back(grow_region(base, next() % (uint32_t)nf, 3 + k % 6, rng));
+    auto one = [&](size_t f) {
+      std::vector<uint8_t> sel(nf, 0);
+      sel[f] = 1;
+      return sel;
+    };
+    /* Push/Pull: single faces and curved regions, in and out, through and onto the far side. */
+    for (size_t f : singles) {
+      const auto lim = meshops::push_pull_limits(base, one(f));
+      std::vector<float> ds = {0.05f * s, -0.05f * s, 0.3f * s, -0.3f * s};
+      if (lim.through > 0) ds.push_back(-lim.through * 1.2f);
+      if (lim.contact > 0) ds.push_back(lim.contact * 1.2f);
+      for (float d : ds)
+        for (int keep = 0; keep < 2; keep++)
+          run(strprintf("push/pull face %zu by %.3g%s", f, d, keep ? " (new face)" : ""), true, [&](Mesh &m) {
+            std::vector<uint8_t> sel = one(f);
+            return meshops::push_pull(m, sel, d, keep == 0);
+          });
+    }
+    for (size_t r = 0; r < regions.size(); r++)
+      for (float d : {0.08f * s, -0.08f * s, -0.6f * s})
+        run(strprintf("push/pull curved region %zu (%d faces) by %.3g", r, (int)std::count(regions[r].begin(), regions[r].end(), 1), d), true,
+            [&](Mesh &m) {
+              std::vector<uint8_t> sel = regions[r];
+              meshops::PushPullResult res = meshops::PushPullResult::Moved;
+              const bool ok = meshops::push_pull(m, sel, d, true, &res);
+              if (std::getenv("BLENDITY_CURVED_DEBUG")) {
+                const auto lim = meshops::push_pull_limits(base, regions[r]);
+                std::printf("--- %s region %zu by %.3g: ok %d result %d (through %.3g behind %.3g)\n", cv.name.c_str(), r, d, (int)ok, (int)res,
+                            lim.through, lim.behind);
+              }
+              return ok;
+            });
+    /* Inset, Extrude, Bevel, Poke, Triangulate on curved regions. */
+    for (size_t r = 0; r < regions.size(); r++) {
+      for (float th : {0.01f * s, 0.2f * s})
+        run(strprintf("inset region %zu by %.3g", r, th), true, [&](Mesh &m) {
+          std::vector<uint8_t> sel = regions[r];
+          meshops::inset_region(m, sel, th);
+          return true;
+        });
+      run(strprintf("inset faces of region %zu", r), true, [&](Mesh &m) {
+        std::vector<uint8_t> sel = regions[r];
+        meshops::inset_faces(m, sel, 0.3f);
+        return true;
+      });
+      for (float d : {0.1f * s, -0.05f * s})
+        run(strprintf("extrude region %zu by %.3g", r, d), true, [&](Mesh &m) {
+          std::vector<uint8_t> sel = regions[r];
+          meshops::extrude_faces(m, sel, d);
+          return true;
+        });
+      for (int seg : {1, 3})
+        run(strprintf("bevel the edges of region %zu (%d segments)", r, seg), true, [&](Mesh &m) {
+          std::vector<uint8_t> fsel = regions[r], vsel(m.vert_count(), 0);
+          for (size_t f = 0; f < m.face_count(); f++)
+            if (fsel[f])
+              for (uint32_t k = 0; k < m.face_size(f); k++) vsel[m.face_verts(f)[k]] = 1;
+          return meshops::bevel_edges(m, vsel, fsel, 0.01f * s, seg);
+        });
+      run(strprintf("poke region %zu", r), true, [&](Mesh &m) {
+        std::vector<uint8_t> sel = regions[r];
+        return meshops::poke_faces(m, sel, 0.02f * s) > 0;
+      });
+      run(strprintf("triangulate then quads, region %zu", r), true, [&](Mesh &m) {
+        std::vector<uint8_t> sel = regions[r];
+        meshops::triangulate_faces(m, sel);
+        sel.assign(m.face_count(), 1);
+        meshops::tris_to_quads(m, sel, 40.0f);
+        return true;
+      });
+      /* A hole in the curved surface, closed again by Smart Fill. */
+      /* (Not required to close: a lobe that is one face's outline - a fin left between two deleted faces - is left open.) */
+      run(strprintf("delete region %zu, Smart Fill the hole", r), false, [&](Mesh &m) {
+        /* Only this hole (the teapot's own openings stay open): its vertices, found by position. */
+        std::vector<Vec3> ring;
+        for (size_t f = 0; f < m.face_count(); f++)
+          if (regions[r][f])
+            for (uint32_t k = 0; k < m.face_size(f); k++) ring.push_back(m.positions[m.face_verts(f)[k]]);
+        meshops::delete_faces(m, regions[r]);
+        std::vector<uint8_t> vs(m.vert_count(), 0);
+        for (size_t v = 0; v < vs.size(); v++)
+          for (const Vec3 &p : ring) vs[v] = vs[v] || length(m.positions[v] - p) < 1e-7f * s;
+        meshops::smart_fill(m, &vs);
+        return true;
+      });
+    }
+    /* Shapes drawn on a curved face, and across its neighbours; then turned. */
+    for (size_t f : singles) {
+      const Vec3 n = normalize(base.face_normal(f));
+      if (!std::isfinite(n.x)) continue;
+      const Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), v = cross(n, u);
+      const Vec3 c = meshops::face_area_center(base, f);
+      float rmin = 1e30f;
+      for (uint32_t k = 0; k < base.face_size(f); k++) {
+        const Vec3 a = base.positions[base.face_verts(f)[k]], b = base.positions[base.face_verts(f)[(k + 1) % base.face_size(f)]];
+        const Vec3 e = b - a;
+        const float t = clampf(dot(c - a, e) / std::max(1e-12f, dot(e, e)), 0.0f, 1.0f);
+        rmin = std::min(rmin, length(a + e * t - c));
+      }
+      for (float frac : {0.4f, 0.8f}) {
+        std::vector<Vec3> sq;
+        const float r = rmin * frac;
+        for (int i = 0; i < 8; i++) {
+          const float a = 2.0f * kPi * i / 8;
+          sq.push_back(c + (u * std::cos(a) + v * std::sin(a)) * r);
+        }
+        for (float deg : {0.0f, 30.0f, 90.0f, 170.0f})
+          run(strprintf("draw an octagon (%.0f%%) on face %zu, turn it %.0f deg", frac * 100, f, deg), true, [&](Mesh &m) {
+            const long in = meshops::imprint_loop(m, f, sq);
+            if (in < 0) return false;
+            std::vector<uint8_t> moved(m.vert_count(), 0);
+            for (uint32_t k = 0; k < m.face_size((size_t)in); k++) moved[m.face_verts((size_t)in)[k]] = 1;
+            const Vec3 nn = normalize(m.face_normal((size_t)in)), cc = m.face_center((size_t)in);
+            const Quat q = Quat::axis_angle(nn, deg * kDeg2Rad);
+            for (size_t k = 0; k < moved.size(); k++)
+              if (moved[k]) m.positions[k] = cc + q.rotate(m.positions[k] - cc);
+            meshops::repair_rings(m, moved);
+            return true;
+          });
+      }
+      /* Across: a circle three times the face, over its neighbours (which lean away). */
+      run(strprintf("draw a circle across face %zu and its neighbours", f), true, [&](Mesh &m) {
+        std::vector<Vec3> circle;
+        for (int i = 0; i < 16; i++) {
+          const float a = 2.0f * kPi * i / 16;
+          circle.push_back(c + (u * std::cos(a) + v * std::sin(a)) * rmin * 3.0f);
+        }
+        return meshops::imprint_loop_across(m, circle, n) >= 0;
+      });
+      /* Follow: the face swept out along a bent path of wire edges from its centre. */
+      run(strprintf("follow face %zu along a bent path", f), true, [&](Mesh &m) {
+        const uint32_t a = m.add_vert(c), b = m.add_vert(c + n * 0.2f * s), d = m.add_vert(c + n * 0.2f * s + u * 0.15f * s);
+        m.add_loose_edge(a, b);
+        m.add_loose_edge(b, d);
+        if (!meshops::follow(m, f)) return false;
+        meshops::merge_by_distance(m, 1e-6f * s);
+        return true;
+      });
+      /* Push Through: a tunnel from this face out the far side. */
+      run(strprintf("push face %zu through", f), true, [&](Mesh &m) {
+        std::vector<uint8_t> sel = one(f);
+        meshops::inset_faces(m, sel, 0.3f);
+        return meshops::push_through(m, sel, 1);
+      });
+    }
+    /* Bridge two faces on opposite sides (a handle) and two far regions (a tunnel). */
+    if (singles.size() >= 2)
+      for (int path : {0, 1, 2})
+        run(strprintf("bridge faces %zu and %zu (path %d)", singles[0], singles[singles.size() / 2], path), true, [&](Mesh &m) {
+          std::vector<uint8_t> fsel(m.face_count(), 0), vsel(m.vert_count(), 0);
+          fsel[singles[0]] = fsel[singles[singles.size() / 2]] = 1;
+          for (size_t f = 0; f < m.face_count(); f++)
+            if (fsel[f])
+              for (uint32_t k = 0; k < m.face_size(f); k++) vsel[m.face_verts(f)[k]] = 1;
+          return meshops::bridge(m, vsel, fsel, 6, 0, 1.0f, path);
+        });
+    /* Clean-up tools. */
+    run("merge by distance (tiny)", true, [&](Mesh &m) {
+      meshops::merge_by_distance(m, 1e-5f * s);
+      return true;
+    });
+    run("merge selected by distance (a band)", false, [&](Mesh &m) {
+      std::vector<uint8_t> vs(m.vert_count(), 0);
+      for (size_t v = 0; v < vs.size(); v++) vs[v] = std::fabs(m.positions[v].y - (bb.min.y + bb.max.y) * 0.5f) < 0.1f * s;
+      meshops::merge_by_distance_selected(m, 0.08f * s, vs);
+      return true;
+    });
+    run("delete a region, then Delete Loose", false, [&](Mesh &m) {
+      meshops::delete_faces(m, regions[0]);
+      meshops::delete_loose(m, true, true, true);
+      return true;
+    });
+    run("auto smooth", true, [&](Mesh &m) {
+      meshops::shade_auto_smooth(m, 30.0f);
+      return true;
+    });
+    total_ops += ops;
+    total_problems += problems;
+    total_overlaps += overlaps;
+    rep.row({cv.name, num((double)nf), num((double)ops), num((double)refused), num((double)problems), num((double)overlaps), f2(max_ms)});
+  }
+  rep.note(strprintf("%zu operations on curved meshes, %zu problems, %zu results with faces newly on top of each other", total_ops, total_problems,
+                     total_overlaps));
+  for (auto &[type, n] : problem_types) rep.note(strprintf("problem %d x: %s", n, type.c_str()));
+  for (const std::string &e : examples) rep.note(e);
+  for (auto &[type, n] : overlap_types) rep.note(strprintf("faces on top of each other %d x after: %s", n, type.c_str()));
+  for (const std::string &e : overlap_examples) rep.note("overlap: " + e);
+}
 
 static void install_crash_handler() {
 #ifdef _WIN32

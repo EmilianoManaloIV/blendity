@@ -726,14 +726,34 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
     int_results_.erase(it);
   }
   bool hot = hovered(r);
+  combo_rects_[i] = r;
   frame(r, theme.button, hot ? theme.field_hover : theme.border, px(3));
   std::string cur = (v >= 0 && v < count) ? options[v] : "";
   label({r.x + px(5), r.y, r.w - r.h - px(5), r.h}, cur, theme.text_bright);
   int a = font.line_height() - px(6);
   draw_icon(Icon::ArrowDown, {r.right() - a - px(5), r.y + (r.h - a) / 2, a, a}, theme.text);
   if (hot && in.pressed[0]) {
-    if (popup_open(i)) close_popups();
-    else open_popup(i, r);
+    if (popup_open(i)) {
+      /* Closing it again: only it when it sits on a dialog. */
+      if (current_layer_ > 0) {
+        for (size_t k = 0; k < popups_.size(); k++)
+          if (popups_[k].id == i) {
+            popups_.resize(k);
+            break;
+          }
+        redraw = true;
+      }
+      else close_popups();
+    }
+    else {
+      /* Inside a popup (a dialog such as Preferences): stack the list on it instead of closing it. */
+      const bool nested = current_layer_ > 0;
+      open_popup(i, r, nested);
+      if (nested) {
+        popups_.back().submenu = false;  // still drops down below the field
+        popups_.back().dropdown = true;
+      }
+    }
     consume_click();
   }
   popup(i, std::max(r.w, px(120)), [this, i, v, options, count] {
@@ -1160,7 +1180,12 @@ bool Context::menu_item(const std::string &text, const char *shortcut, bool chec
   last_widget_ = r;
   last_hovered_ = hot;
   if (hot && enabled && in.released[0]) {
-    close_popups();
+    /* A dropdown inside a dialog closes alone; anything else closes every popup. */
+    if (current_layer_ > 0 && current_layer_ - 1 < (int)popups_.size() && popups_[current_layer_ - 1].dropdown) {
+      popups_.resize(current_layer_ - 1);
+      redraw = true;
+    }
+    else close_popups();
     return true;
   }
   return false;

@@ -18,6 +18,7 @@ namespace bl {
 extern const char *const kDrawShapes[kDrawShapeCount] = {"Polyline", "Rectangle", "Circle", "Arc", "Polygon", "Guide"};
 extern const char *const kRectModes[3] = {"Corner", "Center", "3 Points"};
 extern const char *const kCircleModes[3] = {"Center", "2 Points", "3 Points"};
+extern const char *const kDrawAxisPlanes[kDrawAxisPlaneCount] = {"Surface / Open Space", "YZ (X)", "XZ (Y)", "XY (Z)"};
 extern const char *const kDrawSpacePlanes[kDrawSpacePlaneCount] = {"Ground (XZ)", "Front (XY)", "Side (YZ)", "View (facing you)", "Last Face's Plane"};
 
 /* The circle through three points (in their plane); false when they are in a line. */
@@ -69,8 +70,34 @@ void Editor::draw_begin(int shape) {
   draw_ = DrawTool{};
   draw_.active = true;
   draw_.shape = std::max(0, std::min(shape, kDrawShapeCount - 1));
-  Log::info("Draw %s: click on the mesh or the ground. Ctrl snaps to the grid, Shift to the axes, Esc ends.", kDrawShapes[draw_.shape]);
+  draw_axis_plane_ = 0;
+  Log::info("Draw %s: click on the mesh or the ground. Ctrl snaps to the grid, Shift to the axes, X / Y / Z draw on the YZ / XZ / XY "
+            "plane, Esc ends.",
+            kDrawShapes[draw_.shape]);
   show_guides_ = show_guides_ || draw_.shape == 5;
+}
+
+/* X, Y or Z while drawing: the plane across that axis, like an axis lock on Extrude. Before the
+ * first point it is the plane the shape will go on (through the first click); mid-polyline it
+ * turns through the last point, so a line can go up a wall and on across a floor - a 3D path
+ * for Follow. 0 goes back to the surface's own plane. */
+void Editor::draw_set_axis_plane(int axis) {
+  draw_axis_plane_ = std::max(0, std::min(axis, kDrawAxisPlaneCount - 1));
+  if (draw_axis_plane_ == 0) {
+    Log::info("Draw: on the surface's own plane again");
+    return;
+  }
+  const Vec3 n = draw_axis_plane_ == 1 ? Vec3(1, 0, 0) : draw_axis_plane_ == 2 ? Vec3(0, 1, 0) : Vec3(0, 0, 1);
+  if (draw_.active && !draw_.pts.empty()) {
+    const Vec3 through = draw_.shape == 0 ? draw_.pts.back() : draw_.pts.front();
+    if (draw_.has_plane && std::fabs(dot(draw_.plane_n, n)) < 0.9999f) draw_.bent = draw_.bent || draw_.shape == 0;
+    draw_.plane_n = n;
+    draw_.plane_p = through;
+    draw_.has_plane = true;
+    Vec3 pv;
+    plane_axes(n, draw_.axis_u, pv);
+  }
+  Log::info("Draw: on the %s plane%s", kDrawAxisPlanes[draw_axis_plane_], draw_.pts.empty() ? " (through the first point)" : " (through the last point)");
 }
 
 /* The plane drawing uses off the mesh (or always, with Draw in Open Space Only): the ground,
@@ -445,6 +472,26 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
   /* Drop repeated points (double clicks). */
   pts.erase(std::unique(pts.begin(), pts.end(), [](const Vec3 &a, const Vec3 &b) { return length(a - b) < 1e-6f; }), pts.end());
   if (closed && pts.size() > 2 && length(pts.front() - pts.back()) < 1e-6f) pts.pop_back();
+  /* Closed but not flat (the plane turned with X / Y / Z on the way): a loop of wire edges. */
+  bool wire_loop = false;
+  if (closed && pts.size() >= 4) {
+    Vec3 nrm(0.0f), ctr(0.0f);
+    for (size_t i = 0; i < pts.size(); i++) {
+      const Vec3 &a = pts[i], &b = pts[(i + 1) % pts.size()];
+      nrm += Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));  // Newell's normal
+      ctr += a;
+    }
+    ctr = ctr / (float)pts.size();
+    float ext = 0, off = 0;
+    for (const Vec3 &p : pts) ext = std::max(ext, length(p - ctr));
+    if (length(nrm) > 1e-12f)
+      for (const Vec3 &p : pts) off = std::max(off, std::fabs(dot(p - ctr, normalize(nrm))));
+    if (length(nrm) <= 1e-12f || off > 1e-4f * std::max(1.0f, ext)) {
+      wire_loop = true;
+      closed = false;
+      pts.push_back(pts.front());
+    }
+  }
   std::vector<uint32_t> new_verts;
   const size_t nv0 = m.vert_count();
   std::string what;
@@ -536,6 +583,7 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
         continue;
       }
       /* Not across a face: a wire edge to the next point. */
+      if (wire_loop && i + 2 == pts.size()) on_mesh[i + 1] = on_mesh[0];  // back to the loop's first corner
       const uint32_t a = on_mesh[i] != UINT32_MAX ? on_mesh[i] : (on_mesh[i] = m.add_vert(pts[i]));
       const uint32_t b = on_mesh[i + 1] != UINT32_MAX ? on_mesh[i + 1] : (on_mesh[i + 1] = m.add_vert(pts[i + 1]));
       m.add_loose_edge(a, b);
@@ -565,6 +613,15 @@ bool Editor::draw_update(const Recti &view) {
     draw_.active = false;
     return true;
   }
+  /* X / Y / Z: the plane across that axis (the same key again before the first point: the surface's own). */
+  if (!in.ctrl() && !in.alt() && !u.wants_keyboard()) {
+    const int keys[3] = {platform::KEY_X, platform::KEY_Y, platform::KEY_Z};
+    for (int a = 0; a < 3; a++) {
+      if (!in.key_pressed[keys[a]]) continue;
+      in.key_pressed[keys[a]] = false;  // not a shortcut as well
+      draw_set_axis_plane(draw_axis_plane_ == a + 1 && draw_.pts.empty() ? 0 : a + 1);
+    }
+  }
   /* Enter finishes an open polyline (Esc cancels the shape and ends the tool). */
   if (in.key_pressed[platform::KEY_ENTER]) {
     if (draw_.shape == 0 && draw_.pts.size() >= 2) {
@@ -574,6 +631,7 @@ bool Editor::draw_update(const Recti &view) {
     draw_.pts.clear();
     draw_.snaps.clear();
     draw_.has_plane = false;
+    draw_.bent = false;
     draw_.face = -1;
     return true;
   }
@@ -618,9 +676,16 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     GameObject *g = edit_object();
     const Mesh &m = **edit_mesh_ptr();
     if (draw_space_only_) face = -1;
+    const Vec3 axis_n = draw_axis_plane_ == 1 ? Vec3(1, 0, 0) : draw_axis_plane_ == 2 ? Vec3(0, 1, 0) : Vec3(0, 0, 1);
+    /* Locked to an axis plane: drawn on the face only when the face lies in that plane. */
+    if (draw_axis_plane_ && face >= 0 && (size_t)face < m.face_count() &&
+        std::fabs(dot(normalize(g->world_matrix().dir(m.face_normal((size_t)face))), axis_n)) < 0.9999f)
+      face = -1;
     draw_.face = face;
     draw_.plane_p = world;
-    if (face >= 0 && (size_t)face < m.face_count()) {
+    draw_.bent = false;
+    if (draw_axis_plane_) draw_.plane_n = axis_n;
+    else if (face >= 0 && (size_t)face < m.face_count()) {
       draw_.plane_n = normalize(g->world_matrix().dir(m.face_normal((size_t)face)));
       /* Remembered for "Last Face's Plane": drawing on past the face, in open space. */
       draw_last_face_valid_ = true;
@@ -660,6 +725,7 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     draw_.pts.clear();
     draw_.snaps.clear();
     draw_.has_plane = false;
+    draw_.bent = false;
     draw_.face = -1;
   };
   if (action == 1 && draw_.pts.size() >= 3) {

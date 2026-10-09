@@ -1215,32 +1215,71 @@ size_t merge_by_distance_naive(Mesh &m, float dist) {
   return finish_merge(m, target);
 }
 
+std::vector<uint32_t> region_wedges(const Mesh &m, const std::vector<uint8_t> &face_sel) {
+  std::vector<uint32_t> parent(m.corner_count(), UINT32_MAX);
+  std::unordered_map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>> by_edge;  // edge -> (face, corner of its start)
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (f >= face_sel.size() || !face_sel[f]) continue;
+    const uint32_t b = m.face_offsets[f], n = m.face_size(f);
+    for (uint32_t i = 0; i < n; i++) {
+      parent[b + i] = b + i;
+      by_edge[Mesh::edge_key(m.corner_verts[b + i], m.corner_verts[b + (i + 1) % n])].push_back({(uint32_t)f, b + i});
+    }
+  }
+  std::function<uint32_t(uint32_t)> find = [&](uint32_t c) {
+    while (parent[c] != c) c = parent[c] = parent[parent[c]];
+    return c;
+  };
+  auto next_corner = [&](uint32_t f, uint32_t c) { return m.face_offsets[f] + (c - m.face_offsets[f] + 1) % m.face_size(f); };
+  for (auto &[k, uses] : by_edge) {
+    if (uses.size() != 2) continue;  // the outline (or a non-manifold edge): faces stay apart there
+    const auto [f, c] = uses[0];
+    const auto [g, d] = uses[1];
+    /* f runs a -> b from c, g the other way (or the same way, when the region is inconsistently wound). */
+    const uint32_t fa = c, fb = next_corner(f, c), ga = d, gb = next_corner(g, d);
+    const bool opposite = m.corner_verts[ga] == m.corner_verts[fb];
+    const uint32_t pairs[2][2] = {{fa, opposite ? gb : ga}, {fb, opposite ? ga : gb}};
+    for (auto &p : pairs) {
+      const uint32_t x = find(p[0]), y = find(p[1]);
+      if (x != y) parent[std::max(x, y)] = std::min(x, y);
+    }
+  }
+  for (uint32_t c = 0; c < parent.size(); c++)
+    if (parent[c] != UINT32_MAX) parent[c] = find(c);
+  return parent;
+}
+
 void extrude_faces(Mesh &m, std::vector<uint8_t> &face_sel, float distance) {
   const size_t nf = m.face_count();
   face_sel.resize(nf, 0);
   /* Count each undirected edge among selected faces; count==1 means boundary. */
   std::unordered_map<uint64_t, int> count;
-  std::vector<Vec3> vnorm(m.vert_count(), Vec3(0.0f));
-  std::vector<uint32_t> newv(m.vert_count(), UINT32_MAX);
   bool any = false;
   for (size_t f = 0; f < nf; f++) {
     if (!face_sel[f]) continue;
     any = true;
     const uint32_t *v = m.face_verts(f);
     uint32_t n = m.face_size(f);
-    Vec3 fn = m.face_normal(f);
-    for (uint32_t i = 0; i < n; i++) {
-      count[Mesh::edge_key(v[i], v[(i + 1) % n])]++;
-      vnorm[v[i]] += fn;
-    }
+    for (uint32_t i = 0; i < n; i++) count[Mesh::edge_key(v[i], v[(i + 1) % n])]++;
   }
   if (!any) return;
+  /* One new vertex per wedge (a vertex the region touches twice gets two). */
+  const std::vector<uint32_t> wedge = region_wedges(m, face_sel);
+  std::unordered_map<uint32_t, Vec3> wnorm;
   for (size_t f = 0; f < nf; f++) {
     if (!face_sel[f]) continue;
-    const uint32_t *v = m.face_verts(f);
-    for (uint32_t i = 0; i < m.face_size(f); i++)
-      if (newv[v[i]] == UINT32_MAX) newv[v[i]] = m.add_vert(m.positions[v[i]] + normalize(vnorm[v[i]]) * distance);
+    const Vec3 fn = m.face_normal(f);
+    for (uint32_t i = 0; i < m.face_size(f); i++) wnorm[wedge[m.face_offsets[f] + i]] += fn;
   }
+  std::unordered_map<uint32_t, uint32_t> neww;
+  for (size_t f = 0; f < nf; f++) {
+    if (!face_sel[f]) continue;
+    for (uint32_t i = 0; i < m.face_size(f); i++) {
+      const uint32_t w = wedge[m.face_offsets[f] + i];
+      if (!neww.count(w)) neww[w] = m.add_vert(m.positions[m.corner_verts[w]] + normalize(wnorm[w]) * distance);
+    }
+  }
+  auto newc = [&](uint32_t corner) { return neww[wedge[corner]]; };
   struct Side {
     uint32_t v[4];
     Vec2 t[4];
@@ -1254,7 +1293,7 @@ void extrude_faces(Mesh &m, std::vector<uint8_t> &face_sel, float distance) {
     for (uint32_t i = 0; i < n; i++) {
       uint32_t a = m.corner_verts[b + i], c = m.corner_verts[b + (i + 1) % n];
       if (count[Mesh::edge_key(a, c)] == 1) {
-        Side s{{a, c, newv[c], newv[a]}, {}, m.material_of(f)};
+        Side s{{a, c, newc(b + (i + 1) % n), newc(b + i)}, {}, m.material_of(f)};
         if (uv) {
           /* Side walls get a strip along the boundary edge's UVs, offset
            * perpendicular by the extrusion length (keeps texel density). */
@@ -1269,7 +1308,7 @@ void extrude_faces(Mesh &m, std::vector<uint8_t> &face_sel, float distance) {
         sides.push_back(s);
       }
     }
-    for (uint32_t i = 0; i < n; i++) m.corner_verts[b + i] = newv[m.corner_verts[b + i]];
+    for (uint32_t i = 0; i < n; i++) m.corner_verts[b + i] = newc(b + i);
   }
   for (auto &s : sides) m.add_face(s.v, 4, uv ? s.t : nullptr, s.mat);
   face_sel.resize(m.face_count(), 0);

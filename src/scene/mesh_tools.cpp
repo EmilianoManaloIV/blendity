@@ -457,6 +457,196 @@ std::vector<std::pair<uint32_t, uint32_t>> selected_edges(const Mesh &m, const s
 }  // namespace
 
 /* ===================================================================== */
+/* Rings around a moved face                                              */
+/* ===================================================================== */
+
+/* A shape drawn on a face sits in a ring of faces joining it to the face's outline. Turning
+ * (or moving, or scaling) the shape drags the ring's inner corners round while the outer ones
+ * stay, so the ring's faces twist over each other. Each flat ring that moved vertices fold is
+ * zipped again between its two outlines (annulus: by angle, else two faces with bridges). */
+size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint8_t> *dropped) {
+  const size_t nf = m.face_count();
+  if (dropped) dropped->assign(nf, 0);
+  auto is_moved = [&](uint32_t v) { return v < moved.size() && moved[v] != 0; };
+  std::vector<uint8_t> cand(nf, 0);
+  bool any = false;
+  for (size_t f = 0; f < nf; f++) {
+    uint32_t k = 0;
+    const uint32_t n = m.face_size(f);
+    for (uint32_t i = 0; i < n; i++) k += is_moved(m.face_verts(f)[i]);
+    if (k > 0 && k < n) cand[f] = 1, any = true;
+  }
+  if (!any) return 0;
+  const float eps = 1e-4f * mesh_scale(m);
+  /* Only faces near the ring are looked at (this runs on every frame of a drag). */
+  std::vector<uint8_t> touched(m.vert_count(), 0);
+  for (size_t f = 0; f < nf; f++)
+    if (cand[f])
+      for (uint32_t i = 0; i < m.face_size(f); i++) touched[m.face_verts(f)[i]] = 1;
+  std::unordered_map<uint64_t, std::vector<uint32_t>> edge_faces;
+  for (size_t f = 0; f < nf; f++) {
+    const uint32_t n = m.face_size(f);
+    bool near = false;
+    for (uint32_t i = 0; i < n && !near; i++) near = touched[m.face_verts(f)[i]] != 0;
+    if (!near) continue;
+    for (uint32_t i = 0; i < n; i++) edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % n])].push_back((uint32_t)f);
+  }
+  auto loop_of = [&](size_t f) { return std::vector<uint32_t>(m.face_verts(f), m.face_verts(f) + m.face_size(f)); };
+  std::vector<uint8_t> seen(nf, 0), drop(nf, 0);
+  struct Patch {
+    std::vector<uint32_t> outer, inner;
+    Vec3 n;
+    int mat;
+    bool smooth;
+    std::vector<uint32_t> faces;
+  };
+  std::vector<Patch> patches;
+  for (size_t seed = 0; seed < nf; seed++) {
+    if (!cand[seed] || seen[seed]) continue;
+    const Vec3 sn = loop_newell(m, loop_of(seed));
+    if (length(sn) < 1e-10f) continue;  // folded flat: another face of the ring seeds it
+    const Vec3 pn = normalize(sn), p0 = loop_center(m, loop_of(seed));
+    /* "In the plane": within 15% of the seed's size, since a shape drawn on a
+     * curved (non-planar) quad leaves a ring that is only nearly flat. */
+    float diameter = 0.0f;
+    for (uint32_t i = 0; i < m.face_size(seed); i++)
+      for (uint32_t j = i + 1; j < m.face_size(seed); j++)
+        diameter = std::max(diameter, length(m.positions[m.face_verts(seed)[i]] - m.positions[m.face_verts(seed)[j]]));
+    const float tol = std::max(eps, 0.15f * diameter);
+    auto flat = [&](size_t f) {
+      for (uint32_t i = 0; i < m.face_size(f); i++)
+        if (std::fabs(dot(m.positions[m.face_verts(f)[i]] - p0, pn)) > tol) return false;
+      return true;
+    };
+    /* The ring: candidate faces in the seed's plane, joined by edges. */
+    std::vector<uint32_t> region = {(uint32_t)seed}, stack = {(uint32_t)seed};
+    seen[seed] = 1;
+    while (!stack.empty()) {
+      const uint32_t f = stack.back();
+      stack.pop_back();
+      const uint32_t n = m.face_size(f);
+      for (uint32_t i = 0; i < n; i++)
+        for (uint32_t g : edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % n])])
+          if (cand[g] && !seen[g] && flat(g)) {
+            seen[g] = 1;
+            region.push_back(g);
+            stack.push_back(g);
+          }
+    }
+    /* Its outline: edges used once within it, which must make two loops. */
+    std::unordered_map<uint64_t, int> uses;
+    for (uint32_t f : region) {
+      const uint32_t n = m.face_size(f);
+      for (uint32_t i = 0; i < n; i++) uses[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % n])]++;
+    }
+    std::unordered_map<uint32_t, std::vector<uint32_t>> nb;
+    for (auto &[k, c] : uses)
+      if (c == 1) {
+        const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+        nb[a].push_back(b);
+        nb[b].push_back(a);
+      }
+    bool simple = !nb.empty();
+    for (auto &kv : nb) simple = simple && kv.second.size() == 2;
+    if (!simple) continue;
+    std::vector<std::vector<uint32_t>> loops;
+    std::unordered_set<uint32_t> walked;
+    for (auto &kv : nb) {
+      if (walked.count(kv.first)) continue;
+      std::vector<uint32_t> loop;
+      for (uint32_t prev = UINT32_MAX, cur = kv.first;;) {
+        loop.push_back(cur);
+        walked.insert(cur);
+        const auto &ns = nb[cur];
+        const uint32_t next = ns[0] != prev ? ns[0] : ns[1];
+        prev = cur;
+        cur = next;
+        if (cur == kv.first || walked.count(cur)) break;
+      }
+      loops.push_back(std::move(loop));
+    }
+    if (loops.size() != 2 || loops[0].size() < 3 || loops[1].size() < 3) continue;
+    /* Which way it faces: a face beside it in the same plane that did not fold (the moved
+     * shape itself, or the face around the ring), else the ring's own larger share. */
+    Vec3 n = pn;
+    float vote = 0.0f;
+    bool from_neighbour = false;
+    for (const auto &loop : loops)
+      for (size_t i = 0; i < loop.size() && !from_neighbour; i++)
+        for (uint32_t g : edge_faces[Mesh::edge_key(loop[i], loop[(i + 1) % loop.size()])])
+          if (!cand[g] && flat(g)) {
+            const Vec3 gn = loop_newell(m, loop_of(g));
+            if (length(gn) > 1e-10f) {
+              vote = dot(gn, pn);
+              from_neighbour = true;
+              break;
+            }
+          }
+    if (!from_neighbour)
+      for (uint32_t f : region) vote += dot(loop_newell(m, loop_of(f)), pn);
+    if (vote < 0) n = -pn;
+    std::vector<uint32_t> outer = loops[0], inner = loops[1];
+    if (std::fabs(loop_area_along(m, outer, n)) < std::fabs(loop_area_along(m, inner, n))) std::swap(outer, inner);
+    bool inside = true;
+    for (uint32_t v : inner) inside = inside && inside_loop(m, outer, m.positions[v], n, eps);
+    if (!inside) continue;  // moved out across the outline: nothing a ring can fill
+    const float ring_area = std::fabs(loop_area_along(m, outer, n)) - std::fabs(loop_area_along(m, inner, n));
+    std::vector<std::vector<uint32_t>> faces;
+    for (uint32_t f : region) {
+      std::vector<uint32_t> l = loop_of(f);
+      faces.push_back(l);
+    }
+    if (ring_faces_ok(m, faces, n, ring_area)) continue;  // still fine
+    patches.push_back({outer, inner, n, m.material_of(region[0]), m.smooth_of(region[0]), region});
+  }
+  if (patches.empty()) return 0;
+  /* Corner UVs carried by vertex (the ring is flat; its corners keep where they were mapped). */
+  std::unordered_map<uint32_t, Vec2> uv_of;
+  const bool uvs = m.has_uvs();
+  size_t rebuilt = 0;
+  for (Patch &p : patches) {
+    if (uvs)
+      for (uint32_t f : p.faces)
+        for (uint32_t i = 0; i < m.face_size(f); i++) uv_of.emplace(m.face_verts(f)[i], m.uvs[m.face_offsets[f] + i]);
+    const size_t f0 = m.face_count();
+    const size_t c0 = m.corner_count();
+    std::vector<uint32_t> made;
+    annulus(m, p.outer, p.inner, p.n, p.mat, made);
+    const float ring_area = std::fabs(loop_area_along(m, p.outer, p.n)) - std::fabs(loop_area_along(m, p.inner, p.n));
+    std::vector<std::vector<uint32_t>> nfaces;
+    for (uint32_t f : made) nfaces.push_back(loop_of(f));
+    if (!ring_faces_ok(m, nfaces, normalize(p.n), ring_area)) {
+      /* Could not be zipped cleanly either: leave the ring as it was. */
+      m.face_offsets.resize(f0 + 1);
+      m.corner_verts.resize(c0);
+      if (m.uvs.size() > c0) m.uvs.resize(c0);
+      if (m.face_material.size() > f0) m.face_material.resize(f0);
+      if (m.face_smooth.size() > f0) m.face_smooth.resize(f0);
+      continue;
+    }
+    for (uint32_t f : made) {
+      if (uvs && m.uvs.size() == m.corner_count())
+        for (uint32_t i = 0; i < m.face_size(f); i++) {
+          auto it = uv_of.find(m.face_verts(f)[i]);
+          if (it != uv_of.end()) m.uvs[m.face_offsets[f] + i] = it->second;
+        }
+      if (!m.face_smooth.empty() || p.smooth != m.smooth) m.set_face_smooth(f, p.smooth);
+    }
+    for (uint32_t f : p.faces) drop[f] = 1;
+    rebuilt++;
+  }
+  if (!rebuilt) return 0;
+  if (dropped) {
+    *dropped = drop;
+    dropped->resize(m.face_count(), 0);
+  }
+  drop.resize(m.face_count(), 0);
+  drop_faces(m, drop);
+  m.touch();
+  return rebuilt;
+}
+
+/* ===================================================================== */
 /* Bevel                                                                  */
 /* ===================================================================== */
 
@@ -675,6 +865,9 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
       next[y] = x;  // the patch runs opposite to the open edge
     }
     std::unordered_set<uint32_t> used;
+    std::unordered_map<uint32_t, uint32_t> weld;  // twin corner -> the one kept
+    std::vector<std::vector<uint32_t>> folded;
+    const float sc = mesh_scale(m);
     for (auto &[start, _] : next) {
       if (used.count(start)) continue;
       std::vector<uint32_t> loop;
@@ -685,8 +878,40 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
         v = next[v];
       }
       if (v == start && loop.size() >= 3) {
+        /* Folded flat: the patch runs out along one arc and back along its twin (a corner
+         * where two bevels meet on a curved surface). No face; the twins become one. */
+        Vec3 nw(0.0f);
+        const Vec3 p0 = m.positions[loop[0]];
+        for (size_t k = 0; k < loop.size(); k++) nw += cross(m.positions[loop[k]] - p0, m.positions[loop[(k + 1) % loop.size()]] - p0);
+        if (0.5f * length(nw) < 1e-9f * sc * sc) {
+          for (size_t i = 0; i < loop.size(); i++)
+            for (size_t j = i + 1; j < loop.size(); j++)
+              if (loop[i] != loop[j] && !weld.count(loop[j]) && length(m.positions[loop[i]] - m.positions[loop[j]]) < 1e-6f * sc) weld[loop[j]] = loop[i];
+          folded.push_back(loop);
+          continue;
+        }
         m.add_face(loop.data(), loop.size(), nullptr, 0);
         bevel_faces.push_back((uint32_t)m.face_count() - 1);
+      }
+    }
+    if (!weld.empty()) {
+      const std::vector<uint32_t> before = m.corner_verts;
+      for (uint32_t &cv : m.corner_verts)
+        for (int guard = 0; guard < 8; guard++) {
+          auto it = weld.find(cv);
+          if (it == weld.end()) break;
+          cv = it->second;
+        }
+      /* Only when that leaves every face whole (a sliver's twins can sit side by side in a face). */
+      bool whole = true;
+      for (size_t f = 0; f < m.face_count() && whole; f++)
+        for (uint32_t i = 0; i < m.face_size(f) && whole; i++) whole = m.face_verts(f)[i] != m.face_verts(f)[(i + 1) % m.face_size(f)];
+      if (!whole) {
+        m.corner_verts = before;
+        for (const auto &loop : folded) {
+          m.add_face(loop.data(), loop.size(), nullptr, 0);
+          bevel_faces.push_back((uint32_t)m.face_count() - 1);
+        }
       }
     }
   }
@@ -1541,9 +1766,12 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
   if (distance < 0 && lim.through > 0 && -distance >= lim.through - snap) {
     Mesh before = m;
     std::vector<uint8_t> sel_before = face_sel;
+    const size_t overlaps_before = m.face_count() < 20000 ? overlapping_faces(m) : 0;
     if (push_through(m, face_sel, 1, err)) {
       remap_selection(face_sel, tidy_new_geometry(m, old_positions, weld), m.face_count());
-      if ((!was_closed || closed_manifold(m)) && sliver_faces(m, scale) <= slivers_before) {
+      /* A curved exit the cut could not open cleanly leaves faces lying on the opening. */
+      const bool doubled = before.face_count() < 20000 && overlapping_faces(m) > overlaps_before;
+      if ((!was_closed || closed_manifold(m)) && sliver_faces(m, scale) <= slivers_before && !doubled) {
         if (result) *result = PushPullResult::Hole;
         m.touch();
         return true;
