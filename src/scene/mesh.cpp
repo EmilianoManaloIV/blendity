@@ -1131,21 +1131,19 @@ static size_t finish_merge(Mesh &m, const std::vector<uint32_t> &target) {
 
 size_t merge_by_distance(Mesh &m, float dist) {
   const float cell = std::max(dist, 1e-6f), d2 = dist * dist;
-  auto key = [&](int x, int y, int z) {
-    return ((uint64_t)(uint32_t)(x * 73856093) ^ ((uint64_t)(uint32_t)(y * 19349663) << 21) ^
-            ((uint64_t)(uint32_t)(z * 83492791) << 42));
-  };
+  auto key = grid_key;
+  auto cell_of = [&](float v) { return grid_cell((double)v / cell); };
   std::unordered_map<uint64_t, uint32_t> head;  // cell -> first kept vertex
   head.reserve(m.vert_count() * 2);
   std::vector<uint32_t> next(m.vert_count(), UINT32_MAX);
   std::vector<uint32_t> target(m.vert_count());
   for (uint32_t i = 0; i < (uint32_t)m.vert_count(); i++) {
     Vec3 p = m.positions[i];
-    int cx = (int)std::floor(p.x / cell), cy = (int)std::floor(p.y / cell), cz = (int)std::floor(p.z / cell);
+    const int64_t cx = cell_of(p.x), cy = cell_of(p.y), cz = cell_of(p.z);
     uint32_t found = UINT32_MAX;
-    for (int dz = -1; dz <= 1 && found == UINT32_MAX; dz++)
-      for (int dy = -1; dy <= 1 && found == UINT32_MAX; dy++)
-        for (int dx = -1; dx <= 1 && found == UINT32_MAX; dx++) {
+    for (int64_t dz = -1; dz <= 1 && found == UINT32_MAX; dz++)
+      for (int64_t dy = -1; dy <= 1 && found == UINT32_MAX; dy++)
+        for (int64_t dx = -1; dx <= 1 && found == UINT32_MAX; dx++) {
           auto it = head.find(key(cx + dx, cy + dy, cz + dz));
           if (it == head.end()) continue;
           for (uint32_t k = it->second; k != UINT32_MAX; k = next[k])
@@ -1167,35 +1165,33 @@ size_t merge_by_distance(Mesh &m, float dist) {
 size_t merge_by_distance_selected(Mesh &m, float dist, const std::vector<uint8_t> &sel, bool unselected) {
   if (!std::isfinite(dist) || dist < 0) return 0;
   const float cell = std::max(dist, 1e-6f), d2 = dist * dist;
-  auto key = [&](int x, int y, int z) {
-    return ((uint64_t)(uint32_t)(x * 73856093) ^ ((uint64_t)(uint32_t)(y * 19349663) << 21) ^ ((uint64_t)(uint32_t)(z * 83492791) << 42));
-  };
+  auto key = grid_key;
   auto is_sel = [&](uint32_t v) { return v < sel.size() && sel[v]; };
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
   std::vector<uint32_t> target(m.vert_count());
   for (uint32_t i = 0; i < (uint32_t)m.vert_count(); i++) target[i] = i;
-  auto cell_of = [&](Vec3 p, int &cx, int &cy, int &cz) {
-    cx = (int)std::floor(p.x / cell);
-    cy = (int)std::floor(p.y / cell);
-    cz = (int)std::floor(p.z / cell);
+  auto cell_of = [&](Vec3 p, int64_t &cx, int64_t &cy, int64_t &cz) {
+    cx = grid_cell((double)p.x / cell);
+    cy = grid_cell((double)p.y / cell);
+    cz = grid_cell((double)p.z / cell);
   };
   /* Unselected targets first (they stay where they are), then selected ones in order. */
   if (unselected)
     for (uint32_t i = 0; i < (uint32_t)m.vert_count(); i++)
       if (!is_sel(i)) {
-        int cx, cy, cz;
+        int64_t cx, cy, cz;
         cell_of(m.positions[i], cx, cy, cz);
         grid[key(cx, cy, cz)].push_back(i);
       }
   for (uint32_t i = 0; i < (uint32_t)m.vert_count(); i++) {
     if (!is_sel(i)) continue;
     const Vec3 p = m.positions[i];
-    int cx, cy, cz;
+    int64_t cx, cy, cz;
     cell_of(p, cx, cy, cz);
     uint32_t found = UINT32_MAX;
-    for (int dz = -1; dz <= 1 && found == UINT32_MAX; dz++)
-      for (int dy = -1; dy <= 1 && found == UINT32_MAX; dy++)
-        for (int dx = -1; dx <= 1 && found == UINT32_MAX; dx++) {
+    for (int64_t dz = -1; dz <= 1 && found == UINT32_MAX; dz++)
+      for (int64_t dy = -1; dy <= 1 && found == UINT32_MAX; dy++)
+        for (int64_t dx = -1; dx <= 1 && found == UINT32_MAX; dx++) {
           auto it = grid.find(key(cx + dx, cy + dy, cz + dz));
           if (it == grid.end()) continue;
           for (uint32_t k : it->second)

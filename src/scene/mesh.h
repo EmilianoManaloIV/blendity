@@ -161,6 +161,16 @@ void triangulate(Mesh &m);
 /* One face's triangles as local corner indices (3 per triangle). */
 void triangulate_face_local(const Mesh &m, size_t f, std::vector<uint32_t> &local);
 void flip_normals(Mesh &m);
+/* Uniform-grid spatial hashing. grid_cell takes a coordinate already divided by the cell size;
+ * cells are 64-bit and clamped (NaN -> 0) and keys hash in unsigned arithmetic, so far points
+ * over tiny cells can't overflow (undefined behaviour). Equal keys only share a bucket. */
+inline int64_t grid_cell(double scaled) {
+  const double c = std::floor(scaled);
+  return c == c ? (int64_t)std::max(-4e18, std::min(4e18, c)) : 0;
+}
+inline uint64_t grid_key(int64_t x, int64_t y, int64_t z) {
+  return ((uint64_t)x * 73856093u) ^ (((uint64_t)y * 19349663u) << 21) ^ (((uint64_t)z * 83492791u) << 42);
+}
 /* Merge vertices closer than `dist` using a spatial hash
  * (blender/source/blender/bmesh/operators/bmo_removedoubles.cc). Returns removed count. */
 size_t merge_by_distance(Mesh &m, float dist);

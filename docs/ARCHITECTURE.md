@@ -20,7 +20,7 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - unit checks (1,924 on Windows with Blender's libraries)
+tests/          blendity_tests   - unit checks (1,934 on Windows with Blender's libraries)
 ```
 
 ## System overview

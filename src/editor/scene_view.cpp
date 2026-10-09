@@ -2773,11 +2773,11 @@ void Editor::compute_proportional_weights(const Mat4 &world) {
   /* Distance to the nearest selected vertex through a uniform grid with
    * cell = radius, so only 27 cells are visited per vertex instead of every
    * selected vertex (Blender: editors/transform, proportional editing). */
-  const float r = prop_radius_, inv = 1.0f / r;
-  auto cell = [&](Vec3 p) { return std::array<int, 3>{(int)std::floor(p.x * inv), (int)std::floor(p.y * inv), (int)std::floor(p.z * inv)}; };
-  auto key = [](int x, int y, int z) {
-    return ((uint64_t)(uint32_t)(x * 73856093) ^ ((uint64_t)(uint32_t)(y * 19349663) << 21) ^ ((uint64_t)(uint32_t)(z * 83492791) << 42));
+  const float r = prop_radius_;
+  auto cell = [&](Vec3 p) {
+    return std::array<int64_t, 3>{meshops::grid_cell((double)p.x / r), meshops::grid_cell((double)p.y / r), meshops::grid_cell((double)p.z / r)};
   };
+  auto key = meshops::grid_key;
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
   for (size_t i = 0; i < n; i++)
     if (gizmo_vert_w_[i] > 0) {

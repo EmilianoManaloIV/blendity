@@ -156,6 +156,7 @@ static void round15_tests();
 static void round16_tests();
 static void round17_tests();
 static void round18_tests();
+static void round26_tests();
 
 int main() {
   register_builtin_components();
@@ -755,6 +756,7 @@ int main() {
   round16_tests();
   round17_tests();
   round18_tests();
+  round26_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -7347,5 +7349,51 @@ static void round18_tests() {
         /* All of them pushed through together: holes (each copy a doorway). */
         ed.command("editop push_pull");
       }
+  });
+}
+
+/* Round 26 (task 0002): what the AddressSanitizer / UBSan job found, each with a test that
+ * failed under the sanitizer before its fix. */
+static void round26_tests() {
+  /* A quad whose first two corners are `gap` apart along x at x = base; the other two are 1 away
+   * in y and z, so merging the pair leaves a triangle. */
+  auto pair_at = [](float base, float gap) {
+    Mesh m;
+    m.add_vert({base, 0.0f, 0.0f});
+    m.add_vert({base + gap, 0.0f, 0.0f});
+    m.add_vert({base, 1.0f, 0.0f});
+    m.add_vert({base, 0.0f, 1.0f});
+    m.add_face({0u, 1u, 2u, 3u});
+    return m;
+  };
+  test("merge by distance: far from the origin with a tiny distance, cells don't overflow", [&] {
+    /* -2.0001 / 1e-4 is cell -20001: its hash overflowed int. 1e6 / 1e-6 is cell 1e12: the
+     * cell itself didn't fit in an int. Both are undefined behaviour; the merge must still be right. */
+    struct Case { float base, dist, near_gap, apart_gap; };
+    /* Far out a float can't hold a gap below its step (0.0625 at 1e6, 2 at 3e7): the near pair
+     * coincides and the apart pair is a few steps apart. */
+    for (const Case &c : {Case{-2.0001f, 1e-4f, 2.5e-5f, 4e-4f}, Case{1.0e6f, 1e-6f, 0.0f, 0.25f}, Case{-3.0e7f, 1e-6f, 0.0f, 8.0f}}) {
+      Mesh near_pair = pair_at(c.base, c.near_gap), apart = pair_at(c.base, c.apart_gap);
+      Mesh naive = near_pair;
+      const size_t r = meshops::merge_by_distance(near_pair, c.dist), rn = meshops::merge_by_distance_naive(naive, c.dist);
+      const size_t ra = meshops::merge_by_distance(apart, c.dist);
+      std::printf("    base %g, distance %g: merged %zu (naive %zu), apart merged %zu\n", c.base, c.dist, r, rn, ra);
+      CHECK(r == 1 && rn == 1);
+      CHECK(ra == 0 && apart.vert_count() == 4);
+    }
+    /* A tiny distance on an ordinary mesh: cells of 1e-6 across a 1 m object. */
+    Mesh grid = pair_at(0.5f, 2e-7f);
+    CHECK(meshops::merge_by_distance(grid, 1e-6f) == 1);
+    /* NaN positions don't crash and aren't merged with anything. */
+    Mesh nan_mesh = pair_at(0.0f, 0.5f);
+    nan_mesh.positions[1].x = std::nanf("");
+    meshops::merge_by_distance(nan_mesh, 1e-3f);
+    CHECK(nan_mesh.vert_count() == 4);
+  });
+  test("merge by distance (selected): far from the origin with a tiny distance", [&] {
+    Mesh m = pair_at(-2.0001f, 2.5e-5f);
+    CHECK(meshops::merge_by_distance_selected(m, 1e-4f, {1, 1, 0, 0}) == 1 && m.vert_count() == 3);
+    Mesh far = pair_at(1.0e6f, 0.25f);
+    CHECK(meshops::merge_by_distance_selected(far, 0.5f, {1, 1, 1, 1}) == 1 && far.vert_count() == 3);
   });
 }
