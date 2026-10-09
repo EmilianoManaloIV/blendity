@@ -155,8 +155,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"mesh.dissolve", "Dissolve", "Mesh", CTX_EDIT},
       {"mesh.triangulate", "Triangulate", "Mesh", CTX_EDIT},
       {"mesh.tris_to_quads", "Tris to Quads", "Mesh", CTX_SCENE_EDIT},
-      {"mesh.fill", "Make Face", "Mesh", CTX_SCENE_EDIT},
-      {"mesh.smart_fill", "Smart Fill", "Mesh", CTX_SCENE_EDIT},
+      {"mesh.fill", "Make Face", "Mesh", CTX_EDIT},  // anywhere in Edit Mode (not only over the Scene view)
       {"mesh.merge_center", "Merge at Center", "Mesh", CTX_SCENE_EDIT},
       {"mesh.merge_distance", "Merge by Distance", "Mesh", CTX_SCENE_EDIT},
       {"mesh.connect", "Connect", "Mesh", CTX_SCENE_EDIT},
@@ -262,8 +261,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     b("mesh.dissolve", {"Ctrl+X"});
     b("mesh.triangulate", {"Ctrl+T"});
     b("mesh.tris_to_quads", {"Alt+J"});
-    b("mesh.fill", {"F"});
-    b("mesh.smart_fill", {"Alt+F"});
+    b("mesh.fill", {"F", "Alt+F"});
     b("mesh.merge_center", {"M"});
     b("mesh.merge_distance", {"Alt+M"});
     b("mesh.connect", {"J"});
@@ -371,7 +369,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     b("draw.circle", {"C"});
     b("draw.arc", {"A"});
     b("draw.polygon", {"Shift+P"});
-    b("mesh.smart_fill", {"Alt+F"});
+    b("mesh.fill", {"Alt+F"});
     b("select.linked", {"Ctrl+L"});
     b("select.invert", {"Ctrl+Shift+I"});
   }
@@ -622,7 +620,6 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "mesh.triangulate") edit_tool("triangulate_faces");
   else if (id == "mesh.tris_to_quads") edit_tool("tris_to_quads");
   else if (id == "mesh.fill") edit_tool("fill");
-  else if (id == "mesh.smart_fill") edit_tool("smart_fill");
   else if (id == "mesh.merge_center") edit_tool("merge_center");
   else if (id == "mesh.merge_distance") edit_tool("merge_distance");
   else if (id == "mesh.connect") edit_tool("connect");

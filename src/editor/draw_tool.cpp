@@ -18,8 +18,6 @@ namespace bl {
 extern const char *const kDrawShapes[kDrawShapeCount] = {"Polyline", "Rectangle", "Circle", "Arc", "Polygon", "Guide"};
 extern const char *const kRectModes[3] = {"Corner", "Center", "3 Points"};
 extern const char *const kCircleModes[3] = {"Center", "2 Points", "3 Points"};
-extern const char *const kDrawAxisPlanes[kDrawAxisPlaneCount] = {"Surface / Open Space", "YZ (X)", "XZ (Y)", "XY (Z)"};
-extern const char *const kDrawSpacePlanes[kDrawSpacePlaneCount] = {"Ground (XZ)", "Front (XY)", "Side (YZ)", "View (facing you)", "Last Face's Plane"};
 
 /* The circle through three points (in their plane); false when they are in a line. */
 static bool circle_through(Vec3 a, Vec3 b, Vec3 q, Vec3 &c, Vec3 &nn) {
@@ -70,53 +68,80 @@ void Editor::draw_begin(int shape) {
   draw_ = DrawTool{};
   draw_.active = true;
   draw_.shape = std::max(0, std::min(shape, kDrawShapeCount - 1));
-  draw_axis_plane_ = 0;
-  Log::info("Draw %s: click on the mesh or the ground. Ctrl snaps to the grid, Shift to the axes, X / Y / Z draw on the YZ / XZ / XY "
-            "plane, Esc ends.",
+  Log::info("Draw %s: click on the mesh or the ground. Ctrl snaps to the grid, Shift to the axes; X / Y / Z lay a guide along that axis, "
+            "Ctrl+click an edge lays one along it; Esc ends.",
             kDrawShapes[draw_.shape]);
   show_guides_ = show_guides_ || draw_.shape == 5;
 }
 
-/* X, Y or Z while drawing: the plane across that axis, like an axis lock on Extrude. Before the
- * first point it is the plane the shape will go on (through the first click); mid-polyline it
- * turns through the last point, so a line can go up a wall and on across a floor - a 3D path
- * for Follow. 0 goes back to the surface's own plane. */
-void Editor::draw_set_axis_plane(int axis) {
-  draw_axis_plane_ = std::max(0, std::min(axis, kDrawAxisPlaneCount - 1));
-  if (draw_axis_plane_ == 0) {
-    Log::info("Draw: on the surface's own plane again");
-    return;
+/* X, Y or Z while drawing (Plasticity): a construction line along that axis - the object's own
+ * (Local) or the world's (Global), as Snap Axes says - through the last point, or through the
+ * point under the mouse before the first one. Drawing snaps to it, to where it crosses others and
+ * to where it pierces the drawing plane; a polyline can follow it off the plane (a 3D path). */
+void Editor::draw_axis_guide(const Recti &view, int axis) {
+  Vec3 at;
+  const bool from_last = !draw_.pts.empty();
+  if (from_last) at = draw_.pts.back();
+  else {
+    const DrawHit hh = draw_hit(view, ui_.in.mx, ui_.in.my);
+    if (!hh.ok) {
+      Log::warn("Guide: point at the mesh or the ground first (or click a first point)");
+      return;
+    }
+    at = hh.world;
   }
-  const Vec3 n = draw_axis_plane_ == 1 ? Vec3(1, 0, 0) : draw_axis_plane_ == 2 ? Vec3(0, 1, 0) : Vec3(0, 0, 1);
-  if (draw_.active && !draw_.pts.empty()) {
-    const Vec3 through = draw_.shape == 0 ? draw_.pts.back() : draw_.pts.front();
-    if (draw_.has_plane && std::fabs(dot(draw_.plane_n, n)) < 0.9999f) draw_.bent = draw_.bent || draw_.shape == 0;
-    draw_.plane_n = n;
-    draw_.plane_p = through;
-    draw_.has_plane = true;
-    Vec3 pv;
-    plane_axes(n, draw_.axis_u, pv);
-  }
-  Log::info("Draw: on the %s plane%s", kDrawAxisPlanes[draw_axis_plane_], draw_.pts.empty() ? " (through the first point)" : " (through the last point)");
+  Vec3 d(0.0f);
+  d[axis] = 1.0f;
+  if (!draw_global_axes_)
+    if (GameObject *g = edit_object()) d = normalize(g->world_rotation().rotate(d));
+  for (const GuideLine &gl : scene_->guides)
+    if (std::fabs(dot(gl.d, d)) > 0.9999f && length(cross(at - gl.p, gl.d)) < 1e-5f * std::max(1.0f, length(at))) {
+      Log::info("Guide: that one is already there");
+      return;
+    }
+  scene_->guides.push_back({at, d});
+  show_guides_ = true;
+  mark_changed("Add Guide Line");
+  Log::info("Guide along the %s %c axis through %s (%zu guides)", draw_global_axes_ ? "global" : "local", 'X' + axis,
+            from_last ? "the last point" : "the point under the mouse", scene_->guides.size());
 }
 
-/* The plane drawing uses off the mesh (or always, with Draw in Open Space Only): the ground,
- * a front or side plane, one facing the view through the point being orbited, or the plane
- * of the face drawn on last - each moved along its normal by the offset. */
+/* Ctrl+click on an edge while drawing (Plasticity): a guide along it. */
+bool Editor::draw_edge_guide(const Recti &view, int mx, int my) {
+  GameObject *g = edit_object();
+  if (!g) return false;
+  const Mesh &m = **edit_mesh_ptr();
+  const Mat4 &w = g->world_matrix();
+  const Vec2 mouse((float)(mx - view.x), (float)(my - view.y));
+  float best = (float)ui_.px(10);
+  Vec3 pa, pb;
+  bool have = false;
+  auto consider = [&](uint32_t i, uint32_t j) {
+    const Vec3 a = w.point(m.positions[i]), b = w.point(m.positions[j]);
+    Vec2 sa, sb;
+    float za, zb;
+    if (!scene_r3d_.project(a, sa, za) || !scene_r3d_.project(b, sb, zb)) return;
+    const Vec2 e = sb - sa;
+    const float l2 = dot(e, e);
+    const float t = l2 > 1e-6f ? clampf(dot(mouse - sa, e) / l2, 0.0f, 1.0f) : 0.0f;
+    const float dist = length(sa + e * t - mouse);
+    if (dist < best && length(b - a) > 1e-6f) best = dist, pa = a, pb = b, have = true;
+  };
+  for (auto &e : m.edge_cache()) consider(e.first, e.second);
+  for (uint64_t k : m.loose_edges) consider((uint32_t)(k >> 32), (uint32_t)(k & 0xFFFFFFFF));
+  if (!have) return false;
+  scene_->guides.push_back({pa, normalize(pb - pa)});
+  show_guides_ = true;
+  mark_changed("Add Guide from Edge");
+  Log::info("Guide along the edge (%zu guides). Drawing snaps to it, to where it crosses others and to its direction.", scene_->guides.size());
+  return true;
+}
+
+/* Off the mesh a first point goes on the ground (Plasticity's default construction plane); guides
+ * (X / Y / Z, Ctrl+click on an edge) take a shape anywhere else. */
 void Editor::draw_space_plane(Vec3 &p, Vec3 &n) const {
-  switch (draw_space_mode_) {
-    case 1: n = Vec3(0, 0, 1); p = n * draw_space_offset_; break;
-    case 2: n = Vec3(1, 0, 0); p = n * draw_space_offset_; break;
-    case 3: n = normalize(-cam_.forward()); p = cam_.pivot + n * draw_space_offset_; break;
-    case 4:
-      if (draw_last_face_valid_) {
-        n = draw_last_face_n_;
-        p = draw_last_face_p_ + n * draw_space_offset_;
-        break;
-      }
-      [[fallthrough]];
-    default: n = Vec3(0, 1, 0); p = n * draw_space_offset_; break;
-  }
+  n = Vec3(0, 1, 0);
+  p = Vec3(0.0f);
 }
 
 Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
@@ -169,7 +194,8 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       const float den = 1.0f - b * b;
       if (den < 1e-6f) continue;
       const Vec3 q = gs[i].p + gs[i].d * ((b * e - d) / den);
-      if (draw_.has_plane && std::fabs(dot(q - draw_.plane_p, draw_.plane_n)) > 1e-3f * std::max(1.0f, length(q))) continue;  // off the plane
+      /* Off the plane: only a polyline may follow a guide there (it becomes a 3D path). */
+      if (draw_.has_plane && draw_.shape != 0 && std::fabs(dot(q - draw_.plane_p, draw_.plane_n)) > 1e-3f * std::max(1.0f, length(q))) continue;
       const float sd = screen_dist(q);
       if (sd < best_on) best_on = sd, on_guide = q, have_on_guide = true;
     }
@@ -184,7 +210,7 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
   }
   /* The face under the mouse: its centre is a snap (Plasticity), and with Start at Face
    * Center a centre-based shape's first click goes there wherever it lands on the face. */
-  if (!ui_.in.ctrl() && !draw_space_only_) {
+  if (!ui_.in.ctrl()) {
     const Mat4 inv = w.inverse();
     const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
     const RenderMesh &rm = m.render_mesh(true);
@@ -211,6 +237,41 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       }
     }
   }
+  /* Plasticity's perpendicular snap: the point on an edge where a line from the last point
+   * meets it square (90 degrees). */
+  if (draw_perp_snap_ && !draw_.pts.empty() && !ui_.in.ctrl() && !(draw_.shape == 1 && draw_rect_mode_ != 2)) {
+    const Vec3 last = draw_.pts.back();
+    const Vec2 mouse((float)(mx - view.x), (float)(my - view.y));
+    float best = (float)ui_.px(9);
+    Vec3 foot;
+    bool have = false;
+    auto consider = [&](uint32_t i, uint32_t j) {
+      const Vec3 a = w.point(m.positions[i]), b = w.point(m.positions[j]), d = b - a;
+      const float l2 = dot(d, d);
+      if (l2 < 1e-12f) return;
+      const float t = dot(last - a, d) / l2;
+      if (t <= 1e-3f || t >= 1.0f - 1e-3f) return;  // square to it only inside the edge
+      const Vec3 q = a + d * t;
+      if (length(q - last) < 1e-5f * std::max(1.0f, length(q))) return;  // the last point lies on this edge
+      if (draw_.has_plane && std::fabs(dot(q - draw_.plane_p, draw_.plane_n)) > 1e-3f * std::max(1.0f, length(q))) return;
+      Vec2 s;
+      float z;
+      if (!scene_r3d_.project(q, s, z)) return;
+      const float dist = length(s - mouse);
+      if (dist < best) best = dist, foot = q, have = true;
+    };
+    for (auto &e : m.edge_cache()) consider(e.first, e.second);
+    for (uint64_t key : m.loose_edges) consider((uint32_t)(key >> 32), (uint32_t)(key & 0xFFFFFFFF));
+    if (have) {
+      h.ok = true;
+      h.world = foot;
+      h.label = "Perpendicular to Edge (90 deg)";
+      h.color = Color::hex(0xFF40FF);
+      draw_.guide = true;
+      draw_.guide_dir = normalize(foot - last);
+      return h;
+    }
+  }
   const KnifePoint k = knife_hit(view, mx, my);
   if (k.ok) {
     h.ok = true;
@@ -218,17 +279,6 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
     h.label = k.label;
     h.color = k.kind == 0 ? Color::hex(0x20C020) : std::string(k.label) == "Midpoint" ? Color::hex(0x20C8FF) : Color::hex(0xFF3030);
     h.snap = k;
-    if (draw_space_only_) {
-      /* Open space only: a corner or edge of the mesh guides the point, which stays on the
-       * drawing plane (straight across from what it snapped to). */
-      Vec3 sp, sn;
-      if (draw_.has_plane) sp = draw_.plane_p, sn = draw_.plane_n;
-      else draw_space_plane(sp, sn);
-      h.world -= sn * dot(h.world - sp, sn);
-      h.snap = KnifePoint{};
-      h.on_space_plane = true;
-      h.label = "Snapped (on the plane)";
-    }
   }
   else if (have_on_guide) {
     h.ok = true;
@@ -247,7 +297,6 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
       if (d > 0 && d < best) best = d, h.face = (int)rm.tri_face[t];
     }
-    if (draw_space_only_) h.face = -1;  // open space only: faces don't catch the point
     if (h.face >= 0) {
       h.ok = true;
       h.world = ray.origin + ray.dir * best;  // t is a world parameter (the local ray is unnormalised)
@@ -259,10 +308,9 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       Vec3 sp, sn;
       draw_space_plane(sp, sn);
       if (ray_plane(ray, sp, sn, t) && t > 0) {
-        static const char *kOn[] = {"On Ground", "On Front Plane", "On Side Plane", "On View Plane", "On Face's Plane"};
         h.ok = true;
         h.world = ray.origin + ray.dir * t;
-        h.label = kOn[std::max(0, std::min(draw_space_mode_ == 4 && !draw_last_face_valid_ ? 0 : draw_space_mode_, kDrawSpacePlaneCount - 1))];
+        h.label = "On Ground";
         h.color = Color::hex(0xB0B0B0);
         h.on_space_plane = true;
       }
@@ -466,6 +514,8 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
   if (!g || outline_w.size() < 2) return;
   MeshPtr &mp = *edit_mesh_ptr();
   Mesh &m = *mesh_make_mutable(mp);
+  /* The first shape in a new, empty Drawing object: the object takes the shape's place and turn. */
+  const bool fresh = m.vert_count() == 0 && m.face_count() == 0 && starts_with(g->name, "Drawing");
   const Mat4 inv = g->world_matrix().inverse();
   std::vector<Vec3> pts;
   for (const Vec3 &p : outline_w) pts.push_back(inv.point(p));
@@ -543,6 +593,58 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
       }
       return UINT32_MAX;
     };
+    std::vector<uint8_t> crossed;  // pts that are crossings with edges (added below)
+    /* Where the path crosses edges of the faces it is drawn on (an arc across the faces around
+     * a drawn rectangle, say): a point there too, so every piece between two points on the mesh
+     * runs through one face and can cut it. */
+    if (draw_.has_plane && !draw_.bent && !wire_loop && pts.size() >= 2) {
+      const Vec3 n = normalize(inv.dir(draw_.plane_n)), p0 = inv.point(draw_.plane_p);
+      const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+      auto on_plane = [&](Vec3 q) { return std::fabs(dot(q - p0, n)) < eps; };
+      std::vector<std::pair<uint32_t, uint32_t>> plane_edges;
+      {
+        std::unordered_set<uint64_t> seen;
+        for (size_t f = 0; f < m.face_count(); f++) {
+          bool flat = true;
+          for (uint32_t k = 0; k < m.face_size(f) && flat; k++) flat = on_plane(m.positions[m.face_verts(f)[k]]);
+          if (!flat) continue;
+          for (uint32_t k = 0; k < m.face_size(f); k++) {
+            const uint32_t a = m.face_verts(f)[k], b = m.face_verts(f)[(k + 1) % m.face_size(f)];
+            if (seen.insert(Mesh::edge_key(a, b)).second) plane_edges.push_back({a, b});
+          }
+        }
+      }
+      const Vec3 ax = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), ay = cross(n, ax);
+      auto flat2 = [&](Vec3 q) { return Vec2(dot(q - p0, ax), dot(q - p0, ay)); };
+      std::vector<Vec3> with;
+      std::vector<uint8_t> crossing;
+      for (size_t i = 0; i + 1 < pts.size(); i++) {
+        const Vec3 a = pts[i], b = pts[i + 1];
+        with.push_back(a);
+        crossing.resize(with.size(), 0);
+        const Vec2 a2 = flat2(a), d2 = flat2(b) - a2;
+        std::vector<std::pair<float, Vec3>> hits;
+        for (auto &e : plane_edges) {
+          const Vec2 c2 = flat2(m.positions[e.first]), e2 = flat2(m.positions[e.second]) - c2;
+          const float den = d2.x * e2.y - d2.y * e2.x;
+          if (std::fabs(den) < 1e-12f) continue;
+          const Vec2 wv = c2 - a2;
+          const float s = (wv.x * e2.y - wv.y * e2.x) / den, t = (wv.x * d2.y - wv.y * d2.x) / den;
+          if (s <= 1e-4f || s >= 1.0f - 1e-4f || t < -1e-5f || t > 1.0f + 1e-5f) continue;
+          hits.push_back({s, lerp(m.positions[e.first], m.positions[e.second], clampf(t, 0.0f, 1.0f))});
+        }
+        std::sort(hits.begin(), hits.end(), [](const auto &x, const auto &y) { return x.first < y.first; });
+        for (auto &h : hits)
+          if (length(h.second - with.back()) > eps && length(h.second - b) > eps) {
+            with.push_back(h.second);
+            crossing.push_back(1);
+          }
+      }
+      with.push_back(pts.back());
+      crossing.resize(with.size(), 0);
+      pts = std::move(with);
+      crossed = std::move(crossing);
+    }
     /* The path's points: which lie on the mesh's edges or corners. */
     std::vector<uint32_t> on_mesh(pts.size(), UINT32_MAX);
     for (size_t i = 0; i < pts.size(); i++) on_mesh[i] = vertex_at(pts[i]);
@@ -590,6 +692,72 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
       wires++;
       i++;
     }
+    /* Both ends on the mesh and the path cut across edges of the surface (an arc over the faces
+     * round a drawn rectangle): the pieces inside it - between the path and the chord joining its
+     * ends - become one face again, as SketchUp shows one face there. Only the stretches of the
+     * crossed edges inside are dissolved. */
+    if (!std::getenv("BL_ARC_NOMERGE") && cuts >= 2 && on_mesh.front() != UINT32_MAX && on_mesh.back() != UINT32_MAX && !crossed.empty() && draw_.has_plane) {
+      const Vec3 n = normalize(inv.dir(draw_.plane_n));
+      const Vec3 ax = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), ay = cross(n, ax);
+      std::vector<Vec2> poly;
+      for (const Vec3 &p : pts) poly.push_back(Vec2(dot(p, ax), dot(p, ay)));
+      auto inside_poly = [&](Vec2 q) {
+        bool in = false;
+        for (size_t a = 0, b = poly.size() - 1; a < poly.size(); b = a++)
+          if ((poly[a].y > q.y) != (poly[b].y > q.y) && q.x < (poly[b].x - poly[a].x) * (q.y - poly[a].y) / (poly[b].y - poly[a].y) + poly[a].x)
+            in = !in;
+        return in;
+      };
+      std::unordered_set<uint32_t> on_path(on_mesh.begin(), on_mesh.end());
+      std::unordered_set<uint64_t> path_edges;
+      for (size_t k = 0; k + 1 < on_mesh.size(); k++)
+        if (on_mesh[k] != UINT32_MAX && on_mesh[k + 1] != UINT32_MAX) path_edges.insert(Mesh::edge_key(on_mesh[k], on_mesh[k + 1]));
+      std::unordered_map<uint64_t, std::vector<uint32_t>> edge_faces;
+      for (size_t f = 0; f < m.face_count(); f++)
+        for (uint32_t k = 0; k < m.face_size(f); k++) edge_faces[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])].push_back((uint32_t)f);
+      std::unordered_set<uint64_t> merge;
+      for (size_t k = 0; k < crossed.size() && k < on_mesh.size(); k++) {
+        if (!crossed[k] || on_mesh[k] == UINT32_MAX) continue;
+        const uint32_t c = on_mesh[k];
+        for (auto &[key, fs] : edge_faces) {
+          const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFF);
+          if ((a != c && b != c) || path_edges.count(key) || fs.size() != 2) continue;
+          const uint32_t other = a == c ? b : a;
+          /* The path's two ends are on the chord: an edge from a crossing to one of them runs inside (the corner of a
+           * rectangle an arc starts from). Any other path corner: the edge is the path's own. */
+          const bool to_end = other == on_mesh.front() || other == on_mesh.back();
+          if (on_path.count(other) && !to_end) continue;
+          /* A stretch of the path itself (its inner corners came from the cuts, not on_mesh). */
+          bool along_path = false;
+          {
+            const float peps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+            const Vec3 q = m.positions[other];
+            for (size_t s2 = 0; s2 + 1 < pts.size() && !along_path; s2++) {
+              const Vec3 sa = pts[s2], sd = pts[s2 + 1] - sa;
+              const float l2 = dot(sd, sd);
+              const float tt = l2 > 1e-12f ? clampf(dot(q - sa, sd) / l2, 0.0f, 1.0f) : 0.0f;
+              along_path = length(sa + sd * tt - q) < peps;
+            }
+          }
+          if (along_path && !to_end) continue;
+          const Vec3 mid = (m.positions[a] + m.positions[b]) * 0.5f;
+          if (!inside_poly(Vec2(dot(mid, ax), dot(mid, ay)))) continue;
+          if (dot(normalize(m.face_normal(fs[0])), normalize(m.face_normal(fs[1]))) < 0.9999f) continue;  // a real crease
+          merge.insert(key);
+        }
+      }
+      if (std::getenv("BL_ARC_DEBUG"))
+        for (uint64_t key : merge) {
+          const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFF);
+          std::printf("arc merge edge %u (%.3f %.3f %.3f) - %u (%.3f %.3f %.3f), faces %u %u\n", a, m.positions[a].x, m.positions[a].y, m.positions[a].z, b,
+                      m.positions[b].x, m.positions[b].y, m.positions[b].z, edge_faces[key][0], edge_faces[key][1]);
+        }
+      if (!merge.empty()) {
+        std::vector<uint8_t> vs(m.vert_count(), 1);
+        meshops::EdgeSelectionScope scope(&merge);
+        meshops::dissolve_edges(m, vs);
+      }
+    }
     m.prune_loose_edges();
     face_sel_.assign(m.face_count(), 0);
     what = strprintf("(%zu face cut(s), %zu wire edge(s))", cuts, wires);
@@ -601,6 +769,28 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
   for (uint32_t v : new_verts) vert_sel_[v] = 1;
   if (elem_ == EditElement::Face) sync_vert_face_selection(true);
   else if (elem_ == EditElement::Edge) edges_from_verts();
+  if (fresh && m.vert_count() && draw_.has_plane && !draw_.bent) {
+    /* Origin at the shape's centre, Y along its plane's normal and X along the plane's first axis
+     * (the face's edge, or a rectangle's side): Local / Pivot then work in the shape's own terms. */
+    Vec3 c(0.0f);
+    const Mat4 old = g->world_matrix();
+    for (const Vec3 &p : m.positions) c += old.point(p);
+    c = c / (float)m.vert_count();
+    Vec3 n = normalize(draw_.plane_n), x = draw_.axis_u - n * dot(draw_.axis_u, n);
+    if (outline_w.size() >= 2) {  // a shape's first side (a rectangle drawn at an angle turns the object with it)
+      const Vec3 side = outline_w[1] - outline_w[0], in_plane = side - n * dot(side, n);
+      if (length(in_plane) > 1e-6f) x = in_plane;
+    }
+    if (length(x) > 1e-6f) {
+      x = normalize(x);
+      if (m.face_count() && dot(old.dir(m.face_normal(0)), n) < 0) n = -n, x = -x;  // Y out of the face's front
+      g->set_world_position(c);
+      g->set_world_rotation(quat_from_axes(x, n, cross(x, n)));
+      const Mat4 to_new = g->world_matrix().inverse() * old;
+      for (Vec3 &p : m.positions) p = to_new.point(p);
+      m.touch();
+    }
+  }
   mark_changed(std::string("Draw ") + kDrawShapes[draw_.shape]);
   Log::info("Drew a %s %s", to_lower(kDrawShapes[draw_.shape]).c_str(), what.c_str());
 }
@@ -613,13 +803,13 @@ bool Editor::draw_update(const Recti &view) {
     draw_.active = false;
     return true;
   }
-  /* X / Y / Z: the plane across that axis (the same key again before the first point: the surface's own). */
-  if (!in.ctrl() && !in.alt() && !u.wants_keyboard()) {
+  /* X / Y / Z: a guide along that axis (Plasticity's construction lines). */
+  if (!in.ctrl() && !in.alt() && !u.wants_keyboard() && scene_hovered_) {
     const int keys[3] = {platform::KEY_X, platform::KEY_Y, platform::KEY_Z};
     for (int a = 0; a < 3; a++) {
       if (!in.key_pressed[keys[a]]) continue;
       in.key_pressed[keys[a]] = false;  // not a shortcut as well
-      draw_set_axis_plane(draw_axis_plane_ == a + 1 && draw_.pts.empty() ? 0 : a + 1);
+      draw_axis_guide(view, a);
     }
   }
   /* Enter finishes an open polyline (Esc cancels the shape and ends the tool). */
@@ -636,6 +826,11 @@ bool Editor::draw_update(const Recti &view) {
     return true;
   }
   u.cursor = platform::Cursor::Hand;
+  /* Ctrl+click on an edge: a guide along it (elsewhere Ctrl+click is a grid-snapped point). */
+  if (in.pressed[0] && scene_hovered_ && in.ctrl() && !in.alt() && draw_edge_guide(view, in.mx, in.my)) {
+    u.consume_click();
+    return true;
+  }
   if (!(in.pressed[0] && scene_hovered_ && !in.alt())) return true;
   u.consume_click();
   const DrawHit h = draw_hit(view, in.mx, in.my);
@@ -675,22 +870,11 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     /* The first point fixes the plane: the face's, else the ground's. */
     GameObject *g = edit_object();
     const Mesh &m = **edit_mesh_ptr();
-    if (draw_space_only_) face = -1;
-    const Vec3 axis_n = draw_axis_plane_ == 1 ? Vec3(1, 0, 0) : draw_axis_plane_ == 2 ? Vec3(0, 1, 0) : Vec3(0, 0, 1);
-    /* Locked to an axis plane: drawn on the face only when the face lies in that plane. */
-    if (draw_axis_plane_ && face >= 0 && (size_t)face < m.face_count() &&
-        std::fabs(dot(normalize(g->world_matrix().dir(m.face_normal((size_t)face))), axis_n)) < 0.9999f)
-      face = -1;
     draw_.face = face;
     draw_.plane_p = world;
     draw_.bent = false;
-    if (draw_axis_plane_) draw_.plane_n = axis_n;
-    else if (face >= 0 && (size_t)face < m.face_count()) {
+    if (face >= 0 && (size_t)face < m.face_count()) {
       draw_.plane_n = normalize(g->world_matrix().dir(m.face_normal((size_t)face)));
-      /* Remembered for "Last Face's Plane": drawing on past the face, in open space. */
-      draw_last_face_valid_ = true;
-      draw_last_face_p_ = world;
-      draw_last_face_n_ = draw_.plane_n;
     }
     else {
       Vec3 sp;
@@ -739,6 +923,22 @@ void Editor::draw_add(Vec3 world, int face, int action) {
     reset();
     return;
   }
+  /* A polyline point off the drawing plane (on a guide that leaves it): the line goes on in 3D,
+   * on the plane through that segment that faces the view best. It ends as wire edges. */
+  if (draw_.shape == 0 && !draw_.pts.empty() && draw_.has_plane &&
+      std::fabs(dot(world - draw_.plane_p, draw_.plane_n)) > 1e-4f * std::max(1.0f, length(world))) {
+    const Vec3 seg = world - draw_.pts.back();
+    if (length(seg) > 1e-6f) {
+      const Vec3 sd = normalize(seg), view = normalize(cam_.forward() * -1.0f);
+      Vec3 nn = view - sd * dot(view, sd);
+      if (length(nn) < 1e-4f) nn = cross(sd, std::fabs(sd.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0));
+      draw_.plane_n = normalize(nn);
+      draw_.plane_p = world;
+      draw_.axis_u = sd;
+      draw_.bent = true;
+      draw_.face = -1;
+    }
+  }
   draw_.pts.push_back(world);
   draw_.snaps.push_back(KnifePoint{});
   const size_t needed = draw_points_needed();
@@ -779,14 +979,20 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
     }
   if (mode == "finish") return draw_add(world, -1, 2);
   int face = -1;
-  if (draw_.pts.empty() && !draw_space_only_)
+  if (draw_.pts.empty())
     if (GameObject *g = edit_object()) {
       const Mesh &m = **edit_mesh_ptr();
       const Vec3 p = g->world_matrix().inverse().point(world);
       const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
-      /* Any face shape (a ring around an earlier drawing is concave). */
-      for (size_t f = 0; f < m.face_count() && face < 0; f++)
-        if (meshops::point_in_face(m, f, p, eps)) face = (int)f;
+      /* Any face shape (a ring around an earlier drawing is concave). A point on an edge lies in
+       * the faces on both sides: the one facing the camera most, as a click would pick. */
+      const Vec3 to_cam = normalize(g->world_matrix().inverse().dir(cam_.position() - world));
+      float best = -2.0f;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (meshops::point_in_face(m, f, p, eps)) {
+          const float facing = dot(normalize(m.face_normal(f)), to_cam);
+          if (facing > best) best = facing, face = (int)f;
+        }
     }
   draw_add(world, face, 0);
 }

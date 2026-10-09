@@ -62,6 +62,25 @@ size_t slice(Mesh &m, Vec3 p, Vec3 n, int clear) {
   return crossing.size() + cuts;
 }
 
+static bool follow_impl(Mesh &m, size_t face, const std::vector<uint32_t> &path, bool wires, std::string *error);
+
+bool follow_path(Mesh &m, size_t face, const std::vector<uint32_t> &path, std::string *error) {
+  if (face >= m.face_count()) {
+    if (error) *error = "select the face to sweep";
+    return false;
+  }
+  if (path.size() < 2) {
+    if (error) *error = "the path needs at least one edge";
+    return false;
+  }
+  /* SketchUp's Follow Me: the face goes along the edges where they are - from the path's end
+   * nearest the face, keeping where the face sits relative to that end. */
+  const Vec3 c = m.face_center(face);
+  std::vector<uint32_t> p = path;
+  if (length(m.positions[p.back()] - c) < length(m.positions[p.front()] - c)) std::reverse(p.begin(), p.end());
+  return follow_impl(m, face, p, false, error);
+}
+
 bool follow(Mesh &m, size_t face, std::string *error) {
   auto fail = [&](const char *e) {
     if (error) *error = e;
@@ -92,7 +111,19 @@ bool follow(Mesh &m, size_t face, std::string *error) {
     prev = cur;
     cur = next;
   }
+  return follow_impl(m, face, path, true, error);
+}
+
+/* The sweep along the path where it is: a path of the mesh's own edges (UModeler: pick the edges)
+ * keeps them; a path of wire edges (drawn from the face) is used up. */
+static bool follow_impl(Mesh &m, size_t face, const std::vector<uint32_t> &path, bool wires, std::string *error) {
+  auto fail = [&](const char *e) {
+    if (error) *error = e;
+    return false;
+  };
   if (path.size() < 2) return fail("the path needs at least one edge");
+  for (uint32_t v : path)
+    if (v >= m.vert_count()) return fail("the path has a vertex that isn't there");
   std::vector<Vec3> P;
   for (uint32_t v : path) P.push_back(m.positions[v]);
   /* The profile: the face's corners, wound to face back along the path. */
@@ -157,10 +188,11 @@ bool follow(Mesh &m, size_t face, std::string *error) {
   if (!part_of_solid) m.add_face(cap0.data(), cap0.size(), nullptr, mat);
   m.add_face(cap1.data(), cap1.size(), nullptr, mat);
   /* The path's wire edges are inside the solid now: they go. */
-  for (size_t i = 0; i + 1 < path.size(); i++) {
-    const uint64_t k = Mesh::edge_key(path[i], path[i + 1]);
-    m.loose_edges.erase(std::remove(m.loose_edges.begin(), m.loose_edges.end(), k), m.loose_edges.end());
-  }
+  if (wires)
+    for (size_t i = 0; i + 1 < path.size(); i++) {
+      const uint64_t k = Mesh::edge_key(path[i], path[i + 1]);
+      m.loose_edges.erase(std::remove(m.loose_edges.begin(), m.loose_edges.end(), k), m.loose_edges.end());
+    }
   std::vector<uint8_t> drop(m.face_count(), 0);
   drop[face] = 1;
   delete_faces(m, drop);  // also removes the path's now-unused vertices
@@ -621,33 +653,64 @@ void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness,
 }
 }  // namespace
 
-/* Inset further than the region is wide and the outline crosses over itself: the inner
- * faces turn over and the ring folds onto them. The thickness is halved until every new
- * face still faces the way its face did (Blender leaves the fold; this keeps the surface). */
+/* Inset further than the region is wide and the outline crosses over itself: the inner faces
+ * turn over and the ring folds onto them. Then it stops at the furthest thickness that doesn't fold
+ * (found by bisection, so dragging the inset slides smoothly up to that limit and holds there,
+ * rather than jumping between halves). Blender leaves the fold; this keeps the surface. */
 void inset_region(Mesh &m, std::vector<uint8_t> &face_sel, float thickness) {
   if (!std::isfinite(thickness)) {
     face_sel.resize(m.face_count(), 0);
     return;
   }
   std::vector<uint32_t> src;
-  for (int tries = 0; tries < 10; tries++, thickness *= 0.5f) {
-    Mesh r = m;
-    std::vector<uint8_t> sel = face_sel;
-    inset_region_once(r, sel, thickness, src);
-    bool folded = false;
-    for (size_t f = 0; f < r.face_count() && f < src.size() && !folded; f++) {
+  auto attempt = [&](float th, Mesh &r, std::vector<uint8_t> &sel) {
+    r = m;
+    sel = face_sel;
+    inset_region_once(r, sel, th, src);
+    for (size_t f = 0; f < r.face_count() && f < src.size(); f++) {
       if (src[f] == UINT32_MAX) continue;
-      const Vec3 was = m.face_normal(src[f]), now = r.face_normal(f);
+      /* Area vectors (Newell's), not the unit normals: their lengths are twice the areas. */
+      auto area_vec = [](const Mesh &mm, size_t ff) {
+        Vec3 a(0.0f);
+        const uint32_t n = mm.face_size(ff), *fv = mm.face_verts(ff);
+        const Vec3 o = mm.positions[fv[0]];
+        for (uint32_t i = 1; i + 1 < n; i++) a += cross(mm.positions[fv[i]] - o, mm.positions[fv[i + 1]] - o);
+        return a;
+      };
+      const Vec3 was = area_vec(m, src[f]), now = area_vec(r, f);
       /* Turned over (or squashed flat) against the face it came from. */
       const float nl = length(now), wl = length(was);
-      if (wl > 1e-12f && (nl < 1e-12f * std::max(1.0f, wl) || dot(now, was) <= 0.0f)) folded = true;
+      const bool middle = f < sel.size() && sel[f];  // the inset face itself (ring quads are thin by nature)
+      if (wl > 1e-12f && ((middle && nl < 0.02f * wl) || nl < 1e-9f * wl || dot(now, was) <= 0.0f)) return false;  // turned over, or (the middle) squashed to under 2% of its area
+      /* A ring quad crossed into a bow-tie (the inset went past the middle and the inner face came
+       * out turned half round, facing the same way): two of its corners turn backwards. */
+      if (r.face_size(f) == 4 && wl > 1e-12f) {
+        int back = 0;
+        for (uint32_t i = 0; i < 4; i++) {
+          const Vec3 p = r.positions[r.face_verts(f)[(i + 3) % 4]], c = r.positions[r.face_verts(f)[i]], q = r.positions[r.face_verts(f)[(i + 1) % 4]];
+          back += dot(cross(c - p, q - c), was) < 0.0f;
+        }
+        if (back >= 2) return false;
+      }
     }
-    if (!folded || tries == 9) {
-      m = std::move(r);
-      face_sel = std::move(sel);
-      return;
+    return true;
+  };
+  Mesh r;
+  std::vector<uint8_t> sel;
+  if (!attempt(thickness, r, sel)) {
+    float lo = 0.0f, hi = thickness;
+    for (int k = 0; k < 16; k++) {
+      const float mid = 0.5f * (lo + hi);
+      Mesh t;
+      std::vector<uint8_t> ts;
+      if (attempt(mid, t, ts)) lo = mid;
+      else hi = mid;
     }
+    if (lo <= 1e-3f * std::fabs(thickness)) return;  // folds at any thickness: no inset (rather than one of zero width)
+    attempt(lo, r, sel);
   }
+  m = std::move(r);
+  face_sel = std::move(sel);
 }
 
 /* Blender's Mesh > Clean Up > Delete Loose: vertices no edge or face uses, wire
@@ -758,6 +821,83 @@ Vec3 face_area_center(const Mesh &m, size_t f) {
 
 /* Pairs of faces that lie in one plane and cover some of the same area (z-fighting,
  * "overlapping face artifacts"): compared triangle by triangle in 2D. */
+std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices(const Mesh &m, float eps) {
+  std::vector<std::pair<uint32_t, uint32_t>> out;
+  if (m.positions.empty()) return out;
+  if (!(eps > 0)) eps = 1e-5f * std::max(1e-3f, length(m.bounds().extent()));
+  std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+  auto cell = [&](Vec3 p, int dx, int dy, int dz) {
+    const int64_t x = (int64_t)std::floor(p.x / eps) + dx, y = (int64_t)std::floor(p.y / eps) + dy, z = (int64_t)std::floor(p.z / eps) + dz;
+    return ((uint64_t)(x & 0x1FFFFF) << 42) | ((uint64_t)(y & 0x1FFFFF) << 21) | (uint64_t)(z & 0x1FFFFF);
+  };
+  for (uint32_t v = 0; v < m.vert_count(); v++) {
+    const Vec3 p = m.positions[v];
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+    for (int dx = -1; dx <= 1; dx++)
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++) {
+          auto it = grid.find(cell(p, dx, dy, dz));
+          if (it == grid.end()) continue;
+          for (uint32_t u : it->second)
+            if (length(m.positions[u] - p) <= eps) out.push_back({u, v});
+        }
+    grid[cell(p, 0, 0, 0)].push_back(v);
+  }
+  return out;
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, float eps) {
+  std::vector<std::pair<uint64_t, uint64_t>> out;
+  if (m.positions.empty()) return out;
+  if (!(eps > 0)) eps = 1e-5f * std::max(1e-3f, length(m.bounds().extent()));
+  std::vector<uint64_t> edges;
+  for (auto &e : m.edge_cache()) edges.push_back(Mesh::edge_key(e.first, e.second));
+  for (uint64_t k : m.loose_edges) edges.push_back(k);
+  std::sort(edges.begin(), edges.end());
+  edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+  if (edges.size() < 2) return out;
+  /* A grid of cells the size of a typical edge; each edge sits in the cells its box covers. */
+  double total = 0;
+  for (uint64_t k : edges) total += length(m.positions[(uint32_t)(k >> 32)] - m.positions[(uint32_t)(k & 0xFFFFFFFF)]);
+  const float cs = std::max(eps * 4.0f, (float)(total / (double)edges.size()));
+  std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+  auto key = [](int64_t x, int64_t y, int64_t z) { return ((uint64_t)(x & 0x1FFFFF) << 42) | ((uint64_t)(y & 0x1FFFFF) << 21) | (uint64_t)(z & 0x1FFFFF); };
+  for (uint32_t i = 0; i < edges.size(); i++) {
+    const Vec3 a = m.positions[(uint32_t)(edges[i] >> 32)], b = m.positions[(uint32_t)(edges[i] & 0xFFFFFFFF)];
+    if (!std::isfinite(a.x + a.y + a.z + b.x + b.y + b.z)) continue;
+    const Vec3 lo = vmin(a, b) - Vec3(eps), hi = vmax(a, b) + Vec3(eps);
+    const int64_t x0 = (int64_t)std::floor(lo.x / cs), x1 = (int64_t)std::floor(hi.x / cs), y0 = (int64_t)std::floor(lo.y / cs),
+                  y1 = (int64_t)std::floor(hi.y / cs), z0 = (int64_t)std::floor(lo.z / cs), z1 = (int64_t)std::floor(hi.z / cs);
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) continue;  // an edge across the whole mesh: skipped
+    for (int64_t x = x0; x <= x1; x++)
+      for (int64_t y = y0; y <= y1; y++)
+        for (int64_t z = z0; z <= z1; z++) grid[key(x, y, z)].push_back(i);
+  }
+  std::unordered_set<uint64_t> done;
+  for (auto &[cell, list] : grid)
+    for (size_t p = 0; p < list.size(); p++)
+      for (size_t q = p + 1; q < list.size(); q++) {
+        const uint32_t i = std::min(list[p], list[q]), j = std::max(list[p], list[q]);
+        if (i == j || !done.insert(((uint64_t)i << 32) | j).second) continue;
+        const uint32_t a0 = (uint32_t)(edges[i] >> 32), a1 = (uint32_t)(edges[i] & 0xFFFFFFFF);
+        const uint32_t b0 = (uint32_t)(edges[j] >> 32), b1 = (uint32_t)(edges[j] & 0xFFFFFFFF);
+        const Vec3 A = m.positions[a0], B = m.positions[a1], C = m.positions[b0], D = m.positions[b1];
+        const Vec3 d = B - A;
+        const float len = length(d);
+        if (len <= eps || length(D - C) <= eps) continue;
+        const Vec3 u = d / len;
+        /* Both ends of the other edge on this edge's line... */
+        auto off_line = [&](Vec3 P) { return length(cross(P - A, u)); };
+        if (off_line(C) > eps || off_line(D) > eps) continue;
+        /* ...and sharing more than eps of it (not just meeting end to end). */
+        const float tc = dot(C - A, u), td = dot(D - A, u);
+        const float lo = std::max(0.0f, std::min(tc, td)), hi = std::min(len, std::max(tc, td));
+        if (hi - lo > eps) out.push_back({edges[i], edges[j]});
+      }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
 size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<uint32_t, uint32_t>> *out) {
   const RenderMesh &rm = m.render_mesh(true);
   const size_t T = rm.tri_count();

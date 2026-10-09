@@ -47,7 +47,7 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-Each build produces **`Blendity`** (the editor), **`blendity_tests`** (1643 unit checks with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems.
+Each build produces **`Blendity`** (the editor), **`blendity_tests`** (1924 unit checks with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems.
 
 ## What you can do
 
@@ -71,9 +71,11 @@ Each build produces **`Blendity`** (the editor), **`blendity_tests`** (1643 unit
 
 **Your keys, your layout.** Every shortcut can be rebound in Preferences, starting from a Unity, Blender, Maya, 3ds Max or SketchUp keymap. Edit Mode's tools come in groups with all the selection tools together; a Z-fighting check finds faces on top of each other (also between objects) and removes the ones that can go; the UV editor selects faces and islands and rotates, scales, moves, flips, fits and aligns them; drawing snaps to local or global axes.
 
-**Drawing anywhere.** Shapes drawn off the mesh go onto a chosen plane - the ground, front or side planes, one facing you, or the last face's plane, with an offset - and Draw in Open Space Only treats every click that way (Plasticity's construction plane). The UV editor has the Scene view's move / rotate / scale gizmo, and Edit Mode has Blender's Merge by Distance.
+**Drawing anywhere.** Shapes drawn off the mesh go on the ground, and guides take them anywhere else. The UV editor has the Scene view's move / rotate / scale gizmo, and Edit Mode has Blender's Merge by Distance.
 
-**Any plane, any path.** While drawing, X, Y and Z lock the shape to the YZ, XZ or XY plane. Mid-polyline the plane turns through the last point, so one line can make a 3D path for Follow. A shape drawn on a face can be turned freely: its ring of faces is zipped again instead of twisting. New scenes start with the Utah teapot, a camera and a point light. The `curved` stress section runs every modeling tool on spheres, tori, rounded boxes and the teapot.
+**Any plane, any path.** While drawing, X, Y and Z lay construction lines along the axes (Local or Global) and Ctrl+click lays one along an edge, as in Plasticity. A polyline can follow them off its plane into a 3D path for Follow, and it snaps square onto edges. Follow also runs along picked edges where they are, and Push/Pull moves several faces at once, each group (or each face) along its own normal. A shape drawn on a face can be turned freely, even across the Plane's grid: its ring of faces is zipped again instead of twisting. New scenes start with the Utah teapot, a camera and a point light.
+
+**Hard surface.** Bevels with a profile from concave to convex, Grid, Pipe, Array, Taper Extrude and Recess / Plate (each with a drag helper and F9 settings), one Make Face for holes and loose vertices, and live markers for vertices and edges lying on top of each other. The `curved` stress section runs every modeling tool on spheres, tori, rounded boxes and the teapot.
 
 **Modifier stack.** Like Blender's Modifier Properties: modifiers sit together in one panel, are applied top to bottom and each header has Blender's **Edit Mode, Viewport and Render** toggles, a menu (Apply, Duplicate, Copy to Selected, Move Up / Down / First / Last, Reset) and delete. Add Modifier groups them as Blender does: Edit (**Weld**), Generate (**Array, Bevel, Boolean, Decimate, Mirror, Screw, Solidify, Subdivision Surface, Triangulate, Wireframe**) and Deform (**Cast, Displace, Simple Deform** (twist, bend, taper, stretch, ported from Blender's formulas), **Smooth**). Edit Mode draws the result of the modifiers set to show in Edit Mode over the editable cage; renders use the ones set to show in renders.
 

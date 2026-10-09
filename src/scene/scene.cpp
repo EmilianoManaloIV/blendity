@@ -561,6 +561,9 @@ void BevelModifier::reflect(Reflector &r) {
   r.help("How far the bevel reaches along the faces on each side (Blender: Amount).");
   r.field("Segments", segments, 1, 32);
   r.help("1 cuts a flat chamfer; more segments round it.");
+  r.field("Profile", profile, 0.01f, 0.0f, 1.0f);
+  r.help("The shape across the bevel (with 2+ segments): 0.5 round, 0.25 flat, toward 1 convex (out to a square\n"
+         "corner), toward 0 concave (scooped in). Blender: Profile.");
   static const char *kLimit[] = {"None (every edge)", "Angle"};
   r.enumeration("Limit Method", limit_method, kLimit, 2);
   if (r.all_fields() || limit_method == 1) {
@@ -568,7 +571,7 @@ void BevelModifier::reflect(Reflector &r) {
     r.help("Only edges whose faces meet at more than this many degrees are bevelled (Blender: 30 by default).");
   }
 }
-void BevelModifier::modify(Mesh &m) const { meshops::bevel_modifier(m, width, segments, limit_method == 1 ? angle : -1.0f); }
+void BevelModifier::modify(Mesh &m) const { meshops::bevel_modifier(m, width, segments, limit_method == 1 ? angle : -1.0f, nullptr, profile); }
 
 void TriangulateModifier::reflect(Reflector &r) {
   r.field("Minimum Vertices", min_vertices, 4, 1000);

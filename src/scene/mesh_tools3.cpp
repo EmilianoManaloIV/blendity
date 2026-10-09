@@ -308,18 +308,48 @@ std::unordered_set<uint64_t> coplanar_edges(const Mesh &m, float angle_deg) {
   return out;
 }
 
-size_t dissolve_limited(Mesh &m, float angle_deg) {
+size_t dissolve_limited(Mesh &m, float angle_deg, const std::vector<uint8_t> *face_mask) {
   size_t removed = 0;
+  auto masked = [&](size_t f) { return !face_mask || (f < face_mask->size() && (*face_mask)[f]); };
+  /* The masked faces' corners by place, to tell masked faces apart after step 1 renumbers them. */
+  auto pos_key = [](Vec3 p) {
+    return ((uint64_t)(uint32_t)std::llround(p.x * 1e5) * 73856093ull) ^ ((uint64_t)(uint32_t)std::llround(p.y * 1e5) * 19349663ull) ^
+           ((uint64_t)(uint32_t)std::llround(p.z * 1e5) * 83492791ull);
+  };
+  std::unordered_set<uint64_t> face_mask_positions;
+  if (face_mask)
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (masked(f))
+        for (uint32_t k = 0; k < m.face_size(f); k++) face_mask_positions.insert(pos_key(m.positions[m.face_verts(f)[k]]));
   /* 1. Edges between coplanar faces go: their faces merge into n-gons. */
   {
-    const std::unordered_set<uint64_t> edges = coplanar_edges(m, angle_deg);
+    std::unordered_set<uint64_t> edges = coplanar_edges(m, angle_deg);
+    if (face_mask) {
+      /* Only edges with a masked face on both sides. */
+      std::unordered_map<uint64_t, int> in;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (masked(f))
+          for (uint32_t k = 0; k < m.face_size(f); k++) in[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+      for (auto it = edges.begin(); it != edges.end();) it = in[*it] >= 2 ? std::next(it) : edges.erase(it);
+    }
     if (!edges.empty()) {
       EdgeSelectionScope scope(&edges);
       std::vector<uint8_t> vs(m.vert_count(), 1);
       removed += dissolve_edges(m, vs);
     }
   }
-  /* 2. Corners on a straight run (a vertex with two edges in line) go too. */
+  /* 2. Corners on a straight run (a vertex with two edges in line) go too - with a mask, only
+   * corners no unmasked face uses (the faces were renumbered by step 1: found again by place). */
+  std::vector<uint8_t> keep_vert(m.vert_count(), 0);
+  if (face_mask) {
+    if (!face_mask_positions.empty())
+      for (size_t f = 0; f < m.face_count(); f++) {
+        bool inside = true;
+        for (uint32_t k = 0; k < m.face_size(f) && inside; k++) inside = face_mask_positions.count(pos_key(m.positions[m.face_verts(f)[k]])) > 0;
+        if (!inside)
+          for (uint32_t k = 0; k < m.face_size(f); k++) keep_vert[m.face_verts(f)[k]] = 1;
+      }
+  }
   {
     std::vector<std::vector<uint32_t>> nb(m.vert_count());
     for (auto &e : m.edge_cache()) {
@@ -330,7 +360,7 @@ size_t dissolve_limited(Mesh &m, float angle_deg) {
     std::vector<uint8_t> sel(m.vert_count(), 0);
     size_t n = 0;
     for (uint32_t v = 0; v < m.vert_count(); v++) {
-      if (nb[v].size() != 2) continue;
+      if (nb[v].size() != 2 || (v < keep_vert.size() && keep_vert[v])) continue;
       const Vec3 d0 = m.positions[v] - m.positions[nb[v][0]], d1 = m.positions[nb[v][1]] - m.positions[v];
       if (length(d0) > 0 && length(d1) > 0 && dot(normalize(d0), normalize(d1)) >= cos_limit) {
         sel[v] = 1;

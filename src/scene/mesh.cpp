@@ -249,7 +249,15 @@ static void triangulate_face(const Mesh &m, size_t f, std::vector<uint32_t> &out
     /* Split quads along the shorter diagonal (what Blender's "beauty" mode prefers). */
     float d02 = length_sq(m.positions[v[0]] - m.positions[v[2]]);
     float d13 = length_sq(m.positions[v[1]] - m.positions[v[3]]);
-    if (d02 <= d13) out_local = {0, 1, 2, 0, 2, 3};
+    /* ...unless the quad is concave (a dart) and that diagonal runs outside it: then one of its
+     * two triangles faces backwards, so the other diagonal (the one inside) is used. */
+    const Vec3 nrm = m.face_normal(f);
+    auto facing = [&](uint32_t a, uint32_t b, uint32_t c) {
+      return dot(cross(m.positions[v[b]] - m.positions[v[a]], m.positions[v[c]] - m.positions[v[a]]), nrm) > 0.0f;
+    };
+    const bool ok02 = facing(0, 1, 2) && facing(0, 2, 3), ok13 = facing(0, 1, 3) && facing(1, 2, 3);
+    const bool use02 = ok02 != ok13 ? ok02 : d02 <= d13;
+    if (use02) out_local = {0, 1, 2, 0, 2, 3};
     else out_local = {0, 1, 3, 1, 2, 3};
     return;
   }

@@ -336,6 +336,7 @@ struct BevelModifier : ComponentBase<BevelModifier> {
   static constexpr const char *kName = "BevelModifier";
   float width = 0.05f;
   int segments = 1;
+  float profile = 0.5f;  // 0.5 round, 0.25 flat, toward 1 convex, toward 0 concave
   int limit_method = 1;  // 0 None (every edge), 1 Angle
   float angle = 30.0f;
   void reflect(Reflector &r) override;

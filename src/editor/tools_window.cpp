@@ -103,26 +103,11 @@ void Editor::draw_tools_window(const Recti &r) {
     }
     {
       Recti rr = lay.row(u.row_h() + u.px(2));
-      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Axis Plane (X/Y/Z)");
-      int ap = draw_axis_plane_;
-      if (u.combo(u.id("tools_axis_plane"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, ap, kDrawAxisPlanes, kDrawAxisPlaneCount))
-        draw_set_axis_plane(ap);
-      u.tooltip("X, Y or Z while drawing: the YZ, XZ or XY plane (an axis lock). Mid-polyline it turns through the last point,\n"
-                "making a 3D path for Follow.");
-    }
-    {
-      Recti rr = lay.row(u.row_h() + u.px(2));
-      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Open Space Plane");
-      u.combo(u.id("tools_space"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, draw_space_mode_, kDrawSpacePlanes, kDrawSpacePlaneCount);
-      u.tooltip("Where shapes go when you click off the mesh: the ground, front / side planes, a plane facing you, or the last face's plane.");
-      rr = lay.row();
-      u.label({rr.x + u.px(4), rr.y, rr.w / 2, rr.h}, "Plane Offset");
-      u.float_field(u.id("tools_space_off"), {rr.x + rr.w / 2, rr.y, rr.w / 2 - u.px(6), rr.h}, draw_space_offset_, 0.01f, -100000.0f, 100000.0f);
-      rr = lay.row(u.row_h() + u.px(2));
-      if (u.button({rr.x + u.px(4), rr.y, rr.w - u.px(8), rr.h}, draw_space_only_ ? "Draw in Open Space Only (on)" : "Draw in Open Space Only (off)",
-                   draw_space_only_))
-        draw_space_only_ = !draw_space_only_;
-      u.tooltip("Ignore surfaces: draw on the open-space plane even over the mesh (Plasticity's construction plane).");
+      if (u.button({rr.x + u.px(4), rr.y, rr.w - u.px(8), rr.h}, draw_perp_snap_ ? "Perpendicular Snap (on)" : "Perpendicular Snap (off)",
+                   draw_perp_snap_))
+        draw_perp_snap_ = !draw_perp_snap_;
+      u.tooltip("Snap onto an edge where the line from the last point meets it at 90 degrees (Plasticity).\n"
+                "Guides: X / Y / Z along that axis (Local / Global as Snap Axes says), Ctrl+click along an edge.");
     }
     choice("Rectangle From", draw_rect_mode_, kRectModes, "tools_rectmode",
            "Corner: two opposite corners. Center: the middle, then a corner. 3 Points: one side at any angle, then the width.");
@@ -188,7 +173,7 @@ void Editor::draw_tools_window(const Recti &r) {
         {"Merge by Distance", "Weld close vertices.", has_sel, [this] { mesh_op("merge"); }},
         {"Delete Loose", "Remove vertices and wire edges no face uses (Blender: Clean Up > Delete Loose).", has_sel && !edit_mode_,
          [this] { mesh_op("delete_loose"); }},
-        {"Smart Fill", "Close every hole with faces; cracks with no area are welded shut (Blender: Fill Holes).", has_sel && !edit_mode_,
+        {"Make Faces (Close Holes)", "Make Face on the whole object: every hole gets a face, cracks with no area are welded shut\n(Blender: Fill Holes). In Edit Mode it is Make Face (F / Alt+F) on the selection.", has_sel && !edit_mode_,
          [this] { mesh_op("smart_fill"); }},
         {"Origin to Bottom", "Set Origin to the bottom centre.", has_sel, [this] { set_origin(4); }},
         {origin_edit_ ? "Done (Origin)" : "Edit Origin", "Move the origin with the gizmo, or click a vertex / edge / face to snap it there.", has_sel && !edit_mode_,
@@ -208,6 +193,7 @@ void Editor::draw_tools_window(const Recti &r) {
     u.label(row, mesh ? "Press Tab (or Edit Mode above) to edit the mesh." : "Select a mesh to edit it.", u.theme.text_dim);
   }
   if (section("Check: Z-Fighting")) draw_zfight_panel(lay);
+  if (section("Check: Overlapping Vertices & Edges")) draw_overlap_panel(lay);
   if (section("UV")) {
     std::vector<B> bs = {
         {"Unwrap", "Unwrap along the seams (U).", mesh, [this] { uv_op("unwrap"); }},

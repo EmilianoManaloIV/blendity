@@ -118,6 +118,28 @@ inline Quat normalize(Quat q) {
   if (l < 1e-20f) return {};
   return {q.x / l, q.y / l, q.z / l, q.w / l};
 }
+/* The rotation taking the world axes to X, Y, Z (orthonormal, right-handed: the columns of its matrix). */
+inline Quat quat_from_axes(Vec3 X, Vec3 Y, Vec3 Z) {
+  Quat q;
+  const float tr = X.x + Y.y + Z.z;
+  if (tr > 0.0f) {
+    const float s = std::sqrt(tr + 1.0f) * 2.0f;
+    q = {(Y.z - Z.y) / s, (Z.x - X.z) / s, (X.y - Y.x) / s, 0.25f * s};
+  }
+  else if (X.x > Y.y && X.x > Z.z) {
+    const float s = std::sqrt(1.0f + X.x - Y.y - Z.z) * 2.0f;
+    q = {0.25f * s, (Y.x + X.y) / s, (Z.x + X.z) / s, (Y.z - Z.y) / s};
+  }
+  else if (Y.y > Z.z) {
+    const float s = std::sqrt(1.0f + Y.y - X.x - Z.z) * 2.0f;
+    q = {(Y.x + X.y) / s, 0.25f * s, (Z.y + Y.z) / s, (Z.x - X.z) / s};
+  }
+  else {
+    const float s = std::sqrt(1.0f + Z.z - X.x - Y.y) * 2.0f;
+    q = {(Z.x + X.z) / s, (Z.y + Y.z) / s, 0.25f * s, (X.y - Y.x) / s};
+  }
+  return normalize(q);
+}
 
 struct Mat4 {
   float m[16];  // column-major

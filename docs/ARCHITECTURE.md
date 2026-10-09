@@ -292,6 +292,53 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `primitives::teapot`, `build_starter_scene` | Newell's 32 bicubic patches (306 control points), z-up to y-up, welded through a hash of rounded positions; the starting scene of new projects | Blender's start-up file (cube, camera, light) |
 | `Editor::delete_material` | Empties every slot using it (default material), trashes an asset's .mat, one undo step | Blender: material unlink / Unity: deleting a material asset |
 
+## Guides, perpendicular snaps, selection frames, Fluent-style tools (phase 18)
+
+| Blendity | What it does | Blender / Plasticity / UModeler / Fluent equivalent |
+|---|---|---|
+| `Editor::draw_axis_guide`, `draw_edge_guide` | X / Y / Z lay a `GuideLine` along the (local or global) axis through the last or hovered point; Ctrl+click lays one along the nearest edge on screen; polyline points on a guide may leave the plane (`DrawTool::bent`, the plane re-faces the view) | Plasticity construction lines |
+| Perpendicular snap in `draw_hit` | The foot of the last point on each edge in the plane, when the mouse is near it | Plasticity's perpendicular snap |
+| `Editor::edit_selection_frame` | Y = summed normal of the selected faces, X = their longest edge in that plane; used by the gizmo's Local / Scale and G/R/S axis locks in Edit Mode; a new Drawing object is re-based onto its first shape | Blender's Normal orientation |
+| `meshops::repair_rings` (grown) | The ring region grows by flat neighbouring faces until the moved outline lies inside its outer loop | - |
+| `triangulate_face` (quads) | The diagonal whose two triangles face the face's normal | Blender's beauty split (with a validity check) |
+| `meshops::overlapping_vertices` / `overlapping_edges`, `Editor::overlap_*` | A hash grid of vertices within eps; a grid of edge boxes, pairs on one line sharing more than eps; cached per mesh version and drawn in Edit Mode | Blender: Mesh Analysis / Merge by Distance preview |
+| `meshops::follow_path` | Follow along an ordered chain of any edges, started from the end that leaves the face along its normal (mirrored through its start if both run into it) | UModeler: Follow with picked edges |
+| `meshops::grid_faces`, `pipe`, `array_faces`, `extrude_taper`, `recess` (mesh_tools5.cpp) | Bilinear quad grids with shared side splits; a circle swept by Follow; duplicate + offset; extrude + scale about the cap's centre; region inset + extrude | Fluent 4: Grid, Pipe, Array, Taper, Inset |
+| Make Face (`fill`) | Smart Fill on the selection's open loops, else Fill through the selected vertices | Blender: F / Fill Holes |
+
+## Follow Me along edges, Push/Pull on several faces (phase 19)
+
+| Blendity | What it does | SketchUp / Blender equivalent |
+|---|---|---|
+| `meshops::follow_path` | The sweep along the picked chain where it is, from its end nearest the face (rings at each path point + the transported offset of the profile from the path's start) | SketchUp: Follow Me |
+| `meshops::push_pull_multi` | Groups (connected faces, or single faces when individual), found again by centre + normal after each step since faces renumber; each pushed with `push_pull`; ones that refuse are skipped | Blender: Extrude Individual / SketchUp: one face at a time |
+| `Editor::draw_space_plane` | Always the ground (the Open Space Plane is gone; guides replace it) | Plasticity's default construction plane |
+
+## Bevel profile, cutting across faces, a continuous inset limit (phase 20)
+
+| Blendity | What it does | Blender equivalent |
+|---|---|---|
+| `bevel_edges(..., profile)` | Arc points o + U x + V y on the superellipse x^r + y^r = 1, o = a + b - corner, r = 4p (p <= 0.5) or 1 / (1 - p) | Bevel > Profile (superellipse) |
+| Open-path commit in `draw_commit` | Crossings with edges of faces in the drawing plane become path points; each piece is cut through its one face; the crossed edges' stretches inside the path + chord are dissolved | Knife across faces |
+| `dissolve_edges` | A collinear corner is dropped only when no face outside the merged group uses it | Dissolve Edges (Dissolve Vertices) |
+| `inset_region` | Bisection for the largest thickness where no new face turns over, the middle keeps 2% of its area and no ring quad is a bow-tie | Inset (with an overlap clamp) |
+
+## Tool helpers, non-manifold Push/Pull (phase 21)
+
+| Blendity | What it does | Blender equivalent |
+|---|---|---|
+| `modal_begin` / `modal_update` for grid, pipe, array, taper, recess | The Bevel / Inset drag helper generalised: the mouse drives `LastOp::amount`, the wheel the op's count or second value, X / Y / Z Array's axis; then F9 | Modal operators + Adjust Last Operation |
+| `Editor::remember_last_op_settings` | F9 changes become the tool's defaults (the Inspector no longer holds tool numbers) | Blender remembers operator settings |
+| Lean check in `push_pull_impl` | Per outline edge, only faces running it opposite to the region's face (carrying the surface on) count; it leans only when all of those do | - |
+| `Editor::overlap_shorter` | Of an overlapping edge pair, the shorter is marked / selected | Mesh Analysis |
+
+## Selection-limited Merge Coplanar, Array onto the surface (phase 22)
+
+| Blendity | What it does | Blender equivalent |
+|---|---|---|
+| `dissolve_limited(m, angle, face_mask)` | Coplanar edges with a masked face on both sides; collinear corners only when every face using them is masked (found again by position after step 1) | Limited Dissolve on a selection |
+| `array_faces` | Each copy's outline imprinted with `imprint_loop_across` (pieces dissolved into one); partly off the surface it is clipped (Sutherland-Hodgman) to the surface's convex outer outline first; wholly off, a duplicate; selection by area centres | Array + Knife Project |
+
 ## Key conventions
 
 - **Coordinates:** Unity's left-handed, Y-up space. OBJ import/export mirror X and reverse the winding, as Unity's importer does.

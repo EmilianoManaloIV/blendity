@@ -1844,21 +1844,16 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
                     "Edges of the mesh (parallel / perpendicular) and guides snap either way.");
         }
         if (draw_.active) {
-          int ap = draw_axis_plane_;
-          er.enumeration("Axis Plane (X / Y / Z)", ap, kDrawAxisPlanes, kDrawAxisPlaneCount);
-          if (ap != draw_axis_plane_) draw_set_axis_plane(ap);
-          u.tooltip("Draw on the plane across an axis, like an axis lock on Extrude: X the YZ plane, Y the ground's XZ, Z the XY plane.\n"
-                    "Press X, Y or Z while drawing. Mid-polyline the plane turns through the last point, so the line can go\n"
-                    "up a wall and across a floor: a 3D path for Follow (Enter finishes it as wire edges).");
-          er.enumeration("Open Space Plane", draw_space_mode_, kDrawSpacePlanes, kDrawSpacePlaneCount);
-          u.tooltip("Where shapes go when you click off the mesh (UModeler / Plasticity: draw in open space):\n"
-                    "the ground, a front or side plane, a plane facing you through the point you orbit, or the plane of\n"
-                    "the face you drew on last. A closed shape there becomes a new face; an open one, wire edges.");
-          er.field("Plane Offset", draw_space_offset_, 0.01f, -100000.0f, 100000.0f);
-          u.tooltip("Moves the open-space plane along its normal (a height above the ground, a depth in front of the view...).");
-          er.field("Draw in Open Space Only", draw_space_only_);
-          u.tooltip("Ignore surfaces: every point goes on the open-space plane, even over the mesh\n"
-                    "(corners and edges of the mesh still snap). Plasticity: drawing on the construction plane.");
+          er.field("Perpendicular Snap", draw_perp_snap_);
+          u.tooltip("Snap onto an edge where the line from the last point meets it at 90 degrees (Plasticity).");
+          {
+            Recti gr = lay.row();
+            u.label({gr.x + u.px(4), gr.y, gr.w - u.px(8), gr.h}, "Guides: X / Y / Z along that axis, Ctrl+click along an edge", u.theme.text_dim);
+          }
+          u.tooltip("Construction lines like Plasticity's: X, Y or Z lays one along that axis (Local or Global, as Snap Axes\n"
+                    "says) through the last point, or through the point under the mouse before the first click. Ctrl+click\n"
+                    "on an edge lays one along it. Drawing snaps to guides, where they cross and where they pierce the plane;\n"
+                    "a polyline can follow one off the plane, which makes a 3D path for Follow.");
         }
         if (draw_.active && draw_.shape == 1) {
           er.enumeration("Rectangle From", draw_rect_mode_, kRectModes, 3);
@@ -1897,36 +1892,33 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
           u.tooltip("Round the corners of rectangles, polygons and closed polylines (Plasticity: Fillet Curve). 0 keeps them sharp.");
         }
       }
+      /* Only switches that change how tools behave live here; each tool's own numbers (thickness,
+       * angle, distance, segments...) are in its helper - Adjust Last Operation (F9) at the bottom
+       * left of the Scene view, or the drag helper - and are kept for next time. */
       if (elem_ == EditElement::Face) {
-        er.field("Shell Thickness", shell_thickness_, 0.005f, 0.0001f, 1000.0f);
-        er.field("Draft Angle", draft_angle_, 0.25f, -80.0f, 80.0f);
-        er.field("Extrude Distance", extrude_dist_, 0.01f, -100.0f, 100.0f);
+        er.field("Push/Pull Each Face", pp_individual_);
+        u.tooltip("On: Push/Pull (P) moves every selected face along its own normal (a box's sides all out at once).\n"
+                  "Off: each connected group of selected faces moves along its own normal; separate groups move together.");
         er.field("Inset Individual", inset_individual_);
         u.tooltip("On: each selected face is inset on its own. Off: the selection is inset as one face\n"
                   "(its outline moves in, edges between selected faces stay). Blender: Inset > Individual.");
-        if (inset_individual_) er.field("Inset Amount", inset_amount_, 0.005f, 0.0f, 1.0f);
-        else er.field("Inset Thickness", inset_thickness_, 0.005f, 0.0f, 1000.0f);
-        er.field("Bridge Segments", bridge_segments_, 1, 256);
         er.field("Auto Fuse on Contact", auto_fuse_);
         u.tooltip("Faces extruded or moved onto another face of the mesh merge into it\n(the touching area becomes an opening): bridging by extrusion.");
       }
       else if (elem_ == EditElement::Edge) {
-        er.field("Bevel Width", bevel_width_, 0.005f, 0.0001f, 1000.0f);
-        er.field("Bevel Segments", bevel_segments_, 1, 64);
         er.field("Auto Smooth", auto_smooth_);
         u.tooltip("Rounded results (bevels with 2+ segments, pulled circles...) are shaded smooth, with edges sharper than\n"
                   "the angle kept hard (Blender: Shade Auto Smooth). Only on meshes not shaded per face.");
         if (auto_smooth_) er.field("Auto Smooth Angle", auto_smooth_angle_, 0.5f, 1.0f, 180.0f);
-        er.field("Bevel Clamp Overlap", bevel_clamp_);
-        er.field("Loop Cuts", loop_cuts_, 1, 64);
-        er.field("Loop Slide", loop_slide_, 0.01f, 0.0f, 1.0f);
-        er.field("Subdivide Cuts", subdivide_cuts_, 1, 100);
         er.field("Sharp Angle", seam_angle_, 0.5f, 0.0f, 180.0f);
         u.tooltip("Seams from Sharp and Select Sharp Edges use edges whose faces meet at more than this (Blender: 30).");
-        er.field("Bridge Segments", bridge_segments_, 1, 256);
       }
-      else {
-        er.field("Smooth Factor", smooth_factor_, 0.01f, 0.0f, 1.0f);
+      {
+        Recti nr = lay.row();
+        u.label({nr.x + u.px(4), nr.y, nr.w - u.px(8), nr.h}, "Each tool's settings are in its helper (F9) when you use it.", u.theme.text_dim);
+        u.tooltip("Thickness, angle, distance, segments, count and the like show in Adjust Last Operation (F9, bottom left\n"
+                  "of the Scene view) after a tool runs, and in the drag helper while Bevel, Inset, Array, Grid, Pipe, Taper\n"
+                  "or Recess is dragged. Changing them re-runs the tool, and they are kept for its next use.");
       }
       {
         /* The tools in groups, Select first (one place for every way of selecting); each

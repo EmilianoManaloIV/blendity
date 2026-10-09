@@ -49,9 +49,7 @@ struct ShortcutAction {
 using Keymap = std::unordered_map<std::string, std::vector<KeyChord>>;
 const std::vector<ShortcutAction> &shortcut_actions();
 constexpr int kKeymapPresetCount = 5;
-extern const char *const kKeymapPresets[kKeymapPresetCount];
-constexpr int kDrawAxisPlaneCount = 4;
-extern const char *const kDrawAxisPlanes[kDrawAxisPlaneCount];  // Surface, YZ (X), XZ (Y), XY (Z)  // Unity, Blender, Maya, 3ds Max, SketchUp
+extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Blender, Maya, 3ds Max, SketchUp
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys = false);
 std::string chord_text(const KeyChord &c);
 KeyChord parse_chord(const std::string &text);
@@ -62,8 +60,6 @@ constexpr int kDrawShapeCount = 6;
 extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyline, Rectangle, Circle, Arc, Polygon, Guide
 extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
-constexpr int kDrawSpacePlaneCount = 5;
-extern const char *const kDrawSpacePlanes[kDrawSpacePlaneCount];  // Ground (XZ), Front (XY), Side (YZ), View, Last Face's Plane
 
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Count };
 const char *window_title(WindowKind k);
@@ -80,7 +76,7 @@ struct EditOpInfo {
 const std::vector<EditOpInfo> &edit_op_table();
 const EditOpInfo *find_edit_op(const std::string &op);
 /* The tool groups the Edit Mode tools are laid out in (Select first), and an operator's group. */
-constexpr int kEditGroupCount = 7;
+constexpr int kEditGroupCount = 8;
 extern const char *const kEditGroups[kEditGroupCount];
 int edit_op_group(const std::string &op);
 /* Operators shown as the two halves of one button: {first, second, short first label, short second label, row label}. */
@@ -189,6 +185,13 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
+  size_t overlap_vert_pairs_for_test() { overlap_refresh(); return overlap_.verts.size(); }
+  size_t overlap_edge_pairs_for_test() { overlap_refresh(); return overlap_.edges.size(); }
+  bool modal_active_for_test() const { return modal_.active; }
+  int last_op_segments_for_test() const { return last_op_.segments; }
+  float last_op_profile_for_test() const { return last_op_.profile; }
+  float last_op_amount_for_test() const { return last_op_.amount; }
+  std::string last_op_name_for_test() const { return last_op_.op; }
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr; }
@@ -199,7 +202,9 @@ class Editor {
       if (f < face_sel_.size()) face_sel_[f] = 1;
     sync_vert_face_selection(true);
   }
-  int draw_axis_plane() const { return draw_axis_plane_; }
+  size_t guide_count_for_test() const { return scene_->guides.size(); }
+  bool selection_frame_for_test(Quat &q) { return edit_selection_frame(q); }
+  const GuideLine *last_guide_for_test() const { return scene_->guides.empty() ? nullptr : &scene_->guides.back(); }
   size_t draw_point_count() const { return draw_.active ? draw_.pts.size() : SIZE_MAX; }
   const std::vector<Vec3> &draw_points_for_test() const { return draw_.pts; }
   Recti window_rect_for_test(WindowKind k) const { return window_rects_.count(k) ? window_rects_.at(k) : Recti{0, 0, 0, 0}; }
@@ -213,6 +218,8 @@ class Editor {
   }
   bool in_edit_mode() const { return edit_mode_; }
   bool edit_face_selected(size_t f) const { return f < face_sel_.size() && face_sel_[f]; }
+  bool vert_selected_for_test(size_t v) const { return v < vert_sel_.size() && vert_sel_[v]; }
+  static uint64_t overlap_shorter(const Mesh &m, const std::pair<uint64_t, uint64_t> &p);  // of two overlapping edges, the one to mark
 
  private:
   friend struct InspectorReflector;
@@ -326,6 +333,9 @@ class Editor {
   void edit_box_select(const Recti &r, Recti box, int mode);
   void edit_select_all(bool select);
   void sync_vert_face_selection(bool from_faces);
+  /* Edit Mode's Local orientation (Blender's Normal, UModeler's selection axes): Y along the
+   * selected faces' normal, X along their longest edge. False when nothing gives a direction. */
+  bool edit_selection_frame(Quat &out);
   /* After the selection moved: a folded ring round a drawn shape is zipped again (meshops::repair_rings). */
   void repair_moved_rings(Mesh &m);
   bool edge_is_selected(uint32_t a, uint32_t b) const;  // explicit in edge mode, else both ends
@@ -363,13 +373,18 @@ class Editor {
     int orientation = 0;  // 0 global, 1 local
     bool fuse = true;     // extrude / move onto another face fuses them
     bool clamp = true;    // bevel: Clamp Overlap
+    float profile = 0.5f; // bevel: Profile (0.5 round, toward 1 convex, toward 0 concave)
     bool individual = true;  // inset: each face on its own, or the selection as one region
+    int count = 1;          // array: copies in all; grid: rows
+    int axis = 0;           // array: 0 X, 1 Y, 2 Z (the selection's own axes)
+    float amount2 = 0.0f;   // taper: end scale; recess: border
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
   bool last_op_valid();
   bool last_op_hidden_ = false;  // put away (x, Esc, a selection click) until the next operator or F9
   void run_last_op(bool first);
+  void remember_last_op_settings();
   void draw_last_op_panel(const Recti &view);
   bool try_auto_fuse(Mesh &m);
   /* SketchUp's Push/Pull as a modal face operator (P): mouse or typed distance, click to confirm. */
@@ -732,6 +747,7 @@ class Editor {
   float loop_slide_ = 0.5f;
   float bevel_width_ = 0.1f;
   int bevel_segments_ = 1;
+  float bevel_profile_ = 0.5f;  // Bevel Profile: 0.5 round, 0.25 flat, toward 1 convex, toward 0 concave
   bool bevel_clamp_ = true;  // Blender's Clamp Overlap
   int bridge_segments_ = 1;
   int subdivide_cuts_ = 1;
@@ -769,6 +785,15 @@ class Editor {
   bool knife_update(const Recti &view);
   void knife_draw(const Recti &view);
   float shell_thickness_ = 0.05f;  // Shell / Thicken
+  /* Hard-surface tools (mesh_tools5.cpp). */
+  int grid_cols_ = 4, grid_rows_ = 4;
+  float pipe_radius_ = 0.05f;
+  int pipe_sides_ = 12;
+  int array_count_ = 3, array_axis_ = 0;  // 0 X, 1 Y, 2 Z (the selection's own axes, as Local shows them)
+  float array_spacing_ = 0.5f;
+  float taper_distance_ = 0.3f, taper_scale_ = 0.6f;
+  float recess_border_ = 0.05f, recess_depth_ = 0.05f;
+  std::vector<uint32_t> selected_edge_chain(const Mesh &m, Vec3 near) const;  // the selected edges as one ordered chain
   float draft_angle_ = 5.0f;       // Draft
   float draw_fillet_ = 0.0f;       // corner radius of drawn shapes (Plasticity curve fillet)
   float spin_angle_ = 360.0f;  // Spin / Lathe
@@ -790,22 +815,27 @@ class Editor {
     bool guide = false;
     bool bent = false;     // the plane turned mid-polyline (X / Y / Z): a 3D path, kept as wire edges
   } draw_;
-  /* X / Y / Z while drawing: lock the drawing plane across that axis (X: the YZ plane, Y: XZ,
-   * Z: XY), like an axis lock on Extrude. 0: the surface's own plane. */
-  int draw_axis_plane_ = 0;
-  void draw_set_axis_plane(int axis);
+  /* Plasticity's construction lines while drawing: X / Y / Z lay a guide along that axis (local
+   * or global, as Snap Axes says) through the last point or the point under the mouse; Ctrl+click
+   * on an edge lays one along the edge. A polyline point on a guide may leave the drawing plane. */
+  void draw_axis_guide(const Recti &view, int axis);
+  bool draw_edge_guide(const Recti &view, int mx, int my);
+  bool draw_perp_snap_ = true;
+  bool pp_individual_ = false;  // Push/Pull Each Face: every selected face along its own normal
+  /* Follow, UModeler's way: a face picked first (face mode, no wire path from it), then the path's
+   * edges (edge mode) and Follow again. The face is found again by where it is. */
+  struct FollowPick {
+    uint64_t obj = 0;
+    Vec3 center, normal;
+    bool active = false;
+  } follow_pick_;  // Plasticity: snap onto an edge where the segment meets it square
   int draw_segments_ = 24, draw_sides_ = 6;
   int draw_rect_mode_ = 0;    // kRectModes: from a corner, from the centre, or 3 points (any angle)
   int draw_circle_mode_ = 0;  // kCircleModes: centre + radius, 2 points across, 3 points on it
   bool draw_uniform_ = false; // rectangles come out square
   bool draw_global_axes_ = false;  // snap axes: the world's (global) or the face's / object's own (local)
   /* Drawing in open space (Plasticity's construction plane, UModeler drawing off a face). */
-  int draw_space_mode_ = 0;        // kDrawSpacePlanes: ground XZ, front XY, side YZ, view, last face's plane
-  float draw_space_offset_ = 0.0f; // along the plane's normal
-  bool draw_space_only_ = false;   // ignore surfaces: always draw on the plane
-  bool draw_last_face_valid_ = false;
-  Vec3 draw_last_face_p_, draw_last_face_n_{0, 1, 0};
-  void draw_space_plane(Vec3 &p, Vec3 &n) const;
+  void draw_space_plane(Vec3 &p, Vec3 &n) const;  // off the mesh: the ground (guides do the rest)
   bool show_guides_ = true;   // construction lines (Scene::guides)
   size_t draw_points_needed() const;
   void draw_guide_line(const Recti &view, const GuideLine &gl, uint32_t color);
@@ -925,6 +955,20 @@ class Editor {
   std::unordered_map<std::string, bool> foldouts_;
   std::string add_component_search_;
   float subdiv_levels_ = 1, smooth_factor_ = 0.5f, extrude_dist_ = 0.5f, inset_amount_ = 0.3f, merge_dist_ = 0.001f;
+  /* ---- Overlapping vertices and edges (zfight.cpp): shown live in Edit Mode ---- */
+  struct OverlapCache {
+    const Mesh *mesh = nullptr;
+    uint64_t version = 0, obj = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> verts;
+    std::vector<std::pair<uint64_t, uint64_t>> edges;
+  } overlap_;
+  bool overlap_show_ = true;   // dots and lines over overlapping vertices / edges while editing
+  float overlap_eps_ = 0.0f;   // 0: 1e-5 of the mesh's size
+  void overlap_refresh();      // re-check the edited mesh when it changed
+  void draw_overlap_overlay(const Recti &view);
+  void draw_overlap_panel(ui::Layout &lay);
+  size_t overlap_select();     // select the vertices involved (Edit Mode)
+  size_t overlap_merge();      // weld the overlapping vertices (doubled edges go with them)
   /* ---- Z-fighting check (zfight.cpp) ---- */
   struct ZFightIssue {
     uint64_t obj_a = 0, obj_b = 0;

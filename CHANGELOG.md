@@ -2,6 +2,201 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 23): arched shapes in one piece, array copies past a surface's edge
+
+**Asked:** arraying a vertical rectangle with an arched top cut some copies improperly.
+
+**Fixed**
+- **The arch itself was two faces.** An arc drawn on a rectangle's top crosses an edge of the faces around the rectangle. The pieces inside the arc were merged, except where the crossed edge ran to the arc's own end (the rectangle's corner), so the arch stayed split. The array then copied both pieces. Edges from a crossing to the arc's ends are now dissolved too, so the arch is one face, and so is each copy's.
+- **Copies past the surface's edge.** A copy hanging past the edge of the wall used to fall back to a loose duplicate lying over the wall (overlapping faces, an open mesh). Now:
+  - The part of it on the surface is cut in: clipped to the surface's outline when that outline is convex, as a wall's is.
+  - A copy with nothing under it at all is still a separate copy.
+  - A cut that can't be made leaves that copy out rather than half of it.
+
+**Checked:** 1924 unit checks on Windows and 1900 on Linux, 0 failed. New test: an arched doorway on a wall arrayed 2 and 3 times, with 8 and 16 arc segments. The doorway area must be exact, or exact plus the clipped part for the copy past the wall's end. No overlaps, still closed, no bad triangulations, no wire edges.
+
+Stress:
+- Push/Pull: 0 problems.
+- The modeling section: 0 problems.
+- Curved surfaces: 8 problems.
+- The fuzzer: no crash.
+
+## 2026-10-09 (round 22): Merge Coplanar on a selection, Array copies cut into the surface
+
+**Asked:** Merge Coplanar on a selected group of faces; Array copies of a face should cut into the mesh like the original instead of lying on top of it.
+
+**Added**
+- **Merge Coplanar on the selection.**
+  - With faces selected (in any mode, a face counts when all its corners are selected), only the edges between two selected coplanar faces dissolve, and only corners that no unselected face uses go. The rest of the mesh keeps its edges, and the merged faces stay selected.
+  - A 3 x 3 block of the Plane becomes one 12-cornered face (it keeps the corners its neighbours share, so there are no T-junctions); two separate blocks become two faces.
+  - With nothing selected it works on the whole mesh, as before.
+
+**Changed**
+- **Array copies are drawn onto the surface.**
+  - Each copy of a shape that sits on a face is cut into the faces it lands on, as drawing the shape there would, instead of a duplicate lying on top (z-fighting). A copy crossing the faces round an earlier drawing becomes one face.
+  - Only a copy that lies wholly on the surface is cut in; one hanging off it, or a face with nothing flat under its copy (a box's whole top), is still a separate copy.
+  - The originals and all copies end up selected, ready for Push/Pull or Recess together.
+
+**Checked:** 1916 unit checks on Windows and 1892 on Linux, 0 failed. New tests:
+- Merge Coplanar on a 3 x 3 block, two blocks, and nothing selected.
+- A drawn rectangle arrayed three times across a cube's top: cut in, no overlaps, still closed, no bad triangulations. The three pushed in together stay closed; a copy with nothing under it stays a separate copy.
+
+Stress:
+- Push/Pull: 0 problems.
+- The modeling section: 0 problems.
+- Curved surfaces: 8 problems.
+- The fuzzer: no crash.
+
+## 2026-10-09 (round 21): tool helpers, settings out of the Inspector, Push/Pull on non-manifold meshes, overlap marking
+
+**Asked:**
+- Drop "Fluent" from Hard Surface, and add a helper for the tools such as Array.
+- Make Push/Pull work on non-manifold meshes.
+- Edges were marked as overlapping when they weren't: only the smaller edge should be marked.
+- Thickness, draft angle, extrude distance and the like belong in each tool's helper, not in the general area under Draw.
+
+**Changed**
+- **Hard Surface** (no "Fluent" in the interface). Grid, Pipe, Array, Taper Extrude and Recess / Plate:
+  - Clicked in the menu or the Inspector, each opens a **drag helper** like Ctrl+B's. The mouse sets the spacing, radius, distance or depth, or you type it. The wheel steps the count, columns (Shift: rows), sides, end scale or border. X / Y / Z set Array's axis. Click or Enter confirms, Esc cancels.
+  - Afterwards each one is in **Adjust Last Operation (F9)**.
+- **Tool settings live with the tools.** The Inspector's Edit Mode area keeps only the switches that change how tools behave: Push/Pull Each Face, Inset Individual, Auto Fuse, Auto Smooth and Sharp Angle.
+  - Each tool's numbers (thickness, angle, distance, segments, profile, count...) are in its F9 panel or drag helper.
+  - Shell, Thicken and Draft are now adjustable (F9) operations too.
+  - Whatever you set there is kept for that tool's next use.
+- **Overlapping edges:** of two edges along each other, only the shorter one is marked and selected. That's the piece lying on a longer edge, or one of two doubled edges; the long edge it lies on is left alone.
+
+**Fixed**
+- **Push/Pull on non-manifold meshes.** Pushing a face in next to a fin, or next to a second solid sharing the edge, was refused as "the faces around the selection lean over it". The fin or the other solid counted as a wall of this one. Only the faces that carry the surface on across the edge count now. Tested on:
+  - a fin (pushing and pulling the top, the front and the fin itself);
+  - two cubes sharing an edge, and two sharing a corner;
+  - an open box;
+  - a cube with a stray wire edge and a loose point;
+  - two faces at once.
+
+**Checked:** 1906 unit checks on Windows and 1882 on Linux, 0 failed. New tests:
+- The Array helper from the menu: wheel, Z, a typed spacing, Enter. Grid, Taper and Recess open their helpers and Esc leaves the mesh as it was.
+- The non-manifold Push/Pull cases.
+- No overlap alarms on the primitives, the teapot, a bevelled, a subdivided and a drawn-on cube; only the shorter edge selected.
+- Shell, Thicken and Draft as F9 operations.
+
+Stress:
+- Push/Pull: 0 problems, and 394 results with faces newly on top of each other. That's 4 more than before, from pushes beside fins that used to be refused.
+- The modeling section: 0 problems.
+- Curved surfaces: 8 problems, the same as last round.
+- The fuzzer: no crash.
+
+## 2026-10-09 (round 20): bevel profile, arcs on drawn shapes, smooth region inset
+
+**Asked:** a profile for the bevel, to make it concave or convex; an arc drawn on a rectangle drawn on a surface didn't make a face inside the arc; insetting several faces "stepped" instead of changing smoothly.
+
+**Added**
+- **Bevel Profile** (Blender's superellipse), 0 to 1:
+  - 0.5 is a round quarter circle, 0.25 a flat chamfer.
+  - Toward 1 it bulges out to a square corner (convex); toward 0 it scoops in (concave).
+  - In the Inspector (Bevel Profile), the F9 panel, the Ctrl+B helper (Alt+wheel, shown in its readout), the Bevel modifier (saved with the scene), and the console (`bevelprofile 0.8`).
+  - Profile 0.5 is now an exact quarter circle; before, it was a quadratic curve slightly flatter than a circle.
+
+**Fixed**
+- **Arcs (and other open lines) across the faces round a drawn shape.**
+  - A shape drawn on a face sits in a ring of several faces. A line crossing their edges only cut a face that held all of it, so elsewhere it fell back to loose wire edges.
+  - The line is now split where it crosses edges, and each face it runs through is cut. The pieces inside an arc (between it and the chord joining its ends) become one face again.
+- **Dissolve Edges** could drop a corner that lay on a straight line in the merged face while a neighbouring face still used it, opening the mesh. Such corners now stay.
+- **Inset Region no longer steps.** When an inset would fold over (wider than the region), it used to halve the thickness, so dragging jumped between values. It now finds the furthest thickness that doesn't fold (the middle face keeps at least 2% of its area, and no ring quad crosses into a bow-tie), so dragging slides smoothly to that limit and holds there. A region that folds at any thickness is left as it was.
+- **Scripted drawing points** on an edge shared by two faces belong to the face that faces the camera, as a click would.
+
+**Checked:** 1838 unit checks on Windows and 1814 on Linux, 0 failed. New tests:
+- Profiles 0 to 1 give a rising volume; flat equals a one-segment chamfer; round equals a quarter circle; the editor setting reaches Ctrl+B and the modifier saves its own.
+- Arcs on a drawn rectangle: side to side out and in, corner to corner, across a corner, out to the cube's edge, and on the cube's own edge. No wire edges, still closed, and one face inside the arc where it encloses one.
+- Region inset swept from 0 to 0.8 in 0.01 steps: no jumps, never growing back, holding at the limit.
+
+Stress:
+- Push/Pull: 0 problems.
+- The modeling section: 0 problems.
+- Curved surfaces: 8 problems. 4 are new and come from Recess on regions that touch themselves at a sphere's pole, which can leave two corners in one place.
+- The fuzzer: no crash.
+
+## 2026-10-09 (round 19): Follow along the edges themselves, no Open Space Plane, Push/Pull on several faces
+
+**Asked:** Follow with picked edges didn't follow the edges (especially several of them); remove the Open Space Plane, since guides do that work; Push/Pull on several faces at once, each along its own normal.
+
+**Fixed**
+- **Follow along picked edges** sweeps the face along the edges where they are, from the path's end nearest the face (SketchUp's Follow Me). Before, it carried a copy of the path's shape over to start at the face's centre, so the result ran beside the edges instead of along them. The face's own sides, still selected after switching from face to edge mode, no longer join the path and break it.
+
+**Changed**
+- **No Open Space Plane.** The plane chooser (front, side, view, last face), its offset and Draw in Open Space Only are gone. A click off the mesh lands on the ground, and guides (X / Y / Z, Ctrl+click an edge) take a shape anywhere else.
+- **A new drawing's turn** follows the shape's first side, so a rectangle drawn at an angle gives its object that angle.
+
+**Added**
+- **Push/Pull on several faces.** Each connected group of selected faces moves along its own normal; separate groups move together (top and bottom of a box both out, say).
+  - **Push/Pull Each Face** (Inspector, F9's Each Face, `pushpull individual on`) moves every selected face along its own normal.
+
+**Checked:** 1716 unit checks on Windows and 1692 on Linux, 0 failed. New tests:
+- Follow along a bent rail of quads, directly and through the editor with a stray side of the face selected; the end cap must sit at the path's end.
+- Clicks off the mesh land on the ground.
+- A 3-point rectangle at 30 degrees: the object's origin and X.
+- Push/Pull on top and bottom, on every face of a cube, and with P on two sides in the editor.
+
+Stress:
+- Curved surfaces now include Push/Pull Each Face on curved regions: 5,036 operations, 4 problems. Pushing neighbouring faces of a convex surface in, each along its own normal, can make their walls meet (8 results), as Blender's Extrude Individual does.
+- Push/Pull: 0 problems and 390 overlaps.
+- The modeling section: 0 problems.
+- The fuzzer: no crash.
+
+## 2026-10-08 (round 18): Plasticity guides and perpendicular snaps, one Make Face, overlapping elements, Fluent-style tools, bevel and rotation fixes
+
+**Asked:** commit and push round 17; rotating a face drawn on a rectangular plane still left artifacts; a 90-degree edge snap for polylines like Plasticity's; Ctrl+B sometimes bevelled at once without the helper, and the helper wouldn't go past two segments; guides like Plasticity's (from an axis, local or global, and from edges with Ctrl) instead of axis planes; the Make Face shortcut didn't always work; shapes drawn at an angle kept a global transform (pivot / centre, local / global); a way to see overlapping vertices and edges; Make Face and Smart Fill as one operation; keep Follow like UModeler's; tools from Fluent 4 that fit the current ones.
+
+**Done first:** round 17 committed and pushed.
+
+**Fixed**
+- **Bevel's helper (Ctrl+B).** Auto Smooth shaded the bevel after it was recorded, and that change made the helper think the bevel had been undone, so it quit and left the bevel as it was. That happened as soon as there were 2+ segments: a second Ctrl+B bevelled at once, and the wheel stopped at two. Shading is now part of the operation. The helper stays, and the wheel goes up to 64 segments.
+- **Turning a shape drawn across the Plane's grid.** When the turned shape reached past the cells it was cut into, the ring around it couldn't be rebuilt. The flat faces around it now join the ring as needed.
+- **Concave quads were drawn wrongly.** A dart-shaped quad was split along the diagonal that runs outside it, so one triangle faced backwards. The other diagonal is used now. This also removed the overlaps from drawing circles across curved faces (35 to 0 in the curved stress).
+- **Make Face** works in vertex, edge and face mode, and its key works anywhere in Edit Mode, not only with the mouse over the Scene view.
+- **A new drawing takes its shape's place.** The first shape drawn in a new Drawing object moves the object's origin to the shape's centre and turns the object with the shape's plane, so Pivot, Local and Global behave.
+- **Local in Edit Mode** follows the selection: Y along the selected faces' normal, X along their longest edge. The gizmo and G/R/S now move, turn and scale a shape on a slope, or turned on its face, along its own sides.
+
+**Changed**
+- **Guides instead of axis planes** (Plasticity's construction lines):
+  - X, Y or Z while drawing lays a guide along that axis, Local or Global as Snap Axes says, through the last point (or the point under the mouse before the first click).
+  - Ctrl+click on an edge lays a guide along it.
+  - A polyline can follow a guide off its plane, which makes a 3D path for Follow.
+- **Make Face and Smart Fill are one operation**, Make Face (F in the Blender keymap, Alt+F in Unity's):
+  - Holes and wire loops in the selection close (every hole when nothing is selected): flat ones with a face, bent ones with a fan, cracks welded shut.
+  - Selected vertices that form no loop get one face through them.
+
+**Added**
+- **Perpendicular Snap** (Plasticity): a point on an edge where the line from the last point meets it at 90 degrees. On by default; switch it in the Inspector or Modeling Tools, or with `drawmode perp on|off`.
+- **Overlapping vertices and edges:**
+  - Vertices lying on top of each other get yellow rings, and edges running along each other get magenta lines, live in Edit Mode.
+  - Modeling Tools > Check: Overlapping Vertices & Edges counts them and has Show, Select and Merge.
+  - Also as Edit Mode tools (Select Overlapping, Merge Overlapping) and the console: `overlaps [select|merge|show on|off]`.
+- **Follow, UModeler's way.** Select the face and press Follow; with no wire path drawn from it, the face is remembered. Then select the path's edges in edge mode and press Follow again. The path starts at the face, from whichever end leaves it along its normal, and the picked edges stay.
+- **Hard-surface tools after Fluent 4** (a new Hard Surface group in Edit Mode; settings in the Inspector; console `hs ...`):
+  - **Grid:** cuts quads into columns x rows, splitting neighbours to match.
+  - **Pipe:** a capped tube along selected edges or a drawn polyline.
+  - **Array:** repeats the selected faces along the selection's own X, Y or Z.
+  - **Taper Extrude:** an extrusion with its end scaled.
+  - **Recess / Plate:** an inset panel pushed in, or pulled out when the depth is negative.
+
+**Checked:** 1718 unit checks on Windows and 1694 on Linux, 0 failed. New tests:
+- Ctrl+B three ways (mouse over the Scene view, elsewhere, and a second bevel starting at 7 segments) with six wheel steps.
+- Shapes turned 15 to 90 degrees on a quad, on the 10 x 10 Plane across and inside cells, and on long faces (where a shape turned past its face's edge has no surface left around it, only validity is required).
+- The perpendicular snap, on and off.
+- Ctrl+click and X guides on a turned cube, Local and Global.
+- A 3D polyline along guides, then Follow.
+- Make Face with both keymaps, in each mode, with the mouse away from the Scene view, plus loose vertices.
+- Overlap finding, selecting and merging.
+- Follow along picked edges.
+- A rectangle drawn on the view plane (the new object's origin and up) and the Edit Mode frame.
+- Each Fluent tool, closed where it should be.
+
+Stress:
+- Curved surfaces: 4,876 operations including the new tools, 4 problems, and 69 results with faces on top of each other (91 before).
+- Push/Pull: 0 problems, and 390 results with faces newly on top of each other.
+- The modeling section: 6,080 operations with 0 problems.
+- The editor fuzzer: 6,000 frames with no crash.
+
 ## 2026-10-08 (round 17): drawing on any axis plane, turning drawn shapes cleanly, the keymap dropdown, the Utah teapot, deleting materials, curved surfaces
 
 **Asked:** commit and push round 16; draw polylines on the YX and YZ planes as well as XZ, with an axis-lock workflow like Extrude's, usable with Follow; rotating a face just drawn onto a face left artifacts; the keymap preset dropdown in Preferences disappeared when clicked; the Utah teapot with a camera and a point light as the scene you start with; deleting a material from the Materials window; more edge-case testing on curved surfaces for Push/Pull and the other tools.

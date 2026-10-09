@@ -52,6 +52,8 @@ bool Editor::transform_begin(int mode) {
         n++;
       }
     t.local_rot = g->world_rotation();
+    Quat frame;
+    if (edit_selection_frame(frame)) t.local_rot = frame;  // X / Y / Z twice: the selection's own axes
   }
   else {
     for (GameObject *g : selected_objects(true)) {

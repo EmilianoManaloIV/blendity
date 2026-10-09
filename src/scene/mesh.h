@@ -209,7 +209,8 @@ void recalc_normals_outside(Mesh &m);
  * measured along the neighbouring edges; segments > 1 rounds the profile.
  * Blender: Ctrl+B (bmesh_bevel.cc). */
 bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, float width, int segments,
-                 std::string *error = nullptr, bool clamp_overlap = true);  // Blender: Clamp Overlap
+                 std::string *error = nullptr, bool clamp_overlap = true,  // Blender: Clamp Overlap
+                 float profile = 0.5f);  // Blender's Profile: 0.5 round, 0.25 flat, toward 1 convex (square), toward 0 concave
 /* Joins two selected face regions (removed) or two open edge loops with a
  * tube. Loops may differ in vertex count and face any direction: the second
  * loop is rotated onto the first's plane to match vertices, and segments > 1
@@ -247,6 +248,11 @@ struct PushPullLimits {
   float behind_sweep = -1.0f;  // the same, from geometry inside the swept outline only
 };
 PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_sel);
+/* Push/Pull on several faces at once: each connected group of selected faces along its own normal,
+ * or (individual) every selected face along its own. One group is plain push_pull. Groups that
+ * can't move are skipped; false when none could. The selection ends on every moved face. */
+bool push_pull_multi(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, bool individual,
+                     PushPullResult *result = nullptr, std::string *error = nullptr);
 bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar = true,
                PushPullResult *result = nullptr, std::string *error = nullptr);
 size_t subdivide_edges(Mesh &m, std::vector<uint8_t> &vert_sel, int cuts);  // Blender: Subdivide (edges only)
@@ -308,7 +314,7 @@ size_t loose_parts(const Mesh &m, std::vector<int> &face_part);
  * becomes the new vertices. Returns how many edges / vertices were extruded. */
 size_t extrude_verts_edges(Mesh &m, std::vector<uint8_t> &vert_sel);
 /* More of Blender's modifiers (modifiers.cpp), all in object space. */
-bool bevel_modifier(Mesh &m, float width, int segments, float angle_limit_deg, std::string *error = nullptr);  // angle < 0: every edge
+bool bevel_modifier(Mesh &m, float width, int segments, float angle_limit_deg, std::string *error = nullptr, float profile = 0.5f);  // angle < 0: every edge
 void triangulate_min(Mesh &m, int min_vertices);  // faces with at least this many corners (4 = quads too)
 void wireframe(Mesh &m, float thickness, bool even, bool keep_original);
 float fbm_noise(Vec3 p, int octaves, uint32_t seed);  // 0..1 value noise
@@ -332,7 +338,8 @@ void coplanar_region(const Mesh &m, size_t f, float angle_deg, std::vector<uint8
 std::unordered_set<uint64_t> coplanar_edges(const Mesh &m, float angle_deg);
 /* Blender: Limited Dissolve. Coplanar faces become one n-gon; corners on a
  * straight run vanish. Returns how many edges and vertices went. */
-size_t dissolve_limited(Mesh &m, float angle_deg = 1.0f);
+/* face_mask: only within those faces (edges between two of them; corners only they use). */
+size_t dissolve_limited(Mesh &m, float angle_deg = 1.0f, const std::vector<uint8_t> *face_mask = nullptr);
 /* Blender: Select > Select Sharp Edges (faces meeting at more than angle_deg; edges
  * marked sharp when include_marked), as sorted edge keys. */
 std::vector<uint64_t> sharp_edges_by_angle(const Mesh &m, float angle_deg, bool include_marked = true);
@@ -348,6 +355,15 @@ size_t slice(Mesh &m, Vec3 p, Vec3 n, int clear = 0);
 /* Sweep a face along the open chain of wire edges that starts nearest it (SketchUp's Follow Me);
  * the face becomes the start cap, the path's wire edges are used up. */
 bool follow(Mesh &m, size_t face, std::string *error = nullptr);
+/* UModeler's Follow with picked edges: the face swept along `path` (a chain of vertices, any edges
+ * of the mesh) where it is, from its end nearest the face (SketchUp's Follow Me). The path is kept. */
+bool follow_path(Mesh &m, size_t face, const std::vector<uint32_t> &path, std::string *error = nullptr);
+/* Hard-surface tools (mesh_tools5.cpp). */
+size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows);  // quads cut into a grid; returns quads cut
+bool pipe(Mesh &m, const std::vector<uint32_t> &path, float radius, int sides, std::string *error = nullptr);
+size_t array_faces(Mesh &m, std::vector<uint8_t> &face_sel, int count, Vec3 offset);  // returns copies made
+void extrude_taper(Mesh &m, std::vector<uint8_t> &face_sel, float distance, float scale);
+void recess(Mesh &m, std::vector<uint8_t> &face_sel, float border, float depth);
 /* After moving vertices (`moved`): flat rings of faces between a moved shape and an outline
  * that stayed (a shape drawn on a face, turned) that now fold over are zipped again. Vertices
  * keep their indices; faces dropped (indices before) are marked in `dropped`, new ones come
@@ -402,6 +418,11 @@ struct ZFightPair {
   bool remove_a = false, remove_b = false;
 };
 std::vector<ZFightPair> zfight_pairs(const Mesh &m, float plane_dist = 0.0f, const std::vector<int> *group = nullptr);
+/* Overlapping elements: pairs of distinct vertices closer than eps (unwelded copies), and pairs of
+ * distinct edges (face edges and wire edges) lying on one line and sharing more than eps of their
+ * length (doubled edges, or one running along another). eps <= 0: 1e-5 of the mesh's size. */
+std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices(const Mesh &m, float eps = 0.0f);
+std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, float eps = 0.0f);
 /* The face's area-weighted centre (Plasticity's face centre snap), not the average of its corners. */
 Vec3 face_area_center(const Mesh &m, size_t f);
 /* A closed shape drawn across several coplanar faces: cut into all of them. inner_faces gets the

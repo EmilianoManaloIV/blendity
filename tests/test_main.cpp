@@ -155,6 +155,7 @@ static void round14_feature_tests();
 static void round15_tests();
 static void round16_tests();
 static void round17_tests();
+static void round18_tests();
 
 int main() {
   register_builtin_components();
@@ -753,6 +754,7 @@ int main() {
   round15_tests();
   round16_tests();
   round17_tests();
+  round18_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -5637,13 +5639,12 @@ static void round16_tests() {
     set_env("BLENDITY_PROJECT", "");
   });
 
-  test("draw in open space: front / view planes and 'open space only' over the mesh (UModeler, Plasticity)", [&] {
+  test("draw off the mesh: clicks go on the ground, guides take a line anywhere else", [&] {
     Editor ed;
     ed.init_headless(1000, 700);
     ed.step_frame_headless();
-    ed.command("camera 0 15 8 0 1 0");
+    ed.command("camera 30 35 9 0 0 2");
     ed.command("select Main Camera");
-    ed.command("drawmode plane front 2");  // the XY plane at z = 2
     ed.command("draw rectangle");
     GameObject *g = ed.selected_object();
     ed.step_frame_headless();
@@ -5655,65 +5656,20 @@ static void round16_tests() {
       ed.step_frame_headless({ev(ET::MouseUp, x, y)});
       return true;
     };
-    CHECK(click_world({-1, 0.5f, 2}));
-    CHECK(click_world({1, 1.5f, 2}));
+    CHECK(click_world({-1, 0, 2}));
+    CHECK(click_world({1, 0, 3}));
     const Mesh *m = g ? g->get<MeshFilter>()->mesh.get() : nullptr;
     CHECK(m && m->face_count() == 1);
     if (m && m->face_count() == 1) {
-      const Vec3 n = normalize(m->face_normal(0));
-      float zmin = 1e9f, zmax = -1e9f;
+      float ymin = 1e9f, ymax = -1e9f;
       for (const Vec3 &p2 : m->positions) {
-        const Vec3 wp = g->world_matrix().point(p2);
-        zmin = std::min(zmin, wp.z), zmax = std::max(zmax, wp.z);
+        const float y = g->world_matrix().point(p2).y;
+        ymin = std::min(ymin, y), ymax = std::max(ymax, y);
       }
-      std::printf("    front plane: normal (%.2f %.2f %.2f), z %.3f..%.3f\n", n.x, n.y, n.z, zmin, zmax);
-      CHECK(std::fabs(n.z) > 0.999f && std::fabs(zmin - 2) < 1e-3f && std::fabs(zmax - 2) < 1e-3f);
+      const Vec3 n = normalize(g->world_matrix().dir(m->face_normal(0)));
+      std::printf("    on the ground: normal y %.3f, y %.4f..%.4f\n", n.y, ymin, ymax);
+      CHECK(std::fabs(n.y) > 0.999f && std::fabs(ymin) < 1e-3f && std::fabs(ymax) < 1e-3f);
     }
-    /* The view plane: facing the camera, through the point it orbits. */
-    ed.command("edit off");
-    ed.command("select Main Camera");
-    ed.command("drawmode plane view 0");
-    ed.command("draw polygon 5");
-    GameObject *g2 = ed.selected_object();
-    ed.step_frame_headless();
-    const Vec3 piv(0, 1, 0);
-    CHECK(click_world(piv));
-    CHECK(click_world(piv + Vec3(0.5f, 0, 0)));
-    const Mesh *m2 = g2 ? g2->get<MeshFilter>()->mesh.get() : nullptr;
-    CHECK(m2 && m2->face_count() == 1);
-    if (m2 && m2->face_count() == 1) {
-      const Vec3 n = normalize(g2->world_matrix().dir(m2->face_normal(0)));
-      const Vec3 to_cam = normalize(ed.scene_eye() - piv);
-      std::printf("    view plane: normal . toward camera = %.4f\n", dot(n, to_cam));
-      CHECK(std::fabs(dot(n, to_cam)) > 0.999f);
-    }
-    /* Open space only: a rectangle over the cube goes on the ground plane offset above it, not into the cube. */
-    ed.command("edit off");
-    ed.command("create Cube");
-    GameObject *cube = ed.selected_object();
-    cube->set_world_position({0, 0.5f, 0});
-    const size_t cube_faces = cube->get<MeshFilter>()->mesh->face_count();
-    ed.command("camera 0 55 6 0 1 0");  // looking down at the top
-    ed.command("drawmode plane ground 1.5");
-    ed.command("drawmode space on");
-    ed.command("edit face");
-    ed.command("draw rectangle");
-    ed.step_frame_headless();
-    CHECK(click_world({-0.3f, 1.5f, -0.3f}));
-    CHECK(click_world({0.3f, 1.5f, 0.3f}));
-    if (std::getenv("BLENDITY_DUMP")) {
-      std::vector<LogEntry> lines;
-      Log::fetch(0, lines);
-      for (size_t k = lines.size() > 8 ? lines.size() - 8 : 0; k < lines.size(); k++) std::printf("      log: %s\n", lines[k].text.c_str());
-    }
-    const Mesh &cm = *cube->get<MeshFilter>()->mesh;
-    std::printf("    open space only: cube faces %zu -> %zu\n", cube_faces, cm.face_count());
-    CHECK(cm.face_count() == cube_faces + 1);  // one separate face floating above, the cube's top untouched
-    bool above = false;
-    for (const Vec3 &p2 : cm.positions) above = above || std::fabs(cube->world_matrix().point(p2).y - 1.5f) < 1e-3f;
-    CHECK(above);
-    ed.command("drawmode space off");
-    ed.command("drawmode plane ground 0");
   });
   test("merge by distance (Edit Mode): the selected vertices weld; Unselected welds onto the rest; F9 sets the distance", [&] {
     Editor ed;
@@ -5981,7 +5937,7 @@ static void round17_tests() {
     ed.step_frame_headless();
     CHECK(by_name(ed.scene(), "Teapot") != nullptr);
   });
-  test("draw: X / Y / Z put a polyline on the YZ / XZ / XY plane and turn it mid-line - a 3D path for Follow", [&] {
+  test("draw: X / Y / Z guides (Plasticity) let a polyline leave its plane - a 3D path for Follow", [&] {
     Editor ed;
     ed.init_headless(1000, 700);
     ed.step_frame_headless();
@@ -6006,17 +5962,15 @@ static void round17_tests() {
       ed.step_frame_headless({ev(ET::MouseUp, x, y)});
       return true;
     };
-    /* Z before the first point: the XY plane; the same key again: back to the surface. */
-    press(platform::KEY_Z);
-    CHECK(ed.draw_axis_plane() == 3);
-    press(platform::KEY_Z);
-    CHECK(ed.draw_axis_plane() == 0);
-    /* From the top face's centre straight up (Z: the XY plane through it), then along +Z (X: the YZ plane through the top). */
+    ed.command("drawmode axes global");
+    /* From the top face's centre straight up along a Y guide, then along +Z on a Z guide through the top. */
     CHECK(click_world({0, 1, 0}));
-    press(platform::KEY_Z);
+    const size_t g0 = ed.guide_count_for_test();
+    press(platform::KEY_Y);
+    CHECK(ed.guide_count_for_test() == g0 + 1 && ed.last_guide_for_test() && std::fabs(ed.last_guide_for_test()->d.y) > 0.999f);
     CHECK(click_world({0, 2, 0}));
-    press(platform::KEY_X);
-    CHECK(ed.draw_axis_plane() == 1);
+    press(platform::KEY_Z);
+    CHECK(ed.guide_count_for_test() == g0 + 2 && std::fabs(ed.last_guide_for_test()->d.z) > 0.999f);
     CHECK(click_world({0, 2, 1}));
     press(platform::KEY_ENTER);
     const Mesh *m = g->get<MeshFilter>()->mesh.get();
@@ -6058,12 +6012,12 @@ static void round17_tests() {
     g = ed.selected_object();
     ed.step_frame_headless();
     CHECK(click_world({2, 0, 2}));
-    press(platform::KEY_Z);
-    CHECK(click_world({3, 1, 2}));
-    press(platform::KEY_X);
-    CHECK(click_world({3, 1, 3}));
     press(platform::KEY_Y);
-    CHECK(click_world({2, 1, 3}));
+    CHECK(click_world({2, 1, 2}));
+    press(platform::KEY_X);
+    CHECK(click_world({3, 1, 2}));
+    press(platform::KEY_Z);
+    CHECK(click_world({3, 1, 3}));
     std::printf("    loop points so far: %zu\n", ed.draw_point_count());
     for (const Vec3 &p : ed.draw_points_for_test()) std::printf("      %.3f %.3f %.3f\n", p.x, p.y, p.z);
     const size_t faces_before = g->get<MeshFilter>()->mesh->face_count(), verts_before = g->get<MeshFilter>()->mesh->vert_count();
@@ -6277,5 +6231,1121 @@ static void round17_tests() {
     const auto r = meshops::smart_fill(h);
     std::printf("    two holes at the apex: %zu loops filled, closed %d\n", r.loops, (int)closed_manifold(h));
     CHECK(r.loops == 2 && closed_manifold(h));
+  });
+}
+
+/* ===================================================================== */
+/* Round 18: bevel's modal, turning shapes on rectangles, perpendicular  */
+/* snaps, guides from edges and axes, Make Face, overlapping elements,    */
+/* drawn shapes' transforms, Fluent-style tools                           */
+/* ===================================================================== */
+
+static void round18_tests() {
+  auto ev = [](platform::EventType t, int x, int y, int key = 0, int mods = 0) {
+    platform::Event e;
+    e.type = t;
+    e.x = x;
+    e.y = y;
+    e.key = key;
+    e.mods = mods;
+    return e;
+  };
+  using ET = platform::EventType;
+  test("bevel: Ctrl+B always opens the modal helper, and the wheel adds segments past two", [&] {
+    for (int variant = 0; variant < 3; variant++) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      ed.command("keymap Blender");
+      ed.command("select Cube");
+      ed.command("edit edge");
+      const Mesh &m0 = *ed.selected_object()->get<MeshFilter>()->mesh;
+      const auto e = m0.edge_cache()[(size_t)variant * 3];
+      ed.command(strprintf("esel %u %u", e.first, e.second));
+      const Recti r = ed.scene_view_rect();
+      /* The mouse over the Scene view, or (variant 2) over the Inspector after clicking a button there. */
+      const int cx = variant == 2 ? r.right() + 60 : r.x + r.w / 2 + 40, cy = r.y + r.h / 2 + 30;
+      ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+      ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_B, platform::MOD_CTRL)});
+      ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_B)});
+      ed.step_frame_headless();
+      std::printf("    variant %d: modal %d after Ctrl+B\n", variant, (int)ed.modal_active_for_test());
+      CHECK(ed.modal_active_for_test());
+      for (int k = 0; k < 6; k++) {
+        platform::Event w = ev(ET::Wheel, cx + 10, cy);
+        w.wheel_y = 1;
+        ed.step_frame_headless({w});
+      }
+      ed.step_frame_headless({ev(ET::MouseMove, cx + 40, cy + 10)});
+      std::printf("    segments after six wheel steps: %d, modal %d\n", ed.last_op_segments_for_test(), (int)ed.modal_active_for_test());
+      CHECK(ed.modal_active_for_test() && ed.last_op_segments_for_test() >= 7);
+      ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_ENTER)});
+      ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_ENTER)});
+      CHECK(!ed.modal_active_for_test());
+      /* Again on another edge: it starts with 7 segments (rounded, so Auto Smooth shades it) and must still wait. */
+      const Mesh &m1 = *ed.selected_object()->get<MeshFilter>()->mesh;
+      size_t pick = 0;
+      for (size_t k = 0; k < m1.edge_cache().size(); k++)
+        if (m1.positions[m1.edge_cache()[k].first].y < -0.49f && m1.positions[m1.edge_cache()[k].second].y < -0.49f) pick = k;
+      const auto e2 = m1.edge_cache()[pick];
+      ed.command(strprintf("esel %u %u", e2.first, e2.second));
+      ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_B, platform::MOD_CTRL)});
+      ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_B)});
+      ed.step_frame_headless({ev(ET::MouseMove, cx + 20, cy)});
+      std::printf("    second bevel: modal %d with %d segments\n", (int)ed.modal_active_for_test(), ed.last_op_segments_for_test());
+      CHECK(ed.modal_active_for_test() && ed.last_op_segments_for_test() == 7);
+      ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_ESCAPE)});
+    }
+  });
+  test("rotate a shape drawn on a rectangle (a quad, the 10 x 10 Plane, a long face): no artifacts", [&] {
+    struct Setup {
+      const char *name;
+      const char *create;  // what to draw on
+      Vec3 scale;
+      float top;           // its top's height
+      Vec3 a, b;           // the rectangle's corners
+    };
+    const Setup setups[] = {
+        {"quad", "Quad", {1, 1, 1}, 0.0f, {-0.25f, 0, -0.15f}, {0.25f, 0, 0.15f}},
+        {"long quad", "Quad", {4, 1, 1}, 0.0f, {-0.6f, 0, -0.2f}, {0.6f, 0, 0.2f}},
+        {"10 x 10 plane, across cells", "Plane", {1, 1, 1}, 0.0f, {-1.3f, 0, -0.7f}, {1.3f, 0, 0.7f}},
+        {"10 x 10 plane, inside a cell", "Plane", {1, 1, 1}, 0.0f, {0.2f, 0, 0.3f}, {0.8f, 0, 0.6f}},
+        {"long box top", "Cube", {4, 1, 1.5f}, 0.5f, {-1.0f, 0.5f, -0.3f}, {1.0f, 0.5f, 0.3f}},
+    };
+    for (const Setup &st : setups)
+      for (float deg : {15.0f, 30.0f, 45.0f, 90.0f}) {
+        Editor ed;
+        ed.init_headless(900, 650);
+        ed.step_frame_headless();
+        ed.command("keymap Blender");
+        ed.command(std::string("create ") + st.create);
+        GameObject *g = ed.selected_object();
+        g->set_world_position({0, 0, 0});
+        g->set_local_scale(st.scale);
+        if (std::string(st.create) == "Quad") g->set_local_euler({90, 0, 0});  // lying flat, facing up
+        ed.command("edit face");
+        ed.command("draw rectangle");
+        ed.command(strprintf("drawpoint %g %g %g", st.a.x, st.a.y + st.top * 0, st.a.z));
+        ed.command(strprintf("drawpoint %g %g %g", st.b.x, st.b.y, st.b.z));
+        {
+          const Recti vr = ed.scene_view_rect();
+          ed.step_frame_headless({ev(ET::MouseMove, vr.x + vr.w / 2, vr.y + vr.h / 2)});
+          ed.step_frame_headless({ev(ET::KeyDown, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+          ed.step_frame_headless({ev(ET::KeyUp, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+        }
+        const Mesh *m = g->get<MeshFilter>()->mesh.get();
+        /* The faces inside the rectangle (world space). */
+        std::vector<size_t> inner;
+        for (size_t f = 0; f < m->face_count(); f++) {
+          bool in = std::fabs(normalize(g->world_matrix().dir(m->face_normal(f))).y) > 0.99f;
+          for (uint32_t k = 0; k < m->face_size(f) && in; k++) {
+            const Vec3 w = g->world_matrix().point(m->positions[m->face_verts(f)[k]]);
+            in = w.x > st.a.x - 1e-3f && w.x < st.b.x + 1e-3f && w.z > st.a.z - 1e-3f && w.z < st.b.z + 1e-3f && std::fabs(w.y - st.a.y) < 1e-3f;
+          }
+          if (in) inner.push_back(f);
+        }
+        if (inner.empty()) {
+          std::printf("    %s: the rectangle was not cut in\n", st.name);
+          CHECK(!inner.empty());
+          break;
+        }
+        ed.select_faces_for_test(inner);
+        const size_t ov0 = overlapping_face_pairs(*m);
+        const Recti r = ed.scene_view_rect();
+        const int cx = r.x + r.w / 2 + 60, cy = r.y + r.h / 2;
+        ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+        for (int k : {platform::KEY_R, platform::KEY_Y}) {
+          ed.step_frame_headless({ev(ET::KeyDown, cx, cy, k)});
+          ed.step_frame_headless({ev(ET::KeyUp, cx, cy, k)});
+        }
+        for (char c : strprintf("%g", deg)) {
+          platform::Event t;
+          t.type = ET::Text;
+          t.codepoint = (uint32_t)c;
+          t.x = cx;
+          t.y = cy;
+          ed.step_frame_headless({t});
+        }
+        ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_ENTER)});
+        ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_ENTER)});
+        m = g->get<MeshFilter>()->mesh.get();
+        std::string bad, over;
+        const size_t nb = bad_triangulations(*m, &bad), no = overlapping_face_pairs(*m, &over);
+        std::printf("    %s, %g deg: %zu inner face(s), %zu faces, bad %zu, overlaps %zu (before %zu)\n", st.name, deg, inner.size(), m->face_count(), nb, no, ov0);
+        if (nb) std::printf("      %s\n", bad.c_str());
+        if (no > ov0) std::printf("      %s\n", over.c_str());
+        /* Turned far enough to stick out past the face it was drawn on (the long faces at the larger
+         * angles) there is no surface around it to rebuild: only the mesh must stay valid. */
+        float half_x = 0.5f * st.scale.x, half_z = 0.5f * (std::string(st.create) == "Cube" ? st.scale.z : st.scale.y);
+        if (std::string(st.create) == "Plane") half_x = half_z = 5.0f;
+        const float ex = 0.5f * (st.b.x - st.a.x), ez = 0.5f * (st.b.z - st.a.z), rad = deg * kDeg2Rad;
+        const bool fits = ex * std::fabs(std::cos(rad)) + ez * std::fabs(std::sin(rad)) < half_x && ex * std::fabs(std::sin(rad)) + ez * std::fabs(std::cos(rad)) < half_z;
+        CHECK(structurally_valid(*m) && (!fits || (nb == 0 && no <= ov0)));
+      }
+  });
+  auto click_at = [&](Editor &ed, Vec3 w, int mods = 0) {
+    int x, y;
+    if (!ed.project_to_window(w, x, y)) return false;
+    ed.step_frame_headless({ev(ET::MouseMove, x, y, 0, mods)});
+    platform::Event d = ev(ET::MouseDown, x, y, 0, mods), u = ev(ET::MouseUp, x, y, 0, mods);
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({u});
+    return true;
+  };
+  auto key_press = [&](Editor &ed, int k, int mods = 0, int mx = -1, int my = -1) {
+    const Recti r = ed.scene_view_rect();
+    const int x = mx < 0 ? r.x + r.w / 2 : mx, y = my < 0 ? r.y + r.h / 2 : my;
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::KeyDown, x, y, k, mods)});
+    ed.step_frame_headless({ev(ET::KeyUp, x, y, k)});
+  };
+  test("draw: a polyline snaps onto an edge at 90 degrees from its last point (Plasticity)", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("camera 30 35 4 0 1 0");
+    ed.command("edit face");
+    ed.command("draw polyline");
+    ed.step_frame_headless();
+    std::printf("    cube %s at %.3f %.3f %.3f, editing %s\n", g->name.c_str(), g->world_position().x, g->world_position().y, g->world_position().z,
+                ed.selected_object() ? ed.selected_object()->name.c_str() : "-");
+    /* From inside the top face toward its +X edge, the mouse a little off square: it lands square. */
+    CHECK(click_at(ed, {-0.2f, 1, 0.1f}));
+    int x, y;
+    CHECK(ed.project_to_window({0.5f, 1, 0.13f}, x, y));
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+    const auto &pts = ed.draw_points_for_test();
+    CHECK(pts.size() == 2);
+    if (pts.size() == 2) {
+      std::printf("    points %.4f %.4f %.4f -> %.4f %.4f %.4f\n", pts[0].x, pts[0].y, pts[0].z, pts[1].x, pts[1].y, pts[1].z);
+      CHECK(std::fabs(pts[1].x - 0.5f) < 1e-4f && std::fabs(pts[1].z - pts[0].z) < 1e-4f);  // square: straight across
+    }
+    /* Off: the same mouse keeps its own place on the edge. */
+    key_press(ed, platform::KEY_ESCAPE);
+    ed.command("drawmode perp off");
+    ed.command("draw polyline");
+    ed.step_frame_headless();
+    CHECK(click_at(ed, {-0.2f, 1, 0.1f}));
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+    const auto &p2 = ed.draw_points_for_test();
+    if (p2.size() == 2) std::printf("    without it %.4f %.4f %.4f\n", p2[1].x, p2[1].y, p2[1].z);
+    CHECK(p2.size() == 2 && std::fabs(p2[1].z - p2[0].z) > 0.01f);
+  });
+  test("draw: Ctrl+click an edge lays a guide along it; X / Y / Z lay axis guides, local or global", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    g->set_local_euler({0, 30, 0});
+    ed.command("camera 30 35 5 0 0.5 0");
+    ed.command("edit face");
+    ed.command("draw polyline");
+    ed.step_frame_headless();
+    const size_t g0 = ed.guide_count_for_test();
+    /* The top's edge from (-0.5, 1, 0.5) to (0.5, 1, 0.5) in object space: its middle, Ctrl+clicked. */
+    const Vec3 mid = g->world_matrix().point({0, 0.5f, 0.5f}), along = normalize(g->world_matrix().dir({1, 0, 0}));
+    CHECK(click_at(ed, mid, platform::MOD_CTRL));
+    CHECK(ed.guide_count_for_test() == g0 + 1 && ed.draw_point_count() == 0);
+    if (const GuideLine *gl = ed.last_guide_for_test()) {
+      std::printf("    edge guide direction %.3f %.3f %.3f (edge %.3f %.3f %.3f)\n", gl->d.x, gl->d.y, gl->d.z, along.x, along.y, along.z);
+      CHECK(std::fabs(std::fabs(dot(gl->d, along)) - 1.0f) < 1e-4f && length(cross(mid - gl->p, gl->d)) < 1e-4f);
+    }
+    /* X with Local axes: along the turned cube's X; with Global: the world's X. */
+    ed.command("drawmode axes local");
+    key_press(ed, platform::KEY_X);
+    CHECK(ed.guide_count_for_test() == g0 + 2 && ed.last_guide_for_test() && std::fabs(dot(ed.last_guide_for_test()->d, along)) > 0.9999f);
+    ed.command("drawmode axes global");
+    const Recti r = ed.scene_view_rect();
+    key_press(ed, platform::KEY_X, 0, r.x + r.w / 2 + 30, r.y + r.h / 2 + 20);
+    CHECK(ed.guide_count_for_test() == g0 + 3 && ed.last_guide_for_test() && std::fabs(ed.last_guide_for_test()->d.x) > 0.9999f);
+  });
+  test("Make Face: one operation (Smart Fill's holes and Blender's F), in every mode, with the key anywhere in Edit Mode", [&] {
+    for (const char *preset : {"Unity", "Blender"})
+      for (const char *mode : {"vertex", "edge", "face"}) {
+        Editor ed;
+        ed.init_headless(1000, 700);
+        ed.step_frame_headless();
+        ed.command(std::string("keymap ") + preset);
+        ed.command("select Cube");
+        GameObject *g = ed.selected_object();
+        /* A hole: the top face gone. */
+        ed.command("edit face");
+        ed.command("fsel facing 0 1 0");
+        ed.command("editop delete");
+        const Mesh *m = g->get<MeshFilter>()->mesh.get();
+        CHECK(m->face_count() == 5 && !closed_manifold(*m));
+        /* Select the hole's rim: every vertex (vertex / edge mode) or the side faces (face mode). */
+        ed.command(std::string("edit ") + mode + " all");
+        /* The key with the mouse over the Inspector, not the Scene view. */
+        const Recti r = ed.scene_view_rect();
+        if (std::string(preset) == "Unity") key_press(ed, platform::KEY_F, platform::MOD_ALT, r.right() + 80, r.y + 100);
+        else key_press(ed, platform::KEY_F, 0, r.right() + 80, r.y + 100);
+        m = g->get<MeshFilter>()->mesh.get();
+        std::printf("    %s, %s mode: %zu faces, closed %d\n", preset, mode, m->face_count(), (int)closed_manifold(*m));
+        CHECK(m->face_count() == 6 && closed_manifold(*m));
+      }
+    /* Loose vertices (no hole): one face through them, as Blender's F. */
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    ed.command("draw polyline");
+    ed.command("drawpoint 0 0 0");
+    ed.command("drawpoint 1 0 0");
+    ed.command("drawpoint 1 0 1");
+    ed.command("drawpoint 0 0 1 finish");
+    GameObject *g = ed.selected_object();
+    ed.command("edit vertex all");
+    ed.command("editop fill");
+    const Mesh *m = g->get<MeshFilter>()->mesh.get();
+    std::printf("    open polyline + Make Face: %zu face(s), %zu wire edges\n", m->face_count(), m->loose_edges.size());
+    CHECK(m->face_count() == 1);
+  });
+  test("overlapping vertices and edges: found, shown, selected and merged", [&] {
+    Mesh m;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}) m.add_vert(p);
+    m.add_face({0, 3, 2, 1});
+    /* A second quad sharing the edge's place but not its vertices (unwelded), and a wire edge along another side. */
+    const uint32_t a = m.add_vert({1, 0, 0}), b = m.add_vert({2, 0, 0}), c = m.add_vert({2, 0, 1}), d = m.add_vert({1, 0, 1});
+    m.add_face({a, d, c, b});
+    const uint32_t w0 = m.add_vert({0.25f, 0, 0}), w1 = m.add_vert({0.75f, 0, 0});
+    m.add_loose_edge(w0, w1);
+    const auto vs = meshops::overlapping_vertices(m);
+    const auto es = meshops::overlapping_edges(m);
+    std::printf("    %zu vertex pair(s), %zu edge pair(s)\n", vs.size(), es.size());
+    CHECK(vs.size() == 2 && es.size() == 2);  // 1-a, 2-d; the doubled edge, and the wire along 0-1
+    CHECK(meshops::overlapping_vertices(*primitives::cube()).empty() && meshops::overlapping_edges(*primitives::cube()).empty());
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->get<MeshFilter>()->mesh = std::make_shared<Mesh>(m);
+    ed.command("edit vertex");
+    CHECK(ed.overlap_vert_pairs_for_test() == 2 && ed.overlap_edge_pairs_for_test() == 2);
+    ed.step_frame_headless();  // the overlay draws
+    ed.command("overlaps select");
+    ed.command("overlaps merge");
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    std::printf("    after merging: %zu verts, %zu vertex pairs, %zu edge pairs\n", after.vert_count(), ed.overlap_vert_pairs_for_test(), ed.overlap_edge_pairs_for_test());
+    CHECK(after.vert_count() == 10 - 2 && ed.overlap_vert_pairs_for_test() == 0 && ed.overlap_edge_pairs_for_test() == 1);  // the wire still lies along an edge
+  });
+  /* A rail of thin quads whose near side is the path (0,0,0) -> (1,0,0) -> (1,0,1) -> (2,0,1), and
+   * a small square facing back along it at the rail's start: Follow must run along the rail. */
+  auto rail_and_profile = [](std::vector<uint32_t> &path, size_t &profile) {
+    Mesh m;
+    const Vec3 P[4] = {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {2, 0, 1}};
+    for (const Vec3 &p : P) path.push_back(m.add_vert(p));
+    std::vector<uint32_t> far;
+    for (const Vec3 &p : P) far.push_back(m.add_vert(p + Vec3(0, -1, 0)));
+    for (int i = 0; i < 3; i++) m.add_face({path[i], far[i], far[i + 1], path[i + 1]});
+    const float h = 0.1f;
+    const uint32_t q0 = m.add_vert({0, -h, -h}), q1 = m.add_vert({0, h, -h}), q2 = m.add_vert({0, h, h}), q3 = m.add_vert({0, -h, h});
+    m.add_face({q0, q1, q2, q3});
+    profile = m.face_count() - 1;
+    return m;
+  };
+  auto cap_at = [](const Mesh &m, Vec3 at) {
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (m.face_size(f) == 4 && length(m.face_center(f) - at) < 2e-3f) return true;
+    return false;
+  };
+  test("Follow along picked edges runs along the edges themselves (SketchUp's Follow Me)", [&] {
+    std::vector<uint32_t> path;
+    size_t profile = 0;
+    Mesh m = rail_and_profile(path, profile);
+    std::string err;
+    CHECK(meshops::follow_path(m, profile, path, &err));
+    if (!err.empty()) std::printf("    %s\n", err.c_str());
+    std::printf("    swept: %zu faces; end cap at the path's end %d, the rail kept %d\n", m.face_count(), (int)cap_at(m, {2, 0, 1}), (int)(m.face_count() >= 3));
+    CHECK(cap_at(m, {2, 0, 1}));
+    /* Every ring sits on its path point (the square's centre follows the line). */
+    for (const Vec3 &p : {Vec3(1, 0, 0), Vec3(1, 0, 1)}) {
+      size_t near = 0;
+      for (const Vec3 &q : m.positions) near += length(q - p) < 0.2f && length(q - p) > 0.05f;
+      CHECK(near >= 4);
+    }
+    /* The same through the editor: pick the square, then the rail's edges (and a side of the square, still selected). */
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    path.clear();
+    g->get<MeshFilter>()->mesh = std::make_shared<Mesh>(rail_and_profile(path, profile));
+    ed.command("edit face");
+    ed.command(strprintf("fsel %zu", profile));
+    ed.command("editop follow");
+    const Mesh &m0 = *g->get<MeshFilter>()->mesh;
+    const uint32_t s0 = m0.face_verts(profile)[0], s1 = m0.face_verts(profile)[1];
+    ed.command(strprintf("esel %u %u %u %u %u %u %u %u", s0, s1, path[0], path[1], path[1], path[2], path[2], path[3]));
+    ed.command("editop follow");
+    const Mesh &m1 = *g->get<MeshFilter>()->mesh;
+    std::printf("    editor: %zu faces, end cap at the path's end %d\n", m1.face_count(), (int)cap_at(m1, {2, 0, 1}));
+    CHECK(cap_at(m1, {2, 0, 1}));
+  });
+  test("a shape drawn at an angle: its new object takes the shape's place and turn (Pivot, Local)", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("select Main Camera");
+    ed.command("drawmode rect 3point");
+    ed.command("draw rectangle");
+    GameObject *g = ed.selected_object();
+    /* A 3-point rectangle on the ground, its first side 30 degrees off X. */
+    const float a = 30.0f * kDeg2Rad;
+    const Vec3 p0(1, 0, 1), p1 = p0 + Vec3(std::cos(a), 0, std::sin(a)) * 2.0f, p2 = p1 + Vec3(-std::sin(a), 0, std::cos(a)) * 1.0f;
+    ed.command(strprintf("drawpoint %g %g %g", p0.x, p0.y, p0.z));
+    ed.command(strprintf("drawpoint %g %g %g", p1.x, p1.y, p1.z));
+    ed.command(strprintf("drawpoint %g %g %g", p2.x, p2.y, p2.z));
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(m.face_count() == 1);
+    const Vec3 centre = (p0 + p2) * 0.5f, x = g->world_rotation().rotate({1, 0, 0}), y = g->world_rotation().rotate({0, 1, 0});
+    std::printf("    object at %.3f %.3f %.3f (centre %.3f %.3f %.3f), X . side %.4f, Y . up %.4f\n", g->world_position().x, g->world_position().y,
+                g->world_position().z, centre.x, centre.y, centre.z, std::fabs(dot(x, normalize(p1 - p0))), y.y);
+    CHECK(length(g->world_position() - centre) < 1e-3f);
+    CHECK(std::fabs(dot(x, normalize(p1 - p0))) > 0.9999f && std::fabs(y.y) > 0.9999f);
+    /* Local in Edit Mode: the shape's own axes. */
+    ed.command("edit face all");
+    Quat q;
+    CHECK(ed.selection_frame_for_test(q));
+    CHECK(std::fabs(dot(q.rotate({1, 0, 0}), normalize(p1 - p0))) > 0.999f || std::fabs(dot(q.rotate({1, 0, 0}), normalize(p1 - p0))) < 1e-3f);
+  });
+  test("Push/Pull on several faces: each group, or each face, along its own normal", [&] {
+    const Mesh cube = *primitives::cube();
+    auto box = [](const Mesh &m) {
+      Vec3 lo(1e9f), hi(-1e9f);
+      for (const Vec3 &p : m.positions) lo = vmin(lo, p), hi = vmax(hi, p);
+      return std::pair<Vec3, Vec3>{lo, hi};
+    };
+    /* Top and bottom (not touching): both out along their own normals. */
+    {
+      Mesh m = cube;
+      std::vector<uint8_t> sel(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++) sel[f] = std::fabs(m.face_normal(f).y) > 0.9f;
+      std::string err;
+      CHECK(meshops::push_pull_multi(m, sel, 0.2f, true, false, nullptr, &err));
+      const auto [lo, hi] = box(m);
+      std::printf("    top and bottom: y %.3f..%.3f, closed %d, %zu selected\n", lo.y, hi.y, (int)closed_manifold(m), (size_t)std::count(sel.begin(), sel.end(), 1));
+      CHECK(std::fabs(lo.y + 0.7f) < 1e-4f && std::fabs(hi.y - 0.7f) < 1e-4f && closed_manifold(m) && std::count(sel.begin(), sel.end(), 1) == 2);
+    }
+    /* Every face of the cube, each on its own: the box grows on all six sides. */
+    {
+      Mesh m = cube;
+      std::vector<uint8_t> sel(m.face_count(), 1);
+      std::string err;
+      CHECK(meshops::push_pull_multi(m, sel, 0.2f, true, true, nullptr, &err));
+      const auto [lo, hi] = box(m);
+      std::printf("    each face: %.3f..%.3f, %zu faces, closed %d, valid %d\n", lo.x, hi.x, m.face_count(), (int)closed_manifold(m), (int)structurally_valid(m));
+      CHECK(std::fabs(hi.x - 0.7f) < 1e-4f && std::fabs(lo.z + 0.7f) < 1e-4f && std::fabs(hi.y - 0.7f) < 1e-4f && closed_manifold(m) && structurally_valid(m));
+    }
+    /* In the editor: P with two faces selected and a typed distance; Each Face from the console. */
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    ed.command("edit face");
+    ed.command("fsel facing 1 0 0 -1 0 0");
+    ed.command("pushpull individual on");
+    const Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_P)});
+    ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_P)});
+    for (char c : std::string("0.3")) {
+      platform::Event t;
+      t.type = ET::Text;
+      t.codepoint = (uint32_t)c;
+      t.x = cx;
+      t.y = cy;
+      ed.step_frame_headless({t});
+    }
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_ENTER)});
+    ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_ENTER)});
+    const auto [lo, hi] = box(*g->get<MeshFilter>()->mesh);
+    std::printf("    editor (P, two sides, 0.3): x %.3f..%.3f\n", lo.x, hi.x);
+    CHECK(std::fabs(lo.x + 0.8f) < 1e-4f && std::fabs(hi.x - 0.8f) < 1e-4f);
+  });
+  test("hard-surface tools: Grid, Pipe, Array, Taper Extrude, Recess / Plate", [&] {
+    auto setup = [&](Editor &ed) {
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      ed.command("edit face");
+      ed.command("fsel facing 0 1 0");
+      return ed.selected_object();
+    };
+    {
+      Editor ed;
+      GameObject *g = setup(ed);
+      ed.command("hs grid 3 2");
+      ed.command("editop grid");
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::printf("    grid: %zu faces, closed %d\n", m.face_count(), (int)closed_manifold(m));
+      CHECK(m.face_count() == 5 + 6 && closed_manifold(m) && structurally_valid(m));
+    }
+    {
+      Editor ed;
+      GameObject *g = setup(ed);
+      ed.command("hs recess 0.1 0.2");
+      ed.command("editop recess");
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      float ymin_top = 1e9f;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (ed.edit_face_selected(f)) ymin_top = std::min(ymin_top, m.face_center(f).y);
+      std::printf("    recess: %zu faces, closed %d, panel at y %.3f\n", m.face_count(), (int)closed_manifold(m), ymin_top);
+      CHECK(closed_manifold(m) && std::fabs(ymin_top - 0.3f) < 1e-3f);
+      ed.command("hs recess 0.1 -0.2");  // a raised plate
+      ed.command("fsel facing 0 1 0");
+    }
+    {
+      Editor ed;
+      GameObject *g = setup(ed);
+      ed.command("hs taper 0.5 0.5");
+      ed.command("editop taper");
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      float top = -1e9f, xmax = -1e9f;
+      for (const Vec3 &p : m.positions) top = std::max(top, p.y);
+      for (const Vec3 &p : m.positions)
+        if (p.y > top - 1e-4f) xmax = std::max(xmax, p.x);
+      std::printf("    taper: top %.3f, half width there %.3f, closed %d\n", top, xmax, (int)closed_manifold(m));
+      CHECK(std::fabs(top - 1.0f) < 1e-3f && std::fabs(xmax - 0.25f) < 1e-3f && closed_manifold(m));
+    }
+    {
+      Editor ed;
+      GameObject *g = setup(ed);
+      ed.command("hs grid 2 2");
+      ed.command("editop grid");
+      ed.command("fsel 5");  // one of the grid's cells
+      ed.command("hs array 3 0.2 0");
+      const size_t f0 = g->get<MeshFilter>()->mesh->face_count();
+      ed.command("editop array");
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::printf("    array: %zu faces (was %zu)\n", m.face_count(), f0);
+      CHECK(m.face_count() > f0 && structurally_valid(m) && closed_manifold(m) && overlapping_face_pairs(m) == 0);  // cut in, nothing on top
+    }
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("select Main Camera");
+      ed.command("draw polyline");
+      ed.command("drawpoint 0 0 0");
+      ed.command("drawpoint 1 0 0");
+      ed.command("drawpoint 1 0 1 finish");
+      GameObject *g = ed.selected_object();
+      ed.command("edit vertex all");
+      ed.command("hs pipe 0.1 8");
+      ed.command("editop pipe");
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      Mesh copy = m;
+      meshops::merge_by_distance(copy, 1e-6f);
+      std::printf("    pipe: %zu faces, %zu wires, closed %d\n", copy.face_count(), copy.loose_edges.size(), (int)closed_manifold(copy));
+      CHECK(copy.face_count() == 8 * 2 + 2 && copy.loose_edges.empty() && closed_manifold(copy));
+    }
+    /* On a cube's edges: the path is kept. */
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      const Mesh &m0 = *g->get<MeshFilter>()->mesh;
+      const auto e = m0.edge_cache()[0];
+      ed.command(strprintf("esel %u %u", e.first, e.second));
+      ed.command("editop pipe");
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::printf("    pipe on a cube edge: %zu faces\n", m.face_count());
+      CHECK(m.face_count() == 6 + 12 + 2 && structurally_valid(m));
+    }
+  });
+  test("bevel profile: concave below 0.5, flat at 0.25, round at 0.5, convex toward 1 (Blender's Profile)", [&] {
+    const float sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
+    auto bevelled = [&](float profile, int segs) {
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> vs(m.vert_count(), 1), fs(m.face_count(), 0);
+      std::unordered_set<uint64_t> one;
+      for (auto &e : m.edge_cache())
+        if (m.positions[e.first].y > 0.4f && m.positions[e.second].y > 0.4f && m.positions[e.first].z > 0.4f && m.positions[e.second].z > 0.4f)
+          one.insert(Mesh::edge_key(e.first, e.second));  // the top front edge
+      meshops::EdgeSelectionScope scope(&one);
+      CHECK(meshops::bevel_edges(m, vs, fs, 0.3f, segs, nullptr, true, profile));
+      return m;
+    };
+    float prev = -1.0f;
+    for (float p : {0.0f, 0.1f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+      const Mesh m = bevelled(p, 6);
+      const float v = (float)signed_volume(m) * sign;
+      std::printf("    profile %.2f: volume %.5f, closed %d\n", p, v, (int)closed_manifold(m));
+      CHECK(closed_manifold(m) && structurally_valid(m) && v > prev && v <= 1.0f + 1e-5f);
+      prev = v;
+    }
+    /* Flat (0.25) is a one-segment chamfer's volume; round (0.5) is a quarter circle's. */
+    const float chamfer = (float)signed_volume(bevelled(0.5f, 1)) * sign, flat = (float)signed_volume(bevelled(0.25f, 6)) * sign;
+    const float round = (float)signed_volume(bevelled(0.5f, 64)) * sign, expect_round = 1.0f - (0.09f - kPi * 0.09f / 4.0f);
+    std::printf("    chamfer %.5f vs flat %.5f; round %.5f vs a quarter circle %.5f\n", chamfer, flat, round, expect_round);
+    CHECK(std::fabs(chamfer - flat) < 1e-4f && std::fabs(round - expect_round) < 2e-4f);
+    /* In the editor: the Inspector's value reaches Ctrl+B, and the modifier keeps its own. */
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    const Mesh &m0 = *g->get<MeshFilter>()->mesh;
+    const auto e = m0.edge_cache()[0];
+    ed.command(strprintf("esel %u %u", e.first, e.second));
+    ed.command("bevelprofile 0.9");
+    ed.command("editop bevel");
+    CHECK(std::fabs(ed.last_op_profile_for_test() - 0.9f) < 1e-6f);
+    Scene sc;
+    GameObject *o = sc.create("Box");
+    o->add<MeshFilter>()->mesh = primitives::cube();
+    o->add<BevelModifier>()->profile = 0.2f;
+    std::string a = save_scene_text(sc), err;
+    Scene l;
+    CHECK(load_scene_text(a, l, err) && l.find_by_name("Box") && std::fabs(l.find_by_name("Box")->get<BevelModifier>()->profile - 0.2f) < 1e-6f);
+  });
+  test("draw: an arc on a rectangle drawn on a face makes the face inside the arc", [&] {
+    struct Case {
+      const char *name;
+      Vec3 a, b, bulge;
+    };
+    /* The rectangle (-0.3..0.3, -0.2..0.2) on the cube's top; arcs from its sides, out of it and into it,
+     * from corner to corner, and with one end on the cube's own edge. */
+    const Case cases[] = {
+        {"side to side, bulging out", {-0.15f, 1, 0.2f}, {0.15f, 1, 0.2f}, {0, 1, 0.35f}},
+        {"side to side, bulging in", {-0.15f, 1, 0.2f}, {0.15f, 1, 0.2f}, {0, 1, 0.05f}},
+        {"corner to corner, out", {-0.3f, 1, 0.2f}, {0.3f, 1, 0.2f}, {0, 1, 0.4f}},
+        {"across a corner, out", {-0.3f, 1, 0.0f}, {0.0f, 1, 0.2f}, {-0.35f, 1, 0.3f}},
+        {"rectangle side to the cube's edge", {0.3f, 1, 0.0f}, {0.5f, 1, -0.4f}, {0.36f, 1, -0.28f}},
+        {"on the cube's own edge (no rectangle)", {-0.4f, 1, -0.5f}, {-0.1f, 1, -0.5f}, {-0.25f, 1, -0.35f}},
+    };
+    for (const Case &c : cases)
+      for (int segs : {8, 16}) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        ed.step_frame_headless();
+        ed.command("create Cube");
+        GameObject *g = ed.selected_object();
+        g->set_world_position({0, 0.5f, 0});
+        ed.command("camera 30 40 5 0 1 0");  // from above: a point on the top's edge belongs to the top
+        ed.step_frame_headless();
+        ed.command("edit face");
+        ed.command("draw rectangle");
+        ed.command("drawpoint -0.3 1 -0.2");
+        ed.command("drawpoint 0.3 1 0.2");
+        const size_t f0 = g->get<MeshFilter>()->mesh->face_count();
+        ed.command(strprintf("draw arc %d", segs));
+        ed.command(strprintf("drawpoint %g %g %g", c.a.x, c.a.y, c.a.z));
+        ed.command(strprintf("drawpoint %g %g %g", c.b.x, c.b.y, c.b.z));
+        ed.command(strprintf("drawpoint %g %g %g", c.bulge.x, c.bulge.y, c.bulge.z));
+        const Mesh &m = *g->get<MeshFilter>()->mesh;
+        /* The arc's face: one face holding every corner of the arc (and the face beside it the other). */
+        std::vector<Vec3> arc_pts;
+        {
+          bool closed = false;
+          (void)closed;
+        }
+        size_t inside = 0;
+        for (size_t f = 0; f < m.face_count(); f++) {
+          size_t on_arc = 0;
+          for (uint32_t k = 0; k < m.face_size(f); k++) {
+            const Vec3 w = m.positions[m.face_verts(f)[k]] + Vec3(0, 0.5f, 0);
+            /* On the circle through the three points (the arc's corners). */
+            Vec3 cc, nn;
+            (void)nn;
+            const Vec3 a = c.a, b = c.b, q = c.bulge;
+            const Vec3 ab = b - a, aq = q - a, nrm = cross(ab, aq);
+            cc = a + (cross(nrm, ab) * dot(aq, aq) + cross(aq, nrm) * dot(ab, ab)) / (2.0f * dot(nrm, nrm));
+            if (std::fabs(length(w - cc) - length(a - cc)) < 1e-3f && std::fabs(w.y - 1.0f) < 1e-4f) on_arc++;
+          }
+          if (on_arc >= (size_t)(segs / 2) + 1) inside++;
+        }
+        std::printf("    %s (%d segs): faces %zu -> %zu, faces on the arc's middle %zu, wires %zu, closed %d\n", c.name, segs, f0, m.face_count(), inside,
+                    m.loose_edges.size(), (int)closed_manifold(m));
+        /* From the rectangle out to the cube's edge the arc encloses nothing: it only divides the faces it crosses. */
+        const bool encloses = std::string(c.name).find("cube's edge (8") == std::string::npos && std::string(c.name) != "rectangle side to the cube's edge";
+        CHECK(m.loose_edges.empty() && closed_manifold(m) && structurally_valid(m));
+        if (encloses) CHECK(m.face_count() == f0 + 1 && inside >= 1);
+      }
+  });
+  test("inset region: dragging the thickness changes it smoothly, holding at the limit instead of stepping", [&] {
+    const Mesh cube = *primitives::cube();
+    float prev_area = -1.0f, worst_jump = 0.0f;
+    bool grows = true;
+    for (int k = 0; k <= 80; k++) {
+      const float th = 0.01f * k;  // past half the face's width (0.5) the region would fold
+      Mesh m = cube;
+      std::vector<uint8_t> sel(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++) sel[f] = std::fabs(m.face_normal(f).y) > 0.9f;  // top and bottom
+      meshops::inset_region(m, sel, th);
+      float area = 0.0f;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (sel[f]) area += 0.5f * length(m.face_normal(f)) * 0.0f + [&] {
+          Vec3 nw(0.0f);
+          for (uint32_t i = 0; i < m.face_size(f); i++) nw += cross(m.positions[m.face_verts(f)[i]], m.positions[m.face_verts(f)[(i + 1) % m.face_size(f)]]);
+          return 0.5f * length(nw);
+        }();
+      if (prev_area >= 0) {
+        worst_jump = std::max(worst_jump, std::fabs(area - prev_area));
+        grows = grows && area <= prev_area + 1e-5f;
+      }
+      if (std::getenv("BL_INSET_DEBUG")) std::printf("      t %.2f area %.5f selected %zu\n", th, area, (size_t)std::count(sel.begin(), sel.end(), 1));
+      prev_area = area;
+      CHECK(closed_manifold(m));
+    }
+    std::printf("    largest change between 0.01 steps: %.4f (inner area at the end %.5f)\n", worst_jump, prev_area);
+    CHECK(worst_jump < 0.085f && grows && prev_area < 0.05f);  // the steepest natural change is 0.08 per step (two 1 x 1 faces)
+  });
+  test("hard-surface helpers: Array from the menu waits for the mouse, wheel, X / Y / Z and typed values", [&] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    ed.command("edit face");
+    ed.command("fsel facing 0 1 0");
+    ed.command("hs array 3 0.5 0");
+    const Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2 + 50, cy = r.y + r.h / 2 + 40;
+    ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+    ed.command("edittool array");
+    ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+    CHECK(ed.modal_active_for_test());
+    for (int k = 0; k < 2; k++) {
+      platform::Event w = ev(ET::Wheel, cx, cy);
+      w.wheel_y = 1;
+      ed.step_frame_headless({w});
+    }
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_Z)});
+    ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_Z)});
+    for (char c : std::string("1.5")) {
+      platform::Event t;
+      t.type = ET::Text;
+      t.codepoint = (uint32_t)c;
+      t.x = cx;
+      t.y = cy;
+      ed.step_frame_headless({t});
+    }
+    CHECK(ed.modal_active_for_test());
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_ENTER)});
+    ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_ENTER)});
+    CHECK(!ed.modal_active_for_test());
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    float zmax = -1e9f;
+    for (const Vec3 &p : m.positions) zmax = std::max(zmax, p.z);
+    std::printf("    array: %zu faces, furthest z %.3f\n", m.face_count(), zmax);
+    CHECK(m.face_count() == 6 + 4 && std::fabs(std::fabs(zmax) - (0.5f + 4 * 1.5f)) < 1e-3f);
+    /* The others start their helpers too, and Esc leaves the mesh as it was. */
+    for (const char *op : {"grid", "taper", "recess"}) {
+      const size_t f0 = g->get<MeshFilter>()->mesh->face_count();
+      ed.command("fsel facing 0 -1 0");
+      ed.command(std::string("edittool ") + op);
+      ed.step_frame_headless({ev(ET::MouseMove, cx + 30, cy)});
+      CHECK(ed.modal_active_for_test());
+      ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_ESCAPE)});
+      ed.step_frame_headless({ev(ET::KeyUp, cx, cy, platform::KEY_ESCAPE)});
+      CHECK(!ed.modal_active_for_test() && g->get<MeshFilter>()->mesh->face_count() == f0);
+    }
+  });
+  test("push/pull on non-manifold meshes: fins, shared edges and corners, open boxes, stray wires", [&] {
+    struct Case {
+      std::string name;
+      Mesh m;
+      std::vector<size_t> faces;
+    };
+    std::vector<Case> cases;
+    auto add_cube = [](Mesh &m, Vec3 at, float size = 1.0f) {
+      const uint32_t base = (uint32_t)m.vert_count();
+      const Mesh c = *primitives::cube(size);
+      for (Vec3 p : c.positions) m.add_vert(p + at);
+      for (size_t f = 0; f < c.face_count(); f++) {
+        std::vector<uint32_t> v;
+        for (uint32_t k = 0; k < c.face_size(f); k++) v.push_back(base + c.face_verts(f)[k]);
+        m.add_face(v.data(), v.size());
+      }
+    };
+    auto face_facing = [](const Mesh &m, Vec3 n, Vec3 near) {
+      size_t best = SIZE_MAX;
+      float bd = 1e9f;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (dot(normalize(m.face_normal(f)), n) > 0.99f && length(m.face_center(f) - near) < bd) bd = length(m.face_center(f) - near), best = f;
+      return best;
+    };
+    {
+      /* A fin on the cube's top front edge (three faces on that edge); pull the top, and the fin. */
+      Mesh m = *primitives::cube();
+      uint32_t a = UINT32_MAX, b = UINT32_MAX;
+      for (uint32_t v = 0; v < m.vert_count(); v++)
+        if (m.positions[v].y > 0.4f && m.positions[v].z > 0.4f) (a == UINT32_MAX ? a : b) = v;
+      const uint32_t c = m.add_vert(m.positions[b] + Vec3(0, 0.5f, 0.5f)), d = m.add_vert(m.positions[a] + Vec3(0, 0.5f, 0.5f));
+      m.add_face({a, b, c, d});
+      cases.push_back({"fin: the top", m, {face_facing(m, {0, 1, 0}, {0, 0.5f, 0})}});
+      cases.push_back({"fin: the fin itself", m, {m.face_count() - 1}});
+      cases.push_back({"fin: the front", m, {face_facing(m, {0, 0, 1}, {0, 0, 0.5f})}});
+    }
+    {
+      /* Two cubes sharing an edge (four faces on it), welded. */
+      Mesh m;
+      add_cube(m, {0, 0, 0});
+      add_cube(m, {1, 1, 0});
+      meshops::merge_by_distance(m, 1e-5f);
+      cases.push_back({"two cubes on one edge: a top", m, {face_facing(m, {0, 1, 0}, {0, 0.5f, 0})}});
+      cases.push_back({"two cubes on one edge: a side at the edge", m, {face_facing(m, {1, 0, 0}, {0.5f, 0, 0})}});
+    }
+    {
+      /* Two cubes sharing one corner. */
+      Mesh m;
+      add_cube(m, {0, 0, 0});
+      add_cube(m, {1, 1, 1});
+      meshops::merge_by_distance(m, 1e-5f);
+      cases.push_back({"two cubes on one corner: a top", m, {face_facing(m, {0, 1, 0}, {0, 0.5f, 0})}});
+    }
+    {
+      /* An open box (no top): pull a side, push the bottom. */
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> drop(m.face_count(), 0);
+      drop[face_facing(m, {0, 1, 0}, {0, 0.5f, 0})] = 1;
+      meshops::delete_faces(m, drop);
+      cases.push_back({"open box: a side", m, {face_facing(m, {1, 0, 0}, {0.5f, 0, 0})}});
+      cases.push_back({"open box: the bottom", m, {face_facing(m, {0, -1, 0}, {0, -0.5f, 0})}});
+    }
+    {
+      /* A cube with a stray wire edge at a corner, and a loose point. */
+      Mesh m = *primitives::cube();
+      const uint32_t w = m.add_vert({1, 1, 1});
+      m.add_loose_edge(0, w);
+      m.add_vert({3, 3, 3});
+      cases.push_back({"cube with a wire edge and a loose point: a face", m, {face_facing(m, {0, 1, 0}, {0, 0.5f, 0})}});
+    }
+    {
+      /* A face of an internal wall: a cube with a face across its middle (three faces on four edges). */
+      Mesh m = *primitives::cube();
+      std::vector<uint8_t> vs(m.vert_count(), 0);
+      const size_t top = face_facing(m, {0, 1, 0}, {0, 0.5f, 0});
+      (void)top;
+      cases.push_back({"cube: two faces at once with a fin between", m, {face_facing(m, {0, 1, 0}, {0, 0.5f, 0}), face_facing(m, {0, -1, 0}, {0, -0.5f, 0})}});
+    }
+    for (const Case &c : cases)
+      for (float d : {0.3f, -0.2f}) {
+        Mesh m = c.m;
+        std::vector<uint8_t> sel(m.face_count(), 0);
+        bool have = true;
+        for (size_t f : c.faces) {
+          if (f >= m.face_count()) have = false;
+          else sel[f] = 1;
+        }
+        CHECK(have);
+        if (!have) continue;
+        std::vector<Vec3> before_c;
+        std::vector<Vec3> before_n;
+        for (size_t f : c.faces) before_c.push_back(m.face_center(f)), before_n.push_back(normalize(m.face_normal(f)));
+        std::string err;
+        const bool ok = meshops::push_pull_multi(m, sel, d, true, false, nullptr, &err);
+        /* Moved: a selected face now sits d along the old normal from where it was. */
+        size_t moved = 0;
+        for (size_t k = 0; k < before_c.size(); k++)
+          for (size_t f = 0; f < m.face_count(); f++)
+            if (f < sel.size() && sel[f] && length(m.face_center(f) - (before_c[k] + before_n[k] * d)) < 1e-3f) {
+              moved++;
+              break;
+            }
+        std::string why;
+        /* Sound (indices, corners, numbers), with no more edges on 3+ faces than it came with. */
+        auto many = [](const Mesh &mm) {
+          std::unordered_map<uint64_t, int> uses;
+          for (size_t f = 0; f < mm.face_count(); f++)
+            for (uint32_t k = 0; k < mm.face_size(f); k++) uses[Mesh::edge_key(mm.face_verts(f)[k], mm.face_verts(f)[(k + 1) % mm.face_size(f)])]++;
+          size_t n = 0;
+          for (auto &kv : uses) n += kv.second > 2;
+          return n;
+        };
+        bool valid = true;
+        for (const Vec3 &p : m.positions) valid = valid && std::isfinite(p.x + p.y + p.z);
+        for (size_t f = 0; f < m.face_count() && valid; f++) {
+          valid = m.face_size(f) >= 3;
+          for (uint32_t k = 0; k < m.face_size(f) && valid; k++)
+            valid = m.face_verts(f)[k] < m.vert_count() && m.face_verts(f)[k] != m.face_verts(f)[(k + 1) % m.face_size(f)];
+        }
+        /* (Pulling one of two cubes on an edge up presses it against the other along a face: new shared edges there are right.) */
+        if (many(m) > many(c.m) && c.name.find("two cubes on one edge: a top") == std::string::npos)
+          valid = false, why = strprintf("edges on 3+ faces %zu -> %zu", many(c.m), many(m));
+        std::printf("    %s, %+.1f: %s%s, moved %zu/%zu, valid %d %s\n", c.name.c_str(), d, ok ? "ok" : "refused: ", ok ? "" : err.c_str(), moved, before_c.size(),
+                    (int)valid, why.c_str());
+        CHECK(ok && valid && moved == before_c.size());
+      }
+  });
+  test("overlapping elements: no false alarms on ordinary meshes", [&] {
+    struct P {
+      const char *name;
+      MeshPtr m;
+    };
+    Mesh beveled = *primitives::cube();
+    meshops::bevel_modifier(beveled, 0.1f, 3, -1.0f);
+    Mesh sub = meshops::subdivide(*primitives::cube(), 2, true);
+    Mesh drawn = *primitives::cube();
+    {
+      size_t bottom = 0;
+      for (size_t f = 0; f < drawn.face_count(); f++)
+        if (drawn.face_normal(f).y < -0.9f) bottom = f;
+      CHECK(meshops::imprint_loop(drawn, bottom, {Vec3(-0.2f, -0.5f, -0.2f), Vec3(0.2f, -0.5f, -0.2f), Vec3(0.2f, -0.5f, 0.2f), Vec3(-0.2f, -0.5f, 0.2f)}) >= 0);
+    }
+    const P ps[] = {{"cube", primitives::cube()},
+                    {"plane", primitives::plane()},
+                    {"UV sphere", primitives::uv_sphere()},
+                    {"icosphere", primitives::ico_sphere()},
+                    {"cylinder", primitives::cylinder()},
+                    {"cone", primitives::cone()},
+                    {"torus", primitives::torus()},
+                    {"teapot", primitives::teapot()},
+                    {"bevelled cube", std::make_shared<Mesh>(beveled)},
+                    {"subdivided cube", std::make_shared<Mesh>(sub)},
+                    {"rectangle drawn on a cube", std::make_shared<Mesh>(drawn)}};
+    for (const P &p : ps) {
+      const auto vs = meshops::overlapping_vertices(*p.m);
+      const auto es = meshops::overlapping_edges(*p.m);
+      std::printf("    %s: %zu vertex pair(s), %zu edge pair(s)\n", p.name, vs.size(), es.size());
+      for (size_t k = 0; k < es.size() && k < 3; k++) {
+        const uint32_t a = (uint32_t)(es[k].first >> 32), b = (uint32_t)(es[k].first & 0xFFFFFFFF), c = (uint32_t)(es[k].second >> 32),
+                       d = (uint32_t)(es[k].second & 0xFFFFFFFF);
+        const Vec3 A = p.m->positions[a], B = p.m->positions[b], C = p.m->positions[c], D = p.m->positions[d];
+        std::printf("      %u-%u (%.3f %.3f %.3f)-(%.3f %.3f %.3f)  %u-%u (%.3f %.3f %.3f)-(%.3f %.3f %.3f)\n", a, b, A.x, A.y, A.z, B.x, B.y, B.z, c, d, C.x,
+                    C.y, C.z, D.x, D.y, D.z);
+      }
+      CHECK(vs.empty() && es.empty());
+    }
+  });
+  test("overlapping edges: only the shorter edge of a pair is marked (a piece on a long edge, not the long edge)", [&] {
+    /* A quad whose bottom edge has a wire piece lying on its middle third. */
+    Mesh m;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(3, 0, 0), Vec3(3, 0, 1), Vec3(0, 0, 1)}) m.add_vert(p);
+    m.add_face({0, 3, 2, 1});
+    const uint32_t a = m.add_vert({1, 0, 0}), b = m.add_vert({2, 0, 0});
+    m.add_loose_edge(a, b);
+    const auto es = meshops::overlapping_edges(m);
+    CHECK(es.size() == 1);
+    if (es.size() == 1) CHECK(Editor::overlap_shorter(m, es[0]) == Mesh::edge_key(a, b));
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    ed.selected_object()->get<MeshFilter>()->mesh = std::make_shared<Mesh>(m);
+    ed.command("edit vertex");
+    ed.command("overlaps select");
+    size_t sel = 0;
+    for (uint32_t v = 0; v < m.vert_count(); v++) sel += ed.vert_selected_for_test(v);
+    std::printf("    selected %zu vertices (the piece's two)\n", sel);
+    CHECK(sel == 2 && ed.vert_selected_for_test(a) && ed.vert_selected_for_test(b));
+  });
+  test("tool settings live in the tool's helper: Shell, Thicken and Draft are adjustable (F9) operations", [&] {
+    for (const char *op : {"shell", "thicken", "draft"}) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      ed.command("edit face");
+      ed.command(std::string("fsel facing ") + (std::string(op) == "draft" ? "1 0 0" : "0 1 0"));
+      ed.command(std::string("editop ") + op);
+      ed.step_frame_headless();
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::printf("    %s: %zu faces, last operation %s (%.3g), closed %d\n", op, m.face_count(), ed.last_op_name_for_test().c_str(), ed.last_op_amount_for_test(),
+                  (int)closed_manifold(m));
+      CHECK(ed.last_op_name_for_test() == op && closed_manifold(m) && m.face_count() >= 6);
+    }
+  });
+  test("Merge Coplanar on the selected faces only (the rest keeps its edges); nothing selected: the whole mesh", [&] {
+    /* The 10 x 10 Plane: a 3 x 3 block of its cells selected. */
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Plane");
+    GameObject *g = ed.selected_object();
+    const Mesh &m0 = *g->get<MeshFilter>()->mesh;
+    CHECK(m0.face_count() == 100);
+    std::string fs = "fsel";
+    size_t picked = 0;
+    for (size_t f = 0; f < m0.face_count(); f++) {
+      const Vec3 c = m0.face_center(f);
+      if (c.x > -1.6f && c.x < 1.0f && c.z > -1.6f && c.z < 1.0f) fs += strprintf(" %zu", f), picked++;  // cells at -1.5, -0.5, 0.5
+    }
+    CHECK(picked == 9);
+    ed.command("edit face");
+    ed.command(fs);
+    ed.command("editop dissolve_limited");
+    const Mesh &m1 = *g->get<MeshFilter>()->mesh;
+    size_t sel = 0, sel_corners = 0;
+    for (size_t f = 0; f < m1.face_count(); f++)
+      if (ed.edit_face_selected(f)) sel++, sel_corners = m1.face_size(f);
+    std::printf("    3 x 3 block merged: %zu faces (100 - 9 + 1 = 92), %zu selected with %zu corners\n", m1.face_count(), sel, sel_corners);
+    CHECK(m1.face_count() == 92 && sel == 1 && closed_manifold(m1) == closed_manifold(m0) && structurally_valid(m1));
+    /* The merged face keeps the corners its unselected neighbours share (no T-junctions): 12 around a 3 x 3 block. */
+    CHECK(sel_corners == 12);
+    /* Two separate blocks: each becomes its own face. */
+    ed.command("edit off");
+    ed.command("create Plane");
+    GameObject *g2 = ed.selected_object();
+    const Mesh &p0 = *g2->get<MeshFilter>()->mesh;
+    std::string fs2 = "fsel";
+    for (size_t f = 0; f < p0.face_count(); f++) {
+      const Vec3 c = p0.face_center(f);
+      if ((c.x < -3 && c.z < -3) || (c.x > 3 && c.z > 3)) fs2 += strprintf(" %zu", f);
+    }
+    ed.command("edit face");
+    ed.command(fs2);
+    ed.command("editop dissolve_limited");
+    const Mesh &p1 = *g2->get<MeshFilter>()->mesh;
+    std::printf("    two 2 x 2 corners merged: %zu faces (100 - 8 + 2 = 94)\n", p1.face_count());
+    CHECK(p1.face_count() == 94);
+    /* Nothing selected: the whole plane is one face. */
+    ed.command("edit off");
+    ed.command("create Plane");
+    GameObject *g3 = ed.selected_object();
+    ed.command("edit face");
+    ed.command("fsel");
+    ed.command("editop dissolve_limited");
+    std::printf("    nothing selected: %zu face(s)\n", g3->get<MeshFilter>()->mesh->face_count());
+    CHECK(g3->get<MeshFilter>()->mesh->face_count() == 1);
+  });
+  test("array: copies of a drawn shape are cut into the surface like the original, never laid on top of it", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({0, 0.5f, 0});
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    ed.command("drawpoint -0.4 1 -0.05");  // 0.2 along X, 0.1 along Z: the long side (Array's X) is X
+    ed.command("drawpoint -0.2 1 0.05");
+    {
+      const Recti vr = ed.scene_view_rect();
+      ed.step_frame_headless({ev(ET::KeyDown, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+      ed.step_frame_headless({ev(ET::KeyUp, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+    }
+    const Mesh &m0 = *g->get<MeshFilter>()->mesh;
+    size_t inner = SIZE_MAX;
+    for (size_t f = 0; f < m0.face_count(); f++)
+      if (m0.face_normal(f).y > 0.9f && std::fabs(meshops::face_area_center(m0, f).x + 0.3f) < 1e-3f) inner = f;
+    CHECK(inner != SIZE_MAX);
+    if (inner == SIZE_MAX) return;
+    ed.command(strprintf("fsel %zu", inner));
+    ed.command("hs array 3 0.3 0");
+    ed.command("editop array");
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    size_t sel = 0;
+    for (size_t f = 0; f < m.face_count(); f++) sel += ed.edit_face_selected(f);
+    std::printf("    arrayed: %zu faces, %zu selected, overlaps %zu, closed %d, bad triangulations %zu\n", m.face_count(), sel, overlapping_face_pairs(m),
+                (int)closed_manifold(m), bad_triangulations(m));
+    if (!closed_manifold(m)) {
+      std::unordered_map<uint64_t, int> dir;
+      for (size_t f = 0; f < m.face_count(); f++)
+        for (uint32_t i = 0; i < m.face_size(f); i++) {
+          const uint32_t a = m.face_verts(f)[i], b = m.face_verts(f)[(i + 1) % m.face_size(f)];
+          dir[Mesh::edge_key(a, b)] += a < b ? 1 : 16;
+        }
+      for (auto &[k, c] : dir)
+        if (c != 17) {
+          const Vec3 A = m.positions[(uint32_t)(k >> 32)], B = m.positions[(uint32_t)(k & 0xFFFFFFFF)];
+          std::printf("      open edge %u-%u x%d/%d: (%.3f %.3f %.3f)-(%.3f %.3f %.3f)\n", (uint32_t)(k >> 32), (uint32_t)(k & 0xFFFFFFFF), c % 16, c / 16, A.x, A.y,
+                      A.z, B.x, B.y, B.z);
+        }
+    }
+    CHECK(sel == 3 && overlapping_face_pairs(m) == 0 && closed_manifold(m) && bad_triangulations(m) == 0);
+    /* They behave like drawn shapes: Push/Pull the three into the box at once. */
+    ed.command("editop push_pull");
+    const Mesh &pm = *g->get<MeshFilter>()->mesh;
+    std::printf("    pushed together: %zu faces, closed %d, overlaps %zu\n", pm.face_count(), (int)closed_manifold(pm), overlapping_face_pairs(pm));
+    CHECK(closed_manifold(pm) && overlapping_face_pairs(pm) == 0);
+    /* Off the surface (the box's whole top): separate copies, as before. */
+    Editor ed2;
+    ed2.init_headless(900, 600);
+    ed2.step_frame_headless();
+    ed2.command("create Cube");
+    GameObject *g2 = ed2.selected_object();
+    ed2.command("edit face");
+    ed2.command("fsel facing 0 1 0");
+    ed2.command("hs array 2 1.5 0");
+    ed2.command("editop array");
+    std::printf("    nothing under the copy: %zu faces\n", g2->get<MeshFilter>()->mesh->face_count());
+    CHECK(g2->get<MeshFilter>()->mesh->face_count() == 7);
+  });
+  test("array: an arched doorway (a rectangle with an arc on top) on a wall copies cut in cleanly", [&] {
+    for (int segs : {8, 16})
+      for (int count : {2, 3}) {
+        Editor ed;
+        ed.init_headless(1000, 700);
+        ed.step_frame_headless();
+        ed.command("create Cube");
+        GameObject *g = ed.selected_object();
+        {
+          Mesh &w = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+          for (Vec3 &p : w.positions) p = Vec3(p.x * 5.0f, p.y * 3.0f + 1.5f, p.z * 0.5f);
+          w.touch();
+        }
+        g->set_world_position({0, 0, 0});
+        ed.command("edit face");
+        ed.command("draw rectangle");
+        ed.command("drawpoint -0.5 0.5 -0.25");
+        ed.command("drawpoint 0.5 1.5 -0.25");
+        ed.command(strprintf("draw arc %d", segs));
+        ed.command("drawpoint -0.5 1.5 -0.25");
+        ed.command("drawpoint 0.5 1.5 -0.25");
+        ed.command("drawpoint 0 2 -0.25");
+        {
+          const Recti vr = ed.scene_view_rect();
+          ed.step_frame_headless({ev(ET::KeyDown, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+          ed.step_frame_headless({ev(ET::KeyUp, vr.x + vr.w / 2, vr.y + vr.h / 2, platform::KEY_ESCAPE)});
+        }
+        const Mesh &m0 = *g->get<MeshFilter>()->mesh;
+        std::string fs = "fsel";
+        float area0 = 0.0f;
+        auto area_of = [](const Mesh &mm, size_t f) {
+          Vec3 nw(0.0f);
+          for (uint32_t i = 0; i < mm.face_size(f); i++) nw += cross(mm.positions[mm.face_verts(f)[i]], mm.positions[mm.face_verts(f)[(i + 1) % mm.face_size(f)]]);
+          return 0.5f * length(nw);
+        };
+        for (size_t f = 0; f < m0.face_count(); f++) {
+          bool in = m0.face_normal(f).z < -0.99f;
+          for (uint32_t k = 0; k < m0.face_size(f) && in; k++) {
+            const Vec3 p = m0.positions[m0.face_verts(f)[k]];
+            in = std::fabs(p.x) < 0.5f + 1e-4f && p.y > 0.5f - 1e-4f && p.y < 2.0f + 1e-4f;
+          }
+          if (in) fs += strprintf(" %zu", f), area0 += area_of(m0, f);
+        }
+        ed.command(fs);
+        /* Along the wall: whichever of the shape's own axes runs along X. */
+        Quat q;
+        CHECK(ed.selection_frame_for_test(q));
+        const int axis = std::fabs(q.rotate({1, 0, 0}).x) > 0.9f ? 0 : 2;
+        ed.command(strprintf("hs array %d 1.3 %d", count, axis));
+        ed.command("editop array");
+        const Mesh &m = *g->get<MeshFilter>()->mesh;
+        float area = 0.0f;
+        size_t sel = 0;
+        for (size_t f = 0; f < m.face_count(); f++)
+          if (ed.edit_face_selected(f)) sel++, area += area_of(m, f);
+        /* Each copy cut in: as much doorway area as count shapes, with the wall's own faces untouched behind. */
+        std::printf("    %d segments, %d in all: %zu faces, %zu selected, area %.4f of %.4f, overlaps %zu, closed %d, bad %zu, wires %zu\n", segs, count,
+                    m.face_count(), sel, area, area0 * count, overlapping_face_pairs(m), (int)closed_manifold(m), bad_triangulations(m), m.loose_edges.size());
+        /* The wall runs to x = 2.5: copies at 1.3 fit, the one at 2.6 hangs off and only its part on the wall (x 2.1 .. 2.5) is cut in. */
+        /* That part: 0.4 of the 1 wide doorway below the arch, plus the slice of the (polygonal) arch over it,
+         * a little under the round slice r^2 acos(d / r) - d sqrt(r^2 - d^2), halved, with r = 0.5, d = 0.1 (0.147). */
+        const float extra = count == 2 ? 0.0f : area - area0 * 2 - 0.4f;
+        CHECK((count == 2 ? std::fabs(area - area0 * 2) < 1e-3f : extra > 0.12f && extra < 0.1468f) && overlapping_face_pairs(m) == 0 &&
+              closed_manifold(m) && bad_triangulations(m) == 0 && m.loose_edges.empty());
+        /* All of them pushed through together: holes (each copy a doorway). */
+        ed.command("editop push_pull");
+      }
   });
 }

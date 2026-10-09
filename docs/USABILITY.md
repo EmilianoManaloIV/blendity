@@ -117,6 +117,25 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | The keymap preset dropdown in Preferences closed the dialog. | Dropdowns open over dialogs and close on their own. |
 | Materials could be made but never deleted. | Delete Material (asks first; slots emptied; asset file to the Recycle Bin). |
 | Extruding or insetting a region that touches itself at a vertex broke the mesh. | One vertex copy per side of the pinch. |
+| Ctrl+B sometimes bevelled at once, and the helper stopped at two segments. | Auto Smooth no longer ends the helper; the wheel goes to 64. |
+| Make Face and Smart Fill were two tools, and F worked only in some modes and over the Scene view. | One Make Face, in every mode, with its key anywhere in Edit Mode. |
+| Axis planes (X / Y / Z) were a separate idea from guides. | X / Y / Z and Ctrl+click on an edge lay guides; polylines follow them in 3D. |
+| A shape drawn at an angle got a world-aligned object and gizmo. | The new object sits on the shape; Local in Edit Mode follows the selection. |
+| Overlapping vertices and edges were invisible. | Live markers in Edit Mode, with Select and Merge. |
+| Follow needed a drawn wire path. | It also takes picked edges (UModeler's way). |
+| Follow with picked edges ran beside them (a copy started at the face's centre). | It runs along the edges where they are. |
+| An Open Space Plane chooser duplicated what guides do. | Removed: off the mesh is the ground; guides do the rest. |
+| Push/Pull took one connected group of faces. | Several groups at once, or every face along its own normal (Each Face). |
+| A bevel was always round. | Bevel Profile: concave to convex (Inspector, F9, Alt+wheel in Ctrl+B, the modifier). |
+| An arc across the faces round a drawn shape became loose wire edges. | It cuts every face it crosses, and the area inside it is one face. |
+| Insetting several faces too far jumped between halves. | It slides up to the furthest inset that doesn't fold and holds there. |
+| Tool numbers (thickness, angle, distance, segments...) crowded the Inspector under Draw. | They are in each tool's helper / F9 and kept for next time; the Inspector keeps switches. |
+| Array, Grid, Pipe, Taper and Recess ran at once with Inspector values. | Each opens a drag helper (mouse, wheel, X / Y / Z, typing) and then F9. |
+| Push/Pull refused faces beside a fin or a second solid on the edge. | Only faces carrying the surface on across the edge count. |
+| A long edge with a piece lying on it was marked overlapping too. | Only the shorter edge of a pair is marked. |
+| Merge Coplanar always took the whole mesh. | With faces selected it merges only those. |
+| Array copies of a drawn shape lay on top of the surface (z-fighting). | They are cut into it like the original. |
+| An arch drawn on a rectangle stayed two faces, and its array copies too; copies past a wall's edge lay over it. | The arch is one face; a copy past the edge is clipped to the surface and cut in. |
 
 ## Still worth doing
 

@@ -1862,7 +1862,7 @@ void Editor::mesh_op(const std::string &op) {
       Mesh &m = *mesh_make_mutable(mf->mesh);
       const meshops::SmartFillResult r = meshops::smart_fill(m);
       if (r.loops || r.welded) n++;
-      Log::info("Smart Fill on '%s': %zu hole(s) filled, %zu crack(s) welded", g->name.c_str(), r.loops, r.welded);
+      Log::info("Make Face on '%s': %zu hole(s) filled, %zu crack(s) welded", g->name.c_str(), r.loops, r.welded);
       continue;
     }
     if (op == "delete_loose") {
@@ -2209,6 +2209,34 @@ void Editor::run_console_command(const std::string &line) {
     base->asset_path.clear();
     new_material_asset(base, false);
   }
+  else if (c == "bevelprofile") bevel_profile_ = clampf((float)std::atof(arg(1, "0.5").c_str()), 0.0f, 1.0f);  // bevelprofile <0..1>
+  else if (c == "pushpull") {
+    /* pushpull individual on|off: Push/Pull Each Face */
+    if (to_lower(arg(1, "")) == "individual") pp_individual_ = to_lower(arg(2, "on")) != "off";
+  }
+  else if (c == "hs") {
+    /* hs grid <cols> <rows> | pipe <radius> <sides> | array <count> <spacing> <axis 0-2> | taper <distance> <scale> |
+     * recess <border> <depth>: the hard-surface tools' settings */
+    const std::string s = to_lower(arg(1, ""));
+    auto f = [&](int i, float d) { return t.size() > (size_t)i ? (float)std::atof(t[(size_t)i].c_str()) : d; };
+    if (s == "grid") grid_cols_ = (int)f(2, 4), grid_rows_ = (int)f(3, 4);
+    else if (s == "pipe") pipe_radius_ = f(2, 0.05f), pipe_sides_ = (int)f(3, 12);
+    else if (s == "array") array_count_ = (int)f(2, 3), array_spacing_ = f(3, 0.5f), array_axis_ = (int)f(4, 0);
+    else if (s == "taper") taper_distance_ = f(2, 0.3f), taper_scale_ = f(3, 0.6f);
+    else if (s == "recess") recess_border_ = f(2, 0.05f), recess_depth_ = f(3, 0.05f);
+    else Log::warn("hs grid|pipe|array|taper|recess <values>");
+  }
+  else if (c == "overlaps") {
+    /* overlaps [select|merge|show on|off]: overlapping vertices and edges of the mesh being edited */
+    const std::string s = to_lower(arg(1, ""));
+    if (s == "select") overlap_select();
+    else if (s == "merge") overlap_merge();
+    else if (s == "show") overlap_show_ = to_lower(arg(2, "on")) != "off";
+    else {
+      overlap_refresh();
+      Log::info("%zu overlapping vertex pair(s), %zu overlapping edge pair(s)", overlap_.verts.size(), overlap_.edges.size());
+    }
+  }
   else if (c == "deletemat") {
     /* deletemat <name | Assets/Materials/x.mat>: delete a material without asking (slots emptied, the file trashed) */
     const std::string what = t.size() > 1 ? line.substr(line.find(' ') + 1) : std::string();
@@ -2246,15 +2274,7 @@ void Editor::run_console_command(const std::string &line) {
     const std::string s = to_lower(arg(1, "")), v = to_lower(arg(2, ""));
     if (s == "square") draw_uniform_ = v != "off";
     else if (s == "axes") draw_global_axes_ = v == "global" || v == "world";
-    else if (s == "plane") {
-      /* drawmode plane ground|front|side|view|face [offset] */
-      static const char *names[] = {"ground", "front", "side", "view", "face"};
-      for (int k = 0; k < kDrawSpacePlaneCount; k++)
-        if (v == names[k]) draw_space_mode_ = k;
-      if (t.size() > 3) draw_space_offset_ = (float)std::atof(t[3].c_str());
-    }
-    else if (s == "space") draw_space_only_ = v != "off";
-    else if (s == "axis") draw_set_axis_plane(v == "x" ? 1 : v == "y" ? 2 : v == "z" ? 3 : 0);  // drawmode axis x|y|z|none
+    else if (s == "perp") draw_perp_snap_ = v != "off";  // drawmode perp on|off
     else if (s == "facecenter") draw_face_center_ = v != "off";
     else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
     else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
@@ -2440,6 +2460,7 @@ void Editor::run_console_command(const std::string &line) {
     inset_individual_ = to_lower(arg(1, "individual")) != "region";
     if (t.size() > 2) (inset_individual_ ? inset_amount_ : inset_thickness_) = std::max(0.0f, (float)std::atof(t[2].c_str()));
   }
+  else if (c == "edittool") edit_tool(arg(1, "fill"));  // edittool <op>: as the menus and buttons start it (helpers included)
   else if (c == "editop") {
     const std::string op = arg(1, "fill");
     if (op == "knife" || op == "origin_to_selection") edit_tool(op);  /* tools, not mesh operators */

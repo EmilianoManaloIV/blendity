@@ -22,7 +22,7 @@ namespace bl::meshops {
 
 /* ------------------------------------------------------------------ Bevel */
 
-bool bevel_modifier(Mesh &m, float width, int segments, float angle_limit_deg, std::string *error) {
+bool bevel_modifier(Mesh &m, float width, int segments, float angle_limit_deg, std::string *error, float profile) {
   if (!std::isfinite(width) || width <= 0.0f || m.face_count() == 0 || !std::isfinite(angle_limit_deg)) return false;
   /* Edges between two faces meeting at more than the limit (Blender: Limit Method > Angle). */
   std::unordered_map<uint64_t, std::pair<int, int>> faces_of;
@@ -46,7 +46,7 @@ bool bevel_modifier(Mesh &m, float width, int segments, float angle_limit_deg, s
   if (edges.empty()) return false;
   EdgeSelectionScope scope(&edges);
   std::vector<uint8_t> vs(m.vert_count(), 1), fs(m.face_count(), 0);
-  return bevel_edges(m, vs, fs, width, std::max(1, segments), error, true);
+  return bevel_edges(m, vs, fs, width, std::max(1, segments), error, true, profile);
 }
 
 /* ------------------------------------------------------------ Triangulate */

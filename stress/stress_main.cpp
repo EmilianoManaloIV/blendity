@@ -2193,6 +2193,12 @@ static void test_curved_surfaces(Report &rep, const Options &o) {
               }
               return ok;
             });
+    for (size_t r = 0; r < regions.size(); r++)
+      for (float d : {0.05f * s, -0.05f * s})
+        run(strprintf("push/pull each face of region %zu by %.3g", r, d), true, [&](Mesh &m) {
+          std::vector<uint8_t> sel = regions[r];
+          return meshops::push_pull_multi(m, sel, d, true, true);
+        });
     /* Inset, Extrude, Bevel, Poke, Triangulate on curved regions. */
     for (size_t r = 0; r < regions.size(); r++) {
       for (float th : {0.01f * s, 0.2f * s})
@@ -2230,6 +2236,35 @@ static void test_curved_surfaces(Report &rep, const Options &o) {
         sel.assign(m.face_count(), 1);
         meshops::tris_to_quads(m, sel, 40.0f);
         return true;
+      });
+      /* The hard-surface tools (Fluent 4) on curved regions. */
+      run(strprintf("grid region %zu", r), true, [&](Mesh &m) {
+        std::vector<uint8_t> sel = regions[r];
+        meshops::grid_faces(m, sel, 3, 2);
+        return true;
+      });
+      for (float depth : {0.02f * s, -0.02f * s})
+        run(strprintf("recess region %zu by %.3g", r, depth), true, [&](Mesh &m) {
+          std::vector<uint8_t> sel = regions[r];
+          meshops::recess(m, sel, 0.01f * s, depth);
+          return true;
+        });
+      run(strprintf("taper extrude region %zu", r), true, [&](Mesh &m) {
+        std::vector<uint8_t> sel = regions[r];
+        meshops::extrude_taper(m, sel, 0.1f * s, 0.5f);
+        return true;
+      });
+      run(strprintf("array region %zu", r), false, [&](Mesh &m) {
+        std::vector<uint8_t> sel = regions[r];
+        return meshops::array_faces(m, sel, 3, Vec3(0.1f, 0.05f, 0.0f) * s) > 0;
+      });
+      run(strprintf("pipe along region %zu's outline", r), false, [&](Mesh &m) {
+        /* A chain of edges: the region's first face's corners, as an open path. */
+        size_t f = 0;
+        while (f < m.face_count() && !regions[r][f]) f++;
+        if (f >= m.face_count()) return false;
+        std::vector<uint32_t> path(m.face_verts(f), m.face_verts(f) + m.face_size(f));
+        return meshops::pipe(m, path, 0.01f * s, 6);
       });
       /* A hole in the curved surface, closed again by Smart Fill. */
       /* (Not required to close: a lobe that is one face's outline - a fin left between two deleted faces - is left open.) */

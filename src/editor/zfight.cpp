@@ -224,4 +224,134 @@ void Editor::draw_zfight_panel(ui::Layout &lay) {
   if (zfight_.size() > 30) u.label(lay.row(), strprintf("... and %zu more", zfight_.size() - 30), u.theme.text_dim);
 }
 
+/* ===================================================================== */
+/* Overlapping vertices and edges                                         */
+/* ===================================================================== */
+
+/* Of two edges along each other, the shorter one is the trouble (a piece lying on a longer edge -
+ * a T-junction - or one of two doubled edges); the longer edge is marked only through it. */
+uint64_t Editor::overlap_shorter(const Mesh &m, const std::pair<uint64_t, uint64_t> &p) {
+  auto len = [&](uint64_t k) {
+    const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+    return a < m.vert_count() && b < m.vert_count() ? length(m.positions[b] - m.positions[a]) : 0.0f;
+  };
+  return len(p.second) < len(p.first) ? p.second : p.first;
+}
+
+void Editor::overlap_refresh() {
+  GameObject *g = edit_mode_ ? edit_object() : nullptr;
+  const Mesh *m = g && edit_mesh_ptr() ? edit_mesh_ptr()->get() : nullptr;
+  if (!m) {
+    overlap_ = OverlapCache{};
+    return;
+  }
+  if (overlap_.mesh == m && overlap_.version == m->version && overlap_.obj == g->id) return;
+  overlap_.mesh = m;
+  overlap_.version = m->version;
+  overlap_.obj = g->id;
+  overlap_.verts.clear();
+  overlap_.edges.clear();
+  if (m->vert_count() > 200000) return;  // too big to check on every change
+  overlap_.verts = meshops::overlapping_vertices(*m, overlap_eps_);
+  overlap_.edges = meshops::overlapping_edges(*m, overlap_eps_);
+}
+
+/* Yellow rings on vertices lying on top of each other, magenta lines on edges that do. */
+void Editor::draw_overlap_overlay(const Recti &view) {
+  if (!overlap_show_ || !edit_mode_) return;
+  if (drag_ == Drag::Gizmo || xf_.active) return;  // not re-checked on every frame of a drag
+  overlap_refresh();
+  GameObject *g = edit_object();
+  if (!g || (overlap_.verts.empty() && overlap_.edges.empty())) return;
+  const Mesh &m = **edit_mesh_ptr();
+  const Mat4 &w = g->world_matrix();
+  auto &u = ui_;
+  u.canvas.push_clip(view);
+  for (size_t i = 0; i < overlap_.edges.size() && i < 2000; i++)
+    for (uint64_t k : {overlap_shorter(m, overlap_.edges[i])}) {
+      Vec2 a, b;
+      float za, zb;
+      const uint32_t v0 = (uint32_t)(k >> 32), v1 = (uint32_t)(k & 0xFFFFFFFF);
+      if (v0 >= m.vert_count() || v1 >= m.vert_count()) continue;
+      if (!scene_r3d_.project(w.point(m.positions[v0]), a, za) || !scene_r3d_.project(w.point(m.positions[v1]), b, zb)) continue;
+      u.canvas.line(view.x + a.x, view.y + a.y, view.x + b.x, view.y + b.y, Color::hex(0xFF40FF), 2.5f);
+    }
+  for (size_t i = 0; i < overlap_.verts.size() && i < 4000; i++) {
+    const uint32_t v = overlap_.verts[i].first;
+    if (v >= m.vert_count()) continue;
+    Vec2 s;
+    float z;
+    if (!scene_r3d_.project(w.point(m.positions[v]), s, z)) continue;
+    const float r = (float)u.px(5);
+    u.canvas.circle(view.x + s.x, view.y + s.y, r, Color::hex(0xFFE030), 2.0f);
+  }
+  u.canvas.pop_clip();
+}
+
+size_t Editor::overlap_select() {
+  overlap_refresh();
+  if (!edit_mode_ || !edit_object()) return 0;
+  const Mesh &m = **edit_mesh_ptr();
+  vert_sel_.assign(m.vert_count(), 0);
+  size_t n = 0;
+  auto pick = [&](uint32_t v) {
+    if (v < vert_sel_.size() && !vert_sel_[v]) vert_sel_[v] = 1, n++;
+  };
+  for (auto &p : overlap_.verts) pick(p.first), pick(p.second);
+  const Mesh &mm = **edit_mesh_ptr();
+  for (auto &p : overlap_.edges) {
+    const uint64_t k = overlap_shorter(mm, p);  // the piece lying on the other edge, not the edge it lies on
+    pick((uint32_t)(k >> 32)), pick((uint32_t)(k & 0xFFFFFFFF));
+  }
+  if (elem_ == EditElement::Face) set_edit_element(EditElement::Vertex);
+  face_sel_.assign(m.face_count(), 0);
+  if (elem_ == EditElement::Edge) edges_from_verts();
+  Log::info("Selected %zu vertices: %zu overlapping vertex pair(s) and the shorter edge of %zu overlapping pair(s)", n, overlap_.verts.size(),
+            overlap_.edges.size());
+  return n;
+}
+
+size_t Editor::overlap_merge() {
+  overlap_refresh();
+  if (!edit_mode_ || !edit_object() || overlap_.verts.empty()) {
+    if (!overlap_.edges.empty()) Log::warn("The overlapping edges have no doubled vertices to weld: select them and use Dissolve or Merge");
+    return 0;
+  }
+  MeshPtr &mp = *edit_mesh_ptr();
+  Mesh &m = *mesh_make_mutable(mp);
+  std::vector<uint8_t> sel(m.vert_count(), 0);
+  for (auto &p : overlap_.verts) sel[p.first] = sel[p.second] = 1;
+  float eps = overlap_eps_;
+  if (!(eps > 0)) eps = 1e-5f * std::max(1e-3f, length(m.bounds().extent()));
+  const size_t n = meshops::merge_by_distance_selected(m, eps * 1.01f, sel);
+  m.touch();
+  vert_sel_.assign(m.vert_count(), 0);
+  face_sel_.assign(m.face_count(), 0);
+  edge_sel_.clear();
+  mark_changed("Merge Overlapping Vertices");
+  Log::info("Merged %zu overlapping vertices", n);
+  return n;
+}
+
+void Editor::draw_overlap_panel(ui::Layout &lay) {
+  auto &u = ui_;
+  overlap_refresh();
+  if (!edit_mode_ || !edit_object()) {
+    u.label(lay.row(), "Edit a mesh (Tab) to see overlapping vertices and edges.", u.theme.text_dim);
+    return;
+  }
+  Recti r = lay.row();
+  u.label({r.x + u.px(4), r.y, r.w - u.px(8), r.h},
+          strprintf("%zu overlapping vertex pair(s), %zu overlapping edge pair(s)", overlap_.verts.size(), overlap_.edges.size()),
+          overlap_.verts.empty() && overlap_.edges.empty() ? u.theme.text_dim : u.theme.text);
+  Recti b = lay.row(u.row_h() + u.px(2));
+  const int bw = (b.w - u.px(12)) / 3;
+  if (u.button({b.x + u.px(4), b.y, bw, b.h}, overlap_show_ ? "Show (on)" : "Show (off)", overlap_show_)) overlap_show_ = !overlap_show_;
+  u.tooltip("Yellow rings on vertices lying on top of each other, magenta lines on edges that run along each other.");
+  if (u.button({b.x + u.px(6) + bw, b.y, bw, b.h}, "Select")) overlap_select();
+  u.tooltip("Select the vertices involved (vertex mode).");
+  if (u.button({b.x + u.px(8) + 2 * bw, b.y, bw, b.h}, "Merge")) overlap_merge();
+  u.tooltip("Weld the overlapping vertices (doubled edges on them become one). Blender: Merge by Distance on them.");
+}
+
 }  // namespace bl

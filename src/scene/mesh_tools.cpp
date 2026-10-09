@@ -493,6 +493,7 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
   }
   auto loop_of = [&](size_t f) { return std::vector<uint32_t>(m.face_verts(f), m.face_verts(f) + m.face_size(f)); };
   std::vector<uint8_t> seen(nf, 0), drop(nf, 0);
+  std::unordered_map<uint64_t, std::vector<uint32_t>> full_edge_faces;  // every face, built when a ring has to grow
   struct Patch {
     std::vector<uint32_t> outer, inner;
     Vec3 n;
@@ -533,70 +534,116 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
             stack.push_back(g);
           }
     }
-    /* Its outline: edges used once within it, which must make two loops. */
-    std::unordered_map<uint64_t, int> uses;
-    for (uint32_t f : region) {
-      const uint32_t n = m.face_size(f);
-      for (uint32_t i = 0; i < n; i++) uses[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % n])]++;
-    }
-    std::unordered_map<uint32_t, std::vector<uint32_t>> nb;
-    for (auto &[k, c] : uses)
-      if (c == 1) {
-        const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
-        nb[a].push_back(b);
-        nb[b].push_back(a);
-      }
-    bool simple = !nb.empty();
-    for (auto &kv : nb) simple = simple && kv.second.size() == 2;
-    if (!simple) continue;
-    std::vector<std::vector<uint32_t>> loops;
-    std::unordered_set<uint32_t> walked;
-    for (auto &kv : nb) {
-      if (walked.count(kv.first)) continue;
-      std::vector<uint32_t> loop;
-      for (uint32_t prev = UINT32_MAX, cur = kv.first;;) {
-        loop.push_back(cur);
-        walked.insert(cur);
-        const auto &ns = nb[cur];
-        const uint32_t next = ns[0] != prev ? ns[0] : ns[1];
-        prev = cur;
-        cur = next;
-        if (cur == kv.first || walked.count(cur)) break;
-      }
-      loops.push_back(std::move(loop));
-    }
-    if (loops.size() != 2 || loops[0].size() < 3 || loops[1].size() < 3) continue;
-    /* Which way it faces: a face beside it in the same plane that did not fold (the moved
-     * shape itself, or the face around the ring), else the ring's own larger share. */
+    /* Its outline must be two loops, the moved shape's inside the other. When the shape was
+     * turned or moved past the faces the ring is made of (a rectangle drawn across a grid's
+     * cells, turned), the flat faces around it join the ring, a band at a time. */
+    std::unordered_set<uint32_t> in_region(region.begin(), region.end());
+    std::vector<uint32_t> outer, inner;
     Vec3 n = pn;
-    float vote = 0.0f;
-    bool from_neighbour = false;
-    for (const auto &loop : loops)
-      for (size_t i = 0; i < loop.size() && !from_neighbour; i++)
-        for (uint32_t g : edge_faces[Mesh::edge_key(loop[i], loop[(i + 1) % loop.size()])])
-          if (!cand[g] && flat(g)) {
-            const Vec3 gn = loop_newell(m, loop_of(g));
-            if (length(gn) > 1e-10f) {
-              vote = dot(gn, pn);
-              from_neighbour = true;
-              break;
+    bool usable = false;
+    for (int grow = 0; grow <= 8 && !usable; grow++) {
+      if (grow > 0) {
+        if (full_edge_faces.empty())
+          for (size_t f = 0; f < nf; f++)
+            for (uint32_t i = 0; i < m.face_size(f); i++)
+              full_edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])].push_back((uint32_t)f);
+        std::vector<uint32_t> add;
+        for (uint32_t f : region)
+          for (uint32_t i = 0; i < m.face_size(f); i++)
+            for (uint32_t g : full_edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])]) {
+              if (in_region.count(g) || !flat(g)) continue;
+              bool all_moved = true;
+              for (uint32_t k = 0; k < m.face_size(g); k++) all_moved = all_moved && is_moved(m.face_verts(g)[k]);
+              if (all_moved) continue;  // the moved shape itself
+              in_region.insert(g);
+              add.push_back(g);
             }
-          }
-    if (!from_neighbour)
-      for (uint32_t f : region) vote += dot(loop_newell(m, loop_of(f)), pn);
-    if (vote < 0) n = -pn;
-    std::vector<uint32_t> outer = loops[0], inner = loops[1];
-    if (std::fabs(loop_area_along(m, outer, n)) < std::fabs(loop_area_along(m, inner, n))) std::swap(outer, inner);
-    bool inside = true;
-    for (uint32_t v : inner) inside = inside && inside_loop(m, outer, m.positions[v], n, eps);
-    if (!inside) continue;  // moved out across the outline: nothing a ring can fill
+        if (add.empty() || region.size() + add.size() > 4096) break;
+        for (uint32_t g : add) {
+          region.push_back(g);
+          seen[g] = 1;
+        }
+      }
+      std::unordered_map<uint64_t, int> uses;
+      for (uint32_t f : region) {
+        const uint32_t fn = m.face_size(f);
+        for (uint32_t i = 0; i < fn; i++) uses[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % fn])]++;
+      }
+      std::unordered_map<uint32_t, std::vector<uint32_t>> nb;
+      for (auto &[k, c] : uses)
+        if (c == 1) {
+          const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+          nb[a].push_back(b);
+          nb[b].push_back(a);
+        }
+      bool simple = !nb.empty();
+      for (auto &kv : nb) simple = simple && kv.second.size() == 2;
+      if (!simple) {
+        if (std::getenv("BL_RING_DEBUG")) std::printf("ring: %zu faces, outline not simple\n", region.size());
+        continue;
+      }
+      std::vector<std::vector<uint32_t>> loops;
+      std::unordered_set<uint32_t> walked;
+      for (auto &kv : nb) {
+        if (walked.count(kv.first)) continue;
+        std::vector<uint32_t> loop;
+        for (uint32_t prev = UINT32_MAX, cur = kv.first;;) {
+          loop.push_back(cur);
+          walked.insert(cur);
+          const auto &ns = nb[cur];
+          const uint32_t next = ns[0] != prev ? ns[0] : ns[1];
+          prev = cur;
+          cur = next;
+          if (cur == kv.first || walked.count(cur)) break;
+        }
+        loops.push_back(std::move(loop));
+      }
+      if (loops.size() != 2 || loops[0].size() < 3 || loops[1].size() < 3) {
+        if (std::getenv("BL_RING_DEBUG")) std::printf("ring: %zu faces, %zu loops\n", region.size(), loops.size());
+        continue;
+      }
+      /* Which way it faces: a face beside it in the same plane that did not fold (the moved
+       * shape itself, or the face around the ring), else the ring's own larger share. */
+      float vote = 0.0f;
+      bool from_neighbour = false;
+      for (const auto &loop : loops)
+        for (size_t i = 0; i < loop.size() && !from_neighbour; i++)
+          for (uint32_t g : edge_faces[Mesh::edge_key(loop[i], loop[(i + 1) % loop.size()])])
+            if (!cand[g] && !in_region.count(g) && flat(g)) {
+              const Vec3 gn = loop_newell(m, loop_of(g));
+              if (length(gn) > 1e-10f) {
+                vote = dot(gn, pn);
+                from_neighbour = true;
+                break;
+              }
+            }
+      if (!from_neighbour)
+        for (uint32_t f : region) vote += dot(loop_newell(m, loop_of(f)), pn);
+      n = vote < 0 ? -pn : pn;
+      outer = loops[0];
+      inner = loops[1];
+      if (std::fabs(loop_area_along(m, outer, n)) < std::fabs(loop_area_along(m, inner, n))) std::swap(outer, inner);
+      bool inside = true;
+      for (uint32_t v : inner) inside = inside && inside_loop(m, outer, m.positions[v], n, eps);
+      /* ...and nothing of the old ring may poke out past the new outline either. */
+      if (!inside) {
+        if (std::getenv("BL_RING_DEBUG")) std::printf("ring: %zu faces, the inner loop left the outer\n", region.size());
+        continue;
+      }
+      usable = true;
+    }
+    if (!usable) continue;
     const float ring_area = std::fabs(loop_area_along(m, outer, n)) - std::fabs(loop_area_along(m, inner, n));
     std::vector<std::vector<uint32_t>> faces;
     for (uint32_t f : region) {
       std::vector<uint32_t> l = loop_of(f);
       faces.push_back(l);
     }
-    if (ring_faces_ok(m, faces, n, ring_area)) continue;  // still fine
+    if (ring_faces_ok(m, faces, n, ring_area)) {  // still fine
+      if (std::getenv("BL_RING_DEBUG")) std::printf("ring: %zu faces still fine\n", region.size());
+      continue;
+    }
+    if (std::getenv("BL_RING_DEBUG")) std::printf("ring: rebuilding %zu faces (outer %zu, inner %zu)\n", region.size(), outer.size(), inner.size());
     patches.push_back({outer, inner, n, m.material_of(region[0]), m.smooth_of(region[0]), region});
   }
   if (patches.empty()) return 0;
@@ -617,6 +664,7 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
     for (uint32_t f : made) nfaces.push_back(loop_of(f));
     if (!ring_faces_ok(m, nfaces, normalize(p.n), ring_area)) {
       /* Could not be zipped cleanly either: leave the ring as it was. */
+      if (std::getenv("BL_RING_DEBUG")) std::printf("ring: outer %zu / inner %zu corners could not be zipped\n", p.outer.size(), p.inner.size());
       m.face_offsets.resize(f0 + 1);
       m.corner_verts.resize(c0);
       if (m.uvs.size() > c0) m.uvs.resize(c0);
@@ -651,7 +699,7 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
 /* ===================================================================== */
 
 bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, float width, int segments, std::string *err,
-                 bool clamp_overlap) {
+                 bool clamp_overlap, float profile) {
   segments = std::max(1, std::min(64, segments));
   EdgeFaces ef(m);
   std::unordered_set<uint64_t> bev;
@@ -742,8 +790,13 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
       }
     }
   }
-  /* Bevel strips: one per beveled edge, `segments` faces across, following a
-   * quadratic arc through the original corner (Blender's profile = 0.5). */
+  /* Bevel strips: one per beveled edge, `segments` faces across, following Blender's
+   * superellipse profile between the two slid points a and b: in the frame from the point
+   * opposite the corner (o = a + b - corner), x^r + y^r = 1 with r from the Profile - 2 at
+   * 0.5 (round), 1 at 0.25 (flat, a chamfer), toward infinity at 1 (out to the corner: convex,
+   * square) and toward 0 at 0 (in to o: concave). */
+  profile = std::isfinite(profile) ? clampf(profile, 0.0f, 1.0f) : 0.5f;
+  const float r_exp = profile <= 0.5f ? std::max(0.02f, 4.0f * profile) : std::min(200.0f, 1.0f / std::max(1e-3f, 1.0f - profile));
   std::unordered_map<uint64_t, std::vector<uint32_t>> arcs;  // (f1 point, f2 point) -> arc
   auto arc = [&](uint32_t p1, uint32_t p2, uint32_t corner) {
     uint64_t k = ((uint64_t)p1 << 32) | p2;
@@ -751,9 +804,11 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
     if (it != arcs.end()) return it->second;
     std::vector<uint32_t> pts{p1};
     Vec3 a = m.positions[p1], c = m.positions[corner], b = m.positions[p2];
+    const Vec3 o = a + b - c, U = a - o, V = b - o;
     for (int s = 1; s < segments; s++) {
-      float t = s / (float)segments;
-      uint32_t nv = m.add_vert(a * ((1 - t) * (1 - t)) + c * (2 * t * (1 - t)) + b * (t * t));
+      const float th = 0.5f * kPi * s / (float)segments;
+      const float x = std::pow(std::max(0.0f, std::cos(th)), 2.0f / r_exp), y = std::pow(std::max(0.0f, std::sin(th)), 2.0f / r_exp);
+      uint32_t nv = m.add_vert(o + U * x + V * y);
       origin[nv] = corner;
       pts.push_back(nv);
     }
@@ -1793,10 +1848,34 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
    * turn the solid inside out, so the corners slide instead (below). */
   bool exits = false;
   if (distance < 0 && !joining) {
+    /* On a non-manifold edge (a fin on it, a second solid sharing it) only the faces that
+     * carry the surface on across it count - they run the edge the other way to the region's
+     * face - and it leans only when all of those do. */
+    auto dir_in = [&](uint32_t f, uint32_t a, uint32_t b) {
+      const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+      for (uint32_t k = 0; k < n; k++) {
+        if (fv[k] == a && fv[(k + 1) % n] == b) return 1;
+        if (fv[k] == b && fv[(k + 1) % n] == a) return -1;
+      }
+      return 0;
+    };
     const std::vector<uint32_t> &L = r.loops[0];
-    for (size_t i = 0; i < L.size() && !exits; i++)
-      for (uint32_t g : ef.at(L[i], L[(i + 1) % L.size()]))
-        if (!in_region[g] && dot(-r.normal, m.face_normal(g)) > 0.02f) exits = true;
+    for (size_t i = 0; i < L.size() && !exits; i++) {
+      const uint32_t a = L[i], b = L[(i + 1) % L.size()];
+      const auto fs = ef.at(a, b);
+      int region_dir = 0;
+      for (uint32_t g : fs)
+        if (in_region[g]) region_dir = dir_in(g, a, b);
+      std::vector<uint32_t> across;
+      for (uint32_t g : fs)
+        if (!in_region[g] && region_dir != 0 && dir_in(g, a, b) == -region_dir) across.push_back(g);
+      if (across.empty())
+        for (uint32_t g : fs)
+          if (!in_region[g]) across.push_back(g);
+      bool all_lean = !across.empty();
+      for (uint32_t g : across) all_lean = all_lean && dot(-r.normal, m.face_normal(g)) > 0.02f;
+      if (all_lean) exits = true;
+    }
   }
   /* Flush: walls beside the region that run the way it moves (a pulled block
    * pushed back down, a pocket pulled back up, the next block's side) end
@@ -2227,6 +2306,88 @@ bool push_pull(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool mer
   return true;
 }
 
+bool push_pull_multi(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, bool individual,
+                     PushPullResult *result, std::string *error) {
+  face_sel.resize(m.face_count(), 0);
+  /* The groups: connected through shared edges (or each face alone). */
+  std::vector<std::vector<uint32_t>> groups;
+  {
+    std::unordered_map<uint64_t, std::vector<uint32_t>> by_edge;
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (face_sel[f])
+        for (uint32_t k = 0; k < m.face_size(f); k++) by_edge[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])].push_back((uint32_t)f);
+    std::vector<uint8_t> seen(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (!face_sel[f] || seen[f]) continue;
+      std::vector<uint32_t> g = {(uint32_t)f}, stack = {(uint32_t)f};
+      seen[f] = 1;
+      while (!individual && !stack.empty()) {
+        const uint32_t a = stack.back();
+        stack.pop_back();
+        for (uint32_t k = 0; k < m.face_size(a); k++)
+          for (uint32_t b : by_edge[Mesh::edge_key(m.face_verts(a)[k], m.face_verts(a)[(k + 1) % m.face_size(a)])])
+            if (!seen[b]) {
+              seen[b] = 1;
+              g.push_back(b);
+              stack.push_back(b);
+            }
+      }
+      groups.push_back(std::move(g));
+    }
+  }
+  if (groups.size() <= 1) return push_pull(m, face_sel, distance, merge_coplanar, result, error);
+  /* Faces are renumbered by each step, so groups are found again by where their faces are. */
+  struct Sig {
+    Vec3 c, n;
+  };
+  auto sig = [&](size_t f) { return Sig{m.face_center(f), normalize(m.face_normal(f))}; };
+  const float eps = 1e-4f * std::max(1.0f, mesh_scale(m));
+  auto find = [&](const Sig &s) -> size_t {
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (length(m.face_center(f) - s.c) < eps && dot(normalize(m.face_normal(f)), s.n) > 0.999f) return f;
+    return SIZE_MAX;
+  };
+  std::vector<std::vector<Sig>> gsig;
+  for (auto &g : groups) {
+    gsig.emplace_back();
+    for (uint32_t f : g) gsig.back().push_back(sig(f));
+  }
+  std::vector<Sig> moved;
+  size_t done = 0;
+  std::string first_err;
+  for (size_t gi = 0; gi < gsig.size(); gi++) {
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    bool all = true;
+    for (const Sig &s : gsig[gi]) {
+      const size_t f = find(s);
+      if (f == SIZE_MAX) all = false;
+      else sel[f] = 1;
+    }
+    if (!all) continue;  // an earlier step changed this group's faces
+    Mesh before = m;
+    PushPullResult res = PushPullResult::Moved;
+    std::string err;
+    if (!push_pull(m, sel, distance, merge_coplanar, &res, &err)) {
+      m = std::move(before);
+      if (first_err.empty()) first_err = err;
+      continue;
+    }
+    if (!done && result) *result = res;
+    done++;
+    for (size_t f = 0; f < sel.size() && f < m.face_count(); f++)
+      if (sel[f]) moved.push_back(sig(f));
+  }
+  if (!done) {
+    if (error) *error = first_err.empty() ? "none of the selected faces could move" : first_err;
+    return false;
+  }
+  face_sel.assign(m.face_count(), 0);
+  for (const Sig &s : moved)
+    if (const size_t f = find(s); f != SIZE_MAX) face_sel[f] = 1;
+  m.touch();
+  return true;
+}
+
 /* ===================================================================== */
 /* Subdivide, dissolve, connect, collapse                                 */
 /* ===================================================================== */
@@ -2268,6 +2429,16 @@ size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
   if (!dissolved) return 0;
   std::map<uint32_t, std::vector<uint32_t>> groups;
   for (size_t f = 0; f < nf; f++) groups[find((uint32_t)f)].push_back((uint32_t)f);
+  /* Which groups use each vertex: a corner another group still uses is never dropped (that face
+   * would keep it and the two would no longer share their edge). */
+  std::unordered_map<uint32_t, uint32_t> owner;  // vertex -> its one group, or UINT32_MAX for several
+  for (size_t f = 0; f < nf; f++) {
+    const uint32_t r = find((uint32_t)f);
+    for (uint32_t i = 0; i < m.face_size(f); i++) {
+      auto it = owner.emplace(m.face_verts(f)[i], r).first;
+      if (it->second != r) it->second = UINT32_MAX;
+    }
+  }
   FaceBuilder fb(m);
   for (auto &[root, faces] : groups) {
     if (faces.size() == 1) {
@@ -2308,7 +2479,7 @@ size_t dissolve_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
     std::vector<uint32_t> kept;
     for (size_t i = 0; i < loop.size(); i++) {
       uint32_t p = loop[(i + loop.size() - 1) % loop.size()], v = loop[i], q = loop[(i + 1) % loop.size()];
-      if (touched.count(v) && loop.size() - (i - kept.size()) > 3) {
+      if (touched.count(v) && owner[v] == root && loop.size() - (i - kept.size()) > 3) {
         Vec3 a = normalize(m.positions[v] - m.positions[p]), b = normalize(m.positions[q] - m.positions[v]);
         if (dot(a, b) > 0.9999f) continue;
       }
