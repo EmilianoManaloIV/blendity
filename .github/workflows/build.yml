@@ -1,11 +1,18 @@
 # Builds Blendity for Windows, Linux and macOS, runs the unit tests and a quick
-# stress pass, and uploads the three executables as artifacts.
+# stress pass, and uploads the three executables as artifacts. A Linux job runs the
+# unit tests under AddressSanitizer + UndefinedBehaviorSanitizer.
+# The windows, linux and macos jobs are the required checks for merging into main.
 name: build
 
 on:
   push:
   pull_request:
   workflow_dispatch:
+
+# A newer push to the same branch or PR cancels the run still going.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   windows:
@@ -76,3 +83,23 @@ jobs:
             dist/macos/blendity_tests
             screenshot-macos.png
             stress/results/ci
+
+  # Unit tests under AddressSanitizer + UndefinedBehaviorSanitizer: out-of-range indices, use after
+  # free and undefined behaviour in the mesh code. Not a required check until its first findings are
+  # fixed (docs/tasks/0002); then remove continue-on-error and add it to the branch protection.
+  linux-sanitizers:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler + X11 headers
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core
+      - name: Build the tests with sanitizers
+        env:
+          EXTRA_FLAGS: -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+        run: ./build.sh debug tests
+      - name: Unit tests
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ./dist/linux/blendity_tests

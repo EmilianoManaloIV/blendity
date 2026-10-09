@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 24): engineering setup for agentic development (task 0001)
+
+**Asked:** set the repository up for research-informed agentic development:
+- standards, three agents (implementer, test engineer, code reviewer), requirements, decision records and task specs;
+- CI for the real stack;
+- a plan / implement / test / review / human-merge workflow.
+
+**Added**
+- `CLAUDE.md`: the project map, build and test commands, testing rules, code standards, documentation duties, approval gates and the publishing procedure.
+- `.claude/agents/`:
+  - `implementer` (Sonnet): one approved task; no architecture, dependencies, commits or pushes.
+  - `test-engineer` (Sonnet): tests from the acceptance criteria; edits only `tests/` and `stress/`; reports bugs as failing tests.
+  - `code-reviewer` (Opus): read-only; ranked findings and a verdict.
+- `.claude/settings.json`: denies force pushes, pushes to `main` / `blendity`, merging PRs and hard resets; asks before commits, pushes and `gh pr create` / `gh api`.
+- `docs/requirements.md`: product, quality and constraint requirements with IDs.
+- `docs/decisions/`: the index, a template and six ADRs recording decisions already in force:
+  1. optional Blender libraries;
+  2. licensing;
+  3. copy-on-write meshes;
+  4. SketchUp Push/Pull semantics;
+  5. tool settings in the F9 and drag helpers;
+  6. subtree publishing with human-merged PRs.
+- `docs/tasks/`: the lifecycle, a template, task 0001 (this) and draft task 0002 (sanitizer findings).
+- `docs/ARCHITECTURE.md`: a system overview (layers, one frame, one edit), key invariants and module ownership at the top. The phase tables are kept below as the history.
+- CI: a `linux-sanitizers` job (unit tests under ASan + UBSan, non-blocking until task 0002), and cancelling superseded runs.
+- `build.sh` honours `EXTRA_FLAGS`.
+- `.github/pull_request_template.md`.
+
+**Changed:** work reaches `main` only through a pull request that CI must pass and the human merges. There are no more direct pushes (ADR 0006).
+
+**Found while checking:**
+- **CI has failed on every recent push to `main`.**
+  - `build.sh` exits silently before compiling when Blender's libraries are absent (always the case in CI).
+  - Two Push Through tests rely on the optional Manifold library.
+  - Recorded as task 0003, to finish before branch protection is switched on.
+- **The sanitizer job's first finding:** a signed overflow in `merge_by_distance`'s spatial hash (task 0002).
+- **Local checks:** Windows 1924 and Linux 1900 unit checks pass with Blender's libraries. With `build.sh` corrected, the sanitizer build compiles and runs.
+
 ## 2026-10-09 (round 23): arched shapes in one piece, array copies past a surface's edge
 
 **Asked:** arraying a vertical rectangle with an arched top cut some copies improperly.
