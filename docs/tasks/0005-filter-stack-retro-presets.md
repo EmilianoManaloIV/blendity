@@ -1,6 +1,6 @@
 # 0005: The Camera Filters stack, with Retro Console presets for PS1, N64, Saturn and DOS
 
-- **Status:** in review (asked by the user 2026-10-09; structure chosen: one stack component; ADR 0008)
+- **Status:** done (merged as PR #6)
 - **Requirements:** R-10
 - **Decisions:** ADR 0008 (new), ADR 0007
 - **Model:** main session (Opus): reflection, Inspector UI, rasterizer additions

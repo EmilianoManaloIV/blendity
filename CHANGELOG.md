@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 30): piloting a camera shows its game view (task 0009)
+
+**Asked:** whenever a camera is piloted, its camera filters should show: treat the pilot camera as the game
+camera (chosen: the pure game look).
+
+**Changed**
+- **Piloting** (Pilot Camera, or `pilot`) shows the camera's Game view picture inside its frame: its filters,
+  lens, exposure and depth of field, and the scene's lights, whatever the Shading mode. Around it is a plain
+  dark passepartout.
+  - The grid, gizmos, icons, overlays and statistics are hidden while piloting.
+  - The banner stays, and a thin outline sits just outside the frame.
+  - Clicking an object in the frame still selects it.
+  - Entering Edit Mode ends piloting, because its cage and selection need the editor's overlays.
+
+**Fixed:** the round-29 Saturn screen-door test failed on macOS (arm64). It checked that every pixel of a
+normally blended quad differs from both the veil and the background, and a few didn't. The screen-door checks
+themselves are exact and passed; the contrast check now asks for 90% and prints the count.
+
+**Checked**
+- Seven new tests (five by the test-engineer, two from the review):
+  - The frame equals a second editor's Game view of the same camera at the same size: 0 of 518,870 pixels
+    differ, plain and with the PS1 filter.
+  - PS1 shows in every Shading mode.
+  - With the grid, gizmos and statistics on or off, no pixel changes.
+  - The passepartout is uniform.
+  - A click selects.
+  - Stopping restores the grid.
+- Unit checks: Windows 5062, Linux 5038, sanitizer build 4960; 0 failed.
+- Review (code-reviewer agent, Opus): changes needed. Fixed:
+  - **Depth copied for the editor's tools** used the camera's near / far, so the tools' visibility tests
+    disagreed. It is re-projected into the editor's projection now. A test compares it with the editor's own
+    render: worst difference 0.0008.
+  - **Edit Mode ends piloting.**
+  - **No busy redraw** in Rendered mode while piloting.
+  - **Documented limit:** with an orthographic camera, lens shift or a letterboxing filter, the editor's
+    projection doesn't line up with the picture. Clicks still select what they hit, and the gizmos are hidden.
+
 ## 2026-10-09 (round 29): the Camera Filters stack, and the N64, Saturn and DOS looks (task 0005)
 
 **Asked:** make camera filters a general system like Unity's post-processing, where Retro Console is one

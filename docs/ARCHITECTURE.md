@@ -20,7 +20,7 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - unit checks (5,029 on Windows with Blender's libraries)
+tests/          blendity_tests   - unit checks (5,062 on Windows with Blender's libraries)
 ```
 
 ## System overview
@@ -432,6 +432,13 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `TexFilter::ThreePoint` (`Texture::sample_level`) | The texel square split on its diagonal: a plane through the three nearest corners | N64 RDP texture filter |
 | `RasterOptions::screen_door` | Transparent surfaces draw every other pixel opaque ((x + y) odd skipped), no blending; alpha < 0.1 vanishes | Saturn VDP1 mesh |
 | `retro_palette`, `retro_palette_nearest`, `Palette256` | A 6x6x6 cube plus 40 greys; the nearest entry computed exactly: each channel rounded to the cube, the nearest grey to the mean, the nearer of the two; the dither spans one cube step | VGA 256-colour palettes |
+
+## Piloting is the game camera (round 30, task 0009)
+
+| Piece | What it does | Reference |
+|---|---|---|
+| `render_scene_view` piloting branch, `pilot_rt_` | The frame (`pilot_frame_rect`) is drawn by `render_camera` with the camera's own view, projection, exposure, DoF and filters; a dark passepartout around it. Ids are copied into `scene_rt_` (click-picking reads the pixels shown, so it always works) and depth is re-projected into the editor's projection (its near / far differ). For a centred perspective camera the editor's projection over the view equals the camera's over the frame (`scale_fov`), so the remaining tools line up; with an orthographic camera, lens shift or a letterboxing filter they don't, which is acceptable because the gizmos are hidden and Edit Mode ends piloting | Unity Game view; Blender camera view |
+| `piloted_camera()`; the overlay skip in the Scene view's draw | While piloting: no grid, icons, origins, guides, overlap / Z-fighting overlays, transform or navigation gizmo, statistics. `draw_pilot_frame` keeps its banner and a 1 px outline outside the frame | - |
 
 ## What isn't recreated
 

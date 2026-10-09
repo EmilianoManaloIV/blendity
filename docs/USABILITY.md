@@ -105,6 +105,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Rendering several views meant moving the Main Camera and saving each render. | Render Camera Sequence renders every In Sequence camera, each saved. |
 | Shortcuts were fixed, Unity-style only. | A rebindable keymap with Unity, Blender, Maya, 3ds Max and SketchUp presets. |
 | A camera could only render one look; a retro style meant faking it in materials. | Camera filter components (first: Retro Console Filter, PS1). They apply everywhere that camera's image shows, and the Scene view can preview them with one toggle. |
+| Piloting a camera showed the editor's render (its lighting, grid and gizmos), not what the camera would show. | Piloting shows the camera's game view in its frame: filters, lens, exposure and depth of field, with no editor overlays. |
 | Each camera filter was its own component, mixed in with everything in Add Component. | One Camera Filters stack per camera, like Unity's post-processing: Add Filter by category, a foldout per effect, reorder by menu. |
 | `component` in the console took only one word, so "Retro Console Filter" (or any spaced name) couldn't be added, and such components were dropped when a scene was loaded. | Names with spaces work in the console and in scene files. |
 | Selection tools were scattered across one long grid of 60 buttons. | Grouped tools, Select first; pairs share a button. |

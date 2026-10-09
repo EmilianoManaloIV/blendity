@@ -9,12 +9,14 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 
 #include <algorithm>
 #include <map>
 #include <array>
 #include <unordered_map>
 #include <cmath>
+#include <cstring>
 
 namespace bl {
 
@@ -96,22 +98,26 @@ void Editor::draw_scene_view(const Recti &r) {
     u.canvas.rect_outline(box, Color::hex(0x6FA3DD));
   }
 
-  draw_scene_icons(view);
-  draw_origins(view);
-  draw_guides(view);
-  draw_zfight_overlay(view);
-  draw_overlap_overlay(view);
+  /* Piloting a camera, the view is that camera's game view: none of the editor's overlays. */
+  const bool piloting = piloted_camera() != nullptr;
+  if (!piloting) {
+    draw_scene_icons(view);
+    draw_origins(view);
+    draw_guides(view);
+    draw_zfight_overlay(view);
+    draw_overlap_overlay(view);
+  }
   draw_pilot_frame(view);
   knife_draw(view);
   draw_preview(view);
-  if (show_gizmos_) draw_gizmo(view);
+  if (show_gizmos_ && !piloting) draw_gizmo(view);
   draw_pushpull(view);
   draw_modal(view);
   draw_transform(view);
-  draw_view_gizmo(view);
+  if (!piloting) draw_view_gizmo(view);
 
   /* Statistics overlay (Blender: Viewport Overlays > Statistics). */
-  if (show_stats_) {
+  if (show_stats_ && !piloting) {
     std::vector<std::string> lines;
     size_t verts = 0, faces = 0;
     for (GameObject *g : selected_objects(false))
@@ -391,6 +397,48 @@ void Editor::render_scene_view(const Recti &view) {
   scene_rt_.attach(fb_, view);
   float aspect = view.w / (float)std::max(1, view.h);
   Mat4 v = cam_.view(), p = cam_.proj(aspect);
+  if (GameObject *pg = piloted_camera()) {
+    /* Piloting: the camera's game view in its frame (its filters, lens, exposure, depth of field,
+     * the scene's lights, whatever the Shading mode), a plain passepartout around it. The pilot
+     * keeps the view and the camera in step, so the editor's projection over the whole view
+     * matches the camera's over the frame: its depth and ids go into the Scene view's planes
+     * and picking and the transform tools keep working. */
+    const Camera *pc = pg->get<Camera>();
+    const Recti fr = pilot_frame_rect(view, *pc).intersect(view);
+    for (int y = 0; y < scene_rt_.height; y++)
+      std::fill(scene_rt_.color + (size_t)y * scene_rt_.stride, scene_rt_.color + (size_t)y * scene_rt_.stride + scene_rt_.width, 0xFF1C1C1Cu);
+    std::fill(scene_rt_.depth.begin(), scene_rt_.depth.end(), 1.0f);
+    std::fill(scene_rt_.ids.begin(), scene_rt_.ids.end(), 0u);
+    if (fr.w >= 2 && fr.h >= 2) {
+      pilot_rt_.attach(fb_, fr);
+      const Quat q = pg->world_rotation();
+      const Vec3 eye = pg->world_position();
+      const Mat4 cv = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
+      const float fa = fr.w / (float)fr.h;
+      const Mat4 cp = pc->projection(fa);
+      render_camera(scene_r3d_, pilot_rt_, cv, cp, eye, q.rotate({0, 0, 1}), pg, pc, fa);
+      scene_stats_ = scene_r3d_.stats();
+      /* Ids as they are; depth re-expressed in the editor's projection (its near / far differ from
+       * the camera's), so the tools' visibility tests compare like with like. */
+      const Mat4 to_editor = (p * v) * (cp * cv).inverse();
+      const int ox = fr.x - view.x, oy = fr.y - view.y, fw = pilot_rt_.width, fh = pilot_rt_.height;
+      JobSystem::global().parallel_for(fh, 32, [&](int64_t y0, int64_t y1) {
+        for (int64_t y = y0; y < y1; y++) {
+          const size_t s = (size_t)y * fw, d = (size_t)(y + oy) * scene_rt_.width + ox;
+          std::memcpy(&scene_rt_.ids[d], &pilot_rt_.ids[s], sizeof(uint32_t) * fw);
+          for (int x = 0; x < fw; x++) {
+            const float z = pilot_rt_.depth[s + x];
+            if (z >= 1.0f) continue;  // nothing drawn: stays 1
+            const float nx = 2.0f * (x + 0.5f) / fw - 1.0f, ny = 1.0f - 2.0f * (y + 0.5f) / fh;
+            const Vec4 e = to_editor * Vec4(nx, ny, z, 1.0f);
+            scene_rt_.depth[d + x] = e.w != 0.0f ? std::max(0.0f, std::min(1.0f, e.z / e.w)) : 1.0f;
+          }
+        }
+      });
+    }
+    scene_r3d_.rebind(&scene_rt_, v, p);  // the tools project with the editor's view, over the whole view
+    return;
+  }
   if (shading_ == Shading::Rendered) render_pathtraced_view(view);
   else if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
     GameObject *fowner = nullptr;
@@ -399,12 +447,6 @@ void Editor::render_scene_view(const Recti &view) {
       render_camera(scene_r3d_, scene_rt_, v, p, cam_.position(), cam_.forward(), fowner, nullptr, aspect, false, scene_lighting_);
     else render_deferred(scene_r3d_, scene_rt_, v, p, cam_.position(), false, scene_lighting_, nullptr);
     scene_stats_ = scene_r3d_.stats();
-    /* Piloting a camera: its depth of field shows while framing the shot. */
-    if (GameObject *pg = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr)
-      if (const Camera *pc = pg->get<Camera>()) {
-        const float ra = scene_->render.height > 0 ? scene_->render.width / (float)scene_->render.height : 16.0f / 9.0f;
-        camera_dof(scene_rt_, v, p, cam_.position(), cam_.forward(), pc, pc->image_aspect(ra), cam_.fov);
-      }
   }
   else render_solid(view, v, p);
   if (show_grid_) draw_grid(scene_r3d_);
@@ -1644,6 +1686,7 @@ MeshPtr *Editor::edit_mesh_ptr() {
 
 void Editor::enter_edit_mode() {
   if (playing_) return;
+  if (pilot_cam_) toggle_pilot_camera();  // piloting hides the editor's overlays: editing needs them back
   GameObject *g = active_object();
   if (!g || !g->get<MeshFilter>() || !g->get<MeshFilter>()->mesh) {
     Log::warn("Edit Mode needs an active object with a MeshFilter");

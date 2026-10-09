@@ -169,7 +169,7 @@ void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
   return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || seq_.active || !deferred_.empty() ||
-         (shading_ == Shading::Rendered && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
+         (shading_ == Shading::Rendered && !pilot_cam_ && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
 

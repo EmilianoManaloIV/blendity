@@ -166,6 +166,8 @@ class Editor {
   }
   float scene_fov() const { return cam_.fov; }
   Vec3 scene_eye() const { return cam_.position(); }
+  /* Tests: the Scene view's depth at a window pixel (1 = nothing), as the tools read it. */
+  float scene_depth_for_test(int wx, int wy) const { return scene_rt_.depth_at(wx - scene_rect_.x, wy - scene_rect_.y); }
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
   Recti pilot_frame() const {
     GameObject *g = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr;
@@ -725,6 +727,12 @@ class Editor {
   /* ---- scene view ---- */
   SceneCamera cam_;
   RenderTarget scene_rt_;
+  RenderTarget pilot_rt_;  // piloting: the camera's frame inside the Scene view (its game view)
+  /* The camera being piloted, when there is one: the Scene view then is its game view. */
+  GameObject *piloted_camera() const {
+    GameObject *g = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr;
+    return g && g->get<Camera>() ? g : nullptr;
+  }
   Renderer3D scene_r3d_;
   Recti scene_rect_;
   Shading shading_ = Shading::Shaded;

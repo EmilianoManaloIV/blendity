@@ -1,7 +1,6 @@
 # 0008: Inspector component menus act, and the Scene view filter test is steady on macOS
 
-- **Status:** in review (asked by the user 2026-10-09: "a bug where I can't remove components"; "the macOS
-  build is still causing problems")
+- **Status:** done (merged as PR #5)
 - **Requirements:** R-07, Q-03
 - **Decisions:** none needed
 - **Model:** main session (Opus)
