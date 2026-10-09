@@ -443,7 +443,9 @@ struct MsbReader {
   }
 };
 
-inline int extend(int v, int s) { return s && v < (1 << (s - 1)) ? v + (-1 << s) + 1 : v; }
+/* JPEG's EXTEND: a negative coefficient. -(1 << s), not -1 << s: shifting a negative value is
+ * undefined behaviour in C++17 (found by the sanitizer job). */
+inline int extend(int v, int s) { return s && v < (1 << (s - 1)) ? v - (1 << s) + 1 : v; }
 
 struct IdctTable {
   float c[8][8];

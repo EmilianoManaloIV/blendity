@@ -1,10 +1,10 @@
 # 0001: Engineering setup for agentic development
 
-- **Status:** in review
+- **Status:** done (merged as PR #1, 2026-10-09)
 - **Requirements:** Q-03, C-05
 - **Decisions:** ADR 0001-0006 (recorded), 0006 (new: PR flow)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/1
 
 ## Goal
 The repository states its own engineering standards, roles, decisions and workflow, so planning,
@@ -29,3 +29,11 @@ implementation, testing, review and merging follow the same rules in every sessi
 
 ## Documentation to update
 - CHANGELOG entry; README note on the workflow.
+
+## Outcome
+- Merged as PR #1, together with task 0003 (PR #2) which made the checks pass.
+- Branch protection on `main` since 2026-10-09:
+  - pull requests required, with 0 approvals: you are the only maintainer and GitHub doesn't count
+    self-approval;
+  - the `windows`, `linux` and `macos` checks must pass on a branch up to date with `main`;
+  - no force pushes, no deletions.

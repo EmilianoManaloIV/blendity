@@ -1,7 +1,8 @@
 # Builds Blendity for Windows, Linux and macOS, runs the unit tests and a quick
 # stress pass, and uploads the three executables as artifacts. A Linux job runs the
 # unit tests under AddressSanitizer + UndefinedBehaviorSanitizer.
-# The windows, linux and macos jobs are the required checks for merging into main.
+# The windows, linux and macos jobs are required checks for merging into main; linux-sanitizers
+# blocks too and joins them once task 0002 is merged.
 name: build
 
 on:
@@ -142,18 +143,16 @@ jobs:
             stress/results/ci
 
   # Unit tests under AddressSanitizer + UndefinedBehaviorSanitizer: out-of-range indices, use after
-  # free and undefined behaviour in the mesh code. Not a required check until its first findings are
-  # fixed (docs/tasks/0002); then remove continue-on-error and add it to the branch protection.
+  # free and undefined behaviour. Blocking since task 0002 fixed its findings.
   linux-sanitizers:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install compiler + X11 headers
         run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core
       - name: Build the tests with sanitizers
         env:
-          EXTRA_FLAGS: -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+          EXTRA_FLAGS: -O1 -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer
         run: ./build.sh debug tests
       - name: Unit tests
         env:

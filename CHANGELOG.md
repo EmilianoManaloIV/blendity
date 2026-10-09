@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 26): sanitizer findings fixed, branch protection on (task 0002)
+
+**Asked:** after merging tasks 0001 and 0003, deal with the current issues before the camera
+filters: sync, branch protection, and the sanitizer findings.
+
+**Changed**
+- `main` is protected:
+  - pull requests only;
+  - the `windows`, `linux` and `macos` checks must pass, on a branch up to date with `main`;
+  - no force pushes or deletions;
+  - 0 approvals, since GitHub doesn't count approving your own PR.
+- `linux-sanitizers` is blocking now and joins the required checks once this merges. It also checks
+  float-to-int casts that overflow (`float-cast-overflow`, which GCC leaves out of `undefined`).
+- `CLAUDE.md` says how to call `gh` from the Bash tool and how to read CI.
+
+**Fixed** (both undefined behaviour; neither showed as a wrong result yet, but a compiler is free to
+miscompile them):
+- **Merge by Distance and proportional editing far from the origin.** Their spatial hash multiplied
+  grid cells in `int`. A point at x = -2 with a 0.1 mm distance already overflowed, and far points
+  over tiny distances overflowed the cell index itself. One shared helper now uses 64-bit cells and
+  unsigned hashing.
+- **JPEG decoding** shifted a negative number (`-1 << s`) for every negative coefficient.
+
+**Checked**
+- Sanitizer build (ASan + UBSan + float-cast-overflow, dependency-free): 1832 checks, 0 failed, no reports.
+- Windows with libraries: 1934 checks, 0 failed. Linux with libraries: 1910, 0 failed.
+- The merge stress section: hash and O(n²) reference agree, speed unchanged.
+
 ## 2026-10-09 (round 25): CI passes again (task 0003)
 
 **Asked:** continue with the next task, making CI pass on all three platforms so branch protection can
