@@ -20,8 +20,67 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - 613 checks with Blender's libraries
+tests/          blendity_tests   - unit checks (1,924 on Windows with Blender's libraries)
 ```
+
+## System overview
+
+Blendity is one process with no plugins and no scripting runtime. Three executables share one static
+library built from `src/`: `Blendity` (the editor), `blendity_tests` and `blendity_stress`.
+
+| Layer | Owns | Depends on |
+|---|---|---|
+| `core` | math (Unity's left-handed, Y-up conventions), logging, filesystem, jobs (TBB or own pool), CPU features | - |
+| `platform` | one window, input events, clipboard, file dialogs (Win32 / X11 / Cocoa) | core |
+| `image` | codecs, mipmapped textures | core |
+| `scene` | `Mesh` (Blender's corner-based layout) and `meshops` operators, UVs, materials, modifiers, `GameObject` / components, scene and model IO | core, image |
+| `render` | 2D canvas and fonts, rasterizer, path tracer, GPU devices, colour management | core, image, scene |
+| `editor` | IMGUI toolkit (`ui::Context`), docking, the windows, tools (draw, knife, push/pull, modal transforms), keymaps, undo | everything above |
+
+`scene` never includes `editor` or `render`; mesh operators (`meshops::*`, `src/scene/mesh_tools*.cpp`)
+are pure functions on a `Mesh` plus selection vectors, which is what lets the tests and the stress suite
+call them directly.
+
+### One frame
+`platform` events → `Editor::frame` → windows draw and handle input in docking order (the Scene view runs
+the active tool: `draw_update`, `pushpull_update`, `modal_update`, the gizmo) → `handle_shortcuts` (the
+keymap; tools consume keys they own first) → the frame is rasterized into the editor's framebuffer →
+`platform` presents it. Headless runs (`init_headless` + `step_frame_headless`) execute the same frame
+without a window; tests drive the UI this way with synthetic events.
+
+### One edit
+A tool or menu calls `Editor::edit_tool(op)` (or the console's `editop`). Operators that take numbers
+become a `LastOp`: `run_last_op` copies `LastOp::before`, applies the `meshops` function with the current
+values, records the result's pointer and version, and the F9 panel or drag helper re-runs it when a
+value changes. `mark_changed` turns the edit into one undo step (a scene clone sharing unchanged meshes).
+
+## Key invariants
+- **Copy-on-write meshes** (ADR 0003): `mesh_make_mutable` before writing; re-read `MeshPtr` after an
+  edit; every change `touch()`es the mesh so version-keyed caches refresh.
+- **Edit Mode selections** are vectors indexed like the mesh (`vert_sel_`, `face_sel_`) plus a set of edge
+  keys (`edge_sel_`); any operator that renumbers faces or vertices must rebuild them.
+- **Adjustable operations** re-run from `before`; anything that changes the result after it was recorded
+  must update `LastOp::result_version` (ADR 0005).
+- **Geometry robustness** (Q-01): operators leave a structurally valid mesh or refuse with a message;
+  closed meshes stay closed.
+- **Isolation of user files** (C-04): tests and stress run in a scratch project and trash.
+
+## Module ownership
+| Area | Files | Tests / stress |
+|---|---|---|
+| Mesh data, primitives, extrude, individual inset, loop cut | `scene/mesh.h`, `mesh.cpp` | unit groups by round |
+| Push/Pull, bevel, bridge, push-through, ring repair, dissolve edges | `scene/mesh_tools.cpp` | `pushpull`, `curved` |
+| Poke, triangulate, duplicate, split (mesh_tools2); dissolve limited, seams, face paths (mesh_tools3) | `scene/mesh_tools2.cpp`, `mesh_tools3.cpp` | `modifiers_ngon` |
+| Slice, follow, spin, region inset, smart fill, overlaps, imprints across faces | `scene/mesh_tools4.cpp` | `curved`, `modifiers_ngon` |
+| Hard-surface tools (grid, pipe, array, taper, recess) | `scene/mesh_tools5.cpp` | `curved` |
+| Drawing, guides, snaps | `editor/draw_tool.cpp` | unit (real clicks) |
+| Edit Mode tools, F9, modal helpers, gizmo | `editor/scene_view.cpp`, `modal_transform.cpp` | unit, `editor` fuzz |
+| Keymaps and shortcuts | `editor/keymap.cpp` | unit |
+
+# History of subsystems
+
+What each development phase added, with the Blender (and SketchUp / UModeler / Plasticity) equivalents.
+These sections are kept as written; decisions that shape later work are recorded in `docs/decisions/`.
 
 ## Libraries borrowed from Blender's tree
 

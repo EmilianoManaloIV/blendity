@@ -14,6 +14,8 @@ JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null
 
 FLAGS="-Iextern/sky/include -std=c++17 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -pthread"
 if [ "$CONFIG" = "debug" ]; then FLAGS="$FLAGS -O0 -g -DBL_DEBUG"; else FLAGS="$FLAGS -O2 -DNDEBUG"; fi
+# Extra compiler and linker flags from the environment (CI's sanitizer job: EXTRA_FLAGS="-fsanitize=address,undefined").
+FLAGS="$FLAGS ${EXTRA_FLAGS:-}"
 
 if [ "$OS" = "Darwin" ]; then
   PLATFORM_SRC="src/platform/platform_cocoa.mm"
