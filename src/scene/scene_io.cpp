@@ -85,7 +85,13 @@ void append_float(std::string &s, float v) {
   auto r = std::to_chars(buf, buf + sizeof(buf), v);
   s.append(buf, r.ptr);
 #else
-  int n = std::snprintf(buf, sizeof(buf), "%.9g", v);
+  /* Apple's libc++ has no __cpp_lib_to_chars: the fewest digits that read back as the same
+   * float, as to_chars writes them (so 0.7 is "0.7" on every platform, not "0.699999988"). */
+  int n = 0;
+  for (int prec = 6; prec <= 9; prec++) {
+    n = std::snprintf(buf, sizeof(buf), "%.*g", prec, v);
+    if (std::strtof(buf, nullptr) == v || !(v == v)) break;
+  }
   s.append(buf, (size_t)n);
 #endif
 }

@@ -1963,7 +1963,11 @@ int main(int argc, char **argv) {
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
+    /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
+    std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
+    std::fflush(stdout);
     t.fn(rep, o);
+    std::fprintf(stderr, "[stress] %s done at %.1f s\n", t.name, total.ms() / 1000.0);
   }
   rep.md += strprintf("\n---\nTotal run time: %.1f s\n", total.ms() / 1000.0);
   fs::make_dirs(o.out);

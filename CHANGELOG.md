@@ -14,9 +14,16 @@ be switched on.
 - **`build.sh` was not executable in git** (mode 644, committed from Windows), so CI's
   `./build.sh` failed with "permission denied" (exit 126) before even reaching that line. It is
   now 755.
+- **macOS saved numbers with nine digits.** Apple's C++ library doesn't announce floating-point
+  `to_chars`, so scene and material files used `%.9g` there: 0.7 was written as `0.699999988`, and a
+  material test looking for "0.7" failed. The fallback now writes the fewest digits that read back as the
+  same number, as `to_chars` does, so files are identical on all three platforms.
 
 **Changed:** CI's unit-test steps turn each failing check (and each sanitizer report) into a GitHub
 annotation, so failures can be read on the run page without signing in to view the logs.
+The quick stress step has hung on CI until GitHub's 6-hour limit on every Windows run so far (and now
+on Linux), though it takes under 90 s locally even on one core. It now stops after 15 minutes, and
+`blendity_stress` reports each section's start and end on stderr, so the run page shows where it was.
 - **Push Through out through several faces in one plane needed Manifold.** Pushing a rectangle
   through a wall whose back already had a circle, or an archway where the back had a rectangle across
   it, was refused in the dependency-free build. Now the outline is cut across the back faces and
