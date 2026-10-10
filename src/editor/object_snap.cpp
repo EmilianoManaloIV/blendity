@@ -273,17 +273,10 @@ void Editor::draw_pilot_frame(const Recti &view) {
   auto &u = ui_;
   const Recti frame = pilot_frame_rect(view, *c);
   u.canvas.push_clip(view);
-  const uint32_t dim = Color::hex(0x000000, 110);
-  u.canvas.fill_rect({view.x, view.y, view.w, frame.y - view.y}, dim);
-  u.canvas.fill_rect({view.x, frame.bottom(), view.w, view.bottom() - frame.bottom()}, dim);
-  u.canvas.fill_rect({view.x, frame.y, frame.x - view.x, frame.h}, dim);
-  u.canvas.fill_rect({frame.right(), frame.y, view.right() - frame.right(), frame.h}, dim);
-  u.canvas.rect_outline(frame, Color::hex(0xFFA733), u.px(2));
-  /* Rule-of-thirds guides help framing. */
-  for (int k = 1; k < 3; k++) {
-    u.canvas.vline(frame.x + frame.w * k / 3, frame.y, frame.bottom(), Color::hex(0xFFFFFF, 50));
-    u.canvas.hline(frame.x, frame.right(), frame.y + frame.h * k / 3, Color::hex(0xFFFFFF, 50));
-  }
+  /* The frame shows the camera's game view untouched (render_scene_view draws it and the
+   * passepartout): only an outline just outside it, and this banner. */
+  const int ow = u.px(1);
+  u.canvas.rect_outline({frame.x - ow, frame.y - ow, frame.w + 2 * ow, frame.h + 2 * ow}, Color::hex(0xFFA733), ow);
   const std::string label = strprintf("Piloting %s  |  FOV %.1f%s  |  move the view to move it, Ctrl + wheel: field of view, Esc: stop", g->name.c_str(),
                                       c->vertical_fov_deg(c->image_aspect(render_aspect_of(*scene_))), c->physical ? strprintf(" (%.0f mm)", c->focal_length).c_str() : "");
   const int lw = u.font.text_width(label) + u.px(16);
