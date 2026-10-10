@@ -1,6 +1,6 @@
 # 0013: Voxel-based global illumination (Thiedemann et al. 2011), CPU reference
 
-- **Status:** in review (approved 2026-10-09; deviation below awaits sign-off)
+- **Status:** in review (approved 2026-10-09; the deviation below signed off 2026-10-10)
 - **Requirements:** R-05, R-12 (new: realtime GI from the research folder)
 - **Decisions:** ADR 0011, voxel GI subsystem
 - **Model:** main session (Opus)

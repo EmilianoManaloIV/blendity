@@ -1,6 +1,6 @@
 # 0015: GPU viewport: a measured go / no-go spike
 
-- **Status:** spike done, verdict no-go. Waiting for the user's decision; no viewport code is written
+- **Status:** done (2026-10-10): spike verdict no-go, accepted by the user; no viewport code is written
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0013, GPU viewport
 - **Model:** main session (Opus)

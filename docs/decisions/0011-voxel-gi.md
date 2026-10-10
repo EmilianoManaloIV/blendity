@@ -1,7 +1,7 @@
 # 0011: Voxel GI on the CPU, per pixel, feeding the baked lighting
 
-- **Status:** proposed. Task 0013's spec was approved on 2026-10-09; the per-pixel decision below departs
-  from it (no per-texel realtime lightmaps) and awaits the user's sign-off
+- **Status:** accepted. Task 0013's spec was approved on 2026-10-09; the per-pixel decision below departed
+  from it and was signed off by the user on 2026-10-10 (realtime lightmaps followed in the amendment)
 - **Date:** 2026-10-10
 - **Requirements:** R-05, R-12
 
