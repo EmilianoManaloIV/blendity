@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "raster.h"
 #include "voxel_gi.h"
+#include "probe_volume.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -1182,6 +1183,18 @@ void Renderer3D::shade_deferred() {
             if (sp.has_lightmap && gi->bounce_not_baked) sp.lightmap_add = sp.gi_bounce;
           }
         }
+        if (!sp.has_lightmap && env_.probes && env_.probes->data && it.use_probes) {
+          /* Probe volume: the probes around the point pushed off the surface and toward the eye (APV's
+           * normal and view bias), so probes just behind it don't leak. */
+          const ProbeFrame &pf = *env_.probes;
+          const Vec3 q = sp.position + sp.normal * pf.normal_bias + V * pf.view_bias;
+          Vec3 irr;
+          if (pf.data->sample(q, sp.normal, env.irradiance(sp.normal), pf.use_live, irr, pf.leak_reduction)) {
+            sp.has_probe = true;
+            sp.probe_baked = !pf.use_live;
+            sp.probe = irr;
+          }
+        }
         SurfaceSample s = evaluate_material(*T.mat, sp);
         if (rsm_out_) {
           /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
@@ -1214,7 +1227,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   Vec3 lo(0.0f);
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
-    if (sp.has_lightmap && l.bake_mode == 2) continue;  // a Baked light is in the lightmap already
+    if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
     Vec3 L;
     float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
     if (l.type == RenderLight::Directional) L = -l.direction;
@@ -1236,9 +1249,11 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   Vec3 R = n * (2.0f * dot(n, V)) - V;
   Vec3 spec = env.specular(R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);
   /* Ambient light, best source first: the baked map (plus realtime GI's bounce of lights it doesn't
-   * hold), voxel GI per pixel (the sky that gets through plus the bounce), or the sky alone. */
+   * hold), the probe volume, voxel GI per pixel (the sky that gets through plus the bounce), or the sky
+   * alone. */
   Vec3 amb;
   if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+  else if (sp.has_probe) amb = sp.probe;  // probe-lit objects match the baked look (and live probes follow changes)
   else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
   else amb = env.irradiance(n);
   if (sp.has_gi && !sp.has_lightmap && env_.gi) spec = spec * (1.0f + (sp.gi_sky - 1.0f) * env_.gi->params.specular_occlusion);

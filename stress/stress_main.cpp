@@ -1020,6 +1020,134 @@ struct CfScene {
   }
 };
 
+/* Task 0015's go / no-go spike for a GPU viewport: what a rasterized view costs on the CPU today against
+ * the same picture's work on the GPU through the existing Vulkan path tracer (one sample, no bounces: a
+ * primary ray, the sun's light and its shadow ray per pixel, then the read-back and resolve). The real
+ * viewport would rasterize instead of tracing primary rays, so the GPU column is an upper bound. */
+static void test_gpu_viewport(Report &rep, const Options &o) {
+  rep.title("GPU viewport spike (task 0015): a 1080p view on the CPU vs the GPU",
+            "256 icospheres and a floor, a sun with shadows, the camera orbiting each frame. CPU: deferred PBR with the sun's "
+            "shadow map (cached, as in the editor). GPU: the Vulkan path tracer at 1 sample and no bounces (primary hit, sun "
+            "light, shadow ray), read back and tone mapped, so it includes upload of the camera, the render, the fence wait, "
+            "the read-back and the resolve.");
+  rep.note(gpu::status());
+  const int W = 1920, H = 1080, frames = o.quick ? 4 : 12;
+  auto mesh = primitives::ico_sphere(0.5f, 3);
+  Scene s = make_grid_scene(256, mesh, 1.3f);
+  auto floor = primitives::plane(40.0f, 1);
+  std::vector<MaterialPtr> mats = {make_material("bench", {0.7f, 0.5f, 0.3f})}, mfloor = {make_material("floor", {0.8f, 0.8f, 0.8f})};
+  std::vector<DrawItem> items;
+  std::vector<PTObject> objs;
+  {
+    DrawItem it;
+    it.mesh = &floor->render_mesh();
+    it.model = Mat4::translate({0, -0.6f, 0});
+    it.id = 1;
+    it.materials = &mfloor;
+    items.push_back(it);
+    objs.push_back({&floor->render_mesh_tangents(), it.model, &mfloor});
+  }
+  s.for_each([&](GameObject &g) {
+    DrawItem it;
+    it.mesh = &g.get<MeshFilter>()->mesh->render_mesh();
+    it.model = g.world_matrix();
+    it.id = (uint32_t)g.id + 2;
+    it.materials = &mats;
+    items.push_back(it);
+    objs.push_back({&g.get<MeshFilter>()->mesh->render_mesh_tangents(), it.model, &mats});
+  });
+  AABB bounds;
+  for (auto &it : items) bounds.add(it.mesh->bounds.transformed(it.model));
+  Bench3D b(W, H);
+  ShadowMap sm;
+  render_shadow_map(sm, items, b.env.lights[0].direction, bounds, 2048);
+  auto camera = [&](int f, Mat4 &v, Mat4 &p, Vec3 &eye) {
+    const float a = 0.15f * (float)f;
+    eye = Vec3(std::sin(a) * 16.0f, 10.0f, -std::cos(a) * 16.0f);
+    v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0});
+    p = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 1000.0f);
+  };
+  auto cpu_frame = [&](int f) {
+    Mat4 v, p;
+    Vec3 eye;
+    camera(f, v, p, eye);
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env = b.env;
+    env.camera_pos = eye;
+    env.shadow = &sm;
+    env.shadow_light = 0;
+    b.r3d.begin(&b.rt, v, p, env, opt);
+    b.r3d.clear(0xFF303030);
+    for (auto &it : items) b.r3d.add(it);
+    b.r3d.flush();
+  };
+  cpu_frame(0);
+  ScopedTimer tc;
+  for (int f = 1; f <= frames; f++) cpu_frame(f);
+  const double cpu_ms = tc.ms() / frames;
+  rep.table({"device", "scene upload ms", "1 view end to end ms", "of it render + read-back ms", "2 views, GPU work vs CPU", "verdict"});
+  rep.row({"CPU (deferred + shadow map)", "-", f2(cpu_ms), "-", "1.00x", "-"});
+  if (!gpu::available()) {
+    rep.note("No Vulkan GPU here: the spike needs one (the verdict is measured on the developer's machine).");
+    return;
+  }
+  std::vector<uint32_t> out((size_t)W * H);
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    for (int hw = 0; hw < (d.hardware_rt ? 2 : 1); hw++) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = false;
+      st.gpus = {d.index};
+      st.gpu_hardware_rt = hw == 1;
+      st.max_bounces = 0;
+      st.denoise = false;
+      st.use_guiding = false;
+      st.merge_interval_ms = 0.0;
+      pt.set_settings(st);
+      Environment env;
+      RenderLight sun = b.env.lights[0];
+      pt.build(objs, {sun}, env);  // warm-up: kernel compile and first upload
+      ScopedTimer tu;
+      pt.build(objs, {sun}, env);
+      const double upload_ms = tu.ms();
+      double part[3] = {0, 0, 0};  // camera (and buffer clears), render + read-back, resolve
+      auto gpu_frame = [&](int f) {
+        Mat4 v, p;
+        Vec3 eye;
+        camera(f, v, p, eye);
+        ScopedTimer t0;
+        pt.set_camera(v, p, W, H);
+        part[0] += t0.ms();
+        ScopedTimer t1;
+        pt.render(1e9, 1);
+        part[1] += t1.ms();
+        ScopedTimer t2;
+        pt.resolve(out.data(), W, false);
+        part[2] += t2.ms();
+      };
+      gpu_frame(0);
+      part[0] = part[1] = part[2] = 0;
+      ScopedTimer tg;
+      for (int f = 1; f <= frames; f++) gpu_frame(f);
+      const double gpu_ms = tg.ms() / frames;
+      rep.note(strprintf("%s%s: camera + clears %.2f ms, render + read-back %.2f ms, resolve %.2f ms a frame.", d.name.c_str(),
+                         hw ? " (ray tracing hardware)" : " (compute)", part[0] / frames, part[1] / frames, part[2] / frames));
+      if (!pt.gpu_error().empty()) rep.note("GPU error: " + pt.gpu_error());
+      /* The verdict on the GPU's own work: the path tracer's host side (clearing its float buffers on every
+       * camera change, tone mapping on the CPU) is not what a viewport would do. */
+      const double work = part[1] / frames, ratio = work / std::max(cpu_ms, 1e-9);
+      rep.row({d.name + (hw ? " (ray tracing hardware)" : " (compute)"), f2(upload_ms), f2(gpu_ms), f2(work), f2(ratio) + "x",
+               ratio <= 0.5 ? "go (<= 0.50x)" : "no-go (> 0.50x)"});
+    }
+  }
+  rep.note("Go / no-go (ADR 0013): a GPU viewport is worth building if two views cost at most half the CPU's time. The verdict "
+           "uses the GPU's render + read-back, which traces primary rays (a rasterizing viewport would not) and reads back 16 "
+           "bytes a pixel of float colour (a viewport would read back about 12: colour, depth, ids). End to end through the "
+           "path tracer it is slower than the CPU: its host side clears float buffers on each camera change and tone maps on "
+           "the CPU, which a viewport would do on the GPU.");
+}
+
 /* Voxel GI (task 0013): the paper's pieces timed one by one, then what it adds to a frame. */
 static void test_vgi(Report &rep, const Options &o) {
   rep.title("Voxel-based global illumination (Thiedemann et al. 2011)",
@@ -1156,6 +1284,115 @@ static void test_vgi(Report &rep, const Options &o) {
   rep.note(strprintf("Odd settings, bounds and points (NaN / infinite / negative / huge): %d runs, %d problems (a problem: a crash or a sky ratio "
                      "outside 0..1 or a non-finite bounce)",
                      runs, problems));
+}
+
+/* Probe volumes (task 0014): placement, bake, live updates and per-pixel sampling. */
+static void test_probes(Report &rep, const Options &o) {
+  rep.title("Probe volumes (Adaptive Probe Volume style)",
+            "Spheres and cubes on a 40 m floor under the sky with a Baked sun; probes 1 m apart near geometry, up to 27 m in open space.");
+  CfScene sc;
+  auto white = make_material("White", {0.8f, 0.8f, 0.8f});
+  sc.add(primitives::plane(40.0f), Mat4::identity(), 1, white);
+  auto sphere = primitives::uv_sphere(0.5f, 24, 12);
+  auto cube = primitives::cube();
+  const int count = o.quick ? 32 : 128;
+  for (int i = 0; i < count; i++)
+    sc.add(i % 2 ? sphere : cube, Mat4::translate({(i % 12 - 6) * 2.5f, 0.5f, (i / 12 - 6) * 2.5f}), (uint32_t)i + 2, white);
+  sc.seal();
+  std::vector<AABB> tris;
+  AABB vol;
+  std::vector<PTObject> objs;
+  for (const DrawItem &it : sc.items) {
+    const RenderMesh &rm = *it.mesh;
+    for (size_t k = 0; k < rm.tri_count(); k++) {
+      AABB b;
+      for (int c = 0; c < 3; c++) b.add(it.model.point(rm.positions[rm.indices[k * 3 + c]]));
+      tris.push_back(b);
+      vol.add(b.min), vol.add(b.max);
+    }
+    objs.push_back({&rm, it.model, it.materials});
+  }
+  vol.min = vol.min - Vec3(1.0f), vol.max = vol.max + Vec3(4.0f);
+  ProbeVolumeData d;
+  const double place_ms = time_ms([&] { probe_place(d, vol, tris, 1.0f, 27.0f); });
+  BakeLight sun;
+  sun.light.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+  sun.mode = 2;
+  PathTracer pt;
+  PTSettings ps;
+  ps.max_bounces = 1;
+  ps.denoise = false;
+  pt.set_settings(ps);
+  Environment env;
+  pt.build(objs, {sun.light}, env);
+  const double validate_ms = time_ms([&] { probe_validate(d, pt, 64); });
+  const double bake_ms = time_ms([&] { probe_bake(d, pt, {sun}, 64, 2); });
+  size_t invalid = 0;
+  for (uint8_t v : d.valid) invalid += !v;
+  rep.table({"probes", "bricks", "inside geometry", "place ms", "validate ms", "bake ms (64 rays)", "bytes per probe"});
+  rep.row({std::to_string(d.probe_count()), std::to_string(d.bricks.size()), std::to_string(invalid), f2(place_ms), f2(validate_ms), f2(bake_ms),
+           std::to_string(sizeof(Vec3) + 1 + 2 * sizeof(ProbeCube) + 1)});
+  /* The same volume with nothing in it: the count follows the geometry, not the size. */
+  ProbeVolumeData empty_d;
+  probe_place(empty_d, vol, {}, 1.0f, 27.0f);
+  rep.note(strprintf("The same volume without geometry: %zu probes (with geometry: %zu).", empty_d.probe_count(), d.probe_count()));
+  /* Live updates through voxel GI. */
+  VoxelGrid g;
+  voxel_grid_fit(g, vol, 128);
+  std::vector<std::vector<VoxelSpan>> spans(sc.items.size());
+  std::vector<const std::vector<VoxelSpan> *> ptrs;
+  for (size_t i = 0; i < sc.items.size(); i++) voxelize_mesh(g, *sc.items[i].mesh, sc.items[i].model, spans[i]), ptrs.push_back(&spans[i]);
+  voxel_grid_build(g, ptrs);
+  GiParams prm = gi_params_sanitized(GiParams{});
+  const size_t slice = std::min<size_t>(4096, d.probe_count());
+  const double live_ms = time_ms([&] { probe_live_update(d, g, nullptr, env, prm, 0, slice); }, 3);
+  rep.note(strprintf("Live update by voxel GI: %.2f ms for a slice of %zu probes (six gathers each); the whole volume in %zu frames.", live_ms, slice,
+                     (d.probe_count() + slice - 1) / std::max<size_t>(1, slice)));
+  /* Sampling per pixel: a 1080p deferred frame with every object probe-lit, against none. */
+  {
+    Image img;
+    img.resize(1920, 1080);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 1920, 1080});
+    Renderer3D r3d;
+    ProbeFrame pf;
+    pf.data = &d;
+    auto frame = [&](bool probes) {
+      LightingEnv le;
+      le.lights.push_back(sun.light);
+      le.environment = &env;
+      le.probes = probes ? &pf : nullptr;
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      r3d.begin(&rt, Mat4::look_at({0, 8, -22}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 16.0f / 9.0f, 0.1f, 200.0f), le, opt);
+      r3d.clear(0xFF303030u);
+      for (DrawItem it : sc.items) {
+        it.use_probes = true;
+        r3d.add(it);
+      }
+      r3d.flush();
+    };
+    frame(true);
+    const double plain = time_ms([&] { frame(false); }, 3), with = time_ms([&] { frame(true); }, 3);
+    rep.note(strprintf("Deferred shading at 1080p: %.2f ms without probes, %.2f ms with every object probe-lit.", plain, with));
+  }
+  /* Odd settings never crash. */
+  int problems = 0, runs = 0;
+  uint32_t seed = 13;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  const float odd[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1.0f, 0.0f, 1e9f, 1e-6f, 2.0f};
+  for (int i = 0; i < (o.quick ? 20 : 100); i++) {
+    ProbeVolumeData x;
+    AABB b = vol;
+    if (rnd() < 0.3f) b.max = b.min;  // zero size
+    if (rnd() < 0.2f) b.max.x = odd[(int)(rnd() * 7) % 7];
+    probe_place(x, b, tris, odd[(int)(rnd() * 7) % 7], odd[(int)(rnd() * 7) % 7], 100000);
+    Vec3 out;
+    const bool ok = x.sample(Vec3(rnd() * 40 - 20, rnd() * 4, rnd() * 40 - 20), normalize(Vec3(rnd() - 0.5f, 1, rnd() - 0.5f)), Vec3(0.3f), false, out);
+    if (x.probe_count() > 100000 + 64 || (ok && !std::isfinite(out.x + out.y + out.z))) problems++;
+    runs++;
+  }
+  rep.note(strprintf("Odd volumes and spacings (NaN / infinite / negative / zero / huge): %d runs, %d problems.", runs, problems));
 }
 
 /* Baked lighting (task 0012): what a bake costs as the scene grows, and what a lightmap costs to shade. */
@@ -2685,11 +2922,11 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"vgi", test_vgi},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"vgi", test_vgi}, {"probes", test_probes},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
-               {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
+               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
   ScopedTimer total;
   for (auto &t : tests) {

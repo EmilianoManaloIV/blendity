@@ -57,7 +57,8 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     it.receive_shadows = mr->receive_shadows;
     it.id = (uint32_t)g.id;
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
-    if (!editing && mr->contribute_gi && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
+    if (!editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
+    it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
     items.push_back(it);
   });
   return items;
@@ -177,16 +178,17 @@ uint64_t Editor::scene_render_hash() {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
     auto *l = g.get<Light>();
+    auto *pv = g.get<ProbeVolume>();
     /* The hierarchy: a selected object's children get an outline of their own. */
     const uint64_t parent = g.parent ? g.parent->id : 0;
     mix(&parent, 8);
-    if (!mr && !l) return;
+    if (!mr && !l && !pv) return;
     mix(&g.id, 8);
     mix(g.world_matrix().m, sizeof(float) * 16);
     if (mr) {  // the flags the views draw by (Show in Renders, shadows, wireframe, Display As)
       const uint64_t f = (uint64_t)mr->enabled | (uint64_t)mr->show_wireframe << 1 | (uint64_t)mr->cast_shadows << 2 |
                          (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
-                         (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40;
+                         (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41;
       mix(&f, 8);
     }
     if (mr && mr->enabled) {
@@ -199,6 +201,10 @@ uint64_t Editor::scene_render_hash() {
         mix(&p, sizeof(p));
         if (mp) mix(&mp->version, 8);
       }
+    }
+    if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
+      const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
+      mix(&ph, 8);
     }
     if (l && l->enabled) {
       /* Every field of the light (colour temperature, spot angles, area size, shadows...):
@@ -221,6 +227,7 @@ uint64_t Editor::scene_render_hash() {
   mix(&scene_->serial, 8);
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
   mix(&scene_->lighting.baked_gi, 1);
+  mix(&probe_live_gen_, 8);  // live probes changed
   return h;
 }
 
@@ -319,6 +326,19 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     }
   }
   if (scene_lights && scene_->lighting.realtime_gi) env.gi = update_voxel_gi(items, env, game);
+  const LightingSettings &pls = scene_->lighting;
+  const bool baked_probes = !probes_.empty() && probes_.scene_key != 0 && pls.baked_gi;
+  const bool live_probes = !probes_.empty() && pls.realtime_gi && probe_live_ready_;
+  if (scene_lights && (baked_probes || live_probes)) {
+    const LightingSettings &ls = pls;
+    probe_frame_.data = &probes_;
+    probe_frame_.normal_bias = finite_bits(ls.probe_normal_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_normal_bias)) : 0.25f;
+    probe_frame_.view_bias = finite_bits(ls.probe_view_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_view_bias)) : 0.1f;
+    probe_frame_.leak_reduction = ls.probe_leak_reduction;
+    /* The live copy where the bake doesn't cover it: no bake, a stale one, or a sun it doesn't hold. */
+    probe_frame_.use_live = live_probes && (!baked_probes || lm_stale_live_ || (env.gi && env.gi->bounce_not_baked));
+    env.probes = &probe_frame_;
+  }
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);

@@ -124,6 +124,12 @@ class PathTracer {
     uint32_t object = UINT32_MAX;  // index into the objects passed to build()
   };
   bool intersect(const Ray &r, Hit &h) const;
+  /* The true face normal at a hit (probe volumes: is a probe behind a surface?). */
+  Vec3 hit_geo_normal(const Hit &h) const {
+    SurfacePoint sp;
+    surface_at(h.object, h.tri, h.u, h.v, sp);
+    return sp.geo_normal;
+  }
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, rays, nullptr); }

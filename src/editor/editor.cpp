@@ -168,7 +168,8 @@ void Editor::init_headless(int width, int height) {
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
-  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || seq_.active || !deferred_.empty() ||
+  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || seq_.active ||
+         !deferred_.empty() ||
          (shading_ == Shading::Rendered && !pilot_cam_ && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
@@ -462,6 +463,7 @@ void Editor::frame(std::vector<Event> &events) {
   }
 
   ui_.end_frame();
+  update_probes_live();  // after the views drew: they built this frame's voxel grid
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
@@ -2721,6 +2723,11 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "render") start_final_render();
+  else if (c == "probes") {
+    /* probes show|hide: the probe volume's probes in the Scene view. */
+    scene_->lighting.show_probes = to_lower(arg(1, "show")) != "hide";
+    mark_changed("Show Probes");
+  }
   else if (c == "bake") {
     /* bake [start|cancel|clear]: Generate Lighting, as the Lighting window's buttons. */
     const std::string w = to_lower(arg(1, "start"));
