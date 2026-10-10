@@ -142,6 +142,11 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
    * Visibility > Renders. Boolean cutters are shown as wire and kept out of renders. */
   int display_as = 0;
   bool show_in_renders = true;
+  /* Baked lighting (Unity: Static > Contribute GI, Scale In Lightmap; the model importer's Generate
+   * Lightmap UVs). A contributing object is in the bake and gets a lightmap. */
+  bool contribute_gi = false;
+  float scale_in_lightmap = 1.0f;
+  bool generate_lightmap_uvs = true;
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();
@@ -167,6 +172,9 @@ struct Light : ComponentBase<Light> {
    * multiplied by a black body's colour at this many kelvin. */
   bool use_temperature = false;
   float temperature = 6500.0f;
+  /* Unity's Light Mode: 0 Realtime (not in baked lighting), 1 Mixed (realtime direct light and shadows,
+   * baked indirect), 2 Baked (direct and indirect in the lightmaps). */
+  int mode = 0;
   void reflect(Reflector &r) override;
   Vec3 final_color() const;  // colour x temperature tint
 };
@@ -722,6 +730,22 @@ struct EnvironmentSettings {
   void reflect(Reflector &r);
 };
 
+/* Unity: Lighting window > Scene (Mixed Lighting, Lightmapping Settings). Baked lighting, task 0012. */
+struct LightingSettings {
+  bool baked_gi = true;           // Baked Global Illumination
+  int lighting_mode = 0;          // 0 Baked Indirect
+  float texels_per_unit = 40.0f;  // Lightmap Resolution
+  int max_size = 1024;            // Max Lightmap Size
+  int padding = 2;                // Lightmap Padding (texels)
+  int direct_samples = 32;
+  int indirect_samples = 256;
+  int bounces = 2;
+  bool denoise = true;
+  float indirect_intensity = 1.0f;
+  bool auto_generate = false;     // re-bake after changes settle (wired with realtime GI, task 0013)
+  void reflect(Reflector &r);
+};
+
 /* Blender: Render + Output properties. Unity: Quality / Recorder settings. */
 struct RenderSettings {
   int engine = 0;  // 0 Rasterized (EEVEE-like), 1 Path Traced (Cycles-like)
@@ -780,6 +804,7 @@ class Scene {
   bool compress = false;
   EnvironmentSettings environment;
   RenderSettings render;
+  LightingSettings lighting;
   std::vector<GuideLine> guides;  // construction lines for drawing (editor only)
   std::vector<GameObject *> roots;
   /* Play mode: the Jolt world while playing (null otherwise or without Jolt). */

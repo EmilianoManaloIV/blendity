@@ -312,6 +312,7 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   rm.indices.clear();
   rm.tri_face.clear();
   rm.tri_material.clear();
+  rm.tri_corner.clear();
   const bool uv = has_uvs();
   const size_t nf = face_count();
   std::vector<Vec3> fnormal(nf);
@@ -455,6 +456,7 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
       rm.indices.insert(rm.indices.end(), {corner_rv[base + local[i]], corner_rv[base + local[i + 1]], corner_rv[base + local[i + 2]]});
       rm.tri_face.push_back((uint32_t)f);
       rm.tri_material.push_back(mat);
+      rm.tri_corner.insert(rm.tri_corner.end(), {base + local[i], base + local[i + 1], base + local[i + 2]});
     }
   }
   rm.bounds = bounds();

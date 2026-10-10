@@ -16,11 +16,13 @@
 #pragma once
 
 #include <cstdlib>
+#include <unordered_map>
 #include "../core/core.h"
 #include "../platform/platform.h"
 #include "../render/camera_filter.h"
 #include "../render/pathtracer.h"
 #include "../render/raster.h"
+#include "../render/lightmapper.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -63,7 +65,7 @@ extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyli
 extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -183,6 +185,11 @@ class Editor {
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
   bool rendering_for_test() const { return rendering_; }
+  /* Baked lighting (task 0012). */
+  bool baking_for_test() const { return baking_; }
+  const LightingData &lighting_data_for_test() const { return lighting_data_; }
+  bool lighting_out_of_date_for_test() { return lighting_out_of_date(); }
+  std::string lighting_dir_for_test() const { return lighting_dir(); }
   /* The last frame's profile, and every frame's added up (subtract two to measure a stretch). */
   const FrameProfile &frame_profile() const { return prof_last_; }
   const FrameProfile &frame_profile_totals() const { return prof_total_; }
@@ -937,6 +944,29 @@ class Editor {
   /* ---- rendering (render_view.cpp) ---- */
   Environment env_;
   uint64_t env_key_ = 0;
+  /* ---- baked lighting (lighting.cpp, task 0012) ---- */
+  LightingData lighting_data_;
+  Lightmapper baker_;
+  bool baking_ = false;
+  std::string bake_status_;
+  double bake_start_ = 0;
+  uint64_t bake_key_ = 0, lighting_gen_ = 0;
+  std::string lighting_dir() const;
+  uint64_t lightmap_hash_of(const GameObject &g, const Mesh &m);
+  uint64_t lightmap_scene_key();
+  bool lighting_out_of_date();
+  void attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it);
+  void load_lighting_data();
+  void save_lighting_data();
+  std::string lighting_saved_dir_;  // where lighting_data_ is on disk ("" = only in memory)
+  uint64_t ood_key_ = 0;            // lighting_out_of_date(), recomputed only when this changes
+  bool ood_ = false;
+  std::unordered_map<uint64_t, uint64_t> lm_mesh_hash_;  // RenderMesh::serial -> lightmap_mesh_hash
+  void bake_start();
+  void bake_cancel();
+  void bake_clear();
+  void step_bake();
+  void draw_lighting_window(const Recti &r);
   /* The sun's shadow map, kept while its casters and the light are unchanged. Two entries: the Scene
    * view and the Game view collect different meshes (the Edit cage, the evaluated mesh), so views drawn
    * in turn would otherwise evict each other every frame. */

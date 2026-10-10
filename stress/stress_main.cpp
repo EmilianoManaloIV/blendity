@@ -1001,6 +1001,135 @@ static void test_editor_render(Report &rep, const Options &o) {
            "casters or the light change (task 0011).");
 }
 
+/* Baked lighting (task 0012): what a bake costs as the scene grows, and what a lightmap costs to shade. */
+static void test_bake(Report &rep, const Options &o) {
+  rep.title("Baked lighting (Generate Lighting)",
+            "Static spheres and cubes on a floor under the sky with a Baked sun, Lightmap Resolution 10, 64 indirect samples, "
+            "2 bounces; then random odd settings.");
+  rep.table({"static objects", "texels", "lightmaps", "bake s", "texels/s", "Mrays/s", "filter + dilate ms"});
+  std::vector<int> counts = o.quick ? std::vector<int>{10, 100} : std::vector<int>{10, 100, 1000};
+  for (int n : counts) {
+    std::vector<MeshPtr> keep;
+    std::vector<BakeObject> objs;
+    auto floor = primitives::plane(std::max(10.0f, std::sqrt((float)n) * 3.0f));
+    keep.push_back(floor);
+    std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
+    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
+    const int side = (int)std::ceil(std::sqrt((double)n));
+    auto sphere = primitives::uv_sphere(0.5f, 24, 12);
+    auto cube = primitives::cube();
+    for (int i = 0; i < n; i++) {
+      const float x = (i % side - side * 0.5f) * 2.5f, z = (i / side - side * 0.5f) * 2.5f;
+      objs.push_back({(uint64_t)i + 2, i % 2 ? sphere : cube, Mat4::translate({x, 0.5f, z}), white, 1.0f, true, 0});
+    }
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+    sun.mode = 2;
+    sun.id = 999999;
+    Environment env;
+    env.mode = Environment::Gradient;
+    BakeSettings bs;
+    bs.texels_per_unit = 10.0f;
+    bs.indirect_samples = 64;
+    bs.bounces = 2;
+    bs.max_size = 1024;
+    Lightmapper lm;
+    ScopedTimer t;
+    lm.begin(objs, {sun}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    const double s = t.ms() / 1000.0;
+    const LightingData d = lm.take_result();
+    rep.row({std::to_string(n), std::to_string(lm.texel_count()), std::to_string(d.pages.size()), f2(s), f1(lm.texel_count() / std::max(1e-6, s)),
+             f2(lm.rays() / std::max(1e-6, s) / 1e6), f2(lm.finish_ms())});
+  }
+  /* Shading cost: the same 1080p render with and without lightmaps on every object. */
+  {
+    std::vector<BakeObject> objs;
+    auto sphere = primitives::uv_sphere(0.5f, 32, 16);
+    auto floor = primitives::plane(20.0f);
+    std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
+    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
+    for (int i = 0; i < 64; i++) objs.push_back({(uint64_t)i + 2, sphere, Mat4::translate({(i % 8 - 4) * 1.5f, 0.5f, (i / 8 - 4) * 1.5f}), white, 1.0f, true, 0});
+    Lightmapper lm;
+    BakeSettings bs;
+    bs.texels_per_unit = 8.0f;
+    bs.indirect_samples = 16;
+    lm.begin(objs, {}, Environment{}, bs);
+    while (!lm.step(1e9)) {
+    }
+    const LightingData d = lm.take_result();
+    Image img;
+    img.resize(1920, 1080);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 1920, 1080});
+    Renderer3D r3d;
+    const Mat4 v = Mat4::look_at({0, 6, -14}, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(50 * kDeg2Rad, 16.0f / 9.0f, 0.1f, 200.0f);
+    auto frame = [&](bool lightmaps) {
+      LightingEnv env;
+      RenderLight sun;
+      sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+      env.lights.push_back(sun);
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      r3d.begin(&rt, v, p, env, opt);
+      r3d.clear(0xFF303030u);
+      for (const BakeObject &o : objs) {
+        DrawItem it;
+        it.mesh = &o.mesh->render_mesh();
+        it.model = o.model;
+        it.materials = &o.materials;
+        it.id = (uint32_t)o.id;
+        auto e = d.entries.find(o.id);
+        if (lightmaps && e != d.entries.end()) it.lightmap = &d.pages[(size_t)e->second.page], it.lightmap_uv = &e->second.tri_uv;
+        r3d.add(it);
+      }
+      r3d.flush();
+      return r3d.stats().ms_shade;
+    };
+    frame(true);
+    double plain = 0, lit = 0;
+    for (int i = 0; i < 3; i++) plain += frame(false), lit += frame(true);
+    rep.note(strprintf("Deferred shading at 1080p, 65 objects: %.2f ms without lightmaps, %.2f ms with (bilinear lookup per pixel).", plain / 3, lit / 3));
+  }
+  /* Odd settings never crash and keep the result well formed. */
+  int problems = 0, runs = 0;
+  uint32_t seed = 77;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  const float odd[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1.0f, 0.0f, 1e9f, 0.5f};
+  auto cube = primitives::cube();
+  auto empty = std::make_shared<Mesh>();
+  for (int i = 0; i < (o.quick ? 8 : 30); i++) {
+    BakeSettings bs;
+    bs.texels_per_unit = odd[(int)(rnd() * 6) % 6];
+    bs.max_size = (int)(rnd() * 20000) - 100;
+    bs.padding = (int)(rnd() * 100) - 10;
+    bs.indirect_samples = (int)(rnd() * 8);
+    bs.direct_samples = (int)(rnd() * 8);
+    bs.bounces = (int)(rnd() * 30) - 5;
+    bs.indirect_intensity = odd[(int)(rnd() * 6) % 6];
+    if (std::isfinite(bs.texels_per_unit) && bs.texels_per_unit > 50.0f) bs.texels_per_unit = 50.0f;  // keep the run short
+    std::vector<MaterialPtr> none;
+    std::vector<BakeObject> objs = {{1, cube, Mat4::identity(), none, odd[(int)(rnd() * 6) % 6], rnd() < 0.5f, 0},
+                                    {2, empty, Mat4::identity(), none, 1.0f, true, 0}};
+    Lightmapper lm;
+    lm.begin(objs, {}, Environment{}, bs);
+    int guard = 0;
+    while (!lm.step(50.0) && ++guard < 100000) {
+    }
+    const LightingData d = lm.take_result();
+    for (const Lightmap &p : d.pages)
+      for (const Vec3 &t : p.texels)
+        if (!std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.z) || t.x < 0 || t.y < 0 || t.z < 0) {
+          problems++;
+          break;
+        }
+    runs++;
+  }
+  rep.note(strprintf("Odd settings (NaN / infinite / negative / huge resolution, padding, samples, bounces, scale; an empty mesh): %d runs, %d problems",
+                     runs, problems));
+}
+
 static void test_fuzz(Report &rep, const Options &o) {
   rep.title("Editor robustness: random input fuzzing",
             "Random clicks, drags, wheel and key presses across the whole window (monkey testing).");
@@ -2399,7 +2528,7 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
