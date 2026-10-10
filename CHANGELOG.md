@@ -2,6 +2,66 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-10 (round 41): manual lighting updates and a rough preview, like Bakery's (task 0020)
+
+**Asked:** stop recomputing lighting on every change while moving things around, update it only when
+asked, and add an optional very rough preview like Bakery's Realtime Preview.
+
+**Added**
+- **Lighting Updates** (Lighting window): Manual, the default, or Automatic (the behaviour until now).
+  - **In Manual,** Realtime GI, realtime lightmaps, live probes and Auto Generate don't react to changes.
+    Direct light and shadows stay live.
+  - **The last lighting stays up:** a baked object that moved keeps its lightmap, and the last realtime
+    lightmaps and live probes stay shown. "Lighting out of date" says when it's stale.
+- **Update Lighting** (button, Ctrl+Shift+L, `lighting update`) runs Realtime GI once (the grid, the
+  RSM, the realtime lightmaps, the live probes) and freezes again. Generate Lighting still bakes.
+- **Preview Lighting** (a toggle, `lighting preview on|off`):
+  - **What:** a rough progressive bake at a quarter of the Lightmap Resolution, 16, then 64, then 256
+    samples, denoised, on the GPU when Render > Device is GPU Compute.
+  - **When:** it starts half a second after changes stop and runs about 8 ms a frame.
+  - **Shown, not saved:** it appears in place of the bake and is never saved.
+- **`lighting mode manual|automatic`**, and the Learn lesson and guide explain both modes.
+- **In Manual, one automatic update** when Realtime GI is turned on or a scene opens, so it never starts
+  empty.
+- **"Lighting out of date (Update Lighting)"** in the status bar when frozen Realtime GI is stale (with
+  or without a bake).
+
+**Fixed (found by the code review)**
+- **A fresh Generate Lighting was covered by the preview again.** The preview now stands down while
+  the real bake is current.
+- **Frozen frames dropped a Realtime sun's bounce on lightmaps** (and the frozen live probes, and
+  specular occlusion). A frozen frame is now the last updated picture, bit for bit.
+- **Undo and redo dropped the frozen realtime lightmaps** (a clone gets a new scene serial). They're now
+  keyed by a scene id that undo keeps.
+- **In Automatic with a stale bake, the preview was never attached.** Staleness is now judged on what's
+  shown.
+- **Smaller fixes:**
+  - A mesh edit in Manual drops the object's old map (only a move keeps it).
+  - Opening a scene clears the last one's preview.
+  - The preview's sample count resets on a change.
+  - The Lighting window's out-of-date text fits Manual.
+  - `lighting mode auto` works.
+  - The stress section puts its scene back after the drag rows.
+  - Two tests that couldn't fail now can: Auto Generate gets its real second, and "never saved" checks
+    a real folder.
+- **Not fixed:** each preview stage lays out and builds its scene again in one frame. That's a hitch
+  on big scenes while orbiting during a preview.
+
+**Checked**
+- Unit checks: Windows 8,066, 0 failed (369 tests), with Automatic and with Manual as the default
+  (`BLENDITY_LIGHTING_UPDATES`). Render cache verify mode: 0 stale pictures.
+- Linux with libraries: 8,018, 0 failed. Sanitizer build: 7,940, 0 failed, no reports.
+- Stress `editor_render`, 1600 × 1000, Realtime GI on, dragging a static object:
+
+  | Mode | ms a frame |
+  |---|---|
+  | Automatic | 84–108 |
+  | Manual | 22–27 (the same as with no GI) |
+  | Manual + Preview Lighting | 22–23 (it waits for the drag to stop) |
+
+  After the drag, the GPU preview shows its first pass in 1.4 s and reaches 256 samples in 3.4 s. The
+  first run after a kernel change compiles the pipeline once (11 s).
+
 ## 2026-10-10 (round 40): lighting without lag: baked GI that costs nothing live, realtime lightmaps, GI and baking on the GPU, no path-traced Scene view (tasks 0016-0019)
 
 **Asked:**

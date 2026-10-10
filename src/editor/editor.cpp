@@ -169,6 +169,7 @@ void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
   return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
+         lighting_update_requested_ || preview_running_ ||
          seq_.active ||
          !deferred_.empty() ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
@@ -388,6 +389,7 @@ void Editor::frame(std::vector<Event> &events) {
 
   ui_.begin_frame(&fb_, now);
   auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
+  preview_step();
   auto &c = ui_.canvas;
   c.fill_rect({0, 0, fb_.width, fb_.height}, ui_.theme.border);
   int mh = ui_.row_h() + ui_.px(2);
@@ -465,6 +467,7 @@ void Editor::frame(std::vector<Event> &events) {
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();
+  lighting_update_step();
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
@@ -913,7 +916,10 @@ void Editor::draw_statusbar(const Recti &r) {
     u.label(tr, e.text, u.theme.text);
     if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
   }
-  std::string lighting = baking_ ? bake_status_ + "  |  " : lighting_out_of_date() ? std::string("Lighting out of date  |  ") : std::string();
+  std::string lighting = baking_                 ? bake_status_ + "  |  "
+                         : lighting_out_of_date()  ? std::string("Lighting out of date  |  ")
+                         : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: Ctrl+Shift+L)  |  ")
+                                                   : std::string();
   std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
                                 playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
                                 scene_->object_count(), scene_stats_.tris_submitted, kVersion);
@@ -2737,6 +2743,21 @@ void Editor::run_console_command(const std::string &line) {
     else bake_start();
   }
   else if (c == "saverender") save_render();
+  else if (c == "lighting") {
+    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) */
+    const std::string sub = to_lower(arg(1, "update"));
+    if (sub == "update") lighting_update();
+    else if (sub == "preview") {
+      scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
+      mark_changed("Preview Lighting");
+    }
+    else if (sub == "mode") {
+      const std::string m = to_lower(arg(2, "manual"));
+      scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
+      mark_changed("Lighting Updates");
+    }
+    else Log::warn("lighting: update | preview on|off | mode manual|automatic");
+  }
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));
     if (w == "rendered")

@@ -958,6 +958,55 @@ static void test_editor_render(Report &rep, const Options &o) {
     if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.0f});
     ed.step_frame_headless();
   });
+  /* Task 0020: the same drag of a static (Contribute GI) object with Realtime GI on, in each lighting mode. */
+  {
+    ed.scene().for_each([&](GameObject &g) {
+      if (auto *mr = g.get<MeshRenderer>()) mr->contribute_gi = true;
+    });
+    ed.commit_change("all static");
+    ed.command("set Lighting.RealtimeGI true");
+    ed.command("set Lighting.GIResolution 1");
+    ed.preview_like_window_for_test(true);
+    for (const char *mode : {"automatic", "manual"}) {
+      ed.command(std::string("lighting mode ") + mode);
+      ed.command("lighting update");
+      for (int i = 0; i < 40; i++) ed.step_frame_headless();
+      row(strprintf("dragging a static object, Realtime GI, %s", mode).c_str(), [&](int k) {
+        if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.3f});
+        ed.step_frame_headless();
+      });
+    }
+    ed.scene().render.device = gpu::available() ? 1 : 0;  // (the preview bakes where Generate Lighting does)
+    ed.command("lighting preview on");
+    row("dragging a static object, Manual + Preview Lighting (waits for the drag to stop)", [&](int k) {
+      if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.6f});
+      ed.step_frame_headless();
+    });
+    /* After the drag: how long until the first preview, and until 256 samples. */
+    ScopedTimer tp;
+    double first = -1, full = -1;
+    while (tp.ms() < 60000.0) {
+      ed.step_frame_headless();
+      if (first < 0 && ed.preview_samples_for_test() > 0) first = tp.ms();
+      if (ed.preview_samples_for_test() == 256 && !ed.preview_running_for_test()) {
+        full = tp.ms();
+        break;
+      }
+    }
+    rep.note(strprintf("Preview Lighting after the drag stops (0.5 s wait, 8 ms a frame, %s): the first preview (16 samples) after %.2f s, "
+                       "256 samples after %.2f s.",
+                       ed.scene().render.device == 1 ? "GPU" : "CPU", first / 1000.0, full / 1000.0));
+    ed.command("lighting preview off");
+    ed.command("set Lighting.RealtimeGI false");
+    ed.command("lighting mode automatic");
+    ed.scene().render.device = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (auto *mr = g.get<MeshRenderer>()) mr->contribute_gi = false;
+    });
+    ed.commit_change("as before");
+    ed.preview_like_window_for_test(false);
+    ed.step_frame_headless();
+  }
   MaterialPtr mat = mover && mover->get<MeshRenderer>() ? mover->get<MeshRenderer>()->material(0) : nullptr;
   row("editing a material colour", [&](int k) {
     if (mat) {

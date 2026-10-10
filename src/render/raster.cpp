@@ -1188,13 +1188,14 @@ void Renderer3D::shade_deferred() {
           sp.normal = -sp.normal;
           sp.geo_normal = -sp.geo_normal;
         }
-        if (gi && T.has_rt) {
-          /* Realtime lightmap: the texels' gather, read like a baked map (task 0016). */
+        if (T.has_rt) {
+          /* Realtime lightmap: the texels' gather, read like a baked map (task 0016); also with no GI pass
+           * this frame (Manual lighting updates keep the last maps up, task 0020). */
           const Vec2 ruv = T.rt_uv[0] * B.x + T.rt_uv[1] * B.y + T.rt_uv[2] * B.z;
           sp.has_gi = true;
           sp.gi_sky = std::max(0.0f, std::min(1.0f, it.rt_sky->sample(ruv).x));
           sp.gi_bounce = it.rt_bounce->sample(ruv);
-          if (sp.has_lightmap && gi->bounce_not_baked) sp.lightmap_add = sp.gi_bounce;
+          if (sp.has_lightmap && (gi ? gi->bounce_not_baked : env_.rt_bounce_not_baked)) sp.lightmap_add = sp.gi_bounce;
         }
         else if (gi && stats_.gi_traced) {
           /* The receivers around this pixel that lie on its surface (facing, plane), bilinear between them. */
@@ -1300,7 +1301,8 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   else if (sp.has_probe) amb = sp.probe;  // probe-lit objects match the baked look (and live probes follow changes)
   else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
   else amb = env.irradiance(n);
-  if (sp.has_gi && !sp.has_lightmap && env_.gi) spec = spec * (1.0f + (sp.gi_sky - 1.0f) * env_.gi->params.specular_occlusion);
+  if (sp.has_gi && !sp.has_lightmap)
+    spec = spec * (1.0f + (sp.gi_sky - 1.0f) * (env_.gi ? env_.gi->params.specular_occlusion : env_.rt_specular_occlusion));
   Vec3 diff = amb * s.albedo * (1.0f - s.metallic);
   return lo + diff + spec + s.emission;
 }

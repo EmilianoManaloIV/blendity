@@ -1719,9 +1719,33 @@ void Editor::draw_lighting_window(const Recti &r) {
     u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * baker_.progress()), pr.h}, u.px(3), u.theme.accent);
     u.redraw = true;
   }
+  {
+    /* Task 0020: Update Lighting and the rough preview. */
+    Recti r2 = lay.row(u.row_h() + u.px(4));
+    if (u.button({r2.x, r2.y, bw, r2.h}, lighting_update_requested_ ? "Updating..." : "Update Lighting  (Ctrl+Shift+L)", lighting_update_requested_,
+                 Icon::Lightbulb))
+      lighting_update();
+    u.tooltip("Runs Realtime GI once now: realtime lightmaps and live probes catch up, then stay as they are\n"
+              "(Lighting Updates: Manual). Generate Lighting makes the real bake.");
+    const bool pv = scene_->lighting.preview;
+    if (u.button({r2.x + bw + u.px(4), r2.y, bw, r2.h}, pv ? "Preview Lighting: On" : "Preview Lighting: Off", pv, Icon::Lightbulb))
+      command(pv ? "lighting preview off" : "lighting preview on");
+    u.tooltip("A rough bake while you edit, refining 16 -> 64 -> 256 samples half a second after changes stop;\n"
+              "shown instead of the bake and never saved (like Bakery's Realtime Preview).");
+    std::string mode = lighting_manual() ? "Lighting Updates: Manual (lighting stays as last computed until you update)"
+                                         : "Lighting Updates: Automatic (Realtime GI follows every change)";
+    if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 16 : preview_stage_ == 1 ? 64 : 256,
+                                                  preview_baker_.progress() * 100.0)
+                                     : preview_samples_ ? strprintf("  -  Preview: %d samples", preview_samples_) : std::string("  -  Preview: waiting");
+    u.label(lay.row(), mode, u.theme.text_dim);
+  }
   if (!bake_status_.empty()) u.label(lay.row(), bake_status_, baking_ ? u.theme.accent : u.theme.text_dim);
   if (!baking_ && lighting_out_of_date())
-    u.label(lay.row(), "Lighting out of date: objects changed since the bake keep realtime ambient.", u.theme.warning);
+    u.label(lay.row(), lighting_manual() ? "Lighting out of date: the last lighting stays up until Generate Lighting (moved objects keep their maps)."
+                                         : "Lighting out of date: objects changed since the bake keep realtime ambient.",
+            u.theme.warning);
+  else if (!baking_ && frozen_out_of_date())
+    u.label(lay.row(), "Realtime GI out of date: Update Lighting (Ctrl+Shift+L) brings it up to date.", u.theme.warning);
   {
     std::string why;
     const bool live = live_gi_needed(&why);

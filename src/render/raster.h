@@ -98,6 +98,10 @@ struct LightingEnv {
   const ShadowMap *shadow = nullptr;  // for lights[shadow_light]
   int shadow_light = -1;
   const VoxelGIFrame *gi = nullptr;   // voxel GI (task 0013): null = off
+  /* Realtime lightmaps read without a GI pass this frame (task 0020, Manual): whether the shown bake lacks
+   * the sun's bounce (lightmapped surfaces add the maps'), and the specular occlusion setting. */
+  bool rt_bounce_not_baked = false;
+  float rt_specular_occlusion = 0.0f;
   const ProbeFrame *probes = nullptr; // probe volumes (task 0014): null = none
   ViewTransform view_transform = ViewTransform::Standard;
   float exposure = 0.0f;
