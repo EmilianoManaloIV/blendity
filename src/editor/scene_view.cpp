@@ -92,7 +92,29 @@ void Editor::draw_scene_view(const Recti &r) {
   /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). */
   if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_) frame_selected();
 
-  render_scene_view(view);
+  {
+    /* The 3D layer is reused while nothing it shows has changed (an idle frame, the mouse over a panel,
+     * a caret blinking). Never while piloting, path tracing or playing. */
+    ScopedTimer rt;
+    const bool cacheable = shading_ != Shading::Rendered && !piloted_camera() && !(playing_ && !paused_);
+    const uint64_t key = cacheable ? scene_view_key(view) : 0;
+    const bool hit = view_cache_hit(scene_cache_, key, view);
+    if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else {
+      std::vector<float> depth0;
+      std::vector<uint32_t> ids0;
+      if (hit) depth0 = scene_rt_.depth, ids0 = scene_rt_.ids;  // what picking would have read
+      render_scene_view(view);
+      prof_.view_renders++;
+      if (hit && view_cache_verify(scene_cache_, view, "Scene view") && (depth0 != scene_rt_.depth || ids0 != scene_rt_.ids)) {
+        prof_.cache_mismatches++;
+        Log::warn("Render cache: the Scene view's depth or ids would have been stale");
+        note_render_cache_mismatch();
+      }
+      view_cache_store(scene_cache_, key, view);
+    }
+    prof_.ms_scene3d += rt.ms();
+  }
   if (box_visible) {
     u.canvas.fill_rect(box.intersect(view), Color::hex(0x3A79BB, 40));
     u.canvas.rect_outline(box, Color::hex(0x6FA3DD));
@@ -449,8 +471,12 @@ void Editor::render_scene_view(const Recti &view) {
     scene_stats_ = scene_r3d_.stats();
   }
   else render_solid(view, v, p);
+  ScopedTimer ot;
+  scene_r3d_.begin_overlay_batch();  // the grid and the wireframes are thousands of lines: drawn in parallel bands
   if (show_grid_) draw_grid(scene_r3d_);
   render_overlays(view);
+  scene_r3d_.end_overlay_batch();
+  prof_.ms_overlays += ot.ms();
 }
 
 void Editor::render_solid(const Recti &, const Mat4 &v, const Mat4 &p) {
@@ -2907,8 +2933,24 @@ void Editor::draw_game_view(const Recti &r) {
   Mat4 p = cam->projection(aspect);
   /* The Game view always uses the full material pipeline with shadows (Unity Game view),
    * through the camera's filters. */
-  render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_ && !paused_);
-  game_stats_ = game_r3d_.stats();
+  {
+    /* While playing it changes every frame; otherwise the picture is reused until the scene, the
+     * camera or the view's size changes. */
+    ScopedTimer rt;
+    const bool animating = playing_ && !paused_;
+    const uint64_t key =
+        animating ? 0 : camera_render_hash(owner, cam) ^ raster_opt_key() ^ ((uint64_t)img.w << 48) ^ ((uint64_t)img.h << 32) ^ ((uint64_t)img.x << 16) ^ (uint64_t)img.y;
+    const bool hit = view_cache_hit(game_cache_, key, img);
+    if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else {
+      render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, animating);
+      game_stats_ = game_r3d_.stats();
+      prof_.view_renders++;
+      if (hit) view_cache_verify(game_cache_, img, "Game view");
+      view_cache_store(game_cache_, key, img);
+    }
+    prof_.ms_game += rt.ms();
+  }
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};
     u.frame(box, Color::hex(0x101010, 200), 0, u.px(4));

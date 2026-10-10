@@ -2,6 +2,94 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-10 (round 34): a faster editor: views and shadows reused until something changes (task 0011)
+
+**Asked:** improve performance for the Scene view and the editor (task 0011 of the approved plan).
+
+**Found**
+- **The sun's shadow map was rendered on every shaded render**, up to three times a frame, at about
+  8 ms each. `docs/PERFORMANCE.md` and a stress note both said it was cached.
+- **Any input re-rendered every visible 3D view from scratch**: a mouse move over a panel, a caret blink,
+  a tooltip timer. In a working scene (1600×1000, Scene and Game views, a Camera Preview), an idle frame
+  cost about 46 ms.
+
+**Changed**
+- **Views reuse their picture while nothing they show has changed (ADR 0009).**
+  - **What is cached:** the Scene view, the Game view and the Shaded Camera Preview.
+  - **The key:** a content hash of the scene (geometry, transforms, the hierarchy, MeshRenderer flags,
+    materials, lights, world, render settings), plus each view's camera, size, toggles and selection.
+  - **Never cached:** Rendered shading, piloting, Play while running.
+  - **Verify mode** (`BLENDITY_RENDER_CACHE_VERIFY=1`) renders anyway and compares. The unit suite and
+    the random-input fuzz both run clean in it.
+- **The shadow map is kept until its casters, their materials or the light change.** There are two
+  entries, so the Scene and Game views don't evict each other. Each render mesh gets a `serial` the
+  caches key on.
+- **Clears run in one parallel pass**, and the visibility plane exists only for deferred shading.
+- **Overlay lines and points are drawn in parallel bands of rows**, bit-identical to drawing them one by
+  one. The F12 supersampling downsample is parallel too.
+- **The scene hash no longer evaluates modifier stacks:** `GameObject::evaluated_key` gives the key
+  without the mesh.
+- **The Profiler window shows where the frame went:**
+  - time in the Scene view and its overlays, the Game view, the preview, the shadow map, the UI and
+    present;
+  - how many views were rendered or reused.
+
+**Fixed (from the review)**
+- **The Game view and Camera Preview missed MeshRenderer flags.** Unticking Show in Renders or Receive
+  Shadows left them stale. The flags are now in the shared scene hash, which also fixes the
+  path-traced preview's key.
+- **A modifier's "Show in Edit Mode" didn't redraw the Edit Mode cage.** The cage's evaluated mesh is
+  now in the key.
+- **Re-parenting a selected object's child** (for example by undo) left its child outline. The
+  hierarchy is now in the key.
+- **Smaller gaps:**
+  - Reopening a scene file now starts fresh caches (each Scene has a `serial`).
+  - The raster options are in the Game view and Camera Preview keys.
+  - The grid's orbit distance and pivot are in the Scene view key.
+  - A batch can't stay open across frames.
+- **One test** checks the first three cases in verify mode. Without the fix it finds 3 stale pictures.
+
+**Checked**
+- **Linux, dependency-free build, `editor_render`, before → after:**
+
+| Frame | Before (ms) | After (ms) |
+|---|---|---|
+| Idle | 47.3 | 2.1 |
+| Mouse over the Hierarchy | 44.2 | 2.1 |
+| Orbiting the Scene view | 43.6 | 9.9 (no shadow pass) |
+| Moving an object | 45.1 | 24.7 |
+| Editing a material colour | 45.4 | 27.0 |
+| Playing | 32.5 | 14.8 |
+
+- **Idle frames with many objects:** 1.9 ms at 1,000 meshes and 5.1 ms at 10,000 (the hash). An idle
+  frame with 1,000 empties went from 10.6 to 1.5 ms.
+- **Overlays:** 1.15 → 0.77 ms in a normal frame, and 17.5 → 12.4 ms with a 50k-face Edit Mode cage.
+- **Edit Mode on a 50k-face mesh is still about 280 ms a change.**
+  - The render mesh costs 13–19 ms and the tangents 28–37 ms.
+  - Most of the rest is the overlapping-vertex check. It runs on changes made outside a drag; a real
+    gizmo drag skips it.
+  - Speeding this up is the follow-up (a positions-only mesh update; it needs an ADR).
+- **Unit checks:** Windows 3,203, Linux 3,179, sanitizer build 3,101; 0 failed. 270 tests. The
+  test-engineer wrote 26 tests and the review added 1:
+  - idle and panel-only frames render nothing;
+  - fourteen kinds of change each redraw, including a real gizmo drag, an Edit Mode vertex drag, undo
+    (bit-identical to before), Play, shading, the World and Exposure;
+  - orbiting renders the shadow map at most once;
+  - about 55 mixed actions in verify mode leave no stale picture;
+  - the overlay batch is bit-identical on 450 random lines and points;
+  - the parallel clears.
+- **Stress:**
+  - `editor_fuzz` (6,000 frames of random input) in verify mode: no crash, 0 stale pictures.
+  - `filters`: 0 problems.
+- **The whole unit suite** runs in 18 s on Windows (21.7 s before this task); the tests reuse views too.
+
+**Not done from the spec**
+- **`is_selected` as a set** and **one render snapshot per frame:** the scene walks and the linear
+  selection search don't show in the measurements at 1,000–10,000 objects.
+- **`outline_ids` in one pass:** it reuses its mask instead; still two passes when a selection has
+  children.
+- **A test for the caret blink:** it is the same frame as the idle case (no events, a redraw).
+
 ## 2026-10-09 (round 33): leaner, faster unit tests (task 0010)
 
 **Asked:** consolidate the tests, removing redundant or unnecessary ones. The same request also asked for

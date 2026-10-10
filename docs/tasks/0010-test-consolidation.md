@@ -4,7 +4,7 @@
 - **Requirements:** Q-03
 - **Decisions:** none needed
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/10
 
 ## Goal
 The unit suite says what it checks and runs quickly. Today it has 230 tests and 60,624 checks executed, and

@@ -1579,6 +1579,16 @@ void Editor::draw_profiler(const Recti &r) {
   stat("Scene memory (approx.)", format_bytes(scene_->memory_bytes()));
   stat("Undo steps", strprintf("%zu", undo_.size()));
 
+  /* Where the last frame went, and what the render caches saved (ADR 0009). */
+  lay.space(u.px(6));
+  u.label(lay.row(), "Editor frame breakdown (last frame)", u.theme.text_bright);
+  const FrameProfile &fp = prof_last_;
+  stat("Scene view 3D (of it overlays)", strprintf("%.2f ms (%.2f ms)", fp.ms_scene3d, fp.ms_overlays));
+  stat("Game view / Camera Preview", strprintf("%.2f ms / %.2f ms", fp.ms_game, fp.ms_preview));
+  stat("Shadow map", fp.shadow_renders ? strprintf("%.2f ms (rendered)", fp.ms_shadow) : std::string("reused"));
+  stat("UI / present", strprintf("%.2f ms / %.2f ms", fp.ms_ui, fp.ms_present));
+  stat("Views rendered / reused", strprintf("%llu / %llu", (unsigned long long)fp.view_renders, (unsigned long long)fp.view_cache_hits));
+
   lay.space(u.px(6));
   draw_performance_settings(&lay);
 

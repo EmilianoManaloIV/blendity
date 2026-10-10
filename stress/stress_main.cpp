@@ -885,6 +885,120 @@ static void test_editor(Report &rep, const Options &o) {
     rep.row({std::to_string(n), f2(ms), f1(n / ms)});
   }
   rep.note("Only visible rows are drawn, so frame cost grows with the tree walk, not with drawing.");
+  /* With meshes the views have something to draw: a frame that changes the scene renders it, an idle
+   * one only checks (hashes) the scene and reuses the pictures. */
+  rep.table({"mesh objects", "idle frame ms", "frame after a move ms"});
+  for (int n : o.quick ? std::vector<int>{1000} : std::vector<int>{1000, 10000}) {
+    Editor ed;
+    Log::echo_stdout = false;
+    ed.init_headless(1600, 900);
+    ed.command("stress " + std::to_string(n) + " Cube");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const double idle = time_ms([&] { ed.step_frame_headless(); }, 5);
+    GameObject *g = ed.scene().find_by_name("Cube");
+    int k = 0;
+    const double moved = time_ms([&] {
+      if (g) g->set_local_position({0.0f, 0.5f + 0.01f * ++k, 0.0f});
+      ed.step_frame_headless();
+    }, 5);
+    Log::echo_stdout = true;
+    rep.row({std::to_string(n), f2(idle), f2(moved)});
+  }
+}
+
+/* What a frame costs in an ordinary working scene: meshes, a sun with shadows, the Scene and Game views
+ * side by side and a selected camera (so the Camera Preview shows), for the kinds of frame an editor
+ * draws: nothing happening, the mouse moving over a panel, orbiting, moving an object, editing a
+ * material, dragging a vertex of a big mesh in Edit Mode, and playing. */
+static void test_editor_render(Report &rep, const Options &o) {
+  rep.title("Editor frames in a working scene",
+            "Headless 1600x1000, layout \"2 by 3\" (Scene + Game views), Shaded, 200 icospheres + a floor + a sun with shadows, the "
+            "Main Camera selected (Camera Preview on). Milliseconds per frame, mean of N frames.");
+  rep.table({"frame", "ms / frame", "shadow renders / frame", "view renders / frame", "Scene view 3D ms", "of it overlays ms", "Game view ms", "UI and the rest ms"});
+  Editor ed;
+  Log::echo_stdout = false;
+  ed.init_headless(1600, 1000);
+  ed.command("layout 2 by 3");
+  ed.command("stress 200 Icosphere");
+  ed.command("create Plane");
+  if (GameObject *floor = ed.selected_object()) floor->set_local_scale({4, 1, 4});
+  GameObject *big = ed.scene().create("Big Sphere");
+  big->set_local_position({0, 2, -8});
+  big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 256, 196);  // about 50k faces
+  big->add<MeshRenderer>();
+  ed.command("select Main Camera");
+  for (int i = 0; i < 4; i++) ed.step_frame_headless();
+  const int n = o.quick ? 5 : 10;
+  auto row = [&](const char *name, const std::function<void(int)> &step) {
+    step(0);  // warm-up
+    const FrameProfile before = ed.frame_profile_totals();
+    int k = 1;
+    const double ms = time_ms([&] { step(k++); }, n);
+    const FrameProfile after = ed.frame_profile_totals();
+    rep.row({name, f2(ms), f2((after.shadow_renders - before.shadow_renders) / (double)n),
+             f2((after.view_renders - before.view_renders) / (double)n), f2((after.ms_scene3d - before.ms_scene3d) / n),
+             f2((after.ms_overlays - before.ms_overlays) / n), f2((after.ms_game - before.ms_game) / n), f2((after.ms_ui - before.ms_ui) / n)});
+  };
+  using ET = platform::EventType;
+  const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+  row("idle (nothing changed)", [&](int) { ed.step_frame_headless(); });
+  row("mouse moving over the Hierarchy", [&](int k) {
+    platform::Event e;
+    e.type = ET::MouseMove;
+    e.x = hier.x + 20 + (k % 7) * 9;
+    e.y = hier.y + hier.h / 2 + (k % 5) * 3;
+    ed.step_frame_headless({e});
+  });
+  row("orbiting the Scene view", [&](int k) { ed.command(strprintf("camera %d 20 14", 30 + k * 3)); ed.step_frame_headless(); });
+  GameObject *mover = ed.scene().find_by_name("Icosphere");
+  row("moving an object", [&](int k) {
+    if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.0f});
+    ed.step_frame_headless();
+  });
+  MaterialPtr mat = mover && mover->get<MeshRenderer>() ? mover->get<MeshRenderer>()->material(0) : nullptr;
+  row("editing a material colour", [&](int k) {
+    if (mat) {
+      mat->base_color = {0.2f + 0.05f * (k % 10), 0.5f, 0.5f};
+      mat->touch();
+    }
+    ed.step_frame_headless();
+  });
+  ed.command("select Big Sphere");
+  ed.command("edit vertex");
+  ed.step_frame_headless();
+  row("Edit Mode: a 50k-face mesh changes every frame (not a drag: the overlap check runs too)", [&](int k) {
+    if (auto *mf = big->get<MeshFilter>()) {
+      Mesh &m = *mesh_make_mutable(mf->mesh);
+      m.positions[0].y = 1.0f + 0.01f * k;
+      m.touch();
+    }
+    ed.step_frame_headless();
+  });
+  /* Where an Edit Mode drag goes (task 0011 measures it; making it cheaper is a follow-up): the mesh's
+   * render data, its tangents and its edge table are rebuilt after every move. */
+  if (auto *mf = big->get<MeshFilter>()) {
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    double rm = 0, tg = 0, ec = 0;
+    for (int i = 0; i < n; i++) {
+      m.positions[1].y += 0.001f;
+      m.touch();
+      rm += time_ms([&] { (void)m.render_mesh(); });
+      tg += time_ms([&] { (void)m.render_mesh_tangents(); });
+      ec += time_ms([&] { (void)m.edge_cache(); });
+    }
+    rep.note(strprintf("Edit Mode drag on the 50k-face mesh, per move: render mesh rebuilt %.1f ms, tangents %.1f ms, edge table %.1f ms.",
+                       rm / n, tg / n, ec / n));
+  }
+  ed.command("edit off");
+  ed.command("select Main Camera");
+  ed.step_frame_headless();
+  ed.command("play");
+  row("playing", [&](int) { ed.step_frame_headless(); });
+  ed.command("stop");
+  Log::echo_stdout = true;
+  rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
+           "casters or the light change (task 0011).");
 }
 
 static void test_fuzz(Report &rep, const Options &o) {
@@ -897,6 +1011,8 @@ static void test_fuzz(Report &rep, const Options &o) {
   const bool trace = std::getenv("BLENDITY_FUZZ_TRACE") != nullptr;
   Log::echo_stdout = trace;
   ed.init_headless(1280, 720);
+  /* Verify mode: every picture a render cache would reuse is rendered anyway and compared (ADR 0009). */
+  ed.set_render_cache_verify(true);
   uint32_t seed = std::getenv("BLENDITY_FUZZ_SEED") ? (uint32_t)std::strtoul(std::getenv("BLENDITY_FUZZ_SEED"), nullptr, 10) : 12345u;
   auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return (int)((seed >> 8) % (uint32_t)n); };
   int frames = o.quick ? 1500 : 6000, events = 0;
@@ -961,7 +1077,9 @@ static void test_fuzz(Report &rep, const Options &o) {
   }
   double avg = t.ms() / frames;
   Log::echo_stdout = true;
-  rep.row({std::to_string(frames), std::to_string(events), std::to_string(ed.scene().object_count()), f2(avg), "no crash"});
+  const uint64_t stale = ed.frame_profile_totals().cache_mismatches;
+  rep.row({std::to_string(frames), std::to_string(events), std::to_string(ed.scene().object_count()), f2(avg),
+           strprintf("no crash, %llu stale pictures", (unsigned long long)stale)});
 }
 
 static void test_memory(Report &rep, const Options &) {
@@ -1029,7 +1147,7 @@ static void test_shading_cost(Report &rep, const Options &o) {
     double ds = time_ms([&] { frame(ShadeMode::Deferred, true); }, 3);
     rep.row({strprintf("%dx%d", w, h), f2(g), f2(d), f2(ds), f2(shadow_ms), f2(shade_ms)});
   }
-  rep.note("The shadow map only needs re-rendering when lights or casters move (render_view.cpp caches it by scene hash).");
+  rep.note("The editor re-renders the shadow map only when its casters, their materials or the light change (task 0011: update_shadow_map keeps two maps).");
   /* View transforms: per-frame cost of turning scene light into display pixels. */
   rep.table({"view transform (1920x1080)", "ms / frame", "Mpix/s"});
   std::vector<Vec3> hdr((size_t)1920 * 1080);
@@ -2281,7 +2399,7 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},

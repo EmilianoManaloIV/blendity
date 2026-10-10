@@ -187,6 +187,7 @@ static void round29_review_tests();
 static void round30_tests();
 static void round31_tests();
 static void round32_tests();
+static void round34_tests();
 
 int main() {
   register_builtin_components();
@@ -794,7 +795,14 @@ int main() {
   round30_tests();
   round31_tests();
   round32_tests();
+  round34_tests();
 
+  /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
+   * differ from the cached picture. */
+  if (std::getenv("BLENDITY_RENDER_CACHE_VERIFY")) {
+    std::printf("render cache verify: %llu stale pictures\n", (unsigned long long)Editor::render_cache_mismatches_all());
+    CHECK(Editor::render_cache_mismatches_all() == 0);
+  }
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
 }
@@ -11296,5 +11304,732 @@ static void round32_tests() {
     const long a = r32_total(plain), b = r32_total(glow);
     std::printf("    F12 path traced: channel total %ld plain, %ld with bloom (%+.2f%%)\n", a, b, 100.0 * (b - a) / std::max(1L, a));
     CHECK(b > a);
+  });
+}
+
+/* ===================================================================== */
+/* Round 34: the editor stops redoing work it has done (task 0011)         */
+/* ===================================================================== */
+
+namespace {
+using R34ET = platform::EventType;
+
+platform::Event r34_mouse(R34ET t, int x, int y) {
+  platform::Event e;
+  e.type = t;
+  e.x = x;
+  e.y = y;
+  return e;
+}
+
+/* What the 3D views did over a stretch of frames. */
+struct R34Count {
+  uint64_t frames = 0, renders = 0, hits = 0, shadows = 0, mismatches = 0;
+};
+R34Count r34_totals(const Editor &ed) {
+  const FrameProfile &p = ed.frame_profile_totals();
+  return {p.frames, p.view_renders, p.view_cache_hits, p.shadow_renders, p.cache_mismatches};
+}
+R34Count operator-(const R34Count &a, const R34Count &b) {
+  return {a.frames - b.frames, a.renders - b.renders, a.hits - b.hits, a.shadows - b.shadows, a.mismatches - b.mismatches};
+}
+
+std::vector<uint32_t> r34_crop(const Editor &ed, const Recti &r) {
+  std::vector<uint32_t> out;
+  const Image &fb = ed.framebuffer();
+  for (int y = r.y; y < r.bottom() && y < fb.height; y++)
+    for (int x = r.x; x < r.right() && x < fb.width; x++) out.push_back(fb.pixels[(size_t)y * fb.width + x]);
+  return out;
+}
+
+void r34_steps(Editor &ed, int n) {
+  for (int i = 0; i < n; i++) ed.step_frame_headless();
+}
+
+/* A click with real events (moved there first, then down, then up on later frames). */
+void r34_click(Editor &ed, int x, int y) {
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x, y)});
+}
+
+/* The Scene view's toolbar buttons after the draw-mode combo: 0 scene lighting, 1 grid, 2 gizmos, 3 statistics. */
+void r34_toolbar_click(Editor &ed, int index) {
+  const ui::Context &u = ed.ui_for_test();
+  const Recti v = ed.scene_view_rect();
+  const int bh = u.row_h() + u.px(4), h = bh - u.px(6);
+  const int x = v.x + u.px(6) + u.px(176) + index * (h + u.px(2)) + h / 2, y = v.y - bh + u.px(3) + h / 2;
+  r34_click(ed, x, y);
+}
+
+/* The mouse rests over the Hierarchy: nothing under it draws in a 3D view. */
+void r34_park_mouse(Editor &ed) {
+  const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, h.x + h.w / 2, h.y + h.h - 10)});
+}
+
+/* A 1600x1000 editor with the 2 by 3 layout (Scene and Game both visible), a known camera, and the
+ * Statistics overlay off (it prints frame times, which change every frame by design). */
+void r34_open(Editor &ed, bool two_by_three = true) {
+  ed.init_headless(1600, 1000);
+  /* These tests count renders and hits: verify mode (BLENDITY_RENDER_CACHE_VERIFY, which re-renders every
+   * hit) would turn the hits into renders. The verify-mode test turns it on itself. */
+  ed.set_render_cache_verify(false);
+  if (two_by_three) ed.command("layout 2 by 3");
+  ed.command("camera 25 20 7 0 0.5 0");
+  r34_steps(ed, 3);
+  r34_toolbar_click(ed, 3);
+  r34_park_mouse(ed);
+  r34_steps(ed, 4);
+}
+
+/* Drags the Move gizmo's X arrow (at a world point) with a real mouse drag. */
+void r34_gizmo_drag_x(Editor &ed, Vec3 world_point, int pixels) {
+  int x = 0, y = 0;
+  CHECK(ed.project_to_window(world_point, x, y));
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + pixels / 2, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + pixels, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 55 + pixels, y)});
+}
+
+struct R34Change {
+  R34Count d;                           // what the action's frames cost
+  std::vector<uint32_t> before, after;  // the Scene view's pixels
+  Recti rect_before, rect_after;
+};
+R34Change r34_change(Editor &ed, const std::function<void()> &act, int frames = 1) {
+  R34Change c;
+  c.rect_before = ed.scene_view_rect();
+  c.before = r34_crop(ed, c.rect_before);
+  const R34Count t0 = r34_totals(ed);
+  act();
+  r34_steps(ed, frames);
+  c.d = r34_totals(ed) - t0;
+  c.rect_after = ed.scene_view_rect();
+  c.after = r34_crop(ed, c.rect_after);
+  return c;
+}
+
+/* One "this must redraw the Scene view" case on a fresh editor. */
+void r34_redraw_case(const char *name, const std::function<void(Editor &)> &setup, const std::function<void(Editor &)> &act,
+                     const std::function<void(Editor &, const R34Change &)> &extra = {}) {
+  test(name, [=] {
+    Editor ed;
+    r34_open(ed);
+    if (setup) setup(ed);
+    r34_steps(ed, 4);
+    const R34Change c = r34_change(ed, [&] { act(ed); });
+    std::printf("    renders %llu, cache hits %llu, shadow maps %llu\n", (unsigned long long)c.d.renders, (unsigned long long)c.d.hits,
+                (unsigned long long)c.d.shadows);
+    CHECK(c.d.renders >= 1);
+    CHECK(c.before != c.after);
+    if (extra) extra(ed, c);
+    /* ...and it settles again: the next idle frames cost nothing. */
+    const R34Count t0 = r34_totals(ed);
+    r34_steps(ed, 3);
+    CHECK((r34_totals(ed) - t0).renders == 0);
+  });
+}
+
+/* A scene for the Renderer3D tests: two cubes with different ids. */
+struct R34Raster {
+  CfScene sc;
+  Mat4 v, p;
+  int W, H;
+  explicit R34Raster(int w = 300, int h = 200) : W(w), H(h) {
+    sc.add(primitives::cube(), Mat4::translate(Vec3(0.0f, 0.0f, 0.0f)), 9, make_material("a", {0.8f, 0.3f, 0.2f}));
+    sc.add(primitives::cube(), Mat4::translate(Vec3(2.2f, 0.4f, 1.0f)), 5, make_material("b", {0.2f, 0.5f, 0.8f}));
+    sc.seal();
+    v = Mat4::look_at({3, 3, -6}, {0.5f, 0, 0}, {0, 1, 0});
+    p = Mat4::perspective(60 * kDeg2Rad, w / (float)h, 0.1f, 60);
+  }
+  void render(Image &img, RenderTarget &rt, Renderer3D &r, ShadeMode mode = ShadeMode::Deferred) const {
+    img.resize(W, H);
+    rt.attach(img, {0, 0, W, H});
+    RasterOptions opt;
+    opt.shade = mode;
+    LightingEnv env;
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.3f, -1, 0.4f));
+    env.lights.push_back(sun);
+    r.begin(&rt, v, p, env, opt);
+    r.clear(0xFF204060u);
+    for (const DrawItem &it : sc.items) r.add(it);
+    r.flush();
+  }
+};
+
+struct R34Rng {
+  uint32_t s;
+  float f() {
+    s = s * 1664525u + 1013904223u;
+    return (float)(s >> 8) / (float)(1u << 24);
+  }
+  float range(float a, float b) { return a + (b - a) * f(); }
+};
+}  // namespace
+
+static void round34_tests() {
+  /* ---------------------------------------------------------------- 1 */
+  test("render cache: an idle frame and mouse moves over the Hierarchy redraw no 3D view, and the Scene and Game pictures stay bit-identical", [] {
+    Editor ed;
+    r34_open(ed);
+    const Recti sr = ed.scene_view_rect(), gr = ed.window_rect_for_test(WindowKind::Game);
+    CHECK(sr.w > 200 && sr.h > 200 && gr.w > 100 && gr.h > 100);
+    CHECK(r34_totals(ed).renders > 0);  // the first frames did draw the views
+    const std::vector<uint32_t> s0 = r34_crop(ed, sr), g0 = r34_crop(ed, gr);
+    /* The views are really there: not an all-one-colour crop. */
+    CHECK(std::set<uint32_t>(s0.begin(), s0.end()).size() > 8);
+    CHECK(std::set<uint32_t>(g0.begin(), g0.end()).size() > 8);
+    const R34Count t0 = r34_totals(ed);
+    r34_steps(ed, 5);  // idle
+    const Recti hr = ed.window_rect_for_test(WindowKind::Hierarchy);
+    CHECK(hr.w > 20 && hr.h > 20);
+    for (int i = 0; i < 12; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hr.x + 10 + i * 7, hr.y + 15 + (i % 4) * 9)});
+    const R34Count d = r34_totals(ed) - t0;
+    std::printf("    %llu frames: %llu view renders, %llu cache hits, %llu shadow maps\n", (unsigned long long)d.frames,
+                (unsigned long long)d.renders, (unsigned long long)d.hits, (unsigned long long)d.shadows);
+    CHECK(d.frames == 17);
+    CHECK(d.renders == 0);
+    CHECK(d.shadows == 0);
+    CHECK(d.hits >= 17);  // at least the Scene view every frame
+    CHECK(r34_crop(ed, sr) == s0);
+    CHECK(r34_crop(ed, gr) == g0);
+  });
+
+  /* ---------------------------------------------------------------- 2 */
+  r34_redraw_case(
+      "render cache: dragging the Move gizmo arrow redraws the Scene view and the cube's shadow",
+      [](Editor &ed) {
+        ed.command("select Cube");
+        ed.command("camera 0 20 6 0 0.5 0");  // the X arrow points straight right on screen
+        ed.command("tool move");
+      },
+      [](Editor &ed) {
+        GameObject *cube = ed.scene().find_by_name("Cube");
+        const float x0 = cube->world_position().x;
+        r34_gizmo_drag_x(ed, cube->world_position(), 60);
+        CHECK(std::fabs(cube->world_position().x - x0) > 0.1f);  // the real drag moved it
+      },
+      [](Editor &, const R34Change &c) { CHECK(c.d.shadows >= 1); });
+
+  r34_redraw_case(
+      "render cache: moving an object from the console redraws the Scene view",
+      [](Editor &ed) { ed.command("select Cube"); }, [](Editor &ed) { ed.command("position 1.5 0.5 0"); });
+
+  r34_redraw_case(
+      "render cache: editing a material colour redraws the Scene view",
+      [](Editor &ed) {
+        ed.command("select Cube");
+        MeshRenderer *mr = ed.scene().find_by_name("Cube")->get<MeshRenderer>();
+        if (mr && mr->materials.empty()) mr->materials.push_back(make_material("Painted", {0.8f, 0.8f, 0.8f}));  // the cube starts on the default material
+      },
+      [](Editor &ed) {
+        MeshRenderer *mr = ed.scene().find_by_name("Cube")->get<MeshRenderer>();
+        CHECK(mr && !mr->materials.empty() && mr->materials[0]);
+        if (!mr || mr->materials.empty() || !mr->materials[0]) return;
+        mr->materials[0]->base_color = {0.05f, 0.9f, 0.1f};
+        mr->materials[0]->touch();
+      });
+
+  r34_redraw_case(
+      "render cache: rotating the sun redraws the Scene view and makes a new shadow map",
+      [](Editor &) {},
+      [](Editor &ed) {
+        GameObject *sun = ed.scene().find_by_name("Directional Light");
+        CHECK(sun != nullptr);
+        if (sun) sun->set_local_rotation(Quat::euler({25.0f, 130.0f, 0.0f}));
+      },
+      [](Editor &, const R34Change &c) { CHECK(c.d.shadows >= 1); });
+
+  test("render cache: undo brings back the exact picture from before the change", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    r34_steps(ed, 4);
+    const Recti sr = ed.scene_view_rect();
+    const std::vector<uint32_t> first = r34_crop(ed, sr);
+    const R34Change moved = r34_change(ed, [&] { ed.command("position 1.5 0.5 0"); });
+    CHECK(moved.d.renders >= 1 && moved.after != first);
+    const R34Change undone = r34_change(ed, [&] { ed.command("undo"); });
+    CHECK(undone.d.renders >= 1);
+    CHECK(undone.after != moved.after);
+    CHECK(undone.after == first);
+    /* Redo goes forward again to the very picture the move made. */
+    const R34Change redone = r34_change(ed, [&] { ed.command("redo"); });
+    CHECK(redone.d.renders >= 1 && redone.after == moved.after);
+  });
+
+  r34_redraw_case(
+      "render cache: changing the layout (a new Scene view size) redraws it",
+      [](Editor &) {}, [](Editor &ed) { ed.command("layout Default"); },
+      [](Editor &, const R34Change &c) { CHECK(c.rect_before.w != c.rect_after.w || c.rect_before.h != c.rect_after.h); });
+
+  r34_redraw_case(
+      "render cache: selecting another object redraws the Scene view (the outline moves)",
+      [](Editor &ed) { ed.command("select Cube"); }, [](Editor &ed) { ed.command("select Directional Light"); });
+
+  test("render cache: selecting an object draws its outline in the Scene view", [] {
+    Editor ed;
+    r34_open(ed);
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> none = r34_crop(ed, ed.scene_view_rect());
+    const R34Change sel = r34_change(ed, [&] { ed.command("select Cube"); });
+    CHECK(sel.d.renders >= 1 && sel.after != none);
+    size_t orange = 0;
+    for (uint32_t c : sel.after) {
+      const int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+      orange += r > 200 && g > 100 && g < 190 && b < 80;
+    }
+    CHECK(orange > 20);  // the selection outline
+  });
+
+  r34_redraw_case(
+      "render cache: an Edit Mode vertex drag with the Move gizmo redraws the Scene view",
+      [](Editor &ed) {
+        ed.command("select Cube");
+        ed.command("edit vertex");
+        ed.command("vsel 0");
+        ed.command("camera 0 20 6 0 0.5 0");
+        ed.command("tool move");
+      },
+      [](Editor &ed) {
+        GameObject *cube = ed.scene().find_by_name("Cube");
+        const Mesh &m0 = *cube->get<MeshFilter>()->mesh;
+        const Vec3 wp = cube->world_matrix().point(m0.positions[0]);
+        const Vec3 before = m0.positions[0];
+        r34_gizmo_drag_x(ed, wp, 50);
+        const Mesh &m1 = *ed.scene().find_by_name("Cube")->get<MeshFilter>()->mesh;
+        std::printf("    vertex 0 moved from x %.3f to x %.3f\n", before.x, m1.positions[0].x);
+        CHECK(std::fabs(m1.positions[0].x - before.x) > 1e-4f);  // the drag hit the gizmo (not a selection click)
+      });
+
+  /* Review of task 0011: inputs that once missed the cache keys. In verify mode every would-be hit is
+   * rendered and compared, so a stale picture is a mismatch. */
+  test("render cache: Show in Renders, a modifier's Show in Edit Mode and re-parenting a selected object's child leave no stale picture", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.set_render_cache_verify(true);
+    const uint64_t before = Editor::render_cache_mismatches_all();
+    const Recti game = ed.window_rect_for_test(WindowKind::Game);
+    CHECK(game.w > 0);
+    /* Show in Renders off: the Game view (and the Camera Preview) lose the cube. */
+    ed.command("select Main Camera");  // the Camera Preview is up
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> g0 = r34_crop(ed, game);
+    if (GameObject *cube = ed.scene().find_by_name("Cube")) cube->get<MeshRenderer>()->show_in_renders = false;
+    r34_steps(ed, 3);
+    CHECK(r34_crop(ed, game) != g0);
+    /* A modifier's Show in Edit Mode switches the cage between the modifier's result and the bare mesh. */
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->get<MeshRenderer>()->show_in_renders = true;
+    auto *arr = static_cast<ArrayModifier *>(cube->add_component(create_component("ArrayModifier")));
+    arr->count = 3;
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    r34_steps(ed, 3);
+    arr->show_in_editmode = !arr->show_in_editmode;
+    r34_steps(ed, 3);
+    arr->show_in_editmode = !arr->show_in_editmode;
+    r34_steps(ed, 3);
+    ed.command("edit off");
+    /* A child gets its own outline when its parent is selected: parent the sphere under the cube, select
+     * the cube, then un-parent it in place (its world matrix doesn't change). */
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(sphere != nullptr);
+    if (!sphere) return;
+    ed.scene().set_parent(sphere, cube);
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    ed.scene().set_parent(sphere, nullptr);
+    r34_steps(ed, 3);
+    std::printf("    stale pictures found in verify mode: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - before));
+    CHECK(Editor::render_cache_mismatches_all() == before);
+  });
+
+  r34_redraw_case(
+      "render cache: toggling the grid button redraws the Scene view",
+      [](Editor &) {}, [](Editor &ed) { r34_toolbar_click(ed, 1); });
+
+  r34_redraw_case(
+      "render cache: set Render.Exposure redraws the Scene view",
+      [](Editor &) {}, [](Editor &ed) { ed.command("set Render.Exposure 1.5"); });
+
+  r34_redraw_case(
+      "render cache: changing the World to a sky redraws the Scene view",
+      [](Editor &) {}, [](Editor &ed) { ed.command("world sky"); });
+
+  r34_redraw_case(
+      "render cache: console set MeshRenderer.ShowWireframe on the selection redraws the Scene view",
+      [](Editor &ed) { ed.command("select Cube"); }, [](Editor &ed) { ed.command("set MeshRenderer.ShowWireframe true"); },
+      [](Editor &ed, const R34Change &) { CHECK(ed.scene().find_by_name("Cube")->get<MeshRenderer>()->show_wireframe); });
+
+  r34_redraw_case(
+      "render cache: switching the shading mode redraws the Scene view",
+      [](Editor &) {}, [](Editor &ed) { ed.command("shading solid"); });
+
+  r34_redraw_case(
+      "render cache: orbiting the Scene view camera redraws it",
+      [](Editor &) {}, [](Editor &ed) { ed.command("camera 70 25 7 0 0.5 0"); });
+
+  test("render cache: Play redraws the views on every frame, and Stop settles them again", [] {
+    Editor ed;
+    r34_open(ed);
+    const R34Count t0 = r34_totals(ed);
+    ed.command("play");
+    r34_steps(ed, 6);
+    const R34Count d = r34_totals(ed) - t0;
+    std::printf("    playing: %llu frames, %llu view renders, %llu cache hits\n", (unsigned long long)d.frames, (unsigned long long)d.renders,
+                (unsigned long long)d.hits);
+    CHECK(d.renders >= d.frames);  // at least the Game view, every frame
+    ed.command("stop");
+    r34_steps(ed, 4);
+    const R34Count t1 = r34_totals(ed);
+    r34_steps(ed, 3);
+    CHECK((r34_totals(ed) - t1).renders == 0);
+  });
+
+  /* ---------------------------------------------------------------- 3 */
+  test("render cache: orbiting the Scene view renders the shadow map at most once", [] {
+    Editor ed;
+    r34_open(ed, false);
+    const R34Count t0 = r34_totals(ed);
+    for (int i = 0; i < 8; i++) {
+      ed.command("camera " + std::to_string(10 + i * 9) + " " + std::to_string(15 + i) + " 7 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    const R34Count d = r34_totals(ed) - t0;
+    std::printf("    orbit: %llu frames, %llu view renders, %llu shadow maps\n", (unsigned long long)d.frames, (unsigned long long)d.renders,
+                (unsigned long long)d.shadows);
+    CHECK(d.renders >= 8);  // every frame a new picture
+    CHECK(d.shadows <= 1);
+    CHECK(t0.frames > 0 && ed.frame_profile_totals().shadow_renders >= 1);  // the sun did get a shadow map in the first place
+    /* Not vacuous: a moved caster does make a new one. */
+    const R34Count t1 = r34_totals(ed);
+    ed.command("select Cube");
+    ed.command("position 1.5 0.5 0");
+    r34_steps(ed, 2);
+    CHECK((r34_totals(ed) - t1).shadows >= 1);
+  });
+
+  test("render cache: orbiting with the Scene and Game views side by side does not redraw the shadow map every frame", [] {
+    Editor ed;
+    r34_open(ed);
+    const R34Count t0 = r34_totals(ed);
+    for (int i = 0; i < 10; i++) {
+      ed.command("camera " + std::to_string(10 + i * 9) + " " + std::to_string(15 + i) + " 7 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    const R34Count d = r34_totals(ed) - t0;
+    std::printf("    2 by 3 orbit: %llu frames, %llu view renders, %llu cache hits, %llu shadow maps\n", (unsigned long long)d.frames,
+                (unsigned long long)d.renders, (unsigned long long)d.hits, (unsigned long long)d.shadows);
+    CHECK(d.renders >= 10);
+    CHECK(d.shadows <= 2);  // the cache holds two maps
+    CHECK(d.hits >= 5);     // the Game view's picture is reused while only the Scene view's camera moves
+  });
+
+  /* ---------------------------------------------------------------- 4 */
+  test("render cache: ~30 mixed actions in verify mode leave no stale picture", [] {
+    /* The same script twice: once with the cache doing its job (to see how often it can answer), once in
+     * verify mode, where every view that would have been reused is drawn anyway and compared. */
+    auto script = [](bool verify, R34Count &out) {
+      Editor ed;
+      r34_open(ed);
+      ed.set_render_cache_verify(verify);
+      const R34Count t0 = r34_totals(ed);
+      const Recti hr = ed.window_rect_for_test(WindowKind::Hierarchy);
+      auto idle = [&] {
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hr.x + 20, hr.y + 20)});
+        ed.step_frame_headless();
+      };
+      auto go = [&](const std::string &c) {
+        ed.command(c);
+        ed.step_frame_headless();
+        idle();
+      };
+      MeshRenderer *mr = ed.scene().find_by_name("Cube")->get<MeshRenderer>();
+      if (mr && mr->materials.empty()) mr->materials.push_back(make_material("Painted", {0.8f, 0.8f, 0.8f}));
+      idle();
+      go("select Cube");
+      go("position 1 0.5 0");
+      go("camera 40 30 8 0 0.5 0");
+      if (mr && !mr->materials.empty()) {
+        mr->materials[0]->base_color = {0.9f, 0.1f, 0.1f};
+        mr->materials[0]->touch();
+      }
+      idle();
+      go("undo");
+      go("select Directional Light");
+      if (GameObject *sun = ed.scene().find_by_name("Directional Light")) sun->set_local_rotation(Quat::euler({30.0f, 200.0f, 0.0f}));
+      idle();
+      go("shading solid");
+      go("shading wire");
+      go("shading both");
+      go("shading shaded");
+      go("select Main Camera");
+      go("filter add Vignette");
+      go("filters off");
+      go("filters on");
+      go("filter add Bloom");
+      go("filter remove 0");
+      go("select Cube");
+      go("edit vertex");
+      go("vsel 0 1");
+      go("tool move");
+      go("edit off");
+      go("camera 100 10 5 0 0.5 0");
+      go("world sky");
+      go("set Render.Exposure -1");
+      go("set MeshRenderer.ShowWireframe true");
+      r34_toolbar_click(ed, 1);  // grid off
+      idle();
+      go("layout Default");
+      go("layout 2 by 3");
+      go("play");
+      r34_steps(ed, 3);
+      go("stop");
+      go("undo");
+      go("undo");
+      go("redo");
+      idle();
+      idle();
+      out = r34_totals(ed) - t0;
+    };
+    R34Count plain, checked;
+    const uint64_t all0 = Editor::render_cache_mismatches_all();
+    script(false, plain);
+    script(true, checked);
+    std::printf("    cache on: %llu frames, %llu view renders, %llu cache hits\n", (unsigned long long)plain.frames, (unsigned long long)plain.renders,
+                (unsigned long long)plain.hits);
+    std::printf("    verify:   %llu frames, %llu view renders, %llu stale pictures\n", (unsigned long long)checked.frames,
+                (unsigned long long)checked.renders, (unsigned long long)checked.mismatches);
+    CHECK(plain.hits > 10);                        // the script has stretches the cache can answer
+    CHECK(checked.renders >= plain.renders + 10);  // and verify mode drew them anyway to compare
+    CHECK(plain.mismatches == 0 && checked.mismatches == 0);
+    CHECK(Editor::render_cache_mismatches_all() == all0);
+  });
+
+  /* ---------------------------------------------------------------- 5 */
+  test("overlay batch: hundreds of random lines and points drawn in a batch are bit-identical to drawing them one by one", [] {
+    const R34Raster rs(300, 200);
+    for (uint32_t seed : {1u, 2u, 3u}) {
+      Image img;
+      RenderTarget rt;
+      Renderer3D r;
+      rs.render(img, rt, r);
+      const std::vector<uint32_t> base_color = img.pixels;
+      const std::vector<float> base_depth = rt.depth;
+      const std::vector<uint32_t> base_ids = rt.ids;
+      struct Cmd {
+        bool point;
+        Vec3 a, b;
+        float radius, bias;
+        uint32_t color;
+        bool depth_test;
+      };
+      std::vector<Cmd> cmds;
+      R34Rng rng{seed * 7919u};
+      for (int i = 0; i < 450; i++) {
+        Cmd c{};
+        c.point = i % 5 == 4;
+        const float reach = i % 7 == 0 ? 14.0f : 4.0f;  // some far off screen
+        auto pt = [&] { return Vec3(rng.range(-reach, reach), rng.range(-reach * 0.6f, reach * 0.6f), rng.range(i % 9 == 0 ? -12.0f : -3.0f, 4.0f)); };
+        c.a = pt();
+        c.b = i % 6 == 0 ? Vec3(c.a.x + rng.range(-0.2f, 0.2f), c.a.y + rng.range(5.0f, 12.0f), c.a.z) : pt();  // some steep
+        c.radius = rng.range(1.0f, 6.0f);
+        c.bias = i % 3 == 0 ? rng.range(0.0f, 0.01f) : 0.0f;
+        c.depth_test = (i % 2) == 0;
+        c.color = ((uint32_t)rng.range(40.0f, 255.0f) << 24) | ((uint32_t)rng.range(0.0f, 255.0f) << 16) | ((uint32_t)rng.range(0.0f, 255.0f) << 8) |
+                  (uint32_t)rng.range(0.0f, 255.0f);
+        cmds.push_back(c);
+      }
+      auto draw = [&](bool batch) {
+        if (batch) r.begin_overlay_batch();
+        for (const Cmd &c : cmds) {
+          if (c.point) r.point(c.a, c.radius, c.color, c.depth_test);
+          else r.line(c.a, c.b, c.color, c.depth_test, c.bias);
+        }
+        if (batch) r.end_overlay_batch();
+      };
+      draw(false);
+      const std::vector<uint32_t> serial = img.pixels;
+      img.pixels = base_color;
+      draw(true);
+      const std::vector<uint32_t> batched = img.pixels;
+      size_t changed = 0;
+      for (size_t i = 0; i < serial.size(); i++) changed += serial[i] != base_color[i];
+      std::printf("    seed %u: %zu pixels changed by the overlays\n", seed, changed);
+      CHECK(changed > 500);  // the overlays drew something
+      CHECK(batched == serial);
+      CHECK(rt.depth == base_depth && rt.ids == base_ids);  // overlays touch the colour only
+      /* Two batches in a row equal the same commands drawn one by one twice (order kept across batches). */
+      img.pixels = base_color;
+      draw(true);
+      draw(true);
+      const std::vector<uint32_t> twice = img.pixels;
+      img.pixels = base_color;
+      draw(false);
+      draw(false);
+      CHECK(twice == img.pixels);
+    }
+  });
+
+  test("overlay batch: an empty batch, a single line and the same renderer on a smaller target all draw correctly", [] {
+    const R34Raster big(300, 200), small(64, 48);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    big.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    r.begin_overlay_batch();
+    r.end_overlay_batch();
+    CHECK(img.pixels == base);
+    r.begin_overlay_batch();
+    r.line({-2, 0, 0}, {2, 1, 1}, 0xFFFFFFFFu);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> batched = img.pixels;
+    img.pixels = base;
+    r.line({-2, 0, 0}, {2, 1, 1}, 0xFFFFFFFFu);
+    CHECK(batched == img.pixels && batched != base);
+    Image img2;
+    RenderTarget rt2;
+    small.render(img2, rt2, r);
+    const std::vector<uint32_t> base2 = img2.pixels;
+    r.begin_overlay_batch();
+    for (int i = 0; i < 40; i++) r.line({-3.0f + i * 0.15f, -1, 0}, {3, 2.0f - i * 0.1f, 1}, 0x80FF8000u, i % 2 == 0);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> b2 = img2.pixels;
+    img2.pixels = base2;
+    for (int i = 0; i < 40; i++) r.line({-3.0f + i * 0.15f, -1, 0}, {3, 2.0f - i * 0.1f, 1}, 0x80FF8000u, i % 2 == 0);
+    CHECK(b2 == img2.pixels && b2 != base2);
+  });
+
+  test("outline: outlining the same selection twice gives the same picture, and a reused mask never leaks into another selection or frame", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    const std::vector<uint32_t> sel9 = {9}, sel5 = {5}, both = {5, 9};
+    r.outline_ids(sel9, 0xFFF7941Du);
+    const std::vector<uint32_t> a = img.pixels;
+    CHECK(a != base);
+    img.pixels = base;
+    r.outline_ids(sel9, 0xFFF7941Du);
+    CHECK(img.pixels == a);  // twice in a row: the same
+    img.pixels = base;
+    r.outline_ids(sel5, 0xFFF7941Du);
+    const std::vector<uint32_t> b = img.pixels;
+    CHECK(b != base && b != a);
+    img.pixels = base;
+    r.outline_ids(sel9, 0xFFF7941Du);
+    CHECK(img.pixels == a);  // back to the first selection after the second: no leftovers
+    img.pixels = base;
+    r.outline_ids(both, 0xFFF7941Du, 3);
+    const std::vector<uint32_t> c3 = img.pixels;
+    {
+      Renderer3D fresh;
+      Image i2;
+      RenderTarget rt2;
+      rs.render(i2, rt2, fresh);
+      fresh.outline_ids(both, 0xFFF7941Du, 3);
+      CHECK(i2.pixels == c3);  // a renderer that never outlined before agrees
+    }
+    /* A different frame (the camera moved) through the same renderer outlines like a fresh one. */
+    R34Raster moved(300, 200);
+    moved.v = Mat4::look_at({-3, 2, -5}, {0, 0, 0}, {0, 1, 0});
+    moved.render(img, rt, r);
+    r.outline_ids(sel9, 0xFFF7941Du);
+    Renderer3D fresh2;
+    Image i3;
+    RenderTarget rt3;
+    moved.render(i3, rt3, fresh2);
+    fresh2.outline_ids(sel9, 0xFFF7941Du);
+    CHECK(img.pixels == i3.pixels);
+    /* An empty selection changes nothing. */
+    const std::vector<uint32_t> keep = img.pixels;
+    r.outline_ids({}, 0xFFF7941Du);
+    CHECK(img.pixels == keep);
+  });
+
+  test("outline: inside a batch it keeps order, so lines recorded before it are under the outline and later ones over it", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    const std::vector<uint32_t> sel = {9};
+    auto draw = [&](bool batch) {
+      if (batch) r.begin_overlay_batch();
+      r.line({-1.5f, 0.0f, -1.2f}, {1.5f, 0.2f, -1.2f}, 0xFF00FF00u, false);  // across the cube, before the outline
+      r.point({0.0f, 0.5f, -1.0f}, 4.0f, 0xFF0000FFu, false);
+      r.outline_ids(sel, 0xFFF7941Du, 2);
+      r.line({-1.5f, 0.6f, -1.2f}, {1.5f, -0.4f, -1.2f}, 0xFFFF00FFu, false);  // after it
+      r.point({0.4f, 0.0f, -1.0f}, 3.0f, 0xFFFFFF00u, false);
+      if (batch) r.end_overlay_batch();
+    };
+    draw(false);
+    const std::vector<uint32_t> serial = img.pixels;
+    CHECK(serial != base);
+    img.pixels = base;
+    draw(true);
+    CHECK(img.pixels == serial);
+    /* Not vacuous: the outline alone is a different picture. */
+    img.pixels = base;
+    r.outline_ids(sel, 0xFFF7941Du, 2);
+    CHECK(img.pixels != serial);
+  });
+
+  /* ---------------------------------------------------------------- 6 */
+  test("parallel clear: every depth is 1, every id 0, every colour the clear colour, for odd and tiny sizes too", [] {
+    for (auto sz : {std::pair<int, int>{300, 200}, {333, 211}, {7, 3}, {1, 1}, {64, 1}, {1, 64}, {1025, 33}}) {
+      const R34Raster rs(sz.first, sz.second);
+      Image img;
+      RenderTarget rt;
+      Renderer3D r;
+      rs.render(img, rt, r);  // leave real depth, ids and vis behind
+      const size_t n = (size_t)sz.first * sz.second;
+      CHECK(rt.depth.size() == n && rt.ids.size() == n);
+      r.clear(0xFF123456u);
+      CHECK(count_bad("depth", rt.depth, [](float d) { return d == 1.0f; }) == 0);
+      CHECK(count_bad("ids", rt.ids, [](uint32_t i) { return i == 0; }) == 0);
+      CHECK(count_bad("colour", img.pixels, [](uint32_t c) { return c == 0xFF123456u; }) == 0);
+      CHECK(count_bad("vis", rt.vis, [](uint32_t v) { return v == 0; }) == 0);
+      /* clear_planes alone leaves the colour. */
+      rs.render(img, rt, r);
+      const std::vector<uint32_t> col = img.pixels;
+      r.clear_planes(nullptr);
+      CHECK(img.pixels == col);
+      CHECK(count_bad("depth", rt.depth, [](float d) { return d == 1.0f; }) == 0);
+      CHECK(count_bad("ids", rt.ids, [](uint32_t i) { return i == 0; }) == 0);
+      const uint32_t c2 = 0xFF0A0B0Cu;
+      r.clear_planes(&c2);
+      CHECK(count_bad("colour", img.pixels, [&](uint32_t c) { return c == c2; }) == 0);
+    }
+  });
+
+  test("parallel clear: a Gouraud render allocates no visibility plane, a Deferred one does, and the ids and depth agree", [] {
+    const R34Raster rs(300, 200);
+    Image gi, di, gi2;
+    RenderTarget gr, dr, gr2;
+    Renderer3D r1, r2, r3;
+    rs.render(gi, gr, r1, ShadeMode::Gouraud);
+    rs.render(di, dr, r2, ShadeMode::Deferred);
+    CHECK(gr.vis.empty());
+    CHECK(dr.vis.size() == (size_t)300 * 200);
+    CHECK(std::count(gr.ids.begin(), gr.ids.end(), 9u) > 100);
+    CHECK(std::count(gr.ids.begin(), gr.ids.end(), 9u) == std::count(dr.ids.begin(), dr.ids.end(), 9u));  // same coverage
+    CHECK(gr.depth == dr.depth);
+    rs.render(gi2, gr2, r3, ShadeMode::Gouraud);  // drawing it again gives the same picture and still no vis
+    CHECK(gr2.vis.empty() && gi2.pixels == gi.pixels && gr2.depth == gr.depth && gr2.ids == gr.ids);
+    CHECK(count_bad("depth range", gr.depth, [](float d) { return d >= 0.0f && d <= 1.0f; }) == 0);
+    CHECK(std::count(gr.depth.begin(), gr.depth.end(), 1.0f) > 1000);
+    CHECK(std::count_if(gr.depth.begin(), gr.depth.end(), [](float d) { return d < 1.0f; }) > 1000);
   });
 }
