@@ -472,6 +472,12 @@ void Editor::frame(std::vector<Event> &events) {
   ui_ms_ = (float)frame_timer.ms();
   if (window_) present(window_, fb_.pixels.data(), fb_.width, fb_.height);
   frame_ms_ = (float)frame_timer.ms();
+  prof_.frames = 1;
+  prof_.ms_present = frame_ms_ - ui_ms_;
+  prof_.ms_ui = std::max(0.0, ui_ms_ - prof_.ms_scene3d - prof_.ms_game - prof_.ms_preview);
+  prof_last_ = prof_;
+  prof_total_.add(prof_);
+  prof_ = FrameProfile{};
   frame_history_.push_back(frame_ms_);
   if (frame_history_.size() > 240) frame_history_.erase(frame_history_.begin());
   raster_history_.push_back((float)scene_stats_.ms_total);

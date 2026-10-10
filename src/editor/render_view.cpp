@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
 #include <cstring>
 #include <ctime>
 
@@ -155,23 +156,36 @@ void Editor::update_environment() {
 
 uint64_t Editor::scene_render_hash() {
   uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) { h ^= ((const uint8_t *)p)[i]; h *= 1099511628211ull; }
+  auto mix = [&](const void *p, size_t n) {  // 8 bytes a step: it runs for every view, every frame
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
   };
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
     auto *l = g.get<Light>();
+    /* The hierarchy: a selected object's children get an outline of their own. */
+    const uint64_t parent = g.parent ? g.parent->id : 0;
+    mix(&parent, 8);
     if (!mr && !l) return;
     mix(&g.id, 8);
     mix(g.world_matrix().m, sizeof(float) * 16);
+    if (mr) {  // the flags the views draw by (Show in Renders, shadows, wireframe, Display As)
+      const uint64_t f = (uint64_t)mr->enabled | (uint64_t)mr->show_wireframe << 1 | (uint64_t)mr->cast_shadows << 2 |
+                         (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
+                         (uint64_t)mr->materials.size() << 16;
+      mix(&f, 8);
+    }
     if (mr && mr->enabled) {
-      const Mesh *m = g.evaluated_mesh(1);  // renders: Show in Renders
-      mix(&m, sizeof(m));
-      const Mesh *mv = g.evaluated_mesh(0);  // the Rendered viewport: the viewport toggles
-      mix(&mv, sizeof(mv));
-      if (mv) mix(&mv->version, 8);
-      if (m) mix(&m->version, 8);
+      /* What each kind of evaluated mesh is made from, without evaluating it (a modifier stack would
+       * run every frame): renders (Show in Renders), the viewport, and Edit Mode's cage. */
+      const uint64_t k[3] = {g.evaluated_key(0), g.evaluated_key(1), g.evaluated_key(2)};
+      mix(k, sizeof(k));
       for (auto &mp : mr->materials) {
         const void *p = mp.get();
         mix(&p, sizeof(p));
@@ -196,6 +210,7 @@ uint64_t Editor::scene_render_hash() {
   mix(&edit_mode_, 1);
   mix(&edit_obj_, 8);
   mix(&scene_lighting_, 1);
+  mix(&scene_->serial, 8);
   return h;
 }
 
@@ -218,16 +233,26 @@ bool Editor::camera_for_render(Mat4 &view, Mat4 &proj, float aspect) {
 /* Rasterized (EEVEE-like)                                                */
 /* ===================================================================== */
 
-void Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env) {
+const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env) {
   int li = -1;
   for (size_t i = 0; i < env.lights.size(); i++)
     if (env.lights[i].type == RenderLight::Directional) { li = (int)i; break; }
-  if (li < 0) {
-    shadow_.size = 0;
-    return;
-  }
+  if (li < 0) return nullptr;
   std::vector<DrawItem> casters;
   AABB bounds;
+  /* What the map depends on: each caster's triangles (the render mesh's serial: a new one whenever it is
+   * rebuilt) and placement, the light's direction and the resolution. */
+  uint64_t key = 1469598103934665603ull;
+  bool cacheable = true;
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      key = (key ^ v) * 1099511628211ull;
+      key ^= key >> 29;
+    }
+  };
   for (const DrawItem &it : items) {
     bool casts = false;
     if (!it.materials || it.materials->empty()) casts = true;
@@ -237,8 +262,38 @@ void Editor::update_shadow_map(const std::vector<DrawItem> &items, const Lightin
     if (!casts) continue;
     casters.push_back(it);
     bounds.add(it.mesh->bounds.transformed(it.model));
+    if (it.mesh->serial == 0) cacheable = false;
+    mix(&it.mesh->serial, 8);
+    mix(it.model.m, sizeof(float) * 16);
+    if (it.materials)  // see-through surfaces cast no shadow: a material's surface type matters
+      for (const MaterialPtr &m : *it.materials) {
+        const uint64_t mv[2] = {(uint64_t)(uintptr_t)m.get(), m ? m->version : 0};
+        mix(mv, sizeof(mv));
+      }
   }
-  render_shadow_map(shadow_, casters, env.lights[li].direction, bounds, std::max(256, scene_->render.shadow_resolution));
+  const int res = std::max(256, scene_->render.shadow_resolution);
+  const Vec3 dir = env.lights[li].direction;
+  mix(&dir, sizeof(Vec3));
+  mix(&res, sizeof(int));
+  const uint64_t n = casters.size();
+  mix(&n, 8);
+  if (key == 0) key = 1;  // 0 marks an empty entry
+  shadow_clock_++;
+  if (cacheable)
+    for (ShadowEntry &e : shadow_cache_)
+      if (e.key == key) {
+        e.used = shadow_clock_;
+        return e.map.valid() ? &e.map : nullptr;
+      }
+  /* Render into the least recently used entry. */
+  ShadowEntry &e = shadow_cache_[0].used <= shadow_cache_[1].used ? shadow_cache_[0] : shadow_cache_[1];
+  ScopedTimer t;
+  render_shadow_map(e.map, casters, dir, bounds, res);
+  prof_.shadow_renders++;
+  prof_.ms_shadow += t.ms();
+  e.key = cacheable ? key : 0;
+  e.used = shadow_clock_;
+  return e.map.valid() ? &e.map : nullptr;
 }
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
@@ -247,11 +302,10 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   std::vector<DrawItem> items = collect_items(game, true);
   if (scene_lights && scene_->render.shadows) {
-    update_shadow_map(items, env);
-    if (shadow_.valid()) {
+    if (const ShadowMap *sm = update_shadow_map(items, env)) {
       for (size_t i = 0; i < env.lights.size(); i++)
         if (env.lights[i].type == RenderLight::Directional) { env.shadow_light = (int)i; break; }
-      env.shadow = &shadow_;
+      env.shadow = sm;
     }
   }
   RasterOptions opt = raster_opt_;
@@ -549,19 +603,21 @@ void Editor::start_final_render(bool preview, bool open_window) {
     rt.attach(big, {0, 0, big.width, big.height});
     Renderer3D r3d;
     render_deferred(r3d, rt, v, p, eye, true, true, cam);
-    for (int y = 0; y < h; y++)
-      for (int x = 0; x < w; x++) {
-        uint32_t r = 0, g = 0, b = 0;
-        for (int sy = 0; sy < aa; sy++)
-          for (int sx = 0; sx < aa; sx++) {
-            uint32_t c = big.pixels[(size_t)(y * aa + sy) * big.width + x * aa + sx];
-            r += (c >> 16) & 255;
-            g += (c >> 8) & 255;
-            b += c & 255;
-          }
-        int n = aa * aa;
-        render_img_.pixels[(size_t)y * w + x] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
-      }
+    JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < w; x++) {
+          uint32_t r = 0, g = 0, b = 0;
+          for (int sy = 0; sy < aa; sy++)
+            for (int sx = 0; sx < aa; sx++) {
+              uint32_t c = big.pixels[(size_t)(y * aa + sy) * big.width + x * aa + sx];
+              r += (c >> 16) & 255;
+              g += (c >> 8) & 255;
+              b += c & 255;
+            }
+          int n = aa * aa;
+          render_img_.pixels[(size_t)y * w + x] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+        }
+    });
     render_time_ = now_seconds() - render_start_;
     rendering_ = false;
     render_status_ = strprintf("%s %dx%d, %dx SSAA, %.0f ms (%zu tris)", preview ? "Preview (rasterized)" : "Rasterized", w, h, aa,
@@ -728,6 +784,115 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam) {
   return h;
 }
 
+/* ------------------------------------------------------- view render cache */
+
+static std::atomic<uint64_t> g_cache_mismatches{0};
+uint64_t Editor::render_cache_mismatches_all() { return g_cache_mismatches.load(); }
+void Editor::note_render_cache_mismatch() { g_cache_mismatches++; }
+
+/* Everything a rasterized view draws from the scene (ADR 0009): scene_render_hash() (geometry,
+ * transforms, the hierarchy, MeshRenderer flags, materials, lights, the world) and the render and
+ * world settings. Computed for each view that asks (not once per frame: a panel drawn
+ * between two views can change the scene). */
+uint64_t Editor::frame_scene_hash() {
+  uint64_t h = scene_render_hash();
+  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
+  mix(hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }));
+  mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
+  return h;
+}
+
+/* What the Scene view's 3D layer depends on besides the scene: its camera and size, the shading and
+ * overlay toggles, the selection (outlines, Edit Mode highlights) and the UI scale (line widths). */
+uint64_t Editor::scene_view_key(const Recti &view) {
+  uint64_t h = frame_scene_hash();
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
+  };
+  const float aspect = view.w / (float)std::max(1, view.h);
+  const Mat4 v = cam_.view(), p = cam_.proj(aspect);
+  mix(&view, sizeof(view));
+  mix(v.m, sizeof(v.m));
+  mix(p.m, sizeof(p.m));
+  const uint64_t flags = (uint64_t)shading_ | (uint64_t)scene_lighting_ << 8 | (uint64_t)scene_filters_ << 9 | (uint64_t)show_grid_ << 10 |
+                         (uint64_t)edit_mode_ << 11 | (uint64_t)ngon_mode_ << 12 | (uint64_t)elem_ << 16;
+  mix(&flags, 8);
+  mix(&ui_.scale, sizeof(float));
+  mix(&cam_.distance, sizeof(float));  // the grid's level follows the orbit distance and pivot
+  mix(&cam_.pivot, sizeof(Vec3));
+  const uint64_t ro = raster_opt_key();
+  mix(&ro, 8);
+  mix(&active_, 8);
+  mix(&edit_obj_, 8);
+  mix(selection_.data(), selection_.size() * sizeof(uint64_t));
+  mix(vert_sel_.data(), vert_sel_.size());
+  mix(face_sel_.data(), face_sel_.size());
+  uint64_t es = edge_sel_.size();  // order-free: the set's iteration order isn't stable
+  for (uint64_t e : edge_sel_) es += (e * 0x9E3779B97F4A7C15ull) ^ (e >> 31);
+  mix(&es, 8);
+  if (scene_filters_) {  // the main camera's filters are on the view
+    GameObject *owner = nullptr;
+    if (Camera *mc = main_camera(*scene_, &owner)) {
+      const uint64_t ch = camera_render_hash(owner, mc);
+      mix(&ch, 8);
+    }
+  }
+  return h ? h : 1;
+}
+
+/* Puts a cached picture back into the framebuffer (the frame cleared it), if it is the one for `key`. */
+bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
+  if (key == 0 || c.key != key || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width ||
+      r.bottom() > fb_.height)
+    return false;
+  JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
+  });
+  return true;
+}
+
+void Editor::view_cache_store(ViewCache &c, uint64_t key, const Recti &r) {
+  c.key = 0;
+  if (key == 0 || r.w <= 0 || r.h <= 0 || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height) return;
+  if (c.img.width != r.w || c.img.height != r.h) c.img.resize(r.w, r.h);
+  JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) std::memcpy(c.img.row((int)y), fb_.row((int)(r.y + y)) + r.x, sizeof(uint32_t) * r.w);
+  });
+  c.key = key;
+}
+
+/* Verify mode: the picture just rendered against the cached one it would have reused. */
+bool Editor::view_cache_verify(const ViewCache &c, const Recti &r, const char *what) {
+  if (c.img.width != r.w || c.img.height != r.h) return true;
+  size_t diff = 0;
+  for (int y = 0; y < r.h; y++)
+    for (int x = 0; x < r.w; x++) diff += fb_.row(r.y + y)[r.x + x] != c.img.pixels[(size_t)y * c.img.width + x];
+  if (diff) {
+    prof_.cache_mismatches++;
+    g_cache_mismatches++;
+    Log::warn("Render cache: the %s would have shown a stale picture (%zu pixels differ)", what, diff);
+  }
+  return diff == 0;
+}
+
+/* The raster options (Profiler toggles: culling, threads, fast setup...), field by field. */
+uint64_t Editor::raster_opt_key() const {
+  const RasterOptions &o = raster_opt_;
+  uint64_t k = (uint64_t)o.multithreaded | (uint64_t)o.backface_culling << 1 | (uint64_t)o.frustum_culling << 2 |
+               (uint64_t)o.span_rows << 3 | (uint64_t)o.fast_setup << 4 | (uint64_t)o.affine_uv << 5 | (uint64_t)o.screen_door << 6 |
+               (uint64_t)o.shade << 8 | (uint64_t)(uint32_t)o.tile_size << 16;
+  uint32_t snap;
+  std::memcpy(&snap, &o.vertex_snap, 4);
+  k ^= (uint64_t)snap << 32;
+  return k * 0x9E3779B97F4A7C15ull;
+}
+
 uint64_t Editor::live_preview_hash() {
   GameObject *owner = nullptr;
   Camera *cam = main_camera(*scene_, &owner);
@@ -750,6 +915,7 @@ void Editor::draw_camera_preview(const Recti &view) {
   cam_preview_rect_ = Recti{};
   if (!cam || !cam->enabled || (edit_mode_ && !cam_preview_lock_) || (g && g->id == pilot_cam_)) {  // piloting: the view is the preview
     cam_preview_pt_hash_ = 0;
+    cam_preview_key_ = 0;
     return;
   }
   auto &u = ui_;
@@ -768,6 +934,7 @@ void Editor::draw_camera_preview(const Recti &view) {
   const bool traced = cam_preview_rendered_;  // Rendered is always the path tracer, whatever the final engine
   std::string status;
   if (traced) {
+    cam_preview_key_ = 0;  // the inset now holds the traced picture
     /* Rebuild when the scene, this camera or the inset size changes; then add
      * a few milliseconds of samples every frame until the preview count. */
     uint64_t hash = camera_render_hash(g, cam) ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
@@ -818,9 +985,26 @@ void Editor::draw_camera_preview(const Recti &view) {
   }
   else {
     cam_preview_pt_hash_ = 0;
-    cam_preview_img_.resize(w, h);
-    cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
-    render_camera(cam_preview_r3d_, cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
+    /* Re-rendered only when the scene, this camera or the inset's size changes. */
+    ScopedTimer rt;
+    const uint64_t key = (camera_render_hash(g, cam) ^ raster_opt_key() ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id) | 1;
+    const bool hit = key == cam_preview_key_ && cam_preview_img_.width == w && cam_preview_img_.height == h;
+    if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else {
+      std::vector<uint32_t> before;
+      if (hit) before = cam_preview_img_.pixels;
+      cam_preview_img_.resize(w, h);
+      cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
+      render_camera(cam_preview_r3d_, cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
+      prof_.view_renders++;
+      if (hit && before != cam_preview_img_.pixels) {
+        prof_.cache_mismatches++;
+        g_cache_mismatches++;
+        Log::warn("Render cache: the Camera Preview would have shown a stale picture");
+      }
+      cam_preview_key_ = key;
+    }
+    prof_.ms_preview += rt.ms();
   }
   Recti box{view.right() - w - u.px(12), view.bottom() - h - u.px(12) - u.row_h(), w, h};
   cam_preview_rect_ = {box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)};  // clicks here stay off the scene
