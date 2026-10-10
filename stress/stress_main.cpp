@@ -549,6 +549,24 @@ static void test_jobs(Report &rep, const Options &o) {
 
 /* ------------------------------------------------------- camera filters */
 
+/* Sets every field it visits to an odd value: NaN, infinities, huge, negative, zero (filter fuzzing). */
+struct FuzzReflector : Reflector {
+  std::function<float()> rnd;
+  float odd() {
+    static const float v[] = {0.0f, -1.0f, 1.0f, 0.5f, 1e-9f, 3.0f, 1e9f, -1e9f, std::numeric_limits<float>::quiet_NaN(),
+                              std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()};
+    return v[(int)(rnd() * 11) % 11];
+  }
+  void field(const char *, float &x, float, float, float) override { if (rnd() < 0.6f) x = odd(); }
+  void field(const char *, int &x, int, int) override { if (rnd() < 0.6f) x = (int)(rnd() * 600) - 100; }
+  void field(const char *, bool &x) override { if (rnd() < 0.5f) x = !x; }
+  void field(const char *, Vec3 &x) override { if (rnd() < 0.6f) x = Vec3(odd(), odd(), odd()); }
+  void color(const char *n, Vec3 &x) override { field(n, x); }
+  void enumeration(const char *, int &x, const char *const *, int count) override { if (rnd() < 0.5f) x = (int)(rnd() * (count + 2)) - 1; }
+  void text(const char *, std::string &) override {}
+  void mesh(const char *, MeshPtr &) override {}
+};
+
 /* ADR 0007: what the PS1 filter costs, and odd settings (NaN, 1 x 1, huge) never crash. */
 static void test_camera_filters(Report &rep, const Options &o) {
   rep.title("Camera filters: the PS1 look's cost, and odd settings",
@@ -711,6 +729,26 @@ static void test_camera_filters(Report &rep, const Options &o) {
   }
   rep.note(strprintf("Odd settings (NaN / infinite snap and fog, 1x1 to 100000 px, unknown modes): %d runs, %d problems", runs, problems));
 
+  /* Each Color / Lens / Stylize effect (task 0006) at its defaults on the 1080p frame. */
+  rep.table({"effect (1920x1080, defaults)", "ms"});
+  {
+    full.resize(W, H);
+    frt.attach(full, {0, 0, W, H});
+    draw(frt, nullptr, p);
+    const std::vector<uint32_t> pristine = full.pixels;
+    for (const FilterEffectInfo &fi : filter_effect_infos()) {
+      if (fi.category == "Retro Console") continue;
+      auto e = fi.create();
+      FilterStack st;
+      e->contribute(st);
+      const double ms = time_ms([&] {
+        full.pixels = pristine;
+        for (auto &pass : st.passes) pass(frt, &frame);
+      }, reps);
+      rep.row({fi.category + " > " + fi.name, f2(ms)});
+    }
+  }
+
   /* Random stacks (task 0005): 0-4 Retro Console effects, random presets and odd fields, some off,
    * through the stack's own contribute, layout, render, passes and upscale; each stack's copy must
    * hash the same. A 256-colour frame must use only palette colours. */
@@ -772,6 +810,50 @@ static void test_camera_filters(Report &rep, const Options &o) {
     sruns++;
   }
   rep.note(strprintf("Random Camera Filters stacks (0-4 effects, random presets and odd fields): %d runs, %d problems", sruns, sproblems));
+
+  /* Random stacks over every effect type (task 0006): 0-6 effects of any kind, every field fuzzed. */
+  int aproblems = 0, aruns = 0;
+  FuzzReflector fz;
+  fz.rnd = rnd;
+  const auto &infos = filter_effect_infos();
+  for (int k = 0; k < (o.quick ? 60 : 300); k++) {
+    CameraFilters cf;
+    const int n = (int)(rnd() * 7);
+    for (int i = 0; i < n; i++) {
+      FilterEffect *e = cf.add(infos[(size_t)(rnd() * infos.size()) % infos.size()].name);
+      if (!e) { aproblems++; continue; }
+      e->enabled = rnd() < 0.85f;
+      e->reflect(fz);
+    }
+    CameraFilters copy(cf);
+    if (hash_component(copy) != hash_component(cf)) aproblems++;
+    FilterStack st;
+    cf.contribute(st);
+    const int vw = 1 + (int)(rnd() * 200), vh = 1 + (int)(rnd() * 140);
+    int aw, ah;
+    Recti ad;
+    filter_layout(st, vw, vh, aw, ah, ad);
+    Image a;
+    a.resize(aw, ah);
+    RenderTarget art;
+    art.attach(a, {0, 0, aw, ah});
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    st.apply_raster(opt);
+    r3d.begin(&art, v, Mat4::perspective(60 * kDeg2Rad, aw / (float)ah, 0.1f, 1000.0f), env, opt);
+    r3d.clear(0xFF303030);
+    for (auto &it : few) r3d.add(it);
+    r3d.flush();
+    FilterFrame ff = frame;
+    ff.animate = rnd() < 0.5f;
+    ff.time = fz.odd();
+    for (auto &pass : st.passes) pass(art, rnd() < 0.2f ? nullptr : &ff);
+    if (a.width != aw || a.height != ah) aproblems++;
+    aruns++;
+  }
+  rep.note(strprintf("Random stacks of every effect type (0-6 effects, every field fuzzed with NaN / infinite / huge values): %d runs, %d problems "
+                     "(a problem: a crash, a changed image size, or a copy that hashes differently; the unit tests check the pictures)",
+                     aruns, aproblems));
 }
 
 static void test_editor(Report &rep, const Options &o) {

@@ -413,6 +413,22 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
        "Render the way an old console drew 3D: PlayStation, Nintendo 64, Sega Saturn or a DOS PC (resolution, wobbling vertices, "
        "warping textures, texture filtering, colour depth and dither).",
        [] { return std::make_unique<RetroConsoleFilter>(); }},
+      {ColorGradingEffect::kName, "Color", "Exposure, contrast, saturation, white balance and lift / gamma / gain, in linear light.",
+       [] { return std::make_unique<ColorGradingEffect>(); }},
+      {PosterizeEffect::kName, "Color", "Fewer shades per channel: flat bands of colour.", [] { return std::make_unique<PosterizeEffect>(); }},
+      {GrayscaleEffect::kName, "Color", "Black and white, or a warm old-photo sepia.", [] { return std::make_unique<GrayscaleEffect>(); }},
+      {InvertEffect::kName, "Color", "A negative image.", [] { return std::make_unique<InvertEffect>(); }},
+      {VignetteEffect::kName, "Lens", "Darker (or tinted) corners, drawing the eye to the middle.", [] { return std::make_unique<VignetteEffect>(); }},
+      {ChromaticAberrationEffect::kName, "Lens", "Red and blue fringes toward the edges, as from a cheap lens.",
+       [] { return std::make_unique<ChromaticAberrationEffect>(); }},
+      {FilmGrainEffect::kName, "Lens", "Film-like noise, strongest in the midtones; it moves in Play mode.", [] { return std::make_unique<FilmGrainEffect>(); }},
+      {LensDistortionEffect::kName, "Lens", "Barrel (fisheye-like, below 0) or pincushion (above 0) bending of straight lines.",
+       [] { return std::make_unique<LensDistortionEffect>(); }},
+      {PixelateEffect::kName, "Stylize", "Blocks of one colour.", [] { return std::make_unique<PixelateEffect>(); }},
+      {EdgeOutlineEffect::kName, "Stylize", "Lines where objects meet and where the depth jumps: a toon / sketch look.",
+       [] { return std::make_unique<EdgeOutlineEffect>(); }},
+      {CrtEffect::kName, "Stylize", "An old TV: scanlines, a curved tube, phosphor stripes and flicker.", [] { return std::make_unique<CrtEffect>(); }},
+      {SharpenEffect::kName, "Stylize", "Crisper edges (an unsharp mask).", [] { return std::make_unique<SharpenEffect>(); }},
   };
   return infos;
 }
@@ -625,6 +641,150 @@ void RetroConsoleFilter::contribute(FilterStack &s) const {
   p.fog_color = {linear_to_srgb(fog_color.x), linear_to_srgb(fog_color.y), linear_to_srgb(fog_color.z)};  // the pass works on display colours
   if (p.fog || p.color_depth != RetroImageParams::Full)
     s.passes.push_back([p](RenderTarget &rt, const FilterFrame *frame) { apply_retro_image(rt, p, frame); });
+}
+
+/* Color, Lens and Stylize (task 0006). Colours in the Inspector are linear; the passes work on
+ * display colours. */
+static Vec3 display_color(Vec3 c) { return {linear_to_srgb(c.x), linear_to_srgb(c.y), linear_to_srgb(c.z)}; }
+
+void ColorGradingEffect::reflect(Reflector &r) {
+  r.field("Exposure", exposure, 0.02f, -10.0f, 10.0f);
+  r.help("In stops: +1 doubles the light, -1 halves it.");
+  r.field("Contrast", contrast, 0.01f, -1.0f, 1.0f);
+  r.field("Saturation", saturation, 0.01f, -1.0f, 1.0f);
+  r.help("-1: grey. 0: unchanged. 1: twice as vivid.");
+  r.field("Temperature", temperature, 0.01f, -1.0f, 1.0f);
+  r.help("Warmer (orange) or cooler (blue) white balance.");
+  r.field("Tint", tint, 0.01f, -1.0f, 1.0f);
+  r.help("Toward magenta (+) or green (-).");
+  r.color("Lift", lift);
+  r.help("Raises the shadows by colour (Lift / Gamma / Gain, as in colour grading suites). Black: no change.");
+  r.field("Gamma", gamma);
+  r.help("Bends the midtones per channel (1: no change; above 1 brighter).");
+  r.field("Gain", gain);
+  r.help("Scales the highlights per channel (1: no change).");
+}
+void ColorGradingEffect::contribute(FilterStack &s) const {
+  ColorGradingParams p;
+  p.exposure = exposure, p.contrast = contrast, p.saturation = saturation, p.temperature = temperature, p.tint = tint;
+  p.lift = lift, p.gamma = gamma, p.gain = gain;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_color_grading(rt, p); });
+}
+
+void PosterizeEffect::reflect(Reflector &r) {
+  r.field("Levels", levels, 2, 256);
+  r.help("Shades per colour channel (256: unchanged). Few levels give flat, poster-like bands.");
+}
+void PosterizeEffect::contribute(FilterStack &s) const {
+  const int l = levels;
+  s.passes.push_back([l](RenderTarget &rt, const FilterFrame *) { apply_posterize(rt, l); });
+}
+
+void GrayscaleEffect::reflect(Reflector &r) {
+  static const char *modes[] = {"Grayscale", "Sepia"};
+  r.enumeration("Mode", mode, modes, 2);
+  r.field("Amount", amount, 0.01f, 0.0f, 1.0f);
+}
+void GrayscaleEffect::contribute(FilterStack &s) const {
+  const bool sepia = mode == 1;
+  const float a = amount;
+  s.passes.push_back([sepia, a](RenderTarget &rt, const FilterFrame *) { apply_grayscale(rt, sepia, a); });
+}
+
+void InvertEffect::reflect(Reflector &r) { r.field("Amount", amount, 0.01f, 0.0f, 1.0f); }
+void InvertEffect::contribute(FilterStack &s) const {
+  const float a = amount;
+  s.passes.push_back([a](RenderTarget &rt, const FilterFrame *) { apply_invert(rt, a); });
+}
+
+void VignetteEffect::reflect(Reflector &r) {
+  r.field("Intensity", intensity, 0.01f, 0.0f, 1.0f);
+  r.field("Smoothness", smoothness, 0.01f, 0.01f, 1.0f);
+  r.help("How far in from the corners the darkening reaches, and how softly.");
+  r.field("Roundness", roundness, 0.01f, 0.0f, 1.0f);
+  r.help("1: a circle. 0: follows the frame's shape.");
+  r.color("Colour", color);
+}
+void VignetteEffect::contribute(FilterStack &s) const {
+  VignetteParams p;
+  p.intensity = intensity, p.smoothness = smoothness, p.roundness = roundness, p.color = display_color(color);
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_vignette(rt, p); });
+}
+
+void ChromaticAberrationEffect::reflect(Reflector &r) {
+  r.field("Intensity", intensity, 0.01f, 0.0f, 1.0f);
+  r.help("Colour fringes toward the edges, as from a cheap lens.");
+}
+void ChromaticAberrationEffect::contribute(FilterStack &s) const {
+  const float k = intensity;
+  s.passes.push_back([k](RenderTarget &rt, const FilterFrame *) { apply_chromatic_aberration(rt, k); });
+}
+
+void FilmGrainEffect::reflect(Reflector &r) {
+  r.field("Intensity", intensity, 0.01f, 0.0f, 1.0f);
+  r.field("Size", size, 0.05f, 1.0f, 16.0f);
+  r.help("Grain size in pixels.");
+  r.field("Response", response, 0.01f, 0.0f, 1.0f);
+  r.help("1: grain mostly in the midtones, as on film. 0: the same everywhere.\nThe grain moves in Play mode; elsewhere it holds still.");
+}
+void FilmGrainEffect::contribute(FilterStack &s) const {
+  GrainParams p;
+  p.intensity = intensity, p.size = size, p.response = response;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_film_grain(rt, p, f); });
+}
+
+void LensDistortionEffect::reflect(Reflector &r) {
+  r.field("Intensity", intensity, 0.01f, -1.0f, 1.0f);
+  r.help("Below 0: barrel (straight lines bow outward, like a wide or fisheye lens). Above 0: pincushion (they bow inward).");
+  r.field("Scale", scale, 0.01f, 0.1f, 10.0f);
+  r.help("Zoom, to push the black corners out of the frame.");
+}
+void LensDistortionEffect::contribute(FilterStack &s) const {
+  const float k = intensity, sc = scale;
+  s.passes.push_back([k, sc](RenderTarget &rt, const FilterFrame *) { apply_lens_distortion(rt, k, sc); });
+}
+
+void PixelateEffect::reflect(Reflector &r) {
+  r.field("Cell Size", cell_size, 1, 512);
+  r.help("Pixels per block. (Retro Console's resolution renders fewer pixels instead; this keeps the full render.)");
+}
+void PixelateEffect::contribute(FilterStack &s) const {
+  const int n = cell_size;
+  s.passes.push_back([n](RenderTarget &rt, const FilterFrame *) { apply_pixelate(rt, n); });
+}
+
+void EdgeOutlineEffect::reflect(Reflector &r) {
+  r.color("Colour", color);
+  r.field("Thickness", thickness, 1, 8);
+  r.field("Depth Sensitivity", depth_sensitivity, 0.005f, 0.001f, 1.0f);
+  r.help("How big a jump in distance (as a fraction) draws a line: smaller finds more creases.");
+  r.field("Object Edges", object_edges);
+  r.help("Also outline where one object meets another.\nThe whole effect needs the rasterizer's depth: path-traced renders skip it.");
+}
+void EdgeOutlineEffect::contribute(FilterStack &s) const {
+  OutlineParams p;
+  p.color = display_color(color), p.thickness = thickness, p.depth_sensitivity = depth_sensitivity, p.object_edges = object_edges;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_edge_outline(rt, p, f); });
+}
+
+void CrtEffect::reflect(Reflector &r) {
+  r.field("Scanlines", scanlines, 0.01f, 0.0f, 1.0f);
+  r.field("Curvature", curvature, 0.01f, 0.0f, 1.0f);
+  r.field("Phosphor Mask", mask, 0.01f, 0.0f, 1.0f);
+  r.help("The tube's red / green / blue stripes.");
+  r.field("Flicker", flicker, 0.01f, 0.0f, 1.0f);
+  r.help("Brightness pulses in Play mode only.");
+}
+void CrtEffect::contribute(FilterStack &s) const {
+  CrtParams p;
+  p.scanlines = scanlines, p.curvature = curvature, p.mask = mask, p.flicker = flicker;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_crt(rt, p, f); });
+}
+
+void SharpenEffect::reflect(Reflector &r) { r.field("Amount", amount, 0.01f, 0.0f, 4.0f); }
+void SharpenEffect::contribute(FilterStack &s) const {
+  const float a = amount;
+  s.passes.push_back([a](RenderTarget &rt, const FilterFrame *) { apply_sharpen(rt, a); });
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }

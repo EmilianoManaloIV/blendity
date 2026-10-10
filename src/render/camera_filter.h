@@ -23,6 +23,10 @@ struct FilterFrame {
   Mat4 inv_view_proj;
   Vec3 eye, forward{0, 0, 1};
   float far_distance = 1000.0f;
+  /* Animated effects (grain, flicker) move only when `animate` (the editor sets it in Play mode),
+   * so editor views and renders are reproducible. */
+  float time = 0.0f;
+  bool animate = false;
 };
 
 using FilterPass = std::function<void(RenderTarget &, const FilterFrame *)>;
@@ -75,5 +79,43 @@ uint32_t retro_palette_nearest(int r, int g, int b);
 /* Fog (needs frame), then dither and either truncate to 5 bits per channel or map to the
  * 256-colour palette. Pixels with nothing drawn (depth 1, the sky) take no fog. */
 void apply_retro_image(RenderTarget &rt, const RetroImageParams &p, const FilterFrame *frame);
+
+/* ---- Color, Lens and Stylize passes (task 0006). All clamp their settings (NaN / infinite act as
+ * neutral) and work at any size. ---- */
+struct ColorGradingParams {
+  float exposure = 0.0f;    // stops
+  float contrast = 0.0f;    // -1..1, around middle grey (0.18)
+  float saturation = 0.0f;  // -1 (grey) .. 1
+  float temperature = 0.0f, tint = 0.0f;  // -1..1: warmer / cooler, magenta / green
+  Vec3 lift{0, 0, 0}, gamma{1, 1, 1}, gain{1, 1, 1};
+};
+void apply_color_grading(RenderTarget &rt, const ColorGradingParams &p);
+void apply_posterize(RenderTarget &rt, int levels);
+void apply_grayscale(RenderTarget &rt, bool sepia, float amount);
+void apply_invert(RenderTarget &rt, float amount);
+struct VignetteParams {
+  float intensity = 0.4f, smoothness = 0.5f, roundness = 1.0f;
+  Vec3 color{0, 0, 0};  // display colour
+};
+void apply_vignette(RenderTarget &rt, const VignetteParams &p);
+void apply_chromatic_aberration(RenderTarget &rt, float intensity);
+struct GrainParams {
+  float intensity = 0.3f, size = 1.0f, response = 0.8f;
+};
+void apply_film_grain(RenderTarget &rt, const GrainParams &p, const FilterFrame *frame);
+void apply_lens_distortion(RenderTarget &rt, float intensity, float scale);
+void apply_pixelate(RenderTarget &rt, int cell);
+struct OutlineParams {
+  Vec3 color{0, 0, 0};     // display colour
+  int thickness = 1;       // pixels
+  float depth_sensitivity = 0.05f;  // relative change in distance that counts as an edge
+  bool object_edges = true;          // where one object meets another (ids)
+};
+void apply_edge_outline(RenderTarget &rt, const OutlineParams &p, const FilterFrame *frame);
+struct CrtParams {
+  float scanlines = 0.5f, curvature = 0.2f, mask = 0.3f, flicker = 0.0f;
+};
+void apply_crt(RenderTarget &rt, const CrtParams &p, const FilterFrame *frame);
+void apply_sharpen(RenderTarget &rt, float amount);
 
 }  // namespace bl

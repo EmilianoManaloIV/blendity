@@ -20,7 +20,7 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - unit checks (5,062 on Windows with Blender's libraries)
+tests/          blendity_tests   - unit checks (5,710 on Windows with Blender's libraries)
 ```
 
 ## System overview
@@ -439,6 +439,18 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 |---|---|---|
 | `render_scene_view` piloting branch, `pilot_rt_` | The frame (`pilot_frame_rect`) is drawn by `render_camera` with the camera's own view, projection, exposure, DoF and filters; a dark passepartout around it. Ids are copied into `scene_rt_` (click-picking reads the pixels shown, so it always works) and depth is re-projected into the editor's projection (its near / far differ). For a centred perspective camera the editor's projection over the view equals the camera's over the frame (`scale_fov`), so the remaining tools line up; with an orthographic camera, lens shift or a letterboxing filter they don't, which is acceptable because the gizmos are hidden and Edit Mode ends piloting | Unity Game view; Blender camera view |
 | `piloted_camera()`; the overlay skip in the Scene view's draw | While piloting: no grid, icons, origins, guides, overlap / Z-fighting overlays, transform or navigation gizmo, statistics. `draw_pilot_frame` keeps its banner and a 1 px outline outside the frame | - |
+
+## Color, Lens and Stylize effects (round 31, task 0006)
+
+| Piece | What it does | Reference |
+|---|---|---|
+| The `ColorGradingEffect` ... `SharpenEffect` classes (`scene/scene.h/.cpp`) | Twelve `FilterEffect`s registered under Color, Lens and Stylize. Each pushes one image pass with its settings captured by value | Unity post-processing effects |
+| `apply_color_grading` | sRGB decoded through a 256-entry table to linear light. In order: white balance gains, exposure (2^stops), a contrast power curve through 0.18, saturation around Rec. 709 luma, then ASC CDL-style lift / gain / gamma. Encoded with the exact `linear_to_srgb8`. Neutral settings return untouched | ACES / Unity grading; ASC CDL |
+| `apply_posterize`, `apply_grayscale`, `apply_invert` | Per channel, on display values: posterize rounds to N levels; Rec. 709 luma or the classic sepia matrix, mixed by amount; invert mixed by amount | - |
+| `apply_vignette`, `apply_chromatic_aberration`, `apply_lens_distortion` | Radial from the centre. The vignette uses a smoothstep from (1 - smoothness) to the corners, with roundness blending frame and circle. Aberration samples red outward and blue inward. Distortion uses r' = r / ((1 + k r^2) s): k < 0 barrel, k > 0 pincushion, black outside | Brown-Conrady radial model |
+| `apply_film_grain`, `apply_crt`, `FilterFrame::time / animate` | Grain: hashed noise per cell, strongest in the midtones, re-seeded 24 times a second only while animating. CRT: barrel curvature to black corners, darker odd rows, an RGB aperture grille, and a 30 Hz flicker only while animating. The editor animates in Play mode only | - |
+| `apply_pixelate`, `apply_edge_outline`, `apply_sharpen` | Pixelate takes each cell's centre pixel. Outline marks a pixel where, `thickness` pixels away, the id differs or the distance along the view jumps by more than `depth_sensitivity` (relative). It needs depth, so it skips path-traced output. Sharpen is a 4-neighbour unsharp mask | Sobel-free edge detection as in toon post-processing |
+| `Source` (camera_filter.cpp) | A copy of the colour that neighbour-reading passes read from while they rewrite the target; clamped and bilinear reads | - |
 
 ## What isn't recreated
 

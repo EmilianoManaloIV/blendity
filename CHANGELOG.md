@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 31): Color, Lens and Stylize camera filters (task 0006)
+
+**Asked:** start task 0006: the Color, Lens and Stylize categories of the Camera Filters stack. Animated
+effects move in Play mode only.
+
+**Added:** twelve effects in Add Filter, each with its own settings, stackable in any order.
+
+| Category | Effects |
+|---|---|
+| Color | **Color Grading** (in linear light: exposure, contrast through middle grey, saturation, temperature and tint, lift / gamma / gain), **Posterize**, **Grayscale / Sepia**, **Invert** |
+| Lens | **Vignette** (intensity, smoothness, roundness, colour), **Chromatic Aberration**, **Film Grain** (strongest in the midtones), **Lens Distortion** (below 0 barrel, above 0 pincushion, with zoom) |
+| Stylize | **Pixelate**, **Edge Outline** (lines where objects meet and where the depth creases or steps), **CRT** (scanlines, a curved tube, phosphor stripes, flicker), **Sharpen** |
+
+Film grain and CRT flicker move only in the Game view while playing. F12 renders, camera sequences,
+previews and piloting stay reproducible.
+
+**Fixed (from the review)**
+- **F12 during Play animated the grain.** Only the Game view animates now; there is a test.
+- **CRT flicker vanished at 60 fps.** A 30 Hz sine sampled every 1/60 s sits on its zero crossings. It is a
+  random brightness every 1/30 s now; a test checks 60 fps frames.
+- **Edge Outline drew a band on floors seen at a grazing angle.** It tests flatness now: the second
+  difference of distance and of 1/distance (linear across the screen on a plane, orthographic or
+  perspective) instead of a jump in distance. A test checks a grazing floor with an 8 px, very sensitive
+  outline.
+- **Lift / gamma / gain clamped above 1**, so exposure plus a lower gain flattened the highlights.
+- **The grain seed's time** is wrapped to a day, so a huge time can't overflow the cast.
+- **Lens Distortion's help** had barrel and pincushion swapped (the test-engineer noticed).
+
+**Checked**
+- 19 tests by the test-engineer, plus 2 from the review. For each effect: neutral settings are
+  bit-identical, and its behaviour matches hand-computed values (posterize level counts, the sepia matrix,
+  exact outline columns, CRT rows and mask, sharpen at a step, +1 stop = x2 linear light). Grain and flicker
+  animate only when asked. All 12 effects save, load and undo. NaN, infinite and huge values are safe at
+  1x1 and 64x48 and with a row stride.
+- Unit checks: Windows 5710, Linux 5686, sanitizer build 5608; 0 failed.
+- Stress `filters` (Windows, 1080p, defaults): every effect 0.4-10 ms (Lens Distortion and CRT the slowest).
+  300 random stacks of every effect type with every field fuzzed: 0 problems (crash, size or copy-hash).
+
 ## 2026-10-09 (round 30): piloting a camera shows its game view (task 0009)
 
 **Asked:** whenever a camera is piloted, its camera filters should show: treat the pilot camera as the game
