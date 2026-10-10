@@ -44,6 +44,9 @@ struct SurfacePoint {
   AABB local_bounds;
   bool has_tangent = false;
   const TexOverride *tex = nullptr;  // camera filter (rasterizer only)
+  /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
+  bool has_lightmap = false;
+  Vec3 lightmap;
 };
 
 /* Material inputs after texture lookups. */

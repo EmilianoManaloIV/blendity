@@ -124,6 +124,9 @@ class PathTracer {
     uint32_t object = UINT32_MAX;  // index into the objects passed to build()
   };
   bool intersect(const Ray &r, Hit &h) const;
+  /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
+   * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
+  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, rays, nullptr); }
   bool occluded(const Ray &r, float tmax) const;
   /* Light passing along a shadow ray: 0 when blocked, partial through
    * transparent surfaces, full through cutout holes. */

@@ -1,8 +1,8 @@
 # 0012: Baked lighting, like Unity's (lightmaps and light modes)
 
-- **Status:** approved 2026-10-09
+- **Status:** in review (approved 2026-10-09)
 - **Requirements:** R-05, R-11 (new: baked lighting)
-- **Decisions:** ADR 0010, baked lighting data (to write)
+- **Decisions:** ADR 0010, baked lighting data
 - **Model:** main session (Opus)
 - **PR:** (link when opened)
 

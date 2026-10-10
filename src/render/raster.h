@@ -33,6 +33,7 @@ struct RenderMesh {
   std::vector<uint32_t> indices;    // 3 per triangle
   std::vector<uint32_t> tri_face;   // source polygon per triangle
   std::vector<uint16_t> tri_material;  // material slot per triangle
+  std::vector<uint32_t> tri_corner;    // 3 per triangle: the mesh corner each came from (lightmap UVs)
   AABB bounds;
   /* Different for every build (never reused, unlike a pointer + version after a free), so caches of
    * what was drawn from it (shadow maps, voxel grids) can key on it. 0 = not cacheable (built by hand). */
@@ -40,8 +41,17 @@ struct RenderMesh {
   size_t tri_count() const { return indices.size() / 3; }
 };
 
+/* A baked lightmap page (task 0012): linear light per texel, what albedo multiplies (irradiance / pi). */
+struct Lightmap {
+  int width = 0, height = 0;
+  std::vector<Vec3> texels;
+  /* Bilinear, clamped at the edges; texel centres at ((i + 0.5) / width, (j + 0.5) / height). */
+  Vec3 sample(Vec2 uv) const;
+};
+
 struct RenderLight {
   enum Type { Directional = 0, Point = 1, Spot = 2, Area = 3 } type = Directional;
+  int bake_mode = 0;  // Unity's Light Mode: 0 Realtime, 1 Mixed, 2 Baked (in the lightmaps: skipped on lightmapped surfaces)
   Vec3 direction{0, -1, 0};  // the way the light points (directional, spot, area)
   Vec3 right{1, 0, 0};       // area: the rectangle's width direction (height = cross(direction, right))
   float cos_outer = 0.0f, cos_inner = 0.0f;  // spot cone (cosines of the half angles)
@@ -98,6 +108,9 @@ struct DrawItem {
   const std::vector<MaterialPtr> *materials = nullptr;  // Deferred mode (null = default material)
   bool receive_shadows = true;
   const std::vector<uint8_t> *face_highlight = nullptr;  // edit mode: tint selected faces
+  /* Baked lighting: its page and the lightmap UVs, 3 per render-mesh triangle (null = not lightmapped). */
+  const Lightmap *lightmap = nullptr;
+  const std::vector<Vec2> *lightmap_uv = nullptr;
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
 };
 
