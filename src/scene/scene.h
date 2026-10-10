@@ -375,6 +375,15 @@ struct SharpenEffect : FilterEffectBase<SharpenEffect> {
   void contribute(FilterStack &stack) const override;
 };
 
+/* Bloom & glow (task 0007): light above a threshold spills into the pixels around it. */
+struct BloomEffect : FilterEffectBase<BloomEffect> {
+  static constexpr const char *kName = "Bloom";
+  float intensity = 0.6f, threshold = 1.0f, soft_knee = 0.5f, scatter = 0.7f, clamp = 65000.0f;
+  Vec3 tint{1, 1, 1};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+
 struct Rotator : ComponentBase<Rotator> {
   static constexpr const char *kName = "Rotator";
   Vec3 degrees_per_second{0, 45, 0};

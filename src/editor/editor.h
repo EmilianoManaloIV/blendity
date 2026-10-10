@@ -956,6 +956,8 @@ class Editor {
   Image render_small_;
   Recti render_dst_;
   void resolve_final_render(bool finished);
+  static void fill_hdr_from_linear(RenderTarget &rt, const std::vector<float> &lin, ViewTransform vt, float exposure);
+  std::vector<float> cam_preview_lin_;  // a finished Rendered Camera Preview's linear light (its bloom reads it)
   Renderer3D cam_preview_r3d_;
   bool cam_preview_rendered_ = false;  // Camera Preview shows the render engine (path traced)
   uint64_t cam_preview_lock_ = 0;      // Camera Preview pinned to this camera (0: the selected one)
