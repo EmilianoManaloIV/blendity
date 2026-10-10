@@ -756,6 +756,8 @@ struct LightingSettings {
   int gi_downsample = 1;          // 0 Half, 1 Quarter resolution
   int gi_rsm_resolution = 256;
   float gi_specular_occlusion = 1.0f;
+  float realtime_resolution = 2.0f;  // realtime lightmaps' texels per metre (task 0016); 0 = off (per pixel only)
+  int gi_device = 0;  // task 0018: 0 Auto (the GPU when there is one), 1 CPU, 2 GPU (falls back to the CPU without one)
   /* Probe volumes (task 0014), as Unity 6's Adaptive Probe Volumes. */
   float probe_min_spacing = 1.0f;   // metres between probes near geometry
   float probe_max_spacing = 27.0f;  // ...and in open space
@@ -781,7 +783,7 @@ struct RenderSettings {
   int width = 1280, height = 720;
   int percent = 100;
   int samples = 128;          // path tracer final samples
-  int viewport_samples = 64;  // Rendered viewport shading
+  int viewport_samples = 64;  // unused since task 0019 (no Rendered Scene view); kept so files round-trip
   int preview_samples = 16;   // Preview button / live preview
   int preview_percent = 25;   // preview resolution, % of the output size
   bool live_preview = false;  // re-render the preview whenever the scene changes

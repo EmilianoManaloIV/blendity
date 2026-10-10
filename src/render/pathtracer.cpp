@@ -156,6 +156,7 @@ static uint64_t mesh_hash(const RenderMesh &rm) {
 
 void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<RenderLight> &lights, const Environment &env) {
   ScopedTimer t;
+  build_count_++;
   objects_ = objects;
   see_through_ = false;
   for (const PTObject &o : objects_)
@@ -1719,6 +1720,72 @@ void PathTracer::upload_gpus() {
   }
   stats_.bvh_build_ms += t.ms();
   if (w_ > 0 && h_ > 0) reset();  // camera and buffers for the new scene
+}
+
+bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
+                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error) const {
+  std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
+  out.clear();
+  if (hit) hit->clear();
+  if (origins.size() != dirs.size() || (mode != 1 && mode != 2)) return false;
+  if (!gpu::available() || device < 0 || device >= (int)gpu::devices().size()) {
+    if (error) *error = "no such GPU";
+    return false;
+  }
+  samples = std::max(1, std::min(65536, samples));
+  if (!bake_gpu_ || bake_gpu_index_ != device) {
+    bake_gpu_ = gpu::Renderer::create(device, true, error);
+    if (!bake_gpu_) return false;
+    bake_gpu_index_ = device;
+    bake_gpu_build_ = 0;
+  }
+  if (bake_gpu_build_ != build_count_) {
+    gpu::Scene gs;
+    build_gpu_scene(gs);
+    bake_params_ = gs.params;
+    if (!bake_gpu_->upload(gs, error)) return false;
+    bake_gpu_build_ = build_count_;
+  }
+  out.resize(origins.size());
+  if (hit) hit->resize(origins.size());
+  /* In chunks of points (the buffers), and of samples (no single submission long enough for the driver
+   * to give up on it). */
+  const size_t chunk = (size_t)1 << 20;
+  std::vector<float> pts, acc;
+  for (size_t first = 0; first < origins.size(); first += chunk) {
+    const size_t n = std::min(chunk, origins.size() - first);
+    const int W = (int)std::min<size_t>(n, 4096), H = (int)((n + (size_t)W - 1) / (size_t)W);
+    gpu::GParams p = bake_params_;
+    p.size[0] = W;
+    p.size[1] = H;
+    p.env_i[2] = mode;
+    p.env_i[3] = (int32_t)n;
+    p.cam_pos[3] = (float)first;  // each point's own random sequence, whatever the batch (exact below 2^24)
+    bake_gpu_->set_params(p);
+    const size_t cells = (size_t)W * H;
+    pts.assign(cells * 8, 0.0f);
+    for (size_t i = 0; i < n; i++) {
+      const Vec3 o = origins[first + i], d = dirs[first + i];
+      float *a = &pts[i * 4], *b = &pts[(cells + i) * 4];
+      a[0] = o.x, a[1] = o.y, a[2] = o.z;
+      b[0] = d.x, b[1] = d.y, b[2] = d.z;
+    }
+    if (!bake_gpu_->set_points(pts.data(), pts.size(), error)) return false;
+    const int per = std::max(1, std::min(samples, (int)(((size_t)1 << 24) / std::max<size_t>(1, n))));  // ~16M paths a submission
+    for (int done = 0; done < samples; done += per)
+      if (!bake_gpu_->render(done, std::min(per, samples - done), error)) return false;
+    bake_gpu_->download_accum(acc);
+    if (acc.size() < n * 4) {
+      if (error) *error = "the GPU's results came back short";
+      return false;
+    }
+    const float inv = 1.0f / (float)samples;
+    for (size_t i = 0; i < n; i++) {
+      out[first + i] = Vec3(acc[i * 4], acc[i * 4 + 1], acc[i * 4 + 2]) * inv;
+      if (hit) (*hit)[first + i] = acc[i * 4 + 3] * inv;
+    }
+  }
+  return true;
 }
 
 void PathTracer::merge_aux() {

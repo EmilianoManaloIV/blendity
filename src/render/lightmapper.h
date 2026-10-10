@@ -34,11 +34,13 @@ struct BakeSettings {
   float texels_per_unit = 40.0f;  // Unity's Lightmap Resolution
   int max_size = 1024;            // Max Lightmap Size (a page's side)
   int padding = 2;                // texels between charts
+  int min_chart = 8;              // a chart's smallest side in texels (realtime lightmaps ask for more: small objects)
   int direct_samples = 32;
   int indirect_samples = 256;
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;
+  int gpu_device = -1;            // task 0018: the indirect gather on this GPU (gpu::devices() index), -1 the CPU
 };
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
@@ -97,6 +99,29 @@ struct LightmapTexel {
   uint32_t object = 0;  // index into the bake's objects
 };
 
+/* An atlas laid out for `objects` (those with want_lightmap): each object's chart sized from its world
+ * area x texels_per_unit x scale, shelf-packed into pages of at most max_size, its entry (tri_uv, page,
+ * hash) and the texels its triangles cover. The baker's first step, and the realtime lightmaps' (task
+ * 0016) whole layout. `uv_cache` (optional, by object id) keeps unwrapped UVs between calls: an object
+ * whose mesh and chart size are unchanged isn't unwrapped again. */
+struct LightmapLayout {
+  LightingData data;  // pages sized and zeroed, entries filled
+  std::vector<LightmapTexel> texels;
+  std::vector<std::vector<uint8_t>> covered;  // per page: which texels a chart covers
+  std::vector<std::vector<int32_t>> owner;    // per page: the object owning a texel (-1 none)
+};
+struct LightmapUvCache {
+  struct Entry {
+    uint64_t key = 0;
+    std::vector<Vec2> uv;
+    double fill = 0;
+    int res = 0;  // the chart size those UVs were laid out for
+  };
+  std::map<uint64_t, Entry> by_object;
+};
+void lightmap_layout(const std::vector<BakeObject> &objects, const BakeSettings &settings, LightmapLayout &out,
+                     LightmapUvCache *uv_cache = nullptr);
+
 class Lightmapper {
  public:
   /* Lays out the atlas and finds the texels. Lights of mode Realtime are left out. */
@@ -113,6 +138,9 @@ class Lightmapper {
   LightingData take_result();
   /* For tests and stress: texels, rays. */
   uint64_t rays() const { return rays_; }
+  /* Task 0018: texels whose indirect light the GPU gathered, and why it stopped (empty: it didn't). */
+  size_t gpu_texels() const { return gpu_texels_; }
+  const std::string &gpu_error() const { return gpu_error_; }
 
  private:
   bool active_ = false;
@@ -130,7 +158,9 @@ class Lightmapper {
   LightingData out_;
   std::vector<std::vector<uint8_t>> covered_;  // per page: which texels a chart covers
   std::vector<std::vector<int32_t>> owner_;    // per page: the object owning a texel (-1 none)
-  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed);
+  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true);
+  size_t gpu_texels_ = 0;
+  std::string gpu_error_;
   void finish();
 };
 

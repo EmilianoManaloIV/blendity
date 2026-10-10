@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -39,6 +40,10 @@ std::string status() { return "GPU rendering: not built (needs Blender's vulkan 
 void prewarm() {}
 std::unique_ptr<Renderer> Renderer::create(int, bool, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
+  return nullptr;
+}
+std::unique_ptr<Compute> Compute::create(int, const std::string &, std::string *error) {
+  if (error) *error = "this build has no GPU compute";
   return nullptr;
 }
 
@@ -506,6 +511,27 @@ class VulkanRenderer final : public Renderer {
     normal_depth.assign(p + pixels_ * 8, p + pixels_ * 12);
   }
 
+  bool set_points(const float *data, size_t floats, std::string *err) override {
+    const size_t bytes = floats * 4;
+    if (!bufs_[2].buf || bytes > bufs_[2].size) {
+      if (err) *err = "bake points don't fit";
+      return false;
+    }
+    Buffer staging;
+    if (!make_host_buffer(staging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+      if (err) *err = info_.name + ": out of memory for the bake points";
+      return false;
+    }
+    std::memcpy(staging.mapped, data, bytes);
+    begin();
+    VkBufferCopy c{0, 0, bytes};
+    f_.vkCmdCopyBuffer(cmd_, staging.buf, bufs_[2].buf, 1, &c);
+    const bool ok = submit_wait();
+    free_buffer(staging);
+    if (!ok && err) *err = info_.name + ": the GPU stopped responding";
+    return ok;
+  }
+
   const DeviceInfo &info() const override { return info_; }
   bool using_hardware_rt() const override { return rt_; }
 
@@ -879,6 +905,341 @@ std::unique_ptr<Renderer> Renderer::create(int index, bool hardware_rt, std::str
   auto r = std::make_unique<VulkanRenderer>();
   if (!r->init(index, hardware_rt, error)) return nullptr;
   return r;
+}
+
+/* ===================================================================== */
+/* General compute (task 0018)                                            */
+/* ===================================================================== */
+
+namespace {
+
+/* GLSL to SPIR-V, cached in memory per source and on disk like the path tracer's kernel. */
+std::vector<uint32_t> compile_compute(const std::string &src, std::string *error) {
+  static std::mutex &m = *new std::mutex;
+  static std::map<uint64_t, std::vector<uint32_t>> &mem = *new std::map<uint64_t, std::vector<uint32_t>>;
+  uint64_t key = 1469598103934665603ull;
+  for (char c : src) key = (key ^ (uint8_t)c) * 1099511628211ull;
+  const char *opts = "compute v1 vk1.2 spv1.4 performance";
+  for (const char *p = opts; *p; p++) key = (key ^ (uint8_t)*p) * 1099511628211ull;
+  std::lock_guard<std::mutex> lock(m);
+  std::vector<uint32_t> &out = mem[key];
+  if (!out.empty()) return out;
+  const std::string path = kernel_cache_path(key);
+  std::string bytes;
+  if (fs::read_file(path, bytes) && bytes.size() >= 8 && bytes.size() % 4 == 0) {
+    uint32_t magic, trailer;
+    std::memcpy(&magic, bytes.data(), 4);
+    std::memcpy(&trailer, bytes.data() + bytes.size() - 4, 4);
+    if (magic == 0x07230203u && trailer == (uint32_t)key) {
+      out.resize(bytes.size() / 4 - 1);
+      std::memcpy(out.data(), bytes.data(), out.size() * 4);
+      return out;
+    }
+  }
+  shaderc_compiler_t c = shaderc_compiler_initialize();
+  shaderc_compile_options_t o = shaderc_compile_options_initialize();
+  shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
+  shaderc_compile_options_set_target_spirv(o, shaderc_spirv_version_1_4);
+  shaderc_compile_options_set_optimization_level(o, shaderc_optimization_level_performance);
+  shaderc_compilation_result_t r = shaderc_compile_into_spv(c, src.data(), src.size(), shaderc_compute_shader, "compute.comp", "main", o);
+  if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
+    if (error) *error = std::string("GPU compute kernel failed to compile: ") + shaderc_result_get_error_message(r);
+  }
+  else {
+    const size_t n = shaderc_result_get_length(r) / 4;
+    out.resize(n);
+    std::memcpy(out.data(), shaderc_result_get_bytes(r), n * 4);
+    std::string file(reinterpret_cast<const char *>(out.data()), n * 4);
+    const uint32_t trailer = (uint32_t)key;
+    file.append(reinterpret_cast<const char *>(&trailer), 4);
+    fs::write_file(path, file);
+  }
+  shaderc_result_release(r);
+  shaderc_compile_options_release(o);
+  shaderc_compiler_release(c);
+  std::vector<uint32_t> copy = out;
+  if (out.empty()) mem.erase(key);
+  return copy;
+}
+
+class VulkanCompute final : public Compute {
+ public:
+  ~VulkanCompute() override {
+    if (!dev_) return;
+    f_.vkDeviceWaitIdle(dev_);
+    for (Buffer &b : bufs_) free_buffer(b);
+    free_buffer(staging_);
+    free_buffer(readback_);
+    if (pipeline_) f_.vkDestroyPipeline(dev_, pipeline_, nullptr);
+    if (layout_) f_.vkDestroyPipelineLayout(dev_, layout_, nullptr);
+    if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
+    if (set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, set_layout_, nullptr);
+    if (fence_) f_.vkDestroyFence(dev_, fence_, nullptr);
+    if (pool_) f_.vkDestroyCommandPool(dev_, pool_, nullptr);
+    f_.vkDestroyDevice(dev_, nullptr);
+  }
+
+  bool init(int index, const std::string &glsl, std::string *err) {
+    VkGlobal &g = G();
+    info_ = g.infos[(size_t)index];
+    pd_ = g.phys[(size_t)index];
+    g.f.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
+    uint32_t qn = 0;
+    g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
+    std::vector<VkQueueFamilyProperties> qs(qn);
+    g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, qs.data());
+    qfam_ = UINT32_MAX;
+    for (uint32_t i = 0; i < qn && qfam_ == UINT32_MAX; i++)
+      if ((qs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(qs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) qfam_ = i;
+    for (uint32_t i = 0; i < qn && qfam_ == UINT32_MAX; i++)
+      if (qs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) qfam_ = i;
+    if (qfam_ == UINT32_MAX) {
+      if (err) *err = info_.name + " has no compute queue";
+      return false;
+    }
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    qci.queueFamilyIndex = qfam_;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &prio;
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    if (g.f.vkCreateDevice(pd_, &dci, nullptr, &dev_) != VK_SUCCESS) {
+      if (err) *err = "could not open " + info_.name;
+      dev_ = VK_NULL_HANDLE;
+      return false;
+    }
+#define BL_VK_LOAD_COMPUTE(name) f_.name = (PFN_##name)g.f.vkGetDeviceProcAddr(dev_, #name);
+    BL_VK_DEVICE(BL_VK_LOAD_COMPUTE)
+#undef BL_VK_LOAD_COMPUTE
+    f_.vkGetDeviceQueue(dev_, qfam_, 0, &queue_);
+    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pci.queueFamilyIndex = qfam_;
+    f_.vkCreateCommandPool(dev_, &pci, nullptr, &pool_);
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = pool_;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    f_.vkAllocateCommandBuffers(dev_, &cai, &cmd_);
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    f_.vkCreateFence(dev_, &fci, nullptr, &fence_);
+    /* The pipeline: 16 storage buffers and 128 bytes of push constants. */
+    std::vector<uint32_t> spv = compile_compute(glsl, err);
+    if (spv.empty()) return false;
+    VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    smi.codeSize = spv.size() * 4;
+    smi.pCode = spv.data();
+    VkShaderModule mod;
+    if (f_.vkCreateShaderModule(dev_, &smi, nullptr, &mod) != VK_SUCCESS) {
+      if (err) *err = "could not load the GPU compute kernel";
+      return false;
+    }
+    std::vector<VkDescriptorSetLayoutBinding> b;
+    for (uint32_t i = 0; i < 16; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+    VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dli.bindingCount = (uint32_t)b.size();
+    dli.pBindings = b.data();
+    f_.vkCreateDescriptorSetLayout(dev_, &dli, nullptr, &set_layout_);
+    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 128};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &set_layout_;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pcr;
+    f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
+    VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = mod;
+    cpi.stage.pName = "main";
+    cpi.layout = layout_;
+    const VkResult r = f_.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipeline_);
+    f_.vkDestroyShaderModule(dev_, mod, nullptr);
+    if (r != VK_SUCCESS) {
+      if (err) *err = "could not create the GPU compute pipeline";
+      pipeline_ = VK_NULL_HANDLE;
+      return false;
+    }
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16};
+    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.maxSets = 1;
+    dpi.poolSizeCount = 1;
+    dpi.pPoolSizes = &ps;
+    f_.vkCreateDescriptorPool(dev_, &dpi, nullptr, &dpool_);
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = dpool_;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &set_layout_;
+    f_.vkAllocateDescriptorSets(dev_, &dai, &set_);
+    /* Every binding gets a small buffer, so the set is always complete. */
+    for (int i = 0; i < 16; i++)
+      if (!grow(i, 16, err)) return false;
+    return true;
+  }
+
+  bool set(int binding, const void *data, size_t bytes, std::string *err) override {
+    if (binding < 0 || binding >= 16) return false;
+    if (!grow(binding, bytes, err)) return false;
+    if (!bytes) return true;
+    if (!staging_.buf || staging_.size < bytes) {
+      free_buffer(staging_);
+      if (!make_buffer(staging_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+        if (err) *err = info_.name + ": out of memory for an upload";
+        return false;
+      }
+    }
+    std::memcpy(staging_.mapped, data, bytes);
+    begin();
+    VkBufferCopy c{0, 0, bytes};
+    f_.vkCmdCopyBuffer(cmd_, staging_.buf, bufs_[binding].buf, 1, &c);
+    return submit_wait(err);
+  }
+  bool output(int binding, size_t bytes, std::string *err) override {
+    if (binding < 0 || binding >= 16 || !grow(binding, bytes, err)) return false;
+    begin();
+    f_.vkCmdFillBuffer(cmd_, bufs_[binding].buf, 0, VK_WHOLE_SIZE, 0);
+    return submit_wait(err);
+  }
+  bool run(uint32_t groups, const void *push, uint32_t push_bytes, std::string *err) override {
+    if (!pipeline_ || push_bytes > 128) return false;
+    begin();
+    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
+    if (push_bytes) f_.vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
+    f_.vkCmdDispatch(cmd_, std::max(1u, groups), 1, 1);
+    return submit_wait(err);
+  }
+  bool read(int binding, void *out, size_t bytes, std::string *err) override {
+    if (binding < 0 || binding >= 16 || bytes > bufs_[binding].size) {
+      if (err) *err = "read past the end of a GPU buffer";
+      return false;
+    }
+    if (!readback_.buf || readback_.size < bytes) {
+      free_buffer(readback_);
+      if (!make_buffer(readback_, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) &&
+          !make_buffer(readback_, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+        if (err) *err = info_.name + ": out of memory for a read-back";
+        return false;
+      }
+    }
+    begin();
+    VkBufferCopy c{0, 0, bytes};
+    f_.vkCmdCopyBuffer(cmd_, bufs_[binding].buf, readback_.buf, 1, &c);
+    if (!submit_wait(err)) return false;
+    std::memcpy(out, readback_.mapped, bytes);
+    return true;
+  }
+  const DeviceInfo &info() const override { return info_; }
+
+ private:
+  DeviceInfo info_;
+  VkPhysicalDevice pd_ = VK_NULL_HANDLE;
+  VkPhysicalDeviceMemoryProperties memprops_{};
+  VkDevice dev_ = VK_NULL_HANDLE;
+  DeviceFns f_;
+  uint32_t qfam_ = 0;
+  VkQueue queue_ = VK_NULL_HANDLE;
+  VkCommandPool pool_ = VK_NULL_HANDLE;
+  VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+  VkFence fence_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout layout_ = VK_NULL_HANDLE;
+  VkPipeline pipeline_ = VK_NULL_HANDLE;
+  VkDescriptorPool dpool_ = VK_NULL_HANDLE;
+  VkDescriptorSet set_ = VK_NULL_HANDLE;
+  Buffer bufs_[16], staging_, readback_;
+
+  uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
+    for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
+      if ((bits & (1u << i)) && (memprops_.memoryTypes[i].propertyFlags & want) == want) return i;
+    return UINT32_MAX;
+  }
+  bool make_buffer(Buffer &b, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props) {
+    size = std::max<VkDeviceSize>(size, 16);
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = size;
+    bi.usage = usage;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (f_.vkCreateBuffer(dev_, &bi, nullptr, &b.buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements req;
+    f_.vkGetBufferMemoryRequirements(dev_, b.buf, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = memory_type(req.memoryTypeBits, props);
+    if (ai.memoryTypeIndex == UINT32_MAX || f_.vkAllocateMemory(dev_, &ai, nullptr, &b.mem) != VK_SUCCESS) {
+      f_.vkDestroyBuffer(dev_, b.buf, nullptr);
+      b.buf = VK_NULL_HANDLE;
+      return false;
+    }
+    f_.vkBindBufferMemory(dev_, b.buf, b.mem, 0);
+    b.size = size;
+    if (props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) f_.vkMapMemory(dev_, b.mem, 0, VK_WHOLE_SIZE, 0, &b.mapped);
+    return true;
+  }
+  void free_buffer(Buffer &b) {
+    if (b.mapped) f_.vkUnmapMemory(dev_, b.mem);
+    if (b.buf) f_.vkDestroyBuffer(dev_, b.buf, nullptr);
+    if (b.mem) f_.vkFreeMemory(dev_, b.mem, nullptr);
+    b = Buffer{};
+  }
+  /* The binding's buffer holds at least `bytes` (a new one is bound to the set). */
+  bool grow(int binding, size_t bytes, std::string *err) {
+    Buffer &b = bufs_[binding];
+    if (b.buf && b.size >= bytes) return true;
+    f_.vkDeviceWaitIdle(dev_);
+    free_buffer(b);
+    const VkDeviceSize want = std::max<VkDeviceSize>(16, (VkDeviceSize)bytes + bytes / 4);  // room to grow
+    if (!make_buffer(b, want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      if (err) *err = strprintf("%s: out of GPU memory (%.1f MB buffer)", info_.name.c_str(), bytes / 1048576.0);
+      return false;
+    }
+    VkDescriptorBufferInfo bi{b.buf, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet ws{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    ws.dstSet = set_;
+    ws.dstBinding = (uint32_t)binding;
+    ws.descriptorCount = 1;
+    ws.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    ws.pBufferInfo = &bi;
+    f_.vkUpdateDescriptorSets(dev_, 1, &ws, 0, nullptr);
+    return true;
+  }
+  void begin() {
+    f_.vkResetCommandBuffer(cmd_, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    f_.vkBeginCommandBuffer(cmd_, &bi);
+  }
+  bool submit_wait(std::string *err) {
+    f_.vkEndCommandBuffer(cmd_);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd_;
+    f_.vkResetFences(dev_, 1, &fence_);
+    if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS ||
+        f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS) {
+      if (err) *err = info_.name + ": the GPU stopped responding";
+      return false;
+    }
+    return true;
+  }
+};
+
+}  // namespace
+
+std::unique_ptr<Compute> Compute::create(int index, const std::string &glsl, std::string *error) {
+  if (!available() || index < 0 || index >= (int)G().infos.size()) {
+    if (error) *error = "no such GPU";
+    return nullptr;
+  }
+  auto c = std::make_unique<VulkanCompute>();
+  if (!c->init(index, glsl, error)) return nullptr;
+  return c;
 }
 
 #endif

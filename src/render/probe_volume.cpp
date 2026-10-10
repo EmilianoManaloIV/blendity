@@ -6,7 +6,11 @@
 #include "../core/jobs.h"
 #include "lightmapper.h"
 #include "pathtracer.h"
+#include "voxel_gi_gpu.h"
 
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -18,6 +22,16 @@ namespace bl {
 namespace {
 const Vec3 kAxes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
 inline bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
+/* 1 / sqrt(x) for x > 0: the SSE estimate plus one Newton step (about 23 bits; the leak weight's only
+ * square root, eight per sample). */
+inline float inv_sqrt(float x) {
+#if defined(_M_X64) || defined(__x86_64__)
+  const float y = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(x)));
+  return y * (1.5f - 0.5f * x * y * y);
+#else
+  return 1.0f / std::sqrt(x);
+#endif
+}
 inline uint32_t hash32(uint32_t x) {
   x ^= x >> 16;
   x *= 0x7feb352du;
@@ -162,11 +176,22 @@ int ProbeVolumeData::find_brick(Vec3 p) const {
   return -1;
 }
 
-bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction) const {
-  const int b = find_brick(p);
+bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction, int *hint) const {
+  int b = -1;
+  if (hint && *hint >= 0 && (size_t)*hint < bricks.size()) {
+    /* Half-open, as the octree splits ([min, mid) and [mid, max)): a point inside is in no other brick. */
+    const ProbeBrick &h = bricks[(size_t)*hint];
+    const float side = 3.0f * h.spacing;
+    if (p.x >= h.min.x && p.y >= h.min.y && p.z >= h.min.z && p.x < h.min.x + side && p.y < h.min.y + side && p.z < h.min.z + side)
+      b = *hint;
+  }
+  if (b < 0) {
+    b = find_brick(p);
+    if (hint) *hint = b;
+  }
   if (b < 0) return false;
   const ProbeBrick &br = bricks[(size_t)b];
-  Vec3 l = (p - br.min) / br.spacing;
+  const Vec3 l = (p - br.min) / br.spacing;
   int i0[3];
   float t[3];
   for (int k = 0; k < 3; k++) {
@@ -174,44 +199,54 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
     i0[k] = std::min(2, (int)v);
     t[k] = v - i0[k];
   }
+  const float wxs[2] = {1 - t[0], t[0]}, wys[2] = {1 - t[1], t[1]}, wzs[2] = {1 - t[2], t[2]};
+  static const uint32_t kCorner[8] = {0, 1, 4, 5, 16, 17, 20, 21};  // x + 4 y + 16 z of the cell's corners
+  const uint32_t base = br.first + (uint32_t)(i0[0] + 4 * i0[1] + 16 * i0[2]);
+  /* The cube's axes facing n and their n-squared weights are the same at every corner (ProbeCube::eval),
+   * and the sky's light is linear in the shares: both are applied once, after the sum. */
+  const int ax = n.x >= 0 ? 0 : 1, ay = n.y >= 0 ? 2 : 3, az = n.z >= 0 ? 4 : 5;
+  const float nx2 = n.x * n.x, ny2 = n.y * n.y, nz2 = n.z * n.z;
+  const ProbeCube *cubes = use_live ? live.data() : baked.data();
   Vec3 acc(0.0f);
-  float wsum = 0.0f;
+  float sky_acc = 0.0f, wsum = 0.0f;
+  int nvalid = 0;
+  uint32_t corner[8];
   for (int c = 0; c < 8; c++) {
-    const int x = i0[0] + (c & 1), y = i0[1] + ((c >> 1) & 1), z = i0[2] + ((c >> 2) & 1);
-    const uint32_t i = br.first + x + 4 * y + 16 * z;
+    const uint32_t i = base + kCorner[c];
     if (!valid[i]) continue;
-    float w = (c & 1 ? t[0] : 1 - t[0]) * ((c >> 1) & 1 ? t[1] : 1 - t[1]) * ((c >> 2) & 1 ? t[2] : 1 - t[2]);
-    if (w <= 0.0f) continue;
+    corner[nvalid++] = i;
+    float w = wxs[c & 1] * wys[(c >> 1) & 1] * wzs[c >> 2];
     /* Leak reduction (APV's normal-based): a probe behind the surface being shaded (on the other side of a
      * wall, or moved past one by the virtual offset) sees other light; it counts for (almost) nothing. */
-    const Vec3 to = position[i] - p;
-    const float dl = length(to);
-    if (leak_reduction && dl > 1e-6f) {
-      const float f = std::max(0.0f, std::min(1.0f, dot(n, to / dl) * 0.5f + 0.5f));
-      w *= std::max(1e-4f, f * f * f);
+    if (leak_reduction) {
+      const Vec3 to = position[i] - p;
+      const float dl2 = dot(to, to);
+      if (dl2 > 1e-12f) {
+        const float f = std::max(0.0f, std::min(1.0f, dot(n, to) * inv_sqrt(dl2) * 0.5f + 0.5f));
+        w *= std::max(1e-4f, f * f * f);
+      }
     }
-    const ProbeCube &cube = use_live && live_ok[i] ? live[i] : baked[i];
-    acc += cube.eval(n, sky_irradiance) * w;
+    const ProbeCube &cube = use_live && !live_ok[i] ? baked[i] : cubes[i];
+    acc += (cube.bounce[ax] * nx2 + cube.bounce[ay] * ny2 + cube.bounce[az] * nz2) * w;
+    sky_acc += (cube.sky[ax] * nx2 + cube.sky[ay] * ny2 + cube.sky[az] * nz2) * w;
     wsum += w;
   }
   if (wsum < 1e-3f) {
     /* Every valid corner is behind the surface (leak reduction left almost no weight): their values, plainly
      * averaged, rather than nothing. No valid corner at all: nothing to give. */
+    if (nvalid == 0) return false;
     acc = Vec3(0.0f);
-    int k = 0;
-    for (int c = 0; c < 8; c++) {
-      const int x = i0[0] + (c & 1), y = i0[1] + ((c >> 1) & 1), z = i0[2] + ((c >> 2) & 1);
-      const uint32_t i = br.first + x + 4 * y + 16 * z;
-      if (!valid[i]) continue;
-      const ProbeCube &cube = use_live && live_ok[i] ? live[i] : baked[i];
-      acc += cube.eval(n, sky_irradiance);
-      k++;
+    sky_acc = 0.0f;
+    for (int k = 0; k < nvalid; k++) {
+      const uint32_t i = corner[k];
+      const ProbeCube &cube = use_live && !live_ok[i] ? baked[i] : cubes[i];
+      acc += cube.bounce[ax] * nx2 + cube.bounce[ay] * ny2 + cube.bounce[az] * nz2;
+      sky_acc += cube.sky[ax] * nx2 + cube.sky[ay] * ny2 + cube.sky[az] * nz2;
     }
-    if (k == 0) return false;
-    out = acc / (float)k;
-    return finite3(out);
+    wsum = (float)nvalid;
   }
-  out = acc / wsum;
+  const float inv = 1.0f / wsum;
+  out = acc * inv + sky_irradiance * (sky_acc * inv);
   return finite3(out);
 }
 
@@ -258,12 +293,35 @@ void probe_validate(ProbeVolumeData &d, const PathTracer &pt, int rays) {
 }
 
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start, size_t count,
-                float indirect_intensity) {
+                float indirect_intensity, int gpu_device, std::string *gpu_error) {
   samples = std::max(6, std::min(65536, samples));
   const float ii = finite_bits(indirect_intensity) ? std::max(0.0f, std::min(100.0f, indirect_intensity)) : 1.0f;
   const size_t n = d.position.size();
   if (start >= n) return;
   count = std::min(count, n - start);
+  /* On a GPU (task 0018): every valid probe's rays traced there, one path each, in the CPU's directions. */
+  std::vector<Vec3> g_out;
+  std::vector<float> g_hit;
+  std::vector<size_t> g_first(count, SIZE_MAX);
+  if (gpu_device >= 0 && bounces > 0) {
+    std::vector<Vec3> origins, dirs;
+    for (size_t k = 0; k < count; k++) {
+      const size_t i = start + k;
+      if (!d.valid[i]) continue;
+      g_first[k] = origins.size();
+      uint32_t rng = hash32((uint32_t)i * 2654435761u + 7u);
+      for (int s = 0; s < samples; s++) {
+        origins.push_back(d.position[i]);
+        dirs.push_back(sphere_dir(s, samples, rnd01(rng) * 6.2831853f));
+      }
+    }
+    std::string err;
+    if (!pt.gpu_gather(gpu_device, 2, origins, dirs, 1, g_out, &g_hit, &err) || g_out.size() != origins.size()) {
+      if (gpu_error) *gpu_error = err.empty() ? "the GPU gather failed" : err;
+      g_out.clear();
+    }
+  }
+  const bool on_gpu = !g_out.empty();
   JobSystem::global().parallel_for((int64_t)count, 16, [&](int64_t a, int64_t b) {
     for (int64_t i = (int64_t)start + a; i < (int64_t)start + b; i++) {
       ProbeCube &c = d.baked[(size_t)i];
@@ -273,15 +331,24 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
       uint32_t rng = hash32((uint32_t)i * 2654435761u + 7u);
       std::array<float, 6> wsum{};
       uint64_t rays = 0;
+      const size_t g0 = g_first[(size_t)(i - (int64_t)start)];
       for (int k = 0; k < samples; k++) {
         const Vec3 dir = sphere_dir(k, samples, rnd01(rng) * 6.2831853f);
-        PathTracer::Hit h;
-        const bool hit = pt.intersect({p, dir}, h);
+        bool hit;
         Vec3 L(0.0f);
-        if (hit && bounces > 0) {
-          uint32_t prng = rng ^ (uint32_t)k * 0x9E3779B9u;
-          L = pt.incoming_radiance({p, dir}, prng, rays);
+        if (on_gpu) {
+          hit = g_hit[g0 + (size_t)k] > 0.5f;
+          if (hit) L = g_out[g0 + (size_t)k];
           if (!finite3(L)) L = Vec3(0.0f);
+        }
+        else {
+          PathTracer::Hit h;
+          hit = pt.intersect({p, dir}, h);
+          if (hit && bounces > 0) {
+            uint32_t prng = rng ^ (uint32_t)k * 0x9E3779B9u;
+            L = pt.incoming_radiance({p, dir}, prng, rays);
+            if (!finite3(L)) L = Vec3(0.0f);
+          }
         }
         for (int ax = 0; ax < 6; ax++) {
           const float w = std::max(0.0f, dot(dir, kAxes[ax]));
@@ -345,19 +412,10 @@ void probe_dilate(ProbeVolumeData &d) {
         }
 }
 
-size_t probe_live_update(ProbeVolumeData &d, const VoxelGrid &g, const Rsm *rsm, const Environment &env, const GiParams &prm, size_t start,
-                         size_t budget) {
-  const size_t n = d.position.size();
-  if (n == 0 || !g.valid()) return 0;
-  start %= n;
-  const size_t count = std::min(budget, n);
-  JobSystem::global().parallel_for((int64_t)count, 8, [&](int64_t a, int64_t b) {
-    for (int64_t k = a; k < b; k++) {
-      const size_t i = (start + (size_t)k) % n;
-      ProbeCube c;
-      /* A probe gathers from where it is, with no offset (it floats in free space). One inside a solid voxel
-       * (a voxel is coarse: a probe just above a floor can share the floor's voxel) moves to the centre of
-       * the nearest free voxel, up first, so it doesn't look through the surface. */
+/* A probe gathers from where it is, with no offset (it floats in free space). One inside a solid voxel (a
+ * voxel is coarse: a probe just above a floor can share the floor's voxel) moves to the centre of the
+ * nearest free voxel, up first, so it doesn't look through the surface. */
+static Vec3 probe_gather_point(const ProbeVolumeData &d, const VoxelGrid &g, size_t i) {
       Vec3 p = d.position[i];
       const Vec3 gp = g.to_grid(p);
       /* Clamped before the cast: a probe far outside the grid (a huge volume) is beyond int. */
@@ -375,6 +433,44 @@ size_t probe_live_update(ProbeVolumeData &d, const VoxelGrid &g, const Rsm *rsm,
             break;
           }
       }
+      return p;
+}
+
+size_t probe_live_update(ProbeVolumeData &d, const VoxelGrid &g, const Rsm *rsm, const Environment &env, const GiParams &prm, size_t start,
+                         size_t budget, VoxelGiGpu *gpu, std::string *gpu_error) {
+  const size_t n = d.position.size();
+  if (n == 0 || !g.valid()) return 0;
+  start %= n;
+  const size_t count = std::min(budget, n);
+  if (gpu && gpu->ready()) {
+    /* Six gathers a probe, all at once. */
+    std::vector<GiQuery> qs(count * 6);
+    JobSystem::global().parallel_for((int64_t)count, 64, [&](int64_t a, int64_t b) {
+      for (int64_t k = a; k < b; k++) {
+        const size_t i = (start + (size_t)k) % n;
+        const Vec3 p = probe_gather_point(d, g, i);
+        for (int ax = 0; ax < 6; ax++) qs[(size_t)k * 6 + ax] = {p, kAxes[ax], (int)((i + (size_t)ax) & 15), 0.0f};
+      }
+    });
+    std::vector<GiSample> out;
+    std::string err;
+    if (gpu->gather(qs, prm, out, &err) && out.size() == qs.size()) {
+      for (size_t k = 0; k < count; k++) {
+        const size_t i = (start + k) % n;
+        ProbeCube c;
+        for (int ax = 0; ax < 6; ax++) c.bounce[ax] = out[k * 6 + ax].bounce, c.sky[ax] = out[k * 6 + ax].sky;
+        d.live[i] = c;
+        d.live_ok[i] = 1;
+      }
+      return (start + count) % n;
+    }
+    if (gpu_error) *gpu_error = err.empty() ? "the GPU gather failed" : err;
+  }
+  JobSystem::global().parallel_for((int64_t)count, 8, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++) {
+      const size_t i = (start + (size_t)k) % n;
+      ProbeCube c;
+      const Vec3 p = probe_gather_point(d, g, i);
       for (int ax = 0; ax < 6; ax++) {
         const GiSample s = voxel_gi_gather(g, rsm, env, p, kAxes[ax], prm, (int)((i + (size_t)ax) & 15), 0.0f);
         c.bounce[ax] = s.bounce;

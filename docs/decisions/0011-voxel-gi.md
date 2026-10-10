@@ -74,6 +74,35 @@ rasterized on the CPU, and CI has no GPU.
   - big scenes get coarse voxels (a camera-centred clipmap is a follow-up);
   - see-through surfaces keep today's ambient.
 - **Realtime lightmaps (per texel, progressive) are not built.** The per-pixel pass covers the same
-  cases. They remain an option if per-frame cost matters more than latency.
+  cases. They remain an option if per-frame cost matters more than latency. (Superseded by the
+  amendment below.)
 - **The RSM holds only the sun's reflected light:** emissive surfaces don't bounce.
 - **Probe volumes (task 0014) can gather at probe positions** with the same `voxel_gi_gather`.
+
+## Amendment (2026-10-10, task 0016): realtime lightmaps first, per pixel as the fallback
+The user asked for the faster option first, with a fallback, and reported that GI looked blocky in the
+Scene view: the per-pixel pass traces at ¼ of the screen, so a zoomed-out object is only a few cells
+tall.
+
+- **Realtime lightmaps** (`render/realtime_lightmap.*`): Contribute GI objects with Receive GI =
+  Lightmaps get a chart at **Realtime Resolution** (2 texels per metre by default, as Unity's).
+  - **Layout:** the baked lightmaps' layout (`lightmap_layout`, now shared with the baker), with
+    unwrapped UVs kept per object. Moving an object lays out again in milliseconds.
+  - **Gather:** each texel gathers through the voxel grid and the RSM with twice the ray setting (at
+    least 16). Slices of 16,384 texels a frame, after the views. The pass restarts when the grid, the
+    sun, the world or the GI settings change.
+  - **Publish:** a finished pass is blurred within its charts (by owner and facing), dilated and
+    published. The last published maps stay up meanwhile.
+  - **Two caches:** one per kind of view, as the voxel grids.
+- **Shading:** a mapped surface reads its bounce and sky share bilinearly, like a baked map, and the
+  per-pixel pass neither traces nor blurs it.
+  - **Orbit cost:** a 1080p orbit reading maps costs +1–3 ms over no GI, against +12–14 ms traced
+    (stress `vgi`).
+  - **Look:** the same from any distance.
+- **Fallback, the per-pixel pass,** for objects that don't contribute GI, objects whose map hasn't been
+  published yet, and Realtime Resolution 0.
+- **Not done** (the spec's "voxel step fixes"): ray-origin jitter and an occlusion fade near the start.
+  - **Mapped surfaces don't need them:** the texel blur and bilinear filter smooth the steps (a test
+    checks the sky share up a wall).
+  - **The per-pixel fallback** keeps its look. Probes and maps would shift if the shared gather
+    changed.

@@ -52,7 +52,7 @@ layout(std430, binding = 0) readonly buffer Params {
   ivec4 size;       // width, height, max bounces, instance count
   vec4 settings;    // clamp indirect, sun cos max, point radius, total mesh-light power
   ivec4 counts;     // lights, mesh lights, see-through materials present, TLAS node count
-  ivec4 env_i;      // mode, map texture (-1 none), -, -
+  ivec4 env_i;      // mode, map texture (-1 none), bake mode (task 0018: 0 camera, 1 hemisphere, 2 direction), bake points
   vec4 env_f;       // strength, rotation (degrees)
   vec4 env_sky; vec4 env_equator; vec4 env_ground; vec4 env_color;
   vec4 lens;        // aperture radius, focus distance, blades, blade rotation (thin lens)
@@ -687,6 +687,28 @@ void main() {
   int W = P.size.x, H = P.size.y;
   if (px.x >= W || px.y >= H) return;
   int s = PC.sample_index;
+  if (P.env_i.z != 0) {
+    /* Baking (task 0018): one point per invocation, its origin in Aux [0, n) and its normal (mode 1:
+     * cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
+     * arriving there adds up in Accum; w counts the paths whose first ray hit something. */
+    int i = px.y * W + px.x;
+    if (i >= P.env_i.w) return;
+    vec3 o = aux[i].xyz, nd = aux[W * H + i].xyz;
+    uint brng = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + uint(s) * 6271u + 7u);  // cam_pos.w: the batch's first point
+    vec3 d = nd;
+    if (P.env_i.z == 1) {
+      float r1 = rnd(brng), r2 = rnd(brng), r = sqrt(r1), phi = 6.28318530718 * r2;
+      vec3 t, b;
+      onb(nd, t, b);
+      d = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
+    }
+    vec3 balb, bnrm;
+    float bdep;
+    vec3 bc = trace(o, d, brng, balb, bnrm, bdep);
+    if (any(isnan(bc)) || any(isinf(bc))) bc = vec3(0.0);
+    accum[i] += vec4(bc, dot(bnrm, bnrm) > 0.25 ? 1.0 : 0.0);
+    return;
+  }
   uint rng = pcg_hash(uint(px.y * W + px.x) * 9781u + uint(s) * 6271u + 1u);
   float jx = rnd(rng), jy = rnd(rng);
   float nx = 2.0 * (float(px.x) + jx) / float(W) - 1.0, ny = 1.0 - 2.0 * (float(px.y) + jy) / float(H);

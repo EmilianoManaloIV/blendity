@@ -401,7 +401,7 @@ Blender has two main engines: EEVEE rasterizes triangles in real time; Cycles tr
 | Wireframe | edges only | Wireframe shading | Wireframe draw mode
 | Solid | Gouraud, no materials | Solid shading | Shaded (unlit-ish)
 | Shaded | deferred PBR + shadows + environment | Material Preview / EEVEE | Shaded (URP)
-| Rendered | progressive path tracing | Rendered (Cycles) | HDRP Path Tracing
+| (path tracing) | F12, the Render window, a Rendered Camera Preview | Rendered (Cycles) | HDRP Path Tracing
 # Deferred shading with a visibility buffer
 The rasterizer first stores, per pixel, which object and triangle is visible. A second pass shades each pixel exactly once from that buffer, so overdraw costs nothing in shading. Sun shadows come from a shadow map: the scene's depth seen from the light. A point is in shadow if something sits closer to the light. The 3x3 PCF filter softens the edge.
 > [GEA2] 11.4 Programming the 3D Graphics Pipeline, 12.5 Lighting with Triangle Rasterization
@@ -417,7 +417,7 @@ Rays are tested against a two-level BVH: one tree per unique mesh in object spac
 F12 renders the Main Camera at the resolution in the Render window (F11), using the engine chosen there. Save Render writes PNG, JPEG or Radiance HDR to Renders/.
 ? Why does the path-traced view start noisy and get cleaner? | Each pixel is a Monte Carlo estimate. The error falls as 1/sqrt(samples), so 4x the samples halves the noise.
 ! cmd:shading shaded | Switch the Scene view to Shaded
-! cmd:shading rendered | Switch the Scene view to Rendered (path traced)
+! cmd:camerapreview rendered | Path trace the selected camera's preview
 ! cmd:render; window Render | Render the Main Camera (F12)
 )"},
     {"Light, Sky and Tone Mapping", "World settings, HDRIs and view transforms", R"(
@@ -440,6 +440,27 @@ Scene light is unbounded but a screen shows 0 to 1. A view transform compresses 
 ? Why render in linear light and tone map at the end? | Light adds linearly. Doing the lighting maths in sRGB values gives wrong falloff and blending; the curve is only for display.
 ! cmd:world sky; shading shaded | Use the physical sky
 ! cmd:world gradient | Back to the gradient
+)"},
+    {"Baked and Realtime Lighting", "Lightmaps, light modes, probe volumes and voxel GI", R"(
+Light that bounces between surfaces is either baked ahead of time with the path tracer, or computed live by Realtime GI. Baked light costs about 1 ms a frame to show; live GI costs time whenever a view re-renders. The Lighting window (Window > Rendering > Lighting) holds both, as in Unity.
+| Piece | Blendity | Unity | Blender
+| Static objects | MeshRenderer > Contribute GI | Contribute Global Illumination | (none: Cycles traces everything)
+| Light mode | Light > Mode: Realtime, Mixed, Baked | Light > Mode | (none)
+| Bake | Lighting > Generate Lighting | Generate Lighting | Bake (Cycles: Render > Bake)
+| Moving objects | Probe Volume component | Adaptive Probe Volumes | Light Probe Volume (EEVEE)
+| Live bounce | Realtime GI (voxel based) | Realtime GI (Enlighten) | (EEVEE: screen-space GI)
+# A scene that doesn't lag
+Tick Contribute GI on everything that never moves, make the sun Mixed (or Baked), press Generate Lighting and turn on Auto Generate. A Probe Volume lights moving objects from the bake. With a current bake, Realtime GI is idle: the Lighting window's "Live GI:" line says so.
+# Realtime lightmaps, and why GI can look blocky
+Contribute GI objects get realtime lightmaps (Realtime Resolution, 2 texels per metre as in Unity): voxel GI lights them a slice at a time when the lighting changes, so moving the camera traces nothing and they look the same from any distance. Other objects are traced at a quarter (or half) of the screen's pixels and smoothed; zoomed out, an object is only a few of those cells tall, so they can look blocky. Contribute GI or GI Resolution = Half fixes that; a bake has no blocks at all.
+> Thiedemann, Henrich, Grosch & Müller (2011) Voxel-based Global Illumination. I3D.
+> [GEA2] 12.6 Lighting with Stochastic Ray Tracing
+@ blender/source/blender/draw/engines/eevee  (light probes)
+? Why can't a moving object have a lightmap? | A lightmap stores light for one place. Once the object moves, the light it stored belongs somewhere else; probes store light in space instead, so anything can read it wherever it goes.
+! cmd:window Lighting | Open the Lighting window
+! cmd:select Plane; set MeshRenderer.ContributeGI true | Make the Plane static (Contribute GI)
+! cmd:bake start | Generate Lighting
+! cmd:set Lighting.RealtimeGI true; set Lighting.GIResolution 0 | Realtime GI at Half resolution
 )"},
     {"Advanced Modeling Tools", "Edge loops, loop cuts and generative modifiers", R"(
 Edge mode (press 2) selects edges. An edge loop is a chain of edges running straight through 4-way vertices, around a cylinder or across a grid. Loops are how modellers add detail: you cut a new loop exactly where a bend needs geometry.

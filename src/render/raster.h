@@ -118,6 +118,12 @@ struct DrawItem {
   const Lightmap *lightmap = nullptr;
   const std::vector<Vec2> *lightmap_uv = nullptr;
   bool use_probes = false;  // takes its indirect light from the probe volume (no lightmap)
+  /* Realtime lightmaps (task 0016): voxel GI's bounce and sky share per texel, with their UVs (3 per
+   * triangle). Set: the per-pixel GI pass reads these instead of tracing. realtime_lm: the editor wants
+   * one for this item (Contribute GI, Receive GI = Lightmaps). */
+  const Lightmap *rt_bounce = nullptr, *rt_sky = nullptr;
+  const std::vector<Vec2> *rt_uv = nullptr;
+  bool realtime_lm = false;
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
 };
 
@@ -151,6 +157,8 @@ struct RasterStats {
   size_t tris_submitted = 0, tris_rasterized = 0;
   double ms_vertex = 0, ms_setup = 0, ms_bin = 0, ms_raster = 0, ms_shade = 0, ms_total = 0;
   double ms_clear = 0;  // clearing the planes (not in ms_total, which is flush())
+  double ms_gi = 0;     // voxel GI's per-pixel pass: tracing and blurring the receivers (part of ms_shade)
+  size_t gi_traced = 0; // receivers the per-pixel pass traced (realtime lightmaps spare theirs)
 };
 
 /* Color plus depth, id and visibility planes. color may point into a larger

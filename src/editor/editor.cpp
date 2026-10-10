@@ -168,9 +168,9 @@ void Editor::init_headless(int width, int height) {
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
-  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || seq_.active ||
+  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
+         seq_.active ||
          !deferred_.empty() ||
-         (shading_ == Shading::Rendered && !pilot_cam_ && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
 
@@ -464,6 +464,7 @@ void Editor::frame(std::vector<Event> &events) {
 
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
+  update_realtime_lightmaps();
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
@@ -2695,7 +2696,7 @@ void Editor::run_console_command(const std::string &line) {
     mark_changed("Render Engine");
   }
   else if (c == "samples") {
-    scene_->render.samples = scene_->render.viewport_samples = std::max(1, std::atoi(arg(1, "64").c_str()));
+    scene_->render.samples = std::max(1, std::atoi(arg(1, "64").c_str()));
   }
   else if (c == "texture") {
     std::string p = t.size() > 1 ? line.substr(line.find(t[1])) : "generated:UV Grid";
@@ -2738,10 +2739,12 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "saverender") save_render();
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));
+    if (w == "rendered")
+      Log::warn("shading: the Scene view has no Rendered mode (too slow to edit in); showing Shaded. Path trace with F12, the "
+                "Render window or `camerapreview rendered`.");
     shading_ = w == "wire" || w == "wireframe" ? Shading::Wireframe
                : w == "both"                      ? Shading::ShadedWireframe
                : w == "solid"                     ? Shading::Solid
-               : w == "rendered"                  ? Shading::Rendered
                                                    : Shading::Shaded;
   }
   else if (c == "filter") {

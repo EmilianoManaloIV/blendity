@@ -2,6 +2,113 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-10 (round 40): lighting without lag: baked GI that costs nothing live, realtime lightmaps, GI and baking on the GPU, no path-traced Scene view (tasks 0016-0019)
+
+**Asked:**
+- remove the Scene view's path-traced Rendered mode (too slow);
+- the approved tasks 0016–0018: realtime lightmaps first with a fallback, baked lighting with no lag,
+  and GI, probes and baking on the GPU where it's faster.
+
+**Added**
+- **Realtime lightmaps (0016):** Contribute GI objects get a low-resolution map (Realtime Resolution, 2
+  texels per metre by default).
+  - Voxel GI lights it a slice at a time when the lighting changes, and it's read like a baked map.
+  - **Orbit cost:** +1–3 ms at 1080p over no GI, against +12–14 ms traced per pixel.
+  - **Look:** the same at any zoom (the Scene view's blocks are gone on mapped objects).
+  - **Fallback:** objects without a map keep the per-pixel pass.
+- **No live work once baked (0017):** Realtime GI traces only what a bake doesn't hold.
+  - **Cases:** nothing baked, the scene changed since the bake, or a Realtime Directional Light.
+  - **Otherwise idle:** it traces nothing, and the views equal Realtime GI off.
+  - **Status:** the Lighting window's "Live GI:" line says which case applies, and the per-pixel cost.
+- **Cheaper probe sampling (0017):** +4 ms at 1080p with every object probe-lit, from +15 ms (a brick
+  hint, the cube's axes once per sample, one sample per 2 × 2 pixel quad).
+- **GI on the GPU (0018, ADR 0014):** a Vulkan compute kernel for voxel GI's gather.
+  - **What uses it:** realtime lightmaps and live probes. **GI Device** (Auto / CPU / GPU) chooses.
+  - **Speed:** 4–8.6× faster on the RTX 4070 SUPER, 3.2–6.2× on the 3060 Ti. A whole pass fits in a
+    frame.
+- **Baking on the GPU (0018):** with Render > Device = GPU Compute, Generate Lighting traces lightmap
+  texels and probe rays on the path tracer's kernel.
+  - **Speed:** 8.6× (4070 SUPER) and 6× (3060 Ti) on the tracing.
+  - **Agreement:** totals match the CPU's within 0.01%.
+- **A lighting guide** (`docs/guides/lighting.md`) and a Learn lesson, "Baked and Realtime Lighting".
+
+**Removed**
+- **The Scene view's Rendered (path-traced) mode (0019).** `shading rendered` warns and shows Shaded.
+  Path tracing stays in F12, the Render window and the Camera Preview's Rendered toggle.
+
+**Fixed (found while building it)**
+- **A small object's realtime lightmap had a black patch:** big texels gathering from inside the floor
+  saw nothing. They now take their chart neighbours' light, as invalid probes do. Realtime charts are
+  also at least 24 texels across.
+- **Shared probe samples depended on thread scheduling** (row pairs split between threads). Rows now go
+  out in pairs.
+- **Changing GI Device didn't gather again;** it's in the live keys now.
+- **From the code review:**
+  - **A Sky world drawn from the sun was missing from the GI keys,** so turning the sun didn't re-gather
+    with Bounce off, and the GPU kept the old sky. The keys now include the sky's own key.
+  - **Probe bakes on the GPU could allocate gigabytes** at high sample counts. Slices are now sized by
+    rays (about 8M).
+  - **Test limits had been tuned to one build** (the probe quad's worst difference, the small ball's
+    sky share). They're now principled bounds, with a comment.
+  - **Smaller fixes:**
+    - The GPU kernel's read-back buffer is freed.
+    - Choosing a GI Device again retries the GPU after an error.
+    - Unwrapped realtime charts keep their size when an object moves.
+    - Another scene's published maps are never shown.
+    - The GPU bake's random sequences follow each texel, not its place in a batch.
+    - Realtime lightmaps are capped at about 2M texels.
+    - Stale "Rendered" tips are gone.
+
+**Not as the approved specs said (recorded in each spec's "As built"):**
+- **0016:** no voxel ray jitter or occlusion fade; the maps' blur and bilinear filter smooth mapped
+  surfaces, and the fallback keeps its look.
+- **0017:** shared probe samples differ from per-pixel ones by up to 8 levels on 0.03% of pixels.
+- **0018:**
+  - GPU and CPU gathers can differ by one or two grazing rays per point (means within 0.002).
+  - The per-pixel pass stays on the CPU.
+
+**Checked**
+- Unit checks:
+  - Windows 7,994, 0 failed (358 tests), and the same with GI Device Auto on the GPU
+    (`BLENDITY_GI_DEVICE=auto`);
+  - Windows dependency-free (CI's build): 7,866, 0 failed.
+  - Render cache verify mode: 0 stale pictures.
+- The code review's open minors, not done:
+  - a GPU failure mid-pass makes the CPU finish that pass in one frame (a one-off hitch);
+  - criterion 5 of task 0016 (fallback pictures bit-identical to the old pass) is checked by traced
+    receiver counts, not pixels.
+- Linux with libraries: 7,946, 0 failed. Sanitizer build: 7,868, 0 failed, no reports.
+- Stress:
+  - `vgi`: a 1080p orbit reading realtime lightmaps costs +0.9–3.1 ms over no GI, against +12–14 ms
+    traced. A pass of 9,377 texels takes 4.8 ms on the CPU.
+  - `probes`: deferred shading at 1080p is 13.7 ms without probes and 17.7 ms with every object
+    probe-lit (29.1 ms before).
+  - `gpu_gi`: gathers and bakes as above (ADR 0014's table).
+
+## 2026-10-10 (round 39): realtime lightmaps, baked lighting without lag, GI on the GPU (specs only)
+
+**Asked:**
+- realtime lightmaps, the faster option first with a fallback;
+- GI and probes on the GPU if faster;
+- baked lighting that doesn't lag the Scene view;
+- why realtime GI looks pixel-like in the Scene view but not in the Game view.
+
+**Found:**
+- **The Scene view's blocks** come from the per-pixel GI pass tracing at ¼ of the screen resolution.
+  Objects are small on screen there, so each 4 × 4-pixel GI cell shows.
+  - GI Resolution = Half makes them smaller; a 256 voxel grid doesn't.
+  - A dark band where objects meet the floor comes from the voxel steps.
+- **Per-frame costs at 1080p:**
+  - a baked lightmap: about 1 ms;
+  - live voxel GI: about 12 ms, even where a bake covers the scene;
+  - probe sampling: up to 15 ms.
+
+**Drafted (for approval, no code yet):**
+- **Task 0016:** realtime lightmaps per texel, with the per-pixel pass as the fallback.
+- **Task 0017:** no live GI work once the bake covers the scene, cheaper probe sampling, and a lighting
+  guide.
+- **Task 0018:** GI, probes and baking on Vulkan compute, each behind a measured spike.
+
 ## 2026-10-10 (round 38): GPU viewport, a measured go / no-go spike (task 0015)
 
 **Asked:** run the editor's views on the GPU, after the CPU wins, if it pays off.

@@ -9,6 +9,7 @@
 #include "display.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -963,6 +964,8 @@ void Renderer3D::shade_deferred() {
     AABB bounds;
     bool has_lm = false;
     Vec2 lm_uv[3];
+    bool has_rt = false;  // realtime lightmaps (task 0016)
+    Vec2 rt_uv[3];
   };
   auto setup_tri = [&](TriSetup &T, uint32_t ref) {
     T.ref = ref;
@@ -1022,6 +1025,9 @@ void Renderer3D::shade_deferred() {
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
+    T.has_rt = it.rt_bounce && it.rt_sky && it.rt_uv && it.rt_uv->size() >= ((size_t)st.prim + 1) * 3;
+    if (T.has_rt)
+      for (int k = 0; k < 3; k++) T.rt_uv[k] = (*it.rt_uv)[(size_t)st.prim * 3 + k];
     T.highlighted = false;
     if (it.face_highlight && !rm.tri_face.empty()) {
       uint32_t f = rm.tri_face[st.prim];
@@ -1039,10 +1045,13 @@ void Renderer3D::shade_deferred() {
   const int ds = gi ? gi->params.downsample : 1;
   const int gw = gi ? (W + ds - 1) / ds : 0, gh = gi ? (H + ds - 1) / ds : 0;
   const float gvox = gi ? gi->grid->voxel : 1.0f;
+  ScopedTimer tgi;
   if (gi) {
     gi_lo_.assign((size_t)gw * gh, GiTexel{});
+    std::atomic<size_t> traced{0};
     js.parallel_for(gh, 2, [&](int64_t a, int64_t b) {
       TriSetup T;
+      size_t n_traced = 0;
       for (int64_t gy = a; gy < b; gy++)
         for (int gx = 0; gx < gw; gx++) {
           const int x = std::min(W - 1, gx * ds + ds / 2), y = std::min(H - 1, (int)gy * ds + ds / 2);
@@ -1051,6 +1060,7 @@ void Renderer3D::shade_deferred() {
           if (ref != T.ref) setup_tri(T, ref);
           if (!T.valid || T.item->unlit) continue;
           if (T.has_lm && !gi->bounce_not_baked) continue;  // its lightmap holds everything: nothing to add
+          if (T.has_rt) continue;                             // its realtime lightmap has it: nothing to trace
           const float dx = x + 0.5f - T.ox, dy = y + 0.5f - T.oy;
           const Vec3 Nn = T.na * dx + T.nb * dy + T.nc;
           const float S = T.sa * dx + T.sb * dy + T.sc;
@@ -1061,10 +1071,14 @@ void Renderer3D::shade_deferred() {
           const GiSample g = voxel_gi_gather(*gi->grid, gi->rsm, env, pos, n, gi->params, (gx & 3) + 4 * (int)(gy & 3));
           GiTexel &o = gi_lo_[(size_t)gy * gw + gx];
           o.bounce = g.bounce, o.sky = g.sky, o.pos = pos, o.n = n, o.valid = true;
+          n_traced++;
         }
+      traced += n_traced;
     });
-    gi_blur_ = gi_lo_;
-    js.parallel_for(gh, 4, [&](int64_t a, int64_t b) {
+    stats_.gi_traced = traced.load();
+    /* Nothing traced (every surface reads a realtime lightmap): no blur, and nothing reads gi_blur_. */
+    if (stats_.gi_traced) gi_blur_ = gi_lo_;
+    if (stats_.gi_traced) js.parallel_for(gh, 4, [&](int64_t a, int64_t b) {
       for (int64_t gy = a; gy < b; gy++)
         for (int gx = 0; gx < gw; gx++) {
           const GiTexel &c = gi_lo_[(size_t)gy * gw + gx];
@@ -1091,9 +1105,15 @@ void Renderer3D::shade_deferred() {
           }
         }
     });
+    stats_.ms_gi = tgi.ms();
   }
-  js.parallel_for(H, 4, [&](int64_t y0, int64_t y1) {
-    for (int64_t y = y0; y < y1; y++) {
+  /* Unique to this pass across every renderer, so a thread's shared probe samples never outlive it. */
+  static std::atomic<uint32_t> g_probe_stamp{0};
+  const uint32_t probe_stamp = ++g_probe_stamp;
+  /* Rows go out in pairs, so a 2 x 2 quad's shared probe sample is always taken by the thread that shades
+   * both its rows, whatever the scheduling: the picture doesn't depend on it. */
+  js.parallel_for((H + 1) / 2, 2, [&](int64_t p0, int64_t p1) {
+    for (int64_t y = p0 * 2; y < std::min<int64_t>(H, p1 * 2); y++) {
       const uint32_t *vrow = rt_->vis.data() + (size_t)y * W;
       uint32_t *crow = rt_->color + (size_t)y * rt_->stride;
       /* Shaded colours are encoded for display a whole row at a time (SIMD). */
@@ -1103,6 +1123,17 @@ void Renderer3D::shade_deferred() {
       row_hdr.clear();
       row_x.clear();
       TriSetup T;
+      int probe_hint = -1;  // the brick the last probe sample in this row used
+      /* Probe samples shared by 2 x 2 pixels on one triangle: kept per thread, valid for this flush only
+       * (the stamp) and for the quad's own rows. */
+      struct ProbeQuad {
+        uint32_t ref = 0, stamp = 0;
+        int64_t y = -1;
+        Vec3 irr;
+        bool ok = false;
+      };
+      static thread_local std::vector<ProbeQuad> probe_quads;
+      if (probe_quads.size() < (size_t)(W / 2 + 1)) probe_quads.resize((size_t)(W / 2 + 1));
       for (int x = 0; x < W; x++) {
         uint32_t ref = vrow[x];
         if (!ref) continue;
@@ -1157,7 +1188,15 @@ void Renderer3D::shade_deferred() {
           sp.normal = -sp.normal;
           sp.geo_normal = -sp.geo_normal;
         }
-        if (gi) {
+        if (gi && T.has_rt) {
+          /* Realtime lightmap: the texels' gather, read like a baked map (task 0016). */
+          const Vec2 ruv = T.rt_uv[0] * B.x + T.rt_uv[1] * B.y + T.rt_uv[2] * B.z;
+          sp.has_gi = true;
+          sp.gi_sky = std::max(0.0f, std::min(1.0f, it.rt_sky->sample(ruv).x));
+          sp.gi_bounce = it.rt_bounce->sample(ruv);
+          if (sp.has_lightmap && gi->bounce_not_baked) sp.lightmap_add = sp.gi_bounce;
+        }
+        else if (gi && stats_.gi_traced) {
           /* The receivers around this pixel that lie on its surface (facing, plane), bilinear between them. */
           const float fx = (x + 0.5f) / ds - 0.5f, fy = (y + 0.5f) / ds - 0.5f;
           const int x0 = (int)std::floor(fx), y0g = (int)std::floor(fy);
@@ -1187,12 +1226,17 @@ void Renderer3D::shade_deferred() {
           /* Probe volume: the probes around the point pushed off the surface and toward the eye (APV's
            * normal and view bias), so probes just behind it don't leak. */
           const ProbeFrame &pf = *env_.probes;
-          const Vec3 q = sp.position + sp.normal * pf.normal_bias + V * pf.view_bias;
-          Vec3 irr;
-          if (pf.data->sample(q, sp.normal, env.irradiance(sp.normal), pf.use_live, irr, pf.leak_reduction)) {
+          ProbeQuad &pq = probe_quads[(size_t)(x >> 1)];
+          const int64_t qy = y & ~(int64_t)1;
+          if (!pf.quad_reuse || pq.stamp != probe_stamp || pq.y != qy || pq.ref != ref) {
+            const Vec3 q = sp.position + sp.normal * pf.normal_bias + V * pf.view_bias;
+            pq.ok = pf.data->sample(q, sp.normal, env.irradiance(sp.normal), pf.use_live, pq.irr, pf.leak_reduction, &probe_hint);
+            pq.ref = ref, pq.stamp = probe_stamp, pq.y = qy;
+          }
+          if (pq.ok) {
             sp.has_probe = true;
             sp.probe_baked = !pf.use_live;
-            sp.probe = irr;
+            sp.probe = pq.irr;
           }
         }
         SurfaceSample s = evaluate_material(*T.mat, sp);
