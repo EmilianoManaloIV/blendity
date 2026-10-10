@@ -103,8 +103,29 @@ class Renderer {
    * albedo and normal + depth only when the denoiser needs them. */
   virtual void download_accum(std::vector<float> &accum) = 0;
   virtual void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth) = 0;
+  /* Baking (task 0018, GParams::env_i z / w): the points' origins then normals or directions, 4 floats
+   * each, written where the kernel reads them (after set_params, which clears). */
+  virtual bool set_points(const float *data, size_t floats, std::string *error) = 0;
   virtual const DeviceInfo &info() const = 0;
   virtual bool using_hardware_rt() const = 0;
+};
+
+/* A general compute kernel on one GPU (task 0018: voxel GI's gathers): GLSL compiled once per run (and
+ * cached on disk, as the path tracer's kernel), storage buffers by binding (0..15), dispatches of
+ * 64-wide groups, read-backs. Every call waits for the GPU. Null without Vulkan. */
+class Compute {
+ public:
+  static std::unique_ptr<Compute> create(int device_index, const std::string &glsl, std::string *error);
+  virtual ~Compute() = default;
+  /* Uploads `bytes` to `binding` (a device-local buffer, grown as needed). */
+  virtual bool set(int binding, const void *data, size_t bytes, std::string *error) = 0;
+  /* A zeroed device buffer of `bytes` at `binding`, for the kernel to write. */
+  virtual bool output(int binding, size_t bytes, std::string *error) = 0;
+  /* Runs `groups` work groups with up to 128 bytes of push constants. */
+  virtual bool run(uint32_t groups, const void *push, uint32_t push_bytes, std::string *error) = 0;
+  /* Copies `bytes` of `binding` back. */
+  virtual bool read(int binding, void *out, size_t bytes, std::string *error) = 0;
+  virtual const DeviceInfo &info() const = 0;
 };
 
 }  // namespace bl::gpu

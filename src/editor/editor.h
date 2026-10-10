@@ -25,6 +25,8 @@
 #include "../render/lightmapper.h"
 #include "../render/voxel_gi.h"
 #include "../render/probe_volume.h"
+#include "../render/realtime_lightmap.h"
+#include "../render/voxel_gi_gpu.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -107,7 +109,10 @@ constexpr int kOriginModeCount = 9;
 extern const char *const kOriginModes[kOriginModeCount];
 /* Scene view draw modes. Unity: Shaded / Wireframe / Shaded Wireframe.
  * Blender: Wireframe / Solid / Material Preview / Rendered. */
-enum class Shading { Wireframe = 0, Solid = 1, Shaded = 2, Rendered = 3, ShadedWireframe = 4 };
+/* The Scene view's draw modes, in the dropdown's order. (Its path-traced Rendered mode was removed in task
+ * 0019: too slow for an editing view. Path tracing lives in F12, the Render window and the Camera
+ * Preview's Rendered toggle.) */
+enum class Shading { Wireframe = 0, Solid = 1, Shaded = 2, ShadedWireframe = 3 };
 
 /* Scene view camera: pivot + orientation + distance, exactly how Unity's
  * SceneView camera is parameterised (Blender's RegionView3D uses ofs/viewquat/dist). */
@@ -191,6 +196,19 @@ class Editor {
   bool baking_for_test() const { return baking_; }
   const LightingData &lighting_data_for_test() const { return lighting_data_; }
   bool lighting_out_of_date_for_test() { return lighting_out_of_date(); }
+  bool live_gi_needed_for_test(std::string *why = nullptr) { return live_gi_needed(why); }
+  uint64_t vgi_updates_for_test() const { return vgi_updates_; }
+  const RealtimeLightmaps &realtime_lightmaps_for_test(bool game) const { return vgi_[game ? 1 : 0].rtlm; }
+  const RasterStats &game_stats_for_test() const { return game_stats_; }
+  bool realtime_lightmaps_busy_for_test() const { return rtlm_busy_; }
+  const std::string &gi_gpu_name_for_test() const { return gi_gpu_name_; }
+  const Lightmapper &baker_for_test() const { return baker_; }
+  /* Probe samples shared by 2 x 2 pixels (on) or taken at every pixel (off, the reference); the views
+   * render again. */
+  void set_probe_quad_reuse_for_test(bool on) {
+    probe_quad_reuse_ = on;
+    scene_cache_.key = game_cache_.key = 0;
+  }
   std::string lighting_dir_for_test() const { return lighting_dir(); }
   /* Voxel GI (task 0013). */
   const VoxelGrid &voxel_grid_for_test() const { return vgi_[vgi_last_].grid; }
@@ -199,6 +217,7 @@ class Editor {
   uint64_t rsm_renders_for_test() const { return vgi_[0].rsm_renders + vgi_[1].rsm_renders; }
   /* Probe volumes (task 0014). */
   const ProbeVolumeData &probes_for_test() const { return probes_; }
+  bool wants_continuous_redraw_for_test() const { return wants_continuous_redraw(); }
   bool probe_volume_box_for_test(AABB &out) { return probe_volume_box(out); }
   bool probe_live_ready_for_test() const { return probe_live_ready_; }
   size_t probe_live_left_for_test() const { return probe_live_left_; }
@@ -346,7 +365,6 @@ class Editor {
    * "remove" i, "move" i to j, "reset" i. One undo step each. The Inspector's menus and the
    * `filter` console command both use it. */
   bool filter_stack_op(uint64_t object_id, const std::string &op, int i = 0, int j = 0, const std::string &name = "");
-  void render_pathtraced_view(const Recti &view);
   /* preview: the Preview Resolution % and Preview Samples settings (a quick look
    * before the real render). open_window: bring the Render window forward. */
   void start_final_render(bool preview = false, bool open_window = true);
@@ -967,6 +985,11 @@ class Editor {
   uint64_t lightmap_hash_of(const GameObject &g, const Mesh &m);
   uint64_t lightmap_scene_key();
   bool lighting_out_of_date();
+  /* Whether Realtime GI has live work to do (task 0017): not when a current bake holds every light that
+   * bounces. `why` says which case it is, for the Lighting window. */
+  bool live_gi_needed(std::string *why = nullptr);
+  uint64_t vgi_updates_ = 0;  // update_voxel_gi() calls (tests: no live work once baked)
+  bool probe_quad_reuse_ = true;
   void attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it);
   bool lm_stale_live_ = false;  // set per collect_items: the bake is out of date and realtime GI takes over
   void load_lighting_data();
@@ -996,7 +1019,17 @@ class Editor {
     uint64_t rsm_key = 0;
     VoxelGIFrame frame;
     uint64_t voxelized = 0, assemblies = 0, rsm_renders = 0;  // counters for tests and stress
+    RealtimeLightmaps rtlm;  // task 0016: Contribute GI objects' realtime lightmaps for this kind of view
+    std::unique_ptr<VoxelGiGpu> gpu;  // task 0018: its gathers on the GPU (opened on first use)
   };
+  /* The GPU for this kind of view's gathers, its grid / RSM / world up to date; null for the CPU. */
+  VoxelGiGpu *gi_gpu(VoxelGIState &st);
+  bool gi_gpu_failed_ = false;
+  int gi_gpu_device_seen_ = 0;
+  int bake_gpu_ = -1;  // task 0018: the GPU Generate Lighting gathers on (Render > Device: GPU Compute), -1 the CPU
+  std::string gi_gpu_name_;  // the device in use, for the Lighting window
+  bool rtlm_busy_ = false;  // a realtime lightmap pass is still gathering
+  void update_realtime_lightmaps();
   /* One per kind of view: the Scene view draws viewport meshes (and Edit Mode's cage), the Game view,
    * Camera Preview and renders draw render meshes; sharing one would rebuild both every frame. */
   VoxelGIState vgi_[2];
@@ -1043,13 +1076,6 @@ class Editor {
   bool view_cache_hit(ViewCache &c, uint64_t key, const Recti &r);
   void view_cache_store(ViewCache &c, uint64_t key, const Recti &r);
   bool view_cache_verify(const ViewCache &c, const Recti &r, const char *what);
-  PathTracer vp_pt_;
-  uint64_t vp_pt_hash_ = 0;
-  Mat4 vp_pt_view_, vp_pt_proj_;
-  Image vp_pt_img_;
-  uint64_t vp_pt_shown_ = 0;  // samples + display settings of vp_pt_img_ (skip re-resolving)
-  bool vp_pt_guiding_ = false;
-  uint64_t vp_pt_device_key_ = 0;
   /* GPU render devices the user unticked (names; machine-specific, kept in the prefs). */
   std::set<std::string> render_devices_off_;
   std::vector<int> enabled_gpus() const;

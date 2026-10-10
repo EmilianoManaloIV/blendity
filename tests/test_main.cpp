@@ -3,6 +3,7 @@
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
 #include "../src/editor/editor.h"
+#include "../src/editor/learn.h"
 #include "../src/render/camera_filter.h"
 #include "../src/render/canvas.h"
 #include "../src/render/raster.h"
@@ -41,6 +42,7 @@
 #include <filesystem>
 #include <functional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -196,6 +198,7 @@ static void round34_tests();
 static void round35_tests();
 static void round36_tests();
 static void round37_tests();
+static void round39_tests();
 
 int main() {
   register_builtin_components();
@@ -203,6 +206,9 @@ int main() {
   Log::echo_stdout = false;
   set_env("BLENDITY_PROJECT", "");  // the scratch project
   set_env("BLENDITY_TRASH", "");
+  /* GI Device Auto gathers on the CPU here, so a machine with a GPU and CI (without one) run the same
+   * code; the GPU's own tests ask for it (task 0018). */
+  if (!std::getenv("BLENDITY_GI_DEVICE")) set_env("BLENDITY_GI_DEVICE", "cpu");
 
   test("math: matrix inverse", [] {
     Mat4 m = Mat4::trs({1, 2, 3}, Quat::euler({10, 20, 30}), {2, 3, 4});
@@ -807,6 +813,7 @@ int main() {
   round35_tests();
   round36_tests();
   round37_tests();
+  round39_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -9844,7 +9851,7 @@ static void round30_tests() {
     const int top = std::max(fr.y + 2, R.banner_bottom());
     const Recti inner(fr.x + 2, top, fr.w - 4, fr.bottom() - 2 - top);
     Px first;
-    for (const char *mode : {"solid", "wire", "rendered", "shaded"}) {
+    for (const char *mode : {"solid", "wire", "both", "shaded"}) {
       R.ed.command(std::string("shading ") + mode);
       R.settle();
       const Px px = R.grab();
@@ -15786,8 +15793,10 @@ static void round37_tests() {
 
   test("probe volumes: with voxel GI on, probe-lit objects still take the probes (as in Unity's APV), the rest voxel GI", [] {
     Editor a, b;
-    p37_world(a, true, 1, 1.0f, true);
-    p37_world(b, false, 1, 1.0f, true);
+    /* A Realtime sun: its bounce isn't baked, so voxel GI has live work (task 0017: over a bake of every
+     * bouncing light it traces nothing). */
+    p37_world(a, true, 0, 1.0f, true);
+    p37_world(b, false, 0, 1.0f, true);
     r35_bake(a);
     r35_bake(b);
     const std::vector<uint32_t> a_off = r35_game(a), b_off = r35_game(b);
@@ -15844,7 +15853,7 @@ static void round37_tests() {
       if (restarted && ed.probe_live_left_for_test() == 0) break;
     }
     std::printf("    sun turned: live update ran for %d frames, %zu probes left\n", max_left_frames, ed.probe_live_left_for_test());
-    CHECK(restarted);
+    CHECK(restarted || !ed.gi_gpu_name_for_test().empty());  // (on the GPU it all happens within a frame)
     CHECK(ed.probe_live_left_for_test() == 0 && ed.probe_live_ready_for_test());
     CHECK(max_left_frames <= 12);
     CHECK(ed.lighting_data_for_test().empty());  // still no bake
@@ -15869,7 +15878,8 @@ static void round37_tests() {
       if (restarted && ed.probe_live_left_for_test() == 0) break;
     }
     std::printf("    wall moved: live update ran for %d frames\n", frames);
-    CHECK(restarted && ed.probe_live_left_for_test() == 0);
+    /* (On the GPU the whole volume updates within the frame, so nothing is ever left between frames.) */
+    CHECK((restarted || !ed.gi_gpu_name_for_test().empty()) && ed.probe_live_left_for_test() == 0);
     bool changed = false;
     for (size_t i = 0; i < before_move.size() && !changed; i++) changed = !p37_same_cube(before_move[i], ed.probes_for_test().live[i]);
     CHECK(changed);
@@ -16344,5 +16354,489 @@ static void round37_tests() {
     CHECK(ed.probe_volume_box_for_test(box) && std::fabs(box.max.x - box.min.x - 10.0f) < 0.01f);
     r35_bake(ed);
     CHECK(!ed.probes_for_test().empty());
+  });
+}
+
+
+/* ===================================================================== */
+/* Round 39 (tasks 0016-0019): lighting without lag                       */
+/* ===================================================================== */
+
+static void round39_tests() {
+  test("scene view: there is no path-traced Rendered mode; `shading rendered` shows Shaded and nothing keeps redrawing", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));
+    r36_cmd(ed, "shading shaded");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> shaded = r35_scene_view(ed);
+    r36_cmd(ed, "shading rendered");
+    r34_steps(ed, 3);
+    CHECK(r35_diff_count(r35_scene_view(ed), shaded) == 0);
+    CHECK(!ed.wants_continuous_redraw_for_test());
+    /* The other modes still switch. */
+    r36_cmd(ed, "shading wire");
+    r34_steps(ed, 2);
+    CHECK(r35_diff_count(r35_scene_view(ed), shaded) > 100);
+    r36_cmd(ed, "shading shaded");
+    r34_steps(ed, 2);
+    CHECK(r35_diff_count(r35_scene_view(ed), shaded) == 0);
+  });
+
+  /* ---------------------------------------------------------------- task 0017 */
+  test("baked no live cost: with a current bake of a Mixed sun, Realtime GI traces nothing and the views equal Realtime GI off", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);  // floor and wall Contribute GI; a Mixed sun
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().empty());
+    const std::vector<uint32_t> off_game = r35_game(ed), off_scene = r35_scene_view(ed);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r34_steps(ed, 4);
+    std::string why;
+    CHECK(!ed.live_gi_needed_for_test(&why));
+    std::printf("    %s\n", why.c_str());
+    CHECK(why.find("idle") != std::string::npos);
+    const uint64_t u0 = ed.vgi_updates_for_test();
+    CHECK(r35_diff_count(r35_game(ed), off_game) == 0);
+    CHECK(r35_diff_count(r35_scene_view(ed), off_scene) == 0);
+    /* Moving an object that doesn't contribute re-renders the views but still traces nothing. */
+    w.ball->set_local_position({0.5f, 0.5f, -1.0f});
+    ed.commit_change("ball moved");
+    r34_steps(ed, 4);
+    CHECK(ed.vgi_updates_for_test() == u0);
+    CHECK(ed.probe_live_left_for_test() == 0);
+  });
+
+  test("baked no live cost: a Realtime sun or a static object moved since the bake brings live GI back, and a re-bake stops it again", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    r35_bake(ed);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r34_steps(ed, 2);
+    CHECK(!ed.live_gi_needed_for_test());
+    /* A Realtime sun: its bounce isn't in the bake. */
+    r35_sun_mode(ed, 0);
+    r34_steps(ed, 2);
+    std::string why;
+    CHECK(ed.live_gi_needed_for_test(&why));
+    std::printf("    Realtime sun: %s\n", why.c_str());
+    CHECK(why.find("Realtime") != std::string::npos);
+    const uint64_t u0 = ed.vgi_updates_for_test();
+    r34_steps(ed, 1);
+    w.ball->set_local_position({0.5f, 0.5f, -1.0f});
+    ed.commit_change("ball moved");
+    r34_steps(ed, 2);
+    CHECK(ed.vgi_updates_for_test() > u0);
+    /* Back to Mixed and re-baked: idle. */
+    r35_sun_mode(ed, 1);
+    r35_bake(ed);
+    CHECK(!ed.live_gi_needed_for_test());
+    /* A static (Contribute GI) object moved: live until the next bake. */
+    w.wall->set_local_position({2.6f, 1, 0});
+    ed.commit_change("wall moved");
+    r34_steps(ed, 2);
+    CHECK(ed.live_gi_needed_for_test(&why));
+    std::printf("    wall moved: %s\n", why.c_str());
+    const uint64_t u1 = ed.vgi_updates_for_test();
+    r34_steps(ed, 1);
+    w.ball->set_local_position({0.0f, 0.5f, -1.0f});
+    ed.commit_change("ball moved again");
+    r34_steps(ed, 2);
+    CHECK(ed.vgi_updates_for_test() > u1);
+    r35_bake(ed);
+    CHECK(!ed.live_gi_needed_for_test());
+    /* Realtime GI off: never live. */
+    r36_cmd(ed, "set Lighting.RealtimeGI false");
+    r35_sun_mode(ed, 0);
+    CHECK(!ed.live_gi_needed_for_test());
+  });
+
+  test("baked no live cost: probe samples shared by 2 x 2 pixels match sampling every pixel to within a level or two", [] {
+    Editor ed;
+    p37_world(ed, true, 1, 1.0f, true);  // a probe volume; the ball is lit by probes
+    r35_bake(ed);
+    const std::vector<uint32_t> shared = r35_game(ed);
+    ed.set_probe_quad_reuse_for_test(false);
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> every = r35_game(ed);
+    ed.set_probe_quad_reuse_for_test(true);
+    r34_steps(ed, 2);
+    CHECK(r35_diff_count(r35_game(ed), shared) == 0);  // deterministic
+    int worst = 0;
+    size_t over2 = 0, differ = 0;
+    for (size_t i = 0; i < shared.size() && i < every.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((shared[i] >> k) & 255) - (int)((every[i] >> k) & 255)));
+      worst = std::max(worst, d);
+      differ += d > 0;
+      over2 += d > 2;
+    }
+    std::printf("    %zu of %zu pixels differ, %zu by more than 2 levels, worst %d\n", differ, shared.size(), over2, worst);
+    CHECK(differ > 0);  // it really shares (the ball is curved)
+    /* Bounded, not the measured maximum (8 with Blender's libraries, 9 without): a shared sample is at most
+     * one pixel away on the same triangle, so only a few silhouette pixels can differ visibly. */
+    CHECK(over2 <= shared.size() / 1000);
+    CHECK(worst <= 16);
+  });
+
+  test("learn: the Baked and Realtime Lighting lesson's Try it buttons open the Lighting window, mark the Plane static, bake and turn on GI", [] {
+    int idx = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "Baked and Realtime Lighting") idx = i;
+    CHECK(idx >= 0);
+    if (idx < 0) return;
+    Editor ed;
+    r35_open(ed);
+    ed.scene().find_by_name("Plane")->active = true;  // (r35_open hides the default objects)
+    ed.commit_change("plane shown");
+    std::vector<std::string> cmds;
+    std::istringstream body(lesson(idx).body);
+    for (std::string line; std::getline(body, line);) {
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      std::string c = line.substr(6, line.find(" |") - 6);
+      for (size_t at = 0; at <= c.size();) {
+        size_t semi = c.find(';', at);
+        if (semi == std::string::npos) semi = c.size();
+        std::string one = c.substr(at, semi - at);
+        while (!one.empty() && one.front() == ' ') one.erase(0, 1);
+        if (!one.empty()) cmds.push_back(one);
+        at = semi + 1;
+      }
+    }
+    CHECK(cmds.size() >= 5);
+    for (const std::string &c : cmds) {
+      ed.command(c);
+      for (int i = 0; i < 100 && ed.baking_for_test(); i++) ed.step_frame_headless();
+      r34_steps(ed, 1);
+    }
+    CHECK(ed.scene().find_by_name("Plane")->get<MeshRenderer>()->contribute_gi);
+    CHECK(!ed.lighting_data_for_test().empty());
+    CHECK(ed.scene().lighting.realtime_gi && ed.scene().lighting.gi_downsample == 0);
+    CHECK(ed.window_rect_for_test(WindowKind::Lighting).w > 0);
+  });
+
+  /* ---------------------------------------------------------------- task 0016 */
+  /* Until the Game view's realtime lightmaps have published a pass (a new one if `fresh`) and nothing is
+   * left to gather. Returns the frames it took, or -1. */
+  auto rt_settle = [](Editor &ed, int max_frames = 60, bool fresh = false) {
+    const uint64_t p0 = ed.realtime_lightmaps_for_test(true).passes;
+    for (int i = 0; i < max_frames; i++) {
+      ed.step_frame_headless();
+      const uint64_t p = ed.realtime_lightmaps_for_test(true).passes;
+      if ((fresh ? p > p0 : p > 0) && !ed.realtime_lightmaps_busy_for_test()) return i + 1;
+    }
+    return -1;
+  };
+
+  test("realtime lightmaps: Contribute GI objects get maps that the Game view reads instead of tracing; others are still traced per pixel", [&] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 0, 1.0f, true);  // floor, wall, box Contribute GI; the ball doesn't; a Realtime sun
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    const int frames = rt_settle(ed);
+    CHECK(frames > 0);
+    const RealtimeLightmaps &rl = ed.realtime_lightmaps_for_test(true);
+    std::printf("    published after %d frames: %zu texels on %zu pages, %zu objects\n", frames, rl.texel_count(), rl.shown.bounce.size(),
+                rl.shown.entries.size());
+    CHECK(!rl.shown.empty());
+    CHECK(rl.shown.entries.count(w.floor_go->id) && rl.shown.entries.count(w.wall->id) && rl.shown.entries.count(w.box->id));
+    CHECK(!rl.shown.entries.count(w.ball->id));
+    r34_steps(ed, 2);
+    const size_t traced_maps = ed.game_stats_for_test().gi_traced;
+    r36_cmd(ed, "set Lighting.RealtimeResolution 0");
+    r34_steps(ed, 3);
+    const size_t traced_all = ed.game_stats_for_test().gi_traced;
+    std::printf("    receivers traced per pixel: %zu with realtime lightmaps, %zu without\n", traced_maps, traced_all);
+    CHECK(traced_maps > 0);                  // the ball still is
+    CHECK(traced_maps * 4 < traced_all);     // the floor, wall and box no longer are
+    CHECK(ed.realtime_lightmaps_for_test(true).shown.empty());
+  });
+
+  test("realtime lightmaps: a red wall's bounce shows on the floor beside it, and goes when the wall is white", [&] {
+    Editor red, white;
+    p37_world(red, false, 0, 1.0f, false);
+    p37_world(white, false, 0, 1.0f, false, Vec3(0.9f));
+    for (Editor *e : {&red, &white}) {
+      r36_cmd(*e, "set Lighting.RealtimeGI true");
+      CHECK(rt_settle(*e) > 0);
+      r34_steps(*e, 2);
+    }
+    /* The floor's texels near the wall (not the wall's own pixels, which are red anyway): their bounce. */
+    auto floor_red = [](Editor &e) {
+      const RealtimeLightmaps &rl = e.realtime_lightmaps_for_test(true);
+      double r = 0;
+      for (const LightmapTexel &t : rl.layout.texels) {
+        if (t.normal.y < 0.9f || t.position.y > 0.05f || t.position.x < 1.0f || t.position.x > 2.05f || std::fabs(t.position.z) > 2.0f) continue;
+        const Lightmap &b = rl.shown.bounce[(size_t)t.page];
+        const Vec3 v = b.texels[(size_t)t.y * b.width + t.x];
+        r += v.x - v.z;
+      }
+      return r;
+    };
+    const double r_red = floor_red(red), r_white = floor_red(white);
+    std::printf("    floor beside the wall, bounce red minus blue: %.3f with a red wall, %.3f with a white one\n", r_red, r_white);
+    CHECK(r_red > 0.05);
+    CHECK(std::fabs(r_white) < 0.2 * r_red);
+  });
+
+  test("realtime lightmaps: after the sun turns, the maps settle again within 30 frames with no Generate Lighting", [&] {
+    Editor ed;
+    p37_world(ed, false, 0, 1.0f, true);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    CHECK(rt_settle(ed) > 0);
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> before = r35_game(ed);
+    ed.scene().find_by_name("Directional Light")->set_local_euler({40, -60, 0});
+    ed.commit_change("sun turned");
+    const int frames = rt_settle(ed, 30, true);
+    std::printf("    settled after %d frames\n", frames);
+    CHECK(frames > 0);
+    r34_steps(ed, 2);
+    CHECK(r35_diff_count(r35_game(ed), before) > 500);
+  });
+
+  test("realtime lightmaps: up a wall standing on the floor, the sky share rises smoothly (no voxel steps, no dark contact band)", [&] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 0, 1.0f, false);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r36_cmd(ed, "set Lighting.RealtimeResolution 8");  // 16 texels up the 2 m wall
+    CHECK(rt_settle(ed) > 0);
+    const RealtimeLightmaps &rl = ed.realtime_lightmaps_for_test(true);
+    /* The wall's face toward the scene (normal -X), at z near 0: its published sky share by height. */
+    const auto e = rl.shown.entries.find(w.wall->id);
+    CHECK(e != rl.shown.entries.end());
+    if (e == rl.shown.entries.end()) return;
+    std::vector<std::pair<float, float>> col;  // (height, sky)
+    size_t wall_texels = 0;
+    float z0 = 1e9f;  // the column of texels nearest z = 0
+    for (const LightmapTexel &t : rl.layout.texels)
+      if (t.normal.x < -0.9f && std::fabs(t.position.x - 2.1f) <= 0.02f && std::fabs(t.position.z) < std::fabs(z0)) z0 = t.position.z;
+    for (const LightmapTexel &t : rl.layout.texels) {
+      if (t.normal.x > -0.9f || std::fabs(t.position.x - 2.1f) > 0.02f) continue;  // the wall's face toward the scene (x = 2.2 - 0.1)
+      wall_texels++;
+      if (std::fabs(t.position.z - z0) > 0.01f) continue;
+      const Lightmap &sky = rl.shown.sky[(size_t)t.page];
+      col.push_back({t.position.y, sky.texels[(size_t)t.y * sky.width + t.x].x});
+    }
+    std::printf("    %zu texels on the wall's face\n", wall_texels);
+    std::sort(col.begin(), col.end());
+    float worst_step = 0.0f;
+    for (size_t i = 1; i < col.size(); i++)
+      if (col[i].first - col[i - 1].first > 0.02f) worst_step = std::max(worst_step, std::fabs(col[i].second - col[i - 1].second));
+    std::printf("    %zu wall texels: sky share from %.2f at %.2f m to %.2f at %.2f m; largest step between heights %.3f\n", col.size(),
+                col.empty() ? 0.f : col.front().second, col.empty() ? 0.f : col.front().first, col.empty() ? 0.f : col.back().second,
+                col.empty() ? 0.f : col.back().first, worst_step);
+    for (auto &c : col) std::printf("      y %.2f sky %.3f\n", c.first, c.second);
+    CHECK(col.size() >= 4);
+    CHECK(worst_step <= 0.15f);
+  });
+
+  test("realtime lightmaps: odd resolutions (NaN, negative, huge), an empty scene and undo are safe; 0 turns them off", [&] {
+    Editor ed;
+    p37_world(ed, false, 0, 1.0f, true);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    CHECK(rt_settle(ed) > 0);
+    for (float v : {std::numeric_limits<float>::quiet_NaN(), -5.0f, 1e9f, 0.01f, 100.0f}) {
+      ed.scene().lighting.realtime_resolution = v;
+      ed.commit_change("odd resolution");
+      r34_steps(ed, 3);
+      const RealtimeLightmaps &rl = ed.realtime_lightmaps_for_test(true);
+      bool finite = true;
+      for (const Lightmap &m : rl.shown.bounce)
+        for (const Vec3 &t : m.texels) finite = finite && std::isfinite(t.x) && std::isfinite(t.y) && std::isfinite(t.z);
+      CHECK(finite);
+      CHECK(rl.texel_count() < 4000000);
+    }
+    /* Undo brings the setting back. */
+    r36_cmd(ed, "set Lighting.RealtimeResolution 3");
+    r34_steps(ed, 2);
+    r36_cmd(ed, "set Lighting.RealtimeResolution 0");
+    r34_steps(ed, 2);
+    CHECK(ed.realtime_lightmaps_for_test(true).shown.empty());
+    ed.command("undo");
+    r34_steps(ed, 2);
+    CHECK(std::fabs(ed.scene().lighting.realtime_resolution - 3.0f) < 1e-6f);
+    CHECK(rt_settle(ed) > 0);
+    CHECK(!ed.realtime_lightmaps_for_test(true).shown.empty());
+    /* Nothing contributing: no maps, nothing gathering. (By name: undo rebuilt the objects.) */
+    for (const char *n : {"Floor", "Wall", "Box"}) ed.scene().find_by_name(n)->get<MeshRenderer>()->contribute_gi = false;
+    ed.commit_change("nothing static");
+    r34_steps(ed, 4);
+    CHECK(ed.realtime_lightmaps_for_test(true).shown.empty());
+    CHECK(!ed.realtime_lightmaps_busy_for_test());
+  });
+
+  test("realtime lightmaps: a small ball on the floor has no dark patches (texels gathering from inside the floor take their neighbours' light)", [&] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 0, 1.0f, false);
+    w.ball->get<MeshRenderer>()->contribute_gi = true;
+    ed.commit_change("ball static");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    CHECK(rt_settle(ed) > 0);
+    const RealtimeLightmaps &rl = ed.realtime_lightmaps_for_test(true);
+    CHECK(rl.shown.entries.count(w.ball->id));
+    /* The top of the ball (above its centre, facing up) is open to the sky: its texels'
+     * published sky share stays well above zero, the black patch a texel inside the floor spread. */
+    float lowest = 1.0f;
+    size_t n = 0, invalid = 0;
+    for (size_t k = 0; k < rl.layout.texels.size(); k++) {
+      const LightmapTexel &t = rl.layout.texels[k];
+      if (length(t.position - Vec3(1.0f, 0.5f, 0.0f)) > 0.55f) continue;  // the ball's surface
+      invalid += k < rl.ok.size() && !rl.ok[k];
+      if (t.position.y < 0.55f || t.normal.y < 0.5f) continue;  // facing up: open sky (the wall is to the side)
+      const Lightmap &sky = rl.shown.sky[(size_t)t.page];
+      lowest = std::min(lowest, sky.texels[(size_t)t.y * sky.width + t.x].x);
+      n++;
+    }
+    std::printf("    %zu upper-half texels, lowest sky share %.2f; %zu of the ball's texels gathered from inside something\n", n, lowest, invalid);
+    CHECK(n >= 8);
+    /* "No black patch": the patch read 0. (Above 0.1, not the measured 0.24-0.30: the wall beside it really
+     * takes some of the sky, a little differently on each compiler.) */
+    CHECK(lowest > 0.1f);
+    /* The texels that started inside the floor publish their neighbours' light, not the nothing they saw. */
+    CHECK(invalid > 0);
+    float worst_invalid = 1.0f;
+    for (size_t k = 0; k < rl.layout.texels.size(); k++) {
+      const LightmapTexel &t = rl.layout.texels[k];
+      if (k >= rl.ok.size() || rl.ok[k] || length(t.position - Vec3(1.0f, 0.5f, 0.0f)) > 0.55f) continue;
+      const Lightmap &sky = rl.shown.sky[(size_t)t.page];
+      worst_invalid = std::min(worst_invalid, sky.texels[(size_t)t.y * sky.width + t.x].x);
+      CHECK(rl.sky[k] < 0.05f);  // what it saw itself
+    }
+    std::printf("    the darkest of them as published: %.2f\n", worst_invalid);
+    CHECK(worst_invalid > 0.05f);
+  });
+
+  /* ---------------------------------------------------------------- task 0018 */
+  test("gpu gi: realtime lightmaps and live probes gathered on the GPU agree with the CPU's, a whole pass in one frame (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor cpu_ed, gpu_ed;
+    for (Editor *e : {&cpu_ed, &gpu_ed}) {
+      p37_world(*e, true, 0, 1.0f, true);  // a probe volume, a Realtime sun, nothing baked
+    }
+    r36_cmd(cpu_ed, "set Lighting.GIDevice 1");  // before Realtime GI: nothing gathers anywhere else first
+    r36_cmd(gpu_ed, "set Lighting.GIDevice 2");
+    for (Editor *e : {&cpu_ed, &gpu_ed}) r36_cmd(*e, "set Lighting.RealtimeGI true");
+    CHECK(rt_settle(cpu_ed) > 0);
+    const int gframes = rt_settle(gpu_ed);
+    CHECK(gframes > 0);
+    CHECK(p37_live_settled(cpu_ed));
+    CHECK(p37_live_settled(gpu_ed));
+    std::printf("    GPU: %s; realtime lightmaps published after %d frame(s)\n", gpu_ed.gi_gpu_name_for_test().c_str(), gframes);
+    CHECK(!gpu_ed.gi_gpu_name_for_test().empty());
+    CHECK(cpu_ed.gi_gpu_name_for_test().empty());
+    CHECK(gpu_ed.realtime_lightmaps_for_test(true).gpu_texels > 0 && cpu_ed.realtime_lightmaps_for_test(true).gpu_texels == 0);
+    /* The maps: the same layout, texel by texel. */
+    const RealtimeLightmaps &a = cpu_ed.realtime_lightmaps_for_test(true), &b = gpu_ed.realtime_lightmaps_for_test(true);
+    CHECK(a.texel_count() == b.texel_count() && a.texel_count() > 100);
+    double sum_sky = 0, max_sky = 0, sum_b = 0, sum_bref = 0;
+    for (size_t i = 0; i < a.sky.size() && i < b.sky.size(); i++) {
+      const double d = std::fabs(a.sky[i] - b.sky[i]);
+      sum_sky += d, max_sky = std::max(max_sky, d);
+      sum_b += length(a.bounce[i] - b.bounce[i]), sum_bref += length(a.bounce[i]);
+    }
+    const double mean_sky = sum_sky / std::max<size_t>(1, a.sky.size());
+    /* The probes. */
+    const ProbeVolumeData &pa = cpu_ed.probes_for_test(), &pb = gpu_ed.probes_for_test();
+    CHECK(pa.probe_count() == pb.probe_count() && pa.probe_count() > 0);
+    double psky = 0, pmax = 0;
+    size_t pn = 0;
+    for (size_t i = 0; i < pa.live.size() && i < pb.live.size(); i++)
+      for (int ax = 0; ax < 6; ax++) {
+        const double d = std::fabs(pa.live[i].sky[ax] - pb.live[i].sky[ax]);
+        psky += d, pmax = std::max(pmax, d), pn++;
+      }
+    std::printf("    realtime texels: sky share mean difference %.5f, largest %.4f; bounce differs by %.3f%% of its total\n", mean_sky, max_sky,
+                100.0 * sum_b / std::max(1e-9, sum_bref));
+    std::printf("    live probes: sky share mean difference %.5f, largest %.4f\n", psky / std::max<size_t>(1, pn), pmax);
+    /* A grazing ray can go the other way on the GPU (its sin, cos and sqrt round differently): one ray of 32
+     * is 0.031 of a texel's sky share. On average they agree. */
+    CHECK(mean_sky < 0.002);
+    CHECK(max_sky <= 0.13);
+    CHECK(sum_b <= 0.01 * sum_bref + 1e-6);
+    CHECK(psky / std::max<size_t>(1, pn) < 0.003);
+    /* The pictures. */
+    r34_steps(cpu_ed, 2);
+    r34_steps(gpu_ed, 2);
+    const std::vector<uint32_t> pc = r35_game(cpu_ed), pg = r35_game(gpu_ed);
+    size_t over3 = 0;
+    for (size_t i = 0; i < pc.size() && i < pg.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((pc[i] >> k) & 255) - (int)((pg[i] >> k) & 255)));
+      over3 += d > 3;
+    }
+    std::printf("    Game view: %zu of %zu pixels differ by more than 3 levels\n", over3, pc.size());
+    CHECK(over3 <= pc.size() / 200);
+  });
+
+  test("gpu gi: Generate Lighting on the GPU (Render > Device: GPU Compute) matches the CPU's bake within its noise, probes too (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor cpu_ed, gpu_ed;
+    for (Editor *e : {&cpu_ed, &gpu_ed}) {
+      p37_world(*e, true, 2, 1.0f, true);  // a Baked sun, a red wall, a probe volume
+      e->scene().lighting.indirect_samples = 96;
+      e->commit_change("samples");
+    }
+    gpu_ed.scene().render.device = 1;
+    gpu_ed.commit_change("GPU");
+    r35_bake(cpu_ed);
+    r35_bake(gpu_ed);
+    std::printf("    texels gathered on the GPU: %zu (CPU editor: %zu); GPU error: '%s'\n", gpu_ed.baker_for_test().gpu_texels(),
+                cpu_ed.baker_for_test().gpu_texels(), gpu_ed.baker_for_test().gpu_error().c_str());
+    CHECK(gpu_ed.baker_for_test().gpu_texels() > 0 && gpu_ed.baker_for_test().gpu_error().empty());
+    CHECK(cpu_ed.baker_for_test().gpu_texels() == 0);
+    const LightingData &a = cpu_ed.lighting_data_for_test(), &b = gpu_ed.lighting_data_for_test();
+    CHECK(a.pages.size() == b.pages.size() && !a.pages.empty());
+    if (a.pages.size() != b.pages.size() || a.pages.empty()) return;
+    /* The same texels (the layout doesn't depend on the device); their light within the noise of 96 paths:
+     * the totals agree closely, and per texel the difference is noise-sized. */
+    double ta = 0, tb = 0, diff = 0;
+    size_t n = 0;
+    for (size_t pg = 0; pg < a.pages.size(); pg++)
+      for (size_t i = 0; i < a.pages[pg].texels.size() && i < b.pages[pg].texels.size(); i++) {
+        const Vec3 x = a.pages[pg].texels[i], y = b.pages[pg].texels[i];
+        ta += x.x + x.y + x.z, tb += y.x + y.y + y.z;
+        diff += std::fabs(x.x - y.x) + std::fabs(x.y - y.y) + std::fabs(x.z - y.z);
+        n++;
+      }
+    std::printf("    lightmaps: total %.1f on the CPU, %.1f on the GPU (%.2f%%); mean texel difference %.2f%% of the mean texel\n", ta, tb,
+                100.0 * (tb - ta) / std::max(1e-9, ta), 100.0 * diff / std::max(1e-9, ta));
+    CHECK(std::fabs(tb - ta) <= 0.02 * ta);
+    CHECK(diff <= 0.08 * ta);
+    /* The probes: their bounce and sky shares. */
+    const ProbeVolumeData &pa = cpu_ed.probes_for_test(), &pb = gpu_ed.probes_for_test();
+    CHECK(pa.probe_count() == pb.probe_count() && pa.probe_count() > 0);
+    double sa = 0, sb = 0, ba = 0, bb = 0;
+    for (size_t i = 0; i < pa.baked.size() && i < pb.baked.size(); i++)
+      for (int ax = 0; ax < 6; ax++) {
+        sa += pa.baked[i].sky[ax], sb += pb.baked[i].sky[ax];
+        ba += pa.baked[i].bounce[ax].x + pa.baked[i].bounce[ax].y + pa.baked[i].bounce[ax].z;
+        bb += pb.baked[i].bounce[ax].x + pb.baked[i].bounce[ax].y + pb.baked[i].bounce[ax].z;
+      }
+    std::printf("    probes: sky shares %.1f / %.1f (the same rays: equal), bounce %.1f / %.1f (%.2f%%)\n", sa, sb, ba, bb, 100.0 * (bb - ba) / std::max(1e-9, ba));
+    CHECK(std::fabs(sb - sa) <= 1e-3 * std::max(1.0, sa));
+    CHECK(std::fabs(bb - ba) <= 0.03 * std::max(1e-9, ba));
+  });
+
+  test("realtime lightmaps: with a Sky world (drawn from the sun) and Bounce off, turning the sun gathers the maps again", [&] {
+    Editor ed;
+    p37_world(ed, false, 0, 1.0f, true);
+    ed.scene().environment.mode = 1;  // Sky
+    ed.commit_change("sky");
+    r36_cmd(ed, "set Lighting.Bounce false");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    CHECK(rt_settle(ed) > 0);
+    const uint64_t passes = ed.realtime_lightmaps_for_test(true).passes;
+    ed.scene().find_by_name("Directional Light")->set_local_euler({20, 150, 0});
+    ed.commit_change("sun turned");
+    CHECK(rt_settle(ed, 30, true) > 0);
+    std::printf("    passes: %llu before the sun turned, %llu after\n", (unsigned long long)passes,
+                (unsigned long long)ed.realtime_lightmaps_for_test(true).passes);
+    CHECK(ed.realtime_lightmaps_for_test(true).passes > passes);
   });
 }

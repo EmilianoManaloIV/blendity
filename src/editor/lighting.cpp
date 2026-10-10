@@ -5,6 +5,7 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../render/gpu_device.h"
 #include "../render/pathtracer.h"
 
 #include <algorithm>
@@ -99,6 +100,38 @@ bool Editor::lighting_out_of_date() {
     ood_ = lighting_data_.scene_key != lightmap_scene_key();
   }
   return ood_;
+}
+
+bool Editor::live_gi_needed(std::string *why) {
+  const LightingSettings &ls = scene_->lighting;
+  auto say = [&](const char *s) {
+    if (why) *why = s;
+  };
+  if (!ls.realtime_gi) {
+    say("Live GI: off (Realtime GI is off)");
+    return false;
+  }
+  if (!ls.baked_gi || lighting_data_.empty()) {
+    say("Live GI: running (nothing baked)");
+    return true;
+  }
+  /* Voxel GI bounces the first directional light, as the shadow map: live if the bake doesn't hold it. */
+  int sun_mode = -1;
+  scene_->for_each([&](GameObject &g) {
+    if (sun_mode >= 0 || !g.active_in_hierarchy()) return;
+    if (const Light *l = g.get<Light>())
+      if (l->enabled && l->type == 0) sun_mode = l->mode;
+  });
+  if (sun_mode == 0) {
+    say("Live GI: running (the Directional Light is Realtime, so its bounce isn't baked)");
+    return true;
+  }
+  if (lighting_out_of_date()) {
+    say("Live GI: running until the next bake (the scene changed since it)");
+    return true;
+  }
+  say("Live GI: idle (the bake covers the scene: nothing is traced per frame)");
+  return false;
 }
 
 /* Gives a drawn item its lightmap when the object was baked as it is now. */
@@ -201,6 +234,14 @@ void Editor::bake_start() {
   s.bounces = ls.bounces;
   s.denoise = ls.denoise;
   s.indirect_intensity = ls.indirect_intensity;
+  /* Task 0018: on the first ticked GPU when Render > Device is GPU Compute (as F12 renders); the CPU
+   * otherwise, or after a GPU error. */
+  bake_gpu_ = -1;
+  if (scene_->render.device == 1 && gpu::available()) {
+    const std::vector<int> g = enabled_gpus();
+    if (!g.empty()) bake_gpu_ = g[0];
+  }
+  s.gpu_device = bake_gpu_;
   bake_key_ = lightmap_scene_key();
   bake_start_ = now_seconds();
   baker_.begin(objects, lights, env_, s);
@@ -258,9 +299,16 @@ void Editor::step_bake() {
     const LightingSettings &ls = scene_->lighting;
     const size_t n = probes_.probe_count();
     do {
-      const size_t slice = std::min<size_t>(n - probe_bake_next_, 1024);
-      probe_bake(probes_, *probe_pt_, bake_lights_, std::max(24, std::min(4096, ls.indirect_samples / 4)), ls.bounces, probe_bake_next_, slice,
-                 ls.indirect_intensity);
+      /* On a GPU, 32,768 probes a slice (their rays at once); on the CPU 1,024. */
+      const int psamples = std::max(24, std::min(4096, ls.indirect_samples / 4));
+      /* On a GPU about 8M rays a slice (their points go up at once: memory), on the CPU 1,024 probes. */
+      const size_t slice = std::min<size_t>(n - probe_bake_next_, bake_gpu_ >= 0 ? std::max<size_t>(1, ((size_t)8 << 20) / (size_t)psamples) : 1024);
+      std::string gerr;
+      probe_bake(probes_, *probe_pt_, bake_lights_, psamples, ls.bounces, probe_bake_next_, slice, ls.indirect_intensity, bake_gpu_, &gerr);
+      if (!gerr.empty()) {
+        Log::warn("Baking probes on the GPU stopped (%s): the CPU bakes the rest", gerr.c_str());
+        bake_gpu_ = -1;
+      }
       probe_bake_next_ += slice;
     } while (probe_bake_next_ < n && t.ms() < budget);
     bake_status_ = strprintf("Baking probes %.0f%%  (%.1f s)", 100.0 * probe_bake_next_ / std::max<size_t>(1, n), now_seconds() - bake_start_);
@@ -387,7 +435,7 @@ bool Editor::bake_probes_begin() {
 void Editor::update_probes_live() {
   const LightingSettings &ls = scene_->lighting;
   const VoxelGIState &vg = vgi_[1].grid.valid() ? vgi_[1] : vgi_[0];
-  if (!ls.realtime_gi || !vg.grid.valid()) {
+  if (!live_gi_needed() || !vg.grid.valid()) {
     probe_live_left_ = 0;
     return;
   }
@@ -418,8 +466,9 @@ void Editor::update_probes_live() {
   if (probes_.empty()) return;
   uint64_t key = 1469598103934665603ull;
   for (const VoxelGIState &st : vgi_) key = (key ^ (st.grid.key + st.assembled * 31 + st.rsm_key * 131)) * 1099511628211ull;
-  key ^= hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) * 1031;
-  const float gp[6] = {ls.gi_radius, ls.gi_intensity, (float)ls.gi_rays, (float)ls.gi_resolution, (float)ls.gi_bounce, (float)ls.gi_sky_occlusion};
+  key ^= (hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) ^ env_key_ * 31) * 1031;  // (a Sky follows the sun)
+  const float gp[7] = {ls.gi_radius, ls.gi_intensity, (float)ls.gi_rays, (float)ls.gi_resolution, (float)ls.gi_bounce, (float)ls.gi_sky_occlusion,
+                       (float)ls.gi_device};
   for (float v : gp) {
     uint32_t b;
     std::memcpy(&b, &v, 4);
@@ -430,12 +479,83 @@ void Editor::update_probes_live() {
     probe_live_left_ = probes_.probe_count();
   }
   if (probe_live_left_ == 0) return;
-  const size_t budget = std::min<size_t>(probe_live_left_, 4096);
-  probe_cursor_ = probe_live_update(probes_, vg.grid, vg.rsm.valid() ? &vg.rsm : nullptr, env_, vg.frame.params, probe_cursor_, budget);
+  /* On the GPU the whole volume in one frame; on the CPU 4,096 probes a frame. */
+  VoxelGiGpu *gpu = gi_gpu(vgi_[&vg - vgi_]);
+  const size_t budget = gpu ? probe_live_left_ : std::min<size_t>(probe_live_left_, 4096);
+  std::string gerr;
+  probe_cursor_ = probe_live_update(probes_, vg.grid, vg.rsm.valid() ? &vg.rsm : nullptr, env_, vg.frame.params, probe_cursor_, budget, gpu, &gerr);
+  if (!gerr.empty()) {
+    Log::warn("Live probes on the GPU stopped (%s): gathering on the CPU", gerr.c_str());
+    gi_gpu_failed_ = true;
+  }
   probe_live_left_ -= budget;
   probe_live_gen_++;
   if (probe_live_left_ == 0) probe_live_ready_ = true;
   ui_.redraw = true;
+}
+
+/* Task 0018: GI Device Auto uses the GPU when there is one (BLENDITY_GI_DEVICE=cpu keeps Auto on the CPU:
+ * the unit tests, so this machine and CI's agree); GPU without one, or after an error, is the CPU. */
+VoxelGiGpu *Editor::gi_gpu(VoxelGIState &st) {
+  const int dev = scene_->lighting.gi_device;
+  if (dev != gi_gpu_device_seen_) {  // choosing a device again tries the GPU again after an error
+    gi_gpu_device_seen_ = dev;
+    gi_gpu_failed_ = false;
+  }
+  if (dev == 1 || gi_gpu_failed_) return nullptr;
+  if (dev == 0) {
+    const char *e = std::getenv("BLENDITY_GI_DEVICE");
+    if (e && to_lower(e) == "cpu") return nullptr;
+  }
+  if (!gpu::available() || gpu::devices().empty()) return nullptr;
+  std::string err;
+  if (!st.gpu) {
+    st.gpu = std::make_unique<VoxelGiGpu>();
+    if (!st.gpu->init(gpu::devices()[0].index, &err)) {
+      Log::warn("Realtime GI can't use the GPU (%s): gathering on the CPU", err.c_str());
+      gi_gpu_failed_ = true;
+      st.gpu.reset();
+      return nullptr;
+    }
+    gi_gpu_name_ = gpu::devices()[0].name;
+  }
+  /* env_key_: update_environment()'s key, which covers the sun when the world is a Sky (it's drawn from it). */
+  const uint64_t env_hash = (hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) ^ env_key_ * 31) | 1;
+  if (!st.gpu->set_grid(st.grid, (st.grid.key * 31 + st.assembled) | 1, &err) ||
+      !st.gpu->set_rsm(st.rsm.valid() ? &st.rsm : nullptr, st.rsm.valid() ? (st.rsm_key | 1) : 2, &err) || !st.gpu->set_environment(env_, env_hash, &err)) {
+    Log::warn("Realtime GI on the GPU stopped (%s): gathering on the CPU", err.c_str());
+    gi_gpu_failed_ = true;
+    return nullptr;
+  }
+  return st.gpu.get();
+}
+
+/* Realtime lightmaps (task 0016): once per frame, each kind of view's texels gather again through its voxel
+ * grid, a slice at a time, whenever the grid, the sun, the world or the GI settings changed. A finished
+ * pass is published and the views redraw with it. */
+void Editor::update_realtime_lightmaps() {
+  rtlm_busy_ = false;
+  if (!live_gi_needed()) return;
+  const LightingSettings &ls = scene_->lighting;
+  const uint64_t env_hash = hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) ^ env_key_ * 31;  // (a Sky follows the sun)
+  for (VoxelGIState &st : vgi_) {
+    if (!st.grid.valid() || st.rtlm.layout_key == 0) continue;
+    uint64_t key = (st.grid.key + st.assembled * 31 + st.rsm_key * 131) * 1099511628211ull ^ env_hash * 1031 ^ (uint64_t)ls.gi_device << 60;  // (a new device gathers again)
+    const float gp[6] = {ls.gi_radius, ls.gi_intensity, (float)ls.gi_rays, (float)ls.gi_resolution, (float)ls.gi_bounce, (float)ls.gi_sky_occlusion};
+    for (float v : gp) {
+      uint32_t b;
+      std::memcpy(&b, &v, 4);
+      key = (key ^ b) * 1099511628211ull;
+    }
+    VoxelGiGpu *gpu = st.rtlm.pass_done && key == st.rtlm.gather_key ? nullptr : gi_gpu(st);
+    std::string gerr;
+    if (realtime_lightmap_update(st.rtlm, st.grid, st.rsm.valid() ? &st.rsm : nullptr, env_, st.frame.params, key, 16384, gpu, &gerr)) ui_.redraw = true;
+    if (!gerr.empty()) {
+      Log::warn("Realtime GI on the GPU stopped (%s): gathering on the CPU", gerr.c_str());
+      gi_gpu_failed_ = true;
+    }
+    rtlm_busy_ = rtlm_busy_ || !st.rtlm.pass_done;
+  }
 }
 
 /* Auto Generate (Unity's): once the lighting is out of date and has stopped changing for a second,
