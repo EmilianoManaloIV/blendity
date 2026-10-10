@@ -1,6 +1,6 @@
 # 0014: Global illumination on the GPU: compute for gathers and bakes, the CPU as reference
 
-- **Status:** proposed (task 0018, approved 2026-10-10)
+- **Status:** accepted (task 0018; signed off by the user on 2026-10-10, small GPU / CPU differences included)
 - **Date:** 2026-10-10
 - **Requirements:** R-05, Q-01
 

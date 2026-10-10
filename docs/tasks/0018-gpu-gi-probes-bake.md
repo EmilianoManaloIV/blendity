@@ -1,6 +1,7 @@
 # 0018: Voxel GI, probes and baking on the GPU (Vulkan compute), where measured faster
 
-- **Status:** in review (approved 2026-10-10)
+- **Status:** in review (approved 2026-10-10; signed off 2026-10-10: GPU and CPU may differ slightly as long as it is barely
+  noticeable)
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0014, GI on the GPU
 - **Model:** main session (Opus)

@@ -1,6 +1,7 @@
 # 0017: Baked lighting with no live cost: a Baked-only view and cheap probe sampling
 
-- **Status:** in review (approved 2026-10-10)
+- **Status:** in review (approved 2026-10-10; signed off 2026-10-10: shared probe samples need not be pixel-exact, as the path
+  tracer is there for exact pictures)
 - **Requirements:** R-05, Q-01
 - **Decisions:** none needed (no new subsystem)
 - **Model:** main session (Opus)

@@ -59,7 +59,7 @@ One entry per round of requests, newest first: what was asked, what changed, and
     - Realtime lightmaps are capped at about 2M texels.
     - Stale "Rendered" tips are gone.
 
-**Not as the approved specs said (recorded in each spec's "As built"):**
+**Not as the approved specs said (recorded in each spec's "As built"; all signed off by the user on 2026-10-10):**
 - **0016:** no voxel ray jitter or occlusion fade; the maps' blur and bilinear filter smooth mapped
   surfaces, and the fallback keeps its look.
 - **0017:** shared probe samples differ from per-pixel ones by up to 8 levels on 0.03% of pixels.

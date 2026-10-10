@@ -1,6 +1,6 @@
 # 0016: Realtime lightmaps (per texel) first, the per-pixel voxel GI as the fallback
 
-- **Status:** in review (approved 2026-10-10)
+- **Status:** in review (approved 2026-10-10; the As built deviations signed off by the user on 2026-10-10: "effective")
 - **Requirements:** R-05, R-12
 - **Decisions:** ADR 0011, amended (per texel first, per pixel as the fallback)
 - **Model:** main session (Opus)

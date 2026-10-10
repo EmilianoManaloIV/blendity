@@ -80,6 +80,7 @@ rasterized on the CPU, and CI has no GPU.
 - **Probe volumes (task 0014) can gather at probe positions** with the same `voxel_gi_gather`.
 
 ## Amendment (2026-10-10, task 0016): realtime lightmaps first, per pixel as the fallback
+Accepted by the user on 2026-10-10.
 The user asked for the faster option first, with a fallback, and reported that GI looked blocky in the
 Scene view: the per-pixel pass traces at ¼ of the screen, so a zoomed-out object is only a few cells
 tall.
