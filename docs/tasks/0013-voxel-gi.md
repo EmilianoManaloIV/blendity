@@ -1,8 +1,8 @@
 # 0013: Voxel-based global illumination (Thiedemann et al. 2011), CPU reference
 
-- **Status:** approved 2026-10-09
+- **Status:** in review (approved 2026-10-09; deviation below awaits sign-off)
 - **Requirements:** R-05, R-12 (new: realtime GI from the research folder)
-- **Decisions:** ADR 0011, voxel GI subsystem (to write)
+- **Decisions:** ADR 0011, voxel GI subsystem
 - **Model:** main session (Opus)
 - **PR:** (link when opened)
 
@@ -33,6 +33,22 @@ means re-baking by hand. This is Unity's Realtime GI next to Baked GI.
     bake.
 - **Auto Generate** (0012's Lighting window): re-bakes in the background after changes settle (Unity's
   Auto Generate). Voxel GI covers the time in between, so the picture is never wrong while it waits.
+
+## Deviation from the approved spec (2026-10-10, needs the user's sign-off)
+**Realtime lightmaps are not per texel.** Building them showed that the per-pixel pass already covers
+every case they were meant for:
+- Lightmapped objects add the live bounce of lights the bake doesn't hold.
+- An object changed since the bake, or a whole bake made stale by a light or world change, hands over
+  to live voxel GI instead of flat ambient.
+- Objects with no lightmap get live GI.
+
+The cost is per frame rather than spread over texels. Criterion 7's "texels far from it don't restart"
+and the realtime-lightmap resolution therefore don't apply.
+
+The other changes:
+- **Settings:** they live in `LightingSettings` (the Lighting window), not `RenderSettings`.
+- **Code:** the `shade_deferred` refactor (`setup_tri` / `surface_at`) wasn't needed; the receiver
+  pass reconstructs position and normal itself.
 
 ## Scope
 - In (paper sections 3, 4 and 5.1, on the CPU):

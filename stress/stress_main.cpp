@@ -1001,6 +1001,163 @@ static void test_editor_render(Report &rep, const Options &o) {
            "casters or the light change (task 0011).");
 }
 
+/* Draw items with their meshes and materials kept alive (as the unit tests' scenes). */
+struct CfScene {
+  std::vector<MeshPtr> meshes;
+  std::vector<std::vector<MaterialPtr>> mats;
+  std::vector<DrawItem> items;
+  void add(MeshPtr m, const Mat4 &model, uint32_t id, MaterialPtr mat) {
+    meshes.push_back(m);
+    mats.push_back({mat});
+    DrawItem it;
+    it.mesh = &m->render_mesh();
+    it.model = model;
+    it.id = id;
+    items.push_back(it);
+  }
+  void seal() {
+    for (size_t i = 0; i < items.size(); i++) items[i].materials = &mats[i];
+  }
+};
+
+/* Voxel GI (task 0013): the paper's pieces timed one by one, then what it adds to a frame. */
+static void test_vgi(Report &rep, const Options &o) {
+  rep.title("Voxel-based global illumination (Thiedemann et al. 2011)",
+            "256 spheres (24 x 12) and cubes on a 40 m floor. Voxelization, the hierarchical ray test against a level-0 column walk, "
+            "the sun's RSM, and the per-pixel pass's cost in a deferred frame.");
+  std::vector<MeshPtr> keep;
+  CfScene sc;
+  auto white = make_material("White", {0.8f, 0.8f, 0.8f});
+  auto red = make_material("Red", {0.8f, 0.1f, 0.1f});
+  sc.add(primitives::plane(40.0f), Mat4::identity(), 1, white);
+  auto sphere = primitives::uv_sphere(0.5f, 24, 12);
+  auto cube = primitives::cube();
+  for (int i = 0; i < 256; i++)
+    sc.add(i % 2 ? sphere : cube, Mat4::translate({(i % 16 - 8) * 2.2f, 0.5f, (i / 16 - 8) * 2.2f}), (uint32_t)i + 2, i % 7 ? white : red);
+  sc.seal();
+  AABB bounds;
+  for (const DrawItem &it : sc.items) bounds.add(it.mesh->bounds.transformed(it.model));
+  rep.table({"voxel resolution", "voxelize all ms", "re-voxelize one object ms", "build hierarchy ms", "spans"});
+  VoxelGrid grid128;
+  for (int n : {64, 128, 256}) {
+    VoxelGrid g;
+    voxel_grid_fit(g, bounds, n);
+    std::vector<std::vector<VoxelSpan>> spans(sc.items.size());
+    ScopedTimer t;
+    JobSystem::global().parallel_for((int64_t)sc.items.size(), 4, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) voxelize_mesh(g, *sc.items[(size_t)i].mesh, sc.items[(size_t)i].model, spans[(size_t)i]);
+    });
+    const double all = t.ms();
+    const double one = time_ms([&] { voxelize_mesh(g, *sc.items[5].mesh, sc.items[5].model, spans[5]); }, 10);
+    std::vector<const std::vector<VoxelSpan> *> ptrs;
+    size_t total = 0;
+    for (auto &s : spans) ptrs.push_back(&s), total += s.size();
+    const double build = time_ms([&] { voxel_grid_build(g, ptrs); }, 5);
+    rep.row({std::to_string(n), f2(all), f2(one), f2(build), std::to_string(total)});
+    if (n == 128) grid128 = g;
+  }
+  /* The hierarchical test against the level-0 walk on the same random rays (and that they agree). */
+  {
+    const int N = o.quick ? 50000 : 200000;
+    std::vector<Vec3> org(N), dir(N);
+    uint32_t seed = 9;
+    auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+    for (int i = 0; i < N; i++) {
+      org[i] = Vec3(rnd() * 36 - 18, rnd() * 2.0f + 0.05f, rnd() * 36 - 18);
+      dir[i] = normalize(Vec3(rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 2 - 1));
+    }
+    int agree = 0;
+    std::vector<VoxelHit> a(N), b(N);
+    std::vector<uint8_t> ha(N), hb(N);
+    ScopedTimer t1;
+    for (int i = 0; i < N; i++) ha[i] = voxel_trace(grid128, org[i], dir[i], 4.0f, a[i]);
+    const double ms_h = t1.ms();
+    ScopedTimer t2;
+    for (int i = 0; i < N; i++) hb[i] = voxel_trace_columns(grid128, org[i], dir[i], 4.0f, b[i]);
+    const double ms_c = t2.ms();
+    for (int i = 0; i < N; i++) agree += ha[i] == hb[i] && (!ha[i] || (a[i].x == b[i].x && a[i].y == b[i].y && a[i].z == b[i].z));
+    rep.note(strprintf("Rays of 4 m, 1 thread: hierarchical %.1f Mrays/s, level-0 column walk %.1f Mrays/s; they agree on %d of %d rays.",
+                       N / ms_h / 1000.0, N / ms_c / 1000.0, agree, N));
+    /* Long rays across the scene: where skipping empty columns pays. */
+    for (int i = 0; i < N; i++) org[i].y += 1.5f;
+    ScopedTimer t3;
+    int hits_h = 0, hits_c = 0;
+    for (int i = 0; i < N; i++) hits_h += voxel_trace(grid128, org[i], dir[i], 40.0f, a[i]);
+    const double ms_h2 = t3.ms();
+    ScopedTimer t4;
+    for (int i = 0; i < N; i++) hits_c += voxel_trace_columns(grid128, org[i], dir[i], 40.0f, b[i]);
+    const double ms_c2 = t4.ms();
+    rep.note(strprintf("Rays of 40 m, 1 thread: hierarchical %.1f Mrays/s, level-0 column walk %.1f Mrays/s (%d / %d hits).", N / ms_h2 / 1000.0,
+                       N / ms_c2 / 1000.0, hits_h, hits_c));
+  }
+  /* The RSM and the per-pixel pass. */
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+  Rsm rsm;
+  const double rsm_ms = time_ms([&] { render_rsm(rsm, sc.items, sun, bounds, 256); }, 3);
+  rep.note(strprintf("RSM 256 x 256 of %zu objects: %.2f ms (rendered only when the casters or the sun change).", sc.items.size(), rsm_ms));
+  rep.table({"frame", "rays", "GI resolution", "deferred ms", "with voxel GI ms", "GI adds ms"});
+  for (auto [w, h] : o.quick ? std::vector<std::pair<int, int>>{{1280, 720}} : std::vector<std::pair<int, int>>{{1280, 720}, {1920, 1080}, {3840, 2160}})
+    for (int rays : {4, 8, 16})
+      for (int dsv : {2, 4}) {
+        if (o.quick && rays != 8) continue;
+        Image img;
+        img.resize(w, h);
+        RenderTarget rt;
+        rt.attach(img, {0, 0, w, h});
+        Renderer3D r3d;
+        Environment env;
+        VoxelGIFrame fr;
+        fr.grid = &grid128;
+        fr.rsm = &rsm;
+        GiParams p;
+        p.rays = rays;
+        p.downsample = dsv;
+        fr.params = gi_params_sanitized(p);
+        auto frame = [&](bool with) {
+          LightingEnv le;
+          le.lights.push_back(sun);
+          le.environment = &env;
+          le.gi = with ? &fr : nullptr;
+          RasterOptions opt;
+          opt.shade = ShadeMode::Deferred;
+          r3d.begin(&rt, Mat4::look_at({0, 8, -22}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, w / (float)h, 0.1f, 200.0f), le, opt);
+          r3d.clear(0xFF303030u);
+          for (const DrawItem &it : sc.items) r3d.add(it);
+          r3d.flush();
+        };
+        frame(true);
+        const double plain = time_ms([&] { frame(false); }, 3), with = time_ms([&] { frame(true); }, 3);
+        rep.row({strprintf("%dx%d", w, h), std::to_string(rays), dsv == 2 ? "Half" : "Quarter", f2(plain), f2(with), f2(with - plain)});
+      }
+  /* Odd settings and grids never crash. */
+  int problems = 0, runs = 0;
+  uint32_t seed = 31;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  const float odd[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1.0f, 0.0f, 1e9f, 1e-9f, 3.0f};
+  for (int i = 0; i < (o.quick ? 40 : 200); i++) {
+    GiParams p;
+    p.rays = (int)(rnd() * 80) - 10;
+    p.radius = odd[(int)(rnd() * 7) % 7];
+    p.intensity = odd[(int)(rnd() * 7) % 7];
+    p.downsample = (int)(rnd() * 10) - 2;
+    p.specular_occlusion = odd[(int)(rnd() * 7) % 7];
+    p = gi_params_sanitized(p);
+    AABB b;
+    b.add(Vec3(odd[(int)(rnd() * 7) % 7], 0, 0));
+    b.add(Vec3(rnd() * 1e6f, odd[(int)(rnd() * 7) % 7], 1));
+    VoxelGrid g;
+    voxel_grid_fit(g, rnd() < 0.5f ? b : bounds, (int)(rnd() * 400));
+    const GiSample s = voxel_gi_gather(g.valid() ? g : grid128, &rsm, Environment{}, Vec3(odd[(int)(rnd() * 7) % 7], 0.5f, 0), normalize(Vec3(0, 1, rnd())), p,
+                                       (int)(rnd() * 100));
+    if (!(s.sky >= 0.0f && s.sky <= 1.0f) || !(s.bounce.x >= 0.0f) || !std::isfinite(s.bounce.x + s.bounce.y + s.bounce.z)) problems++;
+    runs++;
+  }
+  rep.note(strprintf("Odd settings, bounds and points (NaN / infinite / negative / huge): %d runs, %d problems (a problem: a crash or a sky ratio "
+                     "outside 0..1 or a non-finite bounce)",
+                     runs, problems));
+}
+
 /* Baked lighting (task 0012): what a bake costs as the scene grows, and what a lightmap costs to shade. */
 static void test_bake(Report &rep, const Options &o) {
   rep.title("Baked lighting (Generate Lighting)",
@@ -2528,7 +2685,7 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"vgi", test_vgi},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},

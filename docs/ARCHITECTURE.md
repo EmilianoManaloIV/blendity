@@ -459,6 +459,16 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `RenderTarget::want_hdr / hdr / hdr_view_transform / hdr_exposure` | Linear light before exposure and tone mapping, allocated in `Renderer3D::begin` only when asked (Deferred mode). `shade_deferred` writes it from its row buffer; `clear_environment` writes the HDRI / physical sky radiance; a plain sky and pixels drawn over by `draw_see_through` hold x = -1. `render_camera` asks when the stack `needs_hdr`. `fill_hdr_from_linear` fills it from the path tracer's `linear_rgb()` for filtered F12 renders and the Rendered Camera Preview | EEVEE / Unity HDR render targets |
 | `apply_bloom`, `BloomEffect` | A bright pass with Unity's soft knee and a firefly clamp. The bright pixels are area-averaged to a fixed 540-row base (so the glow covers the same part of the frame at any resolution), then 13-tap downsamples to about 2 px, then back up with a 4-tap tent mixed by Scatter. A pixel whose colour still encodes its HDR value is re-encoded with the glow added in linear light; one an earlier pass changed (posterize, dither, depth of field) gets the glow added in display light on top, so the stack order holds. Pixels it doesn't reach keep their exact value. `clear_environment` writes the sky's radiance into the plane (no seam at silhouettes). The buffers are reused between frames and shrunk when over twice the need | Jimenez 2014, "Next Generation Post Processing in Call of Duty: Advanced Warfare"; Unity URP bloom |
 
+## Voxel GI (round 36, task 0013)
+
+| Piece | What it does | Reference |
+|---|---|---|
+| `VoxelGrid`, `voxel_grid_fit`, `voxelize_mesh`, `voxel_grid_build` (`render/voxel_gi.h/.cpp`) | Binary boundary voxelization: columns along Y, 128 bits deep, n x n (64 / 128 / 256); power-of-two voxels, origin snapped to 8 voxels. An exact conservative span voxelizer (triangle clipped to each column). Levels OR 2 x 2 columns, full depth kept | Thiedemann et al. 2011, sections 3 and 4 (atlas voxelization replaced) |
+| `voxel_trace` (+ `voxel_trace_columns`, `voxel_trace_dda` references) | The hierarchical ray test: skip empty columns at coarse levels, descend on a hit, first set bit along the ray; starts at the level as wide as the ray is long | Section 4.1 / 4.2; Amanatides & Woo 1987 for the reference |
+| `Rsm`, `render_rsm`, `Renderer3D::set_rsm_output` | The sun's reflective shadow map: deferred shading's side output of position, normal and reflected light, with the shadow map's fit | Dachsbacher & Stamminger 2005; section 5.1 |
+| `voxel_gi_gather`, the GI pass in `shade_deferred` | Per receiver (1/2 or 1/4 resolution, 16 interleaved deterministic Hammersley ray sets): bounce = RSM light at hits the sun sees (eps = max(sqrt(3) v, s / cos)), sky = escaping share of the sky's radiance. 4 x 4 geometry-aware blur, upsampled per pixel; `light_surface` picks baked map (+ bounce the bake lacks) > voxel GI > sky | Section 5.1, figure 7 and 12 |
+| `Editor::update_voxel_gi`, `auto_generate_step` | Per-object span cache (render-mesh serial, matrix, grid key), RSM cache (casters, materials, sun); Auto Generate re-bakes a second after the lighting stops changing | ADR 0011 |
+
 ## Baked lighting (round 35, task 0012)
 
 | Piece | What it does | Reference |

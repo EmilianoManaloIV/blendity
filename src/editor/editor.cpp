@@ -386,6 +386,7 @@ void Editor::frame(std::vector<Event> &events) {
   Log::fetch(log_.size(), log_);
 
   ui_.begin_frame(&fb_, now);
+  auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
   auto &c = ui_.canvas;
   c.fill_rect({0, 0, fb_.width, fb_.height}, ui_.theme.border);
   int mh = ui_.row_h() + ui_.px(2);

@@ -4,7 +4,7 @@
 - **Requirements:** R-05, R-11 (new: baked lighting)
 - **Decisions:** ADR 0010, baked lighting data
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/12
 
 ## Goal
 As in Unity:

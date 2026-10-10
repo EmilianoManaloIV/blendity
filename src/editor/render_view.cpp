@@ -31,6 +31,7 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   std::vector<DrawItem> items;
+  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_data_.empty() && lighting_out_of_date();
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -219,8 +220,7 @@ uint64_t Editor::scene_render_hash() {
   mix(&scene_lighting_, 1);
   mix(&scene_->serial, 8);
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
-  const uint64_t baked = scene_->lighting.baked_gi;
-  mix(&baked, 8);
+  mix(&scene_->lighting.baked_gi, 1);
   return h;
 }
 
@@ -318,6 +318,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
       env.shadow = sm;
     }
   }
+  if (scene_lights && scene_->lighting.realtime_gi) env.gi = update_voxel_gi(items, env, game);
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);
@@ -791,7 +792,133 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam) {
   }
   h ^= hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }) * 31;
   h ^= hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) * 131;
+  h ^= hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }) * 1031;  // baked and realtime GI settings
   return h;
+}
+
+/* ------------------------------------------------------- voxel GI (task 0013) */
+
+/* The voxel grid and the sun's reflective shadow map for these items, each rebuilt only when what it
+ * is drawn from changed: an object's voxels when its mesh or place did (the paper's static / dynamic
+ * split), the RSM when the casters, their materials or the sun did. */
+const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, const LightingEnv &env, bool game) {
+  const LightingSettings &ls = scene_->lighting;
+  vgi_last_ = game ? 1 : 0;
+  VoxelGIState &vgi = vgi_[vgi_last_];
+  auto mix = [](uint64_t &h, const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
+  };
+  /* Occluders: what casts a shadow (as the shadow map's casters), but not see-through surfaces. */
+  std::vector<const DrawItem *> occ;
+  AABB bounds;
+  for (const DrawItem &it : items) {
+    bool solid = !it.materials || it.materials->empty();
+    if (it.materials)
+      for (const MaterialPtr &m : *it.materials)
+        if (!m || ((m->opaque() || m->surface == (int)MaterialSurface::Cutout) && m->cast_shadows)) solid = true;
+    if (!solid || !it.mesh) continue;
+    occ.push_back(&it);
+    bounds.add(it.mesh->bounds.transformed(it.model));
+  }
+  const int n = ls.gi_resolution <= 0 ? 64 : ls.gi_resolution == 1 ? 128 : 256;
+  VoxelGrid fit;
+  voxel_grid_fit(fit, bounds, n);
+  if (!fit.valid()) return nullptr;
+  /* Keep the grid while the scene still fits it at the same voxel size (dragging the outermost object
+   * would otherwise move the grid every 8 voxels and re-voxelize everything). */
+  const bool keep = vgi.grid.valid() && vgi.grid.n == fit.n && vgi.grid.voxel == fit.voxel && bounds.min.x >= vgi.grid.origin.x &&
+                    bounds.min.y >= vgi.grid.origin.y && bounds.min.z >= vgi.grid.origin.z &&
+                    bounds.max.x <= vgi.grid.origin.x + fit.n * fit.voxel && bounds.max.y <= vgi.grid.origin.y + VoxelGrid::kDepth * fit.voxel &&
+                    bounds.max.z <= vgi.grid.origin.z + fit.n * fit.voxel;
+  if (!keep && fit.key != vgi.grid.key) {  // a new grid: every object's voxels are re-made
+    vgi.grid = std::move(fit);
+    vgi.objects.clear();
+    vgi.assembled = 0;
+  }
+  uint64_t assembled = vgi.grid.key;
+  std::vector<const std::vector<VoxelSpan> *> spans;
+  for (const DrawItem *it : occ) {
+    uint64_t key = vgi.grid.key;
+    mix(key, &it->mesh->serial, 8);
+    mix(key, it->model.m, sizeof(it->model.m));
+    VoxelObject &o = vgi.objects[it->id];
+    if (o.key != key || it->mesh->serial == 0) {
+      voxelize_mesh(vgi.grid, *it->mesh, it->model, o.spans);
+      o.key = key;
+      vgi.voxelized++;
+    }
+    mix(assembled, &key, 8);
+    spans.push_back(&o.spans);
+  }
+  if (vgi.objects.size() > occ.size() * 2 + 16) {  // forget objects that are gone
+    std::unordered_set<uint64_t> live;
+    for (const DrawItem *it : occ) live.insert(it->id);
+    for (auto it = vgi.objects.begin(); it != vgi.objects.end();)
+      it = live.count(it->first) ? std::next(it) : vgi.objects.erase(it);
+  }
+  if (assembled != vgi.assembled) {
+    voxel_grid_build(vgi.grid, spans);
+    vgi.assembled = assembled;
+    vgi.assemblies++;
+  }
+  /* The RSM: the first directional light, as the shadow map. */
+  const RenderLight *sun = nullptr;
+  for (const RenderLight &l : env.lights)
+    if (l.type == RenderLight::Directional) {
+      sun = &l;
+      break;
+    }
+  const int rsm_res = std::max(32, std::min(2048, ls.gi_rsm_resolution));
+  if (ls.gi_bounce && sun) {
+    uint64_t key = 1469598103934665603ull;
+    for (const DrawItem *it : occ) {
+      mix(key, &it->mesh->serial, 8);
+      mix(key, it->model.m, sizeof(it->model.m));
+      if (it->materials)
+        for (const MaterialPtr &m : *it->materials) {
+          const uint64_t mv[2] = {(uint64_t)(uintptr_t)m.get(), m ? m->version : 0};
+          mix(key, mv, sizeof(mv));
+        }
+    }
+    mix(key, &sun->direction, sizeof(Vec3));
+    mix(key, &sun->color, sizeof(Vec3));
+    mix(key, &sun->intensity, sizeof(float));
+    mix(key, &rsm_res, sizeof(int));
+    if (key != vgi.rsm_key) {
+      std::vector<DrawItem> casters;
+      for (const DrawItem *it : occ) casters.push_back(*it);
+      AABB b;
+      for (const DrawItem &c : casters) b.add(c.mesh->bounds.transformed(c.model));
+      render_rsm(vgi.rsm, casters, *sun, b, rsm_res);
+      vgi.rsm_key = key;
+      vgi.rsm_renders++;
+    }
+  }
+  else {
+    vgi.rsm = Rsm{};
+    vgi.rsm_key = 0;
+  }
+  GiParams p;
+  p.rays = ls.gi_rays;
+  p.radius = ls.gi_radius;
+  p.intensity = ls.gi_intensity;
+  p.sky_occlusion = ls.gi_sky_occlusion;
+  p.bounce = ls.gi_bounce;
+  p.downsample = ls.gi_downsample == 0 ? 2 : 4;
+  p.specular_occlusion = ls.gi_specular_occlusion;
+  vgi.frame.params = gi_params_sanitized(p);
+  vgi.frame.grid = &vgi.grid;
+  vgi.frame.rsm = vgi.rsm.valid() ? &vgi.rsm : nullptr;
+  /* Lightmapped surfaces add the bounce of a sun the bake doesn't hold (Realtime, or added since). */
+  vgi.frame.bounce_not_baked = true;
+  if (sun && !lighting_data_.empty() && ls.baked_gi) vgi.frame.bounce_not_baked = sun->bake_mode == 0;
+  return &vgi.frame;
 }
 
 /* ------------------------------------------------------- view render cache */
@@ -809,6 +936,7 @@ uint64_t Editor::frame_scene_hash() {
   auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
   mix(hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }));
   mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
+  mix(hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }));  // baked and realtime GI settings
   return h;
 }
 
