@@ -136,7 +136,28 @@ void LightingSettings::reflect(Reflector &r) {
   r.field("Denoise", denoise);
   r.field("Indirect Intensity", indirect_intensity, 0.01f, 0.0f, 100.0f);
   r.field("Auto Generate", auto_generate);
-  r.help("Re-bake by itself after changes settle (Unity: Auto Generate). Takes effect with realtime GI (task 0013).");
+  r.help("Re-bake by itself a second after changes stop (Unity: Auto Generate). Realtime GI covers the time in between.");
+  r.field("Realtime GI", realtime_gi);
+  r.help("Voxel-based global illumination (Thiedemann et al., I3D 2011): one bounce of the sun's light and the sky's\n"
+         "occlusion, live in the rasterized views. Objects without a valid lightmap use it, and lightmapped ones get\n"
+         "the bounce of lights the bake doesn't hold. Nothing to bake: moving lights and objects updates it.");
+  if (realtime_gi || r.all_fields()) {
+    static const char *res[] = {"64", "128", "256"};
+    r.enumeration("Voxel Resolution", gi_resolution, res, 3);
+    r.help("Voxel columns per side over the scene (128 deep). More is finer and slower.");
+    r.field("GI Radius", gi_radius, 0.05f, 0.01f, 1000.0f);
+    r.help("How far bounced light and sky occlusion reach, in metres.");
+    r.field("GI Rays", gi_rays, 1, 32);
+    r.field("GI Intensity", gi_intensity, 0.01f, 0.0f, 10.0f);
+    r.field("Sky Occlusion", gi_sky_occlusion);
+    r.field("Bounce", gi_bounce);
+    static const char *ds[] = {"Half", "Quarter"};
+    r.enumeration("GI Resolution", gi_downsample, ds, 2);
+    r.help("The screen resolution the rays are traced at, blurred and upsampled to every pixel.");
+    r.field("RSM Resolution", gi_rsm_resolution, 32, 2048);
+    r.help("The sun's reflective shadow map: where its light lands, for the bounce.");
+    r.field("Specular Occlusion", gi_specular_occlusion, 0.01f, 0.0f, 1.0f);
+  }
 }
 
 void EnvironmentSettings::reflect(Reflector &r) {
