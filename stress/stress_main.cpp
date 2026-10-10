@@ -747,6 +747,19 @@ static void test_camera_filters(Report &rep, const Options &o) {
       }, reps);
       rep.row({fi.category + " > " + fi.name, f2(ms)});
     }
+    /* Bloom reads linear light: the render's HDR plane costs this much on its own, and bloom on it. */
+    const double no_hdr = time_ms([&] { draw(frt, nullptr, p); }, reps);
+    frt.want_hdr = true;
+    const double with_hdr = time_ms([&] { draw(frt, nullptr, p); }, reps);
+    BloomParams bp;
+    const std::vector<uint32_t> lit = full.pixels;
+    const double bloom_ms = time_ms([&] {
+      full.pixels = lit;
+      apply_bloom(frt, bp);
+    }, reps);
+    frt.want_hdr = false;
+    rep.row({strprintf("render without / with the HDR plane: %.2f / %.2f ms", no_hdr, with_hdr), f2(with_hdr - no_hdr)});
+    rep.row({"Bloom & glow > Bloom (on the HDR plane)", f2(bloom_ms)});
   }
 
   /* Random stacks (task 0005): 0-4 Retro Console effects, random presets and odd fields, some off,

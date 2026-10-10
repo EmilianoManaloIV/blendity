@@ -429,6 +429,8 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
        [] { return std::make_unique<EdgeOutlineEffect>(); }},
       {CrtEffect::kName, "Stylize", "An old TV: scanlines, a curved tube, phosphor stripes and flicker.", [] { return std::make_unique<CrtEffect>(); }},
       {SharpenEffect::kName, "Stylize", "Crisper edges (an unsharp mask).", [] { return std::make_unique<SharpenEffect>(); }},
+      {BloomEffect::kName, "Bloom & glow", "Light brighter than a threshold spills into the pixels around it: glowing lights, emissive materials, sun glints.",
+       [] { return std::make_unique<BloomEffect>(); }},
   };
   return infos;
 }
@@ -785,6 +787,25 @@ void SharpenEffect::reflect(Reflector &r) { r.field("Amount", amount, 0.01f, 0.0
 void SharpenEffect::contribute(FilterStack &s) const {
   const float a = amount;
   s.passes.push_back([a](RenderTarget &rt, const FilterFrame *) { apply_sharpen(rt, a); });
+}
+
+void BloomEffect::reflect(Reflector &r) {
+  r.field("Intensity", intensity, 0.01f, 0.0f, 100.0f);
+  r.field("Threshold", threshold, 0.01f, 0.0f, 1000.0f);
+  r.help("Brightness (linear light, before exposure) above which things glow. 1 is a white surface in full light:\nemissive materials and lights above it bloom.");
+  r.field("Soft Knee", soft_knee, 0.01f, 0.0f, 1.0f);
+  r.help("0: a hard cut at the threshold. 1: the glow fades in gradually below it.");
+  r.field("Scatter", scatter, 0.01f, 0.0f, 1.0f);
+  r.help("How far the glow spreads: low keeps it tight round the light, high gives a wide haze.");
+  r.field("Clamp", clamp, 1.0f, 0.0f, 65000.0f);
+  r.help("Caps single very bright pixels so they don't blow up into large blobs.");
+  r.color("Tint", tint);
+}
+void BloomEffect::contribute(FilterStack &s) const {
+  BloomParams p;
+  p.intensity = intensity, p.threshold = threshold, p.soft_knee = soft_knee, p.scatter = scatter, p.clamp = clamp, p.tint = tint;
+  s.needs_hdr = true;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_bloom(rt, p); });
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "camera_filter.h"
 
+#include "../core/core.h"
 #include "../core/jobs.h"
 #include "../image/image.h"
 #include "display.h"
@@ -452,6 +453,203 @@ void apply_crt(RenderTarget &rt, const CrtParams &p, const FilterFrame *frame) {
     float m = bright * ((y & 1) ? 1.0f - scan : 1.0f);  // every other row dark: scanlines
     for (int k = 0; k < 3; k++) c[k] *= m * (x % 3 == k ? 1.0f : 1.0f - mask);  // aperture grille: one phosphor per column
     px = pack(px, clamp8f(c[0]), clamp8f(c[1]), clamp8f(c[2]));
+  });
+}
+
+namespace {
+
+/* A float RGB image for bloom's pyramid; clamped bilinear reads. */
+struct Plane {
+  int w = 0, h = 0;
+  std::vector<Vec3> px;
+  void resize(int W, int H) {  // contents undefined: callers write every pixel (keeps the allocation between frames)
+    w = std::max(1, W), h = std::max(1, H);
+    px.resize((size_t)w * h);
+  }
+  Vec3 at(int x, int y) const {
+    x = x < 0 ? 0 : x >= w ? w - 1 : x;
+    y = y < 0 ? 0 : y >= h ? h - 1 : y;
+    return px[(size_t)y * w + x];
+  }
+  Vec3 bilinear(float fx, float fy) const {  // pixel-space (centres at +0.5)
+    fx -= 0.5f, fy -= 0.5f;
+    const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+    const float tx = fx - x0, ty = fy - y0;
+    if (x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h) {  // inside: no clamping
+      const Vec3 *r0 = &px[(size_t)y0 * w + x0], *r1 = r0 + w;
+      return (r0[0] * (1 - tx) + r0[1] * tx) * (1 - ty) + (r1[0] * (1 - tx) + r1[1] * tx) * ty;
+    }
+    return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+  }
+};
+
+/* Half the size, with the 13-tap filter (a centre box weighted 0.5 and four corner boxes 0.125 each),
+ * which keeps the glow from flickering as things move by a pixel. */
+void downsample13(const Plane &src, Plane &dst) {
+  dst.resize((src.w + 1) / 2, (src.h + 1) / 2);
+  JobSystem::global().parallel_for(dst.h, 8, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < dst.w; x++) {
+        const float cx = (x + 0.5f) * 2.0f, cy = (y + 0.5f) * 2.0f;
+        auto s = [&](float dx, float dy) { return src.bilinear(cx + dx, cy + dy); };
+        const Vec3 a = s(-2, -2), b = s(0, -2), c = s(2, -2), d = s(-1, -1), e = s(1, -1), f = s(-2, 0), g = s(0, 0), h = s(2, 0),
+                   i = s(-1, 1), j = s(1, 1), k = s(-2, 2), l = s(0, 2), m = s(2, 2);
+        dst.px[(size_t)y * dst.w + x] = (d + e + i + j) * 0.125f + (a + b + f + g) * 0.03125f + (b + c + g + h) * 0.03125f +
+                                        (f + g + k + l) * 0.03125f + (g + h + l + m) * 0.03125f;
+      }
+  });
+}
+
+/* A tent filter of src read at dst's resolution: four bilinear reads half a texel either side. Their
+ * average has 1-2-1 weights when the point sits on a texel centre, and stays centred (slightly
+ * narrower) between them, as at a 2x step. */
+Vec3 tent_up(const Plane &src, int x, int y, float scale_x, float scale_y) {
+  const float fx = (x + 0.5f) * scale_x, fy = (y + 0.5f) * scale_y;
+  return (src.bilinear(fx - 0.5f, fy - 0.5f) + src.bilinear(fx + 0.5f, fy - 0.5f) + src.bilinear(fx - 0.5f, fy + 0.5f) +
+          src.bilinear(fx + 0.5f, fy + 0.5f)) *
+         0.25f;
+}
+
+}  // namespace
+
+void apply_bloom(RenderTarget &rt, const BloomParams &p) {
+  const int W = rt.width, H = rt.height;
+  const float intensity = std::max(0.0f, std::min(100.0f, fin(p.intensity, 0.0f)));
+  if (!rt.color || W <= 0 || H <= 0 || intensity <= 0.0f) return;
+  const float threshold = std::max(0.0f, std::min(1e6f, fin(p.threshold, 1.0f)));
+  const float knee = threshold * clampf01(fin(p.soft_knee, 0.5f));
+  const float scatter = clampf01(fin(p.scatter, 0.7f));
+  const float cap = std::max(0.0f, fin(p.clamp, 65000.0f));
+  const Vec3 tint{std::max(0.0f, fin(p.tint.x, 1.0f)), std::max(0.0f, fin(p.tint.y, 1.0f)), std::max(0.0f, fin(p.tint.z, 1.0f))};
+  const bool have_hdr = rt.hdr.size() >= (size_t)W * H;
+  const ViewTransform vt = have_hdr ? rt.hdr_view_transform : ViewTransform::Standard;
+  const float ex = have_hdr ? rt.hdr_exposure : 0.0f, gain = std::exp2(std::max(-30.0f, std::min(30.0f, fin(ex, 0.0f))));
+  const float *lin = srgb_decode_table();
+  /* Reused between frames (allocating ~24 MB at 1080p cost more than the filtering), and given back
+   * when much bigger than needed. Per calling thread, bound to references here: inside the parallel
+   * loops a thread_local would name each worker's own (empty) copy. */
+  static thread_local Plane bright_buf;
+  static thread_local std::vector<Plane> mips_buf;
+  static thread_local std::vector<Vec3> up_buf;
+  static thread_local std::vector<uint8_t> current_buf;
+  Plane &bright = bright_buf;
+  std::vector<Plane> &mips = mips_buf;
+  std::vector<Vec3> &up = up_buf;
+  std::vector<uint8_t> &current = current_buf;
+  auto fit = [](auto &v, size_t n) {
+    v.resize(n);
+    if (v.capacity() > 2 * n + 4096) v.shrink_to_fit();
+  };
+  bright.w = W, bright.h = H;
+  fit(bright.px, (size_t)W * H);
+  fit(current, (size_t)W * H);
+  /* 1. Linear light before exposure for every pixel (the HDR plane, or the 8-bit colour decoded),
+   * through the bright pass with Unity's soft knee. `current` marks pixels whose colour is still
+   * exactly what the HDR value encodes: the composite may re-encode only those. An earlier pass
+   * (posterize, retro dither, depth of field) that changed a pixel keeps its result. */
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    std::vector<uint32_t> enc((size_t)W);
+    for (int64_t y = y0; y < y1; y++) {
+      const uint32_t *row = rt.color + (size_t)y * rt.stride;
+      if (have_hdr) {
+        const Vec3 *hr = &rt.hdr[(size_t)y * W];
+        display::encode_span(&hr[0].x, enc.data(), (size_t)W, vt, ex);
+      }
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        Vec3 c;
+        const bool from_hdr = have_hdr && rt.hdr[i].x >= 0.0f;
+        current[i] = from_hdr && ((enc[(size_t)x] ^ row[x]) & 0xFFFFFFu) == 0;
+        if (from_hdr) c = rt.hdr[i];
+        else {
+          const uint32_t px = row[x];
+          c = Vec3(lin[(px >> 16) & 255], lin[(px >> 8) & 255], lin[px & 255]) / gain;
+        }
+        for (int k = 0; k < 3; k++) c[k] = finite_bits(c[k]) ? std::max(0.0f, c[k]) : 0.0f;
+        const float b = std::max({c.x, c.y, c.z});
+        if (b <= threshold - knee) {  // stays black: most pixels
+          bright.px[i] = Vec3(0.0f);
+          continue;
+        }
+        float soft = std::max(0.0f, std::min(2.0f * knee, b - threshold + knee));
+        soft = soft * soft / (4.0f * knee + 1e-5f);
+        const float k = std::max(soft, b - threshold) / std::max(b, 1e-5f);
+        c = c * std::max(0.0f, k);
+        for (int j = 0; j < 3; j++) c[j] = std::min(c[j], cap);
+        bright.px[i] = c;
+      }
+    }
+  });
+  /* 2. The pyramid starts at a fixed reference size, 540 rows (the frame's aspect, at most 4:1
+   * either way), so the glow covers the same part of the frame at any resolution: a 320 x 240
+   * console render, the small Camera Preview and a 4K F12 render agree. Area-averaged when
+   * shrinking (a small light still counts), bilinear when growing. */
+  const int bh = 540, bw = std::max(135, std::min(2160, (int)std::lround(540.0 * W / H)));
+  if (mips.empty()) mips.resize(1);
+  Plane &base = mips[0];
+  base.w = bw, base.h = bh;
+  fit(base.px, (size_t)bw * bh);
+  JobSystem::global().parallel_for(bh, 8, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < bw; x++) {
+        const double sx0 = (double)x * W / bw, sx1 = (double)(x + 1) * W / bw, sy0 = (double)y * H / bh, sy1 = (double)(y + 1) * H / bh;
+        Vec3 c(0.0f);
+        if (sx1 - sx0 > 1.0 || sy1 - sy0 > 1.0) {
+          const int ax = (int)sx0, bx = std::max(ax + 1, std::min(W, (int)std::ceil(sx1))), ay = (int)sy0,
+                    by = std::max(ay + 1, std::min(H, (int)std::ceil(sy1)));
+          for (int yy = ay; yy < by; yy++)
+            for (int xx = ax; xx < bx; xx++) c += bright.at(xx, yy);
+          c = c / (float)((bx - ax) * (by - ay));
+        }
+        else c = bright.bilinear((float)((sx0 + sx1) * 0.5), (float)((sy0 + sy1) * 0.5));
+        base.px[(size_t)y * bw + x] = c;
+      }
+  });
+  size_t levels = 1;  // halve while both sides stay above 2 (at most 12 levels)
+  for (int lw = bw, lh = bh; lw > 2 && lh > 2 && levels < 12; lw = (lw + 1) / 2, lh = (lh + 1) / 2) levels++;
+  mips.resize(levels);
+  for (size_t lv = 1; lv < levels; lv++) downsample13(mips[lv - 1], mips[lv]);
+  /* 3. Back up the pyramid: each level mixes in the (tent-filtered) level below by Scatter. */
+  for (int lv = (int)mips.size() - 2; lv >= 0; lv--) {
+    const Plane &low = mips[(size_t)lv + 1];
+    Plane &high = mips[(size_t)lv];
+    const float sx = (float)low.w / high.w, sy = (float)low.h / high.h;
+    up.resize((size_t)high.w * high.h);
+    JobSystem::global().parallel_for(high.h, 8, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < high.w; x++) {
+          const size_t i = (size_t)y * high.w + x;
+          up[i] = high.px[i] + (tent_up(low, x, (int)y, sx, sy) - high.px[i]) * scatter;
+        }
+    });
+    high.px.swap(up);
+  }
+  /* 4. Add the glow. Pixels the glow doesn't reach keep their exact value; pixels still as shaded are
+   * re-encoded from their linear light; anything an earlier pass changed gets the glow added in
+   * display light on top of what that pass made. */
+  const Plane &glow = mips[0];
+  const float gx = (float)glow.w / W, gy = (float)glow.h / H;
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) {
+      uint32_t *row = rt.color + (size_t)y * rt.stride;
+      for (int x = 0; x < W; x++) {
+        const Vec3 add = glow.bilinear((x + 0.5f) * gx, (y + 0.5f) * gy) * tint * intensity;
+        if (!(add.x > 1e-6f || add.y > 1e-6f || add.z > 1e-6f)) continue;
+        const size_t i = (size_t)y * W + x;
+        if (current[i]) {
+          const Vec3 c = rt.hdr[i] + add;
+          uint32_t out;
+          display::encode_span(&c.x, &out, 1, vt, ex);
+          row[x] = (row[x] & 0xFF000000u) | (out & 0xFFFFFFu);
+        }
+        else {
+          const uint32_t px = row[x];
+          const Vec3 c = Vec3(lin[(px >> 16) & 255], lin[(px >> 8) & 255], lin[px & 255]) + add * gain;
+          row[x] = (px & 0xFF000000u) | (uint32_t)display::linear_to_srgb8(c.x) << 16 | (uint32_t)display::linear_to_srgb8(c.y) << 8 |
+                   (uint32_t)display::linear_to_srgb8(c.z);
+        }
+      }
+    }
   });
 }
 

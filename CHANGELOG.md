@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 32): Bloom (task 0007)
+
+**Asked:** start task 0007: the Bloom & glow category of the Camera Filters stack.
+
+**Added**
+- **Bloom** in Add Filter (Bloom & glow): light brighter than a threshold spills into the pixels around it.
+  Settings: intensity, threshold, soft knee, scatter (the glow's spread), tint, and a clamp against
+  fireflies. It works from the rasterizer's linear light and from the path tracer's (F12 renders and the
+  finished Rendered Camera Preview).
+- **An HDR plane in the rasterizer:** linear light before exposure and tone mapping, kept only when a
+  camera's stack has a Bloom. The sky and HDRI write their radiance into it too. Without a Bloom nothing is
+  allocated and pictures are bit-identical.
+
+**Fixed (from the review)**
+- **Bloom undid the effects before it.** Placed after Posterize (or a retro dither, or depth of field), it
+  re-encoded the shader's original light and lost their result. It now re-encodes only pixels still as
+  shaded, and adds the glow on top of anything an earlier pass changed. A test checks that Posterize's
+  levels survive.
+- **The glow's size depended on the resolution:** a small Camera Preview glowed far more widely than a 4K
+  render. The pyramid now starts from a fixed 540-row base, so the glow covers the same part of the frame
+  at any size.
+- **A seam at silhouettes against an HDRI or physical sky:** the sky was decoded from 8 bits while the
+  object beside it had full linear light. The sky now writes its radiance into the HDR plane.
+- **Memory:** the reused buffers are given back when much bigger than needed (after a 4K render).
+
+**Checked**
+- 10 tests (9 by the test-engineer, 1 from the review): an emissive quad above the threshold glows, falling
+  off with distance, and nothing changes below it; more intensity adds more light and more scatter
+  spreads it; no Bloom means no HDR plane and identical pictures; the stack order holds; Posterize's levels
+  survive a later Bloom; odd values and 1x1 / 2x2 frames are safe; save, load, undo and Add Filter; a
+  path-traced F12 glows. Several check every pixel, which is why the count jumps.
+- Unit checks: Windows 60624, Linux 60600, sanitizer build 60522; 0 failed.
+- Stress `filters` (1080p, Windows / Linux): Bloom 14.3 / 15.9 ms on decoded colour, 14.0 / 12.9 ms on the
+  HDR plane; the HDR plane itself costs 2.5 / 1.6 ms a frame when asked for. Random stacks of every effect type: 300 runs, 0 problems.
+
 ## 2026-10-09 (round 31): Color, Lens and Stylize camera filters (task 0006)
 
 **Asked:** start task 0006: the Color, Lens and Stylize categories of the Camera Filters stack. Animated

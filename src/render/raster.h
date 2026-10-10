@@ -138,6 +138,13 @@ struct RenderTarget {
   std::vector<float> depth;
   std::vector<uint32_t> ids;
   std::vector<uint32_t> vis;  // deferred: packed triangle reference + 1
+  /* Optional linear light before exposure and tone mapping (camera filters' bloom, task 0007): filled
+   * by deferred shading when want_hdr is set, with the view transform and exposure that encoded the
+   * colour. A pixel it didn't shade (the sky, see-through surfaces) has x = -1. */
+  bool want_hdr = false;
+  std::vector<Vec3> hdr;
+  ViewTransform hdr_view_transform = ViewTransform::Standard;
+  float hdr_exposure = 0.0f;
   void attach(Image &img, const Recti &r);
   void make_depth_only(int w, int h);
   void resize_planes();

@@ -309,7 +309,9 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, con
     filter_rt_.attach(filter_img_, {0, 0, iw, ih});
     t = &filter_rt_;
   }
+  t->want_hdr = fs.needs_hdr;  // bloom reads linear light (only allocated when asked)
   render_deferred(r3d, *t, v, pp, eye, game, scene_lights, cam, &fs);
+  t->want_hdr = false;
   if (cam) camera_dof(*t, v, pp, eye, forward, cam, a2, cam->vertical_fov_deg(a2));
   FilterFrame frame;
   frame.inv_view_proj = (pp * v).inverse();
@@ -613,6 +615,16 @@ void Editor::step_final_render() {
   }
 }
 
+/* A path tracer's linear output (w x h x 3, before exposure) as a target's HDR plane, for bloom. */
+void Editor::fill_hdr_from_linear(RenderTarget &rt, const std::vector<float> &lin, ViewTransform vt, float exposure) {
+  const size_t n = (size_t)rt.width * rt.height;
+  if (lin.size() < n * 3) return;
+  rt.hdr.resize(n);
+  for (size_t i = 0; i < n; i++) rt.hdr[i] = Vec3(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
+  rt.hdr_view_transform = vt;
+  rt.hdr_exposure = exposure;
+}
+
 void Editor::resolve_final_render(bool finished) {
   const bool denoise = scene_->render.denoise;
   if (!render_filtered_) {
@@ -627,10 +639,14 @@ void Editor::resolve_final_render(bool finished) {
   /* Through camera filters: the small image, its passes (no depth: no fog), then scaled up.
    * No float result: a retro image is an 8-bit one. */
   Image &s = render_small_;
-  if (finished) final_pt_.resolve_rgb(final_pt_.linear_rgb(denoise), s.pixels.data(), s.width);
-  else final_pt_.resolve(s.pixels.data(), s.width, false);
   RenderTarget rt;
   rt.attach(s, {0, 0, s.width, s.height});
+  if (finished) {
+    const std::vector<float> lin = final_pt_.linear_rgb(denoise);
+    final_pt_.resolve_rgb(lin, s.pixels.data(), s.width);
+    if (render_filters_.needs_hdr) fill_hdr_from_linear(rt, lin, final_pt_.settings().view_transform, final_pt_.settings().exposure);
+  }
+  else final_pt_.resolve(s.pixels.data(), s.width, false);
   for (const FilterPass &pass : render_filters_.passes) pass(rt, nullptr);
   upscale_nearest(s.pixels.data(), s.width, s.height, s.width, render_img_.pixels.data(), render_img_.width, render_dst_);
 }
@@ -780,6 +796,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       if (done >= target) {
         std::vector<float> lin = cam_preview_pt_.linear_rgb(rs.denoise);
         cam_preview_pt_.resolve_rgb(lin, traced_img.pixels.data(), tw);
+        if (filters.needs_hdr) cam_preview_lin_ = std::move(lin);  // the bloom pass below reads it
         cam_preview_done_ = true;
       }
       else {
@@ -790,6 +807,8 @@ void Editor::draw_camera_preview(const Recti &view) {
         /* The filters' colour passes (no depth: no fog), scaled up into the inset. */
         RenderTarget trt;
         trt.attach(traced_img, {0, 0, tw, th});
+        if (filters.needs_hdr && cam_preview_done_)
+          fill_hdr_from_linear(trt, cam_preview_lin_, cam_preview_pt_.settings().view_transform, cam_preview_pt_.settings().exposure);
         for (const FilterPass &pass : filters.passes) pass(trt, nullptr);
         std::fill(cam_preview_img_.pixels.begin(), cam_preview_img_.pixels.end(), 0xFF000000u);
         upscale_nearest(traced_img.pixels.data(), tw, th, tw, cam_preview_img_.pixels.data(), w, tdst);

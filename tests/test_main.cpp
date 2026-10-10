@@ -168,6 +168,7 @@ static void round29_tests();
 static void round29_review_tests();
 static void round30_tests();
 static void round31_tests();
+static void round32_tests();
 
 int main() {
   register_builtin_components();
@@ -774,6 +775,7 @@ int main() {
   round29_review_tests();
   round30_tests();
   round31_tests();
+  round32_tests();
 
   std::printf("\n%d checks, %d failed\n", g_checks, g_fail);
   return g_fail;
@@ -10936,5 +10938,455 @@ static void round31_tests() {
     CHECK(floor_px > 200);
     CHECK(floor_lines == 0);
     CHECK(box_lines > 0);
+  });
+}
+
+/* ===================================================================== */
+/* Round 32 (task 0007): Bloom, with an HDR plane in the rasterizer       */
+/* ===================================================================== */
+
+namespace {
+/* A bright unlit quad (linear light `lum`, all channels) on a dark background, seen square on. */
+struct R32Scene {
+  CfScene sc;
+  Mat4 v, p;
+  int W, H;
+  R32Scene(float lum, int w = 128, int h = 128, float quad = 1.0f) : W(w), H(h) {
+    sc.add(primitives::quad(quad), Mat4::identity(), 9, cf_unlit({lum, lum, lum}));
+    sc.seal();
+    v = Mat4::look_at({0, 0, -5}, {0, 0, 0}, {0, 1, 0});
+    p = Mat4::perspective(50 * kDeg2Rad, w / (float)h, 0.1f, 50);
+  }
+  void render(Image &img, RenderTarget &rt, bool want_hdr) const {
+    img.resize(W, H);
+    rt.attach(img, {0, 0, W, H});
+    rt.want_hdr = want_hdr;
+    draw(rt);
+  }
+  void draw(RenderTarget &rt) const {
+    Renderer3D r;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env;
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.3f, -1, 0.4f));
+    env.lights.push_back(sun);
+    r.begin(&rt, v, p, env, opt);
+    r.clear(0xFF101010u);
+    for (const DrawItem &it : sc.items) r.add(it);
+    r.flush();
+  }
+  /* The middle row's last bright pixel of the quad (right edge). */
+  int right_edge(const Image &img) const {
+    int e = W / 2;
+    while (e < W - 1 && (int)((img.pixels[(size_t)(H / 2) * W + e + 1] >> 8) & 255) > 100) e++;
+    return e;
+  }
+};
+inline int r32_sum(uint32_t c) { return r31_ch(c, 0) + r31_ch(c, 1) + r31_ch(c, 2); }
+inline long r32_total(const Image &img) {
+  long t = 0;
+  for (uint32_t c : img.pixels) t += r32_sum(c);
+  return t;
+}
+/* A pixel's gain over the render without bloom. */
+inline int r32_gain(const Image &a, const Image &b, int x, int y) {
+  return r32_sum(a.pixels[(size_t)y * a.width + x]) - r32_sum(b.pixels[(size_t)y * b.width + x]);
+}
+/* A copy of `base` with the hdr plane of `src` (as a bloom pass would find it in a render). */
+struct R32Copy {
+  Image img;
+  RenderTarget rt;
+  R32Copy(const Image &base, const RenderTarget &src) {
+    img = base;
+    rt.attach(img, {0, 0, base.width, base.height});
+    rt.hdr = src.hdr;
+    rt.hdr_view_transform = src.hdr_view_transform;
+    rt.hdr_exposure = src.hdr_exposure;
+  }
+};
+}  // namespace
+
+static void round32_tests() {
+  auto cmd = [&](Editor &ed, const std::string &c) {
+    ed.command(c);
+    ed.step_frame_headless();
+  };
+
+  /* ---------------------------------------------------------------- 1 */
+  test("bloom: a bright quad glows into the pixels around it, fading with distance, and a dim one changes nothing", [] {
+    R32Scene s(8.0f);
+    Image base;
+    RenderTarget rb;
+    s.render(base, rb, true);
+    CHECK(rb.hdr.size() >= (size_t)s.W * s.H);
+    if (rb.hdr.size() >= (size_t)s.W * s.H) {
+      CHECK(rb.hdr[(size_t)64 * s.W + 64].x > 4.0f);  // the quad keeps its real light (8), not the clipped 1
+      CHECK(rb.hdr[0].x < 0.0f);                      // the clear colour was not shaded
+    }
+    const int edge = s.right_edge(base);
+    CHECK(edge > 70 && edge < s.W - 40);
+    R32Copy c(base, rb);
+    BloomParams bp;
+    bp.scatter = 0.3f;
+    apply_bloom(c.rt, bp);
+    const int g1 = r32_gain(c.img, base, edge + 2, 64), g2 = r32_gain(c.img, base, edge + 6, 64), g3 = r32_gain(c.img, base, edge + 14, 64);
+    std::printf("    bloom gain at 2, 6, 14 px from the quad: %d, %d, %d\n", g1, g2, g3);
+    CHECK(g1 > 0);
+    CHECK(g1 >= g2 && g2 >= g3);
+    CHECK(g1 > g3);
+    /* Far away (the corners) the faint tail of the widest levels is all that arrives: under 2% of what
+     * the pixel next to the quad gets. (Not exactly 0: the pyramid's top levels cover the whole frame.) */
+    std::printf("    corner gains: %d %d\n", r32_gain(c.img, base, 0, 0), r32_gain(c.img, base, s.W - 1, s.H - 1));
+    CHECK(r32_gain(c.img, base, 0, 0) >= 0 && r32_gain(c.img, base, 0, 0) * 50 < g1);
+    CHECK(r32_gain(c.img, base, s.W - 1, s.H - 1) >= 0 && r32_gain(c.img, base, s.W - 1, s.H - 1) * 50 < g1);
+    /* A dim quad (below the threshold): bit-identical, with or without the plane. */
+    R32Scene dim(0.5f);
+    Image dbase;
+    RenderTarget drb;
+    dim.render(dbase, drb, true);
+    R32Copy d(dbase, drb);
+    apply_bloom(d.rt, BloomParams{});
+    CHECK(d.img.pixels == dbase.pixels);
+    Image plain = dbase;
+    RenderTarget prt;
+    prt.attach(plain, {0, 0, dim.W, dim.H});
+    apply_bloom(prt, BloomParams{});
+    CHECK(plain.pixels == dbase.pixels);
+  });
+
+  /* ---------------------------------------------------------------- 2 */
+  test("bloom: more intensity adds more light, and a larger scatter reaches farther", [] {
+    R32Scene s(8.0f);
+    Image base;
+    RenderTarget rb;
+    s.render(base, rb, true);
+    const int edge = s.right_edge(base);
+    auto run = [&](float intensity, float scatter) {
+      R32Copy c(base, rb);
+      BloomParams bp;
+      bp.intensity = intensity;
+      bp.scatter = scatter;
+      apply_bloom(c.rt, bp);
+      return c.img;
+    };
+    long prev = 0;
+    for (float in : {0.1f, 0.3f, 0.6f, 1.2f}) {
+      const Image im = run(in, 0.5f);
+      const long added = r32_total(im) - r32_total(base);
+      std::printf("    intensity %.1f adds %ld\n", in, added);
+      CHECK(added >= prev);
+      prev = added;
+      size_t darker = 0;
+      for (size_t i = 0; i < im.pixels.size(); i++) darker += r32_sum(im.pixels[i]) < r32_sum(base.pixels[i]);
+      CHECK(darker == 0);  // light is only ever added
+    }
+    CHECK(prev > 0);
+    const Image tight = run(1.0f, 0.1f), wide = run(1.0f, 1.0f);
+    const int x = std::min(s.W - 1, edge + 20);
+    const int gt = r32_gain(tight, base, x, 64), gw = r32_gain(wide, base, x, 64);
+    std::printf("    gain %d px from the quad: scatter 0.1 -> %d, scatter 1 -> %d\n", x - edge, gt, gw);
+    CHECK(gw > gt);
+  });
+
+  /* ---------------------------------------------------------------- 3 */
+  test("bloom: with no Bloom effect, or intensity 0, the picture is bit-identical and no HDR plane is kept", [] {
+    R32Scene s(8.0f);
+    Image a, b, c;
+    RenderTarget ra, rb, rc;
+    s.render(a, ra, false);
+    CHECK(ra.hdr.empty());
+    s.render(b, rb, true);
+    CHECK(!rb.hdr.empty());
+    CHECK(a.pixels == b.pixels);  // asking for the plane doesn't change the colours
+    s.render(c, rc, false);
+    CHECK(rc.hdr.empty() && c.pixels == a.pixels);
+    /* Asking again without it frees the plane on the same target. */
+    rb.want_hdr = false;
+    s.draw(rb);
+    CHECK(rb.hdr.empty());
+    /* Intensity 0 with a plane present changes nothing. */
+    Image bb;
+    RenderTarget rh;
+    s.render(bb, rh, true);
+    BloomParams zero;
+    zero.intensity = 0.0f;
+    apply_bloom(rh, zero);
+    CHECK(bb.pixels == a.pixels);
+    /* Through the stack: only an enabled Bloom asks for the plane. */
+    FilterStack empty;
+    CHECK(!empty.needs_hdr);
+    CameraFilters cf;
+    cf.add(PosterizeEffect::kName);
+    FilterStack ps;
+    cf.contribute(ps);
+    CHECK(!ps.needs_hdr && ps.passes.size() == 1);
+    auto *bl = static_cast<BloomEffect *>(cf.add(BloomEffect::kName));
+    CHECK(bl != nullptr);
+    FilterStack bs;
+    cf.contribute(bs);
+    CHECK(bs.needs_hdr && bs.passes.size() == 2);
+    bl->enabled = false;
+    FilterStack off;
+    cf.contribute(off);
+    CHECK(!off.needs_hdr && off.passes.size() == 1);
+    /* Bloom at intensity 0 in a stack leaves the render untouched. */
+    bl->enabled = true;
+    bl->intensity = 0.0f;
+    FilterStack z;
+    cf.contribute(z);
+    Image zi;
+    RenderTarget zr;
+    s.render(zi, zr, z.needs_hdr);
+    for (auto &pass : z.passes)
+      if (&pass != &z.passes[0]) pass(zr, nullptr);  // skip the posterize pass: only bloom is under test
+    CHECK(zi.pixels == a.pixels);
+  });
+
+  /* ---------------------------------------------------------------- 4 */
+  test("bloom: order in the stack matters, and each order equals applying the passes by hand", [] {
+    R32Scene s(8.0f);
+    Image base;
+    RenderTarget rb;
+    s.render(base, rb, true);
+    BloomParams bp;
+    bp.scatter = 0.4f;
+    R32Copy h1(base, rb), h2(base, rb);
+    apply_posterize(h1.rt, 4);
+    apply_bloom(h1.rt, bp);
+    apply_bloom(h2.rt, bp);
+    apply_posterize(h2.rt, 4);
+    CHECK(h1.img.pixels != h2.img.pixels);
+    /* Bloom after Posterize builds on the posterized picture: it only adds light, so no channel falls
+     * below its posterized value, and pixels the glow doesn't reach keep their posterized level
+     * (re-encoding the shader's HDR value there would undo the posterize). */
+    {
+      R32Copy po(base, rb);
+      apply_posterize(po.rt, 4);
+      size_t lower = 0, kept = 0;
+      for (size_t i = 0; i < po.img.pixels.size(); i++) {
+        const uint32_t a = po.img.pixels[i], b = h1.img.pixels[i];
+        for (int sh = 0; sh <= 16; sh += 8) lower += ((b >> sh) & 255) < ((a >> sh) & 255);
+        kept += a == b;
+      }
+      std::printf("    posterize -> bloom: %zu channels darker, %zu of %zu pixels unchanged\n", lower, kept, po.img.pixels.size());
+      CHECK(lower == 0);
+      CHECK(kept > 0);
+    }
+    auto stacked = [&](const char *first, const char *second) {
+      CameraFilters cf;
+      FilterEffect *e1 = cf.add(first);
+      FilterEffect *e2 = cf.add(second);
+      for (FilterEffect *e : {e1, e2}) {
+        if (auto *b = dynamic_cast<BloomEffect *>(e)) b->scatter = bp.scatter;
+        if (auto *p = dynamic_cast<PosterizeEffect *>(e)) p->levels = 4;
+      }
+      FilterStack st;
+      cf.contribute(st);
+      R32Copy c(base, rb);
+      for (auto &pass : st.passes) pass(c.rt, nullptr);
+      return c.img.pixels;
+    };
+    CHECK(stacked("Posterize", "Bloom") == h1.img.pixels);
+    CHECK(stacked("Bloom", "Posterize") == h2.img.pixels);
+  });
+
+  /* ---------------------------------------------------------------- 5 */
+  test("bloom: odd values (NaN threshold / tint, huge or negative intensity) and odd sizes never crash and keep the picture's size", [] {
+    const float odd[] = {kNaN, kInf, -kInf, 1e30f, -1e30f, -3.0f, 0.0f, 1e-30f};
+    for (int dims = 0; dims < 5; dims++) {
+      const int W = dims == 0 ? 1 : dims == 1 ? 2 : dims == 2 ? 3 : dims == 3 ? 64 : 9;
+      const int H = dims == 0 ? 1 : dims == 1 ? 2 : dims == 2 ? 1 : dims == 3 ? 48 : 31;
+      for (float v : odd)
+        for (int use_hdr = 0; use_hdr < 2; use_hdr++) {
+          R31Target t(W, H);
+          t.random_planes(11);
+          if (use_hdr) {
+            t.rt.hdr.assign((size_t)W * H, Vec3(4.0f));
+            t.rt.hdr[0] = Vec3(-1.0f, 0, 0);
+          }
+          BloomParams p;
+          p.threshold = v;
+          apply_bloom(t.rt, p);
+          p = BloomParams{};
+          p.intensity = v;
+          p.soft_knee = v;
+          p.scatter = v;
+          p.clamp = v;
+          apply_bloom(t.rt, p);
+          p = BloomParams{};
+          p.tint = Vec3(v, 1.0f, v);
+          apply_bloom(t.rt, p);
+          p.tint = Vec3(v);
+          p.intensity = 5.0f;
+          apply_bloom(t.rt, p);
+          CHECK(t.rt.width == W && t.rt.height == H && (int)t.img.pixels.size() == W * H);
+          for (uint32_t c : t.img.pixels) CHECK((c >> 24) == 0xFF);
+        }
+    }
+    RenderTarget none;
+    apply_bloom(none, BloomParams{});
+    CHECK(true);
+  });
+
+  test("bloom: a target that is a window into a larger image (row stride) only changes inside the window", [] {
+    Image big;
+    big.resize(40, 24);
+    std::fill(big.pixels.begin(), big.pixels.end(), 0xFF202020u);
+    RenderTarget rt;
+    rt.attach(big, {8, 5, 20, 12});
+    CHECK(rt.stride == 40 && rt.width == 20);
+    for (int y = 9; y < 13; y++)
+      for (int x = 14; x < 22; x++) big.pixels[(size_t)y * 40 + x] = 0xFFFFFFFFu;
+    const std::vector<uint32_t> before = big.pixels;
+    BloomParams p;
+    p.threshold = 0.5f;
+    p.intensity = 2.0f;
+    apply_bloom(rt, p);
+    int outside = 0, inside = 0;
+    for (int y = 0; y < 24; y++)
+      for (int x = 0; x < 40; x++) {
+        const bool in = x >= 8 && x < 28 && y >= 5 && y < 17;
+        const bool changed = big.pixels[(size_t)y * 40 + x] != before[(size_t)y * 40 + x];
+        (in ? inside : outside) += changed;
+      }
+    CHECK(outside == 0);
+    CHECK(inside > 0);
+  });
+
+  test("bloom: infinite and NaN values in the HDR plane don't spread NaN into the picture", [] {
+    /* The plane is consistent with the 8-bit grey (0x30 is linear 0.0296) except for the bad pixels. */
+    const float grey = 0.0296f;
+    auto run = [&](Vec3 at_nan) {
+      auto t = std::make_unique<R31Target>(32, 32);
+      t->fill(0xFF303030u);
+      t->rt.hdr.assign(32 * 32, Vec3(grey));
+      t->rt.hdr[5 * 32 + 5] = Vec3(kInf, kNaN, 1e30f);
+      t->rt.hdr[20 * 32 + 20] = at_nan;
+      t->rt.hdr[10 * 32 + 25] = Vec3(-kInf, 5.0f, 5.0f);
+      t->rt.hdr[25 * 32 + 3] = Vec3(50.0f);  // one honest bright pixel
+      apply_bloom(t->rt, BloomParams{});
+      return t;
+    };
+    auto bad = run(Vec3(kNaN));
+    for (uint32_t c : bad->img.pixels) CHECK((c >> 24) == 0xFF);
+    /* A NaN pixel counts as "not shaded" (decoded from its 8-bit grey): same picture as -1 there. */
+    auto ref = run(Vec3(-1.0f, 0, 0));
+    CHECK(bad->img.pixels == ref->img.pixels);
+    /* Infinity in the plane is no light at all: the pixel next to the honest one stays near its grey. */
+    CHECK(r32_sum(bad->at(5, 5)) < 3 * 255);
+  });
+
+  /* ---------------------------------------------------------------- 6 */
+  test("bloom: Add Filter > Bloom on the Main Camera saves, loads, undoes, and the Game view glows around an emissive sphere", [&] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    cmd(ed, "select Sphere");
+    cmd(ed, "material Emissive");
+    cmd(ed, "select Main Camera");
+    cmd(ed, "window Game");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto grab = [&] {
+      const Recti v = ed.scene_view_rect();
+      const Image &fb = ed.framebuffer();
+      std::vector<uint32_t> px;
+      for (int y = v.y + 40; y < v.bottom(); y++)
+        for (int x = v.x; x < v.right(); x++) px.push_back(fb.pixels[(size_t)y * fb.width + x]);
+      return px;
+    };
+    const auto without = grab();
+    CHECK(without.size() > 10000);
+    cmd(ed, "filter add Bloom");
+    CameraFilters *cf = r29_stack(ed);
+    CHECK(cf && cf->effects.size() == 1 && std::string(cf->effects[0]->type_name()) == "Bloom");
+    const FilterEffectInfo *info = find_filter_effect_info("Bloom");
+    CHECK(info && info->category == std::string("Bloom & glow") && !info->help.empty());
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto with = grab();
+    CHECK(with.size() == without.size());
+    size_t brighter = 0, darker = 0;
+    long gain = 0;
+    for (size_t i = 0; i < std::min(with.size(), without.size()); i++) {
+      const int d = r32_sum(with[i]) - r32_sum(without[i]);
+      brighter += d > 0;
+      darker += d < 0;
+      gain += d;
+    }
+    std::printf("    Game view with bloom: %zu pixels brighter, %zu darker, total %+ld\n", brighter, darker, gain);
+    CHECK(brighter > 50);
+    CHECK(darker == 0);
+    CHECK(gain > 0);
+    /* Settings save and load. */
+    cmd(ed, "set CameraFilters.E0Intensity 1.5");
+    cmd(ed, "set CameraFilters.E0Threshold 2.5");
+    cmd(ed, "set CameraFilters.E0Scatter 0.2");
+    const std::string text = save_scene_text(ed.scene());
+    Scene loaded;
+    std::string err;
+    CHECK(load_scene_text(text, loaded, err));
+    GameObject *lc = loaded.find_by_name("Main Camera");
+    CHECK(lc != nullptr);
+    if (lc) {
+      CameraFilters *lcf = lc->get<CameraFilters>();
+      CHECK(lcf && lcf->effects.size() == 1);
+      if (lcf && lcf->effects.size() == 1) {
+        auto *b = dynamic_cast<BloomEffect *>(lcf->effects[0].get());
+        CHECK(b != nullptr);
+        if (b) {
+          CHECK_NEAR(b->intensity, 1.5f, 1e-5);
+          CHECK_NEAR(b->threshold, 2.5f, 1e-5);
+          CHECK_NEAR(b->scatter, 0.2f, 1e-5);
+        }
+      }
+      CHECK(save_scene_text(loaded) == text);
+    }
+    /* Undo: the three sets, then the add. */
+    for (int i = 0; i < 3; i++) cmd(ed, "undo");
+    cf = r29_stack(ed);
+    CHECK(cf && cf->effects.size() == 1);
+    if (cf && cf->effects.size() == 1) CHECK_NEAR(static_cast<BloomEffect *>(cf->effects[0].get())->intensity, 0.6f, 1e-6);
+    cmd(ed, "undo");
+    cf = r29_stack(ed);
+    CHECK(cf == nullptr || cf->effects.empty());
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(grab() == without);  // and the picture is the plain one again
+  });
+
+  test("bloom: a path-traced F12 render through a bloom camera glows around an emissive object", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    cmd(ed, "select Sphere");
+    cmd(ed, "material Emissive");
+    cmd(ed, "select Main Camera");
+    ed.command("set Render.RenderEngine Path");
+    ed.command("set Render.Samples 2");
+    ed.command("set Render.Denoise false");
+    /* Renders on a worker: step frames until the image has stopped changing for a while. */
+    auto render = [&] {
+      ed.command("render");
+      uint64_t prev = 0;
+      int still = 0;
+      for (int i = 0; i < 6000 && still < 25; i++) {
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        const Image &im = ed.render_image_for_test();
+        if (im.pixels.empty()) continue;
+        const uint64_t h = cf_hash(im);
+        still = (h == prev) ? still + 1 : 0;
+        prev = h;
+      }
+      return ed.render_image_for_test();
+    };
+    const Image plain = render();
+    CHECK(!plain.pixels.empty());
+    cmd(ed, "filter add Bloom");
+    const Image glow = render();
+    CHECK(glow.width == plain.width && glow.height == plain.height);
+    if (glow.width != plain.width || glow.height != plain.height || plain.pixels.empty()) return;
+    const long a = r32_total(plain), b = r32_total(glow);
+    std::printf("    F12 path traced: channel total %ld plain, %ld with bloom (%+.2f%%)\n", a, b, 100.0 * (b - a) / std::max(1L, a));
+    CHECK(b > a);
   });
 }

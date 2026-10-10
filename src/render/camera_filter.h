@@ -37,6 +37,7 @@ struct FilterStack {
   bool affine_uv = false;
   TexOverride tex;
   bool screen_door = false;
+  bool needs_hdr = false;  // a pass reads RenderTarget::hdr (bloom): the render fills it
   /* Internal resolution: 0 = the view's own. Fill keeps `height` rows and gives the width the
    * view's aspect (square pixels); Letterbox renders width x height and fits it, with bars. */
   enum Fit { Fill = 0, Letterbox = 1 };
@@ -117,5 +118,20 @@ struct CrtParams {
 };
 void apply_crt(RenderTarget &rt, const CrtParams &p, const FilterFrame *frame);
 void apply_sharpen(RenderTarget &rt, float amount);
+
+/* ---- Bloom (task 0007) ---- */
+struct BloomParams {
+  float intensity = 0.6f;    // how much of the glow is added
+  float threshold = 1.0f;    // linear light (before exposure) above which pixels glow
+  float soft_knee = 0.5f;    // 0: a hard cut at the threshold; 1: a gentle start
+  float scatter = 0.7f;      // 0..1: how far the glow spreads
+  float clamp = 65000.0f;    // limits single very bright pixels (fireflies)
+  Vec3 tint{1, 1, 1};        // linear
+};
+/* Light above the threshold spills into the pixels around it: a bright pass, a mip pyramid down
+ * with a 13-tap filter and up with a tent (Jimenez, "Next Generation Post Processing in Call of Duty",
+ * 2014; Unity URP), added to the linear colour and encoded again. Reads rt.hdr where present, else
+ * decodes the 8-bit colour. Pixels the glow doesn't reach keep their exact value. */
+void apply_bloom(RenderTarget &rt, const BloomParams &p);
 
 }  // namespace bl

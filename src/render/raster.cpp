@@ -59,6 +59,12 @@ void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, con
   opt_.tile_size = std::max(8, opt_.tile_size);
   stats_ = {};
   items_.clear();
+  /* Bloom's linear light: allocated here (unshaded = -1) so a sky cleared next can fill it too. */
+  if (rt_ && rt_->want_hdr && opt_.shade == ShadeMode::Deferred && rt_->width > 0 && rt_->height > 0) {
+    rt_->hdr.assign((size_t)rt_->width * rt_->height, Vec3(-1.0f, 0.0f, 0.0f));
+    rt_->hdr_view_transform = env_.view_transform;
+    rt_->hdr_exposure = env_.exposure;
+  }
 }
 
 void Renderer3D::clear(uint32_t color) {
@@ -91,6 +97,8 @@ void Renderer3D::clear_environment(const Mat4 &inv_vp, const Environment &env, V
         hdr[x] = env.radiance(d);
       }
       display::encode_span(&hdr[0].x, row, (size_t)W, vt, exposure);
+      if (rt_->hdr.size() == (size_t)W * H)  // bloom sees the sky's own light (no seam at silhouettes)
+        std::copy(hdr.begin(), hdr.end(), rt_->hdr.begin() + (size_t)y * W);
     }
   });
   js.set_max_threads(saved);
@@ -258,6 +266,7 @@ void Renderer3D::flush() {
 
   const int W = rt_->width, H = rt_->height;
   if (W <= 0 || H <= 0) { items_.clear(); js.set_max_threads(saved_threads); return; }
+  if (!(rt_->want_hdr && opt_.shade == ShadeMode::Deferred) || rt_->hdr.size() != (size_t)W * H) rt_->hdr.clear();  // begin() allocates it
   const int T = opt_.tile_size;
   tiles_x_ = (W + T - 1) / T;
   tiles_y_ = (H + T - 1) / T;
@@ -974,6 +983,8 @@ void Renderer3D::shade_deferred() {
       row_px.resize(row_hdr.size());
       display::encode_span(&row_hdr[0].x, row_px.data(), row_hdr.size(), env_.view_transform, env_.exposure);
       for (size_t i = 0; i < row_x.size(); i++) crow[row_x[i]] = row_px[i];
+      if (!rt_->hdr.empty())
+        for (size_t i = 0; i < row_x.size(); i++) rt_->hdr[(size_t)y * W + row_x[i]] = row_hdr[i];
     }
   });
 }
@@ -1175,9 +1186,13 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
             return out;
           };
           uint32_t *dst = rt_->color + (size_t)y * rt_->stride + x;
+          auto no_hdr = [&] {  // drawn over: its HDR value no longer holds (decoded from 8-bit instead)
+            if (!rt_->hdr.empty()) rt_->hdr[pi] = Vec3(-1.0f, 0.0f, 0.0f);
+          };
           if (mat.surface == (int)MaterialSurface::Cutout) {
             if (sm.alpha < mat.alpha_clip) continue;  // a hole
             *dst = lit(sm);
+            no_hdr();
             depth[pi] = z;
             ids[pi] = it.id;
           }
@@ -1189,11 +1204,13 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
                * surfaces see it). Nearly clear surfaces vanish. */
               if (a < 0.1f) continue;
               *dst = lit(sm);
+              no_hdr();
               depth[pi] = z;
               ids[pi] = it.id;
               continue;
             }
             *dst = pack(lerp(unpack(*dst), unpack(lit(sm)), a));
+            no_hdr();
             if (a >= 0.3f) ids[pi] = it.id;  // still clickable
           }
           else {
@@ -1208,6 +1225,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
             refl.specular = f0 / 0.08f;  // Principled: F0 = 0.08 * specular
             Vec3 behind = unpack(*dst) * sm.albedo * (1.0f - F);
             *dst = pack(behind + unpack(lit(refl)));
+            no_hdr();
             ids[pi] = it.id;
           }
         }
