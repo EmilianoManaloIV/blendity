@@ -147,6 +147,7 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
   bool contribute_gi = false;
   float scale_in_lightmap = 1.0f;
   bool generate_lightmap_uvs = true;
+  int receive_gi = 0;  // a Contribute GI object's indirect light: 0 Lightmaps, 1 Light Probes (others always probes)
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();
@@ -755,7 +756,23 @@ struct LightingSettings {
   int gi_downsample = 1;          // 0 Half, 1 Quarter resolution
   int gi_rsm_resolution = 256;
   float gi_specular_occlusion = 1.0f;
+  /* Probe volumes (task 0014), as Unity 6's Adaptive Probe Volumes. */
+  float probe_min_spacing = 1.0f;   // metres between probes near geometry
+  float probe_max_spacing = 27.0f;  // ...and in open space
+  float probe_normal_bias = 0.25f;  // metres
+  float probe_view_bias = 0.1f;
+  bool probe_leak_reduction = true; // APV's normal-based leak reduction
+  bool show_probes = false;         // draw them in the Scene view
   void reflect(Reflector &r);
+};
+
+/* Unity's Adaptive Probe Volume: where light probes are placed. Global: around everything that
+ * contributes to GI. Otherwise a box of Size centred on the object. */
+struct ProbeVolume : ComponentBase<ProbeVolume> {
+  static constexpr const char *kName = "Probe Volume";
+  bool global = true;
+  Vec3 size{20.0f, 10.0f, 20.0f};
+  void reflect(Reflector &r) override;
 };
 
 /* Blender: Render + Output properties. Unity: Quality / Recorder settings. */

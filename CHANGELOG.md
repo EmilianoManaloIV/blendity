@@ -2,6 +2,96 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-10 (round 38): GPU viewport, a measured go / no-go spike (task 0015)
+
+**Asked:** run the editor's views on the GPU, after the CPU wins, if it pays off.
+
+**Added**
+- **Stress section `gpu_viewport`:** a 1080p view on the CPU (deferred and the cached shadow map)
+  against the same picture's work on each GPU. The GPU side is the Vulkan path tracer at 1 sample with
+  no bounces, split into clears, render plus read-back, and resolve.
+- **ADR 0013** (proposed) and **task 0015's spec** (no viewport code).
+
+**Result: no-go.**
+- **The bar:** two views at ≤ 0.50× the CPU's time.
+- **The CPU frame:** 19.6 ms.
+- **The GPU's render plus read-back alone:**
+  - RTX 4070 SUPER: 10.6–11.8 ms (0.54–0.60×);
+  - RTX 3060 Ti: 15.4–17.5 ms (0.79–0.89×).
+- **End to end through the path tracer:** 31–39 ms.
+- **Recommendation:** keep the views on the CPU and look next at voxel GI and probe sampling (about
+  12–15 ms each at 1080p).
+
+## 2026-10-10 (round 37): probe volumes, like Unity 6's Adaptive Probe Volumes (task 0014)
+
+**Asked:** add probe volumes, kept live by the voxel GI.
+
+**Added**
+- **Probe Volume component:** Global (around everything that contributes GI) or a box that follows the
+  object's rotation and scale.
+- **Placement:** bricks of 4 × 4 × 4 probes, fine near geometry and coarse in open space. Probes inside
+  geometry move out (virtual offset) or are marked invalid and filled from their neighbours.
+- **Each probe is an ambient cube:**
+  - the light from geometry per axis;
+  - the share of the sky each axis sees, so a new sky colour relights them with no re-bake.
+- **Baked** by Generate Lighting after the lightmaps, in slices so the editor stays responsive.
+- **Live:** Realtime GI keeps the probes current, 4,096 probes a frame, with no bake needed.
+- **Shading:** per pixel, with normal bias, view bias and leak reduction.
+  - **Receive GI** (MeshRenderer) picks Lightmaps or Light Probes.
+  - Objects that don't contribute GI always use the probes.
+- **Settings:** min and max probe spacing, the biases, leak reduction.
+- **Debug display:** `probes show` / `probes hide`, or Show Probes in the Lighting window.
+
+**Fixed (found by the tests and the review)**
+- **Enormous volumes and NaN settings overflowed float-to-int casts** (the sanitizer caught them): in
+  placement, in the live update's voxel lookup and in the volume box's key. The probe cap could also be
+  broken. Counts are now in double, cells are clamped before the cast, the key hashes the setting's
+  bits, and the cap is strict.
+- **Live probes never showed with Realtime GI on**, yet they re-rendered the views. Probe-lit objects
+  now keep the probes (as in APV), and the live probes are what follow lighting changes.
+- **Light counted twice with Baked GI off:** baked probes are now used only with Baked GI on. Probes
+  from another bake are refused on open.
+- **A re-bake without a volume** left the old `ProbeVolume.bin` to come back on open; it is removed.
+  Probes are saved even when there are no lightmaps.
+- **The probe bake ran on the UI thread in one go:** it now runs in slices within the bake's frame
+  budget, and the bake's mesh copies are freed after it.
+- **Global volumes put probes on the floor plane:** the pad is now 1.5 spacings.
+- **Thin walls leaked light:** APV's normal-based leak reduction was added (on by default).
+- **Live probes near a floor saw through it:** they gather from the nearest free voxel.
+- **Receive GI didn't redraw the views.**
+- **Smaller fixes:**
+  - Indirect Intensity applies to the probes.
+  - A cell with every valid probe behind the surface falls back to their plain average.
+  - The virtual offset is limited to ¾ of a spacing.
+  - Receive GI = Light Probes objects get no lightmap chart.
+  - The live key covers both views' voxel GI and only the settings that change the gathers.
+  - The volume box is remembered while nothing changes.
+- **Tests:**
+  - **A NaN volume was a valid point box on GCC:** `AABB::add` drops NaN there, so the placement test
+    sets the box directly.
+  - **"Stopping the pilot brings back the editor view" failed under the sanitizer:** it compared the
+    Statistics overlay, whose frame time differs on a slow run. Statistics is now off for that test,
+    and the view comes back bit for bit.
+
+**Not as the approved spec said (awaits sign-off; recorded in the spec and ADR 0012):**
+- Each probe is an ambient cube, not SH L1 / L2.
+- Probes win over per-pixel voxel GI for the objects they light.
+- Live probes restart as a whole, not only near a change.
+- The debug display draws dots.
+
+**Checked**
+- Unit checks: Windows 7,880, 0 failed (344 tests; round 37 has 29). Render cache verify mode: 0 stale
+  pictures.
+- Linux with libraries: 7,856, 0 failed. Sanitizer build (ASan + UBSan + float-cast-overflow): 7,778, 0 failed, no reports.
+- Stress `probes` (32 threads):
+  - **Scene:** 38,144 probes in 596 bricks, 2,704 inside geometry;
+  - **Time:** place 9.2 ms, validate 11.1 ms, bake 24.2 ms (64 rays);
+  - **Memory:** 206 bytes per probe;
+  - **Live:** 1.48 ms per 4,096-probe slice;
+  - **Shading at 1080p:** deferred shading 13.6 ms without probes and 29.1 ms with every object
+    probe-lit (a follow-up);
+  - **Fuzz:** 100 odd volumes, 0 problems.
+
 ## 2026-10-10 (round 36): realtime GI from the research paper: voxel-based global illumination (task 0013)
 
 **Asked:** implement the first paper in `research/papers/`, Thiedemann et al., *Voxel-based Global

@@ -24,6 +24,7 @@
 #include "../render/raster.h"
 #include "../render/lightmapper.h"
 #include "../render/voxel_gi.h"
+#include "../render/probe_volume.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -196,6 +197,11 @@ class Editor {
   const Rsm &rsm_for_test() const { return vgi_[vgi_last_].rsm; }
   uint64_t voxelized_for_test() const { return vgi_[0].voxelized + vgi_[1].voxelized; }
   uint64_t rsm_renders_for_test() const { return vgi_[0].rsm_renders + vgi_[1].rsm_renders; }
+  /* Probe volumes (task 0014). */
+  const ProbeVolumeData &probes_for_test() const { return probes_; }
+  bool probe_volume_box_for_test(AABB &out) { return probe_volume_box(out); }
+  bool probe_live_ready_for_test() const { return probe_live_ready_; }
+  size_t probe_live_left_for_test() const { return probe_live_left_; }
   /* The last frame's profile, and every frame's added up (subtract two to measure a stretch). */
   const FrameProfile &frame_profile() const { return prof_last_; }
   const FrameProfile &frame_profile_totals() const { return prof_total_; }
@@ -996,6 +1002,22 @@ class Editor {
   VoxelGIState vgi_[2];
   int vgi_last_ = 0;
   const VoxelGIFrame *update_voxel_gi(const std::vector<DrawItem> &items, const LightingEnv &env, bool game);
+  /* ---- probe volumes (lighting.cpp, task 0014) ---- */
+  ProbeVolumeData probes_;
+  ProbeFrame probe_frame_;
+  std::vector<BakeObject> bake_objects_;  // what the running bake bakes, for its probes when it finishes
+  std::vector<BakeLight> bake_lights_;
+  size_t probe_cursor_ = 0, probe_live_left_ = 0, probe_bake_next_ = 0;
+  bool probe_phase_ = false;                 // Generate Lighting is baking the probes (after the lightmaps)
+  std::unique_ptr<PathTracer> probe_pt_;     // the probe bake's scene
+  uint64_t probe_box_key_ = 0;               // probe_volume_box(), remembered while the scene is unchanged
+  AABB probe_box_;
+  bool probe_box_ok_ = false;
+  uint64_t probe_live_key_ = 0, probe_live_gen_ = 0, probe_layout_key_ = 0;
+  bool probe_live_ready_ = false;
+  bool probe_volume_box(AABB &out);
+  bool bake_probes_begin();
+  void update_probes_live();
   /* The sun's shadow map, kept while its casters and the light are unchanged. Two entries: the Scene
    * view and the Game view collect different meshes (the Edit cage, the evaluated mesh), so views drawn
    * in turn would otherwise evict each other every frame. */
