@@ -17,6 +17,8 @@ What Blendity must do and the constraints it works under. Task specs (`docs/task
 | R-08 | Adjustable operations: a tool's numbers live in its F9 panel or drag helper, re-run from the mesh as it was, kept for the tool's next use. |
 | R-09 | A Learn tab citing the reference books in "Blender Documents". |
 | R-10 | Camera filters: components on a camera that change how it renders wherever its image shows (Game view, Camera Preview, F12, sequences, optionally the Scene view), starting with old consoles' 3D looks (PS1, N64, Saturn, DOS). |
+| R-11 | Global illumination like Unity's: baked lighting (Contribute GI, light modes Realtime / Mixed / Baked, generated lightmap UVs, Generate Lighting into lightmaps) and probe volumes (automatically placed light probes, as Unity 6's Adaptive Probe Volumes), kept current by realtime GI so lighting changes don't need a manual re-bake. |
+| R-12 | Realtime global illumination from the research folder: voxel-based GI (Thiedemann et al., I3D 2011) for one bounce of light and sky occlusion in the rasterized views, feeding the lightmaps and probes of R-11. |
 
 ## Quality
 

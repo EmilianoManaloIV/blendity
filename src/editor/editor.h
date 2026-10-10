@@ -168,6 +168,7 @@ class Editor {
   Vec3 scene_eye() const { return cam_.position(); }
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
+  bool rendering_for_test() const { return rendering_; }
   /* Tests: the Scene view's depth at a window pixel (1 = nothing), as the tools read it. */
   float scene_depth_for_test(int wx, int wy) const { return scene_rt_.depth_at(wx - scene_rect_.x, wy - scene_rect_.y); }
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */

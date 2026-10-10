@@ -2,6 +2,105 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-09 (round 33): leaner, faster unit tests (task 0010)
+
+**Asked:** consolidate the tests, removing redundant or unnecessary ones. The same request also asked for
+editor performance, Unity-style baked lighting, probe volumes, and the voxel-based global illumination paper
+in `research/papers/`. Those are specced as tasks 0011–0014, approved, and come next. A GPU viewport
+follows as task 0015, specced after a measured spike.
+
+**Changed**
+- **Per-element checks are counted.** A loop that ran `CHECK` on every pixel or table entry now counts the
+  failures and checks once (`count_bad`, which prints the first bad element). Coverage is the same. The
+  bloom odd-values test alone had run 53,800 checks.
+- **Overlapping tests are merged**:
+
+| Old test | Now covered by |
+|---|---|
+| filter stack: an empty stack, or one with every effect off, gives the same Game view as no component | The stack part moved into "with no filter the rasterizer's image is unchanged". The Game view part (empty stack, two disabled effects) moved into "PS1 Game view is 15-bit ... with no filter, an empty stack, disabled or neutral effects it is the old picture". |
+| camera filters: the component saves, loads (its own values beat the preset), round-trips twice, and clones | "filter stack: a stack saves, loads (every field, its own values beating the preset) and round-trips; clones and Duplicate deep-copy it", which gained a third effect with every field moved off the preset. |
+| bloom: a target that is a window into a larger image (row stride) only changes inside the window | "odd sizes: every pass works ... (row stride, Bloom too)" runs Bloom on the same window, with a white patch to spread. |
+| Bloom's save / load / set / undo in "bloom: Add Filter > Bloom on the Main Camera ..." | Threshold is Bloom's row in the effect table "every filter effect (Retro Console, Color, Lens, Stylize, Bloom) can be added from the console, set, saved, loaded and undone". The table also gained a Retro Console row, and checks that every registered effect has a row. The bloom test keeps the Game view glow, Intensity and Scatter's save / load / undo (restored after the review), and undoing the add. |
+| The PS1 preset fields in "presets: PS1, N64, Saturn and DOS ..." | "Retro Console Filter contributes the PS1 look" (now also checks that there is no screen-door). |
+| The two-filter ordering in "Retro Console Filter contributes the PS1 look" | "effects combine in list order". The later snap grid (in both orders) and the "cap of 0 doesn't lift a cap" checks stay. |
+| The Camera Preview rebuild in "the component's hash changes with any effect field ..." | "the Camera Preview (Rendered) refreshes when a filter field changes", which now sets the size through the stack's field names, for the first effect and for a second one (E1). The hash test no longer opens an editor. |
+
+- **Checks that tested nothing:**
+  - `CHECK(true)` after drawing a window became a check that the window is open.
+  - An empty bloom or retro target is checked as untouched.
+  - Dead variables are removed, including an unchecked `plain_changes_within_key`, an unused render, and
+    an unused `esc` event.
+- **Shared helpers:**
+  - `kNaN` / `kInf` sit at the top of the file.
+  - `cf_draw` is shared by the PS1 helpers and the bloom scene.
+  - Each test prints its time.
+- **Faster tests.** Sample counts were lowered only with a tolerance worked out from the noise, written in
+  the test.
+  - **Path tracer:** the MIS reference uses 1024 spp instead of 8192. The ratio of the two means has σ ≈ 0.5%,
+    so the 1% check is about 2σ of the estimator. The tracer is seeded per pixel and sample, so it gives
+    the same answer on every run; the measured ratio is 0.9965. The path-guiding reference uses 1024 spp
+    instead of 4096 (measured agreement 0.4%, bound 4%).
+  - **Bloom path-traced F12:** waits for the render to report done, instead of a 6,000-frame sleep loop.
+  - **Pilot click:** clicks only where there is geometry. The pilot-frame test reuses the window size it
+    found.
+  - **Film grain:** 45 ms waits instead of 60 ms. The seed changes every 1/24 s.
+  - **Filter-menu tests:** use a wireframe Scene view (only the Inspector is under test), and the
+    checkbox sweep steps 4 px.
+  - **Bloom odd-values test:** tries every odd value at two sizes, and the other sizes with NaN and
+    infinity.
+  - **The rotate-shape sweep:** uses a smaller window.
+
+**Checked**
+- **Checks:** Windows 3,021 (was 60,624), Linux 2,997 (was 60,600), sanitizer build 2,919. 0 failed.
+  243 tests (3 merged away).
+- **Time:**
+  - Linux wall time (Release, median of 3): **37.5 s → 22.0 s**.
+  - Windows, sum of test times: **32.0 s → 21.7 s**.
+- **Slowest ten, before → after (Windows, ms):**
+
+| Test | Before | After |
+|---|---|---|
+| pilot click | 3974 | 194 |
+| path guiding | 2264 | 865 |
+| rotate a shape on a rectangle | 2249 | 2024 |
+| bloom path-traced F12 | 1798 | 223 |
+| effect menu clicks | 1283 | 681 |
+| pilot frame = Game view | 1218 | 867 |
+| film grain in the editor | 1068 | 703 |
+| MIS | 1031 | 136 |
+| bloom odd values | 1017 | 418 |
+| enabled checkbox | 740 | 289 |
+
+- **The spec's 3× target was met by 5 of the 10.** The rest are bound by something the test is about:
+  - **rotate-shape:** 20 editors at about 100 ms each to set up;
+  - **film grain:** real time has to pass for the grain to move;
+  - **pilot frame:** two 1600×1000 editors;
+  - **effect menu:** about 25 clicked frames;
+  - **path guiding:** the guided render itself.
+- **Review fixes:**
+  - Bloom's Intensity and Scatter lost their save / load / undo coverage in the merge; it is back in the
+    bloom test.
+  - The "later snap grid wins" check is back in both orders.
+  - The Camera Preview is also checked through a second effect's fields.
+  - The statistics comments now give the real margins.
+  - Two more per-texel loops are counted.
+  - Local NaN constants use `kNaN` / `kInf`.
+- **Not done from the spec** (left as they were):
+  - **The neutral/identity tests stay separate:** the rasterizer with no filter, the Color / Lens /
+    Stylize passes at neutral settings, and Bloom at intensity 0. They check different layers, so one
+    table would hide which one broke.
+  - **The shared event helpers were not built** (`ev`, `click`, `cmd`, `grab`, `settle`). The copies differ
+    in small ways (frames per click, the rows grabbed), and unifying them is a refactor of about 40 tests
+    with no change in coverage.
+  - **The F12 sequence test (8592), the denoiser test (2088) and the 9833 editor count are not sped up.**
+    Each is under 300 ms now, and none is in the slowest ten.
+  - **The check count is 3,021, not about 2,500.** The rest are single checks.
+- **The slimmer tests still catch bugs.** Three bugs were planted by hand and not committed; each was
+  caught:
+  - bloom dropping alpha (caught by the counted check);
+  - Bloom's Threshold not saving (the new table row);
+  - mesh-light NEE biased by +5% (the 1024-spp MIS check: ratio 1.044).
+
 ## 2026-10-09 (round 32): Bloom (task 0007)
 
 **Asked:** start task 0007: the Bloom & glow category of the Camera Filters stack.

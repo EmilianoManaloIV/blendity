@@ -47,7 +47,7 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-Each build produces **`Blendity`** (the editor), **`blendity_tests`** (60624 unit checks with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems, and runs the unit tests under AddressSanitizer / UBSan.
+Each build produces **`Blendity`** (the editor), **`blendity_tests`** (3021 unit checks in 243 tests with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems, and runs the unit tests under AddressSanitizer / UBSan.
 
 **Contributing.** `CLAUDE.md` holds the engineering standards. Work starts as a task spec in `docs/tasks/` (and a decision record in `docs/decisions/` when it is architectural), approved before code is written. It is implemented and independently tested and reviewed (the agents in `.claude/agents/`), then lands through a pull request that CI must pass and a human merges. What Blendity must do is in `docs/requirements.md`.
 

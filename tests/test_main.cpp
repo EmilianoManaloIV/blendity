@@ -57,9 +57,27 @@ static void test(const char *name, const std::function<void()> &fn) {
   static const char *filter = std::getenv("BLENDITY_TEST_FILTER");
   if (filter && !std::strstr(name, filter)) return;
   int before = g_fail;
+  ScopedTimer t;
   fn();
-  std::printf("%s %s\n", g_fail == before ? "[ ok ]" : "[FAIL]", name);
+  std::printf("%s %s (%.0f ms)\n", g_fail == before ? "[ ok ]" : "[FAIL]", name, t.ms());
 }
+
+/* ------------------------------------------------------- shared helpers */
+
+static const float kNaN = std::numeric_limits<float>::quiet_NaN();
+static const float kInf = std::numeric_limits<float>::infinity();
+
+/* How many elements fail `ok`; prints the first one, so one CHECK(count_bad(...) == 0) over a whole
+ * picture or table reports as much as a CHECK per element did, without counting thousands of checks. */
+template <class V, class F>
+static size_t count_bad(const char *what, const V &v, F ok) {
+  size_t bad = 0, first = 0;
+  for (size_t i = 0; i < v.size(); i++)
+    if (!ok(v[i]) && bad++ == 0) first = i;
+  if (bad) std::printf("    %s: %zu of %zu bad, first at index %zu\n", what, bad, v.size(), first);
+  return bad;
+}
+static bool opaque(uint32_t c) { return (c >> 24) == 0xFF; }
 
 /* Scratch files go to the OS temp folder, not next to the shipped executables. */
 static std::string test_dir() {
@@ -2157,7 +2175,14 @@ static void render_tests() {
       for (size_t i = 0; i < a.size(); i++) e += (a[i] - b[i]) * (a[i] - b[i]);
       return std::sqrt(e / a.size());
     };
-    std::vector<float> bsdf_ref = render(8192, false), nee_ref = render(8192, true);
+    /* 1024 spp for a 1% check. The per-pixel noise is about 0.09 at 64 spp (BSDF-only); a pixel's three
+     * channels share one path, so the mean has about 768 independent values: sigma ~0.09 * sqrt(64/1024) /
+     * sqrt(768) = 8e-4, 0.35% of 0.23, and the ratio of two such means about 0.5% - the 1% bound is about
+     * 2 sigma of the estimator. The tracer is seeded per pixel and sample, so the result is the same on
+     * every run (measured ratio 0.9965 NEE / BSDF); a change of compiler or sampling code is what could move it.
+     * (It used 8192 spp. The 64-spp RMSE below now shares its first samples with the reference, which
+     * flatters NEE by a few percent; the check needs a 30% margin.) */
+    std::vector<float> bsdf_ref = render(1024, false), nee_ref = render(1024, true);
     std::printf("    mean radiance: BSDF-only %.4f, mesh-light NEE + MIS %.4f\n", mean(bsdf_ref), mean(nee_ref));
     CHECK(std::fabs(mean(nee_ref) / mean(bsdf_ref) - 1.0) < 0.01);
     double e_bsdf = rmse(render(64, false), nee_ref), e_nee = rmse(render(64, true), nee_ref);
@@ -2213,7 +2238,9 @@ static void render_tests() {
      * (Whether it lowers the error depends on how much the field learned: at
      * this tiny size it trains on ~10k samples, too few - the stress suite
      * measures the benefit at a realistic resolution.) */
-    std::vector<float> ref = render(4096, false), guided = render(512, true);
+    /* A 1024-spp reference. The 4% bound is empirical: the two agreed to 0.35% with a 4096-spp reference
+     * and agree to 0.4% with this one; seeding per pixel and sample makes it the same every run. */
+    std::vector<float> ref = render(1024, false), guided = render(512, true);
     std::printf("    mean radiance: guided %.4f vs reference %.4f\n", mean(guided), mean(ref));
     CHECK(std::fabs(mean(guided) / mean(ref) - 1.0) < 0.04);
   });
@@ -3285,8 +3312,7 @@ static void modeling_round9_tests() {
     g->add<MeshRenderer>();
     auto *arr = static_cast<ArrayModifier *>(g->add_component(create_component("ArrayModifier")));
     arr->count = 2;
-    auto *tri = static_cast<TriangulateModifier *>(g->add_component(create_component("TriangulateModifier")));
-    (void)tri;
+    g->add_component(create_component("TriangulateModifier"));
     CHECK(g->evaluated_mesh()->face_count() == 24);  // 2 cubes, triangulated
     arr->enabled = false;  // viewport off, render on
     CHECK(g->evaluated_mesh(0)->face_count() == 12);
@@ -3508,7 +3534,6 @@ static void modeling_round10_tests() {
     ed.command("select Main Camera");
     ed.command("delete");
     ed.step_frame_headless();
-    platform::Event esc;
     ed.command("draw circle 16");
     GameObject *d = ed.selected_object();
     CHECK(d && d->name == "Drawing");
@@ -3519,7 +3544,6 @@ static void modeling_round10_tests() {
       CHECK(c.face_count() == 1 && c.face_size(0) == 16);
       CHECK(c.face_count() && c.face_normal(0).y > 0.99f);  // facing up, toward the camera
     }
-    (void)esc;
   });
   test("follow, spin and slice: sweep a face along a path, lathe a profile, cut by a plane", [&] {
     /* Follow: a square swept along an L-shaped path makes a closed bent bar. */
@@ -3897,7 +3921,8 @@ static void modeling_round11_tests() {
       ed.command("select Main Camera");
       ed.step_frame_headless();
     }
-    CHECK(true);  // drawing all of that without crashing is the check
+    /* Drawing all of that without crashing is the main check; the tool window really is up. */
+    CHECK(ed.window_rect_for_test(WindowKind::Tools).w > 0);
   });
 }
 
@@ -3999,13 +4024,9 @@ static void modeling_round12_tests() {
     CHECK(m.face_count() > after_rect + 2);
     /* No face sticks out of the top: every new face lies in the top plane. */
     size_t top = 0;
-    float circle_area = 0;
-    const Mat4 &w = g->world_matrix();
     for (size_t f = 0; f < m.face_count(); f++)
       if (m.face_normal(f).y > 0.99f) top++;
     ed.command("fsel facing 0 1 0");
-    (void)w;
-    (void)circle_area;
     CHECK(top >= 4);
     /* Push the circle's pieces down: still a closed solid. */
     Mesh copy = m;
@@ -4153,7 +4174,7 @@ static void modeling_round12_tests() {
       /* The Project window draws with folders, a rename and a delete waiting. */
       ed.command("window Project");
       ed.step_frame_headless();
-      CHECK(true);
+      CHECK(ed.window_rect_for_test(WindowKind::Project).w > 0);
     }
     set_env("BLENDITY_TRASH", "");
     set_env("BLENDITY_PROJECT", "");
@@ -4341,7 +4362,7 @@ static void modeling_round12_tests() {
     /* The Preferences and the Profiler show the setting and its measured cost. */
     ed.command("window Profiler");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
-    CHECK(true);
+    CHECK(ed.window_rect_for_test(WindowKind::Profiler).w > 0);
   });
 }
 
@@ -4789,7 +4810,7 @@ static void round13_feature_tests() {
     /* The Game view and the Camera Preview draw with it (no crash, something blurred). */
     ed.command("window Game");
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
-    CHECK(true);
+    CHECK(ed.window_rect_for_test(WindowKind::Game).w > 0);
   });
 }
 
@@ -5261,9 +5282,7 @@ static void round14_feature_tests() {
         CHECK(a != b2 && b2 != c && a != c);  // three different views
       }
       /* Renders go back to the Main Camera afterwards. */
-      GameObject *owner = nullptr;
       CHECK(ed.render_camera_name() == "Main Camera");
-      (void)owner;
       /* Stop part-way: the path tracer, stopped after the first camera. */
       ed.command("set Render.RenderEngine Path");
       ed.command("set Render.Samples 4");
@@ -5543,7 +5562,7 @@ static void round15_tests() {
     /* The window draws with the new tool row. */
     ed.command("window UV Editor");
     ed.step_frame_headless();
-    CHECK(true);
+    CHECK(ed.window_rect_for_test(WindowKind::UVEditor).w > 0);
   });
   test("edit tools: every operator has a group (selection tools together), and Extrude Individual is a switch", [&] {
     size_t other = 0, selects = 0;
@@ -6336,7 +6355,7 @@ static void round18_tests() {
     for (const Setup &st : setups)
       for (float deg : {15.0f, 30.0f, 45.0f, 90.0f}) {
         Editor ed;
-        ed.init_headless(900, 650);
+        ed.init_headless(640, 480);  // the geometry is under test; a smaller window renders faster
         ed.step_frame_headless();
         ed.command("keymap Blender");
         ed.command(std::string("create ") + st.create);
@@ -6874,8 +6893,6 @@ static void round18_tests() {
         /* The arc's face: one face holding every corner of the arc (and the face beside it the other). */
         std::vector<Vec3> arc_pts;
         {
-          bool closed = false;
-          (void)closed;
         }
         size_t inside = 0;
         for (size_t f = 0; f < m.face_count(); f++) {
@@ -6883,8 +6900,7 @@ static void round18_tests() {
           for (uint32_t k = 0; k < m.face_size(f); k++) {
             const Vec3 w = m.positions[m.face_verts(f)[k]] + Vec3(0, 0.5f, 0);
             /* On the circle through the three points (the arc's corners). */
-            Vec3 cc, nn;
-            (void)nn;
+            Vec3 cc;
             const Vec3 a = c.a, b = c.b, q = c.bulge;
             const Vec3 ab = b - a, aq = q - a, nrm = cross(ab, aq);
             cc = a + (cross(nrm, ab) * dot(aq, aq) + cross(aq, nrm) * dot(ab, ab)) / (2.0f * dot(nrm, nrm));
@@ -7053,8 +7069,6 @@ static void round18_tests() {
       /* A face of an internal wall: a cube with a face across its middle (three faces on four edges). */
       Mesh m = *primitives::cube();
       std::vector<uint8_t> vs(m.vert_count(), 0);
-      const size_t top = face_facing(m, {0, 1, 0}, {0, 0.5f, 0});
-      (void)top;
       cases.push_back({"cube: two faces at once with a fin between", m, {face_facing(m, {0, 1, 0}, {0, 0.5f, 0}), face_facing(m, {0, -1, 0}, {0, -0.5f, 0})}});
     }
     for (const Case &c : cases)
@@ -7449,10 +7463,9 @@ static MaterialPtr cf_unlit(Vec3 c) {
   return m;
 }
 
-static void cf_render(Image &img, RenderTarget &rt, int W, int H, const Mat4 &v, const Mat4 &p, const RasterOptions &opt0, const CfScene &sc,
-                      uint32_t clear = 0xFF204060u, Renderer3D *keep = nullptr) {
-  img.resize(W, H);
-  rt.attach(img, {0, 0, W, H});
+/* Draws the scene into an attached target: deferred, one sun, cleared to `clear`. */
+static void cf_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, const RasterOptions &opt0, const CfScene &sc, uint32_t clear,
+                    Renderer3D *keep = nullptr) {
   Renderer3D local;
   Renderer3D &r = keep ? *keep : local;
   RasterOptions opt = opt0;
@@ -7466,6 +7479,13 @@ static void cf_render(Image &img, RenderTarget &rt, int W, int H, const Mat4 &v,
   r.clear(clear);
   for (const DrawItem &it : sc.items) r.add(it);
   r.flush();
+}
+
+static void cf_render(Image &img, RenderTarget &rt, int W, int H, const Mat4 &v, const Mat4 &p, const RasterOptions &opt0, const CfScene &sc,
+                      uint32_t clear = 0xFF204060u, Renderer3D *keep = nullptr) {
+  img.resize(W, H);
+  rt.attach(img, {0, 0, W, H});
+  cf_draw(rt, v, p, opt0, sc, clear, keep);
 }
 
 static uint64_t cf_hash(const Image &img) {
@@ -7549,6 +7569,23 @@ static void round27_tests() {
     FilterStack ns;
     neutral.contribute(ns);
     CHECK(ns.empty());
+    /* A Camera Filters stack with no effects, or with every effect off, contributes nothing either;
+     * one effect switched back on does. */
+    {
+      CameraFilters cf;
+      FilterStack s0;
+      cf.contribute(s0);
+      CHECK(s0.empty());
+      cf.add("Retro Console")->enabled = false;
+      cf.add("Retro Console")->enabled = false;
+      FilterStack s2;
+      cf.contribute(s2);
+      CHECK(s2.empty());
+      cf.effects[1]->enabled = true;
+      FilterStack s3;
+      cf.contribute(s3);
+      CHECK(!s3.empty());
+    }
     RasterOptions via_neutral;
     ns.apply_raster(via_neutral);
     cf_render(d, rd, 160, 120, v, p, via_neutral, sc);
@@ -7621,12 +7658,14 @@ static void round27_tests() {
     const uint32_t src[4] = {1, 2, 3, 4};  // 2 x 2
     std::vector<uint32_t> dst(8 * 6, 99u);
     upscale_nearest(src, 2, 2, 2, dst.data(), 8, Recti{2, 1, 4, 4});
+    int upscale_wrong = 0;
     for (int y = 0; y < 6; y++)
       for (int x = 0; x < 8; x++) {
         const bool in = x >= 2 && x < 6 && y >= 1 && y < 5;
         const uint32_t expect = !in ? 99u : (uint32_t)(1 + ((x - 2) / 2) + 2 * ((y - 1) / 2));
-        CHECK(dst[(size_t)y * 8 + x] == expect);
+        if (dst[(size_t)y * 8 + x] != expect && upscale_wrong++ == 0) std::printf("    first wrong pixel (%d, %d)\n", x, y);
       }
+    CHECK(upscale_wrong == 0);
     /* Bad input is ignored, not crashed on. */
     upscale_nearest(nullptr, 2, 2, 2, dst.data(), 8, Recti{0, 0, 2, 2});
     upscale_nearest(src, 0, 2, 2, dst.data(), 8, Recti{0, 0, 2, 2});
@@ -7642,13 +7681,17 @@ static void round27_tests() {
   /* ---------------------------------------------------------------- 3 */
   test("camera filters: the PS1 dither is the console's 4x4 matrix, and flat grey takes exactly those offsets before dropping to 5 bits", [&] {
     static const int kPs1[4][4] = {{-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};
+    int wrong_ps1 = 0, wrong_none = 0, bayer_out_of_range = 0;
     for (int y = 0; y < 8; y++)
       for (int x = 0; x < 8; x++) {
-        CHECK(retro_dither_offset(RetroImageParams::Ps1, x, y) == kPs1[y & 3][x & 3]);
-        CHECK(retro_dither_offset(RetroImageParams::NoDither, x, y) == 0);
+        wrong_ps1 += retro_dither_offset(RetroImageParams::Ps1, x, y) != kPs1[y & 3][x & 3];
+        wrong_none += retro_dither_offset(RetroImageParams::NoDither, x, y) != 0;
         const int b = retro_dither_offset(RetroImageParams::Bayer4, x, y);
-        CHECK(b >= -4 && b <= 3);
+        bayer_out_of_range += b < -4 || b > 3;
       }
+    CHECK(wrong_ps1 == 0);
+    CHECK(wrong_none == 0);
+    CHECK(bayer_out_of_range == 0);
     CHECK(retro_dither_offset(RetroImageParams::Ps1, -1, -1) == kPs1[3][3]);  // the pattern repeats below zero too
     CHECK(retro_dither_offset(99, 3, 2) == 0);
     /* Bayer uses every offset of the range exactly twice per tile. */
@@ -7656,7 +7699,7 @@ static void round27_tests() {
     for (int y = 0; y < 4; y++)
       for (int x = 0; x < 4; x++) hist[retro_dither_offset(RetroImageParams::Bayer4, x, y)]++;
     CHECK(hist.size() == 8);
-    for (auto &kv : hist) CHECK(kv.second == 2);
+    CHECK(std::all_of(hist.begin(), hist.end(), [](const std::pair<const int, int> &kv) { return kv.second == 2; }));
     /* Flat grey 128: offsets -4..-1 give 124..127 -> 120, 0..3 give 128..131 -> 128. */
     Image img;
     img.resize(8, 8);
@@ -7667,41 +7710,42 @@ static void round27_tests() {
     ps1.color_depth = RetroImageParams::Bits15;
     ps1.dither = RetroImageParams::Ps1;
     apply_retro_image(rt, ps1, nullptr);
-    int low = 0, high = 0;
+    int low = 0, high = 0, wrong = 0;
     for (int y = 0; y < 8; y++)
       for (int x = 0; x < 8; x++) {
         const int off = kPs1[y & 3][x & 3];
         const uint32_t v = off < 0 ? 120u : 128u;
-        CHECK(img.row(y)[x] == (0xFF000000u | v << 16 | v << 8 | v));
+        wrong += img.row(y)[x] != (0xFF000000u | v << 16 | v << 8 | v);
         (off < 0 ? low : high)++;
       }
+    CHECK(wrong == 0);
     CHECK(low == 32 && high == 32);
     /* No dither: every grey truncates the same way (0x87 -> 0x80). */
     std::fill(img.pixels.begin(), img.pixels.end(), 0xFF878787u);
     RetroImageParams plain;
     plain.color_depth = RetroImageParams::Bits15;
     apply_retro_image(rt, plain, nullptr);
-    for (uint32_t c : img.pixels) CHECK(c == 0xFF808080u);
+    CHECK(count_bad("pixels", img.pixels, [&](uint32_t c) { return c == 0xFF808080u; }) == 0);
     /* The ends stay in range: white (255 + 3 clamps) and black (0 - 4 clamps). */
     std::fill(img.pixels.begin(), img.pixels.end(), 0xFFFFFFFFu);
     apply_retro_image(rt, ps1, nullptr);
-    for (uint32_t c : img.pixels) CHECK(c == 0xFFF8F8F8u);
+    CHECK(count_bad("pixels", img.pixels, [&](uint32_t c) { return c == 0xFFF8F8F8u; }) == 0);
     std::fill(img.pixels.begin(), img.pixels.end(), 0xFF000000u);
     apply_retro_image(rt, ps1, nullptr);
-    for (uint32_t c : img.pixels) CHECK(c == 0xFF000000u);
+    CHECK(count_bad("pixels", img.pixels, [&](uint32_t c) { return c == 0xFF000000u; }) == 0);
     /* Channels are quantized independently and alpha is kept. */
     std::fill(img.pixels.begin(), img.pixels.end(), 0x80FF8A07u);
     apply_retro_image(rt, plain, nullptr);
-    for (uint32_t c : img.pixels) CHECK(c == 0x80F88800u);
+    CHECK(count_bad("pixels", img.pixels, [&](uint32_t c) { return c == 0x80F88800u; }) == 0);
     /* Full colour depth with no fog does nothing at all. */
     std::fill(img.pixels.begin(), img.pixels.end(), 0xFF123457u);
     RetroImageParams off;
     apply_retro_image(rt, off, nullptr);
-    for (uint32_t c : img.pixels) CHECK(c == 0xFF123457u);
+    CHECK(count_bad("pixels", img.pixels, [&](uint32_t c) { return c == 0xFF123457u; }) == 0);
     /* Empty targets are ignored. */
     RenderTarget none;
     apply_retro_image(none, ps1, nullptr);
-    CHECK(true);
+    CHECK(none.width == 0 && none.color == nullptr);
   });
 
   /* ---------------------------------------------------------------- 4 */
@@ -7714,26 +7758,24 @@ static void round27_tests() {
     const Vec3 corners[4] = {{-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}};
     struct Step { std::vector<int> key; uint64_t snapped, plain; };
     std::vector<Step> steps;
-    bool extents_ok = true;
+    bool extents_ok = true, projected = true;
     for (int i = 0; i < 48; i++) {
       const float cx = i * 0.004f;  // about 0.055 px per step at this distance
       const Mat4 v = Mat4::look_at({cx, 0, -5}, {cx, 0, 0}, {0, 1, 0});
       Step s;
-      RasterOptions snap, plain;
+      RasterOptions snap;
       snap.vertex_snap = 1.0f;
-      Image a, b;
-      RenderTarget ra, rb;
+      Image a;
+      RenderTarget ra;
       Renderer3D r3d;
       cf_render(a, ra, W, H, v, p, snap, sc, 0xFF000000u, &r3d);
-      cf_render(b, rb, W, H, v, p, plain, sc);
       s.snapped = cf_hash(a);
-      s.plain = cf_hash(b);
       int minx = 1 << 20, maxx = -1, miny = 1 << 20, maxy = -1;
       float fx0 = 1e9f, fx1 = -1e9f, fy0 = 1e9f, fy1 = -1e9f;
       for (const Vec3 &c : corners) {
         Vec2 sp;
         float z;
-        CHECK(r3d.project(c, sp, z));
+        projected &= r3d.project(c, sp, z);
         s.key.push_back((int)std::floor(sp.x + 0.5f));
         s.key.push_back((int)std::floor(sp.y + 0.5f));
         fx0 = std::min(fx0, sp.x), fx1 = std::max(fx1, sp.x), fy0 = std::min(fy0, sp.y), fy1 = std::max(fy1, sp.y);
@@ -7747,15 +7789,15 @@ static void round27_tests() {
         extents_ok = false;
       steps.push_back(s);
     }
+    CHECK(projected);
     CHECK(extents_ok);
-    bool same_key_same_image = true, plain_changes_within_key = false, key_changes = false, jump_changes_image = true;
+    bool same_key_same_image = true, key_changes = false, jump_changes_image = true;
     for (size_t i = 0; i < steps.size(); i++)
       for (size_t j = i + 1; j < steps.size(); j++) {
         const bool same = steps[i].key == steps[j].key;
         if (same && steps[i].snapped != steps[j].snapped) same_key_same_image = false;
         if (!same && steps[i].snapped == steps[j].snapped && j == i + 1) jump_changes_image = false;
         if (!same && j == i + 1) key_changes = true;
-        if (same && steps[i].plain != steps[j].plain) plain_changes_within_key = true;
       }
     CHECK(same_key_same_image);     // moves that round to the same corners draw the same picture
     CHECK(key_changes);             // the sweep does cross whole pixels
@@ -7764,7 +7806,6 @@ static void round27_tests() {
      * centre exactly when its corner rounds the other way), so the creep shows on slanted edges:
      * a quad turned 30 degrees. Snapped, moves that keep its corners' rounding draw one picture;
      * unsnapped, the slanted edges creep across pixel centres in between. */
-    (void)plain_changes_within_key;
     CfScene tilted;
     tilted.add(primitives::quad(2.0f), Mat4::trs({0, 0, 0}, Quat::euler({0, 0, 30}), {1, 1, 1}), 9, cf_unlit({1.0f, 0.5f, 0.2f}));
     tilted.seal();
@@ -7786,12 +7827,13 @@ static void round27_tests() {
       for (const Vec3 &c : corners) {
         Vec2 sp;
         float z;
-        CHECK(r3d.project(rot.point(c), sp, z));
+        projected &= r3d.project(rot.point(c), sp, z);
         s.key.push_back((int)std::floor(sp.x + 0.5f));
         s.key.push_back((int)std::floor(sp.y + 0.5f));
       }
       tsteps.push_back(s);
     }
+    CHECK(projected);
     bool t_same_key_same_image = true, t_plain_creeps = false;
     for (size_t i = 0; i + 1 < tsteps.size(); i++) {
       const bool same = tsteps[i].key == tsteps[i + 1].key;
@@ -7812,7 +7854,7 @@ static void round27_tests() {
     RenderTarget rr;
     cf_render(ref, rr, 48, 48, v, p, RasterOptions{}, sc);
     /* A grid that isn't a positive number means no snapping. */
-    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const float nan = kNaN, inf = kInf;
     for (float g : {nan, -1.0f, 0.0f, -inf, inf}) {
       RasterOptions o;
       o.vertex_snap = g;
@@ -8002,7 +8044,7 @@ static void round27_tests() {
     /* NaN footprints don't poison the result when a cap is active. */
     TexOverride capped;
     capped.max_size = 4;
-    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float nan = kNaN;
     const Vec3 poisoned = eval(&capped, u5, {nan, nan}, {nan, nan});
     CHECK(std::isfinite(poisoned.x) && std::isfinite(poisoned.y) && std::isfinite(poisoned.z));
   });
@@ -8023,13 +8065,15 @@ static void round27_tests() {
     t.build(bmp, false);
     CHECK(t.levels.size() == 3);  // 4, 2, 1
     /* v = 0 is the bottom row: texel (x, y) is at u = (x + .5) / 4, v = 1 - (y + .5) / 4. */
+    int texel_wrong = 0;
     for (int y = 0; y < 4; y++)
       for (int x = 0; x < 4; x++) {
         const Vec4 c = t.sample_level({(x + 0.5f) / 4, 1 - (y + 0.5f) / 4}, 0, TexWrap::Repeat, TexFilter::Closest);
-        CHECK_NEAR(c.x * 255, x * 60, 0.6);
-        CHECK_NEAR(c.y * 255, y * 60, 0.6);
-        CHECK_NEAR(c.z, (x + y) % 2 ? 1.0 : 0.0, 1e-4);
+        const bool ok = std::fabs(c.x * 255 - x * 60) <= 0.6f && std::fabs(c.y * 255 - y * 60) <= 0.6f &&
+                        std::fabs(c.z - ((x + y) % 2 ? 1.0f : 0.0f)) <= 1e-4f;
+        if (!ok && texel_wrong++ == 0) std::printf("    first wrong texel (%d, %d)\n", x, y);
       }
+    CHECK(texel_wrong == 0);
     /* Slightly off-centre it is still that texel with Nearest, a blend with Linear. */
     const Vec4 n = t.sample_level({1.4f / 4, 0.5f}, 0, TexWrap::Repeat, TexFilter::Closest);
     const Vec4 l = t.sample_level({1.4f / 4, 0.5f}, 0, TexWrap::Repeat, TexFilter::Linear);
@@ -8123,7 +8167,7 @@ static void round27_tests() {
     }
     CHECK(prev_red >= 0 && monotone);
     /* Degenerate settings: start == end is a hard edge, reversed values are swapped, NaN and infinite ones don't crash. */
-    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const float nan = kNaN, inf = kInf;
     struct Case { float s, e; };
     for (const Case &c : {Case{5, 5}, Case{6, 2}, Case{nan, 4}, Case{2, nan}, Case{-inf, inf}, Case{0, 0}, Case{1e30f, 1e30f}}) {
       std::copy(floor_before.begin(), floor_before.end(), fi.pixels.begin());
@@ -8152,7 +8196,7 @@ static void round27_tests() {
     CHECK(f.width == 320 && f.height == 240 && f.fit == 0);
     CHECK(f.vertex_snap && f.snap_grid == 1.0f && f.affine_textures);
     CHECK(f.texture_filter == 1 && f.max_texture_size == 256 && !f.mipmaps);
-    CHECK(f.color_depth == RetroImageParams::Bits15 && f.dither == RetroImageParams::Ps1 && !f.fog);
+    CHECK(f.color_depth == RetroImageParams::Bits15 && f.dither == RetroImageParams::Ps1 && !f.fog && !f.screen_door);
     CHECK(std::string(f.type_name()) == "Retro Console");
     CHECK(find_filter_effect_info(f.type_name()) && find_filter_effect_info(f.type_name())->category == "Retro Console");
     FilterStack s;
@@ -8172,26 +8216,25 @@ static void round27_tests() {
     f.apply_preset(f.console);
     CHECK(f.width == 320 && f.applied_console == RetroConsoleFilter::PS1);
 
-    /* Two filters on one camera: the later size and snap win, the smaller texture cap wins, every colour pass runs. */
+    /* Stacking order is checked in "effects combine in list order". Here: the later snap grid wins, and a
+     * cap of 0 means "no cap" and doesn't lift another filter's cap. */
     RetroConsoleFilter g;
-    g.width = 160, g.height = 120, g.snap_grid = 2.0f, g.max_texture_size = 64, g.fit = 1;
+    g.snap_grid = 2.0f, g.max_texture_size = 64;
     FilterStack both;
     f.contribute(both);
     g.contribute(both);
-    CHECK(both.width == 160 && both.height == 120 && both.fit == FilterStack::Letterbox);
-    CHECK(both.vertex_snap == 2.0f && both.tex.max_size == 64 && both.passes.size() == 2);
-    FilterStack reversed;
-    g.contribute(reversed);
-    f.contribute(reversed);
-    CHECK(reversed.width == 320 && reversed.tex.max_size == 64 && reversed.vertex_snap == 1.0f);
-    /* A cap of 0 means "no cap" and doesn't lift another filter's cap. */
+    CHECK(both.vertex_snap == 2.0f && both.tex.max_size == 64);
+    FilterStack rev;
+    g.contribute(rev);
+    f.contribute(rev);
+    CHECK(rev.vertex_snap == 1.0f && rev.tex.max_size == 64);  // the later grid, not the larger one
     RetroConsoleFilter nocap;
     nocap.max_texture_size = 0;
     nocap.contribute(both);
     CHECK(both.tex.max_size == 64);
     /* A grid that isn't a positive number leaves snapping off; the other effects still apply. */
     RetroConsoleFilter bad;
-    bad.snap_grid = std::numeric_limits<float>::quiet_NaN();
+    bad.snap_grid = kNaN;
     FilterStack bs;
     bad.contribute(bs);
     CHECK(bs.vertex_snap == 0.0f && bs.affine_uv && !bs.empty());
@@ -8250,7 +8293,7 @@ static void round27_tests() {
     FilterStack ps1;
     f.contribute(ps1);
     ps1.passes[0](rt2, &frame);
-    for (uint32_t c : img.pixels) CHECK(cf_is_15bit(c));
+    CHECK(count_bad("pixels", img.pixels, [&](uint32_t c) { return cf_is_15bit(c); }) == 0);
   });
 
   /* ---------------------------------------------------------------- 9 */
@@ -8328,64 +8371,8 @@ static void round27_tests() {
     CHECK(filters_on_camera() == 0);
   });
 
-  test("camera filters: the component saves, loads (its own values beat the preset), round-trips twice, and clones", [&] {
-    Editor ed;
-    ed.init_headless(900, 600);
-    ed.step_frame_headless();
-    GameObject *cam = ed.scene().find_by_name("Main Camera");
-    CHECK(cam != nullptr);
-    if (!cam) return;
-    auto *a = cf_add_retro(cam);
-    a->width = 64, a->height = 48, a->fit = 1, a->vertex_snap = true, a->snap_grid = 2.5f, a->affine_textures = false;
-    a->texture_filter = 2, a->max_texture_size = 128, a->mipmaps = true, a->color_depth = RetroImageParams::Full, a->dither = RetroImageParams::Bayer4;
-    a->fog = true, a->fog_start = 4.0f, a->fog_end = 22.0f, a->fog_color = {0.1f, 0.2f, 0.3f};
-    auto *b = cf_add_retro(cam);  // untouched: the preset
-    b->enabled = false;
-    const std::string text = save_scene_text(ed.scene());
-    CHECK(text.find("Camera Filters") != std::string::npos && text.find("Retro Console") != std::string::npos);
-    /* Clones (Duplicate, undo snapshots, Play mode) carry every field. */
-    std::unique_ptr<Scene> copy = ed.scene().clone();
-    GameObject *cc = copy->find_by_name("Main Camera");
-    CHECK(cc != nullptr);
-    if (cc) {
-      std::vector<RetroConsoleFilter *> cl = cf_all_retro(cc);
-      CHECK(cl.size() == 2);
-      if (cl.size() == 2) {
-        CHECK(cl[0]->width == 64 && cl[0]->snap_grid == 2.5f && cl[0]->fog && cl[0]->fog_end == 22.0f && cc->get<CameraFilters>()->owner == cc);
-        CHECK(!cl[1]->enabled);
-      }
-    }
-    CHECK(save_scene_text(*copy) == text);
-    /* Duplicate in the editor. */
-    ed.command("select Main Camera");
-    ed.command("duplicate");
-    int owners = 0;
-    ed.scene().for_each([&](GameObject &g) { owners += cf_get_retro(&g) != nullptr; });
-    CHECK(owners == 2);
-    Scene loaded;
-    std::string err;
-    CHECK(load_scene_text(text, loaded, err));
-    GameObject *lc = loaded.find_by_name("Main Camera");
-    CHECK(lc != nullptr);
-    if (!lc) return;
-    std::vector<RetroConsoleFilter *> fl = cf_all_retro(lc);
-    CHECK(fl.size() == 2);
-    if (fl.size() != 2) return;
-    const RetroConsoleFilter *x = fl[0], *y = fl[1];
-    CHECK(x->width == 64 && x->height == 48 && x->fit == 1 && x->vertex_snap && x->snap_grid == 2.5f && !x->affine_textures);
-    CHECK(x->texture_filter == 2 && x->max_texture_size == 128 && x->mipmaps);
-    CHECK(x->color_depth == RetroImageParams::Full && x->dither == RetroImageParams::Bayer4);
-    CHECK(x->fog && x->fog_start == 4.0f && x->fog_end == 22.0f);
-    CHECK_NEAR(x->fog_color.x, 0.1f, 1e-5);
-    CHECK_NEAR(x->fog_color.y, 0.2f, 1e-5);
-    CHECK_NEAR(x->fog_color.z, 0.3f, 1e-5);
-    CHECK(x->applied_console == x->console);
-    CHECK(y->width == 320 && y->height == 240 && !y->enabled);
-    CHECK(save_scene_text(loaded) == text);
-  });
-
   /* --------------------------------------------------------------- 10 */
-  test("camera filters: PS1 Game view is 15-bit colour in whole blocks; with no filter, a disabled one or a neutral one it is the old picture", [&] {
+  test("camera filters: PS1 Game view is 15-bit colour in whole blocks; with no filter, an empty stack, disabled or neutral effects it is the old picture", [&] {
     Editor ed;
     ed.init_headless(1600, 1000);
     ed.step_frame_headless();
@@ -8421,11 +8408,17 @@ static void round27_tests() {
     GameObject *cam = ed.scene().find_by_name("Main Camera");
     CHECK(cam != nullptr);
     if (!cam) return;
-    RetroConsoleFilter *f = cf_add_retro(cam);
-    /* A disabled filter changes nothing. */
-    f->enabled = false;
+    /* An empty Camera Filters stack changes nothing. */
+    cam->add<CameraFilters>();
     settle();
     CHECK(same(grab(), base));
+    RetroConsoleFilter *f = cf_add_retro(cam);
+    /* Disabled filters change nothing (two of them, so nothing combines into a pass either). */
+    RetroConsoleFilter *off2 = cf_add_retro(cam);
+    f->enabled = off2->enabled = false;
+    settle();
+    CHECK(same(grab(), base));
+    if (auto *cf = cam->get<CameraFilters>()) cf->effects.pop_back();  // keep one for the rest
     /* So does one with every effect off. */
     f->enabled = true;
     f->vertex_snap = false, f->affine_textures = false, f->texture_filter = 0, f->max_texture_size = 0, f->mipmaps = true;
@@ -8779,9 +8772,10 @@ static void round27_tests() {
     const std::vector<uint32_t> first = settle();
     const std::vector<uint32_t> again = settle();
     CHECK(first == again);  // a finished preview stays put
-    /* A different internal size: the preview is rebuilt at the new resolution. */
-    ed.command("set RetroConsoleFilter.Width 16");
-    ed.command("set RetroConsoleFilter.Height 16");
+    /* A different internal size, typed through the stack's own field names: the preview is rebuilt at the
+     * new resolution. (The old `set RetroConsoleFilter.*` names are checked in the console test.) */
+    ed.command("set CameraFilters.E0Width 16");
+    ed.command("set CameraFilters.E0Height 16");
     const std::vector<uint32_t> after_size = settle();
     CHECK(after_size != first);
     /* Colour depth alone (no change to geometry or size) also refreshes it. */
@@ -8792,6 +8786,12 @@ static void round27_tests() {
     cf_get_retro(cam)->enabled = false;
     const std::vector<uint32_t> after_off = settle();
     CHECK(after_off != after_depth);
+    /* A field of a later effect (E1) refreshes it too: a second effect's size wins. */
+    cf_add_retro(cam);
+    const std::vector<uint32_t> with_second = settle();
+    ed.command("set CameraFilters.E1Width 24");
+    ed.command("set CameraFilters.E1Height 24");
+    CHECK(settle() != with_second);
   });
 }
 
@@ -9025,6 +9025,7 @@ static void round29_tests() {
     Editor ed;
     ed.init_headless(1600, 1200);
     ed.step_frame_headless();
+    cmd(ed, "shading wire");  // only the Inspector is under test: a cheap Scene view keeps the frames fast
     cmd(ed, "select Main Camera");
     cmd(ed, "filter add Retro Console");
     cmd(ed, "filter add Retro Console");
@@ -9081,6 +9082,7 @@ static void round29_tests() {
     Editor ed;
     ed.init_headless(1600, 1200);
     ed.step_frame_headless();
+    cmd(ed, "shading wire");  // only the Inspector is under test
     cmd(ed, "select Main Camera");
     cmd(ed, "filter add Retro Console");
     collapse(ed);
@@ -9093,7 +9095,7 @@ static void round29_tests() {
     /* The checkbox isn't recorded: sweep the header row from the left until the flag flips. */
     const int y = mr.y + mr.h / 2;
     bool flipped = false;
-    for (int x = std::max(insp.x + 2, mr.x - ed.ui_for_test().px(300)); x < mr.x && !flipped; x += ed.ui_for_test().px(2)) {
+    for (int x = std::max(insp.x + 2, mr.x - ed.ui_for_test().px(300)); x < mr.x && !flipped; x += ed.ui_for_test().px(4)) {  // the box is wider than 4 px
       ed.step_frame_headless({ev(ET::MouseMove, x, y)});
       ed.step_frame_headless({ev(ET::MouseDown, x, y)});
       ed.step_frame_headless({ev(ET::MouseUp, x, y)});
@@ -9164,7 +9166,7 @@ static void round29_tests() {
   });
 
   /* ---------------------------------------------------------------- 3 */
-  test("filter stack: a two-effect stack saves, loads and round-trips; clones and Duplicate deep-copy it", [&] {
+  test("filter stack: a stack saves, loads (every field, its own values beating the preset) and round-trips; clones and Duplicate deep-copy it", [&] {
     Editor ed;
     ed.init_headless(900, 600);
     ed.step_frame_headless();
@@ -9179,6 +9181,11 @@ static void round29_tests() {
     b->console = RetroConsoleFilter::DOS;
     b->apply_preset(RetroConsoleFilter::DOS);
     b->height = 100, b->enabled = false;
+    /* Every Retro Console field moved off the PS1 preset. */
+    auto *c = cf_add_retro(cam);
+    c->width = 64, c->height = 48, c->fit = 1, c->vertex_snap = true, c->snap_grid = 2.5f, c->affine_textures = false;
+    c->texture_filter = 2, c->max_texture_size = 128, c->mipmaps = true, c->color_depth = RetroImageParams::Full, c->dither = RetroImageParams::Bayer4;
+    c->fog = true, c->fog_start = 4.0f, c->fog_end = 22.0f, c->fog_color = {0.1f, 0.2f, 0.3f};
     const std::string text = save_scene_text(ed.scene());
     CHECK(text.find("component Camera Filters") != std::string::npos && text.find("component Retro Console Filter") == std::string::npos);
     Scene loaded;
@@ -9188,18 +9195,28 @@ static void round29_tests() {
     CHECK(lc != nullptr);
     if (!lc) return;
     auto fl = cf_all_retro(lc);
-    CHECK(fl.size() == 2);
-    if (fl.size() != 2) return;
+    CHECK(fl.size() == 3);
+    if (fl.size() != 3) return;
     CHECK(fl[0]->enabled && fl[0]->console == RetroConsoleFilter::N64 && fl[0]->width == 160 && fl[0]->fog_end == 33.0f);
     CHECK(fl[0]->texture_filter == RetroConsoleFilter::ThreePoint && fl[0]->max_texture_size == 64 && fl[0]->mipmaps && fl[0]->fog);
     CHECK(!fl[1]->enabled && fl[1]->console == RetroConsoleFilter::DOS && fl[1]->height == 100 && fl[1]->width == 320);
     CHECK(fl[1]->color_depth == RetroImageParams::Palette256 && fl[1]->dither == RetroImageParams::Bayer4);
+    {
+      const RetroConsoleFilter *x = fl[2];
+      CHECK(x->width == 64 && x->height == 48 && x->fit == 1 && x->vertex_snap && x->snap_grid == 2.5f && !x->affine_textures);
+      CHECK(x->texture_filter == 2 && x->max_texture_size == 128 && x->mipmaps);
+      CHECK(x->color_depth == RetroImageParams::Full && x->dither == RetroImageParams::Bayer4);
+      CHECK(x->fog && x->fog_start == 4.0f && x->fog_end == 22.0f);
+      CHECK(std::fabs(x->fog_color.x - 0.1f) < 1e-5f && std::fabs(x->fog_color.y - 0.2f) < 1e-5f && std::fabs(x->fog_color.z - 0.3f) < 1e-5f);
+      CHECK(x->applied_console == x->console);  // loading didn't re-apply the preset over its values
+    }
     CHECK(save_scene_text(loaded) == text);  // byte for byte
     /* A scene clone copies the effects, not shares them. */
     std::unique_ptr<Scene> copy = ed.scene().clone();
     auto cl = cf_all_retro(copy->find_by_name("Main Camera"));
-    CHECK(cl.size() == 2 && cl[0] != a && cl[1] != b);
-    if (cl.size() == 2) {
+    CHECK(cl.size() == 3 && cl[0] != a && cl[1] != b);
+    CHECK(save_scene_text(*copy) == text);  // every field carried
+    if (cl.size() == 3) {
       cl[0]->width = 777;
       cl[1]->enabled = true;
       cl[0]->apply_preset(RetroConsoleFilter::Saturn);
@@ -9226,8 +9243,8 @@ static void round29_tests() {
     CHECK(dupe != nullptr && dupe != ed.scene().find_by_name("Main Camera"));
     if (dupe) {
       auto dl = cf_all_retro(dupe);
-      CHECK(dl.size() == 2);
-      if (dl.size() == 2) {
+      CHECK(dl.size() == 3);
+      if (dl.size() == 3) {
         dl[0]->width = 555;
         CHECK(cf_all_retro(ed.scene().find_by_name("Main Camera"))[0]->width == 160);
         CHECK(dl[1]->height == 100 && !dl[1]->enabled);
@@ -9236,12 +9253,8 @@ static void round29_tests() {
   });
 
   test("filter stack: the component's hash changes with any effect field, the order, the enabled flag or the count (Camera Preview refresh)", [&] {
-    Editor ed;
-    ed.init_headless(1200, 800);
-    ed.step_frame_headless();
-    GameObject *cam = ed.scene().find_by_name("Main Camera");
-    CHECK(cam != nullptr);
-    if (!cam) return;
+    Scene scene;
+    GameObject *cam = scene.create("Main Camera");
     auto *a = cf_add_retro(cam);
     auto *b = cf_add_retro(cam);
     b->apply_preset(RetroConsoleFilter::DOS);
@@ -9265,34 +9278,8 @@ static void round29_tests() {
     std::swap(cf->effects[0], cf->effects[1]);
     cf->effects.pop_back();
     CHECK(hash_component(*cf) != h2);
-    /* The Rendered Camera Preview rebuilds when a stack field changes through the console. */
-    ed.command("set Render.PreviewSamples 1");
-    ed.command("select Main Camera");
-    cf_add_retro(ed.scene().find_by_name("Main Camera"));
-    ed.command("camerapreview rendered");
-    const Recti view = ed.scene_view_rect();
-    const Recti corner(view.x + view.w * 2 / 3, view.y + view.h * 2 / 3, view.w / 3 - 4, view.h / 3 - 4);
-    auto grab = [&] {
-      std::vector<uint32_t> out;
-      const Image &fb = ed.framebuffer();
-      for (int y = corner.y; y < corner.bottom(); y++) out.insert(out.end(), fb.pixels.data() + (size_t)y * fb.width + corner.x, fb.pixels.data() + (size_t)y * fb.width + corner.right());
-      return out;
-    };
-    auto settle = [&] {
-      std::vector<uint32_t> prev;
-      for (int i = 0; i < 400; i++) {
-        ed.step_frame_headless();
-        std::vector<uint32_t> now = grab();
-        if (!prev.empty() && now == prev && i > 3) return now;
-        prev = now;
-      }
-      return prev;
-    };
-    const std::vector<uint32_t> first = settle();
-    CHECK(first == settle());
-    ed.command("set CameraFilters.E1Width 16");
-    ed.command("set CameraFilters.E1Height 16");
-    CHECK(settle() != first);
+    /* That the Rendered Camera Preview rebuilds on such a change is checked in "the Camera Preview
+     * (Rendered) refreshes when a filter field changes". */
   });
 
   test("filter stack: a scene saved with task 0004's Retro Console Filter components loads into a Camera Filters stack", [&] {
@@ -9339,67 +9326,9 @@ static void round29_tests() {
   });
 
   /* ---------------------------------------------------------------- 4 */
-  test("filter stack: an empty stack, or one with every effect off, gives the same Game view as no component", [&] {
-    /* The stack itself contributes nothing. */
-    {
-      CameraFilters cf;
-      FilterStack s;
-      cf.contribute(s);
-      CHECK(s.empty());
-      cf.add("Retro Console")->enabled = false;
-      cf.add("Retro Console")->enabled = false;
-      FilterStack s2;
-      cf.contribute(s2);
-      CHECK(s2.empty());
-      cf.effects[1]->enabled = true;
-      FilterStack s3;
-      cf.contribute(s3);
-      CHECK(!s3.empty());
-    }
-    Editor ed;
-    ed.init_headless(1600, 1000);
-    ed.step_frame_headless();
-    ed.command("select Cube");
-    ed.command("window Game");
-    auto settle = [&] {
-      for (int i = 0; i < 4; i++) ed.step_frame_headless();
-    };
-    auto grab = [&] { return std::vector<uint32_t>(ed.framebuffer().pixels.begin(), ed.framebuffer().pixels.end()); };
-    settle();
-    const std::vector<uint32_t> base = grab();
-    const int FW = ed.framebuffer().width;
-    auto diff = [&](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
-      const Recti r = ed.scene_view_rect();
-      size_t n = 0;
-      for (int y = r.y; y < r.bottom(); y++)
-        for (int x = r.x; x < r.right(); x++) n += a[(size_t)y * FW + x] != b[(size_t)y * FW + x];
-      return n;
-    };
-    const size_t area = (size_t)ed.scene_view_rect().w * ed.scene_view_rect().h;
-    GameObject *cam = ed.scene().find_by_name("Main Camera");
-    CHECK(cam != nullptr);
-    if (!cam) return;
-    cam->add<CameraFilters>();
-    settle();
-    CHECK(diff(grab(), base) <= area / 1000);  // an empty stack
-    auto *f = cf_add_retro(cam);
-    auto *g = cf_add_retro(cam);
-    f->enabled = g->enabled = false;
-    settle();
-    CHECK(diff(grab(), base) <= area / 1000);  // all off
-    f->enabled = true;
-    f->width = 48, f->height = 36;
-    settle();
-    CHECK(diff(grab(), base) > area / 20);  // the check can fail: one on changes the picture
-  });
-
   /* ---------------------------------------------------------------- 5 */
   test("presets: PS1, N64, Saturn and DOS fill in the documented fields and contribute them to the stack", [&] {
-    RetroConsoleFilter p;
-    p.apply_preset(RetroConsoleFilter::PS1);
-    CHECK(p.width == 320 && p.height == 240 && p.vertex_snap && p.affine_textures && p.texture_filter == RetroConsoleFilter::Nearest);
-    CHECK(p.max_texture_size == 256 && !p.mipmaps && p.color_depth == RetroImageParams::Bits15 && p.dither == RetroImageParams::Ps1);
-    CHECK(!p.screen_door && !p.fog);
+    /* PS1's fields are checked in "Retro Console Filter contributes the PS1 look". */
     RetroConsoleFilter n;
     n.apply_preset(RetroConsoleFilter::N64);
     CHECK(n.width == 320 && n.height == 240 && !n.vertex_snap && !n.affine_textures);
@@ -9491,11 +9420,13 @@ static void round29_tests() {
     CHECK_NEAR(t.sample_level({0.25f, 0.75f}, 0, TexWrap::Repeat, TexFilter::ThreePoint).x, a, 1e-4);
     CHECK_NEAR(t.sample_level({0.75f, 0.25f}, 0, TexWrap::Repeat, TexFilter::ThreePoint).x, d, 1e-4);
     /* It never overshoots the texel values. */
+    int overshoots = 0;
     for (int i = 0; i <= 20; i++)
       for (int j = 0; j <= 20; j++) {
         const Vec4 v = t.sample_level({0.25f + 0.5f * i / 20, 0.25f + 0.5f * j / 20}, 0, TexWrap::Repeat, TexFilter::ThreePoint);
-        CHECK(v.x >= -1e-4f && v.x <= d + 1e-4f);
+        overshoots += !(v.x >= -1e-4f && v.x <= d + 1e-4f);
       }
+    CHECK(overshoots == 0);
   });
 
   test("Saturn screen-door: a transparent quad over a background is an exact checkerboard of opaque pixels, nothing blended", [&] {
@@ -9592,9 +9523,11 @@ static void round29_tests() {
     /* The 6x6x6 cube is in there. */
     CHECK(distinct.count(0x000000u) && distinct.count(0xFFFFFFu) && distinct.count(0xFF3300u) && distinct.count(0x3399CCu));
     /* Anything maps to a palette colour; out-of-range channels clamp. */
+    int off_palette = 0;
     for (int r : {-50, 0, 7, 100, 130, 255, 400})
       for (int g : {0, 33, 128, 254})
-        for (int b : {0, 90, 255, 1000}) CHECK(distinct.count(retro_palette_nearest(r, g, b) & 0xFFFFFFu));
+        for (int b : {0, 90, 255, 1000}) off_palette += !distinct.count(retro_palette_nearest(r, g, b) & 0xFFFFFFu);
+    CHECK(off_palette == 0);
     /* Pure black stays black (the old 5-bit lookup table turned it into 060606). */
     CHECK((retro_palette_nearest(-5, -5, -5) & 0xFFFFFFu) == 0u);
     CHECK((retro_palette_nearest(999, 999, 999) & 0xFFFFFFu) == 0xFFFFFFu);
@@ -9672,7 +9605,8 @@ static void round29_tests() {
     CHECK(ba.width == 320 && ba.height == 240 && ba.fit == FilterStack::Fill);
     CHECK(ba.tex.filter == (int)TexFilter::Closest && ba.tex.max_size == 64);  // the smaller cap wins either way
     CHECK(ba.passes.size() == 2);
-    /* A disabled effect adds nothing, wherever it sits. */
+    /* A disabled effect adds nothing, wherever it sits (also checked with no filter at all, in
+     * "with no filter the rasterizer's image is unchanged"). */
     {
       CameraFilters cf;
       cf.add("Retro Console");
@@ -9832,7 +9766,9 @@ size_t pilot_diff(const Px &a, const Px &b, int stride, const Recti &r, int from
 static void round30_tests() {
   test("pilot view: the frame is the camera's Game view picture (same size Game view in a second editor), plain and with PS1", [&] {
     /* Approach: a second Editor whose Game view has exactly the frame's size renders the same camera
-     * through the Game view path; the piloted frame must match it pixel for pixel. */
+     * through the Game view path; the piloted frame must match it pixel for pixel. The window size
+     * found for the plain pass is reused for PS1 (the filter doesn't change the layout). */
+    int W = 0, H = 0;
     for (int ps1 = 0; ps1 < 2; ps1++) {
       PilotRig A;
       A.start(1600, 1000, ps1 != 0);
@@ -9844,7 +9780,7 @@ static void round30_tests() {
       if (fr.w <= 0) return;
       const Px a = A.grab();
       /* Find a window size whose Game view is the frame's size. */
-      int W = 1600 - (vr.w - fr.w), H = 1000 - (vr.h - fr.h);
+      if (W == 0) W = 1600 - (vr.w - fr.w), H = 1000 - (vr.h - fr.h);
       Recti g{0, 0, 0, 0};
       for (int it = 0; it < 6; it++) {
         auto B = std::make_unique<PilotRig>();
@@ -9953,10 +9889,13 @@ static void round30_tests() {
     const GameObject *cam = R.cam;
     GameObject *got = nullptr;
     int hx = 0, hy = 0;
-    for (int gy = 1; gy < 14 && !got; gy++)
-      for (int gx = 1; gx < 20 && !got; gx++) {
+    int clicks = 0;
+    for (int gy = 1; gy < 14 && !got && clicks < 8; gy++)
+      for (int gx = 1; gx < 20 && !got && clicks < 8; gx++) {
         const int x = fr.x + fr.w * gx / 20, y = fr.y + fr.h * gy / 14;
         if (y < R.banner_bottom()) continue;
+        if (R.ed.scene_depth_for_test(x, y) >= 1.0f) continue;  // sky: nothing to pick there
+        clicks++;
         R.ed.command("select Main Camera");
         R.click(x, y);
         GameObject *s = R.ed.selected_object();
@@ -10113,8 +10052,6 @@ inline FilterFrame r31_frame() {
   f.forward = {0, 0, 1};
   return f;
 }
-const float kNaN = std::numeric_limits<float>::quiet_NaN();
-const float kInf = std::numeric_limits<float>::infinity();
 
 /* Runs every pass with the given odd number in every float slot (and an odd int in every int slot). */
 void r31_run_all(RenderTarget &rt, float v, int iv, const FilterFrame *frame) {
@@ -10395,7 +10332,7 @@ static void round31_tests() {
         int n = 0;
         for (int y = 0; y < H; y++) n += (t.at(x, y) & 0xFFFFFF) == 0;
         if (n == H) cols.push_back(x);
-        else CHECK(n == 0);  // a line is a whole column
+        else if (n != 0) cols.push_back(-1 - x);  // a line is a whole column: a partial one fails the comparison
       }
       return cols;
     };
@@ -10511,7 +10448,7 @@ static void round31_tests() {
     R31Target t(8, 8);
     t.fill(0xFF808080u);
     apply_sharpen(t.rt, 2.0f);
-    for (uint32_t p : t.img.pixels) CHECK(p == 0xFF808080u);
+    CHECK(count_bad("pixels", t.img.pixels, [&](uint32_t p) { return p == 0xFF808080u; }) == 0);
     for (int y = 0; y < 8; y++)
       for (int x = 0; x < 8; x++) t.at(x, y) = x < 4 ? 0xFF323232u : 0xFFC8C8C8u;
     apply_sharpen(t.rt, 1.0f);
@@ -10675,11 +10612,14 @@ static void round31_tests() {
     };
     const auto first = grab();
     CHECK(first.size() > 10000);
-    for (int i = 0; i < 4; i++) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    /* The grain's seed changes every 1/24 s while playing: 45 ms apart, frames would differ if it moved. */
+    size_t moved_while_stopped = 0;
+    for (int i = 0; i < 2; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(45));
       ed.step_frame_headless();
-      CHECK(differing(first, grab()) == 0);
+      moved_while_stopped += differing(first, grab());
     }
+    CHECK(moved_while_stopped == 0);
     /* Grain really is on: switching the effect off changes the picture. */
     cmd(ed, "set CameraFilters.E0Enabled false");
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
@@ -10691,8 +10631,8 @@ static void round31_tests() {
     cmd(ed, "play");
     ed.step_frame_headless();
     std::vector<std::vector<uint32_t>> frames;
-    for (int i = 0; i < 6; i++) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    for (int i = 0; i < 5; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(45));
       ed.step_frame_headless();
       frames.push_back(grab());
     }
@@ -10704,13 +10644,13 @@ static void round31_tests() {
     cmd(ed, "window Game");  // leaving Play puts the Scene view back in the tab; look at the Game view again
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     const auto after = grab();
-    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    std::this_thread::sleep_for(std::chrono::milliseconds(45));
     ed.step_frame_headless();
     CHECK(differing(after, grab()) == 0);  // still again once stopped
   });
 
   /* ---------------------------------------------------------------- 4 */
-  test("every Color / Lens / Stylize effect can be added from the console, set, saved, loaded and undone", [&] {
+  test("every filter effect (Retro Console, Color, Lens, Stylize, Bloom) can be added from the console, set, saved, loaded and undone", [&] {
     const std::vector<R31Case> cases = {
         {"Color Grading", "Exposure", "1.5", [](FilterEffect *e) { return (double)static_cast<ColorGradingEffect *>(e)->exposure; }, 1.5},
         {"Posterize", "Levels", "3", [](FilterEffect *e) { return (double)static_cast<PosterizeEffect *>(e)->levels; }, 3},
@@ -10724,8 +10664,12 @@ static void round31_tests() {
         {"Edge Outline", "Thickness", "3", [](FilterEffect *e) { return (double)static_cast<EdgeOutlineEffect *>(e)->thickness; }, 3},
         {"CRT", "Flicker", "0.5", [](FilterEffect *e) { return (double)static_cast<CrtEffect *>(e)->flicker; }, 0.5},
         {"Sharpen", "Amount", "2.5", [](FilterEffect *e) { return (double)static_cast<SharpenEffect *>(e)->amount; }, 2.5},
+        /* The other categories' effects go through the same paths (they had their own copies of this test). */
+        {"Retro Console", "Width", "100", [](FilterEffect *e) { return (double)static_cast<RetroConsoleFilter *>(e)->width; }, 100},
+        {"Bloom", "Threshold", "2.5", [](FilterEffect *e) { return (double)static_cast<BloomEffect *>(e)->threshold; }, 2.5},
     };
-    /* The registry lists all twelve, three categories of four, each with help and a working factory. */
+    /* The registry lists them all: three categories of four, plus Retro Console and Bloom, each with help and a
+     * working factory. */
     std::map<std::string, int> per_cat;
     for (const R31Case &c : cases) {
       const FilterEffectInfo *info = find_filter_effect_info(c.name);
@@ -10737,6 +10681,8 @@ static void round31_tests() {
       CHECK(e && std::string(e->type_name()) == c.name);
     }
     CHECK(per_cat["Color"] == 4 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 4);
+    CHECK(per_cat["Retro Console"] == 1 && per_cat["Bloom & glow"] == 1);
+    CHECK(filter_effect_infos().size() == cases.size());  // a new effect type gets a row here
     {  // menu order is grouped by category (a category is one run)
       std::vector<std::string> order;
       for (const FilterEffectInfo &fi : filter_effect_infos())
@@ -10824,7 +10770,7 @@ static void round31_tests() {
     }
   });
 
-  test("odd sizes: every pass works on 1 x 1, 1 x N, N x 1 and on a window into a larger image (row stride)", [] {
+  test("odd sizes: every pass works on 1 x 1, 1 x N, N x 1 and on a window into a larger image (row stride, Bloom too)", [] {
     const int sizes[][2] = {{1, 1}, {1, 9}, {9, 1}, {2, 2}, {3, 7}, {64, 48}};
     for (const auto &sz : sizes) {
       R31Target t(sz[0], sz[1]);
@@ -10855,6 +10801,18 @@ static void round31_tests() {
     RenderTarget rt;
     rt.attach(big, {4, 3, 10, 6});
     CHECK(rt.width == 10 && rt.height == 6 && rt.stride == 20);
+    /* A white patch inside, so Bloom has something to spread (it would reach past the window if it
+     * ignored the stride). */
+    for (int y = 5; y < 7; y++)
+      for (int x = 8; x < 11; x++) big.pixels[(size_t)y * 20 + x] = 0xFFFFFFFFu;
+    const std::vector<uint32_t> before = big.pixels;
+    BloomParams bp;
+    bp.threshold = 0.5f;
+    bp.intensity = 2.0f;
+    apply_bloom(rt, bp);
+    int bloom_inside = 0;
+    for (size_t i = 0; i < big.pixels.size(); i++) bloom_inside += big.pixels[i] != before[i];
+    CHECK(bloom_inside > 0);
     apply_invert(rt, 1.0f);
     apply_sharpen(rt, 1.0f);
     apply_pixelate(rt, 3);
@@ -10863,7 +10821,7 @@ static void round31_tests() {
     for (int y = 0; y < 12; y++)
       for (int x = 0; x < 20; x++) {
         const bool inside = x >= 4 && x < 14 && y >= 3 && y < 9;
-        const bool changed = big.pixels[(size_t)y * 20 + x] != 0xFF336699u;
+        const bool changed = big.pixels[(size_t)y * 20 + x] != before[(size_t)y * 20 + x];
         (inside ? inside_changed : outside_changed) += changed;
       }
     CHECK(outside_changed == 0);
@@ -10963,19 +10921,7 @@ struct R32Scene {
     rt.want_hdr = want_hdr;
     draw(rt);
   }
-  void draw(RenderTarget &rt) const {
-    Renderer3D r;
-    RasterOptions opt;
-    opt.shade = ShadeMode::Deferred;
-    LightingEnv env;
-    RenderLight sun;
-    sun.direction = normalize(Vec3(-0.3f, -1, 0.4f));
-    env.lights.push_back(sun);
-    r.begin(&rt, v, p, env, opt);
-    r.clear(0xFF101010u);
-    for (const DrawItem &it : sc.items) r.add(it);
-    r.flush();
-  }
+  void draw(RenderTarget &rt) const { cf_draw(rt, v, p, RasterOptions{}, sc, 0xFF101010u); }
   /* The middle row's last bright pixel of the quad (right edge). */
   int right_edge(const Image &img) const {
     int e = W / 2;
@@ -11199,6 +11145,9 @@ static void round32_tests() {
       const int H = dims == 0 ? 1 : dims == 1 ? 2 : dims == 2 ? 1 : dims == 3 ? 48 : 31;
       for (float v : odd)
         for (int use_hdr = 0; use_hdr < 2; use_hdr++) {
+          /* Every odd value at the smallest and an uneven size; the other sizes with NaN and infinity
+           * (each bloom builds a 540-row pyramid, so the full cross product took a second). */
+          if ((dims == 1 || dims == 2 || dims == 3) && !(std::isnan(v) || v == kInf)) continue;
           R31Target t(W, H);
           t.random_planes(11);
           if (use_hdr) {
@@ -11221,37 +11170,13 @@ static void round32_tests() {
           p.intensity = 5.0f;
           apply_bloom(t.rt, p);
           CHECK(t.rt.width == W && t.rt.height == H && (int)t.img.pixels.size() == W * H);
-          for (uint32_t c : t.img.pixels) CHECK((c >> 24) == 0xFF);
+          CHECK(count_bad("bloom alpha", t.img.pixels, opaque) == 0);
         }
     }
+    /* An empty target (no colour plane) is a no-op, not a crash. */
     RenderTarget none;
     apply_bloom(none, BloomParams{});
-    CHECK(true);
-  });
-
-  test("bloom: a target that is a window into a larger image (row stride) only changes inside the window", [] {
-    Image big;
-    big.resize(40, 24);
-    std::fill(big.pixels.begin(), big.pixels.end(), 0xFF202020u);
-    RenderTarget rt;
-    rt.attach(big, {8, 5, 20, 12});
-    CHECK(rt.stride == 40 && rt.width == 20);
-    for (int y = 9; y < 13; y++)
-      for (int x = 14; x < 22; x++) big.pixels[(size_t)y * 40 + x] = 0xFFFFFFFFu;
-    const std::vector<uint32_t> before = big.pixels;
-    BloomParams p;
-    p.threshold = 0.5f;
-    p.intensity = 2.0f;
-    apply_bloom(rt, p);
-    int outside = 0, inside = 0;
-    for (int y = 0; y < 24; y++)
-      for (int x = 0; x < 40; x++) {
-        const bool in = x >= 8 && x < 28 && y >= 5 && y < 17;
-        const bool changed = big.pixels[(size_t)y * 40 + x] != before[(size_t)y * 40 + x];
-        (in ? inside : outside) += changed;
-      }
-    CHECK(outside == 0);
-    CHECK(inside > 0);
+    CHECK(none.width == 0 && none.color == nullptr);
   });
 
   test("bloom: infinite and NaN values in the HDR plane don't spread NaN into the picture", [] {
@@ -11269,7 +11194,7 @@ static void round32_tests() {
       return t;
     };
     auto bad = run(Vec3(kNaN));
-    for (uint32_t c : bad->img.pixels) CHECK((c >> 24) == 0xFF);
+    CHECK(count_bad("alpha", bad->img.pixels, opaque) == 0);
     /* A NaN pixel counts as "not shaded" (decoded from its 8-bit grey): same picture as -1 there. */
     auto ref = run(Vec3(-1.0f, 0, 0));
     CHECK(bad->img.pixels == ref->img.pixels);
@@ -11278,7 +11203,7 @@ static void round32_tests() {
   });
 
   /* ---------------------------------------------------------------- 6 */
-  test("bloom: Add Filter > Bloom on the Main Camera saves, loads, undoes, and the Game view glows around an emissive sphere", [&] {
+  test("bloom: the Game view glows around an emissive sphere once Bloom is on the Main Camera, and undoing the add restores it", [&] {
     Editor ed;
     ed.init_headless(1200, 800);
     ed.step_frame_headless();
@@ -11317,35 +11242,27 @@ static void round32_tests() {
     CHECK(brighter > 50);
     CHECK(darker == 0);
     CHECK(gain > 0);
-    /* Settings save and load. */
+    /* Threshold's save / load / undo is Bloom's row in "every filter effect ... can be added from the
+     * console"; Intensity and Scatter are checked here. */
     cmd(ed, "set CameraFilters.E0Intensity 1.5");
-    cmd(ed, "set CameraFilters.E0Threshold 2.5");
     cmd(ed, "set CameraFilters.E0Scatter 0.2");
-    const std::string text = save_scene_text(ed.scene());
-    Scene loaded;
-    std::string err;
-    CHECK(load_scene_text(text, loaded, err));
-    GameObject *lc = loaded.find_by_name("Main Camera");
-    CHECK(lc != nullptr);
-    if (lc) {
-      CameraFilters *lcf = lc->get<CameraFilters>();
-      CHECK(lcf && lcf->effects.size() == 1);
-      if (lcf && lcf->effects.size() == 1) {
-        auto *b = dynamic_cast<BloomEffect *>(lcf->effects[0].get());
-        CHECK(b != nullptr);
-        if (b) {
-          CHECK_NEAR(b->intensity, 1.5f, 1e-5);
-          CHECK_NEAR(b->threshold, 2.5f, 1e-5);
-          CHECK_NEAR(b->scatter, 0.2f, 1e-5);
-        }
-      }
+    {
+      const std::string text = save_scene_text(ed.scene());
+      Scene loaded;
+      std::string err;
+      CHECK(load_scene_text(text, loaded, err));
+      GameObject *lc = loaded.find_by_name("Main Camera");
+      CameraFilters *lcf = lc ? lc->get<CameraFilters>() : nullptr;
+      auto *b = lcf && lcf->effects.size() == 1 ? dynamic_cast<BloomEffect *>(lcf->effects[0].get()) : nullptr;
+      CHECK(b != nullptr);
+      if (b) CHECK(std::fabs(b->intensity - 1.5f) < 1e-5f && std::fabs(b->scatter - 0.2f) < 1e-5f);
       CHECK(save_scene_text(loaded) == text);
     }
-    /* Undo: the three sets, then the add. */
-    for (int i = 0; i < 3; i++) cmd(ed, "undo");
+    cmd(ed, "undo");
+    cmd(ed, "undo");
     cf = r29_stack(ed);
-    CHECK(cf && cf->effects.size() == 1);
-    if (cf && cf->effects.size() == 1) CHECK_NEAR(static_cast<BloomEffect *>(cf->effects[0].get())->intensity, 0.6f, 1e-6);
+    auto *bl = cf && cf->effects.size() == 1 ? static_cast<BloomEffect *>(cf->effects[0].get()) : nullptr;
+    CHECK(bl && std::fabs(bl->intensity - 0.6f) < 1e-6f && std::fabs(bl->scatter - 0.7f) < 1e-6f);  // the defaults
     cmd(ed, "undo");
     cf = r29_stack(ed);
     CHECK(cf == nullptr || cf->effects.empty());
@@ -11363,20 +11280,11 @@ static void round32_tests() {
     ed.command("set Render.RenderEngine Path");
     ed.command("set Render.Samples 2");
     ed.command("set Render.Denoise false");
-    /* Renders on a worker: step frames until the image has stopped changing for a while. */
+    /* The render advances a slice per frame: step until it reports done (with a generous cap). */
     auto render = [&] {
       ed.command("render");
-      uint64_t prev = 0;
-      int still = 0;
-      for (int i = 0; i < 6000 && still < 25; i++) {
-        ed.step_frame_headless();
-        std::this_thread::sleep_for(std::chrono::milliseconds(4));
-        const Image &im = ed.render_image_for_test();
-        if (im.pixels.empty()) continue;
-        const uint64_t h = cf_hash(im);
-        still = (h == prev) ? still + 1 : 0;
-        prev = h;
-      }
+      for (int i = 0; i < 2000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.rendering_for_test());
       return ed.render_image_for_test();
     };
     const Image plain = render();
