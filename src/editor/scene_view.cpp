@@ -96,7 +96,7 @@ void Editor::draw_scene_view(const Recti &r) {
     /* The 3D layer is reused while nothing it shows has changed (an idle frame, the mouse over a panel,
      * a caret blinking). Never while piloting, path tracing or playing. */
     ScopedTimer rt;
-    const bool cacheable = shading_ != Shading::Rendered && !piloted_camera() && !(playing_ && !paused_);
+    const bool cacheable = !piloted_camera() && !(playing_ && !paused_);
     const uint64_t key = cacheable ? scene_view_key(view) : 0;
     const bool hit = view_cache_hit(scene_cache_, key, view);
     if (hit && !cache_verify_) prof_.view_cache_hits++;
@@ -159,10 +159,6 @@ void Editor::draw_scene_view(const Recti &r) {
     lines.push_back(strprintf("Triangles %zu (%zu drawn)", scene_stats_.tris_submitted, scene_stats_.tris_rasterized));
     lines.push_back(strprintf("Render    %.2f ms  (%d culled)", scene_stats_.ms_total, scene_stats_.objects_culled));
     lines.push_back(strprintf("Editor    %.0f fps (cap %s), frame %.1f ms", measured_fps_, max_fps_ ? std::to_string(max_fps_).c_str() : "none", frame_ms_));
-    if (shading_ == Shading::Rendered) {
-      lines.push_back(strprintf("Path tracing  %d / %d samples", vp_pt_.samples(), scene_->render.viewport_samples));
-      lines.push_back("Device    " + vp_pt_.device_summary());
-    }
     if (shading_ == Shading::Shaded) lines.push_back(strprintf("Shading   %.2f ms (deferred PBR)", scene_stats_.ms_shade));
     int y = view.y + u.px(8);
     for (auto &l : lines) {
@@ -183,12 +179,12 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
   u.canvas.hline(bar.x, bar.right(), bar.bottom() - 1, u.theme.border);
   int h = bar.h - u.px(6), y = bar.y + u.px(3), x = bar.x + u.px(6);
-  static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Rendered (Path Traced)", "Shaded Wireframe"};
+  static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Shaded Wireframe"};
   int m = (int)shading_;
-  if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 5)) shading_ = (Shading)m;
+  if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 4)) shading_ = (Shading)m;
   u.tooltip("Draw mode (Blender: Z pie).\nSolid = fast vertex lighting (Workbench).\n"
             "Shaded = materials, textures, shadows (EEVEE / Unity Shaded).\n"
-            "Rendered = progressive path tracing (Cycles).");
+            "Path tracing: F12, the Render window, or the Camera Preview's Rendered toggle.");
   x += u.px(176);
   if (u.icon_button({x, y, h, h}, Icon::Lightbulb, scene_lighting_, "Scene lighting on/off.\nOff = headlight from the camera, like Blender's Studio lighting.")) scene_lighting_ = !scene_lighting_;
   x += h + u.px(2);
@@ -461,8 +457,7 @@ void Editor::render_scene_view(const Recti &view) {
     scene_r3d_.rebind(&scene_rt_, v, p);  // the tools project with the editor's view, over the whole view
     return;
   }
-  if (shading_ == Shading::Rendered) render_pathtraced_view(view);
-  else if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
+  if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
     GameObject *fowner = nullptr;
     if (scene_filters_) main_camera(*scene_, &fowner);
     if (fowner && !camera_filters(fowner).empty())  // the main camera's filters on the editor's view

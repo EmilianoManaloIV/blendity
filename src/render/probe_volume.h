@@ -59,8 +59,9 @@ struct ProbeVolumeData {
   size_t probe_count() const { return position.size(); }
   int find_brick(Vec3 p) const;
   /* Trilinear over the brick's valid probes at p (already biased), each cube evaluated at n. False if p
-   * is outside or no valid probe is near. */
-  bool sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction = true) const;
+   * is outside or no valid probe is near. `hint` (optional, per caller and thread): the brick the last
+   * sample used; a point inside it skips the octree (neighbouring pixels mostly share a brick). */
+  bool sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction = true, int *hint = nullptr) const;
   bool save(const std::string &path, std::string &error) const;
   bool load(const std::string &path, std::string &error);
 };
@@ -78,13 +79,17 @@ void probe_validate(ProbeVolumeData &d, const PathTracer &pt, int rays);
  * lights' direct light, into each probe's baked cube; `count` probes from `start` (the editor bakes in
  * slices); the slice that finishes the last probe also dilates (probe_dilate). `indirect_intensity` as the lightmaps'. */
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start = 0,
-                size_t count = SIZE_MAX, float indirect_intensity = 1.0f);
+                size_t count = SIZE_MAX, float indirect_intensity = 1.0f, int gpu_device = -1, std::string *gpu_error = nullptr);
 /* Invalid probes take their valid neighbours' light. */
 void probe_dilate(ProbeVolumeData &d);
 /* Realtime: up to `budget` probes from `start`, with voxel GI (six hemisphere gathers); returns the
  * next start. */
+/* `gpu` (task 0018): gathers there instead, all of `budget` in one go; on a GPU error it says why in
+ * `gpu_error` and gathers on the CPU. */
+class VoxelGiGpu;
 size_t probe_live_update(ProbeVolumeData &d, const VoxelGrid &g, const Rsm *rsm, const Environment &env, const GiParams &prm, size_t start,
-                         size_t budget);
+                         size_t budget,
+                         VoxelGiGpu *gpu = nullptr, std::string *gpu_error = nullptr);
 
 /* What the shader needs (LightingEnv::probes). */
 struct ProbeFrame {
@@ -92,6 +97,9 @@ struct ProbeFrame {
   float normal_bias = 0.25f, view_bias = 0.1f;  // metres
   bool use_live = false;
   bool leak_reduction = true;  // probes behind the shaded surface count for (almost) nothing
+  /* One sample per 2 x 2 pixels on the same triangle (probe light changes slowly over a surface): a
+   * quarter of the cost. Off: every pixel samples (the reference the tests compare against). */
+  bool quad_reuse = true;
 };
 
 }  // namespace bl

@@ -1,6 +1,6 @@
 # 0014: Probe volumes (like Unity 6's Adaptive Probe Volumes), kept live by voxel GI
 
-- **Status:** in review (approved 2026-10-09)
+- **Status:** in review (approved 2026-10-09; the deviations below signed off 2026-10-10)
 - **Requirements:** R-05, R-11
 - **Decisions:** ADR 0012, probe volumes
 - **Model:** main session (Opus)

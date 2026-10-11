@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -134,6 +135,12 @@ class PathTracer {
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, rays, nullptr); }
   bool occluded(const Ray &r, float tmax) const;
+  /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
+   * cosine-weighted around dirs[i] as a normal (the mean is irradiance / pi, as incoming_radiance's
+   * cosine gather), mode 2: along dirs[i]. `hit` (optional) gets the share of paths whose first ray hit
+   * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't. */
+  bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
+                  std::vector<float> *hit, std::string *error) const;
   /* Light passing along a shadow ray: 0 when blocked, partial through
    * transparent surfaces, full through cutout holes. */
   Vec3 transmittance(const Ray &r, float tmax) const;
@@ -207,6 +214,12 @@ class PathTracer {
     double ms_per_sample = 0;
   };
   std::vector<std::unique_ptr<GpuSlot>> gpus_;
+  mutable std::unique_ptr<gpu::Renderer> bake_gpu_;  // gpu_gather's device, and the build its scene came from
+  mutable int bake_gpu_index_ = -1;
+  mutable uint64_t bake_gpu_build_ = 0;
+  uint64_t build_count_ = 0;
+  mutable gpu::GParams bake_params_{};
+  mutable std::mutex bake_gpu_mutex_;
   gpu::GParams gpu_params_{};
   std::string gpu_error_;
   int cpu_samples_ = 0;

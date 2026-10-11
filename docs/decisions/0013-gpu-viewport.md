@@ -1,6 +1,7 @@
 # 0013: A GPU viewport, decided by a measured spike
 
-- **Status:** proposed. The spike measured no-go; the user decides between the options below
+- **Status:** accepted (2026-10-10): the spike measured no-go and the user agreed; the views stay on the
+  CPU, and GI went to the GPU instead (ADR 0014)
 - **Date:** 2026-10-10
 - **Requirements:** R-05, Q-01
 

@@ -1,8 +1,8 @@
 # 0012: Probe volumes: adaptive bricks of ambient-cube probes, baked and kept live
 
-- **Status:** proposed. Task 0014's spec was approved on 2026-10-09; it named SH L1/L2 and put voxel GI
-  ahead of the probes. The ambient cube and the precedence below replace those, pending the user's
-  sign-off
+- **Status:** accepted. Task 0014's spec was approved on 2026-10-09; it named SH L1/L2 and put voxel GI
+  ahead of the probes. The ambient cube and the precedence below replace those, signed off by the user
+  on 2026-10-10 ("as long as they give the same effect and it's performant")
 - **Date:** 2026-10-10
 - **Requirements:** R-05, R-11
 

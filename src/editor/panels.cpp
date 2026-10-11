@@ -1723,6 +1723,15 @@ void Editor::draw_lighting_window(const Recti &r) {
   if (!baking_ && lighting_out_of_date())
     u.label(lay.row(), "Lighting out of date: objects changed since the bake keep realtime ambient.", u.theme.warning);
   {
+    std::string why;
+    const bool live = live_gi_needed(&why);
+    if (live && scene_stats_.ms_gi > 0.0) why += strprintf("  -  %.1f ms a Scene view render", scene_stats_.ms_gi);
+    if (live && !gi_gpu_name_.empty() && !gi_gpu_failed_) why += "  -  gathers on " + gi_gpu_name_;
+    u.label(lay.row(), why, live ? u.theme.text : u.theme.text_dim);
+    u.tooltip("Realtime GI only traces what the bake doesn't hold: no bake, objects or lights changed since it\n"
+              "(Auto Generate re-bakes), or a Realtime Directional Light. Otherwise the views cost what a bake does.");
+  }
+  {
     size_t contributing = 0;
     scene_->for_each([&](GameObject &g) {
       if (auto *mr = g.get<MeshRenderer>())
@@ -1751,7 +1760,6 @@ void Editor::draw_lighting_window(const Recti &r) {
     u.pop_id();
     if (ir.changed) {
       mark_changed("World Settings");
-      vp_pt_hash_ = 0;
     }
   }
   lay.space(u.px(6));
@@ -1901,7 +1909,6 @@ void Editor::draw_render_window(const Recti &r) {
         if (on) render_devices_off_.insert(d.name);
         else render_devices_off_.erase(d.name);
         save_prefs();
-        vp_pt_hash_ = 0;
       }
     }
     if (devs.empty()) u.label(lay.row(), gpu::compiled_in() ? "No Vulkan GPU found - rendering on the CPU" : "This build has no GPU rendering", u.theme.text_dim);
@@ -1917,14 +1924,13 @@ void Editor::draw_render_window(const Recti &r) {
     u.pop_id();
     if (ir.changed) {
       mark_changed("World Settings");
-      vp_pt_hash_ = 0;
     }
   }
   lay.space(u.px(6));
   GameObject *owner = nullptr;
   main_camera(*scene_, &owner);
   u.label(lay.row(), owner ? "Camera: " + owner->name : "No camera - rendering from the Scene view", u.theme.text_dim);
-  u.label(lay.row(), "Tip: Scene view > Rendered previews the path tracer live.", u.theme.text_dim);
+  u.label(lay.row(), "Tip: select a camera and switch its Camera Preview to Rendered to preview the path tracer live.", u.theme.text_dim);
   lay.space(u.px(16));
   content_h = lay.y + off - left.y;
   u.end_scroll();
@@ -2363,7 +2369,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
          u.theme.text_dim);
   const uint32_t dim = u.theme.text_dim;
   text("What it costs:", u.theme.text);
-  text("- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded / Rendered views cost more per frame.", dim);
+  text("- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.", dim);
   if (max_fps_ == 0)
     text("- Unlimited: a CPU core runs flat out while anything moves; fans and battery suffer, and frames beyond the monitor's refresh rate are never seen.", dim);
   else if (max_fps_ > 144)
@@ -2372,7 +2378,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     text("- 30 fps: about half the CPU of 60 while you drag, but the mouse feels up to 33 ms behind and orbiting looks steppy.", dim);
   else
     text(strprintf("- %d fps: dragging and orbiting draw up to %d frames a second; idle costs nothing unless Redraw is Always.", max_fps_, max_fps_), dim);
-  text("- Rendered (path-traced) viewport: editor frames share the CPU with sampling; a lower cap leaves more for samples.", dim);
+  text("- A Rendered Camera Preview: editor frames share the CPU with sampling; a lower cap leaves more for samples.", dim);
   if (always_redraw_) text("- Always redraw: the cap's CPU cost continues while idle (handy with the Profiler; otherwise wasted power).", u.theme.warning);
 }
 

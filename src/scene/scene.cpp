@@ -165,6 +165,14 @@ void LightingSettings::reflect(Reflector &r) {
     r.field("RSM Resolution", gi_rsm_resolution, 32, 2048);
     r.help("The sun's reflective shadow map: where its light lands, for the bounce.");
     r.field("Specular Occlusion", gi_specular_occlusion, 0.01f, 0.0f, 1.0f);
+    static const char *dev[] = {"Auto", "CPU", "GPU"};
+    r.enumeration("GI Device", gi_device, dev, 3);
+    r.help("Where realtime lightmaps and live probes gather: Auto uses the GPU (Vulkan compute) when there is one,\n"
+           "5 to 8 times faster, and a whole pass fits in a frame; the CPU is the fallback and the reference.");
+    r.field("Realtime Resolution", realtime_resolution, 0.1f, 0.0f, 100.0f);
+    r.help("Realtime lightmaps (Unity: Realtime Resolution): texels per metre on Contribute GI objects, lit by the voxel GI\n"
+           "and read like a baked map, so moving the camera traces nothing and the look doesn't change with zoom.\n"
+           "0: off (every object traced per pixel, at the GI Resolution).");
   }
   r.field("Probe Min Spacing", probe_min_spacing, 0.05f, 0.05f, 100.0f);
   r.help("Probe volumes (a Probe Volume component): metres between probes near geometry. The volume gets coarser\n"
@@ -238,7 +246,7 @@ void RenderSettings::reflect(Reflector &r) {
     }
     r.samples("Samples", samples, 1, 65536);
     r.help("Samples per pixel for the final render. Noise falls as 1/sqrt(samples): each doubling cuts it by ~30%.\nBlender: Sampling > Render > Max Samples.");
-    r.samples("Viewport Samples", viewport_samples, 1, 65536);
+    if (r.all_fields()) r.samples("Viewport Samples", viewport_samples, 1, 65536);  // kept in files; the Scene view no longer path traces
     r.field("Max Bounces", max_bounces, 0, 64);
     r.field("Clamp Indirect", clamp_indirect, 0.1f, 0.0f, 1000.0f);
     r.help("Limits bright indirect samples to remove fireflies (0 = off). Blender: Light Paths > Clamping.");

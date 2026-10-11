@@ -100,32 +100,8 @@ inline void basis(Vec3 n, Vec3 &t, Vec3 &b) {
 inline bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
 }  // namespace
 
-void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vector<BakeLight> &lights, const Environment &env,
-                        const BakeSettings &settings) {
-  s_ = settings;
-  s_.texels_per_unit = finite_bits(s_.texels_per_unit) ? std::max(0.01f, std::min(1000.0f, s_.texels_per_unit)) : 40.0f;
-  int ms = 16;
-  while (ms < std::max(16, std::min(8192, s_.max_size))) ms *= 2;  // a power of two
-  s_.max_size = ms;
-  s_.padding = std::max(0, std::min(32, s_.padding));
-  s_.direct_samples = std::max(1, std::min(4096, s_.direct_samples));
-  s_.indirect_samples = std::max(1, std::min(65536, s_.indirect_samples));
-  s_.bounces = std::max(0, std::min(16, s_.bounces));
-  s_.indirect_intensity = finite_bits(s_.indirect_intensity) ? std::max(0.0f, std::min(100.0f, s_.indirect_intensity)) : 1.0f;
-  objects_.clear();
-  for (const BakeObject &o : objects)
-    if (o.mesh && o.mesh->face_count() > 0) objects_.push_back(o);
-  lights_ = lights;
-  env_ = env;
-  texels_.clear();
-  values_.clear();
-  covered_.clear();
-  owner_.clear();
-  out_ = LightingData{};
-  done_ = total_ = 0;
-  rays_ = 0;
-  active_ = true;
-
+void lightmap_layout(const std::vector<BakeObject> &objects, const BakeSettings &s, LightmapLayout &out, LightmapUvCache *uv_cache) {
+  out = LightmapLayout{};
   /* 1. A square chart per object. Its UVs fill only part of the square (islands and their margins), so
    * the side is sized from the area they cover: world area x texels per unit^2 x scale^2 texels of
    * surface, as Unity's Lightmap Resolution means. */
@@ -134,7 +110,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
     int res, page = 0, x = 0, y = 0;
   };
   std::vector<Rect> rects;
-  std::vector<std::vector<Vec2>> obj_uv(objects_.size());
+  std::vector<std::vector<Vec2>> obj_uv(objects.size());
   auto uv_area = [](const Mesh &m, const std::vector<Vec2> &uv) {
     double a = 0.0;
     for (size_t f = 0; f < m.face_count(); f++) {
@@ -146,8 +122,8 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
     }
     return a;
   };
-  for (uint32_t i = 0; i < objects_.size(); i++) {
-    const BakeObject &o = objects_[i];
+  for (uint32_t i = 0; i < objects.size(); i++) {
+    const BakeObject &o = objects[i];
     if (!o.want_lightmap) continue;
     double area = 0.0;
     const Mesh &m = *o.mesh;
@@ -158,19 +134,29 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
         area += 0.5 * length(cross(o.model.point(m.positions[v[k]]) - p0, o.model.point(m.positions[v[k + 1]]) - p0));
     }
     const float scale = finite_bits(o.scale) ? std::max(0.0f, std::min(100.0f, o.scale)) : 1.0f;
-    double side = std::sqrt(std::max(0.0, area)) * s_.texels_per_unit * scale;
+    double side = std::sqrt(std::max(0.0, area)) * s.texels_per_unit * scale;
     if (!finite_bits(side)) side = 8.0;
-    int res = (int)std::max(8.0, std::min((double)s_.max_size, std::ceil(side)));
+    int res = (int)std::max((double)s.min_chart, std::min((double)s.max_size, std::ceil(side)));
     /* Unwrap at that size, see how much of the square the charts fill, and grow it so the charts get
      * the asked density (once more if the margins changed much: they are a number of texels). */
+    /* The cache: the same mesh (content), size request and options give the same UVs. */
+    uint64_t ckey = lightmap_mesh_hash(m) ^ (uint64_t)res * 0x9E3779B97F4A7C15ull ^ (uint64_t)o.generate_uvs << 1 ^ (uint64_t)s.padding << 3;
+    LightmapUvCache::Entry *ce = uv_cache ? &uv_cache->by_object[o.id] : nullptr;
+    if (ce && ce->key == ckey && !ce->uv.empty()) {
+      obj_uv[i] = ce->uv;
+      rects.push_back({i, ce->res > 0 ? ce->res : res});  // the size it had: the atlas doesn't shift when an object moves
+      continue;
+    }
+    double fill = 1.0;
     for (int pass = 0; pass < 2; pass++) {
-      obj_uv[i] = lightmap_uvs(m, o.generate_uvs, res, s_.padding);
-      const double fill = std::max(0.02, std::min(1.0, uv_area(m, obj_uv[i])));
-      const int want = (int)std::max(8.0, std::min((double)s_.max_size, std::ceil(side / std::sqrt(fill))));
+      obj_uv[i] = lightmap_uvs(m, o.generate_uvs, res, s.padding);
+      fill = std::max(0.02, std::min(1.0, uv_area(m, obj_uv[i])));
+      const int want = (int)std::max((double)s.min_chart, std::min((double)s.max_size, std::ceil(side / std::sqrt(fill))));
       if (std::abs(want - res) * 10 <= res) break;
       res = want;
-      if (pass == 1) obj_uv[i] = lightmap_uvs(m, o.generate_uvs, res, s_.padding);
+      if (pass == 1) obj_uv[i] = lightmap_uvs(m, o.generate_uvs, res, s.padding);
     }
+    if (ce) ce->key = ckey, ce->uv = obj_uv[i], ce->fill = fill, ce->res = res;
     rects.push_back({i, res});
   }
   /* 2. Shelf-pack into pages: the smallest power of two that holds everything, else full-size pages. */
@@ -193,35 +179,35 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
     return true;
   };
   int size = 16;
-  while (size < s_.max_size && !pack(size, true)) size *= 2;
-  if (size >= s_.max_size) {
-    size = s_.max_size;
+  while (size < s.max_size && !pack(size, true)) size *= 2;
+  if (size >= s.max_size) {
+    size = s.max_size;
     pack(size, false);
   }
   int pages = 0;
   for (const Rect &r : rects) pages = std::max(pages, r.page + 1);
-  out_.pages.resize((size_t)pages);
-  covered_.assign((size_t)pages, std::vector<uint8_t>((size_t)size * size, 0));
-  owner_.assign((size_t)pages, std::vector<int32_t>((size_t)size * size, -1));
-  for (Lightmap &p : out_.pages) {
+  out.data.pages.resize((size_t)pages);
+  out.covered.assign((size_t)pages, std::vector<uint8_t>((size_t)size * size, 0));
+  out.owner.assign((size_t)pages, std::vector<int32_t>((size_t)size * size, -1));
+  for (Lightmap &p : out.data.pages) {
     p.width = p.height = size;
     p.texels.assign((size_t)size * size, Vec3(0.0f));
   }
 
   /* 3. Lightmap UVs per object, its entry, and the texels its triangles cover. */
   for (const Rect &r : rects) {
-    const BakeObject &o = objects_[r.obj];
+    const BakeObject &o = objects[r.obj];
     const Mesh &m = *o.mesh;
     const RenderMesh &rm = m.render_mesh();
     const std::vector<Vec2> &uv = obj_uv[r.obj];
-    LightingData::Entry &e = out_.entries[o.id];
+    LightingData::Entry &e = out.data.entries[o.id];
     e.hash = o.hash;
     e.page = r.page;
     const size_t nt = rm.tri_count();
     e.tri_uv.resize(nt * 3);
     const Mat4 nm = o.model.inverse().transposed();
-    std::vector<uint8_t> &cov = covered_[(size_t)r.page];
-    std::vector<int32_t> &own = owner_[(size_t)r.page];
+    std::vector<uint8_t> &cov = out.covered[(size_t)r.page];
+    std::vector<int32_t> &own = out.owner[(size_t)r.page];
     for (size_t t = 0; t < nt; t++) {
       Vec2 px[3];
       Vec3 wp[3], wn[3];
@@ -256,10 +242,46 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
           tx.page = r.page, tx.x = x, tx.y = y, tx.object = r.obj;
           cov[idx] = 1;
           own[idx] = (int32_t)r.obj;
-          texels_.push_back(tx);
+          out.texels.push_back(tx);
         }
     }
   }
+}
+
+void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vector<BakeLight> &lights, const Environment &env,
+                        const BakeSettings &settings) {
+  s_ = settings;
+  s_.texels_per_unit = finite_bits(s_.texels_per_unit) ? std::max(0.01f, std::min(1000.0f, s_.texels_per_unit)) : 40.0f;
+  int ms = 16;
+  while (ms < std::max(16, std::min(8192, s_.max_size))) ms *= 2;  // a power of two
+  s_.max_size = ms;
+  s_.padding = std::max(0, std::min(32, s_.padding));
+  s_.direct_samples = std::max(1, std::min(4096, s_.direct_samples));
+  s_.indirect_samples = std::max(1, std::min(65536, s_.indirect_samples));
+  s_.bounces = std::max(0, std::min(16, s_.bounces));
+  s_.indirect_intensity = finite_bits(s_.indirect_intensity) ? std::max(0.0f, std::min(100.0f, s_.indirect_intensity)) : 1.0f;
+  objects_.clear();
+  for (const BakeObject &o : objects)
+    if (o.mesh && o.mesh->face_count() > 0) objects_.push_back(o);
+  lights_ = lights;
+  env_ = env;
+  texels_.clear();
+  values_.clear();
+  covered_.clear();
+  owner_.clear();
+  out_ = LightingData{};
+  done_ = total_ = 0;
+  rays_ = 0;
+  gpu_texels_ = 0;
+  gpu_error_.clear();
+  active_ = true;
+
+  LightmapLayout lay;
+  lightmap_layout(objects_, s_, lay);
+  out_ = std::move(lay.data);
+  texels_ = std::move(lay.texels);
+  covered_ = std::move(lay.covered);
+  owner_ = std::move(lay.owner);
   values_.assign(texels_.size(), Vec3(0.0f));
   total_ = texels_.size();
   for (const BakeLight &l : lights_)
@@ -284,7 +306,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   if (total_ == 0) finish();
 }
 
-Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed) {
+Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect) {
   uint32_t rng = hash32(seed);
   const Vec3 n = t.normal;
   /* Off the surface a little, scaled to where it is (far from the origin floats are coarse). */
@@ -296,7 +318,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed) {
   /* Indirect: incoming radiance over the hemisphere, cosine-weighted (the pdf cancels the cosine and
    * pi: the mean is irradiance / pi). */
   Vec3 sum(0.0f);
-  const int N = s_.indirect_samples;
+  const int N = indirect ? s_.indirect_samples : 0;  // (no indirect: the GPU gathered it)
   for (int i = 0; i < N; i++) {
     const float r1 = rnd01(rng), r2 = rnd01(rng);
     const float r = std::sqrt(r1), phi = 2.0f * kPi * r2;
@@ -310,7 +332,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed) {
     else L = pt_->incoming_radiance({o, d}, prng, rays);
     if (finite3(L)) sum += L;
   }
-  Vec3 value = sum * (s_.indirect_intensity / (float)N);
+  Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
   for (const BakeLight &bl : lights_) {
@@ -357,6 +379,50 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed) {
 bool Lightmapper::step(double budget_ms) {
   if (!active_) return true;
   ScopedTimer t;
+  /* On a GPU (task 0018): batches of texels gather their indirect light there, the Baked lights' direct
+   * light is added here. A GPU error leaves the rest to the CPU. */
+  if (s_.gpu_device >= 0 && gpu_error_.empty() && s_.bounces > 0) {
+    const size_t per = (size_t)std::max<int64_t>(1024, std::min<int64_t>(1 << 20, ((int64_t)1 << 23) / std::max(1, s_.indirect_samples)));
+    std::vector<Vec3> origins, normals, ind;
+    do {
+      const size_t batch = std::min<size_t>(total_ - done_, per);
+      if (batch == 0) break;
+      origins.resize(batch);
+      normals.resize(batch);
+      for (size_t i = 0; i < batch; i++) {
+        const LightmapTexel &tx = texels_[done_ + i];
+        const float eps = 1e-3f + 1e-6f * std::max({std::fabs(tx.position.x), std::fabs(tx.position.y), std::fabs(tx.position.z)});
+        origins[i] = tx.position + tx.normal * eps;
+        normals[i] = tx.normal;
+      }
+      std::string err;
+      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err) || ind.size() != batch) {
+        gpu_error_ = err.empty() ? "the GPU gather failed" : err;
+        Log::warn("Baking on the GPU stopped (%s): the CPU bakes the rest", gpu_error_.c_str());
+        break;
+      }
+      const size_t base = done_;
+      JobSystem::global().parallel_for((int64_t)batch, 64, [&](int64_t a, int64_t b) {
+        for (int64_t i = a; i < b; i++) {
+          const size_t k = base + (size_t)i;
+          Vec3 v = ind[(size_t)i] * s_.indirect_intensity;
+          if (!finite3(v)) v = Vec3(0.0f);
+          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u, false);
+          values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
+        }
+      });
+      done_ += batch;
+      gpu_texels_ += batch;
+      rays_ += (uint64_t)batch * (uint64_t)s_.indirect_samples;
+    } while (done_ < total_ && t.ms() < budget_ms);
+    if (gpu_error_.empty()) {
+      if (done_ >= total_) {
+        finish();
+        return true;
+      }
+      return false;
+    }
+  }
   /* About the same work per batch whatever the sample count, so a frame's budget holds. */
   const size_t per = (size_t)std::max(16, std::min(2048, 2048 * 64 / std::max(1, s_.indirect_samples)));
   do {
