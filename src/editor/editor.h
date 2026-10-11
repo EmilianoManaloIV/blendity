@@ -1245,6 +1245,8 @@ class Editor {
   /* A path-traced render through a filtered camera: traced at the filters' resolution into
    * render_small_, then the image passes, then scaled into render_dst_ of render_img_. */
   bool render_filtered_ = false;
+  /* Vertex-snapped copies of the meshes a filtered camera's trace uses (task 0032), kept while it renders. */
+  std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> render_snapped_, cam_preview_snapped_;
   FilterStack render_filters_;
   Image render_small_;
   Recti render_dst_;

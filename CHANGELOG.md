@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 54): every camera filter in the path tracers (task 0032, ADR 0008 amended)
+
+**Asked:** "I want all the camera filter modifier stack to show up in the render view ... I want the filters to
+show up in the path traced system as well".
+
+**Added**
+- The Retro Console's four rasterizer stages now show in path-traced pictures (F12, the Render window's
+  Preview, the Rendered Camera Preview), on the CPU and the GPU: **vertex snapping** (wobbly PS1 edges),
+  **affine texture warping**, **the texture rules** (Nearest or 3-point filtering, the size cap) and the
+  Saturn's **screen-door transparency**. The other filters (outlines, bloom, grading, fog...) already did.
+
+**Checked**
+- New tests (round 54): a traced quad at a grazing angle takes the rasterizer's affine UVs (mean difference
+  0.19, against 0.94 for perspective), the GPU equal to the CPU; a 1-texel cap makes a textured quad one
+  colour on the CPU and the GPU; the screen door is an exact checkerboard (solid and see-through) on both;
+  a path-traced F12 render through a snapping Retro filter has the rasterized render's silhouette (0 pixels
+  differ, 448 without the snap); the GPU takes the same capped mip level, Nearest and 3-point filters as the
+  CPU; a nearly clear surface (alpha 0.05) vanishes through the door as in the rasterizer.
+- Stress `filters`: the odd-settings check had been reporting 135 false problems since task 0026 (it still
+  required the internal image to be no larger than the view); corrected: 300 runs, 0 problems.
+
+**Review (code reviewer)**: three major and several minor findings, all fixed: the door kept nearly clear
+surfaces, the GPU capped the sky map too, every preview rebuild copied every mesh (now cached and reused),
+hits behind glass counted as camera hits, shadow rays skipped the texture rules, non-finite screen positions.
+- Unit checks: Windows 8,494, 0 failed (452 tests); the whole suite in render-cache verify mode: 8,495,
+  0 failed, 0 stale pictures. Linux with libraries: 8,430, 0 failed. Sanitizer build: 8,352, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `gpu` stress clean.
+
 ## 2026-10-11 (round 53): live procedural textures (task 0031, ADR 0017 amended)
 
 **Asked:** "Not only do I want the procedural textures to be evaluated at a set resolution. I want to view them

@@ -86,6 +86,17 @@ struct PTSettings {
   double merge_interval_ms = 100.0;  // how often GPU results are read back for display
   float guiding_probability = 0.5f;  // Cycles' "Surface Guiding Probability"
   int guiding_training_samples = 128;
+  /* A camera filter's rasterizer stages (task 0032, ADR 0008 amended), as the rasterizer applies them: at a
+   * camera ray's first hits, UVs interpolated across the screen (affine) and Transparent surfaces as a 2 x 2
+   * checkerboard (screen door), both by the hit projected through view_proj into width x height; the texture
+   * rules on every hit. Vertex snapping is done to the meshes before build() (the editor's snapped copies). */
+  struct Retro {
+    bool affine_uv = false, screen_door = false;
+    TexOverride tex;
+    Mat4 view_proj;
+    int width = 0, height = 0;
+    bool active() const { return width > 0 && height > 0 && (affine_uv || screen_door || tex.active()); }
+  } retro;
 };
 
 struct PTStats {
@@ -211,6 +222,10 @@ class PathTracer {
   static void build_sah(const std::vector<AABB> &boxes, std::vector<Node> &nodes, std::vector<uint32_t> &order, uint32_t max_leaf);
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
   Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint32_t *id, uint64_t &rays, PTGuidingThread *guide) const;
+  /* The Retro stages (task 0032): where p lands on the filter's internal image; a triangle's UVs interpolated
+   * there in screen space. */
+  bool retro_screen(Vec3 p, Vec2 &s) const;
+  void retro_affine_uv(uint32_t object, uint32_t prim, Vec2 s, SurfacePoint &sp) const;
   std::vector<float> denoised() const;
   int render_cpu(double budget_ms, int max_samples, std::atomic<int> *claim);
   /* GPU devices (gpu_device.h): their renderers, kept across builds. */

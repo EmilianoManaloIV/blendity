@@ -706,7 +706,10 @@ static void test_camera_filters(Report &rep, const Options &o) {
     q.fog_color = Vec3(odd[(int)(rnd() * 9) % 9], 0.5f, 2.0f);
     const int vw = 1 + (int)(rnd() * 200), vh = 1 + (int)(rnd() * 120);
     filter_layout(fs, vw, vh, iw, ih, dst);
-    if (iw < 1 || ih < 1 || dst.w < 1 || dst.h < 1 || dst.x < 0 || dst.y < 0 || dst.right() > vw || dst.bottom() > vh || iw > vw || ih > vh) {
+    /* (A view smaller than the stack's frame renders at the frame's size and is shrunk into it since task 0026, up
+     * to 1920 x 1080: an internal image larger than the view is right; larger than that cap isn't.) */
+    if (iw < 1 || ih < 1 || dst.w < 1 || dst.h < 1 || dst.x < 0 || dst.y < 0 || dst.right() > vw || dst.bottom() > vh || iw > std::max(vw, 1920) ||
+        ih > std::max(vh, 1080)) {
       problems++;
       continue;
     }

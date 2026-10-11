@@ -49,3 +49,19 @@ Local volumes (blending by where the camera is) are left for later.
 - Two filter components on one camera (task 0004's stacking) become two effects in one list.
 - Only effects that don't need depth or HDR apply to path-traced output: their image passes ignore a
   null `FilterFrame` (as in ADR 0007).
+
+## Amendment (2026-10-11, task 0032): the rasterizer stages in the path tracers
+The user asked for "all the camera filter modifier stack to show up ... in the path traced system as well".
+Image passes already did (depth and ids from the tracer's first hits, ADR 0016). The Retro Console's four
+rasterizer stages now have path-traced equivalents, on the CPU and the GPU:
+- **Vertex snap:** the editor gives the tracer copies of the meshes whose vertices are snapped as the
+  rasterizer snaps them (screen position rounded at the filter's internal size, depth and w kept), mapped
+  back into each object's own space so Box and Generated mapping keep reading object coordinates (of the
+  snapped surface: unlike the rasterizer, the tracer also lights and shadows the snapped geometry).
+- **Affine textures and the screen door** apply at a camera ray's hits (`PTSettings::Retro`): the hit is
+  projected through the camera to find its place on the filter's image, the UVs come from the triangle's
+  screen-space barycentrics, and a Transparent surface is solid or absent by the 2 x 2 checkerboard.
+- **The texture rules** apply on every hit: the CPU through `SurfacePoint::tex`; the GPU's images are
+  uploaded at the capped mip level and sampled with the override filter (the 3-point filter included).
+The consequence above ("only effects that don't need depth or HDR apply to path-traced output") no longer holds.
+

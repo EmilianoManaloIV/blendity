@@ -4,7 +4,7 @@
 - **Requirements:** R-03
 - **Decisions:** ADR 0017 (amended)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/29
 
 ## Goal
 The user: "Not only do I want the procedural textures to be evaluated at a set resolution. I want to view

@@ -502,6 +502,7 @@ Vec3 PathTracer::transmittance(const Ray &r, float tmax) const {
     if (!intersect(ray, h)) return T;
     SurfacePoint sp;
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+    if (settings_.retro.active() && settings_.retro.tex.active()) sp.tex = &settings_.retro.tex;  // a camera filter's texture rules
     if (mat->opaque() || mat->surface == (int)MaterialSurface::Glass) return Vec3(0.0f);
     const float a = evaluate_material(*mat, sp).alpha;
     if (mat->surface == (int)MaterialSurface::Cutout) {
@@ -633,6 +634,29 @@ const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, 
   return mat;
 }
 
+bool PathTracer::retro_screen(Vec3 p, Vec2 &s) const {
+  const Vec4 c = settings_.retro.view_proj * Vec4(p, 1.0f);
+  if (!(c.w > 1e-6f)) return false;
+  s = Vec2((c.x / c.w * 0.5f + 0.5f) * settings_.retro.width, (0.5f - c.y / c.w * 0.5f) * settings_.retro.height);
+  return finite_bits(s.x) && finite_bits(s.y) && std::fabs(s.x) < 1e8f && std::fabs(s.y) < 1e8f;  // (an int cast follows)
+}
+
+void PathTracer::retro_affine_uv(uint32_t object, uint32_t prim, Vec2 s, SurfacePoint &sp) const {
+  /* As the rasterizer's affine_uv: barycentrics of the triangle's corners on the screen, without 1 / w. */
+  const PTObject &ob = objects_[object];
+  const RenderMesh &rm = *ob.mesh;
+  if (rm.uvs.empty()) return;
+  const uint32_t *tri = &rm.indices[(size_t)prim * 3];
+  Vec2 c[3];
+  for (int k = 0; k < 3; k++)
+    if (!retro_screen(ob.model.point(rm.positions[tri[k]]), c[k])) return;
+  const float d = (c[1].x - c[0].x) * (c[2].y - c[0].y) - (c[2].x - c[0].x) * (c[1].y - c[0].y);
+  if (!(std::fabs(d) > 1e-12f)) return;
+  const float b1 = ((s.x - c[0].x) * (c[2].y - c[0].y) - (c[2].x - c[0].x) * (s.y - c[0].y)) / d;
+  const float b2 = ((c[1].x - c[0].x) * (s.y - c[0].y) - (s.x - c[0].x) * (c[1].y - c[0].y)) / d;
+  sp.uv = rm.uvs[tri[0]] * (1.0f - b1 - b2) + rm.uvs[tri[1]] * b1 + rm.uvs[tri[2]] * b2;
+}
+
 /* Emissive triangles become lights, picked in proportion to their power
  * (Cycles: mesh lights in the light tree). Emission is two-sided here, as in
  * the rest of the integrator. */
@@ -679,6 +703,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
   const float clamp = settings_.clamp_indirect;
   float last_pdf = 0.0f;  // solid-angle pdf of the direction that led here (0 = camera ray)
   int see_through_hits = 0, glass_hits = 0;  // these get their own budgets (Cycles: transparent / transmission bounces)
+  bool camera_path = true;  // still the camera ray (see-through passes keep it; glass and BSDF bounces end it)
 #ifdef BL_WITH_OPENPGL
   /* Training records each vertex with local (not throughput-weighted) values;
    * OpenPGL turns the chain into radiance samples (Cycles: guiding.h). */
@@ -722,15 +747,40 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     SurfacePoint sp;
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
     sp.position = ray.origin + ray.dir * h.t;  // more precise than re-interpolating
+    /* A camera filter's rasterizer stages (task 0032): its texture rules everywhere; at a camera ray's hits the
+     * affine UVs and the screen door, by where the hit lands on the filter's image. */
+    bool door_solid = false;
+    if (settings_.retro.active()) {
+      if (settings_.retro.tex.active()) sp.tex = &settings_.retro.tex;
+      Vec2 scr;
+      if (bounce == 0 && camera_path && retro_screen(sp.position, scr)) {
+        if (settings_.retro.affine_uv) retro_affine_uv(h.object, h.tri, scr, sp);
+        if (settings_.retro.screen_door && mat->surface == (int)MaterialSurface::Transparent && see_through_hits < 64) {
+          if ((((int)std::floor(scr.x) + (int)std::floor(scr.y)) & 1) != 0) {  // the checkerboard's holes
+            see_through_hits++;
+            ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+            bounce--;
+            continue;
+          }
+          door_solid = true;  // the other squares: solid, whatever the alpha
+        }
+      }
+    }
     Vec3 V = -ray.dir;
     const bool front_face = dot(sp.geo_normal, V) >= 0;  // entering the object (glass)
     const float cos_hit = std::fabs(dot(sp.geo_normal, V));
     if (dot(sp.geo_normal, V) < 0) sp.geo_normal = -sp.geo_normal;
     if (dot(sp.normal, sp.geo_normal) < 0) sp.normal = -sp.normal;
     SurfaceSample s = evaluate_material(*mat, sp);
+    if (door_solid && saturate(s.alpha) < 0.1f) {  // the rasterizer's door: nearly clear surfaces vanish
+      see_through_hits++;
+      ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      bounce--;
+      continue;
+    }
     /* Cutout and Transparent: alpha decides, per path, whether the ray passes
      * the surface untouched (Cycles' Transparent BSDF; unbiased alpha blending). */
-    if ((mat->surface == (int)MaterialSurface::Cutout || mat->surface == (int)MaterialSurface::Transparent) && see_through_hits < 64) {
+    if ((mat->surface == (int)MaterialSurface::Cutout || mat->surface == (int)MaterialSurface::Transparent) && see_through_hits < 64 && !door_solid) {
       const bool pass = mat->surface == (int)MaterialSurface::Cutout ? s.alpha < mat->alpha_clip : rnd(rng) >= s.alpha;
       if (pass) {
         see_through_hits++;
@@ -822,6 +872,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
 #endif
       ray = {sp.position + sp.geo_normal * ((reflect ? 1.0f : -1.0f) * (1e-4f + h.t * 1e-5f)), dir};
       last_pdf = 0.0f;  // emission seen through glass counts in full
+      camera_path = false;  // seen through glass: not a camera ray's hit any more (the Retro stages stop)
       if (glass_hits++ < 32) bounce--;  // transmission has its own bounce budget
       continue;
     }
@@ -933,6 +984,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
       SurfacePoint lp;
       const Material *lmat = surface_at(mesh_lights_[li].object, mesh_lights_[li].prim, su, sv, lp);
+      if (settings_.retro.active() && settings_.retro.tex.active()) lp.tex = &settings_.retro.tex;
       Vec3 d = lp.position - origin;
       float dist = length(d);
       if (dist > 1e-5f) {
@@ -1555,11 +1607,17 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     for (const Node &n : tlas_) s.nodes.push_back(put_node(n));
   /* Textures (level 0, which is what the CPU path tracer samples too). */
   std::unordered_map<const Texture *, int> tex_id;
-  auto texture = [&](const TexturePtr &t) -> int {
+  auto texture = [&](const TexturePtr &t, bool material = true) -> int {
     if (!t || t->levels.empty()) return -1;
     auto it = tex_id.find(t.get());
     if (it != tex_id.end()) return it->second;
-    const Texture::Level &l = t->levels[0];
+    /* A camera filter's size cap (task 0032): the first mip level within it, as the CPU's tex_sample takes; a
+     * material's textures only (the world's map stays whole, as on the CPU and in the rasterizer). */
+    size_t lv = 0;
+    const int cap = material && settings_.retro.active() ? settings_.retro.tex.max_size : 0;
+    if (cap > 0)
+      while (lv + 1 < t->levels.size() && std::max(t->levels[lv].w, t->levels[lv].h) > cap) lv++;
+    const Texture::Level &l = t->levels[lv];
     gpu::GTexInfo ti{};
     ti.w = l.w;
     ti.h = l.h;
@@ -1612,7 +1670,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     g.tex1[3] = m.surface;
     g.flags[0] = m.unlit ? 1 : 0;
     g.flags[1] = m.wrap;
-    g.flags[2] = m.filter;
+    g.flags[2] = settings_.retro.active() && settings_.retro.tex.filter >= 0 ? settings_.retro.tex.filter : m.filter;  // a camera filter's
     s.materials.push_back(g);
   };
   material(*default_material(), false);  // index 0
@@ -1730,7 +1788,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
   p.counts[2] = see_through_ ? 1 : 0;
   p.counts[3] = own_bvh ? (int32_t)tlas_.size() : 0;
   p.env_i[0] = (int32_t)env_.mode;
-  p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map) : -1;
+  p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
   p.env_f[0] = env_.strength;
   p.env_f[1] = env_.rotation;
   auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };
@@ -1740,6 +1798,13 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
   v4(p.env_color, env_.color);
   v4(p.background, settings_.background);
   p.background[3] = settings_.solid_background ? 1.0f : 0.0f;
+  /* The Retro stages for camera rays (task 0032). */
+  std::memcpy(p.retro_vp, settings_.retro.view_proj.m, 64);
+  const bool ra = settings_.retro.active();
+  p.retro[0] = ra && settings_.retro.affine_uv ? 1.0f : 0.0f;
+  p.retro[1] = ra && settings_.retro.screen_door ? 1.0f : 0.0f;
+  p.retro[2] = ra ? (float)settings_.retro.width : 0.0f;
+  p.retro[3] = ra ? (float)settings_.retro.height : 0.0f;
 }
 
 void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids) {

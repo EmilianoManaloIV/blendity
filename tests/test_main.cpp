@@ -212,6 +212,7 @@ static void round50_tests();
 static void round51_tests();
 static void round52_tests();
 static void round53_tests();
+static void round54_tests();
 
 int main() {
   register_builtin_components();
@@ -842,6 +843,7 @@ int main() {
   round51_tests();
   round52_tests();
   round53_tests();
+  round54_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -19736,5 +19738,258 @@ static void round53_tests() {
     ProceduralTexture b;
     CHECK(load_texture_text(text, b));
     CHECK(!b.live_shading && b.layers.size() == 2);
+  });
+}
+
+/* ===================================================================== */
+/* Round 54 (task 0032, ADR 0008 amended): every camera filter in the     */
+/* path tracers                                                            */
+/* ===================================================================== */
+
+/* A 2 m quad seen at a grazing angle from (0, 0.6, -2.2), 48 x 48: the camera both renderers use. */
+struct R54Cam {
+  Mat4 view = Mat4::look_at({0.0f, 0.6f, -2.2f}, {0, 0, 0}, {0, 1, 0});
+  Mat4 proj = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 20.0f);
+  int size = 48;
+};
+/* The quad lying back 60 degrees (so its far half is foreshortened), an unlit material. */
+static Mat4 r54_model() { return Mat4::rotate(Quat::euler({60, 0, 0})); }
+
+/* Linear RGB of the rasterizer (unlit: the material's colour) with the given stages. */
+static std::vector<Vec3> r54_raster(const MaterialPtr &m, const RasterOptions &stages) {
+  static auto quad = primitives::quad(2.0f);
+  R54Cam c;
+  std::vector<MaterialPtr> mats = {m};
+  Image img;
+  img.resize(c.size, c.size);
+  RenderTarget rt;
+  rt.attach(img, {0, 0, c.size, c.size});
+  rt.want_hdr = true;
+  Renderer3D r;
+  RasterOptions opt = stages;
+  opt.shade = ShadeMode::Deferred;
+  LightingEnv env;
+  env.view_transform = ViewTransform::Standard;
+  env.camera_pos = {0.0f, 0.6f, -2.2f};
+  r.begin(&rt, c.view, c.proj, env, opt);
+  r.clear(0xFF000000);
+  DrawItem it;
+  it.mesh = &quad->render_mesh_tangents();
+  it.model = r54_model();
+  it.materials = &mats;
+  it.double_sided = true;
+  r.add(it);
+  r.flush();
+  std::vector<Vec3> out((size_t)c.size * c.size);
+  for (size_t i = 0; i < out.size(); i++) {
+    if (!rt.hdr.empty() && rt.hdr[i].x >= 0.0f) out[i] = rt.hdr[i];
+    else {
+      const uint32_t px = img.pixels[i];
+      out[i] = Vec3(srgb_to_linear(((px >> 16) & 255) / 255.0f), srgb_to_linear(((px >> 8) & 255) / 255.0f), srgb_to_linear((px & 255) / 255.0f));
+    }
+  }
+  return out;
+}
+
+/* The path tracer's picture of the same, with the Retro stages given (and GPUs when asked). */
+static std::vector<Vec3> r54_trace(const MaterialPtr &m, const PTSettings::Retro &retro, std::vector<int> gpus = {}, int spp = 64) {
+  static auto quad = primitives::quad(2.0f);
+  R54Cam c;
+  std::vector<MaterialPtr> mats = {m};
+  Environment black;
+  black.mode = Environment::Color;
+  black.color = Vec3(0.0f);
+  PathTracer pt;
+  PTSettings st;
+  st.denoise = false;
+  st.use_embree = false;
+  st.max_bounces = 0;
+  st.view_transform = ViewTransform::Standard;
+  st.gpus = gpus;
+  st.use_cpu = gpus.empty();
+  st.retro = retro;
+  pt.set_settings(st);
+  pt.build({{&quad->render_mesh_tangents(), r54_model(), &mats}}, {}, black);
+  pt.set_camera(c.view, c.proj, c.size, c.size);
+  pt.render(1e9, spp);
+  if (!gpus.empty()) CHECK(pt.device_summary().find("GPU") != std::string::npos || pt.device_summary().find("NVIDIA") != std::string::npos ||
+                          pt.device_summary().find("AMD") != std::string::npos || pt.device_summary().find("Intel") != std::string::npos);
+  const auto rgb = pt.linear_rgb(false);
+  std::vector<Vec3> out((size_t)c.size * c.size);
+  for (size_t i = 0; i < out.size(); i++) out[i] = Vec3(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+  return out;
+}
+static double r54_diff(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  double d = 0;
+  for (size_t i = 0; i < a.size(); i++) d += std::fabs(a[i].x - b[i].x) + std::fabs(a[i].y - b[i].y) + std::fabs(a[i].z - b[i].z);
+  return d / a.size();
+}
+static PTSettings::Retro r54_retro() {
+  R54Cam c;
+  PTSettings::Retro r;
+  r.view_proj = c.proj * c.view;
+  r.width = r.height = c.size;
+  return r;
+}
+
+static void round54_tests() {
+  test("retro in the path tracer: affine (screen-linear) UVs as the rasterizer draws them on a quad at a grazing angle", [] {
+    MaterialPtr m = make_material("checker", {1, 1, 1});
+    m->unlit = true;
+    m->procedural = (int)Procedural::Checker;
+    m->procedural_color2 = {0, 0, 0};
+    m->procedural_scale = 6.0f;
+    RasterOptions affine;
+    affine.affine_uv = true;
+    const auto ra = r54_raster(m, affine), rp = r54_raster(m, RasterOptions{});
+    PTSettings::Retro retro = r54_retro();
+    retro.affine_uv = true;
+    const auto ta = r54_trace(m, retro), tp = r54_trace(m, r54_retro());
+    const double same = r54_diff(ta, ra), other = r54_diff(tp, ra), check = r54_diff(ra, rp);
+    std::printf("    mean |difference| to the affine raster: traced affine %.4f, traced perspective %.4f (raster affine vs perspective %.4f)\n", same, other, check);
+    CHECK(check > 0.05);         // the effect is visible at this angle
+    CHECK(same < 0.5 * other);   // the traced affine picture is the raster's, not the perspective one
+    if (gpu::available()) {
+      const auto ga = r54_trace(m, retro, {gpu::devices()[0].index});
+      const double g = r54_diff(ga, ta);
+      std::printf("    the GPU against the CPU: %.4f\n", g);
+      CHECK(g < 0.1 * std::max(0.05, other));
+    }
+  });
+
+  test("retro in the path tracer: the texture rules reach every hit (a 1-texel cap makes a textured quad one colour, CPU and GPU)", [] {
+    /* (The tracer averages many samples a pixel, so a Nearest or 64-texel look can't be compared pixel for pixel with
+     * the rasterizer's single sample; a 1-texel cap shows unmistakably whether the rules apply.) */
+    MaterialPtr m = make_material("grid", {1, 1, 1});
+    m->unlit = true;
+    m->procedural = (int)Procedural::UVGrid;
+    auto spread = [](const std::vector<Vec3> &img) {  // the colours' spread over the quad's middle
+      Vec3 lo(1e9f), hi(-1e9f);
+      for (int y = 18; y < 30; y++)
+        for (int x = 14; x < 34; x++) lo = vmin(lo, img[(size_t)y * 48 + x]), hi = vmax(hi, img[(size_t)y * 48 + x]);
+      return std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+    };
+    PTSettings::Retro retro = r54_retro();
+    retro.tex.filter = (int)TexFilter::Closest;
+    retro.tex.max_size = 1;
+    retro.tex.mipmaps = false;
+    const float with = spread(r54_trace(m, retro, {}, 8)), without = spread(r54_trace(m, r54_retro(), {}, 8));
+    std::printf("    colour spread over the quad: %.4f with a 1-texel cap, %.4f without\n", with, without);
+    CHECK(with < 0.01f && without > 0.1f);
+    if (gpu::available()) {
+      const float g = spread(r54_trace(m, retro, {gpu::devices()[0].index}, 8));
+      std::printf("    the GPU with the cap: %.4f\n", g);
+      CHECK(g < 0.01f);
+    }
+  });
+
+  test("retro in the path tracer: the GPU takes the same capped mip level and filter as the CPU (Nearest and 3-point at 16 texels)", [] {
+    if (!gpu::available()) return;
+    MaterialPtr m = make_material("grid", {1, 1, 1});
+    m->unlit = true;
+    m->procedural = (int)Procedural::UVGrid;
+    for (int f : {(int)TexFilter::Closest, (int)TexFilter::ThreePoint}) {
+      PTSettings::Retro retro = r54_retro();
+      retro.tex.filter = f;
+      retro.tex.max_size = 16;
+      retro.tex.mipmaps = false;
+      const auto cpu = r54_trace(m, retro, {}, 16), gpu = r54_trace(m, retro, {gpu::devices()[0].index}, 16);
+      const auto plain = r54_trace(m, r54_retro(), {}, 16);
+      const double d = r54_diff(cpu, gpu), effect = r54_diff(cpu, plain);
+      std::printf("    filter %d at 16 texels: GPU vs CPU %.4f (the cap's own effect %.4f)\n", f, d, effect);
+      CHECK(effect > 0.02);
+      CHECK(d < 0.2 * effect);
+    }
+  });
+
+  test("retro in the path tracer: screen-door transparency is a 2 x 2 checkerboard, solid and see-through", [] {
+    MaterialPtr m = make_material("glass red", {1, 0, 0});
+    m->unlit = true;
+    m->surface = (int)MaterialSurface::Transparent;
+    m->alpha = 0.5f;
+    PTSettings::Retro retro = r54_retro();
+    retro.screen_door = true;
+    auto pattern = [&](const std::vector<Vec3> &img) {
+      /* Over the quad's middle: pixels of each checkerboard colour, solid red vs black. */
+      int solid_even = 0, hole_odd = 0, n_even = 0, n_odd = 0;
+      for (int y = 18; y < 30; y++)
+        for (int x = 14; x < 34; x++) {
+          const Vec3 c = img[(size_t)y * 48 + x];
+          if (((x + y) & 1) == 0) n_even++, solid_even += c.x > 0.95f;
+          else n_odd++, hole_odd += c.x < 0.05f;
+        }
+      return std::pair<double, double>((double)solid_even / n_even, (double)hole_odd / n_odd);
+    };
+    const auto door = pattern(r54_trace(m, retro, {}, 16));
+    const auto blend = pattern(r54_trace(m, r54_retro(), {}, 16));
+    std::printf("    with the door: %.0f%% of even pixels solid, %.0f%% of odd ones see-through; without: %.0f%% / %.0f%%\n",
+                100 * door.first, 100 * door.second, 100 * blend.first, 100 * blend.second);
+    CHECK(door.first > 0.95 && door.second > 0.95);
+    CHECK(blend.first < 0.5);  // alpha blending: half red
+    /* Nearly clear (alpha 0.05): the rasterizer's door drops it on its solid squares too. */
+    m->alpha = 0.05f;
+    m->touch();
+    const auto clear = pattern(r54_trace(m, retro, {}, 16));
+    std::printf("    alpha 0.05 with the door: %.0f%% of even pixels solid\n", 100 * clear.first);
+    CHECK(clear.first < 0.05);
+    m->alpha = 0.5f;
+    m->touch();
+    if (gpu::available()) {
+      const auto g = pattern(r54_trace(m, retro, {gpu::devices()[0].index}, 16));
+      std::printf("    the GPU: %.0f%% / %.0f%%\n", 100 * g.first, 100 * g.second);
+      CHECK(g.first > 0.95 && g.second > 0.95);
+    }
+  });
+
+  test("retro in the path tracer: vertex snapping moves a path-traced F12 render's silhouette onto the rasterized one's grid", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    for (const char *n : {"Plane", "Sphere", "Cylinder", "Utah Teapot"})
+      if (GameObject *g = ed.scene().find_by_name(n)) g->active = false;
+    ed.command("set Render.ResolutionX 320");
+    ed.command("set Render.ResolutionY 240");
+    ed.command("set Render.Samples 4");
+    ed.command("set Render.Denoise false");
+    ed.command("device cpu");
+    Camera *cam = by_name(ed.scene(), "Main Camera")->camera();
+    cam->clear_flags = 1;  // solid black: the silhouette is what isn't black
+    cam->background = {0, 0, 0};
+    ed.command("select Main Camera");
+    ed.command("filter add Retro Console");
+    auto *cf = by_name(ed.scene(), "Main Camera")->get<CameraFilters>();
+    CHECK(cf && !cf->effects.empty());
+    if (!cf || cf->effects.empty()) return;
+    auto *retro = static_cast<RetroConsoleFilter *>(cf->effects[0].get());
+    retro->width = 80;  // a coarse grid: 4 output pixels a cell
+    retro->height = 60;
+    retro->snap_grid = 4.0f;
+    retro->affine_textures = false;
+    auto mask = [&](const char *engine) {
+      ed.command(std::string("set Render.RenderEngine ") + engine);
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      std::vector<uint8_t> m(img.pixels.size());
+      for (size_t i = 0; i < m.size(); i++) m[i] = (img.pixels[i] & 0xFFFFFF) > 0x080808;
+      return m;
+    };
+    auto differ = [](const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
+      size_t d = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) d += a[i] != b[i];
+      return d;
+    };
+    const auto raster = mask("Rasterized"), traced = mask("Path");
+    retro->vertex_snap = false;
+    const auto traced_free = mask("Path"), raster_free = mask("Rasterized");
+    size_t on = 0;
+    for (uint8_t v : raster) on += v;
+    const size_t d_snap = differ(traced, raster), d_free = differ(traced_free, raster), d_effect = differ(raster_free, raster);
+    std::printf("    silhouette pixels %zu; traced vs raster (snapped): %zu differ; traced without the snap: %zu (raster with / without: %zu)\n", on, d_snap, d_free,
+                d_effect);
+    CHECK(on > 500);
+    CHECK(d_effect > 0);
+    CHECK(d_snap <= on / 50);  // the same silhouette (measured: 0 pixels differ)
+    CHECK(d_snap < d_free);
   });
 }

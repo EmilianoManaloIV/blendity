@@ -589,6 +589,77 @@ static void build_pt(PathTracer &pt, Editor &, const std::vector<DrawItem> &item
   pt.build(objs, env.lights, world);
 }
 
+/* A camera filter's rasterizer stages for a path-traced picture (task 0032, ADR 0008 amended): the settings, and
+ * vertex snapping done to copies of the meshes (each vertex's screen position rounded to the filter's grid at
+ * its internal size, depth and w kept, as the rasterizer's to_screen; then back into the object's own space,
+ * so Box / Generated mapping still read object coordinates). `keep` holds the copies while the tracer uses them. */
+static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p, int w, int h, PTSettings &ps, std::vector<DrawItem> &items,
+                            std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> &keep) {
+  /* The copies are kept by what made them (mesh, model, camera, size, grid): a rebuild with nothing of that
+   * changed reuses the same copy, so the tracer's BVH caches (keyed by mesh) still hit. */
+  std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> old;
+  old.swap(keep);
+  ps.retro = PTSettings::Retro{};
+  if (fs.empty() || w <= 0 || h <= 0) return;
+  const Mat4 vp = p * v;
+  ps.retro.affine_uv = fs.affine_uv;
+  ps.retro.screen_door = fs.screen_door;
+  ps.retro.tex = fs.tex;
+  ps.retro.view_proj = vp;
+  ps.retro.width = w;
+  ps.retro.height = h;
+  const float snap = finite_bits(fs.vertex_snap) && fs.vertex_snap > 0.0f ? fs.vertex_snap : 0.0f;
+  if (snap <= 0.0f) return;
+  const Mat4 ivp = vp.inverse();
+  for (DrawItem &it : items) {
+    if (!it.mesh) continue;
+    const Mat4 mvp = vp * it.model, to_local = it.model.inverse();
+    /* Wholly off one side of the view: no vertex lands on the image, nothing to snap (the original mesh). */
+    if (it.mesh->bounds.valid()) {
+      int out[6] = {0, 0, 0, 0, 0, 0};
+      for (int k = 0; k < 8; k++) {
+        const Vec3 cb{k & 1 ? it.mesh->bounds.max.x : it.mesh->bounds.min.x, k & 2 ? it.mesh->bounds.max.y : it.mesh->bounds.min.y,
+                      k & 4 ? it.mesh->bounds.max.z : it.mesh->bounds.min.z};
+        const Vec4 c = mvp * Vec4(cb, 1.0f);
+        out[0] += c.x < -c.w, out[1] += c.x > c.w, out[2] += c.y < -c.w, out[3] += c.y > c.w, out[4] += c.w <= 0.0f, out[5] += c.z > c.w;
+      }
+      bool outside = false;
+      for (int k = 0; k < 6; k++) outside = outside || out[k] == 8;
+      if (outside) continue;
+    }
+    uint64_t key = 1469598103934665603ull;
+    auto mix = [&](const void *d, size_t n) {
+      for (size_t i = 0; i < n; i++) key = (key ^ ((const uint8_t *)d)[i]) * 1099511628211ull;
+    };
+    const void *src = it.mesh;
+    mix(&src, sizeof(src));
+    mix(&it.mesh->serial, sizeof(it.mesh->serial));
+    mix(it.model.m, sizeof(it.model.m));
+    mix(vp.m, sizeof(vp.m));
+    mix(&w, sizeof(w));
+    mix(&h, sizeof(h));
+    mix(&snap, sizeof(snap));
+    if (auto f = old.find(key); f != old.end()) {
+      it.mesh = f->second.get();
+      keep[key] = f->second;
+      continue;
+    }
+    auto m = std::make_shared<RenderMesh>(*it.mesh);
+    m->serial = 0;
+    for (Vec3 &pos : m->positions) {
+      const Vec4 c = mvp * Vec4(pos, 1.0f);
+      if (!(c.w > 1e-6f)) continue;  // behind the camera: as it is
+      const float sx = std::floor(((c.x / c.w) * 0.5f + 0.5f) * w / snap + 0.5f) * snap, sy = std::floor((0.5f - (c.y / c.w) * 0.5f) * h / snap + 0.5f) * snap;
+      const Vec4 q = ivp * Vec4((sx / w * 2.0f - 1.0f) * c.w, (1.0f - sy / h * 2.0f) * c.w, c.z, c.w);
+      if (!(std::fabs(q.w) > 1e-12f)) continue;
+      const Vec3 wp = q.xyz() / q.w;
+      if (finite_bits(wp.x) && finite_bits(wp.y) && finite_bits(wp.z)) pos = to_local.point(wp);
+    }
+    it.mesh = m.get();
+    keep[key] = std::move(m);
+  }
+}
+
 /* A camera's Clear Flags: Solid Color for the path tracer (ADR 0016): the display colour taken as linear
  * light, so a Standard view transform shows it as set (Filmic tints it a little, as it tints everything). */
 static void pt_solid_background(PTSettings &ps, const Camera *cam) {
@@ -748,8 +819,6 @@ void Editor::start_final_render(bool preview, bool open_window) {
   PTSettings ps = make_pt_settings(rs);
   if (cam) ps.exposure += cam->exposure_stops();
   pt_solid_background(ps, cam);
-  final_pt_.set_settings(ps);  // before build(): it picks the ray backend
-  build_pt(final_pt_, *this, items, env, env_);
   int tw = w, th = h;
   if (render_filtered_) {
     /* Traced at the filters' resolution (fewer samples to wait for), scaled up when shown. */
@@ -758,6 +827,9 @@ void Editor::start_final_render(bool preview, bool open_window) {
     if (render_dst_.w != w || render_dst_.h != h) p = cam->projection(render_dst_.w / (float)render_dst_.h);
     std::fill(render_img_.pixels.begin(), render_img_.pixels.end(), 0xFF000000u);
   }
+  retro_for_trace(render_filters_, v, p, tw, th, ps, items, render_snapped_);  // (no-op without a filter)
+  final_pt_.set_settings(ps);  // before build(): it picks the ray backend
+  build_pt(final_pt_, *this, items, env, env_);
   render_view_ = v;
   render_proj_ = p;
   render_eye_ = eye;
@@ -1262,10 +1334,12 @@ void Editor::draw_camera_preview(const Recti &view) {
       PTSettings ps = make_pt_settings(rs);
       ps.exposure += cam->exposure_stops();
       pt_solid_background(ps, cam);
+      const float ta = tdst.w / (float)std::max(1, tdst.h);
+      const Mat4 tp = tdst.w == w && tdst.h == h ? p : cam->projection(ta);
+      retro_for_trace(filters, v, tp, tw, th, ps, items, cam_preview_snapped_);  // a filter's rasterizer stages (task 0032)
       cam_preview_pt_.set_settings(ps);
       build_pt(cam_preview_pt_, *this, items, env, env_);
-      const float ta = tdst.w / (float)std::max(1, tdst.h);
-      cam_preview_pt_.set_camera(v, tdst.w == w && tdst.h == h ? p : cam->projection(ta), tw, th, camera_lens(cam, ta));
+      cam_preview_pt_.set_camera(v, tp, tw, th, camera_lens(cam, ta));
       cam_preview_done_ = false;
     }
     if (cam_preview_img_.width != w || cam_preview_img_.height != h) cam_preview_img_.resize(w, h);  // keeps a finished preview

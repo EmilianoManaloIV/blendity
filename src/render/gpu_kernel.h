@@ -60,6 +60,8 @@ layout(std430, binding = 0) readonly buffer Params {
   vec4 lens;        // aperture radius, focus distance, blades, blade rotation (thin lens)
   vec4 cam_right; vec4 cam_up; vec4 cam_fwd;
   vec4 background;  // a camera's Solid Color for camera rays (w: on)
+  mat4 retro_vp;    // a camera filter's view-projection (task 0032)
+  vec4 retro;       // affine UVs, screen door, internal width, height (0: off)
 } P;
 layout(std430, binding = 1) buffer Accum { vec4 accum[]; };
 layout(std430, binding = 2) buffer Aux { vec4 aux[]; };  // albedo [0, n), normal + depth [n, 2n)
@@ -143,6 +145,10 @@ vec4 tex_sample(int t, vec2 uv, int wrap, int filter_mode) {
   int x0 = int(floor(fx)), y0 = int(floor(fy));
   float tx = fx - float(x0), ty = fy - float(y0);
   vec4 a = tex_fetch(t, x0, y0, wrap), b = tex_fetch(t, x0 + 1, y0, wrap), c = tex_fetch(t, x0, y0 + 1, wrap), d = tex_fetch(t, x0 + 1, y0 + 1, wrap);
+  if (filter_mode == 3) {  // the N64's 3-point filter (a camera filter's), as Texture::sample_level
+    if (tx + ty <= 1.0) return a + (b - a) * tx + (c - a) * ty;
+    return d + (c - d) * (1.0 - tx) + (b - d) * (1.0 - ty);
+  }
   return mix(mix(a, b, tx), mix(c, d, tx), ty);
 }
 
@@ -220,6 +226,30 @@ int surface_at(uint obj, uint prim, float u, float v, out SurfacePoint sp) {
   sp.bmin = ins.bmin.xyz;
   sp.bmax = ins.bmax.xyz;
   return material_index(ins, t.w);
+}
+
+/* A camera filter's rasterizer stages at camera-ray hits (task 0032): where p lands on its image, and the
+ * triangle's UVs interpolated there across the screen (affine), as PathTracer::retro_screen / retro_affine_uv. */
+bool retro_screen(vec3 p, out vec2 s) {
+  vec4 c = P.retro_vp * vec4(p, 1.0);
+  s = vec2(0.0);
+  if (!(c.w > 1e-6)) return false;
+  s = vec2((c.x / c.w * 0.5 + 0.5) * P.retro.z, (0.5 - c.y / c.w * 0.5) * P.retro.w);
+  return !any(isnan(s)) && !any(isinf(s)) && abs(s.x) < 1e8 && abs(s.y) < 1e8;
+}
+void retro_affine_uv(uint obj, uint prim, vec2 s, inout SurfacePoint sp) {
+  Instance ins = insts[obj];
+  if (ins.info.z == 0u) return;
+  uvec4 t = idx[ins.off.w + prim];
+  Vertex a = verts[ins.off.z + t.x], b = verts[ins.off.z + t.y], c = verts[ins.off.z + t.z];
+  vec2 c0, c1, c2;
+  if (!retro_screen((ins.to_world * vec4(a.p.xyz, 1.0)).xyz, c0) || !retro_screen((ins.to_world * vec4(b.p.xyz, 1.0)).xyz, c1) ||
+      !retro_screen((ins.to_world * vec4(c.p.xyz, 1.0)).xyz, c2)) return;
+  float d = (c1.x - c0.x) * (c2.y - c0.y) - (c2.x - c0.x) * (c1.y - c0.y);
+  if (!(abs(d) > 1e-12)) return;
+  float b1 = ((s.x - c0.x) * (c2.y - c0.y) - (c2.x - c0.x) * (s.y - c0.y)) / d;
+  float b2 = ((c1.x - c0.x) * (s.y - c0.y) - (s.x - c0.x) * (c1.y - c0.y)) / d;
+  sp.uv = a.uv.xy * (1.0 - b1 - b2) + b.uv.xy * b1 + c.uv.xy * b2;
 }
 
 /* evaluate_material (shading.cpp), sampled at lod 0 like the CPU path tracer. */
@@ -534,6 +564,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
   float clamp_ind = P.settings.x;
   float last_pdf = 0.0;
   int see_through_hits = 0, glass_hits = 0;
+  bool camera_path = true;  // the camera ray (see-through passes keep it; glass ends it)
   albedo_out = vec3(0.0);
   normal_out = vec3(0.0);
   depth_out = 0.0;
@@ -555,9 +586,19 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     float cos_hit = abs(dot(sp.geo_normal, V));
     if (dot(sp.geo_normal, V) < 0.0) sp.geo_normal = -sp.geo_normal;
     if (dot(sp.normal, sp.geo_normal) < 0.0) sp.normal = -sp.normal;
-    Sample s = evaluate_material(m, sp);
     int surf = m.tex1.w;
-    if ((surf == 1 || surf == 2) && see_through_hits < 64) {
+    bool door_solid = false;
+    vec2 scr;
+    if (bounce == 0 && camera_path && P.retro.z > 0.0 && retro_screen(sp.position, scr)) {
+      if (P.retro.x > 0.5) retro_affine_uv(h.obj, h.prim, scr, sp);
+      if (P.retro.y > 0.5 && surf == 2 && see_through_hits < 64) {
+        if (((int(floor(scr.x)) + int(floor(scr.y))) & 1) != 0) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+        door_solid = true;
+      }
+    }
+    Sample s = evaluate_material(m, sp);
+    if (door_solid && clamp(s.alpha, 0.0, 1.0) < 0.1) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
+    if ((surf == 1 || surf == 2) && see_through_hits < 64 && !door_solid) {
       bool pass = surf == 1 ? s.alpha < m.tiling.w : rnd(rng) >= s.alpha;
       if (pass) { see_through_hits++; ro = sp.position + rd * (1e-4 + h.t * 1e-5); bounce--; continue; }
     }
@@ -604,6 +645,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       ro = sp.position + sp.geo_normal * ((refl ? 1.0 : -1.0) * (1e-4 + h.t * 1e-5));
       rd = dir;
       last_pdf = 0.0;
+      camera_path = false;
       if (glass_hits++ < 32) bounce--;
       continue;
     }

@@ -48,6 +48,8 @@ struct GParams {
   float lens[4];        // aperture radius, focus distance, blades, blade rotation
   float cam_right[4], cam_up[4], cam_fwd[4];
   float background[4];  // a camera's Solid Color for camera rays (w: on)
+  float retro_vp[16];   // a camera filter's view-projection (task 0032)
+  float retro[4];       // affine UVs, screen door, internal width, height (0: off)
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };
