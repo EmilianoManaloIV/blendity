@@ -12,6 +12,7 @@
 #include "../src/render/colormanagement.h"
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
+#include "../src/render/lightmapper.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/shading.h"
 #include "../src/scene/import.h"
@@ -22,6 +23,7 @@
 #include "../src/scene/uv.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -188,6 +190,7 @@ static void round30_tests();
 static void round31_tests();
 static void round32_tests();
 static void round34_tests();
+static void round35_tests();
 
 int main() {
   register_builtin_components();
@@ -796,6 +799,7 @@ int main() {
   round31_tests();
   round32_tests();
   round34_tests();
+  round35_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -12031,5 +12035,1262 @@ static void round34_tests() {
     CHECK(count_bad("depth range", gr.depth, [](float d) { return d >= 0.0f && d <= 1.0f; }) == 0);
     CHECK(std::count(gr.depth.begin(), gr.depth.end(), 1.0f) > 1000);
     CHECK(std::count_if(gr.depth.begin(), gr.depth.end(), [](float d) { return d < 1.0f; }) > 1000);
+  });
+}
+
+/* ===================================================================== */
+/* Round 35: baked lighting - lightmaps and light modes (task 0012)        */
+/* ===================================================================== */
+
+namespace {
+/* A tiny deterministic generator for the reference gathers. */
+struct R35Rng {
+  uint32_t s = 2463534242u;
+  float f() {
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    return (s >> 8) * (1.0f / 16777216.0f);
+  }
+};
+
+bool r35_finite(Vec3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+
+/* Small, quick settings: a bake of a few thousand texels takes well under a second. */
+BakeSettings r35_small(float tpu = 8.0f, int samples = 32) {
+  BakeSettings s;
+  s.texels_per_unit = tpu;
+  s.max_size = 256;
+  s.padding = 2;
+  s.direct_samples = 8;
+  s.indirect_samples = samples;
+  s.bounces = 2;
+  s.denoise = true;
+  return s;
+}
+
+LightingData r35_run(Lightmapper &lm, const std::vector<BakeObject> &objs, const std::vector<BakeLight> &lights, const Environment &env,
+                     const BakeSettings &s) {
+  lm.begin(objs, lights, env, s);
+  for (int i = 0; i < 100000 && !lm.step(1000.0); i++) {}
+  CHECK(!lm.active());
+  return lm.take_result();
+}
+
+BakeObject r35_object(uint64_t id, MeshPtr m, const Mat4 &model, Vec3 albedo = Vec3(0.8f)) {
+  BakeObject o;
+  o.id = id;
+  o.mesh = m;
+  o.model = model;
+  o.materials = {make_material("m", albedo)};
+  o.hash = lightmap_content_hash(*m, model);
+  return o;
+}
+
+/* The lightmap value at a world point on a baked object: finds the render-mesh triangle the point is on,
+ * interpolates the entry's lightmap UVs and samples the page. False when no triangle holds the point. */
+bool r35_sample(const LightingData &ld, uint64_t id, const Mesh &m, const Mat4 &model, Vec3 p, Vec3 &out) {
+  auto e = ld.entries.find(id);
+  if (e == ld.entries.end() || e->second.page < 0 || e->second.page >= (int)ld.pages.size()) return false;
+  const RenderMesh &rm = m.render_mesh();
+  if (e->second.tri_uv.size() != rm.tri_count() * 3) return false;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const Vec3 a = model.point(rm.positions[rm.indices[t * 3]]), b = model.point(rm.positions[rm.indices[t * 3 + 1]]),
+               c = model.point(rm.positions[rm.indices[t * 3 + 2]]);
+    const Vec3 n = cross(b - a, c - a);
+    const float area2 = dot(n, n);
+    if (!(area2 > 1e-12f)) continue;
+    if (std::fabs(dot(p - a, n)) / std::sqrt(area2) > 0.02f) continue;  // not on this triangle's plane
+    const float w1 = dot(cross(p - a, c - a), n) / area2, w2 = dot(cross(b - a, p - a), n) / area2, w0 = 1.0f - w1 - w2;
+    if (w0 < -1e-3f || w1 < -1e-3f || w2 < -1e-3f) continue;
+    const Vec2 uv = e->second.tri_uv[t * 3] * w0 + e->second.tri_uv[t * 3 + 1] * w1 + e->second.tri_uv[t * 3 + 2] * w2;
+    out = ld.pages[(size_t)e->second.page].sample(uv);
+    return true;
+  }
+  return false;
+}
+
+/* ---- editor scenes ---- */
+
+/* Window with the Scene and Game views, the default objects hidden: a camera, the sun, a grey world. */
+void r35_open(Editor &ed) {
+  r34_open(ed);
+  for (const char *n : {"Plane", "Cube", "Sphere", "Cylinder"})
+    if (GameObject *g = ed.scene().find_by_name(n)) g->active = false;
+  EnvironmentSettings &env = ed.scene().environment;
+  env.mode = 3;
+  env.color = Vec3(0.25f);
+  env.strength = 1.0f;
+  LightingSettings &ls = ed.scene().lighting;
+  ls.texels_per_unit = 8.0f;
+  ls.max_size = 256;
+  ls.padding = 2;
+  ls.indirect_samples = 32;
+  ls.direct_samples = 8;
+  GameObject *sun = ed.scene().find_by_name("Directional Light");
+  sun->set_local_euler({50, 90, 0});
+  Light *l = sun->get<Light>();
+  l->color = Vec3(1.0f);
+  l->intensity = 1.0f;
+  ed.commit_change("r35 setup");
+}
+
+GameObject *r35_add(Editor &ed, const char *kind, const char *name, Vec3 pos, Vec3 scale, Vec3 colour, bool gi = true) {
+  GameObject *g = create_primitive(ed.scene(), kind);
+  g->name = name;
+  g->set_local_position(pos);
+  g->set_local_scale(scale);
+  MeshRenderer *mr = g->get<MeshRenderer>();
+  mr->materials = {make_material(name, colour)};
+  mr->contribute_gi = gi;
+  return g;
+}
+
+void r35_sun_mode(Editor &ed, int mode) {
+  ed.scene().find_by_name("Directional Light")->get<Light>()->mode = mode;
+  ed.commit_change("r35 sun mode");
+}
+
+void r35_bake(Editor &ed) {
+  ed.command("bake start");
+  CHECK(ed.baking_for_test());
+  for (int i = 0; i < 100 && ed.baking_for_test(); i++) ed.step_frame_headless();
+  CHECK(!ed.baking_for_test());
+  r34_steps(ed, 4);
+}
+
+std::vector<uint32_t> r35_game(Editor &ed) { return r34_crop(ed, ed.window_rect_for_test(WindowKind::Game)); }
+std::vector<uint32_t> r35_scene_view(Editor &ed) { return r34_crop(ed, ed.scene_view_rect()); }
+
+double r35_luma(const std::vector<uint32_t> &px) {
+  double s = 0;
+  for (uint32_t c : px) s += ((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255);
+  return s;
+}
+
+/* How many pixels differ by more than `tol` in some channel. */
+size_t r35_diff_count(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, int tol = 0) {
+  if (a.size() != b.size()) return std::max(a.size(), b.size());
+  size_t n = 0;
+  for (size_t i = 0; i < a.size(); i++) {
+    const int dr = std::abs((int)((a[i] >> 16) & 255) - (int)((b[i] >> 16) & 255)), dg = std::abs((int)((a[i] >> 8) & 255) - (int)((b[i] >> 8) & 255)),
+              db = std::abs((int)(a[i] & 255) - (int)(b[i] & 255));
+    if (std::max({dr, dg, db}) > tol) n++;
+  }
+  return n;
+}
+
+/* A scratch scene file in the scratch project's Assets/Scenes, with the scene named after it. */
+std::string r35_scene_path(Editor &ed, const char *name) {
+  const std::string p = fs::join(fs::join(scratch_project(), "Assets/Scenes"), std::string(name) + ".scene");
+  ed.scene().name = name;
+  ed.scene().path = p;
+  return p;
+}
+
+/* A red or white wall (x = 0) beside a white floor, the sun on the wall's -x side; the floor's lightmap
+ * near the wall (0.4 from it) and far from it (4 away), on the sun's side. */
+struct R35Bleed {
+  Vec3 near_v, far_v;
+  bool ok = false;
+};
+R35Bleed r35_bleed(int sun_mode, Vec3 wall_colour) {
+  Editor ed;
+  r35_open(ed);
+  GameObject *floor_go = r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+  r35_add(ed, "Cube", "Wall", {0, 1, 0}, {0.2f, 2, 6}, wall_colour);
+  r35_sun_mode(ed, sun_mode);
+  r35_bake(ed);
+  const LightingData &ld = ed.lighting_data_for_test();
+  R35Bleed r;
+  const Vec3 fwd = ed.scene().find_by_name("Directional Light")->world_rotation().rotate({0, 0, 1});
+  const float side = fwd.x > 0 ? -1.0f : 1.0f;  // the sun's side of the wall
+  const Mesh *fm = floor_go->evaluated_mesh(1);
+  r.ok = fm && r35_sample(ld, floor_go->id, *fm, floor_go->world_matrix(), {side * 0.4f, 0, 0}, r.near_v) &&
+         r35_sample(ld, floor_go->id, *fm, floor_go->world_matrix(), {side * 4.0f, 0, 0}, r.far_v);
+  return r;
+}
+
+/* Union-find over triangles: islands are triangles joined across edges whose two UV ends agree. */
+struct R35Islands {
+  std::vector<int> parent;
+  int find(int a) { return parent[(size_t)a] == a ? a : parent[(size_t)a] = find(parent[(size_t)a]); }
+};
+
+/* Checks one mesh's lightmap UVs: inside [0,1], finite, no two triangles overlapping, total area <= 1, islands
+ * apart by at least `gap` cells of a res x res grid. Returns the number of problems. */
+int r35_uv_problems(const char *what, const Mesh &m, int res, int padding, bool check_gap) {
+  const std::vector<Vec2> uv = lightmap_uvs(m, true, res, padding);
+  const RenderMesh &rm = m.render_mesh();
+  int bad = 0;
+  if (uv.size() != m.corner_verts.size()) {
+    std::printf("    %s: %zu uvs for %zu corners\n", what, uv.size(), m.corner_verts.size());
+    return 1;
+  }
+  for (const Vec2 &u : uv)
+    if (!(std::isfinite(u.x) && std::isfinite(u.y) && u.x >= 0.0f && u.x <= 1.0f && u.y >= 0.0f && u.y <= 1.0f)) bad++;
+  if (bad) std::printf("    %s: %d corners outside 0..1\n", what, bad);
+  const size_t nt = rm.tri_count();
+  auto tuv = [&](size_t t, int k) { return uv[rm.tri_corner[t * 3 + (size_t)k]]; };
+  /* Overlap: rasterize every triangle's strict interior on a fine grid; one cell in two triangles = overlap. */
+  const int G = 384;
+  std::vector<int32_t> owner((size_t)G * G, -1);
+  int overlap_cells = 0;
+  double area = 0;
+  for (size_t t = 0; t < nt; t++) {
+    const Vec2 a = tuv(t, 0), b = tuv(t, 1), c = tuv(t, 2);
+    const float a2 = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    area += std::fabs(a2) * 0.5;
+    if (std::fabs(a2) < 1e-9f) continue;
+    const int x0 = std::max(0, (int)std::floor(std::min({a.x, b.x, c.x}) * G)), x1 = std::min(G - 1, (int)std::ceil(std::max({a.x, b.x, c.x}) * G));
+    const int y0 = std::max(0, (int)std::floor(std::min({a.y, b.y, c.y}) * G)), y1 = std::min(G - 1, (int)std::ceil(std::max({a.y, b.y, c.y}) * G));
+    for (int y = y0; y <= y1; y++)
+      for (int x = x0; x <= x1; x++) {
+        const float px = (x + 0.5f) / G, py = (y + 0.5f) / G;
+        const float w0 = ((b.x - px) * (c.y - py) - (c.x - px) * (b.y - py)) / a2, w1 = ((c.x - px) * (a.y - py) - (a.x - px) * (c.y - py)) / a2,
+                    w2 = 1.0f - w0 - w1;
+        if (w0 < 0.02f || w1 < 0.02f || w2 < 0.02f) continue;
+        int32_t &o = owner[(size_t)y * G + x];
+        if (o >= 0 && o != (int32_t)t) overlap_cells++;
+        o = (int32_t)t;
+      }
+  }
+  if (overlap_cells) std::printf("    %s: %d grid cells hold two triangles\n", what, overlap_cells);
+  bad += overlap_cells > 0;
+  if (area > 1.0 + 1e-3) {
+    std::printf("    %s: total chart area %.3f > 1\n", what, area);
+    bad++;
+  }
+  if (!check_gap) return bad;
+  /* Islands. */
+  R35Islands isl;
+  isl.parent.resize(nt);
+  for (size_t t = 0; t < nt; t++) isl.parent[t] = (int)t;
+  struct EdgeUse {
+    size_t tri;
+    Vec2 ua, ub;
+  };
+  std::map<std::pair<uint32_t, uint32_t>, std::vector<EdgeUse>> edges;
+  for (size_t t = 0; t < nt; t++)
+    for (int k = 0; k < 3; k++) {
+      const uint32_t va = m.corner_verts[rm.tri_corner[t * 3 + (size_t)k]], vb = m.corner_verts[rm.tri_corner[t * 3 + (size_t)((k + 1) % 3)]];
+      const Vec2 ua = tuv(t, k), ub = tuv(t, (k + 1) % 3);
+      if (va < vb) edges[{va, vb}].push_back({t, ua, ub});
+      else edges[{vb, va}].push_back({t, ub, ua});
+    }
+  auto same = [](Vec2 p, Vec2 q) { return std::fabs(p.x - q.x) < 1e-4f && std::fabs(p.y - q.y) < 1e-4f; };
+  for (auto &kv : edges)
+    for (size_t i = 0; i < kv.second.size(); i++)
+      for (size_t j = i + 1; j < kv.second.size(); j++)
+        if (same(kv.second[i].ua, kv.second[j].ua) && same(kv.second[i].ub, kv.second[j].ub))
+          isl.parent[(size_t)isl.find((int)kv.second[i].tri)] = isl.find((int)kv.second[j].tri);
+  /* Coverage per island on the res grid (any of 3x3 sub-samples inside a triangle): no cell within one cell of another island's. */
+  const int R = res;
+  std::vector<int32_t> cell((size_t)R * R, -1);
+  int clash = 0;
+  for (size_t t = 0; t < nt; t++) {
+    const Vec2 a = tuv(t, 0), b = tuv(t, 1), c = tuv(t, 2);
+    const float a2 = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    if (std::fabs(a2) < 1e-9f) continue;
+    const int id = isl.find((int)t);
+    for (int y = 0; y < R; y++)
+      for (int x = 0; x < R; x++) {
+        bool in = false;
+        for (int sy = 0; sy < 3 && !in; sy++)
+          for (int sx = 0; sx < 3 && !in; sx++) {
+            const float px = (x + (sx + 0.5f) / 3.0f) / R, py = (y + (sy + 0.5f) / 3.0f) / R;
+            const float w0 = ((b.x - px) * (c.y - py) - (c.x - px) * (b.y - py)) / a2, w1 = ((c.x - px) * (a.y - py) - (a.x - px) * (c.y - py)) / a2,
+                        w2 = 1.0f - w0 - w1;
+            in = w0 >= 0 && w1 >= 0 && w2 >= 0;
+          }
+        if (!in) continue;
+        int32_t &o = cell[(size_t)y * R + x];
+        if (o >= 0 && o != id) clash++;
+        o = id;
+      }
+  }
+  for (int y = 0; y < R; y++)
+    for (int x = 0; x < R; x++) {
+      const int32_t o = cell[(size_t)y * R + x];
+      if (o < 0) continue;
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+          const int xx = x + dx, yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= R || yy >= R) continue;
+          const int32_t q = cell[(size_t)yy * R + xx];
+          if (q >= 0 && q != o) clash++;
+        }
+    }
+  if (clash) std::printf("    %s: %d texel pairs of different charts touch (padding %d at %d texels)\n", what, clash, padding, res);
+  return bad + (clash > 0);
+}
+}  // namespace
+
+static void round35_tests() {
+  /* ---------------------------------------------------------------- 1: lightmap UVs */
+  test("baked lighting: lightmap UVs stay inside 0..1, no two triangles overlap, charts keep apart", [] {
+    struct Shape {
+      const char *name;
+      MeshPtr m;
+    };
+    const std::vector<Shape> shapes = {{"cube", primitives::cube()},      {"sphere", primitives::uv_sphere()}, {"icosphere", primitives::ico_sphere()},
+                                       {"cylinder", primitives::cylinder()}, {"torus", primitives::torus()},      {"teapot", primitives::teapot(1.2f, 4)},
+                                       {"plane", primitives::plane(10.0f, 4)}};
+    int bad = 0;
+    for (const Shape &s : shapes) bad += r35_uv_problems(s.name, *s.m, 64, 2, true);
+    CHECK(bad == 0);
+    /* The same through the baker: every entry's UVs are inside the page. */
+    Lightmapper lm;
+    Environment env;
+    std::vector<BakeObject> objs;
+    uint64_t id = 1;
+    for (const Shape &s : shapes) objs.push_back(r35_object(id++, s.m, Mat4::translate(Vec3((float)id, 0, 0))));
+    const LightingData ld = r35_run(lm, objs, {}, env, r35_small(6.0f, 4));
+    CHECK(ld.entries.size() == shapes.size());
+    size_t outside = 0;
+    for (auto &kv : ld.entries)
+      for (const Vec2 &u : kv.second.tri_uv)
+        if (!(u.x >= 0 && u.x <= 1 && u.y >= 0 && u.y <= 1)) outside++;
+    CHECK(outside == 0);
+    /* Different objects never share a texel: the pages' charts are laid out by rectangles. */
+    std::map<std::pair<int, int>, uint64_t> texel_owner;
+    size_t shared = 0;
+    for (auto &kv : ld.entries) {
+      const Lightmap &pg = ld.pages[(size_t)kv.second.page];
+      const Mesh &m = *objs[(size_t)kv.first - 1].mesh;
+      const RenderMesh &rm = m.render_mesh();
+      for (size_t t = 0; t < rm.tri_count(); t++) {
+        const Vec2 a = kv.second.tri_uv[t * 3], b = kv.second.tri_uv[t * 3 + 1], c = kv.second.tri_uv[t * 3 + 2];
+        const Vec2 centre = (a + b + c) * (1.0f / 3.0f);
+        const std::pair<int, int> key{kv.second.page * 100000 + (int)(centre.x * pg.width), (int)(centre.y * pg.height)};
+        auto it = texel_owner.find(key);
+        if (it != texel_owner.end() && it->second != kv.first) shared++;
+        texel_owner[key] = kv.first;
+      }
+    }
+    CHECK(shared == 0);
+  });
+
+  test("baked lighting: padding is respected - a bigger Lightmap Padding keeps charts further apart", [] {
+    /* Charts of one object are at least (padding + 1) texels apart at the chart's resolution. */
+    const MeshPtr m = primitives::cube();
+    for (int pad : {1, 2, 4}) {
+      const std::vector<Vec2> uv = lightmap_uvs(*m, true, 64, pad);
+      /* Smallest gap between two different islands' bounding boxes, in texels of a 64 grid. */
+      const RenderMesh &rm = m->render_mesh();
+      std::map<uint32_t, std::vector<Vec2>> by_face;  // per mesh face
+      for (size_t t = 0; t < rm.tri_count(); t++)
+        for (int k = 0; k < 3; k++) by_face[(uint32_t)(t / 2)].push_back(uv[rm.tri_corner[t * 3 + (size_t)k]]);
+      float min_gap = 1e9f;
+      std::vector<std::array<float, 4>> boxes;
+      for (auto &kv : by_face) {
+        std::array<float, 4> b{1e9f, 1e9f, -1e9f, -1e9f};
+        for (const Vec2 &u : kv.second) b[0] = std::min(b[0], u.x), b[1] = std::min(b[1], u.y), b[2] = std::max(b[2], u.x), b[3] = std::max(b[3], u.y);
+        boxes.push_back(b);
+      }
+      for (size_t i = 0; i < boxes.size(); i++)
+        for (size_t j = i + 1; j < boxes.size(); j++) {
+          const float gx = std::max(boxes[i][0] - boxes[j][2], boxes[j][0] - boxes[i][2]), gy = std::max(boxes[i][1] - boxes[j][3], boxes[j][1] - boxes[i][3]);
+          const float g = std::max(gx, gy);  // negative: the boxes overlap on both axes (the faces of one island touch)
+          if (g > 1e-5f) min_gap = std::min(min_gap, g);
+        }
+      std::printf("    padding %d: closest separate faces %.2f texels apart at 64\n", pad, min_gap * 64.0f);
+      CHECK(min_gap * 64.0f >= (float)pad * 0.9f);  // at least `pad` texels where the faces are separate
+    }
+  });
+
+  test("baked lighting: texel density is within 20% of Lightmap Resolution x Scale In Lightmap for objects of different sizes", [] {
+    struct Case {
+      const char *name;
+      MeshPtr m;
+      Vec3 scale;
+      float lm_scale;
+    };
+    const std::vector<Case> cases = {{"cube 1m", primitives::cube(), {1, 1, 1}, 1.0f},
+                                     {"cube 3m", primitives::cube(), {3, 3, 3}, 1.0f},
+                                     {"box 0.5x4x2", primitives::cube(), {0.5f, 4, 2}, 1.0f},
+                                     {"sphere 2m", primitives::uv_sphere(), {2, 2, 2}, 1.0f},
+                                     {"cylinder", primitives::cylinder(), {1, 1, 1}, 1.0f},
+                                     {"cube 2m, scale 2", primitives::cube(), {2, 2, 2}, 2.0f},
+                                     {"cube 2m, scale 0.5", primitives::cube(), {2, 2, 2}, 0.5f}};
+    for (const float tpu : {8.0f, 20.0f, 40.0f}) {
+      for (const Case &c : cases) {
+        BakeObject o = r35_object(1, c.m, Mat4::scale(c.scale));
+        o.scale = c.lm_scale;
+        Lightmapper lm;
+        Environment env;
+        BakeSettings bs = r35_small(tpu, 1);
+        bs.max_size = 1024;  // big enough that no chart is capped
+        const LightingData ld = r35_run(lm, {o}, {}, env, bs);
+        auto e = ld.entries.find(1);
+        CHECK(e != ld.entries.end());
+        if (e == ld.entries.end()) continue;
+        const Lightmap &pg = ld.pages[(size_t)e->second.page];
+        const RenderMesh &rm = c.m->render_mesh();
+        double world = 0, texels = 0;
+        for (size_t t = 0; t < rm.tri_count(); t++) {
+          const Vec3 a = o.model.point(rm.positions[rm.indices[t * 3]]), b = o.model.point(rm.positions[rm.indices[t * 3 + 1]]),
+                     cc = o.model.point(rm.positions[rm.indices[t * 3 + 2]]);
+          world += 0.5 * length(cross(b - a, cc - a));
+          const Vec2 u0 = e->second.tri_uv[t * 3], u1 = e->second.tri_uv[t * 3 + 1], u2 = e->second.tri_uv[t * 3 + 2];
+          texels += 0.5 * std::fabs((double)(u1.x - u0.x) * (u2.y - u0.y) - (double)(u2.x - u0.x) * (u1.y - u0.y)) * pg.width * pg.height;
+        }
+        const double density = std::sqrt(texels / world), want = tpu * c.lm_scale;
+        std::printf("    %-20s tpu %4.1f: %.2f texels/unit (want %.2f, %+.0f%%), page %dx%d\n", c.name, tpu, density, want, 100.0 * (density / want - 1.0),
+                    pg.width, pg.height);
+        CHECK(std::fabs(density / want - 1.0) <= 0.20);
+      }
+    }
+  });
+
+  test("baked lighting: Scale In Lightmap scales the texel count; the content hash follows the shape and the place", [] {
+    const MeshPtr m = primitives::cube();
+    Environment env;
+    size_t counts[3];
+    int k = 0;
+    for (float s : {0.5f, 1.0f, 2.0f}) {
+      BakeObject o = r35_object(1, m, Mat4::scale({2, 2, 2}));
+      o.scale = s;
+      Lightmapper lm;
+      lm.begin({o}, {}, env, r35_small(8.0f, 1));
+      counts[k++] = lm.texel_count();
+    }
+    std::printf("    texels at scale 0.5 / 1 / 2: %zu / %zu / %zu\n", counts[0], counts[1], counts[2]);
+    CHECK(counts[0] > 0 && counts[1] > counts[0] * 2 && counts[2] > counts[1] * 2);
+    const uint64_t h0 = lightmap_content_hash(*m, Mat4()), h1 = lightmap_content_hash(*m, Mat4()), h2 = lightmap_content_hash(*m, Mat4::translate({0.01f, 0, 0}));
+    CHECK(h0 == h1 && h0 != h2 && h0 != 0);
+    MeshPtr moved = std::make_shared<Mesh>(*m);
+    moved->positions[0].x += 0.01f;
+    CHECK(lightmap_content_hash(*moved, Mat4()) != h0);
+  });
+
+  /* ---------------------------------------------------------------- 2: colour bleeding */
+  test("baked lighting: a red wall tints the white floor beside it with a Baked sun, a Mixed sun, and not with a white wall", [] {
+    const Vec3 red(0.9f, 0.05f, 0.05f), white(0.8f);
+    for (int mode : {2, 1}) {
+      const R35Bleed r = r35_bleed(mode, red), w = r35_bleed(mode, white);
+      CHECK(r.ok && w.ok);
+      if (!r.ok || !w.ok) continue;
+      std::printf("    sun mode %d: red wall near (%.3f %.3f %.3f) far (%.3f %.3f %.3f); white wall near (%.3f %.3f %.3f) far (%.3f %.3f %.3f)\n", mode,
+                  r.near_v.x, r.near_v.y, r.near_v.z, r.far_v.x, r.far_v.y, r.far_v.z, w.near_v.x, w.near_v.y, w.near_v.z, w.far_v.x, w.far_v.y, w.far_v.z);
+      /* Red wall: red clearly above green and blue near the wall, and more so than far from it. */
+      CHECK(r.near_v.x > r.near_v.y * 1.10f && r.near_v.x > r.near_v.z * 1.10f);
+      CHECK(r.near_v.x / std::max(1e-4f, r.near_v.y) > r.far_v.x / std::max(1e-4f, r.far_v.y) + 0.05f);
+      /* White wall: neutral (the world and the sun are white). */
+      CHECK(std::fabs(w.near_v.x - w.near_v.y) <= 0.01f * std::max(1.0f, w.near_v.y) && std::fabs(w.near_v.z - w.near_v.y) <= 0.01f * std::max(1.0f, w.near_v.y));
+      /* The tint is the wall's: with the white wall, the red channel near the wall isn't the one that rose. */
+      CHECK(r.near_v.y < w.near_v.y);  // the red wall absorbs green that the white one bounces
+    }
+  });
+
+  /* ---------------------------------------------------------------- 3: accuracy */
+  test("baked lighting: a floor under a uniform sky bakes the sky colour; under a big slab it is dark; at a slab's edge it is half", [] {
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.4f, 0.3f, 0.2f);
+    env.strength = 1.0f;
+    const MeshPtr plane = primitives::plane(10.0f, 4);
+    const MeshPtr cube = primitives::cube();
+    BakeObject floor_o = r35_object(1, plane, Mat4());
+    BakeSettings s = r35_small(6.0f, 256);
+    s.denoise = false;
+    /* Open sky. */
+    {
+      Lightmapper lm;
+      const LightingData ld = r35_run(lm, {floor_o}, {}, env, s);
+      double worst = 0;
+      int n = 0;
+      for (float x = -4.0f; x <= 4.0f; x += 1.7f)
+        for (float z = -4.0f; z <= 4.0f; z += 1.7f) {
+          Vec3 v;
+          CHECK(r35_sample(ld, 1, *plane, Mat4(), {x, 0, z}, v));
+          worst = std::max({worst, (double)std::fabs(v.x - 0.4f), (double)std::fabs(v.y - 0.3f), (double)std::fabs(v.z - 0.2f)});
+          n++;
+        }
+      std::printf("    open sky: worst error %.4f over %d points (sky 0.4 0.3 0.2)\n", worst, n);
+      CHECK(worst <= 0.01);
+    }
+    /* Big slab above: the sky is hidden. The floor is as wide as the slab: a Color world also shines from
+     * below the horizon, and past a small floor's edge the slab's underside would see it and bounce it
+     * back down (a real ~6% the first version of this test counted as a leak). */
+    BakeObject slab = r35_object(2, cube, Mat4::trs({0, 1, 0}, Quat(), {100, 0.1f, 100}));
+    const MeshPtr wide = primitives::plane(100.0f, 4);
+    BakeObject wide_floor = r35_object(1, wide, Mat4());
+    {
+      Lightmapper lm;
+      const LightingData ld = r35_run(lm, {wide_floor, slab}, {}, env, s);
+      Vec3 v;
+      CHECK(r35_sample(ld, 1, *wide, Mat4(), {0, 0, 0}, v));
+      std::printf("    under a 100 m slab: (%.4f %.4f %.4f)\n", v.x, v.y, v.z);
+      CHECK(v.x < 0.4f * 0.06f && v.y < 0.3f * 0.06f && v.z < 0.2f * 0.06f);
+    }
+    /* A slab ending exactly above the sample point: half of the cosine-weighted sky is open. Compared with
+     * the analytic half and with a 8192-sample path-traced gather (a reference from the same scene). */
+    {
+      const Mat4 slab_m = Mat4::trs({-10, 1, 0}, Quat(), {20, 0.1f, 20});
+      BakeObject edge = r35_object(2, cube, slab_m);
+      Lightmapper lm;
+      const LightingData ld = r35_run(lm, {floor_o, edge}, {}, env, s);
+      Vec3 v;
+      CHECK(r35_sample(ld, 1, *plane, Mat4(), {0, 0, 0}, v));
+      PathTracer pt;
+      std::vector<MaterialPtr> mats;
+      const RenderMesh &frm = plane->render_mesh(), &crm = cube->render_mesh();
+      std::vector<PTObject> pto = {{&frm, Mat4(), &mats}, {&crm, slab_m, &mats}};
+      PTSettings ps;
+      ps.max_bounces = 2;
+      ps.denoise = false;
+      ps.use_guiding = false;
+      ps.gpus.clear();
+      pt.set_settings(ps);
+      pt.build(pto, {}, env);
+      R35Rng rng;
+      Vec3 ref(0.0f);
+      const int N = 8192;
+      const Vec3 n(0, 1, 0), tu(1, 0, 0), tv(0, 0, 1);
+      uint64_t rays = 0;
+      for (int i = 0; i < N; i++) {
+        const float r1 = rng.f(), r2 = rng.f();
+        const float r = std::sqrt(r1), phi = 2.0f * kPi * r2;
+        const Vec3 d = normalize(tu * (r * std::cos(phi)) + tv * (r * std::sin(phi)) + n * std::sqrt(std::max(0.0f, 1.0f - r1)));
+        uint32_t prng = 12345u + (uint32_t)i * 2654435761u;
+        ref += pt.incoming_radiance({Vec3(0, 1e-3f, 0), d}, prng, rays);
+      }
+      ref = ref * (1.0f / N);
+      std::printf("    slab edge: lightmap (%.3f %.3f %.3f), reference (%.3f %.3f %.3f), half sky (0.2 0.15 0.1)\n", v.x, v.y, v.z, ref.x, ref.y, ref.z);
+      CHECK(std::fabs(v.x - ref.x) <= 0.06f && std::fabs(v.y - ref.y) <= 0.06f && std::fabs(v.z - ref.z) <= 0.06f);
+      CHECK(std::fabs(v.x - 0.2f) <= 0.07f && std::fabs(v.y - 0.15f) <= 0.07f && std::fabs(v.z - 0.1f) <= 0.07f);
+    }
+  });
+
+  test("baked lighting: a Baked sun's direct light in the map is colour x intensity x N.L, and zero in a shadow", [] {
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    const MeshPtr plane = primitives::plane(10.0f, 4);
+    BakeLight sun;
+    sun.mode = 2;
+    sun.id = 7;
+    sun.light.type = RenderLight::Directional;
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, 0.2f));
+    sun.light.color = Vec3(1.0f, 0.5f, 0.25f);
+    sun.light.intensity = 2.0f;
+    BakeSettings s = r35_small(6.0f, 16);
+    s.denoise = false;
+    Lightmapper lm;
+    const BakeObject floor_o = r35_object(1, plane, Mat4());
+    LightingData ld = r35_run(lm, {floor_o}, {sun}, env, s);
+    Vec3 v;
+    CHECK(r35_sample(ld, 1, *plane, Mat4(), {0.5f, 0, 0.5f}, v));
+    const float ndl = dot(Vec3(0, 1, 0), normalize(-sun.light.direction));
+    std::printf("    N.L %.3f: map (%.3f %.3f %.3f), expected (%.3f %.3f %.3f)\n", ndl, v.x, v.y, v.z, 2.0f * ndl, 1.0f * ndl, 0.5f * ndl);
+    CHECK(std::fabs(v.x - 2.0f * ndl) <= 0.02f && std::fabs(v.y - 1.0f * ndl) <= 0.02f && std::fabs(v.z - 0.5f * ndl) <= 0.02f);
+    CHECK(ld.light_modes.count(7) && ld.light_modes[7] == 2);
+    /* A slab over the point shadows it. */
+    const MeshPtr cube = primitives::cube();
+    const BakeObject slab = r35_object(2, cube, Mat4::trs({0, 2, 0}, Quat(), {40, 0.1f, 40}));
+    Lightmapper lm2;
+    ld = r35_run(lm2, {floor_o, slab}, {sun}, env, s);
+    CHECK(r35_sample(ld, 1, *plane, Mat4(), {0.5f, 0, 0.5f}, v));
+    CHECK(v.x < 0.02f && v.y < 0.02f && v.z < 0.02f);
+    /* A Mixed sun is not in the map's direct light (it stays realtime), but is recorded as Mixed. */
+    sun.mode = 1;
+    Lightmapper lm3;
+    ld = r35_run(lm3, {floor_o}, {sun}, env, s);
+    CHECK(r35_sample(ld, 1, *plane, Mat4(), {0.5f, 0, 0.5f}, v));
+    CHECK(v.x < 0.02f && v.y < 0.02f && v.z < 0.02f);
+    CHECK(ld.light_modes.count(7) && ld.light_modes[7] == 1);
+    /* A Realtime sun is not in the map at all. */
+    sun.mode = 0;
+    Lightmapper lm4;
+    ld = r35_run(lm4, {floor_o}, {sun}, env, s);
+    CHECK(r35_sample(ld, 1, *plane, Mat4(), {0.5f, 0, 0.5f}, v));
+    CHECK(v.x < 0.02f && v.y < 0.02f && v.z < 0.02f);
+    CHECK(ld.light_modes.empty());
+  });
+
+  /* ---------------------------------------------------------------- 4: light modes */
+  test("baked lighting: a Baked sun alone lights a lightmapped floor in the Game view (no realtime light needed), a Realtime one adds nothing to the map", [] {
+    auto build = [](Editor &ed, int mode, bool sun_on) {
+      r35_open(ed);
+      r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+      r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));
+      r35_sun_mode(ed, mode);
+      ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = sun_on;
+      ed.commit_change("sun");
+      r34_steps(ed, 3);
+    };
+    Editor lit, dark, realtime, off;
+    build(lit, 2, true);
+    r35_bake(lit);
+    build(dark, 2, false);
+    r35_bake(dark);
+    const double a = r35_luma(r35_game(lit)), b = r35_luma(r35_game(dark));
+    std::printf("    Game view brightness, Baked sun on: %.0f, sun off: %.0f\n", a, b);
+    CHECK(a > b * 1.05);
+    CHECK(lit.lighting_data_for_test().light_modes.size() == 1);
+    CHECK(dark.lighting_data_for_test().light_modes.empty());
+    /* A Realtime sun: the bake is identical with it on or off. */
+    build(realtime, 0, true);
+    r35_bake(realtime);
+    build(off, 0, false);
+    r35_bake(off);
+    const LightingData &x = realtime.lighting_data_for_test(), &y = off.lighting_data_for_test();
+    CHECK(!x.pages.empty() && x.pages.size() == y.pages.size());
+    bool same = x.pages.size() == y.pages.size();
+    for (size_t p = 0; same && p < x.pages.size(); p++) same = x.pages[p].texels == y.pages[p].texels;
+    CHECK(same);
+    CHECK(x.light_modes.empty() && y.light_modes.empty());
+    /* ...and the Baked sun's map is brighter than that. */
+    const LightingData &z = lit.lighting_data_for_test();
+    double sz = 0, sx = 0;
+    for (const Vec3 &t : z.pages[0].texels) sz += t.x + t.y + t.z;
+    for (const Vec3 &t : x.pages[0].texels) sx += t.x + t.y + t.z;
+    CHECK(sz > sx * 1.2);
+  });
+
+  test("baked lighting: moving a Baked sun after the bake changes nothing on lightmapped surfaces; a Mixed sun's realtime shadow follows it", [] {
+    auto run = [](int mode, size_t &darker, size_t &lighter) {
+      Editor ed;
+      r35_open(ed);
+      r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+      r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1.2f, 1, 1.2f}, Vec3(0.8f));
+      r35_sun_mode(ed, mode);
+      r35_bake(ed);
+      const std::vector<uint32_t> a = r35_game(ed);
+      ed.scene().find_by_name("Directional Light")->set_local_euler({50, -90, 0});  // the shadow swings to the other side
+      ed.commit_change("move the sun");
+      r34_steps(ed, 4);
+      CHECK(ed.lighting_out_of_date_for_test());  // the light changed since the bake
+      const std::vector<uint32_t> b = r35_game(ed);
+      CHECK(a.size() == b.size());
+      darker = lighter = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+        auto lum = [](uint32_t c) { return (int)((c >> 16) & 255) + (int)((c >> 8) & 255) + (int)(c & 255); };
+        const int la = lum(a[i]), lb = lum(b[i]);
+        if (lb < la * 0.8 - 6) darker++;
+        if (lb > la * 1.25 + 6) lighter++;
+      }
+      return r35_diff_count(a, b);
+    };
+    size_t d2 = 0, l2 = 0, d1 = 0, l1 = 0;
+    const size_t baked_diff = run(2, d2, l2);
+    const size_t mixed_diff = run(1, d1, l1);
+    std::printf("    Baked: %zu pixels changed (%zu darker, %zu lighter); Mixed: %zu changed (%zu darker, %zu lighter)\n", baked_diff, d2, l2, mixed_diff, d1, l1);
+    CHECK(baked_diff == 0);
+    CHECK(mixed_diff > 200 && d1 > 60 && l1 > 60);
+  });
+
+  test("baked lighting: a Mixed sun keeps a realtime shadow on the lightmapped floor and puts only its bounce in the map", [] {
+    auto make = [](int mode) {
+      auto ed = std::make_unique<Editor>();
+      r35_open(*ed);
+      r35_add(*ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+      r35_add(*ed, "Cube", "Box", {0, 0.5f, 0}, {1.2f, 1, 1.2f}, Vec3(0.8f));
+      r35_sun_mode(*ed, mode);
+      return ed;
+    };
+    auto realtime = make(0);
+    r34_steps(*realtime, 4);
+    const std::vector<uint32_t> rt = r35_game(*realtime);  // nothing baked: the plain realtime picture
+    auto mixed = make(1);
+    r35_bake(*mixed);
+    const std::vector<uint32_t> mx = r35_game(*mixed);
+    CHECK(rt.size() == mx.size() && !rt.empty());
+    /* The pixels the sun lights = the picture with the sun minus the picture without it. In the realtime
+     * picture that is lit floor with the cube's shadow cut out of it; the Mixed picture must light the same
+     * pixels (its realtime shadow), while the baked bounce stays when the sun is switched off. */
+    realtime->scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    mixed->scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    realtime->commit_change("sun off");
+    mixed->commit_change("sun off");
+    r34_steps(*realtime, 4);
+    r34_steps(*mixed, 4);
+    const std::vector<uint32_t> rt_off = r35_game(*realtime), mx_off = r35_game(*mixed);
+    auto lum = [](uint32_t c) { return (int)((c >> 16) & 255) + (int)((c >> 8) & 255) + (int)(c & 255); };
+    size_t lit_rt = 0, lit_mx = 0, both = 0, either = 0;
+    for (size_t i = 0; i < mx.size(); i++) {
+      const bool a = lum(rt[i]) > lum(rt_off[i]) * 1.15 + 12, b = lum(mx[i]) > lum(mx_off[i]) * 1.15 + 12;
+      lit_rt += a, lit_mx += b, both += a && b, either += a || b;
+    }
+    std::printf("    pixels lit by the sun: realtime %zu, mixed %zu, both %zu, either %zu\n", lit_rt, lit_mx, both, either);
+    std::printf("    luma: rt %.0f rt_off %.0f mx %.0f mx_off %.0f of %zu px\n", r35_luma(rt), r35_luma(rt_off), r35_luma(mx), r35_luma(mx_off), rt.size());
+    CHECK(lit_mx > 500 && lit_rt > 500);
+    CHECK(both * 10 >= either * 9);  // the same lit region, so the same shadow
+    CHECK(r35_luma(mx_off) > 0.5 * r35_luma(rt_off));  // and the baked bounce is still there with the sun off
+    /* The Mixed map holds the bounce but not the sun: a Baked one has the direct light too. */
+    auto baked = make(2);
+    r35_bake(*baked);
+    double sm = 0, sb = 0;
+    CHECK(!mixed->lighting_data_for_test().pages.empty() && !baked->lighting_data_for_test().pages.empty());
+    if (mixed->lighting_data_for_test().pages.empty() || baked->lighting_data_for_test().pages.empty()) return;
+    for (const Vec3 &t : mixed->lighting_data_for_test().pages[0].texels) sm += t.x + t.y + t.z;
+    for (const Vec3 &t : baked->lighting_data_for_test().pages[0].texels) sb += t.x + t.y + t.z;
+    CHECK(sb > sm * 1.3);
+  });
+
+  /* ---------------------------------------------------------------- 5: lifecycle */
+  test("baked lighting: saving the scene and opening it again brings the lightmaps back (pages, entries, picture)", [] {
+    const std::string name = "R35_Lifecycle";
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f, 0.3f, 0.3f));
+    r35_sun_mode(ed, 1);
+    const std::string path = r35_scene_path(ed, name.c_str());
+    const std::string dir = ed.lighting_dir_for_test();
+    CHECK(!dir.empty() && dir == fs::join(fs::parent(path), name));
+    if (fs::exists(dir)) std::filesystem::remove_all(dir);
+    r35_bake(ed);
+    CHECK(fs::exists(fs::join(dir, "LightingData.bin")) && fs::exists(fs::join(dir, "Lightmap-0.hdr")));
+    CHECK(save_scene(ed.scene(), path));
+    const LightingData before = ed.lighting_data_for_test();
+    const std::vector<uint32_t> pic = r35_game(ed);
+    CHECK(!before.pages.empty() && before.entries.size() == 2 && !ed.lighting_out_of_date_for_test());
+    /* A fresh editor opens the scene (a file dropped on the window, as the Project window does). */
+    Editor ed2;
+    r34_open(ed2);
+    CHECK(ed2.lighting_data_for_test().empty());
+    platform::Event drop;
+    drop.type = platform::EventType::Drop;
+    drop.paths = {path};
+    ed2.step_frame_headless({drop});
+    r34_steps(ed2, 6);
+    CHECK(ed2.scene().path == path);
+    const LightingData &after = ed2.lighting_data_for_test();
+    CHECK(after.pages.size() == before.pages.size());
+    CHECK(after.entries.size() == before.entries.size());
+    CHECK(after.light_modes == before.light_modes);
+    CHECK(after.scene_key == before.scene_key);
+    bool entries_same = true;
+    for (auto &kv : before.entries) {
+      auto it = after.entries.find(kv.first);
+      entries_same = entries_same && it != after.entries.end() && it->second.hash == kv.second.hash && it->second.page == kv.second.page &&
+                     it->second.tri_uv.size() == kv.second.tri_uv.size() && std::equal(kv.second.tri_uv.begin(), kv.second.tri_uv.end(), it->second.tri_uv.begin(),
+                                                                                      [](const Vec2 &a, const Vec2 &b) { return a.x == b.x && a.y == b.y; });
+    }
+    CHECK(entries_same);
+    /* The pages come back through a Radiance .hdr file (8-bit mantissa): equal to within 1% of the brightest texel. */
+    double worst = 0, peak = 1e-6;
+    for (size_t p = 0; p < before.pages.size() && p < after.pages.size(); p++) {
+      CHECK(before.pages[p].width == after.pages[p].width && before.pages[p].texels.size() == after.pages[p].texels.size());
+      for (size_t i = 0; i < before.pages[p].texels.size() && i < after.pages[p].texels.size(); i++) {
+        const Vec3 a = before.pages[p].texels[i], b = after.pages[p].texels[i];
+        peak = std::max({peak, (double)a.x, (double)a.y, (double)a.z});
+        worst = std::max({worst, (double)std::fabs(a.x - b.x), (double)std::fabs(a.y - b.y), (double)std::fabs(a.z - b.z)});
+      }
+    }
+    std::printf("    reloaded pages: worst texel error %.5f of peak %.3f\n", worst, peak);
+    CHECK(worst <= 0.01 * peak);
+    CHECK(!ed2.lighting_out_of_date_for_test());
+    /* The reloaded scene draws with them: the picture matches the one before saving, up to the .hdr rounding. */
+    CHECK(r35_diff_count(r35_game(ed2), pic, 3) == 0 || r35_diff_count(r35_game(ed2), pic, 6) < pic.size() / 200);
+    std::filesystem::remove_all(dir);
+    std::filesystem::remove(path);
+  });
+
+  /* Review of task 0012. */
+  test("baked lighting: a scene baked before it had a file keeps its lightmaps when saved, and the folder is named after the file", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    ed.scene().path.clear();
+    CHECK(ed.lighting_dir_for_test().empty());
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().empty());
+    /* The scene's stored name differs from the file's: the folder follows the file. */
+    const std::string path = fs::join(fs::join(scratch_project(), "Assets/Scenes"), "R35_Saved.scene");
+    ed.scene().name = "Some Other Name";
+    ed.scene().path = path;
+    const std::string dir = fs::join(fs::parent(path), "R35_Saved");
+    CHECK(ed.lighting_dir_for_test() == dir);
+    if (fs::exists(dir)) std::filesystem::remove_all(dir);
+    ed.run_action("file.save");
+    CHECK(fs::exists(path));
+    CHECK(fs::exists(fs::join(dir, "LightingData.bin")) && fs::exists(fs::join(dir, "Lightmap-0.hdr")));
+    /* A scene file named "." or ".." never makes the scene folder itself the lighting folder. */
+    ed.scene().path = fs::join(fs::join(scratch_project(), "Assets/Scenes"), "..scene");
+    CHECK(ed.lighting_dir_for_test().empty() || fs::filename(ed.lighting_dir_for_test()) != "Scenes");
+    std::filesystem::remove_all(dir);
+    std::filesystem::remove(path);
+  });
+
+  test("baked lighting: a new scene cancels a running bake and starts with no baked data", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().empty());
+    ed.command("bake start");
+    CHECK(ed.baking_for_test());
+    ed.command("newscene");
+    CHECK(!ed.baking_for_test());
+    CHECK(ed.lighting_data_for_test().empty());
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_data_for_test().empty() && !ed.lighting_out_of_date_for_test());
+  });
+
+  test("baked lighting: a damaged LightingData.bin is refused without a crash, and the scene opens with realtime light", [] {
+    const std::string name = "R35_Damaged";
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    const std::string path = r35_scene_path(ed, name.c_str());
+    const std::string dir = ed.lighting_dir_for_test();
+    r35_bake(ed);
+    CHECK(save_scene(ed.scene(), path));
+    const std::string bin = fs::join(dir, "LightingData.bin");
+    std::string bytes;
+    CHECK(fs::read_file(bin, bytes) && bytes.size() > 64);
+    /* A huge UV count where the first entry's count sits, then a truncated copy. */
+    for (int variant = 0; variant < 2; variant++) {
+      std::string bad = bytes;
+      if (variant == 0) {
+        const uint64_t huge = 0x7FFFFFFFFFFFull;
+        std::memcpy(&bad[8 + 8 + 8 + 16 + 8 + 8 + 8 + 8], &huge, 8);
+      }
+      else bad.resize(bytes.size() / 2);
+      CHECK(fs::write_file(bin, bad));
+      Editor ed2;
+      r34_open(ed2);
+      platform::Event drop;
+      drop.type = platform::EventType::Drop;
+      drop.paths = {path};
+      ed2.step_frame_headless({drop});
+      r34_steps(ed2, 2);
+      CHECK(ed2.scene().path == path);
+      CHECK(ed2.lighting_data_for_test().empty());
+    }
+    std::filesystem::remove_all(dir);
+    std::filesystem::remove(path);
+  });
+
+  test("baked lighting: changing a Baked light on an object with its own (non-contributing) mesh says Lighting out of date", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *lamp = r35_add(ed, "Sphere", "Lamp", {0, 2, 0}, {0.2f, 0.2f, 0.2f}, Vec3(1.0f), false);
+    Light *l = lamp->add<Light>();
+    l->type = 1;
+    l->mode = 2;
+    l->range = 5.0f;
+    ed.commit_change("lamp");
+    r35_bake(ed);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    l->intensity = 3.0f;
+    r34_steps(ed, 2);
+    CHECK(ed.lighting_out_of_date_for_test());
+  });
+
+  test("baked lighting: a light baked as Baked and switched to Realtime afterwards doesn't shine twice on lightmapped surfaces", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_sun_mode(ed, 2);
+    r35_bake(ed);
+    const std::vector<uint32_t> baked = r35_game(ed);
+    r35_sun_mode(ed, 0);  // the map still holds its light
+    r34_steps(ed, 4);
+    const size_t d = r35_diff_count(r35_game(ed), baked);
+    std::printf("    switched to Realtime after the bake: %zu Game view pixels changed\n", d);
+    CHECK(d == 0);
+    CHECK(ed.lighting_out_of_date_for_test());  // but a re-bake is due
+  });
+
+  test("baked lighting: moving a static object makes it fall back to realtime ambient and says Lighting out of date; moving it back restores the map", [] {
+    auto build = [](Editor &ed) {
+      r35_open(ed);
+      r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f), false);  // dynamic floor
+      r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));          // the one static object
+      r35_sun_mode(ed, 2);
+      r34_steps(ed, 3);
+    };
+    /* After the bake the sun swings round: a lightmapped box keeps the baked light, a box without a map
+     * follows the sun. That tells the two apart in the picture. */
+    auto swing = [](Editor &ed) {
+      ed.scene().find_by_name("Directional Light")->set_local_euler({50, -90, 0});
+      ed.commit_change("swing the sun");
+      r34_steps(ed, 3);
+    };
+    Editor baked, plain;
+    build(baked);
+    build(plain);
+    r35_bake(baked);
+    swing(baked);
+    swing(plain);
+    const std::vector<uint32_t> p0 = r35_game(plain);
+    const std::vector<uint32_t> b0 = r35_game(baked);
+    CHECK(baked.lighting_out_of_date_for_test());  // the sun moved since the bake
+    CHECK(r35_diff_count(p0, b0) > 50);  // the lightmap really is in the picture: the box ignores the swung sun
+    baked.command("select Box");
+    baked.command("position 1.5 0.5 0");
+    r34_steps(baked, 4);
+    CHECK(baked.lighting_out_of_date_for_test());
+    plain.command("select Box");
+    plain.command("position 1.5 0.5 0");
+    r34_steps(plain, 4);
+    /* The moved box has no lightmap: the picture is exactly the never-baked one. */
+    CHECK(r35_diff_count(r35_game(plain), r35_game(baked)) == 0);
+    baked.command("position 0 0.5 0");
+    r34_steps(baked, 4);
+    CHECK(r35_game(baked) == b0);  // back in place: the map is used again
+    /* ...and with the sun back where it was, nothing is out of date any more. */
+    baked.scene().find_by_name("Directional Light")->set_local_euler({50, 90, 0});
+    baked.commit_change("sun back");
+    r34_steps(baked, 3);
+    CHECK(!baked.lighting_out_of_date_for_test());
+  });
+
+  test("baked lighting: Clear Baked Data restores the picture bit-identically and removes the folder", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.9f, 0.3f, 0.2f));
+    r35_sun_mode(ed, 2);
+    const std::string path = r35_scene_path(ed, "R35_Clear");
+    const std::string dir = ed.lighting_dir_for_test();
+    if (fs::exists(dir)) std::filesystem::remove_all(dir);
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> before = r35_game(ed), before_scene = r35_scene_view(ed);
+    r35_bake(ed);
+    CHECK(fs::exists(dir));
+    const std::vector<uint32_t> baked = r35_game(ed);
+    CHECK(r35_diff_count(before, baked) > 100);
+    ed.command("bake clear");
+    r34_steps(ed, 4);
+    CHECK(ed.lighting_data_for_test().empty());
+    CHECK(!fs::exists(dir));
+    CHECK(!ed.lighting_out_of_date_for_test());
+    CHECK(r35_game(ed) == before);
+    CHECK(r35_scene_view(ed) == before_scene);
+    /* Clearing again, and with nothing baked, is harmless. */
+    ed.command("bake clear");
+    r34_steps(ed, 2);
+    CHECK(r35_game(ed) == before);
+    (void)path;
+  });
+
+  test("baked lighting: dynamic objects are unaffected by a bake, and only the static box's pixels change", [] {
+    auto build = [](Editor &ed, bool sphere, bool box) {
+      r35_open(ed);
+      r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f), false);
+      if (box) r35_add(ed, "Cube", "Box", {1.5f, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f, 0.4f, 0.3f));
+      if (sphere) r35_add(ed, "Sphere", "Ball", {-3, 0.5f, 0}, {1, 1, 1}, Vec3(0.3f, 0.5f, 0.9f), false);
+      r35_sun_mode(ed, 2);
+      r34_steps(ed, 4);
+    };
+    Editor plain, baked, no_ball, no_box;
+    build(plain, true, true);
+    build(baked, true, true);
+    build(no_ball, false, true);
+    build(no_box, true, false);
+    r35_bake(baked);
+    /* The sun swings round after the bake: only what has a lightmap keeps the old light. */
+    for (Editor *e : {&plain, &baked, &no_ball, &no_box}) {
+      e->scene().find_by_name("Directional Light")->set_local_euler({50, -90, 0});
+      e->commit_change("swing the sun");
+      r34_steps(*e, 3);
+    }
+    const std::vector<uint32_t> p = r35_game(plain), b = r35_game(baked), nb = r35_game(no_ball), nx = r35_game(no_box);
+    CHECK(p.size() == b.size());
+    size_t changed = 0, changed_ball = 0, ball_pixels = 0, box_changed = 0;
+    for (size_t i = 0; i < p.size(); i++) {
+      const bool ball = p[i] != nb[i];  // pixels the ball (or its shadow) occupies
+      const bool box = p[i] != nx[i];   // pixels the box (or its shadow) occupies
+      const bool diff = p[i] != b[i];
+      changed += diff;
+      if (ball && !box) {
+        ball_pixels++;
+        changed_ball += diff;
+      }
+      if (diff && box) box_changed++;
+    }
+    std::printf("    %zu pixels changed by the bake; %zu of them in the box's area; the ball's area (%zu pixels) changed in %zu\n", changed, box_changed,
+                ball_pixels, changed_ball);
+    CHECK(changed > 30);
+    CHECK(box_changed == changed);
+    CHECK(ball_pixels > 30 && changed_ball == 0);
+  });
+
+  test("baked lighting: the path tracer ignores lightmaps - an F12 path-traced render is the same with and without baked data", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f, 0.3f, 0.3f));
+    r35_sun_mode(ed, 2);
+    ed.command("set Render.RenderEngine Path");
+    ed.command("set Render.Samples 4");
+    ed.command("set Render.Denoise false");
+    ed.command("set Render.ResolutionX 160");
+    ed.command("set Render.ResolutionY 90");
+    auto render = [&] {
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.rendering_for_test());
+      return ed.render_image_for_test().pixels;
+    };
+    const std::vector<uint32_t> r0 = render(), r0b = render();
+    CHECK(!r0.empty());
+    r35_bake(ed);
+    const std::vector<uint32_t> r1 = render();
+    const size_t noise = r35_diff_count(r0, r0b), baked = r35_diff_count(r0, r1);
+    std::printf("    path-traced pixels differing: run to run %zu, with baked data %zu of %zu\n", noise, baked, r0.size());
+    CHECK(r0.size() == r1.size());
+    CHECK(baked <= noise);
+    /* The same on the rasterized F12 render: it does use the maps. */
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("set Render.RenderEngine 0");
+    const std::vector<uint32_t> ras_baked = render();
+    ed.command("bake clear");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> ras_plain = render();
+    CHECK(r35_diff_count(ras_baked, ras_plain) > 50);
+  });
+
+  /* ---------------------------------------------------------------- 6: robustness */
+  test("baked lighting: cancelling a bake midway leaves the scene usable, and a new bake works afterwards", [] {
+    /* Through the editor: start, cancel before a frame runs. */
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> before = r35_game(ed);
+    ed.command("bake start");
+    CHECK(ed.baking_for_test());
+    ed.command("bake cancel");
+    CHECK(!ed.baking_for_test());
+    r34_steps(ed, 4);
+    CHECK(ed.lighting_data_for_test().empty());
+    CHECK(r35_game(ed) == before);
+    ed.command("bake cancel");  // nothing running: harmless
+    ed.command("bake start");
+    ed.command("bake start");  // already running: ignored
+    ed.command("bake clear");  // clear cancels
+    CHECK(!ed.baking_for_test());
+    CHECK(ed.lighting_dir_for_test().empty());  // a scene without a file keeps its lightmaps in memory only
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().empty() && r35_diff_count(before, r35_game(ed)) > 50);
+    /* Directly: stop after one batch, abandon it, then reuse the same Lightmapper. */
+    Lightmapper lm;
+    Environment env;
+    const MeshPtr plane = primitives::plane(10.0f, 4);
+    const BakeObject o = r35_object(1, plane, Mat4());
+    lm.begin({o}, {}, env, r35_small(8.0f, 8));
+    CHECK(lm.texel_count() > 4096);  // more than one batch of 2048
+    const bool done = lm.step(0.0);
+    CHECK(!done && lm.active() && lm.progress() > 0.0f && lm.progress() < 1.0f);
+    lm.cancel();
+    CHECK(!lm.active());
+    CHECK(lm.step(1000.0));  // nothing left to do
+    const LightingData cancelled = lm.take_result();
+    (void)cancelled;  // whatever it holds, taking it is safe
+    const LightingData again = r35_run(lm, {o}, {}, env, r35_small(8.0f, 8));
+    CHECK(again.entries.size() == 1 && !again.pages.empty());
+    Vec3 v;
+    CHECK(r35_sample(again, 1, *plane, Mat4(), {1, 0, 1}, v) && r35_finite(v));
+  });
+
+  test("baked lighting: NaN, negative and huge settings, faceless and degenerate objects, and an empty scene are safe", [] {
+    Environment env;
+    const MeshPtr cube = primitives::cube();
+    BakeSettings s;
+    s.texels_per_unit = kNaN;
+    s.max_size = -5;
+    s.padding = -7;
+    s.direct_samples = 0;
+    s.indirect_samples = -3;
+    s.bounces = -1;
+    s.indirect_intensity = kNaN;
+    {
+      Lightmapper lm;
+      const LightingData ld = r35_run(lm, {r35_object(1, cube, Mat4::scale({2, 2, 2}))}, {}, env, s);
+      CHECK(!ld.pages.empty() && ld.pages[0].width >= 16 && ld.pages[0].width <= 8192);
+      size_t bad = 0;
+      for (const Lightmap &p : ld.pages)
+        for (const Vec3 &t : p.texels) bad += !(r35_finite(t) && t.x >= 0 && t.y >= 0 && t.z >= 0);
+      CHECK(bad == 0);
+    }
+    s = r35_small(kInf, 2);
+    s.max_size = 1 << 30;
+    s.padding = 1 << 30;
+    s.direct_samples = 1 << 30;
+    s.bounces = 1 << 30;
+    s.indirect_intensity = kInf;
+    {
+      Lightmapper lm;
+      BakeObject o = r35_object(1, cube, Mat4::scale({0.02f, 0.02f, 0.02f}));  // a small object: a huge density stays cheap
+      lm.begin({o}, {}, env, s);
+      CHECK(lm.texel_count() < 70000000u);
+      lm.cancel();
+    }
+    s = r35_small(8.0f, 2);
+    {
+      /* NaN scale, NaN placement, a mesh with no faces, a zero-area face and an object that is nothing. */
+      BakeObject nan_scale = r35_object(1, cube, Mat4());
+      nan_scale.scale = kNaN;
+      BakeObject neg_scale = r35_object(2, cube, Mat4::translate({3, 0, 0}));
+      neg_scale.scale = -4.0f;
+      BakeObject huge_scale = r35_object(3, cube, Mat4::translate({6, 0, 0}));
+      huge_scale.scale = 1e30f;
+      BakeObject faceless = r35_object(4, std::make_shared<Mesh>(), Mat4());
+      BakeObject null_mesh;
+      null_mesh.id = 5;
+      MeshPtr flat = std::make_shared<Mesh>(*primitives::quad());
+      for (Vec3 &p : flat->positions) p = Vec3(1, 1, 1);  // every face has zero area
+      flat->touch();
+      BakeObject degenerate = r35_object(6, flat, Mat4());
+      MeshPtr nanm = std::make_shared<Mesh>(*primitives::quad());
+      nanm->positions[0].x = kNaN;
+      nanm->touch();
+      BakeObject nan_mesh = r35_object(7, nanm, Mat4::translate({0, 0, 5}));
+      Lightmapper lm;
+      const LightingData ld = r35_run(lm, {nan_scale, neg_scale, huge_scale, faceless, null_mesh, degenerate, nan_mesh}, {}, env, s);
+      CHECK(ld.entries.count(1) && ld.entries.count(2) && ld.entries.count(3));
+      CHECK(!ld.entries.count(4) && !ld.entries.count(5));
+      size_t bad = 0;
+      for (const Lightmap &p : ld.pages)
+        for (const Vec3 &t : p.texels) bad += !r35_finite(t);
+      CHECK(bad == 0);
+      for (auto &kv : ld.entries) {
+        size_t b2 = 0;
+        for (const Vec2 &u : kv.second.tri_uv) b2 += !(std::isfinite(u.x) && std::isfinite(u.y));
+        if (b2) std::printf("    entry %llu: %zu of %zu lightmap UVs are not finite\n", (unsigned long long)kv.first, b2, kv.second.tri_uv.size());
+        bad += b2;
+      }
+      CHECK(bad == 0);
+    }
+    {
+      /* Nothing to bake. */
+      Lightmapper lm;
+      const LightingData ld = r35_run(lm, {}, {}, env, s);
+      CHECK(ld.pages.empty() && ld.entries.empty() && lm.texel_count() == 0 && lm.progress() == 1.0f);
+      BakeLight sun;
+      sun.mode = 2;
+      sun.id = 3;
+      const LightingData ld2 = r35_run(lm, {}, {sun}, env, s);
+      CHECK(ld2.pages.empty() && ld2.entries.empty());
+    }
+    /* Through the editor: settings gone wrong, an object with no faces, then nothing static at all. */
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *empty = r35_add(ed, "Cube", "Empty", {2, 0.5f, 0}, {1, 1, 1}, Vec3(0.5f));
+    empty->get<MeshFilter>()->mesh = std::make_shared<Mesh>();
+    r35_add(ed, "Cube", "Flat", {-2, 0.5f, 0}, {1, 1, 1}, Vec3(0.5f));
+    LightingSettings &ls = ed.scene().lighting;
+    ls.texels_per_unit = kNaN;
+    ls.max_size = 1 << 30;
+    ls.padding = -3;
+    ls.direct_samples = 0;
+    ls.indirect_samples = 1;
+    ls.bounces = 1 << 20;
+    ls.indirect_intensity = kNaN;
+    ed.commit_change("bad settings");
+    r34_steps(ed, 3);
+    ed.command("bake start");
+    for (int i = 0; i < 100 && ed.baking_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test());
+    r34_steps(ed, 3);
+    CHECK(!ed.lighting_data_for_test().empty());
+    const LightingData &got = ed.lighting_data_for_test();
+    size_t bad = 0;
+    for (const Lightmap &p : got.pages)
+      for (const Vec3 &t : p.texels) bad += !r35_finite(t);
+    CHECK(bad == 0);
+    CHECK(r35_luma(r35_game(ed)) > 0);
+    /* Nothing contributes: the bake runs, makes no maps, and the picture is the plain one. */
+    ed.command("bake clear");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> plain = r35_game(ed);
+    ed.scene().find_by_name("Floor")->get<MeshRenderer>()->contribute_gi = false;
+    ed.scene().find_by_name("Empty")->get<MeshRenderer>()->contribute_gi = false;
+    ed.scene().find_by_name("Flat")->get<MeshRenderer>()->contribute_gi = false;
+    ed.commit_change("nothing static");
+    r35_bake(ed);
+    CHECK(ed.lighting_data_for_test().pages.empty() && ed.lighting_data_for_test().entries.empty());
+    CHECK(!ed.lighting_out_of_date_for_test());  // no data, so nothing is out of date
+    CHECK(r35_game(ed) == plain);
+    /* Baked GI off: Generate Lighting refuses. */
+    ed.scene().lighting.baked_gi = false;
+    ed.commit_change("baked gi off");
+    ed.command("bake start");
+    CHECK(!ed.baking_for_test());
+  });
+
+  test("baked lighting: undo covers Contribute GI, Light Mode and the Lighting settings; the mode and settings save and load", [] {
+    Editor ed;
+    auto run = [&](const char *c) {
+      ed.command(c);
+      r34_steps(ed, 2);  // a frame commits the undo step: two commands in one frame would be one step
+    };
+    r35_open(ed);
+    r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f), false);
+    ed.commit_change("add Box");  // an undo step of its own, so undoing the settings below never removes the box
+    run("select Box");
+    /* (a lookup that reports a missing object instead of crashing the run) */
+    static MeshRenderer dummy_mr;
+    static Light dummy_light;
+    auto box_mr = [&](int line) -> MeshRenderer * {
+      GameObject *g = ed.scene().find_by_name("Box");
+      CHECK(g != nullptr && g->get<MeshRenderer>() != nullptr);
+      return g && g->get<MeshRenderer>() ? g->get<MeshRenderer>() : &dummy_mr;
+    };
+    auto sun_mode = [&]() -> int & {
+      GameObject *g = ed.scene().find_by_name("Directional Light");
+      CHECK(g != nullptr && g->get<Light>() != nullptr);
+      return (g && g->get<Light>() ? g->get<Light>() : &dummy_light)->mode;
+    };
+    CHECK(!box_mr(__LINE__)->contribute_gi);
+    run("set MeshRenderer.ContributeGI true");
+    CHECK(box_mr(__LINE__)->contribute_gi);
+    run("set MeshRenderer.ScaleInLightmap 2");
+    CHECK(std::fabs(box_mr(__LINE__)->scale_in_lightmap - 2.0f) < 1e-6f);
+    run("undo");
+    CHECK(std::fabs(box_mr(__LINE__)->scale_in_lightmap - 1.0f) < 1e-6f);
+    run("undo");
+    CHECK(!box_mr(__LINE__)->contribute_gi);
+    run("redo");
+    CHECK(box_mr(__LINE__)->contribute_gi);
+    run("select Directional Light");
+    CHECK(sun_mode() == 0);
+    run("set Light.Mode Baked");
+    CHECK(sun_mode() == 2);
+    run("undo");
+    CHECK(sun_mode() == 0);
+    run("redo");
+    CHECK(sun_mode() == 2);
+    run("set Light.Mode Mixed");
+    CHECK(sun_mode() == 1);
+    const int before_samples = ed.scene().lighting.indirect_samples;
+    run("set Lighting.IndirectSamples 64");
+    CHECK(ed.scene().lighting.indirect_samples == 64);
+    run("set Lighting.LightmapResolution 10");
+    CHECK(std::fabs(ed.scene().lighting.texels_per_unit - 10.0f) < 1e-5f);
+    run("set Lighting.Bounces 3");
+    run("set Lighting.Denoise false");
+    run("set Lighting.AutoGenerate true");
+    CHECK(ed.scene().lighting.bounces == 3 && !ed.scene().lighting.denoise && ed.scene().lighting.auto_generate);
+    /* Saved and loaded as they are. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    CHECK(back.lighting.indirect_samples == 64 && back.lighting.bounces == 3 && !back.lighting.denoise && back.lighting.auto_generate);
+    CHECK(std::fabs(back.lighting.texels_per_unit - 10.0f) < 1e-5f);
+    CHECK(back.find_by_name("Directional Light")->get<Light>()->mode == 1);
+    CHECK(back.find_by_name("Box")->get<MeshRenderer>()->contribute_gi);
+    CHECK(save_scene_text(back) == save_scene_text(ed.scene()));
+    /* Undo walks the settings back one by one. */
+    for (int i = 0; i < 5; i++) run("undo");  // AutoGenerate, Denoise, Bounces, Resolution, Samples
+    CHECK(ed.scene().lighting.indirect_samples == before_samples);
+    CHECK(std::fabs(ed.scene().lighting.texels_per_unit - 8.0f) < 1e-5f);
+    CHECK(ed.scene().lighting.bounces == 2 && ed.scene().lighting.denoise && !ed.scene().lighting.auto_generate);
+    /* Bad numbers typed into a setting are clamped, not stored. */
+    run("set Lighting.IndirectSamples -5");
+    CHECK(ed.scene().lighting.indirect_samples >= 1);
+    run("set Lighting.LightmapResolution nan");
+    CHECK(std::isfinite(ed.scene().lighting.texels_per_unit) && ed.scene().lighting.texels_per_unit > 0.0f);
+    run("set Lighting.MaxLightmapSize 99999999");
+    CHECK(ed.scene().lighting.max_size <= 4096);
   });
 }

@@ -2,6 +2,132 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-10 (round 35): baked lighting like Unity's (task 0012)
+
+**Asked:** "a similar light baking system like Unity3D": lightmaps and light modes, the approved task 0012.
+Voxel GI (0013) and probe volumes (0014) will feed the same lightmaps, so changing the lighting won't
+need a manual re-bake.
+
+**Added**
+- **Per object and per light** (all saved, undoable and settable with `set`):
+  - **Contribute GI** on MeshRenderer, with **Scale In Lightmap** and **Generate Lightmap UVs**;
+  - **Mode** on each Light: Realtime, Mixed or Baked.
+- **A Lighting window** (Window menu, or `window Lighting`) holds:
+  - **Generate Lighting** and Cancel, with a progress bar;
+  - **Clear Baked Data**;
+  - the Lightmapping settings: resolution in texels per unit, max size, padding, direct and indirect
+    samples, bounces, denoise, indirect intensity, Auto Generate;
+  - the Environment.
+
+  Console: `bake start|cancel|clear`.
+- **The baker (`Lightmapper`) runs on the path tracer:**
+  - **Lightmap UVs:** generated per object (Smart UV Project + Pack Islands), sized so each object
+    gets the asked density.
+  - **Indirect light per texel:** cosine-weighted rays through the static objects, the Baked and Mixed
+    lights and the sky, with every bounce. Realtime lights are left out, as in Unity.
+  - **Direct light:** Baked lights only, with shadow rays.
+  - **Finish:** a filter within each object's charts, then dilation into the padding.
+  - **Runs** in slices per frame, cancellable, on its own copies of the meshes.
+- **Shading:**
+  - Lightmapped surfaces take their ambient light from the map.
+  - Baked lights are skipped there in realtime.
+  - Mixed lights keep their realtime light and shadows (Baked Indirect).
+- **Files:** the lightmaps are saved next to the scene, as `<scene>/Lightmap-N.hdr` and
+  `LightingData.bin`, and load with it.
+- **Stale objects:** an object changed since the bake falls back to realtime ambient, and the status
+  bar says **"Lighting out of date"** (ADR 0010).
+
+**Fixed (found by the tests)**
+- **Lightmaps had 21–64% fewer texels than asked.** The packed charts fill only part of their square.
+  Charts are now sized from the area their UVs actually cover. A test checks density within 20% of
+  Lightmap Resolution × Scale In Lightmap across shapes and sizes.
+- **A NaN vertex gave NaN lightmap UVs.** Fast-math compiles `std::isfinite` away, so the check is now
+  by bits.
+
+**Fixed (from the review)**
+- **The Window menu read past its shortcut list** once the Lighting window was added: undefined
+  behaviour every time the menu opened. A compile-time check now ties the list to the windows.
+- **A bake still running when another scene was opened or created** would have written its lightmaps
+  into that scene's folder. Switching scenes now cancels it, and a new scene starts with no baked data.
+- **The lighting folder came from the name stored in the scene**, not the file name. A renamed scene
+  could share or delete another scene's lightmaps, and a name of "." pointed at the Scenes folder
+  itself. It is now the file's name, and anything that isn't a plain name gives no folder.
+- **A bake made before the scene had a file, or before Save As, was lost on save.** Saving now writes
+  it next to the file, and so does the auto-save on exit.
+- **Dragging a lightmapped object re-hashed its whole mesh every frame**, several times. The mesh part
+  of the hash is now remembered by render-mesh serial (only the matrix is rehashed), and "Lighting out
+  of date" is recomputed only when the scene or the lighting settings change. This also fixes a hash
+  that could go stale after opening another scene.
+- **Light skipping:** lightmapped surfaces skip the lights the maps were baked with, as they were
+  baked. A light baked as Baked and switched to Realtime no longer shines twice, and one added since
+  is no longer dropped.
+- **A light on an object with its own non-contributing mesh was missing from the out-of-date check.**
+- **A damaged `LightingData.bin` could ask for gigabytes.** Counts are now checked against the file's
+  size.
+- **Bounces were one too many:** the gather's own hit is the first bounce. With 0 bounces you get only
+  the sky and direct light.
+- **Smaller fixes:**
+  - The content hash now includes per-face materials, sharp edges and smoothing.
+  - Batches are sized by sample count, so a frame's budget holds at high sample counts.
+  - A cancelled bake frees its memory.
+  - Lightmaps are not used under the Scene view's headlight.
+  - The stress section reports the filter + dilation time.
+- **Five tests from the review:**
+  - baking before saving;
+  - a new scene during a bake;
+  - a damaged file;
+  - a lamp mesh with a Baked light;
+  - a mode switched after the bake.
+
+**Not done, from the review:**
+- The texel rasterizer still lives inside the baker; task 0013 will expose it for realtime lightmaps.
+- Texels are taken at texel centres, not conservatively, so slivers thinner than a texel get none;
+  dilation covers them.
+- The Scene view uses a lightmap only when its viewport mesh matches what was baked. With modifiers
+  that differ between the viewport and renders it shows realtime light while the status says up to
+  date.
+- Laying out a very large bake (the UVs, the atlas) still runs on the main thread before the first
+  slice.
+
+**Not as the spec said:** the lightmaps are Radiance `.hdr` files, not `.exr`. Blendity can write EXR
+only with Blender's libraries and has no EXR reader; `.hdr` is written and read without them.
+
+**Checked**
+- **Unit checks:** Windows 3,540, Linux 3,516, sanitizer build 3,438; 0 failed. 293 tests. The
+  test-engineer wrote 19 tests, and the review added 5:
+  - **UVs:** inside 0..1, no overlaps, padding, density.
+  - **Colour bleeding:** a red wall tints the floor with a Baked or a Mixed sun, and a white wall
+    doesn't.
+  - **Accuracy:**
+    - open sky exact;
+    - under a covering slab, dark;
+    - at a slab's edge within 0.013 of an 8,192-sample path-traced reference;
+    - a Baked sun's direct light exact (colour × intensity × N·L), 0 in shadow.
+  - **Light modes:**
+    - a Baked sun alone lights the floor;
+    - a Mixed sun keeps the realtime shadow (90% of the lit region in common with an unbaked scene);
+    - a Realtime sun leaves the maps bit-identical.
+  - **Lifecycle:**
+    - save and reopen;
+    - a moved box falls back, then comes back bit-identical;
+    - `bake clear` restores the picture bit-identically;
+    - dynamic objects untouched;
+    - path-traced F12 unchanged.
+  - **Robustness and undo:** cancel, undo, NaN and odd settings.
+- **Verify mode:** the suite has 0 stale pictures (the view caches re-render when a bake finishes,
+  clears or loads).
+- **Stress `bake` (Windows):**
+
+| Static objects | Texels | Bake time |
+|---|---|---|
+| 10 | 12k | 0.03 s |
+| 100 | 122k | 0.25 s |
+| 1,000 | 1.24M | 2.2 s (3 lightmaps) |
+
+  - That is about 500k texels/s and 42–56 Mrays/s, of which filtering and dilation take 3–140 ms.
+  - Shading a lightmap costs 1–1.4 ms more at 1080p (10.1 → 11.0–11.5 ms).
+  - Odd settings: 30 runs, 0 problems.
+
 ## 2026-10-10 (round 34): a faster editor: views and shadows reused until something changes (task 0011)
 
 **Asked:** improve performance for the Scene view and the editor (task 0011 of the approved plan).

@@ -103,6 +103,40 @@ void MeshRenderer::reflect(Reflector &r) {
   r.field("Show in Renders", show_in_renders);
   r.help("Off: the Game view and rendered images leave the object out, as Blender does for Boolean cutters\n"
          "(Object > Visibility > Renders).");
+  r.field("Contribute GI", contribute_gi);
+  r.help("Part of baked lighting (Unity: Static > Contribute Global Illumination). It bounces light onto the\n"
+         "others and gets a lightmap when you press Generate Lighting (Window > Lighting). Leave it off for\n"
+         "things that move.");
+  if (contribute_gi || r.all_fields()) {
+    r.field("Scale In Lightmap", scale_in_lightmap, 0.01f, 0.0f, 100.0f);
+    r.help("How many lightmap texels this object gets, relative to the Lightmap Resolution (Unity: Scale In Lightmap).");
+    r.field("Generate Lightmap UVs", generate_lightmap_uvs);
+    r.help("On: lightmap UVs are made at bake time (Smart UV Project + Pack Islands). Off: the mesh's own UVs\n"
+           "are used, so they must not overlap.");
+  }
+}
+
+void LightingSettings::reflect(Reflector &r) {
+  r.field("Baked Global Illumination", baked_gi);
+  r.help("Generate Lighting bakes the lights set to Baked or Mixed, the sky and their bounces into lightmaps for\n"
+         "objects marked Contribute GI (Unity: Lighting > Mixed Lighting > Baked Global Illumination).");
+  static const char *modes[] = {"Baked Indirect"};
+  r.enumeration("Lighting Mode", lighting_mode, modes, 1);
+  r.help("Baked Indirect: Mixed lights keep their realtime light and shadows; only their bounced light is baked.");
+  r.field("Lightmap Resolution", texels_per_unit, 0.5f, 0.01f, 1000.0f);
+  r.help("Texels per unit (metre) of surface (Unity's default is 40).");
+  r.field("Max Lightmap Size", max_size, 16, 4096);
+  r.field("Lightmap Padding", padding, 0, 32);
+  r.help("Texels kept between charts so they don't bleed into each other.");
+  r.field("Direct Samples", direct_samples, 1, 4096);
+  r.help("Shadow rays per texel for each Baked area light.");
+  r.field("Indirect Samples", indirect_samples, 1, 65536);
+  r.help("Rays per texel gathering bounced light and the sky. More is smoother and slower.");
+  r.field("Bounces", bounces, 0, 16);
+  r.field("Denoise", denoise);
+  r.field("Indirect Intensity", indirect_intensity, 0.01f, 0.0f, 100.0f);
+  r.field("Auto Generate", auto_generate);
+  r.help("Re-bake by itself after changes settle (Unity: Auto Generate). Takes effect with realtime GI (task 0013).");
 }
 
 void EnvironmentSettings::reflect(Reflector &r) {
@@ -229,6 +263,10 @@ void Light::reflect(Reflector &r) {
   }
   r.field("Intensity", intensity, 0.01f, 0.0f, 8.0f);
   if (r.all_fields() || type != 0) r.field("Range", range, 0.05f, 0.01f, 1000.0f);
+  static const char *light_modes[] = {"Realtime", "Mixed", "Baked"};
+  r.enumeration("Mode", mode, light_modes, 3);
+  r.help("Unity's Light Mode. Realtime: lit every frame, not in baked lighting. Mixed: realtime light and shadows,\n"
+         "its bounced light baked. Baked: all of its light in the lightmaps (none on lightmapped objects in realtime).");
 }
 
 Vec3 Light::final_color() const { return use_temperature ? Vec3(color.x, color.y, color.z) * kelvin_to_rgb(temperature) : color; }
@@ -1292,6 +1330,7 @@ void Scene::move_from(Scene &o) {
   compress = o.compress;
   environment = std::move(o.environment);
   render = o.render;
+  lighting = o.lighting;
   guides = std::move(o.guides);
   roots = std::move(o.roots);
   objects_ = std::move(o.objects_);
@@ -1416,6 +1455,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->compress = compress;
   s->environment = environment;
   s->render = render;
+  s->lighting = lighting;
   s->guides = guides;
   s->objects_.reserve(objects_.size());
   std::unordered_map<const Material *, MaterialPtr> mat_copy;

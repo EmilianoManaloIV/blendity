@@ -1688,6 +1688,79 @@ void Editor::draw_research(const Recti &r) {
  * Unity: Lighting window + Recorder)                                     */
 /* ===================================================================== */
 
+/* Unity's Lighting window (Window > Rendering > Lighting): Generate Lighting, the baked data, and the
+ * settings it bakes with (task 0012). */
+void Editor::draw_lighting_window(const Recti &r) {
+  auto &u = ui_;
+  u.canvas.fill_rect(r, Color::hex(0x333333));
+  static int content_h = 0;
+  int off = u.begin_scroll(u.id("lighting_window"), r, content_h);
+  ui::Layout lay{{r.x + u.px(8), r.y, r.w - u.px(20), r.h}, r.y + u.px(8) - off};
+  lay.row_h = u.row_h();
+  auto header = [&](const char *t) {
+    Recti h = lay.row(u.row_h() + u.px(4));
+    u.canvas.fill_rect({r.x, h.y, r.w, h.h}, u.theme.header);
+    u.label({h.x + u.px(4), h.y, h.w, h.h}, t, u.theme.text_bright);
+  };
+  Recti b = lay.row(u.row_h() + u.px(8));
+  const int bw = (b.w - u.px(4)) / 2;
+  if (baking_) {
+    if (u.button({b.x, b.y, bw, b.h}, "Cancel", true, Icon::Pause)) bake_cancel();
+  }
+  else if (u.button({b.x, b.y, bw, b.h}, "Generate Lighting", false, Icon::Lightbulb))
+    bake_start();
+  u.tooltip("Bakes the Baked and Mixed lights, the sky and their bounces into lightmaps for objects marked\n"
+            "Contribute GI (MeshRenderer). Saved next to the scene, in a folder with the scene's name.");
+  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Clear Baked Data", false, Icon::Close)) bake_clear();
+  u.tooltip("Removes the lightmaps (to the trash) and goes back to realtime ambient light.");
+  if (baking_) {
+    Recti pr = lay.row(u.px(6));
+    u.canvas.fill_round_rect(pr, u.px(3), Color::hex(0x252525));
+    u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * baker_.progress()), pr.h}, u.px(3), u.theme.accent);
+    u.redraw = true;
+  }
+  if (!bake_status_.empty()) u.label(lay.row(), bake_status_, baking_ ? u.theme.accent : u.theme.text_dim);
+  if (!baking_ && lighting_out_of_date())
+    u.label(lay.row(), "Lighting out of date: objects changed since the bake keep realtime ambient.", u.theme.warning);
+  {
+    size_t contributing = 0;
+    scene_->for_each([&](GameObject &g) {
+      if (auto *mr = g.get<MeshRenderer>())
+        if (mr->enabled && mr->contribute_gi && g.active_in_hierarchy()) contributing++;
+    });
+    int side = lighting_data_.pages.empty() ? 0 : lighting_data_.pages[0].width;
+    u.label(lay.row(), strprintf("Contribute GI: %zu objects   Lightmaps: %zu x %d px   Baked: %zu objects", contributing,
+                                 lighting_data_.pages.size(), side, lighting_data_.entries.size()),
+            u.theme.text_dim);
+  }
+  lay.space(u.px(6));
+  header("Lightmapping Settings");
+  {
+    InspectorReflector ir(*this, u, lay);
+    u.push_id("lighting");
+    scene_->lighting.reflect(ir);
+    u.pop_id();
+    if (ir.changed) mark_changed("Lighting Settings");
+  }
+  lay.space(u.px(6));
+  header("Environment");
+  {
+    InspectorReflector ir(*this, u, lay);
+    u.push_id("lighting_world");
+    scene_->environment.reflect(ir);
+    u.pop_id();
+    if (ir.changed) {
+      mark_changed("World Settings");
+      vp_pt_hash_ = 0;
+    }
+  }
+  lay.space(u.px(6));
+  u.label(lay.row(), "Light Mode is on each Light; Contribute GI on each MeshRenderer.", u.theme.text_dim);
+  lay.space(u.px(16));
+  content_h = lay.y + off - r.y;
+  u.end_scroll();
+}
+
 void Editor::draw_render_window(const Recti &r) {
   auto &u = ui_;
   int lw = std::min(u.px(340), r.w * 2 / 5);

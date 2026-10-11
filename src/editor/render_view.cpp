@@ -56,6 +56,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     it.receive_shadows = mr->receive_shadows;
     it.id = (uint32_t)g.id;
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
+    if (!editing && mr->contribute_gi && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
     items.push_back(it);
   });
   return items;
@@ -71,6 +72,7 @@ RenderLight to_render_light(const GameObject &g, const Light &l) {
   rl.position = g.world_position();
   rl.color = l.final_color();
   rl.intensity = l.intensity;
+  rl.bake_mode = std::max(0, std::min(2, l.mode));
   rl.range = l.range;
   const float outer = std::max(1.0f, std::min(179.0f, l.spot_angle)) * 0.5f;
   const float inner = std::min(outer, std::max(0.0f, l.inner_spot_angle) * 0.5f);
@@ -106,7 +108,12 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
     if (!l || !l->enabled) return;
-    env.lights.push_back(to_render_light(g, *l));
+    RenderLight rl = to_render_light(g, *l);
+    /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
+     * Realtime since must not shine twice, and one added since must not vanish. */
+    auto baked = lighting_data_.light_modes.find(g.id);
+    rl.bake_mode = baked != lighting_data_.light_modes.end() && scene_->lighting.baked_gi ? baked->second : 0;
+    env.lights.push_back(rl);
   });
   update_environment();
   env.environment = &env_;
@@ -178,7 +185,7 @@ uint64_t Editor::scene_render_hash() {
     if (mr) {  // the flags the views draw by (Show in Renders, shadows, wireframe, Display As)
       const uint64_t f = (uint64_t)mr->enabled | (uint64_t)mr->show_wireframe << 1 | (uint64_t)mr->cast_shadows << 2 |
                          (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
-                         (uint64_t)mr->materials.size() << 16;
+                         (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40;
       mix(&f, 8);
     }
     if (mr && mr->enabled) {
@@ -211,6 +218,9 @@ uint64_t Editor::scene_render_hash() {
   mix(&edit_obj_, 8);
   mix(&scene_lighting_, 1);
   mix(&scene_->serial, 8);
+  mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
+  const uint64_t baked = scene_->lighting.baked_gi;
+  mix(&baked, 8);
   return h;
 }
 

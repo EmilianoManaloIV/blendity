@@ -636,6 +636,19 @@ void Renderer3D::flush() {
   js.set_max_threads(saved_threads);
 }
 
+Vec3 Lightmap::sample(Vec2 uv) const {
+  if (width <= 0 || height <= 0 || texels.size() < (size_t)width * height) return Vec3(0.0f);
+  float fx = uv.x * width - 0.5f, fy = uv.y * height - 0.5f;
+  if (!(fx == fx)) fx = 0.0f;  // NaN
+  if (!(fy == fy)) fy = 0.0f;
+  fx = std::max(0.0f, std::min((float)(width - 1), fx));
+  fy = std::max(0.0f, std::min((float)(height - 1), fy));
+  const int x0 = (int)fx, y0 = (int)fy, x1 = std::min(width - 1, x0 + 1), y1 = std::min(height - 1, y0 + 1);
+  const float tx = fx - x0, ty = fy - y0;
+  auto at = [&](int x, int y) { return texels[(size_t)y * width + x]; };
+  return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+}
+
 static inline uint32_t pack_rgb(float r, float g, float b) {
   auto c = [](float v) {
     int i = (int)(v * 255.0f + 0.5f);
@@ -940,6 +953,8 @@ void Renderer3D::shade_deferred() {
     Vec2 uv[3];
     float tangent_w = 1.0f;
     AABB bounds;
+    bool has_lm = false;
+    Vec2 lm_uv[3];
   };
   auto setup_tri = [&](TriSetup &T, uint32_t ref) {
     T.ref = ref;
@@ -996,6 +1011,9 @@ void Renderer3D::shade_deferred() {
       const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
       if (mp) T.mat = mp.get();
     }
+    T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
+    if (T.has_lm)
+      for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
     T.highlighted = false;
     if (it.face_highlight && !rm.tri_face.empty()) {
       uint32_t f = rm.tri_face[st.prim];
@@ -1056,6 +1074,10 @@ void Renderer3D::shade_deferred() {
           }
         }
         if (opt_.tex.active()) sp.tex = &opt_.tex;
+        if (T.has_lm) {
+          sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
+          sp.has_lightmap = true;
+        }
         if (T.has_tangent) {
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
@@ -1088,6 +1110,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   Vec3 lo(0.0f);
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
+    if (sp.has_lightmap && l.bake_mode == 2) continue;  // a Baked light is in the lightmap already
     Vec3 L;
     float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
     if (l.type == RenderLight::Directional) L = -l.direction;
@@ -1108,7 +1131,8 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;
   Vec3 spec = env.specular(R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);
-  Vec3 diff = env.irradiance(n) * s.albedo * (1.0f - s.metallic);
+  /* Baked surfaces take their ambient (sky, bounces, Baked lights) from the lightmap. */
+  Vec3 diff = (sp.has_lightmap ? sp.lightmap : env.irradiance(n)) * s.albedo * (1.0f - s.metallic);
   return lo + diff + spec + s.emission;
 }
 
