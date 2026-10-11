@@ -312,12 +312,28 @@ void Editor::scene_navigation(const Recti &view) {
     toggle_pilot_camera();
 }
 
+void Editor::set_active_camera(GameObject *g) {
+  const uint64_t id = g ? g->id : 0;
+  if (id == scene_->active_camera) return;
+  scene_->active_camera = id;
+  Log::info("Active Camera: %s", g ? g->name.c_str() : "none (\"Main Camera\" by name, else the first camera)");
+  mark_changed("Set Active Camera");
+}
+
 Camera *Editor::main_camera(const Scene &s, GameObject **owner) {
   Camera *best = nullptr;
   GameObject *bo = nullptr;
   /* Rendering a camera sequence: the camera whose turn it is. */
   if (render_camera_override_ && &s == scene_.get())
     if (GameObject *g = s.find(render_camera_override_))
+      if (Camera *c = g->camera())
+        if (c->enabled && g->active_in_hierarchy()) {
+          if (owner) *owner = g;
+          return c;
+        }
+  /* The scene's Active Camera (ADR 0016), when it still is one. */
+  if (s.active_camera)
+    if (GameObject *g = s.find(s.active_camera))
       if (Camera *c = g->camera())
         if (c->enabled && g->active_in_hierarchy()) {
           if (owner) *owner = g;
@@ -2908,8 +2924,36 @@ void Editor::draw_game_view(const Recti &r) {
   int bh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
-  u.label({bar.x + u.px(8), bar.y, u.px(80), bar.h}, "Display 1", u.theme.text);
-  u.label({bar.x + u.px(90), bar.y, u.px(110), bar.h}, "Free Aspect", u.theme.text_dim);
+  {
+    /* Which camera the view shows: the scene's Active Camera (Unity: the Display dropdown; Blender: the
+     * scene camera). Choosing one here sets it. */
+    std::vector<GameObject *> &cams = game_cam_objs_;
+    std::vector<std::string> &names = game_cam_names_;
+    std::vector<const char *> &opts = game_cam_opts_;
+    cams.clear();
+    names.clear();
+    opts.clear();
+    scene_->for_each_ordered([&](GameObject &g, int) {  // the cameras the view could show: enabled, on an active object
+      if (Camera *c = g.camera(); c && c->enabled && g.active_in_hierarchy()) cams.push_back(&g);
+    });
+    GameObject *shown = nullptr;
+    main_camera(*scene_, &shown);
+    int cur = -1;
+    for (size_t i = 0; i < cams.size(); i++) {
+      const bool by_rule = cams[i] == shown && cams[i]->id != scene_->active_camera && !render_camera_override_;
+      names.push_back(cams[i]->name + (by_rule ? "  (by name)" : ""));
+      if (cams[i] == shown) cur = (int)i;
+    }
+    for (auto &n : names) opts.push_back(n.c_str());
+    if (opts.empty()) opts.push_back("No cameras");
+    int pick = std::max(0, cur);
+    if (u.combo(u.id("game_camera"), {bar.x + u.px(6), bar.y + u.px(3), u.px(170), bar.h - u.px(6)}, pick, opts.data(), (int)opts.size()) && !cams.empty() &&
+        pick >= 0 && pick < (int)cams.size() && cams[(size_t)pick]->id != scene_->active_camera)
+      set_active_camera(cams[(size_t)pick]);
+    u.tooltip("The camera this view shows: the scene's Active Camera (Blender: the scene camera; Unity: MainCamera).\n"
+              "Without one, \"Main Camera\" by name, else the first camera.");
+  }
+  u.label({bar.x + u.px(182), bar.y, u.px(110), bar.h}, "Free Aspect", u.theme.text_dim);
   int h = bh - u.px(6);
   Recti sr{bar.right() - u.px(70), bar.y + u.px(3), u.px(62), h};
   if (u.button(sr, "Stats", game_stats_overlay_)) game_stats_overlay_ = !game_stats_overlay_;
@@ -2924,7 +2968,7 @@ void Editor::draw_game_view(const Recti &r) {
   Camera *cam = main_camera(*scene_, &owner);
   if (!cam) {
     u.canvas.fill_rect(view, 0xFF000000);
-    u.label(view, "Display 1  -  No cameras rendering", u.theme.text, ui::Align::Center);
+    u.label(view, "No cameras rendering", u.theme.text, ui::Align::Center);
     return;
   }
   ScopedTimer t;

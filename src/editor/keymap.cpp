@@ -140,6 +140,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"transform.rotate", "Rotate with the mouse", "Tools", CTX_SCENE},
       {"transform.scale", "Scale with the mouse", "Tools", CTX_SCENE},
       {"view.frame", "Frame Selected", "View", CTX_SCENE},
+      {"view.active_camera", "Set Active Camera (the selected one)", "View", CTX_SCENE},
       /* Modes */
       {"mode.edit_toggle", "Edit Mode On / Off", "Modes", CTX_SCENE},
       {"mode.vertex", "Vertex Select Mode", "Modes", CTX_SCENE_EDIT},
@@ -245,6 +246,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     b("transform.scale", {"S"});
     b("tool.move", {"Shift+Space"});
     b("view.frame", {"."});
+    b("view.active_camera", {"Ctrl+0"});  // Blender: Ctrl+Numpad0 (the numpad digits arrive as the digit keys)
     b("mode.edit_toggle", {"Tab"});
     b("mode.vertex", {"1"});
     b("mode.edge", {"2"});
@@ -601,6 +603,10 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "transform.rotate") transform_begin(1);
   else if (id == "transform.scale") transform_begin(2);
   else if (id == "view.frame") frame_selected();
+  else if (id == "view.active_camera") {
+    if (GameObject *g = scene_->find(active_); g && g->camera()) set_active_camera(g);
+    else Log::warn("Set Active Camera: select a camera first");
+  }
   else if (id == "mode.edit_toggle") {
     if (edit_mode_) exit_edit_mode();
     else enter_edit_mode();

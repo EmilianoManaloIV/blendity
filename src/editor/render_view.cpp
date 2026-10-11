@@ -497,8 +497,12 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, 
   const FilterStack &fs = camera_filters(owner);
   /* The Scene view fills whatever the stack says: its overlays and picking use the full view's projection. */
   const int fit = cam ? fs.fit : (int)FilterStack::Fill;
+  /* The camera whose exposure, clear colour and far clip the picture takes: the Scene view (cam == nullptr)
+   * keeps the editor's projection but looks through the filters' camera (ADR 0016); no depth of field there
+   * (the user is working in that view). */
+  const Camera *look = cam ? cam : owner ? owner->camera() : nullptr;
   if (fs.empty()) {
-    render_deferred(r3d, rt, v, p, eye, game, scene_lights, cam);
+    render_deferred(r3d, rt, v, p, eye, game, scene_lights, look);
     if (cam) camera_dof(rt, v, p, eye, forward, cam, aspect, cam->vertical_fov_deg(aspect));
     return;
   }
@@ -520,14 +524,14 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, 
     t = &ft.rt;
   }
   t->want_hdr = fs.needs_hdr;  // bloom reads linear light (only allocated when asked)
-  render_deferred(r3d, *t, v, pp, eye, game, scene_lights, cam, &fs);
+  render_deferred(r3d, *t, v, pp, eye, game, scene_lights, look, &fs);
   t->want_hdr = false;
   if (cam) camera_dof(*t, v, pp, eye, forward, cam, a2, cam->vertical_fov_deg(a2));
   FilterFrame frame;
   frame.inv_view_proj = (pp * v).inverse();
   frame.eye = eye;
   frame.forward = normalize(forward);
-  frame.far_distance = cam ? cam->far_clip : 1000.0f;
+  frame.far_distance = look ? look->far_clip : 1000.0f;
   frame.time = play_time_;
   frame.animate = animate;  // only the Game view while playing: F12, previews and piloting stay reproducible
   for (const FilterPass &pass : fs.passes) pass(*t, &frame);
@@ -578,8 +582,52 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
 static void build_pt(PathTracer &pt, Editor &, const std::vector<DrawItem> &items, const LightingEnv &env,
                      const Environment &world) {
   std::vector<PTObject> objs;
-  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials});
+  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials, it.id});
   pt.build(objs, env.lights, world);
+}
+
+/* A camera's Clear Flags: Solid Color for the path tracer (ADR 0016): the display colour taken as linear
+ * light, so a Standard view transform shows it as set (Filmic tints it a little, as it tints everything). */
+static void pt_solid_background(PTSettings &ps, const Camera *cam) {
+  ps.solid_background = cam && cam->clear_flags == 1;
+  if (ps.solid_background)  // divided by the exposure the resolve applies, so it shows as set, like the raster clear
+    ps.background = Vec3(srgb_to_linear(cam->background.x), srgb_to_linear(cam->background.y), srgb_to_linear(cam->background.z)) /
+                    std::exp2(std::max(-16.0f, std::min(16.0f, ps.exposure)));
+}
+
+FilterFrame Editor::trace_filter_frame(PathTracer &pt, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const Camera *cam) {
+  FilterFrame frame;
+  const Mat4 vp = p * v;
+  frame.inv_view_proj = vp.inverse();
+  frame.eye = eye;
+  frame.forward = normalize(forward);
+  frame.far_distance = cam ? cam->far_clip : 1000.0f;
+  frame.time = play_time_;
+  frame.animate = false;
+  std::vector<float> dist;
+  std::vector<uint32_t> ids;
+  pt.first_hit_planes(dist, ids);
+  const int W = rt.width, H = rt.height;
+  if ((int)dist.size() < W * H) return frame;
+  rt.depth.assign((size_t)W * H, 1.0f);
+  rt.ids = std::move(ids);
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        const float t = dist[i];
+        if (!(t < 1e5f)) continue;  // the sky stays at the far plane
+        /* The hit point along this pixel's camera ray, then its z / w through the same projection the
+         * rasterizer would have used. */
+        const float nx = (x + 0.5f) / W * 2.0f - 1.0f, ny = 1.0f - (y + 0.5f) / H * 2.0f;
+        const Vec4 nq = frame.inv_view_proj * Vec4(nx, ny, 0.0f, 1.0f), fq = frame.inv_view_proj * Vec4(nx, ny, 1.0f, 1.0f);
+        if (nq.w == 0.0f || fq.w == 0.0f) continue;
+        const Vec3 pa = nq.xyz() / nq.w, dir = normalize(fq.xyz() / fq.w - pa);  // as the tracer's ray: from the near plane
+        const Vec4 q = vp * Vec4(pa + dir * t, 1.0f);
+        if (q.w != 0.0f) rt.depth[i] = std::max(0.0f, std::min(1.0f, q.z / q.w));
+      }
+  });
+  return frame;
 }
 
 /* ===================================================================== */
@@ -668,6 +716,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
     rt.attach(big, {0, 0, big.width, big.height});
     Renderer3D r3d;
     render_deferred(r3d, rt, v, p, eye, true, true, cam);
+    if (cam && owner) camera_dof(rt, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), cam, w / (float)h, cam->vertical_fov_deg(w / (float)h));
     JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
       for (int64_t y = y0; y < y1; y++)
         for (int x = 0; x < w; x++) {
@@ -694,6 +743,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
   std::vector<DrawItem> items = collect_items(true, true);
   PTSettings ps = make_pt_settings(rs);
   if (cam) ps.exposure += cam->exposure_stops();
+  pt_solid_background(ps, cam);
   final_pt_.set_settings(ps);  // before build(): it picks the ray backend
   build_pt(final_pt_, *this, items, env, env_);
   int tw = w, th = h;
@@ -704,6 +754,11 @@ void Editor::start_final_render(bool preview, bool open_window) {
     if (render_dst_.w != w || render_dst_.h != h) p = cam->projection(render_dst_.w / (float)render_dst_.h);
     std::fill(render_img_.pixels.begin(), render_img_.pixels.end(), 0xFF000000u);
   }
+  render_view_ = v;
+  render_proj_ = p;
+  render_eye_ = eye;
+  render_forward_ = owner ? owner->world_rotation().rotate({0, 0, 1}) : cam_.forward();
+  render_far_ = cam ? cam->far_clip : 1000.0f;
   final_pt_.set_camera(v, p, tw, th, camera_lens(cam, tw / (float)th));
   rendering_ = true;
   render_status_ = strprintf("%s %dx%d: %s scene of %zu tris built in %.0f ms", preview ? "Preview" : "Path tracing", w, h, final_pt_.device_summary().c_str(),
@@ -757,8 +812,8 @@ void Editor::resolve_final_render(bool finished) {
     else final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
     return;
   }
-  /* Through camera filters: the small image, its passes (no depth: no fog), then scaled up.
-   * No float result: a retro image is an 8-bit one. */
+  /* Through camera filters: the small image, its passes (with the first hits' depth and ids, so outlines and
+   * fog work), then scaled up. No float result: a retro image is an 8-bit one. */
   Image &s = render_small_;
   RenderTarget rt;
   rt.attach(s, {0, 0, s.width, s.height});
@@ -768,7 +823,9 @@ void Editor::resolve_final_render(bool finished) {
     if (render_filters_.needs_hdr) fill_hdr_from_linear(rt, lin, final_pt_.settings().view_transform, final_pt_.settings().exposure);
   }
   else final_pt_.resolve(s.pixels.data(), s.width, false);
-  for (const FilterPass &pass : render_filters_.passes) pass(rt, nullptr);
+  FilterFrame frame = trace_filter_frame(final_pt_, rt, render_view_, render_proj_, render_eye_, render_forward_, nullptr);
+  frame.far_distance = render_far_;  // the camera's when the render started (it may have changed since)
+  for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
   upscale_nearest(s.pixels.data(), s.width, s.height, s.width, render_img_.pixels.data(), render_img_.width, render_dst_);
 }
 
@@ -1186,6 +1243,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       std::vector<DrawItem> items = collect_items(true, true);
       PTSettings ps = make_pt_settings(rs);
       ps.exposure += cam->exposure_stops();
+      pt_solid_background(ps, cam);
       cam_preview_pt_.set_settings(ps);
       build_pt(cam_preview_pt_, *this, items, env, env_);
       const float ta = tdst.w / (float)std::max(1, tdst.h);
@@ -1208,12 +1266,14 @@ void Editor::draw_camera_preview(const Recti &view) {
         u.redraw = true;
       }
       if (!filters.empty()) {
-        /* The filters' colour passes (no depth: no fog), scaled up into the inset. */
+        /* The filters' passes, with the first hits' depth and ids (outlines, fog), scaled up into the inset. */
         RenderTarget trt;
         trt.attach(traced_img, {0, 0, tw, th});
         if (filters.needs_hdr && cam_preview_done_)
           fill_hdr_from_linear(trt, cam_preview_lin_, cam_preview_pt_.settings().view_transform, cam_preview_pt_.settings().exposure);
-        for (const FilterPass &pass : filters.passes) pass(trt, nullptr);
+        const float ta = tdst.w / (float)std::max(1, tdst.h);
+        const FilterFrame tframe = trace_filter_frame(cam_preview_pt_, trt, v, tdst.w == w && tdst.h == h ? p : cam->projection(ta), eye, q.rotate({0, 0, 1}), cam);
+        for (const FilterPass &pass : filters.passes) pass(trt, &tframe);
         std::fill(cam_preview_img_.pixels.begin(), cam_preview_img_.pixels.end(), 0xFF000000u);
         upscale_nearest(traced_img.pixels.data(), tw, th, tw, cam_preview_img_.pixels.data(), w, tdst);
       }

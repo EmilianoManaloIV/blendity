@@ -544,6 +544,8 @@ void PathTracer::reset() {
   albedo_.assign(n, Vec3(0.0f));
   normal_.assign(n, Vec3(0.0f));
   depth_.assign(n, 0.0f);
+  ids_.assign(n, 0u);
+  last_dist_.assign(n, 0.0f);
   stats_.rays = 0;
   stats_.render_ms = 0;
   /* Combined rendering: the CPU's own sums, and every GPU starts over. */
@@ -556,6 +558,8 @@ void PathTracer::reset() {
     cpu_albedo_.assign(n, Vec3(0.0f));
     cpu_normal_.assign(n, Vec3(0.0f));
     cpu_depth_.assign(n, 0.0f);
+    cpu_ids_.assign(n, 0u);
+    cpu_last_dist_.assign(n, 0.0f);
     std::memcpy(gpu_params_.inv_vp, inv_vp_.m, 64);
     gpu_params_.cam_pos[0] = cam_pos_.x;
     gpu_params_.cam_pos[1] = cam_pos_.y;
@@ -669,7 +673,7 @@ float PathTracer::mesh_light_pdf(uint32_t li, float dist, float cos_light) const
   return cos_light > 1e-6f ? (l.power / light_power_) * dist * dist / (l.area * cos_light) : 0.0f;
 }
 
-Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint64_t &rays,
+Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint32_t *id_out, uint64_t &rays,
                        PTGuidingThread *guide) const {
   Vec3 L(0.0f), beta(1.0f);
   const float clamp = settings_.clamp_indirect;
@@ -705,11 +709,13 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         float m = std::max({c.x, c.y, c.z});
         if (m > clamp) c = c * (clamp / m);
       }
+      if (bounce == 0 && settings_.solid_background) c = beta * settings_.background;  // Clear Flags: Solid Color
       L += c;
       if (bounce == 0 && albedo_out) {
         *albedo_out = Vec3(1.0f);
         *normal_out = Vec3(0.0f);
         *depth_out = 1e6f;
+        if (id_out) *id_out = 0;
       }
       break;
     }
@@ -739,6 +745,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       *albedo_out = s.albedo + s.emission;
       *normal_out = n;
       *depth_out = h.t;
+      if (id_out) *id_out = h.object + 1;
     }
     auto add = [&](Vec3 c) {
       if (bounce > 0 && clamp > 0) {
@@ -1003,6 +1010,8 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
   Vec3 *A = claim ? cpu_accum_.data() : accum_.data(), *AL = claim ? cpu_albedo_.data() : albedo_.data();
   Vec3 *NR = claim ? cpu_normal_.data() : normal_.data();
   float *DP = claim ? cpu_depth_.data() : depth_.data();
+  uint32_t *ID = claim ? cpu_ids_.data() : ids_.data();
+  float *LD = claim ? cpu_last_dist_.data() : last_dist_.data();
 #ifdef BL_WITH_OPENPGL
   if (guiding_ && !guiding_->field) {
     /* Cycles' configuration (integrator/path_trace.cpp): KD-tree of
@@ -1071,10 +1080,11 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
           }
           Vec3 alb, nrm;
           float dep;
+          uint32_t hit_id = 0;
 #ifdef BL_WITH_OPENPGL
           if (guide && guide->train) guide->segments.Clear();
 #endif
-          Vec3 c = trace(r, rng, &alb, &nrm, &dep, local, guide.get());
+          Vec3 c = trace(r, rng, &alb, &nrm, &dep, &hit_id, local, guide.get());
 #ifdef BL_WITH_OPENPGL
           if (guide && guide->train) {
             /* The path's segments become radiance samples for training. */
@@ -1094,6 +1104,8 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
           AL[i] += alb;
           NR[i] += nrm;
           DP[i] += dep;
+          ID[i] = hit_id;
+          if (hit_id) LD[i] = dep;
         }
       rays += local;
 #ifdef BL_WITH_OPENPGL
@@ -1700,6 +1712,24 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
   v4(p.env_equator, env_.equator);
   v4(p.env_ground, env_.ground);
   v4(p.env_color, env_.color);
+  v4(p.background, settings_.background);
+  p.background[3] = settings_.solid_background ? 1.0f : 0.0f;
+}
+
+void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids) {
+  merge_aux();
+  const size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
+  distance.assign(n, 1e6f);
+  ids.assign(n, 0u);
+  if (last_dist_.size() < n || ids_.size() < n) return;
+  for (size_t i = 0; i < n; i++) {
+    /* The last hitting sample's distance (a mean would count sky samples at 1e6, and on a GPU the sums
+     * run ahead of the merged sample count): consistent with the id, which is the last sample's too. */
+    const uint32_t k = ids_[i];
+    const bool hit = k > 0 && k <= objects_.size();
+    ids[i] = hit ? objects_[k - 1].id : 0;
+    if (hit && last_dist_[i] > 0.0f) distance[i] = last_dist_[i];
+  }
 }
 
 void PathTracer::upload_gpus() {
@@ -1797,14 +1827,18 @@ void PathTracer::merge_aux() {
     for (int64_t i = b; i < e; i++) {
       Vec3 al = cpu_albedo_[i], nr = cpu_normal_[i];
       float d = cpu_depth_[i];
+      uint32_t id = cpu_ids_[i];
       for (size_t k = 0; k < ga.size(); k++) {
         al += Vec3(ga[k][i * 4], ga[k][i * 4 + 1], ga[k][i * 4 + 2]);
         nr += Vec3(gn[k][i * 4], gn[k][i * 4 + 1], gn[k][i * 4 + 2]);
         d += gn[k][i * 4 + 3];
+        const float gid = ga[k][i * 4 + 3];  // a GPU's last first hit (albedo's w)
+        if (gid > 0.0f && gid < 4.0e9f) id = (uint32_t)(gid + 0.5f);
       }
       albedo_[i] = al;
       normal_[i] = nr;
       depth_[i] = d;
+      ids_[i] = id;
     }
   });
   aux_merged_ = true;
@@ -1928,8 +1962,13 @@ void PathTracer::merge_gpus() {
   JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) {
       Vec3 c = cpu_accum_[i];
-      for (const auto &g : gsum) c += Vec3(g[i * 4], g[i * 4 + 1], g[i * 4 + 2]);
+      float ld = cpu_last_dist_[i];
+      for (const auto &g : gsum) {
+        c += Vec3(g[i * 4], g[i * 4 + 1], g[i * 4 + 2]);
+        if (g[i * 4 + 3] > 0.0f) ld = g[i * 4 + 3];  // a GPU's last hitting sample (accum's w)
+      }
       accum_[i] = c;
+      last_dist_[i] = ld;
     }
   });
   aux_merged_ = false;

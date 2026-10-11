@@ -47,6 +47,7 @@ struct GParams {
   float env_sky[4], env_equator[4], env_ground[4], env_color[4];
   float lens[4];        // aperture radius, focus distance, blades, blade rotation
   float cam_right[4], cam_up[4], cam_fwd[4];
+  float background[4];  // a camera's Solid Color for camera rays (w: on)
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };

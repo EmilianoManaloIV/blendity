@@ -1,6 +1,6 @@
 # 0025: Filters show wherever a camera's picture shows (the Active Camera)
 
-- **Status:** approved (the roadmap of 2026-10-11; built next after task 0024)
+- **Status:** done (as built below)
 - **Requirements:** R-05, Q-02
 - **Decisions:** ADR 0016
 - **Model:** main session (Opus)
@@ -66,3 +66,29 @@ camera the Game view shows is an explicit choice, not a name.
 
 ## Documentation to update
 - ADR 0016, CHANGELOG, README (the Active Camera), ARCHITECTURE row, USABILITY rows (the three reports).
+
+## As built
+Built as specified: `Scene::active_camera` (saved as `active_camera <id>`, cleared by `Scene::destroy`,
+copied by undo snapshots), set from the Camera inspector, the Hierarchy menu, the Game view's camera
+dropdown (replacing "Display 1"), `activecamera <name>|none` and Ctrl+0 in the Blender keymap (the
+numpad digits arrive as the digit keys, so Ctrl+Numpad0 works too); `main_camera()` order override →
+active → "Main Camera" → first; the Scene view's filters look through the active camera (exposure,
+Solid Color clear, far clip; the editor's projection, no depth of field); the path tracers (CPU and
+GPU) record the first hit's distance and object id (`PathTracer::first_hit_planes`, the GPU in the
+albedo plane's w), and `Editor::trace_filter_frame` turns them into a target's depth (as z / w) and ids
+and a `FilterFrame`, used by the filtered F12 and the Rendered Camera Preview; a camera's Solid Color is
+honoured by the path tracers for camera rays only (`PTSettings::solid_background`); F12 raster without
+filters applies depth of field before the SSAA downsample.
+
+**Deviations:**
+1. **Criterion 2 is tested as "both change with the camera's filters"**, not pixel for pixel: the Game
+   view is Free Aspect and the Camera Preview keeps the camera's aspect, so the two are never the same
+   size in the editor; a pixel-for-pixel comparison needs a test harness render that the editor has no
+   path for. The pictures come from the same `render_camera` with the same stack and target kind.
+2. **The path tracer's Solid Color is the display colour taken as linear light,** divided by the
+   exposure the resolve applies, so it shows as set under the Standard view transform (like the raster
+   clear) and is tinted a little by Filmic, like everything else.
+4. **F12 raster depth of field runs on the supersampled image** (before the downsample, as the spec
+   asked): at 4x SSAA and 1080p that is about 33 million pixels; a second or two for a final render.
+3. **Exposure in the Scene view under Filmic is compressed** (+4 EV measured as +18 % mean brightness);
+   the test checks for a brightening, not the raw factor.

@@ -41,6 +41,7 @@ struct PTObject {
   const RenderMesh *mesh = nullptr;  // needs tangents for normal maps
   Mat4 model;
   const std::vector<MaterialPtr> *materials = nullptr;
+  uint32_t id = 0;  // the object's id, for the first-hit id plane (camera filters outline by it)
 };
 
 /* A thin lens for depth of field (Cycles: kernel/camera/camera.h). */
@@ -59,6 +60,10 @@ struct PTSettings {
   bool denoise = true;
   ViewTransform view_transform = ViewTransform::Filmic;
   float exposure = 0.0f;
+  /* A camera's Clear Flags: Solid Color (ADR 0016): camera rays that miss everything return this
+   * radiance instead of the world's; bounces still see the world, so the lighting doesn't change. */
+  bool solid_background = false;
+  Vec3 background{0.0f, 0.0f, 0.0f};
   /* Library backends (used when compiled in, see deps/deps.h). Like Cycles:
    * Embree for ray queries, OpenImageDenoise for denoising. Changing
    * use_embree takes effect on the next build(). */
@@ -102,6 +107,9 @@ class PathTracer {
   void set_camera(const Mat4 &view, const Mat4 &proj, int width, int height, const PTLens &lens = PTLens());
   void set_settings(const PTSettings &s) { settings_ = s; }
   const PTSettings &settings() const { return settings_; }
+  /* What the camera rays hit first, per pixel: the mean distance along the ray (1e6 for the sky) and
+   * the object's id (0 for the sky; the last sample's), for a FilterFrame's depth and id planes. */
+  void first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids);
   void reset();
 
   /* Adds samples for up to `budget_ms` (at least one full sample pass).
@@ -133,7 +141,7 @@ class PathTracer {
   }
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
-  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, rays, nullptr); }
+  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr); }
   bool occluded(const Ray &r, float tmax) const;
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
    * cosine-weighted around dirs[i] as a normal (the mean is irradiance / pi, as incoming_radiance's
@@ -202,7 +210,7 @@ class PathTracer {
   };
   static void build_sah(const std::vector<AABB> &boxes, std::vector<Node> &nodes, std::vector<uint32_t> &order, uint32_t max_leaf);
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
-  Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint64_t &rays, PTGuidingThread *guide) const;
+  Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint32_t *id, uint64_t &rays, PTGuidingThread *guide) const;
   std::vector<float> denoised() const;
   int render_cpu(double budget_ms, int max_samples, std::atomic<int> *claim);
   /* GPU devices (gpu_device.h): their renderers, kept across builds. */
@@ -231,6 +239,8 @@ class PathTracer {
   void merge_aux();
   std::vector<Vec3> cpu_accum_, cpu_albedo_, cpu_normal_;
   std::vector<float> cpu_depth_;
+  std::vector<uint32_t> cpu_ids_, ids_;  // first-hit object index + 1 (0 = sky), the last sample's
+  std::vector<float> cpu_last_dist_, last_dist_;  // the last hitting sample's first-hit distance (0 = none yet)
   void build_gpu_scene(gpu::Scene &s) const;
   void sync_gpus();
   void upload_gpus();

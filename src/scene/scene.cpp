@@ -1429,6 +1429,7 @@ void Scene::move_from(Scene &o) {
   render = o.render;
   lighting = o.lighting;
   guides = std::move(o.guides);
+  active_camera = o.active_camera;
   roots = std::move(o.roots);
   objects_ = std::move(o.objects_);
   by_id_ = std::move(o.by_id_);
@@ -1463,6 +1464,7 @@ GameObject *Scene::create(const std::string &name, GameObject *parent) {
 
 void Scene::destroy(GameObject *go) {
   if (!go) return;
+  if (go->id == active_camera) active_camera = 0;  // back to the name rule
   while (!go->children.empty()) destroy(go->children.back());
   auto &list = go->parent ? go->parent->children : roots;
   list.erase(std::remove(list.begin(), list.end(), go), list.end());
@@ -1480,6 +1482,7 @@ void Scene::clear() {
   by_id_.clear();
   roots.clear();
   next_id_ = 1;
+  active_camera = 0;
 }
 
 GameObject *Scene::find(uint64_t id) const {
@@ -1554,6 +1557,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->render = render;
   s->lighting = lighting;
   s->guides = guides;
+  s->active_camera = active_camera;
   s->objects_.reserve(objects_.size());
   std::unordered_map<const Material *, MaterialPtr> mat_copy;
   for (auto &o : objects_) {
