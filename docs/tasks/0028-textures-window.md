@@ -4,7 +4,7 @@
 - **Requirements:** R-03
 - **Decisions:** ADR 0017 (the window is its editor; no new decision)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/26
 
 ## Goal
 The user asked for "a new tab dedicated to making procedural textures, following a modifier stack like
