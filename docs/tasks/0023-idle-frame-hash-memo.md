@@ -4,7 +4,7 @@
 - **Requirements:** Q-04, R-01
 - **Decisions:** ADR 0015, per-object render-hash memo
 - **Model:** main session (Opus)
-- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/20
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/21
 
 ## Goal
 The user wants the Scene view and the editor faster. An idle frame today costs 2.1 ms in the pass-6
