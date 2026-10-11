@@ -61,6 +61,8 @@ struct GVertex { float p[4], n[4], t[4], uv[4]; };
 struct GMaterial {
   float base_color[4], emission[4], params[4], tiling[4], offset[4], color2[4];
   int32_t tex0[4], tex1[4], flags[4];
+  float axis[4];      // an axis material (ADR 0018): cos(angle), half blend, 1 / scale, mode (0 off, 1 world, 2 local)
+  int32_t axis_i[4];  // its Top, Side, Bottom in this table (-1: its own maps)
 };
 struct GLight { float a[4], b[4], c[4], d[4], e[4]; };  // see gpu_kernel.h Light
 struct GMeshLight { uint32_t obj, prim; float area, power; };

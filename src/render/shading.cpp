@@ -33,7 +33,67 @@ static Vec4 tex_sample(const TexturePtr &t, Vec2 uv, float lod, const Material &
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp) { return evaluate_material(m, m.textures(), sp); }
 
+/* One material's surface; force_box projects its maps triplanar from sp's local position and normal (an axis
+ * material's parts), whatever its own mapping says, and ignores its own axis settings. */
+static SurfaceSample evaluate_surface(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp, bool force_box);
+
+static inline float axis_step(float e0, float e1, float x) {  // smoothstep that is a step when the edges meet
+  if (e1 - e0 < 1e-5f) return x >= e0 ? 1.0f : 0.0f;
+  const float t = clampf((x - e0) / (e1 - e0), 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
+  if (m.axis_mode == 0) return evaluate_surface(m, tx, sp, false);
+  /* Axis material (ADR 0018): weights by the slope of the normal in World or Local space, then each part sampled
+   * triplanar at the world / local position and blended. */
+  const bool world = m.axis_mode == 1;
+  Vec3 n = world ? sp.normal : sp.local_normal;
+  const float len = length(n);
+  const bool ok = finite_bits(len) && len > 1e-6f;
+  const float ny = ok ? n.y / len : 0.0f;
+  n = ok ? n / len : Vec3(1.0f, 0.0f, 0.0f);  // a NaN or zero normal: Side, projected along one axis
+  const float c = std::cos(clampf(m.axis_angle, 0.0f, 90.0f) * kDeg2Rad), b = clampf(m.axis_blend, 0.0f, 1.0f) * 0.5f;
+  const float w_top = axis_step(c - b, c + b, ny), w_bottom = axis_step(c - b, c + b, -ny);
+  const float w[3] = {w_top, std::max(0.0f, 1.0f - w_top - w_bottom), w_bottom};
+  SurfacePoint tp = sp;
+  tp.local_position = (world ? sp.position : sp.local_position) / std::max(0.01f, m.axis_scale);
+  tp.local_normal = n;
+  SurfaceSample out;
+  out.albedo = Vec3(0.0f);
+  out.metallic = out.roughness = out.specular = out.alpha = 0.0f;
+  out.emission = Vec3(0.0f);
+  Vec3 nsum(0.0f);
+  float wsum = 0.0f;
+  for (int k = 0; k < 3; k++) {
+    if (w[k] <= 1e-3f) continue;
+    const Material &sm = tx.axis[k] ? *tx.axis[k] : m;
+    const Material::Resolved &stx = tx.axis[k] && tx.axis_tx[k] ? *tx.axis_tx[k] : tx;
+    const SurfaceSample r = evaluate_surface(sm, stx, tp, true);
+    out.albedo = out.albedo + r.albedo * w[k];
+    out.metallic += r.metallic * w[k];
+    out.roughness += r.roughness * w[k];
+    out.specular += r.specular * w[k];
+    out.alpha += r.alpha * w[k];
+    out.emission = out.emission + r.emission * w[k];
+    nsum = nsum + r.normal * w[k];
+    wsum += w[k];
+  }
+  if (wsum > 0.0f) {
+    const float inv = 1.0f / wsum;
+    out.albedo = out.albedo * inv;
+    out.metallic *= inv;
+    out.roughness *= inv;
+    out.specular *= inv;
+    out.alpha *= inv;
+    out.emission = out.emission * inv;
+  }
+  out.normal = length(nsum) > 1e-6f ? normalize(nsum) : sp.normal;
+  out.unlit = m.unlit;
+  return out;
+}
+
+static SurfaceSample evaluate_surface(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp, bool force_box) {
   SurfaceSample s;
   s.albedo = m.base_color;
   s.metallic = m.metallic;
@@ -51,11 +111,11 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
     Vec3 ext = sp.local_bounds.max - sp.local_bounds.min;
     gen = (sp.local_position - sp.local_bounds.min) / vmax(ext, Vec3(1e-6f));
   }
-  if (m.mapping == (int)MaterialMapping::Generated) {
+  if (m.mapping == (int)MaterialMapping::Generated && !force_box) {
     uv = {gen.x * m.tiling.x + m.offset.x, gen.y * m.tiling.y + m.offset.y};
     ddx = ddy = Vec2(0, 0);
   }
-  const bool box = m.mapping == (int)MaterialMapping::Box;
+  const bool box = force_box || m.mapping == (int)MaterialMapping::Box;
   Vec3 bw;  // triplanar weights
   Vec3 bp = sp.local_position * m.tiling + m.offset;
   if (box) {
@@ -79,7 +139,8 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
 
   /* Base colour: procedural or image, tinted by Base Color. */
   if (m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) {
-    Vec3 pp = (m.mapping == (int)MaterialMapping::UV ? Vec3(uv.x, uv.y, 0.0f) : gen) * m.procedural_scale;
+    /* (An axis material's part: the projected position, like its maps.) */
+    Vec3 pp = (force_box ? sp.local_position : m.mapping == (int)MaterialMapping::UV ? Vec3(uv.x, uv.y, 0.0f) : gen) * m.procedural_scale;
     float t = m.procedural == (int)Procedural::Checker ? checker(pp) : saturate(0.5f + 0.5f * fbm_noise(pp, 5, 0.5f) * 1.4f);
     s.albedo = lerp(m.procedural_color2, m.base_color, t);
   }

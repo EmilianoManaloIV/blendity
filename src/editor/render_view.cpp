@@ -213,6 +213,11 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
       for (auto &mp : mr->materials) {  // a material's version is an input of every object using it
         materials_key = (materials_key ^ (uint64_t)(uintptr_t)mp.get()) * 1099511628211ull;
         materials_key = (materials_key ^ (mp ? mp->version : 0)) * 1099511628211ull;
+        if (mp && mp->axis_mode != 0)  // an axis material's parts as resolved (what is rendered; ADR 0018, one level)
+          for (const MaterialPtr &part : mp->textures().axis) {
+            materials_key = (materials_key ^ (uint64_t)(uintptr_t)part.get()) * 1099511628211ull;
+            materials_key = (materials_key ^ (part ? part->version : 0)) * 1099511628211ull;
+          }
       }
     }
   }
@@ -228,12 +233,7 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     if (mr) {
       const uint64_t f = flags & ~(1ull << 63);
       mix(&f, 8);
-      if (mr->enabled)
-        for (auto &mp : mr->materials) {
-          const void *p = mp.get();
-          mix(&p, sizeof(p));
-          if (mp) mix(&mp->version, 8);
-        }
+      mix(&materials_key, 8);  // the materials' pointers and versions, an axis material's parts included
     }
     m.transform_version = g.transform_version;
     m.id = g.id;
@@ -1009,6 +1009,11 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
         for (const MaterialPtr &m : *it->materials) {
           const uint64_t mv[2] = {(uint64_t)(uintptr_t)m.get(), m ? m->version : 0};
           mix(key, mv, sizeof(mv));
+          if (m && m->axis_mode != 0)  // the bounce's colour comes from an axis material's parts too
+            for (const MaterialPtr &part : m->textures().axis) {
+              const uint64_t pv[2] = {(uint64_t)(uintptr_t)part.get(), part ? part->version : 0};
+              mix(key, pv, sizeof(pv));
+            }
         }
     }
     mix(key, &sun->direction, sizeof(Vec3));

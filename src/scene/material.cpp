@@ -81,11 +81,32 @@ void Material::reflect(Reflector &r) {
   r.field("Double Sided", double_sided);
   r.field("Unlit", unlit);
   r.field("Cast Shadows", cast_shadows);
+  static const char *axis_modes[] = {"Off", "World", "Local"};
+  r.enumeration("Axis Mode", axis_mode, axis_modes, 3);
+  r.help("Axis material: surfaces facing up use the Top material, steep ones Side, downward ones Bottom, projected\n"
+         "without UVs. World: up is the world's (grass stays on top however the object turns); Local: the object's.");
+  if (r.all_fields() || axis_mode != 0) {
+    r.material_ref("Axis Top", axis_top);
+    r.material_ref("Axis Side", axis_side);
+    r.material_ref("Axis Bottom", axis_bottom);
+    r.help("Material assets (.mat); empty uses this material's own maps for that part.");
+    r.field("Axis Angle", axis_angle, 0.5f, 0.0f, 90.0f);
+    r.help("Degrees from straight up where Top turns into Side.");
+    r.field("Axis Blend", axis_blend, 0.01f, 0.0f, 1.0f);
+    r.help("How wide the transition is (0: a hard edge).");
+    r.field("Axis Scale", axis_scale, 0.05f, 0.01f, 1000.0f);
+    r.help("Metres one texture tile covers in the projection.");
+  }
 }
 
 const Material::Resolved &Material::textures() const {
   size_t gen = g_texture_gen.load();
-  if (resolved_version_ == version && resolved_cache_gen_ == gen) return resolved_;
+  auto axis_current = [&] {  // an axis material's sub-materials unchanged since they were resolved
+    for (int k = 0; k < 3; k++)
+      if (resolved_.axis[k] && resolved_.axis[k]->version != axis_versions_[k]) return false;
+    return true;
+  };
+  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
   /* Resolving replaces the shared pointers, which frees textures another thread may be
    * sampling: the renderers call this on one thread before shading in parallel (sanitizer
    * finding, task 0004); the lock keeps two first callers from resolving at once. Re-entrant:
@@ -93,7 +114,7 @@ const Material::Resolved &Material::textures() const {
    * material on this same thread. */
   static std::recursive_mutex m;
   std::lock_guard<std::recursive_mutex> lock(m);
-  if (resolved_version_ == version && resolved_cache_gen_ == gen) return resolved_;
+  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
   auto load = [&](const TextureRef &t) -> TexturePtr {
     if (t.empty()) return nullptr;
     if (t.path == "generated:UV Grid") return texture_uv_grid();
@@ -117,6 +138,31 @@ const Material::Resolved &Material::textures() const {
   resolved_.roughness = load(roughness_map);
   resolved_.normal = load(TextureRef{normal_map.path, true});
   resolved_.emission = load(emission_map);
+  /* An axis material's sub-materials, resolved here with their textures (ADR 0018). One level: a sub-material that is
+   * itself an axis material is used plainly; this material itself means its own maps. */
+  for (int k = 0; k < 3; k++) {
+    resolved_.axis[k] = nullptr;
+    resolved_.axis_tx[k] = nullptr;
+    axis_versions_[k] = 0;
+  }
+  if (axis_mode != 0) {
+    const std::string *paths[3] = {&axis_top, &axis_side, &axis_bottom};
+    resolving_ = true;
+    for (int k = 0; k < 3; k++) {
+      if (paths[k]->empty()) continue;
+      MaterialPtr sub = material_asset(*paths[k]);
+      if (!sub) {
+        Log::warn("Material '%s': no material asset %s", name.c_str(), paths[k]->c_str());
+        continue;
+      }
+      /* Itself, or a material whose own resolve led here (A's part is B and B's is A): its own maps instead. */
+      if (sub.get() == this || sub->resolving_) continue;
+      resolved_.axis[k] = sub;
+      resolved_.axis_tx[k] = &sub->textures();
+      axis_versions_[k] = sub->version;
+    }
+    resolving_ = false;
+  }
   resolved_version_ = version;
   resolved_cache_gen_ = gen;
   return resolved_;

@@ -209,6 +209,7 @@ static void round47_tests();
 static void round48_tests();
 static void round49_tests();
 static void round50_tests();
+static void round51_tests();
 
 int main() {
   register_builtin_components();
@@ -836,6 +837,7 @@ int main() {
   round48_tests();
   round49_tests();
   round50_tests();
+  round51_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -18794,5 +18796,256 @@ static void round50_tests() {
     std::printf("    preview size while dragging %d, after %d\n", during, after);
     CHECK(during == 256);
     CHECK(after == 1024);
+  });
+}
+
+/* Round 51 (task 0029, ADR 0018): axis materials. */
+struct R51Mats {
+  MaterialPtr grass, dirt, rock, axis;
+};
+/* Grass (green), Dirt (brown) and Rock (grey) as material assets, and an axis material using them. */
+static R51Mats r51_mats(int mode = 1) {
+  R51Mats m;
+  Material g;
+  g.name = "Grass";
+  g.base_color = {0.1f, 0.8f, 0.1f};
+  Material d;
+  d.name = "Dirt";
+  d.base_color = {0.5f, 0.3f, 0.1f};
+  Material r;
+  r.name = "Rock";
+  r.base_color = {0.4f, 0.4f, 0.4f};
+  m.grass = create_material_asset(g, "Assets/Materials/R51/Grass.mat");
+  m.dirt = create_material_asset(d, "Assets/Materials/R51/Dirt.mat");
+  m.rock = create_material_asset(r, "Assets/Materials/R51/Rock.mat");
+  m.axis = make_material("Ground", Vec3(1.0f));
+  m.axis->axis_mode = mode;
+  m.axis->axis_top = "Assets/Materials/R51/Grass.mat";
+  m.axis->axis_side = "Assets/Materials/R51/Dirt.mat";
+  m.axis->axis_bottom = "Assets/Materials/R51/Rock.mat";
+  m.axis->touch();
+  return m;
+}
+static SurfaceSample r51_eval(const Material &m, Vec3 world_n, Vec3 local_n, Vec3 pos = Vec3(0.3f, 0.2f, 0.1f)) {
+  SurfacePoint sp;
+  sp.position = sp.local_position = pos;
+  sp.normal = sp.geo_normal = normalize(world_n);
+  sp.local_normal = normalize(local_n);
+  return evaluate_material(m, m.textures(), sp);
+}
+static bool r51_green(Vec3 c) { return c.y > 0.6f && c.x < 0.3f; }
+static bool r51_brown(Vec3 c) { return c.x > 0.4f && c.y > 0.2f && c.y < 0.4f && c.z < 0.2f; }
+static void round51_tests() {
+  test("axis material: World mode puts Top on surfaces facing up, Side on steep ones, Bottom underneath, whatever the object's rotation", [] {
+    const R51Mats m = r51_mats(1);
+    const Material &a = *m.axis;
+    CHECK(r51_green(r51_eval(a, {0, 1, 0}, {0, 0, 1}).albedo));   // up in the world (the object turned: locally +Z)
+    CHECK(r51_brown(r51_eval(a, {1, 0, 0}, {0, 1, 0}).albedo));   // a side in the world (locally the top)
+    CHECK(r51_brown(r51_eval(a, {0, 0.3f, 1}, {0, 1, 0}).albedo));  // steep: past 45 degrees
+    const Vec3 bottom = r51_eval(a, {0, -1, 0}, {0, 1, 0}).albedo;
+    CHECK(std::fabs(bottom.x - 0.4f) < 0.02f && std::fabs(bottom.y - 0.4f) < 0.02f);
+  });
+  test("axis material: Local mode follows the object's own up (a quarter turn moves the grass with it)", [] {
+    const R51Mats m = r51_mats(2);
+    const Material &a = *m.axis;
+    CHECK(r51_green(r51_eval(a, {1, 0, 0}, {0, 1, 0}).albedo));  // the object's top, now facing +X in the world
+    CHECK(r51_brown(r51_eval(a, {0, 1, 0}, {0, 0, 1}).albedo));  // the world's up is the object's side
+  });
+  test("axis material: Blend 0 is a hard edge at the angle; a wider blend mixes the parts across it", [] {
+    const R51Mats m = r51_mats(1);
+    auto mixed = [&](float blend) {
+      m.axis->axis_blend = blend;
+      m.axis->touch();
+      int n = 0;
+      for (int i = 0; i <= 200; i++) {  // normals swept from 30 to 60 degrees off up
+        const float t = (30.0f + 30.0f * i / 200.0f) * kDeg2Rad;
+        const Vec3 c = r51_eval(*m.axis, {std::sin(t), std::cos(t), 0}, {0, 1, 0}).albedo;
+        n += !r51_green(c) && !r51_brown(c);
+      }
+      return n;
+    };
+    const int hard = mixed(0.0f), soft = mixed(0.3f);
+    std::printf("    in-between samples across the edge: %d with blend 0, %d with blend 0.3\n", hard, soft);
+    CHECK(hard == 0);
+    CHECK(soft > 20);
+  });
+  test("axis material: a part's texture is projected without UVs (triplanar at the world position)", [] {
+    const R51Mats m = r51_mats(1);
+    m.grass->procedural = (int)Procedural::UVGrid;  // a texture on the Top
+    m.grass->touch();
+    Vec3 a = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.11f, 0.0f, 0.13f)).albedo;
+    Vec3 b = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.61f, 0.0f, 0.37f)).albedo;
+    std::printf("    two points of the top, the same (empty) UVs: %.3f %.3f %.3f vs %.3f %.3f %.3f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    CHECK(length(a - b) > 0.05f);  // the texture varies across the surface without UVs
+  });
+  test("axis material: the fields round-trip through a .mat; an edit undoes; a part's edit changes the views' hash", [] {
+    Editor ed;
+    r34_open(ed);
+    R51Mats m = r51_mats(1);
+    m.axis->axis_angle = 30.0f;
+    m.axis->axis_blend = 0.25f;
+    m.axis->axis_scale = 2.0f;
+    MaterialPtr saved = create_material_asset(*m.axis, "Assets/Materials/R51/Ground.mat");
+    CHECK(saved != nullptr);
+    Material back;
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path("Assets/Materials/R51/Ground.mat"), text));
+    CHECK(load_material_text(text, back));
+    CHECK(back.axis_mode == 1 && back.axis_top == "Assets/Materials/R51/Grass.mat" && back.axis_side == "Assets/Materials/R51/Dirt.mat" &&
+          back.axis_bottom == "Assets/Materials/R51/Rock.mat" && std::fabs(back.axis_angle - 30.0f) < 1e-4f && std::fabs(back.axis_scale - 2.0f) < 1e-4f);
+    /* On the Cube: the hash follows a part's edit, and a field edit undoes. */
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    cube->get<MeshRenderer>()->materials = {saved};
+    ed.commit_change("Ground");
+    r34_steps(ed, 3);
+    const uint64_t h0 = ed.render_hash_for_test();
+    m.grass->base_color = {0.0f, 1.0f, 0.0f};
+    m.grass->touch();
+    const uint64_t h1 = ed.render_hash_for_test();
+    CHECK(h1 != h0);
+    saved->axis_mode = 0;
+    saved->touch();
+    ed.commit_change("Axis Off");
+    r34_steps(ed, 2);
+    ed.command("undo");
+    CHECK(by_name(ed.scene(), "Cube")->get<MeshRenderer>()->materials[0]->axis_mode == 1);
+  });
+  test("axis material: an F12 raster render from above shows the Top on the cube's top, and after a quarter turn still the Top on what faces up", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    R51Mats m = r51_mats(1);
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    cube->get<MeshRenderer>()->materials = {m.axis};
+    GameObject *cam = by_name(ed.scene(), "Main Camera");
+    cam->set_local_position({0.0f, 6.0f, 0.0f});
+    cam->set_local_euler({90.0f, 0.0f, 0.0f});  // looking straight down
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("set Render.ResolutionX 96");
+    ed.command("set Render.ResolutionY 64");
+    auto centre = [&] {
+      ed.command("render");
+      for (int i = 0; i < 100 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      const uint32_t c = img.pixels[(size_t)(img.height / 2) * img.width + img.width / 2];
+      return Vec3(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f);
+    };
+    const Vec3 a = centre();
+    cube->set_local_euler({90.0f, 0.0f, 0.0f});  // a quarter turn about X
+    const Vec3 b = centre();
+    std::printf("    the cube's top seen from above: %.2f %.2f %.2f, after the turn %.2f %.2f %.2f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    /* (Filmic and the sun desaturate: green means green clearly above red and blue.) */
+    CHECK(a.y > a.x + 0.12f && a.y > a.z + 0.12f);  // green
+    CHECK(b.y > b.x + 0.12f && b.y > b.z + 0.12f);  // still green: World mode
+    m.axis->axis_mode = 2;  // Local: the face now up was a side
+    m.axis->touch();
+    const Vec3 c = centre();
+    std::printf("    Local mode after the turn: %.2f %.2f %.2f\n", c.x, c.y, c.z);
+    CHECK(c.x > c.y && c.y > c.z);  // brown
+  });
+  test("axis material: a cycle of parts (A's Top is B, B's Top is A) resolves without recursing forever, and edge cases fall back sensibly", [] {
+    R51Mats m = r51_mats(1);
+    Material a;
+    a.name = "CycleA";
+    a.base_color = {0.9f, 0.1f, 0.1f};
+    a.axis_mode = 1;
+    a.axis_top = "Assets/Materials/R51/CycleB.mat";
+    Material b;
+    b.name = "CycleB";
+    b.base_color = {0.1f, 0.1f, 0.9f};
+    b.axis_mode = 1;
+    b.axis_top = "Assets/Materials/R51/CycleA.mat";
+    MaterialPtr pa = create_material_asset(a, "Assets/Materials/R51/CycleA.mat");
+    MaterialPtr pb = create_material_asset(b, "Assets/Materials/R51/CycleB.mat");
+    CHECK(pa && pb);
+    if (!pa || !pb) return;
+    invalidate_material_textures();
+    const Vec3 top = r51_eval(*pa, {0, 1, 0}, {0, 1, 0}).albedo;  // A's Top is B, used plainly: blue
+    CHECK(top.z > 0.8f && top.x < 0.2f);
+    pb->touch();
+    const Vec3 top2 = r51_eval(*pb, {0, 1, 0}, {0, 1, 0}).albedo;  // B's Top is A, used plainly: red
+    CHECK(top2.x > 0.8f && top2.z < 0.2f);
+    /* A missing part and the material itself as a part: its own maps. */
+    Material own;
+    own.base_color = {0.2f, 0.7f, 0.9f};
+    own.axis_mode = 1;
+    own.axis_top = "Assets/Materials/R51/NoSuch.mat";
+    const Vec3 o = r51_eval(own, {0, 1, 0}, {0, 1, 0}).albedo;
+    CHECK(std::fabs(o.x - 0.2f) < 0.02f && std::fabs(o.z - 0.9f) < 0.02f);
+    /* A NaN or zero normal: the Side part, not black. */
+    const Vec3 z = r51_eval(*m.axis, {0, 0, 0}, {0, 0, 0}).albedo;
+    CHECK(r51_brown(z));
+    /* A part's Checker follows the projection, not the mesh's UVs: two points of the top with the same UVs differ. */
+    m.grass->procedural = (int)Procedural::Checker;
+    m.grass->procedural_scale = 4.0f;
+    m.grass->touch();
+    int differ = 0;
+    for (int i = 0; i < 20; i++) {
+      const Vec3 p1 = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.05f * i, 0.0f, 0.0f)).albedo;
+      const Vec3 p2 = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.05f * i + 0.13f, 0.0f, 0.0f)).albedo;
+      differ += length(p1 - p2) > 0.05f;
+    }
+    CHECK(differ > 3);
+  });
+  test("axis material: the CPU path tracer and (with a Vulkan GPU) the GPU path tracer agree on an axis-material cube", [] {
+    R51Mats m = r51_mats(1);
+    /* A part that is itself an axis material (used plainly) and a part shared by two parents. */
+    m.dirt->axis_mode = 1;
+    m.dirt->axis_top = "Assets/Materials/R51/Grass.mat";
+    m.dirt->touch();
+    MaterialPtr second = make_material("Ground 2", Vec3(1.0f));
+    second->axis_mode = 1;
+    second->axis_side = "Assets/Materials/R51/Dirt.mat";
+    second->touch();
+    auto cube = primitives::cube(1.0f);
+    std::vector<MaterialPtr> mats = {m.axis}, mats2 = {second};
+    std::vector<PTObject> objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, 0, 0}, Quat::euler({30, 20, 0}), {1, 1, 1}), &mats},
+                                  {&cube->render_mesh_tangents(), Mat4::translate({2.2f, 0, 0}), &mats2}};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.3f, -1, 0.2f));
+    Environment env;
+    const int W = 32, H = 32, SPP = 64;
+    auto render = [&](bool cpu, std::vector<int> gpus) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = cpu;
+      st.gpus = gpus;
+      st.denoise = false;
+      st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 3.0f, -2.0f}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(40 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, SPP);
+      return pt.linear_rgb(false);
+    };
+    const std::vector<float> ref = render(true, {});
+    double mean = 0;
+    for (float v : ref) mean += v;
+    CHECK(mean > 0.0);
+    /* From straight above, the unrotated second cube's top fills the middle of a narrow view: the Top (its own white
+     * maps) there, and the first cube's top is grass. */
+    {
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false;
+      st.use_embree = false;
+      pt.set_settings(st);
+      std::vector<PTObject> one = {{&cube->render_mesh_tangents(), Mat4::identity(), &mats}};
+      pt.build(one, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 5.0f, 0.001f}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(10 * kDeg2Rad, 1.0f, 0.1f, 50), 16, 16);
+      pt.render(1e9, 32);
+      const std::vector<float> img = pt.linear_rgb(false);
+      const size_t c = (8 * 16 + 8) * 3;
+      std::printf("    CPU path tracer, the cube's top from above: %.3f %.3f %.3f\n", img[c], img[c + 1], img[c + 2]);
+      CHECK(img[c + 1] > 2.0f * img[c] && img[c + 1] > 2.0f * img[c + 2]);  // grass
+    }
+    if (!gpu::available()) return;
+    for (const gpu::DeviceInfo &d : gpu::devices()) {
+      const std::vector<float> img = render(false, {d.index});
+      double err = 0, mean = 0;
+      for (size_t i = 0; i < img.size(); i++) err += std::fabs(img[i] - ref[i]), mean += ref[i];
+      std::printf("    %s: mean |difference| %.4f of mean %.4f\n", d.name.c_str(), err / img.size(), mean / img.size());
+      CHECK(err / img.size() < 0.08 * (mean / img.size()));
+    }
   });
 }

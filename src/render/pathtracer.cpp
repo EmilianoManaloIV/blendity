@@ -1578,8 +1578,17 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     tex_id[t.get()] = id;
     return id;
   };
-  auto material = [&](const Material &m) {
+  std::vector<std::pair<uint32_t, const Material *>> axis_parents;  // patched once every object's slots are in
+  auto material = [&](const Material &m, bool as_part) {
     gpu::GMaterial g{};
+    for (int k = 0; k < 4; k++) g.axis_i[k] = -1;
+    if (m.axis_mode != 0 && !as_part) {  // (a part that is itself an axis material is used plainly)
+      g.axis[0] = std::cos(std::max(0.0f, std::min(90.0f, m.axis_angle)) * kDeg2Rad);
+      g.axis[1] = std::max(0.0f, std::min(1.0f, m.axis_blend)) * 0.5f;
+      g.axis[2] = 1.0f / std::max(0.01f, m.axis_scale);
+      g.axis[3] = (float)m.axis_mode;
+      axis_parents.push_back({(uint32_t)s.materials.size(), &m});
+    }
     const Material::Resolved &tx = m.textures();
     float base[4] = {m.base_color.x, m.base_color.y, m.base_color.z, m.alpha};
     float em[4] = {m.emission.x * m.emission_strength, m.emission.y * m.emission_strength, m.emission.z * m.emission_strength, m.normal_strength};
@@ -1606,7 +1615,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     g.flags[2] = m.filter;
     s.materials.push_back(g);
   };
-  material(*default_material());  // index 0
+  material(*default_material(), false);  // index 0
   struct MeshRec { uint32_t node_off, tri_off, vtx_off, idx_off, blas; };
   std::unordered_map<const RenderMesh *, MeshRec> meshes;
   s.instances.resize(objects_.size());
@@ -1669,9 +1678,26 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     gi.info[0] = (uint32_t)s.materials.size();
     gi.info[1] = ob.materials ? (uint32_t)ob.materials->size() : 0;
     if (ob.materials)
-      for (const MaterialPtr &mp : *ob.materials) material(mp ? *mp : *default_material());
+      for (const MaterialPtr &mp : *ob.materials) material(mp ? *mp : *default_material(), false);
     gi.info[2] = rm.uvs.empty() ? 0 : 1;
     gi.info[3] = rm.tangents.empty() ? 0 : 1;
+  }
+  /* Axis materials' parts, appended after every object's slots (once each), their own axis settings off. */
+  {
+    std::unordered_map<const Material *, int> part_index;
+    for (const auto &ap : axis_parents) {
+      const Material::Resolved &tx = ap.second->textures();
+      for (int k = 0; k < 3; k++) {
+        if (!tx.axis[k]) continue;
+        auto it = part_index.find(tx.axis[k].get());
+        if (it == part_index.end()) {
+          const int index = (int)s.materials.size();
+          material(*tx.axis[k], true);
+          it = part_index.emplace(tx.axis[k].get(), index).first;
+        }
+        s.materials[ap.first].axis_i[k] = it->second;
+      }
+    }
   }
   for (const Instance &in : instances_) s.tlas_order.push_back(in.object);
   for (const RenderLight &l : lights_) {

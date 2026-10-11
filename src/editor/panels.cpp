@@ -506,6 +506,34 @@ struct InspectorReflector : Reflector {
       changed = true;
     }
   }
+  /* An axis material's part: a button with the material's name that opens the material picker, and a clear button.
+   * The pick lands at the end of the frame (the popup), through Editor::set_material_ref. */
+  void material_ref(const char *n, std::string &v) override {
+    if (!material) {
+      text(n, v);
+      return;
+    }
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    const Recti f = field_rect(row);
+    const Recti b{f.x, f.y, f.w - f.h - u.px(2), f.h};
+    MaterialPtr cur = v.empty() ? nullptr : material_asset(v);
+    const std::string label = v.empty() ? std::string("(this material's own maps)") : cur ? cur->name : "Missing: " + v;
+    const ui::Id pid = fid(n) ^ 0x5A5Aull;
+    ed.inspector_menu_rects_[std::string("matref:") + n] = b;
+    if (u.button(b, label, false)) u.open_popup(pid, b);
+    u.tooltip(v.empty() ? "Pick a material asset for this part." : v);
+    Editor *edp = &ed;
+    Material *mat = material;
+    const std::string field = n;
+    ed.material_picker_popup(pid, nullptr, [edp, mat, field](const MaterialPtr &m) { edp->set_material_ref(mat, field, m); });  // (the popup runs this frame)
+    const Recti xb{b.right() + u.px(2), f.y, f.h, f.h};
+    if (!v.empty() && u.icon_button(xb, Icon::Close, false, "Use this material's own maps for this part")) {
+      v.clear();
+      record(FieldEdit::Text, n).s_new = v;
+      changed = true;
+    }
+  }
   void text(const char *n, std::string &v) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);

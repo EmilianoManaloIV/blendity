@@ -60,6 +60,9 @@ struct Reflector {
   virtual void texture(const char *name, TextureRef &t) { text(name, t.path); }
   /* Material slots (Unity MeshRenderer.materials / Blender material slots). */
   virtual void material_list(const char *, std::vector<MaterialPtr> &) {}
+  /* Another material by its .mat asset path (an axis material's Top / Side / Bottom, ADR 0018). Files, undo and
+   * hashing see the path as text; the Inspector draws a material picker. */
+  virtual void material_ref(const char *name, std::string &asset_path) { text(name, asset_path); }
   /* A camera's filter effects (ADR 0008). By default: the effects' type names as one text field,
    * then each effect's fields with an index prefix ("E0 Width"), which files, undo, hashing and
    * `set CameraFilters.E0Width` all understand. A reader that changes the names rebuilds the

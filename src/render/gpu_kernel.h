@@ -41,6 +41,8 @@ struct Material {
   ivec4 tex0;       // base, metallic, roughness, normal
   ivec4 tex1;       // emission, mapping, procedural, surface
   ivec4 flags;      // unlit, wrap, filter, -
+  vec4 axis;        // axis material (ADR 0018): cos(angle), half blend, 1 / scale, mode (0 off, 1 world, 2 local)
+  ivec4 axis_i;     // its Top, Side, Bottom in mats[] (-1: its own maps)
 };
 struct Light { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; };  // a: dir/pos + type (0 sun, 1 point, 2 spot, 3 area); b: colour, intensity; c: range, spot cos outer / inner, disk; d: direction, width; e: right, height
 struct MeshLight { uint obj; uint prim; float area; float power; };
@@ -230,7 +232,7 @@ vec4 msample(Material m, int t, vec2 uv, bool box, vec3 bw, vec3 bp) {
   if (bw.z > 0.001) r += tex_sample(t, vec2(bp.x, bp.y), wrap, filt) * bw.z;
   return r;
 }
-Sample evaluate_material(Material m, SurfacePoint sp) {
+Sample evaluate_plain(Material m, SurfacePoint sp, bool force_box) {
   Sample s;
   s.albedo = m.base_color.xyz;
   s.metallic = m.params.x;
@@ -242,7 +244,7 @@ Sample evaluate_material(Material m, SurfacePoint sp) {
   vec2 uv = vec2(sp.uv.x * m.tiling.x + m.offset.x, sp.uv.y * m.tiling.y + m.offset.y);
   vec3 gen = sp.local_position;
   if (all(lessThanEqual(sp.bmin, sp.bmax))) gen = (sp.local_position - sp.bmin) / max(sp.bmax - sp.bmin, vec3(1e-6));
-  int mapping = m.tex1.y;
+  int mapping = force_box ? 1 : m.tex1.y;
   if (mapping == 2) uv = vec2(gen.x * m.tiling.x + m.offset.x, gen.y * m.tiling.y + m.offset.y);
   bool box = mapping == 1;
   vec3 bw = vec3(0.0);
@@ -255,7 +257,7 @@ Sample evaluate_material(Material m, SurfacePoint sp) {
   }
   int proc = m.tex1.z;
   if (proc == 1 || proc == 2) {
-    vec3 pp = (mapping == 0 ? vec3(uv, 0.0) : gen) * m.offset.w;
+    vec3 pp = (force_box ? sp.local_position : (mapping == 0 ? vec3(uv, 0.0) : gen)) * m.offset.w;
     float t = proc == 1 ? checker(pp) : saturate1(0.5 + 0.5 * fbm_noise(pp, 5, 0.5) * 1.4);
     s.albedo = mix(m.color2.xyz, m.base_color.xyz, t);
   }
@@ -282,6 +284,49 @@ Sample evaluate_material(Material m, SurfacePoint sp) {
   s.roughness = clamp(s.roughness, 0.0, 1.0);
   s.metallic = clamp(s.metallic, 0.0, 1.0);
   return s;
+}
+
+/* An axis material (shading.cpp's evaluate_material): weights by slope, each part triplanar, blended. */
+float axis_step(float e0, float e1, float x) {
+  if (e1 - e0 < 1e-5) return x >= e0 ? 1.0 : 0.0;
+  float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+Sample evaluate_material(Material m, SurfacePoint sp) {
+  int mode = int(m.axis.w + 0.5);
+  if (mode == 0) return evaluate_plain(m, sp, false);
+  vec3 n = mode == 1 ? sp.normal : sp.local_normal;
+  float len = length(n);
+  bool ok = !isnan(len) && !isinf(len) && len > 1e-6;
+  float ny = ok ? n.y / len : 0.0;
+  n = ok ? n / len : vec3(1.0, 0.0, 0.0);
+  float c = m.axis.x, b = m.axis.y;
+  float wt = axis_step(c - b, c + b, ny), wb = axis_step(c - b, c + b, -ny);
+  float w[3] = float[3](wt, max(0.0, 1.0 - wt - wb), wb);
+  SurfacePoint tp = sp;
+  tp.local_position = (mode == 1 ? sp.position : sp.local_position) * m.axis.z;
+  tp.local_normal = n;
+  Sample o;
+  o.albedo = vec3(0.0); o.metallic = 0.0; o.roughness = 0.0; o.specular = 0.0; o.alpha = 0.0; o.emission = vec3(0.0);
+  vec3 nsum = vec3(0.0);
+  float wsum = 0.0;
+  for (int k = 0; k < 3; k++) {
+    if (w[k] <= 1e-3) continue;
+    int idx = m.axis_i[k];
+    Material sm = idx >= 0 ? mats[idx] : m;
+    Sample r = evaluate_plain(sm, tp, true);
+    o.albedo += r.albedo * w[k]; o.metallic += r.metallic * w[k]; o.roughness += r.roughness * w[k];
+    o.specular += r.specular * w[k]; o.alpha += r.alpha * w[k]; o.emission += r.emission * w[k];
+    nsum += r.normal * w[k];
+    wsum += w[k];
+  }
+  if (wsum > 0.0) {
+    float inv = 1.0 / wsum;
+    o.albedo *= inv; o.metallic *= inv; o.roughness *= inv; o.specular *= inv; o.alpha *= inv; o.emission *= inv;
+  }
+  o.normal = length(nsum) > 1e-6 ? normalize(nsum) : sp.normal;
+  o.unlit = m.flags.x != 0;
+  return o;
 }
 
 /* ----------------------------------------------------------------- BRDF */

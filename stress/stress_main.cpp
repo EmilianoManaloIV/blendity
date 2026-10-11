@@ -2138,6 +2138,45 @@ static void test_shading_cost(Report &rep, const Options &o) {
   rep.row({std::string(display::kernel_name(display::active_kernel())) + ", all threads", f2(par_ms), f1(hdr.size() / par_ms / 1000.0),
            f2(pow_ms / par_ms) + "x"});
   rep.note("CPU: " + cpu::describe() + ". The sRGB table is correctly rounded for every float in [0, 1] (checked in the unit tests).");
+  /* Axis materials (task 0029): a material's evaluation against an axis material's, on normals spread over every
+   * direction (about half the points at a transition, so two parts each), UV-grid textures on both. */
+  {
+    rep.table({"material evaluation (2M points, 1 thread)", "ms", "ns / point", "vs plain"});
+    Material plain;
+    plain.procedural = (int)Procedural::UVGrid;
+    plain.mapping = (int)MaterialMapping::Box;
+    auto top = std::make_shared<Material>(plain), side = std::make_shared<Material>(plain);
+    side->base_color = {0.5f, 0.3f, 0.1f};
+    Material axis = plain;
+    axis.axis_mode = 1;
+    axis.axis_blend = 0.4f;
+    (void)plain.textures();
+    (void)top->textures();
+    (void)side->textures();
+    Material::Resolved atx = axis.textures();  // (parts by pointer: no asset files in the stress run)
+    atx.axis[0] = top;
+    atx.axis_tx[0] = &top->textures();
+    atx.axis[1] = side;
+    atx.axis_tx[1] = &side->textures();
+    const int N = 2000000;
+    std::vector<SurfacePoint> pts(4096);
+    for (size_t i = 0; i < pts.size(); i++) {
+      const float a = (float)i * 2.399963f, z = 1.0f - 2.0f * (i + 0.5f) / pts.size(), r = std::sqrt(1.0f - z * z);
+      SurfacePoint &sp = pts[i];
+      sp.normal = sp.local_normal = sp.geo_normal = Vec3(r * std::cos(a), z, r * std::sin(a));
+      sp.position = sp.local_position = sp.normal * 3.7f;
+    }
+    double sink = 0;
+    const double p_ms = time_ms([&] {
+      for (int i = 0; i < N; i++) sink += evaluate_material(plain, plain.textures(), pts[(size_t)i & 4095]).albedo.x;
+    });
+    const double a_ms = time_ms([&] {
+      for (int i = 0; i < N; i++) sink += evaluate_material(axis, atx, pts[(size_t)i & 4095]).albedo.x;
+    });
+    rep.row({"plain (triplanar UV grid)", f2(p_ms), f1(p_ms * 1e6 / N), "1.00x"});
+    rep.row({"axis material (World, two parts)", f2(a_ms), f1(a_ms * 1e6 / N), f2(a_ms / std::max(1e-9, p_ms)) + "x"});
+    rep.note(strprintf("Task 0029's target: an axis material under 1.6x a plain one per point: %s. (checksum %.1f)", a_ms < 1.6 * p_ms ? "met" : "NOT MET", sink));
+  }
 }
 
 static void test_pathtracer(Report &rep, const Options &o) {

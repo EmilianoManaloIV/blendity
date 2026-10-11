@@ -249,7 +249,7 @@ Bitmap ProceduralTexture::output(int which, const TexPlanes &p) const {
             break;
           case TextureOutput::Normal: {
             /* A Sobel of the height, wrapping; the tile's size in metres gives the slope its scale. */
-            auto H = [&](int xx, int yy) { return p.height[(size_t)p.wrap_y(yy) * p.w + p.wrap_x(xx)]; };
+            auto H = [&](int64_t xx, int64_t yy) { return p.height[(size_t)p.wrap_y((int)yy) * p.w + p.wrap_x((int)xx)]; };
             const float dx = (H(x + 1, y - 1) + 2.0f * H(x + 1, y) + H(x + 1, y + 1)) - (H(x - 1, y - 1) + 2.0f * H(x - 1, y) + H(x - 1, y + 1));
             const float dy = (H(x - 1, y + 1) + 2.0f * H(x, y + 1) + H(x + 1, y + 1)) - (H(x - 1, y - 1) + 2.0f * H(x, y - 1) + H(x + 1, y - 1));
             /* A 64-texel tile with strength 1: a unit height over the tile tilts 45 degrees; each axis by its own size. */

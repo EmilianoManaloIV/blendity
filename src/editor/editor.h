@@ -747,6 +747,8 @@ class Editor {
   void draw_materials_window(const Recti &r);
   std::vector<MaterialPtr> pickable_materials(GameObject *g);
   void material_picker_popup(ui::Id pid, GameObject *g, std::function<void(const MaterialPtr &)> pick);
+  /* An axis material's part picked in the Inspector ("Axis Top" / "Axis Side" / "Axis Bottom"): one undo step. */
+  void set_material_ref(Material *mat, const std::string &field, const MaterialPtr &picked);
   std::string material_pick_search_;
 
  public:

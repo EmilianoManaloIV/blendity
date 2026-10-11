@@ -5,6 +5,7 @@
 // Browser do. Each tile is a shaded preview sphere; click one to edit it
 // right here, drag it onto an object, a face, a Hierarchy row or a slot.
 #include "editor.h"
+#include "../render/shading.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -27,11 +28,14 @@ struct Preview {
 const Preview &material_preview(const Material &m, int size) {
   static std::unordered_map<const Material *, Preview> cache;
   Preview &p = cache[&m];
-  if (p.size == size && p.version == m.version && !p.px.empty()) return p;
+  uint64_t key = m.version;  // an axis material's parts too: the preview shows them
+  for (const MaterialPtr &part : m.textures().axis)
+    if (part) key = key * 1099511628211ull + part->version;
+  if (p.size == size && p.version == key && !p.px.empty()) return p;
   p.size = size;
-  p.version = m.version;
+  p.version = key;
   p.px.assign((size_t)size * size, 0);
-  const TexturePtr tex = m.procedural ? nullptr : m.textures().base;
+  (void)m.textures();  // resolved here (one thread), not in the evaluation below
   const Vec3 L = normalize(Vec3(-0.45f, 0.65f, 0.6f)), V(0, 0, 1);
   const Vec3 H = normalize(L + V);
   const float rough = clampf(m.roughness, 0.03f, 1.0f);
@@ -48,16 +52,15 @@ const Preview &material_preview(const Material &m, int size) {
         continue;
       }
       const Vec3 n(nx, ny, std::sqrt(1 - r2));
-      Vec3 albedo = m.base_color;
-      if (tex) {
-        const Vec2 uv(0.5f + std::atan2(n.x, n.z) / (2 * kPi), 0.5f - std::asin(clampf(n.y, -1.0f, 1.0f)) / kPi);
-        const Vec4 t = tex->sample(Vec2(uv.x * m.tiling.x + m.offset.x, uv.y * m.tiling.y + m.offset.y), 0.0f);
-        albedo = Vec3(albedo.x * t.x, albedo.y * t.y, albedo.z * t.z);
-      }
-      else if (m.procedural == 1) {  // checker
-        const bool c = ((int)std::floor((n.x + 1) * m.procedural_scale * 0.5f) + (int)std::floor((n.y + 1) * m.procedural_scale * 0.5f)) & 1;
-        if (c) albedo = m.procedural_color2;
-      }
+      /* The material's own evaluation (its maps, procedurals, an axis material's parts) on a unit sphere. */
+      SurfacePoint sp;
+      sp.position = sp.local_position = n;
+      sp.normal = sp.geo_normal = sp.local_normal = n;
+      sp.uv = Vec2(0.5f + std::atan2(n.x, n.z) / (2 * kPi), 0.5f - std::asin(clampf(n.y, -1.0f, 1.0f)) / kPi);
+      sp.local_bounds.add(Vec3(-1.0f));
+      sp.local_bounds.add(Vec3(1.0f));
+      const SurfaceSample ss = evaluate_material(m, m.textures(), sp);
+      Vec3 albedo = ss.albedo;
       const float ndl = std::max(0.0f, dot(n, L));
       const Vec3 f0 = Vec3(0.04f) * (1 - m.metallic) + albedo * m.metallic;
       const float spec = std::pow(std::max(0.0f, dot(n, H)), shin) * (shin + 8) / (8 * kPi) * ndl;
@@ -267,6 +270,23 @@ size_t Editor::delete_material(const MaterialPtr &m) {
   mark_changed("Delete Material " + name);
   Log::info("Deleted the material %s: %zu slot(s) emptied%s", name.c_str(), slots, file ? ", its file is in the Recycle Bin / Trash" : "");
   return slots;
+}
+
+void Editor::set_material_ref(Material *mat, const std::string &field, const MaterialPtr &picked) {
+  if (!mat || !picked) return;
+  if (picked->asset_path.empty()) {
+    Log::warn("%s takes a material asset: save %s as a Material Asset first", field.c_str(), picked->name.c_str());
+    return;
+  }
+  if (picked.get() == mat) {
+    Log::warn("%s: a material can't be its own part (leave it empty for its own maps)", field.c_str());
+    return;
+  }
+  std::string *slot = field == "Axis Top" ? &mat->axis_top : field == "Axis Side" ? &mat->axis_side : field == "Axis Bottom" ? &mat->axis_bottom : nullptr;
+  if (!slot) return;
+  *slot = picked->asset_path;
+  mat->touch();
+  mark_changed("Set " + field + " " + picked->name);
 }
 
 /* Everything a face or slot can use: the object's own slots first, then the

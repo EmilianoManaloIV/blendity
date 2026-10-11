@@ -67,6 +67,13 @@ struct Material {
   bool double_sided = false;
   bool unlit = false;   // Unity "Unlit" shader / Blender Emission-only
   bool cast_shadows = true;
+  /* Axis material (ADR 0018): surfaces facing up take Top, steep ones Side, downward ones Bottom (asset paths;
+   * empty = this material's own maps), by the normal in World or Local space, projected triplanar. */
+  int axis_mode = 0;  // 0 Off, 1 World, 2 Local
+  std::string axis_top, axis_side, axis_bottom;
+  float axis_angle = 45.0f;  // degrees from up where Top turns into Side
+  float axis_blend = 0.1f;   // the transition's half width, in cosine units
+  float axis_scale = 1.0f;   // metres per texture tile for the projection
   uint64_t version = 1;
   /* Project-relative .mat file when this is a Material asset (Unity: a material in the
    * Project window, shared by every renderer that uses it); empty for a scene material. */
@@ -78,12 +85,18 @@ struct Material {
   /* Resolved textures (cached; reloaded when the path or file changes). */
   struct Resolved {
     TexturePtr base, metallic, roughness, normal, emission;
+    /* An axis material's Top / Side / Bottom and their own resolved textures (resolved with this material, on one
+     * thread, so shading never resolves); null = this material's own maps. */
+    std::shared_ptr<Material> axis[3];
+    const Resolved *axis_tx[3] = {nullptr, nullptr, nullptr};
   };
   const Resolved &textures() const;
 
  private:
   mutable Resolved resolved_;
   mutable uint64_t resolved_version_ = 0;
+  mutable uint64_t axis_versions_[3] = {0, 0, 0};
+  mutable bool resolving_ = false;  // in textures() (an axis part naming a material mid-resolve is refused: no cycles)
   mutable size_t resolved_cache_gen_ = 0;
 };
 using MaterialPtr = std::shared_ptr<Material>;

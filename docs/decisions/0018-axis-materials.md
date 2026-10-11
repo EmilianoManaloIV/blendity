@@ -20,17 +20,22 @@ rotating the object rotates the grass with it, and a top/side split would need h
   with the object (a carved stone whose moss turns with it).
 - **Each sub-material is sampled triplanar** at the world (or local) position, weights `|n|^4`, so no UVs
   are needed and nothing stretches on the sides. Their albedo, roughness, metallic and emission blend
-  linearly; their normal maps blend with a whiteout blend.
+  linearly; their normals (already in world space by then) blend as a weighted, renormalised sum.
 - **References by asset path, not embedded:** the sub-materials are ordinary `.mat` assets (each can use
   procedural textures, ADR 0017), shared and edited in the Materials window like any other; the Boolean
   modifier's by-name pattern. A missing path falls back to the material's own maps.
 - **Every renderer the same way:** `evaluate_material` (rasterizer and CPU path tracer) and the GPU
-  kernel's (sub-materials appended to its material table; their indices in the free `flags.w` /
-  `color2.w`). The views' render hash mixes the sub-materials' versions (one level deep: a sub-material
-  can't itself be an axis material).
+  kernel's (sub-materials appended once each to its material table; the parent's mode, angle, blend and
+  scale in a new `GMaterial::axis`, the parts' indices in `axis_i`). The views' render hash mixes the
+  sub-materials' versions (one level deep: a sub-material is used as a plain material).
+- **The parent keeps its surface settings:** unlit, alpha clip and the like come from the parent; a
+  part's own tiling multiplies the axis scale.
 
 ## Consequences
 - An axis material costs three triplanar lookups per used sub-material per pixel at the blend; a flat
   top or a vertical side pays for one sub-material (its weight is 1, the others are skipped).
 - Exports bake it (ADR 0019): the raw axis material has no single image an OBJ could reference.
-- Recursion is refused (a sub-material that is an axis material is used as a plain material).
+- Recursion is refused (a sub-material that is an axis material is used as a plain material); a cycle
+  of axis materials referring to each other is cut while resolving, and a part naming the parent itself
+  is ignored.
+- A NaN or zero normal takes the Side part (a fixed direction), never a black pixel.

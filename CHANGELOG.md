@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 51): axis materials (task 0029, ADR 0018)
+
+**Asked:** "a material that will always have grass on top followed by dirt, regardless of rotation".
+
+**Added**
+- **Axis materials:** a material's **Axis Mode** (World or Local) and three parts, **Top**, **Side** and
+  **Bottom** (material assets picked in the Inspector; empty uses the material's own maps). Surfaces facing
+  up take Top, steep ones Side, downward ones Bottom, by the normal in the world (World: grass stays on top
+  however the object turns) or the object's own space (Local: moss that turns with the stone); **Axis
+  Angle** sets where Top turns into Side, **Axis Blend** how soft the edge is, **Axis Scale** the
+  projection's tile size. The parts are projected triplanar, so no UVs are needed.
+- The same in the Scene and Game views, F12 raster, the CPU path tracer and the GPU path tracer; the
+  Materials window's previews show axis materials and procedurals (they showed neither).
+
+**Checked**
+- New tests (round 51): World mode puts Top up, Side on steep faces and Bottom underneath whatever the
+  object's rotation; Local mode follows the object; Blend 0 is a hard edge and 0.3 mixes; a part's texture
+  varies across a surface without UVs; the fields round-trip through a `.mat`, an edit undoes, and a part's
+  edit changes the views' hash; an F12 raster render from above shows the Top, still after a quarter turn
+  in World mode and the Side in Local mode; the CPU and both GPUs agree on an axis-material cube (mean
+  difference 0.0006 of 0.187).
+- Stress `shading`: an axis material with two parts 1.51× a plain one per point (target under 1.6×).
+- Unit checks: Windows 8,371, 0 failed (431 tests); the whole suite in render-cache verify mode: 8,372,
+  0 failed, 0 stale pictures. Linux with libraries: 8,321, 0 failed. Sanitizer build: 8,243, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `gpu` stress clean.
+
+**Review (code reviewer)** found and these were fixed, each with a test: two axis materials naming each
+other recursed without end (now cut while resolving, a part naming the parent itself is ignored); the GPU
+material table's iterator could be invalidated while appending parts; the GPU projected procedural parts at
+a different point than the CPU; the shadow-map (RSM) cache key missed the parts; a NaN normal shaded black
+(now the Side part); the views' hash mixes the parts as resolved. Also: a compiler warning in the normal
+output's Sobel (64-bit indices).
+
 ## 2026-10-11 (round 50): the Textures window (task 0028)
 
 **Asked:** a tab dedicated to making procedural textures with a Blender-style modifier stack.
