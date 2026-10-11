@@ -74,6 +74,7 @@ bool SceneCamera::update(double now) {
 
 Editor::Editor() = default;
 Editor::~Editor() {
+  procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
   if (window_) destroy_window(window_);
 }
 
@@ -337,6 +338,12 @@ void Editor::frame(std::vector<Event> &events) {
   measured_fps_ = (float)frame_stamps_.size();
   process_events(events);
   update_procedural_shapes();
+  /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
+  if (texture_touch_pending_ && !ui_.in.down[0]) {
+    procedural_texture_clear_previews();
+    invalidate_material_textures();
+    texture_touch_pending_ = false;
+  }
   if (scene_ && scene_->render.device == 1) gpu::prewarm();  // once; compiles the GPU kernel off the UI thread
   /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
    * mesh instead, or leave Edit Mode for anything without one. */

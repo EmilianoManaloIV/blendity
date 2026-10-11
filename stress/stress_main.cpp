@@ -1981,6 +1981,91 @@ static void test_textures(Report &rep, const Options &o) {
     if (size == 1024) rep.note(strprintf("1024 x 1024, 8 layers: %.0f ms (task 0027's target: under 150 ms) %s", ms, ms < 150.0 ? "met" : "NOT MET"));
   }
   rep.note(strprintf("%d threads (JobSystem).", JobSystem::global().thread_count()));
+  /* Live shading (task 0031): a point of a stack evaluated directly, one thread, and the albedo plus the normal
+   * (four more points) as a close-up pixel needs them. */
+  {
+    rep.table({"live point evaluation (1 thread)", "layers", "ns / point", "with the normal ns"});
+    for (int which = 0; which < 2; which++) {
+      ProceduralTexture t;
+      apply_texture_preset(t, "Bricks");
+      if (which == 1) {
+        t.add("Blur");
+        t.add("Levels");
+        t.add("Warp");
+        t.add("Height AO");
+        t.add("Hue / Saturation");
+      }
+      t.width = t.height = 1024;
+      TexPlanes pl;
+      std::vector<LayerAux> aux;
+      t.evaluate(pl, &aux);
+      const LiveTexture live(t, std::move(aux), pl.w, pl.h);
+      const int N = o.quick ? 100000 : 400000;
+      double sink = 0;
+      const double a = time_ms([&] {
+        for (int i = 0; i < N; i++) sink += live.at((i % 997) * 0.001003f, (i / 997) * 0.0017f).height;
+      });
+      const double b = time_ms([&] {
+        for (int i = 0; i < N / 4; i++) sink += live.at((i % 997) * 0.001003f, (i / 997) * 0.0017f).height + live.normal((i % 997) * 0.001003f, (i / 997) * 0.0017f).z;
+      });
+      rep.row({which ? "Bricks + 5 filters" : "Bricks preset", std::to_string(t.layers.size()), f1(a * 1e6 / N), f1(b * 1e6 / (N / 4))});
+      if (which == 0) rep.note(strprintf("Task 0031's target: the Bricks preset under 1 us a point: %s. (checksum %.1f)", a * 1e6 / N < 1000.0 ? "met" : "NOT MET", sink));
+    }
+  }
+  /* A close-up view: a quad with the Bricks texture filling a 1920 x 1080 deferred frame, its texels larger
+   * than the pixels, with Live Shading and without (the image). */
+  {
+    ProceduralTexture t;
+    apply_texture_preset(t, "Bricks");
+    t.width = t.height = 256;
+    TexPlanes pl;
+    std::vector<LayerAux> aux;
+    t.evaluate(pl, &aux);
+    auto live = std::make_shared<const LiveTexture>(t, std::move(aux), pl.w, pl.h);
+    auto img = std::make_shared<Texture>();
+    img->build(t.output(0, pl), true);
+    auto nmap = std::make_shared<Texture>();
+    nmap->build(t.output(1, pl), false);
+    auto quad = primitives::quad(2.0f);
+    rep.table({"close-up 1080p frame (deferred)", "ms", "vs the image"});
+    double base = 0;
+    for (int mode = 0; mode < 2; mode++) {
+      /* The material's resolved maps set by hand (no asset file in the stress project). */
+      MaterialPtr m = make_material("bricks", Vec3(1.0f));
+      Material::Resolved &rs = const_cast<Material::Resolved &>(m->textures());
+      rs.base = img;
+      rs.normal = nmap;
+      if (mode == 1) {
+        rs.live[0] = live;
+        rs.live_output[0] = 0;
+        rs.live[3] = live;
+        rs.live_output[3] = 1;
+      }
+      std::vector<MaterialPtr> mats = {m};
+      Image fb;
+      fb.resize(1920, 1080);
+      RenderTarget rt;
+      rt.attach(fb, {0, 0, 1920, 1080});
+      Renderer3D r;
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      LightingEnv env;
+      env.camera_pos = {0, 0, -0.4f};
+      const double ms = time_ms([&] {
+        r.begin(&rt, Mat4::look_at(env.camera_pos, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, 16.0f / 9, 0.01f, 10), env, opt);
+        r.clear(0xFF000000);
+        DrawItem it;
+        it.mesh = &quad->render_mesh_tangents();
+        it.materials = &mats;
+        it.double_sided = true;
+        r.add(it);
+        r.flush();
+      }, o.quick ? 1 : 3);
+      if (mode == 0) base = ms;
+      rep.row({mode ? "Live Shading" : "the image (Live Shading off)", f2(ms), f2(ms / std::max(1e-9, base)) + "x"});
+      if (mode == 1) rep.note(strprintf("Task 0031's target: a close-up with Live Shading under 2x the image's frame: %s.", ms < 2.0 * base ? "met" : "NOT MET"));
+    }
+  }
   /* Fuzz: every layer type with every field at NaN, infinity, huge and negative values, at 64 x 64. */
   struct Fuzz : Reflector {
     int which = 0, n = 0;
@@ -2010,12 +2095,20 @@ static void test_textures(Report &rep, const Options &o) {
       l->reflect(f);
       l->opacity = which == 3 ? std::numeric_limits<float>::quiet_NaN() : 1.0f;
       TexPlanes p;
-      t.evaluate(p);
+      std::vector<LayerAux> aux;
+      t.evaluate(p, &aux);
       bool bad = p.w != 64 || p.h != 64;
       for (size_t i = 0; i < p.size() && !bad; i++)
         bad = !finite_bits(p.height[i]) || !finite_bits(p.albedo[i].x) || !finite_bits(p.rough[i]) || !finite_bits(p.mask[i]);
       const Bitmap nm = t.output(1, p);
       bad = bad || nm.width != 64 || nm.rgba8.size() != (size_t)64 * 64 * 4;
+      /* The live point evaluation of the same stack (task 0031), at ordinary and odd points. */
+      const LiveTexture live(t, std::move(aux), p.w, p.h);
+      for (float u : {0.3f, -7.25f, 1e9f, std::numeric_limits<float>::quiet_NaN()}) {
+        const TexPoint q = live.at(u, 0.6f);
+        const Vec3 nn = live.normal(u, 0.6f);
+        bad = bad || !finite_bits(q.height) || !finite_bits(q.albedo.x) || !finite_bits(q.rough) || !finite_bits(nn.x) || !finite_bits(nn.z);
+      }
       runs++;
       problems += bad;
       if (bad) std::printf("  [textures] problem: %s with fuzz set %d\n", info.name.c_str(), which);

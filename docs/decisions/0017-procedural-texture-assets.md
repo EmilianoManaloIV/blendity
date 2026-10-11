@@ -44,3 +44,19 @@ the GPU kernel, with no room for a composable stack.
   forward and the Textures window's presets (Bricks, Wood Floor, Tatami, Tiles, Noise) are the entry.
 - Axis materials (ADR 0018) reference `.mat` assets whose maps are these textures; the texture bake
   (ADR 0019) samples them through `evaluate_material`, so both build on this without special cases.
+
+## Amendment (2026-10-11, task 0031): live shading as well as images
+The user, after this was accepted: "Not only do I want the procedural textures to be evaluated at a set
+resolution. I want to view them change on the material itself... still having the convenience of live
+shaders." So the images stay (exports, bakes, the GPU path tracer, distant pixels), and beside them:
+- **A stack can be evaluated at a point** (`LiveTexture`, an immutable snapshot of the texture plus the
+  planes its neighbourhood filters need, taken when a material resolves): generators and point filters
+  exactly, Warp and Tile by evaluating the layers below at the moved point, Blur, Edge Wear and Height AO
+  from planes kept from the set-resolution evaluation.
+- **The rasterizer shades with it where the image would be magnified** (up close, resolution-free like a
+  shader) and while the texture is being edited; elsewhere it samples the mipmapped images, which don't
+  alias. A texture's **Live Shading** turns it off.
+- **Edits show on the objects while a field is dragged:** the images are re-evaluated at a preview size
+  each frame and at the set resolution on release.
+- The first consequence above ("no per-pixel procedural evaluation in the renderers") no longer holds for
+  the CPU rasterizer; the GPU kernel still needs no change.

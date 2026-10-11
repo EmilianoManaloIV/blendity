@@ -211,6 +211,7 @@ static void round49_tests();
 static void round50_tests();
 static void round51_tests();
 static void round52_tests();
+static void round53_tests();
 
 int main() {
   register_builtin_components();
@@ -840,6 +841,7 @@ int main() {
   round50_tests();
   round51_tests();
   round52_tests();
+  round53_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -19405,5 +19407,334 @@ static void round52_tests() {
     CHECK(ed.edit_vert_selected(8) && ed.edit_vert_selected(12));  // a coplanar quad's corner added; the other kept
     ed.command("edit face");
     CHECK(ed.edit_face_selected(2) && !ed.edit_face_selected(3));
+  });
+}
+
+/* ===================================================================== */
+/* Round 53 (task 0031, ADR 0017 amended): live procedural textures       */
+/* ===================================================================== */
+
+/* A texture of one stack, evaluated to planes (with the live snapshot) at its size. */
+struct R53Eval {
+  TexPlanes planes;
+  std::shared_ptr<LiveTexture> live;
+};
+static R53Eval r53_eval(const ProceduralTexture &t) {
+  R53Eval e;
+  std::vector<LayerAux> aux;
+  t.evaluate(e.planes, &aux);
+  e.live = std::make_shared<LiveTexture>(t, std::move(aux), e.planes.w, e.planes.h);
+  return e;
+}
+
+/* A quad facing -Z with UVs 0..1 across 2 m, drawn with a material through the deferred rasterizer, the camera
+ * at `dist` in front: the middle row's linear green. */
+static std::vector<float> r53_row(const MaterialPtr &mat, float dist, int size = 128) {
+  static auto quad = primitives::quad(2.0f);
+  std::vector<MaterialPtr> mats = {mat};
+  Image img;
+  img.resize(size, size);
+  RenderTarget rt;
+  rt.attach(img, {0, 0, size, size});
+  rt.want_hdr = true;
+  Renderer3D r;
+  RasterOptions opt;
+  opt.shade = ShadeMode::Deferred;
+  LightingEnv env;
+  env.view_transform = ViewTransform::Standard;
+  env.camera_pos = {0.3f, 0.2f, -dist};
+  r.begin(&rt, Mat4::look_at(env.camera_pos, {0.3f, 0.2f, 0}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1, 0.01f, 50), env, opt);
+  r.clear(0xFF000000);
+  DrawItem it;
+  it.mesh = &quad->render_mesh_tangents();
+  it.materials = &mats;
+  it.double_sided = true;
+  r.add(it);
+  r.flush();
+  std::vector<float> row(size);
+  for (int x = 0; x < size; x++) row[x] = rt.hdr.empty() ? 0.0f : rt.hdr[(size_t)(size / 2) * size + x].y;
+  return row;
+}
+
+static void round53_tests() {
+  test("live textures: a point evaluation equals the planes at every texel centre, for every layer type", [] {
+    int bad_types = 0;
+    for (const TextureLayerInfo &info : texture_layer_infos()) {
+      ProceduralTexture t;
+      /* (Warp and Tile at 512: their planes read whole texels, which at 64 is coarser than a brick's bevel.) */
+      t.width = t.height = info.name == "Warp" || info.name == "Tile" ? 512 : 64;
+      t.seed = 7;
+      if (info.category != "Generators" || info.name == "Image") t.add("Brick");  // something for a filter to work on
+      if (info.name == "Image") {
+        /* An image file in the scratch project for the Image layer. */
+        std::vector<uint32_t> px(16 * 16);
+        for (int i = 0; i < 16 * 16; i++) px[i] = 0xFF000000u | (uint32_t)(i * 7 & 255) << 16 | (uint32_t)(i * 3 & 255) << 8 | 90u;
+        const std::string path = fs::join(scratch_project(), "Assets/R53_image.png");
+        CHECK(write_png(path, px.data(), 16, 16, 16));
+      }
+      TextureLayer *l = t.add(info.name);
+      CHECK(l != nullptr);
+      if (!l) continue;
+      if (info.name == "Mask by Height") t.add("Invert")->use_mask = true;  // something that reads the mask
+      if (info.name == "Image") {
+        struct SetImage : Reflector {  // sets the Image field, ignores the rest
+          void field(const char *, float &, float, float, float) override {}
+          void field(const char *, int &, int, int) override {}
+          void field(const char *, bool &) override {}
+          void field(const char *, Vec3 &) override {}
+          void color(const char *, Vec3 &) override {}
+          void enumeration(const char *, int &, const char *const *, int) override {}
+          void text(const char *, std::string &) override {}
+          void mesh(const char *, MeshPtr &) override {}
+          void texture(const char *, TextureRef &r) override { r.path = "Assets/R53_image.png"; }
+        } si;
+        l->reflect(si);
+      }
+      const R53Eval e = r53_eval(t);
+      const TexPlanes &p = e.planes;
+      size_t ok = 0, n = 0;
+      float worst = 0;
+      double sum = 0;
+      for (int y = 0; y < p.h; y++)
+        for (int x = 0; x < p.w; x++) {
+          const size_t i = (size_t)y * p.w + x;
+          const TexPoint q = e.live->at((x + 0.5f) / p.w, (y + 0.5f) / p.h);
+          const float d = std::max({std::fabs(q.height - p.height[i]), std::fabs(q.rough - p.rough[i]), std::fabs(q.albedo.x - p.albedo[i].x),
+                                    std::fabs(q.albedo.y - p.albedo[i].y), std::fabs(q.albedo.z - p.albedo[i].z)});
+          worst = std::max(worst, d);
+          sum += d;
+          ok += d <= 1.0f / 255.0f;
+          n++;
+        }
+      /* Warp and Tile: the planes read the nearest texel of the moved point, a point evaluation the point itself
+       * (up to half a texel away: across the bricks' bevels and edges that changes values), so for those the
+       * mean difference is what is held to a bound. Every other layer is exact at the centres. */
+      const bool moved = info.name == "Warp" || info.name == "Tile";
+      const double frac = (double)ok / std::max<size_t>(1, n), mean = sum / std::max<size_t>(1, n);
+      if (moved ? mean > 0.03 : frac < 1.0) {
+        std::printf("    %s: %.1f%% of texels within 1/255, mean difference %.4f (worst %.3f)\n", info.name.c_str(), 100.0 * frac, mean, worst);
+        bad_types++;
+      }
+      else if (moved) std::printf("    %s: mean difference %.4f\n", info.name.c_str(), mean);
+    }
+    CHECK(bad_types == 0);
+  });
+
+  test("live textures: the live normal matches the image's normal output (Sobel) within 10 degrees on smooth parts", [] {
+    ProceduralTexture t;
+    t.width = t.height = 64;
+    t.add("Noise");
+    const R53Eval e = r53_eval(t);
+    const Bitmap nm = t.output(1, e.planes);
+    size_t ok = 0, n = 0;
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) {
+        const uint8_t *c = &nm.rgba8[((size_t)y * 64 + x) * 4];
+        const Vec3 img = normalize(Vec3(c[0] / 127.5f - 1, c[1] / 127.5f - 1, c[2] / 127.5f - 1));
+        const Vec3 live = e.live->normal((x + 0.5f) / 64, (y + 0.5f) / 64);
+        const float h0 = e.live->at((x + 0.5f) / 64, (y + 0.5f) / 64).height;
+        const Vec3 fast = e.live->normal((x + 0.5f) / 64, (y + 0.5f) / 64, &h0);  // one-sided, as the rasterizer uses
+        ok += dot(img, live) > std::cos(10 * kDeg2Rad) && dot(img, fast) > std::cos(10 * kDeg2Rad);
+        n++;
+      }
+    std::printf("    %zu of %zu texels within 10 degrees\n", ok, n);
+    CHECK(ok >= n * 95 / 100);
+  });
+
+  test("live textures: up close a Brick texture's mortar edge is sharp with Live Shading and blurred without", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr);
+    if (!t) return;
+    t->width = t->height = 64;
+    t->touch();
+    MaterialPtr m = make_material("bricks", Vec3(1.0f));
+    m->base_map.path = t->asset_path + "#albedo";
+    m->touch();
+    /* Pixels between the mortar and the brick colours along a row (an edge's width). */
+    auto transitions = [](const std::vector<float> &row) {
+      float lo = 1e9f, hi = -1e9f;
+      for (float v : row) lo = std::min(lo, v), hi = std::max(hi, v);
+      int mid = 0;
+      for (float v : row) mid += v > lo + 0.2f * (hi - lo) && v < hi - 0.2f * (hi - lo);
+      return mid;
+    };
+    const auto live = r53_row(m, 0.35f);
+    t->live_shading = false;
+    t->touch();
+    m->touch();
+    const auto image = r53_row(m, 0.35f);
+    const int tl = transitions(live), ti = transitions(image);
+    std::printf("    in-between pixels across a row up close: %d live, %d from the 64-texel image\n", tl, ti);
+    CHECK(ti > 0);
+    CHECK(tl * 2 < ti);
+    /* Far away (a texel smaller than a pixel) both read the image: the same pixels. */
+    t->live_shading = true;
+    t->touch();
+    m->touch();
+    const auto far_live = r53_row(m, 30.0f, 64);
+    t->live_shading = false;
+    t->touch();
+    m->touch();
+    const auto far_image = r53_row(m, 30.0f, 64);
+    CHECK(far_live == far_image);
+  });
+
+  test("live textures: dragging a texture field changes the objects using it every frame (at 256), the set size on release", [] {
+    Editor ed;
+    r50_open(ed);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    if (!t) return;
+    t->width = t->height = 1024;
+    t->touch();
+    MaterialPtr m = make_material("noise", Vec3(1.0f));
+    m->base_map.path = t->asset_path + "#albedo";
+    m->touch();
+    r34_steps(ed, 3);
+    CHECK(m->textures().base && m->textures().base->width == 1024);
+    CHECK(m->textures().live[0] != nullptr);
+    const ui::Context &u = ed.ui_for_test();
+    const Recti row = ed.texture_ui_rect_for_test("field:L0 Detail");
+    CHECK(row.w > 0);
+    if (row.w <= 0) return;
+    const int lx = row.x - u.px(60), ly = row.y - u.row_h() / 2;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx, ly)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, lx, ly)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx + 30, ly)});
+    const size_t g1 = material_textures_generation();
+    const uint64_t v1 = m->textures().live[0] ? m->textures().live[0]->hash() : 0;
+    const int w1 = m->textures().base ? m->textures().base->width : 0;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx + 60, ly)});
+    const size_t g2 = material_textures_generation();
+    const uint64_t v2 = m->textures().live[0] ? m->textures().live[0]->hash() : 0;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, lx + 60, ly)});
+    r34_steps(ed, 3);
+    const int after = m->textures().base ? m->textures().base->width : 0;
+    std::printf("    during the drag: image %d wide, a new snapshot each frame %s; after %d\n", w1, v1 != v2 ? "yes" : "no", after);
+    CHECK(w1 == 256);
+    CHECK(g2 != g1 && v1 != v2);
+    CHECK(after == 1024);
+    CHECK(!procedural_texture_preview());
+  });
+
+  test("live textures: a drag's 256 preview keeps texel-sized filters their size (Edge Wear isn't 8x wider until release)", [] {
+    ProceduralTexture t;
+    apply_texture_preset(t, "Bricks");  // Brick, Noise, Edge Wear
+    t.width = t.height = 2048;
+    TexPlanes full, small;
+    t.evaluate(full);
+    t.evaluate(small, nullptr, 256);
+    auto mean = [](const TexPlanes &p) {
+      double s = 0;
+      for (const Vec3 &a : p.albedo) s += a.x + a.y + a.z;
+      return s / (3.0 * p.size());
+    };
+    const double mf = mean(full), ms = mean(small);
+    std::printf("    mean albedo: %.4f at 2048, %.4f in the 256 preview\n", mf, ms);
+    CHECK(small.w == 256);
+    CHECK(std::fabs(ms - mf) < 0.03 * mf);  // before: the wear 8 texels of 256 wide (8x), lightening the preview
+  });
+
+  test("live textures: stacked Warp and Tile layers evaluate at a point like the planes (and in linear time)", [] {
+    /* Four (their planes round to texels at each one; many more compound that rounding), then twelve timed. */
+    ProceduralTexture t;
+    t.width = t.height = 1024;  // (two Tiles make the bricks 4x smaller: finer planes keep the rounding small)
+    t.add("Brick");
+    for (int i = 0; i < 4; i++) t.add(i % 2 ? "Warp" : "Tile");
+    const R53Eval e = r53_eval(t);
+    ProceduralTexture t12 = t;
+    for (int i = 0; i < 8; i++) t12.add(i % 2 ? "Warp" : "Tile");
+    const R53Eval e12 = r53_eval(t12);
+    double sum = 0;
+    for (int y = 0; y < 1024; y += 7)
+      for (int x = 0; x < 1024; x += 7) {
+        const TexPoint q = e.live->at((x + 0.5f) / 1024, (y + 0.5f) / 1024);
+        sum += std::fabs(q.height - e.planes.height[(size_t)y * 1024 + x]);
+      }
+    const double mean = sum / (147.0 * 147.0);
+    ScopedTimer timer;
+    for (int i = 0; i < 1000; i++) (void)e12.live->at(i * 0.001f, 0.3f);
+    const double ms = timer.ms();
+    std::printf("    4 stacked Warp / Tile layers: mean difference %.4f; 12: %.1f us a point\n", mean, ms);
+    CHECK(mean < 0.05);
+    CHECK(ms < 200.0);  // 2^12 evaluations of the Brick a point without the shortcut (seconds for 1000)
+  });
+
+  test("live textures: an axis material's scale and Mirror wrapping keep the image where it is minified or can't be emulated", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    if (!t) return;
+    t->width = t->height = 64;
+    t->touch();
+    Material part;
+    part.name = "BrickPart";
+    part.base_map.path = t->asset_path + "#albedo";
+    part.mapping = (int)MaterialMapping::Box;
+    create_material_asset(part, "Assets/Materials/R53/BrickPart.mat");
+    MaterialPtr axis = make_material("axis", Vec3(1.0f));
+    axis->axis_mode = 2;  // Local
+    axis->axis_top = axis->axis_side = axis->axis_bottom = "Assets/Materials/R53/BrickPart.mat";
+    axis->touch();
+    SurfacePoint sp;
+    sp.position = sp.local_position = {0.37f, 0.5f, 0.21f};
+    sp.normal = sp.local_normal = sp.geo_normal = {0, 1, 0};
+    sp.live_textures = true;
+    sp.footprint = sp.world_footprint = 0.005f;  // 0.32 texels a pixel at scale 1: live
+    auto eval = [&](const Material &m, bool live) {
+      SurfacePoint q = sp;
+      q.live_textures = live;
+      return evaluate_material(m, m.textures(), q).albedo;
+    };
+    axis->axis_scale = 1.0f;
+    axis->touch();
+    CHECK(length(eval(*axis, true) - eval(*axis, false)) > 1e-4f);  // magnified: the live value differs from the image's
+    axis->axis_scale = 0.1f;  // ten tiles a metre: 3.2 texels a pixel, minified
+    axis->touch();
+    CHECK(length(eval(*axis, true) - eval(*axis, false)) < 1e-6f);  // the image (before: live, shimmering)
+    MaterialPtr mirror = make_material("mirror", Vec3(1.0f));
+    mirror->base_map.path = t->asset_path + "#albedo";
+    mirror->mapping = (int)MaterialMapping::Box;
+    mirror->wrap = (int)TexWrap::Mirror;
+    mirror->touch();
+    CHECK(length(eval(*mirror, true) - eval(*mirror, false)) < 1e-6f);
+  });
+
+  test("live textures: the 256 preview is per texture: dragging one leaves the others at their size", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr a = ed.new_texture_asset_for_test("Noise"), b = ed.new_texture_asset_for_test("Tiles");
+    if (!a || !b) return;
+    a->width = a->height = b->width = b->height = 1024;
+    a->touch();
+    b->touch();
+    procedural_texture_set_preview(a->asset_path, true);
+    a->touch();
+    const int wa = procedural_texture_output(*a, 0)->width, wb = procedural_texture_output(*b, 0)->width;
+    procedural_texture_clear_previews();
+    std::printf("    in preview: %d, the other: %d\n", wa, wb);
+    CHECK(wa == 256 && wb == 1024);
+    CHECK(!procedural_texture_preview());
+  });
+
+  test("live textures: Live Shading saves with the texture, NaN coordinates stay finite, a stack of filters alone works", [] {
+    ProceduralTexture t;
+    t.width = t.height = 64;
+    t.live_shading = false;
+    t.add("Levels");
+    t.add("Blur");
+    const R53Eval e = r53_eval(t);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const TexPoint q = e.live->at(nan, 1e30f);
+    CHECK(std::isfinite(q.height) && std::isfinite(q.albedo.x));
+    CHECK(std::isfinite(e.live->normal(-1e20f, nan).z));
+    const std::string text = save_texture_text(t);
+    ProceduralTexture b;
+    CHECK(load_texture_text(text, b));
+    CHECK(!b.live_shading && b.layers.size() == 2);
   });
 }

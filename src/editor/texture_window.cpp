@@ -237,7 +237,8 @@ void Editor::draw_textures_window(const Recti &r) {
   if (changed && in.down[0]) texture_dragging_ = true;  // a drag on a field: the small preview until release
   if (!in.down[0]) {
     texture_dragging_ = false;
-    if (texture_touch_pending_) {  // the materials using it re-resolve once, at the final value
+    if (texture_touch_pending_) {  // the drag is over: the images at the set size again
+      procedural_texture_clear_previews();
       invalidate_material_textures();
       texture_touch_pending_ = false;
     }

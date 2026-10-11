@@ -3,6 +3,7 @@
 
 #include "colormanagement.h"
 #include "display.h"
+#include "../texture/procedural_texture.h"
 
 #include <algorithm>
 #include <cmath>
@@ -58,6 +59,7 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
   const float w[3] = {w_top, std::max(0.0f, 1.0f - w_top - w_bottom), w_bottom};
   SurfacePoint tp = sp;
   tp.local_position = (world ? sp.position : sp.local_position) / std::max(0.01f, m.axis_scale);
+  tp.footprint = (world ? sp.world_footprint : sp.footprint) / std::max(0.01f, m.axis_scale);  // in the projection's units
   tp.local_normal = n;
   SurfaceSample out;
   out.albedo = Vec3(0.0f);
@@ -93,6 +95,45 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
   return out;
 }
 
+namespace {
+/* A live texture's points looked up for one shading point: the slots that share a texture and projection
+ * (albedo, roughness, normal of one .ptex) walk the stack once. */
+struct LiveMemo {
+  struct Entry {
+    const LiveTexture *t;
+    float u, v;
+    TexPoint p;
+    bool has_n;
+    Vec3 n;
+  };
+  Entry e[6];
+  int count = 0;
+  /* An output as the image holds it: linear albedo, the normal encoded 0..1, roughness / height in x. */
+  Vec4 get(const LiveTexture &t, int out, Vec2 uv) {
+    /* Image convention (v = 0 at the bottom row) to the generators' (v = 0 at the top). */
+    const float u = uv.x - std::floor(uv.x), v = 1.0f - (uv.y - std::floor(uv.y));
+    Entry *hit = nullptr;
+    for (int i = 0; i < count; i++)
+      if (e[i].t == &t && e[i].u == u && e[i].v == v) hit = &e[i];
+    if (!hit) {
+      hit = &e[count < 6 ? count++ : 5];
+      *hit = Entry{&t, u, v, t.at(u, v), false, Vec3(0.0f)};
+    }
+    switch (out) {
+      case 1:
+        if (!hit->has_n) {
+          hit->n = t.normal(u, v, &hit->p.height);
+          hit->has_n = true;
+        }
+        return Vec4(hit->n.x * 0.5f + 0.5f, hit->n.y * 0.5f + 0.5f, hit->n.z * 0.5f + 0.5f, 1.0f);
+      case 2: return Vec4(hit->p.rough, hit->p.rough, hit->p.rough, 1.0f);
+      case 3: return Vec4(hit->p.height, hit->p.height, hit->p.height, 1.0f);
+      default: return Vec4(hit->p.albedo.x, hit->p.albedo.y, hit->p.albedo.z, 1.0f);
+    }
+  }
+};
+}  // namespace
+
 static SurfaceSample evaluate_surface(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp, bool force_box) {
   SurfaceSample s;
   s.albedo = m.base_color;
@@ -125,7 +166,7 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     float sum = std::max(an.x + an.y + an.z, 1e-6f);
     bw = an / sum;
   }
-  auto sample = [&](const TexturePtr &t) -> Vec4 {
+  auto sample_image = [&](const TexturePtr &t) -> Vec4 {
     if (!box) {
       float lod = (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) ? 0.0f : texture_lod(*t, ddx, ddy);
       return tex_sample(t, uv, lod, m, sp.tex);
@@ -136,6 +177,50 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     if (bw.z > 0.001f) r = r + tex_sample(t, {bp.x, bp.y}, 0, m, sp.tex) * bw.z;
     return r;
   };
+  /* Live procedural textures (task 0031): the stack evaluated at this point where the image would be
+   * magnified (a texel larger than the pixel), so a close-up stays sharp; elsewhere the mipmapped image,
+   * which doesn't alias. Not under a camera filter's texture rules (a retro look wants the low-res image). */
+  /* Not with Clamp / Mirror wrapping or Closest filtering either: a point of the tile has neither, and the
+   * switch from the image would show. */
+  const bool live_ok = sp.live_textures && !(sp.tex && sp.tex->active()) && m.wrap == (int)TexWrap::Repeat && m.filter != (int)TexFilter::Closest;
+  static thread_local LiveMemo memo;  // (per thread: built once, not per shaded point)
+  memo.count = 0;
+  /* How much of the live evaluation to take: all of it where a texel covers two pixels or more, none where it
+   * covers one or less (the mipmapped image), a crossfade between (no line where the two meet). */
+  auto live_weight = [&](const TexturePtr &t) {
+    if (!t) return 1.0f;
+    const float texels = (float)std::max(t->width, t->height);
+    float per_px;  // texels across one pixel
+    if (!box && m.mapping != (int)MaterialMapping::Generated) {
+      if (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) return sp.footprint <= 0.0f ? 1.0f : 0.0f;
+      per_px = std::max({std::fabs(ddx.x), std::fabs(ddx.y), std::fabs(ddy.x), std::fabs(ddy.y)}) * texels;
+    }
+    else {
+      if (sp.footprint <= 0.0f) return 1.0f;
+      const float tile = std::max({std::fabs(m.tiling.x), std::fabs(m.tiling.y), std::fabs(m.tiling.z)});
+      float size = 1.0f;  // the object-space size one tile spans (Generated: the bounds)
+      if (!box && sp.local_bounds.valid()) {
+        const Vec3 ext = sp.local_bounds.max - sp.local_bounds.min;
+        size = std::max(1e-6f, std::min({std::max(ext.x, 1e-6f), std::max(ext.y, 1e-6f), std::max(ext.z, 1e-6f)}));
+      }
+      per_px = sp.footprint * tile * texels / size;
+    }
+    return finite_bits(per_px) ? clampf((1.0f - per_px) * 2.0f, 0.0f, 1.0f) : 0.0f;
+  };
+  auto sample_slot = [&](int s, const TexturePtr &t) -> Vec4 {
+    const LiveTexture *lt = live_ok ? tx.live[s].get() : nullptr;
+    const float wl = lt ? live_weight(t) : 0.0f;
+    if (wl <= 0.0f) return sample_image(t);
+    const int out = tx.live_output[s];
+    Vec4 r(0, 0, 0, 0);
+    if (!box) r = memo.get(*lt, out, uv);
+    else {
+      if (bw.x > 0.001f) r = r + memo.get(*lt, out, {bp.z, bp.y}) * bw.x;
+      if (bw.y > 0.001f) r = r + memo.get(*lt, out, {bp.x, bp.z}) * bw.y;
+      if (bw.z > 0.001f) r = r + memo.get(*lt, out, {bp.x, bp.y}) * bw.z;
+    }
+    return wl >= 1.0f || !t ? r : lerp(sample_image(t), r, wl);
+  };
 
   /* Base colour: procedural or image, tinted by Base Color. */
   if (m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) {
@@ -145,17 +230,17 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     s.albedo = lerp(m.procedural_color2, m.base_color, t);
   }
   else if (tx.base) {
-    Vec4 c = sample(tx.base);
+    Vec4 c = sample_slot(0, tx.base);
     s.albedo = s.albedo * c.xyz();
     s.alpha *= c.w;
   }
-  if (tx.metallic) s.metallic *= sample(tx.metallic).x;
-  if (tx.roughness) s.roughness *= sample(tx.roughness).x;
+  if (tx.metallic) s.metallic *= sample_slot(1, tx.metallic).x;
+  if (tx.roughness) s.roughness *= sample_slot(2, tx.roughness).x;
   s.emission = m.emission * m.emission_strength;
-  if (tx.emission) s.emission = s.emission * sample(tx.emission).xyz();
+  if (tx.emission) s.emission = s.emission * sample_slot(4, tx.emission).xyz();
   /* Tangent-space normal map (OpenGL / Blender convention, +Y up). */
   if (tx.normal && sp.has_tangent && m.normal_strength > 0) {
-    Vec4 nm = sample(tx.normal);
+    Vec4 nm = sample_slot(3, tx.normal);
     Vec3 tn = {nm.x * 2 - 1, nm.y * 2 - 1, nm.z * 2 - 1};
     Vec3 n = sp.normal;
     Vec3 t = normalize(sp.tangent.xyz() - n * dot(n, sp.tangent.xyz()));

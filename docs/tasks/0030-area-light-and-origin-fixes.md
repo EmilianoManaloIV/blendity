@@ -4,7 +4,7 @@
 - **Requirements:** R-03 (rendering), R-01 (editing)
 - **Decisions:** none (bug fixes inside ADR 0010's lightmapper and the rasterizer's light model)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/28
 
 ## Goal
 The user reported: "the area light when width and height are large (lets say 10 x 10) still creates weird

@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <atomic>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 
 namespace bl {
@@ -63,6 +65,24 @@ void TextureLayer::reflect_common(Reflector &r, bool with_enabled) {
 
 LayerSample TextureLayer::sample(float, float, const LayerContext &) const { return LayerSample{}; }
 
+float LayerAux::sample_plane(const std::vector<float> &pl, float u, float v) const {
+  if (w <= 0 || h <= 0 || pl.size() < (size_t)w * h) return 0.0f;
+  const float fx = (u - std::floor(u)) * w - 0.5f, fy = (v - std::floor(v)) * h - 0.5f;
+  const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+  const float tx = fx - x0, ty = fy - y0;
+  auto at = [&](int x, int y) { return pl[(size_t)(((y % h) + h) % h) * w + (((x % w) + w) % w)]; };
+  return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+}
+
+Vec3 LayerAux::sample_c(float u, float v) const {
+  if (w <= 0 || h <= 0 || c.size() < (size_t)w * h) return Vec3(0.0f);
+  const float fx = (u - std::floor(u)) * w - 0.5f, fy = (v - std::floor(v)) * h - 0.5f;
+  const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+  const float tx = fx - x0, ty = fy - y0;
+  auto at = [&](int x, int y) { return c[(size_t)(((y % h) + h) % h) * w + (((x % w) + w) % w)]; };
+  return lerp(lerp(at(x0, y0), at(x0 + 1, y0), tx), lerp(at(x0, y0 + 1), at(x0 + 1, y0 + 1), tx), ty);
+}
+
 /* Finite and sane, else the default (finite_bits: a `v == v` test can be folded away under /fp:fast). */
 static inline float fin1(float v, float d) { return finite_bits(v) && std::fabs(v) < 1e30f ? v : d; }
 
@@ -79,6 +99,22 @@ float texture_blend(int mode, float below, float v) {
 }
 static inline Vec3 blend_color(int mode, Vec3 below, Vec3 v) {
   return {texture_blend(mode, below.x, v.x), texture_blend(mode, below.y, v.y), texture_blend(mode, below.z, v.z)};
+}
+
+void TextureLayer::apply_point(TexPoint &p, float u, float v, const LayerContext &c, const LayerAux *) const {
+  /* A generator's blend at one point: exactly apply()'s per texel. */
+  const float op = clampf(fin1(opacity, 1.0f), 0.0f, 1.0f);
+  if (op <= 0.0f || !is_generator()) return;
+  const LayerSample s = sample(u, v, c);
+  float k = op * clampf(fin1(s.cover, 1.0f), 0.0f, 1.0f);
+  if (use_mask) k *= p.mask;
+  if (k <= 0.0f) return;
+  if (targets & TargetHeight) p.height = clampf(lerpf(p.height, texture_blend(blend, p.height, fin1(s.height, 0.0f)), k), 0.0f, 1.0f);
+  if (targets & TargetRoughness) p.rough = clampf(lerpf(p.rough, texture_blend(blend, p.rough, fin1(s.rough, 0.5f)), k), 0.0f, 1.0f);
+  if (targets & TargetAlbedo) {
+    const Vec3 a{fin1(s.albedo.x, 0.5f), fin1(s.albedo.y, 0.5f), fin1(s.albedo.z, 0.5f)};
+    p.albedo = vmax(Vec3(0.0f), vmin(Vec3(1.0f), lerp(p.albedo, blend_color(blend, p.albedo, a), k)));
+  }
 }
 
 void TextureLayer::apply(TexPlanes &p, const LayerContext &c) const {
@@ -171,6 +207,7 @@ ProceduralTexture &ProceduralTexture::operator=(const ProceduralTexture &o) {
   normal_strength = o.normal_strength;
   seed = o.seed;
   version = o.version;
+  live_shading = o.live_shading;
   layers.clear();
   for (const auto &l : o.layers) layers.push_back(l->clone());
   return *this;
@@ -198,6 +235,9 @@ void ProceduralTexture::reflect(Reflector &r) {
   r.field("Seamless", seamless);
   r.field("Normal Strength", normal_strength, 0.05f, 0.0f, 10.0f);
   r.field("Seed", seed, 0, 1000000);
+  r.field("Live Shading", live_shading);
+  r.help("Up close the views evaluate the layers per pixel, like a shader (sharp at any distance), instead of\n"
+         "reading the image; further away, and in path-traced renders and exports, the image at this size.");
   r.layer_list("Layers", layers);
 }
 
@@ -217,16 +257,132 @@ TextureLayer *ProceduralTexture::add(const std::string &type, int at) {
   return raw;
 }
 
-void ProceduralTexture::evaluate(TexPlanes &out) const {
-  out.reset(pow2_size(width), pow2_size(height));
+/* A kept plane at most `side` texels across, box-averaged (Blur's planes, the wear and the mean height are
+ * smooth at that scale; a 4096 texture's three blurred planes would otherwise hold 335 MB). */
+static void shrink_aux(LayerAux &a, int side) {
+  if (a.w <= side && a.h <= side) return;
+  const int f = std::max((a.w + side - 1) / side, (a.h + side - 1) / side), w = std::max(1, a.w / f), h = std::max(1, a.h / f);
+  auto shrink = [&](auto &pl) {
+    if (pl.size() < (size_t)a.w * a.h) return;
+    using T = typename std::decay<decltype(pl[0])>::type;
+    std::vector<T> out((size_t)w * h);
+    const float inv = 1.0f / (f * f);
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        T sum = pl[0] * 0.0f;
+        for (int j = 0; j < f; j++)
+          for (int i = 0; i < f; i++) sum = sum + pl[(size_t)(y * f + j) * a.w + x * f + i];
+        out[(size_t)y * w + x] = sum * inv;
+      }
+    pl.swap(out);
+  };
+  shrink(a.a);
+  shrink(a.b);
+  shrink(a.c);
+  a.w = w;
+  a.h = h;
+}
+
+LayerContext ProceduralTexture::context(int w, int h) const {
   LayerContext c;
-  c.w = out.w;
-  c.h = out.h;
+  c.w = w;
+  c.h = h;
   c.physical_size = fin1(physical_size, 1.0f) > 0.0f ? fin1(physical_size, 1.0f) : 1.0f;
   c.seed = (uint32_t)seed;
   c.seamless = seamless;
-  for (const auto &l : layers)
-    if (l->enabled) l->apply(out, c);
+  return c;
+}
+
+void ProceduralTexture::evaluate(TexPlanes &out, std::vector<LayerAux> *aux, int size) const {
+  const int w = size > 0 ? std::min(size, pow2_size(width)) : pow2_size(width), h = size > 0 ? std::min(size, pow2_size(height)) : pow2_size(height);
+  out.reset(w, h);
+  LayerContext c = context(out.w, out.h);
+  c.texel_scale = (float)out.w / (float)pow2_size(width);
+  if (aux) {
+    aux->clear();
+    aux->resize(layers.size());
+  }
+  for (size_t i = 0; i < layers.size(); i++) {
+    const TextureLayer &l = *layers[i];
+    if (!l.enabled) continue;
+    if (aux && l.needs_aux()) {
+      l.make_aux(out, c, (*aux)[i]);
+      shrink_aux((*aux)[i], 1024);
+    }
+    l.apply(out, c);
+  }
+}
+
+/* ===================================================================== */
+/* Live textures (task 0031)                                              */
+/* ===================================================================== */
+
+LiveTexture::LiveTexture(const ProceduralTexture &t, std::vector<LayerAux> aux, int w, int h)
+    : tex_(t), aux_(std::move(aux)), w_(w), h_(h) {
+  ctx_ = tex_.context(w, h);
+  ns_ = clampf(fin1(tex_.normal_strength, 1.0f), 0.0f, 10.0f);
+  hash_ = tex_.hash() ^ ((uint64_t)w << 40 | (uint64_t)h << 20);
+  aux_.resize(tex_.layers.size());
+  for (const auto &l : tex_.layers) shapes_height_.push_back((l->targets & (TargetHeight | TargetMask)) != 0);
+}
+
+TexPoint LiveTexture::eval(size_t n, float u, float v, bool height_only) const {
+  u -= std::floor(u);
+  v -= std::floor(v);
+  if (!finite_bits(u) || !finite_bits(v)) u = v = 0.0f;
+  n = std::min(n, tex_.layers.size());
+  TexPoint p;
+  size_t start = 0;
+  /* A Warp / Tile at full opacity over every plane, with nothing above it reading the mask, replaces what is below
+   * with what is below at the moved point: start there (stacked ones would otherwise each re-evaluate the layers
+   * under them, twice the work per layer). */
+  bool mask_read = false;
+  for (size_t i = n; i-- > 0;) {
+    const TextureLayer &l = *tex_.layers[i];
+    if (!l.enabled) continue;
+    float mu = u, mv = v;
+    const bool full = !l.use_mask && clampf(fin1(l.opacity, 1.0f), 0.0f, 1.0f) >= 1.0f &&
+                      (l.targets & (TargetHeight | TargetRoughness | TargetAlbedo)) == (TargetHeight | TargetRoughness | TargetAlbedo);
+    if (full && !mask_read && l.remap(mu, mv, ctx_)) {
+      p = eval(i, mu, mv, height_only);
+      p.mask = 1.0f;  // (no layer above reads it)
+      start = i + 1;
+      break;
+    }
+    mask_read = mask_read || l.use_mask || (l.targets & TargetMask);  // (Mask by Height blends into the mask below)
+  }
+  for (size_t i = start; i < n; i++) {
+    const TextureLayer &l = *tex_.layers[i];
+    if (!l.enabled || (height_only && !shapes_height_[i])) continue;
+    float mu = u, mv = v;
+    if (l.remap(mu, mv, ctx_)) {
+      /* Warp / Tile: what the layers below give at the moved point, blended in as apply() does. */
+      const float k = clampf(fin1(l.opacity, 1.0f), 0.0f, 1.0f) * (l.use_mask ? p.mask : 1.0f);
+      if (k <= 0.0f) continue;
+      const TexPoint m = eval(i, mu, mv, height_only);
+      if (l.targets & TargetHeight) p.height = lerpf(p.height, m.height, k);
+      if (l.targets & TargetRoughness) p.rough = lerpf(p.rough, m.rough, k);
+      if (l.targets & TargetAlbedo) p.albedo = lerp(p.albedo, m.albedo, k);
+      continue;
+    }
+    l.apply_point(p, u, v, ctx_, aux_[i].empty() ? nullptr : &aux_[i]);
+  }
+  return p;
+}
+
+Vec3 LiveTexture::normal(float u, float v, const float *height_here) const {
+  /* Central differences one texel apart: what the image's Sobel measures (its scale: a 64-texel tile with
+   * strength 1 tilts 45 degrees for a unit height over the tile, whatever the size). */
+  const float du = 1.0f / std::max(1, w_), dv = 1.0f / std::max(1, h_);
+  const size_t n = tex_.layers.size();
+  if (height_here) {
+    const float h0 = *height_here;
+    const float fu = (eval(n, u + du, v, true).height - h0) / du, fv = (eval(n, u, v + dv, true).height - h0) / dv;
+    return normalize(Vec3(-fu * ns_ / 64.0f, fv * ns_ / 64.0f, 1.0f));
+  }
+  const float dhdu = (eval(n, u + du, v, true).height - eval(n, u - du, v, true).height) / (2.0f * du);
+  const float dhdv = (eval(n, u, v + dv, true).height - eval(n, u, v - dv, true).height) / (2.0f * dv);
+  return normalize(Vec3(-dhdu * ns_ / 64.0f, dhdv * ns_ / 64.0f, 1.0f));
 }
 
 Bitmap ProceduralTexture::output(int which, const TexPlanes &p) const {
@@ -303,24 +459,33 @@ struct CachedOutput {
   uint64_t hash = 0;
   TexturePtr tex[4];
   bool have[4] = {false, false, false, false};
+  LiveTexturePtr live;
 };
 std::mutex g_cache_mutex;
 std::unordered_map<std::string, CachedOutput> g_cache;
-}  // namespace
+std::set<std::string> g_previews;  // asset paths in preview (under g_cache_mutex)
+const int kPreviewSize = 256;
 
-TexturePtr procedural_texture_output(ProceduralTexture &t, int which) {
-  which = std::max(0, std::min(3, which));
-  const std::string key = t.asset_path.empty() ? "<" + t.name + ">" : t.asset_path;
+const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
+  const std::string path = t.asset_path.empty() ? "<" + t.name + ">" : t.asset_path;
+  /* The images don't depend on Live Shading: hashed without it, so toggling it doesn't re-evaluate them. */
+  const bool live = t.live_shading;
+  t.live_shading = true;
   const uint64_t h = t.hash();
+  t.live_shading = live;
+  bool preview;
   {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
-    auto it = g_cache.find(key);
-    if (it != g_cache.end() && it->second.hash == h && it->second.have[which]) return it->second.tex[which];
+    preview = g_previews.count(path) > 0;
+    auto it = g_cache.find(path + (preview ? "#preview" : ""));
+    if (it != g_cache.end() && it->second.hash == h && it->second.have[0] && (!live || it->second.live)) return out = it->second;
   }
+  const std::string key = path + (preview ? "#preview" : "");
   /* Evaluated outside the lock (a stack can take a while, and its parallel_for may run other work on this
-   * thread); the four outputs at once, from one evaluation. */
+   * thread); the four outputs and the live snapshot at once, from one evaluation. */
   TexPlanes planes;
-  t.evaluate(planes);
+  std::vector<LayerAux> aux;
+  t.evaluate(planes, live ? &aux : nullptr, preview ? kPreviewSize : 0);  // (the kept planes only for live shading)
   CachedOutput fresh;
   fresh.hash = h;
   for (int k = 0; k < 4; k++) {
@@ -330,9 +495,35 @@ TexturePtr procedural_texture_output(ProceduralTexture &t, int which) {
     fresh.tex[k] = tex;
     fresh.have[k] = true;
   }
+  if (live) fresh.live = std::make_shared<const LiveTexture>(t, std::move(aux), planes.w, planes.h);
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_cache[key] = fresh;
-  return fresh.tex[which];
+  return out = fresh;
+}
+}  // namespace
+
+TexturePtr procedural_texture_output(ProceduralTexture &t, int which) {
+  CachedOutput c;
+  return cached_outputs(t, c).tex[std::max(0, std::min(3, which))];
+}
+
+LiveTexturePtr procedural_texture_live(ProceduralTexture &t) {
+  CachedOutput c;
+  return cached_outputs(t, c).live;
+}
+
+void procedural_texture_set_preview(const std::string &asset_path, bool on) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  if (on) g_previews.insert(asset_path);
+  else g_previews.erase(asset_path);
+}
+void procedural_texture_clear_previews() {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  g_previews.clear();
+}
+bool procedural_texture_preview() {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  return !g_previews.empty();
 }
 
 void procedural_texture_cache_clear() {

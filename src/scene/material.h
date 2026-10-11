@@ -24,6 +24,7 @@
 namespace bl {
 
 struct Reflector;
+class LiveTexture;
 
 struct TextureRef {
   std::string path;       // project-relative (Assets/Textures/x.png) or "generated:UV Grid"
@@ -85,6 +86,11 @@ struct Material {
   /* Resolved textures (cached; reloaded when the path or file changes). */
   struct Resolved {
     TexturePtr base, metallic, roughness, normal, emission;
+    /* A slot naming a procedural texture's output with Live Shading on (task 0031): its live snapshot and which
+     * output (0 albedo, 1 normal, 2 roughness, 3 height), in the order base, metallic, roughness, normal,
+     * emission. The rasterizer evaluates it per pixel up close. */
+    std::shared_ptr<const LiveTexture> live[5];
+    int live_output[5] = {0, 0, 0, 0, 0};
     /* An axis material's Top / Side / Bottom and their own resolved textures (resolved with this material, on one
      * thread, so shading never resolves); null = this material's own maps. */
     std::shared_ptr<Material> axis[3];

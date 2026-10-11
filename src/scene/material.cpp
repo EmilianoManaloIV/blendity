@@ -115,14 +115,23 @@ const Material::Resolved &Material::textures() const {
   static std::recursive_mutex m;
   std::lock_guard<std::recursive_mutex> lock(m);
   if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
+  int slot = 0;  // which slot load() is resolving (the live snapshots follow the same order)
+  for (auto &l : resolved_.live) l = nullptr;
   auto load = [&](const TextureRef &t) -> TexturePtr {
+    const int s = slot++;
     if (t.empty()) return nullptr;
     if (t.path == "generated:UV Grid") return texture_uv_grid();
     if (t.path == "generated:Color Grid") return texture_color_grid();
     std::string asset;
     int output = 0;
     if (split_texture_ref(t.path, asset, output)) {  // a procedural texture's output (ADR 0017)
-      if (ProceduralTexturePtr pt = texture_asset(asset)) return procedural_texture_output(*pt, output);
+      if (ProceduralTexturePtr pt = texture_asset(asset)) {
+        if (pt->live_shading && s < 5) {
+          resolved_.live[s] = procedural_texture_live(*pt);
+          resolved_.live_output[s] = output;
+        }
+        return procedural_texture_output(*pt, output);
+      }
       Log::warn("Material '%s': no texture asset %s", name.c_str(), asset.c_str());
       return nullptr;
     }
@@ -131,6 +140,7 @@ const Material::Resolved &Material::textures() const {
     if (!p) Log::warn("Material '%s': %s", name.c_str(), err.c_str());
     return p;
   };
+  if (procedural == (int)Procedural::UVGrid || procedural == (int)Procedural::ColorGrid) slot++;  // (no base map read)
   resolved_.base = procedural == (int)Procedural::UVGrid ? texture_uv_grid()
                    : procedural == (int)Procedural::ColorGrid ? texture_color_grid()
                                                               : load(base_map);

@@ -28,7 +28,15 @@ struct Preview {
 const Preview &material_preview(const Material &m, int size) {
   static std::unordered_map<const Material *, Preview> cache;
   Preview &p = cache[&m];
-  uint64_t key = m.version;  // an axis material's parts too: the preview shows them
+  /* Its own textures (their images and live snapshots are new objects when they change), not every texture
+   * edit anywhere (a drag elsewhere would redraw every preview each frame). */
+  uint64_t key = m.version;
+  {
+    const Material::Resolved &rt = m.textures();
+    for (const TexturePtr *tp : {&rt.base, &rt.metallic, &rt.roughness, &rt.normal, &rt.emission})
+      key = key * 1099511628211ull + (uint64_t)(uintptr_t)tp->get();
+    for (const auto &l : rt.live) key = key * 1099511628211ull + (uint64_t)(uintptr_t)l.get();
+  }
   for (const MaterialPtr &part : m.textures().axis)
     if (part) key = key * 1099511628211ull + part->version;
   if (p.size == size && p.version == key && !p.px.empty()) return p;
@@ -54,6 +62,7 @@ const Preview &material_preview(const Material &m, int size) {
       const Vec3 n(nx, ny, std::sqrt(1 - r2));
       /* The material's own evaluation (its maps, procedurals, an axis material's parts) on a unit sphere. */
       SurfacePoint sp;
+      sp.live_textures = true;  // procedural textures evaluated per pixel (task 0031)
       sp.position = sp.local_position = n;
       sp.normal = sp.geo_normal = sp.local_normal = n;
       sp.uv = Vec2(0.5f + std::atan2(n.x, n.z) / (2 * kPi), 0.5f - std::asin(clampf(n.y, -1.0f, 1.0f)) / kPi);

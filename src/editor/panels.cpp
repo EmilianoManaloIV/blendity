@@ -2436,8 +2436,11 @@ bool Editor::draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t)
     bool noted = false;
     for (const auto &kv : texture_before_) noted = noted || kv.first == t->asset_path;
     if (!noted && !t->asset_path.empty()) texture_before_.push_back({t->asset_path, before});
-    if (ui_.in.down[0]) {  // a drag: the window's preview follows at 256; materials re-resolve once on release
-      t->version++;
+    if (ui_.in.down[0]) {
+      /* A drag: the objects using the texture follow every frame (task 0031), its images evaluated at 256 at
+       * most until the release brings back the set size. */
+      procedural_texture_set_preview(t->asset_path, true);
+      t->touch();
       texture_touch_pending_ = true;
     }
     else t->touch();

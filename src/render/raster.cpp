@@ -1403,6 +1403,17 @@ void Renderer3D::shade_deferred() {
           }
         }
         if (opt_.tex.active()) sp.tex = &opt_.tex;
+        /* Live procedural textures (task 0031): the object-space size of this pixel, so a texture whose texel
+         * is larger is evaluated here instead of magnified. Not for the reflective shadow map. */
+        if (!rsm_out_) {
+          sp.live_textures = true;
+          auto lp = [&](Vec3 b) { return T.p[0] * b.x + T.p[1] * b.y + T.p[2] * b.z; };
+          auto wp = [&](Vec3 b) { return T.wp[0] * b.x + T.wp[1] * b.y + T.wp[2] * b.z; };
+          const Vec3 bx = ratio(N + T.na, S + T.sa), by = ratio(N + T.nb, S + T.sb);
+          sp.footprint = std::max(length(lp(bx) - sp.local_position), length(lp(by) - sp.local_position));
+          sp.world_footprint = std::max(length(wp(bx) - sp.position), length(wp(by) - sp.position));
+          if (!finite_bits(sp.footprint) || !finite_bits(sp.world_footprint)) sp.footprint = sp.world_footprint = 0.0f, sp.live_textures = false;
+        }
         if (T.has_lm) {
           sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
           sp.has_lightmap = true;

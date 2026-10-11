@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 53): live procedural textures (task 0031, ADR 0017 amended)
+
+**Asked:** "Not only do I want the procedural textures to be evaluated at a set resolution. I want to view them
+change on the material itself. So one part is images at a set resolution, but still having the convenience of
+live shaders."
+
+**Added**
+- **Live Shading** (a texture's field, on by default): up close, where a texel of the image would cover more
+  than a pixel, the Scene and Game views, the Camera Preview, F12 raster and the Materials window's previews
+  evaluate the texture's layers at the pixel, like a shader, so bricks, planks and tiles stay sharp at any
+  distance (normals included). Further away they read the mipmapped image, which doesn't shimmer. The images
+  at the set resolution are still what exports, bakes and the path tracers use.
+- **Objects follow a texture edit while you drag:** dragging a field in the Textures window updates every
+  material using the texture each frame (its images at 256 during the drag, the set size on release); before,
+  they changed only on release.
+
+**Changed**
+- The Tile layer reads the texel its tiled point lands in (it read one half a cell off), so its images can
+  differ slightly from before.
+
+**Checked**
+- New tests (round 53): a point evaluation equals the planes at every texel centre for every layer type (Warp
+  and Tile within a mean 0.01); the live normal within 10 degrees of the image's normal; up close a mortar edge
+  is sharp with Live Shading (0 in-between pixels across a row) and blurred without (13), and far away both
+  give the same pixels; dragging a field gives the material a new 256 image every frame and the 1024 one on
+  release; the preview's Edge Wear as wide as at full size; 12 stacked Warp / Tile layers in linear time; an
+  axis material's scale and Mirror wrapping keep the image; the preview is per texture; Live Shading saves;
+  NaN coordinates stay finite.
+
+**Review (code reviewer)**: four major and several minor findings, all fixed but the frame-time target (2.4x for
+a whole close-up frame, documented): extra planes kept for every texture, texel-sized filters 8x wide in the
+drag preview, axis materials going live while minified, stacked Warp / Tile doubling per layer, a global
+preview flag, every Materials preview redrawn on any texture edit, Live Shading toggles re-evaluating images,
+Mirror / Clamp / Closest, Generated mapping, a hard switch line (now a crossfade).
+- Stress `procedural_textures`: a point of the Bricks preset about 290 ns, 485 ns with its normal (one
+  thread); a 1080p frame made entirely of magnified texels 2.4x the image-only one (the spec's target was
+  under 2x: not met, see the spec's As built); the odd-settings fuzz now also evaluates every layer type at
+  points: 147 runs, 0 problems. 1024 x 1024, 8 layers: 108 ms (unchanged).
+- Unit checks: Windows 8,471, 0 failed (447 tests); the whole suite in render-cache verify mode: 8,472,
+  0 failed, 0 stale pictures. Linux with libraries: 8,419, 0 failed. Sanitizer build: 8,341, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` idle
+  1.33 ms.
+
 ## 2026-10-11 (round 52): large area lights, the gizmo after Set Origin, Select Coplanar (task 0030)
 
 **Asked:** "the area light when width and height are large (lets say 10 x 10) still creates weird rendered

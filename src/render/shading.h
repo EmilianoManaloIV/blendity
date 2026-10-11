@@ -44,6 +44,11 @@ struct SurfacePoint {
   AABB local_bounds;
   bool has_tangent = false;
   const TexOverride *tex = nullptr;  // camera filter (rasterizer only)
+  /* Live procedural textures (task 0031, rasterizer and previews): evaluated per pixel where a texel of the
+   * image would cover more than this pixel. footprint: object-space metres one pixel covers (0: unknown, then
+   * always live). */
+  bool live_textures = false;
+  float footprint = 0.0f, world_footprint = 0.0f;  // the same in world metres (an axis material's World mode)
   /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
   bool has_lightmap = false;
   Vec3 lightmap;

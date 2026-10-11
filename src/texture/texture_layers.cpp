@@ -553,6 +553,28 @@ struct ImageLayer : TextureLayerBase<ImageLayer> {
         }
     });
   }
+  bool needs_aux() const override { return true; }
+  void make_aux(const TexPlanes &, const LayerContext &c, LayerAux &aux) const override {
+    if (image.empty()) return;
+    std::string err;
+    aux.image = texture_load(resolve_asset_path(image.path), !image.non_color, &err);
+    float k = clampf(fin(tiling, 1.0f), 0.01f, 64.0f);
+    if (c.seamless) k = std::max(1.0f, std::round(k));
+    aux.image_tiling = k;
+  }
+  void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
+    if (!aux || !aux->image) return;
+    const float op = clampf(fin(opacity, 1.0f), 0.0f, 1.0f);
+    const float kk = op * (use_mask ? p.mask : 1.0f);
+    if (kk <= 0.0f) return;
+    const Vec4 s = aux->image->sample({u * aux->image_tiling, v * aux->image_tiling}, 0.0f, TexWrap::Repeat, TexFilter::Linear);
+    const Vec3 a = vmax(Vec3(0.0f), vmin(Vec3(1.0f), fin3(Vec3(s.x, s.y, s.z), Vec3(0.5f))));
+    const float lum = 0.2126f * a.x + 0.7152f * a.y + 0.0722f * a.z;
+    if (targets & TargetAlbedo)
+      p.albedo = lerp(p.albedo, Vec3(texture_blend(blend, p.albedo.x, a.x), texture_blend(blend, p.albedo.y, a.y), texture_blend(blend, p.albedo.z, a.z)), kk);
+    if (targets & TargetHeight) p.height = clampf(lerpf(p.height, texture_blend(blend, p.height, lum), kk), 0.0f, 1.0f);
+    if (targets & TargetRoughness) p.rough = clampf(lerpf(p.rough, texture_blend(blend, p.rough, lum), kk), 0.0f, 1.0f);
+  }
 };
 
 /* A layer whose type this build doesn't know (a newer file): kept, so the layers after it keep their L<i>
@@ -564,6 +586,7 @@ struct MissingLayer : TextureLayer {
   void reflect(Reflector &) override {}
   bool is_generator() const override { return false; }
   void apply(TexPlanes &, const LayerContext &) const override {}
+  void apply_point(TexPoint &, float, float, const LayerContext &, const LayerAux *) const override {}
 };
 
 /* ------------------------------------------------------------------ Filters */
@@ -583,6 +606,11 @@ template<class F> void filter_planes(const TextureLayer &l, TexPlanes &p, F &&fn
   });
 }
 
+/* A filter's weight at a point, as filter_planes gives it per texel. */
+inline float point_weight(const TextureLayer &l, const TexPoint &p) {
+  return clampf(fin(l.opacity, 1.0f), 0.0f, 1.0f) * (l.use_mask ? p.mask : 1.0f);
+}
+
 struct BlurLayer : TextureLayerBase<BlurLayer> {
   static constexpr const char *kName = "Blur";
   float radius = 2.0f;
@@ -591,8 +619,8 @@ struct BlurLayer : TextureLayerBase<BlurLayer> {
     r.help("Texels; a box blur, wrapping at the tile's edges.");
   }
   bool is_generator() const override { return false; }
-  void apply(TexPlanes &p, const LayerContext &) const override {
-    const int rad = (int)std::lround(clampf(fin(radius, 2.0f), 0.0f, 64.0f));
+  void apply(TexPlanes &p, const LayerContext &c) const override {
+    const int rad = (int)std::lround(clampf(fin(radius, 2.0f), 0.0f, 64.0f) * c.texel_scale);
     if (rad <= 0) return;
     const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness;
     std::vector<float> bh, br;
@@ -605,6 +633,25 @@ struct BlurLayer : TextureLayerBase<BlurLayer> {
       if (wr) p.rough[i] = lerpf(p.rough[i], br[i], k);
       if (wa) p.albedo[i] = lerp(p.albedo[i], ba[i], k);
     });
+  }
+  /* At a point: the blurred planes (a blur has no detail finer than its radius to lose). */
+  bool needs_aux() const override { return true; }
+  void make_aux(const TexPlanes &p, const LayerContext &c, LayerAux &aux) const override {
+    const int rad = (int)std::lround(clampf(fin(radius, 2.0f), 0.0f, 64.0f) * c.texel_scale);
+    if (rad <= 0) return;
+    aux.w = p.w;
+    aux.h = p.h;
+    if (targets & TargetHeight) box_mean(p.height, aux.a, p.w, p.h, rad);
+    if (targets & TargetRoughness) box_mean(p.rough, aux.b, p.w, p.h, rad);
+    if (targets & TargetAlbedo) box_mean(p.albedo, aux.c, p.w, p.h, rad);
+  }
+  void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
+    if (!aux || aux->w == 0) return;
+    const float k = point_weight(*this, p);
+    if (k <= 0.0f) return;
+    if (targets & TargetHeight) p.height = lerpf(p.height, aux->sample_a(u, v), k);
+    if (targets & TargetRoughness) p.rough = lerpf(p.rough, aux->sample_b(u, v), k);
+    if (targets & TargetAlbedo) p.albedo = lerp(p.albedo, aux->sample_c(u, v), k);
   }
 };
 
@@ -627,6 +674,15 @@ struct LevelsLayer : TextureLayerBase<LevelsLayer> {
       if (wa) p.albedo[i] = lerp(p.albedo[i], Vec3(lv(p.albedo[i].x), lv(p.albedo[i].y), lv(p.albedo[i].z)), k);
     });
   }
+  void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override {
+    const float k = point_weight(*this, p);
+    if (k <= 0.0f) return;
+    const float b = clampf(fin(black, 0.0f), 0.0f, 1.0f), w = clampf(fin(white, 1.0f), 0.0f, 1.0f), g = clampf(fin(gamma, 1.0f), 0.1f, 10.0f);
+    auto lv = [&](float v) { return std::pow(clampf((v - b) / std::max(1e-4f, w - b), 0.0f, 1.0f), 1.0f / g); };
+    if (targets & TargetHeight) p.height = lerpf(p.height, lv(p.height), k);
+    if (targets & TargetRoughness) p.rough = lerpf(p.rough, lv(p.rough), k);
+    if (targets & TargetAlbedo) p.albedo = lerp(p.albedo, Vec3(lv(p.albedo.x), lv(p.albedo.y), lv(p.albedo.z)), k);
+  }
 };
 
 struct HsvLayer : TextureLayerBase<HsvLayer> {
@@ -640,10 +696,17 @@ struct HsvLayer : TextureLayerBase<HsvLayer> {
   }
   bool is_generator() const override { return false; }
   void apply(TexPlanes &p, const LayerContext &) const override {
-    const float hs = clampf(fin(hue, 0.0f), -0.5f, 0.5f), sa = clampf(fin(saturation, 1.0f), 0.0f, 4.0f), va = clampf(fin(value, 1.0f), 0.0f, 4.0f);
     if (!(targets & TargetAlbedo)) return;
-    filter_planes(*this, p, [&](int, int, size_t i, float k) {
-      const Vec3 c = p.albedo[i];
+    filter_planes(*this, p, [&](int, int, size_t i, float k) { p.albedo[i] = lerp(p.albedo[i], shift(p.albedo[i]), k); });
+  }
+  void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override {
+    const float k = point_weight(*this, p);
+    if (k <= 0.0f || !(targets & TargetAlbedo)) return;
+    p.albedo = lerp(p.albedo, shift(p.albedo), k);
+  }
+  Vec3 shift(const Vec3 c) const {
+    const float hs = clampf(fin(hue, 0.0f), -0.5f, 0.5f), sa = clampf(fin(saturation, 1.0f), 0.0f, 4.0f), va = clampf(fin(value, 1.0f), 0.0f, 4.0f);
+    {
       const float mx = std::max({c.x, c.y, c.z}), mn = std::min({c.x, c.y, c.z}), d = mx - mn;
       float h = 0.0f;
       if (d > 1e-6f) {
@@ -666,8 +729,8 @@ struct HsvLayer : TextureLayerBase<HsvLayer> {
         case 4: o = {t, q, V}; break;
         default: o = {V, q, u}; break;
       }
-      p.albedo[i] = lerp(c, o, k);
-    });
+      return o;
+    }
   }
 };
 
@@ -682,6 +745,13 @@ struct InvertLayer : TextureLayerBase<InvertLayer> {
       if (wr) p.rough[i] = lerpf(p.rough[i], 1.0f - p.rough[i], k);
       if (wa) p.albedo[i] = lerp(p.albedo[i], Vec3(1.0f) - p.albedo[i], k);
     });
+  }
+  void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override {
+    const float k = point_weight(*this, p);
+    if (k <= 0.0f) return;
+    if (targets & TargetHeight) p.height = lerpf(p.height, 1.0f - p.height, k);
+    if (targets & TargetRoughness) p.rough = lerpf(p.rough, 1.0f - p.rough, k);
+    if (targets & TargetAlbedo) p.albedo = lerp(p.albedo, Vec3(1.0f) - p.albedo, k);
   }
 };
 
@@ -719,6 +789,15 @@ struct WarpLayer : TextureLayerBase<WarpLayer> {
       if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k);
     });
   }
+  /* At a point: the layers below read at the pushed point itself (the planes take the nearest texel). */
+  bool remap(float &u, float &v, const LayerContext &c) const override {
+    const float st = clampf(fin(strength, 0.05f), 0.0f, 0.5f), sc = clampf(fin(scale, 3.0f), 0.1f, 50.0f);
+    if (st <= 0.0f) return false;
+    const float dx = (periodic_fbm(u, v, sc, 3, 0.5f, c.seed + 11u) - 0.5f) * 2.0f * st, dy = (periodic_fbm(u, v, sc, 3, 0.5f, c.seed + 23u) - 0.5f) * 2.0f * st;
+    u = fract(u + dx);
+    v = fract(v + dy);
+    return true;
+  }
 };
 
 struct TileLayer : TextureLayerBase<TileLayer> {
@@ -736,11 +815,19 @@ struct TileLayer : TextureLayerBase<TileLayer> {
     const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness;
     const PlaneCopy src(p, wh, wr, wa);
     filter_planes(*this, p, [&](int x, int y, size_t i, float k) {
-      const size_t j = (size_t)p.wrap_y(y * ny) * p.w + p.wrap_x(x * nx);
+      /* The texel the tiled point lands in (as a point evaluation reads it). */
+      const size_t j = (size_t)p.wrap_y((int)std::floor((y + 0.5f) * ny)) * p.w + p.wrap_x((int)std::floor((x + 0.5f) * nx));
       if (wh) p.height[i] = lerpf(p.height[i], src.h[j], k);
       if (wr) p.rough[i] = lerpf(p.rough[i], src.r[j], k);
       if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k);
     });
+  }
+  bool remap(float &u, float &v, const LayerContext &) const override {
+    const int nx = cnt(across, 1, 64), ny = cnt(down, 1, 64);
+    if (nx == 1 && ny == 1) return false;
+    u = fract(u * nx);
+    v = fract(v * ny);
+    return true;
   }
 };
 
@@ -757,16 +844,33 @@ struct EdgeWearLayer : TextureLayerBase<EdgeWearLayer> {
     r.help("Worn edges lighten (chipped stone, scuffed paint) or darken (grime in the corners).");
   }
   bool is_generator() const override { return false; }
-  void apply(TexPlanes &p, const LayerContext &) const override {
+  void apply(TexPlanes &p, const LayerContext &c) const override {
     std::vector<float> e;
-    height_range(p, std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f))), e);
-    const float a = clampf(fin(amount, 0.5f), 0.0f, 1.0f);
+    height_range(p, std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale)), e);
+    /* Narrower than a texel here (a preview): faded by the share of the texel it would cover. */
+    const float a = clampf(fin(amount, 0.5f), 0.0f, 1.0f) * std::min(1.0f, clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale);
     const bool wa = targets & TargetAlbedo, wr = targets & TargetRoughness;
     filter_planes(*this, p, [&](int, int, size_t i, float k) {
       const float w = clampf(e[i] * 2.0f, 0.0f, 1.0f) * a * k;
       if (wa) p.albedo[i] = lerp(p.albedo[i], lighten ? vmin(Vec3(1.0f), p.albedo[i] * 1.6f + Vec3(0.1f)) : p.albedo[i] * 0.4f, w);
       if (wr) p.rough[i] = lerpf(p.rough[i], lighten ? 0.8f : 0.95f, w);
     });
+  }
+  /* At a point: the height's range around it, kept from the planes. */
+  bool needs_aux() const override { return true; }
+  void make_aux(const TexPlanes &p, const LayerContext &c, LayerAux &aux) const override {
+    aux.w = p.w;
+    aux.h = p.h;
+    height_range(p, std::max(1, (int)std::lround(clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale)), aux.a);
+    aux.image_tiling = std::min(1.0f, clampf(fin(width, 2.0f), 0.5f, 32.0f) * c.texel_scale);  // (the fade, as apply())
+  }
+  void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
+    if (!aux || aux->w == 0) return;
+    const float k = point_weight(*this, p);
+    if (k <= 0.0f) return;
+    const float w = clampf(aux->sample_a(u, v) * 2.0f, 0.0f, 1.0f) * clampf(fin(amount, 0.5f), 0.0f, 1.0f) * aux->image_tiling * k;
+    if (targets & TargetAlbedo) p.albedo = lerp(p.albedo, lighten ? vmin(Vec3(1.0f), p.albedo * 1.6f + Vec3(0.1f)) : p.albedo * 0.4f, w);
+    if (targets & TargetRoughness) p.rough = lerpf(p.rough, lighten ? 0.8f : 0.95f, w);
   }
 };
 
@@ -780,9 +884,9 @@ struct HeightAoLayer : TextureLayerBase<HeightAoLayer> {
     r.help("Darkens texels that are lower than their surroundings (mortar, grout, gaps).");
   }
   bool is_generator() const override { return false; }
-  void apply(TexPlanes &p, const LayerContext &) const override {
+  void apply(TexPlanes &p, const LayerContext &c) const override {
     if (!(targets & TargetAlbedo)) return;
-    const int rad = std::max(1, (int)std::lround(clampf(fin(radius, 4.0f), 1.0f, 32.0f)));
+    const int rad = std::max(1, (int)std::lround(clampf(fin(radius, 4.0f), 1.0f, 32.0f) * c.texel_scale));
     const float st = clampf(fin(strength, 0.6f), 0.0f, 1.0f);
     std::vector<float> mean;
     box_mean(p.height, mean, p.w, p.h, rad);
@@ -790,6 +894,21 @@ struct HeightAoLayer : TextureLayerBase<HeightAoLayer> {
       const float occl = clampf((mean[i] - p.height[i]) * 4.0f, 0.0f, 1.0f) * st;
       p.albedo[i] = lerp(p.albedo[i], p.albedo[i] * (1.0f - occl), k);
     });
+  }
+  /* At a point: the mean height around it from the planes, against the point's own height. */
+  bool needs_aux() const override { return true; }
+  void make_aux(const TexPlanes &p, const LayerContext &c, LayerAux &aux) const override {
+    if (!(targets & TargetAlbedo)) return;
+    aux.w = p.w;
+    aux.h = p.h;
+    box_mean(p.height, aux.a, p.w, p.h, std::max(1, (int)std::lround(clampf(fin(radius, 4.0f), 1.0f, 32.0f) * c.texel_scale)));
+  }
+  void apply_point(TexPoint &p, float u, float v, const LayerContext &, const LayerAux *aux) const override {
+    if (!aux || aux->w == 0 || !(targets & TargetAlbedo)) return;
+    const float k = point_weight(*this, p);
+    if (k <= 0.0f) return;
+    const float occl = clampf((aux->sample_a(u, v) - p.height) * 4.0f, 0.0f, 1.0f) * clampf(fin(strength, 0.6f), 0.0f, 1.0f);
+    p.albedo = lerp(p.albedo, p.albedo * (1.0f - occl), k);
   }
 };
 
@@ -807,6 +926,11 @@ struct ColorRampLayer : TextureLayerBase<ColorRampLayer> {
     if (!(targets & TargetAlbedo)) return;
     const Vec3 lo = fin3(color, Vec3(0.1f)), hi = fin3(color2, Vec3(0.9f));
     filter_planes(*this, p, [&](int, int, size_t i, float k) { p.albedo[i] = lerp(p.albedo[i], lerp(lo, hi, p.height[i]), k); });
+  }
+  void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override {
+    const float k = point_weight(*this, p);
+    if (k <= 0.0f || !(targets & TargetAlbedo)) return;
+    p.albedo = lerp(p.albedo, lerp(fin3(color, Vec3(0.1f)), fin3(color2, Vec3(0.9f)), p.height), k);
   }
 };
 
@@ -836,6 +960,13 @@ struct MaskByHeightLayer : TextureLayerBase<MaskByHeightLayer> {
           p.mask[i] = lerpf(p.mask[i], m, op);
         }
     });
+  }
+  void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override {
+    const float lo = clampf(fin(low, 0.0f), 0.0f, 1.0f), hi = clampf(fin(high, 0.5f), 0.0f, 1.0f), so = clampf(fin(softness, 0.05f), 0.0f, 0.5f);
+    const float op = clampf(fin(opacity, 1.0f), 0.0f, 1.0f);
+    float m = smooth(lo - so, lo + so, p.height) * (1.0f - smooth(hi - so, hi + so, p.height));
+    if (invert) m = 1.0f - m;
+    p.mask = lerpf(p.mask, m, op);
   }
 };
 
