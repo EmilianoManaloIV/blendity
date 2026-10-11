@@ -323,7 +323,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   for (size_t i = 0; i < env.lights.size(); i++)
     if (env.lights[i].type == RenderLight::Directional) { li = (int)i; break; }
   if (li < 0) return nullptr;
-  std::vector<DrawItem> casters;
+  std::vector<const DrawItem *> caster_ptrs;  // copied into `casters` only when the map is rendered
   AABB bounds;
   /* What the map depends on: each caster's triangles (the render mesh's serial: a new one whenever it is
    * rebuilt) and placement, the light's direction and the resolution. */
@@ -345,7 +345,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
       for (auto &m : *it.materials)
         if (!m || m->cast_shadows) casts = true;
     if (!casts) continue;
-    casters.push_back(it);
+    caster_ptrs.push_back(&it);
     bounds.add(it.mesh->bounds.transformed(it.model));
     if (it.mesh->serial == 0) cacheable = false;
     mix(&it.mesh->serial, 8);
@@ -360,7 +360,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   const Vec3 dir = env.lights[li].direction;
   mix(&dir, sizeof(Vec3));
   mix(&res, sizeof(int));
-  const uint64_t n = casters.size();
+  const uint64_t n = caster_ptrs.size();
   mix(&n, 8);
   if (key == 0) key = 1;  // 0 marks an empty entry
   shadow_clock_++;
@@ -373,6 +373,9 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   /* Render into the least recently used entry. */
   ShadowEntry &e = shadow_cache_[0].used <= shadow_cache_[1].used ? shadow_cache_[0] : shadow_cache_[1];
   ScopedTimer t;
+  std::vector<DrawItem> casters;
+  casters.reserve(caster_ptrs.size());
+  for (const DrawItem *it : caster_ptrs) casters.push_back(*it);
   render_shadow_map(e.map, casters, dir, bounds, res);
   prof_.shadow_renders++;
   prof_.ms_shadow += t.ms();
@@ -456,13 +459,27 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   r3d.flush();
 }
 
-FilterStack Editor::camera_filters(const GameObject *owner) const {
-  FilterStack s;
-  if (owner)
+/* A camera's filter stack, kept per camera object and rebuilt when its filter components change: building
+ * one makes a std::function per pass, and every view asked for it on every render (task 0024). */
+const FilterStack &Editor::camera_filters(const GameObject *owner) {
+  static const FilterStack none;
+  if (!owner) return none;
+  uint64_t h = 1469598103934665603ull;
+  for (const auto &c : owner->components)
+    if (c->render_role() == Component::RenderRole::CameraFilter) {
+      const uint64_t fh = hash_component(*c) ^ (uint64_t)c->enabled;
+      h = (h ^ fh) * 1099511628211ull;
+    }
+  FilterCacheEntry &e = filter_cache_[owner->id];  // (trimmed between frames, never here: callers hold references)
+  if (!e.valid || e.hash != h) {
+    e.stack = FilterStack();
     for (const auto &c : owner->components)
-      if (const auto *f = dynamic_cast<const CameraFilter *>(c.get()))
-        if (f->enabled) f->contribute(s);
-  return s;
+      if (c->render_role() == Component::RenderRole::CameraFilter && c->enabled) static_cast<const CameraFilter *>(c.get())->contribute(e.stack);
+    e.hash = h;
+    e.valid = true;
+    prof_.filter_stack_builds++;
+  }
+  return e.stack;
 }
 
 /* Nearest-neighbour copy of one plane (colour, depth or ids) into r of a w-wide destination. */
@@ -475,10 +492,11 @@ template<class T> static void upscale_plane(const std::vector<T> &src, int sw, i
   }
 }
 
-void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
+void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
                            const Camera *cam, float aspect, bool game, bool scene_lights, bool animate) {
-  FilterStack fs = camera_filters(owner);
-  if (!cam) fs.fit = FilterStack::Fill;  // the Scene view: its overlays and picking use the full view's projection
+  const FilterStack &fs = camera_filters(owner);
+  /* The Scene view fills whatever the stack says: its overlays and picking use the full view's projection. */
+  const int fit = cam ? fs.fit : (int)FilterStack::Fill;
   if (fs.empty()) {
     render_deferred(r3d, rt, v, p, eye, game, scene_lights, cam);
     if (cam) camera_dof(rt, v, p, eye, forward, cam, aspect, cam->vertical_fov_deg(aspect));
@@ -486,7 +504,7 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, con
   }
   int iw, ih;
   Recti dst;
-  filter_layout(fs, rt.width, rt.height, iw, ih, dst);
+  filter_layout(fs, fit, rt.width, rt.height, iw, ih, dst);
   const bool boxed = dst.x != 0 || dst.y != 0 || dst.w != rt.width || dst.h != rt.height;
   const bool scaled = iw != rt.width || ih != rt.height;
   /* Letterboxed: the picture has the console frame's shape, so the projection does too. */
@@ -494,9 +512,12 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, con
   const Mat4 pp = !boxed ? p : cam ? cam->projection(a2) : cam_.proj(a2);
   RenderTarget *t = &rt;
   if (scaled) {
-    if (filter_img_.width != iw || filter_img_.height != ih) filter_img_.resize(iw, ih);
-    filter_rt_.attach(filter_img_, {0, 0, iw, ih});
-    t = &filter_rt_;
+    if (ft.img.width != iw || ft.img.height != ih) {
+      ft.img.resize(iw, ih);
+      prof_.filter_target_resizes++;
+    }
+    ft.rt.attach(ft.img, {0, 0, iw, ih});
+    t = &ft.rt;
   }
   t->want_hdr = fs.needs_hdr;  // bloom reads linear light (only allocated when asked)
   render_deferred(r3d, *t, v, pp, eye, game, scene_lights, cam, &fs);
@@ -517,9 +538,9 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, con
     std::fill(rt.depth.begin(), rt.depth.end(), 1.0f);
     std::fill(rt.ids.begin(), rt.ids.end(), 0u);
   }
-  upscale_nearest(filter_img_.pixels.data(), iw, ih, iw, rt.color, rt.stride, dst);
-  upscale_plane(filter_rt_.depth, iw, ih, rt.depth, rt.width, dst);
-  upscale_plane(filter_rt_.ids, iw, ih, rt.ids, rt.width, dst);
+  upscale_nearest(ft.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, dst);
+  upscale_plane(ft.rt.depth, iw, ih, rt.depth, rt.width, dst);
+  upscale_plane(ft.rt.ids, iw, ih, rt.ids, rt.width, dst);
   r3d.rebind(&rt, v, p);  // overlays (grid, gizmos) draw on the full-size view; the stats stay
 }
 
@@ -627,7 +648,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
     RenderTarget rt;
     rt.attach(render_img_, {0, 0, w, h});
     Renderer3D r3d;
-    render_camera(r3d, rt, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), owner, cam, w / (float)h);
+    render_camera(r3d, rt, render_ft_, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), owner, cam, w / (float)h);
     render_time_ = now_seconds() - render_start_;
     rendering_ = false;
     int iw, ih;
@@ -1154,7 +1175,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     /* Rebuild when the scene, this camera or the inset size changes; then add
      * a few milliseconds of samples every frame until the preview count. */
     uint64_t hash = camera_render_hash(g, cam) ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
-    const FilterStack filters = camera_filters(g);
+    const FilterStack &filters = camera_filters(g);
     int tw = w, th = h;
     Recti tdst{0, 0, w, h};
     if (!filters.empty()) filter_layout(filters, w, h, tw, th, tdst);
@@ -1211,7 +1232,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       if (hit) before = cam_preview_img_.pixels;
       cam_preview_img_.resize(w, h);
       cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
-      render_camera(cam_preview_r3d_, cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
+      render_camera(cam_preview_r3d_, cam_preview_rt_, preview_ft_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
       prof_.view_renders++;
       if (hit && before != cam_preview_img_.pixels) {
         prof_.cache_mismatches++;

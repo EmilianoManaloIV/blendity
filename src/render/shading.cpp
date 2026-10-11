@@ -31,7 +31,9 @@ static Vec4 tex_sample(const TexturePtr &t, Vec2 uv, float lod, const Material &
   return frac < 1e-3f || l0 >= maxl ? a : lerp(a, t->sample_level(uv, l0 + 1, w, f), frac);
 }
 
-SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp) {
+SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp) { return evaluate_material(m, m.textures(), sp); }
+
+SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
   SurfaceSample s;
   s.albedo = m.base_color;
   s.metallic = m.metallic;
@@ -40,7 +42,6 @@ SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp) {
   s.alpha = m.alpha;
   s.unlit = m.unlit;
   s.normal = sp.normal;
-  const Material::Resolved &tx = m.textures();
 
   /* Texture coordinates (Blender: Texture Coordinate + Mapping nodes). */
   Vec2 uv = {sp.uv.x * m.tiling.x + m.offset.x, sp.uv.y * m.tiling.y + m.offset.y};

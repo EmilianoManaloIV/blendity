@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 46): render-frame waste (task 0024)
+
+**Asked:** the editor-performance round, second part: the frames that really render (orbiting, dragging,
+editing a material, playing) did work that isn't rendering.
+
+**Changed**
+- **One filter stack per camera,** rebuilt only when one of its filters changes (a stack is a
+  `std::function` per pass, and every view asked for a new one on every render). The Rendered Camera
+  Preview and F12 use it too.
+- **One filter target per view** (Scene, Game, Camera Preview, F12): two filtered views of different
+  sizes used to reallocate a shared one every frame. The Profiler counts resizes and stack builds.
+- **The rasterizer resolves each material's textures once per flush** and shades through them,
+  instead of a version check and an atomic read per pixel; its per-item scratch vectors are kept
+  between flushes and the per-chunk tile table is thread-local.
+- **The sun's shadow casters are copied only when the map is rendered** (pointers until the cache
+  check). The RSM already did.
+- Not built: early-outs for the Scene view's icons and z-fight outlines on a cache hit (they draw
+  after the cached picture, so they must draw every frame); recorded in the spec.
+
+**Checked**
+- New tests (round 46): the resolved-texture shading equals the per-pixel path on 64 points of a
+  UV-grid material; three filtered views keep their own targets (2 resizes to warm up, 0 afterwards);
+  a camera's stack is built once and once more after a filter field changes; the shadow map still
+  renders once per change.
+- Unit checks: Windows 8,148, 0 failed (390 tests); the whole suite in render-cache verify mode: 8,149,
+  0 failed, 0 stale pictures. Linux with libraries: 8,100, 0 failed. Sanitizer build: 8,021, 0 failed,
+  no reports.
+- Stress `editor_render` on the final code, quiet machine: idle 1.31 ms, orbit 7.38, moving an object
+  18.13, editing a material 18.13, playing 11.88 (task 0023's 1.30 / 7.32 / 18.44 / 18.33 / 12.13: the
+  same within noise, the waste being allocation and copies that were small next to the rendering);
+  shadow renders per row unchanged (1 for a move and a material edit, 0 otherwise). `shading`, `raster`
+  and `filters` within their usual numbers (deferred 1080p 10.5 ms, 5.2M triangles at 60 FPS, the PS1
+  look 2.5 ms). `editor_fuzz` in verify mode: no crash, 0 stale pictures.
+- From the code review (Opus): the filter-target and stack-build tests measured idle frames, which are
+  cache hits that render nothing; they move an object every frame now and check that the views really
+  rendered. The Scene view no longer copies the cached stack to change its fit (`filter_layout` takes
+  the fit apart from the stack); the cache is trimmed between frames, never during a lookup.
+
 ## 2026-10-11 (round 45): idle editor frames (task 0023, ADR 0015)
 
 **Asked:** improve the editor's performance, the Scene view first. This round is the idle frame

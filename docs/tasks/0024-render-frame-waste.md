@@ -1,10 +1,10 @@
 # 0024: Render-frame waste in the raster path and the filter targets
 
-- **Status:** approved (next after task 0023)
+- **Status:** done (as built below)
 - **Requirements:** Q-04, R-05
 - **Decisions:** none needed (no data-model change)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/22
 
 ## Goal
 Frames that really re-render (orbiting, dragging, editing a material, playing) do work that isn't
@@ -63,3 +63,31 @@ rendering. The pass-6 numbers are orbit 9.9 ms, moving an object 24.7, editing a
 
 ## Documentation to update
 - CHANGELOG, README count, `docs/PERFORMANCE.md` pass 7 (shared with 0023).
+
+## As built
+Task 0023's painting fixes had already brought every target row under its number before this task
+started (orbit 7.4, move 18.4, material edit 18.3, play 12.1 ms); this task removed the waste the spec
+listed, with the pictures unchanged:
+- **One `FilterStack` per camera object** (`Editor::camera_filters` returns a reference to a cached
+  stack keyed by the owner's id, rebuilt when the hash of its filter components changes;
+  `FrameProfile::filter_stack_builds` counts the rebuilds). The Rendered Camera Preview and F12 use it
+  too. Entries of deleted cameras are never looked up; the cache is cleared past 64 entries.
+- **A `FilterTarget` per view** (`scene_ft_`, `game_ft_`, `preview_ft_`, `render_ft_`; piloting shares
+  the Scene view's) and `FrameProfile::filter_target_resizes`.
+- **`Renderer3D::flush` keeps its per-item scratch** (`visible_`, `big_`, `see_through_`, `vjobs_`) and
+  the per-chunk tile table is thread-local.
+- **Textures resolved once per flush:** `evaluate_material(const Material &, const Material::Resolved &,
+  const SurfacePoint &)`; the triangle setup and the see-through pass carry the resolved pointer; the
+  path tracer keeps the old signature (which now calls the new one).
+- **Shadow casters are copied only when the map is rendered** (pointers until the cache check). The
+  RSM's copy already happened only on a miss.
+
+**Deviations:**
+1. **No early-outs for `draw_scene_icons` / `zfight_prune` on a cache hit.** The cached Scene view
+   picture does not contain the overlays (they draw after the picture is put back, so they move with
+   the selection without a re-render); they have to draw every frame. `zfight_prune` is free when the
+   list is empty. Recorded instead of built.
+2. **Criterion 2's "resolved path equals per-pixel path" is a unit identity** (the two
+   `evaluate_material` overloads on a UV-grid material, 64 points), plus the unchanged render-hash and
+   render-cache tests; the rasterizer has only the resolved path now, so a frame-level A/B isn't
+   possible from the same binary.

@@ -436,7 +436,7 @@ void Editor::render_scene_view(const Recti &view) {
       const Mat4 cv = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0}));
       const float fa = fr.w / (float)fr.h;
       const Mat4 cp = pc->projection(fa);
-      render_camera(scene_r3d_, pilot_rt_, cv, cp, eye, q.rotate({0, 0, 1}), pg, pc, fa);
+      render_camera(scene_r3d_, pilot_rt_, scene_ft_, cv, cp, eye, q.rotate({0, 0, 1}), pg, pc, fa);
       scene_stats_ = scene_r3d_.stats();
       /* Ids as they are; depth re-expressed in the editor's projection (its near / far differ from
        * the camera's), so the tools' visibility tests compare like with like. */
@@ -463,7 +463,7 @@ void Editor::render_scene_view(const Recti &view) {
     GameObject *fowner = nullptr;
     if (scene_filters_) main_camera(*scene_, &fowner);
     if (fowner && !camera_filters(fowner).empty())  // the main camera's filters on the editor's view
-      render_camera(scene_r3d_, scene_rt_, v, p, cam_.position(), cam_.forward(), fowner, nullptr, aspect, false, scene_lighting_);
+      render_camera(scene_r3d_, scene_rt_, scene_ft_, v, p, cam_.position(), cam_.forward(), fowner, nullptr, aspect, false, scene_lighting_);
     else render_deferred(scene_r3d_, scene_rt_, v, p, cam_.position(), false, scene_lighting_, nullptr);
     scene_stats_ = scene_r3d_.stats();
   }
@@ -2955,7 +2955,7 @@ void Editor::draw_game_view(const Recti &r) {
     const bool hit = view_cache_hit(game_cache_, key, img);
     if (hit && !cache_verify_) prof_.view_cache_hits++;
     else {
-      render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, animating);
+      render_camera(game_r3d_, game_rt_, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, animating);
       game_stats_ = game_r3d_.stats();
       prof_.view_renders++;
       if (hit) view_cache_verify(game_cache_, img, "Game view");

@@ -68,6 +68,10 @@ struct SurfaceSample {
 };
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
+/* The same with the material's textures already resolved: the rasterizer resolves each material once per
+ * flush (Material::textures() checks a version and an atomic generation on every call) and shades through
+ * this; the path tracer keeps the one above. */
+SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp);
 
 /* --- BRDF --- */
 Vec3 fresnel_f0(const SurfaceSample &s);

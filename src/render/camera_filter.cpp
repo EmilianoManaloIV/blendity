@@ -13,14 +13,16 @@ namespace bl {
 
 static int clamp_size(int v) { return std::max(1, std::min(v, 8192)); }
 
-void filter_layout(const FilterStack &s, int dw, int dh, int &iw, int &ih, Recti &dst) {
+void filter_layout(const FilterStack &s, int dw, int dh, int &iw, int &ih, Recti &dst) { filter_layout(s, s.fit, dw, dh, iw, ih, dst); }
+
+void filter_layout(const FilterStack &s, int fit, int dw, int dh, int &iw, int &ih, Recti &dst) {
   dw = std::max(1, dw);
   dh = std::max(1, dh);
   dst = {0, 0, dw, dh};
   iw = dw;
   ih = dh;
   if (s.height <= 0) return;
-  if (s.fit == FilterStack::Letterbox && s.width > 0) {
+  if (fit == FilterStack::Letterbox && s.width > 0) {
     /* The console's frame (4:3 for 320 x 240), as large as fits, centred. */
     const double aspect = (double)clamp_size(s.width) / clamp_size(s.height);
     int w = dw, h = (int)std::lround(dw / aspect);

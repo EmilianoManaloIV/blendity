@@ -282,6 +282,11 @@ class Renderer3D {
   };
   bool batching_ = false;
   std::vector<OverlayCmd> overlay_cmds_;
+  /* flush() scratch, kept between flushes (cleared, not freed): per item, is it visible, is it big enough
+   * for the separate vertex stage, does it have see-through materials; the vertex-stage jobs. */
+  std::vector<uint8_t> visible_, big_, see_through_;
+  struct VJob { uint32_t item, begin, end; };
+  std::vector<VJob> vjobs_;
   Rsm *rsm_out_ = nullptr;
   RenderLight rsm_sun_;
   /* Voxel GI receivers at 1 / downsample resolution (gathered, then blurred). */
