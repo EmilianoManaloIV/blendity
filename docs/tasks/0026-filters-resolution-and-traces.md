@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-02
 - **Decisions:** ADR 0016 (part 2)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/24
 
 ## Goal
 A camera's filters look the same in the Camera Preview, the Game view and a render, whatever their
