@@ -118,12 +118,13 @@ bool Editor::live_gi_needed(std::string *why) {
     say("Live GI: running (nothing baked)");
     return true;
   }
-  /* Voxel GI bounces the first directional light, as the shadow map: live if the bake doesn't hold it. */
+  /* Voxel GI bounces the first directional light the rasterizer draws (as the shadow map; a Baked one isn't
+   * drawn, task 0021): live if the bake doesn't hold it. */
   int sun_mode = -1;
   scene_->for_each([&](GameObject &g) {
     if (sun_mode >= 0 || !g.active_in_hierarchy()) return;
     if (const Light *l = g.get<Light>())
-      if (l->enabled && l->type == 0) sun_mode = l->mode;
+      if (l->enabled && l->type == 0 && l->mode != 2) sun_mode = l->mode;
   });
   if (sun_mode == 0) {
     say("Live GI: running (the Directional Light is Realtime, so its bounce isn't baked)");
@@ -755,9 +756,10 @@ void Editor::preview_step() {
     update_environment();
     BakeSettings s;
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.25f);
+    s.min_chart = 32;  // a small object still gets a few hundred texels, or it looks blocky at a quarter of the resolution
     s.max_size = std::min(ls.max_size, 1024);
     s.padding = ls.padding;
-    s.direct_samples = std::max(1, std::min(ls.direct_samples, 8));
+    s.direct_samples = std::max(32, std::min(ls.direct_samples, 64));  // area lights: shadow rays are cheap, and 32 stratified is smooth
     s.indirect_samples = kSamples[preview_stage_];
     s.bounces = ls.bounces;
     s.denoise = true;

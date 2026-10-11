@@ -334,7 +334,8 @@ void Light::reflect(Reflector &r) {
   static const char *light_modes[] = {"Realtime", "Mixed", "Baked"};
   r.enumeration("Mode", mode, light_modes, 3);
   r.help("Unity's Light Mode. Realtime: lit every frame, not in baked lighting. Mixed: realtime light and shadows,\n"
-         "its bounced light baked. Baked: all of its light in the lightmaps (none on lightmapped objects in realtime).");
+         "its bounced light baked. Baked: exists only through the bake (lightmaps and probes), nothing drawn live;\n"
+         "Preview Lighting shows it before a bake. The path tracer lights with every mode.");
 }
 
 Vec3 Light::final_color() const { return use_temperature ? Vec3(color.x, color.y, color.z) * kelvin_to_rgb(temperature) : color; }

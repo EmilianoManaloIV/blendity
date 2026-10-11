@@ -102,6 +102,9 @@ inline bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && fin
 
 void lightmap_layout(const std::vector<BakeObject> &objects, const BakeSettings &s, LightmapLayout &out, LightmapUvCache *uv_cache) {
   out = LightmapLayout{};
+  /* A chart never exceeds a page: the smallest chart asked for is cut down to the page size (a Max Lightmap
+   * Size of 16 with the preview's 32-texel charts would otherwise write past the page). */
+  const int min_chart = std::max(1, std::min(s.min_chart, s.max_size));
   /* 1. A square chart per object. Its UVs fill only part of the square (islands and their margins), so
    * the side is sized from the area they cover: world area x texels per unit^2 x scale^2 texels of
    * surface, as Unity's Lightmap Resolution means. */
@@ -136,7 +139,7 @@ void lightmap_layout(const std::vector<BakeObject> &objects, const BakeSettings 
     const float scale = finite_bits(o.scale) ? std::max(0.0f, std::min(100.0f, o.scale)) : 1.0f;
     double side = std::sqrt(std::max(0.0, area)) * s.texels_per_unit * scale;
     if (!finite_bits(side)) side = 8.0;
-    int res = (int)std::max((double)s.min_chart, std::min((double)s.max_size, std::ceil(side)));
+    int res = (int)std::max((double)min_chart, std::min((double)s.max_size, std::ceil(side)));
     /* Unwrap at that size, see how much of the square the charts fill, and grow it so the charts get
      * the asked density (once more if the margins changed much: they are a number of texels). */
     /* The cache: the same mesh (content), size request and options give the same UVs. */
@@ -151,7 +154,7 @@ void lightmap_layout(const std::vector<BakeObject> &objects, const BakeSettings 
     for (int pass = 0; pass < 2; pass++) {
       obj_uv[i] = lightmap_uvs(m, o.generate_uvs, res, s.padding);
       fill = std::max(0.02, std::min(1.0, uv_area(m, obj_uv[i])));
-      const int want = (int)std::max((double)s.min_chart, std::min((double)s.max_size, std::ceil(side / std::sqrt(fill))));
+      const int want = (int)std::max((double)min_chart, std::min((double)s.max_size, std::ceil(side / std::sqrt(fill))));
       if (std::abs(want - res) * 10 <= res) break;
       res = want;
       if (pass == 1) obj_uv[i] = lightmap_uvs(m, o.generate_uvs, res, s.padding);
@@ -346,15 +349,32 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       if (ndl > 0.0f && !pt_->occluded({o, L}, 1e30f)) value += col * ndl;
       continue;
     }
+    /* An area light is sampled on a jittered grid over its surface (stratified: the noise falls much faster
+     * than with random points), the grid shifted by a random offset per texel so neighbouring texels don't
+     * share a pattern (Cranley-Patterson rotation). A disk keeps the points inside its ellipse. */
     const int ns = l.type == RenderLight::Area ? s_.direct_samples : 1;
+    const int nx = l.type == RenderLight::Area ? std::max(1, (int)std::ceil(std::sqrt((double)ns))) : 1;
+    const int ny = l.type == RenderLight::Area ? std::max(1, (ns + nx - 1) / nx) : 1;
+    const float sx = rnd01(rng), sy = rnd01(rng);
+    /* Exactly ns samples (the count the user set): the grid's last strata may go unused, which the random
+     * offset per texel keeps unbiased. */
     Vec3 acc(0.0f);
     for (int k = 0; k < ns; k++) {
       Vec3 lp = l.position;
       if (l.type == RenderLight::Area) {
         const Vec3 up = normalize(cross(l.direction, l.right));
-        float a = rnd01(rng) - 0.5f, b = rnd01(rng) - 0.5f;
-        if (l.disk)
-          while (a * a + b * b > 0.25f) a = rnd01(rng) - 0.5f, b = rnd01(rng) - 0.5f;
+        float a = std::fmod(((k % nx) + rnd01(rng)) / (float)nx + sx, 1.0f) - 0.5f;
+        float b = std::fmod(((k / nx) + rnd01(rng)) / (float)ny + sy, 1.0f) - 0.5f;
+        if (l.disk) {
+          /* The square's point mapped onto the disk (concentric): every stratum lands inside it. */
+          const float u = 2.0f * (a + 0.5f) - 1.0f, v = 2.0f * (b + 0.5f) - 1.0f;
+          float r = 0.0f, th = 0.0f;
+          if (u != 0.0f || v != 0.0f) {
+            if (std::fabs(u) > std::fabs(v)) r = u, th = (kPi / 4.0f) * (v / u);
+            else r = v, th = (kPi / 2.0f) - (kPi / 4.0f) * (u / v);
+          }
+          a = 0.5f * r * std::cos(th), b = 0.5f * r * std::sin(th);
+        }
         lp = l.position + l.right * (a * l.width) + up * (b * l.height);
       }
       const Vec3 dvec = lp - o;

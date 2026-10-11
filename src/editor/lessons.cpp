@@ -445,7 +445,7 @@ Scene light is unbounded but a screen shows 0 to 1. A view transform compresses 
 Light that bounces between surfaces is either baked ahead of time with the path tracer, or computed live by Realtime GI. Baked light costs about 1 ms a frame to show; live GI costs time whenever a view re-renders. The Lighting window (Window > Rendering > Lighting) holds both, as in Unity.
 | Piece | Blendity | Unity | Blender
 | Static objects | MeshRenderer > Contribute GI | Contribute Global Illumination | (none: Cycles traces everything)
-| Light mode | Light > Mode: Realtime, Mixed, Baked | Light > Mode | (none)
+| Light mode | Light > Mode: Realtime, Mixed, Baked (exists only through the bake) | Light > Mode | (none)
 | Bake | Lighting > Generate Lighting | Generate Lighting | Bake (Cycles: Render > Bake)
 | Moving objects | Probe Volume component | Adaptive Probe Volumes | Light Probe Volume (EEVEE)
 | Live bounce | Realtime GI (voxel based) | Realtime GI (Enlighten) | (EEVEE: screen-space GI)
