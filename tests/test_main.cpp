@@ -200,6 +200,9 @@ static void round36_tests();
 static void round37_tests();
 static void round39_tests();
 static void round41_tests();
+static void round43_tests();
+static void round44_tests();
+static void round45_tests();
 
 int main() {
   register_builtin_components();
@@ -819,6 +822,9 @@ int main() {
   round37_tests();
   round39_tests();
   round41_tests();
+  round43_tests();
+  round44_tests();
+  round45_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -17163,5 +17169,615 @@ static void round41_tests() {
     ed.command("newscene");
     CHECK(ed.preview_data_for_test().empty() && !ed.preview_running_for_test() && ed.preview_samples_for_test() == 0);
     std::filesystem::remove(path);
+  });
+}
+
+
+/* ===================================================================== */
+/* Round 43 (task 0021): Baked lights exist only through the bake         */
+/* ===================================================================== */
+
+static void round43_tests() {
+  /* The floor and wall static, a ball that isn't, the sun off, and a point light over the ball. */
+  auto world = [](Editor &ed, int light_mode, bool volume = false) {
+    P37World w = p37_world(ed, volume, 0, 1.0f, false);
+    ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    GameObject *lamp = ed.scene().create("Lamp");
+    Light *l = lamp->add<Light>();
+    l->type = 1;
+    l->intensity = 3.0f;
+    l->range = 8.0f;
+    l->mode = light_mode;
+    lamp->set_local_position({1.0f, 2.0f, 0.0f});
+    ed.commit_change("lamp");
+    r36_cmd(ed, "lighting mode automatic");
+    r34_steps(ed, 2);
+    return lamp;
+  };
+
+  test("baked lights: with nothing baked, a Baked light is not rasterized (the picture equals the light disabled); Mixed and Realtime light the scene", [=] {
+    Editor baked, off, mixed, realtime;
+    GameObject *lb = world(baked, 2);
+    GameObject *lo = world(off, 2);
+    lo->get<Light>()->enabled = false;
+    off.commit_change("off");
+    r34_steps(off, 2);
+    world(mixed, 1);
+    world(realtime, 0);
+    const std::vector<uint32_t> pb = r35_game(baked), po = r35_game(off), pm = r35_game(mixed), pr = r35_game(realtime);
+    std::printf("    Baked vs disabled: %zu pixels differ; Mixed vs disabled: %zu; Realtime vs disabled: %zu\n", r35_diff_count(pb, po),
+                r35_diff_count(pm, po), r35_diff_count(pr, po));
+    CHECK(r35_diff_count(pb, po) == 0);
+    CHECK(r35_diff_count(pm, po) > 500);
+    CHECK(r35_diff_count(pr, po) > 500);
+    /* Switched to Realtime, it lights the scene again at once. */
+    lb->get<Light>()->mode = 0;
+    baked.commit_change("realtime now");
+    r34_steps(baked, 2);
+    CHECK(r35_diff_count(r35_game(baked), pr) == 0);
+  });
+
+  test("baked lights: a Baked sun renders no shadow map and no RSM, and bounces nothing live; a Mixed sun does all three", [] {
+    for (int mode : {2, 1}) {
+      Editor ed;
+      P37World w = p37_world(ed, false, mode, 1.0f, true);  // (the setup's frames rendered a shadow map before the sun's mode was set)
+      r36_cmd(ed, "lighting mode automatic");
+      r36_cmd(ed, "set Lighting.RealtimeGI true");
+      r34_steps(ed, 6);
+      /* A moved caster makes a Mixed sun render its shadow map again; a Baked sun has none to render. */
+      const uint64_t shadows0 = ed.frame_profile_totals().shadow_renders;
+      w.box->set_local_position({-1.2f, 0.5f, 0.4f});
+      ed.commit_change("box moved");
+      r34_steps(ed, 4);
+      const uint64_t shadows = ed.frame_profile_totals().shadow_renders - shadows0, rsm = ed.rsm_renders_for_test();
+      Vec3 bounce(0.0f);
+      const RealtimeLightmaps &rl = ed.realtime_lightmaps_for_test(true);
+      for (const Lightmap &m : rl.shown.bounce)
+        for (const Vec3 &t : m.texels) bounce += t;
+      std::printf("    sun %s: %llu shadow renders, %llu RSM renders, realtime-lightmap bounce total %.3f\n", mode == 2 ? "Baked" : "Mixed",
+                  (unsigned long long)shadows, (unsigned long long)rsm, bounce.x + bounce.y + bounce.z);
+      if (mode == 2) CHECK(shadows == 0 && rsm == 0 && bounce.x + bounce.y + bounce.z == 0.0f);
+      else CHECK(shadows > 0 && rsm > 0 && bounce.x + bounce.y + bounce.z > 0.01f);
+    }
+  });
+
+  test("baked lights: after a bake the lightmapped floor shows the Baked light, a non-static ball shows none of it without a probe volume and the probes' light with one", [=] {
+    Editor plain, probes, none;
+    world(plain, 2);
+    world(probes, 2, true);
+    GameObject *ln = world(none, 2);
+    ln->get<Light>()->enabled = false;
+    none.commit_change("off");
+    for (Editor *e : {&plain, &probes, &none}) r35_bake(*e);
+    const std::vector<uint32_t> pp = r35_game(plain), pv = r35_game(probes), pn = r35_game(none);
+    /* Where the ball is: the pixels that change when it is hidden (sun off: no shadow of it). */
+    GameObject *ball = plain.scene().find_by_name("Ball");
+    ball->active = false;
+    plain.commit_change("hide");
+    r34_steps(plain, 2);
+    const std::vector<uint32_t> hidden = r35_game(plain);
+    size_t ball_px = 0, ball_lit = 0, ball_probes = 0, floor_lit = 0;
+    for (size_t i = 0; i < pp.size(); i++) {
+      if (pp[i] != hidden[i]) {
+        ball_px++;
+        ball_lit += pp[i] != pn[i];
+        ball_probes += pv[i] != pn[i];
+      }
+      else floor_lit += pp[i] != pn[i];
+    }
+    std::printf("    ball: %zu pixels, %zu differ from no light (no volume), %zu with a probe volume; elsewhere %zu pixels differ (the floor's map)\n",
+                ball_px, ball_lit, ball_probes, floor_lit);
+    CHECK(ball_px > 200);
+    CHECK(ball_lit == 0);
+    CHECK(ball_probes > ball_px / 4);
+    CHECK(floor_lit > 1000);
+  });
+
+  test("baked lights: a path-traced F12 render through the editor still lights with a Baked light; the rasterized one doesn't", [=] {
+    Editor ed;
+    GameObject *lamp = world(ed, 2);
+    ed.command("set Render.RenderEngine Path");
+    ed.command("set Render.Samples 4");
+    ed.command("set Render.Denoise false");
+    ed.command("set Render.ResolutionX 160");
+    ed.command("set Render.ResolutionY 90");
+    auto render = [&] {
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.rendering_for_test());
+      return ed.render_image_for_test().pixels;
+    };
+    const std::vector<uint32_t> traced_on = render();
+    lamp->get<Light>()->enabled = false;
+    ed.commit_change("off");
+    const std::vector<uint32_t> traced_off = render();
+    const double lit = r35_luma(traced_on), dark = r35_luma(traced_off);
+    std::printf("    path traced: summed luma %.0f with the Baked light, %.0f without (%.1f%% more)\n", lit, dark, 100.0 * (lit / dark - 1.0));
+    CHECK(lit > dark * 1.08);  // (the sky lights the whole frame; the lamp adds about 16% on top; run-to-run noise is under 1%)
+    /* Rasterized F12: the Baked light isn't drawn, so the two renders are the same. */
+    ed.command("set Render.RenderEngine Rasterized");
+    const std::vector<uint32_t> raster_off = render();
+    lamp->get<Light>()->enabled = true;
+    ed.commit_change("on");
+    const std::vector<uint32_t> raster_on = render();
+    CHECK(r35_diff_count(raster_on, raster_off) == 0);
+  });
+
+  test("baked lights: the path tracer still lights with a Baked light (it computes true GI and doesn't read the bake)", [] {
+    P37Pt s;
+    s.add(primitives::plane(20.0f, 2), Mat4::identity(), Vec3(0.7f));
+    s.add(primitives::uv_sphere(0.5f, 24, 12), Mat4::translate({1.0f, 0.5f, 0.0f}), Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    RenderLight lamp;
+    lamp.type = RenderLight::Point;
+    lamp.position = Vec3(1.0f, 2.0f, 0.0f);
+    lamp.intensity = 3.0f;
+    lamp.range = 8.0f;
+    lamp.bake_mode = 2;
+    s.build({lamp}, env, 1);
+    uint32_t rng = 7;
+    uint64_t rays = 0;
+    Vec3 sum(0.0f);
+    for (int i = 0; i < 64; i++) sum += s.pt.incoming_radiance({Vec3(1.0f, 3.0f, -3.0f), normalize(Vec3(1.0f, 0.9f, 0.0f) - Vec3(1.0f, 3.0f, -3.0f))}, rng, rays);
+    std::printf("    radiance from the ball's top: %.3f\n", sum.x / 64.0f);
+    CHECK(sum.x / 64.0f > 0.05f);
+  });
+
+  test("baked lights: Preview Lighting shows a Baked light before any bake (Bakery's way)", [=] {
+    Editor ed;
+    world(ed, 2);
+    r36_cmd(ed, "lighting mode manual");
+    const std::vector<uint32_t> dark = r35_game(ed);
+    ed.command("lighting preview on");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    r34_steps(ed, 2);
+    CHECK(ed.preview_samples_for_test() == 256 && ed.lighting_data_for_test().empty());
+    const std::vector<uint32_t> shown = r35_game(ed);
+    const size_t d = r35_diff_count(shown, dark);
+    const double lit = r35_luma(shown), before = r35_luma(dark);
+    std::printf("    with the preview: %zu pixels differ from the dark scene; summed luma %.0f -> %.0f\n", d, before, lit);
+    CHECK(d > 1000);
+    CHECK(lit > before * 1.05);  // brighter: the light appeared through the preview, not something else that moved
+  });
+}
+
+
+/* ===================================================================== */
+/* Round 44 (task 0022): area lights bake smoothly, previews aren't blocky */
+/* ===================================================================== */
+
+static void round44_tests() {
+  test("area lights: a floor under a Baked area light bakes with less noise at 16 samples (a jittered grid over the light, against a converged bake)", [] {
+    /* A 4 x 4 m floor, an area light 2 x 1 m facing down from 1.5 m, 16 direct samples per texel, no sky. */
+    auto floor = primitives::plane(4.0f, 1);
+    std::vector<MaterialPtr> mats = {make_material("f", Vec3(0.8f))};
+    BakeObject o;
+    o.id = 1;
+    o.mesh = floor;
+    o.model = Mat4::identity();
+    o.materials = mats;
+    RenderLight lamp;
+    lamp.type = RenderLight::Area;
+    lamp.position = Vec3(0, 1.5f, 0);
+    lamp.direction = Vec3(0, -1, 0);
+    lamp.right = Vec3(1, 0, 0);
+    lamp.width = 2.0f;
+    lamp.height = 1.0f;
+    lamp.intensity = 4.0f;
+    lamp.range = 10.0f;
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    BakeSettings bs;
+    bs.texels_per_unit = 8.0f;
+    bs.direct_samples = 16;
+    bs.indirect_samples = 1;
+    bs.bounces = 0;
+    bs.denoise = false;  // the raw texels: the sampling alone must be smooth
+    auto bake = [&](int samples) {
+      BakeSettings b = bs;
+      b.direct_samples = samples;
+      Lightmapper lm;
+      lm.begin({o}, {{lamp, 2, 9}}, env, b);
+      while (!lm.step(1e9)) {}
+      return lm.take_result();
+    };
+    const LightingData d = bake(16), ref = bake(1024);  // the same layout: the texels line up
+    CHECK(d.pages.size() == 1 && ref.pages.size() == 1);
+    if (d.pages.empty() || ref.pages.empty()) return;
+    const Lightmap &m = d.pages[0], &r = ref.pages[0];
+    CHECK(m.width == r.width && m.height == r.height);
+    /* Each lit texel against the converged bake: the 16 samples' error. */
+    double worst = 0, mean = 0;
+    size_t n = 0;
+    int wx = -1, wy = -1;
+    for (int y = 0; y < m.height; y++)
+      for (int x = 0; x < m.width; x++) {
+        const float c = m.texels[(size_t)y * m.width + x].x, t = r.texels[(size_t)y * m.width + x].x;
+        if (t < 0.3f) continue;  // the padding and the dim edges
+        const double rel = std::fabs(c - t) / t;
+        if (rel > worst) worst = rel, wx = x, wy = y;
+        mean += rel, n++;
+      }
+    std::printf("    %zu lit texels: error against 1024 samples, mean %.2f%%, worst %.2f%% at texel %d,%d of %d x %d\n", n,
+                100.0 * mean / std::max<size_t>(1, n), 100.0 * worst, wx, wy, m.width, m.height);
+    CHECK(n > 200);
+    /* Measured: random 16-point sampling 5.8% mean (35% worst), the jittered grid 3.7% (22%). */
+    CHECK(mean / std::max<size_t>(1, n) < 0.05);
+  });
+
+  test("area lights: Preview Lighting's first pass gives a small sphere a chart of at least 32 texels across and a smooth picture", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 0, 1.0f, false);
+    ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    w.ball->get<MeshRenderer>()->contribute_gi = true;
+    GameObject *lamp = ed.scene().create("Panel");
+    Light *l = lamp->add<Light>();
+    l->type = 3;
+    l->mode = 2;
+    l->intensity = 10.0f;
+    l->area_width = 3.0f;
+    l->area_height = 1.5f;
+    lamp->set_local_position({1.0f, 2.0f, 0.5f});
+    lamp->set_local_euler({90, 0, 0});  // facing down
+    ed.commit_change("panel");
+    r36_cmd(ed, "lighting mode manual");
+    ed.command("lighting preview on");
+    ed.step_frame_headless();  // the first pass (16 samples) in one headless frame
+    CHECK(ed.preview_samples_for_test() == 16);
+    const LightingData &pd = ed.preview_data_for_test();
+    auto e = pd.entries.find(w.ball->id);
+    CHECK(e != pd.entries.end() && !pd.pages.empty());
+    if (e == pd.entries.end() || pd.pages.empty()) return;
+    /* The chart's extent in texels, from its UVs. */
+    float u0 = 1, u1 = 0, v0 = 1, v1 = 0;
+    for (const Vec2 &uv : e->second.tri_uv) u0 = std::min(u0, uv.x), u1 = std::max(u1, uv.x), v0 = std::min(v0, uv.y), v1 = std::max(v1, uv.y);
+    const int side = pd.pages[(size_t)e->second.page].width;
+    const float tex_w = (u1 - u0) * side, tex_h = (v1 - v0) * side;
+    std::printf("    the ball's preview chart: its islands span %.0f x %.0f texels on a %d page\n", tex_w, tex_h, side);
+    /* The islands of a sphere fill part of a 32-texel chart (before: a chart of about 18, islands of about 15). */
+    CHECK(std::max(tex_w, tex_h) >= 24.0f);
+    /* The first pass is close to the refined one (256 samples), texel by texel on the lit top: the same layout
+     * (the scene didn't change), so the difference is the first pass's noise. */
+    const Lightmap first = pd.pages[(size_t)e->second.page];
+    const int first_page = e->second.page;  // (e is an iterator into data the next pass replaces)
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(ed.preview_samples_for_test() == 256);
+    const LightingData &pd3 = ed.preview_data_for_test();
+    auto e3 = pd3.entries.find(w.ball->id);
+    CHECK(e3 != pd3.entries.end() && e3->second.page == first_page && !pd3.pages.empty());
+    if (e3 == pd3.entries.end() || pd3.pages.empty()) return;
+    const Lightmap &fin = pd3.pages[(size_t)e3->second.page];
+    CHECK(fin.width == first.width && fin.height == first.height);
+    double sum = 0, worst = 0;
+    size_t n = 0;
+    const int x0 = (int)(u0 * side), x1 = (int)(u1 * side), y0 = (int)(v0 * side), y1 = (int)(v1 * side);
+    for (int y = y0; y <= y1 && y < fin.height; y++)
+      for (int x = x0; x <= x1 && x < fin.width; x++) {
+        const float a = first.texels[(size_t)y * fin.width + x].x, b = fin.texels[(size_t)y * fin.width + x].x;
+        if (b < 1.0f) continue;  // only the brightly lit top (the sky is off)
+        const double rel = std::fabs(a - b) / b;
+        sum += rel, worst = std::max(worst, rel), n++;
+      }
+    std::printf("    %zu lit texels on the ball: the first pass differs from the refined one by %.1f%% on average, %.1f%% at worst\n", n,
+                100.0 * sum / std::max<size_t>(1, n), 100.0 * worst);
+    CHECK(n > 50);
+    CHECK(sum / std::max<size_t>(1, n) < 0.10);  // measured about 7% (mostly the 16 indirect samples' noise after denoising)
+  });
+
+  test("area lights: a layout whose smallest chart is bigger than the page (Max Lightmap Size 16, 32-texel charts) keeps every texel inside the page", [] {
+    std::vector<BakeObject> objs;
+    std::vector<MaterialPtr> mats = {make_material("m", Vec3(0.8f))};
+    std::vector<MeshPtr> keep = {primitives::uv_sphere(0.5f, 16, 8), primitives::cube(), primitives::plane(4.0f, 1)};
+    for (size_t i = 0; i < keep.size(); i++) {
+      BakeObject o;
+      o.id = i + 1;
+      o.mesh = keep[i];
+      o.model = Mat4::translate({2.0f * i, 0, 0});
+      o.materials = mats;
+      objs.push_back(o);
+    }
+    BakeSettings s;
+    s.texels_per_unit = 8.0f;
+    s.max_size = 16;
+    s.min_chart = 32;  // the preview's, bigger than the page
+    LightmapLayout lay;
+    lightmap_layout(objs, s, lay);
+    CHECK(!lay.data.pages.empty() && !lay.texels.empty());
+    bool inside = true;
+    for (const LightmapTexel &t : lay.texels) {
+      const Lightmap &pg = lay.data.pages[(size_t)t.page];
+      inside = inside && t.x >= 0 && t.y >= 0 && t.x < pg.width && t.y < pg.height && pg.width == 16 && pg.height == 16;
+    }
+    for (size_t p = 0; p < lay.data.pages.size(); p++) inside = inside && lay.covered[p].size() == 256 && lay.owner[p].size() == 256;
+    std::printf("    %zu texels on %zu pages of 16 x 16\n", lay.texels.size(), lay.data.pages.size());
+    CHECK(inside);
+    /* The same through Preview Lighting (the case the review found): no crash, a picture. */
+    Editor ed;
+    P37World w = p37_world(ed, false, 2, 1.0f, true);
+    ed.scene().lighting.max_size = 16;
+    ed.commit_change("tiny pages");
+    r36_cmd(ed, "lighting mode manual");
+    ed.command("lighting preview on");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(ed.preview_samples_for_test() == 256);
+    w.box->set_local_position({-1.2f, 0.5f, 0.3f});
+    ed.commit_change("moved");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(!ed.preview_data_for_test().empty());
+  });
+}
+
+/* Round 45 (task 0023, ADR 0015): the per-object render-hash memo. */
+static void round45_tests() {
+  test("hash memo: evaluated_keys gives the three evaluated_key values on every modifier on / render / edit combination", [] {
+    Scene s;
+    GameObject *g = s.create("Stack");
+    g->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    g->add<MeshRenderer>();
+    g->add<ArrayModifier>();
+    g->add<MirrorModifier>();
+    g->add<SolidifyModifier>();
+    g->add<BevelModifier>();
+    g->add<SubdivisionSurface>();
+    g->add<TriangulateModifier>();
+    g->add<WeldModifier>();
+    g->add<DisplaceModifier>();
+    g->add<SimpleDeformModifier>();
+    g->add<CastModifier>();
+    std::vector<Component *> mods;
+    for (auto &c : g->components)
+      if (c->is_modifier()) mods.push_back(c.get());
+    CHECK(mods.size() == 10);
+    uint64_t seed = 12345;
+    auto bit = [&] { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return (seed >> 40) & 1; };
+    int same = 0, trials = 0;
+    /* Every combination for the first two modifiers, random ones for the rest. */
+    for (int t = 0; t < 300; t++) {
+      for (size_t i = 0; i < mods.size(); i++) {
+        if (i < 2) {
+          mods[i]->enabled = (t >> (i * 3)) & 1;
+          mods[i]->show_in_render = (t >> (i * 3 + 1)) & 1;
+          mods[i]->show_in_editmode = (t >> (i * 3 + 2)) & 1;
+        }
+        else {
+          mods[i]->enabled = bit();
+          mods[i]->show_in_render = bit();
+          mods[i]->show_in_editmode = bit();
+        }
+      }
+      if (t % 7 == 0) static_cast<ArrayModifier *>(mods[0])->count = 2 + t % 5;  // a field change changes the keys too
+      uint64_t k[3];
+      g->evaluated_keys(k);
+      trials++;
+      if (k[0] == g->evaluated_key(0) && k[1] == g->evaluated_key(1) && k[2] == g->evaluated_key(2)) same++;
+    }
+    std::printf("    %d of %d combinations agree\n", same, trials);
+    CHECK(same == trials);
+    /* Without a mesh: all zero, like evaluated_key. */
+    GameObject *e = s.create("Empty");
+    uint64_t z[3] = {1, 1, 1};
+    e->evaluated_keys(z);
+    CHECK(z[0] == 0 && z[1] == 0 && z[2] == 0 && e->evaluated_key(0) == 0);
+  });
+  test("hash memo: an object's transform version bumps on its own move, a parent's move and reparenting (ADR 0015)", [] {
+    Scene s;
+    GameObject *a = s.create("A");
+    GameObject *b = s.create("B", a);
+    GameObject *c = s.create("C");
+    (void)a->world_matrix();
+    (void)b->world_matrix();
+    (void)c->world_matrix();
+    const uint64_t a0 = a->transform_version, b0 = b->transform_version, c0 = c->transform_version;
+    a->set_local_position({1, 0, 0});  // a parent's move reaches the child
+    CHECK(a->transform_version > a0 && b->transform_version > b0 && c->transform_version == c0);
+    const uint64_t a1 = a->transform_version, b1 = b->transform_version;
+    a->set_local_position({2, 0, 0});  // twice before anyone read the matrix: the moved object still bumps
+    CHECK(a->transform_version > a1 && b->transform_version >= b1);
+    /* The child need not bump again: its memo can only have been refreshed by a hash, which reads the
+     * child's world matrix and so cleans the whole chain; a dirty parent means no memo was taken since
+     * the first bump. */
+    (void)b->world_matrix();  // cleans A and B
+    const uint64_t b2 = b->transform_version;
+    a->set_local_position({3, 0, 0});
+    CHECK(b->transform_version > b2);
+    const uint64_t c1 = c->transform_version;
+    s.set_parent(c, a);  // the world matrix changes without the local transform changing
+    CHECK(c->transform_version > c1);
+    const uint64_t c2 = c->transform_version;
+    s.set_parent(c, nullptr);
+    CHECK(c->transform_version > c2);
+  });
+  test("hash memo: the memoised scene hash equals a from-scratch hash and changes after every kind of change, in verify mode", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.set_render_cache_verify(true);
+    const uint64_t mm0 = Editor::render_cache_mismatches_all();
+    uint64_t last = ed.render_hash_for_test();
+    CHECK(last == ed.render_hash_uncached_for_test());
+    /* Idle frames: the hash holds still. */
+    r34_steps(ed, 3);
+    CHECK(ed.render_hash_for_test() == last);
+    int changed = 0, agreed = 0, cases = 0;
+    auto change = [&](const char *what, const std::function<void()> &act) {
+      act();
+      r34_steps(ed, 2);
+      const uint64_t memo = ed.render_hash_for_test(), scratch = ed.render_hash_uncached_for_test();
+      cases++;
+      changed += memo != last;
+      agreed += memo == scratch;
+      if (memo == last || memo != scratch)
+        std::printf("    %s: %s\n", what, memo == last ? "the hash did not change" : "memo and from-scratch hashes differ");
+      last = memo;
+    };
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    GameObject *sphere = by_name(ed.scene(), "Sphere");
+    GameObject *sun = by_name(ed.scene(), "Directional Light");
+    CHECK(cube && sphere && sun);
+    if (!cube || !sphere || !sun) return;
+    MeshRenderer *mr = cube->get<MeshRenderer>();
+    if (mr->materials.empty()) mr->materials.push_back(make_material("Painted", {0.8f, 0.8f, 0.8f}));
+    r34_steps(ed, 2);
+    last = ed.render_hash_for_test();
+    ed.command("select Cube");  // the Move gizmo is on the selection
+    ed.command("camera 0 20 6 0 0.5 0");  // the X arrow points straight right on screen
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    last = ed.render_hash_for_test();
+    change("gizmo move", [&] {
+      const float x0 = cube->world_position().x;
+      r34_gizmo_drag_x(ed, cube->world_position(), 60);
+      CHECK(std::fabs(cube->world_position().x - x0) > 0.1f);  // the real drag moved it
+    });
+    change("the Inspector's position field", [&] {  // (what `set` can't reach: the Transform isn't a component)
+      cube->set_local_position({1, 2, 3});
+      ed.commit_change("Set position");
+    });
+    change("undo", [&] { ed.command("undo"); });
+    change("redo", [&] { ed.command("redo"); });
+    change("parenting", [&] { ed.scene().set_parent(cube, sphere); });
+    change("a parent's move", [&] { sphere->set_local_position({0, 1.5f, 0}); });
+    change("unparenting", [&] { ed.scene().set_parent(cube, nullptr); });
+    change("a material field", [&] {
+      mr->materials[0]->base_color = {0.9f, 0.2f, 0.2f};
+      mr->materials[0]->touch();
+    });
+    change("a light field", [&] { sun->get<Light>()->intensity = 2.5f; });
+    change("a modifier added", [&] {
+      ed.command("select Cube");
+      ed.command("component ArrayModifier");
+    });
+    change("a modifier field", [&] { cube->get<ArrayModifier>()->count = 5; });
+    change("a modifier disabled", [&] { cube->get<ArrayModifier>()->enabled = false; });
+    change("a modifier's Show in Renders", [&] { cube->get<ArrayModifier>()->show_in_render = false; });
+    change("the renderer disabled", [&] { mr->enabled = false; });
+    change("the renderer enabled", [&] { mr->enabled = true; });
+    change("a renderer flag", [&] { mr->cast_shadows = false; });
+    change("a material slot swapped", [&] { mr->materials[0] = make_material("Other", {0.2f, 0.9f, 0.2f}); });
+    change("an object deactivated", [&] { sphere->active = false; });
+    change("an object reactivated", [&] { sphere->active = true; });
+    change("an object deleted", [&] {
+      ed.command("select Sphere");
+      ed.command("delete");
+    });
+    change("an object created", [&] { ed.command("create Cube"); });
+    change("a probe volume added", [&] {
+      ed.command("select Cube");
+      ed.command("component Probe Volume");
+    });
+    change("a probe volume field", [&] { cube->get<ProbeVolume>()->size = {3, 3, 3}; });
+    std::printf("    %d cases: %d changed the hash, %d agreed with the from-scratch hash\n", cases, changed, agreed);
+    CHECK(changed == cases);
+    CHECK(agreed == cases);
+    std::printf("    stale pictures found in verify mode: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - mm0));
+    CHECK(Editor::render_cache_mismatches_all() == mm0);
+  });
+  test("hash memo: a camera filter field re-renders the Game view (the camera hash is not memoised)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Retro Console");
+    r34_steps(ed, 4);
+    const R34Count idle0 = r34_totals(ed);
+    r34_steps(ed, 3);
+    CHECK((r34_totals(ed) - idle0).renders == 0);
+    const R34Change c = r34_change(ed, [&] { ed.command("set RetroConsoleFilter.Width 64"); });
+    std::printf("    renders after the field change: %llu\n", (unsigned long long)c.d.renders);
+    CHECK(c.d.renders >= 1);
+    const R34Count t0 = r34_totals(ed);
+    r34_steps(ed, 3);
+    CHECK((r34_totals(ed) - t0).renders == 0);
+  });
+  test("hash memo: the main camera follows a rename, a disabled Camera component and a deactivated object at once", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *mc = by_name(ed.scene(), "Main Camera");
+    CHECK(mc && ed.main_camera_owner_for_test() == mc);
+    if (!mc) return;
+    ed.command("create Camera");
+    GameObject *second = ed.selected_object();
+    CHECK(second && second != mc && second->get<Camera>());
+    if (!second) return;
+    r34_steps(ed, 2);
+    CHECK(ed.main_camera_owner_for_test() == mc);  // "Main Camera" wins over a later camera
+    mc->name = "Old Camera";
+    second->name = "Main Camera";
+    CHECK(ed.main_camera_owner_for_test() == second);
+    second->get<Camera>()->enabled = false;
+    CHECK(ed.main_camera_owner_for_test() == mc);
+    second->get<Camera>()->enabled = true;
+    second->active = false;
+    CHECK(ed.main_camera_owner_for_test() == mc);
+    second->active = true;
+    CHECK(ed.main_camera_owner_for_test() == second);
+  });
+  test("hash memo: an icon drawn through its mask matches the icon rasterized directly (within a step of coverage)", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ui::Context &u = ed.ui_mut_for_test();
+    Image a, b;
+    a.resize(64, 64);
+    b.resize(64, 64);
+    for (auto &img : {&a, &b}) std::fill(img->pixels.begin(), img->pixels.end(), 0xFF203040u);
+    int worst = 0, pixels = 0;
+    for (ui::Icon ic : {ui::Icon::Camera, ui::Icon::Light, ui::Icon::Gear, ui::Icon::Search, ui::Icon::Folder, ui::Icon::PushPull})
+      for (int size : {13, 16, 22, 48}) {
+        for (auto &img : {&a, &b}) std::fill(img->pixels.begin(), img->pixels.end(), 0xFF203040u);
+        u.canvas.begin(&a);
+        u.draw_icon(ic, {5, 7, size, size}, 0xFFE0C080);
+        u.canvas.begin(&b);
+        u.rasterize_icon(u.canvas, ic, {5, 7, size, size}, 0xFFE0C080);
+        for (size_t i = 0; i < a.pixels.size(); i++) {
+          for (int sh : {0, 8, 16}) worst = std::max(worst, std::abs((int)((a.pixels[i] >> sh) & 255) - (int)((b.pixels[i] >> sh) & 255)));
+          pixels += a.pixels[i] != 0xFF203040u;
+        }
+      }
+    std::printf("    worst channel difference %d over %d icon pixels\n", worst, pixels);
+    CHECK(pixels > 200);
+    CHECK(worst <= 2);  // one step of 8-bit coverage, and one of blending
+  });
+  test("hash memo: Canvas::circle walking the ring gives the same pixels as walking the bounding box", [] {
+    auto old_circle = [](Canvas &c, Image &img, float cx, float cy, float r, uint32_t color, float t) {
+      float hw = t * 0.5f;
+      const Recti clip = c.clip();
+      int x0 = std::max(clip.x, (int)std::floor(cx - r - hw - 1)), x1 = std::min(clip.right() - 1, (int)std::ceil(cx + r + hw + 1));
+      int y0 = std::max(clip.y, (int)std::floor(cy - r - hw - 1)), y1 = std::min(clip.bottom() - 1, (int)std::ceil(cy + r + hw + 1));
+      for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+          float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+          float d = std::fabs(std::sqrt(dx * dx + dy * dy) - r);
+          if (d < hw + 1.0f) c.blend_px_a(x, y, color, saturate(hw + 0.5f - d));
+        }
+      (void)img;
+    };
+    int bad = 0, drawn = 0;
+    const float cases[][4] = {{10, 10.45f, 1.6f, 1}, {20.3f, 19.7f, 3.0f, 1.5f}, {32, 32, 12.5f, 2}, {40.2f, 25.9f, 20, 1}, {5, 5, 0.8f, 1}, {30.5f, 30.5f, 2.2f, 3}};
+    for (const float *k : cases) {
+      Image a, b;
+      a.resize(64, 64);
+      b.resize(64, 64);
+      Canvas ca, cb;
+      ca.begin(&a);
+      cb.begin(&b);
+      ca.circle(k[0], k[1], k[2], 0xFFFFC040, k[3]);
+      old_circle(cb, b, k[0], k[1], k[2], 0xFFFFC040, k[3]);
+      for (size_t i = 0; i < a.pixels.size(); i++) {
+        bad += a.pixels[i] != b.pixels[i];
+        drawn += b.pixels[i] != 0xFF000000u;
+      }
+    }
+    std::printf("    %d pixels differ over %d drawn\n", bad, drawn);
+    CHECK(drawn > 100);
+    CHECK(bad == 0);
+  });
+  test("hash memo: Statistics shows the rasterizer's binning time", [] {
+    Editor ed;
+    r34_open(ed);
+    r34_steps(ed, 2);
+    const RasterStats s = ed.scene_stats_for_test();
+    std::printf("    clip / cull / bin %.3f ms, of it binning (CPU) %.3f ms\n", s.ms_setup, s.ms_bin);
+    CHECK(s.ms_bin > 0.0);
   });
 }

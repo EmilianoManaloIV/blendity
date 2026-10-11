@@ -391,7 +391,6 @@ void Editor::frame(std::vector<Event> &events) {
   auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
   preview_step();
   auto &c = ui_.canvas;
-  c.fill_rect({0, 0, fb_.width, fb_.height}, ui_.theme.border);
   int mh = ui_.row_h() + ui_.px(2);
   int th = ui_.px(36);
   int sh = ui_.row_h();
@@ -399,6 +398,13 @@ void Editor::frame(std::vector<Event> &events) {
   Recti toolbar{0, mh, fb_.width, th};
   Recti status{0, fb_.height - sh, fb_.width, sh};
   Recti dock_area{ui_.px(2), toolbar.bottom() + ui_.px(2), fb_.width - ui_.px(4), status.y - toolbar.bottom() - ui_.px(4)};
+  /* The border shows only around the dock area (the bars and the windows paint their own rects; the
+   * splitters between windows are painted by dock_draw): clearing the whole framebuffer cost a fifth
+   * of an idle frame. */
+  c.fill_rect({0, toolbar.bottom(), fb_.width, dock_area.y - toolbar.bottom()}, ui_.theme.border);
+  c.fill_rect({0, dock_area.bottom(), fb_.width, status.y - dock_area.bottom()}, ui_.theme.border);
+  c.fill_rect({0, dock_area.y, dock_area.x, dock_area.h}, ui_.theme.border);
+  c.fill_rect({dock_area.right(), dock_area.y, fb_.width - dock_area.right(), dock_area.h}, ui_.theme.border);
 
   drop_slots_.clear();  // drop targets register again as the windows draw
   drop_textures_.clear();
@@ -1076,6 +1082,7 @@ void Editor::dock_draw(DockNode *n) {
     dock_draw(n->b.get());
     Recti sr = n->vertical ? Recti{n->rect.x, n->a->rect.bottom(), n->rect.w, n->b->rect.y - n->a->rect.bottom()}
                            : Recti{n->a->rect.right(), n->rect.y, n->b->rect.x - n->a->rect.right(), n->rect.h};
+    u.canvas.fill_rect(sr, u.theme.border);  // (the frame no longer clears the whole framebuffer)
     Recti hit = n->vertical ? Recti{sr.x, sr.y - u.px(2), sr.w, sr.h + u.px(4)} : Recti{sr.x - u.px(2), sr.y, sr.w + u.px(4), sr.h};
     bool hot = u.hovered(hit) && !u.any_active();
     if (hot || split_drag_ == n) u.cursor = n->vertical ? Cursor::ResizeV : Cursor::ResizeH;
@@ -1140,12 +1147,16 @@ void Editor::dock_draw(DockNode *n) {
     });
     x += w;
   }
-  if (n->tabs.empty()) return;
+  if (n->tabs.empty()) {  // (the frame no longer clears the framebuffer: paint the empty leaf's content)
+    u.canvas.fill_rect({r.x, r.y + tbh, r.w, r.h - tbh}, u.theme.border);
+    return;
+  }
   n->active = std::max(0, std::min(n->active, (int)n->tabs.size() - 1));
   Recti content{r.x, r.y + tbh, r.w, r.h - tbh};
   if (u.hovered(content) && (u.in.pressed[0] || u.in.pressed[1] || u.in.pressed[2])) focused_ = n->tabs[n->active];
   window_rects_[n->tabs[n->active]] = content;
-  u.canvas.fill_rect(content, u.theme.panel);
+  /* The Scene and Game views paint every pixel of their content themselves. */
+  if (n->tabs[n->active] != WindowKind::Scene && n->tabs[n->active] != WindowKind::Game) u.canvas.fill_rect(content, u.theme.panel);
   u.canvas.push_clip(content);
   dock_draw_window(n->tabs[n->active], content);
   u.canvas.pop_clip();

@@ -198,6 +198,7 @@ class Context {
 
   /* --- drawing helpers --- */
   void draw_icon(Icon icon, const Recti &r, uint32_t color);
+  void rasterize_icon(Canvas &canvas, Icon icon, const Recti &r, uint32_t color);  // (draw_icon's mask comes from this)
   void panel_bg(const Recti &r, uint32_t color) { canvas.fill_rect(r, color); }
   void frame(const Recti &r, uint32_t fill, uint32_t border, int radius = 3);
 

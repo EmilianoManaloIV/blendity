@@ -91,7 +91,7 @@ RenderLight to_render_light(const GameObject &g, const Light &l) {
   return rl;
 }
 
-LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
+LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized) {
   LightingEnv env;
   const EnvironmentSettings &es = scene_->environment;
   env.sky = es.sky;
@@ -113,6 +113,9 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
     if (!l || !l->enabled) return;
+    /* A Baked light exists only through the bake (task 0021, as Unity): never rasterized, so no direct
+     * light, shadow map or live bounce from it. Before a bake, Preview Lighting shows it (Bakery's way). */
+    if (rasterized && l->mode == 2) return;
     RenderLight rl = to_render_light(g, *l);
     /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
      * Realtime since must not shine twice, and one added since must not vanish. */
@@ -167,7 +170,12 @@ void Editor::update_environment() {
   env_.compute_sh();
 }
 
-uint64_t Editor::scene_render_hash() {
+/* One object's part of the scene render hash (ADR 0009 / 0015). The parts that only change with a
+ * transform, a material or the hierarchy (the world matrix, the flags, the material versions) are
+ * memoised on the object, keyed by its transform version and the material pointers and versions;
+ * everything that can change on its own (the evaluated-mesh keys with their modifiers, the light, the
+ * probe volume) is hashed every time. `memo` false hashes everything from scratch (the tests compare). */
+uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   uint64_t h = 1469598103934665603ull;
   auto mix = [&](const void *p, size_t n) {  // 8 bytes a step: it runs for every view, every frame
     const uint8_t *b = (const uint8_t *)p;
@@ -178,44 +186,99 @@ uint64_t Editor::scene_render_hash() {
       h ^= h >> 29;
     }
   };
-  scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    auto *mr = g.get<MeshRenderer>();
-    auto *l = g.get<Light>();
-    auto *pv = g.get<ProbeVolume>();
-    /* The hierarchy: a selected object's children get an outline of their own. */
-    const uint64_t parent = g.parent ? g.parent->id : 0;
-    mix(&parent, 8);
-    if (!mr && !l && !pv) return;
-    mix(&g.id, 8);
-    mix(g.world_matrix().m, sizeof(float) * 16);
-    if (mr) {  // the flags the views draw by (Show in Renders, shadows, wireframe, Display As)
-      const uint64_t f = (uint64_t)mr->enabled | (uint64_t)mr->show_wireframe << 1 | (uint64_t)mr->cast_shadows << 2 |
-                         (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
-                         (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41;
-      mix(&f, 8);
+  /* One pass over the components: a virtual call each instead of a dynamic_cast per type. */
+  MeshRenderer *mr = nullptr;
+  Light *l = nullptr;
+  ProbeVolume *pv = nullptr;
+  for (auto &c : g.components) switch (c->render_role()) {
+      case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
+      case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
+      case Component::RenderRole::ProbeVolume: if (!pv) pv = static_cast<ProbeVolume *>(c.get()); break;
+      default: break;
     }
-    if (mr && mr->enabled) {
-      /* What each kind of evaluated mesh is made from, without evaluating it (a modifier stack would
-       * run every frame): renders (Show in Renders), the viewport, and Edit Mode's cage. */
-      const uint64_t k[3] = {g.evaluated_key(0), g.evaluated_key(1), g.evaluated_key(2)};
-      mix(k, sizeof(k));
-      for (auto &mp : mr->materials) {
-        const void *p = mp.get();
-        mix(&p, sizeof(p));
-        if (mp) mix(&mp->version, 8);
+  /* The hierarchy: a selected object's children get an outline of their own. */
+  const uint64_t parent = g.parent ? g.parent->id : 0;
+  if (!mr && !l && !pv) {
+    mix(&parent, 8);
+    return h;
+  }
+  /* The flags the views draw by (Show in Renders, shadows, wireframe, Display As). */
+  uint64_t flags = 0, materials_key = 0;
+  if (mr) {
+    flags = 1ull << 63 | (uint64_t)mr->enabled | (uint64_t)mr->show_wireframe << 1 | (uint64_t)mr->cast_shadows << 2 |
+            (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
+            (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41;
+    if (mr->enabled) {
+      materials_key = 1469598103934665603ull;
+      for (auto &mp : mr->materials) {  // a material's version is an input of every object using it
+        materials_key = (materials_key ^ (uint64_t)(uintptr_t)mp.get()) * 1099511628211ull;
+        materials_key = (materials_key ^ (mp ? mp->version : 0)) * 1099511628211ull;
       }
     }
-    if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
-      const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
-      mix(&ph, 8);
+  }
+  GameObject::RenderHashMemo &m = g.render_memo;
+  const Mat4 &world = g.world_matrix();  // cleans the dirty flag: a later change bumps the version
+  if (memo && m.valid && m.transform_version == g.transform_version && m.id == g.id && m.parent_id == parent && m.flags == flags &&
+      m.materials_key == materials_key)
+    h = m.hash;
+  else {
+    mix(&parent, 8);
+    mix(&g.id, 8);
+    mix(world.m, sizeof(float) * 16);
+    if (mr) {
+      const uint64_t f = flags & ~(1ull << 63);
+      mix(&f, 8);
+      if (mr->enabled)
+        for (auto &mp : mr->materials) {
+          const void *p = mp.get();
+          mix(&p, sizeof(p));
+          if (mp) mix(&mp->version, 8);
+        }
     }
-    if (l && l->enabled) {
-      /* Every field of the light (colour temperature, spot angles, area size, shadows...):
-       * a change to any of them re-renders the Camera Preview and the Rendered view. */
-      const uint64_t lh = hash_component(*l);
-      mix(&lh, 8);
+    m.transform_version = g.transform_version;
+    m.id = g.id;
+    m.parent_id = parent;
+    m.flags = flags;
+    m.materials_key = materials_key;
+    m.hash = h;
+    m.valid = true;
+  }
+  if (mr && mr->enabled) {
+    /* What each kind of evaluated mesh is made from, without evaluating it (a modifier stack would
+     * run every frame): renders (Show in Renders), the viewport, and Edit Mode's cage. Every time: a
+     * modifier's fields change on their own. */
+    uint64_t k[3];
+    g.evaluated_keys(k);
+    mix(k, sizeof(k));
+  }
+  if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
+    const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
+    mix(&ph, 8);
+  }
+  if (l && l->enabled) {
+    /* Every field of the light (colour temperature, spot angles, area size, shadows...):
+     * a change to any of them re-renders the Camera Preview and the Rendered view. */
+    const uint64_t lh = hash_component(*l);
+    mix(&lh, 8);
+  }
+  return h;
+}
+
+uint64_t Editor::scene_render_hash(bool memo) {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
     }
+  };
+  scene_->for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    const uint64_t oh = object_render_hash(g, memo);
+    mix(&oh, 8);
   });
   const EnvironmentSettings &es = scene_->environment;
   mix(&es.mode, 4);
@@ -606,7 +669,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
     if (!preview) Log::info("Render finished: %s", render_status_.c_str());
     return;
   }
-  LightingEnv env = make_lighting(eye, true);
+  LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
   std::vector<DrawItem> items = collect_items(true, true);
   PTSettings ps = make_pt_settings(rs);
   if (cam) ps.exposure += cam->exposure_stops();
@@ -743,15 +806,19 @@ void Editor::save_render() {
 
 /* What a render through one camera depends on: geometry, lights, materials,
  * the camera and every render / world setting. */
-uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam) {
-  uint64_t h = scene_render_hash();
+uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam) { return camera_render_hash(owner, cam, scene_render_hash()); }
+
+/* The same, given the scene hash already computed for this frame (the Scene view computes it for its
+ * own key and then once more for its filters' camera). */
+uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam, uint64_t scene_hash) {
+  uint64_t h = scene_hash;
   if (owner && cam) {
     Mat4 w = owner->world_matrix();
     uint64_t c = hash_component(*cam);
     h ^= c + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
     for (const auto &comp : owner->components)  // its camera filters too
-      if (auto *f = dynamic_cast<CameraFilter *>(comp.get())) {
-        const uint64_t fh = hash_component(*f) ^ (uint64_t)f->enabled;
+      if (comp->render_role() == Component::RenderRole::CameraFilter) {
+        const uint64_t fh = hash_component(*comp) ^ (uint64_t)comp->enabled;
         h ^= fh + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
       }
     for (float f : w.m) {
@@ -940,8 +1007,9 @@ void Editor::note_render_cache_mismatch() { g_cache_mismatches++; }
  * transforms, the hierarchy, MeshRenderer flags, materials, lights, the world) and the render and
  * world settings. Computed for each view that asks (not once per frame: a panel drawn
  * between two views can change the scene). */
-uint64_t Editor::frame_scene_hash() {
+uint64_t Editor::frame_scene_hash(uint64_t *scene_hash) {
   uint64_t h = scene_render_hash();
+  if (scene_hash) *scene_hash = h;
   auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
   mix(hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }));
   mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
@@ -952,7 +1020,8 @@ uint64_t Editor::frame_scene_hash() {
 /* What the Scene view's 3D layer depends on besides the scene: its camera and size, the shading and
  * overlay toggles, the selection (outlines, Edit Mode highlights) and the UI scale (line widths). */
 uint64_t Editor::scene_view_key(const Recti &view) {
-  uint64_t h = frame_scene_hash();
+  uint64_t scene_hash = 0;
+  uint64_t h = frame_scene_hash(&scene_hash);
   auto mix = [&](const void *p, size_t n) {
     const uint8_t *b = (const uint8_t *)p;
     for (size_t i = 0; i < n; i += 8) {
@@ -986,7 +1055,7 @@ uint64_t Editor::scene_view_key(const Recti &view) {
   if (scene_filters_) {  // the main camera's filters are on the view
     GameObject *owner = nullptr;
     if (Camera *mc = main_camera(*scene_, &owner)) {
-      const uint64_t ch = camera_render_hash(owner, mc);
+      const uint64_t ch = camera_render_hash(owner, mc, scene_hash);
       mix(&ch, 8);
     }
   }
@@ -1092,7 +1161,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     Image &traced_img = filters.empty() ? cam_preview_img_ : cam_preview_small_;
     if (hash != cam_preview_pt_hash_) {
       cam_preview_pt_hash_ = hash;
-      LightingEnv env = make_lighting(eye, true);
+      LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
       std::vector<DrawItem> items = collect_items(true, true);
       PTSettings ps = make_pt_settings(rs);
       ps.exposure += cam->exposure_stops();

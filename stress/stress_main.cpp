@@ -889,7 +889,7 @@ static void test_editor(Report &rep, const Options &o) {
   rep.note("Only visible rows are drawn, so frame cost grows with the tree walk, not with drawing.");
   /* With meshes the views have something to draw: a frame that changes the scene renders it, an idle
    * one only checks (hashes) the scene and reuses the pictures. */
-  rep.table({"mesh objects", "idle frame ms", "frame after a move ms"});
+  rep.table({"mesh objects", "idle frame ms", "scene hash ms (memo)", "scene hash ms (from scratch)", "frame after a move ms"});
   for (int n : o.quick ? std::vector<int>{1000} : std::vector<int>{1000, 10000}) {
     Editor ed;
     Log::echo_stdout = false;
@@ -898,6 +898,8 @@ static void test_editor(Report &rep, const Options &o) {
     ed.step_frame_headless();
     ed.step_frame_headless();
     const double idle = time_ms([&] { ed.step_frame_headless(); }, 5);
+    const double hash_memo = time_ms([&] { ed.render_hash_for_test(); }, 20);  // the view cache's key (ADR 0015's memo warm)
+    const double hash_scratch = time_ms([&] { ed.render_hash_uncached_for_test(); }, 5);
     GameObject *g = ed.scene().find_by_name("Cube");
     int k = 0;
     const double moved = time_ms([&] {
@@ -905,7 +907,7 @@ static void test_editor(Report &rep, const Options &o) {
       ed.step_frame_headless();
     }, 5);
     Log::echo_stdout = true;
-    rep.row({std::to_string(n), f2(idle), f2(moved)});
+    rep.row({std::to_string(n), f2(idle), f2(hash_memo), f2(hash_scratch), f2(moved)});
   }
 }
 
