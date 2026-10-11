@@ -732,8 +732,16 @@ void clear_material_assets() {
   asset_redirects().clear();
 }
 
-std::vector<std::pair<std::string, MaterialPtr>> loaded_material_assets() {
-  std::vector<std::pair<std::string, MaterialPtr>> out;
+const std::vector<std::pair<std::string, MaterialPtr>> &loaded_material_assets() {
+  /* Rebuilt only when the library's entries changed (the editor asks every frame): an entry added,
+   * removed or pointing at another material changes this signature. */
+  static std::vector<std::pair<std::string, MaterialPtr>> out;
+  static uint64_t signature = ~0ull;
+  uint64_t sig = asset_library().size();
+  for (auto &kv : asset_library()) sig += ((uint64_t)(uintptr_t)kv.second.m.get() ^ std::hash<std::string>()(kv.first)) * 0x9E3779B97F4A7C15ull;
+  if (sig == signature) return out;
+  signature = sig;
+  out.clear();
   for (auto &kv : asset_library())
     if (kv.second.m) out.push_back({kv.first, kv.second.m});
   std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.first < b.first; });

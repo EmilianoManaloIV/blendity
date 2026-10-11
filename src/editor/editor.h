@@ -248,6 +248,13 @@ class Editor {
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
   uint64_t render_hash_for_test() { return scene_render_hash(); }
+  uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
+  const RasterStats &scene_stats_for_test() const { return scene_stats_; }
+  GameObject *main_camera_owner_for_test() {
+    GameObject *o = nullptr;
+    main_camera(*scene_, &o);
+    return o;
+  }
   void select_project_file_for_test(const std::string &p) { project_selected_ = p; }
   bool uv_gizmo_for_test(Vec2 &centre, float &arm) const {
     if (!uv_gizmo_valid_) return false;
@@ -290,6 +297,7 @@ class Editor {
     return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   const ui::Context &ui_for_test() const { return ui_; }
+  ui::Context &ui_mut_for_test() { return ui_; }  // (tests that draw with the toolkit)
   bool project_delete_pending() const { return !project_delete_.empty(); }
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
@@ -378,10 +386,12 @@ class Editor {
   void start_final_render(bool preview = false, bool open_window = true);
   uint64_t live_preview_hash();
   uint64_t camera_render_hash(const GameObject *owner, Camera *cam);
+  uint64_t camera_render_hash(const GameObject *owner, Camera *cam, uint64_t scene_hash);
   void draw_camera_preview(const Recti &view);  // Unity's Camera Preview inset
   void step_final_render();
   void save_render();
-  uint64_t scene_render_hash();
+  uint64_t scene_render_hash(bool memo = true);
+  uint64_t object_render_hash(GameObject &g, bool memo);
   bool camera_for_render(Mat4 &view, Mat4 &proj, float aspect);
   void draw_grid(Renderer3D &r3d);
   void draw_scene_icons(const Recti &r);
@@ -1108,7 +1118,7 @@ class Editor {
   uint64_t cam_preview_key_ = 0;
   bool cache_verify_ = std::getenv("BLENDITY_RENDER_CACHE_VERIFY") != nullptr;
   FrameProfile prof_, prof_last_, prof_total_;
-  uint64_t frame_scene_hash();
+  uint64_t frame_scene_hash(uint64_t *scene_hash = nullptr);
   uint64_t scene_view_key(const Recti &view);
   uint64_t raster_opt_key() const;
   bool view_cache_hit(ViewCache &c, uint64_t key, const Recti &r);
@@ -1279,6 +1289,9 @@ class Editor {
   /* ---- project ---- */
   std::string project_dir_;
   std::vector<DirEntry> project_entries_;
+  /* The folder tree's listings, refreshed with project_entries_ (every 2 s or on a change): the tree
+   * draws every frame and a directory listing is a system call per folder. */
+  std::unordered_map<std::string, std::vector<DirEntry>> project_dir_cache_;
   double project_listed_ = -100;
   std::string project_selected_;
   std::string project_search_;

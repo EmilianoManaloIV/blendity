@@ -1181,6 +1181,8 @@ namespace {
 struct HashReflector : Reflector {
   bool all_fields() const override { return true; }
   uint64_t h = 1469598103934665603ull;
+  /* A byte at a time, and it stays that way: the lights' and the world's hashes are part of
+   * lightmap_scene_key, saved with every bake (a new formula would mark them all out of date). */
   void mix(const void *p, size_t n) {
     auto *b = (const uint8_t *)p;
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
@@ -1219,9 +1221,9 @@ uint64_t hash_component(Component &c) {
   return hr.h;
 }
 
-uint64_t hash_reflect(const std::function<void(Reflector &)> &fn) {
+uint64_t hash_reflect_fn(void (*fn)(void *, Reflector &), void *ctx) {
   HashReflector hr;
-  fn(hr);
+  fn(ctx, hr);
   return hr.h;
 }
 
@@ -1267,6 +1269,9 @@ Mat4 GameObject::world_matrix_uncached() const {
 }
 
 void GameObject::mark_dirty() {
+  /* Before the early return: a node already stale since its hash was memoised must still invalidate
+   * the memo (ADR 0015), and the memo is only refreshed by a hash, which reads the world matrix. */
+  transform_version++;
   /* Invariant: a dirty node's descendants are dirty too, so we can stop early. */
   if (world_dirty_) return;
   world_dirty_ = true;
@@ -1329,7 +1334,7 @@ void GameObject::remove_component(Component *c) {
 
 uint64_t GameObject::evaluated_key(int kind) const {
   kind = std::max(0, std::min(kind, 2));
-  auto *mf = get<MeshFilter>();
+  auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return 0;
   uint64_t key = 1469598103934665603ull;
   auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
@@ -1344,9 +1349,32 @@ uint64_t GameObject::evaluated_key(int kind) const {
   return key;
 }
 
+void GameObject::evaluated_keys(uint64_t out[3]) const {
+  auto *mf = mesh_filter();
+  if (!mf || !mf->mesh) {
+    out[0] = out[1] = out[2] = 0;
+    return;
+  }
+  auto mix = [](uint64_t &key, uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  for (int kind = 0; kind < 3; kind++) {  // the same prefix as evaluated_key(kind)
+    out[kind] = 1469598103934665603ull;
+    mix(out[kind], (uint64_t)(uintptr_t)mf->mesh.get());
+    mix(out[kind], mf->mesh->version);
+    mix(out[kind], (uint64_t)kind);
+  }
+  for (auto &c : components) {
+    if (!c->is_modifier()) continue;
+    const bool on[3] = {c->enabled, c->show_in_render, c->enabled && c->show_in_editmode};
+    if (!on[0] && !on[1] && !on[2]) continue;
+    const uint64_t hc = hash_component(*c), hd = c->modifier_dependency_hash();  // hashed once, not per kind
+    for (int kind = 0; kind < 3; kind++)
+      if (on[kind]) mix(out[kind], hc), mix(out[kind], hd);
+  }
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 2));
-  auto *mf = get<MeshFilter>();
+  auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return nullptr;
   uint64_t key = 1469598103934665603ull;
   bool any = false;

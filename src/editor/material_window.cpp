@@ -99,12 +99,16 @@ void Editor::draw_materials_window(const Recti &r) {
       if (seen.insert(m.get()).second) list.push_back({m, 0});
   for (const MaterialPtr &m : scene_materials())
     if (seen.insert(m.get()).second) list.push_back({m, 0});
-  scene_->for_each([&](GameObject &g) {
-    if (auto *mr = g.get<MeshRenderer>())
-      for (auto &s : mr->materials)
-        for (Entry &e : list)
-          if (s == e.m) e.users++;
-  });
+  {  // users per material in one pass (not materials x slots x objects: this draws every frame)
+    std::unordered_map<const Material *, int> users;
+    scene_->for_each([&](GameObject &g) {
+      if (auto *mr = g.mesh_renderer())
+        for (auto &s : mr->materials)
+          if (s) users[s.get()]++;
+    });
+    for (Entry &e : list)
+      if (auto it = users.find(e.m.get()); it != users.end()) e.users = it->second;
+  }
   const std::string f = to_lower(material_search_);
   list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry &e) { return !f.empty() && to_lower(e.m->name).find(f) == std::string::npos; }),
              list.end());

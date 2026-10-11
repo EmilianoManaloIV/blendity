@@ -10,6 +10,59 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 7: idle frames (task 0023)
+
+Pass 6 left an idle frame at 2.1 ms and called it "almost all hash". A per-phase profile of 100 idle
+frames in the same scene (2.03 ms each) said otherwise: the scene hash was about 0.3 ms of it (four
+hashes: the Scene view's key, the Game view's, the Camera Preview's, the status bar's "Lighting out of
+date"), and the rest was painting the UI. Same scene, same machine, Windows, release build:
+
+| Frame (`editor_render`) | Before (ms) | After (ms) |
+|---|---|---|
+| Idle (nothing changed) | 1.98 | **1.27** |
+| Mouse moving over the Hierarchy | 2.01 | **1.25** |
+| Orbiting the Scene view | 8.49 | **7.40** |
+| Moving an object | 20.99 | **18.42** |
+| Editing a material colour | 19.22 | **18.19** |
+
+| `editor_ui` | Before | After |
+|---|---|---|
+| Idle frame, 1,000 mesh objects | 1.48 ms | **1.11 ms** |
+| Idle frame, 10,000 mesh objects | 4.82 ms | **2.74 ms** |
+| Scene hash, 10,000 mesh objects | (not measured apart) | **0.46 ms** memoised, 0.56 from scratch |
+
+### What was found
+- **The hash's cost was the component lookups, not the mixing.** Each object ran about fifteen
+  `get<T>()` loops a frame (a `dynamic_cast` per component per type), three of them inside the three
+  `evaluated_key` calls. A `Component::render_role()` virtual call replaces them, the three keys come
+  from one pass, and each object memoises the hash of its world matrix, flags and materials on a
+  transform version (ADR 0015). The hash at 10,000 meshes is 0.46 ms; the dynamic parts (lights,
+  probe volumes, modifiers) are still hashed every time, so the memo can't go stale on them.
+- **Every icon was rasterized on every draw** from anti-aliased lines, triangles and circles, tens of
+  microseconds each, and a frame draws dozens: the dock's tab bars alone cost 0.38 ms. An icon is now
+  rasterized once per size into a coverage mask and blended through it (`ui::Context::draw_icon`).
+- **2.5 million pixels of fills nobody saw:** the frame cleared the whole framebuffer, every window
+  painted its whole content panel, and the Scene and Game views painted theirs again with their
+  pictures. The frame now fills only the border strips around the dock area (the splitters are filled
+  by the dock), and the dock paints no panel behind the two views.
+- **The Project window listed folders from disk every frame** (`fs::list` per visible folder and once
+  more per folder to know whether it has children): 0.32 ms. The listings are kept with the entries
+  and refreshed every 2 s or on a change.
+- **`loaded_material_assets()` copied and sorted the library every call**, twice a frame. It is
+  rebuilt only when the library's entries change.
+- **`Canvas::circle` walked the circle's whole bounding box** (4 r² square roots for a ring of about
+  2 π r t pixels). It walks the ring's rows now.
+
+### Honest negatives (pass 7)
+- **The idle frame is 1.3 ms, not the 1.0 the task asked for.** What is left is legitimate drawing:
+  the Inspector (0.13 ms for a Camera), the Scene view's gizmo, view gizmo, icons, Camera Preview and
+  Statistics overlay (0.4 ms together), the remaining panel fills, the Game view's blit. Going further
+  means not redrawing the UI when nothing changed, which is a bigger change (and in the editor itself
+  an idle frame is only drawn on input, a redraw request or a continuous-redraw reason).
+- **The hasher's mixing stayed a byte at a time.** The lights' and the world's component hashes are
+  part of `lightmap_scene_key`, saved with every bake; a new formula would have marked them all out of
+  date. It is a few microseconds a frame.
+
 ## Pass 6: editor frames (task 0011)
 
 `blendity_stress --only editor_render` draws the frames an editor spends its time on, in a working

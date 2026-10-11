@@ -3,10 +3,12 @@
 
 #include "../core/core.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cctype>
 #include <cstring>
 #include <ctime>
+#include <unordered_map>
 #include <vector>
 
 namespace bl::ui {
@@ -1222,7 +1224,8 @@ void Context::menu_label(const std::string &text) {
 /* Icons (procedural, 16x16 design grid)                                  */
 /* ===================================================================== */
 
-void Context::draw_icon(Icon icon, const Recti &r, uint32_t c) {
+/* The icon's shapes: anti-aliased lines, triangles and circles at 16 design units scaled to the rect. */
+void Context::rasterize_icon(Canvas &canvas, Icon icon, const Recti &r, uint32_t c) {
   float s = std::min(r.w, r.h) / 16.0f;
   float ox = r.x + (r.w - 16 * s) / 2, oy = r.y + (r.h - 16 * s) / 2;
   auto P = [&](float x, float y) { return Vec2(ox + x * s, oy + y * s); };
@@ -1335,6 +1338,52 @@ void Context::draw_icon(Icon icon, const Recti &r, uint32_t c) {
       L(2, 7, 9, 10); L(9, 10, 14, 7); L(14, 7, 7, 4); L(7, 4, 2, 7);
       L(8, 1, 8, 5, 1.4f); T(8, 0, 5.5f, 2.5f, 10.5f, 2.5f);
       break;
+  }
+}
+
+/* Icons are drawn through a coverage mask kept per icon and size: rasterizing one from its primitives
+ * costs tens of microseconds (each anti-aliased line walks its whole bounding box) and a frame draws
+ * dozens (tab bars, the toolbar, Hierarchy and Project rows). The mask is the icon drawn white on black
+ * once; blending the colour through it gives the same picture. */
+void Context::draw_icon(Icon icon, const Recti &r, uint32_t c) {
+  if (icon == Icon::None || r.w <= 0 || r.h <= 0) return;
+  if (r.w > 256 || r.h > 256) {  // (never in the UI; not worth a mask)
+    rasterize_icon(canvas, icon, r, c);
+    return;
+  }
+  struct Mask {
+    int w = 0, h = 0;
+    std::vector<uint8_t> cov;
+  };
+  static std::unordered_map<uint64_t, Mask> masks;
+  const uint64_t key = (uint64_t)icon << 32 | (uint64_t)r.w << 16 | (uint64_t)r.h;
+  const int pad = 3;  // a stroke's anti-aliased edge reaches past the rect (an apex at 0, a spoke at 15.5)
+  auto it = masks.find(key);
+  if (it == masks.end()) {
+    Image img;
+    img.resize(r.w + 2 * pad, r.h + 2 * pad);
+    Canvas cv;
+    cv.begin(&img);
+    rasterize_icon(cv, icon, {pad, pad, r.w, r.h}, 0xFFFFFFFF);
+    Mask m;
+    m.w = img.width;
+    m.h = img.height;
+    m.cov.resize(img.pixels.size());
+    /* White over black leaves (255 * a) >> 8 = a - 1 in each channel (a = 255 stays 255). */
+    for (size_t i = 0; i < m.cov.size(); i++) {
+      const uint32_t ch = img.pixels[i] & 0xFF;
+      m.cov[i] = (uint8_t)(ch ? std::min<uint32_t>(255, ch + 1) : 0);
+    }
+    it = masks.emplace(key, std::move(m)).first;
+  }
+  const Mask &m = it->second;
+  const Recti full{r.x - pad, r.y - pad, m.w, m.h};
+  const Recti clip = canvas.clip().intersect(full);
+  if (clip.w <= 0 || clip.h <= 0) return;
+  for (int y = clip.y; y < clip.bottom(); y++) {
+    const uint8_t *row = m.cov.data() + (size_t)(y - full.y) * m.w;
+    for (int x = clip.x; x < clip.right(); x++)
+      if (const uint8_t a = row[x - full.x]) canvas.blend_px_a(x, y, c, a * (1.0f / 255.0f));
   }
 }
 

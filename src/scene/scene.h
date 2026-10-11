@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -98,6 +99,10 @@ struct Component {
   virtual uint64_t modifier_dependency_hash() const { return 0; }
   /* Only one instance per GameObject (Transform-like components). */
   virtual bool unique() const { return true; }
+  /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
+   * find it with a virtual call instead of a dynamic_cast per component type. */
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier };
+  virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
 template<class T, class Base = Component> struct ComponentBase : Base {
@@ -128,11 +133,13 @@ void register_builtin_components();
 struct MeshFilter : ComponentBase<MeshFilter> {
   static constexpr const char *kName = "MeshFilter";
   MeshPtr mesh;
+  RenderRole render_role() const override { return RenderRole::MeshFilter; }
   void reflect(Reflector &r) override { r.mesh("Mesh", mesh); }
 };
 
 struct MeshRenderer : ComponentBase<MeshRenderer> {
   static constexpr const char *kName = "MeshRenderer";
+  RenderRole render_role() const override { return RenderRole::MeshRenderer; }
   /* One material per slot; face material_index selects the slot. */
   std::vector<MaterialPtr> materials;
   bool cast_shadows = true;
@@ -160,6 +167,7 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
 
 struct Light : ComponentBase<Light> {
   static constexpr const char *kName = "Light";
+  RenderRole render_role() const override { return RenderRole::Light; }
   int type = 0;  // 0 directional, 1 point, 2 spot, 3 area
   Vec3 color{1.0f, 0.957f, 0.839f};  // Unity's default warm sun
   float intensity = 1.0f;
@@ -186,6 +194,7 @@ Vec3 kelvin_to_rgb(float kelvin);
 
 struct Camera : ComponentBase<Camera> {
   static constexpr const char *kName = "Camera";
+  RenderRole render_role() const override { return RenderRole::Camera; }
   float fov = 60.0f;
   float near_clip = 0.3f;
   float far_clip = 1000.0f;
@@ -234,6 +243,7 @@ struct Camera : ComponentBase<Camera> {
 struct FilterStack;
 struct CameraFilter : Component {
   virtual void contribute(FilterStack &stack) const = 0;
+  RenderRole render_role() const override { return RenderRole::CameraFilter; }
 };
 
 /* One effect in a camera's filter stack (Unity: a post-processing effect in a profile). */
@@ -689,6 +699,16 @@ class GameObject {
       if (auto *p = dynamic_cast<T *>(c.get())) return p;
     return nullptr;
   }
+  /* The first component with this render role (no dynamic_cast: a virtual call per component). */
+  Component *find_role(Component::RenderRole role) const {
+    for (auto &c : components)
+      if (c->render_role() == role) return c.get();
+    return nullptr;
+  }
+  MeshFilter *mesh_filter() const { return static_cast<MeshFilter *>(find_role(Component::RenderRole::MeshFilter)); }
+  MeshRenderer *mesh_renderer() const { return static_cast<MeshRenderer *>(find_role(Component::RenderRole::MeshRenderer)); }
+  Light *light() const { return static_cast<Light *>(find_role(Component::RenderRole::Light)); }
+  Camera *camera() const { return static_cast<Camera *>(find_role(Component::RenderRole::Camera)); }
   Component *add_component(std::unique_ptr<Component> c);
   template<class T> T *add() { return static_cast<T *>(add_component(std::make_unique<T>())); }
   void remove_component(Component *c);
@@ -700,10 +720,22 @@ class GameObject {
   /* What evaluated_mesh(kind) is computed from (the base mesh and version, the modifiers that apply and
    * their settings), without evaluating anything: for caches that only need to know it changed. */
   uint64_t evaluated_key(int kind = 0) const;
+  /* All three keys in one pass over the components (the same values as three evaluated_key calls). */
+  void evaluated_keys(uint64_t out[3]) const;
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
   Scene *scene = nullptr;  // owning scene (kept up to date by Scene)
+  /* Bumped every time the world matrix is marked stale (own transform, a parent's, reparenting): a
+   * counter rather than the dirty flag, which world_matrix() consumes (ADR 0015). */
+  uint64_t transform_version = 1;
+  /* The render hash this object last produced and the inputs it came from (ADR 0015): when they all
+   * compare equal the hash is reused instead of re-hashing the world matrix and the materials. */
+  struct RenderHashMemo {
+    uint64_t transform_version = 0, id = 0, parent_id = 0, flags = 0, materials_key = 0, hash = 0;
+    bool valid = false;
+  };
+  mutable RenderHashMemo render_memo;
 
  private:
   Transform local_;
@@ -780,6 +812,7 @@ struct LightingSettings {
  * contributes to GI. Otherwise a box of Size centred on the object. */
 struct ProbeVolume : ComponentBase<ProbeVolume> {
   static constexpr const char *kName = "Probe Volume";
+  RenderRole render_role() const override { return RenderRole::ProbeVolume; }
   bool global = true;
   Vec3 size{20.0f, 10.0f, 20.0f};
   void reflect(Reflector &r) override;
@@ -917,7 +950,7 @@ MaterialPtr material_asset(const std::string &path);  // cached; null when the f
 MaterialPtr create_material_asset(const Material &src, const std::string &path);  // writes it, returns the shared instance
 size_t save_dirty_material_assets();  // writes the assets changed since they were saved
 /* The material assets loaded so far (path, shared instance). */
-std::vector<std::pair<std::string, MaterialPtr>> loaded_material_assets();
+const std::vector<std::pair<std::string, MaterialPtr>> &loaded_material_assets();
 /* A .mat (or a folder of them) moved or renamed on disk: the shared instances follow
  * (asset_path, library key). Paths are project-relative ("Assets/..."). Returns how many. */
 size_t retarget_material_assets(const std::string &from, const std::string &to);
@@ -933,7 +966,12 @@ void relink_material_assets(Scene &scene, bool take_scene_values);
 void clear_material_assets();  // a different project
 /* Change detection for modifier caches & undo grouping. */
 uint64_t hash_component(Component &c);
-/* Hash of every field a reflect function visits (settings change detection). */
-uint64_t hash_reflect(const std::function<void(Reflector &)> &fn);
+/* Hash of every field a reflect function visits (settings change detection). A template rather than a
+ * std::function: the views hash the settings blocks every frame. */
+uint64_t hash_reflect_fn(void (*fn)(void *, Reflector &), void *ctx);
+template<class F> uint64_t hash_reflect(F &&fn) {
+  using Fn = std::remove_reference_t<F>;
+  return hash_reflect_fn([](void *ctx, Reflector &r) { (*static_cast<Fn *>(ctx))(r); }, (void *)&fn);
+}
 
 }  // namespace bl

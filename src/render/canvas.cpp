@@ -667,14 +667,29 @@ void Canvas::fill_circle(float cx, float cy, float r, uint32_t color) {
 
 void Canvas::circle(float cx, float cy, float r, uint32_t color, float t) {
   float hw = t * 0.5f;
-  int x0 = std::max(clip_.x, (int)std::floor(cx - r - hw - 1)), x1 = std::min(clip_.right() - 1, (int)std::ceil(cx + r + hw + 1));
+  const float band = hw + 1.0f;  // pixels farther than this from the ring get no coverage
   int y0 = std::max(clip_.y, (int)std::floor(cy - r - hw - 1)), y1 = std::min(clip_.bottom() - 1, (int)std::ceil(cy + r + hw + 1));
-  for (int y = y0; y <= y1; y++)
-    for (int x = x0; x <= x1; x++) {
-      float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
-      float d = std::fabs(std::sqrt(dx * dx + dy * dy) - r);
-      if (d < hw + 1.0f) blend_px_a(x, y, color, saturate(hw + 0.5f - d));
+  for (int y = y0; y <= y1; y++) {
+    const float dy = y + 0.5f - cy;
+    const float ro = r + band;  // outer radius of the band
+    if (std::fabs(dy) > ro + 1.0f) continue;
+    const float half_o = std::sqrt(std::max(0.0f, ro * ro - dy * dy));
+    const float ri = r - band;  // inner radius: the row crosses the hole when |dy| < ri
+    const float half_i = ri > 0 && std::fabs(dy) < ri ? std::sqrt(ri * ri - dy * dy) : -1.0f;
+    auto run = [&](float xa, float xb) {
+      const int x0 = std::max(clip_.x, (int)std::floor(xa) - 1), x1 = std::min(clip_.right() - 1, (int)std::ceil(xb) + 1);
+      for (int x = x0; x <= x1; x++) {
+        float dx = x + 0.5f - cx;
+        float d = std::fabs(std::sqrt(dx * dx + dy * dy) - r);
+        if (d < hw + 1.0f) blend_px_a(x, y, color, saturate(hw + 0.5f - d));
+      }
+    };
+    if (half_i >= 2.0f) {  // two runs, left and right of the hole (a narrower hole: one run, so no pixel is blended twice)
+      run(cx - half_o, cx - half_i);
+      run(cx + half_i, cx + half_o);
     }
+    else run(cx - half_o, cx + half_o);
+  }
 }
 
 void Canvas::fill_polygon(const Vec2 *pts, int n, uint32_t color) {

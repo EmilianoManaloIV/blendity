@@ -405,6 +405,7 @@ void Renderer3D::flush() {
 
   /* ---- Primitive assembly, clipping, culling, binning ---- */
   ScopedTimer ts;
+  std::atomic<int64_t> bin_ns{0};  // the binning part, CPU time over every chunk (fused with the setup tasks)
   /* Items with Cutout / Transparent / Glass materials: those triangles are
    * drawn afterwards, sorted, by draw_see_through(). Depth-only passes
    * (shadow maps) keep Cutout triangles and drop the see-through ones. */
@@ -588,6 +589,7 @@ void Renderer3D::flush() {
         for (; t < range.tri_end; t++) process(t);
       }
       /* Counting-sort the chunk's triangles into tiles. */
+      ScopedTimer tb;
       ch.tile_offsets.assign(ntiles + 1, 0);
       auto tile_range = [&](const ScreenTri &st, int &tx0, int &ty0, int &tx1, int &ty1) {
         float minx = std::min({st.x[0], st.x[1], st.x[2]}), maxx = std::max({st.x[0], st.x[1], st.x[2]});
@@ -618,10 +620,12 @@ void Renderer3D::flush() {
         for (int ty = ty0; ty <= ty1; ty++)
           for (int tx = tx0; tx <= tx1; tx++) ch.tile_tris[tile_of[ty * tiles_x_ + tx]++] = ti;
       }
+      bin_ns.fetch_add((int64_t)(tb.ms() * 1e6), std::memory_order_relaxed);
     }
   });
   for (size_t ci = 0; ci < nchunks; ci++) stats_.tris_rasterized += chunks_[ci].tris.size();
   stats_.ms_setup = ts.ms();
+  stats_.ms_bin = bin_ns.load(std::memory_order_relaxed) * 1e-6;
 
   /* ---- Raster stage: one task per screen tile ---- */
   ScopedTimer tr;

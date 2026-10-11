@@ -2,6 +2,59 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 45): idle editor frames (task 0023, ADR 0015)
+
+**Asked:** improve the editor's performance, the Scene view first. This round is the idle frame
+(nothing changed, the mouse over a panel); the next (task 0024) is the frames that really render.
+
+**Found:** pass 6 had called the 2.1 ms idle frame "almost all hash". A per-phase profile said the
+scene hash was about 0.3 ms of it; the rest was painting the UI: every icon rasterized from its
+primitives on every draw (the tab bars alone 0.38 ms), 2.5 million pixels of fills the views painted
+over anyway, the Project window listing folders from disk every frame, the material library copied and
+sorted twice a frame.
+
+**Changed**
+- **The scene hash's per-object memo (ADR 0015):** a component says what the views read of it
+  (`render_role()`: one virtual call instead of a `dynamic_cast` per type, which was most of the cost),
+  each object remembers the hash of its world matrix, flags and materials keyed by a transform version
+  (bumped wherever the world matrix goes stale, reparenting included) and the material versions, the
+  three evaluated-mesh keys come from one pass, and the Scene view's filter camera takes the frame's
+  scene hash. Lights, probe volumes and modifiers are hashed every time, so the memo can't go stale
+  on them. The hash at 10,000 meshes: 0.46 ms (the idle frame there 4.8 → 2.7 ms).
+- **Icons** are rasterized once per size into a coverage mask and blended through it.
+- **Fills:** the frame fills only the border strips around the dock area (the dock fills its
+  splitters), and no panel is painted behind the Scene and Game views, which paint every pixel.
+- **The Project window** keeps its folder listings with the file list (refreshed every 2 s or on a
+  change); `loaded_material_assets()` is rebuilt only when the library changes; the Materials window
+  counts users in one pass; `Canvas::circle` walks the ring, not its bounding box; the Statistics panel
+  shows the rasterizer's binning time (`ms_bin`, the binning part of the setup tasks over every chunk).
+- **Not changed, on purpose:** the hasher's byte-at-a-time mixing (its values are in every saved
+  bake's key); no per-frame memo for `main_camera()` or "Lighting out of date" (the serial they would
+  key on doesn't change on edits). The spec's 1.0 ms idle target is not met: 1.3 ms, the rest being
+  legitimate drawing (`docs/PERFORMANCE.md`, pass 7, lists it); recorded in the spec for sign-off.
+
+**Checked**
+- New tests (round 45): `evaluated_keys` equals the three `evaluated_key` calls on 300 modifier
+  combinations; the transform version bumps on a move, a parent's move and reparenting; the memoised
+  hash equals a from-scratch hash and changes after 23 kinds of change (a gizmo drag, the position
+  field, undo, redo, parenting, a parent's move, unparenting, material, light, modifier added / changed
+  / disabled / Show in Renders, renderer disabled / enabled / flag, a material slot, an object
+  deactivated / reactivated / deleted / created, a probe volume added / changed), in verify mode with 0
+  stale pictures; a camera filter field re-renders the Game view; the main camera follows a rename, a
+  disabled Camera and a deactivated object; Statistics shows the binning time.
+- From the code review (Opus): a small ring in `Canvas::circle` blended a few pixels twice (one run
+  per row when the hole is narrow); an empty root dock leaf went unpainted without the frame's clear
+  (filled now); an icon's anti-aliased edge past its rect was lost by the mask (the mask is padded by
+  3 px); pixel-equality tests for the icon masks (within 2 of a direct draw) and `Canvas::circle`
+  (identical to the bounding-box walk).
+- Unit checks: Windows 8,139, 0 failed (386 tests); the whole suite in render-cache verify mode:
+  8,140, 0 failed, 0 stale pictures. Linux with libraries: 8,091, 0 failed. Sanitizer build: 8,009,
+  0 failed, no reports.
+- Stress `editor_render`: idle 1.98 → 1.27 ms, mouse over the Hierarchy 2.01 → 1.25, orbit 8.49 →
+  7.40, moving an object 20.99 → 18.42, editing a material 19.22 → 18.19. `editor_ui`: idle at 1,000
+  meshes 1.48 → 1.11 ms, at 10,000 4.82 → 2.74 ms, scene hash at 10,000 meshes 0.46 ms (0.56 from
+  scratch). `editor_fuzz` in verify mode: 6,000 frames, 10,621 events, no crash, 0 stale pictures.
+
 ## 2026-10-11 (round 44): area lights bake smoothly; Preview Lighting isn't blocky on small objects (task 0022)
 
 **Asked:** adjusting an area light's Width and Height made objects look pixel-like.
