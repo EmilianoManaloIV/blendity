@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-02
 - **Decisions:** ADR 0016
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/23
 
 ## Goal
 The user reported camera filters missing from the Game view, the Camera Preview and the Render window.
