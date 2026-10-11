@@ -2,6 +2,30 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 44): area lights bake smoothly; Preview Lighting isn't blocky on small objects (task 0022)
+
+**Asked:** adjusting an area light's Width and Height made objects look pixel-like.
+
+**Found:** every change restarts Preview Lighting at its roughest pass: a quarter of the resolution (a
+small sphere got a few texels across), 16 samples, and the area light sampled with at most 8 random
+points. It looked blotchy for about a second before refining. The real bake sampled area lights
+randomly too.
+
+**Fixed**
+- **Area lights are sampled on a jittered grid** over their surface in the baker (stratified, with a
+  per-texel offset; a concentric mapping for disks). At 16 samples a floor under a 2 x 1 m light is
+  within 3.7% of a converged bake on average, against 5.8% with random points.
+- **Preview Lighting** gives every object a chart at least 32 texels across, and samples area lights
+  32 to 64 times instead of at most 8. That is most of the fix: a small sphere had a few texels across
+  and 8 noisy samples.
+- **From the code review:** the preview's 32-texel minimum chart was bigger than a 16-texel page (Max
+  Lightmap Size allows 16) and wrote past it. A layout now cuts its minimum chart down to the page
+  size, for every caller, and a test lays out and previews with 16-texel pages. The baker also takes
+  exactly the Direct Samples the user set (not rounded up to a grid).
+
+**Checked**
+- Unit checks: Windows 8,108, 0 failed (378 tests), twice. Linux with libraries: 8,060, 0 failed. Sanitizer build: 7,978, 0 failed, no reports (run before the review fix; the final code's run is CI's). Windows dependency-free: 7,980, 0 failed.
+
 ## 2026-10-11 (round 43): Baked lights exist only through the bake (task 0021)
 
 **Asked:** don't rasterize lights whose Mode is Baked; the bake represents them. Mixed and Realtime

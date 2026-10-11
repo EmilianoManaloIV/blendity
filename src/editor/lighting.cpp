@@ -756,9 +756,10 @@ void Editor::preview_step() {
     update_environment();
     BakeSettings s;
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.25f);
+    s.min_chart = 32;  // a small object still gets a few hundred texels, or it looks blocky at a quarter of the resolution
     s.max_size = std::min(ls.max_size, 1024);
     s.padding = ls.padding;
-    s.direct_samples = std::max(1, std::min(ls.direct_samples, 8));
+    s.direct_samples = std::max(32, std::min(ls.direct_samples, 64));  // area lights: shadow rays are cheap, and 32 stratified is smooth
     s.indirect_samples = kSamples[preview_stage_];
     s.bounces = ls.bounces;
     s.denoise = true;

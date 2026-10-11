@@ -201,6 +201,7 @@ static void round37_tests();
 static void round39_tests();
 static void round41_tests();
 static void round43_tests();
+static void round44_tests();
 
 int main() {
   register_builtin_components();
@@ -821,6 +822,7 @@ int main() {
   round39_tests();
   round41_tests();
   round43_tests();
+  round44_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -17336,5 +17338,172 @@ static void round43_tests() {
     std::printf("    with the preview: %zu pixels differ from the dark scene; summed luma %.0f -> %.0f\n", d, before, lit);
     CHECK(d > 1000);
     CHECK(lit > before * 1.05);  // brighter: the light appeared through the preview, not something else that moved
+  });
+}
+
+
+/* ===================================================================== */
+/* Round 44 (task 0022): area lights bake smoothly, previews aren't blocky */
+/* ===================================================================== */
+
+static void round44_tests() {
+  test("area lights: a floor under a Baked area light bakes with less noise at 16 samples (a jittered grid over the light, against a converged bake)", [] {
+    /* A 4 x 4 m floor, an area light 2 x 1 m facing down from 1.5 m, 16 direct samples per texel, no sky. */
+    auto floor = primitives::plane(4.0f, 1);
+    std::vector<MaterialPtr> mats = {make_material("f", Vec3(0.8f))};
+    BakeObject o;
+    o.id = 1;
+    o.mesh = floor;
+    o.model = Mat4::identity();
+    o.materials = mats;
+    RenderLight lamp;
+    lamp.type = RenderLight::Area;
+    lamp.position = Vec3(0, 1.5f, 0);
+    lamp.direction = Vec3(0, -1, 0);
+    lamp.right = Vec3(1, 0, 0);
+    lamp.width = 2.0f;
+    lamp.height = 1.0f;
+    lamp.intensity = 4.0f;
+    lamp.range = 10.0f;
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    BakeSettings bs;
+    bs.texels_per_unit = 8.0f;
+    bs.direct_samples = 16;
+    bs.indirect_samples = 1;
+    bs.bounces = 0;
+    bs.denoise = false;  // the raw texels: the sampling alone must be smooth
+    auto bake = [&](int samples) {
+      BakeSettings b = bs;
+      b.direct_samples = samples;
+      Lightmapper lm;
+      lm.begin({o}, {{lamp, 2, 9}}, env, b);
+      while (!lm.step(1e9)) {}
+      return lm.take_result();
+    };
+    const LightingData d = bake(16), ref = bake(1024);  // the same layout: the texels line up
+    CHECK(d.pages.size() == 1 && ref.pages.size() == 1);
+    if (d.pages.empty() || ref.pages.empty()) return;
+    const Lightmap &m = d.pages[0], &r = ref.pages[0];
+    CHECK(m.width == r.width && m.height == r.height);
+    /* Each lit texel against the converged bake: the 16 samples' error. */
+    double worst = 0, mean = 0;
+    size_t n = 0;
+    int wx = -1, wy = -1;
+    for (int y = 0; y < m.height; y++)
+      for (int x = 0; x < m.width; x++) {
+        const float c = m.texels[(size_t)y * m.width + x].x, t = r.texels[(size_t)y * m.width + x].x;
+        if (t < 0.3f) continue;  // the padding and the dim edges
+        const double rel = std::fabs(c - t) / t;
+        if (rel > worst) worst = rel, wx = x, wy = y;
+        mean += rel, n++;
+      }
+    std::printf("    %zu lit texels: error against 1024 samples, mean %.2f%%, worst %.2f%% at texel %d,%d of %d x %d\n", n,
+                100.0 * mean / std::max<size_t>(1, n), 100.0 * worst, wx, wy, m.width, m.height);
+    CHECK(n > 200);
+    /* Measured: random 16-point sampling 5.8% mean (35% worst), the jittered grid 3.7% (22%). */
+    CHECK(mean / std::max<size_t>(1, n) < 0.05);
+  });
+
+  test("area lights: Preview Lighting's first pass gives a small sphere a chart of at least 32 texels across and a smooth picture", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 0, 1.0f, false);
+    ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    w.ball->get<MeshRenderer>()->contribute_gi = true;
+    GameObject *lamp = ed.scene().create("Panel");
+    Light *l = lamp->add<Light>();
+    l->type = 3;
+    l->mode = 2;
+    l->intensity = 10.0f;
+    l->area_width = 3.0f;
+    l->area_height = 1.5f;
+    lamp->set_local_position({1.0f, 2.0f, 0.5f});
+    lamp->set_local_euler({90, 0, 0});  // facing down
+    ed.commit_change("panel");
+    r36_cmd(ed, "lighting mode manual");
+    ed.command("lighting preview on");
+    ed.step_frame_headless();  // the first pass (16 samples) in one headless frame
+    CHECK(ed.preview_samples_for_test() == 16);
+    const LightingData &pd = ed.preview_data_for_test();
+    auto e = pd.entries.find(w.ball->id);
+    CHECK(e != pd.entries.end() && !pd.pages.empty());
+    if (e == pd.entries.end() || pd.pages.empty()) return;
+    /* The chart's extent in texels, from its UVs. */
+    float u0 = 1, u1 = 0, v0 = 1, v1 = 0;
+    for (const Vec2 &uv : e->second.tri_uv) u0 = std::min(u0, uv.x), u1 = std::max(u1, uv.x), v0 = std::min(v0, uv.y), v1 = std::max(v1, uv.y);
+    const int side = pd.pages[(size_t)e->second.page].width;
+    const float tex_w = (u1 - u0) * side, tex_h = (v1 - v0) * side;
+    std::printf("    the ball's preview chart: its islands span %.0f x %.0f texels on a %d page\n", tex_w, tex_h, side);
+    /* The islands of a sphere fill part of a 32-texel chart (before: a chart of about 18, islands of about 15). */
+    CHECK(std::max(tex_w, tex_h) >= 24.0f);
+    /* The first pass is close to the refined one (256 samples), texel by texel on the lit top: the same layout
+     * (the scene didn't change), so the difference is the first pass's noise. */
+    const Lightmap first = pd.pages[(size_t)e->second.page];
+    const int first_page = e->second.page;  // (e is an iterator into data the next pass replaces)
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(ed.preview_samples_for_test() == 256);
+    const LightingData &pd3 = ed.preview_data_for_test();
+    auto e3 = pd3.entries.find(w.ball->id);
+    CHECK(e3 != pd3.entries.end() && e3->second.page == first_page && !pd3.pages.empty());
+    if (e3 == pd3.entries.end() || pd3.pages.empty()) return;
+    const Lightmap &fin = pd3.pages[(size_t)e3->second.page];
+    CHECK(fin.width == first.width && fin.height == first.height);
+    double sum = 0, worst = 0;
+    size_t n = 0;
+    const int x0 = (int)(u0 * side), x1 = (int)(u1 * side), y0 = (int)(v0 * side), y1 = (int)(v1 * side);
+    for (int y = y0; y <= y1 && y < fin.height; y++)
+      for (int x = x0; x <= x1 && x < fin.width; x++) {
+        const float a = first.texels[(size_t)y * fin.width + x].x, b = fin.texels[(size_t)y * fin.width + x].x;
+        if (b < 1.0f) continue;  // only the brightly lit top (the sky is off)
+        const double rel = std::fabs(a - b) / b;
+        sum += rel, worst = std::max(worst, rel), n++;
+      }
+    std::printf("    %zu lit texels on the ball: the first pass differs from the refined one by %.1f%% on average, %.1f%% at worst\n", n,
+                100.0 * sum / std::max<size_t>(1, n), 100.0 * worst);
+    CHECK(n > 50);
+    CHECK(sum / std::max<size_t>(1, n) < 0.10);  // measured about 7% (mostly the 16 indirect samples' noise after denoising)
+  });
+
+  test("area lights: a layout whose smallest chart is bigger than the page (Max Lightmap Size 16, 32-texel charts) keeps every texel inside the page", [] {
+    std::vector<BakeObject> objs;
+    std::vector<MaterialPtr> mats = {make_material("m", Vec3(0.8f))};
+    std::vector<MeshPtr> keep = {primitives::uv_sphere(0.5f, 16, 8), primitives::cube(), primitives::plane(4.0f, 1)};
+    for (size_t i = 0; i < keep.size(); i++) {
+      BakeObject o;
+      o.id = i + 1;
+      o.mesh = keep[i];
+      o.model = Mat4::translate({2.0f * i, 0, 0});
+      o.materials = mats;
+      objs.push_back(o);
+    }
+    BakeSettings s;
+    s.texels_per_unit = 8.0f;
+    s.max_size = 16;
+    s.min_chart = 32;  // the preview's, bigger than the page
+    LightmapLayout lay;
+    lightmap_layout(objs, s, lay);
+    CHECK(!lay.data.pages.empty() && !lay.texels.empty());
+    bool inside = true;
+    for (const LightmapTexel &t : lay.texels) {
+      const Lightmap &pg = lay.data.pages[(size_t)t.page];
+      inside = inside && t.x >= 0 && t.y >= 0 && t.x < pg.width && t.y < pg.height && pg.width == 16 && pg.height == 16;
+    }
+    for (size_t p = 0; p < lay.data.pages.size(); p++) inside = inside && lay.covered[p].size() == 256 && lay.owner[p].size() == 256;
+    std::printf("    %zu texels on %zu pages of 16 x 16\n", lay.texels.size(), lay.data.pages.size());
+    CHECK(inside);
+    /* The same through Preview Lighting (the case the review found): no crash, a picture. */
+    Editor ed;
+    P37World w = p37_world(ed, false, 2, 1.0f, true);
+    ed.scene().lighting.max_size = 16;
+    ed.commit_change("tiny pages");
+    r36_cmd(ed, "lighting mode manual");
+    ed.command("lighting preview on");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(ed.preview_samples_for_test() == 256);
+    w.box->set_local_position({-1.2f, 0.5f, 0.3f});
+    ed.commit_change("moved");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(!ed.preview_data_for_test().empty());
   });
 }
