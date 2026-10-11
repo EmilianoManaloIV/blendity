@@ -1,10 +1,10 @@
 # 0011: Editor and Scene view performance (CPU)
 
-- **Status:** approved 2026-10-09
+- **Status:** in review (approved 2026-10-09)
 - **Requirements:** Q-04, R-05
-- **Decisions:** ADR 0009, view render cache keyed by content hash (to write)
+- **Decisions:** ADR 0009, view render cache keyed by content hash
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/11
 
 ## Goal
 The editor stops redoing work it has already done. Today:

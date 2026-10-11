@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "raster.h"
+#include "voxel_gi.h"
+#include "probe_volume.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -7,6 +9,7 @@
 #include "display.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -36,7 +39,7 @@ void RenderTarget::resize_planes() {
   size_t n = (size_t)std::max(0, width) * std::max(0, height);
   if (depth.size() != n) depth.resize(n);
   if (ids.size() != n) ids.resize(n);
-  if (vis.size() != n) vis.resize(n);
+  if (!vis.empty() && vis.size() != n) vis.clear();  // only deferred shading needs it: begin() sizes it then
 }
 
 void RenderTarget::make_depth_only(int w, int h) {
@@ -59,6 +62,12 @@ void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, con
   opt_.tile_size = std::max(8, opt_.tile_size);
   stats_ = {};
   items_.clear();
+  batching_ = false;  // a batch left open by a previous frame would swallow every overlay
+  overlay_cmds_.clear();
+  if (rt_ && opt_.shade == ShadeMode::Deferred) {
+    const size_t n = (size_t)std::max(0, rt_->width) * std::max(0, rt_->height);
+    if (rt_->vis.size() != n) rt_->vis.assign(n, 0u);
+  }
   /* Bloom's linear light: allocated here (unshaded = -1) so a sky cleared next can fill it too. */
   if (rt_ && rt_->want_hdr && opt_.shade == ShadeMode::Deferred && rt_->width > 0 && rt_->height > 0) {
     rt_->hdr.assign((size_t)rt_->width * rt_->height, Vec3(-1.0f, 0.0f, 0.0f));
@@ -67,13 +76,29 @@ void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, con
   }
 }
 
-void Renderer3D::clear(uint32_t color) {
-  if (rt_->color)
-    for (int y = 0; y < rt_->height; y++) std::fill(rt_->color + (size_t)y * rt_->stride, rt_->color + (size_t)y * rt_->stride + rt_->width, color);
-  std::fill(rt_->depth.begin(), rt_->depth.end(), 1.0f);
-  std::fill(rt_->ids.begin(), rt_->ids.end(), 0u);
-  std::fill(rt_->vis.begin(), rt_->vis.end(), 0u);
+/* Depth to the far plane, ids and visibility to nothing: rows in parallel (12 bytes a pixel, about
+ * 25 MB at 1080p, too much for one thread), the colour too when given. */
+void Renderer3D::clear_planes(const uint32_t *color) {
+  ScopedTimer t;
+  const int W = rt_->width, H = rt_->height;
+  const bool with_vis = rt_->vis.size() == (size_t)W * H && W > 0;
+  auto &js = JobSystem::global();
+  const int saved = js.max_threads();
+  if (!opt_.multithreaded) js.set_max_threads(1);
+  js.parallel_for(H, 32, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) {
+      const size_t o = (size_t)y * W;
+      if (color && rt_->color) std::fill(rt_->color + (size_t)y * rt_->stride, rt_->color + (size_t)y * rt_->stride + W, *color);
+      std::fill(rt_->depth.begin() + o, rt_->depth.begin() + o + W, 1.0f);
+      std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
+      if (with_vis) std::fill(rt_->vis.begin() + o, rt_->vis.begin() + o + W, 0u);
+    }
+  });
+  js.set_max_threads(saved);
+  stats_.ms_clear += t.ms();
 }
+
+void Renderer3D::clear(uint32_t color) { clear_planes(&color); }
 
 void Renderer3D::clear_environment(const Mat4 &inv_vp, const Environment &env, ViewTransform vt, float exposure) {
   const int W = rt_->width, H = rt_->height;
@@ -102,9 +127,7 @@ void Renderer3D::clear_environment(const Mat4 &inv_vp, const Environment &env, V
     }
   });
   js.set_max_threads(saved);
-  std::fill(rt_->depth.begin(), rt_->depth.end(), 1.0f);
-  std::fill(rt_->ids.begin(), rt_->ids.end(), 0u);
-  std::fill(rt_->vis.begin(), rt_->vis.end(), 0u);
+  clear_planes(nullptr);
 }
 
 void Renderer3D::clear_sky(const Mat4 &inv_vp, Vec3 sky, Vec3 horizon, Vec3 ground) {
@@ -141,9 +164,7 @@ void Renderer3D::clear_sky(const Mat4 &inv_vp, Vec3 sky, Vec3 horizon, Vec3 grou
     }
   });
   js.set_max_threads(saved);
-  std::fill(rt_->depth.begin(), rt_->depth.end(), 1.0f);
-  std::fill(rt_->ids.begin(), rt_->ids.end(), 0u);
-  std::fill(rt_->vis.begin(), rt_->vis.end(), 0u);
+  clear_planes(nullptr);
 }
 
 static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Vec3 n, Vec3 wp) {
@@ -571,10 +592,16 @@ void Renderer3D::flush() {
       auto tile_range = [&](const ScreenTri &st, int &tx0, int &ty0, int &tx1, int &ty1) {
         float minx = std::min({st.x[0], st.x[1], st.x[2]}), maxx = std::max({st.x[0], st.x[1], st.x[2]});
         float miny = std::min({st.y[0], st.y[1], st.y[2]}), maxy = std::max({st.y[0], st.y[1], st.y[2]});
-        tx0 = std::max(0, (int)minx / T);
-        ty0 = std::max(0, (int)miny / T);
-        tx1 = std::min(tiles_x_ - 1, (int)maxx / T);
-        ty1 = std::min(tiles_y_ - 1, (int)maxy / T);
+        if (!finite_bits(minx) || !finite_bits(maxx) || !finite_bits(miny) || !finite_bits(maxy)) {  // far beyond float range
+          tx0 = ty0 = 1, tx1 = ty1 = 0;  // no tiles
+          return;
+        }
+        /* Clamped before the casts: a vertex far off screen can be beyond int's range. */
+        auto cell = [T](float v, float hi) { return (int)std::max(-1.0f, std::min(hi, v)) / T; };
+        tx0 = std::max(0, cell(minx, (float)(W + T)));
+        ty0 = std::max(0, cell(miny, (float)(H + T)));
+        tx1 = std::min(tiles_x_ - 1, cell(maxx, (float)(W + T)));
+        ty1 = std::min(tiles_y_ - 1, cell(maxy, (float)(H + T)));
       };
       for (const ScreenTri &st : ch.tris) {
         int tx0, ty0, tx1, ty1;
@@ -616,6 +643,19 @@ void Renderer3D::flush() {
   stats_.ms_total = total.ms();
   items_.clear();
   js.set_max_threads(saved_threads);
+}
+
+Vec3 Lightmap::sample(Vec2 uv) const {
+  if (width <= 0 || height <= 0 || texels.size() < (size_t)width * height) return Vec3(0.0f);
+  float fx = uv.x * width - 0.5f, fy = uv.y * height - 0.5f;
+  if (!(fx == fx)) fx = 0.0f;  // NaN
+  if (!(fy == fy)) fy = 0.0f;
+  fx = std::max(0.0f, std::min((float)(width - 1), fx));
+  fy = std::max(0.0f, std::min((float)(height - 1), fy));
+  const int x0 = (int)fx, y0 = (int)fy, x1 = std::min(width - 1, x0 + 1), y1 = std::min(height - 1, y0 + 1);
+  const float tx = fx - x0, ty = fy - y0;
+  auto at = [&](int x, int y) { return texels[(size_t)y * width + x]; };
+  return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
 }
 
 static inline uint32_t pack_rgb(float r, float g, float b) {
@@ -720,10 +760,11 @@ Ray Renderer3D::screen_ray(float x, float y) const {
   return {pa, normalize(pb - pa)};
 }
 
-void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias) {
+/* A line clipped to the near plane and the viewport, in screen space. */
+bool Renderer3D::prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias, OverlayCmd &out) const {
   Vec4 ca = vp_ * Vec4(a, 1.0f), cb = vp_ * Vec4(b, 1.0f);
   /* Clip against near plane. */
-  if (ca.z < 0 && cb.z < 0) return;
+  if (ca.z < 0 && cb.z < 0) return false;
   if (ca.z < 0) ca = lerp(ca, cb, ca.z / (ca.z - cb.z));
   else if (cb.z < 0) cb = lerp(cb, ca, cb.z / (cb.z - ca.z));
   const float W = (float)rt_->width, H = (float)rt_->height;
@@ -738,24 +779,63 @@ void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bia
     else { if (r < t0) return false; if (r < t1) t1 = r; }
     return true;
   };
-  if (!clipt(-dx, x0 + 1) || !clipt(dx, W + 1 - x0) || !clipt(-dy, y0 + 1) || !clipt(dy, H + 1 - y0)) return;
-  float nx0 = x0 + dx * t0, ny0 = y0 + dy * t0, nz0 = z0 + (z1 - z0) * t0;
-  float nx1 = x0 + dx * t1, ny1 = y0 + dy * t1, nz1 = z0 + (z1 - z0) * t1;
+  if (!clipt(-dx, x0 + 1) || !clipt(dx, W + 1 - x0) || !clipt(-dy, y0 + 1) || !clipt(dy, H + 1 - y0)) return false;
+  out.x0 = x0 + dx * t0, out.y0 = y0 + dy * t0, out.z0 = z0 + (z1 - z0) * t0;
+  out.x1 = x0 + dx * t1, out.y1 = y0 + dy * t1, out.z1 = z0 + (z1 - z0) * t1;
+  out.color = color, out.bias = bias, out.point = false, out.depth_test = depth_test;
+  /* Rows it can plot: its span, a little more either side (the two-pixel coverage, the half-pixel steps past the ends). */
+  out.ymin = (int)std::floor(std::min(out.y0, out.y1)) - 3;
+  out.ymax = (int)std::ceil(std::max(out.y0, out.y1)) + 3;
+  return true;
+}
+
+bool Renderer3D::prepare_point(Vec3 p, float r, uint32_t color, bool depth_test, OverlayCmd &out) const {
+  Vec2 s;
+  float z;
+  if (!project(p, s, z)) return false;
+  int cx = (int)s.x, cy = (int)s.y;
+  if (depth_test && z - 1e-4f > rt_->depth_at(cx, cy)) return false;
+  out.x0 = s.x, out.y0 = s.y, out.z0 = z, out.x1 = r;
+  out.color = color, out.bias = 0.0f, out.point = true, out.depth_test = depth_test;
+  const int ir = (int)std::ceil(r);
+  out.ymin = cy - ir, out.ymax = cy + ir + 1;
+  return true;
+}
+
+void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
+  const int Wi = rt_->width;
+  ymin = std::max(ymin, 0), ymax = std::min(ymax, rt_->height);
+  if (c.point) {
+    const float r = c.x1;
+    const int cx = (int)c.x0, cy = (int)c.y0, ir = (int)std::ceil(r);
+    for (int y = std::max(cy - ir, ymin); y <= cy + ir && y < ymax; y++)
+      for (int x = cx - ir; x <= cx + ir; x++) {
+        if (x < 0 || x >= Wi) continue;
+        float dx = x + 0.5f - c.x0, dy = y + 0.5f - c.y0;
+        float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
+        if (a <= 0) continue;
+        uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
+        d = Color::blend(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));
+      }
+    return;
+  }
   /* Xiaolin Wu style 2-pixel coverage, with optional depth test. */
-  const int Wi = rt_->width, Hi = rt_->height;
+  const uint32_t color = c.color;
   auto plot = [&](int x, int y, float z, float a) {
-    if (x < 0 || y < 0 || x >= Wi || y >= Hi || a <= 0.0f) return;
-    if (depth_test && z - bias > rt_->depth[(size_t)y * Wi + x]) return;
+    if (x < 0 || y < ymin || x >= Wi || y >= ymax || a <= 0.0f) return;
+    if (c.depth_test && z - c.bias > rt_->depth[(size_t)y * Wi + x]) return;
     uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
     uint32_t ca8 = (uint32_t)((color >> 24) * saturate(a));
     d = Color::blend(d, (color & 0xFFFFFF) | (ca8 << 24));
   };
+  float nx0 = c.x0, ny0 = c.y0, nz0 = c.z0, nx1 = c.x1, ny1 = c.y1, nz1 = c.z1;
   float ldx = nx1 - nx0, ldy = ny1 - ny0;
   bool steep = std::fabs(ldy) > std::fabs(ldx);
   if (steep) { std::swap(nx0, ny0); std::swap(nx1, ny1); std::swap(ldx, ldy); }
   if (nx0 > nx1) { std::swap(nx0, nx1); std::swap(ny0, ny1); std::swap(nz0, nz1); ldx = -ldx; ldy = -ldy; }
   float grad = ldx != 0 ? ldy / ldx : 0;
   int xs = (int)std::floor(nx0), xe = (int)std::ceil(nx1);
+  if (steep) xs = std::max(xs, ymin), xe = std::min(xe, ymax - 1);  // x walks the rows: only this band's
   for (int x = xs; x <= xe; x++) {
     float t = ldx != 0 ? clampf((x + 0.5f - nx0) / ldx, 0, 1) : 0;
     float yy = ny0 + grad * (x + 0.5f - nx0) - 0.5f;
@@ -767,28 +847,62 @@ void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bia
   }
 }
 
+void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias) {
+  OverlayCmd c;
+  if (!prepare_line(a, b, color, depth_test, bias, c)) return;
+  if (batching_) overlay_cmds_.push_back(c);
+  else draw_overlay(c, 0, rt_->height);
+}
+
 void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
-  Vec2 s;
-  float z;
-  if (!project(p, s, z)) return;
-  int cx = (int)s.x, cy = (int)s.y;
-  if (depth_test && z - 1e-4f > rt_->depth_at(cx, cy)) return;
-  int ir = (int)std::ceil(r);
-  for (int y = cy - ir; y <= cy + ir; y++)
-    for (int x = cx - ir; x <= cx + ir; x++) {
-      if (x < 0 || y < 0 || x >= rt_->width || y >= rt_->height) continue;
-      float dx = x + 0.5f - s.x, dy = y + 0.5f - s.y;
-      float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
-      if (a <= 0) continue;
-      uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
-      d = Color::blend(d, Color::with_alpha(color, a * ((color >> 24) / 255.0f)));
-    }
+  OverlayCmd c;
+  if (!prepare_point(p, r, color, depth_test, c)) return;
+  if (batching_) overlay_cmds_.push_back(c);
+  else draw_overlay(c, 0, rt_->height);
+}
+
+void Renderer3D::begin_overlay_batch() {
+  batching_ = true;
+  overlay_cmds_.clear();
+}
+
+/* Draws the recorded overlays: bands of 32 rows in parallel, each band's commands in the order given. */
+void Renderer3D::end_overlay_batch() {
+  batching_ = false;
+  if (overlay_cmds_.empty() || !rt_ || !rt_->color) return;
+  const int H = rt_->height, band = 32, nb = (H + band - 1) / band;
+  if (overlay_cmds_.size() < 64 || nb < 2 || !opt_.multithreaded) {
+    for (const OverlayCmd &c : overlay_cmds_) draw_overlay(c, 0, H);
+    overlay_cmds_.clear();
+    return;
+  }
+  /* Counting sort of command indices into the bands they touch (in order within each band). */
+  std::vector<uint32_t> offs((size_t)nb + 1, 0);
+  for (const OverlayCmd &c : overlay_cmds_)
+    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) offs[(size_t)b + 1]++;
+  for (int b = 0; b < nb; b++) offs[(size_t)b + 1] += offs[(size_t)b];
+  std::vector<uint32_t> idx(offs[(size_t)nb]), fill(offs.begin(), offs.end() - 1);
+  for (uint32_t i = 0; i < overlay_cmds_.size(); i++) {
+    const OverlayCmd &c = overlay_cmds_[i];
+    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) idx[fill[(size_t)b]++] = i;
+  }
+  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+    for (int64_t b = b0; b < b1; b++)
+      for (uint32_t k = offs[(size_t)b]; k < offs[(size_t)b + 1]; k++) draw_overlay(overlay_cmds_[idx[k]], (int)b * band, (int)(b + 1) * band);
+  });
+  overlay_cmds_.clear();
 }
 
 void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, int width) {
   if (sel.empty()) return;
+  if (batching_) {  // overlays recorded so far go under the outline
+    end_overlay_batch();
+    begin_overlay_batch();
+  }
   const int W = rt_->width, H = rt_->height;
-  std::vector<uint8_t> mask((size_t)W * H);
+  static thread_local std::vector<uint8_t> mask_buf;  // reused: a W x H mask a frame, twice with children
+  std::vector<uint8_t> &mask = mask_buf;
+  mask.assign((size_t)W * H, 0);
   JobSystem &js = JobSystem::global();
   js.parallel_for(H, 32, [&](int64_t y0, int64_t y1) {
     uint32_t last = 0;
@@ -848,6 +962,10 @@ void Renderer3D::shade_deferred() {
     Vec2 uv[3];
     float tangent_w = 1.0f;
     AABB bounds;
+    bool has_lm = false;
+    Vec2 lm_uv[3];
+    bool has_rt = false;  // realtime lightmaps (task 0016)
+    Vec2 rt_uv[3];
   };
   auto setup_tri = [&](TriSetup &T, uint32_t ref) {
     T.ref = ref;
@@ -904,6 +1022,12 @@ void Renderer3D::shade_deferred() {
       const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
       if (mp) T.mat = mp.get();
     }
+    T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
+    if (T.has_lm)
+      for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
+    T.has_rt = it.rt_bounce && it.rt_sky && it.rt_uv && it.rt_uv->size() >= ((size_t)st.prim + 1) * 3;
+    if (T.has_rt)
+      for (int k = 0; k < 3; k++) T.rt_uv[k] = (*it.rt_uv)[(size_t)st.prim * 3 + k];
     T.highlighted = false;
     if (it.face_highlight && !rm.tri_face.empty()) {
       uint32_t f = rm.tri_face[st.prim];
@@ -913,8 +1037,83 @@ void Renderer3D::shade_deferred() {
     T.valid = true;
   };
   JobSystem &js = JobSystem::global();
-  js.parallel_for(H, 4, [&](int64_t y0, int64_t y1) {
-    for (int64_t y = y0; y < y1; y++) {
+  /* Voxel GI (task 0013, Thiedemann et al. 2011, section 5.1): receivers at 1 / ds of the resolution,
+   * each gathering one of 16 interleaved ray sets; a blur over 4 x 4 receivers (that merges the sets)
+   * weighted by facing and distance from the plane; then each pixel takes the nearby receivers like
+   * its own surface (below). */
+  const VoxelGIFrame *gi = !rsm_out_ && env_.gi && env_.gi->grid && env_.gi->grid->valid() ? env_.gi : nullptr;
+  const int ds = gi ? gi->params.downsample : 1;
+  const int gw = gi ? (W + ds - 1) / ds : 0, gh = gi ? (H + ds - 1) / ds : 0;
+  const float gvox = gi ? gi->grid->voxel : 1.0f;
+  ScopedTimer tgi;
+  if (gi) {
+    gi_lo_.assign((size_t)gw * gh, GiTexel{});
+    std::atomic<size_t> traced{0};
+    js.parallel_for(gh, 2, [&](int64_t a, int64_t b) {
+      TriSetup T;
+      size_t n_traced = 0;
+      for (int64_t gy = a; gy < b; gy++)
+        for (int gx = 0; gx < gw; gx++) {
+          const int x = std::min(W - 1, gx * ds + ds / 2), y = std::min(H - 1, (int)gy * ds + ds / 2);
+          const uint32_t ref = rt_->vis[(size_t)y * W + x];
+          if (!ref) continue;
+          if (ref != T.ref) setup_tri(T, ref);
+          if (!T.valid || T.item->unlit) continue;
+          if (T.has_lm && !gi->bounce_not_baked) continue;  // its lightmap holds everything: nothing to add
+          if (T.has_rt) continue;                             // its realtime lightmap has it: nothing to trace
+          const float dx = x + 0.5f - T.ox, dy = y + 0.5f - T.oy;
+          const Vec3 Nn = T.na * dx + T.nb * dy + T.nc;
+          const float S = T.sa * dx + T.sb * dy + T.sc;
+          const Vec3 Bc = Nn * (1.0f / (std::fabs(S) < 1e-20f ? 1e-20f : S));
+          const Vec3 pos = T.wp[0] * Bc.x + T.wp[1] * Bc.y + T.wp[2] * Bc.z;
+          Vec3 n = normalize(T.wn[0] * Bc.x + T.wn[1] * Bc.y + T.wn[2] * Bc.z);
+          if (dot(T.geo_normal, eye - pos) < 0) n = -n;
+          const GiSample g = voxel_gi_gather(*gi->grid, gi->rsm, env, pos, n, gi->params, (gx & 3) + 4 * (int)(gy & 3));
+          GiTexel &o = gi_lo_[(size_t)gy * gw + gx];
+          o.bounce = g.bounce, o.sky = g.sky, o.pos = pos, o.n = n, o.valid = true;
+          n_traced++;
+        }
+      traced += n_traced;
+    });
+    stats_.gi_traced = traced.load();
+    /* Nothing traced (every surface reads a realtime lightmap): no blur, and nothing reads gi_blur_. */
+    if (stats_.gi_traced) gi_blur_ = gi_lo_;
+    if (stats_.gi_traced) js.parallel_for(gh, 4, [&](int64_t a, int64_t b) {
+      for (int64_t gy = a; gy < b; gy++)
+        for (int gx = 0; gx < gw; gx++) {
+          const GiTexel &c = gi_lo_[(size_t)gy * gw + gx];
+          if (!c.valid) continue;
+          Vec3 bounce(0.0f);
+          float sky = 0.0f, wsum = 0.0f;
+          for (int oy = -1; oy <= 2; oy++)
+            for (int ox = -1; ox <= 2; ox++) {
+              const int xx = gx + ox, yy = (int)gy + oy;
+              if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
+              const GiTexel &k = gi_lo_[(size_t)yy * gw + xx];
+              if (!k.valid) continue;
+              const float nd = std::max(0.0f, dot(c.n, k.n));
+              const float nd2 = nd * nd, nd4 = nd2 * nd2;
+              const float w = nd4 * nd4 * std::exp(-std::fabs(dot(c.n, k.pos - c.pos)) / (2.0f * gvox));
+              bounce += k.bounce * w;
+              sky += k.sky * w;
+              wsum += w;
+            }
+          if (wsum > 0.0f) {
+            GiTexel &o = gi_blur_[(size_t)gy * gw + gx];
+            o.bounce = bounce / wsum;
+            o.sky = sky / wsum;
+          }
+        }
+    });
+    stats_.ms_gi = tgi.ms();
+  }
+  /* Unique to this pass across every renderer, so a thread's shared probe samples never outlive it. */
+  static std::atomic<uint32_t> g_probe_stamp{0};
+  const uint32_t probe_stamp = ++g_probe_stamp;
+  /* Rows go out in pairs, so a 2 x 2 quad's shared probe sample is always taken by the thread that shades
+   * both its rows, whatever the scheduling: the picture doesn't depend on it. */
+  js.parallel_for((H + 1) / 2, 2, [&](int64_t p0, int64_t p1) {
+    for (int64_t y = p0 * 2; y < std::min<int64_t>(H, p1 * 2); y++) {
       const uint32_t *vrow = rt_->vis.data() + (size_t)y * W;
       uint32_t *crow = rt_->color + (size_t)y * rt_->stride;
       /* Shaded colours are encoded for display a whole row at a time (SIMD). */
@@ -924,6 +1123,17 @@ void Renderer3D::shade_deferred() {
       row_hdr.clear();
       row_x.clear();
       TriSetup T;
+      int probe_hint = -1;  // the brick the last probe sample in this row used
+      /* Probe samples shared by 2 x 2 pixels on one triangle: kept per thread, valid for this flush only
+       * (the stamp) and for the quad's own rows. */
+      struct ProbeQuad {
+        uint32_t ref = 0, stamp = 0;
+        int64_t y = -1;
+        Vec3 irr;
+        bool ok = false;
+      };
+      static thread_local std::vector<ProbeQuad> probe_quads;
+      if (probe_quads.size() < (size_t)(W / 2 + 1)) probe_quads.resize((size_t)(W / 2 + 1));
       for (int x = 0; x < W; x++) {
         uint32_t ref = vrow[x];
         if (!ref) continue;
@@ -964,16 +1174,82 @@ void Renderer3D::shade_deferred() {
           }
         }
         if (opt_.tex.active()) sp.tex = &opt_.tex;
+        if (T.has_lm) {
+          sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
+          sp.has_lightmap = true;
+        }
         if (T.has_tangent) {
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
         }
-        Vec3 V = normalize(eye - sp.position);
+        /* The reflective shadow map is seen from the sun: a surface's front is the side facing it. */
+        Vec3 V = rsm_out_ ? -rsm_sun_.direction : normalize(eye - sp.position);
         if (dot(sp.geo_normal, V) < 0) {  // back side of a double-sided surface
           sp.normal = -sp.normal;
           sp.geo_normal = -sp.geo_normal;
         }
+        if (T.has_rt) {
+          /* Realtime lightmap: the texels' gather, read like a baked map (task 0016); also with no GI pass
+           * this frame (Manual lighting updates keep the last maps up, task 0020). */
+          const Vec2 ruv = T.rt_uv[0] * B.x + T.rt_uv[1] * B.y + T.rt_uv[2] * B.z;
+          sp.has_gi = true;
+          sp.gi_sky = std::max(0.0f, std::min(1.0f, it.rt_sky->sample(ruv).x));
+          sp.gi_bounce = it.rt_bounce->sample(ruv);
+          if (sp.has_lightmap && (gi ? gi->bounce_not_baked : env_.rt_bounce_not_baked)) sp.lightmap_add = sp.gi_bounce;
+        }
+        else if (gi && stats_.gi_traced) {
+          /* The receivers around this pixel that lie on its surface (facing, plane), bilinear between them. */
+          const float fx = (x + 0.5f) / ds - 0.5f, fy = (y + 0.5f) / ds - 0.5f;
+          const int x0 = (int)std::floor(fx), y0g = (int)std::floor(fy);
+          const float tx = fx - x0, ty = fy - y0g;
+          Vec3 bounce(0.0f);
+          float sky = 0.0f, wsum = 0.0f;
+          for (int k = 0; k < 4; k++) {
+            const int xx = std::max(0, std::min(gw - 1, x0 + (k & 1))), yy = std::max(0, std::min(gh - 1, y0g + (k >> 1)));
+            const GiTexel &g = gi_blur_[(size_t)yy * gw + xx];
+            if (!g.valid) continue;
+            const float bw = ((k & 1) ? tx : 1.0f - tx) * ((k >> 1) ? ty : 1.0f - ty) + 1e-3f;
+            const float nd = std::max(0.0f, dot(sp.normal, g.n));
+            const float nd2 = nd * nd, nd4 = nd2 * nd2;
+            const float w = bw * nd4 * nd4 * std::exp(-std::fabs(dot(sp.normal, g.pos - sp.position)) / (2.0f * gvox));
+            bounce += g.bounce * w;
+            sky += g.sky * w;
+            wsum += w;
+          }
+          if (wsum > 1e-4f) {
+            sp.has_gi = true;
+            sp.gi_sky = sky / wsum;
+            sp.gi_bounce = bounce / wsum;
+            if (sp.has_lightmap && gi->bounce_not_baked) sp.lightmap_add = sp.gi_bounce;
+          }
+        }
+        if (!sp.has_lightmap && env_.probes && env_.probes->data && it.use_probes) {
+          /* Probe volume: the probes around the point pushed off the surface and toward the eye (APV's
+           * normal and view bias), so probes just behind it don't leak. */
+          const ProbeFrame &pf = *env_.probes;
+          ProbeQuad &pq = probe_quads[(size_t)(x >> 1)];
+          const int64_t qy = y & ~(int64_t)1;
+          if (!pf.quad_reuse || pq.stamp != probe_stamp || pq.y != qy || pq.ref != ref) {
+            const Vec3 q = sp.position + sp.normal * pf.normal_bias + V * pf.view_bias;
+            pq.ok = pf.data->sample(q, sp.normal, env.irradiance(sp.normal), pf.use_live, pq.irr, pf.leak_reduction, &probe_hint);
+            pq.ref = ref, pq.stamp = probe_stamp, pq.y = qy;
+          }
+          if (pq.ok) {
+            sp.has_probe = true;
+            sp.probe_baked = !pf.use_live;
+            sp.probe = pq.irr;
+          }
+        }
         SurfaceSample s = evaluate_material(*T.mat, sp);
+        if (rsm_out_) {
+          /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
+          const size_t k = (size_t)y * W + x;
+          rsm_out_->position[k] = sp.position;
+          rsm_out_->normal[k] = s.normal;
+          const float ndl = std::max(0.0f, dot(s.normal, -rsm_sun_.direction));
+          rsm_out_->flux[k] = s.unlit ? Vec3(0.0f) : s.albedo * (1.0f - s.metallic) * rsm_sun_.color * (rsm_sun_.intensity * ndl);
+          continue;
+        }
         if (T.highlighted) s.albedo = lerp(s.albedo, it.highlight_color, 0.45f);
         Vec3 color = light_surface(s, sp, V, it, env);
         row_hdr.push_back(color);
@@ -996,6 +1272,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   Vec3 lo(0.0f);
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
+    if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
     Vec3 L;
     float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
     if (l.type == RenderLight::Directional) L = -l.direction;
@@ -1016,7 +1293,17 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;
   Vec3 spec = env.specular(R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);
-  Vec3 diff = env.irradiance(n) * s.albedo * (1.0f - s.metallic);
+  /* Ambient light, best source first: the baked map (plus realtime GI's bounce of lights it doesn't
+   * hold), the probe volume, voxel GI per pixel (the sky that gets through plus the bounce), or the sky
+   * alone. */
+  Vec3 amb;
+  if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+  else if (sp.has_probe) amb = sp.probe;  // probe-lit objects match the baked look (and live probes follow changes)
+  else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
+  else amb = env.irradiance(n);
+  if (sp.has_gi && !sp.has_lightmap)
+    spec = spec * (1.0f + (sp.gi_sky - 1.0f) * (env_.gi ? env_.gi->params.specular_occlusion : env_.rt_specular_occlusion));
+  Vec3 diff = amb * s.albedo * (1.0f - s.metallic);
   return lo + diff + spec + s.emission;
 }
 
@@ -1256,7 +1543,7 @@ void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec
   r3d.flush();
   out.view_proj = proj * view;
   out.size = res;
-  out.depth = rt.depth;
+  out.depth.swap(rt.depth);  // no 16 MB copy: the target gets the old plane back and clears it next time
   out.bias = 1.5f / res;  // ~1.5 texels in [0,1] depth
 }
 

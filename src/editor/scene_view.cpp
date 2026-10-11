@@ -92,7 +92,29 @@ void Editor::draw_scene_view(const Recti &r) {
   /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). */
   if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_) frame_selected();
 
-  render_scene_view(view);
+  {
+    /* The 3D layer is reused while nothing it shows has changed (an idle frame, the mouse over a panel,
+     * a caret blinking). Never while piloting, path tracing or playing. */
+    ScopedTimer rt;
+    const bool cacheable = !piloted_camera() && !(playing_ && !paused_);
+    const uint64_t key = cacheable ? scene_view_key(view) : 0;
+    const bool hit = view_cache_hit(scene_cache_, key, view);
+    if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else {
+      std::vector<float> depth0;
+      std::vector<uint32_t> ids0;
+      if (hit) depth0 = scene_rt_.depth, ids0 = scene_rt_.ids;  // what picking would have read
+      render_scene_view(view);
+      prof_.view_renders++;
+      if (hit && view_cache_verify(scene_cache_, view, "Scene view") && (depth0 != scene_rt_.depth || ids0 != scene_rt_.ids)) {
+        prof_.cache_mismatches++;
+        Log::warn("Render cache: the Scene view's depth or ids would have been stale");
+        note_render_cache_mismatch();
+      }
+      view_cache_store(scene_cache_, key, view);
+    }
+    prof_.ms_scene3d += rt.ms();
+  }
   if (box_visible) {
     u.canvas.fill_rect(box.intersect(view), Color::hex(0x3A79BB, 40));
     u.canvas.rect_outline(box, Color::hex(0x6FA3DD));
@@ -137,10 +159,6 @@ void Editor::draw_scene_view(const Recti &r) {
     lines.push_back(strprintf("Triangles %zu (%zu drawn)", scene_stats_.tris_submitted, scene_stats_.tris_rasterized));
     lines.push_back(strprintf("Render    %.2f ms  (%d culled)", scene_stats_.ms_total, scene_stats_.objects_culled));
     lines.push_back(strprintf("Editor    %.0f fps (cap %s), frame %.1f ms", measured_fps_, max_fps_ ? std::to_string(max_fps_).c_str() : "none", frame_ms_));
-    if (shading_ == Shading::Rendered) {
-      lines.push_back(strprintf("Path tracing  %d / %d samples", vp_pt_.samples(), scene_->render.viewport_samples));
-      lines.push_back("Device    " + vp_pt_.device_summary());
-    }
     if (shading_ == Shading::Shaded) lines.push_back(strprintf("Shading   %.2f ms (deferred PBR)", scene_stats_.ms_shade));
     int y = view.y + u.px(8);
     for (auto &l : lines) {
@@ -161,12 +179,12 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
   u.canvas.hline(bar.x, bar.right(), bar.bottom() - 1, u.theme.border);
   int h = bar.h - u.px(6), y = bar.y + u.px(3), x = bar.x + u.px(6);
-  static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Rendered (Path Traced)", "Shaded Wireframe"};
+  static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Shaded Wireframe"};
   int m = (int)shading_;
-  if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 5)) shading_ = (Shading)m;
+  if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 4)) shading_ = (Shading)m;
   u.tooltip("Draw mode (Blender: Z pie).\nSolid = fast vertex lighting (Workbench).\n"
             "Shaded = materials, textures, shadows (EEVEE / Unity Shaded).\n"
-            "Rendered = progressive path tracing (Cycles).");
+            "Path tracing: F12, the Render window, or the Camera Preview's Rendered toggle.");
   x += u.px(176);
   if (u.icon_button({x, y, h, h}, Icon::Lightbulb, scene_lighting_, "Scene lighting on/off.\nOff = headlight from the camera, like Blender's Studio lighting.")) scene_lighting_ = !scene_lighting_;
   x += h + u.px(2);
@@ -439,8 +457,7 @@ void Editor::render_scene_view(const Recti &view) {
     scene_r3d_.rebind(&scene_rt_, v, p);  // the tools project with the editor's view, over the whole view
     return;
   }
-  if (shading_ == Shading::Rendered) render_pathtraced_view(view);
-  else if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
+  if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
     GameObject *fowner = nullptr;
     if (scene_filters_) main_camera(*scene_, &fowner);
     if (fowner && !camera_filters(fowner).empty())  // the main camera's filters on the editor's view
@@ -449,8 +466,12 @@ void Editor::render_scene_view(const Recti &view) {
     scene_stats_ = scene_r3d_.stats();
   }
   else render_solid(view, v, p);
+  ScopedTimer ot;
+  scene_r3d_.begin_overlay_batch();  // the grid and the wireframes are thousands of lines: drawn in parallel bands
   if (show_grid_) draw_grid(scene_r3d_);
   render_overlays(view);
+  scene_r3d_.end_overlay_batch();
+  prof_.ms_overlays += ot.ms();
 }
 
 void Editor::render_solid(const Recti &, const Mat4 &v, const Mat4 &p) {
@@ -507,6 +528,19 @@ void Editor::render_overlays(const Recti &) {
     if (edges.size() > 400000) return;  // keep the editor responsive on enormous meshes
     for (auto &e : edges) scene_r3d_.line(w.point(m->positions[e.first]), w.point(m->positions[e.second]), col, depth, 2e-4f);
   });
+
+  /* Probe volume (Lighting > Show Probes): each probe a dot in the light it holds (seen from above),
+   * the ones inside geometry red. */
+  if (scene_->lighting.show_probes && !probes_.empty()) {
+    const size_t n = probes_.probe_count(), step = std::max<size_t>(1, n / 50000);
+    const Vec3 up(0, 1, 0), sky = env_.irradiance(up);
+    for (size_t i = 0; i < n; i += step) {
+      const bool live = probe_frame_.use_live && probes_.live_ok[i];
+      const Vec3 c = (live ? probes_.live[i] : probes_.baked[i]).eval(up, sky);
+      const uint32_t col = probes_.valid[i] ? to_display_pixel(c, ViewTransform::Standard, 0.0f) : Color::hex(0xFF3030);
+      scene_r3d_.point(probes_.position[i], std::max(1.5f, (float)ui_.px(2.5f)), col, true);
+    }
+  }
 
   /* Selection outline (orange, children lighter), Unity & Blender style. */
   if (!edit_mode_ && !selection_.empty() && shading_ != Shading::Wireframe) {
@@ -2907,8 +2941,24 @@ void Editor::draw_game_view(const Recti &r) {
   Mat4 p = cam->projection(aspect);
   /* The Game view always uses the full material pipeline with shadows (Unity Game view),
    * through the camera's filters. */
-  render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_ && !paused_);
-  game_stats_ = game_r3d_.stats();
+  {
+    /* While playing it changes every frame; otherwise the picture is reused until the scene, the
+     * camera or the view's size changes. */
+    ScopedTimer rt;
+    const bool animating = playing_ && !paused_;
+    const uint64_t key =
+        animating ? 0 : camera_render_hash(owner, cam) ^ raster_opt_key() ^ ((uint64_t)img.w << 48) ^ ((uint64_t)img.h << 32) ^ ((uint64_t)img.x << 16) ^ (uint64_t)img.y;
+    const bool hit = view_cache_hit(game_cache_, key, img);
+    if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else {
+      render_camera(game_r3d_, game_rt_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, animating);
+      game_stats_ = game_r3d_.stats();
+      prof_.view_renders++;
+      if (hit) view_cache_verify(game_cache_, img, "Game view");
+      view_cache_store(game_cache_, key, img);
+    }
+    prof_.ms_game += rt.ms();
+  }
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};
     u.frame(box, Color::hex(0x101010, 200), 0, u.px(4));

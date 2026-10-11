@@ -10,6 +10,48 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 6: editor frames (task 0011)
+
+`blendity_stress --only editor_render` draws the frames an editor spends its time on, in a working
+scene:
+- **Scene:** 200 icospheres, a floor, a sun with shadows, a 50k-face sphere.
+- **Layout:** "2 by 3", so the Scene and Game views are both visible.
+- **Camera Preview:** on (the Main Camera is selected).
+- **Size:** 1600×1000, headless.
+
+Before and after, Linux, dependency-free build, same machine:
+
+| Frame | Before (ms) | After (ms) | What it renders now |
+|---|---|---|---|
+| Idle (nothing changed) | 47.3 | **2.1** | nothing: the three views are copied back |
+| Mouse moving over the Hierarchy | 44.2 | **2.1** | nothing |
+| Orbiting the Scene view | 43.6 | **9.9** | the Scene view; no shadow map |
+| Moving an object | 45.1 | **24.7** | three views and one shadow map |
+| Editing a material colour | 45.4 | **27.0** | three views and one shadow map |
+| Playing | 32.5 | **14.8** | the Scene and Game views (the preview hides in Play) |
+
+### What was found
+- **The shadow map was never cached.** `docs/PERFORMANCE.md` and the stress note both said it was. It
+  was rendered on every shaded render, up to three times a frame, at about 8 ms each. It is now kept
+  per caster set, two entries (ADR 0009).
+- **Any input re-rendered every visible view.** A mouse move over a panel, a caret blink or a tooltip
+  timer was enough. A view now reuses its picture while a content hash of what it shows is unchanged
+  (ADR 0009). A verify mode re-renders and compares, and the whole unit suite runs clean in it.
+- **Clears were serial:** about 12 bytes a pixel on one thread. They now run as one parallel pass, and
+  the visibility plane exists only for deferred shading.
+- **Overlay lines and points were drawn one by one.** The grid alone is about 2,900 lines. They are
+  now binned into 32-row bands drawn in parallel. Each pixel still sees them in order, so the picture
+  is bit-identical. Overlays went from 1.15 to 0.77 ms in a normal frame, and from 17.5 to 12.4 ms with
+  a 50k-face Edit Mode cage.
+- **The idle cost with many objects is the scene hash:** 1.9 ms at 1,000 meshes and 5.1 ms at 10,000
+  (`--only editor_ui`).
+- **Edit Mode on a 50k-face mesh is still slow (about 280 ms a change).**
+  - Rebuilding its render mesh costs 13–17 ms and its tangents 28–32 ms.
+  - Most of the rest is the overlapping-vertex check. It runs when the mesh changes outside a drag (a
+    real gizmo drag skips it).
+  - A positions-only mesh update and a cheaper overlap check are the follow-up; they need an ADR
+    because they change what a mesh version means (ADR 0003).
+
 ## Pass 5: Push/Pull on odd meshes
 
 `blendity_stress --only pushpull` runs `meshops::push_pull` on 26 awkward meshes:
@@ -128,7 +170,7 @@ The second pass added five suites (`shading`, `pathtracer`, `uv`, `textures`, `m
 | Subsystem | Result (on this machine) |
 |---|---|
 | Deferred PBR (visibility buffer + one shading pass) | 256 spheres: **6.0 ms at 720p, 11.8 ms at 1080p, 39.8 ms at 4K**. Shading costs ~4 ns/pixel; Gouraud is 1.5–4× cheaper |
-| Sun shadow map, 2048² | ~7.7 ms to render (cached until lights or casters move); the 3×3 PCF lookup adds 0.4–2.7 ms per frame |
+| Sun shadow map, 2048² | ~7.7 ms to render; the 3×3 PCF lookup adds 0.4–2.7 ms per frame. (This said "cached until lights or casters move"; it was not cached until pass 6, task 0011.) |
 | Path tracer throughput | *As first reported:* 231 Mrays/s (20k tris) → 69 Mrays/s (21M tris). **Corrected in pass 3 (exact ray counting): 47 → 22 Mrays/s** with the built-in BVH, 95 → 64 with Embree. Ray cost still grows ~logarithmically with scene size |
 | Texture sampling (1 thread) | closest 22–73, bilinear 10–29, trilinear 10–15 Msamples/s; drops at 4K when the texture leaves the cache |
 | LSCM unwrap | a single 65k-face island in **1.3 s**; typical seam-cut islands (a few thousand faces) in milliseconds |
@@ -200,6 +242,9 @@ Each row was a measurable bottleneck in the first stress run. The old implementa
 - Object-heavy scene loading is now limited by per-object work (component creation, a `std::map` per component), not parsing: ~3.7 µs per object.
 
 ## Next candidates
+
+- **Positions-only Edit Mode updates** (pass 6). Keep the triangulation, edges and n-gon regions while a
+  drag only moves vertices, and check overlaps incrementally.
 
 Done since the last list: SIMD in the rasterizer (pass 3, in triangle setup rather than the per-pixel edge functions, which the timings showed aren't the bottleneck), a direct sparse solver for large LSCM islands (Eigen), and a real broad phase for physics (Jolt).
 

@@ -2,6 +2,582 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 42): the sanitizer CI job's flaky pilot test
+
+**Asked:** the Linux sanitizer job was failing on the PR that brings tasks 0011-0020 to main.
+
+**Fixed**
+- **"Stopping the pilot brings back the editor view" failed only on the sanitizer runner:** 7,045
+  pixels differed, all in one 294 x 24 box at the top of the Scene view. The test's click helper left
+  the mouse resting on the Statistics toolbar button, and on a slow run the button's tooltip delay
+  elapsed, so the tooltip drew over the view. The helper now parks the mouse outside the window after a
+  click. Reproduced and fixed under the sanitizer build on 3 threads (CI's count).
+
+**Checked**
+- The pilot tests pass under the sanitizer build on 3 threads (twice), and on Windows.
+
+## 2026-10-10 (round 41): manual lighting updates and a rough preview, like Bakery's (task 0020)
+
+**Asked:** stop recomputing lighting on every change while moving things around, update it only when
+asked, and add an optional very rough preview like Bakery's Realtime Preview.
+
+**Added**
+- **Lighting Updates** (Lighting window): Manual, the default, or Automatic (the behaviour until now).
+  - **In Manual,** Realtime GI, realtime lightmaps, live probes and Auto Generate don't react to changes.
+    Direct light and shadows stay live.
+  - **The last lighting stays up:** a baked object that moved keeps its lightmap, and the last realtime
+    lightmaps and live probes stay shown. "Lighting out of date" says when it's stale.
+- **Update Lighting** (button, Ctrl+Shift+L, `lighting update`) runs Realtime GI once (the grid, the
+  RSM, the realtime lightmaps, the live probes) and freezes again. Generate Lighting still bakes.
+- **Preview Lighting** (a toggle, `lighting preview on|off`):
+  - **What:** a rough progressive bake at a quarter of the Lightmap Resolution, 16, then 64, then 256
+    samples, denoised, on the GPU when Render > Device is GPU Compute.
+  - **When:** it starts half a second after changes stop and runs about 8 ms a frame.
+  - **Shown, not saved:** it appears in place of the bake and is never saved.
+- **`lighting mode manual|automatic`**, and the Learn lesson and guide explain both modes.
+- **In Manual, one automatic update** when Realtime GI is turned on or a scene opens, so it never starts
+  empty.
+- **"Lighting out of date (Update Lighting)"** in the status bar when frozen Realtime GI is stale (with
+  or without a bake).
+
+**Fixed (found by the code review)**
+- **A fresh Generate Lighting was covered by the preview again.** The preview now stands down while
+  the real bake is current.
+- **Frozen frames dropped a Realtime sun's bounce on lightmaps** (and the frozen live probes, and
+  specular occlusion). A frozen frame is now the last updated picture, bit for bit.
+- **Undo and redo dropped the frozen realtime lightmaps** (a clone gets a new scene serial). They're now
+  keyed by a scene id that undo keeps.
+- **In Automatic with a stale bake, the preview was never attached.** Staleness is now judged on what's
+  shown.
+- **Smaller fixes:**
+  - A mesh edit in Manual drops the object's old map (only a move keeps it).
+  - Opening a scene clears the last one's preview.
+  - The preview's sample count resets on a change.
+  - The Lighting window's out-of-date text fits Manual.
+  - `lighting mode auto` works.
+  - The stress section puts its scene back after the drag rows.
+  - Two tests that couldn't fail now can: Auto Generate gets its real second, and "never saved" checks
+    a real folder.
+- **Not fixed:** each preview stage lays out and builds its scene again in one frame. That's a hitch
+  on big scenes while orbiting during a preview.
+
+**Checked**
+- Unit checks: Windows 8,066, 0 failed (369 tests), with Automatic and with Manual as the default
+  (`BLENDITY_LIGHTING_UPDATES`). Render cache verify mode: 0 stale pictures.
+- Linux with libraries: 8,018, 0 failed. Sanitizer build: 7,940, 0 failed, no reports.
+- Stress `editor_render`, 1600 × 1000, Realtime GI on, dragging a static object:
+
+  | Mode | ms a frame |
+  |---|---|
+  | Automatic | 84–108 |
+  | Manual | 22–27 (the same as with no GI) |
+  | Manual + Preview Lighting | 22–23 (it waits for the drag to stop) |
+
+  After the drag, the GPU preview shows its first pass in 1.4 s and reaches 256 samples in 3.4 s. The
+  first run after a kernel change compiles the pipeline once (11 s).
+
+## 2026-10-10 (round 40): lighting without lag: baked GI that costs nothing live, realtime lightmaps, GI and baking on the GPU, no path-traced Scene view (tasks 0016-0019)
+
+**Asked:**
+- remove the Scene view's path-traced Rendered mode (too slow);
+- the approved tasks 0016–0018: realtime lightmaps first with a fallback, baked lighting with no lag,
+  and GI, probes and baking on the GPU where it's faster.
+
+**Added**
+- **Realtime lightmaps (0016):** Contribute GI objects get a low-resolution map (Realtime Resolution, 2
+  texels per metre by default).
+  - Voxel GI lights it a slice at a time when the lighting changes, and it's read like a baked map.
+  - **Orbit cost:** +1–3 ms at 1080p over no GI, against +12–14 ms traced per pixel.
+  - **Look:** the same at any zoom (the Scene view's blocks are gone on mapped objects).
+  - **Fallback:** objects without a map keep the per-pixel pass.
+- **No live work once baked (0017):** Realtime GI traces only what a bake doesn't hold.
+  - **Cases:** nothing baked, the scene changed since the bake, or a Realtime Directional Light.
+  - **Otherwise idle:** it traces nothing, and the views equal Realtime GI off.
+  - **Status:** the Lighting window's "Live GI:" line says which case applies, and the per-pixel cost.
+- **Cheaper probe sampling (0017):** +4 ms at 1080p with every object probe-lit, from +15 ms (a brick
+  hint, the cube's axes once per sample, one sample per 2 × 2 pixel quad).
+- **GI on the GPU (0018, ADR 0014):** a Vulkan compute kernel for voxel GI's gather.
+  - **What uses it:** realtime lightmaps and live probes. **GI Device** (Auto / CPU / GPU) chooses.
+  - **Speed:** 4–8.6× faster on the RTX 4070 SUPER, 3.2–6.2× on the 3060 Ti. A whole pass fits in a
+    frame.
+- **Baking on the GPU (0018):** with Render > Device = GPU Compute, Generate Lighting traces lightmap
+  texels and probe rays on the path tracer's kernel.
+  - **Speed:** 8.6× (4070 SUPER) and 6× (3060 Ti) on the tracing.
+  - **Agreement:** totals match the CPU's within 0.01%.
+- **A lighting guide** (`docs/guides/lighting.md`) and a Learn lesson, "Baked and Realtime Lighting".
+
+**Removed**
+- **The Scene view's Rendered (path-traced) mode (0019).** `shading rendered` warns and shows Shaded.
+  Path tracing stays in F12, the Render window and the Camera Preview's Rendered toggle.
+
+**Fixed (found while building it)**
+- **A small object's realtime lightmap had a black patch:** big texels gathering from inside the floor
+  saw nothing. They now take their chart neighbours' light, as invalid probes do. Realtime charts are
+  also at least 24 texels across.
+- **Shared probe samples depended on thread scheduling** (row pairs split between threads). Rows now go
+  out in pairs.
+- **Changing GI Device didn't gather again;** it's in the live keys now.
+- **From the code review:**
+  - **A Sky world drawn from the sun was missing from the GI keys,** so turning the sun didn't re-gather
+    with Bounce off, and the GPU kept the old sky. The keys now include the sky's own key.
+  - **Probe bakes on the GPU could allocate gigabytes** at high sample counts. Slices are now sized by
+    rays (about 8M).
+  - **Test limits had been tuned to one build** (the probe quad's worst difference, the small ball's
+    sky share). They're now principled bounds, with a comment.
+  - **Smaller fixes:**
+    - The GPU kernel's read-back buffer is freed.
+    - Choosing a GI Device again retries the GPU after an error.
+    - Unwrapped realtime charts keep their size when an object moves.
+    - Another scene's published maps are never shown.
+    - The GPU bake's random sequences follow each texel, not its place in a batch.
+    - Realtime lightmaps are capped at about 2M texels.
+    - Stale "Rendered" tips are gone.
+
+**Not as the approved specs said (recorded in each spec's "As built"; all signed off by the user on 2026-10-10):**
+- **0016:** no voxel ray jitter or occlusion fade; the maps' blur and bilinear filter smooth mapped
+  surfaces, and the fallback keeps its look.
+- **0017:** shared probe samples differ from per-pixel ones by up to 8 levels on 0.03% of pixels.
+- **0018:**
+  - GPU and CPU gathers can differ by one or two grazing rays per point (means within 0.002).
+  - The per-pixel pass stays on the CPU.
+
+**Checked**
+- Unit checks:
+  - Windows 7,994, 0 failed (358 tests), and the same with GI Device Auto on the GPU
+    (`BLENDITY_GI_DEVICE=auto`);
+  - Windows dependency-free (CI's build): 7,866, 0 failed.
+  - Render cache verify mode: 0 stale pictures.
+- The code review's open minors, not done:
+  - a GPU failure mid-pass makes the CPU finish that pass in one frame (a one-off hitch);
+  - criterion 5 of task 0016 (fallback pictures bit-identical to the old pass) is checked by traced
+    receiver counts, not pixels.
+- Linux with libraries: 7,946, 0 failed. Sanitizer build: 7,868, 0 failed, no reports.
+- Stress:
+  - `vgi`: a 1080p orbit reading realtime lightmaps costs +0.9–3.1 ms over no GI, against +12–14 ms
+    traced. A pass of 9,377 texels takes 4.8 ms on the CPU.
+  - `probes`: deferred shading at 1080p is 13.7 ms without probes and 17.7 ms with every object
+    probe-lit (29.1 ms before).
+  - `gpu_gi`: gathers and bakes as above (ADR 0014's table).
+
+## 2026-10-10 (round 39): realtime lightmaps, baked lighting without lag, GI on the GPU (specs only)
+
+**Asked:**
+- realtime lightmaps, the faster option first with a fallback;
+- GI and probes on the GPU if faster;
+- baked lighting that doesn't lag the Scene view;
+- why realtime GI looks pixel-like in the Scene view but not in the Game view.
+
+**Found:**
+- **The Scene view's blocks** come from the per-pixel GI pass tracing at ¼ of the screen resolution.
+  Objects are small on screen there, so each 4 × 4-pixel GI cell shows.
+  - GI Resolution = Half makes them smaller; a 256 voxel grid doesn't.
+  - A dark band where objects meet the floor comes from the voxel steps.
+- **Per-frame costs at 1080p:**
+  - a baked lightmap: about 1 ms;
+  - live voxel GI: about 12 ms, even where a bake covers the scene;
+  - probe sampling: up to 15 ms.
+
+**Drafted (for approval, no code yet):**
+- **Task 0016:** realtime lightmaps per texel, with the per-pixel pass as the fallback.
+- **Task 0017:** no live GI work once the bake covers the scene, cheaper probe sampling, and a lighting
+  guide.
+- **Task 0018:** GI, probes and baking on Vulkan compute, each behind a measured spike.
+
+## 2026-10-10 (round 38): GPU viewport, a measured go / no-go spike (task 0015)
+
+**Asked:** run the editor's views on the GPU, after the CPU wins, if it pays off.
+
+**Added**
+- **Stress section `gpu_viewport`:** a 1080p view on the CPU (deferred and the cached shadow map)
+  against the same picture's work on each GPU. The GPU side is the Vulkan path tracer at 1 sample with
+  no bounces, split into clears, render plus read-back, and resolve.
+- **ADR 0013** (proposed) and **task 0015's spec** (no viewport code).
+
+**Result: no-go.**
+- **The bar:** two views at ≤ 0.50× the CPU's time.
+- **The CPU frame:** 19.6 ms.
+- **The GPU's render plus read-back alone:**
+  - RTX 4070 SUPER: 10.6–11.8 ms (0.54–0.60×);
+  - RTX 3060 Ti: 15.4–17.5 ms (0.79–0.89×).
+- **End to end through the path tracer:** 31–39 ms.
+- **Recommendation:** keep the views on the CPU and look next at voxel GI and probe sampling (about
+  12–15 ms each at 1080p).
+
+## 2026-10-10 (round 37): probe volumes, like Unity 6's Adaptive Probe Volumes (task 0014)
+
+**Asked:** add probe volumes, kept live by the voxel GI.
+
+**Added**
+- **Probe Volume component:** Global (around everything that contributes GI) or a box that follows the
+  object's rotation and scale.
+- **Placement:** bricks of 4 × 4 × 4 probes, fine near geometry and coarse in open space. Probes inside
+  geometry move out (virtual offset) or are marked invalid and filled from their neighbours.
+- **Each probe is an ambient cube:**
+  - the light from geometry per axis;
+  - the share of the sky each axis sees, so a new sky colour relights them with no re-bake.
+- **Baked** by Generate Lighting after the lightmaps, in slices so the editor stays responsive.
+- **Live:** Realtime GI keeps the probes current, 4,096 probes a frame, with no bake needed.
+- **Shading:** per pixel, with normal bias, view bias and leak reduction.
+  - **Receive GI** (MeshRenderer) picks Lightmaps or Light Probes.
+  - Objects that don't contribute GI always use the probes.
+- **Settings:** min and max probe spacing, the biases, leak reduction.
+- **Debug display:** `probes show` / `probes hide`, or Show Probes in the Lighting window.
+
+**Fixed (found by the tests and the review)**
+- **Enormous volumes and NaN settings overflowed float-to-int casts** (the sanitizer caught them): in
+  placement, in the live update's voxel lookup and in the volume box's key. The probe cap could also be
+  broken. Counts are now in double, cells are clamped before the cast, the key hashes the setting's
+  bits, and the cap is strict.
+- **Live probes never showed with Realtime GI on**, yet they re-rendered the views. Probe-lit objects
+  now keep the probes (as in APV), and the live probes are what follow lighting changes.
+- **Light counted twice with Baked GI off:** baked probes are now used only with Baked GI on. Probes
+  from another bake are refused on open.
+- **A re-bake without a volume** left the old `ProbeVolume.bin` to come back on open; it is removed.
+  Probes are saved even when there are no lightmaps.
+- **The probe bake ran on the UI thread in one go:** it now runs in slices within the bake's frame
+  budget, and the bake's mesh copies are freed after it.
+- **Global volumes put probes on the floor plane:** the pad is now 1.5 spacings.
+- **Thin walls leaked light:** APV's normal-based leak reduction was added (on by default).
+- **Live probes near a floor saw through it:** they gather from the nearest free voxel.
+- **Receive GI didn't redraw the views.**
+- **Smaller fixes:**
+  - Indirect Intensity applies to the probes.
+  - A cell with every valid probe behind the surface falls back to their plain average.
+  - The virtual offset is limited to ¾ of a spacing.
+  - Receive GI = Light Probes objects get no lightmap chart.
+  - The live key covers both views' voxel GI and only the settings that change the gathers.
+  - The volume box is remembered while nothing changes.
+- **Tests:**
+  - **A NaN volume was a valid point box on GCC:** `AABB::add` drops NaN there, so the placement test
+    sets the box directly.
+  - **"Stopping the pilot brings back the editor view" failed under the sanitizer:** it compared the
+    Statistics overlay, whose frame time differs on a slow run. Statistics is now off for that test,
+    and the view comes back bit for bit.
+
+**Not as the approved spec said (awaits sign-off; recorded in the spec and ADR 0012):**
+- Each probe is an ambient cube, not SH L1 / L2.
+- Probes win over per-pixel voxel GI for the objects they light.
+- Live probes restart as a whole, not only near a change.
+- The debug display draws dots.
+
+**Checked**
+- Unit checks: Windows 7,880, 0 failed (344 tests; round 37 has 29). Render cache verify mode: 0 stale
+  pictures.
+- Linux with libraries: 7,856, 0 failed. Sanitizer build (ASan + UBSan + float-cast-overflow): 7,778, 0 failed, no reports.
+- Stress `probes` (32 threads):
+  - **Scene:** 38,144 probes in 596 bricks, 2,704 inside geometry;
+  - **Time:** place 9.2 ms, validate 11.1 ms, bake 24.2 ms (64 rays);
+  - **Memory:** 206 bytes per probe;
+  - **Live:** 1.48 ms per 4,096-probe slice;
+  - **Shading at 1080p:** deferred shading 13.6 ms without probes and 29.1 ms with every object
+    probe-lit (a follow-up);
+  - **Fuzz:** 100 odd volumes, 0 problems.
+
+## 2026-10-10 (round 36): realtime GI from the research paper: voxel-based global illumination (task 0013)
+
+**Asked:** implement the first paper in `research/papers/`, Thiedemann et al., *Voxel-based Global
+Illumination* (I3D 2011), working with the baking so that changing the lighting never needs a manual
+re-bake.
+
+**Added**
+- **Realtime GI** (Lighting window): one bounce of the sun's light and the sky's occlusion, live in
+  every rasterized view.
+- **The paper's pieces, on the CPU:**
+  - **Voxel grid (section 3):** the scene voxelized into columns of 128 bits, with an exact conservative
+    span voxelizer.
+  - **Moving objects:** each object's voxels are kept, so a moved object is voxelized alone.
+  - **Ray test (section 4):** a mip-map hierarchy and its ray walk.
+  - **Bounce (section 5.1):** gathered through the sun's reflective shadow map.
+  - **Sky:** the share of the sky that gets through gives directional occlusion; open ground keeps
+    exactly today's light.
+  - **Per pixel:** traced at ½ or ¼ resolution with 16 interleaved ray sets, a geometry-aware blur and
+    an upsample.
+- **With the baking:**
+  - Lightmapped surfaces add the live bounce of lights the bake doesn't hold.
+  - Objects changed since a bake, or a whole bake made stale by a light or world change, switch to live
+    GI instead of flat ambient.
+  - **Auto Generate** re-bakes a second after changes stop.
+- **Settings:** voxel resolution, radius, rays, intensity, sky occlusion, bounce, GI resolution, RSM
+  resolution, specular occlusion.
+
+**Fixed (found by the tests and the review)**
+- **Bounce depended on where the scene sat:** the sun's reflective shadow map flipped normals toward a
+  camera at the world origin. It now faces the sun.
+- **GI settings didn't redraw the views,** and they made the bake look out of date (which would have
+  started Auto Generate). Only the settings a bake depends on count now.
+- **Lightmapped surfaces:** they keep their baked specular. Receivers that take everything from a
+  lightmap trace nothing.
+- **Zero-area triangles** add no voxels.
+- **Auto Generate's wake-up** was cleared in the same frame, so an idle editor never re-baked.
+- **The Scene view and Game view shared one voxel / RSM cache** and rebuilt each other's every frame.
+  Each kind of view now has its own.
+- **The ray walks stall or skip far from the grid's corner:** they re-derived cells from rounded
+  positions. They now step cell indices and pick children by crossing time. A test checks 20,000 rays
+  over 256 voxels long on a 256 grid.
+- **A pre-existing rasterizer bug:** a vertex far beyond float range cast infinity to int in tile
+  binning, which the sanitizer caught.
+- **Smaller fixes:**
+  - The RSM holds the sun's light only.
+  - The self-occlusion offset clears a voxel's diagonal.
+  - Ray sets differ in elevation too.
+  - The grid stays put while the scene fits it.
+  - Objects that are gone are forgotten.
+  - Non-casting objects don't occlude.
+  - The lightmaps' out-of-date key covers bake settings only (a 0012 bake would show as out of date
+    once).
+
+**Not as the approved spec said (awaits sign-off; recorded in the spec and ADR 0011):**
+- Realtime lightmaps are per pixel, not per texel: the per-pixel pass covers the same cases.
+- The settings live in the Lighting window (`LightingSettings`).
+
+**Checked**
+- **Unit checks:** Windows 4,077, Linux 4,053, sanitizer build 3,975; 0 failed. 315 tests. The
+  test-engineer wrote 17 tests and the review added 2:
+  - **Voxelizer:** matches a double-precision triangle–box test, exactly.
+  - **Hierarchy and ray walks:**
+    - mips are the OR of the level below;
+    - the hierarchical walk equals the column walk exactly on 100k rays, and on 20k rays longer than
+      256 voxels;
+    - it agrees with an independent 3D DDA on all of them;
+    - the first hit is right going up and down.
+  - **Gather:** RSM back-projection gathers lit points and not shadowed or back-facing ones.
+  - **Pictures:**
+    - a red wall bleeds onto the floor;
+    - a box darkens the floor beside it, and far floor is bit-identical;
+    - GI off is bit-identical;
+    - deterministic, and 1 thread equals all threads.
+  - **Caching:** orbiting re-voxelizes nothing; moving one object re-voxelizes only it.
+  - **With the baking:**
+    - a Realtime sun's bounce follows it on a lightmapped floor without a bake;
+    - Auto Generate waits, re-bakes and sets its wake-up time.
+  - **Settings:** save, load, undo; odd values are safe.
+- **Verify mode:** 0 stale pictures.
+- **Stress `vgi` (Windows):**
+  - **Voxelizing:** 2.2 ms for 257 objects at 128, and 5 ms at 256.
+  - **Ray walks, short rays:** the hierarchical walk equals the column walk (6.8 vs 7.4 Mrays/s on one
+    thread).
+  - **Ray walks, 40 m rays:** the hierarchical walk is 5x faster (5.4 vs 1.1 Mrays/s).
+  - **RSM 256²:** 3 ms, only when the casters or the sun change.
+  - **The GI pass adds:**
+    - 720p, 8 rays, Quarter: 5.8 ms;
+    - 1080p, 8 rays, Quarter: 11.8 ms (over the spec's ~10.5 ms budget);
+    - 1080p, 4 rays, Quarter: 8.5 ms.
+  - **Odd settings:** 200 runs, 0 problems.
+
+## 2026-10-10 (round 35): baked lighting like Unity's (task 0012)
+
+**Asked:** "a similar light baking system like Unity3D": lightmaps and light modes, the approved task 0012.
+Voxel GI (0013) and probe volumes (0014) work with the same lightmaps, so changing the lighting won't
+need a manual re-bake.
+
+**Added**
+- **Per object and per light** (all saved, undoable and settable with `set`):
+  - **Contribute GI** on MeshRenderer, with **Scale In Lightmap** and **Generate Lightmap UVs**;
+  - **Mode** on each Light: Realtime, Mixed or Baked.
+- **A Lighting window** (Window menu, or `window Lighting`) holds:
+  - **Generate Lighting** and Cancel, with a progress bar;
+  - **Clear Baked Data**;
+  - the Lightmapping settings: resolution in texels per unit, max size, padding, direct and indirect
+    samples, bounces, denoise, indirect intensity, Auto Generate;
+  - the Environment.
+
+  Console: `bake start|cancel|clear`.
+- **The baker (`Lightmapper`) runs on the path tracer:**
+  - **Lightmap UVs:** generated per object (Smart UV Project + Pack Islands), sized so each object
+    gets the asked density.
+  - **Indirect light per texel:** cosine-weighted rays through the static objects, the Baked and Mixed
+    lights and the sky, with every bounce. Realtime lights are left out, as in Unity.
+  - **Direct light:** Baked lights only, with shadow rays.
+  - **Finish:** a filter within each object's charts, then dilation into the padding.
+  - **Runs** in slices per frame, cancellable, on its own copies of the meshes.
+- **Shading:**
+  - Lightmapped surfaces take their ambient light from the map.
+  - Baked lights are skipped there in realtime.
+  - Mixed lights keep their realtime light and shadows (Baked Indirect).
+- **Files:** the lightmaps are saved next to the scene, as `<scene>/Lightmap-N.hdr` and
+  `LightingData.bin`, and load with it.
+- **Stale objects:** an object changed since the bake falls back to realtime ambient, and the status
+  bar says **"Lighting out of date"** (ADR 0010).
+
+**Fixed (found by the tests)**
+- **Lightmaps had 21–64% fewer texels than asked.** The packed charts fill only part of their square.
+  Charts are now sized from the area their UVs actually cover. A test checks density within 20% of
+  Lightmap Resolution × Scale In Lightmap across shapes and sizes.
+- **A NaN vertex gave NaN lightmap UVs.** Fast-math compiles `std::isfinite` away, so the check is now
+  by bits.
+
+**Fixed (from the review)**
+- **The Window menu read past its shortcut list** once the Lighting window was added: undefined
+  behaviour every time the menu opened. A compile-time check now ties the list to the windows.
+- **A bake still running when another scene was opened or created** would have written its lightmaps
+  into that scene's folder. Switching scenes now cancels it, and a new scene starts with no baked data.
+- **The lighting folder came from the name stored in the scene**, not the file name. A renamed scene
+  could share or delete another scene's lightmaps, and a name of "." pointed at the Scenes folder
+  itself. It is now the file's name, and anything that isn't a plain name gives no folder.
+- **A bake made before the scene had a file, or before Save As, was lost on save.** Saving now writes
+  it next to the file, and so does the auto-save on exit.
+- **Dragging a lightmapped object re-hashed its whole mesh every frame**, several times. The mesh part
+  of the hash is now remembered by render-mesh serial (only the matrix is rehashed), and "Lighting out
+  of date" is recomputed only when the scene or the lighting settings change. This also fixes a hash
+  that could go stale after opening another scene.
+- **Light skipping:** lightmapped surfaces skip the lights the maps were baked with, as they were
+  baked. A light baked as Baked and switched to Realtime no longer shines twice, and one added since
+  is no longer dropped.
+- **A light on an object with its own non-contributing mesh was missing from the out-of-date check.**
+- **A damaged `LightingData.bin` could ask for gigabytes.** Counts are now checked against the file's
+  size.
+- **Bounces were one too many:** the gather's own hit is the first bounce. With 0 bounces you get only
+  the sky and direct light.
+- **Smaller fixes:**
+  - The content hash now includes per-face materials, sharp edges and smoothing.
+  - Batches are sized by sample count, so a frame's budget holds at high sample counts.
+  - A cancelled bake frees its memory.
+  - Lightmaps are not used under the Scene view's headlight.
+  - The stress section reports the filter + dilation time.
+- **Five tests from the review:**
+  - baking before saving;
+  - a new scene during a bake;
+  - a damaged file;
+  - a lamp mesh with a Baked light;
+  - a mode switched after the bake.
+
+**Not done, from the review:**
+- The texel rasterizer still lives inside the baker; task 0013 will expose it for realtime lightmaps.
+- Texels are taken at texel centres, not conservatively, so slivers thinner than a texel get none;
+  dilation covers them.
+- The Scene view uses a lightmap only when its viewport mesh matches what was baked. With modifiers
+  that differ between the viewport and renders it shows realtime light while the status says up to
+  date.
+- Laying out a very large bake (the UVs, the atlas) still runs on the main thread before the first
+  slice.
+
+**Not as the spec said:** the lightmaps are Radiance `.hdr` files, not `.exr`. Blendity can write EXR
+only with Blender's libraries and has no EXR reader; `.hdr` is written and read without them.
+
+**Checked**
+- **Unit checks:** Windows 3,540, Linux 3,516, sanitizer build 3,438; 0 failed. 293 tests. The
+  test-engineer wrote 19 tests, and the review added 5:
+  - **UVs:** inside 0..1, no overlaps, padding, density.
+  - **Colour bleeding:** a red wall tints the floor with a Baked or a Mixed sun, and a white wall
+    doesn't.
+  - **Accuracy:**
+    - open sky exact;
+    - under a covering slab, dark;
+    - at a slab's edge within 0.013 of an 8,192-sample path-traced reference;
+    - a Baked sun's direct light exact (colour × intensity × N·L), 0 in shadow.
+  - **Light modes:**
+    - a Baked sun alone lights the floor;
+    - a Mixed sun keeps the realtime shadow (90% of the lit region in common with an unbaked scene);
+    - a Realtime sun leaves the maps bit-identical.
+  - **Lifecycle:**
+    - save and reopen;
+    - a moved box falls back, then comes back bit-identical;
+    - `bake clear` restores the picture bit-identically;
+    - dynamic objects untouched;
+    - path-traced F12 unchanged.
+  - **Robustness and undo:** cancel, undo, NaN and odd settings.
+- **Verify mode:** the suite has 0 stale pictures (the view caches re-render when a bake finishes,
+  clears or loads).
+- **Stress `bake` (Windows):**
+
+| Static objects | Texels | Bake time |
+|---|---|---|
+| 10 | 12k | 0.03 s |
+| 100 | 122k | 0.25 s |
+| 1,000 | 1.24M | 2.2 s (3 lightmaps) |
+
+  - That is about 500k texels/s and 42–56 Mrays/s, of which filtering and dilation take 3–140 ms.
+  - Shading a lightmap costs 1–1.4 ms more at 1080p (10.1 → 11.0–11.5 ms).
+  - Odd settings: 30 runs, 0 problems.
+
+## 2026-10-10 (round 34): a faster editor: views and shadows reused until something changes (task 0011)
+
+**Asked:** improve performance for the Scene view and the editor (task 0011 of the approved plan).
+
+**Found**
+- **The sun's shadow map was rendered on every shaded render**, up to three times a frame, at about
+  8 ms each. `docs/PERFORMANCE.md` and a stress note both said it was cached.
+- **Any input re-rendered every visible 3D view from scratch**: a mouse move over a panel, a caret blink,
+  a tooltip timer. In a working scene (1600×1000, Scene and Game views, a Camera Preview), an idle frame
+  cost about 46 ms.
+
+**Changed**
+- **Views reuse their picture while nothing they show has changed (ADR 0009).**
+  - **What is cached:** the Scene view, the Game view and the Shaded Camera Preview.
+  - **The key:** a content hash of the scene (geometry, transforms, the hierarchy, MeshRenderer flags,
+    materials, lights, world, render settings), plus each view's camera, size, toggles and selection.
+  - **Never cached:** Rendered shading, piloting, Play while running.
+  - **Verify mode** (`BLENDITY_RENDER_CACHE_VERIFY=1`) renders anyway and compares. The unit suite and
+    the random-input fuzz both run clean in it.
+- **The shadow map is kept until its casters, their materials or the light change.** There are two
+  entries, so the Scene and Game views don't evict each other. Each render mesh gets a `serial` the
+  caches key on.
+- **Clears run in one parallel pass**, and the visibility plane exists only for deferred shading.
+- **Overlay lines and points are drawn in parallel bands of rows**, bit-identical to drawing them one by
+  one. The F12 supersampling downsample is parallel too.
+- **The scene hash no longer evaluates modifier stacks:** `GameObject::evaluated_key` gives the key
+  without the mesh.
+- **The Profiler window shows where the frame went:**
+  - time in the Scene view and its overlays, the Game view, the preview, the shadow map, the UI and
+    present;
+  - how many views were rendered or reused.
+
+**Fixed (from the review)**
+- **The Game view and Camera Preview missed MeshRenderer flags.** Unticking Show in Renders or Receive
+  Shadows left them stale. The flags are now in the shared scene hash, which also fixes the
+  path-traced preview's key.
+- **A modifier's "Show in Edit Mode" didn't redraw the Edit Mode cage.** The cage's evaluated mesh is
+  now in the key.
+- **Re-parenting a selected object's child** (for example by undo) left its child outline. The
+  hierarchy is now in the key.
+- **Smaller gaps:**
+  - Reopening a scene file now starts fresh caches (each Scene has a `serial`).
+  - The raster options are in the Game view and Camera Preview keys.
+  - The grid's orbit distance and pivot are in the Scene view key.
+  - A batch can't stay open across frames.
+- **One test** checks the first three cases in verify mode. Without the fix it finds 3 stale pictures.
+
+**Checked**
+- **Linux, dependency-free build, `editor_render`, before → after:**
+
+| Frame | Before (ms) | After (ms) |
+|---|---|---|
+| Idle | 47.3 | 2.1 |
+| Mouse over the Hierarchy | 44.2 | 2.1 |
+| Orbiting the Scene view | 43.6 | 9.9 (no shadow pass) |
+| Moving an object | 45.1 | 24.7 |
+| Editing a material colour | 45.4 | 27.0 |
+| Playing | 32.5 | 14.8 |
+
+- **Idle frames with many objects:** 1.9 ms at 1,000 meshes and 5.1 ms at 10,000 (the hash). An idle
+  frame with 1,000 empties went from 10.6 to 1.5 ms.
+- **Overlays:** 1.15 → 0.77 ms in a normal frame, and 17.5 → 12.4 ms with a 50k-face Edit Mode cage.
+- **Edit Mode on a 50k-face mesh is still about 280 ms a change.**
+  - The render mesh costs 13–19 ms and the tangents 28–37 ms.
+  - Most of the rest is the overlapping-vertex check. It runs on changes made outside a drag; a real
+    gizmo drag skips it.
+  - Speeding this up is the follow-up (a positions-only mesh update; it needs an ADR).
+- **Unit checks:** Windows 3,203, Linux 3,179, sanitizer build 3,101; 0 failed. 270 tests. The
+  test-engineer wrote 26 tests and the review added 1:
+  - idle and panel-only frames render nothing;
+  - fourteen kinds of change each redraw, including a real gizmo drag, an Edit Mode vertex drag, undo
+    (bit-identical to before), Play, shading, the World and Exposure;
+  - orbiting renders the shadow map at most once;
+  - about 55 mixed actions in verify mode leave no stale picture;
+  - the overlay batch is bit-identical on 450 random lines and points;
+  - the parallel clears.
+- **Stress:**
+  - `editor_fuzz` (6,000 frames of random input) in verify mode: no crash, 0 stale pictures.
+  - `filters`: 0 problems.
+- **The whole unit suite** runs in 18 s on Windows (21.7 s before this task); the tests reuse views too.
+
+**Not done from the spec**
+- **`is_selected` as a set** and **one render snapshot per frame:** the scene walks and the linear
+  selection search don't show in the measurements at 1,000–10,000 objects.
+- **`outline_ids` in one pass:** it reuses its mask instead; still two passes when a selection has
+  children.
+- **A test for the caret blink:** it is the same frame as the idle case (no events, a redraw).
+
 ## 2026-10-09 (round 33): leaner, faster unit tests (task 0010)
 
 **Asked:** consolidate the tests, removing redundant or unnecessary ones. The same request also asked for

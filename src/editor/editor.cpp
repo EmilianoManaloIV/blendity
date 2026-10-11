@@ -22,12 +22,12 @@ using ui::Icon;
 static const char *kVersion = "0.10.0";
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting"};
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb};
   return icons[(int)k];
 }
 
@@ -168,8 +168,10 @@ void Editor::init_headless(int width, int height) {
 void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 
 bool Editor::wants_continuous_redraw() const {
-  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || seq_.active || !deferred_.empty() ||
-         (shading_ == Shading::Rendered && !pilot_cam_ && scene_ && vp_pt_.samples() < scene_->render.viewport_samples) ||
+  return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
+         lighting_update_requested_ || preview_running_ ||
+         seq_.active ||
+         !deferred_.empty() ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
 
@@ -220,6 +222,7 @@ void Editor::request_close() {
     if (fs::exists(path)) fs::copy_file(path, path + ".bak");
     save_scene(*scene_, path);
     Log::info("Auto-saved %s on exit", path.c_str());
+    if (scene_->path == path) save_lighting_data();
   }
   if (playing_) exit_play();
   running_ = false;
@@ -374,6 +377,7 @@ void Editor::frame(std::vector<Event> &events) {
     start_final_render(true, false);
   step_final_render();
   step_render_sequence();
+  step_bake();
 
   /* Pull new console lines. */
   if (Log::generation() != log_gen_) {
@@ -384,6 +388,8 @@ void Editor::frame(std::vector<Event> &events) {
   Log::fetch(log_.size(), log_);
 
   ui_.begin_frame(&fb_, now);
+  auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
+  preview_step();
   auto &c = ui_.canvas;
   c.fill_rect({0, 0, fb_.width, fb_.height}, ui_.theme.border);
   int mh = ui_.row_h() + ui_.px(2);
@@ -459,6 +465,9 @@ void Editor::frame(std::vector<Event> &events) {
   }
 
   ui_.end_frame();
+  update_probes_live();  // after the views drew: they built this frame's voxel grid
+  update_realtime_lightmaps();
+  lighting_update_step();
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
@@ -472,6 +481,12 @@ void Editor::frame(std::vector<Event> &events) {
   ui_ms_ = (float)frame_timer.ms();
   if (window_) present(window_, fb_.pixels.data(), fb_.width, fb_.height);
   frame_ms_ = (float)frame_timer.ms();
+  prof_.frames = 1;
+  prof_.ms_present = frame_ms_ - ui_ms_;
+  prof_.ms_ui = std::max(0.0, ui_ms_ - prof_.ms_scene3d - prof_.ms_game - prof_.ms_preview);
+  prof_last_ = prof_;
+  prof_total_.add(prof_);
+  prof_ = FrameProfile{};
   frame_history_.push_back(frame_ms_);
   if (frame_history_.size() > 240) frame_history_.erase(frame_history_.begin());
   raster_history_.push_back((float)scene_stats_.ms_total);
@@ -770,7 +785,8 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn Research Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr};
+    static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if (u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
@@ -900,7 +916,11 @@ void Editor::draw_statusbar(const Recti &r) {
     u.label(tr, e.text, u.theme.text);
     if (u.hovered(tr) && u.in.pressed[0]) dock_open(WindowKind::Console);
   }
-  std::string right = strprintf("%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s",
+  std::string lighting = baking_                 ? bake_status_ + "  |  "
+                         : lighting_out_of_date()  ? std::string("Lighting out of date  |  ")
+                         : frozen_out_of_date()    ? std::string("Lighting out of date (Update Lighting: Ctrl+Shift+L)  |  ")
+                                                   : std::string();
+  std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
                                 playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
                                 scene_->object_count(), scene_stats_.tris_submitted, kVersion);
   u.label({r.x, r.y, r.w - u.px(10), r.h}, right, u.theme.text_dim, ui::Align::Right);
@@ -1144,6 +1164,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Research: draw_research(r); break;
     case WindowKind::Profiler: draw_profiler(r); break;
     case WindowKind::Render: draw_render_window(r); break;
+    case WindowKind::Lighting: draw_lighting_window(r); break;
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1382,9 +1403,11 @@ void Editor::redo() {
 void Editor::new_scene() {
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
+  bake_cancel();  // a bake belongs to the scene it started in
   scene_ = std::make_unique<Scene>();
   build_starter_scene(*scene_);
   scene_->name = "Untitled";
+  load_lighting_data();  // none: the scene has no file yet
   stable_ = scene_->clone();
   undo_.clear();
   redo_.clear();
@@ -1396,6 +1419,7 @@ void Editor::new_scene() {
 
 bool Editor::open_scene(const std::string &path) {
   if (playing_) exit_play();
+  bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
   auto s = std::make_unique<Scene>();
   std::string err;
@@ -1405,6 +1429,7 @@ bool Editor::open_scene(const std::string &path) {
   }
   scene_ = std::move(s);
   relink_material_assets(*scene_, false);  // slots naming a .mat use the asset file
+  load_lighting_data();  // <scene folder>/<scene name>/: its lightmaps, if baked
   stable_ = scene_->clone();
   undo_.clear();
   redo_.clear();
@@ -1442,6 +1467,7 @@ void Editor::save_scene_cmd(bool save_as) {
     scene_dirty_ = false;
     project_listed_ = -100;
     Log::info("Saved %s", scene_->path.c_str());
+    save_lighting_data();  // a bake made before the scene had a file, or before Save As
   }
   else Log::error("Could not write %s", scene_->path.c_str());
 }
@@ -2127,6 +2153,7 @@ bool Editor::set_field_command(const std::string &path, const std::string &value
   int n = 0;
   if (owner == "render") n += apply([&](Reflector &r) { scene_->render.reflect(r); });
   else if (owner == "world") n += apply([&](Reflector &r) { scene_->environment.reflect(r); });
+  else if (owner == "lighting") n += apply([&](Reflector &r) { scene_->lighting.reflect(r); });
   else
     for (GameObject *g : selected_objects(false))
       for (auto &c : g->components)
@@ -2675,7 +2702,7 @@ void Editor::run_console_command(const std::string &line) {
     mark_changed("Render Engine");
   }
   else if (c == "samples") {
-    scene_->render.samples = scene_->render.viewport_samples = std::max(1, std::atoi(arg(1, "64").c_str()));
+    scene_->render.samples = std::max(1, std::atoi(arg(1, "64").c_str()));
   }
   else if (c == "texture") {
     std::string p = t.size() > 1 ? line.substr(line.find(t[1])) : "generated:UV Grid";
@@ -2703,13 +2730,42 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "render") start_final_render();
+  else if (c == "probes") {
+    /* probes show|hide: the probe volume's probes in the Scene view. */
+    scene_->lighting.show_probes = to_lower(arg(1, "show")) != "hide";
+    mark_changed("Show Probes");
+  }
+  else if (c == "bake") {
+    /* bake [start|cancel|clear]: Generate Lighting, as the Lighting window's buttons. */
+    const std::string w = to_lower(arg(1, "start"));
+    if (w == "cancel") bake_cancel();
+    else if (w == "clear") bake_clear();
+    else bake_start();
+  }
   else if (c == "saverender") save_render();
+  else if (c == "lighting") {
+    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) */
+    const std::string sub = to_lower(arg(1, "update"));
+    if (sub == "update") lighting_update();
+    else if (sub == "preview") {
+      scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
+      mark_changed("Preview Lighting");
+    }
+    else if (sub == "mode") {
+      const std::string m = to_lower(arg(2, "manual"));
+      scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
+      mark_changed("Lighting Updates");
+    }
+    else Log::warn("lighting: update | preview on|off | mode manual|automatic");
+  }
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));
+    if (w == "rendered")
+      Log::warn("shading: the Scene view has no Rendered mode (too slow to edit in); showing Shaded. Path trace with F12, the "
+                "Render window or `camerapreview rendered`.");
     shading_ = w == "wire" || w == "wireframe" ? Shading::Wireframe
                : w == "both"                      ? Shading::ShadedWireframe
                : w == "solid"                     ? Shading::Solid
-               : w == "rendered"                  ? Shading::Rendered
                                                    : Shading::Shaded;
   }
   else if (c == "filter") {

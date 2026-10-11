@@ -44,6 +44,18 @@ struct SurfacePoint {
   AABB local_bounds;
   bool has_tangent = false;
   const TexOverride *tex = nullptr;  // camera filter (rasterizer only)
+  /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
+  bool has_lightmap = false;
+  Vec3 lightmap;
+  Vec3 lightmap_add;  // realtime GI's bounce of lights the bake doesn't hold (task 0013), added to it
+  /* Probe volumes (task 0014): irradiance / pi from the probes around this point. */
+  bool has_probe = false;
+  bool probe_baked = false;  // from the bake: it holds the Baked lights' direct light
+  Vec3 probe;
+  /* Voxel GI per pixel (task 0013): the fraction of the sky's light that gets through and the bounce. */
+  bool has_gi = false;
+  float gi_sky = 1.0f;
+  Vec3 gi_bounce;
 };
 
 /* Material inputs after texture lookups. */

@@ -233,6 +233,8 @@ std::string save_scene_text(const Scene &scene) {
     const_cast<Scene &>(scene).environment.reflect(wr);
     os << "end\nrender\n";
     const_cast<Scene &>(scene).render.reflect(wr);
+    os << "end\nlighting\n";
+    const_cast<Scene &>(scene).lighting.reflect(wr);
     os << "end\n";
   }
   const auto &e = scene.environment;
@@ -407,8 +409,9 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       rr->values[k] = std::vector<std::string>(t.begin() + 1, t.end());
       continue;
     }
-    if ((k == "world" || k == "render") && t.size() == 1) {
+    if ((k == "world" || k == "render" || k == "lighting") && t.size() == 1) {
       if (k == "world") pending_block = [&fresh](Reflector &r) { fresh.environment.reflect(r); };
+      else if (k == "lighting") pending_block = [&fresh](Reflector &r) { fresh.lighting.reflect(r); };
       else pending_block = [&fresh](Reflector &r) { fresh.render.reflect(r); };
       rr = std::make_unique<ReadReflector>(meshes, &materials);
       continue;

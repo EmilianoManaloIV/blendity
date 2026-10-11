@@ -142,6 +142,12 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
    * Visibility > Renders. Boolean cutters are shown as wire and kept out of renders. */
   int display_as = 0;
   bool show_in_renders = true;
+  /* Baked lighting (Unity: Static > Contribute GI, Scale In Lightmap; the model importer's Generate
+   * Lightmap UVs). A contributing object is in the bake and gets a lightmap. */
+  bool contribute_gi = false;
+  float scale_in_lightmap = 1.0f;
+  bool generate_lightmap_uvs = true;
+  int receive_gi = 0;  // a Contribute GI object's indirect light: 0 Lightmaps, 1 Light Probes (others always probes)
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();
@@ -167,6 +173,9 @@ struct Light : ComponentBase<Light> {
    * multiplied by a black body's colour at this many kelvin. */
   bool use_temperature = false;
   float temperature = 6500.0f;
+  /* Unity's Light Mode: 0 Realtime (not in baked lighting), 1 Mixed (realtime direct light and shadows,
+   * baked indirect), 2 Baked (direct and indirect in the lightmaps). */
+  int mode = 0;
   void reflect(Reflector &r) override;
   Vec3 final_color() const;  // colour x temperature tint
 };
@@ -688,6 +697,9 @@ class GameObject {
    * kind: 0 the viewport (enabled modifiers), 1 renders (Show in Renders),
    * 2 Edit Mode (enabled and Show in Edit Mode). */
   const Mesh *evaluated_mesh(int kind = 0) const;
+  /* What evaluated_mesh(kind) is computed from (the base mesh and version, the modifiers that apply and
+   * their settings), without evaluating anything: for caches that only need to know it changed. */
+  uint64_t evaluated_key(int kind = 0) const;
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
@@ -719,13 +731,67 @@ struct EnvironmentSettings {
   void reflect(Reflector &r);
 };
 
+/* Unity: Lighting window > Scene (Mixed Lighting, Lightmapping Settings). Baked lighting, task 0012. */
+/* Task 0020: Manual unless BLENDITY_LIGHTING_UPDATES=automatic. */
+int default_lighting_update_mode();
+
+struct LightingSettings {
+  bool baked_gi = true;           // Baked Global Illumination
+  int lighting_mode = 0;          // 0 Baked Indirect
+  float texels_per_unit = 40.0f;  // Lightmap Resolution
+  int max_size = 1024;            // Max Lightmap Size
+  int padding = 2;                // Lightmap Padding (texels)
+  int direct_samples = 32;
+  int indirect_samples = 256;
+  int bounces = 2;
+  bool denoise = true;
+  float indirect_intensity = 1.0f;
+  bool auto_generate = false;     // re-bake after changes settle
+  /* Realtime GI (task 0013): voxel-based global illumination (Thiedemann et al. 2011) in the
+   * rasterized views. */
+  bool realtime_gi = false;
+  int gi_resolution = 1;          // voxel columns per side: 0 64, 1 128, 2 256
+  float gi_radius = 2.0f;         // how far bounced light and sky occlusion reach (metres)
+  int gi_rays = 8;                // per receiver
+  float gi_intensity = 1.0f;      // on the bounce
+  bool gi_sky_occlusion = true;
+  bool gi_bounce = true;
+  int gi_downsample = 1;          // 0 Half, 1 Quarter resolution
+  int gi_rsm_resolution = 256;
+  float gi_specular_occlusion = 1.0f;
+  float realtime_resolution = 2.0f;  // realtime lightmaps' texels per metre (task 0016); 0 = off (per pixel only)
+  /* Task 0020: 0 Manual (lighting is recomputed only on Update Lighting / Generate Lighting), 1 Automatic
+   * (Realtime GI follows every change, Auto Generate re-bakes). BLENDITY_LIGHTING_UPDATES=automatic makes
+   * Automatic the default (the unit tests written before it). */
+  int update_mode = default_lighting_update_mode();
+  bool preview = false;  // a rough progressive bake into preview lightmaps while editing (not saved)
+  int gi_device = 0;  // task 0018: 0 Auto (the GPU when there is one), 1 CPU, 2 GPU (falls back to the CPU without one)
+  /* Probe volumes (task 0014), as Unity 6's Adaptive Probe Volumes. */
+  float probe_min_spacing = 1.0f;   // metres between probes near geometry
+  float probe_max_spacing = 27.0f;  // ...and in open space
+  float probe_normal_bias = 0.25f;  // metres
+  float probe_view_bias = 0.1f;
+  bool probe_leak_reduction = true; // APV's normal-based leak reduction
+  bool show_probes = false;         // draw them in the Scene view
+  void reflect(Reflector &r);
+};
+
+/* Unity's Adaptive Probe Volume: where light probes are placed. Global: around everything that
+ * contributes to GI. Otherwise a box of Size centred on the object. */
+struct ProbeVolume : ComponentBase<ProbeVolume> {
+  static constexpr const char *kName = "Probe Volume";
+  bool global = true;
+  Vec3 size{20.0f, 10.0f, 20.0f};
+  void reflect(Reflector &r) override;
+};
+
 /* Blender: Render + Output properties. Unity: Quality / Recorder settings. */
 struct RenderSettings {
   int engine = 0;  // 0 Rasterized (EEVEE-like), 1 Path Traced (Cycles-like)
   int width = 1280, height = 720;
   int percent = 100;
   int samples = 128;          // path tracer final samples
-  int viewport_samples = 64;  // Rendered viewport shading
+  int viewport_samples = 64;  // unused since task 0019 (no Rendered Scene view); kept so files round-trip
   int preview_samples = 16;   // Preview button / live preview
   int preview_percent = 25;   // preview resolution, % of the output size
   bool live_preview = false;  // re-render the preview whenever the scene changes
@@ -757,7 +823,10 @@ struct GuideLine {
 
 class Scene {
  public:
-  Scene() = default;
+  Scene();
+  /* Different for every Scene made in this process (a reopened file is a new one even when its objects
+   * land at the same addresses): render caches key on it. */
+  uint64_t serial = 0;
   /* Moving a scene re-points its objects at the new owner (GameObject::scene). */
   Scene(Scene &&other) noexcept { move_from(other); }
   Scene &operator=(Scene &&other) noexcept {
@@ -774,6 +843,7 @@ class Scene {
   bool compress = false;
   EnvironmentSettings environment;
   RenderSettings render;
+  LightingSettings lighting;
   std::vector<GuideLine> guides;  // construction lines for drawing (editor only)
   std::vector<GameObject *> roots;
   /* Play mode: the Jolt world while playing (null otherwise or without Jolt). */

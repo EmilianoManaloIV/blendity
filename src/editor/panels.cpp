@@ -1579,6 +1579,16 @@ void Editor::draw_profiler(const Recti &r) {
   stat("Scene memory (approx.)", format_bytes(scene_->memory_bytes()));
   stat("Undo steps", strprintf("%zu", undo_.size()));
 
+  /* Where the last frame went, and what the render caches saved (ADR 0009). */
+  lay.space(u.px(6));
+  u.label(lay.row(), "Editor frame breakdown (last frame)", u.theme.text_bright);
+  const FrameProfile &fp = prof_last_;
+  stat("Scene view 3D (of it overlays)", strprintf("%.2f ms (%.2f ms)", fp.ms_scene3d, fp.ms_overlays));
+  stat("Game view / Camera Preview", strprintf("%.2f ms / %.2f ms", fp.ms_game, fp.ms_preview));
+  stat("Shadow map", fp.shadow_renders ? strprintf("%.2f ms (rendered)", fp.ms_shadow) : std::string("reused"));
+  stat("UI / present", strprintf("%.2f ms / %.2f ms", fp.ms_ui, fp.ms_present));
+  stat("Views rendered / reused", strprintf("%llu / %llu", (unsigned long long)fp.view_renders, (unsigned long long)fp.view_cache_hits));
+
   lay.space(u.px(6));
   draw_performance_settings(&lay);
 
@@ -1677,6 +1687,111 @@ void Editor::draw_research(const Recti &r) {
 /* Render window (Blender: Render Result + Render/Output/World properties;
  * Unity: Lighting window + Recorder)                                     */
 /* ===================================================================== */
+
+/* Unity's Lighting window (Window > Rendering > Lighting): Generate Lighting, the baked data, and the
+ * settings it bakes with (task 0012). */
+void Editor::draw_lighting_window(const Recti &r) {
+  auto &u = ui_;
+  u.canvas.fill_rect(r, Color::hex(0x333333));
+  static int content_h = 0;
+  int off = u.begin_scroll(u.id("lighting_window"), r, content_h);
+  ui::Layout lay{{r.x + u.px(8), r.y, r.w - u.px(20), r.h}, r.y + u.px(8) - off};
+  lay.row_h = u.row_h();
+  auto header = [&](const char *t) {
+    Recti h = lay.row(u.row_h() + u.px(4));
+    u.canvas.fill_rect({r.x, h.y, r.w, h.h}, u.theme.header);
+    u.label({h.x + u.px(4), h.y, h.w, h.h}, t, u.theme.text_bright);
+  };
+  Recti b = lay.row(u.row_h() + u.px(8));
+  const int bw = (b.w - u.px(4)) / 2;
+  if (baking_) {
+    if (u.button({b.x, b.y, bw, b.h}, "Cancel", true, Icon::Pause)) bake_cancel();
+  }
+  else if (u.button({b.x, b.y, bw, b.h}, "Generate Lighting", false, Icon::Lightbulb))
+    bake_start();
+  u.tooltip("Bakes the Baked and Mixed lights, the sky and their bounces into lightmaps for objects marked\n"
+            "Contribute GI (MeshRenderer). Saved next to the scene, in a folder with the scene's name.");
+  if (u.button({b.x + bw + u.px(4), b.y, bw, b.h}, "Clear Baked Data", false, Icon::Close)) bake_clear();
+  u.tooltip("Removes the lightmaps (to the trash) and goes back to realtime ambient light.");
+  if (baking_) {
+    Recti pr = lay.row(u.px(6));
+    u.canvas.fill_round_rect(pr, u.px(3), Color::hex(0x252525));
+    u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * baker_.progress()), pr.h}, u.px(3), u.theme.accent);
+    u.redraw = true;
+  }
+  {
+    /* Task 0020: Update Lighting and the rough preview. */
+    Recti r2 = lay.row(u.row_h() + u.px(4));
+    if (u.button({r2.x, r2.y, bw, r2.h}, lighting_update_requested_ ? "Updating..." : "Update Lighting  (Ctrl+Shift+L)", lighting_update_requested_,
+                 Icon::Lightbulb))
+      lighting_update();
+    u.tooltip("Runs Realtime GI once now: realtime lightmaps and live probes catch up, then stay as they are\n"
+              "(Lighting Updates: Manual). Generate Lighting makes the real bake.");
+    const bool pv = scene_->lighting.preview;
+    if (u.button({r2.x + bw + u.px(4), r2.y, bw, r2.h}, pv ? "Preview Lighting: On" : "Preview Lighting: Off", pv, Icon::Lightbulb))
+      command(pv ? "lighting preview off" : "lighting preview on");
+    u.tooltip("A rough bake while you edit, refining 16 -> 64 -> 256 samples half a second after changes stop;\n"
+              "shown instead of the bake and never saved (like Bakery's Realtime Preview).");
+    std::string mode = lighting_manual() ? "Lighting Updates: Manual (lighting stays as last computed until you update)"
+                                         : "Lighting Updates: Automatic (Realtime GI follows every change)";
+    if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 16 : preview_stage_ == 1 ? 64 : 256,
+                                                  preview_baker_.progress() * 100.0)
+                                     : preview_samples_ ? strprintf("  -  Preview: %d samples", preview_samples_) : std::string("  -  Preview: waiting");
+    u.label(lay.row(), mode, u.theme.text_dim);
+  }
+  if (!bake_status_.empty()) u.label(lay.row(), bake_status_, baking_ ? u.theme.accent : u.theme.text_dim);
+  if (!baking_ && lighting_out_of_date())
+    u.label(lay.row(), lighting_manual() ? "Lighting out of date: the last lighting stays up until Generate Lighting (moved objects keep their maps)."
+                                         : "Lighting out of date: objects changed since the bake keep realtime ambient.",
+            u.theme.warning);
+  else if (!baking_ && frozen_out_of_date())
+    u.label(lay.row(), "Realtime GI out of date: Update Lighting (Ctrl+Shift+L) brings it up to date.", u.theme.warning);
+  {
+    std::string why;
+    const bool live = live_gi_needed(&why);
+    if (live && scene_stats_.ms_gi > 0.0) why += strprintf("  -  %.1f ms a Scene view render", scene_stats_.ms_gi);
+    if (live && !gi_gpu_name_.empty() && !gi_gpu_failed_) why += "  -  gathers on " + gi_gpu_name_;
+    u.label(lay.row(), why, live ? u.theme.text : u.theme.text_dim);
+    u.tooltip("Realtime GI only traces what the bake doesn't hold: no bake, objects or lights changed since it\n"
+              "(Auto Generate re-bakes), or a Realtime Directional Light. Otherwise the views cost what a bake does.");
+  }
+  {
+    size_t contributing = 0;
+    scene_->for_each([&](GameObject &g) {
+      if (auto *mr = g.get<MeshRenderer>())
+        if (mr->enabled && mr->contribute_gi && g.active_in_hierarchy()) contributing++;
+    });
+    int side = lighting_data_.pages.empty() ? 0 : lighting_data_.pages[0].width;
+    u.label(lay.row(), strprintf("Contribute GI: %zu objects   Lightmaps: %zu x %d px   Baked: %zu objects", contributing,
+                                 lighting_data_.pages.size(), side, lighting_data_.entries.size()),
+            u.theme.text_dim);
+  }
+  lay.space(u.px(6));
+  header("Lightmapping Settings");
+  {
+    InspectorReflector ir(*this, u, lay);
+    u.push_id("lighting");
+    scene_->lighting.reflect(ir);
+    u.pop_id();
+    if (ir.changed) mark_changed("Lighting Settings");
+  }
+  lay.space(u.px(6));
+  header("Environment");
+  {
+    InspectorReflector ir(*this, u, lay);
+    u.push_id("lighting_world");
+    scene_->environment.reflect(ir);
+    u.pop_id();
+    if (ir.changed) {
+      mark_changed("World Settings");
+    }
+  }
+  lay.space(u.px(6));
+  u.label(lay.row(), "Light Mode is on each Light; Contribute GI on each MeshRenderer.", u.theme.text_dim);
+  lay.space(u.px(16));
+  content_h = lay.y + off - r.y;
+  u.end_scroll();
+}
 
 void Editor::draw_render_window(const Recti &r) {
   auto &u = ui_;
@@ -1818,7 +1933,6 @@ void Editor::draw_render_window(const Recti &r) {
         if (on) render_devices_off_.insert(d.name);
         else render_devices_off_.erase(d.name);
         save_prefs();
-        vp_pt_hash_ = 0;
       }
     }
     if (devs.empty()) u.label(lay.row(), gpu::compiled_in() ? "No Vulkan GPU found - rendering on the CPU" : "This build has no GPU rendering", u.theme.text_dim);
@@ -1834,14 +1948,13 @@ void Editor::draw_render_window(const Recti &r) {
     u.pop_id();
     if (ir.changed) {
       mark_changed("World Settings");
-      vp_pt_hash_ = 0;
     }
   }
   lay.space(u.px(6));
   GameObject *owner = nullptr;
   main_camera(*scene_, &owner);
   u.label(lay.row(), owner ? "Camera: " + owner->name : "No camera - rendering from the Scene view", u.theme.text_dim);
-  u.label(lay.row(), "Tip: Scene view > Rendered previews the path tracer live.", u.theme.text_dim);
+  u.label(lay.row(), "Tip: select a camera and switch its Camera Preview to Rendered to preview the path tracer live.", u.theme.text_dim);
   lay.space(u.px(16));
   content_h = lay.y + off - left.y;
   u.end_scroll();
@@ -2280,7 +2393,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
          u.theme.text_dim);
   const uint32_t dim = u.theme.text_dim;
   text("What it costs:", u.theme.text);
-  text("- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded / Rendered views cost more per frame.", dim);
+  text("- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.", dim);
   if (max_fps_ == 0)
     text("- Unlimited: a CPU core runs flat out while anything moves; fans and battery suffer, and frames beyond the monitor's refresh rate are never seen.", dim);
   else if (max_fps_ > 144)
@@ -2289,7 +2402,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     text("- 30 fps: about half the CPU of 60 while you drag, but the mouse feels up to 33 ms behind and orbiting looks steppy.", dim);
   else
     text(strprintf("- %d fps: dragging and orbiting draw up to %d frames a second; idle costs nothing unless Redraw is Always.", max_fps_, max_fps_), dim);
-  text("- Rendered (path-traced) viewport: editor frames share the CPU with sampling; a lower cap leaves more for samples.", dim);
+  text("- A Rendered Camera Preview: editor frames share the CPU with sampling; a lower cap leaves more for samples.", dim);
   if (always_redraw_) text("- Always redraw: the cap's CPU cost continues while idle (handy with the Profiler; otherwise wasted power).", u.theme.warning);
 }
 

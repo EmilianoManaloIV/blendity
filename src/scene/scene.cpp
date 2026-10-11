@@ -9,6 +9,8 @@
 #include "physics.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -72,6 +74,10 @@ void register_builtin_components() {
   reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
+  reg<ProbeVolume>("Rendering",
+                   "Light probes placed automatically (dense near geometry): objects without a lightmap take their indirect "
+                   "light from them. Baked by Generate Lighting, kept live by Realtime GI.",
+                   "Unity: Adaptive Probe Volume; Blender EEVEE: Irradiance Volume");
   reg<Camera>("Rendering", "Renders the Game view.", "Camera object (the active scene camera)");
   reg<CameraFilters>("Rendering",
                      "A stack of filters on this camera, applied top to bottom: Retro Console looks (PS1, N64, Saturn, DOS) and more. "
@@ -102,6 +108,103 @@ void MeshRenderer::reflect(Reflector &r) {
   r.field("Show in Renders", show_in_renders);
   r.help("Off: the Game view and rendered images leave the object out, as Blender does for Boolean cutters\n"
          "(Object > Visibility > Renders).");
+  r.field("Contribute GI", contribute_gi);
+  r.help("Part of baked lighting (Unity: Static > Contribute Global Illumination). It bounces light onto the\n"
+         "others and gets a lightmap when you press Generate Lighting (Window > Lighting). Leave it off for\n"
+         "things that move.");
+  if (contribute_gi || r.all_fields()) {
+    r.field("Scale In Lightmap", scale_in_lightmap, 0.01f, 0.0f, 100.0f);
+    r.help("How many lightmap texels this object gets, relative to the Lightmap Resolution (Unity: Scale In Lightmap).");
+    static const char *receive[] = {"Lightmaps", "Light Probes"};
+    r.enumeration("Receive GI", receive_gi, receive, 2);
+    r.help("Where its indirect light comes from: its own lightmap, or the probe volume (Unity: Receive Global\n"
+           "Illumination). Objects that don't contribute always use the probes.");
+    r.field("Generate Lightmap UVs", generate_lightmap_uvs);
+    r.help("On: lightmap UVs are made at bake time (Smart UV Project + Pack Islands). Off: the mesh's own UVs\n"
+           "are used, so they must not overlap.");
+  }
+}
+
+int default_lighting_update_mode() {
+  const char *e = std::getenv("BLENDITY_LIGHTING_UPDATES");
+  return e && (std::string(e) == "automatic" || std::string(e) == "auto") ? 1 : 0;
+}
+
+void LightingSettings::reflect(Reflector &r) {
+  static const char *upd[] = {"Manual", "Automatic"};
+  r.enumeration("Lighting Updates", update_mode, upd, 2);
+  r.help("Manual: lighting stays as last computed while you move things (direct light and shadows stay live);\n"
+         "Update Lighting (Ctrl+Shift+L) refreshes Realtime GI, Generate Lighting bakes. Automatic: Realtime GI\n"
+         "follows every change and Auto Generate re-bakes.");
+  r.field("Preview Lighting", preview);
+  r.help("A rough progressive bake (a quarter of the resolution, 16 then 64 then 256 samples) half a second after\n"
+         "changes stop, shown instead of the bake and never saved (like Bakery's Realtime Preview).");
+  r.field("Baked Global Illumination", baked_gi);
+  r.help("Generate Lighting bakes the lights set to Baked or Mixed, the sky and their bounces into lightmaps for\n"
+         "objects marked Contribute GI (Unity: Lighting > Mixed Lighting > Baked Global Illumination).");
+  static const char *modes[] = {"Baked Indirect"};
+  r.enumeration("Lighting Mode", lighting_mode, modes, 1);
+  r.help("Baked Indirect: Mixed lights keep their realtime light and shadows; only their bounced light is baked.");
+  r.field("Lightmap Resolution", texels_per_unit, 0.5f, 0.01f, 1000.0f);
+  r.help("Texels per unit (metre) of surface (Unity's default is 40).");
+  r.field("Max Lightmap Size", max_size, 16, 4096);
+  r.field("Lightmap Padding", padding, 0, 32);
+  r.help("Texels kept between charts so they don't bleed into each other.");
+  r.field("Direct Samples", direct_samples, 1, 4096);
+  r.help("Shadow rays per texel for each Baked area light.");
+  r.field("Indirect Samples", indirect_samples, 1, 65536);
+  r.help("Rays per texel gathering bounced light and the sky. More is smoother and slower.");
+  r.field("Bounces", bounces, 0, 16);
+  r.field("Denoise", denoise);
+  r.field("Indirect Intensity", indirect_intensity, 0.01f, 0.0f, 100.0f);
+  r.field("Auto Generate", auto_generate);
+  r.help("Re-bake by itself a second after changes stop (Unity: Auto Generate). Realtime GI covers the time in between.");
+  r.field("Realtime GI", realtime_gi);
+  r.help("Voxel-based global illumination (Thiedemann et al., I3D 2011): one bounce of the sun's light and the sky's\n"
+         "occlusion, live in the rasterized views. Objects without a valid lightmap use it, and lightmapped ones get\n"
+         "the bounce of lights the bake doesn't hold. Nothing to bake: moving lights and objects updates it.");
+  if (realtime_gi || r.all_fields()) {
+    static const char *res[] = {"64", "128", "256"};
+    r.enumeration("Voxel Resolution", gi_resolution, res, 3);
+    r.help("Voxel columns per side over the scene (128 deep). More is finer and slower.");
+    r.field("GI Radius", gi_radius, 0.05f, 0.01f, 1000.0f);
+    r.help("How far bounced light and sky occlusion reach, in metres.");
+    r.field("GI Rays", gi_rays, 1, 32);
+    r.field("GI Intensity", gi_intensity, 0.01f, 0.0f, 10.0f);
+    r.field("Sky Occlusion", gi_sky_occlusion);
+    r.field("Bounce", gi_bounce);
+    static const char *ds[] = {"Half", "Quarter"};
+    r.enumeration("GI Resolution", gi_downsample, ds, 2);
+    r.help("The screen resolution the rays are traced at, blurred and upsampled to every pixel.");
+    r.field("RSM Resolution", gi_rsm_resolution, 32, 2048);
+    r.help("The sun's reflective shadow map: where its light lands, for the bounce.");
+    r.field("Specular Occlusion", gi_specular_occlusion, 0.01f, 0.0f, 1.0f);
+    static const char *dev[] = {"Auto", "CPU", "GPU"};
+    r.enumeration("GI Device", gi_device, dev, 3);
+    r.help("Where realtime lightmaps and live probes gather: Auto uses the GPU (Vulkan compute) when there is one,\n"
+           "5 to 8 times faster, and a whole pass fits in a frame; the CPU is the fallback and the reference.");
+    r.field("Realtime Resolution", realtime_resolution, 0.1f, 0.0f, 100.0f);
+    r.help("Realtime lightmaps (Unity: Realtime Resolution): texels per metre on Contribute GI objects, lit by the voxel GI\n"
+           "and read like a baked map, so moving the camera traces nothing and the look doesn't change with zoom.\n"
+           "0: off (every object traced per pixel, at the GI Resolution).");
+  }
+  r.field("Probe Min Spacing", probe_min_spacing, 0.05f, 0.05f, 100.0f);
+  r.help("Probe volumes (a Probe Volume component): metres between probes near geometry. The volume gets coarser\n"
+         "in open space, up to the max spacing (Unity: Adaptive Probe Volumes' Min / Max Probe Spacing).");
+  r.field("Probe Max Spacing", probe_max_spacing, 0.1f, 0.1f, 1000.0f);
+  r.field("Probe Normal Bias", probe_normal_bias, 0.01f, 0.0f, 10.0f);
+  r.help("Metres a shaded point moves along its normal before reading the probes, so probes behind the surface don't leak.");
+  r.field("Probe View Bias", probe_view_bias, 0.01f, 0.0f, 10.0f);
+  r.field("Probe Leak Reduction", probe_leak_reduction);
+  r.help("Probes behind the surface being shaded (the other side of a thin wall) count for almost nothing\n"
+         "(Unity APV: Leak Reduction Mode).");
+  r.field("Show Probes", show_probes);
+}
+
+void ProbeVolume::reflect(Reflector &r) {
+  r.field("Global", global);
+  r.help("On: around everything that contributes to GI. Off: a box of the size below, centred on this object.");
+  if (!global || r.all_fields()) r.field("Size", size);
 }
 
 void EnvironmentSettings::reflect(Reflector &r) {
@@ -157,7 +260,7 @@ void RenderSettings::reflect(Reflector &r) {
     }
     r.samples("Samples", samples, 1, 65536);
     r.help("Samples per pixel for the final render. Noise falls as 1/sqrt(samples): each doubling cuts it by ~30%.\nBlender: Sampling > Render > Max Samples.");
-    r.samples("Viewport Samples", viewport_samples, 1, 65536);
+    if (r.all_fields()) r.samples("Viewport Samples", viewport_samples, 1, 65536);  // kept in files; the Scene view no longer path traces
     r.field("Max Bounces", max_bounces, 0, 64);
     r.field("Clamp Indirect", clamp_indirect, 0.1f, 0.0f, 1000.0f);
     r.help("Limits bright indirect samples to remove fireflies (0 = off). Blender: Light Paths > Clamping.");
@@ -228,6 +331,10 @@ void Light::reflect(Reflector &r) {
   }
   r.field("Intensity", intensity, 0.01f, 0.0f, 8.0f);
   if (r.all_fields() || type != 0) r.field("Range", range, 0.05f, 0.01f, 1000.0f);
+  static const char *light_modes[] = {"Realtime", "Mixed", "Baked"};
+  r.enumeration("Mode", mode, light_modes, 3);
+  r.help("Unity's Light Mode. Realtime: lit every frame, not in baked lighting. Mixed: realtime light and shadows,\n"
+         "its bounced light baked. Baked: all of its light in the lightmaps (none on lightmapped objects in realtime).");
 }
 
 Vec3 Light::final_color() const { return use_temperature ? Vec3(color.x, color.y, color.z) * kelvin_to_rgb(temperature) : color; }
@@ -1219,6 +1326,23 @@ void GameObject::remove_component(Component *c) {
     }
 }
 
+uint64_t GameObject::evaluated_key(int kind) const {
+  kind = std::max(0, std::min(kind, 2));
+  auto *mf = get<MeshFilter>();
+  if (!mf || !mf->mesh) return 0;
+  uint64_t key = 1469598103934665603ull;
+  auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  mix((uint64_t)(uintptr_t)mf->mesh.get());
+  mix(mf->mesh->version);
+  mix((uint64_t)kind);
+  for (auto &c : components)
+    if (c->is_modifier() && (kind == 1 ? c->show_in_render : c->enabled && (kind == 0 || c->show_in_editmode))) {
+      mix(hash_component(*c));
+      mix(c->modifier_dependency_hash());
+    }
+  return key;
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = get<MeshFilter>();
@@ -1262,12 +1386,19 @@ AABB GameObject::world_bounds() const {
 /* Scene                                                                  */
 /* ===================================================================== */
 
+Scene::Scene() {
+  static std::atomic<uint64_t> next{1};
+  serial = next.fetch_add(1, std::memory_order_relaxed);
+}
+
 void Scene::move_from(Scene &o) {
+  serial = o.serial;
   name = std::move(o.name);
   path = std::move(o.path);
   compress = o.compress;
   environment = std::move(o.environment);
   render = o.render;
+  lighting = o.lighting;
   guides = std::move(o.guides);
   roots = std::move(o.roots);
   objects_ = std::move(o.objects_);
@@ -1392,6 +1523,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->compress = compress;
   s->environment = environment;
   s->render = render;
+  s->lighting = lighting;
   s->guides = guides;
   s->objects_.reserve(objects_.size());
   std::unordered_map<const Material *, MaterialPtr> mat_copy;

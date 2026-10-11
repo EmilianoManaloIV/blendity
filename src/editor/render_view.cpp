@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
 #include <cstring>
 #include <ctime>
 
@@ -30,6 +31,9 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   std::vector<DrawItem> items;
+  /* (Of what is shown: the preview's own staleness while there is one.) */
+  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
+                   (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -55,6 +59,9 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     it.receive_shadows = mr->receive_shadows;
     it.id = (uint32_t)g.id;
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
+    if (!editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
+    it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
+    it.realtime_lm = !editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_);
     items.push_back(it);
   });
   return items;
@@ -70,6 +77,7 @@ RenderLight to_render_light(const GameObject &g, const Light &l) {
   rl.position = g.world_position();
   rl.color = l.final_color();
   rl.intensity = l.intensity;
+  rl.bake_mode = std::max(0, std::min(2, l.mode));
   rl.range = l.range;
   const float outer = std::max(1.0f, std::min(179.0f, l.spot_angle)) * 0.5f;
   const float inner = std::min(outer, std::max(0.0f, l.inner_spot_angle) * 0.5f);
@@ -105,7 +113,13 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
     if (!l || !l->enabled) return;
-    env.lights.push_back(to_render_light(g, *l));
+    RenderLight rl = to_render_light(g, *l);
+    /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
+     * Realtime since must not shine twice, and one added since must not vanish. */
+    const LightingData &ld = shown_lighting();
+    auto baked = ld.light_modes.find(g.id);
+    rl.bake_mode = baked != ld.light_modes.end() && scene_->lighting.baked_gi ? baked->second : 0;
+    env.lights.push_back(rl);
   });
   update_environment();
   env.environment = &env_;
@@ -155,28 +169,46 @@ void Editor::update_environment() {
 
 uint64_t Editor::scene_render_hash() {
   uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) { h ^= ((const uint8_t *)p)[i]; h *= 1099511628211ull; }
+  auto mix = [&](const void *p, size_t n) {  // 8 bytes a step: it runs for every view, every frame
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
   };
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
     auto *l = g.get<Light>();
-    if (!mr && !l) return;
+    auto *pv = g.get<ProbeVolume>();
+    /* The hierarchy: a selected object's children get an outline of their own. */
+    const uint64_t parent = g.parent ? g.parent->id : 0;
+    mix(&parent, 8);
+    if (!mr && !l && !pv) return;
     mix(&g.id, 8);
     mix(g.world_matrix().m, sizeof(float) * 16);
+    if (mr) {  // the flags the views draw by (Show in Renders, shadows, wireframe, Display As)
+      const uint64_t f = (uint64_t)mr->enabled | (uint64_t)mr->show_wireframe << 1 | (uint64_t)mr->cast_shadows << 2 |
+                         (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
+                         (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41;
+      mix(&f, 8);
+    }
     if (mr && mr->enabled) {
-      const Mesh *m = g.evaluated_mesh(1);  // renders: Show in Renders
-      mix(&m, sizeof(m));
-      const Mesh *mv = g.evaluated_mesh(0);  // the Rendered viewport: the viewport toggles
-      mix(&mv, sizeof(mv));
-      if (mv) mix(&mv->version, 8);
-      if (m) mix(&m->version, 8);
+      /* What each kind of evaluated mesh is made from, without evaluating it (a modifier stack would
+       * run every frame): renders (Show in Renders), the viewport, and Edit Mode's cage. */
+      const uint64_t k[3] = {g.evaluated_key(0), g.evaluated_key(1), g.evaluated_key(2)};
+      mix(k, sizeof(k));
       for (auto &mp : mr->materials) {
         const void *p = mp.get();
         mix(&p, sizeof(p));
         if (mp) mix(&mp->version, 8);
       }
+    }
+    if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
+      const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
+      mix(&ph, 8);
     }
     if (l && l->enabled) {
       /* Every field of the light (colour temperature, spot angles, area size, shadows...):
@@ -196,6 +228,11 @@ uint64_t Editor::scene_render_hash() {
   mix(&edit_mode_, 1);
   mix(&edit_obj_, 8);
   mix(&scene_lighting_, 1);
+  mix(&scene_->serial, 8);
+  mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
+  mix(&scene_->lighting.baked_gi, 1);
+  mix(&probe_live_gen_, 8);  // live probes changed
+  for (const VoxelGIState &st : vgi_) mix(&st.rtlm.generation, 8);  // realtime lightmaps published
   return h;
 }
 
@@ -218,16 +255,26 @@ bool Editor::camera_for_render(Mat4 &view, Mat4 &proj, float aspect) {
 /* Rasterized (EEVEE-like)                                                */
 /* ===================================================================== */
 
-void Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env) {
+const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env) {
   int li = -1;
   for (size_t i = 0; i < env.lights.size(); i++)
     if (env.lights[i].type == RenderLight::Directional) { li = (int)i; break; }
-  if (li < 0) {
-    shadow_.size = 0;
-    return;
-  }
+  if (li < 0) return nullptr;
   std::vector<DrawItem> casters;
   AABB bounds;
+  /* What the map depends on: each caster's triangles (the render mesh's serial: a new one whenever it is
+   * rebuilt) and placement, the light's direction and the resolution. */
+  uint64_t key = 1469598103934665603ull;
+  bool cacheable = true;
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      key = (key ^ v) * 1099511628211ull;
+      key ^= key >> 29;
+    }
+  };
   for (const DrawItem &it : items) {
     bool casts = false;
     if (!it.materials || it.materials->empty()) casts = true;
@@ -237,8 +284,38 @@ void Editor::update_shadow_map(const std::vector<DrawItem> &items, const Lightin
     if (!casts) continue;
     casters.push_back(it);
     bounds.add(it.mesh->bounds.transformed(it.model));
+    if (it.mesh->serial == 0) cacheable = false;
+    mix(&it.mesh->serial, 8);
+    mix(it.model.m, sizeof(float) * 16);
+    if (it.materials)  // see-through surfaces cast no shadow: a material's surface type matters
+      for (const MaterialPtr &m : *it.materials) {
+        const uint64_t mv[2] = {(uint64_t)(uintptr_t)m.get(), m ? m->version : 0};
+        mix(mv, sizeof(mv));
+      }
   }
-  render_shadow_map(shadow_, casters, env.lights[li].direction, bounds, std::max(256, scene_->render.shadow_resolution));
+  const int res = std::max(256, scene_->render.shadow_resolution);
+  const Vec3 dir = env.lights[li].direction;
+  mix(&dir, sizeof(Vec3));
+  mix(&res, sizeof(int));
+  const uint64_t n = casters.size();
+  mix(&n, 8);
+  if (key == 0) key = 1;  // 0 marks an empty entry
+  shadow_clock_++;
+  if (cacheable)
+    for (ShadowEntry &e : shadow_cache_)
+      if (e.key == key) {
+        e.used = shadow_clock_;
+        return e.map.valid() ? &e.map : nullptr;
+      }
+  /* Render into the least recently used entry. */
+  ShadowEntry &e = shadow_cache_[0].used <= shadow_cache_[1].used ? shadow_cache_[0] : shadow_cache_[1];
+  ScopedTimer t;
+  render_shadow_map(e.map, casters, dir, bounds, res);
+  prof_.shadow_renders++;
+  prof_.ms_shadow += t.ms();
+  e.key = cacheable ? key : 0;
+  e.used = shadow_clock_;
+  return e.map.valid() ? &e.map : nullptr;
 }
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
@@ -247,12 +324,61 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   std::vector<DrawItem> items = collect_items(game, true);
   if (scene_lights && scene_->render.shadows) {
-    update_shadow_map(items, env);
-    if (shadow_.valid()) {
+    if (const ShadowMap *sm = update_shadow_map(items, env)) {
       for (size_t i = 0; i < env.lights.size(); i++)
         if (env.lights[i].type == RenderLight::Directional) { env.shadow_light = (int)i; break; }
-      env.shadow = &shadow_;
+      env.shadow = sm;
     }
+  }
+  /* Realtime GI traces only what the bake doesn't hold (task 0017): with a current bake of every light
+   * that bounces, the views cost what Realtime GI off costs. */
+  const bool live_gi = scene_lights && live_gi_needed();
+  if (live_gi) env.gi = update_voxel_gi(items, env, game);
+  /* Manual (task 0020): nothing traced, but the last realtime lightmaps and live probes stay up. */
+  const bool frozen = scene_lights && lighting_frozen();
+  bool bounce_not_baked = env.gi && env.gi->bounce_not_baked;
+  if (frozen && !env.gi) {
+    /* As update_voxel_gi decides it: the first directional light's bounce isn't in the shown bake. */
+    bounce_not_baked = true;
+    for (const RenderLight &l : env.lights)
+      if (l.type == RenderLight::Directional) {
+        if (!shown_lighting().empty() && scene_->lighting.baked_gi) bounce_not_baked = l.bake_mode == 0;
+        break;
+      }
+    env.rt_bounce_not_baked = bounce_not_baked;
+    const float so = scene_->lighting.gi_specular_occlusion;
+    env.rt_specular_occlusion = finite_bits(so) ? std::max(0.0f, std::min(1.0f, so)) : 1.0f;
+  }
+  if (env.gi || frozen) {
+    /* Realtime lightmaps where a pass has been published: read, not traced, and not probe-lit (Receive GI =
+     * Lightmaps, as Unity's realtime GI). */
+    const RealtimeLightmaps &rl = vgi_[game ? 1 : 0].rtlm;
+    if (!rl.shown.empty())
+      for (DrawItem &it : items) {
+        if (!it.realtime_lm || !it.mesh) continue;
+        auto e = rl.shown.entries.find(it.id);
+        if (e == rl.shown.entries.end() || e->second.page < 0 || (size_t)e->second.page >= rl.shown.bounce.size()) continue;
+        if (e->second.hash != scene_ident_) continue;  // published for the scene before this one (undo keeps the id)
+        if (e->second.tri_uv.size() != it.mesh->tri_count() * 3) continue;  // a different mesh since: traced until the next pass
+        it.rt_bounce = &rl.shown.bounce[(size_t)e->second.page];
+        it.rt_sky = &rl.shown.sky[(size_t)e->second.page];
+        it.rt_uv = &e->second.tri_uv;
+        it.use_probes = false;
+      }
+  }
+  const LightingSettings &pls = scene_->lighting;
+  const bool baked_probes = !probes_.empty() && probes_.scene_key != 0 && pls.baked_gi;
+  const bool live_probes = !probes_.empty() && (live_gi || frozen) && probe_live_ready_;
+  if (scene_lights && (baked_probes || live_probes)) {
+    const LightingSettings &ls = pls;
+    probe_frame_.data = &probes_;
+    probe_frame_.normal_bias = finite_bits(ls.probe_normal_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_normal_bias)) : 0.25f;
+    probe_frame_.view_bias = finite_bits(ls.probe_view_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_view_bias)) : 0.1f;
+    probe_frame_.leak_reduction = ls.probe_leak_reduction;
+    probe_frame_.quad_reuse = probe_quad_reuse_;
+    /* The live copy where the bake doesn't cover it: no bake, a stale one, or a sun it doesn't hold. */
+    probe_frame_.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
+    env.probes = &probe_frame_;
   }
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
@@ -372,97 +498,6 @@ static void build_pt(PathTracer &pt, Editor &, const std::vector<DrawItem> &item
   pt.build(objs, env.lights, world);
 }
 
-void Editor::render_pathtraced_view(const Recti &view) {
-  /* Depth / id pre-pass so picking, outlines, grid and gizmos keep working. */
-  float aspect = view.w / (float)std::max(1, view.h);
-  Mat4 v = cam_.view(), p = cam_.proj(aspect);
-  std::vector<DrawItem> items = collect_items(false, true);
-  {
-    RasterOptions opt = raster_opt_;
-    opt.shade = ShadeMode::DepthOnly;
-    LightingEnv none;
-    scene_r3d_.begin(&scene_rt_, v, p, none, opt);
-    scene_r3d_.clear(0xFF000000);
-    for (const DrawItem &it : items) scene_r3d_.add(it);
-    scene_r3d_.flush();
-  }
-  /* Half resolution on the CPU; GPUs are fast enough for the full view. */
-  const int div = scene_->render.device == 1 && gpu::available() && !enabled_gpus().empty() ? 1 : 2;
-  int pw = std::max(1, view.w / div), ph = std::max(1, view.h / div);
-  uint64_t hash = scene_render_hash();
-  bool rebuilt = false;
-  const RenderSettings &rs = scene_->render;
-  const int target = std::max(1, rs.viewport_samples);
-  PTSettings ps = make_pt_settings(rs);
-  /* While samples accumulate the viewport uses the fast A-Trous filter; the
-   * slower OpenImageDenoise runs once when the view converges (~70 ms at
-   * half resolution, too slow for every frame). */
-  ps.use_oidn = ps.use_oidn && vp_pt_.samples() + 1 >= target;
-  vp_pt_.set_settings(ps);
-  const bool want_embree = rs.use_embree && PathTracer::embree_available();
-  uint64_t device_key = (uint64_t)rs.device * 7 + (rs.gpu_with_cpu ? 3 : 0) + (rs.hardware_rt ? 11 : 0);
-  for (int g : ps.gpus) device_key = device_key * 131 + (uint64_t)g + 1;
-  if (hash != vp_pt_hash_ || (std::strcmp(vp_pt_.ray_backend(), "Embree") == 0) != want_embree || vp_pt_guiding_ != rs.path_guiding ||
-      device_key != vp_pt_device_key_) {
-    vp_pt_guiding_ = rs.path_guiding;
-    vp_pt_device_key_ = device_key;
-    LightingEnv env = make_lighting(cam_.position(), scene_lighting_);
-    Environment world = env_;
-    if (!scene_lighting_) {
-      world = Environment();
-      world.sky = world.equator = world.ground = Vec3(0.35f);
-    }
-    build_pt(vp_pt_, *this, items, env, world);
-    vp_pt_hash_ = hash;
-    rebuilt = true;
-  }
-  bool cam_changed = std::memcmp(v.m, vp_pt_view_.m, sizeof(v.m)) || std::memcmp(p.m, vp_pt_proj_.m, sizeof(p.m));
-  if (rebuilt || cam_changed || vp_pt_.width() != pw || vp_pt_.height() != ph) {
-    vp_pt_.set_camera(v, p, pw, ph);
-    vp_pt_view_ = v;
-    vp_pt_proj_ = p;
-    vp_pt_shown_ = 0;
-  }
-  vp_pt_.render(18.0, target);
-  if (vp_pt_img_.width != pw || vp_pt_img_.height != ph) {
-    vp_pt_img_.resize(pw, ph);
-    vp_pt_shown_ = 0;
-  }
-  /* Resolve (denoise + tone map) only when something it depends on changed:
-   * once converged, the viewport costs just the upscale below. */
-  uint64_t key = 1469598103934665603ull;
-  for (uint64_t part : {(uint64_t)vp_pt_.samples(), (uint64_t)rs.denoise, (uint64_t)ps.use_oidn, (uint64_t)rs.view_transform,
-                        (uint64_t)std::llround(rs.exposure * 1000.0f)})
-    key = (key ^ part) * 1099511628211ull;
-  if (key != vp_pt_shown_) {
-    vp_pt_.resolve(vp_pt_img_.pixels.data(), pw, rs.denoise);
-    vp_pt_shown_ = key;
-  }
-  /* Upscale into the viewport (bilinear), rows in parallel. */
-  JobSystem::global().parallel_for(view.h, 32, [&](int64_t yb, int64_t ye) {
-    for (int64_t y = yb; y < ye; y++) {
-      uint32_t *row = scene_rt_.color + (size_t)y * scene_rt_.stride;
-      float fy = std::min((float)ph - 1.001f, std::max(0.0f, (y + 0.5f) / div - 0.5f));
-      int y0 = (int)fy;
-      float ty = fy - y0;
-      const uint32_t *r0 = vp_pt_img_.row(y0), *r1 = vp_pt_img_.row(std::min(ph - 1, y0 + 1));
-      for (int x = 0; x < view.w; x++) {
-        float fx = std::min((float)pw - 1.001f, std::max(0.0f, (x + 0.5f) / div - 0.5f));
-        int x0 = (int)fx;
-        float tx = fx - x0;
-        int x1 = std::min(pw - 1, x0 + 1);
-        auto ch = [&](int s) {
-          float a = ((r0[x0] >> s) & 255) * (1 - tx) + ((r0[x1] >> s) & 255) * tx;
-          float b = ((r1[x0] >> s) & 255) * (1 - tx) + ((r1[x1] >> s) & 255) * tx;
-          return (uint32_t)(a * (1 - ty) + b * ty + 0.5f);
-        };
-        row[x] = 0xFF000000u | (ch(16) << 16) | (ch(8) << 8) | ch(0);
-      }
-    }
-  });
-  scene_stats_ = scene_r3d_.stats();
-}
-
 /* ===================================================================== */
 /* Final render (F12)                                                     */
 /* ===================================================================== */
@@ -549,19 +584,21 @@ void Editor::start_final_render(bool preview, bool open_window) {
     rt.attach(big, {0, 0, big.width, big.height});
     Renderer3D r3d;
     render_deferred(r3d, rt, v, p, eye, true, true, cam);
-    for (int y = 0; y < h; y++)
-      for (int x = 0; x < w; x++) {
-        uint32_t r = 0, g = 0, b = 0;
-        for (int sy = 0; sy < aa; sy++)
-          for (int sx = 0; sx < aa; sx++) {
-            uint32_t c = big.pixels[(size_t)(y * aa + sy) * big.width + x * aa + sx];
-            r += (c >> 16) & 255;
-            g += (c >> 8) & 255;
-            b += c & 255;
-          }
-        int n = aa * aa;
-        render_img_.pixels[(size_t)y * w + x] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
-      }
+    JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < w; x++) {
+          uint32_t r = 0, g = 0, b = 0;
+          for (int sy = 0; sy < aa; sy++)
+            for (int sx = 0; sx < aa; sx++) {
+              uint32_t c = big.pixels[(size_t)(y * aa + sy) * big.width + x * aa + sx];
+              r += (c >> 16) & 255;
+              g += (c >> 8) & 255;
+              b += c & 255;
+            }
+          int n = aa * aa;
+          render_img_.pixels[(size_t)y * w + x] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+        }
+    });
     render_time_ = now_seconds() - render_start_;
     rendering_ = false;
     render_status_ = strprintf("%s %dx%d, %dx SSAA, %.0f ms (%zu tris)", preview ? "Preview (rasterized)" : "Rasterized", w, h, aa,
@@ -725,7 +762,282 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam) {
   }
   h ^= hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }) * 31;
   h ^= hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) * 131;
+  h ^= hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }) * 1031;  // baked and realtime GI settings
   return h;
+}
+
+/* ------------------------------------------------------- voxel GI (task 0013) */
+
+/* The voxel grid and the sun's reflective shadow map for these items, each rebuilt only when what it
+ * is drawn from changed: an object's voxels when its mesh or place did (the paper's static / dynamic
+ * split), the RSM when the casters, their materials or the sun did. */
+const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, const LightingEnv &env, bool game) {
+  const LightingSettings &ls = scene_->lighting;
+  vgi_updates_++;
+  vgi_last_ = game ? 1 : 0;
+  VoxelGIState &vgi = vgi_[vgi_last_];
+  auto mix = [](uint64_t &h, const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
+  };
+  /* Occluders: what casts a shadow (as the shadow map's casters), but not see-through surfaces. */
+  std::vector<const DrawItem *> occ;
+  AABB bounds;
+  for (const DrawItem &it : items) {
+    bool solid = !it.materials || it.materials->empty();
+    if (it.materials)
+      for (const MaterialPtr &m : *it.materials)
+        if (!m || ((m->opaque() || m->surface == (int)MaterialSurface::Cutout) && m->cast_shadows)) solid = true;
+    if (!solid || !it.mesh) continue;
+    occ.push_back(&it);
+    bounds.add(it.mesh->bounds.transformed(it.model));
+  }
+  const int n = ls.gi_resolution <= 0 ? 64 : ls.gi_resolution == 1 ? 128 : 256;
+  VoxelGrid fit;
+  voxel_grid_fit(fit, bounds, n);
+  if (!fit.valid()) return nullptr;
+  /* Keep the grid while the scene still fits it at the same voxel size (dragging the outermost object
+   * would otherwise move the grid every 8 voxels and re-voxelize everything). */
+  const bool keep = vgi.grid.valid() && vgi.grid.n == fit.n && vgi.grid.voxel == fit.voxel && bounds.min.x >= vgi.grid.origin.x &&
+                    bounds.min.y >= vgi.grid.origin.y && bounds.min.z >= vgi.grid.origin.z &&
+                    bounds.max.x <= vgi.grid.origin.x + fit.n * fit.voxel && bounds.max.y <= vgi.grid.origin.y + VoxelGrid::kDepth * fit.voxel &&
+                    bounds.max.z <= vgi.grid.origin.z + fit.n * fit.voxel;
+  if (!keep && fit.key != vgi.grid.key) {  // a new grid: every object's voxels are re-made
+    vgi.grid = std::move(fit);
+    vgi.objects.clear();
+    vgi.assembled = 0;
+  }
+  uint64_t assembled = vgi.grid.key;
+  std::vector<const std::vector<VoxelSpan> *> spans;
+  for (const DrawItem *it : occ) {
+    uint64_t key = vgi.grid.key;
+    mix(key, &it->mesh->serial, 8);
+    mix(key, it->model.m, sizeof(it->model.m));
+    VoxelObject &o = vgi.objects[it->id];
+    if (o.key != key || it->mesh->serial == 0) {
+      voxelize_mesh(vgi.grid, *it->mesh, it->model, o.spans);
+      o.key = key;
+      vgi.voxelized++;
+    }
+    mix(assembled, &key, 8);
+    spans.push_back(&o.spans);
+  }
+  if (vgi.objects.size() > occ.size() * 2 + 16) {  // forget objects that are gone
+    std::unordered_set<uint64_t> live;
+    for (const DrawItem *it : occ) live.insert(it->id);
+    for (auto it = vgi.objects.begin(); it != vgi.objects.end();)
+      it = live.count(it->first) ? std::next(it) : vgi.objects.erase(it);
+  }
+  if (assembled != vgi.assembled) {
+    voxel_grid_build(vgi.grid, spans);
+    vgi.assembled = assembled;
+    vgi.assemblies++;
+  }
+  /* The RSM: the first directional light, as the shadow map. */
+  const RenderLight *sun = nullptr;
+  for (const RenderLight &l : env.lights)
+    if (l.type == RenderLight::Directional) {
+      sun = &l;
+      break;
+    }
+  const int rsm_res = std::max(32, std::min(2048, ls.gi_rsm_resolution));
+  if (ls.gi_bounce && sun) {
+    uint64_t key = 1469598103934665603ull;
+    for (const DrawItem *it : occ) {
+      mix(key, &it->mesh->serial, 8);
+      mix(key, it->model.m, sizeof(it->model.m));
+      if (it->materials)
+        for (const MaterialPtr &m : *it->materials) {
+          const uint64_t mv[2] = {(uint64_t)(uintptr_t)m.get(), m ? m->version : 0};
+          mix(key, mv, sizeof(mv));
+        }
+    }
+    mix(key, &sun->direction, sizeof(Vec3));
+    mix(key, &sun->color, sizeof(Vec3));
+    mix(key, &sun->intensity, sizeof(float));
+    mix(key, &rsm_res, sizeof(int));
+    if (key != vgi.rsm_key) {
+      std::vector<DrawItem> casters;
+      for (const DrawItem *it : occ) casters.push_back(*it);
+      AABB b;
+      for (const DrawItem &c : casters) b.add(c.mesh->bounds.transformed(c.model));
+      render_rsm(vgi.rsm, casters, *sun, b, rsm_res);
+      vgi.rsm_key = key;
+      vgi.rsm_renders++;
+    }
+  }
+  else {
+    vgi.rsm = Rsm{};
+    vgi.rsm_key = 0;
+  }
+  GiParams p;
+  p.rays = ls.gi_rays;
+  p.radius = ls.gi_radius;
+  p.intensity = ls.gi_intensity;
+  p.sky_occlusion = ls.gi_sky_occlusion;
+  p.bounce = ls.gi_bounce;
+  p.downsample = ls.gi_downsample == 0 ? 2 : 4;
+  p.specular_occlusion = ls.gi_specular_occlusion;
+  vgi.frame.params = gi_params_sanitized(p);
+  vgi.frame.grid = &vgi.grid;
+  vgi.frame.rsm = vgi.rsm.valid() ? &vgi.rsm : nullptr;
+  /* Lightmapped surfaces add the bounce of a sun the bake doesn't hold (Realtime, or added since). */
+  vgi.frame.bounce_not_baked = true;
+  if (sun && !shown_lighting().empty() && ls.baked_gi) vgi.frame.bounce_not_baked = sun->bake_mode == 0;
+  /* Realtime lightmaps (task 0016): laid out again when a Contribute GI object's mesh or placement or the
+   * resolution changes (unwrapped UVs are kept per object); update_realtime_lightmaps() fills them. */
+  const float rres = finite_bits(ls.realtime_resolution) ? std::max(0.0f, std::min(100.0f, ls.realtime_resolution)) : 2.0f;
+  if (rres > 0.0f) {
+    uint64_t lkey = 1469598103934665603ull;
+    mix(lkey, &rres, sizeof(float));
+    mix(lkey, &scene_ident_, 8);  // another scene's objects can share ids
+    for (const DrawItem &it : items) {
+      if (!it.realtime_lm || !it.mesh) continue;
+      mix(lkey, &it.id, sizeof(it.id));
+      mix(lkey, &it.mesh->serial, 8);
+      mix(lkey, it.model.m, sizeof(it.model.m));
+    }
+    if (lkey != vgi.rtlm.layout_key) {
+      std::vector<BakeObject> objs;
+      for (const DrawItem &it : items) {
+        if (!it.realtime_lm || !it.mesh) continue;
+        GameObject *g = scene_->find(it.id);
+        const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+        const Mesh *m = g ? g->evaluated_mesh(game ? 1 : 0) : nullptr;
+        if (!mr || !m || (&m->render_mesh() != it.mesh && &m->render_mesh_tangents() != it.mesh)) continue;
+        BakeObject o;
+        o.id = it.id;
+        o.mesh = std::shared_ptr<const Mesh>(std::shared_ptr<const Mesh>(), m);  // not owned: laid out now
+        o.model = it.model;
+        o.scale = mr->scale_in_lightmap;
+        o.generate_uvs = mr->generate_lightmap_uvs;
+        o.hash = scene_ident_;  // Entry::hash: which scene the chart belongs to
+        objs.push_back(std::move(o));
+      }
+      realtime_lightmap_layout(vgi.rtlm, objs, rres, lkey);
+    }
+  }
+  else if (vgi.rtlm.layout_key != 0) {
+    const uint64_t gen = vgi.rtlm.generation;
+    vgi.rtlm = RealtimeLightmaps{};
+    vgi.rtlm.generation = gen + 1;
+  }
+  return &vgi.frame;
+}
+
+/* ------------------------------------------------------- view render cache */
+
+static std::atomic<uint64_t> g_cache_mismatches{0};
+uint64_t Editor::render_cache_mismatches_all() { return g_cache_mismatches.load(); }
+void Editor::note_render_cache_mismatch() { g_cache_mismatches++; }
+
+/* Everything a rasterized view draws from the scene (ADR 0009): scene_render_hash() (geometry,
+ * transforms, the hierarchy, MeshRenderer flags, materials, lights, the world) and the render and
+ * world settings. Computed for each view that asks (not once per frame: a panel drawn
+ * between two views can change the scene). */
+uint64_t Editor::frame_scene_hash() {
+  uint64_t h = scene_render_hash();
+  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
+  mix(hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }));
+  mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
+  mix(hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }));  // baked and realtime GI settings
+  return h;
+}
+
+/* What the Scene view's 3D layer depends on besides the scene: its camera and size, the shading and
+ * overlay toggles, the selection (outlines, Edit Mode highlights) and the UI scale (line widths). */
+uint64_t Editor::scene_view_key(const Recti &view) {
+  uint64_t h = frame_scene_hash();
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
+  };
+  const float aspect = view.w / (float)std::max(1, view.h);
+  const Mat4 v = cam_.view(), p = cam_.proj(aspect);
+  mix(&view, sizeof(view));
+  mix(v.m, sizeof(v.m));
+  mix(p.m, sizeof(p.m));
+  const uint64_t flags = (uint64_t)shading_ | (uint64_t)scene_lighting_ << 8 | (uint64_t)scene_filters_ << 9 | (uint64_t)show_grid_ << 10 |
+                         (uint64_t)edit_mode_ << 11 | (uint64_t)ngon_mode_ << 12 | (uint64_t)elem_ << 16;
+  mix(&flags, 8);
+  mix(&ui_.scale, sizeof(float));
+  mix(&cam_.distance, sizeof(float));  // the grid's level follows the orbit distance and pivot
+  mix(&cam_.pivot, sizeof(Vec3));
+  const uint64_t ro = raster_opt_key();
+  mix(&ro, 8);
+  mix(&active_, 8);
+  mix(&edit_obj_, 8);
+  mix(selection_.data(), selection_.size() * sizeof(uint64_t));
+  mix(vert_sel_.data(), vert_sel_.size());
+  mix(face_sel_.data(), face_sel_.size());
+  uint64_t es = edge_sel_.size();  // order-free: the set's iteration order isn't stable
+  for (uint64_t e : edge_sel_) es += (e * 0x9E3779B97F4A7C15ull) ^ (e >> 31);
+  mix(&es, 8);
+  if (scene_filters_) {  // the main camera's filters are on the view
+    GameObject *owner = nullptr;
+    if (Camera *mc = main_camera(*scene_, &owner)) {
+      const uint64_t ch = camera_render_hash(owner, mc);
+      mix(&ch, 8);
+    }
+  }
+  return h ? h : 1;
+}
+
+/* Puts a cached picture back into the framebuffer (the frame cleared it), if it is the one for `key`. */
+bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
+  if (key == 0 || c.key != key || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width ||
+      r.bottom() > fb_.height)
+    return false;
+  JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
+  });
+  return true;
+}
+
+void Editor::view_cache_store(ViewCache &c, uint64_t key, const Recti &r) {
+  c.key = 0;
+  if (key == 0 || r.w <= 0 || r.h <= 0 || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height) return;
+  if (c.img.width != r.w || c.img.height != r.h) c.img.resize(r.w, r.h);
+  JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) std::memcpy(c.img.row((int)y), fb_.row((int)(r.y + y)) + r.x, sizeof(uint32_t) * r.w);
+  });
+  c.key = key;
+}
+
+/* Verify mode: the picture just rendered against the cached one it would have reused. */
+bool Editor::view_cache_verify(const ViewCache &c, const Recti &r, const char *what) {
+  if (c.img.width != r.w || c.img.height != r.h) return true;
+  size_t diff = 0;
+  for (int y = 0; y < r.h; y++)
+    for (int x = 0; x < r.w; x++) diff += fb_.row(r.y + y)[r.x + x] != c.img.pixels[(size_t)y * c.img.width + x];
+  if (diff) {
+    prof_.cache_mismatches++;
+    g_cache_mismatches++;
+    Log::warn("Render cache: the %s would have shown a stale picture (%zu pixels differ)", what, diff);
+  }
+  return diff == 0;
+}
+
+/* The raster options (Profiler toggles: culling, threads, fast setup...), field by field. */
+uint64_t Editor::raster_opt_key() const {
+  const RasterOptions &o = raster_opt_;
+  uint64_t k = (uint64_t)o.multithreaded | (uint64_t)o.backface_culling << 1 | (uint64_t)o.frustum_culling << 2 |
+               (uint64_t)o.span_rows << 3 | (uint64_t)o.fast_setup << 4 | (uint64_t)o.affine_uv << 5 | (uint64_t)o.screen_door << 6 |
+               (uint64_t)o.shade << 8 | (uint64_t)(uint32_t)o.tile_size << 16;
+  uint32_t snap;
+  std::memcpy(&snap, &o.vertex_snap, 4);
+  k ^= (uint64_t)snap << 32;
+  return k * 0x9E3779B97F4A7C15ull;
 }
 
 uint64_t Editor::live_preview_hash() {
@@ -750,6 +1062,7 @@ void Editor::draw_camera_preview(const Recti &view) {
   cam_preview_rect_ = Recti{};
   if (!cam || !cam->enabled || (edit_mode_ && !cam_preview_lock_) || (g && g->id == pilot_cam_)) {  // piloting: the view is the preview
     cam_preview_pt_hash_ = 0;
+    cam_preview_key_ = 0;
     return;
   }
   auto &u = ui_;
@@ -768,6 +1081,7 @@ void Editor::draw_camera_preview(const Recti &view) {
   const bool traced = cam_preview_rendered_;  // Rendered is always the path tracer, whatever the final engine
   std::string status;
   if (traced) {
+    cam_preview_key_ = 0;  // the inset now holds the traced picture
     /* Rebuild when the scene, this camera or the inset size changes; then add
      * a few milliseconds of samples every frame until the preview count. */
     uint64_t hash = camera_render_hash(g, cam) ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
@@ -818,9 +1132,26 @@ void Editor::draw_camera_preview(const Recti &view) {
   }
   else {
     cam_preview_pt_hash_ = 0;
-    cam_preview_img_.resize(w, h);
-    cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
-    render_camera(cam_preview_r3d_, cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
+    /* Re-rendered only when the scene, this camera or the inset's size changes. */
+    ScopedTimer rt;
+    const uint64_t key = (camera_render_hash(g, cam) ^ raster_opt_key() ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id) | 1;
+    const bool hit = key == cam_preview_key_ && cam_preview_img_.width == w && cam_preview_img_.height == h;
+    if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else {
+      std::vector<uint32_t> before;
+      if (hit) before = cam_preview_img_.pixels;
+      cam_preview_img_.resize(w, h);
+      cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
+      render_camera(cam_preview_r3d_, cam_preview_rt_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
+      prof_.view_renders++;
+      if (hit && before != cam_preview_img_.pixels) {
+        prof_.cache_mismatches++;
+        g_cache_mismatches++;
+        Log::warn("Render cache: the Camera Preview would have shown a stale picture");
+      }
+      cam_preview_key_ = key;
+    }
+    prof_.ms_preview += rt.ms();
   }
   Recti box{view.right() - w - u.px(12), view.bottom() - h - u.px(12) - u.row_h(), w, h};
   cam_preview_rect_ = {box.x - u.px(4), box.y - u.row_h() - u.px(4), w + u.px(8), h + u.row_h() + u.px(8)};  // clicks here stay off the scene

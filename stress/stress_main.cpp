@@ -18,6 +18,8 @@
 #include "../src/render/colormanagement.h"
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
+#include "../src/render/realtime_lightmap.h"
+#include "../src/render/voxel_gi_gpu.h"
 #include "../src/core/cpu.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/raster.h"
@@ -885,6 +887,975 @@ static void test_editor(Report &rep, const Options &o) {
     rep.row({std::to_string(n), f2(ms), f1(n / ms)});
   }
   rep.note("Only visible rows are drawn, so frame cost grows with the tree walk, not with drawing.");
+  /* With meshes the views have something to draw: a frame that changes the scene renders it, an idle
+   * one only checks (hashes) the scene and reuses the pictures. */
+  rep.table({"mesh objects", "idle frame ms", "frame after a move ms"});
+  for (int n : o.quick ? std::vector<int>{1000} : std::vector<int>{1000, 10000}) {
+    Editor ed;
+    Log::echo_stdout = false;
+    ed.init_headless(1600, 900);
+    ed.command("stress " + std::to_string(n) + " Cube");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const double idle = time_ms([&] { ed.step_frame_headless(); }, 5);
+    GameObject *g = ed.scene().find_by_name("Cube");
+    int k = 0;
+    const double moved = time_ms([&] {
+      if (g) g->set_local_position({0.0f, 0.5f + 0.01f * ++k, 0.0f});
+      ed.step_frame_headless();
+    }, 5);
+    Log::echo_stdout = true;
+    rep.row({std::to_string(n), f2(idle), f2(moved)});
+  }
+}
+
+/* What a frame costs in an ordinary working scene: meshes, a sun with shadows, the Scene and Game views
+ * side by side and a selected camera (so the Camera Preview shows), for the kinds of frame an editor
+ * draws: nothing happening, the mouse moving over a panel, orbiting, moving an object, editing a
+ * material, dragging a vertex of a big mesh in Edit Mode, and playing. */
+static void test_editor_render(Report &rep, const Options &o) {
+  rep.title("Editor frames in a working scene",
+            "Headless 1600x1000, layout \"2 by 3\" (Scene + Game views), Shaded, 200 icospheres + a floor + a sun with shadows, the "
+            "Main Camera selected (Camera Preview on). Milliseconds per frame, mean of N frames.");
+  rep.table({"frame", "ms / frame", "shadow renders / frame", "view renders / frame", "Scene view 3D ms", "of it overlays ms", "Game view ms", "UI and the rest ms"});
+  Editor ed;
+  Log::echo_stdout = false;
+  ed.init_headless(1600, 1000);
+  ed.command("layout 2 by 3");
+  ed.command("stress 200 Icosphere");
+  ed.command("create Plane");
+  if (GameObject *floor = ed.selected_object()) floor->set_local_scale({4, 1, 4});
+  GameObject *big = ed.scene().create("Big Sphere");
+  big->set_local_position({0, 2, -8});
+  big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 256, 196);  // about 50k faces
+  big->add<MeshRenderer>();
+  ed.command("select Main Camera");
+  for (int i = 0; i < 4; i++) ed.step_frame_headless();
+  const int n = o.quick ? 5 : 10;
+  auto row = [&](const char *name, const std::function<void(int)> &step) {
+    step(0);  // warm-up
+    const FrameProfile before = ed.frame_profile_totals();
+    int k = 1;
+    const double ms = time_ms([&] { step(k++); }, n);
+    const FrameProfile after = ed.frame_profile_totals();
+    rep.row({name, f2(ms), f2((after.shadow_renders - before.shadow_renders) / (double)n),
+             f2((after.view_renders - before.view_renders) / (double)n), f2((after.ms_scene3d - before.ms_scene3d) / n),
+             f2((after.ms_overlays - before.ms_overlays) / n), f2((after.ms_game - before.ms_game) / n), f2((after.ms_ui - before.ms_ui) / n)});
+  };
+  using ET = platform::EventType;
+  const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+  row("idle (nothing changed)", [&](int) { ed.step_frame_headless(); });
+  row("mouse moving over the Hierarchy", [&](int k) {
+    platform::Event e;
+    e.type = ET::MouseMove;
+    e.x = hier.x + 20 + (k % 7) * 9;
+    e.y = hier.y + hier.h / 2 + (k % 5) * 3;
+    ed.step_frame_headless({e});
+  });
+  row("orbiting the Scene view", [&](int k) { ed.command(strprintf("camera %d 20 14", 30 + k * 3)); ed.step_frame_headless(); });
+  GameObject *mover = ed.scene().find_by_name("Icosphere");
+  row("moving an object", [&](int k) {
+    if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.0f});
+    ed.step_frame_headless();
+  });
+  /* Task 0020: the same drag of a static (Contribute GI) object with Realtime GI on, in each lighting mode. */
+  {
+    ed.scene().for_each([&](GameObject &g) {
+      if (auto *mr = g.get<MeshRenderer>()) mr->contribute_gi = true;
+    });
+    ed.commit_change("all static");
+    ed.command("set Lighting.RealtimeGI true");
+    ed.command("set Lighting.GIResolution 1");
+    ed.preview_like_window_for_test(true);
+    for (const char *mode : {"automatic", "manual"}) {
+      ed.command(std::string("lighting mode ") + mode);
+      ed.command("lighting update");
+      for (int i = 0; i < 40; i++) ed.step_frame_headless();
+      row(strprintf("dragging a static object, Realtime GI, %s", mode).c_str(), [&](int k) {
+        if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.3f});
+        ed.step_frame_headless();
+      });
+    }
+    ed.scene().render.device = gpu::available() ? 1 : 0;  // (the preview bakes where Generate Lighting does)
+    ed.command("lighting preview on");
+    row("dragging a static object, Manual + Preview Lighting (waits for the drag to stop)", [&](int k) {
+      if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.6f});
+      ed.step_frame_headless();
+    });
+    /* After the drag: how long until the first preview, and until 256 samples. */
+    ScopedTimer tp;
+    double first = -1, full = -1;
+    while (tp.ms() < 60000.0) {
+      ed.step_frame_headless();
+      if (first < 0 && ed.preview_samples_for_test() > 0) first = tp.ms();
+      if (ed.preview_samples_for_test() == 256 && !ed.preview_running_for_test()) {
+        full = tp.ms();
+        break;
+      }
+    }
+    rep.note(strprintf("Preview Lighting after the drag stops (0.5 s wait, 8 ms a frame, %s): the first preview (16 samples) after %.2f s, "
+                       "256 samples after %.2f s.",
+                       ed.scene().render.device == 1 ? "GPU" : "CPU", first / 1000.0, full / 1000.0));
+    ed.command("lighting preview off");
+    ed.command("set Lighting.RealtimeGI false");
+    ed.command("lighting mode automatic");
+    ed.scene().render.device = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (auto *mr = g.get<MeshRenderer>()) mr->contribute_gi = false;
+    });
+    ed.commit_change("as before");
+    ed.preview_like_window_for_test(false);
+    ed.step_frame_headless();
+  }
+  MaterialPtr mat = mover && mover->get<MeshRenderer>() ? mover->get<MeshRenderer>()->material(0) : nullptr;
+  row("editing a material colour", [&](int k) {
+    if (mat) {
+      mat->base_color = {0.2f + 0.05f * (k % 10), 0.5f, 0.5f};
+      mat->touch();
+    }
+    ed.step_frame_headless();
+  });
+  ed.command("select Big Sphere");
+  ed.command("edit vertex");
+  ed.step_frame_headless();
+  row("Edit Mode: a 50k-face mesh changes every frame (not a drag: the overlap check runs too)", [&](int k) {
+    if (auto *mf = big->get<MeshFilter>()) {
+      Mesh &m = *mesh_make_mutable(mf->mesh);
+      m.positions[0].y = 1.0f + 0.01f * k;
+      m.touch();
+    }
+    ed.step_frame_headless();
+  });
+  /* Where an Edit Mode drag goes (task 0011 measures it; making it cheaper is a follow-up): the mesh's
+   * render data, its tangents and its edge table are rebuilt after every move. */
+  if (auto *mf = big->get<MeshFilter>()) {
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    double rm = 0, tg = 0, ec = 0;
+    for (int i = 0; i < n; i++) {
+      m.positions[1].y += 0.001f;
+      m.touch();
+      rm += time_ms([&] { (void)m.render_mesh(); });
+      tg += time_ms([&] { (void)m.render_mesh_tangents(); });
+      ec += time_ms([&] { (void)m.edge_cache(); });
+    }
+    rep.note(strprintf("Edit Mode drag on the 50k-face mesh, per move: render mesh rebuilt %.1f ms, tangents %.1f ms, edge table %.1f ms.",
+                       rm / n, tg / n, ec / n));
+  }
+  ed.command("edit off");
+  ed.command("select Main Camera");
+  ed.step_frame_headless();
+  ed.command("play");
+  row("playing", [&](int) { ed.step_frame_headless(); });
+  ed.command("stop");
+  Log::echo_stdout = true;
+  rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
+           "casters or the light change (task 0011).");
+}
+
+/* Draw items with their meshes and materials kept alive (as the unit tests' scenes). */
+struct CfScene {
+  std::vector<MeshPtr> meshes;
+  std::vector<std::vector<MaterialPtr>> mats;
+  std::vector<DrawItem> items;
+  void add(MeshPtr m, const Mat4 &model, uint32_t id, MaterialPtr mat) {
+    meshes.push_back(m);
+    mats.push_back({mat});
+    DrawItem it;
+    it.mesh = &m->render_mesh();
+    it.model = model;
+    it.id = id;
+    items.push_back(it);
+  }
+  void seal() {
+    for (size_t i = 0; i < items.size(); i++) items[i].materials = &mats[i];
+  }
+};
+
+/* Task 0015's go / no-go spike for a GPU viewport: what a rasterized view costs on the CPU today against
+ * the same picture's work on the GPU through the existing Vulkan path tracer (one sample, no bounces: a
+ * primary ray, the sun's light and its shadow ray per pixel, then the read-back and resolve). The real
+ * viewport would rasterize instead of tracing primary rays, so the GPU column is an upper bound. */
+static void test_gpu_viewport(Report &rep, const Options &o) {
+  rep.title("GPU viewport spike (task 0015): a 1080p view on the CPU vs the GPU",
+            "256 icospheres and a floor, a sun with shadows, the camera orbiting each frame. CPU: deferred PBR with the sun's "
+            "shadow map (cached, as in the editor). GPU: the Vulkan path tracer at 1 sample and no bounces (primary hit, sun "
+            "light, shadow ray), read back and tone mapped, so it includes upload of the camera, the render, the fence wait, "
+            "the read-back and the resolve.");
+  rep.note(gpu::status());
+  const int W = 1920, H = 1080, frames = o.quick ? 4 : 12;
+  auto mesh = primitives::ico_sphere(0.5f, 3);
+  Scene s = make_grid_scene(256, mesh, 1.3f);
+  auto floor = primitives::plane(40.0f, 1);
+  std::vector<MaterialPtr> mats = {make_material("bench", {0.7f, 0.5f, 0.3f})}, mfloor = {make_material("floor", {0.8f, 0.8f, 0.8f})};
+  std::vector<DrawItem> items;
+  std::vector<PTObject> objs;
+  {
+    DrawItem it;
+    it.mesh = &floor->render_mesh();
+    it.model = Mat4::translate({0, -0.6f, 0});
+    it.id = 1;
+    it.materials = &mfloor;
+    items.push_back(it);
+    objs.push_back({&floor->render_mesh_tangents(), it.model, &mfloor});
+  }
+  s.for_each([&](GameObject &g) {
+    DrawItem it;
+    it.mesh = &g.get<MeshFilter>()->mesh->render_mesh();
+    it.model = g.world_matrix();
+    it.id = (uint32_t)g.id + 2;
+    it.materials = &mats;
+    items.push_back(it);
+    objs.push_back({&g.get<MeshFilter>()->mesh->render_mesh_tangents(), it.model, &mats});
+  });
+  AABB bounds;
+  for (auto &it : items) bounds.add(it.mesh->bounds.transformed(it.model));
+  Bench3D b(W, H);
+  ShadowMap sm;
+  render_shadow_map(sm, items, b.env.lights[0].direction, bounds, 2048);
+  auto camera = [&](int f, Mat4 &v, Mat4 &p, Vec3 &eye) {
+    const float a = 0.15f * (float)f;
+    eye = Vec3(std::sin(a) * 16.0f, 10.0f, -std::cos(a) * 16.0f);
+    v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0});
+    p = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 1000.0f);
+  };
+  auto cpu_frame = [&](int f) {
+    Mat4 v, p;
+    Vec3 eye;
+    camera(f, v, p, eye);
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env = b.env;
+    env.camera_pos = eye;
+    env.shadow = &sm;
+    env.shadow_light = 0;
+    b.r3d.begin(&b.rt, v, p, env, opt);
+    b.r3d.clear(0xFF303030);
+    for (auto &it : items) b.r3d.add(it);
+    b.r3d.flush();
+  };
+  cpu_frame(0);
+  ScopedTimer tc;
+  for (int f = 1; f <= frames; f++) cpu_frame(f);
+  const double cpu_ms = tc.ms() / frames;
+  rep.table({"device", "scene upload ms", "1 view end to end ms", "of it render + read-back ms", "2 views, GPU work vs CPU", "verdict"});
+  rep.row({"CPU (deferred + shadow map)", "-", f2(cpu_ms), "-", "1.00x", "-"});
+  if (!gpu::available()) {
+    rep.note("No Vulkan GPU here: the spike needs one (the verdict is measured on the developer's machine).");
+    return;
+  }
+  std::vector<uint32_t> out((size_t)W * H);
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    for (int hw = 0; hw < (d.hardware_rt ? 2 : 1); hw++) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = false;
+      st.gpus = {d.index};
+      st.gpu_hardware_rt = hw == 1;
+      st.max_bounces = 0;
+      st.denoise = false;
+      st.use_guiding = false;
+      st.merge_interval_ms = 0.0;
+      pt.set_settings(st);
+      Environment env;
+      RenderLight sun = b.env.lights[0];
+      pt.build(objs, {sun}, env);  // warm-up: kernel compile and first upload
+      ScopedTimer tu;
+      pt.build(objs, {sun}, env);
+      const double upload_ms = tu.ms();
+      double part[3] = {0, 0, 0};  // camera (and buffer clears), render + read-back, resolve
+      auto gpu_frame = [&](int f) {
+        Mat4 v, p;
+        Vec3 eye;
+        camera(f, v, p, eye);
+        ScopedTimer t0;
+        pt.set_camera(v, p, W, H);
+        part[0] += t0.ms();
+        ScopedTimer t1;
+        pt.render(1e9, 1);
+        part[1] += t1.ms();
+        ScopedTimer t2;
+        pt.resolve(out.data(), W, false);
+        part[2] += t2.ms();
+      };
+      gpu_frame(0);
+      part[0] = part[1] = part[2] = 0;
+      ScopedTimer tg;
+      for (int f = 1; f <= frames; f++) gpu_frame(f);
+      const double gpu_ms = tg.ms() / frames;
+      rep.note(strprintf("%s%s: camera + clears %.2f ms, render + read-back %.2f ms, resolve %.2f ms a frame.", d.name.c_str(),
+                         hw ? " (ray tracing hardware)" : " (compute)", part[0] / frames, part[1] / frames, part[2] / frames));
+      if (!pt.gpu_error().empty()) rep.note("GPU error: " + pt.gpu_error());
+      /* The verdict on the GPU's own work: the path tracer's host side (clearing its float buffers on every
+       * camera change, tone mapping on the CPU) is not what a viewport would do. */
+      const double work = part[1] / frames, ratio = work / std::max(cpu_ms, 1e-9);
+      rep.row({d.name + (hw ? " (ray tracing hardware)" : " (compute)"), f2(upload_ms), f2(gpu_ms), f2(work), f2(ratio) + "x",
+               ratio <= 0.5 ? "go (<= 0.50x)" : "no-go (> 0.50x)"});
+    }
+  }
+  rep.note("Go / no-go (ADR 0013): a GPU viewport is worth building if two views cost at most half the CPU's time. The verdict "
+           "uses the GPU's render + read-back, which traces primary rays (a rasterizing viewport would not) and reads back 16 "
+           "bytes a pixel of float colour (a viewport would read back about 12: colour, depth, ids). End to end through the "
+           "path tracer it is slower than the CPU: its host side clears float buffers on each camera change and tone maps on "
+           "the CPU, which a viewport would do on the GPU.");
+}
+
+/* Task 0018's spike: voxel GI's gathers on the GPU against the CPU, end to end (the points up, the samples
+ * back), and how far apart their answers are. A piece moves to the GPU only at 2x or better. */
+static void test_gpu_gi(Report &rep, const Options &o) {
+  rep.title("GPU voxel GI gathers (task 0018): CPU vs Vulkan compute",
+            "The vgi scene (256 spheres and cubes on a 40 m floor, a 128 grid, the sun's RSM). Points on its surfaces gather 16 rays "
+            "each, as realtime lightmap texels do (a probe gathers six times). CPU: every thread; GPU: the points up, the kernel, the "
+            "samples back, timed together. The grid, RSM and world upload once (shown apart).");
+  rep.note(gpu::status());
+  CfScene sc;
+  auto white = make_material("White", {0.8f, 0.8f, 0.8f});
+  auto red = make_material("Red", {0.8f, 0.1f, 0.1f});
+  sc.add(primitives::plane(40.0f), Mat4::identity(), 1, white);
+  auto sphere = primitives::uv_sphere(0.5f, 24, 12);
+  auto cube = primitives::cube();
+  for (int i = 0; i < 256; i++)
+    sc.add(i % 2 ? sphere : cube, Mat4::translate({(i % 16 - 8) * 2.2f, 0.5f, (i / 16 - 8) * 2.2f}), (uint32_t)i + 2, i % 7 ? white : red);
+  sc.seal();
+  AABB bounds;
+  for (const DrawItem &it : sc.items) bounds.add(it.mesh->bounds.transformed(it.model));
+  VoxelGrid grid;
+  voxel_grid_fit(grid, bounds, 128);
+  std::vector<std::vector<VoxelSpan>> spans(sc.items.size());
+  std::vector<const std::vector<VoxelSpan> *> ptrs;
+  for (size_t i = 0; i < sc.items.size(); i++) {
+    voxelize_mesh(grid, *sc.items[i].mesh, sc.items[i].model, spans[i]);
+    ptrs.push_back(&spans[i]);
+  }
+  voxel_grid_build(grid, ptrs);
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+  Rsm rsm;
+  render_rsm(rsm, sc.items, sun, bounds, 256);
+  Environment env;
+  GiParams prm;
+  prm.rays = 16;
+  prm.radius = 4.0f;
+  prm = gi_params_sanitized(prm);
+  /* Points: random spots on the floor and on the objects' tops and sides. */
+  uint32_t seed = 5;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  std::vector<GiQuery> all(o.quick ? 65536 : 1000000);
+  for (size_t i = 0; i < all.size(); i++) {
+    GiQuery &g = all[i];
+    const int obj = (int)(rnd() * 256);
+    const Vec3 c((obj % 16 - 8) * 2.2f, 0.5f, (obj / 16 - 8) * 2.2f);
+    const float a = rnd() * 6.2831853f;
+    if (rnd() < 0.5f) g.position = Vec3(-20 + 40 * rnd(), 0.0f, -20 + 40 * rnd()), g.normal = Vec3(0, 1, 0);
+    else g.position = c + Vec3(0.5f * std::cos(a), 0.4f * rnd() - 0.2f, 0.5f * std::sin(a)), g.normal = Vec3(std::cos(a), 0, std::sin(a));
+    g.set = (int)(i & 15);
+  }
+  auto cpu = [&](size_t n, std::vector<GiSample> &out) {
+    out.resize(n);
+    JobSystem::global().parallel_for((int64_t)n, 64, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++)
+        out[(size_t)i] = voxel_gi_gather(grid, &rsm, env, all[(size_t)i].position, all[(size_t)i].normal, prm, all[(size_t)i].set, all[(size_t)i].offset_voxels);
+    });
+  };
+  const std::vector<size_t> sizes = o.quick ? std::vector<size_t>{9377, 65536} : std::vector<size_t>{9377, 230000, 1000000};
+  rep.table({"device", "points", "ms (end to end)", "of it up / kernel / back ms", "vs CPU", "largest sky difference", "largest bounce difference", "verdict"});
+  std::vector<double> cpu_ms(sizes.size());
+  std::vector<std::vector<GiSample>> ref(sizes.size());
+  for (size_t k = 0; k < sizes.size(); k++) {
+    cpu(sizes[k], ref[k]);  // warm
+    cpu_ms[k] = time_ms([&] { cpu(sizes[k], ref[k]); }, 3);
+    rep.row({"CPU (32 threads)", std::to_string(sizes[k]), f2(cpu_ms[k]), "-", "1.00x", "-", "-", "-"});
+  }
+  if (!gpu::available()) {
+    rep.note("No Vulkan GPU here: the verdict is measured on the developer's machine.");
+    return;
+  }
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    VoxelGiGpu g;
+    std::string err;
+    ScopedTimer tinit;
+    if (!g.init(d.index, &err)) {
+      rep.note(d.name + ": " + err);
+      continue;
+    }
+    const double init_ms = tinit.ms();
+    ScopedTimer tup;
+    const bool up = g.set_grid(grid, 1, &err) && g.set_rsm(&rsm, 1, &err) && g.set_environment(env, 1, &err);
+    const double up_ms = tup.ms();
+    if (!up) {
+      rep.note(d.name + ": " + err);
+      continue;
+    }
+    /* Again, as when the sun moves (a new RSM) or an object does (a new grid): buffers exist by now. */
+    const double rsm_again = time_ms([&] { static uint64_t k = 2; g.set_rsm(&rsm, ++k, &err); }, 3);
+    const double grid_again = time_ms([&] { static uint64_t k = 2; g.set_grid(grid, ++k, &err); }, 3);
+    rep.note(strprintf("%s: kernel ready in %.0f ms (compiled once, then cached); grid + RSM + world first uploaded in %.2f ms; "
+                       "again: the RSM %.2f ms, the grid %.2f ms.",
+                       d.name.c_str(), init_ms, up_ms, rsm_again, grid_again));
+    for (size_t k = 0; k < sizes.size(); k++) {
+      std::vector<GiQuery> qs(all.begin(), all.begin() + (std::ptrdiff_t)sizes[k]);
+      std::vector<GiSample> out;
+      g.gather(qs, prm, out, &err);  // warm
+      double best = 1e30, upm = 0, runm = 0, backm = 0;
+      for (int rep_i = 0; rep_i < 3; rep_i++) {
+        ScopedTimer t;
+        if (!g.gather(qs, prm, out, &err)) break;
+        const double ms = t.ms();
+        if (ms < best) best = ms, upm = g.last_upload_ms, runm = g.last_run_ms, backm = g.last_read_ms;
+      }
+      if (out.size() != qs.size()) {
+        rep.note(d.name + ": " + err);
+        break;
+      }
+      double dsky = 0, dbounce = 0;
+      for (size_t i = 0; i < out.size(); i++) {
+        dsky = std::max(dsky, (double)std::fabs(out[i].sky - ref[k][i].sky));
+        dbounce = std::max(dbounce, (double)length(out[i].bounce - ref[k][i].bounce));
+      }
+      const double speed = cpu_ms[k] / std::max(best, 1e-9);
+      rep.row({d.name, std::to_string(sizes[k]), f2(best), strprintf("%.2f / %.2f / %.2f", upm, runm, backm), f2(speed) + "x", strprintf("%.4f", dsky),
+               strprintf("%.4f", dbounce), speed >= 2.0 ? "go (>= 2x)" : "no-go (< 2x)"});
+    }
+  }
+  rep.note("Differences: the GPU's sin, cos and sqrt round differently, so a ray that grazes a voxel corner can go the other way; "
+           "the sky share is a ratio of 16 rays (one ray is 1/16).");
+  /* Generate Lighting: the same scene's lightmaps (every object static, 8 texels / m, 512 paths a texel,
+   * 2 bounces, a Baked sun) on the CPU and on each GPU, from begin() to the finished maps. */
+  rep.table({"Generate Lighting on", "texels", "layout s", "tracing s", "tracing vs CPU", "lightmap total (CPU = 100%)", "verdict"});
+  std::vector<BakeObject> objs;
+  for (size_t i = 0; i < sc.items.size(); i++) {
+    BakeObject bo;
+    bo.id = sc.items[i].id;
+    bo.mesh = sc.meshes[i];
+    bo.model = sc.items[i].model;
+    bo.materials = sc.mats[i];
+    bo.hash = i + 1;
+    objs.push_back(bo);
+  }
+  BakeSettings bs;
+  bs.texels_per_unit = o.quick ? 4.0f : 8.0f;
+  bs.indirect_samples = o.quick ? 32 : 512;
+  bs.bounces = 2;
+  bs.denoise = false;
+  std::vector<BakeLight> lights = {{sun, 2, 99}};
+  double cpu_s = 0, cpu_total = 0, lay_s = 0;
+  auto bake = [&](int device, double &secs, double &total, size_t &texels, std::string &err) {
+    Lightmapper lm;
+    BakeSettings b = bs;
+    b.gpu_device = device;
+    ScopedTimer tl;
+    lm.begin(objs, lights, env, b);
+    lay_s = tl.ms() / 1000.0;
+    ScopedTimer t;
+    while (!lm.step(1e9)) {}
+    secs = t.ms() / 1000.0;  // the texels' tracing (and the filter at the end)
+    texels = lm.texel_count();
+    err = lm.gpu_error();
+    LightingData d = lm.take_result();
+    total = 0;
+    for (const Lightmap &pg : d.pages)
+      for (const Vec3 &v : pg.texels) total += v.x + v.y + v.z;
+    return device < 0 || lm.gpu_texels() > 0;
+  };
+  size_t texels = 0;
+  std::string berr;
+  {
+    /* Where a GPU bake's time goes: one gather of 65,536 points at 1 and at 128 paths. */
+    PathTracer pt;
+    PTSettings ps;
+    ps.max_bounces = 1;
+    ps.denoise = false;
+    pt.set_settings(ps);
+    std::vector<PTObject> pobjs;
+    for (size_t i = 0; i < sc.items.size(); i++) pobjs.push_back({&sc.meshes[i]->render_mesh_tangents(), sc.items[i].model, &sc.mats[i]});
+    pt.build(pobjs, {sun}, env);
+    std::vector<Vec3> org(65536), nrm(65536, Vec3(0, 1, 0)), out;
+    for (size_t i = 0; i < org.size(); i++) org[i] = Vec3(-20 + 40 * rnd(), 0.001f, -20 + 40 * rnd());
+    if (gpu::available()) {
+      std::string e;
+      ScopedTimer t0;
+      pt.gpu_gather(0, 1, org, nrm, 1, out, nullptr, &e);
+      const double first = t0.ms();
+      ScopedTimer t1;
+      pt.gpu_gather(0, 1, org, nrm, 1, out, nullptr, &e);
+      const double one = t1.ms();
+      ScopedTimer t2;
+      pt.gpu_gather(0, 1, org, nrm, 128, out, nullptr, &e);
+      const double many = t2.ms();
+      rep.note(strprintf("GPU gather of 65,536 points: first call %.1f ms (opens the device, uploads the scene), then 1 path %.1f ms, 128 paths %.1f ms %s",
+                         first, one, many, e.c_str()));
+    }
+  }
+  bake(-1, cpu_s, cpu_total, texels, berr);
+  rep.row({"CPU (32 threads)", std::to_string(texels), f2(lay_s), f2(cpu_s), "1.00x", "100.00%", "-"});
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    double secs = 0, total = 0;
+    if (!bake(d.index, secs, total, texels, berr)) {
+      rep.note(d.name + ": " + berr);
+      continue;
+    }
+    const double speed = cpu_s / std::max(1e-9, secs);
+    rep.row({d.name, std::to_string(texels), f2(lay_s), f2(secs), f2(speed) + "x", strprintf("%.2f%%", 100.0 * total / std::max(1e-9, cpu_total)),
+             speed >= 2.0 ? "go (>= 2x)" : "no-go (< 2x)"});
+  }
+  rep.note("The GPU traces each texel's indirect paths (the path tracer's kernel, from the texels instead of a camera); the Baked "
+           "lights' direct light is added on the CPU. The first GPU bake also uploads the scene.");
+}
+
+/* Voxel GI (task 0013): the paper's pieces timed one by one, then what it adds to a frame. */
+static void test_vgi(Report &rep, const Options &o) {
+  rep.title("Voxel-based global illumination (Thiedemann et al. 2011)",
+            "256 spheres (24 x 12) and cubes on a 40 m floor. Voxelization, the hierarchical ray test against a level-0 column walk, "
+            "the sun's RSM, and the per-pixel pass's cost in a deferred frame.");
+  std::vector<MeshPtr> keep;
+  CfScene sc;
+  auto white = make_material("White", {0.8f, 0.8f, 0.8f});
+  auto red = make_material("Red", {0.8f, 0.1f, 0.1f});
+  sc.add(primitives::plane(40.0f), Mat4::identity(), 1, white);
+  auto sphere = primitives::uv_sphere(0.5f, 24, 12);
+  auto cube = primitives::cube();
+  for (int i = 0; i < 256; i++)
+    sc.add(i % 2 ? sphere : cube, Mat4::translate({(i % 16 - 8) * 2.2f, 0.5f, (i / 16 - 8) * 2.2f}), (uint32_t)i + 2, i % 7 ? white : red);
+  sc.seal();
+  AABB bounds;
+  for (const DrawItem &it : sc.items) bounds.add(it.mesh->bounds.transformed(it.model));
+  rep.table({"voxel resolution", "voxelize all ms", "re-voxelize one object ms", "build hierarchy ms", "spans"});
+  VoxelGrid grid128;
+  for (int n : {64, 128, 256}) {
+    VoxelGrid g;
+    voxel_grid_fit(g, bounds, n);
+    std::vector<std::vector<VoxelSpan>> spans(sc.items.size());
+    ScopedTimer t;
+    JobSystem::global().parallel_for((int64_t)sc.items.size(), 4, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) voxelize_mesh(g, *sc.items[(size_t)i].mesh, sc.items[(size_t)i].model, spans[(size_t)i]);
+    });
+    const double all = t.ms();
+    const double one = time_ms([&] { voxelize_mesh(g, *sc.items[5].mesh, sc.items[5].model, spans[5]); }, 10);
+    std::vector<const std::vector<VoxelSpan> *> ptrs;
+    size_t total = 0;
+    for (auto &s : spans) ptrs.push_back(&s), total += s.size();
+    const double build = time_ms([&] { voxel_grid_build(g, ptrs); }, 5);
+    rep.row({std::to_string(n), f2(all), f2(one), f2(build), std::to_string(total)});
+    if (n == 128) grid128 = g;
+  }
+  /* The hierarchical test against the level-0 walk on the same random rays (and that they agree). */
+  {
+    const int N = o.quick ? 50000 : 200000;
+    std::vector<Vec3> org(N), dir(N);
+    uint32_t seed = 9;
+    auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+    for (int i = 0; i < N; i++) {
+      org[i] = Vec3(rnd() * 36 - 18, rnd() * 2.0f + 0.05f, rnd() * 36 - 18);
+      dir[i] = normalize(Vec3(rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 2 - 1));
+    }
+    int agree = 0;
+    std::vector<VoxelHit> a(N), b(N);
+    std::vector<uint8_t> ha(N), hb(N);
+    ScopedTimer t1;
+    for (int i = 0; i < N; i++) ha[i] = voxel_trace(grid128, org[i], dir[i], 4.0f, a[i]);
+    const double ms_h = t1.ms();
+    ScopedTimer t2;
+    for (int i = 0; i < N; i++) hb[i] = voxel_trace_columns(grid128, org[i], dir[i], 4.0f, b[i]);
+    const double ms_c = t2.ms();
+    for (int i = 0; i < N; i++) agree += ha[i] == hb[i] && (!ha[i] || (a[i].x == b[i].x && a[i].y == b[i].y && a[i].z == b[i].z));
+    rep.note(strprintf("Rays of 4 m, 1 thread: hierarchical %.1f Mrays/s, level-0 column walk %.1f Mrays/s; they agree on %d of %d rays.",
+                       N / ms_h / 1000.0, N / ms_c / 1000.0, agree, N));
+    /* Long rays across the scene: where skipping empty columns pays. */
+    for (int i = 0; i < N; i++) org[i].y += 1.5f;
+    ScopedTimer t3;
+    int hits_h = 0, hits_c = 0;
+    for (int i = 0; i < N; i++) hits_h += voxel_trace(grid128, org[i], dir[i], 40.0f, a[i]);
+    const double ms_h2 = t3.ms();
+    ScopedTimer t4;
+    for (int i = 0; i < N; i++) hits_c += voxel_trace_columns(grid128, org[i], dir[i], 40.0f, b[i]);
+    const double ms_c2 = t4.ms();
+    rep.note(strprintf("Rays of 40 m, 1 thread: hierarchical %.1f Mrays/s, level-0 column walk %.1f Mrays/s (%d / %d hits).", N / ms_h2 / 1000.0,
+                       N / ms_c2 / 1000.0, hits_h, hits_c));
+  }
+  /* The RSM and the per-pixel pass. */
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+  Rsm rsm;
+  const double rsm_ms = time_ms([&] { render_rsm(rsm, sc.items, sun, bounds, 256); }, 3);
+  rep.note(strprintf("RSM 256 x 256 of %zu objects: %.2f ms (rendered only when the casters or the sun change).", sc.items.size(), rsm_ms));
+  rep.table({"frame", "rays", "GI resolution", "deferred ms", "with voxel GI ms", "GI adds ms"});
+  for (auto [w, h] : o.quick ? std::vector<std::pair<int, int>>{{1280, 720}} : std::vector<std::pair<int, int>>{{1280, 720}, {1920, 1080}, {3840, 2160}})
+    for (int rays : {4, 8, 16})
+      for (int dsv : {2, 4}) {
+        if (o.quick && rays != 8) continue;
+        Image img;
+        img.resize(w, h);
+        RenderTarget rt;
+        rt.attach(img, {0, 0, w, h});
+        Renderer3D r3d;
+        Environment env;
+        VoxelGIFrame fr;
+        fr.grid = &grid128;
+        fr.rsm = &rsm;
+        GiParams p;
+        p.rays = rays;
+        p.downsample = dsv;
+        fr.params = gi_params_sanitized(p);
+        auto frame = [&](bool with) {
+          LightingEnv le;
+          le.lights.push_back(sun);
+          le.environment = &env;
+          le.gi = with ? &fr : nullptr;
+          RasterOptions opt;
+          opt.shade = ShadeMode::Deferred;
+          r3d.begin(&rt, Mat4::look_at({0, 8, -22}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, w / (float)h, 0.1f, 200.0f), le, opt);
+          r3d.clear(0xFF303030u);
+          for (const DrawItem &it : sc.items) r3d.add(it);
+          r3d.flush();
+        };
+        frame(true);
+        const double plain = time_ms([&] { frame(false); }, 3), with = time_ms([&] { frame(true); }, 3);
+        rep.row({strprintf("%dx%d", w, h), std::to_string(rays), dsv == 2 ? "Half" : "Quarter", f2(plain), f2(with), f2(with - plain)});
+      }
+  /* Realtime lightmaps (task 0016): every object reads a map instead of being traced per pixel. */
+  {
+    std::vector<BakeObject> objs;
+    for (size_t i = 0; i < sc.items.size(); i++) {
+      BakeObject bo;
+      bo.id = sc.items[i].id;
+      bo.mesh = sc.meshes[i];
+      bo.model = sc.items[i].model;
+      objs.push_back(bo);
+    }
+    RealtimeLightmaps rl;
+    const double lay_ms = time_ms([&] { realtime_lightmap_layout(rl, objs, 2.0f, 1); }, 1);
+    const double relay_ms = time_ms([&] { realtime_lightmap_layout(rl, objs, 2.0f, 2); }, 1);  // UVs cached: objects moved
+    GiParams p;
+    p.rays = 8;
+    p.downsample = 4;
+    p = gi_params_sanitized(p);
+    Environment env;
+    uint64_t gk = 10;
+    const double pass_ms = time_ms([&] {
+      rl.gather_key = 0;
+      while (!realtime_lightmap_update(rl, grid128, &rsm, env, p, ++gk, 1u << 30)) {}
+    }, 1);
+    std::vector<DrawItem> mapped = sc.items;
+    for (DrawItem &it : mapped) {
+      auto e = rl.shown.entries.find(it.id);
+      if (e == rl.shown.entries.end() || e->second.tri_uv.size() != it.mesh->tri_count() * 3) continue;
+      it.rt_bounce = &rl.shown.bounce[(size_t)e->second.page];
+      it.rt_sky = &rl.shown.sky[(size_t)e->second.page];
+      it.rt_uv = &e->second.tri_uv;
+    }
+    Image img;
+    img.resize(1920, 1080);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 1920, 1080});
+    Renderer3D r3d;
+    VoxelGIFrame fr;
+    fr.grid = &grid128;
+    fr.rsm = &rsm;
+    fr.params = p;
+    auto frame = [&](int mode) {  // 0 no GI, 1 per pixel, 2 realtime lightmaps
+      LightingEnv le;
+      le.lights.push_back(sun);
+      le.environment = &env;
+      le.gi = mode ? &fr : nullptr;
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      r3d.begin(&rt, Mat4::look_at({0, 8, -22}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 16.0f / 9.0f, 0.1f, 200.0f), le, opt);
+      r3d.clear(0xFF303030u);
+      for (const DrawItem &it : mode == 2 ? mapped : sc.items) r3d.add(it);
+      r3d.flush();
+    };
+    frame(2);
+    const double f0 = time_ms([&] { frame(0); }, 3), f1 = time_ms([&] { frame(1); }, 3), f2v = time_ms([&] { frame(2); }, 3);
+    rep.note(strprintf("Realtime lightmaps at 2 texels / m: %zu texels on %zu pages; layout %.1f ms (%.1f ms again with the UVs kept), a whole "
+                       "pass %.1f ms (16 rays a texel).",
+                       rl.texel_count(), rl.shown.bounce.size(), lay_ms, relay_ms, pass_ms));
+    rep.note(strprintf("A 1080p deferred frame (8 rays, Quarter): %.2f ms without GI, %.2f ms traced per pixel (+%.2f), %.2f ms reading realtime "
+                       "lightmaps (+%.2f): what an orbit costs.",
+                       f0, f1, f1 - f0, f2v, f2v - f0));
+  }
+  /* Odd settings and grids never crash. */
+  int problems = 0, runs = 0;
+  uint32_t seed = 31;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  const float odd[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1.0f, 0.0f, 1e9f, 1e-9f, 3.0f};
+  for (int i = 0; i < (o.quick ? 40 : 200); i++) {
+    GiParams p;
+    p.rays = (int)(rnd() * 80) - 10;
+    p.radius = odd[(int)(rnd() * 7) % 7];
+    p.intensity = odd[(int)(rnd() * 7) % 7];
+    p.downsample = (int)(rnd() * 10) - 2;
+    p.specular_occlusion = odd[(int)(rnd() * 7) % 7];
+    p = gi_params_sanitized(p);
+    AABB b;
+    b.add(Vec3(odd[(int)(rnd() * 7) % 7], 0, 0));
+    b.add(Vec3(rnd() * 1e6f, odd[(int)(rnd() * 7) % 7], 1));
+    VoxelGrid g;
+    voxel_grid_fit(g, rnd() < 0.5f ? b : bounds, (int)(rnd() * 400));
+    const GiSample s = voxel_gi_gather(g.valid() ? g : grid128, &rsm, Environment{}, Vec3(odd[(int)(rnd() * 7) % 7], 0.5f, 0), normalize(Vec3(0, 1, rnd())), p,
+                                       (int)(rnd() * 100));
+    if (!(s.sky >= 0.0f && s.sky <= 1.0f) || !(s.bounce.x >= 0.0f) || !std::isfinite(s.bounce.x + s.bounce.y + s.bounce.z)) problems++;
+    runs++;
+  }
+  rep.note(strprintf("Odd settings, bounds and points (NaN / infinite / negative / huge): %d runs, %d problems (a problem: a crash or a sky ratio "
+                     "outside 0..1 or a non-finite bounce)",
+                     runs, problems));
+}
+
+/* Probe volumes (task 0014): placement, bake, live updates and per-pixel sampling. */
+static void test_probes(Report &rep, const Options &o) {
+  rep.title("Probe volumes (Adaptive Probe Volume style)",
+            "Spheres and cubes on a 40 m floor under the sky with a Baked sun; probes 1 m apart near geometry, up to 27 m in open space.");
+  CfScene sc;
+  auto white = make_material("White", {0.8f, 0.8f, 0.8f});
+  sc.add(primitives::plane(40.0f), Mat4::identity(), 1, white);
+  auto sphere = primitives::uv_sphere(0.5f, 24, 12);
+  auto cube = primitives::cube();
+  const int count = o.quick ? 32 : 128;
+  for (int i = 0; i < count; i++)
+    sc.add(i % 2 ? sphere : cube, Mat4::translate({(i % 12 - 6) * 2.5f, 0.5f, (i / 12 - 6) * 2.5f}), (uint32_t)i + 2, white);
+  sc.seal();
+  std::vector<AABB> tris;
+  AABB vol;
+  std::vector<PTObject> objs;
+  for (const DrawItem &it : sc.items) {
+    const RenderMesh &rm = *it.mesh;
+    for (size_t k = 0; k < rm.tri_count(); k++) {
+      AABB b;
+      for (int c = 0; c < 3; c++) b.add(it.model.point(rm.positions[rm.indices[k * 3 + c]]));
+      tris.push_back(b);
+      vol.add(b.min), vol.add(b.max);
+    }
+    objs.push_back({&rm, it.model, it.materials});
+  }
+  vol.min = vol.min - Vec3(1.0f), vol.max = vol.max + Vec3(4.0f);
+  ProbeVolumeData d;
+  const double place_ms = time_ms([&] { probe_place(d, vol, tris, 1.0f, 27.0f); });
+  BakeLight sun;
+  sun.light.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+  sun.mode = 2;
+  PathTracer pt;
+  PTSettings ps;
+  ps.max_bounces = 1;
+  ps.denoise = false;
+  pt.set_settings(ps);
+  Environment env;
+  pt.build(objs, {sun.light}, env);
+  const double validate_ms = time_ms([&] { probe_validate(d, pt, 64); });
+  const double bake_ms = time_ms([&] { probe_bake(d, pt, {sun}, 64, 2); });
+  size_t invalid = 0;
+  for (uint8_t v : d.valid) invalid += !v;
+  rep.table({"probes", "bricks", "inside geometry", "place ms", "validate ms", "bake ms (64 rays)", "bytes per probe"});
+  rep.row({std::to_string(d.probe_count()), std::to_string(d.bricks.size()), std::to_string(invalid), f2(place_ms), f2(validate_ms), f2(bake_ms),
+           std::to_string(sizeof(Vec3) + 1 + 2 * sizeof(ProbeCube) + 1)});
+  /* The same volume with nothing in it: the count follows the geometry, not the size. */
+  ProbeVolumeData empty_d;
+  probe_place(empty_d, vol, {}, 1.0f, 27.0f);
+  rep.note(strprintf("The same volume without geometry: %zu probes (with geometry: %zu).", empty_d.probe_count(), d.probe_count()));
+  /* Live updates through voxel GI. */
+  VoxelGrid g;
+  voxel_grid_fit(g, vol, 128);
+  std::vector<std::vector<VoxelSpan>> spans(sc.items.size());
+  std::vector<const std::vector<VoxelSpan> *> ptrs;
+  for (size_t i = 0; i < sc.items.size(); i++) voxelize_mesh(g, *sc.items[i].mesh, sc.items[i].model, spans[i]), ptrs.push_back(&spans[i]);
+  voxel_grid_build(g, ptrs);
+  GiParams prm = gi_params_sanitized(GiParams{});
+  const size_t slice = std::min<size_t>(4096, d.probe_count());
+  const double live_ms = time_ms([&] { probe_live_update(d, g, nullptr, env, prm, 0, slice); }, 3);
+  rep.note(strprintf("Live update by voxel GI: %.2f ms for a slice of %zu probes (six gathers each); the whole volume in %zu frames.", live_ms, slice,
+                     (d.probe_count() + slice - 1) / std::max<size_t>(1, slice)));
+  /* One sample's cost, single-threaded, along rows of neighbouring points (2 cm apart, as pixels arrive):
+   * the brick lookup alone, then the whole sample with the caller's brick hint. */
+  {
+    const int N = o.quick ? 200000 : 1000000;
+    std::vector<Vec3> rows((size_t)N);
+    for (int i = 0; i < N; i++) rows[(size_t)i] = Vec3(-18.0f + 0.02f * (i % 1800), 0.3f, -18.0f + 0.02f * (i / 1800));
+    double sink = 0;
+    ScopedTimer tf;
+    for (const Vec3 &q : rows) sink += d.find_brick(q);
+    const double ns_find = tf.ms() * 1e6 / N;
+    int hint = -1;
+    Vec3 out;
+    ScopedTimer ts;
+    for (const Vec3 &q : rows) sink += d.sample(q, Vec3(0, 1, 0), Vec3(0.3f), false, out, true, &hint) ? out.x : 0.0f;
+    rep.note(strprintf("One sample, 1 thread: brick lookup %.0f ns; a whole sample with leak reduction %.0f ns (checksum %.0f).", ns_find,
+                       ts.ms() * 1e6 / N, sink));
+  }
+  /* Sampling per pixel: a 1080p deferred frame with every object probe-lit, against none. */
+  {
+    Image img;
+    img.resize(1920, 1080);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 1920, 1080});
+    Renderer3D r3d;
+    ProbeFrame pf;
+    pf.data = &d;
+    auto frame = [&](bool probes) {
+      LightingEnv le;
+      le.lights.push_back(sun.light);
+      le.environment = &env;
+      le.probes = probes ? &pf : nullptr;
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      r3d.begin(&rt, Mat4::look_at({0, 8, -22}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 16.0f / 9.0f, 0.1f, 200.0f), le, opt);
+      r3d.clear(0xFF303030u);
+      for (DrawItem it : sc.items) {
+        it.use_probes = true;
+        r3d.add(it);
+      }
+      r3d.flush();
+    };
+    frame(true);
+    const double plain = time_ms([&] { frame(false); }, 3), with = time_ms([&] { frame(true); }, 3);
+    pf.quad_reuse = false;
+    const double every = time_ms([&] { frame(true); }, 3);
+    rep.note(strprintf("Deferred shading at 1080p: %.2f ms without probes, %.2f ms with every object probe-lit (one sample per 2 x 2 pixels; "
+                       "%.2f ms sampling every pixel).", plain, with, every));
+  }
+  /* Odd settings never crash. */
+  int problems = 0, runs = 0;
+  uint32_t seed = 13;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  const float odd[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1.0f, 0.0f, 1e9f, 1e-6f, 2.0f};
+  for (int i = 0; i < (o.quick ? 20 : 100); i++) {
+    ProbeVolumeData x;
+    AABB b = vol;
+    if (rnd() < 0.3f) b.max = b.min;  // zero size
+    if (rnd() < 0.2f) b.max.x = odd[(int)(rnd() * 7) % 7];
+    probe_place(x, b, tris, odd[(int)(rnd() * 7) % 7], odd[(int)(rnd() * 7) % 7], 100000);
+    Vec3 out;
+    const bool ok = x.sample(Vec3(rnd() * 40 - 20, rnd() * 4, rnd() * 40 - 20), normalize(Vec3(rnd() - 0.5f, 1, rnd() - 0.5f)), Vec3(0.3f), false, out);
+    if (x.probe_count() > 100000 + 64 || (ok && !std::isfinite(out.x + out.y + out.z))) problems++;
+    runs++;
+  }
+  rep.note(strprintf("Odd volumes and spacings (NaN / infinite / negative / zero / huge): %d runs, %d problems.", runs, problems));
+}
+
+/* Baked lighting (task 0012): what a bake costs as the scene grows, and what a lightmap costs to shade. */
+static void test_bake(Report &rep, const Options &o) {
+  rep.title("Baked lighting (Generate Lighting)",
+            "Static spheres and cubes on a floor under the sky with a Baked sun, Lightmap Resolution 10, 64 indirect samples, "
+            "2 bounces; then random odd settings.");
+  rep.table({"static objects", "texels", "lightmaps", "bake s", "texels/s", "Mrays/s", "filter + dilate ms"});
+  std::vector<int> counts = o.quick ? std::vector<int>{10, 100} : std::vector<int>{10, 100, 1000};
+  for (int n : counts) {
+    std::vector<MeshPtr> keep;
+    std::vector<BakeObject> objs;
+    auto floor = primitives::plane(std::max(10.0f, std::sqrt((float)n) * 3.0f));
+    keep.push_back(floor);
+    std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
+    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
+    const int side = (int)std::ceil(std::sqrt((double)n));
+    auto sphere = primitives::uv_sphere(0.5f, 24, 12);
+    auto cube = primitives::cube();
+    for (int i = 0; i < n; i++) {
+      const float x = (i % side - side * 0.5f) * 2.5f, z = (i / side - side * 0.5f) * 2.5f;
+      objs.push_back({(uint64_t)i + 2, i % 2 ? sphere : cube, Mat4::translate({x, 0.5f, z}), white, 1.0f, true, 0});
+    }
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+    sun.mode = 2;
+    sun.id = 999999;
+    Environment env;
+    env.mode = Environment::Gradient;
+    BakeSettings bs;
+    bs.texels_per_unit = 10.0f;
+    bs.indirect_samples = 64;
+    bs.bounces = 2;
+    bs.max_size = 1024;
+    Lightmapper lm;
+    ScopedTimer t;
+    lm.begin(objs, {sun}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    const double s = t.ms() / 1000.0;
+    const LightingData d = lm.take_result();
+    rep.row({std::to_string(n), std::to_string(lm.texel_count()), std::to_string(d.pages.size()), f2(s), f1(lm.texel_count() / std::max(1e-6, s)),
+             f2(lm.rays() / std::max(1e-6, s) / 1e6), f2(lm.finish_ms())});
+  }
+  /* Shading cost: the same 1080p render with and without lightmaps on every object. */
+  {
+    std::vector<BakeObject> objs;
+    auto sphere = primitives::uv_sphere(0.5f, 32, 16);
+    auto floor = primitives::plane(20.0f);
+    std::vector<MaterialPtr> white = {make_material("White", {0.8f, 0.8f, 0.8f})};
+    objs.push_back({1, floor, Mat4::identity(), white, 1.0f, true, 0});
+    for (int i = 0; i < 64; i++) objs.push_back({(uint64_t)i + 2, sphere, Mat4::translate({(i % 8 - 4) * 1.5f, 0.5f, (i / 8 - 4) * 1.5f}), white, 1.0f, true, 0});
+    Lightmapper lm;
+    BakeSettings bs;
+    bs.texels_per_unit = 8.0f;
+    bs.indirect_samples = 16;
+    lm.begin(objs, {}, Environment{}, bs);
+    while (!lm.step(1e9)) {
+    }
+    const LightingData d = lm.take_result();
+    Image img;
+    img.resize(1920, 1080);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 1920, 1080});
+    Renderer3D r3d;
+    const Mat4 v = Mat4::look_at({0, 6, -14}, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(50 * kDeg2Rad, 16.0f / 9.0f, 0.1f, 200.0f);
+    auto frame = [&](bool lightmaps) {
+      LightingEnv env;
+      RenderLight sun;
+      sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.3f));
+      env.lights.push_back(sun);
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      r3d.begin(&rt, v, p, env, opt);
+      r3d.clear(0xFF303030u);
+      for (const BakeObject &o : objs) {
+        DrawItem it;
+        it.mesh = &o.mesh->render_mesh();
+        it.model = o.model;
+        it.materials = &o.materials;
+        it.id = (uint32_t)o.id;
+        auto e = d.entries.find(o.id);
+        if (lightmaps && e != d.entries.end()) it.lightmap = &d.pages[(size_t)e->second.page], it.lightmap_uv = &e->second.tri_uv;
+        r3d.add(it);
+      }
+      r3d.flush();
+      return r3d.stats().ms_shade;
+    };
+    frame(true);
+    double plain = 0, lit = 0;
+    for (int i = 0; i < 3; i++) plain += frame(false), lit += frame(true);
+    rep.note(strprintf("Deferred shading at 1080p, 65 objects: %.2f ms without lightmaps, %.2f ms with (bilinear lookup per pixel).", plain / 3, lit / 3));
+  }
+  /* Odd settings never crash and keep the result well formed. */
+  int problems = 0, runs = 0;
+  uint32_t seed = 77;
+  auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+  const float odd[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1.0f, 0.0f, 1e9f, 0.5f};
+  auto cube = primitives::cube();
+  auto empty = std::make_shared<Mesh>();
+  for (int i = 0; i < (o.quick ? 8 : 30); i++) {
+    BakeSettings bs;
+    bs.texels_per_unit = odd[(int)(rnd() * 6) % 6];
+    bs.max_size = (int)(rnd() * 20000) - 100;
+    bs.padding = (int)(rnd() * 100) - 10;
+    bs.indirect_samples = (int)(rnd() * 8);
+    bs.direct_samples = (int)(rnd() * 8);
+    bs.bounces = (int)(rnd() * 30) - 5;
+    bs.indirect_intensity = odd[(int)(rnd() * 6) % 6];
+    if (std::isfinite(bs.texels_per_unit) && bs.texels_per_unit > 50.0f) bs.texels_per_unit = 50.0f;  // keep the run short
+    std::vector<MaterialPtr> none;
+    std::vector<BakeObject> objs = {{1, cube, Mat4::identity(), none, odd[(int)(rnd() * 6) % 6], rnd() < 0.5f, 0},
+                                    {2, empty, Mat4::identity(), none, 1.0f, true, 0}};
+    Lightmapper lm;
+    lm.begin(objs, {}, Environment{}, bs);
+    int guard = 0;
+    while (!lm.step(50.0) && ++guard < 100000) {
+    }
+    const LightingData d = lm.take_result();
+    for (const Lightmap &p : d.pages)
+      for (const Vec3 &t : p.texels)
+        if (!std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.z) || t.x < 0 || t.y < 0 || t.z < 0) {
+          problems++;
+          break;
+        }
+    runs++;
+  }
+  rep.note(strprintf("Odd settings (NaN / infinite / negative / huge resolution, padding, samples, bounces, scale; an empty mesh): %d runs, %d problems",
+                     runs, problems));
 }
 
 static void test_fuzz(Report &rep, const Options &o) {
@@ -897,6 +1868,8 @@ static void test_fuzz(Report &rep, const Options &o) {
   const bool trace = std::getenv("BLENDITY_FUZZ_TRACE") != nullptr;
   Log::echo_stdout = trace;
   ed.init_headless(1280, 720);
+  /* Verify mode: every picture a render cache would reuse is rendered anyway and compared (ADR 0009). */
+  ed.set_render_cache_verify(true);
   uint32_t seed = std::getenv("BLENDITY_FUZZ_SEED") ? (uint32_t)std::strtoul(std::getenv("BLENDITY_FUZZ_SEED"), nullptr, 10) : 12345u;
   auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return (int)((seed >> 8) % (uint32_t)n); };
   int frames = o.quick ? 1500 : 6000, events = 0;
@@ -961,7 +1934,9 @@ static void test_fuzz(Report &rep, const Options &o) {
   }
   double avg = t.ms() / frames;
   Log::echo_stdout = true;
-  rep.row({std::to_string(frames), std::to_string(events), std::to_string(ed.scene().object_count()), f2(avg), "no crash"});
+  const uint64_t stale = ed.frame_profile_totals().cache_mismatches;
+  rep.row({std::to_string(frames), std::to_string(events), std::to_string(ed.scene().object_count()), f2(avg),
+           strprintf("no crash, %llu stale pictures", (unsigned long long)stale)});
 }
 
 static void test_memory(Report &rep, const Options &) {
@@ -1029,7 +2004,7 @@ static void test_shading_cost(Report &rep, const Options &o) {
     double ds = time_ms([&] { frame(ShadeMode::Deferred, true); }, 3);
     rep.row({strprintf("%dx%d", w, h), f2(g), f2(d), f2(ds), f2(shadow_ms), f2(shade_ms)});
   }
-  rep.note("The shadow map only needs re-rendering when lights or casters move (render_view.cpp caches it by scene hash).");
+  rep.note("The editor re-renders the shadow map only when its casters, their materials or the light change (task 0011: update_shadow_map keeps two maps).");
   /* View transforms: per-frame cost of turning scene light into display pixels. */
   rep.table({"view transform (1920x1080)", "ms / frame", "Mpix/s"});
   std::vector<Vec3> hdr((size_t)1920 * 1080);
@@ -2281,11 +3256,11 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"vgi", test_vgi}, {"probes", test_probes},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
-               {"gpu", test_gpu_devices},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
+               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
   ScopedTimer total;
   for (auto &t : tests) {

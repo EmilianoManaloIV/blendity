@@ -33,12 +33,25 @@ struct RenderMesh {
   std::vector<uint32_t> indices;    // 3 per triangle
   std::vector<uint32_t> tri_face;   // source polygon per triangle
   std::vector<uint16_t> tri_material;  // material slot per triangle
+  std::vector<uint32_t> tri_corner;    // 3 per triangle: the mesh corner each came from (lightmap UVs)
   AABB bounds;
+  /* Different for every build (never reused, unlike a pointer + version after a free), so caches of
+   * what was drawn from it (shadow maps, voxel grids) can key on it. 0 = not cacheable (built by hand). */
+  uint64_t serial = 0;
   size_t tri_count() const { return indices.size() / 3; }
+};
+
+/* A baked lightmap page (task 0012): linear light per texel, what albedo multiplies (irradiance / pi). */
+struct Lightmap {
+  int width = 0, height = 0;
+  std::vector<Vec3> texels;
+  /* Bilinear, clamped at the edges; texel centres at ((i + 0.5) / width, (j + 0.5) / height). */
+  Vec3 sample(Vec2 uv) const;
 };
 
 struct RenderLight {
   enum Type { Directional = 0, Point = 1, Spot = 2, Area = 3 } type = Directional;
+  int bake_mode = 0;  // Unity's Light Mode: 0 Realtime, 1 Mixed, 2 Baked (in the lightmaps: skipped on lightmapped surfaces)
   Vec3 direction{0, -1, 0};  // the way the light points (directional, spot, area)
   Vec3 right{1, 0, 0};       // area: the rectangle's width direction (height = cross(direction, right))
   float cos_outer = 0.0f, cos_inner = 0.0f;  // spot cone (cosines of the half angles)
@@ -70,6 +83,10 @@ inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
   return f;
 }
 
+struct VoxelGIFrame;  // voxel_gi.h
+struct Rsm;
+struct ProbeFrame;  // probe_volume.h
+
 struct LightingEnv {
   Vec3 sky{0.45f, 0.52f, 0.62f};
   Vec3 equator{0.32f, 0.34f, 0.36f};
@@ -80,6 +97,12 @@ struct LightingEnv {
   const Environment *environment = nullptr;
   const ShadowMap *shadow = nullptr;  // for lights[shadow_light]
   int shadow_light = -1;
+  const VoxelGIFrame *gi = nullptr;   // voxel GI (task 0013): null = off
+  /* Realtime lightmaps read without a GI pass this frame (task 0020, Manual): whether the shown bake lacks
+   * the sun's bounce (lightmapped surfaces add the maps'), and the specular occlusion setting. */
+  bool rt_bounce_not_baked = false;
+  float rt_specular_occlusion = 0.0f;
+  const ProbeFrame *probes = nullptr; // probe volumes (task 0014): null = none
   ViewTransform view_transform = ViewTransform::Standard;
   float exposure = 0.0f;
 };
@@ -95,6 +118,16 @@ struct DrawItem {
   const std::vector<MaterialPtr> *materials = nullptr;  // Deferred mode (null = default material)
   bool receive_shadows = true;
   const std::vector<uint8_t> *face_highlight = nullptr;  // edit mode: tint selected faces
+  /* Baked lighting: its page and the lightmap UVs, 3 per render-mesh triangle (null = not lightmapped). */
+  const Lightmap *lightmap = nullptr;
+  const std::vector<Vec2> *lightmap_uv = nullptr;
+  bool use_probes = false;  // takes its indirect light from the probe volume (no lightmap)
+  /* Realtime lightmaps (task 0016): voxel GI's bounce and sky share per texel, with their UVs (3 per
+   * triangle). Set: the per-pixel GI pass reads these instead of tracing. realtime_lm: the editor wants
+   * one for this item (Contribute GI, Receive GI = Lightmaps). */
+  const Lightmap *rt_bounce = nullptr, *rt_sky = nullptr;
+  const std::vector<Vec2> *rt_uv = nullptr;
+  bool realtime_lm = false;
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
 };
 
@@ -127,6 +160,9 @@ struct RasterStats {
   int objects_submitted = 0, objects_culled = 0;
   size_t tris_submitted = 0, tris_rasterized = 0;
   double ms_vertex = 0, ms_setup = 0, ms_bin = 0, ms_raster = 0, ms_shade = 0, ms_total = 0;
+  double ms_clear = 0;  // clearing the planes (not in ms_total, which is flush())
+  double ms_gi = 0;     // voxel GI's per-pixel pass: tracing and blurring the receivers (part of ms_shade)
+  size_t gi_traced = 0; // receivers the per-pixel pass traced (realtime lightmaps spare theirs)
 };
 
 /* Color plus depth, id and visibility planes. color may point into a larger
@@ -169,6 +205,8 @@ class Renderer3D {
     inv_vp_ = vp_.inverse();
   }
   void clear(uint32_t color);
+  /* The depth / id / visibility planes (and the colour when given) back to empty. */
+  void clear_planes(const uint32_t *color);
   /* Unity-style procedural skybox gradient. */
   void clear_sky(const Mat4 &inv_view_proj, Vec3 sky, Vec3 horizon, Vec3 ground);
   /* Background from a World environment (HDRI / sky / colour), tone mapped. */
@@ -179,6 +217,17 @@ class Renderer3D {
   /* Overlays drawn after flush() (grid, wireframes, gizmo lines). */
   void line(Vec3 a, Vec3 b, uint32_t color, bool depth_test = true, float depth_bias = 0.0f);
   void point(Vec3 p, float radius_px, uint32_t color, bool depth_test = true);
+  /* Between begin_overlay_batch() and end_overlay_batch(), line() and point() are recorded and then
+   * drawn in parallel bands of rows. Each pixel still sees them in the order they were given, so the
+   * picture is the same as drawing them one by one; the grid and an Edit Mode cage are thousands. */
+  void begin_overlay_batch();
+  void end_overlay_batch();
+  /* Deferred shading writes a reflective shadow map instead of colour (voxel GI): what each pixel's
+   * surface reflects of `sun`. Set before begin(); null turns it off. */
+  void set_rsm_output(Rsm *out, const RenderLight &sun) {
+    rsm_out_ = out;
+    rsm_sun_ = sun;
+  }
   /* Orange outline around pixels whose id is in `selected`, Unity/Blender style. */
   void outline_ids(const std::vector<uint32_t> &selected_sorted, uint32_t color, int width = 2);
 
@@ -223,6 +272,28 @@ class Renderer3D {
   RasterOptions opt_;
   RasterStats stats_;
   std::vector<DrawItem> items_;
+  /* An overlay prepared for drawing (screen space, clipped). */
+  struct OverlayCmd {
+    float x0, y0, z0, x1, y1, z1;  // line ends, or a point's centre in x0 / y0 / z0 and its radius in x1
+    uint32_t color;
+    float bias;
+    bool point, depth_test;
+    int ymin, ymax;  // rows it can touch
+  };
+  bool batching_ = false;
+  std::vector<OverlayCmd> overlay_cmds_;
+  Rsm *rsm_out_ = nullptr;
+  RenderLight rsm_sun_;
+  /* Voxel GI receivers at 1 / downsample resolution (gathered, then blurred). */
+  struct GiTexel {
+    Vec3 bounce, pos, n;
+    float sky = 1.0f;
+    bool valid = false;
+  };
+  std::vector<GiTexel> gi_lo_, gi_blur_;
+  bool prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias, OverlayCmd &out) const;
+  bool prepare_point(Vec3 p, float r, uint32_t color, bool depth_test, OverlayCmd &out) const;
+  void draw_overlay(const OverlayCmd &c, int ymin, int ymax);  // only rows [ymin, ymax)
   std::vector<Mat4> normal_mats_;
   std::vector<std::vector<Vec4>> clip_pos_;
   std::vector<std::vector<Vec4>> screen_pos_;  // x, y, depth, 1/w (valid where clip z >= 0)
