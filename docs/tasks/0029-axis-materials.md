@@ -4,7 +4,7 @@
 - **Requirements:** R-03
 - **Decisions:** ADR 0018
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/27
 
 ## Goal
 The user asked for "procedural materials/textures that can take axis as a parameter (a material that will

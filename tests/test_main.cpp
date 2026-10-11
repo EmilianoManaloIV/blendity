@@ -210,6 +210,7 @@ static void round48_tests();
 static void round49_tests();
 static void round50_tests();
 static void round51_tests();
+static void round52_tests();
 
 int main() {
   register_builtin_components();
@@ -838,6 +839,7 @@ int main() {
   round49_tests();
   round50_tests();
   round51_tests();
+  round52_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -19047,5 +19049,361 @@ static void round51_tests() {
       std::printf("    %s: mean |difference| %.4f of mean %.4f\n", d.name.c_str(), err / img.size(), mean / img.size());
       CHECK(err / img.size() < 0.08 * (mean / img.size()));
     }
+  });
+}
+
+/* ===================================================================== */
+/* Round 52 (task 0030): large area lights, the gizmo after Set Origin,   */
+/* Select Coplanar                                                         */
+/* ===================================================================== */
+
+/* A 10 x 10 m area light 3.5 m up, facing down (the user's report). */
+RenderLight r52_big_light(bool disk = false, float w = 10.0f, float h = 10.0f) {
+  RenderLight l;
+  l.type = RenderLight::Area;
+  l.position = {0, 3.5f, 0};
+  l.direction = {0, -1, 0};
+  l.right = {1, 0, 0};
+  l.width = w;
+  l.height = h;
+  l.disk = disk;
+  l.intensity = 2.0f;
+  l.range = 10.0f;
+  return l;
+}
+
+/* The path tracer's estimate without shadows, converged: the mean of max(0, n.L) max(0, facing) over uniform
+ * random points of the light. */
+double r52_reference(const RenderLight &l, Vec3 p, Vec3 n, int samples = 1000000) {
+  uint32_t s = 12345;
+  auto rnd = [&] {
+    s = s * 1664525u + 1013904223u;
+    return (s >> 8) / 16777216.0f;
+  };
+  double sum = 0;
+  for (int i = 0; i < samples; i++) {
+    float a = rnd() - 0.5f, b = rnd() - 0.5f;
+    if (l.disk) {
+      const float rr = 0.5f * std::sqrt(rnd()), ph = 2 * kPi * rnd();
+      a = rr * std::cos(ph);
+      b = rr * std::sin(ph);
+    }
+    const Vec3 up = cross(l.direction, l.right);
+    Vec3 L = l.position + l.right * (a * l.width) + up * (b * l.height) - p;
+    L = normalize(L);
+    const float ndl = dot(n, L), c = -dot(l.direction, L);
+    if (ndl > 0 && c > 0) sum += ndl * c;
+  }
+  return sum / samples;
+}
+
+static void round52_tests() {
+  test("area light: its light over the whole surface matches the path tracer's converged estimate (under it, a cube's side, close up, a disk)", [] {
+    struct Case {
+      const char *name;
+      Vec3 p, n;
+      bool disk;
+      float w, h;
+    };
+    const Case cases[] = {{"floor under the centre", {0, 0, 0}, {0, 1, 0}, false, 10, 10},
+                          {"a cube's side", {0.5f, 0.5f, 0}, {1, 0, 0}, false, 10, 10},
+                          {"a cube's top", {0, 1, 0}, {0, 1, 0}, false, 10, 10},
+                          {"floor near the edge", {4.5f, 0, 2}, {0, 1, 0}, false, 10, 10},
+                          {"close below, tilted", {1, 3.0f, -1}, normalize(Vec3(0.3f, 1, 0.2f)), false, 10, 10},
+                          {"0.3 m below, off centre", {1.7f, 3.2f, -2.3f}, {0, 1, 0}, false, 10, 10},
+                          {"0.6 m below, a side", {2.2f, 2.9f, 0.4f}, {1, 0, 0}, false, 10, 10},
+                          {"a 20 x 0.2 m strip 0.5 m above", {0.3f, 3.0f, 0}, {0, 1, 0}, false, 20, 0.2f},
+                          {"a 0.2 x 20 m strip, a side cutting it", {0.05f, 3.0f, 0}, {1, 0, 0}, false, 0.2f, 20},
+                          {"a 0.1 m light (as a point)", {0.4f, 1.0f, 0.3f}, normalize(Vec3(0.2f, 1, 0)), false, 0.1f, 0.1f},
+                          {"a disk light, a side", {0.5f, 0.5f, 0}, {1, 0, 0}, true, 10, 10},
+                          {"a disk light, floor", {1.0f, 0, -2.0f}, {0, 1, 0}, true, 10, 10},
+                          {"a disk light 0.5 m below, tilted", {1.0f, 3.0f, 1.0f}, normalize(Vec3(-0.4f, 1, 0.1f)), true, 10, 10}};
+    for (const Case &c : cases) {
+      const RenderLight l = r52_big_light(c.disk, c.w, c.h);
+      const double ref = r52_reference(l, c.p, c.n), got = area_light_cosine(l, c.p, c.n);
+      std::printf("    %s: %.4f (reference %.4f)\n", c.name, got, ref);
+      CHECK(std::fabs(got - ref) <= 0.01 * ref + 1e-4);
+    }
+    /* Turned away, behind the light, NaN: nothing. */
+    const RenderLight l = r52_big_light();
+    CHECK(area_light_cosine(l, {0, 5, 0}, {0, 1, 0}) == 0.0f);
+    CHECK(area_light_cosine(l, {0, 0, 0}, {0, -1, 0}) == 0.0f);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(area_light_cosine(l, {nan, 0, 0}, {0, 1, 0}) == 0.0f);
+    /* No size (an object scaled to 0 on an axis): the centre, as a point, as the path tracer does. */
+    const RenderLight z = r52_big_light(false, 0.0f, 0.0f);
+    const float pz = area_light_cosine(z, {0, 0, 0}, {0, 1, 0});
+    CHECK(std::fabs(pz - 1.0f) < 1e-4f);
+  });
+
+  test("area light: a 10 m light lights a cube's side in the rasterizer (it was black), as the path tracer does", [] {
+    /* A quad standing where a unit cube's +X side is, seen from +X; only the area light, a black world. */
+    auto quad = primitives::quad(1.0f);
+    std::vector<MaterialPtr> mats = {make_material("side", Vec3(0.8f))};
+    mats[0]->specular = 0.0f;
+    mats[0]->roughness = 1.0f;
+    const Mat4 model = Mat4::translate({0.5f, 0.5f, 0}) * Mat4::rotate(Quat::euler({0, 90, 0}));
+    const RenderLight l = r52_big_light();
+    Environment black;
+    black.mode = Environment::Color;
+    black.color = Vec3(0.0f);
+    /* The rasterizer, linear (its HDR plane). */
+    Image img;
+    img.resize(32, 32);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 32, 32});
+    rt.want_hdr = true;
+    Renderer3D r;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env;
+    env.view_transform = ViewTransform::Standard;
+    env.camera_pos = {4, 0.5f, 0};
+    env.sky = env.equator = env.ground = Vec3(0.0f);
+    env.environment = &black;
+    env.lights = {l};
+    r.begin(&rt, Mat4::look_at(env.camera_pos, {0.5f, 0.5f, 0}, {0, 1, 0}), Mat4::perspective(10 * kDeg2Rad, 1, 0.1f, 20), env, opt);
+    r.clear(0xFF000000);
+    DrawItem it;
+    it.mesh = &quad->render_mesh_tangents();
+    it.model = model;
+    it.materials = &mats;
+    it.double_sided = true;
+    r.add(it);
+    r.flush();
+    CHECK(!rt.hdr.empty());
+    const float raster = rt.hdr.empty() ? 0.0f : rt.hdr[16 * 32 + 16].y;
+    /* The path tracer, direct light only. */
+    PathTracer pt;
+    PTSettings st;
+    st.denoise = false;
+    st.use_embree = false;
+    st.max_bounces = 0;
+    pt.set_settings(st);
+    pt.build({{&quad->render_mesh_tangents(), model, &mats}}, {l}, black);
+    pt.set_camera(Mat4::look_at(env.camera_pos, {0.5f, 0.5f, 0}, {0, 1, 0}), Mat4::ortho(0.3f, 1.0f, 0.1f, 20), 8, 8);
+    pt.render(1e9, 4096);
+    const auto rgb = pt.linear_rgb(false);
+    float traced = 0;
+    for (int y = 3; y < 5; y++)
+      for (int x = 3; x < 5; x++) traced += rgb[((size_t)y * 8 + x) * 3 + 1] * 0.25f;
+    std::printf("    the side's middle: rasterizer %.4f, path tracer %.4f\n", raster, traced);
+    CHECK(traced > 0.05f);
+    CHECK(std::fabs(raster - traced) < 0.1f * traced);
+  });
+
+  test("area light: a glossy floor's highlight from a 1 m area light is close to the path tracer's (it was normalised twice)", [] {
+    auto quad = primitives::quad(4.0f);
+    std::vector<MaterialPtr> mats = {make_material("gloss", Vec3(0.0f))};  // black: the specular alone
+    mats[0]->roughness = 0.3f;
+    const Mat4 model = Mat4::rotate(Quat::euler({90, 0, 0}));  // lying flat
+    RenderLight l = r52_big_light(false, 1.0f, 1.0f);
+    l.position = {1, 2, 0};  // the mirror image of the camera through the floor's centre
+    Environment black;
+    black.mode = Environment::Color;
+    black.color = Vec3(0.0f);
+    const Vec3 eye{-1, 2, 0};
+    Image img;
+    img.resize(32, 32);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 32, 32});
+    rt.want_hdr = true;
+    Renderer3D r;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env;
+    env.view_transform = ViewTransform::Standard;
+    env.camera_pos = eye;
+    env.sky = env.equator = env.ground = Vec3(0.0f);
+    env.environment = &black;
+    env.lights = {l};
+    r.begin(&rt, Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(4 * kDeg2Rad, 1, 0.1f, 20), env, opt);
+    r.clear(0xFF000000);
+    DrawItem it;
+    it.mesh = &quad->render_mesh_tangents();
+    it.model = model;
+    it.materials = &mats;
+    it.double_sided = true;
+    r.add(it);
+    r.flush();
+    const float raster = rt.hdr.empty() ? 0.0f : rt.hdr[16 * 32 + 16].y;
+    PathTracer pt;
+    PTSettings st;
+    st.denoise = false;
+    st.use_embree = false;
+    st.max_bounces = 0;
+    pt.set_settings(st);
+    pt.build({{&quad->render_mesh_tangents(), model, &mats}}, {l}, black);
+    pt.set_camera(Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), Mat4::ortho(0.05f, 1.0f, 0.1f, 20), 4, 4);
+    pt.render(1e9, 20000);
+    const auto rgb = pt.linear_rgb(false);
+    float traced = 0;
+    for (int i = 0; i < 16; i++) traced += rgb[(size_t)i * 3 + 1] / 16.0f;
+    std::printf("    the highlight: rasterizer %.4f, path tracer %.4f (%.2fx)\n", raster, traced, raster / std::max(1e-6f, traced));
+    CHECK(traced > 0.01f);
+    /* Karis's representative point is an approximation: within a factor 0.5 .. 1.6 (measured by the reviewer
+     * 0.53 .. 1.18 over sizes and roughnesses); before the fix 0.12x. */
+    CHECK(raster > 0.5f * traced && raster < 1.6f * traced);
+  });
+
+  test("area light: a floor baked under a 10 m Baked area light is smooth (no splotches) and as bright as the path tracer's", [] {
+    auto floor = primitives::plane(8.0f, 1);
+    BakeObject o;
+    o.id = 1;
+    o.mesh = floor;
+    o.model = Mat4::identity();
+    o.materials = {make_material("f", Vec3(0.8f))};
+    const RenderLight l = r52_big_light();
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    BakeSettings bs;
+    bs.texels_per_unit = 8.0f;
+    bs.direct_samples = 32;
+    bs.indirect_samples = 1;
+    bs.bounces = 0;
+    bs.denoise = false;  // the raw texels
+    Lightmapper lm;
+    lm.begin({o}, {{l, 2, 9}}, env, bs);
+    while (!lm.step(1e9)) {}
+    const LightingData d = lm.take_result();
+    CHECK(d.pages.size() == 1);
+    if (d.pages.empty()) return;
+    const Lightmap &m = d.pages[0];
+    /* An open floor's light varies smoothly: each texel against the mean of its left and right neighbours (a
+     * second difference: the floor's real gradient cancels, the noise doesn't). */
+    double bump = 0, level = 0;
+    size_t n = 0;
+    for (int y = 1; y < m.height; y++)
+      for (int x = 1; x + 1 < m.width; x++) {
+        const size_t i = (size_t)y * m.width + x;
+        const float c = m.texels[i].x, left = m.texels[i - 1].x, right = m.texels[i + 1].x;
+        if (c < 0.05f || left < 0.05f || right < 0.05f) continue;  // padding
+        bump += std::fabs(c - 0.5f * (left + right));
+        level += c;
+        n++;
+      }
+    std::printf("    %zu texels: mean bump against the neighbours %.3f%% of the level\n", n, 100.0 * bump / std::max(1e-9, level));
+    CHECK(n > 500);
+    CHECK(bump / std::max(1e-9, level) < 0.005);
+    /* The floor's centre against the path tracer's converged estimate (the lightmap holds what albedo multiplies). */
+    Vec3 centre;
+    CHECK(r35_sample(d, 1, *floor, Mat4::identity(), {0.05f, 0, 0.05f}, centre));
+    const double want = l.intensity * r52_reference(l, {0.05f, 0, 0.05f}, {0, 1, 0}) * light_range_falloff(l, {0.05f, 0, 0.05f});
+    std::printf("    centre %.4f, path tracer %.4f\n", centre.x, want);
+    CHECK(std::fabs(centre.x - want) < 0.05 * want);
+  });
+
+  test("set origin: a change asks for another frame, and in it the gizmo sits on the new origin (it waited for the next input)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 2, 0});
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(length(ed.gizmo_pivot_for_test() - Vec3(0, 2, 0)) < 1e-4f);
+    /* The Inspector's Apply runs after the Scene view placed the gizmo for that frame; the console's
+     * `origin` runs the same set_origin. Afterwards the editor must ask for a frame by itself. */
+    ed.step_frame_headless();  // (an idle frame: nothing asks for another)
+    ed.command("origin bottom");
+    std::printf("    origin y %.3f; another frame asked for: %s\n", g->world_position().y, ed.ui_for_test().redraw ? "yes" : "no");
+    CHECK(std::fabs(g->world_position().y - 1.5f) < 1e-4f);  // the bottom of a unit cube at y = 2
+    CHECK(ed.ui_for_test().redraw);  // before the fix: no, so the app slept with the gizmo on the old origin
+    ed.step_frame_headless();
+    CHECK(length(ed.gizmo_pivot_for_test() - g->world_position()) < 1e-4f);
+  });
+
+  test("camera filters: every filter shows in a path-traced F12 render at 720p with the denoiser, as in a rasterized one", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("set Render.Samples 2");
+    ed.command("set Render.ResolutionX 1280");
+    ed.command("set Render.ResolutionY 720");
+    ed.command("set Render.Denoise true");
+    ed.command("device cpu");
+    auto render = [&](const char *engine) {
+      ed.command(std::string("set Render.RenderEngine ") + engine);
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.rendering_for_test());
+      const Image &img = ed.render_image_for_test();
+      return r47_dark(img, {0, 0, img.width, img.height});
+    };
+    const int path0 = render("Path"), raster0 = render("Rasterized");
+    ed.command("select Main Camera");
+    ed.command("filter add Edge Outline");
+    const int path1 = render("Path"), raster1 = render("Rasterized");
+    std::printf("    near-black pixels with an Edge Outline: path traced %d -> %d, rasterized %d -> %d\n", path0, path1, raster0, raster1);
+    CHECK(raster1 > raster0 + 300);
+    CHECK(path1 > path0 + 300);
+    CHECK(path1 - path0 > (raster1 - raster0) / 2);
+    /* On the GPUs (Render > Device GPU Compute, the user's setting), and the Render window's Preview. */
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const int gpu1 = render("Path");
+      std::printf("    on the GPU: %d\n", gpu1);
+      CHECK(gpu1 > path0 + 300);
+      ed.command("device cpu");
+    }
+    ed.command("set Render.RenderEngine Path");
+    ed.command("preview");
+    for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    const Image &pv = ed.render_image_for_test();
+    const int prev1 = r47_dark(pv, {0, 0, pv.width, pv.height});
+    std::printf("    the Render window's Preview (%d x %d): %d\n", pv.width, pv.height, prev1);
+    CHECK(prev1 > 0);
+  });
+
+  test("select coplanar: adds the faces in the selected face's plane, joined or not, and nothing tilted, raised or facing the other way", [] {
+    /* Four quads at y = 0 facing up (two apart from the first), one raised, one facing down, one tilted by 5 degrees. */
+    auto m = std::make_shared<Mesh>();
+    auto quad = [&](float x0, float y, bool down, float tilt = 0.0f) {
+      uint32_t a = m->add_vert({x0, y, 0}), b = m->add_vert({x0, y + tilt, 1}), c = m->add_vert({x0 + 1, y + tilt, 1}), d = m->add_vert({x0 + 1, y, 0});
+      if (down) m->add_face({a, d, c, b});
+      else m->add_face({a, b, c, d});
+    };
+    quad(0, 0, false);   // 0: the one selected
+    quad(1, 0, false);   // 1: joined, coplanar
+    quad(5, 0, false);   // 2: apart, coplanar
+    quad(8, 0.5f, false);  // 3: raised
+    quad(10, 0, true);   // 4: facing down
+    quad(12, 0, false, 0.09f);  // 5: tilted ~5 degrees
+    {  // 6: degenerate (three corners on a line): no plane
+      uint32_t a = m->add_vert({20, 0, 0}), b = m->add_vert({21, 0, 0}), c = m->add_vert({22, 0, 0});
+      m->add_face({a, b, c});
+    }
+    std::vector<uint8_t> sel(m->face_count(), 0);
+    sel[0] = 1;
+    CHECK(meshops::select_coplanar(*m, sel) == 2);
+    CHECK(sel[1] && sel[2] && !sel[3] && !sel[4] && !sel[5] && !sel[6]);
+    /* Nothing selected, or only the degenerate face: nothing added. */
+    std::vector<uint8_t> none(m->face_count(), 0);
+    CHECK(meshops::select_coplanar(*m, none) == 0);
+    none[6] = 1;
+    CHECK(meshops::select_coplanar(*m, none) == 0);
+    /* Through the editor: face mode, and vertex mode from the corners of one face. */
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>());
+    if (!g || !g->get<MeshFilter>()) return;
+    g->get<MeshFilter>()->mesh = m;
+    ed.command("fsel 0");
+    ed.command("editop select_coplanar");
+    CHECK(ed.edit_face_selected(0) && ed.edit_face_selected(1) && ed.edit_face_selected(2));
+    CHECK(!ed.edit_face_selected(3) && !ed.edit_face_selected(4) && !ed.edit_face_selected(5));
+    ed.command("edit vertex");
+    ed.command("vsel 0 1 2 3 12");  // the first quad's corners, and one corner of the raised quad
+    ed.command("editop select_coplanar");
+    CHECK(ed.edit_vert_selected(8) && ed.edit_vert_selected(12));  // a coplanar quad's corner added; the other kept
+    ed.command("edit face");
+    CHECK(ed.edit_face_selected(2) && !ed.edit_face_selected(3));
   });
 }

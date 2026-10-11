@@ -197,6 +197,29 @@ Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l) {
   return (diff * (Vec3(1.0f) - F) + spec) * nl;
 }
 
+void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffuse, Vec3 &specular) {
+  const Vec3 f0 = fresnel_f0(s);
+  const Vec3 diff = s.albedo * ((1.0f - s.metallic) / kPi);
+  float nl = dot(n, l);
+  if (nl <= 0.0f) {  // no specular from below the horizon; the diffuse with the normal-incidence Fresnel
+    diffuse = diff * (Vec3(1.0f) - f0);
+    specular = Vec3(0.0f);
+    return;
+  }
+  float nv = std::max(dot(n, v), 1e-4f);
+  Vec3 h = normalize(v + l);
+  float nh = std::max(dot(n, h), 0.0f), vh = std::max(dot(v, h), 0.0f);
+  float a = std::max(s.roughness * s.roughness, 0.002f), a2 = a * a;
+  float d = nh * nh * (a2 - 1.0f) + 1.0f;
+  float D = a2 / (kPi * d * d);
+  float vis = 0.5f / (nl * std::sqrt(nv * nv * (1 - a2) + a2) + nv * std::sqrt(nl * nl * (1 - a2) + a2));
+  float fw = (1.0f - vh) * (1.0f - vh);
+  fw = fw * fw * (1.0f - vh);
+  Vec3 F = f0 + (Vec3(1.0f) - f0) * fw;
+  diffuse = diff * (Vec3(1.0f) - F);
+  specular = F * (D * vis * nl);
+}
+
 Vec3 env_brdf_approx(Vec3 f0, float roughness, float nv) {
   const float c0x = -1, c0y = -0.0275f, c0z = -0.572f, c0w = 0.022f;
   const float c1x = 1, c1y = 0.0425f, c1z = 1.04f, c1w = -0.04f;

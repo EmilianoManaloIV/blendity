@@ -531,6 +531,81 @@ void grow_selection(const Mesh &m, std::vector<uint8_t> &vert_sel, bool grow) {
   vert_sel = out;
 }
 
+size_t select_coplanar(const Mesh &m, std::vector<uint8_t> &face_sel, float angle_deg, float dist) {
+  face_sel.resize(m.face_count(), 0);
+  struct Plane {
+    Vec3 n;
+    float d;
+  };
+  auto plane_of = [&](size_t f, Plane &p) {
+    const Vec3 nn = m.face_normal(f);
+    const float len = length(nn);
+    if (!(len > 1e-12f)) return false;  // degenerate faces have no plane
+    p.n = nn / len;
+    p.d = dot(p.n, m.face_center(f));
+    return finite_bits(p.d);
+  };
+  std::vector<Plane> planes;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    Plane p;
+    if (face_sel[f] && plane_of(f, p)) planes.push_back(p);
+  }
+  if (planes.empty()) return 0;
+  const AABB b = m.bounds();
+  const float size = b.valid() ? std::max(1e-6f, length(b.max - b.min)) : 1.0f;
+  const float tol = dist >= 0.0f ? dist : 1e-4f * std::max(size, 1.0f);
+  const float ang = std::max(0.0f, std::min(90.0f, angle_deg));
+  const float cos_max = std::cos(ang * kDeg2Rad);
+  /* The selected planes in a grid over (normal, offset) with cells as wide as the tolerances: a face looks
+   * only at its own cell and the neighbours (a big selection of many planes stays linear). */
+  const float cn = std::max(1e-3f, 2.0f * std::sin(0.5f * ang * kDeg2Rad)), cd = std::max(1e-12f, tol);
+  auto cell = [&](const Plane &p, int64_t out[4]) {
+    out[0] = (int64_t)std::floor(p.n.x / cn);
+    out[1] = (int64_t)std::floor(p.n.y / cn);
+    out[2] = (int64_t)std::floor(p.n.z / cn);
+    const double dd = std::floor((double)p.d / cd);
+    out[3] = (int64_t)std::max(-9e15, std::min(9e15, dd));
+  };
+  auto key = [](const int64_t c[4]) {
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < 4; i++) h = (h ^ (uint64_t)c[i]) * 1099511628211ull;
+    return h;
+  };
+  std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+  for (size_t i = 0; i < planes.size(); i++) {
+    int64_t c[4];
+    cell(planes[i], c);
+    grid[key(c)].push_back((uint32_t)i);
+  }
+  size_t added = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (face_sel[f]) continue;
+    Plane q;
+    if (!plane_of(f, q)) continue;
+    int64_t c[4];
+    cell(q, c);
+    const Vec3 fc = m.face_center(f);
+    bool hit = false;
+    for (int k = 0; k < 81 && !hit; k++) {
+      int64_t nb[4] = {c[0] + k % 3 - 1, c[1] + k / 3 % 3 - 1, c[2] + k / 9 % 3 - 1, c[3] + k / 27 - 1};
+      auto it = grid.find(key(nb));
+      if (it == grid.end()) continue;
+      for (uint32_t i : it->second) {
+        const Plane &p = planes[i];
+        if (dot(p.n, q.n) >= cos_max && std::fabs(dot(p.n, fc) - p.d) <= tol) {
+          hit = true;
+          break;
+        }
+      }
+    }
+    if (hit) {
+      face_sel[f] = 1;
+      added++;
+    }
+  }
+  return added;
+}
+
 void select_non_manifold(const Mesh &m, std::vector<uint8_t> &vert_sel) {
   vert_sel.assign(m.vert_count(), 0);
   std::unordered_map<uint64_t, int> count;

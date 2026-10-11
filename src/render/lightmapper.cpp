@@ -349,48 +349,56 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       if (ndl > 0.0f && !pt_->occluded({o, L}, 1e30f)) value += col * ndl;
       continue;
     }
-    /* An area light is sampled on a jittered grid over its surface (stratified: the noise falls much faster
-     * than with random points), the grid shifted by a random offset per texel so neighbouring texels don't
-     * share a pattern (Cranley-Patterson rotation). A disk keeps the points inside its ellipse. */
-    const int ns = l.type == RenderLight::Area ? s_.direct_samples : 1;
-    const int nx = l.type == RenderLight::Area ? std::max(1, (int)std::ceil(std::sqrt((double)ns))) : 1;
-    const int ny = l.type == RenderLight::Area ? std::max(1, (ns + nx - 1) / nx) : 1;
-    const float sx = rnd01(rng), sy = rnd01(rng);
-    /* Exactly ns samples (the count the user set): the grid's last strata may go unused, which the random
-     * offset per texel keeps unbiased. */
-    Vec3 acc(0.0f);
-    for (int k = 0; k < ns; k++) {
-      Vec3 lp = l.position;
-      if (l.type == RenderLight::Area) {
-        const Vec3 up = normalize(cross(l.direction, l.right));
-        float a = std::fmod(((k % nx) + rnd01(rng)) / (float)nx + sx, 1.0f) - 0.5f;
-        float b = std::fmod(((k / nx) + rnd01(rng)) / (float)ny + sy, 1.0f) - 0.5f;
-        if (l.disk) {
-          /* The square's point mapped onto the disk (concentric): every stratum lands inside it. */
-          const float u = 2.0f * (a + 0.5f) - 1.0f, v = 2.0f * (b + 0.5f) - 1.0f;
-          float r = 0.0f, th = 0.0f;
-          if (u != 0.0f || v != 0.0f) {
-            if (std::fabs(u) > std::fabs(v)) r = u, th = (kPi / 4.0f) * (v / u);
-            else r = v, th = (kPi / 2.0f) - (kPi / 4.0f) * (u / v);
-          }
-          a = 0.5f * r * std::cos(th), b = 0.5f * r * std::sin(th);
-        }
-        lp = l.position + l.right * (a * l.width) + up * (b * l.height);
+    if (l.type == RenderLight::Area) {
+      /* An area light: its unshadowed light computed (area_light_cosine, no noise), times the share of it
+       * the shadow rays find unblocked, each ray weighted by its cosines (a ratio estimator: Heitz et al.
+       * 2018, "Combining Analytic Direct Illumination and Stochastic Shadows"). Open surfaces come out exact;
+       * only penumbrae are sampled. The rays go to a jittered grid over the light (stratified), shifted by
+       * a random offset per texel (Cranley-Patterson rotation). The range falloff is the centre's, as in
+       * the path tracer and the rasterizer (task 0030: taking it at each random point made a 10 m light's
+       * maps blotchy, its falloff varying tenfold across the light). */
+      const float unshadowed = area_light_cosine(l, o, n) * light_range_falloff(l, t.position);
+      if (!(unshadowed > 0.0f)) continue;
+      const int ns = std::max(1, s_.direct_samples);
+      const int nx = std::max(1, (int)std::ceil(std::sqrt((double)ns)));
+      const int ny = std::max(1, (ns + nx - 1) / nx);
+      const float sx = rnd01(rng), sy = rnd01(rng);
+      float wsum = 0.0f, vsum = 0.0f;
+      for (int k = 0; k < ns; k++) {
+        const float a = std::fmod(((k % nx) + rnd01(rng)) / (float)nx + sx, 1.0f) - 0.5f;
+        const float b = std::fmod(((k / nx) + rnd01(rng)) / (float)ny + sy, 1.0f) - 0.5f;
+        const Vec3 dvec = area_light_point(l, a, b) - o;
+        const float dist = length(dvec);
+        if (!(dist > 1e-5f)) continue;
+        const Vec3 L = dvec / dist;
+        const float w = dot(n, L) * -dot(l.direction, L);
+        if (!(w > 0.0f) || dot(n, L) <= 0.0f) continue;
+        rays++;
+        wsum += w;
+        if (!pt_->occluded({o, L}, dist * (1.0f - 1e-4f))) vsum += w;
       }
-      const Vec3 dvec = lp - o;
-      const float dist = length(dvec);
-      if (!(dist > 1e-5f)) continue;
-      const Vec3 L = dvec / dist;
-      const float ndl = dot(n, L);
-      if (ndl <= 0.0f) continue;
-      RenderLight at = l;
-      at.position = lp;
-      const float fall = light_falloff(at, t.position, L);
-      if (fall <= 0.0f) continue;
-      rays++;
-      if (!pt_->occluded({o, L}, dist * (1.0f - 1e-4f))) acc += col * (ndl * fall);
+      if (wsum > 0.0f) value += col * (unshadowed * (vsum / wsum));
+      else {
+        /* A grazing texel whose few samples all fell behind its horizon: one ray to the light's point
+         * nearest its normal. */
+        float facing;
+        const Vec3 L = area_light_specular_dir(l, o, n, facing);
+        rays++;
+        if (dot(n, L) > 0.0f && facing > 0.0f && !pt_->occluded({o, L}, 1e30f)) value += col * unshadowed;
+      }
+      continue;
     }
-    value += acc / (float)ns;
+    /* A point or spot light: one shadow ray. */
+    const Vec3 dvec = l.position - o;
+    const float dist = length(dvec);
+    if (!(dist > 1e-5f)) continue;
+    const Vec3 L = dvec / dist;
+    const float ndl = dot(n, L);
+    if (ndl <= 0.0f) continue;
+    const float fall = light_falloff(l, t.position, L);
+    if (fall <= 0.0f) continue;
+    rays++;
+    if (!pt_->occluded({o, L}, dist * (1.0f - 1e-4f))) value += col * (ndl * fall);
   }
   rays_ += rays;
   return finite3(value) ? Vec3(std::max(0.0f, value.x), std::max(0.0f, value.y), std::max(0.0f, value.z)) : Vec3(0.0f);

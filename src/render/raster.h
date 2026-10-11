@@ -83,6 +83,40 @@ inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
   return f;
 }
 
+/* The range part of light_falloff alone, taken at the light's centre (as every renderer takes it). */
+inline float light_range_falloff(const RenderLight &l, Vec3 p) {
+  if (l.type == RenderLight::Directional) return 1.0f;
+  float f = 1.0f - length(l.position - p) / (l.range > 1e-3f ? l.range : 1e-3f);
+  return f > 0.0f ? f * f : 0.0f;
+}
+
+/* A point on an area light: a, b in [-0.5, 0.5] across its width and its height. A disk maps the square
+ * onto its ellipse concentrically (Shirley-Chiu: equal areas stay equal, so a uniform grid stays uniform). */
+inline Vec3 area_light_point(const RenderLight &l, float a, float b) {
+  if (l.disk) {
+    const float u = 2.0f * a, v = 2.0f * b;
+    float r = 0.0f, th = 0.0f;
+    if (u != 0.0f || v != 0.0f) {
+      if (std::fabs(u) > std::fabs(v)) r = u, th = (kPi / 4.0f) * (v / u);
+      else r = v, th = (kPi / 2.0f) - (kPi / 4.0f) * (u / v);
+    }
+    a = 0.5f * r * std::cos(th);
+    b = 0.5f * r * std::sin(th);
+  }
+  const Vec3 up = normalize(cross(l.direction, l.right));
+  return l.position + l.right * (a * l.width) + up * (b * l.height);
+}
+
+/* An area light's facing-weighted cosine at p, unshadowed: the mean over its surface of
+ * max(0, n.L) * max(0, the light's facing toward p), on a k x k midpoint grid with k from the light's
+ * angular size (2..8). What the path tracer's next-event estimate converges to without shadows (its range
+ * falloff aside, which is light_range_falloff). A large light near a surface lights faces turned away from
+ * its centre, which a point at the centre doesn't (task 0030: black sides on a cube under a 10 m light). */
+float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n);
+/* The direction to an area light's representative point for a specular lobe (Karis 2013): the point of
+ * the light nearest the reflection ray R, else the nearest to p. Also its facing toward p. */
+Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing);
+
 struct VoxelGIFrame;  // voxel_gi.h
 struct Rsm;
 struct ProbeFrame;  // probe_volume.h

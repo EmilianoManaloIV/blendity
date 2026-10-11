@@ -332,6 +332,7 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   ui::Context &ui_mut_for_test() { return ui_; }  // (tests that draw with the toolkit)
+  Vec3 gizmo_pivot_for_test() const { return gizmo_pivot_; }
   bool project_delete_pending() const { return !project_delete_.empty(); }
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
@@ -342,6 +343,7 @@ class Editor {
   }
   bool in_edit_mode() const { return edit_mode_; }
   bool edit_face_selected(size_t f) const { return f < face_sel_.size() && face_sel_[f]; }
+  bool edit_vert_selected(size_t v) const { return v < vert_sel_.size() && vert_sel_[v]; }
   bool vert_selected_for_test(size_t v) const { return v < vert_sel_.size() && vert_sel_[v]; }
   static uint64_t overlap_shorter(const Mesh &m, const std::pair<uint64_t, uint64_t> &p);  // of two overlapping edges, the one to mark
 

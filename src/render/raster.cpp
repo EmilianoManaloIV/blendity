@@ -167,6 +167,209 @@ void Renderer3D::clear_sky(const Mat4 &inv_vp, Vec3 sky, Vec3 horizon, Vec3 grou
   clear_planes(nullptr);
 }
 
+namespace {
+/* Gauss-Legendre nodes and weights moved to [-0.5, 0.5] (the weights sum to 1), for 2 to 8 points: on a smooth
+ * integrand far more accurate than as many midpoints. */
+struct GaussRule {
+  float x[8], w[8];
+};
+GaussRule make_gauss_rule(int k) {
+  static const double nodes[7][4] = {{0.5773502691896257},
+                                     {0.0, 0.7745966692414834},
+                                     {0.3399810435848563, 0.8611363115940526},
+                                     {0.0, 0.5384693101056831, 0.9061798459386640},
+                                     {0.2386191860831969, 0.6612093864662645, 0.9324695142031521},
+                                     {0.0, 0.4058451513773972, 0.7415311855993945, 0.9491079123427585},
+                                     {0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363}};
+  static const double weights[7][4] = {{1.0},
+                                       {0.8888888888888888, 0.5555555555555556},
+                                       {0.6521451548625461, 0.3478548451374538},
+                                       {0.5688888888888889, 0.4786286704993665, 0.2369268850561891},
+                                       {0.4679139345726910, 0.3607615730481386, 0.1713244923791704},
+                                       {0.4179591836734694, 0.3818300505051189, 0.2797053914892766, 0.1294849661688697},
+                                       {0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763}};
+  GaussRule g{};
+  int m = 0;
+  const bool odd = (k & 1) != 0;
+  for (int i = 0; i < (k + 1) / 2; i++) {
+    const double x = nodes[k - 2][i], w = weights[k - 2][i] * 0.5;
+    if (odd && i == 0) {
+      g.x[m] = 0.0f;
+      g.w[m++] = (float)w;
+      continue;
+    }
+    g.x[m] = (float)(-x * 0.5);
+    g.w[m++] = (float)w;
+    g.x[m] = (float)(x * 0.5);
+    g.w[m++] = (float)w;
+  }
+  return g;
+}
+const GaussRule &gauss_rule(int k) {
+  static const GaussRule rules[7] = {make_gauss_rule(2), make_gauss_rule(3), make_gauss_rule(4), make_gauss_rule(5),
+                                     make_gauss_rule(6), make_gauss_rule(7), make_gauss_rule(8)};
+  return rules[std::max(2, std::min(8, k)) - 2];
+}
+}  // namespace
+
+/* Polynomial atan and tan for the quadrature's substitution (std::atan / std::tan were 90 % of its time). Errors
+ * ~1e-5 rad: they move the points a little, and the weights use the same functions, so the sum stays a
+ * consistent change of variables. */
+static inline float quad_atan(float x) {
+  const bool inv = std::fabs(x) > 1.0f;
+  const float z = inv ? 1.0f / x : x, z2 = z * z;
+  const float a = z * (0.99997726f + z2 * (-0.33262347f + z2 * (0.19354346f + z2 * (-0.11643287f + z2 * (0.05265332f + z2 * -0.01172120f)))));
+  return inv ? (x > 0.0f ? 0.5f * kPi : -0.5f * kPi) - a : a;
+}
+/* tan(t) and 1 / cos(t)^2 for |t| < pi / 2, from Taylor series of sin and cos to the 11th / 12th power. */
+static inline void quad_tan(float t, float &tan_t, float &sec2) {
+  const float t2 = t * t;
+  const float s = t * (1.0f + t2 * (-1.0f / 6 + t2 * (1.0f / 120 + t2 * (-1.0f / 5040 + t2 * (1.0f / 362880 + t2 * (-1.0f / 39916800))))));
+  const float c = 1.0f + t2 * (-0.5f + t2 * (1.0f / 24 + t2 * (-1.0f / 720 + t2 * (1.0f / 40320 + t2 * (-1.0f / 3628800 + t2 * (1.0f / 479001600))))));
+  const float rc = 1.0f / std::max(c, 1e-6f);
+  tan_t = s * rc;
+  sec2 = rc * rc;
+}
+
+float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n) {
+  /* In the light's own metres: U along right (width W), V along up (height H). The quantity is
+   *   mean over the light of max(0, n.L) * max(0, facing) = (1 / area) * integral of max(0, n.d) * h / |d|^2,
+   * d = q - p, h = the light's facing distance dir.(p - pos), the same for every point of the light. */
+  const Vec3 up = normalize(cross(l.direction, l.right));
+  const float W = std::fabs(l.width), H = std::fabs(l.height);
+  const Vec3 rel = p - l.position;
+  const float h = dot(l.direction, rel);  // > 0: p in front of the light
+  if (!finite_bits(h) || !finite_bits(W) || !finite_bits(H) || !(h > 0.0f)) return 0.0f;
+  const float c0 = -dot(n, rel), al = dot(n, l.right), be = dot(n, up);  // n.d = c0 + al U + be V
+  if (!(W * H > 1e-10f)) {  // no size (a zero scale): the centre, as a point
+    const float dl = length(rel);
+    return dl > 1e-6f ? std::max(0.0f, c0 / dl) * (h / dl) : 0.0f;
+  }
+  const float fu = dot(l.right, rel), fv = dot(up, rel), h2 = h * h;
+  auto f = [&](float U, float V) {
+    const float g = c0 + al * U + be * V;
+    if (!(g > 0.0f)) return 0.0f;
+    const float u = U - fu, v = V - fv;
+    return g * h / (h2 + u * u + v * v);
+  };
+  float sum = 0.0f;
+  /* Within a quarter of its size from a large light the falloff is sharp: more points there only. */
+  const bool near = h < 0.25f * std::max(W, H);
+  if (!l.disk) {
+    /* A rectangle. The horizon n.d = 0 is a line across it: integrate only the side in front (no kink
+     * inside), the outer axis split where that line crosses a corner (the inner length's kinks). Each axis
+     * through x = foot + h tan(t): the integrand falls like 1 / (h^2 + x^2) from the point under p, which
+     * that substitution flattens (a 10 m light 0.3 m above a floor is as easy as a small one). */
+    const bool outer_u = std::fabs(be) >= std::fabs(al);  // the inner axis is the one the line depends on more
+    const float Wo = outer_u ? W : H, Wi = outer_u ? H : W;
+    const float ao = outer_u ? al : be, ai = outer_u ? be : al;  // n.d = c0 + ao * o + ai * i
+    const float foot_o = outer_u ? dot(l.right, rel) : dot(up, rel), foot_i = outer_u ? dot(up, rel) : dot(l.right, rel);
+    const float ht = std::max(h, 1e-3f * std::max(W, H));
+    const int k = near ? 8 : 5;
+    const GaussRule &g = gauss_rule(k);
+    const float rht = 1.0f / ht;
+    float in_lo = 1.0f, in_hi = -1.0f, in_x[8], in_w[8];
+    float cuts[4] = {-0.5f * Wo, 0.5f * Wo, 0.5f * Wo, 0.5f * Wo};
+    int nc = 1;
+    if (std::fabs(ai) > 1e-12f && std::fabs(ao) > 1e-12f)
+      for (float iv : {-0.5f * Wi, 0.5f * Wi}) {  // where the line meets the inner axis' two edges
+        const float o = -(c0 + ai * iv) / ao;
+        if (o > -0.5f * Wo && o < 0.5f * Wo) cuts[nc++] = o;
+      }
+    cuts[nc++] = 0.5f * Wo;
+    std::sort(cuts, cuts + nc);
+    for (int piece = 0; piece + 1 < nc; piece++) {
+      const float t0 = quad_atan((cuts[piece] - foot_o) * rht), t1 = quad_atan((cuts[piece + 1] - foot_o) * rht);
+      if (!(t1 > t0)) continue;
+      for (int a = 0; a < k; a++) {
+        float tn, sec2;
+        quad_tan(0.5f * (t0 + t1) + (t1 - t0) * g.x[a], tn, sec2);
+        const float o = foot_o + ht * tn, wo = (t1 - t0) * g.w[a] * ht * sec2;
+        /* The inner interval in front of the horizon. */
+        float lo = -0.5f * Wi, hi = 0.5f * Wi;
+        const float base = c0 + ao * o;
+        if (std::fabs(ai) > 1e-12f) {
+          const float edge = -base / ai;
+          if (ai > 0.0f) lo = std::max(lo, edge);
+          else hi = std::min(hi, edge);
+        }
+        else if (!(base > 0.0f)) continue;
+        if (!(hi > lo)) continue;
+        /* The inner points, kept while the interval is the same (always, where the horizon doesn't cut). */
+        if (lo != in_lo || hi != in_hi) {
+          in_lo = lo;
+          in_hi = hi;
+          const float s0 = quad_atan((lo - foot_i) * rht), s1 = quad_atan((hi - foot_i) * rht);
+          for (int b = 0; b < k; b++) {
+            float tn, sec2;
+            quad_tan(0.5f * (s0 + s1) + (s1 - s0) * g.x[b], tn, sec2);
+            in_x[b] = foot_i + ht * tn;
+            in_w[b] = (s1 - s0) * g.w[b] * ht * sec2;
+          }
+        }
+        float row = 0.0f;
+        for (int b = 0; b < k; b++) row += in_w[b] * (outer_u ? f(o, in_x[b]) : f(in_x[b], o));
+        sum += wo * row;
+      }
+    }
+    return sum / (W * H);
+  }
+  /* An ellipse: rays from its centre at evenly spaced angles (periodic: few are needed), each ray's part in
+   * front of the horizon (n.d is linear along it) integrated by Gauss in the area fraction r^2. */
+  const int k = near ? 6 : 5, na = near ? 20 : 12;
+  const GaussRule &g = gauss_rule(k);
+  for (int j = 0; j < na; j++) {
+    const float th = 2.0f * kPi * (j + 0.5f) / na;
+    const float du = 0.5f * W * std::cos(th), dv = 0.5f * H * std::sin(th);
+    float r1 = 1.0f, r0 = 0.0f;
+    const float slope = al * du + be * dv;  // n.d = c0 + slope * r along the ray
+    if (std::fabs(slope) > 1e-12f) {
+      const float edge = -c0 / slope;
+      if (slope > 0.0f) r0 = std::max(r0, edge);
+      else r1 = std::min(r1, edge);
+    }
+    else if (!(c0 > 0.0f)) continue;
+    if (!(r1 > r0)) continue;
+    const float s0 = r0 * r0, s1 = r1 * r1;
+    for (int a = 0; a < k; a++) {
+      const float r = std::sqrt(0.5f * (s0 + s1) + (s1 - s0) * g.x[a]);
+      sum += (s1 - s0) * g.w[a] * f(r * du, r * dv);
+    }
+  }
+  return sum / na;  // the area fraction already integrates to 1 over r^2 in [0, 1] and the angles average
+}
+
+Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing) {
+  const Vec3 up = normalize(cross(l.direction, l.right));
+  Vec3 q = p - l.direction * dot(p - l.position, l.direction);  // p projected onto the light's plane
+  const float denom = dot(R, l.direction);
+  if (denom < -1e-6f) {  // the reflection ray heads for the light's lit side
+    const float t = dot(l.position - p, l.direction) / denom;
+    if (t > 0.0f) q = p + R * t;
+  }
+  float x = dot(q - l.position, l.right), y = dot(q - l.position, up);
+  const float hw = 0.5f * std::fabs(l.width), hh = 0.5f * std::fabs(l.height);
+  if (l.disk) {
+    if (!(hw > 0.0f)) x = 0.0f;  // a flat ellipse: a line
+    if (!(hh > 0.0f)) y = 0.0f;
+    const float e = (hw > 0.0f ? x * x / (hw * hw) : 0.0f) + (hh > 0.0f ? y * y / (hh * hh) : 0.0f);
+    if (e > 1.0f) {
+      const float s = 1.0f / std::sqrt(e);
+      x *= s;
+      y *= s;
+    }
+  }
+  else {
+    x = clampf(x, -hw, hw);
+    y = clampf(y, -hh, hh);
+  }
+  Vec3 L = l.position + l.right * x + up * y - p;
+  const float dl = length(L);
+  L = dl > 1e-6f ? L / dl : -l.direction;
+  facing = std::max(0.0f, -dot(l.direction, L));
+  return L;
+}
+
 static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Vec3 n, Vec3 wp) {
   float up = n.y;
   Vec3 amb = up >= 0 ? lerp(env.equator, env.sky, up) : lerp(env.equator, env.ground, -up);
@@ -176,6 +379,23 @@ static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Ve
   for (const RenderLight &l : env.lights) {
     Vec3 L;
     float atten = l.intensity;
+    if (l.type == RenderLight::Area) {
+      /* The whole surface of the light (not its centre: large lights light faces turned from it). */
+      atten *= light_range_falloff(l, wp);
+      if (atten <= 0.0f) continue;
+      diff += l.color * (atten * area_light_cosine(l, wp, n));
+      if (specular > 0) {
+        float c;
+        L = area_light_specular_dir(l, wp, n * (2.0f * dot(n, v)) - v, c);
+        if (dot(n, L) > 0.0f) {
+          Vec3 h = normalize(L + v);
+          float nh = std::max(0.0f, dot(n, h));
+          float s = nh * nh; s *= s; s *= s; s *= s; s *= s;
+          spec += l.color * (s * specular * atten * c);
+        }
+      }
+      continue;
+    }
     if (l.type == RenderLight::Directional) {
       L = -l.direction;
     }
@@ -1284,6 +1504,26 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
     Vec3 L;
     float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
+    if (l.type == RenderLight::Area) {
+      /* Diffuse from the light's whole surface (area_light_cosine: what the path tracer converges to,
+       * unshadowed), the specular from its representative point with the lobe widened by the light's size
+       * and renormalised (Karis 2013, "Real Shading in Unreal Engine 4"). */
+      atten *= light_range_falloff(l, sp.position);
+      if (atten <= 0.0f) continue;
+      const float dcos = area_light_cosine(l, sp.position, n);
+      float c;
+      const Vec3 Lr = area_light_specular_dir(l, sp.position, n * (2.0f * dot(n, V)) - V, c);
+      /* The lobe at the original roughness toward the representative point, scaled by (a / a')^2 where a'
+       * is the roughness widened by the light's apparent size: the energy the wider lobe would spread
+       * (Karis's normalisation; widening the lobe as well would count it twice). */
+      const float a = std::max(s.roughness * s.roughness, 0.002f);
+      const float radius = std::sqrt(std::fabs(l.width * l.height) / kPi);
+      const float a2 = std::min(1.0f, a + radius / (2.0f * std::max(1e-3f, length(l.position - sp.position))));
+      Vec3 dpart, spart;
+      brdf_eval_parts(s, n, V, Lr, dpart, spart);
+      lo += (dpart * dcos + spart * (c * (a / a2) * (a / a2))) * l.color * atten;
+      continue;
+    }
     if (l.type == RenderLight::Directional) L = -l.direction;
     else {
       Vec3 d = l.position - sp.position;

@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 52): large area lights, the gizmo after Set Origin, Select Coplanar (task 0030)
+
+**Asked:** "the area light when width and height are large (lets say 10 x 10) still creates weird rendered
+artifacts (black splotches on the object, even a default cube)", "when you use the lighting generate lighting
+feature it causes the error"; "when I retarget the origin of any object, the transform tool and gizmo doesn't
+automatically apply to the new origin"; "the ability to select coplanar faces"; "certain camera filter
+properties like edge outline don't show up in the render view ... in the path traced system as well".
+
+**Fixed**
+- **Generate Lighting under a large area light no longer bakes splotches.** The bake took the light's range
+  falloff from each random point on the light (on a 10 m light it varied tenfold across it), so 32 samples
+  per texel left heavy noise that the denoiser turned into blotches. Now the unshadowed light is computed
+  (no noise) and the shadow rays only decide how much of it gets through, the falloff at the centre as in the
+  path tracer. A floor under a 10 m light: texel-to-texel noise from about 15 % to 0.1 %.
+- **Large area lights light the sides of things in the Scene and Game views and F12 raster.** The
+  rasterizer treated an area light as a point at its centre, so a cube's sides under a 10 m light were black;
+  it now takes the light's whole surface (the path tracer's answer within 1 %), with the specular from the
+  light's nearest point. Light probes take area lights the same way.
+- **The gizmo moves to the new origin at once** after the Inspector's Set Origin > Apply: the change asked for
+  no new frame, so the app waited for the next input with the gizmo on the old origin.
+
+**Added**
+- **Select Coplanar** (Edit Mode, Mesh menu; `editop select_coplanar`): adds every face lying in the plane of a
+  selected face, joined to it or not (Blender's Select Similar > Coplanar). In vertex and edge mode it starts
+  from the faces whose corners are selected and adds to the selection.
+
+**Checked, no change needed**
+- Camera filters in path-traced renders: an Edge Outline shows in F12 path-traced renders at 720p with the
+  denoiser, on the CPU and both GPUs and in the Render window's Preview (now a regression test). The filters
+  that don't reach the path tracer are the Retro Console's rasterizer stages (vertex snapping, affine
+  textures, the texture override, screen-door transparency); task 0032 brings them to it.
+
+**Checked**
+- New tests (round 52): the area light's integral against a million-point reference in 13 cases (within 1 %);
+  a cube's side under a 10 m light lit in the rasterizer as in the path tracer (0.098 vs 0.098); a glossy
+  floor's highlight within a factor 0.5 to 1.6 of the path tracer's; a baked floor under a 10 m light smooth
+  (0.1 % texel-to-texel) and as bright as the path tracer (0.412 vs 0.413); a change asks for a frame and
+  the gizmo is on the new origin in it; Select Coplanar (joined, apart, raised, flipped, tilted, degenerate,
+  the vertex selection kept); the Edge Outline in path-traced renders.
+- Stress `shading`: an area light per pixel, one thread: 175 ns (rectangle), 210 ns (a wall cutting it),
+  280 ns (0.3 m below), 360 ns (disk); a point light is about 10 ns.
+- Unit checks: Windows 8,423, 0 failed (438 tests); the whole suite in render-cache verify mode: 8,424,
+  0 failed, 0 stale pictures. Linux with libraries: 8,371, 0 failed. Sanitizer build: 8,293, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` idle
+  1.41 ms; `bake` and `probes` odd-settings runs: 0 problems.
+
 ## 2026-10-11 (round 51): axis materials (task 0029, ADR 0018)
 
 **Asked:** "a material that will always have grass on top followed by dirt, regardless of rotation".

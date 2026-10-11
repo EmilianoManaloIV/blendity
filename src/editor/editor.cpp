@@ -1353,6 +1353,10 @@ void Editor::prune_selection() {
 
 void Editor::mark_changed(const std::string &label) {
   scene_dirty_ = true;
+  /* Another frame: a change made by a panel drawn after the Scene view (the Inspector's Set Origin > Apply)
+   * would otherwise wait for the next input to show, the gizmo still on the old origin (task 0030). Not
+   * during a drag: it marks a change every frame, and its own mouse events bring the frames. */
+  if (drag_ == Drag::None) ui_.redraw = true;
   if (playing_) return;  // play-mode edits are discarded on Stop
   pending_change_ = true;
   pending_label_ = label;

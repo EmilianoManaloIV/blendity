@@ -287,6 +287,9 @@ size_t edge_split(Mesh &m, std::vector<uint8_t> &vert_sel);                     
 void select_linked(const Mesh &m, std::vector<uint8_t> &vert_sel);                     // Ctrl+L
 void grow_selection(const Mesh &m, std::vector<uint8_t> &vert_sel, bool grow);         // Ctrl+Numpad +/-
 void select_non_manifold(const Mesh &m, std::vector<uint8_t> &vert_sel);
+/* Blender's Select Similar > Coplanar: adds every face lying in the plane of a selected face (normals within
+ * angle_deg, plane distance within dist, or a scale-relative tolerance when dist < 0). Returns the faces added. */
+size_t select_coplanar(const Mesh &m, std::vector<uint8_t> &face_sel, float angle_deg = 1.0f, float dist = -1.0f);
 std::vector<std::pair<uint32_t, uint32_t>> edge_ring_edges(const Mesh &m, uint32_t a, uint32_t b);  // Select Edge Ring
 /* Blender's Set Origin reference points, in mesh space. Volume falls back to
  * Surface for open meshes (no enclosed volume), Surface to Median for meshes

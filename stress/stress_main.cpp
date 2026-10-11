@@ -2177,6 +2177,39 @@ static void test_shading_cost(Report &rep, const Options &o) {
     rep.row({"axis material (World, two parts)", f2(a_ms), f1(a_ms * 1e6 / N), f2(a_ms / std::max(1e-9, p_ms)) + "x"});
     rep.note(strprintf("Task 0029's target: an axis material under 1.6x a plain one per point: %s. (checksum %.1f)", a_ms < 1.6 * p_ms ? "met" : "NOT MET", sink));
   }
+  /* Area lights (task 0030): the rasterizer integrates a light's whole surface per pixel (area_light_cosine);
+   * its cost per call for the cases a scene meets, and what that is for a 1080p view on every thread. */
+  {
+    rep.table({"area light per pixel (1 thread)", "ns / call", "1080p ms on all threads"});
+    struct Case {
+      const char *name;
+      bool disk;
+      Vec3 p, n;
+    };
+    const Case cases[] = {{"10 m rectangle, floor under it", false, {0.5f, 0, 0.5f}, {0, 1, 0}},
+                          {"10 m rectangle, a wall cutting it", false, {0.5f, 0.5f, 0}, {1, 0, 0}},
+                          {"10 m rectangle, 0.3 m below", false, {1.2f, 3.2f, 0.5f}, {0, 1, 0}},
+                          {"10 m disk, a wall cutting it", true, {0.5f, 0.5f, 0}, {1, 0, 0}},
+                          {"10 m disk, 0.3 m below, tilted", true, {1.2f, 3.2f, 0.5f}, normalize(Vec3(0.3f, 1, 0))}};
+    const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+    double sink = 0;
+    for (const Case &c : cases) {
+      RenderLight l;
+      l.type = RenderLight::Area;
+      l.position = {0, 3.5f, 0};
+      l.direction = {0, -1, 0};
+      l.right = {1, 0, 0};
+      l.width = l.height = 10.0f;
+      l.disk = c.disk;
+      const int N = 200000;
+      const double ms = time_ms([&] {
+        for (int i = 0; i < N; i++) sink += area_light_cosine(l, c.p + Vec3((i & 63) * 0.01f, 0, (i >> 6 & 63) * 0.01f), c.n);
+      });
+      const double ns = ms * 1e6 / N;
+      rep.row({c.name, f1(ns), f2(ns * 1920.0 * 1080.0 / 1e6 / threads)});
+    }
+    rep.note(strprintf("A point light costs one evaluation (~10 ns). %u threads. (checksum %.1f)", threads, sink));
+  }
 }
 
 static void test_pathtracer(Report &rep, const Options &o) {

@@ -77,6 +77,9 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
 Vec3 fresnel_f0(const SurfaceSample &s);
 /* Cook-Torrance GGX + Lambert, times N.L. n, v, l normalized; v, l point away from the surface. */
 Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l);
+/* brdf_eval's two terms apart: the diffuse per unit N.L (albedo, Fresnel-weighted) and the specular times
+ * N.L (an area light shades its diffuse from area_light_cosine and its specular from one direction). */
+void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffuse, Vec3 &specular);
 /* Karis' analytic approximation of the split-sum environment BRDF. */
 Vec3 env_brdf_approx(Vec3 f0, float roughness, float nv);
 

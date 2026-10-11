@@ -372,13 +372,15 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
           dist = length(dv);
           if (!(dist > 1e-5f)) continue;
           Ld = dv / dist;
-          fall = light_falloff(l, p, Ld);
+          fall = l.type == RenderLight::Area ? light_range_falloff(l, p) : light_falloff(l, p, Ld);
           if (fall <= 0.0f) continue;
           dist *= 1.0f - 1e-4f;
         }
         if (pt.occluded({p, Ld}, dist)) continue;
         const Vec3 col = l.color * (l.intensity * fall);
-        for (int ax = 0; ax < 6; ax++) c.bounce[ax] += col * std::max(0.0f, dot(kAxes[ax], Ld));
+        /* An area light by its whole surface (task 0030), as the rasterizer and the lightmaps take it. */
+        for (int ax = 0; ax < 6; ax++)
+          c.bounce[ax] += col * (l.type == RenderLight::Area ? area_light_cosine(l, p, kAxes[ax]) : std::max(0.0f, dot(kAxes[ax], Ld)));
       }
     }
   });

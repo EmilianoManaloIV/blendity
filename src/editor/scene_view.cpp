@@ -2492,6 +2492,39 @@ void Editor::edit_op(const std::string &op_in) {
     sync_vert_face_selection(false);
     Log::info("Edge Split");
   }
+  else if (op == "select_coplanar") {
+    /* Selection only, and it only adds. In vertex or edge mode, the faces whose corners are all selected are
+     * the start, and the faces found add their corners (and edges) to what is selected. */
+    vert_sel_.resize(m.vert_count(), 0);
+    if (elem_ != EditElement::Face) {
+      face_sel_.assign(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++) {
+        bool all = m.face_size(f) > 0;
+        for (uint32_t k = 0; k < m.face_size(f); k++) all = all && vert_sel_[m.face_verts(f)[k]];
+        face_sel_[f] = all;
+      }
+    }
+    bool any = false;
+    for (uint8_t f : face_sel_) any = any || f;
+    if (!any) {
+      Log::warn("Select Coplanar: select a face first (or all the corners of one)");
+      return;
+    }
+    const size_t added = meshops::select_coplanar(m, face_sel_);
+    if (elem_ == EditElement::Face) sync_vert_face_selection(true);
+    else
+      for (size_t f = 0; f < m.face_count(); f++) {
+        if (!face_sel_[f]) continue;
+        const uint32_t *fv = m.face_verts(f);
+        const uint32_t ns = m.face_size(f);
+        for (uint32_t k = 0; k < ns; k++) {
+          vert_sel_[fv[k]] = 1;
+          if (elem_ == EditElement::Edge) edge_sel_.insert(Mesh::edge_key(fv[k], fv[(k + 1) % ns]));
+        }
+      }
+    Log::info("Select Coplanar: %zu face%s added", added, added == 1 ? "" : "s");
+    return;
+  }
   else if (op == "select_linked" || op == "select_more" || op == "select_less" || op == "select_invert" ||
            op == "select_non_manifold" || op == "select_ring") {
     /* Selection only: no undo step, nothing touched. */
@@ -2701,6 +2734,8 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"select_less", "Select Less", "Ctrl+-", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
       {"select_invert", "Invert Selection", "Ctrl+Shift+I", "Select what isn't, deselect what is. Blender: Ctrl+I.", ALL},
       {"select_non_manifold", "Select Non-Manifold", "", "Select holes and edges shared by more than two faces. Blender: Select > All by Trait > Non Manifold.", ALL},
+      {"select_coplanar", "Select Coplanar", "", "Add every face lying in the same plane as a selected face (the same direction and the same\n"
+       "height), joined to it or not. Blender: Select > Select Similar > Coplanar.", ALL},
   };
   return ops;
 }
