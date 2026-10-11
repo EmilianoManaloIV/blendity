@@ -4,7 +4,7 @@
 - **Requirements:** R-03, R-06
 - **Decisions:** ADR 0017
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/25
 
 ## Goal
 The user can make a procedural texture (bricks, a wood floor, tatami mats, tiles, noise...) as a stack of
