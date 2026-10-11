@@ -9,6 +9,7 @@
 #include "physics.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -1219,6 +1220,23 @@ void GameObject::remove_component(Component *c) {
     }
 }
 
+uint64_t GameObject::evaluated_key(int kind) const {
+  kind = std::max(0, std::min(kind, 2));
+  auto *mf = get<MeshFilter>();
+  if (!mf || !mf->mesh) return 0;
+  uint64_t key = 1469598103934665603ull;
+  auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  mix((uint64_t)(uintptr_t)mf->mesh.get());
+  mix(mf->mesh->version);
+  mix((uint64_t)kind);
+  for (auto &c : components)
+    if (c->is_modifier() && (kind == 1 ? c->show_in_render : c->enabled && (kind == 0 || c->show_in_editmode))) {
+      mix(hash_component(*c));
+      mix(c->modifier_dependency_hash());
+    }
+  return key;
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = get<MeshFilter>();
@@ -1262,7 +1280,13 @@ AABB GameObject::world_bounds() const {
 /* Scene                                                                  */
 /* ===================================================================== */
 
+Scene::Scene() {
+  static std::atomic<uint64_t> next{1};
+  serial = next.fetch_add(1, std::memory_order_relaxed);
+}
+
 void Scene::move_from(Scene &o) {
+  serial = o.serial;
   name = std::move(o.name);
   path = std::move(o.path);
   compress = o.compress;

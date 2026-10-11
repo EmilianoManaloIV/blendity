@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -457,6 +458,8 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
     }
   }
   rm.bounds = bounds();
+  static std::atomic<uint64_t> next_serial{1};
+  rm.serial = next_serial.fetch_add(1, std::memory_order_relaxed);
   cache_version_[ci] = version;
   cache_tangents_[ci] = false;
   return rm;

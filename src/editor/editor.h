@@ -15,6 +15,7 @@
 //   Docking        Screen areas           screen (area split / join)
 #pragma once
 
+#include <cstdlib>
 #include "../core/core.h"
 #include "../platform/platform.h"
 #include "../render/camera_filter.h"
@@ -64,6 +65,19 @@ extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Count };
 const char *window_title(WindowKind k);
+
+/* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
+ * and how often they ran. */
+struct FrameProfile {
+  double ms_scene3d = 0, ms_overlays = 0, ms_game = 0, ms_preview = 0, ms_shadow = 0, ms_ui = 0, ms_present = 0;
+  uint64_t frames = 0, shadow_renders = 0, view_renders = 0, view_cache_hits = 0, cache_mismatches = 0;
+  void add(const FrameProfile &o) {
+    ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
+    ms_ui += o.ms_ui, ms_present += o.ms_present;
+    frames += o.frames, shadow_renders += o.shadow_renders, view_renders += o.view_renders;
+    view_cache_hits += o.view_cache_hits, cache_mismatches += o.cache_mismatches;
+  }
+};
 ui::Icon window_icon(WindowKind k);
 
 enum class Tool { View, Move, Rotate, Scale, Transform };
@@ -169,6 +183,15 @@ class Editor {
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
   bool rendering_for_test() const { return rendering_; }
+  /* The last frame's profile, and every frame's added up (subtract two to measure a stretch). */
+  const FrameProfile &frame_profile() const { return prof_last_; }
+  const FrameProfile &frame_profile_totals() const { return prof_total_; }
+  /* Verify mode (also BLENDITY_RENDER_CACHE_VERIFY=1): a view whose cached picture would be reused is
+   * rendered anyway and compared; a difference counts in cache_mismatches and is logged. */
+  void set_render_cache_verify(bool on) { cache_verify_ = on; }
+  /* Stale pictures verify mode found, in every editor of this process (the test runner checks it). */
+  static uint64_t render_cache_mismatches_all();
+  static void note_render_cache_mismatch();
   /* Tests: the Scene view's depth at a window pixel (1 = nothing), as the tools read it. */
   float scene_depth_for_test(int wx, int wy) const { return scene_rt_.depth_at(wx - scene_rect_.x, wy - scene_rect_.y); }
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
@@ -287,7 +310,9 @@ class Editor {
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights);
   void update_environment();
-  void update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env);
+  /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
+   * (null without a sun or casters). */
+  const ShadowMap *update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env);
   void render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                        bool scene_lights, const Camera *cam, const FilterStack *filters = nullptr);
   /* A camera's image through its filter components (ADR 0007): the raster stage, the internal
@@ -912,7 +937,31 @@ class Editor {
   /* ---- rendering (render_view.cpp) ---- */
   Environment env_;
   uint64_t env_key_ = 0;
-  ShadowMap shadow_;
+  /* The sun's shadow map, kept while its casters and the light are unchanged. Two entries: the Scene
+   * view and the Game view collect different meshes (the Edit cage, the evaluated mesh), so views drawn
+   * in turn would otherwise evict each other every frame. */
+  struct ShadowEntry {
+    uint64_t key = 0, used = 0;
+    ShadowMap map;
+  };
+  ShadowEntry shadow_cache_[2];
+  uint64_t shadow_clock_ = 0;
+  /* A view's finished picture (and, for the Scene view, the planes picking reads stay in scene_rt_),
+   * reused while nothing it shows has changed (ADR 0009). */
+  struct ViewCache {
+    uint64_t key = 0;
+    Image img;
+  };
+  ViewCache scene_cache_, game_cache_;
+  uint64_t cam_preview_key_ = 0;
+  bool cache_verify_ = std::getenv("BLENDITY_RENDER_CACHE_VERIFY") != nullptr;
+  FrameProfile prof_, prof_last_, prof_total_;
+  uint64_t frame_scene_hash();
+  uint64_t scene_view_key(const Recti &view);
+  uint64_t raster_opt_key() const;
+  bool view_cache_hit(ViewCache &c, uint64_t key, const Recti &r);
+  void view_cache_store(ViewCache &c, uint64_t key, const Recti &r);
+  bool view_cache_verify(const ViewCache &c, const Recti &r, const char *what);
   PathTracer vp_pt_;
   uint64_t vp_pt_hash_ = 0;
   Mat4 vp_pt_view_, vp_pt_proj_;

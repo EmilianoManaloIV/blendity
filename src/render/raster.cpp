@@ -36,7 +36,7 @@ void RenderTarget::resize_planes() {
   size_t n = (size_t)std::max(0, width) * std::max(0, height);
   if (depth.size() != n) depth.resize(n);
   if (ids.size() != n) ids.resize(n);
-  if (vis.size() != n) vis.resize(n);
+  if (!vis.empty() && vis.size() != n) vis.clear();  // only deferred shading needs it: begin() sizes it then
 }
 
 void RenderTarget::make_depth_only(int w, int h) {
@@ -59,6 +59,12 @@ void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, con
   opt_.tile_size = std::max(8, opt_.tile_size);
   stats_ = {};
   items_.clear();
+  batching_ = false;  // a batch left open by a previous frame would swallow every overlay
+  overlay_cmds_.clear();
+  if (rt_ && opt_.shade == ShadeMode::Deferred) {
+    const size_t n = (size_t)std::max(0, rt_->width) * std::max(0, rt_->height);
+    if (rt_->vis.size() != n) rt_->vis.assign(n, 0u);
+  }
   /* Bloom's linear light: allocated here (unshaded = -1) so a sky cleared next can fill it too. */
   if (rt_ && rt_->want_hdr && opt_.shade == ShadeMode::Deferred && rt_->width > 0 && rt_->height > 0) {
     rt_->hdr.assign((size_t)rt_->width * rt_->height, Vec3(-1.0f, 0.0f, 0.0f));
@@ -67,13 +73,29 @@ void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, con
   }
 }
 
-void Renderer3D::clear(uint32_t color) {
-  if (rt_->color)
-    for (int y = 0; y < rt_->height; y++) std::fill(rt_->color + (size_t)y * rt_->stride, rt_->color + (size_t)y * rt_->stride + rt_->width, color);
-  std::fill(rt_->depth.begin(), rt_->depth.end(), 1.0f);
-  std::fill(rt_->ids.begin(), rt_->ids.end(), 0u);
-  std::fill(rt_->vis.begin(), rt_->vis.end(), 0u);
+/* Depth to the far plane, ids and visibility to nothing: rows in parallel (12 bytes a pixel, about
+ * 25 MB at 1080p, too much for one thread), the colour too when given. */
+void Renderer3D::clear_planes(const uint32_t *color) {
+  ScopedTimer t;
+  const int W = rt_->width, H = rt_->height;
+  const bool with_vis = rt_->vis.size() == (size_t)W * H && W > 0;
+  auto &js = JobSystem::global();
+  const int saved = js.max_threads();
+  if (!opt_.multithreaded) js.set_max_threads(1);
+  js.parallel_for(H, 32, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) {
+      const size_t o = (size_t)y * W;
+      if (color && rt_->color) std::fill(rt_->color + (size_t)y * rt_->stride, rt_->color + (size_t)y * rt_->stride + W, *color);
+      std::fill(rt_->depth.begin() + o, rt_->depth.begin() + o + W, 1.0f);
+      std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
+      if (with_vis) std::fill(rt_->vis.begin() + o, rt_->vis.begin() + o + W, 0u);
+    }
+  });
+  js.set_max_threads(saved);
+  stats_.ms_clear += t.ms();
 }
+
+void Renderer3D::clear(uint32_t color) { clear_planes(&color); }
 
 void Renderer3D::clear_environment(const Mat4 &inv_vp, const Environment &env, ViewTransform vt, float exposure) {
   const int W = rt_->width, H = rt_->height;
@@ -102,9 +124,7 @@ void Renderer3D::clear_environment(const Mat4 &inv_vp, const Environment &env, V
     }
   });
   js.set_max_threads(saved);
-  std::fill(rt_->depth.begin(), rt_->depth.end(), 1.0f);
-  std::fill(rt_->ids.begin(), rt_->ids.end(), 0u);
-  std::fill(rt_->vis.begin(), rt_->vis.end(), 0u);
+  clear_planes(nullptr);
 }
 
 void Renderer3D::clear_sky(const Mat4 &inv_vp, Vec3 sky, Vec3 horizon, Vec3 ground) {
@@ -141,9 +161,7 @@ void Renderer3D::clear_sky(const Mat4 &inv_vp, Vec3 sky, Vec3 horizon, Vec3 grou
     }
   });
   js.set_max_threads(saved);
-  std::fill(rt_->depth.begin(), rt_->depth.end(), 1.0f);
-  std::fill(rt_->ids.begin(), rt_->ids.end(), 0u);
-  std::fill(rt_->vis.begin(), rt_->vis.end(), 0u);
+  clear_planes(nullptr);
 }
 
 static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Vec3 n, Vec3 wp) {
@@ -720,10 +738,11 @@ Ray Renderer3D::screen_ray(float x, float y) const {
   return {pa, normalize(pb - pa)};
 }
 
-void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias) {
+/* A line clipped to the near plane and the viewport, in screen space. */
+bool Renderer3D::prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias, OverlayCmd &out) const {
   Vec4 ca = vp_ * Vec4(a, 1.0f), cb = vp_ * Vec4(b, 1.0f);
   /* Clip against near plane. */
-  if (ca.z < 0 && cb.z < 0) return;
+  if (ca.z < 0 && cb.z < 0) return false;
   if (ca.z < 0) ca = lerp(ca, cb, ca.z / (ca.z - cb.z));
   else if (cb.z < 0) cb = lerp(cb, ca, cb.z / (cb.z - ca.z));
   const float W = (float)rt_->width, H = (float)rt_->height;
@@ -738,24 +757,63 @@ void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bia
     else { if (r < t0) return false; if (r < t1) t1 = r; }
     return true;
   };
-  if (!clipt(-dx, x0 + 1) || !clipt(dx, W + 1 - x0) || !clipt(-dy, y0 + 1) || !clipt(dy, H + 1 - y0)) return;
-  float nx0 = x0 + dx * t0, ny0 = y0 + dy * t0, nz0 = z0 + (z1 - z0) * t0;
-  float nx1 = x0 + dx * t1, ny1 = y0 + dy * t1, nz1 = z0 + (z1 - z0) * t1;
+  if (!clipt(-dx, x0 + 1) || !clipt(dx, W + 1 - x0) || !clipt(-dy, y0 + 1) || !clipt(dy, H + 1 - y0)) return false;
+  out.x0 = x0 + dx * t0, out.y0 = y0 + dy * t0, out.z0 = z0 + (z1 - z0) * t0;
+  out.x1 = x0 + dx * t1, out.y1 = y0 + dy * t1, out.z1 = z0 + (z1 - z0) * t1;
+  out.color = color, out.bias = bias, out.point = false, out.depth_test = depth_test;
+  /* Rows it can plot: its span, a little more either side (the two-pixel coverage, the half-pixel steps past the ends). */
+  out.ymin = (int)std::floor(std::min(out.y0, out.y1)) - 3;
+  out.ymax = (int)std::ceil(std::max(out.y0, out.y1)) + 3;
+  return true;
+}
+
+bool Renderer3D::prepare_point(Vec3 p, float r, uint32_t color, bool depth_test, OverlayCmd &out) const {
+  Vec2 s;
+  float z;
+  if (!project(p, s, z)) return false;
+  int cx = (int)s.x, cy = (int)s.y;
+  if (depth_test && z - 1e-4f > rt_->depth_at(cx, cy)) return false;
+  out.x0 = s.x, out.y0 = s.y, out.z0 = z, out.x1 = r;
+  out.color = color, out.bias = 0.0f, out.point = true, out.depth_test = depth_test;
+  const int ir = (int)std::ceil(r);
+  out.ymin = cy - ir, out.ymax = cy + ir + 1;
+  return true;
+}
+
+void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
+  const int Wi = rt_->width;
+  ymin = std::max(ymin, 0), ymax = std::min(ymax, rt_->height);
+  if (c.point) {
+    const float r = c.x1;
+    const int cx = (int)c.x0, cy = (int)c.y0, ir = (int)std::ceil(r);
+    for (int y = std::max(cy - ir, ymin); y <= cy + ir && y < ymax; y++)
+      for (int x = cx - ir; x <= cx + ir; x++) {
+        if (x < 0 || x >= Wi) continue;
+        float dx = x + 0.5f - c.x0, dy = y + 0.5f - c.y0;
+        float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
+        if (a <= 0) continue;
+        uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
+        d = Color::blend(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));
+      }
+    return;
+  }
   /* Xiaolin Wu style 2-pixel coverage, with optional depth test. */
-  const int Wi = rt_->width, Hi = rt_->height;
+  const uint32_t color = c.color;
   auto plot = [&](int x, int y, float z, float a) {
-    if (x < 0 || y < 0 || x >= Wi || y >= Hi || a <= 0.0f) return;
-    if (depth_test && z - bias > rt_->depth[(size_t)y * Wi + x]) return;
+    if (x < 0 || y < ymin || x >= Wi || y >= ymax || a <= 0.0f) return;
+    if (c.depth_test && z - c.bias > rt_->depth[(size_t)y * Wi + x]) return;
     uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
     uint32_t ca8 = (uint32_t)((color >> 24) * saturate(a));
     d = Color::blend(d, (color & 0xFFFFFF) | (ca8 << 24));
   };
+  float nx0 = c.x0, ny0 = c.y0, nz0 = c.z0, nx1 = c.x1, ny1 = c.y1, nz1 = c.z1;
   float ldx = nx1 - nx0, ldy = ny1 - ny0;
   bool steep = std::fabs(ldy) > std::fabs(ldx);
   if (steep) { std::swap(nx0, ny0); std::swap(nx1, ny1); std::swap(ldx, ldy); }
   if (nx0 > nx1) { std::swap(nx0, nx1); std::swap(ny0, ny1); std::swap(nz0, nz1); ldx = -ldx; ldy = -ldy; }
   float grad = ldx != 0 ? ldy / ldx : 0;
   int xs = (int)std::floor(nx0), xe = (int)std::ceil(nx1);
+  if (steep) xs = std::max(xs, ymin), xe = std::min(xe, ymax - 1);  // x walks the rows: only this band's
   for (int x = xs; x <= xe; x++) {
     float t = ldx != 0 ? clampf((x + 0.5f - nx0) / ldx, 0, 1) : 0;
     float yy = ny0 + grad * (x + 0.5f - nx0) - 0.5f;
@@ -767,28 +825,62 @@ void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bia
   }
 }
 
+void Renderer3D::line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias) {
+  OverlayCmd c;
+  if (!prepare_line(a, b, color, depth_test, bias, c)) return;
+  if (batching_) overlay_cmds_.push_back(c);
+  else draw_overlay(c, 0, rt_->height);
+}
+
 void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
-  Vec2 s;
-  float z;
-  if (!project(p, s, z)) return;
-  int cx = (int)s.x, cy = (int)s.y;
-  if (depth_test && z - 1e-4f > rt_->depth_at(cx, cy)) return;
-  int ir = (int)std::ceil(r);
-  for (int y = cy - ir; y <= cy + ir; y++)
-    for (int x = cx - ir; x <= cx + ir; x++) {
-      if (x < 0 || y < 0 || x >= rt_->width || y >= rt_->height) continue;
-      float dx = x + 0.5f - s.x, dy = y + 0.5f - s.y;
-      float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
-      if (a <= 0) continue;
-      uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
-      d = Color::blend(d, Color::with_alpha(color, a * ((color >> 24) / 255.0f)));
-    }
+  OverlayCmd c;
+  if (!prepare_point(p, r, color, depth_test, c)) return;
+  if (batching_) overlay_cmds_.push_back(c);
+  else draw_overlay(c, 0, rt_->height);
+}
+
+void Renderer3D::begin_overlay_batch() {
+  batching_ = true;
+  overlay_cmds_.clear();
+}
+
+/* Draws the recorded overlays: bands of 32 rows in parallel, each band's commands in the order given. */
+void Renderer3D::end_overlay_batch() {
+  batching_ = false;
+  if (overlay_cmds_.empty() || !rt_ || !rt_->color) return;
+  const int H = rt_->height, band = 32, nb = (H + band - 1) / band;
+  if (overlay_cmds_.size() < 64 || nb < 2 || !opt_.multithreaded) {
+    for (const OverlayCmd &c : overlay_cmds_) draw_overlay(c, 0, H);
+    overlay_cmds_.clear();
+    return;
+  }
+  /* Counting sort of command indices into the bands they touch (in order within each band). */
+  std::vector<uint32_t> offs((size_t)nb + 1, 0);
+  for (const OverlayCmd &c : overlay_cmds_)
+    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) offs[(size_t)b + 1]++;
+  for (int b = 0; b < nb; b++) offs[(size_t)b + 1] += offs[(size_t)b];
+  std::vector<uint32_t> idx(offs[(size_t)nb]), fill(offs.begin(), offs.end() - 1);
+  for (uint32_t i = 0; i < overlay_cmds_.size(); i++) {
+    const OverlayCmd &c = overlay_cmds_[i];
+    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) idx[fill[(size_t)b]++] = i;
+  }
+  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+    for (int64_t b = b0; b < b1; b++)
+      for (uint32_t k = offs[(size_t)b]; k < offs[(size_t)b + 1]; k++) draw_overlay(overlay_cmds_[idx[k]], (int)b * band, (int)(b + 1) * band);
+  });
+  overlay_cmds_.clear();
 }
 
 void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, int width) {
   if (sel.empty()) return;
+  if (batching_) {  // overlays recorded so far go under the outline
+    end_overlay_batch();
+    begin_overlay_batch();
+  }
   const int W = rt_->width, H = rt_->height;
-  std::vector<uint8_t> mask((size_t)W * H);
+  static thread_local std::vector<uint8_t> mask_buf;  // reused: a W x H mask a frame, twice with children
+  std::vector<uint8_t> &mask = mask_buf;
+  mask.assign((size_t)W * H, 0);
   JobSystem &js = JobSystem::global();
   js.parallel_for(H, 32, [&](int64_t y0, int64_t y1) {
     uint32_t last = 0;
@@ -1256,7 +1348,7 @@ void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec
   r3d.flush();
   out.view_proj = proj * view;
   out.size = res;
-  out.depth = rt.depth;
+  out.depth.swap(rt.depth);  // no 16 MB copy: the target gets the old plane back and clears it next time
   out.bias = 1.5f / res;  // ~1.5 texels in [0,1] depth
 }
 

@@ -688,6 +688,9 @@ class GameObject {
    * kind: 0 the viewport (enabled modifiers), 1 renders (Show in Renders),
    * 2 Edit Mode (enabled and Show in Edit Mode). */
   const Mesh *evaluated_mesh(int kind = 0) const;
+  /* What evaluated_mesh(kind) is computed from (the base mesh and version, the modifiers that apply and
+   * their settings), without evaluating anything: for caches that only need to know it changed. */
+  uint64_t evaluated_key(int kind = 0) const;
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
@@ -757,7 +760,10 @@ struct GuideLine {
 
 class Scene {
  public:
-  Scene() = default;
+  Scene();
+  /* Different for every Scene made in this process (a reopened file is a new one even when its objects
+   * land at the same addresses): render caches key on it. */
+  uint64_t serial = 0;
   /* Moving a scene re-points its objects at the new owner (GameObject::scene). */
   Scene(Scene &&other) noexcept { move_from(other); }
   Scene &operator=(Scene &&other) noexcept {
