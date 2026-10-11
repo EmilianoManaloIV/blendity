@@ -2994,12 +2994,14 @@ void Editor::draw_game_view(const Recti &r) {
      * camera or the view's size changes. */
     ScopedTimer rt;
     const bool animating = playing_ && !paused_;
+    /* (Paused and stepped: the play time moves a frame and the grain's seed with it, so it is in the key.) */
+    const uint64_t time_key = playing_ ? (uint64_t)(int64_t)std::floor(std::fmod((double)play_time_, 86400.0) * 24.0) * 0x9E3779B97F4A7C15ull : 0;
     const uint64_t key =
-        animating ? 0 : camera_render_hash(owner, cam) ^ raster_opt_key() ^ ((uint64_t)img.w << 48) ^ ((uint64_t)img.h << 32) ^ ((uint64_t)img.x << 16) ^ (uint64_t)img.y;
+        animating ? 0 : camera_render_hash(owner, cam) ^ raster_opt_key() ^ time_key ^ ((uint64_t)img.w << 48) ^ ((uint64_t)img.h << 32) ^ ((uint64_t)img.x << 16) ^ (uint64_t)img.y;
     const bool hit = view_cache_hit(game_cache_, key, img);
     if (hit && !cache_verify_) prof_.view_cache_hits++;
     else {
-      render_camera(game_r3d_, game_rt_, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, animating);
+      render_camera(game_r3d_, game_rt_, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain
       game_stats_ = game_r3d_.stats();
       prof_.view_renders++;
       if (hit) view_cache_verify(game_cache_, img, "Game view");

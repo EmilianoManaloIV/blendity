@@ -845,6 +845,7 @@ struct RenderSettings {
   int file_format = 0;        // 0 PNG, 1 JPEG, 2 Radiance HDR, 3 OpenEXR
   int jpeg_quality = 92;
   void reflect(Reflector &r);
+  void reflect_raster(Reflector &r);  // the subset the rasterized views depend on
 };
 
 /* A construction line (Plasticity's lines, SketchUp's guides): an infinite line

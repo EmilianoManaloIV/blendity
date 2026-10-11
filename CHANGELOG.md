@@ -2,6 +2,50 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 48): filters look the same at every resolution and during traces (task 0026, ADR 0016 part 2)
+
+**Asked:** the camera-filter round, second part: a camera's filters should look the same in the Camera
+Preview, the Game view and a render, and a filtered progressive trace shouldn't change its look as
+samples accumulate.
+
+**Changed**
+- **Pixel-sized filter parameters scale with the picture's height** (1080p = 1x): Pixelate's cell, Edge
+  Outline's thickness, Film Grain's size, CRT's scanline and phosphor pitch, Sharpen's radius. A 540p
+  Preview and a 1080p render of the same camera now match (an outline covers 0.57 % of both).
+- **A small view renders at its stack's resolution** (a 240-row retro stack in a 120-row inset) and is
+  box-averaged into the view, instead of rendering at the inset's own rows.
+- **Bloom on a progressive trace** reads the linear light at every resolve, so the glow doesn't grow
+  with the samples; Color Grading's exposure applies in linear light when bloom's HDR plane is there.
+- **The views' cache keys hash only the raster-relevant render settings:** changing the path tracer's
+  Samples no longer redraws the Game view (changing Exposure still does).
+- **The Game view's background is the world's gradient** (or sky / HDRI) when the scene's lighting is on;
+  in Gradient mode it used the editor's fixed sky colours.
+- A paused Game view keeps the grain's and the flicker's last pattern.
+
+**Checked**
+- New tests (round 48): an Edge Outline's covered fraction is equal at 540p and 1080p (0.0057 both); a
+  Pixelate row has the same cell count at both sizes (54 / 55); Samples doesn't redraw the Game view,
+  Exposure does (0 / 2 view renders); a Rendered Preview with bloom keeps its mean brightness from the
+  first frames to the finished trace (152.6 / 152.6); a red world gradient reaches the Game view's sky;
+  a paused Game view with Film Grain holds still. The `filter_layout` test now expects the stack's
+  resolution for a small view.
+- From the code review (Opus), three majors fixed: the Live Preview and the Rendered Camera Preview
+  keyed on the raster-only settings too, so changing Samples, Max Bounces or the denoiser no longer
+  restarted them (a trace-settings hash is mixed into their keys; a test changes Max Bounces); Color
+  Grading's new HDR path re-encoded every pixel from the HDR plane, wiping a glow, an outline, depth of
+  field or a Solid Color clear drawn after it (it now re-encodes only pixels whose colour still is the
+  plane's encoding; a test checks a glow and a solid clear survive); the Fill layout's width was
+  unbounded for a squeezed view (both sides are capped, and a letterboxed stack scales by one factor so
+  its pixels stay square). Also: the linear buffer is taken once per progressive resolve, a stepped
+  paused Game view keys on its time, and the preview's header is kept out of the bloom measurement.
+  Note: a view smaller than its stack's resolution now renders and traces up to 1080p rows for it (a
+  360-row Rendered Preview of a 1080-row retro stack traces 1920 x 1080).
+- Unit checks: Windows 8,205, 0 failed (408 tests); the whole suite in render-cache verify mode: 8,206,
+  0 failed, 0 stale pictures. Linux with libraries: 8,156, 0 failed. Sanitizer build: the
+  round's tests 21 checks, 0 failed (the full run before the review fixes failed only in the two tests
+  those fixes changed; CI's job covers the final code). Stress `filters`:
+  300 fuzzed stacks, 0 problems; `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
 ## 2026-10-11 (round 47): the Active Camera, and filters wherever a camera's picture shows (task 0025, ADR 0016)
 
 **Asked:** camera filters were missing from the Game view, the Camera Preview and the Render window.

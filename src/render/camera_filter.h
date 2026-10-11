@@ -27,6 +27,10 @@ struct FilterFrame {
    * so editor views and renders are reproducible. */
   float time = 0.0f;
   bool animate = false;
+  /* The picture's height over 1080: effects whose parameters are pixel sizes (Pixelate's cell, Edge
+   * Outline's thickness, Film Grain's size, CRT's scanline pitch, Sharpen's radius) scale by it, so a
+   * camera's filters look the same in a 540p inset and a 2160p render (task 0026). */
+  float pixel_scale = 1.0f;
 };
 
 using FilterPass = std::function<void(RenderTarget &, const FilterFrame *)>;
@@ -53,13 +57,16 @@ struct FilterStack {
   }
 };
 
-/* Where an internal image of the stack's resolution goes in a dw x dh view, and its size.
- * Never larger than the view (a filter can't add pixels); at least 1 x 1. */
+/* Where an internal image of the stack's resolution goes in a dw x dh view, and its size. A view
+ * smaller than the stack's resolution still renders at that resolution (up to 1080p) and is shrunk
+ * into the view, so every picture of the camera looks alike (task 0026); at least 1 x 1. */
 void filter_layout(const FilterStack &s, int dw, int dh, int &iw, int &ih, Recti &dst);
 /* The same with the fit given apart from the stack (the Scene view fills, whatever the camera's stack says). */
 void filter_layout(const FilterStack &s, int fit, int dw, int dh, int &iw, int &ih, Recti &dst);
 
-/* Nearest-neighbour scaling of src (sw x sh, row stride sstride) into dst's rectangle r. */
+/* Scaling of src (sw x sh, row stride sstride) into dst's rectangle r: nearest-neighbour when enlarging
+ * (a retro image's pixels stay crisp), a box average when shrinking (a Retro Preview rendered at its
+ * true internal height into a smaller inset). */
 void upscale_nearest(const uint32_t *src, int sw, int sh, int sstride, uint32_t *dst, int dstride, const Recti &r);
 
 /* The retro colour pass. */
@@ -107,7 +114,7 @@ struct GrainParams {
 };
 void apply_film_grain(RenderTarget &rt, const GrainParams &p, const FilterFrame *frame);
 void apply_lens_distortion(RenderTarget &rt, float intensity, float scale);
-void apply_pixelate(RenderTarget &rt, int cell);
+void apply_pixelate(RenderTarget &rt, int cell, const FilterFrame *frame = nullptr);
 struct OutlineParams {
   Vec3 color{0, 0, 0};     // display colour
   int thickness = 1;       // pixels
@@ -119,7 +126,7 @@ struct CrtParams {
   float scanlines = 0.5f, curvature = 0.2f, mask = 0.3f, flicker = 0.0f;
 };
 void apply_crt(RenderTarget &rt, const CrtParams &p, const FilterFrame *frame);
-void apply_sharpen(RenderTarget &rt, float amount);
+void apply_sharpen(RenderTarget &rt, float amount, const FilterFrame *frame = nullptr);
 
 /* ---- Bloom (task 0007) ---- */
 struct BloomParams {

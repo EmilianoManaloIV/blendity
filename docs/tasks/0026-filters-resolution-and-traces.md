@@ -1,6 +1,6 @@
 # 0026: Filters look the same at every resolution and during traces
 
-- **Status:** approved (the roadmap of 2026-10-11; after task 0025)
+- **Status:** done (as built below)
 - **Requirements:** R-05, Q-02
 - **Decisions:** ADR 0016 (part 2)
 - **Model:** main session (Opus)
@@ -48,3 +48,24 @@ pixel sizes, and a filtered progressive trace doesn't change its look as samples
 
 ## Documentation to update
 - ADR 0016, CHANGELOG, README, ARCHITECTURE row, USABILITY row.
+
+## As built
+Built as specified: `FilterFrame::pixel_scale` (the picture's height over 1080) scales Pixelate's cell,
+Edge Outline's thickness, Film Grain's size, CRT's scanline and phosphor pitch and Sharpen's radius
+(`scaled_px`, at least one pixel); a view with fewer rows than its stack's resolution renders at the
+stack's resolution (up to 1080p / 1920 wide) and is box-averaged into the view, so a small Camera
+Preview inset shows the Game view's look; bloom on a progressive trace reads the linear buffer at every
+resolve; Color Grading's exposure applies to the HDR plane (and re-encodes through the target's view
+transform) when bloom asked for it; `RenderSettings::reflect_raster` is what the views' cache keys
+hash, so the path tracer's settings don't redraw a view; the raster clears with the world's gradient
+(or sky / HDRI) whenever the scene's lighting is on, instead of the editor's fixed sky colours in
+Gradient mode; a paused Game view keeps the grain's and the flicker's last pattern (its time stands
+still).
+
+**Deviations:**
+1. **Pixel sizes round to whole pixels with a minimum of one**, so a 1-pixel Edge Outline is relatively
+   thicker at 540p than at 1080p (the equal-fraction test uses thickness 2), and CRT scanlines only
+   double in pitch from 1620p up. A sub-pixel look would need filtering, which the retro effects don't
+   want.
+2. **The paused grain is tested as "the picture holds still"** (identical frames), not against the
+   last playing frame's pattern (a frame-exact comparison would need the exact play time).
