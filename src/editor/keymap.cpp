@@ -128,6 +128,8 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"play.toggle", "Play / Stop", "Play", CTX_GLOBAL},
       {"play.pause", "Pause", "Play", CTX_GLOBAL},
       {"play.step", "Step", "Play", CTX_GLOBAL},
+      /* Lighting */
+      {"lighting.update", "Update Lighting", "Lighting", CTX_GLOBAL},
       /* Tools and transforms */
       {"tool.view", "View Tool (pan)", "Tools", CTX_SCENE},
       {"tool.move", "Move Tool", "Tools", CTX_SCENE},
@@ -217,6 +219,7 @@ static void common_bindings(Keymap &k) {
   b("play.toggle", {"Ctrl+P"});
   b("play.pause", {"Ctrl+Shift+P"});
   b("play.step", {"Ctrl+Alt+P"});
+  b("lighting.update", {"Ctrl+Shift+L"});
   b("object.create_empty", {"Ctrl+Shift+N"});
   b("object.create_empty_child", {"Alt+Shift+N"});
   b("object.move_to_view", {"Ctrl+Alt+F"});
@@ -587,6 +590,7 @@ bool Editor::run_action(const std::string &id) {
     else enter_play();
   }
   else if (id == "play.pause") paused_ = !paused_;
+  else if (id == "lighting.update") lighting_update();
   else if (id == "play.step") step_requested_ = true;
   else if (id == "tool.view") tool_ = Tool::View;
   else if (id == "tool.move") tool_ = Tool::Move;

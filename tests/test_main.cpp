@@ -199,6 +199,7 @@ static void round35_tests();
 static void round36_tests();
 static void round37_tests();
 static void round39_tests();
+static void round41_tests();
 
 int main() {
   register_builtin_components();
@@ -209,6 +210,9 @@ int main() {
   /* GI Device Auto gathers on the CPU here, so a machine with a GPU and CI (without one) run the same
    * code; the GPU's own tests ask for it (task 0018). */
   if (!std::getenv("BLENDITY_GI_DEVICE")) set_env("BLENDITY_GI_DEVICE", "cpu");
+  /* Scenes default to Automatic lighting updates here (the behaviour the tests before task 0020 were written
+   * for); Manual's own tests ask for it. */
+  if (!std::getenv("BLENDITY_LIGHTING_UPDATES")) set_env("BLENDITY_LIGHTING_UPDATES", "automatic");
 
   test("math: matrix inverse", [] {
     Mat4 m = Mat4::trs({1, 2, 3}, Quat::euler({10, 20, 30}), {2, 3, 4});
@@ -814,6 +818,7 @@ int main() {
   round36_tests();
   round37_tests();
   round39_tests();
+  round41_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -16838,5 +16843,321 @@ static void round39_tests() {
     std::printf("    passes: %llu before the sun turned, %llu after\n", (unsigned long long)passes,
                 (unsigned long long)ed.realtime_lightmaps_for_test(true).passes);
     CHECK(ed.realtime_lightmaps_for_test(true).passes > passes);
+  });
+}
+
+
+/* ===================================================================== */
+/* Round 41 (task 0020): manual lighting updates and a rough preview      */
+/* ===================================================================== */
+
+static void round41_tests() {
+  auto press = [](Editor &ed, int k, int mods) {
+    platform::Event d, u;
+    d.type = platform::EventType::KeyDown, d.key = k, d.mods = mods;
+    u.type = platform::EventType::KeyUp, u.key = k;
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({u});
+  };
+  /* Realtime GI on, a Realtime sun, Manual: one Update Lighting brings it up to date. */
+  auto manual_world = [](Editor &ed, bool volume) {
+    P37World w = p37_world(ed, volume, 0, 1.0f, true);
+    r36_cmd(ed, "lighting mode manual");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    return w;
+  };
+
+  test("manual lighting: new scenes are Manual unless BLENDITY_LIGHTING_UPDATES says otherwise, and `lighting mode` switches", [] {
+    /* The default follows BLENDITY_LIGHTING_UPDATES (the tests' main sets automatic; unset, it's Manual). */
+    const char *env = std::getenv("BLENDITY_LIGHTING_UPDATES");
+    const bool autom = env && (std::string(env) == "automatic" || std::string(env) == "auto");
+    CHECK(LightingSettings{}.update_mode == (autom ? 1 : 0));
+    Editor ed;
+    r35_open(ed);
+    r36_cmd(ed, "lighting mode manual");
+    CHECK(ed.scene().lighting.update_mode == 0);
+    r36_cmd(ed, "lighting mode automatic");
+    CHECK(ed.scene().lighting.update_mode == 1);
+    ed.command("undo");
+    r34_steps(ed, 1);
+    CHECK(ed.scene().lighting.update_mode == 0);
+  });
+
+  test("manual lighting: moving a Contribute GI object or turning the sun does no GI work; the last realtime lightmaps and probes stay up", [=] {
+    Editor ed;
+    P37World w = manual_world(ed, true);
+    r34_steps(ed, 3);
+    std::string why;
+    CHECK(!ed.live_gi_needed_for_test(&why));
+    std::printf("    %s\n", why.c_str());
+    CHECK(why.find("frozen") != std::string::npos);
+    /* Update once: maps and probes appear. */
+    ed.command("lighting update");
+    for (int i = 0; i < 60 && ed.lighting_update_pending_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.lighting_update_pending_for_test());
+    const RealtimeLightmaps &rl = ed.realtime_lightmaps_for_test(true);
+    CHECK(!rl.shown.empty() && ed.probe_live_ready_for_test());
+    const uint64_t passes = rl.passes, updates = ed.vgi_updates_for_test();
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> frozen_pic = r35_game(ed);
+    /* Drag the wall a few frames, turn the sun: nothing is voxelized, gathered or published. */
+    for (int i = 0; i < 5; i++) {
+      w.wall->set_local_position({2.2f - 0.1f * i, 1, 0});
+      ed.commit_change("drag");
+      ed.step_frame_headless();
+    }
+    ed.scene().find_by_name("Directional Light")->set_local_euler({30, 140, 0});
+    ed.commit_change("sun");
+    r34_steps(ed, 3);
+    CHECK(ed.vgi_updates_for_test() == updates);
+    CHECK(rl.passes == passes);
+    CHECK(ed.probe_live_left_for_test() == 0);
+    CHECK(!rl.shown.empty());  // still shown
+    CHECK(r35_diff_count(r35_game(ed), frozen_pic) > 100);  // direct light and shadows did move
+  });
+
+  test("manual lighting: Update Lighting (and Ctrl+Shift+L) catches up within a few frames, then freezes again", [=] {
+    Editor ed;
+    P37World w = manual_world(ed, false);
+    press(ed, platform::KEY_L, platform::MOD_CTRL | platform::MOD_SHIFT);
+    CHECK(ed.lighting_update_pending_for_test() || ed.realtime_lightmaps_for_test(true).passes > 0);
+    int frames = 0;
+    for (; frames < 30 && ed.lighting_update_pending_for_test(); frames++) ed.step_frame_headless();
+    std::printf("    caught up after %d more frames\n", frames);
+    CHECK(!ed.lighting_update_pending_for_test());
+    const uint64_t passes = ed.realtime_lightmaps_for_test(true).passes;
+    CHECK(passes > 0);
+    /* A change, then Update Lighting again: one new pass, then nothing more. */
+    w.box->set_local_position({-1.0f, 0.5f, 1.0f});
+    ed.commit_change("box moved");
+    r34_steps(ed, 3);
+    CHECK(ed.realtime_lightmaps_for_test(true).passes == passes);
+    ed.command("lighting update");
+    for (int i = 0; i < 30 && ed.lighting_update_pending_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.lighting_update_pending_for_test());
+    const uint64_t after = ed.realtime_lightmaps_for_test(true).passes;
+    CHECK(after > passes);
+    r34_steps(ed, 5);
+    CHECK(ed.realtime_lightmaps_for_test(true).passes == after);
+    CHECK(!ed.wants_continuous_redraw_for_test());
+  });
+
+  test("manual lighting: a baked object that moved keeps its lightmap, \"out of date\" shows, and Auto Generate never starts", [] {
+    Editor ed, autom;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    P37World wa = p37_world(autom, false, 1, 1.0f, true);
+    r36_cmd(ed, "lighting mode manual");
+    r36_cmd(autom, "lighting mode automatic");
+    for (Editor *e : {&ed, &autom}) {
+      r35_bake(*e);
+      r36_cmd(*e, "set Lighting.AutoGenerate true");
+    }
+    const std::vector<uint32_t> before = r35_game(ed);
+    w.box->set_local_position({-1.5f, 0.5f, -0.6f});
+    ed.commit_change("box moved");
+    wa.box->set_local_position({-1.5f, 0.5f, -0.6f});
+    autom.commit_change("box moved");
+    r34_steps(ed, 3);
+    r34_steps(autom, 3);
+    CHECK(ed.lighting_out_of_date_for_test());
+    /* The box keeps its baked light in Manual; in Automatic it falls back to realtime ambient: they differ. */
+    const size_t d = r35_diff_count(r35_game(ed), r35_game(autom));
+    std::printf("    Manual vs Automatic after the move: %zu pixels differ\n", d);
+    CHECK(d > 50);
+    CHECK(r35_diff_count(r35_game(ed), before) > 50);  // (the box did move)
+    /* Auto Generate waits for a second of real time without changes: give it two. */
+    const double t0 = now_seconds();
+    int baked_frames = 0;  // (one check: the frame count depends on the machine)
+    while (now_seconds() - t0 < 2.0) {
+      ed.step_frame_headless();
+      autom.step_frame_headless();
+      baked_frames += ed.baking_for_test();
+    }
+    CHECK(baked_frames == 0);
+    bool autom_baked = false;
+    for (int i = 0; i < 200 && !autom_baked; i++) {
+      autom_baked = autom.baking_for_test() || !autom.lighting_out_of_date_for_test();
+      autom.step_frame_headless();
+    }
+    CHECK(autom_baked);  // (the same wait does start it in Automatic: the check above can fail)
+  });
+
+  test("lighting preview: refines 16 -> 64 -> 256 samples into preview lightmaps that are shown, never saved, and gone when turned off", [] {
+    Editor ed;
+    p37_world(ed, false, 2, 1.0f, true);  // a Baked sun: the preview shows its light
+    r36_cmd(ed, "lighting mode manual");
+    const std::string path = r35_scene_path(ed, "R41_Preview");  // a file, so a lighting folder to look in
+    const std::string dir = ed.lighting_dir_for_test();
+    CHECK(!dir.empty());
+    if (!dir.empty() && fs::exists(dir)) std::filesystem::remove_all(dir);
+    const std::vector<uint32_t> none = r35_game(ed);
+    ed.command("lighting preview on");  // (no frames yet: the loop watches every stage)
+    std::vector<int> seen;
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) {
+      ed.step_frame_headless();
+      if (seen.empty() || seen.back() != ed.preview_samples_for_test()) seen.push_back(ed.preview_samples_for_test());
+    }
+    std::printf("    preview samples seen:");
+    for (int v : seen) std::printf(" %d", v);
+    std::printf("\n");
+    CHECK(ed.preview_samples_for_test() == 256);
+    CHECK(std::find(seen.begin(), seen.end(), 16) != seen.end() && std::find(seen.begin(), seen.end(), 64) != seen.end());
+    CHECK(!ed.preview_data_for_test().empty());
+    CHECK(ed.lighting_data_for_test().empty());  // the real bake is untouched
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> preview = r35_game(ed);
+    CHECK(r35_diff_count(preview, none) > 500);  // the preview's light shows
+    CHECK(!fs::exists(fs::join(dir, "LightingData.bin")) && !fs::exists(fs::join(dir, "Lightmap-0.hdr")));
+    /* A change starts it over. */
+    ed.scene().find_by_name("Box")->set_local_position({-1.2f, 0.5f, 0.6f});
+    ed.commit_change("box moved");
+    ed.step_frame_headless();
+    CHECK(ed.preview_samples_for_test() <= 256);
+    for (int i = 0; i < 20 && !(ed.preview_samples_for_test() == 256 && !ed.preview_running_for_test()); i++) ed.step_frame_headless();
+    CHECK(ed.preview_samples_for_test() == 256);
+    /* Off: the picture without it, bit for bit. */
+    r36_cmd(ed, "lighting preview off");
+    r34_steps(ed, 2);
+    CHECK(ed.preview_data_for_test().empty());
+    ed.scene().find_by_name("Box")->set_local_position({-1.5f, 0.5f, 0.0f});  // back where it was
+    ed.commit_change("box back");
+    r34_steps(ed, 2);
+    CHECK(r35_diff_count(r35_game(ed), none) == 0);
+  });
+
+  test("lighting preview: Generate Lighting replaces it; switching modes and odd settings mid-preview are safe", [] {
+    Editor ed;
+    p37_world(ed, false, 2, 1.0f, true);
+    r36_cmd(ed, "lighting preview on");
+    ed.step_frame_headless();
+    r36_cmd(ed, "lighting mode automatic");
+    r36_cmd(ed, "lighting mode manual");
+    ed.scene().lighting.texels_per_unit = std::numeric_limits<float>::quiet_NaN();
+    ed.commit_change("nan");
+    r34_steps(ed, 4);
+    ed.scene().lighting.texels_per_unit = 8.0f;
+    ed.commit_change("ok");
+    r34_steps(ed, 2);
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().empty());
+    /* The fresh bake is what shows, with the preview still on (it stands down while the bake is current). */
+    r34_steps(ed, 4);
+    CHECK(ed.preview_data_for_test().empty() && !ed.preview_running_for_test());
+    const std::vector<uint32_t> baked = r35_game(ed);
+    /* A change: the preview takes over again; Generate Lighting hands back to the bake. */
+    ed.scene().find_by_name("Box")->set_local_position({-1.2f, 0.5f, 0.6f});
+    ed.commit_change("box moved");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(!ed.preview_data_for_test().empty());
+    r35_bake(ed);
+    r34_steps(ed, 2);
+    CHECK(ed.preview_data_for_test().empty());
+    CHECK(r35_diff_count(r35_game(ed), baked) > 0);  // (the new bake, with the box where it is now)
+    r36_cmd(ed, "lighting preview off");
+    r34_steps(ed, 2);
+    CHECK(ed.preview_data_for_test().empty());
+    CHECK(!ed.preview_running_for_test());
+  });
+
+  /* ---------------------------------------------------------------- task 0020's review */
+  /* Everything static (the ball too), a Realtime sun, a bake of the sky: realtime lightmaps add the sun's
+   * bounce to the lightmaps. */
+  auto static_world = [](Editor &ed) {
+    P37World w = p37_world(ed, false, 0, 1.0f, true);
+    w.ball->get<MeshRenderer>()->contribute_gi = true;
+    ed.commit_change("ball static");
+    return w;
+  };
+
+  test("manual lighting: the frozen picture is the last updated one (the sun's bounce on lightmaps and specular occlusion kept)", [=] {
+    Editor ed;
+    static_world(ed);
+    r35_bake(ed);
+    r36_cmd(ed, "lighting mode manual");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    for (int i = 0; i < 40 && ed.lighting_update_pending_for_test(); i++) ed.step_frame_headless();
+    /* An update, watched frame by frame: the last frame drawn while it ran, then the frozen ones. */
+    ed.command("lighting update");
+    std::vector<uint32_t> live;
+    for (int i = 0; i < 40 && ed.lighting_update_pending_for_test(); i++) {
+      ed.step_frame_headless();
+      if (ed.lighting_update_pending_for_test()) live = r35_game(ed);
+    }
+    CHECK(!ed.lighting_update_pending_for_test());
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> frozen = r35_game(ed);
+    CHECK(!live.empty());
+    const size_t d = r35_diff_count(frozen, live);
+    std::printf("    frozen vs the last live frame: %zu pixels differ\n", d);
+    CHECK(d == 0);
+  });
+
+  test("manual lighting: undo and redo keep the frozen realtime lightmaps", [=] {
+    Editor ed;
+    P37World w = static_world(ed);
+    r36_cmd(ed, "lighting mode manual");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    for (int i = 0; i < 40 && ed.lighting_update_pending_for_test(); i++) ed.step_frame_headless();
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> before = r35_game(ed);
+    w.box->set_local_position({-1.0f, 0.5f, 1.2f});
+    ed.commit_change("box moved");
+    r34_steps(ed, 2);
+    CHECK(r35_diff_count(r35_game(ed), before) > 0);
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(r35_diff_count(r35_game(ed), before) == 0);
+    ed.command("redo");
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(r35_diff_count(r35_game(ed), before) == 0);
+  });
+
+  test("manual lighting: frozen Realtime GI with no bake says it's out of date after a change, and not after Update Lighting", [=] {
+    Editor ed;
+    P37World w = manual_world(ed, false);
+    for (int i = 0; i < 40 && ed.lighting_update_pending_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.frozen_out_of_date_for_test());
+    w.box->set_local_position({-1.0f, 0.5f, 1.0f});
+    ed.commit_change("box moved");
+    r34_steps(ed, 1);
+    CHECK(ed.frozen_out_of_date_for_test());
+    ed.command("lighting update");
+    for (int i = 0; i < 40 && ed.lighting_update_pending_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.frozen_out_of_date_for_test());
+  });
+
+  test("lighting preview: in Automatic with a stale bake (the case it's for) the preview is what shows", [] {
+    Editor ed, off;
+    for (Editor *e : {&ed, &off}) {
+      p37_world(*e, false, 2, 1.0f, true);
+      r36_cmd(*e, "lighting mode automatic");
+      r36_cmd(*e, "set Lighting.RealtimeGI true");
+      r35_bake(*e);
+      e->scene().find_by_name("Box")->set_local_position({-1.2f, 0.5f, 0.6f});
+      e->commit_change("box moved");
+      r34_steps(*e, 2);
+    }
+    ed.command("lighting preview on");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    r34_steps(ed, 2);
+    r34_steps(off, 2);
+    CHECK(!ed.preview_data_for_test().empty());
+    const size_t d = r35_diff_count(r35_game(ed), r35_game(off));
+    std::printf("    with the preview vs without: %zu pixels differ\n", d);
+    CHECK(d > 500);  // its lightmaps are attached, not dropped as stale
+  });
+
+  test("lighting preview: opening another scene drops the old scene's preview", [] {
+    Editor ed;
+    p37_world(ed, false, 2, 1.0f, true);
+    const std::string path = r35_scene_path(ed, "R41_Other");
+    CHECK(save_scene(ed.scene(), path));
+    ed.command("lighting preview on");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    CHECK(!ed.preview_data_for_test().empty());
+    ed.command("newscene");
+    CHECK(ed.preview_data_for_test().empty() && !ed.preview_running_for_test() && ed.preview_samples_for_test() == 0);
+    std::filesystem::remove(path);
   });
 }

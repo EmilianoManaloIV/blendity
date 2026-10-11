@@ -25,18 +25,17 @@ std::string Editor::lighting_dir() const {
 
 /* lightmap_content_hash() of a drawn mesh at g's place. The mesh part is remembered by its render
  * mesh's serial (new for every rebuild, never reused), so a drag only rehashes the matrix. */
-uint64_t Editor::lightmap_hash_of(const GameObject &g, const Mesh &m) {
+uint64_t Editor::mesh_hash_of(const Mesh &m) {
   const uint64_t serial = m.render_mesh().serial;
-  uint64_t mh = 0;
   auto it = serial ? lm_mesh_hash_.find(serial) : lm_mesh_hash_.end();
-  if (it != lm_mesh_hash_.end()) mh = it->second;
-  else {
-    mh = lightmap_mesh_hash(m);
-    if (lm_mesh_hash_.size() > 8192) lm_mesh_hash_.clear();  // old meshes' serials never come back
-    if (serial) lm_mesh_hash_[serial] = mh;
-  }
-  return lightmap_placed_hash(mh, g.world_matrix());
+  if (it != lm_mesh_hash_.end()) return it->second;
+  const uint64_t mh = lightmap_mesh_hash(m);
+  if (lm_mesh_hash_.size() > 8192) lm_mesh_hash_.clear();  // old meshes' serials never come back
+  if (serial) lm_mesh_hash_[serial] = mh;
+  return mh;
 }
+
+uint64_t Editor::lightmap_hash_of(const GameObject &g, const Mesh &m) { return lightmap_placed_hash(mesh_hash_of(m), g.world_matrix()); }
 
 /* What the baked lighting depends on: the contributing objects (shape, place, material colours),
  * the Baked and Mixed lights, the world and the lighting settings. Different from the bake's = out of date. */
@@ -111,6 +110,10 @@ bool Editor::live_gi_needed(std::string *why) {
     say("Live GI: off (Realtime GI is off)");
     return false;
   }
+  if (lighting_manual() && !lighting_update_requested_) {
+    say("Live GI: frozen (Lighting Updates: Manual; Update Lighting or Ctrl+Shift+L refreshes it)");
+    return false;
+  }
   if (!ls.baked_gi || lighting_data_.empty()) {
     say("Live GI: running (nothing baked)");
     return true;
@@ -136,17 +139,34 @@ bool Editor::live_gi_needed(std::string *why) {
 
 /* Gives a drawn item its lightmap when the object was baked as it is now. */
 void Editor::attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it) {
-  if (lighting_data_.empty() || !scene_->lighting.baked_gi) return;
-  auto e = lighting_data_.entries.find(g.id);
-  if (e == lighting_data_.entries.end() || e->second.page < 0 || e->second.page >= (int)lighting_data_.pages.size()) return;
+  const LightingData &ld = shown_lighting();  // the preview's while there is one (task 0020)
+  if (ld.empty() || !scene_->lighting.baked_gi) return;
+  auto e = ld.entries.find(g.id);
+  if (e == ld.entries.end() || e->second.page < 0 || e->second.page >= (int)ld.pages.size()) return;
   if (e->second.tri_uv.size() != it.mesh->tri_count() * 3) return;
-  if (e->second.hash != lightmap_hash_of(g, m)) return;  // changed since the bake: realtime ambient
+  /* Changed since the bake: realtime ambient - except in Manual, where the last lighting stays up (a moved
+   * object keeps its map, lit where it was) until you update. */
+  if (e->second.hash != lightmap_hash_of(g, m)) {
+    if (!lighting_manual()) return;
+    auto mb = lm_mesh_baked_.find(g.id);
+    if (mb == lm_mesh_baked_.end() || mb->second != mesh_hash_of(m)) return;  // its mesh changed: probes or the sky
+  }
   if (lm_stale_live_) return;  // lights or world changed since the bake: live GI until the next one
-  it.lightmap = &lighting_data_.pages[(size_t)e->second.page];
+  it.lightmap = &ld.pages[(size_t)e->second.page];
   it.lightmap_uv = &e->second.tri_uv;
 }
 
 void Editor::load_lighting_data() {
+  scene_ident_++;  // a new or opened scene: nothing published for the last one shows
+  if (preview_running_) preview_baker_.cancel();
+  preview_running_ = false;
+  preview_data_ = LightingData{};
+  preview_key_ = preview_view_key_ = preview_scene_key_ = 0;
+  preview_stage_ = preview_samples_ = 0;
+  lighting_update_requested_ = false;
+  last_realtime_gi_ = false;  // Realtime GI on in the scene: one update when it's drawn (task 0020)
+  frozen_key_ = 0;
+  lm_mesh_baked_.clear();
   lighting_data_ = LightingData{};
   probes_ = ProbeVolumeData{};
   probe_live_ready_ = false;
@@ -160,7 +180,15 @@ void Editor::load_lighting_data() {
   if (dir.empty() || !fs::exists(fs::join(dir, "LightingData.bin"))) return;
   std::string err;
   if (!lighting_data_.load(dir, err)) Log::warn("Baked lighting not loaded: %s", err.c_str());
-  else lighting_saved_dir_ = dir;
+  else {
+    lighting_saved_dir_ = dir;
+    /* The meshes it was baked from: the scene's as they are (where they still sit where they were baked). */
+    scene_->for_each([&](GameObject &g) {
+      auto e = lighting_data_.entries.find(g.id);
+      const Mesh *m = e != lighting_data_.entries.end() ? g.evaluated_mesh(1) : nullptr;
+      if (m && e->second.hash == lightmap_hash_of(g, *m)) lm_mesh_baked_[g.id] = mesh_hash_of(*m);
+    });
+  }
   const std::string pv = fs::join(dir, "ProbeVolume.bin");
   if (fs::exists(pv) && !probes_.load(pv, err)) Log::warn("Probe volume not loaded: %s", err.c_str());
   if (!probes_.empty() && (lighting_saved_dir_.empty() || probes_.scene_key != lighting_data_.scene_key)) {
@@ -190,19 +218,11 @@ void Editor::save_lighting_data() {
   else Log::error("Could not save the baked lighting: %s", err.c_str());
 }
 
-void Editor::bake_start() {
-  if (baking_) return;
-  if (playing_) {
-    Log::warn("Generate Lighting: not while playing.");
-    return;
-  }
-  const LightingSettings &ls = scene_->lighting;
-  if (!ls.baked_gi) {
-    Log::warn("Generate Lighting: Baked Global Illumination is off (Lighting window).");
-    return;
-  }
-  std::vector<BakeObject> objects;
-  std::vector<BakeLight> lights;
+/* What Generate Lighting (and its preview) bakes: the Contribute GI objects, copied (the scene may change
+ * while it runs), and the lights with their modes. */
+void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) {
+  objects.clear();
+  lights.clear();
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     if (auto *mr = g.get<MeshRenderer>())
@@ -222,6 +242,35 @@ void Editor::bake_start() {
     if (auto *l = g.get<Light>())
       if (l->enabled) lights.push_back({to_render_light(g, *l), l->mode, g.id});
   });
+}
+
+/* Task 0018: on the first ticked GPU when Render > Device is GPU Compute (as F12 renders); -1 the CPU. */
+int Editor::choose_bake_gpu() {
+  if (scene_->render.device == 1 && gpu::available()) {
+    const std::vector<int> g = enabled_gpus();
+    if (!g.empty()) return g[0];
+  }
+  return -1;
+}
+
+void Editor::bake_start() {
+  if (baking_) return;
+  if (playing_) {
+    Log::warn("Generate Lighting: not while playing.");
+    return;
+  }
+  const LightingSettings &ls = scene_->lighting;
+  if (!ls.baked_gi) {
+    Log::warn("Generate Lighting: Baked Global Illumination is off (Lighting window).");
+    return;
+  }
+  std::vector<BakeObject> objects;
+  std::vector<BakeLight> lights;
+  collect_bake_scene(objects, lights);
+  if (preview_running_) {  // the real bake replaces the preview
+    preview_baker_.cancel();
+    preview_running_ = false;
+  }
   update_environment();
   bake_objects_ = objects;  // the probes are baked from the same scene when the lightmaps are done
   bake_lights_ = lights;
@@ -234,13 +283,7 @@ void Editor::bake_start() {
   s.bounces = ls.bounces;
   s.denoise = ls.denoise;
   s.indirect_intensity = ls.indirect_intensity;
-  /* Task 0018: on the first ticked GPU when Render > Device is GPU Compute (as F12 renders); the CPU
-   * otherwise, or after a GPU error. */
-  bake_gpu_ = -1;
-  if (scene_->render.device == 1 && gpu::available()) {
-    const std::vector<int> g = enabled_gpus();
-    if (!g.empty()) bake_gpu_ = g[0];
-  }
+  bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
   bake_key_ = lightmap_scene_key();
   bake_start_ = now_seconds();
@@ -292,6 +335,8 @@ void Editor::step_bake() {
     if (!done) return;
     lighting_data_ = baker_.take_result();
     lighting_data_.scene_key = bake_key_;
+    lm_mesh_baked_.clear();
+    for (const BakeObject &o : bake_objects_) lm_mesh_baked_[o.id] = lightmap_mesh_hash(*o.mesh);
     probe_phase_ = bake_probes_begin();  // then the probes, in slices like the texels
   }
   if (probe_phase_) {
@@ -562,7 +607,7 @@ void Editor::update_realtime_lightmaps() {
  * bake again. Until then realtime GI (if on) keeps the picture right. */
 void Editor::auto_generate_step() {
   const LightingSettings &ls = scene_->lighting;
-  if (!ls.auto_generate || !ls.baked_gi || baking_ || playing_ || lighting_data_.empty()) {
+  if (!ls.auto_generate || !ls.baked_gi || baking_ || playing_ || lighting_data_.empty() || lighting_manual()) {
     settle_since_ = 0;
     return;
   }
@@ -581,6 +626,159 @@ void Editor::auto_generate_step() {
     bake_start();
   }
   else ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, settle_since_ + 1.0) : settle_since_ + 1.0;
+}
+
+/* Task 0020: Update Lighting. Realtime GI runs once - the grid, the RSM, the realtime lightmaps and the live
+ * probes - and freezes again when they have all caught up (a frame on a GPU, a few on the CPU). */
+void Editor::lighting_update() {
+  if (!scene_->lighting.realtime_gi) {
+    Log::warn("Update Lighting: Realtime GI is off (Lighting window); Generate Lighting bakes.");
+    return;
+  }
+  lighting_update_requested_ = true;
+  lighting_update_frames_ = 0;
+  lighting_gen_++;  // the views render again, building this frame's grid and RSM
+  ui_.redraw = true;
+}
+
+/* What frozen Realtime GI depends on: every drawn object's place and shape, the lights, the world and the
+ * GI settings. */
+uint64_t Editor::frozen_lighting_key() {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+  };
+  scene_->for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    const auto *mr = g.get<MeshRenderer>();
+    const Light *l = g.get<Light>();
+    if (!(mr && mr->enabled) && !(l && l->enabled)) return;
+    mix(&g.id, 8);
+    mix(g.world_matrix().m, sizeof(float) * 16);
+    if (mr && mr->enabled) {
+      const uint64_t k = g.evaluated_key(1);
+      mix(&k, 8);
+      mix(&mr->contribute_gi, 1);
+    }
+    if (l && l->enabled) {
+      const uint64_t lh = hash_component(*const_cast<Light *>(l));
+      mix(&lh, 8);
+    }
+  });
+  const uint64_t w = hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); });
+  mix(&w, 8);
+  const LightingSettings &ls = scene_->lighting;
+  const float gp[7] = {ls.gi_radius, ls.gi_intensity, (float)ls.gi_rays, (float)ls.gi_resolution, (float)ls.gi_bounce, (float)ls.gi_sky_occlusion,
+                       ls.realtime_resolution};
+  mix(gp, sizeof(gp));
+  return h ? h : 1;
+}
+
+/* Manual with Realtime GI: the scene changed since the last Update Lighting (the status bar says so). */
+bool Editor::frozen_out_of_date() {
+  if (!scene_->lighting.realtime_gi || !lighting_manual() || lighting_update_requested_ || frozen_key_ == 0) return false;
+  return frozen_lighting_key() != frozen_key_;
+}
+
+void Editor::lighting_update_step() {
+  const bool rgi = scene_->lighting.realtime_gi;
+  if (rgi && !last_realtime_gi_ && lighting_manual() && !lighting_update_requested_) lighting_update();  // turned on, or a scene opened
+  last_realtime_gi_ = rgi;
+  if (!lighting_update_requested_) return;
+  lighting_update_frames_++;
+  const bool caught_up = lighting_update_frames_ >= 2 && !rtlm_busy_ && probe_live_left_ == 0;
+  if (caught_up || lighting_update_frames_ > 600 || !scene_->lighting.realtime_gi) {
+    lighting_update_requested_ = false;
+    frozen_key_ = frozen_lighting_key();
+    lighting_gen_++;  // drawn once more from the frozen results
+  }
+  ui_.redraw = true;
+}
+
+/* Task 0020: Preview Lighting, like Bakery's Realtime Preview. Half a second after the scene stops changing,
+ * a rough bake (a quarter of the resolution, 16, then 64, then 256 samples) runs a slice a frame and is
+ * shown instead of the real lightmaps; any change starts over. Never saved. */
+void Editor::preview_step() {
+  const LightingSettings &ls = scene_->lighting;
+  if (!ls.preview || baking_ || playing_ || !ls.baked_gi) {
+    if (preview_running_) preview_baker_.cancel();
+    preview_running_ = false;
+    if (!preview_data_.empty()) {
+      preview_data_ = LightingData{};
+      lighting_gen_++;
+    }
+    preview_key_ = 0;
+    preview_stage_ = preview_samples_ = 0;
+    return;
+  }
+  /* (lightmap_scene_key() walks every object: only when something the views draw or a setting changed.) */
+  const uint64_t vk = scene_render_hash() ^ hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }) * 31;
+  if (vk != preview_view_key_ || preview_scene_key_ == 0) {
+    preview_view_key_ = vk;
+    preview_scene_key_ = lightmap_scene_key();
+  }
+  const uint64_t key = preview_scene_key_;
+  const double now = now_seconds();
+  if (!lighting_data_.empty() && lighting_data_.scene_key == key) {
+    /* The real bake is current (Generate Lighting just ran, or nothing changed since): it's shown. */
+    if (preview_running_) preview_baker_.cancel();
+    preview_running_ = false;
+    if (!preview_data_.empty()) {
+      preview_data_ = LightingData{};
+      lighting_gen_++;
+    }
+    preview_key_ = key;
+    preview_stage_ = 3;
+    preview_samples_ = 0;
+    return;
+  }
+  if (key != preview_key_) {  // changed: wait for it to settle, then start over
+    if (preview_running_) preview_baker_.cancel();
+    preview_running_ = false;
+    preview_key_ = key;
+    preview_settle_ = now;
+    preview_stage_ = 0;
+    preview_samples_ = 0;
+  }
+  const bool real_time = !headless_ || preview_like_window_;
+  if (real_time && now - preview_settle_ < 0.5) {
+    ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, preview_settle_ + 0.5) : preview_settle_ + 0.5;
+    return;
+  }
+  static const int kSamples[3] = {16, 64, 256};
+  if (!preview_running_) {
+    if (preview_stage_ >= 3) return;  // refined
+    std::vector<BakeObject> objects;
+    std::vector<BakeLight> lights;
+    collect_bake_scene(objects, lights);
+    update_environment();
+    BakeSettings s;
+    s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.25f);
+    s.max_size = std::min(ls.max_size, 1024);
+    s.padding = ls.padding;
+    s.direct_samples = std::max(1, std::min(ls.direct_samples, 8));
+    s.indirect_samples = kSamples[preview_stage_];
+    s.bounces = ls.bounces;
+    s.denoise = true;
+    s.indirect_intensity = ls.indirect_intensity;
+    s.gpu_device = choose_bake_gpu();
+    preview_baker_.begin(objects, lights, env_, s);
+    preview_running_ = true;
+  }
+  if (preview_baker_.step(real_time ? 8.0 : 1e9)) {
+    preview_data_ = preview_baker_.take_result();
+    preview_data_.scene_key = key;
+    scene_->for_each([&](GameObject &g) {  // the meshes it lit (Manual keeps a moved object's map)
+      if (preview_data_.entries.count(g.id))
+        if (const Mesh *m = g.evaluated_mesh(1)) lm_mesh_baked_[g.id] = mesh_hash_of(*m);
+    });
+    preview_samples_ = kSamples[preview_stage_];
+    preview_stage_++;
+    preview_running_ = false;
+    lighting_gen_++;
+  }
+  ui_.redraw = true;
 }
 
 }  // namespace bl

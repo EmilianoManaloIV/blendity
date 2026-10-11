@@ -450,7 +450,7 @@ Light that bounces between surfaces is either baked ahead of time with the path 
 | Moving objects | Probe Volume component | Adaptive Probe Volumes | Light Probe Volume (EEVEE)
 | Live bounce | Realtime GI (voxel based) | Realtime GI (Enlighten) | (EEVEE: screen-space GI)
 # A scene that doesn't lag
-Tick Contribute GI on everything that never moves, make the sun Mixed (or Baked), press Generate Lighting and turn on Auto Generate. A Probe Volume lights moving objects from the bake. With a current bake, Realtime GI is idle: the Lighting window's "Live GI:" line says so.
+Tick Contribute GI on everything that never moves, make the sun Mixed (or Baked) and press Generate Lighting. A Probe Volume lights moving objects from the bake. Lighting Updates: Manual (the default) keeps the lighting as it was while you move things: press Update Lighting (Ctrl+Shift+L) when you want Realtime GI to catch up, and turn on Preview Lighting for a rough bake each time you stop (like Bakery's Realtime Preview). Automatic follows every change live instead.
 # Realtime lightmaps, and why GI can look blocky
 Contribute GI objects get realtime lightmaps (Realtime Resolution, 2 texels per metre as in Unity): voxel GI lights them a slice at a time when the lighting changes, so moving the camera traces nothing and they look the same from any distance. Other objects are traced at a quarter (or half) of the screen's pixels and smoothed; zoomed out, an object is only a few of those cells tall, so they can look blocky. Contribute GI or GI Resolution = Half fixes that; a bake has no blocks at all.
 > Thiedemann, Henrich, Grosch & Müller (2011) Voxel-based Global Illumination. I3D.
@@ -461,6 +461,8 @@ Contribute GI objects get realtime lightmaps (Realtime Resolution, 2 texels per 
 ! cmd:select Plane; set MeshRenderer.ContributeGI true | Make the Plane static (Contribute GI)
 ! cmd:bake start | Generate Lighting
 ! cmd:set Lighting.RealtimeGI true; set Lighting.GIResolution 0 | Realtime GI at Half resolution
+! cmd:lighting update | Update Lighting (Ctrl+Shift+L)
+! cmd:lighting preview on | Preview Lighting: a rough bake when you stop
 )"},
     {"Advanced Modeling Tools", "Edge loops, loop cuts and generative modifiers", R"(
 Edge mode (press 2) selects edges. An edge loop is a chain of edges running straight through 4-way vertices, around a cylinder or across a grid. Loops are how modellers add detail: you cut a new loop exactly where a bend needs geometry.

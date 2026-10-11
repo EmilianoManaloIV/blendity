@@ -203,6 +203,12 @@ class Editor {
   bool realtime_lightmaps_busy_for_test() const { return rtlm_busy_; }
   const std::string &gi_gpu_name_for_test() const { return gi_gpu_name_; }
   const Lightmapper &baker_for_test() const { return baker_; }
+  bool lighting_update_pending_for_test() const { return lighting_update_requested_; }
+  const LightingData &preview_data_for_test() const { return preview_data_; }
+  int preview_samples_for_test() const { return preview_samples_; }
+  bool preview_running_for_test() const { return preview_running_; }
+  bool frozen_out_of_date_for_test() { return frozen_out_of_date(); }
+  void preview_like_window_for_test(bool on) { preview_like_window_ = on; }
   /* Probe samples shared by 2 x 2 pixels (on) or taken at every pixel (off, the reference); the views
    * render again. */
   void set_probe_quad_reuse_for_test(bool on) {
@@ -988,6 +994,36 @@ class Editor {
   /* Whether Realtime GI has live work to do (task 0017): not when a current bake holds every light that
    * bounces. `why` says which case it is, for the Lighting window. */
   bool live_gi_needed(std::string *why = nullptr);
+  /* Task 0020: Manual lighting updates, the one-off Update Lighting, and the rough preview bake. */
+  bool lighting_manual() const { return scene_->lighting.update_mode == 0; }
+  bool lighting_frozen() const { return scene_->lighting.realtime_gi && lighting_manual() && !lighting_update_requested_; }
+  void lighting_update();
+  void lighting_update_step();
+  bool lighting_update_requested_ = false;
+  int lighting_update_frames_ = 0;
+  void preview_step();
+  const LightingData &shown_lighting() const { return !preview_data_.empty() ? preview_data_ : lighting_data_; }
+  Lightmapper preview_baker_;
+  LightingData preview_data_;
+  bool preview_running_ = false;
+  int preview_stage_ = 0, preview_samples_ = 0;
+  uint64_t preview_key_ = 0;
+  double preview_settle_ = 0;
+  /* Headless runs (tests) don't wait for the scene to settle and bake a stage a frame; the stress section
+   * asks for the editor's real 0.5 s and 8 ms. */
+  bool preview_like_window_ = false;
+  uint64_t scene_ident_ = 1;  // a new or opened scene gets a new one; undo and redo keep it (unlike Scene::serial)
+  /* Manual (task 0020): the scene as of the last Update Lighting, to say when frozen GI is stale. */
+  uint64_t frozen_key_ = 0;
+  bool last_realtime_gi_ = false;
+  uint64_t frozen_lighting_key();
+  bool frozen_out_of_date();
+  /* Per object: the mesh (not its place) a bake or preview lit, for Manual's "moved, not changed". */
+  std::unordered_map<uint64_t, uint64_t> lm_mesh_baked_;
+  uint64_t mesh_hash_of(const Mesh &m);
+  uint64_t preview_view_key_ = 0, preview_scene_key_ = 0;  // lightmap_scene_key(), recomputed only when the scene changed
+  void collect_bake_scene(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights);
+  int choose_bake_gpu();
   uint64_t vgi_updates_ = 0;  // update_voxel_gi() calls (tests: no live work once baked)
   bool probe_quad_reuse_ = true;
   void attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it);

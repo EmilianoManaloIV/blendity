@@ -31,7 +31,9 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   std::vector<DrawItem> items;
-  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_data_.empty() && lighting_out_of_date();
+  /* (Of what is shown: the preview's own staleness while there is one.) */
+  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
+                   (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -114,8 +116,9 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
     RenderLight rl = to_render_light(g, *l);
     /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
      * Realtime since must not shine twice, and one added since must not vanish. */
-    auto baked = lighting_data_.light_modes.find(g.id);
-    rl.bake_mode = baked != lighting_data_.light_modes.end() && scene_->lighting.baked_gi ? baked->second : 0;
+    const LightingData &ld = shown_lighting();
+    auto baked = ld.light_modes.find(g.id);
+    rl.bake_mode = baked != ld.light_modes.end() && scene_->lighting.baked_gi ? baked->second : 0;
     env.lights.push_back(rl);
   });
   update_environment();
@@ -331,7 +334,22 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
    * that bounces, the views cost what Realtime GI off costs. */
   const bool live_gi = scene_lights && live_gi_needed();
   if (live_gi) env.gi = update_voxel_gi(items, env, game);
-  if (env.gi) {
+  /* Manual (task 0020): nothing traced, but the last realtime lightmaps and live probes stay up. */
+  const bool frozen = scene_lights && lighting_frozen();
+  bool bounce_not_baked = env.gi && env.gi->bounce_not_baked;
+  if (frozen && !env.gi) {
+    /* As update_voxel_gi decides it: the first directional light's bounce isn't in the shown bake. */
+    bounce_not_baked = true;
+    for (const RenderLight &l : env.lights)
+      if (l.type == RenderLight::Directional) {
+        if (!shown_lighting().empty() && scene_->lighting.baked_gi) bounce_not_baked = l.bake_mode == 0;
+        break;
+      }
+    env.rt_bounce_not_baked = bounce_not_baked;
+    const float so = scene_->lighting.gi_specular_occlusion;
+    env.rt_specular_occlusion = finite_bits(so) ? std::max(0.0f, std::min(1.0f, so)) : 1.0f;
+  }
+  if (env.gi || frozen) {
     /* Realtime lightmaps where a pass has been published: read, not traced, and not probe-lit (Receive GI =
      * Lightmaps, as Unity's realtime GI). */
     const RealtimeLightmaps &rl = vgi_[game ? 1 : 0].rtlm;
@@ -340,7 +358,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
         if (!it.realtime_lm || !it.mesh) continue;
         auto e = rl.shown.entries.find(it.id);
         if (e == rl.shown.entries.end() || e->second.page < 0 || (size_t)e->second.page >= rl.shown.bounce.size()) continue;
-        if (e->second.hash != scene_->serial) continue;  // published for the scene before this one
+        if (e->second.hash != scene_ident_) continue;  // published for the scene before this one (undo keeps the id)
         if (e->second.tri_uv.size() != it.mesh->tri_count() * 3) continue;  // a different mesh since: traced until the next pass
         it.rt_bounce = &rl.shown.bounce[(size_t)e->second.page];
         it.rt_sky = &rl.shown.sky[(size_t)e->second.page];
@@ -350,7 +368,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   }
   const LightingSettings &pls = scene_->lighting;
   const bool baked_probes = !probes_.empty() && probes_.scene_key != 0 && pls.baked_gi;
-  const bool live_probes = !probes_.empty() && live_gi && probe_live_ready_;
+  const bool live_probes = !probes_.empty() && (live_gi || frozen) && probe_live_ready_;
   if (scene_lights && (baked_probes || live_probes)) {
     const LightingSettings &ls = pls;
     probe_frame_.data = &probes_;
@@ -359,7 +377,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     probe_frame_.leak_reduction = ls.probe_leak_reduction;
     probe_frame_.quad_reuse = probe_quad_reuse_;
     /* The live copy where the bake doesn't cover it: no bake, a stale one, or a sun it doesn't hold. */
-    probe_frame_.use_live = live_probes && (!baked_probes || lm_stale_live_ || (env.gi && env.gi->bounce_not_baked));
+    probe_frame_.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
     env.probes = &probe_frame_;
   }
   RasterOptions opt = raster_opt_;
@@ -870,14 +888,14 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
   vgi.frame.rsm = vgi.rsm.valid() ? &vgi.rsm : nullptr;
   /* Lightmapped surfaces add the bounce of a sun the bake doesn't hold (Realtime, or added since). */
   vgi.frame.bounce_not_baked = true;
-  if (sun && !lighting_data_.empty() && ls.baked_gi) vgi.frame.bounce_not_baked = sun->bake_mode == 0;
+  if (sun && !shown_lighting().empty() && ls.baked_gi) vgi.frame.bounce_not_baked = sun->bake_mode == 0;
   /* Realtime lightmaps (task 0016): laid out again when a Contribute GI object's mesh or placement or the
    * resolution changes (unwrapped UVs are kept per object); update_realtime_lightmaps() fills them. */
   const float rres = finite_bits(ls.realtime_resolution) ? std::max(0.0f, std::min(100.0f, ls.realtime_resolution)) : 2.0f;
   if (rres > 0.0f) {
     uint64_t lkey = 1469598103934665603ull;
     mix(lkey, &rres, sizeof(float));
-    mix(lkey, &scene_->serial, 8);  // another scene's objects can share ids
+    mix(lkey, &scene_ident_, 8);  // another scene's objects can share ids
     for (const DrawItem &it : items) {
       if (!it.realtime_lm || !it.mesh) continue;
       mix(lkey, &it.id, sizeof(it.id));
@@ -898,7 +916,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
         o.model = it.model;
         o.scale = mr->scale_in_lightmap;
         o.generate_uvs = mr->generate_lightmap_uvs;
-        o.hash = scene_->serial;  // Entry::hash: which scene the chart belongs to
+        o.hash = scene_ident_;  // Entry::hash: which scene the chart belongs to
         objs.push_back(std::move(o));
       }
       realtime_lightmap_layout(vgi.rtlm, objs, rres, lkey);

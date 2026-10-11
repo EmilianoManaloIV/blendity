@@ -24,6 +24,22 @@ every frame that re-renders a view.
    editing, it bakes again in the background. The status bar shows "Lighting out of date" until then.
 6. **Save the scene:** the bake is saved next to it, in a folder with the scene's name.
 
+## Manual or Automatic updates
+**Lighting Updates** (Lighting window) decides when lighting is recomputed:
+- **Manual (the default):** moving objects, lights or the world doesn't recompute anything. Direct light
+  and shadows follow, but bounced light stays as it was last computed, so a drag costs what it costs
+  without GI. A baked object you move keeps its lightmap until you bake again.
+  - Press **Update Lighting** (or **Ctrl+Shift+L**) to bring Realtime GI up to date once.
+  - Press **Generate Lighting** for the real bake.
+- **Automatic:** Realtime GI follows every change live, and Auto Generate re-bakes a second after you
+  stop.
+
+**Preview Lighting** shows a rough bake while you work, like Bakery's Realtime Preview:
+- **When:** half a second after you stop changing things.
+- **What:** it bakes at a quarter of the resolution with 16, then 64, then 256 samples (about 1.5 s for
+  the first pass on a GPU) and shows the result instead of the real bake.
+- It's never saved; turn it off to see the real bake again.
+
 ## What Realtime GI is for
 Realtime GI shows bounced light while you're still arranging lights and objects, with nothing to bake.
 It only does live work for what the bake doesn't hold. The Lighting window shows a "Live GI:" line that

@@ -732,6 +732,9 @@ struct EnvironmentSettings {
 };
 
 /* Unity: Lighting window > Scene (Mixed Lighting, Lightmapping Settings). Baked lighting, task 0012. */
+/* Task 0020: Manual unless BLENDITY_LIGHTING_UPDATES=automatic. */
+int default_lighting_update_mode();
+
 struct LightingSettings {
   bool baked_gi = true;           // Baked Global Illumination
   int lighting_mode = 0;          // 0 Baked Indirect
@@ -757,6 +760,11 @@ struct LightingSettings {
   int gi_rsm_resolution = 256;
   float gi_specular_occlusion = 1.0f;
   float realtime_resolution = 2.0f;  // realtime lightmaps' texels per metre (task 0016); 0 = off (per pixel only)
+  /* Task 0020: 0 Manual (lighting is recomputed only on Update Lighting / Generate Lighting), 1 Automatic
+   * (Realtime GI follows every change, Auto Generate re-bakes). BLENDITY_LIGHTING_UPDATES=automatic makes
+   * Automatic the default (the unit tests written before it). */
+  int update_mode = default_lighting_update_mode();
+  bool preview = false;  // a rough progressive bake into preview lightmaps while editing (not saved)
   int gi_device = 0;  // task 0018: 0 Auto (the GPU when there is one), 1 CPU, 2 GPU (falls back to the CPU without one)
   /* Probe volumes (task 0014), as Unity 6's Adaptive Probe Volumes. */
   float probe_min_spacing = 1.0f;   // metres between probes near geometry

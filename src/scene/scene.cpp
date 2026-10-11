@@ -9,6 +9,7 @@
 #include "physics.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -124,7 +125,20 @@ void MeshRenderer::reflect(Reflector &r) {
   }
 }
 
+int default_lighting_update_mode() {
+  const char *e = std::getenv("BLENDITY_LIGHTING_UPDATES");
+  return e && (std::string(e) == "automatic" || std::string(e) == "auto") ? 1 : 0;
+}
+
 void LightingSettings::reflect(Reflector &r) {
+  static const char *upd[] = {"Manual", "Automatic"};
+  r.enumeration("Lighting Updates", update_mode, upd, 2);
+  r.help("Manual: lighting stays as last computed while you move things (direct light and shadows stay live);\n"
+         "Update Lighting (Ctrl+Shift+L) refreshes Realtime GI, Generate Lighting bakes. Automatic: Realtime GI\n"
+         "follows every change and Auto Generate re-bakes.");
+  r.field("Preview Lighting", preview);
+  r.help("A rough progressive bake (a quarter of the resolution, 16 then 64 then 256 samples) half a second after\n"
+         "changes stop, shown instead of the bake and never saved (like Bakery's Realtime Preview).");
   r.field("Baked Global Illumination", baked_gi);
   r.help("Generate Lighting bakes the lights set to Baked or Mixed, the sky and their bounces into lightmaps for\n"
          "objects marked Contribute GI (Unity: Lighting > Mixed Lighting > Baked Global Illumination).");

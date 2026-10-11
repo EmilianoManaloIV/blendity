@@ -26,7 +26,7 @@ struct RealtimeLightmaps {
    * x) per texel, and each object's UVs. Replaced whole when a pass finishes. */
   struct Published {
     std::vector<Lightmap> bounce, sky;
-    std::map<uint64_t, LightingData::Entry> entries;  // by GameObject id; Entry::hash = the Scene::serial it was laid out in
+    std::map<uint64_t, LightingData::Entry> entries;  // by GameObject id; Entry::hash = the editor's scene id it was laid out in
     bool empty() const { return bounce.empty(); }
   } shown;
   uint64_t generation = 0;  // bumps on every publish (views re-render)
