@@ -23,6 +23,7 @@
 #include "../render/pathtracer.h"
 #include "../render/raster.h"
 #include "../render/lightmapper.h"
+#include "../render/voxel_gi.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -190,6 +191,11 @@ class Editor {
   const LightingData &lighting_data_for_test() const { return lighting_data_; }
   bool lighting_out_of_date_for_test() { return lighting_out_of_date(); }
   std::string lighting_dir_for_test() const { return lighting_dir(); }
+  /* Voxel GI (task 0013). */
+  const VoxelGrid &voxel_grid_for_test() const { return vgi_[vgi_last_].grid; }
+  const Rsm &rsm_for_test() const { return vgi_[vgi_last_].rsm; }
+  uint64_t voxelized_for_test() const { return vgi_[0].voxelized + vgi_[1].voxelized; }
+  uint64_t rsm_renders_for_test() const { return vgi_[0].rsm_renders + vgi_[1].rsm_renders; }
   /* The last frame's profile, and every frame's added up (subtract two to measure a stretch). */
   const FrameProfile &frame_profile() const { return prof_last_; }
   const FrameProfile &frame_profile_totals() const { return prof_total_; }
@@ -956,6 +962,7 @@ class Editor {
   uint64_t lightmap_scene_key();
   bool lighting_out_of_date();
   void attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it);
+  bool lm_stale_live_ = false;  // set per collect_items: the bake is out of date and realtime GI takes over
   void load_lighting_data();
   void save_lighting_data();
   std::string lighting_saved_dir_;  // where lighting_data_ is on disk ("" = only in memory)
@@ -967,6 +974,28 @@ class Editor {
   void bake_clear();
   void step_bake();
   void draw_lighting_window(const Recti &r);
+  double settle_since_ = 0;  // Auto Generate: when the lighting last went out of date
+  uint64_t settle_key_ = 0;
+  void auto_generate_step();
+  /* ---- realtime GI (voxel GI, task 0013) ---- */
+  struct VoxelObject {
+    uint64_t key = 0;
+    std::vector<VoxelSpan> spans;
+  };
+  struct VoxelGIState {
+    VoxelGrid grid;
+    std::unordered_map<uint64_t, VoxelObject> objects;  // by GameObject id
+    uint64_t assembled = 0;
+    Rsm rsm;
+    uint64_t rsm_key = 0;
+    VoxelGIFrame frame;
+    uint64_t voxelized = 0, assemblies = 0, rsm_renders = 0;  // counters for tests and stress
+  };
+  /* One per kind of view: the Scene view draws viewport meshes (and Edit Mode's cage), the Game view,
+   * Camera Preview and renders draw render meshes; sharing one would rebuild both every frame. */
+  VoxelGIState vgi_[2];
+  int vgi_last_ = 0;
+  const VoxelGIFrame *update_voxel_gi(const std::vector<DrawItem> &items, const LightingEnv &env, bool game);
   /* The sun's shadow map, kept while its casters and the light are unchanged. Two entries: the Scene
    * view and the Game view collect different meshes (the Edit cage, the evaluated mesh), so views drawn
    * in turn would otherwise evict each other every frame. */

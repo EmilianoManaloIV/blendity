@@ -2,10 +2,101 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-10 (round 36): realtime GI from the research paper: voxel-based global illumination (task 0013)
+
+**Asked:** implement the first paper in `research/papers/`, Thiedemann et al., *Voxel-based Global
+Illumination* (I3D 2011), working with the baking so that changing the lighting never needs a manual
+re-bake.
+
+**Added**
+- **Realtime GI** (Lighting window): one bounce of the sun's light and the sky's occlusion, live in
+  every rasterized view.
+- **The paper's pieces, on the CPU:**
+  - **Voxel grid (section 3):** the scene voxelized into columns of 128 bits, with an exact conservative
+    span voxelizer.
+  - **Moving objects:** each object's voxels are kept, so a moved object is voxelized alone.
+  - **Ray test (section 4):** a mip-map hierarchy and its ray walk.
+  - **Bounce (section 5.1):** gathered through the sun's reflective shadow map.
+  - **Sky:** the share of the sky that gets through gives directional occlusion; open ground keeps
+    exactly today's light.
+  - **Per pixel:** traced at ½ or ¼ resolution with 16 interleaved ray sets, a geometry-aware blur and
+    an upsample.
+- **With the baking:**
+  - Lightmapped surfaces add the live bounce of lights the bake doesn't hold.
+  - Objects changed since a bake, or a whole bake made stale by a light or world change, switch to live
+    GI instead of flat ambient.
+  - **Auto Generate** re-bakes a second after changes stop.
+- **Settings:** voxel resolution, radius, rays, intensity, sky occlusion, bounce, GI resolution, RSM
+  resolution, specular occlusion.
+
+**Fixed (found by the tests and the review)**
+- **Bounce depended on where the scene sat:** the sun's reflective shadow map flipped normals toward a
+  camera at the world origin. It now faces the sun.
+- **GI settings didn't redraw the views,** and they made the bake look out of date (which would have
+  started Auto Generate). Only the settings a bake depends on count now.
+- **Lightmapped surfaces:** they keep their baked specular. Receivers that take everything from a
+  lightmap trace nothing.
+- **Zero-area triangles** add no voxels.
+- **Auto Generate's wake-up** was cleared in the same frame, so an idle editor never re-baked.
+- **The Scene view and Game view shared one voxel / RSM cache** and rebuilt each other's every frame.
+  Each kind of view now has its own.
+- **The ray walks stall or skip far from the grid's corner:** they re-derived cells from rounded
+  positions. They now step cell indices and pick children by crossing time. A test checks 20,000 rays
+  over 256 voxels long on a 256 grid.
+- **A pre-existing rasterizer bug:** a vertex far beyond float range cast infinity to int in tile
+  binning, which the sanitizer caught.
+- **Smaller fixes:**
+  - The RSM holds the sun's light only.
+  - The self-occlusion offset clears a voxel's diagonal.
+  - Ray sets differ in elevation too.
+  - The grid stays put while the scene fits it.
+  - Objects that are gone are forgotten.
+  - Non-casting objects don't occlude.
+  - The lightmaps' out-of-date key covers bake settings only (a 0012 bake would show as out of date
+    once).
+
+**Not as the approved spec said (awaits sign-off; recorded in the spec and ADR 0011):**
+- Realtime lightmaps are per pixel, not per texel: the per-pixel pass covers the same cases.
+- The settings live in the Lighting window (`LightingSettings`).
+
+**Checked**
+- **Unit checks:** Windows 4,077, Linux 4,053, sanitizer build 3,975; 0 failed. 315 tests. The
+  test-engineer wrote 17 tests and the review added 2:
+  - **Voxelizer:** matches a double-precision triangle–box test, exactly.
+  - **Hierarchy and ray walks:**
+    - mips are the OR of the level below;
+    - the hierarchical walk equals the column walk exactly on 100k rays, and on 20k rays longer than
+      256 voxels;
+    - it agrees with an independent 3D DDA on all of them;
+    - the first hit is right going up and down.
+  - **Gather:** RSM back-projection gathers lit points and not shadowed or back-facing ones.
+  - **Pictures:**
+    - a red wall bleeds onto the floor;
+    - a box darkens the floor beside it, and far floor is bit-identical;
+    - GI off is bit-identical;
+    - deterministic, and 1 thread equals all threads.
+  - **Caching:** orbiting re-voxelizes nothing; moving one object re-voxelizes only it.
+  - **With the baking:**
+    - a Realtime sun's bounce follows it on a lightmapped floor without a bake;
+    - Auto Generate waits, re-bakes and sets its wake-up time.
+  - **Settings:** save, load, undo; odd values are safe.
+- **Verify mode:** 0 stale pictures.
+- **Stress `vgi` (Windows):**
+  - **Voxelizing:** 2.2 ms for 257 objects at 128, and 5 ms at 256.
+  - **Ray walks, short rays:** the hierarchical walk equals the column walk (6.8 vs 7.4 Mrays/s on one
+    thread).
+  - **Ray walks, 40 m rays:** the hierarchical walk is 5x faster (5.4 vs 1.1 Mrays/s).
+  - **RSM 256²:** 3 ms, only when the casters or the sun change.
+  - **The GI pass adds:**
+    - 720p, 8 rays, Quarter: 5.8 ms;
+    - 1080p, 8 rays, Quarter: 11.8 ms (over the spec's ~10.5 ms budget);
+    - 1080p, 4 rays, Quarter: 8.5 ms.
+  - **Odd settings:** 200 runs, 0 problems.
+
 ## 2026-10-10 (round 35): baked lighting like Unity's (task 0012)
 
 **Asked:** "a similar light baking system like Unity3D": lightmaps and light modes, the approved task 0012.
-Voxel GI (0013) and probe volumes (0014) will feed the same lightmaps, so changing the lighting won't
+Voxel GI (0013) and probe volumes (0014) work with the same lightmaps, so changing the lighting won't
 need a manual re-bake.
 
 **Added**

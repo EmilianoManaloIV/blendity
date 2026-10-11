@@ -72,7 +72,18 @@ uint64_t Editor::lightmap_scene_key() {
     }
   });
   mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
-  mix(hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }));
+  /* The settings a bake depends on (not Realtime GI's or Auto Generate). */
+  const LightingSettings &ls = scene_->lighting;
+  mix(ls.baked_gi);
+  mix((uint64_t)ls.lighting_mode);
+  mixf(&ls.texels_per_unit, 1);
+  mix((uint64_t)ls.max_size);
+  mix((uint64_t)ls.padding);
+  mix((uint64_t)ls.direct_samples);
+  mix((uint64_t)ls.indirect_samples);
+  mix((uint64_t)ls.bounces);
+  mix(ls.denoise);
+  mixf(&ls.indirect_intensity, 1);
   return h ? h : 1;
 }
 
@@ -95,6 +106,7 @@ void Editor::attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it) {
   if (e == lighting_data_.entries.end() || e->second.page < 0 || e->second.page >= (int)lighting_data_.pages.size()) return;
   if (e->second.tri_uv.size() != it.mesh->tri_count() * 3) return;
   if (e->second.hash != lightmap_hash_of(g, m)) return;  // changed since the bake: realtime ambient
+  if (lm_stale_live_) return;  // lights or world changed since the bake: live GI until the next one
   it.lightmap = &lighting_data_.pages[(size_t)e->second.page];
   it.lightmap_uv = &e->second.tri_uv;
 }
@@ -219,6 +231,31 @@ void Editor::step_bake() {
   Log::info("Generate Lighting: done in %.1f s", secs);
   if (lighting_dir().empty()) Log::info("Save the scene to keep its lightmaps: they are written next to the scene file.");
   else save_lighting_data();
+}
+
+/* Auto Generate (Unity's): once the lighting is out of date and has stopped changing for a second,
+ * bake again. Until then realtime GI (if on) keeps the picture right. */
+void Editor::auto_generate_step() {
+  const LightingSettings &ls = scene_->lighting;
+  if (!ls.auto_generate || !ls.baked_gi || baking_ || playing_ || lighting_data_.empty()) {
+    settle_since_ = 0;
+    return;
+  }
+  if (!lighting_out_of_date()) {
+    settle_since_ = 0;
+    return;
+  }
+  const double now = now_seconds();
+  if (settle_since_ == 0 || ood_key_ != settle_key_) {  // still changing: wait for it to settle
+    settle_key_ = ood_key_;
+    settle_since_ = now;
+  }
+  if (now - settle_since_ >= 1.0) {
+    settle_since_ = 0;
+    Log::info("Auto Generate: the lighting changed, baking again");
+    bake_start();
+  }
+  else ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, settle_since_ + 1.0) : settle_since_ + 1.0;
 }
 
 }  // namespace bl

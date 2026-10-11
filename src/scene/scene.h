@@ -742,7 +742,19 @@ struct LightingSettings {
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;
-  bool auto_generate = false;     // re-bake after changes settle (wired with realtime GI, task 0013)
+  bool auto_generate = false;     // re-bake after changes settle
+  /* Realtime GI (task 0013): voxel-based global illumination (Thiedemann et al. 2011) in the
+   * rasterized views. */
+  bool realtime_gi = false;
+  int gi_resolution = 1;          // voxel columns per side: 0 64, 1 128, 2 256
+  float gi_radius = 2.0f;         // how far bounced light and sky occlusion reach (metres)
+  int gi_rays = 8;                // per receiver
+  float gi_intensity = 1.0f;      // on the bounce
+  bool gi_sky_occlusion = true;
+  bool gi_bounce = true;
+  int gi_downsample = 1;          // 0 Half, 1 Quarter resolution
+  int gi_rsm_resolution = 256;
+  float gi_specular_occlusion = 1.0f;
   void reflect(Reflector &r);
 };
 

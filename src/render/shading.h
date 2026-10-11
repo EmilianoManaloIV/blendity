@@ -47,6 +47,11 @@ struct SurfacePoint {
   /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
   bool has_lightmap = false;
   Vec3 lightmap;
+  Vec3 lightmap_add;  // realtime GI's bounce of lights the bake doesn't hold (task 0013), added to it
+  /* Voxel GI per pixel (task 0013): the fraction of the sky's light that gets through and the bounce. */
+  bool has_gi = false;
+  float gi_sky = 1.0f;
+  Vec3 gi_bounce;
 };
 
 /* Material inputs after texture lookups. */

@@ -83,6 +83,9 @@ inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
   return f;
 }
 
+struct VoxelGIFrame;  // voxel_gi.h
+struct Rsm;
+
 struct LightingEnv {
   Vec3 sky{0.45f, 0.52f, 0.62f};
   Vec3 equator{0.32f, 0.34f, 0.36f};
@@ -93,6 +96,7 @@ struct LightingEnv {
   const Environment *environment = nullptr;
   const ShadowMap *shadow = nullptr;  // for lights[shadow_light]
   int shadow_light = -1;
+  const VoxelGIFrame *gi = nullptr;   // voxel GI (task 0013): null = off
   ViewTransform view_transform = ViewTransform::Standard;
   float exposure = 0.0f;
 };
@@ -203,6 +207,12 @@ class Renderer3D {
    * picture is the same as drawing them one by one; the grid and an Edit Mode cage are thousands. */
   void begin_overlay_batch();
   void end_overlay_batch();
+  /* Deferred shading writes a reflective shadow map instead of colour (voxel GI): what each pixel's
+   * surface reflects of `sun`. Set before begin(); null turns it off. */
+  void set_rsm_output(Rsm *out, const RenderLight &sun) {
+    rsm_out_ = out;
+    rsm_sun_ = sun;
+  }
   /* Orange outline around pixels whose id is in `selected`, Unity/Blender style. */
   void outline_ids(const std::vector<uint32_t> &selected_sorted, uint32_t color, int width = 2);
 
@@ -257,6 +267,15 @@ class Renderer3D {
   };
   bool batching_ = false;
   std::vector<OverlayCmd> overlay_cmds_;
+  Rsm *rsm_out_ = nullptr;
+  RenderLight rsm_sun_;
+  /* Voxel GI receivers at 1 / downsample resolution (gathered, then blurred). */
+  struct GiTexel {
+    Vec3 bounce, pos, n;
+    float sky = 1.0f;
+    bool valid = false;
+  };
+  std::vector<GiTexel> gi_lo_, gi_blur_;
   bool prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias, OverlayCmd &out) const;
   bool prepare_point(Vec3 p, float r, uint32_t color, bool depth_test, OverlayCmd &out) const;
   void draw_overlay(const OverlayCmd &c, int ymin, int ymax);  // only rows [ymin, ymax)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "raster.h"
+#include "voxel_gi.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -589,10 +590,16 @@ void Renderer3D::flush() {
       auto tile_range = [&](const ScreenTri &st, int &tx0, int &ty0, int &tx1, int &ty1) {
         float minx = std::min({st.x[0], st.x[1], st.x[2]}), maxx = std::max({st.x[0], st.x[1], st.x[2]});
         float miny = std::min({st.y[0], st.y[1], st.y[2]}), maxy = std::max({st.y[0], st.y[1], st.y[2]});
-        tx0 = std::max(0, (int)minx / T);
-        ty0 = std::max(0, (int)miny / T);
-        tx1 = std::min(tiles_x_ - 1, (int)maxx / T);
-        ty1 = std::min(tiles_y_ - 1, (int)maxy / T);
+        if (!finite_bits(minx) || !finite_bits(maxx) || !finite_bits(miny) || !finite_bits(maxy)) {  // far beyond float range
+          tx0 = ty0 = 1, tx1 = ty1 = 0;  // no tiles
+          return;
+        }
+        /* Clamped before the casts: a vertex far off screen can be beyond int's range. */
+        auto cell = [T](float v, float hi) { return (int)std::max(-1.0f, std::min(hi, v)) / T; };
+        tx0 = std::max(0, cell(minx, (float)(W + T)));
+        ty0 = std::max(0, cell(miny, (float)(H + T)));
+        tx1 = std::min(tiles_x_ - 1, cell(maxx, (float)(W + T)));
+        ty1 = std::min(tiles_y_ - 1, cell(maxy, (float)(H + T)));
       };
       for (const ScreenTri &st : ch.tris) {
         int tx0, ty0, tx1, ty1;
@@ -1023,6 +1030,67 @@ void Renderer3D::shade_deferred() {
     T.valid = true;
   };
   JobSystem &js = JobSystem::global();
+  /* Voxel GI (task 0013, Thiedemann et al. 2011, section 5.1): receivers at 1 / ds of the resolution,
+   * each gathering one of 16 interleaved ray sets; a blur over 4 x 4 receivers (that merges the sets)
+   * weighted by facing and distance from the plane; then each pixel takes the nearby receivers like
+   * its own surface (below). */
+  const VoxelGIFrame *gi = !rsm_out_ && env_.gi && env_.gi->grid && env_.gi->grid->valid() ? env_.gi : nullptr;
+  const int ds = gi ? gi->params.downsample : 1;
+  const int gw = gi ? (W + ds - 1) / ds : 0, gh = gi ? (H + ds - 1) / ds : 0;
+  const float gvox = gi ? gi->grid->voxel : 1.0f;
+  if (gi) {
+    gi_lo_.assign((size_t)gw * gh, GiTexel{});
+    js.parallel_for(gh, 2, [&](int64_t a, int64_t b) {
+      TriSetup T;
+      for (int64_t gy = a; gy < b; gy++)
+        for (int gx = 0; gx < gw; gx++) {
+          const int x = std::min(W - 1, gx * ds + ds / 2), y = std::min(H - 1, (int)gy * ds + ds / 2);
+          const uint32_t ref = rt_->vis[(size_t)y * W + x];
+          if (!ref) continue;
+          if (ref != T.ref) setup_tri(T, ref);
+          if (!T.valid || T.item->unlit) continue;
+          if (T.has_lm && !gi->bounce_not_baked) continue;  // its lightmap holds everything: nothing to add
+          const float dx = x + 0.5f - T.ox, dy = y + 0.5f - T.oy;
+          const Vec3 Nn = T.na * dx + T.nb * dy + T.nc;
+          const float S = T.sa * dx + T.sb * dy + T.sc;
+          const Vec3 Bc = Nn * (1.0f / (std::fabs(S) < 1e-20f ? 1e-20f : S));
+          const Vec3 pos = T.wp[0] * Bc.x + T.wp[1] * Bc.y + T.wp[2] * Bc.z;
+          Vec3 n = normalize(T.wn[0] * Bc.x + T.wn[1] * Bc.y + T.wn[2] * Bc.z);
+          if (dot(T.geo_normal, eye - pos) < 0) n = -n;
+          const GiSample g = voxel_gi_gather(*gi->grid, gi->rsm, env, pos, n, gi->params, (gx & 3) + 4 * (int)(gy & 3));
+          GiTexel &o = gi_lo_[(size_t)gy * gw + gx];
+          o.bounce = g.bounce, o.sky = g.sky, o.pos = pos, o.n = n, o.valid = true;
+        }
+    });
+    gi_blur_ = gi_lo_;
+    js.parallel_for(gh, 4, [&](int64_t a, int64_t b) {
+      for (int64_t gy = a; gy < b; gy++)
+        for (int gx = 0; gx < gw; gx++) {
+          const GiTexel &c = gi_lo_[(size_t)gy * gw + gx];
+          if (!c.valid) continue;
+          Vec3 bounce(0.0f);
+          float sky = 0.0f, wsum = 0.0f;
+          for (int oy = -1; oy <= 2; oy++)
+            for (int ox = -1; ox <= 2; ox++) {
+              const int xx = gx + ox, yy = (int)gy + oy;
+              if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
+              const GiTexel &k = gi_lo_[(size_t)yy * gw + xx];
+              if (!k.valid) continue;
+              const float nd = std::max(0.0f, dot(c.n, k.n));
+              const float nd2 = nd * nd, nd4 = nd2 * nd2;
+              const float w = nd4 * nd4 * std::exp(-std::fabs(dot(c.n, k.pos - c.pos)) / (2.0f * gvox));
+              bounce += k.bounce * w;
+              sky += k.sky * w;
+              wsum += w;
+            }
+          if (wsum > 0.0f) {
+            GiTexel &o = gi_blur_[(size_t)gy * gw + gx];
+            o.bounce = bounce / wsum;
+            o.sky = sky / wsum;
+          }
+        }
+    });
+  }
   js.parallel_for(H, 4, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) {
       const uint32_t *vrow = rt_->vis.data() + (size_t)y * W;
@@ -1082,12 +1150,48 @@ void Renderer3D::shade_deferred() {
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
         }
-        Vec3 V = normalize(eye - sp.position);
+        /* The reflective shadow map is seen from the sun: a surface's front is the side facing it. */
+        Vec3 V = rsm_out_ ? -rsm_sun_.direction : normalize(eye - sp.position);
         if (dot(sp.geo_normal, V) < 0) {  // back side of a double-sided surface
           sp.normal = -sp.normal;
           sp.geo_normal = -sp.geo_normal;
         }
+        if (gi) {
+          /* The receivers around this pixel that lie on its surface (facing, plane), bilinear between them. */
+          const float fx = (x + 0.5f) / ds - 0.5f, fy = (y + 0.5f) / ds - 0.5f;
+          const int x0 = (int)std::floor(fx), y0g = (int)std::floor(fy);
+          const float tx = fx - x0, ty = fy - y0g;
+          Vec3 bounce(0.0f);
+          float sky = 0.0f, wsum = 0.0f;
+          for (int k = 0; k < 4; k++) {
+            const int xx = std::max(0, std::min(gw - 1, x0 + (k & 1))), yy = std::max(0, std::min(gh - 1, y0g + (k >> 1)));
+            const GiTexel &g = gi_blur_[(size_t)yy * gw + xx];
+            if (!g.valid) continue;
+            const float bw = ((k & 1) ? tx : 1.0f - tx) * ((k >> 1) ? ty : 1.0f - ty) + 1e-3f;
+            const float nd = std::max(0.0f, dot(sp.normal, g.n));
+            const float nd2 = nd * nd, nd4 = nd2 * nd2;
+            const float w = bw * nd4 * nd4 * std::exp(-std::fabs(dot(sp.normal, g.pos - sp.position)) / (2.0f * gvox));
+            bounce += g.bounce * w;
+            sky += g.sky * w;
+            wsum += w;
+          }
+          if (wsum > 1e-4f) {
+            sp.has_gi = true;
+            sp.gi_sky = sky / wsum;
+            sp.gi_bounce = bounce / wsum;
+            if (sp.has_lightmap && gi->bounce_not_baked) sp.lightmap_add = sp.gi_bounce;
+          }
+        }
         SurfaceSample s = evaluate_material(*T.mat, sp);
+        if (rsm_out_) {
+          /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
+          const size_t k = (size_t)y * W + x;
+          rsm_out_->position[k] = sp.position;
+          rsm_out_->normal[k] = s.normal;
+          const float ndl = std::max(0.0f, dot(s.normal, -rsm_sun_.direction));
+          rsm_out_->flux[k] = s.unlit ? Vec3(0.0f) : s.albedo * (1.0f - s.metallic) * rsm_sun_.color * (rsm_sun_.intensity * ndl);
+          continue;
+        }
         if (T.highlighted) s.albedo = lerp(s.albedo, it.highlight_color, 0.45f);
         Vec3 color = light_surface(s, sp, V, it, env);
         row_hdr.push_back(color);
@@ -1131,8 +1235,14 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;
   Vec3 spec = env.specular(R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);
-  /* Baked surfaces take their ambient (sky, bounces, Baked lights) from the lightmap. */
-  Vec3 diff = (sp.has_lightmap ? sp.lightmap : env.irradiance(n)) * s.albedo * (1.0f - s.metallic);
+  /* Ambient light, best source first: the baked map (plus realtime GI's bounce of lights it doesn't
+   * hold), voxel GI per pixel (the sky that gets through plus the bounce), or the sky alone. */
+  Vec3 amb;
+  if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+  else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
+  else amb = env.irradiance(n);
+  if (sp.has_gi && !sp.has_lightmap && env_.gi) spec = spec * (1.0f + (sp.gi_sky - 1.0f) * env_.gi->params.specular_occlusion);
+  Vec3 diff = amb * s.albedo * (1.0f - s.metallic);
   return lo + diff + spec + s.emission;
 }
 

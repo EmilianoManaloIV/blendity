@@ -191,6 +191,7 @@ static void round31_tests();
 static void round32_tests();
 static void round34_tests();
 static void round35_tests();
+static void round36_tests();
 
 int main() {
   register_builtin_components();
@@ -800,6 +801,7 @@ int main() {
   round32_tests();
   round34_tests();
   round35_tests();
+  round36_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -13292,5 +13294,1369 @@ static void round35_tests() {
     CHECK(std::isfinite(ed.scene().lighting.texels_per_unit) && ed.scene().lighting.texels_per_unit > 0.0f);
     run("set Lighting.MaxLightmapSize 99999999");
     CHECK(ed.scene().lighting.max_size <= 4096);
+  });
+}
+
+/* ===================================================================== */
+/* Round 36: voxel-based global illumination (task 0013)                   */
+/* ===================================================================== */
+
+namespace {
+
+struct R36D3 {
+  double x, y, z;
+};
+R36D3 r36_d3(Vec3 v) { return {v.x, v.y, v.z}; }
+R36D3 r36_sub(R36D3 a, R36D3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+R36D3 r36_cross(R36D3 a, R36D3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+double r36_dot(R36D3 a, R36D3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+/* Akenine-Moeller's triangle / box test, in double: the 13 separating axes (a touch counts as an overlap). */
+bool r36_tri_box(Vec3 va, Vec3 vb, Vec3 vc, Vec3 box_min) {
+  const R36D3 ctr = {box_min.x + 0.5, box_min.y + 0.5, box_min.z + 0.5};
+  const R36D3 a = r36_sub(r36_d3(va), ctr), b = r36_sub(r36_d3(vb), ctr), c = r36_sub(r36_d3(vc), ctr);
+  const R36D3 e[3] = {r36_sub(b, a), r36_sub(c, b), r36_sub(a, c)};
+  const R36D3 unit[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+  auto separated = [&](R36D3 ax) {
+    if (r36_dot(ax, ax) < 1e-18) return false;  // a degenerate axis separates nothing
+    const double p0 = r36_dot(a, ax), p1 = r36_dot(b, ax), p2 = r36_dot(c, ax);
+    const double r = 0.5 * (std::fabs(ax.x) + std::fabs(ax.y) + std::fabs(ax.z));
+    return std::min({p0, p1, p2}) > r || std::max({p0, p1, p2}) < -r;
+  };
+  for (int i = 0; i < 3; i++)
+    for (int j = 0; j < 3; j++)
+      if (separated(r36_cross(e[i], unit[j]))) return false;
+  for (int j = 0; j < 3; j++)
+    if (separated(unit[j])) return false;
+  return !separated(r36_cross(e[0], e[1]));
+}
+
+int r36_pop(uint64_t v) {
+  int n = 0;
+  for (; v; v &= v - 1) n++;
+  return n;
+}
+int r36_count_set(const VoxelGrid &g) {
+  int n = 0;
+  for (const VoxelColumn &c : g.levels[0]) n += r36_pop(c.lo) + r36_pop(c.hi);
+  return n;
+}
+
+/* A grid whose world space is its grid space: voxel 1, origin 0, n columns, 128 deep. */
+VoxelGrid r36_unit_grid(int n = 64, float voxel = 1.0f) {
+  VoxelGrid g;
+  AABB b;
+  b.add(Vec3(0.0f));
+  b.add(Vec3((float)(n - 14) * voxel, 100.0f * voxel, (float)(n - 14) * voxel));
+  voxel_grid_fit(g, b, n);
+  CHECK(g.valid() && g.voxel == voxel && g.n == n);
+  CHECK(g.origin.x == 0.0f && g.origin.y == 0.0f && g.origin.z == 0.0f);
+  return g;
+}
+
+RenderMesh r36_tris(const std::vector<Vec3> &p) {
+  RenderMesh rm;
+  rm.positions = p;
+  for (uint32_t i = 0; i < p.size(); i++) rm.indices.push_back(i);
+  return rm;
+}
+
+std::vector<VoxelSpan> r36_voxelize(VoxelGrid &g, const RenderMesh &rm, const Mat4 &model = Mat4()) {
+  std::vector<VoxelSpan> spans;
+  voxelize_mesh(g, rm, model, spans);
+  voxel_grid_build(g, {&spans});
+  return spans;
+}
+
+Vec3 r36_dir(R34Rng &rng) {
+  const float z = rng.range(-1.0f, 1.0f), phi = rng.range(0.0f, 6.2831853f), r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+  return Vec3(r * std::cos(phi), z, r * std::sin(phi));
+}
+
+/* Random bits: some columns hold one or two short runs. */
+std::vector<VoxelSpan> r36_random_bits(const VoxelGrid &g, R34Rng &rng, float density) {
+  std::vector<VoxelSpan> spans;
+  for (int z = 0; z < g.n; z++)
+    for (int x = 0; x < g.n; x++) {
+      if (rng.f() > density) continue;
+      for (int k = 0, runs = 1 + (rng.f() < 0.3f); k < runs; k++) {
+        const int y0 = (int)(rng.f() * 127.99f), y1 = std::min(127, y0 + (int)(rng.f() * 6.0f));
+        spans.push_back({(uint32_t)(z * g.n + x), (uint8_t)y0, (uint8_t)y1});
+      }
+    }
+  return spans;
+}
+/* Random triangles inside the grid's box. */
+std::vector<VoxelSpan> r36_random_tris(const VoxelGrid &g, R34Rng &rng, int count, float size) {
+  std::vector<Vec3> p;
+  const float ex = (float)g.n * g.voxel, ey = (float)VoxelGrid::kDepth * g.voxel;
+  for (int i = 0; i < count; i++) {
+    const Vec3 c(rng.range(0.1f, 0.9f) * ex, rng.range(0.1f, 0.9f) * ey, rng.range(0.1f, 0.9f) * ex);
+    for (int k = 0; k < 3; k++)
+      p.push_back(g.origin + c + Vec3(rng.range(-size, size), rng.range(-size, size), rng.range(-size, size)) * g.voxel);
+  }
+  std::vector<VoxelSpan> spans;
+  voxelize_mesh(g, r36_tris(p), Mat4(), spans);
+  return spans;
+}
+
+/* Does the ray (grid units) pass within 1e-4 of a voxel edge (two lattice coordinates at once) while it is
+ * inside the grid's box, up to grid distance t_end? Those are the rays whose answer is a coin toss. */
+bool r36_near_edge(const VoxelGrid &g, Vec3 world_o, Vec3 world_d, double t_end) {
+  const Vec3 go = g.to_grid(world_o);
+  const double O[3] = {go.x, go.y, go.z}, D[3] = {world_d.x, world_d.y, world_d.z};
+  const double hi[3] = {(double)g.n, (double)VoxelGrid::kDepth, (double)g.n};
+  double t0 = 0.0, t1 = t_end;
+  for (int a = 0; a < 3; a++) {
+    if (std::fabs(D[a]) < 1e-12) {
+      if (O[a] < 0.0 || O[a] > hi[a]) return false;
+      continue;
+    }
+    double ta = (0.0 - O[a]) / D[a], tb = (hi[a] - O[a]) / D[a];
+    if (ta > tb) std::swap(ta, tb);
+    t0 = std::max(t0, ta);
+    t1 = std::min(t1, tb);
+  }
+  if (!(t0 < t1)) return false;
+  for (int a = 0; a < 3; a++) {
+    if (std::fabs(D[a]) < 1e-9) continue;
+    const double pa = O[a] + D[a] * t0, pb = O[a] + D[a] * t1;
+    for (double k = std::ceil(std::min(pa, pb)); k <= std::max(pa, pb); k += 1.0) {
+      const double t = (k - O[a]) / D[a];
+      for (int b = 0; b < 3; b++) {
+        if (b == a) continue;
+        const double p = O[b] + D[b] * t;
+        if (std::fabs(p - std::round(p)) < 1e-4) return true;
+      }
+    }
+  }
+  return false;
+}
+
+struct R36RayStats {
+  int rays = 0, hits = 0, hier_vs_columns = 0, vs_dda = 0, grazing = 0, hard = 0, t_off = 0;
+};
+/* Shoots `count` random rays (and a few axis-parallel ones) at the grid with all three traces. */
+R36RayStats r36_compare_traces(const VoxelGrid &g, R34Rng &rng, int count) {
+  R36RayStats s;
+  const float ex = (float)g.n * g.voxel, ey = (float)VoxelGrid::kDepth * g.voxel, m = 10.0f * g.voxel;
+  for (int i = 0; i < count; i++) {
+    const Vec3 o = g.origin + Vec3(rng.range(-m, ex + m), rng.range(-m, ey + m), rng.range(-m, ex + m));
+    Vec3 d = r36_dir(rng);
+    if (i % 50 == 0) d = Vec3(0.0f), d[i / 50 % 3] = (i / 150) % 2 ? -1.0f : 1.0f;  // axis-parallel: exact boundaries
+    const float tmax = rng.range(2.0f, 120.0f) * g.voxel;
+    VoxelHit a, b, c;
+    const bool ha = voxel_trace(g, o, d, tmax, a), hb = voxel_trace_columns(g, o, d, tmax, b), hc = voxel_trace_dda(g, o, d, tmax, c);
+    s.rays++;
+    s.hits += hb;
+    if (ha != hb || (ha && (a.x != b.x || a.y != b.y || a.z != b.z || a.t != b.t))) s.hier_vs_columns++;
+    if (hb != hc || (hb && (b.x != c.x || b.y != c.y || b.z != c.z))) {
+      /* A mismatch is allowed only for a ray that grazes a voxel edge on its way to the hit. */
+      double t_end = (double)tmax / g.voxel;
+      if (hb || hc) t_end = std::min(t_end, std::max(hb ? b.t : 0.0f, hc ? c.t : 0.0f) / (double)g.voxel + 2.0);
+      if (r36_near_edge(g, o, d, t_end)) s.grazing++;
+      else {
+        s.hard++;
+        if (s.hard <= 3)
+          std::printf("    ray %d: o (%g %g %g) d (%g %g %g) tmax %g: columns %d (%d %d %d t %g), dda %d (%d %d %d t %g)\n", i, o.x, o.y, o.z, d.x, d.y, d.z,
+                      tmax, hb, b.x, b.y, b.z, b.t, hc, c.x, c.y, c.z, c.t);
+      }
+      s.vs_dda++;
+    }
+    else if (hb && std::fabs(b.t - c.t) > 2e-3f * g.voxel + 1e-4f * b.t) s.t_off++;
+  }
+  return s;
+}
+
+/* ---- a scene for the gather and image tests: items, world, grid, RSM ---- */
+struct R36Sc {
+  CfScene sc;
+  Environment env;
+  VoxelGrid grid;
+  Rsm rsm;
+  uint32_t next_id = 1;
+  R36Sc() {
+    env.mode = Environment::Color;
+    env.color = Vec3(0.4f);
+    env.strength = 1.0f;
+  }
+  void add(MeshPtr m, const Mat4 &model, Vec3 colour) { sc.add(m, model, next_id++, make_material("m", colour)); }
+  AABB bounds() const {
+    AABB b;
+    for (const DrawItem &it : sc.items) b.add(it.mesh->bounds.transformed(it.model));
+    return b;
+  }
+  /* Voxelizes everything into a grid of n columns; renders the RSM when there is a sun. */
+  void finish(int n, const RenderLight *sun, int rsm_res = 256) {
+    sc.seal();
+    const AABB b = bounds();
+    voxel_grid_fit(grid, b, n);
+    std::vector<std::vector<VoxelSpan>> spans(sc.items.size());
+    std::vector<const std::vector<VoxelSpan> *> ptrs;
+    for (size_t i = 0; i < sc.items.size(); i++) {
+      voxelize_mesh(grid, *sc.items[i].mesh, sc.items[i].model, spans[i]);
+      ptrs.push_back(&spans[i]);
+    }
+    voxel_grid_build(grid, ptrs);
+    rsm = Rsm{};
+    if (sun) render_rsm(rsm, sc.items, *sun, b, rsm_res);
+  }
+};
+
+RenderLight r36_sun(Vec3 dir, float intensity = 0.7f) {
+  RenderLight s;
+  s.direction = normalize(dir);
+  s.intensity = intensity;
+  s.shadows = false;
+  return s;
+}
+
+/* The bounce and sky summed over the 16 ray sets, for a receiver on the floor at p (normal up). */
+GiSample r36_gather_all(const R36Sc &s, const Rsm *rsm, Vec3 p, const GiParams &prm, Vec3 n = Vec3(0, 1, 0)) {
+  GiSample sum;
+  sum.sky = 0.0f;
+  for (int set = 0; set < 16; set++) {
+    const GiSample g = voxel_gi_gather(s.grid, rsm, s.env, p, n, prm, set);
+    sum.bounce += g.bounce;
+    sum.sky += g.sky / 16.0f;
+  }
+  return sum;
+}
+
+bool r36_pix(const Mat4 &v, const Mat4 &p, int W, int H, Vec3 w, int &x, int &y) {
+  const Vec4 c = (p * v) * Vec4(w, 1.0f);
+  if (!(c.w > 0.0f)) return false;
+  x = (int)((c.x / c.w * 0.5f + 0.5f) * W);
+  y = (int)((0.5f - c.y / c.w * 0.5f) * H);
+  return x >= 3 && y >= 3 && x < W - 3 && y < H - 3;
+}
+/* Mean channel values (0..255) of the 5 x 5 pixels around a world point; false when it is off screen. */
+bool r36_probe(const Image &img, const Mat4 &v, const Mat4 &p, Vec3 w, double out[3]) {
+  int x, y;
+  if (!r36_pix(v, p, img.width, img.height, w, x, y)) return false;
+  out[0] = out[1] = out[2] = 0.0;
+  for (int dy = -2; dy <= 2; dy++)
+    for (int dx = -2; dx <= 2; dx++) {
+      const uint32_t c = img.pixels[(size_t)(y + dy) * img.width + x + dx];
+      out[0] += (c >> 16) & 255, out[1] += (c >> 8) & 255, out[2] += c & 255;
+    }
+  for (int k = 0; k < 3; k++) out[k] /= 25.0;
+  return true;
+}
+/* The 3 x 3 pixels around a world point, bit for bit. */
+bool r36_same_block(const Image &a, const Image &b, const Mat4 &v, const Mat4 &p, Vec3 w) {
+  int x, y;
+  if (!r36_pix(v, p, a.width, a.height, w, x, y)) return false;
+  for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+      if (a.pixels[(size_t)(y + dy) * a.width + x + dx] != b.pixels[(size_t)(y + dy) * b.width + x + dx]) return false;
+  return true;
+}
+
+struct R36View {
+  Mat4 v, p;
+  Vec3 eye;
+  int W = 240, H = 180;
+  R36View(Vec3 e, Vec3 target) : eye(e) {
+    v = Mat4::look_at(e, target, {0, 1, 0});
+    p = Mat4::perspective(55 * kDeg2Rad, W / (float)H, 0.1f, 80.0f);
+  }
+};
+
+void r36_render(Image &img, const R36Sc &s, const R36View &view, const RenderLight *sun, const VoxelGIFrame *gi) {
+  img.resize(view.W, view.H);
+  RenderTarget rt;
+  rt.attach(img, {0, 0, view.W, view.H});
+  RasterOptions opt;
+  opt.shade = ShadeMode::Deferred;
+  LightingEnv env;
+  env.environment = &s.env;
+  env.camera_pos = view.eye;
+  if (sun) env.lights.push_back(*sun);
+  env.gi = gi;
+  Renderer3D r3d;
+  r3d.begin(&rt, view.v, view.p, env, opt);
+  r3d.clear(0xFF204060u);
+  for (const DrawItem &it : s.sc.items) r3d.add(it);
+  r3d.flush();
+}
+
+VoxelGIFrame r36_frame(const R36Sc &s, int rays = 16, float radius = 2.0f, int downsample = 2) {
+  VoxelGIFrame f;
+  f.grid = &s.grid;
+  f.rsm = s.rsm.valid() ? &s.rsm : nullptr;
+  GiParams p;
+  p.rays = rays;
+  p.radius = radius;
+  p.downsample = downsample;
+  f.params = gi_params_sanitized(p);
+  return f;
+}
+
+/* A floor with a red (or other) wall beside it at x = dx, the sun on the wall's -x face; optionally a slab high above
+ * that keeps the sun off the wall. */
+void r36_wall_scene(R36Sc &s, Vec3 wall_colour, bool slab_over_wall, RenderLight &sun, float dx) {
+  sun = r36_sun(Vec3(1.0f, -1.2f, 0.3f));
+  s.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+  s.add(primitives::cube(), Mat4::translate({dx, 2, 0}) * Mat4::scale({0.2f, 4, 8}), wall_colour);
+  if (slab_over_wall) s.add(primitives::cube(), Mat4::translate({dx - 3.5f, 6.2f, 0}) * Mat4::scale({9, 0.4f, 16}), Vec3(0.7f));
+  s.finish(128, &sun);
+}
+
+/* Mean (GI on - GI off) over the floor beside the wall, per channel (0..255 steps). */
+bool r36_bleed(const R36Sc &s, const RenderLight &sun, double d[3], float dx) {
+  const R36View view(Vec3(-6 + dx, 5, 9), Vec3(-1 + dx, 0, 0));
+  Image on, off;
+  const VoxelGIFrame fr = r36_frame(s);
+  r36_render(on, s, view, &sun, &fr);
+  r36_render(off, s, view, &sun, nullptr);
+  d[0] = d[1] = d[2] = 0.0;
+  int n = 0;
+  for (float z : {-1.5f, 0.0f, 1.5f}) {
+    double a[3], b[3];
+    if (!r36_probe(on, view.v, view.p, Vec3(dx - 0.6f, 0, z), a) || !r36_probe(off, view.v, view.p, Vec3(dx - 0.6f, 0, z), b)) continue;
+    for (int k = 0; k < 3; k++) d[k] += a[k] - b[k];
+    n++;
+  }
+  for (int k = 0; k < 3; k++) d[k] /= std::max(1, n);
+  return n == 3;
+}
+
+/* ---- editor scenes ---- */
+
+/* The Game view looks straight down at a floor that lies to the wall's -x side, so a whole-picture
+ * average is the floor beside the wall. The wall stands at x = dx: the world origin is not special, but see the
+ * "same wherever the scene sits" test for why these scenes keep away from it. */
+void r36_editor_scene(Editor &ed, Vec3 wall_colour = Vec3(0.9f, 0.1f, 0.1f), float dx = 6.0f) {
+  r35_open(ed);
+  r35_add(ed, "Plane", "Floor", {dx - 5.1f, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+  r35_add(ed, "Cube", "Wall", {dx, 1, 0}, {0.2f, 2, 6}, wall_colour);
+  GameObject *cam = ed.scene().find_by_name("Main Camera");
+  cam->set_local_position({dx - 2.5f, 8, 0});
+  cam->set_local_euler({90, 0, 0});
+  ed.commit_change("r36 scene");
+  r34_steps(ed, 3);
+}
+
+/* The 5 x 5 pixels around a world point in the Game view's picture (a crop from r35_game), mean R G B. */
+bool r36_game_probe(Editor &ed, const std::vector<uint32_t> &crop, Vec3 w, double out[3]) {
+  const Recti r = ed.window_rect_for_test(WindowKind::Game);
+  GameObject *go = ed.scene().find_by_name("Main Camera");
+  Camera *cam = go ? go->get<Camera>() : nullptr;
+  if (!cam || r.w < 8 || r.h < 8 || crop.size() < (size_t)r.w * r.h) return false;
+  const Quat q = go->world_rotation();
+  const Vec3 eye = go->world_position();
+  const Mat4 v = Mat4::look_at(eye, eye + q.rotate({0, 0, 1}), q.rotate({0, 1, 0})), p = cam->projection(r.w / (float)r.h);
+  int x, y;
+  if (!r36_pix(v, p, r.w, r.h, w, x, y)) return false;
+  out[0] = out[1] = out[2] = 0.0;
+  for (int dy = -2; dy <= 2; dy++)
+    for (int dx = -2; dx <= 2; dx++) {
+      const uint32_t c = crop[(size_t)(y + dy) * r.w + x + dx];
+      out[0] += (c >> 16) & 255, out[1] += (c >> 8) & 255, out[2] += c & 255;
+    }
+  for (int k = 0; k < 3; k++) out[k] /= 25.0;
+  return true;
+}
+
+struct R36Mean {
+  double r = 0, g = 0, b = 0;
+};
+/* The mean per-channel difference a - b over the picture. */
+R36Mean r36_mean_diff(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+  R36Mean m;
+  if (a.size() != b.size() || a.empty()) return m;
+  for (size_t i = 0; i < a.size(); i++) {
+    m.r += (int)((a[i] >> 16) & 255) - (int)((b[i] >> 16) & 255);
+    m.g += (int)((a[i] >> 8) & 255) - (int)((b[i] >> 8) & 255);
+    m.b += (int)(a[i] & 255) - (int)(b[i] & 255);
+  }
+  m.r /= a.size(), m.g /= a.size(), m.b /= a.size();
+  return m;
+}
+
+/* A console command and three frames, nothing else. */
+void r36_raw(Editor &ed, const char *c) {
+  ed.command(c);
+  r34_steps(ed, 3);
+}
+/* A console command and a few frames. (It used to rotate the world too, to work around the Lighting
+ * settings missing from the views' cache key; that was fixed, and a rotated world rightly makes a bake
+ * out of date.) */
+void r36_cmd(Editor &ed, const char *c) {
+  ed.command(c);
+  r34_steps(ed, 3);
+}
+
+}  // namespace
+
+static void round36_tests() {
+  /* ---------------------------------------------------------------- 1: voxelizer */
+  test("voxel GI: the voxelizer marks exactly the voxels a triangle touches (150 random triangles against a triangle-box SAT over every voxel)", [] {
+    R34Rng rng{20261009u};
+    VoxelGrid g = r36_unit_grid(64);
+    int wrong = 0, total_set = 0;
+    for (int t = 0; t < 150; t++) {
+      const float size = t % 3 == 0 ? 0.6f : t % 3 == 1 ? 4.0f : 12.0f;
+      const Vec3 c(rng.range(14, 36), rng.range(14, 86), rng.range(14, 36));
+      Vec3 v[3];
+      for (int k = 0; k < 3; k++) v[k] = c + Vec3(rng.range(-size, size), rng.range(-size, size), rng.range(-size, size));
+      r36_voxelize(g, r36_tris({v[0], v[1], v[2]}));
+      int expected = 0;
+      const Vec3 lo = vmin(vmin(v[0], v[1]), v[2]), hi = vmax(vmax(v[0], v[1]), v[2]);
+      for (int z = std::max(0, (int)lo.z - 1); z <= std::min(63, (int)hi.z + 1); z++)
+        for (int y = std::max(0, (int)lo.y - 1); y <= std::min(127, (int)hi.y + 1); y++)
+          for (int x = std::max(0, (int)lo.x - 1); x <= std::min(63, (int)hi.x + 1); x++) {
+            const bool want = r36_tri_box(v[0], v[1], v[2], Vec3((float)x, (float)y, (float)z));
+            expected += want;
+            if (want != g.voxel_set(x, y, z)) {
+              if (++wrong <= 3) std::printf("    triangle %d: voxel (%d %d %d) brute force %d, voxelizer %d\n", t, x, y, z, want, !want);
+            }
+          }
+      const int got = r36_count_set(g);
+      total_set += got;
+      if (got != expected) wrong++;  // voxels set outside the triangle's box, or too few
+    }
+    std::printf("    %d voxels set over 150 triangles, %d disagreements\n", total_set, wrong);
+    CHECK(wrong == 0);
+  });
+
+  test("voxel GI: a closed box voxelizes to a hollow shell, a vertical wall is captured, a big floor fills exactly one layer", [] {
+    VoxelGrid g = r36_unit_grid(64);
+    /* A cube from (10.3, 11.4, 12.2) to (20.7, 21.1, 22.9): 11 x 11 x 11 voxels touched, 9^3 of them inside. */
+    const MeshPtr cube = primitives::cube();
+    r36_voxelize(g, cube->render_mesh(), Mat4::translate({15.5f, 16.25f, 17.55f}) * Mat4::scale({10.4f, 9.7f, 10.7f}));
+    CHECK(r36_count_set(g) == 11 * 11 * 11 - 9 * 9 * 9);
+    CHECK(!g.voxel_set(15, 16, 17));  // the middle is empty
+    CHECK(!g.voxel_set(12, 14, 15) && !g.voxel_set(19, 19, 20));
+    CHECK(g.voxel_set(15, 11, 17) && g.voxel_set(15, 21, 17) && g.voxel_set(10, 16, 17) && g.voxel_set(20, 16, 17) && g.voxel_set(15, 16, 12) &&
+          g.voxel_set(15, 16, 22));
+    CHECK(g.voxel_set(10, 11, 12) && g.voxel_set(20, 21, 22));  // corners
+    CHECK(!g.voxel_set(9, 16, 17) && !g.voxel_set(21, 16, 17) && !g.voxel_set(15, 10, 17) && !g.voxel_set(15, 22, 17));
+    /* Turned 37 degrees about Y and X: still a shell (nothing deep inside), and the surface is set. */
+    const Mat4 turned = Mat4::translate({30.0f, 50.0f, 30.0f}) * Mat4::rotate(Quat::euler({37, 37, 0})) * Mat4::scale({12, 12, 12});
+    r36_voxelize(g, cube->render_mesh(), turned);
+    CHECK(r36_count_set(g) > 0);
+    CHECK(!g.voxel_set(30, 50, 30) && !g.voxel_set(29, 49, 29) && !g.voxel_set(31, 51, 31));
+    int inner_set = 0, shell_set = 0;
+    for (int z = 22; z < 38; z++)
+      for (int y = 42; y < 58; y++)
+        for (int x = 22; x < 38; x++) {
+          const Vec3 q = Quat::euler({37, 37, 0}).conjugate().rotate(Vec3(x + 0.5f, y + 0.5f, z + 0.5f) - Vec3(30, 50, 30));
+          const float m = std::max({std::fabs(q.x), std::fabs(q.y), std::fabs(q.z)});
+          if (m < 6.0f - 1.8f) inner_set += g.voxel_set(x, y, z);  // deeper than a voxel diagonal inside
+          if (m > 6.0f - 0.2f && m < 6.0f + 0.2f) shell_set += g.voxel_set(x, y, z);
+        }
+    CHECK(inner_set == 0 && shell_set > 50);
+    /* A wall at x = 15.5, y 3.2..20.7, z 5.3..9.8: no area seen from above, but it is a surface. */
+    const std::vector<Vec3> wall = {{15.5f, 3.2f, 5.3f}, {15.5f, 20.7f, 5.3f}, {15.5f, 20.7f, 9.8f}, {15.5f, 3.2f, 5.3f}, {15.5f, 20.7f, 9.8f}, {15.5f, 3.2f, 9.8f}};
+    r36_voxelize(g, r36_tris(wall));
+    CHECK(r36_count_set(g) == 18 * 5);
+    bool all = true;
+    for (int y = 3; y <= 20; y++)
+      for (int z = 5; z <= 9; z++) all = all && g.voxel_set(15, y, z);
+    CHECK(all);
+    /* A floor triangle pair a million units wide, at y = 10.5: one layer over every column of the grid. */
+    const float B = 1e6f;
+    r36_voxelize(g, r36_tris({{-B, 10.5f, -B}, {-B, 10.5f, B}, {B, 10.5f, B}, {-B, 10.5f, -B}, {B, 10.5f, B}, {B, 10.5f, -B}}));
+    CHECK(r36_count_set(g) == 64 * 64);
+    bool layer = true;
+    for (int z = 0; z < 64; z += 3)
+      for (int x = 0; x < 64; x += 3) layer = layer && g.voxel_set(x, 10, z) && !g.voxel_set(x, 9, z) && !g.voxel_set(x, 11, z);
+    CHECK(layer);
+  });
+
+  test("voxel GI: NaN, infinite, far-away and zero-area triangles are skipped or harmless", [] {
+    VoxelGrid g = r36_unit_grid(64);
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    /* NaN or infinity in any coordinate of any corner: no spans at all. */
+    std::vector<VoxelSpan> spans;
+    for (int k = 0; k < 9; k++) {
+      std::vector<Vec3> t = {{10, 10, 10}, {14, 10, 10}, {10, 14, 10}};
+      float *f = &t[(size_t)k / 3].x + (k % 3);
+      *f = k % 2 ? nan : inf;
+      voxelize_mesh(g, r36_tris(t), Mat4(), spans);
+      CHECK(spans.empty());
+    }
+    /* A good triangle after a bad one in the same mesh is still voxelized. */
+    voxelize_mesh(g, r36_tris({{nan, 1, 1}, {2, 2, 2}, {3, 1, 4}, {10.2f, 10.2f, 10.2f}, {14.2f, 10.2f, 10.2f}, {10.2f, 14.2f, 10.2f}}), Mat4(), spans);
+    CHECK(!spans.empty());
+    voxel_grid_build(g, {&spans});
+    CHECK(g.voxel_set(10, 10, 10) && g.voxel_set(14, 10, 10) && g.voxel_set(10, 14, 10));
+    /* A model matrix with NaN: nothing, no crash. */
+    Mat4 bad = Mat4::translate({nan, 0, 0});
+    voxelize_mesh(g, r36_tris({{10, 10, 10}, {14, 10, 10}, {10, 14, 10}}), bad, spans);
+    CHECK(spans.empty());
+    /* Far away or empty meshes. */
+    voxelize_mesh(g, r36_tris({{1e6f, 1e6f, 1e6f}, {1e6f + 1, 1e6f, 1e6f}, {1e6f, 1e6f + 1, 1e6f}}), Mat4(), spans);
+    CHECK(spans.empty());
+    voxelize_mesh(g, r36_tris({{-5, 10, 10}, {-1, 10, 10}, {-3, 12, 10}}), Mat4(), spans);  // beside the grid
+    CHECK(spans.empty());
+    voxelize_mesh(g, RenderMesh(), Mat4(), spans);
+    CHECK(spans.empty());
+    /* Zero-area triangles (spec: degenerate triangles are skipped). Three equal points, and three on a line. */
+    voxelize_mesh(g, r36_tris({{20.5f, 20.5f, 20.5f}, {20.5f, 20.5f, 20.5f}, {20.5f, 20.5f, 20.5f}}), Mat4(), spans);
+    const size_t point_spans = spans.size();
+    voxelize_mesh(g, r36_tris({{20.5f, 20.5f, 20.5f}, {22.5f, 20.5f, 20.5f}, {26.5f, 20.5f, 20.5f}}), Mat4(), spans);
+    const size_t line_spans = spans.size();
+    std::printf("    zero-area triangles: a point makes %zu spans, a line makes %zu\n", point_spans, line_spans);
+    CHECK(point_spans == 0 && line_spans == 0);
+    /* Not a built grid: harmless. */
+    VoxelGrid none;
+    voxelize_mesh(none, r36_tris({{1, 1, 1}, {2, 1, 1}, {1, 2, 1}}), Mat4(), spans);
+    CHECK(spans.empty());
+    voxel_grid_build(none, {&spans});
+    CHECK(!none.voxel_set(0, 0, 0));
+  });
+
+  /* ---------------------------------------------------------------- 2: mips */
+  test("voxel GI: every mip level is the OR of the 2 x 2 columns below it, at 64, 128 and 256, and a rebuild leaves no stale bits", [] {
+    R34Rng rng{77};
+    for (int n : {64, 128, 256}) {
+      VoxelGrid g = r36_unit_grid(n);
+      int levels = 1;
+      while ((n >> levels) >= 1) levels++;
+      CHECK(g.level_count() == levels && g.side(levels - 1) == 1 && g.side(0) == n);
+      std::vector<VoxelSpan> spans = r36_random_bits(g, rng, 0.08f);
+      const std::vector<VoxelSpan> tris = r36_random_tris(g, rng, 60, 10.0f);
+      spans.insert(spans.end(), tris.begin(), tris.end());
+      voxel_grid_build(g, {&spans});
+      CHECK(r36_count_set(g) > 100);
+      int bad = 0;
+      for (int l = 1; l < g.level_count(); l++) {
+        CHECK(g.levels[(size_t)l].size() == (size_t)g.side(l) * g.side(l));
+        for (int z = 0; z < g.side(l); z++)
+          for (int x = 0; x < g.side(l); x++) {
+            uint64_t lo = 0, hi = 0;
+            for (int dz = 0; dz < 2; dz++)
+              for (int dx = 0; dx < 2; dx++) {
+                const VoxelColumn &c = g.column(l - 1, 2 * x + dx, 2 * z + dz);
+                lo |= c.lo, hi |= c.hi;
+              }
+            const VoxelColumn &c = g.column(l, x, z);
+            bad += c.lo != lo || c.hi != hi;
+          }
+      }
+      CHECK(bad == 0);
+      /* The single top column is everything. */
+      uint64_t lo = 0, hi = 0;
+      for (const VoxelColumn &c : g.levels[0]) lo |= c.lo, hi |= c.hi;
+      CHECK(g.column(g.level_count() - 1, 0, 0).lo == lo && g.column(g.level_count() - 1, 0, 0).hi == hi);
+      /* A new build with other spans replaces the old bits at every level. */
+      std::vector<VoxelSpan> one = {{(uint32_t)(5 * n + 7), 20, 90}};
+      voxel_grid_build(g, {&one});
+      int set_columns = 0;
+      for (int l = 0; l < g.level_count(); l++)
+        for (const VoxelColumn &c : g.levels[(size_t)l]) set_columns += c.any();
+      CHECK(set_columns == g.level_count());  // one column per level
+      CHECK(r36_count_set(g) == 71);
+      std::vector<VoxelSpan> none;
+      voxel_grid_build(g, {&none, nullptr});
+      CHECK(r36_count_set(g) == 0);
+      /* A span past the grid's columns is ignored, not written. */
+      std::vector<VoxelSpan> outside = {{(uint32_t)(n * n + 3), 0, 5}};
+      voxel_grid_build(g, {&outside});
+      CHECK(r36_count_set(g) == 0);
+    }
+  });
+
+  /* ---------------------------------------------------------------- 3: ray test */
+  test("voxel GI: the hierarchical ray test equals the column walk exactly on 100k random rays and agrees with a 3D DDA apart from rays grazing a voxel edge", [] {
+    R34Rng rng{424242};
+    R36RayStats total;
+    int variant = 0;
+    for (float voxel : {1.0f, 2.0f})
+      for (bool triangles : {false, true}) {
+        VoxelGrid g = r36_unit_grid(64, voxel);
+        const std::vector<VoxelSpan> spans = triangles ? r36_random_tris(g, rng, 120, 9.0f) : r36_random_bits(g, rng, 0.09f);
+        voxel_grid_build(g, {&spans});
+        const R36RayStats s = r36_compare_traces(g, rng, 25000);
+        std::printf("    grid %d (voxel %g, %s): %d rays, %d hit, hierarchical != columns %d, vs DDA: %d differ (%d grazing, %d not), %d hit times off\n",
+                    variant++, voxel, triangles ? "triangles" : "random bits", s.rays, s.hits, s.hier_vs_columns, s.vs_dda, s.grazing, s.hard, s.t_off);
+        total.rays += s.rays, total.hits += s.hits, total.hier_vs_columns += s.hier_vs_columns, total.vs_dda += s.vs_dda;
+        total.grazing += s.grazing, total.hard += s.hard, total.t_off += s.t_off;
+      }
+    std::printf("    %d rays, %d hits: hierarchical != column walk on %d, DDA differs on %d (%d grazing)\n", total.rays, total.hits, total.hier_vs_columns,
+                total.vs_dda, total.grazing);
+    CHECK(total.rays == 100000);
+    CHECK(total.hits > 10000);  // the rays do hit things
+    CHECK(total.hier_vs_columns == 0);
+    CHECK(total.hard == 0);
+    CHECK(total.t_off == 0);
+    CHECK(total.grazing * 100 < total.rays);  // grazing is rare
+  });
+
+  test("voxel GI: with bits 10 and 50 set in a column the first hit is 10 going up and 50 going down, at the analytic distance", [] {
+    for (float voxel : {1.0f, 2.0f}) {
+      VoxelGrid g = r36_unit_grid(64, voxel);
+      const uint32_t col = 20 * 64 + 20;
+      std::vector<VoxelSpan> spans = {{col, 10, 10}, {col, 50, 50}};
+      voxel_grid_build(g, {&spans});
+      const float cx = (20.5f) * voxel, cz = 20.5f * voxel;
+      struct Case {
+        float y0;
+        float dy;     // +1 up, -1 down
+        float slant;  // horizontal lean per unit height
+        int want_y;
+        float face;   // the plane the ray enters through (voxel units)
+      };
+      const Case cases[] = {{2.3f, 1, 0, 10, 10}, {2.3f, 1, 0.01f, 10, 10}, {100.2f, -1, 0, 50, 51}, {100.2f, -1, 0.01f, 50, 51},
+                            {30.0f, 1, 0, 50, 50},  {30.0f, -1, 0, 10, 11},    {-8.0f, 1, 0, 10, 10},   {140.0f, -1, 0, 50, 51}};
+      for (const Case &c : cases) {
+        const Vec3 o = g.origin + Vec3(cx, c.y0 * voxel, cz);
+        const Vec3 d = normalize(Vec3(c.slant, c.dy, c.slant * 0.5f));
+        const float t_expect = (c.face - c.y0) * voxel / d.y;
+        VoxelHit h[3];
+        const bool r[3] = {voxel_trace(g, o, d, 1000.0f, h[0]), voxel_trace_columns(g, o, d, 1000.0f, h[1]), voxel_trace_dda(g, o, d, 1000.0f, h[2])};
+        for (int k = 0; k < 3; k++) {
+          CHECK(r[k]);
+          if (!r[k]) continue;
+          CHECK(h[k].x == 20 && h[k].z == 20 && h[k].y == c.want_y);
+          if (k < 2) CHECK(std::fabs(h[k].t - t_expect) <= 1e-5f * std::max(1.0f, t_expect));
+          else CHECK(std::fabs(h[k].t - t_expect) <= 1e-3f);
+        }
+        /* One step short of it: a miss. */
+        VoxelHit m;
+        CHECK(!voxel_trace(g, o, d, t_expect * 0.99f, m) && !voxel_trace_columns(g, o, d, t_expect * 0.99f, m));
+      }
+      /* Beside the column: nothing. */
+      VoxelHit m;
+      CHECK(!voxel_trace(g, g.origin + Vec3(22.5f, 2.3f, 20.5f) * voxel, Vec3(0, 1, 0), 1000.0f, m));
+    }
+    /* Not a ray: zero or NaN direction, NaN origin, zero range, no grid. */
+    VoxelGrid g = r36_unit_grid(64);
+    std::vector<VoxelSpan> spans = {{20 * 64 + 20, 10, 10}};
+    voxel_grid_build(g, {&spans});
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    VoxelHit h;
+    CHECK(!voxel_trace(g, {20.5f, 2, 20.5f}, {0, 0, 0}, 100.0f, h));
+    CHECK(!voxel_trace(g, {20.5f, 2, 20.5f}, {0, nan, 0}, 100.0f, h));
+    CHECK(!voxel_trace(g, {nan, 2, 20.5f}, {0, 1, 0}, 100.0f, h));
+    CHECK(!voxel_trace(g, {20.5f, 2, 20.5f}, {0, 1, 0}, 0.0f, h));
+    CHECK(!voxel_trace(g, {20.5f, 2, 20.5f}, {0, 1, 0}, nan, h));
+    CHECK(voxel_trace(g, {20.5f, 2, 20.5f}, {0, 1, 0}, std::numeric_limits<float>::infinity(), h) && h.y == 10);
+    VoxelGrid none;
+    CHECK(!voxel_trace(none, {20.5f, 2, 20.5f}, {0, 1, 0}, 100.0f, h));
+  });
+
+  /* ---------------------------------------------------------------- 4: RSM back-projection */
+  test("voxel GI: a lit wall gathers its reflected sunlight, a wall in shadow and the back of a slab gather nothing", [] {
+    GiParams prm;
+    prm.rays = 32;
+    prm.radius = 3.0f;
+    prm.downsample = 2;
+    prm = gi_params_sanitized(prm);
+    const Vec3 sun_dir(1.0f, -1.0f, 0.2f);
+    auto scene = [&](R36Sc &s, Vec3 wall_colour, bool shadow_slab, bool low_slab) {
+      RenderLight sun = r36_sun(sun_dir, 1.0f);
+      s.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+      s.add(primitives::cube(), Mat4::translate({1.5f, 2, 0}) * Mat4::scale({0.2f, 4, 8}), wall_colour);
+      if (shadow_slab) s.add(primitives::cube(), Mat4::translate({-3.0f, 6.2f, 0}) * Mat4::scale({9, 0.4f, 16}), Vec3(0.7f));
+      if (low_slab) s.add(primitives::cube(), Mat4::translate({0, 2.1f, 0}) * Mat4::scale({16, 0.2f, 16}), Vec3(0.7f));
+      s.finish(64, &sun);
+      CHECK(s.rsm.valid());
+    };
+    const Vec3 receiver(0.0f, 0.0f, 0.0f);
+    /* Lit: red light from a red wall. */
+    R36Sc lit;
+    scene(lit, Vec3(0.9f, 0.1f, 0.1f), false, false);
+    const GiSample a = r36_gather_all(lit, &lit.rsm, receiver, prm);
+    std::printf("    lit red wall: bounce (%.4f %.4f %.4f) summed over 16 sets, sky %.3f\n", a.bounce.x, a.bounce.y, a.bounce.z, a.sky);
+    CHECK(a.bounce.x > 0.02f);
+    CHECK(a.bounce.x > 5.0f * a.bounce.y && a.bounce.x > 5.0f * a.bounce.z);
+    CHECK(a.sky < 0.95f && a.sky > 0.2f);  // the wall takes part of the sky
+    /* The bounce is what the RSM stored, times intensity / rays: twice the intensity, twice the light. */
+    GiParams twice = prm;
+    twice.intensity = 2.0f;
+    const GiSample a2 = r36_gather_all(lit, &lit.rsm, receiver, gi_params_sanitized(twice));
+    CHECK(std::fabs(a2.bounce.x - 2.0f * a.bounce.x) <= 1e-4f * a.bounce.x + 1e-6f);
+    /* No bounce: bounce off, no RSM, or intensity 0. The sky part stays. */
+    GiParams nb = prm;
+    nb.bounce = false;
+    const GiSample b0 = r36_gather_all(lit, &lit.rsm, receiver, nb);
+    const GiSample b1 = r36_gather_all(lit, nullptr, receiver, prm);
+    GiParams zero = prm;
+    zero.intensity = 0.0f;
+    const GiSample b2 = r36_gather_all(lit, &lit.rsm, receiver, zero);
+    CHECK(length(b0.bounce) == 0.0f && length(b1.bounce) == 0.0f && length(b2.bounce) == 0.0f);
+    CHECK(std::fabs(b0.sky - a.sky) < 1e-6f && std::fabs(b1.sky - a.sky) < 1e-6f);
+    /* A white wall bounces white light. */
+    R36Sc white;
+    scene(white, Vec3(0.9f), false, false);
+    const GiSample w = r36_gather_all(white, &white.rsm, receiver, prm);
+    CHECK(w.bounce.x > 0.02f && std::fabs(w.bounce.x - w.bounce.y) < 0.02f * w.bounce.x && std::fabs(w.bounce.x - w.bounce.z) < 0.02f * w.bounce.x);
+    /* Shadowed: a slab between the sun and the wall (out of the receiver's reach). Exactly nothing. */
+    R36Sc shadow;
+    scene(shadow, Vec3(0.9f, 0.1f, 0.1f), true, false);
+    for (int set = 0; set < 16; set++) {
+      const GiSample g = voxel_gi_gather(shadow.grid, &shadow.rsm, shadow.env, receiver, Vec3(0, 1, 0), prm, set);
+      CHECK(g.bounce.x == 0.0f && g.bounce.y == 0.0f && g.bounce.z == 0.0f);
+    }
+    /* Back-facing: a thin slab over the receiver. The sun lights its top; the receiver sees its underside, which is
+     * within the RSM's epsilon of the top but faces away. */
+    R36Sc under;
+    scene(under, Vec3(0.9f, 0.1f, 0.1f), false, true);
+    int blocked = 0;
+    for (int set = 0; set < 16; set++) {
+      const GiSample g = voxel_gi_gather(under.grid, &under.rsm, under.env, receiver, Vec3(0, 1, 0), prm, set);
+      CHECK(g.bounce.x == 0.0f && g.bounce.y == 0.0f && g.bounce.z == 0.0f);
+      blocked += g.sky < 0.9f;
+    }
+    CHECK(blocked == 16);  // the slab really is in the rays' way
+    /* The same slab with the wall and the receiver in the open far from it: the wall still bounces. */
+    const GiSample far_lit = r36_gather_all(lit, &lit.rsm, Vec3(0.3f, 0, 3.0f), prm);
+    CHECK(far_lit.bounce.x > 0.0f);
+  });
+
+  test("voxel GI: parameters are clamped, the gather survives NaN and an unbuilt grid, an empty floor keeps a sky ratio of 1", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    GiParams p;
+    p.rays = 0, p.radius = nan, p.intensity = inf, p.downsample = 3, p.specular_occlusion = nan;
+    GiParams q = gi_params_sanitized(p);
+    CHECK(q.rays == 1 && std::isfinite(q.radius) && q.radius > 0.0f && std::isfinite(q.intensity) && q.intensity >= 0.0f && q.intensity <= 10.0f);
+    CHECK(q.downsample == 4 && q.specular_occlusion >= 0.0f && q.specular_occlusion <= 1.0f);
+    p.rays = 9999, p.radius = 1e9f, p.intensity = -4.0f, p.downsample = 1, p.specular_occlusion = 7.0f;
+    q = gi_params_sanitized(p);
+    CHECK(q.rays == 32 && q.radius <= 1000.0f && q.intensity == 0.0f && q.downsample == 2 && q.specular_occlusion == 1.0f);
+    p.radius = -3.0f, p.rays = -9;
+    q = gi_params_sanitized(p);
+    CHECK(q.radius > 0.0f && q.rays == 1);
+
+    R36Sc flat;
+    flat.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+    RenderLight sun = r36_sun(Vec3(1, -1, 0.2f));
+    flat.finish(64, &sun);
+    CHECK(flat.grid.valid());  // a flat scene still makes a grid
+    GiParams prm = gi_params_sanitized(GiParams());
+    float worst = 1.0f;
+    R34Rng rng{5};
+    for (int i = 0; i < 40; i++) {
+      const GiSample g = voxel_gi_gather(flat.grid, &flat.rsm, flat.env, Vec3(rng.range(-8, 8), 0, rng.range(-8, 8)), Vec3(0, 1, 0), prm, i);
+      worst = std::min(worst, g.sky);
+      CHECK(length(g.bounce) == 0.0f);
+    }
+    std::printf("    lowest sky ratio over an empty floor: %.4f\n", worst);
+    CHECK(worst >= 0.98f);
+    /* Rubbish in, no crash and finite numbers out. */
+    for (Vec3 pos : {Vec3(nan, 0, 0), Vec3(0, inf, 0), Vec3(1e9f, 1e9f, 1e9f), Vec3(-1e9f, 0, 0)})
+      for (Vec3 nrm : {Vec3(0, 1, 0), Vec3(nan, 1, 0), Vec3(0, 0, 0), Vec3(1e9f, 0, 0)}) {
+        const GiSample g = voxel_gi_gather(flat.grid, &flat.rsm, flat.env, pos, nrm, prm, 3);
+        CHECK(std::isfinite(g.sky) && std::isfinite(g.bounce.x) && std::isfinite(g.bounce.y) && std::isfinite(g.bounce.z));
+      }
+    CHECK(voxel_gi_gather(flat.grid, &flat.rsm, flat.env, Vec3(0, 0, 0), Vec3(0, 1, 0), prm, -7).sky == 1.0f);  // a set out of range wraps
+    VoxelGrid none;
+    const GiSample g = voxel_gi_gather(none, nullptr, flat.env, Vec3(0, 0, 0), Vec3(0, 1, 0), prm, 0);
+    CHECK(g.sky == 1.0f && length(g.bounce) == 0.0f);
+    /* The grid fit refuses what it cannot hold, and makes a grid for a flat or tiny box. */
+    VoxelGrid f;
+    AABB empty;
+    voxel_grid_fit(f, empty, 128);
+    CHECK(!f.valid());
+    AABB bad;
+    bad.min = Vec3(0.0f), bad.max = Vec3(1, 1, inf);
+    voxel_grid_fit(f, bad, 128);
+    CHECK(!f.valid());
+    AABB huge;
+    huge.add(Vec3(-1e6f)), huge.add(Vec3(1e6f));
+    voxel_grid_fit(f, huge, 128);
+    CHECK(f.valid() && f.voxel >= 1e6f * 2.0f / 128.0f);
+    CHECK(f.origin.x <= -1e6f && f.origin.x + f.n * f.voxel >= 1e6f);
+    AABB absurd;
+    absurd.add(Vec3(-1e12f)), absurd.add(Vec3(1e12f));
+    voxel_grid_fit(f, absurd, 256);
+    CHECK(!f.valid());
+    AABB tiny;
+    tiny.add(Vec3(5.0f)), tiny.add(Vec3(5.0f));  // a point
+    voxel_grid_fit(f, tiny, 64);
+    CHECK(f.valid());
+    AABB flat_box;
+    flat_box.add(Vec3(-3, 0, -3)), flat_box.add(Vec3(3, 0, 3));
+    voxel_grid_fit(f, flat_box, 64);
+    CHECK(f.valid() && f.origin.y <= 0.0f);
+    /* The origin snaps, so a small move keeps the grid (and every object's spans). */
+    VoxelGrid f1, f2;
+    AABB b1, b2;
+    b1.add(Vec3(0.3f, 0.2f, 0.1f)), b1.add(Vec3(20, 10, 20));
+    b2.add(Vec3(0.5f, 0.2f, 0.4f)), b2.add(Vec3(20.5f, 10, 20.2f));
+    voxel_grid_fit(f1, b1, 128);
+    voxel_grid_fit(f2, b2, 128);
+    CHECK(f1.valid() && f1.key == f2.key && f1.key != 0);
+    voxel_grid_fit(f2, b2, 64);
+    CHECK(f2.key != f1.key);
+  });
+
+  /* ---------------------------------------------------------------- 5: images */
+  test("voxel GI: a red wall bleeds red onto a white floor only with GI on, and not with a white wall or a wall in shadow", [] {
+    const float dx = 4.0f;  // away from the world origin: see the "same wherever the scene sits" test
+    double red[3], white[3], shadow[3];
+    RenderLight sun;
+    {
+      R36Sc s;
+      r36_wall_scene(s, Vec3(0.9f, 0.05f, 0.05f), false, sun, dx);
+      CHECK(r36_bleed(s, sun, red, dx));
+    }
+    {
+      R36Sc s;
+      r36_wall_scene(s, Vec3(0.9f), false, sun, dx);
+      CHECK(r36_bleed(s, sun, white, dx));
+    }
+    {
+      R36Sc s;
+      r36_wall_scene(s, Vec3(0.9f, 0.05f, 0.05f), true, sun, dx);
+      CHECK(r36_bleed(s, sun, shadow, dx));
+    }
+    std::printf("    floor beside the wall, GI on minus off (R G B): red wall (%.1f %.1f %.1f), white wall (%.1f %.1f %.1f), red wall in shadow (%.1f %.1f %.1f)\n",
+                red[0], red[1], red[2], white[0], white[1], white[2], shadow[0], shadow[1], shadow[2]);
+    CHECK(red[0] - red[2] > 4.0 && red[0] - red[1] > 4.0);  // redder
+    CHECK(std::fabs(white[0] - white[2]) < 1.5);           // a white wall: no tint
+    CHECK(white[0] > shadow[0] - 1.5 + 4.0);               // ...but it does add light, which the shadowed wall does not
+    CHECK(std::fabs(shadow[0] - shadow[2]) < 1.5);         // a wall the sun doesn't reach: no tint
+  });
+
+  test("voxel GI: the bounce is the same wherever the scene sits in the world (a wall facing away from the origin bleeds as much as one facing it)", [] {
+    /* The RSM is drawn from the sun with the rasterizer's "face the viewer" normal flip; if that flip uses a point
+     * that is not the sun's view direction (for example the world origin), the lit faces that point away from the
+     * origin get normals turned the wrong way, flux 0, and no bounce. */
+    double at_origin[3], away[3];
+    RenderLight sun;
+    for (float dx : {0.0f, 4.0f}) {
+      R36Sc s;
+      r36_wall_scene(s, Vec3(0.9f, 0.05f, 0.05f), false, sun, dx);
+      CHECK(r36_bleed(s, sun, dx == 0.0f ? at_origin : away, dx));
+    }
+    std::printf("    red wall bleed (R G B), wall at the origin: (%.1f %.1f %.1f), wall 4 units along +x: (%.1f %.1f %.1f)\n", at_origin[0], at_origin[1],
+                at_origin[2], away[0], away[1], away[2]);
+    CHECK(away[0] - away[2] > 4.0);
+    CHECK(std::fabs((at_origin[0] - at_origin[2]) - (away[0] - away[2])) < 0.2 * (away[0] - away[2]));
+    /* The same through the gather alone: the whole scene (floor, wall, receiver) slid 3 units along -x, which puts the
+     * wall's lit face on the side that faces away from the origin. */
+    GiParams prm = gi_params_sanitized([] {
+      GiParams p;
+      p.rays = 32, p.radius = 3.0f;
+      return p;
+    }());
+    double bounce[2];
+    for (int slid = 0; slid < 2; slid++) {
+      const float shift = slid ? -3.0f : 0.0f;
+      R36Sc s;
+      RenderLight sun2 = r36_sun(Vec3(1.0f, -1.0f, 0.2f), 1.0f);
+      s.add(primitives::plane(20.0f, 2), Mat4::translate({shift, 0, 0}), Vec3(0.7f));
+      s.add(primitives::cube(), Mat4::translate({1.5f + shift, 2, 0}) * Mat4::scale({0.2f, 4, 8}), Vec3(0.9f, 0.1f, 0.1f));
+      s.finish(64, &sun2);
+      bounce[slid] = r36_gather_all(s, &s.rsm, Vec3(shift, 0, 0), prm).bounce.x;
+    }
+    std::printf("    summed red bounce on the floor beside a wall at x = 1.5: %.4f, the same scene slid by -3 (wall at x = -1.5): %.4f\n", bounce[0], bounce[1]);
+    CHECK(bounce[0] > 0.02f);
+    CHECK(std::fabs(bounce[1] - bounce[0]) < 0.1 * bounce[0]);
+  });
+
+  test("voxel GI: a box darkens the floor beside it under the sky, and the floor beyond the radius is bit-identical to GI off", [] {
+    R36Sc s;
+    s.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::translate({0, 1, 0}) * Mat4::scale({2, 2, 2}), Vec3(0.7f));
+    s.finish(128, nullptr);  // no sun: the sky alone
+    const R36View view(Vec3(0, 9, 12), Vec3(0, 0, 0));
+    const float radius = 2.0f;
+    VoxelGIFrame fr = r36_frame(s, 16, radius, 2);
+    CHECK(fr.rsm == nullptr);
+    Image on, off;
+    r36_render(on, s, view, nullptr, &fr);
+    r36_render(off, s, view, nullptr, nullptr);
+    double a[3], b[3];
+    CHECK(r36_probe(on, view.v, view.p, Vec3(1.5f, 0, 0), a) && r36_probe(off, view.v, view.p, Vec3(1.5f, 0, 0), b));
+    std::printf("    floor 0.5 from the box, GI on / off: %.1f / %.1f\n", a[0], b[0]);
+    CHECK(a[0] < b[0] - 8.0 && a[1] < b[1] - 8.0 && a[2] < b[2] - 8.0);
+    CHECK(r36_probe(on, view.v, view.p, Vec3(-1.5f, 0, 0), a) && r36_probe(off, view.v, view.p, Vec3(-1.5f, 0, 0), b) && a[0] < b[0] - 8.0);
+    /* Farther from the box than the radius plus a few voxels (box edge at 1, voxel 0.25): bit for bit. */
+    int checked = 0, same = 0;
+    for (float x = 4.5f; x <= 9.0f; x += 1.5f)
+      for (float z = -6.0f; z <= 3.0f; z += 1.5f) {
+        int px, py;
+        if (!r36_pix(view.v, view.p, view.W, view.H, Vec3(x, 0, z), px, py)) continue;
+        checked++;
+        same += r36_same_block(on, off, view.v, view.p, Vec3(x, 0, z));
+      }
+    for (float x = -9.0f; x <= -4.5f; x += 1.5f)
+      for (float z = -6.0f; z <= 3.0f; z += 1.5f) {
+        int px, py;
+        if (!r36_pix(view.v, view.p, view.W, view.H, Vec3(x, 0, z), px, py)) continue;
+        checked++;
+        same += r36_same_block(on, off, view.v, view.p, Vec3(x, 0, z));
+      }
+    std::printf("    far floor points: %d checked, %d bit-identical\n", checked, same);
+    CHECK(checked >= 12 && same == checked);
+    /* The picture does change somewhere (this is not a vacuous comparison). */
+    CHECK(on.pixels != off.pixels);
+  });
+
+  test("voxel GI: GI off is bit-identical (no frame, an unbuilt grid, or sky and bounce both off), renders repeat exactly and 1 thread equals all threads", [] {
+    R36Sc s;
+    RenderLight sun = r36_sun(Vec3(1.0f, -1.2f, 0.3f));
+    s.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::translate({0, 2, 0}) * Mat4::scale({0.2f, 4, 8}), Vec3(0.9f, 0.1f, 0.1f));
+    s.add(primitives::uv_sphere(), Mat4::translate({-3, 1, 2}) * Mat4::scale({2, 2, 2}), Vec3(0.2f, 0.6f, 0.9f));
+    s.finish(128, &sun);
+    const R36View view(Vec3(-6, 5, 9), Vec3(-1, 0, 0));
+    Image off, off2, none_grid, quiet, on1, on2, on_one_thread;
+    r36_render(off, s, view, &sun, nullptr);
+    r36_render(off2, s, view, &sun, nullptr);
+    CHECK(off.pixels == off2.pixels);
+    VoxelGIFrame unbuilt;  // a frame whose grid was never built
+    VoxelGrid empty_grid;
+    unbuilt.grid = &empty_grid;
+    r36_render(none_grid, s, view, &sun, &unbuilt);
+    CHECK(none_grid.pixels == off.pixels);
+    VoxelGIFrame null_grid;  // no grid at all
+    r36_render(none_grid, s, view, &sun, &null_grid);
+    CHECK(none_grid.pixels == off.pixels);
+    VoxelGIFrame fr = r36_frame(s);
+    VoxelGIFrame calm = fr;
+    calm.params.sky_occlusion = false;
+    calm.params.bounce = false;
+    r36_render(quiet, s, view, &sun, &calm);  // GI on, but it adds nothing: today's picture
+    std::printf("    GI on with sky occlusion and bounce off: %zu pixels differ from GI off\n", r35_diff_count(quiet.pixels, off.pixels));
+    CHECK(quiet.pixels == off.pixels);
+    r36_render(on1, s, view, &sun, &fr);
+    r36_render(on2, s, view, &sun, &fr);
+    CHECK(on1.pixels != off.pixels);
+    CHECK(on1.pixels == on2.pixels);
+    JobSystem &js = JobSystem::global();
+    const int old = js.max_threads();
+    js.set_max_threads(1);
+    r36_render(on_one_thread, s, view, &sun, &fr);
+    js.set_max_threads(old);
+    CHECK(on_one_thread.pixels == on1.pixels);
+    /* The 16 ray sets and the quarter-resolution variant are deterministic too. */
+    VoxelGIFrame quarter = r36_frame(s, 8, 2.0f, 4);
+    Image q1, q2;
+    r36_render(q1, s, view, &sun, &quarter);
+    r36_render(q2, s, view, &sun, &quarter);
+    CHECK(q1.pixels == q2.pixels && q1.pixels != off.pixels);
+    /* Non-square sizes and tiny targets don't trip the low-resolution grid. */
+    for (int w : {1, 2, 3, 7, 33}) {
+      R36View v2(Vec3(-6, 5, 9), Vec3(-1, 0, 0));
+      v2.W = w, v2.H = 5;
+      Image img;
+      r36_render(img, s, v2, &sun, &fr);
+      CHECK(img.width == w);
+    }
+  });
+
+  /* ---------------------------------------------------------------- 6: caching */
+  test("voxel GI: orbiting does not re-voxelize, moving one object re-voxelizes only it, a light change makes a new RSM, an idle frame does nothing", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    GameObject *box = r35_add(ed, "Cube", "Box", {-3.0f, 0.5f, 2.0f}, {1, 1, 1}, Vec3(0.8f));
+    ed.commit_change("add Box");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r34_steps(ed, 3);
+    CHECK(ed.voxel_grid_for_test().valid());
+    CHECK(ed.rsm_for_test().valid());
+    const uint64_t vox0 = ed.voxelized_for_test(), rsm0 = ed.rsm_renders_for_test();
+    std::printf("    first frames: %llu objects voxelized, %llu RSM renders\n", (unsigned long long)vox0, (unsigned long long)rsm0);
+    /* The Scene view and the Game view keep a cache each (they draw viewport and render meshes): floor,
+     * wall and box once per kind of view that drew (review of task 0013). */
+    const uint64_t K = vox0 / 3;
+    std::printf("    views with their own voxel cache: %llu\n", (unsigned long long)K);
+    CHECK(vox0 % 3 == 0 && (K == 1 || K == 2));
+    CHECK(rsm0 == K);
+    /* Idle: nothing is drawn, nothing is rebuilt. */
+    R34Count t0 = r34_totals(ed);
+    r34_steps(ed, 5);
+    CHECK((r34_totals(ed) - t0).renders == 0);
+    CHECK(ed.voxelized_for_test() == vox0 && ed.rsm_renders_for_test() == rsm0);
+    /* Orbit: the Scene view draws again, with the same voxels and the same RSM. */
+    t0 = r34_totals(ed);
+    ed.command("camera 40 22 7 0 0.5 0");
+    r34_steps(ed, 3);
+    ed.command("camera 55 15 8 1 0.5 0");
+    r34_steps(ed, 3);
+    CHECK((r34_totals(ed) - t0).renders >= 2);
+    CHECK(ed.voxelized_for_test() == vox0 && ed.rsm_renders_for_test() == rsm0);
+    /* Move one object: only it is voxelized again. */
+    box->set_local_position({-3.5f, 0.5f, 2.0f});
+    ed.commit_change("move Box");
+    r34_steps(ed, 3);
+    CHECK(ed.voxelized_for_test() == vox0 + K);  // the box, once per view kind
+    const uint64_t rsm1 = ed.rsm_renders_for_test();
+    CHECK(rsm1 == rsm0 + K);  // the casters moved
+    /* The sun turns: a new RSM, the same voxels. */
+    ed.scene().find_by_name("Directional Light")->set_local_euler({45, 120, 0});
+    ed.commit_change("turn the sun");
+    r34_steps(ed, 3);
+    CHECK(ed.voxelized_for_test() == vox0 + K);
+    CHECK(ed.rsm_renders_for_test() == rsm1 + K);
+    /* A colour change on the wall: same voxels, a new RSM (its reflected light changed). */
+    ed.scene().find_by_name("Wall")->get<MeshRenderer>()->materials[0]->base_color = Vec3(0.1f, 0.9f, 0.1f);
+    ed.scene().find_by_name("Wall")->get<MeshRenderer>()->materials[0]->version++;
+    ed.commit_change("wall colour");
+    r34_steps(ed, 3);
+    CHECK(ed.voxelized_for_test() == vox0 + K);
+    CHECK(ed.rsm_renders_for_test() == rsm1 + 2 * K);
+    /* Settings that don't change what the sun sees keep both. */
+    const uint64_t vox2 = ed.voxelized_for_test(), rsm2 = ed.rsm_renders_for_test();
+    r36_cmd(ed, "set Lighting.GIRadius 3");
+    r36_cmd(ed, "set Lighting.GIRays 12");
+    r36_cmd(ed, "set Lighting.GIIntensity 1.5");
+    CHECK(ed.voxelized_for_test() == vox2 && ed.rsm_renders_for_test() == rsm2);
+    /* The grid's resolution: a new grid, every object again. */
+    r36_cmd(ed, "set Lighting.VoxelResolution 64");
+    CHECK(ed.voxel_grid_for_test().n == 64);
+    CHECK(ed.voxelized_for_test() == vox2 + 3 * K);
+    CHECK(ed.rsm_renders_for_test() == rsm2);
+    /* ...and idle again. */
+    t0 = r34_totals(ed);
+    r34_steps(ed, 4);
+    CHECK((r34_totals(ed) - t0).renders == 0);
+    CHECK(ed.voxelized_for_test() == vox2 + 3 * K && ed.rsm_renders_for_test() == rsm2);
+  });
+
+  test("voxel GI: turning Realtime GI or its settings on redraws the views (no stale picture)", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    /* Plain commands, nothing else touching the scene: what the user does in the Lighting window. */
+    const std::vector<uint32_t> off = r35_game(ed);
+    r36_raw(ed, "set Lighting.RealtimeGI true");
+    const std::vector<uint32_t> on = r35_game(ed);
+    CHECK(on != off);
+    r36_raw(ed, "set Lighting.Bounce false");
+    const std::vector<uint32_t> no_bounce = r35_game(ed);
+    CHECK(no_bounce != on);
+    r36_raw(ed, "set Lighting.SkyOcclusion false");
+    const std::vector<uint32_t> nothing = r35_game(ed);
+    CHECK(nothing != no_bounce);
+    CHECK(nothing == off);  // GI on but adding nothing is the plain picture
+    r36_raw(ed, "set Lighting.SkyOcclusion true");
+    r36_raw(ed, "set Lighting.Bounce true");
+    CHECK(r35_game(ed) == on);
+    r36_raw(ed, "set Lighting.GIRadius 0.5");
+    CHECK(r35_game(ed) != on);
+    r36_raw(ed, "set Lighting.RealtimeGI false");
+    CHECK(r35_game(ed) == off);
+    /* The render-cache verifier (it re-renders every picture the cache reused) finds no stale one. */
+    ed.set_render_cache_verify(true);
+    const uint64_t bad0 = Editor::render_cache_mismatches_all();
+    r36_raw(ed, "set Lighting.RealtimeGI true");
+    r36_raw(ed, "set Lighting.GIIntensity 2");
+    r36_raw(ed, "set Lighting.RealtimeGI false");
+    r34_steps(ed, 3);
+    std::printf("    stale pictures found by the verifier: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - bad0));
+    CHECK(Editor::render_cache_mismatches_all() == bad0);
+    ed.set_render_cache_verify(false);
+  });
+
+  /* ---------------------------------------------------------------- 7: works with baking */
+  test("voxel GI: rotating a Realtime sun moves the bounce on a lightmapped floor without Generate Lighting", [] {
+    Editor ed;
+    r36_editor_scene(ed);  // sun Realtime; the floor and the red wall are baked (the sky only)
+    r35_bake(ed);
+    CHECK(ed.lighting_data_for_test().entries.size() >= 2);
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    /* How much redder GI makes the floor beside the wall (mean of red up minus blue up, in levels, over three spots 0.5
+     * from it). The wall's own surfaces are left out: any extra light makes a red wall redder. */
+    auto reddening = [&](float yaw) {
+      sun->set_local_euler({50, yaw, 0});
+      ed.commit_change("turn the sun");
+      r36_cmd(ed, "set Lighting.RealtimeGI false");
+      const std::vector<uint32_t> off = r35_game(ed);
+      r36_cmd(ed, "set Lighting.RealtimeGI true");
+      const std::vector<uint32_t> on = r35_game(ed);
+      double sum = 0.0;
+      int spots = 0;
+      for (float z : {-2.0f, 0.0f, 2.0f}) {
+        double a[3], b[3];
+        if (r36_game_probe(ed, on, Vec3(6.0f - 0.5f, 0, z), a) && r36_game_probe(ed, off, Vec3(6.0f - 0.5f, 0, z), b)) sum += (a[0] - b[0]) - (a[2] - b[2]), spots++;
+      }
+      CHECK(spots == 3);
+      std::printf("    sun yaw %g: GI makes the floor beside the wall %.1f levels redder\n", yaw, sum / std::max(1, spots));
+      return sum / std::max(1, spots);
+    };
+    const double toward = reddening(90.0f);  // the sun lights the wall's face that looks at the floor
+    const double away = reddening(270.0f);   // the sun lights the other face: the floor sees the wall's shadow
+    CHECK(toward > 4.0);
+    CHECK(away < 0.25 * toward);
+    CHECK(!ed.baking_for_test());
+  });
+
+  test("voxel GI: with a valid bake of a Baked or Mixed sun the picture equals the baked one, and an object moved after the bake gets live GI", [] {
+    for (int mode : {2, 1}) {
+      Editor ed;
+      r36_editor_scene(ed);
+      r35_add(ed, "Cube", "Box", {-3.0f, 0.5f, 1.0f}, {1, 1, 1}, Vec3(0.8f));
+      r35_sun_mode(ed, mode);
+      r35_bake(ed);
+      const std::vector<uint32_t> baked = r35_game(ed);
+      r36_cmd(ed, "set Lighting.RealtimeGI true");
+      const std::vector<uint32_t> with_gi = r35_game(ed);
+      const size_t d = r35_diff_count(with_gi, baked);
+      std::printf("    sun mode %d: %zu of %zu pixels differ with GI on (default settings)\n", mode, d, baked.size());
+      CHECK(d == 0);  // spec: with a valid bake of Baked / Mixed lights the picture equals the baked one
+      /* What the difference is: GI that adds nothing (sky occlusion and bounce off) is identical, and so is GI with
+       * the specular occlusion turned off; only the occlusion of lightmapped surfaces' specular light remains. */
+      r36_cmd(ed, "set Lighting.SkyOcclusion false");
+      r36_cmd(ed, "set Lighting.Bounce false");
+      CHECK(r35_diff_count(r35_game(ed), baked) == 0);
+      r36_cmd(ed, "set Lighting.SkyOcclusion true");
+      r36_cmd(ed, "set Lighting.Bounce true");
+      r36_cmd(ed, "set Lighting.SpecularOcclusion 0");
+      const size_t d_spec = r35_diff_count(r35_game(ed), baked);
+      std::printf("    sun mode %d: %zu pixels differ with the specular occlusion at 0\n", mode, d_spec);
+      CHECK(d_spec == 0);
+      r36_cmd(ed, "set Lighting.SpecularOcclusion 1");
+      /* Moved after the bake: its map is stale, so it falls back to realtime light - now with GI. */
+      ed.scene().find_by_name("Box")->set_local_position({-3.0f, 0.5f, -1.0f});
+      ed.commit_change("move Box after the bake");
+      r34_steps(ed, 3);
+      CHECK(ed.lighting_out_of_date_for_test());
+      const std::vector<uint32_t> moved_on = r35_game(ed);
+      r36_cmd(ed, "set Lighting.RealtimeGI false");
+      const std::vector<uint32_t> moved_off = r35_game(ed);
+      const size_t md = r35_diff_count(moved_on, moved_off);
+      const R36Mean m = r36_mean_diff(moved_on, moved_off);
+      std::printf("    box moved: %zu pixels differ between GI on and off, mean (%.3f %.3f %.3f)\n", md, m.r, m.g, m.b);
+      CHECK(md > 40);  // not the flat ambient of GI off
+    }
+  });
+
+  test("voxel GI: Auto Generate waits for the changes to settle, then re-bakes; the result replaces the stale fallback", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    GameObject *box = r35_add(ed, "Cube", "Box", {-3.0f, 0.5f, 1.0f}, {1, 1, 1}, Vec3(0.8f));
+    r35_sun_mode(ed, 2);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r36_cmd(ed, "set Lighting.AutoGenerate true");  // before the bake: every Lighting setting is part of its key
+    r36_cmd(ed, "set Lighting.SpecularOcclusion 0");  // (the occlusion of lightmapped specular light is its own finding)
+    r35_bake(ed);
+    r34_steps(ed, 3);
+    CHECK(!ed.baking_for_test() && !ed.lighting_out_of_date_for_test());  // nothing changed: no bake
+    box->set_local_position({-3.0f, 0.5f, -1.5f});
+    ed.commit_change("move Box");
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_out_of_date_for_test());
+    CHECK(!ed.baking_for_test());  // it waits for the change to settle
+    const std::vector<uint32_t> waiting = r35_game(ed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1150));
+    r34_steps(ed, 3);  // the settle time is over: the bake starts (a tiny scene may also finish within these frames)
+    for (int i = 0; i < 200 && ed.baking_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test());
+    r34_steps(ed, 4);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    const std::vector<uint32_t> baked_again = r35_game(ed);
+    std::printf("    waiting picture vs re-baked picture: %zu pixels differ\n", r35_diff_count(waiting, baked_again));
+    CHECK(waiting != baked_again);
+    /* No change, no more bakes. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(1150));
+    r34_steps(ed, 4);
+    CHECK(!ed.baking_for_test() && !ed.lighting_out_of_date_for_test());
+    /* Baked, GI adds nothing on the lightmapped objects: the Baked sun is in the maps. */
+    r36_cmd(ed, "set Lighting.RealtimeGI false");
+    CHECK(r35_diff_count(r35_game(ed), baked_again) == 0);
+  });
+
+  /* Review of task 0013. */
+  test("voxel GI: rays longer than 256 voxels on a 256 grid walk exactly like the column walk, and never stall", [] {
+    VoxelGrid g;
+    AABB b;
+    b.add(Vec3(-200.0f, 0.0f, -200.0f));
+    b.add(Vec3(200.0f, 30.0f, 200.0f));
+    voxel_grid_fit(g, b, 256);
+    CHECK(g.valid() && g.n == 256);
+    if (!g.valid()) return;
+    std::vector<VoxelSpan> spans;
+    uint32_t seed = 4242;
+    auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+    for (int i = 0; i < 3000; i++) {
+      const int y0 = (int)(rnd() * 120);
+      spans.push_back({(uint32_t)(rnd() * 255.99f) * 256 + (uint32_t)(rnd() * 255.99f), (uint8_t)y0, (uint8_t)(y0 + (int)(rnd() * 6))});
+    }
+    voxel_grid_build(g, {&spans});
+    int differ = 0, hits = 0, n = 0;
+    ScopedTimer t;
+    for (int i = 0; i < 20000; i++) {
+      /* Starting far from the grid's corner (t past 256 voxels along the ray), long and slanted. */
+      const Vec3 o = g.to_world(Vec3(200.0f + rnd() * 55.0f, rnd() * 127.0f, 200.0f + rnd() * 55.0f));
+      const Vec3 d = normalize(Vec3(-rnd(), (rnd() - 0.5f) * 0.2f, -rnd()));
+      VoxelHit a, c;
+      const bool ha = voxel_trace(g, o, d, 1e6f, a), hc = voxel_trace_columns(g, o, d, 1e6f, c);
+      differ += ha != hc || (ha && (a.x != c.x || a.y != c.y || a.z != c.z || a.t != c.t));
+      hits += ha;
+      n++;
+    }
+    std::printf("    %d long rays: %d hits, %d differ, %.1f ms\n", n, hits, differ, t.ms());
+    CHECK(differ == 0);
+    CHECK(hits > 100);
+    CHECK(t.ms() < 5000.0);  // a stalled walk would spin its guard on many rays
+  });
+
+  test("voxel GI: Auto Generate leaves a wake-up time for the idle editor, so the re-bake happens without more input", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    ed.scene().lighting.auto_generate = true;
+    r35_sun_mode(ed, 2);
+    r35_bake(ed);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    ed.scene().find_by_name("Directional Light")->set_local_euler({40, 60, 0});
+    ed.commit_change("turn the sun");
+    r34_steps(ed, 2);
+    CHECK(ed.lighting_out_of_date_for_test());
+    /* The run loop sleeps until next_wakeup when no event comes: it must point about a second ahead. */
+    const double wake = ed.ui_for_test().next_wakeup;
+    std::printf("    wake-up in %.2f s\n", wake - now_seconds());
+    CHECK(wake > now_seconds() && wake < now_seconds() + 1.5);
+  });
+
+  test("voxel GI: changing the Realtime GI settings does not make the baked lighting out of date", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    r35_sun_mode(ed, 2);
+    r35_bake(ed);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    const bool after_toggle = ed.lighting_out_of_date_for_test();
+    r36_cmd(ed, "set Lighting.GIRadius 3");
+    r36_cmd(ed, "set Lighting.GIRays 4");
+    r36_cmd(ed, "set Lighting.Bounce false");
+    r36_cmd(ed, "set Lighting.VoxelResolution 64");
+    const bool after_settings = ed.lighting_out_of_date_for_test();
+    std::printf("    out of date after turning GI on: %d, after changing its settings: %d\n", after_toggle, after_settings);
+    CHECK(!after_toggle);
+    CHECK(!after_settings);
+  });
+
+  /* ---------------------------------------------------------------- 8: settings and safety */
+  test("voxel GI: settings set, undo, save and load; bad numbers are clamped", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    const LightingSettings def = ed.scene().lighting;
+    CHECK(!def.realtime_gi && def.gi_resolution == 1 && def.gi_rays == 8 && def.gi_downsample == 1 && def.gi_sky_occlusion && def.gi_bounce);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r36_cmd(ed, "set Lighting.GIRadius 3");
+    r36_cmd(ed, "set Lighting.GIRays 12");
+    r36_cmd(ed, "set Lighting.VoxelResolution 256");
+    r36_cmd(ed, "set Lighting.GIIntensity 1.5");
+    r36_cmd(ed, "set Lighting.SkyOcclusion false");
+    r36_cmd(ed, "set Lighting.Bounce false");
+    r36_cmd(ed, "set Lighting.GIResolution Half");
+    r36_cmd(ed, "set Lighting.RSMResolution 512");
+    r36_cmd(ed, "set Lighting.SpecularOcclusion 0.5");
+    r36_cmd(ed, "set Lighting.AutoGenerate true");
+    const LightingSettings &ls = ed.scene().lighting;
+    CHECK(ls.realtime_gi && std::fabs(ls.gi_radius - 3.0f) < 1e-5f && ls.gi_rays == 12 && ls.gi_resolution == 2);
+    CHECK(std::fabs(ls.gi_intensity - 1.5f) < 1e-5f && !ls.gi_sky_occlusion && !ls.gi_bounce && ls.gi_downsample == 0);
+    CHECK(ls.gi_rsm_resolution == 512 && std::fabs(ls.gi_specular_occlusion - 0.5f) < 1e-5f && ls.auto_generate);
+    /* Saved and loaded as they are. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const LightingSettings &bl = back.lighting;
+    CHECK(bl.realtime_gi && std::fabs(bl.gi_radius - 3.0f) < 1e-5f && bl.gi_rays == 12 && bl.gi_resolution == 2 && std::fabs(bl.gi_intensity - 1.5f) < 1e-5f);
+    CHECK(!bl.gi_sky_occlusion && !bl.gi_bounce && bl.gi_downsample == 0 && bl.gi_rsm_resolution == 512 && std::fabs(bl.gi_specular_occlusion - 0.5f) < 1e-5f);
+    CHECK(bl.auto_generate);
+    CHECK(save_scene_text(back) == save_scene_text(ed.scene()));
+    /* Undo walks them back, one command each. */
+    for (int i = 0; i < 11; i++) r36_cmd(ed, "undo");
+    CHECK(!ed.scene().lighting.realtime_gi && ed.scene().lighting.gi_rays == 8 && ed.scene().lighting.gi_resolution == 1 && ed.scene().lighting.gi_downsample == 1);
+    CHECK(std::fabs(ed.scene().lighting.gi_radius - 2.0f) < 1e-5f && ed.scene().lighting.gi_sky_occlusion && ed.scene().lighting.gi_bounce && !ed.scene().lighting.auto_generate);
+    CHECK(ed.scene().lighting.gi_rsm_resolution == def.gi_rsm_resolution);
+    for (int i = 0; i < 11; i++) r36_cmd(ed, "redo");
+    CHECK(ed.scene().lighting.realtime_gi && ed.scene().lighting.gi_rays == 12 && ed.scene().lighting.auto_generate);
+    /* Bad numbers are clamped, not stored. */
+    r36_cmd(ed, "set Lighting.GIRadius nan");
+    CHECK(std::isfinite(ed.scene().lighting.gi_radius) && ed.scene().lighting.gi_radius > 0.0f && ed.scene().lighting.gi_radius <= 1000.0f);
+    r36_cmd(ed, "set Lighting.GIRadius 1e9");
+    CHECK(ed.scene().lighting.gi_radius <= 1000.0f);
+    r36_cmd(ed, "set Lighting.GIRadius -4");
+    CHECK(ed.scene().lighting.gi_radius > 0.0f);
+    r36_cmd(ed, "set Lighting.GIRays 999");
+    CHECK(ed.scene().lighting.gi_rays <= 32 && ed.scene().lighting.gi_rays >= 1);
+    r36_cmd(ed, "set Lighting.GIRays -5");
+    CHECK(ed.scene().lighting.gi_rays >= 1);
+    r36_cmd(ed, "set Lighting.GIIntensity -3");
+    CHECK(ed.scene().lighting.gi_intensity >= 0.0f);
+    r36_cmd(ed, "set Lighting.GIIntensity 1e9");
+    CHECK(std::isfinite(ed.scene().lighting.gi_intensity) && ed.scene().lighting.gi_intensity <= 10.0f);
+    r36_cmd(ed, "set Lighting.RSMResolution 1");
+    CHECK(ed.scene().lighting.gi_rsm_resolution >= 32);
+    r36_cmd(ed, "set Lighting.RSMResolution 99999");
+    CHECK(ed.scene().lighting.gi_rsm_resolution <= 2048);
+    r36_cmd(ed, "set Lighting.SpecularOcclusion nan");
+    CHECK(std::isfinite(ed.scene().lighting.gi_specular_occlusion) && ed.scene().lighting.gi_specular_occlusion >= 0.0f &&
+          ed.scene().lighting.gi_specular_occlusion <= 1.0f);
+    r36_cmd(ed, "set Lighting.VoxelResolution 99");
+    CHECK(ed.scene().lighting.gi_resolution >= 0 && ed.scene().lighting.gi_resolution <= 2);
+  });
+
+  test("voxel GI: extreme settings, an empty scene, a flat scene and objects a million units away draw without trouble", [] {
+    /* Extreme settings on a real scene. */
+    Editor ed;
+    r36_editor_scene(ed);
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r36_cmd(ed, "set Lighting.GIRadius 1000");
+    r36_cmd(ed, "set Lighting.GIRays 32");
+    r36_cmd(ed, "set Lighting.VoxelResolution 256");
+    r36_cmd(ed, "set Lighting.RSMResolution 32");
+    CHECK(r35_luma(r35_game(ed)) > 0);
+    r36_cmd(ed, "set Lighting.GIRadius 0.05");
+    r36_cmd(ed, "set Lighting.GIRays 1");
+    r36_cmd(ed, "set Lighting.VoxelResolution 64");
+    r36_cmd(ed, "set Lighting.RSMResolution 2048");
+    CHECK(r35_luma(r35_game(ed)) > 0);
+    /* Two cubes a million units out each way: the grid covers the lot (a coarse one), the views still draw. */
+    r36_cmd(ed, "set Lighting.RSMResolution 128");
+    r35_add(ed, "Cube", "FarA", {1e6f, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_add(ed, "Cube", "FarB", {-1e6f, 1e5f, 1e6f}, {5, 5, 5}, Vec3(0.8f));
+    ed.commit_change("far objects");
+    r34_steps(ed, 4);
+    const VoxelGrid &g = ed.voxel_grid_for_test();
+    CHECK(g.valid() && g.voxel > 1000.0f);
+    CHECK(r35_luma(r35_game(ed)) > 0);
+    /* An object scaled to a million units, then absurdly far (beyond what a grid can cover): GI quietly steps aside. */
+    r35_add(ed, "Cube", "Huge", {0, 0, 0}, {1e6f, 1, 1e6f}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Absurd", {5e9f, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    ed.commit_change("huge objects");
+    r34_steps(ed, 4);
+    CHECK(r35_luma(r35_game(ed)) > 0);
+    ed.scene().find_by_name("FarA")->active = false;
+    ed.scene().find_by_name("FarB")->active = false;
+    ed.scene().find_by_name("Huge")->active = false;
+    ed.scene().find_by_name("Absurd")->active = false;
+    ed.commit_change("far objects gone");
+    r34_steps(ed, 4);
+    CHECK(r35_luma(r35_game(ed)) > 0);
+
+    /* Numbers a file could hold: the views clamp them rather than trust them. */
+    ed.scene().lighting.gi_rays = 1000;
+    ed.scene().lighting.gi_resolution = 77;
+    ed.scene().lighting.gi_radius = std::numeric_limits<float>::quiet_NaN();
+    ed.scene().lighting.gi_intensity = std::numeric_limits<float>::infinity();
+    ed.scene().lighting.gi_rsm_resolution = -5;
+    ed.scene().lighting.gi_downsample = 9;
+    ed.scene().lighting.gi_specular_occlusion = std::numeric_limits<float>::quiet_NaN();
+    ed.commit_change("odd numbers");
+    r34_steps(ed, 4);
+    CHECK(r35_luma(r35_game(ed)) > 0);
+
+    /* Everything hidden: no scene at all. */
+    Editor empty;
+    r35_open(empty);
+    r36_cmd(empty, "set Lighting.RealtimeGI true");
+    const std::vector<uint32_t> on = r35_game(empty);
+    r36_cmd(empty, "set Lighting.RealtimeGI false");
+    CHECK(r35_diff_count(r35_game(empty), on) == 0);
+    CHECK(!empty.voxel_grid_for_test().valid());
+
+    /* A flat scene (one plane): GI on changes nothing visible (the sky is all open). */
+    Editor flat;
+    r35_open(flat);
+    r35_add(flat, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    flat.commit_change("floor");
+    r34_steps(flat, 3);
+    const std::vector<uint32_t> flat_off = r35_game(flat);
+    r36_cmd(flat, "set Lighting.RealtimeGI true");
+    CHECK(flat.voxel_grid_for_test().valid());
+    const std::vector<uint32_t> flat_on = r35_game(flat);
+    const size_t fd = r35_diff_count(flat_on, flat_off);
+    std::printf("    flat scene, GI on vs off: %zu pixels differ\n", fd);
+    CHECK(fd == 0);
   });
 }
