@@ -4,7 +4,7 @@
 - **Requirements:** Q-04, R-05
 - **Decisions:** none needed (no data-model change)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/22
 
 ## Goal
 Frames that really re-render (orbiting, dragging, editing a material, playing) do work that isn't
