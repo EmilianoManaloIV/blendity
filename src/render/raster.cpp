@@ -299,7 +299,8 @@ void Renderer3D::flush() {
   clip_pos_.resize(n_items);
   screen_pos_.resize(n_items);
   colors_.resize(n_items);
-  std::vector<uint8_t> visible(n_items, 1);
+  std::vector<uint8_t> &visible = visible_;
+  visible.assign(n_items, 1);
   stats_.objects_submitted = (int)n_items;
   size_t total_tris = 0;
   for (size_t i = 0; i < n_items; i++) {
@@ -330,7 +331,8 @@ void Renderer3D::flush() {
    * written out and read back; only bigger meshes take the separate vertex
    * stage. */
   const uint32_t chunk_tris = (uint32_t)std::clamp<size_t>(total_tris / ((size_t)js.thread_count() * 4 + 1), 2048, kMaxChunkTris);
-  std::vector<uint8_t> big(n_items, 0);
+  std::vector<uint8_t> &big = big_;
+  big.assign(n_items, 0);
   size_t nchunks = 0;
   uint32_t fill = chunk_tris;  // triangles in the open chunk
   auto open_chunk = [&] {
@@ -386,8 +388,8 @@ void Renderer3D::flush() {
     if (gouraud && col)
       for (uint32_t v = b; v < e; v++) col[v] = shade_vertex(item, v);
   };
-  struct VJob { uint32_t item, begin, end; };
-  std::vector<VJob> vjobs;
+  std::vector<VJob> &vjobs = vjobs_;
+  vjobs.clear();
   for (size_t i = 0; i < n_items; i++) {
     if (!big[i]) continue;
     size_t nv = items_[i].mesh->positions.size();
@@ -409,7 +411,8 @@ void Renderer3D::flush() {
   /* Items with Cutout / Transparent / Glass materials: those triangles are
    * drawn afterwards, sorted, by draw_see_through(). Depth-only passes
    * (shadow maps) keep Cutout triangles and drop the see-through ones. */
-  std::vector<uint8_t> see_through(n_items, 0);
+  std::vector<uint8_t> &see_through = see_through_;
+  see_through.assign(n_items, 0);
   bool any_see_through = false;
   for (size_t i = 0; i < n_items; i++)
     if (visible[i] && items_[i].materials)
@@ -426,7 +429,7 @@ void Renderer3D::flush() {
   const bool avx2 = opt_.fast_setup && cpu::features().avx2;
 #endif
   js.parallel_for((int64_t)nchunks, 1, [&](int64_t c0, int64_t c1) {
-    std::vector<uint32_t> tile_of;  // scratch
+    static thread_local std::vector<uint32_t> tile_of;  // scratch
     static thread_local std::vector<Vec4> local_cp, local_sp;
     static thread_local std::vector<Vec3> local_col;
     static thread_local std::vector<uint32_t> local_stamp;  // == stamp: local_col[v] is shaded
@@ -958,6 +961,7 @@ void Renderer3D::shade_deferred() {
     bool valid = false, has_uv = false, has_tangent = false, highlighted = false;
     const DrawItem *item = nullptr;
     const Material *mat = nullptr;
+    const Material::Resolved *tex = nullptr;  // its textures, resolved once per flush
     float ox = 0, oy = 0;  // screen position of vertex 0: the planes' origin (keeps them precise)
     Vec3 na, nb, nc;       // sum(c_k * q_k), q_k = screen barycentric / w
     float sa = 0, sb = 0, sc = 0;  // sum(q_k)
@@ -1026,6 +1030,7 @@ void Renderer3D::shade_deferred() {
       const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
       if (mp) T.mat = mp.get();
     }
+    T.tex = &T.mat->textures();  // (resolved before the parallel stages: a cached reference)
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
@@ -1244,7 +1249,7 @@ void Renderer3D::shade_deferred() {
             sp.probe = pq.irr;
           }
         }
-        SurfaceSample s = evaluate_material(*T.mat, sp);
+        SurfaceSample s = evaluate_material(*T.mat, *T.tex, sp);
         if (rsm_out_) {
           /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
           const size_t k = (size_t)y * W + x;
@@ -1335,6 +1340,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
     Vec3 c[3];
     uint32_t item, prim;
     const Material *mat;
+    const Material::Resolved *tex;
     float depth;
   };
   std::vector<FTri> tris;
@@ -1394,6 +1400,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
         t.item = (uint32_t)i;
         t.prim = prim;
         t.mat = mat;
+        t.tex = &mat->textures();
         t.depth = (t.z[0] + t.z[1] + t.z[2]) / 3.0f;
         tris.push_back(t);
       }
@@ -1467,7 +1474,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           }
           const bool door = opt_.screen_door && mat.surface == (int)MaterialSurface::Transparent;
           if (door && ((x + y) & 1)) continue;  // the mesh's holes: not even shaded
-          SurfaceSample sm = evaluate_material(mat, sp);
+          SurfaceSample sm = evaluate_material(mat, *t.tex, sp);
           if (highlighted) sm.albedo = lerp(sm.albedo, it.highlight_color, 0.45f);
           auto lit = [&](const SurfaceSample &ss) {
             if (gouraud) return pack(shade(env_, ss.albedo, it.specular, ss.normal, sp.position));

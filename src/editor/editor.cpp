@@ -406,6 +406,7 @@ void Editor::frame(std::vector<Event> &events) {
   c.fill_rect({0, dock_area.y, dock_area.x, dock_area.h}, ui_.theme.border);
   c.fill_rect({dock_area.right(), dock_area.y, fb_.width - dock_area.right(), dock_area.h}, ui_.theme.border);
 
+  if (filter_cache_.size() > 64) filter_cache_.clear();  // deleted cameras' stacks (ids are never reused within a scene)
   drop_slots_.clear();  // drop targets register again as the windows draw
   drop_textures_.clear();
   drop_rows_.clear();

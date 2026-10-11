@@ -56,6 +56,8 @@ struct FilterStack {
 /* Where an internal image of the stack's resolution goes in a dw x dh view, and its size.
  * Never larger than the view (a filter can't add pixels); at least 1 x 1. */
 void filter_layout(const FilterStack &s, int dw, int dh, int &iw, int &ih, Recti &dst);
+/* The same with the fit given apart from the stack (the Scene view fills, whatever the camera's stack says). */
+void filter_layout(const FilterStack &s, int fit, int dw, int dh, int &iw, int &ih, Recti &dst);
 
 /* Nearest-neighbour scaling of src (sw x sh, row stride sstride) into dst's rectangle r. */
 void upscale_nearest(const uint32_t *src, int sw, int sh, int sstride, uint32_t *dst, int dstride, const Recti &r);

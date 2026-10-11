@@ -53,6 +53,16 @@ date"), and the rest was painting the UI. Same scene, same machine, Windows, rel
 - **`Canvas::circle` walked the circle's whole bounding box** (4 r² square roots for a ring of about
   2 π r t pixels). It walks the ring's rows now.
 
+### Task 0024: the render-frame waste
+The spec's targets for the frames that really render (orbit ≤ 8.5, move ≤ 21, material edit ≤ 22,
+play ≤ 13 ms) were already met by the painting fixes above. The waste it listed was removed anyway, and
+measured as noise: one filter stack per camera instead of a `std::function` per pass per render, one
+internal filter image per view instead of a shared one reallocated by every differently sized view, the
+rasterizer's per-item scratch kept between flushes, a material's textures resolved once per flush
+instead of a version check and an atomic read per pixel, and the sun's shadow casters copied only when
+the map is rendered. The lesson: in these frames the time is the rendering itself (the Scene view's
+raster at 5.9 ms of an orbit frame), not what surrounds it.
+
 ### Honest negatives (pass 7)
 - **The idle frame is 1.3 ms, not the 1.0 the task asked for.** What is left is legitimate drawing:
   the Inspector (0.13 ms for a Camera), the Scene view's gizmo, view gizmo, icons, Camera Preview and

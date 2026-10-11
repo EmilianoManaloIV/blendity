@@ -77,14 +77,23 @@ const char *window_title(WindowKind k);
 struct FrameProfile {
   double ms_scene3d = 0, ms_overlays = 0, ms_game = 0, ms_preview = 0, ms_shadow = 0, ms_ui = 0, ms_present = 0;
   uint64_t frames = 0, shadow_renders = 0, view_renders = 0, view_cache_hits = 0, cache_mismatches = 0;
+  uint64_t filter_target_resizes = 0, filter_stack_builds = 0;  // task 0024: both should stay still in a steady frame
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
     ms_ui += o.ms_ui, ms_present += o.ms_present;
     frames += o.frames, shadow_renders += o.shadow_renders, view_renders += o.view_renders;
     view_cache_hits += o.view_cache_hits, cache_mismatches += o.cache_mismatches;
+    filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
   }
 };
 ui::Icon window_icon(WindowKind k);
+
+/* The internal image a filtered render draws at the stack's resolution before scaling up into its view;
+ * one per view, so two filtered views of different sizes don't reallocate it every frame (task 0024). */
+struct FilterTarget {
+  Image img;
+  RenderTarget rt;
+};
 
 enum class Tool { View, Move, Rotate, Scale, Transform };
 enum class EditElement { Vertex, Edge, Face };
@@ -373,10 +382,16 @@ class Editor {
    * resolution scaled up nearest-neighbour, depth of field and the image passes. Without filters
    * it is render_deferred + camera_dof. rt keeps full-size depth and ids, and r3d is left bound to
    * rt for overlays. */
-  void render_camera(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
+  void render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
                      const Camera *cam, float aspect, bool game = true, bool scene_lights = true, bool animate = false);
   /* The enabled filter components on a camera's GameObject, in order. */
-  FilterStack camera_filters(const GameObject *owner) const;
+  const FilterStack &camera_filters(const GameObject *owner);
+  struct FilterCacheEntry {
+    uint64_t hash = 0;
+    bool valid = false;
+    FilterStack stack;
+  };
+  std::unordered_map<uint64_t, FilterCacheEntry> filter_cache_;  // by camera object id
   /* Edits an object's Camera Filters stack (ADR 0008): op "add" (name; creates the component),
    * "remove" i, "move" i to j, "reset" i. One undo step each. The Inspector's menus and the
    * `filter` console command both use it. */
@@ -1138,8 +1153,7 @@ class Editor {
   RenderTarget cam_preview_rt_;
   /* Camera filters: the internal-resolution image and target (render_camera); the Scene view
    * shows the main camera's filters when scene_filters_ is on. */
-  Image filter_img_;
-  RenderTarget filter_rt_;
+  FilterTarget scene_ft_, game_ft_, preview_ft_, render_ft_;  // one per view that can be filtered
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution
   /* A choice from a component's or modifier's menu in the Inspector. Popup menus run at the end
    * of the frame, after draw_inspector has returned, so they record the choice here and the

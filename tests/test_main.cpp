@@ -203,6 +203,7 @@ static void round41_tests();
 static void round43_tests();
 static void round44_tests();
 static void round45_tests();
+static void round46_tests();
 
 int main() {
   register_builtin_components();
@@ -825,6 +826,7 @@ int main() {
   round43_tests();
   round44_tests();
   round45_tests();
+  round46_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -17779,5 +17781,92 @@ static void round45_tests() {
     const RasterStats s = ed.scene_stats_for_test();
     std::printf("    clip / cull / bin %.3f ms, of it binning (CPU) %.3f ms\n", s.ms_setup, s.ms_bin);
     CHECK(s.ms_bin > 0.0);
+  });
+}
+
+/* Round 46 (task 0024): render-frame waste. */
+static void round46_tests() {
+  test("render frame: shading through the textures resolved once per flush gives the same sample as the per-pixel path (which forwards to it: a guard against the two drifting apart)", [] {
+    Material m;
+    m.procedural = (int)Procedural::UVGrid;  // a texture without a file
+    m.tiling = Vec3(2.0f, 3.0f, 1.0f);
+    m.metallic = 0.3f;
+    m.roughness = 0.6f;
+    int same = 0, n = 0;
+    for (int i = 0; i < 64; i++) {
+      SurfacePoint sp;
+      sp.uv = {(i % 8) / 7.3f, (i / 8) / 7.9f};
+      sp.duvdx = {0.01f, 0.0f};
+      sp.duvdy = {0.0f, 0.02f};
+      sp.normal = sp.geo_normal = normalize(Vec3(0.2f, 1.0f, 0.1f * i));
+      sp.position = sp.local_position = Vec3(i * 0.1f, 0.5f, -i * 0.2f);
+      const SurfaceSample a = evaluate_material(m, sp), b = evaluate_material(m, m.textures(), sp);
+      n++;
+      same += a.albedo.x == b.albedo.x && a.albedo.y == b.albedo.y && a.albedo.z == b.albedo.z && a.metallic == b.metallic && a.roughness == b.roughness &&
+              a.alpha == b.alpha && a.normal.x == b.normal.x && a.normal.y == b.normal.y && a.normal.z == b.normal.z && a.unlit == b.unlit;
+    }
+    CHECK(same == n);
+  });
+  test("render frame: two filtered views of different sizes keep their own filter target (no reallocation every frame)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");  // the Camera Preview shows too: a third filtered view
+    ed.command("filter add Retro Console");  // its own resolution: every view draws through a scaled target
+    ed.command("filters on");
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    auto render_frames = [&](int n) {  // frames that really render: each moves the cube (an idle frame is a cache hit)
+      for (int i = 0; i < n; i++) {
+        cube->set_local_position({0.02f * i, 0.5f, 0.0f});
+        ed.step_frame_headless();
+      }
+    };
+    render_frames(10);
+    const uint64_t warm = ed.frame_profile_totals().filter_target_resizes;
+    std::printf("    filter target resizes over the first 10 rendering frames: %llu (one per filtered view)\n", (unsigned long long)warm);
+    CHECK(warm >= 2 && warm <= 3);
+    const uint64_t r0 = ed.frame_profile_totals().view_renders;
+    render_frames(10);
+    const uint64_t more = ed.frame_profile_totals().filter_target_resizes - warm, rendered = ed.frame_profile_totals().view_renders - r0;
+    std::printf("    over the next 10 (%llu view renders): %llu\n", (unsigned long long)rendered, (unsigned long long)more);
+    CHECK(rendered >= 20);  // the Scene view, the Game view and the Camera Preview, each frame
+    CHECK(more == 0);
+  });
+  test("render frame: a camera's filter stack is built once, and again only when one of its filters changes", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Retro Console");
+    r34_steps(ed, 6);
+    const uint64_t b0 = ed.frame_profile_totals().filter_stack_builds;
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    for (int i = 0; i < 10; i++) {  // rendering frames: the Scene view, Game view and Camera Preview all ask for the stack
+      cube->set_local_position({0.02f * i, 0.5f, 0.0f});
+      ed.step_frame_headless();
+    }
+    const uint64_t idle = ed.frame_profile_totals().filter_stack_builds - b0;
+    ed.command("set RetroConsoleFilter.Width 64");
+    r34_steps(ed, 3);
+    const uint64_t changed = ed.frame_profile_totals().filter_stack_builds - b0 - idle;
+    r34_steps(ed, 5);
+    const uint64_t after = ed.frame_profile_totals().filter_stack_builds - b0 - idle - changed;
+    std::printf("    stack builds: %llu idle, %llu after a field change, %llu after\n", (unsigned long long)idle, (unsigned long long)changed, (unsigned long long)after);
+    CHECK(idle == 0);
+    CHECK(changed == 1);
+    CHECK(after == 0);
+  });
+  test("render frame: the sun's shadow map is still rendered once per change, not per frame (the casters are copied only then)", [] {
+    Editor ed;
+    r34_open(ed);
+    r34_steps(ed, 4);
+    const R34Count t0 = r34_totals(ed);
+    r34_steps(ed, 5);
+    CHECK((r34_totals(ed) - t0).shadows == 0);
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    const R34Count t1 = r34_totals(ed);
+    cube->set_local_position({0.5f, 0.5f, 0.0f});
+    r34_steps(ed, 3);
+    const R34Count d = r34_totals(ed) - t1;
+    std::printf("    shadow maps after a move: %llu\n", (unsigned long long)d.shadows);
+    CHECK(d.shadows == 1);
   });
 }
