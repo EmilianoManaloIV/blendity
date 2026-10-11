@@ -200,6 +200,7 @@ static void round36_tests();
 static void round37_tests();
 static void round39_tests();
 static void round41_tests();
+static void round43_tests();
 
 int main() {
   register_builtin_components();
@@ -819,6 +820,7 @@ int main() {
   round37_tests();
   round39_tests();
   round41_tests();
+  round43_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -17163,5 +17165,176 @@ static void round41_tests() {
     ed.command("newscene");
     CHECK(ed.preview_data_for_test().empty() && !ed.preview_running_for_test() && ed.preview_samples_for_test() == 0);
     std::filesystem::remove(path);
+  });
+}
+
+
+/* ===================================================================== */
+/* Round 43 (task 0021): Baked lights exist only through the bake         */
+/* ===================================================================== */
+
+static void round43_tests() {
+  /* The floor and wall static, a ball that isn't, the sun off, and a point light over the ball. */
+  auto world = [](Editor &ed, int light_mode, bool volume = false) {
+    P37World w = p37_world(ed, volume, 0, 1.0f, false);
+    ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    GameObject *lamp = ed.scene().create("Lamp");
+    Light *l = lamp->add<Light>();
+    l->type = 1;
+    l->intensity = 3.0f;
+    l->range = 8.0f;
+    l->mode = light_mode;
+    lamp->set_local_position({1.0f, 2.0f, 0.0f});
+    ed.commit_change("lamp");
+    r36_cmd(ed, "lighting mode automatic");
+    r34_steps(ed, 2);
+    return lamp;
+  };
+
+  test("baked lights: with nothing baked, a Baked light is not rasterized (the picture equals the light disabled); Mixed and Realtime light the scene", [=] {
+    Editor baked, off, mixed, realtime;
+    GameObject *lb = world(baked, 2);
+    GameObject *lo = world(off, 2);
+    lo->get<Light>()->enabled = false;
+    off.commit_change("off");
+    r34_steps(off, 2);
+    world(mixed, 1);
+    world(realtime, 0);
+    const std::vector<uint32_t> pb = r35_game(baked), po = r35_game(off), pm = r35_game(mixed), pr = r35_game(realtime);
+    std::printf("    Baked vs disabled: %zu pixels differ; Mixed vs disabled: %zu; Realtime vs disabled: %zu\n", r35_diff_count(pb, po),
+                r35_diff_count(pm, po), r35_diff_count(pr, po));
+    CHECK(r35_diff_count(pb, po) == 0);
+    CHECK(r35_diff_count(pm, po) > 500);
+    CHECK(r35_diff_count(pr, po) > 500);
+    /* Switched to Realtime, it lights the scene again at once. */
+    lb->get<Light>()->mode = 0;
+    baked.commit_change("realtime now");
+    r34_steps(baked, 2);
+    CHECK(r35_diff_count(r35_game(baked), pr) == 0);
+  });
+
+  test("baked lights: a Baked sun renders no shadow map and no RSM, and bounces nothing live; a Mixed sun does all three", [] {
+    for (int mode : {2, 1}) {
+      Editor ed;
+      P37World w = p37_world(ed, false, mode, 1.0f, true);  // (the setup's frames rendered a shadow map before the sun's mode was set)
+      r36_cmd(ed, "lighting mode automatic");
+      r36_cmd(ed, "set Lighting.RealtimeGI true");
+      r34_steps(ed, 6);
+      /* A moved caster makes a Mixed sun render its shadow map again; a Baked sun has none to render. */
+      const uint64_t shadows0 = ed.frame_profile_totals().shadow_renders;
+      w.box->set_local_position({-1.2f, 0.5f, 0.4f});
+      ed.commit_change("box moved");
+      r34_steps(ed, 4);
+      const uint64_t shadows = ed.frame_profile_totals().shadow_renders - shadows0, rsm = ed.rsm_renders_for_test();
+      Vec3 bounce(0.0f);
+      const RealtimeLightmaps &rl = ed.realtime_lightmaps_for_test(true);
+      for (const Lightmap &m : rl.shown.bounce)
+        for (const Vec3 &t : m.texels) bounce += t;
+      std::printf("    sun %s: %llu shadow renders, %llu RSM renders, realtime-lightmap bounce total %.3f\n", mode == 2 ? "Baked" : "Mixed",
+                  (unsigned long long)shadows, (unsigned long long)rsm, bounce.x + bounce.y + bounce.z);
+      if (mode == 2) CHECK(shadows == 0 && rsm == 0 && bounce.x + bounce.y + bounce.z == 0.0f);
+      else CHECK(shadows > 0 && rsm > 0 && bounce.x + bounce.y + bounce.z > 0.01f);
+    }
+  });
+
+  test("baked lights: after a bake the lightmapped floor shows the Baked light, a non-static ball shows none of it without a probe volume and the probes' light with one", [=] {
+    Editor plain, probes, none;
+    world(plain, 2);
+    world(probes, 2, true);
+    GameObject *ln = world(none, 2);
+    ln->get<Light>()->enabled = false;
+    none.commit_change("off");
+    for (Editor *e : {&plain, &probes, &none}) r35_bake(*e);
+    const std::vector<uint32_t> pp = r35_game(plain), pv = r35_game(probes), pn = r35_game(none);
+    /* Where the ball is: the pixels that change when it is hidden (sun off: no shadow of it). */
+    GameObject *ball = plain.scene().find_by_name("Ball");
+    ball->active = false;
+    plain.commit_change("hide");
+    r34_steps(plain, 2);
+    const std::vector<uint32_t> hidden = r35_game(plain);
+    size_t ball_px = 0, ball_lit = 0, ball_probes = 0, floor_lit = 0;
+    for (size_t i = 0; i < pp.size(); i++) {
+      if (pp[i] != hidden[i]) {
+        ball_px++;
+        ball_lit += pp[i] != pn[i];
+        ball_probes += pv[i] != pn[i];
+      }
+      else floor_lit += pp[i] != pn[i];
+    }
+    std::printf("    ball: %zu pixels, %zu differ from no light (no volume), %zu with a probe volume; elsewhere %zu pixels differ (the floor's map)\n",
+                ball_px, ball_lit, ball_probes, floor_lit);
+    CHECK(ball_px > 200);
+    CHECK(ball_lit == 0);
+    CHECK(ball_probes > ball_px / 4);
+    CHECK(floor_lit > 1000);
+  });
+
+  test("baked lights: a path-traced F12 render through the editor still lights with a Baked light; the rasterized one doesn't", [=] {
+    Editor ed;
+    GameObject *lamp = world(ed, 2);
+    ed.command("set Render.RenderEngine Path");
+    ed.command("set Render.Samples 4");
+    ed.command("set Render.Denoise false");
+    ed.command("set Render.ResolutionX 160");
+    ed.command("set Render.ResolutionY 90");
+    auto render = [&] {
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.rendering_for_test());
+      return ed.render_image_for_test().pixels;
+    };
+    const std::vector<uint32_t> traced_on = render();
+    lamp->get<Light>()->enabled = false;
+    ed.commit_change("off");
+    const std::vector<uint32_t> traced_off = render();
+    const double lit = r35_luma(traced_on), dark = r35_luma(traced_off);
+    std::printf("    path traced: summed luma %.0f with the Baked light, %.0f without (%.1f%% more)\n", lit, dark, 100.0 * (lit / dark - 1.0));
+    CHECK(lit > dark * 1.08);  // (the sky lights the whole frame; the lamp adds about 16% on top; run-to-run noise is under 1%)
+    /* Rasterized F12: the Baked light isn't drawn, so the two renders are the same. */
+    ed.command("set Render.RenderEngine Rasterized");
+    const std::vector<uint32_t> raster_off = render();
+    lamp->get<Light>()->enabled = true;
+    ed.commit_change("on");
+    const std::vector<uint32_t> raster_on = render();
+    CHECK(r35_diff_count(raster_on, raster_off) == 0);
+  });
+
+  test("baked lights: the path tracer still lights with a Baked light (it computes true GI and doesn't read the bake)", [] {
+    P37Pt s;
+    s.add(primitives::plane(20.0f, 2), Mat4::identity(), Vec3(0.7f));
+    s.add(primitives::uv_sphere(0.5f, 24, 12), Mat4::translate({1.0f, 0.5f, 0.0f}), Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    RenderLight lamp;
+    lamp.type = RenderLight::Point;
+    lamp.position = Vec3(1.0f, 2.0f, 0.0f);
+    lamp.intensity = 3.0f;
+    lamp.range = 8.0f;
+    lamp.bake_mode = 2;
+    s.build({lamp}, env, 1);
+    uint32_t rng = 7;
+    uint64_t rays = 0;
+    Vec3 sum(0.0f);
+    for (int i = 0; i < 64; i++) sum += s.pt.incoming_radiance({Vec3(1.0f, 3.0f, -3.0f), normalize(Vec3(1.0f, 0.9f, 0.0f) - Vec3(1.0f, 3.0f, -3.0f))}, rng, rays);
+    std::printf("    radiance from the ball's top: %.3f\n", sum.x / 64.0f);
+    CHECK(sum.x / 64.0f > 0.05f);
+  });
+
+  test("baked lights: Preview Lighting shows a Baked light before any bake (Bakery's way)", [=] {
+    Editor ed;
+    world(ed, 2);
+    r36_cmd(ed, "lighting mode manual");
+    const std::vector<uint32_t> dark = r35_game(ed);
+    ed.command("lighting preview on");
+    for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
+    r34_steps(ed, 2);
+    CHECK(ed.preview_samples_for_test() == 256 && ed.lighting_data_for_test().empty());
+    const std::vector<uint32_t> shown = r35_game(ed);
+    const size_t d = r35_diff_count(shown, dark);
+    const double lit = r35_luma(shown), before = r35_luma(dark);
+    std::printf("    with the preview: %zu pixels differ from the dark scene; summed luma %.0f -> %.0f\n", d, before, lit);
+    CHECK(d > 1000);
+    CHECK(lit > before * 1.05);  // brighter: the light appeared through the preview, not something else that moved
   });
 }
