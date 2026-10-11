@@ -73,6 +73,10 @@ void register_builtin_components() {
   reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
+  reg<ProbeVolume>("Rendering",
+                   "Light probes placed automatically (dense near geometry): objects without a lightmap take their indirect "
+                   "light from them. Baked by Generate Lighting, kept live by Realtime GI.",
+                   "Unity: Adaptive Probe Volume; Blender EEVEE: Irradiance Volume");
   reg<Camera>("Rendering", "Renders the Game view.", "Camera object (the active scene camera)");
   reg<CameraFilters>("Rendering",
                      "A stack of filters on this camera, applied top to bottom: Retro Console looks (PS1, N64, Saturn, DOS) and more. "
@@ -110,6 +114,10 @@ void MeshRenderer::reflect(Reflector &r) {
   if (contribute_gi || r.all_fields()) {
     r.field("Scale In Lightmap", scale_in_lightmap, 0.01f, 0.0f, 100.0f);
     r.help("How many lightmap texels this object gets, relative to the Lightmap Resolution (Unity: Scale In Lightmap).");
+    static const char *receive[] = {"Lightmaps", "Light Probes"};
+    r.enumeration("Receive GI", receive_gi, receive, 2);
+    r.help("Where its indirect light comes from: its own lightmap, or the probe volume (Unity: Receive Global\n"
+           "Illumination). Objects that don't contribute always use the probes.");
     r.field("Generate Lightmap UVs", generate_lightmap_uvs);
     r.help("On: lightmap UVs are made at bake time (Smart UV Project + Pack Islands). Off: the mesh's own UVs\n"
            "are used, so they must not overlap.");
@@ -158,6 +166,23 @@ void LightingSettings::reflect(Reflector &r) {
     r.help("The sun's reflective shadow map: where its light lands, for the bounce.");
     r.field("Specular Occlusion", gi_specular_occlusion, 0.01f, 0.0f, 1.0f);
   }
+  r.field("Probe Min Spacing", probe_min_spacing, 0.05f, 0.05f, 100.0f);
+  r.help("Probe volumes (a Probe Volume component): metres between probes near geometry. The volume gets coarser\n"
+         "in open space, up to the max spacing (Unity: Adaptive Probe Volumes' Min / Max Probe Spacing).");
+  r.field("Probe Max Spacing", probe_max_spacing, 0.1f, 0.1f, 1000.0f);
+  r.field("Probe Normal Bias", probe_normal_bias, 0.01f, 0.0f, 10.0f);
+  r.help("Metres a shaded point moves along its normal before reading the probes, so probes behind the surface don't leak.");
+  r.field("Probe View Bias", probe_view_bias, 0.01f, 0.0f, 10.0f);
+  r.field("Probe Leak Reduction", probe_leak_reduction);
+  r.help("Probes behind the surface being shaded (the other side of a thin wall) count for almost nothing\n"
+         "(Unity APV: Leak Reduction Mode).");
+  r.field("Show Probes", show_probes);
+}
+
+void ProbeVolume::reflect(Reflector &r) {
+  r.field("Global", global);
+  r.help("On: around everything that contributes to GI. Off: a box of the size below, centred on this object.");
+  if (!global || r.all_fields()) r.field("Size", size);
 }
 
 void EnvironmentSettings::reflect(Reflector &r) {

@@ -49,6 +49,7 @@ struct BakeObject {
   std::vector<MaterialPtr> materials;
   float scale = 1.0f;          // Scale In Lightmap
   bool generate_uvs = true;    // off: the mesh's own UVs are its lightmap UVs
+  bool want_lightmap = true;   // off (Receive GI = Light Probes): in the bake's scene, but no chart
   uint64_t hash = 0;           // lightmap_content_hash() of what is baked
 };
 

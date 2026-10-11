@@ -148,6 +148,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   };
   for (uint32_t i = 0; i < objects_.size(); i++) {
     const BakeObject &o = objects_[i];
+    if (!o.want_lightmap) continue;
     double area = 0.0;
     const Mesh &m = *o.mesh;
     for (size_t f = 0; f < m.face_count(); f++) {

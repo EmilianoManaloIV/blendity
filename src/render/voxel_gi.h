@@ -111,7 +111,10 @@ struct GiSample {
   float sky = 1.0f;
 };
 /* `set` picks one of 16 fixed direction sets (interleaved sampling): deterministic. */
-GiSample voxel_gi_gather(const VoxelGrid &g, const Rsm *rsm, const Environment &env, Vec3 p, Vec3 n, const GiParams &prm, int set);
+/* `offset_voxels`: how far off the surface along n the rays start (a surface's own voxels); 0 for a point in
+ * free space (a probe). */
+GiSample voxel_gi_gather(const VoxelGrid &g, const Rsm *rsm, const Environment &env, Vec3 p, Vec3 n, const GiParams &prm, int set,
+                         float offset_voxels = 1.8f);
 
 /* Everything the per-pixel pass needs (LightingEnv::gi). */
 struct VoxelGIFrame {

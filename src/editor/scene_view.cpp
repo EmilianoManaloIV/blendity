@@ -534,6 +534,19 @@ void Editor::render_overlays(const Recti &) {
     for (auto &e : edges) scene_r3d_.line(w.point(m->positions[e.first]), w.point(m->positions[e.second]), col, depth, 2e-4f);
   });
 
+  /* Probe volume (Lighting > Show Probes): each probe a dot in the light it holds (seen from above),
+   * the ones inside geometry red. */
+  if (scene_->lighting.show_probes && !probes_.empty()) {
+    const size_t n = probes_.probe_count(), step = std::max<size_t>(1, n / 50000);
+    const Vec3 up(0, 1, 0), sky = env_.irradiance(up);
+    for (size_t i = 0; i < n; i += step) {
+      const bool live = probe_frame_.use_live && probes_.live_ok[i];
+      const Vec3 c = (live ? probes_.live[i] : probes_.baked[i]).eval(up, sky);
+      const uint32_t col = probes_.valid[i] ? to_display_pixel(c, ViewTransform::Standard, 0.0f) : Color::hex(0xFF3030);
+      scene_r3d_.point(probes_.position[i], std::max(1.5f, (float)ui_.px(2.5f)), col, true);
+    }
+  }
+
   /* Selection outline (orange, children lighter), Unity & Blender style. */
   if (!edit_mode_ && !selection_.empty() && shading_ != Shading::Wireframe) {
     std::vector<uint32_t> sel, kids;

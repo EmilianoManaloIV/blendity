@@ -459,6 +459,16 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `RenderTarget::want_hdr / hdr / hdr_view_transform / hdr_exposure` | Linear light before exposure and tone mapping, allocated in `Renderer3D::begin` only when asked (Deferred mode). `shade_deferred` writes it from its row buffer; `clear_environment` writes the HDRI / physical sky radiance; a plain sky and pixels drawn over by `draw_see_through` hold x = -1. `render_camera` asks when the stack `needs_hdr`. `fill_hdr_from_linear` fills it from the path tracer's `linear_rgb()` for filtered F12 renders and the Rendered Camera Preview | EEVEE / Unity HDR render targets |
 | `apply_bloom`, `BloomEffect` | A bright pass with Unity's soft knee and a firefly clamp. The bright pixels are area-averaged to a fixed 540-row base (so the glow covers the same part of the frame at any resolution), then 13-tap downsamples to about 2 px, then back up with a 4-tap tent mixed by Scatter. A pixel whose colour still encodes its HDR value is re-encoded with the glow added in linear light; one an earlier pass changed (posterize, dither, depth of field) gets the glow added in display light on top, so the stack order holds. Pixels it doesn't reach keep their exact value. `clear_environment` writes the sky's radiance into the plane (no seam at silhouettes). The buffers are reused between frames and shrunk when over twice the need | Jimenez 2014, "Next Generation Post Processing in Call of Duty: Advanced Warfare"; Unity URP bloom |
 
+## Probe volumes (round 37, task 0014)
+
+| Piece | What it does | Reference |
+|---|---|---|
+| `probe_place`, `ProbeVolumeData` (`render/probe_volume.h/.cpp`) | Top cells of 3 x max spacing split where triangles come near, down to 3 x min spacing; each leaf a brick of 4 x 4 x 4 probes; an octree per top cell finds a point's brick | Unity 6 Adaptive Probe Volumes (bricks, min / max spacing) |
+| `ProbeCube` | Per probe, six directions: light from geometry (irradiance / pi) and the sky share each axis sees; evaluated with n squared weights; the sky's light applied when shading (relights with the world) | Valve's ambient cube (McTaggart 2004); APV sky occlusion |
+| `probe_validate`, `probe_bake` | Back-face rays find probes inside geometry: moved past the nearest back face (virtual offset) or marked invalid and dilated; the bake gathers path-traced light from geometry, the sky share and Baked lights' direct light, in slices (`start`, `count`), and the last slice dilates (`probe_dilate`) | APV validity and virtual offset |
+| `probe_live_update`, `Editor::update_probes_live` | With Realtime GI, slices of 4,096 probes per frame gather again through the voxel grid (six hemispheres) when the grid, sun, world or settings change; live-only placement without a bake | Task 0013's voxel GI |
+| `ProbeFrame`, sampling in `shade_deferred` | Per pixel at the point pushed off along the normal and toward the eye, trilinear over the brick's valid probes with normal-based leak reduction; `light_surface` order: lightmap, probes, voxel GI, sky | APV normal / view bias |
+
 ## Voxel GI (round 36, task 0013)
 
 | Piece | What it does | Reference |

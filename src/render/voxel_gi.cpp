@@ -406,7 +406,8 @@ GiParams gi_params_sanitized(GiParams p) {
   return p;
 }
 
-GiSample voxel_gi_gather(const VoxelGrid &g, const Rsm *rsm, const Environment &env, Vec3 p, Vec3 n, const GiParams &prm, int set) {
+GiSample voxel_gi_gather(const VoxelGrid &g, const Rsm *rsm, const Environment &env, Vec3 p, Vec3 n, const GiParams &prm, int set,
+                         float offset_voxels) {
   GiSample out;
   if (!g.valid() || !finite3(p) || !finite3(n)) return out;
   const int N = prm.rays;
@@ -414,7 +415,7 @@ GiSample voxel_gi_gather(const VoxelGrid &g, const Rsm *rsm, const Environment &
   Vec3 tv = cross(n, tu);
   /* Off the surface by more than a voxel's diagonal: a plane can mark the voxels on both of its sides,
    * and along a slanted normal a voxel reaches sqrt(3) voxels (the paper's figure 12). */
-  const Vec3 o = p + n * (1.8f * g.voxel);
+  const Vec3 o = p + n * ((finite_bits(offset_voxels) ? std::max(0.0f, std::min(8.0f, offset_voxels)) : 1.8f) * g.voxel);
   const float rot = (float)(set & 15) * 2.39996323f;  // golden angle: the 16 sets interleave
   double all = 0, through = 0;
   Vec3 bounce(0.0f);

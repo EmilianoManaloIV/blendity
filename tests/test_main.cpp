@@ -26,6 +26,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <deque>
+#include <fstream>
+#include <iterator>
 #include <thread>
 #include <unordered_map>
 #include <cmath>
@@ -192,6 +195,7 @@ static void round32_tests();
 static void round34_tests();
 static void round35_tests();
 static void round36_tests();
+static void round37_tests();
 
 int main() {
   register_builtin_components();
@@ -802,6 +806,7 @@ int main() {
   round34_tests();
   round35_tests();
   round36_tests();
+  round37_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -8775,7 +8780,7 @@ static void round27_tests() {
     };
     auto settle = [&] {
       std::vector<uint32_t> prev;
-      for (int i = 0; i < 400; i++) {
+      for (int i = 0; i < 150; i++) {
         ed.step_frame_headless();
         std::vector<uint32_t> now = grab();
         if (!prev.empty() && now == prev && i > 3) return now;
@@ -9933,6 +9938,10 @@ static void round30_tests() {
     PilotRig R;
     R.start(1600, 1000, true);
     const Recti v = R.ed.scene_view_rect();
+    /* Statistics off: its frame time changes from frame to frame (a slow sanitizer run pushed it past the
+     * limit below, all of it in that box). */
+    R.click_button(3);
+    R.settle();
     const Px editor_view = R.grab();
     R.ed.command("pilot");
     R.settle();
@@ -9944,7 +9953,17 @@ static void round30_tests() {
     CHECK(R.ed.pilot_frame().w == 0);
     const Px back = R.grab();
     const size_t d = pilot_diff(editor_view, back, R.FW(), v, v.y);
-    std::printf("    editor view after the pilot: %zu pixels differ from before\n", d);
+    Recti where{0, 0, 0, 0};  // where the differences are, for when it fails
+    {
+      int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
+      for (int y = v.y; y < v.bottom(); y++)
+        for (int x = v.x; x < v.right(); x++)
+          if (editor_view[(size_t)y * R.FW() + x] != back[(size_t)y * R.FW() + x])
+            x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+      if (x1 >= 0) where = {x0 - v.x, y0 - v.y, x1 - x0 + 1, y1 - y0 + 1};
+    }
+    std::printf("    editor view after the pilot: %zu pixels differ from before (limit %d), within %d,%d %dx%d of the %dx%d view\n", d,
+                v.w * v.h / 200, where.x, where.y, where.w, where.h, v.w, v.h);
     CHECK(d <= (size_t)v.w * v.h / 200);
     /* The grid is back: switching it off changes the view. */
     R.click_button(1);
@@ -14658,5 +14677,1672 @@ static void round36_tests() {
     const size_t fd = r35_diff_count(flat_on, flat_off);
     std::printf("    flat scene, GI on vs off: %zu pixels differ\n", fd);
     CHECK(fd == 0);
+  });
+}
+
+/* ===================================================================== */
+/* Round 37: probe volumes (task 0014)                                     */
+/* ===================================================================== */
+
+namespace {
+
+/* A path tracer over a few meshes; the meshes and materials live as long as it does. */
+struct P37Pt {
+  std::vector<MeshPtr> meshes;
+  std::deque<std::vector<MaterialPtr>> mats;
+  std::vector<PTObject> objs;
+  PathTracer pt;
+  void add(MeshPtr m, const Mat4 &model, Vec3 colour) {
+    meshes.push_back(m);
+    mats.push_back({make_material("m", colour)});
+    objs.push_back({&m->render_mesh_tangents(), model, &mats.back()});
+  }
+  void build(const std::vector<RenderLight> &lights, const Environment &env, int bounces = 2) {
+    PTSettings ps;
+    ps.max_bounces = bounces;
+    ps.denoise = false;
+    ps.use_guiding = false;
+    ps.gpus.clear();
+    pt.set_settings(ps);
+    pt.build(objs, lights, env);
+  }
+  std::vector<AABB> tri_boxes() const {
+    std::vector<AABB> out;
+    for (const PTObject &o : objs)
+      for (size_t k = 0; k < o.mesh->tri_count(); k++) {
+        AABB b;
+        for (int c = 0; c < 3; c++) b.add(o.model.point(o.mesh->positions[o.mesh->indices[k * 3 + c]]));
+        out.push_back(b);
+      }
+    return out;
+  }
+};
+
+AABB p37_box(Vec3 a, Vec3 b) {
+  AABB r;
+  r.add(a);
+  r.add(b);
+  return r;
+}
+
+RenderLight p37_sun(Vec3 travel, float intensity = 1.0f) {
+  RenderLight s;
+  s.direction = normalize(travel);
+  s.intensity = intensity;
+  return s;
+}
+
+bool p37_same_cube(const ProbeCube &a, const ProbeCube &b) {
+  for (int i = 0; i < 6; i++)
+    if (a.bounce[i].x != b.bounce[i].x || a.bounce[i].y != b.bounce[i].y || a.bounce[i].z != b.bounce[i].z || a.sky[i] != b.sky[i]) return false;
+  return true;
+}
+
+bool p37_same_probes(const ProbeVolumeData &a, const ProbeVolumeData &b) {
+  if (a.position.size() != b.position.size() || a.bricks.size() != b.bricks.size() || a.nodes.size() != b.nodes.size() || a.roots != b.roots ||
+      a.valid != b.valid || a.scene_key != b.scene_key)
+    return false;
+  for (size_t i = 0; i < a.position.size(); i++)
+    if (a.position[i].x != b.position[i].x || a.position[i].y != b.position[i].y || a.position[i].z != b.position[i].z) return false;
+  for (size_t i = 0; i < a.baked.size(); i++)
+    if (!p37_same_cube(a.baked[i], b.baked[i])) return false;
+  for (size_t i = 0; i < a.bricks.size(); i++)
+    if (a.bricks[i].min.x != b.bricks[i].min.x || a.bricks[i].min.y != b.bricks[i].min.y || a.bricks[i].min.z != b.bricks[i].min.z ||
+        a.bricks[i].spacing != b.bricks[i].spacing || a.bricks[i].first != b.bricks[i].first)
+      return false;
+  return true;
+}
+
+/* One brick of 4 x 4 x 4 probes, `spacing` apart, from the origin (probe i at its grid position). */
+ProbeVolumeData p37_one_brick(float spacing = 1.0f) {
+  ProbeVolumeData d;
+  probe_place(d, p37_box(Vec3(0.0f), Vec3(3.0f * spacing)), {}, spacing, spacing);
+  return d;
+}
+
+/* ---- editor scenes ---- */
+
+struct P37World {
+  GameObject *floor_go = nullptr, *wall = nullptr, *ball = nullptr, *box = nullptr, *probes = nullptr;
+};
+
+/* A floor and a red wall (x = 2.2) that contribute to the lightmaps, a dynamic ball beside the wall, an
+ * optional lightmapped box, the sun in `sun_mode`, and (optionally) a local probe volume over all of it. */
+P37World p37_world(Editor &ed, bool volume, int sun_mode = 1, float ball_x = 1.0f, bool with_box = false, Vec3 wall_colour = Vec3(0.9f, 0.05f, 0.05f)) {
+  r35_open(ed);
+  P37World w;
+  w.floor_go = r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+  w.wall = r35_add(ed, "Cube", "Wall", {2.2f, 1, 0}, {0.2f, 2, 6}, wall_colour);
+  w.ball = r35_add(ed, "Sphere", "Ball", {ball_x, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f), false);
+  if (with_box) w.box = r35_add(ed, "Cube", "Box", {-1.5f, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));
+  r35_sun_mode(ed, sun_mode);
+  if (volume) {
+    w.probes = ed.scene().create("Probes");
+    ProbeVolume *pv = w.probes->add<ProbeVolume>();
+    pv->global = false;
+    pv->size = Vec3(10, 4, 10);
+    w.probes->set_local_position({0, 1.5f, 0});
+    ed.commit_change("probe volume");
+  }
+  r34_steps(ed, 2);
+  return w;
+}
+
+template <class F>
+int p37_until(Editor &ed, int max_frames, F pred) {
+  for (int i = 0; i < max_frames; i++) {
+    if (pred()) return i;
+    ed.step_frame_headless();
+  }
+  return pred() ? max_frames : -1;
+}
+
+/* Realtime GI on and the live probes caught up. */
+bool p37_live_settled(Editor &ed, int max_frames = 80) {
+  return p37_until(ed, max_frames, [&] { return ed.probe_live_ready_for_test() && ed.probe_live_left_for_test() == 0; }) >= 0;
+}
+
+/* Sum over all pixels of (A - B) in red minus blue: how much redder A is than B. */
+double p37_redder(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+  double s = 0;
+  for (size_t i = 0; i < a.size() && i < b.size(); i++)
+    s += (int)((a[i] >> 16) & 255) - (int)((b[i] >> 16) & 255) - ((int)(a[i] & 255) - (int)(b[i] & 255));
+  return s;
+}
+
+/* Where an object is in the Game view: the pixels that change when it is hidden, with the sun off (so no
+ * shadow of it counts). */
+std::vector<char> p37_footprint(Editor &ed, GameObject *g) {
+  Light *sun = ed.scene().find_by_name("Directional Light")->get<Light>();
+  sun->enabled = false;
+  const Vec3 sky = ed.scene().environment.color;
+  std::vector<char> m;
+  /* Twice, against two sky colours: a ball lit by a grey sky can match a grey background by chance. */
+  for (const Vec3 bg : {sky, Vec3(0.95f)}) {
+    ed.scene().environment.color = bg;
+    ed.commit_change("footprint");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> with = r35_game(ed);
+    g->active = false;
+    ed.commit_change("hide");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> without = r35_game(ed);
+    g->active = true;
+    ed.commit_change("show");
+    r34_steps(ed, 1);
+    if (m.empty()) m.assign(with.size(), 0);
+    for (size_t i = 0; i < with.size() && i < without.size(); i++) {
+      const int d = std::max({std::abs((int)((with[i] >> 16) & 255) - (int)((without[i] >> 16) & 255)), std::abs((int)((with[i] >> 8) & 255) - (int)((without[i] >> 8) & 255)),
+                              std::abs((int)(with[i] & 255) - (int)(without[i] & 255))});
+      if (d > 2) m[i] = 1;
+    }
+  }
+  ed.scene().environment.color = sky;
+  sun->enabled = true;
+  ed.commit_change("footprint done");
+  r34_steps(ed, 3);
+  return m;
+}
+
+size_t p37_count(const std::vector<char> &m) {
+  size_t n = 0;
+  for (char c : m) n += c != 0;
+  return n;
+}
+
+/* Mean luma (sum of channels / 3) and red-minus-blue over the masked pixels. */
+struct P37Mean {
+  double luma = 0, red_minus_blue = 0;
+};
+P37Mean p37_mean(const std::vector<uint32_t> &px, const std::vector<char> &mask) {
+  P37Mean r;
+  size_t n = 0;
+  for (size_t i = 0; i < px.size() && i < mask.size(); i++) {
+    if (!mask[i]) continue;
+    const int R = (px[i] >> 16) & 255, G = (px[i] >> 8) & 255, B = px[i] & 255;
+    r.luma += (R + G + B) / 3.0;
+    r.red_minus_blue += R - B;
+    n++;
+  }
+  if (n) r.luma /= n, r.red_minus_blue /= n;
+  return r;
+}
+
+/* Pixels that differ (by more than tol) inside / outside a mask. */
+size_t p37_diff_in(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, const std::vector<char> &mask, bool inside, int tol = 0) {
+  size_t n = 0;
+  for (size_t i = 0; i < a.size() && i < b.size() && i < mask.size(); i++) {
+    if ((mask[i] != 0) != inside) continue;
+    const int dr = std::abs((int)((a[i] >> 16) & 255) - (int)((b[i] >> 16) & 255)), dg = std::abs((int)((a[i] >> 8) & 255) - (int)((b[i] >> 8) & 255)),
+              db = std::abs((int)(a[i] & 255) - (int)(b[i] & 255));
+    if (std::max({dr, dg, db}) > tol) n++;
+  }
+  return n;
+}
+
+std::vector<char> p37_read(const std::string &path) {
+  std::ifstream f(path, std::ios::binary);
+  return std::vector<char>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+void p37_write(const std::string &path, const std::vector<char> &bytes) {
+  std::ofstream f(path, std::ios::binary | std::ios::trunc);
+  f.write(bytes.data(), (std::streamsize)bytes.size());
+}
+
+/* A fresh editor opens a scene file as a file dropped on the window (what the Project window does). */
+void p37_open_file(Editor &ed, const std::string &path) {
+  r34_open(ed);
+  platform::Event drop;
+  drop.type = platform::EventType::Drop;
+  drop.paths = {path};
+  ed.step_frame_headless({drop});
+  r34_steps(ed, 6);
+}
+
+}  // namespace
+
+static void round37_tests() {
+  /* ---------------------------------------------------------------- 1: placement */
+  test("probe volumes: bricks are finest within one brick of geometry and coarsest in open space; the probe count follows the geometry, not the volume", [] {
+    const float mn = 1.0f, mx = 8.0f;
+    auto floor_boxes = [](float half) { return std::vector<AABB>{p37_box(Vec3(-half, -0.01f, -half), Vec3(half, 0.01f, half))}; };
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-72.0f), Vec3(72.0f)), floor_boxes(10.0f), mn, mx);
+    CHECK(!d.empty());
+    CHECK(d.position.size() == d.bricks.size() * 64 && d.valid.size() == d.position.size() && d.baked.size() == d.position.size() &&
+          d.live.size() == d.position.size() && d.live_ok.size() == d.position.size());
+    bool all_valid = true;
+    for (uint8_t v : d.valid) all_valid = all_valid && v == 1;
+    CHECK(all_valid);  // placement alone invalidates nothing
+    /* Every brick's probes sit on its grid and inside the volume's cells. */
+    bool grid_ok = true;
+    for (const ProbeBrick &b : d.bricks)
+      for (int k = 0; k < 64; k++) {
+        const Vec3 want = b.min + Vec3((float)(k & 3), (float)((k >> 2) & 3), (float)(k >> 4)) * b.spacing;
+        const Vec3 got = d.position[b.first + (uint32_t)k];
+        grid_ok = grid_ok && std::fabs(got.x - want.x) < 1e-4f && std::fabs(got.y - want.y) < 1e-4f && std::fabs(got.z - want.z) < 1e-4f;
+      }
+    CHECK(grid_ok);
+    /* Finest within one fine brick (3 m) of the floor, anywhere around it; coarsest far away. */
+    R34Rng rng{3737u};
+    int near_bad = 0, near_n = 0, far_bad = 0, far_n = 0;
+    for (int i = 0; i < 4000; i++) {
+      const Vec3 p(rng.range(-13.0f, 13.0f), rng.range(-2.9f, 2.9f), rng.range(-13.0f, 13.0f));
+      const float dx = std::max(0.0f, std::fabs(p.x) - 10.0f), dz = std::max(0.0f, std::fabs(p.z) - 10.0f);
+      if (std::sqrt(dx * dx + p.y * p.y + dz * dz) > 2.9f) continue;
+      const int b = d.find_brick(p);
+      near_n++;
+      if (b < 0 || std::fabs(d.bricks[(size_t)b].spacing - mn) > 1e-4f) near_bad++;
+    }
+    for (int i = 0; i < 1000; i++) {
+      const Vec3 p(rng.range(50.0f, 71.0f) * (i & 1 ? 1 : -1), rng.range(50.0f, 71.0f) * (i & 2 ? 1 : -1), rng.range(50.0f, 71.0f));
+      const int b = d.find_brick(p);
+      far_n++;
+      if (b < 0 || std::fabs(d.bricks[(size_t)b].spacing - mx) > 1e-4f) far_bad++;
+    }
+    std::printf("    %zu probes in %zu bricks; near the floor %d of %d points not at the finest spacing, far away %d of %d not at the coarsest\n", d.position.size(), d.bricks.size(),
+                near_bad, near_n, far_bad, far_n);
+    CHECK(near_n > 500 && near_bad == 0);
+    CHECK(far_n > 0 && far_bad == 0);
+    /* Going up from the floor the spacing never gets finer: 1, 2, 4, 8. */
+    float prev = 0;
+    bool monotone = true;
+    for (float y = 0.05f; y < 70.0f; y += 0.37f) {
+      const int b = d.find_brick(Vec3(0.2f, y, 0.2f));
+      CHECK(b >= 0);
+      if (b < 0) break;
+      const float s = d.bricks[(size_t)b].spacing;
+      monotone = monotone && s >= prev - 1e-4f;
+      prev = s;
+    }
+    CHECK(monotone);
+    CHECK(std::fabs(prev - mx) < 1e-4f);
+    /* The count follows the geometry: an empty volume is the top cells and nothing else; the floor adds its own
+     * fine bricks, four times the floor adds about four times as many; and the same floor in a volume twice as
+     * wide adds only the coarse cells of the extra space. */
+    ProbeVolumeData e, f10, f20, f10_small;
+    probe_place(e, p37_box(Vec3(-72.0f), Vec3(72.0f)), {}, mn, mx);
+    probe_place(f10, p37_box(Vec3(-72.0f), Vec3(72.0f)), floor_boxes(10.0f), mn, mx);
+    probe_place(f20, p37_box(Vec3(-72.0f), Vec3(72.0f)), floor_boxes(20.0f), mn, mx);
+    probe_place(f10_small, p37_box(Vec3(-24.0f), Vec3(24.0f)), floor_boxes(10.0f), mn, mx);
+    const double uniform = 144.0 * 144.0 * 144.0;  // one probe per metre everywhere
+    const size_t add10 = f10.position.size() - e.position.size(), add20 = f20.position.size() - e.position.size();
+    std::printf("    empty %zu probes, floor 20 x 20 m adds %zu, floor 40 x 40 m adds %zu; the same 20 m floor in a 48 m volume %zu; a uniform 1 m grid would be %.0f\n",
+                e.position.size(), add10, add20, f10_small.position.size(), uniform);
+    CHECK(e.position.size() == 6u * 6u * 6u * 64u);
+    CHECK(add10 > 0 && add20 > add10 * 2);
+    CHECK((double)f10.position.size() < 0.05 * uniform);  // (a 20 m floor gets about 2%: bricks of 1 m probes a few metres thick; a uniform grid would be 100%)
+    CHECK(f10.position.size() - f10_small.position.size() == e.position.size() - 8u * 64u);  // volume size alone adds only coarse cells
+    /* The probe cap is kept (coarser where needed), also with dense geometry everywhere. */
+    std::vector<AABB> dense;
+    for (int i = 0; i < 200; i++) dense.push_back(p37_box(Vec3(rng.range(-70, 70), rng.range(-70, 70), rng.range(-70, 70)), Vec3(0.0f)));
+    for (AABB &b : dense) b.add(b.min + Vec3(0.3f));
+    ProbeVolumeData capped;
+    probe_place(capped, p37_box(Vec3(-72.0f), Vec3(72.0f)), dense, mn, mx, 3000);
+    std::printf("    200 small boxes scattered through the volume, cap 3000: %zu probes\n", capped.position.size());
+    CHECK(!capped.empty() && capped.position.size() <= 3000);
+  });
+
+  test("probe volumes: placement refuses nonsense (NaN or inverted volumes, NaN or negative spacings) and stays inside its limits", [] {
+    const std::vector<AABB> none;
+    ProbeVolumeData d;
+    AABB bad;  // never grown: invalid
+    probe_place(d, bad, none, 1.0f, 8.0f);
+    CHECK(d.empty() && d.position.empty());
+    /* Set directly: AABB::add drops a NaN point on GCC (std::min(0, NaN) is 0), so the box would be a valid point. */
+    AABB nan_box;
+    nan_box.min = Vec3(0.0f);
+    nan_box.max = Vec3(kNaN);
+    probe_place(d, nan_box, none, 1.0f, 8.0f);
+    CHECK(d.empty());
+    AABB inf_box;
+    inf_box.min = Vec3(0.0f);
+    inf_box.max = Vec3(std::numeric_limits<float>::infinity());
+    probe_place(d, inf_box, none, 1.0f, 8.0f);
+    CHECK(d.empty());
+    const AABB v = p37_box(Vec3(-6.0f), Vec3(6.0f));
+    const float spacings[][2] = {{kNaN, 8.0f}, {1.0f, kNaN}, {-3.0f, 8.0f}, {0.0f, 0.0f}, {8.0f, 1.0f}, {1e30f, 1e30f}, {1e-30f, 1.0f}, {kNaN, kNaN}};
+    for (const auto &s : spacings) {
+      probe_place(d, v, none, s[0], s[1]);
+      CHECK(!d.empty());
+      bool finite = d.position.size() == d.bricks.size() * 64 && d.position.size() <= 2000000;
+      for (const Vec3 &p : d.position) finite = finite && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+      CHECK(finite);
+      CHECK(d.find_brick(Vec3(0.1f)) >= 0);
+    }
+    /* A volume of zero size, and a huge one (capped, not 10^30 probes). */
+    probe_place(d, p37_box(Vec3(1.0f), Vec3(1.0f)), none, 1.0f, 8.0f);
+    CHECK(d.position.size() == d.bricks.size() * 64);
+    probe_place(d, p37_box(Vec3(-1e30f), Vec3(1e30f)), none, 1.0f, 8.0f, 20000);
+    CHECK(d.position.size() == d.bricks.size() * 64 && d.position.size() <= 20000);
+    /* Triangles with NaN bounds don't break the split. */
+    std::vector<AABB> odd = {p37_box(Vec3(kNaN), Vec3(kNaN)), p37_box(Vec3(0.0f), Vec3(0.5f))};
+    probe_place(d, v, odd, 1.0f, 8.0f);
+    CHECK(!d.empty() && d.position.size() == d.bricks.size() * 64);
+    /* Lookups outside, at NaN and at infinity find nothing. */
+    probe_place(d, v, none, 1.0f, 8.0f);
+    Vec3 out;
+    CHECK(d.find_brick(Vec3(100.0f, 0, 0)) < 0 && d.find_brick(Vec3(kNaN, 0, 0)) < 0 && d.find_brick(Vec3(std::numeric_limits<float>::infinity(), 0, 0)) < 0);
+    CHECK(!d.sample(Vec3(100.0f, 0, 0), Vec3(0, 1, 0), Vec3(0.3f), false, out));
+    ProbeVolumeData blank;
+    CHECK(blank.find_brick(Vec3(0.0f)) < 0 && !blank.sample(Vec3(0.0f), Vec3(0, 1, 0), Vec3(0.3f), false, out));
+  });
+
+  /* ---------------------------------------------------------------- 2: the cube (SH was replaced) */
+  test("probe volumes: the ambient cube reconstructs a constant light exactly, gives an axis normal that axis's value, and blends by n squared", [] {
+    /* The spec asks for spherical harmonics (L1 / L2). ADR 0012 replaced them with Valve's ambient cube (six
+     * values, blended by n squared): cheaper per pixel and it cannot ring. So the SH criteria become: a constant
+     * environment is returned exactly, an axis normal reads exactly its axis, and the blend weights sum to 1. */
+    R34Rng rng{99u};
+    ProbeCube c;
+    for (int i = 0; i < 6; i++) c.bounce[(size_t)i] = Vec3(0.3f, 0.6f, 0.9f), c.sky[(size_t)i] = 0.0f;
+    double worst = 0;
+    for (int i = 0; i < 2000; i++) {
+      const Vec3 n = normalize(Vec3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)) + Vec3(1e-3f));
+      const Vec3 v = c.eval(n, Vec3(0.0f));
+      worst = std::max({worst, (double)std::fabs(v.x - 0.3f), (double)std::fabs(v.y - 0.6f), (double)std::fabs(v.z - 0.9f)});
+    }
+    std::printf("    constant bounce 0.3 0.6 0.9: worst error %.2e over 2000 normals\n", worst);
+    CHECK(worst < 2e-6);
+    /* A constant sky seen entirely (share 1) and one seen half. */
+    ProbeCube s;
+    for (int i = 0; i < 6; i++) s.sky[(size_t)i] = 1.0f;
+    const Vec3 E(0.2f, 0.4f, 0.8f);
+    worst = 0;
+    for (int i = 0; i < 2000; i++) {
+      const Vec3 n = normalize(Vec3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)) + Vec3(1e-3f));
+      const Vec3 v = s.eval(n, E);
+      worst = std::max({worst, (double)std::fabs(v.x - E.x), (double)std::fabs(v.y - E.y), (double)std::fabs(v.z - E.z)});
+    }
+    CHECK(worst < 2e-6);
+    for (int i = 0; i < 6; i++) s.sky[(size_t)i] = 0.5f;
+    const Vec3 half = s.eval(normalize(Vec3(0.3f, -0.8f, 0.5f)), E);
+    CHECK(std::fabs(half.x - 0.1f) < 1e-6f && std::fabs(half.z - 0.4f) < 1e-6f);
+    /* Axis normals read exactly their axis (bounce and sky share), the six values all different. */
+    ProbeCube a;
+    const Vec3 axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (int i = 0; i < 6; i++) a.bounce[(size_t)i] = Vec3((float)(i + 1), 10.0f * (float)(i + 1), 100.0f * (float)(i + 1)), a.sky[(size_t)i] = 0.1f * (float)(i + 1);
+    for (int i = 0; i < 6; i++) {
+      const Vec3 v = a.eval(axes[i], E);
+      const Vec3 want = a.bounce[(size_t)i] + E * a.sky[(size_t)i];
+      CHECK(v.x == want.x && v.y == want.y && v.z == want.z);
+    }
+    /* Between two axes the weights are n squared: 45 degrees is half and half, and the sign picks the face. */
+    const Vec3 d45 = a.eval(normalize(Vec3(1, 1, 0)), Vec3(0.0f));
+    const Vec3 want45 = (a.bounce[0] + a.bounce[2]) * 0.5f;
+    CHECK(std::fabs(d45.x - want45.x) < 1e-4f && std::fabs(d45.y - want45.y) < 1e-3f && std::fabs(d45.z - want45.z) < 1e-2f);
+    const Vec3 neg = a.eval(normalize(Vec3(-1, -1, 0)), Vec3(0.0f));
+    const Vec3 want_neg = (a.bounce[1] + a.bounce[3]) * 0.5f;
+    CHECK(std::fabs(neg.x - want_neg.x) < 1e-4f && std::fabs(neg.y - want_neg.y) < 1e-3f);
+    const Vec3 three = a.eval(Vec3(-1, 2, -2) * (1.0f / 3.0f), Vec3(0.0f));  // n squared: 1/9, 4/9, 4/9
+    const Vec3 want3 = a.bounce[1] * (1.0f / 9.0f) + a.bounce[2] * (4.0f / 9.0f) + a.bounce[5] * (4.0f / 9.0f);
+    CHECK(std::fabs(three.x - want3.x) < 1e-4f && std::fabs(three.y - want3.y) < 1e-3f && std::fabs(three.z - want3.z) < 1e-2f);
+    /* A smooth walk of the normal gives a smooth result (no jump at the sign flip of a component). */
+    Vec3 last = a.eval(normalize(Vec3(-1.0f, 0.4f, 0.2f)), E);
+    double jump = 0;
+    for (float t = -1.0f; t <= 1.0f; t += 0.001f) {
+      const Vec3 v = a.eval(normalize(Vec3(t, 0.4f, 0.2f)), E);
+      jump = std::max(jump, (double)std::fabs(v.x - last.x));
+      last = v;
+    }
+    CHECK(jump < 0.02);  // a step of 0.001 in the normal moves the x values (1..6 apart) by a few thousandths; a jump would be whole units
+  });
+
+  test("probe volumes: sampling blends trilinearly (a linear field comes back exactly), skips invalid probes, and falls back to the baked values", [] {
+    ProbeVolumeData d = p37_one_brick(1.0f);
+    CHECK(d.position.size() == 64 && d.bricks.size() == 1);
+    for (size_t i = 0; i < 64; i++)
+      for (int ax = 0; ax < 6; ax++) d.baked[i].bounce[(size_t)ax] = d.position[i], d.baked[i].sky[(size_t)ax] = 0.0f;
+    R34Rng rng{5u};
+    Vec3 out;
+    double worst = 0;
+    for (int i = 0; i < 500; i++) {
+      const Vec3 p(rng.range(0.0f, 2.99f), rng.range(0.0f, 2.99f), rng.range(0.0f, 2.99f));
+      const Vec3 n = normalize(Vec3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)) + Vec3(1e-3f));
+      CHECK(d.sample(p, n, Vec3(0.0f), false, out, false));  // plain trilinear: leak reduction off
+      worst = std::max({worst, (double)std::fabs(out.x - p.x), (double)std::fabs(out.y - p.y), (double)std::fabs(out.z - p.z)});
+    }
+    std::printf("    linear field 1 m probes: worst trilinear error %.2e\n", worst);
+    CHECK(worst < 2e-5);
+    /* The weights sum to 1 even with probes missing: a constant field is returned as it is, and a NaN in an invalid
+     * probe never reaches the result. */
+    for (size_t i = 0; i < 64; i++)
+      for (int ax = 0; ax < 6; ax++) d.baked[i].bounce[(size_t)ax] = Vec3(0.4f, 0.5f, 0.6f);
+    int invalid = 0;
+    for (size_t i = 0; i < 64; i++)
+      if (rng.f() < 0.3f) {
+        d.valid[i] = 0;
+        invalid++;
+        for (int ax = 0; ax < 6; ax++) d.baked[i].bounce[(size_t)ax] = Vec3(kNaN), d.baked[i].sky[(size_t)ax] = kNaN;
+      }
+    CHECK(invalid > 5);
+    int answered = 0;
+    bool constant = true;
+    for (int i = 0; i < 800; i++) {
+      const Vec3 p(rng.range(0.0f, 2.99f), rng.range(0.0f, 2.99f), rng.range(0.0f, 2.99f));
+      if (d.sample(p, Vec3(0, 1, 0), Vec3(0.0f), false, out, false)) {  // plain trilinear: leak reduction off
+        answered++;
+        constant = constant && std::fabs(out.x - 0.4f) < 1e-5f && std::fabs(out.y - 0.5f) < 1e-5f && std::fabs(out.z - 0.6f) < 1e-5f;
+      }
+    }
+    CHECK(answered > 600);
+    CHECK(constant);
+    /* A cell whose eight corners are all invalid has nothing to give. */
+    ProbeVolumeData e = p37_one_brick(1.0f);
+    for (int z = 1; z <= 2; z++)
+      for (int y = 1; y <= 2; y++)
+        for (int x = 1; x <= 2; x++) e.valid[(size_t)(x + 4 * y + 16 * z)] = 0;
+    CHECK(!e.sample(Vec3(1.5f), Vec3(0, 1, 0), Vec3(0.3f), false, out));
+    CHECK(e.sample(Vec3(0.5f), Vec3(0, 1, 0), Vec3(0.3f), false, out));  // the cell beside it still answers
+    /* Live values are used only where they exist. */
+    ProbeVolumeData l = p37_one_brick(1.0f);
+    for (size_t i = 0; i < 64; i++) {
+      for (int ax = 0; ax < 6; ax++) l.baked[i].bounce[(size_t)ax] = Vec3(1.0f), l.live[i].bounce[(size_t)ax] = Vec3(5.0f), l.baked[i].sky[(size_t)ax] = l.live[i].sky[(size_t)ax] = 0.0f;
+      l.live_ok[i] = 0;
+    }
+    CHECK(l.sample(Vec3(1.2f), Vec3(0, 1, 0), Vec3(0.0f), true, out) && std::fabs(out.x - 1.0f) < 1e-5f);   // live asked, not ready: baked
+    for (size_t i = 0; i < 64; i++) l.live_ok[i] = 1;
+    CHECK(l.sample(Vec3(1.2f), Vec3(0, 1, 0), Vec3(0.0f), true, out) && std::fabs(out.x - 5.0f) < 1e-5f);   // ready: live
+    CHECK(l.sample(Vec3(1.2f), Vec3(0, 1, 0), Vec3(0.0f), false, out) && std::fabs(out.x - 1.0f) < 1e-5f);  // not asked: baked
+    /* The sky's share is applied with the sky you pass in, so a new sky needs no new bake. */
+    for (size_t i = 0; i < 64; i++)
+      for (int ax = 0; ax < 6; ax++) l.baked[i].bounce[(size_t)ax] = Vec3(0.0f), l.baked[i].sky[(size_t)ax] = 0.5f;
+    Vec3 lo, hi;
+    CHECK(l.sample(Vec3(1.2f), Vec3(0, 1, 0), Vec3(0.2f), false, lo) && l.sample(Vec3(1.2f), Vec3(0, 1, 0), Vec3(0.8f), false, hi));
+    CHECK(std::fabs(lo.x - 0.1f) < 1e-5f && std::fabs(hi.x - 0.4f) < 1e-5f);
+    /* A NaN normal or point gives no answer rather than a NaN. */
+    CHECK(!l.sample(Vec3(1.2f), Vec3(kNaN, 1, 0), Vec3(0.2f), false, out));
+    CHECK(!l.sample(Vec3(kNaN), Vec3(0, 1, 0), Vec3(0.2f), false, out));
+  });
+
+  test("probe volumes: a linear field is continuous across a fine and a coarse brick (the seam of two resolutions)", [] {
+    ProbeVolumeData d;
+    std::vector<AABB> floor = {p37_box(Vec3(-3.0f, -0.01f, -3.0f), Vec3(3.0f, 0.01f, 3.0f))};
+    probe_place(d, p37_box(Vec3(-24.0f), Vec3(24.0f)), floor, 1.0f, 8.0f);
+    for (size_t i = 0; i < d.position.size(); i++)
+      for (int ax = 0; ax < 6; ax++) d.baked[i].bounce[(size_t)ax] = d.position[i], d.baked[i].sky[(size_t)ax] = 0.0f;
+    /* Walk along +y from the floor through the 1 m, 2 m, 4 m and 8 m bricks: the field is returned exactly everywhere,
+     * including at the brick faces (a probe pool whose levels didn't line up would jump there). */
+    double worst = 0;
+    int changes = 0;
+    float last_spacing = 0;
+    for (float y = 0.02f; y < 23.0f; y += 0.0173f) {
+      const Vec3 p(0.31f, y, 0.27f);
+      Vec3 out;
+      const int b = d.find_brick(p);
+      if (b < 0) continue;
+      if (d.bricks[(size_t)b].spacing != last_spacing) changes++, last_spacing = d.bricks[(size_t)b].spacing;
+      if (!d.sample(p, Vec3(0, 1, 0), Vec3(0.0f), false, out, false)) continue;  // plain trilinear
+      worst = std::max(worst, (double)length(out - p));
+    }
+    std::printf("    walking up through %d brick sizes: worst error %.2e\n", changes, worst);
+    CHECK(changes >= 3);
+    CHECK(worst < 1e-3);
+    /* A curved field does jump where the resolutions meet (the coarse side interpolates between its own probes): the
+     * size of the jump is reported, bounded by the curvature times the coarse spacing squared. */
+    for (size_t i = 0; i < d.position.size(); i++)
+      for (int ax = 0; ax < 6; ax++) d.baked[i].bounce[(size_t)ax] = Vec3(dot(d.position[i], d.position[i]) * 0.01f);
+    double jump = 0;
+    for (float y = 0.02f; y < 23.0f; y += 0.0173f) {
+      const Vec3 p0(0.31f, y, 0.27f), p1(0.31f, y + 0.0173f, 0.27f);
+      Vec3 a, b;
+      if (d.sample(p0, Vec3(0, 1, 0), Vec3(0.0f), false, a, false) && d.sample(p1, Vec3(0, 1, 0), Vec3(0.0f), false, b, false)) jump = std::max(jump, (double)std::fabs(a.x - b.x) - 0.01 * 2 * y * 0.0173);
+    }
+    std::printf("    quadratic field 0.01 r^2: largest step beyond the smooth slope across the brick sizes %.4f\n", jump);
+    CHECK(jump < 0.01 * 8.0 * 8.0 / 4.0);  // the coarsest interpolation error bound: curvature * spacing^2 / 4
+  });
+
+  /* ---------------------------------------------------------------- 3: validity */
+  test("probe volumes: probes inside a closed box are moved out or marked invalid, and none stays inside; the others are untouched", [] {
+    P37Pt s;
+    s.add(primitives::cube(), Mat4::scale({2.0f, 2.0f, 2.0f}), Vec3(0.7f));  // a solid box, +-1
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.3f);
+    s.build({}, env);
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-3.1f), Vec3(2.9f)), s.tri_boxes(), 0.5f, 0.5f);
+    const std::vector<Vec3> before = d.position;
+    probe_validate(d, s.pt, 64);
+    int inside = 0, moved = 0, invalid = 0, outside_touched = 0, still_inside_valid = 0;
+    for (size_t i = 0; i < d.position.size(); i++) {
+      const Vec3 b = before[i];
+      const bool was_inside = std::max({std::fabs(b.x), std::fabs(b.y), std::fabs(b.z)}) < 0.93f;
+      const Vec3 a = d.position[i];
+      if (was_inside) {
+        inside++;
+        if (!d.valid[i]) invalid++;
+        else {
+          moved++;
+          if (std::max({std::fabs(a.x), std::fabs(a.y), std::fabs(a.z)}) < 1.0f) still_inside_valid++;
+        }
+      }
+      else if (std::max({std::fabs(b.x), std::fabs(b.y), std::fabs(b.z)}) > 1.2f && (a.x != b.x || a.y != b.y || a.z != b.z || !d.valid[i])) outside_touched++;
+    }
+    std::printf("    %d probes inside the box: %d moved out, %d invalid, %d valid and still inside; %d outside probes touched\n", inside, moved, invalid, still_inside_valid,
+                outside_touched);
+    CHECK(inside >= 20);
+    CHECK(still_inside_valid == 0);
+    CHECK(outside_touched == 0);
+  });
+
+  test("probe volumes: a bake leaves invalid probes dilated from valid neighbours and sampling never reads an invalid one", [] {
+    P37Pt s;
+    /* A 3 x 3 x 3 block of touching unit cubes: a probe in the middle one has a neighbour behind every face, so moving it
+     * out lands inside the next cube and it must end up invalid (the outer ones can be moved out). */
+    for (int x = -1; x <= 1; x++)
+      for (int y = -1; y <= 1; y++)
+        for (int z = -1; z <= 1; z++) s.add(primitives::cube(), Mat4::translate({(float)x, (float)y, (float)z}), Vec3(0.7f));
+    s.add(primitives::plane(20.0f, 2), Mat4::translate({0, -3.0f, 0}), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.3f);
+    s.build({}, env);
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-2.5f), Vec3(2.5f)), s.tri_boxes(), 0.5f, 0.5f);
+    probe_validate(d, s.pt, 64);
+    probe_bake(d, s.pt, {}, 32, 2);
+    int invalid = 0, filled = 0;
+    bool dilated = true, finite = true;
+    for (const ProbeBrick &br : d.bricks)
+      for (int z = 0; z < 4; z++)
+        for (int y = 0; y < 4; y++)
+          for (int x = 0; x < 4; x++) {
+            const uint32_t i = br.first + (uint32_t)(x + 4 * y + 16 * z);
+            for (int ax = 0; ax < 6; ax++)
+              finite = finite && std::isfinite(d.baked[i].bounce[(size_t)ax].x + d.baked[i].bounce[(size_t)ax].y + d.baked[i].bounce[(size_t)ax].z + d.baked[i].sky[(size_t)ax]);
+            if (d.valid[i]) continue;
+            invalid++;
+            /* An invalid probe holds the mean of its valid neighbours in the brick (the 3 x 3 x 3 around it). */
+            Vec3 mean_b(0.0f);
+            float mean_s = 0;
+            int cnt = 0;
+            for (int dz = -1; dz <= 1; dz++)
+              for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                  const int xx = x + dx, yy = y + dy, zz = z + dz;
+                  if (xx < 0 || yy < 0 || zz < 0 || xx > 3 || yy > 3 || zz > 3) continue;
+                  const uint32_t j = br.first + (uint32_t)(xx + 4 * yy + 16 * zz);
+                  if (!d.valid[j]) continue;
+                  mean_b += d.baked[j].bounce[2], mean_s += d.baked[j].sky[2], cnt++;
+                }
+            if (!cnt) continue;
+            filled++;
+            mean_b = mean_b / (float)cnt;
+            mean_s /= (float)cnt;
+            dilated = dilated && length(d.baked[i].bounce[2] - mean_b) < 1e-4f && std::fabs(d.baked[i].sky[2] - mean_s) < 1e-4f;
+          }
+    CHECK(finite);
+    CHECK(invalid > 0 && filled > 0);
+    CHECK(dilated);
+    std::printf("    %d of %zu probes invalid, %d dilated from neighbours\n", invalid, d.position.size(), filled);
+    /* Poison the invalid probes: no sample changes. */
+    ProbeVolumeData poisoned = d;
+    for (size_t i = 0; i < poisoned.position.size(); i++)
+      if (!poisoned.valid[i])
+        for (int ax = 0; ax < 6; ax++) poisoned.baked[i].bounce[(size_t)ax] = Vec3(1e6f), poisoned.baked[i].sky[(size_t)ax] = 1e6f;
+    R34Rng rng{8u};
+    double worst = 0;
+    int n = 0;
+    for (int i = 0; i < 2000; i++) {
+      const Vec3 p(rng.range(-2.9f, 2.9f), rng.range(-2.9f, 2.9f), rng.range(-2.9f, 2.9f));
+      Vec3 a, b;
+      const bool ha = d.sample(p, Vec3(0, 1, 0), Vec3(0.3f), false, a), hb = poisoned.sample(p, Vec3(0, 1, 0), Vec3(0.3f), false, b);
+      CHECK(ha == hb);
+      if (ha && hb) worst = std::max(worst, (double)length(a - b)), n++;
+    }
+    std::printf("    poisoned invalid probes: worst change %.2e over %d samples\n", worst, n);
+    CHECK(worst == 0.0);
+    CHECK(n > 500);
+  });
+
+  /* ---------------------------------------------------------------- 4: leaks */
+  test("probe volumes: a closed room with thin walls, lit and skylit only from outside, stays dark inside (normal bias); outside samples are bright", [] {
+    P37Pt s;
+    const MeshPtr cube = primitives::cube();
+    s.add(cube, Mat4::trs({0, -0.1f, 0}, Quat(), {6.4f, 0.2f, 6.4f}), Vec3(0.8f));  // floor
+    s.add(cube, Mat4::trs({0, 3.1f, 0}, Quat(), {6.4f, 0.2f, 6.4f}), Vec3(0.8f));   // ceiling
+    s.add(cube, Mat4::trs({3.1f, 1.5f, 0}, Quat(), {0.2f, 3.4f, 6.4f}), Vec3(0.8f));
+    s.add(cube, Mat4::trs({-3.1f, 1.5f, 0}, Quat(), {0.2f, 3.4f, 6.4f}), Vec3(0.8f));
+    s.add(cube, Mat4::trs({0, 1.5f, 3.1f}, Quat(), {6.4f, 3.4f, 0.2f}), Vec3(0.8f));
+    s.add(cube, Mat4::trs({0, 1.5f, -3.1f}, Quat(), {6.4f, 3.4f, 0.2f}), Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.3f);
+    env.strength = 1.0f;
+    env.compute_sh();
+    RenderLight sun = p37_sun(Vec3(0.3f, -1.0f, 0.2f), 1.0f);
+    std::vector<BakeLight> lights = {{sun, 1, 1}};
+    s.build({sun}, env);
+    ProbeVolumeData d;
+    // An offset volume: no probe lies in a wall, so the virtual offset can't help and only the bias keeps the leak out.
+    probe_place(d, p37_box(Vec3(-5.13f, -1.13f, -5.13f), Vec3(5.0f, 5.0f, 5.0f)), s.tri_boxes(), 0.5f, 4.0f);
+    const std::vector<Vec3> placed = d.position;
+    probe_validate(d, s.pt, 64);
+    size_t moved_probes = 0;
+    for (size_t i = 0; i < d.position.size(); i++) moved_probes += length(d.position[i] - placed[i]) > 1e-6f;
+    probe_bake(d, s.pt, lights, 24, 2);
+    size_t invalid = 0;
+    for (uint8_t v : d.valid) invalid += !v;
+    std::printf("    %zu probes (%zu invalid)\n", d.position.size(), invalid);
+    struct Face {
+      Vec3 n, origin, u, v;
+    };
+    // Inner faces of the room: normal pointing into it.
+    const Face faces[] = {{{-1, 0, 0}, {3.0f, 0.25f, -2.5f}, {0, 0.5f, 0}, {0, 0, 0.5f}},
+                          {{1, 0, 0}, {-3.0f, 0.25f, -2.5f}, {0, 0.5f, 0}, {0, 0, 0.5f}},
+                          {{0, 0, -1}, {-2.5f, 0.25f, 3.0f}, {0.5f, 0, 0}, {0, 0.5f, 0}},
+                          {{0, 0, 1}, {-2.5f, 0.25f, -3.0f}, {0.5f, 0, 0}, {0, 0.5f, 0}},
+                          {{0, 1, 0}, {-2.5f, 0.0f, -2.5f}, {0.5f, 0, 0}, {0, 0, 0.5f}},
+                          {{0, -1, 0}, {-2.5f, 3.0f, -2.5f}, {0.5f, 0, 0}, {0, 0, 0.5f}}};
+    double worst_in = 0, worst_nobias = 0;
+    Vec3 worst_at(0.0f), worst_n(0.0f);
+    int answered = 0, asked = 0;
+    for (const Face &f : faces) {
+      const int nu = f.n.y != 0 ? 11 : 6, nv = 11;
+      for (int a = 0; a < nu; a++)
+        for (int b = 0; b < nv; b++) {
+          const Vec3 p = f.origin + f.u * (float)a * (f.n.y != 0 ? 1.0f : 1.0f) + f.v * (float)b;
+          if (std::fabs(p.x) > 2.9f || std::fabs(p.z) > 2.9f || p.y > 3.01f || p.y < -0.01f) continue;
+          Vec3 irr, raw;
+          asked++;
+          if (d.sample(p + f.n * 0.25f, f.n, env.irradiance(f.n), false, irr)) {
+            answered++;
+            if ((double)std::max({irr.x, irr.y, irr.z}) > worst_in) worst_at = p, worst_n = f.n;
+            worst_in = std::max(worst_in, (double)std::max({irr.x, irr.y, irr.z}));
+          }
+          if (d.sample(p + f.n * 0.01f, f.n, env.irradiance(f.n), false, raw, false)) worst_nobias = std::max(worst_nobias, (double)std::max({raw.x, raw.y, raw.z}));
+        }
+    }
+    Vec3 up_out;
+    CHECK(d.sample(Vec3(0.3f, 3.45f, 0.2f), Vec3(0, 1, 0), env.irradiance(Vec3(0, 1, 0)), false, up_out));
+    std::printf("    sky irradiance %.3f; inside: brightest sample %.3f with the 0.25 m normal bias, %.3f without it nor leak reduction; above the roof %.3f\n", env.irradiance(Vec3(0, 1, 0)).x,
+                worst_in, worst_nobias, up_out.x);
+    std::printf("    brightest inside sample at (%.2f %.2f %.2f) facing (%.0f %.0f %.0f); %zu probes were moved by the virtual offset\n", worst_at.x, worst_at.y, worst_at.z, worst_n.x,
+                worst_n.y, worst_n.z, moved_probes);
+    if (worst_in >= 0.03) {  // which probes feed it
+      const Vec3 q = worst_at + worst_n * 0.25f;
+      const int b = d.find_brick(q);
+      if (b >= 0) {
+        const ProbeBrick &br = d.bricks[(size_t)b];
+        const Vec3 l = (q - br.min) / br.spacing;
+        for (int c = 0; c < 8; c++) {
+          const int x = std::min(2, (int)l.x) + (c & 1), y = std::min(2, (int)l.y) + ((c >> 1) & 1), z = std::min(2, (int)l.z) + ((c >> 2) & 1);
+          const uint32_t i = br.first + (uint32_t)(x + 4 * y + 16 * z);
+          const Vec3 bn = d.baked[i].bounce[worst_n.y > 0 ? 2 : 0];
+          std::printf("      corner placed (%.2f %.2f %.2f) now (%.2f %.2f %.2f) valid %d, bounce %.3f, sky %.3f\n", placed[i].x, placed[i].y, placed[i].z, d.position[i].x,
+                      d.position[i].y, d.position[i].z, d.valid[i], bn.x, d.baked[i].sky[worst_n.y > 0 ? 2 : 0]);
+        }
+      }
+    }
+    CHECK(answered == asked && asked > 200);
+    CHECK(up_out.x > 0.25f);                  // the outside is bright
+    CHECK(worst_in < 0.03);                   // ...and the inside, 10% of that, is dark
+    /* The scene really can leak: without the bias and without leak reduction (task 0014's review added it, as
+     * Unity's APV has it) the room fills with sky. */
+    CHECK(worst_nobias > 3.0 * worst_in + 0.02);
+  });
+
+  /* ---------------------------------------------------------------- 5: accuracy */
+  test("probe volumes: a probe in open sky bakes a sky share of 1 upward, and about 0 under a big slab", [] {
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.4f, 0.3f, 0.2f);
+    env.compute_sh();
+    {
+      P37Pt s;
+      s.add(primitives::cube(), Mat4::trs({0, -50.0f, 0}, Quat(), {200.0f, 0.1f, 200.0f}), Vec3(0.5f));  // far below
+      s.build({}, env);
+      ProbeVolumeData d = p37_one_brick(1.0f);
+      probe_validate(d, s.pt, 64);
+      probe_bake(d, s.pt, {}, 256, 2);
+      float worst = 1;
+      for (size_t i = 0; i < d.position.size(); i++) worst = std::min(worst, d.baked[i].sky[2]);
+      std::printf("    open sky: lowest upward sky share over 64 probes %.4f\n", worst);
+      CHECK(worst > 0.999f);
+    }
+    {
+      P37Pt s;
+      s.add(primitives::cube(), Mat4::trs({0, 3.5f, 0}, Quat(), {200.0f, 0.1f, 200.0f}), Vec3(0.5f));  // a big slab overhead
+      s.build({}, env);
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-1.5f), Vec3(1.5f)), {}, 1.0f, 1.0f);  // all below the slab (y = 3.5)
+      probe_validate(d, s.pt, 64);
+      probe_bake(d, s.pt, {}, 512, 2);
+      float best = 0;
+      for (size_t i = 0; i < d.position.size(); i++) best = std::max(best, d.baked[i].sky[2]);
+      std::printf("    under a 200 m slab: highest upward sky share %.4f\n", best);
+      CHECK(best < 0.01f);
+    }
+  });
+
+  test("probe volumes: a baked probe's bounce matches a high-sample path-traced gather, and a Baked sun adds exactly its direct light", [] {
+    P37Pt s;
+    s.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::trs({1.5f, 2.0f, 0}, Quat(), {0.2f, 4.0f, 8.0f}), Vec3(0.9f, 0.05f, 0.05f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.2f);
+    env.compute_sh();
+    RenderLight sun = p37_sun(Vec3(1.0f, -1.0f, 0.2f), 1.0f);
+    s.build({sun}, env);
+    auto baked = [&](int light_mode, int samples) {
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-2.5f, 0.5f, -1.5f), Vec3(0.5f, 3.5f, 1.5f)), {}, 1.0f, 1.0f);
+      probe_validate(d, s.pt, 64);
+      probe_bake(d, s.pt, {{sun, light_mode, 1}}, samples, 2);
+      return d;
+    };
+    const ProbeVolumeData d = baked(1, 4096);
+    CHECK(d.position.size() == 64);
+    const size_t pi = 3 + 4 * 1 + 16 * 1;  // (0.5, 1.5, -0.5): 0.9 m from the red wall
+    const Vec3 p = d.position[pi];
+    CHECK(d.valid[pi] == 1 && std::fabs(p.x - 0.5f) < 1e-4f && std::fabs(p.y - 1.5f) < 1e-4f);
+    const Vec3 axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    double worst_rel = 0;
+    for (int ax : {0, 2, 3, 1}) {
+      /* Cosine-weighted rays about the axis: irradiance / pi is the mean radiance of the ones that hit something. */
+      const Vec3 n = axes[ax];
+      const Vec3 t = std::fabs(n.y) > 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+      const Vec3 u = normalize(cross(n, t)), v = cross(n, u);
+      R34Rng rng{777u + (uint32_t)ax};
+      Vec3 sum(0.0f);
+      const int N = 24000;
+      uint64_t rays = 0;
+      for (int i = 0; i < N; i++) {
+        const float r1 = rng.f(), r2 = rng.f();
+        const float r = std::sqrt(r1), phi = 2.0f * kPi * r2;
+        const Vec3 dir = normalize(u * (r * std::cos(phi)) + v * (r * std::sin(phi)) + n * std::sqrt(std::max(0.0f, 1.0f - r1)));
+        PathTracer::Hit h;
+        if (!s.pt.intersect({p, dir}, h)) continue;
+        uint32_t prng = 4242u + (uint32_t)i * 2654435761u;
+        sum += s.pt.incoming_radiance({p, dir}, prng, rays);
+      }
+      const Vec3 ref = sum * (1.0f / (float)N), got = d.baked[pi].bounce[(size_t)ax];
+      const double m = std::max({ref.x, ref.y, ref.z});
+      const double err = std::max({(double)std::fabs(ref.x - got.x), (double)std::fabs(ref.y - got.y), (double)std::fabs(ref.z - got.z)});
+      std::printf("    axis %d: probe (%.3f %.3f %.3f), path-traced gather (%.3f %.3f %.3f)\n", ax, got.x, got.y, got.z, ref.x, ref.y, ref.z);
+      worst_rel = std::max(worst_rel, err / std::max(m, 0.05));
+    }
+    std::printf("    worst error %.1f%% of the brightest channel\n", worst_rel * 100.0);
+    CHECK(worst_rel < 0.10);
+    /* The red wall's light really is in it (+X looks at the wall). */
+    CHECK(d.baked[pi].bounce[0].x > 2.5f * d.baked[pi].bounce[0].z);
+    /* Baked sun: same rays, plus colour * intensity * max(0, axis . L) where nothing shadows the probe. */
+    const ProbeVolumeData b = baked(2, 4096);
+    const Vec3 L = normalize(-sun.direction);
+    int checked = 0;
+    double worst = 0;
+    for (size_t i = 0; i < 64; i++) {
+      if (!d.valid[i] || !b.valid[i]) continue;
+      const Vec3 q = d.position[i];
+      if (s.pt.occluded({q, L}, 1e30f)) continue;
+      for (int ax = 0; ax < 6; ax++) {
+        const Vec3 diff = b.baked[i].bounce[(size_t)ax] - d.baked[i].bounce[(size_t)ax];
+        const float want = std::max(0.0f, dot(axes[ax], L));
+        worst = std::max({worst, (double)std::fabs(diff.x - want), (double)std::fabs(diff.y - want), (double)std::fabs(diff.z - want)});
+      }
+      checked++;
+    }
+    std::printf("    Baked sun: %d unshadowed probes, worst difference from the direct light %.2e\n", checked, worst);
+    CHECK(checked >= 20);
+    CHECK(worst < 1e-4);
+  });
+
+  /* ---------------------------------------------------------------- 6: live update (library) */
+  test("probe volumes: the live update visits probes in slices (each once), tints the ones near a red wall, and ignores a missing grid", [] {
+    R36Sc sc;
+    RenderLight sun = r36_sun(Vec3(1.0f, -1.0f, 0.2f), 1.0f);
+    sc.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+    sc.add(primitives::cube(), Mat4::translate({1.5f, 2, 0}) * Mat4::scale({0.2f, 4, 8}), Vec3(0.9f, 0.05f, 0.05f));
+    sc.finish(64, &sun);
+    GiParams prm = gi_params_sanitized([] {
+      GiParams p;
+      p.rays = 32, p.radius = 3.0f;
+      return p;
+    }());
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-2.5f, 0.5f, -1.5f), Vec3(0.5f, 3.5f, 1.5f)), {}, 1.0f, 1.0f);
+    const size_t n = d.position.size();
+    CHECK(n == 64);
+    auto done = [&] {
+      size_t c = 0;
+      for (uint8_t v : d.live_ok) c += v;
+      return c;
+    };
+    CHECK(done() == 0);
+    size_t next = probe_live_update(d, sc.grid, &sc.rsm, sc.env, prm, 0, 20);
+    CHECK(next == 20 && done() == 20);
+    bool first20 = true;
+    for (size_t i = 0; i < n; i++) first20 = first20 && (d.live_ok[i] != 0) == (i < 20);
+    CHECK(first20);
+    next = probe_live_update(d, sc.grid, &sc.rsm, sc.env, prm, next, 30);
+    CHECK(next == 50 && done() == 50);
+    next = probe_live_update(d, sc.grid, &sc.rsm, sc.env, prm, next, 100000);  // a huge budget: every probe once, wrapped
+    CHECK(next == 50 && done() == n);
+    CHECK(probe_live_update(d, sc.grid, &sc.rsm, sc.env, prm, 7, 0) == 7 && done() == n);
+    CHECK(probe_live_update(d, sc.grid, &sc.rsm, sc.env, prm, 64 * 5 + 3, 1) == 4);  // a start past the end wraps
+    /* Red near the wall (probes at x = 0.5 face it), nothing like it 3 m away. */
+    double near_rb = 0, far_rb = 0;
+    int nn = 0, nf = 0;
+    for (size_t i = 0; i < n; i++) {
+      const Vec3 b = d.live[i].bounce[0];
+      if (std::fabs(d.position[i].x - 0.5f) < 1e-3f) near_rb += b.x - b.z, nn++;
+      if (std::fabs(d.position[i].x + 2.5f) < 1e-3f) far_rb += b.x - b.z, nf++;
+    }
+    near_rb /= nn, far_rb /= nf;
+    std::printf("    +X face, red minus blue: probes 0.9 m from the wall %.4f, probes 3.9 m away %.4f\n", near_rb, far_rb);
+    CHECK(near_rb > 0.03);
+    CHECK(far_rb < 0.25 * near_rb);
+    /* The sky: open above, mostly shut near the floor looking down. */
+    float up = 1, down = 0;
+    int nu = 0;
+    for (size_t i = 0; i < n; i++)
+      if (d.position[i].x < -1.0f && d.position[i].y > 2.0f) up = std::min(up, d.live[i].sky[2]), nu++;
+    for (size_t i = 0; i < n; i++)
+      if (d.position[i].y > 1.0f && d.position[i].y < 2.0f) down = std::max(down, d.live[i].sky[3]);  // 1.5 m above the floor, looking at it
+    std::printf("    open probes' upward sky share >= %.3f; probes 1.5 m above the floor: downward share <= %.3f\n", up, down);
+    CHECK(nu > 4 && up > 0.9f);
+    CHECK(down < 0.5f);
+    /* The slice and the whole pass agree (deterministic). */
+    ProbeVolumeData e = d;
+    e.live_ok.assign(n, 0);
+    probe_live_update(e, sc.grid, &sc.rsm, sc.env, prm, 0, 100000);
+    bool same = true;
+    for (size_t i = 0; i < n; i++) same = same && p37_same_cube(e.live[i], d.live[i]);
+    CHECK(same);
+    /* No grid, no work. */
+    ProbeVolumeData g = d;
+    g.live_ok.assign(n, 0);
+    VoxelGrid empty;
+    CHECK(probe_live_update(g, empty, nullptr, sc.env, prm, 3, 10) == 0 && std::count(g.live_ok.begin(), g.live_ok.end(), 1) == 0);
+    ProbeVolumeData blank;
+    CHECK(probe_live_update(blank, sc.grid, &sc.rsm, sc.env, prm, 0, 10) == 0);
+    /* No RSM (no sun): the bounce is gone, the sky stays. */
+    ProbeVolumeData h = d;
+    h.live_ok.assign(n, 0);
+    probe_live_update(h, sc.grid, nullptr, sc.env, prm, 0, 100000);
+    double with_rsm = 0, without = 0;
+    for (size_t i = 0; i < n; i++) with_rsm += d.live[i].bounce[0].x, without += h.live[i].bounce[0].x;
+    CHECK(with_rsm > 3.0 * without + 0.1);
+  });
+
+  test("probe volumes: a live probe close above a floor still sees the floor below it (no sky leak through a surface less than a voxel away)", [] {
+    R36Sc sc;
+    sc.add(primitives::plane(20.0f, 2), Mat4(), Vec3(0.7f));
+    sc.add(primitives::cube(), Mat4::translate({1.5f, 2, 0}) * Mat4::scale({0.2f, 4, 8}), Vec3(0.7f));  // sets the grid's size: voxel 0.5
+    sc.finish(64, nullptr);
+    GiParams prm = gi_params_sanitized([] {
+      GiParams p;
+      p.rays = 32, p.radius = 3.0f;
+      return p;
+    }());
+    const float heights[] = {0.1f, 0.25f, 0.4f, 0.5f, 0.6f, 0.75f, 1.0f, 1.5f};
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-2.5f, 0.5f, -1.5f), Vec3(0.5f, 3.5f, 1.5f)), {}, 1.0f, 1.0f);
+    for (size_t i = 0; i < 8; i++) d.position[i] = Vec3(-2.0f, heights[i], 0.0f);  // 8 probes over the open floor
+    probe_live_update(d, sc.grid, nullptr, sc.env, prm, 0, 8);
+    std::printf("    voxel %.2f m; downward sky share at height:", sc.grid.voxel);
+    float worst = 0;
+    for (size_t i = 0; i < 8; i++) {
+      std::printf(" %.2f m: %.2f", heights[i], d.live[i].sky[3]);
+      worst = std::max(worst, d.live[i].sky[3]);
+    }
+    std::printf("\n");
+    /* The floor fills the whole lower hemisphere: whatever the height, almost none of the sky comes through. */
+    CHECK(worst < 0.2f);
+  });
+
+  /* ---------------------------------------------------------------- 8: file format */
+  test("probe volumes: ProbeVolume.bin round-trips exactly, and a damaged or truncated file is refused without a crash", [] {
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4(), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::trs({1.0f, 0.5f, 0}, Quat(), {1, 1, 1}), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.3f);
+    s.build({}, env);
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-4.0f, -0.5f, -4.0f), Vec3(4.0f, 3.0f, 4.0f)), s.tri_boxes(), 1.0f, 4.0f);
+    probe_validate(d, s.pt, 32);
+    probe_bake(d, s.pt, {}, 16, 2);
+    d.scene_key = 0xABCDEF1234ull;
+    const std::string path = fs::join(fs::join(scratch_project(), "Assets/Scenes"), "p37_probes.bin");
+    std::string err;
+    CHECK(d.save(path, err));
+    ProbeVolumeData back;
+    CHECK(back.load(path, err));
+    CHECK(p37_same_probes(d, back));
+    CHECK(back.live.size() == back.baked.size() && std::count(back.live_ok.begin(), back.live_ok.end(), 1) == 0);
+    CHECK(back.top == d.top && back.tn[0] == d.tn[0] && back.tn[1] == d.tn[1] && back.tn[2] == d.tn[2]);
+    R34Rng rng{31u};
+    bool same_samples = true;
+    for (int i = 0; i < 500; i++) {
+      const Vec3 p(rng.range(-4, 4), rng.range(-0.5f, 3), rng.range(-4, 4));
+      Vec3 a, b;
+      const bool ha = d.sample(p, Vec3(0, 1, 0), Vec3(0.3f), false, a), hb = back.sample(p, Vec3(0, 1, 0), Vec3(0.3f), false, b);
+      same_samples = same_samples && ha == hb && (!ha || (a.x == b.x && a.y == b.y && a.z == b.z));
+    }
+    CHECK(same_samples);
+    /* Missing file, wrong magic, empty file. */
+    ProbeVolumeData x;
+    CHECK(!x.load(fs::join(scratch_project(), "Assets/Scenes/no_such_probes.bin"), err) && x.empty());
+    const std::vector<char> good = p37_read(path);
+    CHECK(good.size() > 200);
+    std::vector<char> bad = good;
+    bad[0] = 'X';
+    p37_write(path, bad);
+    CHECK(!x.load(path, err) && x.empty() && !err.empty());
+    p37_write(path, {});
+    CHECK(!x.load(path, err) && x.empty());
+    /* Every truncation point of the header and a spread beyond: refused. */
+    int accepted = 0;
+    for (size_t len = 1; len < good.size(); len += (len < 400 ? 1 : 997)) {
+      p37_write(path, std::vector<char>(good.begin(), good.begin() + (std::ptrdiff_t)len));
+      if (x.load(path, err)) accepted++;
+      CHECK(x.empty() || accepted > 0);
+    }
+    std::printf("    truncations accepted: %d\n", accepted);
+    CHECK(accepted == 0);
+    /* Huge counts: a header claiming 2^62 roots / nodes / probes doesn't allocate or crash. */
+    for (size_t off : {(size_t)68, (size_t)68 + 8}) {
+      bad = good;
+      const uint64_t huge = 1ull << 62;
+      std::memcpy(&bad[off], &huge, 8);
+      p37_write(path, bad);
+      CHECK(!x.load(path, err) && x.empty());
+    }
+    /* Random single and multi byte corruption: either refused, or loaded and then safe to sample. */
+    int loaded = 0, refused = 0;
+    for (int i = 0; i < 150; i++) {
+      bad = good;
+      const int flips = 1 + (i % 4);
+      for (int k = 0; k < flips; k++) bad[(size_t)(rng.f() * (float)(bad.size() - 1))] = (char)(int)(rng.f() * 255.0f);
+      p37_write(path, bad);
+      if (x.load(path, err)) {
+        loaded++;
+        for (int k = 0; k < 40; k++) {
+          Vec3 o;
+          x.sample(Vec3(rng.range(-6, 6), rng.range(-3, 4), rng.range(-6, 6)), Vec3(0, 1, 0), Vec3(0.3f), k & 1, o);
+          x.find_brick(Vec3(rng.range(-6, 6), rng.range(-3, 4), rng.range(-6, 6)));
+        }
+      }
+      else {
+        refused++;
+        CHECK(x.empty());
+      }
+    }
+    std::printf("    150 corrupted files: %d refused, %d loaded and sampled safely\n", refused, loaded);
+    CHECK(refused + loaded == 150);
+    std::filesystem::remove(path);
+  });
+
+  /* ---------------------------------------------------------------- 6/7: the editor */
+  test("probe volumes: a ball beside a red wall picks up red from the baked probes, one far from it does not, and the lightmapped scene is unchanged", [] {
+    ProbeVolumeData probes_near;
+    /* The same ball with a volume (a) and without (b): what the probes add is the difference. Beside a red wall, beside a
+     * white wall (the control: a warm sun on a white floor tints the probes a little), and far from the red wall. */
+    struct Variant {
+      const char *what;
+      float ball_x;
+      Vec3 wall;
+    };
+    const Variant variants[3] = {{"beside the red wall", 1.0f, Vec3(0.9f, 0.05f, 0.05f)}, {"beside a white wall", 1.0f, Vec3(0.9f)}, {"far from the red wall", -2.5f, Vec3(0.9f, 0.05f, 0.05f)}};
+    double redder[3] = {0, 0, 0};
+    for (int v = 0; v < 3; v++) {
+      Editor a, b;
+      p37_world(a, true, 1, variants[v].ball_x, false, variants[v].wall);
+      p37_world(b, false, 1, variants[v].ball_x, false, variants[v].wall);
+      CHECK(a.probes_for_test().empty() && b.probes_for_test().empty());
+      r35_bake(a);
+      r35_bake(b);
+      CHECK(!a.probes_for_test().empty() && b.probes_for_test().empty());
+      CHECK(a.probes_for_test().scene_key != 0 && a.probes_for_test().scene_key == a.lighting_data_for_test().scene_key);
+      redder[v] = p37_redder(r35_game(a), r35_game(b));
+      if (v == 0) probes_near = a.probes_for_test();
+      /* Ball pixels only: everything else (floor, wall, sky) is the same lightmapped picture. */
+      const std::vector<char> ball = p37_footprint(b, b.scene().find_by_name("Ball"));
+      const std::vector<uint32_t> pa = r35_game(a), pb = r35_game(b);
+      const size_t outside = p37_diff_in(pa, pb, ball, false), inside = p37_diff_in(pa, pb, ball, true);
+      std::printf("    ball %s: %zu pixels in its footprint (%zu differ with probes), %zu differ outside it\n", variants[v].what, p37_count(ball), inside, outside);
+      CHECK(p37_count(ball) > 500);
+      CHECK(inside > p37_count(ball) / 3);   // probe-lit differs from sky-only
+      CHECK(outside == 0);                   // nothing else changed
+    }
+    std::printf("    redder than sky-only (sum of R - B over the Game view): beside the red wall %.0f, beside a white wall %.0f, far from the red wall %.0f\n", redder[0], redder[1], redder[2]);
+    CHECK(redder[0] > 1000);
+    CHECK(redder[0] > redder[1] + 0.4 * redder[0]);  // the red is the wall's, not the sun's warmth
+    CHECK(redder[0] > redder[2] + 0.4 * redder[0]);  // ...and it fades with distance
+    /* The wall bleeds red into the probes' +X cube faces, near the wall only. */
+    double red_near = 0, red_far = 0;
+    int nn = 0, nf = 0;
+    for (size_t i = 0; i < probes_near.position.size(); i++) {
+      if (!probes_near.valid[i]) continue;
+      const Vec3 p = probes_near.position[i];
+      if (p.y < 0.4f || p.y > 1.8f || std::fabs(p.z) > 1.5f) continue;
+      const Vec3 b = probes_near.baked[i].bounce[0];
+      if (p.x > 0.8f && p.x < 1.9f) red_near += b.x - b.z, nn++;
+      if (p.x < -2.5f) red_far += b.x - b.z, nf++;
+    }
+    CHECK(nn > 0 && nf > 0);
+    if (nn && nf) {
+      red_near /= nn, red_far /= nf;
+      std::printf("    probes' +X bounce, red minus blue: next to the wall %.4f, 5 m from it %.4f\n", red_near, red_far);
+      CHECK(red_near > 0.02 && red_far < 0.5 * red_near);
+    }
+  });
+
+  test("probe volumes: Receive GI picks the source (lightmaps ignore probes, Light Probes ignores the lightmap), set from the console", [] {
+    Editor a, b;
+    P37World wa = p37_world(a, true, 1, 1.0f, true);
+    p37_world(b, false, 1, 1.0f, true);
+    r35_bake(a);
+    r35_bake(b);
+    const std::vector<char> box = p37_footprint(b, b.scene().find_by_name("Box"));
+    CHECK(p37_count(box) > 500);
+    const std::vector<uint32_t> a0 = r35_game(a), b0 = r35_game(b);
+    /* Lightmapped (Receive GI = Lightmaps): the box looks the same with or without probes in the scene. */
+    CHECK(p37_diff_in(a0, b0, box, true) == 0);
+    CHECK(wa.box->get<MeshRenderer>()->receive_gi == 0);
+    /* The console sets the enum by name. */
+    a.command("select Box");
+    a.command("set MeshRenderer.ReceiveGI Light Probes");
+    r34_steps(a, 4);
+    CHECK(wa.box->get<MeshRenderer>()->receive_gi == 1);
+    b.command("select Box");
+    b.command("set MeshRenderer.ReceiveGI 1");
+    r34_steps(b, 4);
+    CHECK(b.scene().find_by_name("Box")->get<MeshRenderer>()->receive_gi == 1);
+    /* The picture must follow the setting by itself: no other edit, no camera move. (The view render cache's hash of the
+     * MeshRenderer flags has to include Receive GI for that.) */
+    const std::vector<uint32_t> a_stale = r35_game(a);
+    const size_t stale_changed = p37_diff_in(a_stale, a0, box, true);
+    std::printf("    Game view box pixels (%zu) that changed on their own after Receive GI = Light Probes: %zu\n", p37_count(box), stale_changed);
+    CHECK(stale_changed > p37_count(box) / 4);
+    /* From here on, every view re-renders (the cache-verify mode), so the rest checks the shading and not the cache. */
+    const uint64_t mm0 = Editor::render_cache_mismatches_all();
+    a.set_render_cache_verify(true);
+    b.set_render_cache_verify(true);
+    r34_steps(a, 3);
+    r34_steps(b, 3);
+    const uint64_t mismatches = Editor::render_cache_mismatches_all() - mm0;
+    std::printf("    stale pictures the render cache would have shown: %llu\n", (unsigned long long)mismatches);
+    const std::vector<uint32_t> a1 = r35_game(a), b1 = r35_game(b);
+    const size_t changed = p37_diff_in(a1, a0, box, true);
+    const size_t vs_sky = p37_diff_in(a1, b1, box, true);
+    std::printf("    box pixels (%zu): %zu change when it switches to probes; %zu differ from the same box without a volume (sky only)\n", p37_count(box), changed, vs_sky);
+    CHECK(changed > p37_count(box) / 4);  // it left its lightmap
+    CHECK(vs_sky > p37_count(box) / 4);   // ...and reads the probes
+    /* Switched back: the lightmap again, bit for bit. */
+    a.command("set MeshRenderer.ReceiveGI Lightmaps");
+    r34_steps(a, 4);
+    CHECK(r35_game(a) == a0);
+    /* Not contributing: always probes. */
+    a.command("set MeshRenderer.ContributeGI false");
+    r34_steps(a, 4);
+    const std::vector<uint32_t> a2 = r35_game(a);
+    CHECK(p37_diff_in(a2, a0, box, true) > p37_count(box) / 4);
+  });
+
+  test("probe volumes: with voxel GI on, probe-lit objects still take the probes (as in Unity's APV), the rest voxel GI", [] {
+    Editor a, b;
+    p37_world(a, true, 1, 1.0f, true);
+    p37_world(b, false, 1, 1.0f, true);
+    r35_bake(a);
+    r35_bake(b);
+    const std::vector<uint32_t> a_off = r35_game(a), b_off = r35_game(b);
+    CHECK(r35_diff_count(a_off, b_off) > 100);  // GI off: the probes show (the ball)
+    r36_cmd(a, "set Lighting.RealtimeGI true");
+    r36_cmd(b, "set Lighting.RealtimeGI true");
+    CHECK(p37_live_settled(a));
+    r34_steps(a, 4);
+    r34_steps(b, 4);
+    CHECK(a.voxel_grid_for_test().valid() && b.voxel_grid_for_test().valid());
+    const std::vector<uint32_t> a_on = r35_game(a), b_on = r35_game(b);
+    const size_t d = r35_diff_count(a_on, b_on);
+    std::printf("    GI off: %zu pixels differ with a volume; GI on: %zu\n", r35_diff_count(a_off, b_off), d);
+    CHECK(r35_diff_count(b_on, b_off) > 100);  // the voxel GI really changed the picture without probes
+    /* Task 0014's review: probes win over the per-pixel pass for the objects they light (the ball), so the
+     * volume still shows with GI on, and live probes are what follow lighting changes there. */
+    CHECK(d > 100);
+  });
+
+  test("probe volumes: Realtime GI keeps probes live with no bake: placed on their own, relit within a few frames when the sun turns or an object moves", [] {
+    Editor ed;
+    P37World w = p37_world(ed, true, 0, 1.0f, false);  // the sun Realtime: nothing baked
+    CHECK(ed.probes_for_test().empty());
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    CHECK(p37_live_settled(ed));
+    const ProbeVolumeData &pv = ed.probes_for_test();
+    CHECK(!pv.empty() && pv.scene_key == 0 && ed.lighting_data_for_test().empty());
+    size_t ok = 0;
+    for (uint8_t v : pv.live_ok) ok += v;
+    std::printf("    %zu live-only probes, %zu updated; %zu bricks\n", pv.probe_count(), ok, pv.bricks.size());
+    CHECK(ok == pv.probe_count());
+    /* Nothing changes: it stays quiet (no restart, the values don't move). */
+    const std::vector<ProbeCube> still = pv.live;
+    r34_steps(ed, 8);
+    CHECK(ed.probe_live_left_for_test() == 0);
+    bool unchanged = still.size() == pv.live.size();
+    for (size_t i = 0; unchanged && i < still.size(); i++) unchanged = p37_same_cube(still[i], pv.live[i]);
+    CHECK(unchanged);
+    auto total_red = [&] {
+      double s = 0;
+      for (const ProbeCube &c : ed.probes_for_test().live) s += c.bounce[0].x + c.bounce[1].x;
+      return s;
+    };
+    const double red0 = total_red();
+    /* Turn the sun to the other side of the wall: no Generate Lighting. */
+    const std::vector<ProbeCube> before_sun = pv.live;
+    ed.scene().find_by_name("Directional Light")->set_local_euler({50, -90, 0});
+    ed.commit_change("sun turned");
+    int max_left_frames = 0;
+    bool restarted = false;
+    for (int i = 0; i < 40; i++) {
+      ed.step_frame_headless();
+      if (ed.probe_live_left_for_test() > 0) restarted = true, max_left_frames++;
+      if (restarted && ed.probe_live_left_for_test() == 0) break;
+    }
+    std::printf("    sun turned: live update ran for %d frames, %zu probes left\n", max_left_frames, ed.probe_live_left_for_test());
+    CHECK(restarted);
+    CHECK(ed.probe_live_left_for_test() == 0 && ed.probe_live_ready_for_test());
+    CHECK(max_left_frames <= 12);
+    CHECK(ed.lighting_data_for_test().empty());  // still no bake
+    double moved = 0, scale = 1e-6;
+    for (size_t i = 0; i < before_sun.size(); i++)
+      for (int ax = 0; ax < 6; ax++) {
+        const Vec3 a = before_sun[i].bounce[(size_t)ax], b = ed.probes_for_test().live[i].bounce[(size_t)ax];
+        moved += std::fabs(a.x - b.x) + std::fabs(a.y - b.y) + std::fabs(a.z - b.z);
+        scale += std::fabs(a.x) + std::fabs(a.y) + std::fabs(a.z);
+      }
+    std::printf("    probe bounce moved by %.1f%% of its total (red-wall faces %.2f -> %.2f)\n", 100.0 * moved / scale, red0, total_red());
+    CHECK(moved > 0.05 * scale);
+    /* Move one object: live update restarts and finishes. */
+    const std::vector<ProbeCube> before_move = ed.probes_for_test().live;
+    w.wall->set_local_position({0.4f, 1, 0});
+    ed.commit_change("wall moved");
+    restarted = false;
+    int frames = 0;
+    for (int i = 0; i < 40; i++) {
+      ed.step_frame_headless();
+      if (ed.probe_live_left_for_test() > 0) restarted = true, frames++;
+      if (restarted && ed.probe_live_left_for_test() == 0) break;
+    }
+    std::printf("    wall moved: live update ran for %d frames\n", frames);
+    CHECK(restarted && ed.probe_live_left_for_test() == 0);
+    bool changed = false;
+    for (size_t i = 0; i < before_move.size() && !changed; i++) changed = !p37_same_cube(before_move[i], ed.probes_for_test().live[i]);
+    CHECK(changed);
+    /* Turning Realtime GI off stops it (and the redraw loop it asked for). */
+    r36_cmd(ed, "set Lighting.RealtimeGI false");
+    r34_steps(ed, 2);
+    CHECK(ed.probe_live_left_for_test() == 0);
+  });
+
+  test("probe volumes: changing the sky colour relights probe-lit objects with no re-bake, close to a re-bake", [] {
+    auto build = [](Editor &ed, float sky) {
+      p37_world(ed, true, 1, 1.0f, false);
+      ed.scene().environment.color = Vec3(sky);
+      ed.commit_change("sky");
+      r35_bake(ed);
+    };
+    Editor a, c;
+    build(a, 0.25f);
+    const std::vector<char> ball = p37_footprint(a, a.scene().find_by_name("Ball"));
+    CHECK(p37_count(ball) > 500);
+    auto sun_off = [](Editor &ed) {  // the sun hides what the sky adds: measure the ball by probes and sky alone
+      ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+      ed.commit_change("sun off");
+      r34_steps(ed, 4);
+    };
+    sun_off(a);
+    const P37Mean m0 = p37_mean(r35_game(a), ball);
+    const ProbeVolumeData probes_before = a.probes_for_test();
+    const uint64_t key_before = a.lighting_data_for_test().scene_key;
+    a.scene().environment.color = Vec3(0.6f);
+    a.commit_change("brighter sky");
+    r34_steps(a, 4);
+    CHECK(!a.baking_for_test());
+    const P37Mean m1 = p37_mean(r35_game(a), ball);
+    CHECK(p37_same_probes(probes_before, a.probes_for_test()) && a.lighting_data_for_test().scene_key == key_before);  // nothing was re-baked
+    build(c, 0.6f);
+    sun_off(c);
+    const P37Mean mc = p37_mean(r35_game(c), ball);
+    std::printf("    ball luma: sky 0.25 baked %.1f, sky 0.6 applied at shading %.1f, sky 0.6 re-baked %.1f\n", m0.luma, m1.luma, mc.luma);
+    /* Tone mapping squeezes the display values (the ball is mostly lit by the baked bounce), so the size of the change is
+     * judged against the re-bake's own change: the sky was applied at shading about as far as a re-bake moves it. */
+    CHECK(mc.luma > m0.luma * 1.05);
+    CHECK(m1.luma - m0.luma > 0.5 * (mc.luma - m0.luma));
+    CHECK(std::fabs(m1.luma - mc.luma) < 0.06 * mc.luma);  // a re-bake also bounces the brighter sky off the floor into the probes, which the old bake lacks
+    /* Darker sky the other way. */
+    a.scene().environment.color = Vec3(0.05f);
+    a.commit_change("dark sky");
+    r34_steps(a, 4);
+    CHECK(m0.luma - p37_mean(r35_game(a), ball).luma > 0.5 * (mc.luma - m0.luma));
+  });
+
+  /* ---------------------------------------------------------------- 7/8: nothing without a volume, lifecycle */
+  test("probe volumes: no Probe Volume component means today's pictures, bit for bit, and no probes (baked or live)", [] {
+    Editor ed;
+    p37_world(ed, false, 1, 1.0f, true);
+    r35_bake(ed);
+    const std::vector<uint32_t> game = r35_game(ed), view = r35_scene_view(ed);
+    CHECK(ed.probes_for_test().empty());
+    /* Adding a volume (or turning probes on) after the bake changes nothing until the next Generate Lighting. */
+    GameObject *g = ed.scene().create("Probes");
+    ProbeVolume *pv = g->add<ProbeVolume>();
+    pv->global = false;
+    pv->size = Vec3(10, 4, 10);
+    ed.commit_change("volume");
+    r34_steps(ed, 4);
+    CHECK(ed.probes_for_test().empty());
+    CHECK(r35_game(ed) == game && r35_scene_view(ed) == view);
+    /* A disabled volume bakes nothing. */
+    pv->enabled = false;
+    ed.commit_change("volume off");
+    r35_bake(ed);
+    CHECK(ed.probes_for_test().empty());
+    CHECK(r35_game(ed) == game);
+    /* Realtime GI with no volume never makes probes either. */
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r34_steps(ed, 6);
+    CHECK(ed.probes_for_test().empty() && ed.probe_live_left_for_test() == 0 && !ed.probe_live_ready_for_test());
+    /* Enabled again: a bake makes probes, and removing the component's effect (disable + rebake) takes them away. */
+    r36_cmd(ed, "set Lighting.RealtimeGI false");
+    pv->enabled = true;
+    ed.commit_change("volume on");
+    r35_bake(ed);
+    CHECK(!ed.probes_for_test().empty());
+    pv->enabled = false;
+    ed.commit_change("volume off again");
+    r35_bake(ed);
+    CHECK(ed.probes_for_test().empty());
+    CHECK(r35_game(ed) == game);
+  });
+
+  test("probe volumes: saving and opening the scene restores the probes (count, positions, cubes); Clear Baked Data removes them and the file", [] {
+    Editor ed;
+    p37_world(ed, true, 1, 1.0f, true);
+    const std::string path = r35_scene_path(ed, "R37_Probes");
+    const std::string dir = ed.lighting_dir_for_test();
+    CHECK(!dir.empty());
+    if (fs::exists(dir)) std::filesystem::remove_all(dir);
+    r35_bake(ed);
+    const std::string file = fs::join(dir, "ProbeVolume.bin");
+    CHECK(fs::exists(file));
+    CHECK(save_scene(ed.scene(), path));
+    const ProbeVolumeData before = ed.probes_for_test();
+    const std::vector<uint32_t> pic = r35_game(ed);
+    CHECK(!before.empty() && before.probe_count() == before.bricks.size() * 64);
+    Editor ed2;
+    p37_open_file(ed2, path);
+    CHECK(ed2.scene().path == path);
+    const ProbeVolumeData &after = ed2.probes_for_test();
+    CHECK(!after.empty());
+    CHECK(after.probe_count() == before.probe_count() && after.bricks.size() == before.bricks.size());
+    CHECK(p37_same_probes(before, after));
+    CHECK(after.baked.size() == after.position.size() && after.live_ok.size() == after.position.size());
+    std::printf("    reopened: %zu probes in %zu bricks, scene key %llu\n", after.probe_count(), after.bricks.size(), (unsigned long long)after.scene_key);
+    CHECK(r35_diff_count(r35_game(ed2), pic, 3) == 0 || r35_diff_count(r35_game(ed2), pic, 6) < pic.size() / 200);
+    /* Clear Baked Data. */
+    ed2.command("bake clear");
+    r34_steps(ed2, 4);
+    CHECK(ed2.probes_for_test().empty() && ed2.lighting_data_for_test().empty());
+    CHECK(!fs::exists(file));
+    ed.command("bake clear");
+    r34_steps(ed, 4);
+    CHECK(ed.probes_for_test().empty() && !fs::exists(file));
+    const std::vector<uint32_t> cleared = r35_game(ed);
+    CHECK(r35_diff_count(cleared, pic) > 100);  // the ball is sky-only again
+    std::filesystem::remove_all(dir);
+    std::filesystem::remove(path);
+  });
+
+  test("probe volumes: a damaged ProbeVolume.bin next to a saved scene is refused with the lightmaps still loading, in every way it can break", [] {
+    const std::string name = "R37_Damaged";
+    std::string dir, path;
+    std::vector<char> good;
+    {
+      Editor ed;
+      p37_world(ed, true, 1, 1.0f, false);
+      path = r35_scene_path(ed, name.c_str());
+      dir = ed.lighting_dir_for_test();
+      if (fs::exists(dir)) std::filesystem::remove_all(dir);
+      r35_bake(ed);
+      CHECK(save_scene(ed.scene(), path));
+      good = p37_read(fs::join(dir, "ProbeVolume.bin"));
+      CHECK(good.size() > 300);
+    }
+    const std::string file = fs::join(dir, "ProbeVolume.bin");
+    auto reopen = [&](const char *what, const std::vector<char> &bytes, bool expect_refused) {
+      p37_write(file, bytes);
+      Editor ed;
+      p37_open_file(ed, path);
+      CHECK(ed.scene().path == path);
+      CHECK(!ed.lighting_data_for_test().empty());  // the lightmaps are not taken down with it
+      const bool empty = ed.probes_for_test().empty();
+      std::printf("    %-28s -> %s\n", what, empty ? "refused" : "loaded");
+      if (expect_refused) CHECK(empty);
+      CHECK(r35_luma(r35_game(ed)) > 0);
+      r34_steps(ed, 3);
+    };
+    std::vector<char> v = good;
+    reopen("intact", good, false);
+    v.resize(good.size() / 2);
+    reopen("cut in half", v, true);
+    v = good;
+    v[0] = 'Z';
+    reopen("wrong magic", v, true);
+    reopen("empty file", {}, true);
+    v = good;
+    const uint64_t huge = ~0ull;
+    std::memcpy(&v[68], &huge, 8);
+    reopen("a count of 2^64 - 1", v, true);
+    v = good;
+    for (size_t i = 64; i < v.size(); i++) v[i] = (char)(0x5A + i);
+    reopen("garbage after the header", v, false);
+    v.assign(good.size(), (char)0xFF);
+    reopen("all bytes 0xFF", v, true);
+    std::filesystem::remove_all(dir);
+    std::filesystem::remove(path);
+  });
+
+  /* ---------------------------------------------------------------- 8: robustness, undo, display */
+  test("probe volumes: odd settings (NaN, huge, zero), a zero-size or enormous local volume and an empty scene are safe, in a bake and live", [] {
+    Editor ed;
+    P37World w = p37_world(ed, true, 1, 1.0f, false);
+    LightingSettings &ls = ed.scene().lighting;
+    ProbeVolume *pv = w.probes->get<ProbeVolume>();
+    const float inf = std::numeric_limits<float>::infinity();
+    struct Odd {
+      float mn, mx, nb, vb;
+    };
+    const Odd odds[] = {{kNaN, kNaN, kNaN, kNaN}, {-1.0f, -1.0f, -5.0f, -5.0f}, {0.0f, 0.0f, inf, inf}, {1e30f, 1e30f, 1e30f, 1e30f}, {0.5f, 0.5f, 0.0f, 0.0f}, {2.0f, 0.5f, 0.3f, 0.1f}};
+    for (const Odd &o : odds) {
+      ls.probe_min_spacing = o.mn, ls.probe_max_spacing = o.mx, ls.probe_normal_bias = o.nb, ls.probe_view_bias = o.vb;
+      ed.commit_change("odd probe settings");
+      r34_steps(ed, 2);
+      CHECK(r35_luma(r35_game(ed)) > 0);
+      r35_bake(ed);
+      const ProbeVolumeData &d = ed.probes_for_test();
+      bool finite = d.position.size() == d.bricks.size() * 64 && d.position.size() <= 2000000;
+      for (size_t i = 0; i < d.baked.size() && i < 4000; i++)
+        for (int ax = 0; ax < 6; ax++) {
+          const Vec3 b = d.baked[i].bounce[(size_t)ax];
+          finite = finite && std::isfinite(b.x + b.y + b.z + d.baked[i].sky[(size_t)ax]);
+        }
+      CHECK(finite);
+      CHECK(r35_luma(r35_game(ed)) > 0);
+      /* Pixels never go non-finite: the picture of the dynamic ball is a plain colour. */
+      const std::vector<uint32_t> px = r35_game(ed);
+      CHECK(px.size() > 1000);
+    }
+    ls.probe_min_spacing = 1.0f, ls.probe_max_spacing = 27.0f, ls.probe_normal_bias = 0.25f, ls.probe_view_bias = 0.1f;
+    /* A volume with no size, a negative size, NaN, and 10^30 metres. */
+    const Vec3 sizes[] = {Vec3(0.0f), Vec3(-4.0f, -4.0f, -4.0f), Vec3(kNaN, 4.0f, 4.0f), Vec3(1e30f), Vec3(inf, 4.0f, 4.0f)};
+    for (const Vec3 &sz : sizes) {
+      pv->size = sz;
+      ed.commit_change("odd volume");
+      r34_steps(ed, 2);
+      r35_bake(ed);
+      CHECK(ed.probes_for_test().position.size() <= 2000000);
+      CHECK(r35_luma(r35_game(ed)) > 0);
+    }
+    /* The same, live. */
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    for (const Vec3 &sz : sizes) {
+      pv->size = sz;
+      ed.commit_change("odd volume (live)");
+      r34_steps(ed, 6);
+      CHECK(ed.probes_for_test().position.size() <= 2000000);
+      CHECK(r35_luma(r35_game(ed)) > 0);
+    }
+    for (const Odd &o : odds) {
+      ls.probe_min_spacing = o.mn, ls.probe_max_spacing = o.mx, ls.probe_normal_bias = o.nb, ls.probe_view_bias = o.vb;
+      pv->size = Vec3(10, 4, 10);
+      ed.commit_change("odd probe settings (live)");
+      r34_steps(ed, 6);
+      CHECK(ed.probes_for_test().position.size() <= 2000000);
+      CHECK(r35_luma(r35_game(ed)) > 0);
+    }
+    /* Everything hidden: nothing to put probes in. */
+    Editor empty;
+    r35_open(empty);
+    GameObject *g = empty.scene().create("Probes");
+    g->add<ProbeVolume>();
+    empty.commit_change("global volume, empty scene");
+    empty.command("bake start");
+    r34_steps(empty, 12);
+    CHECK(!empty.baking_for_test() && empty.probes_for_test().empty());
+    r36_cmd(empty, "set Lighting.RealtimeGI true");
+    r34_steps(empty, 6);
+    CHECK(empty.probes_for_test().empty() && empty.probe_live_left_for_test() == 0);
+    CHECK(r35_luma(r35_game(empty)) > 0);
+    /* A Global volume is sized from what contributes to GI: the 10 m floor, not the cube 30 m away. */
+    Editor glob;
+    r35_open(glob);
+    r35_add(glob, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f), true);
+    r35_add(glob, "Cube", "Far", {30, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f), false);
+    glob.scene().create("Probes")->add<ProbeVolume>();
+    glob.commit_change("global volume");
+    r35_bake(glob);
+    CHECK(!glob.probes_for_test().empty());
+    const AABB gb = glob.probes_for_test().box;
+    std::printf("    global volume around the contributing floor: x %.1f .. %.1f\n", gb.min.x, gb.max.x);
+    CHECK(gb.min.x <= -4.9f && gb.max.x >= 4.9f && gb.max.x < 10.0f && gb.min.y <= 0.0f);
+    /* ...and from every mesh when none contributes (live, no bake). */
+    Editor live;
+    r35_open(live);
+    r35_add(live, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f), false);
+    r35_add(live, "Cube", "Far", {30, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f), false);
+    live.scene().create("Probes")->add<ProbeVolume>();
+    live.commit_change("global volume");
+    r36_cmd(live, "set Lighting.RealtimeGI true");
+    r34_steps(live, 6);
+    CHECK(!live.probes_for_test().empty() && live.probes_for_test().box.max.x >= 30.0f);
+  });
+
+  test("probe volumes: undo and redo cover the component, its Global and Size, the spacing and bias settings, Receive GI and the probe display", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, false);
+    auto run = [&](const char *c) {
+      ed.command(c);
+      r34_steps(ed, 2);
+    };
+    auto floor_obj = [&]() { return ed.scene().find_by_name("Floor"); };  // (undo rebuilds the objects: look it up each time)
+    auto pv = [&]() -> ProbeVolume * { GameObject *f = floor_obj(); return f ? f->get<ProbeVolume>() : nullptr; };
+    
+    run("select Floor");
+    CHECK(pv() == nullptr);
+    run("component Probe Volume");
+    CHECK(pv() != nullptr && pv()->global);
+    run("set ProbeVolume.Global false");
+    CHECK(pv() && !pv()->global);
+    run("set ProbeVolume.Size 4 5 6");
+    CHECK(pv() && std::fabs(pv()->size.x - 4.0f) < 1e-5f && std::fabs(pv()->size.y - 5.0f) < 1e-5f && std::fabs(pv()->size.z - 6.0f) < 1e-5f);
+    run("set Lighting.ProbeMinSpacing 0.5");
+    run("set Lighting.ProbeMaxSpacing 8");
+    run("set Lighting.ProbeNormalBias 0.4");
+    run("set Lighting.ProbeViewBias 0.3");
+    run("probes show");
+    run("set MeshRenderer.ReceiveGI Light Probes");
+    CHECK(std::fabs(ed.scene().lighting.probe_min_spacing - 0.5f) < 1e-5f && std::fabs(ed.scene().lighting.probe_max_spacing - 8.0f) < 1e-5f && std::fabs(ed.scene().lighting.probe_normal_bias - 0.4f) < 1e-5f &&
+          std::fabs(ed.scene().lighting.probe_view_bias - 0.3f) < 1e-5f && ed.scene().lighting.show_probes);
+    CHECK(floor_obj()->get<MeshRenderer>()->receive_gi == 1);
+    /* Saved as they are, loaded back. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    CHECK(back.find_by_name("Floor")->get<ProbeVolume>() && !back.find_by_name("Floor")->get<ProbeVolume>()->global &&
+          std::fabs(back.find_by_name("Floor")->get<ProbeVolume>()->size.z - 6.0f) < 1e-5f);
+    CHECK(back.find_by_name("Floor")->get<MeshRenderer>()->receive_gi == 1);
+    CHECK(std::fabs(back.lighting.probe_min_spacing - 0.5f) < 1e-5f && back.lighting.show_probes);
+    CHECK(save_scene_text(back) == save_scene_text(ed.scene()));
+    /* One undo per step, back to the start. */
+    run("undo");
+    CHECK(floor_obj()->get<MeshRenderer>()->receive_gi == 0);
+    run("undo");
+    CHECK(!ed.scene().lighting.show_probes);
+    run("undo");
+    CHECK(std::fabs(ed.scene().lighting.probe_view_bias - 0.1f) < 1e-5f);
+    run("undo");
+    CHECK(std::fabs(ed.scene().lighting.probe_normal_bias - 0.25f) < 1e-5f);
+    run("undo");
+    CHECK(std::fabs(ed.scene().lighting.probe_max_spacing - 27.0f) < 1e-5f);
+    run("undo");
+    CHECK(std::fabs(ed.scene().lighting.probe_min_spacing - 1.0f) < 1e-5f);
+    run("undo");
+    CHECK(pv() && std::fabs(pv()->size.x - 20.0f) < 1e-5f);
+    run("undo");
+    CHECK(pv() && pv()->global);
+    run("undo");
+    CHECK(pv() == nullptr);
+    run("redo");
+    CHECK(pv() && pv()->global);
+    run("redo");
+    run("redo");
+    CHECK(pv() && !pv()->global && std::fabs(pv()->size.x - 4.0f) < 1e-5f);
+    /* Out-of-range numbers typed into the settings are kept in range. */
+    run("set Lighting.ProbeMinSpacing -3");
+    CHECK(std::isfinite(ed.scene().lighting.probe_min_spacing) && ed.scene().lighting.probe_min_spacing >= 0.05f);
+    run("set Lighting.ProbeMinSpacing nan");
+    CHECK(std::isfinite(ed.scene().lighting.probe_min_spacing) && ed.scene().lighting.probe_min_spacing >= 0.05f);
+    run("set Lighting.ProbeMaxSpacing 99999999");
+    CHECK(ed.scene().lighting.probe_max_spacing <= 1000.0f);
+    run("set Lighting.ProbeNormalBias nan");
+    CHECK(std::isfinite(ed.scene().lighting.probe_normal_bias));
+    run("set ProbeVolume.Size nan 2 2");
+    CHECK(pv() != nullptr);  // (a NaN size is stored as typed; probe_volume_box and probe_place refuse it - see the odd-settings test)
+  });
+
+  test("probe volumes: `probes show` draws the probes in the Scene view and `probes hide` takes them away, bit for bit", [] {
+    Editor ed;
+    p37_world(ed, true, 1, 1.0f, true);
+    r35_bake(ed);
+    const std::vector<uint32_t> hidden = r35_scene_view(ed);
+    ed.command("probes show");
+    r34_steps(ed, 4);
+    CHECK(ed.scene().lighting.show_probes);
+    const std::vector<uint32_t> shown = r35_scene_view(ed);
+    const size_t dots = r35_diff_count(shown, hidden);
+    std::printf("    Scene view: %zu of %zu pixels change with the probes shown\n", dots, shown.size());
+    CHECK(dots > 200);
+    ed.command("probes hide");
+    r34_steps(ed, 4);
+    CHECK(!ed.scene().lighting.show_probes);
+    CHECK(r35_scene_view(ed) == hidden);
+    /* Nothing to draw without a volume: the picture doesn't change. */
+    Editor none;
+    p37_world(none, false, 1, 1.0f, true);
+    r35_bake(none);
+    const std::vector<uint32_t> before = r35_scene_view(none);
+    none.command("probes show");
+    r34_steps(none, 4);
+    CHECK(r35_scene_view(none) == before);
+    /* Live-only probes draw too. */
+    Editor live;
+    p37_world(live, true, 0, 1.0f, false);
+    r36_cmd(live, "set Lighting.RealtimeGI true");
+    CHECK(p37_live_settled(live));
+    const std::vector<uint32_t> l0 = r35_scene_view(live);
+    live.command("probes show");
+    r34_steps(live, 4);
+    CHECK(r35_diff_count(r35_scene_view(live), l0) > 200);
+  });
+
+  /* ---------------------------------------------------------------- task 0014's review */
+  test("probe volumes: an enormous volume (1e30 m) places nothing out of range and the probe cap is never exceeded", [] {
+    for (float half : {1e30f, 1e12f, 1e7f, 5e3f}) {
+      for (size_t cap : {(size_t)64, (size_t)4096, (size_t)100000}) {
+        ProbeVolumeData d;
+        std::vector<AABB> tris = {p37_box(Vec3(-1.0f), Vec3(1.0f)), p37_box(Vec3(half * 0.5f), Vec3(half * 0.5f + 1.0f))};
+        probe_place(d, p37_box(Vec3(-half), Vec3(half)), tris, 1.0f, 27.0f, cap);
+        CHECK(d.probe_count() <= cap);
+        CHECK(d.probe_count() == d.bricks.size() * 64 && d.position.size() == d.probe_count());
+        bool finite = true;
+        for (const Vec3 &q : d.position) finite = finite && std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z);
+        CHECK(finite);
+      }
+    }
+  });
+
+  test("probe volumes: baking in slices (as Generate Lighting does, a frame at a time) equals one bake of every probe", [] {
+    P37Pt s;
+    s.add(primitives::cube(), Mat4::translate({0, 0.5f, 0}), Vec3(0.9f, 0.1f, 0.1f));
+    s.add(primitives::plane(20.0f, 2), Mat4::identity(), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.3f);
+    s.build({}, env);
+    ProbeVolumeData whole;
+    probe_place(whole, p37_box(Vec3(-3.0f, 0.2f, -3.0f), Vec3(3.0f)), s.tri_boxes(), 0.5f, 2.0f);
+    probe_validate(whole, s.pt, 32);
+    ProbeVolumeData sliced = whole;
+    probe_bake(whole, s.pt, {}, 24, 2);
+    for (size_t at = 0; at < sliced.probe_count(); at += 100) probe_bake(sliced, s.pt, {}, 24, 2, at, 100);
+    bool same = whole.baked.size() == sliced.baked.size() && whole.probe_count() > 100;
+    for (size_t i = 0; same && i < whole.baked.size(); i++) same = p37_same_cube(whole.baked[i], sliced.baked[i]);
+    CHECK(same);
+  });
+
+  test("probe volumes: with Baked Global Illumination off the baked probes are not used (no light counted twice), as with no volume", [] {
+    Editor a, b;
+    p37_world(a, true, 2, 1.0f, true);  // the sun Baked: its light is only in the bake
+    p37_world(b, false, 2, 1.0f, true);
+    r35_bake(a);
+    r35_bake(b);
+    CHECK(!a.probes_for_test().empty());
+    CHECK(r35_diff_count(r35_game(a), r35_game(b)) > 100);
+    r36_cmd(a, "set Lighting.BakedGlobalIllumination false");
+    r36_cmd(b, "set Lighting.BakedGlobalIllumination false");
+    r34_steps(a, 2);
+    r34_steps(b, 2);
+    CHECK(r35_diff_count(r35_game(a), r35_game(b)) == 0);
+  });
+
+  test("probe volumes: Generate Lighting again without a Probe Volume removes the old ProbeVolume.bin, so it can't come back on open", [] {
+    Editor ed;
+    P37World w = p37_world(ed, true, 1, 1.0f, false);
+    const std::string path = r35_scene_path(ed, "R37_Rebake");
+    const std::string dir = ed.lighting_dir_for_test();
+    if (fs::exists(dir)) std::filesystem::remove_all(dir);
+    r35_bake(ed);
+    CHECK(save_scene(ed.scene(), path));
+    const std::string file = fs::join(dir, "ProbeVolume.bin");
+    CHECK(fs::exists(file));
+    ed.scene().destroy(w.probes);
+    ed.commit_change("no volume");
+    r35_bake(ed);
+    CHECK(ed.probes_for_test().empty());
+    CHECK(!fs::exists(file));
+    CHECK(save_scene(ed.scene(), path));
+    Editor ed2;
+    p37_open_file(ed2, path);
+    CHECK(ed2.probes_for_test().empty() && !ed2.lighting_data_for_test().empty());
+    std::filesystem::remove_all(dir);
+    std::filesystem::remove(path);
+  });
+
+  test("probe volumes: a rotated and scaled box volume covers its rotated extent", [] {
+    Editor ed;
+    P37World w = p37_world(ed, true, 1, 1.0f, false);
+    ProbeVolume *pv = w.probes->get<ProbeVolume>();
+    pv->size = Vec3(10, 1, 1);
+    w.probes->set_local_euler({0, 90, 0});  // the long side now along Z
+    w.probes->set_local_scale({1, 2, 1});
+    ed.commit_change("turned");
+    AABB box;
+    CHECK(ed.probe_volume_box_for_test(box));
+    std::printf("    volume box x %.1f..%.1f, z %.1f..%.1f\n", box.min.x, box.max.x, box.min.z, box.max.z);
+    CHECK(std::fabs(box.max.z - box.min.z - 10.0f) < 0.01f);  // the 10 m side, turned onto Z
+    CHECK(std::fabs(box.max.x - box.min.x - 1.0f) < 0.01f);
+    CHECK(std::fabs(box.max.y - box.min.y - 2.0f) < 0.01f);   // scaled twice in Y
+    /* The cached box follows a change. */
+    w.probes->set_local_euler({0, 0, 0});
+    ed.commit_change("back");
+    r34_steps(ed, 1);
+    CHECK(ed.probe_volume_box_for_test(box) && std::fabs(box.max.x - box.min.x - 10.0f) < 0.01f);
+    r35_bake(ed);
+    CHECK(!ed.probes_for_test().empty());
   });
 }

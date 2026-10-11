@@ -85,6 +85,7 @@ inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
 
 struct VoxelGIFrame;  // voxel_gi.h
 struct Rsm;
+struct ProbeFrame;  // probe_volume.h
 
 struct LightingEnv {
   Vec3 sky{0.45f, 0.52f, 0.62f};
@@ -97,6 +98,7 @@ struct LightingEnv {
   const ShadowMap *shadow = nullptr;  // for lights[shadow_light]
   int shadow_light = -1;
   const VoxelGIFrame *gi = nullptr;   // voxel GI (task 0013): null = off
+  const ProbeFrame *probes = nullptr; // probe volumes (task 0014): null = none
   ViewTransform view_transform = ViewTransform::Standard;
   float exposure = 0.0f;
 };
@@ -115,6 +117,7 @@ struct DrawItem {
   /* Baked lighting: its page and the lightmap UVs, 3 per render-mesh triangle (null = not lightmapped). */
   const Lightmap *lightmap = nullptr;
   const std::vector<Vec2> *lightmap_uv = nullptr;
+  bool use_probes = false;  // takes its indirect light from the probe volume (no lightmap)
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
 };
 

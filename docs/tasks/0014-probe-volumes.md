@@ -1,10 +1,10 @@
 # 0014: Probe volumes (like Unity 6's Adaptive Probe Volumes), kept live by voxel GI
 
-- **Status:** approved 2026-10-09
+- **Status:** in review (approved 2026-10-09)
 - **Requirements:** R-05, R-11
-- **Decisions:** ADR 0012, probe volumes (to write)
+- **Decisions:** ADR 0012, probe volumes
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/14
 
 ## Goal
 Indirect light lives in a 3D grid of light probes that is placed automatically: dense near geometry,
@@ -13,6 +13,28 @@ sparse in open space. It is the way Unity 6 does it with Adaptive Probe Volumes 
 - No lightmap UVs are needed.
 - Probes are baked with the path tracer (task 0012's lights and modes), and voxel GI (task 0013) keeps them
   current. Moving a light, an object or changing the sky updates them live, with no re-bake.
+
+## Deviation from the approved spec (2026-10-10, needs the user's sign-off)
+- **Each probe is an ambient cube (six directions), not SH L1 / L2.** It is as accurate as L1 for
+  diffuse light, and voxel GI's hemisphere gathers update it directly. There is therefore no SH setting.
+- **Precedence with voxel GI is reversed:** for objects lit by probes, the probes win over the per-pixel
+  voxel GI pass, as in Unity's APV, so moving objects match the baked look. Voxel GI keeps the probes
+  themselves live, so lighting changes still show with no re-bake. Other objects (no volume, or outside
+  it) keep the per-pixel pass.
+- **Live probes restart as a whole** when the voxel grid, the sun, the world or the GI settings change,
+  not only near the change (AC 6's last point). A full pass is about 10 frames at 38,000 probes.
+- **The leak test passes with normal-based leak reduction** (APV's Leak Reduction Mode, a new setting,
+  on by default) as well as the normal bias.
+- **AC 2's "L2 matches a cosine integral within 3%"** doesn't apply to the ambient cube. Its test checks
+  exact reconstruction of a constant light, axis normals and the n² blend instead.
+- **AC 7 is checked against "no volume" pictures and lightmapped pictures,** not a path-traced
+  reference.
+- **The debug display** draws probes as dots (invalid ones red), not SH-shaded spheres, and no brick
+  outline.
+- **Settings not added:** SH order (there is no SH), dilation (always on), sky occlusion (always on)
+  and live update (it follows Realtime GI).
+- **Without a bake,** probes are placed around the objects' bounds (not every triangle) and are live
+  only.
 
 ## Scope
 - In:
