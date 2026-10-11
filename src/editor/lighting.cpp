@@ -51,7 +51,7 @@ uint64_t Editor::lightmap_scene_key() {
   };
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
-    const auto *mr = g.get<MeshRenderer>();
+    const auto *mr = g.mesh_renderer();
     const Mesh *m = mr && mr->enabled && mr->contribute_gi && mr->show_in_renders ? g.evaluated_mesh(1) : nullptr;
     if (m) {
       mix(g.id);
@@ -66,7 +66,7 @@ uint64_t Editor::lightmap_scene_key() {
           mixf(&mp->metallic, 1);
         }
     }
-    if (auto *l = g.get<Light>()) {
+    if (auto *l = g.light()) {
       if (!l->enabled || l->mode == 0) return;
       mix(g.id);
       mix(hash_component(*l));

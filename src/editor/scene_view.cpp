@@ -37,7 +37,10 @@ void Editor::draw_scene_view(const Recti &r) {
   Recti view{r.x, r.y + bh, r.w, r.h - bh};
   scene_rect_ = view;
   draw_scene_overlay_bar(bar);
-  if (view.w < 8 || view.h < 8) return;
+  if (view.w < 8 || view.h < 8) {  // (the dock doesn't paint this view's content: it paints every pixel itself)
+    u.canvas.fill_rect(view, u.theme.panel);
+    return;
+  }
   scene_hovered_ = u.hovered(view) && !u.any_popup_open() && !(last_op_valid() && last_op_rect_.contains(u.in.mx, u.in.my)) &&
                    !cam_preview_rect_.contains(u.in.mx, u.in.my) && !view_gizmo_rect(view).contains(u.in.mx, u.in.my);
   scene_navigation(view);
@@ -315,15 +318,14 @@ Camera *Editor::main_camera(const Scene &s, GameObject **owner) {
   /* Rendering a camera sequence: the camera whose turn it is. */
   if (render_camera_override_ && &s == scene_.get())
     if (GameObject *g = s.find(render_camera_override_))
-      if (Camera *c = g->get<Camera>())
+      if (Camera *c = g->camera())
         if (c->enabled && g->active_in_hierarchy()) {
           if (owner) *owner = g;
           return c;
         }
   s.for_each_ordered([&](GameObject &g, int) {
-    if (!g.active_in_hierarchy()) return;
-    auto *c = g.get<Camera>();
-    if (!c || !c->enabled) return;
+    auto *c = g.camera();  // (the role lookup first: it runs for every object, every frame)
+    if (!c || !c->enabled || !g.active_in_hierarchy()) return;
     if (!best || (g.name == "Main Camera" && bo->name != "Main Camera")) { best = c; bo = &g; }
   });
   if (owner) *owner = bo;
@@ -598,10 +600,9 @@ void Editor::render_overlays(const Recti &) {
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
   scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    auto *l = g.get<Light>();
-    auto *c = g.get<Camera>();
-    if (!l && !c) return;
+    auto *l = g.light();  // (the role lookups first: every object, every frame)
+    auto *c = g.camera();
+    if ((!l && !c) || !g.active_in_hierarchy()) return;
     Vec2 sp;
     float z;
     if (!scene_r3d_.project(g.world_position(), sp, z)) return;
@@ -2915,7 +2916,10 @@ void Editor::draw_game_view(const Recti &r) {
   u.tooltip("Rendering statistics (Unity: Game view > Stats).");
   Recti view{r.x, r.y + bh, r.w, r.h - bh};
   game_rect_ = view;
-  if (view.w < 8 || view.h < 8) return;
+  if (view.w < 8 || view.h < 8) {  // (the dock doesn't paint this view's content: it paints every pixel itself)
+    u.canvas.fill_rect(view, u.theme.panel);
+    return;
+  }
   GameObject *owner = nullptr;
   Camera *cam = main_camera(*scene_, &owner);
   if (!cam) {

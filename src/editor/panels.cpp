@@ -1570,6 +1570,7 @@ void Editor::draw_profiler(const Recti &r) {
   };
   stat("Vertex stage", strprintf("%.2f ms", s.ms_vertex));
   stat("Clip / cull / bin", strprintf("%.2f ms", s.ms_setup));
+  stat("  of it binning (CPU, all threads)", strprintf("%.2f ms", s.ms_bin));
   stat("Raster (tiles)", strprintf("%.2f ms", s.ms_raster));
   stat("Total 3D", strprintf("%.2f ms", s.ms_total));
   stat("Editor frame (incl. UI)", strprintf("%.2f ms", frame_ms_));

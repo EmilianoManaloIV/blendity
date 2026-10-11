@@ -167,9 +167,17 @@ bool Editor::delete_project_entry(const std::string &path) {
 /* Unity: renaming a material renames its file (and the other way round). */
 void Editor::sync_material_asset_names() {
   if (ui_.any_editing() || playing_) return;  // not while the name is being typed
+  /* (loaded_material_assets() is a reference to a list rebuilt when the library changes: the loop
+   * returns right after the one call that changes it, move_project_entry, and must keep doing so.) */
   for (auto &kv : loaded_material_assets()) {
     const MaterialPtr &m = kv.second;
     if (!m || m->asset_path.empty() || m->name.empty()) continue;
+    /* The usual case ("Assets/Materials/<name>.mat") without parsing the path: this runs for every
+     * asset every frame. */
+    const size_t n = m->name.size(), len = kv.first.size();
+    if (len >= n + 4 && kv.first.compare(len - 4, 4, ".mat") == 0 && kv.first.compare(len - 4 - n, n, m->name) == 0 &&
+        (len == n + 4 || kv.first[len - 5 - n] == '/'))
+      continue;
     if (m->name == fs::stem(kv.first)) continue;
     const std::string abs = resolve_asset_path(kv.first);
     if (!fs::exists(abs)) continue;
@@ -191,8 +199,14 @@ void Editor::draw_project(const Recti &r) {
   if (u.hovered(r) && (in.pressed[0] || in.pressed[1])) focused_ = WindowKind::Project;
   if (u.time - project_listed_ > 2.0) {
     project_entries_ = fs::list(project_dir_);
+    project_dir_cache_.clear();
     project_listed_ = u.time;
   }
+  auto cached_list = [&](const std::string &dir) -> const std::vector<DirEntry> & {
+    auto it = project_dir_cache_.find(dir);
+    if (it == project_dir_cache_.end()) it = project_dir_cache_.emplace(dir, fs::list(dir)).first;
+    return it->second;
+  };
   const bool dragging_asset = asset_drag_.pending && asset_drag_.dragging;
   auto folder_target = [&](const Recti &rr, const std::string &dir) {
     drop_folders_.push_back({rr, dir});
@@ -280,14 +294,14 @@ void Editor::draw_project(const Recti &r) {
   /* Nested folders, each with an arrow to fold it (Unity's two-column layout). */
   std::function<void(const std::string &, int)> tree = [&](const std::string &dir, int depth) {
     if (depth > 10) return;
-    for (const DirEntry &d : fs::list(dir)) {
+    for (const DirEntry &d : cached_list(dir)) {
       if (!d.is_dir) continue;
       const std::string p = fs::join(dir, d.name);
       Recti fr{left.x, y, left.w, rh};
       y += rh;
       const int ind = u.px(10) + depth * u.px(12);
       bool has_sub = false;
-      for (const DirEntry &c : fs::list(p)) has_sub = has_sub || c.is_dir;
+      for (const DirEntry &c : cached_list(p)) has_sub = has_sub || c.is_dir;
       bool &open = foldouts_.emplace("proj_" + p, false).first->second;
       if (fr.bottom() >= left.y && fr.y <= left.bottom()) {
         const bool hot = u.hovered(fr);

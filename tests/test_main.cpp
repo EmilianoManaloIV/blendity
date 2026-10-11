@@ -202,6 +202,7 @@ static void round39_tests();
 static void round41_tests();
 static void round43_tests();
 static void round44_tests();
+static void round45_tests();
 
 int main() {
   register_builtin_components();
@@ -823,6 +824,7 @@ int main() {
   round41_tests();
   round43_tests();
   round44_tests();
+  round45_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -17505,5 +17507,277 @@ static void round44_tests() {
     ed.commit_change("moved");
     for (int i = 0; i < 20 && ed.preview_samples_for_test() < 256; i++) ed.step_frame_headless();
     CHECK(!ed.preview_data_for_test().empty());
+  });
+}
+
+/* Round 45 (task 0023, ADR 0015): the per-object render-hash memo. */
+static void round45_tests() {
+  test("hash memo: evaluated_keys gives the three evaluated_key values on every modifier on / render / edit combination", [] {
+    Scene s;
+    GameObject *g = s.create("Stack");
+    g->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    g->add<MeshRenderer>();
+    g->add<ArrayModifier>();
+    g->add<MirrorModifier>();
+    g->add<SolidifyModifier>();
+    g->add<BevelModifier>();
+    g->add<SubdivisionSurface>();
+    g->add<TriangulateModifier>();
+    g->add<WeldModifier>();
+    g->add<DisplaceModifier>();
+    g->add<SimpleDeformModifier>();
+    g->add<CastModifier>();
+    std::vector<Component *> mods;
+    for (auto &c : g->components)
+      if (c->is_modifier()) mods.push_back(c.get());
+    CHECK(mods.size() == 10);
+    uint64_t seed = 12345;
+    auto bit = [&] { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return (seed >> 40) & 1; };
+    int same = 0, trials = 0;
+    /* Every combination for the first two modifiers, random ones for the rest. */
+    for (int t = 0; t < 300; t++) {
+      for (size_t i = 0; i < mods.size(); i++) {
+        if (i < 2) {
+          mods[i]->enabled = (t >> (i * 3)) & 1;
+          mods[i]->show_in_render = (t >> (i * 3 + 1)) & 1;
+          mods[i]->show_in_editmode = (t >> (i * 3 + 2)) & 1;
+        }
+        else {
+          mods[i]->enabled = bit();
+          mods[i]->show_in_render = bit();
+          mods[i]->show_in_editmode = bit();
+        }
+      }
+      if (t % 7 == 0) static_cast<ArrayModifier *>(mods[0])->count = 2 + t % 5;  // a field change changes the keys too
+      uint64_t k[3];
+      g->evaluated_keys(k);
+      trials++;
+      if (k[0] == g->evaluated_key(0) && k[1] == g->evaluated_key(1) && k[2] == g->evaluated_key(2)) same++;
+    }
+    std::printf("    %d of %d combinations agree\n", same, trials);
+    CHECK(same == trials);
+    /* Without a mesh: all zero, like evaluated_key. */
+    GameObject *e = s.create("Empty");
+    uint64_t z[3] = {1, 1, 1};
+    e->evaluated_keys(z);
+    CHECK(z[0] == 0 && z[1] == 0 && z[2] == 0 && e->evaluated_key(0) == 0);
+  });
+  test("hash memo: an object's transform version bumps on its own move, a parent's move and reparenting (ADR 0015)", [] {
+    Scene s;
+    GameObject *a = s.create("A");
+    GameObject *b = s.create("B", a);
+    GameObject *c = s.create("C");
+    (void)a->world_matrix();
+    (void)b->world_matrix();
+    (void)c->world_matrix();
+    const uint64_t a0 = a->transform_version, b0 = b->transform_version, c0 = c->transform_version;
+    a->set_local_position({1, 0, 0});  // a parent's move reaches the child
+    CHECK(a->transform_version > a0 && b->transform_version > b0 && c->transform_version == c0);
+    const uint64_t a1 = a->transform_version, b1 = b->transform_version;
+    a->set_local_position({2, 0, 0});  // twice before anyone read the matrix: the moved object still bumps
+    CHECK(a->transform_version > a1 && b->transform_version >= b1);
+    /* The child need not bump again: its memo can only have been refreshed by a hash, which reads the
+     * child's world matrix and so cleans the whole chain; a dirty parent means no memo was taken since
+     * the first bump. */
+    (void)b->world_matrix();  // cleans A and B
+    const uint64_t b2 = b->transform_version;
+    a->set_local_position({3, 0, 0});
+    CHECK(b->transform_version > b2);
+    const uint64_t c1 = c->transform_version;
+    s.set_parent(c, a);  // the world matrix changes without the local transform changing
+    CHECK(c->transform_version > c1);
+    const uint64_t c2 = c->transform_version;
+    s.set_parent(c, nullptr);
+    CHECK(c->transform_version > c2);
+  });
+  test("hash memo: the memoised scene hash equals a from-scratch hash and changes after every kind of change, in verify mode", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.set_render_cache_verify(true);
+    const uint64_t mm0 = Editor::render_cache_mismatches_all();
+    uint64_t last = ed.render_hash_for_test();
+    CHECK(last == ed.render_hash_uncached_for_test());
+    /* Idle frames: the hash holds still. */
+    r34_steps(ed, 3);
+    CHECK(ed.render_hash_for_test() == last);
+    int changed = 0, agreed = 0, cases = 0;
+    auto change = [&](const char *what, const std::function<void()> &act) {
+      act();
+      r34_steps(ed, 2);
+      const uint64_t memo = ed.render_hash_for_test(), scratch = ed.render_hash_uncached_for_test();
+      cases++;
+      changed += memo != last;
+      agreed += memo == scratch;
+      if (memo == last || memo != scratch)
+        std::printf("    %s: %s\n", what, memo == last ? "the hash did not change" : "memo and from-scratch hashes differ");
+      last = memo;
+    };
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    GameObject *sphere = by_name(ed.scene(), "Sphere");
+    GameObject *sun = by_name(ed.scene(), "Directional Light");
+    CHECK(cube && sphere && sun);
+    if (!cube || !sphere || !sun) return;
+    MeshRenderer *mr = cube->get<MeshRenderer>();
+    if (mr->materials.empty()) mr->materials.push_back(make_material("Painted", {0.8f, 0.8f, 0.8f}));
+    r34_steps(ed, 2);
+    last = ed.render_hash_for_test();
+    ed.command("select Cube");  // the Move gizmo is on the selection
+    ed.command("camera 0 20 6 0 0.5 0");  // the X arrow points straight right on screen
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    last = ed.render_hash_for_test();
+    change("gizmo move", [&] {
+      const float x0 = cube->world_position().x;
+      r34_gizmo_drag_x(ed, cube->world_position(), 60);
+      CHECK(std::fabs(cube->world_position().x - x0) > 0.1f);  // the real drag moved it
+    });
+    change("the Inspector's position field", [&] {  // (what `set` can't reach: the Transform isn't a component)
+      cube->set_local_position({1, 2, 3});
+      ed.commit_change("Set position");
+    });
+    change("undo", [&] { ed.command("undo"); });
+    change("redo", [&] { ed.command("redo"); });
+    change("parenting", [&] { ed.scene().set_parent(cube, sphere); });
+    change("a parent's move", [&] { sphere->set_local_position({0, 1.5f, 0}); });
+    change("unparenting", [&] { ed.scene().set_parent(cube, nullptr); });
+    change("a material field", [&] {
+      mr->materials[0]->base_color = {0.9f, 0.2f, 0.2f};
+      mr->materials[0]->touch();
+    });
+    change("a light field", [&] { sun->get<Light>()->intensity = 2.5f; });
+    change("a modifier added", [&] {
+      ed.command("select Cube");
+      ed.command("component ArrayModifier");
+    });
+    change("a modifier field", [&] { cube->get<ArrayModifier>()->count = 5; });
+    change("a modifier disabled", [&] { cube->get<ArrayModifier>()->enabled = false; });
+    change("a modifier's Show in Renders", [&] { cube->get<ArrayModifier>()->show_in_render = false; });
+    change("the renderer disabled", [&] { mr->enabled = false; });
+    change("the renderer enabled", [&] { mr->enabled = true; });
+    change("a renderer flag", [&] { mr->cast_shadows = false; });
+    change("a material slot swapped", [&] { mr->materials[0] = make_material("Other", {0.2f, 0.9f, 0.2f}); });
+    change("an object deactivated", [&] { sphere->active = false; });
+    change("an object reactivated", [&] { sphere->active = true; });
+    change("an object deleted", [&] {
+      ed.command("select Sphere");
+      ed.command("delete");
+    });
+    change("an object created", [&] { ed.command("create Cube"); });
+    change("a probe volume added", [&] {
+      ed.command("select Cube");
+      ed.command("component Probe Volume");
+    });
+    change("a probe volume field", [&] { cube->get<ProbeVolume>()->size = {3, 3, 3}; });
+    std::printf("    %d cases: %d changed the hash, %d agreed with the from-scratch hash\n", cases, changed, agreed);
+    CHECK(changed == cases);
+    CHECK(agreed == cases);
+    std::printf("    stale pictures found in verify mode: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - mm0));
+    CHECK(Editor::render_cache_mismatches_all() == mm0);
+  });
+  test("hash memo: a camera filter field re-renders the Game view (the camera hash is not memoised)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Retro Console");
+    r34_steps(ed, 4);
+    const R34Count idle0 = r34_totals(ed);
+    r34_steps(ed, 3);
+    CHECK((r34_totals(ed) - idle0).renders == 0);
+    const R34Change c = r34_change(ed, [&] { ed.command("set RetroConsoleFilter.Width 64"); });
+    std::printf("    renders after the field change: %llu\n", (unsigned long long)c.d.renders);
+    CHECK(c.d.renders >= 1);
+    const R34Count t0 = r34_totals(ed);
+    r34_steps(ed, 3);
+    CHECK((r34_totals(ed) - t0).renders == 0);
+  });
+  test("hash memo: the main camera follows a rename, a disabled Camera component and a deactivated object at once", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *mc = by_name(ed.scene(), "Main Camera");
+    CHECK(mc && ed.main_camera_owner_for_test() == mc);
+    if (!mc) return;
+    ed.command("create Camera");
+    GameObject *second = ed.selected_object();
+    CHECK(second && second != mc && second->get<Camera>());
+    if (!second) return;
+    r34_steps(ed, 2);
+    CHECK(ed.main_camera_owner_for_test() == mc);  // "Main Camera" wins over a later camera
+    mc->name = "Old Camera";
+    second->name = "Main Camera";
+    CHECK(ed.main_camera_owner_for_test() == second);
+    second->get<Camera>()->enabled = false;
+    CHECK(ed.main_camera_owner_for_test() == mc);
+    second->get<Camera>()->enabled = true;
+    second->active = false;
+    CHECK(ed.main_camera_owner_for_test() == mc);
+    second->active = true;
+    CHECK(ed.main_camera_owner_for_test() == second);
+  });
+  test("hash memo: an icon drawn through its mask matches the icon rasterized directly (within a step of coverage)", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ui::Context &u = ed.ui_mut_for_test();
+    Image a, b;
+    a.resize(64, 64);
+    b.resize(64, 64);
+    for (auto &img : {&a, &b}) std::fill(img->pixels.begin(), img->pixels.end(), 0xFF203040u);
+    int worst = 0, pixels = 0;
+    for (ui::Icon ic : {ui::Icon::Camera, ui::Icon::Light, ui::Icon::Gear, ui::Icon::Search, ui::Icon::Folder, ui::Icon::PushPull})
+      for (int size : {13, 16, 22, 48}) {
+        for (auto &img : {&a, &b}) std::fill(img->pixels.begin(), img->pixels.end(), 0xFF203040u);
+        u.canvas.begin(&a);
+        u.draw_icon(ic, {5, 7, size, size}, 0xFFE0C080);
+        u.canvas.begin(&b);
+        u.rasterize_icon(u.canvas, ic, {5, 7, size, size}, 0xFFE0C080);
+        for (size_t i = 0; i < a.pixels.size(); i++) {
+          for (int sh : {0, 8, 16}) worst = std::max(worst, std::abs((int)((a.pixels[i] >> sh) & 255) - (int)((b.pixels[i] >> sh) & 255)));
+          pixels += a.pixels[i] != 0xFF203040u;
+        }
+      }
+    std::printf("    worst channel difference %d over %d icon pixels\n", worst, pixels);
+    CHECK(pixels > 200);
+    CHECK(worst <= 2);  // one step of 8-bit coverage, and one of blending
+  });
+  test("hash memo: Canvas::circle walking the ring gives the same pixels as walking the bounding box", [] {
+    auto old_circle = [](Canvas &c, Image &img, float cx, float cy, float r, uint32_t color, float t) {
+      float hw = t * 0.5f;
+      const Recti clip = c.clip();
+      int x0 = std::max(clip.x, (int)std::floor(cx - r - hw - 1)), x1 = std::min(clip.right() - 1, (int)std::ceil(cx + r + hw + 1));
+      int y0 = std::max(clip.y, (int)std::floor(cy - r - hw - 1)), y1 = std::min(clip.bottom() - 1, (int)std::ceil(cy + r + hw + 1));
+      for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+          float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+          float d = std::fabs(std::sqrt(dx * dx + dy * dy) - r);
+          if (d < hw + 1.0f) c.blend_px_a(x, y, color, saturate(hw + 0.5f - d));
+        }
+      (void)img;
+    };
+    int bad = 0, drawn = 0;
+    const float cases[][4] = {{10, 10.45f, 1.6f, 1}, {20.3f, 19.7f, 3.0f, 1.5f}, {32, 32, 12.5f, 2}, {40.2f, 25.9f, 20, 1}, {5, 5, 0.8f, 1}, {30.5f, 30.5f, 2.2f, 3}};
+    for (const float *k : cases) {
+      Image a, b;
+      a.resize(64, 64);
+      b.resize(64, 64);
+      Canvas ca, cb;
+      ca.begin(&a);
+      cb.begin(&b);
+      ca.circle(k[0], k[1], k[2], 0xFFFFC040, k[3]);
+      old_circle(cb, b, k[0], k[1], k[2], 0xFFFFC040, k[3]);
+      for (size_t i = 0; i < a.pixels.size(); i++) {
+        bad += a.pixels[i] != b.pixels[i];
+        drawn += b.pixels[i] != 0xFF000000u;
+      }
+    }
+    std::printf("    %d pixels differ over %d drawn\n", bad, drawn);
+    CHECK(drawn > 100);
+    CHECK(bad == 0);
+  });
+  test("hash memo: Statistics shows the rasterizer's binning time", [] {
+    Editor ed;
+    r34_open(ed);
+    r34_steps(ed, 2);
+    const RasterStats s = ed.scene_stats_for_test();
+    std::printf("    clip / cull / bin %.3f ms, of it binning (CPU) %.3f ms\n", s.ms_setup, s.ms_bin);
+    CHECK(s.ms_bin > 0.0);
   });
 }
