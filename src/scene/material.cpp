@@ -3,6 +3,7 @@
 
 #include "../core/core.h"
 #include "scene.h"
+#include "../texture/procedural_texture.h"
 
 #include <atomic>
 #include <mutex>
@@ -16,6 +17,7 @@ static std::atomic<size_t> g_texture_gen{1};
 void set_asset_root(const std::string &dir) { g_asset_root = dir; }
 const std::string &asset_root() { return g_asset_root; }
 void invalidate_material_textures() { g_texture_gen++; }
+size_t material_textures_generation() { return g_texture_gen.load(); }
 
 std::string resolve_asset_path(const std::string &path) {
   if (path.empty() || starts_with(path, "generated:")) return path;
@@ -96,6 +98,13 @@ const Material::Resolved &Material::textures() const {
     if (t.empty()) return nullptr;
     if (t.path == "generated:UV Grid") return texture_uv_grid();
     if (t.path == "generated:Color Grid") return texture_color_grid();
+    std::string asset;
+    int output = 0;
+    if (split_texture_ref(t.path, asset, output)) {  // a procedural texture's output (ADR 0017)
+      if (ProceduralTexturePtr pt = texture_asset(asset)) return procedural_texture_output(*pt, output);
+      Log::warn("Material '%s': no texture asset %s", name.c_str(), asset.c_str());
+      return nullptr;
+    }
     std::string err;
     TexturePtr p = texture_load(resolve_asset_path(t.path), !t.non_color, &err);
     if (!p) Log::warn("Material '%s': %s", name.c_str(), err.c_str());

@@ -29,6 +29,8 @@ struct PhysicsWorld;  // physics.h
 
 struct FilterEffect;
 using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
+struct TextureLayer;  // texture/procedural_texture.h
+using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
 
 /* ------------------------------------------------------------ Reflection */
 /* One description of a component's fields drives the Inspector, the scene
@@ -63,6 +65,9 @@ struct Reflector {
    * `set CameraFilters.E0Width` all understand. A reader that changes the names rebuilds the
    * list. The Inspector draws the stack instead. */
   virtual void filter_effects(const char *name, FilterEffectList &effects);
+  /* A procedural texture's layers (ADR 0017): the same scheme with an "L0 " prefix. Defined in
+   * texture/procedural_texture.cpp; the Textures window draws the stack instead. */
+  virtual void layer_list(const char *name, TextureLayerList &layers);
   /* Serialization, undo and hashing must see every field, including ones the
    * Inspector hides for the current mode (e.g. path tracer samples while the
    * raster engine is active). */
@@ -968,6 +973,19 @@ size_t retarget_scene_files(const std::string &dir, const std::string &from, con
  * loading a scene (the .mat file wins, as in Unity). */
 void relink_material_assets(Scene &scene, bool take_scene_values);
 void clear_material_assets();  // a different project
+/* Procedural texture assets (ADR 0017): Assets/Textures/<name>.ptex, kept in a library by path like the
+ * materials; a material's map "X.ptex#albedo" resolves through texture_asset(). */
+struct ProceduralTexture;
+using ProceduralTexturePtr = std::shared_ptr<ProceduralTexture>;
+std::string save_texture_text(ProceduralTexture &t);
+bool load_texture_text(const std::string &text, ProceduralTexture &t);
+ProceduralTexturePtr texture_asset(const std::string &path);  // loads on first use; nullptr if missing
+ProceduralTexturePtr create_texture_asset(const ProceduralTexture &src, const std::string &path);  // writes the file
+size_t save_dirty_texture_assets();
+const std::vector<std::pair<std::string, ProceduralTexturePtr>> &loaded_texture_assets();
+size_t retarget_texture_assets(const std::string &from, const std::string &to);
+size_t forget_texture_assets(const std::string &path);
+void clear_texture_assets();
 /* Change detection for modifier caches & undo grouping. */
 uint64_t hash_component(Component &c);
 /* Hash of every field a reflect function visits (settings change detection). A template rather than a

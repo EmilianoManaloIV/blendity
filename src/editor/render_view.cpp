@@ -293,6 +293,8 @@ uint64_t Editor::scene_render_hash(bool memo) {
   mix(&scene_lighting_, 1);
   mix(&scene_->serial, 8);
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
+  const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
+  mix(&tex_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
   mix(&probe_live_gen_, 8);  // live probes changed
   for (const VoxelGIState &st : vgi_) mix(&st.rtlm.generation, 8);  // realtime lightmaps published

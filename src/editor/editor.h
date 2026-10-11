@@ -165,6 +165,7 @@ struct UndoState {
   std::vector<uint64_t> selection;
   uint64_t active = 0;
   std::string label;
+  std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
 };
 
 class Editor {
@@ -262,6 +263,8 @@ class Editor {
   uint64_t render_hash_for_test() { return scene_render_hash(); }
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
   const RasterStats &scene_stats_for_test() const { return scene_stats_; }
+  void assign_texture_asset_for_test(const std::string &asset) { assign_texture_asset_to_selection(asset); }
+  std::string export_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   GameObject *main_camera_owner_for_test() {
     GameObject *o = nullptr;
     main_camera(*scene_, &o);
@@ -426,6 +429,16 @@ class Editor {
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
   void set_active_camera(GameObject *g);
+  /* A .ptex asset dropped on the selection: a material whose maps are its four outputs (task 0027). */
+  void assign_texture_asset_to_selection(const std::string &asset_path);
+  /* Procedural texture outputs referenced by the items' materials written as PNGs beside `path`; the
+   * items get material copies that point at those files, so every exporter sees ordinary images. */
+  void bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o);
+  /* Texture assets live outside the scene: an edit records the asset's text before it, and the undo step
+   * carries those texts (UndoState::textures), so undo and redo restore them. */
+  void note_texture_edit(ProceduralTexture &t);
+  void restore_texture_texts(const std::vector<std::pair<std::string, std::string>> &texts, std::vector<std::pair<std::string, std::string>> *current);
+  std::vector<std::pair<std::string, std::string>> texture_before_;  // since the last undo step: path -> text
   /* Render Camera Sequence: every camera marked In Sequence, one after another, each saved. */
   uint64_t render_camera_override_ = 0;  // the camera renders use instead of the Main Camera
   struct RenderSequence {

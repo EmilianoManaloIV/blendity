@@ -4,6 +4,7 @@
 // (blender/source/blender/blenloader/intern/writefile.cc) and
 // blender/source/blender/io/wavefront_obj.
 #include "scene.h"
+#include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
 #include "../../extern/fast_float/fast_float.h"
@@ -681,6 +682,145 @@ MaterialPtr create_material_asset(const Material &src, const std::string &path_i
   return m;
 }
 
+/* ---------------------------------------------------------- texture assets (ADR 0017) */
+
+std::string save_texture_text(ProceduralTexture &t) {
+  Out os;
+  os << "blendity_texture 1\n";
+  const std::unordered_map<const Mesh *, int> no_meshes;
+  WriteReflector wr(os, no_meshes);
+  t.reflect(wr);
+  return os.str();
+}
+
+bool load_texture_text(const std::string &text, ProceduralTexture &t) {
+  LineReader is{text.data(), text.data() + text.size()};
+  std::string_view line;
+  if (!is.next(line) || tokenize(line).empty() || tokenize(line)[0] != "blendity_texture") return false;
+  const std::unordered_map<int, MeshPtr> no_meshes;
+  ReadReflector rr(no_meshes);
+  while (is.next(line)) {
+    auto tk = tokenize(line);
+    if (tk.empty()) continue;
+    rr.values[tk[0]] = std::vector<std::string>(tk.begin() + 1, tk.end());
+  }
+  t.reflect(rr);
+  t.version++;  // (not touch(): a first load happens inside a material's texture resolve, which must not bump the generation)
+  return true;
+}
+
+namespace {
+struct TexEntry {
+  ProceduralTexturePtr t;
+  uint64_t saved_version = 0;
+};
+std::unordered_map<std::string, TexEntry> &texture_library() {
+  static std::unordered_map<std::string, TexEntry> lib;
+  return lib;
+}
+}  // namespace
+
+ProceduralTexturePtr texture_asset(const std::string &path_in) {
+  if (path_in.empty()) return nullptr;
+  const std::string path = follow_redirects(asset_key(path_in));
+  if (path.empty()) return nullptr;
+  auto &lib = texture_library();
+  auto it = lib.find(path);
+  if (it != lib.end()) return it->second.t;
+  std::string text;
+  if (!fs::read_file(resolve_asset_path(path), text)) return nullptr;
+  auto t = std::make_shared<ProceduralTexture>();
+  if (!load_texture_text(text, *t)) return nullptr;
+  t->name = fs::stem(path);
+  t->asset_path = path;
+  lib[path] = {t, t->version};
+  return t;
+}
+
+ProceduralTexturePtr create_texture_asset(const ProceduralTexture &src, const std::string &path_in) {
+  const std::string path = asset_key(path_in);
+  /* A texture made again under a name that was renamed or deleted this session: that name is its own again. */
+  auto &red = asset_redirects();
+  red.erase(std::remove_if(red.begin(), red.end(), [&](const std::pair<std::string, std::string> &r) { return path_under(path, r.first); }), red.end());
+  auto t = std::make_shared<ProceduralTexture>(src);
+  t->asset_path = path;
+  if (t->name.empty() || t->name == "Texture") t->name = fs::stem(path);
+  const std::string file = resolve_asset_path(path);
+  fs::make_dirs(fs::parent(file));
+  if (!fs::write_file(file, save_texture_text(*t))) return nullptr;
+  texture_library()[path] = {t, t->version};
+  return t;
+}
+
+size_t save_dirty_texture_assets() {
+  size_t n = 0;
+  for (auto &kv : texture_library()) {
+    TexEntry &e = kv.second;
+    if (!e.t || e.t->version == e.saved_version) continue;
+    if (fs::write_file(resolve_asset_path(kv.first), save_texture_text(*e.t))) {
+      e.saved_version = e.t->version;
+      n++;
+    }
+  }
+  return n;
+}
+
+const std::vector<std::pair<std::string, ProceduralTexturePtr>> &loaded_texture_assets() {
+  static std::vector<std::pair<std::string, ProceduralTexturePtr>> out;
+  static uint64_t signature = ~0ull;
+  uint64_t sig = texture_library().size();
+  for (auto &kv : texture_library()) sig += ((uint64_t)(uintptr_t)kv.second.t.get() ^ std::hash<std::string>()(kv.first)) * 0x9E3779B97F4A7C15ull;
+  if (sig == signature) return out;
+  signature = sig;
+  out.clear();
+  for (auto &kv : texture_library())
+    if (kv.second.t) out.push_back({kv.first, kv.second.t});
+  std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  return out;
+}
+
+size_t retarget_texture_assets(const std::string &from_in, const std::string &to_in) {
+  const std::string from = asset_key(from_in), to = asset_key(to_in);
+  auto &lib = texture_library();
+  std::vector<std::pair<std::string, TexEntry>> moved;
+  for (auto it = lib.begin(); it != lib.end();) {
+    if (path_under(it->first, from)) {
+      moved.push_back({to + it->first.substr(from.size()), it->second});
+      it = lib.erase(it);
+    }
+    else ++it;
+  }
+  for (auto &kv : moved) {
+    if (kv.second.t) {
+      kv.second.t->asset_path = kv.first;
+      if (fs::extension(kv.first) == ".ptex") kv.second.t->name = fs::stem(kv.first);
+    }
+    lib[kv.first] = kv.second;
+  }
+  if (!moved.empty()) procedural_texture_cache_clear();  // (outputs are cached by path)
+  return moved.size();
+}
+
+size_t forget_texture_assets(const std::string &path_in) {
+  const std::string path = asset_key(path_in);
+  auto &lib = texture_library();
+  size_t n = 0;
+  for (auto it = lib.begin(); it != lib.end();) {
+    if (path_under(it->first, path)) {
+      it = lib.erase(it);
+      n++;
+    }
+    else ++it;
+  }
+  if (n) procedural_texture_cache_clear();
+  return n;
+}
+
+void clear_texture_assets() {
+  texture_library().clear();
+  procedural_texture_cache_clear();
+}
+
 size_t save_dirty_material_assets() {
   size_t n = 0;
   for (auto &kv : asset_library()) {
@@ -872,8 +1012,9 @@ size_t retarget_scene_files(const std::string &dir, const std::string &from_in, 
     /* "from" exactly, or "from/..." for a folder; written quoted by save_scene_text. */
     const std::string a = quote(from), b = quote(to);
     const std::string fa = a.substr(0, a.size() - 1) + "/", fb = b.substr(0, b.size() - 1) + "/";
+    const std::string ha = a.substr(0, a.size() - 1) + "#", hb = b.substr(0, b.size() - 1) + "#";  // a texture's output
     size_t n = 0;
-    for (const auto &rep : {std::make_pair(a, b), std::make_pair(fa, fb)})
+    for (const auto &rep : {std::make_pair(a, b), std::make_pair(fa, fb), std::make_pair(ha, hb)})
       for (size_t at = text.find(rep.first); at != std::string::npos; at = text.find(rep.first, at + rep.second.size())) {
         text.replace(at, rep.first.size(), rep.second);
         n++;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "editor.h"
+#include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -100,6 +101,7 @@ void Editor::resolve_project_paths() {
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
   clear_material_assets();  // assets belong to one project
+  clear_texture_assets();
   project_dir_ = assets_dir_;
 }
 
@@ -1356,12 +1358,14 @@ void Editor::commit_undo() {
   s.selection = selection_;
   s.active = active_;
   s.label = pending_label_;
+  s.textures = std::move(texture_before_);
+  texture_before_.clear();
   undo_.push_back(std::move(s));
   if (undo_.size() > 200) undo_.erase(undo_.begin());
   redo_.clear();
   stable_ = scene_->clone();
   pending_change_ = false;
-  if (save_dirty_material_assets()) project_listed_ = -100;  // edited material assets go back to their .mat files
+  if (save_dirty_material_assets() + save_dirty_texture_assets()) project_listed_ = -100;  // edited assets go back to their files
 }
 
 void Editor::undo() {
@@ -1375,12 +1379,14 @@ void Editor::undo() {
   cur.selection = selection_;
   cur.active = active_;
   cur.label = s.label;
+  restore_texture_texts(s.textures, &cur.textures);
   redo_.push_back(std::move(cur));
   scene_ = std::move(s.scene);
   selection_ = s.selection;
   active_ = s.active;
   relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
   save_dirty_material_assets();
+  save_dirty_texture_assets();
   stable_ = scene_->clone();
   prune_selection();
   scene_dirty_ = true;
@@ -1396,12 +1402,14 @@ void Editor::redo() {
   cur.selection = selection_;
   cur.active = active_;
   cur.label = s.label;
+  restore_texture_texts(s.textures, &cur.textures);
   undo_.push_back(std::move(cur));
   scene_ = std::move(s.scene);
   selection_ = s.selection;
   active_ = s.active;
   relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
   save_dirty_material_assets();
+  save_dirty_texture_assets();
   stable_ = scene_->clone();
   prune_selection();
   scene_dirty_ = true;
@@ -1478,6 +1486,8 @@ void Editor::save_scene_cmd(bool save_as) {
   if (save_scene(*scene_, scene_->path)) {
     scene_dirty_ = false;
     project_listed_ = -100;
+    save_dirty_material_assets();
+    save_dirty_texture_assets();  // a texture edited since the last undo step goes to its .ptex too
     Log::info("Saved %s", scene_->path.c_str());
     save_lighting_data();  // a bake made before the scene had a file, or before Save As
   }
@@ -1512,6 +1522,120 @@ void Editor::open_scene_dialog() {
     }
     open_scene(path);
   });
+}
+
+void Editor::note_texture_edit(ProceduralTexture &t) {
+  if (t.asset_path.empty()) return;
+  for (const auto &kv : texture_before_)
+    if (kv.first == t.asset_path) return;  // the text before the first edit since the last undo step
+  texture_before_.push_back({t.asset_path, save_texture_text(t)});
+}
+
+void Editor::restore_texture_texts(const std::vector<std::pair<std::string, std::string>> &texts, std::vector<std::pair<std::string, std::string>> *current) {
+  for (const auto &kv : texts) {
+    ProceduralTexturePtr pt = texture_asset(kv.first);
+    if (!pt) continue;  // renamed or deleted since: nothing to restore
+    if (current) current->push_back({kv.first, save_texture_text(*pt)});
+    ProceduralTexture fresh;
+    if (!load_texture_text(kv.second, fresh)) continue;
+    const uint64_t v = pt->version;
+    const std::string path = pt->asset_path, name = pt->name;
+    *pt = fresh;
+    pt->asset_path = path;
+    pt->name = name;
+    pt->version = v;
+    pt->touch();  // a new version: saved back to its file, and the views redraw
+  }
+}
+
+void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o) {
+  /* Only the formats whose writers reference textures (OBJ / MTL, glTF), and only with materials. */
+  const ExportFormat f = (ExportFormat)o.format;
+  if (!o.materials || (f != ExportFormat::OBJ && f != ExportFormat::GLB && f != ExportFormat::GLTF)) return;
+  std::unordered_map<std::string, std::string> written;  // "X.ptex#albedo" -> the PNG's absolute path
+  std::unordered_map<std::string, std::string> stem_of;  // asset path -> the PNGs' stem (unique beside the file)
+  std::unordered_map<std::string, int> stems_used;
+  std::unordered_map<std::string, TexPlanes> planes;      // each asset evaluated once
+  std::unordered_map<const Material *, MaterialPtr> copies;
+  for (ExportItem &it : items)
+    for (MaterialPtr &mp : it.materials) {
+      if (!mp) continue;
+      bool any = false;
+      for (const TextureRef *t : {&mp->base_map, &mp->metallic_map, &mp->roughness_map, &mp->normal_map, &mp->emission_map}) {
+        std::string asset;
+        int out = 0;
+        if (split_texture_ref(t->path, asset, out)) any = true;
+      }
+      if (!any) continue;
+      auto ci = copies.find(mp.get());
+      if (ci == copies.end()) {
+        auto copy = std::make_shared<Material>(*mp);
+        for (TextureRef *t : {&copy->base_map, &copy->metallic_map, &copy->roughness_map, &copy->normal_map, &copy->emission_map}) {
+          std::string asset;
+          int out = 0;
+          if (!split_texture_ref(t->path, asset, out)) continue;
+          auto wi = written.find(t->path);
+          if (wi == written.end()) {
+            ProceduralTexturePtr pt = texture_asset(asset);
+            if (!pt) continue;
+            auto si = stem_of.find(asset);
+            if (si == stem_of.end()) {  // two assets with one name in different folders get their own files
+              std::string st = fs::stem(asset);
+              const int n = stems_used[st]++;
+              if (n) st += "_" + std::to_string(n + 1);
+              si = stem_of.emplace(asset, st).first;
+            }
+            auto pi = planes.find(asset);
+            if (pi == planes.end()) {
+              pi = planes.emplace(asset, TexPlanes()).first;
+              pt->evaluate(pi->second);
+            }
+            const std::string png = fs::join(fs::parent(path), si->second + "_" + texture_output_name(out) + ".png");
+            const Bitmap b = pt->output(out, pi->second);
+            std::vector<uint32_t> px((size_t)b.width * b.height);
+            for (size_t i = 0; i < px.size(); i++)
+              px[i] = 0xFF000000u | (uint32_t)b.rgba8[i * 4] << 16 | (uint32_t)b.rgba8[i * 4 + 1] << 8 | (uint32_t)b.rgba8[i * 4 + 2];
+            if (!write_png(png, px.data(), b.width, b.height, b.width)) continue;
+            wi = written.emplace(t->path, png).first;
+          }
+          t->path = wi->second;  // absolute: the exporters resolve it as such
+        }
+        ci = copies.emplace(mp.get(), copy).first;
+      }
+      mp = ci->second;
+    }
+  if (!written.empty()) Log::info("Export: %zu procedural texture image(s) written beside the file", written.size());
+}
+
+void Editor::assign_texture_asset_to_selection(const std::string &asset_path) {
+  ProceduralTexturePtr pt = texture_asset(asset_path);
+  if (!pt) {
+    Log::warn("No texture asset %s", asset_path.c_str());
+    return;
+  }
+  int n = 0;
+  for (GameObject *g : selected_objects(false)) {
+    auto *mr = g->get<MeshRenderer>();
+    if (!mr) continue;
+    if (mr->materials.empty() || !mr->materials[0]) mr->materials = {make_material(pt->name, Vec3(1.0f))};
+    else if (!mr->materials[0]->asset_path.empty()) {  // a .mat asset is shared: this object gets its own copy
+      auto copy = std::make_shared<Material>(*mr->materials[0]);
+      copy->asset_path.clear();
+      copy->name = pt->name;
+      mr->materials[0] = copy;
+    }
+    Material &m = *mr->materials[0];
+    m.base_map = TextureRef{asset_path + "#albedo", false};
+    m.normal_map = TextureRef{asset_path + "#normal", true};
+    m.roughness_map = TextureRef{asset_path + "#roughness", true};
+    m.base_color = Vec3(1.0f);
+    m.procedural = 0;
+    m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
+    m.touch();
+    n++;
+  }
+  if (n) mark_changed("Assign Texture " + pt->name);
+  else Log::warn("Select objects with a MeshRenderer first");
 }
 
 /* File > Export (Blender: File > Export; Unity: the FBX Exporter). The
@@ -1557,6 +1681,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
   }
   std::string err;
   project_listed_ = -100;
+  bake_texture_assets_for_export(items, path, o);
   if (!export_file(path, items, o, &err)) {
     Log::error("Export failed: %s", err.c_str());
     return "";
@@ -2807,6 +2932,111 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "undo") undo();  // Ctrl+Z
+  else if (c == "newtex") {
+    /* newtex <name> [preset]: a new Assets/Textures/<name>.ptex (presets: Bricks, Wood Floor, Tatami, Tiles, Noise, Checker). */
+    const std::string name = arg(1, "");
+    if (name.empty()) {
+      Log::warn("newtex <name> [preset]");
+      return;
+    }
+    std::string preset;
+    for (size_t i = 2; i < t.size(); i++) preset += (i > 2 ? " " : "") + t[i];
+    ProceduralTexture src;
+    src.name = name;
+    if (!preset.empty() && !apply_texture_preset(src, preset)) Log::warn("newtex: no preset '%s' (Bricks, Wood Floor, Tatami, Tiles, Noise, Checker)", preset.c_str());
+    const std::string rel = "Assets/Textures/" + name + ".ptex";
+    if (ProceduralTexturePtr pt = create_texture_asset(src, rel)) {
+      Log::info("Created %s (%zu layer%s)", rel.c_str(), pt->layers.size(), pt->layers.size() == 1 ? "" : "s");
+      project_listed_ = -100;
+    }
+    else Log::error("Could not write %s", rel.c_str());
+  }
+  else if (c == "texlist") {
+    for (const auto &kv : loaded_texture_assets())
+      Log::info("%s: %dx%d, %zu layer(s)%s", kv.first.c_str(), kv.second->width, kv.second->height, kv.second->layers.size(),
+                kv.second->layers.empty() ? "" : (": " + [&] {
+                  std::string s;
+                  for (size_t i = 0; i < kv.second->layers.size(); i++) s += (i ? ", " : "") + std::string(kv.second->layers[i]->type_name());
+                  return s;
+                }()).c_str());
+    const std::string dir = fs::join(assets_dir_, "Textures");
+    for (const DirEntry &de : fs::list(dir))
+      if (!de.is_dir && fs::extension(de.name) == ".ptex") texture_asset(make_asset_relative(fs::join(dir, de.name)));
+  }
+  else if (c == "texlayer") {
+    /* texlayer <asset> add <type> | remove <i> | move <i> <j> | reset <i> | list */
+    ProceduralTexturePtr pt = texture_asset(arg(1, "").find('/') == std::string::npos ? "Assets/Textures/" + arg(1, "") + ".ptex" : arg(1, ""));
+    if (!pt) {
+      Log::warn("texlayer: no texture asset '%s' (a name in Assets/Textures, or a project path)", arg(1, "").c_str());
+      return;
+    }
+    const std::string sub = to_lower(arg(2, "list"));
+    std::string name;
+    for (size_t k = 3; k < t.size(); k++) name += (k > 3 ? " " : "") + t[k];
+    const int i = std::atoi(arg(3, "0").c_str()), j = std::atoi(arg(4, "0").c_str());
+    const int n = (int)pt->layers.size();
+    if (sub != "list") note_texture_edit(*pt);
+    if (sub == "add") {
+      if (pt->add(name)) Log::info("%s: added %s (%zu layers)", pt->name.c_str(), name.c_str(), pt->layers.size());
+      else Log::warn("texlayer add: no layer called '%s'", name.c_str());
+    }
+    else if (sub == "list") {
+      for (int k = 0; k < n; k++) Log::info("  %d: %s%s", k, pt->layers[(size_t)k]->type_name(), pt->layers[(size_t)k]->enabled ? "" : " (off)");
+      if (!n) Log::info("%s: no layers", pt->name.c_str());
+    }
+    else if (i < 0 || i >= n) Log::warn("texlayer %s: layer %d is not in 0..%d", sub.c_str(), i, n - 1);
+    else if (sub == "remove") {
+      pt->layers.erase(pt->layers.begin() + i);
+      pt->touch();
+    }
+    else if (sub == "move") {
+      const int jj = std::max(0, std::min(n - 1, j));
+      if (jj != i) {
+        auto l = std::move(pt->layers[(size_t)i]);
+        pt->layers.erase(pt->layers.begin() + i);
+        pt->layers.insert(pt->layers.begin() + jj, std::move(l));
+        pt->touch();
+      }
+    }
+    else if (sub == "reset") {
+      if (auto fresh = create_texture_layer(pt->layers[(size_t)i]->type_name())) pt->layers[(size_t)i] = std::move(fresh);
+      pt->touch();
+    }
+    else Log::warn("texlayer: add <type> | remove <i> | move <i> <j> | reset <i> | list");
+    if (sub != "list") mark_changed("Texture " + pt->name);
+  }
+  else if (c == "settex") {
+    /* settex <asset> <Field> <value...>: a texture asset's field, or a layer's as "L0 Rows" / L0Rows. */
+    ProceduralTexturePtr pt = texture_asset(arg(1, "").find('/') == std::string::npos ? "Assets/Textures/" + arg(1, "") + ".ptex" : arg(1, ""));
+    if (!pt || t.size() < 4) {
+      Log::warn("settex <asset> <Field> <value...> (e.g. settex Bricks L0Rows 12)");
+      return;
+    }
+    size_t at = line.find(t[3], line.find(t[2], line.find(t[1]) + t[1].size()) + t[2].size());
+    SetFieldReflector sr;
+    sr.key = field_key(t[2]);
+    sr.value = at == std::string::npos ? "" : line.substr(at);
+    sr.target.clear();
+    sr.names.clear();
+    sr.done = false;
+    pt->reflect(sr);
+    for (int pass = 0; pass < 2 && sr.target.empty(); pass++)
+      for (const std::string &nm : sr.names)
+        if (pass == 0 ? field_key(nm) == sr.key : field_key(nm).rfind(sr.key, 0) == 0) {
+          sr.target = nm;
+          break;
+        }
+    if (sr.target.empty()) {
+      Log::warn("settex: no field '%s' on %s", t[2].c_str(), pt->name.c_str());
+      return;
+    }
+    note_texture_edit(*pt);
+    pt->reflect(sr);
+    if (sr.done) {
+      pt->touch();
+      mark_changed("Set " + pt->name + " " + sr.target);
+    }
+  }
   else if (c == "activecamera") {
     /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
     std::string name;

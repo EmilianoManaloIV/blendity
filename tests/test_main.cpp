@@ -21,6 +21,7 @@
 #include "../src/scene/mesh.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
+#include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
 
 #include <algorithm>
@@ -206,6 +207,7 @@ static void round45_tests();
 static void round46_tests();
 static void round47_tests();
 static void round48_tests();
+static void round49_tests();
 
 int main() {
   register_builtin_components();
@@ -831,6 +833,7 @@ int main() {
   round46_tests();
   round47_tests();
   round48_tests();
+  round49_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -18288,5 +18291,308 @@ static void round48_tests() {
     const std::vector<uint32_t> b = r34_crop(ed, ed.game_rect_for_test());
     CHECK(!a.empty() && a == b);
     ed.command("stop");
+  });
+}
+
+/* Round 49 (task 0027, ADR 0017): procedural texture assets. */
+/* Sets one of a texture's fields by its reflected name (a layer's as "L0 Rows"), from text: what `settex` does. */
+struct R49Set : Reflector {
+  std::string key, value;
+  bool done = false;
+  bool all_fields() const override { return true; }
+  bool is(const char *n) const { return !done && key == n; }
+  void field(const char *n, float &v, float, float, float) override { if (is(n)) v = (float)std::atof(value.c_str()), done = true; }
+  void field(const char *n, int &v, int, int) override { if (is(n)) v = std::atoi(value.c_str()), done = true; }
+  void field(const char *n, bool &v) override { if (is(n)) v = value != "0" && value != "false", done = true; }
+  void field(const char *n, Vec3 &v) override {
+    if (!is(n)) return;
+    std::sscanf(value.c_str(), "%f %f %f", &v.x, &v.y, &v.z);
+    done = true;
+  }
+  void color(const char *n, Vec3 &v) override { field(n, v); }
+  void enumeration(const char *n, int &v, const char *const *, int) override { field(n, v, 0, 0); }
+  void text(const char *n, std::string &v) override { if (is(n)) v = value, done = true; }
+  void mesh(const char *, MeshPtr &) override {}
+};
+static bool r49_set(ProceduralTexture &t, const char *key, const char *value) {
+  R49Set r;
+  r.key = key;
+  r.value = value;
+  t.reflect(r);
+  if (r.done) t.touch();
+  return r.done;
+}
+static ProceduralTexture r49_tex(const char *layer, int size = 64) {
+  ProceduralTexture t;
+  t.name = layer;
+  t.width = t.height = size;
+  t.add(layer);
+  return t;
+}
+/* The biggest step between neighbouring texels inside the tile, and across its seam (left / right, top / bottom). */
+static void r49_steps(const TexPlanes &p, double &interior, double &seam) {
+  interior = seam = 0;
+  auto d = [&](size_t a, size_t b) {
+    const Vec3 c = p.albedo[a] - p.albedo[b];
+    return std::max({std::fabs(p.height[a] - p.height[b]), std::fabs(c.x), std::fabs(c.y), std::fabs(c.z)});
+  };
+  for (int y = 0; y < p.h; y++)
+    for (int x = 0; x < p.w; x++) {
+      const size_t i = (size_t)y * p.w + x;
+      if (x + 1 < p.w) interior = std::max(interior, (double)d(i, i + 1));
+      if (y + 1 < p.h) interior = std::max(interior, (double)d(i, i + p.w));
+      if (x == 0) seam = std::max(seam, (double)d(i, i + p.w - 1));
+      if (y == 0) seam = std::max(seam, (double)d(i, i + (size_t)(p.h - 1) * p.w));
+    }
+}
+static void round49_tests() {
+  test("procedural texture: every generator repeats exactly one tile over (at odd and even counts, every shape and layout) and is deterministic", [] {
+    /* A generator is periodic when sample(u, v) = sample(u + 1, v) = sample(u, v + 1): checked at 400 points for
+     * each configuration, within 1/255 (trigonometric noise rounds a little). */
+    struct Config {
+      const char *layer, *field, *value;
+    };
+    const Config configs[] = {{"Brick", nullptr, nullptr}, {"Brick", "L0 Rows", "7"}, {"Brick", "L0 Offset Every", "3"},
+                              {"Wood Floor", nullptr, nullptr}, {"Wood Floor", "L0 Rows", "5"},
+                              {"Tatami", "L0 Layout", "0"}, {"Tatami", "L0 Layout", "1"}, {"Tatami", "L0 Layout", "2"}, {"Tatami", "L0 Cells", "7"},
+                              {"Tiles", "L0 Shape", "0"}, {"Tiles", "L0 Shape", "1"}, {"Tiles", "L0 Shape", "2"}, {"Tiles", "L0 Count", "5"},
+                              {"Voronoi", nullptr, nullptr}, {"Noise", nullptr, nullptr}, {"Wave", "L0 Direction", "2"},
+                              {"Checker", "L0 Count", "7"}, {"Stripes", nullptr, nullptr}, {"Gradient", "L0 Type", "1"}, {"Gradient", "L0 Type", "2"}};
+    for (const Config &cf : configs) {
+      ProceduralTexture t = r49_tex(cf.layer);
+      if (cf.field) CHECK(r49_set(t, cf.field, cf.value));
+      if (!strcmp(cf.layer, "Tiles") && !strcmp(cf.field ? cf.field : "", "L0 Count")) r49_set(t, "L0 Shape", "1");  // an odd count of hexagons
+      const TextureLayer &l = *t.layers[0];
+      LayerContext c;
+      c.w = c.h = 64;
+      double worst = 0;
+      for (int k = 0; k < 400; k++) {
+        const float u = texture_rand((uint32_t)k, 1u, 9u), v = texture_rand((uint32_t)k, 2u, 9u);
+        const LayerSample a = l.sample(u, v, c), b = l.sample(u + 1.0f, v, c), d = l.sample(u, v + 1.0f, c);
+        for (const LayerSample *o : {&b, &d})
+          worst = std::max({worst, (double)std::fabs(a.height - o->height), (double)std::fabs(a.albedo.x - o->albedo.x), (double)std::fabs(a.albedo.y - o->albedo.y),
+                            (double)std::fabs(a.albedo.z - o->albedo.z), (double)std::fabs(a.rough - o->rough)});
+      }
+      TexPlanes p1, p2;
+      t.evaluate(p1);
+      t.evaluate(p2);
+      const bool same = p1.height == p2.height && p1.albedo == p2.albedo && p1.rough == p2.rough;
+      std::printf("    %-10s %-16s %-3s worst difference one tile over %.5f%s\n", cf.layer, cf.field ? cf.field : "", cf.value ? cf.value : "", worst,
+                  same ? "" : "  NOT deterministic");
+      CHECK(same);
+      CHECK(worst <= 1.0 / 255.0);
+    }
+  });
+  test("procedural texture: a field edit made with settex is undone and redone (the asset's text travels with the undo step)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("newtex UndoMe Bricks");
+    ProceduralTexturePtr pt = texture_asset("Assets/Textures/UndoMe.ptex");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    r34_steps(ed, 2);
+    const uint64_t h0 = pt->hash();
+    ed.command("settex UndoMe L0Rows 13");
+    r34_steps(ed, 2);
+    const uint64_t h1 = pt->hash();
+    CHECK(h1 != h0);
+    ed.command("texlayer UndoMe add Blur");
+    r34_steps(ed, 2);
+    CHECK(pt->layers.size() == 4);
+    ed.command("undo");
+    CHECK(pt->layers.size() == 3 && pt->hash() == h1);
+    ed.command("undo");
+    CHECK(pt->hash() == h0);
+    ed.command("redo");
+    CHECK(pt->hash() == h1);
+    ed.command("redo");
+    CHECK(pt->layers.size() == 4);
+  });
+  test("procedural texture: a Brick's mortar fraction follows its parameters; Tatami has a border; a Wood Floor has gaps", [] {
+    ProceduralTexture t = r49_tex("Brick", 128);
+    r49_set(t, "L0 Rows", "4");
+    r49_set(t, "L0 Columns", "4");
+    r49_set(t, "L0 Mortar", "0.1");
+    TexPlanes p;
+    t.evaluate(p);
+    size_t mortar = 0;
+    for (float h : p.height) mortar += h == 0.0f;
+    const double f = mortar / (double)p.size(), expect = 1.0 - 0.9 * 0.9;  // mortar 0.1 of a brick on both axes
+    std::printf("    mortar fraction %.3f (expected %.3f)\n", f, expect);
+    CHECK(std::fabs(f - expect) < 0.05);
+    ProceduralTexture tat = r49_tex("Tatami", 128);
+    tat.evaluate(p);
+    size_t dark = 0;
+    for (const Vec3 &c : p.albedo) dark += c.x < 0.2f;
+    std::printf("    tatami border texels: %.1f %%\n", 100.0 * dark / p.size());
+    CHECK(dark > p.size() / 20);
+    ProceduralTexture wood = r49_tex("Wood Floor", 128);
+    wood.evaluate(p);
+    size_t gaps = 0;
+    for (float h : p.height) gaps += h == 0.0f;
+    std::printf("    wood floor gap texels: %.1f %%\n", 100.0 * gaps / p.size());
+    CHECK(gaps > p.size() / 100 && gaps < p.size() / 4);
+  });
+  test("procedural texture: the stack order matters (Blur then Levels differs from Levels then Blur)", [] {
+    ProceduralTexture a = r49_tex("Noise");
+    a.add("Blur");
+    a.add("Levels");
+    r49_set(a, "L2 Gamma", "0.4");
+    ProceduralTexture b = r49_tex("Noise");
+    b.add("Levels");
+    r49_set(b, "L1 Gamma", "0.4");
+    b.add("Blur");
+    TexPlanes pa, pb;
+    a.evaluate(pa);
+    b.evaluate(pb);
+    double diff = 0;
+    for (size_t i = 0; i < pa.size(); i++) diff += std::fabs(pa.height[i] - pb.height[i]);
+    std::printf("    mean height difference between the two orders: %.4f\n", diff / pa.size());
+    CHECK(diff / pa.size() > 0.0005);  // measured 0.0015: small (a 2-texel blur of smooth noise) but not zero
+  });
+  test("procedural texture: a .ptex round-trips through its text (every field and layer, in order); the file's name is the texture's", [] {
+    ProceduralTexture t;
+    t.name = "Round";
+    t.width = 256;
+    t.height = 128;
+    t.physical_size = 2.5f;
+    t.normal_strength = 3.0f;
+    t.seed = 42;
+    t.add("Brick");
+    t.add("Noise");
+    t.add("Edge Wear");
+    t.layers[1]->enabled = false;
+    t.layers[1]->blend = (int)LayerBlend::Overlay;
+    t.layers[1]->opacity = 0.3f;
+    r49_set(t, "L0 Rows", "11");
+    r49_set(t, "L0 Color", "0.1 0.2 0.3");
+    const std::string text = save_texture_text(t);
+    ProceduralTexture u;
+    CHECK(load_texture_text(text, u));
+    CHECK(u.width == 256 && u.height == 128 && std::fabs(u.physical_size - 2.5f) < 1e-5f && std::fabs(u.normal_strength - 3.0f) < 1e-5f && u.seed == 42);
+    CHECK(u.layers.size() == 3 && std::string(u.layers[0]->type_name()) == "Brick" && std::string(u.layers[1]->type_name()) == "Noise" &&
+          std::string(u.layers[2]->type_name()) == "Edge Wear");
+    CHECK(!u.layers[1]->enabled && u.layers[1]->blend == (int)LayerBlend::Overlay && std::fabs(u.layers[1]->opacity - 0.3f) < 1e-5f);
+    TexPlanes pa, pb;
+    t.evaluate(pa);
+    u.evaluate(pb);
+    CHECK(pa.height == pb.height && pa.albedo == pb.albedo);
+    CHECK(u.hash() == t.hash());
+  });
+  test("procedural texture: a material with Bricks.ptex#albedo renders non-grey, its #normal changes a lit plane's shading, and a layer field re-renders", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("newtex Bricks Bricks");
+    ProceduralTexturePtr pt = texture_asset("Assets/Textures/Bricks.ptex");
+    CHECK(pt && pt->layers.size() == 3);
+    if (!pt) return;
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test("Assets/Textures/Bricks.ptex");
+    r34_steps(ed, 3);
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    const Material &m = *cube->get<MeshRenderer>()->materials[0];
+    CHECK(m.base_map.path == "Assets/Textures/Bricks.ptex#albedo" && m.normal_map.path == "Assets/Textures/Bricks.ptex#normal");
+    const Material::Resolved &tx = m.textures();
+    CHECK(tx.base && tx.normal && tx.roughness && tx.base->width == 512);
+    const Recti sv = ed.scene_view_rect();
+    const std::vector<uint32_t> a = r34_crop(ed, sv);
+    size_t coloured = 0;
+    for (uint32_t c : a) coloured += std::abs((int)((c >> 16) & 255) - (int)(c & 255)) > 40;  // red bricks: red far from blue
+    std::printf("    coloured pixels in the Scene view: %zu\n", coloured);
+    CHECK(coloured > 200);
+    /* The normal map changes the shading: without it the picture differs. */
+    const R34Count t0 = r34_totals(ed);
+    ed.command("settex Bricks L0Color 0.1 0.2 0.9");  // a layer field: the texture re-evaluates and the view re-renders
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> b = r34_crop(ed, sv);
+    CHECK((r34_totals(ed) - t0).renders >= 1);
+    CHECK(a != b);
+    ed.command("settex Bricks NormalStrength 0");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> c = r34_crop(ed, sv);
+    CHECK(b != c);  // the normal map's relief is gone
+  });
+  test("procedural texture: exporting OBJ and glTF writes the texture's images beside the file and references them", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("newtex Floor Wood Floor");
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test("Assets/Textures/Floor.ptex");
+    r34_steps(ed, 2);
+    const std::string dir = fs::join(scratch_project(), "Assets/Exports/R49");
+    fs::make_dirs(dir);
+    ExportOptions o;
+    o.format = (int)ExportFormat::OBJ;
+    o.selection_only = true;
+    const std::string obj = ed.export_for_test(o, fs::join(dir, "floor.obj"));
+    CHECK(!obj.empty());
+    std::string mtl;
+    CHECK(fs::read_file(fs::join(dir, "floor.mtl"), mtl));
+    CHECK(mtl.find("map_Kd Floor_albedo.png") != std::string::npos && mtl.find("map_Bump Floor_normal.png") != std::string::npos);  // by name: the folder can move
+    CHECK(fs::exists(fs::join(dir, "Floor_albedo.png")) && fs::exists(fs::join(dir, "Floor_normal.png")) && fs::exists(fs::join(dir, "Floor_roughness.png")));
+    o.format = (int)ExportFormat::GLTF;
+    const std::string gltf = ed.export_for_test(o, fs::join(dir, "floor.gltf"));
+    CHECK(!gltf.empty());
+    std::string json;
+    CHECK(fs::read_file(fs::join(dir, "floor.gltf"), json));
+    CHECK(json.find("Floor_albedo.png") != std::string::npos);
+    /* Read back by the importer: the material's base colour map is the written image. */
+    ImportResult back;
+    CHECK(import_model(fs::join(dir, "floor.gltf"), back));
+    bool found = false;
+    for (const std::string &tp : back.textures) found = found || tp.find("Floor_albedo.png") != std::string::npos;
+    CHECK(found);
+    /* A format whose writer references no textures gets no images. */
+    std::remove(fs::join(dir, "Floor_albedo.png").c_str());
+    o.format = (int)ExportFormat::STL;
+    CHECK(!ed.export_for_test(o, fs::join(dir, "floor.stl")).empty());
+    CHECK(!fs::exists(fs::join(dir, "Floor_albedo.png")));
+    /* The material in the scene still points at the asset, not the PNG. */
+    CHECK(by_name(ed.scene(), "Cube")->get<MeshRenderer>()->materials[0]->base_map.path == "Assets/Textures/Floor.ptex#albedo");
+  });
+  test("procedural texture: renaming the .ptex in the Project window retargets the material's maps and the library", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("newtex Stone Tiles");
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test("Assets/Textures/Stone.ptex");
+    r34_steps(ed, 2);
+    const std::string abs = fs::join(scratch_project(), "Assets/Textures/Stone.ptex");
+    std::remove(fs::join(fs::parent(abs), "Granite.ptex").c_str());  // (a previous run's)
+    CHECK(ed.move_project_entry(abs, fs::parent(abs), "Granite.ptex"));
+    Material &m = *by_name(ed.scene(), "Cube")->get<MeshRenderer>()->materials[0];
+    CHECK(m.base_map.path == "Assets/Textures/Granite.ptex#albedo" && m.normal_map.path == "Assets/Textures/Granite.ptex#normal");
+    ProceduralTexturePtr pt = texture_asset("Assets/Textures/Granite.ptex");
+    CHECK(pt && pt->name == "Granite");
+    r34_steps(ed, 2);
+    CHECK(m.textures().base != nullptr);
+  });
+  test("procedural texture: `texlayer` adds, moves, resets and removes layers and `settex` sets fields (with the L<i> prefix)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("newtex Fresh");
+    ProceduralTexturePtr pt = texture_asset("Assets/Textures/Fresh.ptex");
+    CHECK(pt && pt->layers.empty());
+    if (!pt) return;
+    ed.command("texlayer Fresh add Checker");
+    ed.command("texlayer Fresh add Blur");
+    CHECK(pt->layers.size() == 2 && std::string(pt->layers[1]->type_name()) == "Blur");
+    ed.command("texlayer Fresh move 1 0");
+    CHECK(std::string(pt->layers[0]->type_name()) == "Blur");
+    const uint64_t v0 = pt->version;
+    ed.command("settex Fresh L1Count 16");
+    CHECK(pt->version > v0);
+    ed.command("settex Fresh Width 128");
+    CHECK(pt->width == 128);
+    ed.command("texlayer Fresh reset 1");
+    ed.command("texlayer Fresh remove 0");
+    CHECK(pt->layers.size() == 1 && std::string(pt->layers[0]->type_name()) == "Checker");
+    ed.command("texlayer Fresh add Nonsense");  // refused, nothing added
+    CHECK(pt->layers.size() == 1);
+    /* Written to its file when the edit settles (the undo step), like material assets. */
+    r34_steps(ed, 2);
+    std::string text;
+    CHECK(fs::read_file(fs::join(scratch_project(), "Assets/Textures/Fresh.ptex"), text));
+    CHECK(text.find("Checker") != std::string::npos && text.find("Width 128") != std::string::npos);
   });
 }

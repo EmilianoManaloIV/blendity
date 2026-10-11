@@ -330,7 +330,11 @@ void export_obj_mtl(const std::vector<ExportItem> &items, const std::string &mtl
     mtl += "illum " + std::string(m.alpha < 1.0f ? "4" : m.metallic > 0.5f ? "3" : "2") + "\n";
     mtl += "Pm " + num(m.metallic) + "\nPr " + num(m.roughness) + "\n";  // PBR extension (Blender reads these)
     auto map = [&](const char *key, const TextureRef &t) {
-      if (!t.empty() && !starts_with(t.path, "generated:")) mtl += std::string(key) + " " + resolve_asset_path(t.path) + "\n";
+      if (t.empty() || starts_with(t.path, "generated:")) return;
+      std::string p = resolve_asset_path(t.path);
+      /* An image beside the exported file is referenced by its name, so the folder can be moved or sent. */
+      if (!o.texture_dir.empty() && fs::normalize(fs::parent(p)) == fs::normalize(o.texture_dir)) p = fs::filename(p);
+      mtl += std::string(key) + " " + p + "\n";
     };
     map("map_Kd", m.base_map);
     map("map_Pm", m.metallic_map);
@@ -1069,7 +1073,9 @@ bool export_file(const std::string &path, const std::vector<ExportItem> &items, 
   switch ((ExportFormat)o.format) {
     case ExportFormat::OBJ: {
       std::string obj, mtl;
-      export_obj_mtl(items, stem + ".mtl", obj, mtl, o);
+      ExportOptions oo = o;
+      oo.texture_dir = dir;
+      export_obj_mtl(items, stem + ".mtl", obj, mtl, oo);
       ok = fs::write_file(path, obj) && (!o.materials || fs::write_file(fs::join(dir, stem + ".mtl"), mtl));
       break;
     }
