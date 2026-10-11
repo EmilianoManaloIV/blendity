@@ -9778,6 +9778,10 @@ struct PilotRig {
     ed.step_frame_headless({ev(ET::MouseMove)});
     ed.step_frame_headless({ev(ET::MouseDown)});
     ed.step_frame_headless({ev(ET::MouseUp)});
+    /* Park the mouse outside the window: resting on a toolbar button, its tooltip appears after a real-time
+     * delay that a slow (sanitizer) run reaches, and it draws over the view's top. */
+    x = y = -100;
+    ed.step_frame_headless({ev(ET::MouseMove)});
     ed.step_frame_headless();
   }
   void click_button(int index) {

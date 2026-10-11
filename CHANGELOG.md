@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 42): the sanitizer CI job's flaky pilot test
+
+**Asked:** the Linux sanitizer job was failing on the PR that brings tasks 0011-0020 to main.
+
+**Fixed**
+- **"Stopping the pilot brings back the editor view" failed only on the sanitizer runner:** 7,045
+  pixels differed, all in one 294 x 24 box at the top of the Scene view. The test's click helper left
+  the mouse resting on the Statistics toolbar button, and on a slow run the button's tooltip delay
+  elapsed, so the tooltip drew over the view. The helper now parks the mouse outside the window after a
+  click. Reproduced and fixed under the sanitizer build on 3 threads (CI's count).
+
+**Checked**
+- The pilot tests pass under the sanitizer build on 3 threads (twice), and on Windows.
+
 ## 2026-10-10 (round 41): manual lighting updates and a rough preview, like Bakery's (task 0020)
 
 **Asked:** stop recomputing lighting on every change while moving things around, update it only when
