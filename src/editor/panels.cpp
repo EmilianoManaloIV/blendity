@@ -3,6 +3,7 @@
 // Project (Blender: File/Asset Browser), Console (Blender: Info editor),
 // Profiler (Blender: Statistics overlay / --debug timings).
 #include "editor.h"
+#include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -372,6 +373,7 @@ struct InspectorReflector : Reflector {
   ui::Layout &lay;
   bool changed = false;
   Material *material = nullptr;  // the material being edited (texture drops touch it)
+  ProceduralTexture *edited_texture = nullptr;  // a texture asset being edited (the Textures window)
   std::vector<FieldEdit> edits;  // what changed this frame (for multi-object editing)
   std::string record_prefix;     // a filter effect's "E<i> ": edits carry the name other objects' reflectors see
   int label_w;
@@ -403,7 +405,7 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     u.label(label_rect(row), n);
     int old = v;
-    ed.inspector_menu_rects_["field:" + record_prefix + n] = field_rect(row);  // tests type into it
+    (edited_texture ? ed.texture_ui_rects_ : ed.inspector_menu_rects_)["field:" + record_prefix + n] = field_rect(row);  // tests type into it
     bool ch = u.int_field(fid(n), field_rect(row), v, mn, mx);
     if (ch) {
       FieldEdit &e = record(FieldEdit::Int, n);
@@ -743,6 +745,85 @@ struct InspectorReflector : Reflector {
    * foldout with its toggle and a menu (Move Up / Down, Reset, Remove), then Add Filter by
    * category. Menus run at the end of the frame: they edit the stack through filter_stack_op,
    * by object id. */
+  /* A texture's layer stack (task 0028), like a camera's filter stack: each layer a foldout with its checkbox and a
+   * menu (Move Up / Down, Reset, Remove), then Add Layer by category. Menus edit through texture_stack_op at the
+   * end of the frame, by the asset's path. */
+  void layer_list(const char *, TextureLayerList &layers) override {
+    if (!edited_texture) return;
+    const std::string path = edited_texture->asset_path;
+    const int n = (int)layers.size();
+    if (layers.empty()) {
+      Recti er = lay.row();
+      u.label({er.x + u.px(8), er.y, er.w - u.px(16), er.h}, "No layers. Add Layer starts the stack (a generator first).", u.theme.text_dim);
+    }
+    for (int i = 0; i < n; i++) {
+      TextureLayer &l = *layers[(size_t)i];
+      u.push_id((uint64_t)i + 9000);
+      lay.space(u.px(2));
+      Recti h = lay.row(u.row_h() + u.px(4));
+      h.x += u.px(4);
+      h.w -= u.px(8);
+      u.canvas.fill_round_rect(h, u.px(3), u.theme.header);
+      const int a = u.font.line_height() - u.px(4);
+      Recti fr{h.x, h.y, a + u.px(6), h.h};
+      if (u.hovered(fr) && u.in.pressed[0]) l.ui_expanded = !l.ui_expanded;
+      u.draw_icon(l.ui_expanded ? Icon::ArrowDown : Icon::ArrowRight, {h.x + u.px(2), h.y + (h.h - a) / 2, a, a}, u.theme.text);
+      const Recti cb{fr.right(), h.y, a + u.px(4), h.h};
+      ed.texture_ui_rects_["layer_enabled" + std::to_string(i)] = cb;
+      if (u.checkbox(cb, l.enabled)) {
+        record(FieldEdit::Bool, ("L" + std::to_string(i) + " Enabled").c_str()).b_new = l.enabled;
+        changed = true;
+      }
+      const TextureLayerInfo *info = find_texture_layer_info(l.type_name());
+      Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
+      u.label(tr, l.type_name(), l.enabled ? u.theme.text_bright : u.theme.text_dim);
+      if (u.hovered(tr) && u.in.pressed[0]) l.ui_expanded = !l.ui_expanded;
+      if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
+      const int bs = h.h - u.px(4);
+      Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
+      ui::Id mid = u.id("layer_menu");
+      ed.texture_ui_rects_["layer" + std::to_string(i)] = mr;
+      if (u.icon_button(mr, Icon::Menu, false, "Move, reset or remove this layer")) u.open_popup(mid, mr);
+      Editor *edp = &ed;
+      u.popup(mid, u.px(200), [edp, path, i, n] {
+        auto &uu = edp->ui_;
+        if (uu.menu_item("Move Up", nullptr, false, i > 0)) edp->texture_stack_op(path, "move", i, i - 1);
+        if (uu.menu_item("Move Down", nullptr, false, i + 1 < n)) edp->texture_stack_op(path, "move", i, i + 1);
+        if (uu.menu_item("Reset")) edp->texture_stack_op(path, "reset", i);
+        uu.menu_separator();
+        if (uu.menu_item("Remove Layer")) edp->texture_stack_op(path, "remove", i);
+      });
+      if (l.ui_expanded) {
+        lay.indent += u.px(10);
+        record_prefix = "L" + std::to_string(i) + " ";
+        l.reflect_common(*this, false);
+        l.reflect(*this);
+        record_prefix.clear();
+        lay.indent -= u.px(10);
+      }
+      u.pop_id();
+    }
+    lay.space(u.px(4));
+    Recti ar = lay.row(u.row_h() + u.px(4));
+    Recti ab{ar.x + u.px(4), ar.y, std::min(ar.w - u.px(8), u.px(200)), ar.h};
+    ui::Id add = u.id("add_layer");
+    ed.texture_ui_rects_["add_layer"] = ab;
+    if (u.button(ab, "Add Layer", false, Icon::Plus)) u.open_popup(add, ab);
+    u.tooltip("Add a generator (a pattern) or a filter (changes what is below) to the top of the stack.");
+    Editor *edp = &ed;
+    u.popup(add, u.px(240), [edp, path] {
+      auto &uu = edp->ui_;
+      std::string category;
+      for (const TextureLayerInfo &li : texture_layer_infos()) {
+        if (li.category != category) {
+          category = li.category;
+          uu.menu_label(category);
+        }
+        if (uu.menu_item(li.name)) edp->texture_stack_op(path, "add", 0, 0, li.name);
+        uu.tooltip(li.help);
+      }
+    });
+  }
   void filter_effects(const char *, FilterEffectList &effects) override {
     GameObject *g = ed.active_object();
     if (!g) return;
@@ -2317,6 +2398,26 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
 }
 
 /* A material's fields anywhere (the Materials window, a .mat's inspector). */
+bool Editor::draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t) {
+  if (!t) return false;
+  const std::string before = save_texture_text(*t);  // (small: the undo step keeps it if a field changes)
+  InspectorReflector ir(*this, ui_, lay);
+  ir.edited_texture = t.get();
+  t->reflect(ir);
+  if (ir.changed) {
+    bool noted = false;
+    for (const auto &kv : texture_before_) noted = noted || kv.first == t->asset_path;
+    if (!noted && !t->asset_path.empty()) texture_before_.push_back({t->asset_path, before});
+    if (ui_.in.down[0]) {  // a drag: the window's preview follows at 256; materials re-resolve once on release
+      t->version++;
+      texture_touch_pending_ = true;
+    }
+    else t->touch();
+    mark_changed("Edit Texture " + t->name);
+  }
+  return ir.changed;
+}
+
 void Editor::draw_material_fields(ui::Layout &lay, const MaterialPtr &m) {
   if (!m) return;
   InspectorReflector ir(*this, ui_, lay);

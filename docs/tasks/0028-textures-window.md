@@ -1,6 +1,6 @@
 # 0028: The Textures window
 
-- **Status:** approved (the roadmap of 2026-10-11; after task 0027)
+- **Status:** done (as built below)
 - **Requirements:** R-03
 - **Decisions:** ADR 0017 (the window is its editor; no new decision)
 - **Model:** main session (Opus)
@@ -62,3 +62,20 @@ outputs, and assigns it to the selection by a button or by dragging a thumbnail 
 
 ## Documentation to update
 - CHANGELOG, README (the Textures window), ARCHITECTURE row, USABILITY row.
+
+## As built
+Built as specified: `WindowKind::Textures` (appended before `Count`; the title and icon tables now have
+`static_assert`s on their sizes), `draw_textures_window` (`texture_window.cpp`) with New (presets),
+the size, Assign to Selection, a search, the thumbnail grid (64², cached per hash), the selected
+texture's fields and layer stack (the Inspector's reflector with a `layer_list` override, like the camera
+filter stack), and the preview (an output, 1× or 2 × 2; 256 while a field is dragged, full size on
+release); `texture_stack_op` shared by the menus and `texlayer`; thumbnails dragged onto an object in the
+Scene view or a Hierarchy row assign the texture; a `.ptex` double-clicked in the Project window opens the
+window. Undo of texture edits came with task 0027 (`UndoState::textures`); the window's field edits use it.
+
+**Deviations:**
+1. **Layout criterion tested as a round trip** of the dock's text with the new kind in it, not a
+   saved-and-reloaded preferences file.
+2. **A texture's name is its file's** (renamed in the Project window), so it is not an editable field.
+3. **The window opens beside the Materials window** (where it is docked), not in the largest area: there it
+   covered the Scene view a thumbnail is dragged onto.

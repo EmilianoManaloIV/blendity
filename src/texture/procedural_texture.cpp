@@ -52,8 +52,8 @@ static void reflect_targets(Reflector &r, int &targets) {
   targets = (a ? TargetAlbedo : 0) | (h ? TargetHeight : 0) | (ro ? TargetRoughness : 0) | (targets & TargetMask);
 }
 
-void TextureLayer::reflect_common(Reflector &r) {
-  r.field("Enabled", enabled);
+void TextureLayer::reflect_common(Reflector &r, bool with_enabled) {
+  if (with_enabled) r.field("Enabled", enabled);
   r.enumeration("Blend", blend, kBlendNames, 7);
   r.help("How this layer combines with what is below (Substance's layer blend modes; Height Max / Min for stacking heights).");
   r.field("Opacity", opacity, 0.01f, 0.0f, 1.0f);
@@ -189,7 +189,7 @@ static int pow2_size(int v) {
 }
 
 void ProceduralTexture::reflect(Reflector &r) {
-  r.text("Name", name);
+  /* (The name is the file's: renamed in the Project window, so it isn't a field.) */
   r.field("Width", width, 64, 4096);
   r.field("Height", height, 64, 4096);
   r.help("The images' size in texels (powers of two, 64 to 4096).");

@@ -7,6 +7,7 @@
 // datablocks, Ctrl+L > Link Materials, the Assign button and Remove Unused
 // Slots (editors/render/render_shading.cc).
 #include "editor.h"
+#include "../texture/procedural_texture.h"
 
 #include <algorithm>
 
@@ -143,8 +144,9 @@ void Editor::update_asset_drag() {
   if (!d.dragging && (std::abs(in.mx - d.x) > ui_.px(6) || std::abs(in.my - d.y) > ui_.px(6))) d.dragging = true;
   if (d.dragging) {
     const bool image = !d.mat && image_extension_supported(fs::extension(d.path));
+    const bool ptex = !d.mat && fs::extension(d.path) == ".ptex";  // a texture asset: objects (rows, the Scene view) or a folder
     const bool material = d.mat || fs::extension(d.path) == ".mat";
-    const std::string label = (image ? "Texture: " : material ? "Material: " : fs::is_dir(d.path) ? "Folder: " : "") +
+    const std::string label = (image ? "Texture: " : fs::extension(d.path) == ".ptex" ? "Procedural Texture: " : material ? "Material: " : fs::is_dir(d.path) ? "Folder: " : "") +
                               (d.mat ? d.mat->name : fs::filename(d.path));
     /* Highlight what it would land on. */
     Recti target{0, 0, 0, 0};
@@ -153,7 +155,7 @@ void Editor::update_asset_drag() {
         if (f.first.contains(in.mx, in.my)) target = f.first;
     }
     for (auto &s : drop_slots_)
-      if (!image && s.r.contains(in.mx, in.my)) target = s.r;
+      if (!image && !ptex && s.r.contains(in.mx, in.my)) target = s.r;
     for (auto &t : drop_textures_)
       if (image && t.r.contains(in.mx, in.my)) target = t.r;
     for (auto &r : drop_rows_)
@@ -180,11 +182,32 @@ void Editor::update_asset_drag() {
           if (fs::normalize(fs::parent(src)) != fs::normalize(folder->second)) move_project_entry(src, folder->second);
         }
       }
+      else if (fs::extension(d.path) == ".ptex") drop_texture_asset(d.path, in.mx, in.my);
       else if (d.mat || fs::extension(d.path) == ".mat" || image_extension_supported(fs::extension(d.path)))
         drop_asset(d.path, in.mx, in.my, d.mat);
     }
     d = AssetDrag{};
   }
+}
+
+/* A texture asset dropped on a Hierarchy row or an object in the Scene view: that object's first material uses it. */
+bool Editor::drop_texture_asset(const std::string &abs_path, int mx, int my) {
+  const std::string rel = make_asset_relative(abs_path);
+  GameObject *g = nullptr;
+  for (auto &r : drop_rows_)
+    if (r.first.contains(mx, my)) g = scene_->find(r.second);
+  if (!g && scene_drawn_ && scene_rect_.contains(mx, my)) {
+    const uint32_t id = scene_rt_.id_at(mx - scene_rect_.x, my - scene_rect_.y);
+    g = id ? scene_->find(id) : nullptr;
+  }
+  if (!g || !g->get<MeshRenderer>()) {
+    Log::warn("Drop the texture onto an object with a MeshRenderer (Scene view or Hierarchy)");
+    return false;
+  }
+  assign_texture_asset(g, rel);
+  select(g->id);
+  mark_changed("Assign Texture " + fs::stem(rel));
+  return true;
 }
 
 bool Editor::drop_asset(const std::string &path, int mx, int my, MaterialPtr given) {
@@ -218,7 +241,7 @@ bool Editor::drop_asset(const std::string &path, int mx, int my, MaterialPtr giv
       assign_material(scene_->find(r.second), 0, m);
       return true;
     }
-  if (scene_rect_.contains(mx, my)) {
+  if (scene_drawn_ && scene_rect_.contains(mx, my)) {  // (a hidden Scene view's last picture is stale)
     const uint32_t id = scene_rt_.id_at(mx - scene_rect_.x, my - scene_rect_.y);
     GameObject *g = id ? scene_->find(id) : nullptr;
     if (!g || !g->get<MeshFilter>() || !g->get<MeshFilter>()->mesh) {

@@ -63,7 +63,7 @@ struct TextureLayer {
   /* Filters override this and work on the planes directly (in parallel over rows). */
   virtual void apply(TexPlanes &p, const LayerContext &c) const;
   /* The blend, opacity, targets and mask fields (reflected first by every layer). */
-  void reflect_common(Reflector &r);
+  void reflect_common(Reflector &r, bool with_enabled = true);
 };
 template<class T> struct TextureLayerBase : TextureLayer {
   const char *type_name() const override { return T::kName; }

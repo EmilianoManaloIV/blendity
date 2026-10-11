@@ -36,6 +36,7 @@ void Editor::draw_scene_view(const Recti &r) {
   Recti bar{r.x, r.y, r.w, bh};
   Recti view{r.x, r.y + bh, r.w, r.h - bh};
   scene_rect_ = view;
+  scene_drawn_ = true;
   draw_scene_overlay_bar(bar);
   if (view.w < 8 || view.h < 8) {  // (the dock doesn't paint this view's content: it paints every pixel itself)
     u.canvas.fill_rect(view, u.theme.panel);

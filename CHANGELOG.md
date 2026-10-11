@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 50): the Textures window (task 0028)
+
+**Asked:** a tab dedicated to making procedural textures with a Blender-style modifier stack.
+
+**Added**
+- **Window > Textures** (`window Textures`): the project's texture assets as thumbnails (click to edit,
+  drag onto an object in the Scene view or a Hierarchy row to use it); **New** from a preset (Bricks, Wood
+  Floor, Tatami, Tiles, Noise, Checker, or empty); the size; **Assign to Selection**; a search.
+- **The layer stack**, drawn like a camera's filter stack: each layer a foldout with its checkbox and a menu
+  (Move Up, Move Down, Reset, Remove Layer), **Add Layer** by category (Generators, Filters), every field
+  editable; each edit one undo step.
+- **A preview** of an output (Albedo, Normal, Roughness, Height), 1× or tiled 2 × 2 to check the seams; it
+  evaluates at 256 while a field is being dragged and at the texture's size on release.
+- Double-clicking a `.ptex` in the Project window opens it in the Textures window. The window opens beside
+  the Materials window, so the Scene view stays visible to drag onto.
+- From the code review (Opus): the window first opened over the Scene view, and a drop then landed on an
+  object in the hidden view's last picture (drops onto the Scene view now need this frame's picture);
+  dragging a field re-evaluated the whole texture every frame for every material using it (they now
+  re-resolve once, on release, while the preview follows at 256); the preview repacked the full image on
+  every frame, idle ones included (it is cached and drawn from the smallest fitting mip); a deleted texture
+  stayed selected; the name is the file's, not a field; the drag highlight now matches where a texture
+  asset can land; the tests clean up the scratch project's textures.
+
+**Checked**
+- New tests (round 50), by real clicks: `window Textures` opens it and the layout round-trips with it;
+  New > Bricks creates and selects the asset; Add Layer > Blur appends a Blur, its menu's Move Up moves
+  it, its checkbox disables it, and undo takes each back; a value typed into a layer field changes the
+  texture and the preview, and undo / redo restore both; a thumbnail dragged onto the Cube gives it the
+  texture's maps; the preview is 256 while a field is dragged and 1024 after.
+- Unit checks: Windows 8,343, 0 failed (423 tests); the whole suite in render-cache verify mode: 8,344,
+  0 failed, 0 stale pictures. Linux with libraries: 8,295, 0 failed. Sanitizer build: 8,217, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` idle
+  1.39 ms (unchanged).
+
 ## 2026-10-11 (round 49): procedural texture assets (task 0027, ADR 0017)
 
 **Asked:** a tab for making procedural textures (bricks, wood floors, tatami mats...) with a Blender-style

@@ -69,7 +69,8 @@ extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyli
 extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Count };
+/* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -263,6 +264,24 @@ class Editor {
   uint64_t render_hash_for_test() { return scene_render_hash(); }
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
   const RasterStats &scene_stats_for_test() const { return scene_stats_; }
+  /* The Textures window last frame: "new", "size", "assign", "output", "add_layer", "layer<i>", "thumb:<name>". */
+  Recti texture_ui_rect_for_test(const std::string &key) const {
+    auto it = texture_ui_rects_.find(key);
+    return it == texture_ui_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
+  ProceduralTexturePtr texture_selected_for_test() const { return texture_selected_; }
+  ProceduralTexturePtr new_texture_asset_for_test(const std::string &preset) { return new_texture_asset(preset); }
+  std::string dock_serialize_for_test() { return dock_serialize(dock_.get()); }
+  std::string dock_parse_roundtrip_for_test(const std::string &s) {
+    size_t pos = 0;
+    auto n = dock_parse(s, pos);
+    return n ? dock_serialize(n.get()) : std::string();
+  }
+  void select_texture_for_test(const ProceduralTexturePtr &t) { texture_selected_ = t; }
+  int texture_preview_size_for_test() const { return texture_preview_size_; }
+  bool scene_drawn_for_test() const { return scene_drawn_; }
+  /* Moves a window into the largest area, split (zone 1 left, 2 right, 3 top, 4 bottom; 0 a tab). */
+  void dock_split_for_test(WindowKind k, int zone) { dock_move(k, dock_largest_leaf(), zone); }
   void assign_texture_asset_for_test(const std::string &asset) { assign_texture_asset_to_selection(asset); }
   std::string export_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   GameObject *main_camera_owner_for_test() {
@@ -434,6 +453,26 @@ class Editor {
   /* Procedural texture outputs referenced by the items' materials written as PNGs beside `path`; the
    * items get material copies that point at those files, so every exporter sees ordinary images. */
   void bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o);
+  /* The Textures window (task 0028, texture_window.cpp). */
+  void draw_textures_window(const Recti &r);
+  const std::vector<std::string> &texture_asset_paths();
+  ProceduralTexturePtr new_texture_asset(const std::string &preset);
+  bool draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t);  // panels.cpp; true when a field changed
+  /* A texture's layer stack edited (the window's menus and `texlayer`): add <name>, remove / reset <i>, move <i> <j>;
+   * one undo step each. */
+  bool texture_stack_op(const std::string &asset, const std::string &op, int i, int j = 0, const std::string &name = "");
+  void assign_texture_asset(GameObject *g, const std::string &asset_path);
+  bool drop_texture_asset(const std::string &abs_path, int mx, int my);
+  bool scene_drawn_ = false;  // the Scene view drew this frame (another tab can hide it)
+  bool texture_touch_pending_ = false;  // a texture field was dragged: materials re-resolve on release
+  ProceduralTexturePtr texture_selected_;
+  std::string texture_search_;
+  int texture_preview_output_ = 0;
+  bool texture_preview_tiled_ = false, texture_dragging_ = false;
+  int texture_preview_size_ = 0, texture_edit_h_ = 0;
+  std::vector<std::string> texture_paths_;
+  double texture_paths_listed_ = -100;
+  std::map<std::string, Recti> texture_ui_rects_;  // the window's buttons and menus last frame (tests click them)
   /* Texture assets live outside the scene: an edit records the asset's text before it, and the undo step
    * carries those texts (UndoState::textures), so undo and redo restore them. */
   void note_texture_edit(ProceduralTexture &t);
