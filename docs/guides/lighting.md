@@ -9,8 +9,9 @@ every frame that re-renders a view.
 1. **Static objects:** select everything that never moves (floors, walls, buildings, props) and tick
    **MeshRenderer > Contribute GI**. Lightmap UVs are made for you (Generate Lightmap UVs).
 2. **Lights:** set each light's **Mode**:
-   - **Baked:** its direct light, shadows and bounces are all in the lightmaps. Nothing is computed
-     live. Best for lights that never move.
+   - **Baked:** its direct light, shadows and bounces are all in the lightmaps and probes. Nothing is
+     computed live, so it doesn't show at all until you bake (or turn on Preview Lighting, as with
+     Bakery). Best for lights that never move.
    - **Mixed:** its bounced light is baked; its direct light and shadows stay live, so moving objects
      still cast shadows. The usual choice for the sun.
    - **Realtime:** nothing is baked. Use it for lights that move or change.
@@ -44,7 +45,7 @@ every frame that re-renders a view.
 Realtime GI shows bounced light while you're still arranging lights and objects, with nothing to bake.
 It only does live work for what the bake doesn't hold. The Lighting window shows a "Live GI:" line that
 says which case applies:
-- **nothing baked yet:** everything is live;
+- **nothing baked yet:** everything except Baked lights is live;
 - **objects or lights changed since the bake:** live until the next bake (Auto Generate does it for you);
 - **a Realtime Directional Light:** its bounce can't be baked, so it is live;
 - **otherwise idle:** a current bake covers the scene and nothing is traced per frame, even with Realtime

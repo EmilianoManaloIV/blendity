@@ -118,12 +118,13 @@ bool Editor::live_gi_needed(std::string *why) {
     say("Live GI: running (nothing baked)");
     return true;
   }
-  /* Voxel GI bounces the first directional light, as the shadow map: live if the bake doesn't hold it. */
+  /* Voxel GI bounces the first directional light the rasterizer draws (as the shadow map; a Baked one isn't
+   * drawn, task 0021): live if the bake doesn't hold it. */
   int sun_mode = -1;
   scene_->for_each([&](GameObject &g) {
     if (sun_mode >= 0 || !g.active_in_hierarchy()) return;
     if (const Light *l = g.get<Light>())
-      if (l->enabled && l->type == 0) sun_mode = l->mode;
+      if (l->enabled && l->type == 0 && l->mode != 2) sun_mode = l->mode;
   });
   if (sun_mode == 0) {
     say("Live GI: running (the Directional Light is Realtime, so its bounce isn't baked)");

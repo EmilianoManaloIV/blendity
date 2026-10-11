@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 43): Baked lights exist only through the bake (task 0021)
+
+**Asked:** don't rasterize lights whose Mode is Baked; the bake represents them. Mixed and Realtime
+stay live. Before a bake, Preview Lighting is what shows them, as Bakery's Realtime Preview does.
+
+**Changed**
+- **A Baked light is left out of the rasterized views:** no direct light or highlight, no shadow map,
+  no reflective shadow map (so no live bounce from it). Until now it was skipped only on lightmapped
+  or baked-probe surfaces, and still lit everything else.
+- **Before a bake it lights nothing;** turn on Preview Lighting or press Generate Lighting.
+- **Unchanged:** its icon and gizmo, the bake itself, and the path tracer (F12 path traced, the Rendered
+  Camera Preview), which computes true GI.
+- **Solid shading** leaves Baked lights out too, and live GI picks its sun the way the shadow map does
+  (the first directional light that isn't Baked).
+
+**Fixed (found by the code review)**
+- **The first version also dropped Baked lights from the path tracer,** which builds its lights the
+  same way. A path-traced F12 render of a Baked-light scene came out sky-lit. The rasterizer and the
+  path tracer now take different light lists, and a test renders F12 through the editor to check.
+- **The light's Mode help text** said Baked lights still drew on unmapped objects.
+
+**Checked**
+- Unit checks: Windows 8,092, 0 failed (375 tests), twice. Render cache verify mode: 0 stale pictures.
+- Linux with libraries: 8,044, 0 failed. Sanitizer build: 7,966, 0 failed, no reports. Windows dependency-free: 7,964, 0 failed.
+
 ## 2026-10-11 (round 42): the sanitizer CI job's flaky pilot test
 
 **Asked:** the Linux sanitizer job was failing on the PR that brings tasks 0011-0020 to main.

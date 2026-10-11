@@ -352,7 +352,9 @@ class Editor {
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
-  LightingEnv make_lighting(Vec3 eye, bool use_scene_lights);
+  /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
+   * the path tracer, which computes true GI, takes every light. */
+  LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
   void update_environment();
   /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
    * (null without a sun or casters). */

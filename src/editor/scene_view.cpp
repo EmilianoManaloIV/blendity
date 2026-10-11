@@ -338,7 +338,7 @@ static LightingEnv build_env(const Scene &s) {
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
-    if (!l || !l->enabled) return;
+    if (!l || !l->enabled || l->mode == 2) return;  // a Baked light isn't rasterized (task 0021), in Solid mode either
     env.lights.push_back(to_render_light(g, *l));
   });
   return env;

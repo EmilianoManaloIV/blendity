@@ -91,7 +91,7 @@ RenderLight to_render_light(const GameObject &g, const Light &l) {
   return rl;
 }
 
-LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
+LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized) {
   LightingEnv env;
   const EnvironmentSettings &es = scene_->environment;
   env.sky = es.sky;
@@ -113,6 +113,9 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
     if (!l || !l->enabled) return;
+    /* A Baked light exists only through the bake (task 0021, as Unity): never rasterized, so no direct
+     * light, shadow map or live bounce from it. Before a bake, Preview Lighting shows it (Bakery's way). */
+    if (rasterized && l->mode == 2) return;
     RenderLight rl = to_render_light(g, *l);
     /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
      * Realtime since must not shine twice, and one added since must not vanish. */
@@ -606,7 +609,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
     if (!preview) Log::info("Render finished: %s", render_status_.c_str());
     return;
   }
-  LightingEnv env = make_lighting(eye, true);
+  LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
   std::vector<DrawItem> items = collect_items(true, true);
   PTSettings ps = make_pt_settings(rs);
   if (cam) ps.exposure += cam->exposure_stops();
@@ -1092,7 +1095,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     Image &traced_img = filters.empty() ? cam_preview_img_ : cam_preview_small_;
     if (hash != cam_preview_pt_hash_) {
       cam_preview_pt_hash_ = hash;
-      LightingEnv env = make_lighting(eye, true);
+      LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
       std::vector<DrawItem> items = collect_items(true, true);
       PTSettings ps = make_pt_settings(rs);
       ps.exposure += cam->exposure_stops();
