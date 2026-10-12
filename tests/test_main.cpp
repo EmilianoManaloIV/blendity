@@ -221,6 +221,7 @@ static void round57_tests();
 static void round58_tests();
 static void round59_tests();
 static void round60_tests();
+static void round61_tests();
 
 int main() {
   register_builtin_components();
@@ -858,6 +859,7 @@ int main() {
   round58_tests();
   round59_tests();
   round60_tests();
+  round61_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -10762,11 +10764,17 @@ static void round31_tests() {
         {"Edge Outline", "Thickness", "3", [](FilterEffect *e) { return (double)static_cast<EdgeOutlineEffect *>(e)->thickness; }, 3},
         {"CRT", "Flicker", "0.5", [](FilterEffect *e) { return (double)static_cast<CrtEffect *>(e)->flicker; }, 0.5},
         {"Sharpen", "Amount", "2.5", [](FilterEffect *e) { return (double)static_cast<SharpenEffect *>(e)->amount; }, 2.5},
+        /* The anime and manga effects (task 0039). */
+        {"Halftone", "CellSize", "12", [](FilterEffect *e) { return (double)static_cast<HalftoneEffect *>(e)->cell; }, 12},
+        {"Hatching", "Spacing", "9", [](FilterEffect *e) { return (double)static_cast<HatchingEffect *>(e)->spacing; }, 9},
+        {"Line Art", "CreaseAngle", "60", [](FilterEffect *e) { return (double)static_cast<LineArtEffect *>(e)->crease_angle; }, 60},
+        {"Paper", "Strength", "0.6", [](FilterEffect *e) { return (double)static_cast<PaperEffect *>(e)->strength; }, 0.6},
+        {"Color Ramp", "Stops", "4", [](FilterEffect *e) { return (double)static_cast<ColorRampEffect *>(e)->stops; }, 4},
         /* The other categories' effects go through the same paths (they had their own copies of this test). */
         {"Retro Console", "Width", "100", [](FilterEffect *e) { return (double)static_cast<RetroConsoleFilter *>(e)->width; }, 100},
         {"Bloom", "Threshold", "2.5", [](FilterEffect *e) { return (double)static_cast<BloomEffect *>(e)->threshold; }, 2.5},
     };
-    /* The registry lists them all: three categories of four, plus Retro Console and Bloom, each with help and a
+    /* The registry lists them all: Color (5), Lens (4), Stylize (8), plus Retro Console and Bloom, each with help and a
      * working factory. */
     std::map<std::string, int> per_cat;
     for (const R31Case &c : cases) {
@@ -10778,7 +10786,7 @@ static void round31_tests() {
       auto e = create_filter_effect(c.name);
       CHECK(e && std::string(e->type_name()) == c.name);
     }
-    CHECK(per_cat["Color"] == 4 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 4);
+    CHECK(per_cat["Color"] == 5 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 8);
     CHECK(per_cat["Retro Console"] == 1 && per_cat["Bloom & glow"] == 1);
     CHECK(filter_effect_infos().size() == cases.size());  // a new effect type gets a row here
     {  // menu order is grouped by category (a category is one run)
@@ -20702,6 +20710,38 @@ static void round58_tests() {
     r58_forget_baked("Cube");
   });
 
+  test("texture bake: right-clicking an object in the Hierarchy offers Bake Textures, which bakes it", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+    int x = 0, y = 0;
+    CHECK(ed.hierarchy_row_for_test("Cube", x, y));
+    platform::Event e = r34_mouse(R34ET::MouseMove, x, y);
+    ed.step_frame_headless({e});
+    e.type = R34ET::MouseDown, e.button = 1;
+    ed.step_frame_headless({e});
+    e.type = R34ET::MouseUp;
+    ed.step_frame_headless({e});
+    r34_steps(ed, 1);
+    const Recti menu = r50_popup(ed);
+    CHECK(menu.w > 0 && ed.selected_object() && ed.selected_object()->name == "Cube");
+    if (menu.w <= 0) return;
+    /* Rows: Rename, Duplicate, Delete, Frame Selected, Select Children, Clear Parent, Join, Boolean, Separate By Loose
+     * Parts, Export Selection..., Bake Textures. Hovering it opens its sizes. */
+    const int row = ed.ui_for_test().row_h();
+    const int by = menu.y + ed.ui_for_test().px(4) + row * 10 + row / 2;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, menu.x + menu.w / 2, by)});
+    r34_steps(ed, 2);
+    const Recti sizes = r50_popup(ed);
+    CHECK(sizes.w > 0 && sizes.x != menu.x);
+    if (sizes.w <= 0 || sizes.x == menu.x) return;
+    r50_pick_row(ed, sizes, 0);  // 512 x 512
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>()->materials[0] && cube->get<MeshRenderer>()->materials[0]->name == "Cube Baked");
+    CHECK(fs::exists(resolve_asset_path("Assets/Textures/Baked/Cube_albedo.png")));
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+  });
+
   test("texture bake: two objects with one name get their own images and material; a Mirror modifier is refused, the object unchanged", [] {
     Editor ed;
     r57_open(ed);
@@ -21399,5 +21439,298 @@ static void round60_tests() {
     GameObject *g2 = back_scene.find_by_name("Cube");
     const Component *oc = g2 ? g2->find_role(Component::RenderRole::Outline) : nullptr;
     CHECK(oc && std::fabs(static_cast<const Outline *>(oc)->thickness - 0.07f) < 1e-5f);
+  });
+}
+
+/* ===================================================================== */
+/* Round 61 (task 0039): anime and manga camera filters, looks            */
+/* ===================================================================== */
+
+/* An image of one grey, or a left-to-right gradient. */
+static Image r61_image(int w, int h, int grey, bool gradient = false) {
+  Image img;
+  img.resize(w, h);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      const int v = gradient ? (int)std::lround(255.0 * x / std::max(1, w - 1)) : grey;
+      img.pixels[(size_t)y * w + x] = 0xFF000000u | (uint32_t)v << 16 | (uint32_t)v << 8 | (uint32_t)v;
+    }
+  return img;
+}
+/* Connected groups of dark pixels (4-neighbour flood fill): halftone dots. */
+static int r61_blobs(const Image &img) {
+  std::vector<uint8_t> seen(img.pixels.size(), 0);
+  auto dark = [&](size_t i) { return ((img.pixels[i] >> 8) & 255) < 128; };
+  int n = 0;
+  std::vector<size_t> stack;
+  for (size_t i = 0; i < img.pixels.size(); i++) {
+    if (seen[i] || !dark(i)) continue;
+    n++;
+    stack.push_back(i);
+    seen[i] = 1;
+    while (!stack.empty()) {
+      const size_t j = stack.back();
+      stack.pop_back();
+      const int x = (int)(j % img.width), y = (int)(j / img.width);
+      const int nb[4][2] = {{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}};
+      for (auto &q : nb) {
+        if (q[0] < 0 || q[1] < 0 || q[0] >= img.width || q[1] >= img.height) continue;
+        const size_t k = (size_t)q[1] * img.width + q[0];
+        if (!seen[k] && dark(k)) seen[k] = 1, stack.push_back(k);
+      }
+    }
+  }
+  return n;
+}
+
+static void round61_tests() {
+  test("anime filters: Halftone's dots quadruple when the cell halves, and a 540p and a 1080p picture show the same dots", [] {
+    auto dots = [](int w, int h, float cell, float scale) {
+      Image img = r61_image(w, h, 200);  // light enough that neighbouring dots stay apart at 6-pixel cells (counted one by one)
+      RenderTarget rt;
+      rt.attach(img, {0, 0, w, h});
+      FilterFrame f;
+      f.pixel_scale = scale;
+      HalftoneParams p;
+      p.cell = cell;
+      apply_halftone(rt, p, &f);
+      return r61_blobs(img);
+    };
+    const int big = dots(960, 540, 16.0f, 1.0f), small = dots(960, 540, 8.0f, 1.0f);
+    const double ratio = (double)small / std::max(1, big);
+    const int at540 = dots(960, 540, 12.0f, 0.5f), at1080 = dots(1920, 1080, 12.0f, 1.0f);
+    std::printf("    dots: %d at cell 16, %d at cell 8 (x%.2f); %d at 540p, %d at 1080p\n", big, small, ratio, at540, at1080);
+    CHECK(ratio > 3.5 && ratio < 4.5);
+    CHECK(std::abs(at540 - at1080) * 10 <= at1080);
+    /* White stays paper, black is all ink. */
+    Image w = r61_image(64, 64, 255), b = r61_image(64, 64, 0);
+    RenderTarget rw, rb;
+    rw.attach(w, {0, 0, 64, 64});
+    rb.attach(b, {0, 0, 64, 64});
+    HalftoneParams p;
+    apply_halftone(rw, p, nullptr);
+    apply_halftone(rb, p, nullptr);
+    /* Exactly: no grey speck at a white cell's centre, none in a black cell's corners. */
+    bool all_white = true, all_black = true;
+    for (uint32_t c : w.pixels) all_white = all_white && (c & 0xFFFFFF) == 0xFFFFFF;
+    for (uint32_t c : b.pixels) all_black = all_black && ((c >> 8) & 255) <= 2;
+    CHECK(all_white && all_black);
+  });
+
+  test("anime filters: Hatching's ink falls as the picture brightens, white stays paper; Color Ramp Constant gives exactly its stops; Paper at 0 changes nothing", [] {
+    Image g = r61_image(800, 200, 0, true);
+    RenderTarget rt;
+    rt.attach(g, {0, 0, 800, 200});
+    HatchingParams hp;
+    apply_hatching(rt, hp, nullptr);
+    std::vector<double> ink(8, 0.0);
+    for (int y = 0; y < 200; y++)
+      for (int x = 0; x < 800; x++) ink[(size_t)x / 100] += ((g.pixels[(size_t)y * 800 + x] >> 8) & 255) < 128;
+    bool falling = true;
+    for (size_t k = 1; k < ink.size(); k++) falling = falling && ink[k] <= ink[k - 1] + 50;
+    int last_col_ink = 0;
+    for (int y = 0; y < 200; y++) last_col_ink += ((g.pixels[(size_t)y * 800 + 799] >> 8) & 255) < 250;
+    std::printf("    hatching ink per eighth (dark to light):");
+    for (double v : ink) std::printf(" %.0f", v);
+    std::printf("\n");
+    CHECK(falling && ink[0] > ink[7] * 4 && last_col_ink == 0);
+    Image r = r61_image(256, 4, 0, true);
+    RenderTarget rr;
+    rr.attach(r, {0, 0, 256, 4});
+    ColorRampParams cp;
+    cp.stops = 3;
+    cp.color[0] = {0.1f, 0.0f, 0.2f}, cp.color[1] = {0.5f, 0.5f, 0.0f}, cp.color[2] = {1.0f, 0.9f, 0.8f};
+    cp.position[0] = 0.0f, cp.position[1] = 0.4f, cp.position[2] = 0.7f;
+    apply_color_ramp(rr, cp);
+    std::set<uint32_t> cols(r.pixels.begin(), r.pixels.end());
+    CHECK(cols.size() == 3);
+    Image a = r61_image(300, 200, 0, true), b = a;
+    RenderTarget ra, rb2;
+    ra.attach(a, {0, 0, 300, 200});
+    PaperParams pp;
+    pp.strength = 0.0f;
+    apply_paper(ra, pp, nullptr);
+    CHECK(a.pixels == b.pixels);
+    pp.strength = 0.5f;
+    Image c1 = b, c2 = b;
+    RenderTarget r1, r2;
+    r1.attach(c1, {0, 0, 300, 200});
+    r2.attach(c2, {0, 0, 300, 200});
+    apply_paper(r1, pp, nullptr);
+    apply_paper(r2, pp, nullptr);
+    CHECK(c1.pixels == c2.pixels && c1.pixels != b.pixels);  // the same paper every time
+  });
+
+  test("anime filters: Line Art draws a cube's edges as creases (rasterized and path traced), a 30-degree fold at 20 but not at 40, and nothing on a smooth sphere", [] {
+    Editor ed;
+    r57_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Line Art");
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    LineArtEffect *la = cam ? cam->get<CameraFilters>()->find<LineArtEffect>() : nullptr;
+    CHECK(la != nullptr);
+    if (!la) return;
+    la->silhouettes = false, la->object_edges = false;  // creases alone
+    la->color = Vec3(1.0f, 0.0f, 1.0f);              // magenta: nothing else in the scene is
+    auto crease_pixels = [&](const char *engine) {
+      cam->get<CameraFilters>()->effects[0]->enabled = true;
+      ed.mark_changed_for_test("R61 crease");
+      ed.step_frame_headless();
+      const Image &img = r57_render(ed, engine, true);
+      int n = 0, solid = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255) continue;
+        solid++;
+        n += (int)((c >> 16) & 255) > 200 && (int)(c & 255) > 200 && (int)((c >> 8) & 255) < 90;
+      }
+      return std::make_pair(n, solid);
+    };
+    auto cube = crease_pixels("Rasterized");
+    const Image cube_raster = ed.render_image_for_test();
+    auto cube_pt = crease_pixels("Path");
+    const Image &cube_traced = ed.render_image_for_test();
+    /* The trace's creases where the rasterizer's are (within a pixel): its depth is the pixel centres', not the
+     * jittered samples' (which drew noise on the faces). */
+    auto magenta = [](uint32_t c) { return (c >> 24) == 255 && (int)((c >> 16) & 255) > 200 && (int)(c & 255) > 200 && (int)((c >> 8) & 255) < 90; };
+    int near_raster = 0, traced_lines = 0;
+    for (int y = 0; y < cube_traced.height; y++)
+      for (int x = 0; x < cube_traced.width; x++) {
+        if (!magenta(cube_traced.pixels[(size_t)y * cube_traced.width + x])) continue;
+        traced_lines++;
+        bool near = false;
+        for (int dy = -1; dy <= 1; dy++)
+          for (int dx = -1; dx <= 1; dx++) {
+            const int xx = x + dx, yy = y + dy;
+            if (xx >= 0 && yy >= 0 && xx < cube_raster.width && yy < cube_raster.height && magenta(cube_raster.pixels[(size_t)yy * cube_raster.width + xx])) near = true;
+          }
+        near_raster += near;
+      }
+    std::printf("    cube: %d crease pixels rasterized, %d traced (%d of them by the rasterized ones)\n", cube.first, cube_pt.first, near_raster);
+    CHECK(cube.first > 15 && cube_pt.first > 15);  // (the cube is small in a 160 x 90 render: its three visible edges)
+    CHECK(near_raster * 10 >= traced_lines * 9);
+    /* A plate folded 30 degrees along its middle. */
+    GameObject *g = ed.scene().find_by_name("Cube");
+    if (!g) return;
+    auto plate = std::make_shared<Mesh>();
+    const float a = 30.0f * kDeg2Rad;
+    plate->add_vert({-1.5f, 0.0f, -1.5f});
+    plate->add_vert({0.0f, 0.0f, -1.5f});
+    plate->add_vert({0.0f, 0.0f, 1.5f});
+    plate->add_vert({-1.5f, 0.0f, 1.5f});
+    plate->add_vert({1.5f * std::cos(a), 1.5f * std::sin(a), -1.5f});
+    plate->add_vert({1.5f * std::cos(a), 1.5f * std::sin(a), 1.5f});
+    plate->add_face({0, 3, 2, 1});
+    plate->add_face({1, 2, 5, 4});
+    g->get<MeshFilter>()->mesh = plate;
+    MaterialPtr both = make_material("Plate", Vec3(0.7f));  // (the default cube has no material slot of its own)
+    both->double_sided = true;
+    g->get<MeshRenderer>()->materials = {both};
+    g->mark_dirty();
+    la->crease_angle = 20.0f;
+    const auto plate20 = crease_pixels("Rasterized");
+    const int at20 = plate20.first;
+    std::printf("    the plate covers %d pixels\n", plate20.second);
+    la->crease_angle = 40.0f;
+    const int at40 = crease_pixels("Rasterized").first;
+    g->get<MeshFilter>()->mesh = primitives::uv_sphere(1.5f, 64, 32);
+    g->mark_dirty();
+    auto sph = crease_pixels("Rasterized");
+    std::printf("    30-degree fold: %d pixels at 20, %d at 40; smooth sphere: %d of %d\n", at20, at40, sph.first, sph.second);
+    CHECK(at20 > 10 && at40 == 0);
+    CHECK(sph.first * 100 <= sph.second);
+  });
+
+  test("material texture fields: a procedural texture's output shows its image and name (not missing, not Non-Color), a missing one says so", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("newtex R61Field Bricks");
+    TextureRef albedo{"Assets/Textures/R61Field.ptex#albedo", false}, normal{"Assets/Textures/R61Field.ptex#normal", true};
+    CHECK(resolve_texture_ref(albedo) != nullptr && resolve_texture_ref(normal) != nullptr);
+    CHECK(texture_ref_label(albedo) == "R61Field (albedo)" && texture_ref_label(normal) == "R61Field (normal)");
+    CHECK(texture_ref_is_procedural(normal) && !texture_ref_is_procedural(TextureRef{"Assets/Textures/x.png", true}));
+    /* The same image the material renders with. */
+    MaterialPtr m = make_material("Field", Vec3(1.0f));
+    m->base_map = albedo;
+    m->touch();
+    CHECK(m->textures().base == resolve_texture_ref(albedo));
+    CHECK(resolve_texture_ref(TextureRef{"Assets/Textures/NoSuch.ptex#albedo", false}) == nullptr);
+    CHECK(resolve_texture_ref(TextureRef{"generated:UV Grid", false}) != nullptr && texture_ref_label(TextureRef{"generated:UV Grid", false}) == "UV Grid");
+    std::remove(resolve_asset_path("Assets/Textures/R61Field.ptex").c_str());
+  });
+
+  test("procedural textures: the Normal / Roughness / Height Map switches make those outputs neutral while a Color Ramp still colours by the height", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("newtex R61Maps Bricks");
+    ProceduralTexturePtr pt = texture_asset("Assets/Textures/R61Maps.ptex");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    pt->width = pt->height = 64;
+    pt->add("Color Ramp");  // the albedo from the height: mortar and bricks two colours
+    pt->touch();
+    const Bitmap albedo_on = pt->output(0), normal_on = pt->output(1);
+    pt->use_normal = false, pt->use_roughness = false, pt->use_height = false;
+    pt->touch();
+    const Bitmap albedo_off = pt->output(0), normal_off = pt->output(1), rough_off = pt->output(2), height_off = pt->output(3);
+    CHECK(albedo_on.rgba8 == albedo_off.rgba8);  // the colour (and the ramp's input, the height inside) unchanged
+    std::set<uint32_t> cols;
+    for (size_t i = 0; i < albedo_off.rgba8.size(); i += 4) cols.insert((uint32_t)albedo_off.rgba8[i] << 16 | (uint32_t)albedo_off.rgba8[i + 1] << 8 | albedo_off.rgba8[i + 2]);
+    CHECK(cols.size() >= 2);  // the ramp still separates bricks from mortar
+    bool flat = true, rough1 = true, mid = true, bumpy = false;
+    for (size_t i = 0; i < normal_off.rgba8.size(); i += 4) {
+      flat = flat && normal_off.rgba8[i] == 128 && normal_off.rgba8[i + 1] == 128 && normal_off.rgba8[i + 2] == 255;
+      rough1 = rough1 && rough_off.rgba8[i] == 255;
+      mid = mid && height_off.rgba8[i] == 128;
+      bumpy = bumpy || normal_on.rgba8[i] != 128;
+    }
+    CHECK(flat && rough1 && mid && bumpy);
+    /* Assign to Selection gives only the maps that are on. */
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test("Assets/Textures/R61Maps.ptex");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const Material &m = *cube->get<MeshRenderer>()->materials[0];
+    CHECK(m.base_map.path == "Assets/Textures/R61Maps.ptex#albedo" && m.normal_map.empty() && m.roughness_map.empty());
+    /* The switches save with the texture. */
+    ProceduralTexture back;
+    CHECK(load_texture_text(save_texture_text(*pt), back));
+    CHECK(!back.use_normal && !back.use_roughness && !back.use_height);
+    std::remove(resolve_asset_path("Assets/Textures/R61Maps.ptex").c_str());
+  });
+
+  test("anime filters: the Anime and Manga looks add their effects in order, one undo step removes them, and a scene keeps them", [] {
+    Editor ed;
+    r57_open(ed);
+    ed.step_frame_headless();  // r57_open's settings as their own undo step (not merged with the look's)
+    ed.command("select Main Camera");
+    ed.command("filter look Manga");
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CameraFilters *cf = cam ? cam->get<CameraFilters>() : nullptr;
+    CHECK(cf && cf->effects.size() == 4);
+    if (!cf || cf->effects.size() != 4) return;
+    CHECK(std::string(cf->effects[0]->type_name()) == GrayscaleEffect::kName && std::string(cf->effects[1]->type_name()) == HalftoneEffect::kName &&
+          std::string(cf->effects[2]->type_name()) == LineArtEffect::kName && std::string(cf->effects[3]->type_name()) == PaperEffect::kName);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    GameObject *bc = back.find_by_name("Main Camera");
+    CHECK(bc && bc->get<CameraFilters>() && bc->get<CameraFilters>()->effects.size() == 4);
+    ed.step_frame_headless();
+    ed.command("undo");
+    cam = ed.scene().find_by_name("Main Camera");
+    cf = cam ? cam->get<CameraFilters>() : nullptr;
+    CHECK(!cf || cf->effects.empty());
+    ed.command("filter look Anime");
+    cam = ed.scene().find_by_name("Main Camera");
+    cf = cam->get<CameraFilters>();
+    CHECK(cf && cf->effects.size() == 3 && std::string(cf->effects[0]->type_name()) == LineArtEffect::kName);
+    /* The look renders. (NaN and huge fields: the stress section `filters` fuzzes every effect.) */
+    const Image &img = r57_render(ed, "Rasterized", false);
+    CHECK(img.width == 160);
+    ed.command("filter look Comic");  // unknown: a warning, nothing added
+    CHECK(cam->get<CameraFilters>()->effects.size() == 3);
+    ed.command("select Directional Light");  // and no empty stack on an object that had none
+    ed.command("filter look Comic");
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    CHECK(sun && !sun->get<CameraFilters>());
   });
 }

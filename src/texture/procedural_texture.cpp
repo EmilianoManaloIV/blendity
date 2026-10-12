@@ -240,6 +240,14 @@ void ProceduralTexture::reflect(Reflector &r) {
   r.help("Up close the views evaluate the layers per pixel, like a shader (sharp at any distance), instead of\n"
          "reading the image; further away, and in path-traced renders and exports, the image at this size.");
   r.layer_list("Layers", layers);
+  /* After the stack (the part most used stays at the top of the window). */
+  r.field("Normal Map", use_normal);
+  r.help("The bumps of the height as a normal map. Off: a flat one (the layers still use the height inside,\n"
+         "for example a Color Ramp colouring by it).");
+  r.field("Roughness Map", use_roughness);
+  r.help("The roughness the layers make. Off: the material's own Roughness everywhere.");
+  r.field("Height Map", use_height);
+  r.help("The height as an output image. Off: a flat mid grey.");
 }
 
 uint64_t ProceduralTexture::hash() {
@@ -392,6 +400,12 @@ Bitmap ProceduralTexture::output(int which, const TexPlanes &p) const {
   b.height = p.h;
   b.rgba8.resize(p.size() * 4);
   const float ns = clampf(fin1(normal_strength, 1.0f), 0.0f, 10.0f);
+  if (!output_on(which)) {  // switched off: neutral (flat normal, roughness 1, mid height)
+    const uint8_t v[3] = {which == 1 ? (uint8_t)128 : which == 2 ? (uint8_t)255 : (uint8_t)128, which == 1 ? (uint8_t)128 : which == 2 ? (uint8_t)255 : (uint8_t)128,
+                          which == 1 ? (uint8_t)255 : which == 2 ? (uint8_t)255 : (uint8_t)128};
+    for (size_t i = 0; i < p.size(); i++) b.rgba8[i * 4] = v[0], b.rgba8[i * 4 + 1] = v[1], b.rgba8[i * 4 + 2] = v[2], b.rgba8[i * 4 + 3] = 255;
+    return b;
+  }
   JobSystem::global().parallel_for(p.h, 16, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++)
       for (int x = 0; x < p.w; x++) {

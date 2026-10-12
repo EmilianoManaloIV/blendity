@@ -1845,8 +1845,9 @@ void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) 
     }
     Material &m = *mr->materials[0];
     m.base_map = TextureRef{asset_path + "#albedo", false};
-    m.normal_map = TextureRef{asset_path + "#normal", true};
-    m.roughness_map = TextureRef{asset_path + "#roughness", true};
+    /* Only the maps the texture gives (its Normal / Roughness Map switches): the others are left empty. */
+    m.normal_map = pt->use_normal ? TextureRef{asset_path + "#normal", true} : TextureRef{};
+    m.roughness_map = pt->use_roughness ? TextureRef{asset_path + "#roughness", true} : TextureRef{};
     m.base_color = Vec3(1.0f);
     m.procedural = 0;
     m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
@@ -2187,6 +2188,19 @@ bool Editor::filter_stack_op(uint64_t object_id, const std::string &op, int i, i
     if (!cf) cf = g->add<CameraFilters>();
     cf->add(info->name);
     mark_changed("Add Filter " + info->name);
+    return true;
+  }
+  if (op == "look") {  // a ready-made stack appended (task 0039): one undo step
+    std::string look;
+    for (const std::string &l : filter_looks())
+      if (to_lower(l) == to_lower(name)) look = l;
+    if (look.empty()) {
+      Log::warn("filter look: Anime or Manga");
+      return false;
+    }
+    if (!cf) cf = g->add<CameraFilters>();
+    apply_filter_look(*cf, look);
+    mark_changed("Filter Look " + look);
     return true;
   }
   if (!cf) return false;
@@ -3144,7 +3158,7 @@ void Editor::run_console_command(const std::string &line) {
                                                    : Shading::Shaded;
   }
   else if (c == "filter") {
-    /* filter add <name> | remove <i> | move <i> <j> | reset <i> | list: the selection's Camera Filters stacks. */
+    /* filter add <name> | look <Anime|Manga> | remove <i> | move <i> <j> | reset <i> | list: the selection's Camera Filters stacks. */
     const std::string sub = to_lower(arg(1, "list"));
     std::string name;
     for (size_t k = 2; k < t.size(); k++) name += (k > 2 ? " " : "") + t[k];

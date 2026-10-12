@@ -283,6 +283,15 @@ void Editor::draw_hierarchy(const Recti &r) {
     u.tooltip("The active object (selected last) is cut by the others. Modifier: the cut stays live.");
     if (u.menu_item("Separate By Loose Parts", nullptr, false, has_sel)) separate("loose");
     if (u.menu_item("Export Selection...", nullptr, false, has_sel)) open_export_dialog(export_opts_.format);
+    /* As GameObject > Bake Textures, for the object right-clicked (the user asked for it here too). */
+    const GameObject *bg = scene_->find(active_);
+    const bool bakeable = bg && bg->mesh_filter() && bg->mesh_filter()->mesh;
+    u.submenu("Bake Textures", u.px(200), [this, bakeable] {
+      for (int size : {512, 1024, 2048, 4096})
+        if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, bakeable)) bake_object_textures(size);
+    });
+    u.tooltip("Bake this object's look (procedural textures, axis materials, every material slot) into one set of images\n"
+              "on new UVs, with a material that uses them. Undo restores it.");
     u.menu_separator();
     u.menu_label("Create Child");
     create_body(true);
@@ -574,18 +583,18 @@ struct InspectorReflector : Reflector {
     u.label(label_rect(row), n);
     Recti f = field_rect(row);
     Recti thumb{f.x, f.y, f.h, f.h};
-    TexturePtr tex;
-    if (t.path == "generated:UV Grid") tex = texture_uv_grid();
-    else if (t.path == "generated:Color Grid") tex = texture_color_grid();
-    else if (!t.empty()) tex = texture_load(resolve_asset_path(t.path), !t.non_color);
+    /* What the renderers use: an image file, a generated image, or a procedural texture's output (a .ptex
+     * reference such as Bricks.ptex#albedo is no file: loading it as one showed it missing). */
+    const TexturePtr tex = resolve_texture_ref(t);
+    const bool procedural = texture_ref_is_procedural(t);
     draw_texture_thumb(u, tex, thumb);
     Recti name{f.x + f.h + u.px(4), f.y, f.w - f.h - u.px(4), f.h};
     ed.drop_textures_.push_back({f, &t, material});  // an image dragged from the Project window lands here
     bool hot = u.hovered(name) || u.hovered(thumb);
     u.frame(name, u.theme.field, hot ? u.theme.field_hover : u.theme.field_border, u.px(3));
-    std::string label = t.empty() ? "None (Texture)" : (starts_with(t.path, "generated:") ? t.path.substr(10) : fs::filename(t.path));
+    std::string label = texture_ref_label(t);
     if (!t.empty() && !tex) label += "  (missing)";
-    if (t.non_color && !t.empty()) label += "  [Non-Color]";
+    if (t.non_color && !t.empty() && !procedural) label += "  [Non-Color]";  // a .ptex output's colour space is its own
     u.label({name.x + u.px(5), name.y, name.w - u.px(8), name.h}, label, tex || t.empty() ? u.theme.text : u.theme.error);
     u.tooltip(t.empty() ? std::string("Click to pick an image from Assets, or drop an image file onto the window.") : t.path);
     if (hot && u.in.pressed[0]) {
@@ -602,8 +611,20 @@ struct InspectorReflector : Reflector {
       if (uc->menu_item("None")) pick("", cur.non_color);
       if (uc->menu_item("UV Grid (generated)", nullptr, cur.path == "generated:UV Grid")) pick("generated:UV Grid", false);
       if (uc->menu_item("Color Grid (generated)", nullptr, cur.path == "generated:Color Grid")) pick("generated:Color Grid", false);
-      if (!cur.empty() && uc->menu_item(cur.non_color ? "Color Space: Non-Color (click for sRGB)" : "Color Space: sRGB (click for Non-Color)"))
+      if (!cur.empty() && !texture_ref_is_procedural(cur) &&
+          uc->menu_item(cur.non_color ? "Color Space: Non-Color (click for sRGB)" : "Color Space: sRGB (click for Non-Color)"))
         pick(cur.path, !cur.non_color);
+      /* The procedural textures (Window > Textures) and their outputs. */
+      const auto &ptex = e->texture_asset_paths();
+      if (!ptex.empty()) {
+        uc->menu_separator();
+        uc->menu_label("Procedural textures");
+        for (const std::string &p : ptex)
+          for (int o = 0; o < (int)TextureOutput::Count; o++) {
+            const std::string ref = p + "#" + texture_output_name(o);
+            if (uc->menu_item(fs::stem(p) + " (" + texture_output_name(o) + ")", nullptr, ref == cur.path)) pick(ref, o != (int)TextureOutput::Albedo);
+          }
+      }
       uc->menu_separator();
       const auto &imgs = e->image_assets();
       if (imgs.empty()) uc->menu_label("No images in Assets yet - drop some onto the window");
@@ -928,6 +949,13 @@ struct InspectorReflector : Reflector {
         if (uu.menu_item(fi.name))
           for (uint64_t id : targets) edp->filter_stack_op(id, "add", 0, 0, fi.name);
         uu.tooltip(fi.help);
+      }
+      uu.menu_label("Looks");
+      for (const std::string &look : filter_looks()) {
+        if (uu.menu_item(look))
+          for (uint64_t id : targets) edp->filter_stack_op(id, "look", 0, 0, look);
+        uu.tooltip(look == "Anime" ? "Line Art, a little more saturation and contrast, a soft Bloom."
+                                   : "Grayscale, Halftone dots, Line Art and Paper: a printed manga page.");
       }
     });
   }

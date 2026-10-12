@@ -588,6 +588,8 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
       {PosterizeEffect::kName, "Color", "Fewer shades per channel: flat bands of colour.", [] { return std::make_unique<PosterizeEffect>(); }},
       {GrayscaleEffect::kName, "Color", "Black and white, or a warm old-photo sepia.", [] { return std::make_unique<GrayscaleEffect>(); }},
       {InvertEffect::kName, "Color", "A negative image.", [] { return std::make_unique<InvertEffect>(); }},
+      {ColorRampEffect::kName, "Color", "The picture's brightness through a few colours (Blender's Color Ramp): flat cel tones or a gradient map.",
+       [] { return std::make_unique<ColorRampEffect>(); }},
       {VignetteEffect::kName, "Lens", "Darker (or tinted) corners, drawing the eye to the middle.", [] { return std::make_unique<VignetteEffect>(); }},
       {ChromaticAberrationEffect::kName, "Lens", "Red and blue fringes toward the edges, as from a cheap lens.",
        [] { return std::make_unique<ChromaticAberrationEffect>(); }},
@@ -599,6 +601,12 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
        [] { return std::make_unique<EdgeOutlineEffect>(); }},
       {CrtEffect::kName, "Stylize", "An old TV: scanlines, a curved tube, phosphor stripes and flicker.", [] { return std::make_unique<CrtEffect>(); }},
       {SharpenEffect::kName, "Stylize", "Crisper edges (an unsharp mask).", [] { return std::make_unique<SharpenEffect>(); }},
+      {HalftoneEffect::kName, "Stylize", "Comic / manga dots: a dot screen whose dots grow with the darkness (Mono ink on paper, or Colour).",
+       [] { return std::make_unique<HalftoneEffect>(); }},
+      {HatchingEffect::kName, "Stylize", "Pen hatching: lines that cross more densely in darker areas.", [] { return std::make_unique<HatchingEffect>(); }},
+      {LineArtEffect::kName, "Stylize", "Ink lines on silhouettes, where objects meet, and on creases sharper than an angle (a manga / anime line).",
+       [] { return std::make_unique<LineArtEffect>(); }},
+      {PaperEffect::kName, "Stylize", "A paper texture under the picture: blotches, fibres and grain.", [] { return std::make_unique<PaperEffect>(); }},
       {BloomEffect::kName, "Bloom & glow", "Light brighter than a threshold spills into the pixels around it: glowing lights, emissive materials, sun glints.",
        [] { return std::make_unique<BloomEffect>(); }},
   };
@@ -977,6 +985,119 @@ void BloomEffect::contribute(FilterStack &s) const {
   p.intensity = intensity, p.threshold = threshold, p.soft_knee = soft_knee, p.scatter = scatter, p.clamp = clamp, p.tint = tint;
   s.needs_hdr = true;
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_bloom(rt, p); });
+}
+
+void HalftoneEffect::reflect(Reflector &r) {
+  static const char *modes[] = {"Mono", "Colour"};
+  r.enumeration("Mode", mode, modes, 2);
+  r.field("Cell Size", cell, 0.1f, 2.0f, 128.0f);
+  r.help("Dot spacing in pixels at 1080p (the same look at any resolution).");
+  r.field("Angle", angle, 0.5f, -180.0f, 180.0f);
+  r.field("Contrast", contrast, 0.01f, 0.0f, 8.0f);
+  if (r.all_fields() || mode == 0) {
+    r.color("Ink", ink);
+    r.color("Paper", paper);
+  }
+}
+void HalftoneEffect::contribute(FilterStack &s) const {
+  HalftoneParams p;
+  p.cell = cell, p.angle = angle, p.mode = mode, p.ink = display_color(ink), p.paper = display_color(paper), p.contrast = contrast;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_halftone(rt, p, f); });
+}
+
+void HatchingEffect::reflect(Reflector &r) {
+  r.field("Spacing", spacing, 0.1f, 2.0f, 128.0f);
+  r.field("Thickness", thickness, 0.05f, 0.25f, 32.0f);
+  r.field("Angle", angle, 0.5f, -180.0f, 180.0f);
+  r.field("Layers", layers, 1, 3);
+  r.help("1: lines one way. 2: cross-hatching in the darker tones. 3: a diagonal too in the darkest.");
+  r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
+  r.field("Keep Color", keep_color);
+  r.help("Draw the lines over the picture instead of over paper.");
+  r.color("Ink", ink);
+  if (r.all_fields() || !keep_color) r.color("Paper", paper);
+}
+void HatchingEffect::contribute(FilterStack &s) const {
+  HatchingParams p;
+  p.spacing = spacing, p.thickness = thickness, p.angle = angle, p.layers = layers, p.strength = strength, p.keep_color = keep_color;
+  p.ink = display_color(ink), p.paper = display_color(paper);
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_hatching(rt, p, f); });
+}
+
+void LineArtEffect::reflect(Reflector &r) {
+  r.color("Color", color);
+  r.field("Thickness", thickness, 0.05f, 0.5f, 8.0f);
+  r.field("Silhouettes", silhouettes);
+  r.help("Outlines against the background, and where a part steps in front of another.");
+  r.field("Object Edges", object_edges);
+  r.field("Creases", creases);
+  r.field("Crease Angle", crease_angle, 0.5f, 1.0f, 179.0f);
+  r.help("A line where the surface turns more than this many degrees (a cube's edges at 90; smooth curves draw none).");
+  r.field("Taper", taper, 0.01f, 0.0f, 100.0f);
+  r.help("Lines fade with distance (0: the same everywhere).");
+}
+void LineArtEffect::contribute(FilterStack &s) const {
+  LineArtParams p;
+  p.color = display_color(color), p.thickness = thickness, p.crease_angle = crease_angle, p.taper = taper;
+  p.silhouettes = silhouettes, p.object_edges = object_edges, p.creases = creases;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_line_art(rt, p, f); });
+}
+
+void PaperEffect::reflect(Reflector &r) {
+  r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
+  r.field("Scale", scale, 0.01f, 0.05f, 50.0f);
+  r.color("Tint", tint);
+}
+void PaperEffect::contribute(FilterStack &s) const {
+  PaperParams p;
+  p.strength = strength, p.scale = scale, p.tint = display_color(tint);
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_paper(rt, p, f); });
+}
+
+void ColorRampEffect::reflect(Reflector &r) {
+  static const char *interp[] = {"Constant", "Linear"};
+  r.field("Stops", stops, 2, 4);
+  r.enumeration("Interpolation", interpolation, interp, 2);
+  r.help("Constant: flat tones (cel); Linear: a gradient map.");
+  Vec3 *cols[4] = {&color0, &color1, &color2, &color3};
+  float *poss[4] = {&position0, &position1, &position2, &position3};
+  static const char *cn[4] = {"Color 1", "Color 2", "Color 3", "Color 4"}, *pn[4] = {"Position 1", "Position 2", "Position 3", "Position 4"};
+  for (int k = 0; k < 4; k++)
+    if (r.all_fields() || k < stops) {
+      r.color(cn[k], *cols[k]);
+      r.field(pn[k], *poss[k], 0.01f, 0.0f, 1.0f);
+    }
+}
+void ColorRampEffect::contribute(FilterStack &s) const {
+  ColorRampParams p;
+  p.stops = stops, p.interpolation = interpolation;
+  const Vec3 cols[4] = {color0, color1, color2, color3};
+  const float poss[4] = {position0, position1, position2, position3};
+  for (int k = 0; k < 4; k++) p.color[k] = display_color(cols[k]), p.position[k] = poss[k];
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_color_ramp(rt, p); });
+}
+
+const std::vector<std::string> &filter_looks() {
+  static const std::vector<std::string> names = {"Anime", "Manga"};
+  return names;
+}
+
+bool apply_filter_look(CameraFilters &cf, const std::string &name_in) {
+  const std::string name = to_lower(name_in);
+  if (name == "anime") {
+    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.2f, l->crease_angle = 50.0f;
+    if (auto *g = dynamic_cast<ColorGradingEffect *>(cf.add(ColorGradingEffect::kName))) g->saturation = 0.15f, g->contrast = 0.08f;
+    if (auto *b = dynamic_cast<BloomEffect *>(cf.add(BloomEffect::kName))) b->intensity = 0.25f, b->threshold = 1.2f;
+    return true;
+  }
+  if (name == "manga") {
+    cf.add(GrayscaleEffect::kName);
+    if (auto *h = dynamic_cast<HalftoneEffect *>(cf.add(HalftoneEffect::kName))) h->cell = 6.0f, h->contrast = 1.2f;
+    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.5f;
+    cf.add(PaperEffect::kName);
+    return true;
+  }
+  return false;
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }

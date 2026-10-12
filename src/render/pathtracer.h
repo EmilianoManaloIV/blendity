@@ -121,8 +121,10 @@ class PathTracer {
   void set_camera(const Mat4 &view, const Mat4 &proj, int width, int height, const PTLens &lens = PTLens());
   void set_settings(const PTSettings &s) { settings_ = s; }
   const PTSettings &settings() const { return settings_; }
-  /* What the camera rays hit first, per pixel: the mean distance along the ray (1e6 for the sky) and
-   * the object's id (0 for the sky; the last sample's), for a FilterFrame's depth and id planes. */
+  /* What the camera sees first through each pixel's centre (no jitter, no lens), as the rasterizer's depth and id
+   * planes hold it: the distance along that ray (1e6 for the sky) and the object's id (0 for the sky). Traced once
+   * per scene and camera, for a FilterFrame (task 0039: the samples' jittered hits made creases noisy). Transparent
+   * and glass surfaces and an outline's back faces are looked through; cutout holes too. */
   void first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids);
   void reset();
 
@@ -273,6 +275,9 @@ class PathTracer {
   std::vector<float> cpu_depth_;
   std::vector<uint32_t> cpu_ids_, ids_;  // first-hit object index + 1 (0 = sky), the last sample's
   std::vector<float> cpu_cov_, cov_;      // camera samples that hit something (summed)
+  std::vector<float> centre_dist_;  // first_hit_planes' cache, for centre_key_
+  std::vector<uint32_t> centre_ids_;
+  uint64_t centre_key_ = 0;
   std::vector<float> cpu_last_dist_, last_dist_;  // the last hitting sample's first-hit distance (0 = none yet)
   void build_gpu_scene(gpu::Scene &s) const;
   void sync_gpus();

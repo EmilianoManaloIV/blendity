@@ -416,6 +416,51 @@ struct SharpenEffect : FilterEffectBase<SharpenEffect> {
   void contribute(FilterStack &stack) const override;
 };
 
+/* Anime and manga looks (task 0039). Sizes in pixels at 1080p. */
+struct HalftoneEffect : FilterEffectBase<HalftoneEffect> {
+  static constexpr const char *kName = "Halftone";
+  float cell = 8.0f, angle = 45.0f, contrast = 1.0f;
+  int mode = 0;  // 0 Mono, 1 Colour
+  Vec3 ink{0, 0, 0}, paper{1, 1, 1};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct HatchingEffect : FilterEffectBase<HatchingEffect> {
+  static constexpr const char *kName = "Hatching";
+  float spacing = 6.0f, thickness = 1.0f, angle = 45.0f, strength = 1.0f;
+  int layers = 3;
+  bool keep_color = false;
+  Vec3 ink{0, 0, 0}, paper{1, 1, 1};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct LineArtEffect : FilterEffectBase<LineArtEffect> {
+  static constexpr const char *kName = "Line Art";
+  Vec3 color{0, 0, 0};
+  float thickness = 1.5f, crease_angle = 40.0f, taper = 0.0f;
+  bool silhouettes = true, object_edges = true, creases = true;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct PaperEffect : FilterEffectBase<PaperEffect> {
+  static constexpr const char *kName = "Paper";
+  float strength = 0.35f, scale = 1.0f;
+  Vec3 tint{1.0f, 0.97f, 0.9f};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct ColorRampEffect : FilterEffectBase<ColorRampEffect> {
+  static constexpr const char *kName = "Color Ramp";
+  int stops = 3, interpolation = 0;
+  Vec3 color0{0.05f, 0.04f, 0.08f}, color1{0.45f, 0.4f, 0.55f}, color2{1.0f, 0.95f, 0.88f}, color3{1, 1, 1};
+  float position0 = 0.0f, position1 = 0.33f, position2 = 0.66f, position3 = 1.0f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+/* Ready-made stacks (task 0039): "Anime" and "Manga", appended to a camera's filters. False for an unknown name. */
+const std::vector<std::string> &filter_looks();
+bool apply_filter_look(CameraFilters &cf, const std::string &name);
+
 /* Bloom & glow (task 0007): light above a threshold spills into the pixels around it. */
 struct BloomEffect : FilterEffectBase<BloomEffect> {
   static constexpr const char *kName = "Bloom";

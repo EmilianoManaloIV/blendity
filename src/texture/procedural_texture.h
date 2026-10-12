@@ -129,6 +129,13 @@ struct ProceduralTexture {
   /* Live Shading (task 0031): up close the rasterizer evaluates the stack per pixel instead of reading the
    * image, so it stays sharp at any distance. */
   bool live_shading = true;
+  /* Which maps the texture gives a material (the user's request, round 61). Off, an output is neutral (a flat
+   * normal, roughness 1 so the material's own Roughness rules, mid height) while the layers still compute the
+   * height inside: a Color Ramp from the height colours the albedo without the bricks also bumping the surface. */
+  bool use_normal = true, use_roughness = true, use_height = true;
+  bool output_on(int which) const {
+    return which == 1 ? use_normal : which == 2 ? use_roughness : which == 3 ? use_height : true;
+  }
   TextureLayerList layers;
   uint64_t version = 1;
   ProceduralTexture() = default;
@@ -163,6 +170,7 @@ class LiveTexture {
   int width() const { return w_; }
   int height() const { return h_; }
   uint64_t hash() const { return hash_; }
+  bool output_on(int which) const { return tex_.output_on(which); }  // the texture's Normal / Roughness / Height Map switches
 
  private:
   /* height_only: just the layers that change the height (or the mask the height layers fade by), for the

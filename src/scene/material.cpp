@@ -32,6 +32,34 @@ std::string make_asset_relative(const std::string &abs_path) {
   return abs_path;
 }
 
+TexturePtr resolve_texture_ref(const TextureRef &t) {
+  if (t.empty()) return nullptr;
+  if (t.path == "generated:UV Grid") return texture_uv_grid();
+  if (t.path == "generated:Color Grid") return texture_color_grid();
+  std::string asset;
+  int output = 0;
+  if (split_texture_ref(t.path, asset, output)) {
+    ProceduralTexturePtr pt = texture_asset(asset);
+    return pt ? procedural_texture_output(*pt, output) : nullptr;
+  }
+  return texture_load(resolve_asset_path(t.path), !t.non_color);
+}
+
+bool texture_ref_is_procedural(const TextureRef &t) {
+  std::string asset;
+  int output = 0;
+  return split_texture_ref(t.path, asset, output);
+}
+
+std::string texture_ref_label(const TextureRef &t) {
+  if (t.empty()) return "None (Texture)";
+  if (starts_with(t.path, "generated:")) return t.path.substr(10);
+  std::string asset;
+  int output = 0;
+  if (split_texture_ref(t.path, asset, output)) return fs::stem(asset) + " (" + texture_output_name(output) + ")";
+  return fs::filename(t.path);
+}
+
 void Material::reflect(Reflector &r) {
   static const char *mappings[] = {"UV", "Box (Triplanar)", "Generated (Object Bounds)"};
   static const char *procs[] = {"None (use Base Map)", "Checker", "Noise", "UV Grid", "Color Grid"};

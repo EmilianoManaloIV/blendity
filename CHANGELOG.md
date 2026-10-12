@@ -2,6 +2,58 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 61): anime and manga camera filters (task 0039)
+
+**Asked:** the rest of "anime / 2D looks like Goo Engine (toon shading, outlines, halftone, ...)" (the roadmap's
+item 6, second half).
+
+**Added**
+- Camera filters: **Halftone** (a dot screen, Mono ink on paper or Colour, the same dots at any resolution),
+  **Hatching** (one to three line directions switched on by darkness), **Line Art** (silhouettes, object edges,
+  creases by angle, Taper), **Paper** (blotches, fibres and grain) and **Color Ramp** (brightness through 2 to 4
+  colours, Constant or Linear).
+- **Looks**: Add Filter > Looks > Anime (Line Art, saturation, a soft Bloom) and Manga (Grayscale, Halftone, Line
+  Art, Paper); `filter look Anime|Manga`. One undo step.
+
+**Asked during the round:** "in the material tab and inspector it says the texture is either non color or missing."
+And: "When I have a procedural map (bricks) and I have a color ramp that is based on height. It only works when height
+map is enabled even though I just want the color ... Maybe add a toggle with the texture window to only enable or
+disable certain maps."
+
+- **Normal Map, Roughness Map and Height Map switches** on a procedural texture (the Textures window, below the layer stack): off, that
+  output is neutral (a flat normal, roughness 1 so the material's Roughness rules, mid height) and Assign to
+  Selection leaves it out, while the layers still compute the height inside, so a Color Ramp from the height
+  colours the bricks without them also bumping the surface. Live shading follows the switches too.
+
+- **Bake Textures in the Hierarchy's right-click menu** too (as GameObject > Bake Textures), as the user asked.
+
+**Fixed**
+- **A material's texture field said "(missing)" for a procedural texture** (Bricks.ptex#albedo is no file): it
+  now shows the texture's image and its name ("Bricks (albedo)"), and its picker lists every procedural texture's
+  outputs beside the images. Their Non-Color tag and colour-space switch are gone (an output's colour space is its
+  own). The renderers always used them; only the field was wrong.
+- Path-traced pictures gave the filters (Edge Outline, Line Art) depth from a random sample per pixel; now one ray
+  through each pixel's centre, so their lines match the rasterizer's.
+- The Add Filter menu showed two Color headings (Color Ramp was listed after the Stylize effects).
+
+**Checked**
+- New tests (round 61): halving Halftone's cell gives 3.9 times the dots and 540p and 1080p show the same 14,528;
+  white stays white and black solid; Hatching's ink falls with brightness; Color Ramp Constant gives exactly 3
+  colours; Paper at 0 changes nothing and is the same twice; Line Art draws a cube's edges rasterized and traced
+  (the traced lines all within a pixel of the rasterized ones), a 30-degree fold at 20 and not at 40, nothing on
+  a smooth sphere; the looks add their effects in order, undo, round-trip, and an unknown look adds nothing.
+- Stress `filters`: each pass at 1080p on 8 threads against Edge Outline (about 10 ms): Halftone 0.6-0.9x,
+  Hatching 0.8x, Line Art 1.8-2.5x, Paper 0.1x, Color Ramp 0.05x (the spec's flat 4 ms is below what Posterize
+  costs; see the spec's As built); the fuzz of every effect with NaN / huge fields, 0 problems.
+
+**Review (code reviewer)**: three major and several minor findings, all fixed but one noted: grey specks in pure
+white and black halftone; noisy traced creases from jittered depth; Paper's cache holding one size (now four);
+an unknown look adding an empty stack; scratch memory that never shrank; Taper on the sky side; dots sized from
+one pixel. Noted: these colour passes veil a transparent film's background, as Invert and Posterize do.
+- Unit checks: Windows 8,850, 0 failed (497 tests); the whole suite in render-cache verify mode: 8,851,
+  0 failed, 0 stale pictures. Linux with libraries: 8,762, 0 failed. Sanitizer build: 8,684, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `filters` and `textures` stress 0 problems.
+
 ## 2026-10-11 (round 60): toon shading and outlines (task 0038)
 
 **Asked:** "Anime / 2D looks like Goo Engine (toon shading, outlines, halftone, ...)" (the roadmap's item 6, first half).

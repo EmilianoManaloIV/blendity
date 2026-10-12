@@ -159,6 +159,7 @@ struct LiveMemo {
       hit = &e[count < 6 ? count++ : 5];
       *hit = Entry{&t, u, v, t.at(u, v), false, Vec3(0.0f)};
     }
+    if (!t.output_on(out)) return out == 1 ? Vec4(0.5f, 0.5f, 1.0f, 1.0f) : out == 2 ? Vec4(1.0f, 1.0f, 1.0f, 1.0f) : Vec4(0.5f, 0.5f, 0.5f, 1.0f);  // switched off
     switch (out) {
       case 1:
         if (!hit->has_n) {

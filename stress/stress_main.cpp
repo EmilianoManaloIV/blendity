@@ -874,6 +874,73 @@ static void test_camera_filters(Report &rep, const Options &o) {
   rep.note(strprintf("Random stacks of every effect type (0-6 effects, every field fuzzed with NaN / infinite / huge values): %d runs, %d problems "
                      "(a problem: a crash, a changed image size, or a copy that hashes differently; the unit tests check the pictures)",
                      aruns, aproblems));
+  /* Task 0039: each anime / manga pass at 1080p on 8 threads (budget: Edge Outline's cost), on a picture with a depth plane (a
+   * tilted floor and a box, two ids) so Line Art does its whole work. */
+  {
+    const int W = 1920, H = 1080;
+    Image img;
+    img.resize(W, H);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, W, H});
+    const Mat4 vp = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 100.0f) * Mat4::look_at({0, 3, -6}, {0, 0, 0}, {0, 1, 0});
+    FilterFrame frame;
+    frame.inv_view_proj = vp.inverse();
+    frame.eye = {0, 3, -6};
+    frame.forward = normalize(Vec3(0, -3, 6));
+    frame.pixel_scale = 1.0f;
+    for (int y = 0; y < H; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        const int v = (x * 255) / W;
+        img.pixels[i] = 0xFF000000u | (uint32_t)v << 16 | (uint32_t)((y * 255) / H) << 8 | 128u;
+        rt.depth[i] = y > H / 3 ? 0.97f + 0.02f * (float)(H - y) / H : 1.0f;  // a floor (the sky above)
+        rt.ids[i] = (x > W / 3 && x < 2 * W / 3 && y > H / 2) ? 2u : 1u;
+      }
+    const std::vector<uint32_t> base = img.pixels;
+    JobSystem &js = JobSystem::global();
+    js.set_max_threads(8);
+    struct Item {
+      const char *name;
+      std::function<void()> run;
+    };
+    HalftoneParams hp;
+    HatchingParams tp;
+    LineArtParams lp;
+    PaperParams pp;
+    ColorRampParams cp;
+    for (int k = 0; k < 3; k++) cp.color[k] = Vec3(k / 2.0f), cp.position[k] = k / 2.0f;
+    const Item items[] = {{"Halftone", [&] { apply_halftone(rt, hp, &frame); }},
+                          {"Hatching", [&] { apply_hatching(rt, tp, &frame); }},
+                          {"Line Art", [&] { apply_line_art(rt, lp, &frame); }},
+                          {"Paper", [&] { apply_paper(rt, pp, &frame); }},
+                          {"Color Ramp", [&] { apply_color_ramp(rt, cp); }},
+                          {"Edge Outline (an existing pass, for reference)", [&] { apply_edge_outline(rt, OutlineParams{}, &frame); }},
+                          {"Posterize (an existing pass, for reference)", [&] { apply_posterize(rt, 6); }}};
+    rep.table({"anime / manga pass (1920x1080, 8 threads)", "ms", "vs Edge Outline", "problems"});
+    std::vector<double> ms;
+    for (const Item &it : items) {
+      double best = 1e30;
+      for (int k = 0; k < 5; k++) {
+        img.pixels = base;
+        best = std::min(best, time_ms(it.run));
+      }
+      ms.push_back(best);
+    }
+    /* The budget (spec, as built): no more than Edge Outline, a neighbour-reading pass already in the stack (Line
+     * Art, which also rebuilds positions and normals from the depth, 2.5 times it). A flat 4 ms was below what a
+     * one-line pass such as Posterize costs at 1080p on 8 threads. */
+    const double edge = ms[5];
+    int problems = 0;
+    for (size_t k = 0; k < ms.size(); k++) {
+      const bool reference = std::strstr(items[k].name, "reference") != nullptr;
+      const double limit = (std::strcmp(items[k].name, "Line Art") == 0 ? 2.5 : 1.0) * edge * 1.1;  // 10 % for timing noise
+      const int pr = !reference && ms[k] > limit ? 1 : 0;
+      problems += pr;
+      rep.row({items[k].name, f2(ms[k]), f2(ms[k] / std::max(1e-6, edge)), reference ? "-" : std::to_string(pr)});
+    }
+    js.set_max_threads(1 << 30);
+    std::printf("  -> Anime / manga passes at 1080p on 8 threads: %d over budget (Edge Outline %.2f ms)\n", problems, edge);
+  }
 }
 
 static void test_editor(Report &rep, const Options &o) {

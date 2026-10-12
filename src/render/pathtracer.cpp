@@ -1887,19 +1887,50 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
 }
 
 void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids) {
-  merge_aux();
   const size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
-  distance.assign(n, 1e6f);
-  ids.assign(n, 0u);
-  if (last_dist_.size() < n || ids_.size() < n) return;
-  for (size_t i = 0; i < n; i++) {
-    /* The last hitting sample's distance (a mean would count sky samples at 1e6, and on a GPU the sums
-     * run ahead of the merged sample count): consistent with the id, which is the last sample's too. */
-    const uint32_t k = ids_[i];
-    const bool hit = k > 0 && k <= objects_.size();
-    ids[i] = hit ? objects_[k - 1].id : 0;
-    if (hit && last_dist_[i] > 0.0f) distance[i] = last_dist_[i];
+  /* The key: this build, the camera and the size. */
+  uint64_t key = 1469598103934665603ull ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
+  const uint8_t *b = reinterpret_cast<const uint8_t *>(inv_vp_.m);
+  for (size_t i = 0; i < sizeof(inv_vp_.m); i++) key = (key ^ b[i]) * 1099511628211ull;
+  if (key != centre_key_ || centre_dist_.size() != n) {
+    centre_dist_.assign(n, 1e6f);
+    centre_ids_.assign(n, 0u);
+    JobSystem::global().parallel_for(h_, 4, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < w_; x++) {
+          const float nx = 2.0f * (x + 0.5f) / w_ - 1.0f, ny = 1.0f - 2.0f * (y + 0.5f) / h_;
+          const Vec4 a = inv_vp_ * Vec4(nx, ny, 0.0f, 1.0f), bb = inv_vp_ * Vec4(nx, ny, 1.0f, 1.0f);
+          if (a.w == 0.0f || bb.w == 0.0f) continue;
+          const Vec3 pa = a.xyz() / a.w, pb = bb.xyz() / bb.w;
+          Ray r{pa, normalize(pb - pa)};
+          float travelled = 0.0f;
+          for (int step = 0; step < 64; step++) {
+            Hit h;
+            if (!intersect(r, h)) break;
+            SurfacePoint sp;
+            const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+            bool through = mat->surface == (int)MaterialSurface::Transparent || mat->surface == (int)MaterialSurface::Glass;
+            through = through || (mat->outline_hull && dot(sp.geo_normal, r.dir) >= 0.0f);  // a hull's back faces
+            if (!through && mat->surface == (int)MaterialSurface::Cutout) {
+              sp.position = r.origin + r.dir * h.t;
+              through = evaluate_material(*mat, sp).alpha < mat->alpha_clip;
+            }
+            if (!through) {
+              const size_t i = (size_t)y * w_ + x;
+              centre_dist_[i] = travelled + h.t;
+              centre_ids_[i] = h.object < objects_.size() ? objects_[h.object].id : 0u;
+              break;
+            }
+            const float adv = h.t + 1e-4f * (1.0f + h.t);
+            r.origin = r.origin + r.dir * adv;
+            travelled += adv;
+          }
+        }
+    });
+    centre_key_ = key;
   }
+  distance = centre_dist_;
+  ids = centre_ids_;
 }
 
 bool PathTracer::adopt_ready_gpus() {

@@ -4,7 +4,7 @@
 - **Requirements:** R-03, R-05
 - **Decisions:** ADR 0020
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/36
 
 ## Goal
 The anime / 2D look Goo Engine gives Blender: a **Toon** shading model on materials (banded light, a shadow colour,

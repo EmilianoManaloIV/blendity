@@ -442,7 +442,10 @@ Ramp (Goo Engine builds it in); Unity with a toon shader. In Blendity set a mate
 pick the Toon preset): Toon Bands sets how many lit tones, Threshold where light turns to shadow, Shadow Color the
 dark side's tint, and a rim light can outline the silhouette from inside. Add an Outline component for the lines:
 a slightly larger copy of the mesh, turned inside out, so only its rim shows round the object (the inverted
-hull). Both show in the views, F12 renders on the CPU and GPU, and exports.
+hull). Both show in the views, F12 renders on the CPU and GPU, and exports. For the printed-page look, a camera's
+Add Filter > Looks > Manga stacks Grayscale, Halftone dots, Line Art and Paper; Anime adds Line Art, a little
+saturation and a soft Bloom. Line Art draws creases where the surface turns more than an angle, so a cube's edges
+get lines and a smooth sphere only its outline.
 ! cmd:select Sphere; material Toon; component Outline | Make the Sphere toon-shaded with an outline
 # Baking textures for other programs
 Procedural textures, axis materials and Box mapping are computed by Blendity's shaders; another program only understands images on UVs. Object > Bake Textures lays the object out on new UVs (Smart UV Project and Pack Islands, as the lightmapper does) and evaluates its materials at every texel into four images: albedo, roughness, metallic and a normal map. Blender does the same with Cycles' Bake panel, Unity users with Substance's baker. The export option Bake Textures does it on copies for OBJ, FBX and glTF, leaving the scene alone.
