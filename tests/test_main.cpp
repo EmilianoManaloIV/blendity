@@ -204,6 +204,7 @@ static void round43_tests();
 static void round44_tests();
 static void round45_tests();
 static void round46_tests();
+static void round47_tests();
 
 int main() {
   register_builtin_components();
@@ -827,6 +828,7 @@ int main() {
   round44_tests();
   round45_tests();
   round46_tests();
+  round47_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -17868,5 +17870,233 @@ static void round46_tests() {
     const R34Count d = r34_totals(ed) - t1;
     std::printf("    shadow maps after a move: %llu\n", (unsigned long long)d.shadows);
     CHECK(d.shadows == 1);
+  });
+}
+
+/* Round 47 (task 0025, ADR 0016): the Active Camera, and filters wherever a camera's picture shows. */
+static int r47_dark(const Image &img, const Recti &r) {  // pixels near black (an outline's colour)
+  int n = 0;
+  for (int y = r.y; y < r.bottom() && y < img.height; y++)
+    for (int x = r.x; x < r.right() && x < img.width; x++) {
+      const uint32_t c = img.pixels[(size_t)y * img.width + x];
+      if (((c >> 16) & 255) < 24 && ((c >> 8) & 255) < 24 && (c & 255) < 24) n++;
+    }
+  return n;
+}
+static double r47_mean(const std::vector<uint32_t> &px) {
+  double s = 0;
+  for (uint32_t c : px) s += ((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255);
+  return px.empty() ? 0 : s / (3.0 * px.size());
+}
+static double r47_detail(const Image &img) {  // high-frequency energy: mean |difference| between horizontal neighbours
+  double s = 0;
+  size_t n = 0;
+  for (int y = 0; y < img.height; y++)
+    for (int x = 1; x < img.width; x++) {
+      const uint32_t a = img.pixels[(size_t)y * img.width + x], b = img.pixels[(size_t)y * img.width + x - 1];
+      s += std::abs((int)((a >> 8) & 255) - (int)((b >> 8) & 255));
+      n++;
+    }
+  return n ? s / n : 0;
+}
+static void round47_tests() {
+  test("active camera: a filter on a camera that is not \"Main Camera\" shows in the Game view only once it is the Active Camera", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Camera");
+    GameObject *second = ed.selected_object();
+    CHECK(second && second->camera() && second->name != "Main Camera");
+    if (!second) return;
+    second->set_local_position({0, 1, -6});
+    ed.command("filter add Retro Console");  // on the selection: the second camera
+    r34_steps(ed, 4);
+    CHECK(ed.main_camera_owner_for_test() && ed.main_camera_owner_for_test()->name == "Main Camera");
+    const std::vector<uint32_t> before = r34_crop(ed, ed.game_rect_for_test());
+    ed.command("activecamera " + second->name);
+    r34_steps(ed, 4);
+    CHECK(ed.scene().active_camera == second->id);
+    CHECK(ed.main_camera_owner_for_test() == second);
+    const std::vector<uint32_t> after = r34_crop(ed, ed.game_rect_for_test());
+    CHECK(before != after);
+    /* Undo puts the name rule back. */
+    ed.command("undo");
+    r34_steps(ed, 2);
+    CHECK(ed.scene().active_camera == 0);
+    CHECK(ed.main_camera_owner_for_test()->name == "Main Camera");
+  });
+  test("active camera: the Camera Preview and the Game view both follow the active camera's filters (Shaded)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Camera");
+    GameObject *second = ed.selected_object();
+    if (!second) return;
+    second->set_local_position({0, 1, -6});
+    ed.command("activecamera " + second->name);
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> g0 = r34_crop(ed, ed.game_rect_for_test()), p0 = r34_crop(ed, ed.cam_preview_rect_for_test());
+    ed.command("filter add Retro Console");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> g1 = r34_crop(ed, ed.game_rect_for_test()), p1 = r34_crop(ed, ed.cam_preview_rect_for_test());
+    CHECK(!p0.empty() && g0 != g1 && p0 != p1);
+  });
+  test("active camera: with filters on, the Scene view takes the active camera's exposure and Solid Color clear", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    GameObject *mc = by_name(ed.scene(), "Main Camera");
+    Camera *cam = mc->camera();
+    ed.command("filter add Sharpen");  // any pass: the Scene view then renders through render_camera
+    ed.command("filters on");
+    r34_steps(ed, 4);
+    const Recti sv = ed.scene_view_rect();
+    const double m0 = r47_mean(r34_crop(ed, sv));
+    cam->physical_exposure = true;
+    cam->iso = 1600.0f;  // +4 EV
+    r34_steps(ed, 3);
+    const double m1 = r47_mean(r34_crop(ed, sv));
+    std::printf("    Scene view mean brightness: %.1f, at +4 EV on the camera: %.1f\n", m0, m1);
+    CHECK(m1 > m0 * 1.1);  // Filmic compresses the +4 EV: measured 142.8 -> 168.6
+    cam->physical_exposure = false;
+    cam->clear_flags = 1;
+    cam->background = {1.0f, 0.0f, 0.0f};
+    r34_steps(ed, 3);
+    const uint32_t sky = ed.framebuffer().pixels[(size_t)(sv.y + 4) * ed.framebuffer().width + sv.x + sv.w / 2];
+    std::printf("    a sky pixel with Solid Color red: %06x\n", sky & 0xFFFFFF);
+    CHECK(((sky >> 16) & 255) > 200 && ((sky >> 8) & 255) < 40 && (sky & 255) < 40);
+  });
+  test("active camera: an Edge Outline filter draws outlines in a path-traced F12 render, and Solid Color fills its background", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("set Render.RenderEngine Path");
+    ed.command("set Render.Samples 2");
+    ed.command("set Render.ResolutionX 160");
+    ed.command("set Render.ResolutionY 90");
+    ed.command("set Render.Denoise false");
+    auto render = [&] {
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.rendering_for_test());
+    };
+    render();
+    const Image &img = ed.render_image_for_test();
+    const int dark0 = r47_dark(img, {0, 0, img.width, img.height});
+    ed.command("select Main Camera");
+    ed.command("filter add Edge Outline");
+    render();
+    const int dark1 = r47_dark(img, {0, 0, img.width, img.height});
+    std::printf("    near-black pixels: %d without the outline, %d with\n", dark0, dark1);
+    CHECK(dark1 > dark0 + 40);
+    Camera *cam = by_name(ed.scene(), "Main Camera")->camera();
+    cam->clear_flags = 1;
+    cam->background = {1.0f, 0.0f, 0.0f};
+    ed.command("set Render.ViewTransform Standard");
+    render();
+    const uint32_t corner = img.pixels[2 * img.width + 2];
+    std::printf("    a background pixel with Solid Color red: %06x\n", corner & 0xFFFFFF);
+    CHECK(((corner >> 16) & 255) > 150 && ((corner >> 8) & 255) < 60 && (corner & 255) < 60);
+  });
+  test("active camera: an F12 raster render without filters applies the camera's depth of field", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("set Render.ResolutionX 240");
+    ed.command("set Render.ResolutionY 135");
+    auto render = [&] {
+      ed.command("render");
+      for (int i = 0; i < 100 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    };
+    render();
+    const Image &img = ed.render_image_for_test();
+    const double d0 = r47_detail(img);
+    Camera *cam = by_name(ed.scene(), "Main Camera")->camera();
+    cam->dof = true;
+    cam->f_stop = 0.3f;
+    cam->focus_distance = 0.2f;  // everything far out of focus
+    render();
+    const double d1 = r47_detail(img);
+    std::printf("    neighbour difference: %.2f sharp, %.2f with depth of field\n", d0, d1);
+    CHECK(d1 < d0 * 0.85);  // measured 0.47 -> 0.36 at 240 x 135 (the blur works on the supersampled image)
+  });
+  test("active camera: saved and loaded with the scene; deleting the camera clears it", [] {
+    Scene s;
+    GameObject *a = s.create("Cam A");
+    a->add<Camera>();
+    GameObject *b = s.create("Cam B");
+    b->add<Camera>();
+    s.active_camera = b->id;
+    const std::string path = fs::join(fs::join(scratch_project(), "Assets/Scenes"), "R47_Active.scene");
+    CHECK(save_scene(s, path));
+    Scene t;
+    std::string err;
+    CHECK(load_scene(path, t, err));
+    GameObject *tb = t.find_by_name("Cam B");
+    CHECK(tb && t.active_camera == tb->id);
+    t.destroy(tb);
+    CHECK(t.active_camera == 0);
+    std::remove(path.c_str());
+  });
+  test("active camera: the Game view's camera dropdown opens with a click and picking a camera makes it the active one", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Camera");
+    GameObject *second = ed.selected_object();
+    if (!second) return;
+    second->name = "Second Camera";
+    second->set_local_position({0, 1, -6});
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    const ui::Context &u = ed.ui_for_test();
+    const Recti gv = ed.game_rect_for_test();
+    const int bh = u.row_h() + u.px(4);
+    const Recti combo{gv.x + u.px(6), gv.y - bh + u.px(3), u.px(170), bh - u.px(6)};
+    r34_click(ed, combo.x + combo.w / 2, combo.y + combo.h / 2);  // opens the list (its labels are read at the frame's end)
+    r34_steps(ed, 3);
+    /* The list drops below the field: a row per camera, the second camera second (Hierarchy order). */
+    const int row_y = combo.bottom() + u.px(4) + u.row_h() + u.row_h() / 2;
+    r34_click(ed, combo.x + u.px(30), row_y);
+    r34_steps(ed, 3);
+    std::printf("    active camera after the pick: %s\n", ed.main_camera_owner_for_test() ? ed.main_camera_owner_for_test()->name.c_str() : "none");
+    CHECK(ed.scene().active_camera == second->id);
+    CHECK(ed.main_camera_owner_for_test() == second);
+    /* Deleting it through the editor: back to the name rule. */
+    ed.command("select Second Camera");
+    ed.command("delete");
+    r34_steps(ed, 2);
+    CHECK(ed.scene().active_camera == 0);
+    CHECK(ed.main_camera_owner_for_test() && ed.main_camera_owner_for_test()->name == "Main Camera");
+  });
+  test("active camera: an Edge Outline filter draws outlines in the Rendered (path-traced) Camera Preview", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("set Render.PreviewSamples 2");
+    ed.command("set Render.Denoise false");
+    ed.command("select Main Camera");
+    ed.command("camerapreview rendered");
+    auto settle = [&] {
+      for (int i = 0; i < 400 && !ed.cam_preview_done_for_test(); i++) ed.step_frame_headless();
+      CHECK(ed.cam_preview_done_for_test());
+    };
+    settle();
+    const Recti pr = ed.cam_preview_rect_for_test();
+    CHECK(pr.w > 40 && pr.h > 20);
+    const int dark0 = r47_dark(ed.framebuffer(), pr);
+    ed.command("filter add Edge Outline");
+    r34_steps(ed, 2);
+    settle();
+    const int dark1 = r47_dark(ed.framebuffer(), pr);
+    std::printf("    near-black pixels in the Rendered Preview: %d without the outline, %d with\n", dark0, dark1);
+    CHECK(dark1 > dark0 + 30);
+  });
+  test("active camera: the console reports it, 'none' clears it, and a non-camera is refused", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("activecamera Cube");
+    CHECK(ed.scene().active_camera == 0);
+    ed.command("activecamera Main Camera");
+    CHECK(ed.scene().active_camera == by_name(ed.scene(), "Main Camera")->id);
+    ed.command("activecamera none");
+    CHECK(ed.scene().active_camera == 0);
   });
 }

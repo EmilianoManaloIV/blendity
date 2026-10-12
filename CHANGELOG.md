@@ -2,6 +2,55 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 47): the Active Camera, and filters wherever a camera's picture shows (task 0025, ADR 0016)
+
+**Asked:** camera filters were missing from the Game view, the Camera Preview and the Render window.
+
+**Found:** which camera "the" camera is was decided by name ("Main Camera", else the first), while the
+Camera Preview showed the selected one: a filter on the selected camera showed in the Preview and not
+in the Game view. The Scene view's filters ran with no camera (no exposure, clear colour or fog). Path-
+traced pictures carried no depth or ids, so Edge Outline and the Retro fog were skipped in the Rendered
+Preview and a path-traced F12, and Solid Color was ignored there. F12 raster without filters skipped
+depth of field.
+
+**Added / fixed**
+- **An explicit Active Camera** per scene (Blender's scene camera, Unity's MainCamera tag): "Set as
+  Active Camera" in the Camera inspector and the Hierarchy menu, a camera dropdown in the Game view's
+  bar (replacing "Display 1"), `activecamera <name>|none` in the console, Ctrl+0 (Ctrl+Numpad0) in the
+  Blender keymap; saved with the scene, one undo step, cleared when the camera is deleted. Without one
+  the old name rule applies, so old scenes behave as before.
+- **The path tracers (CPU and GPU) record the first hit's distance and object id,** and a traced picture
+  gets a real `FilterFrame` with depth (as the rasterizer's z / w) and ids: Edge Outline and the Retro
+  fog now work in a path-traced F12 and the Rendered Camera Preview. A camera's Solid Color fills the
+  traced background (camera rays only; the lighting is unchanged).
+- **The Scene view's filters look through the active camera** for exposure, Solid Color clear and far
+  clip (the editor's projection stays; no depth of field while working). **F12 raster without filters**
+  applies depth of field before the supersampling downsample.
+
+**Checked**
+- New tests (round 47): a filter on a second camera shows in the Game view only once it is the Active
+  Camera, and undo restores the name rule; the Camera Preview and the Game view both follow the active
+  camera's filters; the Scene view with filters takes the camera's exposure (+18 % mean brightness at
+  +4 EV under Filmic) and Solid Color (a red sky pixel); a path-traced F12 with Edge Outline has 591
+  near-black pixels against 1 without, and Solid Color fills its background; F12 raster depth of field
+  lowers the neighbour difference 0.47 → 0.36; the active camera round-trips through a scene file and is
+  cleared by deleting the camera; the console command reports, clears and refuses a non-camera.
+- From the code review (Opus): the Game view's camera dropdown kept its labels in locals that died
+  before the popup read them (a use after free the first time it was opened); they live in the editor
+  now, the list shows only cameras the view could show, and a test opens it with mouse clicks and picks
+  a camera. On a GPU the traced depth plane was a mean divided by a sample count that lags the sums
+  (inflated fog between merges) and a mean that counted sky samples at 1e6 (an unfogged ring around
+  distant objects): the plane now holds the last hitting sample's distance, consistent with the id. The
+  hit point is rebuilt from the near plane as the tracer traces it (orthographic cameras too); the
+  traced Solid Color is divided by the camera's exposure so it matches the raster clear; the far clip
+  is kept with the render; `Scene::clear` resets the active camera and a dangling id in a file is
+  dropped at load. A test checks outlines in the Rendered Camera Preview too. Note: F12 raster depth of
+  field runs on the supersampled image (33 million pixels at 4x 1080p), a second or two.
+- Unit checks: Windows 8,179, 0 failed (399 tests); the whole suite in render-cache verify mode: 8,180,
+  0 failed, 0 stale pictures. Linux with libraries: 8,131, 0 failed. Sanitizer build (before the review
+  fixes): 8,045, 0 failed, no reports. Stress `filters`: 300 fuzzed stacks, 0 problems; `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` unchanged within noise.
+
 ## 2026-10-11 (round 46): render-frame waste (task 0024)
 
 **Asked:** the editor-performance round, second part: the frames that really render (orbiting, dragging,

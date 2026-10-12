@@ -182,6 +182,8 @@ class Editor {
   /* Runs a console command (also used by --headless-screenshot and tests). */
   void command(const std::string &c) { run_console_command(c); }
   Recti scene_view_rect() const { return scene_rect_; }  // tests drive the Scene view with mouse events
+  Recti game_rect_for_test() const { return game_rect_; }
+  Recti cam_preview_rect_for_test() const { return cam_preview_rect_; }
   /* Tests: select an object, and record a change they made to the scene directly as one undo step. */
   void select_object(uint64_t id) { select(id); }
   void select_object_add(uint64_t id) { select(id, SEL_ADD); }  // Ctrl+click: the last one added is active
@@ -201,6 +203,7 @@ class Editor {
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
   bool rendering_for_test() const { return rendering_; }
+  bool cam_preview_done_for_test() const { return cam_preview_done_; }
   /* Baked lighting (task 0012). */
   bool baking_for_test() const { return baking_; }
   const LightingData &lighting_data_for_test() const { return lighting_data_; }
@@ -420,6 +423,8 @@ class Editor {
   uint64_t pick_wire_object(const Recti &r, int mx, int my, int radius);  // Display As Wire / Bounds objects
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
+  /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
+  void set_active_camera(GameObject *g);
   /* Render Camera Sequence: every camera marked In Sequence, one after another, each saved. */
   uint64_t render_camera_override_ = 0;  // the camera renders use instead of the Main Camera
   struct RenderSequence {
@@ -1002,6 +1007,11 @@ class Editor {
   RenderTarget game_rt_;
   Renderer3D game_r3d_;
   Recti game_rect_;
+  /* The Game view's camera dropdown: its labels live here because the combo's popup reads them at the
+   * end of the frame (ui::Context::combo), and which object each entry is. */
+  std::vector<std::string> game_cam_names_;
+  std::vector<const char *> game_cam_opts_;
+  std::vector<GameObject *> game_cam_objs_;
   bool game_stats_overlay_ = false;
 
   /* ---- rendering (render_view.cpp) ---- */
@@ -1145,6 +1155,13 @@ class Editor {
   PTSettings make_pt_settings(const RenderSettings &rs) const;
   PathTracer final_pt_;
   Image render_img_;
+  /* The final render's camera (for the traced picture's FilterFrame, ADR 0016). */
+  Mat4 render_view_, render_proj_;
+  Vec3 render_eye_, render_forward_{0, 0, 1};
+  float render_far_ = 1000.0f;
+  /* A path-traced picture's depth and id planes and its FilterFrame, from the tracer's first hits
+   * (ADR 0016): the depth is re-expressed as the rasterizer's z / w, so every pass reads it alike. */
+  FilterFrame trace_filter_frame(PathTracer &pt, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const Camera *cam);
   bool rendering_ = false, render_has_result_ = false;
   bool render_preview_ = false;  // the current / last render is a preview
   uint64_t live_preview_hash_ = 0;

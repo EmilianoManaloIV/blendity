@@ -251,6 +251,8 @@ void Editor::draw_hierarchy(const Recti &r) {
     if (u.menu_item("Duplicate", "Ctrl+D", false, has_sel)) duplicate_selected();
     if (u.menu_item("Delete", "Del", false, has_sel)) delete_selected();
     if (u.menu_item("Frame Selected", "F", false, has_sel)) frame_selected();
+    if (GameObject *ag = scene_->find(active_); ag && ag->camera() && ag->id != scene_->active_camera)
+      if (u.menu_item("Set as Active Camera", nullptr, false, true)) set_active_camera(ag);
     if (u.menu_item("Select Children", nullptr, false, has_sel)) {
       /* Unity: Select Children - the selection and everything under it. */
       std::vector<GameObject *> stack = selected_objects(false);
@@ -1131,6 +1133,14 @@ void Editor::draw_inspector(const Recti &r) {
                   "move the camera itself, Ctrl + wheel changes its field of view (its lens). Blender: Lock Camera to View.");
         if (u.button({row.x + u.px(8) + hw, row.y, hw, row.h}, "Align to View")) align_camera_to_view();
         u.tooltip("Move this camera to where the Scene view is looking from (Unity: GameObject > Align With View).");
+        row = lay.row(u.row_h() + u.px(2));
+        const bool is_active = scene_->active_camera == g->id;
+        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, is_active ? "Active Camera (the Game view and renders use it)" : "Set as Active Camera",
+                     is_active, Icon::Camera) &&
+            !is_active)
+          set_active_camera(g);
+        u.tooltip("The Game view, F12 and the Scene view's filters use the scene's Active Camera (Blender: Ctrl+Numpad0, the\n"
+                  "scene camera; Unity: the MainCamera tag). Without one, \"Main Camera\" by name, else the first camera.");
       }
       /* Light: the same eyedropper aims it (Blender: Track To / Point At; Unity: LookAt). */
       if (auto *lc = dynamic_cast<Light *>(c)) {

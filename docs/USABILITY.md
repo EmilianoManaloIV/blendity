@@ -151,6 +151,9 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Push/Pull refused faces beside a fin or a second solid on the edge. | Only faces carrying the surface on across the edge count. |
 | A long edge with a piece lying on it was marked overlapping too. | Only the shorter edge of a pair is marked. |
 | Merge Coplanar always took the whole mesh. | With faces selected it merges only those. |
+| A camera's filters showed in the Camera Preview (the selected camera) but not in the Game view, which showed "Main Camera" by name. | The scene has an explicit Active Camera (Camera inspector, Hierarchy menu, the Game view's camera dropdown, `activecamera`, Ctrl+0 in the Blender keymap); the Game view, F12 and the Scene view's filters use it (task 0025, ADR 0016). |
+| Edge Outline and the Retro fog did nothing in the Rendered Camera Preview and in a path-traced render; Solid Color clear was ignored there. | The path tracers record the first hit's depth and object id, so every pass runs on traced pictures too; Solid Color fills the traced background. |
+| With filters on, the Scene view ignored the camera's exposure and Solid Color clear; an F12 raster render without filters had no depth of field. | The Scene view looks through the active camera for those; F12 raster applies depth of field before the supersampling downsample. |
 | Array copies of a drawn shape lay on top of the surface (z-fighting). | They are cut into it like the original. |
 | An arch drawn on a rectangle stayed two faces, and its array copies too; copies past a wall's edge lay over it. | The arch is one face; a copy past the edge is clipped to the surface and cut in. |
 

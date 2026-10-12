@@ -57,6 +57,7 @@ layout(std430, binding = 0) readonly buffer Params {
   vec4 env_sky; vec4 env_equator; vec4 env_ground; vec4 env_color;
   vec4 lens;        // aperture radius, focus distance, blades, blade rotation (thin lens)
   vec4 cam_right; vec4 cam_up; vec4 cam_fwd;
+  vec4 background;  // a camera's Solid Color for camera rays (w: on)
 } P;
 layout(std430, binding = 1) buffer Accum { vec4 accum[]; };
 layout(std430, binding = 2) buffer Aux { vec4 aux[]; };  // albedo [0, n), normal + depth [n, 2n)
@@ -482,7 +483,8 @@ int find_mesh_light(uint obj, uint prim) {
 )GLSL",
 R"GLSL(
 /* ----------------------------------------------------------- integrator */
-vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 normal_out, out float depth_out) {
+vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 normal_out, out float depth_out, out float id_out) {
+  id_out = 0.0;
   vec3 L = vec3(0.0), beta = vec3(1.0);
   float clamp_ind = P.settings.x;
   float last_pdf = 0.0;
@@ -494,10 +496,10 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     Hit h;
     h.t = 1e30;
     if (!intersect(ro, rd, h)) {
-      vec3 c = beta * env_radiance(rd);
+      vec3 c = beta * ((bounce == 0 && P.background.w > 0.5) ? P.background.xyz : env_radiance(rd));  // Clear Flags: Solid Color
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
-      if (bounce == 0) { albedo_out = vec3(1.0); normal_out = vec3(0.0); depth_out = 1e6; }
+      if (bounce == 0) { albedo_out = vec3(1.0); normal_out = vec3(0.0); depth_out = 1e6; id_out = 0.0; }
       break;
     }
     SurfacePoint sp;
@@ -516,7 +518,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     }
     vec3 n = s.normal;
     if (dot(n, V) < 0.0) n = normalize(n + sp.geo_normal * (-dot(n, V) + 0.01));
-    if (bounce == 0) { albedo_out = s.albedo + s.emission; normal_out = n; depth_out = h.t; }
+    if (bounce == 0) { albedo_out = s.albedo + s.emission; normal_out = n; depth_out = h.t; id_out = float(h.obj + 1u); }
     vec3 c0 = vec3(0.0);
     float w_emit = 1.0;
     if (last_pdf > 0.0 && P.counts.y > 0 && luminance(s.emission) > 0.0) {
@@ -704,7 +706,8 @@ void main() {
     }
     vec3 balb, bnrm;
     float bdep;
-    vec3 bc = trace(o, d, brng, balb, bnrm, bdep);
+    float bid;
+    vec3 bc = trace(o, d, brng, balb, bnrm, bdep, bid);
     if (any(isnan(bc)) || any(isinf(bc))) bc = vec3(0.0);
     accum[i] += vec4(bc, dot(bnrm, bnrm) > 0.25 ? 1.0 : 0.0);
     return;
@@ -725,12 +728,12 @@ void main() {
     rd = normalize(focus - ro);
   }
   vec3 alb, nrm;
-  float dep;
-  vec3 c = trace(ro, rd, rng, alb, nrm, dep);
+  float dep, hit_id;
+  vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id);
   if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
   int i = px.y * W + px.x;
-  accum[i] += vec4(c, 0.0);
-  aux[i] += vec4(alb, 0.0);
+  accum[i] = vec4(accum[i].xyz + c, hit_id > 0.0 ? dep : accum[i].w);  // w: the last hitting sample's first-hit distance
+  aux[i] = vec4(aux[i].xyz + alb, hit_id);  // w: the first hit's object index + 1 (the last sample's; 0 = sky)
   aux[W * H + i] += vec4(nrm, dep);
 }
 )GLSL",

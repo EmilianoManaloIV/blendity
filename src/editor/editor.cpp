@@ -2807,6 +2807,23 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "undo") undo();  // Ctrl+Z
+  else if (c == "activecamera") {
+    /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
+    std::string name;
+    for (size_t i = 1; i < t.size(); i++) name += (i > 1 ? " " : "") + t[i];
+    if (name.empty()) {
+      GameObject *shown = nullptr;
+      main_camera(*scene_, &shown);
+      Log::info("Active Camera: %s%s", shown ? shown->name.c_str() : "none",
+                shown && shown->id != scene_->active_camera ? " (by name; none chosen)" : "");
+    }
+    else if (to_lower(name) == "none") set_active_camera(nullptr);
+    else if (GameObject *g = scene_->find_by_name(name)) {
+      if (g->camera()) set_active_camera(g);
+      else Log::warn("activecamera: '%s' has no Camera component", name.c_str());
+    }
+    else Log::warn("activecamera: no object named '%s'", name.c_str());
+  }
   else if (c == "filters") {
     /* The main camera's filters on the Scene view (Shaded): on / off / toggle. */
     const std::string w = to_lower(arg(1, "toggle"));
