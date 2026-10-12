@@ -77,6 +77,9 @@ void register_builtin_components() {
   reg<Bone>("Rigging", "A bone of a skeleton: a skin moves the vertices of the vertex group named after it.", "Bone (in an Armature)");
   reg<Armature>("Rigging", "On a skeleton's root: how skins deform (Linear or Dual Quaternion), Rest Position, Show Bones.",
                 "Armature object data");
+  reg<IKConstraint>("Rigging", "On the end bone of a chain (a shin, a forearm): the chain turns so its tip reaches the Target. "
+                    "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
+                    "Inverse Kinematics bone constraint (with Pole Target)");
   reg<MeshDeformModifier>("Mesh", "Binds the mesh to a closed cage mesh round it; moving the cage's vertices shapes the mesh smoothly.",
                           "Mesh Deform modifier (Bind)");
   reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");

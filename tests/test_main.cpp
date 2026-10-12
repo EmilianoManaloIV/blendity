@@ -23929,4 +23929,329 @@ static void round69_tests() {
     std::printf("    %d of %d vertices mostly on their nearest bone\n", right, total);
     CHECK(total > 0 && right == total);
   });
+
+  /* ------------------------------------------------------------------ round 70: IK and rig presets (task 0048) */
+  test("IK: two bones reach a target exactly, point at one out of reach, and bend towards the pole", [] {
+    R69Rig t;
+    GameObject *target = t.s.create("Target");
+    target->set_world_position({0.8f, 1.2f, 0.3f});
+    IKConstraint *ik = t.upper->add<IKConstraint>();
+    ik->target = "Target";
+    CHECK(solve_constraints(t.s));
+    auto tip = [&] { return t.upper->world_matrix().point({0, 1, 0}); };
+    std::printf("    reachable: tip off the target by %g\n", length(tip() - target->world_position()));
+    CHECK(length(tip() - target->world_position()) < 1e-4f);
+    CHECK(length(t.lower->world_position()) < 1e-6f);  // the chain's root stays where it hangs
+    /* Out of reach: the chain straightens towards it. */
+    target->set_world_position({0.0f, 5.0f, 3.0f});
+    CHECK(solve_constraints(t.s));
+    const Vec3 dir = normalize(target->world_position());
+    CHECK(dot(normalize(tip()), dir) > 0.9999f && std::fabs(length(tip()) - 2.0f) < 1e-3f);
+    /* A pole: the knee lies in the plane of root, target and pole, on the pole's side. */
+    GameObject *pole = t.s.create("Pole");
+    pole->set_world_position({0.0f, 1.0f, 2.0f});
+    ik->pole = "Pole";
+    target->set_world_position({0.0f, 1.2f, 0.0f});
+    CHECK(solve_constraints(t.s));
+    const Vec3 knee = t.upper->world_position(), T = target->world_position(), P = pole->world_position();
+    const Vec3 n = normalize(cross(T, P));
+    std::printf("    knee off the pole plane by %g; tip off the target by %g\n", std::fabs(dot(knee, n)), length(tip() - T));
+    CHECK(std::fabs(dot(knee, n)) < 1e-4f && knee.z > 0.5f && length(tip() - T) < 1e-4f);
+    /* Nothing moved: nothing to solve. */
+    CHECK(!solve_constraints(t.s));
+    /* The skin follows the solved bones. */
+    const Mesh *m = t.tube->evaluated_mesh();
+    CHECK(length(m->positions.back() - t.base->positions.back()) > 0.5f);
+  });
+
+  test("IK: five bones converge on a target by CCD; weight blends with the pose; Reset Pose solves again", [] {
+    Scene s;
+    GameObject *root = s.create("Rig");
+    root->add<Armature>();
+    GameObject *parent = root, *end = nullptr;
+    for (int k = 0; k < 5; k++) {
+      GameObject *b = s.create(strprintf("B%d", k), parent);
+      if (k) b->set_local_position({0, 0.5f, 0});
+      b->add<Bone>()->length = 0.5f;
+      b->get<Bone>()->set_rest(b->local());
+      parent = end = b;
+    }
+    GameObject *target = s.create("Target");
+    target->set_world_position({1.0f, 1.2f, 0.5f});
+    IKConstraint *ik = end->add<IKConstraint>();
+    ik->target = "Target";
+    ik->chain_length = 5;
+    ik->iterations = 100;
+    CHECK(solve_constraints(s));
+    const float err = length(end->world_matrix().point({0, 0.5f, 0}) - target->world_position());
+    std::printf("    5 bones: tip off the target by %g\n", err);
+    CHECK(err < 1e-3f);
+    CHECK(length(s.find_by_name("B0")->world_position()) < 1e-6f);
+    /* Reset Pose turns the bones back; the next solve puts them on the target again. */
+    for (int k = 0; k < 5; k++) s.find_by_name(strprintf("B%d", k))->set_local_rotation(Quat());
+    CHECK(solve_constraints(s));
+    CHECK(length(end->world_matrix().point({0, 0.5f, 0}) - target->world_position()) < 1e-3f);
+    /* Weight 0: the pose as it was. */
+    for (int k = 0; k < 5; k++) s.find_by_name(strprintf("B%d", k))->set_local_rotation(Quat());
+    ik->weight = 0.0f;
+    solve_constraints(s);
+    for (int k = 0; k < 5; k++) CHECK(std::fabs(s.find_by_name(strprintf("B%d", k))->local().rotation.w - 1.0f) < 1e-6f);
+    /* A target the chain carries (a child of its bone) is refused rather than chased. */
+    s.set_parent(target, s.find_by_name("B2"), -1, true);
+    ik->weight = 1.0f;
+    CHECK(!solve_constraints(s));
+    /* Driven bones: the chain only. */
+    CHECK(ik_drives(s, *s.find_by_name("B0")) && ik_drives(s, *end) && !ik_drives(s, *root));
+  });
+
+  test("IK: rig presets make the named bones with IK on the limbs; auto IK finds Mixamo, Unity and Rigify limbs", [] {
+    Scene s;
+    GameObject *h = create_rig(s, false, {});
+    int iks = 0;
+    s.for_each([&](GameObject &g) { iks += g.get<IKConstraint>() != nullptr; });
+    CHECK(h && h->get<Armature>() && iks == 4);
+    for (const char *n : {"Hips", "Spine", "Chest", "Neck", "Head", "LeftUpperLeg", "RightLowerLeg", "LeftHand", "RightFoot", "LeftFootIK", "RightElbowPole"})
+      CHECK(s.find_by_name(n) && (std::strstr(n, "IK") || std::strstr(n, "Pole") || s.find_by_name(n)->get<Bone>()));
+    /* Lifting a foot target bends the knee forward (the pole's side) and the foot stays on it. */
+    GameObject *ft = s.find_by_name("LeftFootIK");
+    ft->set_world_position(ft->world_position() + Vec3(0, 0.3f, 0.1f));
+    CHECK(solve_constraints(s));
+    GameObject *shin = s.find_by_name("LeftLowerLeg");
+    const float err = length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - ft->world_position());
+    std::printf("    humanoid: foot off its lifted target by %g, knee forward by %.3f\n", err, shin->world_position().z);
+    CHECK(err < 1e-4f && shin->world_position().z > 0.05f);
+    Scene q;
+    create_rig(q, true, {});
+    iks = 0;
+    q.for_each([&](GameObject &g) { iks += g.get<IKConstraint>() != nullptr; });
+    CHECK(iks == 4 && q.find_by_name("Tail") && q.find_by_name("HindLeftFootIK"));
+    CHECK(create_rig(q, true, {})->name == "Quadruped.001");
+    /* Auto IK by names: Mixamo, Unity and Rigify skeletons get four limbs each; a spine or a hand matches nothing. */
+    const char *sets[3][8] = {
+        {"mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:LeftArm", "mixamorig:LeftForeArm",
+         "mixamorig:RightArm", "mixamorig:RightForeArm"},
+        {"LeftUpperLeg", "LeftLowerLeg", "RightUpperLeg", "RightLowerLeg", "LeftUpperArm", "LeftLowerArm", "RightUpperArm", "RightLowerArm"},
+        {"thigh.L", "shin.L", "thigh.R", "shin.R", "upper_arm.L", "forearm.L", "upper_arm.R", "forearm.R"}};
+    for (auto &names : sets) {
+      Scene k;
+      GameObject *root = k.create("Armature");
+      root->add<Armature>();
+      GameObject *hips = k.create("mixamorig:Hips", root);
+      hips->add<Bone>();
+      GameObject *spine = k.create("Spine", hips);
+      spine->add<Bone>();
+      for (int limb = 0; limb < 4; limb++) {
+        GameObject *up = k.create(names[limb * 2], limb < 2 ? hips : spine);
+        up->set_local_position({limb % 2 ? 0.2f : -0.2f, 0, 0});
+        up->set_local_rotation(Quat::axis_angle({0, 0, 1}, kPi));
+        up->add<Bone>()->length = 0.4f;
+        GameObject *lo = k.create(names[limb * 2 + 1], up);
+        lo->set_local_position({0, 0.4f, 0});
+        lo->add<Bone>()->length = 0.4f;
+        k.create(limb < 2 ? "LeftHand" : "LeftFoot", lo)->add<Bone>();
+      }
+      const int n = add_humanoid_ik(k, root);
+      std::printf("    %s...: %d limbs\n", names[0], n);
+      CHECK(n == 4);
+      CHECK(k.find_by_name(names[1])->get<IKConstraint>() && !k.find_by_name(names[0])->get<IKConstraint>());
+      CHECK(add_humanoid_ik(k, root) == 0);  // twice: nothing more
+    }
+  });
+
+  test("IK: the console adds IK and presets; moving the target with the gizmo poses the leg, a driven bone refuses the gizmo, undo", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.scene().find_by_name("Humanoid");
+    CHECK(rig && ed.active_object_for_test() == rig);
+    rig->set_world_position({0, 0, 3.0f});
+    ed.command("camera 0 1.2 9 0 0.8 3");  // facing the rig: the Move gizmo's X arrow points right on screen
+    ed.mark_changed_for_test("R70 setup");
+    r34_steps(ed, 2);
+    GameObject *ft = ed.scene().find_by_name("RightFootIK");
+    GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
+    auto foot_err = [&] { return length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - ft->world_position()); };
+    CHECK(foot_err() < 1e-4f);  // the frame solved after the rig moved
+    ft->set_world_position(ft->world_position() + Vec3(0, 0.25f, 0));  // a straight leg at rest: lift the foot so a sideways move stays in reach
+    ed.mark_changed_for_test("R70 lift");
+    r34_steps(ed, 1);
+    CHECK(foot_err() < 1e-4f);
+    ed.command("select RightFootIK");
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    const Vec3 before = ft->world_position();
+    r34_gizmo_drag_x(ed, before, 8);  // about 0.2 m: still in the leg's reach
+    r34_steps(ed, 2);
+    std::printf("    target moved by %.3f; foot off it by %g\n", ft->world_position().x - before.x, foot_err());
+    CHECK(ft->world_position().x > before.x + 0.02f && foot_err() < 1e-4f);
+    /* The shin is turned by IK: the gizmo refuses it. */
+    ed.command("select RightLowerLeg");
+    r34_steps(ed, 2);
+    const Vec3 shin_at = shin->world_position();
+    const Quat q0 = shin->local().rotation;
+    r34_gizmo_drag_x(ed, shin_at, 40);
+    r34_steps(ed, 2);
+    CHECK(length(shin->world_position() - shin_at) < 1e-5f && std::fabs(shin->local().rotation.x * q0.x + shin->local().rotation.y * q0.y + shin->local().rotation.z * q0.z + shin->local().rotation.w * q0.w) > 0.99999f);
+    /* Undo the target's move: the leg follows it back. */
+    ed.command("undo");
+    r34_steps(ed, 2);
+    ft = ed.scene().find_by_name("RightFootIK");
+    shin = ed.scene().find_by_name("RightLowerLeg");
+    CHECK(ft && shin && std::fabs(ft->world_position().x - before.x) < 1e-5f && foot_err() < 1e-4f);
+    /* ik add on a plain skeleton, through a scene file. */
+    ed.command("create Armature");
+    ed.command("bone add Bone 1");
+    ed.command("create Empty");
+    GameObject *e = ed.scene().find_by_name("GameObject");
+    CHECK(e != nullptr);
+    if (!e) return;
+    e->set_world_position({1.0f, 1.0f, 0.0f});
+    ed.command("ik add Bone.001 GameObject - 2");
+    GameObject *b1 = ed.scene().find_by_name("Bone.001");
+    CHECK(b1 && b1->get<IKConstraint>() && b1->get<IKConstraint>()->target == "GameObject");
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const IKConstraint *ik = back.find_by_name("Bone.001") ? back.find_by_name("Bone.001")->get<IKConstraint>() : nullptr;
+    CHECK(ik && ik->target == "GameObject" && ik->chain_length == 2 && ik->pole.empty());
+  });
+
+  test("IK: in Play a Rotator swinging a foot target animates the leg; Stop puts the pose back", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("rig humanoid");
+    Scene &s0 = ed.scene();
+    GameObject *ft = s0.find_by_name("RightFootIK");
+    const Vec3 foot = ft->world_position();
+    GameObject *spin = s0.create("Spin");
+    spin->set_world_position(foot + Vec3(0, 0.25f, 0));
+    spin->add<Rotator>()->degrees_per_second = {0, 3000, 0};
+    s0.set_parent(ft, spin, -1, true);
+    ft->set_world_position(foot + Vec3(0.15f, 0.25f, 0));  // a circle the leg reaches all the way round
+    ed.mark_changed_for_test("R70 play setup");
+    r34_steps(ed, 2);
+    const Quat rest = s0.find_by_name("RightLowerLeg")->local().rotation;
+    ed.command("play");
+    r34_steps(ed, 6);
+    GameObject *pft = ed.scene().find_by_name("RightFootIK");
+    GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
+    const float err = length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - pft->world_position());
+    const Vec3 off = pft->world_position() - (foot + Vec3(0.15f, 0.25f, 0));
+    std::printf("    in Play: the target swung by %.3f, the foot off it by %g\n", length(off), err);
+    CHECK(length(off) > 0.01f && err < 1e-4f);
+    ed.command("stop");
+    r34_steps(ed, 2);
+    const Quat q = ed.scene().find_by_name("RightLowerLeg")->local().rotation;
+    CHECK(std::fabs(q.x * rest.x + q.y * rest.y + q.z * rest.z + q.w * rest.w) > 0.99999f);
+  });
+
+  test("IK: a second rig has its own targets; a target that circles back leaves no twist; Weight 0.5 doesn't add up; a pole the chain carries is refused", [] {
+    /* Two humanoids: moving the second's foot target poses the second's leg, not the first's. */
+    {
+      Scene s;
+      create_rig(s, false, {});
+      GameObject *r2 = create_rig(s, false, {2.0f, 0, 0});
+      CHECK(r2->name == "Humanoid.001" && s.find_by_name("LeftFootIK.001"));
+      GameObject *shin2 = nullptr;
+      s.for_each([&](GameObject &g) {  // the bones keep their names: the second rig's shin is the one under it
+        if (!shin2 && g.name == "LeftLowerLeg" && s.is_ancestor(r2, &g)) shin2 = &g;
+      });
+      GameObject *t2 = s.find_by_name("LeftFootIK.001");
+      CHECK(shin2 && t2 && shin2->get<IKConstraint>()->target == "LeftFootIK.001");
+      t2->set_world_position(t2->world_position() + Vec3(0, 0.3f, 0));
+      solve_constraints(s);
+      CHECK(length(shin2->world_matrix().point({0, shin2->get<Bone>()->length, 0}) - t2->world_position()) < 1e-4f);
+    }
+    /* A target that goes round a circle and back: the same rotations as before the circle (no wound-up twist). */
+    {
+      R69Rig t;
+      GameObject *target = t.s.create("Target");
+      target->set_world_position({0.6f, 1.4f, 0.0f});
+      t.upper->add<IKConstraint>()->target = "Target";
+      solve_constraints(t.s);
+      const Quat a0 = t.lower->local().rotation, b0 = t.upper->local().rotation;
+      for (int k = 1; k <= 24; k++) {
+        const float ang = k * 2.0f * kPi / 24.0f;
+        target->set_world_position({0.6f * std::cos(ang), 1.4f, 0.6f * std::sin(ang)});
+        solve_constraints(t.s);
+      }
+      const Quat a1 = t.lower->local().rotation, b1 = t.upper->local().rotation;
+      auto same = [](Quat p, Quat q) { return std::fabs(p.x * q.x + p.y * q.y + p.z * q.z + p.w * q.w) > 0.99999f; };
+      CHECK(same(a0, a1) && same(b0, b1));
+      /* Weight 0.5: the same pose however many times the target moved on the way. */
+      IKConstraint *ik = t.upper->get<IKConstraint>();
+      ik->weight = 0.5f;
+      target->set_world_position({0.5f, 1.0f, 0.2f});
+      solve_constraints(t.s);
+      const Quat once = t.lower->local().rotation;
+      for (int k = 0; k < 10; k++) {
+        target->set_world_position({0.5f + 0.01f * k, 1.0f, 0.2f});
+        solve_constraints(t.s);
+      }
+      target->set_world_position({0.5f, 1.0f, 0.2f});
+      solve_constraints(t.s);
+      CHECK(same(once, t.lower->local().rotation));
+      /* A pole carried by the chain would move with every solve: refused, so the editor goes idle. */
+      ik->weight = 1.0f;
+      GameObject *pole = t.s.create("Pole", t.lower);
+      pole->set_local_position({0, 0.5f, 1.0f});
+      ik->pole = "Pole";
+      CHECK(!solve_constraints(t.s) && !solve_constraints(t.s));
+    }
+    /* A constraint whose target is gone doesn't hold the bone (the gizmo can turn it again). */
+    {
+      R69Rig t;
+      t.upper->add<IKConstraint>()->target = "Nowhere";
+      CHECK(!ik_drives(t.s, *t.upper));
+    }
+  });
+
+  test("IK: G / R on a bone turned by IK is refused, on a free bone it turns it", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("rig humanoid");
+    ed.step_frame_headless();
+    Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto key = [&](int k) {
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove;
+      m.x = d.x = u.x = cx + 40;
+      m.y = d.y = u.y = cy;
+      d.type = platform::EventType::KeyDown;
+      d.key = u.key = k;
+      u.type = platform::EventType::KeyUp;
+      ed.step_frame_headless({m, d, u});
+    };
+    auto type = [&](const char *s) {
+      for (const char *c = s; *c; c++) {
+        platform::Event t;
+        t.type = platform::EventType::Text;
+        t.codepoint = (uint32_t)*c;
+        t.x = cx + 40;
+        t.y = cy;
+        ed.step_frame_headless({t});
+      }
+    };
+    /* The head has no IK: G, R (rotate), X, 30, Enter turns it, FK as before. */
+    ed.command("select Head");
+    ed.step_frame_headless();
+    const Quat q0 = ed.scene().find_by_name("Head")->local().rotation;
+    key(platform::KEY_G);
+    CHECK(ed.transform_active_for_test());
+    key(platform::KEY_R);
+    key(platform::KEY_X);
+    type("30");
+    key(platform::KEY_ENTER);
+    ed.step_frame_headless();
+    const Quat q = ed.scene().find_by_name("Head")->local().rotation;
+    CHECK(std::fabs(q.x * q0.x + q.y * q0.y + q.z * q0.z + q.w * q0.w) < 0.999f);
+    /* IK drives the shin: G starts nothing (IK would only turn it back, after an undo step that changes nothing). */
+    ed.command("select LeftLowerLeg");
+    ed.step_frame_headless();
+    key(platform::KEY_G);
+    CHECK(!ed.transform_active_for_test());
+    key(platform::KEY_ESCAPE);
+    CHECK(ed.scene().find_by_name("LeftLowerLeg") != nullptr);
+  });
 }

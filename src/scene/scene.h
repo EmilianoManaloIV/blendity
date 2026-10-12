@@ -9,6 +9,7 @@
 // FoCG ch. 12.2 "Scene Graphs".
 #pragma once
 
+#include <atomic>
 #include "../core/math.h"
 #include "material.h"
 #include "mesh.h"
@@ -957,6 +958,37 @@ Mat4 armature_base(const GameObject &root);  // the root's parent's world matrix
 /* Automatic weights: groups named after the bones, from each vertex's distance to them (skin.cpp). */
 bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error = nullptr);
 Quat slerp(Quat a, Quat b, float t);  // skin.cpp
+
+/* Blender: Inverse Kinematics bone constraint (task 0048). On a chain's end bone: the chain turns so the end's tip
+ * reaches the target object; two bones are solved exactly in the pole's plane, longer chains by CCD (ik.cpp). */
+struct IKConstraint : ComponentBase<IKConstraint> {
+  static constexpr const char *kName = "IKConstraint";
+  std::string target;  // by name
+  std::string pole;    // optional: the bend points towards it
+  int chain_length = 2;
+  int iterations = 20;
+  float weight = 1.0f;
+  uint64_t last_key = 0;               // the inputs of the last solve (unchanged: nothing to do)
+  uint64_t target_id = 0, pole_id = 0;  // where the names were last found
+  static std::atomic<int> live;        // constraints in existence: none, and the per-frame solve walks nothing
+  IKConstraint() { live.fetch_add(1, std::memory_order_relaxed); }
+  IKConstraint(const IKConstraint &o) : ComponentBase<IKConstraint>(o), target(o.target), pole(o.pole), chain_length(o.chain_length),
+                                         iterations(o.iterations), weight(o.weight) {
+    live.fetch_add(1, std::memory_order_relaxed);
+  }
+  IKConstraint &operator=(const IKConstraint &) = default;
+  ~IKConstraint() override { live.fetch_sub(1, std::memory_order_relaxed); }
+  void reflect(Reflector &r) override;
+};
+Quat rotation_between(Vec3 a, Vec3 b);  // the shortest-arc rotation taking direction a to b (ik.cpp)
+/* Solves every IK constraint whose inputs changed (after Scene::update in Play, before drawing in the editor). True
+ * when bones turned. The solved rotations are a pose, not an edit: they make no undo step of their own. */
+bool solve_constraints(Scene &scene);
+bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK chain turns this bone (the gizmo refuses it)
+/* Rig presets: a skeleton with an Armature, IK on its limbs with target and pole objects. Its root is returned. */
+GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
+/* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */
+int add_humanoid_ik(Scene &scene, GameObject *root);
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {

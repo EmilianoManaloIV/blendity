@@ -3565,6 +3565,35 @@ static void test_vgroups_stress(Report &rep, const Options &o) {
     rep.note(strprintf("Task 0047's target: a pose change on a 50k-vertex mesh in at most 8 ms: Linear %.2f ms, Dual Quaternion %.2f ms: %s", ms[0], ms[1],
                        std::max(ms[0], ms[1]) <= 8.0 ? "met" : "NOT MET"));
   }
+  /* Task 0048: a humanoid rig's four IK chains solved with every target moved, and with nothing moved (a hash each). */
+  {
+    Scene sc;
+    create_rig(sc, false, {});
+    GameObject *t[4] = {sc.find_by_name("LeftFootIK"), sc.find_by_name("RightFootIK"), sc.find_by_name("LeftHandIK"), sc.find_by_name("RightHandIK")};
+    Vec3 home[4];
+    for (int k = 0; k < 4; k++) home[k] = t[k]->world_position();
+    double moved = 1e30, still = 1e30;
+    float worst = 0.0f;
+    for (int r = 0; r < 20; r++) {
+      moved = std::min(moved, time_ms([&] {
+                for (int k = 0; k < 4; k++) t[k]->set_world_position(home[k] + Vec3(0.05f * std::sin(r * 0.7f + k), 0.2f, 0.05f * std::cos(r * 0.3f)));
+                solve_constraints(sc);
+              }));
+      still = std::min(still, time_ms([&] { solve_constraints(sc); }));
+      GameObject *shin = sc.find_by_name("LeftLowerLeg");
+      worst = std::max(worst, length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - t[0]->world_position()));
+    }
+    rep.row({"IK: a humanoid's 4 chains, targets moved / nothing moved (ms)", strprintf("%.4f", moved), strprintf("%.4f", still), "-", "-"});
+    /* The per-frame walk in a big scene: 20k other objects, nothing moved (the editor pays this every frame). */
+    for (int k = 0; k < 20000; k++) sc.create(strprintf("Prop%d", k));
+    double big = 1e30;
+    for (int r = 0; r < 10; r++) big = std::min(big, time_ms([&] { solve_constraints(sc); }));
+    rep.row({"IK: the same rig among 20k objects, nothing moved (ms)", strprintf("%.4f", big), "-", "-", "-"});
+    rep.note(strprintf("Task 0048: with 20k other objects in the scene the per-frame IK pass costs %.3f ms when nothing moved", big));
+    rep.note(strprintf("Task 0048: solving a humanoid's four IK chains costs %.4f ms a frame when the targets move, %.4f ms when "
+                       "nothing does; the left foot is off its target by at most %g (should be under 1e-4)",
+                       moved, still, worst));
+  }
   /* The cost groups add to a stack that re-runs every frame (Edit Mode's cage, a deformer before a generative
    * modifier): a 25k-vertex mesh through Subdivision Surface, with and without two groups to carry. */
   {

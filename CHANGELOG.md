@@ -2,6 +2,53 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 70): inverse kinematics and rig presets (task 0048)
+
+**Asked:** the roadmap (2026-10-11): "IK/FK for humanoid and quadruped rigs", with name-based humanoid auto-map and
+the gizmo refused on an IK-driven bone.
+
+**Added**
+- **IK constraints** (ADR 0025): an IKConstraint on a chain's end bone (a shin, a forearm) turns the chain so its
+  tip reaches the Target object; two bones exactly (law of cosines) bending towards an optional Pole, longer chains
+  by cyclic coordinate descent (Iterations), Weight from the rest pose to the solution. Solved every editor frame
+  and in Play after the scripts, only when something it depends on moved; the solved pose makes no undo step. The
+  gizmo and G / R / S refuse a bone IK turns ("move its target instead"). Console `ik add <bone> <target> [pole]
+  [chain]`.
+- **GameObject > Rig**: Humanoid (Hips, Spine, Chest, Neck, Head, arms, legs) and Quadruped (spine, neck, head,
+  tail, four legs) with IK targets on hands and feet and poles at knees and elbows; **Auto IK on Selected
+  Skeleton** finds the limbs of an imported Mixamo (`mixamorig:LeftUpLeg`), Unity (`LeftUpperLeg`) or Rigify
+  (`thigh.L`) skeleton by name. Console `rig humanoid|quadruped|autoik [root]`.
+- Learn > Modifiers: "Inverse kinematics".
+
+**Fixed**
+- The GameObject menu's Lattice and Armature items had each other's tooltips.
+
+**Checked**
+- New tests (round 70): two bones reach a target within 1.3e-7, point straight at one out of reach, and with a pole
+  the knee lies in the plane of hip, target and pole; the skin follows; nothing moved, nothing solved; five bones
+  by CCD within 7.7e-4; Reset Pose solves again; Weight 0 keeps the rest; a target the chain carries is refused;
+  the presets make the named bones and 4 IK chains each, lifting a foot target bends the knee forward with the
+  foot on it; auto IK finds 4 limbs in Mixamo, Unity and Rigify skeletons and adds nothing the second time; in the
+  editor, dragging a foot target with the gizmo poses the leg, the gizmo leaves a driven shin alone, undo puts the
+  target and the leg back, `ik add` and a scene file keep the constraint; in Play a Rotator swinging a target
+  animates the leg and Stop restores it; a second rig has its own targets; a target that circles back leaves no
+  twist; Weight 0.5 doesn't add up over many moves; a pole the chain carries is refused; a lost target doesn't hold
+  the bone; G on a driven shin starts nothing while G, R on the head turns it.
+- Stress `vgroups`: a humanoid's four chains cost 0.006 ms a frame when every target moves, 0.001 ms
+  when nothing does; among 20,000 other objects 0.046 ms (the per-frame pass); no IK in a scene: no walk.
+- Unit checks: Windows 9,303, 0 failed (562 tests); the whole suite in render-cache verify mode: 9,304,
+  0 failed, 0 stale pictures. Linux with libraries: 9,213, 0 failed. Sanitizer build: 9,131, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: three majors and several minor findings, fixed: a second preset rig's limbs reached for
+the first rig's targets (names now unique); each solve started from the last one, so a circling target wound up
+twist and a Weight under 1 added up frame by frame (now from the rest pose); a pole parented under the chain
+re-solved every frame; the per-frame pass walked every object of every scene and looked targets up by name (now
+nothing with no IK anywhere, ids between frames); G / R / S weren't refused on a driven bone; a constraint with a
+lost target still blocked the gizmo; a straight chain without a pole could bend sideways (now the rest bend, then
+the bone's own Z); auto IK's poles were world +Z / -Z (now where each limb bends). Left as it is: the undo snapshot
+is taken after the frame's solve, harmless now that solving doesn't depend on the previous pose.
+
 ## 2026-10-12 (round 69): skeletons and skinning (task 0047)
 
 **Asked:** the roadmap (2026-10-11): "rigging ... v1: import rigs from FBX/glTF and pose them".

@@ -5,7 +5,7 @@
 - **Requirements:** R-02, R-03, R-06
 - **Decisions:** ADR 0025
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/45
 
 ## Goal
 Import a rigged character (FBX or glTF), see its skeleton, turn a bone and watch the mesh follow; or build a

@@ -56,6 +56,11 @@ bool Editor::transform_begin(int mode) {
     if (edit_selection_frame(frame)) t.local_rot = frame;  // X / Y / Z twice: the selection's own axes
   }
   else {
+    for (GameObject *g : selected_objects(true))
+      if (g->get<Bone>() && ik_drives(*scene_, *g)) {  // IK would turn it straight back (task 0048)
+        Log::warn("%s: '%s' is turned by IK: move its target instead", kModeNames[mode], g->name.c_str());
+        return false;
+      }
     for (GameObject *g : selected_objects(true)) {
       t.objects.push_back({g->id, g->world_matrix()});
       pivot += g->world_position();

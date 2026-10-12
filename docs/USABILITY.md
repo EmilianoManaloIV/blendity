@@ -182,6 +182,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Edge Outline in path-traced renders took its depth from a random sample per pixel, so lines could wobble. | The tracers give the filters one ray through each pixel's centre, as the rasterizer's depth. |
 | Switching the Camera Preview to Rendered on the GPU froze the editor for over a minute the first time (Windows closed it as not responding). | The GPU opens in the background: the preview traces on the CPU meanwhile ("GPU starting") and moves to the GPU when it is ready. |
 | Procedural, axis and Box-mapped materials looked grey or wrong in other programs after an export; glTF lost normal and roughness maps, FBX every texture. | Bake Textures (Object menu and the export option) turns an object's look into images on new UVs; glTF and FBX carry their image maps. |
+| Posing a leg meant turning thigh and shin by hand, and there was no ready-made character skeleton. | IK constraints move a limb by its foot or hand target (with a pole for the knee or elbow); GameObject > Rig makes a humanoid or quadruped with IK, and Auto IK rigs an imported skeleton's limbs by name. |
 
 ## Still worth doing
 

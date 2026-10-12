@@ -1529,6 +1529,14 @@ bool Editor::gizmo_update(const Recti &view) {
   /* Holding V (Unity's vertex snapping): a press anywhere starts a free move
    * from the selection's vertex nearest the mouse. */
   if (drag_ != Drag::Gizmo && in.key_down[platform::KEY_V] && do_move && scene_hovered_ && !u.wants_keyboard()) gizmo_hot_ = H_MOVE_FREE;
+  /* A bone an IK chain turns would only be turned back (task 0048): its target is what moves it. */
+  if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt() && !eo && !co)
+    for (GameObject *g : objs)
+      if (g->get<Bone>() && ik_drives(*scene_, *g)) {
+        Log::warn("'%s' is turned by IK: move its target instead", g->name.c_str());
+        gizmo_hot_ = -1;
+        break;
+      }
   /* Start drag. */
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt()) {
     drag_ = Drag::Gizmo;

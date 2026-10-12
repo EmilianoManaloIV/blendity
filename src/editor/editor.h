@@ -343,6 +343,7 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
+  bool transform_active_for_test() const { return xf_.active; }  // a G / R / S is running
   size_t overlap_vert_pairs_for_test() { overlap_refresh(); return overlap_.verts.size(); }
   size_t overlap_edge_pairs_for_test() { overlap_refresh(); return overlap_.edges.size(); }
   bool modal_active_for_test() const { return modal_.active; }

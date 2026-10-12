@@ -27,7 +27,13 @@ undo, files and the modifier stack.
   bound elsewhere is reported in the Console. (As accepted, both were to be read; reading them is a follow-up.)
 - **Constraints** (task 0048): an `IKConstraint` on a chain's end bone, solved after `Scene::update` in Play and before
   drawing in the editor whenever a target or bone moved. Driven rotations are not undo steps; the gizmo is refused
-  on a driven bone (move its target instead).
+  on a driven bone (move its target instead). As built: the gizmo and G / R / S are refused; each solve starts
+  from the bones' rest rotations (Blender solves from the FK pose, which is the rest here since driven bones can't
+  be turned by hand), so a target that circles winds up no twist and a Weight under 1 blends rest to solution
+  rather than adding up; the solve is skipped when a hash of its inputs (target, pole, the chain's parent, the
+  bones' transforms as the last solve left them, the settings) is unchanged, and with no IK constraint anywhere
+  the per-frame pass returns at once. Targets and poles are names (remembered by id between frames); one the
+  chain itself carries is refused.
 
 ## Consequences
 - Many bones mean many GameObjects (a 60-bone humanoid adds 60 rows to the Hierarchy, collapsed under the root).

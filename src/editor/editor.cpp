@@ -388,6 +388,8 @@ void Editor::frame(std::vector<Event> &events) {
       step_requested_ = false;
     }
   }
+  /* IK after scripts move the targets, before anything draws (task 0048); unchanged inputs cost a hash per chain. */
+  if (solve_constraints(*scene_)) ui_.redraw = true;
   if (cam_.update(now)) ui_.redraw = true;
   update_camera_focus();
   /* Live preview: re-render the preview when anything it depends on changes
@@ -667,11 +669,21 @@ void Editor::draw_menubar(const Recti &r) {
     });
     u.tooltip("A path to bend meshes along (Curve modifier) or fill with copies (Array > Fit Curve). Blender: Add > Curve.");
     if (u.menu_item("Lattice")) create_object("Lattice");
+    u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
+              "or taper the mesh. Blender: Add > Lattice.");
     if (u.menu_item("Armature")) create_object("Armature");
     u.tooltip("A skeleton: a root with one bone (add more with the console's `bone add`). Select a mesh first and it gets\n"
               "a Skin modifier with automatic weights. Blender: Add > Armature.");
-    u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
-              "or taper the mesh. Blender: Add > Lattice.");
+    u.submenu("Rig", u.px(200), [this] {
+      if (ui_.menu_item("Humanoid")) run_console_command("rig humanoid");
+      ui_.tooltip("A person's skeleton (Hips to Head, arms, legs) with IK on the hands and feet: move the HandIK / FootIK\n"
+                  "objects and the limbs follow; the Pole objects aim the elbows and knees.");
+      if (ui_.menu_item("Quadruped")) run_console_command("rig quadruped");
+      ui_.tooltip("A four-legged skeleton (spine, neck, head, tail, four legs) with IK on each foot.");
+      if (ui_.menu_item("Auto IK on Selected Skeleton")) run_console_command("rig autoik");
+      ui_.tooltip("Finds the arms and legs of an imported skeleton by their bone names (Mixamo, Unity, Rigify) and adds\n"
+                  "two-bone IK with targets and poles to each.");
+    });
     u.menu_separator();
     u.submenu("Set Origin", u.px(270), [this, has_sel] {
       for (int k = 0; k < kOriginModeCount; k++) {
@@ -2682,7 +2694,7 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
-  if (c == "bone" || c == "armature" || c == "skin") {
+  if (c == "bone" || c == "armature" || c == "skin" || c == "ik" || c == "rig") {
     rig_command(t);
     return;
   }
@@ -3989,7 +4001,48 @@ void Editor::rig_command(const std::vector<std::string> &t) {
     skin_bind(t.size() > 2 ? scene_->find_by_name(arg(2, "")) : active_object());
     return;
   }
-  Log::warn("bone add <parent> [length] | armature reset|apply [root] | skin bind [object]");
+  if (t[0] == "ik" && to_lower(arg(1, "")) == "add") {  // ik add <bone> <target> [pole|-] [chain]
+    GameObject *bone = scene_->find_by_name(arg(2, ""));
+    if (!bone || !bone->get<Bone>() || !scene_->find_by_name(arg(3, ""))) {
+      Log::warn("ik add <bone> <target> [pole|-] [chain length]: no bone '%s' or target '%s'", arg(2, "").c_str(), arg(3, "").c_str());
+      return;
+    }
+    IKConstraint *ik = bone->get<IKConstraint>();
+    if (!ik) ik = bone->add<IKConstraint>();
+    ik->target = t[3];
+    ik->pole = arg(4, "-") == "-" ? "" : t[4];
+    if (t.size() > 5) ik->chain_length = std::max(1, std::min(std::atoi(t[5].c_str()), 64));
+    solve_constraints(*scene_);
+    mark_changed("Add IK");
+    return;
+  }
+  if (t[0] == "rig") {  // rig humanoid|quadruped: a preset; rig autoik [root]: IK on a skeleton's limbs by bone names
+    const std::string kind = to_lower(arg(1, ""));
+    if (kind == "humanoid" || kind == "quadruped") {
+      GameObject *root = create_rig(*scene_, kind == "quadruped", Vec3());
+      expanded_.insert(root->id);
+      select(root->id);
+      mark_changed(kind == "humanoid" ? "Add Humanoid Rig" : "Add Quadruped Rig");
+      return;
+    }
+    if (kind == "autoik") {
+      GameObject *root = t.size() > 2 ? scene_->find_by_name(t[2]) : active_object();
+      while (root && !root->get<Armature>()) root = root->parent;
+      if (!root) {
+        Log::warn("rig autoik [root]: select a skeleton (an object with an Armature, or one of its bones)");
+        return;
+      }
+      const int n = add_humanoid_ik(*scene_, root);
+      Log::info("Auto IK: %d limbs found by name", n);
+      if (n) {
+        solve_constraints(*scene_);
+        mark_changed("Auto IK");
+      }
+      return;
+    }
+  }
+  Log::warn("bone add <parent> [length] | armature reset|apply [root] | skin bind [object] | ik add <bone> <target> [pole] [chain] | "
+            "rig humanoid|quadruped|autoik [root]");
 }
 
 bool Editor::armature_pose(GameObject *root, bool apply_as_rest) {
