@@ -2,6 +2,7 @@
 #include "editor.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
+#include "../render/texture_bake.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -660,6 +661,13 @@ void Editor::draw_menubar(const Recti &r) {
       ui_.tooltip("Move and rotate only the origin with the gizmo, or click a vertex, edge or face to snap it there.\n"
                   "Blender: Options > Affect Only > Origins.");
     });
+    u.submenu("Bake Textures", u.px(200), [this, has_sel] {
+      for (int size : {512, 1024, 2048, 4096})
+        if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) bake_object_textures(size);
+    });
+    u.tooltip("Bake the active object's look (procedural textures, axis materials, Box mapping, every material slot) into\n"
+              "one set of images on new UVs, and give it a material that uses them: what it looks like, as plain images\n"
+              "any program shows. Undo restores it. Blender: Cycles Bake. (Console: baketex [size] [keepuvs])");
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
       mark_changed("Clear Parent");
@@ -1583,6 +1591,118 @@ void Editor::restore_texture_texts(const std::vector<std::pair<std::string, std:
   }
 }
 
+/* A name usable in a file name on every platform. */
+static std::string file_safe(std::string s) {
+  for (char &c : s)
+    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' || (unsigned char)c < 32) c = '_';
+  return s.empty() ? std::string("Object") : s;
+}
+
+void Editor::bake_textures_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o,
+                                      std::vector<std::shared_ptr<Mesh>> &keep) {
+  const ExportFormat f = (ExportFormat)o.format;
+  if (!o.bake_textures || !o.materials || (f != ExportFormat::OBJ && f != ExportFormat::FBX && f != ExportFormat::GLB && f != ExportFormat::GLTF))
+    return;
+  const std::string dir = fs::parent(path), stem = fs::stem(path);
+  std::unordered_map<std::string, int> used;
+  TextureBakeSettings s;
+  s.size = std::max(256, std::min(4096, o.bake_size));
+  s.export_space = true;
+  ScopedTimer timer;
+  int baked = 0;
+  for (ExportItem &it : items) {
+    if (!it.mesh || !it.mesh->face_count()) continue;
+    const TextureBakeResult r = bake_textures(*it.mesh, it.world, it.materials, s);
+    if (!r.texels) continue;
+    std::string name = file_safe(it.name);
+    const int n = used[to_lower(name)]++;
+    if (n) name += "_" + std::to_string(n + 1);
+    const std::string base = fs::join(dir, stem + "_" + name);
+    std::string err;
+    if (!write_baked_textures(r, base, &err)) {
+      Log::error("Bake Textures: %s", err.c_str());
+      continue;
+    }
+    for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) texture_cache_forget(base + m);
+    auto mesh = std::make_shared<Mesh>(*it.mesh);
+    mesh->uvs = r.uvs;
+    mesh->touch();
+    const Material *like = !it.materials.empty() && it.materials[0] ? it.materials[0].get() : nullptr;
+    const Material *alpha_like = r.alpha_slot >= 0 && r.alpha_slot < (int)it.materials.size() ? it.materials[(size_t)r.alpha_slot].get() : nullptr;
+    auto mat = std::make_shared<Material>(baked_material(it.name + " Baked", base, like, alpha_like));
+    it.mesh = mesh.get();
+    keep.push_back(mesh);
+    it.materials.assign(std::max<size_t>(1, it.materials.size()), mat);
+    baked++;
+  }
+  Log::info("Bake Textures: %d object%s at %d x %d in %.0f ms", baked, baked == 1 ? "" : "s", s.size, s.size, timer.ms());
+}
+
+bool Editor::bake_object_textures(int size, bool keep_uvs) {
+  GameObject *g = active_object();
+  auto *mf = g ? g->get<MeshFilter>() : nullptr;
+  if (!g || !mf || !mf->mesh || !mf->mesh->face_count()) {
+    Log::warn("Bake Textures: select an object with a mesh");
+    return false;
+  }
+  if (edit_mode_) exit_edit_mode();
+  /* The views show the evaluated mesh. Modifiers that keep the topology (deformers) are baked as shown and the UVs
+   * go on the base mesh's same corners; ones that add or remove geometry (Mirror, Array, Boolean...) would repeat
+   * or stretch the base's images, so they are refused. */
+  const Mesh *ev = g->evaluated_mesh();
+  if (ev && ev != mf->mesh.get() && (ev->corner_verts.size() != mf->mesh->corner_verts.size() || ev->face_count() != mf->mesh->face_count())) {
+    Log::warn("Bake Textures: %s's modifiers add or remove geometry; apply them first (Mesh > Apply Modifiers), or use "
+              "File > Export with Bake Textures, which bakes what it exports", g->name.c_str());
+    return false;
+  }
+  const Mesh &source = ev ? *ev : *mf->mesh;
+  auto *mr = g->get<MeshRenderer>();
+  const std::vector<MaterialPtr> mats = mr ? mr->materials : std::vector<MaterialPtr>();
+  TextureBakeSettings s;
+  s.size = std::max(256, std::min(4096, size));
+  s.keep_uvs = keep_uvs;
+  ScopedTimer timer;
+  const TextureBakeResult r = bake_textures(source, g->world_matrix(), mats, s);
+  if (!r.texels) {
+    Log::warn("Bake Textures: %s has no surface to bake", g->name.c_str());
+    return false;
+  }
+  /* New files every time (Blender's Material.001): another object with the same name, or an undo past this bake,
+   * keeps the images its UVs were laid out for. */
+  std::string name = file_safe(g->name);
+  for (int k = 2; fs::exists(resolve_asset_path("Assets/Materials/" + name + " Baked.mat")) ||
+                  fs::exists(resolve_asset_path("Assets/Textures/Baked/" + name + "_albedo.png"));
+       k++)
+    name = file_safe(g->name) + " " + std::to_string(k);
+  const std::string rel = "Assets/Textures/Baked/" + name;
+  const std::string abs = resolve_asset_path(rel);
+  std::string err;
+  if (!write_baked_textures(r, abs, &err)) {
+    Log::error("Bake Textures: %s", err.c_str());
+    return false;
+  }
+  for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) texture_cache_forget(abs + m);
+  const Material *like = !mats.empty() && mats[0] ? mats[0].get() : nullptr;
+  const Material *alpha_like = r.alpha_slot >= 0 && r.alpha_slot < (int)mats.size() ? mats[(size_t)r.alpha_slot].get() : nullptr;
+  MaterialPtr baked = create_material_asset(baked_material(name + " Baked", rel, like, alpha_like), "Assets/Materials/" + name + " Baked.mat");
+  if (!baked) {
+    Log::error("Bake Textures: could not write Assets/Materials/%s Baked.mat", name.c_str());
+    return false;
+  }
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  m.uvs = r.uvs;
+  m.touch();
+  if (!mr) mr = g->add<MeshRenderer>();
+  const size_t slots = std::max<size_t>(1, mr->materials.size());
+  mr->materials.assign(slots, baked);
+  invalidate_material_textures();
+  project_listed_ = -100;
+  Log::info("Baked %s: %d x %d, %zu texels%s, in %.0f ms -> %s_*.png", g->name.c_str(), r.size, r.size, r.texels,
+            r.own_uvs ? " (its own UVs)" : "", timer.ms(), rel.c_str());
+  mark_changed("Bake Textures");
+  return true;
+}
+
 void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o) {
   /* Only the formats whose writers reference textures (OBJ / MTL, glTF), and only with materials. */
   const ExportFormat f = (ExportFormat)o.format;
@@ -1766,8 +1886,14 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
   }
   std::string err;
   project_listed_ = -100;
-  bake_texture_assets_for_export(items, path, o);
-  if (!export_file(path, items, o, &err)) {
+  std::vector<std::shared_ptr<Mesh>> baked_meshes;
+  ExportOptions eo = o;
+  if (eo.bake_textures && eo.materials) {
+    eo.uvs = true;  // the baked images need the baked UVs
+    bake_textures_for_export(items, path, eo, baked_meshes);
+  }
+  bake_texture_assets_for_export(items, path, eo);
+  if (!export_file(path, items, eo, &err)) {
     Log::error("Export failed: %s", err.c_str());
     return "";
   }
@@ -2494,6 +2620,7 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "join") join_selected();
+  else if (c == "baketex") bake_object_textures(std::atoi(arg(1, "1024").c_str()), to_lower(arg(2, "")) == "keepuvs");  // baketex [size] [keepuvs]
   else if (c == "meshop") mesh_op(arg(1, ""));
   else if (c == "drawfillet") draw_fillet_ = std::max(0.0f, (float)std::atof(arg(1, "0").c_str()));  // corner radius of drawn shapes
   else if (c == "pilot") toggle_pilot_camera();  // fly the selected camera with the Scene view

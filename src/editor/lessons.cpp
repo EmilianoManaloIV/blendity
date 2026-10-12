@@ -435,6 +435,9 @@ In Unity a material is a file in the Project window that many objects share; cha
 @ blender/intern/cycles/kernel/svm/checker.h, noise.h
 # Getting textures in
 Drag images onto the window: they're copied to Assets/Textures and, if an object is selected, assigned to its material. Drag an .obj or .fbx and its materials and textures come with it (OBJ uses the .mtl file; FBX is read with ufbx, a library Blender itself bundles).
+# Baking textures for other programs
+Procedural textures, axis materials and Box mapping are computed by Blendity's shaders; another program only understands images on UVs. Object > Bake Textures lays the object out on new UVs (Smart UV Project and Pack Islands, as the lightmapper does) and evaluates its materials at every texel into four images: albedo, roughness, metallic and a normal map. Blender does the same with Cycles' Bake panel, Unity users with Substance's baker. The export option Bake Textures does it on copies for OBJ, FBX and glTF, leaving the scene alone.
+? Why can't a Mirror modifier be baked in place? | The images go on the base mesh's UVs, and the mirrored half shares them: it would repeat the base's images. Apply the modifier first, or export with Bake Textures, which bakes what it exports.
 ? Why is a normal map stored as Non-Color? | Its RGB values are vector components, not colours. Converting them from sRGB would bend every normal.
 ! cmd:select Sphere; texture colorgrid | Put a Color Grid texture on the Sphere
 )"},

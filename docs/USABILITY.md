@@ -168,6 +168,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Bloom on a progressive trace grew as samples accumulated; changing the path tracer's Samples redrew the Game view; the Game view showed the editor's sky colours instead of the world's gradient. | Bloom reads linear light at every resolve; the views hash only the raster-relevant settings; the raster clears with the world's gradient. |
 | Array copies of a drawn shape lay on top of the surface (z-fighting). | They are cut into it like the original. |
 | An arch drawn on a rectangle stayed two faces, and its array copies too; copies past a wall's edge lay over it. | The arch is one face; a copy past the edge is clipped to the surface and cut in. |
+| Procedural, axis and Box-mapped materials looked grey or wrong in other programs after an export; glTF lost normal and roughness maps, FBX every texture. | Bake Textures (Object menu and the export option) turns an object's look into images on new UVs; glTF and FBX carry their image maps. |
 
 ## Still worth doing
 

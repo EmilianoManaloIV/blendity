@@ -209,6 +209,9 @@ class Editor {
   const Image &render_image_for_test() const { return render_img_; }
   bool rendering_for_test() const { return rendering_; }
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
+  std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
+  void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
+  bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
   bool cam_preview_done_for_test() const { return cam_preview_done_; }
   /* Baked lighting (task 0012). */
   bool baking_for_test() const { return baking_; }
@@ -468,6 +471,13 @@ class Editor {
   /* Procedural texture outputs referenced by the items' materials written as PNGs beside `path`; the
    * items get material copies that point at those files, so every exporter sees ordinary images. */
   void bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o);
+  /* Export > Bake Textures (task 0036): each item baked on a copy (kept alive in `keep`), the images written beside
+   * `path`, the copies' materials naming them. */
+  void bake_textures_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o,
+                                std::vector<std::shared_ptr<Mesh>> &keep);
+  /* Object > Bake Textures (task 0036): the active object's look baked into Assets/Textures/Baked, its mesh on the
+   * baked UVs and a "<Object> Baked" material on every slot; one undo step. False when nothing was baked. */
+  bool bake_object_textures(int size, bool keep_uvs = false);
   /* The Textures window (task 0028, texture_window.cpp). */
   void draw_textures_window(const Recti &r);
   const std::vector<std::string> &texture_asset_paths();

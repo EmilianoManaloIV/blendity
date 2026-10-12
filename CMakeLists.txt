@@ -112,7 +112,7 @@ else()
 endif()
 
 file(GLOB BLENDITY_SOURCES CONFIGURE_DEPENDS
-  src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp)
+  src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp)
 # Blender's own bundled dependencies (extern/README.md)
 list(APPEND BLENDITY_SOURCES extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp)
 

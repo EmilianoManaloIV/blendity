@@ -4,7 +4,7 @@
 - **Requirements:** R-03, R-06
 - **Decisions:** none expected (Blender's Film > Transparent; an image's alpha already exists in `Image`)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/33
 
 ## Goal
 Blender's Render Properties > Film > Transparent: the world still lights the scene but isn't drawn behind it,

@@ -46,6 +46,10 @@ struct ExportOptions {
   bool uvs = true;              // Blender: UV Coordinates
   bool materials = true;        // Blender: Materials (glTF: with their base colour textures)
   bool ascii = false;           // STL / PLY: ASCII instead of binary
+  /* Bake Textures (task 0036, OBJ / FBX / glTF): each object's look baked on a copy into one set of images beside
+   * the file (albedo, roughness, metallic, normal) on new UVs; the copies' materials name them. */
+  bool bake_textures = false;
+  int bake_size = 1024;         // texels per side
   std::string texture_dir;      // (not reflected) the exported file's folder: textures in it are written by name
   void reflect(Reflector &r);
 };

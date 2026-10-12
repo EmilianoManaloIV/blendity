@@ -984,7 +984,7 @@ static std::string png_filtered_rows(const uint32_t *pixels, int width, int heig
   return out;
 }
 
-bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride, bool alpha) {
+std::string encode_png(const uint32_t *pixels, int width, int height, int stride, bool alpha) {
   std::string raw = png_filtered_rows(pixels, width, height, stride, alpha ? 4 : 3);
   std::string png("\x89PNG\r\n\x1a\n", 8);
   std::string ihdr;
@@ -998,7 +998,11 @@ bool write_png(const std::string &path, const uint32_t *pixels, int width, int h
   chunk(png, "IHDR", ihdr);
   chunk(png, "IDAT", png_deflate(raw));
   chunk(png, "IEND", "");
-  return fs::write_file(path, png);
+  return png;
+}
+
+bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride, bool alpha) {
+  return fs::write_file(path, encode_png(pixels, width, height, stride, alpha));
 }
 
 }  // namespace bl

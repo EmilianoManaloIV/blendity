@@ -16,6 +16,8 @@
 #include "../src/render/lightmapper.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/shading.h"
+#include "../src/render/texture_bake.h"
+#include "../extern/ufbx/ufbx.h"
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
@@ -216,6 +218,7 @@ static void round54_tests();
 static void round55_tests();
 static void round56_tests();
 static void round57_tests();
+static void round58_tests();
 
 int main() {
   register_builtin_components();
@@ -850,6 +853,7 @@ int main() {
   round55_tests();
   round56_tests();
   round57_tests();
+  round58_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -20481,5 +20485,410 @@ static void round57_tests() {
     CHECK(load_image(written, b, err));
     if (b.width == 160) CHECK(b.rgba8[(1 * 160 + 1) * 4 + 3] == 255);
     std::remove(written.c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 58 (task 0036, ADR 0019): bake textures onto a mesh              */
+/* ===================================================================== */
+
+/* A baked image's texel at a baked UV (rows top to bottom, as textures are sampled). */
+static uint32_t r58_at(const std::vector<uint32_t> &img, int size, Vec2 uv) {
+  const int x = std::max(0, std::min(size - 1, (int)std::floor(uv.x * size)));
+  const int y = std::max(0, std::min(size - 1, (int)std::floor((1.0f - uv.y) * size)));
+  return img[(size_t)y * size + x];
+}
+static Vec3 r58_rgb(uint32_t c) { return Vec3((c >> 16 & 255) / 255.0f, (c >> 8 & 255) / 255.0f, (c & 255) / 255.0f); }
+/* Face f's centre in the baked UVs (the corners' average: a convex face's centre is inside its chart). */
+static Vec2 r58_face_uv(const Mesh &m, const TextureBakeResult &r, size_t f) {
+  Vec2 s;
+  const uint32_t n = m.face_size(f);
+  for (uint32_t k = 0; k < n; k++) s = s + r.uvs[m.face_offsets[f] + k];
+  return s / (float)n;
+}
+/* The colour a material shows (sRGB 0..1) where a point of the original surface has original UV q: found by the
+ * triangle holding q, and that point's baked UV. */
+static bool r58_baked_uv(const Mesh &m, const TextureBakeResult &r, Vec2 q, Vec2 &out) {
+  const RenderMesh &rm = m.render_mesh();
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    Vec2 a[3], b[3];
+    for (int k = 0; k < 3; k++) a[k] = m.uvs[rm.tri_corner[t * 3 + k]], b[k] = r.uvs[rm.tri_corner[t * 3 + k]];
+    const float d = (a[1].x - a[0].x) * (a[2].y - a[0].y) - (a[2].x - a[0].x) * (a[1].y - a[0].y);
+    if (std::fabs(d) < 1e-12f) continue;
+    const float w1 = ((q.x - a[0].x) * (a[2].y - a[0].y) - (a[2].x - a[0].x) * (q.y - a[0].y)) / d;
+    const float w2 = ((a[1].x - a[0].x) * (q.y - a[0].y) - (q.x - a[0].x) * (a[1].y - a[0].y)) / d;
+    if (w1 < -1e-5f || w2 < -1e-5f || w1 + w2 > 1.0f + 1e-5f) continue;
+    out = b[0] * (1.0f - w1 - w2) + b[1] * w1 + b[2] * w2;
+    return true;
+  }
+  return false;
+}
+static float r58_to_srgb(float v) { return linear_to_srgb(std::max(0.0f, std::min(1.0f, v))); }
+static bool r58_same(const std::vector<Vec2> &a, const std::vector<Vec2> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (a[i].x != b[i].x || a[i].y != b[i].y) return false;
+  return true;
+}
+
+static void r58_forget_baked(const std::string &name) {
+  for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"})
+    std::remove(resolve_asset_path("Assets/Textures/Baked/" + name + m).c_str());
+  std::remove(resolve_asset_path("Assets/Materials/" + name + " Baked.mat").c_str());
+}
+
+static void round58_tests() {
+  test("texture bake: a cube with a different material on each face bakes each colour at its face's centre, on one atlas", [] {
+    MeshPtr cube = primitives::cube();
+    Mesh &m = *mesh_make_mutable(cube);
+    m.face_material.assign(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) m.face_material[f] = (int32_t)f;
+    m.touch();
+    const Vec3 cols[6] = {{0.9f, 0.1f, 0.1f}, {0.1f, 0.9f, 0.1f}, {0.1f, 0.1f, 0.9f}, {0.9f, 0.9f, 0.1f}, {0.1f, 0.9f, 0.9f}, {0.9f, 0.1f, 0.9f}};
+    std::vector<MaterialPtr> mats;
+    for (int k = 0; k < 6; k++) mats.push_back(make_material("F" + std::to_string(k), cols[k]));
+    TextureBakeSettings s;
+    s.size = 256;
+    const TextureBakeResult r = bake_textures(m, Mat4::identity(), mats, s);
+    CHECK(r.size == 256 && r.albedo.size() == 256u * 256u && r.uvs.size() == m.corner_verts.size());
+    std::printf("    %zu of %d texels covered\n", r.texels, 256 * 256);
+    CHECK(r.texels > 256 * 256 / 5);
+    for (Vec2 u : r.uvs) CHECK(u.x >= 0.0f && u.x <= 1.0f && u.y >= 0.0f && u.y <= 1.0f);
+    int right = 0;
+    for (size_t f = 0; f < m.face_count() && f < 6; f++) {
+      const Vec3 got = r58_rgb(r58_at(r.albedo, r.size, r58_face_uv(m, r, f)));
+      const Vec3 want(r58_to_srgb(cols[f].x), r58_to_srgb(cols[f].y), r58_to_srgb(cols[f].z));
+      const float err = std::max({std::fabs(got.x - want.x), std::fabs(got.y - want.y), std::fabs(got.z - want.z)});
+      right += err < 2.5f / 255.0f;
+      if (err >= 2.5f / 255.0f) std::printf("    face %zu: baked %.3f %.3f %.3f, wanted %.3f %.3f %.3f\n", f, got.x, got.y, got.z, want.x, want.y, want.z);
+    }
+    CHECK(right == 6);
+    /* Roughness and metallic hold the materials' values (0.5, 0); the normal map is flat. */
+    const uint32_t rough = r58_at(r.roughness, r.size, r58_face_uv(m, r, 2)), metal = r58_at(r.metallic, r.size, r58_face_uv(m, r, 2));
+    CHECK(std::abs((int)(rough & 255) - 128) <= 1 && (metal & 255) == 0);
+  });
+
+  test("texture bake: a checker on a plane's UVs bakes the colour the renderer shows at every cell centre", [] {
+    MeshPtr plane = primitives::plane(2.0f, 1);
+    CHECK(plane->has_uvs());
+    MaterialPtr mat = make_material("Checker", Vec3(0.9f, 0.85f, 0.2f));
+    mat->procedural = (int)Procedural::Checker;
+    mat->procedural_scale = 4.0f;
+    mat->procedural_color2 = Vec3(0.05f, 0.1f, 0.6f);
+    TextureBakeSettings s;
+    s.size = 256;
+    const TextureBakeResult r = bake_textures(*plane, Mat4::translate({1, 2, 3}), {mat}, s);
+    int checked = 0, right = 0;
+    for (int j = 0; j < 8; j++)
+      for (int i = 0; i < 8; i++) {
+        const Vec2 q((i + 0.5f) / 8.0f, (j + 0.5f) / 8.0f);  // the middle of a checker cell's quarter
+        Vec2 b;
+        if (!r58_baked_uv(*plane, r, q, b)) continue;
+        SurfacePoint sp;
+        sp.uv = q;
+        sp.normal = sp.geo_normal = sp.local_normal = Vec3(0, 1, 0);
+        const SurfaceSample want = evaluate_material(*mat, sp);
+        const Vec3 got = r58_rgb(r58_at(r.albedo, r.size, b));
+        checked++;
+        right += std::fabs(got.x - r58_to_srgb(want.albedo.x)) < 3.0f / 255.0f && std::fabs(got.z - r58_to_srgb(want.albedo.z)) < 3.0f / 255.0f;
+      }
+    std::printf("    %d of %d cell centres match\n", right, checked);
+    CHECK(checked == 64 && right == 64);
+  });
+
+  test("texture bake: an axis material bakes grass on the top's texels and dirt on the sides', whatever the object's rotation", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    const R51Mats am = r51_mats(1);
+    MeshPtr cube = primitives::cube();
+    TextureBakeSettings s;
+    s.size = 256;
+    for (int turn = 0; turn < 2; turn++) {
+      /* A quarter turn about X: the face that was +Z faces up. World mode follows the world's up, not the mesh's. */
+      const Mat4 model = turn ? Mat4::rotate(Quat::axis_angle(Vec3(1, 0, 0), -kPi * 0.5f)) : Mat4::identity();
+      const TextureBakeResult r = bake_textures(*cube, model, {am.axis}, s);
+      int top = 0, side = 0, tops = 0, sides = 0;
+      for (size_t f = 0; f < cube->face_count(); f++) {
+        const Vec3 n = normalize(model.dir(cube->face_normal(f)));
+        const Vec3 c = r58_rgb(r58_at(r.albedo, r.size, r58_face_uv(*cube, r, f)));
+        const Vec3 lin(srgb_to_linear(c.x), srgb_to_linear(c.y), srgb_to_linear(c.z));
+        if (n.y > 0.9f) tops++, top += r51_green(lin);
+        else if (std::fabs(n.y) < 0.1f) sides++, side += r51_brown(lin);
+      }
+      std::printf("    turn %d: %d of %d tops green, %d of %d sides brown\n", turn, top, tops, side, sides);
+      CHECK(tops == 1 && top == 1 && sides == 4 && side == 4);
+    }
+  });
+
+  test("texture bake: a flat surface bakes a flat normal map; a Bricks texture's normal bakes its mortar", [] {
+    MeshPtr cube = primitives::cube();
+    TextureBakeSettings s;
+    s.size = 128;
+    const TextureBakeResult flat = bake_textures(*cube, Mat4::scale({2, 1, 3}), {make_material("Grey", Vec3(0.5f))}, s);
+    float worst = 0.0f;
+    for (size_t i = 0; i < flat.normal.size(); i++) {
+      if (!flat.covered[i]) continue;
+      const Vec3 c = r58_rgb(flat.normal[i]) * 2.0f - Vec3(1.0f);
+      worst = std::max(worst, std::acos(std::min(1.0f, normalize(c).z)) * 180.0f / kPi);
+    }
+    std::printf("    flat: the most tilted texel is %.2f degrees off +Z\n", worst);
+    CHECK(worst < 2.0f);
+    /* Bricks: the normal map comes from the texture's height, so the mortar lines tilt the texels beside them. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("newtex R58Bricks Bricks");
+    MaterialPtr bricks = make_material("Bricks", Vec3(1.0f));
+    bricks->normal_map = TextureRef{"Assets/Textures/R58Bricks.ptex#normal", true};
+    bricks->touch();
+    CHECK(bricks->textures().normal != nullptr);
+    MeshPtr plane = primitives::plane(2.0f, 1);
+    s.size = 256;
+    const TextureBakeResult b = bake_textures(*plane, Mat4::identity(), {bricks}, s);
+    size_t tilted = 0;
+    for (size_t i = 0; i < b.normal.size(); i++) {
+      if (!b.covered[i]) continue;
+      const Vec3 c = normalize(r58_rgb(b.normal[i]) * 2.0f - Vec3(1.0f));
+      tilted += std::acos(std::min(1.0f, c.z)) * 180.0f / kPi > 5.0f;
+    }
+    std::printf("    bricks: %zu of %zu texels tilted more than 5 degrees\n", tilted, b.texels);
+    CHECK(tilted * 50 > b.texels && tilted * 2 < b.texels);  // mortar edges, not everything
+    std::remove(resolve_asset_path("Assets/Textures/R58Bricks.ptex").c_str());
+  });
+
+  test("texture bake: Object > Bake Textures keeps the look (rasterized within 5 %), writes the images and material, and undo restores the UVs and materials", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr mat = make_material("R58 Checker", Vec3(0.85f, 0.3f, 0.1f));
+    mat->procedural = (int)Procedural::Checker;
+    mat->procedural_scale = 3.0f;
+    mat->procedural_color2 = Vec3(0.1f, 0.3f, 0.8f);
+    mat->roughness = 0.35f;
+    cube->get<MeshRenderer>()->materials = {mat};
+    ed.mark_changed_for_test("R58 material");  // the state undo returns to (committed by the next frame)
+    ed.step_frame_headless();
+    cube = ed.scene().find_by_name("Cube");
+    ed.select_object(cube->id);
+    const std::vector<Vec2> uvs_before = cube->get<MeshFilter>()->mesh->uvs;
+    const Image before = r57_render(ed, "Rasterized", false);
+    ed.command("baketex 1024");
+    cube = ed.scene().find_by_name("Cube");
+    const Mesh &bm = *cube->get<MeshFilter>()->mesh;
+    const MaterialPtr &now = cube->get<MeshRenderer>()->materials[0];
+    CHECK(now && now->name == "Cube Baked" && now->asset_path == "Assets/Materials/Cube Baked.mat");
+    CHECK(!r58_same(bm.uvs, uvs_before));
+    for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"})
+      CHECK(fs::exists(resolve_asset_path(std::string("Assets/Textures/Baked/Cube") + m)));
+    const Image after = r57_render(ed, "Rasterized", false);
+    CHECK(after.pixels.size() == before.pixels.size());
+    double diff = 0.0;
+    for (size_t i = 0; i < before.pixels.size() && i < after.pixels.size(); i++)
+      for (int ch = 0; ch < 3; ch++) diff += std::abs((int)(before.pixels[i] >> (ch * 8) & 255) - (int)(after.pixels[i] >> (ch * 8) & 255));
+    diff /= std::max<size_t>(1, before.pixels.size()) * 3.0 * 255.0;
+    std::printf("    mean colour difference after the bake: %.2f %%\n", diff * 100.0);
+    CHECK(diff < 0.05);
+    ed.command("undo");
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(r58_same(cube->get<MeshFilter>()->mesh->uvs, uvs_before));
+    const std::vector<MaterialPtr> &slots = cube->get<MeshRenderer>()->materials;
+    CHECK(slots.size() == 1 && slots[0] && slots[0]->name == "R58 Checker");
+    r58_forget_baked("Cube");
+  });
+
+  test("texture bake: two objects with one name get their own images and material; a Mirror modifier is refused, the object unchanged", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+    GameObject *a = ed.scene().find_by_name("Cube");
+    if (!a) return;
+    ed.select_object(a->id);
+    ed.command("duplicate");
+    GameObject *b = ed.selected_object();
+    CHECK(b && b != a);
+    if (!b || b == a) return;
+    b->name = "Cube";
+    const uint64_t ida = a->id, idb = b->id;
+    ed.select_object(ida);
+    CHECK(ed.bake_object_textures_for_test(256));
+    ed.select_object(idb);
+    CHECK(ed.bake_object_textures_for_test(256));
+    a = ed.scene().find(ida), b = ed.scene().find(idb);
+    const MaterialPtr ma = a->get<MeshRenderer>()->materials[0], mb = b->get<MeshRenderer>()->materials[0];
+    std::printf("    first: %s, second: %s\n", ma->asset_path.c_str(), mb->asset_path.c_str());
+    CHECK(ma->asset_path == "Assets/Materials/Cube Baked.mat" && mb->asset_path == "Assets/Materials/Cube 2 Baked.mat");
+    CHECK(ma->base_map.path != mb->base_map.path);
+    CHECK(fs::exists(resolve_asset_path("Assets/Textures/Baked/Cube_albedo.png")) && fs::exists(resolve_asset_path("Assets/Textures/Baked/Cube 2_albedo.png")));
+    /* Mirror adds geometry: the bake would repeat the base's images, so it is refused and nothing changes. */
+    b->add<MirrorModifier>();
+    b->mark_dirty();
+    ed.mark_changed_for_test("R58 mirror");
+    ed.step_frame_headless();
+    b = ed.scene().find(idb);
+    const std::vector<Vec2> uvs = b->get<MeshFilter>()->mesh->uvs;
+    ed.select_object(idb);
+    CHECK(!ed.bake_object_textures_for_test(256));
+    b = ed.scene().find(idb);
+    CHECK(r58_same(b->get<MeshFilter>()->mesh->uvs, uvs) && b->get<MeshRenderer>()->materials[0]->asset_path == "Assets/Materials/Cube 2 Baked.mat");
+    CHECK(!fs::exists(resolve_asset_path("Assets/Materials/Cube 3 Baked.mat")));
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+  });
+
+  test("texture bake: alpha only from see-through surfaces: an Opaque material with alpha bakes solid, a Transparent slot gives the baked material its surface", [] {
+    MeshPtr cube = primitives::cube();
+    Mesh &m = *mesh_make_mutable(cube);
+    m.face_material.assign(m.face_count(), 0);
+    m.face_material[0] = 1;
+    m.touch();
+    MaterialPtr solid = make_material("Solid", Vec3(0.5f));
+    solid->alpha = 0.3f;  // ignored by every renderer on an Opaque surface
+    TextureBakeSettings s;
+    s.size = 128;
+    const TextureBakeResult r1 = bake_textures(m, Mat4::identity(), {solid}, s);
+    CHECK(!r1.any_alpha && r1.alpha_slot == -1);
+    bool opaque = true;
+    for (size_t i = 0; i < r1.albedo.size(); i++) opaque = opaque && (r1.albedo[i] >> 24) == 255;
+    CHECK(opaque);
+    CHECK(baked_material("X", "x", solid.get(), nullptr).surface == (int)MaterialSurface::Opaque);
+    MaterialPtr glassy = make_material_preset("Transparent");
+    glassy->alpha = 0.4f;
+    const TextureBakeResult r2 = bake_textures(m, Mat4::identity(), {solid, glassy}, s);
+    CHECK(r2.any_alpha && r2.alpha_slot == 1);
+    const uint32_t c = r58_at(r2.albedo, r2.size, r58_face_uv(m, r2, 0));
+    std::printf("    the Transparent face's alpha: %u\n", c >> 24);
+    CHECK(std::abs((int)(c >> 24) - 102) <= 1);
+    CHECK((r58_at(r2.albedo, r2.size, r58_face_uv(m, r2, 1)) >> 24) == 255);
+    const Material bm = baked_material("X", "x", solid.get(), glassy.get());
+    CHECK(bm.surface == (int)MaterialSurface::Transparent);
+  });
+
+
+  test("texture bake: OBJ, glb and FBX exports with Bake Textures write the images beside the file and reference them", [] {
+    Editor ed;
+    r57_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (!cube) return;
+    MaterialPtr mat = make_material("R58 Export", Vec3(0.2f, 0.7f, 0.3f));
+    mat->procedural = (int)Procedural::Noise;
+    cube->get<MeshRenderer>()->materials = {mat};
+    ed.select_object(cube->id);
+    const std::vector<Vec2> uvs_before = cube->get<MeshFilter>()->mesh->uvs;
+    const std::string dir = fs::join(scratch_project(), "R58Export");
+    for (int fmt : {(int)ExportFormat::OBJ, (int)ExportFormat::GLB, (int)ExportFormat::FBX}) {
+      ExportOptions o = export_defaults(fmt);
+      o.bake_textures = true;
+      o.bake_size = 256;
+      const std::string path = fs::join(dir, std::string("r58") + export_format_extension(fmt));
+      CHECK(ed.export_model_for_test(o, path) == path);
+      const std::string base = fs::join(dir, "r58_Cube");
+      for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) CHECK(fs::exists(base + m));
+      std::string file;
+      CHECK(fs::read_file(path, file));
+      if (fmt == (int)ExportFormat::OBJ) {
+        std::string mtl;
+        CHECK(fs::read_file(fs::join(dir, "r58.mtl"), mtl));
+        CHECK(mtl.find("map_Kd r58_Cube_albedo.png") != std::string::npos);
+        CHECK(mtl.find("map_Pr r58_Cube_roughness.png") != std::string::npos);
+        CHECK(mtl.find("map_Bump r58_Cube_normal.png") != std::string::npos);
+        CHECK(file.find("\nvt ") != std::string::npos);
+      }
+      else if (fmt == (int)ExportFormat::GLB) {
+        for (const char *k : {"baseColorTexture", "metallicRoughnessTexture", "normalTexture", "image/png"}) CHECK(file.find(k) != std::string::npos);
+      }
+      else {
+        for (const char *k : {"TextureVideoClip", "DiffuseColor", "NormalMap", "ShininessExponent", "r58_Cube_albedo.png"})
+          CHECK(file.find(k) != std::string::npos);
+      }
+    }
+    /* The scene is untouched. */
+    CHECK(r58_same(cube->get<MeshFilter>()->mesh->uvs, uvs_before) && cube->get<MeshRenderer>()->materials[0] == mat);
+    /* ufbx reads the FBX's textures on the material. */
+    std::string fbx;
+    fs::read_file(fs::join(dir, "r58.fbx"), fbx);
+    ufbx_load_opts opts = {};
+    ufbx_error uerr;
+    ufbx_scene *sc = ufbx_load_memory(fbx.data(), fbx.size(), &opts, &uerr);
+    CHECK(sc != nullptr);
+    if (sc) {
+      bool diffuse = false, normal = false;
+      for (size_t i = 0; i < sc->materials.count; i++) {
+        const ufbx_material *um = sc->materials.data[i];
+        diffuse = diffuse || (um->fbx.diffuse_color.texture && std::string(um->fbx.diffuse_color.texture->relative_filename.data).find("r58_Cube_albedo.png") != std::string::npos);
+        normal = normal || um->fbx.normal_map.texture != nullptr;
+      }
+      CHECK(diffuse && normal);
+      ufbx_free_scene(sc);
+    }
+  });
+
+  test("texture bake: exports reference image maps of ordinary materials too (glTF normal and packed metallic-roughness, FBX textures), never a .ptex output", [] {
+    const std::string dir = fs::join(scratch_project(), "R58Maps");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(16 * 16, 0xFF808080u);
+    const std::string rough = fs::join(dir, "rough.png"), nrm = fs::join(dir, "nrm.png");
+    CHECK(write_png(rough, px.data(), 16, 16, 16));
+    CHECK(write_png(nrm, px.data(), 16, 16, 16));
+    MaterialPtr mat = make_material("Maps", Vec3(0.5f));
+    mat->roughness_map = TextureRef{rough, true};
+    mat->normal_map = TextureRef{nrm, true};
+    MeshPtr cube = primitives::cube();
+    ExportItem it;
+    it.name = "Cube";
+    it.mesh = cube.get();
+    it.world = Mat4::identity();
+    it.materials = {mat};
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    CHECK(glb.find("metallicRoughnessTexture") != std::string::npos && glb.find("normalTexture") != std::string::npos);
+    const std::string fbx = export_fbx({it}, export_defaults((int)ExportFormat::FBX));
+    CHECK(fbx.find("rough.png") != std::string::npos && fbx.find("ShininessExponent") != std::string::npos);
+    /* A procedural texture's output isn't a file: the MTL leaves it out (the editor writes those as PNGs first). */
+    mat->base_map = TextureRef{"Assets/Textures/X.ptex#albedo", false};
+    std::string obj, mtl;
+    export_obj_mtl({it}, "x.mtl", obj, mtl);
+    CHECK(mtl.find(".ptex") == std::string::npos && mtl.find("map_Pr") != std::string::npos);
+    std::remove(rough.c_str());
+    std::remove(nrm.c_str());
+  });
+
+  test("texture bake: Keep UVs keeps a plane's own UVs, not a mesh whose UVs overlap; empty, NaN and degenerate meshes bake nothing", [] {
+    MeshPtr plane = primitives::plane(2.0f, 4);
+    TextureBakeSettings s;
+    s.size = 64;
+    s.keep_uvs = true;
+    const TextureBakeResult own = bake_textures(*plane, Mat4::identity(), {}, s);
+    CHECK(own.own_uvs && own.uvs.size() == plane->uvs.size());
+    bool same = own.uvs.size() == plane->uvs.size();
+    for (size_t i = 0; same && i < own.uvs.size(); i++) same = std::fabs(own.uvs[i].x - plane->uvs[i].x) < 1e-6f && std::fabs(own.uvs[i].y - plane->uvs[i].y) < 1e-6f;
+    CHECK(same);
+    MeshPtr stacked = primitives::plane(2.0f, 4);
+    Mesh &sm = *mesh_make_mutable(stacked);
+    for (size_t f = 0; f < sm.face_count(); f++)  // every face on the whole 0..1 square: all overlap
+      for (uint32_t k = 0; k < sm.face_size(f); k++) {
+        static const Vec2 sq[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+        sm.uvs[sm.face_offsets[f] + k] = sq[k % 4];
+      }
+    sm.touch();
+    const TextureBakeResult gen = bake_textures(sm, Mat4::identity(), {}, s);
+    CHECK(!gen.own_uvs && gen.texels > 0);
+    /* Nothing to bake: no faces, every position NaN, every vertex in one place. */
+    Mesh empty;
+    CHECK(bake_textures(empty, Mat4::identity(), {}, s).texels == 0);
+    MeshPtr bad = primitives::cube();
+    Mesh &bm = *mesh_make_mutable(bad);
+    for (Vec3 &p : bm.positions) p = Vec3(std::nanf(""), 0.0f, 0.0f);
+    bm.touch();
+    const TextureBakeResult nan = bake_textures(bm, Mat4::identity(), {}, s);
+    CHECK(nan.albedo.size() == 64u * 64u && nan.texels == 0);
+    MeshPtr dot = primitives::cube();
+    Mesh &dm = *mesh_make_mutable(dot);
+    for (Vec3 &p : dm.positions) p = Vec3(1.0f);
+    dm.touch();
+    const TextureBakeResult collapsed = bake_textures(dm, Mat4::identity(), {}, s);
+    CHECK(collapsed.albedo.size() == 64u * 64u && collapsed.texels == 0);
+    /* Out-of-range sizes are clamped (16..4096). */
+    s.size = 1;
+    CHECK(bake_textures(*plane, Mat4::identity(), {}, s).size == 16);
   });
 }

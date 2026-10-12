@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 58): bake textures onto a mesh for export (task 0036)
+
+**Asked:** "Bake textures onto a mesh" for export (the roadmap's item 5), one atlas per object.
+
+**Added**
+- **Object > Bake Textures** (512 to 4096; console `baketex [size] [keepuvs]`): the active object's look (image
+  maps, procedural and `.ptex` textures, axis materials, Box and Generated mapping, every material slot) baked into
+  albedo, roughness, metallic and normal PNGs in `Assets/Textures/Baked`, on new UVs (Smart UV Project and Pack
+  Islands); the mesh takes those UVs and a new `<Object> Baked` material on every slot. One undo step. Objects
+  whose modifiers add geometry are refused with a message (apply them, or export with Bake Textures).
+- **Export > Bake Textures** (OBJ, FBX, glb / glTF, with a size): each exported object baked on a copy, the
+  images written beside the file and referenced; the scene is not changed.
+- **Exports carry more maps** without a bake: glTF normal textures and roughness / metallic packed into one PNG in
+  the buffer; FBX Texture and Video objects for base colour, normal, roughness, metallic and emission maps.
+
+**Fixed**
+- OBJ exports wrote a procedural texture's output (`X.ptex#albedo`) as a file path when it hadn't been converted.
+- `CMakeLists.txt` didn't compile `src/texture` (the build scripts and CI did).
+
+**Checked**
+- New tests (round 58): six materials on a cube's faces bake their colours at the face centres on one atlas; a
+  checker on a plane matches the renderer at all 64 cell centres; an axis material bakes grass on top and dirt on
+  the sides, rotated too; a flat surface's normal map is within 0.3 degrees of +Z and a Bricks texture bakes its
+  mortar; Object > Bake Textures keeps the rasterized look (0.02 % mean colour difference) and undo restores the
+  UVs and material; OBJ, glb and FBX exports with Bake Textures write and reference the images (ufbx reads the
+  FBX textures); ordinary materials' maps reach glTF and FBX; Keep UVs; NaN, empty and collapsed meshes bake
+  nothing; two objects with one name get their own files; a Mirror modifier is refused; Opaque alpha bakes solid
+  and a Transparent slot gives the baked material its surface.
+- Opened in Blender 5.2: the OBJ, glb and FBX import with Base Color, Roughness, Metallic and Normal linked to
+  the baked 256 x 256 images.
+- Stress `texbake` (new): 50k faces at 2048 in 506 ms on 8 threads (spec: under 2 s), 441 ms on 32, 4096 in
+  968 ms; 60 fuzzed bakes (NaN, huge, collapsed meshes, odd sizes) 0 problems. A 4096 bake from the menu holds
+  the editor for about a second.
+
+**Review (code reviewer)**: four major and several minor findings, all fixed: an Opaque material's alpha made the
+baked object a Cutout; a bake overwrote another same-named object's images (now new files each time); the in-scene
+bake ignored modifiers that add geometry (now refused); tracked stress reports deleted by a cleanup (restored);
+mirrored objects' normal maps in exports; the Bake option shown with Materials off; Unlit and emission dropped;
+packed roughness read as linear from sRGB maps; collapsed triangles baked.
+- Unit checks: Windows 8,693, 0 failed (476 tests); the whole suite in render-cache verify mode: 8,694,
+  0 failed, 0 stale pictures. Linux with libraries: 8,625, 0 failed. Sanitizer build: 8,547, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `texbake` and `textures` stress 0 problems.
+
 ## 2026-10-11 (round 57): transparent backgrounds in renders (task 0035)
 
 **Asked:** "Add the ability to make backgrounds transparent when they are rendered (png transparency)."

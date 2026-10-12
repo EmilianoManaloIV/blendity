@@ -90,6 +90,9 @@ using TexturePtr = std::shared_ptr<const Texture>;
 /* Cached load (reloads when the file changes on disk). */
 TexturePtr texture_load(const std::string &path, bool srgb, std::string *error = nullptr);
 void texture_cache_clear();
+/* Drops a file's cached textures (it was rewritten: a bake, task 0036; the modification time can stay the same
+ * within a second). */
+void texture_cache_forget(const std::string &path);
 size_t texture_cache_size();
 
 /* Blender's generated test images (Image > New > Generated Type). */

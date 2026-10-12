@@ -23,6 +23,7 @@
 #include "../src/core/cpu.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/raster.h"
+#include "../src/render/texture_bake.h"
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
 #include "../src/scene/physics.h"
@@ -2528,6 +2529,66 @@ static void test_texture_sampling(Report &rep, const Options &o) {
   }
 }
 
+/* Task 0036: baking textures (UVs, per-texel material evaluation, padding) on meshes up to 50k faces. */
+static void test_texture_bake(Report &rep, const Options &o) {
+  rep.title("Texture bake (task 0036)",
+            "bake_textures on UV spheres: Smart UV Project + Pack Islands, then 2 x 2 material samples per covered texel "
+            "(a procedural Noise material), padding 4. Spec: 50k faces at 2048 in under 2 s on 8 threads.");
+  rep.table({"faces", "size", "threads", "ms", "texels covered", "problems"});
+  MaterialPtr mat = make_material("Noise", Vec3(0.6f, 0.4f, 0.3f));
+  mat->procedural = (int)Procedural::Noise;
+  int problems_total = 0;
+  struct Case { int seg, rings, size, threads; };  // threads 0: all
+  const std::vector<Case> cases = o.quick ? std::vector<Case>{{64, 32, 512, 0}, {320, 160, 2048, 8}}
+                                          : std::vector<Case>{{64, 32, 512, 0}, {160, 80, 1024, 0}, {320, 160, 2048, 0},
+                                                              {320, 160, 2048, 8}, {320, 160, 4096, 0}};
+  JobSystem &js = JobSystem::global();
+  for (const Case &c : cases) {
+    MeshPtr m = primitives::uv_sphere(1.0f, c.seg, c.rings);
+    TextureBakeSettings s;
+    s.size = c.size;
+    TextureBakeResult r;
+    if (c.threads) js.set_max_threads(c.threads);
+    const double ms = time_ms([&] { r = bake_textures(*m, Mat4::identity(), {mat}, s); });
+    js.set_max_threads(1 << 30);
+    int problems = 0;
+    if (r.texels == 0 || r.uvs.size() != m->corner_verts.size()) problems++;
+    for (const Vec2 &u : r.uvs) problems += !(u.x >= 0.0f && u.x <= 1.0f && u.y >= 0.0f && u.y <= 1.0f);
+    if (c.threads == 8 && m->face_count() >= 50000 && c.size == 2048 && ms > 2000.0) problems++;  // the spec's goal
+    problems_total += problems;
+    const int threads = c.threads ? std::min(c.threads, js.thread_count()) : js.thread_count();
+    rep.row({std::to_string(m->face_count()), std::to_string(c.size), std::to_string(threads), f1(ms), std::to_string(r.texels),
+             std::to_string(problems)});
+  }
+  /* Robustness: NaN, huge and collapsed meshes, odd sizes and settings. */
+  int fuzz = 0;
+  uint32_t rng = 7;
+  auto rnd = [&] { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
+  for (int i = 0; i < (o.quick ? 20 : 60); i++) {
+    MeshPtr m = (i % 3 == 0) ? primitives::cube() : (i % 3 == 1) ? primitives::plane(2.0f, 3) : primitives::uv_sphere(0.5f, 8, 6);
+    Mesh &mm = *mesh_make_mutable(m);
+    const int kind = (int)(rnd() % 4);
+    for (Vec3 &p : mm.positions) {
+      if (kind == 1 && rnd() % 5 == 0) p.x = std::nanf("");
+      if (kind == 2) p = p * 1e18f;
+      if (kind == 3) p = Vec3(0.5f);
+    }
+    mm.touch();
+    TextureBakeSettings s;
+    s.size = (int)(rnd() % 300) - 20;
+    s.padding = (int)(rnd() % 100) - 10;
+    s.samples = (int)(rnd() % 6);
+    s.keep_uvs = rnd() % 2;
+    const TextureBakeResult r = bake_textures(mm, Mat4::identity(), {mat}, s);
+    const size_t n = (size_t)r.size * r.size;
+    if (r.size < 16 || r.albedo.size() != n || r.normal.size() != n || r.roughness.size() != n || r.metallic.size() != n) fuzz++;
+  }
+  problems_total += fuzz;
+  rep.note(strprintf("Random NaN / huge / collapsed meshes with odd sizes, padding and samples: %d runs, %d problems "
+                     "(a problem: a crash, or images of the wrong size).", o.quick ? 20 : 60, fuzz));
+  std::printf("  -> Texture bake: %d problems\n", problems_total);
+}
+
 static void test_codecs(Report &rep, const Options &o) {
   rep.title("Image codecs and scene compression",
             "Decoding a 3840x2160 photo-like image (gradients + noise) with Blendity's own decoders vs Blender's libjpeg-turbo "
@@ -3494,7 +3555,7 @@ int main(int argc, char **argv) {
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
                {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"procedural_textures", test_textures}, {"vgi", test_vgi}, {"probes", test_probes},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
-               {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
+               {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
