@@ -53,6 +53,7 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
   bool gizmo_busy = gizmo_update(view);
+  if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
   /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
   if (pushpull_update(view)) gizmo_busy = true;
   if (modal_update(view)) gizmo_busy = true;
@@ -145,6 +146,7 @@ void Editor::draw_scene_view(const Recti &r) {
   knife_draw(view);
   draw_preview(view);
   if (show_gizmos_ && !piloting) draw_gizmo(view);
+  wp_draw(view);
   draw_pushpull(view);
   draw_modal(view);
   draw_transform(view);
@@ -395,6 +397,12 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
     it.receive_shadows = mr->receive_shadows;
     it.id = (uint32_t)g.id;
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
+    if (!game && weight_paint_ && g.id == wp_obj_) {  // Weight Paint: the mesh being painted, in its weight colours
+      it.mesh = &mf->mesh->render_mesh();
+      it.vertex_colors = wp_colors(*mf->mesh, *it.mesh);
+      it.unlit = false;
+      it.materials = nullptr;  // (with materials, Solid shades per pixel from them: the weight colours are the point here)
+    }
     r3d.add(it);
   });
 }
@@ -1322,7 +1330,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1755,7 +1763,7 @@ bool Editor::gizmo_update(const Recti &view) {
 
 void Editor::draw_gizmo(const Recti &view) {
   auto &u = ui_;
-  if (tool_ == Tool::View) return;
+  if (tool_ == Tool::View || weight_paint_) return;  // Weight Paint: the brush, not the gizmo
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
   if (!has_target) return;
   /* Snapping markers: the vertex / surface point a move is snapping to, and with V
@@ -1892,6 +1900,7 @@ MeshPtr *Editor::edit_mesh_ptr() {
 }
 
 void Editor::enter_edit_mode() {
+  if (weight_paint_) set_weight_paint(false);  // one mode at a time
   if (playing_) return;
   if (pilot_cam_) toggle_pilot_camera();  // piloting hides the editor's overlays: editing needs them back
   GameObject *g = active_object();

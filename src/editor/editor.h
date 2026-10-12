@@ -69,6 +69,17 @@ extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyli
 extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
+/* Weight Paint's brush (task 0046): radius in screen pixels (at UI scale 1). */
+struct WeightBrush {
+  int mode = 0;  // kWeightBrushModes
+  float radius = 50.0f, strength = 0.5f, weight = 1.0f;
+  int falloff = 0;  // kWeightFalloffs
+  bool mirror_x = false, front_only = true;
+};
+extern const char *const kWeightBrushModes[4];  // Add, Subtract, Draw, Blur (task 0046)
+extern const char *const kWeightFalloffs[6];
+Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
+
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Count };
 const char *window_title(WindowKind k);
@@ -214,6 +225,9 @@ class Editor {
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
   std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
+  bool weight_paint_for_test() const { return weight_paint_; }
+  Shading shading_for_test() const { return shading_; }
+  WeightBrush &wp_brush_for_test() { return wp_brush_; }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
   void set_background_gpu_open_for_test(bool on) {
     cam_preview_pt_.set_background_gpu_open(on);
@@ -493,6 +507,20 @@ class Editor {
   /* After an edit (at the undo commit): meshes whose vertex count changed get their groups back from the snapshot
    * before the edit, by position (ADR 0024). */
   void carry_vertex_groups(const Scene &before);
+  /* Weight Paint mode (task 0046, weight_paint.cpp). */
+  bool set_weight_paint(bool on);
+  bool wp_update(const Recti &view);  // the brush owns the mouse
+  void wp_draw(const Recti &view);
+  bool wp_begin_stroke();
+  void wp_end_stroke();
+  void wp_dab(float x, float y);
+  void wp_stroke_to(float x, float y, bool first);
+  Mesh *wp_mesh();
+  int wp_group(const Mesh &m) const;  // the group being painted (pinned while painting)
+  void wp_prepare(const Mesh &m);
+  void wp_abort_stroke();
+  const std::vector<Vec3> *wp_colors(const Mesh &m, const RenderMesh &rm);
+  void weight_paint_command(const std::vector<std::string> &t);
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
@@ -992,6 +1020,22 @@ class Editor {
   float prop_radius_ = 1.0f;
   int prop_falloff_ = 0;
   std::vector<float> gizmo_vert_w_;
+  /* Weight Paint (task 0046). */
+  WeightBrush wp_brush_;
+  bool weight_paint_ = false, wp_stroking_ = false, wp_dabbed_ = false, wp_mirror_done_ = false;
+  uint64_t wp_obj_ = 0, wp_version_ = 0, wp_cache_version_ = 0;
+  const Scene *wp_scene_ = nullptr;        // the scene the mode started in (ids restart in every scene)
+  const Mesh *wp_stroke_mesh_ = nullptr;   // the mesh a stroke writes (anything else ends it)
+  const Mesh *wp_cache_mesh_ = nullptr;    // what wp_normals_ / wp_nb_ / wp_mirror_ were made for
+  int wp_group_ = 0;
+  std::vector<float> wp_start_, wp_alpha_;  // a stroke's starting weights and strongest amount per vertex
+  Shading wp_saved_shading_ = Shading::Shaded;
+  Vec2 wp_last_;
+  std::vector<Vec3> wp_normals_;
+  std::vector<uint32_t> wp_nb_off_, wp_nb_, wp_mirror_;
+  std::vector<Vec3> wp_colors_;
+  uint64_t wp_colors_serial_ = 0, wp_colors_version_ = ~0ull;
+  int wp_colors_group_ = -1;
   int active_vgroup_ = 0;        // the Inspector's chosen vertex group
   float vgroup_weight_ = 1.0f;   // what Assign gives
   std::string vgroup_name_edit_;

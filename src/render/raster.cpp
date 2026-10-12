@@ -596,9 +596,10 @@ void Renderer3D::flush() {
   };
   auto shade_vertex = [&](uint32_t item, uint32_t v) {
     const DrawItem &it = items_[item];
-    if (it.unlit) return it.albedo;
+    const Vec3 base = it.vertex_colors && v < it.vertex_colors->size() ? (*it.vertex_colors)[v] : it.albedo;
+    if (it.unlit) return base;
     const Vec3 &p = it.mesh->positions[v];
-    return shade(env_, it.albedo, it.specular, normalize(normal_mats_[item].dir(it.mesh->normals[v])), it.model.point(p));
+    return shade(env_, base, it.specular, normalize(normal_mats_[item].dir(it.mesh->normals[v])), it.model.point(p));
   };
   /* col == nullptr: positions only (Gouraud colours are then shaded lazily). */
   auto transform = [&](uint32_t item, uint32_t b, uint32_t e, Vec4 *cp, Vec4 *sp, Vec3 *col) {

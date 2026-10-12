@@ -1436,6 +1436,7 @@ void Editor::commit_undo() {
 
 void Editor::undo() {
   if (playing_) return;
+  wp_abort_stroke();  // a stroke under way would write into the restored scene's (shared) mesh
   commit_undo();
   if (undo_.empty()) return;
   UndoState s = std::move(undo_.back());
@@ -1454,6 +1455,7 @@ void Editor::undo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   stable_ = scene_->clone();
+  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
   scene_dirty_ = true;
   Log::info("Undo %s", s.label.c_str());
@@ -1461,6 +1463,7 @@ void Editor::undo() {
 
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
+  wp_abort_stroke();
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
   UndoState cur;
@@ -1477,6 +1480,7 @@ void Editor::redo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   stable_ = scene_->clone();
+  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
   scene_dirty_ = true;
   Log::info("Redo %s", s.label.c_str());
@@ -1487,6 +1491,7 @@ void Editor::redo() {
 /* ===================================================================== */
 
 void Editor::new_scene() {
+  set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1504,6 +1509,7 @@ void Editor::new_scene() {
 }
 
 bool Editor::open_scene(const std::string &path) {
+  set_weight_paint(false);
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -2502,6 +2508,7 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
 }
 
 void Editor::enter_play() {
+  set_weight_paint(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
   commit_undo();
@@ -2641,6 +2648,11 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (c == "weightpaint" || c == "wpbrush" || c == "wpfalloff" || c == "wpmirror" || c == "wpfront" || c == "wpstroke" || c == "wpnormalize" ||
+      c == "wpclean") {
+    weight_paint_command(t);
+    return;
+  }
   if (c == "vgroup") {
     /* vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (task 0045). */
     vgroup_op(to_lower(arg(1, "")), arg(2, ""), arg(3, ""), (float)std::atof(arg(3, "1").c_str()));
@@ -2672,6 +2684,8 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
     Log::info("  vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (vertex groups)");
+    Log::info("  weightpaint on|off, wpbrush add|subtract|draw|blur [radius] [strength] [weight], wpfalloff <curve>, wpmirror on|off,");
+    Log::info("  wpfront on|off, wpstroke x y x y ..., wpnormalize, wpclean [threshold] (Weight Paint)");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -3774,6 +3788,7 @@ bool Editor::vgroup_op(const std::string &verb, const std::string &name_in, cons
   }
   if (verb == "active") {
     active_vgroup_ = gi;
+    if (weight_paint_ && wp_obj_ == g->id) wp_group_ = gi, wp_version_++;
     return true;
   }
   const bool needs_edit = verb == "assign" || verb == "unassign" || verb == "select" || verb == "deselect";
@@ -3797,11 +3812,18 @@ bool Editor::vgroup_op(const std::string &verb, const std::string &name_in, cons
     for (int k = 1; m.find_group(name) >= 0; k++) name = strprintf("%s.%03d", name_in.empty() ? "Group" : name_in.c_str(), k);
     m.vertex_groups.push_back({name, std::vector<float>(m.vert_count(), 0.0f)});
     active_vgroup_ = (int)m.vertex_groups.size() - 1;
+    if (weight_paint_ && wp_obj_ == g->id) wp_group_ = active_vgroup_, wp_version_++;
     label = "Add Vertex Group";
   }
   else if (verb == "remove") {
     m.vertex_groups.erase(m.vertex_groups.begin() + gi);
     active_vgroup_ = std::max(0, std::min(active_vgroup_, (int)m.vertex_groups.size() - 1));
+    if (weight_paint_ && wp_obj_ == g->id) {
+      wp_abort_stroke();
+      if (m.vertex_groups.empty()) m.vertex_groups.push_back({"Group", std::vector<float>(m.vert_count(), 0.0f)});  // still something to paint
+      wp_group_ = std::max(0, std::min(wp_group_ - (gi < wp_group_ ? 1 : 0), (int)m.vertex_groups.size() - 1));
+      wp_version_++;
+    }
     label = "Remove Vertex Group";
   }
   else if (verb == "rename") {
@@ -3854,6 +3876,7 @@ void Editor::draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay) 
     Recti row = lay.row(u.row_h());
     if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, m.vertex_groups[(size_t)i].name, i == active_vgroup_, Icon::Vertex)) {
       active_vgroup_ = i;
+      if (weight_paint_ && wp_obj_ == g->id) wp_group_ = i, wp_version_++;  // paint this one now
       vgroup_name_edit_ = m.vertex_groups[(size_t)i].name;
     }
   }

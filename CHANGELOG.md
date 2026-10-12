@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 68): Weight Paint (task 0046)
+
+**Asked:** the roadmap (2026-10-11): "weight painting", the second half: the brush.
+
+**Added**
+- **Weight Paint mode** (MeshFilter > Vertex Groups > Weight Paint, or `weightpaint on`): the chosen group of the
+  active mesh shows as Blender's weight colours (blue 0, green 0.5, red 1) and dragging in the Scene view paints it.
+  Brush: Add, Subtract, Draw (towards Weight), Blur (towards the neighbours); Radius (screen pixels), Strength,
+  Weight, Falloff (Smooth, Sphere, Root, Sharp, Linear, Constant), Mirror X, Front Faces Only. One undo step per
+  stroke. Normalize All and Clean. Console: `wpbrush`, `wpfalloff`, `wpmirror`, `wpfront`, `wpstroke x y ...`,
+  `wpnormalize`, `wpclean`.
+- Learn > Modifiers: "Weight painting".
+
+**Checked**
+- New tests (round 68): Add raises the weights under the brush only, Subtract lowers them, Draw reaches Weight; the
+  Smooth falloff paints the centre more than the rim; Blur evens a hard edge; Front Faces Only leaves a sphere's
+  back alone (and off, reaches it); Mirror X gives the twin the same weight; a real mouse drag there and back is one
+  stroke, one undo step, and stays within one dab's strength (also along the mirror line); leaving the mode keeps
+  the weights; the view shows red at weight 1 and blue at 0 (pixels); the painted group stays the painted object's
+  when another object is selected; a scene file keeps the weights; a new scene leaves the mode; Normalize All,
+  Clean.
+- Stress `vgroups`: a dab on a 50,176-vertex mesh 0.08 ms (target 8); a stroke's press and release 3.8 ms.
+- Unit checks: Windows 9,194, 0 failed (549 tests); the whole suite in render-cache verify mode: 9,195,
+  0 failed, 0 stale pictures. Linux with libraries: 9,104, 0 failed. Sanitizer build: 9,022, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: four majors and several minor findings, all fixed: an undo, a new scene or Play in the
+middle of a drag let the stroke write into meshes the undo history shared (a stroke now belongs to its scene and
+mesh and stops otherwise); a new scene kept painting whatever object had the same id; choosing another group showed
+a stale picture; selecting another object could switch the painted group; every click made an undo step (only a
+stroke that changes weights does now); Mirror X applied twice near the centre line; strokes accumulated past their
+strength (Blender's no-accumulate rule now); Normalize All moved the active group (Lock Active now); the X-mirror
+map could stall on a stray far vertex (an edge-length tolerance, and cached); Esc leaves the mode.
+
 ## 2026-10-12 (round 67): vertex groups (task 0045)
 
 **Asked:** the roadmap (2026-10-11): "weight painting", the first half: the groups it paints.

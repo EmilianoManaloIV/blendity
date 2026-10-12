@@ -167,6 +167,8 @@ struct DrawItem {
   bool realtime_lm = false;
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
   bool always_cull = false;  // an outline's inverted hull (ADR 0020): back faces culled whatever the view's setting
+  /* Gouraud mode: a colour per render vertex instead of albedo (Weight Paint's weight colours, task 0046). */
+  const std::vector<Vec3> *vertex_colors = nullptr;
 };
 
 enum class ShadeMode { Gouraud = 0, Deferred = 1, DepthOnly = 2 };

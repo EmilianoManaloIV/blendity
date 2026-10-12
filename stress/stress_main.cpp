@@ -3487,6 +3487,47 @@ static void test_vgroups_stress(Report &rep, const Options &o) {
   rep.note(strprintf("%zu operations; %zu with groups the wrong size, %zu weights not finite or out of 0..1, %zu weights that moved off a "
                      "vertex that stayed (all should be 0)",
                      total_ops, total_size, total_bad, total_moved));
+  /* Task 0046: a Weight Paint stroke on a 50k-vertex mesh, per dab (a 200-pixel drag at radius 40: a dab every 10). */
+  {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    GameObject *g = ed.scene().create("Blob");
+    MeshPtr m = primitives::uv_sphere(1.0f, 256, 196);
+    m->vertex_groups = {{"G", std::vector<float>(m->vert_count(), 0.0f)}};
+    g->add<MeshFilter>()->mesh = m;
+    g->add<MeshRenderer>();
+    g->set_world_position({0, 20, 0});
+    ed.command("select Blob");
+    ed.command("camera 0 30 4 0 20 0");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("weightpaint on");
+    ed.command("wpbrush add 40 0.1 1");
+    ed.step_frame_headless();
+    int x = 0, y = 0;
+    ed.project_to_window({0, 20, 0}, x, y);
+    /* A long stroke (201 dabs) and a one-dab stroke: their difference is 200 dabs; the one-dab stroke is the press and
+     * release around them (the mesh copy, normals, neighbours, then touch and the undo step). */
+    double long_ms = 1e30, one_ms = 1e30;
+    for (int r = 0; r < 4; r++) {
+      ed.command("wpbrush subtract 40 1 1");  // back to 0 first, so every stroke changes weights
+      ed.command(strprintf("wpstroke %d %d %d %d", x - 100, y, x + 100, y));
+      ed.command("wpbrush add 40 0.1 1");
+      ed.step_frame_headless();
+      std::string back_and_forth = "wpstroke";  // ten passes of 200 pixels: 201 dabs
+      for (int k = 0; k <= 10; k++) back_and_forth += strprintf(" %d %d", k % 2 ? x + 100 : x - 100, y);
+      long_ms = std::min(long_ms, time_ms([&] { ed.command(back_and_forth); }));
+      ed.step_frame_headless();
+      one_ms = std::min(one_ms, time_ms([&] { ed.command(strprintf("wpstroke %d %d", x + 30, y + 15)); }));
+      ed.step_frame_headless();
+    }
+    float painted = 0.0f;
+    for (float w : ed.scene().find_by_name("Blob")->mesh_filter()->mesh->vertex_groups[0].weights) painted = std::max(painted, w);
+    const double dab = std::max(0.0, (long_ms - one_ms) / 200.0);
+    rep.row({strprintf("Weight Paint on %zu vertices: a dab / a stroke's press and release (ms)", m->vert_count()), f2(dab), f2(one_ms), "-", "-"});
+    rep.note(strprintf("Task 0046's target: a stroke step on a 50k-vertex mesh in at most 8 ms: %.2f ms a dab (press and release %.2f ms; "
+                       "weights painted: %s): %s",
+                       dab, one_ms, painted > 0.0f ? "yes" : "NO", dab <= 8.0 && painted > 0.0f ? "met" : "NOT MET"));
+  }
   /* The cost groups add to a stack that re-runs every frame (Edit Mode's cage, a deformer before a generative
    * modifier): a 25k-vertex mesh through Subdivision Surface, with and without two groups to carry. */
   {

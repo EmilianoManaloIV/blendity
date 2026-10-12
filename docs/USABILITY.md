@@ -171,6 +171,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Objects with a negative scale (mirrored) were drawn inside out in the views. | They cull their own back faces. |
 | New Material Asset (and New in the Textures window) seemed to do nothing when a search was left in the box: the new item was filtered out. | New clears the search; a search says how many items it hides. |
 | Textures could not be deleted from the Textures window. | Delete (button, right-click, Del) with a confirmation; it goes to the Recycle Bin. |
+| Vertex groups could only be set a selection at a time with one weight. | Weight Paint: brush the weights on, seen as colours. |
 | A Displace or a bend affected the whole mesh: no way to keep part of it still. | Vertex groups (Assign in Edit Mode) and every deformer's Vertex Group / Invert. |
 | A box-shaped lattice can't follow a character's shape. | Mesh Deform: bind the mesh to any closed cage mesh and edit the cage. |
 | Squashing or bulging part of a mesh meant moving its vertices by hand. | Lattices: a box of points fitted round the mesh; drag a point and the mesh follows smoothly. |

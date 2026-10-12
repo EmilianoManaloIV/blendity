@@ -5,7 +5,7 @@
 - **Requirements:** R-02, R-03
 - **Decisions:** ADR 0024
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/43
 
 ## Goal
 A mesh can hold named vertex groups (a weight per vertex), they survive every edit, and the deforming modifiers can

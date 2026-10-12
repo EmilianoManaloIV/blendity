@@ -1327,6 +1327,32 @@ void Editor::draw_inspector(const Recti &r) {
           }
         }
         draw_vertex_groups(g, mf, lay);
+        if (mf->mesh) {
+          /* Weight Paint (task 0046): the toggle (a group is added when there is none), and the brush while painting
+           * this object. */
+          Recti wrow = lay.row(u.row_h() + u.px(2));
+          const bool painting = weight_paint_ && wp_obj_ == g->id;
+          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, painting ? "Exit Weight Paint" : "Weight Paint", painting, Icon::Vertex))
+            set_weight_paint(!painting);
+          u.tooltip("Paint the chosen group's weights with a brush (Blender: Weight Paint mode). Blue is 0, green 0.5, red 1.");
+          if (painting) {
+            InspectorReflector br(*this, u, lay);
+            br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
+            br.help("Add raises, Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+            br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
+            br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
+            br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
+            br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
+            br.field("Mirror X", wp_brush_.mirror_x);
+            br.field("Front Faces Only", wp_brush_.front_only);
+            const int hw = (lay.area.w - u.px(16)) / 2;
+            Recti brow = lay.row(u.row_h() + u.px(2));
+            if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "Normalize All")) command("wpnormalize");
+            u.tooltip("Each vertex's weights over all groups add up to 1 (Blender: Normalize All).");
+            if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "Clean")) command("wpclean 0.01");
+            u.tooltip("Weights under 0.01 become 0 (Blender: Clean).");
+          }
+        }
         Recti row = lay.row(u.row_h() + u.px(2));
         if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, edit_mode_ ? "Exit Edit Mode (Tab)" : "Enter Edit Mode (Tab)", edit_mode_, Icon::Vertex)) {
           if (edit_mode_) exit_edit_mode(); else enter_edit_mode();

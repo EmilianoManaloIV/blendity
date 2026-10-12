@@ -229,6 +229,7 @@ static void round64_tests();
 static void round65_tests();
 static void round66_tests();
 static void round67_tests();
+static void round68_tests();
 
 int main() {
   register_builtin_components();
@@ -873,6 +874,7 @@ int main() {
   round65_tests();
   round66_tests();
   round67_tests();
+  round68_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -23443,5 +23445,201 @@ static void round67_tests() {
     ed.command("undo");
     ed.step_frame_headless();
     CHECK(ed.scene().find_by_name("Cube")->mesh_filter()->mesh->vertex_groups.empty());
+  });
+}
+
+/* ===================================================================== */
+/* Round 68 (task 0046): Weight Paint mode                                 */
+/* ===================================================================== */
+
+/* An editor looking down at a flat 2 x 2 pad (20 x 20 quads) high above the default scene, in Weight Paint with a
+ * group "G" at 0 everywhere. */
+struct R68 {
+  Editor ed;
+  GameObject *pad = nullptr;
+  explicit R68(MeshPtr mesh = nullptr) {
+    ed.init_headless(1000, 800);
+    pad = ed.scene().create("Pad");
+    MeshPtr m = mesh ? mesh : primitives::grid(2.0f, 20, 20);
+    m->vertex_groups = {{"G", std::vector<float>(m->vert_count(), 0.0f)}};
+    pad->add<MeshFilter>()->mesh = m;
+    pad->add<MeshRenderer>();
+    pad->set_world_position({0, 20, 0});
+    ed.command("select Pad");
+    ed.command("camera 0 89 3.5 0 20 0");
+    ed.mark_changed_for_test("R68 pad");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("weightpaint on");
+    ed.step_frame_headless();
+  }
+  const Mesh &mesh() { return *ed.scene().find_by_name("Pad")->mesh_filter()->mesh; }
+  float weight_at(Vec3 local) {  // the weight of the vertex nearest a local point
+    const Mesh &m = mesh();
+    size_t best = 0;
+    for (size_t i = 0; i < m.vert_count(); i++)
+      if (length(m.positions[i] - local) < length(m.positions[best] - local)) best = i;
+    return m.vertex_groups[0].weights[best];
+  }
+  /* A stroke through local points (projected into the window). */
+  void stroke(std::initializer_list<Vec3> pts) {
+    std::string cmd = "wpstroke";
+    for (Vec3 p : pts) {
+      int x = 0, y = 0;
+      CHECK(ed.project_to_window(pad->world_matrix().point(p), x, y));
+      cmd += " " + std::to_string(x) + " " + std::to_string(y);
+    }
+    ed.command(cmd);
+    ed.step_frame_headless();
+  }
+};
+
+static void round68_tests() {
+  test("weight paint: Add raises the weights under the brush only; Subtract lowers them; Draw moves them towards Weight", [] {
+    R68 t;
+    CHECK(t.ed.weight_paint_for_test());
+    t.ed.command("wpbrush add 40 1 1");
+    t.stroke({Vec3(-0.5f, 0, 0), Vec3(-0.4f, 0, 0)});
+    const float under = t.weight_at({-0.5f, 0, 0}), far = t.weight_at({0.8f, 0, 0.8f});
+    std::printf("    under the brush %.3f, far away %.3f\n", under, far);
+    CHECK(under > 0.5f && far == 0.0f);
+    t.ed.command("wpbrush subtract 40 0.5 1");
+    t.stroke({Vec3(-0.5f, 0, 0), Vec3(-0.4f, 0, 0)});
+    CHECK(t.weight_at({-0.5f, 0, 0}) < under);
+    t.ed.command("wpbrush draw 40 1 0.25");
+    t.stroke({Vec3(0.5f, 0, -0.5f), Vec3(0.5f, 0, -0.45f)});
+    CHECK(std::fabs(t.weight_at({0.5f, 0, -0.5f}) - 0.25f) < 0.02f);
+  });
+
+  test("weight paint: the Smooth falloff paints the centre more than the rim; Blur evens a hard edge", [] {
+    R68 t;
+    t.ed.command("wpbrush add 60 0.4 1");
+    t.ed.command("wpfalloff smooth");
+    t.stroke({Vec3(0, 0, 0)});
+    const float centre = t.weight_at({0, 0, 0});
+    float rim = 1.0f;
+    for (float d : {0.2f, 0.25f, 0.3f}) {
+      const float w = t.weight_at({d, 0, 0});
+      if (w > 0.0f) rim = std::min(rim, w);
+    }
+    std::printf("    centre %.3f, near the rim %.3f\n", centre, rim);
+    CHECK(centre > rim);
+    /* A hard edge: left half 1, right half 0; Blur across it. */
+    R68 b;
+    {
+      Mesh &m = *mesh_make_mutable(b.pad->mesh_filter()->mesh);
+      for (size_t i = 0; i < m.vert_count(); i++) m.vertex_groups[0].weights[i] = m.positions[i].x < 0.0f ? 1.0f : 0.0f;
+    }
+    b.ed.command("wpbrush blur 60 1 1");
+    b.stroke({Vec3(0, 0, -0.3f), Vec3(0, 0, 0.3f)});
+    const float l = b.weight_at({-0.1f, 0, 0}), r = b.weight_at({0.1f, 0, 0});
+    std::printf("    across the edge after Blur: %.3f | %.3f\n", l, r);
+    CHECK(l < 1.0f && r > 0.0f);
+  });
+
+  test("weight paint: Front Faces Only leaves a sphere's back alone; Mirror X paints the twin; a stroke is one undo step", [] {
+    R68 t(primitives::uv_sphere(0.6f, 24, 16));
+    t.ed.command("wpbrush add 200 1 1");
+    t.stroke({Vec3(0, 0.6f, 0)});  // the top, facing the camera above
+    CHECK(t.weight_at({0, 0.6f, 0}) > 0.5f && t.weight_at({0, -0.6f, 0}) == 0.0f);
+    t.ed.command("wpfront off");
+    t.stroke({Vec3(0, 0.6f, 0)});
+    CHECK(t.weight_at({0, -0.6f, 0}) > 0.0f);  // the brush now reaches through
+    /* Mirror X on the pad. */
+    R68 m;
+    m.ed.command("wpmirror on");
+    m.ed.command("wpbrush add 30 1 1");
+    m.stroke({Vec3(0.6f, 0, 0.3f)});
+    const float a = m.weight_at({0.6f, 0, 0.3f}), b = m.weight_at({-0.6f, 0, 0.3f});
+    CHECK(a > 0.5f && a == b);
+    /* One undo step takes the whole stroke back; leaving the mode keeps the weights. */
+    m.ed.command("weightpaint off");
+    CHECK(!m.ed.weight_paint_for_test() && m.weight_at({0.6f, 0, 0.3f}) == a);
+    m.ed.step_frame_headless();
+    m.ed.command("undo");
+    m.ed.step_frame_headless();
+    CHECK(m.weight_at({0.6f, 0, 0.3f}) == 0.0f && m.weight_at({-0.6f, 0, 0.3f}) == 0.0f);
+  });
+
+  test("weight paint: the view shows the weights, red at 1 and blue at 0; Normalize All and Clean", [] {
+    R68 t;
+    {
+      Mesh &m = *mesh_make_mutable(t.pad->mesh_filter()->mesh);
+      for (size_t i = 0; i < m.vert_count(); i++) m.vertex_groups[0].weights[i] = m.positions[i].x < 0.0f ? 1.0f : 0.0f;
+    }
+    t.ed.command("wpbrush add 1 0 1");
+    t.stroke({Vec3(0.95f, 0, 0.95f)});  // a dab of nothing: the view picks up the change
+    for (int i = 0; i < 2; i++) t.ed.step_frame_headless();
+    int x = 0, y = 0;
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({-0.6f, 0, 0.5f}), x, y));
+    const uint32_t red = r34_crop(t.ed, {x, y, 1, 1})[0];
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({0.6f, 0, 0.5f}), x, y));
+    const uint32_t blue = r34_crop(t.ed, {x, y, 1, 1})[0];
+    auto ch = [](uint32_t c, int k) { return (int)((c >> (8 * k)) & 0xFF); };
+    std::printf("    at weight 1: %d %d %d, at weight 0: %d %d %d\n", ch(red, 0), ch(red, 1), ch(red, 2), ch(blue, 0), ch(blue, 1), ch(blue, 2));
+    /* The framebuffer is 0xAARRGGBB: red is byte 2, blue byte 0. */
+    CHECK(ch(red, 2) > 200 && ch(red, 0) < 80);
+    CHECK(ch(blue, 0) > 200 && ch(blue, 2) < 80);
+    /* Normalize All and Clean. */
+    t.ed.command("vgroup add H");
+    {
+      Mesh &m = *mesh_make_mutable(t.ed.scene().find_by_name("Pad")->mesh_filter()->mesh);
+      for (size_t i = 0; i < m.vert_count(); i++) m.vertex_groups[1].weights[i] = 1.0f;
+    }
+    t.ed.command("wpnormalize");
+    const Mesh &n = t.mesh();
+    CHECK(n.vertex_groups[0].weights[0] + n.vertex_groups[1].weights[0] == 1.0f);
+    t.ed.command("wpclean 0.6");
+    CHECK(t.mesh().vertex_groups[1].weights[0] == 0.0f || t.mesh().vertex_groups[1].weights[0] >= 0.6f);
+  });
+
+  test("weight paint: a mouse drag in the Scene view is one stroke and one undo step; a stroke doesn't pile up past its strength, even along the mirror line", [] {
+    R68 t;
+    t.ed.command("wpbrush add 40 0.4 1");
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({-0.6f, 0, 0}), x0, y0));
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({0.6f, 0, 0}), x1, y1));
+    t.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x0, y0)});
+    t.ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x0, y0)});
+    for (int k = 1; k <= 8; k++) t.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x0 + (x1 - x0) * k / 8, y0)});
+    for (int k = 8; k >= 0; k--) t.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x0 + (x1 - x0) * k / 8, y0)});  // back over it
+    t.ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x0, y0)});
+    t.ed.step_frame_headless();
+    float top = 0.0f;
+    for (float w : t.mesh().vertex_groups[0].weights) top = std::max(top, w);
+    std::printf("    after a drag there and back at strength 0.4: highest weight %.3f\n", top);
+    CHECK(top > 0.3f && top <= 0.4f + 1e-5f);  // Blender without Accumulate: one dab's worth per stroke
+    t.ed.command("undo");
+    t.ed.step_frame_headless();
+    top = 0.0f;
+    for (float w : t.mesh().vertex_groups[0].weights) top = std::max(top, w);
+    CHECK(top == 0.0f);  // the whole drag was one step
+    /* Mirror X along the centre line: twins both under the brush still get one dab's worth. */
+    t.ed.command("wpmirror on");
+    t.stroke({Vec3(0, 0, -0.8f), Vec3(0, 0, 0.8f)});
+    top = 0.0f;
+    for (float w : t.mesh().vertex_groups[0].weights) top = std::max(top, w);
+    CHECK(top > 0.3f && top <= 0.4f + 1e-5f);
+  });
+
+  test("weight paint: a new scene leaves the mode; the painted group stays the painted object's when another object is selected; a file keeps the weights", [] {
+    R68 t;
+    t.ed.command("vgroup add Second");
+    t.ed.command("vgroup active G");  // paint G
+    t.ed.command("select Cube");      // the selection moves on; the painted object and group stay
+    t.ed.command("wpbrush add 40 1 1");
+    t.stroke({Vec3(0.3f, 0, 0.3f)});
+    const Mesh &m = t.mesh();
+    CHECK(m.vertex_groups.size() == 2 && t.weight_at({0.3f, 0, 0.3f}) > 0.5f);
+    float second = 0.0f;
+    for (float w : m.vertex_groups[1].weights) second = std::max(second, w);
+    CHECK(second == 0.0f);
+    std::string err;
+    Scene back;
+    CHECK(load_scene_text(save_scene_text(t.ed.scene()), back, err));
+    const Mesh &bm = *back.find_by_name("Pad")->mesh_filter()->mesh;
+    CHECK(bm.vertex_groups.size() == 2 && bm.vertex_groups[0].weights == m.vertex_groups[0].weights);
+    t.ed.command("newscene");
+    t.ed.step_frame_headless();
+    CHECK(!t.ed.weight_paint_for_test());
   });
 }

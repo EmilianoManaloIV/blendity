@@ -1372,6 +1372,8 @@ uint64_t Editor::scene_view_key(const Recti &view) {
   mix(&ro, 8);
   mix(&active_, 8);
   mix(&edit_obj_, 8);
+  const uint64_t wp[4] = {(uint64_t)weight_paint_, wp_obj_, wp_version_, (uint64_t)wp_group_};  // the painted weights (task 0046)
+  mix(wp, sizeof(wp));
   mix(selection_.data(), selection_.size() * sizeof(uint64_t));
   mix(vert_sel_.data(), vert_sel_.size());
   mix(face_sel_.data(), face_sel_.size());
