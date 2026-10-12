@@ -227,6 +227,7 @@ static void round62_tests();
 static void round63_tests();
 static void round64_tests();
 static void round65_tests();
+static void round66_tests();
 
 int main() {
   register_builtin_components();
@@ -869,6 +870,7 @@ int main() {
   round63_tests();
   round64_tests();
   round65_tests();
+  round66_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -22918,5 +22920,244 @@ static void round65_tests() {
     GameObject *bo = back.find_by_name("O");
     CHECK(bo && bo->get<LatticeModifier>() && bo->get<LatticeModifier>()->strength == 0.75f);
     if (bo) CHECK(bo->evaluated_mesh()->positions == o->evaluated_mesh()->positions);
+  });
+}
+
+/* ===================================================================== */
+/* Round 66 (task 0044): the Mesh Deform modifier (a cage)                 */
+/* ===================================================================== */
+
+/* A sphere inside a cage object, the sphere with a Mesh Deform modifier naming it. */
+struct R66Scene {
+  Scene s;
+  GameObject *obj = nullptr, *cage_obj = nullptr;
+  MeshDeformModifier *mod = nullptr;
+  MeshPtr base, cage;
+  R66Scene(MeshPtr cage_mesh, MeshPtr m = nullptr) {
+    base = m ? m : primitives::uv_sphere(0.35f, 16, 12);
+    obj = s.create("Thing");
+    obj->add<MeshFilter>()->mesh = base;
+    mod = obj->add<MeshDeformModifier>();
+    mod->object = "Cage";
+    cage = cage_mesh;
+    cage_obj = s.create("Cage");
+    cage_obj->add<MeshFilter>()->mesh = cage;
+  }
+  /* The cage's vertices moved by f (in place, as Edit Mode does). */
+  void move_cage(const std::function<Vec3(Vec3)> &f) {
+    Mesh &cm = *mesh_make_mutable(cage_obj->get<MeshFilter>()->mesh);
+    for (Vec3 &v : cm.positions) v = f(v);
+    cm.touch();
+  }
+  float worst(const std::function<Vec3(Vec3)> &want) const {
+    const Mesh *m = obj->evaluated_mesh();
+    float w = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) w = std::max(w, length(m->positions[i] - want(base->positions[i])));
+    return w;
+  }
+};
+
+static void round66_tests() {
+  test("mesh deform: right after Bind the mesh is unchanged; the weights sum to 1; moving or turning the whole cage moves the mesh the same way", [] {
+    for (int which = 0; which < 2; which++) {
+      R66Scene t(which == 0 ? primitives::cube(1.0f) : primitives::ico_sphere(0.6f, 2));
+      std::string err;
+      CHECK(t.mod->bind(&err));
+      if (!err.empty()) std::printf("    %s\n", err.c_str());
+      CHECK(t.worst([](Vec3 v) { return v; }) < 1e-4f);
+      /* Sums. */
+      float worst_sum = 0.0f;
+      std::vector<float> w(t.mod->bind_verts.size());
+      for (size_t i = 0; i < t.base->positions.size(); i += 7) {
+        mean_value_coordinates(t.base->positions[i], t.mod->bind_verts, t.mod->bind_tris, w.data());
+        float sum = 0.0f;
+        for (float x : w) sum += x;
+        worst_sum = std::max(worst_sum, std::fabs(sum - 1.0f));
+      }
+      CHECK(worst_sum < 1e-4f);
+      /* A move and a turn of every cage vertex. */
+      const Vec3 d(0.3f, -0.2f, 0.5f);
+      t.move_cage([&](Vec3 v) { return v + d; });
+      const float moved = t.worst([&](Vec3 v) { return v + d; });
+      const Quat q = Quat::euler({25, 40, -15});
+      t.move_cage([&](Vec3 v) { return q.rotate(v - d); });
+      const float turned = t.worst([&](Vec3 v) { return q.rotate(v); });
+      std::printf("    %s cage: sums off by %g, a move off by %g, a turn off by %g\n", which == 0 ? "cube" : "icosphere", worst_sum, moved, turned);
+      CHECK(moved < 1e-3f && turned < 1e-3f);
+    }
+  });
+
+  test("mesh deform: moving one cage vertex moves the mesh near it most and the far side least", [] {
+    R66Scene t(primitives::cube(1.0f));
+    CHECK(t.mod->bind(nullptr));
+    /* The cube's (+, +, +) corner pulled out. */
+    t.move_cage([](Vec3 v) { return v.x > 0 && v.y > 0 && v.z > 0 ? v + Vec3(0.4f) : v; });
+    const Mesh *m = t.obj->evaluated_mesh();
+    float near_move = 0.0f, far_move = 1e9f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i];
+      const float mv = length(m->positions[i] - v);
+      const float to_corner = length(v - Vec3(0.5f));
+      if (to_corner < 0.6f) near_move = std::max(near_move, mv);  // the sphere (radius 0.35) comes within 0.52 of it
+      if (to_corner > 1.15f) far_move = std::min(far_move, mv);
+    }
+    std::printf("    near the corner %.3f, far side %.4f\n", near_move, far_move);
+    CHECK(near_move > 0.05f && near_move > 4.0f * far_move);
+  });
+
+  test("mesh deform: an open or flat cage is refused, Unbind leaves the mesh, a cage with other vertices stops with a message", [] {
+    {
+      R66Scene t(primitives::plane(1.0f, 2));  // open
+      std::string err;
+      CHECK(!t.mod->bind(&err) && err.find("open") != std::string::npos);
+      CHECK(!t.mod->bound());
+    }
+    {
+      MeshPtr flat = primitives::cube(1.0f);
+      for (Vec3 &v : flat->positions) v.y = 0.0f;
+      flat->touch();
+      R66Scene t(flat);
+      std::string err;
+      CHECK(!t.mod->bind(&err) && err.find("volume") != std::string::npos);
+    }
+    {
+      R66Scene t(primitives::cube(1.0f));
+      CHECK(t.mod->bind(nullptr));
+      t.move_cage([](Vec3 v) { return v * 1.3f; });
+      CHECK(t.worst([](Vec3 v) { return v * 1.3f; }) < 1e-3f);
+      t.mod->unbind();
+      CHECK(t.worst([](Vec3 v) { return v; }) == 0.0f);
+      CHECK(t.mod->bind(nullptr));
+      Mesh &cm = *mesh_make_mutable(t.cage_obj->get<MeshFilter>()->mesh);  // another vertex
+      cm.add_vert({0, 2, 0});
+      cm.touch();
+      CHECK(t.worst([](Vec3 v) { return v; }) == 0.0f);
+      CHECK(t.mod->last_error.find("Bind again") != std::string::npos);
+    }
+  });
+
+  test("mesh deform: cages of every kind: reversed winding works, mixed winding and doubled faces are refused, points on and outside the cage", [] {
+    /* Reversed winding binds too, and reproduces a stretch exactly (the quads may split along the other diagonal, so
+     * a non-affine move can differ a little from the other winding's). */
+    MeshPtr flipped = primitives::cube(1.0f);
+    meshops::flip_normals(*flipped);
+    R66Scene a(primitives::cube(1.0f)), b(flipped);
+    CHECK(a.mod->bind(nullptr) && b.mod->bind(nullptr));
+    CHECK(b.worst([](Vec3 v) { return v; }) < 1e-4f);
+    b.move_cage([](Vec3 v) { return Vec3(v.x, v.y * 1.4f, v.z * 0.8f); });
+    CHECK(b.worst([](Vec3 v) { return Vec3(v.x, v.y * 1.4f, v.z * 0.8f); }) < 1e-4f);
+    /* One face turned the other way, and a face doubled: refused. */
+    MeshPtr mixed = primitives::cube(1.0f);
+    std::reverse(mixed->corner_verts.begin(), mixed->corner_verts.begin() + mixed->face_offsets[1]);
+    mixed->touch();
+    R66Scene c(mixed);
+    std::string err;
+    CHECK(!c.mod->bind(&err) && err.find("opposite") != std::string::npos);
+    MeshPtr doubled = primitives::cube(1.0f);
+    doubled->add_face({doubled->corner_verts[0], doubled->corner_verts[1], doubled->corner_verts[2], doubled->corner_verts[3]});
+    doubled->touch();
+    R66Scene d(doubled);
+    CHECK(!d.mod->bind(&err));
+    /* A stray vertex far away doesn't spoil the volume test. */
+    MeshPtr stray = primitives::cube(1.0f);
+    stray->add_vert({1000, 0, 0});
+    stray->touch();
+    R66Scene e(stray);
+    CHECK(e.mod->bind(&err));
+    /* Weights at a cage vertex, on a face and outside the cage: finite, sum 1, reproduce the point. */
+    std::vector<float> w(a.mod->bind_verts.size());
+    for (Vec3 x : {a.mod->bind_verts[3], Vec3(0.5f, 0.1f, -0.2f), Vec3(1.5f, -0.7f, 2.0f), Vec3(0.0f)}) {
+      mean_value_coordinates(x, a.mod->bind_verts, a.mod->bind_tris, w.data());
+      Vec3 back(0.0f);
+      float sum = 0.0f;
+      for (size_t j = 0; j < w.size(); j++) back += a.mod->bind_verts[j] * w[j], sum += w[j];
+      if (!(std::fabs(sum - 1.0f) < 1e-4f && length(back - x) < 1e-4f))
+        std::printf("    at %g %g %g: sum %g, back off by %g\n", x.x, x.y, x.z, sum, length(back - x));
+      CHECK(std::fabs(sum - 1.0f) < 1e-4f && length(back - x) < 1e-4f);
+    }
+  });
+
+  test("mesh deform: two meshes caging each other don't hang or crash; editing the bound mesh gives what a fresh Bind would", [] {
+    Scene s;
+    GameObject *a = s.create("A"), *b = s.create("B");
+    a->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    b->add<MeshFilter>()->mesh = primitives::cube(2.0f);
+    auto *ma = a->add<MeshDeformModifier>();
+    auto *mb = b->add<MeshDeformModifier>();
+    ma->object = "B";
+    mb->object = "A";
+    (void)ma->bind(nullptr);
+    (void)mb->bind(nullptr);
+    CHECK(a->evaluated_mesh() && b->evaluated_mesh());  // ends (the cycle is cut), with valid meshes
+    uint64_t keys[3];
+    a->evaluated_keys(keys);
+    /* Editing the bound mesh: the moved vertices' weights are redone, the result is a fresh Bind's. */
+    R66Scene t(primitives::cube(1.2f));
+    CHECK(t.mod->bind(nullptr));
+    t.move_cage([](Vec3 v) { return v + Vec3(0, v.x * 0.3f, 0); });
+    (void)t.obj->evaluated_mesh();
+    Mesh &own = *mesh_make_mutable(t.obj->get<MeshFilter>()->mesh);
+    own.positions[5] += Vec3(0.05f, 0.1f, 0.0f);
+    own.touch();
+    const std::vector<Vec3> edited = t.obj->evaluated_mesh()->positions;
+    R66Scene fresh(primitives::cube(1.2f), std::make_shared<Mesh>(own));
+    CHECK(fresh.mod->bind(nullptr));
+    fresh.move_cage([](Vec3 v) { return v + Vec3(0, v.x * 0.3f, 0); });
+    float off = 0.0f;
+    for (size_t i = 0; i < edited.size(); i++) off = std::max(off, length(edited[i] - fresh.obj->evaluated_mesh()->positions[i]));
+    CHECK(off < 1e-6f);
+  });
+
+  test("mesh deform: the binding round-trips through a scene file and comes back with undo", [] {
+    R66Scene t(primitives::ico_sphere(0.7f, 1));
+    CHECK(t.mod->bind(nullptr));
+    t.move_cage([](Vec3 v) { return Vec3(v.x * 1.4f, v.y, v.z * 0.8f); });
+    const std::vector<Vec3> want = t.obj->evaluated_mesh()->positions;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(t.s), back, err));
+    GameObject *b = back.find_by_name("Thing");
+    CHECK(b && b->get<MeshDeformModifier>() && b->get<MeshDeformModifier>()->bound());
+    if (b) {
+      const std::vector<Vec3> got = b->evaluated_mesh()->positions;
+      float off = 0.0f;
+      for (size_t i = 0; i < got.size() && i < want.size(); i++) off = std::max(off, length(got[i] - want[i]));
+      CHECK(got.size() == want.size() && off < 1e-5f);
+    }
+    /* In the editor: Bind as one undo step; a refusal says why. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(ball && cube);
+    if (!ball || !cube) return;
+    auto *md = ball->add<MeshDeformModifier>();
+    md->object = "Plane";
+    ed.command("select Sphere");
+    ed.mark_changed_for_test("R66 modifier");
+    ed.step_frame_headless();
+    ed.command("meshdeform bind");
+    CHECK(!md->bound() && md->last_error.find("open") != std::string::npos);
+    md->object = "Cube";
+    ed.command("meshdeform bind Sphere");
+    CHECK(md->bound());
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *ub = ed.scene().find_by_name("Sphere");
+    CHECK(ub && ub->get<MeshDeformModifier>() && !ub->get<MeshDeformModifier>()->bound());
+    /* Bind, Unbind, then undo the Unbind: bound again. */
+    if (ub) ub->get<MeshDeformModifier>()->object = "Cube";
+    ed.mark_changed_for_test("R66 cube");
+    ed.step_frame_headless();
+    ed.command("meshdeform bind Sphere");
+    ed.step_frame_headless();
+    ed.command("meshdeform unbind Sphere");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Sphere") && !ed.scene().find_by_name("Sphere")->get<MeshDeformModifier>()->bound());
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *rb = ed.scene().find_by_name("Sphere");
+    CHECK(rb && rb->get<MeshDeformModifier>() && rb->get<MeshDeformModifier>()->bound());
   });
 }

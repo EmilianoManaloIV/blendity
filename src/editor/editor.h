@@ -483,6 +483,8 @@ class Editor {
   bool point_pick(const Recti &view, int mx, int my, int mode);
   GameObject *point_target(std::vector<int> &points);
   void points_command(const std::vector<std::string> &t);  // the console's `points` (and `curve`)
+  /* Bind (or unbind) a Mesh Deform modifier as one undo step; a refusal is logged and shown in the Inspector. */
+  bool mesh_deform_bind(GameObject *g, MeshDeformModifier *md, bool bind);
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */

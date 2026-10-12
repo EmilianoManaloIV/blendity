@@ -812,6 +812,37 @@ struct LatticeModifier : ComponentBase<LatticeModifier> {
   bool unique() const override { return false; }
 };
 
+/* Mean value coordinates of x over a closed triangle mesh (Ju, Schaefer, Warren 2005), one weight per vertex into w
+ * (mesh_deform.cpp). They sum to 1 and reproduce affine maps. */
+void mean_value_coordinates(const Vec3 &x, const std::vector<Vec3> &p, const std::vector<uint32_t> &t, float *w);
+
+/* Blender: Mesh Deform modifier (task 0044, ADR 0023). Bound to a closed cage mesh, the mesh follows the cage's
+ * vertices by mean value coordinates. Bind keeps the cage's rest shape; the weights are a cache. Deform-only. */
+struct MeshDeformWeights;
+struct MeshDeformModifier : ComponentBase<MeshDeformModifier> {
+  static constexpr const char *kName = "MeshDeformModifier";
+  std::string object;               // the cage, by name
+  std::vector<Vec3> bind_verts;     // the cage at Bind, in this object's space (empty: not bound)
+  std::vector<uint32_t> bind_tris;  // its triangles
+  bool bound() const { return !bind_verts.empty(); }
+  /* Reads the cage as it is now. False (and why) for an open, non-manifold, flat or missing cage. */
+  bool bind(std::string *error);
+  void unbind();
+  uint64_t bind_key() const;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // mesh_deform.cpp
+  uint64_t modifier_dependency_hash() const override;  // mesh_deform.cpp
+  bool unique() const override { return false; }
+  mutable std::string last_error;  // shown in the Inspector, logged once
+
+ private:
+  mutable std::shared_ptr<MeshDeformWeights> weights_;
+  mutable std::string bind_text_;
+  mutable uint64_t bind_text_key_ = 0;
+};
+
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {
   static constexpr const char *kName = "ScrewModifier";

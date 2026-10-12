@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 66): the Mesh Deform modifier, a cage of any shape (task 0044)
+
+**Asked:** the roadmap (2026-10-11): "a Cage (lattice / mesh-deform) tool".
+
+**Added**
+- **Mesh Deform** (Add Modifier > Deform): set Object to a closed mesh round this one and press **Bind** (or
+  `meshdeform bind [object]`); then moving the cage's vertices shapes the mesh smoothly. Binding uses mean value
+  coordinates (Ju, Schaefer and Warren 2005; ADR 0023), closed form, so it takes a moment instead of Blender's
+  voxel solve. An open, flat or missing cage is refused with the reason; a cage whose vertex count changes stops
+  the deform and says "Bind again". Deform-only, so dragging cage vertices updates in place.
+- Learn > Modifiers: "A cage round a mesh".
+
+**Checked**
+- New tests (round 66): right after Bind a sphere in a cube cage and in an icosphere cage is unchanged; the weights
+  sum to 1 (off by 1e-7); moving and turning the whole cage moves the mesh the same way (off by 7e-8); pulling one
+  cage corner moves the mesh near it 18 times more than the far side; an open cage and a flat one are refused,
+  Unbind leaves the mesh, an extra cage vertex stops the deform with "Bind again"; a cage wound the other way binds
+  and reproduces a stretch, one with a face turned round or doubled is refused, a stray far vertex doesn't spoil the
+  volume test; weights at a cage vertex, on a face and outside the cage reproduce the point; two meshes caging each
+  other end without a crash; editing the bound mesh gives what a fresh Bind would; the binding round-trips through
+  a scene file; in the editor a refused Bind says why, Bind is one undo step, and undoing an Unbind binds again.
+- Stress `modifiers_ngon`: Mesh Deform on all 26 meshes with cages moved, NaN, huge and flattened after Bind:
+  11,514 operations, 0 problems. Binding 20,002 vertices to a 1,280-triangle cage: 97 ms (target 200); each deform
+  0.8 ms (target 5).
+- Unit checks: Windows 9,126, 0 failed (537 tests); the whole suite in render-cache verify mode: 9,127,
+  0 failed, 0 stale pictures. Linux with libraries: 9,036, 0 failed. Sanitizer build: 8,954, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: a blocker, a major and several minor findings, all fixed: two meshes caging each other
+recursed until the stack overflowed (the cage is now hashed as the Boolean's cutter is, without evaluating its
+keys); editing the bound mesh rebuilt every weight on every drag frame (rows are now redone only for vertices that
+moved); a stray cage vertex could fail the volume test, which also lost precision far from the origin; the binding
+text was copied and hashed byte by byte in every evaluation (the change hash now sees a key); a binding read from a
+file wasn't checked; a point on a cage face missed the on-face case by rounding (its tolerance is now 1e-6).
+
 ## 2026-10-12 (round 65): lattices (task 0043)
 
 **Asked:** the roadmap (2026-10-11): "a Cage (lattice / mesh-deform) tool".

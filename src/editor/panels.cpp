@@ -1385,7 +1385,7 @@ void Editor::draw_inspector(const Recti &r) {
                                          {"Mirror", "MirrorModifier"},         {"Screw", "ScrewModifier"},
                                          {"Solidify", "SolidifyModifier"},     {"Subdivision Surface", "SubdivisionSurface"},
                                          {"Triangulate", "TriangulateModifier"}, {"Wireframe", "WireframeModifier"}};
-        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"}, {"Lattice", "LatticeModifier"},
+        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"}, {"Lattice", "LatticeModifier"}, {"Mesh Deform", "MeshDeformModifier"},
                                        {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"}};
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);
@@ -1484,6 +1484,18 @@ void Editor::draw_inspector(const Recti &r) {
           if (auto *bm = dynamic_cast<BooleanModifier *>(c); bm && !bm->last_error.empty()) {
             Recti er = lay.row();
             u.label({er.x + u.px(14), er.y, er.w - u.px(18), er.h}, bm->last_error, u.theme.warning);
+          }
+          if (auto *md = dynamic_cast<MeshDeformModifier *>(c)) {
+            /* Bind / Unbind (Blender's button), and why it does nothing when it can't. */
+            Recti br = lay.row(u.row_h() + u.px(2));
+            if (u.button({br.x + u.px(14), br.y, br.w - u.px(18), br.h}, md->bound() ? "Unbind" : "Bind", md->bound()))
+              mesh_deform_bind(g, md, !md->bound());
+            u.tooltip(md->bound() ? "Forget the cage's shape: the mesh goes back to its own shape."
+                                  : "Remember the cage's shape now: moving its vertices afterwards moves this mesh.");
+            if (!md->last_error.empty()) {
+              Recti er = lay.row();
+              u.label({er.x + u.px(14), er.y, er.w - u.px(18), er.h}, md->last_error, u.theme.warning);
+            }
           }
         }
         u.pop_id();

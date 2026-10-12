@@ -3477,6 +3477,32 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
             run("lattice modifier", [&](Mesh &m) { lm->modify(m); });
           }
     }
+    /* Task 0044: the Mesh Deform modifier with ordinary and hostile cages (moved after Bind, NaN, huge, flat). */
+    {
+      Scene sc;
+      GameObject *owner = sc.create("Owner");
+      auto *md = owner->add<MeshDeformModifier>();
+      md->object = "Cage";
+      GameObject *cage = sc.create("Cage");
+      auto *cmf = cage->add<MeshFilter>();
+      for (int kind = 0; kind < 5; kind++) {
+        MeshPtr c = kind % 2 ? primitives::ico_sphere(s, 1) : primitives::cube(2.0f * s);
+        cmf->mesh = c;
+        md->unbind();
+        const bool bound = md->bind(nullptr);
+        Mesh &cm = *mesh_make_mutable(cmf->mesh);
+        for (size_t i = 0; i < cm.positions.size(); i++) {
+          Vec3 &v = cm.positions[i];
+          if (kind == 0) v = v * 1.2f + Vec3(0.1f * s, 0, 0);
+          if (kind == 1) v.x += (i % 2 ? 0.3f : -0.2f) * s;
+          if (kind == 2 && i == 3) v = Vec3(nan, 0, 0);
+          if (kind == 3) v = v * 1e30f;
+          if (kind == 4) v.y = 0.0f;  // flattened after Bind
+        }
+        cm.touch();
+        if (bound) run("mesh deform", [&](Mesh &m) { md->modify(m); });
+      }
+    }
     for (int shape = 0; shape < 3; shape++)
       for (float f : {1.0f, -2.0f, 0.0f, nan}) run("cast", [&](Mesh &m) { meshops::cast(m, shape, f, 0.0f, 1); });
     for (float ang : {360.0f, 90.0f, -720.0f, 0.0f})
@@ -3762,6 +3788,35 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
     }
     rep.row({strprintf("Lattice (B-Spline 4 x 4 x 4) on a %zu-vertex mesh", base->vert_count()), "1", "0", f2(ms)});
     rep.note(strprintf("Task 0043's target: a 50k-vertex mesh deformed in at most 3 ms: %.2f ms: %s", ms, ms <= 3.0 ? "met" : "NOT MET"));
+  }
+  /* Task 0044: binding a 20k-vertex mesh to a cage of about 1k triangles (mean value coordinates), then deforming it. */
+  {
+    Scene sc;
+    GameObject *g = sc.create("Body");
+    MeshPtr base = primitives::uv_sphere(0.8f, 160, 126);  // about 20k vertices
+    g->add<MeshFilter>()->mesh = base;
+    auto *md = g->add<MeshDeformModifier>();
+    md->object = "Cage";
+    GameObject *cage = sc.create("Cage");
+    cage->add<MeshFilter>()->mesh = primitives::ico_sphere(1.0f, 3);  // 1,280 triangles
+    const bool bound = md->bind(nullptr);
+    Mesh m = *base;
+    const double bind_ms = time_ms([&] { md->modify(m); });  // the first deform makes the weights
+    {
+      Mesh &cm = *mesh_make_mutable(cage->get<MeshFilter>()->mesh);
+      for (Vec3 &v : cm.positions) v.y *= 1.3f;
+      cm.touch();
+    }
+    double deform_ms = 1e30;
+    for (int r = 0; r < 6; r++) {
+      m.positions = base->positions;
+      deform_ms = std::min(deform_ms, time_ms([&] { md->modify(m); }));
+    }
+    rep.row({strprintf("Mesh Deform: bind %zu vertices to a %zu-triangle cage", base->vert_count(), md->bind_tris.size() / 3), "1",
+             bound ? "0" : "1", f2(bind_ms)});
+    rep.row({"  then each deform", "1", "0", f2(deform_ms)});
+    rep.note(strprintf("Task 0044's targets: bind in at most 200 ms (%.0f ms: %s), deform in at most 5 ms (%.2f ms: %s)", bind_ms,
+                       bind_ms <= 200.0 ? "met" : "NOT MET", deform_ms, deform_ms <= 5.0 ? "met" : "NOT MET"));
   }
 }
 /* ------------------------------------------------------------------ main */

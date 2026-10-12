@@ -5,7 +5,7 @@
 - **Requirements:** R-02, R-03
 - **Decisions:** ADR 0022 (the Lattice modifier deforms in place)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/41
 
 ## Goal
 Squash, bulge and taper a mesh by moving a few points of a box around it: Blender's Lattice object and modifier.

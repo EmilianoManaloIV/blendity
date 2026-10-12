@@ -2639,6 +2639,19 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (c == "meshdeform") {
+    /* meshdeform bind|unbind [object]: the first Mesh Deform modifier on the object (the active one by default). Here,
+     * before the long chain below: it is at the compiler's nesting limit. */
+    std::string name;
+    for (size_t i = 2; i < t.size(); i++) name += (i > 2 ? " " : "") + t[i];
+    GameObject *g = name.empty() ? active_object() : scene_->find_by_name(name);
+    MeshDeformModifier *md = g ? g->get<MeshDeformModifier>() : nullptr;
+    const std::string verb = to_lower(arg(1, "bind"));
+    if (verb != "bind" && verb != "unbind") Log::warn("meshdeform: bind | unbind [object]");
+    else if (!md) Log::warn("meshdeform: %s has no Mesh Deform modifier", g ? g->name.c_str() : "no object");
+    else mesh_deform_bind(g, md, verb == "bind");
+    return;
+  }
   if (c == "help") {
     Log::info("Commands: help, clear, create <Cube|Sphere|...> [count], stress <count> [Cube|Sphere|Icosphere|Torus], select <name>,");
     Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
@@ -2650,6 +2663,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
+    Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -3699,6 +3713,24 @@ void Editor::points_command(const std::vector<std::string> &t) {
     pt_sel_.clear();
     mark_changed("Delete Curve Point");
   }
+}
+
+bool Editor::mesh_deform_bind(GameObject *g, MeshDeformModifier *md, bool bind) {
+  if (!bind && !md->bound()) return true;  // nothing to forget: no undo step
+  if (!bind) {
+    md->unbind();
+    mark_changed("Unbind Mesh Deform");
+    return true;
+  }
+  std::string err;
+  if (!md->bind(&err)) {
+    md->last_error = "Bind refused: " + err;
+    Log::warn("Mesh Deform on '%s': %s", g->name.c_str(), md->last_error.c_str());
+    return false;
+  }
+  Log::info("Mesh Deform on '%s' bound to '%s' (%zu cage vertices)", g->name.c_str(), md->object.c_str(), md->bind_verts.size());
+  mark_changed("Bind Mesh Deform");
+  return true;
 }
 
 }  // namespace bl
