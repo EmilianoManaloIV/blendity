@@ -494,6 +494,11 @@ class Editor {
    * (Shift toggles) and the gizmo then moves the selected points. */
   void draw_curve(const GameObject &g, const Curve &c);
   void draw_lattice(const GameObject &g, const Lattice &l);
+  void draw_bone(const GameObject &g, const Bone &b);  // Blender's octahedral bone (task 0047)
+  /* Rigging (task 0047): bone add <parent> [length], armature reset|apply [root], skin bind [object]. */
+  void rig_command(const std::vector<std::string> &t);
+  bool armature_pose(GameObject *root, bool apply_as_rest);  // Reset Pose (false) / Apply as Rest (true)
+  bool skin_bind(GameObject *g);
   void draw_control_points(const Recti &view, const GameObject &g, const Component &pc);
   bool point_pick(const Recti &view, int mx, int my, int mode);
   GameObject *point_target(std::vector<int> &points);

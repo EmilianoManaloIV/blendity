@@ -3528,6 +3528,43 @@ static void test_vgroups_stress(Report &rep, const Options &o) {
                        "weights painted: %s): %s",
                        dab, one_ms, painted > 0.0f ? "yes" : "NO", dab <= 8.0 && painted > 0.0f ? "met" : "NOT MET"));
   }
+  /* Task 0047: posing a 50k-vertex mesh skinned to a 3-bone chain (automatic weights), Linear and Dual Quaternion. */
+  {
+    Scene sc;
+    GameObject *rig = sc.create("Rig");
+    Armature *arm = rig->add<Armature>();
+    GameObject *b0 = sc.create("B0", rig);
+    b0->add<Bone>()->length = 0.7f;
+    b0->set_local_position({0, -1, 0});
+    b0->get<Bone>()->rest_position = {0, -1, 0};
+    GameObject *b1 = sc.create("B1", b0);
+    b1->add<Bone>()->length = 0.7f;
+    b1->set_local_position({0, 0.7f, 0});
+    b1->get<Bone>()->rest_position = {0, 0.7f, 0};
+    GameObject *b2 = sc.create("B2", b1);
+    b2->add<Bone>()->length = 0.6f;
+    b2->set_local_position({0, 0.7f, 0});
+    b2->get<Bone>()->rest_position = {0, 0.7f, 0};
+    GameObject *body = sc.create("Body");
+    MeshPtr m = primitives::uv_sphere(1.0f, 256, 196);
+    body->add<MeshFilter>()->mesh = m;
+    auto *sk = body->add<SkinModifier>();
+    sk->object = "Rig";
+    skin_bind_automatic(*sk, *m);
+    (void)body->evaluated_mesh()->render_mesh_tangents();
+    double ms[2] = {1e30, 1e30};
+    for (int dq = 0; dq < 2; dq++) {
+      arm->deform = dq;
+      for (int r = 0; r < 8; r++)
+        ms[dq] = std::min(ms[dq], time_ms([&] {
+                   b1->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.1f * (r + 1)));
+                   (void)body->evaluated_mesh()->render_mesh_tangents();
+                 }));
+    }
+    rep.row({strprintf("Skin pose change, %zu vertices, 3 bones: Linear / Dual Quaternion (ms)", m->vert_count()), f2(ms[0]), f2(ms[1]), "-", "-"});
+    rep.note(strprintf("Task 0047's target: a pose change on a 50k-vertex mesh in at most 8 ms: Linear %.2f ms, Dual Quaternion %.2f ms: %s", ms[0], ms[1],
+                       std::max(ms[0], ms[1]) <= 8.0 ? "met" : "NOT MET"));
+  }
   /* The cost groups add to a stack that re-runs every frame (Edit Mode's cage, a deformer before a generative
    * modifier): a 25k-vertex mesh through Subdivision Surface, with and without two groups to carry. */
   {

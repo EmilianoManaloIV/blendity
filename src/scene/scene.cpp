@@ -72,6 +72,11 @@ void register_builtin_components() {
   reg<DisplaceModifier>("Mesh", "Pushes vertices along their normals by a noise texture.", "Displace modifier (procedural texture)");
   reg<SimpleDeformModifier>("Mesh", "Twists, bends, tapers or stretches the mesh along an axis.", "Simple Deform modifier");
   reg<CastModifier>("Mesh", "Pulls the mesh towards a sphere, cylinder or box.", "Cast modifier");
+  reg<SkinModifier>("Mesh", "Moves the mesh with an armature's bones: each vertex by the bones its vertex groups are named after.",
+                    "Armature modifier (Vertex Groups)");
+  reg<Bone>("Rigging", "A bone of a skeleton: a skin moves the vertices of the vertex group named after it.", "Bone (in an Armature)");
+  reg<Armature>("Rigging", "On a skeleton's root: how skins deform (Linear or Dual Quaternion), Rest Position, Show Bones.",
+                "Armature object data");
   reg<MeshDeformModifier>("Mesh", "Binds the mesh to a closed cage mesh round it; moving the cage's vertices shapes the mesh smoothly.",
                           "Mesh Deform modifier (Bind)");
   reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");

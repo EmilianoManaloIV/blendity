@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace bl {
 
@@ -342,6 +343,10 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
   }
   /* Nodes (skip the implicit root) */
   std::unordered_map<const ufbx_node *, int> index;
+  std::unordered_set<const ufbx_node *> skin_bones;  // nodes a skin's clusters name (task 0047)
+  std::vector<const ufbx_node *> skinned;
+  std::unordered_map<const ufbx_node *, std::vector<const ufbx_node *>> skin_joints;  // each skinned mesh's own bones
+  bool warned_pose = false;
   size_t verts = 0, faces = 0;
   for (size_t i = 0; i < scene->nodes.count; i++) {
     const ufbx_node *n = scene->nodes.data[i];
@@ -386,6 +391,39 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
         int slot = fi < fm->face_material.count ? (int)fm->face_material.data[fi] : 0;
         m->add_face(fv.data(), fv.size(), has_uv ? fuv.data() : nullptr, slot);
       }
+      /* A skin (task 0047): a vertex group per cluster, named after its bone's node. */
+      for (size_t si = 0; si < fm->skin_deformers.count; si++) {
+        const ufbx_skin_deformer *sk = fm->skin_deformers.data[si];
+        for (size_t ci = 0; ci < sk->clusters.count; ci++) {
+          const ufbx_skin_cluster *cl = sk->clusters.data[ci];
+          if (!cl->bone_node) continue;
+          const std::string bname = ustr(cl->bone_node->name);
+          int gi = m->find_group(bname);
+          if (gi < 0) {
+            m->vertex_groups.push_back({bname, std::vector<float>(m->vert_count(), 0.0f)});
+            gi = (int)m->vertex_groups.size() - 1;
+          }
+          std::vector<float> &w = m->vertex_groups[(size_t)gi].weights;
+          for (size_t k = 0; k < cl->vertices.count && k < cl->weights.count; k++) {
+            const uint32_t v = cl->vertices.data[k];
+            const float x = (float)cl->weights.data[k];
+            if (v < w.size() && finite_bits(x)) w[v] = std::max(0.0f, std::min(1.0f, x));
+          }
+          skin_bones.insert(cl->bone_node);
+          skin_joints[n].push_back(cl->bone_node);
+          /* The file's pose should be its bind pose (the rest we take): say so when a bone was bound elsewhere. */
+          const ufbx_matrix &bw = cl->bind_to_world, &nw = cl->bone_node->node_to_world;
+          float diff = 0.0f;
+          for (int r = 0; r < 4; r++)
+            for (int k = 0; k < 3; k++) diff = std::max(diff, (float)std::fabs(bw.cols[r].v[k] - nw.cols[r].v[k]));
+          if (diff > 1e-3f * (1.0f + (float)std::fabs(nw.cols[3].x) + (float)std::fabs(nw.cols[3].y) + (float)std::fabs(nw.cols[3].z)) && !warned_pose) {
+            Log::warn("FBX '%s': saved in a pose other than its bind pose (bone '%s'): the skin rests in the saved pose", fs::filename(path).c_str(),
+                      ustr(cl->bone_node->name).c_str());
+            warned_pose = true;
+          }
+        }
+        if (sk->clusters.count) skinned.push_back(n);
+      }
       m->smooth = true;
       m->smooth_angle = 60.0f;  // keep hard edges of imported hard-surface models
       m->sync_attributes();
@@ -407,6 +445,19 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
     if (it == index.end() || !n->parent) continue;
     auto pit = index.find(n->parent);
     if (pit != index.end()) out.nodes[it->second].parent = pit->second;
+  }
+  for (const ufbx_node *b : skin_bones)
+    if (auto it = index.find(b); it != index.end()) out.nodes[(size_t)it->second].is_bone = true;
+  for (size_t i = 0; i < scene->nodes.count; i++)  // bones with no weights (end bones, a hand's root) are bones too
+    if (const ufbx_node *n = scene->nodes.data[i]; n->bone)
+      if (auto it = index.find(n); it != index.end()) out.nodes[(size_t)it->second].is_bone = true;
+  for (const ufbx_node *n : skinned) {
+    ImportedSkin skin;
+    skin.mesh_node = index[n];
+    for (const ufbx_node *b : skin_joints[n])
+      if (auto it = index.find(b); it != index.end() && std::find(skin.joints.begin(), skin.joints.end(), it->second) == skin.joints.end())
+        skin.joints.push_back(it->second);
+    out.skins.push_back(std::move(skin));
   }
   ufbx_free_scene(scene);
   if (out.nodes.empty()) {
@@ -439,6 +490,52 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
   }
   for (size_t i = 0; i < r.nodes.size(); i++)
     if (r.nodes[i].parent >= 0 && made[r.nodes[i].parent]) scene.set_parent(made[i], made[r.nodes[i].parent], -1, false);
+  /* Skeletons (task 0047): each joint a Bone resting where the file puts it, long enough to reach its first child joint. */
+  for (size_t i = 0; i < r.nodes.size(); i++) {
+    if (!r.nodes[i].is_bone || !made[i]) continue;
+    Bone *b = made[i]->add<Bone>();
+    b->set_rest(made[i]->local());
+    float len = 0.0f;
+    for (size_t c = 0; c < r.nodes.size(); c++)
+      if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone) len = std::max(len, length(r.nodes[c].position));
+    b->length = len > 1e-4f ? len : 0.1f;
+  }
+  for (const ImportedSkin &sk : r.skins) {
+    if (sk.mesh_node < 0 || sk.mesh_node >= (int)made.size() || !made[(size_t)sk.mesh_node] || sk.joints.empty()) continue;
+    /* Each vertex's bone weights summing to 1 (Blender writes them as painted and normalises when deforming). */
+    if (Mesh *m = r.nodes[(size_t)sk.mesh_node].mesh.get(); m && m->groups_fit()) {
+      for (size_t v = 0; v < m->vert_count(); v++) {
+        float sum = 0.0f;
+        for (const VertexGroup &g : m->vertex_groups) sum += g.weights[v];
+        if (sum > 0.0f && std::fabs(sum - 1.0f) > 1e-6f)
+          for (VertexGroup &g : m->vertex_groups) g.weights[v] /= sum;
+      }
+      m->touch();
+    }
+    /* The armature's root: above every joint's topmost bone - Blender's armature object when the file has one (the
+     * top joints' common non-bone parent), else the import's root (never a bone: renaming it for uniqueness must not
+     * rename a bone, whose name its vertex group carries). */
+    std::vector<int> tops;
+    for (int j : sk.joints) {
+      int p = j;
+      while (r.nodes[(size_t)p].parent >= 0 && r.nodes[(size_t)r.nodes[(size_t)p].parent].is_bone) p = r.nodes[(size_t)p].parent;
+      if (std::find(tops.begin(), tops.end(), p) == tops.end()) tops.push_back(p);
+    }
+    int above = r.nodes[(size_t)tops[0]].parent;
+    for (int t : tops)
+      if (r.nodes[(size_t)t].parent != above) above = -1;  // tops under different parents: the import's root holds them all
+    GameObject *arm = above >= 0 && made[(size_t)above] && !r.nodes[(size_t)above].mesh ? made[(size_t)above] : root;
+    if (!arm) continue;  // (a single node can't be a skin and its bones)
+    if (!arm->get<Armature>()) arm->add<Armature>();
+    /* Skins find their armature by name: keep it unique in the scene. */
+    if (scene.find_by_name(arm->name) != arm) {
+      std::string n = arm->name;
+      for (int k = 1; scene.find_by_name(n) && scene.find_by_name(n) != arm; k++) n = strprintf("%s.%03d", arm->name.c_str(), k);
+      arm->name = n;
+    }
+    GameObject *mg = made[(size_t)sk.mesh_node];
+    if (!mg->get<SkinModifier>()) mg->add<SkinModifier>()->object = arm->name;
+  }
   return root ? root : (made.empty() ? nullptr : made[0]);
 }
 

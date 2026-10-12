@@ -5,7 +5,7 @@
 - **Requirements:** R-02, R-03
 - **Decisions:** ADR 0024 (vertex groups)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/44
 
 ## Goal
 Paint a vertex group's weights onto a mesh with a brush, seeing them as Blender's blue-green-red colours: the way to

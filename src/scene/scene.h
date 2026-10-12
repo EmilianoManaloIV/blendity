@@ -29,6 +29,7 @@ struct PhysicsWorld;  // physics.h
 
 struct FilterEffect;
 struct Curve;
+struct Transform;
 struct Lattice;
 struct CurvePath;
 using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
@@ -132,7 +133,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone };
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
@@ -898,6 +899,64 @@ struct MeshDeformModifier : ComponentBase<MeshDeformModifier> {
   mutable std::string bind_text_;
   mutable uint64_t bind_text_key_ = 0;
 };
+
+/* Skeletons (task 0047, ADR 0025): a bone is a GameObject with a Bone component under a root with an Armature; posing
+ * is moving and turning the bone objects. Blender's bones point along their +Y. */
+struct Bone : ComponentBase<Bone> {
+  static constexpr const char *kName = "Bone";
+  float length = 1.0f;
+  bool deform = true;  // moves the vertex group named after it
+  /* The rest pose: this bone's place relative to its parent (what skins measure poses from). */
+  Vec3 rest_position;
+  Quat rest_rotation;     // exact (Euler angles lose up to a degree near 90 degrees of X)
+  Vec3 rest_euler_hint;   // what the Inspector shows for it
+  Vec3 rest_scale{1, 1, 1};
+  Mat4 rest_matrix() const;
+  void set_rest(const Transform &t);  // the bone's current local transform becomes its rest (skin.cpp)
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Bone; }  // the Scene view draws and picks bones
+};
+
+/* On a skeleton's root (Blender's Armature object data settings). */
+struct Armature : ComponentBase<Armature> {
+  static constexpr const char *kName = "Armature";
+  int deform = 0;  // Linear, Dual Quaternion
+  bool show_bones = true;
+  bool rest_position = false;  // skins show the mesh unposed
+  bool in_front = true;        // bones drawn over the meshes
+  void reflect(Reflector &r) override;
+};
+
+/* Blender: Armature modifier. Moves each vertex by the bones its vertex groups name (ADR 0025). Deform-only. */
+struct SkinModifier : ComponentBase<SkinModifier> {
+  static constexpr const char *kName = "SkinModifier";
+  std::string object;  // the armature's root, by name
+  int max_influences = 4;
+  std::string vertex_group;  // Blender: Armature modifier > Vertex Group (only these vertices follow the bones)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // skin.cpp
+  uint64_t modifier_dependency_hash() const override;  // skin.cpp
+  bool unique() const override { return false; }
+};
+
+/* A bone of an armature: its object, its world matrix now, its rest matrix relative to the root's parent. */
+struct ArmatureBone {
+  const GameObject *object;
+  const Bone *bone;
+  Mat4 world, rest;
+};
+void armature_bones(const GameObject &root, std::vector<ArmatureBone> &out);
+Mat4 armature_base(const GameObject &root);  // the root's parent's world matrix (rest matrices are relative to it)
+/* Automatic weights: groups named after the bones, from each vertex's distance to them (skin.cpp). */
+bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error = nullptr);
+Quat slerp(Quat a, Quat b, float t);  // skin.cpp
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {

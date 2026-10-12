@@ -67,6 +67,7 @@ void Editor::draw_hierarchy(const Recti &r) {
         if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k, child);
     });
     if (u.menu_item("Lattice")) create_object("Lattice", child);
+    if (u.menu_item("Armature")) create_object("Armature", child);
   };
   u.popup(create_menu, u.px(200), [create_body] { create_body(false); });
   u.text_field(u.id("hier_search"), {plus.right() + u.px(6), bar.y + u.px(4), bar.right() - plus.right() - u.px(12), h},
@@ -1412,7 +1413,7 @@ void Editor::draw_inspector(const Recti &r) {
                                          {"Mirror", "MirrorModifier"},         {"Screw", "ScrewModifier"},
                                          {"Solidify", "SolidifyModifier"},     {"Subdivision Surface", "SubdivisionSurface"},
                                          {"Triangulate", "TriangulateModifier"}, {"Wireframe", "WireframeModifier"}};
-        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"}, {"Lattice", "LatticeModifier"}, {"Mesh Deform", "MeshDeformModifier"},
+        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"}, {"Lattice", "LatticeModifier"}, {"Mesh Deform", "MeshDeformModifier"}, {"Armature (Skin)", "SkinModifier"},
                                        {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"}};
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);
@@ -1511,6 +1512,11 @@ void Editor::draw_inspector(const Recti &r) {
           if (auto *bm = dynamic_cast<BooleanModifier *>(c); bm && !bm->last_error.empty()) {
             Recti er = lay.row();
             u.label({er.x + u.px(14), er.y, er.w - u.px(18), er.h}, bm->last_error, u.theme.warning);
+          }
+          if (dynamic_cast<SkinModifier *>(c)) {  // automatic weights (task 0047)
+            Recti br = lay.row(u.row_h() + u.px(2));
+            if (u.button({br.x + u.px(14), br.y, br.w - u.px(18), br.h}, "Bind: Automatic Weights")) skin_bind(g);
+            u.tooltip("Vertex groups named after the bones, from each vertex's distance to them (Blender: With Automatic Weights).");
           }
           if (auto *md = dynamic_cast<MeshDeformModifier *>(c)) {
             /* Bind / Unbind (Blender's button), and why it does nothing when it can't. */

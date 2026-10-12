@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 69): skeletons and skinning (task 0047)
+
+**Asked:** the roadmap (2026-10-11): "rigging ... v1: import rigs from FBX/glTF and pose them".
+
+**Added**
+- **Bones and armatures** (ADR 0025): a bone is a GameObject with a Bone component (Length, Deform, its rest
+  transform) under a root with an Armature (Deform: Linear or Dual Quaternion, Show Bones, Rest Position). Bones
+  are drawn as Blender's octahedra and picked by clicking them; pose them with the gizmo. GameObject > Armature
+  (a selected mesh is bound to it), `bone add <parent> [length]`, `armature reset|apply` (Reset Pose, Apply as
+  Rest).
+- **The Armature (Skin) modifier**: moves the mesh with the bones its vertex groups are named after, 4 influences,
+  Linear or Dual Quaternion (twisted joints keep their girth), deform-only (task 0041). **Bind: Automatic Weights**
+  (`skin bind`): groups from each vertex's distance to the bones.
+- **Rigged FBX and glTF import**: bones, hierarchy, weights (normalised), an Armature and a Skin modifier.
+- Learn > Modifiers: "Bones and skins".
+
+**Checked**
+- New tests (round 69): a two-bone tube is unchanged at rest and turning the upper bone 90 degrees turns its
+  vertices about the joint exactly (2.7e-7) while the lower ones stay; a 150 degree twist keeps the joint's radius
+  at 0.200 with Dual Quaternion where Linear shrinks it to 0.052, and both agree at rest and for single-bone
+  vertices; Blender's glTF and FBX two-bone tubes import with Lower and Upper bones, an armature, weights summing to
+  1, unchanged at rest, and posing Upper moves its vertices and not Lower's; GameObject > Armature binds a column,
+  `bone add` places a child at its parent's tip, `skin bind` gives weights summing to 1, a pose is one undo step and
+  is kept by a scene file, Reset Pose and Apply as Rest; Reset Pose on a root that is a bone; a rest near 90 degrees
+  stays exact through a file; an unevenly scaled mesh keeps Dual Quaternion's girth; a mesh under the armature
+  follows it, and the Skin's own vertex group limits it; automatic weights give every vertex away from the joint to
+  its nearest bone.
+- Stress `vgroups`: a pose change on 50,176 vertices with 3 bones, 5.5 ms Linear, 5.6 ms Dual Quaternion (target 8).
+- Unit checks: Windows 9,232, 0 failed (555 tests); the whole suite in render-cache verify mode: 9,233,
+  0 failed, 0 stale pictures. Linux with libraries: 9,142, 0 failed. Sanitizer build: 9,060, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: five majors and several minor findings, fixed: Reset Pose and Apply as Rest skipped a
+root that is a bone; rest rotations kept as Euler angles lost up to 0.8 degrees near 90 (now a quaternion); the ADR
+said bind poses were read (it now says they aren't, and an FBX saved in another pose is reported); in an FBX with
+two characters every mesh took every skin's bones (now its own); making the armature's name unique could rename a
+bone (the armature is never a bone now). Also: Dual Quaternion fell back to Linear on an unevenly scaled mesh;
+a zero rest scale made vertices jump; hidden bones were still picked and In Front did nothing; GameObject >
+Armature stacked a second Skin; glTF welded touching vertices with different weights. Left as they are (in the
+spec's As built or for later): renaming a bone doesn't rename its vertex group; duplicate joint names.
+
 ## 2026-10-12 (round 68): Weight Paint (task 0046)
 
 **Asked:** the roadmap (2026-10-11): "weight painting", the second half: the brush.

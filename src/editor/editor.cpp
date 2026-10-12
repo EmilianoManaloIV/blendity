@@ -667,6 +667,9 @@ void Editor::draw_menubar(const Recti &r) {
     });
     u.tooltip("A path to bend meshes along (Curve modifier) or fill with copies (Array > Fit Curve). Blender: Add > Curve.");
     if (u.menu_item("Lattice")) create_object("Lattice");
+    if (u.menu_item("Armature")) create_object("Armature");
+    u.tooltip("A skeleton: a root with one bone (add more with the console's `bone add`). Select a mesh first and it gets\n"
+              "a Skin modifier with automatic weights. Blender: Add > Armature.");
     u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
               "or taper the mesh. Blender: Add > Lattice.");
     u.menu_separator();
@@ -2110,6 +2113,37 @@ void Editor::update_procedural_shapes() {
 
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
+  if (kind == "Armature") {
+    /* Blender's Add > Armature: a root and one bone, a metre long. A selected mesh gets a Skin modifier bound to it
+     * (automatic weights) - the usual next step. */
+    GameObject *target = active_object();
+    MeshFilter *tmf = target && is_selected(target->id) ? target->mesh_filter() : nullptr;
+    std::string name = "Armature";
+    for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Armature.%03d", k);
+    GameObject *root = scene_->create(name, parent);
+    root->add<Armature>();
+    std::string bname = "Bone";
+    for (int k = 1; scene_->find_by_name(bname); k++) bname = strprintf("Bone.%03d", k);
+    GameObject *bone = scene_->create(bname, root);
+    bone->add<Bone>();
+    if (tmf && tmf->mesh && !parent) {
+      const AABB b = target->world_bounds();
+      root->set_world_position(Vec3(b.center().x, b.min.y, b.center().z));
+      bone->get<Bone>()->length = std::max(0.1f, b.max.y - b.min.y);
+      SkinModifier *sk = target->get<SkinModifier>();  // a Skin already there: it follows the new armature (not a second one)
+      if (!sk) sk = target->add<SkinModifier>();
+      sk->object = name;
+      std::string err;
+      if (!skin_bind_automatic(*sk, *mesh_make_mutable(tmf->mesh), &err)) Log::warn("Armature: %s", err.c_str());
+    }
+    else if (!parent)
+      root->set_world_position(cam_.pivot);
+    expanded_.insert(root->id);
+    if (parent) expanded_.insert(parent->id);
+    select(bone->id);
+    mark_changed("Create Armature");
+    return root;
+  }
   if (kind == "Lattice") {
     /* Blender's Add > Lattice (2 x 2 x 2, B-Spline), fitted round the selected mesh, which gets a Lattice modifier
      * on it: the usual next step, done at once (task 0043). */
@@ -2648,6 +2682,10 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (c == "bone" || c == "armature" || c == "skin") {
+    rig_command(t);
+    return;
+  }
   if (c == "weightpaint" || c == "wpbrush" || c == "wpfalloff" || c == "wpmirror" || c == "wpfront" || c == "wpstroke" || c == "wpnormalize" ||
       c == "wpclean") {
     weight_paint_command(t);
@@ -2683,6 +2721,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
+    Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] (rigging)");
     Log::info("  vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (vertex groups)");
     Log::info("  weightpaint on|off, wpbrush add|subtract|draw|blur [radius] [strength] [weight], wpfalloff <curve>, wpmirror on|off,");
     Log::info("  wpfront on|off, wpstroke x y x y ..., wpnormalize, wpclean [threshold] (Weight Paint)");
@@ -3910,6 +3949,89 @@ void Editor::draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay) 
   row = lay.row(u.row_h() + u.px(2));
   if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Select")) vgroup_op("select", "", "", 1.0f);
   if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Deselect")) vgroup_op("deselect", "", "", 1.0f);
+}
+
+/* bone add <parent> [length]: a child bone at the parent bone's tail (or the root's origin); armature reset|apply
+ * [root]: Reset Pose / Apply as Rest; skin bind [object]: automatic weights for its Skin modifier. */
+void Editor::rig_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (t[0] == "bone" && to_lower(arg(1, "")) == "add") {
+    GameObject *parent = scene_->find_by_name(arg(2, ""));
+    if (!parent) {
+      Log::warn("bone add: no object named '%s'", arg(2, "").c_str());
+      return;
+    }
+    const float len = t.size() > 3 ? std::max(0.01f, (float)std::atof(t[3].c_str())) : 1.0f;
+    std::string name = "Bone";
+    for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Bone.%03d", k);
+    GameObject *b = scene_->create(name, parent);
+    Bone *bone = b->add<Bone>();
+    bone->length = len;
+    if (const Bone *pb = parent->get<Bone>()) b->set_local_position(Vec3(0, pb->length, 0));  // at the parent's tail
+    bone->set_rest(b->local());
+    expanded_.insert(parent->id);
+    select(b->id);
+    mark_changed("Add Bone");
+    return;
+  }
+  if (t[0] == "armature") {
+    GameObject *root = t.size() > 2 ? scene_->find_by_name(arg(2, "")) : active_object();
+    while (root && !root->get<Armature>()) root = root->parent;
+    const std::string verb = to_lower(arg(1, ""));
+    if (!root || (verb != "reset" && verb != "apply")) {
+      Log::warn("armature reset|apply [root]: select a bone or an armature");
+      return;
+    }
+    armature_pose(root, verb == "apply");
+    return;
+  }
+  if (t[0] == "skin" && to_lower(arg(1, "")) == "bind") {
+    skin_bind(t.size() > 2 ? scene_->find_by_name(arg(2, "")) : active_object());
+    return;
+  }
+  Log::warn("bone add <parent> [length] | armature reset|apply [root] | skin bind [object]");
+}
+
+bool Editor::armature_pose(GameObject *root, bool apply_as_rest) {
+  std::vector<GameObject *> stack{root};  // the root too: an imported skeleton's top joint is often its root
+  int n = 0;
+  while (!stack.empty()) {
+    GameObject *g = stack.back();
+    stack.pop_back();
+    if (Bone *b = g->get<Bone>()) {
+      if (apply_as_rest) b->set_rest(g->local());
+      else {
+        Transform tr = g->local();
+        tr.position = b->rest_position;
+        tr.rotation = b->rest_rotation;
+        tr.euler_hint = b->rest_euler_hint;
+        tr.scale = b->rest_scale;
+        g->set_local(tr);
+      }
+      n++;
+    }
+    for (GameObject *c : g->children) stack.push_back(c);
+  }
+  Log::info("%s: %d bones", apply_as_rest ? "Apply as Rest" : "Reset Pose", n);
+  if (n) mark_changed(apply_as_rest ? "Apply as Rest" : "Reset Pose");
+  return n > 0;
+}
+
+bool Editor::skin_bind(GameObject *g) {
+  SkinModifier *sk = g ? g->get<SkinModifier>() : nullptr;
+  MeshFilter *mf = g ? g->mesh_filter() : nullptr;
+  if (!sk || !mf || !mf->mesh) {
+    Log::warn("skin bind: select a mesh with a Skin modifier");
+    return false;
+  }
+  std::string err;
+  if (!skin_bind_automatic(*sk, *mesh_make_mutable(mf->mesh), &err)) {
+    Log::warn("skin bind: %s", err.c_str());
+    return false;
+  }
+  Log::info("'%s' bound to '%s' with automatic weights", g->name.c_str(), sk->object.c_str());
+  mark_changed("Skin: Automatic Weights");
+  return true;
 }
 
 }  // namespace bl

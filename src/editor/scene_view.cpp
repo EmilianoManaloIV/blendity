@@ -703,9 +703,38 @@ GameObject *Editor::point_target(std::vector<int> &points) {
   return points.empty() ? nullptr : g;
 }
 
+/* Blender's octahedral bone: from the head (the object's origin) along +Y by its length, widest a tenth of the way. */
+/* The armature a bone belongs to (the nearest Armature up from it, itself included). */
+static const Armature *bone_armature(const GameObject &g) {
+  for (const GameObject *p = &g; p; p = p->parent)
+    if (const Armature *a = p->get<Armature>()) return a;
+  return nullptr;
+}
+
+void Editor::draw_bone(const GameObject &g, const Bone &b) {
+  const Armature *arm = bone_armature(g);
+  if (arm && !arm->show_bones) return;
+  const bool over = !arm || arm->in_front;  // In Front: over the meshes; off: hidden behind them
+  const Mat4 &w = g.world_matrix();
+  const float L = finite_bits(b.length) ? std::max(1e-4f, b.length) : 1.0f, r = L * 0.1f;
+  const Vec3 head = w.point(Vec3(0.0f)), tail = w.point(Vec3(0, L, 0));
+  Vec3 ring[4];
+  for (int k = 0; k < 4; k++) {
+    const float a = k * kPi * 0.5f;
+    ring[k] = w.point(Vec3(std::cos(a) * r, L * 0.1f, std::sin(a) * r));
+  }
+  const uint32_t col = is_selected(g.id) ? kSelectOrange : Color::hex(0x202020, 220);
+  for (int k = 0; k < 4; k++) {
+    scene_r3d_.line(head, ring[k], col, !over);
+    scene_r3d_.line(ring[k], tail, col, !over);
+    scene_r3d_.line(ring[k], ring[(k + 1) % 4], col, !over);
+  }
+}
+
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
   scene_->for_each([&](GameObject &g) {
+    if (const Component *bc = g.find_role(Component::RenderRole::Bone); bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
     if (const Component *pc = g.point_source(); pc && g.active_in_hierarchy()) {
       if (const Curve *cv = g.curve()) draw_curve(g, *cv);
       if (const Lattice *lt = g.lattice()) draw_lattice(g, *lt);
@@ -1187,6 +1216,22 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
   float best = (float)radius;
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
+    const Component *bc = g.find_role(Component::RenderRole::Bone);
+    if (bc && bone_armature(g) && !bone_armature(g)->show_bones) bc = nullptr;  // hidden bones aren't picked
+    if (bc) {  // a bone by its line (task 0047)
+      const Bone &bn = *static_cast<const Bone *>(bc);
+      const Mat4 &bw = g.world_matrix();
+      Vec2 sa, sb;
+      float za, zb;
+      if (scene_r3d_.project(bw.point(Vec3(0.0f)), sa, za) &&
+          scene_r3d_.project(bw.point(Vec3(0, finite_bits(bn.length) ? bn.length : 1.0f, 0)), sb, zb)) {
+        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
+        const float len2 = dot(d, d);
+        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
+        const float dist = length(p - (sa + d * t));
+        if (dist < best) best = dist, hit = g.id;
+      }
+    }
     if (const Lattice *lt = g.lattice()) {  // a lattice by its cage (task 0043)
       const Mat4 &lw = g.world_matrix();
       const int n = lt->control_point_count(), nu = lt->points_u, nv = lt->points_v;

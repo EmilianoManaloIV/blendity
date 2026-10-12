@@ -230,6 +230,7 @@ static void round65_tests();
 static void round66_tests();
 static void round67_tests();
 static void round68_tests();
+static void round69_tests();
 
 int main() {
   register_builtin_components();
@@ -875,6 +876,7 @@ int main() {
   round66_tests();
   round67_tests();
   round68_tests();
+  round69_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -23641,5 +23643,290 @@ static void round68_tests() {
     t.ed.command("newscene");
     t.ed.step_frame_headless();
     CHECK(!t.ed.weight_paint_for_test());
+  });
+}
+
+/* ===================================================================== */
+/* Round 69 (task 0047): skeletons and skinning                            */
+/* ===================================================================== */
+
+/* A tube up +Y from 0 to 2 (radius 0.2, 21 rings of 16), an armature "Rig" with Lower (0..1) and Upper (1..2), the
+ * tube skinned: Lower below 0.9, Upper above 1.1, a blend between. */
+struct R69Rig {
+  Scene s;
+  GameObject *rig = nullptr, *lower = nullptr, *upper = nullptr, *tube = nullptr;
+  MeshPtr base;
+  R69Rig() {
+    rig = s.create("Rig");
+    rig->add<Armature>();
+    lower = s.create("Lower", rig);
+    lower->add<Bone>();
+    upper = s.create("Upper", lower);
+    upper->set_local_position({0, 1, 0});
+    Bone *ub = upper->add<Bone>();
+    ub->rest_position = {0, 1, 0};
+    base = std::make_shared<Mesh>();
+    const int rings = 21, seg = 16;
+    for (int r = 0; r < rings; r++)
+      for (int k = 0; k < seg; k++) {
+        const float a = k * 2.0f * kPi / seg;
+        base->add_vert({0.2f * std::cos(a), r * 0.1f, 0.2f * std::sin(a)});
+      }
+    for (int r = 0; r + 1 < rings; r++)
+      for (int k = 0; k < seg; k++) {
+        const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+        base->add_face({a, a + seg, b + seg, b});
+      }
+    VertexGroup lo{"Lower", {}}, up{"Upper", {}};
+    for (const Vec3 &p : base->positions) {
+      const float t = std::max(0.0f, std::min(1.0f, (p.y - 0.9f) / 0.2f));
+      lo.weights.push_back(1.0f - t);
+      up.weights.push_back(t);
+    }
+    base->vertex_groups = {lo, up};
+    base->touch();
+    tube = s.create("Tube");
+    tube->add<MeshFilter>()->mesh = base;
+    tube->add<SkinModifier>()->object = "Rig";
+  }
+  /* The ring at height y: its mean distance from the bone axis (Y). */
+  float ring_radius(float y) {
+    const Mesh *m = tube->evaluated_mesh();
+    float sum = 0.0f;
+    int n = 0;
+    for (size_t i = 0; i < base->vert_count(); i++)
+      if (std::fabs(base->positions[i].y - y) < 1e-4f) sum += length(Vec3(m->positions[i].x, 0, m->positions[i].z)), n++;
+    return n ? sum / n : 0.0f;
+  }
+};
+
+static void round69_tests() {
+  test("skins: at rest the mesh is unchanged; turning a bone 90 degrees turns the vertices it owns about its joint exactly", [] {
+    R69Rig t;
+    float rest = 0.0f;
+    const Mesh *m = t.tube->evaluated_mesh();
+    for (size_t i = 0; i < m->vert_count(); i++) rest = std::max(rest, length(m->positions[i] - t.base->positions[i]));
+    CHECK(rest < 1e-5f);
+    const Quat q = Quat::axis_angle({0, 0, 1}, kPi * 0.5f);
+    t.upper->set_local_rotation(q);
+    m = t.tube->evaluated_mesh();
+    float off = 0.0f, still = 0.0f;
+    for (size_t i = 0; i < m->vert_count(); i++) {
+      const Vec3 p = t.base->positions[i];
+      if (p.y >= 1.1f - 1e-4f) off = std::max(off, length(m->positions[i] - (q.rotate(p - Vec3(0, 1, 0)) + Vec3(0, 1, 0))));
+      if (p.y <= 0.9f + 1e-4f) still = std::max(still, length(m->positions[i] - p));
+    }
+    std::printf("    upper part off by %g, lower part moved by %g\n", off, still);
+    CHECK(off < 1e-4f && still < 1e-5f);
+    /* Rest Position shows it unposed; moving the whole rig moves nothing relative to it (the tube isn't its child). */
+    t.rig->get<Armature>()->rest_position = true;
+    CHECK(t.tube->evaluated_mesh()->positions == t.base->positions);
+  });
+
+  test("skins: Dual Quaternion keeps a twisted joint's girth where Linear collapses it; both agree at rest", [] {
+    R69Rig t;
+    t.upper->set_local_rotation(Quat::axis_angle({0, 1, 0}, kPi * 150.0f / 180.0f));  // a twist along the bone
+    const float linear = t.ring_radius(1.0f);
+    t.rig->get<Armature>()->deform = 1;
+    const float dq = t.ring_radius(1.0f);
+    std::printf("    the joint's radius after a 150 degree twist: linear %.3f, dual quaternion %.3f (rest 0.2)\n", linear, dq);
+    CHECK(linear < 0.1f && dq > 0.18f);
+    t.upper->set_local_rotation(Quat());
+    CHECK(std::fabs(t.ring_radius(1.0f) - 0.2f) < 1e-4f);
+    /* A single bone's vertices: both methods the same. */
+    t.upper->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.7f));
+    const std::vector<Vec3> d = t.tube->evaluated_mesh()->positions;
+    t.rig->get<Armature>()->deform = 0;
+    const std::vector<Vec3> l = t.tube->evaluated_mesh()->positions;
+    float off = 0.0f;
+    for (size_t i = 0; i < d.size(); i++)
+      if (t.base->positions[i].y > 1.15f) off = std::max(off, length(d[i] - l[i]));
+    CHECK(off < 1e-4f);
+  });
+
+  test("skins: the glTF and FBX two-bone tubes import with bones, an armature, weights summing to 1, and pose like the original", [] {
+    for (const char *file : {"tests/fixtures/rig_tube.glb", "tests/fixtures/rig_tube.fbx"}) {
+      ImportResult r;
+      CHECK(import_model(file, r));
+      Scene s;
+      instantiate_import(s, r, "Rig Import", nullptr);
+      GameObject *lower = s.find_by_name("Lower"), *upper = s.find_by_name("Upper"), *tube = s.find_by_name("Tube");
+      const bool shape = lower && upper && tube && lower->get<Bone>() && upper->get<Bone>() && upper->parent == lower && tube->get<SkinModifier>();
+      std::printf("    %s: %s, %zu skins\n", file, shape ? "bones, armature and skin" : "MISSING PARTS", r.skins.size());
+      CHECK(shape);
+      if (!shape) continue;
+      const GameObject *arm = s.find_by_name(tube->get<SkinModifier>()->object);
+      CHECK(arm && arm->get<Armature>());
+      const Mesh &m = *tube->mesh_filter()->mesh;
+      CHECK(m.find_group("Lower") >= 0 && m.find_group("Upper") >= 0 && m.groups_fit());
+      float worst = 0.0f;
+      for (size_t i = 0; i < m.vert_count(); i++) {
+        float sum = 0.0f;
+        for (const VertexGroup &g : m.vertex_groups) sum += g.weights[i];
+        worst = std::max(worst, std::fabs(sum - 1.0f));
+      }
+      if (!(worst < 1e-3f)) {
+        std::printf("    weights off by %g; groups:", worst);
+        for (const VertexGroup &g : m.vertex_groups) {
+          float mx = 0.0f;
+          for (float w : g.weights) mx = std::max(mx, w);
+          std::printf(" %s (max %.2f)", g.name.c_str(), mx);
+        }
+        std::printf("; %zu vertices\n", m.vert_count());
+      }
+      CHECK(worst < 1e-3f);
+      float rest = 0.0f;
+      const Mesh *e = tube->evaluated_mesh();
+      for (size_t i = 0; i < m.vert_count(); i++) rest = std::max(rest, length(e->positions[i] - m.positions[i]));
+      std::printf("    at rest, moved by %g\n", rest);
+      CHECK(rest < 1e-3f);
+      /* Turning Upper moves its vertices; Lower's own stay. */
+      upper->set_local_rotation(upper->local().rotation * Quat::axis_angle({1, 0, 0}, 1.0f));
+      e = tube->evaluated_mesh();
+      const std::vector<float> &uw = m.vertex_groups[(size_t)m.find_group("Upper")].weights;
+      float moved_up = 0.0f, moved_low = 0.0f;
+      const Mat4 &tw = tube->world_matrix();  // in metres: the FBX keeps centimetres inside a x100 scale
+      for (size_t i = 0; i < m.vert_count(); i++) {
+        const float d = length(tw.point(e->positions[i]) - tw.point(m.positions[i]));
+        if (uw[i] > 0.99f) moved_up = std::max(moved_up, d);
+        if (uw[i] == 0.0f) moved_low = std::max(moved_low, d);  // (auto weights reach a little way down)
+      }
+      CHECK(moved_up > 0.1f && moved_low < 1e-3f);
+    }
+  });
+
+  test("skins: GameObject > Armature binds a selected mesh with automatic weights; posing is undoable and saved; Reset Pose and Apply as Rest", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *col = ed.scene().create("Column");
+    col->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 16);
+    col->add<MeshRenderer>();
+    ed.command("select Column");
+    ed.mark_changed_for_test("R69 column");
+    ed.step_frame_headless();
+    ed.command("create Armature");
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(arm && arm->get<Armature>() && bone && bone->get<Bone>() && col->get<SkinModifier>());
+    if (!arm || !bone || !col->get<SkinModifier>()) return;
+    ed.command("bone add Bone 0.5");
+    GameObject *tip = ed.scene().find_by_name("Bone.001");
+    CHECK(tip && tip->parent == bone && tip->local().position.y == bone->get<Bone>()->length);
+    ed.command("skin bind Column");
+    const Mesh &m = *ed.scene().find_by_name("Column")->mesh_filter()->mesh;
+    CHECK(m.find_group("Bone") >= 0 && m.find_group("Bone.001") >= 0);
+    float worst = 0.0f;
+    for (size_t i = 0; i < m.vert_count(); i++) {
+      float sum = 0.0f;
+      for (const VertexGroup &g : m.vertex_groups) sum += g.weights[i];
+      worst = std::max(worst, std::fabs(sum - 1.0f));
+    }
+    CHECK(worst < 1e-4f);
+    ed.step_frame_headless();
+    /* Pose: one undo step; Reset Pose brings the rest back; a file keeps the pose and the rest. */
+    const std::vector<Vec3> rest = ed.scene().find_by_name("Column")->evaluated_mesh()->positions;
+    tip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.8f));
+    ed.mark_changed_for_test("R69 pose");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions != rest);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    CHECK(back.find_by_name("Column")->evaluated_mesh()->positions == ed.scene().find_by_name("Column")->evaluated_mesh()->positions);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions == rest);
+    tip = ed.scene().find_by_name("Bone.001");
+    tip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.5f));
+    ed.command("armature reset Armature");
+    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions == rest);
+    tip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.5f));
+    ed.command("armature apply Armature");  // this pose is the rest now: the mesh shows unposed in it
+    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions == ed.scene().find_by_name("Column")->mesh_filter()->mesh->positions);
+  });
+
+  test("skins: a root bone resets, rests near 90 degrees stay exact, an unevenly scaled mesh keeps Dual Quaternion, a mesh under the armature follows it", [] {
+    /* The root itself a bone (as imports often make it): Reset Pose puts it back too. */
+    {
+      Editor ed;
+      ed.init_headless(400, 300);
+      GameObject *hips = ed.scene().create("Hips");
+      hips->add<Armature>();
+      hips->add<Bone>();
+      hips->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+      ed.command("armature reset Hips");
+      const Quat q = ed.scene().find_by_name("Hips")->local().rotation;
+      CHECK(std::fabs(q.w - 1.0f) < 1e-6f);
+    }
+    /* A rest rotation near 90 degrees about X (where Euler angles lose up to a degree): unchanged at rest. */
+    {
+      R69Rig t;
+      const Quat near90 = Quat::euler({89.6f, 20.0f, 35.0f});
+      t.upper->set_local_rotation(near90);
+      t.upper->get<Bone>()->set_rest(t.upper->local());
+      Scene back;
+      std::string err;
+      CHECK(load_scene_text(save_scene_text(t.s), back, err));  // through a file too
+      const Mesh *m = back.find_by_name("Tube")->evaluated_mesh();
+      float off = 0.0f;
+      for (size_t i = 0; i < m->vert_count(); i++) off = std::max(off, length(m->positions[i] - t.base->positions[i]));
+      std::printf("    a rest at (89.6, 20, 35) degrees, saved and loaded: moved by %g at rest\n", off);
+      CHECK(off < 1e-4f);
+    }
+    /* An unevenly scaled mesh: Dual Quaternion still keeps the twisted joint's girth (blended in world space). */
+    {
+      R69Rig t;
+      t.tube->set_local_scale({2.0f, 1.0f, 2.0f});
+      t.rig->get<Armature>()->deform = 1;
+      t.upper->set_local_rotation(Quat::axis_angle({0, 1, 0}, kPi * 150.0f / 180.0f));
+      const Mesh *m = t.tube->evaluated_mesh();
+      float sum = 0.0f;
+      int n = 0;
+      for (size_t i = 0; i < t.base->vert_count(); i++)
+        if (std::fabs(t.base->positions[i].y - 1.0f) < 1e-4f) sum += length(Vec3(m->positions[i].x, 0, m->positions[i].z)), n++;
+      std::printf("    scaled (2, 1, 2): the joint's local radius %.3f (rest 0.2)\n", sum / n);
+      CHECK(n > 0 && sum / n > 0.18f);
+    }
+    /* A mesh parented under the armature follows it when the armature moves; the Skin's own vertex group limits it. */
+    {
+      R69Rig t;
+      t.s.set_parent(t.tube, t.rig, -1, false);
+      t.rig->set_world_position({3, 0, 0});
+      {
+        const Mesh *e = t.tube->evaluated_mesh();
+        float off = 0.0f;
+        for (size_t i = 0; i < e->vert_count(); i++) off = std::max(off, length(e->positions[i] - t.base->positions[i]));
+        CHECK(off < 1e-4f);  // in its own space: unchanged (up to rounding through world space)
+      }
+      Mesh &bm = *mesh_make_mutable(t.tube->mesh_filter()->mesh);
+      VertexGroup half{"Half", {}};
+      for (const Vec3 &q : bm.positions) half.weights.push_back(q.x > 0.0f ? 1.0f : 0.0f);
+      bm.vertex_groups.push_back(half);
+      bm.touch();
+      t.tube->get<SkinModifier>()->vertex_group = "Half";
+      t.upper->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+      const Mesh *m = t.tube->evaluated_mesh();
+      float moved_neg = 0.0f;
+      for (size_t i = 0; i < bm.vert_count(); i++)
+        if (bm.positions[i].x < 0.0f) moved_neg = std::max(moved_neg, length(m->positions[i] - bm.positions[i]));
+      CHECK(moved_neg == 0.0f);
+    }
+  });
+
+  test("skins: automatic weights give each vertex mostly to its nearest bone", [] {
+    R69Rig t;
+    Mesh m = *t.base;
+    m.vertex_groups.clear();
+    CHECK(skin_bind_automatic(*t.tube->get<SkinModifier>(), m));
+    const std::vector<float> &lo = m.vertex_groups[(size_t)m.find_group("Lower")].weights;
+    int right = 0, total = 0;
+    for (size_t i = 0; i < m.vert_count(); i++) {
+      const float y = m.positions[i].y;
+      if (std::fabs(y - 1.0f) < 0.15f) continue;  // near the joint either may lead
+      total++;
+      right += (y < 1.0f) == (lo[i] > 0.5f);
+    }
+    std::printf("    %d of %d vertices mostly on their nearest bone\n", right, total);
+    CHECK(total > 0 && right == total);
   });
 }
