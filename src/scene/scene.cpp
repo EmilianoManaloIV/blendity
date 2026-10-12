@@ -1312,6 +1312,7 @@ uint64_t BooleanModifier::modifier_dependency_hash() const {
   mix(rel.m, sizeof(rel.m));
   mix(&tm, sizeof(tm));
   if (tm) mix(&tm->version, sizeof(tm->version));
+  if (tm) mix(&tm->deform_version, sizeof(tm->deform_version));  // a deformed cutter is the same mesh, moved (ADR 0022)
   return h;
 }
 
@@ -1632,20 +1633,76 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   auto on = [kind](const Component &c) {
     return c.is_modifier() && (kind == 1 ? c.show_in_render : c.enabled && (kind == 0 || c.show_in_editmode));
   };
-  for (auto &c : components)
-    if (on(*c)) {
-      any = true;
-      mix(hash_component(*c));
-      mix(c->modifier_dependency_hash());
-    }
+  /* The deforming tail (ADR 0022): the modifiers after the last one that changes topology. Edit Mode's
+   * cage (kind 2) keeps the full path. */
+  size_t split = 0;
+  for (size_t i = 0; i < components.size(); i++)
+    if (on(*components[i]) && (!components[i]->is_deform_only() || kind == 2)) split = i + 1;
+  uint64_t head_key = key;
+  bool any_head = false, any_tail = false;
+  for (size_t i = 0; i < components.size(); i++) {
+    Component &c = *components[i];
+    if (!on(c)) continue;
+    any = true;
+    (i < split ? any_head : any_tail) = true;
+    mix(hash_component(c));
+    mix(c.modifier_dependency_hash());
+    if (i + 1 == split) head_key = key;
+  }
   if (!any) return mf->mesh.get();
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
-  auto m = std::make_shared<Mesh>(*mf->mesh);
-  for (auto &c : components)
-    if (on(*c)) c->modify(*m);
-  m->touch();
+  auto run = [&](Mesh &m, size_t from, size_t to) {
+    for (size_t i = from; i < to; i++)
+      if (on(*components[i])) components[i]->modify(m);
+  };
+  if (!any_tail) {
+    auto m = std::make_shared<Mesh>(*mf->mesh);
+    run(*m, 0, components.size());
+    m->touch();
+    eval_mesh_[kind] = m;
+    eval_key_[kind] = key;
+    eval_from_[kind] = 0;
+    eval_head_[kind] = nullptr;  // nothing to deform from: don't keep a second copy
+    return eval_mesh_[kind].get();
+  }
+  const Mesh *head = mf->mesh.get();
+  if (any_head) {
+    if (!eval_head_[kind] || eval_head_key_[kind] != head_key) {
+      auto h = std::make_shared<Mesh>(*mf->mesh);
+      run(*h, 0, split);
+      h->touch();
+      eval_head_[kind] = h;
+      eval_head_key_[kind] = head_key;
+    }
+    head = eval_head_[kind].get();
+  }
+  else
+    eval_head_[kind] = nullptr;
+  std::shared_ptr<Mesh> m = eval_mesh_[kind];
+  const bool same_topology = m && m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
+                             m->face_offsets.size() == head->face_offsets.size();
+  if (m && eval_from_[kind] == head_key && same_topology) {
+    /* Deform again from the head's positions. A copy shared with a snapshot (Scene::clone) or another
+     * scene is never written: it is copied first, render mesh included, which still saves the rebuild. */
+    if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
+    const uint64_t v = m->version;
+    m->positions = head->positions;
+    m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
+    run(*m, split, components.size());
+    if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
+        m->face_offsets.size() == head->face_offsets.size())
+      m->version = v;  // the deformers touch() it; only the positions moved
+    else
+      m->touch();  // a modifier that claims to deform changed topology: rebuild as usual
+  }
+  else {
+    m = std::make_shared<Mesh>(*head);
+    run(*m, split, components.size());
+    m->touch();
+  }
   eval_mesh_[kind] = m;
   eval_key_[kind] = key;
+  eval_from_[kind] = head_key;
   return eval_mesh_[kind].get();
 }
 
@@ -1818,6 +1875,9 @@ std::unique_ptr<Scene> Scene::clone() const {
     for (int k = 0; k < 3; k++) {
       c->eval_mesh_[k] = o->eval_mesh_[k];
       c->eval_key_[k] = o->eval_key_[k];
+      c->eval_head_[k] = o->eval_head_[k];
+      c->eval_head_key_[k] = o->eval_head_key_[k];
+      c->eval_from_[k] = o->eval_from_[k];
     }
     for (auto &comp : o->components) {
       auto cc = comp->clone();

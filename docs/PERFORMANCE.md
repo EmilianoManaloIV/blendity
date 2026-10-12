@@ -310,6 +310,12 @@ driver cache took about 80 s, on the editor's thread. Now it opens in the backgr
 by a test hook, the slowest editor frame was 17-30 ms and the preview moved to the GPU after 3.3 s. With the
 driver's cache warm, the pipeline takes 84-141 ms without Blendity's pipeline cache file and 9-13 ms with it.
 
+## Deforming modifiers in place (task 0041)
+A deforming modifier's field change on a 50k-face mesh used to copy the mesh, run the stack, rebuild the render
+mesh and run MikkTSpace: 56 ms. Now the topology-changing head of the stack is cached, the deformers re-run on a
+kept mesh, and the render mesh moves its vertices in place (normals by the build's function, tangents from UV
+gradients): 6.6 ms, 8.3 ms with sharp edges (smoothing fans) (stress `modifiers_ngon`).
+
 ## Next candidates
 
 - **Positions-only Edit Mode updates** (pass 6). Keep the triangulation, edges and n-gon regions while a

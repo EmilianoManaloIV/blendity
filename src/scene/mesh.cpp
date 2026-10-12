@@ -299,21 +299,12 @@ static void triangulate_face(const Mesh &m, size_t f, std::vector<uint32_t> &out
   for (size_t i = 1; i + 1 < idx.size(); i++) out_local.insert(out_local.end(), {idx[0], idx[i], idx[i + 1]});
 }
 
-const RenderMesh &Mesh::render_mesh(bool force_flat) const {
-  const bool has_smooth = any_smooth();
-  bool flat = force_flat || !has_smooth;
-  const int ci = force_flat && has_smooth ? 1 : 0;
-  if (cache_version_[ci] == version) return cache_[ci];
-  RenderMesh &rm = cache_[ci];
-  rm.positions.clear();
-  rm.normals.clear();
-  rm.uvs.clear();
-  rm.tangents.clear();
-  rm.indices.clear();
-  rm.tri_face.clear();
-  rm.tri_material.clear();
-  rm.tri_corner.clear();
-  const bool uv = has_uvs();
+static uint64_t next_render_serial() {
+  static std::atomic<uint64_t> next_serial{1};
+  return next_serial.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
   const size_t nf = face_count();
   std::vector<Vec3> fnormal(nf);
   for (size_t f = 0; f < nf; f++) fnormal[f] = face_normal(f);
@@ -321,7 +312,7 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   /* Per-corner normal: flat = face normal; smooth = area-weighted average of
    * the faces around the vertex, restricted to faces within smooth_angle
    * (Blender's "Smooth by Angle" / Unity's import smoothing angle). */
-  std::vector<Vec3> cnormal(corner_verts.size());
+  cnormal.assign(corner_verts.size(), Vec3(0.0f));
   if (flat) {
     for (size_t f = 0; f < nf; f++)
       for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) cnormal[c] = fnormal[f];
@@ -412,6 +403,88 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
         }
     }
   }
+}
+
+/* A deform moved the positions only (ADR 0022): the topology, the triangulation and the UVs are the
+ * build's. Positions and normals are written per render vertex; if two corners of one render vertex now
+ * have different normals (the full build would split it), the caller rebuilds instead. */
+bool Mesh::deform_in_place(int ci, bool flat) const {
+  RenderMesh &rm = cache_[ci];
+  const std::vector<uint32_t> &crv = corner_rv_[ci];
+  if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return false;
+  std::vector<Vec3> cnormal;
+  corner_normals(flat, cnormal);
+  std::vector<uint8_t> seen(rm.positions.size(), 0);
+  for (size_t c = 0; c < corner_verts.size(); c++) {
+    const uint32_t rv = crv[c], v = corner_verts[c];
+    if (rv >= rm.positions.size() || v >= positions.size()) return false;
+    const Vec3 n = cnormal[c];
+    if (!seen[rv]) {
+      seen[rv] = 1;
+      rm.positions[rv] = positions[v];
+      rm.normals[rv] = n;
+    }
+    else if (!(rm.normals[rv].x == n.x && rm.normals[rv].y == n.y && rm.normals[rv].z == n.z))
+      return false;  // the build's key compares the same way
+  }
+  if (cache_tangents_[ci] && rm.tangents.size() == rm.positions.size() && rm.uvs.size() == rm.positions.size()) {
+    /* Tangents from the UV gradients of the deformed triangles (Lengyel's method), averaged per render vertex and
+     * made orthogonal to the new normal: they depend on the shape alone, not on the drag that led there.
+     * MikkTSpace (the next full build) is the same idea with more care at splits, so they differ slightly. */
+    const size_t nv = rm.positions.size();
+    std::vector<Vec3> sdir(nv, Vec3(0.0f)), tdir(nv, Vec3(0.0f));
+    for (size_t t = 0; t + 2 < rm.indices.size(); t += 3) {
+      const uint32_t i0 = rm.indices[t], i1 = rm.indices[t + 1], i2 = rm.indices[t + 2];
+      const Vec3 e1 = rm.positions[i1] - rm.positions[i0], e2 = rm.positions[i2] - rm.positions[i0];
+      const float du1 = rm.uvs[i1].x - rm.uvs[i0].x, dv1 = rm.uvs[i1].y - rm.uvs[i0].y;
+      const float du2 = rm.uvs[i2].x - rm.uvs[i0].x, dv2 = rm.uvs[i2].y - rm.uvs[i0].y;
+      /* Weighted by the triangle's UV area (no division): a sliver of an n-gon's triangulation adds almost
+       * nothing instead of a huge, badly rounded gradient. */
+      const float den = du1 * dv2 - du2 * dv1;
+      if (!(std::fabs(den) > 0.0f)) continue;  // no UV area (or NaN)
+      const float r = den < 0.0f ? -1.0f : 1.0f;
+      const Vec3 s = (e1 * dv2 - e2 * dv1) * r, b = (e2 * du1 - e1 * du2) * r;
+      for (uint32_t i : {i0, i1, i2}) sdir[i] += s, tdir[i] += b;
+    }
+    for (size_t i = 0; i < nv; i++) {
+      const Vec3 n = rm.normals[i];
+      Vec3 t = sdir[i] - n * dot(n, sdir[i]);
+      if (!(length_sq(t) > 1e-20f)) {  // no UV gradient here: any direction across the normal
+        const Vec3 a = std::fabs(n.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+        t = a - n * dot(n, a);
+      }
+      t = normalize(t);
+      if (!(length_sq(t) > 0.5f)) t = Vec3(1, 0, 0);  // a NaN normal: as the build's default
+      rm.tangents[i] = Vec4(t, dot(cross(n, t), tdir[i]) < 0.0f ? -1.0f : 1.0f);
+    }
+  }
+  rm.bounds = bounds();
+  rm.serial = next_render_serial();  // what was drawn from it changed: every cache keyed on it re-renders
+  cache_deform_[ci] = deform_version;
+  return true;
+}
+
+const RenderMesh &Mesh::render_mesh(bool force_flat) const {
+  const bool has_smooth = any_smooth();
+  bool flat = force_flat || !has_smooth;
+  const int ci = force_flat && has_smooth ? 1 : 0;
+  if (cache_version_[ci] == version) {
+    if (cache_deform_[ci] == deform_version) return cache_[ci];
+    if (deform_in_place(ci, flat)) return cache_[ci];
+  }
+  RenderMesh &rm = cache_[ci];
+  rm.positions.clear();
+  rm.normals.clear();
+  rm.uvs.clear();
+  rm.tangents.clear();
+  rm.indices.clear();
+  rm.tri_face.clear();
+  rm.tri_material.clear();
+  rm.tri_corner.clear();
+  const bool uv = has_uvs();
+  const size_t nf = face_count();
+  std::vector<Vec3> cnormal;
+  corner_normals(flat, cnormal);
 
   /* Emit render vertices, sharing corners with identical vertex + normal + uv
    * (the same splitting a game engine does at hard edges and UV seams). */
@@ -460,10 +533,11 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
     }
   }
   rm.bounds = bounds();
-  static std::atomic<uint64_t> next_serial{1};
-  rm.serial = next_serial.fetch_add(1, std::memory_order_relaxed);
+  rm.serial = rm.build_serial = next_render_serial();
   cache_version_[ci] = version;
+  cache_deform_[ci] = deform_version;
   cache_tangents_[ci] = false;
+  corner_rv_[ci] = std::move(corner_rv);
   return rm;
 }
 

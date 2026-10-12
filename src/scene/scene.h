@@ -105,6 +105,9 @@ struct Component {
   /* Modifier components transform the mesh non-destructively (Blender's modifier stack). */
   virtual bool is_modifier() const { return false; }
   virtual void modify(Mesh &) const {}
+  /* A modifier whose modify() only moves positions (ADR 0022): at the end of a stack it runs on a kept
+   * copy of the mesh, and the render mesh follows in place instead of being rebuilt. */
+  virtual bool is_deform_only() const { return false; }
   /* Modifiers that read other objects (Boolean) mix those objects' state in
    * here so the cached evaluated mesh updates when they move or change. */
   virtual uint64_t modifier_dependency_hash() const { return 0; }
@@ -553,6 +556,7 @@ struct SmoothModifier : ComponentBase<SmoothModifier> {
   int iterations = 4;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
@@ -677,6 +681,7 @@ struct DisplaceModifier : ComponentBase<DisplaceModifier> {
   int direction = 0;  // Normal, X, Y, Z
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
@@ -691,6 +696,7 @@ struct SimpleDeformModifier : ComponentBase<SimpleDeformModifier> {
   float lower = 0.0f, upper = 1.0f;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
@@ -704,6 +710,7 @@ struct CastModifier : ComponentBase<CastModifier> {
   int axis = 1;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
@@ -840,6 +847,11 @@ class GameObject {
   mutable bool world_dirty_ = true;
   mutable std::shared_ptr<Mesh> eval_mesh_[3];
   mutable uint64_t eval_key_[3] = {0, 0, 0};
+  /* The stack before its deforming tail (ADR 0022): the result of the modifiers up to the last one that
+   * isn't deform-only, its key, and the head key eval_mesh_ was deformed from (0: a full evaluation). */
+  mutable std::shared_ptr<Mesh> eval_head_[3];
+  mutable uint64_t eval_head_key_[3] = {0, 0, 0};
+  mutable uint64_t eval_from_[3] = {0, 0, 0};
   friend class Scene;
 };
 

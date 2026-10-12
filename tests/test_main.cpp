@@ -223,6 +223,7 @@ static void round59_tests();
 static void round60_tests();
 static void round61_tests();
 static void round62_tests();
+static void round63_tests();
 
 int main() {
   register_builtin_components();
@@ -862,6 +863,7 @@ int main() {
   round60_tests();
   round61_tests();
   round62_tests();
+  round63_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -21958,5 +21960,336 @@ static void round62_tests() {
     CHECK(parent->axis_top == high->asset_path && parent->axis_side == high->asset_path && parent->axis_bottom == high->asset_path &&
           parent->axis_high == high->asset_path);
     std::remove(resolve_asset_path("Assets/Materials/R62High.mat").c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 63 (task 0041): deforming modifiers move positions in place       */
+/* ===================================================================== */
+
+/* got (a deformed, in-place mesh) against ref (the same stack evaluated in full): the positions bit for
+ * bit, and per mesh corner the render vertex's position bit for bit and normal within max_dn. */
+static bool r63_same(const Mesh &got, const Mesh &ref, float *max_dn) {
+  if (got.positions.size() != ref.positions.size() || got.corner_count() != ref.corner_count()) return false;
+  bool ok = std::memcmp(got.positions.data(), ref.positions.data(), got.positions.size() * sizeof(Vec3)) == 0;
+  const RenderMesh &a = got.render_mesh(), &b = ref.render_mesh();
+  std::vector<uint32_t> ca(got.corner_count(), UINT32_MAX), cb(ref.corner_count(), UINT32_MAX);
+  for (size_t k = 0; k < a.tri_corner.size(); k++) ca[a.tri_corner[k]] = a.indices[k];
+  for (size_t k = 0; k < b.tri_corner.size(); k++) cb[b.tri_corner[k]] = b.indices[k];
+  float dn = 0.0f;
+  for (size_t c = 0; c < ca.size(); c++) {
+    if (ca[c] == UINT32_MAX || cb[c] == UINT32_MAX) {
+      ok = ok && ca[c] == cb[c];
+      continue;
+    }
+    ok = ok && std::memcmp(&a.positions[ca[c]], &b.positions[cb[c]], sizeof(Vec3)) == 0;
+    dn = std::max(dn, length(a.normals[ca[c]] - b.normals[cb[c]]));
+  }
+  *max_dn = dn;
+  return ok;
+}
+
+/* The five meshes of the spec: a cube, a UV sphere, a 50k-face grid, sharp edges, UV seams. */
+static std::vector<std::pair<std::string, MeshPtr>> r63_meshes() {
+  std::vector<std::pair<std::string, MeshPtr>> out;
+  out.push_back({"cube", primitives::cube(1.0f)});
+  MeshPtr sphere = primitives::uv_sphere(0.5f, 24, 16);
+  sphere->smooth = true;
+  out.push_back({"UV sphere", sphere});
+  MeshPtr grid = primitives::grid(4.0f, 224, 224);  // 50,176 faces
+  grid->smooth = true;
+  out.push_back({"50k-face grid", grid});
+  MeshPtr sharp = primitives::cylinder(0.5f, 2.0f, 24);
+  meshops::shade_auto_smooth(*sharp, 30.0f);  // smooth sides, hard caps (sharp edges)
+  out.push_back({"sharp edges", sharp});
+  MeshPtr seams = primitives::torus(0.5f, 0.2f, 32, 16);
+  seams->smooth = true;
+  seams->seams_sharp = true;
+  std::vector<std::pair<uint32_t, uint32_t>> edges;
+  seams->edges(edges);
+  for (size_t i = 0; i < edges.size(); i += 7) seams->set_seam(edges[i].first, edges[i].second, true);
+  out.push_back({"UV seams", seams});
+  return out;
+}
+
+static void round63_tests() {
+  test("deforming modifiers: changing a field moves the render mesh in place, the same as evaluating the stack in full, on five meshes", [] {
+    int cases = 0, in_place = 0, mismatches = 0;
+    float worst = 0.0f;
+    for (auto &[name, base] : r63_meshes()) {
+      for (int kind = 0; kind < 4; kind++) {
+        Scene s;
+        GameObject *g = s.create("Deformed");
+        g->add<MeshFilter>()->mesh = base;
+        Component *mod = nullptr;
+        std::function<void(float)> set;
+        if (kind == 0) {
+          auto *m = g->add<SimpleDeformModifier>();
+          set = [m](float v) { m->angle = v; };
+          mod = m;
+        }
+        else if (kind == 1) {
+          auto *m = g->add<DisplaceModifier>();
+          set = [m](float v) { m->strength = v / 300.0f; };
+          mod = m;
+        }
+        else if (kind == 2) {
+          auto *m = g->add<CastModifier>();
+          set = [m](float v) { m->factor = v / 100.0f; };
+          mod = m;
+        }
+        else {
+          auto *m = g->add<SmoothModifier>();
+          set = [m](float v) { m->factor = v / 100.0f; };
+          mod = m;
+        }
+        set(45.0f);
+        const RenderMesh &first = g->evaluated_mesh()->render_mesh_tangents();
+        const uint64_t build = first.build_serial;
+        for (float v : {60.0f, -30.0f, 10.0f}) {
+          set(v);
+          const Mesh *got = g->evaluated_mesh();
+          const RenderMesh &rm = got->render_mesh_tangents();
+          in_place += rm.build_serial == build;
+          Mesh ref = *base;
+          mod->modify(ref);
+          ref.touch();
+          float dn = 0.0f;
+          const bool same = r63_same(*got, ref, &dn);
+          mismatches += !same || dn > 1e-5f;
+          if (!same || dn > 1e-5f) std::printf("    %s, modifier %d, value %.0f: positions %s, normals off by %g\n", name.c_str(), kind, v, same ? "same" : "DIFFER", dn);
+          worst = std::max(worst, dn);
+          cases++;
+          /* Tangents stay unit length and at right angles to the normals. */
+          bool tangents_ok = rm.tangents.size() == rm.positions.size();
+          for (size_t i = 0; tangents_ok && i < rm.tangents.size(); i += 97)
+            tangents_ok = std::fabs(length(rm.tangents[i].xyz()) - 1.0f) < 1e-3f && std::fabs(dot(rm.tangents[i].xyz(), rm.normals[i])) < 1e-3f;
+          CHECK(tangents_ok);
+        }
+      }
+    }
+    std::printf("    %d changes, %d moved in place, worst normal difference %g\n", cases, in_place, worst);
+    CHECK(cases == 60);
+    CHECK(mismatches == 0);
+    CHECK(in_place == 60);  // these five keep their split pattern under these changes
+  });
+
+  test("deforming modifiers: only the deforming tail is re-run; the render mesh keeps its build while a generative modifier rebuilds", [] {
+    Scene s;
+    GameObject *g = s.create("Twist");
+    MeshPtr base = primitives::uv_sphere(0.5f, 32, 24);
+    base->smooth = true;
+    g->add<MeshFilter>()->mesh = base;
+    auto *sub = g->add<SubdivisionSurface>();  // a head: evaluated once, kept
+    auto *tw = g->add<SimpleDeformModifier>();
+    const Mesh *m0 = g->evaluated_mesh();
+    const RenderMesh &rm0 = m0->render_mesh();
+    const uint64_t build = rm0.build_serial, serial = rm0.serial, version = m0->version, deform = m0->deform_version;
+    tw->angle = 90.0f;
+    const Mesh *m1 = g->evaluated_mesh();
+    const RenderMesh &rm1 = m1->render_mesh();
+    CHECK(m1 == m0);  // the same mesh, written in place (nothing else holds it)
+    CHECK(m1->version == version && m1->deform_version == deform + 1);
+    CHECK(rm1.build_serial == build && rm1.serial != serial);
+    /* The same result as the whole stack from scratch. */
+    Mesh ref = *base;
+    sub->modify(ref);
+    tw->modify(ref);
+    ref.touch();
+    float dn = 0.0f;
+    CHECK(r63_same(*m1, ref, &dn) && dn <= 1e-5f);
+    /* The head's own field: a full evaluation. */
+    sub->levels = 2;
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial != build);
+    const uint64_t build2 = g->evaluated_mesh()->render_mesh().build_serial;
+    /* A generative modifier after the deformer: the whole stack is a head, every change rebuilds. */
+    g->add<MirrorModifier>();
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial != build2);
+    const uint64_t build3 = g->evaluated_mesh()->render_mesh().build_serial;
+    tw->angle = 30.0f;
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial != build3);
+    /* Edit Mode's cage (kind 2) keeps the full path. */
+    s.find_by_name("Twist")->components.pop_back();
+    const uint64_t b2 = g->evaluated_mesh(2)->render_mesh().build_serial;
+    tw->angle = 40.0f;
+    CHECK(g->evaluated_mesh(2)->render_mesh().build_serial != b2);
+  });
+
+  test("deforming modifiers: when a deform changes how corners split (a flat grid made bumpy) the render mesh is rebuilt, then follows in place", [] {
+    Scene s;
+    GameObject *g = s.create("Bumpy");
+    MeshPtr base = primitives::grid(2.0f, 16, 16);
+    base->smooth = false;  // flat: a flat grid's corners share one normal, a bumpy one's don't
+    g->add<MeshFilter>()->mesh = base;
+    auto *d = g->add<DisplaceModifier>();
+    d->strength = 0.0f;
+    const uint64_t b0 = g->evaluated_mesh()->render_mesh().build_serial;
+    const size_t verts0 = g->evaluated_mesh()->render_mesh().positions.size();
+    d->strength = 0.3f;
+    const RenderMesh &rm1 = g->evaluated_mesh()->render_mesh();
+    CHECK(rm1.build_serial != b0 && rm1.positions.size() > verts0);  // rebuilt, split per face
+    const uint64_t b1 = rm1.build_serial;
+    d->strength = 0.35f;
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial == b1);  // now in place
+    Mesh ref = *base;
+    d->modify(ref);
+    ref.touch();
+    float dn = 0.0f;
+    CHECK(r63_same(*g->evaluated_mesh(), ref, &dn) && dn <= 1e-5f);
+  });
+
+  test("deforming modifiers: a Boolean whose cutter is deformed re-cuts on every change of the deformer", [] {
+    if (!meshops::boolean_available()) return;
+    Scene s;
+    GameObject *a = s.create("Block");
+    a->add<MeshFilter>()->mesh = primitives::cube(2.0f);
+    auto *boolean = a->add<BooleanModifier>();
+    boolean->object = "Cutter";
+    GameObject *b = s.create("Cutter");
+    MeshPtr bar = primitives::cube(1.0f);
+    for (Vec3 &p : bar->positions) p = Vec3(p.x * 0.4f, p.y * 3.0f, p.z * 3.0f);  // a slab through the block
+    bar->touch();
+    b->add<MeshFilter>()->mesh = bar;
+    auto *tw = b->add<SimpleDeformModifier>();
+    tw->angle = 0.0f;
+    (void)a->evaluated_mesh()->render_mesh();
+    for (float ang : {30.0f, 60.0f}) {
+      tw->angle = ang;
+      const Mesh *cut = a->evaluated_mesh();
+      /* The reference: the same cut against a cutter evaluated from scratch. */
+      Mesh cutter = *bar;
+      tw->modify(cutter);
+      Mesh ref = *a->get<MeshFilter>()->mesh;
+      std::string err;
+      CHECK(meshops::boolean_op(ref, cutter, a->world_matrix().inverse() * b->world_matrix(), meshops::BooleanOp::Difference, &err));
+      CHECK(cut->positions == ref.positions && cut->corner_verts == ref.corner_verts);
+    }
+  });
+
+  test("deforming modifiers: tangents after a deform depend on the shape, not on the drag that led there, and follow a twisted cap", [] {
+    MeshPtr base = primitives::cylinder(0.3f, 2.0f, 24);
+    Scene s;
+    GameObject *g1 = s.create("Dragged"), *g2 = s.create("Direct");
+    g1->add<MeshFilter>()->mesh = base;
+    g2->add<MeshFilter>()->mesh = base;
+    auto *t1 = g1->add<SimpleDeformModifier>();
+    auto *t2 = g2->add<SimpleDeformModifier>();
+    t1->angle = t2->angle = 1.0f;
+    const uint64_t b1 = g1->evaluated_mesh()->render_mesh_tangents().build_serial;
+    const uint64_t b2 = g2->evaluated_mesh()->render_mesh_tangents().build_serial;
+    for (float a : {30.0f, 90.0f, 140.0f, 60.0f, 90.0f}) {
+      t1->angle = a;
+      (void)g1->evaluated_mesh()->render_mesh_tangents();
+    }
+    t2->angle = 90.0f;
+    const RenderMesh &r1 = g1->evaluated_mesh()->render_mesh_tangents(), &r2 = g2->evaluated_mesh()->render_mesh_tangents();
+    std::printf("    builds: dragged %s, direct %s\n", r1.build_serial == b1 ? "kept" : "rebuilt", r2.build_serial == b2 ? "kept" : "rebuilt");
+    CHECK(r1.build_serial != r2.build_serial);
+    CHECK(r1.tangents.size() == r2.tangents.size() &&
+          std::memcmp(r1.tangents.data(), r2.tangents.data(), r1.tangents.size() * sizeof(Vec4)) == 0);
+    /* Against MikkTSpace on the same twisted shape built in full: the caps turn with the twist too. */
+    Mesh ref = *base;
+    t2->modify(ref);
+    ref.touch();
+    const RenderMesh &rf = ref.render_mesh_tangents();
+    std::vector<uint32_t> ca(ref.corner_count(), UINT32_MAX), cb(ref.corner_count(), UINT32_MAX);
+    for (size_t k = 0; k < r2.tri_corner.size(); k++) ca[r2.tri_corner[k]] = r2.indices[k];
+    for (size_t k = 0; k < rf.tri_corner.size(); k++) cb[rf.tri_corner[k]] = rf.indices[k];
+    size_t close = 0, n = 0;
+    for (size_t c = 0; c < ca.size(); c++) {
+      if (ca[c] == UINT32_MAX || cb[c] == UINT32_MAX) continue;
+      n++;
+      close += dot(r2.tangents[ca[c]].xyz(), rf.tangents[cb[c]].xyz()) > 0.95f && r2.tangents[ca[c]].w == rf.tangents[cb[c]].w;
+    }
+    std::printf("    %zu of %zu corners within 18 degrees of MikkTSpace with the same handedness\n", close, n);
+    CHECK(n > 0 && close * 100 >= n * 95);
+  });
+
+  test("deforming modifiers: a saved and reloaded scene evaluates to the same deformed mesh", [] {
+    Scene s;
+    GameObject *g = s.create("Saved");
+    g->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 24, 16);
+    g->add<MeshRenderer>();
+    auto *c = g->add<CastModifier>();
+    c->shape = 2;
+    c->factor = 0.2f;
+    (void)g->evaluated_mesh()->render_mesh();
+    c->factor = 0.7f;  // in place
+    const std::vector<Vec3> want = g->evaluated_mesh()->positions;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    GameObject *h = back.find_by_name("Saved");
+    CHECK(h && h->evaluated_mesh() && h->evaluated_mesh()->positions == want);
+  });
+
+  test("deforming modifiers: a snapshot of the scene keeps its deformed mesh when the original changes again", [] {
+    Scene s;
+    GameObject *g = s.create("Bend");
+    MeshPtr base = primitives::cylinder(0.3f, 2.0f, 16);
+    g->add<MeshFilter>()->mesh = base;
+    auto *bend = g->add<SimpleDeformModifier>();
+    bend->mode = 1;
+    bend->angle = 60.0f;
+    const Mesh *m0 = g->evaluated_mesh();
+    (void)m0->render_mesh();
+    std::unique_ptr<Scene> snap = s.clone();  // shares the evaluated mesh (an undo step does this)
+    const std::vector<Vec3> kept = snap->find_by_name("Bend")->evaluated_mesh()->positions;
+    const std::vector<Vec3> kept_rm = snap->find_by_name("Bend")->evaluated_mesh()->render_mesh().positions;
+    bend->angle = 120.0f;
+    const Mesh *m1 = g->evaluated_mesh();
+    CHECK(m1 != m0);  // copied before writing: the snapshot's is shared
+    const Mesh *sm = snap->find_by_name("Bend")->evaluated_mesh();
+    CHECK(sm->positions == kept);
+    CHECK(sm->render_mesh().positions == kept_rm);
+    CHECK(m1->positions != kept);
+  });
+
+  test("deforming modifiers: dragging Simple Deform's angle re-renders the view and the shadows, no stale picture, and undo brings the old shape back", [] {
+    Editor ed;
+    r34_open(ed);
+    MeshPtr base = primitives::cylinder(0.3f, 2.0f, 24);
+    GameObject *g = ed.scene().create("Twisted");
+    g->add<MeshFilter>()->mesh = base;
+    g->add<MeshRenderer>();
+    auto *tw = g->add<SimpleDeformModifier>();
+    tw->mode = 1;
+    tw->angle = 20.0f;
+    ed.mark_changed_for_test("R63 twisted");
+    r34_steps(ed, 4);
+    const uint64_t build = g->evaluated_mesh()->render_mesh().build_serial;
+    const std::vector<Vec3> at20 = g->evaluated_mesh()->positions;
+    ed.command("set Lighting.RealtimeGI true");
+    r34_steps(ed, 3);
+    ed.set_render_cache_verify(true);
+    const uint64_t vox0 = ed.voxelized_for_test();
+    const R34Change c = r34_change(ed, [&] {
+      tw->angle = 80.0f;
+      ed.mark_changed_for_test("R63 bend");
+    }, 2);
+    std::printf("    the change: %llu view renders, %llu shadow renders, %llu objects voxelized, %llu stale\n", (unsigned long long)c.d.renders,
+                (unsigned long long)c.d.shadows, (unsigned long long)(ed.voxelized_for_test() - vox0), (unsigned long long)c.d.mismatches);
+    CHECK(c.d.renders > 0 && c.d.shadows > 0);
+    CHECK(ed.voxelized_for_test() > vox0);  // voxel GI re-made the bent object
+    CHECK(c.before != c.after);
+    CHECK(c.d.mismatches == 0);
+    /* More changes, each a frame, as a drag gives them. */
+    const uint64_t bad0 = Editor::render_cache_mismatches_all();
+    for (float a : {85.0f, 90.0f, 95.0f, 100.0f}) {
+      tw->angle = a;
+      r34_steps(ed, 1);
+    }
+    ed.mark_changed_for_test("R63 drag");
+    r34_steps(ed, 2);
+    CHECK(Editor::render_cache_mismatches_all() == bad0);
+    ed.set_render_cache_verify(false);
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial == build);  // the whole drag stayed in place
+    /* Undo to 80 then 20 degrees: the positions are the full evaluation's. */
+    ed.command("undo");
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Twisted");
+    CHECK(u && u->get<SimpleDeformModifier>() && u->get<SimpleDeformModifier>()->angle == 20.0f);
+    if (u) CHECK(u->evaluated_mesh()->positions == at20);
   });
 }

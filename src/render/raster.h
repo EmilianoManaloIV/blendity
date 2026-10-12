@@ -38,6 +38,9 @@ struct RenderMesh {
   /* Different for every build (never reused, unlike a pointer + version after a free), so caches of
    * what was drawn from it (shadow maps, voxel grids) can key on it. 0 = not cacheable (built by hand). */
   uint64_t serial = 0;
+  /* The serial of the full build this one came from: it stays while a deforming modifier only moves the
+   * positions in place (ADR 0022), when `serial` moves. Same topology, triangulation and split pattern. */
+  uint64_t build_serial = 0;
   size_t tri_count() const { return indices.size() / 3; }
 };
 

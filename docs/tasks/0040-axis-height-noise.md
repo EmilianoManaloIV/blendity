@@ -5,7 +5,7 @@
 - **Requirements:** R-03
 - **Decisions:** ADR 0018 (amended)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/38
 
 ## Goal
 Axis materials (task 0029) choose Top / Side / Bottom by the surface's slope. Terrain also changes with height

@@ -94,8 +94,16 @@ struct Mesh {
   const std::vector<std::pair<uint32_t, uint32_t>> &edge_cache() const;
   void touch() { version++; }
   uint64_t version = 1;
+  /* Bumped instead of `version` when only the positions changed (a deforming modifier, ADR 0022): the
+   * render mesh then moves its vertices in place rather than being rebuilt. Code that caches positions
+   * on `version` alone must check this too. */
+  uint64_t deform_version = 0;
 
  private:
+  /* Per-corner shading normals (flat, smooth, smooth by angle, sharp edges): what render_mesh splits by. */
+  void corner_normals(bool flat, std::vector<Vec3> &out) const;
+  /* The render mesh follows a deform: false when the split pattern no longer holds (a full build then). */
+  bool deform_in_place(int ci, bool flat) const;
   mutable std::vector<std::pair<uint32_t, uint32_t>> edges_;
   mutable uint64_t edges_version_ = 0;
   /* One cache per variant (0 = as shaded, 1 = forced flat for Edit Mode) so a
@@ -103,6 +111,8 @@ struct Mesh {
   mutable RenderMesh cache_[2];
   mutable uint64_t cache_version_[2] = {0, 0};
   mutable bool cache_tangents_[2] = {false, false};
+  mutable uint64_t cache_deform_[2] = {0, 0};
+  mutable std::vector<uint32_t> corner_rv_[2];  // each corner's render vertex in cache_[i]
 };
 
 using MeshPtr = std::shared_ptr<Mesh>;

@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 63): deforming modifiers update in place (task 0041)
+
+**Asked:** the roadmap (2026-10-11): curves, lattices, cages and skinning all deform meshes, and dragging their
+fields must stay interactive ("make sure the editor is still decently responsive").
+
+**Changed**
+- Smooth, Displace, Simple Deform and Cast only move vertices. At the end of a stack they now re-run on a kept copy
+  of the mesh and the render mesh moves its positions, normals and tangents in place, instead of a copy, a full
+  rebuild and new tangents on every change. A field drag on a 50k-face mesh went from 56 ms to 6.6 ms per change.
+  Modifiers before them (Subdivision, Mirror, ...) are evaluated once and kept while only the deformers change.
+
+**Checked**
+- New tests (round 63): on a cube, a UV sphere, a 50k-face grid, a mesh with sharp edges and one with UV seams,
+  each of the four deformers, three changes each: the in-place result equals the full evaluation (positions and
+  normals bit for bit; tangents unit length and at right angles); only the tail re-runs and the render mesh keeps
+  its build, a generative modifier or Edit Mode's cage rebuild in full; a flat grid made bumpy rebuilds then
+  follows in place; a scene snapshot keeps its shape when the original changes again; a Boolean re-cuts when its
+  cutter is deformed; tangents are the same whatever drag led to a shape (and within 18 degrees of MikkTSpace on a
+  twisted cylinder); a saved and reloaded scene evaluates the same; in the editor a drag stays in place and
+  re-renders the view, the shadows and voxel GI with no stale picture, and undo brings the old shape back exactly.
+- Stress `modifiers_ngon`: Simple Deform angle on a 50,176-face mesh 6.6 ms per change, 8.3 ms with sharp edges
+  (in full 56 ms); 6,080 operations on odd meshes, 0 problems.
+
+**Review (code reviewer)**: two majors and several minor findings, all fixed: a Boolean whose cutter was deformed
+kept its old cut (the cutter's mesh is now the same object, so its dependency mixes `deform_version`); tangents
+were projected from the previous frame's and drifted with the drag (now from UV gradients); `deform_version` moved
+only after the deformers ran; tests for voxel GI, save / load, the Boolean and tangents; a sharp-edges stress row.
+- Unit checks: Windows 8,975, 0 failed (511 tests); the whole suite in render-cache verify mode: 8,976,
+  0 failed, 0 stale pictures. Linux with libraries: 8,885, 0 failed. Sanitizer build: 8,803, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
 ## 2026-10-12 (round 62): axis materials by height with a noisy border; deleting textures (task 0040)
 
 **Asked:** "procedural ... work based on global position. Like the top of a cliff where it's grassy but over the edge

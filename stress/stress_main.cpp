@@ -3641,6 +3641,56 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
   for (auto &[type, n] : problem_types) rep.note(strprintf("problem %d x: %s", n, type.c_str()));
   for (const std::string &e : examples) rep.note(e);
   (void)inf;
+
+  /* Task 0041: a deforming modifier's field dragged on a 50k-face mesh. In place: the deformer, then the
+   * render mesh's positions, normals and tangents. Full: the copy, the stack, the rebuild and MikkTSpace
+   * (what every change cost before). The fastest of several rounds of each, interleaved. */
+  {
+    Scene sc;
+    GameObject *g = sc.create("Twist");
+    MeshPtr base = primitives::uv_sphere(1.0f, 256, 196);  // about 50k faces
+    base->smooth = true;
+    g->add<MeshFilter>()->mesh = base;
+    auto *tw = g->add<SimpleDeformModifier>();
+    (void)g->evaluated_mesh()->render_mesh_tangents();
+    const uint64_t build = g->evaluated_mesh()->render_mesh().build_serial;
+    double in_ms = 1e30, full_ms = 1e30;
+    float angle = 10.0f;
+    for (int r = 0; r < 8; r++) {
+      in_ms = std::min(in_ms, time_ms([&] {
+                tw->angle = (angle += 1.0f);
+                (void)g->evaluated_mesh()->render_mesh_tangents();
+              }));
+      full_ms = std::min(full_ms, time_ms([&] {
+                  Mesh m = *base;
+                  tw->modify(m);
+                  m.touch();
+                  (void)m.render_mesh_tangents();
+                }));
+    }
+    const bool kept = g->evaluated_mesh()->render_mesh().build_serial == build;
+    rep.row({strprintf("Simple Deform angle on a %zu-face mesh, per change: in place%s", base->face_count(), kept ? "" : " (REBUILT)"), "1", "0",
+             f2(in_ms)});
+    rep.row({"  the same change evaluated in full (before task 0041)", "1", "0", f2(full_ms)});
+    rep.note(strprintf("Task 0041's target: a deforming field's change on a 50k-face mesh in at most 10 ms: %.2f ms (full path %.2f ms, %.1fx): %s",
+                       in_ms, full_ms, full_ms / std::max(1e-9, in_ms), in_ms <= 10.0 && kept ? "met" : "NOT MET"));
+    /* The same with Shade Auto Smooth (sharp edges): the normals then go by smoothing fans, the slow kind. */
+    MeshPtr sharp = std::make_shared<Mesh>(*base);
+    meshops::shade_auto_smooth(*sharp, 30.0f);
+    sharp->touch();
+    g->get<MeshFilter>()->mesh = sharp;
+    (void)g->evaluated_mesh()->render_mesh_tangents();
+    const uint64_t build2 = g->evaluated_mesh()->render_mesh().build_serial;
+    double in2_ms = 1e30;
+    for (int r = 0; r < 8; r++)
+      in2_ms = std::min(in2_ms, time_ms([&] {
+                 tw->angle = (angle += 1.0f);
+                 (void)g->evaluated_mesh()->render_mesh_tangents();
+               }));
+    const bool kept2 = g->evaluated_mesh()->render_mesh().build_serial == build2;
+    rep.row({strprintf("  the same with Shade Auto Smooth (sharp edges)%s", kept2 ? "" : " (REBUILT)"), "1", "0", f2(in2_ms)});
+    rep.note(strprintf("With sharp edges (smoothing fans): %.2f ms per change: %s", in2_ms, in2_ms <= 10.0 && kept2 ? "met" : "NOT MET"));
+  }
 }
 /* ------------------------------------------------------------------ main */
 
