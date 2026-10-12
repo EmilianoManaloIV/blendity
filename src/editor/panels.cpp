@@ -2038,7 +2038,15 @@ void Editor::draw_render_window(const Recti &r) {
     int sy = std::min(ih - 1, (int)((y - oy) / sc));
     const uint32_t *src = render_img_.row(sy);
     uint32_t *drow = fb->row(y);
-    for (int x = dst.x; x < dst.right(); x++) drow[x] = src[std::min(iw - 1, (int)((x - ox) / sc))];
+    if (!render_transparent_)
+      for (int x = dst.x; x < dst.right(); x++) drow[x] = src[std::min(iw - 1, (int)((x - ox) / sc))];
+    else
+      for (int x = dst.x; x < dst.right(); x++) {  // Film > Transparent: over a checkerboard, as Blender's Image Editor
+        const uint32_t c = src[std::min(iw - 1, (int)((x - ox) / sc))], a = c >> 24;
+        const uint32_t chk = (((x - ox) / u.px(8)) + ((y - oy) / u.px(8))) & 1 ? 0x99u : 0x66u;
+        auto mix = [&](uint32_t v) { return (v * a + chk * (255 - a) + 127) / 255; };
+        drow[x] = 0xFF000000u | mix(c >> 16 & 255) << 16 | mix(c >> 8 & 255) << 8 | mix(c & 255);
+      }
   }
   u.canvas.rect_outline({ox - 1, oy - 1, dw + 2, dh + 2}, Color::hex(0x101010));
   if (render_preview_) {

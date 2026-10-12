@@ -208,6 +208,7 @@ class Editor {
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
   bool rendering_for_test() const { return rendering_; }
+  bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   bool cam_preview_done_for_test() const { return cam_preview_done_; }
   /* Baked lighting (task 0012). */
   bool baking_for_test() const { return baking_; }
@@ -1261,6 +1262,15 @@ class Editor {
   /* A path-traced render through a filtered camera: traced at the filters' resolution into
    * render_small_, then the image passes, then scaled into render_dst_ of render_img_. */
   bool render_filtered_ = false;
+  /* Film > Transparent (task 0035): this render's alpha is meaningful (PNG / EXR keep it, the Render window shows a
+   * checkerboard behind it); the rasterizer clears to a flat colour for its two passes; the alpha of a path-traced
+   * render as linear floats (EXR). */
+  bool render_transparent_ = false;
+  bool render_clear_override_on_ = false;
+  uint32_t render_clear_override_ = 0;
+  std::vector<float> render_alpha_lin_;
+  void render_with_alpha(const std::function<void()> &once);
+  void apply_trace_alpha(const std::vector<float> &lin, bool filtered);
   /* Vertex-snapped copies of the meshes a filtered camera's trace uses (task 0032), kept while it renders. */
   std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> render_snapped_, cam_preview_snapped_;
   FilterStack render_filters_;

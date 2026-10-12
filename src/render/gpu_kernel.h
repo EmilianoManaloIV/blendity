@@ -572,10 +572,12 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     Hit h;
     h.t = 1e30;
     if (!intersect(ro, rd, h)) {
-      vec3 c = beta * ((bounce == 0 && P.background.w > 0.5) ? P.background.xyz : env_radiance(rd));  // Clear Flags: Solid Color
+      /* The camera ray's own miss (through glass too, except for a transparent film: w 2), as the CPU's trace(). */
+      bool camera_miss = bounce == 0 && (camera_path || P.background.w < 1.5);
+      vec3 c = beta * ((camera_miss && P.background.w > 0.5) ? P.background.xyz : env_radiance(rd));  // Clear Flags: Solid Color
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
-      if (bounce == 0) { albedo_out = vec3(1.0); normal_out = vec3(0.0); depth_out = 1e6; id_out = 0.0; }
+      if (camera_miss) { albedo_out = vec3(1.0); normal_out = vec3(0.0); depth_out = 1e6; id_out = 0.0; }
       break;
     }
     SurfacePoint sp;
@@ -822,6 +824,7 @@ void main() {
   accum[i] = vec4(accum[i].xyz + c, hit_id > 0.0 ? dep : accum[i].w);  // w: the last hitting sample's first-hit distance
   aux[i] = vec4(aux[i].xyz + alb, hit_id);  // w: the first hit's object index + 1 (the last sample's; 0 = sky)
   aux[W * H + i] += vec4(nrm, dep);
+  if (P.background.w > 1.5) aux[2 * W * H + i] += vec4(hit_id > 0.0 ? 1.0 : 0.0, 0.0, 0.0, 0.0);  // coverage: a transparent film's alpha
 }
 )GLSL",
 };

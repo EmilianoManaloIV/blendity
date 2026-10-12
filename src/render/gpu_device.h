@@ -107,7 +107,7 @@ class Renderer {
   /* Accumulated sums (4 floats per pixel): the colour after every render call,
    * albedo and normal + depth only when the denoiser needs them. */
   virtual void download_accum(std::vector<float> &accum) = 0;
-  virtual void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth) = 0;
+  virtual void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth, std::vector<float> *coverage = nullptr) = 0;
   /* Baking (task 0018, GParams::env_i z / w): the points' origins then normals or directions, 4 floats
    * each, written where the kernel reads them (after set_params, which clears). */
   virtual bool set_points(const float *data, size_t floats, std::string *error) = 0;

@@ -122,7 +122,7 @@ bool decode_exr_lib(const std::string &bytes, Bitmap &out, std::string &error) {
 #endif
 }
 
-bool write_exr(const std::string &path, const float *rgb, int w, int h, bool half) {
+bool write_exr(const std::string &path, const float *rgb, int w, int h, bool half, const float *alpha) {
 #ifdef BL_WITH_OPENEXR
   try {
     /* Blender's default for renders: ZIP compression; half floats unless
@@ -131,21 +131,24 @@ bool write_exr(const std::string &path, const float *rgb, int w, int h, bool hal
     header.compression() = Imf::ZIP_COMPRESSION;
     const Imf::PixelType type = half ? Imf::HALF : Imf::FLOAT;
     for (const char *c : {"R", "G", "B"}) header.channels().insert(c, Imf::Channel(type));
+    if (alpha) header.channels().insert("A", Imf::Channel(type));
     Imf::OutputFile file(path.c_str(), header);
     Imf::FrameBuffer fb;
     std::vector<Imf::Rgba> hbuf;
     if (half) {
       hbuf.resize((size_t)w * h);
-      for (size_t i = 0; i < hbuf.size(); i++) hbuf[i] = Imf::Rgba(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], 1.0f);
+      for (size_t i = 0; i < hbuf.size(); i++) hbuf[i] = Imf::Rgba(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], alpha ? alpha[i] : 1.0f);
       char *base = (char *)hbuf.data();
       fb.insert("R", Imf::Slice(Imf::HALF, base + offsetof(Imf::Rgba, r), sizeof(Imf::Rgba), sizeof(Imf::Rgba) * w));
       fb.insert("G", Imf::Slice(Imf::HALF, base + offsetof(Imf::Rgba, g), sizeof(Imf::Rgba), sizeof(Imf::Rgba) * w));
       fb.insert("B", Imf::Slice(Imf::HALF, base + offsetof(Imf::Rgba, b), sizeof(Imf::Rgba), sizeof(Imf::Rgba) * w));
+      if (alpha) fb.insert("A", Imf::Slice(Imf::HALF, base + offsetof(Imf::Rgba, a), sizeof(Imf::Rgba), sizeof(Imf::Rgba) * w));
     }
     else {
       char *base = (char *)rgb;
       for (int k = 0; k < 3; k++)
         fb.insert(k == 0 ? "R" : k == 1 ? "G" : "B", Imf::Slice(Imf::FLOAT, base + k * sizeof(float), 3 * sizeof(float), 3 * sizeof(float) * w));
+      if (alpha) fb.insert("A", Imf::Slice(Imf::FLOAT, (char *)alpha, sizeof(float), sizeof(float) * w));
     }
     file.setFrameBuffer(fb);
     file.writePixels(h);
@@ -161,6 +164,7 @@ bool write_exr(const std::string &path, const float *rgb, int w, int h, bool hal
   (void)w;
   (void)h;
   (void)half;
+  (void)alpha;
   return false;
 #endif
 }

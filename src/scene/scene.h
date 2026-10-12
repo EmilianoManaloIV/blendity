@@ -847,6 +847,9 @@ struct RenderSettings {
   int percent = 100;
   int samples = 128;          // path tracer final samples
   int viewport_samples = 64;  // unused since task 0019 (no Rendered Scene view); kept so files round-trip
+  /* Film > Transparent (task 0035): renders leave the world out of the background (alpha 0 there, the lighting
+   * unchanged); PNG and EXR keep the alpha. */
+  bool transparent = false;
   int preview_samples = 16;   // Preview button / live preview
   int preview_percent = 25;   // preview resolution, % of the output size
   bool live_preview = false;  // re-render the preview whenever the scene changes

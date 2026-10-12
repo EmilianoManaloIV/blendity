@@ -440,14 +440,14 @@ class VulkanRenderer final : public Renderer {
       free_buffer(readback_);
       std::string e;
       make_device_buffer(bufs_[1], nullptr, pixels * 16, 0, &e);
-      make_device_buffer(bufs_[2], nullptr, pixels * 32, 0, &e);
+      make_device_buffer(bufs_[2], nullptr, pixels * 48, 0, &e);  // albedo, normal + depth, coverage (task 0035)
       /* Read back through CPU-cached memory: plain host-visible memory is
        * uncached on most GPUs, and reading 15 MB from it took ~50 ms. */
-      readback_coherent_ = make_buffer(readback_, pixels * 48, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      readback_coherent_ = make_buffer(readback_, pixels * 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-      if (!readback_coherent_ && !make_buffer(readback_, pixels * 48, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      if (!readback_coherent_ && !make_buffer(readback_, pixels * 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) {
-        make_host_buffer(readback_, pixels * 48, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        make_host_buffer(readback_, pixels * 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         readback_coherent_ = true;
       }
       pixels_ = pixels;
@@ -500,15 +500,16 @@ class VulkanRenderer final : public Renderer {
     const float *p = (const float *)readback_.mapped;
     accum.assign(p, p + pixels_ * 4);
   }
-  void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth) override {
+  void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth, std::vector<float> *coverage) override {
     begin();
-    VkBufferCopy c{0, pixels_ * 16, pixels_ * 32};
+    VkBufferCopy c{0, pixels_ * 16, pixels_ * 48};
     f_.vkCmdCopyBuffer(cmd_, bufs_[2].buf, readback_.buf, 1, &c);
     submit_wait();
     invalidate_readback();
     const float *p = (const float *)readback_.mapped;
     albedo.assign(p + pixels_ * 4, p + pixels_ * 8);
     normal_depth.assign(p + pixels_ * 8, p + pixels_ * 12);
+    if (coverage) coverage->assign(p + pixels_ * 12, p + pixels_ * 16);
   }
 
   bool set_points(const float *data, size_t floats, std::string *err) override {

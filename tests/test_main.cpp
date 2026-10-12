@@ -215,6 +215,7 @@ static void round53_tests();
 static void round54_tests();
 static void round55_tests();
 static void round56_tests();
+static void round57_tests();
 
 int main() {
   register_builtin_components();
@@ -848,6 +849,7 @@ int main() {
   round54_tests();
   round55_tests();
   round56_tests();
+  round57_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -20316,5 +20318,168 @@ static void round56_tests() {
     CHECK(!fs::exists(fs::join(scratch_project(), "research/papers/R56_paper.pdf")));
     CHECK(!ed.window_docked_for_test(WindowKind::Research));
     std::remove(src.c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 57 (task 0035): transparent backgrounds in renders               */
+/* ===================================================================== */
+
+/* The default scene's Cube alone (no floor), rendered at 160 x 90 with the engine given. */
+static const Image &r57_render(Editor &ed, const char *engine, bool transparent) {
+  ed.command(std::string("set Render.RenderEngine ") + engine);
+  ed.command(std::string("set Render.Transparent ") + (transparent ? "true" : "false"));
+  ed.command("render");
+  for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+  return ed.render_image_for_test();
+}
+static void r57_open(Editor &ed) {
+  ed.init_headless(900, 600);
+  ed.step_frame_headless();
+  for (const char *n : {"Plane", "Sphere", "Cylinder", "Utah Teapot"})
+    if (GameObject *g = ed.scene().find_by_name(n)) g->active = false;
+  ed.command("set Render.ResolutionX 160");
+  ed.command("set Render.ResolutionY 90");
+  ed.command("set Render.Samples 16");
+  ed.command("set Render.Denoise false");
+  ed.command("device cpu");
+}
+static int r57_alpha(const Image &img, int x, int y) { return (int)(img.pixels[(size_t)y * img.width + x] >> 24); }
+
+static void round57_tests() {
+  test("transparent film: rasterized and path traced, the background's alpha is 0, the cube's 255, its edges between", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &img = r57_render(ed, engine, true);
+      CHECK(img.width == 160 && img.height == 90);
+      int zero = 0, full = 0, part = 0;
+      for (uint32_t c : img.pixels) {
+        const int a = (int)(c >> 24);
+        zero += a == 0, full += a == 255, part += a > 0 && a < 255;
+      }
+      std::printf("    %s: corner alpha %d, middle %d; %d transparent, %d solid, %d partial pixels\n", engine, r57_alpha(img, 1, 1),
+                  r57_alpha(img, 80, 45), zero, full, part);
+      CHECK(r57_alpha(img, 1, 1) == 0 && r57_alpha(img, 158, 88) == 0);
+      CHECK(r57_alpha(img, 80, 45) == 255);
+      CHECK(zero > 1000 && full > 100 && part > 0);
+    }
+    /* The GPU's coverage, as the CPU's. */
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const Image &g = r57_render(ed, "Path", true);
+      std::printf("    GPU: corner alpha %d, middle %d\n", r57_alpha(g, 1, 1), r57_alpha(g, 80, 45));
+      CHECK(r57_alpha(g, 1, 1) == 0 && r57_alpha(g, 80, 45) == 255);
+      ed.command("device cpu");
+    }
+    /* Off: every pixel opaque, as before. */
+    const Image &off = r57_render(ed, "Rasterized", false);
+    bool all = true;
+    for (uint32_t c : off.pixels) all = all && (c >> 24) == 255;
+    CHECK(all);
+  });
+
+  test("transparent film: a 50 % see-through quad gives alpha about 128 (rasterized and path traced)", [] {
+    /* (A single surface: a closed see-through cube is two, which the path tracer counts as 75 % and the rasterizer,
+     * culling the far face, as 50 %.) */
+    Editor ed;
+    r57_open(ed);
+    if (GameObject *cube = ed.scene().find_by_name("Cube")) cube->active = false;
+    ed.command("create Quad");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 1, 0});
+    g->set_local_scale({3, 3, 3});
+    g->set_world_rotation(by_name(ed.scene(), "Main Camera")->world_rotation());  // facing the camera
+    ed.command("material Transparent");
+    CHECK(g && g->get<MeshRenderer>() && !g->get<MeshRenderer>()->materials.empty());
+    if (!g || !g->get<MeshRenderer>() || g->get<MeshRenderer>()->materials.empty()) return;
+    MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+    m->alpha = 0.5f;
+    m->double_sided = true;
+    m->touch();
+    ed.command("set Render.Samples 256");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &img = r57_render(ed, engine, true);
+      double sum = 0;  // the mean over the middle (the quad covers it; the tracer's alpha is a noisy estimate)
+      for (int y = 40; y < 50; y++)
+        for (int x = 75; x < 85; x++) sum += r57_alpha(img, x, y);
+      const double a = sum / 100.0;
+      std::printf("    %s: the middle's alpha %.1f\n", engine, a);
+      CHECK(a > 112 && a < 144);
+    }
+  });
+
+  test("transparent film: a glass sphere is covered (alpha 255) in a path-traced render, CPU and GPU, and shows the world through it", [] {
+    Editor ed;
+    r57_open(ed);
+    if (GameObject *cube = ed.scene().find_by_name("Cube")) cube->active = false;
+    ed.command("create Sphere");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 1, 0});
+    ed.command("material Glass");
+    std::vector<const char *> devices = {"cpu"};
+    if (gpu::available()) devices.push_back("gpu");
+    for (const char *dev : devices) {
+      ed.command(std::string("device ") + dev);
+      const Image &img = r57_render(ed, "Path", true);
+      const uint32_t c = img.pixels[(size_t)45 * img.width + 80];
+      std::printf("    %s: the sphere's middle alpha %u, colour %06x; corner alpha %d\n", dev, c >> 24, c & 0xFFFFFF, r57_alpha(img, 1, 1));
+      CHECK((c >> 24) == 255);
+      CHECK((c & 0xFFFFFF) != 0);  // the world seen through it, not the empty background
+      CHECK(r57_alpha(img, 1, 1) == 0);
+    }
+    ed.command("device cpu");
+  });
+
+  test("transparent film: a Bloom filter doesn't make a rasterized cube see-through, and an outline keeps its alpha in a filtered trace", [] {
+    Editor ed;
+    r57_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Bloom");
+    const Image &img = r57_render(ed, "Rasterized", true);
+    int solid_inside = 0, n = 0;
+    for (int y = 40; y < 50; y++)
+      for (int x = 75; x < 85; x++) n++, solid_inside += r57_alpha(img, x, y) == 255;
+    std::printf("    Bloom: %d of %d of the cube's middle pixels opaque, corner alpha %d\n", solid_inside, n, r57_alpha(img, 1, 1));
+    CHECK(solid_inside == n);
+    CHECK(r57_alpha(img, 1, 1) == 0);
+    /* An Edge Outline in a filtered path-traced render: its lines (drawn over the background beside the cube) are
+     * opaque, as in the rasterizer. */
+    ed.command("filter remove 0");
+    ed.command("filter add Edge Outline");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &o = r57_render(ed, engine, true);
+      int dark_opaque = 0;
+      for (uint32_t c : o.pixels) dark_opaque += (c >> 24) == 255 && (c & 0xFFFFFF) < 0x202020;
+      std::printf("    %s with an Edge Outline: %d opaque dark (outline) pixels\n", engine, dark_opaque);
+      CHECK(dark_opaque > 40);
+    }
+  });
+
+  test("transparent film: the PNG keeps the alpha (and opens with it), a JPEG is composited, off writes an opaque PNG", [] {
+    Editor ed;
+    r57_open(ed);
+    r57_render(ed, "Rasterized", true);
+    const std::string base = fs::join(scratch_project(), "R57_render");
+    std::string written;
+    CHECK(ed.write_render_file_for_test(base, &written));
+    Bitmap b;
+    std::string err;
+    CHECK(load_image(written, b, err));
+    CHECK(b.width == 160 && b.height == 90);
+    if (b.width == 160 && b.height == 90) {
+      std::printf("    PNG alpha: corner %d, middle %d\n", b.rgba8[(1 * 160 + 1) * 4 + 3], b.rgba8[(45 * 160 + 80) * 4 + 3]);
+      CHECK(b.rgba8[(1 * 160 + 1) * 4 + 3] == 0 && b.rgba8[(45 * 160 + 80) * 4 + 3] == 255);
+    }
+    std::remove(written.c_str());
+    r57_render(ed, "Rasterized", false);
+    CHECK(ed.write_render_file_for_test(base, &written));
+    CHECK(load_image(written, b, err));
+    if (b.width == 160) CHECK(b.rgba8[(1 * 160 + 1) * 4 + 3] == 255);
+    std::remove(written.c_str());
   });
 }

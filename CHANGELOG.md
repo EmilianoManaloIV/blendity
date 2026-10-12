@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 57): transparent backgrounds in renders (task 0035)
+
+**Asked:** "Add the ability to make backgrounds transparent when they are rendered (png transparency)."
+
+**Added**
+- **Transparent** (Render window; Blender's Film > Transparent): F12 renders, rasterized or path traced on the CPU
+  or the GPU, leave the world out of the background while it still lights the scene. A saved PNG has alpha 0
+  there, partial alpha at anti-aliased edges and behind see-through surfaces, 1 on solid objects; an EXR keeps the
+  alpha too; a JPEG is composited over black. The Render window shows a transparent render over a checkerboard.
+  Camera sequences save the same way.
+
+**Checked**
+- New tests (round 57): rasterized and path-traced (CPU and GPU) renders of a cube with no floor have alpha 0 at
+  the corners, 255 in the middle and partial values at the edges; a 50 % see-through quad gives alpha 127 (raster)
+  and 128 (traced); the PNG reads back with the alpha; off, every pixel is opaque. Opened in Blender 5.2: RGBA,
+  straight alpha, 0 at the corner, 1 on the subject. A glass sphere is covered (alpha 255) and shows the world
+  through it on the CPU and the GPU; a Bloom filter keeps a rasterized cube opaque; an Edge Outline keeps its
+  alpha in rasterized and filtered path-traced renders.
+
+**Review (code reviewer)**: three major and several minor findings, all fixed: glass vanished in transparent traces,
+Bloom made a see-through rim in rasterized ones, a filtered trace's alpha ignored its passes, a faint veil from
+colour-quantising passes, coverage accumulated on every GPU render, low coverage amplifying denoised colour.
+- Unit checks: Windows 8,584, 0 failed (466 tests); the whole suite in render-cache verify mode: 8,585,
+  0 failed, 0 stale pictures. Linux with libraries: 8,516, 0 failed. Sanitizer build: 8,438, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `filters` and `gpu` stress 0 problems.
+
 ## 2026-10-11 (round 56): the Research window retired; papers in Learn > References (task 0034)
 
 **Asked:** "you can remove the research tab, doesn't really serve a purpose. Any features that use papers should be

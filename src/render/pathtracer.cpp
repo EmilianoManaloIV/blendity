@@ -546,6 +546,7 @@ void PathTracer::reset() {
   normal_.assign(n, Vec3(0.0f));
   depth_.assign(n, 0.0f);
   ids_.assign(n, 0u);
+  cov_.assign(n, 0.0f);
   last_dist_.assign(n, 0.0f);
   stats_.rays = 0;
   stats_.render_ms = 0;
@@ -560,6 +561,7 @@ void PathTracer::reset() {
     cpu_normal_.assign(n, Vec3(0.0f));
     cpu_depth_.assign(n, 0.0f);
     cpu_ids_.assign(n, 0u);
+    cpu_cov_.assign(n, 0.0f);
     cpu_last_dist_.assign(n, 0.0f);
     std::memcpy(gpu_params_.inv_vp, inv_vp_.m, 64);
     gpu_params_.cam_pos[0] = cam_pos_.x;
@@ -734,9 +736,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         float m = std::max({c.x, c.y, c.z});
         if (m > clamp) c = c * (clamp / m);
       }
-      if (bounce == 0 && settings_.solid_background) c = beta * settings_.background;  // Clear Flags: Solid Color
+      /* The camera ray's own miss (through see-through surfaces; through glass too unless the film is transparent). */
+      const bool camera_miss = bounce == 0 && (camera_path || !settings_.transparent_film);
+      if (camera_miss && settings_.solid_background) c = beta * settings_.background;  // Clear Flags: Solid Color
       L += c;
-      if (bounce == 0 && albedo_out) {
+      if (camera_miss && albedo_out) {
         *albedo_out = Vec3(1.0f);
         *normal_out = Vec3(0.0f);
         *depth_out = 1e6f;
@@ -1064,6 +1068,7 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
   float *DP = claim ? cpu_depth_.data() : depth_.data();
   uint32_t *ID = claim ? cpu_ids_.data() : ids_.data();
   float *LD = claim ? cpu_last_dist_.data() : last_dist_.data();
+  float *CV = claim ? cpu_cov_.data() : cov_.data();
 #ifdef BL_WITH_OPENPGL
   if (guiding_ && !guiding_->field) {
     /* Cycles' configuration (integrator/path_trace.cpp): KD-tree of
@@ -1158,6 +1163,7 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
           DP[i] += dep;
           ID[i] = hit_id;
           if (hit_id) LD[i] = dep;
+          if (hit_id) CV[i] += 1.0f;
         }
       rays += local;
 #ifdef BL_WITH_OPENPGL
@@ -1797,7 +1803,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
   v4(p.env_ground, env_.ground);
   v4(p.env_color, env_.color);
   v4(p.background, settings_.background);
-  p.background[3] = settings_.solid_background ? 1.0f : 0.0f;
+  p.background[3] = settings_.solid_background ? (settings_.transparent_film ? 2.0f : 1.0f) : 0.0f;  // 2: transparent film
   /* The Retro stages for camera rays (task 0032). */
   std::memcpy(p.retro_vp, settings_.retro.view_proj.m, 64);
   const bool ra = settings_.retro.active();
@@ -1909,17 +1915,28 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
   return true;
 }
 
+std::vector<float> PathTracer::coverage() {
+  merge_aux();
+  const size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
+  std::vector<float> out(n, 0.0f);
+  const float inv = 1.0f / (float)std::max(1, samples_);
+  for (size_t i = 0; i < n && i < cov_.size(); i++) out[i] = std::min(1.0f, cov_[i] * inv);
+  return out;
+}
+
 void PathTracer::merge_aux() {
   if (aux_merged_ || gpus_.empty()) return;
   const size_t n = (size_t)w_ * h_;
-  std::vector<std::vector<float>> ga(gpus_.size()), gn(gpus_.size());
-  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_aux(ga[k], gn[k]);
+  std::vector<std::vector<float>> ga(gpus_.size()), gn(gpus_.size()), gc(gpus_.size());
+  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_aux(ga[k], gn[k], &gc[k]);
   JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) {
       Vec3 al = cpu_albedo_[i], nr = cpu_normal_[i];
       float d = cpu_depth_[i];
       uint32_t id = cpu_ids_[i];
+      float cv = cpu_cov_.size() > (size_t)i ? cpu_cov_[i] : 0.0f;
       for (size_t k = 0; k < ga.size(); k++) {
+        if (gc[k].size() > (size_t)i * 4) cv += gc[k][i * 4];
         al += Vec3(ga[k][i * 4], ga[k][i * 4 + 1], ga[k][i * 4 + 2]);
         nr += Vec3(gn[k][i * 4], gn[k][i * 4 + 1], gn[k][i * 4 + 2]);
         d += gn[k][i * 4 + 3];
@@ -1930,6 +1947,7 @@ void PathTracer::merge_aux() {
       normal_[i] = nr;
       depth_[i] = d;
       ids_[i] = id;
+      cov_[i] = cv;
     }
   });
   aux_merged_ = true;

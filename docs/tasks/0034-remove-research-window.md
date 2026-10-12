@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** none (removes a window; no ADR covered the research folder)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/32
 
 ## Goal
 The Research window (a paper drop folder, a list of papers and of "research features") goes. Every feature

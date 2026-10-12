@@ -38,7 +38,8 @@ bool write_jpeg(const std::string &path, const uint32_t *pixels, int width, int 
 /* Linear float RGB (3 floats per pixel) as Radiance RGBE. */
 bool write_hdr(const std::string &path, const float *rgb, int width, int height);
 /* OpenEXR (when built with Blender's libraries): linear RGB, half or full float. */
-bool write_exr(const std::string &path, const float *rgb, int width, int height, bool half = true);
+/* alpha (optional, one float a pixel): an RGBA EXR (a transparent render, task 0035). */
+bool write_exr(const std::string &path, const float *rgb, int width, int height, bool half = true, const float *alpha = nullptr);
 bool exr_available();
 /* Use libjpeg-turbo / libpng for decoding when built with them (default on);
  * off = Blendity's own decoders (stress tests compare both). */

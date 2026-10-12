@@ -141,6 +141,7 @@ class Canvas {
 };
 
 /* PNG writer (stored deflate, no zlib) for screenshots & reports. */
-bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride);
+/* alpha: an RGBA PNG from the pixels' top byte (a transparent render, task 0035); otherwise RGB. */
+bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride, bool alpha = false);
 
 }  // namespace bl

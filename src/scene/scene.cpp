@@ -263,6 +263,9 @@ void RenderSettings::reflect(Reflector &r) {
   r.help("Path-traced samples for the Preview render (the rasterized engine ignores it).");
   r.field("Live Preview", live_preview);
   r.help("Re-render the preview automatically whenever the scene, camera or settings change.");
+  r.field("Transparent", transparent);
+  r.help("Film > Transparent: the background is left out of the render (transparent in a PNG or EXR) while the world\n"
+         "still lights the scene. Blender: Render Properties > Film > Transparent.");
   if (r.all_fields() || engine == 1) {
     static const char *devices[] = {"CPU", "GPU Compute"};
     r.enumeration("Device", device, devices, 2);

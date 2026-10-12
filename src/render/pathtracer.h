@@ -64,6 +64,9 @@ struct PTSettings {
    * radiance instead of the world's; bounces still see the world, so the lighting doesn't change. */
   bool solid_background = false;
   Vec3 background{0.0f, 0.0f, 0.0f};
+  /* Film > Transparent (task 0035; set with solid_background black): only the camera ray itself sees the empty
+   * background; rays out of glass see the world and the glass counts as covered (Cycles' Transparent Glass off). */
+  bool transparent_film = false;
   /* Library backends (used when compiled in, see deps/deps.h). Like Cycles:
    * Embree for ray queries, OpenImageDenoise for denoising. Changing
    * use_embree takes effect on the next build(). */
@@ -136,6 +139,9 @@ class PathTracer {
   void resolve_rgb(const std::vector<float> &rgb, uint32_t *out, int stride) const;
   /* Linear float RGB (3 per pixel), for .hdr export. */
   std::vector<float> linear_rgb(bool denoise);
+  /* The share of camera samples that hit something, per pixel (alpha for a transparent render, task 0035): a
+   * surface seen through a Transparent one counts, the world doesn't. */
+  std::vector<float> coverage();
 
   /* Ray queries (also used by tests / picking). */
   struct Hit {
@@ -255,6 +261,7 @@ class PathTracer {
   std::vector<Vec3> cpu_accum_, cpu_albedo_, cpu_normal_;
   std::vector<float> cpu_depth_;
   std::vector<uint32_t> cpu_ids_, ids_;  // first-hit object index + 1 (0 = sky), the last sample's
+  std::vector<float> cpu_cov_, cov_;      // camera samples that hit something (summed)
   std::vector<float> cpu_last_dist_, last_dist_;  // the last hitting sample's first-hit distance (0 = none yet)
   void build_gpu_scene(gpu::Scene &s) const;
   void sync_gpus();
