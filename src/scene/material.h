@@ -102,6 +102,9 @@ std::string resolve_asset_path(const std::string &path);
 std::string make_asset_relative(const std::string &abs_path);
 /* Bumps a generation counter so materials re-resolve their textures. */
 void invalidate_material_textures();
+/* Bumped by invalidate_material_textures (an image reloaded, a procedural texture edited): the views'
+ * render hash includes it, so a texture change redraws them. */
+size_t material_textures_generation();
 
 /* Procedural textures, from Cycles' SVM nodes (intern/cycles/kernel/svm). */
 float perlin_noise(Vec3 p);                       // gradient noise in [-1, 1]

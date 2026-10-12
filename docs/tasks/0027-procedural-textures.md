@@ -1,10 +1,10 @@
 # 0027: Procedural texture assets: a layer stack baked to images
 
-- **Status:** approved (the roadmap of 2026-10-11; after task 0026)
+- **Status:** done (as built below)
 - **Requirements:** R-03, R-06
 - **Decisions:** ADR 0017
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/25
 
 ## Goal
 The user can make a procedural texture (bricks, a wood floor, tatami mats, tiles, noise...) as a stack of
@@ -84,3 +84,35 @@ data model, the layers and the evaluation; the Textures window is task 0028.
 ## Documentation to update
 - ADR 0017, CHANGELOG, README (procedural textures), ARCHITECTURE rows, docs/requirements if R-03
   wording needs the asset.
+
+## As built
+Built as specified: `ProceduralTexture` and 21 layer types (11 generators, 10 filters) in `src/texture/`,
+`Reflector::layer_list` (`L<i> ` prefixes), evaluation to four planes in parallel and to the four outputs,
+an output cache keyed by asset path and hash, the asset library (`texture_asset`, `.ptex` text files,
+dirty-save on undo steps and on scene save, retarget on move / rename including `X.ptex#` references in
+materials and scene files, forget on delete), `Material::textures()` resolving `X.ptex#output`, export
+writing the referenced outputs as PNGs beside the file (material copies point at them, so every exporter
+sees ordinary images), the console (`newtex`, `texlist`, `texlayer`, `settex`), the Project window's icon
+and Assign to Selection, and the `textures` stress section. A texture edit bumps the material-texture
+generation, which the views' render hash now includes, so they redraw.
+
+Undo of texture edits (criterion 4) is built: a texture asset lives outside the scene, so an edit
+records the asset's text before it and the undo step carries it (`UndoState::textures`); undo and redo
+restore it.
+
+**Deviations:**
+1. **Exports reference the images from OBJ / MTL and glTF only** (criterion 6 named USD too): the USD and
+   FBX writers write no texture references today, so no images are written for them (or for STL / PLY,
+   or with Materials off). OBJ references them by name, so the folder can be moved; the glTF is read back
+   by the importer in the test.
+2. **The linear Gradient doesn't tile** by design (it runs from one edge to the other); Mirrored and Radial
+   do.
+3. **Counts that decide a pattern's parity are rounded** so every pattern repeats exactly: Brick rows to a
+   multiple of Offset Every, Wood Floor rows and Checker counts to even, Herringbone to a multiple of 4,
+   Tatami's cells to the layout's block (4 Basket, 2 Running Bond, 3 Pinwheel); Hexagon rows are fitted.
+4. **Mortar, gap and grout widths are full widths** (half on each side of a joint), as Blender's Mortar
+   Size.
+5. **Tatami's fields changed from the spec's sketch:** one Cells count of half-mat cells and three
+   layouts (Basket, Running Bond, Pinwheel around a half mat), so the mats are truly 1:2.
+6. **A changed image file behind an Image layer** isn't noticed until the texture is edited (its hash
+   covers the path, not the file).

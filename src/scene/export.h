@@ -46,6 +46,7 @@ struct ExportOptions {
   bool uvs = true;              // Blender: UV Coordinates
   bool materials = true;        // Blender: Materials (glTF: with their base colour textures)
   bool ascii = false;           // STL / PLY: ASCII instead of binary
+  std::string texture_dir;      // (not reflected) the exported file's folder: textures in it are written by name
   void reflect(Reflector &r);
 };
 

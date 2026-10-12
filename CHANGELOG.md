@@ -2,6 +2,58 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 49): procedural texture assets (task 0027, ADR 0017)
+
+**Asked:** a tab for making procedural textures (bricks, wood floors, tatami mats...) with a Blender-style
+modifier stack. This round is the texture assets themselves; the Textures window is the next (0028).
+
+**Added**
+- **Texture assets, `Assets/Textures/<name>.ptex`:** a size (64–4096), a physical size (metres per tile),
+  a normal strength, a seed, and **a stack of layers** evaluated in order to four images: **albedo**,
+  **normal** (from the height), **roughness** and **height**.
+- **21 layers.** Generators, all tiling seamlessly: Brick, Wood Floor, Tatami, Tiles (square, hexagon,
+  herringbone), Voronoi, Noise, Wave, Checker, Stripes, Gradient, Image. Filters: Blur, Levels,
+  Hue / Saturation, Invert, Warp, Tile, Edge Wear, Height AO, Color Ramp, Mask by Height. Each layer has
+  a blend mode (Normal, Multiply, Add, Screen, Overlay, Height Max / Min), an opacity, the planes it
+  writes, and can fade by the mask a Mask by Height layer below sets.
+- **Materials use them by output:** `Assets/Textures/Bricks.ptex#albedo` (`#normal`, `#roughness`,
+  `#height`); Assign to Selection (Project window, or `newtex` then the console) sets all three maps and
+  the tiling from the physical size. Editing a texture redraws every view that shows it.
+- **Exports carry them:** the outputs a material uses are written as PNGs beside an exported OBJ or glTF
+  and referenced (by name in the MTL, so the folder can be moved). USD and FBX don't reference textures
+  yet, so no images are written for them.
+- **Assets behave like material assets:** saved when an edit settles and with the scene, renamed and moved
+  with their references (materials and scene files), forgotten when deleted.
+- Console: `newtex <name> [preset]` (Bricks, Wood Floor, Tatami, Tiles, Noise, Checker), `texlist`,
+  `texlayer <texture> add|remove|move|reset|list`, `settex <texture> <Field> <value>` (a layer's field
+  as `L0Rows`). **Texture edits undo and redo** (the asset's text travels with the undo step).
+- From the code review (Opus): Hexagon and Herringbone tiles are real tilings now (the first draft's
+  hexagons didn't repeat vertically and its herringbone was a square grid), Tatami lays true 1:2 mats
+  (Basket, Running Bond, Pinwheel), and every count that decides a pattern's parity is rounded so the
+  pattern repeats exactly; the seam test now checks sample(u, v) = sample(u + 1, v) = sample(u, v + 1)
+  on 20 configurations instead of a step comparison that could not fail. Blur, Height AO and Edge Wear
+  are separable (O(r) or O(1) per texel instead of O(r²): radius 64 at 4096² went from minutes to
+  seconds) and copy only the planes they touch; evaluation runs outside the cache's lock; a texture's
+  first load no longer bumps the texture generation in the middle of a render's resolve; NaN guards use
+  `finite_bits` (a `v == v` test can be folded away under /fp:fast); integer fields are clamped where
+  used; an unknown layer type (a newer file) is kept so the layers after it keep their fields; exported
+  images get unique names per asset and each asset is evaluated once; assigning a texture to an object
+  using a `.mat` asset gives that object its own copy instead of editing the shared asset.
+
+**Checked**
+- New tests (round 49): every generator tiles seamlessly and is deterministic; a Brick's mortar fraction
+  follows its parameters, Tatami has its border, a Wood Floor its gaps; the stack order matters; a
+  `.ptex` round-trips; a material with `Bricks.ptex#albedo` renders coloured, and a layer field and the
+  normal strength redraw the view; OBJ and glTF exports write and reference the PNGs (by name in the MTL;
+  the glTF read back by the importer) while the scene's material keeps the asset, and an STL export writes
+  none; renaming the `.ptex` retargets the material; `texlayer` / `settex` edit the stack, the file is
+  written when the edit settles, and undo / redo restore a field edit and an added layer.
+- Unit checks: Windows 8,308, 0 failed (417 tests); the whole suite in render-cache verify mode: 8,309,
+  0 failed, 0 stale pictures. Linux with libraries: 8,260, 0 failed. Sanitizer build: 8,182, 0 failed, no reports.
+- Stress `procedural_textures` (new): 1024 x 1024 with 8 layers 108 ms on 32 threads (target under 150 ms);
+  147 fuzzed runs (NaN / infinite / huge / negative fields on every layer type), 0 problems.
+  `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
 ## 2026-10-11 (round 48): filters look the same at every resolution and during traces (task 0026, ADR 0016 part 2)
 
 **Asked:** the camera-filter round, second part: a camera's filters should look the same in the Camera

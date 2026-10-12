@@ -55,11 +55,13 @@ void Editor::invalidate_project_listing() {
 /* Every reference to `from` (a file or a folder, project-relative) now points at `to`. */
 void Editor::retarget_asset_references(const std::string &from, const std::string &to) {
   retarget_material_assets(from, to);
+  retarget_texture_assets(from, to);
   auto fix = [&](Material &m) {
     for (TextureRef *t : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map}) {
       std::string p = t->path;
       std::replace(p.begin(), p.end(), '\\', '/');
-      if (p == from || (p.size() > from.size() && p.compare(0, from.size(), from) == 0 && p[from.size()] == '/')) {
+      /* The file itself, a file in the folder, or a procedural texture's output ("X.ptex#albedo"). */
+      if (p == from || (p.size() > from.size() && p.compare(0, from.size(), from) == 0 && (p[from.size()] == '/' || p[from.size()] == '#'))) {
         t->path = to + p.substr(from.size());
         m.touch();
       }
@@ -151,6 +153,7 @@ bool Editor::delete_project_entry(const std::string &path) {
   }
   /* Materials from it stay on the objects that use them, as scene materials. */
   const size_t n = forget_material_assets(rel);
+  forget_texture_assets(rel);
   if (path_inside(project_selected_, path)) project_selected_.clear();
   if (path_inside(project_dir_, path)) project_dir_ = fs::parent(path);
   invalidate_project_listing();
@@ -369,6 +372,7 @@ void Editor::draw_project(const Recti &r) {
     std::string ext = fs::extension(en->name);
     Icon ic = en->is_dir ? Icon::Folder
               : ext == ".mat" ? Icon::None
+              : ext == ".ptex" ? Icon::Grid
               : ext == ".scene" ? Icon::Scene
               : model_extension_supported(ext) ? Icon::Mesh
               : ext == ".pdf" ? Icon::Paper
@@ -484,6 +488,7 @@ void Editor::draw_project(const Recti &r) {
     if (ext == ".mat" && u.menu_item("Assign to Selection", nullptr, false, !selection_.empty()))
       if (MaterialPtr m = material_asset(make_asset_relative(sel)))
         for (GameObject *g : selected_objects(false)) assign_material(g, 0, m);
+    if (ext == ".ptex" && u.menu_item("Assign to Selection", nullptr, false, !selection_.empty())) assign_texture_asset_to_selection(make_asset_relative(sel));
     if (ext == ".mat" && u.menu_item("Edit in Materials Window"))
       if (MaterialPtr m = material_asset(make_asset_relative(sel))) {
         material_selected_ = m;

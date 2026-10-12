@@ -80,7 +80,7 @@ if /i "%CONFIG%"=="debug" (
 )
 if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64^))
 set LIBSRC=
-for %%d in (core image render scene editor research platform deps) do (
+for %%d in (core image render scene texture editor research platform deps) do (
   for %%f in (src\%%d\*.cpp) do set LIBSRC=!LIBSRC! %%f
 )
 rem Blender's own bundled dependencies (see extern\README.md)

@@ -27,6 +27,7 @@
 #include "../src/scene/mesh.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
+#include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
 
 #include <algorithm>
@@ -1957,6 +1958,71 @@ static void test_memory(Report &rep, const Options &) {
 
 /* ------------------------------------------------- phase 2: render / UV / modeling */
 
+/* Procedural textures (task 0027): what a big stack costs, and every layer field fuzzed. */
+static void test_textures(Report &rep, const Options &o) {
+  rep.title("Procedural textures: a stack's cost, and odd settings",
+            "A Bricks preset plus Noise, Blur, Levels, Warp, Edge Wear, Height AO and Hue / Saturation (8 layers), evaluated to the four outputs.");
+  rep.table({"size", "layers", "evaluate + outputs ms", "Mtexels / s"});
+  for (int size : o.quick ? std::vector<int>{256} : std::vector<int>{256, 1024}) {
+    ProceduralTexture t;
+    apply_texture_preset(t, "Bricks");  // Brick, Noise, Edge Wear
+    t.add("Blur");
+    t.add("Levels");
+    t.add("Warp");
+    t.add("Height AO");
+    t.add("Hue / Saturation");
+    t.width = t.height = size;
+    const double ms = time_ms([&] {
+      TexPlanes p;
+      t.evaluate(p);
+      for (int k = 0; k < 4; k++) (void)t.output(k, p);
+    }, o.quick ? 1 : 3);
+    rep.row({std::to_string(size), std::to_string(t.layers.size()), f2(ms), f1((double)size * size / ms / 1000.0)});
+    if (size == 1024) rep.note(strprintf("1024 x 1024, 8 layers: %.0f ms (task 0027's target: under 150 ms) %s", ms, ms < 150.0 ? "met" : "NOT MET"));
+  }
+  rep.note(strprintf("%d threads (JobSystem).", JobSystem::global().thread_count()));
+  /* Fuzz: every layer type with every field at NaN, infinity, huge and negative values, at 64 x 64. */
+  struct Fuzz : Reflector {
+    int which = 0, n = 0;
+    bool all_fields() const override { return true; }
+    float pick() {
+      static const float vals[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1e30f, 1e30f, -5.0f, 0.0f, 1e-30f};
+      return vals[(which + n++) % 7];
+    }
+    void field(const char *, float &v, float, float, float) override { v = pick(); }
+    void field(const char *, int &v, int, int) override { v = (int)(n++ % 3 == 0 ? -1000000 : n % 3 == 1 ? 2000000000 : 0); }
+    void field(const char *, bool &v) override { v = (n++ & 1) != 0; }
+    void field(const char *, Vec3 &v) override { v = Vec3(pick(), pick(), pick()); }
+    void color(const char *n_, Vec3 &v) override { field(n_, v); }
+    void enumeration(const char *, int &v, const char *const *, int) override { v = (n++ % 2) ? 1000 : -7; }
+    void text(const char *, std::string &) override {}
+    void mesh(const char *, MeshPtr &) override {}
+  };
+  int runs = 0, problems = 0;
+  for (const TextureLayerInfo &info : texture_layer_infos())
+    for (int which = 0; which < 7; which++) {
+      ProceduralTexture t;
+      t.width = t.height = 64;
+      TextureLayer *l = t.add(info.name);
+      if (!l) continue;
+      Fuzz f;
+      f.which = which;
+      l->reflect(f);
+      l->opacity = which == 3 ? std::numeric_limits<float>::quiet_NaN() : 1.0f;
+      TexPlanes p;
+      t.evaluate(p);
+      bool bad = p.w != 64 || p.h != 64;
+      for (size_t i = 0; i < p.size() && !bad; i++)
+        bad = !finite_bits(p.height[i]) || !finite_bits(p.albedo[i].x) || !finite_bits(p.rough[i]) || !finite_bits(p.mask[i]);
+      const Bitmap nm = t.output(1, p);
+      bad = bad || nm.width != 64 || nm.rgba8.size() != (size_t)64 * 64 * 4;
+      runs++;
+      problems += bad;
+      if (bad) std::printf("  [textures] problem: %s with fuzz set %d\n", info.name.c_str(), which);
+    }
+  rep.note(strprintf("Odd settings (NaN / infinite / huge / negative fields on every layer type): %d runs, %d problems (a problem: a NaN plane or a wrong size).", runs, problems));
+}
+
 static void test_shading_cost(Report &rep, const Options &o) {
   rep.title("Shading: Gouraud vs deferred PBR vs deferred + sun shadows",
             "256 icospheres with a material at each resolution. Deferred shades each visible pixel once from the "
@@ -3258,7 +3324,7 @@ int main(int argc, char **argv) {
   T tests[] = {{"raster", test_raster_scaling}, {"raster_tiles", test_tile_size}, {"raster_resolution", test_resolution},
                {"hierarchy", test_hierarchy},    {"picking", test_picking},       {"subdivision", test_subdivision},
                {"edges", test_edge_building},    {"merge", test_merge},           {"serialization", test_serialization},
-               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"vgi", test_vgi}, {"probes", test_probes},
+               {"undo", test_undo},              {"jobs", test_jobs},             {"editor_ui", test_editor},  {"editor_render", test_editor_render}, {"bake", test_bake}, {"procedural_textures", test_textures}, {"vgi", test_vgi}, {"probes", test_probes},
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
