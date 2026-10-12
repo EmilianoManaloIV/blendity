@@ -42,7 +42,8 @@ struct Material {
   ivec4 tex1;       // emission, mapping, procedural, surface
   ivec4 flags;      // unlit, wrap, filter, -
   vec4 axis;        // axis material (ADR 0018): cos(angle), half blend, 1 / scale, mode (0 off, 1 world, 2 local)
-  ivec4 axis_i;     // its Top, Side, Bottom in mats[] (-1: its own maps)
+  ivec4 axis_i;     // its Top, Side, Bottom, High in mats[] (-1: its own maps; High -1: no band)
+  vec4 axis2;       // task 0040: noise amount, 1 / noise scale, high start, high half-width
   vec4 toon0;       // toon (flags.w bit 1, ADR 0020): bands, softness, threshold, specular smoothness
   vec4 toon1;       // shadow colour, specular size
   vec4 toon2;       // rim colour x strength, rim width
@@ -334,8 +335,19 @@ Sample evaluate_material(Material m, SurfacePoint sp) {
   float ny = ok ? n.y / len : 0.0;
   n = ok ? n / len : vec3(1.0, 0.0, 0.0);
   float c = m.axis.x, b = m.axis.y;
-  float wt = axis_step(c - b, c + b, ny), wb = axis_step(c - b, c + b, -ny);
-  float w[3] = float[3](wt, max(0.0, 1.0 - wt - wb), wb);
+  vec3 at = mode == 1 ? sp.position : sp.local_position;
+  float noise = m.axis2.x > 0.0 ? fbm_noise(at * m.axis2.y, 2, 0.5) : 0.0;  // task 0040: the borders wander
+  if (isnan(noise) || isinf(noise)) noise = 0.0;
+  float sy = ny + noise * m.axis2.x * 0.5;
+  float wt = axis_step(c - b, c + b, sy), wb = axis_step(c - b, c + b, -sy);
+  float w[4] = float[4](wt, max(0.0, 1.0 - wt - wb), wb, 0.0);
+  if (m.axis_i.w >= 0) {
+    float hb = m.axis2.w;
+    bool fy = !isnan(at.y) && !isinf(at.y);  // a non-finite height: no band (as the CPU)
+    float wh = fy ? axis_step(m.axis2.z - hb, m.axis2.z + hb, at.y + noise * m.axis2.x * max(hb, 0.05) * 2.0) : 0.0;
+    w[0] *= 1.0 - wh; w[1] *= 1.0 - wh; w[2] *= 1.0 - wh;
+    w[3] = wh;
+  }
   SurfacePoint tp = sp;
   tp.local_position = (mode == 1 ? sp.position : sp.local_position) * m.axis.z;
   tp.local_normal = n;
@@ -343,7 +355,7 @@ Sample evaluate_material(Material m, SurfacePoint sp) {
   o.albedo = vec3(0.0); o.metallic = 0.0; o.roughness = 0.0; o.specular = 0.0; o.alpha = 0.0; o.emission = vec3(0.0);
   vec3 nsum = vec3(0.0);
   float wsum = 0.0;
-  for (int k = 0; k < 3; k++) {
+  for (int k = 0; k < 4; k++) {
     if (w[k] <= 1e-3) continue;
     int idx = m.axis_i[k];
     Material sm = idx >= 0 ? mats[idx] : m;

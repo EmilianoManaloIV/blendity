@@ -135,17 +135,25 @@ void Editor::draw_materials_window(const Recti &r) {
       if (auto it = users.find(e.m.get()); it != users.end()) e.users = it->second;
   }
   const std::string f = to_lower(material_search_);
+  const size_t all = list.size();
   list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry &e) { return !f.empty() && to_lower(e.m->name).find(f) == std::string::npos; }),
              list.end());
   /* Toolbar */
   const int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
-  if (u.button({bar.x + u.px(6), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "New Material Asset", false, Icon::Plus))
+  if (u.button({bar.x + u.px(6), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "New Material Asset", false, Icon::Plus)) {
     material_selected_ = new_material_asset(nullptr, false);
+    /* The new one in view: a search left from earlier would hide it (the user saw nothing appear). */
+    material_search_.clear();
+    u.redraw = true;
+  }
   u.tooltip("A new .mat in Assets/Materials (Unity: Create > Material).");
-  u.text_field(u.id("mat_search"), {bar.x + u.px(162), bar.y + u.px(4), std::min(u.px(200), bar.w - u.px(170)), bh - u.px(8)}, material_search_, nullptr,
-               "Search materials");
+  const Recti sf{bar.x + u.px(162), bar.y + u.px(4), std::min(u.px(200), bar.w - u.px(170)), bh - u.px(8)};
+  u.text_field(u.id("mat_search"), sf, material_search_, nullptr, "Search materials");
+  if (!f.empty() && list.size() < all)  // say that the search hides some
+    u.label({sf.right() + u.px(8), bar.y, std::max(0, bar.right() - sf.right() - u.px(12)), bh},
+            strprintf("Showing %zu of %zu (search)", list.size(), all), u.theme.text_dim);
   /* Grid of previews on top, the selected material's editor below. */
   const bool editing = material_selected_ != nullptr;
   const int grid_h = editing ? std::max(u.px(120), (r.h - bh) * 2 / 5) : r.h - bh;
@@ -304,7 +312,11 @@ void Editor::set_material_ref(Material *mat, const std::string &field, const Mat
     Log::warn("%s: a material can't be its own part (leave it empty for its own maps)", field.c_str());
     return;
   }
-  std::string *slot = field == "Axis Top" ? &mat->axis_top : field == "Axis Side" ? &mat->axis_side : field == "Axis Bottom" ? &mat->axis_bottom : nullptr;
+  std::string *slot = field == "Axis Top"      ? &mat->axis_top
+                      : field == "Axis Side"   ? &mat->axis_side
+                      : field == "Axis Bottom" ? &mat->axis_bottom
+                      : field == "Axis High"   ? &mat->axis_high  // task 0040
+                                               : nullptr;
   if (!slot) return;
   *slot = picked->asset_path;
   mat->touch();

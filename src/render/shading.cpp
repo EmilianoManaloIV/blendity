@@ -95,8 +95,37 @@ static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &t
   const float ny = ok ? n.y / len : 0.0f;
   n = ok ? n / len : Vec3(1.0f, 0.0f, 0.0f);  // a NaN or zero normal: Side, projected along one axis
   const float c = std::cos(clampf(m.axis_angle, 0.0f, 90.0f) * kDeg2Rad), b = clampf(m.axis_blend, 0.0f, 1.0f) * 0.5f;
-  const float w_top = axis_step(c - b, c + b, ny), w_bottom = axis_step(c - b, c + b, -ny);
-  const float w[3] = {w_top, std::max(0.0f, 1.0f - w_top - w_bottom), w_bottom};
+  /* Task 0040: noise at the point moves the slope's border (in the cosine) and the height band's (in metres). */
+  const Vec3 at = world ? sp.position : sp.local_position;
+  const float amount = finite_bits(m.axis_noise) ? clampf(m.axis_noise, 0.0f, 1.0f) : 0.0f;
+  float noise = 0.0f;
+  if (amount > 0.0f) {
+    /* Only near a border: further away no noise can move it past (the weights are saturated), so the result is the
+     * same without evaluating it (most of a surface is far from one). */
+    const float reach = amount * 0.5f + b;
+    bool by_border = std::fabs(std::fabs(ny) - c) <= reach;
+    if (!by_border && tx.axis[3]) {
+      const float hb = finite_bits(m.axis_high_blend) ? std::max(0.0f, m.axis_high_blend) : 1.0f;
+      const float start = finite_bits(m.axis_high_start) ? m.axis_high_start : 0.0f;
+      by_border = !finite_bits(at.y) || std::fabs(at.y - start) <= hb + amount * std::max(hb, 0.05f) * 2.0f;
+    }
+    if (by_border && finite_bits(at.x) && finite_bits(at.y) && finite_bits(at.z)) {  // (noise of NaN would be 0 anyway)
+      const float ns = finite_bits(m.axis_noise_scale) ? std::max(0.01f, m.axis_noise_scale) : 4.0f;
+      noise = fbm_noise(at / ns, 2, 0.5f);
+      if (!finite_bits(noise)) noise = 0.0f;
+    }
+  }
+  const float sy = ny + noise * amount * 0.5f;
+  const float w_top = axis_step(c - b, c + b, sy), w_bottom = axis_step(c - b, c + b, -sy);
+  float w[4] = {w_top, std::max(0.0f, 1.0f - w_top - w_bottom), w_bottom, 0.0f};
+  if (tx.axis[3]) {  // the height band covers the slope's parts where it is on
+    const float hb = finite_bits(m.axis_high_blend) ? std::max(0.0f, m.axis_high_blend) : 1.0f;
+    const float start = finite_bits(m.axis_high_start) ? m.axis_high_start : 0.0f;
+    const float y = finite_bits(at.y) ? at.y + noise * amount * std::max(hb, 0.05f) * 2.0f : -1e30f;
+    const float wh = axis_step(start - hb, start + hb, y);
+    for (int k = 0; k < 3; k++) w[k] *= 1.0f - wh;
+    w[3] = wh;
+  }
   SurfacePoint tp = sp;
   tp.local_position = (world ? sp.position : sp.local_position) / std::max(0.01f, m.axis_scale);
   tp.footprint = (world ? sp.world_footprint : sp.footprint) / std::max(0.01f, m.axis_scale);  // in the projection's units
@@ -107,7 +136,7 @@ static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &t
   out.emission = Vec3(0.0f);
   Vec3 nsum(0.0f);
   float wsum = 0.0f;
-  for (int k = 0; k < 3; k++) {
+  for (int k = 0; k < 4; k++) {
     if (w[k] <= 1e-3f) continue;
     const Material &sm = tx.axis[k] ? *tx.axis[k] : m;
     const Material::Resolved &stx = tx.axis[k] && tx.axis_tx[k] ? *tx.axis_tx[k] : tx;

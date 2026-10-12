@@ -146,6 +146,7 @@ bool Editor::delete_project_entry(const std::string &path) {
     return false;
   }
   save_dirty_material_assets();
+  save_dirty_texture_assets();  // the trash keeps the last edits
   std::string rel = make_asset_relative(path);
   std::replace(rel.begin(), rel.end(), '\\', '/');
   std::string err;

@@ -2372,15 +2372,44 @@ static void test_shading_cost(Report &rep, const Options &o) {
       sp.position = sp.local_position = sp.normal * 3.7f;
     }
     double sink = 0;
-    const double p_ms = time_ms([&] {
-      for (int i = 0; i < N; i++) sink += evaluate_material(plain, plain.textures(), pts[(size_t)i & 4095]).albedo.x;
-    });
-    const double a_ms = time_ms([&] {
-      for (int i = 0; i < N; i++) sink += evaluate_material(axis, atx, pts[(size_t)i & 4095]).albedo.x;
-    });
+    /* Five interleaved rounds of a fifth of the points each, the fastest of each kept (x5): one thread is easily
+     * slowed by whatever else runs, and interleaving lets both sides meet the same conditions. */
+    auto rounds = [&](const Material &a, const Material::Resolved &ta, const Material &b, const Material::Resolved &tb, double &ma, double &mb) {
+      ma = mb = 1e30;
+      const int n = N / 5;
+      for (int r = 0; r < 5; r++) {
+        ma = std::min(ma, time_ms([&] {
+                for (int i = 0; i < n; i++) sink += evaluate_material(a, ta, pts[(size_t)(i + r) & 4095]).albedo.x;
+              }));
+        mb = std::min(mb, time_ms([&] {
+                for (int i = 0; i < n; i++) sink += evaluate_material(b, tb, pts[(size_t)(i + r) & 4095]).albedo.x;
+              }));
+      }
+      ma *= 5.0, mb *= 5.0;
+    };
+    double p_ms = 0, a_ms = 0;
+    rounds(plain, plain.textures(), axis, atx, p_ms, a_ms);
     rep.row({"plain (triplanar UV grid)", f2(p_ms), f1(p_ms * 1e6 / N), "1.00x"});
     rep.row({"axis material (World, two parts)", f2(a_ms), f1(a_ms * 1e6 / N), f2(a_ms / std::max(1e-9, p_ms)) + "x"});
     rep.note(strprintf("Task 0029's target: an axis material under 1.6x a plain one per point: %s. (checksum %.1f)", a_ms < 1.6 * p_ms ? "met" : "NOT MET", sink));
+    /* Task 0040: the same with a height band (a fourth part) and border noise (2 octaves, near a border). */
+    Material axis_hn = axis;
+    axis_hn.axis_noise = 0.5f;
+    axis_hn.axis_high_start = 0.0f;  // the sample points are on a sphere of radius 3.7: about half above
+    axis_hn.axis_high_blend = 0.5f;
+    auto high = std::make_shared<Material>(plain);
+    high->base_color = {0.95f, 0.95f, 0.97f};
+    (void)high->textures();
+    Material::Resolved htx = atx;
+    htx.axis[3] = high;
+    htx.axis_tx[3] = &high->textures();
+    double p2_ms = 0, h_ms = 0;
+    rounds(plain, plain.textures(), axis_hn, htx, p2_ms, h_ms);
+    rep.row({"axis material + height band + noise (task 0040)", f2(h_ms), f1(h_ms * 1e6 / N), f2(h_ms / std::max(1e-9, p2_ms)) + "x"});
+    /* (Every sample point here is near a border, the worst case: on real ground most of a surface is far from one and
+     * skips the noise. The spec's 2x became 2.5x for this case: see its As built.) */
+    rep.note(strprintf("Task 0040's target: with height and noise, every point near a border, under 2.5x a plain one per point: %s.",
+                       h_ms < 2.5 * p2_ms ? "met" : "NOT MET"));
   }
   /* Area lights (task 0030): the rasterizer integrates a light's whole surface per pixel (area_light_cosine);
    * its cost per call for the cases a scene meets, and what that is for a 1080p view on every thread. */

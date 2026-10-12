@@ -169,6 +169,8 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Array copies of a drawn shape lay on top of the surface (z-fighting). | They are cut into it like the original. |
 | An arch drawn on a rectangle stayed two faces, and its array copies too; copies past a wall's edge lay over it. | The arch is one face; a copy past the edge is clipped to the surface and cut in. |
 | Objects with a negative scale (mirrored) were drawn inside out in the views. | They cull their own back faces. |
+| New Material Asset (and New in the Textures window) seemed to do nothing when a search was left in the box: the new item was filtered out. | New clears the search; a search says how many items it hides. |
+| Textures could not be deleted from the Textures window. | Delete (button, right-click, Del) with a confirmation; it goes to the Recycle Bin. |
 | A colour-only procedural texture (a Color Ramp from the bricks' height) also bumped the surface: turning the layers' height off lost the ramp's input. | The texture's Normal / Roughness / Height Map switches turn those outputs off and keep the height inside. |
 | A material's texture field said "(missing)" (and Non-Color) for a procedural texture it was using. | It shows the texture's image and name, and the picker lists the procedural textures. |
 | Edge Outline in path-traced renders took its depth from a random sample per pixel, so lines could wobble. | The tracers give the filters one ray through each pixel's centre, as the rasterizer's depth. |

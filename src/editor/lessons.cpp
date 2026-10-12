@@ -435,6 +435,11 @@ In Unity a material is a file in the Project window that many objects share; cha
 @ blender/intern/cycles/kernel/svm/checker.h, noise.h
 # Getting textures in
 Drag images onto the window: they're copied to Assets/Textures and, if an object is selected, assigned to its material. Drag an .obj or .fbx and its materials and textures come with it (OBJ uses the .mtl file; FBX is read with ufbx, a library Blender itself bundles).
+# Terrain: grass on top, dirt on the slopes, snow up high
+An axis material (Axis Mode: World) takes a Top, Side and Bottom material by how steep the surface is, projected
+without UVs, so a cliff's top is grassy and its face dirt or rock. Axis High adds a material above a height (High
+Start, faded over High Blend): snow on the peaks. Axis Noise makes those borders wander instead of following a
+clean line, the way real ground does; Noise Scale is how far apart their bumps are.
 # The anime look
 Anime and cel shading draw light in a few flat tones with hard edges instead of a smooth gradient, a coloured
 shadow side, a hard highlight and black lines round the shape. Blender gets it with Shader to RGB and a Color

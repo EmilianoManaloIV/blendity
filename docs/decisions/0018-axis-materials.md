@@ -31,6 +31,14 @@ rotating the object rotates the grass with it, and a top/side split would need h
 - **The parent keeps its surface settings:** unlit, alpha clip and the like come from the parent; a
   part's own tiling multiplies the axis scale.
 
+## Amendment (task 0040, 2026-10-12)
+- **A height band**: an Axis High material asset covers the slope's parts above High Start (metres: world height in
+  World mode, the object's own in Local), faded over High Blend each side. It is a fourth entry of the same part
+  loop on the CPU and the GPU (`Resolved::axis[3]`, `axis_i.w`), so no new inlined call sites in the GPU kernel.
+- **Border noise**: 2-octave fractal noise at the point moves the slope's border (in cosine units, Axis Noise / 2)
+  and the height border (in metres, Axis Noise x High Blend x 2). It is only evaluated near a border: further away
+  the weights are saturated, so the result is the same.
+
 ## Consequences
 - An axis material costs three triplanar lookups per used sub-material per pixel at the blend; a flat
   top or a vertical side pays for one sub-material (its weight is 1, the others are skipped).

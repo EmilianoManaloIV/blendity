@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 62): axis materials by height with a noisy border; deleting textures (task 0040)
+
+**Asked:** "procedural ... work based on global position. Like the top of a cliff where it's grassy but over the edge
+it turns into dirt and rock" ("if it's quick, then do it"); "provide the option to delete textures in the texture
+tab"; "Making a new material in the material tab doesn't actually show the new material."
+
+**Added**
+- **Axis High** on axis materials: a material above **High Start** (world height in World mode, the object's own in
+  Local), faded over **High Blend**; and **Axis Noise** / **Noise Scale**, which make the grass-to-dirt and the
+  high band's borders wander. The same in the views, CPU and GPU path tracing and bakes. Learn > Materials: the
+  terrain section.
+- **Deleting textures** in the Textures window: a Delete button, the thumbnail's right-click menu, or Del; it asks
+  first, says how many materials use it (they then show it missing), and moves the file to the Recycle Bin.
+
+**Fixed**
+- New Material Asset (and New in the Textures window) with text left in the search box made something the grid
+  filtered out, so it looked as if nothing happened: New now clears the search, and a search says how many items
+  it hides ("Showing 1 of 15").
+
+**Checked**
+- New tests (round 62): above the band snow, below it the slope's parts, a blend between, nothing without it;
+  Local mode by the object's height; noise 0 gives the slope rule exactly, noise makes the border wander (107 grass,
+  92 dirt at the border angle) and is the same at the same point; NaN fields and positions stay finite; a tilted
+  plane is 29.3 % snow rasterized, 30.0 % on the CPU, 30.1 % on both GPUs (checked to be the GPUs); the fields
+  round-trip, an old .mat loads with the defaults, the pickers set every part; Delete asks first then trashes the
+  texture and a material using it shows it missing; New clears a leftover search.
+- Stress `shading`: with height and noise, every point near a border, 2.2x a plain material (the spec's 2x is
+  2.5x for this worst case; see its As built); task 0029's axis row 1.5-1.6x. Both are now the fastest of five
+  interleaved rounds against a plain run: single timings swung 1.5-2.4x for the unchanged 0029 row.
+
+**Review (code reviewer)**: a blocker, a suspected major and several minor findings, all fixed: Axis High couldn't
+be picked in the UI (the setter knew three parts); the GPU test could pass on a CPU fallback (it now checks the
+device); a NaN height on the GPU; noise evaluated at NaN; weak tests; the delete popup's count (now unique
+materials, assets included); undo could write a deleted texture's text into a new one of its name; unsaved texture
+edits not saved before the trash.
+- Unit checks: Windows 8,880, 0 failed (503 tests); the whole suite in render-cache verify mode: 8,881,
+  0 failed, 0 stale pictures. Linux with libraries: 8,790, 0 failed. Sanitizer build: 8,712, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
 ## 2026-10-11 (round 61): anime and manga camera filters (task 0039)
 
 **Asked:** the rest of "anime / 2D looks like Goo Engine (toon shading, outlines, halftone, ...)" (the roadmap's

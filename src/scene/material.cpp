@@ -124,6 +124,20 @@ void Material::reflect(Reflector &r) {
     r.help("How wide the transition is (0: a hard edge).");
     r.field("Axis Scale", axis_scale, 0.05f, 0.01f, 1000.0f);
     r.help("Metres one texture tile covers in the projection.");
+    r.material_ref("Axis High", axis_high);
+    r.help("A material for everything above High Start, whatever the slope (snow on peaks, rock up high). Empty: none.");
+    if (r.all_fields() || !axis_high.empty()) {
+      r.field("High Start", axis_high_start, 0.1f, -100000.0f, 100000.0f);
+      r.help("The height in metres where Axis High begins (World mode: the world's; Local: the object's own).");
+      r.field("High Blend", axis_high_blend, 0.05f, 0.0f, 10000.0f);
+      r.help("Metres over which it fades in, each side of High Start.");
+    }
+    r.field("Axis Noise", axis_noise, 0.01f, 0.0f, 1.0f);
+    r.help("Breaks up the borders (grass to dirt, and the high band's) with noise, so they wander like real ground.");
+    if (r.all_fields() || axis_noise > 0.0f) {
+      r.field("Noise Scale", axis_noise_scale, 0.05f, 0.01f, 10000.0f);
+      r.help("Metres between the border's bumps.");
+    }
   }
   static const char *models[] = {"PBR (Principled)", "Toon (Cel)"};
   r.enumeration("Shading Model", shading_model, models, 2);
@@ -153,7 +167,7 @@ void Material::reflect(Reflector &r) {
 const Material::Resolved &Material::textures() const {
   size_t gen = g_texture_gen.load();
   auto axis_current = [&] {  // an axis material's sub-materials unchanged since they were resolved
-    for (int k = 0; k < 3; k++)
+    for (int k = 0; k < 4; k++)
       if (resolved_.axis[k] && resolved_.axis[k]->version != axis_versions_[k]) return false;
     return true;
   };
@@ -201,15 +215,15 @@ const Material::Resolved &Material::textures() const {
   resolved_.emission = load(emission_map);
   /* An axis material's sub-materials, resolved here with their textures (ADR 0018). One level: a sub-material that is
    * itself an axis material is used plainly; this material itself means its own maps. */
-  for (int k = 0; k < 3; k++) {
+  for (int k = 0; k < 4; k++) {
     resolved_.axis[k] = nullptr;
     resolved_.axis_tx[k] = nullptr;
     axis_versions_[k] = 0;
   }
   if (axis_mode != 0) {
-    const std::string *paths[3] = {&axis_top, &axis_side, &axis_bottom};
+    const std::string *paths[4] = {&axis_top, &axis_side, &axis_bottom, &axis_high};
     resolving_ = true;
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 4; k++) {
       if (paths[k]->empty()) continue;
       MaterialPtr sub = material_asset(*paths[k]);
       if (!sub) {

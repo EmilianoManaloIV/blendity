@@ -1715,6 +1715,11 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
       g.axis[1] = std::max(0.0f, std::min(1.0f, m.axis_blend)) * 0.5f;
       g.axis[2] = 1.0f / std::max(0.01f, m.axis_scale);
       g.axis[3] = (float)m.axis_mode;
+      const float amount = std::isfinite(m.axis_noise) ? std::max(0.0f, std::min(1.0f, m.axis_noise)) : 0.0f;
+      g.axis2[0] = amount;
+      g.axis2[1] = 1.0f / (std::isfinite(m.axis_noise_scale) ? std::max(0.01f, m.axis_noise_scale) : 4.0f);
+      g.axis2[2] = std::isfinite(m.axis_high_start) ? m.axis_high_start : 0.0f;
+      g.axis2[3] = std::isfinite(m.axis_high_blend) ? std::max(0.0f, m.axis_high_blend) : 1.0f;
       axis_parents.push_back({(uint32_t)s.materials.size(), &m});
     }
     const Material::Resolved &tx = m.textures();
@@ -1824,7 +1829,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     std::unordered_map<const Material *, int> part_index;
     for (const auto &ap : axis_parents) {
       const Material::Resolved &tx = ap.second->textures();
-      for (int k = 0; k < 3; k++) {
+      for (int k = 0; k < 4; k++) {
         if (!tx.axis[k]) continue;
         auto it = part_index.find(tx.axis[k].get());
         if (it == part_index.end()) {

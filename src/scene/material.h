@@ -75,6 +75,12 @@ struct Material {
   float axis_angle = 45.0f;  // degrees from up where Top turns into Side
   float axis_blend = 0.1f;   // the transition's half width, in cosine units
   float axis_scale = 1.0f;   // metres per texture tile for the projection
+  /* Task 0040: a height band and a noisy border. Axis High (an asset path; empty = no band) covers the slope's
+   * parts above High Start (metres: world height in World mode, the object's own in Local mode), faded in over
+   * High Blend; Axis Noise (0..1) moves both borders by fractal noise of Noise Scale metres. */
+  std::string axis_high;
+  float axis_high_start = 10.0f, axis_high_blend = 1.0f;
+  float axis_noise = 0.0f, axis_noise_scale = 4.0f;
   /* Shading model (ADR 0020): PBR, or Toon (anime / cel look: banded light, a shadow colour, a hard specular spot,
    * a rim light), the same in every renderer. */
   int shading_model = 0;             // 0 PBR, 1 Toon
@@ -109,15 +115,15 @@ struct Material {
     int live_output[5] = {0, 0, 0, 0, 0};
     /* An axis material's Top / Side / Bottom and their own resolved textures (resolved with this material, on one
      * thread, so shading never resolves); null = this material's own maps. */
-    std::shared_ptr<Material> axis[3];
-    const Resolved *axis_tx[3] = {nullptr, nullptr, nullptr};
+    std::shared_ptr<Material> axis[4];  // Top, Side, Bottom, High (task 0040)
+    const Resolved *axis_tx[4] = {nullptr, nullptr, nullptr, nullptr};
   };
   const Resolved &textures() const;
 
  private:
   mutable Resolved resolved_;
   mutable uint64_t resolved_version_ = 0;
-  mutable uint64_t axis_versions_[3] = {0, 0, 0};
+  mutable uint64_t axis_versions_[4] = {0, 0, 0, 0};
   mutable bool resolving_ = false;  // in textures() (an axis part naming a material mid-resolve is refused: no cycles)
   mutable size_t resolved_cache_gen_ = 0;
 };

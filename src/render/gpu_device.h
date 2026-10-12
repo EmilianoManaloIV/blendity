@@ -65,7 +65,8 @@ struct GMaterial {
   float base_color[4], emission[4], params[4], tiling[4], offset[4], color2[4];
   int32_t tex0[4], tex1[4], flags[4];
   float axis[4];      // an axis material (ADR 0018): cos(angle), half blend, 1 / scale, mode (0 off, 1 world, 2 local)
-  int32_t axis_i[4];  // its Top, Side, Bottom in this table (-1: its own maps)
+  int32_t axis_i[4];  // its Top, Side, Bottom, High in this table (-1: its own maps; High -1: no band)
+  float axis2[4];     // task 0040: noise amount, 1 / noise scale, high start, high half-width
   /* Toon (ADR 0020; flags[3] bit 1): bands, softness, threshold, specular smoothness; shadow colour, specular
    * size; rim colour x strength, rim width. */
   float toon0[4], toon1[4], toon2[4];

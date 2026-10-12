@@ -5,7 +5,7 @@
 - **Decisions:** ADR 0007 / 0008 (camera filters; no new ADR: new effects through the existing registry, reading
   the depth and id planes the passes already have)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/37
 
 ## Goal
 The rest of the Goo Engine look, as camera filters that work on every picture a camera makes (the Game view, the

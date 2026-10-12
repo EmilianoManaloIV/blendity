@@ -222,6 +222,7 @@ static void round58_tests();
 static void round59_tests();
 static void round60_tests();
 static void round61_tests();
+static void round62_tests();
 
 int main() {
   register_builtin_components();
@@ -860,6 +861,7 @@ int main() {
   round59_tests();
   round60_tests();
   round61_tests();
+  round62_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -18688,6 +18690,52 @@ static void round50_tests() {
     CHECK(t && t->name.rfind("Bricks", 0) == 0 && t->layers.size() == 3 && std::string(t->layers[0]->type_name()) == "Brick");
     CHECK(t && fs::exists(resolve_asset_path(t->asset_path)));
   });
+  test("textures window: Delete asks first, then sends the texture to the trash; the list drops it and a material using it shows it missing", [] {
+    Editor ed;
+    r50_open(ed);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr);
+    if (!t) return;
+    const std::string path = resolve_asset_path(t->asset_path), ref = t->asset_path + "#albedo";
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test(t->asset_path);
+    r34_steps(ed, 3);
+    const Recti db = ed.texture_ui_rect_for_test("delete");
+    CHECK(db.w > 0);
+    if (db.w <= 0) return;
+    r34_click(ed, db.x + db.w / 2, db.y + db.h / 2);
+    r34_steps(ed, 2);
+    CHECK(fs::exists(path));  // only asked
+    const Recti ok = ed.texture_ui_rect_for_test("delete_confirm");
+    CHECK(ok.w > 0);
+    if (ok.w <= 0) return;
+    r34_click(ed, ok.x + ok.w / 2, ok.y + ok.h / 2);
+    r34_steps(ed, 3);
+    CHECK(!fs::exists(path));
+    CHECK(ed.texture_selected_for_test() == nullptr);
+    CHECK(resolve_texture_ref(TextureRef{ref, false}) == nullptr);  // the material's map: missing now
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>()->materials[0]->base_map.path == ref);  // (kept, so restoring the file brings it back)
+  });
+
+  test("materials window: New Material Asset clears a search left from earlier, so the new material shows", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.command("window Materials");
+    r34_steps(ed, 2);
+    ed.set_material_search_for_test("toon");
+    r34_steps(ed, 2);
+    const Recti wr = ed.window_rect_for_test(WindowKind::Materials);
+    CHECK(wr.w > 0);
+    if (wr.w <= 0) return;
+    /* The toolbar's first button: New Material Asset. */
+    const ui::Context &u = ed.ui_for_test();
+    r34_click(ed, wr.x + u.px(6) + u.px(75), wr.y + (u.row_h() + u.px(6)) / 2);
+    r34_steps(ed, 2);
+    CHECK(ed.material_search_for_test().empty());
+    CHECK(ed.material_selected_for_test() && ed.material_selected_for_test()->name.rfind("New Material", 0) == 0);
+  });
+
   test("textures window: Add Layer > Blur by clicks appends it, its menu's Move Up moves it, its checkbox disables it, each one undo step", [] {
     Editor ed;
     r50_open(ed);
@@ -21732,5 +21780,183 @@ static void round61_tests() {
     ed.command("filter look Comic");
     GameObject *sun = ed.scene().find_by_name("Directional Light");
     CHECK(sun && !sun->get<CameraFilters>());
+  });
+}
+
+/* ===================================================================== */
+/* Round 62 (task 0040): axis materials by height, with a noisy border     */
+/* ===================================================================== */
+
+static bool r62_white(Vec3 c) { return c.x > 0.85f && c.y > 0.85f && c.z > 0.85f; }
+
+static void round62_tests() {
+  test("axis materials: Axis High covers the slope's parts above High Start, blends across High Blend, and nothing changes without it", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    R51Mats am = r51_mats(1);
+    Material snow;
+    snow.name = "Snow";
+    snow.base_color = {0.95f, 0.95f, 0.97f};
+    create_material_asset(snow, "Assets/Materials/R51/Snow.mat");
+    /* Without the band: the task-0029 result, bit for bit. */
+    const SurfaceSample before_top = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 20.0f, 0.1f});
+    am.axis->axis_high_start = 5.0f;
+    am.axis->axis_high_blend = 1.0f;
+    am.axis->touch();
+    const SurfaceSample same = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 20.0f, 0.1f});
+    CHECK(same.albedo.x == before_top.albedo.x && same.albedo.y == before_top.albedo.y && same.albedo.z == before_top.albedo.z);
+    am.axis->axis_high = "Assets/Materials/R51/Snow.mat";
+    am.axis->touch();
+    const Vec3 hi_top = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 7.0f, 0.1f}).albedo;
+    const Vec3 hi_side = r51_eval(*am.axis, {1, 0, 0}, {1, 0, 0}, {0.3f, 7.0f, 0.1f}).albedo;
+    const Vec3 lo_top = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 3.0f, 0.1f}).albedo;
+    const Vec3 lo_side = r51_eval(*am.axis, {1, 0, 0}, {1, 0, 0}, {0.3f, 3.0f, 0.1f}).albedo;
+    const Vec3 mid = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 5.0f, 0.1f}).albedo;
+    CHECK(r62_white(hi_top) && r62_white(hi_side));
+    CHECK(r51_green(lo_top) && r51_brown(lo_side));
+    CHECK(!r62_white(mid) && !r51_green(mid) && mid.x > 0.4f);  // half way between snow and grass
+    /* Local mode measures the object's own height. */
+    am.axis->axis_mode = 2;
+    am.axis->touch();
+    SurfacePoint sp;
+    sp.position = {0, 100, 0};       // high up in the world...
+    sp.local_position = {0, 2, 0};   // ...but low on the object
+    sp.normal = sp.geo_normal = sp.local_normal = {0, 1, 0};
+    CHECK(r51_green(evaluate_material(*am.axis, am.axis->textures(), sp).albedo));
+  });
+
+  test("axis materials: Axis Noise 0 changes nothing; with noise the grass / dirt border wanders along the surface, the same at the same point", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    R51Mats am = r51_mats(1);
+    const float c = std::cos(45.0f * kDeg2Rad);
+    const Vec3 n_border = normalize(Vec3(std::sqrt(1.0f - c * c), c, 0.0f));  // right at the angle
+    std::vector<Vec3> before;
+    for (int i = 0; i < 64; i++) before.push_back(r51_eval(*am.axis, n_border, n_border, {i * 0.7f, 1.0f, i * 0.3f}).albedo);
+    am.axis->axis_noise = 0.0f;
+    am.axis->touch();
+    bool same = true;
+    for (int i = 0; i < 64; i++) {
+      const Vec3 a = r51_eval(*am.axis, n_border, n_border, {i * 0.7f, 1.0f, i * 0.3f}).albedo;
+      same = same && a.x == before[(size_t)i].x && a.y == before[(size_t)i].y && a.z == before[(size_t)i].z;
+    }
+    CHECK(same);
+    am.axis->axis_noise = 0.8f;
+    am.axis->axis_noise_scale = 2.0f;
+    am.axis->axis_blend = 0.02f;
+    am.axis->touch();
+    int green = 0, brown = 0;
+    bool stable = true;
+    for (int i = 0; i < 200; i++) {
+      const Vec3 pos{i * 0.37f, 1.0f, i * 0.21f};
+      const Vec3 a = r51_eval(*am.axis, n_border, n_border, pos).albedo, b = r51_eval(*am.axis, n_border, n_border, pos).albedo;
+      stable = stable && a.x == b.x && a.y == b.y && a.z == b.z;
+      green += r51_green(a), brown += r51_brown(a);
+    }
+    std::printf("    at the border angle with noise: %d grass, %d dirt of 200 points\n", green, brown);
+    CHECK(stable && green > 30 && brown > 30);
+    /* Noise 0: the slope rule alone (task 0029's formula: Top above the angle's cosine, Side below). */
+    am.axis->axis_noise = 0.0f;
+    am.axis->axis_blend = 0.0f;
+    am.axis->touch();
+    int ok = 0;
+    for (int i = 0; i < 90; i++) {
+      const float ang = i * kDeg2Rad, ny = std::cos(ang);
+      const Vec3 n = normalize(Vec3(std::sin(ang), ny, 0.0f));
+      const Vec3 a = r51_eval(*am.axis, n, n, {i * 0.3f, 1.0f, 0.0f}).albedo;
+      ok += ny >= c ? r51_green(a) : r51_brown(a);
+    }
+    CHECK(ok == 90);
+    /* NaN fields and positions don't make NaN colours, with a height band too. */
+    Material snow;
+    snow.base_color = {0.95f, 0.95f, 0.97f};
+    create_material_asset(snow, "Assets/Materials/R51/Snow.mat");
+    am.axis->axis_high = "Assets/Materials/R51/Snow.mat";
+    am.axis->axis_noise = 0.5f;
+    am.axis->axis_noise_scale = std::nanf("");
+    am.axis->axis_high_start = std::nanf("");
+    am.axis->axis_high_blend = std::numeric_limits<float>::infinity();
+    am.axis->touch();
+    for (const Vec3 pos : {Vec3(1, 1, 1), Vec3(std::nanf(""), 1, 1), Vec3(1, std::numeric_limits<float>::infinity(), 1)}) {
+      const Vec3 a = r51_eval(*am.axis, n_border, n_border, pos).albedo;
+      CHECK(std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z));
+    }
+  });
+
+  test("axis materials: a tilted plane crossing High Start: rasterized, CPU and GPU path traced agree on how much is snow", [] {
+    Editor ed;
+    r57_open(ed);
+    R51Mats am = r51_mats(1);
+    Material snow;
+    snow.name = "Snow";
+    snow.base_color = {0.95f, 0.95f, 0.97f};
+    create_material_asset(snow, "Assets/Materials/R51/Snow.mat");
+    am.axis->axis_high = "Assets/Materials/R51/Snow.mat";
+    am.axis->axis_high_start = 0.6f;
+    am.axis->axis_high_blend = 0.05f;
+    am.axis->axis_noise = 0.3f;
+    am.axis->axis_noise_scale = 0.5f;
+    am.axis->touch();
+    GameObject *g = ed.scene().find_by_name("Cube");
+    if (!g) return;
+    g->get<MeshFilter>()->mesh = primitives::plane(3.0f, 4);
+    g->get<MeshRenderer>()->materials = {am.axis};
+    g->set_world_rotation(Quat::euler({-25.0f, 0.0f, 0.0f}));
+    g->mark_dirty();
+    ed.mark_changed_for_test("R62 plane");
+    ed.step_frame_headless();
+    auto snow_share = [&](const Image &img) {
+      int solid = 0, white = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255) continue;
+        solid++;
+        /* Snow: bright and neutral (lit and tone mapped it isn't 255; grass is green, dirt brown). */
+        const int rr = (int)((c >> 16) & 255), gg = (int)((c >> 8) & 255), bb2 = (int)(c & 255);
+        white += std::max({rr, gg, bb2}) - std::min({rr, gg, bb2}) < 30 && rr > 110;
+      }
+      return solid ? (double)white / solid : 0.0;
+    };
+    const double r = snow_share(r57_render(ed, "Rasterized", true));
+    ed.command("set Render.Samples 32");
+    const double p = snow_share(r57_render(ed, "Path", true));
+    std::printf("    snow: %.1f %% rasterized, %.1f %% CPU traced\n", r * 100.0, p * 100.0);
+    CHECK(r > 0.1 && r < 0.9 && std::fabs(r - p) < 0.08);
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const double gp = snow_share(r57_render(ed, "Path", true));
+      std::printf("    GPU: %.1f %% (%s)\n", gp * 100.0, ed.render_device_for_test().c_str());
+      /* On the GPU indeed: a kernel that failed to build falls back to the CPU and would pass the comparison. */
+      CHECK(ed.render_gpu_error_for_test().empty() && ed.render_device_for_test().find("CPU") == std::string::npos);
+      CHECK(std::fabs(gp - p) < 0.03);
+      ed.command("device cpu");
+    }
+  });
+
+  test("axis materials: the height and noise fields round-trip through a .mat", [] {
+    Material m;
+    m.axis_mode = 1;
+    m.axis_high = "Assets/Materials/Snow.mat";
+    m.axis_high_start = 12.5f;
+    m.axis_high_blend = 2.0f;
+    m.axis_noise = 0.4f;
+    m.axis_noise_scale = 7.0f;
+    Material back;
+    CHECK(load_material_text(save_material_text(m), back));
+    CHECK(back.axis_high == "Assets/Materials/Snow.mat" && back.axis_high_start == 12.5f && back.axis_high_blend == 2.0f &&
+          back.axis_noise == 0.4f && back.axis_noise_scale == 7.0f);
+    /* A file from before (no such lines) loads with the defaults. */
+    Material old;
+    CHECK(load_material_text("blendity_material 1\n  Name \"Old\"\n  Axis_Mode 1\nend\n", old));
+    CHECK(old.axis_high.empty() && old.axis_noise == 0.0f && old.axis_high_start == 10.0f);
+    /* The pickers (Inspector and Materials window) set every part, Axis High included, as one undo step each. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    MaterialPtr parent = make_material("Ground", Vec3(1.0f));
+    parent->axis_mode = 1;
+    MaterialPtr high = create_material_asset(Material(), "Assets/Materials/R62High.mat");
+    for (const char *f : {"Axis Top", "Axis Side", "Axis Bottom", "Axis High"}) ed.set_material_ref_for_test(parent.get(), f, high);
+    CHECK(parent->axis_top == high->asset_path && parent->axis_side == high->asset_path && parent->axis_bottom == high->asset_path &&
+          parent->axis_high == high->asset_path);
+    std::remove(resolve_asset_path("Assets/Materials/R62High.mat").c_str());
   });
 }

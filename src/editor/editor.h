@@ -292,6 +292,11 @@ class Editor {
     return it == texture_ui_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   ProceduralTexturePtr texture_selected_for_test() const { return texture_selected_; }
+  void set_material_search_for_test(const std::string &s) { material_search_ = s; }
+  void set_material_ref_for_test(Material *m, const std::string &field, const MaterialPtr &picked) { set_material_ref(m, field, picked); }
+  const std::string &render_gpu_error_for_test() const { return final_pt_.gpu_error(); }
+  std::string render_device_for_test() const { return final_pt_.device_summary(); }
+  const std::string &material_search_for_test() const { return material_search_; }
   ProceduralTexturePtr new_texture_asset_for_test(const std::string &preset) { return new_texture_asset(preset); }
   std::string dock_serialize_for_test() { return dock_serialize(dock_.get()); }
   std::string dock_parse_roundtrip_for_test(const std::string &s) {
@@ -503,6 +508,7 @@ class Editor {
   int texture_preview_size_ = 0, texture_edit_h_ = 0;
   std::vector<std::string> texture_paths_;
   double texture_paths_listed_ = -100;
+  ProceduralTexturePtr texture_delete_;  // waiting for the user to confirm (Textures window, as the Materials window)
   std::map<std::string, Recti> texture_ui_rects_;  // the window's buttons and menus last frame (tests click them)
   /* Texture assets live outside the scene: an edit records the asset's text before it, and the undo step
    * carries those texts (UndoState::textures), so undo and redo restore them. */
