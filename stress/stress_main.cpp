@@ -3452,6 +3452,31 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
               run("curve modifier", [&](Mesh &m) { cm->modify(m); });
             }
     }
+    /* Task 0043: the Lattice modifier, both interpolations, ordinary and hostile offsets and boxes. */
+    {
+      Scene sc;
+      GameObject *owner = sc.create("Owner");
+      auto *lm = owner->add<LatticeModifier>();
+      lm->object = "Box";
+      GameObject *box = sc.create("Box");
+      Lattice *lt = box->add<Lattice>();
+      box->set_local_scale(Vec3(s));
+      for (int interp = 0; interp < 2; interp++)
+        for (int res : {2, 4, 7})
+          for (int kind = 0; kind < 4; kind++) {
+            lt->interpolation = interp;
+            lt->resample(res, res, res);
+            for (int i = 0; i < lt->control_point_count(); i++) {
+              const float k = (float)((i * 7919) % 13) / 13.0f - 0.5f;
+              lt->offsets[(size_t)i] = kind == 0 ? Vec3(k * 0.3f, -k * 0.2f, k * 0.1f)
+                                     : kind == 1 ? Vec3(i % 3 ? nan : 0.1f, 0, 0)
+                                     : kind == 2 ? Vec3(1e30f, -1e30f, inf)
+                                                 : Vec3(0.2f, 0, 0);
+            }
+            box->set_local_scale(kind == 3 ? Vec3(s, 0.0f, s) : Vec3(s));  // the last: a box flattened to nothing
+            run("lattice modifier", [&](Mesh &m) { lm->modify(m); });
+          }
+    }
     for (int shape = 0; shape < 3; shape++)
       for (float f : {1.0f, -2.0f, 0.0f, nan}) run("cast", [&](Mesh &m) { meshops::cast(m, shape, f, 0.0f, 1); });
     for (float ang : {360.0f, 90.0f, -720.0f, 0.0f})
@@ -3715,6 +3740,28 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
     const bool kept2 = g->evaluated_mesh()->render_mesh().build_serial == build2;
     rep.row({strprintf("  the same with Shade Auto Smooth (sharp edges)%s", kept2 ? "" : " (REBUILT)"), "1", "0", f2(in2_ms)});
     rep.note(strprintf("With sharp edges (smoothing fans): %.2f ms per change: %s", in2_ms, in2_ms <= 10.0 && kept2 ? "met" : "NOT MET"));
+  }
+  /* Task 0043: a B-Spline 4 x 4 x 4 lattice deforming a 50k-vertex mesh, the fastest of several runs. */
+  {
+    Scene sc;
+    GameObject *g = sc.create("Blob");
+    MeshPtr base = primitives::uv_sphere(1.0f, 256, 196);
+    g->add<MeshFilter>()->mesh = base;
+    auto *lm = g->add<LatticeModifier>();
+    lm->object = "Box";
+    GameObject *box = sc.create("Box");
+    box->set_local_scale(Vec3(2.2f));
+    Lattice *lt = box->add<Lattice>();
+    lt->resample(4, 4, 4);
+    for (int i = 0; i < lt->control_point_count(); i++) lt->offsets[(size_t)i] = Vec3(0.05f * (i % 3), 0.03f * (i % 5), -0.04f * (i % 2));
+    double ms = 1e30;
+    Mesh m = *base;
+    for (int r = 0; r < 8; r++) {
+      m.positions = base->positions;  // untimed: only the deform is measured
+      ms = std::min(ms, time_ms([&] { lm->modify(m); }));
+    }
+    rep.row({strprintf("Lattice (B-Spline 4 x 4 x 4) on a %zu-vertex mesh", base->vert_count()), "1", "0", f2(ms)});
+    rep.note(strprintf("Task 0043's target: a 50k-vertex mesh deformed in at most 3 ms: %.2f ms: %s", ms, ms <= 3.0 ? "met" : "NOT MET"));
   }
 }
 /* ------------------------------------------------------------------ main */

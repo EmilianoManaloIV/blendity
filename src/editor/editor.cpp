@@ -666,6 +666,9 @@ void Editor::draw_menubar(const Recti &r) {
         if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k);
     });
     u.tooltip("A path to bend meshes along (Curve modifier) or fill with copies (Array > Fit Curve). Blender: Add > Curve.");
+    if (u.menu_item("Lattice")) create_object("Lattice");
+    u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
+              "or taper the mesh. Blender: Add > Lattice.");
     u.menu_separator();
     u.submenu("Set Origin", u.px(270), [this, has_sel] {
       for (int k = 0; k < kOriginModeCount; k++) {
@@ -1342,7 +1345,7 @@ void Editor::dock_move(WindowKind k, DockNode *target, int zone) {
 bool Editor::is_selected(uint64_t id) const { return std::find(selection_.begin(), selection_.end(), id) != selection_.end(); }
 
 void Editor::select(uint64_t id, int mode) {
-  if (id != active_ && curve_pt_obj_ != id) curve_pt_sel_.clear();  // a curve's points belong to it while it is active
+  if (id != active_ && pt_obj_ != id) pt_sel_.clear();  // a curve's or lattice's points belong to it while it is active
   if (mode == SEL_REPLACE) {
     selection_.clear();
     if (id) selection_.push_back(id);
@@ -1370,7 +1373,7 @@ void Editor::select(uint64_t id, int mode) {
 }
 
 void Editor::clear_selection() {
-  curve_pt_sel_.clear();
+  pt_sel_.clear();
   selection_.clear();
   active_ = 0;
 }
@@ -2099,6 +2102,31 @@ void Editor::update_procedural_shapes() {
 
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
+  if (kind == "Lattice") {
+    /* Blender's Add > Lattice (2 x 2 x 2, B-Spline), fitted round the selected mesh, which gets a Lattice modifier
+     * on it: the usual next step, done at once (task 0043). */
+    GameObject *target = active_object();
+    const Mesh *tm = target && is_selected(target->id) ? target->evaluated_mesh() : nullptr;
+    /* A name no other object has (Blender's Lattice.001): the modifier finds its lattice by name, scene-wide. */
+    std::string name = "Lattice";
+    for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Lattice.%03d", k);
+    GameObject *g = scene_->create(name, parent);
+    g->add<Lattice>();
+    if (tm && !parent) {
+      const AABB b = tm->render_mesh().bounds;  // in the mesh's own space, so the box turns with it
+      const Vec3 size = b.max - b.min;
+      g->set_world_matrix(target->world_matrix() *
+                          Mat4::trs(b.center(), Quat(), Vec3(std::max(size.x, 0.01f), std::max(size.y, 0.01f), std::max(size.z, 0.01f)) * 1.05f));
+      auto *lm = target->add<LatticeModifier>();
+      lm->object = g->name;
+    }
+    else if (!parent)
+      g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create Lattice");
+    return g;
+  }
   if (starts_with(kind, "Curve:")) {
     /* Blender's Add > Curve presets, lying on the ground plane (task 0042). */
     std::string which = to_lower(kind.substr(6));
@@ -2174,14 +2202,16 @@ void Editor::duplicate_selected() {
 }
 
 void Editor::delete_selected() {
-  /* With a curve's points selected, Delete removes those points (Edit Mode's rule), not the curve. */
+  /* With a curve's points selected, Delete removes those points (Edit Mode's rule), not the curve. A lattice keeps
+   * its points (its resolution sets them). */
   std::vector<int> pts;
-  if (GameObject *co = curve_point_target(pts)) {
+  GameObject *co = point_target(pts);
+  if (co && co->curve()) {  // a lattice's points come with its resolution: Delete removes the object then
     std::sort(pts.begin(), pts.end());
     pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
     Curve &cv = *co->curve();
     for (auto it = pts.rbegin(); it != pts.rend(); ++it) cv.points.erase(cv.points.begin() + *it);
-    curve_pt_sel_.clear();
+    pt_sel_.clear();
     mark_changed("Delete Curve Points");
     return;
   }
@@ -2619,7 +2649,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
-    Log::info("  curve add|move|delete|select <object> [index] [x y z] (a Curve object's points), create Curve: Bezier|Circle|Path");
+    Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -3364,7 +3394,7 @@ void Editor::run_console_command(const std::string &line) {
     }
     if (changed) mark_changed("Guides");
   }
-  else if (c == "curve") curve_command(t);  // its own function: this chain is near the compiler's nesting limit
+  else if (c == "curve" || c == "points") points_command(t);  // its own function: this chain is near the compiler's nesting limit
   else if (c == "activecamera") {
     /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
     std::string name;
@@ -3619,20 +3649,21 @@ void Editor::save_prefs() {
   fs::write_file(prefs_path_, s);
 }
 
-/* curve add|move|delete|select <object> [index] [x y z]: a Curve object's control points (task 0042). Positions are in
- * the curve's own space. */
-void Editor::curve_command(const std::vector<std::string> &t) {
+/* points (or curve) add|move|delete|select <object> [index] [x y z]: a Curve's or Lattice's control points (tasks
+ * 0042, 0043). Positions are in the object's own space; add and delete are for curves. */
+void Editor::points_command(const std::vector<std::string> &t) {
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
   auto num = [&](size_t i) { return (float)std::atof(arg(i, "0").c_str()); };
   const std::string verb = to_lower(arg(1, ""));
   GameObject *g = scene_->find_by_name(arg(2, ""));
+  Component *pc = g ? g->point_source() : nullptr;
   Curve *cv = g ? g->curve() : nullptr;
   if (verb != "add" && verb != "move" && verb != "delete" && verb != "select") {
-    Log::warn("curve: add | move | delete | select <object> ...");
+    Log::warn("%s: add | move | delete | select <object> ...", t[0].c_str());
     return;
   }
-  if (!cv) {
-    Log::warn("curve: no Curve object named '%s'", arg(2, "").c_str());
+  if (!pc || ((verb == "add" || verb == "delete") && !cv)) {
+    Log::warn("%s: no %s named '%s'", t[0].c_str(), verb == "add" || verb == "delete" ? "Curve object" : "Curve or Lattice object", arg(2, "").c_str());
     return;
   }
   if (verb == "add") {
@@ -3646,26 +3677,26 @@ void Editor::curve_command(const std::vector<std::string> &t) {
   }
   if (verb == "select") {
     select(g->id);
-    curve_pt_obj_ = g->id;
-    curve_pt_sel_.clear();
+    pt_obj_ = g->id;
+    pt_sel_.clear();
     for (size_t k = 3; k < t.size(); k++) {
       const int j = std::atoi(t[k].c_str());
-      if (j >= 0 && j < (int)cv->points.size()) curve_pt_sel_.push_back(j);
+      if (j >= 0 && j < pc->control_point_count()) pt_sel_.push_back(j);
     }
     return;
   }
   const int i = std::atoi(arg(3, "-1").c_str());
-  if (i < 0 || i >= (int)cv->points.size()) {
-    Log::warn("curve: '%s' has no point %d", g->name.c_str(), i);
+  if (i < 0 || i >= pc->control_point_count()) {
+    Log::warn("%s: '%s' has no point %d", t[0].c_str(), g->name.c_str(), i);
     return;
   }
   if (verb == "move") {
-    cv->points[(size_t)i].position = Vec3(num(4), num(5), num(6));
-    mark_changed("Move Curve Point");
+    pc->set_control_point(i, Vec3(num(4), num(5), num(6)));
+    mark_changed("Move Point");
   }
   else {
     cv->points.erase(cv->points.begin() + i);
-    curve_pt_sel_.clear();
+    pt_sel_.clear();
     mark_changed("Delete Curve Point");
   }
 }

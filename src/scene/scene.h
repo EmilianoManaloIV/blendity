@@ -29,6 +29,7 @@ struct PhysicsWorld;  // physics.h
 
 struct FilterEffect;
 struct Curve;
+struct Lattice;
 struct CurvePath;
 using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
 struct TextureLayer;  // texture/procedural_texture.h
@@ -110,6 +111,11 @@ struct Component {
   /* A modifier whose modify() only moves positions (ADR 0022): at the end of a stack it runs on a kept
    * copy of the mesh, and the render mesh follows in place instead of being rebuilt. */
   virtual bool is_deform_only() const { return false; }
+  /* Objects shaped by points the Scene view edits (a Curve's, a Lattice's, task 0043): positions in the object's
+   * space. The view draws them, selects them by clicking and moves them with the gizmo. */
+  virtual int control_point_count() const { return 0; }
+  virtual Vec3 control_point(int) const { return Vec3(0.0f); }
+  virtual void set_control_point(int, Vec3) {}
   /* Modifiers that read other objects (Boolean) mix those objects' state in
    * here so the cached evaluated mesh updates when they move or change. */
   virtual uint64_t modifier_dependency_hash() const { return 0; }
@@ -117,7 +123,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice };
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
@@ -745,6 +751,11 @@ struct Curve : ComponentBase<Curve> {
   const CurvePath &local_path() const;
   void reflect(Reflector &r) override;
   RenderRole render_role() const override { return RenderRole::Curve; }  // found without a dynamic_cast (the Scene view draws it)
+  int control_point_count() const override { return (int)points.size(); }
+  Vec3 control_point(int i) const override { return points[(size_t)i].position; }
+  void set_control_point(int i, Vec3 p) override {
+    if (i >= 0 && i < (int)points.size()) points[(size_t)i].position = p;
+  }
 
  private:
   mutable std::shared_ptr<const CurvePath> path_;  // shared by copies until one changes (the key is checked)
@@ -762,6 +773,42 @@ struct CurveModifier : ComponentBase<CurveModifier> {
   bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;              // curve.cpp
   uint64_t modifier_dependency_hash() const override;  // curve.cpp
+  bool unique() const override { return false; }
+};
+
+/* Blender: a Lattice object (task 0043): a box of points round a mesh, which a Lattice modifier moves the mesh with.
+ * The points rest on a unit cube (-0.5..0.5) in the object's space, so the object's scale sizes the box. */
+struct Lattice : ComponentBase<Lattice> {
+  static constexpr const char *kName = "Lattice";
+  static constexpr int kMaxRes = 32;
+  int points_u = 2, points_v = 2, points_w = 2;
+  int interpolation = 1;      // Linear, B-Spline (Blender's default)
+  std::vector<Vec3> offsets = std::vector<Vec3>(8, Vec3(0.0f));  // each point from its rest place; u fastest, then v, then w
+  int size() const;
+  Vec3 rest_point(int i) const;
+  /* How far a point of the box at q (lattice space) moves: the offsets round it blended (lattice.cpp). Outside the
+   * box, the nearest border cell's blend. */
+  Vec3 displacement(Vec3 q) const;
+  /* New resolution, keeping the shape: the new points take the displacement the old lattice gave their rest places. */
+  void resample(int u, int v, int w);
+  uint64_t content_key() const;
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Lattice; }
+  int control_point_count() const override;
+  Vec3 control_point(int i) const override;
+  void set_control_point(int i, Vec3 p) override;
+};
+
+/* Blender: Lattice modifier. Moves the mesh with a Lattice object's points (deform-only, ADR 0022). */
+struct LatticeModifier : ComponentBase<LatticeModifier> {
+  static constexpr const char *kName = "LatticeModifier";
+  std::string object;  // the Lattice object, by name
+  float strength = 1.0f;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // lattice.cpp
+  uint64_t modifier_dependency_hash() const override;  // lattice.cpp
   bool unique() const override { return false; }
 };
 
@@ -864,6 +911,8 @@ class GameObject {
   Light *light() const { return static_cast<Light *>(find_role(Component::RenderRole::Light)); }
   Camera *camera() const { return static_cast<Camera *>(find_role(Component::RenderRole::Camera)); }
   Curve *curve() const;  // scene.cpp (Curve is declared further down)
+  Lattice *lattice() const;
+  Component *point_source() const;  // the component whose control points the Scene view edits (a curve, a lattice)
   Component *add_component(std::unique_ptr<Component> c);
   template<class T> T *add() { return static_cast<T *>(add_component(std::make_unique<T>())); }
   void remove_component(Component *c);

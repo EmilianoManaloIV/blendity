@@ -5,7 +5,7 @@
 - **Requirements:** R-02, R-03
 - **Decisions:** ADR 0022 (the Curve modifier deforms in place)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/40
 
 ## Goal
 Draw a path in the scene and bend things along it: a rail, a pipe, a road, a chain of fence posts. A **Curve**

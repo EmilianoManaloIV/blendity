@@ -2,6 +2,46 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 65): lattices (task 0043)
+
+**Asked:** the roadmap (2026-10-11): "a Cage (lattice / mesh-deform) tool".
+
+**Added**
+- **Lattice objects** (GameObject > Lattice, also in the Hierarchy's + menu): a box of points fitted round the
+  selected mesh, which gets a **Lattice modifier** naming it. Points U / V / W (2 to 32, changing them keeps the
+  shape), Linear or B-Spline; the modifier has a Strength. Click a point to select it and move, turn or scale it
+  with the gizmo (Shift adds, Esc lets go). The modifier is deform-only, so dragging a point updates the mesh in
+  place (task 0041).
+- Curve and lattice points are now one kind of thing to the editor (`Component` control points); the console has
+  `points select|move <object> ...` for both (`curve` still works).
+- Learn > Modifiers: "Squashing with a lattice".
+
+**Checked**
+- New tests (round 65): a lattice at rest leaves a mesh as it is (both interpolations, three resolutions); Linear:
+  a corner moved by d moves the mesh's corner by d, the opposite corner not at all, the centre by d / 8, Strength
+  0.5 half as far; B-Spline: pulling an inner point never moves neighbouring samples by more than the pull times
+  their spacing over the cell size; changing the resolution keeps an affine pull (within 1e-3); NaN, flattened,
+  missing and self-referencing lattices leave a valid mesh; a turned, stretched lattice on a turned, scaled object
+  bends the mesh as the same lattice would in world space (off by 1e-7), and moving it re-bends; a B-Spline
+  lattice keeps its points through resolution changes 2 to 10 and back, and outside its box blends on without a
+  crease; GameObject > Lattice fits the box and adds the modifier, a click selects a point, a gizmo drag moves
+  only it and reshapes the mesh, Delete then removes the lattice, undo restores each step, `set` reaches the
+  resolution and any point, a second lattice is Lattice.001 and its modifier names it, and a scene file keeps
+  everything.
+- Stress `modifiers_ngon`: lattice cases on all 26 meshes (both interpolations, three resolutions, ordinary, NaN
+  and huge offsets, a flattened box): 11,384 operations, 0 problems. A B-Spline 4 x 4 x 4 lattice deforms a 50k-
+  vertex mesh in 0.5 ms (target 3 ms).
+- Unit checks: Windows 9,083, 0 failed (531 tests); the whole suite in render-cache verify mode: 9,084,
+  0 failed, 0 stale pictures. Linux with libraries: 8,993, 0 failed. Sanitizer build: 8,911, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, all fixed: changing a B-Spline lattice's
+resolution sampled it as a B-spline and shrank the shape a little every time (now sampled linearly, as Blender
+does); a second lattice had the same name, so its modifier found the first (now Lattice.001); outside the box
+B-Spline held the face value (a crease) where Blender blends on; a click on a mesh inside its lattice could select
+the lattice (only the box's outer edges pick it now); the flattened-box test was absolute (now relative to the
+box's size); Delete with a lattice point selected did nothing; the timing row subtracted two noisy timings.
+
 ## 2026-10-12 (round 64): curve objects, the Curve modifier and Array along a curve (task 0042)
 
 **Asked:** the roadmap (2026-10-11): "Curves: objects follow a path (Blender's Curve modifier and Array-along-curve)".

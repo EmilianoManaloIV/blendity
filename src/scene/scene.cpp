@@ -72,6 +72,9 @@ void register_builtin_components() {
   reg<DisplaceModifier>("Mesh", "Pushes vertices along their normals by a noise texture.", "Displace modifier (procedural texture)");
   reg<SimpleDeformModifier>("Mesh", "Twists, bends, tapers or stretches the mesh along an axis.", "Simple Deform modifier");
   reg<CastModifier>("Mesh", "Pulls the mesh towards a sphere, cylinder or box.", "Cast modifier");
+  reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");
+  reg<Lattice>("Mesh", "A box of points round a mesh: a Lattice modifier moves the mesh with them. Click a point to move it with the gizmo.",
+               "Lattice object");
   reg<CurveModifier>("Mesh", "Bends the mesh along a Curve object (rails, pipes, roads, chains).", "Curve modifier");
   reg<Curve>("Mesh", "A path of control points (Bezier, Catmull-Rom or Poly): Curve modifiers bend meshes along it and "
              "Array's Fit Curve fills it. Click a point to move it with the gizmo.",
@@ -1308,6 +1311,32 @@ void Curve::reflect(Reflector &r) {
   }
 }
 
+/* The resolution first: a change resamples the shape (Blender keeps it the same way), then each point's offset with a
+ * "P<i> " prefix. The Inspector lists the offsets only for small lattices (the gizmo moves points). */
+void Lattice::reflect(Reflector &r) {
+  int u = points_u, v = points_v, w = points_w;
+  r.field("Points U", u, 2, kMaxRes);
+  r.field("Points V", v, 2, kMaxRes);
+  r.field("Points W", w, 2, kMaxRes);
+  r.help("Points along each side (Blender: Resolution U / V / W). Changing it keeps the shape.");
+  if (u != points_u || v != points_v || w != points_w || (int)offsets.size() != size()) resample(u, v, w);
+  static const char *kInterp[] = {"Linear", "B-Spline"};
+  r.enumeration("Interpolation", interpolation, kInterp, 2);
+  r.help("Linear follows the points exactly; B-Spline is smoother (Blender's default).");
+  interpolation = std::max(0, std::min(interpolation, 1));
+  if (!r.all_fields() && offsets.size() > 64) return;
+  for (size_t i = 0; i < offsets.size(); i++) {
+    PrefixReflector p(r, "P" + std::to_string(i) + " ");
+    p.field("Offset", offsets[i]);
+  }
+}
+
+void LatticeModifier::reflect(Reflector &r) {
+  r.text("Object", object);
+  r.help("Name of the Lattice object whose points move the mesh (Blender: Lattice > Object).");
+  r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
+}
+
 void CurveModifier::reflect(Reflector &r) {
   r.text("Object", object);
   r.help("Name of the Curve object to bend along (Blender: Curve > Curve Object).");
@@ -1767,6 +1796,12 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
 }
 
 Curve *GameObject::curve() const { return static_cast<Curve *>(find_role(Component::RenderRole::Curve)); }
+Lattice *GameObject::lattice() const { return static_cast<Lattice *>(find_role(Component::RenderRole::Lattice)); }
+Component *GameObject::point_source() const {
+  for (auto &c : components)
+    if (c->render_role() == Component::RenderRole::Curve || c->render_role() == Component::RenderRole::Lattice) return c.get();
+  return nullptr;
+}
 
 AABB GameObject::world_bounds() const {
   const Mesh *m = evaluated_mesh();

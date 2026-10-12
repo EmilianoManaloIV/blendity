@@ -226,6 +226,7 @@ static void round61_tests();
 static void round62_tests();
 static void round63_tests();
 static void round64_tests();
+static void round65_tests();
 
 int main() {
   register_builtin_components();
@@ -867,6 +868,7 @@ int main() {
   round62_tests();
   round63_tests();
   round64_tests();
+  round65_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -22417,10 +22419,10 @@ static void round64_tests() {
     GameObject *g = ed.scene().find_by_name("Path");
     CHECK(g && g->curve() && g->curve()->points.size() == 3);
     if (g && g->curve() && g->curve()->points.size() == 3) CHECK(g->curve()->points[1].position.x == 0.0f);  // -2, 0, 2 left
-    CHECK(ed.curve_points_selected_for_test().empty());
+    CHECK(ed.points_selected_for_test().empty());
     ed.command("curve select Path 0");
     ed.command("select Cube");
-    CHECK(ed.curve_points_selected_for_test().empty());
+    CHECK(ed.points_selected_for_test().empty());
     ed.command("delete");
     CHECK(ed.scene().find_by_name("Path") != nullptr);  // the Cube went, the curve stayed
   });
@@ -22640,7 +22642,7 @@ static void round64_tests() {
     CHECK(ed.project_to_window(w, x, y));
     r34_click(ed, x, y);
     r34_steps(ed, 1);
-    CHECK(ed.curve_points_selected_for_test() == std::vector<int>{1});
+    CHECK(ed.points_selected_for_test() == std::vector<int>{1});
     CHECK(ed.active_object_for_test() == g);
     ed.command("tool move");
     r34_steps(ed, 2);
@@ -22656,6 +22658,265 @@ static void round64_tests() {
     CHECK(u && u->curve() && u->curve()->points[1].position.x == before[0].x);
     /* The console selects points too. */
     ed.command("curve select Path 3 0");
-    CHECK(ed.curve_points_selected_for_test() == (std::vector<int>{3, 0}));
+    CHECK(ed.points_selected_for_test() == (std::vector<int>{3, 0}));
+  });
+}
+
+/* ===================================================================== */
+/* Round 65 (task 0043): lattice objects and the Lattice modifier          */
+/* ===================================================================== */
+
+/* A mesh and a Lattice object at the origin (unit box, scaled by `box`), the mesh with a Lattice modifier on it. */
+struct R65Scene {
+  Scene s;
+  GameObject *obj = nullptr, *lat_obj = nullptr;
+  Lattice *lat = nullptr;
+  LatticeModifier *mod = nullptr;
+  MeshPtr base;
+  R65Scene(MeshPtr m, float box = 1.0f) {
+    base = m;
+    obj = s.create("Thing");
+    obj->add<MeshFilter>()->mesh = m;
+    mod = obj->add<LatticeModifier>();
+    mod->object = "Box";
+    lat_obj = s.create("Box");
+    lat = lat_obj->add<Lattice>();
+    lat_obj->set_local_scale(Vec3(box));
+  }
+  float worst_move() const {
+    const Mesh *m = obj->evaluated_mesh();
+    float w = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) w = std::max(w, length(m->positions[i] - base->positions[i]));
+    return w;
+  }
+};
+
+static void round65_tests() {
+  test("lattices: a lattice at rest leaves the mesh as it is, Linear or B-Spline, at any resolution", [] {
+    int bad = 0;
+    for (int interp = 0; interp < 2; interp++)
+      for (int res : {2, 3, 5}) {
+        R65Scene t(primitives::uv_sphere(0.5f, 16, 12), 0.8f);  // the sphere pokes out of the box too
+        t.lat->interpolation = interp;
+        t.lat->resample(res, res + 1, res);
+        bad += t.worst_move() > 1e-5f;
+      }
+    CHECK(bad == 0);
+  });
+
+  test("lattices: Linear: a corner moved by d moves the mesh's vertex there by d, the opposite one not at all, the centre by d / 8", [] {
+    R65Scene t(primitives::cube(1.0f));
+    t.lat->interpolation = 0;
+    const Vec3 d(0.3f, -0.1f, 0.2f);
+    t.lat->set_control_point(7, t.lat->control_point(7) + d);  // u = v = w = 1: the (+, +, +) corner
+    const Mesh *m = t.obj->evaluated_mesh();
+    float at_corner = 1e9f, at_opposite = 1e9f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i], moved = m->positions[i] - v;
+      if (v.x > 0 && v.y > 0 && v.z > 0) at_corner = length(moved - d);
+      if (v.x < 0 && v.y < 0 && v.z < 0) at_opposite = length(moved);
+    }
+    CHECK(at_corner < 1e-5f && at_opposite < 1e-6f);
+    CHECK(length(t.lat->displacement(Vec3(0.0f)) - d / 8.0f) < 1e-6f);
+    /* Strength 0.5: every vertex half as far. */
+    const std::vector<Vec3> full = m->positions;
+    t.mod->strength = 0.5f;
+    const Mesh *h = t.obj->evaluated_mesh();
+    float off = 0.0f;
+    for (size_t i = 0; i < h->positions.size(); i++)
+      off = std::max(off, length((h->positions[i] - t.base->positions[i]) * 2.0f - (full[i] - t.base->positions[i])));
+    CHECK(off < 1e-5f);
+  });
+
+  test("lattices: B-Spline: pulling an inner point moves the mesh smoothly, with no jump at cell borders", [] {
+    Lattice l;
+    l.resample(4, 4, 4);
+    const Vec3 d(0.0f, 0.4f, 0.0f);
+    const int inner = (1 * 4 + 1) * 4 + 1;
+    l.set_control_point(inner, l.control_point(inner) + d);
+    const float cell = 1.0f / 3.0f, h = 0.002f;
+    float worst = 0.0f, peak = 0.0f;
+    for (float x = -0.6f; x < 0.6f; x += h) {
+      const Vec3 a = l.displacement(Vec3(x, -0.17f, -0.17f)), b = l.displacement(Vec3(x + h, -0.17f, -0.17f));
+      worst = std::max(worst, length(b - a));
+      peak = std::max(peak, length(a));
+    }
+    std::printf("    largest step %.5f for %.3f along X (bound %.5f), largest move %.3f\n", worst, h, length(d) * h / cell, peak);
+    CHECK(peak > 0.05f && peak < length(d));  // B-Spline doesn't reach the point (it smooths)
+    CHECK(worst <= length(d) * h / cell);
+  });
+
+  test("lattices: B-Spline keeps its points through resolution changes (2 to 3 and back), and outside the box blends on smoothly", [] {
+    Lattice l;
+    l.interpolation = 1;
+    for (int i = 0; i < 8; i++) l.offsets[(size_t)i] = Vec3(l.rest_point(i).x, 0, 0);  // a stretch along X
+    const std::vector<Vec3> start = l.offsets;
+    l.resample(3, 2, 2);
+    CHECK(std::fabs(l.offsets[2].x - 0.5f) < 1e-5f && std::fabs(l.offsets[1].x) < 1e-5f);  // the net is sampled linearly
+    for (int k = 2; k <= 10; k++) l.resample(k, 2, 2);  // an Inspector drag across many resolutions
+    l.resample(2, 2, 2);
+    float drift = 0.0f;
+    for (size_t i = 0; i < 8; i++) drift = std::max(drift, length(l.offsets[i] - start[i]));
+    CHECK(drift < 1e-5f);
+    /* Past the +X face: no crease (the slope carries on), and it settles on the border point one cell out. */
+    const float a = l.displacement({0.49f, 0, 0}).x, b = l.displacement({0.51f, 0, 0}).x, far = l.displacement({1.6f, 0, 0}).x;
+    std::printf("    at the face %.4f / %.4f, far out %.4f\n", a, b, far);
+    CHECK(b > a && b - a < 0.02f);
+    CHECK(std::fabs(far - 0.5f) < 1e-5f);
+  });
+
+  test("lattices: a turned, stretched lattice on a turned, scaled object bends the mesh as the same lattice would in world space", [] {
+    R65Scene t(primitives::uv_sphere(0.4f, 12, 8));
+    t.obj->set_world_position({0.3f, 0.2f, -0.1f});
+    t.obj->set_world_rotation(Quat::euler({20, 35, -10}));
+    t.obj->set_local_scale({1.5f, 0.7f, 1.2f});
+    t.lat_obj->set_world_position({0.25f, 0.3f, 0.0f});
+    t.lat_obj->set_world_rotation(Quat::euler({-15, 50, 5}));
+    t.lat_obj->set_local_scale({1.4f, 2.0f, 1.7f});
+    t.lat->interpolation = 0;
+    t.lat->offsets[7] = Vec3(0.2f, 0.1f, -0.1f);
+    t.lat->offsets[0] = Vec3(-0.1f, 0.0f, 0.15f);
+    const Mesh *m = t.obj->evaluated_mesh();
+    const Mat4 ow = t.obj->world_matrix(), lw = t.lat_obj->world_matrix(), li = lw.inverse();
+    float off = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 w = ow.point(t.base->positions[i]);
+      const Vec3 want = w + lw.dir(t.lat->displacement(li.point(w)));
+      off = std::max(off, length(ow.point(m->positions[i]) - want));
+    }
+    std::printf("    off by %g\n", off);
+    CHECK(off < 1e-4f);
+    /* Moving the lattice object re-bends the mesh. */
+    const std::vector<Vec3> before = m->positions;
+    t.lat_obj->set_world_position({0.35f, 0.3f, 0.0f});
+    CHECK(t.obj->evaluated_mesh()->positions != before);
+  });
+
+  test("lattices: changing the resolution keeps the shape (an affine pull, Linear)", [] {
+    R65Scene t(primitives::uv_sphere(0.45f, 16, 12));
+    t.lat->interpolation = 0;
+    /* A shear and a stretch: every resolution holds them exactly. */
+    for (int i = 0; i < t.lat->control_point_count(); i++) {
+      const Vec3 r = t.lat->rest_point(i);
+      t.lat->offsets[(size_t)i] = Vec3(0.3f * r.y, 0.5f * r.y, 0.0f);
+    }
+    const std::vector<Vec3> before = t.obj->evaluated_mesh()->positions;
+    for (Vec3 res : {Vec3(5, 3, 4), Vec3(2, 7, 2), Vec3(32, 2, 3)}) {
+      t.lat->resample((int)res.x, (int)res.y, (int)res.z);
+      const std::vector<Vec3> after = t.obj->evaluated_mesh()->positions;
+      float w = 0.0f;
+      for (size_t i = 0; i < after.size(); i++) w = std::max(w, length(after[i] - before[i]));
+      CHECK(w < 1e-3f);
+    }
+    CHECK(t.lat->control_point_count() == 32 * 2 * 3);
+  });
+
+  test("lattices: a flat, missing or NaN lattice leaves the mesh valid", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    R65Scene t(primitives::cube(1.0f));
+    t.lat->set_control_point(0, Vec3(nan, 0, 0));
+    for (const Vec3 &p : t.obj->evaluated_mesh()->positions) CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+    t.lat->offsets.assign(8, Vec3(0.1f, 0, 0));
+    t.lat_obj->set_local_scale({1, 0, 1});  // flattened: no inside
+    CHECK(t.worst_move() == 0.0f);
+    t.lat_obj->set_local_scale({1, 1, 1});
+    CHECK(t.worst_move() > 0.05f);
+    t.mod->object = "Thing";  // itself
+    CHECK(t.worst_move() == 0.0f);
+    t.mod->object = "Box";
+    t.mod->strength = nan;
+    CHECK(t.worst_move() == 0.0f);
+  });
+
+  test("lattices: GameObject > Lattice fits a box round the selected mesh with a modifier; clicking a point and dragging it reshapes the mesh; undo; a scene file keeps it", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("create Lattice");
+    GameObject *box = ed.scene().find_by_name("Lattice");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(box && box->lattice() && cube && cube->get<LatticeModifier>() && cube->get<LatticeModifier>()->object == "Lattice");
+    if (!box || !cube || !box->lattice()) return;
+    CHECK(ed.active_object_for_test() == box);
+    const std::vector<Vec3> rest = cube->evaluated_mesh()->positions;
+    r34_steps(ed, 3);
+    /* The (+X, +Y, -Z) corner. */
+    const int corner = 1 + 2;  // u = 1, v = 1, w = 0
+    const Vec3 w = box->world_matrix().point(box->lattice()->control_point(corner));
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(w, x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{corner});
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    CHECK(length(ed.gizmo_pivot_for_test() - w) < 1e-4f);  // the gizmo sits on the point
+    /* Drag the X arrow along the way it points on screen (it needn't point right from this corner). */
+    int ax = 0, ay = 0;
+    CHECK(ed.project_to_window(w + Vec3(0.2f, 0, 0), ax, ay));
+    const float dx = (float)(ax - x), dy = (float)(ay - y), dl = std::max(1.0f, std::sqrt(dx * dx + dy * dy));
+    auto at = [&](float px) { return std::make_pair(x + (int)std::lround(dx / dl * px), y + (int)std::lround(dy / dl * px)); };
+    const auto p0 = at(55.0f), p1 = at(85.0f), p2 = at(115.0f);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, p0.first, p0.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, p0.first, p0.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, p1.first, p1.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, p2.first, p2.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, p2.first, p2.second)});
+    r34_steps(ed, 2);
+    const Lattice &l = *box->lattice();
+    std::printf("    the corner moved by %.3f %.3f %.3f\n", l.offsets[(size_t)corner].x, l.offsets[(size_t)corner].y, l.offsets[(size_t)corner].z);
+    CHECK(l.offsets[(size_t)corner].x > 0.05f);
+    int others = 0;
+    for (size_t i = 0; i < l.offsets.size(); i++) others += i != (size_t)corner && length(l.offsets[i]) > 0.0f;
+    CHECK(others == 0);
+    CHECK(cube->evaluated_mesh()->positions != rest);
+    ed.command("points select Lattice 0 6");  // the console selects lattice points too
+    CHECK(ed.points_selected_for_test() == (std::vector<int>{0, 6}));
+    r34_steps(ed, 1);
+    ed.command("delete");  // a lattice's points come with its resolution: Delete removes the lattice itself
+    r34_steps(ed, 1);
+    CHECK(ed.scene().find_by_name("Lattice") == nullptr);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *back1 = ed.scene().find_by_name("Lattice");
+    CHECK(back1 && back1->lattice() && back1->lattice()->offsets[(size_t)corner].x > 0.05f);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Lattice");
+    CHECK(u && u->lattice() && length(u->lattice()->offsets[(size_t)corner]) == 0.0f);
+    /* `set` reaches the resolution and any point. */
+    ed.command("set Lattice.PointsU 4");
+    ed.command("set Lattice.P5Offset 0 0.25 0");
+    if (GameObject *l2 = ed.scene().find_by_name("Lattice")) {
+      CHECK(l2->lattice()->points_u == 4 && l2->lattice()->control_point_count() == 16);
+      CHECK(l2->lattice()->offsets[5].y == 0.25f);
+    }
+    /* A second lattice gets a name of its own, and its modifier names it. */
+    ed.command("select Sphere");
+    ed.command("create Lattice");
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(ed.scene().find_by_name("Lattice.001") && sphere && sphere->get<LatticeModifier>() &&
+          sphere->get<LatticeModifier>()->object == "Lattice.001");
+    /* A scene file: resolution, interpolation, offsets, the modifier. */
+    Scene s;
+    GameObject *lo = s.create("L");
+    Lattice *lt = lo->add<Lattice>();
+    lt->interpolation = 0;
+    lt->resample(3, 2, 4);
+    lt->offsets[5] = Vec3(0.1f, 0.2f, -0.3f);
+    GameObject *o = s.create("O");
+    o->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    auto *lm = o->add<LatticeModifier>();
+    lm->object = "L";
+    lm->strength = 0.75f;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    const Lattice *bl2 = back.find_by_name("L") ? back.find_by_name("L")->lattice() : nullptr;
+    CHECK(bl2 && bl2->points_u == 3 && bl2->points_v == 2 && bl2->points_w == 4 && bl2->interpolation == 0 && bl2->offsets.size() == 24);
+    if (bl2 && bl2->offsets.size() == 24) CHECK(bl2->offsets[5].z == -0.3f);
+    GameObject *bo = back.find_by_name("O");
+    CHECK(bo && bo->get<LatticeModifier>() && bo->get<LatticeModifier>()->strength == 0.75f);
+    if (bo) CHECK(bo->evaluated_mesh()->positions == o->evaluated_mesh()->positions);
   });
 }
