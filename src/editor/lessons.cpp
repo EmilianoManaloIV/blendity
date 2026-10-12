@@ -233,6 +233,9 @@ A real lens focuses at one distance. With Depth of Field on, each camera ray sta
 The Camera's Pick Focus Point button is an eyedropper. Click a surface in the Scene view and the focus distance becomes how far that point is in front of the camera. Lock on the Camera Preview keeps that camera's preview up while you select other things and edit meshes, so you can model while you watch the shot.
 ! cmd:select Main Camera; pickfocus | Pick the Main Camera's focus point (then click a surface)
 ! cmd:select Main Camera; set Camera.PhysicalCamera 1; set Camera.DepthOfField 1; set Camera.FStop 1.4; camerapreview rendered | Make the Main Camera physical with a shallow depth of field and preview it
+# Composition guides
+Show Guides (Camera inspector, or the Game view's Guides menu) draws lines over what the camera sees, never into the render. The rule of thirds splits the frame into a three by three grid: a horizon on one of the horizontal lines and a subject where two lines cross usually reads better than one dead centre. The golden ratio does the same at 0.382 and 0.618. The golden and harmonious triangles lay a diagonal across the frame with lines from the other two corners (square to the diagonal for the golden ones, to the golden section of the far edge for the harmonious ones), for compositions built on diagonals. Title Safe and Action Safe mark the margins a television might crop (Blender's defaults: Title Safe 10 % across and 5 % down, Action Safe 3.5 % both ways, of half the frame on each side).
+! cmd:select Main Camera; guides thirds on; window Game | Show the Main Camera's rule-of-thirds guides in the Game view
 # Depth precision
 Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits close to the near plane, so a tiny near clip value causes z-fighting in the distance. Keep Near as large as you can.
 > [FoCG] 8.3 Perspective Projection, 8.4 Some Properties of the Perspective Transform, 8.5 Field-of-View

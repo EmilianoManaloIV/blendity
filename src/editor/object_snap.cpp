@@ -277,12 +277,102 @@ void Editor::draw_pilot_frame(const Recti &view) {
    * passepartout): only an outline just outside it, and this banner. */
   const int ow = u.px(1);
   u.canvas.rect_outline({frame.x - ow, frame.y - ow, frame.w + 2 * ow, frame.h + 2 * ow}, Color::hex(0xFFA733), ow);
+  {
+    Recti gf = frame;  // inside a filter's letterbox, as render_scene_view draws the camera's picture
+    const FilterStack &fs = camera_filters(g);
+    if (!fs.empty()) {
+      int iw, ih;
+      Recti d;
+      filter_layout(fs, frame.w, frame.h, iw, ih, d);
+      gf = {frame.x + d.x, frame.y + d.y, d.w, d.h};
+    }
+    draw_camera_guides(*c, gf);
+  }
   const std::string label = strprintf("Piloting %s  |  FOV %.1f%s  |  move the view to move it, Ctrl + wheel: field of view, Esc: stop", g->name.c_str(),
                                       c->vertical_fov_deg(c->image_aspect(render_aspect_of(*scene_))), c->physical ? strprintf(" (%.0f mm)", c->focal_length).c_str() : "");
   const int lw = u.font.text_width(label) + u.px(16);
   Recti lb{view.x + (view.w - lw) / 2, view.y + u.px(8), lw, u.row_h()};
   u.canvas.fill_round_rect(lb, u.px(3), Color::hex(0x402810, 230));
   u.label(lb, label, Color::hex(0xFFD8A0), ui::Align::Center);
+  u.canvas.pop_clip();
+}
+
+/* The composition guides as screen-space lines over a camera's frame, ported from Blender
+ * (ED_draw_composition_guides and drawviewborder_triangle in editors/util/ed_draw.cc; the safe areas from
+ * UI_draw_safe_areas in interface_draw.cc), task 0033. Blender's rect is y-up: its ymin is the frame's bottom. */
+std::vector<std::pair<Vec2, Vec2>> camera_guide_lines(const Camera &c, const Recti &f) {
+  std::vector<std::pair<Vec2, Vec2>> out;
+  if (!c.show_guides || f.w < 4 || f.h < 4) return out;
+  const float xmin = (float)f.x, xmax = (float)(f.x + f.w), w = (float)f.w, h = (float)f.h, bottom = (float)(f.y + f.h);
+  auto P = [&](float x, float y_up) { return Vec2(x, bottom - y_up); };  // Blender's (x, y up from the bottom) on screen
+  auto L = [&](Vec2 a, Vec2 b) { out.push_back({a, b}); };
+  const float golden_conj = 0.618033988749895f;
+  auto grid3 = [&](float fac) {
+    L(P(xmin, fac * h), P(xmax, fac * h));
+    L(P(xmin, (1 - fac) * h), P(xmax, (1 - fac) * h));
+    L(P(xmin + fac * w, 0), P(xmin + fac * w, h));
+    L(P(xmin + (1 - fac) * w, 0), P(xmin + (1 - fac) * w, h));
+  };
+  /* Blender's drawviewborder_triangle: golden = false for the Golden Triangles (the offset h^2 / w: the lines from
+   * the other corners square to the diagonal, on to the far edge), true for the Harmonious ones (the golden
+   * section of the edge). */
+  auto triangle = [&](bool golden, bool dir_b) {
+    float rxmin = xmin, rxmax = xmax, rymin = 0.0f, rymax = h;
+    if (w > h) {
+      const float ofs = golden ? w * (1.0f - golden_conj) : h * (h / w);
+      if (dir_b) std::swap(rymin, rymax);
+      L(P(rxmin, rymin), P(rxmax, rymax));
+      L(P(rxmax, rymin), P(rxmin + (w - ofs), rymax));
+      L(P(rxmin, rymax), P(rxmin + ofs, rymin));
+    }
+    else {
+      const float ofs = golden ? h * (1.0f - golden_conj) : w * (w / h);
+      if (dir_b) std::swap(rxmin, rxmax);
+      L(P(rxmin, rymin), P(rxmax, rymax));
+      L(P(rxmax, rymin), P(rxmin, rymin + ofs));
+      L(P(rxmin, rymax), P(rxmax, rymin + (h - ofs)));
+    }
+  };
+  if (c.guide_center) L(P(xmin, h * 0.5f), P(xmax, h * 0.5f)), L(P(xmin + w * 0.5f, 0), P(xmin + w * 0.5f, h));
+  if (c.guide_center_diagonal) L(P(xmin, 0), P(xmax, h)), L(P(xmin, h), P(xmax, 0));
+  if (c.guide_thirds) grid3(1.0f / 3.0f);
+  if (c.guide_golden) grid3(1.0f - golden_conj);
+  if (c.guide_golden_tri_a) triangle(false, false);
+  if (c.guide_golden_tri_b) triangle(false, true);
+  if (c.guide_harmony_a) triangle(true, false);
+  if (c.guide_harmony_b) triangle(true, true);
+  auto safe = [&](float fx, float fy) {  // a margin of the fraction times half the frame on each side; none at 0 / 0
+    fx = clampf(finite_bits(fx) ? fx : 0.0f, 0.0f, 1.0f);
+    fy = clampf(finite_bits(fy) ? fy : 0.0f, 0.0f, 1.0f);
+    if (fx <= 0.0f && fy <= 0.0f) return;
+    const float mx = fx * w * 0.5f, my = fy * h * 0.5f;
+    const Vec2 a = P(xmin + mx, my), b = P(xmax - mx, my), cc = P(xmax - mx, h - my), d = P(xmin + mx, h - my);
+    L(a, b), L(b, cc), L(cc, d), L(d, a);
+  };
+  if (c.guide_title_safe) safe(c.title_safe_x, c.title_safe_y);
+  if (c.guide_action_safe) safe(c.action_safe_x, c.action_safe_y);
+  return out;
+}
+
+/* A camera's composition guides over its frame (task 0033). */
+void Editor::draw_camera_guides(const Camera &c, const Recti &f) {
+  if (!c.show_guides || f.w < 4 || f.h < 4) return;
+  auto &u = ui_;
+  const float op = clampf(finite_bits(c.guide_opacity) ? c.guide_opacity : 0.5f, 0.0f, 1.0f);
+  if (op <= 0.0f) return;
+  auto ch = [](float v) { return (uint32_t)std::lround(clampf(finite_bits(v) ? v : 1.0f, 0.0f, 1.0f) * 255.0f); };
+  const uint32_t col = (uint32_t)std::lround(op * 255.0f) << 24 | ch(c.guide_color.x) << 16 | ch(c.guide_color.y) << 8 | ch(c.guide_color.z);
+  const int thick = std::max(1, u.px(1));
+  /* Straight lines snapped so they cover whole pixels: odd widths on pixel centres, even ones on boundaries (else the
+   * anti-aliasing splits a line into faint halves). */
+  auto snap = [&](float v) { return (thick & 1) ? std::floor(v) + 0.5f : std::round(v); };
+  u.canvas.push_clip({f.x, f.y, f.w + 1, f.h + 1});  // (+1: the right and bottom edges' lines)
+  for (auto ln : camera_guide_lines(c, f)) {
+    Vec2 a = ln.first, b = ln.second;
+    if (a.x == b.x) a.x = b.x = std::min(snap(a.x), (float)(f.x + f.w) - 0.5f);
+    if (a.y == b.y) a.y = b.y = std::min(snap(a.y), (float)(f.y + f.h) - 0.5f);
+    u.canvas.line(a.x, a.y, b.x, b.y, col, (float)thick);
+  }
   u.canvas.pop_clip();
 }
 

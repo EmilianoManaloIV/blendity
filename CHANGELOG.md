@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 55): camera composition guides (task 0033)
+
+**Asked:** "adding 'rule of thirds' guides to the camera and can be togglable. Any additional camera guides or
+helpers are also welcomed."
+
+**Added**
+- **Composition guides** on every camera (Blender's Composition Guides and Safe Areas): **Thirds**, **Center**,
+  **Center Diagonal**, **Golden Ratio**, **Golden Triangle A / B**, **Harmonious Triangle A / B**, **Title Safe**
+  and **Action Safe** (margins adjustable), in a colour and opacity of your choice, all behind one **Show
+  Guides** switch. They draw over the camera's frame in the Game view, the Camera Preview and while piloting the
+  camera (inside a filter's letterbox when there is one), never into renders. Toggle them in the Camera
+  inspector, the Game view's new **Guides** menu or with `guides thirds on` / `guides off`. A Learn lesson
+  explains them.
+
+**Checked**
+- New tests (round 55): the thirds lines at 1/3 and 2/3 of the Game view's camera frame (every pixel of the
+  line), also in a 2.39:1 letterbox; each of the ten guides draws on its own; Show Guides off draws nothing; an
+  F12 render with guides on is identical to one without; the camera's render hash ignores them; Title Safe at
+  Blender's margins; the fields save, undo and redo; the Guides menu clicked with the mouse; the triangles'
+  endpoints are Blender's.
+
+**Review (code reviewer)**: a blocker and several minor findings, all fixed: the Guides menu read a dead pointer,
+the triangles weren't Blender's construction, the piloted frame ignored a filter's letterbox, a hashing hazard in
+`Camera::reflect`, loose console parsing, HiDPI lines, zero safe margins.
+- Unit checks: Windows 8,522, 0 failed (458 tests); the whole suite in render-cache verify mode: 8,523,
+  0 failed, 0 stale pictures. Linux with libraries: 8,458, 0 failed. Sanitizer build: 8,380, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` idle 1.33 ms.
+
 ## 2026-10-11 (round 54): every camera filter in the path tracers (task 0032, ADR 0008 amended)
 
 **Asked:** "I want all the camera filter modifier stack to show up in the render view ... I want the filters to

@@ -477,6 +477,43 @@ void Camera::reflect(Reflector &r) {
     r.field("Shutter Speed (1/s)", shutter, 1.0f, 0.001f, 100000.0f);
     if (!dof && !all) r.field("F-Stop", f_stop, 0.05f, 0.1f, 128.0f);  // shown with Depth of Field otherwise
   }
+  /* Composition guides (task 0033): drawn over the views, so not part of the render hash. Keep this the last call:
+   * anything a render reads goes above it. */
+  if (!r.hashing()) reflect_guides(r);
+}
+
+void Camera::reflect_guides(Reflector &r) {
+  const bool all = r.all_fields();
+  r.field("Show Guides", show_guides);
+  r.help("Composition guides over what this camera sees in the Game view, the Camera Preview and while piloting\n"
+         "(never in renders). Blender: Camera > Viewport Display > Composition Guides. Game view: the Guides menu.");
+  if (show_guides || all) {
+    r.field("Thirds", guide_thirds);
+    r.help("The rule of thirds: two lines each way at a third of the frame; put subjects on them or where they cross.");
+    r.field("Center", guide_center);
+    r.field("Center Diagonal", guide_center_diagonal);
+    r.field("Golden Ratio", guide_golden);
+    r.help("Lines at 0.382 and 0.618 of the frame (the golden section).");
+    r.field("Golden Triangle A", guide_golden_tri_a);
+    r.field("Golden Triangle B", guide_golden_tri_b);
+    r.help("A diagonal and, from the other two corners, lines square to it running on to the far edge (Blender's;\n"
+           "A: the diagonal rising to the right, B: falling).");
+    r.field("Harmonious Triangle A", guide_harmony_a);
+    r.field("Harmonious Triangle B", guide_harmony_b);
+    r.help("A diagonal and lines from the other two corners to the golden-section points (0.382 / 0.618) of the far\n"
+           "edge (Blender's).");
+    r.field("Title Safe", guide_title_safe);
+    if (guide_title_safe || all) {
+      r.field("Title Safe X", title_safe_x, 0.005f, 0.0f, 1.0f);
+      r.field("Title Safe Y", title_safe_y, 0.005f, 0.0f, 1.0f);
+    }
+    r.field("Action Safe", guide_action_safe);
+    if (guide_action_safe || all) {
+      r.field("Action Safe X", action_safe_x, 0.005f, 0.0f, 1.0f);
+      r.field("Action Safe Y", action_safe_y, 0.005f, 0.0f, 1.0f);
+    }
+    r.color_alpha("Guide Color", guide_color, "Guide Opacity", guide_opacity);
+  }
 }
 
 float Camera::image_aspect(float render_aspect) const {
@@ -598,6 +635,7 @@ struct PrefixReflector : Reflector {
   void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
   void material_list(const char *name, std::vector<MaterialPtr> &m) override { in.material_list(n(name).c_str(), m); }
   bool all_fields() const override { return in.all_fields(); }
+  bool hashing() const override { return in.hashing(); }
 };
 }  // namespace
 
@@ -1198,6 +1236,7 @@ void ScrewModifier::modify(Mesh &m) const { meshops::screw(m, angle, steps, scre
 namespace {
 struct HashReflector : Reflector {
   bool all_fields() const override { return true; }
+  bool hashing() const override { return true; }
   uint64_t h = 1469598103934665603ull;
   /* A byte at a time, and it stays that way: the lights' and the world's hashes are part of
    * lightmap_scene_key, saved with every bake (a new formula would mark them all out of date). */

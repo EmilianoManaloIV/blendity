@@ -152,6 +152,7 @@ struct LayerPrefixReflector : Reflector {
   LayerPrefixReflector(Reflector &r, std::string p) : in(r), prefix(std::move(p)) {}
   std::string n(const char *name) const { return prefix + name; }
   bool all_fields() const override { return in.all_fields(); }
+  bool hashing() const override { return in.hashing(); }
   void field(const char *name, float &v, float speed, float mn, float mx) override { in.field(n(name).c_str(), v, speed, mn, mx); }
   void field(const char *name, int &v, int mn, int mx) override { in.field(n(name).c_str(), v, mn, mx); }
   void field(const char *name, bool &v) override { in.field(n(name).c_str(), v); }

@@ -2989,8 +2989,46 @@ void Editor::draw_game_view(const Recti &r) {
     u.tooltip("The camera this view shows: the scene's Active Camera (Blender: the scene camera; Unity: MainCamera).\n"
               "Without one, \"Main Camera\" by name, else the first camera.");
   }
-  u.label({bar.x + u.px(182), bar.y, u.px(110), bar.h}, "Free Aspect", u.theme.text_dim);
+  if (bar.w > u.px(460)) u.label({bar.x + u.px(182), bar.y, u.px(110), bar.h}, "Free Aspect", u.theme.text_dim);  // (not under the buttons)
   int h = bh - u.px(6);
+  {
+    /* Composition guides of the camera shown (task 0033). */
+    GameObject *shown = nullptr;
+    Camera *gc = main_camera(*scene_, &shown);
+    Recti gr{bar.right() - u.px(144), bar.y + u.px(3), u.px(68), h};
+    game_guides_rects_["button"] = gr;
+    if (u.button(gr, "Guides", gc && gc->show_guides) && gc) u.open_popup(u.id("game_guides"), {gr.x, gr.bottom(), gr.w, 0});
+    u.tooltip("Composition guides over the camera's frame: rule of thirds, golden ratio, safe areas...\n"
+              "(Blender: Camera > Viewport Display > Composition Guides). Never in renders.");
+    u.popup(u.id("game_guides"), u.px(200), [this, gid = shown ? shown->id : 0] {
+      auto &u = ui_;
+      /* (Run at the frame's end: the camera by id, as it is then - deleted or swapped by undo, no menu.) */
+      GameObject *go = gid ? scene_->find(gid) : nullptr;
+      Camera *gc = go ? go->get<Camera>() : nullptr;
+      if (!gc) return;
+      auto item = [&](const char *label, bool &v) {
+        const bool clicked = u.menu_item(label, nullptr, v);
+        game_guides_rects_[label] = u.last_widget();
+        if (clicked) {
+          v = !v;
+          if (&v != &gc->show_guides && v) gc->show_guides = true;  // picking a guide shows the guides
+          mark_changed(std::string("Guides: ") + label);
+        }
+      };
+      item("Show Guides", gc->show_guides);
+      u.menu_separator();
+      item("Thirds", gc->guide_thirds);
+      item("Center", gc->guide_center);
+      item("Center Diagonal", gc->guide_center_diagonal);
+      item("Golden Ratio", gc->guide_golden);
+      item("Golden Triangle A", gc->guide_golden_tri_a);
+      item("Golden Triangle B", gc->guide_golden_tri_b);
+      item("Harmonious Triangle A", gc->guide_harmony_a);
+      item("Harmonious Triangle B", gc->guide_harmony_b);
+      item("Title Safe", gc->guide_title_safe);
+      item("Action Safe", gc->guide_action_safe);
+    });
+  }
   Recti sr{bar.right() - u.px(70), bar.y + u.px(3), u.px(62), h};
   if (u.button(sr, "Stats", game_stats_overlay_)) game_stats_overlay_ = !game_stats_overlay_;
   u.tooltip("Rendering statistics (Unity: Game view > Stats).");
@@ -3044,6 +3082,19 @@ void Editor::draw_game_view(const Recti &r) {
       view_cache_store(game_cache_, key, img);
     }
     prof_.ms_game += rt.ms();
+  }
+  /* Composition guides over the camera's frame: the image, or a filter's letterboxed frame inside it. */
+  {
+    Recti frame = img;
+    const FilterStack &fs = camera_filters(owner);
+    if (!fs.empty()) {
+      int iw, ih;
+      Recti d;
+      filter_layout(fs, img.w, img.h, iw, ih, d);
+      frame = {img.x + d.x, img.y + d.y, d.w, d.h};
+    }
+    game_guides_frame_ = frame;
+    draw_camera_guides(*cam, frame);
   }
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};

@@ -4,7 +4,7 @@
 - **Requirements:** R-03
 - **Decisions:** ADR 0008 (amended: the rasterizer-only stages get path-traced equivalents)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/30
 
 ## Goal
 Image passes (Edge Outline, Bloom, grading, Pixelate, fog...) already run on path-traced pictures (tasks

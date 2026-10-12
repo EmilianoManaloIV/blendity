@@ -169,6 +169,9 @@ struct UndoState {
   std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
 };
 
+/* A camera's composition guides as screen lines over its frame, Blender's construction (task 0033). */
+std::vector<std::pair<Vec2, Vec2>> camera_guide_lines(const Camera &c, const Recti &frame);
+
 class Editor {
  public:
   Editor();
@@ -253,6 +256,13 @@ class Editor {
   /* Tests: the Scene view's depth at a window pixel (1 = nothing), as the tools read it. */
   float scene_depth_for_test(int wx, int wy) const { return scene_rt_.depth_at(wx - scene_rect_.x, wy - scene_rect_.y); }
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
+  /* Tests: where the Game view's camera frame (the guides' frame) was last drawn. */
+  Recti game_guides_frame_for_test() const { return game_guides_frame_; }
+  /* Tests: the Guides button ("button") and its menu's rows by label, as last drawn. */
+  Recti game_guides_rect_for_test(const std::string &key) const {
+    auto it = game_guides_rects_.find(key);
+    return it == game_guides_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
   Recti pilot_frame() const {
     GameObject *g = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr;
     const Camera *c = g ? g->get<Camera>() : nullptr;
@@ -769,6 +779,10 @@ class Editor {
   /* ---- Object snapping and camera piloting (object_snap.cpp) ---- */
   bool surface_align_ = false;  // surface snap also turns the object's up to the normal
   uint64_t pilot_cam_ = 0;      // the camera the Scene view is flying
+  /* Composition guides (task 0033) over a camera's frame in a view (lines from camera_guide_lines). */
+  void draw_camera_guides(const Camera &c, const Recti &frame);
+  Recti game_guides_frame_;
+  std::map<std::string, Recti> game_guides_rects_;
   SceneCamera pilot_saved_cam_;
   uint64_t pilot_last_hash_ = 0;
   Vec3 pilot_cam_pos_;          // the camera as piloting last left it

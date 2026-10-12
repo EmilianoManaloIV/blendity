@@ -1421,6 +1421,20 @@ void Editor::draw_camera_preview(const Recti &view) {
   Recti dst = box.intersect(view);
   for (int y = dst.y; y < dst.bottom(); y++)
     std::memcpy(fb->row(y) + dst.x, cam_preview_img_.row(y - box.y) + (dst.x - box.x), sizeof(uint32_t) * dst.w);
+  {
+    /* Composition guides (task 0033) over the camera's frame in the inset (a filter's letterbox inside it). */
+    Recti frame = box;
+    const FilterStack &fs = camera_filters(g);
+    if (!fs.empty()) {
+      int iw, ih;
+      Recti d;
+      filter_layout(fs, box.w, box.h, iw, ih, d);
+      frame = {box.x + d.x, box.y + d.y, d.w, d.h};
+    }
+    u.canvas.push_clip(view);
+    draw_camera_guides(*cam, frame);
+    u.canvas.pop_clip();
+  }
   u.canvas.rect_outline(box, Color::hex(0x101010));
 }
 

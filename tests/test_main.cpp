@@ -213,6 +213,7 @@ static void round51_tests();
 static void round52_tests();
 static void round53_tests();
 static void round54_tests();
+static void round55_tests();
 
 int main() {
   register_builtin_components();
@@ -844,6 +845,7 @@ int main() {
   round52_tests();
   round53_tests();
   round54_tests();
+  round55_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -19991,5 +19993,225 @@ static void round54_tests() {
     CHECK(d_effect > 0);
     CHECK(d_snap <= on / 50);  // the same silhouette (measured: 0 pixels differ)
     CHECK(d_snap < d_free);
+  });
+}
+
+/* ===================================================================== */
+/* Round 55 (task 0033): camera composition guides                        */
+/* ===================================================================== */
+
+/* A Game view in a 2 x 3 layout, the camera's guides pure red and opaque (so a test can find them). */
+static Camera *r55_open(Editor &ed) {
+  r34_open(ed);
+  Camera *c = by_name(ed.scene(), "Main Camera")->camera();
+  c->guide_color = {1, 0, 0};
+  c->guide_opacity = 1.0f;
+  c->guide_thirds = false;
+  return c;
+}
+/* Share of a vertical (or horizontal) line's pixels inside the frame that are the guides' red. */
+static double r55_red_line(const Editor &ed, const Recti &f, bool vertical, int at) {
+  const Image &fb = ed.framebuffer();
+  int red = 0, n = 0;
+  const int a = vertical ? f.y + 2 : f.x + 2, b = vertical ? f.bottom() - 2 : f.right() - 2;
+  for (int k = a; k < b; k++) {
+    const int x = vertical ? at : k, y = vertical ? k : at;
+    if (x < 0 || y < 0 || x >= fb.width || y >= fb.height) continue;
+    const uint32_t c = fb.pixels[(size_t)y * fb.width + x];
+    red += ((c >> 16) & 255) > 200 && ((c >> 8) & 255) < 60 && (c & 255) < 60;
+    n++;
+  }
+  return n ? (double)red / n : 0.0;
+}
+/* Red pixels anywhere in the frame. */
+static size_t r55_red_pixels(const Editor &ed, const Recti &f) {
+  const Image &fb = ed.framebuffer();
+  size_t n = 0;
+  for (int y = std::max(0, f.y); y < std::min(fb.height, f.bottom()); y++)
+    for (int x = std::max(0, f.x); x < std::min(fb.width, f.right()); x++) {
+      const uint32_t c = fb.pixels[(size_t)y * fb.width + x];
+      n += ((c >> 16) & 255) > 200 && ((c >> 8) & 255) < 60 && (c & 255) < 60;
+    }
+  return n;
+}
+
+static void round55_tests() {
+  test("camera guides: rule of thirds lines at a third and two thirds of the Game view's camera frame, letterboxed too", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    ed.command("guides thirds on");
+    r34_steps(ed, 2);
+    CHECK(c->show_guides && c->guide_thirds);
+    Recti f = ed.game_guides_frame_for_test();
+    CHECK(f.w > 50 && f.h > 50);
+    const int x3 = f.x + (int)std::lround(f.w / 3.0), y3 = f.y + (int)std::lround(f.h * 2.0 / 3.0);
+    auto best = [&](bool vertical, int at) {  // (the line may land on either pixel of a boundary)
+      return std::max({r55_red_line(ed, f, vertical, at - 1), r55_red_line(ed, f, vertical, at), r55_red_line(ed, f, vertical, at + 1)});
+    };
+    const double v3 = best(true, x3), h23 = best(false, y3), mid = r55_red_line(ed, f, true, f.x + f.w / 2);
+    std::printf("    frame %d x %d at %d,%d: red along x = w/3 %.0f%%, y = 2h/3 %.0f%%, x = w/2 %.0f%%\n", f.w, f.h, f.x, f.y, 100 * v3, 100 * h23, 100 * mid);
+    CHECK(v3 > 0.9 && h23 > 0.9 && mid < 0.1);
+    /* A 2.39:1 camera letterboxes the Game view: the lines follow the frame, not the view. */
+    c->aspect_mode = 4;  // (an aspect other than the render's)
+    ed.command("set Camera.AspectRatio 2.39:1");
+    r34_steps(ed, 2);
+    const Recti f2 = ed.game_guides_frame_for_test();
+    std::printf("    letterboxed frame %d x %d\n", f2.w, f2.h);
+    CHECK(f2.w != f.w || f2.h != f.h);
+    CHECK(std::max({r55_red_line(ed, f2, false, f2.y + (int)std::lround(f2.h / 3.0) - 1), r55_red_line(ed, f2, false, f2.y + (int)std::lround(f2.h / 3.0)),
+                    r55_red_line(ed, f2, false, f2.y + (int)std::lround(f2.h / 3.0) + 1)}) > 0.9);
+  });
+
+  test("camera guides: each one toggles on its own, Show Guides off draws none, and renders and the render hash ignore them", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    const uint64_t h0 = hash_component(*c);
+    r34_steps(ed, 2);
+    const Recti f = ed.game_guides_frame_for_test();
+    const size_t none = r55_red_pixels(ed, f);
+    struct G {
+      const char *cmd;
+      bool *flag;
+    } guides[] = {{"thirds", &c->guide_thirds},     {"center", &c->guide_center},       {"diagonal", &c->guide_center_diagonal},
+                  {"golden", &c->guide_golden},     {"goldena", &c->guide_golden_tri_a}, {"goldenb", &c->guide_golden_tri_b},
+                  {"harmonya", &c->guide_harmony_a}, {"harmonyb", &c->guide_harmony_b},  {"title", &c->guide_title_safe},
+                  {"action", &c->guide_action_safe}};
+    int drawn = 0;
+    for (const G &g : guides) {
+      ed.command(std::string("guides ") + g.cmd + " on");
+      r34_steps(ed, 2);
+      const size_t n = r55_red_pixels(ed, f);
+      drawn += n > none + 50;
+      if (n <= none + 50) std::printf("    %s drew nothing\n", g.cmd);
+      ed.command(std::string("guides ") + g.cmd + " off");
+    }
+    CHECK(drawn == 10);
+    CHECK(hash_component(*c) == h0);  // guides don't touch the render hash: toggling them never re-renders
+    ed.command("guides thirds on");
+    ed.command("guides off");
+    r34_steps(ed, 2);
+    CHECK(r55_red_pixels(ed, f) == none);
+    /* F12 (rasterized) with the guides on is the same picture as with them off. */
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("set Render.ResolutionX 160");
+    ed.command("set Render.ResolutionY 90");
+    ed.command("render");
+    const std::vector<uint32_t> off = ed.render_image_for_test().pixels;
+    ed.command("guides thirds on");
+    ed.command("guides title on");
+    ed.command("render");
+    CHECK(ed.render_image_for_test().pixels == off);
+  });
+
+  test("camera guides: the Game view's Guides menu, clicked with the mouse, turns Thirds on (the menu reads its camera when it runs)", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    CHECK(!c->show_guides && !c->guide_thirds);
+    const Recti b = ed.game_guides_rect_for_test("button");
+    CHECK(b.w > 0);
+    if (b.w <= 0) return;
+    auto click = [&](const Recti &r) {
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x, y)});
+    };
+    click(b);
+    ed.step_frame_headless();
+    const Recti t = ed.game_guides_rect_for_test("Thirds");
+    CHECK(t.w > 0);
+    if (t.w <= 0) return;
+    click(t);
+    r34_steps(ed, 2);
+    c = by_name(ed.scene(), "Main Camera")->camera();
+    std::printf("    after clicking Guides > Thirds: shown %d, thirds %d\n", (int)c->show_guides, (int)c->guide_thirds);
+    CHECK(c->show_guides && c->guide_thirds);
+    const Recti f = ed.game_guides_frame_for_test();
+    CHECK(r55_red_pixels(ed, f) > (size_t)f.w);  // the lines are drawn
+  });
+
+  test("camera guides: the golden and harmonious triangles are Blender's construction (endpoints on a 16:9 frame)", [] {
+    Camera c;
+    c.show_guides = true;
+    c.guide_thirds = false;
+    const Recti f{0, 0, 1600, 900};
+    auto lines_of = [&](bool Camera::*flag) {
+      Camera k = c;
+      k.*flag = true;
+      return camera_guide_lines(k, f);
+    };
+    auto near = [](Vec2 a, Vec2 b) { return length(a - b) < 0.5f; };
+    /* Golden Triangle A (Blender: golden = false, ofs = h^2 / w = 506.25): the rising diagonal, from the bottom-right
+     * corner to x = w - ofs on the top edge, from the top-left to x = ofs on the bottom edge. */
+    const auto g = lines_of(&Camera::guide_golden_tri_a);
+    CHECK(g.size() == 3);
+    if (g.size() == 3) {
+      CHECK(near(g[0].first, {0, 900}) && near(g[0].second, {1600, 0}));
+      CHECK(near(g[1].first, {1600, 900}) && near(g[1].second, {1600 - 506.25f, 0}));
+      CHECK(near(g[2].first, {0, 0}) && near(g[2].second, {506.25f, 900}));
+    }
+    /* Harmonious Triangle A (golden = true, ofs = 0.381966 w = 611.15). */
+    const auto hh = lines_of(&Camera::guide_harmony_a);
+    CHECK(hh.size() == 3);
+    if (hh.size() == 3) {
+      CHECK(near(hh[1].second, {1600 - 611.146f, 0}) && near(hh[2].second, {611.146f, 900}));
+    }
+    /* B mirrors A top to bottom; a zero safe margin draws nothing. */
+    const auto gb = lines_of(&Camera::guide_golden_tri_b);
+    CHECK(gb.size() == 3 && near(gb[0].first, {0, 0}) && near(gb[0].second, {1600, 900}));
+    Camera z = c;
+    z.guide_title_safe = true;
+    z.title_safe_x = z.title_safe_y = 0.0f;
+    CHECK(camera_guide_lines(z, f).empty());
+  });
+
+  test("camera guides: Title and Action Safe at Blender's margins (a fraction of half the frame per side)", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    ed.command("guides title on");
+    r34_steps(ed, 2);
+    const Recti f = ed.game_guides_frame_for_test();
+    const int top = f.y + (int)std::lround(c->title_safe_y * f.h * 0.5f), left = f.x + (int)std::lround(c->title_safe_x * f.w * 0.5f);
+    const Recti inner{left, top, f.w - 2 * (left - f.x), f.h - 2 * (top - f.y)};
+    auto near_line = [&](bool vertical, int at, const Recti &r) {
+      return std::max({r55_red_line(ed, r, vertical, at - 1), r55_red_line(ed, r, vertical, at), r55_red_line(ed, r, vertical, at + 1)});
+    };
+    const double t = near_line(false, top, inner), l = near_line(true, left, inner);
+    std::printf("    title safe: top edge %.0f%%, left edge %.0f%% red\n", 100 * t, 100 * l);
+    CHECK(t > 0.9 && l > 0.9);
+  });
+
+  test("camera guides: saved with the scene, undone, and set from the Inspector's fields and the console", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    ed.command("select Main Camera");
+    ed.step_frame_headless();
+    ed.command("guides golden on");
+    ed.step_frame_headless();
+    CHECK(c->show_guides && c->guide_golden);
+    ed.command("set Camera.TitleSafeX 0.2");
+    ed.step_frame_headless();
+    ed.command("set Camera.GuideOpacity 0.8");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    c = by_name(ed.scene(), "Main Camera")->camera();  // (undo restores a copy of the scene: a new Camera)
+    std::printf("    after two undos: title safe x %.2f, opacity %.2f, golden %d\n", c->title_safe_x, c->guide_opacity, (int)c->guide_golden);
+    CHECK(std::fabs(c->title_safe_x - 0.1f) < 1e-6f && std::fabs(c->guide_opacity - 1.0f) < 1e-6f && c->guide_golden);
+    ed.command("redo");
+    ed.step_frame_headless();
+    ed.command("redo");
+    ed.step_frame_headless();
+    Scene &sc = ed.scene();
+    const std::string path = fs::join(fs::join(scratch_project(), "Assets/Scenes"), "R55_Guides.scene");
+    CHECK(save_scene(sc, path));
+    Scene t;
+    std::string err;
+    CHECK(load_scene(path, t, err));
+    Camera *tc = t.find_by_name("Main Camera") ? t.find_by_name("Main Camera")->camera() : nullptr;
+    CHECK(tc && tc->show_guides && tc->guide_golden && std::fabs(tc->guide_opacity - 0.8f) < 1e-5f);
+    std::remove(path.c_str());
   });
 }

@@ -3084,6 +3084,60 @@ void Editor::run_console_command(const std::string &line) {
       mark_changed("Set " + pt->name + " " + sr.target);
     }
   }
+  else if (c == "guides") {
+    /* guides list | guides off | guides <thirds|center|diagonal|golden|goldena|goldenb|harmonya|harmonyb|title|action|show> [on|off]:
+     * the composition guides of the selected cameras, else the camera the Game view shows (task 0033). */
+    std::vector<Camera *> cams;
+    for (GameObject *g : selected_objects(false))
+      if (Camera *cm = g->get<Camera>()) cams.push_back(cm);
+    if (cams.empty())
+      if (Camera *mc = main_camera(*scene_)) cams.push_back(mc);
+    if (cams.empty()) {
+      Log::warn("guides: no camera");
+      return;
+    }
+    const std::string what = to_lower(arg(1, "list")), v = to_lower(arg(2, "on"));
+    const bool on = v == "on" || v == "1" || v == "true", off_ = v == "off" || v == "0" || v == "false";
+    if (what != "list" && what != "off" && !on && !off_) {
+      Log::warn("guides %s: on or off", what.c_str());
+      return;
+    }
+    bool changed = false;
+    for (Camera *cm : cams) {
+      struct G {
+        const char *name;
+        bool *flag;
+      } all[] = {{"thirds", &cm->guide_thirds},        {"center", &cm->guide_center},           {"diagonal", &cm->guide_center_diagonal},
+                 {"golden", &cm->guide_golden},        {"goldena", &cm->guide_golden_tri_a},    {"goldenb", &cm->guide_golden_tri_b},
+                 {"harmonya", &cm->guide_harmony_a},   {"harmonyb", &cm->guide_harmony_b},      {"title", &cm->guide_title_safe},
+                 {"action", &cm->guide_action_safe},   {"show", &cm->show_guides}};
+      if (what == "list") {
+        std::string on;
+        for (const G &gg : all)
+          if (*gg.flag) on += std::string(on.empty() ? "" : ", ") + gg.name;
+        Log::info("guides of %s: %s (shown: %s)", cm->owner ? cm->owner->name.c_str() : "?", on.empty() ? "none" : on.c_str(), cm->show_guides ? "yes" : "no");
+        continue;
+      }
+      if (what == "off") {
+        changed = changed || cm->show_guides;
+        cm->show_guides = false;
+        continue;
+      }
+      bool found = false;
+      for (const G &gg : all)
+        if (what == gg.name) {
+          changed = changed || *gg.flag != on;
+          *gg.flag = on;
+          if (gg.flag != &cm->show_guides && on) changed = changed || !cm->show_guides, cm->show_guides = true;
+          found = true;
+        }
+      if (!found) {
+        Log::warn("guides: thirds, center, diagonal, golden, goldena, goldenb, harmonya, harmonyb, title, action, show, off or list");
+        return;
+      }
+    }
+    if (changed) mark_changed("Guides");
+  }
   else if (c == "activecamera") {
     /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
     std::string name;

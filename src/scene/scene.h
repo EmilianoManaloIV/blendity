@@ -75,6 +75,9 @@ struct Reflector {
    * Inspector hides for the current mode (e.g. path tracer samples while the
    * raster engine is active). */
   virtual bool all_fields() const { return false; }
+  /* True for the change-detection hash (render caches): fields that only change what is drawn over a picture
+   * (a camera's composition guides) leave it alone, so toggling them doesn't re-render. */
+  virtual bool hashing() const { return false; }
 };
 
 struct PlayContext {
@@ -231,6 +234,17 @@ struct Camera : ComponentBase<Camera> {
   Vec3 focus_point{0, 0, 0};    // world space, set by Pick Focus Point
   int blades = 0;               // 0 round, 3+ polygonal bokeh
   float blade_rotation = 0.0f;  // degrees
+  /* Composition guides (task 0033; Blender: Camera > Viewport Display > Composition Guides and Safe Areas):
+   * lines over what the camera sees in the views, never in renders. show_guides switches them all; the rest
+   * pick which. Margins are fractions of half the frame per side (Blender's safe areas). */
+  bool show_guides = false;
+  void reflect_guides(Reflector &r);
+  bool guide_thirds = true, guide_center = false, guide_center_diagonal = false, guide_golden = false;
+  bool guide_golden_tri_a = false, guide_golden_tri_b = false, guide_harmony_a = false, guide_harmony_b = false;
+  bool guide_title_safe = false, guide_action_safe = false;
+  float title_safe_x = 0.1f, title_safe_y = 0.05f, action_safe_x = 0.035f, action_safe_y = 0.035f;
+  Vec3 guide_color{1.0f, 1.0f, 1.0f};
+  float guide_opacity = 0.5f;
   /* Exposure from ISO, shutter speed and f-stop (Unity's Physical Camera). */
   bool physical_exposure = false;
   float iso = 100.0f;
