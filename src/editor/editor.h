@@ -403,6 +403,7 @@ class Editor {
    * before the real render). open_window: bring the Render window forward. */
   void start_final_render(bool preview = false, bool open_window = true);
   uint64_t live_preview_hash();
+  uint64_t trace_settings_hash();
   uint64_t camera_render_hash(const GameObject *owner, Camera *cam);
   uint64_t camera_render_hash(const GameObject *owner, Camera *cam, uint64_t scene_hash);
   void draw_camera_preview(const Recti &view);  // Unity's Camera Preview inset

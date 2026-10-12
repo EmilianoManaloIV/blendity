@@ -452,7 +452,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   r3d.begin(&rt, v, p, env, opt);
   Mat4 inv = (p * v).inverse();
   if (cam && cam->clear_flags == 1) r3d.clear(to_display_pixel(cam->background, ViewTransform::Standard, 0.0f));
-  else if (!scene_lights || env_.mode == Environment::Gradient)
+  else if (!scene_lights)  // the editor's own sky; with the scene's lighting the world's gradient, sky or HDRI
     r3d.clear_sky(inv, {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
   else r3d.clear_environment(inv, env_, env.view_transform, env.exposure);
   for (const DrawItem &it : items) r3d.add(it);
@@ -532,6 +532,7 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, 
   frame.eye = eye;
   frame.forward = normalize(forward);
   frame.far_distance = look ? look->far_clip : 1000.0f;
+  frame.pixel_scale = t->height / 1080.0f;
   frame.time = play_time_;
   frame.animate = animate;  // only the Game view while playing: F12, previews and piloting stay reproducible
   for (const FilterPass &pass : fs.passes) pass(*t, &frame);
@@ -602,6 +603,7 @@ FilterFrame Editor::trace_filter_frame(PathTracer &pt, RenderTarget &rt, const M
   frame.eye = eye;
   frame.forward = normalize(forward);
   frame.far_distance = cam ? cam->far_clip : 1000.0f;
+  frame.pixel_scale = rt.height / 1080.0f;
   frame.time = play_time_;
   frame.animate = false;
   std::vector<float> dist;
@@ -822,7 +824,12 @@ void Editor::resolve_final_render(bool finished) {
     final_pt_.resolve_rgb(lin, s.pixels.data(), s.width);
     if (render_filters_.needs_hdr) fill_hdr_from_linear(rt, lin, final_pt_.settings().view_transform, final_pt_.settings().exposure);
   }
-  else final_pt_.resolve(s.pixels.data(), s.width, false);
+  else {
+    const std::vector<float> lin = final_pt_.linear_rgb(false);  // once: the resolve and bloom's plane both read it
+    final_pt_.resolve_rgb(lin, s.pixels.data(), s.width);
+    if (render_filters_.needs_hdr)  // bloom reads the linear light at every resolve, so the glow doesn't grow with the samples
+      fill_hdr_from_linear(rt, lin, final_pt_.settings().view_transform, final_pt_.settings().exposure);
+  }
   FilterFrame frame = trace_filter_frame(final_pt_, rt, render_view_, render_proj_, render_eye_, render_forward_, nullptr);
   frame.far_distance = render_far_;  // the camera's when the render started (it may have changed since)
   for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
@@ -905,7 +912,7 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam, uint64
       h = (h ^ b) * 1099511628211ull;
     }
   }
-  h ^= hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }) * 31;
+  h ^= hash_reflect([this](Reflector &r) { scene_->render.reflect_raster(r); }) * 31;  // the path tracer's settings don't redraw a view
   h ^= hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) * 131;
   h ^= hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }) * 1031;  // baked and realtime GI settings
   return h;
@@ -1089,7 +1096,7 @@ uint64_t Editor::frame_scene_hash(uint64_t *scene_hash) {
   uint64_t h = scene_render_hash();
   if (scene_hash) *scene_hash = h;
   auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
-  mix(hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }));
+  mix(hash_reflect([this](Reflector &r) { scene_->render.reflect_raster(r); }));  // (not the path tracer's settings)
   mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
   mix(hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }));  // baked and realtime GI settings
   return h;
@@ -1190,8 +1197,12 @@ uint64_t Editor::raster_opt_key() const {
 uint64_t Editor::live_preview_hash() {
   GameObject *owner = nullptr;
   Camera *cam = main_camera(*scene_, &owner);
-  return camera_render_hash(owner, cam);
+  return camera_render_hash(owner, cam) ^ trace_settings_hash();
 }
+
+/* The path tracer's own settings (samples, bounces, denoiser, device...): a traced picture restarts when
+ * they change, while the rasterized views' keys hash only the raster-relevant ones. */
+uint64_t Editor::trace_settings_hash() { return hash_reflect([this](Reflector &r) { scene_->render.reflect(r); }) * 0x9E3779B97F4A7C15ull; }
 
 /* Unity's Camera Preview: selecting a camera shows what it sees in a corner
  * of the Scene view. Shaded is the rasterizer (cheap); Rendered runs the
@@ -1231,7 +1242,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     cam_preview_key_ = 0;  // the inset now holds the traced picture
     /* Rebuild when the scene, this camera or the inset size changes; then add
      * a few milliseconds of samples every frame until the preview count. */
-    uint64_t hash = camera_render_hash(g, cam) ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
+    uint64_t hash = camera_render_hash(g, cam) ^ trace_settings_hash() ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
     const FilterStack &filters = camera_filters(g);
     int tw = w, th = h;
     Recti tdst{0, 0, w, h};
@@ -1262,14 +1273,18 @@ void Editor::draw_camera_preview(const Recti &view) {
         cam_preview_done_ = true;
       }
       else {
-        cam_preview_pt_.resolve(traced_img.pixels.data(), tw, false);
+        if (filters.needs_hdr) {  // the linear light once: the resolve and bloom's plane (not twice a frame)
+          cam_preview_lin_ = cam_preview_pt_.linear_rgb(false);
+          cam_preview_pt_.resolve_rgb(cam_preview_lin_, traced_img.pixels.data(), tw);
+        }
+        else cam_preview_pt_.resolve(traced_img.pixels.data(), tw, false);
         u.redraw = true;
       }
       if (!filters.empty()) {
         /* The filters' passes, with the first hits' depth and ids (outlines, fog), scaled up into the inset. */
         RenderTarget trt;
         trt.attach(traced_img, {0, 0, tw, th});
-        if (filters.needs_hdr && cam_preview_done_)
+        if (filters.needs_hdr)  // the linear light at every resolve (kept above): the bloom doesn't grow as samples accumulate
           fill_hdr_from_linear(trt, cam_preview_lin_, cam_preview_pt_.settings().view_transform, cam_preview_pt_.settings().exposure);
         const float ta = tdst.w / (float)std::max(1, tdst.h);
         const FilterFrame tframe = trace_filter_frame(cam_preview_pt_, trt, v, tdst.w == w && tdst.h == h ? p : cam->projection(ta), eye, q.rotate({0, 0, 1}), cam);

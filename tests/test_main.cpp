@@ -205,6 +205,7 @@ static void round44_tests();
 static void round45_tests();
 static void round46_tests();
 static void round47_tests();
+static void round48_tests();
 
 int main() {
   register_builtin_components();
@@ -829,6 +830,7 @@ int main() {
   round45_tests();
   round46_tests();
   round47_tests();
+  round48_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -7658,13 +7660,14 @@ static void round27_tests() {
     /* A tall view gets bars top and bottom. */
     filter_layout(s, 600, 900, iw, ih, dst);
     CHECK(dst.w == 600 && dst.h == 450 && dst.x == 0 && dst.y == 225 && iw == 320 && ih == 240);
-    /* A filter never adds pixels: a view smaller than the internal size is rendered at its own size. */
+    /* A view smaller than the internal size still renders at the internal size (task 0026: a small
+     * Camera Preview inset shows the Game view's look) and is shrunk into the view. */
     s.fit = FilterStack::Fill;
     filter_layout(s, 100, 50, iw, ih, dst);
-    CHECK(iw == 100 && ih == 50 && dst.w == 100 && dst.h == 50);
+    CHECK(iw == 480 && ih == 240 && dst.w == 100 && dst.h == 50);
     s.fit = FilterStack::Letterbox;
     filter_layout(s, 100, 50, iw, ih, dst);
-    CHECK(iw <= dst.w && ih <= dst.h && dst.w <= 100 && dst.h <= 50 && iw >= 1 && ih >= 1);
+    CHECK(iw == 320 && ih == 240 && dst.w <= 100 && dst.h <= 50 && dst.w >= 1 && dst.h >= 1);
     /* No internal size: the view itself. */
     FilterStack none;
     filter_layout(none, 640, 480, iw, ih, dst);
@@ -7672,20 +7675,29 @@ static void round27_tests() {
     /* Odd sizes: 1 x 1 views, zero and negative views, absurd internal sizes. */
     s.fit = FilterStack::Fill;
     filter_layout(s, 1, 1, iw, ih, dst);
-    CHECK(iw == 1 && ih == 1 && dst.w == 1 && dst.h == 1);
+    CHECK(iw == 240 && ih == 240 && dst.w == 1 && dst.h == 1);
     filter_layout(s, 0, -5, iw, ih, dst);
     CHECK(iw >= 1 && ih >= 1 && dst.w >= 1 && dst.h >= 1);
     s.fit = FilterStack::Letterbox;
     filter_layout(s, 1, 1, iw, ih, dst);
-    CHECK(iw == 1 && ih == 1 && dst.w == 1 && dst.h == 1);
+    CHECK(iw == 320 && ih == 240 && dst.w == 1 && dst.h == 1);
     FilterStack huge;
     huge.width = 1000000;
     huge.height = 1000000;
     for (int fit : {0, 1}) {
       huge.fit = fit;
       filter_layout(huge, 1920, 1080, iw, ih, dst);
-      CHECK(iw >= 1 && ih >= 1 && iw <= 1920 && ih <= 1080);
+      CHECK(iw >= 1 && ih >= 1 && iw <= 1920 && ih <= 1080);  // an absurd stack size never exceeds the view (1080p here)
       CHECK(dst.x >= 0 && dst.y >= 0 && dst.right() <= 1920 && dst.bottom() <= 1080);
+    }
+    /* A squeezed view can't ask for a huge internal image either: both sides are capped (1920 x 1080, or
+     * the view's own size when larger). */
+    for (int fit : {0, 1}) {
+      huge.fit = fit;
+      filter_layout(huge, 1600, 8, iw, ih, dst);
+      CHECK(iw >= 1 && ih >= 1 && iw <= 1920 && ih <= 1080 && dst.right() <= 1600 && dst.bottom() <= 8);
+      filter_layout(huge, 16384, 16, iw, ih, dst);
+      CHECK(iw >= 1 && ih >= 1 && iw <= 16384 && ih <= 1080 && dst.right() <= 16384 && dst.bottom() <= 16);
     }
     FilterStack negative;
     negative.width = -3;
@@ -18098,5 +18110,183 @@ static void round47_tests() {
     CHECK(ed.scene().active_camera == by_name(ed.scene(), "Main Camera")->id);
     ed.command("activecamera none");
     CHECK(ed.scene().active_camera == 0);
+  });
+}
+
+/* Round 48 (task 0026, ADR 0016 part 2): filters look the same at every resolution and during traces. */
+static int r48_runs(const Image &img, int y) {  // colour changes along one row (a pixelated row: one per cell)
+  int n = 0;
+  for (int x = 1; x < img.width; x++)
+    if ((img.pixels[(size_t)y * img.width + x] & 0xFFFFFF) != (img.pixels[(size_t)y * img.width + x - 1] & 0xFFFFFF)) n++;
+  return n;
+}
+static void round48_tests() {
+  test("pixel scale: an Edge Outline covers the same fraction of the picture at 540p and at 1080p (±10 %)", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("select Main Camera");
+    ed.command("filter add Edge Outline");
+    ed.command("set EdgeOutline.Thickness 2");  // (thickness 1 rounds to 1 pixel at both sizes: relatively thicker at 540p, by design)
+    auto fraction = [&](int w, int h) {
+      ed.command("set Render.ResolutionX " + std::to_string(w));
+      ed.command("set Render.ResolutionY " + std::to_string(h));
+      ed.command("render");
+      for (int i = 0; i < 100 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      return r47_dark(img, {0, 0, img.width, img.height}) / (double)(img.width * img.height);
+    };
+    const double f540 = fraction(960, 540), f1080 = fraction(1920, 1080);
+    std::printf("    outlined fraction: %.4f at 540p, %.4f at 1080p\n", f540, f1080);
+    CHECK(f540 > 0.002 && f1080 > 0.002);
+    CHECK(std::fabs(f540 - f1080) <= 0.1 * std::max(f540, f1080));
+  });
+  test("pixel scale: a letterboxed 21:9 stack keeps square pixels in a small inset, and a Fill stack in a very wide view stays bounded", [] {
+    FilterStack s;
+    s.width = 2560;
+    s.height = 1080;
+    s.fit = FilterStack::Letterbox;
+    int iw = 0, ih = 0;
+    Recti dst;
+    filter_layout(s, 320, 135, iw, ih, dst);
+    std::printf("    21:9 stack in a 320 x 135 inset: %d x %d internal\n", iw, ih);
+    CHECK_NEAR((double)iw / ih, 2560.0 / 1080.0, 0.01);  // one scale factor for both sides
+    CHECK(iw <= 1920 && ih <= 1080);
+    s.fit = FilterStack::Fill;
+    filter_layout(s, 1600, 8, iw, ih, dst);
+    std::printf("    Fill stack in a 1600 x 8 view: %d x %d internal\n", iw, ih);
+    CHECK(iw <= 1920 && ih >= 1 && ih <= 1080);
+  });
+  test("pixel scale: Color Grading's exposure applies in linear light only where the HDR plane still matches the picture (a glow or a solid clear keeps the 8-bit path)", [] {
+    Image img;
+    img.resize(32, 8);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 32, 8});
+    rt.hdr.assign((size_t)32 * 8, Vec3(0.5f));  // scene light, encoded below
+    rt.hdr_view_transform = ViewTransform::Standard;
+    rt.hdr_exposure = 0.0f;
+    for (int i = 0; i < 32 * 8; i++) rt.hdr[(size_t)i] = i % 32 < 16 ? Vec3(0.5f) : Vec3(-1.0f, 0.0f, 0.0f);  // the right half: unshaded (a solid clear)
+    display::encode_span(&rt.hdr[0].x, img.pixels.data(), 16, ViewTransform::Standard, 0.0f);
+    for (int y = 1; y < 8; y++) std::copy(img.pixels.begin(), img.pixels.begin() + 16, img.pixels.begin() + (size_t)y * 32);
+    for (int y = 0; y < 8; y++)
+      for (int x = 16; x < 32; x++) img.pixels[(size_t)y * 32 + x] = 0xFF2040C0u;  // a solid clear colour the plane knows nothing about
+    img.pixels[3] = 0xFFFFFFFFu;  // one pixel drawn over since (a glow): not the plane's encoding
+    ColorGradingParams p;
+    p.exposure = 1.0f;
+    apply_color_grading(rt, p);
+    const uint32_t lit = img.pixels[0], glow = img.pixels[3], solid = img.pixels[20];
+    std::printf("    +1 EV: a shaded pixel %06x (from 0.5 linear), the glow %06x, the solid clear %06x\n", lit & 0xFFFFFF, glow & 0xFFFFFF, solid & 0xFFFFFF);
+    CHECK(((lit >> 16) & 255) > 230);     // 0.5 x 2 = 1.0 linear: white
+    CHECK(glow == 0xFFFFFFFFu);           // already white; untouched by the HDR path and clamped by the 8-bit one
+    CHECK(((solid >> 16) & 255) > 0x20 && ((solid >> 8) & 255) > 0x40 && (solid & 255) > 0xC0);  // brighter, not black
+  });
+  test("pixel scale: a Pixelate filter gives the same number of cells across a row at 540p and at 1080p (±15 %)", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("select Main Camera");
+    ed.command("filter add Pixelate");
+    ed.command("set Pixelate.CellSize 12");
+    auto cells = [&](int w, int h) {
+      ed.command("set Render.ResolutionX " + std::to_string(w));
+      ed.command("set Render.ResolutionY " + std::to_string(h));
+      ed.command("render");
+      for (int i = 0; i < 100 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      int best = 0;
+      for (int y = img.height / 3; y < img.height * 2 / 3; y += img.height / 12) best = std::max(best, r48_runs(img, y));
+      return best;
+    };
+    const int c540 = cells(960, 540), c1080 = cells(1920, 1080);
+    std::printf("    colour changes along a row: %d at 540p, %d at 1080p\n", c540, c1080);
+    CHECK(c540 > 10 && c1080 > 10);
+    CHECK(std::abs(c540 - c1080) <= 0.15 * std::max(c540, c1080));
+  });
+  test("pixel scale: changing the path tracer's Samples doesn't redraw the Game view; changing Exposure does", [] {
+    Editor ed;
+    r34_open(ed);
+    r34_steps(ed, 3);
+    R34Count t0 = r34_totals(ed);
+    ed.command("set Render.Samples 77");
+    r34_steps(ed, 3);
+    R34Count d = r34_totals(ed) - t0;
+    std::printf("    view renders after Samples: %llu\n", (unsigned long long)d.renders);
+    CHECK(d.renders == 0);
+    t0 = r34_totals(ed);
+    ed.command("set Render.Exposure 1.5");
+    r34_steps(ed, 3);
+    d = r34_totals(ed) - t0;
+    std::printf("    view renders after Exposure: %llu\n", (unsigned long long)d.renders);
+    CHECK(d.renders >= 1);
+  });
+  test("pixel scale: a filtered progressive trace's bloom doesn't brighten as samples accumulate (mean within 5 % from the first sample to the last)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("set Render.PreviewSamples 256");  // enough that the first frames show an unfinished trace (verify mode too)
+    ed.command("set Render.Denoise false");
+    ed.command("select Main Camera");
+    ed.command("filter add Bloom");
+    ed.command("set Bloom.Intensity 1");
+    ed.command("set Bloom.Threshold 0.2");
+    ed.command("camerapreview rendered");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti pr = ed.cam_preview_rect_for_test();
+    CHECK(pr.w > 40);
+    pr.y += pr.h / 5, pr.h -= pr.h / 5;  // (not the inset's header: its sample count text changes)
+    const double m1 = r47_mean(r34_crop(ed, pr));
+    const bool partial = !ed.cam_preview_done_for_test();  // (a very fast machine can finish within the first frames: then there is nothing to compare)
+    for (int i = 0; i < 4000 && !ed.cam_preview_done_for_test(); i++) ed.step_frame_headless();  // (a sanitizer build is slow: many frames)
+    CHECK(ed.cam_preview_done_for_test());
+    ed.step_frame_headless();
+    const double mN = r47_mean(r34_crop(ed, pr));
+    if (!partial) std::printf("    (the trace finished within the first frames: nothing partial to compare)\n");
+    std::printf("    Rendered Preview with bloom, mean brightness: %.1f after the first frames, %.1f finished\n", m1, mN);
+    if (partial) CHECK(std::fabs(mN - m1) <= 0.05 * std::max(1.0, std::max(m1, mN)));  // (5 %, not the spec's 2 %: the first frames are a noisy trace)
+  });
+  test("pixel scale: with the scene's lighting on, the Game view's background is the world's gradient, not the editor's sky", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.scene().environment.mode = 0;  // Gradient
+    ed.scene().environment.sky = {1.0f, 0.0f, 0.0f};
+    ed.scene().environment.equator = {1.0f, 0.0f, 0.0f};
+    r34_steps(ed, 3);
+    const Recti gv = ed.game_rect_for_test();
+    const uint32_t top = ed.framebuffer().pixels[(size_t)(gv.y + 3) * ed.framebuffer().width + gv.x + gv.w / 2];
+    std::printf("    Game view sky pixel with a red gradient: %06x\n", top & 0xFFFFFF);
+    CHECK(((top >> 16) & 255) > 2 * (((top >> 8) & 255) + 10) && ((top >> 16) & 255) > 2 * ((top & 255) + 10));
+  });
+  test("pixel scale: the Rendered Camera Preview restarts when a path tracer setting changes (Max Bounces), though the Game view doesn't redraw", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("set Render.PreviewSamples 4");
+    ed.command("select Main Camera");
+    ed.command("camerapreview rendered");
+    for (int i = 0; i < 400 && !ed.cam_preview_done_for_test(); i++) ed.step_frame_headless();
+    CHECK(ed.cam_preview_done_for_test());
+    const R34Count t0 = r34_totals(ed);
+    ed.command("set Render.MaxBounces 1");
+    r34_steps(ed, 2);
+    CHECK(!ed.cam_preview_done_for_test() || (r34_totals(ed) - t0).renders == 0);  // restarted (or already finished again): a new trace
+    for (int i = 0; i < 400 && !ed.cam_preview_done_for_test(); i++) ed.step_frame_headless();
+    CHECK(ed.cam_preview_done_for_test());
+    CHECK((r34_totals(ed) - t0).renders == 0);  // the Game view (raster) didn't redraw for a path tracer setting
+  });
+  test("pixel scale: a paused Game view with Film Grain keeps the same picture from frame to frame", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Film Grain");
+    ed.command("play");
+    r34_steps(ed, 4);
+    ed.run_action("play.pause");
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> a = r34_crop(ed, ed.game_rect_for_test());
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> b = r34_crop(ed, ed.game_rect_for_test());
+    CHECK(!a.empty() && a == b);
+    ed.command("stop");
   });
 }

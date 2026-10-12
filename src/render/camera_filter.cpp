@@ -33,17 +33,49 @@ void filter_layout(const FilterStack &s, int fit, int dw, int dh, int &iw, int &
     w = std::max(1, std::min(w, dw));
     h = std::max(1, std::min(h, dh));
     dst = {(dw - w) / 2, (dh - h) / 2, w, h};
-    iw = std::min(clamp_size(s.width), w);
-    ih = std::min(clamp_size(s.height), h);
+    /* A box smaller than the console's frame still renders at the frame's size and is shrunk into it
+     * (box average), so a small Camera Preview inset shows the Game view's look; never beyond 1080p
+     * rows for a view below that (an absurd stack size can't make a huge internal image). */
+    const int sw = clamp_size(s.width), sh = clamp_size(s.height);
+    const double f = std::min({1.0, (double)std::max(w, 1920) / sw, (double)std::max(h, 1080) / sh});  // one factor: square pixels
+    iw = std::max(1, (int)std::lround(sw * f));
+    ih = std::max(1, (int)std::lround(sh * f));
     return;
   }
-  /* Fill: the stack's height in rows, the view's aspect, square pixels. */
-  ih = std::min(clamp_size(s.height), dh);
-  iw = std::max(1, std::min(dw, (int)std::lround((double)ih * dw / dh)));
+  /* Fill: the stack's height in rows, the view's aspect, square pixels. A view with fewer rows than the
+   * stack still renders at the stack's height and is shrunk into it (box average), so a small Camera
+   * Preview inset shows the same look as the Game view; never beyond 1080 rows (or 1920 columns) for a
+   * smaller view, so a squeezed view can't ask for a huge image. */
+  ih = std::min(clamp_size(s.height), std::max(dh, 1080));
+  iw = std::max(1, (int)std::lround((double)ih * dw / dh));
+  const int wcap = std::max(dw, 1920);
+  if (iw > wcap) {  // a very wide view: the width caps and the height follows (square pixels)
+    iw = wcap;
+    ih = std::max(1, (int)std::lround((double)iw * dh / dw));
+  }
 }
 
 void upscale_nearest(const uint32_t *src, int sw, int sh, int sstride, uint32_t *dst, int dstride, const Recti &r) {
   if (!src || !dst || sw <= 0 || sh <= 0 || r.w <= 0 || r.h <= 0) return;
+  if (sw > r.w || sh > r.h) {  // shrinking: each destination pixel averages its block of source pixels
+    JobSystem::global().parallel_for(r.h, 32, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++) {
+        const int sy0 = (int)(y * sh / r.h), sy1 = std::max(sy0 + 1, (int)((y + 1) * sh / r.h));
+        uint32_t *d = dst + (size_t)(r.y + y) * dstride + r.x;
+        for (int x = 0; x < r.w; x++) {
+          const int sx0 = (int)((int64_t)x * sw / r.w), sx1 = std::max(sx0 + 1, (int)((int64_t)(x + 1) * sw / r.w));
+          uint32_t rs = 0, gs = 0, bs = 0, n = 0;
+          for (int yy = sy0; yy < sy1 && yy < sh; yy++)
+            for (int xx = sx0; xx < sx1 && xx < sw; xx++) {
+              const uint32_t c = src[(size_t)yy * sstride + xx];
+              rs += (c >> 16) & 255, gs += (c >> 8) & 255, bs += c & 255, n++;
+            }
+          if (n) d[x] = 0xFF000000u | ((rs + n / 2) / n) << 16 | ((gs + n / 2) / n) << 8 | ((bs + n / 2) / n);
+        }
+      }
+    });
+    return;
+  }
   std::vector<int> col((size_t)r.w);
   for (int x = 0; x < r.w; x++) col[(size_t)x] = std::min(sw - 1, (int)((int64_t)x * sw / r.w));
   JobSystem::global().parallel_for(r.h, 32, [&](int64_t y0, int64_t y1) {
@@ -238,11 +270,37 @@ void apply_color_grading(RenderTarget &rt, const ColorGradingParams &p) {
   }
   const bool lgg = lift != Vec3(0.0f) || gamma != Vec3(1.0f) || gain != Vec3(1.0f);
   if (ex == 1.0f && contrast == 0.0f && sat == 1.0f && temp == 0.0f && tint == 0.0f && !lgg) return;  // neutral: untouched
+  /* Scene-referred light where bloom asked for it: for a pixel whose colour still is that plane's
+   * encoding (nothing drew over it: no glow, no outline, no solid clear, no depth of field), the exposure
+   * applies to the light and the pixel is encoded again through the same view transform, so highlights
+   * roll off as the camera's would instead of clipping in 8 bits. Every other pixel takes the 8-bit path. */
+  std::vector<uint8_t> done;
+  if (ex != 1.0f && rt.hdr.size() == (size_t)rt.width * rt.height && rt.color) {
+    const int W = rt.width;
+    done.assign((size_t)W * rt.height, 0);
+    JobSystem::global().parallel_for(rt.height, 16, [&](int64_t y0, int64_t y1) {
+      std::vector<uint32_t> enc((size_t)W);
+      for (int64_t y = y0; y < y1; y++) {
+        Vec3 *h = rt.hdr.data() + (size_t)y * W;
+        uint32_t *row = rt.color + (size_t)y * rt.stride;
+        display::encode_span(&h[0].x, enc.data(), (size_t)W, rt.hdr_view_transform, rt.hdr_exposure);
+        for (int x = 0; x < W; x++) {
+          if (h[x].x < 0.0f || (enc[(size_t)x] & 0xFFFFFF) != (row[x] & 0xFFFFFF)) continue;  // unshaded, or drawn over since
+          h[x] = h[x] * ex;
+          done[(size_t)y * W + x] = 1;
+        }
+        display::encode_span(&h[0].x, enc.data(), (size_t)W, rt.hdr_view_transform, rt.hdr_exposure);
+        for (int x = 0; x < W; x++)
+          if (done[(size_t)y * W + x]) row[x] = (row[x] & 0xFF000000u) | (enc[(size_t)x] & 0xFFFFFF);
+      }
+    });
+  }
   const float *lin = srgb_decode_table();
-  each_pixel(rt, [&](int, int, uint32_t &px) {
+  each_pixel(rt, [&](int x, int y, uint32_t &px) {
     /* In linear light, where exposure and white balance mean what they say. */
+    const bool through_hdr = !done.empty() && done[(size_t)y * rt.width + x];
     Vec3 c{lin[(px >> 16) & 255], lin[(px >> 8) & 255], lin[px & 255]};
-    c = c * wb * ex;
+    c = c * wb * (through_hdr ? 1.0f : ex);
     if (contrast != 0.0f)  // a power curve through middle grey (0.18), as ACES / Unity grade contrast
       for (int k = 0; k < 3; k++) c[k] = c[k] > 0.0f ? 0.18f * std::pow(c[k] / 0.18f, 1.0f + contrast) : 0.0f;
     if (sat != 1.0f) {
@@ -325,10 +383,16 @@ void apply_chromatic_aberration(RenderTarget &rt, float intensity) {
   });
 }
 
+/* A pixel-sized parameter at this picture's size (FilterFrame::pixel_scale), at least one pixel. */
+static int scaled_px(float n, const FilterFrame *frame, int hi) {
+  const float s = frame && finite_bits(frame->pixel_scale) && frame->pixel_scale > 0.0f ? frame->pixel_scale : 1.0f;
+  return std::max(1, std::min(hi, (int)std::lround(n * s)));
+}
+
 void apply_film_grain(RenderTarget &rt, const GrainParams &p, const FilterFrame *frame) {
   const float in = clampf01(fin(p.intensity, 0.0f));
   if (in <= 0.0f) return;
-  const int cell = std::max(1, std::min(16, (int)std::lround(fin(p.size, 1.0f))));
+  const int cell = scaled_px(std::max(1.0f, std::min(16.0f, fin(p.size, 1.0f))), frame, 64);
   const float resp = clampf01(fin(p.response, 0.8f));
   /* A new pattern 24 times a second while playing; a fixed one otherwise (reproducible frames). */
   const uint32_t seed = frame && frame->animate && finite_bits(frame->time)
@@ -364,8 +428,8 @@ void apply_lens_distortion(RenderTarget &rt, float intensity, float scale) {
   });
 }
 
-void apply_pixelate(RenderTarget &rt, int cell) {
-  const int n = std::max(1, std::min(512, cell));
+void apply_pixelate(RenderTarget &rt, int cell, const FilterFrame *frame) {
+  const int n = scaled_px((float)std::max(1, std::min(512, cell)), frame, 2048);
   if (n <= 1 || rt.width <= 0) return;
   const Source src(rt);
   each_pixel(rt, [&](int x, int y, uint32_t &px) {
@@ -379,7 +443,7 @@ void apply_pixelate(RenderTarget &rt, int cell) {
 void apply_edge_outline(RenderTarget &rt, const OutlineParams &p, const FilterFrame *frame) {
   const int W = rt.width, H = rt.height;
   if (!frame || !rt.color || W <= 0 || H <= 0 || (int)rt.depth.size() < W * H || (int)rt.ids.size() < W * H) return;
-  const int t = std::max(1, std::min(8, p.thickness));
+  const int t = scaled_px((float)std::max(1, std::min(8, p.thickness)), frame, 32);
   const float sens = std::max(1e-4f, fin(p.depth_sensitivity, 0.05f));
   /* Distance along the view for each pixel (the sky: infinite), from the depth buffer. */
   std::vector<float> dist((size_t)W * H);
@@ -439,6 +503,9 @@ void apply_crt(RenderTarget &rt, const CrtParams &p, const FilterFrame *frame) {
   }
   const Source src(rt);
   const float W = (float)rt.width, H = (float)rt.height;
+  /* A scanline (and a phosphor column) is this many pixels: 1 up to 1620 rows, 2 at 2160p (whole pixels; a
+   * finer scanline than a pixel isn't drawable). */
+  const int half = scaled_px(1.0f, frame, 16);
   each_pixel(rt, [&](int x, int y, uint32_t &px) {
     float fx = x + 0.5f, fy = y + 0.5f;
     if (curve > 0.0f) {
@@ -452,8 +519,8 @@ void apply_crt(RenderTarget &rt, const CrtParams &p, const FilterFrame *frame) {
       fx = (su + 1.0f) * 0.5f * W, fy = (sv + 1.0f) * 0.5f * H;
     }
     float c[3] = {src.channel(fx, fy, 16), src.channel(fx, fy, 8), src.channel(fx, fy, 0)};
-    float m = bright * ((y & 1) ? 1.0f - scan : 1.0f);  // every other row dark: scanlines
-    for (int k = 0; k < 3; k++) c[k] *= m * (x % 3 == k ? 1.0f : 1.0f - mask);  // aperture grille: one phosphor per column
+    float m = bright * (((y / half) & 1) ? 1.0f - scan : 1.0f);  // every other row dark: scanlines
+    for (int k = 0; k < 3; k++) c[k] *= m * ((x / half) % 3 == k ? 1.0f : 1.0f - mask);  // aperture grille: one phosphor per column
     px = pack(px, clamp8f(c[0]), clamp8f(c[1]), clamp8f(c[2]));
   });
 }
@@ -655,18 +722,19 @@ void apply_bloom(RenderTarget &rt, const BloomParams &p) {
   });
 }
 
-void apply_sharpen(RenderTarget &rt, float amount) {
+void apply_sharpen(RenderTarget &rt, float amount, const FilterFrame *frame) {
   const float a = std::max(0.0f, std::min(4.0f, fin(amount, 0.0f)));
   if (a <= 0.0f || rt.width <= 0) return;
   const Source src(rt);
+  const int d = scaled_px(1.0f, frame, 16);  // the neighbours' distance: 1 pixel up to 1620 rows, 2 at 2160p (whole pixels)
   each_pixel(rt, [&](int x, int y, uint32_t &px) {
     /* Unsharp mask with the 4 neighbours: a flat area has no difference to add. */
     int out[3];
     for (int k = 0; k < 3; k++) {
       const int sh = 16 - 8 * k;
       const int c = (int)((src.at(x, y) >> sh) & 255);
-      const int n = (int)((src.at(x - 1, y) >> sh) & 255) + (int)((src.at(x + 1, y) >> sh) & 255) + (int)((src.at(x, y - 1) >> sh) & 255) +
-                    (int)((src.at(x, y + 1) >> sh) & 255);
+      const int n = (int)((src.at(x - d, y) >> sh) & 255) + (int)((src.at(x + d, y) >> sh) & 255) + (int)((src.at(x, y - d) >> sh) & 255) +
+                    (int)((src.at(x, y + d) >> sh) & 255);
       out[k] = clamp8f(c + a * (4 * c - n) * 0.25f);
     }
     px = pack(px, out[0], out[1], out[2]);

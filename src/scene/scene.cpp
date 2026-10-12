@@ -231,6 +231,24 @@ void EnvironmentSettings::reflect(Reflector &r) {
   r.field("Rotation", rotation, 0.5f, -360.0f, 360.0f);
 }
 
+/* What a rasterized view reads of the render settings (the views' cache keys hash only these, so changing
+ * the path tracer's samples doesn't redraw the Game view). */
+void RenderSettings::reflect_raster(Reflector &r) {
+  r.field("Resolution X", width, 16, 16384);
+  r.field("Resolution Y", height, 16, 16384);
+  r.field("Resolution %", percent, 1, 400);
+  r.field("Anti-Aliasing (SSAA)", raster_aa, 1, 4);
+  r.field("Shadows", shadows);
+  r.field("Shadow Resolution", shadow_resolution, 256, 8192);
+  static const std::vector<const char *> vts = [] {
+    std::vector<const char *> v;
+    for (const std::string &n : view_transform_names()) v.push_back(n.c_str());
+    return v;
+  }();
+  r.enumeration("View Transform", view_transform, vts.data(), (int)vts.size());
+  r.field("Exposure", exposure, 0.02f, -10.0f, 10.0f);
+}
+
 void RenderSettings::reflect(Reflector &r) {
   static const char *engines[] = {"Rasterized (EEVEE-like)", "Path Traced (Cycles-like)"};
   static const char *formats[] = {"PNG", "JPEG", "Radiance HDR", "OpenEXR (half float)"};
@@ -860,7 +878,7 @@ void PixelateEffect::reflect(Reflector &r) {
 }
 void PixelateEffect::contribute(FilterStack &s) const {
   const int n = cell_size;
-  s.passes.push_back([n](RenderTarget &rt, const FilterFrame *) { apply_pixelate(rt, n); });
+  s.passes.push_back([n](RenderTarget &rt, const FilterFrame *f) { apply_pixelate(rt, n, f); });
 }
 
 void EdgeOutlineEffect::reflect(Reflector &r) {
@@ -894,7 +912,7 @@ void CrtEffect::contribute(FilterStack &s) const {
 void SharpenEffect::reflect(Reflector &r) { r.field("Amount", amount, 0.01f, 0.0f, 4.0f); }
 void SharpenEffect::contribute(FilterStack &s) const {
   const float a = amount;
-  s.passes.push_back([a](RenderTarget &rt, const FilterFrame *) { apply_sharpen(rt, a); });
+  s.passes.push_back([a](RenderTarget &rt, const FilterFrame *f) { apply_sharpen(rt, a, f); });
 }
 
 void BloomEffect::reflect(Reflector &r) {
