@@ -892,6 +892,11 @@ void Editor::step_final_render() {
   if (!rendering_) return;
   const RenderSettings &rs = scene_->render;
   int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
+  if (final_pt_.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there
+    render_start_ = now_seconds();
+    render_status_ = strprintf("%s: %s", render_preview_ ? "Preview" : "Path tracing", final_pt_.device_summary().c_str());
+    Log::info("%s", render_status_.c_str());
+  }
   int done = final_pt_.render(40.0, target);
   render_time_ = now_seconds() - render_start_;
   bool finished = done >= target;
@@ -1474,6 +1479,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       cam_preview_pt_.set_camera(v, tp, tw, th, camera_lens(cam, ta));
       cam_preview_done_ = false;
     }
+    else if (cam_preview_pt_.adopt_ready_gpus()) cam_preview_done_ = false;  // its GPU opened: samples restart there (task 0037)
     if (cam_preview_img_.width != w || cam_preview_img_.height != h) cam_preview_img_.resize(w, h);  // keeps a finished preview
     if (traced_img.width != tw || traced_img.height != th) traced_img.resize(tw, th);
     const int target = std::max(1, rs.preview_samples);
@@ -1507,6 +1513,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       }
     }
     status = strprintf("  %d / %d", std::min(cam_preview_pt_.samples(), target), target);
+    if (cam_preview_pt_.waiting_for_gpu()) status += "  (CPU: GPU starting)";
   }
   else {
     cam_preview_pt_hash_ = 0;

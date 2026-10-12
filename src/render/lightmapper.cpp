@@ -409,6 +409,7 @@ bool Lightmapper::step(double budget_ms) {
   ScopedTimer t;
   /* On a GPU (task 0018): batches of texels gather their indirect light there, the Baked lights' direct
    * light is added here. A GPU error leaves the rest to the CPU. */
+  bool gpu_waiting = false;  // the GPU is still opening (task 0037): this step bakes on the CPU
   if (s_.gpu_device >= 0 && gpu_error_.empty() && s_.bounces > 0) {
     const size_t per = (size_t)std::max<int64_t>(1024, std::min<int64_t>(1 << 20, ((int64_t)1 << 23) / std::max(1, s_.indirect_samples)));
     std::vector<Vec3> origins, normals, ind;
@@ -425,6 +426,10 @@ bool Lightmapper::step(double budget_ms) {
       }
       std::string err;
       if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err) || ind.size() != batch) {
+        if (pt_->gpu_gather_waiting()) {
+          gpu_waiting = true;
+          break;
+        }
         gpu_error_ = err.empty() ? "the GPU gather failed" : err;
         Log::warn("Baking on the GPU stopped (%s): the CPU bakes the rest", gpu_error_.c_str());
         break;
@@ -443,7 +448,7 @@ bool Lightmapper::step(double budget_ms) {
       gpu_texels_ += batch;
       rays_ += (uint64_t)batch * (uint64_t)s_.indirect_samples;
     } while (done_ < total_ && t.ms() < budget_ms);
-    if (gpu_error_.empty()) {
+    if (gpu_error_.empty() && !gpu_waiting) {
       if (done_ >= total_) {
         finish();
         return true;

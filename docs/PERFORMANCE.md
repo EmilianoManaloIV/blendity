@@ -304,6 +304,12 @@ Each row was a measurable bottleneck in the first stress run. The old implementa
 - **Flat hierarchies** gain little from dirty flags (1.6–1.8×). The benefit grows with depth.
 - Object-heavy scene loading is now limited by per-object work (component creation, a `std::map` per component), not parsing: ~3.7 µs per object.
 
+## GPU first use (task 0037)
+The first GPU render of a session builds the kernel's pipeline (2.4 MB of SPIR-V). On the user's machine a cold
+driver cache took about 80 s, on the editor's thread. Now it opens in the background: with the open slowed to 3 s
+by a test hook, the slowest editor frame was 17-30 ms and the preview moved to the GPU after 3.3 s. With the
+driver's cache warm, the pipeline takes 84-141 ms without Blendity's pipeline cache file and 9-13 ms with it.
+
 ## Next candidates
 
 - **Positions-only Edit Mode updates** (pass 6). Keep the triangulation, edges and n-gon regions while a

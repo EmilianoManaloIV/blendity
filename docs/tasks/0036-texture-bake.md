@@ -4,7 +4,7 @@
 - **Requirements:** R-03, R-06
 - **Decisions:** ADR 0019
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/34
 
 ## Goal
 "Bake textures onto a mesh" for export: every material effect Blendity renders (procedurals, `.ptex` textures,

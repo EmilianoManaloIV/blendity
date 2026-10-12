@@ -180,6 +180,15 @@ class PathTracer {
   const char *denoise_backend() const;
   /* "CPU", "NVIDIA GeForce RTX 4070 SUPER (RT cores)", "CPU + 2 GPUs" ... */
   std::string device_summary() const;
+  /* Task 0037: with background opening, a GPU that is still opening leaves the tracer on the CPU (gpu_starting);
+   * adopt_ready_gpus, called every frame, takes it when ready, uploads the scene and restarts the samples on it
+   * (true then). The editor's views turn it on; headless runs and tests open synchronously. */
+  void set_background_gpu_open(bool on) { background_gpu_open_ = on; }
+  bool gpu_starting() const { return gpu_starting_; }
+  bool waiting_for_gpu() const { return gpus_.empty() && gpu_starting_; }  // tracing on the CPU only because of it
+  bool adopt_ready_gpus();
+  /* gpu_gather returned false because its device is still opening (the caller gathers on the CPU this time). */
+  bool gpu_gather_waiting() const { return gpu_gather_waiting_; }
   static bool gpu_available();
   /* Errors from GPU devices that had to drop out (empty if none). */
   const std::string &gpu_error() const { return gpu_error_; }
@@ -265,6 +274,11 @@ class PathTracer {
   std::vector<float> cpu_last_dist_, last_dist_;  // the last hitting sample's first-hit distance (0 = none yet)
   void build_gpu_scene(gpu::Scene &s) const;
   void sync_gpus();
+  bool background_gpu_open_ = gpu::background_open_default();
+  bool gpu_starting_ = false;
+  uint64_t gpu_generation_seen_ = 0;
+  std::vector<std::pair<int, bool>> gpu_pending_;  // the devices it waits for (index, ray tracing hardware)
+  mutable bool gpu_gather_waiting_ = false;
   void upload_gpus();
 
   std::vector<PTObject> objects_;

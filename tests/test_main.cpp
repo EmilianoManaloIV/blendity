@@ -219,6 +219,7 @@ static void round55_tests();
 static void round56_tests();
 static void round57_tests();
 static void round58_tests();
+static void round59_tests();
 
 int main() {
   register_builtin_components();
@@ -854,6 +855,7 @@ int main() {
   round56_tests();
   round57_tests();
   round58_tests();
+  round59_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -20890,5 +20892,160 @@ static void round58_tests() {
     /* Out-of-range sizes are clamped (16..4096). */
     s.size = 1;
     CHECK(bake_textures(*plane, Mat4::identity(), {}, s).size == 16);
+  });
+}
+
+/* ===================================================================== */
+/* Round 59 (task 0037, ADR 0021): GPU devices open in the background     */
+/* ===================================================================== */
+
+static void round59_tests() {
+  test("GPU opening: a device that doesn't exist is refused at once (nothing pending, an error)", [] {
+    bool pending = true;
+    std::string err;
+    std::unique_ptr<gpu::Renderer> r = gpu::take_renderer(999, true, &pending, &err);
+    CHECK(!r && !pending && !err.empty());
+    CHECK(!gpu::open_renderer(-1, false, &err));
+  });
+
+  test("GPU opening: turning the Camera Preview to Rendered while the GPU opens slowly keeps every frame under 100 ms, traces on the CPU meanwhile, then on the GPU; the next view gets the spare at once", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));  // an earlier spare
+    gpu::drop_ready_renderers_for_test();
+    gpu::set_open_delay_for_test(3000);  // a cold driver cache, shortened
+    Editor ed;
+    r57_open(ed);
+    ed.set_background_gpu_open_for_test(true);
+    ed.command("device gpu");
+    ed.command("select Main Camera");
+    ed.command("camerapreview rendered");
+    ed.step_frame_headless();  // builds the preview's scene
+    /* The editor asks to be woken while the device opens (the run loop would otherwise sleep once the CPU samples
+     * are done, and never take the GPU). */
+    ed.step_frame_headless();
+    CHECK(!gpu::renderers_opening() || ed.next_wakeup_for_test() > 0.0);
+    const std::string gpu_name = gpu::devices()[0].name;
+    double worst = 0.0;
+    bool saw_cpu = false, saw_gpu = false;
+    int frames = 0;
+    ScopedTimer total;
+    while (total.ms() < 20000.0 && !saw_gpu) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      worst = std::max(worst, f.ms());
+      frames++;
+      const std::string d = ed.cam_preview_device_for_test();
+      saw_cpu = saw_cpu || d.find("GPU starting") != std::string::npos;
+      saw_gpu = d.find(gpu_name) != std::string::npos && d.find("starting") == std::string::npos;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    gpu::set_open_delay_for_test(0);
+    std::printf("    %d frames, the slowest %.1f ms; CPU while opening: %s; on the GPU after %.1f s: %s\n", frames, worst,
+                saw_cpu ? "yes" : "no", total.ms() / 1000.0, saw_gpu ? "yes" : "no");
+    CHECK(saw_cpu && saw_gpu);
+    CHECK(worst < 100.0);
+    /* The spare: once it has opened, the next view is served at once. */
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    bool pending = true;
+    std::unique_ptr<gpu::Renderer> spare = gpu::take_renderer(0, true, &pending);
+    CHECK(spare != nullptr && !pending);
+    gpu::return_renderer(std::move(spare), 0, true);
+  });
+
+  test("GPU opening: a tracer waiting for its GPU forgets it when the device turns back to the CPU; a lighting gather doesn't wait for an opening GPU", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    MeshPtr sphere = primitives::uv_sphere(0.5f, 16, 8);
+    std::vector<MaterialPtr> mats = {make_material("Grey", Vec3(0.5f))};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0.5f, 0.5f, 0.5f};
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));  // an earlier spare
+    gpu::drop_ready_renderers_for_test();
+    gpu::set_open_delay_for_test(1500);
+    PathTracer pt;
+    pt.set_background_gpu_open(true);
+    PTSettings st;
+    st.gpus = {0};
+    pt.set_settings(st);
+    pt.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    CHECK(pt.waiting_for_gpu());
+    st.gpus.clear();  // Render > Device: CPU
+    pt.set_settings(st);
+    pt.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    CHECK(!pt.gpu_starting() && pt.device_summary().find("starting") == std::string::npos);
+    /* The bake's gather: refused at once while the device opens (the bake does that slice on the CPU), then on it. */
+    PathTracer bake;
+    bake.set_background_gpu_open(true);
+    bake.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    std::vector<Vec3> origins(64, Vec3(0, 2, 0)), dirs(64, Vec3(0, -1, 0)), out;
+    std::string err;
+    ScopedTimer t;
+    const bool first = bake.gpu_gather(0, 1, origins, dirs, 4, out, nullptr, &err);
+    const double first_ms = t.ms();
+    CHECK(!first && bake.gpu_gather_waiting() && first_ms < 100.0);
+    bool later = false;
+    for (int i = 0; i < 300 && !later; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      later = bake.gpu_gather(0, 1, origins, dirs, 4, out, nullptr, &err);
+    }
+    std::printf("    the first gather returned in %.1f ms (waiting); on the GPU later: %s\n", first_ms, later ? "yes" : "no");
+    CHECK(later && out.size() == 64 && !bake.gpu_gather_waiting());
+    gpu::set_open_delay_for_test(0);
+  });
+
+  test("GPU opening: the pipeline cache is written, used by the next open, and a corrupt file is ignored and rewritten", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    /* In a scratch cache folder: never the user's (their Blendity may be using it). */
+    const char *old_env = std::getenv("BLENDITY_CACHE_DIR");
+    const std::string keep = old_env ? old_env : "";
+    const std::string dir = fs::join(test_dir(), "gpu_cache");
+    set_env("BLENDITY_CACHE_DIR", dir);
+    const std::string path = gpu::pipeline_cache_file(0, true);
+    CHECK(!path.empty() && path.find("gpu_cache") != std::string::npos);
+    std::remove(path.c_str());
+    std::string err;
+    std::unique_ptr<gpu::Renderer> a = gpu::Renderer::create(0, true, &err);
+    CHECK(a != nullptr);
+    if (!a) return;
+    CHECK(fs::exists(path) && !a->open_stats().from_pipeline_cache);
+    std::unique_ptr<gpu::Renderer> b = gpu::Renderer::create(0, true, &err);
+    CHECK(b && b->open_stats().from_pipeline_cache);
+    std::printf("    pipeline: %.0f ms without the cache file, %.0f ms with it (device %.0f ms; the driver's own cache is warm)\n",
+                a->open_stats().pipeline_ms, b ? b->open_stats().pipeline_ms : 0.0, a->open_stats().device_ms);
+    const std::string junk(4096, 'x');
+    CHECK(fs::write_file(path, junk));
+    std::unique_ptr<gpu::Renderer> c = gpu::Renderer::create(0, true, &err);
+    CHECK(c && !c->open_stats().from_pipeline_cache);
+    std::string good;
+    CHECK(fs::read_file(path, good) && good != junk && good.size() > 48);
+    /* A cache from another GPU (its UUID differs) with an intact trailer: the header check refuses it. */
+    if (good.size() > 48) {
+      std::string foreign = good.substr(0, good.size() - 16);
+      foreign[20] = (char)(foreign[20] ^ 0x5A);
+      uint64_t h = 1469598103934665603ull;
+      for (char ch : foreign) h = (h ^ (uint8_t)ch) * 1099511628211ull;
+      const uint32_t len = (uint32_t)foreign.size(), tag = 0x43504C42u;
+      foreign.append(reinterpret_cast<const char *>(&len), 4);
+      foreign.append(reinterpret_cast<const char *>(&tag), 4);
+      foreign.append(reinterpret_cast<const char *>(&h), 8);
+      CHECK(fs::write_file(path, foreign));
+      std::unique_ptr<gpu::Renderer> d = gpu::Renderer::create(0, true, &err);
+      CHECK(d && !d->open_stats().from_pipeline_cache);
+      /* and a torn copy of a good one (the trailer no longer matches) */
+      CHECK(fs::write_file(path, good.substr(0, good.size() / 2) + good.substr(good.size() - 16)));
+      std::unique_ptr<gpu::Renderer> e = gpu::Renderer::create(0, true, &err);
+      CHECK(e && !e->open_stats().from_pipeline_cache);
+    }
+    std::remove(path.c_str());
+    set_env("BLENDITY_CACHE_DIR", keep);
   });
 }

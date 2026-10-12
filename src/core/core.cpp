@@ -36,8 +36,9 @@ namespace bl {
 
 /* ---------------------------------------------------------------- Logging */
 
-static std::mutex g_log_mutex;
-static std::vector<LogEntry> g_log;
+/* Leaked: a detached thread (a GPU opening in the background, task 0037) may log while the program quits. */
+static std::mutex &g_log_mutex = *new std::mutex;
+static std::vector<LogEntry> &g_log = *new std::vector<LogEntry>;
 static size_t g_log_generation = 0;
 bool Log::echo_stdout = true;
 

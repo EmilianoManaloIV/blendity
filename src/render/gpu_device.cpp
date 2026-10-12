@@ -7,8 +7,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <functional>
+#include <cstdio>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 
 #if defined(BL_WITH_VULKAN)
@@ -28,6 +33,14 @@
 
 namespace bl::gpu {
 
+/* ~/.blendity/cache, or BLENDITY_CACHE_DIR (tests keep their files out of the user's). */
+[[maybe_unused]] static std::string cache_dir() {
+  const char *env = std::getenv("BLENDITY_CACHE_DIR");
+  std::string dir = env && *env ? std::string(env) : fs::join(fs::join(fs::home_dir(), ".blendity"), "cache");
+  fs::make_dirs(dir);
+  return dir;
+}
+
 #if !defined(BL_WITH_VULKAN)
 
 bool compiled_in() { return false; }
@@ -37,7 +50,8 @@ const std::vector<DeviceInfo> &devices() {
   return none;
 }
 std::string status() { return "GPU rendering: not built (needs Blender's vulkan + shaderc libraries)"; }
-void prewarm() {}
+void prewarm(bool, bool) {}
+std::string pipeline_cache_file(int, bool) { return ""; }
 std::unique_ptr<Renderer> Renderer::create(int, bool, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
   return nullptr;
@@ -69,7 +83,8 @@ namespace {
   X(vkWaitForFences) X(vkResetFences) X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreateDescriptorSetLayout)         \
   X(vkDestroyDescriptorSetLayout) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkCreateComputePipelines)            \
   X(vkDestroyPipeline) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkAllocateDescriptorSets)                      \
-  X(vkUpdateDescriptorSets) X(vkDeviceWaitIdle) X(vkInvalidateMappedMemoryRanges)
+  X(vkUpdateDescriptorSets) X(vkDeviceWaitIdle) X(vkInvalidateMappedMemoryRanges) X(vkCreatePipelineCache)                \
+  X(vkDestroyPipelineCache) X(vkGetPipelineCacheData)
 #define BL_VK_DEVICE_RT(X)                                                                                                    \
   X(vkGetBufferDeviceAddressKHR) X(vkCreateAccelerationStructureKHR) X(vkDestroyAccelerationStructureKHR)                     \
   X(vkGetAccelerationStructureBuildSizesKHR) X(vkCmdBuildAccelerationStructuresKHR)                                           \
@@ -99,7 +114,7 @@ struct VkGlobal {
 };
 
 VkGlobal &G() {
-  static VkGlobal g;
+  static VkGlobal &g = *new VkGlobal;  // leaked: background opens (task 0037) may outlive main
   return g;
 }
 
@@ -256,8 +271,7 @@ bool init_global() {
  * far more later. NVIDIA's driver then spent ~105 s per GPU building the
  * pipeline the first time, and the software-BVH kernel ran 1.7x slower. */
 static std::string kernel_cache_path(uint64_t key) {
-  std::string dir = fs::join(fs::join(fs::home_dir(), ".blendity"), "cache");
-  fs::make_dirs(dir);
+  const std::string dir = cache_dir();
   return fs::join(dir, strprintf("gpu_kernel_%016llx.spv", (unsigned long long)key));
 }
 
@@ -335,7 +349,11 @@ class VulkanRenderer final : public Renderer {
  public:
   ~VulkanRenderer() override { destroy(); }
 
+  OpenStats open_stats() const override { return stats_; }
+
   bool init(int index, bool want_rt, std::string *err) {
+    ScopedTimer open_timer;
+    index_ = index;
     VkGlobal &g = G();
     info_ = g.infos[(size_t)index];
     pd_ = g.phys[(size_t)index];
@@ -405,6 +423,7 @@ class VulkanRenderer final : public Renderer {
     f_.vkAllocateCommandBuffers(dev_, &cai, &cmd_);
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     f_.vkCreateFence(dev_, &fci, nullptr, &fence_);
+    stats_.device_ms = open_timer.ms();
     return create_pipeline(err);
   }
 
@@ -565,6 +584,8 @@ class VulkanRenderer final : public Renderer {
   size_t pixels_ = 0;
   GParams scene_params_{};
   bool rt_ = false;
+  int index_ = 0;
+  OpenStats stats_;
   uint32_t scratch_align_ = 256;
   std::vector<Buffer> as_buffers_;
   std::vector<VkAccelerationStructureKHR> blas_;
@@ -688,7 +709,26 @@ class VulkanRenderer final : public Renderer {
     cpi.stage.module = mod;
     cpi.stage.pName = "main";
     cpi.layout = layout_;
-    VkResult r = f_.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipeline_);
+    /* Built through a pipeline cache kept on disk (task 0037): a later run takes the compiled pipeline from it
+     * even when the driver's own cache is cold. A file from another GPU or driver is ignored (its header). */
+    const std::string cache_path = pipeline_cache_file(index_, rt_);
+    std::string blob;
+    if (!fs::read_file(cache_path, blob) || !strip_pipeline_trailer(blob) || !pipeline_cache_matches(blob)) blob.clear();
+    VkPipelineCache pcache = VK_NULL_HANDLE;
+    VkPipelineCacheCreateInfo pcci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    pcci.initialDataSize = blob.size();
+    pcci.pInitialData = blob.empty() ? nullptr : blob.data();
+    if (f_.vkCreatePipelineCache(dev_, &pcci, nullptr, &pcache) != VK_SUCCESS) pcache = VK_NULL_HANDLE;
+    ScopedTimer pipeline_timer;
+    VkResult r = f_.vkCreateComputePipelines(dev_, pcache, 1, &cpi, nullptr, &pipeline_);
+    stats_.pipeline_ms = pipeline_timer.ms();
+    stats_.from_pipeline_cache = !blob.empty();
+    if (pcache) {
+      if (r == VK_SUCCESS) save_pipeline_cache(pcache, cache_path, blob.size());
+      f_.vkDestroyPipelineCache(dev_, pcache, nullptr);
+    }
+    if (stats_.pipeline_ms > 250.0)
+      Log::info("GPU %s: kernel pipeline built in %.0f ms%s", info_.name.c_str(), stats_.pipeline_ms, blob.empty() ? "" : " (with the pipeline cache)");
     f_.vkDestroyShaderModule(dev_, mod, nullptr);
     if (r != VK_SUCCESS) {
       if (err) *err = "could not create the GPU pipeline";
@@ -848,6 +888,61 @@ class VulkanRenderer final : public Renderer {
     as_buffers_.clear();
   }
 
+  /* A VkPipelineCache's header (Vulkan spec, VkPipelineCacheHeaderVersionOne): it must name this GPU. */
+  bool pipeline_cache_matches(const std::string &blob) const {
+    if (blob.size() < 32) return false;
+    uint32_t hsize, version, vendor, device;
+    std::memcpy(&hsize, blob.data(), 4);
+    std::memcpy(&version, blob.data() + 4, 4);
+    std::memcpy(&vendor, blob.data() + 8, 4);
+    std::memcpy(&device, blob.data() + 12, 4);
+    VkPhysicalDeviceProperties props;
+    G().f.vkGetPhysicalDeviceProperties(pd_, &props);
+    return hsize >= 32 && hsize <= blob.size() && version == 1 && vendor == props.vendorID && device == props.deviceID &&
+           std::memcmp(blob.data() + 16, props.pipelineCacheUUID, 16) == 0;
+  }
+
+  /* The file is the driver's data, then its length, an FNV-1a hash and a tag: a torn or truncated file (the
+   * driver must get exactly what it gave) is ignored. True with the trailer removed. */
+  static uint64_t fnv64(const char *p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)p[i]) * 1099511628211ull;
+    return h;
+  }
+  static bool strip_pipeline_trailer(std::string &blob) {
+    if (blob.size() < 16) return false;
+    const size_t body = blob.size() - 16;
+    uint64_t len, hash;
+    std::memcpy(&len, blob.data() + body, 4 + 4);  // length (u32) + tag (u32)
+    std::memcpy(&hash, blob.data() + body + 8, 8);
+    const uint32_t n = (uint32_t)(len & 0xFFFFFFFFu), tag = (uint32_t)(len >> 32);
+    if (tag != 0x43504C42u || n != body || hash != fnv64(blob.data(), body)) return false;  // "BLPC"
+    blob.resize(body);
+    return true;
+  }
+
+  /* Written when it grew, to a temporary file of this process and thread, then renamed over the old one in one
+   * step (another Blendity may be reading it). */
+  void save_pipeline_cache(VkPipelineCache pc, const std::string &path, size_t had) const {
+    size_t n = 0;
+    if (f_.vkGetPipelineCacheData(dev_, pc, &n, nullptr) != VK_SUCCESS || n == 0 || n == had || n > ((size_t)256 << 20)) return;
+    std::string data(n, '\0');
+    if (f_.vkGetPipelineCacheData(dev_, pc, &n, &data[0]) != VK_SUCCESS) return;
+    data.resize(n);
+    const uint32_t len = (uint32_t)n, tag = 0x43504C42u;
+    const uint64_t hash = fnv64(data.data(), n);
+    data.append(reinterpret_cast<const char *>(&len), 4);
+    data.append(reinterpret_cast<const char *>(&tag), 4);
+    data.append(reinterpret_cast<const char *>(&hash), 8);
+    const uint64_t unique = (uint64_t)std::hash<std::thread::id>{}(std::this_thread::get_id()) ^
+                            (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() ^ (uint64_t)(uintptr_t)this;
+    const std::string tmp = path + strprintf(".%016llx.tmp", (unsigned long long)unique);
+    if (!fs::write_file(tmp, data)) return;
+    std::error_code ec;
+    std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);  // replaces the old file
+    if (ec) std::remove(tmp.c_str());
+  }
+
   void destroy() {
     if (!dev_) return;
     f_.vkDeviceWaitIdle(dev_);
@@ -885,17 +980,31 @@ std::string status() {
   return s;
 }
 
-void prewarm() {
+void prewarm(bool open_devices, bool hardware_rt) {
   static std::atomic<bool> started{false};
   if (started.exchange(true) || !available()) return;
   bool rt = false, sw = false;
   for (const DeviceInfo &d : G().infos) (d.hardware_rt ? rt : sw) = true;
   /* Detached: compile_kernel keeps its results in leaked statics, so quitting
-   * mid-compile is safe. */
-  std::thread([rt, sw] {
+   * mid-compile is safe. Then (the interactive editor) a renderer per GPU opens in the background, so turning a
+   * view to the GPU later finds one ready (task 0037). */
+  std::thread([rt, sw, open_devices, hardware_rt] {
     if (rt) compile_kernel(true, nullptr);
     if (sw) compile_kernel(false, nullptr);
+    if (open_devices)
+      for (const DeviceInfo &d : devices()) {
+        bool pending = false;
+        if (std::unique_ptr<Renderer> r = take_renderer(d.index, hardware_rt, &pending)) return_renderer(std::move(r), d.index, hardware_rt);
+      }
   }).detach();
+}
+
+std::string pipeline_cache_file(int index, bool hardware_rt) {
+  if (!available() || index < 0 || index >= (int)G().infos.size()) return "";
+  VkPhysicalDeviceProperties props;
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  const std::string dir = cache_dir();
+  return fs::join(dir, strprintf("pipeline_%04x_%04x_%s.bin", props.vendorID, props.deviceID, hardware_rt && G().infos[(size_t)index].hardware_rt ? "rt" : "bvh"));
 }
 
 std::unique_ptr<Renderer> Renderer::create(int index, bool hardware_rt, std::string *error) {
@@ -1244,5 +1353,141 @@ std::unique_ptr<Compute> Compute::create(int index, const std::string &glsl, std
 }
 
 #endif
+
+/* ===================================================================== */
+/* Renderers opened in the background (task 0037, ADR 0021)              */
+/* ===================================================================== */
+
+namespace {
+
+struct RendererPool {
+  std::mutex m;
+  std::map<int, std::unique_ptr<Renderer>> ready;  // key: device index * 2 + hardware ray tracing
+  std::map<int, std::pair<std::string, double>> failed;  // an open that failed (its error and when): retried after 30 s
+  std::set<int> opening;
+  std::atomic<uint64_t> generation{1};
+  std::atomic<int> delay_ms{0};
+};
+/* Leaked: a background open may still run when the program quits. */
+RendererPool &pool() {
+  static RendererPool *p = new RendererPool;
+  return *p;
+}
+int pool_key(int index, bool rt) { return index * 2 + (rt ? 1 : 0); }
+bool device_rt(int index) { return index >= 0 && index < (int)devices().size() && devices()[(size_t)index].hardware_rt; }
+
+/* Starts opening one on a detached thread, unless one is ready or opening. The pool is locked. */
+void start_open(RendererPool &p, int index, bool rt) {
+  const int key = pool_key(index, rt);
+  if (p.ready.count(key) || p.opening.count(key)) return;
+  auto f = p.failed.find(key);
+  if (f != p.failed.end()) {
+    if (now_seconds() - f->second.second < 30.0) return;
+    p.failed.erase(f);
+  }
+  p.opening.insert(key);
+  const std::string name = devices()[(size_t)index].name;  // copied: nothing global is read after the open
+  std::thread([index, rt, key, name] {
+    RendererPool &p = pool();
+    if (const int d = p.delay_ms.load()) std::this_thread::sleep_for(std::chrono::milliseconds(d));
+    std::string err;
+    ScopedTimer t;
+    std::unique_ptr<Renderer> r = Renderer::create(index, rt, &err);
+    const double ms = t.ms();
+    const bool ok = r != nullptr;
+    {
+      std::lock_guard<std::mutex> lock(p.m);
+      p.opening.erase(key);
+      if (ok) p.ready[key] = std::move(r);
+      else p.failed[key] = {err.empty() ? std::string("could not open the GPU") : err, now_seconds()};
+    }
+    p.generation++;
+    if (ok && ms > 250.0) Log::info("GPU %s ready (opened in the background in %.0f ms)", name.c_str(), ms);
+    if (!ok) Log::warn("GPU %s unavailable: %s", name.c_str(), err.c_str());
+  }).detach();
+}
+
+}  // namespace
+
+/* Back into the pool (prewarm opened it for whichever view comes first). */
+void return_renderer(std::unique_ptr<Renderer> r, int index, bool hardware_rt) {
+  if (!r) return;
+  RendererPool &p = pool();
+  std::lock_guard<std::mutex> lock(p.m);
+  std::unique_ptr<Renderer> &slot = p.ready[pool_key(index, hardware_rt && device_rt(index))];
+  if (!slot) slot = std::move(r);
+}
+
+std::unique_ptr<Renderer> take_renderer(int index, bool hardware_rt, bool *pending, std::string *error) {
+  if (pending) *pending = false;
+  if (!available() || index < 0 || index >= (int)devices().size()) {
+    if (error) *error = "no such GPU";
+    return nullptr;
+  }
+  hardware_rt = hardware_rt && device_rt(index);  // the same renderer either way on a GPU without RT hardware
+  RendererPool &p = pool();
+  std::lock_guard<std::mutex> lock(p.m);
+  auto it = p.ready.find(pool_key(index, hardware_rt));
+  if (it != p.ready.end() && it->second) {
+    std::unique_ptr<Renderer> r = std::move(it->second);
+    p.ready.erase(it);
+    start_open(p, index, hardware_rt);  // the spare for the next view
+    return r;
+  }
+  start_open(p, index, hardware_rt);
+  auto f = p.failed.find(pool_key(index, hardware_rt));
+  if (f != p.failed.end()) {  // failed less than 30 s ago
+    if (error) *error = f->second.first;
+    return nullptr;
+  }
+  if (pending) *pending = true;
+  return nullptr;
+}
+
+bool renderer_ready(int index, bool hardware_rt) {
+  if (!available() || index < 0 || index >= (int)devices().size()) return false;
+  RendererPool &p = pool();
+  std::lock_guard<std::mutex> lock(p.m);
+  auto it = p.ready.find(pool_key(index, hardware_rt && device_rt(index)));
+  return it != p.ready.end() && it->second != nullptr;
+}
+
+static std::atomic<bool> g_background_default{false};
+void set_background_open_default(bool on) { g_background_default = on; }
+bool background_open_default() { return g_background_default.load(); }
+
+std::unique_ptr<Renderer> open_renderer(int index, bool hardware_rt, std::string *error) {
+  if (available() && index >= 0 && index < (int)devices().size()) {
+    RendererPool &p = pool();
+    std::lock_guard<std::mutex> lock(p.m);
+    auto it = p.ready.find(pool_key(index, hardware_rt && device_rt(index)));
+    if (it != p.ready.end() && it->second) {
+      std::unique_ptr<Renderer> r = std::move(it->second);
+      p.ready.erase(it);
+      return r;
+    }
+  }
+  return Renderer::create(index, hardware_rt, error);
+}
+
+uint64_t renderers_generation() { return pool().generation.load(); }
+
+bool renderers_opening() {
+  RendererPool &p = pool();
+  std::lock_guard<std::mutex> lock(p.m);
+  return !p.opening.empty();
+}
+
+void set_open_delay_for_test(int ms) { pool().delay_ms = std::max(0, ms); }
+
+void drop_ready_renderers_for_test() {
+  RendererPool &p = pool();
+  std::map<int, std::unique_ptr<Renderer>> drop;
+  {
+    std::lock_guard<std::mutex> lock(p.m);
+    drop.swap(p.ready);
+    p.failed.clear();
+  }
+}
 
 }  // namespace bl::gpu

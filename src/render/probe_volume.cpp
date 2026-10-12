@@ -317,7 +317,7 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
     }
     std::string err;
     if (!pt.gpu_gather(gpu_device, 2, origins, dirs, 1, g_out, &g_hit, &err) || g_out.size() != origins.size()) {
-      if (gpu_error) *gpu_error = err.empty() ? "the GPU gather failed" : err;
+      if (gpu_error && !pt.gpu_gather_waiting()) *gpu_error = err.empty() ? "the GPU gather failed" : err;  // still opening: the CPU this time
       g_out.clear();
     }
   }

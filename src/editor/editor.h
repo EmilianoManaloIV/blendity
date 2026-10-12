@@ -212,6 +212,12 @@ class Editor {
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
+  void set_background_gpu_open_for_test(bool on) {
+    cam_preview_pt_.set_background_gpu_open(on);
+    final_pt_.set_background_gpu_open(on);
+  }
+  std::string cam_preview_device_for_test() const { return cam_preview_pt_.device_summary(); }
+  double next_wakeup_for_test() const { return ui_.next_wakeup; }
   bool cam_preview_done_for_test() const { return cam_preview_done_; }
   /* Baked lighting (task 0012). */
   bool baking_for_test() const { return baking_; }

@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 59): GPU devices open in the background (task 0037)
+
+**Asked:** "Switching from shaded to rendered and path trace preview crashes/halts the program" ... "make sure the
+editor is still decently responsive" (the retro stages stay in the path tracers).
+
+**Fixed**
+- **Turning the Camera Preview (or the Render window, Live Preview, a bake) to the GPU froze the editor** the first
+  time in a session: the driver built the kernel's pipeline on the editor's thread, about 80 s with a cold cache,
+  and Windows closed Blendity as not responding. Now the GPU opens in the background: the view traces on the CPU
+  ("GPU starting") and moves to the GPU when it is ready; bakes do those slices on the CPU; the editor wakes four
+  times a second meanwhile. A spare stays open so the next view gets a GPU at once.
+
+**Added**
+- A pipeline cache per GPU in `~/.blendity/cache` (checked against the GPU and a hash): later starts build the
+  pipeline from it even when the driver's cache is cold (9-13 ms instead of 84-141 ms here with a warm one).
+
+**Checked**
+- New tests (round 59): a GPU that doesn't exist is refused at once; with the open slowed to 3 s the slowest
+  editor frame is 17 ms, the preview traces on the CPU and is on the GPU after 3.3 s, and the spare is handed over
+  at once; a tracer forgets a pending GPU when the device turns back to the CPU; a bake's gather returns at once
+  while the GPU opens and uses it later; the pipeline cache is written and used, and corrupt, torn and foreign
+  files are ignored. The tests keep their caches in a scratch folder.
+
+**Review (code reviewer)**: four major and several minor findings, all fixed: the wake-up was cleared later in the
+same frame; quitting while a device opened could crash in static destructors (now leaked statics and `_Exit`);
+the GPU bakes still opened a device on the editor's thread; "GPU starting" stuck after switching to the CPU;
+the cache file had no body check and a shared temporary name; a failed open was never retried; any other view's
+open rebuilt a waiting tracer's scene; prewarm ignored the RT setting; the tests wrote the user's cache folder.
+- Unit checks: Windows 8,714, 0 failed (480 tests); the whole suite in render-cache verify mode: 8,715,
+  0 failed, 0 stale pictures. Linux with libraries: 8,627, 0 failed. Sanitizer build: 8,549, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `gpu` stress 0 problems.
+
 ## 2026-10-11 (round 58): bake textures onto a mesh for export (task 0036)
 
 **Asked:** "Bake textures onto a mesh" for export (the roadmap's item 5), one atlas per object.

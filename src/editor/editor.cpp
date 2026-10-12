@@ -118,6 +118,11 @@ static void common_init(Editor *) {
 
 bool Editor::init(int argc, char **argv) {
   common_init(this);
+  /* The interactive editor never waits for a GPU to open (task 0037): its views and bakes trace on the CPU until
+   * it is. */
+  gpu::set_background_open_default(true);
+  cam_preview_pt_.set_background_gpu_open(true);
+  final_pt_.set_background_gpu_open(true);
   resolve_project_paths();
   load_prefs();
   std::string scene_arg, layout_arg;
@@ -347,7 +352,7 @@ void Editor::frame(std::vector<Event> &events) {
     invalidate_material_textures();
     texture_touch_pending_ = false;
   }
-  if (scene_ && scene_->render.device == 1) gpu::prewarm();  // once; compiles the GPU kernel off the UI thread
+  if (scene_ && scene_->render.device == 1) gpu::prewarm(!headless_, scene_->render.hardware_rt);  // once; the GPU kernel and devices off the UI thread
   /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
    * mesh instead, or leave Edit Mode for anything without one. */
   if (edit_mode_ && active_ && active_ != edit_obj_ && !pp_.active && !modal_.active && !xf_.active) {
@@ -403,6 +408,12 @@ void Editor::frame(std::vector<Event> &events) {
 
   ui_.begin_frame(&fb_, now);
   auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
+  /* While a GPU opens in the background, wake a few times a second so a waiting view takes it (task 0037; after
+   * begin_frame, which clears the wake-up). */
+  if (gpu::renderers_opening()) {
+    const double wake = now + 0.25;
+    ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, wake) : wake;
+  }
   preview_step();
   auto &c = ui_.canvas;
   int mh = ui_.row_h() + ui_.px(2);

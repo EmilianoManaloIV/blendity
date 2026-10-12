@@ -173,7 +173,11 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
    * own BVH, so that is built even when the CPU uses Embree. */
   gpu_error_.clear();
   if (!settings_.gpus.empty() && gpu::available()) sync_gpus();
-  else gpus_.clear();
+  else {
+    gpus_.clear();
+    gpu_starting_ = false;  // back on the CPU: nothing to wait for
+    gpu_pending_.clear();
+  }
   bool software_gpu = false;
   for (auto &g : gpus_) software_gpu = software_gpu || !g->hw_rt;
   use_embree_ = embree_available() && settings_.use_embree;
@@ -1576,11 +1580,36 @@ void PathTracer::sync_gpus() {
     for (auto &s : gpus_) have = have || s->index == i;
     if (!have) add.push_back(i);
   }
+  gpu_starting_ = false;
+  gpu_pending_.clear();
+  if (background_gpu_open_) {
+    /* Task 0037: a device that is still opening (a cold driver cache can take a minute) leaves this tracer on the
+     * CPU until adopt_ready_gpus finds it ready. */
+    gpu_generation_seen_ = gpu::renderers_generation();
+    for (int i : add) {
+      bool pending = false;
+      std::string err;
+      std::unique_ptr<gpu::Renderer> r = gpu::take_renderer(i, settings_.gpu_hardware_rt, &pending, &err);
+      if (r) {
+        auto slot = std::make_unique<GpuSlot>();
+        slot->index = i;
+        slot->hw_rt = r->using_hardware_rt();
+        slot->r = std::move(r);
+        gpus_.push_back(std::move(slot));
+      }
+      else if (pending) {
+        gpu_starting_ = true;
+        gpu_pending_.push_back({i, settings_.gpu_hardware_rt});
+      }
+      else gpu_error_ += (gpu_error_.empty() ? "" : "; ") + devs[(size_t)i].name + ": " + err;
+    }
+    return;
+  }
   std::vector<std::unique_ptr<gpu::Renderer>> made(add.size());
   std::vector<std::string> errs(add.size());
   std::vector<std::thread> threads;
   for (size_t k = 0; k < add.size(); k++)
-    threads.emplace_back([&, k] { made[k] = gpu::Renderer::create(add[k], settings_.gpu_hardware_rt, &errs[k]); });
+    threads.emplace_back([&, k] { made[k] = gpu::open_renderer(add[k], settings_.gpu_hardware_rt, &errs[k]); });
   for (std::thread &th : threads) th.join();
   for (size_t k = 0; k < add.size(); k++) {
     const int i = add[k];
@@ -1829,6 +1858,24 @@ void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint
   }
 }
 
+bool PathTracer::adopt_ready_gpus() {
+  if (!gpu_starting_) return false;
+  const uint64_t gen = gpu::renderers_generation();
+  if (gen == gpu_generation_seen_) return false;
+  gpu_generation_seen_ = gen;
+  /* Only for a device this tracer waits for (another view's spare opening is not its business). */
+  bool any = false;
+  for (const auto &k : gpu_pending_) any = any || gpu::renderer_ready(k.first, k.second);
+  if (!any) return false;
+  /* The same scene again: sync_gpus takes the ready device, and a GPU without RT hardware gets Blendity's BVH
+   * (skipped while only the CPU with Embree traced). upload_gpus resets the samples. */
+  const std::vector<PTObject> objects = objects_;
+  const std::vector<RenderLight> lights = lights_;
+  const Environment env = env_;
+  build(objects, lights, env);
+  return !gpus_.empty();
+}
+
 void PathTracer::upload_gpus() {
   if (gpus_.empty()) return;
   ScopedTimer t;
@@ -1861,7 +1908,15 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
   }
   samples = std::max(1, std::min(65536, samples));
   if (!bake_gpu_ || bake_gpu_index_ != device) {
-    bake_gpu_ = gpu::Renderer::create(device, true, error);
+    /* In the interactive editor the bakes step on its thread: a device still opening is not waited for, this
+     * slice gathers on the CPU (task 0037). Headless runs open it here. */
+    gpu_gather_waiting_ = false;
+    if (background_gpu_open_) {
+      bool pending = false;
+      bake_gpu_ = gpu::take_renderer(device, true, &pending, error);
+      gpu_gather_waiting_ = pending;
+    }
+    else bake_gpu_ = gpu::open_renderer(device, true, error);  // a ready one from the pool when there is
     if (!bake_gpu_) return false;
     bake_gpu_index_ = device;
     bake_gpu_build_ = 0;
@@ -1956,6 +2011,7 @@ void PathTracer::merge_aux() {
 std::string PathTracer::device_summary() const {
   std::string s;
   if (settings_.use_cpu || gpus_.empty()) s = std::string("CPU (") + ray_backend() + ")";
+  if (gpus_.empty() && gpu_starting_) s += ", GPU starting...";
   for (const auto &g : gpus_)
     s += (s.empty() ? "" : " + ") + g->r->info().name + (g->hw_rt ? " (RT hardware)" : " (GPU compute)");
   return s;
