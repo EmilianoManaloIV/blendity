@@ -6,6 +6,7 @@
 //   Gizmos      : Unity handles; Blender's are in blender/source/blender/editors/gizmo_library
 //                 and blender/source/blender/editors/transform
 //   Edit Mode   : Blender's mesh editing (blender/source/blender/editors/mesh)
+#include "../scene/curve.h"
 #include "editor.h"
 
 #include "../core/core.h"
@@ -87,12 +88,19 @@ void Editor::draw_scene_view(const Recti &r) {
       }
       else {
         if (edit_mode_) edit_pick(view, in.mx, in.my, mode);
-        else pick(view, in.mx, in.my, mode);
+        else if (!curve_point_pick(view, in.mx, in.my, mode)) {
+          curve_pt_sel_.clear();
+          pick(view, in.mx, in.my, mode);
+        }
       }
+      if (moved && !edit_mode_) curve_pt_sel_.clear();
       drag_ = Drag::None;
       box_visible = false;
     }
   }
+  /* Esc drops a curve's point selection (the object stays selected). */
+  if (!curve_pt_sel_.empty() && scene_hovered_ && drag_ == Drag::None && in.key_pressed[platform::KEY_ESCAPE] && !u.wants_keyboard())
+    curve_pt_sel_.clear();
   /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). */
   if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_) frame_selected();
 
@@ -614,9 +622,65 @@ void Editor::render_overlays(const Recti &) {
   }
 }
 
+void Editor::draw_curve(const Recti &view, const GameObject &g, const Curve &cv) {
+  auto &u = ui_;
+  const bool sel = is_selected(g.id);
+  const CurvePath &path = cv.local_path();  // sampled once per change, placed here by the matrix
+  const Mat4 &w = g.world_matrix();
+  const uint32_t col = sel ? kSelectOrange : Color::hex(0x101010, 200);
+  for (size_t i = 1; i < path.pos.size(); i++) scene_r3d_.line(w.point(path.pos[i - 1]), w.point(path.pos[i]), col, false);
+  if (path.closed && path.pos.size() > 2) scene_r3d_.line(w.point(path.pos.back()), w.point(path.pos.front()), col, false);
+  if (g.id != active_ || edit_mode_) return;
+  /* The active curve's control points: selected ones orange, the rest white; the first one larger (its start). */
+  for (size_t i = 0; i < cv.points.size(); i++) {
+    Vec2 sp;
+    float z;
+    if (!scene_r3d_.project(g.world_matrix().point(cv.points[i].position), sp, z)) continue;
+    const bool on = curve_pt_obj_ == g.id && std::find(curve_pt_sel_.begin(), curve_pt_sel_.end(), (int)i) != curve_pt_sel_.end();
+    const float r = (float)u.px(i == 0 ? 5 : 4);
+    u.canvas.fill_circle(view.x + sp.x, view.y + sp.y, r + 1.0f, Color::hex(0x000000, 200));
+    u.canvas.fill_circle(view.x + sp.x, view.y + sp.y, r, on ? kSelectOrange : Color::hex(0xF0F0F0));
+  }
+}
+
+bool Editor::curve_point_pick(const Recti &view, int mx, int my, int mode) {
+  GameObject *g = active_object();
+  const Curve *cv = g && is_selected(g->id) ? g->curve() : nullptr;
+  if (!cv || edit_mode_) return false;
+  int hit = -1;
+  float best = (float)ui_.px(9);
+  for (size_t i = 0; i < cv->points.size(); i++) {
+    Vec2 sp;
+    float z;
+    if (!scene_r3d_.project(g->world_matrix().point(cv->points[i].position), sp, z)) continue;
+    const float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
+    if (d < best) best = d, hit = (int)i;
+  }
+  if (hit < 0) return false;
+  if (curve_pt_obj_ != g->id) curve_pt_sel_.clear();
+  curve_pt_obj_ = g->id;
+  auto it = std::find(curve_pt_sel_.begin(), curve_pt_sel_.end(), hit);
+  if (mode == SEL_REPLACE) curve_pt_sel_ = {hit};
+  else if (it != curve_pt_sel_.end()) curve_pt_sel_.erase(it);
+  else curve_pt_sel_.push_back(hit);
+  return true;
+}
+
+GameObject *Editor::curve_point_target(std::vector<int> &points) {
+  points.clear();
+  if (edit_mode_ || !curve_pt_obj_ || curve_pt_obj_ != active_ || curve_pt_sel_.empty()) return nullptr;
+  GameObject *g = scene_->find(curve_pt_obj_);
+  const Curve *cv = g ? g->curve() : nullptr;
+  if (!cv) return nullptr;
+  for (int i : curve_pt_sel_)
+    if (i >= 0 && i < (int)cv->points.size()) points.push_back(i);
+  return points.empty() ? nullptr : g;
+}
+
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
   scene_->for_each([&](GameObject &g) {
+    if (const Curve *cv = g.curve(); cv && g.active_in_hierarchy()) draw_curve(view, g, *cv);
     auto *l = g.light();  // (the role lookups first: every object, every frame)
     auto *c = g.camera();
     if ((!l && !c) || !g.active_in_hierarchy()) return;
@@ -1093,6 +1157,21 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
   float best = (float)radius;
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
+    if (const Curve *cv = g.curve()) {  // a curve by its line (task 0042)
+      const CurvePath &path = cv->local_path();
+      const Mat4 &cw = g.world_matrix();
+      const size_t n = path.pos.size();
+      for (size_t i = 0; i + 1 < n + (path.closed ? 1 : 0); i++) {
+        Vec2 sa, sb;
+        float za, zb;
+        if (!scene_r3d_.project(cw.point(path.pos[i]), sa, za) || !scene_r3d_.project(cw.point(path.pos[(i + 1) % n]), sb, zb)) continue;
+        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
+        const float len2 = dot(d, d);
+        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
+        const float dist = length(p - (sa + d * t));
+        if (dist < best) best = dist, hit = g.id;
+      }
+    }
     auto *mr = g.get<MeshRenderer>();
     if (!mr || !mr->enabled || mr->display_as == 0) return;
     const Mesh *m = g.evaluated_mesh();
@@ -1202,9 +1281,22 @@ bool Editor::gizmo_update(const Recti &view) {
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
+  std::vector<int> cpts;  // a curve's selected control points (task 0042)
+  GameObject *co = eo ? nullptr : curve_point_target(cpts);
   std::vector<GameObject *> objs;
   Vec3 pivot;
-  if (eo) {
+  if (co) {
+    const Curve &cv = *co->curve();
+    AABB b;
+    Vec3 sum(0.0f);
+    for (int i : cpts) {
+      const Vec3 w = co->world_matrix().point(cv.points[(size_t)i].position);
+      sum += w;
+      b.add(w);
+    }
+    pivot = pivot_center_ ? b.center() : sum / (float)cpts.size();
+  }
+  else if (eo) {
     const Mesh &m = **edit_mesh_ptr();
     AABB b;
     Vec3 sum(0.0f);
@@ -1232,7 +1324,7 @@ bool Editor::gizmo_update(const Recti &view) {
       pivot = (a ? a : objs.back())->world_position();
     }
   }
-  if (origin_edit_ && !eo) {
+  if (origin_edit_ && !eo && !co) {
     /* Editing origins: the handles sit on the active object's origin. */
     GameObject *a = active_object();
     pivot = (a ? a : objs.back())->world_position();
@@ -1399,6 +1491,8 @@ bool Editor::gizmo_update(const Recti &view) {
       for (size_t i = 0; i < mm.vert_count(); i++) gizmo_vert_starts_.push_back(eo->world_matrix().point(mm.positions[i]));
       compute_proportional_weights(eo->world_matrix());
     }
+    else if (co)
+      for (int i : cpts) gizmo_vert_starts_.push_back(co->world_matrix().point(co->curve()->points[(size_t)i].position));
     else {
       for (GameObject *g : objs) gizmo_starts_.push_back({g->id, g->world_matrix(), g->world_position(), g->world_rotation(), g->local().scale});
     }
@@ -1420,6 +1514,13 @@ bool Editor::gizmo_update(const Recti &view) {
     gizmo_start_angle_ = std::atan2((float)in.my - ps.y, (float)in.mx - ps.x);
   }
 
+  /* A curve's points: each from where it started (world), written back in the curve's space. */
+  auto apply_points = [&](const std::function<Vec3(Vec3)> &to) {
+    Curve &cv = *co->curve();
+    const Mat4 inv = co->world_matrix().inverse();
+    for (size_t k = 0; k < cpts.size() && k < gizmo_vert_starts_.size(); k++)
+      if (cpts[k] < (int)cv.points.size()) cv.points[(size_t)cpts[k]].position = inv.point(to(gizmo_vert_starts_[k]));
+  };
   /* Apply drag. */
   if (drag_ == Drag::Gizmo) {
     u.cursor = Cursor::Move;
@@ -1488,6 +1589,8 @@ bool Editor::gizmo_update(const Recti &view) {
         mm.touch();
         repair_moved_rings(mm);
       }
+      else if (co)
+        apply_points([&](Vec3 s) { return s + delta; });
       else
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) g->set_world_position(s.pos + delta);
@@ -1525,6 +1628,8 @@ bool Editor::gizmo_update(const Recti &view) {
         mm.touch();
         repair_moved_rings(mm);
       }
+      else if (co)
+        apply_points([&](Vec3 s) { return pivot + q.rotate(s - pivot); });
       else
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) {
@@ -1565,6 +1670,11 @@ bool Editor::gizmo_update(const Recti &view) {
         mm.touch();
         repair_moved_rings(mm);
       }
+      else if (co)
+        apply_points([&](Vec3 s) {
+          const Vec3 d = s - pivot;
+          return pivot + axis[0] * (dot(d, axis[0]) * f.x) + axis[1] * (dot(d, axis[1]) * f.y) + axis[2] * (dot(d, axis[2]) * f.z);
+        });
       else
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) {
@@ -1576,7 +1686,8 @@ bool Editor::gizmo_update(const Recti &view) {
             }
           }
     }
-    if (origin_edit_ && !eo) {
+    if (co) label = h <= H_MOVE_FREE ? "Move Curve Points" : h <= H_ROT_VIEW ? "Rotate Curve Points" : "Scale Curve Points";
+    else if (origin_edit_ && !eo) {
       /* Only the origins move: the meshes (and children) are put back where they were in the world. */
       compensate_origin_drag();
       label = h <= H_MOVE_FREE ? "Move Origin" : "Rotate Origin";

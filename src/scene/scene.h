@@ -28,6 +28,8 @@ class Scene;
 struct PhysicsWorld;  // physics.h
 
 struct FilterEffect;
+struct Curve;
+struct CurvePath;
 using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
 struct TextureLayer;  // texture/procedural_texture.h
 using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
@@ -115,7 +117,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve };
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
@@ -582,9 +584,15 @@ struct ArrayModifier : ComponentBase<ArrayModifier> {
   float radial_angle = 360.0f;
   bool merge = false;
   float merge_distance = 0.001f;
+  /* Blender's Fit Type (task 0042): 0 Fixed Count, 1 Fit Length (copies that fit fit_length), 2 Fit Curve (the
+   * named Curve object's length). Offset mode only. */
+  int fit_type = 0;
+  float fit_length = 4.0f;
+  std::string curve;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
   void modify(Mesh &m) const override;
+  uint64_t modifier_dependency_hash() const override;  // curve.cpp
   bool unique() const override { return false; }
 };
 
@@ -715,6 +723,48 @@ struct CastModifier : ComponentBase<CastModifier> {
   bool unique() const override { return false; }
 };
 
+/* A Curve object's control points (task 0042). Handles are Blender's Auto handles. */
+struct CurvePoint {
+  Vec3 position;
+  float tilt = 0.0f;    // degrees round the curve
+  float radius = 1.0f;  // scales what a Curve modifier bends along it
+};
+
+/* Blender: a Curve object (Bezier with Auto handles; Poly); Catmull-Rom also passes through every point.
+ * Sampled by sample_curve (curve.h). Drawn in the Scene view; its points move with the gizmo. */
+struct Curve : ComponentBase<Curve> {
+  static constexpr const char *kName = "Curve";
+  int type = 0;  // Bezier, Catmull-Rom, Poly
+  bool closed = false;
+  int resolution = 12;  // samples per segment
+  std::vector<CurvePoint> points;
+  static constexpr int kMaxPoints = 4096;
+  /* What the path is made from (type, closed, resolution, every point), hashed straight from the fields. */
+  uint64_t content_key() const;
+  /* The path in the curve's own space, kept until content_key() changes: the Scene view draws it every frame. */
+  const CurvePath &local_path() const;
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Curve; }  // found without a dynamic_cast (the Scene view draws it)
+
+ private:
+  mutable std::shared_ptr<const CurvePath> path_;  // shared by copies until one changes (the key is checked)
+  mutable uint64_t path_key_ = 0;
+};
+
+/* Blender: Curve modifier (MOD_curve.cc). Bends the mesh along a Curve object: the coordinate along the deform
+ * axis becomes a distance along the curve, the other two an offset in its frame. Deform-only (ADR 0022). */
+struct CurveModifier : ComponentBase<CurveModifier> {
+  static constexpr const char *kName = "CurveModifier";
+  std::string object;    // the Curve object, by name (as the Boolean's cutter)
+  int deform_axis = 0;   // X, Y, Z, -X, -Y, -Z
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;              // curve.cpp
+  uint64_t modifier_dependency_hash() const override;  // curve.cpp
+  bool unique() const override { return false; }
+};
+
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {
   static constexpr const char *kName = "ScrewModifier";
@@ -813,6 +863,7 @@ class GameObject {
   MeshRenderer *mesh_renderer() const { return static_cast<MeshRenderer *>(find_role(Component::RenderRole::MeshRenderer)); }
   Light *light() const { return static_cast<Light *>(find_role(Component::RenderRole::Light)); }
   Camera *camera() const { return static_cast<Camera *>(find_role(Component::RenderRole::Camera)); }
+  Curve *curve() const;  // scene.cpp (Curve is declared further down)
   Component *add_component(std::unique_ptr<Component> c);
   template<class T> T *add() { return static_cast<T *>(add_component(std::make_unique<T>())); }
   void remove_component(Component *c);

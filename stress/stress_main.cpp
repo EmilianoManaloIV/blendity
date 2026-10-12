@@ -10,6 +10,7 @@
 //
 // Theory: GEA Vol. I 2.3 Profiling Tools, 10.8 In-Game Profiling;
 //         FoCG 12.3 Spatial Data Structures.
+#include "../src/scene/curve.h"
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
 #include "../src/editor/editor.h"
@@ -3427,6 +3428,30 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
         for (int axis = 0; axis < 3; axis++)
           run("simple deform", [&](Mesh &m) { meshops::simple_deform(m, mode, mode <= 1 ? amt : amt / 90.0f, axis, 0.2f, 0.8f); });
     run("simple deform, inverted limits", [&](Mesh &m) { meshops::simple_deform(m, 1, 90.0f, 2, 0.9f, 0.1f); });
+    /* Task 0042: the Curve modifier along ordinary and hostile curves, every type and axis. */
+    {
+      Scene sc;
+      GameObject *owner = sc.create("Owner");
+      auto *cm = owner->add<CurveModifier>();
+      cm->object = "Path";
+      Curve *cv = sc.create("Path")->add<Curve>();
+      const std::vector<std::vector<CurvePoint>> curves = {
+          {{Vec3(0, 0, 0), 0, 1}, {Vec3(s, 0, s), 30, 1}, {Vec3(2 * s, s, 0), 0, 2}},
+          {{Vec3(0, 0, 0), 0, 1}, {Vec3(0, 0, 0), 0, 1}},
+          {{Vec3(0, 0, 0), nan, nan}, {Vec3(nan, 0, 0), 0, 1}, {Vec3(s, 0, 0), 0, 0}},
+          {{Vec3(0, 0, 0), 0, 1}, {Vec3(1e30f, 0, 0), 0, 1e6f}, {Vec3(0, inf, 0), 0, 1}},
+          {{Vec3(0, 0, 0), 0, 1}, {Vec3(0, s, 0), 0, 1}, {Vec3(0, 2 * s, 0), 0, 1}}};
+      for (int type = 0; type < 3; type++)
+        for (int closed = 0; closed < 2; closed++)
+          for (int axis = 0; axis < 6; axis += (o.quick ? 2 : 1))
+            for (const auto &pts : curves) {
+              cv->type = type;
+              cv->closed = closed != 0;
+              cv->points = pts;
+              cm->deform_axis = axis;
+              run("curve modifier", [&](Mesh &m) { cm->modify(m); });
+            }
+    }
     for (int shape = 0; shape < 3; shape++)
       for (float f : {1.0f, -2.0f, 0.0f, nan}) run("cast", [&](Mesh &m) { meshops::cast(m, shape, f, 0.0f, 1); });
     for (float ang : {360.0f, 90.0f, -720.0f, 0.0f})

@@ -211,6 +211,8 @@ class Editor {
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
+  const std::vector<int> &curve_points_selected_for_test() const { return curve_pt_sel_; }
+  GameObject *active_object_for_test() const { return active_object(); }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
   void set_background_gpu_open_for_test(bool on) {
     cam_preview_pt_.set_background_gpu_open(on);
@@ -473,6 +475,12 @@ class Editor {
   void pick(const Recti &r, int mx, int my, int mode);
   void box_select(const Recti &r, Recti box, int mode);
   uint64_t pick_wire_object(const Recti &r, int mx, int my, int radius);  // Display As Wire / Bounds objects
+  /* Curve objects (task 0042): their lines and, for the active one, its control points; a click on a point selects it
+   * (Shift toggles) and the gizmo then moves the selected points. */
+  void draw_curve(const Recti &view, const GameObject &g, const Curve &c);
+  bool curve_point_pick(const Recti &view, int mx, int my, int mode);
+  GameObject *curve_point_target(std::vector<int> &points);
+  void curve_command(const std::vector<std::string> &t);  // the console's `curve`
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
@@ -972,6 +980,8 @@ class Editor {
   float prop_radius_ = 1.0f;
   int prop_falloff_ = 0;
   std::vector<float> gizmo_vert_w_;
+  uint64_t curve_pt_obj_ = 0;     // the curve whose points are selected (only while it is the active object)
+  std::vector<int> curve_pt_sel_;  // its selected control points
   int loop_cuts_ = 1;
   float loop_slide_ = 0.5f;
   float bevel_width_ = 0.1f;

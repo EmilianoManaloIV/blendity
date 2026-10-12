@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 64): curve objects, the Curve modifier and Array along a curve (task 0042)
+
+**Asked:** the roadmap (2026-10-11): "Curves: objects follow a path (Blender's Curve modifier and Array-along-curve)".
+
+**Added**
+- **Curve objects** (GameObject > Curve > Bezier, Circle, Path, also in the Hierarchy's + menu): Bezier (Blender's
+  Auto handles), Catmull-Rom or Poly; Closed; Resolution; per point a Tilt and a Radius. Drawn in the Scene view
+  (orange when selected); click the line to select the curve, click a point to select it (Shift adds, Esc lets go),
+  and the Move / Rotate / Scale gizmo moves the selected points, one undo step per drag. Console:
+  `curve add|move|delete|select <object> ...`, and `set Curve.P2Position x y z`.
+- **Curve modifier** (Deform): bends a mesh along a named Curve object on any of six axes; the mesh's origin sits
+  at the curve's start, past an open curve's end the mesh goes on straight, a closed one wraps round. It is
+  deform-only, so dragging its curve updates the mesh in place (task 0041).
+- **Array: Fit Type** Fixed Count, Fit Length and Fit Curve (as many copies as fit the curve's length).
+- Learn > Modifiers: "Bending along a curve".
+
+**Checked**
+- New tests (round 64): a straight curve of each type leaves a beam unchanged; a quarter circle bends a beam onto
+  the arc (radius off by 2.5e-6, length along it kept); a closed curve wraps a beam round and an open one goes on
+  straight past its end; Fit Curve gives 5 then 7 then 14 copies as the curve grows and is scaled, Fit Length 3,
+  NaN or a missing curve one; moving a point or the curve object re-bends, a curve naming its own object or
+  nothing leaves the mesh; NaN, huge and coincident points on every type, closed or not, and every axis give a
+  finite mesh; a scene file keeps everything; in the editor a click selects the curve, then a point, the Move
+  gizmo moves only that point and undo puts it back; moving points and the curve leaves no stale picture; a
+  straight curve along each of the six deform axes changes nothing, Tilt 90 turns the cross-section a quarter turn
+  and Radius 2 doubles it; the Circle preset is round within 0.3 %; a closed trefoil knot's frame meets itself;
+  Delete with points selected removes the points, and selecting another object lets go of them.
+- Stress `modifiers_ngon`: the Curve modifier on all 26 meshes along five ordinary and hostile curves, every type,
+  closed or open, every axis: 10,760 operations, 0 problems.
+- Unit checks: Windows 9,034, 0 failed (523 tests); the whole suite in render-cache verify mode: 9,035,
+  0 failed, 0 stale pictures. Linux with libraries: 8,944, 0 failed. Sanitizer build: 8,862, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: approved, with minor findings fixed: Array's Fit Curve no longer re-evaluates when the
+curve is only moved or turned (just its scale counts), so dragging a curve under "Array then Curve" stays on the
+in-place path; a curve's path is sampled once per change (the Scene view used to sample every curve every frame)
+and hashed straight from its fields; a point selection is dropped when another object is selected, and Delete
+removes the selected points; the Circle preset has 8 points (4 bulged in by 4 %); `curve` is in the console's help.
+Left as they are: point clicks win over a mesh in front within 9 pixels; V and Ctrl+Shift snapping don't apply to
+curve points yet.
+
 ## 2026-10-12 (round 63): deforming modifiers update in place (task 0041)
 
 **Asked:** the roadmap (2026-10-11): curves, lattices, cages and skinning all deform meshes, and dragging their

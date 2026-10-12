@@ -1,5 +1,6 @@
 ﻿// SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests - dependency-free unit tests (exit code = number of failures).
+#include "../src/scene/curve.h"
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
 #include "../src/editor/editor.h"
@@ -224,6 +225,7 @@ static void round60_tests();
 static void round61_tests();
 static void round62_tests();
 static void round63_tests();
+static void round64_tests();
 
 int main() {
   register_builtin_components();
@@ -864,6 +866,7 @@ int main() {
   round61_tests();
   round62_tests();
   round63_tests();
+  round64_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -22291,5 +22294,368 @@ static void round63_tests() {
     GameObject *u = ed.scene().find_by_name("Twisted");
     CHECK(u && u->get<SimpleDeformModifier>() && u->get<SimpleDeformModifier>()->angle == 20.0f);
     if (u) CHECK(u->evaluated_mesh()->positions == at20);
+  });
+}
+
+/* ===================================================================== */
+/* Round 64 (task 0042): curve objects, the Curve modifier, Array along a curve */
+/* ===================================================================== */
+
+/* A beam along +X from 0 to `len`, `w` thick, cut into `segs` along its length. */
+static MeshPtr r64_beam(float len, float w, int segs) {
+  MeshPtr m = std::make_shared<Mesh>();
+  for (int i = 0; i <= segs; i++)
+    for (int k = 0; k < 4; k++) {
+      const float y = (k == 1 || k == 2) ? w : -w, z = (k >= 2) ? w : -w;
+      m->add_vert({len * i / segs, y, z});
+    }
+  for (int i = 0; i < segs; i++)
+    for (int k = 0; k < 4; k++) {
+      const uint32_t a = (uint32_t)(i * 4 + k), b = (uint32_t)(i * 4 + (k + 1) % 4);
+      m->add_face({a, b, b + 4, a + 4});
+    }
+  m->touch();
+  return m;
+}
+
+/* An object with the beam and a Curve modifier, and a Curve object at the origin. */
+struct R64Scene {
+  Scene s;
+  GameObject *beam = nullptr, *curve_obj = nullptr;
+  Curve *curve = nullptr;
+  CurveModifier *mod = nullptr;
+  MeshPtr base;
+  R64Scene(MeshPtr m) {
+    base = m;
+    beam = s.create("Beam");
+    beam->add<MeshFilter>()->mesh = m;
+    mod = beam->add<CurveModifier>();
+    mod->object = "Path";
+    curve_obj = s.create("Path");
+    curve = curve_obj->add<Curve>();
+  }
+};
+
+static void round64_tests() {
+  test("curves: a straight curve along X leaves the mesh as it is (Bezier, Catmull-Rom and Poly)", [] {
+    for (int type = 0; type < 3; type++) {
+      R64Scene t(r64_beam(3.0f, 0.2f, 12));
+      t.curve->type = type;
+      for (int i = 0; i < 4; i++) t.curve->points.push_back({Vec3(i * 2.0f, 0, 0), 0.0f, 1.0f});
+      const Mesh *m = t.beam->evaluated_mesh();
+      float worst = 0.0f;
+      for (size_t i = 0; i < m->positions.size(); i++) worst = std::max(worst, length(m->positions[i] - t.base->positions[i]));
+      std::printf("    type %d: largest move %g\n", type, worst);
+      CHECK(worst < 1e-4f);
+    }
+  });
+
+  test("curves: a straight curve along each of the six deform axes leaves a mesh as it is; Tilt turns it, Radius scales it", [] {
+    const Vec3 dirs[6] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    for (int axis = 0; axis < 6; axis++) {
+      R64Scene t(primitives::uv_sphere(0.5f, 12, 8));
+      t.mod->deform_axis = axis;
+      t.curve->type = 2;
+      t.curve->points = {{Vec3(0.0f), 0, 1}, {dirs[axis] * 4.0f, 0, 1}};
+      const Mesh *m = t.beam->evaluated_mesh();
+      float worst = 0.0f;
+      for (size_t i = 0; i < m->positions.size(); i++) worst = std::max(worst, length(m->positions[i] - t.base->positions[i]));
+      if (worst >= 1e-4f) std::printf("    axis %d: largest move %g\n", axis, worst);
+      CHECK(worst < 1e-4f);
+    }
+    /* Tilt 90 degrees all along X turns the cross-section a quarter turn round X; Radius 2 doubles it. */
+    R64Scene t(r64_beam(2.0f, 0.1f, 4));
+    t.curve->type = 2;
+    t.curve->points = {{Vec3(0, 0, 0), 90.0f, 2.0f}, {Vec3(5, 0, 0), 90.0f, 2.0f}};
+    const Mesh *m = t.beam->evaluated_mesh();
+    float worst = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i];
+      const Vec3 turned = Quat::axis_angle({1, 0, 0}, kPi * 0.5f).rotate(Vec3(0, v.y, v.z)) * 2.0f + Vec3(v.x, 0, 0);
+      worst = std::max(worst, length(m->positions[i] - turned));
+    }
+    std::printf("    tilt 90 and radius 2: off by %g\n", worst);
+    CHECK(worst < 1e-4f);
+  });
+
+  test("curves: the Circle preset is round, and a closed curve that isn't flat meets itself without a twist", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Curve: Circle");
+    GameObject *g = ed.scene().find_by_name("BezierCircle");
+    CHECK(g && g->curve());
+    if (!g || !g->curve()) return;
+    const CurvePath &path = g->curve()->local_path();
+    float lo = 1e9f, hi = 0.0f;
+    for (const Vec3 &p : path.pos) lo = std::min(lo, length(p)), hi = std::max(hi, length(p));
+    std::printf("    circle radius from %.4f to %.4f\n", lo, hi);
+    CHECK(lo > 0.99f && hi < 1.01f);
+    /* A trefoil knot: the frame carried round comes back turned; the correction spreads that turn so the normal
+     * at the end (just before the start) is the start's, turned only by the last short step. */
+    Curve knot;
+    knot.type = 2;
+    knot.closed = true;
+    for (int i = 0; i < 300; i++) {
+      const float a = i / 300.0f * 2.0f * kPi;
+      knot.points.push_back({Vec3(std::sin(a) + 2 * std::sin(2 * a), std::cos(a) - 2 * std::cos(2 * a), -std::sin(3 * a)), 0, 1});
+    }
+    const CurvePath kp = sample_curve(knot, Mat4::identity());
+    Vec3 p0, t0, n0, pe, te, ne;
+    float r;
+    kp.at(0.0f, p0, t0, n0, r);
+    kp.at(kp.total() - 1e-3f, pe, te, ne, r);
+    std::printf("    trefoil: the normal meets itself within %.2f degrees\n", std::acos(std::min(1.0f, dot(n0, ne))) * kRad2Deg);
+    CHECK(dot(n0, ne) > std::cos(3.0f * kDeg2Rad));
+  });
+
+  test("curves: with a curve's points selected, Delete removes the points, not the curve; selecting another object lets go of them", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("create Curve: Path");
+    ed.command("curve select Path 1 3");
+    ed.command("delete");
+    GameObject *g = ed.scene().find_by_name("Path");
+    CHECK(g && g->curve() && g->curve()->points.size() == 3);
+    if (g && g->curve() && g->curve()->points.size() == 3) CHECK(g->curve()->points[1].position.x == 0.0f);  // -2, 0, 2 left
+    CHECK(ed.curve_points_selected_for_test().empty());
+    ed.command("curve select Path 0");
+    ed.command("select Cube");
+    CHECK(ed.curve_points_selected_for_test().empty());
+    ed.command("delete");
+    CHECK(ed.scene().find_by_name("Path") != nullptr);  // the Cube went, the curve stayed
+  });
+
+  test("curves: a quarter circle bends a beam onto the arc, keeping each offset and the length along it", [] {
+    const float R = 2.0f;
+    R64Scene t(r64_beam(R * kPi * 0.5f * 0.9f, 0.1f, 40));
+    t.curve->type = 2;
+    for (int i = 0; i <= 512; i++) {
+      const float a = i / 512.0f * kPi * 0.5f;
+      t.curve->points.push_back({Vec3(R * std::sin(a), 0.0f, R * (1.0f - std::cos(a))), 0.0f, 1.0f});
+    }
+    const Mesh *m = t.beam->evaluated_mesh();
+    const Vec3 c(0, 0, R);  // the arc's centre: the beam's +Z side faces it
+    float worst_r = 0.0f, worst_a = 0.0f, worst_y = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i], p = m->positions[i];
+      const Vec3 d = Vec3(p.x - c.x, 0.0f, p.z - c.z);
+      worst_r = std::max(worst_r, std::fabs(length(d) - (R - v.z)));
+      const float ang = std::atan2(p.x, c.z - p.z);  // turned from the start, round the centre
+      if (v.x > 0.05f) worst_a = std::max(worst_a, std::fabs(ang * R - v.x) / v.x);
+      worst_y = std::max(worst_y, std::fabs(p.y - v.y));
+    }
+    std::printf("    radius off by %g, length along the arc off by %.3f %%, height off by %g\n", worst_r, worst_a * 100.0f, worst_y);
+    CHECK(worst_r < 1e-3f);
+    CHECK(worst_a < 0.01f);
+    CHECK(worst_y < 1e-4f);
+  });
+
+  test("curves: a closed curve wraps a long beam round; an open one goes on straight past its end", [] {
+    const float r = 1.0f, L = 2.0f * kPi * r;
+    R64Scene t(r64_beam(L * 1.5f, 0.05f, 60));
+    t.curve->type = 2;
+    t.curve->closed = true;
+    for (int i = 0; i < 360; i++) {
+      const float a = i / 360.0f * 2.0f * kPi;
+      t.curve->points.push_back({Vec3(r * std::sin(a), 0.0f, r * (1.0f - std::cos(a))), 0.0f, 1.0f});
+    }
+    const CurvePath path = sample_curve(*t.curve, Mat4::identity());
+    CHECK(path.closed && std::fabs(path.total() - L) < 1e-3f);
+    Vec3 p0, p1, tg, n;
+    float rad;
+    path.at(0.3f, p0, tg, n, rad);
+    path.at(0.3f + path.total(), p1, tg, n, rad);
+    CHECK(length(p0 - p1) < 1e-4f);  // once round, the same place
+    const Mesh *m = t.beam->evaluated_mesh();
+    float off = 0.0f;
+    for (const Vec3 &p : m->positions) off = std::max(off, std::fabs(length(Vec3(p.x, 0, p.z - r)) - r));
+    CHECK(off < 0.06f);  // every vertex stays on the ring (within the beam's half width)
+    /* Open, straight: a beam three times longer than the curve continues along its end's direction. */
+    R64Scene o(r64_beam(9.0f, 0.1f, 9));
+    o.curve->type = 2;
+    o.curve->points = {{Vec3(0, 0, 0), 0, 1}, {Vec3(0, 0, -3), 0, 1}};  // along -Z
+    const Mesh *om = o.beam->evaluated_mesh();
+    const Vec3 end = om->positions[9 * 4];  // the far end's first corner, 6 past the curve's end
+    CHECK(std::fabs(end.z - (-9.0f)) < 1e-3f && std::fabs(end.x - (-0.1f)) < 1e-3f);
+  });
+
+  test("curves: Array's Fit Curve fills the curve's length, Fit Length a length; changing the curve changes the count", [] {
+    Scene s;
+    GameObject *g = s.create("Posts");
+    g->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    auto *arr = g->add<ArrayModifier>();
+    arr->fit_type = 2;
+    arr->curve = "Fence";
+    GameObject *fence = s.create("Fence");
+    Curve *cv = fence->add<Curve>();
+    cv->type = 2;
+    cv->points = {{Vec3(0, 0, 0), 0, 1}, {Vec3(5.5f, 0, 0), 0, 1}};
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 5);
+    cv->points[1].position = Vec3(7.2f, 0, 0);
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 7);
+    fence->set_local_scale({2, 2, 2});  // the curve is measured in the array's space
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 14);
+    arr->fit_type = 1;
+    arr->fit_length = 3.4f;
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 3);
+    arr->fit_length = std::numeric_limits<float>::quiet_NaN();
+    CHECK(g->evaluated_mesh()->vert_count() == 8);
+    arr->fit_type = 2;
+    arr->curve = "Nothing";
+    CHECK(g->evaluated_mesh()->vert_count() == 8);  // no curve: one copy
+  });
+
+  test("curves: moving the curve object or a point re-bends the mesh; a curve can't bend itself", [] {
+    R64Scene t(r64_beam(2.0f, 0.1f, 8));
+    t.curve->type = 1;
+    t.curve->points = {{Vec3(0, 0, 0), 0, 1}, {Vec3(1, 0, 0.5f), 0, 1}, {Vec3(2, 0, 0), 0, 1}};
+    const std::vector<Vec3> a = t.beam->evaluated_mesh()->positions;
+    t.curve->points[1].position = Vec3(1, 0, -0.5f);
+    const std::vector<Vec3> b = t.beam->evaluated_mesh()->positions;
+    CHECK(a != b);
+    t.curve_obj->set_world_position({0, 3, 0});
+    const std::vector<Vec3> c = t.beam->evaluated_mesh()->positions;
+    CHECK(b != c && std::fabs(c[0].y - (b[0].y + 3.0f)) < 1e-4f);
+    /* A modifier naming its own object, a missing one, or a curve with one point: the mesh as it is. */
+    for (const char *name : {"Beam", "Missing"}) {
+      t.mod->object = name;
+      CHECK(t.beam->evaluated_mesh()->positions == t.base->positions);
+    }
+    t.mod->object = "Path";
+    t.curve->points.resize(1);
+    CHECK(t.beam->evaluated_mesh()->positions == t.base->positions);
+  });
+
+  test("curves: odd points (NaN, huge, all in one place) and odd settings give a valid mesh", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    R64Scene t(r64_beam(2.0f, 0.1f, 6));
+    std::vector<std::vector<CurvePoint>> sets = {
+        {{Vec3(0, 0, 0), 0, 1}, {Vec3(nan, 0, 0), 0, 1}, {Vec3(2, 0, 0), nan, nan}},
+        {{Vec3(1, 1, 1), 0, 1}, {Vec3(1, 1, 1), 0, 1}, {Vec3(1, 1, 1), 0, 1}},
+        {{Vec3(0, 0, 0), 1e9f, 1e9f}, {Vec3(1e30f, 0, 0), 0, 1}, {Vec3(inf, 0, 0), 0, 1}},
+        {{Vec3(0, 0, 0), 0, 0}, {Vec3(0, 1, 0), 0, 0}, {Vec3(0, 2, 0), 0, -5}}};
+    int bad = 0;
+    for (int type = 0; type < 3; type++)
+      for (int closed = 0; closed < 2; closed++)
+        for (int axis = 0; axis < 6; axis++)
+          for (auto &pts : sets) {
+            t.curve->type = type;
+            t.curve->closed = closed != 0;
+            t.curve->resolution = type == 0 ? 0 : 100000;
+            t.curve->points = pts;
+            t.mod->deform_axis = axis;
+            const Mesh *m = t.beam->evaluated_mesh();
+            for (const Vec3 &p : m->positions) bad += !(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+            bad += m->positions.size() != t.base->positions.size();
+          }
+    CHECK(bad == 0);
+  });
+
+  test("curves: points, type, closed, resolution and the modifiers round-trip through a scene file", [] {
+    Scene s;
+    GameObject *c = s.create("Rail");
+    Curve *cv = c->add<Curve>();
+    cv->type = 1;
+    cv->closed = true;
+    cv->resolution = 20;
+    cv->points = {{Vec3(1, 2, 3), 15.0f, 0.5f}, {Vec3(-1, 0, 4), 0.0f, 2.0f}, {Vec3(0, 5, -2), -30.0f, 1.0f}};
+    GameObject *g = s.create("Train");
+    g->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    auto *a = g->add<ArrayModifier>();
+    a->fit_type = 2;
+    a->curve = "Rail";
+    auto *m = g->add<CurveModifier>();
+    m->object = "Rail";
+    m->deform_axis = 4;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    const Curve *bc = back.find_by_name("Rail") ? back.find_by_name("Rail")->curve() : nullptr;
+    CHECK(bc && bc->type == 1 && bc->closed && bc->resolution == 20 && bc->points.size() == 3);
+    if (bc && bc->points.size() == 3)
+      CHECK(bc->points[2].position.y == 5.0f && bc->points[2].tilt == -30.0f && bc->points[0].radius == 0.5f);
+    GameObject *bg = back.find_by_name("Train");
+    CHECK(bg && bg->get<ArrayModifier>() && bg->get<ArrayModifier>()->fit_type == 2 && bg->get<ArrayModifier>()->curve == "Rail");
+    CHECK(bg && bg->get<CurveModifier>() && bg->get<CurveModifier>()->deform_axis == 4 && bg->get<CurveModifier>()->object == "Rail");
+    if (bg) CHECK(bg->evaluated_mesh()->positions == g->evaluated_mesh()->positions);
+    /* `set` reaches a point by its prefix, as filters' fields do. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Curve: Path");
+    ed.command("set Curve.P2Position 0 3 0");
+    GameObject *p = ed.scene().find_by_name("Path");
+    CHECK(p && p->curve() && p->curve()->points.size() == 5 && p->curve()->points[2].position.y == 3.0f);
+  });
+
+  test("curves: in the editor, moving a point or the curve re-bends the mesh with no stale picture", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Bezier");
+    GameObject *beam = ed.scene().create("Beam");
+    beam->add<MeshFilter>()->mesh = r64_beam(3.0f, 0.1f, 30);
+    beam->add<MeshRenderer>();
+    beam->add<CurveModifier>()->object = "BezierCurve";
+    beam->set_world_position({-1.5f, 0.3f, 0});
+    ed.mark_changed_for_test("R64 beam");
+    r34_steps(ed, 3);
+    ed.set_render_cache_verify(true);
+    const uint64_t bad0 = Editor::render_cache_mismatches_all();
+    const std::vector<Vec3> a = beam->evaluated_mesh()->positions;
+    const R34Change c = r34_change(ed, [&] { ed.command("curve move BezierCurve 1 -0.5 0.8 -0.6"); }, 2);
+    CHECK(c.d.renders > 0 && c.before != c.after);
+    const std::vector<Vec3> b = beam->evaluated_mesh()->positions;
+    CHECK(a != b);
+    GameObject *cv = ed.scene().find_by_name("BezierCurve");
+    for (float z : {0.2f, 0.4f, 0.6f}) {
+      cv->set_world_position({0, 0, z});
+      ed.mark_changed_for_test("R64 move curve");
+      r34_steps(ed, 1);
+    }
+    r34_steps(ed, 2);
+    CHECK(beam->evaluated_mesh()->positions != b);
+    CHECK(Editor::render_cache_mismatches_all() == bad0);
+    ed.set_render_cache_verify(false);
+  });
+
+  test("curves: clicking a curve selects it, clicking its point selects the point, the Move gizmo moves only that point, undo puts it back", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    CHECK(g && g->curve());
+    if (!g || !g->curve()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Main Camera");  // something else selected, its gizmo far from the curve
+    ed.mark_changed_for_test("R64 setup");
+    r34_steps(ed, 3);
+    /* The line between two points: the object is selected. */
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point({0.5f, 0, 0}), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.active_object_for_test() == g);
+    /* Its second point (the third sits on the origin, under the gizmo). */
+    const Vec3 before[2] = {g->curve()->points[1].position, g->curve()->points[0].position};
+    const Vec3 w = g->world_matrix().point(before[0]);
+    CHECK(ed.project_to_window(w, x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.curve_points_selected_for_test() == std::vector<int>{1});
+    CHECK(ed.active_object_for_test() == g);
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    r34_gizmo_drag_x(ed, w, 60);
+    r34_steps(ed, 2);
+    const Vec3 after[2] = {g->curve()->points[1].position, g->curve()->points[0].position};
+    std::printf("    point 1 moved by %.3f along X\n", after[0].x - before[0].x);
+    CHECK(after[0].x > before[0].x + 0.05f && std::fabs(after[0].y - before[0].y) < 1e-4f && std::fabs(after[0].z - before[0].z) < 1e-4f);
+    CHECK(after[1].x == before[1].x && after[1].y == before[1].y && after[1].z == before[1].z);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Path");
+    CHECK(u && u->curve() && u->curve()->points[1].position.x == before[0].x);
+    /* The console selects points too. */
+    ed.command("curve select Path 3 0");
+    CHECK(ed.curve_points_selected_for_test() == (std::vector<int>{3, 0}));
   });
 }

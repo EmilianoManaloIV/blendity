@@ -4,7 +4,7 @@
 - **Requirements:** Q-01, R-02
 - **Decisions:** ADR 0022
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/39
 
 ## Goal
 Dragging a field of a modifier that only moves vertices (Smooth, Displace, Simple Deform, Cast; later Curve,

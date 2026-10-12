@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "curve.h"
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -71,6 +72,10 @@ void register_builtin_components() {
   reg<DisplaceModifier>("Mesh", "Pushes vertices along their normals by a noise texture.", "Displace modifier (procedural texture)");
   reg<SimpleDeformModifier>("Mesh", "Twists, bends, tapers or stretches the mesh along an axis.", "Simple Deform modifier");
   reg<CastModifier>("Mesh", "Pulls the mesh towards a sphere, cylinder or box.", "Cast modifier");
+  reg<CurveModifier>("Mesh", "Bends the mesh along a Curve object (rails, pipes, roads, chains).", "Curve modifier");
+  reg<Curve>("Mesh", "A path of control points (Bezier, Catmull-Rom or Poly): Curve modifiers bend meshes along it and "
+             "Array's Fit Curve fills it. Click a point to move it with the gizmo.",
+             "Curve object (Bezier / Poly spline)");
   reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
@@ -1248,12 +1253,67 @@ void ArrayModifier::reflect(Reflector &r) {
     r.field("Angle", radial_angle, 1.0f, -3600.0f, 3600.0f);
     r.help("360 spreads the copies evenly round a full turn.");
   }
+  if (all || mode == 0) {
+    static const char *kFit[] = {"Fixed Count", "Fit Length", "Fit Curve"};
+    r.enumeration("Fit Type", fit_type, kFit, 3);
+    r.help("Blender's Fit Type: Fixed Count uses Count; Fit Length makes as many copies as fit the length; Fit Curve as many\n"
+           "as fit the curve's length (then add a Curve modifier on the same curve to bend them along it). Each copy takes one\n"
+           "step, so the copies end within the length (Blender adds one more, ending past it).");
+    if (all || fit_type == 1) r.field("Fit Length", fit_length, 0.05f, 0.0f, 1e5f);
+    if (all || fit_type == 2) {
+      r.text("Curve", curve);
+      r.help("Name of the Curve object whose length the copies fill.");
+    }
+  }
   r.field("Merge", merge);
   r.field("Merge Distance", merge_distance, 0.0005f, 0.0f, 1.0f);
 }
 void ArrayModifier::modify(Mesh &m) const {
-  if (mode == 1) meshops::radial_array(m, count, radial_axis, radial_angle, merge ? merge_distance : 0.0f);
-  else meshops::make_array(m, count, relative_offset, constant_offset, merge ? merge_distance : 0.0f);
+  if (mode == 1) {
+    meshops::radial_array(m, count, radial_axis, radial_angle, merge ? merge_distance : 0.0f);
+    return;
+  }
+  int n = count;
+  if (fit_type == 1 || fit_type == 2) {
+    /* As many copies as fit: each takes one step (the offset between copies). */
+    const float L = fit_type == 1 ? fit_length : array_curve_length(*this);
+    const AABB b = m.bounds();
+    const Vec3 size = b.max - b.min;
+    const float step = length(Vec3(relative_offset.x * size.x, relative_offset.y * size.y, relative_offset.z * size.z) + constant_offset);
+    n = 1;
+    if (finite_bits(L) && finite_bits(step) && step > 1e-6f && L > 0.0f) n = (int)std::max(1.0, std::min(1000.0, std::floor(L / step + 1e-4)));
+  }
+  meshops::make_array(m, n, relative_offset, constant_offset, merge ? merge_distance : 0.0f);
+}
+
+/* The points after a count, each with a "P<i> " prefix (ADR 0008's scheme): files, undo, hashing and
+ * `set Curve.P2Position 1 0 0` see every point. */
+void Curve::reflect(Reflector &r) {
+  static const char *kTypes[] = {"Bezier", "Catmull-Rom", "Poly"};
+  r.enumeration("Type", type, kTypes, 3);
+  r.help("Bezier: smooth, near the points (Blender's Auto handles). Catmull-Rom: smooth, through every point. Poly: straight lines.");
+  r.field("Closed", closed);
+  r.help("Joins the last point to the first (Blender: Cyclic).");
+  r.field("Resolution", resolution, 1, 256);
+  r.help("Samples per segment (Blender: Resolution Preview U).");
+  int n = (int)points.size();
+  const int before = n;
+  r.field("Points", n, 0, kMaxPoints);
+  if (n != before) points.resize((size_t)std::max(0, std::min(n, kMaxPoints)));
+  for (size_t i = 0; i < points.size(); i++) {
+    PrefixReflector p(r, "P" + std::to_string(i) + " ");
+    p.field("Position", points[i].position);
+    p.field("Tilt", points[i].tilt, 1.0f, -36000.0f, 36000.0f);
+    p.field("Radius", points[i].radius, 0.01f, 0.0f, 1000.0f);
+  }
+}
+
+void CurveModifier::reflect(Reflector &r) {
+  r.text("Object", object);
+  r.help("Name of the Curve object to bend along (Blender: Curve > Curve Object).");
+  static const char *kAxes[] = {"X", "Y", "Z", "-X", "-Y", "-Z"};
+  r.enumeration("Deform Axis", deform_axis, kAxes, 6);
+  r.help("The mesh's axis that runs along the curve; the mesh's origin sits at the curve's start.");
 }
 
 void SolidifyModifier::reflect(Reflector &r) {
@@ -1705,6 +1765,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   eval_from_[kind] = head_key;
   return eval_mesh_[kind].get();
 }
+
+Curve *GameObject::curve() const { return static_cast<Curve *>(find_role(Component::RenderRole::Curve)); }
 
 AABB GameObject::world_bounds() const {
   const Mesh *m = evaluated_mesh();

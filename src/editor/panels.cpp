@@ -62,6 +62,10 @@ void Editor::draw_hierarchy(const Recti &r) {
       if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light", child);
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera", child);
+    u.submenu("Curve", u.px(170), [this, child] {
+      for (const char *k : {"Bezier", "Circle", "Path"})
+        if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k, child);
+    });
   };
   u.popup(create_menu, u.px(200), [create_body] { create_body(false); });
   u.text_field(u.id("hier_search"), {plus.right() + u.px(6), bar.y + u.px(4), bar.right() - plus.right() - u.px(12), h},
@@ -1380,7 +1384,7 @@ void Editor::draw_inspector(const Recti &r) {
                                          {"Mirror", "MirrorModifier"},         {"Screw", "ScrewModifier"},
                                          {"Solidify", "SolidifyModifier"},     {"Subdivision Surface", "SubdivisionSurface"},
                                          {"Triangulate", "TriangulateModifier"}, {"Wireframe", "WireframeModifier"}};
-        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Displace", "DisplaceModifier"},
+        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"},
                                        {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"}};
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);

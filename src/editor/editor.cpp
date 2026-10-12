@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "../scene/curve.h"
 #include "editor.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
@@ -660,6 +661,11 @@ void Editor::draw_menubar(const Recti &r) {
       if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light");
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera");
+    u.submenu("Curve", u.px(170), [this] {
+      for (const char *k : {"Bezier", "Circle", "Path"})
+        if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k);
+    });
+    u.tooltip("A path to bend meshes along (Curve modifier) or fill with copies (Array > Fit Curve). Blender: Add > Curve.");
     u.menu_separator();
     u.submenu("Set Origin", u.px(270), [this, has_sel] {
       for (int k = 0; k < kOriginModeCount; k++) {
@@ -1336,6 +1342,7 @@ void Editor::dock_move(WindowKind k, DockNode *target, int zone) {
 bool Editor::is_selected(uint64_t id) const { return std::find(selection_.begin(), selection_.end(), id) != selection_.end(); }
 
 void Editor::select(uint64_t id, int mode) {
+  if (id != active_ && curve_pt_obj_ != id) curve_pt_sel_.clear();  // a curve's points belong to it while it is active
   if (mode == SEL_REPLACE) {
     selection_.clear();
     if (id) selection_.push_back(id);
@@ -1363,6 +1370,7 @@ void Editor::select(uint64_t id, int mode) {
 }
 
 void Editor::clear_selection() {
+  curve_pt_sel_.clear();
   selection_.clear();
   active_ = 0;
 }
@@ -2091,6 +2099,28 @@ void Editor::update_procedural_shapes() {
 
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
+  if (starts_with(kind, "Curve:")) {
+    /* Blender's Add > Curve presets, lying on the ground plane (task 0042). */
+    std::string which = to_lower(kind.substr(6));
+    while (!which.empty() && which[0] == ' ') which.erase(0, 1);
+    GameObject *g = scene_->create(which == "circle" ? "BezierCircle" : which == "path" ? "Path" : "BezierCurve", parent);
+    Curve *cv = g->add<Curve>();
+    if (which == "circle") {
+      cv->closed = true;  // 8 points: Auto handles keep it within half a percent of round (4 would bulge in by 4 %)
+      for (int i = 0; i < 8; i++) cv->points.push_back({Vec3(std::cos(i * kPi * 0.25f), 0.0f, -std::sin(i * kPi * 0.25f)), 0.0f, 1.0f});
+    }
+    else if (which == "path") {
+      cv->type = 1;
+      for (int i = 0; i < 5; i++) cv->points.push_back({Vec3(-2.0f + i, 0.0f, 0.0f), 0.0f, 1.0f});
+    }
+    else
+      for (Vec3 p : {Vec3(-1.5f, 0, 0), Vec3(-0.5f, 0, -0.6f), Vec3(0.5f, 0, 0.6f), Vec3(1.5f, 0, 0)}) cv->points.push_back({p, 0.0f, 1.0f});
+    if (!parent) g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create " + g->name);
+    return g;
+  }
   if (starts_with(kind, "Shape:")) {
     std::string name = kind.substr(6);
     while (!name.empty() && name[0] == ' ') name.erase(0, 1);
@@ -2144,6 +2174,17 @@ void Editor::duplicate_selected() {
 }
 
 void Editor::delete_selected() {
+  /* With a curve's points selected, Delete removes those points (Edit Mode's rule), not the curve. */
+  std::vector<int> pts;
+  if (GameObject *co = curve_point_target(pts)) {
+    std::sort(pts.begin(), pts.end());
+    pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+    Curve &cv = *co->curve();
+    for (auto it = pts.rbegin(); it != pts.rend(); ++it) cv.points.erase(cv.points.begin() + *it);
+    curve_pt_sel_.clear();
+    mark_changed("Delete Curve Points");
+    return;
+  }
   auto list = selected_objects(true);
   if (list.empty()) return;
   for (GameObject *g : list) scene_->destroy(g);
@@ -2578,6 +2619,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
+    Log::info("  curve add|move|delete|select <object> [index] [x y z] (a Curve object's points), create Curve: Bezier|Circle|Path");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -3322,6 +3364,7 @@ void Editor::run_console_command(const std::string &line) {
     }
     if (changed) mark_changed("Guides");
   }
+  else if (c == "curve") curve_command(t);  // its own function: this chain is near the compiler's nesting limit
   else if (c == "activecamera") {
     /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
     std::string name;
@@ -3574,6 +3617,57 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0);
   fs::write_file(prefs_path_, s);
+}
+
+/* curve add|move|delete|select <object> [index] [x y z]: a Curve object's control points (task 0042). Positions are in
+ * the curve's own space. */
+void Editor::curve_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  auto num = [&](size_t i) { return (float)std::atof(arg(i, "0").c_str()); };
+  const std::string verb = to_lower(arg(1, ""));
+  GameObject *g = scene_->find_by_name(arg(2, ""));
+  Curve *cv = g ? g->curve() : nullptr;
+  if (verb != "add" && verb != "move" && verb != "delete" && verb != "select") {
+    Log::warn("curve: add | move | delete | select <object> ...");
+    return;
+  }
+  if (!cv) {
+    Log::warn("curve: no Curve object named '%s'", arg(2, "").c_str());
+    return;
+  }
+  if (verb == "add") {
+    if ((int)cv->points.size() >= Curve::kMaxPoints) {
+      Log::warn("curve: '%s' has the most points a curve can have (%d)", g->name.c_str(), Curve::kMaxPoints);
+      return;
+    }
+    cv->points.push_back({Vec3(num(3), num(4), num(5)), 0.0f, 1.0f});
+    mark_changed("Add Curve Point");
+    return;
+  }
+  if (verb == "select") {
+    select(g->id);
+    curve_pt_obj_ = g->id;
+    curve_pt_sel_.clear();
+    for (size_t k = 3; k < t.size(); k++) {
+      const int j = std::atoi(t[k].c_str());
+      if (j >= 0 && j < (int)cv->points.size()) curve_pt_sel_.push_back(j);
+    }
+    return;
+  }
+  const int i = std::atoi(arg(3, "-1").c_str());
+  if (i < 0 || i >= (int)cv->points.size()) {
+    Log::warn("curve: '%s' has no point %d", g->name.c_str(), i);
+    return;
+  }
+  if (verb == "move") {
+    cv->points[(size_t)i].position = Vec3(num(4), num(5), num(6));
+    mark_changed("Move Curve Point");
+  }
+  else {
+    cv->points.erase(cv->points.begin() + i);
+    curve_pt_sel_.clear();
+    mark_changed("Delete Curve Point");
+  }
 }
 
 }  // namespace bl
