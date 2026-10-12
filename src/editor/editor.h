@@ -213,6 +213,7 @@ class Editor {
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
+  std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
   void set_background_gpu_open_for_test(bool on) {
     cam_preview_pt_.set_background_gpu_open(on);
@@ -485,6 +486,13 @@ class Editor {
   void points_command(const std::vector<std::string> &t);  // the console's `points` (and `curve`)
   /* Bind (or unbind) a Mesh Deform modifier as one undo step; a refusal is logged and shown in the Inspector. */
   bool mesh_deform_bind(GameObject *g, MeshDeformModifier *md, bool bind);
+  /* Vertex groups (task 0045): add | remove | rename | assign | unassign | select | deselect | active, on the edited
+   * mesh in Edit Mode, else the active object's. Each change is an undo step. */
+  bool vgroup_op(const std::string &verb, const std::string &name, const std::string &arg2, float weight);
+  void draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay);
+  /* After an edit (at the undo commit): meshes whose vertex count changed get their groups back from the snapshot
+   * before the edit, by position (ADR 0024). */
+  void carry_vertex_groups(const Scene &before);
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
@@ -984,6 +992,9 @@ class Editor {
   float prop_radius_ = 1.0f;
   int prop_falloff_ = 0;
   std::vector<float> gizmo_vert_w_;
+  int active_vgroup_ = 0;        // the Inspector's chosen vertex group
+  float vgroup_weight_ = 1.0f;   // what Assign gives
+  std::string vgroup_name_edit_;
   uint64_t pt_obj_ = 0;     // the curve or lattice whose points are selected (only while it is the active object)
   std::vector<int> pt_sel_;  // its selected control points
   int loop_cuts_ = 1;

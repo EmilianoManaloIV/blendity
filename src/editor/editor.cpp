@@ -1418,6 +1418,7 @@ void Editor::mark_changed(const std::string &label) {
 
 void Editor::commit_undo() {
   if (!pending_change_) return;
+  if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
   s.scene = std::move(stable_);
   s.selection = selection_;
@@ -1529,6 +1530,7 @@ void Editor::save_scene_cmd(bool save_as) {
     Log::warn("Cannot save while in Play mode (Unity has the same rule). Press Stop first.");
     return;
   }
+  commit_undo();  // an edit this frame: its vertex groups mended before they are written
   if (save_as || scene_->path.empty()) {
     defer([this] {
       const std::string dir = scene_->path.empty() ? fs::join(assets_dir_, "Scenes") : fs::parent(scene_->path);
@@ -2639,6 +2641,11 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (c == "vgroup") {
+    /* vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (task 0045). */
+    vgroup_op(to_lower(arg(1, "")), arg(2, ""), arg(3, ""), (float)std::atof(arg(3, "1").c_str()));
+    return;
+  }
   if (c == "meshdeform") {
     /* meshdeform bind|unbind [object]: the first Mesh Deform modifier on the object (the active one by default). Here,
      * before the long chain below: it is at the compiler's nesting limit. */
@@ -2664,6 +2671,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
+    Log::info("  vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (vertex groups)");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -3731,6 +3739,154 @@ bool Editor::mesh_deform_bind(GameObject *g, MeshDeformModifier *md, bool bind) 
   Log::info("Mesh Deform on '%s' bound to '%s' (%zu cage vertices)", g->name.c_str(), md->object.c_str(), md->bind_verts.size());
   mark_changed("Bind Mesh Deform");
   return true;
+}
+
+void Editor::carry_vertex_groups(const Scene &before) {
+  scene_->for_each([&](GameObject &g) {
+    MeshFilter *mf = g.mesh_filter();
+    if (!mf || !mf->mesh) return;
+    const GameObject *old = before.find(g.id);
+    const MeshFilter *of = old ? old->mesh_filter() : nullptr;
+    const Mesh *om = of && of->mesh && of->mesh.get() != mf->mesh.get() ? of->mesh.get() : nullptr;
+    /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
+     * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
+    if (mf->mesh->groups_fit()) return;
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    if (om && om->groups_fit() && !om->vertex_groups.empty()) meshops::transfer_vertex_groups(*om, m);
+    else
+      for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);  // nothing to carry from: fit the sizes
+    m.touch();
+  });
+}
+
+bool Editor::vgroup_op(const std::string &verb, const std::string &name_in, const std::string &arg2, float weight) {
+  GameObject *g = edit_mode_ ? edit_object() : active_object();
+  MeshPtr *mp = edit_mode_ ? edit_mesh_ptr() : (g && g->mesh_filter() ? &g->mesh_filter()->mesh : nullptr);
+  if (!g || !mp || !*mp) {
+    Log::warn("vgroup: select a mesh object first");
+    return false;
+  }
+  const Mesh &cur = **mp;
+  int gi = name_in.empty() ? active_vgroup_ : cur.find_group(name_in);
+  if (verb != "add" && (gi < 0 || gi >= (int)cur.vertex_groups.size())) {
+    Log::warn("vgroup: '%s' has no vertex group %s", g->name.c_str(), name_in.empty() ? "chosen" : ("'" + name_in + "'").c_str());
+    return false;
+  }
+  if (verb == "active") {
+    active_vgroup_ = gi;
+    return true;
+  }
+  const bool needs_edit = verb == "assign" || verb == "unassign" || verb == "select" || verb == "deselect";
+  if (needs_edit && !edit_mode_) {
+    Log::warn("vgroup %s: works on the selected vertices in Edit Mode", verb.c_str());
+    return false;
+  }
+  if (verb == "select" || verb == "deselect") {
+    const std::vector<float> &w = cur.vertex_groups[(size_t)gi].weights;
+    vert_sel_.resize(cur.vert_count(), 0);
+    for (size_t i = 0; i < w.size() && i < vert_sel_.size(); i++)
+      if (w[i] > 0.0f) vert_sel_[i] = verb == "select" ? 1 : 0;
+    sync_vert_face_selection(false);
+    return true;
+  }
+  Mesh &m = *mesh_make_mutable(*mp);
+  for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);
+  std::string label;
+  if (verb == "add") {
+    std::string name = name_in.empty() ? "Group" : name_in;
+    for (int k = 1; m.find_group(name) >= 0; k++) name = strprintf("%s.%03d", name_in.empty() ? "Group" : name_in.c_str(), k);
+    m.vertex_groups.push_back({name, std::vector<float>(m.vert_count(), 0.0f)});
+    active_vgroup_ = (int)m.vertex_groups.size() - 1;
+    label = "Add Vertex Group";
+  }
+  else if (verb == "remove") {
+    m.vertex_groups.erase(m.vertex_groups.begin() + gi);
+    active_vgroup_ = std::max(0, std::min(active_vgroup_, (int)m.vertex_groups.size() - 1));
+    label = "Remove Vertex Group";
+  }
+  else if (verb == "rename") {
+    if (arg2.empty() || (m.find_group(arg2) >= 0 && m.find_group(arg2) != gi)) {
+      Log::warn("vgroup rename: give a new name no other group has");
+      return false;
+    }
+    m.vertex_groups[(size_t)gi].name = arg2;
+    label = "Rename Vertex Group";
+  }
+  else if (verb == "assign" || verb == "unassign") {
+    const float w = verb == "assign" ? (finite_bits(weight) ? std::max(0.0f, std::min(weight, 1.0f)) : 1.0f) : 0.0f;
+    std::vector<float> &ws = m.vertex_groups[(size_t)gi].weights;
+    size_t n = 0;
+    for (size_t i = 0; i < ws.size() && i < vert_sel_.size(); i++)
+      if (vert_sel_[i]) ws[i] = w, n++;
+    label = verb == "assign" ? "Assign to Vertex Group" : "Remove from Vertex Group";
+    Log::info("%s: %zu vertices", label.c_str(), n);
+  }
+  else {
+    Log::warn("vgroup: add | remove | rename | assign | unassign | select | deselect | active <name> ...");
+    return false;
+  }
+  m.touch();  // deformers limited to a group read it from the evaluated mesh
+  mark_changed(label);
+  return true;
+}
+
+void Editor::draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay) {
+  auto &u = ui_;
+  (void)g;
+  if (!mf->mesh) return;
+  const Mesh &m = edit_mode_ && edit_object() == g ? **edit_mesh_ptr() : *mf->mesh;
+  const int n = (int)m.vertex_groups.size();
+  const int bw = (lay.area.w - u.px(16)) / 2;
+  if (!n) {  // none yet: one row (most meshes), so the Inspector doesn't grow for them
+    Recti row = lay.row(u.row_h() + u.px(2));
+    u.label({row.x + u.px(4), row.y, bw, row.h}, "Vertex Groups", u.theme.text_dim);
+    if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Add Group", false, Icon::Plus)) vgroup_op("add", "", "", 1.0f);
+    u.tooltip("Named weights per vertex (Blender: Object Data > Vertex Groups): deforming modifiers can be limited to one,\n"
+              "Weight Paint paints them and skins read them. They follow the vertices through every edit.");
+    return;
+  }
+  lay.space(u.px(4));
+  u.label(lay.row(), "Vertex Groups", u.theme.accent);
+  u.tooltip("Named weights per vertex (Blender: Object Data > Vertex Groups): deforming modifiers can be limited to one,\n"
+            "Weight Paint paints them and skins read them. They follow the vertices through every edit.");
+  active_vgroup_ = std::max(0, std::min(active_vgroup_, n - 1));
+  for (int i = 0; i < n; i++) {
+    Recti row = lay.row(u.row_h());
+    if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, m.vertex_groups[(size_t)i].name, i == active_vgroup_, Icon::Vertex)) {
+      active_vgroup_ = i;
+      vgroup_name_edit_ = m.vertex_groups[(size_t)i].name;
+    }
+  }
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Add", false, Icon::Plus)) {
+    vgroup_op("add", "", "", 1.0f);
+    return;  // the mesh may have been copied or changed: drawn again next frame
+  }
+  if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Remove")) {
+    vgroup_op("remove", "", "", 1.0f);
+    return;
+  }
+  if (vgroup_name_edit_.empty() || m.find_group(vgroup_name_edit_) < 0) vgroup_name_edit_ = m.vertex_groups[(size_t)active_vgroup_].name;
+  row = lay.row(u.row_h() + u.px(2));
+  bool committed = false;
+  std::string name = vgroup_name_edit_;
+  u.text_field(u.id("vgroup_name"), {row.x + u.px(4), row.y, row.w - u.px(8), row.h}, name, &committed, "Name");
+  vgroup_name_edit_ = name;
+  if (committed && name != m.vertex_groups[(size_t)active_vgroup_].name && !name.empty()) {
+    vgroup_op("rename", m.vertex_groups[(size_t)active_vgroup_].name, name, 1.0f);
+    return;
+  }
+  if (!edit_mode_) return;
+  row = lay.row(u.row_h() + u.px(2));
+  u.label({row.x + u.px(4), row.y, u.px(60), row.h}, "Weight", u.theme.text_dim);
+  u.slider(u.id("vgroup_weight"), {row.x + u.px(66), row.y, row.w - u.px(70), row.h}, vgroup_weight_, 0.0f, 1.0f);
+  row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Assign")) vgroup_op("assign", "", "", vgroup_weight_);
+  u.tooltip("The selected vertices get this weight in the group (Blender: Assign).");
+  if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Remove from")) vgroup_op("unassign", "", "", 0.0f);
+  row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Select")) vgroup_op("select", "", "", 1.0f);
+  if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Deselect")) vgroup_op("deselect", "", "", 1.0f);
 }
 
 }  // namespace bl

@@ -1326,6 +1326,7 @@ void Editor::draw_inspector(const Recti &r) {
             mark_changed("Seams Are Hard Edges");
           }
         }
+        draw_vertex_groups(g, mf, lay);
         Recti row = lay.row(u.row_h() + u.px(2));
         if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, edit_mode_ ? "Exit Edit Mode (Tab)" : "Enter Edit Mode (Tab)", edit_mode_, Icon::Vertex)) {
           if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
@@ -1526,7 +1527,7 @@ void Editor::draw_inspector(const Recti &r) {
               for (size_t i = 0; i < pos; i++) first = first && !g->components[mods[i]]->enabled;
               if (!first) Log::warn("Applied a modifier that isn't first in the stack: the ones above it are skipped (as in Blender)");
               Mesh m = *mf->mesh;
-              g->components[act_ci]->modify(m);
+              run_modifier(*g->components[act_ci], m);  // its vertex group, and the groups carried (ADR 0024)
               m.touch();
               mf->mesh = std::make_shared<Mesh>(std::move(m));
               Log::info("Applied %s", g->components[act_ci]->type_name());

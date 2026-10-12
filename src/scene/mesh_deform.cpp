@@ -201,6 +201,7 @@ void MeshDeformModifier::reflect(Reflector &r) {
   r.text("Object", object);
   r.help("Name of the cage: a closed mesh round this one (Blender: Mesh Deform > Object). Move its vertices in Edit Mode\n"
          "after Bind and this mesh follows. Put Mesh Deform first among the deforming modifiers.");
+  reflect_group_limit(r, vertex_group, invert_group);
   if (!r.all_fields()) return;
   if (r.hashing()) {  // every frame, for every evaluation: the key, not ~40 bytes per cage vertex
     std::string k = strprintf("%016llx", (unsigned long long)bind_key());

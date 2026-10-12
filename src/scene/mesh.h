@@ -18,6 +18,12 @@
 
 namespace bl {
 
+/* A named vertex group (Blender's vertex groups, ADR 0024): one weight per vertex, 0 = not in the group. */
+struct VertexGroup {
+  std::string name;
+  std::vector<float> weights;
+};
+
 struct Mesh {
   std::string name = "Mesh";
   std::vector<Vec3> positions;
@@ -48,6 +54,14 @@ struct Mesh {
    * extruding a lone vertex makes. Edit Mode selects and extrudes them like
    * any edge; edge_cache() includes them; extruding one gives a face. */
   std::vector<uint64_t> loose_edges;
+  /* Vertex groups (task 0045, ADR 0024). Operators that renumber vertices keep them through remove_loose_verts;
+   * Mirror, Array and Join copy them; anything else that changes the vertex count leaves them the wrong size, and
+   * the editor (and the modifier stack) then carry them over from the mesh before by position
+   * (meshops::transfer_vertex_groups). */
+  std::vector<VertexGroup> vertex_groups;
+  int find_group(const std::string &group) const;
+  bool groups_fit() const;               // every group has one weight per vertex
+  void copy_vertex_weights(uint32_t from);  // a weight for a vertex just added as a copy of `from`
   void add_loose_edge(uint32_t a, uint32_t b);
   /* Drops loose edges that a face now uses, or whose vertices are gone. */
   void prune_loose_edges();
@@ -199,6 +213,20 @@ void inset_faces(Mesh &m, std::vector<uint8_t> &face_sel, float amount);
 void delete_faces(Mesh &m, const std::vector<uint8_t> &face_sel);
 /* Removes vertices not referenced by faces; returns the old->new remap. */
 std::vector<uint32_t> remove_loose_verts(Mesh &m);
+/* How `to`'s vertices take vertex groups from `from` (vertex_groups.cpp): three old vertices and their weights per new
+ * vertex. Kept by a modifier while its input and output topology stay (in_key, out_key). */
+struct GroupTransferMap {
+  uint64_t in_key = 0, out_key = 0;
+  std::vector<uint32_t> src;  // 3 per vertex of `to`
+  std::vector<Vec3> bary;
+};
+uint64_t topology_key(const Mesh &m);
+void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map);
+void apply_group_map(const GroupTransferMap &map, const Mesh &from, Mesh &to);
+/* Vertex groups onto `to` from `from` (ADR 0024): by index when the topology is the same, otherwise by position: a
+ * vertex where one of from's was takes its weights, any other the weights interpolated at the nearest point of from's
+ * surface (a new mid-edge vertex gets the average of the edge's ends). */
+void transfer_vertex_groups(const Mesh &from, Mesh &to);
 /* Uniform Laplacian smoothing (blender/source/blender/modifiers/intern/MOD_smooth.cc). */
 void smooth_laplacian(Mesh &m, float factor, int iterations, const std::vector<uint8_t> *vert_mask = nullptr);
 /* Moves vertices along their normals by random amounts (for stress tests / noise). */

@@ -3383,6 +3383,138 @@ static void test_pushpull_stress(Report &rep, const Options &o) {
  * Separate, and every parametric shape - on the same awkward meshes as
  * Push/Pull, with ordinary, zero, negative, huge and NaN settings. Nothing may
  * crash, and every result must be a structurally valid mesh. */
+/* Task 0045 (ADR 0024): every Edit Mode operator, through the editor (so its undo commit carries the groups), on the
+ * Push/Pull stress meshes with two vertex groups and random selections. Every group must keep one finite weight in
+ * 0..1 per vertex, and a vertex left where an old one was must keep that vertex's weights. */
+static void test_vgroups_stress(Report &rep, const Options &o) {
+  using namespace ppstress;
+  rep.title("Vertex groups through every Edit Mode operator",
+            "Two groups (a ramp along X and a random one) on each Push/Pull stress mesh; each operator on a random selection in "
+            "the editor; then the groups are checked: sizes, finite weights in 0..1, and vertices that stayed keep theirs.");
+  rep.table({"mesh", "ops", "size errors", "bad weights", "moved weights"});
+  static const char *kOps[] = {"merge_distance", "delete", "dissolve_vertices", "dissolve_faces", "dissolve_limited", "subdivide_edges",
+                               "loopcut", "bevel", "extrude", "extrude_individual", "extrude_edges", "inset", "triangulate_faces",
+                               "tris_to_quads", "poke", "split", "duplicate", "collapse", "connect", "edge_split", "merge_center",
+                               "fill", "smart_fill", "delete_loose", "flip_faces", "shrink_fatten", "to_sphere", "randomize",
+                               "spin", "thicken", "shell", "recess", "taper", "grid", "array", "push_pull", "smooth"};
+  size_t total_ops = 0, total_size = 0, total_bad = 0, total_moved = 0;
+  uint32_t rng = 4242u;
+  auto rnd = [&] { return rng = rng * 1664525u + 1013904223u; };
+  int done = 0;
+  for (Case &cs : cases()) {
+    if (o.quick && done++ >= 6) break;
+    size_t ops = 0, size_err = 0, bad = 0, moved = 0;
+    for (const char *op : kOps) {
+      Editor ed;
+      ed.init_headless(800, 600);
+      GameObject *g = ed.scene().create("VG");
+      MeshPtr m = std::make_shared<Mesh>(cs.mesh);
+      AABB b;
+      for (Vec3 p : m->positions) b.add(p);
+      VertexGroup ramp{"Ramp", {}}, noise{"Noise", {}};
+      for (const Vec3 &p : m->positions) {
+        ramp.weights.push_back(std::max(0.0f, std::min(1.0f, (p.x - b.min.x) / std::max(1e-6f, b.max.x - b.min.x))));
+        noise.weights.push_back((rnd() >> 8) / 16777216.0f);
+      }
+      m->vertex_groups = {ramp, noise};
+      m->touch();
+      g->add<MeshFilter>()->mesh = m;
+      ed.command("select VG");
+      ed.mark_changed_for_test("vgroups stress");
+      ed.step_frame_headless();
+      const bool faces = (rnd() >> 16) % 2;
+      ed.command(faces ? "edit face" : "edit vertex");
+      std::string sel = faces ? "fsel" : "vsel";  // (the high bits: an LCG's low ones repeat)
+      for (size_t k = 0, n = faces ? m->face_count() : m->vert_count(); k < n; k++)
+        if ((rnd() >> 16) % 4 == 0) sel += " " + std::to_string(k);
+      ed.command(sel);
+      ed.step_frame_headless();
+      ed.command(std::string("editop ") + op);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ed.command("edit off");
+      ed.step_frame_headless();
+      ops++;
+      GameObject *a = ed.scene().find_by_name("VG");
+      const Mesh *r = a && a->mesh_filter() ? a->mesh_filter()->mesh.get() : nullptr;
+      if (!r || !r->groups_fit() || r->vertex_groups.size() != 2) {
+        size_err++;
+        continue;
+      }
+      for (const VertexGroup &vg : r->vertex_groups)
+        for (float w : vg.weights) bad += !(std::isfinite(w) && w >= -1e-6f && w <= 1.0f + 1e-6f);
+      /* Vertices left exactly where an old one was keep its weights (the first old vertex there). */
+      std::unordered_map<uint64_t, uint32_t> at;
+      auto key = [](Vec3 p) {
+        uint32_t k[3];
+        std::memcpy(k, &p, sizeof(k));
+        return ((uint64_t)k[0] * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)k[1] * 0xC2B2AE3D27D4EB4Full) ^ ((uint64_t)k[2] * 0x165667B19E3779F9ull);
+      };
+      std::unordered_map<uint64_t, int> count;
+      for (uint32_t i = 0; i < (uint32_t)m->vert_count(); i++) at.emplace(key(m->positions[i]), i), count[key(m->positions[i])]++;
+      for (size_t i = 0; i < r->vert_count(); i++) {
+        auto it = at.find(key(r->positions[i]));
+        if (it == at.end() || count[it->first] != 1) continue;  // new, or several old vertices there
+        moved += r->vertex_groups[0].weights[i] != m->vertex_groups[0].weights[it->second];
+      }
+    }
+    /* The modifiers too: each generative one after a group-limited Displace, on the mesh with groups. */
+    {
+      Scene sc;
+      GameObject *g = sc.create("M");
+      MeshPtr m = std::make_shared<Mesh>(cs.mesh);
+      m->vertex_groups = {{"Ramp", std::vector<float>(m->vert_count(), 0.5f)}};
+      g->add<MeshFilter>()->mesh = m;
+      auto *d = g->add<DisplaceModifier>();
+      d->vertex_group = "Ramp";
+      for (const char *type : {"SubdivisionSurface", "MirrorModifier", "ArrayModifier", "SolidifyModifier", "BevelModifier", "TriangulateModifier",
+                               "WeldModifier", "WireframeModifier", "ScrewModifier", "DecimateModifier"}) {
+        Component *c = g->add_component(create_component(type));
+        auto *d2 = g->add<DisplaceModifier>();  // after it: needs the groups to have come through
+        d2->vertex_group = "Ramp";
+        const Mesh *r = g->evaluated_mesh();
+        ops++;
+        if (!r || !r->groups_fit() || r->find_group("Ramp") < 0) size_err++;
+        else
+          for (float w : r->vertex_groups[0].weights) bad += !(std::isfinite(w) && w >= -1e-6f && w <= 1.0f + 1e-6f);
+        g->remove_component(d2);
+        g->remove_component(c);
+      }
+    }
+    rep.row({cs.name, num((double)ops), num((double)size_err), num((double)bad), num((double)moved)});
+    total_ops += ops, total_size += size_err, total_bad += bad, total_moved += moved;
+  }
+  rep.note(strprintf("%zu operations; %zu with groups the wrong size, %zu weights not finite or out of 0..1, %zu weights that moved off a "
+                     "vertex that stayed (all should be 0)",
+                     total_ops, total_size, total_bad, total_moved));
+  /* The cost groups add to a stack that re-runs every frame (Edit Mode's cage, a deformer before a generative
+   * modifier): a 25k-vertex mesh through Subdivision Surface, with and without two groups to carry. */
+  {
+    MeshPtr base = primitives::uv_sphere(1.0f, 180, 140);
+    double ms[3] = {1e30, 1e30, 1e30};  // no groups, groups with the map kept, groups with the map built afresh
+    for (int with = 0; with < 3; with++) {
+      Scene sc;
+      GameObject *g = sc.create("S");
+      MeshPtr m = std::make_shared<Mesh>(*base);
+      if (with) m->vertex_groups = {{"A", std::vector<float>(m->vert_count(), 0.3f)}, {"B", std::vector<float>(m->vert_count(), 0.7f)}};
+      g->add<MeshFilter>()->mesh = m;
+      auto *sub = g->add<SubdivisionSurface>();
+      for (int r = 0; r < 4; r++)
+        ms[with] = std::min(ms[with], time_ms([&] {
+                     sub->levels = 1 + (r % 2);  // a change every time: a full evaluation
+                     sub->levels = 1;
+                     if (with == 2) sub->group_map.reset();
+                     m->touch();
+                     (void)g->evaluated_mesh();
+                   }));
+    }
+    rep.row({strprintf("Subdivision of %zu vertices: no groups / two groups carried (ms)", base->vert_count()), f2(ms[0]), f2(ms[1]), "-", "-"});
+    rep.note(strprintf("Carrying two groups through Subdivision Surface on %zu vertices costs %.1f ms on top of %.1f ms per re-run "
+                       "(%.1f ms the first time, when the map is built)",
+                       base->vert_count(), ms[1] - ms[0], ms[0], ms[2] - ms[0]));
+  }
+}
+
 static void test_modifier_tools_stress(Report &rep, const Options &o) {
   using namespace ppstress;
   rep.title("Modifiers, n-gon tools and shapes on odd meshes",
@@ -3871,7 +4003,7 @@ int main(int argc, char **argv) {
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
-               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress},
+               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
   ScopedTimer total;
   for (auto &t : tests) {

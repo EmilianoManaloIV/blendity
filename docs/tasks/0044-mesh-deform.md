@@ -5,7 +5,7 @@
 - **Requirements:** R-02, R-03
 - **Decisions:** ADR 0023 (mean value coordinates), ADR 0022 (deform-only)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/42
 
 ## Goal
 Shape a detailed mesh with a simple one round it: a low-poly cage (any closed mesh) whose vertices you move in Edit

@@ -111,6 +111,15 @@ struct Component {
   /* A modifier whose modify() only moves positions (ADR 0022): at the end of a stack it runs on a kept
    * copy of the mesh, and the render mesh follows in place instead of being rebuilt. */
   virtual bool is_deform_only() const { return false; }
+  /* A deformer limited to a vertex group (ADR 0024): the group's name (empty: the whole mesh) and whether inverted.
+   * The stack scales each vertex's move by its weight. */
+  virtual const std::string *limit_group(bool &invert) const {
+    invert = false;
+    return nullptr;
+  }
+  /* run_modifier's cache for a generative modifier: how its output vertices take the input's vertex groups, kept
+   * while the topology in and out stays (a drag re-runs the stack every frame; ADR 0024). */
+  mutable std::shared_ptr<meshops::GroupTransferMap> group_map;
   /* Objects shaped by points the Scene view edits (a Curve's, a Lattice's, task 0043): positions in the object's
    * space. The view draws them, selects them by clicking and moves them with the gizmo. */
   virtual int control_point_count() const { return 0; }
@@ -560,6 +569,12 @@ struct SubdivisionSurface : ComponentBase<SubdivisionSurface> {
 
 struct SmoothModifier : ComponentBase<SmoothModifier> {
   static constexpr const char *kName = "SmoothModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   float factor = 0.5f;
   int iterations = 4;
   void reflect(Reflector &r) override;
@@ -687,6 +702,12 @@ struct WireframeModifier : ComponentBase<WireframeModifier> {
 /* Blender: Displace modifier with a procedural noise texture. */
 struct DisplaceModifier : ComponentBase<DisplaceModifier> {
   static constexpr const char *kName = "DisplaceModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   float strength = 0.2f;
   float midlevel = 0.5f;
   float noise_scale = 0.5f;
@@ -703,6 +724,12 @@ struct DisplaceModifier : ComponentBase<DisplaceModifier> {
 /* Blender: Simple Deform modifier (Twist, Bend, Taper, Stretch). */
 struct SimpleDeformModifier : ComponentBase<SimpleDeformModifier> {
   static constexpr const char *kName = "SimpleDeformModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   int mode = 0;          // Twist, Bend, Taper, Stretch
   float angle = 45.0f;   // Twist / Bend (degrees)
   float factor = 0.5f;   // Taper / Stretch
@@ -718,6 +745,12 @@ struct SimpleDeformModifier : ComponentBase<SimpleDeformModifier> {
 /* Blender: Cast modifier. */
 struct CastModifier : ComponentBase<CastModifier> {
   static constexpr const char *kName = "CastModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   int shape = 0;  // Sphere, Cylinder, Cuboid
   float factor = 0.5f;
   float radius = 0.0f;
@@ -766,6 +799,12 @@ struct Curve : ComponentBase<Curve> {
  * axis becomes a distance along the curve, the other two an offset in its frame. Deform-only (ADR 0022). */
 struct CurveModifier : ComponentBase<CurveModifier> {
   static constexpr const char *kName = "CurveModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   std::string object;    // the Curve object, by name (as the Boolean's cutter)
   int deform_axis = 0;   // X, Y, Z, -X, -Y, -Z
   void reflect(Reflector &r) override;
@@ -802,6 +841,12 @@ struct Lattice : ComponentBase<Lattice> {
 /* Blender: Lattice modifier. Moves the mesh with a Lattice object's points (deform-only, ADR 0022). */
 struct LatticeModifier : ComponentBase<LatticeModifier> {
   static constexpr const char *kName = "LatticeModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   std::string object;  // the Lattice object, by name
   float strength = 1.0f;
   void reflect(Reflector &r) override;
@@ -812,6 +857,11 @@ struct LatticeModifier : ComponentBase<LatticeModifier> {
   bool unique() const override { return false; }
 };
 
+/* Runs one modifier of a stack with the vertex-group rules of ADR 0024 (scene.cpp). */
+void run_modifier(const Component &c, Mesh &m);
+/* A deformer's Vertex Group / Invert Group fields (ADR 0024). */
+void reflect_group_limit(Reflector &r, std::string &group, bool &invert);
+
 /* Mean value coordinates of x over a closed triangle mesh (Ju, Schaefer, Warren 2005), one weight per vertex into w
  * (mesh_deform.cpp). They sum to 1 and reproduce affine maps. */
 void mean_value_coordinates(const Vec3 &x, const std::vector<Vec3> &p, const std::vector<uint32_t> &t, float *w);
@@ -821,6 +871,12 @@ void mean_value_coordinates(const Vec3 &x, const std::vector<Vec3> &p, const std
 struct MeshDeformWeights;
 struct MeshDeformModifier : ComponentBase<MeshDeformModifier> {
   static constexpr const char *kName = "MeshDeformModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   std::string object;               // the cage, by name
   std::vector<Vec3> bind_verts;     // the cage at Bind, in this object's space (empty: not bound)
   std::vector<uint32_t> bind_tris;  // its triangles

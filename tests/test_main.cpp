@@ -228,6 +228,7 @@ static void round63_tests();
 static void round64_tests();
 static void round65_tests();
 static void round66_tests();
+static void round67_tests();
 
 int main() {
   register_builtin_components();
@@ -871,6 +872,7 @@ int main() {
   round64_tests();
   round65_tests();
   round66_tests();
+  round67_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -8926,7 +8928,7 @@ static void round28_tests() {
   };
   test("Inspector: Remove Component, Move Up and Reset in a component's menu act on a click, and undo", [&] {
     Editor ed;
-    ed.init_headless(1600, 900);
+    ed.init_headless(1600, 1000);  // tall enough for the Cube's whole Inspector (task 0045 added a Vertex Groups row)
     ed.step_frame_headless();
     ed.command("select Cube");
     ed.command("component Rotator");
@@ -23159,5 +23161,287 @@ static void round66_tests() {
     ed.step_frame_headless();
     GameObject *rb = ed.scene().find_by_name("Sphere");
     CHECK(rb && rb->get<MeshDeformModifier>() && rb->get<MeshDeformModifier>()->bound());
+  });
+}
+
+/* ===================================================================== */
+/* Round 67 (task 0045): vertex groups                                     */
+/* ===================================================================== */
+
+/* A flat grid (y = 0, x and z in -1..1) with two groups: "Ramp" = (x + 1) / 2, linear, so any vertex on the plane
+ * should carry exactly that; "Right" = 1 for x > 0. */
+static MeshPtr r67_grid(int n = 6) {
+  MeshPtr m = primitives::grid(2.0f, n, n);
+  VertexGroup ramp{"Ramp", {}}, right{"Right", {}};
+  for (const Vec3 &p : m->positions) {
+    ramp.weights.push_back((p.x + 1.0f) * 0.5f);
+    right.weights.push_back(p.x > 0.0f ? 1.0f : 0.0f);
+  }
+  m->vertex_groups = {ramp, right};
+  return m;
+}
+
+/* Every group fits; on-plane vertices carry the ramp exactly; every weight finite and in 0..1. */
+static bool r67_ok(const Mesh &m, float *worst) {
+  bool ok = m.groups_fit() && m.find_group("Ramp") >= 0;
+  float w = 0.0f;
+  if (ok) {
+    const std::vector<float> &ramp = m.vertex_groups[(size_t)m.find_group("Ramp")].weights;
+    for (size_t i = 0; i < m.vert_count(); i++) {
+      ok = ok && std::isfinite(ramp[i]) && ramp[i] >= -1e-6f && ramp[i] <= 1.0f + 1e-6f;
+      if (std::fabs(m.positions[i].y) < 1e-5f && std::fabs(m.positions[i].x) <= 1.0f) w = std::max(w, std::fabs(ramp[i] - (m.positions[i].x + 1.0f) * 0.5f));
+    }
+  }
+  *worst = w;
+  return ok && w < 2e-4f;
+}
+
+static void round67_tests() {
+  test("vertex groups: every Edit Mode operator family keeps one weight per vertex; vertices that stay keep theirs; new ones on the surface take its weights", [] {
+    struct Case { const char *op; const char *select; bool creates; };
+    const Case cases[] = {{"merge_distance", "all", false}, {"delete", "faces", false}, {"dissolve_vertices", "some", false},
+                          {"subdivide_edges", "all", true}, {"loopcut", "edge", true}, {"bevel", "some", true}, {"extrude", "faces", false},
+                          {"inset", "faces", true}, {"triangulate_faces", "faces", true}, {"poke", "faces", true}, {"split", "faces", false},
+                          {"duplicate", "faces", false}, {"dissolve_faces", "faces", false}, {"tris_to_quads", "all", false},
+                          {"collapse", "edge", false}, {"connect", "some", true}, {"edge_split", "some", false}};
+    int bad = 0;
+    for (const Case &c : cases) {
+      Editor ed;
+      ed.init_headless(800, 600);
+      GameObject *g = ed.scene().create("Grid");
+      g->add<MeshFilter>()->mesh = r67_grid();
+      g->add<MeshRenderer>();
+      const MeshPtr before = g->mesh_filter()->mesh;
+      ed.command("select Grid");
+      ed.mark_changed_for_test("R67 grid");
+      ed.step_frame_headless();
+      const std::string sel = c.select;
+      if (sel == "faces") ed.command("edit face all");
+      else ed.command("edit vertex");
+      if (sel == "all") ed.command("edit vertex all");
+      if (sel == "some") ed.command("vsel 8 9 15 16 22");
+      if (sel == "edge") ed.command("vsel 8 9");
+      ed.step_frame_headless();
+      ed.command(std::string("editop ") + c.op);
+      ed.step_frame_headless();
+      ed.step_frame_headless();  // the undo commit mends the groups
+      ed.command("edit off");
+      ed.step_frame_headless();
+      GameObject *after = ed.scene().find_by_name("Grid");
+      const Mesh *m = after && after->mesh_filter() ? after->mesh_filter()->mesh.get() : nullptr;
+      bool ok = m && m->groups_fit() && m->vertex_groups.size() == 2;
+      int moved = 0;
+      float worst = 0.0f;
+      if (ok) {
+        /* Vertices at a place only one old vertex had keep both its weights. */
+        for (size_t i = 0; i < m->vert_count(); i++) {
+          int n = 0;
+          size_t src = 0;
+          for (size_t j = 0; j < before->vert_count(); j++)
+            if (std::memcmp(&before->positions[j], &m->positions[i], sizeof(Vec3)) == 0) n++, src = j;
+          if (n == 1)
+            for (int k = 0; k < 2; k++) moved += m->vertex_groups[(size_t)k].weights[i] != before->vertex_groups[(size_t)k].weights[src];
+        }
+        /* New vertices on the plane carry the linear ramp exactly (interpolated from the surface). */
+        if (c.creates) ok = r67_ok(*m, &worst);
+      }
+      ok = ok && moved == 0;
+      if (!ok) std::printf("    %s: %d weights moved, ramp off by %g\n", c.op, moved, worst);
+      bad += !ok;
+    }
+    CHECK(bad == 0);
+  });
+
+  test("vertex groups: adding or removing a group survives the undo commit; Separate and Join keep groups", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("select Cube");
+    ed.command("vgroup add A");
+    ed.step_frame_headless();
+    ed.command("vgroup add B");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Mesh *m = ed.scene().find_by_name("Cube")->mesh_filter()->mesh.get();
+    CHECK(m->find_group("A") == 0 && m->find_group("B") == 1);
+    ed.command("vgroup remove A");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    m = ed.scene().find_by_name("Cube")->mesh_filter()->mesh.get();
+    CHECK(m->vertex_groups.size() == 1 && m->find_group("B") == 0);
+    /* Separate by loose parts: a part keeps its vertices' weights. */
+    Scene s;
+    (void)s;
+    GameObject *two = ed.scene().create("Two");
+    MeshPtr tm = primitives::cube(1.0f);
+    Mesh other = *primitives::cube(1.0f);
+    meshops::append_mesh(*tm, other, Mat4::translate({3, 0, 0}));
+    tm->vertex_groups = {{"Side", {}}};
+    for (const Vec3 &p : tm->positions) tm->vertex_groups[0].weights.push_back(p.x > 1.0f ? 1.0f : 0.0f);
+    two->add<MeshFilter>()->mesh = tm;
+    two->add<MeshRenderer>();
+    ed.command("select Two");
+    ed.mark_changed_for_test("R67 two");
+    ed.step_frame_headless();
+    ed.command("separate loose");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    int parts = 0, right = 0;
+    ed.scene().for_each([&](GameObject &o) {
+      const MeshFilter *mf = o.mesh_filter();
+      if (!mf || !mf->mesh || mf->mesh->find_group("Side") < 0) return;
+      parts++;
+      const Mesh &pm = *mf->mesh;
+      bool all_one = pm.groups_fit(), all_zero = pm.groups_fit();
+      for (float w : pm.vertex_groups[(size_t)pm.find_group("Side")].weights) all_one = all_one && w == 1.0f, all_zero = all_zero && w == 0.0f;
+      right += all_one || all_zero;
+    });
+    CHECK(parts == 2 && right == 2);
+    /* Join through the editor: the other object's group comes along, by name. */
+    ed.command("select Cube");
+    ed.command("select Sphere");  // replace: Sphere only
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    {
+      Mesh &sm = *mesh_make_mutable(sphere->mesh_filter()->mesh);
+      sm.vertex_groups = {{"Leg", std::vector<float>(sm.vert_count(), 0.5f)}};
+      sm.touch();
+    }
+    ed.mark_changed_for_test("R67 leg");
+    ed.step_frame_headless();
+    ed.command("select Sphere");
+    ed.command("selectadd Cube");  // the Cube is active: it keeps the result
+    ed.command("join");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Mesh *joined = ed.scene().find_by_name("Cube")->mesh_filter()->mesh.get();
+    CHECK(joined->groups_fit() && joined->find_group("B") >= 0 && joined->find_group("Leg") >= 0);
+    if (joined->groups_fit() && joined->find_group("Leg") >= 0) {
+      const std::vector<float> &leg = joined->vertex_groups[(size_t)joined->find_group("Leg")].weights;
+      CHECK(leg.front() == 0.0f && leg.back() == 0.5f);  // the Cube's vertices first, the Sphere's after
+    }
+  });
+
+  test("vertex groups: Apply Modifiers bakes a deformer limited to a group as the viewport shows it", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *g = ed.scene().create("G");
+    g->add<MeshFilter>()->mesh = r67_grid(6);
+    g->add<MeshRenderer>();
+    auto *d = g->add<DisplaceModifier>();
+    d->direction = 2;
+    d->strength = 1.0f;
+    d->vertex_group = "Right";
+    const std::vector<Vec3> shown = g->evaluated_mesh()->positions;
+    ed.command("select G");
+    ed.mark_changed_for_test("R67 displace");
+    ed.step_frame_headless();
+    ed.command("applymods");
+    ed.step_frame_headless();
+    GameObject *a = ed.scene().find_by_name("G");
+    CHECK(a && a->mesh_filter()->mesh->positions == shown && !a->get<DisplaceModifier>());
+  });
+
+  test("vertex groups: Mirror, Array, Subdivision and Join carry them; mid-edge vertices get the average", [] {
+    Scene s;
+    GameObject *g = s.create("G");
+    g->add<MeshFilter>()->mesh = r67_grid(4);
+    auto *mir = g->add<MirrorModifier>();
+    mir->x = true;
+    mir->merge = false;
+    float worst = 0.0f;
+    const Mesh *m = g->evaluated_mesh();
+    CHECK(m->groups_fit() && m->vert_count() == 2 * 25);
+    if (m->groups_fit()) {
+      const std::vector<float> &ramp = m->vertex_groups[0].weights;
+      for (size_t i = 25; i < 50; i++) worst = std::max(worst, std::fabs(ramp[i] - ramp[i - 25]));  // the copy has its source's weights
+    }
+    CHECK(worst == 0.0f);
+    g->remove_component(mir);
+    auto *arr = g->add<ArrayModifier>();
+    arr->count = 3;
+    CHECK(g->evaluated_mesh()->groups_fit() && g->evaluated_mesh()->vert_count() == 3 * 25);
+    g->remove_component(arr);
+    g->add<SubdivisionSurface>()->smooth = false;  // simple: new vertices at edge midpoints and face centres, all on the plane
+    CHECK(r67_ok(*g->evaluated_mesh(), &worst));
+    /* Join: groups by name. */
+    Mesh a = *r67_grid(2), b = *primitives::cube(1.0f);
+    b.vertex_groups = {{"Other", std::vector<float>(b.vert_count(), 0.5f)}};
+    meshops::append_mesh(a, b, Mat4::identity());
+    CHECK(a.groups_fit() && a.find_group("Ramp") >= 0 && a.find_group("Other") >= 0);
+    if (a.groups_fit()) CHECK(a.vertex_groups[(size_t)a.find_group("Other")].weights.back() == 0.5f && a.vertex_groups[(size_t)a.find_group("Other")].weights[0] == 0.0f);
+  });
+
+  test("vertex groups: a Displace limited to a group moves only its vertices, by their weights; Invert does the opposite", [] {
+    Scene s;
+    GameObject *g = s.create("G");
+    MeshPtr base = r67_grid(8);
+    g->add<MeshFilter>()->mesh = base;
+    auto *d = g->add<DisplaceModifier>();
+    d->direction = 2;  // Y
+    d->strength = 1.0f;
+    d->midlevel = -1.0f;  // every vertex moves up
+    const std::vector<Vec3> all = g->evaluated_mesh()->positions;
+    d->vertex_group = "Ramp";
+    const Mesh *m = g->evaluated_mesh();
+    float off = 0.0f;
+    for (size_t i = 0; i < m->vert_count(); i++) {
+      const float w = (base->positions[i].x + 1.0f) * 0.5f;
+      off = std::max(off, length(m->positions[i] - (base->positions[i] + (all[i] - base->positions[i]) * w)));
+    }
+    CHECK(off < 1e-5f);
+    d->invert_group = true;
+    m = g->evaluated_mesh();
+    off = 0.0f;
+    for (size_t i = 0; i < m->vert_count(); i++) {
+      const float w = 1.0f - (base->positions[i].x + 1.0f) * 0.5f;
+      off = std::max(off, length(m->positions[i] - (base->positions[i] + (all[i] - base->positions[i]) * w)));
+    }
+    CHECK(off < 1e-5f);
+    d->vertex_group = "Nothing";  // a name the mesh hasn't: the whole mesh
+    CHECK(g->evaluated_mesh()->positions == all);
+  });
+
+  test("vertex groups: they round-trip through a scene file and undo; a file without them loads as before; the console edits them", [] {
+    Scene s;
+    GameObject *g = s.create("G");
+    g->add<MeshFilter>()->mesh = r67_grid(3);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    GameObject *b = back.find_by_name("G");
+    CHECK(b && b->mesh_filter()->mesh->vertex_groups.size() == 2);
+    if (b && b->mesh_filter()->mesh->vertex_groups.size() == 2)
+      CHECK(b->mesh_filter()->mesh->vertex_groups[0].weights == g->mesh_filter()->mesh->vertex_groups[0].weights &&
+            b->mesh_filter()->mesh->vertex_groups[1].name == "Right");
+    Scene plain;
+    plain.create("P")->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    Scene back2;
+    CHECK(load_scene_text(save_scene_text(plain), back2, err) && back2.find_by_name("P")->mesh_filter()->mesh->vertex_groups.empty());
+    /* Console, Edit Mode, undo. */
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("select Cube");
+    ed.command("vgroup add Lid");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->mesh_filter()->mesh->find_group("Lid") == 0);
+    ed.step_frame_headless();
+    ed.command("edit vertex");
+    ed.command("vsel 2 3 6 7");
+    ed.command("vgroup assign Lid 0.75");
+    ed.step_frame_headless();
+    ed.command("edit off");
+    ed.step_frame_headless();
+    cube = ed.scene().find_by_name("Cube");
+    const std::vector<float> &w = cube->mesh_filter()->mesh->vertex_groups[0].weights;
+    CHECK(w.size() == 8 && w[2] == 0.75f && w[7] == 0.75f && w[0] == 0.0f);
+    ed.command("vgroup rename Lid Top");
+    CHECK(ed.scene().find_by_name("Cube")->mesh_filter()->mesh->find_group("Top") == 0);
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Cube")->mesh_filter()->mesh->find_group("Lid") == 0);
+    ed.command("undo");
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Cube")->mesh_filter()->mesh->vertex_groups.empty());
   });
 }

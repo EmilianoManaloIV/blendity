@@ -2,6 +2,48 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 67): vertex groups (task 0045)
+
+**Asked:** the roadmap (2026-10-11): "weight painting", the first half: the groups it paints.
+
+**Added**
+- **Vertex groups** (ADR 0024): MeshFilter > Vertex Groups in the Inspector (Add, Remove, rename; in Edit Mode a
+  Weight with Assign, Remove from, Select, Deselect) and the console `vgroup add|remove|rename|assign|unassign|
+  select|deselect|active`. Saved in scene files (`vg` lines), kept by undo.
+- **Every deforming modifier** (Displace, Simple Deform, Smooth, Cast, Curve, Lattice, Mesh Deform) has **Vertex
+  Group** and **Invert Group**: only that group's vertices move, each by its weight.
+- The groups follow the vertices through every edit: welds and merges, Mirror, Array and Join carry them exactly;
+  any other change of the vertex count mends them by position (a vertex that stayed keeps its weights, a new one
+  takes the surface's at its place), at each undo step and after each generative modifier of a stack.
+- Learn > Modifiers: "Vertex groups".
+
+**Checked**
+- New tests (round 67): 17 Edit Mode operators (merge, delete, dissolves, subdivide, loop cut, bevel, extrudes,
+  inset, triangulate, poke, split, duplicate, quads, collapse, connect, edge split) keep one weight per vertex,
+  vertices that stay keep both groups' weights, and new vertices on the surface carry a linear ramp exactly; adding
+  a second group and removing one survive the undo commit; Separate keeps each part's weights and Join through the
+  editor brings the other object's group by name; Apply Modifiers bakes a group-limited Displace as shown; Mirror
+  copies give their sources' weights, Array and simple Subdivision carry them, Join merges groups by name; a Displace limited to a group moves each vertex by its weight, Invert the rest, an
+  unknown name the whole mesh; groups round-trip through a scene file, old files load without them, the console
+  adds, assigns (0.75), renames and undo takes each back.
+- New stress section `vgroups`: 37 Edit Mode operators (random vertex or face selections) and 10 generative
+  modifiers (each followed by a group-limited Displace) on the 26 stress meshes with groups: 1,222 operations, 0
+  groups of the wrong size, 0 weights not finite or out of 0..1, 0 weights moved off a vertex that stayed. Carrying
+  two groups through Subdivision Surface on 25k vertices: 1.8 ms a re-run (48 ms once, building the map).
+- Push/Pull: 26,620 operations, 0 problems, 394 results with faces newly on top of each other (unchanged);
+  `modifiers_ngon` 11,514 operations, 0 problems.
+- Unit checks: Windows 9,151, 0 failed (543 tests); the whole suite in render-cache verify mode: 9,152,
+  0 failed, 0 stale pictures. Linux with libraries: 9,061, 0 failed. Sanitizer build: 8,979, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: a blocker, five majors and several minor findings, all fixed: the undo commit's mending
+undid Add and Remove group and lost a joined object's groups (it now only mends groups an operator left the wrong
+size); mending by position overwrote Mirror's and Array's exact copies; Separate dropped the groups; Apply of one
+modifier ignored its vertex group; carrying groups through a generative modifier cost 89 ms every frame of a drag
+(now a kept map: 1.8 ms); the tests couldn't tell carried weights from re-sampled ones and the stress selected no
+faces; the search could stop early for points outside the old mesh, a far point overflowed an int, a deformer's
+NaN reached weight-0 vertices, saving before the commit dropped the groups (save commits first).
+
 ## 2026-10-12 (round 66): the Mesh Deform modifier, a cage of any shape (task 0044)
 
 **Asked:** the roadmap (2026-10-11): "a Cage (lattice / mesh-deform) tool".

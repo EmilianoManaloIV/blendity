@@ -1228,6 +1228,7 @@ void SubdivisionSurface::modify(Mesh &m) const {
 void SmoothModifier::reflect(Reflector &r) {
   r.field("Factor", factor, 0.01f, -2.0f, 2.0f);
   r.field("Iterations", iterations, 0, 200);
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void SmoothModifier::modify(Mesh &m) const { meshops::smooth_laplacian(m, factor, iterations); }
 
@@ -1291,6 +1292,13 @@ void ArrayModifier::modify(Mesh &m) const {
   meshops::make_array(m, n, relative_offset, constant_offset, merge ? merge_distance : 0.0f);
 }
 
+void reflect_group_limit(Reflector &r, std::string &group, bool &invert) {
+  r.text("Vertex Group", group);
+  r.help("Only the vertices of this vertex group move, each as much as its weight (Blender: Vertex Group). Empty: the\n"
+         "whole mesh; a name the mesh hasn't: the whole mesh too.");
+  r.field("Invert Group", invert);
+}
+
 /* The points after a count, each with a "P<i> " prefix (ADR 0008's scheme): files, undo, hashing and
  * `set Curve.P2Position 1 0 0` see every point. */
 void Curve::reflect(Reflector &r) {
@@ -1337,6 +1345,7 @@ void LatticeModifier::reflect(Reflector &r) {
   r.text("Object", object);
   r.help("Name of the Lattice object whose points move the mesh (Blender: Lattice > Object).");
   r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 
 void CurveModifier::reflect(Reflector &r) {
@@ -1345,6 +1354,7 @@ void CurveModifier::reflect(Reflector &r) {
   static const char *kAxes[] = {"X", "Y", "Z", "-X", "-Y", "-Z"};
   r.enumeration("Deform Axis", deform_axis, kAxes, 6);
   r.help("The mesh's axis that runs along the curve; the mesh's origin sits at the curve's start.");
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 
 void SolidifyModifier::reflect(Reflector &r) {
@@ -1465,6 +1475,7 @@ void DisplaceModifier::reflect(Reflector &r) {
   r.field("Seed", seed, 0, 100000);
   static const char *kDir[] = {"Normal", "X", "Y", "Z"};
   r.enumeration("Direction", direction, kDir, 4);
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void DisplaceModifier::modify(Mesh &m) const {
   meshops::displace(m, strength, midlevel, noise_scale, direction, octaves, (uint32_t)std::max(0, seed));
@@ -1483,6 +1494,7 @@ void SimpleDeformModifier::reflect(Reflector &r) {
   r.field("Lower Limit", lower, 0.01f, 0.0f, 1.0f);
   r.field("Upper Limit", upper, 0.01f, 0.0f, 1.0f);
   r.help("The part of the mesh (0 = one end, 1 = the other) that deforms; the rest follows rigidly.");
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void SimpleDeformModifier::modify(Mesh &m) const { meshops::simple_deform(m, mode, mode <= 1 ? angle : factor, axis, lower, upper); }
 
@@ -1494,6 +1506,7 @@ void CastModifier::reflect(Reflector &r) {
   r.field("Radius", radius, 0.01f, 0.0f, 10000.0f);
   r.help("0 uses the vertices' average distance from the origin.");
   if (r.all_fields() || shape == 1) r.enumeration("Axis", axis, kAxes, 3);
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void CastModifier::modify(Mesh &m) const { meshops::cast(m, shape, factor, radius, axis); }
 
@@ -1712,6 +1725,53 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
   }
 }
 
+/* One modifier of a stack (ADR 0024): a deformer limited to a vertex group moves each vertex by its weight; a modifier
+ * that changes the vertex count without carrying the groups gets them from the mesh before it, by position. */
+void run_modifier(const Component &c, Mesh &m) {
+  bool invert = false;
+  const std::string *group = c.limit_group(invert);
+  const int gi = group && !group->empty() ? m.find_group(*group) : -1;
+  if (gi >= 0 && c.is_deform_only() && m.vertex_groups[(size_t)gi].weights.size() == m.vert_count()) {
+    const std::vector<Vec3> before = m.positions;
+    c.modify(m);
+    if (m.positions.size() != before.size()) return;
+    const std::vector<float> &w = m.vertex_groups[(size_t)gi].weights;
+    for (size_t i = 0; i < before.size(); i++) {
+      float k = finite_bits(w[i]) ? std::max(0.0f, std::min(w[i], 1.0f)) : 0.0f;
+      if (invert) k = 1.0f - k;
+      m.positions[i] = k == 0.0f ? before[i] : before[i] + (m.positions[i] - before[i]) * k;  // 0: untouched, even by a NaN
+    }
+    return;
+  }
+  if (!c.is_deform_only() && !m.vertex_groups.empty()) {
+    /* What the transfer reads, not a whole copy (no render caches, UVs or flags). */
+    Mesh before;
+    before.positions = m.positions;
+    before.face_offsets = m.face_offsets;
+    before.corner_verts = m.corner_verts;
+    before.vertex_groups = m.vertex_groups;
+    c.modify(m);
+    /* Mirror, Array and Join copy the groups themselves; a modifier that made a new mesh, or renumbered without
+     * them, gets them from the mesh before it, by position, through a map kept while the topology stays. */
+    if (m.groups_fit() && m.vertex_groups.size() == before.vertex_groups.size()) return;
+    if (!before.groups_fit()) {
+      meshops::transfer_vertex_groups(before, m);
+      return;
+    }
+    const uint64_t in_key = meshops::topology_key(before), out_key = meshops::topology_key(m);
+    std::shared_ptr<meshops::GroupTransferMap> map = c.group_map;
+    if (!map || map->in_key != in_key || map->out_key != out_key) {
+      map = std::make_shared<meshops::GroupTransferMap>();
+      meshops::group_transfer_map(before, m, *map);
+      map->in_key = in_key, map->out_key = out_key;
+      c.group_map = map;
+    }
+    meshops::apply_group_map(*map, before, m);
+    return;
+  }
+  c.modify(m);
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = mesh_filter();
@@ -1744,7 +1804,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
-      if (on(*components[i])) components[i]->modify(m);
+      if (on(*components[i])) run_modifier(*components[i], m);
   };
   if (!any_tail) {
     auto m = std::make_shared<Mesh>(*mf->mesh);

@@ -87,6 +87,22 @@ void Mesh::sync_attributes() {
   if (!face_smooth.empty()) face_smooth.resize(face_count(), smooth ? 1 : 0);
 }
 
+int Mesh::find_group(const std::string &group) const {
+  for (size_t i = 0; i < vertex_groups.size(); i++)
+    if (vertex_groups[i].name == group) return (int)i;
+  return -1;
+}
+
+bool Mesh::groups_fit() const {
+  for (const VertexGroup &g : vertex_groups)
+    if (g.weights.size() != positions.size()) return false;
+  return true;
+}
+
+void Mesh::copy_vertex_weights(uint32_t from) {
+  for (VertexGroup &g : vertex_groups) g.weights.push_back(from < g.weights.size() ? g.weights[from] : 0.0f);
+}
+
 int Mesh::material_count() const {
   int m = 0;
   for (int32_t i : face_material) m = std::max(m, i);
@@ -1168,6 +1184,13 @@ std::vector<uint32_t> remove_loose_verts(Mesh &m) {
       np.push_back(m.positions[i]);
     }
   for (uint32_t &v : m.corner_verts) v = remap[v];
+  for (VertexGroup &g : m.vertex_groups) {  // groups that fitted the old numbering follow the remap
+    if (g.weights.size() != remap.size()) continue;
+    std::vector<float> w(np.size(), 0.0f);
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX) w[remap[i]] = g.weights[i];
+    g.weights = std::move(w);
+  }
   m.positions = std::move(np);
   remap_seams(m, remap);
   m.touch();
@@ -1898,6 +1921,7 @@ void mirror(Mesh &m, bool x, bool y, bool z, float merge_dist) {
       }
       p[ax] = -p[ax];
       twin[i] = m.add_vert(p);
+      m.copy_vertex_weights(i);
     }
     std::vector<uint32_t> fv;
     std::vector<Vec2> ft;
@@ -1933,7 +1957,10 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
   m.positions.reserve(nv * (size_t)count);
   for (int c = 1; c < count; c++) {
     uint32_t off = (uint32_t)m.vert_count();
-    for (uint32_t i = 0; i < nv; i++) m.add_vert(src.positions[i] + step * (float)c);
+    for (uint32_t i = 0; i < nv; i++) {
+      m.add_vert(src.positions[i] + step * (float)c);
+      m.copy_vertex_weights(i);
+    }
     std::vector<uint32_t> fv;
     for (size_t f = 0; f < src.face_count(); f++) {
       fv.assign(src.face_verts(f), src.face_verts(f) + src.face_size(f));
