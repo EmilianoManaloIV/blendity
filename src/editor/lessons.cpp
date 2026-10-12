@@ -435,6 +435,15 @@ In Unity a material is a file in the Project window that many objects share; cha
 @ blender/intern/cycles/kernel/svm/checker.h, noise.h
 # Getting textures in
 Drag images onto the window: they're copied to Assets/Textures and, if an object is selected, assigned to its material. Drag an .obj or .fbx and its materials and textures come with it (OBJ uses the .mtl file; FBX is read with ufbx, a library Blender itself bundles).
+# The anime look
+Anime and cel shading draw light in a few flat tones with hard edges instead of a smooth gradient, a coloured
+shadow side, a hard highlight and black lines round the shape. Blender gets it with Shader to RGB and a Color
+Ramp (Goo Engine builds it in); Unity with a toon shader. In Blendity set a material's Shading Model to Toon (or
+pick the Toon preset): Toon Bands sets how many lit tones, Threshold where light turns to shadow, Shadow Color the
+dark side's tint, and a rim light can outline the silhouette from inside. Add an Outline component for the lines:
+a slightly larger copy of the mesh, turned inside out, so only its rim shows round the object (the inverted
+hull). Both show in the views, F12 renders on the CPU and GPU, and exports.
+! cmd:select Sphere; material Toon; component Outline | Make the Sphere toon-shaded with an outline
 # Baking textures for other programs
 Procedural textures, axis materials and Box mapping are computed by Blendity's shaders; another program only understands images on UVs. Object > Bake Textures lays the object out on new UVs (Smart UV Project and Pack Islands, as the lightmapper does) and evaluates its materials at every texel into four images: albedo, roughness, metallic and a normal map. Blender does the same with Cycles' Bake panel, Unity users with Substance's baker. The export option Bake Textures does it on copies for OBJ, FBX and glTF, leaving the scene alone.
 ? Why can't a Mirror modifier be baked in place? | The images go on the base mesh's UVs, and the mirrored half shares them: it would repeat the base's images. Apply the modifier first, or export with Bake Textures, which bakes what it exports.

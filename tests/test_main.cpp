@@ -220,6 +220,7 @@ static void round56_tests();
 static void round57_tests();
 static void round58_tests();
 static void round59_tests();
+static void round60_tests();
 
 int main() {
   register_builtin_components();
@@ -856,6 +857,7 @@ int main() {
   round57_tests();
   round58_tests();
   round59_tests();
+  round60_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -21047,5 +21049,355 @@ static void round59_tests() {
     }
     std::remove(path.c_str());
     set_env("BLENDITY_CACHE_DIR", keep);
+  });
+}
+
+/* ===================================================================== */
+/* Round 60 (task 0038, ADR 0020): toon shading and outlines              */
+/* ===================================================================== */
+
+/* The round 57 scene with the Cube's mesh a sphere, a black world (no ambient: only the sun shades it) and a Toon
+ * material with `bands` tones, no rim, no highlight. Returns the sphere's object. */
+static GameObject *r60_open(Editor &ed, int bands, bool toon = true) {
+  r57_open(ed);
+  ed.scene().environment.mode = 3;
+  ed.scene().environment.color = Vec3(0.0f);
+  GameObject *g = ed.scene().find_by_name("Cube");
+  if (!g) return nullptr;
+  g->get<MeshFilter>()->mesh = primitives::uv_sphere(2.5f, 96, 48);  // big in the frame: anti-aliased edges are few of its pixels
+  MaterialPtr m = make_material_preset(toon ? "Toon" : "Solid");
+  m->base_color = Vec3(0.9f, 0.6f, 0.5f);
+  m->toon_bands = bands;
+  m->toon_softness = 0.0f;
+  m->toon_rim_width = 0.0f;
+  m->toon_specular_size = 0.0f;
+  g->get<MeshRenderer>()->materials = {m};
+  g->mark_dirty();
+  ed.mark_changed_for_test("R60 setup");
+  ed.step_frame_headless();
+  return ed.scene().find_by_name("Cube");
+}
+/* The solid pixels' colours (a transparent render: alpha 255 is the object), most common first, with their counts. */
+static std::vector<std::pair<uint32_t, int>> r60_colours(const Image &img, int *solid = nullptr) {
+  std::map<uint32_t, int> h;
+  int n = 0;
+  for (uint32_t c : img.pixels)
+    if ((c >> 24) == 255) h[c & 0xFFFFFF]++, n++;
+  std::vector<std::pair<uint32_t, int>> v(h.begin(), h.end());
+  std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+  if (solid) *solid = n;
+  return v;
+}
+static float r60_lum(uint32_t c) { return ((c >> 16 & 255) * 0.2126f + (c >> 8 & 255) * 0.7152f + (c & 255) * 0.0722f) / 255.0f; }
+
+static void round60_tests() {
+  test("toon: the tone of a surface steps through Toon Bands levels at the threshold, softness 0 a hard edge", [] {
+    Material m;
+    m.shading_model = 1;
+    m.toon_threshold = 0.2f;
+    m.toon_softness = 0.0f;
+    for (int bands : {1, 2, 3, 5}) {
+      m.toon_bands = bands;
+      std::set<int> levels;
+      for (int i = 0; i <= 1000; i++) levels.insert((int)std::lround(toon_level(m, i / 1000.0f) * 1000.0f));
+      CHECK((int)levels.size() == bands + 1);  // the shadow and the lit tones
+    }
+    m.toon_bands = 1;
+    CHECK(toon_level(m, 0.19f) == 0.0f && toon_level(m, 0.21f) == 1.0f);
+    CHECK(toon_level(m, std::nanf("")) == 0.0f);
+    m.toon_softness = 0.1f;
+    const float mid = toon_level(m, 0.2f);
+    CHECK(mid > 0.3f && mid < 0.7f);  // soft: half way at the edge
+  });
+
+  test("toon: the rim lights the silhouette and nothing facing the eye", [] {
+    Material m;
+    m.toon_rim_width = 0.3f;
+    m.toon_rim_strength = 1.0f;
+    m.toon_rim = Vec3(1.0f, 0.5f, 0.25f);
+    const Vec3 V(0, 0, 1);
+    CHECK(length(toon_rim(m, V, V)) == 0.0f);
+    const Vec3 edge = toon_rim(m, normalize(Vec3(1, 0, 0.05f)), V);
+    CHECK(edge.x > 0.9f && std::fabs(edge.y - 0.5f * edge.x) < 1e-4f);
+    m.toon_rim_width = 0.0f;
+    CHECK(length(toon_rim(m, normalize(Vec3(1, 0, 0.05f)), V)) == 0.0f);
+  });
+
+  test("toon: a rasterized toon sphere takes exactly its Toon Bands tones (plus the shadow); PBR shades smoothly", [] {
+    for (int bands : {1, 3}) {
+      Editor ed;
+      if (!r60_open(ed, bands)) return;
+      int solid = 0;
+      const auto v = r60_colours(r57_render(ed, "Rasterized", true), &solid);
+      int big = 0, covered = 0;
+      for (const auto &c : v)
+        if (c.second * 50 >= solid) big++, covered += c.second;  // a tone: at least 2 % of the sphere
+      std::printf("    %d band%s: %d tones cover %.1f %% of %d pixels\n", bands, bands == 1 ? "" : "s", big, 100.0 * covered / std::max(1, solid), solid);
+      CHECK(big == bands || big == bands + 1);
+      CHECK(covered * 100 >= solid * 85);  // the rest: anti-aliased edges between tones
+    }
+    Editor ed;
+    if (!r60_open(ed, 1, false)) return;
+    int solid = 0;
+    const auto v = r60_colours(r57_render(ed, "Rasterized", true), &solid);
+    int top = 0;
+    for (size_t i = 0; i < v.size() && i < 4; i++) top += v[i].second;
+    std::printf("    PBR: the 4 commonest colours cover %.1f %%\n", 100.0 * top / std::max(1, solid));
+    CHECK(top * 2 < solid);
+  });
+
+  test("toon: the CPU path tracer's direct light gives the rasterizer's tones (each tone's share within 4 %), the GPU's the CPU's", [] {
+    Editor ed;
+    if (!r60_open(ed, 2)) return;
+    const Image raster = r57_render(ed, "Rasterized", true);
+    int solid = 0;
+    const auto tones = r60_colours(raster, &solid);
+    std::vector<float> lum;
+    for (const auto &c : tones)
+      if (c.second * 50 >= solid) lum.push_back(r60_lum(c.first));
+    auto shares = [&](const Image &img) {
+      std::vector<double> sh(lum.size(), 0.0);
+      int n = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255) continue;
+        const float l = r60_lum(c);
+        size_t best = 0;
+        for (size_t k = 1; k < lum.size(); k++)
+          if (std::fabs(lum[k] - l) < std::fabs(lum[best] - l)) best = k;
+        sh[best] += 1.0, n++;
+      }
+      for (double &x : sh) x /= std::max(1, n);
+      return sh;
+    };
+    ed.command("set Render.Samples 64");
+    const Image cpu = r57_render(ed, "Path", true);
+    const auto a = shares(raster), b = shares(cpu);
+    double worst = 0.0;
+    for (size_t k = 0; k < a.size(); k++) worst = std::max(worst, std::fabs(a[k] - b[k]));
+    std::printf("    %zu tones; the largest share difference raster / CPU trace: %.1f %%\n", lum.size(), worst * 100.0);
+    CHECK(lum.size() >= 2 && worst < 0.04);
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const Image g = r57_render(ed, "Path", true);
+      double diff = 0.0;
+      int n = 0;
+      for (size_t i = 0; i < cpu.pixels.size() && i < g.pixels.size(); i++) {
+        if ((cpu.pixels[i] >> 24) != 255) continue;
+        for (int ch = 0; ch < 3; ch++) diff += std::abs((int)(cpu.pixels[i] >> (ch * 8) & 255) - (int)(g.pixels[i] >> (ch * 8) & 255));
+        n++;
+      }
+      diff /= std::max(1, n) * 3.0 * 255.0;
+      std::printf("    GPU vs CPU: mean difference %.2f %%\n", diff * 100.0);
+      CHECK(diff < 0.03);
+      ed.command("device cpu");
+    }
+  });
+
+  test("toon: an Outline draws a line of its colour round the silhouette (rasterized and path traced), none over the object, and thickness 0 draws nothing", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    const Image plain = r57_render(ed, "Rasterized", true);
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("set Outline.Color 1 0 0");
+    ed.command("set Outline.Thickness 0.08");
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g && g->find_role(Component::RenderRole::Outline) != nullptr);
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &o = r57_render(ed, engine, true);
+      /* The ring: solid pixels where the sphere alone left the background, red-dominant (the view transform
+       * desaturates pure red). Inside: the sphere's own pixels stay as they were, but for its edge. */
+      int ring = 0, ring_red = 0, inside = 0, inside_changed = 0;
+      for (size_t i = 0; i < o.pixels.size() && i < plain.pixels.size(); i++) {
+        const uint32_t c = o.pixels[i], p0 = plain.pixels[i];
+        if ((p0 >> 24) == 0 && (c >> 24) == 255) {
+          ring++;
+          ring_red += (int)(c >> 16 & 255) > 2 * (int)(c >> 8 & 255) + 20 && (int)(c >> 16 & 255) > 2 * (int)(c & 255) + 20;
+        }
+        if ((p0 >> 24) == 255) {
+          inside++;
+          int d = 0;
+          for (int ch = 0; ch < 3; ch++) d = std::max(d, std::abs((int)(c >> (ch * 8) & 255) - (int)(p0 >> (ch * 8) & 255)));
+          inside_changed += d > 40;
+        }
+      }
+      std::printf("    %s: %d new solid pixels round the sphere (%d red), %d of %d of its own pixels changed\n", engine, ring, ring_red,
+                  inside_changed, inside);
+      /* 80 %: a traced ring pixel next to the sphere averages the sphere's colour in (its samples spread over the
+       * pixel); the rasterizer's are all red. */
+      CHECK(ring > 60 && ring_red * 10 >= ring * 8);
+      CHECK(inside_changed * 25 < inside);  // only its edge: the hull doesn't cover or darken the sphere
+    }
+    /* The path tracer: the hull doesn't shadow or darken the sphere it surrounds. */
+    ed.command("set Outline.Thickness 0");
+    const Image none = r57_render(ed, "Rasterized", true);
+    int changed = 0;
+    for (size_t i = 0; i < none.pixels.size() && i < plain.pixels.size(); i++) changed += none.pixels[i] != plain.pixels[i];
+    CHECK(changed == 0);
+  });
+
+  test("toon: a mirrored (negative scale) object keeps its outline a rim, rasterized and traced, and draws its own front faces", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    g->set_local_scale({-1.0f, 1.0f, 1.0f});
+    ed.mark_changed_for_test("R60 mirror");
+    ed.step_frame_headless();
+    g = ed.scene().find_by_name("Cube");
+    const Image plain = r57_render(ed, "Rasterized", true);
+    int solid = 0;
+    const auto tones = r60_colours(plain, &solid);
+    CHECK(solid > 2000);
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("set Outline.Color 1 0 0");
+    ed.command("set Outline.Thickness 0.08");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &o = r57_render(ed, engine, true);
+      int ring = 0, inside = 0, changed = 0;
+      for (size_t i = 0; i < o.pixels.size() && i < plain.pixels.size(); i++) {
+        const uint32_t c = o.pixels[i], p0 = plain.pixels[i];
+        if ((p0 >> 24) == 0 && (c >> 24) == 255) ring++;
+        if ((p0 >> 24) == 255) {
+          inside++;
+          int d = 0;
+          for (int ch = 0; ch < 3; ch++) d = std::max(d, std::abs((int)(c >> (ch * 8) & 255) - (int)(p0 >> (ch * 8) & 255)));
+          changed += d > 40;
+        }
+      }
+      std::printf("    mirrored, %s: %d ring pixels, %d of %d of the sphere's own changed\n", engine, ring, changed, inside);
+      CHECK(ring > 60 && changed * 25 < inside);
+    }
+  });
+
+  test("toon: an outlined object with a modifier traced in the Camera Preview while the Scene view redraws (each view keeps its own shell)", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    g->add<MirrorModifier>();
+    g->mark_dirty();
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("select Main Camera");
+    ed.command("camerapreview rendered");
+    for (int i = 0; i < 30; i++) {
+      ed.command("redraw always");
+      ed.step_frame_headless();  // the Scene view's raster (viewport mesh) and the preview's trace (render mesh) both
+    }
+    ed.command("redraw changes");
+    const Image &o = r57_render(ed, "Path", true);
+    int solid = 0;
+    for (uint32_t c : o.pixels) solid += (c >> 24) == 255;
+    CHECK(solid > 2000);  // (the sanitizer build reads freed memory here if a view's shell is freed under a tracer)
+  });
+
+  test("toon: adding an Outline undoes; a toon field's edit is one undo step", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 2);
+    if (!g) return;
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.step_frame_headless();
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g && g->find_role(Component::RenderRole::Outline));
+    ed.command("undo");
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g && !g->find_role(Component::RenderRole::Outline));
+    MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+    m->toon_bands = 5;
+    m->touch();
+    ed.mark_changed_for_test("R60 bands");
+    ed.step_frame_headless();
+    ed.command("undo");
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g->get<MeshRenderer>()->materials[0]->toon_bands == 2);
+  });
+
+  test("toon: under a large area light the rasterizer's tones match the CPU path tracer's (each share within 6 %)", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 2);
+    if (!g) return;
+    if (GameObject *sun = ed.scene().find_by_name("Directional Light")) {
+      Light *l = sun->get<Light>();
+      l->type = 3;  // Area
+      l->area_width = l->area_height = 3.0f;
+      l->range = 30.0f;
+      sun->set_world_position({0.0f, 6.0f, -4.0f});
+      sun->set_world_rotation(Quat::euler({60.0f, 0.0f, 0.0f}));
+      l->intensity = 3.0f;
+    }
+    ed.mark_changed_for_test("R60 area");
+    ed.step_frame_headless();
+    const Image raster = r57_render(ed, "Rasterized", true);
+    int solid = 0;
+    const auto tones = r60_colours(raster, &solid);
+    std::vector<float> lum;
+    for (const auto &c : tones)
+      if (c.second * 50 >= solid) lum.push_back(r60_lum(c.first));
+    auto shares = [&](const Image &img) {
+      std::vector<double> sh(lum.size(), 0.0);
+      int n = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255 || lum.empty()) continue;
+        const float l = r60_lum(c);
+        size_t best = 0;
+        for (size_t k = 1; k < lum.size(); k++)
+          if (std::fabs(lum[k] - l) < std::fabs(lum[best] - l)) best = k;
+        sh[best] += 1.0, n++;
+      }
+      for (double &x : sh) x /= std::max(1, n);
+      return sh;
+    };
+    ed.command("set Render.Samples 128");
+    const auto a = shares(raster), b = shares(r57_render(ed, "Path", true));
+    double worst = 0.0;
+    for (size_t k = 0; k < a.size(); k++) worst = std::max(worst, std::fabs(a[k] - b[k]));
+    std::printf("    area light: %zu tones, the largest share difference %.1f %%\n", lum.size(), worst * 100.0);
+    CHECK(lum.size() >= 2 && worst < 0.06);
+  });
+
+  test("toon: the outline shell is the mesh pushed out with its faces flipped; the Outline round-trips through the scene and the fields through a .mat", [] {
+    MeshPtr cube = primitives::cube();
+    Outline ol;
+    ol.thickness = 0.1f;
+    ol.world_space = false;
+    const Mesh *sh = ol.shell(*cube, 1.0f);
+    CHECK(sh && sh->face_count() == cube->face_count() && sh->positions.size() == cube->positions.size());
+    if (sh) {
+      CHECK(dot(sh->face_normal(0), cube->face_normal(0)) < -0.99f);
+      float far = 0.0f;
+      for (size_t i = 0; i < sh->positions.size(); i++) far = std::max(far, length(sh->positions[i] - cube->positions[i]));
+      CHECK(std::fabs(far - 0.1f) < 1e-4f);
+      CHECK(ol.shell(*cube, 1.0f) == sh);  // cached
+    }
+    ol.world_space = true;
+    const Mesh *scaled = ol.shell(*cube, 2.0f);
+    CHECK(scaled && std::fabs(length(scaled->positions[0] - cube->positions[0]) - 0.05f) < 1e-4f);  // 0.1 m on a 2x object
+    CHECK(ol.materials().size() == 1 && ol.materials()[0]->outline_hull && ol.materials()[0]->unlit && !ol.materials()[0]->cast_shadows);
+    ol.thickness = 0.0f;
+    CHECK(ol.shell(*cube, 1.0f) == nullptr);
+    Material m;
+    m.shading_model = 1;
+    m.toon_bands = 4;
+    m.toon_shadow = Vec3(0.1f, 0.2f, 0.3f);
+    m.toon_rim_width = 0.4f;
+    m.toon_flat_ambient = false;
+    Material back;
+    CHECK(load_material_text(save_material_text(m), back));
+    CHECK(back.shading_model == 1 && back.toon_bands == 4 && std::fabs(back.toon_shadow.z - 0.3f) < 1e-5f && back.toon_rim_width == 0.4f &&
+          !back.toon_flat_ambient);
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("set Outline.Thickness 0.07");
+    Scene back_scene;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back_scene, err));
+    GameObject *g2 = back_scene.find_by_name("Cube");
+    const Component *oc = g2 ? g2->find_role(Component::RenderRole::Outline) : nullptr;
+    CHECK(oc && std::fabs(static_cast<const Outline *>(oc)->thickness - 0.07f) < 1e-5f);
   });
 }

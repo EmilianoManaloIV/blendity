@@ -75,6 +75,22 @@ struct Material {
   float axis_angle = 45.0f;  // degrees from up where Top turns into Side
   float axis_blend = 0.1f;   // the transition's half width, in cosine units
   float axis_scale = 1.0f;   // metres per texture tile for the projection
+  /* Shading model (ADR 0020): PBR, or Toon (anime / cel look: banded light, a shadow colour, a hard specular spot,
+   * a rim light), the same in every renderer. */
+  int shading_model = 0;             // 0 PBR, 1 Toon
+  int toon_bands = 1;                // lit tones above the shadow (1: classic two-tone cel)
+  float toon_softness = 0.02f;       // half width of each tone's edge, in N.L
+  float toon_threshold = 0.15f;      // N.L x shadow where the light starts
+  Vec3 toon_shadow{0.55f, 0.5f, 0.68f};  // the shadow side: this times the albedo
+  float toon_specular_size = 0.0f;   // the highlight spot (0: none)
+  float toon_specular_smooth = 0.05f;
+  Vec3 toon_rim{1.0f, 1.0f, 1.0f};
+  float toon_rim_width = 0.0f;       // 0: no rim light
+  float toon_rim_strength = 0.5f;
+  bool toon_flat_ambient = true;     // the sky's light one flat tone (no gradient across the shape)
+  /* An outline's inverted hull (the Outline component's own material, not saved): the path tracers show only its
+   * front faces, to camera rays, as the rasterizer's back-face culling does. */
+  bool outline_hull = false;
   uint64_t version = 1;
   /* Project-relative .mat file when this is a Material asset (Unity: a material in the
    * Project window, shared by every renderer that uses it); empty for a scene material. */

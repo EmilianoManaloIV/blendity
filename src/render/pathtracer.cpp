@@ -162,7 +162,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   for (const PTObject &o : objects_)
     if (o.materials)
       for (const MaterialPtr &mp : *o.materials) {
-        see_through_ = see_through_ || (mp && !mp->opaque());
+        see_through_ = see_through_ || (mp && (!mp->opaque() || mp->outline_hull));  // a hull: shadow rays step through it
         if (mp) mp->textures();  // resolved here, not by the tracing threads (Material::textures)
       }
   lights_ = lights;
@@ -507,6 +507,12 @@ Vec3 PathTracer::transmittance(const Ray &r, float tmax) const {
     SurfacePoint sp;
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
     if (settings_.retro.active() && settings_.retro.tex.active()) sp.tex = &settings_.retro.tex;  // a camera filter's texture rules
+    if (mat->outline_hull) {  // an outline casts no shadow (ADR 0020)
+      const float step = h.t + 1e-4f * (1.0f + h.t);
+      ray.origin = ray.origin + ray.dir * step;
+      left -= step;
+      continue;
+    }
     if (mat->opaque() || mat->surface == (int)MaterialSurface::Glass) return Vec3(0.0f);
     const float a = evaluate_material(*mat, sp).alpha;
     if (mat->surface == (int)MaterialSurface::Cutout) {
@@ -704,12 +710,12 @@ float PathTracer::mesh_light_pdf(uint32_t li, float dist, float cos_light) const
 }
 
 Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint32_t *id_out, uint64_t &rays,
-                       PTGuidingThread *guide) const {
+                       PTGuidingThread *guide, bool camera) const {
   Vec3 L(0.0f), beta(1.0f);
   const float clamp = settings_.clamp_indirect;
   float last_pdf = 0.0f;  // solid-angle pdf of the direction that led here (0 = camera ray)
   int see_through_hits = 0, glass_hits = 0;  // these get their own budgets (Cycles: transparent / transmission bounces)
-  bool camera_path = true;  // still the camera ray (see-through passes keep it; glass and BSDF bounces end it)
+  bool camera_path = camera;  // still the camera ray (see-through passes keep it; glass and BSDF bounces end it)
 #ifdef BL_WITH_OPENPGL
   /* Training records each vertex with local (not throughput-weighted) values;
    * OpenPGL turns the chain into radiance samples (Cycles: guiding.h). */
@@ -755,6 +761,14 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     SurfacePoint sp;
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
     sp.position = ray.origin + ray.dir * h.t;  // more precise than re-interpolating
+    /* An outline's inverted hull (ADR 0020): camera rays see its front faces only (the rasterizer culls the back
+     * ones); bounces, shadows and its back faces pass through. */
+    if (mat->outline_hull && !(bounce == 0 && camera_path && dot(sp.geo_normal, ray.dir) < 0.0f) && see_through_hits < 64) {
+      see_through_hits++;
+      ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      bounce--;
+      continue;
+    }
     /* A camera filter's rasterizer stages (task 0032): its texture rules everywhere; at a camera ray's hits the
      * affine UVs and the screen door, by where the hit lands on the filter's image. */
     bool door_solid = false;
@@ -885,6 +899,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       continue;
     }
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
+    /* Toon (ADR 0020) where the eye sees the surface: its tones and rim. Elsewhere (bounces, bakes) it is Lambert. */
+    const bool toon_here = s.toon && bounce == 0 && camera_path;
+    if (toon_here) add(beta * toon_rim(*s.toon, n, V));
 
     /* BSDF sampling setup (one-sample MIS between the diffuse and GGX lobes),
      * needed before direct lighting: light-sample MIS weights use the same pdf. */
@@ -894,6 +911,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     float diff_w = luminance(s.albedo) * (1.0f - s.metallic);
     float p_spec = diff_w + spec_w > 0 ? clampf(spec_w / (spec_w + diff_w), 0.1f, 0.9f) : 0.5f;
     if (s.metallic >= 0.999f) p_spec = 1.0f;
+    if (s.toon) p_spec = 0.0f;  // a toon surface bounces light as Lambert (ADR 0020)
+    /* The BSDF for bounces and mesh lights: Lambert on a toon surface (its tones are a direct-light look). */
+    auto bsdf = [&](Vec3 d) { return s.toon ? s.albedo * (std::max(0.0f, dot(n, d)) / kPi) : brdf_eval(s, n, V, d); };
     Vec3 tt, bb;
     onb(n, tt, bb);
     GGX g{std::max(s.roughness * s.roughness, 0.002f), 0};
@@ -970,11 +990,26 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         dir = d / dist;
         power *= light_falloff(l, sp.position, dir);  // range, spot cone, area facing
       }
+      if (toon_here) {
+        /* Toon: N.L x visibility x the falloff in tones; the dark side takes the shadow colour (no shadow ray). */
+        if (power <= 0 || !(l.intensity > 0.0f)) continue;
+        const float fall = std::min(1.0f, power / (l.intensity * kPi));  // range, spot cone, an area's facing
+        const float ndl = dot(n, dir);
+        Vec3 Tr(0.0f);
+        if (ndl > 0 && dot(sp.geo_normal, dir) > 0) {
+          rays++;
+          Tr = transmittance({origin, dir}, dist);
+        }
+        const Vec3 Lo = shade_toon(s, n, V, dir, std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z}) * fall) * l.color * l.intensity;
+        add(beta * Lo);
+        record_nee(Lo);
+        continue;
+      }
       if (power <= 0 || dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) continue;
       rays++;
       const Vec3 Tr = transmittance({origin, dir}, dist);
       if (std::max({Tr.x, Tr.y, Tr.z}) <= 0.0f) continue;
-      const Vec3 Lo = brdf_eval(s, n, V, dir) * l.color * Tr * power;  // scattered toward V, before throughput
+      const Vec3 Lo = bsdf(dir) * l.color * Tr * power;  // scattered toward V, before throughput (a toon bounce: Lambert)
       add(beta * Lo);
       record_nee(Lo);
     }
@@ -1006,7 +1041,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
             const Vec3 Le = evaluate_material(*lmat, lp).emission * Tr;
             float pb = sampling_pdf(dir);
             float w = pl * pl / (pl * pl + pb * pb);
-            const Vec3 Lo = brdf_eval(s, n, V, dir) * Le * (w / pl);
+            const Vec3 Lo = bsdf(dir) * Le * (w / pl);
             add(beta * Lo);
             record_nee(Lo);
           }
@@ -1037,7 +1072,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) break;
     const float pdf = sampling_pdf(dir);
     if (pdf < 1e-8f) break;
-    const Vec3 f = brdf_eval(s, n, V, dir);
+    const Vec3 f = bsdf(dir);
     beta = beta * f / pdf;
     last_pdf = pdf;
 #ifdef BL_WITH_OPENPGL
@@ -1706,6 +1741,15 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     g.flags[0] = m.unlit ? 1 : 0;
     g.flags[1] = m.wrap;
     g.flags[2] = settings_.retro.active() && settings_.retro.tex.filter >= 0 ? settings_.retro.tex.filter : m.filter;  // a camera filter's
+    g.flags[3] = (m.shading_model == 1 ? 1 : 0) | (m.outline_hull ? 2 : 0);  // toon, an outline's hull (ADR 0020)
+    const float t0[4] = {(float)std::max(1, std::min(8, m.toon_bands)), clampf(m.toon_softness, 0.0f, 0.5f), clampf(m.toon_threshold, 0.0f, 0.95f),
+                         clampf(m.toon_specular_smooth, 0.0f, 0.5f)};
+    const float t1[4] = {m.toon_shadow.x, m.toon_shadow.y, m.toon_shadow.z, clampf(m.toon_specular_size, 0.0f, 1.0f)};
+    const Vec3 rim = m.toon_rim * (m.toon_rim_width > 0.0f ? std::max(0.0f, m.toon_rim_strength) : 0.0f);
+    const float t2[4] = {rim.x, rim.y, rim.z, clampf(m.toon_rim_width, 0.0f, 1.0f)};
+    std::memcpy(g.toon0, t0, 16);
+    std::memcpy(g.toon1, t1, 16);
+    std::memcpy(g.toon2, t2, 16);
     s.materials.push_back(g);
   };
   material(*default_material(), false);  // index 0

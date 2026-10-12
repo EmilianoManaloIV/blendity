@@ -2,6 +2,44 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 60): toon shading and outlines (task 0038)
+
+**Asked:** "Anime / 2D looks like Goo Engine (toon shading, outlines, halftone, ...)" (the roadmap's item 6, first half).
+
+**Added**
+- **Toon shading model** (a material's Shading Model, or the Toon preset): light in Toon Bands flat tones with a
+  hard (or Softness) edge at the Threshold, a Shadow Color for the dark side, a hard highlight spot, a rim light
+  and a flat ambient. The same tones in the views, F12 on the CPU and the GPU, and Live Preview; bounces off toon
+  surfaces stay ordinary (Lambert), so lighting bakes are unchanged.
+- **Outline** component: the black line round an object (the inverted hull), in the views, path-traced renders
+  (camera rays only) and exports; Thickness in metres or object units, a colour.
+- Learn > Materials: *The anime look*, with a Try-it.
+
+**Fixed**
+- Objects with a negative scale (mirrored) were drawn inside out by the rasterizer.
+
+**Checked**
+- New tests (round 60): tones step through exactly Toon Bands levels; a rasterized toon sphere takes 2 tones with
+  1 band and 4 with 3 (PBR: the 4 commonest colours cover 28 %); the CPU trace's tone shares are within 0.7 % of
+  the rasterizer's, 3.1 % under a large area light; the GPU matches the CPU; the rim lights only the silhouette;
+  an Outline adds a ring of its colour round the sphere and changes none of its pixels, rasterized and traced,
+  mirrored too; thickness 0 draws nothing; the shell is pushed out with flipped faces, cached, world-space
+  thickness; an outlined object with a modifier traced in the Camera Preview while the Scene view redraws; undo
+  of the Outline and of a toon field; the fields round-trip through a .mat and the Outline through a scene.
+- Stress `shading`: a toon material shades in 8.4 ms at 1080p against PBR's 10.4 ms (spec: at most +15 %).
+- The GPU kernel came within reach of the SPIR-V optimiser's id limit (a second inlined shadow-ray call
+  overflowed it): the toon light branch shares the PBR one's shadow ray.
+
+**Review (code reviewer)**: a blocker, three major and several minor findings, all fixed but one noted: the
+outline shell had one cache slot for several views (a path tracer could keep a freed one); mirrored objects drew
+the hull's near side; the toon response was applied at bounces and in bakes; the rasterizer's toon ignored an area
+light's facing; falloff scaled tones instead of being banded; flat ambient ignored occlusion; tests for
+mirroring, modifiers, undo and area lights; the ADR now records the component and the camera-only hull. Noted:
+an outline makes shadow rays use the closest-hit loop.
+- Unit checks: Windows 8,756, 0 failed (490 tests); the whole suite in render-cache verify mode: 8,757,
+  0 failed, 0 stale pictures. Linux with libraries: 8,668, 0 failed. Sanitizer build: 8,590, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `shading` and `gpu` stress 0 problems.
+
 ## 2026-10-11 (round 59): GPU devices open in the background (task 0037)
 
 **Asked:** "Switching from shaded to rendered and path trace preview crashes/halts the program" ... "make sure the

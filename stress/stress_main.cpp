@@ -2170,6 +2170,47 @@ static void test_shading_cost(Report &rep, const Options &o) {
     rep.row({strprintf("%dx%d", w, h), f2(g), f2(d), f2(ds), f2(shadow_ms), f2(shade_ms)});
   }
   rep.note("The editor re-renders the shadow map only when its casters, their materials or the light change (task 0011: update_shadow_map keeps two maps).");
+  /* Task 0038: a Toon material's shading against PBR's, the same scene and frame (spec: at most +15 %). */
+  {
+    const int w = 1920, h = 1080;
+    Bench3D b(w, h);
+    std::vector<MaterialPtr> pbr = {make_material("pbr", {0.7f, 0.5f, 0.3f})}, toon = {make_material_preset("Toon")};
+    auto items_for = [&](std::vector<MaterialPtr> &m) {
+      std::vector<DrawItem> items;
+      s.for_each([&](GameObject &g) {
+        DrawItem it;
+        it.mesh = &g.get<MeshFilter>()->mesh->render_mesh();
+        it.model = g.world_matrix();
+        it.id = (uint32_t)g.id;
+        it.materials = &m;
+        items.push_back(it);
+      });
+      return items;
+    };
+    const std::vector<DrawItem> ip = items_for(pbr), it2 = items_for(toon);
+    Vec3 eye{0, 12 * 0.9f, -12 * 1.1f};
+    const Mat4 v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(60 * kDeg2Rad, w / (float)h, 0.1f, 1000.0f);
+    b.env.camera_pos = eye;
+    auto shade = [&](const std::vector<DrawItem> &items) {
+      double best = 1e30;
+      for (int k = 0; k < 5; k++) {
+        RasterOptions opt;
+        opt.shade = ShadeMode::Deferred;
+        b.r3d.begin(&b.rt, v, p, b.env, opt);
+        b.r3d.clear(0xFF303030);
+        for (auto &i : items) b.r3d.add(i);
+        b.r3d.flush();
+        if (k > 0) best = std::min(best, b.r3d.stats().ms_shade);  // the first warms up
+      }
+      return best;
+    };
+    const double sp = shade(ip), st = shade(it2);
+    const int problems = st > sp * 1.15 + 0.05 ? 1 : 0;
+    rep.table({"material (1920x1080, deferred)", "shade ms", "vs PBR", "problems"});
+    rep.row({"PBR", f2(sp), "1.00", "0"});
+    rep.row({"Toon (2 tones, rim, highlight)", f2(st), f2(st / std::max(1e-6, sp)), std::to_string(problems)});
+    std::printf("  -> Toon shading: %.2f ms vs PBR %.2f ms (%+.0f %%), %d problems\n", st, sp, (st / std::max(1e-6, sp) - 1.0) * 100.0, problems);
+  }
   /* View transforms: per-frame cost of turning scene light into display pixels. */
   rep.table({"view transform (1920x1080)", "ms / frame", "Mpix/s"});
   std::vector<Vec3> hdr((size_t)1920 * 1080);

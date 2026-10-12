@@ -5,7 +5,7 @@
 - **Requirements:** Q-01, R-05
 - **Decisions:** ADR 0021
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/35
 
 ## Goal
 Switching the Camera Preview (or the Render window, F12, Live Preview) to the GPU never freezes the editor. Today

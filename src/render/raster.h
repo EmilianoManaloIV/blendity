@@ -163,6 +163,7 @@ struct DrawItem {
   const std::vector<Vec2> *rt_uv = nullptr;
   bool realtime_lm = false;
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
+  bool always_cull = false;  // an outline's inverted hull (ADR 0020): back faces culled whatever the view's setting
 };
 
 enum class ShadeMode { Gouraud = 0, Deferred = 1, DepthOnly = 2 };

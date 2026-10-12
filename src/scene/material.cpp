@@ -97,6 +97,29 @@ void Material::reflect(Reflector &r) {
     r.field("Axis Scale", axis_scale, 0.05f, 0.01f, 1000.0f);
     r.help("Metres one texture tile covers in the projection.");
   }
+  static const char *models[] = {"PBR (Principled)", "Toon (Cel)"};
+  r.enumeration("Shading Model", shading_model, models, 2);
+  r.help("Toon: the anime / cel look (Goo Engine; Blender: Shader to RGB + Color Ramp) - light in flat tones with a\n"
+         "hard edge, a shadow colour, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
+         "for the black lines.");
+  if (r.all_fields() || shading_model == 1) {
+    r.field("Toon Bands", toon_bands, 1, 8);
+    r.help("How many lit tones above the shadow (1: two-tone cel shading).");
+    r.field("Toon Softness", toon_softness, 0.005f, 0.0f, 0.5f);
+    r.help("How soft each tone's edge is (0: a hard line).");
+    r.field("Toon Threshold", toon_threshold, 0.01f, 0.0f, 0.95f);
+    r.help("Where light turns into shadow (the light's angle, shadows included).");
+    r.color("Toon Shadow Color", toon_shadow);
+    r.help("The shadow side's colour, times the base colour (a cool tint reads as anime shading).");
+    r.field("Toon Specular Size", toon_specular_size, 0.01f, 0.0f, 1.0f);
+    r.field("Toon Specular Smoothness", toon_specular_smooth, 0.005f, 0.0f, 0.5f);
+    r.color("Toon Rim Color", toon_rim);
+    r.field("Toon Rim Width", toon_rim_width, 0.01f, 0.0f, 1.0f);
+    r.help("A light edge around the silhouette (0: none).");
+    r.field("Toon Rim Strength", toon_rim_strength, 0.01f, 0.0f, 10.0f);
+    r.field("Toon Flat Ambient", toon_flat_ambient);
+    r.help("The sky's light as one flat tone, so only the lights shade the form.");
+  }
 }
 
 const Material::Resolved &Material::textures() const {
@@ -186,7 +209,7 @@ MaterialPtr make_material(const std::string &name, Vec3 color) {
 }
 
 const std::vector<std::string> &material_presets() {
-  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit"};
+  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit", "Toon"};
   return names;
 }
 
@@ -223,6 +246,13 @@ MaterialPtr make_material_preset(const std::string &preset) {
   else if (preset == "Unlit") {
     m->unlit = true;
     m->base_color = {1.0f, 0.5f, 0.1f};
+  }
+  else if (preset == "Toon") {  // ADR 0020: two-tone cel shading with a soft rim
+    m->shading_model = 1;
+    m->base_color = {0.95f, 0.75f, 0.65f};
+    m->toon_specular_size = 0.15f;
+    m->toon_rim_width = 0.25f;
+    m->toon_rim_strength = 0.35f;
   }
   return m;
 }

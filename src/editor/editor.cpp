@@ -1870,6 +1870,21 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
     it.world = g.world_matrix();
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
     items.push_back(it);
+    /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
+     * back faces, as glTF's single-sided default asks, show the silhouette line). */
+    if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
+      const Outline &ol = *static_cast<const Outline *>(oc);
+      const Mat4 &w = it.world;
+      const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
+      if (const Mesh *shell = ol.shell(*m, scale, 3)) {
+        ExportItem oi;
+        oi.name = g.name + " Outline";
+        oi.mesh = shell;
+        oi.world = it.world;
+        oi.materials = ol.materials();
+        items.push_back(oi);
+      }
+    }
   };
   if (o.selection_only) {
     /* The selected objects and everything under them. */

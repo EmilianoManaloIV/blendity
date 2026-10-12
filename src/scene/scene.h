@@ -112,7 +112,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline };
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
@@ -423,6 +423,36 @@ struct BloomEffect : FilterEffectBase<BloomEffect> {
   Vec3 tint{1, 1, 1};
   void reflect(Reflector &r) override;
   void contribute(FilterStack &stack) const override;
+};
+
+/* Toon outlines (ADR 0020): the inverted hull. A shell pushed out along the smoothed vertex normals with its faces
+ * flipped, drawn in one unlit colour as its own draw item with its back faces culled, so only a rim around the
+ * object shows: in the views, F12 and the path tracers (camera rays only), and exports. Blender: a Solidify with
+ * Flip Normals and an outline material. */
+struct Outline : ComponentBase<Outline> {
+  static constexpr const char *kName = "Outline";
+  float thickness = 0.02f;  // metres (World Space) or the object's own units
+  bool world_space = true;
+  Vec3 color{0.02f, 0.02f, 0.03f};
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Outline; }
+  /* The shell of this (evaluated) mesh for an object of this world scale, cached; null when nothing to draw. slot:
+   * which use (the evaluated mesh's kind 0..2, 3 exports): each keeps its own, so a path tracer still holding one
+   * view's shell isn't left with a freed mesh when another view builds its own. */
+  static constexpr int kShellSlots = 4;
+  const Mesh *shell(const Mesh &src, float world_scale, int slot = 0) const;
+  /* Its one material: unlit, the colour, casts no shadow, an outline hull. */
+  const std::vector<MaterialPtr> &materials() const;
+
+ private:
+  struct ShellCache {
+    MeshPtr mesh;
+    uint64_t serial = 0;
+    float offset = -1.0f;
+  };
+  mutable ShellCache shells_[kShellSlots];
+  mutable std::vector<MaterialPtr> mats_;
+  mutable Vec3 mats_color_{-1.0f, -1.0f, -1.0f};
 };
 
 struct Rotator : ComponentBase<Rotator> {

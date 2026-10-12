@@ -434,7 +434,7 @@ static inline int ctz32(uint32_t m) {
  * plus any that need near-plane clipping. Uses the same float operations as
  * the scalar tests (no FMA), so it rejects exactly the same triangles. */
 BL_TARGET_AVX2 static uint32_t needs_scalar8_avx2(const uint32_t *idx, const Vec4 *cp, const Vec4 *sp, float W, float H,
-                                                  bool two_sided) {
+                                                  bool two_sided, float facing) {
   const __m256i lane3 = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
   const float *c = &cp[0].x, *s = &sp[0].x;
   __m256 x[3], y[3], z[3];
@@ -450,7 +450,7 @@ BL_TARGET_AVX2 static uint32_t needs_scalar8_avx2(const uint32_t *idx, const Vec
   __m256 area = _mm256_sub_ps(_mm256_mul_ps(_mm256_sub_ps(x[1], x[0]), _mm256_sub_ps(y[2], y[0])),
                               _mm256_mul_ps(_mm256_sub_ps(x[2], x[0]), _mm256_sub_ps(y[1], y[0])));
   __m256 rej = _mm256_cmp_ps(area, zero, _CMP_EQ_OQ);
-  if (!two_sided) rej = _mm256_or_ps(rej, _mm256_cmp_ps(area, zero, _CMP_LT_OQ));
+  if (!two_sided) rej = _mm256_or_ps(rej, _mm256_cmp_ps(_mm256_mul_ps(area, _mm256_set1_ps(facing)), zero, _CMP_LT_OQ));
   __m256 minx = _mm256_min_ps(_mm256_min_ps(x[0], x[1]), x[2]), maxx = _mm256_max_ps(_mm256_max_ps(x[0], x[1]), x[2]);
   __m256 miny = _mm256_min_ps(_mm256_min_ps(y[0], y[1]), y[2]), maxy = _mm256_max_ps(_mm256_max_ps(y[0], y[1]), y[2]);
   rej = _mm256_or_ps(rej, _mm256_or_ps(_mm256_cmp_ps(maxx, zero, _CMP_LT_OQ), _mm256_cmp_ps(maxy, zero, _CMP_LT_OQ)));
@@ -672,7 +672,11 @@ void Renderer3D::flush() {
           cp = local_cp.data();
           col = nullptr;  // shaded on demand: most vertices of distant objects only touch culled triangles
         }
-        const bool two_sided = it.double_sided || !cull;
+        const bool two_sided = (it.double_sided || !cull) && !it.always_cull;
+        /* A mirrored placement (negative scale) winds its triangles the other way on screen: its front faces have
+         * negative area. Before, culling kept their back faces (inside out). */
+        const Vec3 m0 = it.model.dir(Vec3(1, 0, 0)), m1 = it.model.dir(Vec3(0, 1, 0)), m2 = it.model.dir(Vec3(0, 0, 1));
+        const float facing = dot(cross(m0, m1), m2) < 0.0f ? -1.0f : 1.0f;
         auto vcol = [&](uint32_t v) -> Vec3 {
           if (col) return col[v];
           if (local_stamp[v] != stamp) {
@@ -690,7 +694,7 @@ void Renderer3D::flush() {
              * same values as the general path below. */
             const Vec4 &s0 = sp[i0], &s1 = sp[i1], &s2 = sp[i2];
             float area = (s1.x - s0.x) * (s2.y - s0.y) - (s2.x - s0.x) * (s1.y - s0.y);
-            if (area == 0.0f || (area < 0.0f && !two_sided)) return;
+            if (area == 0.0f || (area * facing < 0.0f && !two_sided)) return;
             float minx = std::min({s0.x, s1.x, s2.x}), maxx = std::max({s0.x, s1.x, s2.x});
             float miny = std::min({s0.y, s1.y, s2.y}), maxy = std::max({s0.y, s1.y, s2.y});
             if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) return;
@@ -773,10 +777,8 @@ void Renderer3D::flush() {
             int a = 0, b = k, d = k + 1;
             float area = (sx[b] - sx[a]) * (sy[d] - sy[a]) - (sx[d] - sx[a]) * (sy[b] - sy[a]);
             if (area == 0.0f) continue;
-            if (area < 0.0f) {
-              if (!two_sided) continue;
-              std::swap(b, d);
-            }
+            if (area * facing < 0.0f && !two_sided) continue;
+            if (area < 0.0f) std::swap(b, d);
             float minx = std::min({sx[a], sx[b], sx[d]}), maxx = std::max({sx[a], sx[b], sx[d]});
             float miny = std::min({sy[a], sy[b], sy[d]}), maxy = std::max({sy[a], sy[b], sy[d]});
             if (maxx < 0 || maxy < 0 || minx >= W || miny >= H) continue;
@@ -806,7 +808,7 @@ void Renderer3D::flush() {
          * needing near clipping) take the scalar path, in the same order. */
         if (avx2)
           for (; t + 8 <= range.tri_end; t += 8)
-            for (uint32_t m = needs_scalar8_avx2(idx.data() + (size_t)t * 3, cp, sp, (float)W, (float)H, two_sided); m; m &= m - 1)
+            for (uint32_t m = needs_scalar8_avx2(idx.data() + (size_t)t * 3, cp, sp, (float)W, (float)H, two_sided, facing); m; m &= m - 1)
               process(t + (uint32_t)ctz32(m));
 #endif
         for (; t < range.tri_end; t++) process(t);
@@ -1513,6 +1515,26 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
     if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
+    if (s.toon) {
+      /* Toon (ADR 0020): N.L x the shadow x the falloff (range, spot cone, an area's facing), in tones; the dark side
+       * takes the shadow colour. As the path tracers' light sampling. */
+      Vec3 L;
+      float fall = 1.0f;
+      if (l.type == RenderLight::Directional) L = -l.direction;
+      else {
+        const Vec3 d = l.position - sp.position;
+        const float dist = length(d);
+        L = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
+        fall = light_falloff(l, sp.position, L);
+      }
+      if (!(fall > 0.0f) || !(l.intensity > 0.0f)) continue;
+      const float ndl = dot(n, L);
+      float vis = 1.0f;
+      if (ndl > 0 && (int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
+        vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
+      lo += shade_toon(s, n, V, L, std::max(ndl, 0.0f) * vis * std::min(fall, 1.0f)) * l.color * l.intensity;
+      continue;
+    }
     Vec3 L;
     float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
     if (l.type == RenderLight::Area) {
@@ -1549,6 +1571,19 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
       vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
     if (vis <= 0) continue;
     lo += brdf_eval(s, n, V, L) * l.color * (atten * vis);
+  }
+  if (s.toon) {
+    /* Toon: the ambient as one flat tone (unless baked light holds more), no reflections, the rim on top. */
+    Vec3 amb;
+    if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+    else if (sp.has_probe) amb = sp.probe;
+    else if (s.toon->toon_flat_ambient) {
+      amb = (env.irradiance(Vec3(0, 1, 0)) + env.irradiance(Vec3(0, -1, 0))) * 0.5f;
+      if (sp.has_gi) amb = amb * sp.gi_sky + sp.gi_bounce;  // still occluded: no full sky indoors
+    }
+    else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
+    else amb = env.irradiance(n);
+    return lo + amb * s.albedo + toon_rim(*s.toon, n, V) + s.emission;
   }
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;
@@ -1603,7 +1638,9 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
     const Mat4 mvp = vp_ * it.model;
     cp.resize(rm.positions.size());
     for (size_t v = 0; v < rm.positions.size(); v++) cp[v] = mvp * Vec4(rm.positions[v], 1.0f);
-    const bool two_sided = it.double_sided || !opt_.backface_culling;
+    const bool two_sided = (it.double_sided || !opt_.backface_culling) && !it.always_cull;
+    const Vec3 m0 = it.model.dir(Vec3(1, 0, 0)), m1 = it.model.dir(Vec3(0, 1, 0)), m2 = it.model.dir(Vec3(0, 0, 1));
+    const float facing = dot(cross(m0, m1), m2) < 0.0f ? -1.0f : 1.0f;  // a mirrored placement winds the other way
     for (uint32_t prim = 0; prim < (uint32_t)rm.tri_count(); prim++) {
       const Material *mat = item_material(it, prim);
       if (mat->opaque()) continue;
@@ -1637,7 +1674,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
       for (int k = 1; k + 1 < np; k++) {
         int a = 0, b = k, d = k + 1;
         float area = (sx[b] - sx[a]) * (sy[d] - sy[a]) - (sx[d] - sx[a]) * (sy[b] - sy[a]);
-        if (area == 0.0f || (area < 0.0f && !two_sided)) continue;
+        if (area == 0.0f || (area * facing < 0.0f && !two_sided)) continue;
         if (area < 0.0f) std::swap(b, d);
         FTri t;
         int ord[3] = {a, b, d};

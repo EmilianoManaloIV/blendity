@@ -83,6 +83,10 @@ void register_builtin_components() {
                      "A stack of filters on this camera, applied top to bottom: Retro Console looks (PS1, N64, Saturn, DOS) and more. "
                      "Add Filter picks them by category.",
                      "Compositor nodes on the render (Unity: the Post-processing Layer and Volume profile)");
+  reg<Outline>("Rendering",
+               "Toon outlines: a shell around the object in one colour, so it has a line round its silhouette (the inverted "
+               "hull). Pair it with a Toon material.",
+               "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
@@ -976,6 +980,69 @@ void BloomEffect::contribute(FilterStack &s) const {
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }
+
+void Outline::reflect(Reflector &r) {
+  r.field("Thickness", thickness, 0.001f, 0.0f, 10.0f);
+  r.help("How far the outline shell stands out from the surface.");
+  r.field("World Space", world_space);
+  r.help("Thickness in metres whatever the object's scale (off: in the object's own units).");
+  r.color("Color", color);
+  r.help("The line's colour. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
+         "it as a sheet; it suits closed meshes.)");
+}
+
+const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
+  const float s = world_space ? (finite_bits(world_scale) && world_scale > 1e-6f ? world_scale : 1.0f) : 1.0f;
+  const float offset = thickness / s;
+  if (!(offset > 0.0f) || !finite_bits(offset) || src.face_count() == 0) return nullptr;
+  ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
+  const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
+  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset) return c.mesh.get();
+  /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
+  std::vector<Vec3> vn(src.positions.size(), Vec3(0.0f));
+  for (size_t f = 0; f < src.face_count(); f++) {
+    const uint32_t *v = src.face_verts(f);
+    const uint32_t n = src.face_size(f);
+    Vec3 fn(0.0f);
+    for (uint32_t k = 0; k < n; k++) fn += cross(src.positions[v[k]], src.positions[v[(k + 1) % n]]);  // Newell
+    if (!finite_bits(fn.x) || !finite_bits(fn.y) || !finite_bits(fn.z)) continue;
+    for (uint32_t k = 0; k < n; k++) vn[v[k]] += fn;
+  }
+  auto m = std::make_shared<Mesh>();
+  m->name = "Outline";
+  m->smooth = true;
+  m->positions.reserve(src.positions.size());
+  for (size_t i = 0; i < src.positions.size(); i++) {
+    const float len = length(vn[i]);
+    const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
+    m->positions.push_back(src.positions[i] + d * offset);
+  }
+  std::vector<uint32_t> rev;
+  for (size_t f = 0; f < src.face_count(); f++) {
+    const uint32_t *v = src.face_verts(f);
+    const uint32_t n = src.face_size(f);
+    rev.assign(v, v + n);
+    std::reverse(rev.begin(), rev.end());  // flipped: its outside faces in
+    m->add_face(rev.data(), rev.size());
+  }
+  c.mesh = m;
+  c.serial = serial;
+  c.offset = offset;
+  return c.mesh.get();
+}
+
+const std::vector<MaterialPtr> &Outline::materials() const {
+  const Vec3 c(finite_bits(color.x) ? color.x : 0.0f, finite_bits(color.y) ? color.y : 0.0f, finite_bits(color.z) ? color.z : 0.0f);
+  if (mats_.empty() || c.x != mats_color_.x || c.y != mats_color_.y || c.z != mats_color_.z) {
+    auto mat = make_material("Outline", c);
+    mat->unlit = true;
+    mat->cast_shadows = false;
+    mat->outline_hull = true;
+    mats_ = {mat};
+    mats_color_ = c;
+  }
+  return mats_;
+}
 void Rotator::update(PlayContext &ctx) {
   Quat dq = Quat::euler(degrees_per_second * ctx.dt);
   owner->set_local_rotation(owner->local().rotation * dq);

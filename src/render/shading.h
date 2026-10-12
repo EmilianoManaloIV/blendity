@@ -70,6 +70,7 @@ struct SurfaceSample {
   Vec3 emission;
   Vec3 normal;  // after normal mapping
   bool unlit = false;
+  const Material *toon = nullptr;  // a Toon material (ADR 0020): lights shade it through shade_toon
 };
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
@@ -77,6 +78,16 @@ SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
  * flush (Material::textures() checks a version and an atomic generation on every call) and shades through
  * this; the path tracer keeps the one above. */
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp);
+
+/* --- Toon (ADR 0020) --- */
+/* How lit a toon surface is, 0 (the shadow tone) to 1, in `toon_bands` steps: lit = N.L x visibility. */
+float toon_level(const Material &m, float lit);
+/* A toon surface's light toward the eye from one light, per unit of the light's colour x intensity (Unity's
+ * convention: intensity 1 lights a white surface white): the albedo from the shadow colour to full by the tone,
+ * plus the highlight spot. s.toon must be set. */
+Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit);
+/* The rim light at the silhouette (added once, not per light). */
+Vec3 toon_rim(const Material &m, Vec3 n, Vec3 V);
 
 /* --- BRDF --- */
 Vec3 fresnel_f0(const SurfaceSample &s);

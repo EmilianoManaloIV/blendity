@@ -64,6 +64,25 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
     it.realtime_lm = !editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_);
     items.push_back(it);
+    /* Toon outlines (ADR 0020): the inverted hull as its own item, back faces always culled (not in Edit Mode). */
+    if (!editing)
+      if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
+        const Outline &ol = *static_cast<const Outline *>(oc);
+        const Mat4 &w = it.model;
+        const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
+        if (const Mesh *shell = ol.shell(*m, scale, game ? 1 : 0)) {
+          DrawItem o;
+          o.mesh = &shell->render_mesh();
+          o.model = it.model;
+          o.albedo = ol.materials()[0]->base_color;  // (NaN-free)
+          o.unlit = true;
+          o.materials = &ol.materials();
+          o.receive_shadows = false;
+          o.always_cull = true;
+          o.id = it.id;
+          items.push_back(o);
+        }
+      }
   });
   return items;
 }
@@ -191,7 +210,9 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   MeshRenderer *mr = nullptr;
   Light *l = nullptr;
   ProbeVolume *pv = nullptr;
+  Component *outline = nullptr;
   for (auto &c : g.components) switch (c->render_role()) {
+      case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
       case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
       case Component::RenderRole::ProbeVolume: if (!pv) pv = static_cast<ProbeVolume *>(c.get()); break;
@@ -251,6 +272,10 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     uint64_t k[3];
     g.evaluated_keys(k);
     mix(k, sizeof(k));
+  }
+  if (outline) {  // a toon outline's thickness, colour and on / off (ADR 0020)
+    const uint64_t oh = hash_component(*outline) ^ (uint64_t)outline->enabled << 63;
+    mix(&oh, 8);
   }
   if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
     const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;

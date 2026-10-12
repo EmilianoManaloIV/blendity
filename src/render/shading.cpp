@@ -44,7 +44,47 @@ static inline float axis_step(float e0, float e1, float x) {  // smoothstep that
   return t * t * (3.0f - 2.0f * t);
 }
 
+static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp);
+
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
+  SurfaceSample s = evaluate_any(m, tx, sp);
+  if (m.shading_model == 1) s.toon = &m;  // an axis material's parts shade by the parent's model
+  return s;
+}
+
+float toon_level(const Material &m, float lit) {
+  const int bands = std::max(1, std::min(8, m.toon_bands));
+  const float th = clampf(m.toon_threshold, 0.0f, 0.95f), w = clampf(m.toon_softness, 0.0f, 0.5f);
+  if (!finite_bits(lit)) lit = 0.0f;
+  float q = 0.0f;
+  for (int k = 0; k < bands; k++) {
+    const float e = th + (float)k * (1.0f - th) / (float)bands;
+    q += axis_step(e - w, e + w, lit);
+  }
+  return q / (float)bands;
+}
+
+Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit) {
+  const Material &m = *s.toon;
+  const float q = toon_level(m, lit);
+  Vec3 c = s.albedo * lerp(m.toon_shadow, Vec3(1.0f), q);
+  if (m.toon_specular_size > 0.0f && q > 0.0f) {
+    /* A hard spot where N.H is near 1: size 1 reaches N.H = 0.8. */
+    const float nh = dot(n, normalize(V + L)), e = 1.0f - 0.2f * clampf(m.toon_specular_size, 0.0f, 1.0f);
+    const float w = 0.1f * clampf(m.toon_specular_smooth, 0.0f, 0.5f);
+    c += lerp(Vec3(1.0f), s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0f * s.specular);
+  }
+  return c;
+}
+
+Vec3 toon_rim(const Material &m, Vec3 n, Vec3 V) {
+  if (!(m.toon_rim_width > 0.0f) || !(m.toon_rim_strength > 0.0f)) return Vec3(0.0f);
+  const float f = 1.0f - std::max(0.0f, dot(n, V)), e = 1.0f - clampf(m.toon_rim_width, 0.0f, 1.0f);
+  const float w = clampf(m.toon_softness, 0.0f, 0.5f) + 0.02f;
+  return m.toon_rim * (axis_step(e - w, e + w, f) * m.toon_rim_strength);
+}
+
+static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
   if (m.axis_mode == 0) return evaluate_surface(m, tx, sp, false);
   /* Axis material (ADR 0018): weights by the slope of the normal in World or Local space, then each part sampled
    * triplanar at the world / local position and blended. */
