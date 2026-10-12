@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** none (an overlay; nothing in the data model beyond a camera's display fields)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/31
 
 ## Goal
 Blender's Camera > Viewport Display > Composition Guides and Safe Areas, on Blendity's cameras: lines drawn

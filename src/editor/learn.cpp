@@ -259,7 +259,7 @@ void Editor::draw_learn(const Recti &r) {
         else if (verb == "edit") enter_edit_mode();
         else if (verb == "play") enter_play();
         else if (verb == "spawn") spawn_stress_grid(std::atoi(arg.c_str()), "Sphere");
-        else if (verb == "research") dock_open(WindowKind::Research);
+        else if (verb == "research") open_references();
         else if (verb == "cmd") {
           /* Console commands, ';'-separated (see `help` in the Console). */
           size_t s = 0;

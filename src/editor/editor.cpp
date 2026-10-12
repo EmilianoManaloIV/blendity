@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "editor.h"
+#include "learn.h"
 #include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
@@ -79,7 +80,9 @@ Editor::~Editor() {
 }
 
 void Editor::resolve_project_paths() {
-  auto is_root = [](const std::string &d) { return fs::is_dir(fs::join(d, "Assets")) && fs::is_dir(fs::join(d, "research")); };
+  auto is_root = [](const std::string &d) {  // (a research folder marked older projects; new ones have Assets/Scenes)
+    return fs::is_dir(fs::join(d, "Assets")) && (fs::is_dir(fs::join(d, "research")) || fs::is_dir(fs::join(d, "Assets/Scenes")));
+  };
   std::vector<std::string> starts = {fs::executable_dir(), fs::current_dir()};
   if (const char *env = std::getenv("BLENDITY_PROJECT")) project_root_ = env;  // tests: a scratch project
   if (!project_root_.empty()) starts.clear();
@@ -98,7 +101,6 @@ void Editor::resolve_project_paths() {
   papers_dir_ = fs::join(project_root_, "research/papers");
   screenshots_dir_ = fs::join(project_root_, "Screenshots");
   fs::make_dirs(fs::join(assets_dir_, "Scenes"));
-  fs::make_dirs(papers_dir_);
   std::string prefs_dir = fs::join(fs::home_dir(), ".blendity");
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
@@ -151,7 +153,7 @@ bool Editor::init(int argc, char **argv) {
   }
   stable_ = scene_->clone();
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
-  Log::info("New here? Open the Learn tab (F1). Drop research papers onto the window or into %s", papers_dir_.c_str());
+  Log::info("New here? Open the Learn tab (F1).");
   Log::info("UI font: %s | worker threads: %d", ui_.font.source().c_str(), JobSystem::global().thread_count());
   return true;
 }
@@ -621,10 +623,9 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Import Model...")) import_dialog();
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
     u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
-    if (u.menu_item("Refresh", "Ctrl+R")) { project_listed_ = -100; papers_listed_ = -100; }
+    if (u.menu_item("Refresh", "Ctrl+R")) project_listed_ = -100;
     u.menu_separator();
     if (u.menu_item("Open Assets Folder")) fs::open_external(assets_dir_);
-    if (u.menu_item("Open Research Papers Folder")) fs::open_external(papers_dir_);
   });
   u.popup(u.id("GameObject"), u.px(280), [this, has_sel] {
     auto &u = ui_;
@@ -795,7 +796,7 @@ void Editor::draw_menubar(const Recti &r) {
     });
     if (!research::features().empty()) {
       u.menu_separator();
-      u.submenu("Research Features", u.px(300), [this, has_sel] {
+      u.submenu("From Papers", u.px(300), [this, has_sel] {  // features from research papers (Learn > References)
         for (auto &f : research::features())
           if (ui_.menu_item(f.name, nullptr, false, has_sel)) mesh_op("research:" + f.id);
       });
@@ -803,11 +804,12 @@ void Editor::draw_menubar(const Recti &r) {
   });
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
-    /* Order: Scene Game Hierarchy Inspector Project Console Learn Research Profiler (Unity's Ctrl+N bindings). */
+    /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
     const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
-      if (u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
+      if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
+          u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
     u.menu_separator();
     u.submenu("Layouts", u.px(180), [this] {
@@ -829,7 +831,7 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
-    if (u.menu_item("Open Research Folder")) fs::open_external(papers_dir_);
+    if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
     if (u.menu_item("About Blendity")) dialog_ = Dialog::About;
   });
@@ -982,13 +984,8 @@ void Editor::handle_drop() {
     }
     else if (ext == ".pdf" || ext == ".txt" || ext == ".md" || ext == ".tex" || ext == ".bib" || ext == ".docx" ||
              ext == ".html" || ext == ".htm" || ext == ".epub" || ext == ".ps" || ext == ".djvu") {
-      std::string dst = fs::join(papers_dir_, name);
-      if (fs::copy_file(path, dst)) {
-        Log::info("Research paper added: %s -> research/papers. Ask Claude to implement features from it (see the Research tab).", name.c_str());
-        papers_listed_ = -100;
-        dock_open(WindowKind::Research);
-      }
-      else Log::error("Could not copy %s into %s", path.c_str(), papers_dir_.c_str());
+      /* (The Research window that collected papers is retired, task 0034.) */
+      Log::info("%s is a document, not a file Blendity opens. The papers behind Blendity's features are listed in Learn > References.", name.c_str());
     }
     else {
       std::string dst = fs::join(assets_dir_, "Imported/" + name);
@@ -1058,11 +1055,11 @@ void Editor::dock_fix_parents(DockNode *n, DockNode *parent) {
 
 void Editor::dock_reset(const std::string &preset) {
   /* Window ids: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 7 Research 8 Profiler */
-  std::string s = "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,7,8,9:0)),L(3,12:0))";
-  if (preset == "2 by 3") s = "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,7,8:0),L(3,12:0))))";
-  else if (preset == "Tall") s = "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,7,8,9:0))),L(3,12:0))";
-  else if (preset == "Wide") s = "V(0.7,H(0.8,L(0,1,6,10:0),L(3,12:0)),H(0.3,L(2:0),L(4,11,5,7,8,9:0)))";
-  else if (preset == "Learning") s = "H(0.40,L(6,7:0),V(0.64,L(0,1,10:0),H(0.45,L(2:0),L(3,12,4,11,5,8,9:0))))";
+  std::string s = "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,8,9:0)),L(3,12:0))";
+  if (preset == "2 by 3") s = "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,8:0),L(3,12:0))))";
+  else if (preset == "Tall") s = "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,8,9:0))),L(3,12:0))";
+  else if (preset == "Wide") s = "V(0.7,H(0.8,L(0,1,6,10:0),L(3,12:0)),H(0.3,L(2:0),L(4,11,5,8,9:0)))";
+  else if (preset == "Learning") s = "H(0.40,L(6:0),V(0.64,L(0,1,10:0),H(0.45,L(2:0),L(3,12,4,11,5,8,9:0))))";
   else if (preset.size() > 2 && (preset[0] == 'H' || preset[0] == 'V' || preset[0] == 'L') && preset[1] == '(') s = preset;
   static const char *names[] = {"Default", "2 by 3", "Tall", "Wide", "Learning"};
   for (int i = 0; i < 5; i++)
@@ -1070,6 +1067,15 @@ void Editor::dock_reset(const std::string &preset) {
   size_t pos = 0;
   dock_ = dock_parse(s, pos);
   dock_fix_parents(dock_.get(), nullptr);
+  /* A layout saved before the Research window was retired (task 0034): its tab goes, and an area that held only it
+   * closes. */
+  while (DockNode *leaf = dock_find(WindowKind::Research)) {
+    if (!leaf->parent && leaf->tabs.size() == 1) {  // the whole layout was that one tab
+      dock_reset("Default");
+      return;
+    }
+    dock_remove(WindowKind::Research);
+  }
 }
 
 void Editor::dock_layout(DockNode *n, const Recti &r) {
@@ -1150,7 +1156,8 @@ void Editor::dock_draw(DockNode *n) {
       ui_.menu_separator();
       ui_.menu_label("Add Tab");
       for (int w = 0; w < (int)WindowKind::Count; w++)
-        if (!dock_find((WindowKind)w) && ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
+        if ((WindowKind)w != WindowKind::Research && !dock_find((WindowKind)w) &&  // (retired, task 0034)
+            ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
           DockNode *leaf = dock_find(k);
           if (leaf) {
             leaf->tabs.push_back((WindowKind)w);
@@ -1185,7 +1192,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Project: draw_project(r); break;
     case WindowKind::Console: draw_console(r); break;
     case WindowKind::Learn: draw_learn(r); break;
-    case WindowKind::Research: draw_research(r); break;
+    case WindowKind::Research: break;  // retired (task 0034); never docked (dock_reset drops it)
     case WindowKind::Profiler: draw_profiler(r); break;
     case WindowKind::Render: draw_render_window(r); break;
     case WindowKind::Lighting: draw_lighting_window(r); break;
@@ -1245,7 +1252,17 @@ void Editor::dock_remove(WindowKind k) {
   dock_fix_parents(p, p->parent);
 }
 
+void Editor::open_references() {
+  for (int i = 0; i < lesson_count(); i++)
+    if (std::string(lesson(i).title) == "References") lesson_ = i;
+  dock_open(WindowKind::Learn);
+}
+
 void Editor::dock_open(WindowKind k, bool focus) {
+  if (k == WindowKind::Research) {  // retired (task 0034): the papers are in Learn > References
+    open_references();
+    return;
+  }
   DockNode *leaf = dock_find(k);
   if (!leaf) {
     /* The Textures window goes beside the Materials window when it is docked (not over the Scene view, which a
@@ -2388,7 +2405,7 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "help") {
     Log::info("Commands: help, clear, create <Cube|Sphere|...> [count], stress <count> [Cube|Sphere|Icosphere|Torus], select <name>,");
     Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
-    Log::info("  screenshot [file.png], bench [frames], lesson <n>, research, window <name>, tool <move|rotate|...>,");
+    Log::info("  screenshot [file.png], bench [frames], lesson <n>, references, window <name>, tool <move|rotate|...>,");
     Log::info("  edit [vertex|edge|face|off] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
     Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation),");
     Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
@@ -2432,7 +2449,7 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "scale") { ui_scale_pref_ = (float)std::atof(arg(1, "0").c_str()); apply_ui_scale(); }
   else if (c == "screenshot") screenshot(t.size() > 1 ? line.substr(line.find(' ') + 1) : "");
   else if (c == "lesson") { lesson_ = std::atoi(arg(1, "0").c_str()); dock_open(WindowKind::Learn); }
-  else if (c == "research") dock_open(WindowKind::Research);
+  else if (c == "research" || c == "references") open_references();  // (the Research window is retired: task 0034)
   else if (c == "window") {
     std::string w = line.substr(line.find(' ') + 1);
     for (int k = 0; k < (int)WindowKind::Count; k++)

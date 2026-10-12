@@ -205,19 +205,21 @@ void Editor::draw_textures_window(const Recti &r) {
     else if (TexturePtr tex = procedural_texture_output(t, which)) {
       /* From the smallest mip at least as wide as the pane, repacked only when the image or the level changes
        * (not every frame: an idle editor redraws on every mouse move). */
-      static const Texture *packed_tex = nullptr;
+      /* (Held, not just its address: a new image allocated where a freed one was would look unchanged, and the pane
+       * would keep the old picture - after an undo, say.) */
+      static TexturePtr packed_tex;
       static size_t packed_level = 0;
       static std::vector<uint32_t> px;
       size_t lv = 0;
       while (lv + 1 < tex->levels.size() && tex->levels[lv + 1].w >= pane.w) lv++;
       const Texture::Level &L = tex->levels[lv];
-      if (packed_tex != tex.get() || packed_level != lv || px.size() != (size_t)L.w * L.h) {
+      if (packed_tex != tex || packed_level != lv || px.size() != (size_t)L.w * L.h) {
         px.resize((size_t)L.w * L.h);
         for (size_t i = 0; i < px.size(); i++) {
           const uint32_t c = L.px8[i];
           px[i] = 0xFF000000u | (c & 0xFF) << 16 | (c >> 8 & 0xFF) << 8 | (c >> 16 & 0xFF);
         }
-        packed_tex = tex.get();
+        packed_tex = tex;
         packed_level = lv;
       }
       draw_pixels(u, px, L.w, L.h, pane, texture_preview_tiled_ ? 2 : 1);

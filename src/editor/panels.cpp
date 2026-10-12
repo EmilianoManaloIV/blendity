@@ -974,11 +974,6 @@ void Editor::draw_inspector(const Recti &r) {
           return;
         }
       }
-      if (ext == ".pdf" || starts_with(project_selected_, papers_dir_)) {
-        lay.space(u.px(6));
-        u.label(lay.row(), "Research paper", u.theme.accent);
-        u.label(lay.row(), "Ask Claude: \"implement <technique> from research/papers/" + fs::filename(project_selected_) + "\"", u.theme.text);
-      }
       if (u.button(lay.row(u.row_h() + u.px(4)), "Open with system viewer")) fs::open_external(project_selected_);
       return;
     }
@@ -1308,7 +1303,7 @@ void Editor::draw_inspector(const Recti &r) {
         auto &feats = research::features();
         if (!feats.empty()) {
           lay.space(u.px(2));
-          u.label(lay.row(), "Research features", u.theme.accent);
+          u.label(lay.row(), "From Papers (Learn > References)", u.theme.accent);
           for (auto &f : feats) {
             Recti fr = lay.row(u.row_h() + u.px(2));
             if (u.button({fr.x + u.px(4), fr.y, fr.w - u.px(8), fr.h}, f.name, false, Icon::Flask)) mesh_op("research:" + f.id);
@@ -1738,70 +1733,6 @@ void Editor::draw_profiler(const Recti &r) {
   content_h = lay.y + off - r.y;
   u.end_scroll();
 }
-
-/* ===================================================================== */
-/* Research                                                               */
-/* ===================================================================== */
-
-void Editor::draw_research(const Recti &r) {
-  auto &u = ui_;
-  if (u.time - papers_listed_ > 2.0) {
-    papers_ = fs::list(papers_dir_);
-    papers_.erase(std::remove_if(papers_.begin(), papers_.end(), [](const DirEntry &e) { return e.is_dir || to_lower(e.name) == "readme.md"; }), papers_.end());
-    papers_listed_ = u.time;
-  }
-  ui::Id sid = u.id("research_scroll");
-  static int content_h = 0;
-  int off = u.begin_scroll(sid, r, content_h);
-  ui::Layout lay{{r.x + u.px(12), r.y, r.w - u.px(34), r.h}, r.y + u.px(10) - off};
-  lay.row_h = u.row_h();
-  Recti title = lay.row(u.row_h() + u.px(6));
-  u.draw_icon(Icon::Flask, {title.x, title.y + u.px(3), u.row_h(), u.row_h()}, u.theme.accent);
-  u.label({title.x + u.row_h() + u.px(8), title.y, title.w, title.h}, "Research: turn your papers into editor features", u.theme.text_bright);
-  const char *intro[] = {
-      "1. Drop papers (PDF / TXT / MD / TeX) onto this window, or copy them into the folder below.",
-      "2. Ask Claude Code: \"Read research/papers/<file> and implement <technique> as a Blendity feature.\"",
-      "3. New features register in src/research/ and appear here, in the Mesh menu and the Inspector.",
-      "4. Track progress in research/FEATURES.md (paper -> feature -> status -> source file)."};
-  for (const char *t : intro) u.label(lay.row(), t, u.theme.text);
-  Recti br = lay.row(u.row_h() + u.px(4));
-  if (u.button({br.x, br.y, u.px(190), br.h}, "Open papers folder", false, Icon::Folder)) fs::open_external(papers_dir_);
-  if (u.button({br.x + u.px(198), br.y, u.px(190), br.h}, "Open FEATURES.md", false, Icon::File)) fs::open_external(fs::join(project_root_, "research/FEATURES.md"));
-  u.label(lay.row(), papers_dir_, u.theme.text_dim);
-
-  lay.space(u.px(8));
-  u.label(lay.row(), strprintf("Papers (%zu)", papers_.size()), u.theme.accent);
-  if (papers_.empty()) u.label(lay.row(), "No papers yet - drag & drop one onto the editor.", u.theme.text_dim);
-  for (auto &p : papers_) {
-    Recti row = lay.row(u.row_h() + u.px(2));
-    bool hot = u.hovered(row);
-    if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
-    int a = u.font.line_height() - u.px(2);
-    u.draw_icon(Icon::Paper, {row.x + u.px(4), row.y + (row.h - a) / 2, a, a}, u.theme.accent);
-    u.label({row.x + a + u.px(10), row.y, row.w * 6 / 10, row.h}, p.name);
-    u.label({row.x, row.y, row.w - u.px(80), row.h}, format_bytes(p.size), u.theme.text_dim, ui::Align::Right);
-    if (u.button({row.right() - u.px(70), row.y + u.px(1), u.px(66), row.h - u.px(2)}, "Open")) fs::open_external(fs::join(papers_dir_, p.name));
-    if (hot && u.in.double_clicked[0]) fs::open_external(fs::join(papers_dir_, p.name));
-  }
-
-  lay.space(u.px(10));
-  auto &feats = research::features();
-  u.label(lay.row(), strprintf("Implemented research features (%zu)", feats.size()), u.theme.accent);
-  for (auto &f : feats) {
-    Recti row = lay.row(u.row_h() + u.px(4));
-    u.canvas.fill_rect(row, Color::hex(0x323232));
-    u.label({row.x + u.px(6), row.y, row.w - u.px(140), row.h}, f.name, u.theme.text_bright);
-    if (u.button({row.right() - u.px(130), row.y + u.px(2), u.px(126), row.h - u.px(4)}, "Apply to selection", false, Icon::Flask)) mesh_op("research:" + f.id);
-    u.label(lay.row(), "  " + f.citation, u.theme.text_dim);
-    u.label(lay.row(), "  " + f.description, u.theme.text);
-    u.label(lay.row(), "  Status: " + f.status + "   |   Source: " + f.source_file, u.theme.text_dim);
-    lay.space(u.px(4));
-  }
-  lay.space(u.px(20));
-  content_h = lay.y + off - r.y;
-  u.end_scroll();
-}
-
 
 /* ===================================================================== */
 /* Render window (Blender: Render Result + Render/Output/World properties;

@@ -15,7 +15,7 @@ src/
 │               GameObject/Component scene, scene IO
 ├── editor/     IMGUI toolkit, docking, Scene/Game views, UV Editor, Render window,
 │               asset handling, panels, Learn tab
-├── research/   paper-derived features (registry)
+├── research/   paper-derived mesh features (registry; cited in Learn > References)
 ├── deps/       registry of the optional Blender libraries (the Console's `libs` command)
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)

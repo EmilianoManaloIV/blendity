@@ -47,7 +47,7 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-Each build produces **`Blendity`** (the editor), **`blendity_tests`** (8522 unit checks in 458 tests with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems, and runs the unit tests under AddressSanitizer / UBSan.
+Each build produces **`Blendity`** (the editor), **`blendity_tests`** (8552 unit checks in 461 tests with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems, and runs the unit tests under AddressSanitizer / UBSan.
 
 **Contributing.** `CLAUDE.md` holds the engineering standards. Work starts as a task spec in `docs/tasks/` (and a decision record in `docs/decisions/` when it is architectural), approved before code is written. It is implemented and independently tested and reviewed (the agents in `.claude/agents/`), then lands through a pull request that CI must pass and a human merges. What Blendity must do is in `docs/requirements.md`.
 
@@ -134,9 +134,9 @@ Each build produces **`Blendity`** (the editor), **`blendity_tests`** (8522 unit
 | UV Editor / Unwrap | Ctrl+9 / U | UV Editing workspace / U |
 | Render image / Render window | F12 / F11 | F12 / F11 |
 | Snap while dragging | hold Ctrl | hold Ctrl |
-| Windows | Ctrl+1 Scene, 2 Game, 3 Inspector, 4 Hierarchy, 5 Project, 6 Console, 7 Profiler, 8 Research, 9 UV Editor | — |
+| Windows | Ctrl+1 Scene, 2 Game, 3 Inspector, 4 Hierarchy, 5 Project, 6 Console, 7 Profiler, 8 Learn > References, 9 UV Editor | — |
 
-**Windows:** Scene, Game, Hierarchy, Inspector, Project, Console (with a command line; type `help`), **UV Editor**, **Render**, **Learn**, **Research** and **Profiler**. Drag tabs to dock or split them; Window → Layouts has the Default, 2 by 3, Tall, Wide and Learning presets.
+**Windows:** Scene, Game, Hierarchy, Inspector, Project, Console (with a command line; type `help`), **UV Editor**, **Render**, **Learn** and **Profiler**. Drag tabs to dock or split them; Window → Layouts has the Default, 2 by 3, Tall, Wide and Learning presets.
 
 ## The Learn tab
 
@@ -145,11 +145,11 @@ Each build produces **`Blendity`** (the editor), **`blendity_tests`** (8522 unit
 - **[FoCG]** Marschner & Shirley, *Fundamentals of Computer Graphics*, 5th ed.
 - **[GEA1]** / **[GEA2]** Gregory, *Game Engine Architecture* Vol. I and II
 
-They cover the editor layout, navigation, GameObjects vs Objects, scene graphs, transforms, handedness, mesh storage, Edit Mode, modifiers, cameras, the rasterizer, lighting, the game loop, files, undo, performance and research, **UV Mapping**, **Materials and Textures**, **Render Engines**, **Light, Sky and Tone Mapping**, **Advanced Modeling Tools**, **Libraries and Performance**, and new in this release **Bevel, Bridge and Push Through** (Blender's external libraries, profiling, SIMD and multithreading). Lessons have "Try it" buttons that drive the editor, reveal-on-click self-checks and links into the matching folder of the Blender source tree. The text is my own wording; the books are cited, not reproduced.
+They cover the editor layout, navigation, GameObjects vs Objects, scene graphs, transforms, handedness, mesh storage, Edit Mode, modifiers, cameras, the rasterizer, lighting, the game loop, files, undo, performance, the **References** behind the features, **UV Mapping**, **Materials and Textures**, **Render Engines**, **Light, Sky and Tone Mapping**, **Advanced Modeling Tools**, **Libraries and Performance**, and new in this release **Bevel, Bridge and Push Through** (Blender's external libraries, profiling, SIMD and multithreading). Lessons have "Try it" buttons that drive the editor, reveal-on-click self-checks and links into the matching folder of the Blender source tree. The text is my own wording; the books are cited, not reproduced.
 
-## Your research papers
+## The papers behind the features
 
-Drop papers onto the editor window or into **`research/papers/`**. They appear in the **Research** tab. Then ask Claude Code to implement a technique; features register in `src/research/` and show up in the Research tab, the Mesh menu and the Inspector. A worked example is included: **Taubin's λ|μ smoothing** (SIGGRAPH '95). See [`research/README.md`](research/README.md) and [`research/FEATURES.md`](research/FEATURES.md).
+Features built from research papers (Taubin's λ|μ smoothing, the voxel GI of Thiedemann et al., the GGX microfacet model, the area-light bake of Heitz et al. and others) are cited in the Learn tab's **References** lesson, each with the feature it became and where to find it; the code cites the same papers in its comments. Mesh features from papers are in Mesh > From Papers and the Inspector. (The Research window that collected papers was retired.)
 
 ## Stress tests and efficiencies
 
@@ -180,7 +180,7 @@ blendity/
 ├── stress/         stress suite + results/
 ├── tests/          unit tests
 ├── Assets/         your project's scenes, meshes and textures (the Project window)
-├── research/       papers/ drop folder, FEATURES.md tracker
+├── research/       your own notes and papers (not read by the editor; references are in Learn)
 ├── docs/           ARCHITECTURE.md, PERFORMANCE.md, images/
 ├── licenses/       license texts and what they mean for the executables
 └── build.bat · build.sh · CMakeLists.txt · .github/workflows/build.yml

@@ -191,7 +191,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"window.project", "Project", "Windows", CTX_GLOBAL},
       {"window.console", "Console", "Windows", CTX_GLOBAL},
       {"window.profiler", "Profiler", "Windows", CTX_GLOBAL},
-      {"window.research", "Research", "Windows", CTX_GLOBAL},
+      {"window.research", "References (Learn)", "Windows", CTX_GLOBAL},
       {"window.uv", "UV Editor", "Windows", CTX_GLOBAL},
   };
   return acts;
@@ -523,7 +523,7 @@ void Editor::parse_keymap_overrides(const std::string &text) {
 bool Editor::run_action(const std::string &id) {
   auto &in = ui_.in;
   const WindowKind wins[] = {WindowKind::Scene,   WindowKind::Game,     WindowKind::Inspector, WindowKind::Hierarchy, WindowKind::Project,
-                             WindowKind::Console, WindowKind::Profiler, WindowKind::Research,  WindowKind::UVEditor};
+                             WindowKind::Console, WindowKind::Profiler, WindowKind::Research,  WindowKind::UVEditor};  // (Research: Learn > References)
   const char *win_ids[] = {"window.scene", "window.game", "window.inspector", "window.hierarchy", "window.project",
                            "window.console", "window.profiler", "window.research", "window.uv"};
   for (int k = 0; k < 9; k++)
@@ -575,7 +575,6 @@ bool Editor::run_action(const std::string &id) {
   }
   else if (id == "assets.refresh") {
     project_listed_ = -100;
-    papers_listed_ = -100;
   }
   else if (id == "object.join") {
     if (edit_mode_) return false;

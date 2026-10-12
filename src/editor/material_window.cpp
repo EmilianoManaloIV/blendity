@@ -6,6 +6,7 @@
 // right here, drag it onto an object, a face, a Hierarchy row or a slot.
 #include "editor.h"
 #include "../render/shading.h"
+#include "../texture/procedural_texture.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -21,29 +22,41 @@ struct Preview {
   uint64_t version = 0;
   std::vector<uint32_t> px;
   int size = 0;
+  /* The textures it was drawn from, weakly: a key match with a texture since freed (and another allocated at its
+   * address) is a miss, without keeping old textures alive. */
+  std::weak_ptr<const Texture> tex[5];
+  std::weak_ptr<const LiveTexture> live[5];
+  uint64_t last_used = 0;
 };
 
 /* A small software-shaded sphere: Lambert + Blinn-Phong from the material's
  * colour, metallic, roughness and emission, with its base texture wrapped on. */
 const Preview &material_preview(const Material &m, int size) {
   static std::unordered_map<const Material *, Preview> cache;
+  static uint64_t calls = 0;
+  calls++;
+  /* Entries of materials not drawn for a while go (undo and redo clone every material: new addresses). */
+  if ((calls & 1023) == 0)
+    for (auto it = cache.begin(); it != cache.end();) it = calls - it->second.last_used > 4096 ? cache.erase(it) : std::next(it);
   Preview &p = cache[&m];
-  /* Its own textures (their images and live snapshots are new objects when they change), not every texture
-   * edit anywhere (a drag elsewhere would redraw every preview each frame). */
-  uint64_t key = m.version;
-  {
-    const Material::Resolved &rt = m.textures();
-    for (const TexturePtr *tp : {&rt.base, &rt.metallic, &rt.roughness, &rt.normal, &rt.emission})
-      key = key * 1099511628211ull + (uint64_t)(uintptr_t)tp->get();
-    for (const auto &l : rt.live) key = key * 1099511628211ull + (uint64_t)(uintptr_t)l.get();
-  }
-  for (const MaterialPtr &part : m.textures().axis)
-    if (part) key = key * 1099511628211ull + part->version;
-  if (p.size == size && p.version == key && !p.px.empty()) return p;
+  p.last_used = calls;
+  /* The key is the material's content (its fields, not its address or version: a material allocated where a freed
+   * one was can't pass for it) and its textures (new objects when they change); not every texture edit anywhere (a
+   * drag elsewhere would redraw every preview each frame). */
+  const Material::Resolved &rt = m.textures();  // resolved here (one thread), not in the evaluation below
+  uint64_t key = hash_reflect([&](Reflector &r) { const_cast<Material &>(m).reflect(r); });
+  const TexturePtr *slots[5] = {&rt.base, &rt.metallic, &rt.roughness, &rt.normal, &rt.emission};
+  for (const TexturePtr *tp : slots) key = key * 1099511628211ull + (uint64_t)(uintptr_t)tp->get();
+  for (const auto &l : rt.live) key = key * 1099511628211ull + (uint64_t)(uintptr_t)l.get();
+  for (const MaterialPtr &part : rt.axis)
+    if (part) key = key * 1099511628211ull + hash_reflect([&](Reflector &r) { part->reflect(r); });
+  bool same = p.size == size && p.version == key && !p.px.empty();
+  for (int k = 0; k < 5 && same; k++) same = p.tex[k].lock().get() == slots[k]->get() && p.live[k].lock().get() == rt.live[k].get();
+  if (same) return p;
   p.size = size;
   p.version = key;
+  for (int k = 0; k < 5; k++) p.tex[k] = *slots[k], p.live[k] = rt.live[k];
   p.px.assign((size_t)size * size, 0);
-  (void)m.textures();  // resolved here (one thread), not in the evaluation below
   const Vec3 L = normalize(Vec3(-0.45f, 0.65f, 0.6f)), V(0, 0, 1);
   const Vec3 H = normalize(L + V);
   const float rough = clampf(m.roughness, 0.03f, 1.0f);

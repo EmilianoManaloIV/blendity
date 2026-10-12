@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-11 (round 56): the Research window retired; papers in Learn > References (task 0034)
+
+**Asked:** "you can remove the research tab, doesn't really serve a purpose. Any features that use papers should be
+simply referenced and included in the learn tab."
+
+**Changed**
+- **The Research window is gone** (Window menu, File and Help menus, the Project window's Research Papers folder,
+  dropping a PDF copying it into the project). A layout saved with it loads without it.
+- **Learn > References** lists the papers behind Blendity's features, each with the feature it became and where
+  it is (Taubin smoothing, Catmull-Clark, LSCM unwrapping, MikkTSpace, voxel GI, GGX, the area-light work of
+  Karis and Heitz et al., the BVH, path guiding, the physical sky, noise, colour temperature...), with a Try-it
+  button for Taubin smoothing. `window Research`, `research`, `references` and Ctrl+8 open it. Mesh features from
+  papers are now under Mesh > From Papers. Nothing in the `research/` folder was touched.
+
+**Fixed**
+- The Textures window's preview could keep an old picture after an undo (an image freed and a new one allocated
+  at the same address looked unchanged); it, and the Materials window's previews, now hold their images.
+
+**Checked**
+- New tests (round 56): an old layout with Research (beside the Console, and alone in an area) loads without it,
+  every preset too; `window Research` and `research` open References; every paper feature is cited there and the
+  Taubin Try-it smooths a noisy sphere; dropping a PDF copies nothing; Ctrl+8 opens References from any lesson; a
+  layout with Research in its root area, or only Research, loads without it.
+
+**Review (code reviewer)**: a major and several minor findings, all fixed: Add Tab still offered Research, Ctrl+8
+opened the last lesson, Research in a layout's root area stayed, the path-guiding citation (now Ruppert, Herholz
+& Lensch 2020, the method Open PGL is set to), the research folder still deletable from Blendity, the Materials
+previews holding textures (now a content key and weak references), dead state.
+- Unit checks: Windows 8,552, 0 failed (461 tests); the whole suite in render-cache verify mode: 8,553,
+  0 failed, 0 stale pictures. Linux with libraries: 8,488, 0 failed. Sanitizer build: 8,410, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_ui` 0 problems.
+
 ## 2026-10-11 (round 55): camera composition guides (task 0033)
 
 **Asked:** "adding 'rule of thirds' guides to the camera and can be togglable. Any additional camera guides or

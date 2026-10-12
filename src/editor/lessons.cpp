@@ -341,13 +341,53 @@ Each test compares a naive version with the optimised one, so you can see what e
 ! window:Profiler | Open the Profiler
 ! spawn:1000 | Spawn 1,000 spheres and watch the frame time
 )"},
-    {"Your Research", "Turning papers into features", R"(
-Drop papers onto the editor window, or copy them into research/papers. Then ask Claude Code to implement a technique, for example: "Read research/papers/taubin95.pdf and add lambda-mu smoothing as a Blendity feature."
-New features follow the pattern in src/research/research.cpp: a function that edits a Mesh plus a short registration (name, citation, description). They then appear in the Research tab, the Mesh > Research Features menu and the Inspector. research/FEATURES.md tracks which paper produced which feature.
-An example is included: Taubin's lambda|mu smoothing. Plain Laplacian smoothing shrinks a mesh toward its centre. Taubin alternates a positive and a negative smoothing step, which removes noise while keeping the volume. Try both on a noisy sphere and compare.
+    {"References", "The papers behind Blendity's features", R"(
+Some of Blendity's features come straight from research papers. Each one is listed here with the feature it became and where to find it, so you can read the original next to the code. The code cites the same papers in its comments.
+# Modeling
+- Taubin smoothing: Inspector > MeshFilter > From Papers, or Mesh > From Papers. Smooths without shrinking the mesh.
 > Taubin, G. (1995) A signal processing approach to fair surface design. SIGGRAPH '95.
-> [FoCG] 10.3 Convolution Filters (smoothing as low-pass filtering)
-! research | Open the Research tab
+! cmd:create Sphere; meshop research:surface_noise; meshop research:taubin_smoothing | Add noise to a sphere, then smooth it with Taubin's filter
+- Subdivision (Subdivide, the Subdivision Surface modifier).
+> Catmull, E. & Clark, J. (1978) Recursively generated B-spline surfaces on arbitrary topological meshes. Computer-Aided Design 10(6).
+- UV unwrapping (U > Unwrap): least squares conformal maps, as Blender's unwrapper.
+> Lévy, B., Petitjean, S., Ray, N. & Maillot, J. (2002) Least squares conformal maps for automatic texture atlas generation. SIGGRAPH '02.
+- Tangent space for normal maps (MikkTSpace, as Blender and most engines).
+> Mikkelsen, M. (2008) Simulation of wrinkled surfaces revisited. Master's thesis, University of Copenhagen.
+- The Utah Teapot primitive.
+> Newell, M. (1975) The utilization of procedure models in digital image synthesis. PhD thesis, University of Utah.
+# Rendering
+- Realtime GI (Lighting window): voxel columns, the mip-map ray test, one bounce of the sun.
+> Thiedemann, S., Henrich, N., Grosch, T. & Müller, S. (2011) Voxel-based global illumination. I3D '11.
+> Amanatides, J. & Woo, A. (1987) A fast voxel traversal algorithm for ray tracing. Eurographics '87.
+- Rough reflection and glass (the GGX microfacet model) and its sampling in the path tracer.
+> Cook, R. & Torrance, K. (1982) A reflectance model for computer graphics. ACM Transactions on Graphics 1(1).
+> Walter, B., Marschner, S., Li, H. & Torrance, K. (2007) Microfacet models for refraction through rough surfaces. EGSR '07.
+> Heitz, E. (2018) Sampling the GGX distribution of visible normals. Journal of Computer Graphics Techniques 7(4).
+> Schlick, C. (1994) An inexpensive BRDF model for physically-based rendering. Computer Graphics Forum 13(3).
+- Large area lights in the views (their specular highlight) and image-based lighting's split sum.
+> Karis, B. (2013) Real shading in Unreal Engine 4. SIGGRAPH course: Physically Based Shading in Theory and Practice.
+- Area lights in Generate Lighting (an exact unshadowed term, shadow rays for the visible share).
+> Heitz, E., Hill, S. & McGuire, M. (2018) Combining analytic direct illumination and stochastic shadows. I3D '18.
+- Disk-shaped area lights (an even mapping of the square onto the disk) and stratified light samples.
+> Shirley, P. & Chiu, K. (1997) A low distortion map between disk and square. Journal of Graphics Tools 2(3).
+> Cranley, R. & Patterson, T. (1976) Randomization of number theoretic methods for multiple integration. SIAM Journal on Numerical Analysis 13(6).
+- The path tracer's BVH (surface area heuristic) and ray-triangle test.
+> Wald, I. (2007) On fast construction of SAH-based bounding volume hierarchies. IEEE Symposium on Interactive Ray Tracing.
+> Möller, T. & Trumbore, B. (1997) Fast, minimum storage ray-triangle intersection. Journal of Graphics Tools 2(1).
+> Duff, T. et al. (2017) Building an orthonormal basis, revisited. Journal of Computer Graphics Techniques 6(1).
+- Path guiding (Render Settings > Path Guiding, through Open PGL's parallax-aware mixtures).
+> Ruppert, L., Herholz, S. & Lensch, H. (2020) Robust fitting of parallax-aware mixtures for path guiding. ACM Transactions on Graphics 39(4), SIGGRAPH '20.
+- The A-Trous denoiser (when OpenImageDenoise isn't there).
+> Dammertz, H., Sewtz, D., Hanika, J. & Lensch, H. (2010) Edge-avoiding À-Trous wavelet transform for fast global illumination filtering. HPG '10.
+- The world: the physical sky, its irradiance for diffuse lighting and probes.
+> Hosek, L. & Wilkie, A. (2012) An analytic model for full spectral sky-dome radiance. SIGGRAPH '12.
+> Ramamoorthi, R. & Hanrahan, P. (2001) An efficient representation for irradiance environment maps. SIGGRAPH '01.
+- Light colour temperature (Use Color Temperature on a light).
+> Kang, B. et al. (2002) Design of advanced color temperature control system for HDTV applications. Journal of the Korean Physical Society 41(6).
+# Textures
+- Noise in materials and procedural textures (gradient noise and its fractal sums).
+> Perlin, K. (2002) Improving noise. SIGGRAPH '02.
+> [FoCG] 11.5 Procedural 3D Textures
 )"},
     {"UV Mapping", "Seams, unwrapping and the UV Editor", R"(
 A texture is a flat image, but a mesh is a surface in 3D. UV mapping gives every face corner a 2D coordinate (u, v) inside the image. Blender stores UVs per face corner, so two faces that share a vertex can still use different parts of the texture. Unity stores UVs per vertex (Mesh.uv), so the importer splits a vertex wherever its UVs differ. Blendity keeps Blender's per-corner layout and splits only in the render cache.

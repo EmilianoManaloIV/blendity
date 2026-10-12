@@ -258,6 +258,8 @@ class Editor {
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
   /* Tests: where the Game view's camera frame (the guides' frame) was last drawn. */
   Recti game_guides_frame_for_test() const { return game_guides_frame_; }
+  bool window_docked_for_test(WindowKind k) { return dock_find(k) != nullptr; }
+  int lesson_for_test() const { return lesson_; }
   /* Tests: the Guides button ("button") and its menu's rows by label, as last drawn. */
   Recti game_guides_rect_for_test(const std::string &key) const {
     auto it = game_guides_rects_.find(key);
@@ -392,7 +394,7 @@ class Editor {
   void draw_project(const Recti &r);
   void draw_console(const Recti &r);
   void draw_learn(const Recti &r);
-  void draw_research(const Recti &r);
+  void open_references();  // Learn > References (the papers behind features; the Research window is retired)
   void draw_profiler(const Recti &r);
   void draw_render_window(const Recti &r);
   void draw_uv_editor(const Recti &r);
@@ -1433,8 +1435,7 @@ class Editor {
   std::set<int> lessons_done_;
 
   /* ---- research ---- */
-  std::vector<DirEntry> papers_;
-  double papers_listed_ = -100;
+
 
   /* ---- profiler ---- */
   int stress_count_ = 500;

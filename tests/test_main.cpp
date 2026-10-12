@@ -214,6 +214,7 @@ static void round52_tests();
 static void round53_tests();
 static void round54_tests();
 static void round55_tests();
+static void round56_tests();
 
 int main() {
   register_builtin_components();
@@ -846,6 +847,7 @@ int main() {
   round53_tests();
   round54_tests();
   round55_tests();
+  round56_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -20213,5 +20215,106 @@ static void round55_tests() {
     Camera *tc = t.find_by_name("Main Camera") ? t.find_by_name("Main Camera")->camera() : nullptr;
     CHECK(tc && tc->show_guides && tc->guide_golden && std::fabs(tc->guide_opacity - 0.8f) < 1e-5f);
     std::remove(path.c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 56 (task 0034): the Research window retired; papers in Learn     */
+/* ===================================================================== */
+
+static void round56_tests() {
+  test("references: an old layout holding the Research window loads without it, and opening it shows Learn > References", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));  // not in the default layout
+    /* A layout saved before: Research beside the Console, and alone in an area of its own. */
+    ed.command("layout H(0.5,V(0.5,L(0,1:0),L(5,7:1)),V(0.5,L(3:0),L(7:0)))");
+    ed.step_frame_headless();
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    CHECK(ed.window_docked_for_test(WindowKind::Console) && ed.window_docked_for_test(WindowKind::Inspector));
+    for (const char *preset : {"Default", "2 by 3", "Tall", "Wide", "Learning"}) {
+      ed.command(std::string("layout ") + preset);
+      CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    }
+    ed.command("window Research");
+    ed.step_frame_headless();
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    CHECK(ed.window_docked_for_test(WindowKind::Learn));
+    CHECK(std::string(lesson(ed.lesson_for_test()).title) == "References");
+    ed.command("research");
+    CHECK(std::string(lesson(ed.lesson_for_test()).title) == "References");
+    /* Ctrl+8 (its old shortcut) opens References, from any lesson. */
+    ed.command("lesson 3");
+    platform::Event k8;
+    k8.type = platform::EventType::KeyDown;
+    k8.key = platform::KEY_8;
+    k8.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({k8});
+    ed.step_frame_headless();
+    CHECK(std::string(lesson(ed.lesson_for_test()).title) == "References");
+    /* Research in the root area (beside the Console), and a layout that was only Research. */
+    ed.command("layout L(5,7:1)");
+    CHECK(!ed.window_docked_for_test(WindowKind::Research) && ed.window_docked_for_test(WindowKind::Console));
+    ed.command("layout L(7:0)");
+    CHECK(!ed.window_docked_for_test(WindowKind::Research) && ed.window_docked_for_test(WindowKind::Scene));  // the default
+  });
+
+  test("references: every feature built from a paper is cited in the References lesson, and its Try-it button runs", [] {
+    int idx = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "References") idx = i;
+    CHECK(idx >= 0);
+    if (idx < 0) return;
+    const std::string body = lesson(idx).body;
+    int missing = 0;
+    for (const auto &f : research::features()) {
+      /* The citation's first author's surname (the paper behind a feature; utilities cite none). */
+      std::string c = f.citation;
+      const size_t comma = c.find(',');
+      const std::string author = comma == std::string::npos ? c : c.substr(0, comma);
+      if (author.empty() || f.status == "utility") continue;  // (a tool, no paper)
+      if (body.find(author) == std::string::npos) {
+        std::printf("    not cited: %s (%s)\n", f.name.c_str(), f.citation.c_str());
+        missing++;
+      }
+    }
+    CHECK(missing == 0);
+    for (const char *paper : {"Taubin", "Catmull", "Thiedemann", "conformal maps", "Walter", "Karis", "Heitz", "Perlin", "Hosek"})
+      CHECK(body.find(paper) != std::string::npos);
+    /* The Taubin Try-it button: a noisy sphere smoothed (the mesh changes). */
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Sphere");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>());
+    if (!g || !g->get<MeshFilter>()) return;
+    ed.command("meshop research:surface_noise");
+    const std::vector<Vec3> noisy = g->get<MeshFilter>()->mesh->positions;
+    ed.command("meshop research:taubin_smoothing");
+    CHECK(g->get<MeshFilter>()->mesh->positions != noisy);
+  });
+
+  test("references: dropping a paper onto the editor copies nothing into the project (no research folder)", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const std::string src = fs::join(scratch_project(), "R56_paper.pdf");
+    {
+      std::FILE *f = std::fopen(src.c_str(), "wb");
+      if (f) {
+        std::fputs("%PDF-1.4 test", f);
+        std::fclose(f);
+      }
+    }
+    platform::Event drop;
+    drop.type = platform::EventType::Drop;
+    drop.paths = {src};
+    ed.step_frame_headless({drop});
+    ed.step_frame_headless();
+    CHECK(!fs::exists(fs::join(scratch_project(), "research/papers/R56_paper.pdf")));
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    std::remove(src.c_str());
   });
 }
