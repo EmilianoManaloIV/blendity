@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 78): bind poses on rigged imports (task 0056, ADR 0025 amended)
+
+**Asked:** "Yes, please follow Blender, Unity, and Maya methodology" (about rigged files saved in a pose).
+
+**Fixed**
+- **A rigged glTF or FBX saved mid-pose** imported with that pose as its rest, so the skin was wrong and Reset Pose
+  did nothing. Each bone's rest is now its **bind pose**, as Blender, Unity and Maya read it: glTF's inverse bind
+  matrices, FBX's cluster bind matrix. The pose in the file stays on the bones, and Reset Pose gives the shape the
+  mesh was bound in.
+- Files saved at rest import exactly as before. A bind that can't be used (missing, zero, non-finite, under a parent
+  scaled to 0) falls back to the saved transform.
+- The Console's "saved in a pose other than its bind pose" warning is gone. It now warns when two meshes bound a bone
+  in different poses, or an FBX mesh moved after binding.
+- Learn: the Bones and skins lesson says how posed files import.
+- Tests: round 75's materials test left its MA..MD materials in the scratch project, so they piled up run after run
+  until MC scrolled out of the window and the test failed (and crashed when run alone). It now clears them first.
+
+**Checked**
+- New tests (round 78), with fixtures exported from Blender 5.2 with the forearm bent 60 degrees:
+  - The posed glTF and FBX import bent 60 degrees and match Blender's posed mesh (FBX within 9e-7).
+  - `armature reset` gives the file's mesh and puts the forearm back above the upper arm.
+  - Rigs saved at rest keep each bone's saved transform exactly.
+  - Unusable binds leave the bone at its saved transform.
+- Unit checks: Windows 9,493, 0 failed (594 tests); the whole suite in render-cache verify mode: 9,494,
+  0 failed, 0 stale pictures. Linux with libraries: 9,401, 0 failed. Sanitizer build: 9,319, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: one major and three minor findings, fixed:
+- An FBX cluster without a bind matrix (ufbx leaves zeros) was taken as a bind, which froze its vertices.
+- A parent scaled to 0 made a bone's rest its absolute bind.
+- Two meshes bound in different poses, and a mesh moved after binding, went unreported.
+- A rig saved at rest got float-rounded rests instead of the saved ones.
+
 ## 2026-10-13 (round 77): layouts for each stage of the work (task 0055, ADR 0027)
 
 **Asked:** "Add different layouts that focus on different sections of the 3D modeling process such as:

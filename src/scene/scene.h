@@ -1046,6 +1046,9 @@ struct Transform {
   Vec3 euler_hint;  // keeps Inspector euler angles stable (Unity does the same)
 };
 
+/* A matrix as position, rotation and scale (a mirrored matrix keeps a negative X scale); shear is dropped. */
+Transform transform_from_matrix(const Mat4 &m);
+
 class GameObject {
  public:
   uint64_t id = 0;

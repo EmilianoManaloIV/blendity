@@ -24783,6 +24783,15 @@ static void round69_tests() {
   });
   /* ------------------------------------------------------------------ round 75: many assets at once (task 0053) */
   test("assets: Ctrl and Shift click select several materials, Delete asks once and deletes them all as one undo step", [] {
+    /* Earlier runs' MA..MD (and the "MA 1", "MB 2" ... that newmat makes beside them) out of the scratch project: they
+     * pile up run after run and push MC and MD out of the window's view. */
+    {
+      const std::string dir = fs::join(scratch_project(), "Assets/Materials");
+      for (const DirEntry &de : fs::list(dir))
+        if (de.name.size() > 2 && de.name[0] == 'M' && de.name[1] >= 'A' && de.name[1] <= 'D' && (de.name[2] == '.' || de.name[2] == ' ') &&
+            fs::extension(de.name) == ".mat")
+          std::remove(fs::join(dir, de.name).c_str());
+    }
     Editor ed;
     r50_open(ed);
     ed.record_buttons_for_test(true);
@@ -24841,11 +24850,12 @@ static void round69_tests() {
     std::printf("    deleted three of four: %d material asset(s) left\n", left);
     CHECK(left == 1 && !ed.material_delete_pending());
     GameObject *cube = ed.scene().find_by_name("Cube");
-    CHECK(cube && cube->get<MeshRenderer>()->materials[0] == nullptr);  // its slot: the default material now
+    CHECK(cube && !cube->get<MeshRenderer>()->materials.empty() && cube->get<MeshRenderer>()->materials[0] == nullptr);  // its slot: the default material now
     ed.command("undo");  // one step for the slots of all three
     r34_steps(ed, 2);
     cube = ed.scene().find_by_name("Cube");
-    CHECK(cube && cube->get<MeshRenderer>()->materials[0] && cube->get<MeshRenderer>()->materials[0]->name == "MA");
+    CHECK(cube && !cube->get<MeshRenderer>()->materials.empty() && cube->get<MeshRenderer>()->materials[0] &&
+          cube->get<MeshRenderer>()->materials[0]->name == "MA");
   });
 
   test("assets: the Textures window takes Ctrl+A over its thumbnails and deletes every texture shown after one question", [] {
@@ -25229,5 +25239,114 @@ static void round69_tests() {
       ed.step_frame_headless();
       CHECK(ed.window_rect_for_test(WindowKind::Lighting).w > 0 && ed.shows(Editor::FocusLight));
     }
+  });
+  /* ---------------------------------------------------------------- round 78: bind poses (task 0056) */
+  test("bind poses: a glTF and an FBX saved with the forearm bent import bent like Blender shows them, and Reset Pose gives the bound shape", [] {
+    /* Blender's own posed tube (make_rig_posed.py), in glTF's axes: Blendity mirrors X. */
+    std::vector<Vec3> blender;
+    {
+      std::ifstream f("tests/fixtures/rig_tube_posed_verts.txt");
+      float x, y, z;
+      while (f >> x >> y >> z) blender.push_back({-x, y, z});
+    }
+    CHECK(blender.size() == 132);
+    /* The farthest any point of one set is from the other set (both ways). */
+    auto apart = [](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+      float worst = 0.0f;
+      for (int pass = 0; pass < 2; pass++) {
+        const std::vector<Vec3> &p = pass ? b : a, &q = pass ? a : b;
+        for (const Vec3 &v : p) {
+          float best = 1e30f;
+          for (const Vec3 &w : q) best = std::min(best, length(v - w));
+          worst = std::max(worst, best);
+        }
+      }
+      return worst;
+    };
+    for (const char *file : {"tests/fixtures/rig_tube_posed.glb", "tests/fixtures/rig_tube_posed.fbx"}) {
+      ImportResult r;
+      CHECK(import_model(file, r));
+      Editor ed;
+      ed.init_headless(800, 600);
+      GameObject *root = instantiate_import(ed.scene(), r, "Posed Import", nullptr);
+      GameObject *upper = ed.scene().find_by_name("Upper"), *tube = ed.scene().find_by_name("Tube");
+      CHECK(root && upper && upper->get<Bone>() && tube && tube->get<SkinModifier>());
+      if (!root || !upper || !upper->get<Bone>() || !tube || !tube->get<SkinModifier>()) continue;
+      const Bone &ub = *upper->get<Bone>();
+      /* The bones keep the file's pose; their rest is the bind pose: 60 degrees apart. */
+      const Quat a = ub.rest_rotation, b = upper->local().rotation;
+      const float bent = 2.0f * std::acos(std::min(1.0f, std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w)));
+      const Mat4 &tw = tube->world_matrix();
+      std::vector<Vec3> posed;
+      for (const Vec3 &p : tube->evaluated_mesh()->positions) posed.push_back(tw.point(p));
+      const float off = apart(posed, blender);
+      std::printf("    %s: Upper posed %.2f degrees from its rest; %zu vertices, at most %.2g from Blender's posed mesh\n", file, bent * 57.29578f, posed.size(),
+                  off);
+      CHECK(std::fabs(bent * 57.29578f - 60.0f) < 0.1f);
+      CHECK(off < 1e-3f * 2.0f);  // 1e-3 of the tube's size (2 m)
+      /* Reset Pose: back to the file's vertices (the shape it was bound in), and Upper straight above Lower again. */
+      ed.command("armature reset Upper");
+      const Mesh &m = *tube->mesh_filter()->mesh;
+      const Mesh *e = tube->evaluated_mesh();
+      float rest = 0.0f;
+      for (size_t i = 0; i < m.vert_count(); i++) rest = std::max(rest, length(tw.point(e->positions[i]) - tw.point(m.positions[i])));
+      const Vec3 tip = upper->world_matrix().point(Vec3(0.0f));
+      std::printf("    after Reset Pose: moved by %.2g from the file's mesh; Upper's head at (%.3f, %.3f, %.3f)\n", rest, tip.x, tip.y, tip.z);
+      CHECK(rest < 1e-3f);
+      CHECK(length(tip - Vec3(0.0f, 1.0f, 0.0f)) < 1e-3f);
+    }
+  });
+
+  test("bind poses: a rig saved at rest imports as before (each bone's rest is where the file puts it)", [] {
+    for (const char *file : {"tests/fixtures/rig_tube.glb", "tests/fixtures/rig_tube.fbx"}) {
+      ImportResult r;
+      CHECK(import_model(file, r));
+      int binds = 0;
+      for (const ImportedNode &n : r.nodes) binds += n.has_bind;
+      Scene s;
+      instantiate_import(s, r, "Rest Import", nullptr);
+      float worst = 0.0f;
+      int bones = 0;
+      for (const char *name : {"Lower", "Upper"}) {
+        const GameObject *g = s.find_by_name(name);
+        const Bone *b = g ? g->get<Bone>() : nullptr;
+        CHECK(b);
+        if (!b) continue;
+        bones++;
+        worst = std::max(worst, length(b->rest_position - g->local().position) / std::max(1.0f, length(g->local().position)));
+        const Quat q = b->rest_rotation, l = g->local().rotation;
+        worst = std::max(worst, 1.0f - std::fabs(q.x * l.x + q.y * l.y + q.z * l.z + q.w * l.w));
+      }
+      std::printf("    %s: %d bones with a bind pose; rest differs from the saved transform by %.2g\n", file, binds, worst);
+      CHECK(bones == 2 && binds >= 2 && worst == 0.0f);  // exactly: a bind equal to the saved transform keeps it bit for bit
+    }
+  });
+
+  test("bind poses: a bind that can't be used (under a parent scaled to 0, or broken) leaves the bone resting where the file puts it", [] {
+    ImportResult r;
+    ImportedNode hidden, bone, mesh;
+    hidden.name = "Hidden";
+    hidden.scale = Vec3(0.0f);  // hide-by-scale: its place has no inverse
+    bone.name = "Joint";
+    bone.parent = 0;
+    bone.position = {0.0f, 1.0f, 0.0f};
+    bone.is_bone = true;
+    bone.has_bind = true;
+    bone.bind_world = Mat4::translate({3.0f, 4.0f, 5.0f});
+    mesh.name = "Body";
+    r.nodes = {hidden, bone, mesh};
+    Scene s;
+    instantiate_import(s, r, "Broken Bind", nullptr);
+    const GameObject *g = s.find_by_name("Joint");
+    const Bone *b = g ? g->get<Bone>() : nullptr;
+    CHECK(b && length(b->rest_position - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);
+    /* A non-finite bind is the same. */
+    r.nodes[0].scale = Vec3(1.0f);
+    r.nodes[1].bind_world.m[12] = std::numeric_limits<float>::quiet_NaN();
+    Scene s2;
+    instantiate_import(s2, r, "Broken Bind", nullptr);
+    g = s2.find_by_name("Joint");
+    b = g ? g->get<Bone>() : nullptr;
+    CHECK(b && length(b->rest_position - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);
   });
 }

@@ -1652,9 +1652,8 @@ void GameObject::set_world_rotation(Quat q) {
   set_local_rotation(parent ? parent->world_rotation().conjugate() * q : q);
 }
 
-void GameObject::set_world_matrix(const Mat4 &world) {
-  Mat4 l = parent ? parent->world_matrix().inverse() * world : world;
-  Transform t = local_;
+Transform transform_from_matrix(const Mat4 &l) {
+  Transform t;
   t.position = l.translation();
   t.scale = {length(l.column(0)), length(l.column(1)), length(l.column(2))};
   /* Preserve mirroring (negative determinant) on X. */
@@ -1667,7 +1666,11 @@ void GameObject::set_world_matrix(const Mat4 &world) {
   }
   t.rotation = quat_from_matrix(r);
   t.euler_hint = t.rotation.to_euler();
-  set_local(t);
+  return t;
+}
+
+void GameObject::set_world_matrix(const Mat4 &world) {
+  set_local(transform_from_matrix(parent ? parent->world_matrix().inverse() * world : world));
 }
 
 bool GameObject::active_in_hierarchy() const {

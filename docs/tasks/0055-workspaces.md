@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** ADR 0027
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/52
 
 ## Goal
 The user asked (2026-10-12) for layouts that focus on the stages of 3D work, "Reference/Planning, Blocking Out,
