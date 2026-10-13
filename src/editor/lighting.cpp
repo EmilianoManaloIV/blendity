@@ -247,7 +247,7 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
 
 /* Task 0018: on the first ticked GPU when Render > Device is GPU Compute (as F12 renders); -1 the CPU. */
 int Editor::choose_bake_gpu() {
-  if (scene_->render.device == 1 && gpu::available()) {
+  if (scene_->render.device >= 1 && gpu::available()) {
     const std::vector<int> g = enabled_gpus();
     if (!g.empty()) return g[0];
   }

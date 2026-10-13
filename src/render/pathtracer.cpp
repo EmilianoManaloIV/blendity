@@ -175,6 +175,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   if (!settings_.gpus.empty() && gpu::available()) sync_gpus();
   else {
     gpus_.clear();
+    parked_gpus_.clear();
     gpu_starting_ = false;  // back on the CPU: nothing to wait for
     gpu_pending_.clear();
   }
@@ -550,6 +551,7 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
 
 void PathTracer::reset() {
   samples_ = 0;
+  stats_.max_submit_ms = 0;
   size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
   accum_.assign(n, Vec3(0.0f));
   albedo_.assign(n, Vec3(0.0f));
@@ -1599,6 +1601,9 @@ void PathTracer::sync_gpus() {
   std::vector<int> want;
   for (int i : settings_.gpus)
     if (i >= 0 && i < (int)devs.size() && std::find(want.begin(), want.end(), i) == want.end()) want.push_back(i);
+  /* Devices set aside because the last scene didn't fit them (task 0051) come back for this one. */
+  for (auto &g : parked_gpus_) gpus_.push_back(std::move(g));
+  parked_gpus_.clear();
   /* Drop devices no longer wanted (or whose ray tracing mode changed). */
   for (size_t k = 0; k < gpus_.size();) {
     GpuSlot &s = *gpus_[k];
@@ -1663,7 +1668,60 @@ void PathTracer::sync_gpus() {
 
 /* The scene in the GPU kernel's layouts: Blendity's own BVH (for GPUs that
  * trace in software), meshes, objects, materials, textures and lights. */
-void PathTracer::build_gpu_scene(gpu::Scene &s) const {
+/* What a GPU scene takes in device memory (its buffers as uploaded). */
+static uint64_t gpu_scene_bytes(const gpu::Scene &s) {
+  return s.nodes.size() * sizeof(gpu::GNode) + s.tris.size() * sizeof(gpu::GTri) + s.instances.size() * sizeof(gpu::GInstance) +
+         s.verts.size() * sizeof(gpu::GVertex) + s.idx.size() * 4 + s.materials.size() * sizeof(gpu::GMaterial) +
+         s.lights.size() * sizeof(gpu::GLight) + s.mesh_lights.size() * sizeof(gpu::GMeshLight) + s.mesh_cdf.size() * 4 +
+         s.tex8.size() * 4 + s.texf.size() * 4 + s.textures.size() * sizeof(gpu::GTexInfo) + s.tlas_order.size() * 4 +
+         s.blas.size() * sizeof(gpu::GBlas) + s.object_blas.size() * 4;
+}
+
+/* The level a texture is sent at, tex_skip levels below `lv`, never under 256 texels a side. */
+static size_t skipped_level(const Texture &t, size_t lv, int tex_skip) {
+  for (int k = 0; k < tex_skip && lv + 1 < t.levels.size() && std::max(t.levels[lv].w, t.levels[lv].h) > 256; k++) lv++;
+  return lv;
+}
+
+static uint64_t level_bytes(const Texture &t, size_t lv) {
+  const Texture::Level &l = t.levels[lv];
+  return (uint64_t)l.w * (uint64_t)l.h * (t.is_float ? 16u : 4u);
+}
+
+bool PathTracer::build_gpu_scene_fit(gpu::Scene &s, uint64_t memory_mb, int *skipped, bool with_frame) const {
+  if (const char *e = std::getenv("BLENDITY_GPU_VRAM_MB"))  // a smaller card's memory, for testing on a bigger one
+    if (std::atoll(e) > 0) memory_mb = memory_mb ? std::min<uint64_t>(memory_mb, (uint64_t)std::atoll(e)) : (uint64_t)std::atoll(e);
+  /* The accumulation and output buffers come out of the same memory: about 64 bytes a pixel (a bake has its own). */
+  const uint64_t frame = with_frame ? (uint64_t)std::max(0, w_) * (uint64_t)std::max(0, h_) * 64 : 0;
+  const uint64_t budget = memory_mb ? memory_mb * (1ull << 20) / 10 * 8 : 0;
+  std::vector<std::pair<const Texture *, size_t>> tex;
+  s = gpu::Scene();
+  build_gpu_scene(s, 0, &tex);
+  if (skipped) *skipped = 0;
+  if (!budget) return true;
+  /* The rest of the scene stays; only the textures shrink: their bytes for each level skipped, worked out, not built. */
+  uint64_t tex0 = 0;
+  for (const auto &t : tex) tex0 += level_bytes(*t.first, t.second);
+  const uint64_t rest = gpu_scene_bytes(s) - std::min(gpu_scene_bytes(s), tex0);
+  uint64_t prev = ~0ull;
+  for (int skip = 0; skip <= 8; skip++) {
+    uint64_t tb = 0;
+    for (const auto &t : tex) tb += level_bytes(*t.first, skipped_level(*t.first, t.second, skip));
+    if (rest + tb + frame <= budget) {
+      if (skip > 0) {
+        s = gpu::Scene();
+        build_gpu_scene(s, skip);
+      }
+      if (skipped) *skipped = skip;
+      return true;
+    }
+    if (tb == prev) break;  // nothing smaller left to send
+    prev = tb;
+  }
+  return false;
+}
+
+void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::pair<const Texture *, size_t>> *textures) const {
   auto put_node = [](const Node &n) {
     gpu::GNode g;
     g.bmin[0] = n.box.min.x; g.bmin[1] = n.box.min.y; g.bmin[2] = n.box.min.z;
@@ -1687,6 +1745,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     const int cap = material && settings_.retro.active() ? settings_.retro.tex.max_size : 0;
     if (cap > 0)
       while (lv + 1 < t->levels.size() && std::max(t->levels[lv].w, t->levels[lv].h) > cap) lv++;
+    if (textures) textures->push_back({t.get(), lv});
+    lv = skipped_level(*t, lv, tex_skip);  // too big for the GPU's memory (task 0051): levels down
     const Texture::Level &l = t->levels[lv];
     gpu::GTexInfo ti{};
     ti.w = l.w;
@@ -1960,7 +2020,29 @@ void PathTracer::upload_gpus() {
   if (gpus_.empty()) return;
   ScopedTimer t;
   gpu::Scene gs;
-  build_gpu_scene(gs);
+  uint64_t vram = 0;  // the smallest card's: one scene is uploaded to every GPU (a card reporting none is skipped)
+  for (const auto &g : gpus_)
+    if (g->r->info().memory_mb) vram = vram ? std::min(vram, g->r->info().memory_mb) : g->r->info().memory_mb;
+  if (const char *e = std::getenv("BLENDITY_GPU_VRAM_MB"))  // (as build_gpu_scene_fit: the message names what was budgeted)
+    if (std::atoll(e) > 0) vram = vram ? std::min<uint64_t>(vram, (uint64_t)std::atoll(e)) : (uint64_t)std::atoll(e);
+  gpu_vram_mb_ = vram;
+  gpu_fit_w_ = w_, gpu_fit_h_ = h_;
+  int skipped = 0;
+  if (!build_gpu_scene_fit(gs, vram, &skipped)) {
+    /* Not even with smaller textures: the CPU renders it rather than the GPU failing to allocate (task 0051). The
+     * devices are set aside, open, for the next scene. */
+    const std::string msg = strprintf("the scene doesn't fit in the GPU's %llu MB: rendering on the CPU", (unsigned long long)vram);
+    gpu_error_ += (gpu_error_.empty() ? "" : "; ") + msg;
+    Log::warn("Path tracer: %s", msg.c_str());
+    for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
+    gpus_.clear();
+    stats_.bvh_build_ms += t.ms();
+    if (w_ > 0 && h_ > 0) reset();
+    return;
+  }
+  gpu_upload_bytes_ = gpu_scene_bytes(gs);
+  if (skipped > 0) Log::info("Path tracer: textures sent to the GPU %d mip level(s) smaller to fit its %llu MB", skipped, (unsigned long long)vram);
+  gpu_tex_skip_ = skipped;
   gpu_params_ = gs.params;
   for (size_t k = 0; k < gpus_.size();) {
     std::string err;
@@ -2001,9 +2083,17 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
     bake_gpu_index_ = device;
     bake_gpu_build_ = 0;
   }
+  if (bake_nofit_build_ == build_count_) {
+    if (error) *error = "the scene doesn't fit in the GPU's memory";
+    return false;  // (known for this scene: the bake gathers on the CPU)
+  }
   if (bake_gpu_build_ != build_count_) {
     gpu::Scene gs;
-    build_gpu_scene(gs);
+    if (!build_gpu_scene_fit(gs, bake_gpu_->info().memory_mb, nullptr, false)) {
+      bake_nofit_build_ = build_count_;  // (not tried again for this scene)
+      if (error) *error = strprintf("the scene doesn't fit in the GPU's %llu MB", (unsigned long long)bake_gpu_->info().memory_mb);
+      return false;  // (the bake gathers on the CPU)
+    }
     bake_params_ = gs.params;
     if (!bake_gpu_->upload(gs, error)) return false;
     bake_gpu_build_ = build_count_;
@@ -2103,6 +2193,15 @@ int PathTracer::render(double budget_ms, int max_samples) {
     if (o.materials)
       for (const MaterialPtr &mp : *o.materials)
         if (mp) mp->textures();
+  if (!gpus_.empty() && (w_ != gpu_fit_w_ || h_ != gpu_fit_h_) && gpu_vram_mb_ > 0) {
+    /* A frame size the last upload didn't allow for (build() comes before set_camera()): check again, smaller
+     * textures or the CPU if the buffers now don't fit (task 0051). */
+    uint64_t vram = gpu_vram_mb_;
+    if (const char *e = std::getenv("BLENDITY_GPU_VRAM_MB"))
+      if (std::atoll(e) > 0) vram = std::min<uint64_t>(vram, (uint64_t)std::atoll(e));
+    gpu_fit_w_ = w_, gpu_fit_h_ = h_;
+    if (gpu_upload_bytes_ + (uint64_t)std::max(0, w_) * (uint64_t)std::max(0, h_) * 64 > vram * (1ull << 20) / 10 * 8) upload_gpus();
+  }
   if (gpus_.empty()) {
     stats_.cpu_samples = samples_;
     return render_cpu(budget_ms, max_samples, nullptr);
@@ -2136,7 +2235,9 @@ int PathTracer::render(double budget_ms, int max_samples) {
           double rate = 1.0 / g.ms_per_sample, total = settings_.use_cpu && cpu_ms_per_sample_ > 0 ? 1.0 / cpu_ms_per_sample_ : 0.0;
           for (auto &o : gpus_) total += o->ms_per_sample > 0 ? 1.0 / o->ms_per_sample : rate;
           double share = (max_samples - next.load()) * rate / std::max(total, 1e-9) * 0.5;
-          n = (int)std::max(1.0, std::min({64.0, share, left > 0 ? left / g.ms_per_sample : 1.0}));
+          /* And no submission over 100 ms: a slow card (a GTX 1050 Ti tracing in software) given 64 samples of a big
+           * frame at once would pass Windows' 2 s driver timeout, which resets the GPU (task 0051). */
+          n = (int)std::max(1.0, std::min({64.0, share, left > 0 ? left / g.ms_per_sample : 1.0, 100.0 / g.ms_per_sample}));
         }
         int first = next.fetch_add(n);
         if (first >= max_samples) break;
@@ -2149,7 +2250,12 @@ int PathTracer::render(double budget_ms, int max_samples) {
           failed.push_back(k);
           break;
         }
-        double ms = bt.ms() / n;
+        const double submit_ms = bt.ms();
+        {
+          std::lock_guard<std::mutex> lock(err_mutex);
+          stats_.max_submit_ms = std::max(stats_.max_submit_ms, submit_ms);
+        }
+        double ms = submit_ms / n;
         g.ms_per_sample = g.ms_per_sample > 0 ? g.ms_per_sample * 0.5 + ms * 0.5 : ms;
         g.samples += n;
         any = true;

@@ -1224,7 +1224,7 @@ struct RenderSettings {
   int denoiser = 0;           // 0 OpenImageDenoise (when built with it), 1 A-Trous
   bool use_embree = true;     // Embree ray tracing (when built with it)
   bool path_guiding = false;  // OpenPGL path guiding (when built with it)
-  int device = 0;             // 0 CPU, 1 GPU Compute (Cycles: Render Properties > Device)
+  int device = 0;             // 0 CPU, 1 GPU Compute, 2 GPU + CPU by speed (Cycles: Render Properties > Device)
   bool gpu_with_cpu = false;  // GPU Compute: the CPU renders samples too (combined)
   bool hardware_rt = true;    // GPU Compute: ray tracing hardware (RT cores) when a GPU has it
   int raster_aa = 2;          // supersampling factor for the rasterized engine

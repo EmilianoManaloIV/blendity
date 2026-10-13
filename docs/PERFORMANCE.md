@@ -50,6 +50,16 @@ The two frames still over 16.7 ms are a material edit and Play. Both render the 
 Preview, and are about 60 % deferred shading. The next step would be the shading itself (a cheaper shadow lookup
 than 3 x 3 PCF on Low, SIMD across a tile).
 
+### The GPU (task 0051)
+
+| Device (stress `gpu`, 1280 x 720) | Samples/s | Longest submission (ms) |
+|---|---|---|
+| CPU, 8 threads | 6.5 | - |
+| RTX 3060 Ti, compute kernel (a 1050 Ti's path, about 6 times faster than a 1050 Ti) | 60.9 | 98 |
+| RTX 4070 SUPER, compute kernel | 115.5 | 106 |
+
+Submissions used to take up to 64 samples at once: seconds on a slow card, past Windows' 2 s driver timeout.
+
 ## Pass 7: idle frames (task 0023)
 
 Pass 6 left an idle frame at 2.1 ms and called it "almost all hash". A per-phase profile of 100 idle

@@ -289,12 +289,13 @@ void RenderSettings::reflect(Reflector &r) {
   r.help("Film > Transparent: the background is left out of the render (transparent in a PNG or EXR) while the world\n"
          "still lights the scene. Blender: Render Properties > Film > Transparent.");
   if (r.all_fields() || engine == 1) {
-    static const char *devices[] = {"CPU", "GPU Compute"};
-    r.enumeration("Device", device, devices, 2);
+    static const char *devices[] = {"CPU", "GPU Compute", "GPU + CPU (Auto)"};
+    r.enumeration("Device", device, devices, 3);
     r.help("GPU Compute renders on the GPUs ticked under Render Devices (Vulkan: NVIDIA, AMD, Intel).\n"
-           "Blender: Render Properties > Device, with the GPUs chosen in Preferences > System.");
-    if (r.all_fields() || device == 1) {
-      r.field("Also Use the CPU", gpu_with_cpu);
+           "GPU + CPU (Auto): both, each taking samples as fast as it renders them, so a slow card (a GTX 1050 Ti traces\n"
+           "in software) costs nothing and a fast one does most of the work. Blender: Render Properties > Device.");
+    if (r.all_fields() || device == 1 || device == 2) {
+      if (r.all_fields() || device == 1) r.field("Also Use the CPU", gpu_with_cpu);  // (Auto always does)
       r.help("Combined rendering: the CPU renders samples alongside the GPUs and the results are averaged\n"
              "(Blender: tick the CPU in the Render Devices list).");
       r.field("Hardware Ray Tracing", hardware_rt);
