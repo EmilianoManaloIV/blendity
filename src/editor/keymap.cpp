@@ -160,6 +160,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"mesh.tris_to_quads", "Tris to Quads", "Mesh", CTX_SCENE_EDIT},
       {"mesh.fill", "Make Face", "Mesh", CTX_EDIT},  // anywhere in Edit Mode (not only over the Scene view)
       {"mesh.merge_center", "Merge at Center", "Mesh", CTX_SCENE_EDIT},
+      {"points.toggle_closed", "Toggle Closed (Curve)", "Curve", CTX_SCENE},  // task 0054 (Blender: Toggle Cyclic)
       {"mesh.merge_distance", "Merge by Distance", "Mesh", CTX_SCENE_EDIT},
       {"mesh.connect", "Connect", "Mesh", CTX_SCENE_EDIT},
       {"mesh.recalc_normals", "Recalculate Normals", "Mesh", CTX_SCENE_EDIT},
@@ -207,6 +208,7 @@ static void common_bindings(Keymap &k) {
     for (const char *c : chords) v.push_back(parse_chord(c));
   };
   b("file.save", {"Ctrl+S"});
+  b("points.toggle_closed", {"Alt+C"});
   b("file.save_as", {"Ctrl+Shift+S"});
   b("file.new", {"Ctrl+N"});
   b("file.open", {"Ctrl+O"});
@@ -441,7 +443,8 @@ static bool contexts_overlap(int a, int b) {
 /* Pairs meant to share a key (the same command in two modes) are not conflicts. */
 static bool intended_pair(const std::string &a, const std::string &b) {
   auto is = [&](const char *x, const char *y) { return (a == x && b == y) || (a == y && b == x); };
-  return is("edit.duplicate", "mesh.duplicate") || is("assets.refresh", "mesh.loop_cut") || is("edit.select_all", "edit.select_none");
+  return is("edit.duplicate", "mesh.duplicate") || is("assets.refresh", "mesh.loop_cut") || is("edit.select_all", "edit.select_none") ||
+         is("points.toggle_closed", "mesh.knife");  // (a curve's points outside Edit Mode; the knife in it)
 }
 
 std::vector<std::string> keymap_conflicts(const Keymap &k, const std::string &id, const KeyChord &c) {
@@ -615,6 +618,7 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "mode.face") set_edit_element(EditElement::Face);
   else if (id == "mesh.push_pull") edit_tool("push_pull");
   else if (id == "mesh.push_through") edit_tool("push_through");
+  else if (id == "points.toggle_closed") return point_shortcut(id);
   else if (id == "mesh.extrude") extrude_and_move();
   else if (id == "mesh.inset") modal_begin("inset");
   else if (id == "mesh.bevel") modal_begin("bevel");
@@ -684,6 +688,19 @@ void Editor::handle_shortcuts() {
     if (!in.key_pressed[key] || key == platform::KEY_SHIFT || key == platform::KEY_CTRL || key == platform::KEY_ALT) continue;
     const KeyChord pressed{key, mods};
     bool done = false;
+    /* Edit Mode's keys on a curve's or lattice's points, outside Edit Mode (task 0054): Extrude, Loop Cut, Merge at
+     * Center and Delete act on the points when the active curve or lattice shows them. */
+    if (scene_ok && !edit_mode_)
+      for (const char *id : {"mesh.extrude", "mesh.loop_cut", "mesh.merge_center", "edit.delete"}) {
+        if (std::string(id) == "edit.delete" && focused_ == WindowKind::Hierarchy && !scene_hovered_) continue;  // there Delete removes objects
+        auto it = keymap_.find(id);
+        if (it == keymap_.end() || std::find(it->second.begin(), it->second.end(), pressed) == it->second.end()) continue;
+        if (point_shortcut(id)) {
+          done = true;
+          break;
+        }
+      }
+    if (done) continue;
     for (int ctx : {CTX_SCENE_EDIT, CTX_EDIT, CTX_SCENE, CTX_GLOBAL}) {
       if (!active(ctx)) continue;
       for (const ShortcutAction &a : shortcut_actions()) {

@@ -664,6 +664,7 @@ struct PrefixReflector : Reflector {
     in.enumeration(n(name).c_str(), v, options, count);
   }
   void text(const char *name, std::string &v) override { in.text(n(name).c_str(), v); }
+  void object(const char *name, std::string &v) override { in.object(n(name).c_str(), v); }
   void mesh(const char *name, MeshPtr &m) override { in.mesh(n(name).c_str(), m); }
   void help(const char *h) override { in.help(h); }
   void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
@@ -1276,7 +1277,7 @@ void ArrayModifier::reflect(Reflector &r) {
            "step, so the copies end within the length (Blender adds one more, ending past it).");
     if (all || fit_type == 1) r.field("Fit Length", fit_length, 0.05f, 0.0f, 1e5f);
     if (all || fit_type == 2) {
-      r.text("Curve", curve);
+      r.object("Curve", curve);
       r.help("Name of the Curve object whose length the copies fill.");
     }
   }
@@ -1351,14 +1352,14 @@ void Lattice::reflect(Reflector &r) {
 }
 
 void LatticeModifier::reflect(Reflector &r) {
-  r.text("Object", object);
+  r.object("Object", object);
   r.help("Name of the Lattice object whose points move the mesh (Blender: Lattice > Object).");
   r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
   reflect_group_limit(r, vertex_group, invert_group);
 }
 
 void CurveModifier::reflect(Reflector &r) {
-  r.text("Object", object);
+  r.object("Object", object);
   r.help("Name of the Curve object to bend along (Blender: Curve > Curve Object).");
   static const char *kAxes[] = {"X", "Y", "Z", "-X", "-Y", "-Z"};
   r.enumeration("Deform Axis", deform_axis, kAxes, 6);
@@ -1376,7 +1377,7 @@ void SolidifyModifier::reflect(Reflector &r) {
 void SolidifyModifier::modify(Mesh &m) const { meshops::solidify(m, thickness, offset, even_thickness, fill_rim); }
 
 void BooleanModifier::reflect(Reflector &r) {
-  r.text("Object", object);
+  r.object("Object", object);
   r.help("Name of the GameObject to cut with (Blender: Boolean > Object). Both meshes must be closed.");
   static const char *ops[] = {"Difference", "Union", "Intersect"};
   r.enumeration("Operation", operation, ops, 3);
@@ -1652,9 +1653,8 @@ void GameObject::set_world_rotation(Quat q) {
   set_local_rotation(parent ? parent->world_rotation().conjugate() * q : q);
 }
 
-void GameObject::set_world_matrix(const Mat4 &world) {
-  Mat4 l = parent ? parent->world_matrix().inverse() * world : world;
-  Transform t = local_;
+Transform transform_from_matrix(const Mat4 &l) {
+  Transform t;
   t.position = l.translation();
   t.scale = {length(l.column(0)), length(l.column(1)), length(l.column(2))};
   /* Preserve mirroring (negative determinant) on X. */
@@ -1667,7 +1667,11 @@ void GameObject::set_world_matrix(const Mat4 &world) {
   }
   t.rotation = quat_from_matrix(r);
   t.euler_hint = t.rotation.to_euler();
-  set_local(t);
+  return t;
+}
+
+void GameObject::set_world_matrix(const Mat4 &world) {
+  set_local(transform_from_matrix(parent ? parent->world_matrix().inverse() * world : world));
 }
 
 bool GameObject::active_in_hierarchy() const {

@@ -4,7 +4,7 @@
 - **Requirements:** R-02, R-03
 - **Decisions:** none needed (a new window kind, the existing pattern)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/49
 
 ## Goal
 The user asked (2026-10-12): "rigging and weight painting tools should be in their own tab. The mesh filter area is

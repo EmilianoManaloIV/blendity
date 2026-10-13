@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -346,7 +347,22 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
   std::unordered_set<const ufbx_node *> skin_bones;  // nodes a skin's clusters name (task 0047)
   std::vector<const ufbx_node *> skinned;
   std::unordered_map<const ufbx_node *, std::vector<const ufbx_node *>> skin_joints;  // each skinned mesh's own bones
-  bool warned_pose = false;
+  std::unordered_map<const ufbx_node *, Mat4> binds;  // each bone's bind pose, from the first cluster naming it (task 0056)
+  std::unordered_map<const ufbx_node *, const ufbx_matrix *> bind_src;  // (the cluster matrix it came from)
+  bool warned_binds = false, warned_moved = false;
+  auto to_mat = [](const ufbx_matrix &u) {  // ufbx's 3x4 into a Mat4, in Blendity's axes
+    Mat4 r;
+    for (int c = 0; c < 4; c++)
+      for (int k = 0; k < 3; k++) r.at(k, c) = (float)u.cols[c].v[k];
+    return mirror_x(r);
+  };
+  auto far_apart = [](const ufbx_matrix &a, const ufbx_matrix &b) {  // beyond float noise, relative to the translations
+    double d = 0.0, size = 1.0;
+    for (int c = 0; c < 4; c++)
+      for (int k = 0; k < 3; k++) d = std::max(d, std::fabs(a.cols[c].v[k] - b.cols[c].v[k]));
+    for (int k = 0; k < 3; k++) size += std::fabs(a.cols[3].v[k]);
+    return d > 1e-4 * size;
+  };
   size_t verts = 0, faces = 0;
   for (size_t i = 0; i < scene->nodes.count; i++) {
     const ufbx_node *n = scene->nodes.data[i];
@@ -411,15 +427,30 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
           }
           skin_bones.insert(cl->bone_node);
           skin_joints[n].push_back(cl->bone_node);
-          /* The file's pose should be its bind pose (the rest we take): say so when a bone was bound elsewhere. */
-          const ufbx_matrix &bw = cl->bind_to_world, &nw = cl->bone_node->node_to_world;
-          float diff = 0.0f;
-          for (int r = 0; r < 4; r++)
-            for (int k = 0; k < 3; k++) diff = std::max(diff, (float)std::fabs(bw.cols[r].v[k] - nw.cols[r].v[k]));
-          if (diff > 1e-3f * (1.0f + (float)std::fabs(nw.cols[3].x) + (float)std::fabs(nw.cols[3].y) + (float)std::fabs(nw.cols[3].z)) && !warned_pose) {
-            Log::warn("FBX '%s': saved in a pose other than its bind pose (bone '%s'): the skin rests in the saved pose", fs::filename(path).c_str(),
-                      ustr(cl->bone_node->name).c_str());
-            warned_pose = true;
+          /* Where the bone was when the skin was bound (FBX's "Transform Link"): its rest, as in Blender, Unity and Maya.
+           * The file may be saved in another pose, which stays as the bone's pose. */
+          const ufbx_matrix &bw = cl->bind_to_world;
+          const ufbx_vec3 &x = bw.cols[0], &y = bw.cols[1], &z = bw.cols[2];
+          const double det = x.x * (y.y * z.z - y.z * z.y) - y.x * (x.y * z.z - x.z * z.y) + z.x * (x.y * y.z - x.z * y.y);
+          if (!(std::fabs(det) > 1e-12)) continue;  // no bind matrix in the file (ufbx leaves zeros): the saved transform rests
+          if (auto it = binds.find(cl->bone_node); it == binds.end()) {
+            binds[cl->bone_node] = to_mat(bw);
+            bind_src[cl->bone_node] = &bw;
+          }
+          else if (!warned_binds && far_apart(*bind_src[cl->bone_node], bw)) {
+            /* One rest per bone: a second mesh bound in another pose deforms from the first one's. */
+            Log::warn("FBX '%s': bone '%s' was bound in different poses by different meshes; '%s' follows the first", fs::filename(path).c_str(),
+                      ustr(cl->bone_node->name).c_str(), node.name.c_str());
+            warned_binds = true;
+          }
+          /* The skin deforms from where the mesh is now; a mesh moved after binding (Maya, Mixamo) ends up off by that. */
+          if (!warned_moved) {
+            const ufbx_matrix bound = ufbx_matrix_mul(&bw, &cl->geometry_to_bone);
+            if (far_apart(bound, n->geometry_to_world)) {
+              Log::warn("FBX '%s': mesh '%s' moved after it was bound to bone '%s': the skin follows where it is now", fs::filename(path).c_str(),
+                        node.name.c_str(), ustr(cl->bone_node->name).c_str());
+              warned_moved = true;
+            }
           }
         }
         if (sk->clusters.count) skinned.push_back(n);
@@ -448,6 +479,12 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
   }
   for (const ufbx_node *b : skin_bones)
     if (auto it = index.find(b); it != index.end()) out.nodes[(size_t)it->second].is_bone = true;
+  for (const auto &[b, bw] : binds)
+    if (auto it = index.find(b); it != index.end()) {
+      bool finite = true;
+      for (float f : bw.m) finite = finite && finite_bits(f);
+      if (finite) out.nodes[(size_t)it->second].has_bind = true, out.nodes[(size_t)it->second].bind_world = bw;
+    }
   for (size_t i = 0; i < scene->nodes.count; i++)  // bones with no weights (end bones, a hand's root) are bones too
     if (const ufbx_node *n = scene->nodes.data[i]; n->bone)
       if (auto it = index.find(n); it != index.end()) out.nodes[(size_t)it->second].is_bone = true;
@@ -490,14 +527,54 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
   }
   for (size_t i = 0; i < r.nodes.size(); i++)
     if (r.nodes[i].parent >= 0 && made[r.nodes[i].parent]) scene.set_parent(made[i], made[r.nodes[i].parent], -1, false);
-  /* Skeletons (task 0047): each joint a Bone resting where the file puts it, long enough to reach its first child joint. */
+  /* Skeletons (task 0047): each joint a Bone. Its rest is its bind pose relative to its parent's place at rest (task
+   * 0056: Blender, Unity and Maya's way), so a file saved mid-pose keeps that pose on the bones and Reset Pose gives the
+   * bound shape; a joint with no bind rests where the file puts it. */
+  std::vector<Mat4> rest_world(r.nodes.size());
+  std::vector<char> done(r.nodes.size(), 0);
+  std::function<const Mat4 &(int)> at_rest = [&](int i) -> const Mat4 & {  // a node's place at rest, in the import's space
+    if (!done[(size_t)i]) {
+      const ImportedNode &n = r.nodes[(size_t)i];
+      done[(size_t)i] = 2;  // (a parent loop ends here, at the identity)
+      if (n.is_bone && n.has_bind)
+        rest_world[(size_t)i] = n.bind_world;
+      else {
+        const Mat4 local = Mat4::trs(n.position, n.rotation, n.scale);
+        rest_world[(size_t)i] = n.parent >= 0 && done[(size_t)n.parent] != 2 ? at_rest(n.parent) * local : local;
+      }
+      done[(size_t)i] = 1;
+    }
+    return rest_world[(size_t)i];
+  };
   for (size_t i = 0; i < r.nodes.size(); i++) {
     if (!r.nodes[i].is_bone || !made[i]) continue;
     Bone *b = made[i]->add<Bone>();
-    b->set_rest(made[i]->local());
+    const ImportedNode &n = r.nodes[i];
+    if (n.has_bind) {
+      const Mat4 parent_rest = n.parent >= 0 ? at_rest(n.parent) : Mat4::identity();
+      const float det = dot(cross(parent_rest.column(0), parent_rest.column(1)), parent_rest.column(2));
+      Transform t = transform_from_matrix(parent_rest.inverse() * n.bind_world);
+      bool finite = std::fabs(det) > 1e-12f;  // (a parent scaled to 0 has no inverse: keep the saved transform)
+      for (float f : {t.position.x, t.position.y, t.position.z, t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w, t.scale.x, t.scale.y, t.scale.z})
+        finite = finite && finite_bits(f);
+      /* Saved at its bind pose (most files): keep the saved transform exactly, not a float-rounded copy of it. */
+      const Transform &l = made[i]->local();
+      const float q = std::fabs(t.rotation.x * l.rotation.x + t.rotation.y * l.rotation.y + t.rotation.z * l.rotation.z + t.rotation.w * l.rotation.w);
+      const bool same = finite && length(t.position - l.position) <= 1e-5f * (1.0f + length(l.position)) && q >= 1.0f - 1e-7f &&
+                        length(t.scale - l.scale) <= 1e-5f * length(l.scale);
+      b->set_rest(finite && !same ? t : l);
+    }
+    else
+      b->set_rest(made[i]->local());
+  }
+  /* Long enough to reach the first child joint, at rest. */
+  for (size_t i = 0; i < r.nodes.size(); i++) {
+    Bone *b = r.nodes[i].is_bone && made[i] ? made[i]->get<Bone>() : nullptr;
+    if (!b) continue;
     float len = 0.0f;
     for (size_t c = 0; c < r.nodes.size(); c++)
-      if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone) len = std::max(len, length(r.nodes[c].position));
+      if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone && made[c])
+        if (const Bone *cb = made[c]->get<Bone>()) len = std::max(len, length(cb->rest_position));
     b->length = len > 1e-4f ? len : 0.1f;
   }
   for (const ImportedSkin &sk : r.skins) {

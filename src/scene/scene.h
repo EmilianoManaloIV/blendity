@@ -58,6 +58,9 @@ struct Reflector {
   }
   virtual void enumeration(const char *name, int &v, const char *const *options, int count) = 0;
   virtual void text(const char *name, std::string &v) = 0;
+  /* A GameObject by name (Unity's object field): stored and typed as text; the Inspector also takes an object dragged
+   * onto it from the Hierarchy. */
+  virtual void object(const char *name, std::string &v) { text(name, v); }
   virtual void mesh(const char *name, MeshPtr &m) = 0;
   /* Help text for the previous field (shown as an Inspector tooltip). */
   virtual void help(const char *) {}
@@ -1045,6 +1048,9 @@ struct Transform {
   Vec3 scale{1, 1, 1};
   Vec3 euler_hint;  // keeps Inspector euler angles stable (Unity does the same)
 };
+
+/* A matrix as position, rotation and scale (a mirrored matrix keeps a negative X scale); shear is dropped. */
+Transform transform_from_matrix(const Mat4 &m);
 
 class GameObject {
  public:

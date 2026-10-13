@@ -185,6 +185,12 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Posing a leg meant turning thigh and shin by hand, and there was no ready-made character skeleton. | IK constraints move a limb by its foot or hand target (with a pole for the knee or elbow); GameObject > Rig makes a humanoid or quadruped with IK, and Auto IK rigs an imported skeleton's limbs by name. |
 | On a 4-core laptop the editor stuttered: dragging an object took about 47 ms a frame. | Quality tiers (Low on small machines): views drawn at 67 % and scaled up, cached shadows, a cheaper sky; dragging is about 15 ms a frame at 8 threads. Preferences > Performance also has CPU Threads. |
 | The Inspector's MeshFilter section was crowded: modeling buttons, vertex groups and the Weight Paint brush in one list. | A Rigging window (beside the Inspector) holds skeletons, skins, vertex groups, Weight Paint and IK; MeshFilter keeps modeling and one row that opens it. |
+| Deleting many materials or textures meant one at a time, a question each. | Ctrl / Shift click and Ctrl+A select several in the Materials, Textures and Project windows; Delete asks once for all of them. |
+| Curves only grew at the end, from the console, and lattices only by typing a resolution. | Extrude, Loop Cut (Ctrl+R), Merge at Center, Delete and Alt+C work on curve and lattice points with Edit Mode's keys. |
+| Every tool showed all the time: a first-time user faced all of them at once. | Layouts for each stage of the work (Layout dropdown) show that stage's tools; Show All Tools and the keys reach the rest. |
+| A character exported mid-pose imported with that pose as its rest: the skin was wrong and Reset Pose did nothing. | Bones rest at their bind pose (as in Blender, Unity, Maya); the saved pose stays on them and Reset Pose gives the bound shape. |
+| Fields that name another object (Boolean, Lattice, IK Target...) had to be typed. | Drag the object from the Hierarchy onto the field; the Inspector stays on the object being edited. |
+| Clicking the Layout dropdown crashed the editor. | Fixed: a dropdown's list keeps its own copy of its names. |
 
 ## Still worth doing
 

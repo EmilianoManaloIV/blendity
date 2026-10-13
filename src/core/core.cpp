@@ -127,6 +127,18 @@ std::vector<std::string> split_ws(const std::string &s) {
   return out;
 }
 
+std::vector<std::string> split_list(const std::string &s, char sep) {
+  std::vector<std::string> out;
+  std::istringstream is(s);
+  std::string part;
+  while (std::getline(is, part, sep)) {
+    const size_t a = part.find_first_not_of(' ');
+    if (a == std::string::npos) continue;
+    out.push_back(part.substr(a, part.find_last_not_of(' ') - a + 1));
+  }
+  return out;
+}
+
 bool starts_with(const std::string &s, const char *prefix) {
   size_t n = std::strlen(prefix);
   return s.size() >= n && s.compare(0, n, prefix) == 0;

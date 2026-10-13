@@ -2,6 +2,237 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 80): flatter code after the review on PR #50
+
+**Asked:** "Can you read feedback in my GitHub and then make appropriate changes?" The one review (PR #50, task 0053):
+"Be careful of nested if statements. Use methods as noted by @CodeAesthetic 'Why You Shouldn't Nest Your Code'."
+
+**Changed** (extraction and guard clauses):
+- **`MultiSelect`**: `click` is three lines over `add`, `toggle` and `range_to`. New `sync` and `select_all` replace
+  blocks each of the three windows repeated.
+- **One delete question** (`ask_delete` with a `DeleteQuestion`) replaces six copies: one and several, in the
+  Materials, Textures and Project windows. One context-menu item (`delete_menu_item`) and two key checks
+  (`select_all_key`, `delete_key`) replace the nested `if`s around them.
+- **Helpers out of nested loops:** `slots_using`, `select_objects_using`, `materials_using_texture`,
+  `edit_material_asset`, `project_keys`, `project_row_pressed`, `request_*_delete`.
+- **`matdelete` / `texdelete`** moved out of the console's command chain into `delete_assets_command`, with
+  `material_by_name`, `texture_by_name` and a shared `split_list` replacing nested lookup loops.
+- Small differences:
+  - Clicking away from the Materials window's "Delete the material ...?" now cancels it, as the other windows'
+    questions did.
+  - Ctrl+A and Delete over the Materials and Textures windows wait while a text field is being edited.
+  - `matdelete` with two assets of one name deletes the first found (it took the last).
+- The rule now applies to new code too (task 0057's solver is written as small functions).
+
+**Checked**
+- New tests (round 80):
+  - `matdelete` with names holding spaces and an unknown one; `split_list` trims and drops empty parts.
+  - The multi-selection: Ctrl+Shift with the last click gone, `sync` with hidden and edited items, Ctrl+A.
+- Reviewed by the code reviewer twice (no behaviour bugs; its remaining nesting spots were flattened too).
+- Unit checks: Windows 9,523, 0 failed (599 tests); the whole suite in render-cache verify mode: 9,524,
+  0 failed, 0 stale pictures. Linux with libraries: 9,431, 0 failed. Sanitizer build: 9,349, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+## 2026-10-13 (round 79): drag objects onto fields; the Layout dropdown crash; a flaky CI check
+
+**Asked:** "Some checks fail, check those out." "Clicking the drop down for the layouts crashes the program." "Also
+add the ability to drag and drop objects from the hierarchy into the parameter field rather than just typing the name
+(applies to all tools)."
+
+**Fixed**
+- **Clicking the Layout dropdown crashed the editor.** A dropdown's list draws at the end of the frame, after the
+  Layout dropdown's per-frame list of names was gone. Every dropdown now keeps its own copy of its names while open.
+- **CI (Windows) failed on PRs #49 and #50** at "min spec: a thread ceiling holds ...": on a 4-core runner every
+  thread had to join one short loop. The check now takes the best of a few tries; the other Windows run of each PR
+  passed, and the failed jobs were re-run.
+
+**Added**
+- **Object fields** (Unity's `ObjectField`): every field that names another object (Boolean, Lattice, Curve and Mesh
+  Deform's Object, Array's Fit Curve, IK Target and Pole, a skin's Armature) takes an object dragged from the
+  Hierarchy. The field lights up under it, the drop is one undo step, and the Console warns when two objects share
+  the name.
+- **Pressing a Hierarchy row selects it when the button comes up**, so dragging a row onto a field keeps the
+  Inspector on the object you're editing (Unity selects on press, so its users lock the Inspector first). A click,
+  a wobbly click, a reparent or a drop in the Scene view still selects it.
+- Learn: "Object fields: drag, don't type" in the GameObjects lesson.
+
+**Checked**
+- New tests (round 79):
+  - Opening the Layout dropdown and picking UV Unwrapping by mouse, from a named layout and from a custom one.
+  - Dragging the Cylinder's row onto a Boolean's Object field fills it, keeps the Cube in the Inspector, and undoes
+    in one step; a click still selects.
+  - A click that slides 8 px still selects; a row dropped in the Scene view ends up selected; a press right after a
+    drop finds no drag still live.
+- Unit checks: Windows 9,511, 0 failed (597 tests); the whole suite in render-cache verify mode: 9,512,
+  0 failed, 0 stale pictures. Linux with libraries: 9,419, 0 failed. Sanitizer build: 9,337, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- A field scrolled out of view or under a popup took the drop.
+- The drag state could outlive the button and drop again on the next click.
+- Also fixed:
+  - A wobbly click no longer selected, and a row dropped in the Scene view stayed unselected.
+  - The lesson said Unity selects on release (it selects on press).
+  - Two objects with one name went unreported.
+  - A field being typed in wrote its old text back over a drop.
+  - Nested reflectors didn't pass object fields on.
+
+## 2026-10-13 (round 78): bind poses on rigged imports (task 0056, ADR 0025 amended)
+
+**Asked:** "Yes, please follow Blender, Unity, and Maya methodology" (about rigged files saved in a pose).
+
+**Fixed**
+- **A rigged glTF or FBX saved mid-pose** imported with that pose as its rest, so the skin was wrong and Reset Pose
+  did nothing. Each bone's rest is now its **bind pose**, as Blender, Unity and Maya read it: glTF's inverse bind
+  matrices, FBX's cluster bind matrix. The pose in the file stays on the bones, and Reset Pose gives the shape the
+  mesh was bound in.
+- Files saved at rest import exactly as before. A bind that can't be used (missing, zero, non-finite, under a parent
+  scaled to 0) falls back to the saved transform.
+- The Console's "saved in a pose other than its bind pose" warning is gone. It now warns when two meshes bound a bone
+  in different poses, or an FBX mesh moved after binding.
+- Learn: the Bones and skins lesson says how posed files import.
+- Tests: round 75's materials test left its MA..MD materials in the scratch project, so they piled up run after run
+  until MC scrolled out of the window and the test failed (and crashed when run alone). It now clears them first.
+
+**Checked**
+- New tests (round 78), with fixtures exported from Blender 5.2 with the forearm bent 60 degrees:
+  - The posed glTF and FBX import bent 60 degrees and match Blender's posed mesh (FBX within 9e-7).
+  - `armature reset` gives the file's mesh and puts the forearm back above the upper arm.
+  - Rigs saved at rest keep each bone's saved transform exactly.
+  - Unusable binds leave the bone at its saved transform.
+- Unit checks: Windows 9,493, 0 failed (594 tests); the whole suite in render-cache verify mode: 9,494,
+  0 failed, 0 stale pictures. Linux with libraries: 9,401, 0 failed. Sanitizer build: 9,319, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: one major and three minor findings, fixed:
+- An FBX cluster without a bind matrix (ufbx leaves zeros) was taken as a bind, which froze its vertices.
+- A parent scaled to 0 made a bone's rest its absolute bind.
+- Two meshes bound in different poses, and a mesh moved after binding, went unreported.
+- A rig saved at rest got float-rounded rests instead of the saved ones.
+
+## 2026-10-13 (round 77): layouts for each stage of the work (task 0055, ADR 0027)
+
+**Asked:** "Add different layouts that focus on different sections of the 3D modeling process such as:
+Reference/Planning, Blocking Out, Modeling and Topology, UV Unwrapping, Texturing and materials, and then lighting and
+Rendering; of course the generic editor too ... I want to avoid that feeling of so many tools ... separate layouts for
+rigging, skinning and weight painting, animation".
+
+**Added**
+- **Stage layouts** in the Layout dropdown (top right, Unity's place) and Window > Layouts: Reference & Planning,
+  Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Rigging, Skinning &
+  Weight Painting, Animation.
+- **Each layout arranges the windows** for its stage, for example the UV Editor beside the Scene view for UVs, or the
+  Materials and Textures windows for texturing.
+- **Each layout shows only its stage's tools** in the Modeling Tools window, the GameObject menu and Add Component.
+  The keys and console reach the rest; Show All Tools shows them.
+- **Save Layout... / Delete Layout...** for your own layouts, kept in preferences.
+- **GameObject > Reference Image...**: an unlit plane with the image, facing front, side or top. It casts no shadow and
+  stays out of renders; an image from outside the project is copied in.
+- Console: `layout <name>|save <name>|delete <name>`, `alltools on|off`, `refimage <path> [front|side|top]`.
+- Learn: "Layouts for each stage" in The Editor Layout lesson.
+
+**Checked**
+- New tests (round 77):
+  - The stage layouts open their windows and show their groups.
+  - Blocking Out's Tools window offers Show All Tools, and a click brings the Edit Mode section back.
+  - The console reaches a hidden Light.
+  - Save Layout keeps the windows and focus; built-in names are refused; Delete removes the layout.
+  - A lesson's layout button arranges the windows.
+  - Preferences bring back the layout and your own after a restart.
+  - A Reference Image is unlit, 2:1 for a 200 x 100 picture, faces up for "top" and +X for "side", out of renders.
+- Unit checks: Windows 9,470, 0 failed (591 tests); the whole suite in render-cache verify mode: 9,471,
+  0 failed, 0 stale pictures. Linux with libraries: 9,378, 0 failed. Sanitizer build: 9,296, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- A lesson's layout button (and `--layout`) changed the tools but not the windows; one table now serves both.
+- Tooltips of hidden GameObject menu items landed on others.
+- Also fixed:
+  - The dropdown couldn't get back to a layout from a custom arrangement.
+  - An unknown `layout` name went by silently.
+  - `refimage` split paths at spaces.
+  - Images outside the project were named by absolute path.
+  - Duplicate saved layouts weren't merged.
+  - The Tools window couldn't turn Show All Tools off.
+
+## 2026-10-13 (round 76): curve and lattice points with the vertex and edge keys (task 0054)
+
+**Asked:** "Add the ability to add more points and loop cuts for lattice and curves using similar key binds for
+vertices and edges."
+
+**Added**
+- **Curves**, with a curve's points selected and outside Edit Mode:
+  - **Extrude** (Ctrl+E; Blender's E) grows the curve from a selected end.
+  - **Loop Cut** (Ctrl+R) puts a point on the segment under the mouse, where the mouse is.
+  - **Merge at Center** (Alt+M; Blender's M) joins the selected points.
+  - **Delete** removes the selected points, keeping two.
+  - **Alt+C** opens or closes the curve.
+- **Lattices**: Loop Cut over an edge adds a row across it, keeping the shape. Delete with a whole row selected
+  removes one.
+- Each is one undo step.
+- Console: `points extrude|cut|merge|close|lattice ...`.
+- Learn: "More points, by the vertex and edge keys" in the Modifiers lesson.
+
+**Checked**
+- New tests (round 76):
+  - By keys, Extrude puts the new point beyond the last in the curve's direction and selects it; undo is one step.
+  - In Blender's keymap, E grows the first point backwards.
+  - Ctrl+R puts the point on the old path (0.004 off).
+  - On a Poly curve, Ctrl+R puts it where the mouse was, away from the corners.
+  - Merge leaves one point at the middle.
+  - Delete keeps two points; Alt+C toggles Closed.
+  - A lattice's U row added by Ctrl+R leaves the deformation unchanged (0 off), and Delete of a full row takes it
+    away again; undo brings it back.
+  - A merge of bad indices from the console is refused.
+- Unit checks: Windows 9,444, 0 failed (587 tests); the whole suite in render-cache verify mode: 9,445,
+  0 failed, 0 stale pictures. Linux with libraries: 9,352, 0 failed. Sanitizer build: 9,270, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- Ctrl+R put the new point on top of the segment's first point (always on a Poly curve).
+- A console merge with an index out of range could crash.
+- Also fixed:
+  - The closing span of a closed curve couldn't be cut by the mouse.
+  - Finding the points' samples could take billions of steps on the biggest curves.
+  - Delete in the Hierarchy stopped deleting a lattice with points selected.
+  - The two-point rule now holds on every Delete path.
+  - Extrude at the point limit said nothing.
+
+## 2026-10-13 (round 75): many assets at once (task 0053)
+
+**Asked:** "I want to be able to multiselect textures and materials in their tabs so I can en masse delete assets."
+
+**Added**
+- **Multi-select in the Materials, Textures and Project windows.** Ctrl+click toggles, Shift+click selects a range
+  (Ctrl+Shift adds it), Ctrl+A selects everything shown (a search narrows it).
+- **One question for many.** Delete, the toolbar or the context menu asks once ("Delete 3 materials?") and sends them
+  all to the Recycle Bin / Trash. The Materials window empties their slots in one undo step.
+- Console: `matdelete A, B` and `texdelete A, B`, with names separated by commas.
+- Learn: "Many at once" in the Assets lesson.
+
+**Checked**
+- New tests (round 75):
+  - By clicks: Ctrl, Shift and Ctrl+Shift select exactly the named materials.
+  - Delete asks once and deletes three of four. The slot that used one shows the default, and one undo brings it
+    back.
+  - Ctrl+A in the Textures window takes every texture shown, or only the search's.
+  - The console deletes two textures by name.
+  - The Project window's Ctrl+click selects two files and Delete removes both after one question.
+- The user accepted task 0050's two frames over 16.7 ms (material edit 19.8, Play 17.6).
+- Unit checks: Windows 9,422, 0 failed (583 tests); the whole suite in render-cache verify mode: 9,423,
+  0 failed, 0 stale pictures. Linux with libraries: 9,330, 0 failed. Sanitizer build: 9,248, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- The Project window's context-menu Delete ignored the multi-selection.
+- The console couldn't name assets with spaces.
+- Also fixed:
+  - Items hidden by a search were still deleted.
+  - Two delete questions could fight.
+  - Ctrl+A could fall through to the scene's Select All.
+  - Shift with the anchor gone selected one item.
+  - The Learn text said Project-window deletes empty slots (they keep the material).
+
 ## 2026-10-13 (round 74): the Rigging window (task 0052)
 
 **Asked:** "rigging and weight painting tools should be in their own tab. The mesh filter area is getting a little

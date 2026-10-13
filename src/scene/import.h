@@ -26,7 +26,20 @@ struct ImportedNode {
   MeshPtr mesh;
   std::vector<MaterialPtr> materials;
   bool is_bone = false;  // a joint of a skin (task 0047): becomes a Bone, its local transform its rest
+  /* The joint's bind pose (task 0056), when the file has one: where it was when the skin was bound, in the import's
+   * own space and Blendity's axes. It becomes the Bone's rest; the saved transform stays as the pose. */
+  bool has_bind = false;
+  Mat4 bind_world;
 };
+
+/* A file's right-handed matrix in Blendity's axes: the X mirror on both sides (S M S, S = diag(-1, 1, 1, 1)). */
+inline Mat4 mirror_x(const Mat4 &m) {
+  Mat4 r = m;
+  for (int c = 0; c < 4; c++)
+    for (int k = 0; k < 4; k++)
+      if ((c == 0) != (k == 0)) r.at(k, c) = -r.at(k, c);
+  return r;
+}
 
 /* A skinned mesh (task 0047): its node and its joints' nodes. The mesh's vertex groups are named after the joints. */
 struct ImportedSkin {

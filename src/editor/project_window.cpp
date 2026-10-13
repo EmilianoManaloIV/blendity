@@ -199,6 +199,116 @@ void Editor::sync_material_asset_names() {
   }
 }
 
+/* A press on a file row: Ctrl toggles, Shift selects a range (task 0053); a plain press selects it and may start a drag
+ * (anything onto folders; materials and images onto objects, faces and slots too, as in Unity). Either way the
+ * Inspector shows the files. */
+void Editor::project_row_pressed(const std::string &full, const std::vector<std::string> &shown, size_t index) {
+  auto &in = ui_.in;
+  clear_selection();
+  if (in.ctrl() || in.shift()) {
+    project_multi_.click(shown, index, in.ctrl(), in.shift());
+    project_selected_ = project_multi_.has(full) ? full : project_multi_.items.empty() ? std::string() : project_multi_.items.back();
+    return;
+  }
+  project_selected_ = full;
+  project_multi_.only(full);
+  asset_drag_ = {true, false, full, nullptr, in.mx, in.my};
+}
+
+/* The Recycle Bin (Windows) or the Trash: where deleted assets go. */
+const char *trash_name() {
+#ifdef _WIN32
+  return "Recycle Bin";
+#else
+  return "Trash";
+#endif
+}
+
+void Editor::ask_delete(const DeleteQuestion &q) {
+  auto &u = ui_;
+  const ui::Id did = u.id(q.id);
+  if (!u.popup_open(did)) u.open_popup(did, q.at);
+  std::string listed;  // the first four names, then how many more
+  for (size_t k = 0; k < q.names.size() && k < 4; k++) listed += (k ? ", " : "") + q.names[k];
+  if (q.names.size() > 4) listed += strprintf(" and %zu more", q.names.size() - 4);
+  u.popup(did, u.px(q.width), [this, q, listed] {
+    auto &u = ui_;
+    auto line = [&](const std::string &text, uint32_t color, int extra) {
+      const Recti row = u.popup_row(u.row_h() + extra);
+      u.label({row.x + u.px(10), row.y, row.w - u.px(20), row.h}, text, color);
+    };
+    line(q.title, u.theme.text_bright, u.px(6));
+    if (!listed.empty()) line(listed, u.theme.text_dim, 0);
+    for (const std::string &n : q.notes) line(n, u.theme.text_dim, 0);
+    const Recti b = u.popup_row(u.row_h() + u.px(10));
+    const Recti ok{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+    confirm_rects_[q.id] = ok;
+    const bool confirmed = u.button(ok, q.confirm);
+    const bool cancelled = u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel");
+    if (!confirmed && !cancelled) return;
+    if (confirmed) q.on_delete();
+    q.on_close();
+    u.close_popups();
+  });
+  if (!u.popup_open(did)) q.on_close();  // clicked away
+}
+
+bool Editor::delete_menu_item(size_t selected, const char *one, const char *plural, bool enabled) {
+  const std::string label = selected > 1 ? strprintf("Delete %zu %s...", selected, plural) : std::string(one);
+  return ui_.menu_item(label, "Del", false, enabled);
+}
+
+bool Editor::select_all_key(const Recti &over, bool blocked) {
+  auto &u = ui_;
+  if (blocked || !u.in.ctrl() || !u.in.key_pressed[platform::KEY_A]) return false;
+  if (!u.hovered(over) || u.wants_keyboard() || u.any_editing()) return false;
+  u.in.key_pressed[platform::KEY_A] = false;  // (never the scene's Select All from over this window)
+  return true;
+}
+
+bool Editor::delete_key(const Recti &over, bool blocked) {
+  auto &u = ui_;
+  if (blocked || !(u.in.key_pressed[platform::KEY_DELETE] || u.in.key_pressed[platform::KEY_BACKSPACE])) return false;
+  if (!u.hovered(over) || u.wants_keyboard() || u.any_editing()) return false;
+  u.in.key_pressed[platform::KEY_DELETE] = u.in.key_pressed[platform::KEY_BACKSPACE] = false;
+  return true;
+}
+
+size_t Editor::slots_using(const std::function<bool(const MaterialPtr &)> &match) {
+  size_t n = 0;
+  scene_->for_each([&](GameObject &g) {
+    const auto *mr = g.get<MeshRenderer>();
+    if (!mr) return;
+    for (const MaterialPtr &s : mr->materials) n += match(s);
+  });
+  return n;
+}
+
+void Editor::request_project_delete(const std::string &one) {
+  if (project_multi_.items.size() > 1) project_delete_many_ = project_multi_.items, project_delete_.clear();
+  else project_delete_ = one, project_delete_many_.clear();
+}
+
+/* Keys while the Project window has focus and the mouse is over it (a Delete meant for the Hierarchy or the Scene view
+ * must never reach a file selected here earlier): F2 renames, Delete deletes (after asking). */
+void Editor::project_keys(const Recti &r) {
+  auto &in = ui_.in;
+  if (focused_ != WindowKind::Project || project_selected_.empty() || !fs::exists(project_selected_)) return;
+  if (in.key_pressed[platform::KEY_F2] && ui_.hovered(r) && !ui_.any_editing()) {
+    project_rename_ = project_selected_;
+    project_rename_buf_ = fs::is_dir(project_selected_) ? fs::filename(project_selected_) : fs::stem(project_selected_);
+    in.key_pressed[platform::KEY_F2] = false;
+  }
+  if (delete_key(r, !project_delete_.empty() || !project_delete_many_.empty())) request_project_delete(project_selected_);
+}
+
+void Editor::edit_material_asset(const std::string &path) {
+  MaterialPtr m = material_asset(make_asset_relative(path));
+  if (!m) return;
+  material_selected_ = m;
+  dock_open(WindowKind::Materials);
+}
+
 void Editor::draw_project(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
@@ -344,6 +454,10 @@ void Editor::draw_project(const Recti &r) {
   std::vector<const DirEntry *> shown;
   for (auto &en : project_entries_)
     if (f.empty() || to_lower(en.name).find(f) != std::string::npos) shown.push_back(&en);
+  /* The multi-selection (task 0053): this folder's shown files; the one selected the usual way always in it. */
+  std::vector<std::string> shown_paths;
+  for (const DirEntry *en : shown) shown_paths.push_back(fs::join(project_dir_, en->name));
+  project_multi_.sync(shown_paths, project_selected_);
   bool can_up = project_dir_ != project_root_ && project_dir_.size() > project_root_.size();
   int rows = (int)shown.size() + (can_up ? 1 : 0);
   ui::Id sid = u.id("proj_scroll");
@@ -363,11 +477,13 @@ void Editor::draw_project(const Recti &r) {
     if (path_inside(fs::parent(project_dir_), assets_dir_)) folder_target(rr.intersect(right), fs::parent(project_dir_));
     row_clicked = row_clicked || (hot && (in.pressed[0] || in.pressed[1]));
   }
-  for (const DirEntry *en : shown) {
+  for (size_t si = 0; si < shown.size(); si++) {
+    const DirEntry *en = shown[si];
     Recti rr = row_rect(i++);
     if (rr.bottom() < right.y || rr.y > right.bottom()) continue;
     std::string full = fs::join(project_dir_, en->name);
-    bool sel = project_selected_ == full;
+    bool sel = project_selected_ == full || project_multi_.has(full);
+    if (u.record_buttons) u.button_rects["file:" + en->name] = rr;  // (tests click rows)
     bool hot = u.hovered(rr);
     if (sel) u.canvas.fill_rect(rr, u.theme.selection);
     else if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
@@ -406,12 +522,7 @@ void Editor::draw_project(const Recti &r) {
     else u.label(name_r, en->name);
     if (!en->is_dir) u.label({rr.x, rr.y, rr.w - u.px(12), rh}, format_bytes(en->size), u.theme.text_dim, ui::Align::Right);
     if (en->is_dir) folder_target(rr.intersect(right), full);
-    if (hot && in.pressed[0] && project_rename_ != full) {
-      project_selected_ = full;
-      clear_selection();
-      /* Anything drags onto folders; materials and images onto objects, faces and slots too (Unity). */
-      asset_drag_ = {true, false, full, nullptr, in.mx, in.my};
-    }
+    if (hot && in.pressed[0] && project_rename_ != full) project_row_pressed(full, shown_paths, si);
     if (hot && in.double_clicked[0]) {
       asset_drag_ = AssetDrag{};
       if (en->is_dir) {
@@ -427,6 +538,7 @@ void Editor::draw_project(const Recti &r) {
       else if (ext != ".mat" && ext != ".ptex") fs::open_external(full);
     }
     if (hot && in.pressed[1]) {
+      if (!project_multi_.has(full)) project_multi_.only(full);
       project_selected_ = full;
       u.open_popup(u.id("proj_ctx"), {in.mx, in.my, 0, 0});
     }
@@ -447,19 +559,31 @@ void Editor::draw_project(const Recti &r) {
     }
     if (u.hovered(right) && in.pressed[0] && !row_clicked) project_selected_.clear();
   }
-  /* Keys while the Project window has focus: F2 renames, Delete deletes (after asking). */
-  /* Only with the mouse over the Project window too: a Delete meant for the Hierarchy or the Scene
-   * view must never reach a file selected here earlier. */
-  if (focused_ == WindowKind::Project && u.hovered(r) && !u.any_editing() && !project_selected_.empty() && fs::exists(project_selected_)) {
-    if (in.key_pressed[platform::KEY_F2]) {
-      project_rename_ = project_selected_;
-      project_rename_buf_ = fs::is_dir(project_selected_) ? fs::filename(project_selected_) : fs::stem(project_selected_);
-      in.key_pressed[platform::KEY_F2] = false;
-    }
-    if (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE]) {
-      project_delete_ = project_selected_;
-      in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
-    }
+  project_keys(r);
+  /* Ctrl+A over the files: every one shown (the search applies). */
+  const std::string *last = select_all_key(right, false) ? project_multi_.select_all(shown_paths) : nullptr;
+  if (last) project_selected_ = *last;
+  /* Several at once (task 0053): one question, then each to the Recycle Bin / Trash. */
+  if (!project_delete_many_.empty()) {
+    const std::vector<std::string> targets = project_delete_many_;
+    DeleteQuestion q;
+    q.id = "proj_delete_many";
+    q.at = {r.x + r.w / 2 - u.px(180), r.y + r.h / 3, 0, 0};
+    q.width = 360;
+    q.title = strprintf("Delete %zu items?", targets.size());
+    q.confirm = "Delete All";
+    q.notes.push_back(strprintf("They go to the %s, where you can restore them.", trash_name()));
+    size_t folders = 0, mats = 0;
+    for (const std::string &p : targets) q.names.push_back(fs::filename(p)), folders += fs::is_dir(p), mats += fs::extension(p) == ".mat";
+    std::string note = folders ? strprintf("%zu folder(s) go with everything in them. ", folders) : std::string();
+    if (mats) note += "Objects using a material keep it as a scene material.";
+    if (!note.empty()) q.notes.push_back(note);
+    q.on_delete = [this, targets] {
+      for (const std::string &p : targets) delete_project_entry(p);
+      project_multi_.items.clear();
+    };
+    q.on_close = [this] { project_delete_many_.clear(); };
+    ask_delete(q);
   }
   const std::string dir_now = path_inside(project_dir_, assets_dir_) ? project_dir_ : assets_dir_;
   u.popup(u.id("proj_create"), u.px(220), [this, dir_now] {
@@ -493,11 +617,7 @@ void Editor::draw_project(const Recti &r) {
       if (MaterialPtr m = material_asset(make_asset_relative(sel)))
         for (GameObject *g : selected_objects(false)) assign_material(g, 0, m);
     if (ext == ".ptex" && u.menu_item("Assign to Selection", nullptr, false, !selection_.empty())) assign_texture_asset_to_selection(make_asset_relative(sel));
-    if (ext == ".mat" && u.menu_item("Edit in Materials Window"))
-      if (MaterialPtr m = material_asset(make_asset_relative(sel))) {
-        material_selected_ = m;
-        dock_open(WindowKind::Materials);
-      }
+    if (ext == ".mat" && u.menu_item("Edit in Materials Window")) edit_material_asset(sel);
     u.menu_separator();
     if (u.menu_item("Create Folder", nullptr, false, true, Icon::Folder)) {
       const std::string p = create_project_folder(fs::is_dir(sel) && in_assets ? sel : dir_now);
@@ -513,7 +633,7 @@ void Editor::draw_project(const Recti &r) {
       project_rename_ = sel;
       project_rename_buf_ = fs::is_dir(sel) ? fs::filename(sel) : fs::stem(sel);
     }
-    if (u.menu_item("Delete", "Del", false, in_assets)) project_delete_ = sel;
+    if (delete_menu_item(project_multi_.items.size(), "Delete", "Items", in_assets)) request_project_delete(sel);
     u.menu_separator();
     if (u.menu_item("Open with system viewer")) fs::open_external(sel);
     if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::is_dir(sel) ? sel : fs::parent(sel));
@@ -521,44 +641,19 @@ void Editor::draw_project(const Recti &r) {
   });
   /* Delete asks first (Unity: "Delete selected asset?"); it goes to the Recycle Bin / Trash. */
   if (!project_delete_.empty()) {
-    ui::Id did = u.id("proj_delete");
-    if (!u.popup_open(did)) u.open_popup(did, {r.x + r.w / 2 - u.px(170), r.y + r.h / 3, 0, 0});
-    std::string target = project_delete_;
-    u.popup(did, u.px(340), [this, target] {
-      auto &u = ui_;
-      std::string rel = make_asset_relative(target);
-      size_t users = 0;
-      if (fs::extension(target) == ".mat")
-        if (MaterialPtr m = material_asset(rel))
-          scene_->for_each([&](GameObject &g) {
-            if (auto *mr = g.get<MeshRenderer>())
-              for (auto &s : mr->materials) users += s == m;
-          });
-      Recti t = u.popup_row(u.row_h() + u.px(6));
-      u.label({t.x + u.px(10), t.y, t.w - u.px(20), t.h}, "Delete " + fs::filename(target) + (fs::is_dir(target) ? " and everything in it?" : "?"),
-              u.theme.text_bright);
-      Recti h1 = u.popup_row();
-#ifdef _WIN32
-      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "It goes to the Recycle Bin, where you can restore it.", u.theme.text_dim);
-#else
-      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "It goes to the Trash, where you can restore it.", u.theme.text_dim);
-#endif
-      if (users) {
-        Recti h2 = u.popup_row();
-        u.label({h2.x + u.px(10), h2.y, h2.w - u.px(20), h2.h}, strprintf("%zu slot(s) use it; they keep it as a scene material.", users), u.theme.text_dim);
-      }
-      Recti b = u.popup_row(u.row_h() + u.px(10));
-      if (u.button({b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Delete")) {
-        delete_project_entry(target);
-        project_delete_.clear();
-        u.close_popups();
-      }
-      if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {
-        project_delete_.clear();
-        u.close_popups();
-      }
-    });
-    if (!u.popup_open(did)) project_delete_.clear();  // clicked away
+    const std::string target = project_delete_;
+    const MaterialPtr m = fs::extension(target) == ".mat" ? material_asset(make_asset_relative(target)) : nullptr;
+    const size_t users = m ? slots_using([&](const MaterialPtr &s) { return s == m; }) : 0;
+    DeleteQuestion q;
+    q.id = "proj_delete";
+    q.at = {r.x + r.w / 2 - u.px(170), r.y + r.h / 3, 0, 0};
+    q.width = 340;
+    q.title = "Delete " + fs::filename(target) + (fs::is_dir(target) ? " and everything in it?" : "?");
+    q.notes.push_back(strprintf("It goes to the %s, where you can restore it.", trash_name()));
+    if (users) q.notes.push_back(strprintf("%zu slot(s) use it; they keep it as a scene material.", users));
+    q.on_delete = [this, target] { delete_project_entry(target); };
+    q.on_close = [this] { project_delete_.clear(); };
+    ask_delete(q);
   }
 }
 

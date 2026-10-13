@@ -22,9 +22,14 @@ undo, files and the modifier stack.
   twisted joint). At most 4 influences per vertex (the largest, renormalised). It is deform-only (ADR 0022), so a
   pose is an in-place position update. Its dependency hash is the bones' world matrices.
 - **Import**: FBX (ufbx skin deformers and clusters) and glTF (skins, `JOINTS_0` / `WEIGHTS_0`) make bone
-  GameObjects, groups and a Skin modifier. The rest is each joint's transform as saved: files are expected at their
-  bind pose (Blender writes them so). Bind poses and inverse bind matrices are not read; an FBX whose bones were
-  bound elsewhere is reported in the Console. (As accepted, both were to be read; reading them is a follow-up.)
+  GameObjects, groups and a Skin modifier. **Amended by task 0056:** the rest is each joint's **bind pose**, as in
+  Blender, Unity and Maya: glTF's `inverseBindMatrices` (the joint as bound = the mesh's world x IBM^-1) and FBX's
+  cluster bind matrix (ufbx `bind_to_world`), relative to the parent's place at rest. The transform saved in the
+  file stays on the bone as its pose, so a character exported mid-walk imports mid-walk, skins correctly, and Reset
+  Pose gives the shape it was bound in. A joint without a bind (an end bone, a file without matrices) rests at its
+  saved transform, as before; the "saved in another pose" warning is gone. Known limits: a bone has one rest, so a
+  second mesh bound to it in another pose follows the first one's (the Console says so), and an FBX mesh moved after
+  binding is skinned from where it is now (also reported).
 - **Constraints** (task 0048): an `IKConstraint` on a chain's end bone, solved after `Scene::update` in Play and before
   drawing in the editor whenever a target or bone moved. Driven rotations are not undo steps; the gizmo is refused
   on a driven bone (move its target instead). As built: the gizmo and G / R / S are refused; each solve starts

@@ -611,6 +611,7 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     const int me = node_index[(size_t)ni];
     for (const Json &c : n["children"].arr) visit(c.integer(), me);
   };
+  bool warned_binds = false;
   auto skins_and_bones = [&] {
     /* Skins (task 0047): joints become bones; a skinned mesh's "J<k>" groups take its joints' names. */
     for (const Json &sk : doc["skins"].arr)
@@ -624,11 +625,38 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
       ImportedSkin skin;
       skin.mesh_node = oi;
       Mesh &m = *out.nodes[(size_t)oi].mesh;
+      /* The bind pose (task 0056): a joint's inverse bind matrix takes the mesh to the joint as bound, so the joint was
+       * at mesh world x IBM^-1 (in the import's space; mirrored like everything else). No matrices: no bind. */
+      int ibc = 0;
+      const int ibi = doc["skins"][(size_t)si]["inverseBindMatrices"].integer();
+      const std::vector<float> ibm = ibi >= 0 ? read_accessor(ibi, ibc) : std::vector<float>();
+      Mat4 mesh_world;
+      for (int p = oi; p >= 0; p = out.nodes[(size_t)p].parent)
+        mesh_world = Mat4::trs(out.nodes[(size_t)p].position, out.nodes[(size_t)p].rotation, out.nodes[(size_t)p].scale) * mesh_world;
       for (size_t k = 0; k < joints.size(); k++) {
         const int jni = joints[k].integer();
         const int jo = jni >= 0 && jni < (int)node_index.size() ? node_index[(size_t)jni] : -1;
         if (jo < 0) continue;
         skin.joints.push_back(jo);
+        if (ibc == 16 && ibm.size() >= (k + 1) * 16) {
+          Mat4 ib;
+          std::memcpy(ib.m, &ibm[k * 16], sizeof(ib.m));  // column-major, as Mat4
+          const Mat4 bind = mesh_world * mirror_x(ib).inverse();
+          bool finite = std::fabs(dot(cross(ib.column(0), ib.column(1)), ib.column(2))) > 1e-12f;  // (all zeros: a broken accessor)
+          for (float f : bind.m) finite = finite && finite_bits(f);
+          ImportedNode &jn_ = out.nodes[(size_t)jo];
+          if (finite && !jn_.has_bind) jn_.has_bind = true, jn_.bind_world = bind;
+          else if (finite && !warned_binds) {
+            /* One rest per bone: a second mesh bound in another pose deforms from the first one's. */
+            float d = 0.0f;
+            for (int e = 0; e < 16; e++) d = std::max(d, std::fabs(bind.m[e] - jn_.bind_world.m[e]));
+            if (d > 1e-4f * (1.0f + length(bind.translation()))) {
+              Log::warn("glTF: joint '%s' was bound in different poses by different meshes; '%s' follows the first", jn_.name.c_str(),
+                        out.nodes[(size_t)oi].name.c_str());
+              warned_binds = true;
+            }
+          }
+        }
         const int gi = m.find_group("J" + std::to_string(k));
         if (gi >= 0) m.vertex_groups[(size_t)gi].name = out.nodes[(size_t)jo].name;
       }

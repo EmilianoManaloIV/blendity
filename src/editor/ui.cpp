@@ -760,13 +760,18 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
     }
     consume_click();
   }
-  popup(i, std::max(r.w, px(120)), [this, i, v, options, count] {
-    for (int k = 0; k < count; k++)
-      if (menu_item(options[k], nullptr, k == v)) {
-        int_results_[i] = k;
-        redraw = true;
-      }
-  });
+  /* The list draws at the end of the frame, after the caller's option strings may be gone (a list built each frame,
+   * like the Layout dropdown's): it keeps its own copy, made only while it is open. */
+  if (popup_open(i)) {
+    std::vector<std::string> opts(options, options + std::max(0, count));
+    popup(i, std::max(r.w, px(120)), [this, i, v, opts = std::move(opts)] {
+      for (int k = 0; k < (int)opts.size(); k++)
+        if (menu_item(opts[(size_t)k].c_str(), nullptr, k == v)) {
+          int_results_[i] = k;
+          redraw = true;
+        }
+    });
+  }
   last_widget_ = r;
   last_hovered_ = hot;
   return changed;
@@ -1167,6 +1172,7 @@ void Context::draw_popups() {
 
 bool Context::menu_item(const std::string &text, const char *shortcut, bool checked, bool enabled, Icon icon) {
   Recti r = popup_row();
+  if (record_buttons) button_rects["menu:" + text] = r;  // (tests click a menu row by its text)
   bool hot = hovered(r);
   if (hot && enabled) {
     canvas.fill_rect(r, theme.selection);

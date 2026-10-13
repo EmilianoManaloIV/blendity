@@ -160,6 +160,7 @@ struct LayerPrefixReflector : Reflector {
   void color(const char *name, Vec3 &v) override { in.color(n(name).c_str(), v); }
   void enumeration(const char *name, int &v, const char *const *o, int c) override { in.enumeration(n(name).c_str(), v, o, c); }
   void text(const char *name, std::string &v) override { in.text(n(name).c_str(), v); }
+  void object(const char *name, std::string &v) override { in.object(n(name).c_str(), v); }
   void mesh(const char *name, MeshPtr &m) override { in.mesh(n(name).c_str(), m); }
   void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
   void help(const char *h) override { in.help(h); }

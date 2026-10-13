@@ -59,9 +59,9 @@ Quat rotation_between(Vec3 a, Vec3 b) {
 }
 
 void IKConstraint::reflect(Reflector &r) {
-  r.text("Target", target);
+  r.object("Target", target);
   r.help("The object the chain's tip reaches for (Blender: IK > Target). Move it, not the bones.");
-  r.text("Pole", pole);
+  r.object("Pole", pole);
   r.help("Optional: the object the bend points towards (a knee's or an elbow's direction; Blender: Pole Target).");
   r.field("Chain Length", chain_length, 1, 64);
   r.help("Bones from this one up the hierarchy that turn (2: thigh and shin, upper arm and forearm).");

@@ -18722,7 +18722,7 @@ static void round50_tests() {
     r34_click(ed, db.x + db.w / 2, db.y + db.h / 2);
     r34_steps(ed, 2);
     CHECK(fs::exists(path));  // only asked
-    const Recti ok = ed.texture_ui_rect_for_test("delete_confirm");
+    const Recti ok = ed.confirm_rect_for_test("tex_delete");
     CHECK(ok.w > 0);
     if (ok.w <= 0) return;
     r34_click(ed, ok.x + ok.w / 2, ok.y + ok.h / 2);
@@ -24285,7 +24285,11 @@ static void round69_tests() {
     CHECK(capped <= 3 && js.thread_count() <= 3);
     js.set_thread_limit(0);
     CHECK(js.thread_count() == all);
-    if (all >= 4) CHECK(distinct() > 3);  // lifted: more than the old ceiling again
+    /* Lifted: more than the old ceiling again. How many threads join one short loop is up to the scheduler (on a
+     * 4-core CI runner all four must), so take the best of a few tries rather than one (it failed CI on PRs #49, #50). */
+    int lifted = 0;
+    for (int tries = 0; tries < 8 && lifted <= 3; tries++) lifted = std::max(lifted, distinct());
+    if (all >= 4) CHECK(lifted > 3);
     /* The dependency-free build's own pool (CI's): its workers already started, the ceiling still holds. */
     const JobSystem::Backend was = js.backend();
     js.set_backend(JobSystem::Backend::Builtin);
@@ -24780,5 +24784,736 @@ static void round69_tests() {
     CHECK(gpu.find("device auto") != std::string::npos);
     run(ed, "engine path; device auto");
     CHECK(ed.scene().render.device == 2);
+  });
+  /* ------------------------------------------------------------------ round 75: many assets at once (task 0053) */
+  test("assets: Ctrl and Shift click select several materials, Delete asks once and deletes them all as one undo step", [] {
+    /* Earlier runs' MA..MD (and the "MA 1", "MB 2" ... that newmat makes beside them) out of the scratch project: they
+     * pile up run after run and push MC and MD out of the window's view. */
+    {
+      const std::string dir = fs::join(scratch_project(), "Assets/Materials");
+      for (const DirEntry &de : fs::list(dir))
+        if (de.name.size() > 2 && de.name[0] == 'M' && de.name[1] >= 'A' && de.name[1] <= 'D' && (de.name[2] == '.' || de.name[2] == ' ') &&
+            fs::extension(de.name) == ".mat")
+          std::remove(fs::join(dir, de.name).c_str());
+    }
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    for (const char *n : {"MA", "MB", "MC", "MD"}) ed.command(std::string("newmat ") + n);
+    ed.command("select Cube");
+    ed.command("assignmat Assets/Materials/MA.mat");  // a slot that uses one of them
+    ed.command("window Materials");
+    r34_steps(ed, 3);
+    auto click = [&](const std::string &key, int mods) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) {
+        std::printf("    no '%s'\n", key.c_str());
+        return false;
+      }
+      const int x = b.x + b.w / 2, y = b.y + b.h / 2;
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+      m.mods = d.mods = u.mods = mods;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+      return true;
+    };
+    CHECK(click("mat:MA", 0));
+    CHECK(click("mat:MC", platform::MOD_CTRL));
+    CHECK(ed.materials_selected_for_test() == 2);
+    CHECK(click("mat:MD", platform::MOD_SHIFT));  // the range from the last click (MC) to MD
+    CHECK(ed.materials_selected_for_test() == 2);
+    CHECK(click("mat:MA", platform::MOD_CTRL));  // and MA again
+    CHECK(ed.materials_selected_for_test() == 3);
+    CHECK(click("mat:MB", platform::MOD_CTRL | platform::MOD_SHIFT));  // Ctrl+Shift adds the range from MA to MB
+    for (const char *n : {"MA", "MB", "MC", "MD"}) CHECK(ed.material_is_selected_for_test(n));  // (other tests' materials may lie between)
+    CHECK(click("mat:MB", platform::MOD_CTRL));  // MB out again; the range's others out by hand below
+    CHECK(!ed.material_is_selected_for_test("MB"));
+    CHECK(click("mat:MA", 0));  // back to exactly MA, MC, MD
+    CHECK(click("mat:MC", platform::MOD_CTRL) && click("mat:MD", platform::MOD_CTRL));
+    CHECK(ed.materials_selected_for_test() == 3);
+    /* Delete over the window: one question for all three. */
+    Recti wr = ed.window_rect_for_test(WindowKind::Materials);
+    platform::Event mv, kd;
+    mv.type = platform::EventType::MouseMove, mv.x = wr.x + wr.w / 2, mv.y = wr.y + wr.h / 3;
+    kd.type = platform::EventType::KeyDown, kd.key = platform::KEY_DELETE, kd.x = mv.x, kd.y = mv.y;
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({kd});
+    ed.step_frame_headless();
+    CHECK(ed.material_delete_pending());
+    for (const char *n : {"MA", "MC", "MD"}) CHECK(fs::exists(resolve_asset_path(std::string("Assets/Materials/") + n + ".mat")));  // only asked
+    Recti b;
+    CHECK(ed.button_rect_for_test("Delete All", b));
+    r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+    r34_steps(ed, 3);
+    int left = 0;
+    for (const char *n : {"MA", "MB", "MC", "MD"}) left += fs::exists(resolve_asset_path(std::string("Assets/Materials/") + n + ".mat"));
+    std::printf("    deleted three of four: %d material asset(s) left\n", left);
+    CHECK(left == 1 && !ed.material_delete_pending());
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && !cube->get<MeshRenderer>()->materials.empty() && cube->get<MeshRenderer>()->materials[0] == nullptr);  // its slot: the default material now
+    ed.command("undo");  // one step for the slots of all three
+    r34_steps(ed, 2);
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && !cube->get<MeshRenderer>()->materials.empty() && cube->get<MeshRenderer>()->materials[0] &&
+          cube->get<MeshRenderer>()->materials[0]->name == "MA");
+  });
+
+  test("assets: the Textures window takes Ctrl+A over its thumbnails and deletes every texture shown after one question", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    std::vector<std::string> paths;
+    for (const char *p : {"Bricks", "Noise", "Wood Floor"}) {
+      ProceduralTexturePtr t = ed.new_texture_asset_for_test(p);
+      CHECK(t != nullptr);
+      if (t) paths.push_back(resolve_asset_path(t->asset_path));
+    }
+    ed.command("window Textures");
+    r34_steps(ed, 3);
+    Recti b;
+    CHECK(ed.button_rect_for_test("tex:Bricks", b));
+    r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+    platform::Event a;
+    a.type = platform::EventType::KeyDown, a.key = platform::KEY_A, a.mods = platform::MOD_CTRL, a.x = b.x + b.w / 2, a.y = b.y + b.h / 2;
+    ed.step_frame_headless({a});
+    ed.step_frame_headless();
+    const size_t n = ed.textures_selected_for_test();
+    std::printf("    Ctrl+A: %zu textures selected\n", n);
+    CHECK(n == ed.texture_count_shown_for_test());
+    /* With a search, Ctrl+A takes only what shows. */
+    ed.set_texture_search_for_test("brick");
+    r34_steps(ed, 2);
+    ed.step_frame_headless({a});
+    ed.step_frame_headless();
+    CHECK(ed.textures_selected_for_test() == ed.texture_count_shown_for_test() && ed.texture_count_shown_for_test() >= 1);
+    ed.set_texture_search_for_test("");
+    ed.command("texdelete Bricks, Noise");  // the console path: names separated by commas
+    r34_steps(ed, 2);
+    CHECK(paths.size() == 3 && !fs::exists(paths[0]) && !fs::exists(paths[1]) && fs::exists(paths[2]));
+  });
+
+  test("assets: the Project window's Ctrl+click selects several files and Delete asks once", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    for (const char *nm : {"PA", "PB"}) ed.command(std::string("newmat ") + nm);
+    ed.command("window Project");
+    r34_steps(ed, 3);
+    ed.project_open_folder_for_test(fs::parent(resolve_asset_path("Assets/Materials/PA.mat")), "p");  // (the folder holds other tests' materials too)
+    r34_steps(ed, 3);
+    auto click = [&](const std::string &key, int mods) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) {
+        std::printf("    no '%s'\n", key.c_str());
+        return false;
+      }
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      m.x = d.x = u.x = b.x + b.w / 2, m.y = d.y = u.y = b.y + b.h / 2;
+      m.mods = d.mods = u.mods = mods;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      return true;
+    };
+    CHECK(click("file:PA.mat", 0));
+    CHECK(click("file:PB.mat", platform::MOD_CTRL));
+    CHECK(ed.project_selected_count_for_test() == 2);
+    /* Delete with the mouse over the files: one question, then both go to the trash. */
+    Recti pb;
+    CHECK(ed.button_rect_for_test("file:PB.mat", pb));
+    platform::Event kd;
+    kd.type = platform::EventType::KeyDown, kd.key = platform::KEY_DELETE, kd.x = pb.x + pb.w / 2, kd.y = pb.y + pb.h / 2;
+    ed.step_frame_headless({kd});
+    ed.step_frame_headless();
+    Recti all;
+    CHECK(ed.button_rect_for_test("Delete All", all));
+    r34_click(ed, all.x + all.w / 2, all.y + all.h / 2);
+    r34_steps(ed, 2);
+    CHECK(!fs::exists(resolve_asset_path("Assets/Materials/PA.mat")) && !fs::exists(resolve_asset_path("Assets/Materials/PB.mat")));
+  });
+  /* ------------------------------------------------------------------ round 76: curve and lattice points by keys (task 0054) */
+  test("points: Extrude grows a curve from its end, Ctrl+R cuts a segment where the mouse is, Alt+M merges, Delete keeps two, Alt+C closes", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    CHECK(g && g->curve());
+    if (!g || !g->curve()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Path");
+    ed.mark_changed_for_test("R76 setup");
+    r34_steps(ed, 3);
+    const Recti view = ed.scene_view_rect();
+    auto key = [&](int k, int mods, int mx = -1, int my = -1) {
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+      m.x = d.x = u.x = mx >= 0 ? mx : view.x + view.w / 2;
+      m.y = d.y = u.y = my >= 0 ? my : view.y + view.h / 2;
+      d.key = u.key = k;
+      d.mods = u.mods = mods;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d, u});
+      ed.step_frame_headless();
+    };
+    Curve &c = *g->curve();
+    const int n0 = (int)c.points.size();
+    /* Extrude (Unity's Ctrl+E) on the last point: one beyond it, in the curve's direction, selected. */
+    ed.command(strprintf("curve select Path %d", n0 - 1));
+    const Vec3 last = c.points.back().position, prev = c.points[(size_t)n0 - 2].position;
+    key(platform::KEY_E, platform::MOD_CTRL);
+    CHECK((int)g->curve()->points.size() == n0 + 1);
+    CHECK(length(g->curve()->points.back().position - (last + (last - prev))) < 1e-5f);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{n0});
+    ed.command("undo");  // one step
+    r34_steps(ed, 2);
+    g = ed.scene().find_by_name("Path");
+    CHECK(g && (int)g->curve()->points.size() == n0);
+    /* Ctrl+R over the middle of the first segment: a point on the curve's own path there. */
+    const CurvePath &path = g->curve()->local_path();
+    const Vec3 mid_local = path.pos[path.pos.size() / (size_t)(2 * std::max(1, n0 - 1))];
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point(mid_local), x, y));
+    key(platform::KEY_R, platform::MOD_CTRL, x, y);
+    CHECK((int)g->curve()->points.size() == n0 + 1);
+    float off = 1e30f;
+    for (const Vec3 &p : path.pos) off = std::min(off, length(g->curve()->points[1].position - p));
+    std::printf("    Ctrl+R: the new point %.4f from the old path (length %.3f)\n", off, path.total());
+    CHECK(off < 0.02f * path.total());
+    /* Merge at Center (Unity's Alt+M) of points 0 and 1: one at their middle. */
+    const Vec3 p0 = g->curve()->points[0].position, p1 = g->curve()->points[1].position;
+    ed.command("curve select Path 0 1");
+    key(platform::KEY_M, platform::MOD_ALT);
+    CHECK((int)g->curve()->points.size() == n0 && length(g->curve()->points[0].position - (p0 + p1) * 0.5f) < 1e-5f);
+    /* Delete keeps two points. */
+    std::string all = "curve select Path";
+    for (int i = 0; i < (int)g->curve()->points.size(); i++) all += strprintf(" %d", i);
+    ed.command(all);
+    key(platform::KEY_DELETE, 0);
+    CHECK(g->curve()->points.size() == (size_t)n0 && ed.scene().find_by_name("Path"));  // refused: the curve and its points stay
+    ed.command("curve select Path 0");
+    key(platform::KEY_DELETE, 0);
+    CHECK((int)g->curve()->points.size() == n0 - 1);
+    /* Alt+C toggles Closed. */
+    const bool closed = g->curve()->closed;
+    key(platform::KEY_C, platform::MOD_ALT);
+    CHECK(g->curve()->closed != closed);
+  });
+
+  test("points: in Blender's keymap E extrudes the curve's first point backwards", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("keymap Blender");
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    if (!g || !g->curve()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Path");
+    ed.mark_changed_for_test("R76 setup");
+    r34_steps(ed, 3);
+    const Vec3 a = g->curve()->points[0].position, b = g->curve()->points[1].position;
+    const size_t n0 = g->curve()->points.size();
+    ed.command("curve select Path 0");
+    const Recti view = ed.scene_view_rect();
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+    m.x = d.x = u.x = view.x + view.w / 2, m.y = d.y = u.y = view.y + view.h / 2;
+    d.key = u.key = platform::KEY_E;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    CHECK(g->curve()->points.size() == n0 + 1 && length(g->curve()->points[0].position - (a + (a - b))) < 1e-5f);
+  });
+
+  test("points: Ctrl+R over a lattice's edge adds a row keeping the shape; Delete with a whole row selected removes one", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Lattice");
+    GameObject *g = ed.scene().find_by_name("Lattice");
+    CHECK(g && g->get<Lattice>());
+    if (!g || !g->get<Lattice>()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    g->set_local_scale({2, 2, 2});
+    Lattice &l = *g->get<Lattice>();
+    l.interpolation = 0;  // Linear: the shape is kept exactly
+    l.set_control_point(7, l.control_point(7) + Vec3(0.2f, 0.1f, 0.0f));
+    ed.command("select Lattice");
+    ed.mark_changed_for_test("R76 lattice");
+    r34_steps(ed, 3);
+    std::vector<Vec3> probes;
+    for (int i = 0; i < 27; i++) probes.push_back(Vec3((i % 3) * 0.5f - 0.5f, ((i / 3) % 3) * 0.5f - 0.5f, (i / 9) * 0.5f - 0.5f));
+    std::vector<Vec3> before;
+    for (const Vec3 &q : probes) before.push_back(g->get<Lattice>()->displacement(q));
+    /* The mouse on the U edge between points 0 and 1. */
+    int x0, y0, x1, y1;
+    CHECK(ed.project_to_window(g->world_matrix().point(l.control_point(0)), x0, y0) && ed.project_to_window(g->world_matrix().point(l.control_point(1)), x1, y1));
+    const Recti view = ed.scene_view_rect();
+    (void)view;
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+    m.x = d.x = u.x = (x0 + x1) / 2, m.y = d.y = u.y = (y0 + y1) / 2;
+    d.key = u.key = platform::KEY_R;
+    d.mods = u.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    const Lattice &l2 = *ed.scene().find_by_name("Lattice")->get<Lattice>();
+    CHECK(l2.points_u == 3 && l2.points_v == 2 && l2.points_w == 2);
+    float worst = 0.0f;
+    for (size_t i = 0; i < probes.size(); i++) worst = std::max(worst, length(l2.displacement(probes[i]) - before[i]));
+    std::printf("    a row added along U: the deformation moved by at most %g\n", worst);
+    CHECK(worst < 1e-4f);
+    /* Delete with the whole first U row selected (u index 0): back to two along U. */
+    std::string sel = "points select Lattice";
+    for (int i = 0; i < l2.size(); i++)
+      if (i % l2.points_u == 0) sel += strprintf(" %d", i);
+    ed.command(sel);
+    d.key = u.key = platform::KEY_DELETE;
+    d.mods = u.mods = 0;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    GameObject *g3 = ed.scene().find_by_name("Lattice");
+    CHECK(g3 && g3->get<Lattice>()->points_u == 2);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    CHECK(ed.scene().find_by_name("Lattice")->get<Lattice>()->points_u == 3);
+  });
+  test("points: Ctrl+R on a Poly curve's segment puts the point where the mouse is along it, never on a corner; a merge of bad indices is refused", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    if (!g || !g->curve()) return;
+    g->curve()->type = 2;  // Poly: one sample per segment
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Path");
+    ed.mark_changed_for_test("R76 poly");
+    r34_steps(ed, 3);
+    const Vec3 a = g->curve()->points[0].position, b = g->curve()->points[1].position;
+    const Vec3 at = a + (b - a) * 0.3f;  // 30 % along the first segment
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point(at), x, y));
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+    m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+    d.key = u.key = platform::KEY_R;
+    d.mods = u.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    const Vec3 p = g->curve()->points[1].position;
+    std::printf("    Poly Ctrl+R at 30 %%: the new point %.3f from where the mouse was, %.3f from the nearest corner\n", length(p - at),
+                std::min(length(p - a), length(p - b)));
+    CHECK(length(p - at) < 0.05f * length(b - a) && std::min(length(p - a), length(p - b)) > 0.1f * length(b - a));
+    const size_t n = g->curve()->points.size();
+    ed.command("points merge Path 0 99");  // one point really there: nothing to merge, no crash
+    ed.command("points merge Path -1 0");
+    CHECK(g->curve()->points.size() == n);
+  });
+  /* ------------------------------------------------------------------ round 77: layouts for each stage (task 0055) */
+  test("layouts: each stage's layout opens its windows and shows its tools; Show All Tools brings back the rest", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("layout UV Unwrapping");
+    ed.step_frame_headless();
+    CHECK(ed.workspace_name() == "UV Unwrapping" && ed.window_rect_for_test(WindowKind::UVEditor).w > 0 && ed.window_rect_for_test(WindowKind::Scene).w > 0);
+    CHECK(ed.shows(Editor::FocusUV) && ed.shows(Editor::FocusEdit) && !ed.shows(Editor::FocusRig));
+    ed.command("layout Texturing & Materials");
+    ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Materials).w > 0 && ed.window_rect_for_test(WindowKind::Textures).w > 0);
+    CHECK(ed.shows(Editor::FocusMaterial) && !ed.shows(Editor::FocusEdit));
+    ed.command("layout Rigging");
+    ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Rigging).w > 0 && ed.shows(Editor::FocusRig));
+    ed.command("layout Modeling & Topology");
+    ed.step_frame_headless();
+    CHECK(ed.shows(Editor::FocusEdit) && ed.shows(Editor::FocusCheck) && !ed.shows(Editor::FocusMaterial));
+    /* Blocking Out's Modeling Tools window hides the other stages' sections and says how to get them back. */
+    ed.command("layout Blocking Out");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti b;
+    bool found = false;
+    for (const std::string &l : ed.button_labels_for_test())
+      if (l.find("more for other stages: Show All Tools") != std::string::npos && ed.button_rect_for_test(l, b)) found = true;
+    CHECK(found && !ed.shows(Editor::FocusEdit));
+    if (found) {
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      CHECK(ed.show_all_tools() && ed.shows(Editor::FocusEdit));
+    }
+    ed.command("alltools off");
+    CHECK(!ed.shows(Editor::FocusEdit));
+    /* The console reaches what a layout hides: a Light while texturing. */
+    ed.command("layout Texturing & Materials");
+    CHECK(!ed.shows(Editor::FocusLight));
+    ed.command("create Point Light");
+    CHECK(ed.scene().find_by_name("Point Light") != nullptr);
+    /* Default shows everything, as before. */
+    ed.command("layout Default");
+    CHECK(ed.shows(Editor::FocusRig) && ed.shows(Editor::FocusEdit) && ed.shows(Editor::FocusMaterial));
+  });
+
+  test("layouts: Save Layout keeps the arrangement and the focus under a name; Delete Layout removes it; built-in names are refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("layout Rigging");
+    ed.command("window Lighting");
+    ed.step_frame_headless();
+    ed.command("layout save My Rig Stage");
+    const std::vector<std::string> names = ed.workspace_names();
+    CHECK(std::find(names.begin(), names.end(), "My Rig Stage") != names.end());
+    ed.command("layout Default");
+    ed.step_frame_headless();
+    ed.command("layout My Rig Stage");
+    ed.step_frame_headless();
+    CHECK(ed.workspace_name() == "My Rig Stage" && ed.window_rect_for_test(WindowKind::Lighting).w > 0 && ed.shows(Editor::FocusRig) &&
+          !ed.shows(Editor::FocusEdit));
+    ed.command("layout save Default");  // a built-in's name: refused
+    int defaults = 0;
+    for (const std::string &n : ed.workspace_names()) defaults += n == "Default";
+    CHECK(defaults == 1);
+    ed.command("layout delete My Rig Stage");
+    const std::vector<std::string> after = ed.workspace_names();
+    CHECK(std::find(after.begin(), after.end(), "My Rig Stage") == after.end());
+  });
+
+  test("layouts: a Reference Image is an unlit plane the image's shape, facing the view asked for, out of renders and shadows", [] {
+    const std::string png = fs::join(test_dir(), "r77_ref.png");
+    std::vector<uint32_t> px((size_t)200 * 100, 0xFF808080u);
+    CHECK(write_png(png, px.data(), 200, 100, 200));
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("refimage " + png + " top");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->name.rfind("Reference r77_ref", 0) == 0);
+    if (!g) return;
+    const MeshRenderer *mr = g->get<MeshRenderer>();
+    CHECK(mr && !mr->show_in_renders && !mr->cast_shadows && mr->materials.size() == 1 && mr->materials[0]->unlit);
+    CHECK(std::fabs(g->local().scale.x - 2.0f) < 1e-5f && std::fabs(g->local().scale.y - 1.0f) < 1e-5f);  // 2:1
+    const Vec3 facing = normalize(g->world_matrix().dir(Vec3(0, 0, -1)));  // the quad faces -Z before turning
+    std::printf("    top view: the image faces (%.2f, %.2f, %.2f)\n", facing.x, facing.y, facing.z);
+    CHECK(facing.y > 0.999f);
+    ed.command("refimage " + png + " side");
+    GameObject *s = ed.selected_object();
+    CHECK(s && s != g && normalize(s->world_matrix().dir(Vec3(0, 0, -1))).x > 0.999f);
+  });
+  test("layouts: a lesson's layout button arranges the windows too, and your own layouts survive a restart (preferences)", [] {
+    /* The lesson's "Use the UV Unwrapping layout" goes through dock_reset by name: the UV Editor opens beside the Scene. */
+    {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      ed.command("lesson 1");
+      ed.step_frame_headless();
+      ed.dock_reset_for_test("UV Unwrapping");
+      ed.step_frame_headless();
+      CHECK(ed.workspace_name() == "UV Unwrapping" && ed.window_rect_for_test(WindowKind::UVEditor).w > 0 && ed.shows(Editor::FocusUV));
+    }
+    const std::string prefs = fs::join(test_dir(), "r77_prefs.txt");
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(prefs), ec);
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.command("layout Lighting & Rendering");
+      ed.command("layout save Lights; and = Stuff");  // separators in a name are dropped, not saved broken
+      ed.command("layout Rigging");
+      ed.save_prefs_for_test();
+    }
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.load_prefs_for_test();
+      ed.step_frame_headless();
+      CHECK(ed.workspace_name() == "Rigging" && ed.shows(Editor::FocusRig) && !ed.shows(Editor::FocusEdit));
+      std::string mine;
+      for (const std::string &n : ed.workspace_names())
+        if (n.rfind("Lights", 0) == 0) mine = n;
+      std::printf("    restored: layout '%s', and yours '%s'\n", ed.workspace_name().c_str(), mine.c_str());
+      CHECK(!mine.empty() && mine.find(';') == std::string::npos && mine.find('=') == std::string::npos);
+      ed.command("layout " + mine);
+      ed.step_frame_headless();
+      CHECK(ed.window_rect_for_test(WindowKind::Lighting).w > 0 && ed.shows(Editor::FocusLight));
+    }
+  });
+  /* ---------------------------------------------------------------- round 78: bind poses (task 0056) */
+  test("bind poses: a glTF and an FBX saved with the forearm bent import bent like Blender shows them, and Reset Pose gives the bound shape", [] {
+    /* Blender's own posed tube (make_rig_posed.py), in glTF's axes: Blendity mirrors X. */
+    std::vector<Vec3> blender;
+    {
+      std::ifstream f("tests/fixtures/rig_tube_posed_verts.txt");
+      float x, y, z;
+      while (f >> x >> y >> z) blender.push_back({-x, y, z});
+    }
+    CHECK(blender.size() == 132);
+    /* The farthest any point of one set is from the other set (both ways). */
+    auto apart = [](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+      float worst = 0.0f;
+      for (int pass = 0; pass < 2; pass++) {
+        const std::vector<Vec3> &p = pass ? b : a, &q = pass ? a : b;
+        for (const Vec3 &v : p) {
+          float best = 1e30f;
+          for (const Vec3 &w : q) best = std::min(best, length(v - w));
+          worst = std::max(worst, best);
+        }
+      }
+      return worst;
+    };
+    for (const char *file : {"tests/fixtures/rig_tube_posed.glb", "tests/fixtures/rig_tube_posed.fbx"}) {
+      ImportResult r;
+      CHECK(import_model(file, r));
+      Editor ed;
+      ed.init_headless(800, 600);
+      GameObject *root = instantiate_import(ed.scene(), r, "Posed Import", nullptr);
+      GameObject *upper = ed.scene().find_by_name("Upper"), *tube = ed.scene().find_by_name("Tube");
+      CHECK(root && upper && upper->get<Bone>() && tube && tube->get<SkinModifier>());
+      if (!root || !upper || !upper->get<Bone>() || !tube || !tube->get<SkinModifier>()) continue;
+      const Bone &ub = *upper->get<Bone>();
+      /* The bones keep the file's pose; their rest is the bind pose: 60 degrees apart. */
+      const Quat a = ub.rest_rotation, b = upper->local().rotation;
+      const float bent = 2.0f * std::acos(std::min(1.0f, std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w)));
+      const Mat4 &tw = tube->world_matrix();
+      std::vector<Vec3> posed;
+      for (const Vec3 &p : tube->evaluated_mesh()->positions) posed.push_back(tw.point(p));
+      const float off = apart(posed, blender);
+      std::printf("    %s: Upper posed %.2f degrees from its rest; %zu vertices, at most %.2g from Blender's posed mesh\n", file, bent * 57.29578f, posed.size(),
+                  off);
+      CHECK(std::fabs(bent * 57.29578f - 60.0f) < 0.1f);
+      CHECK(off < 1e-3f * 2.0f);  // 1e-3 of the tube's size (2 m)
+      /* Reset Pose: back to the file's vertices (the shape it was bound in), and Upper straight above Lower again. */
+      ed.command("armature reset Upper");
+      const Mesh &m = *tube->mesh_filter()->mesh;
+      const Mesh *e = tube->evaluated_mesh();
+      float rest = 0.0f;
+      for (size_t i = 0; i < m.vert_count(); i++) rest = std::max(rest, length(tw.point(e->positions[i]) - tw.point(m.positions[i])));
+      const Vec3 tip = upper->world_matrix().point(Vec3(0.0f));
+      std::printf("    after Reset Pose: moved by %.2g from the file's mesh; Upper's head at (%.3f, %.3f, %.3f)\n", rest, tip.x, tip.y, tip.z);
+      CHECK(rest < 1e-3f);
+      CHECK(length(tip - Vec3(0.0f, 1.0f, 0.0f)) < 1e-3f);
+    }
+  });
+
+  test("bind poses: a rig saved at rest imports as before (each bone's rest is where the file puts it)", [] {
+    for (const char *file : {"tests/fixtures/rig_tube.glb", "tests/fixtures/rig_tube.fbx"}) {
+      ImportResult r;
+      CHECK(import_model(file, r));
+      int binds = 0;
+      for (const ImportedNode &n : r.nodes) binds += n.has_bind;
+      Scene s;
+      instantiate_import(s, r, "Rest Import", nullptr);
+      float worst = 0.0f;
+      int bones = 0;
+      for (const char *name : {"Lower", "Upper"}) {
+        const GameObject *g = s.find_by_name(name);
+        const Bone *b = g ? g->get<Bone>() : nullptr;
+        CHECK(b);
+        if (!b) continue;
+        bones++;
+        worst = std::max(worst, length(b->rest_position - g->local().position) / std::max(1.0f, length(g->local().position)));
+        const Quat q = b->rest_rotation, l = g->local().rotation;
+        worst = std::max(worst, 1.0f - std::fabs(q.x * l.x + q.y * l.y + q.z * l.z + q.w * l.w));
+      }
+      std::printf("    %s: %d bones with a bind pose; rest differs from the saved transform by %.2g\n", file, binds, worst);
+      CHECK(bones == 2 && binds >= 2 && worst == 0.0f);  // exactly: a bind equal to the saved transform keeps it bit for bit
+    }
+  });
+
+  test("bind poses: a bind that can't be used (under a parent scaled to 0, or broken) leaves the bone resting where the file puts it", [] {
+    ImportResult r;
+    ImportedNode hidden, bone, mesh;
+    hidden.name = "Hidden";
+    hidden.scale = Vec3(0.0f);  // hide-by-scale: its place has no inverse
+    bone.name = "Joint";
+    bone.parent = 0;
+    bone.position = {0.0f, 1.0f, 0.0f};
+    bone.is_bone = true;
+    bone.has_bind = true;
+    bone.bind_world = Mat4::translate({3.0f, 4.0f, 5.0f});
+    mesh.name = "Body";
+    r.nodes = {hidden, bone, mesh};
+    Scene s;
+    instantiate_import(s, r, "Broken Bind", nullptr);
+    const GameObject *g = s.find_by_name("Joint");
+    const Bone *b = g ? g->get<Bone>() : nullptr;
+    CHECK(b && length(b->rest_position - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);
+    /* A non-finite bind is the same. */
+    r.nodes[0].scale = Vec3(1.0f);
+    r.nodes[1].bind_world.m[12] = std::numeric_limits<float>::quiet_NaN();
+    Scene s2;
+    instantiate_import(s2, r, "Broken Bind", nullptr);
+    g = s2.find_by_name("Joint");
+    b = g ? g->get<Bone>() : nullptr;
+    CHECK(b && length(b->rest_position - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);
+  });
+  test("layouts: clicking the Layout dropdown opens its list (it crashed: the list outlived its names) and picking a row applies it", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    const Recti r = ed.combo_rect_for_test("layout_combo");
+    CHECK(r.w > 0 && r.h > 0);
+    if (r.w <= 0) return;
+    auto click = [&](int x, int y) {
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+    };
+    /* Open it from a custom arrangement too (its names list then grows a "Custom" row each frame). */
+    for (const char *start : {"Default", "custom"}) {
+      if (std::string(start) == "custom") ed.command("layout 0,1,2|3,4");
+      else ed.command("layout Default");
+      ed.step_frame_headless();
+      click(r.x + r.w / 2, r.y + r.h / 2);
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();  // the list draws, frame after frame
+      Recti row;
+      const bool listed = ed.button_rect_for_test("menu:UV Unwrapping", row);
+      std::printf("    from %s: list open %d, popups %zu\n", start, (int)listed, ed.popup_count_for_test());
+      CHECK(listed && ed.popup_count_for_test() == 1);
+      if (!listed) continue;
+      click(row.x + row.w / 2, row.y + row.h / 2);
+      CHECK(ed.workspace_name() == "UV Unwrapping" && ed.popup_count_for_test() == 0);
+    }
+  });
+  test("object fields: dragging an object from the Hierarchy onto an object field (a Boolean's Object) fills it in (Unity's object field) and keeps the Inspector where it was", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("component BooleanModifier");
+    r34_steps(ed, 3);
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    /* Press on the Cylinder's row, drag sideways into the Inspector, let go over the field. */
+    auto drag_onto = [&](const std::string &object, const std::string &field) {
+      int hx = 0, hy = 0;
+      Recti f;
+      if (!ed.hierarchy_row_for_test(object, hx, hy) || !ed.button_rect_for_test("field:" + field, f)) {
+        std::printf("    no row '%s' or field '%s'\n", object.c_str(), field.c_str());
+        return false;
+      }
+      const int fx = f.x + f.w / 2, fy = f.y + f.h / 2;
+      ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+      ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<BooleanModifier>());
+    if (!cube || !cube->get<BooleanModifier>()) return;
+    CHECK(drag_onto("Cylinder", "Object"));
+    std::printf("    Boolean's Object: '%s'; still showing Cube: %d\n", cube->get<BooleanModifier>()->object.c_str(),
+                (int)(ed.active_object_for_test() == cube));
+    CHECK(cube->get<BooleanModifier>()->object == "Cylinder");
+    CHECK(ed.active_object_for_test() == cube);  // the drag didn't select the Cylinder (the Inspector stays on the Cube)
+    ed.command("undo");
+    r34_steps(ed, 2);
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<BooleanModifier>() && cube->get<BooleanModifier>()->object.empty());  // one undo step
+    /* A plain click on a row still selects it. */
+    int hx = 0, hy = 0;
+    CHECK(ed.hierarchy_row_for_test("Cylinder", hx, hy));
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseUp, hx, hy)});
+    ed.step_frame_headless();
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Cylinder");
+  });
+  test("object fields: a wobbly click still selects, a row dropped in the Scene view ends up selected, and a drag ends with the button", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    int hx = 0, hy = 0;
+    CHECK(ed.hierarchy_row_for_test("Cylinder", hx, hy));
+    /* A click that slides 8 pixels sideways on the same row: a drag that went nowhere, still a selection. */
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseMove, hx + 8, hy)});
+    ed.step_frame_headless({at(ET::MouseUp, hx + 8, hy)});
+    ed.step_frame_headless();
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Cylinder");
+    /* Back to the Cube; drag the (unselected) Cylinder into the Scene view: it lands there and is selected. */
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    int sx = 0, sy = 0;
+    CHECK(ed.project_to_window(Vec3(2.0f, 0.0f, 2.0f), sx, sy));
+    CHECK(ed.hierarchy_row_for_test("Cylinder", hx, hy));
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (sx - hx) * k / 4, hy + (sy - hy) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, sx, sy)});
+    /* The very next frame presses again (no idle frame between): the old drag must not still be live. */
+    ed.step_frame_headless({at(ET::MouseDown, sx, sy)});
+    CHECK(ed.hierarchy_drag_object() == nullptr);
+    ed.step_frame_headless({at(ET::MouseUp, sx, sy)});
+    ed.step_frame_headless();
+    std::printf("    after the Scene-view drop: active '%s'\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "-");
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Cylinder");
+  });
+  test("assets: `matdelete` takes comma-separated names with spaces, skips unknown ones, and split_list trims and drops empty parts", [] {
+    const std::vector<std::string> parts = split_list("  Wood Floor , Bricks,, ,Tiles  ", ',');
+    CHECK(parts.size() == 3 && parts[0] == "Wood Floor" && parts[1] == "Bricks" && parts[2] == "Tiles");
+    CHECK(split_list("", ',').empty() && split_list(" , ", ',').empty());
+    /* Earlier runs' copies out of the scratch project (newmat would name the new ones "R80 Oak 1"...). */
+    for (const char *f : {"R80 Oak.mat", "R80Pine.mat"}) std::remove(resolve_asset_path(std::string("Assets/Materials/") + f).c_str());
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("newmat R80 Oak");
+    ed.command("newmat R80Pine");
+    CHECK(fs::exists(resolve_asset_path("Assets/Materials/R80 Oak.mat")) && fs::exists(resolve_asset_path("Assets/Materials/R80Pine.mat")));
+    ed.command("matdelete R80 Oak, No Such Material, R80Pine");
+    CHECK(!fs::exists(resolve_asset_path("Assets/Materials/R80 Oak.mat")) && !fs::exists(resolve_asset_path("Assets/Materials/R80Pine.mat")));
+  });
+  test("assets: a list's multi-selection - Ctrl+Shift with the last click gone starts a range, sync drops hidden ones, Ctrl+A returns the last", [] {
+    const std::vector<std::string> shown{"A", "B", "C", "D"};
+    MultiSelect<std::string> s;
+    s.click(shown, 1, false, false);  // B
+    s.click(shown, 3, false, true);   // Shift: B..D
+    CHECK(s.items.size() == 3 && s.has("B") && s.has("C") && s.has("D") && s.anchor == "B");
+    s.click(shown, 0, true, false);  // Ctrl: + A, the anchor moves to A
+    CHECK(s.items.size() == 4 && s.anchor == "A");
+    /* The anchor scrolled out of a narrower list: Ctrl+Shift starts the range at the click, keeping the rest. */
+    const std::vector<std::string> narrow{"C", "D"};
+    s.only("B");
+    s.anchor = "Z";
+    s.click(narrow, 1, true, true);
+    CHECK(s.has("B") && s.has("D") && s.anchor == "D");
+    /* sync: hidden ones drop; the edited one joins when shown; nothing edited, nothing selected. */
+    s.items = {"A", "C"};
+    s.sync(narrow, "D");
+    CHECK(s.items.size() == 1 && s.items[0] == "D");
+    s.items = {"C"};
+    s.sync(narrow, "C");
+    CHECK(s.items.size() == 1 && s.items[0] == "C");
+    s.sync(narrow, "");
+    CHECK(s.items.empty());
+    const std::string *last = s.select_all(shown);
+    CHECK(last && *last == "D" && s.items.size() == 4);
+    CHECK(s.select_all({}) == nullptr);
   });
 }
