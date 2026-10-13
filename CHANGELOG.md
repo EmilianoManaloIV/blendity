@@ -2,6 +2,59 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 74): the Rigging window (task 0052)
+
+**Asked:** "rigging and weight painting tools should be in their own tab. The mesh filter area is getting a little
+crowded from the amount of modeling operations we have."
+
+**Added**
+- **Window > Rigging**, opened beside the Inspector, with these sections:
+  - **Skeleton**: Add Armature, Add Bone, Humanoid / Quadruped Rig, Reset Pose, Apply as Rest, and the armature's
+    settings.
+  - **Skin**: Add Armature (Skin) to the selected mesh for the selected skeleton, Bind: Automatic Weights, the
+    skin's settings.
+  - **Vertex Groups.**
+  - **Weight Paint**: the toggle and the brush.
+  - **Inverse Kinematics**: Add IK to Bone (makes its target and pole), Auto IK, the IK's settings.
+- **Selecting a bone while painting** (in the Hierarchy) paints the group named after it, as Blender does.
+- Console: `ik add [bone]` makes the target and pole.
+- **Learn** (the user: "I really like the Learn feature ... feel free to use this system further"):
+  - "The Rigging window" in the Modifiers lesson.
+  - "Quality tiers: a small machine" in Performance and Stress Testing.
+  - "A small graphics card" in Rendering on the GPU.
+  - Each has Try it buttons and questions.
+
+**Changed**
+- The Inspector's MeshFilter section keeps modeling; one row ("Vertex Groups, Weight Paint: Rigging...") opens the
+  window.
+
+**Checked**
+- New tests (round 74), by clicks:
+  - Add Bone puts a child at the tip.
+  - Reset Pose and Apply as Rest work.
+  - Add IK to Bone makes a target and a pole, and moving the target poses the bones.
+  - The MeshFilter row opens the window with the groups.
+  - With a mesh and a bone selected, Add Armature (Skin) binds the mesh.
+  - The window's Weight Paint paints a stroke.
+  - Selecting bones while painting switches groups.
+  - A layout with the Rigging tab loads back.
+  - The new lessons' Try it commands make a humanoid and open the window, switch the tier and threads, and set the device to Auto.
+- Unit checks: Windows 9,384, 0 failed (580 tests); the whole suite in render-cache verify mode: 9,377,
+  0 failed, 0 stale pictures. Linux with libraries: 9,284, 0 failed. Sanitizer build: 9,202, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: three majors and several minor findings, fixed:
+- Add Armature (Skin) could almost never be clicked; it now looks through the whole selection.
+- Fields shared UI ids: the IK's Weight and the brush's Weight. The window, each component and the brush have their
+  own ids now.
+- The buttons went by name, so two characters' identical bones or a name with a space went wrong. They act on the
+  objects now.
+- Also fixed:
+  - A failed bind left a Skin with no undo step.
+  - A bone selected mid-stroke was lost.
+  - Add IK on an arm put the pole in front.
+  - The test hook kept old button rectangles.
+
 ## 2026-10-13 (round 73): the minimum machine's GPU (task 0051)
 
 **Asked:** the same request: "at minimum run on a GTX 1050ti".

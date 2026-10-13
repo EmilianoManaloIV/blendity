@@ -26,13 +26,13 @@ using ui::Icon;
 static const char *kVersion = "0.10.0";
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging"};
   static_assert(sizeof(names) / sizeof(names[0]) == (size_t)WindowKind::Count, "a title per window");
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move};
   static_assert(sizeof(icons) / sizeof(icons[0]) == (size_t)WindowKind::Count, "an icon per window");
   return icons[(int)k];
 }
@@ -848,7 +848,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
@@ -1240,6 +1240,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Render: draw_render_window(r); break;
     case WindowKind::Lighting: draw_lighting_window(r); break;
     case WindowKind::Textures: draw_textures_window(r); break;
+    case WindowKind::Rigging: draw_rigging_window(r); break;
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1311,6 +1312,7 @@ void Editor::dock_open(WindowKind k, bool focus) {
     /* The Textures window goes beside the Materials window when it is docked (not over the Scene view, which a
      * thumbnail is dragged onto); everything else into the largest area. */
     if (k == WindowKind::Textures) leaf = dock_find(WindowKind::Materials);
+    if (k == WindowKind::Rigging) leaf = dock_find(WindowKind::Inspector);  // a tab beside it (painting needs the Scene view free)
     if (!leaf) leaf = dock_largest_leaf();
     leaf->tabs.push_back(k);
   }
@@ -4042,17 +4044,7 @@ void Editor::rig_command(const std::vector<std::string> &t) {
       Log::warn("bone add: no object named '%s'", arg(2, "").c_str());
       return;
     }
-    const float len = t.size() > 3 ? std::max(0.01f, (float)std::atof(t[3].c_str())) : 1.0f;
-    std::string name = "Bone";
-    for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Bone.%03d", k);
-    GameObject *b = scene_->create(name, parent);
-    Bone *bone = b->add<Bone>();
-    bone->length = len;
-    if (const Bone *pb = parent->get<Bone>()) b->set_local_position(Vec3(0, pb->length, 0));  // at the parent's tail
-    bone->set_rest(b->local());
-    expanded_.insert(parent->id);
-    select(b->id);
-    mark_changed("Add Bone");
+    add_bone(parent, t.size() > 3 ? std::max(0.01f, (float)std::atof(t[3].c_str())) : 1.0f);
     return;
   }
   if (t[0] == "armature") {
@@ -4068,6 +4060,10 @@ void Editor::rig_command(const std::vector<std::string> &t) {
   }
   if (t[0] == "skin" && to_lower(arg(1, "")) == "bind") {
     skin_bind(t.size() > 2 ? scene_->find_by_name(arg(2, "")) : active_object());
+    return;
+  }
+  if (t[0] == "ik" && to_lower(arg(1, "")) == "add" && t.size() <= 3) {  // ik add [bone]: a target and a pole made for it
+    add_ik(t.size() == 3 ? scene_->find_by_name(t[2]) : active_object());
     return;
   }
   if (t[0] == "ik" && to_lower(arg(1, "")) == "add") {  // ik add <bone> <target> [pole|-] [chain]
@@ -4110,8 +4106,37 @@ void Editor::rig_command(const std::vector<std::string> &t) {
       return;
     }
   }
-  Log::warn("bone add <parent> [length] | armature reset|apply [root] | skin bind [object] | ik add <bone> <target> [pole] [chain] | "
-            "rig humanoid|quadruped|autoik [root]");
+  Log::warn("bone add <parent> [length] | armature reset|apply [root] | skin bind [object] | ik add [bone] | "
+            "ik add <bone> <target> [pole] [chain] | rig humanoid|quadruped|autoik [root]");
+}
+
+/* A child bone of `parent` at its tip (or at its origin, an armature's root), selected; one undo step. */
+GameObject *Editor::add_bone(GameObject *parent, float length) {
+  if (!parent) return nullptr;
+  std::string name = "Bone";
+  for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Bone.%03d", k);
+  GameObject *b = scene_->create(name, parent);
+  Bone *bone = b->add<Bone>();
+  bone->length = std::max(0.01f, length);
+  if (const Bone *pb = parent->get<Bone>()) b->set_local_position(Vec3(0, pb->length, 0));  // at the parent's tail
+  bone->set_rest(b->local());
+  expanded_.insert(parent->id);
+  select(b->id);
+  mark_changed("Add Bone");
+  return b;
+}
+
+/* IK on a bone and its parent with a new target and pole (the Rigging window's Add IK; console `ik add <bone>`). */
+IKConstraint *Editor::add_ik(GameObject *bone) {
+  IKConstraint *ik = add_ik_to_bone(*scene_, bone);
+  if (!ik) {
+    Log::warn("Add IK: '%s' must be a bone whose parent is a bone, without IK already", bone ? bone->name.c_str() : "");
+    return nullptr;
+  }
+  solve_constraints(*scene_);
+  mark_changed("Add IK");
+  Log::info("IK on '%s': move '%s'", bone->name.c_str(), ik->target.c_str());
+  return ik;
 }
 
 bool Editor::armature_pose(GameObject *root, bool apply_as_rest) {

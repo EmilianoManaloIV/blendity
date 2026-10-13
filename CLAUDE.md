@@ -99,4 +99,4 @@ run the reviewer.
 - `main` is protected: PRs only, `windows` / `linux` / `macos` / `linux-sanitizers` must pass on a branch
   up to date with `main`, no force pushes.
 - After a merge: `git fetch origin main && git update-ref refs/heads/blendity-root origin/main`.
-- No force pushes, no branch deletions, no history rewrites.
+- No force pushes, no history rewrites. Branches are deleted only once merged into `main` (the user asked, 2026-10-13: `git push origin --delete` the merged `task/*` branches after each merge).

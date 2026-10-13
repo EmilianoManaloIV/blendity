@@ -76,6 +76,7 @@ bool Editor::set_weight_paint(bool on) {
   if (mf->mesh->vertex_groups.empty()) vgroup_op("add", "", "", 1.0f);  // something to paint
   weight_paint_ = true;
   wp_obj_ = g->id;
+  wp_last_active_ = active_;  // (the mesh: no bone to follow yet)
   wp_scene_ = scene_.get();
   wp_group_ = std::max(0, std::min(active_vgroup_, (int)mf->mesh->vertex_groups.size() - 1));
   wp_saved_shading_ = shading_;
@@ -257,6 +258,21 @@ bool Editor::wp_update(const Recti &view) {
   if (!wp_mesh()) {  // the object is gone, or another scene
     set_weight_paint(false);
     return false;
+  }
+  /* A bone selected while painting paints its own group, the one named after it (Blender: selecting a bone in
+   * Weight Paint mode; task 0052). */
+  if (active_ != wp_last_active_ && !wp_stroking_) {  // (a change mid-stroke is taken when the stroke ends)
+    wp_last_active_ = active_;
+    const GameObject *a = active_object();
+    if (a && a->get<Bone>()) {
+      const int gi = wp_mesh()->find_group(a->name);
+      if (gi >= 0) {
+        wp_group_ = active_vgroup_ = gi;
+        wp_version_++;
+        ui_.redraw = true;
+      }
+      else Log::info("Weight Paint: the mesh has no group named '%s' (Rigging > Skin > Bind adds one per bone)", a->name.c_str());
+    }
   }
   const float x = (float)(in.mx - view.x), y = (float)(in.my - view.y);
   if (!wp_stroking_) {

@@ -309,6 +309,17 @@ static bool limb_of(const std::string &raw, int &side, int &limb) {
   return true;
 }
 
+/* Where a two-bone limb's pole goes: where it already bends; a straight limb, the skeleton's forward (knees) or back
+ * (elbows). */
+static Vec3 limb_pole_dir(const GameObject &upper, const GameObject &lower, const GameObject &root, bool elbow) {
+  const Vec3 A0 = upper.world_position(), B0 = lower.world_position(), tip = bone_tail(lower);
+  const Vec3 line = normalize(tip - A0);
+  Vec3 bend = (B0 - A0) + (B0 - tip);
+  bend = bend - line * dot(bend, line);
+  const Vec3 fwd = normalize(root.world_matrix().dir(Vec3(0, 0, 1)));
+  return length(bend) > 1e-3f * length(B0 - A0) ? normalize(bend) : (elbow ? fwd * -1.0f : fwd);
+}
+
 int add_humanoid_ik(Scene &s, GameObject *root) {
   if (!root) return 0;
   /* The bones by limb; a lower bone counts when its parent is the matching upper one. */
@@ -327,17 +338,20 @@ int add_humanoid_ik(Scene &s, GameObject *root) {
       GameObject *upper = found[side][pair * 2], *lower = found[side][pair * 2 + 1];
       if (!upper || !lower || lower->parent != upper || lower->get<IKConstraint>()) continue;
       const std::string S = side ? "Right" : "Left";
-      /* The pole where the limb already bends; a straight limb: the skeleton's forward (knees) or back (elbows). */
-      const Vec3 A0 = upper->world_position(), B0 = lower->world_position(), tip = bone_tail(*lower);
-      const Vec3 line = normalize(tip - A0);
-      Vec3 bend = (B0 - A0) + (B0 - tip);
-      bend = bend - line * dot(bend, line);
-      const Vec3 fwd = normalize(root->world_matrix().dir(Vec3(0, 0, 1)));
-      const Vec3 pole_dir = length(bend) > 1e-3f * length(B0 - A0) ? normalize(bend) : (pair ? fwd * -1.0f : fwd);
-      add_limb_ik(s, root, lower, S + (pair ? "HandIK" : "FootIK"), S + (pair ? "ElbowPole" : "KneePole"), pole_dir);
+      add_limb_ik(s, root, lower, S + (pair ? "HandIK" : "FootIK"), S + (pair ? "ElbowPole" : "KneePole"), limb_pole_dir(*upper, *lower, *root, pair == 1));
       added++;
     }
   return added;
+}
+
+IKConstraint *add_ik_to_bone(Scene &s, GameObject *lower) {
+  if (!lower || !lower->get<Bone>() || !lower->parent || !lower->parent->get<Bone>() || lower->get<IKConstraint>()) return nullptr;
+  GameObject *root = lower;
+  while (root->parent && !root->get<Armature>()) root = root->parent;  // the skeleton's root (or the top of the chain)
+  int side = 0, limb = 0;
+  const bool elbow = limb_of(lower->name, side, limb) && limb >= 2;  // a forearm by its name: a straight arm bends back
+  add_limb_ik(s, root, lower, lower->name + "IK", lower->name + "Pole", limb_pole_dir(*lower->parent, *lower, *root, elbow));
+  return lower->get<IKConstraint>();
 }
 
 }  // namespace bl

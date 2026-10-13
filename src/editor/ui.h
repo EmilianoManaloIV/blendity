@@ -105,6 +105,9 @@ class Context {
   platform::Cursor cursor = platform::Cursor::Arrow;
   /* Set by widgets that need another frame right away (popup results, layout). */
   bool redraw = false;
+  /* Tests: each button's rectangle by its label, as last drawn (filled only while record_buttons is set). */
+  bool record_buttons = false;
+  std::unordered_map<std::string, Recti> button_rects;
   /* Absolute time at which the UI wants to be woken (tooltips, caret blink); 0 = never. */
   double next_wakeup = 0;
   std::function<std::string()> clipboard_get;

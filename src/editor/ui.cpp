@@ -20,6 +20,7 @@ using namespace platform;
 /* ===================================================================== */
 
 void Context::begin_frame(Image *target, double now) {
+  if (record_buttons) button_rects.clear();  // (tests: only what this frame drew)
   canvas.begin(target);
   frame_++;
   order_last_ = 0;
@@ -114,6 +115,7 @@ void Context::label(const Recti &r, const std::string &text, uint32_t color, Ali
 static uint64_t rect_key(const Recti &r) { return ((uint64_t)(uint16_t)r.x << 48) ^ ((uint64_t)(uint16_t)r.y << 32) ^ ((uint64_t)r.w << 16) ^ r.h; }
 
 bool Context::button(const Recti &r, const std::string &text, bool selected, Icon icon) {
+  if (record_buttons) button_rects[text] = r;
   Id i = id(text) ^ (rect_key(r) * 0x9E3779B97F4A7C15ull);
   bool hot = hovered(r);
   bool clicked = false;

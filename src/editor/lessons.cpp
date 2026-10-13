@@ -216,10 +216,16 @@ Under Vertex Groups, press Weight Paint: the mesh turns blue (weight 0) to red (
 # Bones and skins
 A skeleton is a hierarchy of bones: in Blendity each bone is a GameObject with a Bone component, under a root with an Armature. Pose it by turning bones with the Rotate gizmo, like any object. A mesh follows through its Armature (Skin) modifier: each vertex moves with the bones its vertex groups are named after, weighted. Select a mesh and choose GameObject > Armature: a bone the mesh's height is made and the mesh bound to it with automatic weights (by distance); `bone add <parent>` adds bones at a parent's tip, and Bind: Automatic Weights binds again; Weight Paint fixes what automatic weights get wrong. Linear blending makes twisted joints thin (the candy wrapper); Armature > Deform: Dual Quaternion keeps their girth. Armature > Rest Position shows the mesh unposed; `armature reset` puts the bones back, `armature apply` makes the pose the new rest. Rigged FBX and glTF characters import with all of this set up.
 # Inverse kinematics
-Turning a thigh and then a shin until the foot lands on a step is slow; IK does it backwards. An IK constraint on the shin (Chain Length 2: shin and thigh) turns both so the shin's tip reaches the Target object: move the target and the leg follows, every frame and in Play. Two bones have one exact answer (the triangle of thigh, shin and hip-to-target, the law of cosines) up to which way the knee points: a Pole object picks that. Longer chains (a tail, a spine) are solved by cyclic coordinate descent: from the tip up, each bone turns the tip towards the target, a few dozen rounds. Weight fades from the rest pose to the solution. A bone IK turns refuses the gizmo and G / R / S: move its target. GameObject > Rig > Humanoid or Quadruped makes a whole skeleton with targets (FootIK, HandIK) and poles; Auto IK on Selected Skeleton finds the legs and arms of an imported Mixamo, Unity or Rigify skeleton by their names. Console: `ik add <bone> <target> [pole] [chain]`, `rig humanoid|quadruped|autoik`.
+Turning a thigh and then a shin until the foot lands on a step is slow; IK does it backwards. An IK constraint on the shin (Chain Length 2: shin and thigh) turns both so the shin's tip reaches the Target object: move the target and the leg follows, every frame and in Play. Two bones have one exact answer (the triangle of thigh, shin and hip-to-target, the law of cosines) up to which way the knee points: a Pole object picks that. Longer chains (a tail, a spine) are solved by cyclic coordinate descent: from the tip up, each bone turns the tip towards the target, a few dozen rounds. Weight fades from the rest pose to the solution. A bone IK turns refuses the gizmo and G / R / S: move its target. GameObject > Rig > Humanoid or Quadruped makes a whole skeleton with targets (FootIK, HandIK) and poles; Auto IK on Selected Skeleton finds the legs and arms of an imported Mixamo, Unity or Rigify skeleton by their names. Console: `ik add <bone>` (makes its target and pole) or `ik add <bone> <target> [pole] [chain]`, `rig humanoid|quadruped|autoik`. All of it is in the Rigging window (Window > Rigging).
 > Welman, C. (1993) Inverse Kinematics and Geometric Constraints for Articulated Figure Manipulation. MSc thesis, Simon Fraser University (CCD).
 @ blender/source/blender/ikplugin/intern/iksolver_plugin.cc
 ? A thigh and a shin are 0.45 m and 0.43 m. Can the foot reach a target 0.9 m from the hip? | No: the chain is at most 0.88 m long, so IK points the straightened leg at it.
+! cmd:rig humanoid; window Rigging | Make a humanoid rig and open the Rigging window
+# The Rigging window
+Window > Rigging gathers everything for characters, beside the Inspector: Skeleton (Add Armature, Add Bone at the selected bone's tip, the Humanoid and Quadruped rigs, Reset Pose, Apply as Rest), Skin (Add Armature (Skin) to a mesh, Bind: Automatic Weights), Vertex Groups, Weight Paint and Inverse Kinematics (Add IK to Bone makes its target and pole; Auto IK finds the limbs by name). The buttons work on the selection: to skin a mesh, Ctrl+click the mesh and one bone of the skeleton in the Hierarchy, then press Add Armature (Skin). While Weight Paint is on, selecting a bone in the Hierarchy paints the group named after it, as Blender does in Weight Paint mode.
+! window:Rigging | Open the Rigging window
+! cmd:create Cylinder; create Armature; bone add Bone 1; window Rigging | A cylinder bound to a two-bone armature: pose Bone.001 or press Add IK to Bone
+? Why does Add Armature (Skin) want a bone selected as well as the mesh? | A scene can hold several skeletons: the selected bone (or armature) says which one the mesh follows.
 # Catmull-Clark in three rules
 - Face point = average of the face's corners.
 - Edge point = average of the edge's two ends and the two neighbouring face points.
@@ -357,6 +363,18 @@ Each test compares a naive version with the optimised one, so you can see what e
 > [FoCG] 12.3 Spatial Data Structures
 ! window:Profiler | Open the Profiler
 ! spawn:1000 | Spawn 1,000 spheres and watch the frame time
+# Quality tiers: a small machine
+Blendity's views are drawn by the CPU, so their cost follows the cores and the pixels. Preferences > Performance > Quality tier picks a set of limits for the editor's views (never for F12 renders): Low draws the Scene and Game views' 3D at 67 % and scales it up (lines, gizmos and text stay sharp, and clicks still pick exactly), with a 1024 shadow map, lighter Realtime GI and 60 fps; Medium is 85 %; High has no limits. A first run on a machine with 8 threads or fewer, or about 8 GB, starts on Low. CPU Threads sets how many threads Blendity works on, which also lets a big machine feel like a small one.
+| Tier | Views | Shadow map | Realtime GI | Frame cap
+| Low | 67 % | 1024 | 4 rays | 60
+| Medium | 85 % | 2048 | 8 rays | 120
+| High | 100 % | the scene's | the scene's | 144
+Two more tricks keep a small machine smooth. Cached shadows: while one object is dragged, the objects that stay still keep a shadow map of their own and only the moving one is drawn over a copy of it. The sky last: the background is drawn after the surfaces, only where none landed.
+! cmd:quality low | Switch to the Low tier (watch the views soften slightly)
+! cmd:quality high | Back to High
+! cmd:threads 8; quality low | Feel the minimum machine: 8 threads, Low
+! cmd:threads 0 | Every thread again
+? Why do the overlays stay sharp at 67 %? | Only the 3D picture is drawn smaller; the grid, gizmos, outlines and text are drawn afterwards at the view's full size, on top of the scaled-up picture.
 )"},
     {"References", "The papers behind Blendity's features", R"(
 Some of Blendity's features come straight from research papers. Each one is listed here with the feature it became and where to find it, so you can read the original next to the code. The code cites the same papers in its comments.
@@ -659,6 +677,10 @@ With several devices ticked, they share one counter of sample numbers. Each devi
 ? Why can adding the CPU make a render slower? | One CPU sample can take 30x longer than a GPU sample. If the CPU is still finishing a sample after the GPUs are done, everyone waits. Blendity stops the CPU from taking new samples near the end, but a fast GPU pair still does better alone.
 ! cmd:engine path; device gpu +cpu; window Render | Switch to path tracing on the GPU, with the CPU helping
 ! cmd:engine path; device gpu; render; window Render | Render the Main Camera on the GPUs only
+# A small graphics card
+A GTX 1050 Ti has no ray tracing hardware: it traces with Blendity's compute kernel, roughly as fast as a 4-core CPU. Render > Device > GPU + CPU (Auto) uses both, each taking samples as fast as it finishes them, so neither waits for the other. A scene that wouldn't fit in the card's memory goes with its textures a mip level smaller at a time; one that can't fit renders on the CPU, with a message, instead of failing. Each submission to the GPU stays near 100 ms, under the 2 seconds after which Windows resets a GPU that seems stuck.
+! cmd:engine path; device auto; window Render | Render on the GPU and the CPU together (Auto)
+? Why are GPU submissions kept short? | Windows' driver watchdog (TDR) resets a GPU whose work takes over 2 seconds; a slow card given 64 samples of a big frame at once could pass it.
 )"},
     {"Points, Lines, N-gons and Booleans", "Building from a vertex, SketchUp faces, combining solids", R"(
 Blender can start a model from a single vertex. Ctrl+E (Blender's E) on a vertex grows an edge: a "wire" or loose edge that no face uses yet. Ctrl+E on that edge grows a face. Blendity keeps those wire edges in the mesh (Mesh::loose_edges), saves them, and lets the Screw modifier sweep them into a solid.
