@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "animation.h"
 #include "curve.h"
 
 #include "../core/core.h"
@@ -80,6 +81,9 @@ void register_builtin_components() {
   reg<IKConstraint>("Rigging", "On the end bone of a chain (a shin, a forearm): the chain turns so its tip reaches the Target. "
                     "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
                     "Inverse Kinematics bone constraint (with Pole Target)");
+  reg<Animation>("Animation", "Plays an animation clip (Assets/Animations/*.anim) on this object and the ones below it, in Play. "
+                 "Make and edit clips in the Animation window.",
+                 "an Action played by the object (Animation data)");
   reg<MeshDeformModifier>("Mesh", "Binds the mesh to a closed cage mesh round it; moving the cage's vertices shapes the mesh smoothly.",
                           "Mesh Deform modifier (Bind)");
   reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");

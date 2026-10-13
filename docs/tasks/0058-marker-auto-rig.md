@@ -4,7 +4,7 @@
 - **Requirements:** R-06
 - **Decisions:** ADR 0028 (part 2: the marker auto-rig)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/55
 
 ## Goal
 The user asked (2026-10-12) for "a Mixamo-styled automatic weight paint" with "the markers and inpainted weights", and

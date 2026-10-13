@@ -22,6 +22,7 @@
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
 #include "../src/scene/skin_weights.h"
+#include "../src/scene/animation.h"
 #include "../src/scene/mesh.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
@@ -26299,5 +26300,283 @@ static void round81_tests() {
     big.command("select Mannequin");
     big.command("autorig humanoid");
     CHECK(big.autorig_for_test().markers.size() == 8);
+  });
+  /* ---------------------------------------------------------------- round 83: keyframe animation (task 0059) */
+  test("animation: Constant holds, Linear interpolates, Auto passes through every key without overshooting, and clips round-trip", [] {
+    AnimTrack t;
+    t.set_key(0, 0), t.set_key(10, 10), t.set_key(20, 0);
+    float worst = 0.0f;
+    for (float f = 0; f <= 20.0f; f += 0.25f) worst = std::max(worst, t.sample(f));
+    CHECK(std::fabs(t.sample(10) - 10.0f) < 1e-6f && worst <= 10.0f + 1e-5f);  // through the peak, never above it
+    /* Rising then rising more: the span between stays within its two keys. */
+    AnimTrack m;
+    m.set_key(0, 0), m.set_key(10, 1), m.set_key(20, 10);
+    bool inside = true;
+    for (float f = 10; f <= 20.0f; f += 0.25f) inside = inside && m.sample(f) >= 1.0f - 1e-5f && m.sample(f) <= 10.0f + 1e-5f;
+    CHECK(inside);
+    t.keys[0].interp = AnimLinear;
+    CHECK(std::fabs(t.sample(5) - 5.0f) < 1e-5f);
+    t.keys[0].interp = AnimConstant;
+    CHECK(t.sample(9.9f) == 0.0f && t.sample(10.0f) == 10.0f);
+    CHECK(t.sample(-5) == 0.0f && t.sample(50) == 0.0f);  // held outside the keys
+    AnimationClip c;
+    c.name = "Walk", c.frame_rate = 30, c.length = 48, c.loop = false;
+    c.track("Hips/Left Leg", "Rotation", 2).set_key(12, 45.5f, AnimLinear);
+    c.track("", "Light.Intensity", 0).set_key(3, 2.0f);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(c), back));
+    CHECK(back.frame_rate == 30 && back.length == 48 && !back.loop && back.tracks.size() == 2 && back.tracks[0].path == "Hips/Left Leg" &&
+          back.tracks[0].keys[0].value == 45.5f && back.tracks[0].keys[0].interp == AnimLinear && back.tracks[1].path.empty());
+    CHECK(wrap_frame(70, 60, 0) == 10.0f && wrap_frame(70, 60, 1) == 60.0f && wrap_frame(70, 60, 2) == 50.0f);
+  });
+
+  /* A box with a lid, for the editor tests. */
+  auto box_with_lid = [](Editor &ed) {
+    std::remove(resolve_asset_path("Assets/Animations/R83Box.anim").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R83Spin.anim").c_str());
+    GameObject *box = ed.scene().create("R83Box");
+    GameObject *lid = ed.scene().create("Lid", box);
+    lid->set_local_position({0, 2, 0});
+    ed.command("select R83Box");
+    ed.mark_changed_for_test("R83 box");
+    ed.step_frame_headless();
+    return box;
+  };
+
+  test("animation: the Animation window's clip on a box - keys on the lid, Preview scrubs without undo steps and puts the pose back", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("anim new");
+    CHECK(ed.scene().find_by_name("R83Box")->get<Animation>() && ed.anim_clip_for_test() &&
+          fs::exists(resolve_asset_path("Assets/Animations/R83Box.anim")));
+    ed.command("anim key Lid Position 1 0 0");
+    ed.command("anim key Lid Position 1 30 1");
+    ed.step_frame_headless();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("anim preview on");
+    for (int f : {0, 15, 30}) {
+      ed.command("anim frame " + std::to_string(f));
+      ed.step_frame_headless();
+    }
+    ed.command("anim frame 15");
+    GameObject *lid = ed.scene().find_by_name("Lid");
+    std::printf("    lid at frame 15: y = %.3f; undo steps %zu -> %zu\n", lid->local().position.y, steps, ed.undo_steps_for_test());
+    CHECK(std::fabs(lid->local().position.y - 0.5f) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps);  // scrubbing is no edit
+    ed.command("anim preview off");
+    CHECK(std::fabs(ed.scene().find_by_name("Lid")->local().position.y - 2.0f) < 1e-6f);  // back where it was
+    /* The file has the keys. */
+    AnimationClip back;
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path("Assets/Animations/R83Box.anim"), text) && load_clip_text(text, back));
+    CHECK(back.find("Lid", "Position", 1) && back.find("Lid", "Position", 1)->keys.size() == 2);
+  });
+
+  test("animation: Record turns a move into keys at the playhead (one undo step takes them back); renaming the clip keeps it playing", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("anim new");
+    ed.command("anim record on");
+    ed.command("anim frame 20");
+    ed.step_frame_headless();
+    GameObject *lid = ed.scene().find_by_name("Lid");
+    lid->set_local_position({0.5f, 2.0f, 0});
+    ed.mark_changed_for_test("Move Lid");
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *x = clip ? clip->find("Lid", "Position", 0) : nullptr;
+    std::printf("    recorded: %s\n", x ? strprintf("Lid x key at %g = %g", x->keys[0].frame, x->keys[0].value).c_str() : "nothing");
+    CHECK(x && x->keys.size() == 1 && x->keys[0].frame == 20.0f && x->keys[0].value == 0.5f);
+    CHECK(clip && clip->find("Lid", "Position", 1) && !clip->find("", "Position", 0));  // the lid's three axes, the box untouched
+    ed.command("undo");
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && !clip->find("Lid", "Position", 0));
+    /* Rename the clip in the Project window: the Animation component follows. */
+    ed.command("redo");
+    ed.command("renameasset Assets/Animations/R83Box.anim R83Spin");
+    ed.step_frame_headless();
+    const Animation *an = ed.scene().find_by_name("R83Box")->get<Animation>();
+    std::printf("    after the rename: '%s'\n", an ? an->clip.c_str() : "-");
+    CHECK(an && an->clip == "Assets/Animations/R83Spin.anim" && clip_asset(an->clip));
+  });
+
+  test("animation: in Play the Animation component turns a bone, and the skin follows", [] {
+    /* The component on its own (a fixed step), then in the editor's Play. */
+    Scene s;
+    GameObject *root = s.create("R83Arm");
+    GameObject *bone = s.create("Bone", root);
+    std::remove(resolve_asset_path("Assets/Animations/R83Arm.anim").c_str());
+    AnimationClipPtr c = create_clip_asset("Assets/Animations/R83Arm.anim", "R83Arm");
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->track("Bone", "Rotation", 0).set_key(0, 0, AnimLinear);
+    c->track("Bone", "Rotation", 0).set_key(60, 90);
+    Animation *an = root->add<Animation>();
+    an->clip = c->asset_path;
+    PlayContext ctx;
+    ctx.scene = &s;
+    an->start(ctx);
+    ctx.dt = 0.5f;  // 30 frames at 60 per second
+    an->update(ctx);
+    std::printf("    after half a second: the bone at %.2f degrees\n", bone->local().euler_hint.x);
+    CHECK(std::fabs(bone->local().euler_hint.x - 45.0f) < 1e-3f);
+    /* The editor: the Blender tube's Upper bone, keyed, moves its half of the mesh in Play. */
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ImportResult r;
+    CHECK(import_model("tests/fixtures/rig_tube.glb", r));
+    instantiate_import(ed.scene(), r, "Rig Import", nullptr);
+    GameObject *tube = ed.scene().find_by_name("Tube");
+    GameObject *arm = tube ? ed.scene().find_by_name(tube->get<SkinModifier>()->object) : nullptr;
+    CHECK(arm != nullptr);
+    if (!arm) return;
+    std::remove(resolve_asset_path("Assets/Animations/R83Tube.anim").c_str());
+    AnimationClipPtr bend = create_clip_asset("Assets/Animations/R83Tube.anim", "R83Tube");
+    const std::string path = anim_path(*arm, *ed.scene().find_by_name("Upper"));
+    bend->track(path, "Rotation", 0).set_key(0, 0, AnimLinear);
+    bend->track(path, "Rotation", 0).set_key(6, 60, AnimConstant);
+    arm->add<Animation>()->clip = bend->asset_path;
+    ed.mark_changed_for_test("R83 tube");
+    ed.step_frame_headless();
+    const std::vector<Vec3> rest = tube->evaluated_mesh()->positions;
+    ed.command("play");
+    const double t0 = now_seconds();
+    while (now_seconds() - t0 < 0.6) ed.step_frame_headless();
+    tube = ed.scene().find_by_name("Tube");
+    float moved = 0.0f;
+    for (size_t v = 0; v < rest.size(); v++) moved = std::max(moved, length(tube->evaluated_mesh()->positions[v] - rest[v]));
+    std::printf("    in Play the tube's vertices moved up to %.3f\n", moved);
+    CHECK(moved > 0.1f);
+    ed.command("stop");
+  });
+
+  test("animation: the dopesheet - clicking the ruler moves the playhead, dragging a key moves it in time, Delete removes it", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    box_with_lid(ed);
+    ed.command("window Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 10 1");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti sheet, ruler;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet) && ed.button_rect_for_test("anim_ruler", ruler));
+    if (sheet.w <= 0) return;
+    const float end = std::max(30.0f, ed.anim_clip_for_test()->end_frame()) * 1.1f;  // (the sheet's span: the clip and a tenth more)
+    auto x_of = [&](float f) { return sheet.x + (int)std::lround(f / end * (float)sheet.w); };
+    auto click = [&](int x, int y, bool drag_to = false, int x2 = 0) {
+      platform::Event m, d, mv, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, mv.type = platform::EventType::MouseMove, u.type = platform::EventType::MouseUp;
+      m.x = d.x = x, m.y = d.y = mv.y = u.y = y;
+      mv.x = u.x = drag_to ? x2 : x;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      if (drag_to) ed.step_frame_headless({mv});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+    };
+    click(x_of(20), ruler.y + ruler.h / 2);
+    std::printf("    the playhead after clicking the ruler at 20: %g\n", ed.anim_for_test().frame);
+    CHECK(std::fabs(ed.anim_for_test().frame - 20.0f) <= 1.0f);
+    const int row = sheet.y + ed.ui_for_test().row_h() / 2;  // the first (only) track
+    click(x_of(10), row, true, x_of(16));
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *t = clip ? clip->find("Lid", "Position", 1) : nullptr;
+    std::printf("    the key after dragging: frame %g\n", t && !t->keys.empty() ? t->keys[0].frame : -1.0f);
+    CHECK(t && t->keys.size() == 1 && std::fabs(t->keys[0].frame - 16.0f) <= 1.0f);
+    platform::Event del;
+    del.type = platform::EventType::KeyDown, del.key = platform::KEY_DELETE, del.x = sheet.x + sheet.w / 2, del.y = row;
+    ed.step_frame_headless({del});
+    ed.step_frame_headless();
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Lid", "Position", 1) && clip->find("Lid", "Position", 1)->keys.empty());
+  });
+  test("animation: names with spaces survive the file; Ping Pong, Once, Clamp and a negative Speed wrap as they should", [] {
+    AnimationClip c;
+    c.track("Lamp Post/Bulb", "Light.Spot Angle", 0).set_key(5, 40.0f);
+    c.track("Lamp Post/Bulb", "Light.Spot Angle", 0).set_key(10, 60.0f, AnimConstant);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(c), back));
+    const AnimTrack *t = back.find("Lamp Post/Bulb", "Light.Spot Angle", 0);
+    CHECK(back.tracks.size() == 1 && t && t->keys.size() == 2 && t->keys[1].value == 60.0f && t->keys[0].interp == AnimAuto);
+    AnimationClip bad;
+    CHECK(load_clip_text("blendity_anim 1\ntrack\t0\tPosition\tA\nkey 12 nan 0\nkey 3 1.5 1\n", bad));
+    CHECK(bad.tracks.size() == 1 && bad.tracks[0].keys.size() == 1 && bad.tracks[0].keys[0].frame == 3.0f);  // the bad line: no key
+    CHECK(wrap_frame(90, 60, 2) == 30.0f && wrap_frame(130, 60, 2) == 10.0f);  // ping pong: back down, then up again
+    CHECK(wrap_frame(-10, 60, 0) == 50.0f && wrap_frame(-10, 60, 2) == 10.0f);  // backwards
+    CHECK(wrap_frame(75, 60, 1) == 60.0f && wrap_frame(75, 60, 3) == 60.0f && wrap_frame(-5, 60, 3) == 0.0f);
+  });
+
+  test("animation: Record keys only real changes - a rename or a new child keys nothing - and Preview puts back only what it moved", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    GameObject *cube = ed.scene().create("R83Other");
+    cube->set_local_position({5, 0, 0});
+    ed.command("select R83Box");
+    ed.mark_changed_for_test("R83 other");
+    ed.step_frame_headless();
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 0 0");
+    ed.command("anim key Lid Position 1 30 1");
+    ed.command("anim record on");
+    ed.command("anim frame 15");
+    ed.step_frame_headless();
+    /* A rename and a new child: no keys. */
+    ed.scene().find_by_name("Lid")->name = "Lid2";
+    ed.mark_changed_for_test("Rename");
+    ed.step_frame_headless();
+    ed.scene().create("Handle", ed.scene().find_by_name("R83Box"))->set_local_position({0, 3, 0});
+    ed.mark_changed_for_test("Add child");
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    size_t keys = 0;
+    for (const AnimTrack &t : clip->tracks) keys += t.keys.size();
+    std::printf("    after a rename and a new child: %zu keys in %zu tracks\n", keys, clip->tracks.size());
+    CHECK(keys == 2 && clip->tracks.size() == 1);
+    ed.scene().find_by_name("Lid2")->name = "Lid";
+    ed.mark_changed_for_test("Rename back");
+    ed.step_frame_headless();
+    /* The unrelated cube moved while previewing stays moved; the lid goes back; an undo after that doesn't bring the
+     * previewed pose back. */
+    ed.command("anim record off");
+    ed.scene().find_by_name("R83Other")->set_local_position({7, 0, 0});
+    ed.mark_changed_for_test("Move other");
+    ed.step_frame_headless();
+    ed.command("anim preview off");
+    CHECK(ed.scene().find_by_name("R83Other")->local().position.x == 7.0f && std::fabs(ed.scene().find_by_name("Lid")->local().position.y - 2.0f) < 1e-6f);
+    ed.scene().find_by_name("R83Other")->set_local_position({9, 0, 0});
+    ed.mark_changed_for_test("Move other again");
+    ed.step_frame_headless();
+    ed.command("undo");
+    std::printf("    after the undo: other x = %g, lid y = %g\n", ed.scene().find_by_name("R83Other")->local().position.x, ed.scene().find_by_name("Lid")->local().position.y);
+    CHECK(ed.scene().find_by_name("R83Other")->local().position.x == 7.0f && std::fabs(ed.scene().find_by_name("Lid")->local().position.y - 2.0f) < 1e-6f);
+  });
+
+  test("animation: Preview is refused in Play, a new scene clears the window, and an undo after renaming the clip still finds it", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.step_frame_headless();
+    ed.command("play");
+    ed.command("anim preview on");
+    CHECK(!ed.anim_for_test().preview);
+    ed.command("stop");
+    /* Rename, then undo a step made before it: the Animation component (restored from before) still finds the clip. */
+    ed.command("anim key Lid Position 1 20 2");
+    ed.step_frame_headless();
+    ed.command("renameasset Assets/Animations/R83Box.anim R83Spin");
+    ed.step_frame_headless();
+    ed.command("undo");  // the second key
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    after rename + undo: clip %s, %zu key(s)\n", clip ? clip->asset_path.c_str() : "-", clip && !clip->tracks.empty() ? clip->tracks[0].keys.size() : 0);
+    CHECK(clip && clip->asset_path == "Assets/Animations/R83Spin.anim" && clip->tracks.size() == 1 && clip->tracks[0].keys.size() == 1);
+    ed.command("newscene");
+    CHECK(!ed.anim_for_test().preview && ed.anim_for_test().selected.empty());
   });
 }

@@ -28,6 +28,7 @@
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
 #include "../src/scene/skin_weights.h"
+#include "../src/scene/animation.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
@@ -3512,6 +3513,35 @@ static void test_skin_weights_stress(Report &rep, const Options &o) {
                      whole.ms(), frames, worst_frame));
 }
 
+/* Keyframe animation (task 0059): sampling and applying a clip of 200 tracks (rotations of 67 bones, Auto keys) once a
+ * frame. Target: at most 0.2 ms. */
+static void test_animation_stress(Report &rep, const Options &o) {
+  rep.title("Keyframe animation (task 0059)",
+            "A chain of bones under a root, each turned by three Euler tracks with keys every 10 frames (Auto), applied with "
+            "apply_clip at frames across the clip.");
+  rep.table({"tracks", "keys", "ms per frame", "target"});
+  Scene s;
+  GameObject *root = s.create("Root");
+  GameObject *parent = root;
+  AnimationClip clip;
+  std::string path;
+  for (int b = 0; b < 67; b++) {
+    GameObject *g = s.create(strprintf("B%d", b), parent);
+    path = path.empty() ? g->name : path + "/" + g->name;
+    for (int a = 0; a < 3; a++)
+      for (int f = 0; f <= 120; f += 10) clip.track(path, "Rotation", a).set_key((float)f, (float)((b * 7 + a * 13 + f) % 90));
+    parent = g;
+  }
+  size_t keys = 0;
+  for (const AnimTrack &t : clip.tracks) keys += t.keys.size();
+  const int frames = o.quick ? 200 : 2000;
+  ScopedTimer t;
+  for (int i = 0; i < frames; i++) apply_clip(clip, *root, (float)(i % 120) + 0.5f);
+  const double per = t.ms() / frames;
+  rep.row({std::to_string(clip.tracks.size()), std::to_string(keys), strprintf("%.4f", per), "0.2"});
+  rep.note(strprintf("%zu tracks: %.4f ms a frame (target 0.2 ms). %s", clip.tracks.size(), per, per <= 0.2 ? "Within it." : "OVER the target."));
+}
+
 static void test_vgroups_stress(Report &rep, const Options &o) {
   using namespace ppstress;
   rep.title("Vertex groups through every Edit Mode operator",
@@ -4239,7 +4269,7 @@ int main(int argc, char **argv) {
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
-               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress},
+               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
   ScopedTimer total;
   for (auto &t : tests) {

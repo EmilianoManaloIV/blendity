@@ -31,12 +31,14 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/animation.h"
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
 #include "ui.h"
 
 #include <functional>
 #include <thread>
+#include <tuple>
 #include <map>
 #include <memory>
 #include <set>
@@ -85,7 +87,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -189,6 +191,25 @@ struct DeleteQuestion {
   std::vector<std::string> notes;
   const char *confirm = "Delete";
   std::function<void()> on_delete, on_close;  // on_close: answered either way, or clicked away
+};
+
+/* The Animation window's state (task 0059): which clip, the playhead, Preview and Record, the selected keys. */
+struct AnimEditorState {
+  uint64_t root = 0;  // the object last animated (its Animation component's clip is edited)
+  float frame = 0.0f;
+  bool preview = false, record = false, playing = false;
+  double play_clock = 0.0;
+  float play_from = 0.0f;
+  std::vector<std::pair<int, float>> selected;  // (track, key frame)
+  std::vector<std::pair<uint64_t, Transform>> saved_pose;  // every object's transform before Preview (put back after)
+  std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;  // the animated component numbers likewise
+  std::unordered_map<std::string, float> shown;  // each animated number as last shown (Record compares with it)
+  uint64_t shown_root = 0;  // the root and clip `shown` was taken for (another one: look again before recording)
+  const AnimationClip *shown_clip = nullptr;
+  int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
+  int drag_x = 0, drag_y = 0;
+  int scroll = 0;  // the first track row shown
+  std::vector<std::tuple<std::string, std::string, int, AnimKey>> clipboard;  // (path, property, axis, key from the first copied)
 };
 
 /* The marker auto-rig being placed (task 0058): which mesh, which kind, the markers so far. */
@@ -298,6 +319,7 @@ struct UndoState {
   uint64_t active = 0;
   std::string label;
   std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
+  std::vector<std::pair<std::string, std::string>> clips;     // animation clips' texts likewise (task 0059)
   size_t bytes = 0;  // what only this state held when it was stored (its own meshes, objects, texts): the undo budget
 };
 
@@ -531,6 +553,8 @@ class Editor {
   void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
+  const AnimEditorState &anim_for_test() const { return anim_; }
+  AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
   std::string autorig_next_for_test() const { return autorig_next(); }
   void autorig_remove_last_for_test() { autorig_remove_last(); }
   std::string wp_group_name_for_test() {
@@ -683,6 +707,48 @@ class Editor {
   void give_skin_modifier(GameObject *target, uint64_t source);
   void draw_skin_job_progress(ui::Layout &lay);
   void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
+  /* The Animation window (task 0059, animation_window.cpp). */
+  AnimEditorState anim_;
+  std::vector<std::pair<std::string, std::string>> clip_before_;  // clips' texts before their first edit since the last undo step
+  std::vector<std::string> anim_clip_paths_;
+  double anim_clip_paths_listed_ = -100;
+  GameObject *anim_root();
+  AnimationClipPtr anim_clip();
+  AnimationClipPtr anim_new_clip(GameObject *root, const std::string &name);
+  void anim_snapshot_shown();
+  void anim_apply();
+  void anim_set_frame(float f);
+  void anim_set_preview(bool on);
+  void note_clip_edit(AnimationClip &c);
+  void restore_clip_texts(const std::vector<std::pair<std::string, std::string>> &texts, std::vector<std::pair<std::string, std::string>> *current);
+  void anim_record_changes();
+  bool anim_changed(uint64_t id, const std::string &property, int axis, float v) const;
+  bool anim_record_vector(AnimationClip &clip, GameObject &g, const std::string &path, const char *prop, float frame);
+  void anim_reset();
+  void retarget_clip_references(const std::string &from, const std::string &to);
+  void anim_tick();
+  void anim_edit_keys(const char *label, const std::function<void(AnimationClip &)> &edit);
+  void anim_add_key(size_t track, float frame);
+  void anim_delete_selected();
+  void anim_move_selected(float delta);
+  void anim_set_interp(int interp);
+  void anim_copy();
+  void anim_paste();
+  void anim_add_property(GameObject *g, const std::string &property, int axes);
+  std::vector<float> anim_key_frames();
+  void anim_step_key(int dir);
+  const std::vector<std::string> &anim_clip_paths();
+  void draw_anim_toolbar(const Recti &bar, GameObject *root);
+  void anim_pick_clip(GameObject *root, const std::string &path);
+  void draw_anim_add_property(GameObject *root);
+  float anim_frame_at(const Recti &sheet, int x, float end) const;
+  int anim_x_of(const Recti &sheet, float frame, float end) const;
+  bool anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, int &track, float &frame);
+  bool anim_selected(int track, float frame) const;
+  void anim_sheet_input(const AnimationClip &clip, const Recti &ruler, const Recti &sheet, int row_h, float end);
+  void anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end);
+  void draw_animation_window(const Recti &r);
+  void anim_command(const std::vector<std::string> &t);
   /* The marker auto-rig (task 0058, auto_rig_tool.cpp). */
   AutoRigSession autorig_;
   AutoRigSession autorig_last_;  // the last built session's markers: starting again on that mesh brings them back

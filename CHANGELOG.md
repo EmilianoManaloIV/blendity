@@ -2,6 +2,70 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 83): keyframe animation with a dopesheet, Unity's way (task 0059, ADR 0029)
+
+**Asked:** "A keyframe/animation system like Unity", "Dopesheet for now" (a Premiere-style clip sequencer later
+instead of a state machine).
+
+**Added**
+- **Animation clips**, `Assets/Animations/<name>.anim`:
+  - Tracks of numbers by path below the animated root: Position, Rotation (Euler degrees) and Scale, or any
+    component's number (`Light.Intensity`).
+  - Keys with Auto (Unity's Clamped Auto: smooth, no overshoot between two keys), Linear or Constant.
+- **The Animation window** (Window > Animation; the Animation layout along the bottom):
+  - Preview, Record, first / previous key / play / next key / last, the frame, the clip menu with Create New Clip,
+    and Add Property.
+  - The tracks, with a ruler, the playhead and key diamonds.
+  - Click, Shift+click or box-select keys; drag them in time; Delete; Ctrl+C / Ctrl+V at the playhead; double-click
+    to add; right-click for the interpolation.
+- **Record**: gizmo, Inspector or console changes to the animated objects become keys at the playhead.
+- **Preview**: scrubbing poses the scene without an undo step, and turning it off puts it back.
+- **The Animation component** (Unity's legacy one) plays its clip in Play (Loop, Once, Ping Pong, Clamp Forever,
+  Speed), before IK solves.
+- Key edits are undo steps; renaming a clip keeps the components pointing at it.
+- Console: `anim new|key|interp|frame|preview|record|play|stop`.
+- Learn: "Keyframes and the dopesheet" in the Bones and skins lesson, with questions.
+
+**Checked**
+- New tests (round 83):
+  - Sampling: Constant, Linear, and Auto through a peak without overshoot.
+  - The file, with names holding spaces and a bad line skipped.
+  - Wrapping, including a negative Speed.
+  - Keys on a lid: scrubbing makes no undo step, and Preview off puts the lid back.
+  - Record keys a move but not a rename or a new child, and one undo takes the keys back.
+  - Preview leaves unrelated objects alone, and an undo afterwards doesn't bring the pose back.
+  - In Play, a bone turns and the Blender tube's skin follows.
+  - Dopesheet clicks: the ruler, dragging a key, Delete.
+  - Renaming a clip, and undo after it.
+  - Preview refused in Play; New Scene clears the window.
+- Stress `animation`: 201 tracks in 0.074 ms a frame (target 0.2 ms).
+- Unit checks: Windows 9,653, 0 failed (627 tests); the whole suite in render-cache verify mode: 9,654,
+  0 failed, 0 stale pictures. Linux with libraries: 9,561, 0 failed. Sanitizer build: 9,478, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: seven majors and several minor findings, fixed:
+- Property names with spaces broke the file.
+- Preview put back every object in the scene.
+- The previewed pose leaked into undo.
+- Preview survived Play and scene switches.
+- Record keyed renames, new children and IK-driven bones.
+- Clips weren't forgotten on delete or cleared on another project.
+- A rename didn't reach undo states.
+- Also fixed:
+  - Bad numbers in a file.
+  - A negative Speed.
+  - Missing clips read every frame.
+  - The clip list walked every 2 s.
+  - Pasting into another clip.
+  - Moved keys' interpolation.
+  - Fractional record frames.
+  - Key edits in Play.
+  - Console objects outside the root.
+  - Unsafe clip file names.
+  - Euler flips on record.
+  - No dopesheet scroll.
+  - Nesting.
+
 ## 2026-10-13 (round 82): the marker auto-rig, humanoid and quadruped (task 0058, ADR 0028 part 2)
 
 **Asked:** "A Mixamo-styled automatic weight paint ... I want the markers and inpainted weights, but I want support for

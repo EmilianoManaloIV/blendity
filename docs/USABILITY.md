@@ -193,6 +193,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Clicking the Layout dropdown crashed the editor. | Fixed: a dropdown's list keeps its own copy of its names. |
 | Automatic weights bled across gaps (a hand by a thigh took leg weight) and clothing had to be weighted by hand. | Bind: Automatic Weights inpaints from vertices each bone clearly owns and sees; Transfer Weights copies a body's weights onto clothing and inpaints where they don't match. |
 | Rigging a character meant placing every bone by hand. | Auto-Rig: click a few markers on the mesh (Mixamo's, or an animal's), Build Rig. |
+| Nothing could be animated. | The Animation window (a Unity-style dopesheet with Record and Preview) and the Animation component. |
 
 ## Still worth doing
 

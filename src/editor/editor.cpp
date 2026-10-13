@@ -26,13 +26,13 @@ using ui::Icon;
 static const char *kVersion = "0.10.0";
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation"};
   static_assert(sizeof(names) / sizeof(names[0]) == (size_t)WindowKind::Count, "a title per window");
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step};
   static_assert(sizeof(icons) / sizeof(icons[0]) == (size_t)WindowKind::Count, "an icon per window");
   return icons[(int)k];
 }
@@ -109,6 +109,7 @@ void Editor::resolve_project_paths() {
   set_asset_root(project_root_);  // material texture paths are project-relative
   clear_material_assets();  // assets belong to one project
   clear_texture_assets();
+  clear_clip_assets();
   project_dir_ = assets_dir_;
 }
 
@@ -502,6 +503,7 @@ void Editor::frame(std::vector<Event> &events) {
 
   finish_hierarchy_drag();
   poll_skin_job();
+  anim_tick();
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();
@@ -875,7 +877,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
@@ -1303,6 +1305,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Lighting: draw_lighting_window(r); break;
     case WindowKind::Textures: draw_textures_window(r); break;
     case WindowKind::Rigging: draw_rigging_window(r); break;
+    case WindowKind::Animation: draw_animation_window(r); break;
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1491,6 +1494,7 @@ void Editor::mark_changed(const std::string &label) {
    * during a drag: it marks a change every frame, and its own mouse events bring the frames. */
   if (drag_ == Drag::None) ui_.redraw = true;
   if (playing_) return;  // play-mode edits are discarded on Stop
+  anim_record_changes();  // (Record: the edit becomes keys at the playhead)
   pending_change_ = true;
   pending_label_ = label;
 }
@@ -1505,6 +1509,8 @@ void Editor::commit_undo() {
   s.label = pending_label_;
   s.textures = std::move(texture_before_);
   texture_before_.clear();
+  s.clips = std::move(clip_before_);
+  clip_before_.clear();
   if (s.scene) {
     /* What this step alone holds: the meshes no other state or the scene shares (copy-on-write, ADR 0003), its
      * objects and its texture texts. */
@@ -1515,6 +1521,7 @@ void Editor::commit_undo() {
     });
   }
   for (const auto &t : s.textures) s.bytes += t.first.size() + t.second.size();
+  for (const auto &t : s.clips) s.bytes += t.first.size() + t.second.size();
   undo_.push_back(std::move(s));
   if (undo_.size() > 200) undo_.erase(undo_.begin());
   {
@@ -1527,7 +1534,7 @@ void Editor::commit_undo() {
   redo_.clear();
   stable_ = scene_->clone();
   pending_change_ = false;
-  if (save_dirty_material_assets() + save_dirty_texture_assets()) project_listed_ = -100;  // edited assets go back to their files
+  if (save_dirty_material_assets() + save_dirty_texture_assets() + save_dirty_clip_assets()) project_listed_ = -100;  // edited assets go back to their files
 }
 
 size_t Editor::undo_budget() const {
@@ -1545,6 +1552,7 @@ size_t Editor::undo_bytes() const {
 void Editor::undo() {
   if (playing_) return;
   cancel_skin_job();  // (its result was solved for the state being undone)
+  anim_set_preview(false);  // (the pose shown goes back first: it isn't the scene's)
   wp_abort_stroke();  // a stroke under way would write into the restored scene's (shared) mesh
   commit_undo();
   if (undo_.empty()) return;
@@ -1556,6 +1564,7 @@ void Editor::undo() {
   cur.active = active_;
   cur.label = s.label;
   restore_texture_texts(s.textures, &cur.textures);
+  restore_clip_texts(s.clips, &cur.clips);
   redo_.push_back(std::move(cur));
   scene_ = std::move(s.scene);
   selection_ = s.selection;
@@ -1563,6 +1572,9 @@ void Editor::undo() {
   relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
   save_dirty_material_assets();
   save_dirty_texture_assets();
+  save_dirty_clip_assets();
+  anim_.selected.clear();
+  anim_.shown_clip = nullptr;
   stable_ = scene_->clone();
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
@@ -1573,6 +1585,7 @@ void Editor::undo() {
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
   cancel_skin_job();
+  anim_set_preview(false);
   wp_abort_stroke();
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
@@ -1582,6 +1595,7 @@ void Editor::redo() {
   cur.active = active_;
   cur.label = s.label;
   restore_texture_texts(s.textures, &cur.textures);
+  restore_clip_texts(s.clips, &cur.clips);
   undo_.push_back(std::move(cur));
   scene_ = std::move(s.scene);
   selection_ = s.selection;
@@ -1589,6 +1603,9 @@ void Editor::redo() {
   relink_material_assets(*scene_, true);  // material assets stay shared, with the restored values
   save_dirty_material_assets();
   save_dirty_texture_assets();
+  save_dirty_clip_assets();
+  anim_.selected.clear();
+  anim_.shown_clip = nullptr;
   stable_ = scene_->clone();
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
@@ -1604,6 +1621,7 @@ void Editor::new_scene() {
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   cancel_skin_job();
   autorig_cancel();
+  anim_reset();
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1624,6 +1642,7 @@ bool Editor::open_scene(const std::string &path) {
   set_weight_paint(false);
   cancel_skin_job();
   autorig_cancel();
+  anim_reset();
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -1646,6 +1665,8 @@ bool Editor::open_scene(const std::string &path) {
 }
 
 void Editor::save_scene_cmd(bool save_as) {
+  anim_set_preview(false);  // (the scene is saved in its own pose, not the one previewed)
+  save_dirty_clip_assets();
   if (playing_) {
     Log::warn("Cannot save while in Play mode (Unity has the same rule). Press Stop first.");
     return;
@@ -2660,6 +2681,7 @@ void Editor::enter_play() {
   set_weight_paint(false);
   cancel_skin_job();  // (Stop would throw its result away)
   autorig_cancel();
+  anim_set_preview(false);  // (Play plays from the scene's own pose)
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
   commit_undo();
@@ -2676,6 +2698,7 @@ void Editor::enter_play() {
 
 void Editor::exit_play() {
   if (!playing_) return;
+  clip_before_.clear();  // (key edits are refused in Play; nothing of it belongs to the next step)
   playing_ = false;
   paused_ = false;
   scene_ = std::move(play_backup_);
@@ -2859,6 +2882,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "matdelete" || c == "texdelete") {
     delete_assets_command(c, line);
+    return;
+  }
+  if (c == "anim") {
+    anim_command(t);
     return;
   }
   if (c == "autorig") {
