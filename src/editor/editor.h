@@ -749,6 +749,7 @@ class Editor {
   void anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end);
   void draw_animation_window(const Recti &r);
   void anim_command(const std::vector<std::string> &t);
+  void open_manual();  // Help > Open Manual, `manual`
   /* The marker auto-rig (task 0058, auto_rig_tool.cpp). */
   AutoRigSession autorig_;
   AutoRigSession autorig_last_;  // the last built session's markers: starting again on that mesh brings them back

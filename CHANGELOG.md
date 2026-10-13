@@ -2,6 +2,54 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 84): a README for GitHub and one user manual (task 0060)
+
+**Asked:** "Update the GitHub README and compress the tutorial docs into one document with examples and use cases",
+building on the Learn tab.
+
+**Added**
+- **docs/MANUAL.md**: one manual by stage of the work, the layouts' order:
+  - Getting around, reference and planning, blocking out, modeling, UVs, materials and textures, lighting and
+    rendering, rigging and skinning, animation, files, performance, shortcuts and the console.
+  - Each chapter has short examples to follow, its use cases, and the Learn lessons that go deeper.
+  - It takes in the old README's feature list and the lighting guide.
+- **Opening it:** Help > Open Manual and the `manual` console command open it (the project's copy, else GitHub's).
+  The Learn tab's Welcome lesson has a "The manual" section.
+
+**Changed**
+- **README.md** is a short front page:
+  - What Blendity is, the screenshots and a quick start.
+  - What it does by stage, the minimum and recommended machines, building, and links to the manual and the developer
+    documents.
+  - The stress highlights live in PERFORMANCE.md.
+- `docs/guides/lighting.md` points into the manual.
+- On Windows, opening a web address keeps its slashes.
+- `help` lists the rigging, auto-rig, animation and manual commands.
+- CMake's unit-test run starts in the source folder, as the fixtures need.
+
+**Checked**
+- New test (round 84): the manual has its 13 chapters, the README and the lighting guide link it, and every lesson
+  and lesson section it names is in the Learn tab under that lesson (with CRLF checkouts too).
+- Unit checks: Windows 9,658, 0 failed (628 tests); the whole suite in render-cache verify mode: 9,659,
+  0 failed, 0 stale pictures. Linux with libraries: 9,566, 0 failed. Sanitizer build: 9,483, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review**: the reviewer checked every menu path, field and number against the code. Fixed:
+- Shapes are under GameObject > Shapes (Parametric).
+- The lighting window is Window > Lighting.
+- Reference Image faces the front (`refimage ... side` for the others).
+- Rigging and Skinning are two layouts.
+- Preferences are Edit > Preferences... (Quality, Keymap).
+- The Bricks preset already has Edge Wear.
+- Axis Top / Side / Bottom and High Start.
+- Console: PlayStation (PS1).
+- Retiming drags the keys, not the ruler.
+- The GPU also bakes and runs realtime GI.
+- Two lessons were cited under the wrong lesson.
+- Old README sections were restored in the manual (origins, number expressions, Join / Follow / Shell..., Active
+  Camera, camera sequences, Transparent, the lighting settings).
+- The test's CRLF and working-folder handling.
+
 ## 2026-10-13 (round 83): keyframe animation with a dopesheet, Unity's way (task 0059, ADR 0029)
 
 **Asked:** "A keyframe/animation system like Unity", "Dopesheet for now" (a Premiere-style clip sequencer later

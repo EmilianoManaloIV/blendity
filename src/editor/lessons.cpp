@@ -31,6 +31,9 @@ Each lesson connects three layers so you can move between the two programs and u
 - "Try it" buttons drive the editor for you, so you can watch the concept happen.
 - Click a question to reveal the answer.
 - Hover over almost any button or field in the editor to see its Blender equivalent.
+# The manual
+The same ground in one document, by stage of the work - getting around, reference and planning, blocking out, modeling, UVs, materials, lighting and rendering, rigging, animation, files, performance, shortcuts, the console - with short examples to follow (a brick wall material, rigging a character in five minutes) and what each stage is good for: docs/MANUAL.md, also on GitHub (Help > Open Manual). Each chapter names the lessons here that go deeper. Console: `manual`.
+! cmd:manual | Open the manual
 ! layout:Learning | Use the Learning layout (Learn tab beside the Scene)
 ! lesson:1 | Next: the editor layout
 )"},

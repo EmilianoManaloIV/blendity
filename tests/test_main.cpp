@@ -26579,4 +26579,62 @@ static void round81_tests() {
     ed.command("newscene");
     CHECK(!ed.anim_for_test().preview && ed.anim_for_test().selected.empty());
   });
+  /* ---------------------------------------------------------------- round 84: the README and the manual (task 0060) */
+  test("docs: the manual has its 13 chapters, the README and the lighting guide point to it, and every lesson it cites exists", [] {
+    /* The repository's folder: the working directory or one above it (ctest runs from build/, the exe from dist/). */
+    std::string top = fs::current_dir();
+    for (int up = 0; up < 4 && !fs::exists(fs::join(top, "docs/MANUAL.md")); up++) top = fs::parent(top);
+    std::string manual, readme, lighting;
+    CHECK(fs::read_file(fs::join(top, "docs/MANUAL.md"), manual) && fs::read_file(fs::join(top, "README.md"), readme) &&
+          fs::read_file(fs::join(top, "docs/guides/lighting.md"), lighting));
+    manual.erase(std::remove(manual.begin(), manual.end(), '\r'), manual.end());  // (a CRLF checkout)
+    int chapters = 0;
+    for (int k = 1; k <= 13; k++) chapters += manual.find("\n## " + std::to_string(k) + ". ") != std::string::npos;
+    CHECK(chapters == 13);
+    CHECK(readme.find("docs/MANUAL.md") != std::string::npos && lighting.find("MANUAL.md#7-lighting-and-rendering") != std::string::npos);
+    /* The Learn tab: lesson titles, and each lesson's "# " sections under it. */
+    std::map<std::string, std::set<std::string>> learn;
+    for (int i = 0; i < lesson_count(); i++) {
+      std::set<std::string> &sections = learn[lesson(i).title];
+      std::istringstream body(lesson(i).body);
+      std::string line;
+      while (std::getline(body, line))
+        if (line.rfind("# ", 0) == 0) sections.insert(line.substr(2));
+    }
+    /* Every *name* in the manual's "> Learn:" notes: a lesson ("Bevel, Bridge and Push Through": titles may hold
+     * commas), or "Lesson > section, section" with each section in that lesson. */
+    std::vector<std::string> wrong;
+    auto check = [&](std::string cited) {
+      for (size_t d; (d = cited.find("  ")) != std::string::npos;) cited.erase(d, 1);  // (a name wrapped onto the next line)
+      const size_t gt = cited.find(" > ");
+      if (gt == std::string::npos) {
+        if (!learn.count(cited)) wrong.push_back(cited);
+        return;
+      }
+      const auto it = learn.find(cited.substr(0, gt));
+      if (it == learn.end()) return wrong.push_back(cited.substr(0, gt));
+      for (const std::string &part : split_list(cited.substr(gt + 3), ','))
+        if (!it->second.count(part)) wrong.push_back(it->first + " > " + part);
+    };
+    std::istringstream is(manual);
+    std::string line, note;
+    bool in_note = false;
+    while (std::getline(is, line)) {
+      if (line.rfind("> Learn:", 0) == 0) in_note = true, note.clear();
+      if (!in_note) continue;
+      if (line.rfind(">", 0) != 0) {
+        in_note = false;
+        continue;
+      }
+      note += line.substr(1) + " ";
+      for (size_t a = note.find('*'), b; a != std::string::npos && (b = note.find('*', a + 1)) != std::string::npos; a = note.find('*')) {
+        const std::string cited = note.substr(a + 1, b - a - 1);
+        note.erase(0, b + 1);
+        check(cited);
+      }
+    }
+    for (const std::string &m : wrong) std::printf("    not in the Learn tab: '%s'\n", m.c_str());
+    CHECK(wrong.empty());
+    CHECK(fs::is_web_address("https://github.com/x") && !fs::is_web_address("C:/Users/x/MANUAL.md") && !fs::is_web_address("docs/MANUAL.md"));
+  });
 }

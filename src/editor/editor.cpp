@@ -916,6 +916,7 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
+    if (u.menu_item("Open Manual")) open_manual();
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
     if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
@@ -2842,6 +2843,14 @@ void Editor::delete_assets_command(const std::string &cmd, const std::string &li
   Log::info("%s: %d deleted", cmd.c_str(), n);
 }
 
+/* The user manual (task 0060): the project's copy when it has one (a source checkout), else GitHub's. */
+void Editor::open_manual() {
+  const std::string local = fs::join(project_root_, "docs/MANUAL.md");
+  const bool here = fs::exists(local);
+  fs::open_external(here ? local : std::string("https://github.com/EmilianoManaloIV/blendity/blob/main/docs/MANUAL.md"));
+  Log::info("Manual: %s (open it with any Markdown viewer or a text editor)", here ? local.c_str() : "on GitHub");
+}
+
 void Editor::run_console_command(const std::string &line) {
   auto t = split_ws(line);
   if (t.empty()) return;
@@ -2888,6 +2897,10 @@ void Editor::run_console_command(const std::string &line) {
     anim_command(t);
     return;
   }
+  if (c == "manual") {
+    open_manual();
+    return;
+  }
   if (c == "autorig") {
     autorig_command(t);
     return;
@@ -2931,7 +2944,9 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
-    Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] (rigging)");
+    Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] [inpaint|envelope], skin transfer <body> [mesh] (rigging)");
+    Log::info("  autorig humanoid|quadruped, autorig mark <marker> <x> <y> <z>, autorig build|cancel (the marker auto-rig)");
+    Log::info("  anim new|key|interp|frame|preview|record|play|stop (the Animation window); manual (the user manual)");
     Log::info("  vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (vertex groups)");
     Log::info("  weightpaint on|off, wpbrush add|subtract|draw|blur [radius] [strength] [weight], wpfalloff <curve>, wpmirror on|off,");
     Log::info("  wpfront on|off, wpstroke x y x y ..., wpnormalize, wpclean [threshold] (Weight Paint)");

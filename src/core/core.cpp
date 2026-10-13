@@ -139,6 +139,14 @@ std::vector<std::string> split_list(const std::string &s, char sep) {
   return out;
 }
 
+bool fs::is_web_address(const std::string &p) {
+  const size_t at = p.find("://");
+  if (at == std::string::npos || at == 0) return false;
+  for (size_t i = 0; i < at; i++)
+    if (!std::isalpha((unsigned char)p[i])) return false;  // a scheme ("https"), not "C:" or a path
+  return true;
+}
+
 bool starts_with(const std::string &s, const char *prefix) {
   size_t n = std::strlen(prefix);
   return s.size() >= n && s.compare(0, n, prefix) == 0;
@@ -302,8 +310,9 @@ bool move_to_trash(const std::string &path, std::string *error) {
 
 void open_external(const std::string &path) {
   std::wstring w = widen(path);
-  for (auto &c : w)
-    if (c == L'/') c = L'\\';
+  if (!is_web_address(path))  // (a web address keeps its slashes)
+    for (auto &c : w)
+      if (c == L'/') c = L'\\';
   ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 #else

@@ -4,7 +4,7 @@
 - **Requirements:** R-06
 - **Decisions:** ADR 0029
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/56
 
 ## Goal
 The user asked (2026-10-12) for "a keyframe/animation system like Unity", "dopesheet for now", with a Premiere-style
