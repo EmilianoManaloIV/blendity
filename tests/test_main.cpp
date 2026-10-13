@@ -18722,7 +18722,7 @@ static void round50_tests() {
     r34_click(ed, db.x + db.w / 2, db.y + db.h / 2);
     r34_steps(ed, 2);
     CHECK(fs::exists(path));  // only asked
-    const Recti ok = ed.texture_ui_rect_for_test("delete_confirm");
+    const Recti ok = ed.confirm_rect_for_test("tex_delete");
     CHECK(ok.w > 0);
     if (ok.w <= 0) return;
     r34_click(ed, ok.x + ok.w / 2, ok.y + ok.h / 2);
@@ -25474,5 +25474,46 @@ static void round69_tests() {
     ed.step_frame_headless();
     std::printf("    after the Scene-view drop: active '%s'\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "-");
     CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Cylinder");
+  });
+  test("assets: `matdelete` takes comma-separated names with spaces, skips unknown ones, and split_list trims and drops empty parts", [] {
+    const std::vector<std::string> parts = split_list("  Wood Floor , Bricks,, ,Tiles  ", ',');
+    CHECK(parts.size() == 3 && parts[0] == "Wood Floor" && parts[1] == "Bricks" && parts[2] == "Tiles");
+    CHECK(split_list("", ',').empty() && split_list(" , ", ',').empty());
+    /* Earlier runs' copies out of the scratch project (newmat would name the new ones "R80 Oak 1"...). */
+    for (const char *f : {"R80 Oak.mat", "R80Pine.mat"}) std::remove(resolve_asset_path(std::string("Assets/Materials/") + f).c_str());
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("newmat R80 Oak");
+    ed.command("newmat R80Pine");
+    CHECK(fs::exists(resolve_asset_path("Assets/Materials/R80 Oak.mat")) && fs::exists(resolve_asset_path("Assets/Materials/R80Pine.mat")));
+    ed.command("matdelete R80 Oak, No Such Material, R80Pine");
+    CHECK(!fs::exists(resolve_asset_path("Assets/Materials/R80 Oak.mat")) && !fs::exists(resolve_asset_path("Assets/Materials/R80Pine.mat")));
+  });
+  test("assets: a list's multi-selection - Ctrl+Shift with the last click gone starts a range, sync drops hidden ones, Ctrl+A returns the last", [] {
+    const std::vector<std::string> shown{"A", "B", "C", "D"};
+    MultiSelect<std::string> s;
+    s.click(shown, 1, false, false);  // B
+    s.click(shown, 3, false, true);   // Shift: B..D
+    CHECK(s.items.size() == 3 && s.has("B") && s.has("C") && s.has("D") && s.anchor == "B");
+    s.click(shown, 0, true, false);  // Ctrl: + A, the anchor moves to A
+    CHECK(s.items.size() == 4 && s.anchor == "A");
+    /* The anchor scrolled out of a narrower list: Ctrl+Shift starts the range at the click, keeping the rest. */
+    const std::vector<std::string> narrow{"C", "D"};
+    s.only("B");
+    s.anchor = "Z";
+    s.click(narrow, 1, true, true);
+    CHECK(s.has("B") && s.has("D") && s.anchor == "D");
+    /* sync: hidden ones drop; the edited one joins when shown; nothing edited, nothing selected. */
+    s.items = {"A", "C"};
+    s.sync(narrow, "D");
+    CHECK(s.items.size() == 1 && s.items[0] == "D");
+    s.items = {"C"};
+    s.sync(narrow, "C");
+    CHECK(s.items.size() == 1 && s.items[0] == "C");
+    s.sync(narrow, "");
+    CHECK(s.items.empty());
+    const std::string *last = s.select_all(shown);
+    CHECK(last && *last == "D" && s.items.size() == 4);
+    CHECK(s.select_all({}) == nullptr);
   });
 }

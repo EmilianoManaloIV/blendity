@@ -173,6 +173,21 @@ struct DockNode {
   DockNode *parent = nullptr;
 };
 
+const char *trash_name();  // "Recycle Bin" on Windows, else "Trash" (project_window.cpp)
+
+/* A "Delete ...?" question (the Materials, Textures and Project windows; Editor::ask_delete): a title, the names
+ * listed under it when there are several, notes, then the confirm button and Cancel. */
+struct DeleteQuestion {
+  const char *id = "";
+  Recti at;
+  int width = 380;  // unscaled pixels
+  std::string title;
+  std::vector<std::string> names;
+  std::vector<std::string> notes;
+  const char *confirm = "Delete";
+  std::function<void()> on_delete, on_close;  // on_close: answered either way, or clicked away
+};
+
 /* A multi-selection in a list of assets (task 0053): the Hierarchy's clicks (Ctrl toggles, Shift selects the range
  * from the last click in the order shown, Ctrl+Shift adds that range, a plain click selects one), Ctrl+A all shown. */
 template<class T> struct MultiSelect {
@@ -183,37 +198,56 @@ template<class T> struct MultiSelect {
     items.assign(1, v);
     anchor = v;
   }
+  void add(const T &v) {
+    if (!has(v)) items.push_back(v);
+  }
+  void toggle(const T &v) {
+    auto it = std::find(items.begin(), items.end(), v);
+    if (it != items.end()) items.erase(it);
+    else items.push_back(v);
+    anchor = v;
+  }
   void click(const std::vector<T> &shown, size_t i, bool ctrl, bool shift) {
     if (i >= shown.size()) return;
-    const T &v = shown[i];
-    if (shift) {
-      auto a = std::find(shown.begin(), shown.end(), anchor);
-      if (a == shown.end()) {  // the last click is gone or hidden: this one starts the range
-        if (ctrl) {
-          if (!has(v)) items.push_back(v);
-          anchor = v;
-        }
-        else only(v);
-        return;
+    if (shift) range_to(shown, i, ctrl);
+    else if (ctrl) toggle(shown[i]);
+    else only(shown[i]);
+  }
+  /* Shift: everything from the last click to shown[i] (`keep`, Ctrl+Shift: added to the selection). The anchor stays, so
+   * Shift+clicks again measure from it. */
+  void range_to(const std::vector<T> &shown, size_t i, bool keep) {
+    const auto a = std::find(shown.begin(), shown.end(), anchor);
+    if (a == shown.end()) {  // the last click is gone or hidden: this one starts the range
+      if (keep) {
+        add(shown[i]);
+        anchor = shown[i];
       }
-      const size_t ai = (size_t)(a - shown.begin());
-      if (!ctrl) items.clear();
-      for (size_t k = std::min(ai, i); k <= std::max(ai, i); k++)
-        if (!has(shown[k])) items.push_back(shown[k]);
-      return;  // (the anchor stays: Shift+clicks again measure from it)
-    }
-    if (ctrl) {
-      auto it = std::find(items.begin(), items.end(), v);
-      if (it != items.end()) items.erase(it);
-      else items.push_back(v);
-      anchor = v;
+      else only(shown[i]);
       return;
     }
-    only(v);
+    if (!keep) items.clear();
+    const size_t ai = (size_t)(a - shown.begin());
+    for (size_t k = std::min(ai, i); k <= std::max(ai, i); k++) add(shown[k]);
+  }
+  /* Each frame: only what is shown (deleted ones and a search's hidden ones drop), and `current` (the one being
+   * edited) in it; nothing current, nothing selected. */
+  void sync(const std::vector<T> &shown, const T &current) {
+    keep_only(shown);
+    if (current == T{}) {
+      items.clear();
+      return;
+    }
+    if (!has(current) && std::find(shown.begin(), shown.end(), current) != shown.end()) only(current);
   }
   void all(const std::vector<T> &shown) {
     items = shown;
     if (!shown.empty()) anchor = shown.front();
+  }
+  /* Ctrl+A: everything shown; returns the last of it (to edit), or null when nothing is shown. */
+  const T *select_all(const std::vector<T> &shown) {
+    if (shown.empty()) return nullptr;
+    all(shown);
+    return &items.back();
   }
   /* Drop what isn't shown any more (deleted, renamed away, hidden by a search: what Delete would remove is what the user sees). */
   void keep_only(const std::vector<T> &all) {
@@ -355,6 +389,10 @@ class Editor {
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
   const RasterStats &scene_stats_for_test() const { return scene_stats_; }
   /* The Textures window last frame: "new", "size", "assign", "output", "add_layer", "layer<i>", "thumb:<name>". */
+  Recti confirm_rect_for_test(const std::string &id) const {
+    auto it = confirm_rects_.find(id);
+    return it == confirm_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
   Recti texture_ui_rect_for_test(const std::string &key) const {
     auto it = texture_ui_rects_.find(key);
     return it == texture_ui_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
@@ -670,6 +708,27 @@ class Editor {
   MultiSelect<ProceduralTexturePtr> texture_multi_;   // task 0053
   std::vector<ProceduralTexturePtr> texture_delete_many_;
   void delete_texture_asset(const ProceduralTexturePtr &t);
+  ProceduralTexturePtr texture_by_name(const std::string &name);  // a texture asset by its name (null: none)
+  /* Shows a delete question this frame (call it every frame while it's pending). */
+  void ask_delete(const DeleteQuestion &q);
+  std::unordered_map<std::string, Recti> confirm_rects_;  // each question's confirm button, as last drawn (tests)
+  /* A context menu's Delete: `one` ("Delete Material...") for one, "Delete 3 Materials..." (`plural`) for a
+   * multi-selection. */
+  bool delete_menu_item(size_t selected, const char *one, const char *plural, bool enabled = true);
+  /* Ctrl+A / Delete (or Backspace) with the mouse over `over`, nothing typed into and `blocked` false: consumed. */
+  bool select_all_key(const Recti &over, bool blocked);
+  bool delete_key(const Recti &over, bool blocked);
+  /* Material slots in the scene that `match` says yes to. */
+  size_t slots_using(const std::function<bool(const MaterialPtr &)> &match);
+  void select_objects_using(const MaterialPtr &m);  // the Materials window's "Select Objects Using It"
+  size_t materials_using_texture(const ProceduralTexturePtr &t);  // scene and asset materials whose maps name it
+  void request_material_delete(const MaterialPtr &one);  // one, or the multi-selection when it holds more
+  void request_texture_delete();
+  void request_project_delete(const std::string &one);
+  void project_keys(const Recti &r);  // F2 / Delete over the Project window
+  void edit_material_asset(const std::string &path);  // open a .mat in the Materials window
+  void delete_assets_command(const std::string &cmd, const std::string &line);  // matdelete / texdelete
+  void project_row_pressed(const std::string &full, const std::vector<std::string> &shown, size_t index);
   std::string texture_search_;
   int texture_preview_output_ = 0;
   bool texture_preview_tiled_ = false, texture_dragging_ = false;
@@ -964,6 +1023,7 @@ class Editor {
   void draw_tools_window(const Recti &r);  // Modeling Tools window (UModeler's tool panel)
   MaterialPtr material_selected_;
   MaterialPtr material_delete_;  // waiting for Delete Material's confirmation
+  MaterialPtr material_by_name(const std::string &name);  // an asset first, then a scene material (null: none)
   MultiSelect<MaterialPtr> material_multi_;  // task 0053
   std::vector<MaterialPtr> material_delete_many_;
   /* Delete a material (the Materials window): every slot using it is emptied (its faces

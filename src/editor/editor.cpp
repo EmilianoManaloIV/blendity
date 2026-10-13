@@ -2784,6 +2784,32 @@ bool Editor::set_field_command(const std::string &path, const std::string &value
   return true;
 }
 
+/* matdelete <name>[, <name>...] / texdelete <name>[, <name>...]: delete material or texture assets by name, at once
+ * (task 0053; the windows ask first). Names are comma-separated, so they may hold spaces ("Wood Floor"). The scene side
+ * is one undo step. */
+void Editor::delete_assets_command(const std::string &cmd, const std::string &line) {
+  const size_t at = line.find(cmd);
+  const std::vector<std::string> names = split_list(at == std::string::npos ? std::string() : line.substr(at + cmd.size()), ',');
+  /* Each kind deletes one by name, or says there is none. */
+  auto delete_material_named = [this](const std::string &name) {
+    const MaterialPtr m = material_by_name(name);
+    if (m) delete_material(m);
+    return m != nullptr;
+  };
+  auto delete_texture_named = [this](const std::string &name) {
+    const ProceduralTexturePtr t = texture_by_name(name);
+    if (t) delete_texture_asset(t);
+    return t != nullptr;
+  };
+  const bool materials = cmd == "matdelete";
+  int n = 0;
+  for (const std::string &name : names) {
+    if (materials ? delete_material_named(name) : delete_texture_named(name)) n++;
+    else Log::warn("%s: no %s named '%s'", cmd.c_str(), materials ? "material" : "texture", name.c_str());
+  }
+  Log::info("%s: %d deleted", cmd.c_str(), n);
+}
+
 void Editor::run_console_command(const std::string &line) {
   auto t = split_ws(line);
   if (t.empty()) return;
@@ -2823,46 +2849,7 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (c == "matdelete" || c == "texdelete") {
-    /* matdelete <name>[, <name>...] / texdelete <name>[, <name>...]: delete material or texture assets by name, at once
-     * (task 0053; the windows ask first). Names are comma-separated, so they may hold spaces ("Wood Floor"). The scene
-     * side is one undo step. */
-    std::vector<std::string> names;
-    {
-      const std::string rest = line.size() > c.size() ? line.substr(line.find(c) + c.size()) : std::string();
-      size_t s = 0;
-      while (s <= rest.size()) {
-        const size_t e = rest.find(',', s);
-        std::string nm = rest.substr(s, e == std::string::npos ? std::string::npos : e - s);
-        while (!nm.empty() && nm.front() == ' ') nm.erase(nm.begin());
-        while (!nm.empty() && nm.back() == ' ') nm.pop_back();
-        if (!nm.empty()) names.push_back(nm);
-        if (e == std::string::npos) break;
-        s = e + 1;
-      }
-    }
-    int n = 0;
-    for (size_t k = 0; k < names.size(); k++) {
-      if (c == "matdelete") {
-        MaterialPtr hit;
-        for (const std::string &path : material_asset_paths())
-          if (MaterialPtr m = material_asset(path))
-            if (m->name == names[k]) hit = m;
-        if (!hit)
-          for (const MaterialPtr &m : scene_materials())
-            if (m->name == names[k]) hit = m;
-        if (hit) delete_material(hit), n++;
-        else Log::warn("matdelete: no material named '%s'", names[k].c_str());
-      }
-      else {
-        ProceduralTexturePtr hit;
-        for (const std::string &path : texture_asset_paths())
-          if (ProceduralTexturePtr tx = texture_asset(path))
-            if (tx->name == names[k]) hit = tx;
-        if (hit) delete_texture_asset(hit), n++;
-        else Log::warn("texdelete: no texture named '%s'", names[k].c_str());
-      }
-    }
-    Log::info("%s: %d deleted", c.c_str(), n);
+    delete_assets_command(c, line);
     return;
   }
   if (c == "bone" || c == "armature" || c == "skin" || c == "ik" || c == "rig") {

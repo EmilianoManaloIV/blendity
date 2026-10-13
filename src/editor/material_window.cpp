@@ -108,6 +108,30 @@ void blit(ui::Context &u, const Preview &p, Recti r) {
 
 }  // namespace
 
+MaterialPtr Editor::material_by_name(const std::string &name) {
+  for (const std::string &path : material_asset_paths()) {
+    MaterialPtr m = material_asset(path);
+    if (m && m->name == name) return m;
+  }
+  for (const MaterialPtr &m : scene_materials())
+    if (m->name == name) return m;
+  return nullptr;
+}
+
+void Editor::select_objects_using(const MaterialPtr &m) {
+  selection_.clear();
+  scene_->for_each([&](GameObject &g) {
+    const auto *mr = g.get<MeshRenderer>();
+    if (mr && std::find(mr->materials.begin(), mr->materials.end(), m) != mr->materials.end()) selection_.push_back(g.id);
+  });
+  if (!selection_.empty()) active_ = selection_.back();
+}
+
+void Editor::request_material_delete(const MaterialPtr &one) {
+  if (material_multi_.items.size() > 1) material_delete_many_ = material_multi_.items, material_delete_ = nullptr;
+  else material_delete_ = one, material_delete_many_.clear();
+}
+
 void Editor::draw_materials_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
@@ -165,13 +189,7 @@ void Editor::draw_materials_window(const Recti &r) {
   const int off = u.begin_scroll(sid, grid, rows * (tile + u.row_h() + pad) + pad);
   std::vector<MaterialPtr> shown;
   for (const Entry &e : list) shown.push_back(e.m);
-  {  // the multi-selection (task 0053): only what is shown (deleted ones and a search's hidden ones drop), the edited one in it
-    material_multi_.keep_only(shown);
-    if (material_selected_ && !material_multi_.has(material_selected_) &&
-        std::find(shown.begin(), shown.end(), material_selected_) != shown.end())
-      material_multi_.only(material_selected_);
-    if (!material_selected_) material_multi_.items.clear();
-  }
+  material_multi_.sync(shown, material_selected_);  // the multi-selection (task 0053)
   const bool asking = material_delete_ || !material_delete_many_.empty();  // a question is up: no new selection or Delete
   for (size_t i = 0; i < list.size(); i++) {
     const int cx = grid.x + pad + (int)(i % (size_t)cols) * (tile + pad);
@@ -216,120 +234,50 @@ void Editor::draw_materials_window(const Recti &r) {
       copy->name = selm->name + " Copy";
       material_selected_ = new_material_asset(copy, false);
     }
-    if (u.menu_item("Select Objects Using It")) {
-      selection_.clear();
-      scene_->for_each([&](GameObject &g) {
-        if (auto *mr = g.get<MeshRenderer>())
-          for (auto &s : mr->materials)
-            if (s == selm && std::find(selection_.begin(), selection_.end(), g.id) == selection_.end()) selection_.push_back(g.id);
-      });
-      if (!selection_.empty()) active_ = selection_.back();
-    }
+    if (u.menu_item("Select Objects Using It")) select_objects_using(selm);
     u.menu_separator();
-    if (material_multi_.items.size() > 1) {
-      if (u.menu_item(strprintf("Delete %zu Materials...", material_multi_.items.size()).c_str(), "Del")) material_delete_many_ = material_multi_.items, material_delete_ = nullptr;
-    }
-    else if (u.menu_item("Delete Material...", "Del")) material_delete_ = selm, material_delete_many_.clear();
+    if (delete_menu_item(material_multi_.items.size(), "Delete Material...", "Materials")) request_material_delete(selm);
   });
-  /* Ctrl+A over the window: every material shown (the search applies). */
-  if (u.hovered(r) && !u.wants_keyboard() && !asking && in.ctrl() && in.key_pressed[platform::KEY_A]) {
-    if (!shown.empty()) {
-      material_multi_.all(shown);
-      material_selected_ = shown.back();
-    }
-    in.key_pressed[platform::KEY_A] = false;  // (never the scene's Select All from over this window)
-  }
-  /* Delete (or Backspace) over the window asks to delete the selected material(s) too. */
-  if (u.hovered(r) && material_selected_ && !u.wants_keyboard() && !asking && (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE])) {
-    if (material_multi_.items.size() > 1) material_delete_many_ = material_multi_.items;
-    else material_delete_ = material_selected_;
-    in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
-  }
+  /* Ctrl+A over the window: every material shown (the search applies). Delete (or Backspace) asks to delete the
+   * selected material(s). */
+  const MaterialPtr *last = select_all_key(r, asking) ? material_multi_.select_all(shown) : nullptr;
+  if (last) material_selected_ = *last;
+  if (delete_key(r, asking || !material_selected_)) request_material_delete(material_selected_);
   /* Several at once (task 0053): one question, then each as Delete Material does; the slots they empty are one undo
    * step (every mark_changed of one frame is). */
   if (!material_delete_many_.empty()) {
-    const ui::Id did = u.id("mat_delete_many");
-    if (!u.popup_open(did)) u.open_popup(did, {r.x + r.w / 2 - u.px(190), r.y + u.px(40), 0, 0});
     const std::vector<MaterialPtr> dms = material_delete_many_;
-    u.popup(did, u.px(380), [this, dms] {
-      auto &u = ui_;
-      size_t users = 0, files = 0;
-      scene_->for_each([&](GameObject &g) {
-        if (auto *mr = g.get<MeshRenderer>())
-          for (auto &s : mr->materials) users += std::find(dms.begin(), dms.end(), s) != dms.end();
-      });
-      std::string names;
-      for (size_t k = 0; k < dms.size(); k++) {
-        if (!dms[k]->asset_path.empty()) files++;
-        if (k < 4) names += (k ? ", " : "") + dms[k]->name;
-      }
-      if (dms.size() > 4) names += strprintf(" and %zu more", dms.size() - 4);
-      Recti t = u.popup_row(u.row_h() + u.px(6));
-      u.label({t.x + u.px(10), t.y, t.w - u.px(20), t.h}, strprintf("Delete %zu materials?", dms.size()), u.theme.text_bright);
-      Recti h0 = u.popup_row();
-      u.label({h0.x + u.px(10), h0.y, h0.w - u.px(20), h0.h}, names, u.theme.text_dim);
-      Recti h1 = u.popup_row();
-      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h},
-              (users ? strprintf("%zu slot(s) use them; their faces get the default material.", users) : std::string("No object uses them.")) +
-                  (files ? strprintf(" %zu file(s) go to the %s.", files,
-#ifdef _WIN32
-                                     "Recycle Bin"
-#else
-                                     "Trash"
-#endif
-                                     )
-                         : std::string()),
-              u.theme.text_dim);
-      Recti b = u.popup_row(u.row_h() + u.px(10));
-      if (u.button({b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Delete All")) {
-        for (const MaterialPtr &m : dms) delete_material(m);
-        material_delete_many_.clear();
-        material_multi_.items.clear();
-        u.close_popups();
-      }
-      if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {
-        material_delete_many_.clear();
-        u.close_popups();
-      }
-    });
-    if (!u.popup_open(did)) material_delete_many_.clear();  // clicked away
+    DeleteQuestion q;
+    q.id = "mat_delete_many";
+    q.at = {r.x + r.w / 2 - u.px(190), r.y + u.px(40), 0, 0};
+    q.title = strprintf("Delete %zu materials?", dms.size());
+    q.confirm = "Delete All";
+    size_t files = 0;
+    for (const MaterialPtr &m : dms) q.names.push_back(m->name), files += !m->asset_path.empty();
+    const size_t users = slots_using([&](const MaterialPtr &s) { return std::find(dms.begin(), dms.end(), s) != dms.end(); });
+    std::string note = users ? strprintf("%zu slot(s) use them; their faces get the default material.", users) : std::string("No object uses them.");
+    if (files) note += strprintf(" %zu file(s) go to the %s.", files, trash_name());
+    q.notes.push_back(note);
+    q.on_delete = [this, dms] {
+      for (const MaterialPtr &m : dms) delete_material(m);
+      material_multi_.items.clear();
+    };
+    q.on_close = [this] { material_delete_many_.clear(); };
+    ask_delete(q);
   }
   /* Delete Material's confirmation (like the Project window's). */
   if (material_delete_) {
-    const ui::Id did = u.id("mat_delete");
-    if (!u.popup_open(did)) u.open_popup(did, {r.x + r.w / 2 - u.px(190), r.y + u.px(40), 0, 0});
     const MaterialPtr dm = material_delete_;
-    u.popup(did, u.px(380), [this, dm] {
-      auto &u = ui_;
-      size_t users = 0;
-      scene_->for_each([&](GameObject &g) {
-        if (auto *mr = g.get<MeshRenderer>())
-          for (auto &s : mr->materials) users += s == dm;
-      });
-      Recti t = u.popup_row(u.row_h() + u.px(6));
-      u.label({t.x + u.px(10), t.y, t.w - u.px(20), t.h}, "Delete the material " + dm->name + "?", u.theme.text_bright);
-      Recti h1 = u.popup_row();
-      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h},
-              users ? strprintf("%zu slot(s) use it; their faces get the default material.", users) : std::string("No object uses it."), u.theme.text_dim);
-      if (!dm->asset_path.empty()) {
-        Recti h2 = u.popup_row();
-#ifdef _WIN32
-        u.label({h2.x + u.px(10), h2.y, h2.w - u.px(20), h2.h}, "Its file " + fs::filename(dm->asset_path) + " goes to the Recycle Bin.", u.theme.text_dim);
-#else
-        u.label({h2.x + u.px(10), h2.y, h2.w - u.px(20), h2.h}, "Its file " + fs::filename(dm->asset_path) + " goes to the Trash.", u.theme.text_dim);
-#endif
-      }
-      Recti b = u.popup_row(u.row_h() + u.px(10));
-      if (u.button({b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Delete")) {
-        delete_material(dm);
-        material_delete_ = nullptr;
-        u.close_popups();
-      }
-      if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {
-        material_delete_ = nullptr;
-        u.close_popups();
-      }
-    });
+    const size_t users = slots_using([&](const MaterialPtr &s) { return s == dm; });
+    DeleteQuestion q;
+    q.id = "mat_delete";
+    q.at = {r.x + r.w / 2 - u.px(190), r.y + u.px(40), 0, 0};
+    q.title = "Delete the material " + dm->name + "?";
+    q.notes.push_back(users ? strprintf("%zu slot(s) use it; their faces get the default material.", users) : std::string("No object uses it."));
+    if (!dm->asset_path.empty()) q.notes.push_back("Its file " + fs::filename(dm->asset_path) + " goes to the " + trash_name() + ".");
+    q.on_delete = [this, dm] { delete_material(dm); };
+    q.on_close = [this] { material_delete_ = nullptr; };  // (clicking away now cancels it, as in the other windows)
+    ask_delete(q);
   }
   if (!editing) return;
   /* The material's own inspector, outside any object. */

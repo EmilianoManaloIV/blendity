@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 80): flatter code after the review on PR #50
+
+**Asked:** "Can you read feedback in my GitHub and then make appropriate changes?" The one review (PR #50, task 0053):
+"Be careful of nested if statements. Use methods as noted by @CodeAesthetic 'Why You Shouldn't Nest Your Code'."
+
+**Changed** (extraction and guard clauses):
+- **`MultiSelect`**: `click` is three lines over `add`, `toggle` and `range_to`. New `sync` and `select_all` replace
+  blocks each of the three windows repeated.
+- **One delete question** (`ask_delete` with a `DeleteQuestion`) replaces six copies: one and several, in the
+  Materials, Textures and Project windows. One context-menu item (`delete_menu_item`) and two key checks
+  (`select_all_key`, `delete_key`) replace the nested `if`s around them.
+- **Helpers out of nested loops:** `slots_using`, `select_objects_using`, `materials_using_texture`,
+  `edit_material_asset`, `project_keys`, `project_row_pressed`, `request_*_delete`.
+- **`matdelete` / `texdelete`** moved out of the console's command chain into `delete_assets_command`, with
+  `material_by_name`, `texture_by_name` and a shared `split_list` replacing nested lookup loops.
+- Small differences:
+  - Clicking away from the Materials window's "Delete the material ...?" now cancels it, as the other windows'
+    questions did.
+  - Ctrl+A and Delete over the Materials and Textures windows wait while a text field is being edited.
+  - `matdelete` with two assets of one name deletes the first found (it took the last).
+- The rule now applies to new code too (task 0057's solver is written as small functions).
+
+**Checked**
+- New tests (round 80):
+  - `matdelete` with names holding spaces and an unknown one; `split_list` trims and drops empty parts.
+  - The multi-selection: Ctrl+Shift with the last click gone, `sync` with hidden and edited items, Ctrl+A.
+- Reviewed by the code reviewer twice (no behaviour bugs; its remaining nesting spots were flattened too).
+- Unit checks: Windows 9,523, 0 failed (599 tests); the whole suite in render-cache verify mode: 9,524,
+  0 failed, 0 stale pictures. Linux with libraries: 9,431, 0 failed. Sanitizer build: 9,349, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
 ## 2026-10-13 (round 79): drag objects onto fields; the Layout dropdown crash; a flaky CI check
 
 **Asked:** "Some checks fail, check those out." "Clicking the drop down for the layouts crashes the program." "Also

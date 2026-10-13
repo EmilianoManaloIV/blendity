@@ -101,6 +101,8 @@ std::string strprintf(const char *fmt, ...);
 std::string format_bytes(uint64_t bytes);
 std::string to_lower(std::string s);
 std::vector<std::string> split_ws(const std::string &s);
+/* `s` split at `sep`, each part trimmed of spaces, empty parts dropped ("Bricks, Wood Floor" -> two names). */
+std::vector<std::string> split_list(const std::string &s, char sep);
 bool starts_with(const std::string &s, const char *prefix);
 inline bool starts_with(const std::string &s, const std::string &prefix) { return starts_with(s, prefix.c_str()); }
 
