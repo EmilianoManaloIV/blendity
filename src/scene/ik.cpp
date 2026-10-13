@@ -6,6 +6,7 @@
 // (1993, CCD); Real-Time Rendering ch. 4 (rotation between vectors).
 // Also the Humanoid / Quadruped rig presets and the name-based mapping of an imported skeleton to IK.
 #include "scene.h"
+#include "rig_build.h"
 #include "../core/core.h"
 
 #include <algorithm>
@@ -193,13 +194,13 @@ bool ik_drives(const Scene &scene, const GameObject &bone) {
 
 /* ------------------------------------------------------------- rig presets */
 
-namespace {
+namespace rigbuild {
 
 /* A bone from world `head` along world `dir`, child of `parent`; its pose is its rest. */
 GameObject *make_bone(Scene &s, const std::string &name, GameObject *parent, Vec3 head, Vec3 dir, float length) {
   GameObject *g = s.create(name, parent);
   g->set_world_position(head);
-  g->set_world_rotation(rotation_between(Vec3(0, 1, 0), dir));
+  g->set_world_rotation(rotation_between(Vec3(0, 1, 0), normalize(dir)));
   Bone *b = g->add<Bone>();
   b->length = length;
   b->set_rest(g->local());
@@ -229,7 +230,9 @@ void add_limb_ik(Scene &s, GameObject *root, GameObject *lower, const std::strin
   ik->chain_length = 2;
 }
 
-}  // namespace
+}  // namespace rigbuild
+
+using namespace rigbuild;
 
 GameObject *create_rig(Scene &s, bool quadruped, Vec3 at) {
   GameObject *root = s.create(unique_name(s, quadruped ? "Quadruped" : "Humanoid"), nullptr);

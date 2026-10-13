@@ -26011,4 +26011,293 @@ static void round81_tests() {
     }  // (its destructor cancels and joins the worker)
     CHECK(true);
   });
+  /* ---------------------------------------------------------------- round 82: the marker auto-rig (task 0058) */
+  /* A 1.7 m mannequin in a T-pose facing +Z (left on -X), as one mesh of tubes. */
+  auto mannequin = [](Editor &ed) {
+    auto m = std::make_shared<Mesh>();
+    for (float sx : {-1.0f, 1.0f}) {
+      r81_tube(*m, {0.1f * sx, 0.0f, 0}, {0.1f * sx, 0.92f, 0}, 0.07f, 18, 12);    // a leg
+      r81_tube(*m, {0.15f * sx, 1.42f, 0}, {0.78f * sx, 1.42f, 0}, 0.05f, 24, 12);  // an arm
+    }
+    r81_tube(*m, {0, 0.85f, 0}, {0, 1.5f, 0}, 0.17f, 14, 16);   // the torso
+    r81_tube(*m, {0, 1.5f, 0}, {0, 1.72f, 0}, 0.1f, 6, 12);     // the head
+    GameObject *g = ed.scene().create("Mannequin");
+    g->add<MeshFilter>()->mesh = m;
+    g->add<MeshRenderer>();
+    ed.command("select Mannequin");
+    ed.mark_changed_for_test("R82 mannequin");
+    ed.step_frame_headless();
+    return g;
+  };
+  auto near_bone = [](Editor &ed, const char *bone, Vec3 at, float tolerance) {
+    GameObject *b = ed.scene().find_by_name(bone);
+    const float d = b ? length(b->world_position() - at) : 1e9f;
+    if (!(d <= tolerance)) std::printf("    %s: %.3f from (%.2f, %.2f, %.2f)\n", bone, d, at.x, at.y, at.z);
+    return d <= tolerance;
+  };
+
+  test("auto-rig: a humanoid's markers give a skeleton at its joints, weighted and posable, undone in one step (Mixamo's way)", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    GameObject *body = mannequin(ed);
+    ed.command("autorig humanoid");
+    CHECK(ed.autorig_for_test().active);
+    /* One side placed by hand (the left, on -X); Symmetry places the right. */
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.42 0", "autorig mark LeftKnee -0.1 0.48 0"})
+      ed.command(line);
+    CHECK(ed.autorig_next_for_test().empty());
+    ed.step_frame_headless();
+    ed.command("autorig build");
+    ed.step_frame_headless();
+    const float tol = 0.02f * 1.72f;  // 2 % of the height
+    CHECK(near_bone(ed, "LeftLowerArm", {-0.45f, 1.42f, 0}, tol) && near_bone(ed, "RightLowerArm", {0.45f, 1.42f, 0}, tol));
+    CHECK(near_bone(ed, "LeftHand", {-0.7f, 1.42f, 0}, tol) && near_bone(ed, "RightHand", {0.7f, 1.42f, 0}, tol));
+    CHECK(near_bone(ed, "LeftLowerLeg", {-0.1f, 0.48f, 0}, tol) && near_bone(ed, "RightLowerLeg", {0.1f, 0.48f, 0}, tol));
+    CHECK(near_bone(ed, "Head", {0, 1.55f, 0}, tol) && near_bone(ed, "LeftUpperLeg", {-0.1f, 0.88f + 0.03f * 1.72f, 0}, tol));
+    CHECK(ed.scene().find_by_name("LeftLowerArm") && ed.scene().find_by_name("LeftLowerArm")->get<IKConstraint>());
+    body = ed.scene().find_by_name("Mannequin");
+    const SkinModifier *sk = body ? body->get<SkinModifier>() : nullptr;
+    CHECK(sk && ed.scene().find_by_name(sk->object) && body->mesh_filter()->mesh->find_group("LeftHand") >= 0);
+    if (!sk) return;
+    const Mesh &m = *body->mesh_filter()->mesh;
+    std::printf("    %zu vertices, %zu groups; partition error %.2g\n", m.vert_count(), m.vertex_groups.size(), r81_partition_error(m));
+    CHECK(r81_partition_error(m) < 1e-3f);
+    /* Bend the left forearm: the hand moves, the hips don't. */
+    GameObject *fore = ed.scene().find_by_name("LeftLowerArm");
+    for (GameObject *ik_t : {ed.scene().find_by_name("LeftHandIK")})
+      if (ik_t) ik_t->set_world_position(ik_t->world_position() + Vec3(0, 0.3f, 0));  // (IK drives the forearm: move its target)
+    solve_constraints(ed.scene());
+    const Mesh *e = body->evaluated_mesh();
+    const Mat4 &w = body->world_matrix();
+    float hand = 0.0f, hips = 0.0f;
+    for (size_t v = 0; v < m.vert_count(); v++) {
+      const Vec3 p = m.positions[v];
+      const float d = length(w.point(e->positions[v]) - w.point(p));
+      if (p.x < -0.68f) hand = std::max(hand, d);
+      if (std::fabs(p.x) < 0.2f && p.y > 0.8f && p.y < 1.0f) hips = std::max(hips, d);
+    }
+    std::printf("    the left hand moved %.3f, the hips %.4f (forearm %s)\n", hand, hips, fore ? "found" : "missing");
+    CHECK(hand > 0.05f && hips < 1e-3f);
+    /* One undo: the rig and its bind went in together (a small mesh binds at once, in the same frame; a large one's
+     * bind lands later as its own step). */
+    ed.command("undo");
+    body = ed.scene().find_by_name("Mannequin");
+    CHECK(!ed.scene().find_by_name("LeftLowerArm") && body && !body->get<SkinModifier>() && body->mesh_filter()->mesh->find_group("LeftHand") < 0);
+  });
+
+  test("auto-rig: a quadruped's markers give a spine, neck, tail and four legs where they are; a front leg moves its paw, not the head", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    auto m = std::make_shared<Mesh>();
+    r81_tube(*m, {0, 0.6f, -0.42f}, {0, 0.6f, 0.4f}, 0.15f, 16, 16);      // the body, nose towards +Z
+    r81_tube(*m, {0, 0.65f, 0.38f}, {0, 0.82f, 0.68f}, 0.07f, 8, 12);     // neck and head
+    r81_tube(*m, {0, 0.62f, -0.42f}, {0, 0.76f, -0.8f}, 0.025f, 8, 8);    // the tail
+    for (float sx : {-1.0f, 1.0f})
+      for (float z : {-0.3f, 0.3f}) r81_tube(*m, {0.1f * sx, 0.55f, z}, {0.1f * sx, 0.0f, z}, 0.04f, 14, 10);  // the legs
+    GameObject *dog = ed.scene().create("Dog");
+    dog->add<MeshFilter>()->mesh = m;
+    dog->add<MeshRenderer>();
+    ed.command("select Dog");
+    ed.mark_changed_for_test("R82 dog");
+    ed.step_frame_headless();
+    ed.command("autorig quadruped");
+    for (const char *line : {"autorig mark Nose 0 0.8 0.66", "autorig mark Skull 0 0.74 0.55", "autorig mark Withers 0 0.65 0.3",
+                             "autorig mark Hips 0 0.6 -0.3", "autorig mark TailBase 0 0.62 -0.42", "autorig mark TailTip 0 0.75 -0.78",
+                             "autorig mark FrontLeftKnee -0.1 0.3 0.3", "autorig mark FrontLeftPaw -0.1 0.03 0.3",
+                             "autorig mark HindLeftHock -0.1 0.3 -0.3", "autorig mark HindLeftPaw -0.1 0.03 -0.3"})
+      ed.command(line);
+    CHECK(ed.autorig_next_for_test().empty());
+    ed.command("autorig build");
+    ed.step_frame_headless();
+    const float tol = 0.02f * 0.82f;
+    CHECK(near_bone(ed, "FrontLeftLowerLeg", {-0.1f, 0.3f, 0.3f}, tol) && near_bone(ed, "FrontRightLowerLeg", {0.1f, 0.3f, 0.3f}, tol));
+    CHECK(near_bone(ed, "HindLeftLowerLeg", {-0.1f, 0.3f, -0.3f}, tol) && near_bone(ed, "HindRightLowerLeg", {0.1f, 0.3f, -0.3f}, tol));
+    CHECK(near_bone(ed, "Head", {0, 0.74f, 0.55f}, tol) && near_bone(ed, "Neck", {0, 0.65f, 0.3f}, tol) && near_bone(ed, "Tail", {0, 0.62f, -0.42f}, tol));
+    CHECK(ed.scene().find_by_name("Tail2") && ed.scene().find_by_name("FrontLeftLowerLeg")->get<IKConstraint>());
+    dog = ed.scene().find_by_name("Dog");
+    const Mesh &mesh = *dog->mesh_filter()->mesh;
+    CHECK(r81_partition_error(mesh) < 1e-3f);
+    /* Lift the front left foot: its paw follows; the head stays. */
+    if (GameObject *t = ed.scene().find_by_name("FrontLeftFootIK")) t->set_world_position(t->world_position() + Vec3(0, 0.15f, 0.1f));
+    solve_constraints(ed.scene());
+    const Mesh *e = dog->evaluated_mesh();
+    float paw = 0.0f, head = 0.0f;
+    for (size_t v = 0; v < mesh.vert_count(); v++) {
+      const Vec3 p = mesh.positions[v];
+      const float d = length(e->positions[v] - p);
+      if (p.x < -0.05f && p.z > 0.2f && p.y < 0.1f) paw = std::max(paw, d);
+      if (p.z > 0.55f && p.y > 0.7f) head = std::max(head, d);
+    }
+    std::printf("    the front left paw moved %.3f, the head %.4f\n", paw, head);
+    CHECK(paw > 0.05f && head < 1e-3f);
+  });
+
+  test("auto-rig: clicks in the front view put markers inside the body (mid-depth), Symmetry mirrors them, Remove Last takes one back", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    mannequin(ed);
+    ed.command("autorig humanoid");
+    for (int i = 0; i < 90; i++) ed.step_frame_headless();  // (the view turns to the front)
+    auto click_at = [&](Vec3 world) {
+      int x = 0, y = 0;
+      if (!ed.project_to_window(world, x, y)) return false;
+      platform::Event mv, d, u;
+      mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      mv.x = d.x = u.x = x, mv.y = d.y = u.y = y;
+      ed.step_frame_headless({mv});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      return true;
+    };
+    CHECK(click_at({0, 1.6f, 0.1f}));  // the chin, on the head's front surface
+    CHECK(click_at({-0.7f, 1.42f, 0.05f}));  // the left wrist
+    const MarkerMap &mk = ed.autorig_for_test().markers;
+    const bool have = mk.count("Chin") && mk.count("LeftWrist") && mk.count("RightWrist");
+    CHECK(have);
+    if (!have) return;
+    const Vec3 c = mk.at("Chin"), lw = mk.at("LeftWrist"), rw = mk.at("RightWrist");
+    std::printf("    chin (%.3f, %.3f, %.3f), left wrist (%.3f, %.3f, %.3f), right wrist (%.3f, %.3f, %.3f)\n", c.x, c.y, c.z, lw.x, lw.y, lw.z, rw.x, rw.y,
+                rw.z);
+    CHECK(std::fabs(c.z) < 0.02f && std::fabs(lw.z) < 0.01f);  // the middle of the head and of the arm, not their front
+    CHECK(std::fabs(lw.x + 0.7f) < 0.02f && std::fabs(rw.x - 0.7f) < 0.02f && std::fabs(rw.y - lw.y) < 1e-4f);
+    ed.autorig_remove_last_for_test();
+    CHECK(!ed.autorig_for_test().markers.count("LeftWrist") && !ed.autorig_for_test().markers.count("RightWrist") &&
+          ed.autorig_for_test().markers.count("Chin"));
+    CHECK(ed.autorig_next_for_test() == "LeftWrist");
+    ed.command("autorig cancel");
+    CHECK(!ed.autorig_for_test().active);
+  });
+  /* A dog of tubes; legs bent at the hocks and elbows unless `straight`; nose towards +Z (or -Z, `backwards`). */
+  auto dog_markers = [](bool straight, bool backwards) {
+    const float s = backwards ? -1.0f : 1.0f, bend = straight ? 0.0f : 0.06f;
+    std::vector<std::string> lines = {
+        strprintf("autorig mark Nose 0 0.8 %g", 0.66f * s), strprintf("autorig mark Skull 0 0.74 %g", 0.55f * s),
+        strprintf("autorig mark Withers 0 0.65 %g", 0.3f * s), strprintf("autorig mark Hips 0 0.6 %g", -0.3f * s),
+        strprintf("autorig mark TailBase 0 0.62 %g", -0.42f * s), strprintf("autorig mark TailTip 0 0.75 %g", -0.78f * s),
+        strprintf("autorig mark FrontLeftKnee %g 0.3 %g", -0.1f * s, (0.3f - bend) * s), strprintf("autorig mark FrontLeftPaw %g 0.03 %g", -0.1f * s, 0.3f * s),
+        strprintf("autorig mark HindLeftHock %g 0.3 %g", -0.1f * s, (-0.3f - bend) * s),
+        strprintf("autorig mark HindLeftPaw %g 0.03 %g", -0.1f * s, -0.3f * s)};
+    return lines;
+  };
+  auto make_dog = [](Editor &ed, bool backwards) {
+    const float s = backwards ? -1.0f : 1.0f;
+    auto m = std::make_shared<Mesh>();
+    r81_tube(*m, {0, 0.6f, -0.42f * s}, {0, 0.6f, 0.4f * s}, 0.15f, 16, 16);
+    r81_tube(*m, {0, 0.65f, 0.38f * s}, {0, 0.82f, 0.68f * s}, 0.07f, 8, 12);
+    r81_tube(*m, {0, 0.62f, -0.42f * s}, {0, 0.76f, -0.8f * s}, 0.025f, 8, 8);
+    for (float sx : {-1.0f, 1.0f})
+      for (float z : {-0.3f, 0.3f}) r81_tube(*m, {0.1f * sx, 0.55f, z}, {0.1f * sx, 0.0f, z}, 0.04f, 14, 10);
+    GameObject *dog = ed.scene().create("Dog");
+    dog->add<MeshFilter>()->mesh = m;
+    dog->add<MeshRenderer>();
+    ed.command("select Dog");
+    ed.mark_changed_for_test("R82 dog");
+    ed.step_frame_headless();
+    return dog;
+  };
+
+  test("auto-rig: bent legs and elbows stay as placed - Build Rig leaves every bone at its rest and the mesh unmoved", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    make_dog(ed, false);
+    ed.command("autorig quadruped");
+    for (const std::string &l : dog_markers(false, false)) ed.command(l);
+    ed.command("autorig build");
+    ed.step_frame_headless();
+    float worst_bone = 0.0f;
+    ed.scene().for_each([&](GameObject &g) {
+      const Bone *b = g.get<Bone>();
+      if (!b) return;
+      const Quat q = g.local().rotation, r = b->rest_rotation;
+      worst_bone = std::max(worst_bone, 1.0f - std::fabs(q.x * r.x + q.y * r.y + q.z * r.z + q.w * r.w));
+    });
+    GameObject *dog = ed.scene().find_by_name("Dog");
+    const Mesh &m = *dog->mesh_filter()->mesh;
+    const Mesh *e = dog->evaluated_mesh();
+    float moved = 0.0f;
+    for (size_t v = 0; v < m.vert_count(); v++) moved = std::max(moved, length(e->positions[v] - m.positions[v]));
+    std::printf("    after Build Rig: bones off their rest by %.2g (1 - |q.r|), the mesh moved %.2g\n", worst_bone, moved);
+    CHECK(worst_bone < 1e-5f && moved < 1e-4f);
+    /* A humanoid with the elbows a little in front of the shoulder-wrist line: the same. */
+    Editor h;
+    h.init_headless(1200, 800);
+    mannequin(h);
+    h.command("autorig humanoid");
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.40 0.04", "autorig mark LeftKnee -0.1 0.48 0.02"})
+      h.command(line);
+    h.command("autorig build");
+    h.step_frame_headless();
+    float worst = 0.0f;
+    std::string which;
+    h.scene().for_each([&](GameObject &g) {
+      const Bone *b = g.get<Bone>();
+      if (!b) return;
+      const Quat q = g.local().rotation, r = b->rest_rotation;
+      const float off = 1.0f - std::fabs(q.x * r.x + q.y * r.y + q.z * r.z + q.w * r.w);
+      if (off > worst) worst = off, which = g.name;
+    });
+    std::printf("    humanoid with bent elbows: bones off their rest by %.2g (%s)\n", worst, which.c_str());
+    CHECK(worst < 1e-5f);
+  });
+
+  test("auto-rig: left and right follow the body - markers placed on the wrong side swap, and a dog facing -Z has its left on +X", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    mannequin(ed);
+    ed.command("autorig humanoid");
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist 0.7 1.42 0",
+                             "autorig mark LeftElbow 0.45 1.42 0", "autorig mark LeftKnee 0.1 0.48 0"})  // (the "left" ones on +X)
+      ed.command(line);
+    ed.command("autorig build");
+    GameObject *la = ed.scene().find_by_name("LeftLowerArm");
+    CHECK(la && la->world_position().x < 0.0f);
+    Editor ed2;
+    ed2.init_headless(1200, 800);
+    make_dog(ed2, true);
+    ed2.command("autorig quadruped");
+    for (const std::string &l : dog_markers(true, true)) ed2.command(l);
+    ed2.command("autorig build");
+    GameObject *fl = ed2.scene().find_by_name("FrontLeftLowerLeg");
+    std::printf("    the backwards dog's front left knee at x = %.2f\n", fl ? fl->world_position().x : 0.0f);
+    CHECK(fl && fl->world_position().x > 0.0f && fl->world_position().z < 0.0f);
+  });
+
+  test("auto-rig: upside-down markers and unknown names are refused; New Scene ends a session; a large mesh binds in the background", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    mannequin(ed);
+    ed.command("autorig humanoid");
+    ed.command("autorig mark chin 0 1.55 0");  // (lower case: not a marker's name)
+    CHECK(ed.autorig_for_test().markers.empty());
+    for (const char *line : {"autorig mark Chin 0 0.5 0", "autorig mark Groin 0 1.5 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.42 0", "autorig mark LeftKnee -0.1 0.48 0"})  // the groin above the chin
+      ed.command(line);
+    ed.command("autorig build");
+    CHECK(!ed.scene().find_by_name("Hips") && ed.autorig_for_test().active);  // refused; the markers stay to fix
+    ed.command("newscene");
+    CHECK(!ed.autorig_for_test().active);
+    /* Background: Build lands the rig at once, the bind later as its own step. */
+    Editor big;
+    big.init_headless(1200, 800);
+    mannequin(big);
+    big.set_skin_async_min_verts_for_test(0);
+    big.command("autorig humanoid");
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.42 0", "autorig mark LeftKnee -0.1 0.48 0"})
+      big.command(line);
+    big.command("autorig build");
+    CHECK(big.scene().find_by_name("LeftLowerArm") != nullptr);
+    for (int i = 0; i < 4000 && big.skin_job_running_for_test(); i++) big.step_frame_headless();
+    GameObject *body = big.scene().find_by_name("Mannequin");
+    CHECK(body && r81_partition_error(*body->mesh_filter()->mesh) < 1e-3f && body->mesh_filter()->mesh->find_group("LeftHand") >= 0);
+    big.command("undo");  // the bind (and the rig too, when the bind landed in the frame right after Build)
+    body = big.scene().find_by_name("Mannequin");
+    CHECK(body && body->mesh_filter()->mesh->find_group("LeftHand") < 0);
+    /* Starting again on the same mesh brings the markers back. */
+    big.command("select Mannequin");
+    big.command("autorig humanoid");
+    CHECK(big.autorig_for_test().markers.size() == 8);
+  });
 }

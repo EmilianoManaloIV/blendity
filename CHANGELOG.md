@@ -2,6 +2,60 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 82): the marker auto-rig, humanoid and quadruped (task 0058, ADR 0028 part 2)
+
+**Asked:** "A Mixamo-styled automatic weight paint ... I want the markers and inpainted weights, but I want support for
+quadruped auto rigging as well."
+
+**Added**
+- **Rigging > Auto-Rig**: Humanoid or Quadruped, with the character's mesh selected.
+  - The Scene view turns to an orthographic front view (an animal: its left side).
+  - A diagram shows the markers, the next one in orange.
+- **Placing**: each click puts the next marker inside the body, halfway through the first part under the mouse.
+  - Symmetry mirrors left and right.
+  - Drag a marker to move it; Remove Last takes one back.
+- **Markers**:
+  - A person (Mixamo's): chin, wrists, elbows, knees, groin.
+  - An animal: nose, base of the skull, withers, hips, base and tip of the tail, paws, front knees, hind hocks.
+- **Build Rig**:
+  - The skeleton with the presets' bone names (an animal also gets a three-bone tail).
+  - IK on every limb, the poles following each limb's own bend.
+  - The mesh bound with inpainted weights.
+  - Its markers stay for another try.
+- Console: `autorig humanoid|quadruped`, `autorig mark <marker> <x> <y> <z>`, `autorig symmetry on|off`,
+  `autorig build`, `autorig cancel`.
+- Learn: "Auto-rig with markers" in the Bones and skins lesson, with questions.
+
+**Checked**
+- New tests (round 82):
+  - A 1.7 m mannequin's and a dog's markers give their bones within 2 % of the height.
+  - Every vertex weighted.
+  - Bending the forearm moves the hand (0.31) not the hips; lifting a front paw moves it (0.30) not the head.
+  - Clicks in the front view land mid-depth (z = 0.000) and mirror.
+  - Bent limbs stay as placed (bones at rest within 6e-8).
+  - Markers on the wrong side, and a dog facing -Z, keep their sides.
+  - Upside-down markers and unknown names are refused.
+  - New Scene ends a session.
+  - The background bind, its undo, and markers kept for a rerun.
+- Unit checks: Windows 9,613, 0 failed (619 tests); the whole suite in render-cache verify mode: 9,614,
+  0 failed, 0 stale pictures. Linux with libraries: 9,521, 0 failed. Sanitizer build: 9,438, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: three majors and several minor findings, fixed:
+- Build Rig turned limbs that weren't bent the poles' fixed way.
+- The mesh's move gizmo took marker clicks.
+- A session outlived New Scene, Open Scene and Play (a new scene's object ids could point it at another object).
+- Also fixed:
+  - Duplicate crossings at shared edges.
+  - Weight Paint and Edit Mode during a session.
+  - Double-clicks framing the view.
+  - Esc taken from G / R / S.
+  - Build while a solve ran.
+  - An animal facing -Z.
+  - Upside-down markers.
+  - A wide stance.
+  - Unknown marker names.
+
 ## 2026-10-13 (round 81): automatic weights and weight transfer by inpainting (task 0057, ADR 0028)
 
 **Asked:** "A Mixamo-styled automatic weight paint ... based on Epic's Robust Skin Weights Transfer via Weight

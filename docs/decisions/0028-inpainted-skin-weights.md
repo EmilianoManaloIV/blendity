@@ -49,6 +49,13 @@ redo, Play and another scene cancel it.
 Transfer Weights From (pick the body). Console `skin bind [object] [inpaint|envelope]`, `skin transfer <source>
 [target]`.
 
+## Part 2: the marker auto-rig (task 0058)
+Mixamo's flow, for people and four-legged animals: markers clicked on the mesh in an orthographic front (or side)
+view, each at the middle of the first part the click passes through; a skeleton fitted to them with create_rig's bone
+names (so presets, Auto IK and the limb finder work on it), IK on every limb with poles from the markers' own bend,
+and the mesh bound with the inpainted weights above. Proportions the markers don't give (shoulders, hips, ankles,
+leg tops) follow create_rig's person and dog, scaled to the body (`scene/auto_rig.cpp`).
+
 ## Consequences
 - Weights near joints come from the bones on both sides, smoothly, and nothing bleeds across a gap.
 - A bind takes a solve: sub-second at 50,000 vertices with Eigen, longer with conjugate gradients (the build without

@@ -1603,6 +1603,7 @@ void Editor::redo() {
 void Editor::new_scene() {
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   cancel_skin_job();
+  autorig_cancel();
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1622,6 +1623,7 @@ void Editor::new_scene() {
 bool Editor::open_scene(const std::string &path) {
   set_weight_paint(false);
   cancel_skin_job();
+  autorig_cancel();
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -2657,6 +2659,7 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
 void Editor::enter_play() {
   set_weight_paint(false);
   cancel_skin_job();  // (Stop would throw its result away)
+  autorig_cancel();
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
   commit_undo();
@@ -2856,6 +2859,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "matdelete" || c == "texdelete") {
     delete_assets_command(c, line);
+    return;
+  }
+  if (c == "autorig") {
+    autorig_command(t);
     return;
   }
   if (c == "bone" || c == "armature" || c == "skin" || c == "ik" || c == "rig") {

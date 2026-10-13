@@ -59,6 +59,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (modal_update(view)) gizmo_busy = true;
   if (transform_update(view)) gizmo_busy = true;
   if (focus_pick_update(view)) gizmo_busy = true;
+  if (autorig_update(view)) gizmo_busy = true;
   if (knife_update(view)) gizmo_busy = true;
   if (draw_update(view)) gizmo_busy = true;
 
@@ -147,6 +148,7 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_preview(view);
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
+  draw_autorig_markers(view);
   draw_pushpull(view);
   draw_modal(view);
   draw_transform(view);
@@ -1377,7 +1379,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || weight_paint_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;

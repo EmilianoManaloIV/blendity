@@ -201,6 +201,7 @@ void Editor::draw_rigging_window(const Recti &r) {
     u.pop_id();
     if (weight_paint_) u.label(lay.row(), "Tip: select a bone (in the Hierarchy) to paint its group.", u.theme.text_dim);
   }
+  if (section("Auto-Rig")) draw_autorig_section(lay, mesh_obj);
   if (section("Inverse Kinematics")) {
     const bool chain = bone && a->parent && a->parent->get<Bone>() && !a->get<IKConstraint>();
     grid({{"Add IK to Bone", "The selected bone (a shin, a forearm) and its parent reach for a new target at its tip, bending towards a new pole.\n"

@@ -31,6 +31,7 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
 #include "ui.h"
 
@@ -188,6 +189,17 @@ struct DeleteQuestion {
   std::vector<std::string> notes;
   const char *confirm = "Delete";
   std::function<void()> on_delete, on_close;  // on_close: answered either way, or clicked away
+};
+
+/* The marker auto-rig being placed (task 0058): which mesh, which kind, the markers so far. */
+struct AutoRigSession {
+  bool active = false;
+  RigKind kind = RigKind::Humanoid;
+  uint64_t mesh = 0;
+  MarkerMap markers;
+  std::vector<std::string> order;  // the ones placed by hand, in order (Remove Last)
+  bool symmetry = true;
+  std::string dragging;  // a marker being dragged in the Scene view
 };
 
 /* A skin-weight solve (task 0057): a copy of the mesh in, its new groups out, on a worker thread when the mesh is
@@ -518,6 +530,9 @@ class Editor {
   bool weight_paint_active_for_test() const { return weight_paint_; }
   void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
+  const AutoRigSession &autorig_for_test() const { return autorig_; }
+  std::string autorig_next_for_test() const { return autorig_next(); }
+  void autorig_remove_last_for_test() { autorig_remove_last(); }
   std::string wp_group_name_for_test() {
     const Mesh *m = wp_mesh();
     const int gi = m ? wp_group(*m) : -1;
@@ -668,6 +683,22 @@ class Editor {
   void give_skin_modifier(GameObject *target, uint64_t source);
   void draw_skin_job_progress(ui::Layout &lay);
   void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
+  /* The marker auto-rig (task 0058, auto_rig_tool.cpp). */
+  AutoRigSession autorig_;
+  AutoRigSession autorig_last_;  // the last built session's markers: starting again on that mesh brings them back
+  bool autorig_start(GameObject *mesh, RigKind kind);
+  std::string autorig_next() const;  // the marker to place next ("" when all are)
+  void autorig_place(const std::string &name, Vec3 at);
+  void autorig_remove_last();
+  void autorig_cancel();
+  bool autorig_build();
+  bool autorig_update(const Recti &view);  // Scene view clicks while placing
+  std::string autorig_marker_at(int mx, int my);
+  void draw_autorig_markers(const Recti &view);
+  void draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj);
+  void draw_autorig_diagram(ui::Layout &lay);
+  void autorig_command(const std::vector<std::string> &t);
+  bool body_midpoint(GameObject *g, const Ray &ray, Vec3 &out);
   void cancel_skin_job() {
     if (skin_job_) skin_job_->cancel = true;  // (it ends at its next check; finish_skin_job drops it)
   }

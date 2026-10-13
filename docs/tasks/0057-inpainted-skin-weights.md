@@ -4,7 +4,7 @@
 - **Requirements:** R-06
 - **Decisions:** ADR 0028
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/54
 
 ## Goal
 The user asked (2026-10-12) for "a Mixamo-styled automatic weight paint ... based on Epic's Robust Skin Weights
