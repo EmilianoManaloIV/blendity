@@ -87,6 +87,14 @@ std::string normalize(const std::string &path);
 void open_external(const std::string &path);
 }  // namespace fs
 
+/* ---------------------------------------------------------------- System (task 0050: the minimum machine) */
+namespace sys {
+uint64_t physical_memory_bytes();  // installed RAM (0 if unknown)
+uint64_t working_set_bytes();      // this process's resident memory now
+uint64_t peak_working_set_bytes(); // and at its highest so far
+int hardware_threads();            // logical processors
+}  // namespace sys
+
 /* ---------------------------------------------------------------- Strings */
 
 std::string strprintf(const char *fmt, ...);

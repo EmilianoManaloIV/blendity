@@ -87,6 +87,37 @@ void upscale_nearest(const uint32_t *src, int sw, int sh, int sstride, uint32_t 
   });
 }
 
+void upscale_bilinear(const uint32_t *src, int sw, int sh, int sstride, uint32_t *dst, int dstride, const Recti &r) {
+  if (!src || !dst || sw <= 0 || sh <= 0 || r.w <= 0 || r.h <= 0) return;
+  /* Per destination column: the two source columns and the weight of the second (0..256). */
+  std::vector<int> x0((size_t)r.w), x1((size_t)r.w), fx((size_t)r.w);
+  for (int x = 0; x < r.w; x++) {
+    const float sx = std::max(0.0f, (x + 0.5f) * sw / (float)r.w - 0.5f);
+    const int i = std::min(sw - 1, (int)sx);
+    x0[(size_t)x] = i, x1[(size_t)x] = std::min(sw - 1, i + 1), fx[(size_t)x] = (int)((sx - i) * 256.0f);
+  }
+  JobSystem::global().parallel_for(r.h, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) {
+      const float sy = std::max(0.0f, (y + 0.5f) * sh / (float)r.h - 0.5f);
+      const int j = std::min(sh - 1, (int)sy), j1 = std::min(sh - 1, j + 1), fy = (int)((sy - j) * 256.0f);
+      const uint32_t *a = src + (size_t)j * sstride, *b = src + (size_t)j1 * sstride;
+      uint32_t *d = dst + (size_t)(r.y + y) * dstride + r.x;
+      /* Two channels at a time in 16-bit lanes (0x00FF00FF masks): weights in 0..256 fit, sums stay below 2^16. */
+      auto blend = [](uint32_t p, uint32_t q, uint32_t w) {  // p + (q - p) * w / 256, per byte
+        const uint32_t rb = ((p & 0x00FF00FFu) * (256 - w) + (q & 0x00FF00FFu) * w) >> 8 & 0x00FF00FFu;
+        const uint32_t ga = (((p >> 8) & 0x00FF00FFu) * (256 - w) + ((q >> 8) & 0x00FF00FFu) * w) & 0xFF00FF00u;
+        return rb | ga;
+      };
+      const uint32_t wy = (uint32_t)fy;
+      for (int x = 0; x < r.w; x++) {
+        const uint32_t wx = (uint32_t)fx[(size_t)x];
+        const uint32_t top = blend(a[x0[(size_t)x]], a[x1[(size_t)x]], wx), bot = blend(b[x0[(size_t)x]], b[x1[(size_t)x]], wx);
+        d[x] = blend(top, bot, wy);
+      }
+    }
+  });
+}
+
 int retro_dither_offset(int dither, int x, int y) {
   /* The PS1 GPU's dither matrix (psx-spx), added to 8-bit colour before it drops to 5 bits. */
   static const int kPs1[4][4] = {{-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};

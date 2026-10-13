@@ -53,6 +53,7 @@ void RenderTarget::make_depth_only(int w, int h) {
 void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, const LightingEnv &env,
                        const RasterOptions &opt) {
   rt_ = rt;
+  sky_.on = false;  // a frame that never reached flush() leaves no sky behind
   view_ = view;
   proj_ = proj;
   vp_ = proj * view;
@@ -98,39 +99,79 @@ void Renderer3D::clear_planes(const uint32_t *color) {
   stats_.ms_clear += t.ms();
 }
 
-void Renderer3D::clear(uint32_t color) { clear_planes(&color); }
+void Renderer3D::clear(uint32_t color) {
+  sky_.on = false;  // a colour replaces a sky asked for earlier
+  clear_planes(&color);
+}
 
 void Renderer3D::clear_environment(const Mat4 &inv_vp, const Environment &env, ViewTransform vt, float exposure) {
+  clear_planes(nullptr);
+  sky_.on = true;
+  sky_.inv_vp = inv_vp;
+  sky_.env = &env;
+  sky_.vt = vt;
+  sky_.exposure = exposure;
+}
+
+/* The sky where no opaque surface was drawn (depth still cleared), in runs along each row, before the see-through
+ * surfaces blend over it. The same per-pixel direction and encoding as filling the whole view first. */
+void Renderer3D::fill_pending_sky() {
+  if (!sky_.on || !sky_.env || !rt_->color) {
+    sky_.on = false;
+    return;
+  }
+  sky_.on = false;
   const int W = rt_->width, H = rt_->height;
+  const Mat4 inv_vp = sky_.inv_vp;
+  const Environment &env = *sky_.env;
   auto unproject = [&](float nx, float ny, float nz) {
     Vec4 p = inv_vp * Vec4(nx, ny, nz, 1.0f);
     return p.xyz() / p.w;
   };
-  auto &js = JobSystem::global();
-  int saved = js.max_threads();
-  if (!opt_.multithreaded) js.set_max_threads(1);
-  js.parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
+  const bool with_hdr = rt_->hdr.size() == (size_t)W * H;  // bloom sees the sky's own light (no seam at silhouettes)
+  JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
+    static thread_local std::vector<Vec3> hdr;
+    hdr.resize((size_t)W);
     for (int64_t y = y0; y < y1; y++) {
+      const float *dz = rt_->depth.data() + (size_t)y * W;
       float ny = 1.0f - 2.0f * (y + 0.5f) / H;
       Vec3 a0 = unproject(-1, ny, 0), a1 = unproject(-1, ny, 1), b0 = unproject(1, ny, 0), b1 = unproject(1, ny, 1);
       uint32_t *row = rt_->color + (size_t)y * rt_->stride;
-      static thread_local std::vector<Vec3> hdr;
-      hdr.resize((size_t)W);
-      for (int x = 0; x < W; x++) {
-        float u = (x + 0.5f) / W;
-        Vec3 d = normalize(lerp(a1, b1, u) - lerp(a0, b0, u));
-        hdr[x] = env.radiance(d);
+      for (int x = 0; x < W;) {
+        if (!(dz[x] >= 1.0f)) {  // (a NaN depth is a surface too: the loop must move on)
+          x++;
+          continue;
+        }
+        int e = x;
+        while (e < W && dz[e] >= 1.0f) e++;  // a run of sky
+        auto at = [&](int k) {
+          const float u = (k + 0.5f) / W;
+          return env.radiance(normalize(lerp(a1, b1, u) - lerp(a0, b0, u)));
+        };
+        /* Every 4th pixel, and the three between filled in a straight line where the ends agree to within a
+         * fraction of a display step (a gradient, the smooth part of a sky); where they don't (the sun's disc, an
+         * HDRI's detail) each pixel is evaluated. */
+        hdr[(size_t)x] = at(x);
+        for (int k = x; k < e - 1;) {
+          const int n = std::min(4, e - 1 - k);
+          const Vec3 c0 = hdr[(size_t)k], c1 = at(k + n);
+          const Vec3 d = c1 - c0;
+          const float scale = std::max(1e-4f, std::max(c0.x, std::max(c0.y, c0.z)));
+          const bool smooth = std::max(std::fabs(d.x), std::max(std::fabs(d.y), std::fabs(d.z))) <= 0.004f * scale;
+          for (int j = 1; j < n; j++) hdr[(size_t)(k + j)] = smooth ? c0 + d * (j / (float)n) : at(k + j);
+          hdr[(size_t)(k + n)] = c1;
+          k += n;
+        }
+        display::encode_span(&hdr[(size_t)x].x, row + x, (size_t)(e - x), sky_.vt, sky_.exposure);
+        if (with_hdr) std::copy(hdr.begin() + x, hdr.begin() + e, rt_->hdr.begin() + (size_t)y * W + x);
+        x = e;
       }
-      display::encode_span(&hdr[0].x, row, (size_t)W, vt, exposure);
-      if (rt_->hdr.size() == (size_t)W * H)  // bloom sees the sky's own light (no seam at silhouettes)
-        std::copy(hdr.begin(), hdr.end(), rt_->hdr.begin() + (size_t)y * W);
     }
   });
-  js.set_max_threads(saved);
-  clear_planes(nullptr);
 }
 
 void Renderer3D::clear_sky(const Mat4 &inv_vp, Vec3 sky, Vec3 horizon, Vec3 ground) {
+  sky_.on = false;  // the gradient replaces a sky asked for earlier
   const int W = rt_->width, H = rt_->height;
   auto unproject = [&](float nx, float ny, float nz) {
     Vec4 p = inv_vp * Vec4(nx, ny, nz, 1.0f);
@@ -506,7 +547,7 @@ void Renderer3D::flush() {
   if (!opt_.multithreaded) js.set_max_threads(1);
 
   const int W = rt_->width, H = rt_->height;
-  if (W <= 0 || H <= 0) { items_.clear(); js.set_max_threads(saved_threads); return; }
+  if (W <= 0 || H <= 0) { items_.clear(); sky_.on = false; js.set_max_threads(saved_threads); return; }
   if (!(rt_->want_hdr && opt_.shade == ShadeMode::Deferred) || rt_->hdr.size() != (size_t)W * H) rt_->hdr.clear();  // begin() allocates it
   const int T = opt_.tile_size;
   tiles_x_ = (W + T - 1) / T;
@@ -860,6 +901,11 @@ void Renderer3D::flush() {
     for (int64_t t = t0; t < t1; t++) raster_tile((int)t);
   });
   stats_.ms_raster = tr.ms();
+  if (sky_.on) {
+    ScopedTimer tsk;
+    fill_pending_sky();
+    stats_.ms_clear += tsk.ms();
+  }
   if (opt_.shade == ShadeMode::Deferred && rt_->color) {
     ScopedTimer tsh;
     shade_deferred();
@@ -1197,6 +1243,7 @@ void Renderer3D::shade_deferred() {
     Vec2 lm_uv[3];
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
+    bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
   };
   auto setup_tri = [&](TriSetup &T, uint32_t ref) {
     T.ref = ref;
@@ -1254,6 +1301,11 @@ void Renderer3D::shade_deferred() {
       if (mp) T.mat = mp.get();
     }
     T.tex = &T.mat->textures();  // (resolved before the parallel stages: a cached reference)
+    T.live = false;
+    for (int k = 0; k < 5; k++) T.live = T.live || T.tex->live[k] != nullptr;
+    for (int a = 0; a < 4; a++)
+      if (const Material::Resolved *at = T.tex->axis_tx[a])
+        for (int k = 0; k < 5; k++) T.live = T.live || at->live[k] != nullptr;
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
@@ -1408,7 +1460,7 @@ void Renderer3D::shade_deferred() {
         if (opt_.tex.active()) sp.tex = &opt_.tex;
         /* Live procedural textures (task 0031): the object-space size of this pixel, so a texture whose texel
          * is larger is evaluated here instead of magnified. Not for the reflective shadow map. */
-        if (!rsm_out_) {
+        if (!rsm_out_ && T.live) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
           sp.live_textures = true;
           auto lp = [&](Vec3 b) { return T.p[0] * b.x + T.p[1] * b.y + T.p[2] * b.z; };
           auto wp = [&](Vec3 b) { return T.wp[0] * b.x + T.wp[1] * b.y + T.wp[2] * b.z; };
@@ -1821,9 +1873,11 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
   });
 }
 
-void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds, int res) {
+void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds, int res,
+                       const ShadowMap *base) {
   out.size = 0;
-  if (!bounds.valid() || casters.empty()) return;
+  if (base && (base->size != res || base->depth.size() != (size_t)res * res)) base = nullptr;
+  if (!bounds.valid() || (casters.empty() && !base)) return;
   Vec3 c = bounds.center();
   float r = std::max(0.5f, length(bounds.extent()));
   Vec3 d = normalize(light_dir);
@@ -1839,6 +1893,13 @@ void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec
   LightingEnv env;
   r3d.begin(&rt, view, proj, env, opt);
   r3d.clear(0);
+  if (base) {
+    float *dst = rt.depth.data();  // (rt is thread_local: the workers below must not name it)
+    const float *src = base->depth.data();
+    JobSystem::global().parallel_for(res, 64, [&](int64_t y0, int64_t y1) {
+      std::memcpy(dst + (size_t)y0 * res, src + (size_t)y0 * res, sizeof(float) * (size_t)(y1 - y0) * res);
+    });
+  }
   for (const DrawItem &it : casters) r3d.add(it);
   r3d.flush();
   out.view_proj = proj * view;

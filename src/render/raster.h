@@ -249,7 +249,9 @@ class Renderer3D {
   void clear_planes(const uint32_t *color);
   /* Unity-style procedural skybox gradient. */
   void clear_sky(const Mat4 &inv_view_proj, Vec3 sky, Vec3 horizon, Vec3 ground);
-  /* Background from a World environment (HDRI / sky / colour), tone mapped. */
+  /* Background from a World environment (HDRI / sky / colour), tone mapped. The planes clear at once; the colour is
+   * filled by flush() after the opaque surfaces, only where none landed (task 0050: evaluating the sky for every pixel
+   * and then shading over most of them cost 2 ms a view on 8 threads). env must live until flush(). */
   void clear_environment(const Mat4 &inv_view_proj, const Environment &env, ViewTransform vt, float exposure);
   void add(const DrawItem &item) { items_.push_back(item); }
   void flush();
@@ -312,6 +314,14 @@ class Renderer3D {
   RasterOptions opt_;
   RasterStats stats_;
   std::vector<DrawItem> items_;
+  struct PendingSky {  // clear_environment()'s background, drawn by flush() where nothing opaque is
+    bool on = false;
+    Mat4 inv_vp;
+    const Environment *env = nullptr;
+    ViewTransform vt = ViewTransform::Standard;
+    float exposure = 0.0f;
+  } sky_;
+  void fill_pending_sky();
   /* An overlay prepared for drawing (screen space, clipped). */
   struct OverlayCmd {
     float x0, y0, z0, x1, y1, z1;  // line ends, or a point's centre in x0 / y0 / z0 and its radius in x1
@@ -349,8 +359,10 @@ class Renderer3D {
 };
 
 /* Sun shadow map (Blender EEVEE "Shadow", Unity "Shadow Type: Soft"):
- * depth-only render of the casters from the light, fitted to `bounds`. */
+ * depth-only render of the casters from the light, fitted to `bounds`. With `base` (a map of the same frame and
+ * resolution) the casters are drawn over its depth instead of an empty map: the result is the map of both sets, bit for
+ * bit (a depth buffer keeps the nearest surface whatever the order). Task 0050: the casters that didn't move. */
 void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds,
-                       int resolution);
+                       int resolution, const ShadowMap *base = nullptr);
 
 }  // namespace bl

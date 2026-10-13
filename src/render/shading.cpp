@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shading.h"
+#include <cstdlib>
 
 #include "colormanagement.h"
 #include "display.h"
@@ -388,11 +389,41 @@ Vec3 env_brdf_approx(Vec3 f0, float roughness, float nv) {
 /* Environment                                                            */
 /* ===================================================================== */
 
+/* atan2 and asin by polynomials (task 0050): every background pixel and every shaded pixel's reflection maps a
+ * direction to the sky's image, and the library calls were a fifth of a view's shading on a 4-core machine. Errors
+ * under 1e-5 radians: under a hundredth of a texel on a 4096-wide sky. */
+static inline float fast_atan2(float y, float x) {
+  const float ax = std::fabs(x), ay = std::fabs(y);
+  const float mx = std::max(ax, ay), mn = std::min(ax, ay);
+  if (!(mx > 0.0f)) return 0.0f;
+  const float a = mn / mx, s = a * a;
+  /* atan(a) on [0, 1], a minimax polynomial in a (max error ~1e-5 rad). */
+  float r = ((((-0.0117212f * s + 0.05265332f) * s - 0.11643287f) * s + 0.19354346f) * s - 0.33262347f) * s * a + 0.99997726f * a;
+  if (ay > ax) r = 1.57079637f - r;
+  if (x < 0.0f) r = 3.14159274f - r;
+  return y < 0.0f ? -r : r;
+}
+
+static inline float fast_asin(float x) {
+  /* Abramowitz & Stegun 4.4.46: asin(x) = pi/2 - sqrt(1 - x) * poly(x) on [0, 1], error under 2e-8. */
+  const float a = std::fabs(x);
+  float p = -0.0012624911f;
+  p = p * a + 0.0066700901f;
+  p = p * a - 0.0170881256f;
+  p = p * a + 0.0308918810f;
+  p = p * a - 0.0501743046f;
+  p = p * a + 0.0889789874f;
+  p = p * a - 0.2145988016f;
+  p = p * a + 1.5707963050f;
+  const float r = 1.57079637f - std::sqrt(std::max(0.0f, 1.0f - a)) * p;
+  return x < 0.0f ? -r : r;
+}
+
 Vec2 dir_to_equirect(Vec3 d, float rot) {
-  float phi = std::atan2(d.x, d.z) + rot * kDeg2Rad;
+  float phi = fast_atan2(d.x, d.z) + rot * kDeg2Rad;
   float u = 0.5f + phi / (2.0f * kPi);
   u -= std::floor(u);
-  return {u, 0.5f + std::asin(clampf(d.y, -1.0f, 1.0f)) / kPi};
+  return {u, 0.5f + fast_asin(clampf(d.y, -1.0f, 1.0f)) / kPi};
 }
 
 Vec3 equirect_to_dir(Vec2 uv, float rot) {

@@ -3,12 +3,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <cstdarg>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -19,13 +21,17 @@
 #  endif
 #  include <windows.h>
 #  include <shellapi.h>
+#  include <psapi.h>
 #else
+#  include <sys/resource.h>
 #  include <signal.h>
 #  include <spawn.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
 #  ifdef __APPLE__
 #    include <mach-o/dyld.h>
+#    include <mach/mach.h>
+#    include <sys/sysctl.h>
 #  endif
 extern char **environ;
 #endif
@@ -375,4 +381,62 @@ void open_external(const std::string &path) {
 #endif
 
 }  // namespace fs
+
+namespace sys {
+
+uint64_t physical_memory_bytes() {
+#ifdef _WIN32
+  MEMORYSTATUSEX ms;
+  ms.dwLength = sizeof(ms);
+  return GlobalMemoryStatusEx(&ms) ? (uint64_t)ms.ullTotalPhys : 0;
+#elif defined(__APPLE__)
+  uint64_t mem = 0;
+  size_t len = sizeof(mem);
+  return sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0 ? mem : 0;
+#else
+  const long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGE_SIZE);
+  return pages > 0 && page > 0 ? (uint64_t)pages * (uint64_t)page : 0;
+#endif
+}
+
+#ifndef _WIN32
+/* Linux: a "VmRSS:" / "VmHWM:" line of /proc/self/status, in kB. */
+static uint64_t proc_status_kb(const char *key) {
+  std::ifstream f("/proc/self/status");
+  std::string line;
+  const size_t n = std::strlen(key);
+  while (std::getline(f, line))
+    if (line.compare(0, n, key) == 0) return (uint64_t)std::strtoull(line.c_str() + n, nullptr, 10) * 1024;
+  return 0;
+}
+#endif
+
+uint64_t working_set_bytes() {
+#ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS pmc;
+  return K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)) ? (uint64_t)pmc.WorkingSetSize : 0;
+#elif defined(__APPLE__)
+  mach_task_basic_info info;
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  return task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) == KERN_SUCCESS ? (uint64_t)info.resident_size : 0;
+#else
+  return proc_status_kb("VmRSS:");
+#endif
+}
+
+uint64_t peak_working_set_bytes() {
+#ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS pmc;
+  return K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)) ? (uint64_t)pmc.PeakWorkingSetSize : 0;
+#elif defined(__APPLE__)
+  struct rusage ru;
+  return getrusage(RUSAGE_SELF, &ru) == 0 ? (uint64_t)ru.ru_maxrss : 0;  // bytes on macOS
+#else
+  return proc_status_kb("VmHWM:");
+#endif
+}
+
+int hardware_threads() { return (int)std::max(1u, std::thread::hardware_concurrency()); }
+
+}  // namespace sys
 }  // namespace bl

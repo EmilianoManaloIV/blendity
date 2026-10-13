@@ -2515,6 +2515,47 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     }
     if (!line.empty()) flush();
   };
+  /* Quality tier, viewport scale and CPU threads (task 0050): what the minimum machine (4 cores / 8 threads, a GTX
+   * 1050 Ti, 8 GB) needs, one choice away. */
+  {
+    Recti qh = row(u.row_h() + u.px(4));
+    u.label(qh, "Quality", u.theme.text_bright);
+    static const char *kTiers[] = {"Low (4 cores, GTX 1050 Ti)", "Medium", "High", "Custom"};
+    int ti = std::max(0, std::min(3, quality_tier_ < 0 ? (int)TierCustom : quality_tier_));
+    Recti q1 = row(u.row_h() + u.px(4));
+    u.label({q1.x, q1.y, u.px(150), q1.h}, "Quality tier");
+    if (u.combo(u.id("pref_tier"), {q1.x + u.px(150), q1.y + u.px(2), u.px(220), q1.h - u.px(4)}, ti, kTiers, 4)) set_quality_tier(ti);
+    u.tooltip("Low: the Scene and Game views drawn at 67 % and scaled up, a 1024 shadow map, lighter Realtime GI, 60 fps.\n"
+              "Medium: views at 85 %, a 2048 shadow map. High: no limits. Renders (F12) always use the scene's own settings.\n"
+              "Recommended here: " + std::string(recommended_tier() == TierLow ? "Low" : "High") + ".");
+    Recti q2 = row(u.row_h() + u.px(4));
+    u.label({q2.x, q2.y, u.px(150), q2.h}, "Viewport resolution");
+    static const char *kScales[] = {"50 %", "67 %", "75 %", "85 %", "100 %"};
+    static const float kScaleValues[] = {0.5f, 0.67f, 0.75f, 0.85f, 1.0f};
+    int si = 4;
+    for (int k = 0; k < 5; k++)
+      if (std::fabs(kScaleValues[k] - view_scale_) < 0.01f) si = k;
+    if (u.combo(u.id("pref_vscale"), {q2.x + u.px(150), q2.y + u.px(2), u.px(120), q2.h - u.px(4)}, si, kScales, 5)) {
+      set_view_scale(kScaleValues[si]);
+      quality_tier_ = TierCustom;
+    }
+    u.tooltip("The Scene and Game views draw their 3D this much smaller and scale it up: 75 % draws about half the pixels.\n"
+              "Lines, gizmos and text stay sharp, and clicks still pick exactly.");
+    Recti q3 = row(u.row_h() + u.px(4));
+    u.label({q3.x, q3.y, u.px(150), q3.h}, "CPU threads");
+    std::vector<std::string> opts{"All (" + std::to_string(sys::hardware_threads()) + ")"};
+    std::vector<int> vals{0};
+    for (int n : {2, 4, 6, 8, 12, 16, 24, 32})
+      if (n < sys::hardware_threads()) opts.push_back(std::to_string(n)), vals.push_back(n);
+    std::vector<const char *> cs;
+    for (const std::string &o : opts) cs.push_back(o.c_str());
+    int ci0 = 0;
+    for (size_t k = 0; k < vals.size(); k++)
+      if (vals[k] == cpu_threads_) ci0 = (int)k;
+    if (u.combo(u.id("pref_threads"), {q3.x + u.px(150), q3.y + u.px(2), u.px(120), q3.h - u.px(4)}, ci0, cs.data(), (int)cs.size()))
+      set_cpu_threads(vals[(size_t)ci0]);
+    u.tooltip("How many threads Blendity works on (rendering, modeling, baking). Fewer leaves room for other programs.");
+  }
   Recti head = row(u.row_h() + u.px(4));
   u.label(head, "Editor frame rate", u.theme.text_bright);
   static const char *kCaps[] = {"30 fps", "60 fps", "90 fps", "120 fps", "144 fps", "165 fps", "240 fps", "Unlimited"};

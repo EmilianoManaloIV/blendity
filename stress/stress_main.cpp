@@ -105,6 +105,7 @@ struct Options {
   std::string only;
   std::string out = "stress/results";
   double budget = 16.7;
+  std::string quality;  // --quality low|medium|high: the editor sections run at that tier (task 0050)
 };
 
 /* --------------------------------------------------------- scene helpers */
@@ -967,6 +968,7 @@ static void test_editor(Report &rep, const Options &o) {
     Editor ed;
     Log::echo_stdout = false;
     ed.init_headless(1600, 900);
+    if (!o.quality.empty()) ed.command("quality " + o.quality);
     ed.command("stress " + std::to_string(n) + " Cube");
     ed.step_frame_headless();
     ed.step_frame_headless();
@@ -992,10 +994,12 @@ static void test_editor_render(Report &rep, const Options &o) {
   rep.title("Editor frames in a working scene",
             "Headless 1600x1000, layout \"2 by 3\" (Scene + Game views), Shaded, 200 icospheres + a floor + a sun with shadows, the "
             "Main Camera selected (Camera Preview on). Milliseconds per frame, mean of N frames.");
-  rep.table({"frame", "ms / frame", "shadow renders / frame", "view renders / frame", "Scene view 3D ms", "of it overlays ms", "Game view ms", "UI and the rest ms"});
+  rep.table({"frame", "ms / frame", "shadow renders / frame", "view renders / frame", "Scene view 3D ms", "of it overlays ms", "Game view ms",
+             "shadow map ms", "Camera Preview ms", "UI and the rest ms"});
   Editor ed;
   Log::echo_stdout = false;
   ed.init_headless(1600, 1000);
+  if (!o.quality.empty()) ed.command("quality " + o.quality);
   ed.command("layout 2 by 3");
   ed.command("stress 200 Icosphere");
   ed.command("create Plane");
@@ -1015,7 +1019,8 @@ static void test_editor_render(Report &rep, const Options &o) {
     const FrameProfile after = ed.frame_profile_totals();
     rep.row({name, f2(ms), f2((after.shadow_renders - before.shadow_renders) / (double)n),
              f2((after.view_renders - before.view_renders) / (double)n), f2((after.ms_scene3d - before.ms_scene3d) / n),
-             f2((after.ms_overlays - before.ms_overlays) / n), f2((after.ms_game - before.ms_game) / n), f2((after.ms_ui - before.ms_ui) / n)});
+             f2((after.ms_overlays - before.ms_overlays) / n), f2((after.ms_game - before.ms_game) / n), f2((after.ms_shadow - before.ms_shadow) / n),
+             f2((after.ms_preview - before.ms_preview) / n), f2((after.ms_ui - before.ms_ui) / n)});
   };
   using ET = platform::EventType;
   const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
@@ -1033,6 +1038,14 @@ static void test_editor_render(Report &rep, const Options &o) {
     if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.0f});
     ed.step_frame_headless();
   });
+  {
+    /* Where a moved frame's raster time goes, view by view (task 0050 profiled the minimum machine with this). */
+    const RasterStats &s = ed.scene_stats_for_test(), &g = ed.game_stats_for_test();
+    rep.note(strprintf("Moving an object, the last frame's rasterizer: Scene view %zu of %zu triangles, setup %.2f ms, raster %.2f ms, shade %.2f ms "
+                       "(sky %.2f ms), %.2f ms in all; Game view %zu triangles, shade %.2f ms, %.2f ms in all",
+                       s.tris_rasterized, s.tris_submitted, s.ms_setup, s.ms_raster, s.ms_shade, s.ms_clear, s.ms_total, g.tris_rasterized, g.ms_shade,
+                       g.ms_total));
+  }
   /* Task 0020: the same drag of a static (Contribute GI) object with Realtime GI on, in each lighting mode. */
   {
     ed.scene().for_each([&](GameObject &g) {
@@ -2014,7 +2027,7 @@ static void test_fuzz(Report &rep, const Options &o) {
            strprintf("no crash, %llu stale pictures", (unsigned long long)stale)});
 }
 
-static void test_memory(Report &rep, const Options &) {
+static void test_memory(Report &rep, const Options &o) {
   rep.title("Memory footprint", "Approximate bytes per element (Scene::memory_bytes / Mesh::memory_bytes).");
   rep.table({"item", "bytes"});
   Scene s;
@@ -2026,6 +2039,31 @@ static void test_memory(Report &rep, const Options &) {
   for (int i = 0; i < 6; i++) m = meshops::subdivide_simple(m);
   m.render_mesh();
   rep.row({"mesh vertex (incl. render cache)", f1(m.memory_bytes() / (double)m.vert_count())});
+  /* Task 0050: the process on an 8 GB machine. The editor at 1600 x 1000 with the stress scene of editor_render
+   * (200 icospheres, two views) plus 10,000 cubes, after 30 frames and 30 moves (each an undo step). */
+  {
+    Editor ed;
+    Log::echo_stdout = false;
+    ed.init_headless(1600, 1000);
+    if (!o.quality.empty()) ed.command("quality " + o.quality);
+    ed.command("layout 2 by 3");
+    ed.command("stress 200 Icosphere");
+    ed.command("stress 10000 Cube");
+    for (int k = 0; k < 30; k++) ed.step_frame_headless();
+    GameObject *mover = ed.scene().find_by_name("Icosphere");
+    for (int k = 0; k < 30; k++) {
+      if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.0f});
+      ed.mark_changed_for_test("move");
+      ed.step_frame_headless();
+    }
+    Log::echo_stdout = true;
+    const double now = sys::working_set_bytes() / (1024.0 * 1024.0), peak = sys::peak_working_set_bytes() / (1024.0 * 1024.0);
+    rep.row({"process working set now / peak (MB), editor + 10,200 objects", strprintf("%.0f / %.0f", now, peak)});
+    rep.note(strprintf("Task 0050's target: the editor's peak working set under 3 GB on the minimum machine's scenes: %.0f MB: %s; undo holds %zu steps, "
+                       "%.1f MB of its own; the texture cache %.1f MB (budget %.0f MB)",
+                       peak, peak < 3072.0 ? "met" : "NOT MET", ed.undo_steps_for_test(), ed.undo_bytes() / (1024.0 * 1024.0),
+                       texture_cache_bytes() / (1024.0 * 1024.0), texture_cache_budget() / (1024.0 * 1024.0)));
+  }
 }
 
 /* ------------------------------------------------- phase 2: render / UV / modeling */
@@ -4071,8 +4109,11 @@ int main(int argc, char **argv) {
     else if (a == "--only" && i + 1 < argc) o.only = argv[++i];
     else if (a == "--out" && i + 1 < argc) o.out = argv[++i];
     else if (a == "--budget" && i + 1 < argc) o.budget = std::atof(argv[++i]);
+    else if (a == "--threads" && i + 1 < argc) JobSystem::global().set_thread_limit(std::atoi(argv[++i]));
+    else if (a == "--min-spec") JobSystem::global().set_thread_limit(8);  // task 0050: a 4-core / 8-thread machine
+    else if (a == "--quality" && i + 1 < argc) o.quality = argv[++i];
     else if (a == "--help") {
-      std::printf("blendity_stress [--quick] [--only NAME] [--out DIR] [--budget MS]\n");
+      std::printf("blendity_stress [--quick] [--only NAME] [--out DIR] [--budget MS] [--threads N | --min-spec]\n");
       return 0;
     }
   }

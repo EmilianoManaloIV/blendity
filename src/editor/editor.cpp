@@ -1441,12 +1441,41 @@ void Editor::commit_undo() {
   s.label = pending_label_;
   s.textures = std::move(texture_before_);
   texture_before_.clear();
+  if (s.scene) {
+    /* What this step alone holds: the meshes no other state or the scene shares (copy-on-write, ADR 0003), its
+     * objects and its texture texts. */
+    s.scene->for_each([&](GameObject &g) {
+      s.bytes += 600;  // an object and its components, about (stress `memory`)
+      if (const MeshFilter *mf = g.mesh_filter())
+        if (mf->mesh && mf->mesh.use_count() == 1) s.bytes += mf->mesh->memory_bytes();
+    });
+  }
+  for (const auto &t : s.textures) s.bytes += t.first.size() + t.second.size();
   undo_.push_back(std::move(s));
   if (undo_.size() > 200) undo_.erase(undo_.begin());
+  {
+    size_t total = undo_bytes();
+    const size_t budget = undo_budget();
+    size_t drop = 0;
+    while (undo_.size() - drop > 1 && total > budget) total -= undo_[drop++].bytes;  // the oldest first, the newest kept
+    if (drop) undo_.erase(undo_.begin(), undo_.begin() + (std::ptrdiff_t)drop);
+  }
   redo_.clear();
   stable_ = scene_->clone();
   pending_change_ = false;
   if (save_dirty_material_assets() + save_dirty_texture_assets()) project_listed_ = -100;  // edited assets go back to their files
+}
+
+size_t Editor::undo_budget() const {
+  if (undo_budget_) return undo_budget_;
+  const uint64_t ram = sys::physical_memory_bytes();
+  return (size_t)std::min<uint64_t>(ram ? ram / 8 : (uint64_t)1 << 30, (uint64_t)2 << 30);
+}
+
+size_t Editor::undo_bytes() const {
+  size_t total = 0;
+  for (const UndoState &u : undo_) total += u.bytes;
+  return total;
 }
 
 void Editor::undo() {
@@ -2923,6 +2952,21 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("Editor frame rate: %s", max_fps_ ? strprintf("up to %d fps", max_fps_).c_str() : "unlimited");
   }
   else if (c == "redraw") always_redraw_ = to_lower(arg(1, "changes")) == "always";  // redraw always | changes
+  else if (c == "quality") {
+    /* quality low|medium|high|custom: the editor's quality tier (task 0050) */
+    const std::string v = to_lower(arg(1, ""));
+    const int t = v == "low" ? TierLow : v == "medium" ? TierMedium : v == "high" ? TierHigh : v == "custom" ? TierCustom : -1;
+    if (t < 0) Log::warn("quality low|medium|high|custom");
+    else {
+      set_quality_tier(t);
+      Log::info("Quality: %s (views at %.0f%%)", v.c_str(), view_scale_ * 100.0f);
+    }
+  }
+  else if (c == "viewscale") {  // viewscale <50..100>: Viewport Resolution Scale in percent (the tier becomes Custom)
+    set_view_scale((float)std::atof(arg(1, "100").c_str()) / 100.0f);
+    quality_tier_ = TierCustom;
+  }
+  else if (c == "threads") set_cpu_threads(std::atoi(arg(1, "0").c_str()));  // threads <n | 0 = all>
   else if (c == "preferences") dialog_ = Dialog::Preferences;
   else if (c == "newscene") new_scene();  // File > New Scene
   else if (c == "guide") {
@@ -3679,8 +3723,14 @@ void Editor::draw_dialogs() {
 void Editor::load_prefs() {
   std::string text;
   rebuild_keymap();
-  if (!fs::read_file(prefs_path_, text)) return;
+  if (!fs::read_file(prefs_path_, text)) {
+    set_quality_tier(recommended_tier());  // the first run: a tier that suits this machine (task 0050)
+    return;
+  }
   std::string keymap_text;
+  int tier = -1, threads = 0, caps[3] = {0, 0, 0};
+  float scale = 1.0f;
+  bool had_fps = false;
   std::istringstream is(text);
   std::string line;
   while (std::getline(is, line)) {
@@ -3699,8 +3749,12 @@ void Editor::load_prefs() {
     else if (k == "snap_rot") snap_rot_ = (float)std::atof(v.c_str());
     else if (k == "blender_transform_keys") blender_keys_ = v == "1";
     else if (k == "pivot_center") pivot_center_ = v == "1";
-    else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str())));
+    else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str()))), had_fps = true;
     else if (k == "always_redraw") always_redraw_ = v == "1";
+    else if (k == "quality_tier") tier = std::atoi(v.c_str());
+    else if (k == "view_scale") scale = (float)std::atof(v.c_str());
+    else if (k == "cpu_threads") threads = std::atoi(v.c_str());
+    else if (k == "tier_caps") std::sscanf(v.c_str(), "%d %d %d", &caps[0], &caps[1], &caps[2]);
     else if (k == "auto_smooth") auto_smooth_ = v == "1";
     else if (k == "draw_axes") draw_global_axes_ = v == "global";
     else if (k == "keymap_preset" && !v.empty()) keymap_preset_ = v;
@@ -3717,6 +3771,18 @@ void Editor::load_prefs() {
       }
     }
   }
+  /* The tier (task 0050): a named one sets its own values; Custom keeps the saved ones; none saved yet (preferences
+   * from before the tiers) picks one for this machine. */
+  const int saved_fps = max_fps_;
+  if (tier < 0 || tier > TierCustom) set_quality_tier(recommended_tier());
+  else if (tier != TierCustom) set_quality_tier(tier);
+  else {
+    quality_tier_ = TierCustom;
+    set_view_scale(scale);
+    tier_shadow_cap_ = std::max(0, caps[0]), tier_gi_rays_cap_ = std::max(0, caps[1]), tier_rsm_cap_ = std::max(0, caps[2]);
+  }
+  if (had_fps) max_fps_ = saved_fps;  // the frame cap as last chosen (preferences from before the tiers too)
+  if (threads > 0) set_cpu_threads(threads);
   parse_keymap_overrides(keymap_text);  // also builds the keymap from the preset
 }
 
@@ -3728,11 +3794,13 @@ void Editor::save_prefs() {
   for (const std::string &d : render_devices_off_) off += (off.empty() ? "" : "|") + d;
   std::string s = strprintf("ui_scale=%g\nlayout=%s\nlesson=%d\nlessons_done=%s\ngrid=%d\nstats=%d\nsnap_move=%g\nsnap_rot=%g\nrender_devices_off=%s\n"
                             "blender_transform_keys=%d\npivot_center=%d\nmax_fps=%d\nalways_redraw=%d\nauto_smooth=%d\nauto_smooth_angle=%g\n"
-                            "keymap_preset=%s\nkeymap=%s\ndraw_axes=%s\ncamera_filters=%d\n",
+                            "keymap_preset=%s\nkeymap=%s\ndraw_axes=%s\ncamera_filters=%d\nquality_tier=%d\nview_scale=%g\n"
+                            "cpu_threads=%d\ntier_caps=%d %d %d\n",
                             ui_scale_pref_, dock_serialize(dock_.get()).c_str(), lesson_, done.c_str(), show_grid_ ? 1 : 0,
                             show_stats_ ? 1 : 0, snap_move_, snap_rot_, off.c_str(), blender_keys_ ? 1 : 0, pivot_center_ ? 1 : 0, max_fps_,
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
-                            keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0);
+                            keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
+                            view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
   fs::write_file(prefs_path_, s);
 }
 

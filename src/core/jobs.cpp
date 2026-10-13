@@ -2,10 +2,12 @@
 #include "jobs.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 
 #ifdef BL_WITH_TBB
 #  include <oneapi/tbb/blocked_range.h>
+#  include <oneapi/tbb/global_control.h>
 #  include <oneapi/tbb/info.h>
 #  include <oneapi/tbb/parallel_for.h>
 #  include <oneapi/tbb/task_arena.h>
@@ -16,8 +18,9 @@ namespace bl {
 struct JobSystem::TbbState {
 #ifdef BL_WITH_TBB
   std::mutex mutex;
-  std::unique_ptr<tbb::task_arena> arena;  // only when max_threads limits parallelism
+  std::shared_ptr<tbb::task_arena> arena;  // only when max_threads limits parallelism (shared: a loop still in it keeps it)
   int arena_threads = 0;
+  std::unique_ptr<tbb::global_control> limit;  // the thread ceiling, for every TBB user in the process
 #endif
 };
 
@@ -50,10 +53,24 @@ void JobSystem::set_backend(Backend b) { backend_ = b == Backend::TBB && tbb_ava
 
 int JobSystem::thread_count() const {
 #ifdef BL_WITH_TBB
-  if (backend_ == Backend::TBB) return tbb::info::default_concurrency();
+  if (backend_ == Backend::TBB) {
+    const int all = tbb::info::default_concurrency();
+    return thread_limit_ > 0 ? std::min(all, thread_limit_) : all;
+  }
 #endif
   int threads = requested_threads_ > 0 ? requested_threads_ : (int)std::max(1u, std::thread::hardware_concurrency()) - 1;
-  return threads + 1;
+  if (thread_limit_ > 0) threads = std::min(threads, thread_limit_ - 1);
+  return std::max(0, threads) + 1;
+}
+
+void JobSystem::set_thread_limit(int n) {
+  thread_limit_ = std::max(0, n);
+#ifdef BL_WITH_TBB
+  std::lock_guard<std::mutex> lock(tbb_->mutex);
+  tbb_->limit.reset();
+  if (thread_limit_ > 0) tbb_->limit = std::make_unique<tbb::global_control>(tbb::global_control::max_allowed_parallelism, (size_t)thread_limit_);
+  tbb_->arena.reset();  // an arena sized under the old ceiling
+#endif
 }
 
 void JobSystem::start_workers() {
@@ -65,6 +82,12 @@ void JobSystem::start_workers() {
 
 JobSystem &JobSystem::global() {
   static JobSystem js;
+  static bool once = [] {
+    if (const char *e = std::getenv("BLENDITY_THREADS"))
+      if (std::atoi(e) > 0) js.set_thread_limit(std::atoi(e));
+    return true;
+  }();
+  (void)once;
   return js;
 }
 
@@ -127,25 +150,25 @@ void JobSystem::parallel_for(int64_t count, int64_t grain, const std::function<v
       tbb::parallel_for(tbb::blocked_range<int64_t>(0, count, grain),
                         [&](const tbb::blocked_range<int64_t> &r) { fn(r.begin(), r.end()); });
     };
-    if (max_threads_ >= tbb::info::default_concurrency()) {
+    if (max_threads_ >= thread_count()) {
       run();
       return;
     }
-    tbb::task_arena *arena;
+    std::shared_ptr<tbb::task_arena> arena;
     {
       std::lock_guard<std::mutex> lock(tbb_->mutex);
       if (!tbb_->arena || tbb_->arena_threads != max_threads_) {
-        tbb_->arena = std::make_unique<tbb::task_arena>(max_threads_);
+        tbb_->arena = std::make_shared<tbb::task_arena>(std::min(max_threads_, thread_count()));
         tbb_->arena_threads = max_threads_;
       }
-      arena = tbb_->arena.get();
+      arena = tbb_->arena;
     }
     arena->execute(run);
     return;
   }
 #endif
   start_workers();
-  int allowed = std::min<int>((int)workers_.size(), max_threads_ - 1);
+  int allowed = std::min<int>({(int)workers_.size(), max_threads_ - 1, thread_count() - 1});  // the ceiling holds after the workers started
   /* Wake only as many workers as there are chunks beyond the caller's. */
   allowed = (int)std::min<int64_t>(allowed, (count + grain - 1) / grain - 1);
   bool expected = false;

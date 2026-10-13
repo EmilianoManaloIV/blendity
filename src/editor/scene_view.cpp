@@ -495,12 +495,14 @@ void Editor::render_scene_view(const Recti &view) {
   if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
     GameObject *fowner = nullptr;
     if (scene_filters_) main_camera(*scene_, &fowner);
-    if (fowner && !camera_filters(fowner).empty())  // the main camera's filters on the editor's view
-      render_camera(scene_r3d_, scene_rt_, scene_ft_, v, p, cam_.position(), cam_.forward(), fowner, nullptr, aspect, false, scene_lighting_);
-    else render_deferred(scene_r3d_, scene_rt_, v, p, cam_.position(), false, scene_lighting_, nullptr);
+    render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) {
+      if (fowner && !camera_filters(fowner).empty())  // the main camera's filters on the editor's view
+        render_camera(scene_r3d_, t, scene_ft_, v, p, cam_.position(), cam_.forward(), fowner, nullptr, aspect, false, scene_lighting_);
+      else render_deferred(scene_r3d_, t, v, p, cam_.position(), false, scene_lighting_, nullptr);
+    }, fowner, true);
     scene_stats_ = scene_r3d_.stats();
   }
-  else render_solid(view, v, p);
+  else render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) { render_solid(t, v, p); });
   ScopedTimer ot;
   scene_r3d_.begin_overlay_batch();  // the grid and the wireframes are thousands of lines: drawn in parallel bands
   if (show_grid_) draw_grid(scene_r3d_);
@@ -509,7 +511,7 @@ void Editor::render_scene_view(const Recti &view) {
   prof_.ms_overlays += ot.ms();
 }
 
-void Editor::render_solid(const Recti &, const Mat4 &v, const Mat4 &p) {
+void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
   LightingEnv env = build_env(*scene_);
   env.camera_pos = cam_.position();
   if (!scene_lighting_) {
@@ -520,7 +522,7 @@ void Editor::render_solid(const Recti &, const Mat4 &v, const Mat4 &p) {
     env.lights.push_back(head);
     env.sky = env.equator = env.ground = Vec3(0.35f);
   }
-  scene_r3d_.begin(&scene_rt_, v, p, env, raster_opt_);
+  scene_r3d_.begin(&rt, v, p, env, raster_opt_);
   scene_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
   if (shading_ != Shading::Wireframe) {
     submit_scene(scene_r3d_, *scene_, false, env, env.camera_pos);
@@ -3292,7 +3294,9 @@ void Editor::draw_game_view(const Recti &r) {
     const bool hit = view_cache_hit(game_cache_, key, img);
     if (hit && !cache_verify_) prof_.view_cache_hits++;
     else {
-      render_camera(game_r3d_, game_rt_, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain
+      render_scaled(game_r3d_, game_rt_, game_vs_, v, p, [&](RenderTarget &t) {
+        render_camera(game_r3d_, t, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain
+      }, owner);
       game_stats_ = game_r3d_.stats();
       prof_.view_renders++;
       if (hit) view_cache_verify(game_cache_, img, "Game view");

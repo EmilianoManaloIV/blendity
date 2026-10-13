@@ -10,6 +10,7 @@
 #include "scene.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -123,7 +124,9 @@ std::shared_ptr<PhysicsWorld> physics_create(Scene &scene) {
   jolt_init();
   auto w = std::make_shared<PhysicsWorld>();
   w->temp = std::make_unique<TempAllocatorImpl>(16 * 1024 * 1024);
-  int threads = std::max(1, (int)std::thread::hardware_concurrency() - 1);
+  /* Half the threads Blendity may use (task 0050): Jolt's own pool on top of TBB's workers had the whole machine twice
+   * over in Play, and a 4-core machine felt it. */
+  int threads = std::max(1, JobSystem::global().thread_count() / 2);
   w->jobs = std::make_unique<JobSystemThreadPool>(cMaxPhysicsJobs, cMaxPhysicsBarriers, threads);
   w->system.Init(65536, 0, 65536, 16384, w->bp_layers, w->object_vs_bp, w->object_pairs);
   w->system.SetGravity(JPH::Vec3(0, -9.81f, 0));  // Unity: Physics.gravity

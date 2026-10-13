@@ -2,6 +2,72 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 72): the minimum machine, CPU and memory (task 0050)
+
+**Asked:** "Look for more optimizations project wide to at minimum run on a GTX 1050ti and at least a quad-core
+processor with eight threads running at a modest 3 Ghz and eight gigabytes of ram" (performance first).
+
+**Added**
+- **Quality tiers** (Preferences > Performance > Quality tier; console `quality low|medium|high|custom`): Low draws
+  the Scene and Game views at 67 % and scales them up, with a 1024 shadow map, lighter Realtime GI and 60 fps;
+  Medium is 85 % with a 2048 shadow map; High has no caps. They hold in the editor's views only, never in F12
+  renders. The first run picks Low on a machine with 8 threads or fewer, or about 8 GB or less.
+- **Viewport Resolution** (`viewscale 50..100`) and **CPU Threads** (`threads N`) in Preferences > Performance;
+  `BLENDITY_THREADS` and `blendity_stress --threads N | --min-spec | --quality` emulate a smaller machine.
+- **Cached shadows**: objects that stay still keep a shadow map of their own while another one is dragged.
+
+**Changed**
+- **The sky is drawn after the surfaces**, only where none landed, and only every 4th pixel where it is smooth. Its
+  lookups use polynomial atan2 / asin. Pictures differ by at most one display step.
+- **The views' shadow frame is snapped** (steps of 10 %), so texels can be up to about 1.2 times larger. F12 still
+  fits exactly.
+- **A material colour edit no longer redraws the shadow map.**
+- **Jolt uses half of Blendity's threads.**
+- **Memory budgets**: the texture cache drops its least recently used unheld textures past a quarter of RAM, and
+  undo drops its oldest steps past an eighth (each at most 2 GB).
+
+**Checked**
+- New tests (round 72):
+  - A ceiling of 3 holds a loop to 3 threads with TBB and with the built-in pool after its workers started.
+  - At 50 % the Scene view draws 438 x 205 of 876 x 409, a click still selects the cube, and the scale is in the
+    picture keys.
+  - The tiers set scale, shadow map and fps; F12 keeps the scene's 2048.
+  - Two tiers at the same scale but different caps are different pictures.
+  - A moving caster drawn over the still casters' map equals the full map bit for bit. Six moved frames draw the
+    still layer once.
+  - The deferred sky matches a per-pixel evaluation within 1 display step.
+  - The polynomial atan2 / asin are within 4e-7 of the library's.
+  - The texture cache lets go of unheld textures past its budget and keeps a held one.
+  - Undo keeps its newest steps within its budget, and they undo.
+- Stress at 8 threads, Low, fastest of four runs:
+
+  | Frame | Before (ms) | After (ms) |
+  |---|---|---|
+  | Orbit | 17.9 | 7.1 |
+  | Moving an object | 47.2 | 15.5 |
+  | Material colour edit | 48.1 | 19.8 |
+  | Play | 39.3 | 17.6 |
+
+  The material edit and Play are still over 16.7 ms; PERFORMANCE.md pass 8 says what is next. Peak working set with
+  10,200 objects: 448 MB.
+- Unit checks: Windows 9,336, 0 failed (570 tests); the whole suite in render-cache verify mode: 9,337,
+  0 failed, 0 stale pictures. Linux with libraries: 9,246, 0 failed. Sanitizer build: 9,164, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: five majors and several minor findings, fixed:
+- The thread ceiling didn't hold in the dependency-free pool once its workers had started.
+- The tiers' shadow and GI caps weren't in the views' picture keys, so a tier change could show a stale picture.
+- F12 took the tiers' GI caps.
+- Preferences from before the tiers lost the user's frame cap.
+- Retro filter stacks were scaled twice and came out soft.
+- Also fixed:
+  - Edit Mode and modifier levels kept an object "moving" (motion is by placement now, with a still layer per view
+    slot).
+  - Snapping was coarse (now steps of 10 %, and none for F12).
+  - A pending sky could outlive its frame.
+  - A NaN depth could stall the sky fill.
+  - The TBB arena could be freed while in use.
+
 ## 2026-10-12 (round 71): the macOS check, and merging the stack (task 0049)
 
 **Asked:** "check for any errors on the GitHub side ... and merge them".
