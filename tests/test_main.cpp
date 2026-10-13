@@ -25353,4 +25353,37 @@ static void round69_tests() {
     b = g ? g->get<Bone>() : nullptr;
     CHECK(b && length(b->rest_position - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);
   });
+  test("layouts: clicking the Layout dropdown opens its list (it crashed: the list outlived its names) and picking a row applies it", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    const Recti r = ed.combo_rect_for_test("layout_combo");
+    CHECK(r.w > 0 && r.h > 0);
+    if (r.w <= 0) return;
+    auto click = [&](int x, int y) {
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+    };
+    /* Open it from a custom arrangement too (its names list then grows a "Custom" row each frame). */
+    for (const char *start : {"Default", "custom"}) {
+      if (std::string(start) == "custom") ed.command("layout 0,1,2|3,4");
+      else ed.command("layout Default");
+      ed.step_frame_headless();
+      click(r.x + r.w / 2, r.y + r.h / 2);
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();  // the list draws, frame after frame
+      Recti row;
+      const bool listed = ed.button_rect_for_test("menu:UV Unwrapping", row);
+      std::printf("    from %s: list open %d, popups %zu\n", start, (int)listed, ed.popup_count_for_test());
+      CHECK(listed && ed.popup_count_for_test() == 1);
+      if (!listed) continue;
+      click(row.x + row.w / 2, row.y + row.h / 2);
+      CHECK(ed.workspace_name() == "UV Unwrapping" && ed.popup_count_for_test() == 0);
+    }
+  });
 }
