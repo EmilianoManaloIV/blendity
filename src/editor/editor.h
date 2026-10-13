@@ -31,9 +31,11 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/skin_weights.h"
 #include "ui.h"
 
 #include <functional>
+#include <thread>
 #include <map>
 #include <memory>
 #include <set>
@@ -186,6 +188,28 @@ struct DeleteQuestion {
   std::vector<std::string> notes;
   const char *confirm = "Delete";
   std::function<void()> on_delete, on_close;  // on_close: answered either way, or clicked away
+};
+
+/* A skin-weight solve (task 0057): a copy of the mesh in, its new groups out, on a worker thread when the mesh is
+ * large (Editor::run_skin_job). */
+struct SkinWeightJob {
+  using Solve = std::function<bool(Mesh &, const InpaintOptions &, InpaintReport *, std::string *)>;
+  uint64_t object = 0;    // the mesh's GameObject
+  uint64_t source = 0;    // a transfer's source (its Skin modifier is copied to a target without one)
+  uint64_t topology = 0;  // meshops::topology_key at the start: a mesh edited meanwhile drops the result
+  std::string label;      // the undo step's name
+  std::vector<std::string> groups;  // the groups it makes
+  Mesh result;
+  Solve solve;
+  std::thread worker;
+  std::atomic<float> progress{0.0f};
+  std::atomic<bool> cancel{false}, done{false};
+  bool ok = false;
+  std::string error;
+  InpaintReport report;
+  uint64_t positions = 0;  // a hash of the mesh's positions at the start (vertices moved meanwhile: dropped too)
+  void run();
+  ~SkinWeightJob();
 };
 
 /* A multi-selection in a list of assets (task 0053): the Hierarchy's clicks (Ctrl toggles, Shift selects the range
@@ -492,6 +516,8 @@ class Editor {
     return out;
   }
   bool weight_paint_active_for_test() const { return weight_paint_; }
+  void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
+  bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   std::string wp_group_name_for_test() {
     const Mesh *m = wp_mesh();
     const int gi = m ? wp_group(*m) : -1;
@@ -511,6 +537,7 @@ class Editor {
     return (hier_dragging_ && hier_drag_ && (ui_.in.down[0] || ui_.in.released[0])) ? scene_->find(hier_drag_) : nullptr;
   }
   void object_field_took_drop() { hier_field_took_drop_ = true; }
+  bool object_field(const char *name, const Recti &f, std::string &v);  // panels.cpp
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
     if (it == hierarchy_rows_.end()) return false;
@@ -631,7 +658,23 @@ class Editor {
   /* Rigging (task 0047): bone add <parent> [length], armature reset|apply [root], skin bind [object]. */
   void rig_command(const std::vector<std::string> &t);
   bool armature_pose(GameObject *root, bool apply_as_rest);  // Reset Pose (false) / Apply as Rest (true)
-  bool skin_bind(GameObject *g);
+  enum class SkinBind { Inpaint, Envelope };
+  bool skin_bind(GameObject *g, SkinBind how = SkinBind::Inpaint);
+  bool skin_transfer(GameObject *source, GameObject *target);  // the body's weights onto clothing (task 0057)
+  void skin_command(const std::vector<std::string> &t);       // skin bind | transfer | cancel
+  bool run_skin_job(GameObject *g, const char *label, std::vector<std::string> names, SkinWeightJob::Solve solve, uint64_t source = 0);
+  void poll_skin_job();    // each frame: a finished background solve lands
+  bool finish_skin_job();  // applies the result as one undo step
+  void give_skin_modifier(GameObject *target, uint64_t source);
+  void draw_skin_job_progress(ui::Layout &lay);
+  void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
+  void cancel_skin_job() {
+    if (skin_job_) skin_job_->cancel = true;  // (it ends at its next check; finish_skin_job drops it)
+  }
+  void draw_skin_transfer(GameObject *target, ui::Layout &lay);  // the Rigging window's Transfer Weights
+  std::unique_ptr<SkinWeightJob> skin_job_;
+  size_t skin_async_min_verts_ = 5000;  // smaller meshes solve at once
+  std::string skin_transfer_source_;    // the Rigging window's Transfer From field
   void draw_control_points(const Recti &view, const GameObject &g, const Component &pc);
   bool point_pick(const Recti &view, int mx, int my, int mode);
   GameObject *point_target(std::vector<int> &points);

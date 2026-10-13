@@ -2,6 +2,69 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 81): automatic weights and weight transfer by inpainting (task 0057, ADR 0028)
+
+**Asked:** "A Mixamo-styled automatic weight paint ... based on Epic's Robust Skin Weights Transfer via Weight
+Inpainting", with transfer from a body onto clothing.
+
+**Added**
+- **Bind: Automatic Weights** now inpaints:
+  - A vertex clearly nearest one bone (under 0.8 of the next one's distance) that the bone can see (nothing of the
+    mesh in between) takes that bone whole.
+  - The rest get the smoothest weights that agree with those: one sparse solve per bone of `Q = -L + L M^-1 L` (the
+    cotangent Laplacian and Voronoi areas), by Eigen's LDLT or conjugate gradients.
+  - A hand hanging by a thigh, or below its own arm bone, takes no leg weight.
+  - A bone no vertex is nearest (a tip bone past the end of a column) takes the vertices nearest it, so posing it still
+    moves that end (round 69's Armature test).
+  - **Bind: Envelope** keeps the old distance weights.
+- **Transfer Weights** (Rigging window, `skin transfer <body> [mesh]`): a rigged body's weights onto clothing.
+  - Matches within 5 % of the clothing's size with normals within 30 degrees (or opposite) copy; the rest are
+    inpainted.
+  - An **InpaintMask** vertex group forces places to be inpainted.
+  - The clothing gets the body's Armature (Skin) modifier.
+  - The body is an object field: drag it from the Hierarchy.
+- **Large meshes (5,000+ vertices) solve on a worker thread**, in a job arena of their own, with a progress bar and
+  Cancel. They land as one undo step; undo, Play or another scene cancels them.
+- Console: `skin bind [object] [inpaint|envelope]`, `skin transfer <source> [target]`, `skin cancel`.
+- Learn: "Automatic weights by inpainting" and "Weights onto clothing" in the Bones and skins lesson, with questions.
+
+**Checked**
+- New tests (round 81):
+  - The Laplacian is symmetric, its rows sum to 0, and the masses add up to the area.
+  - Inpainting between known ends is a monotone partition of unity.
+  - A transfer onto a copy (renumbered and 2 mm out) gives back the weights within 1e-4.
+  - The paper's loose sleeve takes no torso weight (plain closest point gives it 1.0).
+  - InpaintMask vertices are inpainted, and a source's mask isn't carried.
+  - A hand by the thigh takes no leg weight, whether by the ratio test or by visibility.
+  - Short spine bones in a wide torso each get a band and blend (largest step between rings 0.14).
+  - A NaN vertex, a wire edge and a zero-area face still give a partition, by the direct solver.
+  - `skin bind` at once and on a worker thread, each one undo step; cancel, undo during a solve and closing the
+    editor mid-solve.
+  - Transfer by console and by dragging the body onto the Rigging window's field; the sleeve then bends with the arm.
+- Stress `skin_weights` (8 threads, Eigen): 50k vertices in 108 ms (automatic) and 31 ms (transfer), against the
+  2 s target. The editor's slowest frame while it solves 50k in the background: 1.4 ms.
+- Unit checks: Windows 9,576, 0 failed (613 tests); the whole suite in render-cache verify mode: 9,577,
+  0 failed, 0 stale pictures. Linux with libraries: 9,484, 0 failed. Sanitizer build: 9,401, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures, stress skin_weights: 50k vertices in 108 ms on 8 threads.
+
+**Review (code reviewer)**: five majors and several minor findings, fixed:
+- Short bones got hard bands.
+- A wire edge or NaN vertex made the solve singular and dropped it to conjugate gradients.
+- A transfer normalised over InpaintMask and non-bone groups.
+- A large mesh's Add Armature (Skin) had no undo step.
+- The background solve shared the job pool with the editor's frames.
+- Also fixed:
+  - Undo or Play during a solve.
+  - Vertices moved during a solve.
+  - No frames while a solve ran with the window closed.
+  - The Inspector's bind button.
+  - Unconverged solves went unreported.
+  - The solve depended on the mesh's scale.
+  - Exceptions in the worker.
+  - Copying render caches.
+  - Nesting.
+  - Tests that missed the closest-point path and the visibility rule.
+
 ## 2026-10-13 (round 80): flatter code after the review on PR #50
 
 **Asked:** "Can you read feedback in my GitHub and then make appropriate changes?" The one review (PR #50, task 0053):

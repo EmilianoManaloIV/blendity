@@ -563,26 +563,9 @@ struct InspectorReflector : Reflector {
   void object(const char *n, std::string &v) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    const Recti f = field_rect(row);
-    if (u.text_field(fid(n), f, v, nullptr, "None (drag an object here)")) {
-      record(FieldEdit::Text, n).s_new = v;
-      changed = true;
-    }
-    if (u.record_buttons) u.button_rects[std::string("field:") + n] = f;  // (tests drop onto a field by its name)
-    if (const GameObject *g = ed.hierarchy_drag_object(); g && u.hovered(f)) {
-      u.canvas.rect_outline(f, u.theme.focus, u.px(2));
-      if (u.in.released[0]) {
-        ed.object_field_took_drop();  // (the Hierarchy then leaves the selection as it was)
-        if (u.editing(fid(n))) u.stop_editing();  // (the edit buffer would write the old text back)
-        if (ed.scene().find_by_name(g->name) != g)
-          Log::warn("Two objects are named '%s': the field finds the other one first. Rename one of them.", g->name.c_str());
-        if (v != g->name) {
-          v = g->name;
-          record(FieldEdit::Text, n).s_new = v;
-          changed = true;
-        }
-      }
-    }
+    if (!ed.object_field(n, field_rect(row), v)) return;
+    record(FieldEdit::Text, n).s_new = v;
+    changed = true;
   }
   void mesh(const char *n, MeshPtr &m) override {
     Recti row = lay.row();
@@ -1522,11 +1505,7 @@ void Editor::draw_inspector(const Recti &r) {
             Recti er = lay.row();
             u.label({er.x + u.px(14), er.y, er.w - u.px(18), er.h}, bm->last_error, u.theme.warning);
           }
-          if (dynamic_cast<SkinModifier *>(c)) {  // automatic weights (task 0047)
-            Recti br = lay.row(u.row_h() + u.px(2));
-            if (u.button({br.x + u.px(14), br.y, br.w - u.px(18), br.h}, "Bind: Automatic Weights")) skin_bind(g);
-            u.tooltip("Vertex groups named after the bones, from each vertex's distance to them (Blender: With Automatic Weights).");
-          }
+          if (dynamic_cast<SkinModifier *>(c)) draw_skin_bind_buttons(g, lay);  // (task 0047; inpainted, task 0057)
           if (auto *md = dynamic_cast<MeshDeformModifier *>(c)) {
             /* Bind / Unbind (Blender's button), and why it does nothing when it can't. */
             Recti br = lay.row(u.row_h() + u.px(2));
@@ -2621,8 +2600,25 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
   if (always_redraw_) text("- Always redraw: the cap's CPU cost continues while idle (handy with the Profiler; otherwise wasted power).", u.theme.warning);
 }
 
-/* A component's (or any reflected) fields with the Inspector's widgets, outside the Inspector (task 0052: the Rigging
- * window). True when one changed this frame. */
+/* An object field (Unity's ObjectField): a name typed in, or an object dropped on it from the Hierarchy, which lights
+ * it up while it's over it. True when the name changed. `name` keys it among the fields drawn this frame. */
+bool Editor::object_field(const char *name, const Recti &f, std::string &v) {
+  auto &u = ui_;
+  const ui::Id id = u.id(name);
+  bool changed = u.text_field(id, f, v, nullptr, "None (drag an object here)");
+  if (u.record_buttons) u.button_rects[std::string("field:") + name] = f;  // (tests drop onto a field by its name)
+  const GameObject *g = hierarchy_drag_object();
+  if (!g || !u.hovered(f)) return changed;
+  u.canvas.rect_outline(f, u.theme.focus, u.px(2));
+  if (!u.in.released[0]) return changed;
+  object_field_took_drop();  // (the Hierarchy then leaves the selection as it was)
+  if (u.editing(id)) u.stop_editing();  // (the edit buffer would write the old text back)
+  if (scene_->find_by_name(g->name) != g) Log::warn("Two objects are named '%s': the field finds the other one first. Rename one of them.", g->name.c_str());
+  if (v == g->name) return changed;
+  v = g->name;
+  return true;
+}
+
 /* The end of a Hierarchy press, once a frame after every window drew (so a field drawn after the Hierarchy took its
  * drop first). A row pressed while unselected is selected now - a click, a wobbly click, a reparent, a drop in the
  * Scene view - unless an object field took it; then the drag state goes. */
@@ -2637,6 +2633,8 @@ void Editor::finish_hierarchy_drag() {
   }
 }
 
+/* A component's (or any reflected) fields with the Inspector's widgets, outside the Inspector (task 0052: the Rigging
+ * window). True when one changed this frame. */
 bool Editor::draw_reflected(const std::function<void(Reflector &)> &fields, ui::Layout &lay) {
   InspectorReflector ir(*this, ui_, lay);
   fields(ir);

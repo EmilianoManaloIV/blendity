@@ -21,6 +21,7 @@
 #include "../extern/ufbx/ufbx.h"
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
+#include "../src/scene/skin_weights.h"
 #include "../src/scene/mesh.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
@@ -232,6 +233,7 @@ static void round66_tests();
 static void round67_tests();
 static void round68_tests();
 static void round69_tests();
+static void round81_tests();
 
 int main() {
   register_builtin_components();
@@ -878,6 +880,7 @@ int main() {
   round67_tests();
   round68_tests();
   round69_tests();
+  round81_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -25515,5 +25518,497 @@ static void round69_tests() {
     const std::string *last = s.select_all(shown);
     CHECK(last && *last == "D" && s.items.size() == 4);
     CHECK(s.select_all({}) == nullptr);
+  });
+  /* ---------------------------------------------------------------- round 81: inpainted skin weights (task 0057) */
+}
+
+/* An open tube from a to b (rings x segments, normals out), appended to m: the test bodies of round 81. */
+static void r81_tube(Mesh &m, Vec3 a, Vec3 b, float radius, int rings, int segs) {
+  const Vec3 axis = normalize(b - a);
+  const Vec3 side = std::fabs(axis.y) < 0.9f ? normalize(cross(axis, Vec3(0, 1, 0))) : normalize(cross(axis, Vec3(1, 0, 0)));
+  const Vec3 up = cross(side, axis);
+  const uint32_t base = (uint32_t)m.vert_count();
+  for (int r = 0; r <= rings; r++)
+    for (int s = 0; s < segs; s++) {
+      const float t = (float)r / (float)rings, ang = 6.2831853f * (float)s / (float)segs;
+      m.add_vert(a + (b - a) * t + (side * std::cos(ang) + up * std::sin(ang)) * radius);
+    }
+  for (int r = 0; r < rings; r++)
+    for (int s = 0; s < segs; s++) {
+      const uint32_t i0 = base + (uint32_t)(r * segs + s), i1 = base + (uint32_t)(r * segs + (s + 1) % segs);
+      m.add_face({i0, i1, i1 + (uint32_t)segs, i0 + (uint32_t)segs});
+    }
+}
+
+/* Each vertex's weights over the groups: in [0, 1] and summing to 1 (the worst error). */
+static float r81_partition_error(const Mesh &m) {
+  float worst = 0.0f;
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    float sum = 0.0f;
+    for (const VertexGroup &g : m.vertex_groups) {
+      const float w = g.weights[v];
+      if (!(w >= 0.0f && w <= 1.0f)) worst = std::max(worst, 1.0f);
+      sum += w;
+    }
+    worst = std::max(worst, std::fabs(sum - 1.0f));
+  }
+  return worst;
+}
+
+static float r81_weight(const Mesh &m, const char *group, size_t v) {
+  const int gi = m.find_group(group);
+  return gi < 0 ? 0.0f : m.vertex_groups[(size_t)gi].weights[v];
+}
+
+static void round81_tests() {
+  test("skin weights: the cotangent Laplacian is symmetric with rows summing to 0, and the Voronoi masses add up to the surface's area", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 2, 0}, 0.5f, 8, 16);
+    std::vector<std::vector<std::pair<uint32_t, double>>> K;
+    std::vector<double> mass;
+    skinweights::cotangent_laplacian(m, K, mass);
+    double worst_sum = 0.0, worst_sym = 0.0, total = 0.0;
+    for (size_t i = 0; i < K.size(); i++) {
+      double s = 0.0;
+      for (const auto &[j, w] : K[i]) {
+        s += w;
+        double back = 0.0;
+        for (const auto &[k, w2] : K[j])
+          if (k == i) back = w2;
+        worst_sym = std::max(worst_sym, std::fabs(w - back));
+      }
+      worst_sum = std::max(worst_sum, std::fabs(s));
+      total += mass[i];
+    }
+    double area = 0.0;  // the quads' area, as two triangles each
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t *q = m.face_verts(f);
+      const Vec3 a = m.positions[q[0]], b = m.positions[q[1]], c = m.positions[q[2]], d = m.positions[q[3]];
+      area += 0.5 * (length(cross(b - a, c - a)) + length(cross(c - a, d - a)));
+    }
+    std::printf("    rows sum to within %.2g, symmetric within %.2g; mass %.5f against area %.5f\n", worst_sum, worst_sym, total, area);
+    CHECK(worst_sum < 1e-9 && worst_sym < 1e-9);
+    CHECK(std::fabs(total - area) < 1e-4 * area);
+  });
+
+  test("skin weights: inpainting between two known ends of a tube gives weights in [0, 1] summing to 1, changing smoothly along it", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 2, 0}, 0.2f, 20, 12);
+    const size_t n = m.vert_count();
+    std::vector<uint8_t> known(n, 0);
+    std::vector<std::vector<float>> w(2, std::vector<float>(n, 0.0f));
+    for (size_t v = 0; v < n; v++) {
+      const float y = m.positions[v].y;
+      if (y < 0.5f) known[v] = 1, w[0][v] = 1.0f;
+      if (y > 1.5f) known[v] = 1, w[1][v] = 1.0f;
+    }
+    InpaintReport rep;
+    std::string err;
+    CHECK(skinweights::inpaint(m, known, w, true, InpaintOptions{}, &rep, &err));
+    m.vertex_groups = {{"Low", w[0]}, {"High", w[1]}};
+    float jump = 0.0f, prev = 1.0f;
+    bool falling = true;
+    for (int r = 0; r <= 20; r++) {  // one vertex per ring, bottom to top
+      const float x = w[0][(size_t)r * 12];
+      falling = falling && x <= prev + 1e-4f;
+      if (r) jump = std::max(jump, std::fabs(x - prev));
+      prev = x;
+    }
+    std::printf("    %zu inpainted by %s in %.1f ms; partition error %.2g, the largest step between rings %.3f\n", rep.inpainted, rep.solver, rep.ms,
+                r81_partition_error(m), jump);
+    CHECK(rep.inpainted > 0 && r81_partition_error(m) < 1e-4f);
+    CHECK(falling && jump < 0.2f);
+  });
+
+  test("skin weights: transferring a body's weights onto a copy of itself gives back the same weights", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> low(n), high(n);
+    for (size_t v = 0; v < n; v++) high[v] = std::max(0.0f, std::min(1.0f, body.positions[v].y - 0.5f)), low[v] = 1.0f - high[v];
+    body.vertex_groups = {{"Low", low}, {"High", high}};
+    Mesh copy = body;
+    copy.vertex_groups.clear();
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, copy, InpaintOptions{}, &rep, &err));
+    float worst = 0.0f;
+    for (size_t v = 0; v < n; v++) worst = std::max({worst, std::fabs(r81_weight(copy, "Low", v) - low[v]), std::fabs(r81_weight(copy, "High", v) - high[v])});
+    std::printf("    %zu matched, %zu inpainted; worst difference %.2g\n", rep.known, rep.inpainted, worst);
+    CHECK(rep.known == n && worst < 1e-4f);
+  });
+
+  test("skin weights: a loose sleeve takes the arm's weights, not the torso's it passes close to (the paper's figure 1)", [] {
+    /* The body: a torso (Y up, radius 0.3) and an arm out along +X from it, each weighted wholly to its bone. */
+    Mesh body;
+    r81_tube(body, {0, -1, 0}, {0, 1, 0}, 0.3f, 20, 24);
+    const size_t torso_n = body.vert_count();
+    r81_tube(body, {0.3f, 0.5f, 0}, {1.2f, 0.5f, 0}, 0.1f, 18, 12);
+    std::vector<float> torso(body.vert_count(), 0.0f), arm(body.vert_count(), 0.0f);
+    for (size_t v = 0; v < body.vert_count(); v++) (v < torso_n ? torso : arm)[v] = 1.0f;
+    body.vertex_groups = {{"Torso", torso}, {"Arm", arm}};
+    /* The sleeve: 3 cm off the arm (within the paper's 5 % of its size), starting right at the torso's side. */
+    Mesh sleeve;
+    r81_tube(sleeve, {0.32f, 0.5f, 0}, {0.9f, 0.5f, 0}, 0.13f, 12, 16);
+    auto worst_torso = [&](const InpaintOptions &o) {
+      Mesh s = sleeve;
+      std::string err;
+      InpaintReport rep;
+      CHECK(transfer_skin_weights(body, s, o, &rep, &err));
+      float t = 0.0f;
+      for (size_t v = 0; v < s.vert_count(); v++) t = std::max(t, r81_weight(s, "Torso", v));
+      std::printf("    angle %.0f, distance %.2f: %zu matched, %zu inpainted, most torso weight on the sleeve %.3f, partition error %.2g\n", o.angle,
+                  o.distance, rep.known, rep.inpainted, t, r81_partition_error(s));
+      CHECK(r81_partition_error(s) < 1e-3f);
+      return t;
+    };
+    InpaintOptions plain;  // plain closest point (Blender's Data Transfer): anything near, any normal
+    plain.angle = 180.0f, plain.distance = 10.0f;
+    const float naive = worst_torso(plain), robust = worst_torso(InpaintOptions{});
+    CHECK(naive > 0.5f);   // the sleeve's end by the torso copies the torso
+    CHECK(robust < 0.1f);  // matched by normals, its end is inpainted from the arm
+  });
+
+  test("skin weights: vertices in the InpaintMask group are inpainted, not copied", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> one(n, 1.0f);
+    body.vertex_groups = {{"Bone", one}};
+    Mesh copy = body;
+    copy.vertex_groups.clear();
+    std::vector<float> mask(n, 0.0f);
+    size_t masked = 0;
+    for (size_t v = 0; v < n; v++)
+      if (std::fabs(copy.positions[v].y - 1.0f) < 0.2f) mask[v] = 1.0f, masked++;
+    copy.vertex_groups.push_back({kInpaintMask, mask});
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, copy, InpaintOptions{}, &rep, &err));
+    std::printf("    %zu masked: %zu matched, %zu inpainted; the mask group kept: %d\n", masked, rep.known, rep.inpainted, copy.find_group(kInpaintMask) >= 0);
+    CHECK(masked > 0 && rep.inpainted == masked && rep.known == n - masked);
+    CHECK(copy.find_group(kInpaintMask) >= 0 && r81_weight(copy, "Bone", n / 2) > 0.999f);
+  });
+
+  test("skin weights: automatic weights by inpainting - a hand hanging beside the thigh takes none of the leg, and a bent tube splits at the joint", [] {
+    /* A hip block's leg and an arm hanging beside it (a loose part of the same mesh), with a bone in each. */
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 1, 0}, 0.12f, 12, 12);          // the leg
+    const size_t leg_n = m.vert_count();
+    r81_tube(m, {0.22f, 0.3f, 0}, {0.22f, 1.2f, 0}, 0.08f, 12, 12);  // the arm, 0.02 from the leg's surface
+    const std::vector<BoneSegment> bones{{"Leg", {0, 0, 0}, {0, 1, 0}}, {"Arm", {0.22f, 1.2f, 0}, {0.22f, 0.3f, 0}}};
+    Mesh env = m;
+    std::vector<float> e;
+    float env_leg_on_arm = 0.0f;
+    for (size_t v = leg_n; v < env.vert_count(); v++) {
+      skinweights::envelope_weights(env.positions[v], bones, e);
+      env_leg_on_arm = std::max(env_leg_on_arm, e[0]);
+    }
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, bones, InpaintOptions{}, &rep, &err));
+    float leg_on_arm = 0.0f;
+    for (size_t v = leg_n; v < m.vert_count(); v++) leg_on_arm = std::max(leg_on_arm, r81_weight(m, "Leg", v));
+    std::printf("    leg weight on the arm: distance weights %.3f, inpainted %.4f (%zu known, %zu inpainted, %zu by distance)\n", env_leg_on_arm, leg_on_arm,
+                rep.known, rep.inpainted, rep.fallback);
+    CHECK(env_leg_on_arm > 0.05f && leg_on_arm < 0.01f);
+    CHECK(r81_partition_error(m) < 1e-3f);
+    /* A two-bone tube: whole at each end, shared around the joint, smooth along it. */
+    Mesh tube;
+    r81_tube(tube, {0, 0, 0}, {0, 2, 0}, 0.2f, 20, 12);
+    const std::vector<BoneSegment> two{{"Lower", {0, 0, 0}, {0, 1, 0}}, {"Upper", {0, 1, 0}, {0, 2, 0}}};
+    CHECK(automatic_skin_weights(tube, two, InpaintOptions{}, &rep, &err));
+    const float bottom = r81_weight(tube, "Lower", 0), top = r81_weight(tube, "Upper", tube.vert_count() - 1), mid = r81_weight(tube, "Lower", 10 * 12);
+    float jump = 0.0f;
+    for (int r = 1; r <= 20; r++) jump = std::max(jump, std::fabs(r81_weight(tube, "Lower", (size_t)r * 12) - r81_weight(tube, "Lower", (size_t)(r - 1) * 12)));
+    std::printf("    two-bone tube: Lower %.3f at the bottom, %.3f at the joint; Upper %.3f at the top; largest step %.3f\n", bottom, mid, top, jump);
+    CHECK(bottom > 0.999f && top > 0.999f && mid > 0.2f && mid < 0.8f && jump < 0.35f);
+    CHECK(r81_partition_error(tube) < 1e-3f);
+  });
+  test("skin weights: `skin bind` inpaints the Blender tube's weights at once, a large mesh's on a worker thread, each one undo step", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ImportResult r;
+    CHECK(import_model("tests/fixtures/rig_tube.glb", r));
+    instantiate_import(ed.scene(), r, "Rig Import", nullptr);
+    ed.mark_changed_for_test("Import");
+    ed.step_frame_headless();
+    GameObject *tube = ed.scene().find_by_name("Tube");
+    CHECK(tube && tube->get<SkinModifier>());
+    if (!tube || !tube->get<SkinModifier>()) return;
+    /* Spoil the weights (an undo step, so undo comes back here), then bind again (at once: the tube is small). */
+    {
+      Mesh &m = *mesh_make_mutable(tube->mesh_filter()->mesh);
+      for (VertexGroup &g : m.vertex_groups) std::fill(g.weights.begin(), g.weights.end(), 0.5f);
+      m.touch();
+    }
+    ed.mark_changed_for_test("Spoil the weights");
+    ed.step_frame_headless();  // (one frame's changes are one undo step: the bind below gets its own)
+    ed.command("skin bind Tube");
+    const Mesh &m = *tube->mesh_filter()->mesh;
+    const float now = r81_partition_error(m);
+    std::printf("    bound at once: partition error %.2g, Lower at the bottom %.3f\n", now, r81_weight(m, "Lower", 0));
+    CHECK(!ed.skin_job_running_for_test() && now < 1e-3f && r81_weight(m, "Lower", 0) > 0.99f);
+    ed.command("undo");
+    tube = ed.scene().find_by_name("Tube");
+    CHECK(tube && std::fabs(r81_weight(*tube->mesh_filter()->mesh, "Lower", 0) - 0.5f) < 1e-6f);  // the spoiled ones back
+    /* The same on a worker thread: frames go on while it solves; it lands as one undo step. */
+    ed.set_skin_async_min_verts_for_test(0);
+    ed.command("skin bind Tube");
+    int frames = 0;
+    while (ed.skin_job_running_for_test() && frames < 2000) ed.step_frame_headless(), frames++;
+    tube = ed.scene().find_by_name("Tube");
+    CHECK(tube != nullptr);
+    if (!tube) return;
+    const Mesh &m2 = *tube->mesh_filter()->mesh;
+    std::printf("    on a worker thread: landed after %d frame(s); partition error %.2g\n", frames, r81_partition_error(m2));
+    CHECK(!ed.skin_job_running_for_test() && r81_partition_error(m2) < 1e-3f && r81_weight(m2, "Lower", 0) > 0.99f);
+    ed.command("undo");
+    tube = ed.scene().find_by_name("Tube");
+    CHECK(tube && std::fabs(r81_weight(*tube->mesh_filter()->mesh, "Lower", 0) - 0.5f) < 1e-6f);
+    /* Envelope stays available. */
+    ed.command("skin bind Tube envelope");
+    CHECK(r81_partition_error(*ed.scene().find_by_name("Tube")->mesh_filter()->mesh) < 1e-3f);
+  });
+
+  test("skin weights: Transfer Weights puts the body's weights on a sleeve, gives it the body's skeleton, and the sleeve bends with the arm", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ImportResult r;
+    CHECK(import_model("tests/fixtures/rig_tube.glb", r));
+    instantiate_import(ed.scene(), r, "Rig Import", nullptr);
+    GameObject *tube = ed.scene().find_by_name("Tube");
+    CHECK(tube != nullptr);
+    if (!tube) return;
+    /* Two sleeves round the tube, 5 % wider, where the tube is. */
+    auto make_sleeve = [&](const char *name) {
+      auto mesh = std::make_shared<Mesh>(*tube->mesh_filter()->mesh);
+      mesh->vertex_groups.clear();
+      for (Vec3 &p : mesh->positions) p = Vec3(p.x * 1.05f, p.y, p.z * 1.05f);  // (the tube runs along its Y)
+      GameObject *s = ed.scene().create(name, nullptr);
+      s->add<MeshFilter>()->mesh = mesh;
+      s->add<MeshRenderer>();
+      s->set_world_matrix(tube->world_matrix());
+      return s;
+    };
+    make_sleeve("SleeveA");
+    make_sleeve("SleeveB");
+    ed.step_frame_headless();
+    /* By console. */
+    ed.command("skin transfer Tube SleeveA");
+    GameObject *a = ed.scene().find_by_name("SleeveA");
+    const SkinModifier *sk = a ? a->get<SkinModifier>() : nullptr;
+    CHECK(sk && sk->object == tube->get<SkinModifier>()->object);
+    CHECK(a && r81_partition_error(*a->mesh_filter()->mesh) < 1e-3f);
+    /* By the Rigging window: drag the Tube from the Hierarchy onto From, then Transfer Weights. */
+    ed.command("select Tube");  // (shows its row: its parents expand)
+    ed.command("select SleeveB");
+    ed.command("window Rigging");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    int hx = 0, hy = 0;
+    Recti f;
+    const bool row = ed.hierarchy_row_for_test("Tube", hx, hy), field = ed.button_rect_for_test("field:skin_transfer_from", f);
+    std::printf("    the Tube's row shown: %d, the From field: %d\n", (int)row, (int)field);
+    const bool ready = row && field;
+    CHECK(ready);
+    if (!ready) return;
+    const int fx = f.x + f.w / 2, fy = f.y + f.h / 2;
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+    ed.step_frame_headless();
+    Recti b;
+    CHECK(ed.button_rect_for_test("Transfer Weights", b));
+    ed.step_frame_headless({at(ET::MouseMove, b.x + b.w / 2, b.y + b.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, b.x + b.w / 2, b.y + b.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, b.x + b.w / 2, b.y + b.h / 2)});
+    ed.step_frame_headless();
+    GameObject *sb = ed.scene().find_by_name("SleeveB");
+    CHECK(sb && sb->get<SkinModifier>() && sb->mesh_filter()->mesh->find_group("Upper") >= 0);
+    /* Bend the arm: the sleeve's top follows; its bottom stays. */
+    GameObject *upper = ed.scene().find_by_name("Upper");
+    CHECK(upper != nullptr);
+    if (!upper || !sb) return;
+    upper->set_local_rotation(upper->local().rotation * Quat::axis_angle({1, 0, 0}, 1.0f));
+    const Mesh &base = *sb->mesh_filter()->mesh;
+    const Mesh *e = sb->evaluated_mesh();
+    float top = 0.0f, bottom = 0.0f;
+    for (size_t v = 0; v < base.vert_count(); v++) {
+      const float d = length(e->positions[v] - base.positions[v]);
+      if (r81_weight(base, "Upper", v) > 0.99f) top = std::max(top, d);
+      if (r81_weight(base, "Lower", v) > 0.99f) bottom = std::max(bottom, d);
+    }
+    std::printf("    posed: the sleeve's upper part moved %.3f, its lower part %.4f\n", top, bottom);
+    CHECK(top > 0.1f && bottom < 1e-3f);
+  });
+  test("skin weights: a transfer onto a renumbered copy finds each vertex's closest point and gives back the same weights", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> high(n);
+    for (size_t v = 0; v < n; v++) high[v] = std::max(0.0f, std::min(1.0f, body.positions[v].y - 0.5f));
+    std::vector<float> low(n);
+    for (size_t v = 0; v < n; v++) low[v] = 1.0f - high[v];
+    body.vertex_groups = {{"Low", low}, {"High", high}};
+    /* The copy's vertices in reverse order (so not "the same mesh by index") and 2 mm out (so not "the same position"):
+     * each one's weights come from the closest point of the body's surface. Its faces are renumbered to match. */
+    Mesh copy;
+    for (size_t v = 0; v < n; v++) {
+      const Vec3 p = body.positions[n - 1 - v];
+      copy.add_vert({p.x * 1.0067f, p.y, p.z * 1.0067f});
+    }
+    for (size_t f = 0; f < body.face_count(); f++) {
+      const uint32_t *q = body.face_verts(f);
+      copy.add_face({(uint32_t)(n - 1 - q[0]), (uint32_t)(n - 1 - q[1]), (uint32_t)(n - 1 - q[2]), (uint32_t)(n - 1 - q[3])});
+    }
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, copy, InpaintOptions{}, &rep, &err));
+    float worst = 0.0f;
+    for (size_t v = 0; v < n; v++) worst = std::max(worst, std::fabs(r81_weight(copy, "High", n - 1 - v) - high[v]));
+    std::printf("    %zu matched; worst difference %.2g\n", rep.known, worst);
+    CHECK(rep.known == n && worst < 1e-4f);
+  });
+
+  test("skin weights: a hand below its arm bone's end, beside the thigh, takes no leg weight - the leg bone can't see it", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 1, 0}, 0.12f, 12, 12);  // the leg
+    const size_t leg_n = m.vert_count();
+    r81_tube(m, {0.22f, 0.3f, 0}, {0.22f, 1.2f, 0}, 0.08f, 18, 12);  // the arm with its hand at the bottom
+    /* The arm bone stops above the hand: the hand's vertices are nearer the leg bone, through the leg's surface. */
+    const std::vector<BoneSegment> bones{{"Leg", {0, 0, 0}, {0, 1, 0}}, {"Arm", {0.22f, 1.2f, 0}, {0.22f, 0.7f, 0}}};
+    std::vector<float> e;
+    float env_hand = 0.0f;
+    for (size_t v = leg_n; v < m.vert_count(); v++)
+      if (m.positions[v].y < 0.6f) skinweights::envelope_weights(m.positions[v], bones, e), env_hand = std::max(env_hand, e[0]);
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, bones, InpaintOptions{}, &rep, &err));
+    float hand = 0.0f;
+    for (size_t v = leg_n; v < m.vert_count(); v++)
+      if (m.positions[v].y < 0.6f) hand = std::max(hand, r81_weight(m, "Leg", v));
+    std::printf("    the hand's leg weight: by distance %.3f, inpainted %.4f\n", env_hand, hand);
+    CHECK(env_hand > 0.5f && hand < 0.01f);
+  });
+
+  test("skin weights: short spine bones in a wide torso each get their own band and blend into the next (no hard steps)", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 1, 0}, 0.15f, 40, 16);
+    std::vector<BoneSegment> bones;
+    const char *names[] = {"Hips", "Spine", "Chest", "Neck", "Head"};
+    for (int i = 0; i < 5; i++) bones.push_back({names[i], {0, 0.2f * (float)i, 0}, {0, 0.2f * (float)(i + 1), 0}});
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, bones, InpaintOptions{}, &rep, &err));
+    float step = 0.0f, weakest = 1.0f;
+    for (const char *nm : names) {
+      float most = 0.0f;
+      for (size_t v = 0; v < m.vert_count(); v++) most = std::max(most, r81_weight(m, nm, v));
+      weakest = std::min(weakest, most);
+      for (int r = 1; r <= 40; r++) step = std::max(step, std::fabs(r81_weight(m, nm, (size_t)r * 16) - r81_weight(m, nm, (size_t)(r - 1) * 16)));
+    }
+    std::printf("    %zu trusted, %zu inpainted; every bone's strongest weight at least %.2f; largest step between rings %.3f\n", rep.known, rep.inpainted,
+                weakest, step);
+    CHECK(weakest > 0.5f && step < 0.35f && r81_partition_error(m) < 1e-3f);
+  });
+
+  test("skin weights: a NaN vertex, a wire edge and a zero-area face leave every vertex weighted, summing to 1, still by the direct solver", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 2, 0}, 0.2f, 20, 12);
+    const uint32_t a = m.add_vert({0.5f, 1.0f, 0.0f}), b = m.add_vert({0.6f, 1.0f, 0.0f});
+    m.add_loose_edge(a, b);  // a wire hanging off nothing
+    const uint32_t z0 = m.add_vert({1, 1, 1}), z1 = m.add_vert({1, 1, 1}), z2 = m.add_vert({1, 1, 1});
+    m.add_face({z0, z1, z2});  // no area
+    m.positions[5] = Vec3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f);
+    m.sync_attributes();
+    const std::vector<BoneSegment> two{{"Lower", {0, 0, 0}, {0, 1, 0}}, {"Upper", {0, 1, 0}, {0, 2, 0}}};
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, two, InpaintOptions{}, &rep, &err));
+    bool finite = true;
+    for (const VertexGroup &g : m.vertex_groups)
+      for (float w : g.weights) finite = finite && finite_bits(w);
+    std::printf("    %zu kept their first guess; solver: %s; partition error %.2g\n", rep.fallback, rep.solver, r81_partition_error(m));
+    CHECK(finite && r81_partition_error(m) < 1e-3f && rep.fallback >= 5);
+#ifdef BL_WITH_EIGEN
+    CHECK(std::string(rep.solver) == "Eigen sparse Cholesky");  // (not thrown to conjugate gradients by a zero pivot)
+#endif
+  });
+
+  test("skin weights: a source's InpaintMask isn't transferred or counted - the target's bone weights still sum to 1", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> low(n), high(n), mask(n, 0.0f);
+    for (size_t v = 0; v < n; v++) {
+      high[v] = std::max(0.0f, std::min(1.0f, body.positions[v].y - 0.5f)), low[v] = 1.0f - high[v];
+      if (body.positions[v].y > 1.8f) mask[v] = 1.0f;  // a collar painted on the body
+    }
+    body.vertex_groups = {{"Low", low}, {"High", high}, {kInpaintMask, mask}};
+    Mesh cloth = body;
+    cloth.vertex_groups.clear();
+    for (Vec3 &p : cloth.positions) p = Vec3(p.x * 1.03f, p.y, p.z * 1.03f);
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, cloth, InpaintOptions{}, &rep, &err));
+    CHECK(cloth.find_group(kInpaintMask) < 0 && cloth.vertex_groups.size() == 2 && r81_partition_error(cloth) < 1e-3f);
+  });
+
+  test("skin weights: a background bind can be cancelled, is dropped by an undo, and an editor closed mid-solve waits for it", [] {
+    auto setup = [](Editor &ed, int rings) {
+      ed.init_headless(1000, 700);
+      ed.command("create Armature");
+      GameObject *arm = ed.scene().find_by_name("Armature");
+      GameObject *g = ed.scene().create("R81Body");
+      auto mesh = std::make_shared<Mesh>();
+      r81_tube(*mesh, {0, 0, 0}, {0, 2, 0}, 0.2f, rings, 64);
+      std::vector<float> half(mesh->vert_count(), 0.5f);
+      mesh->vertex_groups.push_back({arm && !arm->children.empty() ? arm->children[0]->name : "Bone", half});
+      g->add<MeshFilter>()->mesh = mesh;
+      g->add<MeshRenderer>();
+      g->add<SkinModifier>()->object = arm ? arm->name : "Armature";
+      ed.mark_changed_for_test("R81 body");
+      ed.step_frame_headless();
+      ed.set_skin_async_min_verts_for_test(0);
+      return g;
+    };
+    auto first_weight = [](Editor &ed) {
+      GameObject *g = ed.scene().find_by_name("R81Body");
+      return g && !g->mesh_filter()->mesh->vertex_groups.empty() ? g->mesh_filter()->mesh->vertex_groups[0].weights[0] : -1.0f;
+    };
+    auto settle = [](Editor &ed) {
+      for (int i = 0; i < 4000 && ed.skin_job_running_for_test(); i++) ed.step_frame_headless();
+    };
+    {
+      Editor ed;
+      setup(ed, 300);
+      ed.command("skin bind R81Body");
+      ed.command("skin cancel");
+      settle(ed);
+      std::printf("    cancelled: the first weight %.2f (0.50 before)\n", first_weight(ed));
+      CHECK(!ed.skin_job_running_for_test() && std::fabs(first_weight(ed) - 0.5f) < 1e-6f);
+    }
+    {
+      Editor ed;
+      setup(ed, 300);
+      ed.command("skin bind R81Body");
+      ed.command("undo");  // (back past the body: the solve was for a scene that's gone)
+      settle(ed);
+      CHECK(!ed.skin_job_running_for_test() && ed.scene().find_by_name("R81Body") == nullptr);
+    }
+    {
+      Editor ed;
+      setup(ed, 300);
+      ed.command("skin bind R81Body");
+    }  // (its destructor cancels and joins the worker)
+    CHECK(true);
   });
 }

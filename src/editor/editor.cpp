@@ -501,6 +501,7 @@ void Editor::frame(std::vector<Event> &events) {
   }
 
   finish_hierarchy_drag();
+  poll_skin_job();
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();
@@ -1543,6 +1544,7 @@ size_t Editor::undo_bytes() const {
 
 void Editor::undo() {
   if (playing_) return;
+  cancel_skin_job();  // (its result was solved for the state being undone)
   wp_abort_stroke();  // a stroke under way would write into the restored scene's (shared) mesh
   commit_undo();
   if (undo_.empty()) return;
@@ -1570,6 +1572,7 @@ void Editor::undo() {
 
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
+  cancel_skin_job();
   wp_abort_stroke();
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
@@ -1599,6 +1602,7 @@ void Editor::redo() {
 
 void Editor::new_scene() {
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
+  cancel_skin_job();
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1617,6 +1621,7 @@ void Editor::new_scene() {
 
 bool Editor::open_scene(const std::string &path) {
   set_weight_paint(false);
+  cancel_skin_job();
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -2651,6 +2656,7 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
 
 void Editor::enter_play() {
   set_weight_paint(false);
+  cancel_skin_job();  // (Stop would throw its result away)
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
   commit_undo();
@@ -4228,8 +4234,8 @@ void Editor::rig_command(const std::vector<std::string> &t) {
     armature_pose(root, verb == "apply");
     return;
   }
-  if (t[0] == "skin" && to_lower(arg(1, "")) == "bind") {
-    skin_bind(t.size() > 2 ? scene_->find_by_name(arg(2, "")) : active_object());
+  if (t[0] == "skin") {
+    skin_command(t);
     return;
   }
   if (t[0] == "ik" && to_lower(arg(1, "")) == "add" && t.size() <= 3) {  // ik add [bone]: a target and a pole made for it
@@ -4332,23 +4338,6 @@ bool Editor::armature_pose(GameObject *root, bool apply_as_rest) {
   Log::info("%s: %d bones", apply_as_rest ? "Apply as Rest" : "Reset Pose", n);
   if (n) mark_changed(apply_as_rest ? "Apply as Rest" : "Reset Pose");
   return n > 0;
-}
-
-bool Editor::skin_bind(GameObject *g) {
-  SkinModifier *sk = g ? g->get<SkinModifier>() : nullptr;
-  MeshFilter *mf = g ? g->mesh_filter() : nullptr;
-  if (!sk || !mf || !mf->mesh) {
-    Log::warn("skin bind: select a mesh with a Skin modifier");
-    return false;
-  }
-  std::string err;
-  if (!skin_bind_automatic(*sk, *mesh_make_mutable(mf->mesh), &err)) {
-    Log::warn("skin bind: %s", err.c_str());
-    return false;
-  }
-  Log::info("'%s' bound to '%s' with automatic weights", g->name.c_str(), sk->object.c_str());
-  mark_changed("Skin: Automatic Weights");
-  return true;
 }
 
 }  // namespace bl

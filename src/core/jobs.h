@@ -32,6 +32,10 @@ class JobSystem {
    * all threads, and returns once every chunk is done. With the built-in pool
    * nested calls run inline; with TBB they run in parallel too. */
   void parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn);
+  /* Runs `fn` (on a thread of the caller's own, such as a background solve) so its parallel loops don't hold up the
+   * editor's: with TBB in an arena of its own two threads short of the machine; with the built-in pool (one job at a
+   * time) serially, never taking the pool from the main thread. */
+  void run_background(const std::function<void()> &fn);
 
   int thread_count() const;
   /* A ceiling on every thread the process runs work on, TBB's included (Embree, OpenImageDenoise, OpenSubdiv share

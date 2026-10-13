@@ -5,6 +5,7 @@
 // from deform groups, a matrix per bone of pose x inverse rest, DQ via BLI_math_rotation's dquat functions).
 // Theory: Kavan, Collins, Zara, O'Sullivan, "Skinning with Dual Quaternions" (I3D 2007).
 #include "scene.h"
+#include "skin_weights.h"
 #include "../core/core.h"
 #include "../core/jobs.h"
 
@@ -261,7 +262,8 @@ void SkinModifier::modify(Mesh &m) const {
 /* Automatic weights (Blender's With Automatic / Envelope weights, simplified): each vertex to the bones nearest it,
  * weight falling off with the distance to the bone's segment (to the fourth power), the 4 largest kept, summing to 1.
  * Groups named after the bones are made (or replaced). Distances at rest, in the mesh's space. */
-bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error) {
+bool skin_bone_segments(const SkinModifier &s, std::vector<BoneSegment> &out, std::string *error) {
+  out.clear();
   const GameObject *root = armature_target(s);
   if (!root) {
     if (error) *error = "no armature named '" + s.object + "' (a root with an Armature component)";
@@ -269,49 +271,32 @@ bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error) {
   }
   std::vector<ArmatureBone> bones;
   armature_bones(*root, bones);
-  std::vector<std::pair<Vec3, Vec3>> seg;  // each deforming bone's head and tail at rest, in the mesh's space
-  std::vector<const ArmatureBone *> deforming;
   const Mat4 to_mesh = s.owner->world_matrix().inverse() * armature_base(*root);
   for (const ArmatureBone &b : bones) {
     if (!b.bone->deform) continue;
     const Mat4 rest = to_mesh * b.rest;
-    seg.push_back({rest.point(Vec3(0.0f)), rest.point(Vec3(0.0f, std::max(1e-6f, b.bone->length), 0.0f))});
-    deforming.push_back(&b);
+    out.push_back({b.object->name, rest.point(Vec3(0.0f)), rest.point(Vec3(0.0f, std::max(1e-6f, b.bone->length), 0.0f))});
   }
-  if (deforming.empty()) {
-    if (error) *error = "the armature has no deforming bones";
-    return false;
-  }
-  const size_t nv = m.vert_count(), nb = deforming.size();
+  if (out.empty() && error) *error = "the armature has no deforming bones";
+  return !out.empty();
+}
+
+bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error) {
+  std::vector<BoneSegment> bones;
+  if (!skin_bone_segments(s, bones, error)) return false;
+  const size_t nv = m.vert_count(), nb = bones.size();
   std::vector<std::vector<float>> w(nb, std::vector<float>(nv, 0.0f));
   JobSystem::global().parallel_for((int64_t)nv, 512, [&](int64_t b, int64_t e) {
-    std::vector<std::pair<float, size_t>> near(nb);
+    std::vector<float> one;
     for (int64_t v = b; v < e; v++) {
-      const Vec3 p = m.positions[(size_t)v];
-      for (size_t i = 0; i < nb; i++) {
-        const Vec3 a = seg[i].first, d = seg[i].second - a;
-        const float t = std::max(0.0f, std::min(1.0f, dot(p - a, d) / std::max(1e-12f, dot(d, d))));
-        const float dist = length(p - (a + d * t));
-        near[i] = {finite_bits(dist) ? dist : 1e30f, i};
-      }
-      const size_t k = std::min<size_t>(4, nb);
-      std::partial_sort(near.begin(), near.begin() + (long)k, near.end());
-      const float d0 = std::max(near[0].first, 1e-6f);
-      float sum = 0.0f;
-      float raw[4];
-      for (size_t j = 0; j < k; j++) {
-        const float r = d0 / std::max(near[j].first, 1e-6f);
-        raw[j] = r * r * r * r;
-        sum += raw[j];
-      }
-      for (size_t j = 0; j < k; j++) w[near[j].second][(size_t)v] = raw[j] / sum;
+      skinweights::envelope_weights(m.positions[(size_t)v], bones, one);
+      for (size_t i = 0; i < nb; i++) w[i][(size_t)v] = one[i];
     }
   });
   for (size_t i = 0; i < nb; i++) {
-    const std::string &name = deforming[i]->object->name;
-    const int gi = m.find_group(name);
+    const int gi = m.find_group(bones[i].name);
     if (gi >= 0) m.vertex_groups[(size_t)gi].weights = std::move(w[i]);
-    else m.vertex_groups.push_back({name, std::move(w[i])});
+    else m.vertex_groups.push_back({bones[i].name, std::move(w[i])});
   }
   m.touch();
   return true;
