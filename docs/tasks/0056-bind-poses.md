@@ -4,7 +4,7 @@
 - **Requirements:** R-06
 - **Decisions:** ADR 0025 (amended: the rest of an import is its bind pose)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/53
 
 ## Goal
 The user asked (2026-10-12): "Yes, please follow Blender, Unity, and Maya methodology", about rigged imports saved in

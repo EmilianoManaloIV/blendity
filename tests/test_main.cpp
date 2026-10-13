@@ -24285,7 +24285,11 @@ static void round69_tests() {
     CHECK(capped <= 3 && js.thread_count() <= 3);
     js.set_thread_limit(0);
     CHECK(js.thread_count() == all);
-    if (all >= 4) CHECK(distinct() > 3);  // lifted: more than the old ceiling again
+    /* Lifted: more than the old ceiling again. How many threads join one short loop is up to the scheduler (on a
+     * 4-core CI runner all four must), so take the best of a few tries rather than one (it failed CI on PRs #49, #50). */
+    int lifted = 0;
+    for (int tries = 0; tries < 8 && lifted <= 3; tries++) lifted = std::max(lifted, distinct());
+    if (all >= 4) CHECK(lifted > 3);
     /* The dependency-free build's own pool (CI's): its workers already started, the ceiling still holds. */
     const JobSystem::Backend was = js.backend();
     js.set_backend(JobSystem::Backend::Builtin);
