@@ -194,6 +194,7 @@ class Context {
   void menu_separator();
   void menu_label(const std::string &text);
   Recti popup_row(int h = -1);  // reserve a row in the current popup
+  Recti last_widget() const { return last_widget_; }  // where the last widget (or menu row) was drawn
   int popup_width() const;
 
   /* --- drawing helpers --- */

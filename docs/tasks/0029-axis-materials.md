@@ -1,10 +1,10 @@
 # 0029: Axis materials (grass on top, dirt on the sides, whatever the rotation)
 
-- **Status:** approved (the roadmap of 2026-10-11; after task 0028)
+- **Status:** done (as built below)
 - **Requirements:** R-03
 - **Decisions:** ADR 0018
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/27
 
 ## Goal
 The user asked for "procedural materials/textures that can take axis as a parameter (a material that will
@@ -64,3 +64,31 @@ renders on the CPU and the GPU.
 
 ## Documentation to update
 - ADR 0018, CHANGELOG, README (axis materials), ARCHITECTURE row, USABILITY row.
+
+## As built
+Built as specified: the `Material` fields and `Reflector::material_ref` (files, undo, hashing and `set` see the
+paths as text; the Inspector draws a picker button and a clear button), the parts resolved with the parent in
+`Material::textures()` (one thread, before shading), `evaluate_material`'s axis branch over a shared
+`evaluate_surface(..., force_box)`, the GPU kernel's (parts appended to the material table once each,
+`GMaterial::axis` / `axis_i`), the views' hash mixing the parts' versions, and the Materials window's
+preview through `evaluate_material` (procedurals and axis materials now show). The F12 raster render and
+the CPU / GPU path tracers agree (both RTX GPUs within 0.0006 of a 0.187 mean). Stress `shading`: an axis
+material with two parts costs 1.51× a plain triplanar one per point (target under 1.6×).
+
+**Deviations:**
+1. **Normals blend as a weighted, renormalised sum**, not a whiteout blend: the parts' normals are already in
+   world space here, where a whiteout blend (of tangent-space maps) doesn't apply.
+2. **A part's normal map uses the mesh's UV tangents** (as the Box mapping always has), so it is approximate
+   on the projected parts; their colours and roughness are exact.
+3. **The Inspector's picker is not click-tested** (its popup is the Materials window's picker, already
+   tested); the fields are tested through the material, its file and undo.
+4. **The GPU parameters live in a new `GMaterial::axis` / `axis_i`** rather than the spare `flags.w` /
+   `color2.w`: four numbers and three indices don't fit there.
+5. Found and fixed on the way: on a hash-memo miss the object hash re-mixed only the materials' pointers and
+   versions, not the full material key; it now mixes the key (which carries the parts).
+
+**Review:** the code reviewer found two blockers and two major issues, all fixed with tests: two axis
+materials naming each other recursed without end (now cut while resolving); appending parts to the GPU
+table could invalidate an iterator; the GPU projected procedural parts at a different point than the CPU;
+and the shadow-map (RSM) cache key missed the parts. Also fixed: a NaN normal gave black, and the views'
+hash now mixes the parts as resolved.

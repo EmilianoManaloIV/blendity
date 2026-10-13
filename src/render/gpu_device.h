@@ -32,8 +32,9 @@ bool available();                      // compiled in, a Vulkan loader found and
 const std::vector<DeviceInfo> &devices();  // enumerated once per run
 std::string status();                  // one line for the Console / libs command
 /* Compiles the kernel in the background (once per run, cached on disk), so
- * the first GPU render doesn't stall the editor. */
-void prewarm();
+ * the first GPU render doesn't stall the editor; with open_devices (the
+ * interactive editor) it also opens a renderer for each GPU (take_renderer). */
+void prewarm(bool open_devices = false, bool hardware_rt = true);
 
 /* --- the flattened scene, in the kernel's std430 layouts (gpu_kernel.h) --- */
 struct GParams {
@@ -48,6 +49,8 @@ struct GParams {
   float lens[4];        // aperture radius, focus distance, blades, blade rotation
   float cam_right[4], cam_up[4], cam_fwd[4];
   float background[4];  // a camera's Solid Color for camera rays (w: on)
+  float retro_vp[16];   // a camera filter's view-projection (task 0032)
+  float retro[4];       // affine UVs, screen door, internal width, height (0: off)
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };
@@ -61,6 +64,12 @@ struct GVertex { float p[4], n[4], t[4], uv[4]; };
 struct GMaterial {
   float base_color[4], emission[4], params[4], tiling[4], offset[4], color2[4];
   int32_t tex0[4], tex1[4], flags[4];
+  float axis[4];      // an axis material (ADR 0018): cos(angle), half blend, 1 / scale, mode (0 off, 1 world, 2 local)
+  int32_t axis_i[4];  // its Top, Side, Bottom, High in this table (-1: its own maps; High -1: no band)
+  float axis2[4];     // task 0040: noise amount, 1 / noise scale, high start, high half-width
+  /* Toon (ADR 0020; flags[3] bit 1): bands, softness, threshold, specular smoothness; shadow colour, specular
+   * size; rim colour x strength, rim width. */
+  float toon0[4], toon1[4], toon2[4];
 };
 struct GLight { float a[4], b[4], c[4], d[4], e[4]; };  // see gpu_kernel.h Light
 struct GMeshLight { uint32_t obj, prim; float area, power; };
@@ -93,6 +102,12 @@ class Renderer {
  public:
   /* hardware_rt: use ray tracing hardware if the device has it. */
   static std::unique_ptr<Renderer> create(int device_index, bool hardware_rt, std::string *error);
+  /* How long opening took, and whether the pipeline came from the cache on disk (task 0037). */
+  struct OpenStats {
+    double device_ms = 0, pipeline_ms = 0;
+    bool from_pipeline_cache = false;
+  };
+  virtual OpenStats open_stats() const { return {}; }
   virtual ~Renderer() = default;
   virtual bool upload(const Scene &scene, std::string *error) = 0;
   /* Camera, resolution and other per-frame parameters (clears the buffers). */
@@ -103,7 +118,7 @@ class Renderer {
   /* Accumulated sums (4 floats per pixel): the colour after every render call,
    * albedo and normal + depth only when the denoiser needs them. */
   virtual void download_accum(std::vector<float> &accum) = 0;
-  virtual void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth) = 0;
+  virtual void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth, std::vector<float> *coverage = nullptr) = 0;
   /* Baking (task 0018, GParams::env_i z / w): the points' origins then normals or directions, 4 floats
    * each, written where the kernel reads them (after set_params, which clears). */
   virtual bool set_points(const float *data, size_t floats, std::string *error) = 0;
@@ -114,6 +129,26 @@ class Renderer {
 /* A general compute kernel on one GPU (task 0018: voxel GI's gathers): GLSL compiled once per run (and
  * cached on disk, as the path tracer's kernel), storage buffers by binding (0..15), dispatches of
  * 64-wide groups, read-backs. Every call waits for the GPU. Null without Vulkan. */
+/* --- renderers opened in the background (task 0037, ADR 0021) ---
+ * Opening a renderer builds the kernel's pipeline: under a second with a warm driver cache, over a minute with a
+ * cold one. take_renderer hands over one that is already open, or returns null with *pending while one opens on a
+ * background thread; after a hand-over a spare opens, so the next view gets one at once. */
+std::unique_ptr<Renderer> take_renderer(int index, bool hardware_rt, bool *pending, std::string *error = nullptr);
+/* A ready one from the pool, else opened here (may take long: worker threads, headless runs). */
+std::unique_ptr<Renderer> open_renderer(int index, bool hardware_rt, std::string *error = nullptr);
+void return_renderer(std::unique_ptr<Renderer> r, int index, bool hardware_rt);  // back into the pool
+uint64_t renderers_generation();  // changes when a background open finishes (waiting tracers check it)
+bool renderer_ready(int index, bool hardware_rt);  // one is waiting in the pool
+/* Whether new path tracers open their GPUs in the background (the interactive editor turns it on). */
+void set_background_open_default(bool on);
+bool background_open_default();
+bool renderers_opening();         // a background open is running
+/* Tests: slow every background open down, and drop the ready renderers (a cold start). */
+void set_open_delay_for_test(int ms);
+void drop_ready_renderers_for_test();
+/* The pipeline cache file of a device (task 0037): a Vulkan VkPipelineCache kept on disk. */
+std::string pipeline_cache_file(int index, bool hardware_rt);
+
 class Compute {
  public:
   static std::unique_ptr<Compute> create(int device_index, const std::string &glsl, std::string *error);

@@ -38,7 +38,8 @@ bool write_jpeg(const std::string &path, const uint32_t *pixels, int width, int 
 /* Linear float RGB (3 floats per pixel) as Radiance RGBE. */
 bool write_hdr(const std::string &path, const float *rgb, int width, int height);
 /* OpenEXR (when built with Blender's libraries): linear RGB, half or full float. */
-bool write_exr(const std::string &path, const float *rgb, int width, int height, bool half = true);
+/* alpha (optional, one float a pixel): an RGBA EXR (a transparent render, task 0035). */
+bool write_exr(const std::string &path, const float *rgb, int width, int height, bool half = true, const float *alpha = nullptr);
 bool exr_available();
 /* Use libjpeg-turbo / libpng for decoding when built with them (default on);
  * off = Blendity's own decoders (stress tests compare both). */
@@ -89,6 +90,9 @@ using TexturePtr = std::shared_ptr<const Texture>;
 /* Cached load (reloads when the file changes on disk). */
 TexturePtr texture_load(const std::string &path, bool srgb, std::string *error = nullptr);
 void texture_cache_clear();
+/* Drops a file's cached textures (it was rewritten: a bake, task 0036; the modification time can stay the same
+ * within a second). */
+void texture_cache_forget(const std::string &path);
 size_t texture_cache_size();
 
 /* Blender's generated test images (Image > New > Generated Type). */

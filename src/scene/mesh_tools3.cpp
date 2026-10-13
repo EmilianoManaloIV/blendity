@@ -26,6 +26,16 @@ static float det3(const Mat4 &w) {
 void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap) {
   const uint32_t base = (uint32_t)dst.vert_count();
   const bool flip = det3(xf) < 0;  // a mirrored object: keep its faces pointing out
+  /* Vertex groups joined by name: dst's go on with src's weights (0 where src has none), src's new ones start at 0
+   * for dst's vertices. */
+  if (dst.groups_fit() && src.groups_fit()) {
+    for (const VertexGroup &sg : src.vertex_groups)
+      if (dst.find_group(sg.name) < 0) dst.vertex_groups.push_back({sg.name, std::vector<float>(dst.vert_count(), 0.0f)});
+    for (VertexGroup &dg : dst.vertex_groups) {
+      const int si = src.find_group(dg.name);
+      for (size_t i = 0; i < src.vert_count(); i++) dg.weights.push_back(si >= 0 ? src.vertex_groups[(size_t)si].weights[i] : 0.0f);
+    }
+  }
   for (const Vec3 &p : src.positions) dst.positions.push_back(xf.point(p));
   const bool uv = dst.has_uvs() || src.has_uvs();
   if (uv && !dst.has_uvs()) dst.uvs.assign(dst.corner_count(), Vec2(0.0f, 0.0f));
@@ -67,6 +77,7 @@ Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   out.positions = m.positions;
   out.seams = m.seams;
   out.sharp_edges = m.sharp_edges;
+  out.vertex_groups = m.vertex_groups;  // remove_loose_verts below keeps the separated vertices' weights
   if (!m.face_smooth.empty()) out.face_smooth.reserve(m.face_count());
   const bool uv = m.has_uvs();
   for (size_t f = 0; f < m.face_count(); f++) {

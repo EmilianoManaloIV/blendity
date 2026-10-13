@@ -313,7 +313,10 @@ void radial_array(Mesh &m, int count, int axis, float angle_deg, float merge_dis
   for (int c = 1; c < count; c++) {
     const Quat q = Quat::axis_angle(ax, step * (float)c * kDeg2Rad);
     const uint32_t off = (uint32_t)m.vert_count();
-    for (uint32_t i = 0; i < nv; i++) m.add_vert(q.rotate(src.positions[i]));
+    for (uint32_t i = 0; i < nv; i++) {
+      m.add_vert(q.rotate(src.positions[i]));
+      m.copy_vertex_weights(i);
+    }
     std::vector<uint32_t> fv;
     for (size_t f = 0; f < src.face_count(); f++) {
       fv.assign(src.face_verts(f), src.face_verts(f) + src.face_size(f));

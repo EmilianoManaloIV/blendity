@@ -135,16 +135,18 @@ std::string Editor::create_project_folder(const std::string &dir_in) {
 
 bool Editor::delete_project_entry(const std::string &path) {
   if (path.empty() || !fs::exists(path)) return false;
-  /* Only what the Project window shows: inside Assets, the research papers or the screenshots (not those folders themselves). */
+  /* Only what the Project window shows: inside Assets or the screenshots (not those folders themselves). The
+   * research folder is the user's and no longer shown (task 0034). */
   const std::string np = fs::normalize(path);
   bool deletable = false;
-  for (const std::string &root : {assets_dir_, papers_dir_, screenshots_dir_})
+  for (const std::string &root : {assets_dir_, screenshots_dir_})
     deletable = deletable || (path_inside(np, fs::normalize(root)) && np != fs::normalize(root));
   if (!deletable) {
-    Log::warn("Only things inside Assets, research papers or screenshots can be deleted here");
+    Log::warn("Only things inside Assets or Screenshots can be deleted here");
     return false;
   }
   save_dirty_material_assets();
+  save_dirty_texture_assets();  // the trash keeps the last edits
   std::string rel = make_asset_relative(path);
   std::replace(rel.begin(), rel.end(), '\\', '/');
   std::string err;
@@ -269,7 +271,6 @@ void Editor::draw_project(const Recti &r) {
   };
   Fav favs[] = {{"Assets", assets_dir_, Icon::Folder},
                 {"Scenes", fs::join(assets_dir_, "Scenes"), Icon::Scene},
-                {"Research Papers", papers_dir_, Icon::Paper},
                 {"Screenshots", screenshots_dir_, Icon::Folder}};
   ui::Id tid = u.id("proj_tree");
   static int tree_h = 0;
@@ -432,10 +433,8 @@ void Editor::draw_project(const Recti &r) {
     row_clicked = row_clicked || (hot && (in.pressed[0] || in.pressed[1]));
   }
   if (shown.empty()) {
-    bool papers = project_dir_ == papers_dir_;
-    u.label({right.x, right.y + rh, right.w, rh},
-            papers ? "Drop research papers (PDF, TXT, MD...) onto this window." : "This folder is empty. Right-click or + to create a folder or material.",
-            u.theme.text_dim, ui::Align::Center);
+    u.label({right.x, right.y + rh, right.w, rh}, "This folder is empty. Right-click or + to create a folder or material.", u.theme.text_dim,
+            ui::Align::Center);
   }
   u.end_scroll();
   /* Empty space: the current folder is the drop target, and right-click creates. */

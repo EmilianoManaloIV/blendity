@@ -44,6 +44,11 @@ struct SurfacePoint {
   AABB local_bounds;
   bool has_tangent = false;
   const TexOverride *tex = nullptr;  // camera filter (rasterizer only)
+  /* Live procedural textures (task 0031, rasterizer and previews): evaluated per pixel where a texel of the
+   * image would cover more than this pixel. footprint: object-space metres one pixel covers (0: unknown, then
+   * always live). */
+  bool live_textures = false;
+  float footprint = 0.0f, world_footprint = 0.0f;  // the same in world metres (an axis material's World mode)
   /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
   bool has_lightmap = false;
   Vec3 lightmap;
@@ -65,6 +70,7 @@ struct SurfaceSample {
   Vec3 emission;
   Vec3 normal;  // after normal mapping
   bool unlit = false;
+  const Material *toon = nullptr;  // a Toon material (ADR 0020): lights shade it through shade_toon
 };
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
@@ -73,10 +79,23 @@ SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
  * this; the path tracer keeps the one above. */
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp);
 
+/* --- Toon (ADR 0020) --- */
+/* How lit a toon surface is, 0 (the shadow tone) to 1, in `toon_bands` steps: lit = N.L x visibility. */
+float toon_level(const Material &m, float lit);
+/* A toon surface's light toward the eye from one light, per unit of the light's colour x intensity (Unity's
+ * convention: intensity 1 lights a white surface white): the albedo from the shadow colour to full by the tone,
+ * plus the highlight spot. s.toon must be set. */
+Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit);
+/* The rim light at the silhouette (added once, not per light). */
+Vec3 toon_rim(const Material &m, Vec3 n, Vec3 V);
+
 /* --- BRDF --- */
 Vec3 fresnel_f0(const SurfaceSample &s);
 /* Cook-Torrance GGX + Lambert, times N.L. n, v, l normalized; v, l point away from the surface. */
 Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l);
+/* brdf_eval's two terms apart: the diffuse per unit N.L (albedo, Fresnel-weighted) and the specular times
+ * N.L (an area light shades its diffuse from area_light_cosine and its specular from one direction). */
+void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffuse, Vec3 &specular);
 /* Karis' analytic approximation of the split-sum environment BRDF. */
 Vec3 env_brdf_approx(Vec3 f0, float roughness, float nv);
 

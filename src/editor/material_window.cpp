@@ -5,6 +5,8 @@
 // Browser do. Each tile is a shaded preview sphere; click one to edit it
 // right here, drag it onto an object, a face, a Hierarchy row or a slot.
 #include "editor.h"
+#include "../render/shading.h"
+#include "../texture/procedural_texture.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -20,18 +22,41 @@ struct Preview {
   uint64_t version = 0;
   std::vector<uint32_t> px;
   int size = 0;
+  /* The textures it was drawn from, weakly: a key match with a texture since freed (and another allocated at its
+   * address) is a miss, without keeping old textures alive. */
+  std::weak_ptr<const Texture> tex[5];
+  std::weak_ptr<const LiveTexture> live[5];
+  uint64_t last_used = 0;
 };
 
 /* A small software-shaded sphere: Lambert + Blinn-Phong from the material's
  * colour, metallic, roughness and emission, with its base texture wrapped on. */
 const Preview &material_preview(const Material &m, int size) {
   static std::unordered_map<const Material *, Preview> cache;
+  static uint64_t calls = 0;
+  calls++;
+  /* Entries of materials not drawn for a while go (undo and redo clone every material: new addresses). */
+  if ((calls & 1023) == 0)
+    for (auto it = cache.begin(); it != cache.end();) it = calls - it->second.last_used > 4096 ? cache.erase(it) : std::next(it);
   Preview &p = cache[&m];
-  if (p.size == size && p.version == m.version && !p.px.empty()) return p;
+  p.last_used = calls;
+  /* The key is the material's content (its fields, not its address or version: a material allocated where a freed
+   * one was can't pass for it) and its textures (new objects when they change); not every texture edit anywhere (a
+   * drag elsewhere would redraw every preview each frame). */
+  const Material::Resolved &rt = m.textures();  // resolved here (one thread), not in the evaluation below
+  uint64_t key = hash_reflect([&](Reflector &r) { const_cast<Material &>(m).reflect(r); });
+  const TexturePtr *slots[5] = {&rt.base, &rt.metallic, &rt.roughness, &rt.normal, &rt.emission};
+  for (const TexturePtr *tp : slots) key = key * 1099511628211ull + (uint64_t)(uintptr_t)tp->get();
+  for (const auto &l : rt.live) key = key * 1099511628211ull + (uint64_t)(uintptr_t)l.get();
+  for (const MaterialPtr &part : rt.axis)
+    if (part) key = key * 1099511628211ull + hash_reflect([&](Reflector &r) { part->reflect(r); });
+  bool same = p.size == size && p.version == key && !p.px.empty();
+  for (int k = 0; k < 5 && same; k++) same = p.tex[k].lock().get() == slots[k]->get() && p.live[k].lock().get() == rt.live[k].get();
+  if (same) return p;
   p.size = size;
-  p.version = m.version;
+  p.version = key;
+  for (int k = 0; k < 5; k++) p.tex[k] = *slots[k], p.live[k] = rt.live[k];
   p.px.assign((size_t)size * size, 0);
-  const TexturePtr tex = m.procedural ? nullptr : m.textures().base;
   const Vec3 L = normalize(Vec3(-0.45f, 0.65f, 0.6f)), V(0, 0, 1);
   const Vec3 H = normalize(L + V);
   const float rough = clampf(m.roughness, 0.03f, 1.0f);
@@ -48,16 +73,16 @@ const Preview &material_preview(const Material &m, int size) {
         continue;
       }
       const Vec3 n(nx, ny, std::sqrt(1 - r2));
-      Vec3 albedo = m.base_color;
-      if (tex) {
-        const Vec2 uv(0.5f + std::atan2(n.x, n.z) / (2 * kPi), 0.5f - std::asin(clampf(n.y, -1.0f, 1.0f)) / kPi);
-        const Vec4 t = tex->sample(Vec2(uv.x * m.tiling.x + m.offset.x, uv.y * m.tiling.y + m.offset.y), 0.0f);
-        albedo = Vec3(albedo.x * t.x, albedo.y * t.y, albedo.z * t.z);
-      }
-      else if (m.procedural == 1) {  // checker
-        const bool c = ((int)std::floor((n.x + 1) * m.procedural_scale * 0.5f) + (int)std::floor((n.y + 1) * m.procedural_scale * 0.5f)) & 1;
-        if (c) albedo = m.procedural_color2;
-      }
+      /* The material's own evaluation (its maps, procedurals, an axis material's parts) on a unit sphere. */
+      SurfacePoint sp;
+      sp.live_textures = true;  // procedural textures evaluated per pixel (task 0031)
+      sp.position = sp.local_position = n;
+      sp.normal = sp.geo_normal = sp.local_normal = n;
+      sp.uv = Vec2(0.5f + std::atan2(n.x, n.z) / (2 * kPi), 0.5f - std::asin(clampf(n.y, -1.0f, 1.0f)) / kPi);
+      sp.local_bounds.add(Vec3(-1.0f));
+      sp.local_bounds.add(Vec3(1.0f));
+      const SurfaceSample ss = evaluate_material(m, m.textures(), sp);
+      Vec3 albedo = ss.albedo;
       const float ndl = std::max(0.0f, dot(n, L));
       const Vec3 f0 = Vec3(0.04f) * (1 - m.metallic) + albedo * m.metallic;
       const float spec = std::pow(std::max(0.0f, dot(n, H)), shin) * (shin + 8) / (8 * kPi) * ndl;
@@ -110,17 +135,25 @@ void Editor::draw_materials_window(const Recti &r) {
       if (auto it = users.find(e.m.get()); it != users.end()) e.users = it->second;
   }
   const std::string f = to_lower(material_search_);
+  const size_t all = list.size();
   list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry &e) { return !f.empty() && to_lower(e.m->name).find(f) == std::string::npos; }),
              list.end());
   /* Toolbar */
   const int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
-  if (u.button({bar.x + u.px(6), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "New Material Asset", false, Icon::Plus))
+  if (u.button({bar.x + u.px(6), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "New Material Asset", false, Icon::Plus)) {
     material_selected_ = new_material_asset(nullptr, false);
+    /* The new one in view: a search left from earlier would hide it (the user saw nothing appear). */
+    material_search_.clear();
+    u.redraw = true;
+  }
   u.tooltip("A new .mat in Assets/Materials (Unity: Create > Material).");
-  u.text_field(u.id("mat_search"), {bar.x + u.px(162), bar.y + u.px(4), std::min(u.px(200), bar.w - u.px(170)), bh - u.px(8)}, material_search_, nullptr,
-               "Search materials");
+  const Recti sf{bar.x + u.px(162), bar.y + u.px(4), std::min(u.px(200), bar.w - u.px(170)), bh - u.px(8)};
+  u.text_field(u.id("mat_search"), sf, material_search_, nullptr, "Search materials");
+  if (!f.empty() && list.size() < all)  // say that the search hides some
+    u.label({sf.right() + u.px(8), bar.y, std::max(0, bar.right() - sf.right() - u.px(12)), bh},
+            strprintf("Showing %zu of %zu (search)", list.size(), all), u.theme.text_dim);
   /* Grid of previews on top, the selected material's editor below. */
   const bool editing = material_selected_ != nullptr;
   const int grid_h = editing ? std::max(u.px(120), (r.h - bh) * 2 / 5) : r.h - bh;
@@ -267,6 +300,27 @@ size_t Editor::delete_material(const MaterialPtr &m) {
   mark_changed("Delete Material " + name);
   Log::info("Deleted the material %s: %zu slot(s) emptied%s", name.c_str(), slots, file ? ", its file is in the Recycle Bin / Trash" : "");
   return slots;
+}
+
+void Editor::set_material_ref(Material *mat, const std::string &field, const MaterialPtr &picked) {
+  if (!mat || !picked) return;
+  if (picked->asset_path.empty()) {
+    Log::warn("%s takes a material asset: save %s as a Material Asset first", field.c_str(), picked->name.c_str());
+    return;
+  }
+  if (picked.get() == mat) {
+    Log::warn("%s: a material can't be its own part (leave it empty for its own maps)", field.c_str());
+    return;
+  }
+  std::string *slot = field == "Axis Top"      ? &mat->axis_top
+                      : field == "Axis Side"   ? &mat->axis_side
+                      : field == "Axis Bottom" ? &mat->axis_bottom
+                      : field == "Axis High"   ? &mat->axis_high  // task 0040
+                                               : nullptr;
+  if (!slot) return;
+  *slot = picked->asset_path;
+  mat->touch();
+  mark_changed("Set " + field + " " + picked->name);
 }
 
 /* Everything a face or slot can use: the object's own slots first, then the

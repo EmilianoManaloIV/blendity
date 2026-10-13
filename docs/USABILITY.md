@@ -155,10 +155,34 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Edge Outline and the Retro fog did nothing in the Rendered Camera Preview and in a path-traced render; Solid Color clear was ignored there. | The path tracers record the first hit's depth and object id, so every pass runs on traced pictures too; Solid Color fills the traced background. |
 | With filters on, the Scene view ignored the camera's exposure and Solid Color clear; an F12 raster render without filters had no depth of field. | The Scene view looks through the active camera for those; F12 raster applies depth of field before the supersampling downsample. |
 | A camera's Pixelate, Edge Outline, Film Grain, CRT and Sharpen looked different in the Camera Preview, the Game view and a render (device pixels), and a small Preview inset rendered a retro stack at the inset's rows. | Pixel sizes scale with the picture's height (1080p = 1x), and a small view renders at the stack's resolution and is shrunk into it (task 0026). |
+| Renders always had the sky or world colour behind them: no PNG with a transparent background. | Transparent (Film > Transparent) gives renders an alpha channel (task 0035). |
+| The Research window (a paper drop folder) served no purpose in the editor. | Retired; the papers behind features are cited in Learn > References, with the feature each became (task 0034). |
+| No composition guides on cameras (rule of thirds, safe areas) to frame a shot. | Ten guides behind a Show Guides switch, in the Camera inspector and the Game view's Guides menu (task 0033). |
+| A Retro Console camera looked retro only when rasterized: path-traced renders had no snapped vertices, affine warping, texture rules or screen door. | All four show in path-traced renders, on the CPU and the GPU (task 0032). |
+| A procedural texture on an object changed only when the mouse was released, and up close it was as blurry as its image. | Objects follow a texture edit while dragging; Live Shading evaluates the layers per pixel up close (task 0031). |
+| A large area light (10 x 10 m) baked blotchy lightmaps with Generate Lighting, and in the views left the sides of a cube under it black. | Bakes compute the light and use their shadow rays only for what blocks it; the rasterizer lights from the whole surface of the light (task 0030). |
+| After Set Origin in the Inspector the gizmo stayed on the old origin until the mouse moved. | A change asks for another frame (task 0030). |
+| No way to select the faces in one plane (a floor broken into pieces, the faces of a wall). | Select Coplanar adds every face in a selected face's plane (task 0030). |
+| A material couldn't put grass on top and dirt on the sides: rotating the object rotated its maps. | Axis materials pick Top / Side / Bottom materials by the surface's slope in the world (or the object), projected without UVs (task 0029). |
 | There was no place to make textures: only image files and two built-in grids. | Window > Textures makes procedural textures as a layer stack (bricks, wood floors, tatami, tiles...), previewed tiled, dragged onto objects (tasks 0027 and 0028). |
 | Bloom on a progressive trace grew as samples accumulated; changing the path tracer's Samples redrew the Game view; the Game view showed the editor's sky colours instead of the world's gradient. | Bloom reads linear light at every resolve; the views hash only the raster-relevant settings; the raster clears with the world's gradient. |
 | Array copies of a drawn shape lay on top of the surface (z-fighting). | They are cut into it like the original. |
 | An arch drawn on a rectangle stayed two faces, and its array copies too; copies past a wall's edge lay over it. | The arch is one face; a copy past the edge is clipped to the surface and cut in. |
+| Objects with a negative scale (mirrored) were drawn inside out in the views. | They cull their own back faces. |
+| New Material Asset (and New in the Textures window) seemed to do nothing when a search was left in the box: the new item was filtered out. | New clears the search; a search says how many items it hides. |
+| Textures could not be deleted from the Textures window. | Delete (button, right-click, Del) with a confirmation; it goes to the Recycle Bin. |
+| Rigged characters imported as statues: bones were plain empties and the mesh didn't follow them. | Skins: bones, an armature and a Skin modifier come in with the file; turn a bone and the mesh bends. |
+| Vertex groups could only be set a selection at a time with one weight. | Weight Paint: brush the weights on, seen as colours. |
+| A Displace or a bend affected the whole mesh: no way to keep part of it still. | Vertex groups (Assign in Edit Mode) and every deformer's Vertex Group / Invert. |
+| A box-shaped lattice can't follow a character's shape. | Mesh Deform: bind the mesh to any closed cage mesh and edit the cage. |
+| Squashing or bulging part of a mesh meant moving its vertices by hand. | Lattices: a box of points fitted round the mesh; drag a point and the mesh follows smoothly. |
+| Nothing could follow a path: a rail, a pipe or a fence along a bend meant modelling it bent. | Curve objects with clickable, draggable points; the Curve modifier bends a mesh along one; Array's Fit Curve fills one. |
+| A colour-only procedural texture (a Color Ramp from the bricks' height) also bumped the surface: turning the layers' height off lost the ramp's input. | The texture's Normal / Roughness / Height Map switches turn those outputs off and keep the height inside. |
+| A material's texture field said "(missing)" (and Non-Color) for a procedural texture it was using. | It shows the texture's image and name, and the picker lists the procedural textures. |
+| Edge Outline in path-traced renders took its depth from a random sample per pixel, so lines could wobble. | The tracers give the filters one ray through each pixel's centre, as the rasterizer's depth. |
+| Switching the Camera Preview to Rendered on the GPU froze the editor for over a minute the first time (Windows closed it as not responding). | The GPU opens in the background: the preview traces on the CPU meanwhile ("GPU starting") and moves to the GPU when it is ready. |
+| Procedural, axis and Box-mapped materials looked grey or wrong in other programs after an export; glTF lost normal and roughness maps, FBX every texture. | Bake Textures (Object menu and the export option) turns an object's look into images on new UVs; glTF and FBX carry their image maps. |
+| Posing a leg meant turning thigh and shin by hand, and there was no ready-made character skeleton. | IK constraints move a limb by its foot or hand target (with a pole for the knee or elbow); GameObject > Rig makes a humanoid or quadruped with IK, and Auto IK rigs an imported skeleton's limbs by name. |
 
 ## Still worth doing
 

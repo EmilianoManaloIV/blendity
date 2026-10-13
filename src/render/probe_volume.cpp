@@ -317,7 +317,7 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
     }
     std::string err;
     if (!pt.gpu_gather(gpu_device, 2, origins, dirs, 1, g_out, &g_hit, &err) || g_out.size() != origins.size()) {
-      if (gpu_error) *gpu_error = err.empty() ? "the GPU gather failed" : err;
+      if (gpu_error && !pt.gpu_gather_waiting()) *gpu_error = err.empty() ? "the GPU gather failed" : err;  // still opening: the CPU this time
       g_out.clear();
     }
   }
@@ -372,13 +372,15 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
           dist = length(dv);
           if (!(dist > 1e-5f)) continue;
           Ld = dv / dist;
-          fall = light_falloff(l, p, Ld);
+          fall = l.type == RenderLight::Area ? light_range_falloff(l, p) : light_falloff(l, p, Ld);
           if (fall <= 0.0f) continue;
           dist *= 1.0f - 1e-4f;
         }
         if (pt.occluded({p, Ld}, dist)) continue;
         const Vec3 col = l.color * (l.intensity * fall);
-        for (int ax = 0; ax < 6; ax++) c.bounce[ax] += col * std::max(0.0f, dot(kAxes[ax], Ld));
+        /* An area light by its whole surface (task 0030), as the rasterizer and the lightmaps take it. */
+        for (int ax = 0; ax < 6; ax++)
+          c.bounce[ax] += col * (l.type == RenderLight::Area ? area_light_cosine(l, p, kAxes[ax]) : std::max(0.0f, dot(kAxes[ax], Ld)));
       }
     }
   });

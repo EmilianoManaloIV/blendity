@@ -162,7 +162,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   for (const PTObject &o : objects_)
     if (o.materials)
       for (const MaterialPtr &mp : *o.materials) {
-        see_through_ = see_through_ || (mp && !mp->opaque());
+        see_through_ = see_through_ || (mp && (!mp->opaque() || mp->outline_hull));  // a hull: shadow rays step through it
         if (mp) mp->textures();  // resolved here, not by the tracing threads (Material::textures)
       }
   lights_ = lights;
@@ -173,7 +173,11 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
    * own BVH, so that is built even when the CPU uses Embree. */
   gpu_error_.clear();
   if (!settings_.gpus.empty() && gpu::available()) sync_gpus();
-  else gpus_.clear();
+  else {
+    gpus_.clear();
+    gpu_starting_ = false;  // back on the CPU: nothing to wait for
+    gpu_pending_.clear();
+  }
   bool software_gpu = false;
   for (auto &g : gpus_) software_gpu = software_gpu || !g->hw_rt;
   use_embree_ = embree_available() && settings_.use_embree;
@@ -502,6 +506,13 @@ Vec3 PathTracer::transmittance(const Ray &r, float tmax) const {
     if (!intersect(ray, h)) return T;
     SurfacePoint sp;
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+    if (settings_.retro.active() && settings_.retro.tex.active()) sp.tex = &settings_.retro.tex;  // a camera filter's texture rules
+    if (mat->outline_hull) {  // an outline casts no shadow (ADR 0020)
+      const float step = h.t + 1e-4f * (1.0f + h.t);
+      ray.origin = ray.origin + ray.dir * step;
+      left -= step;
+      continue;
+    }
     if (mat->opaque() || mat->surface == (int)MaterialSurface::Glass) return Vec3(0.0f);
     const float a = evaluate_material(*mat, sp).alpha;
     if (mat->surface == (int)MaterialSurface::Cutout) {
@@ -545,6 +556,7 @@ void PathTracer::reset() {
   normal_.assign(n, Vec3(0.0f));
   depth_.assign(n, 0.0f);
   ids_.assign(n, 0u);
+  cov_.assign(n, 0.0f);
   last_dist_.assign(n, 0.0f);
   stats_.rays = 0;
   stats_.render_ms = 0;
@@ -559,6 +571,7 @@ void PathTracer::reset() {
     cpu_normal_.assign(n, Vec3(0.0f));
     cpu_depth_.assign(n, 0.0f);
     cpu_ids_.assign(n, 0u);
+    cpu_cov_.assign(n, 0.0f);
     cpu_last_dist_.assign(n, 0.0f);
     std::memcpy(gpu_params_.inv_vp, inv_vp_.m, 64);
     gpu_params_.cam_pos[0] = cam_pos_.x;
@@ -633,6 +646,29 @@ const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, 
   return mat;
 }
 
+bool PathTracer::retro_screen(Vec3 p, Vec2 &s) const {
+  const Vec4 c = settings_.retro.view_proj * Vec4(p, 1.0f);
+  if (!(c.w > 1e-6f)) return false;
+  s = Vec2((c.x / c.w * 0.5f + 0.5f) * settings_.retro.width, (0.5f - c.y / c.w * 0.5f) * settings_.retro.height);
+  return finite_bits(s.x) && finite_bits(s.y) && std::fabs(s.x) < 1e8f && std::fabs(s.y) < 1e8f;  // (an int cast follows)
+}
+
+void PathTracer::retro_affine_uv(uint32_t object, uint32_t prim, Vec2 s, SurfacePoint &sp) const {
+  /* As the rasterizer's affine_uv: barycentrics of the triangle's corners on the screen, without 1 / w. */
+  const PTObject &ob = objects_[object];
+  const RenderMesh &rm = *ob.mesh;
+  if (rm.uvs.empty()) return;
+  const uint32_t *tri = &rm.indices[(size_t)prim * 3];
+  Vec2 c[3];
+  for (int k = 0; k < 3; k++)
+    if (!retro_screen(ob.model.point(rm.positions[tri[k]]), c[k])) return;
+  const float d = (c[1].x - c[0].x) * (c[2].y - c[0].y) - (c[2].x - c[0].x) * (c[1].y - c[0].y);
+  if (!(std::fabs(d) > 1e-12f)) return;
+  const float b1 = ((s.x - c[0].x) * (c[2].y - c[0].y) - (c[2].x - c[0].x) * (s.y - c[0].y)) / d;
+  const float b2 = ((c[1].x - c[0].x) * (s.y - c[0].y) - (s.x - c[0].x) * (c[1].y - c[0].y)) / d;
+  sp.uv = rm.uvs[tri[0]] * (1.0f - b1 - b2) + rm.uvs[tri[1]] * b1 + rm.uvs[tri[2]] * b2;
+}
+
 /* Emissive triangles become lights, picked in proportion to their power
  * (Cycles: mesh lights in the light tree). Emission is two-sided here, as in
  * the rest of the integrator. */
@@ -674,11 +710,12 @@ float PathTracer::mesh_light_pdf(uint32_t li, float dist, float cos_light) const
 }
 
 Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint32_t *id_out, uint64_t &rays,
-                       PTGuidingThread *guide) const {
+                       PTGuidingThread *guide, bool camera) const {
   Vec3 L(0.0f), beta(1.0f);
   const float clamp = settings_.clamp_indirect;
   float last_pdf = 0.0f;  // solid-angle pdf of the direction that led here (0 = camera ray)
   int see_through_hits = 0, glass_hits = 0;  // these get their own budgets (Cycles: transparent / transmission bounces)
+  bool camera_path = camera;  // still the camera ray (see-through passes keep it; glass and BSDF bounces end it)
 #ifdef BL_WITH_OPENPGL
   /* Training records each vertex with local (not throughput-weighted) values;
    * OpenPGL turns the chain into radiance samples (Cycles: guiding.h). */
@@ -709,9 +746,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         float m = std::max({c.x, c.y, c.z});
         if (m > clamp) c = c * (clamp / m);
       }
-      if (bounce == 0 && settings_.solid_background) c = beta * settings_.background;  // Clear Flags: Solid Color
+      /* The camera ray's own miss (through see-through surfaces; through glass too unless the film is transparent). */
+      const bool camera_miss = bounce == 0 && (camera_path || !settings_.transparent_film);
+      if (camera_miss && settings_.solid_background) c = beta * settings_.background;  // Clear Flags: Solid Color
       L += c;
-      if (bounce == 0 && albedo_out) {
+      if (camera_miss && albedo_out) {
         *albedo_out = Vec3(1.0f);
         *normal_out = Vec3(0.0f);
         *depth_out = 1e6f;
@@ -722,15 +761,48 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     SurfacePoint sp;
     const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
     sp.position = ray.origin + ray.dir * h.t;  // more precise than re-interpolating
+    /* An outline's inverted hull (ADR 0020): camera rays see its front faces only (the rasterizer culls the back
+     * ones); bounces, shadows and its back faces pass through. */
+    if (mat->outline_hull && !(bounce == 0 && camera_path && dot(sp.geo_normal, ray.dir) < 0.0f) && see_through_hits < 64) {
+      see_through_hits++;
+      ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      bounce--;
+      continue;
+    }
+    /* A camera filter's rasterizer stages (task 0032): its texture rules everywhere; at a camera ray's hits the
+     * affine UVs and the screen door, by where the hit lands on the filter's image. */
+    bool door_solid = false;
+    if (settings_.retro.active()) {
+      if (settings_.retro.tex.active()) sp.tex = &settings_.retro.tex;
+      Vec2 scr;
+      if (bounce == 0 && camera_path && retro_screen(sp.position, scr)) {
+        if (settings_.retro.affine_uv) retro_affine_uv(h.object, h.tri, scr, sp);
+        if (settings_.retro.screen_door && mat->surface == (int)MaterialSurface::Transparent && see_through_hits < 64) {
+          if ((((int)std::floor(scr.x) + (int)std::floor(scr.y)) & 1) != 0) {  // the checkerboard's holes
+            see_through_hits++;
+            ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+            bounce--;
+            continue;
+          }
+          door_solid = true;  // the other squares: solid, whatever the alpha
+        }
+      }
+    }
     Vec3 V = -ray.dir;
     const bool front_face = dot(sp.geo_normal, V) >= 0;  // entering the object (glass)
     const float cos_hit = std::fabs(dot(sp.geo_normal, V));
     if (dot(sp.geo_normal, V) < 0) sp.geo_normal = -sp.geo_normal;
     if (dot(sp.normal, sp.geo_normal) < 0) sp.normal = -sp.normal;
     SurfaceSample s = evaluate_material(*mat, sp);
+    if (door_solid && saturate(s.alpha) < 0.1f) {  // the rasterizer's door: nearly clear surfaces vanish
+      see_through_hits++;
+      ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+      bounce--;
+      continue;
+    }
     /* Cutout and Transparent: alpha decides, per path, whether the ray passes
      * the surface untouched (Cycles' Transparent BSDF; unbiased alpha blending). */
-    if ((mat->surface == (int)MaterialSurface::Cutout || mat->surface == (int)MaterialSurface::Transparent) && see_through_hits < 64) {
+    if ((mat->surface == (int)MaterialSurface::Cutout || mat->surface == (int)MaterialSurface::Transparent) && see_through_hits < 64 && !door_solid) {
       const bool pass = mat->surface == (int)MaterialSurface::Cutout ? s.alpha < mat->alpha_clip : rnd(rng) >= s.alpha;
       if (pass) {
         see_through_hits++;
@@ -822,10 +894,14 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
 #endif
       ray = {sp.position + sp.geo_normal * ((reflect ? 1.0f : -1.0f) * (1e-4f + h.t * 1e-5f)), dir};
       last_pdf = 0.0f;  // emission seen through glass counts in full
+      camera_path = false;  // seen through glass: not a camera ray's hit any more (the Retro stages stop)
       if (glass_hits++ < 32) bounce--;  // transmission has its own bounce budget
       continue;
     }
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
+    /* Toon (ADR 0020) where the eye sees the surface: its tones and rim. Elsewhere (bounces, bakes) it is Lambert. */
+    const bool toon_here = s.toon && bounce == 0 && camera_path;
+    if (toon_here) add(beta * toon_rim(*s.toon, n, V));
 
     /* BSDF sampling setup (one-sample MIS between the diffuse and GGX lobes),
      * needed before direct lighting: light-sample MIS weights use the same pdf. */
@@ -835,6 +911,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     float diff_w = luminance(s.albedo) * (1.0f - s.metallic);
     float p_spec = diff_w + spec_w > 0 ? clampf(spec_w / (spec_w + diff_w), 0.1f, 0.9f) : 0.5f;
     if (s.metallic >= 0.999f) p_spec = 1.0f;
+    if (s.toon) p_spec = 0.0f;  // a toon surface bounces light as Lambert (ADR 0020)
+    /* The BSDF for bounces and mesh lights: Lambert on a toon surface (its tones are a direct-light look). */
+    auto bsdf = [&](Vec3 d) { return s.toon ? s.albedo * (std::max(0.0f, dot(n, d)) / kPi) : brdf_eval(s, n, V, d); };
     Vec3 tt, bb;
     onb(n, tt, bb);
     GGX g{std::max(s.roughness * s.roughness, 0.002f), 0};
@@ -911,11 +990,26 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         dir = d / dist;
         power *= light_falloff(l, sp.position, dir);  // range, spot cone, area facing
       }
+      if (toon_here) {
+        /* Toon: N.L x visibility x the falloff in tones; the dark side takes the shadow colour (no shadow ray). */
+        if (power <= 0 || !(l.intensity > 0.0f)) continue;
+        const float fall = std::min(1.0f, power / (l.intensity * kPi));  // range, spot cone, an area's facing
+        const float ndl = dot(n, dir);
+        Vec3 Tr(0.0f);
+        if (ndl > 0 && dot(sp.geo_normal, dir) > 0) {
+          rays++;
+          Tr = transmittance({origin, dir}, dist);
+        }
+        const Vec3 Lo = shade_toon(s, n, V, dir, std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z}) * fall) * l.color * l.intensity;
+        add(beta * Lo);
+        record_nee(Lo);
+        continue;
+      }
       if (power <= 0 || dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) continue;
       rays++;
       const Vec3 Tr = transmittance({origin, dir}, dist);
       if (std::max({Tr.x, Tr.y, Tr.z}) <= 0.0f) continue;
-      const Vec3 Lo = brdf_eval(s, n, V, dir) * l.color * Tr * power;  // scattered toward V, before throughput
+      const Vec3 Lo = bsdf(dir) * l.color * Tr * power;  // scattered toward V, before throughput (a toon bounce: Lambert)
       add(beta * Lo);
       record_nee(Lo);
     }
@@ -933,6 +1027,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
       SurfacePoint lp;
       const Material *lmat = surface_at(mesh_lights_[li].object, mesh_lights_[li].prim, su, sv, lp);
+      if (settings_.retro.active() && settings_.retro.tex.active()) lp.tex = &settings_.retro.tex;
       Vec3 d = lp.position - origin;
       float dist = length(d);
       if (dist > 1e-5f) {
@@ -946,7 +1041,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
             const Vec3 Le = evaluate_material(*lmat, lp).emission * Tr;
             float pb = sampling_pdf(dir);
             float w = pl * pl / (pl * pl + pb * pb);
-            const Vec3 Lo = brdf_eval(s, n, V, dir) * Le * (w / pl);
+            const Vec3 Lo = bsdf(dir) * Le * (w / pl);
             add(beta * Lo);
             record_nee(Lo);
           }
@@ -977,7 +1072,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) break;
     const float pdf = sampling_pdf(dir);
     if (pdf < 1e-8f) break;
-    const Vec3 f = brdf_eval(s, n, V, dir);
+    const Vec3 f = bsdf(dir);
     beta = beta * f / pdf;
     last_pdf = pdf;
 #ifdef BL_WITH_OPENPGL
@@ -1012,6 +1107,7 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
   float *DP = claim ? cpu_depth_.data() : depth_.data();
   uint32_t *ID = claim ? cpu_ids_.data() : ids_.data();
   float *LD = claim ? cpu_last_dist_.data() : last_dist_.data();
+  float *CV = claim ? cpu_cov_.data() : cov_.data();
 #ifdef BL_WITH_OPENPGL
   if (guiding_ && !guiding_->field) {
     /* Cycles' configuration (integrator/path_trace.cpp): KD-tree of
@@ -1106,6 +1202,7 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
           DP[i] += dep;
           ID[i] = hit_id;
           if (hit_id) LD[i] = dep;
+          if (hit_id) CV[i] += 1.0f;
         }
       rays += local;
 #ifdef BL_WITH_OPENPGL
@@ -1518,11 +1615,36 @@ void PathTracer::sync_gpus() {
     for (auto &s : gpus_) have = have || s->index == i;
     if (!have) add.push_back(i);
   }
+  gpu_starting_ = false;
+  gpu_pending_.clear();
+  if (background_gpu_open_) {
+    /* Task 0037: a device that is still opening (a cold driver cache can take a minute) leaves this tracer on the
+     * CPU until adopt_ready_gpus finds it ready. */
+    gpu_generation_seen_ = gpu::renderers_generation();
+    for (int i : add) {
+      bool pending = false;
+      std::string err;
+      std::unique_ptr<gpu::Renderer> r = gpu::take_renderer(i, settings_.gpu_hardware_rt, &pending, &err);
+      if (r) {
+        auto slot = std::make_unique<GpuSlot>();
+        slot->index = i;
+        slot->hw_rt = r->using_hardware_rt();
+        slot->r = std::move(r);
+        gpus_.push_back(std::move(slot));
+      }
+      else if (pending) {
+        gpu_starting_ = true;
+        gpu_pending_.push_back({i, settings_.gpu_hardware_rt});
+      }
+      else gpu_error_ += (gpu_error_.empty() ? "" : "; ") + devs[(size_t)i].name + ": " + err;
+    }
+    return;
+  }
   std::vector<std::unique_ptr<gpu::Renderer>> made(add.size());
   std::vector<std::string> errs(add.size());
   std::vector<std::thread> threads;
   for (size_t k = 0; k < add.size(); k++)
-    threads.emplace_back([&, k] { made[k] = gpu::Renderer::create(add[k], settings_.gpu_hardware_rt, &errs[k]); });
+    threads.emplace_back([&, k] { made[k] = gpu::open_renderer(add[k], settings_.gpu_hardware_rt, &errs[k]); });
   for (std::thread &th : threads) th.join();
   for (size_t k = 0; k < add.size(); k++) {
     const int i = add[k];
@@ -1555,11 +1677,17 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     for (const Node &n : tlas_) s.nodes.push_back(put_node(n));
   /* Textures (level 0, which is what the CPU path tracer samples too). */
   std::unordered_map<const Texture *, int> tex_id;
-  auto texture = [&](const TexturePtr &t) -> int {
+  auto texture = [&](const TexturePtr &t, bool material = true) -> int {
     if (!t || t->levels.empty()) return -1;
     auto it = tex_id.find(t.get());
     if (it != tex_id.end()) return it->second;
-    const Texture::Level &l = t->levels[0];
+    /* A camera filter's size cap (task 0032): the first mip level within it, as the CPU's tex_sample takes; a
+     * material's textures only (the world's map stays whole, as on the CPU and in the rasterizer). */
+    size_t lv = 0;
+    const int cap = material && settings_.retro.active() ? settings_.retro.tex.max_size : 0;
+    if (cap > 0)
+      while (lv + 1 < t->levels.size() && std::max(t->levels[lv].w, t->levels[lv].h) > cap) lv++;
+    const Texture::Level &l = t->levels[lv];
     gpu::GTexInfo ti{};
     ti.w = l.w;
     ti.h = l.h;
@@ -1578,8 +1706,22 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     tex_id[t.get()] = id;
     return id;
   };
-  auto material = [&](const Material &m) {
+  std::vector<std::pair<uint32_t, const Material *>> axis_parents;  // patched once every object's slots are in
+  auto material = [&](const Material &m, bool as_part) {
     gpu::GMaterial g{};
+    for (int k = 0; k < 4; k++) g.axis_i[k] = -1;
+    if (m.axis_mode != 0 && !as_part) {  // (a part that is itself an axis material is used plainly)
+      g.axis[0] = std::cos(std::max(0.0f, std::min(90.0f, m.axis_angle)) * kDeg2Rad);
+      g.axis[1] = std::max(0.0f, std::min(1.0f, m.axis_blend)) * 0.5f;
+      g.axis[2] = 1.0f / std::max(0.01f, m.axis_scale);
+      g.axis[3] = (float)m.axis_mode;
+      const float amount = std::isfinite(m.axis_noise) ? std::max(0.0f, std::min(1.0f, m.axis_noise)) : 0.0f;
+      g.axis2[0] = amount;
+      g.axis2[1] = 1.0f / (std::isfinite(m.axis_noise_scale) ? std::max(0.01f, m.axis_noise_scale) : 4.0f);
+      g.axis2[2] = std::isfinite(m.axis_high_start) ? m.axis_high_start : 0.0f;
+      g.axis2[3] = std::isfinite(m.axis_high_blend) ? std::max(0.0f, m.axis_high_blend) : 1.0f;
+      axis_parents.push_back({(uint32_t)s.materials.size(), &m});
+    }
     const Material::Resolved &tx = m.textures();
     float base[4] = {m.base_color.x, m.base_color.y, m.base_color.z, m.alpha};
     float em[4] = {m.emission.x * m.emission_strength, m.emission.y * m.emission_strength, m.emission.z * m.emission_strength, m.normal_strength};
@@ -1603,10 +1745,19 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     g.tex1[3] = m.surface;
     g.flags[0] = m.unlit ? 1 : 0;
     g.flags[1] = m.wrap;
-    g.flags[2] = m.filter;
+    g.flags[2] = settings_.retro.active() && settings_.retro.tex.filter >= 0 ? settings_.retro.tex.filter : m.filter;  // a camera filter's
+    g.flags[3] = (m.shading_model == 1 ? 1 : 0) | (m.outline_hull ? 2 : 0);  // toon, an outline's hull (ADR 0020)
+    const float t0[4] = {(float)std::max(1, std::min(8, m.toon_bands)), clampf(m.toon_softness, 0.0f, 0.5f), clampf(m.toon_threshold, 0.0f, 0.95f),
+                         clampf(m.toon_specular_smooth, 0.0f, 0.5f)};
+    const float t1[4] = {m.toon_shadow.x, m.toon_shadow.y, m.toon_shadow.z, clampf(m.toon_specular_size, 0.0f, 1.0f)};
+    const Vec3 rim = m.toon_rim * (m.toon_rim_width > 0.0f ? std::max(0.0f, m.toon_rim_strength) : 0.0f);
+    const float t2[4] = {rim.x, rim.y, rim.z, clampf(m.toon_rim_width, 0.0f, 1.0f)};
+    std::memcpy(g.toon0, t0, 16);
+    std::memcpy(g.toon1, t1, 16);
+    std::memcpy(g.toon2, t2, 16);
     s.materials.push_back(g);
   };
-  material(*default_material());  // index 0
+  material(*default_material(), false);  // index 0
   struct MeshRec { uint32_t node_off, tri_off, vtx_off, idx_off, blas; };
   std::unordered_map<const RenderMesh *, MeshRec> meshes;
   s.instances.resize(objects_.size());
@@ -1669,9 +1820,26 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
     gi.info[0] = (uint32_t)s.materials.size();
     gi.info[1] = ob.materials ? (uint32_t)ob.materials->size() : 0;
     if (ob.materials)
-      for (const MaterialPtr &mp : *ob.materials) material(mp ? *mp : *default_material());
+      for (const MaterialPtr &mp : *ob.materials) material(mp ? *mp : *default_material(), false);
     gi.info[2] = rm.uvs.empty() ? 0 : 1;
     gi.info[3] = rm.tangents.empty() ? 0 : 1;
+  }
+  /* Axis materials' parts, appended after every object's slots (once each), their own axis settings off. */
+  {
+    std::unordered_map<const Material *, int> part_index;
+    for (const auto &ap : axis_parents) {
+      const Material::Resolved &tx = ap.second->textures();
+      for (int k = 0; k < 4; k++) {
+        if (!tx.axis[k]) continue;
+        auto it = part_index.find(tx.axis[k].get());
+        if (it == part_index.end()) {
+          const int index = (int)s.materials.size();
+          material(*tx.axis[k], true);
+          it = part_index.emplace(tx.axis[k].get(), index).first;
+        }
+        s.materials[ap.first].axis_i[k] = it->second;
+      }
+    }
   }
   for (const Instance &in : instances_) s.tlas_order.push_back(in.object);
   for (const RenderLight &l : lights_) {
@@ -1704,7 +1872,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
   p.counts[2] = see_through_ ? 1 : 0;
   p.counts[3] = own_bvh ? (int32_t)tlas_.size() : 0;
   p.env_i[0] = (int32_t)env_.mode;
-  p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map) : -1;
+  p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
   p.env_f[0] = env_.strength;
   p.env_f[1] = env_.rotation;
   auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };
@@ -1713,23 +1881,79 @@ void PathTracer::build_gpu_scene(gpu::Scene &s) const {
   v4(p.env_ground, env_.ground);
   v4(p.env_color, env_.color);
   v4(p.background, settings_.background);
-  p.background[3] = settings_.solid_background ? 1.0f : 0.0f;
+  p.background[3] = settings_.solid_background ? (settings_.transparent_film ? 2.0f : 1.0f) : 0.0f;  // 2: transparent film
+  /* The Retro stages for camera rays (task 0032). */
+  std::memcpy(p.retro_vp, settings_.retro.view_proj.m, 64);
+  const bool ra = settings_.retro.active();
+  p.retro[0] = ra && settings_.retro.affine_uv ? 1.0f : 0.0f;
+  p.retro[1] = ra && settings_.retro.screen_door ? 1.0f : 0.0f;
+  p.retro[2] = ra ? (float)settings_.retro.width : 0.0f;
+  p.retro[3] = ra ? (float)settings_.retro.height : 0.0f;
 }
 
 void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids) {
-  merge_aux();
   const size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
-  distance.assign(n, 1e6f);
-  ids.assign(n, 0u);
-  if (last_dist_.size() < n || ids_.size() < n) return;
-  for (size_t i = 0; i < n; i++) {
-    /* The last hitting sample's distance (a mean would count sky samples at 1e6, and on a GPU the sums
-     * run ahead of the merged sample count): consistent with the id, which is the last sample's too. */
-    const uint32_t k = ids_[i];
-    const bool hit = k > 0 && k <= objects_.size();
-    ids[i] = hit ? objects_[k - 1].id : 0;
-    if (hit && last_dist_[i] > 0.0f) distance[i] = last_dist_[i];
+  /* The key: this build, the camera and the size. */
+  uint64_t key = 1469598103934665603ull ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
+  const uint8_t *b = reinterpret_cast<const uint8_t *>(inv_vp_.m);
+  for (size_t i = 0; i < sizeof(inv_vp_.m); i++) key = (key ^ b[i]) * 1099511628211ull;
+  if (key != centre_key_ || centre_dist_.size() != n) {
+    centre_dist_.assign(n, 1e6f);
+    centre_ids_.assign(n, 0u);
+    JobSystem::global().parallel_for(h_, 4, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < w_; x++) {
+          const float nx = 2.0f * (x + 0.5f) / w_ - 1.0f, ny = 1.0f - 2.0f * (y + 0.5f) / h_;
+          const Vec4 a = inv_vp_ * Vec4(nx, ny, 0.0f, 1.0f), bb = inv_vp_ * Vec4(nx, ny, 1.0f, 1.0f);
+          if (a.w == 0.0f || bb.w == 0.0f) continue;
+          const Vec3 pa = a.xyz() / a.w, pb = bb.xyz() / bb.w;
+          Ray r{pa, normalize(pb - pa)};
+          float travelled = 0.0f;
+          for (int step = 0; step < 64; step++) {
+            Hit h;
+            if (!intersect(r, h)) break;
+            SurfacePoint sp;
+            const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+            bool through = mat->surface == (int)MaterialSurface::Transparent || mat->surface == (int)MaterialSurface::Glass;
+            through = through || (mat->outline_hull && dot(sp.geo_normal, r.dir) >= 0.0f);  // a hull's back faces
+            if (!through && mat->surface == (int)MaterialSurface::Cutout) {
+              sp.position = r.origin + r.dir * h.t;
+              through = evaluate_material(*mat, sp).alpha < mat->alpha_clip;
+            }
+            if (!through) {
+              const size_t i = (size_t)y * w_ + x;
+              centre_dist_[i] = travelled + h.t;
+              centre_ids_[i] = h.object < objects_.size() ? objects_[h.object].id : 0u;
+              break;
+            }
+            const float adv = h.t + 1e-4f * (1.0f + h.t);
+            r.origin = r.origin + r.dir * adv;
+            travelled += adv;
+          }
+        }
+    });
+    centre_key_ = key;
   }
+  distance = centre_dist_;
+  ids = centre_ids_;
+}
+
+bool PathTracer::adopt_ready_gpus() {
+  if (!gpu_starting_) return false;
+  const uint64_t gen = gpu::renderers_generation();
+  if (gen == gpu_generation_seen_) return false;
+  gpu_generation_seen_ = gen;
+  /* Only for a device this tracer waits for (another view's spare opening is not its business). */
+  bool any = false;
+  for (const auto &k : gpu_pending_) any = any || gpu::renderer_ready(k.first, k.second);
+  if (!any) return false;
+  /* The same scene again: sync_gpus takes the ready device, and a GPU without RT hardware gets Blendity's BVH
+   * (skipped while only the CPU with Embree traced). upload_gpus resets the samples. */
+  const std::vector<PTObject> objects = objects_;
+  const std::vector<RenderLight> lights = lights_;
+  const Environment env = env_;
+  build(objects, lights, env);
+  return !gpus_.empty();
 }
 
 void PathTracer::upload_gpus() {
@@ -1764,7 +1988,15 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
   }
   samples = std::max(1, std::min(65536, samples));
   if (!bake_gpu_ || bake_gpu_index_ != device) {
-    bake_gpu_ = gpu::Renderer::create(device, true, error);
+    /* In the interactive editor the bakes step on its thread: a device still opening is not waited for, this
+     * slice gathers on the CPU (task 0037). Headless runs open it here. */
+    gpu_gather_waiting_ = false;
+    if (background_gpu_open_) {
+      bool pending = false;
+      bake_gpu_ = gpu::take_renderer(device, true, &pending, error);
+      gpu_gather_waiting_ = pending;
+    }
+    else bake_gpu_ = gpu::open_renderer(device, true, error);  // a ready one from the pool when there is
     if (!bake_gpu_) return false;
     bake_gpu_index_ = device;
     bake_gpu_build_ = 0;
@@ -1818,17 +2050,28 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
   return true;
 }
 
+std::vector<float> PathTracer::coverage() {
+  merge_aux();
+  const size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
+  std::vector<float> out(n, 0.0f);
+  const float inv = 1.0f / (float)std::max(1, samples_);
+  for (size_t i = 0; i < n && i < cov_.size(); i++) out[i] = std::min(1.0f, cov_[i] * inv);
+  return out;
+}
+
 void PathTracer::merge_aux() {
   if (aux_merged_ || gpus_.empty()) return;
   const size_t n = (size_t)w_ * h_;
-  std::vector<std::vector<float>> ga(gpus_.size()), gn(gpus_.size());
-  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_aux(ga[k], gn[k]);
+  std::vector<std::vector<float>> ga(gpus_.size()), gn(gpus_.size()), gc(gpus_.size());
+  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_aux(ga[k], gn[k], &gc[k]);
   JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) {
       Vec3 al = cpu_albedo_[i], nr = cpu_normal_[i];
       float d = cpu_depth_[i];
       uint32_t id = cpu_ids_[i];
+      float cv = cpu_cov_.size() > (size_t)i ? cpu_cov_[i] : 0.0f;
       for (size_t k = 0; k < ga.size(); k++) {
+        if (gc[k].size() > (size_t)i * 4) cv += gc[k][i * 4];
         al += Vec3(ga[k][i * 4], ga[k][i * 4 + 1], ga[k][i * 4 + 2]);
         nr += Vec3(gn[k][i * 4], gn[k][i * 4 + 1], gn[k][i * 4 + 2]);
         d += gn[k][i * 4 + 3];
@@ -1839,6 +2082,7 @@ void PathTracer::merge_aux() {
       normal_[i] = nr;
       depth_[i] = d;
       ids_[i] = id;
+      cov_[i] = cv;
     }
   });
   aux_merged_ = true;
@@ -1847,6 +2091,7 @@ void PathTracer::merge_aux() {
 std::string PathTracer::device_summary() const {
   std::string s;
   if (settings_.use_cpu || gpus_.empty()) s = std::string("CPU (") + ray_backend() + ")";
+  if (gpus_.empty() && gpu_starting_) s += ", GPU starting...";
   for (const auto &g : gpus_)
     s += (s.empty() ? "" : " + ") + g->r->info().name + (g->hw_rt ? " (RT hardware)" : " (GPU compute)");
   return s;

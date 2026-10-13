@@ -24,6 +24,7 @@
 namespace bl {
 
 struct Reflector;
+class LiveTexture;
 
 struct TextureRef {
   std::string path;       // project-relative (Assets/Textures/x.png) or "generated:UV Grid"
@@ -67,6 +68,35 @@ struct Material {
   bool double_sided = false;
   bool unlit = false;   // Unity "Unlit" shader / Blender Emission-only
   bool cast_shadows = true;
+  /* Axis material (ADR 0018): surfaces facing up take Top, steep ones Side, downward ones Bottom (asset paths;
+   * empty = this material's own maps), by the normal in World or Local space, projected triplanar. */
+  int axis_mode = 0;  // 0 Off, 1 World, 2 Local
+  std::string axis_top, axis_side, axis_bottom;
+  float axis_angle = 45.0f;  // degrees from up where Top turns into Side
+  float axis_blend = 0.1f;   // the transition's half width, in cosine units
+  float axis_scale = 1.0f;   // metres per texture tile for the projection
+  /* Task 0040: a height band and a noisy border. Axis High (an asset path; empty = no band) covers the slope's
+   * parts above High Start (metres: world height in World mode, the object's own in Local mode), faded in over
+   * High Blend; Axis Noise (0..1) moves both borders by fractal noise of Noise Scale metres. */
+  std::string axis_high;
+  float axis_high_start = 10.0f, axis_high_blend = 1.0f;
+  float axis_noise = 0.0f, axis_noise_scale = 4.0f;
+  /* Shading model (ADR 0020): PBR, or Toon (anime / cel look: banded light, a shadow colour, a hard specular spot,
+   * a rim light), the same in every renderer. */
+  int shading_model = 0;             // 0 PBR, 1 Toon
+  int toon_bands = 1;                // lit tones above the shadow (1: classic two-tone cel)
+  float toon_softness = 0.02f;       // half width of each tone's edge, in N.L
+  float toon_threshold = 0.15f;      // N.L x shadow where the light starts
+  Vec3 toon_shadow{0.55f, 0.5f, 0.68f};  // the shadow side: this times the albedo
+  float toon_specular_size = 0.0f;   // the highlight spot (0: none)
+  float toon_specular_smooth = 0.05f;
+  Vec3 toon_rim{1.0f, 1.0f, 1.0f};
+  float toon_rim_width = 0.0f;       // 0: no rim light
+  float toon_rim_strength = 0.5f;
+  bool toon_flat_ambient = true;     // the sky's light one flat tone (no gradient across the shape)
+  /* An outline's inverted hull (the Outline component's own material, not saved): the path tracers show only its
+   * front faces, to camera rays, as the rasterizer's back-face culling does. */
+  bool outline_hull = false;
   uint64_t version = 1;
   /* Project-relative .mat file when this is a Material asset (Unity: a material in the
    * Project window, shared by every renderer that uses it); empty for a scene material. */
@@ -78,12 +108,23 @@ struct Material {
   /* Resolved textures (cached; reloaded when the path or file changes). */
   struct Resolved {
     TexturePtr base, metallic, roughness, normal, emission;
+    /* A slot naming a procedural texture's output with Live Shading on (task 0031): its live snapshot and which
+     * output (0 albedo, 1 normal, 2 roughness, 3 height), in the order base, metallic, roughness, normal,
+     * emission. The rasterizer evaluates it per pixel up close. */
+    std::shared_ptr<const LiveTexture> live[5];
+    int live_output[5] = {0, 0, 0, 0, 0};
+    /* An axis material's Top / Side / Bottom and their own resolved textures (resolved with this material, on one
+     * thread, so shading never resolves); null = this material's own maps. */
+    std::shared_ptr<Material> axis[4];  // Top, Side, Bottom, High (task 0040)
+    const Resolved *axis_tx[4] = {nullptr, nullptr, nullptr, nullptr};
   };
   const Resolved &textures() const;
 
  private:
   mutable Resolved resolved_;
   mutable uint64_t resolved_version_ = 0;
+  mutable uint64_t axis_versions_[4] = {0, 0, 0, 0};
+  mutable bool resolving_ = false;  // in textures() (an axis part naming a material mid-resolve is refused: no cycles)
   mutable size_t resolved_cache_gen_ = 0;
 };
 using MaterialPtr = std::shared_ptr<Material>;
@@ -105,6 +146,12 @@ void invalidate_material_textures();
 /* Bumped by invalidate_material_textures (an image reloaded, a procedural texture edited): the views'
  * render hash includes it, so a texture change redraws them. */
 size_t material_textures_generation();
+
+/* What a material's texture field shows: the image a renderer would use (an image file, a generated image or a
+ * procedural texture's output; null when missing) and its name ("Bricks (albedo)" for a .ptex output). */
+TexturePtr resolve_texture_ref(const TextureRef &t);
+std::string texture_ref_label(const TextureRef &t);
+bool texture_ref_is_procedural(const TextureRef &t);  // a .ptex output: its colour space is the output's own
 
 /* Procedural textures, from Cycles' SVM nodes (intern/cycles/kernel/svm). */
 float perlin_noise(Vec3 p);                       // gradient noise in [-1, 1]

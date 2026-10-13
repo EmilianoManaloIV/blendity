@@ -9,6 +9,7 @@
 // FoCG ch. 12.2 "Scene Graphs".
 #pragma once
 
+#include <atomic>
 #include "../core/math.h"
 #include "material.h"
 #include "mesh.h"
@@ -28,6 +29,10 @@ class Scene;
 struct PhysicsWorld;  // physics.h
 
 struct FilterEffect;
+struct Curve;
+struct Transform;
+struct Lattice;
+struct CurvePath;
 using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
 struct TextureLayer;  // texture/procedural_texture.h
 using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
@@ -60,6 +65,9 @@ struct Reflector {
   virtual void texture(const char *name, TextureRef &t) { text(name, t.path); }
   /* Material slots (Unity MeshRenderer.materials / Blender material slots). */
   virtual void material_list(const char *, std::vector<MaterialPtr> &) {}
+  /* Another material by its .mat asset path (an axis material's Top / Side / Bottom, ADR 0018). Files, undo and
+   * hashing see the path as text; the Inspector draws a material picker. */
+  virtual void material_ref(const char *name, std::string &asset_path) { text(name, asset_path); }
   /* A camera's filter effects (ADR 0008). By default: the effects' type names as one text field,
    * then each effect's fields with an index prefix ("E0 Width"), which files, undo, hashing and
    * `set CameraFilters.E0Width` all understand. A reader that changes the names rebuilds the
@@ -72,6 +80,9 @@ struct Reflector {
    * Inspector hides for the current mode (e.g. path tracer samples while the
    * raster engine is active). */
   virtual bool all_fields() const { return false; }
+  /* True for the change-detection hash (render caches): fields that only change what is drawn over a picture
+   * (a camera's composition guides) leave it alone, so toggling them doesn't re-render. */
+  virtual bool hashing() const { return false; }
 };
 
 struct PlayContext {
@@ -99,6 +110,23 @@ struct Component {
   /* Modifier components transform the mesh non-destructively (Blender's modifier stack). */
   virtual bool is_modifier() const { return false; }
   virtual void modify(Mesh &) const {}
+  /* A modifier whose modify() only moves positions (ADR 0022): at the end of a stack it runs on a kept
+   * copy of the mesh, and the render mesh follows in place instead of being rebuilt. */
+  virtual bool is_deform_only() const { return false; }
+  /* A deformer limited to a vertex group (ADR 0024): the group's name (empty: the whole mesh) and whether inverted.
+   * The stack scales each vertex's move by its weight. */
+  virtual const std::string *limit_group(bool &invert) const {
+    invert = false;
+    return nullptr;
+  }
+  /* run_modifier's cache for a generative modifier: how its output vertices take the input's vertex groups, kept
+   * while the topology in and out stays (a drag re-runs the stack every frame; ADR 0024). */
+  mutable std::shared_ptr<meshops::GroupTransferMap> group_map;
+  /* Objects shaped by points the Scene view edits (a Curve's, a Lattice's, task 0043): positions in the object's
+   * space. The view draws them, selects them by clicking and moves them with the gizmo. */
+  virtual int control_point_count() const { return 0; }
+  virtual Vec3 control_point(int) const { return Vec3(0.0f); }
+  virtual void set_control_point(int, Vec3) {}
   /* Modifiers that read other objects (Boolean) mix those objects' state in
    * here so the cached evaluated mesh updates when they move or change. */
   virtual uint64_t modifier_dependency_hash() const { return 0; }
@@ -106,7 +134,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone };
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
@@ -228,6 +256,17 @@ struct Camera : ComponentBase<Camera> {
   Vec3 focus_point{0, 0, 0};    // world space, set by Pick Focus Point
   int blades = 0;               // 0 round, 3+ polygonal bokeh
   float blade_rotation = 0.0f;  // degrees
+  /* Composition guides (task 0033; Blender: Camera > Viewport Display > Composition Guides and Safe Areas):
+   * lines over what the camera sees in the views, never in renders. show_guides switches them all; the rest
+   * pick which. Margins are fractions of half the frame per side (Blender's safe areas). */
+  bool show_guides = false;
+  void reflect_guides(Reflector &r);
+  bool guide_thirds = true, guide_center = false, guide_center_diagonal = false, guide_golden = false;
+  bool guide_golden_tri_a = false, guide_golden_tri_b = false, guide_harmony_a = false, guide_harmony_b = false;
+  bool guide_title_safe = false, guide_action_safe = false;
+  float title_safe_x = 0.1f, title_safe_y = 0.05f, action_safe_x = 0.035f, action_safe_y = 0.035f;
+  Vec3 guide_color{1.0f, 1.0f, 1.0f};
+  float guide_opacity = 0.5f;
   /* Exposure from ISO, shutter speed and f-stop (Unity's Physical Camera). */
   bool physical_exposure = false;
   float iso = 100.0f;
@@ -399,6 +438,51 @@ struct SharpenEffect : FilterEffectBase<SharpenEffect> {
   void contribute(FilterStack &stack) const override;
 };
 
+/* Anime and manga looks (task 0039). Sizes in pixels at 1080p. */
+struct HalftoneEffect : FilterEffectBase<HalftoneEffect> {
+  static constexpr const char *kName = "Halftone";
+  float cell = 8.0f, angle = 45.0f, contrast = 1.0f;
+  int mode = 0;  // 0 Mono, 1 Colour
+  Vec3 ink{0, 0, 0}, paper{1, 1, 1};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct HatchingEffect : FilterEffectBase<HatchingEffect> {
+  static constexpr const char *kName = "Hatching";
+  float spacing = 6.0f, thickness = 1.0f, angle = 45.0f, strength = 1.0f;
+  int layers = 3;
+  bool keep_color = false;
+  Vec3 ink{0, 0, 0}, paper{1, 1, 1};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct LineArtEffect : FilterEffectBase<LineArtEffect> {
+  static constexpr const char *kName = "Line Art";
+  Vec3 color{0, 0, 0};
+  float thickness = 1.5f, crease_angle = 40.0f, taper = 0.0f;
+  bool silhouettes = true, object_edges = true, creases = true;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct PaperEffect : FilterEffectBase<PaperEffect> {
+  static constexpr const char *kName = "Paper";
+  float strength = 0.35f, scale = 1.0f;
+  Vec3 tint{1.0f, 0.97f, 0.9f};
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct ColorRampEffect : FilterEffectBase<ColorRampEffect> {
+  static constexpr const char *kName = "Color Ramp";
+  int stops = 3, interpolation = 0;
+  Vec3 color0{0.05f, 0.04f, 0.08f}, color1{0.45f, 0.4f, 0.55f}, color2{1.0f, 0.95f, 0.88f}, color3{1, 1, 1};
+  float position0 = 0.0f, position1 = 0.33f, position2 = 0.66f, position3 = 1.0f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+/* Ready-made stacks (task 0039): "Anime" and "Manga", appended to a camera's filters. False for an unknown name. */
+const std::vector<std::string> &filter_looks();
+bool apply_filter_look(CameraFilters &cf, const std::string &name);
+
 /* Bloom & glow (task 0007): light above a threshold spills into the pixels around it. */
 struct BloomEffect : FilterEffectBase<BloomEffect> {
   static constexpr const char *kName = "Bloom";
@@ -406,6 +490,36 @@ struct BloomEffect : FilterEffectBase<BloomEffect> {
   Vec3 tint{1, 1, 1};
   void reflect(Reflector &r) override;
   void contribute(FilterStack &stack) const override;
+};
+
+/* Toon outlines (ADR 0020): the inverted hull. A shell pushed out along the smoothed vertex normals with its faces
+ * flipped, drawn in one unlit colour as its own draw item with its back faces culled, so only a rim around the
+ * object shows: in the views, F12 and the path tracers (camera rays only), and exports. Blender: a Solidify with
+ * Flip Normals and an outline material. */
+struct Outline : ComponentBase<Outline> {
+  static constexpr const char *kName = "Outline";
+  float thickness = 0.02f;  // metres (World Space) or the object's own units
+  bool world_space = true;
+  Vec3 color{0.02f, 0.02f, 0.03f};
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Outline; }
+  /* The shell of this (evaluated) mesh for an object of this world scale, cached; null when nothing to draw. slot:
+   * which use (the evaluated mesh's kind 0..2, 3 exports): each keeps its own, so a path tracer still holding one
+   * view's shell isn't left with a freed mesh when another view builds its own. */
+  static constexpr int kShellSlots = 4;
+  const Mesh *shell(const Mesh &src, float world_scale, int slot = 0) const;
+  /* Its one material: unlit, the colour, casts no shadow, an outline hull. */
+  const std::vector<MaterialPtr> &materials() const;
+
+ private:
+  struct ShellCache {
+    MeshPtr mesh;
+    uint64_t serial = 0;
+    float offset = -1.0f;
+  };
+  mutable ShellCache shells_[kShellSlots];
+  mutable std::vector<MaterialPtr> mats_;
+  mutable Vec3 mats_color_{-1.0f, -1.0f, -1.0f};
 };
 
 struct Rotator : ComponentBase<Rotator> {
@@ -457,10 +571,17 @@ struct SubdivisionSurface : ComponentBase<SubdivisionSurface> {
 
 struct SmoothModifier : ComponentBase<SmoothModifier> {
   static constexpr const char *kName = "SmoothModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   float factor = 0.5f;
   int iterations = 4;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
@@ -486,9 +607,15 @@ struct ArrayModifier : ComponentBase<ArrayModifier> {
   float radial_angle = 360.0f;
   bool merge = false;
   float merge_distance = 0.001f;
+  /* Blender's Fit Type (task 0042): 0 Fixed Count, 1 Fit Length (copies that fit fit_length), 2 Fit Curve (the
+   * named Curve object's length). Offset mode only. */
+  int fit_type = 0;
+  float fit_length = 4.0f;
+  std::string curve;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
   void modify(Mesh &m) const override;
+  uint64_t modifier_dependency_hash() const override;  // curve.cpp
   bool unique() const override { return false; }
 };
 
@@ -577,6 +704,12 @@ struct WireframeModifier : ComponentBase<WireframeModifier> {
 /* Blender: Displace modifier with a procedural noise texture. */
 struct DisplaceModifier : ComponentBase<DisplaceModifier> {
   static constexpr const char *kName = "DisplaceModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   float strength = 0.2f;
   float midlevel = 0.5f;
   float noise_scale = 0.5f;
@@ -585,6 +718,7 @@ struct DisplaceModifier : ComponentBase<DisplaceModifier> {
   int direction = 0;  // Normal, X, Y, Z
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
@@ -592,6 +726,12 @@ struct DisplaceModifier : ComponentBase<DisplaceModifier> {
 /* Blender: Simple Deform modifier (Twist, Bend, Taper, Stretch). */
 struct SimpleDeformModifier : ComponentBase<SimpleDeformModifier> {
   static constexpr const char *kName = "SimpleDeformModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   int mode = 0;          // Twist, Bend, Taper, Stretch
   float angle = 45.0f;   // Twist / Bend (degrees)
   float factor = 0.5f;   // Taper / Stretch
@@ -599,6 +739,7 @@ struct SimpleDeformModifier : ComponentBase<SimpleDeformModifier> {
   float lower = 0.0f, upper = 1.0f;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
@@ -606,15 +747,248 @@ struct SimpleDeformModifier : ComponentBase<SimpleDeformModifier> {
 /* Blender: Cast modifier. */
 struct CastModifier : ComponentBase<CastModifier> {
   static constexpr const char *kName = "CastModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
   int shape = 0;  // Sphere, Cylinder, Cuboid
   float factor = 0.5f;
   float radius = 0.0f;
   int axis = 1;
   void reflect(Reflector &r) override;
   bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
   bool unique() const override { return false; }
 };
+
+/* A Curve object's control points (task 0042). Handles are Blender's Auto handles. */
+struct CurvePoint {
+  Vec3 position;
+  float tilt = 0.0f;    // degrees round the curve
+  float radius = 1.0f;  // scales what a Curve modifier bends along it
+};
+
+/* Blender: a Curve object (Bezier with Auto handles; Poly); Catmull-Rom also passes through every point.
+ * Sampled by sample_curve (curve.h). Drawn in the Scene view; its points move with the gizmo. */
+struct Curve : ComponentBase<Curve> {
+  static constexpr const char *kName = "Curve";
+  int type = 0;  // Bezier, Catmull-Rom, Poly
+  bool closed = false;
+  int resolution = 12;  // samples per segment
+  std::vector<CurvePoint> points;
+  static constexpr int kMaxPoints = 4096;
+  /* What the path is made from (type, closed, resolution, every point), hashed straight from the fields. */
+  uint64_t content_key() const;
+  /* The path in the curve's own space, kept until content_key() changes: the Scene view draws it every frame. */
+  const CurvePath &local_path() const;
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Curve; }  // found without a dynamic_cast (the Scene view draws it)
+  int control_point_count() const override { return (int)points.size(); }
+  Vec3 control_point(int i) const override { return points[(size_t)i].position; }
+  void set_control_point(int i, Vec3 p) override {
+    if (i >= 0 && i < (int)points.size()) points[(size_t)i].position = p;
+  }
+
+ private:
+  mutable std::shared_ptr<const CurvePath> path_;  // shared by copies until one changes (the key is checked)
+  mutable uint64_t path_key_ = 0;
+};
+
+/* Blender: Curve modifier (MOD_curve.cc). Bends the mesh along a Curve object: the coordinate along the deform
+ * axis becomes a distance along the curve, the other two an offset in its frame. Deform-only (ADR 0022). */
+struct CurveModifier : ComponentBase<CurveModifier> {
+  static constexpr const char *kName = "CurveModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  std::string object;    // the Curve object, by name (as the Boolean's cutter)
+  int deform_axis = 0;   // X, Y, Z, -X, -Y, -Z
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;              // curve.cpp
+  uint64_t modifier_dependency_hash() const override;  // curve.cpp
+  bool unique() const override { return false; }
+};
+
+/* Blender: a Lattice object (task 0043): a box of points round a mesh, which a Lattice modifier moves the mesh with.
+ * The points rest on a unit cube (-0.5..0.5) in the object's space, so the object's scale sizes the box. */
+struct Lattice : ComponentBase<Lattice> {
+  static constexpr const char *kName = "Lattice";
+  static constexpr int kMaxRes = 32;
+  int points_u = 2, points_v = 2, points_w = 2;
+  int interpolation = 1;      // Linear, B-Spline (Blender's default)
+  std::vector<Vec3> offsets = std::vector<Vec3>(8, Vec3(0.0f));  // each point from its rest place; u fastest, then v, then w
+  int size() const;
+  Vec3 rest_point(int i) const;
+  /* How far a point of the box at q (lattice space) moves: the offsets round it blended (lattice.cpp). Outside the
+   * box, the nearest border cell's blend. */
+  Vec3 displacement(Vec3 q) const;
+  /* New resolution, keeping the shape: the new points take the displacement the old lattice gave their rest places. */
+  void resample(int u, int v, int w);
+  uint64_t content_key() const;
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Lattice; }
+  int control_point_count() const override;
+  Vec3 control_point(int i) const override;
+  void set_control_point(int i, Vec3 p) override;
+};
+
+/* Blender: Lattice modifier. Moves the mesh with a Lattice object's points (deform-only, ADR 0022). */
+struct LatticeModifier : ComponentBase<LatticeModifier> {
+  static constexpr const char *kName = "LatticeModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  std::string object;  // the Lattice object, by name
+  float strength = 1.0f;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // lattice.cpp
+  uint64_t modifier_dependency_hash() const override;  // lattice.cpp
+  bool unique() const override { return false; }
+};
+
+/* Runs one modifier of a stack with the vertex-group rules of ADR 0024 (scene.cpp). */
+void run_modifier(const Component &c, Mesh &m);
+/* A deformer's Vertex Group / Invert Group fields (ADR 0024). */
+void reflect_group_limit(Reflector &r, std::string &group, bool &invert);
+
+/* Mean value coordinates of x over a closed triangle mesh (Ju, Schaefer, Warren 2005), one weight per vertex into w
+ * (mesh_deform.cpp). They sum to 1 and reproduce affine maps. */
+void mean_value_coordinates(const Vec3 &x, const std::vector<Vec3> &p, const std::vector<uint32_t> &t, float *w);
+
+/* Blender: Mesh Deform modifier (task 0044, ADR 0023). Bound to a closed cage mesh, the mesh follows the cage's
+ * vertices by mean value coordinates. Bind keeps the cage's rest shape; the weights are a cache. Deform-only. */
+struct MeshDeformWeights;
+struct MeshDeformModifier : ComponentBase<MeshDeformModifier> {
+  static constexpr const char *kName = "MeshDeformModifier";
+  std::string vertex_group;  // Blender's Vertex Group (empty: the whole mesh)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  std::string object;               // the cage, by name
+  std::vector<Vec3> bind_verts;     // the cage at Bind, in this object's space (empty: not bound)
+  std::vector<uint32_t> bind_tris;  // its triangles
+  bool bound() const { return !bind_verts.empty(); }
+  /* Reads the cage as it is now. False (and why) for an open, non-manifold, flat or missing cage. */
+  bool bind(std::string *error);
+  void unbind();
+  uint64_t bind_key() const;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // mesh_deform.cpp
+  uint64_t modifier_dependency_hash() const override;  // mesh_deform.cpp
+  bool unique() const override { return false; }
+  mutable std::string last_error;  // shown in the Inspector, logged once
+
+ private:
+  mutable std::shared_ptr<MeshDeformWeights> weights_;
+  mutable std::string bind_text_;
+  mutable uint64_t bind_text_key_ = 0;
+};
+
+/* Skeletons (task 0047, ADR 0025): a bone is a GameObject with a Bone component under a root with an Armature; posing
+ * is moving and turning the bone objects. Blender's bones point along their +Y. */
+struct Bone : ComponentBase<Bone> {
+  static constexpr const char *kName = "Bone";
+  float length = 1.0f;
+  bool deform = true;  // moves the vertex group named after it
+  /* The rest pose: this bone's place relative to its parent (what skins measure poses from). */
+  Vec3 rest_position;
+  Quat rest_rotation;     // exact (Euler angles lose up to a degree near 90 degrees of X)
+  Vec3 rest_euler_hint;   // what the Inspector shows for it
+  Vec3 rest_scale{1, 1, 1};
+  Mat4 rest_matrix() const;
+  void set_rest(const Transform &t);  // the bone's current local transform becomes its rest (skin.cpp)
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::Bone; }  // the Scene view draws and picks bones
+};
+
+/* On a skeleton's root (Blender's Armature object data settings). */
+struct Armature : ComponentBase<Armature> {
+  static constexpr const char *kName = "Armature";
+  int deform = 0;  // Linear, Dual Quaternion
+  bool show_bones = true;
+  bool rest_position = false;  // skins show the mesh unposed
+  bool in_front = true;        // bones drawn over the meshes
+  void reflect(Reflector &r) override;
+};
+
+/* Blender: Armature modifier. Moves each vertex by the bones its vertex groups name (ADR 0025). Deform-only. */
+struct SkinModifier : ComponentBase<SkinModifier> {
+  static constexpr const char *kName = "SkinModifier";
+  std::string object;  // the armature's root, by name
+  int max_influences = 4;
+  std::string vertex_group;  // Blender: Armature modifier > Vertex Group (only these vertices follow the bones)
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // skin.cpp
+  uint64_t modifier_dependency_hash() const override;  // skin.cpp
+  bool unique() const override { return false; }
+};
+
+/* A bone of an armature: its object, its world matrix now, its rest matrix relative to the root's parent. */
+struct ArmatureBone {
+  const GameObject *object;
+  const Bone *bone;
+  Mat4 world, rest;
+};
+void armature_bones(const GameObject &root, std::vector<ArmatureBone> &out);
+Mat4 armature_base(const GameObject &root);  // the root's parent's world matrix (rest matrices are relative to it)
+/* Automatic weights: groups named after the bones, from each vertex's distance to them (skin.cpp). */
+bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error = nullptr);
+Quat slerp(Quat a, Quat b, float t);  // skin.cpp
+
+/* Blender: Inverse Kinematics bone constraint (task 0048). On a chain's end bone: the chain turns so the end's tip
+ * reaches the target object; two bones are solved exactly in the pole's plane, longer chains by CCD (ik.cpp). */
+struct IKConstraint : ComponentBase<IKConstraint> {
+  static constexpr const char *kName = "IKConstraint";
+  std::string target;  // by name
+  std::string pole;    // optional: the bend points towards it
+  int chain_length = 2;
+  int iterations = 20;
+  float weight = 1.0f;
+  uint64_t last_key = 0;               // the inputs of the last solve (unchanged: nothing to do)
+  uint64_t target_id = 0, pole_id = 0;  // where the names were last found
+  static std::atomic<int> live;        // constraints in existence: none, and the per-frame solve walks nothing
+  IKConstraint() { live.fetch_add(1, std::memory_order_relaxed); }
+  IKConstraint(const IKConstraint &o) : ComponentBase<IKConstraint>(o), target(o.target), pole(o.pole), chain_length(o.chain_length),
+                                         iterations(o.iterations), weight(o.weight) {
+    live.fetch_add(1, std::memory_order_relaxed);
+  }
+  IKConstraint &operator=(const IKConstraint &) = default;
+  ~IKConstraint() override { live.fetch_sub(1, std::memory_order_relaxed); }
+  void reflect(Reflector &r) override;
+};
+Quat rotation_between(Vec3 a, Vec3 b);  // the shortest-arc rotation taking direction a to b (ik.cpp)
+/* Solves every IK constraint whose inputs changed (after Scene::update in Play, before drawing in the editor). True
+ * when bones turned. The solved rotations are a pose, not an edit: they make no undo step of their own. */
+bool solve_constraints(Scene &scene);
+bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK chain turns this bone (the gizmo refuses it)
+/* Rig presets: a skeleton with an Armature, IK on its limbs with target and pole objects. Its root is returned. */
+GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
+/* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */
+int add_humanoid_ik(Scene &scene, GameObject *root);
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {
@@ -714,6 +1088,9 @@ class GameObject {
   MeshRenderer *mesh_renderer() const { return static_cast<MeshRenderer *>(find_role(Component::RenderRole::MeshRenderer)); }
   Light *light() const { return static_cast<Light *>(find_role(Component::RenderRole::Light)); }
   Camera *camera() const { return static_cast<Camera *>(find_role(Component::RenderRole::Camera)); }
+  Curve *curve() const;  // scene.cpp (Curve is declared further down)
+  Lattice *lattice() const;
+  Component *point_source() const;  // the component whose control points the Scene view edits (a curve, a lattice)
   Component *add_component(std::unique_ptr<Component> c);
   template<class T> T *add() { return static_cast<T *>(add_component(std::make_unique<T>())); }
   void remove_component(Component *c);
@@ -748,6 +1125,11 @@ class GameObject {
   mutable bool world_dirty_ = true;
   mutable std::shared_ptr<Mesh> eval_mesh_[3];
   mutable uint64_t eval_key_[3] = {0, 0, 0};
+  /* The stack before its deforming tail (ADR 0022): the result of the modifiers up to the last one that
+   * isn't deform-only, its key, and the head key eval_mesh_ was deformed from (0: a full evaluation). */
+  mutable std::shared_ptr<Mesh> eval_head_[3];
+  mutable uint64_t eval_head_key_[3] = {0, 0, 0};
+  mutable uint64_t eval_from_[3] = {0, 0, 0};
   friend class Scene;
 };
 
@@ -830,6 +1212,9 @@ struct RenderSettings {
   int percent = 100;
   int samples = 128;          // path tracer final samples
   int viewport_samples = 64;  // unused since task 0019 (no Rendered Scene view); kept so files round-trip
+  /* Film > Transparent (task 0035): renders leave the world out of the background (alpha 0 there, the lighting
+   * unchanged); PNG and EXR keep the alpha. */
+  bool transparent = false;
   int preview_samples = 16;   // Preview button / live preview
   int preview_percent = 25;   // preview resolution, % of the output size
   bool live_preview = false;  // re-render the preview whenever the scene changes

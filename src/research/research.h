@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Research feature registry.
 //
-// Workflow: drop a paper into research/papers/, ask Claude Code to implement a
-// technique from it, and it gets added here as a Feature. Registered features
-// automatically appear in:
-//   * the Research window (with citation + status),
-//   * Mesh > Research Features,
-//   * the Inspector's MeshFilter tools.
-// Track paper -> feature -> status in research/FEATURES.md.
+// Mesh features built from research papers. Registered features appear in
+// Mesh > From Papers and the Inspector's MeshFilter tools; the papers are cited
+// in the Learn tab's References lesson (task 0034 retired the Research window).
 #pragma once
 
 #include "../scene/mesh.h"

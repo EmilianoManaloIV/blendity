@@ -73,6 +73,7 @@ void weld_exact(Mesh &m) {
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
   std::vector<uint32_t> remap(m.vert_count());
   std::vector<Vec3> kept;
+  std::vector<uint32_t> first;  // each kept vertex's first original
   auto bits = [](float f) {
     uint32_t b;
     if (f == 0.0f) f = 0.0f;  // -0 == +0
@@ -84,23 +85,44 @@ void weld_exact(Mesh &m) {
     const uint64_t h = ((uint64_t)bits(p.x) * 73856093ull) ^ ((uint64_t)bits(p.y) * 19349663ull) ^ ((uint64_t)bits(p.z) * 83492791ull);
     auto &bucket = grid[h];
     uint32_t found = UINT32_MAX;
-    for (uint32_t k : bucket)
-      if (kept[k] == p) {
+    for (uint32_t k : bucket) {
+      if (!(kept[k] == p)) continue;
+      /* Vertices of a skin weld only with the same weights: lips and eyelids touch but must part. */
+      bool same = true;
+      for (const VertexGroup &g : m.vertex_groups)
+        if (g.weights.size() == m.vert_count() && g.weights[i] != g.weights[first[k]]) same = false;
+      if (same) {
         found = k;
         break;
       }
+    }
     if (found == UINT32_MAX) {
       found = (uint32_t)kept.size();
       kept.push_back(p);
+      first.push_back((uint32_t)i);
       bucket.push_back(found);
     }
     remap[i] = found;
+  }
+  /* Vertex groups (a skin's weights): a welded vertex keeps the first copy's (they were at the same place). */
+  std::vector<VertexGroup> groups = m.vertex_groups;
+  for (VertexGroup &g : groups) {
+    if (g.weights.size() != m.vert_count()) {
+      g.weights.assign(kept.size(), 0.0f);
+      continue;
+    }
+    std::vector<float> w(kept.size(), 0.0f);
+    std::vector<uint8_t> set(kept.size(), 0);
+    for (size_t i = 0; i < remap.size(); i++)
+      if (!set[remap[i]]) w[remap[i]] = g.weights[i], set[remap[i]] = 1;
+    g.weights = std::move(w);
   }
   m.positions = kept;
   for (uint32_t &v : m.corner_verts) v = remap[v];
   /* Triangles that collapsed (degenerate in the file) would break topology tools. */
   Mesh clean;
   clean.positions = m.positions;
+  clean.vertex_groups = std::move(groups);
   clean.smooth = m.smooth;
   clean.smooth_angle = m.smooth_angle;
   clean.name = m.name;
@@ -496,6 +518,27 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
         }
       const uint32_t base = (uint32_t)m->vert_count();
       for (size_t i = 0; i < nv; i++) m->add_vert(from_y_up({pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]}));
+      /* A skin's weights (task 0047): groups "J<k>" for the skin's k-th joint, renamed after the joints' nodes below. */
+      if (pr["attributes"]["JOINTS_0"].integer() >= 0 && pr["attributes"]["WEIGHTS_0"].integer() >= 0) {
+        int jc = 0, wc = 0;
+        const std::vector<float> js = read_accessor(pr["attributes"]["JOINTS_0"].integer(), jc);
+        const std::vector<float> ws = read_accessor(pr["attributes"]["WEIGHTS_0"].integer(), wc);
+        if (jc == 4 && wc == 4 && js.size() >= nv * 4 && ws.size() >= nv * 4)
+          for (size_t i = 0; i < nv; i++)
+            for (int k = 0; k < 4; k++) {
+              const float w = ws[i * 4 + k];
+              if (!(w > 0.0f) || !finite_bits(w)) continue;
+              const std::string gname = "J" + std::to_string((int)js[i * 4 + k]);
+              int gi = m->find_group(gname);
+              if (gi < 0) {
+                m->vertex_groups.push_back({gname, {}});
+                gi = (int)m->vertex_groups.size() - 1;
+              }
+              m->vertex_groups[(size_t)gi].weights.resize(m->vert_count(), 0.0f);
+              m->vertex_groups[(size_t)gi].weights[base + i] = std::min(1.0f, w);
+            }
+      }
+      for (VertexGroup &vg : m->vertex_groups) vg.weights.resize(m->vert_count(), 0.0f);
       int slot = (int)slots.size();
       const int mi = pr["material"].integer();
       MaterialPtr mp = mi >= 0 && mi < (int)mats.size() ? mats[(size_t)mi] : nullptr;
@@ -568,6 +611,30 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     const int me = node_index[(size_t)ni];
     for (const Json &c : n["children"].arr) visit(c.integer(), me);
   };
+  auto skins_and_bones = [&] {
+    /* Skins (task 0047): joints become bones; a skinned mesh's "J<k>" groups take its joints' names. */
+    for (const Json &sk : doc["skins"].arr)
+      for (const Json &j : sk["joints"].arr)
+        if (j.integer() >= 0 && j.integer() < (int)node_index.size() && node_index[(size_t)j.integer()] >= 0)
+          out.nodes[(size_t)node_index[(size_t)j.integer()]].is_bone = true;
+    for (size_t ni = 0; ni < jn.size(); ni++) {
+      const int si = jn[ni]["skin"].integer(), oi = node_index[ni];
+      if (si < 0 || oi < 0 || !out.nodes[(size_t)oi].mesh) continue;
+      const Json &joints = doc["skins"][(size_t)si]["joints"];
+      ImportedSkin skin;
+      skin.mesh_node = oi;
+      Mesh &m = *out.nodes[(size_t)oi].mesh;
+      for (size_t k = 0; k < joints.size(); k++) {
+        const int jni = joints[k].integer();
+        const int jo = jni >= 0 && jni < (int)node_index.size() ? node_index[(size_t)jni] : -1;
+        if (jo < 0) continue;
+        skin.joints.push_back(jo);
+        const int gi = m.find_group("J" + std::to_string(k));
+        if (gi >= 0) m.vertex_groups[(size_t)gi].name = out.nodes[(size_t)jo].name;
+      }
+      out.skins.push_back(std::move(skin));
+    }
+  };
   const int scene = doc["scene"].integer(0);
   const Json &roots = doc["scenes"][(size_t)std::max(0, scene)]["nodes"];
   if (roots.size())
@@ -587,6 +654,7 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     out.error = "glTF: no meshes or nodes";
     return false;
   }
+  skins_and_bones();
   out.summary = strprintf("%zu node(s), %zu vertices, %zu faces, %zu material(s)", out.nodes.size(), verts, faces, out.materials.size());
   return true;
 }

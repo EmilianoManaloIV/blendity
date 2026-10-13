@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "curve.h"
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -71,6 +72,23 @@ void register_builtin_components() {
   reg<DisplaceModifier>("Mesh", "Pushes vertices along their normals by a noise texture.", "Displace modifier (procedural texture)");
   reg<SimpleDeformModifier>("Mesh", "Twists, bends, tapers or stretches the mesh along an axis.", "Simple Deform modifier");
   reg<CastModifier>("Mesh", "Pulls the mesh towards a sphere, cylinder or box.", "Cast modifier");
+  reg<SkinModifier>("Mesh", "Moves the mesh with an armature's bones: each vertex by the bones its vertex groups are named after.",
+                    "Armature modifier (Vertex Groups)");
+  reg<Bone>("Rigging", "A bone of a skeleton: a skin moves the vertices of the vertex group named after it.", "Bone (in an Armature)");
+  reg<Armature>("Rigging", "On a skeleton's root: how skins deform (Linear or Dual Quaternion), Rest Position, Show Bones.",
+                "Armature object data");
+  reg<IKConstraint>("Rigging", "On the end bone of a chain (a shin, a forearm): the chain turns so its tip reaches the Target. "
+                    "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
+                    "Inverse Kinematics bone constraint (with Pole Target)");
+  reg<MeshDeformModifier>("Mesh", "Binds the mesh to a closed cage mesh round it; moving the cage's vertices shapes the mesh smoothly.",
+                          "Mesh Deform modifier (Bind)");
+  reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");
+  reg<Lattice>("Mesh", "A box of points round a mesh: a Lattice modifier moves the mesh with them. Click a point to move it with the gizmo.",
+               "Lattice object");
+  reg<CurveModifier>("Mesh", "Bends the mesh along a Curve object (rails, pipes, roads, chains).", "Curve modifier");
+  reg<Curve>("Mesh", "A path of control points (Bezier, Catmull-Rom or Poly): Curve modifiers bend meshes along it and "
+             "Array's Fit Curve fills it. Click a point to move it with the gizmo.",
+             "Curve object (Bezier / Poly spline)");
   reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
@@ -83,6 +101,10 @@ void register_builtin_components() {
                      "A stack of filters on this camera, applied top to bottom: Retro Console looks (PS1, N64, Saturn, DOS) and more. "
                      "Add Filter picks them by category.",
                      "Compositor nodes on the render (Unity: the Post-processing Layer and Volume profile)");
+  reg<Outline>("Rendering",
+               "Toon outlines: a shell around the object in one colour, so it has a line round its silhouette (the inverted "
+               "hull). Pair it with a Toon material.",
+               "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
@@ -263,6 +285,9 @@ void RenderSettings::reflect(Reflector &r) {
   r.help("Path-traced samples for the Preview render (the rasterized engine ignores it).");
   r.field("Live Preview", live_preview);
   r.help("Re-render the preview automatically whenever the scene, camera or settings change.");
+  r.field("Transparent", transparent);
+  r.help("Film > Transparent: the background is left out of the render (transparent in a PNG or EXR) while the world\n"
+         "still lights the scene. Blender: Render Properties > Film > Transparent.");
   if (r.all_fields() || engine == 1) {
     static const char *devices[] = {"CPU", "GPU Compute"};
     r.enumeration("Device", device, devices, 2);
@@ -477,6 +502,43 @@ void Camera::reflect(Reflector &r) {
     r.field("Shutter Speed (1/s)", shutter, 1.0f, 0.001f, 100000.0f);
     if (!dof && !all) r.field("F-Stop", f_stop, 0.05f, 0.1f, 128.0f);  // shown with Depth of Field otherwise
   }
+  /* Composition guides (task 0033): drawn over the views, so not part of the render hash. Keep this the last call:
+   * anything a render reads goes above it. */
+  if (!r.hashing()) reflect_guides(r);
+}
+
+void Camera::reflect_guides(Reflector &r) {
+  const bool all = r.all_fields();
+  r.field("Show Guides", show_guides);
+  r.help("Composition guides over what this camera sees in the Game view, the Camera Preview and while piloting\n"
+         "(never in renders). Blender: Camera > Viewport Display > Composition Guides. Game view: the Guides menu.");
+  if (show_guides || all) {
+    r.field("Thirds", guide_thirds);
+    r.help("The rule of thirds: two lines each way at a third of the frame; put subjects on them or where they cross.");
+    r.field("Center", guide_center);
+    r.field("Center Diagonal", guide_center_diagonal);
+    r.field("Golden Ratio", guide_golden);
+    r.help("Lines at 0.382 and 0.618 of the frame (the golden section).");
+    r.field("Golden Triangle A", guide_golden_tri_a);
+    r.field("Golden Triangle B", guide_golden_tri_b);
+    r.help("A diagonal and, from the other two corners, lines square to it running on to the far edge (Blender's;\n"
+           "A: the diagonal rising to the right, B: falling).");
+    r.field("Harmonious Triangle A", guide_harmony_a);
+    r.field("Harmonious Triangle B", guide_harmony_b);
+    r.help("A diagonal and lines from the other two corners to the golden-section points (0.382 / 0.618) of the far\n"
+           "edge (Blender's).");
+    r.field("Title Safe", guide_title_safe);
+    if (guide_title_safe || all) {
+      r.field("Title Safe X", title_safe_x, 0.005f, 0.0f, 1.0f);
+      r.field("Title Safe Y", title_safe_y, 0.005f, 0.0f, 1.0f);
+    }
+    r.field("Action Safe", guide_action_safe);
+    if (guide_action_safe || all) {
+      r.field("Action Safe X", action_safe_x, 0.005f, 0.0f, 1.0f);
+      r.field("Action Safe Y", action_safe_y, 0.005f, 0.0f, 1.0f);
+    }
+    r.color_alpha("Guide Color", guide_color, "Guide Opacity", guide_opacity);
+  }
 }
 
 float Camera::image_aspect(float render_aspect) const {
@@ -544,6 +606,8 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
       {PosterizeEffect::kName, "Color", "Fewer shades per channel: flat bands of colour.", [] { return std::make_unique<PosterizeEffect>(); }},
       {GrayscaleEffect::kName, "Color", "Black and white, or a warm old-photo sepia.", [] { return std::make_unique<GrayscaleEffect>(); }},
       {InvertEffect::kName, "Color", "A negative image.", [] { return std::make_unique<InvertEffect>(); }},
+      {ColorRampEffect::kName, "Color", "The picture's brightness through a few colours (Blender's Color Ramp): flat cel tones or a gradient map.",
+       [] { return std::make_unique<ColorRampEffect>(); }},
       {VignetteEffect::kName, "Lens", "Darker (or tinted) corners, drawing the eye to the middle.", [] { return std::make_unique<VignetteEffect>(); }},
       {ChromaticAberrationEffect::kName, "Lens", "Red and blue fringes toward the edges, as from a cheap lens.",
        [] { return std::make_unique<ChromaticAberrationEffect>(); }},
@@ -555,6 +619,12 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
        [] { return std::make_unique<EdgeOutlineEffect>(); }},
       {CrtEffect::kName, "Stylize", "An old TV: scanlines, a curved tube, phosphor stripes and flicker.", [] { return std::make_unique<CrtEffect>(); }},
       {SharpenEffect::kName, "Stylize", "Crisper edges (an unsharp mask).", [] { return std::make_unique<SharpenEffect>(); }},
+      {HalftoneEffect::kName, "Stylize", "Comic / manga dots: a dot screen whose dots grow with the darkness (Mono ink on paper, or Colour).",
+       [] { return std::make_unique<HalftoneEffect>(); }},
+      {HatchingEffect::kName, "Stylize", "Pen hatching: lines that cross more densely in darker areas.", [] { return std::make_unique<HatchingEffect>(); }},
+      {LineArtEffect::kName, "Stylize", "Ink lines on silhouettes, where objects meet, and on creases sharper than an angle (a manga / anime line).",
+       [] { return std::make_unique<LineArtEffect>(); }},
+      {PaperEffect::kName, "Stylize", "A paper texture under the picture: blotches, fibres and grain.", [] { return std::make_unique<PaperEffect>(); }},
       {BloomEffect::kName, "Bloom & glow", "Light brighter than a threshold spills into the pixels around it: glowing lights, emissive materials, sun glints.",
        [] { return std::make_unique<BloomEffect>(); }},
   };
@@ -598,6 +668,7 @@ struct PrefixReflector : Reflector {
   void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
   void material_list(const char *name, std::vector<MaterialPtr> &m) override { in.material_list(n(name).c_str(), m); }
   bool all_fields() const override { return in.all_fields(); }
+  bool hashing() const override { return in.hashing(); }
 };
 }  // namespace
 
@@ -934,7 +1005,183 @@ void BloomEffect::contribute(FilterStack &s) const {
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_bloom(rt, p); });
 }
 
+void HalftoneEffect::reflect(Reflector &r) {
+  static const char *modes[] = {"Mono", "Colour"};
+  r.enumeration("Mode", mode, modes, 2);
+  r.field("Cell Size", cell, 0.1f, 2.0f, 128.0f);
+  r.help("Dot spacing in pixels at 1080p (the same look at any resolution).");
+  r.field("Angle", angle, 0.5f, -180.0f, 180.0f);
+  r.field("Contrast", contrast, 0.01f, 0.0f, 8.0f);
+  if (r.all_fields() || mode == 0) {
+    r.color("Ink", ink);
+    r.color("Paper", paper);
+  }
+}
+void HalftoneEffect::contribute(FilterStack &s) const {
+  HalftoneParams p;
+  p.cell = cell, p.angle = angle, p.mode = mode, p.ink = display_color(ink), p.paper = display_color(paper), p.contrast = contrast;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_halftone(rt, p, f); });
+}
+
+void HatchingEffect::reflect(Reflector &r) {
+  r.field("Spacing", spacing, 0.1f, 2.0f, 128.0f);
+  r.field("Thickness", thickness, 0.05f, 0.25f, 32.0f);
+  r.field("Angle", angle, 0.5f, -180.0f, 180.0f);
+  r.field("Layers", layers, 1, 3);
+  r.help("1: lines one way. 2: cross-hatching in the darker tones. 3: a diagonal too in the darkest.");
+  r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
+  r.field("Keep Color", keep_color);
+  r.help("Draw the lines over the picture instead of over paper.");
+  r.color("Ink", ink);
+  if (r.all_fields() || !keep_color) r.color("Paper", paper);
+}
+void HatchingEffect::contribute(FilterStack &s) const {
+  HatchingParams p;
+  p.spacing = spacing, p.thickness = thickness, p.angle = angle, p.layers = layers, p.strength = strength, p.keep_color = keep_color;
+  p.ink = display_color(ink), p.paper = display_color(paper);
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_hatching(rt, p, f); });
+}
+
+void LineArtEffect::reflect(Reflector &r) {
+  r.color("Color", color);
+  r.field("Thickness", thickness, 0.05f, 0.5f, 8.0f);
+  r.field("Silhouettes", silhouettes);
+  r.help("Outlines against the background, and where a part steps in front of another.");
+  r.field("Object Edges", object_edges);
+  r.field("Creases", creases);
+  r.field("Crease Angle", crease_angle, 0.5f, 1.0f, 179.0f);
+  r.help("A line where the surface turns more than this many degrees (a cube's edges at 90; smooth curves draw none).");
+  r.field("Taper", taper, 0.01f, 0.0f, 100.0f);
+  r.help("Lines fade with distance (0: the same everywhere).");
+}
+void LineArtEffect::contribute(FilterStack &s) const {
+  LineArtParams p;
+  p.color = display_color(color), p.thickness = thickness, p.crease_angle = crease_angle, p.taper = taper;
+  p.silhouettes = silhouettes, p.object_edges = object_edges, p.creases = creases;
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_line_art(rt, p, f); });
+}
+
+void PaperEffect::reflect(Reflector &r) {
+  r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
+  r.field("Scale", scale, 0.01f, 0.05f, 50.0f);
+  r.color("Tint", tint);
+}
+void PaperEffect::contribute(FilterStack &s) const {
+  PaperParams p;
+  p.strength = strength, p.scale = scale, p.tint = display_color(tint);
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_paper(rt, p, f); });
+}
+
+void ColorRampEffect::reflect(Reflector &r) {
+  static const char *interp[] = {"Constant", "Linear"};
+  r.field("Stops", stops, 2, 4);
+  r.enumeration("Interpolation", interpolation, interp, 2);
+  r.help("Constant: flat tones (cel); Linear: a gradient map.");
+  Vec3 *cols[4] = {&color0, &color1, &color2, &color3};
+  float *poss[4] = {&position0, &position1, &position2, &position3};
+  static const char *cn[4] = {"Color 1", "Color 2", "Color 3", "Color 4"}, *pn[4] = {"Position 1", "Position 2", "Position 3", "Position 4"};
+  for (int k = 0; k < 4; k++)
+    if (r.all_fields() || k < stops) {
+      r.color(cn[k], *cols[k]);
+      r.field(pn[k], *poss[k], 0.01f, 0.0f, 1.0f);
+    }
+}
+void ColorRampEffect::contribute(FilterStack &s) const {
+  ColorRampParams p;
+  p.stops = stops, p.interpolation = interpolation;
+  const Vec3 cols[4] = {color0, color1, color2, color3};
+  const float poss[4] = {position0, position1, position2, position3};
+  for (int k = 0; k < 4; k++) p.color[k] = display_color(cols[k]), p.position[k] = poss[k];
+  s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_color_ramp(rt, p); });
+}
+
+const std::vector<std::string> &filter_looks() {
+  static const std::vector<std::string> names = {"Anime", "Manga"};
+  return names;
+}
+
+bool apply_filter_look(CameraFilters &cf, const std::string &name_in) {
+  const std::string name = to_lower(name_in);
+  if (name == "anime") {
+    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.2f, l->crease_angle = 50.0f;
+    if (auto *g = dynamic_cast<ColorGradingEffect *>(cf.add(ColorGradingEffect::kName))) g->saturation = 0.15f, g->contrast = 0.08f;
+    if (auto *b = dynamic_cast<BloomEffect *>(cf.add(BloomEffect::kName))) b->intensity = 0.25f, b->threshold = 1.2f;
+    return true;
+  }
+  if (name == "manga") {
+    cf.add(GrayscaleEffect::kName);
+    if (auto *h = dynamic_cast<HalftoneEffect *>(cf.add(HalftoneEffect::kName))) h->cell = 6.0f, h->contrast = 1.2f;
+    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.5f;
+    cf.add(PaperEffect::kName);
+    return true;
+  }
+  return false;
+}
+
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }
+
+void Outline::reflect(Reflector &r) {
+  r.field("Thickness", thickness, 0.001f, 0.0f, 10.0f);
+  r.help("How far the outline shell stands out from the surface.");
+  r.field("World Space", world_space);
+  r.help("Thickness in metres whatever the object's scale (off: in the object's own units).");
+  r.color("Color", color);
+  r.help("The line's colour. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
+         "it as a sheet; it suits closed meshes.)");
+}
+
+const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
+  const float s = world_space ? (finite_bits(world_scale) && world_scale > 1e-6f ? world_scale : 1.0f) : 1.0f;
+  const float offset = thickness / s;
+  if (!(offset > 0.0f) || !finite_bits(offset) || src.face_count() == 0) return nullptr;
+  ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
+  const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
+  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset) return c.mesh.get();
+  /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
+  std::vector<Vec3> vn(src.positions.size(), Vec3(0.0f));
+  for (size_t f = 0; f < src.face_count(); f++) {
+    const uint32_t *v = src.face_verts(f);
+    const uint32_t n = src.face_size(f);
+    Vec3 fn(0.0f);
+    for (uint32_t k = 0; k < n; k++) fn += cross(src.positions[v[k]], src.positions[v[(k + 1) % n]]);  // Newell
+    if (!finite_bits(fn.x) || !finite_bits(fn.y) || !finite_bits(fn.z)) continue;
+    for (uint32_t k = 0; k < n; k++) vn[v[k]] += fn;
+  }
+  auto m = std::make_shared<Mesh>();
+  m->name = "Outline";
+  m->smooth = true;
+  m->positions.reserve(src.positions.size());
+  for (size_t i = 0; i < src.positions.size(); i++) {
+    const float len = length(vn[i]);
+    const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
+    m->positions.push_back(src.positions[i] + d * offset);
+  }
+  std::vector<uint32_t> rev;
+  for (size_t f = 0; f < src.face_count(); f++) {
+    const uint32_t *v = src.face_verts(f);
+    const uint32_t n = src.face_size(f);
+    rev.assign(v, v + n);
+    std::reverse(rev.begin(), rev.end());  // flipped: its outside faces in
+    m->add_face(rev.data(), rev.size());
+  }
+  c.mesh = m;
+  c.serial = serial;
+  c.offset = offset;
+  return c.mesh.get();
+}
+
+const std::vector<MaterialPtr> &Outline::materials() const {
+  const Vec3 c(finite_bits(color.x) ? color.x : 0.0f, finite_bits(color.y) ? color.y : 0.0f, finite_bits(color.z) ? color.z : 0.0f);
+  if (mats_.empty() || c.x != mats_color_.x || c.y != mats_color_.y || c.z != mats_color_.z) {
+    auto mat = make_material("Outline", c);
+    mat->unlit = true;
+    mat->cast_shadows = false;
+    mat->outline_hull = true;
+    mats_ = {mat};
+    mats_color_ = c;
+  }
+  return mats_;
+}
 void Rotator::update(PlayContext &ctx) {
   Quat dq = Quat::euler(degrees_per_second * ctx.dt);
   owner->set_local_rotation(owner->local().rotation * dq);
@@ -989,6 +1236,7 @@ void SubdivisionSurface::modify(Mesh &m) const {
 void SmoothModifier::reflect(Reflector &r) {
   r.field("Factor", factor, 0.01f, -2.0f, 2.0f);
   r.field("Iterations", iterations, 0, 200);
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void SmoothModifier::modify(Mesh &m) const { meshops::smooth_laplacian(m, factor, iterations); }
 
@@ -1019,12 +1267,102 @@ void ArrayModifier::reflect(Reflector &r) {
     r.field("Angle", radial_angle, 1.0f, -3600.0f, 3600.0f);
     r.help("360 spreads the copies evenly round a full turn.");
   }
+  if (all || mode == 0) {
+    static const char *kFit[] = {"Fixed Count", "Fit Length", "Fit Curve"};
+    r.enumeration("Fit Type", fit_type, kFit, 3);
+    r.help("Blender's Fit Type: Fixed Count uses Count; Fit Length makes as many copies as fit the length; Fit Curve as many\n"
+           "as fit the curve's length (then add a Curve modifier on the same curve to bend them along it). Each copy takes one\n"
+           "step, so the copies end within the length (Blender adds one more, ending past it).");
+    if (all || fit_type == 1) r.field("Fit Length", fit_length, 0.05f, 0.0f, 1e5f);
+    if (all || fit_type == 2) {
+      r.text("Curve", curve);
+      r.help("Name of the Curve object whose length the copies fill.");
+    }
+  }
   r.field("Merge", merge);
   r.field("Merge Distance", merge_distance, 0.0005f, 0.0f, 1.0f);
 }
 void ArrayModifier::modify(Mesh &m) const {
-  if (mode == 1) meshops::radial_array(m, count, radial_axis, radial_angle, merge ? merge_distance : 0.0f);
-  else meshops::make_array(m, count, relative_offset, constant_offset, merge ? merge_distance : 0.0f);
+  if (mode == 1) {
+    meshops::radial_array(m, count, radial_axis, radial_angle, merge ? merge_distance : 0.0f);
+    return;
+  }
+  int n = count;
+  if (fit_type == 1 || fit_type == 2) {
+    /* As many copies as fit: each takes one step (the offset between copies). */
+    const float L = fit_type == 1 ? fit_length : array_curve_length(*this);
+    const AABB b = m.bounds();
+    const Vec3 size = b.max - b.min;
+    const float step = length(Vec3(relative_offset.x * size.x, relative_offset.y * size.y, relative_offset.z * size.z) + constant_offset);
+    n = 1;
+    if (finite_bits(L) && finite_bits(step) && step > 1e-6f && L > 0.0f) n = (int)std::max(1.0, std::min(1000.0, std::floor(L / step + 1e-4)));
+  }
+  meshops::make_array(m, n, relative_offset, constant_offset, merge ? merge_distance : 0.0f);
+}
+
+void reflect_group_limit(Reflector &r, std::string &group, bool &invert) {
+  r.text("Vertex Group", group);
+  r.help("Only the vertices of this vertex group move, each as much as its weight (Blender: Vertex Group). Empty: the\n"
+         "whole mesh; a name the mesh hasn't: the whole mesh too.");
+  r.field("Invert Group", invert);
+}
+
+/* The points after a count, each with a "P<i> " prefix (ADR 0008's scheme): files, undo, hashing and
+ * `set Curve.P2Position 1 0 0` see every point. */
+void Curve::reflect(Reflector &r) {
+  static const char *kTypes[] = {"Bezier", "Catmull-Rom", "Poly"};
+  r.enumeration("Type", type, kTypes, 3);
+  r.help("Bezier: smooth, near the points (Blender's Auto handles). Catmull-Rom: smooth, through every point. Poly: straight lines.");
+  r.field("Closed", closed);
+  r.help("Joins the last point to the first (Blender: Cyclic).");
+  r.field("Resolution", resolution, 1, 256);
+  r.help("Samples per segment (Blender: Resolution Preview U).");
+  int n = (int)points.size();
+  const int before = n;
+  r.field("Points", n, 0, kMaxPoints);
+  if (n != before) points.resize((size_t)std::max(0, std::min(n, kMaxPoints)));
+  for (size_t i = 0; i < points.size(); i++) {
+    PrefixReflector p(r, "P" + std::to_string(i) + " ");
+    p.field("Position", points[i].position);
+    p.field("Tilt", points[i].tilt, 1.0f, -36000.0f, 36000.0f);
+    p.field("Radius", points[i].radius, 0.01f, 0.0f, 1000.0f);
+  }
+}
+
+/* The resolution first: a change resamples the shape (Blender keeps it the same way), then each point's offset with a
+ * "P<i> " prefix. The Inspector lists the offsets only for small lattices (the gizmo moves points). */
+void Lattice::reflect(Reflector &r) {
+  int u = points_u, v = points_v, w = points_w;
+  r.field("Points U", u, 2, kMaxRes);
+  r.field("Points V", v, 2, kMaxRes);
+  r.field("Points W", w, 2, kMaxRes);
+  r.help("Points along each side (Blender: Resolution U / V / W). Changing it keeps the shape.");
+  if (u != points_u || v != points_v || w != points_w || (int)offsets.size() != size()) resample(u, v, w);
+  static const char *kInterp[] = {"Linear", "B-Spline"};
+  r.enumeration("Interpolation", interpolation, kInterp, 2);
+  r.help("Linear follows the points exactly; B-Spline is smoother (Blender's default).");
+  interpolation = std::max(0, std::min(interpolation, 1));
+  if (!r.all_fields() && offsets.size() > 64) return;
+  for (size_t i = 0; i < offsets.size(); i++) {
+    PrefixReflector p(r, "P" + std::to_string(i) + " ");
+    p.field("Offset", offsets[i]);
+  }
+}
+
+void LatticeModifier::reflect(Reflector &r) {
+  r.text("Object", object);
+  r.help("Name of the Lattice object whose points move the mesh (Blender: Lattice > Object).");
+  r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
+  reflect_group_limit(r, vertex_group, invert_group);
+}
+
+void CurveModifier::reflect(Reflector &r) {
+  r.text("Object", object);
+  r.help("Name of the Curve object to bend along (Blender: Curve > Curve Object).");
+  static const char *kAxes[] = {"X", "Y", "Z", "-X", "-Y", "-Z"};
+  r.enumeration("Deform Axis", deform_axis, kAxes, 6);
+  r.help("The mesh's axis that runs along the curve; the mesh's origin sits at the curve's start.");
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 
 void SolidifyModifier::reflect(Reflector &r) {
@@ -1083,6 +1421,7 @@ uint64_t BooleanModifier::modifier_dependency_hash() const {
   mix(rel.m, sizeof(rel.m));
   mix(&tm, sizeof(tm));
   if (tm) mix(&tm->version, sizeof(tm->version));
+  if (tm) mix(&tm->deform_version, sizeof(tm->deform_version));  // a deformed cutter is the same mesh, moved (ADR 0022)
   return h;
 }
 
@@ -1144,6 +1483,7 @@ void DisplaceModifier::reflect(Reflector &r) {
   r.field("Seed", seed, 0, 100000);
   static const char *kDir[] = {"Normal", "X", "Y", "Z"};
   r.enumeration("Direction", direction, kDir, 4);
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void DisplaceModifier::modify(Mesh &m) const {
   meshops::displace(m, strength, midlevel, noise_scale, direction, octaves, (uint32_t)std::max(0, seed));
@@ -1162,6 +1502,7 @@ void SimpleDeformModifier::reflect(Reflector &r) {
   r.field("Lower Limit", lower, 0.01f, 0.0f, 1.0f);
   r.field("Upper Limit", upper, 0.01f, 0.0f, 1.0f);
   r.help("The part of the mesh (0 = one end, 1 = the other) that deforms; the rest follows rigidly.");
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void SimpleDeformModifier::modify(Mesh &m) const { meshops::simple_deform(m, mode, mode <= 1 ? angle : factor, axis, lower, upper); }
 
@@ -1173,6 +1514,7 @@ void CastModifier::reflect(Reflector &r) {
   r.field("Radius", radius, 0.01f, 0.0f, 10000.0f);
   r.help("0 uses the vertices' average distance from the origin.");
   if (r.all_fields() || shape == 1) r.enumeration("Axis", axis, kAxes, 3);
+  reflect_group_limit(r, vertex_group, invert_group);
 }
 void CastModifier::modify(Mesh &m) const { meshops::cast(m, shape, factor, radius, axis); }
 
@@ -1198,6 +1540,7 @@ void ScrewModifier::modify(Mesh &m) const { meshops::screw(m, angle, steps, scre
 namespace {
 struct HashReflector : Reflector {
   bool all_fields() const override { return true; }
+  bool hashing() const override { return true; }
   uint64_t h = 1469598103934665603ull;
   /* A byte at a time, and it stays that way: the lights' and the world's hashes are part of
    * lightmap_scene_key, saved with every bake (a new formula would mark them all out of date). */
@@ -1390,6 +1733,53 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
   }
 }
 
+/* One modifier of a stack (ADR 0024): a deformer limited to a vertex group moves each vertex by its weight; a modifier
+ * that changes the vertex count without carrying the groups gets them from the mesh before it, by position. */
+void run_modifier(const Component &c, Mesh &m) {
+  bool invert = false;
+  const std::string *group = c.limit_group(invert);
+  const int gi = group && !group->empty() ? m.find_group(*group) : -1;
+  if (gi >= 0 && c.is_deform_only() && m.vertex_groups[(size_t)gi].weights.size() == m.vert_count()) {
+    const std::vector<Vec3> before = m.positions;
+    c.modify(m);
+    if (m.positions.size() != before.size()) return;
+    const std::vector<float> &w = m.vertex_groups[(size_t)gi].weights;
+    for (size_t i = 0; i < before.size(); i++) {
+      float k = finite_bits(w[i]) ? std::max(0.0f, std::min(w[i], 1.0f)) : 0.0f;
+      if (invert) k = 1.0f - k;
+      m.positions[i] = k == 0.0f ? before[i] : before[i] + (m.positions[i] - before[i]) * k;  // 0: untouched, even by a NaN
+    }
+    return;
+  }
+  if (!c.is_deform_only() && !m.vertex_groups.empty()) {
+    /* What the transfer reads, not a whole copy (no render caches, UVs or flags). */
+    Mesh before;
+    before.positions = m.positions;
+    before.face_offsets = m.face_offsets;
+    before.corner_verts = m.corner_verts;
+    before.vertex_groups = m.vertex_groups;
+    c.modify(m);
+    /* Mirror, Array and Join copy the groups themselves; a modifier that made a new mesh, or renumbered without
+     * them, gets them from the mesh before it, by position, through a map kept while the topology stays. */
+    if (m.groups_fit() && m.vertex_groups.size() == before.vertex_groups.size()) return;
+    if (!before.groups_fit()) {
+      meshops::transfer_vertex_groups(before, m);
+      return;
+    }
+    const uint64_t in_key = meshops::topology_key(before), out_key = meshops::topology_key(m);
+    std::shared_ptr<meshops::GroupTransferMap> map = c.group_map;
+    if (!map || map->in_key != in_key || map->out_key != out_key) {
+      map = std::make_shared<meshops::GroupTransferMap>();
+      meshops::group_transfer_map(before, m, *map);
+      map->in_key = in_key, map->out_key = out_key;
+      c.group_map = map;
+    }
+    meshops::apply_group_map(*map, before, m);
+    return;
+  }
+  c.modify(m);
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = mesh_filter();
@@ -1402,21 +1792,85 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   auto on = [kind](const Component &c) {
     return c.is_modifier() && (kind == 1 ? c.show_in_render : c.enabled && (kind == 0 || c.show_in_editmode));
   };
-  for (auto &c : components)
-    if (on(*c)) {
-      any = true;
-      mix(hash_component(*c));
-      mix(c->modifier_dependency_hash());
-    }
+  /* The deforming tail (ADR 0022): the modifiers after the last one that changes topology. Edit Mode's
+   * cage (kind 2) keeps the full path. */
+  size_t split = 0;
+  for (size_t i = 0; i < components.size(); i++)
+    if (on(*components[i]) && (!components[i]->is_deform_only() || kind == 2)) split = i + 1;
+  uint64_t head_key = key;
+  bool any_head = false, any_tail = false;
+  for (size_t i = 0; i < components.size(); i++) {
+    Component &c = *components[i];
+    if (!on(c)) continue;
+    any = true;
+    (i < split ? any_head : any_tail) = true;
+    mix(hash_component(c));
+    mix(c.modifier_dependency_hash());
+    if (i + 1 == split) head_key = key;
+  }
   if (!any) return mf->mesh.get();
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
-  auto m = std::make_shared<Mesh>(*mf->mesh);
-  for (auto &c : components)
-    if (on(*c)) c->modify(*m);
-  m->touch();
+  auto run = [&](Mesh &m, size_t from, size_t to) {
+    for (size_t i = from; i < to; i++)
+      if (on(*components[i])) run_modifier(*components[i], m);
+  };
+  if (!any_tail) {
+    auto m = std::make_shared<Mesh>(*mf->mesh);
+    run(*m, 0, components.size());
+    m->touch();
+    eval_mesh_[kind] = m;
+    eval_key_[kind] = key;
+    eval_from_[kind] = 0;
+    eval_head_[kind] = nullptr;  // nothing to deform from: don't keep a second copy
+    return eval_mesh_[kind].get();
+  }
+  const Mesh *head = mf->mesh.get();
+  if (any_head) {
+    if (!eval_head_[kind] || eval_head_key_[kind] != head_key) {
+      auto h = std::make_shared<Mesh>(*mf->mesh);
+      run(*h, 0, split);
+      h->touch();
+      eval_head_[kind] = h;
+      eval_head_key_[kind] = head_key;
+    }
+    head = eval_head_[kind].get();
+  }
+  else
+    eval_head_[kind] = nullptr;
+  std::shared_ptr<Mesh> m = eval_mesh_[kind];
+  const bool same_topology = m && m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
+                             m->face_offsets.size() == head->face_offsets.size();
+  if (m && eval_from_[kind] == head_key && same_topology) {
+    /* Deform again from the head's positions. A copy shared with a snapshot (Scene::clone) or another
+     * scene is never written: it is copied first, render mesh included, which still saves the rebuild. */
+    if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
+    const uint64_t v = m->version;
+    m->positions = head->positions;
+    m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
+    run(*m, split, components.size());
+    if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
+        m->face_offsets.size() == head->face_offsets.size())
+      m->version = v;  // the deformers touch() it; only the positions moved
+    else
+      m->touch();  // a modifier that claims to deform changed topology: rebuild as usual
+  }
+  else {
+    m = std::make_shared<Mesh>(*head);
+    run(*m, split, components.size());
+    m->touch();
+  }
   eval_mesh_[kind] = m;
   eval_key_[kind] = key;
+  eval_from_[kind] = head_key;
   return eval_mesh_[kind].get();
+}
+
+Curve *GameObject::curve() const { return static_cast<Curve *>(find_role(Component::RenderRole::Curve)); }
+Lattice *GameObject::lattice() const { return static_cast<Lattice *>(find_role(Component::RenderRole::Lattice)); }
+Component *GameObject::point_source() const {
+  for (auto &c : components)
+    if (c->render_role() == Component::RenderRole::Curve || c->render_role() == Component::RenderRole::Lattice) return c.get();
+  return nullptr;
 }
 
 AABB GameObject::world_bounds() const {
@@ -1588,6 +2042,9 @@ std::unique_ptr<Scene> Scene::clone() const {
     for (int k = 0; k < 3; k++) {
       c->eval_mesh_[k] = o->eval_mesh_[k];
       c->eval_key_[k] = o->eval_key_[k];
+      c->eval_head_[k] = o->eval_head_[k];
+      c->eval_head_key_[k] = o->eval_head_key_[k];
+      c->eval_from_[k] = o->eval_from_[k];
     }
     for (auto &comp : o->components) {
       auto cc = comp->clone();

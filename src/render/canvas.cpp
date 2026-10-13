@@ -942,8 +942,8 @@ static std::string png_deflate(const std::string &raw) {
 /* PNG row filters (PNG spec 9.2), chosen per row by the smallest sum of
  * absolute residuals - libpng's adaptive heuristic. The first writer always
  * used filter 0 (None): gradients barely compressed (22 MB for a 4K image). */
-static std::string png_filtered_rows(const uint32_t *pixels, int width, int height, int stride) {
-  const size_t rb = (size_t)width * 3;
+static std::string png_filtered_rows(const uint32_t *pixels, int width, int height, int stride, int bpp = 3) {
+  const size_t rb = (size_t)width * bpp;
   std::vector<uint8_t> prev(rb, 0), cur(rb), cand[5];
   for (auto &c : cand) c.resize(rb);
   std::vector<std::string> rows((size_t)height);
@@ -956,16 +956,17 @@ static std::string png_filtered_rows(const uint32_t *pixels, int width, int heig
   for (int y = 0; y < height; y++) {
     const uint32_t *row = pixels + (size_t)y * stride;
     for (int x = 0; x < width; x++) {
-      cur[x * 3] = (uint8_t)(row[x] >> 16);
-      cur[x * 3 + 1] = (uint8_t)(row[x] >> 8);
-      cur[x * 3 + 2] = (uint8_t)row[x];
+      cur[x * bpp] = (uint8_t)(row[x] >> 16);
+      cur[x * bpp + 1] = (uint8_t)(row[x] >> 8);
+      cur[x * bpp + 2] = (uint8_t)row[x];
+      if (bpp == 4) cur[x * 4 + 3] = (uint8_t)(row[x] >> 24);
     }
     int best = 0;
     uint64_t best_cost = UINT64_MAX;
     for (int f = 0; f < 5; f++) {
       uint64_t cost = 0;
       for (size_t i = 0; i < rb; i++) {
-        int a = i >= 3 ? cur[i - 3] : 0, b = prev[i], c = i >= 3 ? prev[i - 3] : 0;
+        int a = i >= (size_t)bpp ? cur[i - bpp] : 0, b = prev[i], c = i >= (size_t)bpp ? prev[i - bpp] : 0;
         int pred = f == 0 ? 0 : f == 1 ? a : f == 2 ? b : f == 3 ? (a + b) / 2 : paeth(a, b, c);
         uint8_t v = (uint8_t)(cur[i] - pred);
         cand[f][i] = v;
@@ -983,21 +984,25 @@ static std::string png_filtered_rows(const uint32_t *pixels, int width, int heig
   return out;
 }
 
-bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride) {
-  std::string raw = png_filtered_rows(pixels, width, height, stride);
+std::string encode_png(const uint32_t *pixels, int width, int height, int stride, bool alpha) {
+  std::string raw = png_filtered_rows(pixels, width, height, stride, alpha ? 4 : 3);
   std::string png("\x89PNG\r\n\x1a\n", 8);
   std::string ihdr;
   be32(ihdr, (uint32_t)width);
   be32(ihdr, (uint32_t)height);
   ihdr += (char)8;  // bit depth
-  ihdr += (char)2;  // RGB
+  ihdr += (char)(alpha ? 6 : 2);  // RGBA / RGB
   ihdr += (char)0;
   ihdr += (char)0;
   ihdr += (char)0;
   chunk(png, "IHDR", ihdr);
   chunk(png, "IDAT", png_deflate(raw));
   chunk(png, "IEND", "");
-  return fs::write_file(path, png);
+  return png;
+}
+
+bool write_png(const std::string &path, const uint32_t *pixels, int width, int height, int stride, bool alpha) {
+  return fs::write_file(path, encode_png(pixels, width, height, stride, alpha));
 }
 
 }  // namespace bl

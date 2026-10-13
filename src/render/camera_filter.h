@@ -122,6 +122,45 @@ struct OutlineParams {
   bool object_edges = true;          // where one object meets another (ids)
 };
 void apply_edge_outline(RenderTarget &rt, const OutlineParams &p, const FilterFrame *frame);
+
+/* Anime and manga looks (task 0039). Sizes are pixels at 1080p (scaled by FilterFrame::pixel_scale); colours are
+ * display colours 0..1. */
+struct HalftoneParams {
+  float cell = 8.0f;    // dot spacing
+  float angle = 45.0f;  // the screen's angle, degrees
+  int mode = 0;         // 0 Mono (ink on paper), 1 Colour (each channel its own screen)
+  Vec3 ink{0, 0, 0}, paper{1, 1, 1};
+  float contrast = 1.0f;
+};
+void apply_halftone(RenderTarget &rt, const HalftoneParams &p, const FilterFrame *frame);
+struct HatchingParams {
+  float spacing = 6.0f, thickness = 1.0f, angle = 45.0f;
+  int layers = 3;            // 1 one direction, 2 cross-hatching, 3 plus a diagonal
+  Vec3 ink{0, 0, 0}, paper{1, 1, 1};
+  bool keep_color = false;   // lines over the image instead of over paper
+  float strength = 1.0f;
+};
+void apply_hatching(RenderTarget &rt, const HatchingParams &p, const FilterFrame *frame);
+struct LineArtParams {
+  Vec3 color{0, 0, 0};
+  float thickness = 1.5f;
+  float crease_angle = 40.0f;  // degrees between neighbouring surface normals that draws a crease
+  bool silhouettes = true, object_edges = true, creases = true;
+  float taper = 0.0f;          // lines fade with distance (0: none)
+};
+void apply_line_art(RenderTarget &rt, const LineArtParams &p, const FilterFrame *frame);
+struct PaperParams {
+  float strength = 0.35f, scale = 1.0f;
+  Vec3 tint{1.0f, 0.97f, 0.9f};
+};
+void apply_paper(RenderTarget &rt, const PaperParams &p, const FilterFrame *frame);
+struct ColorRampParams {
+  int stops = 3;          // 2..4
+  Vec3 color[4] = {};
+  float position[4] = {};
+  int interpolation = 0;  // 0 Constant, 1 Linear
+};
+void apply_color_ramp(RenderTarget &rt, const ColorRampParams &p);
 struct CrtParams {
   float scanlines = 0.5f, curvature = 0.2f, mask = 0.3f, flicker = 0.0f;
 };

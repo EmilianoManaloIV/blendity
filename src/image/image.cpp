@@ -1261,6 +1261,12 @@ void texture_cache_clear() {
   g_cache.clear();
 }
 
+void texture_cache_forget(const std::string &path) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  g_cache.erase(path + "|srgb");
+  g_cache.erase(path + "|data");
+}
+
 size_t texture_cache_size() {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   return g_cache.size();

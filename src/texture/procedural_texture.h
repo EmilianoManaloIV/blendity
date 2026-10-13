@@ -34,6 +34,9 @@ struct LayerContext {
   float physical_size = 1.0f;  // metres per tile (the default tiling of a material using the texture)
   uint32_t seed = 0;
   bool seamless = true;  // the texture's Seamless: an Image layer repeats a whole number of times
+  /* This evaluation's size over the texture's set size (below 1 for the drag preview): radii given in texels
+   * of the set size (Blur, Edge Wear, Height AO) are scaled by it, so the preview looks like the result. */
+  float texel_scale = 1.0f;
 };
 
 /* What a generator produces at one texel: the planes it writes (by the layer's targets) and how much
@@ -41,6 +44,28 @@ struct LayerContext {
 struct LayerSample {
   float height = 0.0f, rough = 0.5f, cover = 1.0f;
   Vec3 albedo{0.5f, 0.5f, 0.5f};
+};
+
+/* One point of the planes (live shading, task 0031): what TexPlanes holds per texel. */
+struct TexPoint {
+  float height = 0.5f, rough = 0.5f, mask = 1.0f;
+  Vec3 albedo{0.5f, 0.5f, 0.5f};
+};
+
+/* What a neighbourhood filter keeps from the set-resolution evaluation so it can be applied at a point (live
+ * shading): Blur's blurred planes, Edge Wear's height range, Height AO's mean height; an Image layer's image.
+ * Sampled bilinearly, wrapping. */
+struct LayerAux {
+  int w = 0, h = 0;
+  std::vector<float> a, b;
+  std::vector<Vec3> c;
+  TexturePtr image;
+  float image_tiling = 1.0f;
+  bool empty() const { return w == 0 && !image; }
+  float sample_a(float u, float v) const { return sample_plane(a, u, v); }
+  float sample_b(float u, float v) const { return sample_plane(b, u, v); }
+  Vec3 sample_c(float u, float v) const;
+  float sample_plane(const std::vector<float> &pl, float u, float v) const;
 };
 
 enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin };
@@ -62,6 +87,14 @@ struct TextureLayer {
   virtual LayerSample sample(float u, float v, const LayerContext &c) const;
   /* Filters override this and work on the planes directly (in parallel over rows). */
   virtual void apply(TexPlanes &p, const LayerContext &c) const;
+  /* The same at one point of the tile (live shading, task 0031): generators blend their sample, point filters
+   * apply their formula, neighbourhood filters read what make_aux kept. */
+  virtual void apply_point(TexPoint &p, float u, float v, const LayerContext &c, const LayerAux *aux) const;
+  virtual bool needs_aux() const { return false; }
+  /* Called with the planes this layer receives, before apply(). */
+  virtual void make_aux(const TexPlanes &, const LayerContext &, LayerAux &) const {}
+  /* Warp and Tile read the layers below somewhere else: the point they read (u, v in the tile). */
+  virtual bool remap(float &, float &, const LayerContext &) const { return false; }
   /* The blend, opacity, targets and mask fields (reflected first by every layer). */
   void reflect_common(Reflector &r, bool with_enabled = true);
 };
@@ -93,6 +126,16 @@ struct ProceduralTexture {
   bool seamless = true;           // blend a quarter-tile overlap of non-periodic layers (Image)
   float normal_strength = 1.0f;
   int seed = 0;
+  /* Live Shading (task 0031): up close the rasterizer evaluates the stack per pixel instead of reading the
+   * image, so it stays sharp at any distance. */
+  bool live_shading = true;
+  /* Which maps the texture gives a material (the user's request, round 61). Off, an output is neutral (a flat
+   * normal, roughness 1 so the material's own Roughness rules, mid height) while the layers still compute the
+   * height inside: a Color Ramp from the height colours the albedo without the bricks also bumping the surface. */
+  bool use_normal = true, use_roughness = true, use_height = true;
+  bool output_on(int which) const {
+    return which == 1 ? use_normal : which == 2 ? use_roughness : which == 3 ? use_height : true;
+  }
   TextureLayerList layers;
   uint64_t version = 1;
   ProceduralTexture() = default;
@@ -101,8 +144,10 @@ struct ProceduralTexture {
   void touch();
   void reflect(Reflector &r);
   uint64_t hash();  // every field and layer
-  /* The stack evaluated into planes of the texture's size. */
-  void evaluate(TexPlanes &out) const;
+  /* The stack evaluated into planes of the texture's size (or `size`, a preview's), and what each
+   * neighbourhood layer keeps for point evaluation when `aux` is given (one entry per layer). */
+  void evaluate(TexPlanes &out, std::vector<LayerAux> *aux = nullptr, int size = 0) const;
+  LayerContext context(int w, int h) const;
   /* One output as an image: 0 albedo (sRGB), 1 normal (+Y up, from the height), 2 roughness, 3 height. */
   Bitmap output(int which, const TexPlanes &planes) const;
   Bitmap output(int which) const;
@@ -110,6 +155,36 @@ struct ProceduralTexture {
   TextureLayer *add(const std::string &type, int at = -1);
 };
 using ProceduralTexturePtr = std::shared_ptr<ProceduralTexture>;
+
+/* A texture evaluated at any point (task 0031): an immutable snapshot of the stack and of the planes its
+ * neighbourhood filters need, taken with its images. Shared by the materials using it; never edited, so it is
+ * safe to read from every shading thread. */
+class LiveTexture {
+ public:
+  LiveTexture(const ProceduralTexture &t, std::vector<LayerAux> aux, int w, int h);
+  /* u, v in the tile (generator convention: v = 0 at the image's top row), any value (wrapped). */
+  TexPoint at(float u, float v) const { return eval(tex_.layers.size(), u, v, false); }
+  /* The normal output at (u, v) as the image's Sobel gives it (+Y up, tangent space). Given the point's own
+   * height (from at()), one-sided differences: two more height evaluations instead of four. */
+  Vec3 normal(float u, float v, const float *height_here = nullptr) const;
+  int width() const { return w_; }
+  int height() const { return h_; }
+  uint64_t hash() const { return hash_; }
+  bool output_on(int which) const { return tex_.output_on(which); }  // the texture's Normal / Roughness / Height Map switches
+
+ private:
+  /* height_only: just the layers that change the height (or the mask the height layers fade by), for the
+   * normal's differences: in the Bricks preset that is the Brick alone. */
+  TexPoint eval(size_t n, float u, float v, bool height_only) const;
+  ProceduralTexture tex_;
+  std::vector<LayerAux> aux_;
+  std::vector<uint8_t> shapes_height_;  // per layer: it can change the height
+  LayerContext ctx_;
+  int w_ = 0, h_ = 0;
+  float ns_ = 1.0f;
+  uint64_t hash_ = 0;
+};
+using LiveTexturePtr = std::shared_ptr<const LiveTexture>;
 
 enum class TextureOutput { Albedo = 0, Normal, Roughness, Height, Count };
 const char *texture_output_name(int which);  // "albedo", "normal", "roughness", "height"
@@ -119,6 +194,14 @@ bool split_texture_ref(const std::string &path, std::string &asset, int &output)
 
 /* An output as a Texture, kept per asset path + output while the asset's hash is unchanged. */
 TexturePtr procedural_texture_output(ProceduralTexture &t, int which);
+/* The texture's live snapshot (built with its outputs, from the same evaluation). */
+LiveTexturePtr procedural_texture_live(ProceduralTexture &t);
+/* While a texture's field is dragged its outputs (and live snapshot) evaluate at 256 at most, so the objects
+ * using it follow every frame; off again, they come back at the set size (task 0031). Per texture (by asset
+ * path); clear_previews ends them all (the editor on release and when it closes). */
+void procedural_texture_set_preview(const std::string &asset_path, bool on);
+void procedural_texture_clear_previews();
+bool procedural_texture_preview();  // any texture in preview
 void procedural_texture_cache_clear();
 
 /* Presets the Textures window and `newtex` start from: "Bricks", "Wood Floor", "Tatami", "Tiles", "Noise". */

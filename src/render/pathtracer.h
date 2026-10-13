@@ -64,6 +64,9 @@ struct PTSettings {
    * radiance instead of the world's; bounces still see the world, so the lighting doesn't change. */
   bool solid_background = false;
   Vec3 background{0.0f, 0.0f, 0.0f};
+  /* Film > Transparent (task 0035; set with solid_background black): only the camera ray itself sees the empty
+   * background; rays out of glass see the world and the glass counts as covered (Cycles' Transparent Glass off). */
+  bool transparent_film = false;
   /* Library backends (used when compiled in, see deps/deps.h). Like Cycles:
    * Embree for ray queries, OpenImageDenoise for denoising. Changing
    * use_embree takes effect on the next build(). */
@@ -86,6 +89,17 @@ struct PTSettings {
   double merge_interval_ms = 100.0;  // how often GPU results are read back for display
   float guiding_probability = 0.5f;  // Cycles' "Surface Guiding Probability"
   int guiding_training_samples = 128;
+  /* A camera filter's rasterizer stages (task 0032, ADR 0008 amended), as the rasterizer applies them: at a
+   * camera ray's first hits, UVs interpolated across the screen (affine) and Transparent surfaces as a 2 x 2
+   * checkerboard (screen door), both by the hit projected through view_proj into width x height; the texture
+   * rules on every hit. Vertex snapping is done to the meshes before build() (the editor's snapped copies). */
+  struct Retro {
+    bool affine_uv = false, screen_door = false;
+    TexOverride tex;
+    Mat4 view_proj;
+    int width = 0, height = 0;
+    bool active() const { return width > 0 && height > 0 && (affine_uv || screen_door || tex.active()); }
+  } retro;
 };
 
 struct PTStats {
@@ -107,8 +121,10 @@ class PathTracer {
   void set_camera(const Mat4 &view, const Mat4 &proj, int width, int height, const PTLens &lens = PTLens());
   void set_settings(const PTSettings &s) { settings_ = s; }
   const PTSettings &settings() const { return settings_; }
-  /* What the camera rays hit first, per pixel: the mean distance along the ray (1e6 for the sky) and
-   * the object's id (0 for the sky; the last sample's), for a FilterFrame's depth and id planes. */
+  /* What the camera sees first through each pixel's centre (no jitter, no lens), as the rasterizer's depth and id
+   * planes hold it: the distance along that ray (1e6 for the sky) and the object's id (0 for the sky). Traced once
+   * per scene and camera, for a FilterFrame (task 0039: the samples' jittered hits made creases noisy). Transparent
+   * and glass surfaces and an outline's back faces are looked through; cutout holes too. */
   void first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids);
   void reset();
 
@@ -125,6 +141,9 @@ class PathTracer {
   void resolve_rgb(const std::vector<float> &rgb, uint32_t *out, int stride) const;
   /* Linear float RGB (3 per pixel), for .hdr export. */
   std::vector<float> linear_rgb(bool denoise);
+  /* The share of camera samples that hit something, per pixel (alpha for a transparent render, task 0035): a
+   * surface seen through a Transparent one counts, the world doesn't. */
+  std::vector<float> coverage();
 
   /* Ray queries (also used by tests / picking). */
   struct Hit {
@@ -141,7 +160,7 @@ class PathTracer {
   }
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
-  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr); }
+  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false); }
   bool occluded(const Ray &r, float tmax) const;
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
    * cosine-weighted around dirs[i] as a normal (the mean is irradiance / pi, as incoming_radiance's
@@ -163,6 +182,15 @@ class PathTracer {
   const char *denoise_backend() const;
   /* "CPU", "NVIDIA GeForce RTX 4070 SUPER (RT cores)", "CPU + 2 GPUs" ... */
   std::string device_summary() const;
+  /* Task 0037: with background opening, a GPU that is still opening leaves the tracer on the CPU (gpu_starting);
+   * adopt_ready_gpus, called every frame, takes it when ready, uploads the scene and restarts the samples on it
+   * (true then). The editor's views turn it on; headless runs and tests open synchronously. */
+  void set_background_gpu_open(bool on) { background_gpu_open_ = on; }
+  bool gpu_starting() const { return gpu_starting_; }
+  bool waiting_for_gpu() const { return gpus_.empty() && gpu_starting_; }  // tracing on the CPU only because of it
+  bool adopt_ready_gpus();
+  /* gpu_gather returned false because its device is still opening (the caller gathers on the CPU this time). */
+  bool gpu_gather_waiting() const { return gpu_gather_waiting_; }
   static bool gpu_available();
   /* Errors from GPU devices that had to drop out (empty if none). */
   const std::string &gpu_error() const { return gpu_error_; }
@@ -210,7 +238,13 @@ class PathTracer {
   };
   static void build_sah(const std::vector<AABB> &boxes, std::vector<Node> &nodes, std::vector<uint32_t> &order, uint32_t max_leaf);
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
-  Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint32_t *id, uint64_t &rays, PTGuidingThread *guide) const;
+  /* camera: a camera's ray (the bakes' gathers are not: toon tones, outlines and the Retro stages are for the eye). */
+  Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint32_t *id, uint64_t &rays, PTGuidingThread *guide,
+             bool camera = true) const;
+  /* The Retro stages (task 0032): where p lands on the filter's internal image; a triangle's UVs interpolated
+   * there in screen space. */
+  bool retro_screen(Vec3 p, Vec2 &s) const;
+  void retro_affine_uv(uint32_t object, uint32_t prim, Vec2 s, SurfacePoint &sp) const;
   std::vector<float> denoised() const;
   int render_cpu(double budget_ms, int max_samples, std::atomic<int> *claim);
   /* GPU devices (gpu_device.h): their renderers, kept across builds. */
@@ -240,9 +274,18 @@ class PathTracer {
   std::vector<Vec3> cpu_accum_, cpu_albedo_, cpu_normal_;
   std::vector<float> cpu_depth_;
   std::vector<uint32_t> cpu_ids_, ids_;  // first-hit object index + 1 (0 = sky), the last sample's
+  std::vector<float> cpu_cov_, cov_;      // camera samples that hit something (summed)
+  std::vector<float> centre_dist_;  // first_hit_planes' cache, for centre_key_
+  std::vector<uint32_t> centre_ids_;
+  uint64_t centre_key_ = 0;
   std::vector<float> cpu_last_dist_, last_dist_;  // the last hitting sample's first-hit distance (0 = none yet)
   void build_gpu_scene(gpu::Scene &s) const;
   void sync_gpus();
+  bool background_gpu_open_ = gpu::background_open_default();
+  bool gpu_starting_ = false;
+  uint64_t gpu_generation_seen_ = 0;
+  std::vector<std::pair<int, bool>> gpu_pending_;  // the devices it waits for (index, ray tracing hardware)
+  mutable bool gpu_gather_waiting_ = false;
   void upload_gpus();
 
   std::vector<PTObject> objects_;

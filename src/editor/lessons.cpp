@@ -198,11 +198,28 @@ Navigation stays Unity's (hold RMB to fly, Alt+LMB orbit, MMB pan), and so do th
 )"},
     {"Modifiers vs Components", "Non-destructive editing and Catmull-Clark", R"(
 Blender's modifier stack changes a mesh on the fly without touching the original: Subdivision Surface, Mirror, Smooth... Each modifier feeds the next. Unity has no modifier stack. Any procedural change is done by a script component.
-Blendity combines the two ideas: modifiers are components, shown together in the Inspector's Modifiers panel as Blender's stack. Add Modifier lists them by Blender's groups: Edit (Weld), Generate (Array, Bevel, Boolean, Decimate, Mirror, Screw, Solidify, Subdivision Surface, Triangulate, Wireframe) and Deform (Cast, Displace, Simple Deform, Smooth). They run from the top down, and the result is cached until the mesh or a setting changes. Each header has Blender's three toggles: Edit Mode (draw the result while you edit the cage), Viewport and Render. Its menu applies, duplicates, copies to the other selected objects or moves the modifier. Apply bakes one modifier into the mesh, like Blender's Ctrl+A; Apply All bakes the whole stack.
+Blendity combines the two ideas: modifiers are components, shown together in the Inspector's Modifiers panel as Blender's stack. Add Modifier lists them by Blender's groups: Edit (Weld), Generate (Array, Bevel, Boolean, Decimate, Mirror, Screw, Solidify, Subdivision Surface, Triangulate, Wireframe) and Deform (Cast, Curve, Displace, Lattice, Mesh Deform, Simple Deform, Smooth). They run from the top down, and the result is cached until the mesh or a setting changes. Each header has Blender's three toggles: Edit Mode (draw the result while you edit the cage), Viewport and Render. Its menu applies, duplicates, copies to the other selected objects or moves the modifier. Apply bakes one modifier into the mesh, like Blender's Ctrl+A; Apply All bakes the whole stack.
 # Order matters
 Mirror then Bevel bevels the seam in the middle; Bevel then Mirror doesn't, because the seam doesn't exist yet when the bevel runs. Array then Simple Deform bends the whole row; Simple Deform then Array repeats one bent copy. Move a modifier up or down and watch.
 # A lathe from a line
 Screw sweeps edges round an axis. Draw a profile with wire edges (Edit Mode, vertex mode: select a vertex and press Ctrl+E repeatedly to grow a line), add Screw, and the outline becomes a vase or a bottle. Screw > Screw raises each turn: springs and threads.
+# Bending along a curve
+GameObject > Curve adds a path: Bezier (smooth, near its points), Catmull-Rom (through every point) or Poly (straight lines). Click the curve to select it, click a point to select that point (Shift adds), then move, turn or scale points with the gizmo; Esc lets go of them. A Curve modifier on a mesh bends it along the curve: the mesh's X (or the Deform Axis) runs along the path from its start, and the other two axes stay across it, so a straight curve changes nothing. Array with Fit Type Fit Curve makes as many copies as fit the curve's length: Array then Curve, both naming the same curve, makes a fence, a chain or a ring of blocks. Each point's Tilt twists the mesh round the path and its Radius thickens it there.
+# Squashing with a lattice
+Select a mesh and choose GameObject > Lattice: a box of points is fitted round it and the mesh gets a Lattice modifier naming it. Click a point and move it with the gizmo: the part of the mesh near it follows. Points U / V / W add points along each side (the shape is kept); Linear follows the points exactly, B-Spline is smoother and softer. Strength on the modifier fades the effect. It is how cartoon squash and stretch, bulging muscles and bent buildings are done without touching a vertex.
+# A cage round a mesh
+A lattice is always a box; a cage can be any shape. Model a rough, closed, low-poly mesh round a detailed one (a few boxes round a character), add Mesh Deform to the detailed mesh, set Object to the cage and press Bind. Now move the cage's vertices in Edit Mode: the detailed mesh follows smoothly, near parts most. Blendity binds with mean value coordinates (Ju, Schaefer and Warren 2005): each vertex is a weighted average of the cage's vertices, weights that reproduce any move, turn or stretch of the whole cage exactly. The cage must be closed; hide it from renders (Display As Wire) and keep Mesh Deform first among the deforming modifiers.
+# Vertex groups
+A vertex group is a name and a weight (0 to 1) for every vertex. In the Inspector, MeshFilter > Vertex Groups > Add makes one; in Edit Mode select vertices, set Weight and press Assign. Every deforming modifier (Displace, Simple Deform, Smooth, Cast, Curve, Lattice, Mesh Deform) has Vertex Group and Invert: name a group and only its vertices move, each as much as its weight, so a Displace can rough up the top of a rock and leave its base. The groups follow their vertices through every edit: a vertex that stays keeps its weights, a new one takes what the surface had where it is.
+# Weight painting
+Under Vertex Groups, press Weight Paint: the mesh turns blue (weight 0) to red (weight 1) for the chosen group, and dragging over it paints. Add raises the weights, Subtract lowers them, Draw moves them towards Weight, Blur evens out sharp borders. Radius is in screen pixels, Strength how much each dab gives, Falloff how it fades towards the edge of the brush. Mirror X paints both sides of a symmetric model at once; Front Faces Only stops the brush reaching the back. Each stroke is one undo step. Normalize All makes every vertex's weights add up to 1 (what a skin wants), Clean drops tiny weights.
+# Bones and skins
+A skeleton is a hierarchy of bones: in Blendity each bone is a GameObject with a Bone component, under a root with an Armature. Pose it by turning bones with the Rotate gizmo, like any object. A mesh follows through its Armature (Skin) modifier: each vertex moves with the bones its vertex groups are named after, weighted. Select a mesh and choose GameObject > Armature: a bone the mesh's height is made and the mesh bound to it with automatic weights (by distance); `bone add <parent>` adds bones at a parent's tip, and Bind: Automatic Weights binds again; Weight Paint fixes what automatic weights get wrong. Linear blending makes twisted joints thin (the candy wrapper); Armature > Deform: Dual Quaternion keeps their girth. Armature > Rest Position shows the mesh unposed; `armature reset` puts the bones back, `armature apply` makes the pose the new rest. Rigged FBX and glTF characters import with all of this set up.
+# Inverse kinematics
+Turning a thigh and then a shin until the foot lands on a step is slow; IK does it backwards. An IK constraint on the shin (Chain Length 2: shin and thigh) turns both so the shin's tip reaches the Target object: move the target and the leg follows, every frame and in Play. Two bones have one exact answer (the triangle of thigh, shin and hip-to-target, the law of cosines) up to which way the knee points: a Pole object picks that. Longer chains (a tail, a spine) are solved by cyclic coordinate descent: from the tip up, each bone turns the tip towards the target, a few dozen rounds. Weight fades from the rest pose to the solution. A bone IK turns refuses the gizmo and G / R / S: move its target. GameObject > Rig > Humanoid or Quadruped makes a whole skeleton with targets (FootIK, HandIK) and poles; Auto IK on Selected Skeleton finds the legs and arms of an imported Mixamo, Unity or Rigify skeleton by their names. Console: `ik add <bone> <target> [pole] [chain]`, `rig humanoid|quadruped|autoik`.
+> Welman, C. (1993) Inverse Kinematics and Geometric Constraints for Articulated Figure Manipulation. MSc thesis, Simon Fraser University (CCD).
+@ blender/source/blender/ikplugin/intern/iksolver_plugin.cc
+? A thigh and a shin are 0.45 m and 0.43 m. Can the foot reach a target 0.9 m from the hip? | No: the chain is at most 0.88 m long, so IK points the straightened leg at it.
 # Catmull-Clark in three rules
 - Face point = average of the face's corners.
 - Edge point = average of the edge's two ends and the two neighbouring face points.
@@ -233,6 +250,9 @@ A real lens focuses at one distance. With Depth of Field on, each camera ray sta
 The Camera's Pick Focus Point button is an eyedropper. Click a surface in the Scene view and the focus distance becomes how far that point is in front of the camera. Lock on the Camera Preview keeps that camera's preview up while you select other things and edit meshes, so you can model while you watch the shot.
 ! cmd:select Main Camera; pickfocus | Pick the Main Camera's focus point (then click a surface)
 ! cmd:select Main Camera; set Camera.PhysicalCamera 1; set Camera.DepthOfField 1; set Camera.FStop 1.4; camerapreview rendered | Make the Main Camera physical with a shallow depth of field and preview it
+# Composition guides
+Show Guides (Camera inspector, or the Game view's Guides menu) draws lines over what the camera sees, never into the render. The rule of thirds splits the frame into a three by three grid: a horizon on one of the horizontal lines and a subject where two lines cross usually reads better than one dead centre. The golden ratio does the same at 0.382 and 0.618. The golden and harmonious triangles lay a diagonal across the frame with lines from the other two corners (square to the diagonal for the golden ones, to the golden section of the far edge for the harmonious ones), for compositions built on diagonals. Title Safe and Action Safe mark the margins a television might crop (Blender's defaults: Title Safe 10 % across and 5 % down, Action Safe 3.5 % both ways, of half the frame on each side).
+! cmd:select Main Camera; guides thirds on; window Game | Show the Main Camera's rule-of-thirds guides in the Game view
 # Depth precision
 Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits close to the near plane, so a tiny near clip value causes z-fighting in the distance. Keep Near as large as you can.
 > [FoCG] 8.3 Perspective Projection, 8.4 Some Properties of the Perspective Transform, 8.5 Field-of-View
@@ -338,13 +358,53 @@ Each test compares a naive version with the optimised one, so you can see what e
 ! window:Profiler | Open the Profiler
 ! spawn:1000 | Spawn 1,000 spheres and watch the frame time
 )"},
-    {"Your Research", "Turning papers into features", R"(
-Drop papers onto the editor window, or copy them into research/papers. Then ask Claude Code to implement a technique, for example: "Read research/papers/taubin95.pdf and add lambda-mu smoothing as a Blendity feature."
-New features follow the pattern in src/research/research.cpp: a function that edits a Mesh plus a short registration (name, citation, description). They then appear in the Research tab, the Mesh > Research Features menu and the Inspector. research/FEATURES.md tracks which paper produced which feature.
-An example is included: Taubin's lambda|mu smoothing. Plain Laplacian smoothing shrinks a mesh toward its centre. Taubin alternates a positive and a negative smoothing step, which removes noise while keeping the volume. Try both on a noisy sphere and compare.
+    {"References", "The papers behind Blendity's features", R"(
+Some of Blendity's features come straight from research papers. Each one is listed here with the feature it became and where to find it, so you can read the original next to the code. The code cites the same papers in its comments.
+# Modeling
+- Taubin smoothing: Inspector > MeshFilter > From Papers, or Mesh > From Papers. Smooths without shrinking the mesh.
 > Taubin, G. (1995) A signal processing approach to fair surface design. SIGGRAPH '95.
-> [FoCG] 10.3 Convolution Filters (smoothing as low-pass filtering)
-! research | Open the Research tab
+! cmd:create Sphere; meshop research:surface_noise; meshop research:taubin_smoothing | Add noise to a sphere, then smooth it with Taubin's filter
+- Subdivision (Subdivide, the Subdivision Surface modifier).
+> Catmull, E. & Clark, J. (1978) Recursively generated B-spline surfaces on arbitrary topological meshes. Computer-Aided Design 10(6).
+- UV unwrapping (U > Unwrap): least squares conformal maps, as Blender's unwrapper.
+> Lévy, B., Petitjean, S., Ray, N. & Maillot, J. (2002) Least squares conformal maps for automatic texture atlas generation. SIGGRAPH '02.
+- Tangent space for normal maps (MikkTSpace, as Blender and most engines).
+> Mikkelsen, M. (2008) Simulation of wrinkled surfaces revisited. Master's thesis, University of Copenhagen.
+- The Utah Teapot primitive.
+> Newell, M. (1975) The utilization of procedure models in digital image synthesis. PhD thesis, University of Utah.
+# Rendering
+- Realtime GI (Lighting window): voxel columns, the mip-map ray test, one bounce of the sun.
+> Thiedemann, S., Henrich, N., Grosch, T. & Müller, S. (2011) Voxel-based global illumination. I3D '11.
+> Amanatides, J. & Woo, A. (1987) A fast voxel traversal algorithm for ray tracing. Eurographics '87.
+- Rough reflection and glass (the GGX microfacet model) and its sampling in the path tracer.
+> Cook, R. & Torrance, K. (1982) A reflectance model for computer graphics. ACM Transactions on Graphics 1(1).
+> Walter, B., Marschner, S., Li, H. & Torrance, K. (2007) Microfacet models for refraction through rough surfaces. EGSR '07.
+> Heitz, E. (2018) Sampling the GGX distribution of visible normals. Journal of Computer Graphics Techniques 7(4).
+> Schlick, C. (1994) An inexpensive BRDF model for physically-based rendering. Computer Graphics Forum 13(3).
+- Large area lights in the views (their specular highlight) and image-based lighting's split sum.
+> Karis, B. (2013) Real shading in Unreal Engine 4. SIGGRAPH course: Physically Based Shading in Theory and Practice.
+- Area lights in Generate Lighting (an exact unshadowed term, shadow rays for the visible share).
+> Heitz, E., Hill, S. & McGuire, M. (2018) Combining analytic direct illumination and stochastic shadows. I3D '18.
+- Disk-shaped area lights (an even mapping of the square onto the disk) and stratified light samples.
+> Shirley, P. & Chiu, K. (1997) A low distortion map between disk and square. Journal of Graphics Tools 2(3).
+> Cranley, R. & Patterson, T. (1976) Randomization of number theoretic methods for multiple integration. SIAM Journal on Numerical Analysis 13(6).
+- The path tracer's BVH (surface area heuristic) and ray-triangle test.
+> Wald, I. (2007) On fast construction of SAH-based bounding volume hierarchies. IEEE Symposium on Interactive Ray Tracing.
+> Möller, T. & Trumbore, B. (1997) Fast, minimum storage ray-triangle intersection. Journal of Graphics Tools 2(1).
+> Duff, T. et al. (2017) Building an orthonormal basis, revisited. Journal of Computer Graphics Techniques 6(1).
+- Path guiding (Render Settings > Path Guiding, through Open PGL's parallax-aware mixtures).
+> Ruppert, L., Herholz, S. & Lensch, H. (2020) Robust fitting of parallax-aware mixtures for path guiding. ACM Transactions on Graphics 39(4), SIGGRAPH '20.
+- The A-Trous denoiser (when OpenImageDenoise isn't there).
+> Dammertz, H., Sewtz, D., Hanika, J. & Lensch, H. (2010) Edge-avoiding À-Trous wavelet transform for fast global illumination filtering. HPG '10.
+- The world: the physical sky, its irradiance for diffuse lighting and probes.
+> Hosek, L. & Wilkie, A. (2012) An analytic model for full spectral sky-dome radiance. SIGGRAPH '12.
+> Ramamoorthi, R. & Hanrahan, P. (2001) An efficient representation for irradiance environment maps. SIGGRAPH '01.
+- Light colour temperature (Use Color Temperature on a light).
+> Kang, B. et al. (2002) Design of advanced color temperature control system for HDTV applications. Journal of the Korean Physical Society 41(6).
+# Textures
+- Noise in materials and procedural textures (gradient noise and its fractal sums).
+> Perlin, K. (2002) Improving noise. SIGGRAPH '02.
+> [FoCG] 11.5 Procedural 3D Textures
 )"},
     {"UV Mapping", "Seams, unwrapping and the UV Editor", R"(
 A texture is a flat image, but a mesh is a surface in 3D. UV mapping gives every face corner a 2D coordinate (u, v) inside the image. Blender stores UVs per face corner, so two faces that share a vertex can still use different parts of the texture. Unity stores UVs per vertex (Mesh.uv), so the importer splits a vertex wherever its UVs differ. Blendity keeps Blender's per-corner layout and splits only in the render cache.
@@ -392,6 +452,26 @@ In Unity a material is a file in the Project window that many objects share; cha
 @ blender/intern/cycles/kernel/svm/checker.h, noise.h
 # Getting textures in
 Drag images onto the window: they're copied to Assets/Textures and, if an object is selected, assigned to its material. Drag an .obj or .fbx and its materials and textures come with it (OBJ uses the .mtl file; FBX is read with ufbx, a library Blender itself bundles).
+# Terrain: grass on top, dirt on the slopes, snow up high
+An axis material (Axis Mode: World) takes a Top, Side and Bottom material by how steep the surface is, projected
+without UVs, so a cliff's top is grassy and its face dirt or rock. Axis High adds a material above a height (High
+Start, faded over High Blend): snow on the peaks. Axis Noise makes those borders wander instead of following a
+clean line, the way real ground does; Noise Scale is how far apart their bumps are.
+# The anime look
+Anime and cel shading draw light in a few flat tones with hard edges instead of a smooth gradient, a coloured
+shadow side, a hard highlight and black lines round the shape. Blender gets it with Shader to RGB and a Color
+Ramp (Goo Engine builds it in); Unity with a toon shader. In Blendity set a material's Shading Model to Toon (or
+pick the Toon preset): Toon Bands sets how many lit tones, Threshold where light turns to shadow, Shadow Color the
+dark side's tint, and a rim light can outline the silhouette from inside. Add an Outline component for the lines:
+a slightly larger copy of the mesh, turned inside out, so only its rim shows round the object (the inverted
+hull). Both show in the views, F12 renders on the CPU and GPU, and exports. For the printed-page look, a camera's
+Add Filter > Looks > Manga stacks Grayscale, Halftone dots, Line Art and Paper; Anime adds Line Art, a little
+saturation and a soft Bloom. Line Art draws creases where the surface turns more than an angle, so a cube's edges
+get lines and a smooth sphere only its outline.
+! cmd:select Sphere; material Toon; component Outline | Make the Sphere toon-shaded with an outline
+# Baking textures for other programs
+Procedural textures, axis materials and Box mapping are computed by Blendity's shaders; another program only understands images on UVs. Object > Bake Textures lays the object out on new UVs (Smart UV Project and Pack Islands, as the lightmapper does) and evaluates its materials at every texel into four images: albedo, roughness, metallic and a normal map. Blender does the same with Cycles' Bake panel, Unity users with Substance's baker. The export option Bake Textures does it on copies for OBJ, FBX and glTF, leaving the scene alone.
+? Why can't a Mirror modifier be baked in place? | The images go on the base mesh's UVs, and the mirrored half shares them: it would repeat the base's images. Apply the modifier first, or export with Bake Textures, which bakes what it exports.
 ? Why is a normal map stored as Non-Color? | Its RGB values are vector components, not colours. Converting them from sRGB would bend every normal.
 ! cmd:select Sphere; texture colorgrid | Put a Color Grid texture on the Sphere
 )"},

@@ -8,6 +8,7 @@
 #include "../texture/procedural_texture.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <functional>
 #include <unordered_map>
 
@@ -107,9 +108,12 @@ void Editor::draw_textures_window(const Recti &r) {
   /* The list: every .ptex under Assets (loaded on first sight), filtered by the search. */
   std::vector<ProceduralTexturePtr> list;
   const std::string f = to_lower(texture_search_);
+  size_t all = 0;
   for (const std::string &path : texture_asset_paths())
-    if (ProceduralTexturePtr t = texture_asset(path))
+    if (ProceduralTexturePtr t = texture_asset(path)) {
+      all++;
       if (f.empty() || to_lower(t->name).find(f) != std::string::npos) list.push_back(t);
+    }
   if (texture_selected_ && texture_asset(texture_selected_->asset_path) != texture_selected_) texture_selected_ = nullptr;  // deleted or replaced
   /* Toolbar: New (presets), size, Assign to Selection, search. */
   const int bh = u.row_h() + u.px(6);
@@ -120,10 +124,15 @@ void Editor::draw_textures_window(const Recti &r) {
   if (u.button(nb, "New", false, ui::Icon::Plus)) u.open_popup(u.id("tex_new"), nb);
   u.tooltip("A new texture asset in Assets/Textures from a preset (Bricks, Wood Floor, Tatami...).");
   u.popup(u.id("tex_new"), u.px(180), [this] {
+    bool made = false;
     for (const std::string &p : texture_preset_names())
-      if (ui_.menu_item(p.c_str())) new_texture_asset(p);
+      if (ui_.menu_item(p.c_str())) new_texture_asset(p), made = true;
     ui_.menu_separator();
-    if (ui_.menu_item("Empty")) new_texture_asset("");
+    if (ui_.menu_item("Empty")) new_texture_asset(""), made = true;
+    if (made) {  // the new one in view (a search left from earlier would hide it)
+      texture_search_.clear();
+      ui_.redraw = true;
+    }
   });
   int x = nb.right() + u.px(6);
   if (texture_selected_) {
@@ -144,9 +153,17 @@ void Editor::draw_textures_window(const Recti &r) {
     if (u.button(ab, "Assign to Selection", false)) assign_texture_asset_to_selection(texture_selected_->asset_path);
     u.tooltip("The selected objects' first material gets this texture's albedo, normal and roughness, tiled by its physical size.");
     x = ab.right() + u.px(6);
+    const Recti db{x, bar.y + u.px(3), u.px(80), bh - u.px(6)};
+    texture_ui_rects_["delete"] = db;
+    if (u.button(db, "Delete", false)) texture_delete_ = texture_selected_;
+    u.tooltip("Delete this texture (it goes to the Recycle Bin / Trash). Also: right-click a thumbnail, or Del.");
+    x = db.right() + u.px(6);
   }
-  u.text_field(u.id("tex_search"), {x + u.px(6), bar.y + u.px(4), std::max(u.px(60), std::min(u.px(200), bar.right() - x - u.px(12))), bh - u.px(8)}, texture_search_,
-               nullptr, "Search textures");
+  const Recti sf{x + u.px(6), bar.y + u.px(4), std::max(u.px(60), std::min(u.px(200), bar.right() - x - u.px(12))), bh - u.px(8)};
+  u.text_field(u.id("tex_search"), sf, texture_search_, nullptr, "Search textures");
+  if (!f.empty() && list.size() < all)
+    u.label({sf.right() + u.px(8), bar.y, std::max(0, bar.right() - sf.right() - u.px(12)), bh}, strprintf("Showing %zu of %zu (search)", list.size(), all),
+            u.theme.text_dim);
   /* The grid of thumbnails, the selected texture's editor below. */
   const bool editing = texture_selected_ != nullptr;
   const int grid_h = editing ? std::max(u.px(110), (r.h - bh) / 4) : r.h - bh;
@@ -173,6 +190,80 @@ void Editor::draw_textures_window(const Recti &r) {
       texture_selected_ = t;
       asset_drag_ = {true, false, resolve_asset_path(t->asset_path), nullptr, in.mx, in.my};
     }
+    if (hot && in.pressed[1]) {  // right-click: the thumbnail's menu
+      texture_selected_ = t;
+      u.open_popup(u.id("tex_ctx"), {in.mx, in.my, 0, 0});
+    }
+  }
+  u.popup(u.id("tex_ctx"), u.px(200), [this] {
+    if (!texture_selected_) return;
+    if (ui_.menu_item("Assign to Selection")) assign_texture_asset_to_selection(texture_selected_->asset_path);
+    ui_.menu_separator();
+    if (ui_.menu_item("Delete Texture...", "Del")) texture_delete_ = texture_selected_;
+  });
+  /* Delete (or Backspace) over the window asks to delete the selected texture. */
+  if (u.hovered(r) && texture_selected_ && !u.wants_keyboard() && (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE])) {
+    texture_delete_ = texture_selected_;
+    in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
+  }
+  /* The confirmation (as the Project and Materials windows'): it goes to the Recycle Bin / Trash. */
+  if (texture_delete_) {
+    const ui::Id did = u.id("tex_delete");
+    if (!u.popup_open(did)) u.open_popup(did, {r.x + r.w / 2 - u.px(190), r.y + u.px(40), 0, 0});
+    const ProceduralTexturePtr dt = texture_delete_;
+    u.popup(did, u.px(380), [this, dt] {
+      auto &u = ui_;
+      /* The materials whose maps name one of its outputs: the scene's and the assets (an axis material's parts are
+       * assets too), each once. */
+      const std::string prefix = dt->asset_path + "#";
+      std::unordered_set<const Material *> users_set;
+      auto check = [&](const Material *m) {
+        if (!m) return;
+        for (const TextureRef *t : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map})
+          if (t->path.compare(0, prefix.size(), prefix) == 0) users_set.insert(m);
+      };
+      scene_->for_each([&](GameObject &g) {
+        if (auto *mr = g.get<MeshRenderer>())
+          for (auto &m : mr->materials) check(m.get());
+      });
+      for (const auto &kv : loaded_material_assets()) check(kv.second.get());
+      const size_t users = users_set.size();
+      Recti t = u.popup_row(u.row_h() + u.px(6));
+      u.label({t.x + u.px(10), t.y, t.w - u.px(20), t.h}, "Delete " + fs::filename(dt->asset_path) + "?", u.theme.text_bright);
+      Recti h1 = u.popup_row();
+#ifdef _WIN32
+      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "It goes to the Recycle Bin, where you can restore it.", u.theme.text_dim);
+#else
+      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "It goes to the Trash, where you can restore it.", u.theme.text_dim);
+#endif
+      if (users) {
+        Recti h2 = u.popup_row();
+        u.label({h2.x + u.px(10), h2.y, h2.w - u.px(20), h2.h}, strprintf("%zu material%s use it: those maps will show it missing.", users, users == 1 ? "" : "s"),
+                u.theme.text_dim);
+      }
+      Recti b = u.popup_row(u.row_h() + u.px(10));
+      const Recti del{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+      texture_ui_rects_["delete_confirm"] = del;
+      if (u.button(del, "Delete")) {
+        const std::string path = resolve_asset_path(dt->asset_path);
+        if (texture_selected_ == dt) texture_selected_ = nullptr;
+        texture_delete_ = nullptr;
+        /* An undo past this point must not write the deleted texture's text into a new one of the same name. */
+        texture_before_.erase(std::remove_if(texture_before_.begin(), texture_before_.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }),
+                              texture_before_.end());
+        for (UndoState &st : undo_) st.textures.erase(std::remove_if(st.textures.begin(), st.textures.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }), st.textures.end());
+        for (UndoState &st : redo_) st.textures.erase(std::remove_if(st.textures.begin(), st.textures.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }), st.textures.end());
+        delete_project_entry(path);
+        texture_paths_listed_ = -100;  // list again now
+        invalidate_material_textures();  // materials naming it re-resolve (and show it missing)
+        u.close_popups();
+      }
+      if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {
+        texture_delete_ = nullptr;
+        u.close_popups();
+      }
+    });
+    if (!u.popup_open(did)) texture_delete_ = nullptr;  // clicked away
   }
   if (list.empty()) u.label({grid.x, grid.y + u.px(20), grid.w, u.row_h()}, "No textures yet. New makes one from a preset.", u.theme.text_dim, ui::Align::Center);
   u.end_scroll();
@@ -205,19 +296,21 @@ void Editor::draw_textures_window(const Recti &r) {
     else if (TexturePtr tex = procedural_texture_output(t, which)) {
       /* From the smallest mip at least as wide as the pane, repacked only when the image or the level changes
        * (not every frame: an idle editor redraws on every mouse move). */
-      static const Texture *packed_tex = nullptr;
+      /* (Held, not just its address: a new image allocated where a freed one was would look unchanged, and the pane
+       * would keep the old picture - after an undo, say.) */
+      static TexturePtr packed_tex;
       static size_t packed_level = 0;
       static std::vector<uint32_t> px;
       size_t lv = 0;
       while (lv + 1 < tex->levels.size() && tex->levels[lv + 1].w >= pane.w) lv++;
       const Texture::Level &L = tex->levels[lv];
-      if (packed_tex != tex.get() || packed_level != lv || px.size() != (size_t)L.w * L.h) {
+      if (packed_tex != tex || packed_level != lv || px.size() != (size_t)L.w * L.h) {
         px.resize((size_t)L.w * L.h);
         for (size_t i = 0; i < px.size(); i++) {
           const uint32_t c = L.px8[i];
           px[i] = 0xFF000000u | (c & 0xFF) << 16 | (c >> 8 & 0xFF) << 8 | (c >> 16 & 0xFF);
         }
-        packed_tex = tex.get();
+        packed_tex = tex;
         packed_level = lv;
       }
       draw_pixels(u, px, L.w, L.h, pane, texture_preview_tiled_ ? 2 : 1);
@@ -237,7 +330,8 @@ void Editor::draw_textures_window(const Recti &r) {
   if (changed && in.down[0]) texture_dragging_ = true;  // a drag on a field: the small preview until release
   if (!in.down[0]) {
     texture_dragging_ = false;
-    if (texture_touch_pending_) {  // the materials using it re-resolve once, at the final value
+    if (texture_touch_pending_) {  // the drag is over: the images at the set size again
+      procedural_texture_clear_previews();
       invalidate_material_textures();
       texture_touch_pending_ = false;
     }

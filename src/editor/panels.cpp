@@ -62,6 +62,12 @@ void Editor::draw_hierarchy(const Recti &r) {
       if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light", child);
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera", child);
+    u.submenu("Curve", u.px(170), [this, child] {
+      for (const char *k : {"Bezier", "Circle", "Path"})
+        if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k, child);
+    });
+    if (u.menu_item("Lattice")) create_object("Lattice", child);
+    if (u.menu_item("Armature")) create_object("Armature", child);
   };
   u.popup(create_menu, u.px(200), [create_body] { create_body(false); });
   u.text_field(u.id("hier_search"), {plus.right() + u.px(6), bar.y + u.px(4), bar.right() - plus.right() - u.px(12), h},
@@ -283,6 +289,15 @@ void Editor::draw_hierarchy(const Recti &r) {
     u.tooltip("The active object (selected last) is cut by the others. Modifier: the cut stays live.");
     if (u.menu_item("Separate By Loose Parts", nullptr, false, has_sel)) separate("loose");
     if (u.menu_item("Export Selection...", nullptr, false, has_sel)) open_export_dialog(export_opts_.format);
+    /* As GameObject > Bake Textures, for the object right-clicked (the user asked for it here too). */
+    const GameObject *bg = scene_->find(active_);
+    const bool bakeable = bg && bg->mesh_filter() && bg->mesh_filter()->mesh;
+    u.submenu("Bake Textures", u.px(200), [this, bakeable] {
+      for (int size : {512, 1024, 2048, 4096})
+        if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, bakeable)) bake_object_textures(size);
+    });
+    u.tooltip("Bake this object's look (procedural textures, axis materials, every material slot) into one set of images\n"
+              "on new UVs, with a material that uses them. Undo restores it.");
     u.menu_separator();
     u.menu_label("Create Child");
     create_body(true);
@@ -506,6 +521,34 @@ struct InspectorReflector : Reflector {
       changed = true;
     }
   }
+  /* An axis material's part: a button with the material's name that opens the material picker, and a clear button.
+   * The pick lands at the end of the frame (the popup), through Editor::set_material_ref. */
+  void material_ref(const char *n, std::string &v) override {
+    if (!material) {
+      text(n, v);
+      return;
+    }
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    const Recti f = field_rect(row);
+    const Recti b{f.x, f.y, f.w - f.h - u.px(2), f.h};
+    MaterialPtr cur = v.empty() ? nullptr : material_asset(v);
+    const std::string label = v.empty() ? std::string("(this material's own maps)") : cur ? cur->name : "Missing: " + v;
+    const ui::Id pid = fid(n) ^ 0x5A5Aull;
+    ed.inspector_menu_rects_[std::string("matref:") + n] = b;
+    if (u.button(b, label, false)) u.open_popup(pid, b);
+    u.tooltip(v.empty() ? "Pick a material asset for this part." : v);
+    Editor *edp = &ed;
+    Material *mat = material;
+    const std::string field = n;
+    ed.material_picker_popup(pid, nullptr, [edp, mat, field](const MaterialPtr &m) { edp->set_material_ref(mat, field, m); });  // (the popup runs this frame)
+    const Recti xb{b.right() + u.px(2), f.y, f.h, f.h};
+    if (!v.empty() && u.icon_button(xb, Icon::Close, false, "Use this material's own maps for this part")) {
+      v.clear();
+      record(FieldEdit::Text, n).s_new = v;
+      changed = true;
+    }
+  }
   void text(const char *n, std::string &v) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
@@ -546,18 +589,18 @@ struct InspectorReflector : Reflector {
     u.label(label_rect(row), n);
     Recti f = field_rect(row);
     Recti thumb{f.x, f.y, f.h, f.h};
-    TexturePtr tex;
-    if (t.path == "generated:UV Grid") tex = texture_uv_grid();
-    else if (t.path == "generated:Color Grid") tex = texture_color_grid();
-    else if (!t.empty()) tex = texture_load(resolve_asset_path(t.path), !t.non_color);
+    /* What the renderers use: an image file, a generated image, or a procedural texture's output (a .ptex
+     * reference such as Bricks.ptex#albedo is no file: loading it as one showed it missing). */
+    const TexturePtr tex = resolve_texture_ref(t);
+    const bool procedural = texture_ref_is_procedural(t);
     draw_texture_thumb(u, tex, thumb);
     Recti name{f.x + f.h + u.px(4), f.y, f.w - f.h - u.px(4), f.h};
     ed.drop_textures_.push_back({f, &t, material});  // an image dragged from the Project window lands here
     bool hot = u.hovered(name) || u.hovered(thumb);
     u.frame(name, u.theme.field, hot ? u.theme.field_hover : u.theme.field_border, u.px(3));
-    std::string label = t.empty() ? "None (Texture)" : (starts_with(t.path, "generated:") ? t.path.substr(10) : fs::filename(t.path));
+    std::string label = texture_ref_label(t);
     if (!t.empty() && !tex) label += "  (missing)";
-    if (t.non_color && !t.empty()) label += "  [Non-Color]";
+    if (t.non_color && !t.empty() && !procedural) label += "  [Non-Color]";  // a .ptex output's colour space is its own
     u.label({name.x + u.px(5), name.y, name.w - u.px(8), name.h}, label, tex || t.empty() ? u.theme.text : u.theme.error);
     u.tooltip(t.empty() ? std::string("Click to pick an image from Assets, or drop an image file onto the window.") : t.path);
     if (hot && u.in.pressed[0]) {
@@ -574,8 +617,20 @@ struct InspectorReflector : Reflector {
       if (uc->menu_item("None")) pick("", cur.non_color);
       if (uc->menu_item("UV Grid (generated)", nullptr, cur.path == "generated:UV Grid")) pick("generated:UV Grid", false);
       if (uc->menu_item("Color Grid (generated)", nullptr, cur.path == "generated:Color Grid")) pick("generated:Color Grid", false);
-      if (!cur.empty() && uc->menu_item(cur.non_color ? "Color Space: Non-Color (click for sRGB)" : "Color Space: sRGB (click for Non-Color)"))
+      if (!cur.empty() && !texture_ref_is_procedural(cur) &&
+          uc->menu_item(cur.non_color ? "Color Space: Non-Color (click for sRGB)" : "Color Space: sRGB (click for Non-Color)"))
         pick(cur.path, !cur.non_color);
+      /* The procedural textures (Window > Textures) and their outputs. */
+      const auto &ptex = e->texture_asset_paths();
+      if (!ptex.empty()) {
+        uc->menu_separator();
+        uc->menu_label("Procedural textures");
+        for (const std::string &p : ptex)
+          for (int o = 0; o < (int)TextureOutput::Count; o++) {
+            const std::string ref = p + "#" + texture_output_name(o);
+            if (uc->menu_item(fs::stem(p) + " (" + texture_output_name(o) + ")", nullptr, ref == cur.path)) pick(ref, o != (int)TextureOutput::Albedo);
+          }
+      }
       uc->menu_separator();
       const auto &imgs = e->image_assets();
       if (imgs.empty()) uc->menu_label("No images in Assets yet - drop some onto the window");
@@ -901,6 +956,13 @@ struct InspectorReflector : Reflector {
           for (uint64_t id : targets) edp->filter_stack_op(id, "add", 0, 0, fi.name);
         uu.tooltip(fi.help);
       }
+      uu.menu_label("Looks");
+      for (const std::string &look : filter_looks()) {
+        if (uu.menu_item(look))
+          for (uint64_t id : targets) edp->filter_stack_op(id, "look", 0, 0, look);
+        uu.tooltip(look == "Anime" ? "Line Art, a little more saturation and contrast, a soft Bloom."
+                                   : "Grayscale, Halftone dots, Line Art and Paper: a printed manga page.");
+      }
     });
   }
 };
@@ -945,11 +1007,6 @@ void Editor::draw_inspector(const Recti &r) {
           u.end_scroll();
           return;
         }
-      }
-      if (ext == ".pdf" || starts_with(project_selected_, papers_dir_)) {
-        lay.space(u.px(6));
-        u.label(lay.row(), "Research paper", u.theme.accent);
-        u.label(lay.row(), "Ask Claude: \"implement <technique> from research/papers/" + fs::filename(project_selected_) + "\"", u.theme.text);
       }
       if (u.button(lay.row(u.row_h() + u.px(4)), "Open with system viewer")) fs::open_external(project_selected_);
       return;
@@ -1270,6 +1327,33 @@ void Editor::draw_inspector(const Recti &r) {
             mark_changed("Seams Are Hard Edges");
           }
         }
+        draw_vertex_groups(g, mf, lay);
+        if (mf->mesh) {
+          /* Weight Paint (task 0046): the toggle (a group is added when there is none), and the brush while painting
+           * this object. */
+          Recti wrow = lay.row(u.row_h() + u.px(2));
+          const bool painting = weight_paint_ && wp_obj_ == g->id;
+          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, painting ? "Exit Weight Paint" : "Weight Paint", painting, Icon::Vertex))
+            set_weight_paint(!painting);
+          u.tooltip("Paint the chosen group's weights with a brush (Blender: Weight Paint mode). Blue is 0, green 0.5, red 1.");
+          if (painting) {
+            InspectorReflector br(*this, u, lay);
+            br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
+            br.help("Add raises, Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+            br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
+            br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
+            br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
+            br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
+            br.field("Mirror X", wp_brush_.mirror_x);
+            br.field("Front Faces Only", wp_brush_.front_only);
+            const int hw = (lay.area.w - u.px(16)) / 2;
+            Recti brow = lay.row(u.row_h() + u.px(2));
+            if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "Normalize All")) command("wpnormalize");
+            u.tooltip("Each vertex's weights over all groups add up to 1 (Blender: Normalize All).");
+            if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "Clean")) command("wpclean 0.01");
+            u.tooltip("Weights under 0.01 become 0 (Blender: Clean).");
+          }
+        }
         Recti row = lay.row(u.row_h() + u.px(2));
         if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, edit_mode_ ? "Exit Edit Mode (Tab)" : "Enter Edit Mode (Tab)", edit_mode_, Icon::Vertex)) {
           if (edit_mode_) exit_edit_mode(); else enter_edit_mode();
@@ -1280,7 +1364,7 @@ void Editor::draw_inspector(const Recti &r) {
         auto &feats = research::features();
         if (!feats.empty()) {
           lay.space(u.px(2));
-          u.label(lay.row(), "Research features", u.theme.accent);
+          u.label(lay.row(), "From Papers (Learn > References)", u.theme.accent);
           for (auto &f : feats) {
             Recti fr = lay.row(u.row_h() + u.px(2));
             if (u.button({fr.x + u.px(4), fr.y, fr.w - u.px(8), fr.h}, f.name, false, Icon::Flask)) mesh_op("research:" + f.id);
@@ -1329,7 +1413,7 @@ void Editor::draw_inspector(const Recti &r) {
                                          {"Mirror", "MirrorModifier"},         {"Screw", "ScrewModifier"},
                                          {"Solidify", "SolidifyModifier"},     {"Subdivision Surface", "SubdivisionSurface"},
                                          {"Triangulate", "TriangulateModifier"}, {"Wireframe", "WireframeModifier"}};
-        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Displace", "DisplaceModifier"},
+        static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"}, {"Lattice", "LatticeModifier"}, {"Mesh Deform", "MeshDeformModifier"}, {"Armature (Skin)", "SkinModifier"},
                                        {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"}};
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);
@@ -1429,6 +1513,23 @@ void Editor::draw_inspector(const Recti &r) {
             Recti er = lay.row();
             u.label({er.x + u.px(14), er.y, er.w - u.px(18), er.h}, bm->last_error, u.theme.warning);
           }
+          if (dynamic_cast<SkinModifier *>(c)) {  // automatic weights (task 0047)
+            Recti br = lay.row(u.row_h() + u.px(2));
+            if (u.button({br.x + u.px(14), br.y, br.w - u.px(18), br.h}, "Bind: Automatic Weights")) skin_bind(g);
+            u.tooltip("Vertex groups named after the bones, from each vertex's distance to them (Blender: With Automatic Weights).");
+          }
+          if (auto *md = dynamic_cast<MeshDeformModifier *>(c)) {
+            /* Bind / Unbind (Blender's button), and why it does nothing when it can't. */
+            Recti br = lay.row(u.row_h() + u.px(2));
+            if (u.button({br.x + u.px(14), br.y, br.w - u.px(18), br.h}, md->bound() ? "Unbind" : "Bind", md->bound()))
+              mesh_deform_bind(g, md, !md->bound());
+            u.tooltip(md->bound() ? "Forget the cage's shape: the mesh goes back to its own shape."
+                                  : "Remember the cage's shape now: moving its vertices afterwards moves this mesh.");
+            if (!md->last_error.empty()) {
+              Recti er = lay.row();
+              u.label({er.x + u.px(14), er.y, er.w - u.px(18), er.h}, md->last_error, u.theme.warning);
+            }
+          }
         }
         u.pop_id();
       }
@@ -1458,7 +1559,7 @@ void Editor::draw_inspector(const Recti &r) {
               for (size_t i = 0; i < pos; i++) first = first && !g->components[mods[i]]->enabled;
               if (!first) Log::warn("Applied a modifier that isn't first in the stack: the ones above it are skipped (as in Blender)");
               Mesh m = *mf->mesh;
-              g->components[act_ci]->modify(m);
+              run_modifier(*g->components[act_ci], m);  // its vertex group, and the groups carried (ADR 0024)
               m.touch();
               mf->mesh = std::make_shared<Mesh>(std::move(m));
               Log::info("Applied %s", g->components[act_ci]->type_name());
@@ -1710,70 +1811,6 @@ void Editor::draw_profiler(const Recti &r) {
   content_h = lay.y + off - r.y;
   u.end_scroll();
 }
-
-/* ===================================================================== */
-/* Research                                                               */
-/* ===================================================================== */
-
-void Editor::draw_research(const Recti &r) {
-  auto &u = ui_;
-  if (u.time - papers_listed_ > 2.0) {
-    papers_ = fs::list(papers_dir_);
-    papers_.erase(std::remove_if(papers_.begin(), papers_.end(), [](const DirEntry &e) { return e.is_dir || to_lower(e.name) == "readme.md"; }), papers_.end());
-    papers_listed_ = u.time;
-  }
-  ui::Id sid = u.id("research_scroll");
-  static int content_h = 0;
-  int off = u.begin_scroll(sid, r, content_h);
-  ui::Layout lay{{r.x + u.px(12), r.y, r.w - u.px(34), r.h}, r.y + u.px(10) - off};
-  lay.row_h = u.row_h();
-  Recti title = lay.row(u.row_h() + u.px(6));
-  u.draw_icon(Icon::Flask, {title.x, title.y + u.px(3), u.row_h(), u.row_h()}, u.theme.accent);
-  u.label({title.x + u.row_h() + u.px(8), title.y, title.w, title.h}, "Research: turn your papers into editor features", u.theme.text_bright);
-  const char *intro[] = {
-      "1. Drop papers (PDF / TXT / MD / TeX) onto this window, or copy them into the folder below.",
-      "2. Ask Claude Code: \"Read research/papers/<file> and implement <technique> as a Blendity feature.\"",
-      "3. New features register in src/research/ and appear here, in the Mesh menu and the Inspector.",
-      "4. Track progress in research/FEATURES.md (paper -> feature -> status -> source file)."};
-  for (const char *t : intro) u.label(lay.row(), t, u.theme.text);
-  Recti br = lay.row(u.row_h() + u.px(4));
-  if (u.button({br.x, br.y, u.px(190), br.h}, "Open papers folder", false, Icon::Folder)) fs::open_external(papers_dir_);
-  if (u.button({br.x + u.px(198), br.y, u.px(190), br.h}, "Open FEATURES.md", false, Icon::File)) fs::open_external(fs::join(project_root_, "research/FEATURES.md"));
-  u.label(lay.row(), papers_dir_, u.theme.text_dim);
-
-  lay.space(u.px(8));
-  u.label(lay.row(), strprintf("Papers (%zu)", papers_.size()), u.theme.accent);
-  if (papers_.empty()) u.label(lay.row(), "No papers yet - drag & drop one onto the editor.", u.theme.text_dim);
-  for (auto &p : papers_) {
-    Recti row = lay.row(u.row_h() + u.px(2));
-    bool hot = u.hovered(row);
-    if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
-    int a = u.font.line_height() - u.px(2);
-    u.draw_icon(Icon::Paper, {row.x + u.px(4), row.y + (row.h - a) / 2, a, a}, u.theme.accent);
-    u.label({row.x + a + u.px(10), row.y, row.w * 6 / 10, row.h}, p.name);
-    u.label({row.x, row.y, row.w - u.px(80), row.h}, format_bytes(p.size), u.theme.text_dim, ui::Align::Right);
-    if (u.button({row.right() - u.px(70), row.y + u.px(1), u.px(66), row.h - u.px(2)}, "Open")) fs::open_external(fs::join(papers_dir_, p.name));
-    if (hot && u.in.double_clicked[0]) fs::open_external(fs::join(papers_dir_, p.name));
-  }
-
-  lay.space(u.px(10));
-  auto &feats = research::features();
-  u.label(lay.row(), strprintf("Implemented research features (%zu)", feats.size()), u.theme.accent);
-  for (auto &f : feats) {
-    Recti row = lay.row(u.row_h() + u.px(4));
-    u.canvas.fill_rect(row, Color::hex(0x323232));
-    u.label({row.x + u.px(6), row.y, row.w - u.px(140), row.h}, f.name, u.theme.text_bright);
-    if (u.button({row.right() - u.px(130), row.y + u.px(2), u.px(126), row.h - u.px(4)}, "Apply to selection", false, Icon::Flask)) mesh_op("research:" + f.id);
-    u.label(lay.row(), "  " + f.citation, u.theme.text_dim);
-    u.label(lay.row(), "  " + f.description, u.theme.text);
-    u.label(lay.row(), "  Status: " + f.status + "   |   Source: " + f.source_file, u.theme.text_dim);
-    lay.space(u.px(4));
-  }
-  lay.space(u.px(20));
-  content_h = lay.y + off - r.y;
-  u.end_scroll();
-}
-
 
 /* ===================================================================== */
 /* Render window (Blender: Render Result + Render/Output/World properties;
@@ -2079,7 +2116,15 @@ void Editor::draw_render_window(const Recti &r) {
     int sy = std::min(ih - 1, (int)((y - oy) / sc));
     const uint32_t *src = render_img_.row(sy);
     uint32_t *drow = fb->row(y);
-    for (int x = dst.x; x < dst.right(); x++) drow[x] = src[std::min(iw - 1, (int)((x - ox) / sc))];
+    if (!render_transparent_)
+      for (int x = dst.x; x < dst.right(); x++) drow[x] = src[std::min(iw - 1, (int)((x - ox) / sc))];
+    else
+      for (int x = dst.x; x < dst.right(); x++) {  // Film > Transparent: over a checkerboard, as Blender's Image Editor
+        const uint32_t c = src[std::min(iw - 1, (int)((x - ox) / sc))], a = c >> 24;
+        const uint32_t chk = (((x - ox) / u.px(8)) + ((y - oy) / u.px(8))) & 1 ? 0x99u : 0x66u;
+        auto mix = [&](uint32_t v) { return (v * a + chk * (255 - a) + 127) / 255; };
+        drow[x] = 0xFF000000u | mix(c >> 16 & 255) << 16 | mix(c >> 8 & 255) << 8 | mix(c & 255);
+      }
   }
   u.canvas.rect_outline({ox - 1, oy - 1, dw + 2, dh + 2}, Color::hex(0x101010));
   if (render_preview_) {
@@ -2408,8 +2453,11 @@ bool Editor::draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t)
     bool noted = false;
     for (const auto &kv : texture_before_) noted = noted || kv.first == t->asset_path;
     if (!noted && !t->asset_path.empty()) texture_before_.push_back({t->asset_path, before});
-    if (ui_.in.down[0]) {  // a drag: the window's preview follows at 256; materials re-resolve once on release
-      t->version++;
+    if (ui_.in.down[0]) {
+      /* A drag: the objects using the texture follow every frame (task 0031), its images evaluated at 256 at
+       * most until the release brings back the set size. */
+      procedural_texture_set_preview(t->asset_path, true);
+      t->touch();
       texture_touch_pending_ = true;
     }
     else t->touch();

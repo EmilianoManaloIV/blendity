@@ -2,6 +2,772 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 71): the macOS check, and merging the stack (task 0049)
+
+**Asked:** "check for any errors on the GitHub side ... and merge them".
+
+**Fixed**
+- macOS CI failed on #45 and #46: a test compared the skinned mesh with the base mesh bit for bit after Apply as
+  Rest; Apple clang's fused multiply-adds left one vertex one ulp off. The test compares within 1e-5 now (the
+  editor was right).
+
+**Changed**
+- CLAUDE.md: agents merge only when the user asks, after CI passes, with a merge commit.
+
+**Checked**
+- The test on Windows; CI's four jobs on #46 before merging.
+
+## 2026-10-12 (round 70): inverse kinematics and rig presets (task 0048)
+
+**Asked:** the roadmap (2026-10-11): "IK/FK for humanoid and quadruped rigs", with name-based humanoid auto-map and
+the gizmo refused on an IK-driven bone.
+
+**Added**
+- **IK constraints** (ADR 0025): an IKConstraint on a chain's end bone (a shin, a forearm) turns the chain so its
+  tip reaches the Target object; two bones exactly (law of cosines) bending towards an optional Pole, longer chains
+  by cyclic coordinate descent (Iterations), Weight from the rest pose to the solution. Solved every editor frame
+  and in Play after the scripts, only when something it depends on moved; the solved pose makes no undo step. The
+  gizmo and G / R / S refuse a bone IK turns ("move its target instead"). Console `ik add <bone> <target> [pole]
+  [chain]`.
+- **GameObject > Rig**: Humanoid (Hips, Spine, Chest, Neck, Head, arms, legs) and Quadruped (spine, neck, head,
+  tail, four legs) with IK targets on hands and feet and poles at knees and elbows; **Auto IK on Selected
+  Skeleton** finds the limbs of an imported Mixamo (`mixamorig:LeftUpLeg`), Unity (`LeftUpperLeg`) or Rigify
+  (`thigh.L`) skeleton by name. Console `rig humanoid|quadruped|autoik [root]`.
+- Learn > Modifiers: "Inverse kinematics".
+
+**Fixed**
+- The GameObject menu's Lattice and Armature items had each other's tooltips.
+
+**Checked**
+- New tests (round 70): two bones reach a target within 1.3e-7, point straight at one out of reach, and with a pole
+  the knee lies in the plane of hip, target and pole; the skin follows; nothing moved, nothing solved; five bones
+  by CCD within 7.7e-4; Reset Pose solves again; Weight 0 keeps the rest; a target the chain carries is refused;
+  the presets make the named bones and 4 IK chains each, lifting a foot target bends the knee forward with the
+  foot on it; auto IK finds 4 limbs in Mixamo, Unity and Rigify skeletons and adds nothing the second time; in the
+  editor, dragging a foot target with the gizmo poses the leg, the gizmo leaves a driven shin alone, undo puts the
+  target and the leg back, `ik add` and a scene file keep the constraint; in Play a Rotator swinging a target
+  animates the leg and Stop restores it; a second rig has its own targets; a target that circles back leaves no
+  twist; Weight 0.5 doesn't add up over many moves; a pole the chain carries is refused; a lost target doesn't hold
+  the bone; G on a driven shin starts nothing while G, R on the head turns it.
+- Stress `vgroups`: a humanoid's four chains cost 0.006 ms a frame when every target moves, 0.001 ms
+  when nothing does; among 20,000 other objects 0.046 ms (the per-frame pass); no IK in a scene: no walk.
+- Unit checks: Windows 9,303, 0 failed (562 tests); the whole suite in render-cache verify mode: 9,304,
+  0 failed, 0 stale pictures. Linux with libraries: 9,213, 0 failed. Sanitizer build: 9,131, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: three majors and several minor findings, fixed: a second preset rig's limbs reached for
+the first rig's targets (names now unique); each solve started from the last one, so a circling target wound up
+twist and a Weight under 1 added up frame by frame (now from the rest pose); a pole parented under the chain
+re-solved every frame; the per-frame pass walked every object of every scene and looked targets up by name (now
+nothing with no IK anywhere, ids between frames); G / R / S weren't refused on a driven bone; a constraint with a
+lost target still blocked the gizmo; a straight chain without a pole could bend sideways (now the rest bend, then
+the bone's own Z); auto IK's poles were world +Z / -Z (now where each limb bends). Left as it is: the undo snapshot
+is taken after the frame's solve, harmless now that solving doesn't depend on the previous pose.
+
+## 2026-10-12 (round 69): skeletons and skinning (task 0047)
+
+**Asked:** the roadmap (2026-10-11): "rigging ... v1: import rigs from FBX/glTF and pose them".
+
+**Added**
+- **Bones and armatures** (ADR 0025): a bone is a GameObject with a Bone component (Length, Deform, its rest
+  transform) under a root with an Armature (Deform: Linear or Dual Quaternion, Show Bones, Rest Position). Bones
+  are drawn as Blender's octahedra and picked by clicking them; pose them with the gizmo. GameObject > Armature
+  (a selected mesh is bound to it), `bone add <parent> [length]`, `armature reset|apply` (Reset Pose, Apply as
+  Rest).
+- **The Armature (Skin) modifier**: moves the mesh with the bones its vertex groups are named after, 4 influences,
+  Linear or Dual Quaternion (twisted joints keep their girth), deform-only (task 0041). **Bind: Automatic Weights**
+  (`skin bind`): groups from each vertex's distance to the bones.
+- **Rigged FBX and glTF import**: bones, hierarchy, weights (normalised), an Armature and a Skin modifier.
+- Learn > Modifiers: "Bones and skins".
+
+**Checked**
+- New tests (round 69): a two-bone tube is unchanged at rest and turning the upper bone 90 degrees turns its
+  vertices about the joint exactly (2.7e-7) while the lower ones stay; a 150 degree twist keeps the joint's radius
+  at 0.200 with Dual Quaternion where Linear shrinks it to 0.052, and both agree at rest and for single-bone
+  vertices; Blender's glTF and FBX two-bone tubes import with Lower and Upper bones, an armature, weights summing to
+  1, unchanged at rest, and posing Upper moves its vertices and not Lower's; GameObject > Armature binds a column,
+  `bone add` places a child at its parent's tip, `skin bind` gives weights summing to 1, a pose is one undo step and
+  is kept by a scene file, Reset Pose and Apply as Rest; Reset Pose on a root that is a bone; a rest near 90 degrees
+  stays exact through a file; an unevenly scaled mesh keeps Dual Quaternion's girth; a mesh under the armature
+  follows it, and the Skin's own vertex group limits it; automatic weights give every vertex away from the joint to
+  its nearest bone.
+- Stress `vgroups`: a pose change on 50,176 vertices with 3 bones, 5.5 ms Linear, 5.6 ms Dual Quaternion (target 8).
+- Unit checks: Windows 9,232, 0 failed (555 tests); the whole suite in render-cache verify mode: 9,233,
+  0 failed, 0 stale pictures. Linux with libraries: 9,142, 0 failed. Sanitizer build: 9,060, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: five majors and several minor findings, fixed: Reset Pose and Apply as Rest skipped a
+root that is a bone; rest rotations kept as Euler angles lost up to 0.8 degrees near 90 (now a quaternion); the ADR
+said bind poses were read (it now says they aren't, and an FBX saved in another pose is reported); in an FBX with
+two characters every mesh took every skin's bones (now its own); making the armature's name unique could rename a
+bone (the armature is never a bone now). Also: Dual Quaternion fell back to Linear on an unevenly scaled mesh;
+a zero rest scale made vertices jump; hidden bones were still picked and In Front did nothing; GameObject >
+Armature stacked a second Skin; glTF welded touching vertices with different weights. Left as they are (in the
+spec's As built or for later): renaming a bone doesn't rename its vertex group; duplicate joint names.
+
+## 2026-10-12 (round 68): Weight Paint (task 0046)
+
+**Asked:** the roadmap (2026-10-11): "weight painting", the second half: the brush.
+
+**Added**
+- **Weight Paint mode** (MeshFilter > Vertex Groups > Weight Paint, or `weightpaint on`): the chosen group of the
+  active mesh shows as Blender's weight colours (blue 0, green 0.5, red 1) and dragging in the Scene view paints it.
+  Brush: Add, Subtract, Draw (towards Weight), Blur (towards the neighbours); Radius (screen pixels), Strength,
+  Weight, Falloff (Smooth, Sphere, Root, Sharp, Linear, Constant), Mirror X, Front Faces Only. One undo step per
+  stroke. Normalize All and Clean. Console: `wpbrush`, `wpfalloff`, `wpmirror`, `wpfront`, `wpstroke x y ...`,
+  `wpnormalize`, `wpclean`.
+- Learn > Modifiers: "Weight painting".
+
+**Checked**
+- New tests (round 68): Add raises the weights under the brush only, Subtract lowers them, Draw reaches Weight; the
+  Smooth falloff paints the centre more than the rim; Blur evens a hard edge; Front Faces Only leaves a sphere's
+  back alone (and off, reaches it); Mirror X gives the twin the same weight; a real mouse drag there and back is one
+  stroke, one undo step, and stays within one dab's strength (also along the mirror line); leaving the mode keeps
+  the weights; the view shows red at weight 1 and blue at 0 (pixels); the painted group stays the painted object's
+  when another object is selected; a scene file keeps the weights; a new scene leaves the mode; Normalize All,
+  Clean.
+- Stress `vgroups`: a dab on a 50,176-vertex mesh 0.08 ms (target 8); a stroke's press and release 3.8 ms.
+- Unit checks: Windows 9,194, 0 failed (549 tests); the whole suite in render-cache verify mode: 9,195,
+  0 failed, 0 stale pictures. Linux with libraries: 9,104, 0 failed. Sanitizer build: 9,022, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: four majors and several minor findings, all fixed: an undo, a new scene or Play in the
+middle of a drag let the stroke write into meshes the undo history shared (a stroke now belongs to its scene and
+mesh and stops otherwise); a new scene kept painting whatever object had the same id; choosing another group showed
+a stale picture; selecting another object could switch the painted group; every click made an undo step (only a
+stroke that changes weights does now); Mirror X applied twice near the centre line; strokes accumulated past their
+strength (Blender's no-accumulate rule now); Normalize All moved the active group (Lock Active now); the X-mirror
+map could stall on a stray far vertex (an edge-length tolerance, and cached); Esc leaves the mode.
+
+## 2026-10-12 (round 67): vertex groups (task 0045)
+
+**Asked:** the roadmap (2026-10-11): "weight painting", the first half: the groups it paints.
+
+**Added**
+- **Vertex groups** (ADR 0024): MeshFilter > Vertex Groups in the Inspector (Add, Remove, rename; in Edit Mode a
+  Weight with Assign, Remove from, Select, Deselect) and the console `vgroup add|remove|rename|assign|unassign|
+  select|deselect|active`. Saved in scene files (`vg` lines), kept by undo.
+- **Every deforming modifier** (Displace, Simple Deform, Smooth, Cast, Curve, Lattice, Mesh Deform) has **Vertex
+  Group** and **Invert Group**: only that group's vertices move, each by its weight.
+- The groups follow the vertices through every edit: welds and merges, Mirror, Array and Join carry them exactly;
+  any other change of the vertex count mends them by position (a vertex that stayed keeps its weights, a new one
+  takes the surface's at its place), at each undo step and after each generative modifier of a stack.
+- Learn > Modifiers: "Vertex groups".
+
+**Checked**
+- New tests (round 67): 17 Edit Mode operators (merge, delete, dissolves, subdivide, loop cut, bevel, extrudes,
+  inset, triangulate, poke, split, duplicate, quads, collapse, connect, edge split) keep one weight per vertex,
+  vertices that stay keep both groups' weights, and new vertices on the surface carry a linear ramp exactly; adding
+  a second group and removing one survive the undo commit; Separate keeps each part's weights and Join through the
+  editor brings the other object's group by name; Apply Modifiers bakes a group-limited Displace as shown; Mirror
+  copies give their sources' weights, Array and simple Subdivision carry them, Join merges groups by name; a Displace limited to a group moves each vertex by its weight, Invert the rest, an
+  unknown name the whole mesh; groups round-trip through a scene file, old files load without them, the console
+  adds, assigns (0.75), renames and undo takes each back.
+- New stress section `vgroups`: 37 Edit Mode operators (random vertex or face selections) and 10 generative
+  modifiers (each followed by a group-limited Displace) on the 26 stress meshes with groups: 1,222 operations, 0
+  groups of the wrong size, 0 weights not finite or out of 0..1, 0 weights moved off a vertex that stayed. Carrying
+  two groups through Subdivision Surface on 25k vertices: 1.8 ms a re-run (48 ms once, building the map).
+- Push/Pull: 26,620 operations, 0 problems, 394 results with faces newly on top of each other (unchanged);
+  `modifiers_ngon` 11,514 operations, 0 problems.
+- Unit checks: Windows 9,151, 0 failed (543 tests); the whole suite in render-cache verify mode: 9,152,
+  0 failed, 0 stale pictures. Linux with libraries: 9,061, 0 failed. Sanitizer build: 8,979, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: a blocker, five majors and several minor findings, all fixed: the undo commit's mending
+undid Add and Remove group and lost a joined object's groups (it now only mends groups an operator left the wrong
+size); mending by position overwrote Mirror's and Array's exact copies; Separate dropped the groups; Apply of one
+modifier ignored its vertex group; carrying groups through a generative modifier cost 89 ms every frame of a drag
+(now a kept map: 1.8 ms); the tests couldn't tell carried weights from re-sampled ones and the stress selected no
+faces; the search could stop early for points outside the old mesh, a far point overflowed an int, a deformer's
+NaN reached weight-0 vertices, saving before the commit dropped the groups (save commits first).
+
+## 2026-10-12 (round 66): the Mesh Deform modifier, a cage of any shape (task 0044)
+
+**Asked:** the roadmap (2026-10-11): "a Cage (lattice / mesh-deform) tool".
+
+**Added**
+- **Mesh Deform** (Add Modifier > Deform): set Object to a closed mesh round this one and press **Bind** (or
+  `meshdeform bind [object]`); then moving the cage's vertices shapes the mesh smoothly. Binding uses mean value
+  coordinates (Ju, Schaefer and Warren 2005; ADR 0023), closed form, so it takes a moment instead of Blender's
+  voxel solve. An open, flat or missing cage is refused with the reason; a cage whose vertex count changes stops
+  the deform and says "Bind again". Deform-only, so dragging cage vertices updates in place.
+- Learn > Modifiers: "A cage round a mesh".
+
+**Checked**
+- New tests (round 66): right after Bind a sphere in a cube cage and in an icosphere cage is unchanged; the weights
+  sum to 1 (off by 1e-7); moving and turning the whole cage moves the mesh the same way (off by 7e-8); pulling one
+  cage corner moves the mesh near it 18 times more than the far side; an open cage and a flat one are refused,
+  Unbind leaves the mesh, an extra cage vertex stops the deform with "Bind again"; a cage wound the other way binds
+  and reproduces a stretch, one with a face turned round or doubled is refused, a stray far vertex doesn't spoil the
+  volume test; weights at a cage vertex, on a face and outside the cage reproduce the point; two meshes caging each
+  other end without a crash; editing the bound mesh gives what a fresh Bind would; the binding round-trips through
+  a scene file; in the editor a refused Bind says why, Bind is one undo step, and undoing an Unbind binds again.
+- Stress `modifiers_ngon`: Mesh Deform on all 26 meshes with cages moved, NaN, huge and flattened after Bind:
+  11,514 operations, 0 problems. Binding 20,002 vertices to a 1,280-triangle cage: 97 ms (target 200); each deform
+  0.8 ms (target 5).
+- Unit checks: Windows 9,126, 0 failed (537 tests); the whole suite in render-cache verify mode: 9,127,
+  0 failed, 0 stale pictures. Linux with libraries: 9,036, 0 failed. Sanitizer build: 8,954, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: a blocker, a major and several minor findings, all fixed: two meshes caging each other
+recursed until the stack overflowed (the cage is now hashed as the Boolean's cutter is, without evaluating its
+keys); editing the bound mesh rebuilt every weight on every drag frame (rows are now redone only for vertices that
+moved); a stray cage vertex could fail the volume test, which also lost precision far from the origin; the binding
+text was copied and hashed byte by byte in every evaluation (the change hash now sees a key); a binding read from a
+file wasn't checked; a point on a cage face missed the on-face case by rounding (its tolerance is now 1e-6).
+
+## 2026-10-12 (round 65): lattices (task 0043)
+
+**Asked:** the roadmap (2026-10-11): "a Cage (lattice / mesh-deform) tool".
+
+**Added**
+- **Lattice objects** (GameObject > Lattice, also in the Hierarchy's + menu): a box of points fitted round the
+  selected mesh, which gets a **Lattice modifier** naming it. Points U / V / W (2 to 32, changing them keeps the
+  shape), Linear or B-Spline; the modifier has a Strength. Click a point to select it and move, turn or scale it
+  with the gizmo (Shift adds, Esc lets go). The modifier is deform-only, so dragging a point updates the mesh in
+  place (task 0041).
+- Curve and lattice points are now one kind of thing to the editor (`Component` control points); the console has
+  `points select|move <object> ...` for both (`curve` still works).
+- Learn > Modifiers: "Squashing with a lattice".
+
+**Checked**
+- New tests (round 65): a lattice at rest leaves a mesh as it is (both interpolations, three resolutions); Linear:
+  a corner moved by d moves the mesh's corner by d, the opposite corner not at all, the centre by d / 8, Strength
+  0.5 half as far; B-Spline: pulling an inner point never moves neighbouring samples by more than the pull times
+  their spacing over the cell size; changing the resolution keeps an affine pull (within 1e-3); NaN, flattened,
+  missing and self-referencing lattices leave a valid mesh; a turned, stretched lattice on a turned, scaled object
+  bends the mesh as the same lattice would in world space (off by 1e-7), and moving it re-bends; a B-Spline
+  lattice keeps its points through resolution changes 2 to 10 and back, and outside its box blends on without a
+  crease; GameObject > Lattice fits the box and adds the modifier, a click selects a point, a gizmo drag moves
+  only it and reshapes the mesh, Delete then removes the lattice, undo restores each step, `set` reaches the
+  resolution and any point, a second lattice is Lattice.001 and its modifier names it, and a scene file keeps
+  everything.
+- Stress `modifiers_ngon`: lattice cases on all 26 meshes (both interpolations, three resolutions, ordinary, NaN
+  and huge offsets, a flattened box): 11,384 operations, 0 problems. A B-Spline 4 x 4 x 4 lattice deforms a 50k-
+  vertex mesh in 0.5 ms (target 3 ms).
+- Unit checks: Windows 9,083, 0 failed (531 tests); the whole suite in render-cache verify mode: 9,084,
+  0 failed, 0 stale pictures. Linux with libraries: 8,993, 0 failed. Sanitizer build: 8,911, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, all fixed: changing a B-Spline lattice's
+resolution sampled it as a B-spline and shrank the shape a little every time (now sampled linearly, as Blender
+does); a second lattice had the same name, so its modifier found the first (now Lattice.001); outside the box
+B-Spline held the face value (a crease) where Blender blends on; a click on a mesh inside its lattice could select
+the lattice (only the box's outer edges pick it now); the flattened-box test was absolute (now relative to the
+box's size); Delete with a lattice point selected did nothing; the timing row subtracted two noisy timings.
+
+## 2026-10-12 (round 64): curve objects, the Curve modifier and Array along a curve (task 0042)
+
+**Asked:** the roadmap (2026-10-11): "Curves: objects follow a path (Blender's Curve modifier and Array-along-curve)".
+
+**Added**
+- **Curve objects** (GameObject > Curve > Bezier, Circle, Path, also in the Hierarchy's + menu): Bezier (Blender's
+  Auto handles), Catmull-Rom or Poly; Closed; Resolution; per point a Tilt and a Radius. Drawn in the Scene view
+  (orange when selected); click the line to select the curve, click a point to select it (Shift adds, Esc lets go),
+  and the Move / Rotate / Scale gizmo moves the selected points, one undo step per drag. Console:
+  `curve add|move|delete|select <object> ...`, and `set Curve.P2Position x y z`.
+- **Curve modifier** (Deform): bends a mesh along a named Curve object on any of six axes; the mesh's origin sits
+  at the curve's start, past an open curve's end the mesh goes on straight, a closed one wraps round. It is
+  deform-only, so dragging its curve updates the mesh in place (task 0041).
+- **Array: Fit Type** Fixed Count, Fit Length and Fit Curve (as many copies as fit the curve's length).
+- Learn > Modifiers: "Bending along a curve".
+
+**Checked**
+- New tests (round 64): a straight curve of each type leaves a beam unchanged; a quarter circle bends a beam onto
+  the arc (radius off by 2.5e-6, length along it kept); a closed curve wraps a beam round and an open one goes on
+  straight past its end; Fit Curve gives 5 then 7 then 14 copies as the curve grows and is scaled, Fit Length 3,
+  NaN or a missing curve one; moving a point or the curve object re-bends, a curve naming its own object or
+  nothing leaves the mesh; NaN, huge and coincident points on every type, closed or not, and every axis give a
+  finite mesh; a scene file keeps everything; in the editor a click selects the curve, then a point, the Move
+  gizmo moves only that point and undo puts it back; moving points and the curve leaves no stale picture; a
+  straight curve along each of the six deform axes changes nothing, Tilt 90 turns the cross-section a quarter turn
+  and Radius 2 doubles it; the Circle preset is round within 0.3 %; a closed trefoil knot's frame meets itself;
+  Delete with points selected removes the points, and selecting another object lets go of them.
+- Stress `modifiers_ngon`: the Curve modifier on all 26 meshes along five ordinary and hostile curves, every type,
+  closed or open, every axis: 10,760 operations, 0 problems.
+- Unit checks: Windows 9,034, 0 failed (523 tests); the whole suite in render-cache verify mode: 9,035,
+  0 failed, 0 stale pictures. Linux with libraries: 8,944, 0 failed. Sanitizer build: 8,862, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: approved, with minor findings fixed: Array's Fit Curve no longer re-evaluates when the
+curve is only moved or turned (just its scale counts), so dragging a curve under "Array then Curve" stays on the
+in-place path; a curve's path is sampled once per change (the Scene view used to sample every curve every frame)
+and hashed straight from its fields; a point selection is dropped when another object is selected, and Delete
+removes the selected points; the Circle preset has 8 points (4 bulged in by 4 %); `curve` is in the console's help.
+Left as they are: point clicks win over a mesh in front within 9 pixels; V and Ctrl+Shift snapping don't apply to
+curve points yet.
+
+## 2026-10-12 (round 63): deforming modifiers update in place (task 0041)
+
+**Asked:** the roadmap (2026-10-11): curves, lattices, cages and skinning all deform meshes, and dragging their
+fields must stay interactive ("make sure the editor is still decently responsive").
+
+**Changed**
+- Smooth, Displace, Simple Deform and Cast only move vertices. At the end of a stack they now re-run on a kept copy
+  of the mesh and the render mesh moves its positions, normals and tangents in place, instead of a copy, a full
+  rebuild and new tangents on every change. A field drag on a 50k-face mesh went from 56 ms to 6.6 ms per change.
+  Modifiers before them (Subdivision, Mirror, ...) are evaluated once and kept while only the deformers change.
+
+**Checked**
+- New tests (round 63): on a cube, a UV sphere, a 50k-face grid, a mesh with sharp edges and one with UV seams,
+  each of the four deformers, three changes each: the in-place result equals the full evaluation (positions and
+  normals bit for bit; tangents unit length and at right angles); only the tail re-runs and the render mesh keeps
+  its build, a generative modifier or Edit Mode's cage rebuild in full; a flat grid made bumpy rebuilds then
+  follows in place; a scene snapshot keeps its shape when the original changes again; a Boolean re-cuts when its
+  cutter is deformed; tangents are the same whatever drag led to a shape (and within 18 degrees of MikkTSpace on a
+  twisted cylinder); a saved and reloaded scene evaluates the same; in the editor a drag stays in place and
+  re-renders the view, the shadows and voxel GI with no stale picture, and undo brings the old shape back exactly.
+- Stress `modifiers_ngon`: Simple Deform angle on a 50,176-face mesh 6.6 ms per change, 8.3 ms with sharp edges
+  (in full 56 ms); 6,080 operations on odd meshes, 0 problems.
+
+**Review (code reviewer)**: two majors and several minor findings, all fixed: a Boolean whose cutter was deformed
+kept its old cut (the cutter's mesh is now the same object, so its dependency mixes `deform_version`); tangents
+were projected from the previous frame's and drifted with the drag (now from UV gradients); `deform_version` moved
+only after the deformers ran; tests for voxel GI, save / load, the Boolean and tangents; a sharp-edges stress row.
+- Unit checks: Windows 8,975, 0 failed (511 tests); the whole suite in render-cache verify mode: 8,976,
+  0 failed, 0 stale pictures. Linux with libraries: 8,885, 0 failed. Sanitizer build: 8,803, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+## 2026-10-12 (round 62): axis materials by height with a noisy border; deleting textures (task 0040)
+
+**Asked:** "procedural ... work based on global position. Like the top of a cliff where it's grassy but over the edge
+it turns into dirt and rock" ("if it's quick, then do it"); "provide the option to delete textures in the texture
+tab"; "Making a new material in the material tab doesn't actually show the new material."
+
+**Added**
+- **Axis High** on axis materials: a material above **High Start** (world height in World mode, the object's own in
+  Local), faded over **High Blend**; and **Axis Noise** / **Noise Scale**, which make the grass-to-dirt and the
+  high band's borders wander. The same in the views, CPU and GPU path tracing and bakes. Learn > Materials: the
+  terrain section.
+- **Deleting textures** in the Textures window: a Delete button, the thumbnail's right-click menu, or Del; it asks
+  first, says how many materials use it (they then show it missing), and moves the file to the Recycle Bin.
+
+**Fixed**
+- New Material Asset (and New in the Textures window) with text left in the search box made something the grid
+  filtered out, so it looked as if nothing happened: New now clears the search, and a search says how many items
+  it hides ("Showing 1 of 15").
+
+**Checked**
+- New tests (round 62): above the band snow, below it the slope's parts, a blend between, nothing without it;
+  Local mode by the object's height; noise 0 gives the slope rule exactly, noise makes the border wander (107 grass,
+  92 dirt at the border angle) and is the same at the same point; NaN fields and positions stay finite; a tilted
+  plane is 29.3 % snow rasterized, 30.0 % on the CPU, 30.1 % on both GPUs (checked to be the GPUs); the fields
+  round-trip, an old .mat loads with the defaults, the pickers set every part; Delete asks first then trashes the
+  texture and a material using it shows it missing; New clears a leftover search.
+- Stress `shading`: with height and noise, every point near a border, 2.2x a plain material (the spec's 2x is
+  2.5x for this worst case; see its As built); task 0029's axis row 1.5-1.6x. Both are now the fastest of five
+  interleaved rounds against a plain run: single timings swung 1.5-2.4x for the unchanged 0029 row.
+
+**Review (code reviewer)**: a blocker, a suspected major and several minor findings, all fixed: Axis High couldn't
+be picked in the UI (the setter knew three parts); the GPU test could pass on a CPU fallback (it now checks the
+device); a NaN height on the GPU; noise evaluated at NaN; weak tests; the delete popup's count (now unique
+materials, assets included); undo could write a deleted texture's text into a new one of its name; unsaved texture
+edits not saved before the trash.
+- Unit checks: Windows 8,880, 0 failed (503 tests); the whole suite in render-cache verify mode: 8,881,
+  0 failed, 0 stale pictures. Linux with libraries: 8,790, 0 failed. Sanitizer build: 8,712, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+## 2026-10-11 (round 61): anime and manga camera filters (task 0039)
+
+**Asked:** the rest of "anime / 2D looks like Goo Engine (toon shading, outlines, halftone, ...)" (the roadmap's
+item 6, second half).
+
+**Added**
+- Camera filters: **Halftone** (a dot screen, Mono ink on paper or Colour, the same dots at any resolution),
+  **Hatching** (one to three line directions switched on by darkness), **Line Art** (silhouettes, object edges,
+  creases by angle, Taper), **Paper** (blotches, fibres and grain) and **Color Ramp** (brightness through 2 to 4
+  colours, Constant or Linear).
+- **Looks**: Add Filter > Looks > Anime (Line Art, saturation, a soft Bloom) and Manga (Grayscale, Halftone, Line
+  Art, Paper); `filter look Anime|Manga`. One undo step.
+
+**Asked during the round:** "in the material tab and inspector it says the texture is either non color or missing."
+And: "When I have a procedural map (bricks) and I have a color ramp that is based on height. It only works when height
+map is enabled even though I just want the color ... Maybe add a toggle with the texture window to only enable or
+disable certain maps."
+
+- **Normal Map, Roughness Map and Height Map switches** on a procedural texture (the Textures window, below the layer stack): off, that
+  output is neutral (a flat normal, roughness 1 so the material's Roughness rules, mid height) and Assign to
+  Selection leaves it out, while the layers still compute the height inside, so a Color Ramp from the height
+  colours the bricks without them also bumping the surface. Live shading follows the switches too.
+
+- **Bake Textures in the Hierarchy's right-click menu** too (as GameObject > Bake Textures), as the user asked.
+
+**Fixed**
+- **A material's texture field said "(missing)" for a procedural texture** (Bricks.ptex#albedo is no file): it
+  now shows the texture's image and its name ("Bricks (albedo)"), and its picker lists every procedural texture's
+  outputs beside the images. Their Non-Color tag and colour-space switch are gone (an output's colour space is its
+  own). The renderers always used them; only the field was wrong.
+- Path-traced pictures gave the filters (Edge Outline, Line Art) depth from a random sample per pixel; now one ray
+  through each pixel's centre, so their lines match the rasterizer's.
+- The Add Filter menu showed two Color headings (Color Ramp was listed after the Stylize effects).
+
+**Checked**
+- New tests (round 61): halving Halftone's cell gives 3.9 times the dots and 540p and 1080p show the same 14,528;
+  white stays white and black solid; Hatching's ink falls with brightness; Color Ramp Constant gives exactly 3
+  colours; Paper at 0 changes nothing and is the same twice; Line Art draws a cube's edges rasterized and traced
+  (the traced lines all within a pixel of the rasterized ones), a 30-degree fold at 20 and not at 40, nothing on
+  a smooth sphere; the looks add their effects in order, undo, round-trip, and an unknown look adds nothing.
+- Stress `filters`: each pass at 1080p on 8 threads against Edge Outline (about 10 ms): Halftone 0.6-0.9x,
+  Hatching 0.8x, Line Art 1.8-2.5x, Paper 0.1x, Color Ramp 0.05x (the spec's flat 4 ms is below what Posterize
+  costs; see the spec's As built); the fuzz of every effect with NaN / huge fields, 0 problems.
+
+**Review (code reviewer)**: three major and several minor findings, all fixed but one noted: grey specks in pure
+white and black halftone; noisy traced creases from jittered depth; Paper's cache holding one size (now four);
+an unknown look adding an empty stack; scratch memory that never shrank; Taper on the sky side; dots sized from
+one pixel. Noted: these colour passes veil a transparent film's background, as Invert and Posterize do.
+- Unit checks: Windows 8,850, 0 failed (497 tests); the whole suite in render-cache verify mode: 8,851,
+  0 failed, 0 stale pictures. Linux with libraries: 8,762, 0 failed. Sanitizer build: 8,684, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `filters` and `textures` stress 0 problems.
+
+## 2026-10-11 (round 60): toon shading and outlines (task 0038)
+
+**Asked:** "Anime / 2D looks like Goo Engine (toon shading, outlines, halftone, ...)" (the roadmap's item 6, first half).
+
+**Added**
+- **Toon shading model** (a material's Shading Model, or the Toon preset): light in Toon Bands flat tones with a
+  hard (or Softness) edge at the Threshold, a Shadow Color for the dark side, a hard highlight spot, a rim light
+  and a flat ambient. The same tones in the views, F12 on the CPU and the GPU, and Live Preview; bounces off toon
+  surfaces stay ordinary (Lambert), so lighting bakes are unchanged.
+- **Outline** component: the black line round an object (the inverted hull), in the views, path-traced renders
+  (camera rays only) and exports; Thickness in metres or object units, a colour.
+- Learn > Materials: *The anime look*, with a Try-it.
+
+**Fixed**
+- Objects with a negative scale (mirrored) were drawn inside out by the rasterizer.
+
+**Checked**
+- New tests (round 60): tones step through exactly Toon Bands levels; a rasterized toon sphere takes 2 tones with
+  1 band and 4 with 3 (PBR: the 4 commonest colours cover 28 %); the CPU trace's tone shares are within 0.7 % of
+  the rasterizer's, 3.1 % under a large area light; the GPU matches the CPU; the rim lights only the silhouette;
+  an Outline adds a ring of its colour round the sphere and changes none of its pixels, rasterized and traced,
+  mirrored too; thickness 0 draws nothing; the shell is pushed out with flipped faces, cached, world-space
+  thickness; an outlined object with a modifier traced in the Camera Preview while the Scene view redraws; undo
+  of the Outline and of a toon field; the fields round-trip through a .mat and the Outline through a scene.
+- Stress `shading`: a toon material shades in 8.4 ms at 1080p against PBR's 10.4 ms (spec: at most +15 %).
+- The GPU kernel came within reach of the SPIR-V optimiser's id limit (a second inlined shadow-ray call
+  overflowed it): the toon light branch shares the PBR one's shadow ray.
+
+**Review (code reviewer)**: a blocker, three major and several minor findings, all fixed but one noted: the
+outline shell had one cache slot for several views (a path tracer could keep a freed one); mirrored objects drew
+the hull's near side; the toon response was applied at bounces and in bakes; the rasterizer's toon ignored an area
+light's facing; falloff scaled tones instead of being banded; flat ambient ignored occlusion; tests for
+mirroring, modifiers, undo and area lights; the ADR now records the component and the camera-only hull. Noted:
+an outline makes shadow rays use the closest-hit loop.
+- Unit checks: Windows 8,756, 0 failed (490 tests); the whole suite in render-cache verify mode: 8,757,
+  0 failed, 0 stale pictures. Linux with libraries: 8,668, 0 failed. Sanitizer build: 8,590, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `shading` and `gpu` stress 0 problems.
+
+## 2026-10-11 (round 59): GPU devices open in the background (task 0037)
+
+**Asked:** "Switching from shaded to rendered and path trace preview crashes/halts the program" ... "make sure the
+editor is still decently responsive" (the retro stages stay in the path tracers).
+
+**Fixed**
+- **Turning the Camera Preview (or the Render window, Live Preview, a bake) to the GPU froze the editor** the first
+  time in a session: the driver built the kernel's pipeline on the editor's thread, about 80 s with a cold cache,
+  and Windows closed Blendity as not responding. Now the GPU opens in the background: the view traces on the CPU
+  ("GPU starting") and moves to the GPU when it is ready; bakes do those slices on the CPU; the editor wakes four
+  times a second meanwhile. A spare stays open so the next view gets a GPU at once.
+
+**Added**
+- A pipeline cache per GPU in `~/.blendity/cache` (checked against the GPU and a hash): later starts build the
+  pipeline from it even when the driver's cache is cold (9-13 ms instead of 84-141 ms here with a warm one).
+
+**Checked**
+- New tests (round 59): a GPU that doesn't exist is refused at once; with the open slowed to 3 s the slowest
+  editor frame is 17 ms, the preview traces on the CPU and is on the GPU after 3.3 s, and the spare is handed over
+  at once; a tracer forgets a pending GPU when the device turns back to the CPU; a bake's gather returns at once
+  while the GPU opens and uses it later; the pipeline cache is written and used, and corrupt, torn and foreign
+  files are ignored. The tests keep their caches in a scratch folder.
+
+**Review (code reviewer)**: four major and several minor findings, all fixed: the wake-up was cleared later in the
+same frame; quitting while a device opened could crash in static destructors (now leaked statics and `_Exit`);
+the GPU bakes still opened a device on the editor's thread; "GPU starting" stuck after switching to the CPU;
+the cache file had no body check and a shared temporary name; a failed open was never retried; any other view's
+open rebuilt a waiting tracer's scene; prewarm ignored the RT setting; the tests wrote the user's cache folder.
+- Unit checks: Windows 8,714, 0 failed (480 tests); the whole suite in render-cache verify mode: 8,715,
+  0 failed, 0 stale pictures. Linux with libraries: 8,627, 0 failed. Sanitizer build: 8,549, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `gpu` stress 0 problems.
+
+## 2026-10-11 (round 58): bake textures onto a mesh for export (task 0036)
+
+**Asked:** "Bake textures onto a mesh" for export (the roadmap's item 5), one atlas per object.
+
+**Added**
+- **Object > Bake Textures** (512 to 4096; console `baketex [size] [keepuvs]`): the active object's look (image
+  maps, procedural and `.ptex` textures, axis materials, Box and Generated mapping, every material slot) baked into
+  albedo, roughness, metallic and normal PNGs in `Assets/Textures/Baked`, on new UVs (Smart UV Project and Pack
+  Islands); the mesh takes those UVs and a new `<Object> Baked` material on every slot. One undo step. Objects
+  whose modifiers add geometry are refused with a message (apply them, or export with Bake Textures).
+- **Export > Bake Textures** (OBJ, FBX, glb / glTF, with a size): each exported object baked on a copy, the
+  images written beside the file and referenced; the scene is not changed.
+- **Exports carry more maps** without a bake: glTF normal textures and roughness / metallic packed into one PNG in
+  the buffer; FBX Texture and Video objects for base colour, normal, roughness, metallic and emission maps.
+
+**Fixed**
+- OBJ exports wrote a procedural texture's output (`X.ptex#albedo`) as a file path when it hadn't been converted.
+- `CMakeLists.txt` didn't compile `src/texture` (the build scripts and CI did).
+
+**Checked**
+- New tests (round 58): six materials on a cube's faces bake their colours at the face centres on one atlas; a
+  checker on a plane matches the renderer at all 64 cell centres; an axis material bakes grass on top and dirt on
+  the sides, rotated too; a flat surface's normal map is within 0.3 degrees of +Z and a Bricks texture bakes its
+  mortar; Object > Bake Textures keeps the rasterized look (0.02 % mean colour difference) and undo restores the
+  UVs and material; OBJ, glb and FBX exports with Bake Textures write and reference the images (ufbx reads the
+  FBX textures); ordinary materials' maps reach glTF and FBX; Keep UVs; NaN, empty and collapsed meshes bake
+  nothing; two objects with one name get their own files; a Mirror modifier is refused; Opaque alpha bakes solid
+  and a Transparent slot gives the baked material its surface.
+- Opened in Blender 5.2: the OBJ, glb and FBX import with Base Color, Roughness, Metallic and Normal linked to
+  the baked 256 x 256 images.
+- Stress `texbake` (new): 50k faces at 2048 in 506 ms on 8 threads (spec: under 2 s), 441 ms on 32, 4096 in
+  968 ms; 60 fuzzed bakes (NaN, huge, collapsed meshes, odd sizes) 0 problems. A 4096 bake from the menu holds
+  the editor for about a second.
+
+**Review (code reviewer)**: four major and several minor findings, all fixed: an Opaque material's alpha made the
+baked object a Cutout; a bake overwrote another same-named object's images (now new files each time); the in-scene
+bake ignored modifiers that add geometry (now refused); tracked stress reports deleted by a cleanup (restored);
+mirrored objects' normal maps in exports; the Bake option shown with Materials off; Unlit and emission dropped;
+packed roughness read as linear from sRGB maps; collapsed triangles baked.
+- Unit checks: Windows 8,693, 0 failed (476 tests); the whole suite in render-cache verify mode: 8,694,
+  0 failed, 0 stale pictures. Linux with libraries: 8,625, 0 failed. Sanitizer build: 8,547, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `texbake` and `textures` stress 0 problems.
+
+## 2026-10-11 (round 57): transparent backgrounds in renders (task 0035)
+
+**Asked:** "Add the ability to make backgrounds transparent when they are rendered (png transparency)."
+
+**Added**
+- **Transparent** (Render window; Blender's Film > Transparent): F12 renders, rasterized or path traced on the CPU
+  or the GPU, leave the world out of the background while it still lights the scene. A saved PNG has alpha 0
+  there, partial alpha at anti-aliased edges and behind see-through surfaces, 1 on solid objects; an EXR keeps the
+  alpha too; a JPEG is composited over black. The Render window shows a transparent render over a checkerboard.
+  Camera sequences save the same way.
+
+**Checked**
+- New tests (round 57): rasterized and path-traced (CPU and GPU) renders of a cube with no floor have alpha 0 at
+  the corners, 255 in the middle and partial values at the edges; a 50 % see-through quad gives alpha 127 (raster)
+  and 128 (traced); the PNG reads back with the alpha; off, every pixel is opaque. Opened in Blender 5.2: RGBA,
+  straight alpha, 0 at the corner, 1 on the subject. A glass sphere is covered (alpha 255) and shows the world
+  through it on the CPU and the GPU; a Bloom filter keeps a rasterized cube opaque; an Edge Outline keeps its
+  alpha in rasterized and filtered path-traced renders.
+
+**Review (code reviewer)**: three major and several minor findings, all fixed: glass vanished in transparent traces,
+Bloom made a see-through rim in rasterized ones, a filtered trace's alpha ignored its passes, a faint veil from
+colour-quantising passes, coverage accumulated on every GPU render, low coverage amplifying denoised colour.
+- Unit checks: Windows 8,584, 0 failed (466 tests); the whole suite in render-cache verify mode: 8,585,
+  0 failed, 0 stale pictures. Linux with libraries: 8,516, 0 failed. Sanitizer build: 8,438, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `filters` and `gpu` stress 0 problems.
+
+## 2026-10-11 (round 56): the Research window retired; papers in Learn > References (task 0034)
+
+**Asked:** "you can remove the research tab, doesn't really serve a purpose. Any features that use papers should be
+simply referenced and included in the learn tab."
+
+**Changed**
+- **The Research window is gone** (Window menu, File and Help menus, the Project window's Research Papers folder,
+  dropping a PDF copying it into the project). A layout saved with it loads without it.
+- **Learn > References** lists the papers behind Blendity's features, each with the feature it became and where
+  it is (Taubin smoothing, Catmull-Clark, LSCM unwrapping, MikkTSpace, voxel GI, GGX, the area-light work of
+  Karis and Heitz et al., the BVH, path guiding, the physical sky, noise, colour temperature...), with a Try-it
+  button for Taubin smoothing. `window Research`, `research`, `references` and Ctrl+8 open it. Mesh features from
+  papers are now under Mesh > From Papers. Nothing in the `research/` folder was touched.
+
+**Fixed**
+- The Textures window's preview could keep an old picture after an undo (an image freed and a new one allocated
+  at the same address looked unchanged); it, and the Materials window's previews, now hold their images.
+
+**Checked**
+- New tests (round 56): an old layout with Research (beside the Console, and alone in an area) loads without it,
+  every preset too; `window Research` and `research` open References; every paper feature is cited there and the
+  Taubin Try-it smooths a noisy sphere; dropping a PDF copies nothing; Ctrl+8 opens References from any lesson; a
+  layout with Research in its root area, or only Research, loads without it.
+
+**Review (code reviewer)**: a major and several minor findings, all fixed: Add Tab still offered Research, Ctrl+8
+opened the last lesson, Research in a layout's root area stayed, the path-guiding citation (now Ruppert, Herholz
+& Lensch 2020, the method Open PGL is set to), the research folder still deletable from Blendity, the Materials
+previews holding textures (now a content key and weak references), dead state.
+- Unit checks: Windows 8,552, 0 failed (461 tests); the whole suite in render-cache verify mode: 8,553,
+  0 failed, 0 stale pictures. Linux with libraries: 8,488, 0 failed. Sanitizer build: 8,410, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_ui` 0 problems.
+
+## 2026-10-11 (round 55): camera composition guides (task 0033)
+
+**Asked:** "adding 'rule of thirds' guides to the camera and can be togglable. Any additional camera guides or
+helpers are also welcomed."
+
+**Added**
+- **Composition guides** on every camera (Blender's Composition Guides and Safe Areas): **Thirds**, **Center**,
+  **Center Diagonal**, **Golden Ratio**, **Golden Triangle A / B**, **Harmonious Triangle A / B**, **Title Safe**
+  and **Action Safe** (margins adjustable), in a colour and opacity of your choice, all behind one **Show
+  Guides** switch. They draw over the camera's frame in the Game view, the Camera Preview and while piloting the
+  camera (inside a filter's letterbox when there is one), never into renders. Toggle them in the Camera
+  inspector, the Game view's new **Guides** menu or with `guides thirds on` / `guides off`. A Learn lesson
+  explains them.
+
+**Checked**
+- New tests (round 55): the thirds lines at 1/3 and 2/3 of the Game view's camera frame (every pixel of the
+  line), also in a 2.39:1 letterbox; each of the ten guides draws on its own; Show Guides off draws nothing; an
+  F12 render with guides on is identical to one without; the camera's render hash ignores them; Title Safe at
+  Blender's margins; the fields save, undo and redo; the Guides menu clicked with the mouse; the triangles'
+  endpoints are Blender's.
+
+**Review (code reviewer)**: a blocker and several minor findings, all fixed: the Guides menu read a dead pointer,
+the triangles weren't Blender's construction, the piloted frame ignored a filter's letterbox, a hashing hazard in
+`Camera::reflect`, loose console parsing, HiDPI lines, zero safe margins.
+- Unit checks: Windows 8,522, 0 failed (458 tests); the whole suite in render-cache verify mode: 8,523,
+  0 failed, 0 stale pictures. Linux with libraries: 8,458, 0 failed. Sanitizer build: 8,380, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` idle 1.33 ms.
+
+## 2026-10-11 (round 54): every camera filter in the path tracers (task 0032, ADR 0008 amended)
+
+**Asked:** "I want all the camera filter modifier stack to show up in the render view ... I want the filters to
+show up in the path traced system as well".
+
+**Added**
+- The Retro Console's four rasterizer stages now show in path-traced pictures (F12, the Render window's
+  Preview, the Rendered Camera Preview), on the CPU and the GPU: **vertex snapping** (wobbly PS1 edges),
+  **affine texture warping**, **the texture rules** (Nearest or 3-point filtering, the size cap) and the
+  Saturn's **screen-door transparency**. The other filters (outlines, bloom, grading, fog...) already did.
+
+**Checked**
+- New tests (round 54): a traced quad at a grazing angle takes the rasterizer's affine UVs (mean difference
+  0.19, against 0.94 for perspective), the GPU equal to the CPU; a 1-texel cap makes a textured quad one
+  colour on the CPU and the GPU; the screen door is an exact checkerboard (solid and see-through) on both;
+  a path-traced F12 render through a snapping Retro filter has the rasterized render's silhouette (0 pixels
+  differ, 448 without the snap); the GPU takes the same capped mip level, Nearest and 3-point filters as the
+  CPU; a nearly clear surface (alpha 0.05) vanishes through the door as in the rasterizer.
+- Stress `filters`: the odd-settings check had been reporting 135 false problems since task 0026 (it still
+  required the internal image to be no larger than the view); corrected: 300 runs, 0 problems.
+
+**Review (code reviewer)**: three major and several minor findings, all fixed: the door kept nearly clear
+surfaces, the GPU capped the sky map too, every preview rebuild copied every mesh (now cached and reused),
+hits behind glass counted as camera hits, shadow rays skipped the texture rules, non-finite screen positions.
+- Unit checks: Windows 8,494, 0 failed (452 tests); the whole suite in render-cache verify mode: 8,495,
+  0 failed, 0 stale pictures. Linux with libraries: 8,430, 0 failed. Sanitizer build: 8,352, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `gpu` stress clean.
+
+## 2026-10-11 (round 53): live procedural textures (task 0031, ADR 0017 amended)
+
+**Asked:** "Not only do I want the procedural textures to be evaluated at a set resolution. I want to view them
+change on the material itself. So one part is images at a set resolution, but still having the convenience of
+live shaders."
+
+**Added**
+- **Live Shading** (a texture's field, on by default): up close, where a texel of the image would cover more
+  than a pixel, the Scene and Game views, the Camera Preview, F12 raster and the Materials window's previews
+  evaluate the texture's layers at the pixel, like a shader, so bricks, planks and tiles stay sharp at any
+  distance (normals included). Further away they read the mipmapped image, which doesn't shimmer. The images
+  at the set resolution are still what exports, bakes and the path tracers use.
+- **Objects follow a texture edit while you drag:** dragging a field in the Textures window updates every
+  material using the texture each frame (its images at 256 during the drag, the set size on release); before,
+  they changed only on release.
+
+**Changed**
+- The Tile layer reads the texel its tiled point lands in (it read one half a cell off), so its images can
+  differ slightly from before.
+
+**Checked**
+- New tests (round 53): a point evaluation equals the planes at every texel centre for every layer type (Warp
+  and Tile within a mean 0.01); the live normal within 10 degrees of the image's normal; up close a mortar edge
+  is sharp with Live Shading (0 in-between pixels across a row) and blurred without (13), and far away both
+  give the same pixels; dragging a field gives the material a new 256 image every frame and the 1024 one on
+  release; the preview's Edge Wear as wide as at full size; 12 stacked Warp / Tile layers in linear time; an
+  axis material's scale and Mirror wrapping keep the image; the preview is per texture; Live Shading saves;
+  NaN coordinates stay finite.
+
+**Review (code reviewer)**: four major and several minor findings, all fixed but the frame-time target (2.4x for
+a whole close-up frame, documented): extra planes kept for every texture, texel-sized filters 8x wide in the
+drag preview, axis materials going live while minified, stacked Warp / Tile doubling per layer, a global
+preview flag, every Materials preview redrawn on any texture edit, Live Shading toggles re-evaluating images,
+Mirror / Clamp / Closest, Generated mapping, a hard switch line (now a crossfade).
+- Stress `procedural_textures`: a point of the Bricks preset about 290 ns, 485 ns with its normal (one
+  thread); a 1080p frame made entirely of magnified texels 2.4x the image-only one (the spec's target was
+  under 2x: not met, see the spec's As built); the odd-settings fuzz now also evaluates every layer type at
+  points: 147 runs, 0 problems. 1024 x 1024, 8 layers: 108 ms (unchanged).
+- Unit checks: Windows 8,471, 0 failed (447 tests); the whole suite in render-cache verify mode: 8,472,
+  0 failed, 0 stale pictures. Linux with libraries: 8,419, 0 failed. Sanitizer build: 8,341, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` idle
+  1.33 ms.
+
+## 2026-10-11 (round 52): large area lights, the gizmo after Set Origin, Select Coplanar (task 0030)
+
+**Asked:** "the area light when width and height are large (lets say 10 x 10) still creates weird rendered
+artifacts (black splotches on the object, even a default cube)", "when you use the lighting generate lighting
+feature it causes the error"; "when I retarget the origin of any object, the transform tool and gizmo doesn't
+automatically apply to the new origin"; "the ability to select coplanar faces"; "certain camera filter
+properties like edge outline don't show up in the render view ... in the path traced system as well".
+
+**Fixed**
+- **Generate Lighting under a large area light no longer bakes splotches.** The bake took the light's range
+  falloff from each random point on the light (on a 10 m light it varied tenfold across it), so 32 samples
+  per texel left heavy noise that the denoiser turned into blotches. Now the unshadowed light is computed
+  (no noise) and the shadow rays only decide how much of it gets through, the falloff at the centre as in the
+  path tracer. A floor under a 10 m light: texel-to-texel noise from about 15 % to 0.1 %.
+- **Large area lights light the sides of things in the Scene and Game views and F12 raster.** The
+  rasterizer treated an area light as a point at its centre, so a cube's sides under a 10 m light were black;
+  it now takes the light's whole surface (the path tracer's answer within 1 %), with the specular from the
+  light's nearest point. Light probes take area lights the same way.
+- **The gizmo moves to the new origin at once** after the Inspector's Set Origin > Apply: the change asked for
+  no new frame, so the app waited for the next input with the gizmo on the old origin.
+
+**Added**
+- **Select Coplanar** (Edit Mode, Mesh menu; `editop select_coplanar`): adds every face lying in the plane of a
+  selected face, joined to it or not (Blender's Select Similar > Coplanar). In vertex and edge mode it starts
+  from the faces whose corners are selected and adds to the selection.
+
+**Checked, no change needed**
+- Camera filters in path-traced renders: an Edge Outline shows in F12 path-traced renders at 720p with the
+  denoiser, on the CPU and both GPUs and in the Render window's Preview (now a regression test). The filters
+  that don't reach the path tracer are the Retro Console's rasterizer stages (vertex snapping, affine
+  textures, the texture override, screen-door transparency); task 0032 brings them to it.
+
+**Checked**
+- New tests (round 52): the area light's integral against a million-point reference in 13 cases (within 1 %);
+  a cube's side under a 10 m light lit in the rasterizer as in the path tracer (0.098 vs 0.098); a glossy
+  floor's highlight within a factor 0.5 to 1.6 of the path tracer's; a baked floor under a 10 m light smooth
+  (0.1 % texel-to-texel) and as bright as the path tracer (0.412 vs 0.413); a change asks for a frame and
+  the gizmo is on the new origin in it; Select Coplanar (joined, apart, raised, flipped, tilted, degenerate,
+  the vertex selection kept); the Edge Outline in path-traced renders.
+- Stress `shading`: an area light per pixel, one thread: 175 ns (rectangle), 210 ns (a wall cutting it),
+  280 ns (0.3 m below), 360 ns (disk); a point light is about 10 ns.
+- Unit checks: Windows 8,423, 0 failed (438 tests); the whole suite in render-cache verify mode: 8,424,
+  0 failed, 0 stale pictures. Linux with libraries: 8,371, 0 failed. Sanitizer build: 8,293, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `editor_render` idle
+  1.41 ms; `bake` and `probes` odd-settings runs: 0 problems.
+
+## 2026-10-11 (round 51): axis materials (task 0029, ADR 0018)
+
+**Asked:** "a material that will always have grass on top followed by dirt, regardless of rotation".
+
+**Added**
+- **Axis materials:** a material's **Axis Mode** (World or Local) and three parts, **Top**, **Side** and
+  **Bottom** (material assets picked in the Inspector; empty uses the material's own maps). Surfaces facing
+  up take Top, steep ones Side, downward ones Bottom, by the normal in the world (World: grass stays on top
+  however the object turns) or the object's own space (Local: moss that turns with the stone); **Axis
+  Angle** sets where Top turns into Side, **Axis Blend** how soft the edge is, **Axis Scale** the
+  projection's tile size. The parts are projected triplanar, so no UVs are needed.
+- The same in the Scene and Game views, F12 raster, the CPU path tracer and the GPU path tracer; the
+  Materials window's previews show axis materials and procedurals (they showed neither).
+
+**Checked**
+- New tests (round 51): World mode puts Top up, Side on steep faces and Bottom underneath whatever the
+  object's rotation; Local mode follows the object; Blend 0 is a hard edge and 0.3 mixes; a part's texture
+  varies across a surface without UVs; the fields round-trip through a `.mat`, an edit undoes, and a part's
+  edit changes the views' hash; an F12 raster render from above shows the Top, still after a quarter turn
+  in World mode and the Side in Local mode; the CPU and both GPUs agree on an axis-material cube (mean
+  difference 0.0006 of 0.187).
+- Stress `shading`: an axis material with two parts 1.51× a plain one per point (target under 1.6×).
+- Unit checks: Windows 8,371, 0 failed (431 tests); the whole suite in render-cache verify mode: 8,372,
+  0 failed, 0 stale pictures. Linux with libraries: 8,321, 0 failed. Sanitizer build: 8,243, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures; `gpu` stress clean.
+
+**Review (code reviewer)** found and these were fixed, each with a test: two axis materials naming each
+other recursed without end (now cut while resolving, a part naming the parent itself is ignored); the GPU
+material table's iterator could be invalidated while appending parts; the GPU projected procedural parts at
+a different point than the CPU; the shadow-map (RSM) cache key missed the parts; a NaN normal shaded black
+(now the Side part); the views' hash mixes the parts as resolved. Also: a compiler warning in the normal
+output's Sobel (64-bit indices).
+
 ## 2026-10-11 (round 50): the Textures window (task 0028)
 
 **Asked:** a tab dedicated to making procedural textures with a Blender-style modifier stack.

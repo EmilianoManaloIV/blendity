@@ -6,6 +6,7 @@
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
 #include "../render/dof.h"
+#include "../render/display.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -63,6 +64,25 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
     it.realtime_lm = !editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_);
     items.push_back(it);
+    /* Toon outlines (ADR 0020): the inverted hull as its own item, back faces always culled (not in Edit Mode). */
+    if (!editing)
+      if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
+        const Outline &ol = *static_cast<const Outline *>(oc);
+        const Mat4 &w = it.model;
+        const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
+        if (const Mesh *shell = ol.shell(*m, scale, game ? 1 : 0)) {
+          DrawItem o;
+          o.mesh = &shell->render_mesh();
+          o.model = it.model;
+          o.albedo = ol.materials()[0]->base_color;  // (NaN-free)
+          o.unlit = true;
+          o.materials = &ol.materials();
+          o.receive_shadows = false;
+          o.always_cull = true;
+          o.id = it.id;
+          items.push_back(o);
+        }
+      }
   });
   return items;
 }
@@ -190,7 +210,9 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   MeshRenderer *mr = nullptr;
   Light *l = nullptr;
   ProbeVolume *pv = nullptr;
+  Component *outline = nullptr;
   for (auto &c : g.components) switch (c->render_role()) {
+      case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
       case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
       case Component::RenderRole::ProbeVolume: if (!pv) pv = static_cast<ProbeVolume *>(c.get()); break;
@@ -213,6 +235,11 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
       for (auto &mp : mr->materials) {  // a material's version is an input of every object using it
         materials_key = (materials_key ^ (uint64_t)(uintptr_t)mp.get()) * 1099511628211ull;
         materials_key = (materials_key ^ (mp ? mp->version : 0)) * 1099511628211ull;
+        if (mp && mp->axis_mode != 0)  // an axis material's parts as resolved (what is rendered; ADR 0018, one level)
+          for (const MaterialPtr &part : mp->textures().axis) {
+            materials_key = (materials_key ^ (uint64_t)(uintptr_t)part.get()) * 1099511628211ull;
+            materials_key = (materials_key ^ (part ? part->version : 0)) * 1099511628211ull;
+          }
       }
     }
   }
@@ -228,12 +255,7 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     if (mr) {
       const uint64_t f = flags & ~(1ull << 63);
       mix(&f, 8);
-      if (mr->enabled)
-        for (auto &mp : mr->materials) {
-          const void *p = mp.get();
-          mix(&p, sizeof(p));
-          if (mp) mix(&mp->version, 8);
-        }
+      mix(&materials_key, 8);  // the materials' pointers and versions, an axis material's parts included
     }
     m.transform_version = g.transform_version;
     m.id = g.id;
@@ -250,6 +272,10 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     uint64_t k[3];
     g.evaluated_keys(k);
     mix(k, sizeof(k));
+  }
+  if (outline) {  // a toon outline's thickness, colour and on / off (ADR 0020)
+    const uint64_t oh = hash_component(*outline) ^ (uint64_t)outline->enabled << 63;
+    mix(&oh, 8);
   }
   if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
     const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
@@ -453,12 +479,47 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   if (filters) filters->apply_raster(opt);
   r3d.begin(&rt, v, p, env, opt);
   Mat4 inv = (p * v).inverse();
-  if (cam && cam->clear_flags == 1) r3d.clear(to_display_pixel(cam->background, ViewTransform::Standard, 0.0f));
+  if (render_clear_override_on_) {  // a transparent F12's black / white pass (task 0035)
+    r3d.clear(render_clear_override_);
+    if (!rt.hdr.empty()) std::fill(rt.hdr.begin(), rt.hdr.end(), Vec3(0.0f));  // no light there for bloom in either pass
+  }
+  else if (cam && cam->clear_flags == 1) r3d.clear(to_display_pixel(cam->background, ViewTransform::Standard, 0.0f));
   else if (!scene_lights)  // the editor's own sky; with the scene's lighting the world's gradient, sky or HDRI
     r3d.clear_sky(inv, {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
   else r3d.clear_environment(inv, env_, env.view_transform, env.exposure);
   for (const DrawItem &it : items) r3d.add(it);
   r3d.flush();
+}
+
+/* A picture drawn over black and over white -> straight colour and alpha, in place of the white one (task 0035):
+ * alpha = 1 - (white - black), colour = black / alpha. Under 4 % alpha is clear: a pass that quantises colours
+ * (15-bit, posterize) or adds grain leaves the background a few levels apart in the two, not a real veil. */
+static void combine_black_white(const uint32_t *black, uint32_t *white_out, size_t n) {
+  JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
+    for (int64_t i = b; i < e; i++) {
+      const uint32_t bk = black[(size_t)i], wt = white_out[(size_t)i];
+      const int rb = bk >> 16 & 255, gb = bk >> 8 & 255, bb = bk & 255, rw = wt >> 16 & 255, gw = wt >> 8 & 255, bw = wt & 255;
+      const float a = clampf(1.0f - ((rw - rb) + (gw - gb) + (bw - bb)) / (3.0f * 255.0f), 0.0f, 1.0f);
+      if (a < 0.04f) {
+        white_out[(size_t)i] = 0;
+        continue;
+      }
+      const int a8 = (int)std::lround(a * 255.0f);
+      auto un = [&](int c) { return (uint32_t)std::min(255, (int)std::lround(c / a)); };
+      white_out[(size_t)i] = (uint32_t)a8 << 24 | un(rb) << 16 | un(gb) << 8 | un(bb);
+    }
+  });
+}
+
+/* A transparent render's pixels over black (a JPEG has no alpha; task 0035). */
+static std::vector<uint32_t> over_black(const std::vector<uint32_t> &px) {
+  std::vector<uint32_t> out(px.size());
+  for (size_t i = 0; i < px.size(); i++) {
+    const uint32_t c = px[i], a = c >> 24;
+    auto m = [&](uint32_t v) { return (v * a + 127) / 255; };
+    out[i] = 0xFF000000u | m(c >> 16 & 255) << 16 | m(c >> 8 & 255) << 8 | m(c & 255);
+  }
+  return out;
 }
 
 /* A camera's filter stack, kept per camera object and rebuilt when its filter components change: building
@@ -589,6 +650,77 @@ static void build_pt(PathTracer &pt, Editor &, const std::vector<DrawItem> &item
   pt.build(objs, env.lights, world);
 }
 
+/* A camera filter's rasterizer stages for a path-traced picture (task 0032, ADR 0008 amended): the settings, and
+ * vertex snapping done to copies of the meshes (each vertex's screen position rounded to the filter's grid at
+ * its internal size, depth and w kept, as the rasterizer's to_screen; then back into the object's own space,
+ * so Box / Generated mapping still read object coordinates). `keep` holds the copies while the tracer uses them. */
+static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p, int w, int h, PTSettings &ps, std::vector<DrawItem> &items,
+                            std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> &keep) {
+  /* The copies are kept by what made them (mesh, model, camera, size, grid): a rebuild with nothing of that
+   * changed reuses the same copy, so the tracer's BVH caches (keyed by mesh) still hit. */
+  std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> old;
+  old.swap(keep);
+  ps.retro = PTSettings::Retro{};
+  if (fs.empty() || w <= 0 || h <= 0) return;
+  const Mat4 vp = p * v;
+  ps.retro.affine_uv = fs.affine_uv;
+  ps.retro.screen_door = fs.screen_door;
+  ps.retro.tex = fs.tex;
+  ps.retro.view_proj = vp;
+  ps.retro.width = w;
+  ps.retro.height = h;
+  const float snap = finite_bits(fs.vertex_snap) && fs.vertex_snap > 0.0f ? fs.vertex_snap : 0.0f;
+  if (snap <= 0.0f) return;
+  const Mat4 ivp = vp.inverse();
+  for (DrawItem &it : items) {
+    if (!it.mesh) continue;
+    const Mat4 mvp = vp * it.model, to_local = it.model.inverse();
+    /* Wholly off one side of the view: no vertex lands on the image, nothing to snap (the original mesh). */
+    if (it.mesh->bounds.valid()) {
+      int out[6] = {0, 0, 0, 0, 0, 0};
+      for (int k = 0; k < 8; k++) {
+        const Vec3 cb{k & 1 ? it.mesh->bounds.max.x : it.mesh->bounds.min.x, k & 2 ? it.mesh->bounds.max.y : it.mesh->bounds.min.y,
+                      k & 4 ? it.mesh->bounds.max.z : it.mesh->bounds.min.z};
+        const Vec4 c = mvp * Vec4(cb, 1.0f);
+        out[0] += c.x < -c.w, out[1] += c.x > c.w, out[2] += c.y < -c.w, out[3] += c.y > c.w, out[4] += c.w <= 0.0f, out[5] += c.z > c.w;
+      }
+      bool outside = false;
+      for (int k = 0; k < 6; k++) outside = outside || out[k] == 8;
+      if (outside) continue;
+    }
+    uint64_t key = 1469598103934665603ull;
+    auto mix = [&](const void *d, size_t n) {
+      for (size_t i = 0; i < n; i++) key = (key ^ ((const uint8_t *)d)[i]) * 1099511628211ull;
+    };
+    const void *src = it.mesh;
+    mix(&src, sizeof(src));
+    mix(&it.mesh->serial, sizeof(it.mesh->serial));
+    mix(it.model.m, sizeof(it.model.m));
+    mix(vp.m, sizeof(vp.m));
+    mix(&w, sizeof(w));
+    mix(&h, sizeof(h));
+    mix(&snap, sizeof(snap));
+    if (auto f = old.find(key); f != old.end()) {
+      it.mesh = f->second.get();
+      keep[key] = f->second;
+      continue;
+    }
+    auto m = std::make_shared<RenderMesh>(*it.mesh);
+    m->serial = 0;
+    for (Vec3 &pos : m->positions) {
+      const Vec4 c = mvp * Vec4(pos, 1.0f);
+      if (!(c.w > 1e-6f)) continue;  // behind the camera: as it is
+      const float sx = std::floor(((c.x / c.w) * 0.5f + 0.5f) * w / snap + 0.5f) * snap, sy = std::floor((0.5f - (c.y / c.w) * 0.5f) * h / snap + 0.5f) * snap;
+      const Vec4 q = ivp * Vec4((sx / w * 2.0f - 1.0f) * c.w, (1.0f - sy / h * 2.0f) * c.w, c.z, c.w);
+      if (!(std::fabs(q.w) > 1e-12f)) continue;
+      const Vec3 wp = q.xyz() / q.w;
+      if (finite_bits(wp.x) && finite_bits(wp.y) && finite_bits(wp.z)) pos = to_local.point(wp);
+    }
+    it.mesh = m.get();
+    keep[key] = std::move(m);
+  }
+}
+
 /* A camera's Clear Flags: Solid Color for the path tracer (ADR 0016): the display colour taken as linear
  * light, so a Standard view transform shows it as set (Filmic tints it a little, as it tints everything). */
 static void pt_solid_background(PTSettings &ps, const Camera *cam) {
@@ -689,6 +821,8 @@ void Editor::start_final_render(bool preview, bool open_window) {
   Vec3 eye = owner ? owner->world_position() : cam_.position();
   render_img_.resize(w, h);
   render_linear_.clear();
+  render_alpha_lin_.clear();
+  render_transparent_ = rs.transparent;
   render_start_ = now_seconds();
   render_has_result_ = true;
   if (open_window) dock_open(WindowKind::Render);
@@ -700,7 +834,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
     RenderTarget rt;
     rt.attach(render_img_, {0, 0, w, h});
     Renderer3D r3d;
-    render_camera(r3d, rt, render_ft_, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), owner, cam, w / (float)h);
+    render_with_alpha([&] { render_camera(r3d, rt, render_ft_, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), owner, cam, w / (float)h); });
     render_time_ = now_seconds() - render_start_;
     rendering_ = false;
     int iw, ih;
@@ -719,6 +853,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
     RenderTarget rt;
     rt.attach(big, {0, 0, big.width, big.height});
     Renderer3D r3d;
+    render_with_alpha([&] {
     render_deferred(r3d, rt, v, p, eye, true, true, cam);
     if (cam && owner) camera_dof(rt, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), cam, w / (float)h, cam->vertical_fov_deg(w / (float)h));
     JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
@@ -736,6 +871,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
           render_img_.pixels[(size_t)y * w + x] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
         }
     });
+    });
     render_time_ = now_seconds() - render_start_;
     rendering_ = false;
     render_status_ = strprintf("%s %dx%d, %dx SSAA, %.0f ms (%zu tris)", preview ? "Preview (rasterized)" : "Rasterized", w, h, aa,
@@ -748,8 +884,11 @@ void Editor::start_final_render(bool preview, bool open_window) {
   PTSettings ps = make_pt_settings(rs);
   if (cam) ps.exposure += cam->exposure_stops();
   pt_solid_background(ps, cam);
-  final_pt_.set_settings(ps);  // before build(): it picks the ray backend
-  build_pt(final_pt_, *this, items, env, env_);
+  if (rs.transparent) {  // Film > Transparent: camera rays that miss add nothing (the world still lights the scene)
+    ps.solid_background = true;
+    ps.background = Vec3(0.0f);
+    ps.transparent_film = true;
+  }
   int tw = w, th = h;
   if (render_filtered_) {
     /* Traced at the filters' resolution (fewer samples to wait for), scaled up when shown. */
@@ -758,6 +897,9 @@ void Editor::start_final_render(bool preview, bool open_window) {
     if (render_dst_.w != w || render_dst_.h != h) p = cam->projection(render_dst_.w / (float)render_dst_.h);
     std::fill(render_img_.pixels.begin(), render_img_.pixels.end(), 0xFF000000u);
   }
+  retro_for_trace(render_filters_, v, p, tw, th, ps, items, render_snapped_);  // (no-op without a filter)
+  final_pt_.set_settings(ps);  // before build(): it picks the ray backend
+  build_pt(final_pt_, *this, items, env, env_);
   render_view_ = v;
   render_proj_ = p;
   render_eye_ = eye;
@@ -775,6 +917,11 @@ void Editor::step_final_render() {
   if (!rendering_) return;
   const RenderSettings &rs = scene_->render;
   int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
+  if (final_pt_.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there
+    render_start_ = now_seconds();
+    render_status_ = strprintf("%s: %s", render_preview_ ? "Preview" : "Path tracing", final_pt_.device_summary().c_str());
+    Log::info("%s", render_status_.c_str());
+  }
   int done = final_pt_.render(40.0, target);
   render_time_ = now_seconds() - render_start_;
   bool finished = done >= target;
@@ -812,7 +959,9 @@ void Editor::resolve_final_render(bool finished) {
       /* Denoise once and keep the linear result for HDR / EXR saving. */
       render_linear_ = final_pt_.linear_rgb(denoise);
       final_pt_.resolve_rgb(render_linear_, render_img_.pixels.data(), render_img_.width);
+      if (render_transparent_) apply_trace_alpha(render_linear_, false);
     }
+    else if (render_transparent_) apply_trace_alpha(final_pt_.linear_rgb(false), false);
     else final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
     return;
   }
@@ -834,8 +983,89 @@ void Editor::resolve_final_render(bool finished) {
   }
   FilterFrame frame = trace_filter_frame(final_pt_, rt, render_view_, render_proj_, render_eye_, render_forward_, nullptr);
   frame.far_distance = render_far_;  // the camera's when the render started (it may have changed since)
+  if (render_transparent_) {
+    /* Transparent (task 0035): the picture (straight colour by the coverage) over black and over white, each through
+     * the passes; alpha from the difference, so what a pass draws or moves (outlines, pixelation, distortion)
+     * carries its alpha as in the rasterizer. */
+    const std::vector<float> lin = final_pt_.linear_rgb(finished && denoise), cov = final_pt_.coverage();
+    const size_t n = (size_t)s.width * s.height;
+    if (cov.size() >= n && lin.size() >= n * 3) {
+      std::vector<uint32_t> over_black(n), over_white(n);
+      const ViewTransform vt = final_pt_.settings().view_transform;
+      const float ex = final_pt_.settings().exposure;
+      for (size_t i = 0; i < n; i++) {
+        const float a = clampf(cov[i], 0.0f, 1.0f), d = std::max(a, 0.05f);
+        const float st[3] = {lin[i * 3] / d, lin[i * 3 + 1] / d, lin[i * 3 + 2] / d};
+        uint32_t px;
+        display::encode_span(st, &px, 1, vt, ex);
+        auto ch = [&](int sh, float bg) { return (uint32_t)std::lround(((px >> sh) & 255) * a + bg * (1.0f - a)); };
+        over_black[i] = 0xFF000000u | ch(16, 0) << 16 | ch(8, 0) << 8 | ch(0, 0);
+        over_white[i] = 0xFF000000u | ch(16, 255) << 16 | ch(8, 255) << 8 | ch(0, 255);
+      }
+      const std::vector<Vec3> hdr = rt.hdr;  // (bloom's light, the same for both: the background has none)
+      s.pixels = over_black;
+      for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
+      const std::vector<uint32_t> black = s.pixels;
+      s.pixels = over_white;
+      rt.hdr = hdr;
+      for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
+      combine_black_white(black.data(), s.pixels.data(), n);
+    }
+    upscale_nearest(s.pixels.data(), s.width, s.height, s.width, render_img_.pixels.data(), render_img_.width, render_dst_);
+    return;
+  }
   for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
   upscale_nearest(s.pixels.data(), s.width, s.height, s.width, render_img_.pixels.data(), render_img_.width, render_dst_);
+}
+
+/* A transparent rasterized render (Film > Transparent, task 0035): drawn over black, then over white; where the two
+ * differ the background showed through. alpha = 1 - (white - black), colour = black / alpha (straight). */
+void Editor::render_with_alpha(const std::function<void()> &once) {
+  if (!render_transparent_) {
+    once();
+    return;
+  }
+  render_clear_override_on_ = true;
+  render_clear_override_ = 0xFF000000u;
+  once();
+  const std::vector<uint32_t> black = render_img_.pixels;
+  render_clear_override_ = 0xFFFFFFFFu;
+  once();
+  render_clear_override_on_ = false;
+  combine_black_white(black.data(), render_img_.pixels.data(), render_img_.pixels.size());
+}
+
+/* A transparent path-traced render (task 0035): alpha from the share of camera samples that hit something; the
+ * colour (premultiplied: misses add nothing) divided by it before the view transform. Filtered: the passes ran on the
+ * premultiplied picture; its display colour is divided instead, and the alpha scaled up as the picture was. */
+void Editor::apply_trace_alpha(const std::vector<float> &lin, bool filtered) {
+  const std::vector<float> cov = final_pt_.coverage();
+  const int w = render_img_.width, h = render_img_.height;
+  if (!filtered) {
+    if (cov.size() < (size_t)w * h || lin.size() < (size_t)w * h * 3) return;
+    const ViewTransform vt = final_pt_.settings().view_transform;
+    const float ex = final_pt_.settings().exposure;
+    JobSystem::global().parallel_for(h, 16, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < w; x++) {
+          const size_t i = (size_t)y * w + x;
+          const float a = cov[i];
+          const int a8 = (int)std::lround(clampf(a, 0.0f, 1.0f) * 255.0f);
+          if (a8 <= 0) {
+            render_img_.pixels[i] = 0;
+            continue;
+          }
+          const float d = std::max(a, 0.05f);  // (a silhouette's few samples: don't amplify the denoised colour's bleed)
+          const float straight[3] = {lin[i * 3] / d, lin[i * 3 + 1] / d, lin[i * 3 + 2] / d};
+          uint32_t px;
+          display::encode_span(straight, &px, 1, vt, ex);
+          render_img_.pixels[i] = (uint32_t)a8 << 24 | (px & 0xFFFFFF);
+        }
+    });
+    if (render_linear_.size() == (size_t)w * h * 3) render_alpha_lin_ = cov;
+    return;
+  }
+  (void)filtered;  // (a filtered render's alpha comes from its two pass runs, in resolve_final_render)
 }
 
 void Editor::save_render() {
@@ -882,10 +1112,14 @@ void Editor::save_render() {
     }
   }
   const int w = render_img_.width, h = render_img_.height;
-  bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), w, h, w)
-            : fmt == 1 ? write_jpeg(path, render_img_.pixels.data(), w, h, w, scene_->render.jpeg_quality)
+  const std::vector<uint32_t> jpg = render_transparent_ && fmt == 1 ? over_black(render_img_.pixels) : std::vector<uint32_t>();
+  const float *alpha = render_transparent_ && render_alpha_lin_.size() == (size_t)w * h ? render_alpha_lin_.data() : nullptr;
+  if (render_transparent_ && (fmt == 1 || fmt == 2))
+    Log::info("%s has no alpha: the transparent background is saved black (PNG or EXR keep it)", fmt == 1 ? "JPEG" : "Radiance HDR");
+  bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), w, h, w, render_transparent_)
+            : fmt == 1 ? write_jpeg(path, jpg.empty() ? render_img_.pixels.data() : jpg.data(), w, h, w, scene_->render.jpeg_quality)
             : fmt == 2 ? write_hdr(path, render_linear_.data(), w, h)
-                       : write_exr(path, render_linear_.data(), w, h, true);
+                       : write_exr(path, render_linear_.data(), w, h, true, alpha);
   if (ok) Log::info("Saved render: %s", path.c_str());
   else Log::error("Could not write %s", path.c_str());
   project_listed_ = -100;
@@ -1009,6 +1243,11 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
         for (const MaterialPtr &m : *it->materials) {
           const uint64_t mv[2] = {(uint64_t)(uintptr_t)m.get(), m ? m->version : 0};
           mix(key, mv, sizeof(mv));
+          if (m && m->axis_mode != 0)  // the bounce's colour comes from an axis material's parts too
+            for (const MaterialPtr &part : m->textures().axis) {
+              const uint64_t pv[2] = {(uint64_t)(uintptr_t)part.get(), part ? part->version : 0};
+              mix(key, pv, sizeof(pv));
+            }
         }
     }
     mix(key, &sun->direction, sizeof(Vec3));
@@ -1133,6 +1372,8 @@ uint64_t Editor::scene_view_key(const Recti &view) {
   mix(&ro, 8);
   mix(&active_, 8);
   mix(&edit_obj_, 8);
+  const uint64_t wp[4] = {(uint64_t)weight_paint_, wp_obj_, wp_version_, (uint64_t)wp_group_};  // the painted weights (task 0046)
+  mix(wp, sizeof(wp));
   mix(selection_.data(), selection_.size() * sizeof(uint64_t));
   mix(vert_sel_.data(), vert_sel_.size());
   mix(face_sel_.data(), face_sel_.size());
@@ -1257,12 +1498,15 @@ void Editor::draw_camera_preview(const Recti &view) {
       PTSettings ps = make_pt_settings(rs);
       ps.exposure += cam->exposure_stops();
       pt_solid_background(ps, cam);
+      const float ta = tdst.w / (float)std::max(1, tdst.h);
+      const Mat4 tp = tdst.w == w && tdst.h == h ? p : cam->projection(ta);
+      retro_for_trace(filters, v, tp, tw, th, ps, items, cam_preview_snapped_);  // a filter's rasterizer stages (task 0032)
       cam_preview_pt_.set_settings(ps);
       build_pt(cam_preview_pt_, *this, items, env, env_);
-      const float ta = tdst.w / (float)std::max(1, tdst.h);
-      cam_preview_pt_.set_camera(v, tdst.w == w && tdst.h == h ? p : cam->projection(ta), tw, th, camera_lens(cam, ta));
+      cam_preview_pt_.set_camera(v, tp, tw, th, camera_lens(cam, ta));
       cam_preview_done_ = false;
     }
+    else if (cam_preview_pt_.adopt_ready_gpus()) cam_preview_done_ = false;  // its GPU opened: samples restart there (task 0037)
     if (cam_preview_img_.width != w || cam_preview_img_.height != h) cam_preview_img_.resize(w, h);  // keeps a finished preview
     if (traced_img.width != tw || traced_img.height != th) traced_img.resize(tw, th);
     const int target = std::max(1, rs.preview_samples);
@@ -1296,6 +1540,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       }
     }
     status = strprintf("  %d / %d", std::min(cam_preview_pt_.samples(), target), target);
+    if (cam_preview_pt_.waiting_for_gpu()) status += "  (CPU: GPU starting)";
   }
   else {
     cam_preview_pt_hash_ = 0;
@@ -1342,6 +1587,20 @@ void Editor::draw_camera_preview(const Recti &view) {
   Recti dst = box.intersect(view);
   for (int y = dst.y; y < dst.bottom(); y++)
     std::memcpy(fb->row(y) + dst.x, cam_preview_img_.row(y - box.y) + (dst.x - box.x), sizeof(uint32_t) * dst.w);
+  {
+    /* Composition guides (task 0033) over the camera's frame in the inset (a filter's letterbox inside it). */
+    Recti frame = box;
+    const FilterStack &fs = camera_filters(g);
+    if (!fs.empty()) {
+      int iw, ih;
+      Recti d;
+      filter_layout(fs, box.w, box.h, iw, ih, d);
+      frame = {box.x + d.x, box.y + d.y, d.w, d.h};
+    }
+    u.canvas.push_clip(view);
+    draw_camera_guides(*cam, frame);
+    u.canvas.pop_clip();
+  }
   u.canvas.rect_outline(box, Color::hex(0x101010));
 }
 
@@ -1373,10 +1632,12 @@ bool Editor::write_render_file(const std::string &base, std::string *written) {
   if (fmt >= 2 && render_linear_.empty()) fmt = 0;
   static const char *exts[] = {".png", ".jpg", ".hdr", ".exr"};
   const std::string path = base + exts[fmt];
-  const bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), w, h, w)
-                  : fmt == 1 ? write_jpeg(path, render_img_.pixels.data(), w, h, w, scene_->render.jpeg_quality)
+  const std::vector<uint32_t> jpg = render_transparent_ && fmt == 1 ? over_black(render_img_.pixels) : std::vector<uint32_t>();
+  const float *alpha = render_transparent_ && render_alpha_lin_.size() == (size_t)w * h ? render_alpha_lin_.data() : nullptr;
+  const bool ok = fmt == 0   ? write_png(path, render_img_.pixels.data(), w, h, w, render_transparent_)
+                  : fmt == 1 ? write_jpeg(path, jpg.empty() ? render_img_.pixels.data() : jpg.data(), w, h, w, scene_->render.jpeg_quality)
                   : fmt == 2 ? write_hdr(path, render_linear_.data(), w, h)
-                             : write_exr(path, render_linear_.data(), w, h, true);
+                             : write_exr(path, render_linear_.data(), w, h, true, alpha);
   if (ok && written) *written = path;
   return ok;
 }

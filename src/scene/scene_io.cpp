@@ -40,6 +40,22 @@ std::string quote(const std::string &s) {
   return o + "\"";
 }
 
+/* One quoted word at `at` (as quote() writes it); `at` moves past it. */
+std::string unquote_word(std::string_view line, size_t &at) {
+  std::string s;
+  while (at < line.size() && line[at] == ' ') at++;
+  if (at >= line.size() || line[at] != '"') return s;
+  for (at++; at < line.size() && line[at] != '"'; at++) {
+    if (line[at] == '\\' && at + 1 < line.size()) {
+      at++;
+      s += line[at] == 'n' ? '\n' : line[at];
+    }
+    else s += line[at];
+  }
+  if (at < line.size()) at++;
+  return s;
+}
+
 std::vector<std::string> tokenize(std::string_view line) {
   std::vector<std::string> t;
   size_t i = 0, n = line.size();
@@ -314,6 +330,13 @@ std::string save_scene_text(const Scene &scene) {
     for (uint64_t k : m.sharp_edges) os << "e " << (uint32_t)(k >> 32) << ' ' << (uint32_t)(k & 0xFFFFFFFF) << '\n';
     if (m.seams_sharp) os << "seamsharp 1\n";
     for (uint64_t k : m.loose_edges) os << "w " << (uint32_t)(k >> 32) << ' ' << (uint32_t)(k & 0xFFFFFFFF) << '\n';  // wire edges
+    /* Vertex groups (ADR 0024): a name, then one weight per vertex. */
+    for (const VertexGroup &vg : m.vertex_groups) {
+      if (vg.weights.size() != m.vert_count()) continue;
+      os << "vg " << quote(vg.name);
+      for (float w : vg.weights) os << ' ' << F{w};
+      os << '\n';
+    }
     os << "end\n";
   }
   scene.for_each_ordered([&](GameObject &g, int) {
@@ -504,6 +527,22 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
           p = parse_uint(p + 2, le, a);
           parse_uint(p, le, b);
           if (a < nv && b < nv && a != b) m->loose_edges.push_back(Mesh::edge_key((uint32_t)a, (uint32_t)b));
+        }
+        else if (line.substr(0, 3) == "vg ") {
+          /* A vertex group: its quoted name, then a weight per vertex (clamped to 0..1, NaN to 0; short lines padded). */
+          VertexGroup vg;
+          size_t at = 3;
+          vg.name = unquote_word(line, at);
+          const char *q = line.data() + std::min(at, line.size());
+          while (vg.weights.size() < nv) {
+            float w = 0.0f;
+            const char *q2 = parse_float(q, le, w);
+            if (q2 == q) break;
+            q = q2;
+            vg.weights.push_back(finite_bits(w) ? std::max(0.0f, std::min(w, 1.0f)) : 0.0f);
+          }
+          vg.weights.resize(nv, 0.0f);
+          if (!vg.name.empty() && m->find_group(vg.name) < 0) m->vertex_groups.push_back(std::move(vg));
         }
         else if (line.substr(0, 10) == "seamsharp ") m->seams_sharp = true;
         else if (line.substr(0, 6) == "angle ") {

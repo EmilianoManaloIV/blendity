@@ -9,8 +9,10 @@
 //       renders the editor without a window (CI, docs, visual tests)
 #include "../core/core.h"
 #include "../editor/editor.h"
+#include "../render/gpu_device.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <tuple>
@@ -82,7 +84,17 @@ static int headless(int argc, char **argv) {
 int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++)
     if (std::strcmp(argv[i], "--headless-screenshot") == 0) return headless(argc, argv);
-  Editor editor;
-  if (!editor.init(argc, argv)) return 1;
-  return editor.run();
+  int code = 0;
+  {
+    Editor editor;
+    if (!editor.init(argc, argv)) return 1;
+    code = editor.run();
+  }
+  /* A GPU still opening in the background (task 0037) is inside the driver: running the static destructors (and
+   * the driver's own teardown) under it can crash or hang. Everything is saved by now, so leave at once. */
+  if (gpu::renderers_opening()) {
+    std::fflush(nullptr);
+    std::_Exit(code);
+  }
+  return code;
 }

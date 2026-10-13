@@ -3,6 +3,7 @@
 
 #include "colormanagement.h"
 #include "display.h"
+#include "../texture/procedural_texture.h"
 
 #include <algorithm>
 #include <cmath>
@@ -33,7 +34,177 @@ static Vec4 tex_sample(const TexturePtr &t, Vec2 uv, float lod, const Material &
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp) { return evaluate_material(m, m.textures(), sp); }
 
+/* One material's surface; force_box projects its maps triplanar from sp's local position and normal (an axis
+ * material's parts), whatever its own mapping says, and ignores its own axis settings. */
+static SurfaceSample evaluate_surface(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp, bool force_box);
+
+static inline float axis_step(float e0, float e1, float x) {  // smoothstep that is a step when the edges meet
+  if (e1 - e0 < 1e-5f) return x >= e0 ? 1.0f : 0.0f;
+  const float t = clampf((x - e0) / (e1 - e0), 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp);
+
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
+  SurfaceSample s = evaluate_any(m, tx, sp);
+  if (m.shading_model == 1) s.toon = &m;  // an axis material's parts shade by the parent's model
+  return s;
+}
+
+float toon_level(const Material &m, float lit) {
+  const int bands = std::max(1, std::min(8, m.toon_bands));
+  const float th = clampf(m.toon_threshold, 0.0f, 0.95f), w = clampf(m.toon_softness, 0.0f, 0.5f);
+  if (!finite_bits(lit)) lit = 0.0f;
+  float q = 0.0f;
+  for (int k = 0; k < bands; k++) {
+    const float e = th + (float)k * (1.0f - th) / (float)bands;
+    q += axis_step(e - w, e + w, lit);
+  }
+  return q / (float)bands;
+}
+
+Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit) {
+  const Material &m = *s.toon;
+  const float q = toon_level(m, lit);
+  Vec3 c = s.albedo * lerp(m.toon_shadow, Vec3(1.0f), q);
+  if (m.toon_specular_size > 0.0f && q > 0.0f) {
+    /* A hard spot where N.H is near 1: size 1 reaches N.H = 0.8. */
+    const float nh = dot(n, normalize(V + L)), e = 1.0f - 0.2f * clampf(m.toon_specular_size, 0.0f, 1.0f);
+    const float w = 0.1f * clampf(m.toon_specular_smooth, 0.0f, 0.5f);
+    c += lerp(Vec3(1.0f), s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0f * s.specular);
+  }
+  return c;
+}
+
+Vec3 toon_rim(const Material &m, Vec3 n, Vec3 V) {
+  if (!(m.toon_rim_width > 0.0f) || !(m.toon_rim_strength > 0.0f)) return Vec3(0.0f);
+  const float f = 1.0f - std::max(0.0f, dot(n, V)), e = 1.0f - clampf(m.toon_rim_width, 0.0f, 1.0f);
+  const float w = clampf(m.toon_softness, 0.0f, 0.5f) + 0.02f;
+  return m.toon_rim * (axis_step(e - w, e + w, f) * m.toon_rim_strength);
+}
+
+static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
+  if (m.axis_mode == 0) return evaluate_surface(m, tx, sp, false);
+  /* Axis material (ADR 0018): weights by the slope of the normal in World or Local space, then each part sampled
+   * triplanar at the world / local position and blended. */
+  const bool world = m.axis_mode == 1;
+  Vec3 n = world ? sp.normal : sp.local_normal;
+  const float len = length(n);
+  const bool ok = finite_bits(len) && len > 1e-6f;
+  const float ny = ok ? n.y / len : 0.0f;
+  n = ok ? n / len : Vec3(1.0f, 0.0f, 0.0f);  // a NaN or zero normal: Side, projected along one axis
+  const float c = std::cos(clampf(m.axis_angle, 0.0f, 90.0f) * kDeg2Rad), b = clampf(m.axis_blend, 0.0f, 1.0f) * 0.5f;
+  /* Task 0040: noise at the point moves the slope's border (in the cosine) and the height band's (in metres). */
+  const Vec3 at = world ? sp.position : sp.local_position;
+  const float amount = finite_bits(m.axis_noise) ? clampf(m.axis_noise, 0.0f, 1.0f) : 0.0f;
+  float noise = 0.0f;
+  if (amount > 0.0f) {
+    /* Only near a border: further away no noise can move it past (the weights are saturated), so the result is the
+     * same without evaluating it (most of a surface is far from one). */
+    const float reach = amount * 0.5f + b;
+    bool by_border = std::fabs(std::fabs(ny) - c) <= reach;
+    if (!by_border && tx.axis[3]) {
+      const float hb = finite_bits(m.axis_high_blend) ? std::max(0.0f, m.axis_high_blend) : 1.0f;
+      const float start = finite_bits(m.axis_high_start) ? m.axis_high_start : 0.0f;
+      by_border = !finite_bits(at.y) || std::fabs(at.y - start) <= hb + amount * std::max(hb, 0.05f) * 2.0f;
+    }
+    if (by_border && finite_bits(at.x) && finite_bits(at.y) && finite_bits(at.z)) {  // (noise of NaN would be 0 anyway)
+      const float ns = finite_bits(m.axis_noise_scale) ? std::max(0.01f, m.axis_noise_scale) : 4.0f;
+      noise = fbm_noise(at / ns, 2, 0.5f);
+      if (!finite_bits(noise)) noise = 0.0f;
+    }
+  }
+  const float sy = ny + noise * amount * 0.5f;
+  const float w_top = axis_step(c - b, c + b, sy), w_bottom = axis_step(c - b, c + b, -sy);
+  float w[4] = {w_top, std::max(0.0f, 1.0f - w_top - w_bottom), w_bottom, 0.0f};
+  if (tx.axis[3]) {  // the height band covers the slope's parts where it is on
+    const float hb = finite_bits(m.axis_high_blend) ? std::max(0.0f, m.axis_high_blend) : 1.0f;
+    const float start = finite_bits(m.axis_high_start) ? m.axis_high_start : 0.0f;
+    const float y = finite_bits(at.y) ? at.y + noise * amount * std::max(hb, 0.05f) * 2.0f : -1e30f;
+    const float wh = axis_step(start - hb, start + hb, y);
+    for (int k = 0; k < 3; k++) w[k] *= 1.0f - wh;
+    w[3] = wh;
+  }
+  SurfacePoint tp = sp;
+  tp.local_position = (world ? sp.position : sp.local_position) / std::max(0.01f, m.axis_scale);
+  tp.footprint = (world ? sp.world_footprint : sp.footprint) / std::max(0.01f, m.axis_scale);  // in the projection's units
+  tp.local_normal = n;
+  SurfaceSample out;
+  out.albedo = Vec3(0.0f);
+  out.metallic = out.roughness = out.specular = out.alpha = 0.0f;
+  out.emission = Vec3(0.0f);
+  Vec3 nsum(0.0f);
+  float wsum = 0.0f;
+  for (int k = 0; k < 4; k++) {
+    if (w[k] <= 1e-3f) continue;
+    const Material &sm = tx.axis[k] ? *tx.axis[k] : m;
+    const Material::Resolved &stx = tx.axis[k] && tx.axis_tx[k] ? *tx.axis_tx[k] : tx;
+    const SurfaceSample r = evaluate_surface(sm, stx, tp, true);
+    out.albedo = out.albedo + r.albedo * w[k];
+    out.metallic += r.metallic * w[k];
+    out.roughness += r.roughness * w[k];
+    out.specular += r.specular * w[k];
+    out.alpha += r.alpha * w[k];
+    out.emission = out.emission + r.emission * w[k];
+    nsum = nsum + r.normal * w[k];
+    wsum += w[k];
+  }
+  if (wsum > 0.0f) {
+    const float inv = 1.0f / wsum;
+    out.albedo = out.albedo * inv;
+    out.metallic *= inv;
+    out.roughness *= inv;
+    out.specular *= inv;
+    out.alpha *= inv;
+    out.emission = out.emission * inv;
+  }
+  out.normal = length(nsum) > 1e-6f ? normalize(nsum) : sp.normal;
+  out.unlit = m.unlit;
+  return out;
+}
+
+namespace {
+/* A live texture's points looked up for one shading point: the slots that share a texture and projection
+ * (albedo, roughness, normal of one .ptex) walk the stack once. */
+struct LiveMemo {
+  struct Entry {
+    const LiveTexture *t;
+    float u, v;
+    TexPoint p;
+    bool has_n;
+    Vec3 n;
+  };
+  Entry e[6];
+  int count = 0;
+  /* An output as the image holds it: linear albedo, the normal encoded 0..1, roughness / height in x. */
+  Vec4 get(const LiveTexture &t, int out, Vec2 uv) {
+    /* Image convention (v = 0 at the bottom row) to the generators' (v = 0 at the top). */
+    const float u = uv.x - std::floor(uv.x), v = 1.0f - (uv.y - std::floor(uv.y));
+    Entry *hit = nullptr;
+    for (int i = 0; i < count; i++)
+      if (e[i].t == &t && e[i].u == u && e[i].v == v) hit = &e[i];
+    if (!hit) {
+      hit = &e[count < 6 ? count++ : 5];
+      *hit = Entry{&t, u, v, t.at(u, v), false, Vec3(0.0f)};
+    }
+    if (!t.output_on(out)) return out == 1 ? Vec4(0.5f, 0.5f, 1.0f, 1.0f) : out == 2 ? Vec4(1.0f, 1.0f, 1.0f, 1.0f) : Vec4(0.5f, 0.5f, 0.5f, 1.0f);  // switched off
+    switch (out) {
+      case 1:
+        if (!hit->has_n) {
+          hit->n = t.normal(u, v, &hit->p.height);
+          hit->has_n = true;
+        }
+        return Vec4(hit->n.x * 0.5f + 0.5f, hit->n.y * 0.5f + 0.5f, hit->n.z * 0.5f + 0.5f, 1.0f);
+      case 2: return Vec4(hit->p.rough, hit->p.rough, hit->p.rough, 1.0f);
+      case 3: return Vec4(hit->p.height, hit->p.height, hit->p.height, 1.0f);
+      default: return Vec4(hit->p.albedo.x, hit->p.albedo.y, hit->p.albedo.z, 1.0f);
+    }
+  }
+};
+}  // namespace
+
+static SurfaceSample evaluate_surface(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp, bool force_box) {
   SurfaceSample s;
   s.albedo = m.base_color;
   s.metallic = m.metallic;
@@ -51,11 +222,11 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
     Vec3 ext = sp.local_bounds.max - sp.local_bounds.min;
     gen = (sp.local_position - sp.local_bounds.min) / vmax(ext, Vec3(1e-6f));
   }
-  if (m.mapping == (int)MaterialMapping::Generated) {
+  if (m.mapping == (int)MaterialMapping::Generated && !force_box) {
     uv = {gen.x * m.tiling.x + m.offset.x, gen.y * m.tiling.y + m.offset.y};
     ddx = ddy = Vec2(0, 0);
   }
-  const bool box = m.mapping == (int)MaterialMapping::Box;
+  const bool box = force_box || m.mapping == (int)MaterialMapping::Box;
   Vec3 bw;  // triplanar weights
   Vec3 bp = sp.local_position * m.tiling + m.offset;
   if (box) {
@@ -65,7 +236,7 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
     float sum = std::max(an.x + an.y + an.z, 1e-6f);
     bw = an / sum;
   }
-  auto sample = [&](const TexturePtr &t) -> Vec4 {
+  auto sample_image = [&](const TexturePtr &t) -> Vec4 {
     if (!box) {
       float lod = (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) ? 0.0f : texture_lod(*t, ddx, ddy);
       return tex_sample(t, uv, lod, m, sp.tex);
@@ -76,25 +247,70 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
     if (bw.z > 0.001f) r = r + tex_sample(t, {bp.x, bp.y}, 0, m, sp.tex) * bw.z;
     return r;
   };
+  /* Live procedural textures (task 0031): the stack evaluated at this point where the image would be
+   * magnified (a texel larger than the pixel), so a close-up stays sharp; elsewhere the mipmapped image,
+   * which doesn't alias. Not under a camera filter's texture rules (a retro look wants the low-res image). */
+  /* Not with Clamp / Mirror wrapping or Closest filtering either: a point of the tile has neither, and the
+   * switch from the image would show. */
+  const bool live_ok = sp.live_textures && !(sp.tex && sp.tex->active()) && m.wrap == (int)TexWrap::Repeat && m.filter != (int)TexFilter::Closest;
+  static thread_local LiveMemo memo;  // (per thread: built once, not per shaded point)
+  memo.count = 0;
+  /* How much of the live evaluation to take: all of it where a texel covers two pixels or more, none where it
+   * covers one or less (the mipmapped image), a crossfade between (no line where the two meet). */
+  auto live_weight = [&](const TexturePtr &t) {
+    if (!t) return 1.0f;
+    const float texels = (float)std::max(t->width, t->height);
+    float per_px;  // texels across one pixel
+    if (!box && m.mapping != (int)MaterialMapping::Generated) {
+      if (ddx.x == 0 && ddx.y == 0 && ddy.x == 0 && ddy.y == 0) return sp.footprint <= 0.0f ? 1.0f : 0.0f;
+      per_px = std::max({std::fabs(ddx.x), std::fabs(ddx.y), std::fabs(ddy.x), std::fabs(ddy.y)}) * texels;
+    }
+    else {
+      if (sp.footprint <= 0.0f) return 1.0f;
+      const float tile = std::max({std::fabs(m.tiling.x), std::fabs(m.tiling.y), std::fabs(m.tiling.z)});
+      float size = 1.0f;  // the object-space size one tile spans (Generated: the bounds)
+      if (!box && sp.local_bounds.valid()) {
+        const Vec3 ext = sp.local_bounds.max - sp.local_bounds.min;
+        size = std::max(1e-6f, std::min({std::max(ext.x, 1e-6f), std::max(ext.y, 1e-6f), std::max(ext.z, 1e-6f)}));
+      }
+      per_px = sp.footprint * tile * texels / size;
+    }
+    return finite_bits(per_px) ? clampf((1.0f - per_px) * 2.0f, 0.0f, 1.0f) : 0.0f;
+  };
+  auto sample_slot = [&](int s, const TexturePtr &t) -> Vec4 {
+    const LiveTexture *lt = live_ok ? tx.live[s].get() : nullptr;
+    const float wl = lt ? live_weight(t) : 0.0f;
+    if (wl <= 0.0f) return sample_image(t);
+    const int out = tx.live_output[s];
+    Vec4 r(0, 0, 0, 0);
+    if (!box) r = memo.get(*lt, out, uv);
+    else {
+      if (bw.x > 0.001f) r = r + memo.get(*lt, out, {bp.z, bp.y}) * bw.x;
+      if (bw.y > 0.001f) r = r + memo.get(*lt, out, {bp.x, bp.z}) * bw.y;
+      if (bw.z > 0.001f) r = r + memo.get(*lt, out, {bp.x, bp.y}) * bw.z;
+    }
+    return wl >= 1.0f || !t ? r : lerp(sample_image(t), r, wl);
+  };
 
   /* Base colour: procedural or image, tinted by Base Color. */
   if (m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) {
-    Vec3 pp = (m.mapping == (int)MaterialMapping::UV ? Vec3(uv.x, uv.y, 0.0f) : gen) * m.procedural_scale;
+    /* (An axis material's part: the projected position, like its maps.) */
+    Vec3 pp = (force_box ? sp.local_position : m.mapping == (int)MaterialMapping::UV ? Vec3(uv.x, uv.y, 0.0f) : gen) * m.procedural_scale;
     float t = m.procedural == (int)Procedural::Checker ? checker(pp) : saturate(0.5f + 0.5f * fbm_noise(pp, 5, 0.5f) * 1.4f);
     s.albedo = lerp(m.procedural_color2, m.base_color, t);
   }
   else if (tx.base) {
-    Vec4 c = sample(tx.base);
+    Vec4 c = sample_slot(0, tx.base);
     s.albedo = s.albedo * c.xyz();
     s.alpha *= c.w;
   }
-  if (tx.metallic) s.metallic *= sample(tx.metallic).x;
-  if (tx.roughness) s.roughness *= sample(tx.roughness).x;
+  if (tx.metallic) s.metallic *= sample_slot(1, tx.metallic).x;
+  if (tx.roughness) s.roughness *= sample_slot(2, tx.roughness).x;
   s.emission = m.emission * m.emission_strength;
-  if (tx.emission) s.emission = s.emission * sample(tx.emission).xyz();
+  if (tx.emission) s.emission = s.emission * sample_slot(4, tx.emission).xyz();
   /* Tangent-space normal map (OpenGL / Blender convention, +Y up). */
   if (tx.normal && sp.has_tangent && m.normal_strength > 0) {
-    Vec4 nm = sample(tx.normal);
+    Vec4 nm = sample_slot(3, tx.normal);
     Vec3 tn = {nm.x * 2 - 1, nm.y * 2 - 1, nm.z * 2 - 1};
     Vec3 n = sp.normal;
     Vec3 t = normalize(sp.tangent.xyz() - n * dot(n, sp.tangent.xyz()));
@@ -134,6 +350,29 @@ Vec3 brdf_eval(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l) {
   Vec3 spec = F * (D * vis);
   Vec3 diff = s.albedo * ((1.0f - s.metallic) / kPi);
   return (diff * (Vec3(1.0f) - F) + spec) * nl;
+}
+
+void brdf_eval_parts(const SurfaceSample &s, Vec3 n, Vec3 v, Vec3 l, Vec3 &diffuse, Vec3 &specular) {
+  const Vec3 f0 = fresnel_f0(s);
+  const Vec3 diff = s.albedo * ((1.0f - s.metallic) / kPi);
+  float nl = dot(n, l);
+  if (nl <= 0.0f) {  // no specular from below the horizon; the diffuse with the normal-incidence Fresnel
+    diffuse = diff * (Vec3(1.0f) - f0);
+    specular = Vec3(0.0f);
+    return;
+  }
+  float nv = std::max(dot(n, v), 1e-4f);
+  Vec3 h = normalize(v + l);
+  float nh = std::max(dot(n, h), 0.0f), vh = std::max(dot(v, h), 0.0f);
+  float a = std::max(s.roughness * s.roughness, 0.002f), a2 = a * a;
+  float d = nh * nh * (a2 - 1.0f) + 1.0f;
+  float D = a2 / (kPi * d * d);
+  float vis = 0.5f / (nl * std::sqrt(nv * nv * (1 - a2) + a2) + nv * std::sqrt(nl * nl * (1 - a2) + a2));
+  float fw = (1.0f - vh) * (1.0f - vh);
+  fw = fw * fw * (1.0f - vh);
+  Vec3 F = f0 + (Vec3(1.0f) - f0) * fw;
+  diffuse = diff * (Vec3(1.0f) - F);
+  specular = F * (D * vis * nl);
 }
 
 Vec3 env_brdf_approx(Vec3 f0, float roughness, float nv) {

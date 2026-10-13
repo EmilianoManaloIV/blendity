@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "../scene/curve.h"
 #include "editor.h"
+#include "learn.h"
 #include "../texture/procedural_texture.h"
+#include "../render/texture_bake.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -74,11 +77,14 @@ bool SceneCamera::update(double now) {
 
 Editor::Editor() = default;
 Editor::~Editor() {
+  procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
   if (window_) destroy_window(window_);
 }
 
 void Editor::resolve_project_paths() {
-  auto is_root = [](const std::string &d) { return fs::is_dir(fs::join(d, "Assets")) && fs::is_dir(fs::join(d, "research")); };
+  auto is_root = [](const std::string &d) {  // (a research folder marked older projects; new ones have Assets/Scenes)
+    return fs::is_dir(fs::join(d, "Assets")) && (fs::is_dir(fs::join(d, "research")) || fs::is_dir(fs::join(d, "Assets/Scenes")));
+  };
   std::vector<std::string> starts = {fs::executable_dir(), fs::current_dir()};
   if (const char *env = std::getenv("BLENDITY_PROJECT")) project_root_ = env;  // tests: a scratch project
   if (!project_root_.empty()) starts.clear();
@@ -97,7 +103,6 @@ void Editor::resolve_project_paths() {
   papers_dir_ = fs::join(project_root_, "research/papers");
   screenshots_dir_ = fs::join(project_root_, "Screenshots");
   fs::make_dirs(fs::join(assets_dir_, "Scenes"));
-  fs::make_dirs(papers_dir_);
   std::string prefs_dir = fs::join(fs::home_dir(), ".blendity");
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
@@ -114,6 +119,11 @@ static void common_init(Editor *) {
 
 bool Editor::init(int argc, char **argv) {
   common_init(this);
+  /* The interactive editor never waits for a GPU to open (task 0037): its views and bakes trace on the CPU until
+   * it is. */
+  gpu::set_background_open_default(true);
+  cam_preview_pt_.set_background_gpu_open(true);
+  final_pt_.set_background_gpu_open(true);
   resolve_project_paths();
   load_prefs();
   std::string scene_arg, layout_arg;
@@ -150,7 +160,7 @@ bool Editor::init(int argc, char **argv) {
   }
   stable_ = scene_->clone();
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
-  Log::info("New here? Open the Learn tab (F1). Drop research papers onto the window or into %s", papers_dir_.c_str());
+  Log::info("New here? Open the Learn tab (F1).");
   Log::info("UI font: %s | worker threads: %d", ui_.font.source().c_str(), JobSystem::global().thread_count());
   return true;
 }
@@ -337,7 +347,13 @@ void Editor::frame(std::vector<Event> &events) {
   measured_fps_ = (float)frame_stamps_.size();
   process_events(events);
   update_procedural_shapes();
-  if (scene_ && scene_->render.device == 1) gpu::prewarm();  // once; compiles the GPU kernel off the UI thread
+  /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
+  if (texture_touch_pending_ && !ui_.in.down[0]) {
+    procedural_texture_clear_previews();
+    invalidate_material_textures();
+    texture_touch_pending_ = false;
+  }
+  if (scene_ && scene_->render.device == 1) gpu::prewarm(!headless_, scene_->render.hardware_rt);  // once; the GPU kernel and devices off the UI thread
   /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
    * mesh instead, or leave Edit Mode for anything without one. */
   if (edit_mode_ && active_ && active_ != edit_obj_ && !pp_.active && !modal_.active && !xf_.active) {
@@ -372,6 +388,8 @@ void Editor::frame(std::vector<Event> &events) {
       step_requested_ = false;
     }
   }
+  /* IK after scripts move the targets, before anything draws (task 0048); unchanged inputs cost a hash per chain. */
+  if (solve_constraints(*scene_)) ui_.redraw = true;
   if (cam_.update(now)) ui_.redraw = true;
   update_camera_focus();
   /* Live preview: re-render the preview when anything it depends on changes
@@ -393,6 +411,12 @@ void Editor::frame(std::vector<Event> &events) {
 
   ui_.begin_frame(&fb_, now);
   auto_generate_step();  // after begin_frame: its wake-up time must survive to the run loop
+  /* While a GPU opens in the background, wake a few times a second so a waiting view takes it (task 0037; after
+   * begin_frame, which clears the wake-up). */
+  if (gpu::renderers_opening()) {
+    const double wake = now + 0.25;
+    ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, wake) : wake;
+  }
   preview_step();
   auto &c = ui_.canvas;
   int mh = ui_.row_h() + ui_.px(2);
@@ -614,10 +638,9 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Import Model...")) import_dialog();
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
     u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
-    if (u.menu_item("Refresh", "Ctrl+R")) { project_listed_ = -100; papers_listed_ = -100; }
+    if (u.menu_item("Refresh", "Ctrl+R")) project_listed_ = -100;
     u.menu_separator();
     if (u.menu_item("Open Assets Folder")) fs::open_external(assets_dir_);
-    if (u.menu_item("Open Research Papers Folder")) fs::open_external(papers_dir_);
   });
   u.popup(u.id("GameObject"), u.px(280), [this, has_sel] {
     auto &u = ui_;
@@ -640,6 +663,27 @@ void Editor::draw_menubar(const Recti &r) {
       if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light");
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera");
+    u.submenu("Curve", u.px(170), [this] {
+      for (const char *k : {"Bezier", "Circle", "Path"})
+        if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k);
+    });
+    u.tooltip("A path to bend meshes along (Curve modifier) or fill with copies (Array > Fit Curve). Blender: Add > Curve.");
+    if (u.menu_item("Lattice")) create_object("Lattice");
+    u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
+              "or taper the mesh. Blender: Add > Lattice.");
+    if (u.menu_item("Armature")) create_object("Armature");
+    u.tooltip("A skeleton: a root with one bone (add more with the console's `bone add`). Select a mesh first and it gets\n"
+              "a Skin modifier with automatic weights. Blender: Add > Armature.");
+    u.submenu("Rig", u.px(200), [this] {
+      if (ui_.menu_item("Humanoid")) run_console_command("rig humanoid");
+      ui_.tooltip("A person's skeleton (Hips to Head, arms, legs) with IK on the hands and feet: move the HandIK / FootIK\n"
+                  "objects and the limbs follow; the Pole objects aim the elbows and knees.");
+      if (ui_.menu_item("Quadruped")) run_console_command("rig quadruped");
+      ui_.tooltip("A four-legged skeleton (spine, neck, head, tail, four legs) with IK on each foot.");
+      if (ui_.menu_item("Auto IK on Selected Skeleton")) run_console_command("rig autoik");
+      ui_.tooltip("Finds the arms and legs of an imported skeleton by their bone names (Mixamo, Unity, Rigify) and adds\n"
+                  "two-bone IK with targets and poles to each.");
+    });
     u.menu_separator();
     u.submenu("Set Origin", u.px(270), [this, has_sel] {
       for (int k = 0; k < kOriginModeCount; k++) {
@@ -652,6 +696,13 @@ void Editor::draw_menubar(const Recti &r) {
       ui_.tooltip("Move and rotate only the origin with the gizmo, or click a vertex, edge or face to snap it there.\n"
                   "Blender: Options > Affect Only > Origins.");
     });
+    u.submenu("Bake Textures", u.px(200), [this, has_sel] {
+      for (int size : {512, 1024, 2048, 4096})
+        if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) bake_object_textures(size);
+    });
+    u.tooltip("Bake the active object's look (procedural textures, axis materials, Box mapping, every material slot) into\n"
+              "one set of images on new UVs, and give it a material that uses them: what it looks like, as plain images\n"
+              "any program shows. Undo restores it. Blender: Cycles Bake. (Console: baketex [size] [keepuvs])");
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
       mark_changed("Clear Parent");
@@ -788,7 +839,7 @@ void Editor::draw_menubar(const Recti &r) {
     });
     if (!research::features().empty()) {
       u.menu_separator();
-      u.submenu("Research Features", u.px(300), [this, has_sel] {
+      u.submenu("From Papers", u.px(300), [this, has_sel] {  // features from research papers (Learn > References)
         for (auto &f : research::features())
           if (ui_.menu_item(f.name, nullptr, false, has_sel)) mesh_op("research:" + f.id);
       });
@@ -796,11 +847,12 @@ void Editor::draw_menubar(const Recti &r) {
   });
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
-    /* Order: Scene Game Hierarchy Inspector Project Console Learn Research Profiler (Unity's Ctrl+N bindings). */
+    /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
     const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
-      if (u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
+      if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
+          u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
     u.menu_separator();
     u.submenu("Layouts", u.px(180), [this] {
@@ -822,7 +874,7 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Learn Blendity", "F1", false, true, Icon::Book)) dock_open(WindowKind::Learn);
     if (u.menu_item("Keyboard Shortcuts")) { dock_open(WindowKind::Learn); lesson_ = 2; }
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
-    if (u.menu_item("Open Research Folder")) fs::open_external(papers_dir_);
+    if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
     if (u.menu_item("About Blendity")) dialog_ = Dialog::About;
   });
@@ -975,13 +1027,8 @@ void Editor::handle_drop() {
     }
     else if (ext == ".pdf" || ext == ".txt" || ext == ".md" || ext == ".tex" || ext == ".bib" || ext == ".docx" ||
              ext == ".html" || ext == ".htm" || ext == ".epub" || ext == ".ps" || ext == ".djvu") {
-      std::string dst = fs::join(papers_dir_, name);
-      if (fs::copy_file(path, dst)) {
-        Log::info("Research paper added: %s -> research/papers. Ask Claude to implement features from it (see the Research tab).", name.c_str());
-        papers_listed_ = -100;
-        dock_open(WindowKind::Research);
-      }
-      else Log::error("Could not copy %s into %s", path.c_str(), papers_dir_.c_str());
+      /* (The Research window that collected papers is retired, task 0034.) */
+      Log::info("%s is a document, not a file Blendity opens. The papers behind Blendity's features are listed in Learn > References.", name.c_str());
     }
     else {
       std::string dst = fs::join(assets_dir_, "Imported/" + name);
@@ -1051,11 +1098,11 @@ void Editor::dock_fix_parents(DockNode *n, DockNode *parent) {
 
 void Editor::dock_reset(const std::string &preset) {
   /* Window ids: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 7 Research 8 Profiler */
-  std::string s = "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,7,8,9:0)),L(3,12:0))";
-  if (preset == "2 by 3") s = "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,7,8:0),L(3,12:0))))";
-  else if (preset == "Tall") s = "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,7,8,9:0))),L(3,12:0))";
-  else if (preset == "Wide") s = "V(0.7,H(0.8,L(0,1,6,10:0),L(3,12:0)),H(0.3,L(2:0),L(4,11,5,7,8,9:0)))";
-  else if (preset == "Learning") s = "H(0.40,L(6,7:0),V(0.64,L(0,1,10:0),H(0.45,L(2:0),L(3,12,4,11,5,8,9:0))))";
+  std::string s = "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,8,9:0)),L(3,12:0))";
+  if (preset == "2 by 3") s = "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,8:0),L(3,12:0))))";
+  else if (preset == "Tall") s = "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,8,9:0))),L(3,12:0))";
+  else if (preset == "Wide") s = "V(0.7,H(0.8,L(0,1,6,10:0),L(3,12:0)),H(0.3,L(2:0),L(4,11,5,8,9:0)))";
+  else if (preset == "Learning") s = "H(0.40,L(6:0),V(0.64,L(0,1,10:0),H(0.45,L(2:0),L(3,12,4,11,5,8,9:0))))";
   else if (preset.size() > 2 && (preset[0] == 'H' || preset[0] == 'V' || preset[0] == 'L') && preset[1] == '(') s = preset;
   static const char *names[] = {"Default", "2 by 3", "Tall", "Wide", "Learning"};
   for (int i = 0; i < 5; i++)
@@ -1063,6 +1110,15 @@ void Editor::dock_reset(const std::string &preset) {
   size_t pos = 0;
   dock_ = dock_parse(s, pos);
   dock_fix_parents(dock_.get(), nullptr);
+  /* A layout saved before the Research window was retired (task 0034): its tab goes, and an area that held only it
+   * closes. */
+  while (DockNode *leaf = dock_find(WindowKind::Research)) {
+    if (!leaf->parent && leaf->tabs.size() == 1) {  // the whole layout was that one tab
+      dock_reset("Default");
+      return;
+    }
+    dock_remove(WindowKind::Research);
+  }
 }
 
 void Editor::dock_layout(DockNode *n, const Recti &r) {
@@ -1143,7 +1199,8 @@ void Editor::dock_draw(DockNode *n) {
       ui_.menu_separator();
       ui_.menu_label("Add Tab");
       for (int w = 0; w < (int)WindowKind::Count; w++)
-        if (!dock_find((WindowKind)w) && ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
+        if ((WindowKind)w != WindowKind::Research && !dock_find((WindowKind)w) &&  // (retired, task 0034)
+            ui_.menu_item(window_title((WindowKind)w), nullptr, false, true, window_icon((WindowKind)w))) {
           DockNode *leaf = dock_find(k);
           if (leaf) {
             leaf->tabs.push_back((WindowKind)w);
@@ -1178,7 +1235,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Project: draw_project(r); break;
     case WindowKind::Console: draw_console(r); break;
     case WindowKind::Learn: draw_learn(r); break;
-    case WindowKind::Research: draw_research(r); break;
+    case WindowKind::Research: break;  // retired (task 0034); never docked (dock_reset drops it)
     case WindowKind::Profiler: draw_profiler(r); break;
     case WindowKind::Render: draw_render_window(r); break;
     case WindowKind::Lighting: draw_lighting_window(r); break;
@@ -1238,7 +1295,17 @@ void Editor::dock_remove(WindowKind k) {
   dock_fix_parents(p, p->parent);
 }
 
+void Editor::open_references() {
+  for (int i = 0; i < lesson_count(); i++)
+    if (std::string(lesson(i).title) == "References") lesson_ = i;
+  dock_open(WindowKind::Learn);
+}
+
 void Editor::dock_open(WindowKind k, bool focus) {
+  if (k == WindowKind::Research) {  // retired (task 0034): the papers are in Learn > References
+    open_references();
+    return;
+  }
   DockNode *leaf = dock_find(k);
   if (!leaf) {
     /* The Textures window goes beside the Materials window when it is docked (not over the Scene view, which a
@@ -1293,6 +1360,7 @@ void Editor::dock_move(WindowKind k, DockNode *target, int zone) {
 bool Editor::is_selected(uint64_t id) const { return std::find(selection_.begin(), selection_.end(), id) != selection_.end(); }
 
 void Editor::select(uint64_t id, int mode) {
+  if (id != active_ && pt_obj_ != id) pt_sel_.clear();  // a curve's or lattice's points belong to it while it is active
   if (mode == SEL_REPLACE) {
     selection_.clear();
     if (id) selection_.push_back(id);
@@ -1320,6 +1388,7 @@ void Editor::select(uint64_t id, int mode) {
 }
 
 void Editor::clear_selection() {
+  pt_sel_.clear();
   selection_.clear();
   active_ = 0;
 }
@@ -1353,6 +1422,10 @@ void Editor::prune_selection() {
 
 void Editor::mark_changed(const std::string &label) {
   scene_dirty_ = true;
+  /* Another frame: a change made by a panel drawn after the Scene view (the Inspector's Set Origin > Apply)
+   * would otherwise wait for the next input to show, the gizmo still on the old origin (task 0030). Not
+   * during a drag: it marks a change every frame, and its own mouse events bring the frames. */
+  if (drag_ == Drag::None) ui_.redraw = true;
   if (playing_) return;  // play-mode edits are discarded on Stop
   pending_change_ = true;
   pending_label_ = label;
@@ -1360,6 +1433,7 @@ void Editor::mark_changed(const std::string &label) {
 
 void Editor::commit_undo() {
   if (!pending_change_) return;
+  if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
   s.scene = std::move(stable_);
   s.selection = selection_;
@@ -1377,6 +1451,7 @@ void Editor::commit_undo() {
 
 void Editor::undo() {
   if (playing_) return;
+  wp_abort_stroke();  // a stroke under way would write into the restored scene's (shared) mesh
   commit_undo();
   if (undo_.empty()) return;
   UndoState s = std::move(undo_.back());
@@ -1395,6 +1470,7 @@ void Editor::undo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   stable_ = scene_->clone();
+  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
   scene_dirty_ = true;
   Log::info("Undo %s", s.label.c_str());
@@ -1402,6 +1478,7 @@ void Editor::undo() {
 
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
+  wp_abort_stroke();
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
   UndoState cur;
@@ -1418,6 +1495,7 @@ void Editor::redo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   stable_ = scene_->clone();
+  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
   scene_dirty_ = true;
   Log::info("Redo %s", s.label.c_str());
@@ -1428,6 +1506,7 @@ void Editor::redo() {
 /* ===================================================================== */
 
 void Editor::new_scene() {
+  set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1445,6 +1524,7 @@ void Editor::new_scene() {
 }
 
 bool Editor::open_scene(const std::string &path) {
+  set_weight_paint(false);
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -1471,6 +1551,7 @@ void Editor::save_scene_cmd(bool save_as) {
     Log::warn("Cannot save while in Play mode (Unity has the same rule). Press Stop first.");
     return;
   }
+  commit_undo();  // an edit this frame: its vertex groups mended before they are written
   if (save_as || scene_->path.empty()) {
     defer([this] {
       const std::string dir = scene_->path.empty() ? fs::join(assets_dir_, "Scenes") : fs::parent(scene_->path);
@@ -1553,6 +1634,118 @@ void Editor::restore_texture_texts(const std::vector<std::pair<std::string, std:
     pt->version = v;
     pt->touch();  // a new version: saved back to its file, and the views redraw
   }
+}
+
+/* A name usable in a file name on every platform. */
+static std::string file_safe(std::string s) {
+  for (char &c : s)
+    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' || (unsigned char)c < 32) c = '_';
+  return s.empty() ? std::string("Object") : s;
+}
+
+void Editor::bake_textures_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o,
+                                      std::vector<std::shared_ptr<Mesh>> &keep) {
+  const ExportFormat f = (ExportFormat)o.format;
+  if (!o.bake_textures || !o.materials || (f != ExportFormat::OBJ && f != ExportFormat::FBX && f != ExportFormat::GLB && f != ExportFormat::GLTF))
+    return;
+  const std::string dir = fs::parent(path), stem = fs::stem(path);
+  std::unordered_map<std::string, int> used;
+  TextureBakeSettings s;
+  s.size = std::max(256, std::min(4096, o.bake_size));
+  s.export_space = true;
+  ScopedTimer timer;
+  int baked = 0;
+  for (ExportItem &it : items) {
+    if (!it.mesh || !it.mesh->face_count()) continue;
+    const TextureBakeResult r = bake_textures(*it.mesh, it.world, it.materials, s);
+    if (!r.texels) continue;
+    std::string name = file_safe(it.name);
+    const int n = used[to_lower(name)]++;
+    if (n) name += "_" + std::to_string(n + 1);
+    const std::string base = fs::join(dir, stem + "_" + name);
+    std::string err;
+    if (!write_baked_textures(r, base, &err)) {
+      Log::error("Bake Textures: %s", err.c_str());
+      continue;
+    }
+    for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) texture_cache_forget(base + m);
+    auto mesh = std::make_shared<Mesh>(*it.mesh);
+    mesh->uvs = r.uvs;
+    mesh->touch();
+    const Material *like = !it.materials.empty() && it.materials[0] ? it.materials[0].get() : nullptr;
+    const Material *alpha_like = r.alpha_slot >= 0 && r.alpha_slot < (int)it.materials.size() ? it.materials[(size_t)r.alpha_slot].get() : nullptr;
+    auto mat = std::make_shared<Material>(baked_material(it.name + " Baked", base, like, alpha_like));
+    it.mesh = mesh.get();
+    keep.push_back(mesh);
+    it.materials.assign(std::max<size_t>(1, it.materials.size()), mat);
+    baked++;
+  }
+  Log::info("Bake Textures: %d object%s at %d x %d in %.0f ms", baked, baked == 1 ? "" : "s", s.size, s.size, timer.ms());
+}
+
+bool Editor::bake_object_textures(int size, bool keep_uvs) {
+  GameObject *g = active_object();
+  auto *mf = g ? g->get<MeshFilter>() : nullptr;
+  if (!g || !mf || !mf->mesh || !mf->mesh->face_count()) {
+    Log::warn("Bake Textures: select an object with a mesh");
+    return false;
+  }
+  if (edit_mode_) exit_edit_mode();
+  /* The views show the evaluated mesh. Modifiers that keep the topology (deformers) are baked as shown and the UVs
+   * go on the base mesh's same corners; ones that add or remove geometry (Mirror, Array, Boolean...) would repeat
+   * or stretch the base's images, so they are refused. */
+  const Mesh *ev = g->evaluated_mesh();
+  if (ev && ev != mf->mesh.get() && (ev->corner_verts.size() != mf->mesh->corner_verts.size() || ev->face_count() != mf->mesh->face_count())) {
+    Log::warn("Bake Textures: %s's modifiers add or remove geometry; apply them first (Mesh > Apply Modifiers), or use "
+              "File > Export with Bake Textures, which bakes what it exports", g->name.c_str());
+    return false;
+  }
+  const Mesh &source = ev ? *ev : *mf->mesh;
+  auto *mr = g->get<MeshRenderer>();
+  const std::vector<MaterialPtr> mats = mr ? mr->materials : std::vector<MaterialPtr>();
+  TextureBakeSettings s;
+  s.size = std::max(256, std::min(4096, size));
+  s.keep_uvs = keep_uvs;
+  ScopedTimer timer;
+  const TextureBakeResult r = bake_textures(source, g->world_matrix(), mats, s);
+  if (!r.texels) {
+    Log::warn("Bake Textures: %s has no surface to bake", g->name.c_str());
+    return false;
+  }
+  /* New files every time (Blender's Material.001): another object with the same name, or an undo past this bake,
+   * keeps the images its UVs were laid out for. */
+  std::string name = file_safe(g->name);
+  for (int k = 2; fs::exists(resolve_asset_path("Assets/Materials/" + name + " Baked.mat")) ||
+                  fs::exists(resolve_asset_path("Assets/Textures/Baked/" + name + "_albedo.png"));
+       k++)
+    name = file_safe(g->name) + " " + std::to_string(k);
+  const std::string rel = "Assets/Textures/Baked/" + name;
+  const std::string abs = resolve_asset_path(rel);
+  std::string err;
+  if (!write_baked_textures(r, abs, &err)) {
+    Log::error("Bake Textures: %s", err.c_str());
+    return false;
+  }
+  for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) texture_cache_forget(abs + m);
+  const Material *like = !mats.empty() && mats[0] ? mats[0].get() : nullptr;
+  const Material *alpha_like = r.alpha_slot >= 0 && r.alpha_slot < (int)mats.size() ? mats[(size_t)r.alpha_slot].get() : nullptr;
+  MaterialPtr baked = create_material_asset(baked_material(name + " Baked", rel, like, alpha_like), "Assets/Materials/" + name + " Baked.mat");
+  if (!baked) {
+    Log::error("Bake Textures: could not write Assets/Materials/%s Baked.mat", name.c_str());
+    return false;
+  }
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  m.uvs = r.uvs;
+  m.touch();
+  if (!mr) mr = g->add<MeshRenderer>();
+  const size_t slots = std::max<size_t>(1, mr->materials.size());
+  mr->materials.assign(slots, baked);
+  invalidate_material_textures();
+  project_listed_ = -100;
+  Log::info("Baked %s: %d x %d, %zu texels%s, in %.0f ms -> %s_*.png", g->name.c_str(), r.size, r.size, r.texels,
+            r.own_uvs ? " (its own UVs)" : "", timer.ms(), rel.c_str());
+  mark_changed("Bake Textures");
+  return true;
 }
 
 void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o) {
@@ -1686,8 +1879,9 @@ void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) 
     }
     Material &m = *mr->materials[0];
     m.base_map = TextureRef{asset_path + "#albedo", false};
-    m.normal_map = TextureRef{asset_path + "#normal", true};
-    m.roughness_map = TextureRef{asset_path + "#roughness", true};
+    /* Only the maps the texture gives (its Normal / Roughness Map switches): the others are left empty. */
+    m.normal_map = pt->use_normal ? TextureRef{asset_path + "#normal", true} : TextureRef{};
+    m.roughness_map = pt->use_roughness ? TextureRef{asset_path + "#roughness", true} : TextureRef{};
     m.base_color = Vec3(1.0f);
     m.procedural = 0;
     m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
@@ -1711,6 +1905,21 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
     it.world = g.world_matrix();
     if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
     items.push_back(it);
+    /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
+     * back faces, as glTF's single-sided default asks, show the silhouette line). */
+    if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
+      const Outline &ol = *static_cast<const Outline *>(oc);
+      const Mat4 &w = it.world;
+      const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
+      if (const Mesh *shell = ol.shell(*m, scale, 3)) {
+        ExportItem oi;
+        oi.name = g.name + " Outline";
+        oi.mesh = shell;
+        oi.world = it.world;
+        oi.materials = ol.materials();
+        items.push_back(oi);
+      }
+    }
   };
   if (o.selection_only) {
     /* The selected objects and everything under them. */
@@ -1738,8 +1947,14 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
   }
   std::string err;
   project_listed_ = -100;
-  bake_texture_assets_for_export(items, path, o);
-  if (!export_file(path, items, o, &err)) {
+  std::vector<std::shared_ptr<Mesh>> baked_meshes;
+  ExportOptions eo = o;
+  if (eo.bake_textures && eo.materials) {
+    eo.uvs = true;  // the baked images need the baked UVs
+    bake_textures_for_export(items, path, eo, baked_meshes);
+  }
+  bake_texture_assets_for_export(items, path, eo);
+  if (!export_file(path, items, eo, &err)) {
     Log::error("Export failed: %s", err.c_str());
     return "";
   }
@@ -1910,6 +2125,84 @@ void Editor::update_procedural_shapes() {
 
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
+  if (kind == "Armature") {
+    /* Blender's Add > Armature: a root and one bone, a metre long. A selected mesh gets a Skin modifier bound to it
+     * (automatic weights) - the usual next step. */
+    GameObject *target = active_object();
+    MeshFilter *tmf = target && is_selected(target->id) ? target->mesh_filter() : nullptr;
+    std::string name = "Armature";
+    for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Armature.%03d", k);
+    GameObject *root = scene_->create(name, parent);
+    root->add<Armature>();
+    std::string bname = "Bone";
+    for (int k = 1; scene_->find_by_name(bname); k++) bname = strprintf("Bone.%03d", k);
+    GameObject *bone = scene_->create(bname, root);
+    bone->add<Bone>();
+    if (tmf && tmf->mesh && !parent) {
+      const AABB b = target->world_bounds();
+      root->set_world_position(Vec3(b.center().x, b.min.y, b.center().z));
+      bone->get<Bone>()->length = std::max(0.1f, b.max.y - b.min.y);
+      SkinModifier *sk = target->get<SkinModifier>();  // a Skin already there: it follows the new armature (not a second one)
+      if (!sk) sk = target->add<SkinModifier>();
+      sk->object = name;
+      std::string err;
+      if (!skin_bind_automatic(*sk, *mesh_make_mutable(tmf->mesh), &err)) Log::warn("Armature: %s", err.c_str());
+    }
+    else if (!parent)
+      root->set_world_position(cam_.pivot);
+    expanded_.insert(root->id);
+    if (parent) expanded_.insert(parent->id);
+    select(bone->id);
+    mark_changed("Create Armature");
+    return root;
+  }
+  if (kind == "Lattice") {
+    /* Blender's Add > Lattice (2 x 2 x 2, B-Spline), fitted round the selected mesh, which gets a Lattice modifier
+     * on it: the usual next step, done at once (task 0043). */
+    GameObject *target = active_object();
+    const Mesh *tm = target && is_selected(target->id) ? target->evaluated_mesh() : nullptr;
+    /* A name no other object has (Blender's Lattice.001): the modifier finds its lattice by name, scene-wide. */
+    std::string name = "Lattice";
+    for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Lattice.%03d", k);
+    GameObject *g = scene_->create(name, parent);
+    g->add<Lattice>();
+    if (tm && !parent) {
+      const AABB b = tm->render_mesh().bounds;  // in the mesh's own space, so the box turns with it
+      const Vec3 size = b.max - b.min;
+      g->set_world_matrix(target->world_matrix() *
+                          Mat4::trs(b.center(), Quat(), Vec3(std::max(size.x, 0.01f), std::max(size.y, 0.01f), std::max(size.z, 0.01f)) * 1.05f));
+      auto *lm = target->add<LatticeModifier>();
+      lm->object = g->name;
+    }
+    else if (!parent)
+      g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create Lattice");
+    return g;
+  }
+  if (starts_with(kind, "Curve:")) {
+    /* Blender's Add > Curve presets, lying on the ground plane (task 0042). */
+    std::string which = to_lower(kind.substr(6));
+    while (!which.empty() && which[0] == ' ') which.erase(0, 1);
+    GameObject *g = scene_->create(which == "circle" ? "BezierCircle" : which == "path" ? "Path" : "BezierCurve", parent);
+    Curve *cv = g->add<Curve>();
+    if (which == "circle") {
+      cv->closed = true;  // 8 points: Auto handles keep it within half a percent of round (4 would bulge in by 4 %)
+      for (int i = 0; i < 8; i++) cv->points.push_back({Vec3(std::cos(i * kPi * 0.25f), 0.0f, -std::sin(i * kPi * 0.25f)), 0.0f, 1.0f});
+    }
+    else if (which == "path") {
+      cv->type = 1;
+      for (int i = 0; i < 5; i++) cv->points.push_back({Vec3(-2.0f + i, 0.0f, 0.0f), 0.0f, 1.0f});
+    }
+    else
+      for (Vec3 p : {Vec3(-1.5f, 0, 0), Vec3(-0.5f, 0, -0.6f), Vec3(0.5f, 0, 0.6f), Vec3(1.5f, 0, 0)}) cv->points.push_back({p, 0.0f, 1.0f});
+    if (!parent) g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create " + g->name);
+    return g;
+  }
   if (starts_with(kind, "Shape:")) {
     std::string name = kind.substr(6);
     while (!name.empty() && name[0] == ' ') name.erase(0, 1);
@@ -1963,6 +2256,19 @@ void Editor::duplicate_selected() {
 }
 
 void Editor::delete_selected() {
+  /* With a curve's points selected, Delete removes those points (Edit Mode's rule), not the curve. A lattice keeps
+   * its points (its resolution sets them). */
+  std::vector<int> pts;
+  GameObject *co = point_target(pts);
+  if (co && co->curve()) {  // a lattice's points come with its resolution: Delete removes the object then
+    std::sort(pts.begin(), pts.end());
+    pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+    Curve &cv = *co->curve();
+    for (auto it = pts.rbegin(); it != pts.rend(); ++it) cv.points.erase(cv.points.begin() + *it);
+    pt_sel_.clear();
+    mark_changed("Delete Curve Points");
+    return;
+  }
   auto list = selected_objects(true);
   if (list.empty()) return;
   for (GameObject *g : list) scene_->destroy(g);
@@ -2007,6 +2313,19 @@ bool Editor::filter_stack_op(uint64_t object_id, const std::string &op, int i, i
     if (!cf) cf = g->add<CameraFilters>();
     cf->add(info->name);
     mark_changed("Add Filter " + info->name);
+    return true;
+  }
+  if (op == "look") {  // a ready-made stack appended (task 0039): one undo step
+    std::string look;
+    for (const std::string &l : filter_looks())
+      if (to_lower(l) == to_lower(name)) look = l;
+    if (look.empty()) {
+      Log::warn("filter look: Anime or Manga");
+      return false;
+    }
+    if (!cf) cf = g->add<CameraFilters>();
+    apply_filter_look(*cf, look);
+    mark_changed("Filter Look " + look);
     return true;
   }
   if (!cf) return false;
@@ -2235,6 +2554,7 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
 }
 
 void Editor::enter_play() {
+  set_weight_paint(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
   commit_undo();
@@ -2374,16 +2694,49 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (c == "bone" || c == "armature" || c == "skin" || c == "ik" || c == "rig") {
+    rig_command(t);
+    return;
+  }
+  if (c == "weightpaint" || c == "wpbrush" || c == "wpfalloff" || c == "wpmirror" || c == "wpfront" || c == "wpstroke" || c == "wpnormalize" ||
+      c == "wpclean") {
+    weight_paint_command(t);
+    return;
+  }
+  if (c == "vgroup") {
+    /* vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (task 0045). */
+    vgroup_op(to_lower(arg(1, "")), arg(2, ""), arg(3, ""), (float)std::atof(arg(3, "1").c_str()));
+    return;
+  }
+  if (c == "meshdeform") {
+    /* meshdeform bind|unbind [object]: the first Mesh Deform modifier on the object (the active one by default). Here,
+     * before the long chain below: it is at the compiler's nesting limit. */
+    std::string name;
+    for (size_t i = 2; i < t.size(); i++) name += (i > 2 ? " " : "") + t[i];
+    GameObject *g = name.empty() ? active_object() : scene_->find_by_name(name);
+    MeshDeformModifier *md = g ? g->get<MeshDeformModifier>() : nullptr;
+    const std::string verb = to_lower(arg(1, "bind"));
+    if (verb != "bind" && verb != "unbind") Log::warn("meshdeform: bind | unbind [object]");
+    else if (!md) Log::warn("meshdeform: %s has no Mesh Deform modifier", g ? g->name.c_str() : "no object");
+    else mesh_deform_bind(g, md, verb == "bind");
+    return;
+  }
   if (c == "help") {
     Log::info("Commands: help, clear, create <Cube|Sphere|...> [count], stress <count> [Cube|Sphere|Icosphere|Torus], select <name>,");
     Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
-    Log::info("  screenshot [file.png], bench [frames], lesson <n>, research, window <name>, tool <move|rotate|...>,");
+    Log::info("  screenshot [file.png], bench [frames], lesson <n>, references, window <name>, tool <move|rotate|...>,");
     Log::info("  edit [vertex|edge|face|off] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
     Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation),");
     Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
+    Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
+    Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
+    Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] (rigging)");
+    Log::info("  vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (vertex groups)");
+    Log::info("  weightpaint on|off, wpbrush add|subtract|draw|blur [radius] [strength] [weight], wpfalloff <curve>, wpmirror on|off,");
+    Log::info("  wpfront on|off, wpstroke x y x y ..., wpnormalize, wpclean [threshold] (Weight Paint)");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
@@ -2421,7 +2774,7 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "scale") { ui_scale_pref_ = (float)std::atof(arg(1, "0").c_str()); apply_ui_scale(); }
   else if (c == "screenshot") screenshot(t.size() > 1 ? line.substr(line.find(' ') + 1) : "");
   else if (c == "lesson") { lesson_ = std::atoi(arg(1, "0").c_str()); dock_open(WindowKind::Learn); }
-  else if (c == "research") dock_open(WindowKind::Research);
+  else if (c == "research" || c == "references") open_references();  // (the Research window is retired: task 0034)
   else if (c == "window") {
     std::string w = line.substr(line.find(' ') + 1);
     for (int k = 0; k < (int)WindowKind::Count; k++)
@@ -2466,6 +2819,7 @@ void Editor::run_console_command(const std::string &line) {
     }
   }
   else if (c == "join") join_selected();
+  else if (c == "baketex") bake_object_textures(std::atoi(arg(1, "1024").c_str()), to_lower(arg(2, "")) == "keepuvs");  // baketex [size] [keepuvs]
   else if (c == "meshop") mesh_op(arg(1, ""));
   else if (c == "drawfillet") draw_fillet_ = std::max(0.0f, (float)std::atof(arg(1, "0").c_str()));  // corner radius of drawn shapes
   else if (c == "pilot") toggle_pilot_camera();  // fly the selected camera with the Scene view
@@ -2963,7 +3317,7 @@ void Editor::run_console_command(const std::string &line) {
                                                    : Shading::Shaded;
   }
   else if (c == "filter") {
-    /* filter add <name> | remove <i> | move <i> <j> | reset <i> | list: the selection's Camera Filters stacks. */
+    /* filter add <name> | look <Anime|Manga> | remove <i> | move <i> <j> | reset <i> | list: the selection's Camera Filters stacks. */
     const std::string sub = to_lower(arg(1, "list"));
     std::string name;
     for (size_t k = 2; k < t.size(); k++) name += (k > 2 ? " " : "") + t[k];
@@ -3073,6 +3427,61 @@ void Editor::run_console_command(const std::string &line) {
       mark_changed("Set " + pt->name + " " + sr.target);
     }
   }
+  else if (c == "guides") {
+    /* guides list | guides off | guides <thirds|center|diagonal|golden|goldena|goldenb|harmonya|harmonyb|title|action|show> [on|off]:
+     * the composition guides of the selected cameras, else the camera the Game view shows (task 0033). */
+    std::vector<Camera *> cams;
+    for (GameObject *g : selected_objects(false))
+      if (Camera *cm = g->get<Camera>()) cams.push_back(cm);
+    if (cams.empty())
+      if (Camera *mc = main_camera(*scene_)) cams.push_back(mc);
+    if (cams.empty()) {
+      Log::warn("guides: no camera");
+      return;
+    }
+    const std::string what = to_lower(arg(1, "list")), v = to_lower(arg(2, "on"));
+    const bool on = v == "on" || v == "1" || v == "true", off_ = v == "off" || v == "0" || v == "false";
+    if (what != "list" && what != "off" && !on && !off_) {
+      Log::warn("guides %s: on or off", what.c_str());
+      return;
+    }
+    bool changed = false;
+    for (Camera *cm : cams) {
+      struct G {
+        const char *name;
+        bool *flag;
+      } all[] = {{"thirds", &cm->guide_thirds},        {"center", &cm->guide_center},           {"diagonal", &cm->guide_center_diagonal},
+                 {"golden", &cm->guide_golden},        {"goldena", &cm->guide_golden_tri_a},    {"goldenb", &cm->guide_golden_tri_b},
+                 {"harmonya", &cm->guide_harmony_a},   {"harmonyb", &cm->guide_harmony_b},      {"title", &cm->guide_title_safe},
+                 {"action", &cm->guide_action_safe},   {"show", &cm->show_guides}};
+      if (what == "list") {
+        std::string on;
+        for (const G &gg : all)
+          if (*gg.flag) on += std::string(on.empty() ? "" : ", ") + gg.name;
+        Log::info("guides of %s: %s (shown: %s)", cm->owner ? cm->owner->name.c_str() : "?", on.empty() ? "none" : on.c_str(), cm->show_guides ? "yes" : "no");
+        continue;
+      }
+      if (what == "off") {
+        changed = changed || cm->show_guides;
+        cm->show_guides = false;
+        continue;
+      }
+      bool found = false;
+      for (const G &gg : all)
+        if (what == gg.name) {
+          changed = changed || *gg.flag != on;
+          *gg.flag = on;
+          if (gg.flag != &cm->show_guides && on) changed = changed || !cm->show_guides, cm->show_guides = true;
+          found = true;
+        }
+      if (!found) {
+        Log::warn("guides: thirds, center, diagonal, golden, goldena, goldenb, harmonya, harmonyb, title, action, show, off or list");
+        return;
+      }
+    }
+    if (changed) mark_changed("Guides");
+  }
+  else if (c == "curve" || c == "points") points_command(t);  // its own function: this chain is near the compiler's nesting limit
   else if (c == "activecamera") {
     /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
     std::string name;
@@ -3325,6 +3734,357 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0);
   fs::write_file(prefs_path_, s);
+}
+
+/* points (or curve) add|move|delete|select <object> [index] [x y z]: a Curve's or Lattice's control points (tasks
+ * 0042, 0043). Positions are in the object's own space; add and delete are for curves. */
+void Editor::points_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  auto num = [&](size_t i) { return (float)std::atof(arg(i, "0").c_str()); };
+  const std::string verb = to_lower(arg(1, ""));
+  GameObject *g = scene_->find_by_name(arg(2, ""));
+  Component *pc = g ? g->point_source() : nullptr;
+  Curve *cv = g ? g->curve() : nullptr;
+  if (verb != "add" && verb != "move" && verb != "delete" && verb != "select") {
+    Log::warn("%s: add | move | delete | select <object> ...", t[0].c_str());
+    return;
+  }
+  if (!pc || ((verb == "add" || verb == "delete") && !cv)) {
+    Log::warn("%s: no %s named '%s'", t[0].c_str(), verb == "add" || verb == "delete" ? "Curve object" : "Curve or Lattice object", arg(2, "").c_str());
+    return;
+  }
+  if (verb == "add") {
+    if ((int)cv->points.size() >= Curve::kMaxPoints) {
+      Log::warn("curve: '%s' has the most points a curve can have (%d)", g->name.c_str(), Curve::kMaxPoints);
+      return;
+    }
+    cv->points.push_back({Vec3(num(3), num(4), num(5)), 0.0f, 1.0f});
+    mark_changed("Add Curve Point");
+    return;
+  }
+  if (verb == "select") {
+    select(g->id);
+    pt_obj_ = g->id;
+    pt_sel_.clear();
+    for (size_t k = 3; k < t.size(); k++) {
+      const int j = std::atoi(t[k].c_str());
+      if (j >= 0 && j < pc->control_point_count()) pt_sel_.push_back(j);
+    }
+    return;
+  }
+  const int i = std::atoi(arg(3, "-1").c_str());
+  if (i < 0 || i >= pc->control_point_count()) {
+    Log::warn("%s: '%s' has no point %d", t[0].c_str(), g->name.c_str(), i);
+    return;
+  }
+  if (verb == "move") {
+    pc->set_control_point(i, Vec3(num(4), num(5), num(6)));
+    mark_changed("Move Point");
+  }
+  else {
+    cv->points.erase(cv->points.begin() + i);
+    pt_sel_.clear();
+    mark_changed("Delete Curve Point");
+  }
+}
+
+bool Editor::mesh_deform_bind(GameObject *g, MeshDeformModifier *md, bool bind) {
+  if (!bind && !md->bound()) return true;  // nothing to forget: no undo step
+  if (!bind) {
+    md->unbind();
+    mark_changed("Unbind Mesh Deform");
+    return true;
+  }
+  std::string err;
+  if (!md->bind(&err)) {
+    md->last_error = "Bind refused: " + err;
+    Log::warn("Mesh Deform on '%s': %s", g->name.c_str(), md->last_error.c_str());
+    return false;
+  }
+  Log::info("Mesh Deform on '%s' bound to '%s' (%zu cage vertices)", g->name.c_str(), md->object.c_str(), md->bind_verts.size());
+  mark_changed("Bind Mesh Deform");
+  return true;
+}
+
+void Editor::carry_vertex_groups(const Scene &before) {
+  scene_->for_each([&](GameObject &g) {
+    MeshFilter *mf = g.mesh_filter();
+    if (!mf || !mf->mesh) return;
+    const GameObject *old = before.find(g.id);
+    const MeshFilter *of = old ? old->mesh_filter() : nullptr;
+    const Mesh *om = of && of->mesh && of->mesh.get() != mf->mesh.get() ? of->mesh.get() : nullptr;
+    /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
+     * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
+    if (mf->mesh->groups_fit()) return;
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    if (om && om->groups_fit() && !om->vertex_groups.empty()) meshops::transfer_vertex_groups(*om, m);
+    else
+      for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);  // nothing to carry from: fit the sizes
+    m.touch();
+  });
+}
+
+bool Editor::vgroup_op(const std::string &verb, const std::string &name_in, const std::string &arg2, float weight) {
+  GameObject *g = edit_mode_ ? edit_object() : active_object();
+  MeshPtr *mp = edit_mode_ ? edit_mesh_ptr() : (g && g->mesh_filter() ? &g->mesh_filter()->mesh : nullptr);
+  if (!g || !mp || !*mp) {
+    Log::warn("vgroup: select a mesh object first");
+    return false;
+  }
+  const Mesh &cur = **mp;
+  int gi = name_in.empty() ? active_vgroup_ : cur.find_group(name_in);
+  if (verb != "add" && (gi < 0 || gi >= (int)cur.vertex_groups.size())) {
+    Log::warn("vgroup: '%s' has no vertex group %s", g->name.c_str(), name_in.empty() ? "chosen" : ("'" + name_in + "'").c_str());
+    return false;
+  }
+  if (verb == "active") {
+    active_vgroup_ = gi;
+    if (weight_paint_ && wp_obj_ == g->id) wp_group_ = gi, wp_version_++;
+    return true;
+  }
+  const bool needs_edit = verb == "assign" || verb == "unassign" || verb == "select" || verb == "deselect";
+  if (needs_edit && !edit_mode_) {
+    Log::warn("vgroup %s: works on the selected vertices in Edit Mode", verb.c_str());
+    return false;
+  }
+  if (verb == "select" || verb == "deselect") {
+    const std::vector<float> &w = cur.vertex_groups[(size_t)gi].weights;
+    vert_sel_.resize(cur.vert_count(), 0);
+    for (size_t i = 0; i < w.size() && i < vert_sel_.size(); i++)
+      if (w[i] > 0.0f) vert_sel_[i] = verb == "select" ? 1 : 0;
+    sync_vert_face_selection(false);
+    return true;
+  }
+  Mesh &m = *mesh_make_mutable(*mp);
+  for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);
+  std::string label;
+  if (verb == "add") {
+    std::string name = name_in.empty() ? "Group" : name_in;
+    for (int k = 1; m.find_group(name) >= 0; k++) name = strprintf("%s.%03d", name_in.empty() ? "Group" : name_in.c_str(), k);
+    m.vertex_groups.push_back({name, std::vector<float>(m.vert_count(), 0.0f)});
+    active_vgroup_ = (int)m.vertex_groups.size() - 1;
+    if (weight_paint_ && wp_obj_ == g->id) wp_group_ = active_vgroup_, wp_version_++;
+    label = "Add Vertex Group";
+  }
+  else if (verb == "remove") {
+    m.vertex_groups.erase(m.vertex_groups.begin() + gi);
+    active_vgroup_ = std::max(0, std::min(active_vgroup_, (int)m.vertex_groups.size() - 1));
+    if (weight_paint_ && wp_obj_ == g->id) {
+      wp_abort_stroke();
+      if (m.vertex_groups.empty()) m.vertex_groups.push_back({"Group", std::vector<float>(m.vert_count(), 0.0f)});  // still something to paint
+      wp_group_ = std::max(0, std::min(wp_group_ - (gi < wp_group_ ? 1 : 0), (int)m.vertex_groups.size() - 1));
+      wp_version_++;
+    }
+    label = "Remove Vertex Group";
+  }
+  else if (verb == "rename") {
+    if (arg2.empty() || (m.find_group(arg2) >= 0 && m.find_group(arg2) != gi)) {
+      Log::warn("vgroup rename: give a new name no other group has");
+      return false;
+    }
+    m.vertex_groups[(size_t)gi].name = arg2;
+    label = "Rename Vertex Group";
+  }
+  else if (verb == "assign" || verb == "unassign") {
+    const float w = verb == "assign" ? (finite_bits(weight) ? std::max(0.0f, std::min(weight, 1.0f)) : 1.0f) : 0.0f;
+    std::vector<float> &ws = m.vertex_groups[(size_t)gi].weights;
+    size_t n = 0;
+    for (size_t i = 0; i < ws.size() && i < vert_sel_.size(); i++)
+      if (vert_sel_[i]) ws[i] = w, n++;
+    label = verb == "assign" ? "Assign to Vertex Group" : "Remove from Vertex Group";
+    Log::info("%s: %zu vertices", label.c_str(), n);
+  }
+  else {
+    Log::warn("vgroup: add | remove | rename | assign | unassign | select | deselect | active <name> ...");
+    return false;
+  }
+  m.touch();  // deformers limited to a group read it from the evaluated mesh
+  mark_changed(label);
+  return true;
+}
+
+void Editor::draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay) {
+  auto &u = ui_;
+  (void)g;
+  if (!mf->mesh) return;
+  const Mesh &m = edit_mode_ && edit_object() == g ? **edit_mesh_ptr() : *mf->mesh;
+  const int n = (int)m.vertex_groups.size();
+  const int bw = (lay.area.w - u.px(16)) / 2;
+  if (!n) {  // none yet: one row (most meshes), so the Inspector doesn't grow for them
+    Recti row = lay.row(u.row_h() + u.px(2));
+    u.label({row.x + u.px(4), row.y, bw, row.h}, "Vertex Groups", u.theme.text_dim);
+    if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Add Group", false, Icon::Plus)) vgroup_op("add", "", "", 1.0f);
+    u.tooltip("Named weights per vertex (Blender: Object Data > Vertex Groups): deforming modifiers can be limited to one,\n"
+              "Weight Paint paints them and skins read them. They follow the vertices through every edit.");
+    return;
+  }
+  lay.space(u.px(4));
+  u.label(lay.row(), "Vertex Groups", u.theme.accent);
+  u.tooltip("Named weights per vertex (Blender: Object Data > Vertex Groups): deforming modifiers can be limited to one,\n"
+            "Weight Paint paints them and skins read them. They follow the vertices through every edit.");
+  active_vgroup_ = std::max(0, std::min(active_vgroup_, n - 1));
+  for (int i = 0; i < n; i++) {
+    Recti row = lay.row(u.row_h());
+    if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, m.vertex_groups[(size_t)i].name, i == active_vgroup_, Icon::Vertex)) {
+      active_vgroup_ = i;
+      if (weight_paint_ && wp_obj_ == g->id) wp_group_ = i, wp_version_++;  // paint this one now
+      vgroup_name_edit_ = m.vertex_groups[(size_t)i].name;
+    }
+  }
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Add", false, Icon::Plus)) {
+    vgroup_op("add", "", "", 1.0f);
+    return;  // the mesh may have been copied or changed: drawn again next frame
+  }
+  if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Remove")) {
+    vgroup_op("remove", "", "", 1.0f);
+    return;
+  }
+  if (vgroup_name_edit_.empty() || m.find_group(vgroup_name_edit_) < 0) vgroup_name_edit_ = m.vertex_groups[(size_t)active_vgroup_].name;
+  row = lay.row(u.row_h() + u.px(2));
+  bool committed = false;
+  std::string name = vgroup_name_edit_;
+  u.text_field(u.id("vgroup_name"), {row.x + u.px(4), row.y, row.w - u.px(8), row.h}, name, &committed, "Name");
+  vgroup_name_edit_ = name;
+  if (committed && name != m.vertex_groups[(size_t)active_vgroup_].name && !name.empty()) {
+    vgroup_op("rename", m.vertex_groups[(size_t)active_vgroup_].name, name, 1.0f);
+    return;
+  }
+  if (!edit_mode_) return;
+  row = lay.row(u.row_h() + u.px(2));
+  u.label({row.x + u.px(4), row.y, u.px(60), row.h}, "Weight", u.theme.text_dim);
+  u.slider(u.id("vgroup_weight"), {row.x + u.px(66), row.y, row.w - u.px(70), row.h}, vgroup_weight_, 0.0f, 1.0f);
+  row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Assign")) vgroup_op("assign", "", "", vgroup_weight_);
+  u.tooltip("The selected vertices get this weight in the group (Blender: Assign).");
+  if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Remove from")) vgroup_op("unassign", "", "", 0.0f);
+  row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Select")) vgroup_op("select", "", "", 1.0f);
+  if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Deselect")) vgroup_op("deselect", "", "", 1.0f);
+}
+
+/* bone add <parent> [length]: a child bone at the parent bone's tail (or the root's origin); armature reset|apply
+ * [root]: Reset Pose / Apply as Rest; skin bind [object]: automatic weights for its Skin modifier. */
+void Editor::rig_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (t[0] == "bone" && to_lower(arg(1, "")) == "add") {
+    GameObject *parent = scene_->find_by_name(arg(2, ""));
+    if (!parent) {
+      Log::warn("bone add: no object named '%s'", arg(2, "").c_str());
+      return;
+    }
+    const float len = t.size() > 3 ? std::max(0.01f, (float)std::atof(t[3].c_str())) : 1.0f;
+    std::string name = "Bone";
+    for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Bone.%03d", k);
+    GameObject *b = scene_->create(name, parent);
+    Bone *bone = b->add<Bone>();
+    bone->length = len;
+    if (const Bone *pb = parent->get<Bone>()) b->set_local_position(Vec3(0, pb->length, 0));  // at the parent's tail
+    bone->set_rest(b->local());
+    expanded_.insert(parent->id);
+    select(b->id);
+    mark_changed("Add Bone");
+    return;
+  }
+  if (t[0] == "armature") {
+    GameObject *root = t.size() > 2 ? scene_->find_by_name(arg(2, "")) : active_object();
+    while (root && !root->get<Armature>()) root = root->parent;
+    const std::string verb = to_lower(arg(1, ""));
+    if (!root || (verb != "reset" && verb != "apply")) {
+      Log::warn("armature reset|apply [root]: select a bone or an armature");
+      return;
+    }
+    armature_pose(root, verb == "apply");
+    return;
+  }
+  if (t[0] == "skin" && to_lower(arg(1, "")) == "bind") {
+    skin_bind(t.size() > 2 ? scene_->find_by_name(arg(2, "")) : active_object());
+    return;
+  }
+  if (t[0] == "ik" && to_lower(arg(1, "")) == "add") {  // ik add <bone> <target> [pole|-] [chain]
+    GameObject *bone = scene_->find_by_name(arg(2, ""));
+    if (!bone || !bone->get<Bone>() || !scene_->find_by_name(arg(3, ""))) {
+      Log::warn("ik add <bone> <target> [pole|-] [chain length]: no bone '%s' or target '%s'", arg(2, "").c_str(), arg(3, "").c_str());
+      return;
+    }
+    IKConstraint *ik = bone->get<IKConstraint>();
+    if (!ik) ik = bone->add<IKConstraint>();
+    ik->target = t[3];
+    ik->pole = arg(4, "-") == "-" ? "" : t[4];
+    if (t.size() > 5) ik->chain_length = std::max(1, std::min(std::atoi(t[5].c_str()), 64));
+    solve_constraints(*scene_);
+    mark_changed("Add IK");
+    return;
+  }
+  if (t[0] == "rig") {  // rig humanoid|quadruped: a preset; rig autoik [root]: IK on a skeleton's limbs by bone names
+    const std::string kind = to_lower(arg(1, ""));
+    if (kind == "humanoid" || kind == "quadruped") {
+      GameObject *root = create_rig(*scene_, kind == "quadruped", Vec3());
+      expanded_.insert(root->id);
+      select(root->id);
+      mark_changed(kind == "humanoid" ? "Add Humanoid Rig" : "Add Quadruped Rig");
+      return;
+    }
+    if (kind == "autoik") {
+      GameObject *root = t.size() > 2 ? scene_->find_by_name(t[2]) : active_object();
+      while (root && !root->get<Armature>()) root = root->parent;
+      if (!root) {
+        Log::warn("rig autoik [root]: select a skeleton (an object with an Armature, or one of its bones)");
+        return;
+      }
+      const int n = add_humanoid_ik(*scene_, root);
+      Log::info("Auto IK: %d limbs found by name", n);
+      if (n) {
+        solve_constraints(*scene_);
+        mark_changed("Auto IK");
+      }
+      return;
+    }
+  }
+  Log::warn("bone add <parent> [length] | armature reset|apply [root] | skin bind [object] | ik add <bone> <target> [pole] [chain] | "
+            "rig humanoid|quadruped|autoik [root]");
+}
+
+bool Editor::armature_pose(GameObject *root, bool apply_as_rest) {
+  std::vector<GameObject *> stack{root};  // the root too: an imported skeleton's top joint is often its root
+  int n = 0;
+  while (!stack.empty()) {
+    GameObject *g = stack.back();
+    stack.pop_back();
+    if (Bone *b = g->get<Bone>()) {
+      if (apply_as_rest) b->set_rest(g->local());
+      else {
+        Transform tr = g->local();
+        tr.position = b->rest_position;
+        tr.rotation = b->rest_rotation;
+        tr.euler_hint = b->rest_euler_hint;
+        tr.scale = b->rest_scale;
+        g->set_local(tr);
+      }
+      n++;
+    }
+    for (GameObject *c : g->children) stack.push_back(c);
+  }
+  Log::info("%s: %d bones", apply_as_rest ? "Apply as Rest" : "Reset Pose", n);
+  if (n) mark_changed(apply_as_rest ? "Apply as Rest" : "Reset Pose");
+  return n > 0;
+}
+
+bool Editor::skin_bind(GameObject *g) {
+  SkinModifier *sk = g ? g->get<SkinModifier>() : nullptr;
+  MeshFilter *mf = g ? g->mesh_filter() : nullptr;
+  if (!sk || !mf || !mf->mesh) {
+    Log::warn("skin bind: select a mesh with a Skin modifier");
+    return false;
+  }
+  std::string err;
+  if (!skin_bind_automatic(*sk, *mesh_make_mutable(mf->mesh), &err)) {
+    Log::warn("skin bind: %s", err.c_str());
+    return false;
+  }
+  Log::info("'%s' bound to '%s' with automatic weights", g->name.c_str(), sk->object.c_str());
+  mark_changed("Skin: Automatic Weights");
+  return true;
 }
 
 }  // namespace bl

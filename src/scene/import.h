@@ -25,12 +25,20 @@ struct ImportedNode {
   Vec3 scale{1, 1, 1};
   MeshPtr mesh;
   std::vector<MaterialPtr> materials;
+  bool is_bone = false;  // a joint of a skin (task 0047): becomes a Bone, its local transform its rest
+};
+
+/* A skinned mesh (task 0047): its node and its joints' nodes. The mesh's vertex groups are named after the joints. */
+struct ImportedSkin {
+  int mesh_node = -1;
+  std::vector<int> joints;
 };
 
 struct ImportResult {
   std::vector<ImportedNode> nodes;
   std::vector<MaterialPtr> materials;
   std::vector<std::string> textures;  // absolute paths referenced by materials
+  std::vector<ImportedSkin> skins;
   std::string error;
   std::string summary;
 };

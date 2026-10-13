@@ -2,6 +2,8 @@
 #include "export.h"
 
 #include "../core/core.h"
+#include "../image/image.h"
+#include "../render/canvas.h"
 #include "scene.h"
 
 #include <algorithm>
@@ -71,8 +73,18 @@ void ExportOptions::reflect(Reflector &r) {
   }
   if (f != ExportFormat::STL && f != ExportFormat::PLY) {
     r.field("Materials", materials);
-    r.help(f == ExportFormat::GLB || f == ExportFormat::GLTF ? "Write materials (PBR metallic-roughness) and their base colour textures."
-                                                              : "Write materials (colour, metallic, roughness, emission, alpha).");
+    r.help(f == ExportFormat::GLB || f == ExportFormat::GLTF ? "Write materials (PBR metallic-roughness) and their textures."
+                                                              : "Write materials (colour, metallic, roughness, emission, alpha) and their textures.");
+  }
+  if (materials && (f == ExportFormat::OBJ || f == ExportFormat::FBX || f == ExportFormat::GLB || f == ExportFormat::GLTF)) {
+    r.field("Bake Textures", bake_textures);
+    r.help("Bake each object's look (procedural textures, axis materials, Box mapping, several materials) into one set of\n"
+           "images on new UVs: albedo, roughness, metallic and normal PNGs beside the file. Other programs then show\n"
+           "what Blendity renders. The scene is not changed. (Blender: Cycles Bake.)");
+    if (bake_textures) {
+      r.field("Bake Size", bake_size, 256, 4096);
+      r.help("Texels per side of the baked images (256 to 4096).");
+    }
   }
   if (f == ExportFormat::STL || f == ExportFormat::PLY || f == ExportFormat::FBX) {
     r.field("ASCII", ascii);
@@ -87,6 +99,14 @@ void ExportOptions::reflect(Reflector &r) {
 /* ===================================================================== */
 
 namespace {
+
+/* The file a texture slot names when it is an image other programs can open; empty for a generated image or a
+ * procedural texture's output (the editor writes those as PNGs first). */
+std::string image_file(const TextureRef &t) {
+  if (t.empty() || starts_with(t.path, "generated:")) return "";
+  const std::string p = resolve_asset_path(t.path);
+  return image_extension_supported(to_lower(fs::extension(p))) ? p : "";
+}
 
 std::string num(double v) {
   if (std::fabs(v) < 1e-12) return "0";
@@ -330,8 +350,8 @@ void export_obj_mtl(const std::vector<ExportItem> &items, const std::string &mtl
     mtl += "illum " + std::string(m.alpha < 1.0f ? "4" : m.metallic > 0.5f ? "3" : "2") + "\n";
     mtl += "Pm " + num(m.metallic) + "\nPr " + num(m.roughness) + "\n";  // PBR extension (Blender reads these)
     auto map = [&](const char *key, const TextureRef &t) {
-      if (t.empty() || starts_with(t.path, "generated:")) return;
-      std::string p = resolve_asset_path(t.path);
+      std::string p = image_file(t);
+      if (p.empty()) return;
       /* An image beside the exported file is referenced by its name, so the folder can be moved or sent. */
       if (!o.texture_dir.empty() && fs::normalize(fs::parent(p)) == fs::normalize(o.texture_dir)) p = fs::filename(p);
       mtl += std::string(key) + " " + p + "\n";
@@ -548,6 +568,46 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
       item_mats[i].push_back(f->second);
     }
   }
+  /* Textures (as Blender's FBX exporter writes them): a Video holding the file and a Texture using it, connected to
+   * the material by the property it drives (Blender's importer: DiffuseColor -> Base Color, NormalMap -> Normal,
+   * ShininessExponent -> Roughness, ReflectionFactor -> Metallic, EmissiveColor -> Emission). */
+  struct FbxTex {
+    int64_t tex, vid;
+    std::string abs, rel, name;
+  };
+  std::vector<FbxTex> fbx_tex;
+  struct FbxTexLink {
+    int64_t tex, mat;
+    const char *prop;
+  };
+  std::vector<FbxTexLink> tex_links;
+  if (o.materials) {
+    std::unordered_map<std::string, size_t> tex_of_path;
+    for (const Mat &mt : mats) {
+      if (!mt.m) continue;
+      const std::pair<const TextureRef *, const char *> slots[] = {{&mt.m->base_map, "DiffuseColor"}, {&mt.m->normal_map, "NormalMap"},
+                                                                   {&mt.m->roughness_map, "ShininessExponent"},
+                                                                   {&mt.m->metallic_map, "ReflectionFactor"}, {&mt.m->emission_map, "EmissiveColor"}};
+      for (const auto &sl : slots) {
+        if (sl.first == &mt.m->base_map && mt.m->procedural != 0) continue;  // a procedural replaces the base map
+        const std::string abs = image_file(*sl.first);
+        if (abs.empty()) continue;
+        auto it = tex_of_path.find(abs);
+        if (it == tex_of_path.end()) {
+          FbxTex t;
+          t.tex = next_id++;
+          t.vid = next_id++;
+          t.abs = abs;
+          /* Beside the exported file: by name, so the folder can be moved (Blender reads RelativeFilename first). */
+          t.rel = !o.texture_dir.empty() && fs::normalize(fs::parent(abs)) == fs::normalize(o.texture_dir) ? fs::filename(abs) : abs;
+          t.name = fs::stem(abs);
+          fbx_tex.push_back(t);
+          it = tex_of_path.emplace(abs, fbx_tex.size() - 1).first;
+        }
+        tex_links.push_back({fbx_tex[it->second].tex, mt.id, sl.second});
+      }
+    }
+  }
   FbxNode root;
   {
     FbxNode &h = root.add("FBXHeaderExtension");
@@ -574,11 +634,15 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
   {
     FbxNode &d = root.add("Definitions");
     d.add("Version").I(100);
-    d.add("Count").I((int64_t)(prepared.size() * 2 + mats.size() + 1));
+    d.add("Count").I((int64_t)(prepared.size() * 2 + mats.size() + fbx_tex.size() * 2 + 1));
     d.add("ObjectType").S("GlobalSettings").add("Count").I(1);
     d.add("ObjectType").S("Model").add("Count").I((int64_t)prepared.size());
     d.add("ObjectType").S("Geometry").add("Count").I((int64_t)prepared.size());
     d.add("ObjectType").S("Material").add("Count").I((int64_t)mats.size());
+    if (!fbx_tex.empty()) {
+      d.add("ObjectType").S("Texture").add("Count").I((int64_t)fbx_tex.size());
+      d.add("ObjectType").S("Video").add("Count").I((int64_t)fbx_tex.size());
+    }
   }
   root.add("Objects");
   FbxNode conns("Connections");
@@ -676,6 +740,25 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
       pp.P("ShininessExponent", "Number", "", "A").D(gloss);
     }
   }
+  for (const FbxTex &t : fbx_tex) {
+    FbxNode &objs = root.kids.back();
+    FbxNode &v = objs.add("Video").L(t.vid).S(fbx_name(t.name, "Video")).S("Clip");
+    v.add("Type").S("Clip");
+    v.add("Properties70").P("Path", "KString", "XRefUrl", "").S(t.abs);
+    v.add("UseMipMap").I(0);
+    v.add("Filename").S(t.abs);
+    v.add("RelativeFilename").S(t.rel);
+    FbxNode &x = objs.add("Texture").L(t.tex).S(fbx_name(t.name, "Texture")).S("");
+    x.add("Type").S("TextureVideoClip");
+    x.add("Version").I(202);
+    x.add("TextureName").S(fbx_name(t.name, "Texture"));
+    x.add("Media").S(fbx_name(t.name, "Video"));
+    x.add("FileName").S(t.abs);
+    x.add("RelativeFilename").S(t.rel);
+    x.add("Texture_Alpha_Source").S("None");
+    conns.add("C").S("OO").L(t.vid).L(t.tex);
+  }
+  for (const FbxTexLink &l : tex_links) conns.add("C").S("OP").L(l.tex).L(l.mat).S(l.prop);
   root.kids.push_back(std::move(conns));
   std::string s;
   if (o.ascii) {
@@ -958,6 +1041,34 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     }
     return it->second;
   };
+  /* glTF keeps roughness (G) and metallic (B) in one image: the two maps packed into a PNG in the buffer (task 0036). */
+  auto metal_rough_of = [&](const Material &m) -> int {
+    const std::string rp = image_file(m.roughness_map), mp = image_file(m.metallic_map);
+    if (rp.empty() && mp.empty()) return -1;
+    const std::string key = "metal-rough:" + rp + "|" + mp;
+    auto it = image_index.find(key);
+    if (it != image_index.end()) return it->second;
+    /* Read as Blendity reads them (a map not marked Non-Color is decoded from sRGB). */
+    const TexturePtr rt = rp.empty() ? nullptr : texture_load(rp, !m.roughness_map.non_color);
+    const TexturePtr mt = mp.empty() ? nullptr : texture_load(mp, !m.metallic_map.non_color);
+    if (!rt && !mt) return -1;
+    const int w = std::max(rt ? rt->width : 1, mt ? mt->width : 1), h = std::max(rt ? rt->height : 1, mt ? mt->height : 1);
+    if (w <= 0 || h <= 0 || (int64_t)w * h > 8192 * 8192) return -1;
+    std::vector<uint32_t> px((size_t)w * h);
+    auto byte = [](float v) { return (uint32_t)std::lround(std::min(1.0f, std::max(0.0f, finite_bits(v) ? v : 0.0f)) * 255.0f); };
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        const Vec2 uv((x + 0.5f) / w, 1.0f - (y + 0.5f) / h);  // texel centres (sample() reads v from the bottom row)
+        const float r = rt ? rt->sample_level(uv, 0, TexWrap::Repeat, TexFilter::Linear).x : 1.0f;
+        const float k = mt ? mt->sample_level(uv, 0, TexWrap::Repeat, TexFilter::Linear).x : 1.0f;
+        px[(size_t)y * w + x] = 0xFFFF0000u | byte(r) << 8 | byte(k);
+      }
+    const std::string png = encode_png(px.data(), w, h, w, false);
+    const int view = add_view(png.data(), png.size(), 0);
+    images.push_back(strprintf("{\"bufferView\":%d,\"mimeType\":\"image/png\"}", view));
+    textures.push_back(strprintf("{\"source\":%zu}", images.size() - 1));
+    return image_index.emplace(key, (int)textures.size() - 1).first->second;
+  };
   auto material_of = [&](const MaterialPtr &mp) -> int {
     if (!o.materials) return -1;
     auto it = mat_index.find(mp.get());
@@ -969,7 +1080,15 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
                     "],\"metallicFactor\":" + num(m.metallic) + ",\"roughnessFactor\":" + num(m.roughness);
     const int tex = texture_of(m.base_map);
     if (tex >= 0) j += strprintf(",\"baseColorTexture\":{\"index\":%d}", tex);
+    const int mr = metal_rough_of(m);
+    if (mr >= 0) j += strprintf(",\"metallicRoughnessTexture\":{\"index\":%d}", mr);
     j += "}";
+    const int nt = texture_of(m.normal_map);
+    if (nt >= 0) {
+      j += strprintf(",\"normalTexture\":{\"index\":%d", nt);
+      if (std::fabs(m.normal_strength - 1.0f) > 1e-4f) j += ",\"scale\":" + num(m.normal_strength);
+      j += "}";
+    }
     const Vec3 e = m.emission * m.emission_strength;
     const float emax = std::max(e.x, std::max(e.y, e.z));
     if (emax > 0) {
@@ -1079,7 +1198,12 @@ bool export_file(const std::string &path, const std::vector<ExportItem> &items, 
       ok = fs::write_file(path, obj) && (!o.materials || fs::write_file(fs::join(dir, stem + ".mtl"), mtl));
       break;
     }
-    case ExportFormat::FBX: ok = fs::write_file(path, export_fbx(items, o)); break;
+    case ExportFormat::FBX: {
+      ExportOptions oo = o;
+      oo.texture_dir = dir;
+      ok = fs::write_file(path, export_fbx(items, oo));
+      break;
+    }
     case ExportFormat::GLB: ok = fs::write_file(path, export_gltf(items, o, true, "", nullptr)); break;
     case ExportFormat::GLTF: {
       std::string bin;

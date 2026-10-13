@@ -69,6 +69,17 @@ extern const char *const kDrawShapes[kDrawShapeCount];  // draw_tool.cpp: Polyli
 extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plasticity)
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
+/* Weight Paint's brush (task 0046): radius in screen pixels (at UI scale 1). */
+struct WeightBrush {
+  int mode = 0;  // kWeightBrushModes
+  float radius = 50.0f, strength = 0.5f, weight = 1.0f;
+  int falloff = 0;  // kWeightFalloffs
+  bool mirror_x = false, front_only = true;
+};
+extern const char *const kWeightBrushModes[4];  // Add, Subtract, Draw, Blur (task 0046)
+extern const char *const kWeightFalloffs[6];
+Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
+
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
 enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Count };
 const char *window_title(WindowKind k);
@@ -169,6 +180,9 @@ struct UndoState {
   std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
 };
 
+/* A camera's composition guides as screen lines over its frame, Blender's construction (task 0033). */
+std::vector<std::pair<Vec2, Vec2>> camera_guide_lines(const Camera &c, const Recti &frame);
+
 class Editor {
  public:
   Editor();
@@ -205,6 +219,22 @@ class Editor {
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
   bool rendering_for_test() const { return rendering_; }
+  bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
+  std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
+  void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
+  const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
+  GameObject *active_object_for_test() const { return active_object(); }
+  std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
+  bool weight_paint_for_test() const { return weight_paint_; }
+  Shading shading_for_test() const { return shading_; }
+  WeightBrush &wp_brush_for_test() { return wp_brush_; }
+  bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
+  void set_background_gpu_open_for_test(bool on) {
+    cam_preview_pt_.set_background_gpu_open(on);
+    final_pt_.set_background_gpu_open(on);
+  }
+  std::string cam_preview_device_for_test() const { return cam_preview_pt_.device_summary(); }
+  double next_wakeup_for_test() const { return ui_.next_wakeup; }
   bool cam_preview_done_for_test() const { return cam_preview_done_; }
   /* Baked lighting (task 0012). */
   bool baking_for_test() const { return baking_; }
@@ -253,6 +283,15 @@ class Editor {
   /* Tests: the Scene view's depth at a window pixel (1 = nothing), as the tools read it. */
   float scene_depth_for_test(int wx, int wy) const { return scene_rt_.depth_at(wx - scene_rect_.x, wy - scene_rect_.y); }
   /* Tests: the piloted camera's frame in the Scene view (empty when not piloting). */
+  /* Tests: where the Game view's camera frame (the guides' frame) was last drawn. */
+  Recti game_guides_frame_for_test() const { return game_guides_frame_; }
+  bool window_docked_for_test(WindowKind k) { return dock_find(k) != nullptr; }
+  int lesson_for_test() const { return lesson_; }
+  /* Tests: the Guides button ("button") and its menu's rows by label, as last drawn. */
+  Recti game_guides_rect_for_test(const std::string &key) const {
+    auto it = game_guides_rects_.find(key);
+    return it == game_guides_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
   Recti pilot_frame() const {
     GameObject *g = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr;
     const Camera *c = g ? g->get<Camera>() : nullptr;
@@ -270,6 +309,11 @@ class Editor {
     return it == texture_ui_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   ProceduralTexturePtr texture_selected_for_test() const { return texture_selected_; }
+  void set_material_search_for_test(const std::string &s) { material_search_ = s; }
+  void set_material_ref_for_test(Material *m, const std::string &field, const MaterialPtr &picked) { set_material_ref(m, field, picked); }
+  const std::string &render_gpu_error_for_test() const { return final_pt_.gpu_error(); }
+  std::string render_device_for_test() const { return final_pt_.device_summary(); }
+  const std::string &material_search_for_test() const { return material_search_; }
   ProceduralTexturePtr new_texture_asset_for_test(const std::string &preset) { return new_texture_asset(preset); }
   std::string dock_serialize_for_test() { return dock_serialize(dock_.get()); }
   std::string dock_parse_roundtrip_for_test(const std::string &s) {
@@ -299,6 +343,7 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool dialog_open_for_test() const { return dialog_ != Dialog::None; }
+  bool transform_active_for_test() const { return xf_.active; }  // a G / R / S is running
   size_t overlap_vert_pairs_for_test() { overlap_refresh(); return overlap_.verts.size(); }
   size_t overlap_edge_pairs_for_test() { overlap_refresh(); return overlap_.edges.size(); }
   bool modal_active_for_test() const { return modal_.active; }
@@ -332,6 +377,7 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   ui::Context &ui_mut_for_test() { return ui_; }  // (tests that draw with the toolkit)
+  Vec3 gizmo_pivot_for_test() const { return gizmo_pivot_; }
   bool project_delete_pending() const { return !project_delete_.empty(); }
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
@@ -342,6 +388,7 @@ class Editor {
   }
   bool in_edit_mode() const { return edit_mode_; }
   bool edit_face_selected(size_t f) const { return f < face_sel_.size() && face_sel_[f]; }
+  bool edit_vert_selected(size_t v) const { return v < vert_sel_.size() && vert_sel_[v]; }
   bool vert_selected_for_test(size_t v) const { return v < vert_sel_.size() && vert_sel_[v]; }
   static uint64_t overlap_shorter(const Mesh &m, const std::pair<uint64_t, uint64_t> &p);  // of two overlapping edges, the one to mark
 
@@ -380,7 +427,7 @@ class Editor {
   void draw_project(const Recti &r);
   void draw_console(const Recti &r);
   void draw_learn(const Recti &r);
-  void draw_research(const Recti &r);
+  void open_references();  // Learn > References (the papers behind features; the Research window is retired)
   void draw_profiler(const Recti &r);
   void draw_render_window(const Recti &r);
   void draw_uv_editor(const Recti &r);
@@ -444,6 +491,42 @@ class Editor {
   void pick(const Recti &r, int mx, int my, int mode);
   void box_select(const Recti &r, Recti box, int mode);
   uint64_t pick_wire_object(const Recti &r, int mx, int my, int radius);  // Display As Wire / Bounds objects
+  /* Curve objects (task 0042): their lines and, for the active one, its control points; a click on a point selects it
+   * (Shift toggles) and the gizmo then moves the selected points. */
+  void draw_curve(const GameObject &g, const Curve &c);
+  void draw_lattice(const GameObject &g, const Lattice &l);
+  void draw_bone(const GameObject &g, const Bone &b);  // Blender's octahedral bone (task 0047)
+  /* Rigging (task 0047): bone add <parent> [length], armature reset|apply [root], skin bind [object]. */
+  void rig_command(const std::vector<std::string> &t);
+  bool armature_pose(GameObject *root, bool apply_as_rest);  // Reset Pose (false) / Apply as Rest (true)
+  bool skin_bind(GameObject *g);
+  void draw_control_points(const Recti &view, const GameObject &g, const Component &pc);
+  bool point_pick(const Recti &view, int mx, int my, int mode);
+  GameObject *point_target(std::vector<int> &points);
+  void points_command(const std::vector<std::string> &t);  // the console's `points` (and `curve`)
+  /* Bind (or unbind) a Mesh Deform modifier as one undo step; a refusal is logged and shown in the Inspector. */
+  bool mesh_deform_bind(GameObject *g, MeshDeformModifier *md, bool bind);
+  /* Vertex groups (task 0045): add | remove | rename | assign | unassign | select | deselect | active, on the edited
+   * mesh in Edit Mode, else the active object's. Each change is an undo step. */
+  bool vgroup_op(const std::string &verb, const std::string &name, const std::string &arg2, float weight);
+  void draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay);
+  /* After an edit (at the undo commit): meshes whose vertex count changed get their groups back from the snapshot
+   * before the edit, by position (ADR 0024). */
+  void carry_vertex_groups(const Scene &before);
+  /* Weight Paint mode (task 0046, weight_paint.cpp). */
+  bool set_weight_paint(bool on);
+  bool wp_update(const Recti &view);  // the brush owns the mouse
+  void wp_draw(const Recti &view);
+  bool wp_begin_stroke();
+  void wp_end_stroke();
+  void wp_dab(float x, float y);
+  void wp_stroke_to(float x, float y, bool first);
+  Mesh *wp_mesh();
+  int wp_group(const Mesh &m) const;  // the group being painted (pinned while painting)
+  void wp_prepare(const Mesh &m);
+  void wp_abort_stroke();
+  const std::vector<Vec3> *wp_colors(const Mesh &m, const RenderMesh &rm);
+  void weight_paint_command(const std::vector<std::string> &t);
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
@@ -453,6 +536,13 @@ class Editor {
   /* Procedural texture outputs referenced by the items' materials written as PNGs beside `path`; the
    * items get material copies that point at those files, so every exporter sees ordinary images. */
   void bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o);
+  /* Export > Bake Textures (task 0036): each item baked on a copy (kept alive in `keep`), the images written beside
+   * `path`, the copies' materials naming them. */
+  void bake_textures_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o,
+                                std::vector<std::shared_ptr<Mesh>> &keep);
+  /* Object > Bake Textures (task 0036): the active object's look baked into Assets/Textures/Baked, its mesh on the
+   * baked UVs and a "<Object> Baked" material on every slot; one undo step. False when nothing was baked. */
+  bool bake_object_textures(int size, bool keep_uvs = false);
   /* The Textures window (task 0028, texture_window.cpp). */
   void draw_textures_window(const Recti &r);
   const std::vector<std::string> &texture_asset_paths();
@@ -472,6 +562,7 @@ class Editor {
   int texture_preview_size_ = 0, texture_edit_h_ = 0;
   std::vector<std::string> texture_paths_;
   double texture_paths_listed_ = -100;
+  ProceduralTexturePtr texture_delete_;  // waiting for the user to confirm (Textures window, as the Materials window)
   std::map<std::string, Recti> texture_ui_rects_;  // the window's buttons and menus last frame (tests click them)
   /* Texture assets live outside the scene: an edit records the asset's text before it, and the undo step
    * carries those texts (UndoState::textures), so undo and redo restore them. */
@@ -747,6 +838,8 @@ class Editor {
   void draw_materials_window(const Recti &r);
   std::vector<MaterialPtr> pickable_materials(GameObject *g);
   void material_picker_popup(ui::Id pid, GameObject *g, std::function<void(const MaterialPtr &)> pick);
+  /* An axis material's part picked in the Inspector ("Axis Top" / "Axis Side" / "Axis Bottom"): one undo step. */
+  void set_material_ref(Material *mat, const std::string &field, const MaterialPtr &picked);
   std::string material_pick_search_;
 
  public:
@@ -765,6 +858,10 @@ class Editor {
   /* ---- Object snapping and camera piloting (object_snap.cpp) ---- */
   bool surface_align_ = false;  // surface snap also turns the object's up to the normal
   uint64_t pilot_cam_ = 0;      // the camera the Scene view is flying
+  /* Composition guides (task 0033) over a camera's frame in a view (lines from camera_guide_lines). */
+  void draw_camera_guides(const Camera &c, const Recti &frame);
+  Recti game_guides_frame_;
+  std::map<std::string, Recti> game_guides_rects_;
   SceneCamera pilot_saved_cam_;
   uint64_t pilot_last_hash_ = 0;
   Vec3 pilot_cam_pos_;          // the camera as piloting last left it
@@ -929,6 +1026,27 @@ class Editor {
   float prop_radius_ = 1.0f;
   int prop_falloff_ = 0;
   std::vector<float> gizmo_vert_w_;
+  /* Weight Paint (task 0046). */
+  WeightBrush wp_brush_;
+  bool weight_paint_ = false, wp_stroking_ = false, wp_dabbed_ = false, wp_mirror_done_ = false;
+  uint64_t wp_obj_ = 0, wp_version_ = 0, wp_cache_version_ = 0;
+  const Scene *wp_scene_ = nullptr;        // the scene the mode started in (ids restart in every scene)
+  const Mesh *wp_stroke_mesh_ = nullptr;   // the mesh a stroke writes (anything else ends it)
+  const Mesh *wp_cache_mesh_ = nullptr;    // what wp_normals_ / wp_nb_ / wp_mirror_ were made for
+  int wp_group_ = 0;
+  std::vector<float> wp_start_, wp_alpha_;  // a stroke's starting weights and strongest amount per vertex
+  Shading wp_saved_shading_ = Shading::Shaded;
+  Vec2 wp_last_;
+  std::vector<Vec3> wp_normals_;
+  std::vector<uint32_t> wp_nb_off_, wp_nb_, wp_mirror_;
+  std::vector<Vec3> wp_colors_;
+  uint64_t wp_colors_serial_ = 0, wp_colors_version_ = ~0ull;
+  int wp_colors_group_ = -1;
+  int active_vgroup_ = 0;        // the Inspector's chosen vertex group
+  float vgroup_weight_ = 1.0f;   // what Assign gives
+  std::string vgroup_name_edit_;
+  uint64_t pt_obj_ = 0;     // the curve or lattice whose points are selected (only while it is the active object)
+  std::vector<int> pt_sel_;  // its selected control points
   int loop_cuts_ = 1;
   float loop_slide_ = 0.5f;
   float bevel_width_ = 0.1f;
@@ -1241,6 +1359,17 @@ class Editor {
   /* A path-traced render through a filtered camera: traced at the filters' resolution into
    * render_small_, then the image passes, then scaled into render_dst_ of render_img_. */
   bool render_filtered_ = false;
+  /* Film > Transparent (task 0035): this render's alpha is meaningful (PNG / EXR keep it, the Render window shows a
+   * checkerboard behind it); the rasterizer clears to a flat colour for its two passes; the alpha of a path-traced
+   * render as linear floats (EXR). */
+  bool render_transparent_ = false;
+  bool render_clear_override_on_ = false;
+  uint32_t render_clear_override_ = 0;
+  std::vector<float> render_alpha_lin_;
+  void render_with_alpha(const std::function<void()> &once);
+  void apply_trace_alpha(const std::vector<float> &lin, bool filtered);
+  /* Vertex-snapped copies of the meshes a filtered camera's trace uses (task 0032), kept while it renders. */
+  std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> render_snapped_, cam_preview_snapped_;
   FilterStack render_filters_;
   Image render_small_;
   Recti render_dst_;
@@ -1413,8 +1542,7 @@ class Editor {
   std::set<int> lessons_done_;
 
   /* ---- research ---- */
-  std::vector<DirEntry> papers_;
-  double papers_listed_ = -100;
+
 
   /* ---- profiler ---- */
   int stress_count_ = 500;

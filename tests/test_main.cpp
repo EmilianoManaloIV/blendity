@@ -1,5 +1,6 @@
 ﻿// SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests - dependency-free unit tests (exit code = number of failures).
+#include "../src/scene/curve.h"
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
 #include "../src/editor/editor.h"
@@ -16,6 +17,8 @@
 #include "../src/render/lightmapper.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/shading.h"
+#include "../src/render/texture_bake.h"
+#include "../extern/ufbx/ufbx.h"
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
@@ -209,6 +212,25 @@ static void round47_tests();
 static void round48_tests();
 static void round49_tests();
 static void round50_tests();
+static void round51_tests();
+static void round52_tests();
+static void round53_tests();
+static void round54_tests();
+static void round55_tests();
+static void round56_tests();
+static void round57_tests();
+static void round58_tests();
+static void round59_tests();
+static void round60_tests();
+static void round61_tests();
+static void round62_tests();
+static void round63_tests();
+static void round64_tests();
+static void round65_tests();
+static void round66_tests();
+static void round67_tests();
+static void round68_tests();
+static void round69_tests();
 
 int main() {
   register_builtin_components();
@@ -836,6 +858,25 @@ int main() {
   round48_tests();
   round49_tests();
   round50_tests();
+  round51_tests();
+  round52_tests();
+  round53_tests();
+  round54_tests();
+  round55_tests();
+  round56_tests();
+  round57_tests();
+  round58_tests();
+  round59_tests();
+  round60_tests();
+  round61_tests();
+  round62_tests();
+  round63_tests();
+  round64_tests();
+  round65_tests();
+  round66_tests();
+  round67_tests();
+  round68_tests();
+  round69_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -8891,7 +8932,7 @@ static void round28_tests() {
   };
   test("Inspector: Remove Component, Move Up and Reset in a component's menu act on a click, and undo", [&] {
     Editor ed;
-    ed.init_headless(1600, 900);
+    ed.init_headless(1600, 1000);  // tall enough for the Cube's whole Inspector (task 0045 added a Vertex Groups row)
     ed.step_frame_headless();
     ed.command("select Cube");
     ed.command("component Rotator");
@@ -10740,11 +10781,17 @@ static void round31_tests() {
         {"Edge Outline", "Thickness", "3", [](FilterEffect *e) { return (double)static_cast<EdgeOutlineEffect *>(e)->thickness; }, 3},
         {"CRT", "Flicker", "0.5", [](FilterEffect *e) { return (double)static_cast<CrtEffect *>(e)->flicker; }, 0.5},
         {"Sharpen", "Amount", "2.5", [](FilterEffect *e) { return (double)static_cast<SharpenEffect *>(e)->amount; }, 2.5},
+        /* The anime and manga effects (task 0039). */
+        {"Halftone", "CellSize", "12", [](FilterEffect *e) { return (double)static_cast<HalftoneEffect *>(e)->cell; }, 12},
+        {"Hatching", "Spacing", "9", [](FilterEffect *e) { return (double)static_cast<HatchingEffect *>(e)->spacing; }, 9},
+        {"Line Art", "CreaseAngle", "60", [](FilterEffect *e) { return (double)static_cast<LineArtEffect *>(e)->crease_angle; }, 60},
+        {"Paper", "Strength", "0.6", [](FilterEffect *e) { return (double)static_cast<PaperEffect *>(e)->strength; }, 0.6},
+        {"Color Ramp", "Stops", "4", [](FilterEffect *e) { return (double)static_cast<ColorRampEffect *>(e)->stops; }, 4},
         /* The other categories' effects go through the same paths (they had their own copies of this test). */
         {"Retro Console", "Width", "100", [](FilterEffect *e) { return (double)static_cast<RetroConsoleFilter *>(e)->width; }, 100},
         {"Bloom", "Threshold", "2.5", [](FilterEffect *e) { return (double)static_cast<BloomEffect *>(e)->threshold; }, 2.5},
     };
-    /* The registry lists them all: three categories of four, plus Retro Console and Bloom, each with help and a
+    /* The registry lists them all: Color (5), Lens (4), Stylize (8), plus Retro Console and Bloom, each with help and a
      * working factory. */
     std::map<std::string, int> per_cat;
     for (const R31Case &c : cases) {
@@ -10756,7 +10803,7 @@ static void round31_tests() {
       auto e = create_filter_effect(c.name);
       CHECK(e && std::string(e->type_name()) == c.name);
     }
-    CHECK(per_cat["Color"] == 4 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 4);
+    CHECK(per_cat["Color"] == 5 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 8);
     CHECK(per_cat["Retro Console"] == 1 && per_cat["Bloom & glow"] == 1);
     CHECK(filter_effect_infos().size() == cases.size());  // a new effect type gets a row here
     {  // menu order is grouped by category (a category is one run)
@@ -18658,6 +18705,52 @@ static void round50_tests() {
     CHECK(t && t->name.rfind("Bricks", 0) == 0 && t->layers.size() == 3 && std::string(t->layers[0]->type_name()) == "Brick");
     CHECK(t && fs::exists(resolve_asset_path(t->asset_path)));
   });
+  test("textures window: Delete asks first, then sends the texture to the trash; the list drops it and a material using it shows it missing", [] {
+    Editor ed;
+    r50_open(ed);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr);
+    if (!t) return;
+    const std::string path = resolve_asset_path(t->asset_path), ref = t->asset_path + "#albedo";
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test(t->asset_path);
+    r34_steps(ed, 3);
+    const Recti db = ed.texture_ui_rect_for_test("delete");
+    CHECK(db.w > 0);
+    if (db.w <= 0) return;
+    r34_click(ed, db.x + db.w / 2, db.y + db.h / 2);
+    r34_steps(ed, 2);
+    CHECK(fs::exists(path));  // only asked
+    const Recti ok = ed.texture_ui_rect_for_test("delete_confirm");
+    CHECK(ok.w > 0);
+    if (ok.w <= 0) return;
+    r34_click(ed, ok.x + ok.w / 2, ok.y + ok.h / 2);
+    r34_steps(ed, 3);
+    CHECK(!fs::exists(path));
+    CHECK(ed.texture_selected_for_test() == nullptr);
+    CHECK(resolve_texture_ref(TextureRef{ref, false}) == nullptr);  // the material's map: missing now
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>()->materials[0]->base_map.path == ref);  // (kept, so restoring the file brings it back)
+  });
+
+  test("materials window: New Material Asset clears a search left from earlier, so the new material shows", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.command("window Materials");
+    r34_steps(ed, 2);
+    ed.set_material_search_for_test("toon");
+    r34_steps(ed, 2);
+    const Recti wr = ed.window_rect_for_test(WindowKind::Materials);
+    CHECK(wr.w > 0);
+    if (wr.w <= 0) return;
+    /* The toolbar's first button: New Material Asset. */
+    const ui::Context &u = ed.ui_for_test();
+    r34_click(ed, wr.x + u.px(6) + u.px(75), wr.y + (u.row_h() + u.px(6)) / 2);
+    r34_steps(ed, 2);
+    CHECK(ed.material_search_for_test().empty());
+    CHECK(ed.material_selected_for_test() && ed.material_selected_for_test()->name.rfind("New Material", 0) == 0);
+  });
+
   test("textures window: Add Layer > Blur by clicks appends it, its menu's Move Up moves it, its checkbox disables it, each one undo step", [] {
     Editor ed;
     r50_open(ed);
@@ -18794,5 +18887,5379 @@ static void round50_tests() {
     std::printf("    preview size while dragging %d, after %d\n", during, after);
     CHECK(during == 256);
     CHECK(after == 1024);
+  });
+}
+
+/* Round 51 (task 0029, ADR 0018): axis materials. */
+struct R51Mats {
+  MaterialPtr grass, dirt, rock, axis;
+};
+/* Grass (green), Dirt (brown) and Rock (grey) as material assets, and an axis material using them. */
+static R51Mats r51_mats(int mode = 1) {
+  R51Mats m;
+  Material g;
+  g.name = "Grass";
+  g.base_color = {0.1f, 0.8f, 0.1f};
+  Material d;
+  d.name = "Dirt";
+  d.base_color = {0.5f, 0.3f, 0.1f};
+  Material r;
+  r.name = "Rock";
+  r.base_color = {0.4f, 0.4f, 0.4f};
+  m.grass = create_material_asset(g, "Assets/Materials/R51/Grass.mat");
+  m.dirt = create_material_asset(d, "Assets/Materials/R51/Dirt.mat");
+  m.rock = create_material_asset(r, "Assets/Materials/R51/Rock.mat");
+  m.axis = make_material("Ground", Vec3(1.0f));
+  m.axis->axis_mode = mode;
+  m.axis->axis_top = "Assets/Materials/R51/Grass.mat";
+  m.axis->axis_side = "Assets/Materials/R51/Dirt.mat";
+  m.axis->axis_bottom = "Assets/Materials/R51/Rock.mat";
+  m.axis->touch();
+  return m;
+}
+static SurfaceSample r51_eval(const Material &m, Vec3 world_n, Vec3 local_n, Vec3 pos = Vec3(0.3f, 0.2f, 0.1f)) {
+  SurfacePoint sp;
+  sp.position = sp.local_position = pos;
+  sp.normal = sp.geo_normal = normalize(world_n);
+  sp.local_normal = normalize(local_n);
+  return evaluate_material(m, m.textures(), sp);
+}
+static bool r51_green(Vec3 c) { return c.y > 0.6f && c.x < 0.3f; }
+static bool r51_brown(Vec3 c) { return c.x > 0.4f && c.y > 0.2f && c.y < 0.4f && c.z < 0.2f; }
+static void round51_tests() {
+  test("axis material: World mode puts Top on surfaces facing up, Side on steep ones, Bottom underneath, whatever the object's rotation", [] {
+    const R51Mats m = r51_mats(1);
+    const Material &a = *m.axis;
+    CHECK(r51_green(r51_eval(a, {0, 1, 0}, {0, 0, 1}).albedo));   // up in the world (the object turned: locally +Z)
+    CHECK(r51_brown(r51_eval(a, {1, 0, 0}, {0, 1, 0}).albedo));   // a side in the world (locally the top)
+    CHECK(r51_brown(r51_eval(a, {0, 0.3f, 1}, {0, 1, 0}).albedo));  // steep: past 45 degrees
+    const Vec3 bottom = r51_eval(a, {0, -1, 0}, {0, 1, 0}).albedo;
+    CHECK(std::fabs(bottom.x - 0.4f) < 0.02f && std::fabs(bottom.y - 0.4f) < 0.02f);
+  });
+  test("axis material: Local mode follows the object's own up (a quarter turn moves the grass with it)", [] {
+    const R51Mats m = r51_mats(2);
+    const Material &a = *m.axis;
+    CHECK(r51_green(r51_eval(a, {1, 0, 0}, {0, 1, 0}).albedo));  // the object's top, now facing +X in the world
+    CHECK(r51_brown(r51_eval(a, {0, 1, 0}, {0, 0, 1}).albedo));  // the world's up is the object's side
+  });
+  test("axis material: Blend 0 is a hard edge at the angle; a wider blend mixes the parts across it", [] {
+    const R51Mats m = r51_mats(1);
+    auto mixed = [&](float blend) {
+      m.axis->axis_blend = blend;
+      m.axis->touch();
+      int n = 0;
+      for (int i = 0; i <= 200; i++) {  // normals swept from 30 to 60 degrees off up
+        const float t = (30.0f + 30.0f * i / 200.0f) * kDeg2Rad;
+        const Vec3 c = r51_eval(*m.axis, {std::sin(t), std::cos(t), 0}, {0, 1, 0}).albedo;
+        n += !r51_green(c) && !r51_brown(c);
+      }
+      return n;
+    };
+    const int hard = mixed(0.0f), soft = mixed(0.3f);
+    std::printf("    in-between samples across the edge: %d with blend 0, %d with blend 0.3\n", hard, soft);
+    CHECK(hard == 0);
+    CHECK(soft > 20);
+  });
+  test("axis material: a part's texture is projected without UVs (triplanar at the world position)", [] {
+    const R51Mats m = r51_mats(1);
+    m.grass->procedural = (int)Procedural::UVGrid;  // a texture on the Top
+    m.grass->touch();
+    Vec3 a = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.11f, 0.0f, 0.13f)).albedo;
+    Vec3 b = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.61f, 0.0f, 0.37f)).albedo;
+    std::printf("    two points of the top, the same (empty) UVs: %.3f %.3f %.3f vs %.3f %.3f %.3f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    CHECK(length(a - b) > 0.05f);  // the texture varies across the surface without UVs
+  });
+  test("axis material: the fields round-trip through a .mat; an edit undoes; a part's edit changes the views' hash", [] {
+    Editor ed;
+    r34_open(ed);
+    R51Mats m = r51_mats(1);
+    m.axis->axis_angle = 30.0f;
+    m.axis->axis_blend = 0.25f;
+    m.axis->axis_scale = 2.0f;
+    MaterialPtr saved = create_material_asset(*m.axis, "Assets/Materials/R51/Ground.mat");
+    CHECK(saved != nullptr);
+    Material back;
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path("Assets/Materials/R51/Ground.mat"), text));
+    CHECK(load_material_text(text, back));
+    CHECK(back.axis_mode == 1 && back.axis_top == "Assets/Materials/R51/Grass.mat" && back.axis_side == "Assets/Materials/R51/Dirt.mat" &&
+          back.axis_bottom == "Assets/Materials/R51/Rock.mat" && std::fabs(back.axis_angle - 30.0f) < 1e-4f && std::fabs(back.axis_scale - 2.0f) < 1e-4f);
+    /* On the Cube: the hash follows a part's edit, and a field edit undoes. */
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    cube->get<MeshRenderer>()->materials = {saved};
+    ed.commit_change("Ground");
+    r34_steps(ed, 3);
+    const uint64_t h0 = ed.render_hash_for_test();
+    m.grass->base_color = {0.0f, 1.0f, 0.0f};
+    m.grass->touch();
+    const uint64_t h1 = ed.render_hash_for_test();
+    CHECK(h1 != h0);
+    saved->axis_mode = 0;
+    saved->touch();
+    ed.commit_change("Axis Off");
+    r34_steps(ed, 2);
+    ed.command("undo");
+    CHECK(by_name(ed.scene(), "Cube")->get<MeshRenderer>()->materials[0]->axis_mode == 1);
+  });
+  test("axis material: an F12 raster render from above shows the Top on the cube's top, and after a quarter turn still the Top on what faces up", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    R51Mats m = r51_mats(1);
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    cube->get<MeshRenderer>()->materials = {m.axis};
+    GameObject *cam = by_name(ed.scene(), "Main Camera");
+    cam->set_local_position({0.0f, 6.0f, 0.0f});
+    cam->set_local_euler({90.0f, 0.0f, 0.0f});  // looking straight down
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("set Render.ResolutionX 96");
+    ed.command("set Render.ResolutionY 64");
+    auto centre = [&] {
+      ed.command("render");
+      for (int i = 0; i < 100 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      const uint32_t c = img.pixels[(size_t)(img.height / 2) * img.width + img.width / 2];
+      return Vec3(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f);
+    };
+    const Vec3 a = centre();
+    cube->set_local_euler({90.0f, 0.0f, 0.0f});  // a quarter turn about X
+    const Vec3 b = centre();
+    std::printf("    the cube's top seen from above: %.2f %.2f %.2f, after the turn %.2f %.2f %.2f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    /* (Filmic and the sun desaturate: green means green clearly above red and blue.) */
+    CHECK(a.y > a.x + 0.12f && a.y > a.z + 0.12f);  // green
+    CHECK(b.y > b.x + 0.12f && b.y > b.z + 0.12f);  // still green: World mode
+    m.axis->axis_mode = 2;  // Local: the face now up was a side
+    m.axis->touch();
+    const Vec3 c = centre();
+    std::printf("    Local mode after the turn: %.2f %.2f %.2f\n", c.x, c.y, c.z);
+    CHECK(c.x > c.y && c.y > c.z);  // brown
+  });
+  test("axis material: a cycle of parts (A's Top is B, B's Top is A) resolves without recursing forever, and edge cases fall back sensibly", [] {
+    R51Mats m = r51_mats(1);
+    Material a;
+    a.name = "CycleA";
+    a.base_color = {0.9f, 0.1f, 0.1f};
+    a.axis_mode = 1;
+    a.axis_top = "Assets/Materials/R51/CycleB.mat";
+    Material b;
+    b.name = "CycleB";
+    b.base_color = {0.1f, 0.1f, 0.9f};
+    b.axis_mode = 1;
+    b.axis_top = "Assets/Materials/R51/CycleA.mat";
+    MaterialPtr pa = create_material_asset(a, "Assets/Materials/R51/CycleA.mat");
+    MaterialPtr pb = create_material_asset(b, "Assets/Materials/R51/CycleB.mat");
+    CHECK(pa && pb);
+    if (!pa || !pb) return;
+    invalidate_material_textures();
+    const Vec3 top = r51_eval(*pa, {0, 1, 0}, {0, 1, 0}).albedo;  // A's Top is B, used plainly: blue
+    CHECK(top.z > 0.8f && top.x < 0.2f);
+    pb->touch();
+    const Vec3 top2 = r51_eval(*pb, {0, 1, 0}, {0, 1, 0}).albedo;  // B's Top is A, used plainly: red
+    CHECK(top2.x > 0.8f && top2.z < 0.2f);
+    /* A missing part and the material itself as a part: its own maps. */
+    Material own;
+    own.base_color = {0.2f, 0.7f, 0.9f};
+    own.axis_mode = 1;
+    own.axis_top = "Assets/Materials/R51/NoSuch.mat";
+    const Vec3 o = r51_eval(own, {0, 1, 0}, {0, 1, 0}).albedo;
+    CHECK(std::fabs(o.x - 0.2f) < 0.02f && std::fabs(o.z - 0.9f) < 0.02f);
+    /* A NaN or zero normal: the Side part, not black. */
+    const Vec3 z = r51_eval(*m.axis, {0, 0, 0}, {0, 0, 0}).albedo;
+    CHECK(r51_brown(z));
+    /* A part's Checker follows the projection, not the mesh's UVs: two points of the top with the same UVs differ. */
+    m.grass->procedural = (int)Procedural::Checker;
+    m.grass->procedural_scale = 4.0f;
+    m.grass->touch();
+    int differ = 0;
+    for (int i = 0; i < 20; i++) {
+      const Vec3 p1 = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.05f * i, 0.0f, 0.0f)).albedo;
+      const Vec3 p2 = r51_eval(*m.axis, {0, 1, 0}, {0, 1, 0}, Vec3(0.05f * i + 0.13f, 0.0f, 0.0f)).albedo;
+      differ += length(p1 - p2) > 0.05f;
+    }
+    CHECK(differ > 3);
+  });
+  test("axis material: the CPU path tracer and (with a Vulkan GPU) the GPU path tracer agree on an axis-material cube", [] {
+    R51Mats m = r51_mats(1);
+    /* A part that is itself an axis material (used plainly) and a part shared by two parents. */
+    m.dirt->axis_mode = 1;
+    m.dirt->axis_top = "Assets/Materials/R51/Grass.mat";
+    m.dirt->touch();
+    MaterialPtr second = make_material("Ground 2", Vec3(1.0f));
+    second->axis_mode = 1;
+    second->axis_side = "Assets/Materials/R51/Dirt.mat";
+    second->touch();
+    auto cube = primitives::cube(1.0f);
+    std::vector<MaterialPtr> mats = {m.axis}, mats2 = {second};
+    std::vector<PTObject> objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, 0, 0}, Quat::euler({30, 20, 0}), {1, 1, 1}), &mats},
+                                  {&cube->render_mesh_tangents(), Mat4::translate({2.2f, 0, 0}), &mats2}};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.3f, -1, 0.2f));
+    Environment env;
+    const int W = 32, H = 32, SPP = 64;
+    auto render = [&](bool cpu, std::vector<int> gpus) {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = cpu;
+      st.gpus = gpus;
+      st.denoise = false;
+      st.use_embree = false;
+      pt.set_settings(st);
+      pt.build(objs, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 3.0f, -2.0f}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(40 * kDeg2Rad, 1.0f, 0.1f, 50), W, H);
+      pt.render(1e9, SPP);
+      return pt.linear_rgb(false);
+    };
+    const std::vector<float> ref = render(true, {});
+    double mean = 0;
+    for (float v : ref) mean += v;
+    CHECK(mean > 0.0);
+    /* From straight above, the unrotated second cube's top fills the middle of a narrow view: the Top (its own white
+     * maps) there, and the first cube's top is grass. */
+    {
+      PathTracer pt;
+      PTSettings st;
+      st.denoise = false;
+      st.use_embree = false;
+      pt.set_settings(st);
+      std::vector<PTObject> one = {{&cube->render_mesh_tangents(), Mat4::identity(), &mats}};
+      pt.build(one, {sun}, env);
+      pt.set_camera(Mat4::look_at({0, 5.0f, 0.001f}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(10 * kDeg2Rad, 1.0f, 0.1f, 50), 16, 16);
+      pt.render(1e9, 32);
+      const std::vector<float> img = pt.linear_rgb(false);
+      const size_t c = (8 * 16 + 8) * 3;
+      std::printf("    CPU path tracer, the cube's top from above: %.3f %.3f %.3f\n", img[c], img[c + 1], img[c + 2]);
+      CHECK(img[c + 1] > 2.0f * img[c] && img[c + 1] > 2.0f * img[c + 2]);  // grass
+    }
+    if (!gpu::available()) return;
+    for (const gpu::DeviceInfo &d : gpu::devices()) {
+      const std::vector<float> img = render(false, {d.index});
+      double err = 0, mean = 0;
+      for (size_t i = 0; i < img.size(); i++) err += std::fabs(img[i] - ref[i]), mean += ref[i];
+      std::printf("    %s: mean |difference| %.4f of mean %.4f\n", d.name.c_str(), err / img.size(), mean / img.size());
+      CHECK(err / img.size() < 0.08 * (mean / img.size()));
+    }
+  });
+}
+
+/* ===================================================================== */
+/* Round 52 (task 0030): large area lights, the gizmo after Set Origin,   */
+/* Select Coplanar                                                         */
+/* ===================================================================== */
+
+/* A 10 x 10 m area light 3.5 m up, facing down (the user's report). */
+RenderLight r52_big_light(bool disk = false, float w = 10.0f, float h = 10.0f) {
+  RenderLight l;
+  l.type = RenderLight::Area;
+  l.position = {0, 3.5f, 0};
+  l.direction = {0, -1, 0};
+  l.right = {1, 0, 0};
+  l.width = w;
+  l.height = h;
+  l.disk = disk;
+  l.intensity = 2.0f;
+  l.range = 10.0f;
+  return l;
+}
+
+/* The path tracer's estimate without shadows, converged: the mean of max(0, n.L) max(0, facing) over uniform
+ * random points of the light. */
+double r52_reference(const RenderLight &l, Vec3 p, Vec3 n, int samples = 1000000) {
+  uint32_t s = 12345;
+  auto rnd = [&] {
+    s = s * 1664525u + 1013904223u;
+    return (s >> 8) / 16777216.0f;
+  };
+  double sum = 0;
+  for (int i = 0; i < samples; i++) {
+    float a = rnd() - 0.5f, b = rnd() - 0.5f;
+    if (l.disk) {
+      const float rr = 0.5f * std::sqrt(rnd()), ph = 2 * kPi * rnd();
+      a = rr * std::cos(ph);
+      b = rr * std::sin(ph);
+    }
+    const Vec3 up = cross(l.direction, l.right);
+    Vec3 L = l.position + l.right * (a * l.width) + up * (b * l.height) - p;
+    L = normalize(L);
+    const float ndl = dot(n, L), c = -dot(l.direction, L);
+    if (ndl > 0 && c > 0) sum += ndl * c;
+  }
+  return sum / samples;
+}
+
+static void round52_tests() {
+  test("area light: its light over the whole surface matches the path tracer's converged estimate (under it, a cube's side, close up, a disk)", [] {
+    struct Case {
+      const char *name;
+      Vec3 p, n;
+      bool disk;
+      float w, h;
+    };
+    const Case cases[] = {{"floor under the centre", {0, 0, 0}, {0, 1, 0}, false, 10, 10},
+                          {"a cube's side", {0.5f, 0.5f, 0}, {1, 0, 0}, false, 10, 10},
+                          {"a cube's top", {0, 1, 0}, {0, 1, 0}, false, 10, 10},
+                          {"floor near the edge", {4.5f, 0, 2}, {0, 1, 0}, false, 10, 10},
+                          {"close below, tilted", {1, 3.0f, -1}, normalize(Vec3(0.3f, 1, 0.2f)), false, 10, 10},
+                          {"0.3 m below, off centre", {1.7f, 3.2f, -2.3f}, {0, 1, 0}, false, 10, 10},
+                          {"0.6 m below, a side", {2.2f, 2.9f, 0.4f}, {1, 0, 0}, false, 10, 10},
+                          {"a 20 x 0.2 m strip 0.5 m above", {0.3f, 3.0f, 0}, {0, 1, 0}, false, 20, 0.2f},
+                          {"a 0.2 x 20 m strip, a side cutting it", {0.05f, 3.0f, 0}, {1, 0, 0}, false, 0.2f, 20},
+                          {"a 0.1 m light (as a point)", {0.4f, 1.0f, 0.3f}, normalize(Vec3(0.2f, 1, 0)), false, 0.1f, 0.1f},
+                          {"a disk light, a side", {0.5f, 0.5f, 0}, {1, 0, 0}, true, 10, 10},
+                          {"a disk light, floor", {1.0f, 0, -2.0f}, {0, 1, 0}, true, 10, 10},
+                          {"a disk light 0.5 m below, tilted", {1.0f, 3.0f, 1.0f}, normalize(Vec3(-0.4f, 1, 0.1f)), true, 10, 10}};
+    for (const Case &c : cases) {
+      const RenderLight l = r52_big_light(c.disk, c.w, c.h);
+      const double ref = r52_reference(l, c.p, c.n), got = area_light_cosine(l, c.p, c.n);
+      std::printf("    %s: %.4f (reference %.4f)\n", c.name, got, ref);
+      CHECK(std::fabs(got - ref) <= 0.01 * ref + 1e-4);
+    }
+    /* Turned away, behind the light, NaN: nothing. */
+    const RenderLight l = r52_big_light();
+    CHECK(area_light_cosine(l, {0, 5, 0}, {0, 1, 0}) == 0.0f);
+    CHECK(area_light_cosine(l, {0, 0, 0}, {0, -1, 0}) == 0.0f);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(area_light_cosine(l, {nan, 0, 0}, {0, 1, 0}) == 0.0f);
+    /* No size (an object scaled to 0 on an axis): the centre, as a point, as the path tracer does. */
+    const RenderLight z = r52_big_light(false, 0.0f, 0.0f);
+    const float pz = area_light_cosine(z, {0, 0, 0}, {0, 1, 0});
+    CHECK(std::fabs(pz - 1.0f) < 1e-4f);
+  });
+
+  test("area light: a 10 m light lights a cube's side in the rasterizer (it was black), as the path tracer does", [] {
+    /* A quad standing where a unit cube's +X side is, seen from +X; only the area light, a black world. */
+    auto quad = primitives::quad(1.0f);
+    std::vector<MaterialPtr> mats = {make_material("side", Vec3(0.8f))};
+    mats[0]->specular = 0.0f;
+    mats[0]->roughness = 1.0f;
+    const Mat4 model = Mat4::translate({0.5f, 0.5f, 0}) * Mat4::rotate(Quat::euler({0, 90, 0}));
+    const RenderLight l = r52_big_light();
+    Environment black;
+    black.mode = Environment::Color;
+    black.color = Vec3(0.0f);
+    /* The rasterizer, linear (its HDR plane). */
+    Image img;
+    img.resize(32, 32);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 32, 32});
+    rt.want_hdr = true;
+    Renderer3D r;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env;
+    env.view_transform = ViewTransform::Standard;
+    env.camera_pos = {4, 0.5f, 0};
+    env.sky = env.equator = env.ground = Vec3(0.0f);
+    env.environment = &black;
+    env.lights = {l};
+    r.begin(&rt, Mat4::look_at(env.camera_pos, {0.5f, 0.5f, 0}, {0, 1, 0}), Mat4::perspective(10 * kDeg2Rad, 1, 0.1f, 20), env, opt);
+    r.clear(0xFF000000);
+    DrawItem it;
+    it.mesh = &quad->render_mesh_tangents();
+    it.model = model;
+    it.materials = &mats;
+    it.double_sided = true;
+    r.add(it);
+    r.flush();
+    CHECK(!rt.hdr.empty());
+    const float raster = rt.hdr.empty() ? 0.0f : rt.hdr[16 * 32 + 16].y;
+    /* The path tracer, direct light only. */
+    PathTracer pt;
+    PTSettings st;
+    st.denoise = false;
+    st.use_embree = false;
+    st.max_bounces = 0;
+    pt.set_settings(st);
+    pt.build({{&quad->render_mesh_tangents(), model, &mats}}, {l}, black);
+    pt.set_camera(Mat4::look_at(env.camera_pos, {0.5f, 0.5f, 0}, {0, 1, 0}), Mat4::ortho(0.3f, 1.0f, 0.1f, 20), 8, 8);
+    pt.render(1e9, 4096);
+    const auto rgb = pt.linear_rgb(false);
+    float traced = 0;
+    for (int y = 3; y < 5; y++)
+      for (int x = 3; x < 5; x++) traced += rgb[((size_t)y * 8 + x) * 3 + 1] * 0.25f;
+    std::printf("    the side's middle: rasterizer %.4f, path tracer %.4f\n", raster, traced);
+    CHECK(traced > 0.05f);
+    CHECK(std::fabs(raster - traced) < 0.1f * traced);
+  });
+
+  test("area light: a glossy floor's highlight from a 1 m area light is close to the path tracer's (it was normalised twice)", [] {
+    auto quad = primitives::quad(4.0f);
+    std::vector<MaterialPtr> mats = {make_material("gloss", Vec3(0.0f))};  // black: the specular alone
+    mats[0]->roughness = 0.3f;
+    const Mat4 model = Mat4::rotate(Quat::euler({90, 0, 0}));  // lying flat
+    RenderLight l = r52_big_light(false, 1.0f, 1.0f);
+    l.position = {1, 2, 0};  // the mirror image of the camera through the floor's centre
+    Environment black;
+    black.mode = Environment::Color;
+    black.color = Vec3(0.0f);
+    const Vec3 eye{-1, 2, 0};
+    Image img;
+    img.resize(32, 32);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 32, 32});
+    rt.want_hdr = true;
+    Renderer3D r;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env;
+    env.view_transform = ViewTransform::Standard;
+    env.camera_pos = eye;
+    env.sky = env.equator = env.ground = Vec3(0.0f);
+    env.environment = &black;
+    env.lights = {l};
+    r.begin(&rt, Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(4 * kDeg2Rad, 1, 0.1f, 20), env, opt);
+    r.clear(0xFF000000);
+    DrawItem it;
+    it.mesh = &quad->render_mesh_tangents();
+    it.model = model;
+    it.materials = &mats;
+    it.double_sided = true;
+    r.add(it);
+    r.flush();
+    const float raster = rt.hdr.empty() ? 0.0f : rt.hdr[16 * 32 + 16].y;
+    PathTracer pt;
+    PTSettings st;
+    st.denoise = false;
+    st.use_embree = false;
+    st.max_bounces = 0;
+    pt.set_settings(st);
+    pt.build({{&quad->render_mesh_tangents(), model, &mats}}, {l}, black);
+    pt.set_camera(Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), Mat4::ortho(0.05f, 1.0f, 0.1f, 20), 4, 4);
+    pt.render(1e9, 20000);
+    const auto rgb = pt.linear_rgb(false);
+    float traced = 0;
+    for (int i = 0; i < 16; i++) traced += rgb[(size_t)i * 3 + 1] / 16.0f;
+    std::printf("    the highlight: rasterizer %.4f, path tracer %.4f (%.2fx)\n", raster, traced, raster / std::max(1e-6f, traced));
+    CHECK(traced > 0.01f);
+    /* Karis's representative point is an approximation: within a factor 0.5 .. 1.6 (measured by the reviewer
+     * 0.53 .. 1.18 over sizes and roughnesses); before the fix 0.12x. */
+    CHECK(raster > 0.5f * traced && raster < 1.6f * traced);
+  });
+
+  test("area light: a floor baked under a 10 m Baked area light is smooth (no splotches) and as bright as the path tracer's", [] {
+    auto floor = primitives::plane(8.0f, 1);
+    BakeObject o;
+    o.id = 1;
+    o.mesh = floor;
+    o.model = Mat4::identity();
+    o.materials = {make_material("f", Vec3(0.8f))};
+    const RenderLight l = r52_big_light();
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    BakeSettings bs;
+    bs.texels_per_unit = 8.0f;
+    bs.direct_samples = 32;
+    bs.indirect_samples = 1;
+    bs.bounces = 0;
+    bs.denoise = false;  // the raw texels
+    Lightmapper lm;
+    lm.begin({o}, {{l, 2, 9}}, env, bs);
+    while (!lm.step(1e9)) {}
+    const LightingData d = lm.take_result();
+    CHECK(d.pages.size() == 1);
+    if (d.pages.empty()) return;
+    const Lightmap &m = d.pages[0];
+    /* An open floor's light varies smoothly: each texel against the mean of its left and right neighbours (a
+     * second difference: the floor's real gradient cancels, the noise doesn't). */
+    double bump = 0, level = 0;
+    size_t n = 0;
+    for (int y = 1; y < m.height; y++)
+      for (int x = 1; x + 1 < m.width; x++) {
+        const size_t i = (size_t)y * m.width + x;
+        const float c = m.texels[i].x, left = m.texels[i - 1].x, right = m.texels[i + 1].x;
+        if (c < 0.05f || left < 0.05f || right < 0.05f) continue;  // padding
+        bump += std::fabs(c - 0.5f * (left + right));
+        level += c;
+        n++;
+      }
+    std::printf("    %zu texels: mean bump against the neighbours %.3f%% of the level\n", n, 100.0 * bump / std::max(1e-9, level));
+    CHECK(n > 500);
+    CHECK(bump / std::max(1e-9, level) < 0.005);
+    /* The floor's centre against the path tracer's converged estimate (the lightmap holds what albedo multiplies). */
+    Vec3 centre;
+    CHECK(r35_sample(d, 1, *floor, Mat4::identity(), {0.05f, 0, 0.05f}, centre));
+    const double want = l.intensity * r52_reference(l, {0.05f, 0, 0.05f}, {0, 1, 0}) * light_range_falloff(l, {0.05f, 0, 0.05f});
+    std::printf("    centre %.4f, path tracer %.4f\n", centre.x, want);
+    CHECK(std::fabs(centre.x - want) < 0.05 * want);
+  });
+
+  test("set origin: a change asks for another frame, and in it the gizmo sits on the new origin (it waited for the next input)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 2, 0});
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(length(ed.gizmo_pivot_for_test() - Vec3(0, 2, 0)) < 1e-4f);
+    /* The Inspector's Apply runs after the Scene view placed the gizmo for that frame; the console's
+     * `origin` runs the same set_origin. Afterwards the editor must ask for a frame by itself. */
+    ed.step_frame_headless();  // (an idle frame: nothing asks for another)
+    ed.command("origin bottom");
+    std::printf("    origin y %.3f; another frame asked for: %s\n", g->world_position().y, ed.ui_for_test().redraw ? "yes" : "no");
+    CHECK(std::fabs(g->world_position().y - 1.5f) < 1e-4f);  // the bottom of a unit cube at y = 2
+    CHECK(ed.ui_for_test().redraw);  // before the fix: no, so the app slept with the gizmo on the old origin
+    ed.step_frame_headless();
+    CHECK(length(ed.gizmo_pivot_for_test() - g->world_position()) < 1e-4f);
+  });
+
+  test("camera filters: every filter shows in a path-traced F12 render at 720p with the denoiser, as in a rasterized one", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("set Render.Samples 2");
+    ed.command("set Render.ResolutionX 1280");
+    ed.command("set Render.ResolutionY 720");
+    ed.command("set Render.Denoise true");
+    ed.command("device cpu");
+    auto render = [&](const char *engine) {
+      ed.command(std::string("set Render.RenderEngine ") + engine);
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.rendering_for_test());
+      const Image &img = ed.render_image_for_test();
+      return r47_dark(img, {0, 0, img.width, img.height});
+    };
+    const int path0 = render("Path"), raster0 = render("Rasterized");
+    ed.command("select Main Camera");
+    ed.command("filter add Edge Outline");
+    const int path1 = render("Path"), raster1 = render("Rasterized");
+    std::printf("    near-black pixels with an Edge Outline: path traced %d -> %d, rasterized %d -> %d\n", path0, path1, raster0, raster1);
+    CHECK(raster1 > raster0 + 300);
+    CHECK(path1 > path0 + 300);
+    CHECK(path1 - path0 > (raster1 - raster0) / 2);
+    /* On the GPUs (Render > Device GPU Compute, the user's setting), and the Render window's Preview. */
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const int gpu1 = render("Path");
+      std::printf("    on the GPU: %d\n", gpu1);
+      CHECK(gpu1 > path0 + 300);
+      ed.command("device cpu");
+    }
+    ed.command("set Render.RenderEngine Path");
+    ed.command("preview");
+    for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    const Image &pv = ed.render_image_for_test();
+    const int prev1 = r47_dark(pv, {0, 0, pv.width, pv.height});
+    std::printf("    the Render window's Preview (%d x %d): %d\n", pv.width, pv.height, prev1);
+    CHECK(prev1 > 0);
+  });
+
+  test("select coplanar: adds the faces in the selected face's plane, joined or not, and nothing tilted, raised or facing the other way", [] {
+    /* Four quads at y = 0 facing up (two apart from the first), one raised, one facing down, one tilted by 5 degrees. */
+    auto m = std::make_shared<Mesh>();
+    auto quad = [&](float x0, float y, bool down, float tilt = 0.0f) {
+      uint32_t a = m->add_vert({x0, y, 0}), b = m->add_vert({x0, y + tilt, 1}), c = m->add_vert({x0 + 1, y + tilt, 1}), d = m->add_vert({x0 + 1, y, 0});
+      if (down) m->add_face({a, d, c, b});
+      else m->add_face({a, b, c, d});
+    };
+    quad(0, 0, false);   // 0: the one selected
+    quad(1, 0, false);   // 1: joined, coplanar
+    quad(5, 0, false);   // 2: apart, coplanar
+    quad(8, 0.5f, false);  // 3: raised
+    quad(10, 0, true);   // 4: facing down
+    quad(12, 0, false, 0.09f);  // 5: tilted ~5 degrees
+    {  // 6: degenerate (three corners on a line): no plane
+      uint32_t a = m->add_vert({20, 0, 0}), b = m->add_vert({21, 0, 0}), c = m->add_vert({22, 0, 0});
+      m->add_face({a, b, c});
+    }
+    std::vector<uint8_t> sel(m->face_count(), 0);
+    sel[0] = 1;
+    CHECK(meshops::select_coplanar(*m, sel) == 2);
+    CHECK(sel[1] && sel[2] && !sel[3] && !sel[4] && !sel[5] && !sel[6]);
+    /* Nothing selected, or only the degenerate face: nothing added. */
+    std::vector<uint8_t> none(m->face_count(), 0);
+    CHECK(meshops::select_coplanar(*m, none) == 0);
+    none[6] = 1;
+    CHECK(meshops::select_coplanar(*m, none) == 0);
+    /* Through the editor: face mode, and vertex mode from the corners of one face. */
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>());
+    if (!g || !g->get<MeshFilter>()) return;
+    g->get<MeshFilter>()->mesh = m;
+    ed.command("fsel 0");
+    ed.command("editop select_coplanar");
+    CHECK(ed.edit_face_selected(0) && ed.edit_face_selected(1) && ed.edit_face_selected(2));
+    CHECK(!ed.edit_face_selected(3) && !ed.edit_face_selected(4) && !ed.edit_face_selected(5));
+    ed.command("edit vertex");
+    ed.command("vsel 0 1 2 3 12");  // the first quad's corners, and one corner of the raised quad
+    ed.command("editop select_coplanar");
+    CHECK(ed.edit_vert_selected(8) && ed.edit_vert_selected(12));  // a coplanar quad's corner added; the other kept
+    ed.command("edit face");
+    CHECK(ed.edit_face_selected(2) && !ed.edit_face_selected(3));
+  });
+}
+
+/* ===================================================================== */
+/* Round 53 (task 0031, ADR 0017 amended): live procedural textures       */
+/* ===================================================================== */
+
+/* A texture of one stack, evaluated to planes (with the live snapshot) at its size. */
+struct R53Eval {
+  TexPlanes planes;
+  std::shared_ptr<LiveTexture> live;
+};
+static R53Eval r53_eval(const ProceduralTexture &t) {
+  R53Eval e;
+  std::vector<LayerAux> aux;
+  t.evaluate(e.planes, &aux);
+  e.live = std::make_shared<LiveTexture>(t, std::move(aux), e.planes.w, e.planes.h);
+  return e;
+}
+
+/* A quad facing -Z with UVs 0..1 across 2 m, drawn with a material through the deferred rasterizer, the camera
+ * at `dist` in front: the middle row's linear green. */
+static std::vector<float> r53_row(const MaterialPtr &mat, float dist, int size = 128) {
+  static auto quad = primitives::quad(2.0f);
+  std::vector<MaterialPtr> mats = {mat};
+  Image img;
+  img.resize(size, size);
+  RenderTarget rt;
+  rt.attach(img, {0, 0, size, size});
+  rt.want_hdr = true;
+  Renderer3D r;
+  RasterOptions opt;
+  opt.shade = ShadeMode::Deferred;
+  LightingEnv env;
+  env.view_transform = ViewTransform::Standard;
+  env.camera_pos = {0.3f, 0.2f, -dist};
+  r.begin(&rt, Mat4::look_at(env.camera_pos, {0.3f, 0.2f, 0}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1, 0.01f, 50), env, opt);
+  r.clear(0xFF000000);
+  DrawItem it;
+  it.mesh = &quad->render_mesh_tangents();
+  it.materials = &mats;
+  it.double_sided = true;
+  r.add(it);
+  r.flush();
+  std::vector<float> row(size);
+  for (int x = 0; x < size; x++) row[x] = rt.hdr.empty() ? 0.0f : rt.hdr[(size_t)(size / 2) * size + x].y;
+  return row;
+}
+
+static void round53_tests() {
+  test("live textures: a point evaluation equals the planes at every texel centre, for every layer type", [] {
+    int bad_types = 0;
+    for (const TextureLayerInfo &info : texture_layer_infos()) {
+      ProceduralTexture t;
+      /* (Warp and Tile at 512: their planes read whole texels, which at 64 is coarser than a brick's bevel.) */
+      t.width = t.height = info.name == "Warp" || info.name == "Tile" ? 512 : 64;
+      t.seed = 7;
+      if (info.category != "Generators" || info.name == "Image") t.add("Brick");  // something for a filter to work on
+      if (info.name == "Image") {
+        /* An image file in the scratch project for the Image layer. */
+        std::vector<uint32_t> px(16 * 16);
+        for (int i = 0; i < 16 * 16; i++) px[i] = 0xFF000000u | (uint32_t)(i * 7 & 255) << 16 | (uint32_t)(i * 3 & 255) << 8 | 90u;
+        const std::string path = fs::join(scratch_project(), "Assets/R53_image.png");
+        CHECK(write_png(path, px.data(), 16, 16, 16));
+      }
+      TextureLayer *l = t.add(info.name);
+      CHECK(l != nullptr);
+      if (!l) continue;
+      if (info.name == "Mask by Height") t.add("Invert")->use_mask = true;  // something that reads the mask
+      if (info.name == "Image") {
+        struct SetImage : Reflector {  // sets the Image field, ignores the rest
+          void field(const char *, float &, float, float, float) override {}
+          void field(const char *, int &, int, int) override {}
+          void field(const char *, bool &) override {}
+          void field(const char *, Vec3 &) override {}
+          void color(const char *, Vec3 &) override {}
+          void enumeration(const char *, int &, const char *const *, int) override {}
+          void text(const char *, std::string &) override {}
+          void mesh(const char *, MeshPtr &) override {}
+          void texture(const char *, TextureRef &r) override { r.path = "Assets/R53_image.png"; }
+        } si;
+        l->reflect(si);
+      }
+      const R53Eval e = r53_eval(t);
+      const TexPlanes &p = e.planes;
+      size_t ok = 0, n = 0;
+      float worst = 0;
+      double sum = 0;
+      for (int y = 0; y < p.h; y++)
+        for (int x = 0; x < p.w; x++) {
+          const size_t i = (size_t)y * p.w + x;
+          const TexPoint q = e.live->at((x + 0.5f) / p.w, (y + 0.5f) / p.h);
+          const float d = std::max({std::fabs(q.height - p.height[i]), std::fabs(q.rough - p.rough[i]), std::fabs(q.albedo.x - p.albedo[i].x),
+                                    std::fabs(q.albedo.y - p.albedo[i].y), std::fabs(q.albedo.z - p.albedo[i].z)});
+          worst = std::max(worst, d);
+          sum += d;
+          ok += d <= 1.0f / 255.0f;
+          n++;
+        }
+      /* Warp and Tile: the planes read the nearest texel of the moved point, a point evaluation the point itself
+       * (up to half a texel away: across the bricks' bevels and edges that changes values), so for those the
+       * mean difference is what is held to a bound. Every other layer is exact at the centres. */
+      const bool moved = info.name == "Warp" || info.name == "Tile";
+      const double frac = (double)ok / std::max<size_t>(1, n), mean = sum / std::max<size_t>(1, n);
+      if (moved ? mean > 0.03 : frac < 1.0) {
+        std::printf("    %s: %.1f%% of texels within 1/255, mean difference %.4f (worst %.3f)\n", info.name.c_str(), 100.0 * frac, mean, worst);
+        bad_types++;
+      }
+      else if (moved) std::printf("    %s: mean difference %.4f\n", info.name.c_str(), mean);
+    }
+    CHECK(bad_types == 0);
+  });
+
+  test("live textures: the live normal matches the image's normal output (Sobel) within 10 degrees on smooth parts", [] {
+    ProceduralTexture t;
+    t.width = t.height = 64;
+    t.add("Noise");
+    const R53Eval e = r53_eval(t);
+    const Bitmap nm = t.output(1, e.planes);
+    size_t ok = 0, n = 0;
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) {
+        const uint8_t *c = &nm.rgba8[((size_t)y * 64 + x) * 4];
+        const Vec3 img = normalize(Vec3(c[0] / 127.5f - 1, c[1] / 127.5f - 1, c[2] / 127.5f - 1));
+        const Vec3 live = e.live->normal((x + 0.5f) / 64, (y + 0.5f) / 64);
+        const float h0 = e.live->at((x + 0.5f) / 64, (y + 0.5f) / 64).height;
+        const Vec3 fast = e.live->normal((x + 0.5f) / 64, (y + 0.5f) / 64, &h0);  // one-sided, as the rasterizer uses
+        ok += dot(img, live) > std::cos(10 * kDeg2Rad) && dot(img, fast) > std::cos(10 * kDeg2Rad);
+        n++;
+      }
+    std::printf("    %zu of %zu texels within 10 degrees\n", ok, n);
+    CHECK(ok >= n * 95 / 100);
+  });
+
+  test("live textures: up close a Brick texture's mortar edge is sharp with Live Shading and blurred without", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr);
+    if (!t) return;
+    t->width = t->height = 64;
+    t->touch();
+    MaterialPtr m = make_material("bricks", Vec3(1.0f));
+    m->base_map.path = t->asset_path + "#albedo";
+    m->touch();
+    /* Pixels between the mortar and the brick colours along a row (an edge's width). */
+    auto transitions = [](const std::vector<float> &row) {
+      float lo = 1e9f, hi = -1e9f;
+      for (float v : row) lo = std::min(lo, v), hi = std::max(hi, v);
+      int mid = 0;
+      for (float v : row) mid += v > lo + 0.2f * (hi - lo) && v < hi - 0.2f * (hi - lo);
+      return mid;
+    };
+    const auto live = r53_row(m, 0.35f);
+    t->live_shading = false;
+    t->touch();
+    m->touch();
+    const auto image = r53_row(m, 0.35f);
+    const int tl = transitions(live), ti = transitions(image);
+    std::printf("    in-between pixels across a row up close: %d live, %d from the 64-texel image\n", tl, ti);
+    CHECK(ti > 0);
+    CHECK(tl * 2 < ti);
+    /* Far away (a texel smaller than a pixel) both read the image: the same pixels. */
+    t->live_shading = true;
+    t->touch();
+    m->touch();
+    const auto far_live = r53_row(m, 30.0f, 64);
+    t->live_shading = false;
+    t->touch();
+    m->touch();
+    const auto far_image = r53_row(m, 30.0f, 64);
+    CHECK(far_live == far_image);
+  });
+
+  test("live textures: dragging a texture field changes the objects using it every frame (at 256), the set size on release", [] {
+    Editor ed;
+    r50_open(ed);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    if (!t) return;
+    t->width = t->height = 1024;
+    t->touch();
+    MaterialPtr m = make_material("noise", Vec3(1.0f));
+    m->base_map.path = t->asset_path + "#albedo";
+    m->touch();
+    r34_steps(ed, 3);
+    CHECK(m->textures().base && m->textures().base->width == 1024);
+    CHECK(m->textures().live[0] != nullptr);
+    const ui::Context &u = ed.ui_for_test();
+    const Recti row = ed.texture_ui_rect_for_test("field:L0 Detail");
+    CHECK(row.w > 0);
+    if (row.w <= 0) return;
+    const int lx = row.x - u.px(60), ly = row.y - u.row_h() / 2;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx, ly)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, lx, ly)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx + 30, ly)});
+    const size_t g1 = material_textures_generation();
+    const uint64_t v1 = m->textures().live[0] ? m->textures().live[0]->hash() : 0;
+    const int w1 = m->textures().base ? m->textures().base->width : 0;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx + 60, ly)});
+    const size_t g2 = material_textures_generation();
+    const uint64_t v2 = m->textures().live[0] ? m->textures().live[0]->hash() : 0;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, lx + 60, ly)});
+    r34_steps(ed, 3);
+    const int after = m->textures().base ? m->textures().base->width : 0;
+    std::printf("    during the drag: image %d wide, a new snapshot each frame %s; after %d\n", w1, v1 != v2 ? "yes" : "no", after);
+    CHECK(w1 == 256);
+    CHECK(g2 != g1 && v1 != v2);
+    CHECK(after == 1024);
+    CHECK(!procedural_texture_preview());
+  });
+
+  test("live textures: a drag's 256 preview keeps texel-sized filters their size (Edge Wear isn't 8x wider until release)", [] {
+    ProceduralTexture t;
+    apply_texture_preset(t, "Bricks");  // Brick, Noise, Edge Wear
+    t.width = t.height = 2048;
+    TexPlanes full, small;
+    t.evaluate(full);
+    t.evaluate(small, nullptr, 256);
+    auto mean = [](const TexPlanes &p) {
+      double s = 0;
+      for (const Vec3 &a : p.albedo) s += a.x + a.y + a.z;
+      return s / (3.0 * p.size());
+    };
+    const double mf = mean(full), ms = mean(small);
+    std::printf("    mean albedo: %.4f at 2048, %.4f in the 256 preview\n", mf, ms);
+    CHECK(small.w == 256);
+    CHECK(std::fabs(ms - mf) < 0.03 * mf);  // before: the wear 8 texels of 256 wide (8x), lightening the preview
+  });
+
+  test("live textures: stacked Warp and Tile layers evaluate at a point like the planes (and in linear time)", [] {
+    /* Four (their planes round to texels at each one; many more compound that rounding), then twelve timed. */
+    ProceduralTexture t;
+    t.width = t.height = 1024;  // (two Tiles make the bricks 4x smaller: finer planes keep the rounding small)
+    t.add("Brick");
+    for (int i = 0; i < 4; i++) t.add(i % 2 ? "Warp" : "Tile");
+    const R53Eval e = r53_eval(t);
+    ProceduralTexture t12 = t;
+    for (int i = 0; i < 8; i++) t12.add(i % 2 ? "Warp" : "Tile");
+    const R53Eval e12 = r53_eval(t12);
+    double sum = 0;
+    for (int y = 0; y < 1024; y += 7)
+      for (int x = 0; x < 1024; x += 7) {
+        const TexPoint q = e.live->at((x + 0.5f) / 1024, (y + 0.5f) / 1024);
+        sum += std::fabs(q.height - e.planes.height[(size_t)y * 1024 + x]);
+      }
+    const double mean = sum / (147.0 * 147.0);
+    ScopedTimer timer;
+    for (int i = 0; i < 1000; i++) (void)e12.live->at(i * 0.001f, 0.3f);
+    const double ms = timer.ms();
+    std::printf("    4 stacked Warp / Tile layers: mean difference %.4f; 12: %.1f us a point\n", mean, ms);
+    CHECK(mean < 0.05);
+    CHECK(ms < 200.0);  // 2^12 evaluations of the Brick a point without the shortcut (seconds for 1000)
+  });
+
+  test("live textures: an axis material's scale and Mirror wrapping keep the image where it is minified or can't be emulated", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    if (!t) return;
+    t->width = t->height = 64;
+    t->touch();
+    Material part;
+    part.name = "BrickPart";
+    part.base_map.path = t->asset_path + "#albedo";
+    part.mapping = (int)MaterialMapping::Box;
+    create_material_asset(part, "Assets/Materials/R53/BrickPart.mat");
+    MaterialPtr axis = make_material("axis", Vec3(1.0f));
+    axis->axis_mode = 2;  // Local
+    axis->axis_top = axis->axis_side = axis->axis_bottom = "Assets/Materials/R53/BrickPart.mat";
+    axis->touch();
+    SurfacePoint sp;
+    sp.position = sp.local_position = {0.37f, 0.5f, 0.21f};
+    sp.normal = sp.local_normal = sp.geo_normal = {0, 1, 0};
+    sp.live_textures = true;
+    sp.footprint = sp.world_footprint = 0.005f;  // 0.32 texels a pixel at scale 1: live
+    auto eval = [&](const Material &m, bool live) {
+      SurfacePoint q = sp;
+      q.live_textures = live;
+      return evaluate_material(m, m.textures(), q).albedo;
+    };
+    axis->axis_scale = 1.0f;
+    axis->touch();
+    CHECK(length(eval(*axis, true) - eval(*axis, false)) > 1e-4f);  // magnified: the live value differs from the image's
+    axis->axis_scale = 0.1f;  // ten tiles a metre: 3.2 texels a pixel, minified
+    axis->touch();
+    CHECK(length(eval(*axis, true) - eval(*axis, false)) < 1e-6f);  // the image (before: live, shimmering)
+    MaterialPtr mirror = make_material("mirror", Vec3(1.0f));
+    mirror->base_map.path = t->asset_path + "#albedo";
+    mirror->mapping = (int)MaterialMapping::Box;
+    mirror->wrap = (int)TexWrap::Mirror;
+    mirror->touch();
+    CHECK(length(eval(*mirror, true) - eval(*mirror, false)) < 1e-6f);
+  });
+
+  test("live textures: the 256 preview is per texture: dragging one leaves the others at their size", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr a = ed.new_texture_asset_for_test("Noise"), b = ed.new_texture_asset_for_test("Tiles");
+    if (!a || !b) return;
+    a->width = a->height = b->width = b->height = 1024;
+    a->touch();
+    b->touch();
+    procedural_texture_set_preview(a->asset_path, true);
+    a->touch();
+    const int wa = procedural_texture_output(*a, 0)->width, wb = procedural_texture_output(*b, 0)->width;
+    procedural_texture_clear_previews();
+    std::printf("    in preview: %d, the other: %d\n", wa, wb);
+    CHECK(wa == 256 && wb == 1024);
+    CHECK(!procedural_texture_preview());
+  });
+
+  test("live textures: Live Shading saves with the texture, NaN coordinates stay finite, a stack of filters alone works", [] {
+    ProceduralTexture t;
+    t.width = t.height = 64;
+    t.live_shading = false;
+    t.add("Levels");
+    t.add("Blur");
+    const R53Eval e = r53_eval(t);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const TexPoint q = e.live->at(nan, 1e30f);
+    CHECK(std::isfinite(q.height) && std::isfinite(q.albedo.x));
+    CHECK(std::isfinite(e.live->normal(-1e20f, nan).z));
+    const std::string text = save_texture_text(t);
+    ProceduralTexture b;
+    CHECK(load_texture_text(text, b));
+    CHECK(!b.live_shading && b.layers.size() == 2);
+  });
+}
+
+/* ===================================================================== */
+/* Round 54 (task 0032, ADR 0008 amended): every camera filter in the     */
+/* path tracers                                                            */
+/* ===================================================================== */
+
+/* A 2 m quad seen at a grazing angle from (0, 0.6, -2.2), 48 x 48: the camera both renderers use. */
+struct R54Cam {
+  Mat4 view = Mat4::look_at({0.0f, 0.6f, -2.2f}, {0, 0, 0}, {0, 1, 0});
+  Mat4 proj = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 20.0f);
+  int size = 48;
+};
+/* The quad lying back 60 degrees (so its far half is foreshortened), an unlit material. */
+static Mat4 r54_model() { return Mat4::rotate(Quat::euler({60, 0, 0})); }
+
+/* Linear RGB of the rasterizer (unlit: the material's colour) with the given stages. */
+static std::vector<Vec3> r54_raster(const MaterialPtr &m, const RasterOptions &stages) {
+  static auto quad = primitives::quad(2.0f);
+  R54Cam c;
+  std::vector<MaterialPtr> mats = {m};
+  Image img;
+  img.resize(c.size, c.size);
+  RenderTarget rt;
+  rt.attach(img, {0, 0, c.size, c.size});
+  rt.want_hdr = true;
+  Renderer3D r;
+  RasterOptions opt = stages;
+  opt.shade = ShadeMode::Deferred;
+  LightingEnv env;
+  env.view_transform = ViewTransform::Standard;
+  env.camera_pos = {0.0f, 0.6f, -2.2f};
+  r.begin(&rt, c.view, c.proj, env, opt);
+  r.clear(0xFF000000);
+  DrawItem it;
+  it.mesh = &quad->render_mesh_tangents();
+  it.model = r54_model();
+  it.materials = &mats;
+  it.double_sided = true;
+  r.add(it);
+  r.flush();
+  std::vector<Vec3> out((size_t)c.size * c.size);
+  for (size_t i = 0; i < out.size(); i++) {
+    if (!rt.hdr.empty() && rt.hdr[i].x >= 0.0f) out[i] = rt.hdr[i];
+    else {
+      const uint32_t px = img.pixels[i];
+      out[i] = Vec3(srgb_to_linear(((px >> 16) & 255) / 255.0f), srgb_to_linear(((px >> 8) & 255) / 255.0f), srgb_to_linear((px & 255) / 255.0f));
+    }
+  }
+  return out;
+}
+
+/* The path tracer's picture of the same, with the Retro stages given (and GPUs when asked). */
+static std::vector<Vec3> r54_trace(const MaterialPtr &m, const PTSettings::Retro &retro, std::vector<int> gpus = {}, int spp = 64) {
+  static auto quad = primitives::quad(2.0f);
+  R54Cam c;
+  std::vector<MaterialPtr> mats = {m};
+  Environment black;
+  black.mode = Environment::Color;
+  black.color = Vec3(0.0f);
+  PathTracer pt;
+  PTSettings st;
+  st.denoise = false;
+  st.use_embree = false;
+  st.max_bounces = 0;
+  st.view_transform = ViewTransform::Standard;
+  st.gpus = gpus;
+  st.use_cpu = gpus.empty();
+  st.retro = retro;
+  pt.set_settings(st);
+  pt.build({{&quad->render_mesh_tangents(), r54_model(), &mats}}, {}, black);
+  pt.set_camera(c.view, c.proj, c.size, c.size);
+  pt.render(1e9, spp);
+  if (!gpus.empty()) CHECK(pt.device_summary().find("GPU") != std::string::npos || pt.device_summary().find("NVIDIA") != std::string::npos ||
+                          pt.device_summary().find("AMD") != std::string::npos || pt.device_summary().find("Intel") != std::string::npos);
+  const auto rgb = pt.linear_rgb(false);
+  std::vector<Vec3> out((size_t)c.size * c.size);
+  for (size_t i = 0; i < out.size(); i++) out[i] = Vec3(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+  return out;
+}
+static double r54_diff(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  double d = 0;
+  for (size_t i = 0; i < a.size(); i++) d += std::fabs(a[i].x - b[i].x) + std::fabs(a[i].y - b[i].y) + std::fabs(a[i].z - b[i].z);
+  return d / a.size();
+}
+static PTSettings::Retro r54_retro() {
+  R54Cam c;
+  PTSettings::Retro r;
+  r.view_proj = c.proj * c.view;
+  r.width = r.height = c.size;
+  return r;
+}
+
+static void round54_tests() {
+  test("retro in the path tracer: affine (screen-linear) UVs as the rasterizer draws them on a quad at a grazing angle", [] {
+    MaterialPtr m = make_material("checker", {1, 1, 1});
+    m->unlit = true;
+    m->procedural = (int)Procedural::Checker;
+    m->procedural_color2 = {0, 0, 0};
+    m->procedural_scale = 6.0f;
+    RasterOptions affine;
+    affine.affine_uv = true;
+    const auto ra = r54_raster(m, affine), rp = r54_raster(m, RasterOptions{});
+    PTSettings::Retro retro = r54_retro();
+    retro.affine_uv = true;
+    const auto ta = r54_trace(m, retro), tp = r54_trace(m, r54_retro());
+    const double same = r54_diff(ta, ra), other = r54_diff(tp, ra), check = r54_diff(ra, rp);
+    std::printf("    mean |difference| to the affine raster: traced affine %.4f, traced perspective %.4f (raster affine vs perspective %.4f)\n", same, other, check);
+    CHECK(check > 0.05);         // the effect is visible at this angle
+    CHECK(same < 0.5 * other);   // the traced affine picture is the raster's, not the perspective one
+    if (gpu::available()) {
+      const auto ga = r54_trace(m, retro, {gpu::devices()[0].index});
+      const double g = r54_diff(ga, ta);
+      std::printf("    the GPU against the CPU: %.4f\n", g);
+      CHECK(g < 0.1 * std::max(0.05, other));
+    }
+  });
+
+  test("retro in the path tracer: the texture rules reach every hit (a 1-texel cap makes a textured quad one colour, CPU and GPU)", [] {
+    /* (The tracer averages many samples a pixel, so a Nearest or 64-texel look can't be compared pixel for pixel with
+     * the rasterizer's single sample; a 1-texel cap shows unmistakably whether the rules apply.) */
+    MaterialPtr m = make_material("grid", {1, 1, 1});
+    m->unlit = true;
+    m->procedural = (int)Procedural::UVGrid;
+    auto spread = [](const std::vector<Vec3> &img) {  // the colours' spread over the quad's middle
+      Vec3 lo(1e9f), hi(-1e9f);
+      for (int y = 18; y < 30; y++)
+        for (int x = 14; x < 34; x++) lo = vmin(lo, img[(size_t)y * 48 + x]), hi = vmax(hi, img[(size_t)y * 48 + x]);
+      return std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z});
+    };
+    PTSettings::Retro retro = r54_retro();
+    retro.tex.filter = (int)TexFilter::Closest;
+    retro.tex.max_size = 1;
+    retro.tex.mipmaps = false;
+    const float with = spread(r54_trace(m, retro, {}, 8)), without = spread(r54_trace(m, r54_retro(), {}, 8));
+    std::printf("    colour spread over the quad: %.4f with a 1-texel cap, %.4f without\n", with, without);
+    CHECK(with < 0.01f && without > 0.1f);
+    if (gpu::available()) {
+      const float g = spread(r54_trace(m, retro, {gpu::devices()[0].index}, 8));
+      std::printf("    the GPU with the cap: %.4f\n", g);
+      CHECK(g < 0.01f);
+    }
+  });
+
+  test("retro in the path tracer: the GPU takes the same capped mip level and filter as the CPU (Nearest and 3-point at 16 texels)", [] {
+    if (!gpu::available()) return;
+    MaterialPtr m = make_material("grid", {1, 1, 1});
+    m->unlit = true;
+    m->procedural = (int)Procedural::UVGrid;
+    for (int f : {(int)TexFilter::Closest, (int)TexFilter::ThreePoint}) {
+      PTSettings::Retro retro = r54_retro();
+      retro.tex.filter = f;
+      retro.tex.max_size = 16;
+      retro.tex.mipmaps = false;
+      const auto cpu = r54_trace(m, retro, {}, 16), gpu = r54_trace(m, retro, {gpu::devices()[0].index}, 16);
+      const auto plain = r54_trace(m, r54_retro(), {}, 16);
+      const double d = r54_diff(cpu, gpu), effect = r54_diff(cpu, plain);
+      std::printf("    filter %d at 16 texels: GPU vs CPU %.4f (the cap's own effect %.4f)\n", f, d, effect);
+      CHECK(effect > 0.02);
+      CHECK(d < 0.2 * effect);
+    }
+  });
+
+  test("retro in the path tracer: screen-door transparency is a 2 x 2 checkerboard, solid and see-through", [] {
+    MaterialPtr m = make_material("glass red", {1, 0, 0});
+    m->unlit = true;
+    m->surface = (int)MaterialSurface::Transparent;
+    m->alpha = 0.5f;
+    PTSettings::Retro retro = r54_retro();
+    retro.screen_door = true;
+    auto pattern = [&](const std::vector<Vec3> &img) {
+      /* Over the quad's middle: pixels of each checkerboard colour, solid red vs black. */
+      int solid_even = 0, hole_odd = 0, n_even = 0, n_odd = 0;
+      for (int y = 18; y < 30; y++)
+        for (int x = 14; x < 34; x++) {
+          const Vec3 c = img[(size_t)y * 48 + x];
+          if (((x + y) & 1) == 0) n_even++, solid_even += c.x > 0.95f;
+          else n_odd++, hole_odd += c.x < 0.05f;
+        }
+      return std::pair<double, double>((double)solid_even / n_even, (double)hole_odd / n_odd);
+    };
+    const auto door = pattern(r54_trace(m, retro, {}, 16));
+    const auto blend = pattern(r54_trace(m, r54_retro(), {}, 16));
+    std::printf("    with the door: %.0f%% of even pixels solid, %.0f%% of odd ones see-through; without: %.0f%% / %.0f%%\n",
+                100 * door.first, 100 * door.second, 100 * blend.first, 100 * blend.second);
+    CHECK(door.first > 0.95 && door.second > 0.95);
+    CHECK(blend.first < 0.5);  // alpha blending: half red
+    /* Nearly clear (alpha 0.05): the rasterizer's door drops it on its solid squares too. */
+    m->alpha = 0.05f;
+    m->touch();
+    const auto clear = pattern(r54_trace(m, retro, {}, 16));
+    std::printf("    alpha 0.05 with the door: %.0f%% of even pixels solid\n", 100 * clear.first);
+    CHECK(clear.first < 0.05);
+    m->alpha = 0.5f;
+    m->touch();
+    if (gpu::available()) {
+      const auto g = pattern(r54_trace(m, retro, {gpu::devices()[0].index}, 16));
+      std::printf("    the GPU: %.0f%% / %.0f%%\n", 100 * g.first, 100 * g.second);
+      CHECK(g.first > 0.95 && g.second > 0.95);
+    }
+  });
+
+  test("retro in the path tracer: vertex snapping moves a path-traced F12 render's silhouette onto the rasterized one's grid", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    for (const char *n : {"Plane", "Sphere", "Cylinder", "Utah Teapot"})
+      if (GameObject *g = ed.scene().find_by_name(n)) g->active = false;
+    ed.command("set Render.ResolutionX 320");
+    ed.command("set Render.ResolutionY 240");
+    ed.command("set Render.Samples 4");
+    ed.command("set Render.Denoise false");
+    ed.command("device cpu");
+    Camera *cam = by_name(ed.scene(), "Main Camera")->camera();
+    cam->clear_flags = 1;  // solid black: the silhouette is what isn't black
+    cam->background = {0, 0, 0};
+    ed.command("select Main Camera");
+    ed.command("filter add Retro Console");
+    auto *cf = by_name(ed.scene(), "Main Camera")->get<CameraFilters>();
+    CHECK(cf && !cf->effects.empty());
+    if (!cf || cf->effects.empty()) return;
+    auto *retro = static_cast<RetroConsoleFilter *>(cf->effects[0].get());
+    retro->width = 80;  // a coarse grid: 4 output pixels a cell
+    retro->height = 60;
+    retro->snap_grid = 4.0f;
+    retro->affine_textures = false;
+    auto mask = [&](const char *engine) {
+      ed.command(std::string("set Render.RenderEngine ") + engine);
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      std::vector<uint8_t> m(img.pixels.size());
+      for (size_t i = 0; i < m.size(); i++) m[i] = (img.pixels[i] & 0xFFFFFF) > 0x080808;
+      return m;
+    };
+    auto differ = [](const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
+      size_t d = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) d += a[i] != b[i];
+      return d;
+    };
+    const auto raster = mask("Rasterized"), traced = mask("Path");
+    retro->vertex_snap = false;
+    const auto traced_free = mask("Path"), raster_free = mask("Rasterized");
+    size_t on = 0;
+    for (uint8_t v : raster) on += v;
+    const size_t d_snap = differ(traced, raster), d_free = differ(traced_free, raster), d_effect = differ(raster_free, raster);
+    std::printf("    silhouette pixels %zu; traced vs raster (snapped): %zu differ; traced without the snap: %zu (raster with / without: %zu)\n", on, d_snap, d_free,
+                d_effect);
+    CHECK(on > 500);
+    CHECK(d_effect > 0);
+    CHECK(d_snap <= on / 50);  // the same silhouette (measured: 0 pixels differ)
+    CHECK(d_snap < d_free);
+  });
+}
+
+/* ===================================================================== */
+/* Round 55 (task 0033): camera composition guides                        */
+/* ===================================================================== */
+
+/* A Game view in a 2 x 3 layout, the camera's guides pure red and opaque (so a test can find them). */
+static Camera *r55_open(Editor &ed) {
+  r34_open(ed);
+  Camera *c = by_name(ed.scene(), "Main Camera")->camera();
+  c->guide_color = {1, 0, 0};
+  c->guide_opacity = 1.0f;
+  c->guide_thirds = false;
+  return c;
+}
+/* Share of a vertical (or horizontal) line's pixels inside the frame that are the guides' red. */
+static double r55_red_line(const Editor &ed, const Recti &f, bool vertical, int at) {
+  const Image &fb = ed.framebuffer();
+  int red = 0, n = 0;
+  const int a = vertical ? f.y + 2 : f.x + 2, b = vertical ? f.bottom() - 2 : f.right() - 2;
+  for (int k = a; k < b; k++) {
+    const int x = vertical ? at : k, y = vertical ? k : at;
+    if (x < 0 || y < 0 || x >= fb.width || y >= fb.height) continue;
+    const uint32_t c = fb.pixels[(size_t)y * fb.width + x];
+    red += ((c >> 16) & 255) > 200 && ((c >> 8) & 255) < 60 && (c & 255) < 60;
+    n++;
+  }
+  return n ? (double)red / n : 0.0;
+}
+/* Red pixels anywhere in the frame. */
+static size_t r55_red_pixels(const Editor &ed, const Recti &f) {
+  const Image &fb = ed.framebuffer();
+  size_t n = 0;
+  for (int y = std::max(0, f.y); y < std::min(fb.height, f.bottom()); y++)
+    for (int x = std::max(0, f.x); x < std::min(fb.width, f.right()); x++) {
+      const uint32_t c = fb.pixels[(size_t)y * fb.width + x];
+      n += ((c >> 16) & 255) > 200 && ((c >> 8) & 255) < 60 && (c & 255) < 60;
+    }
+  return n;
+}
+
+static void round55_tests() {
+  test("camera guides: rule of thirds lines at a third and two thirds of the Game view's camera frame, letterboxed too", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    ed.command("guides thirds on");
+    r34_steps(ed, 2);
+    CHECK(c->show_guides && c->guide_thirds);
+    Recti f = ed.game_guides_frame_for_test();
+    CHECK(f.w > 50 && f.h > 50);
+    const int x3 = f.x + (int)std::lround(f.w / 3.0), y3 = f.y + (int)std::lround(f.h * 2.0 / 3.0);
+    auto best = [&](bool vertical, int at) {  // (the line may land on either pixel of a boundary)
+      return std::max({r55_red_line(ed, f, vertical, at - 1), r55_red_line(ed, f, vertical, at), r55_red_line(ed, f, vertical, at + 1)});
+    };
+    const double v3 = best(true, x3), h23 = best(false, y3), mid = r55_red_line(ed, f, true, f.x + f.w / 2);
+    std::printf("    frame %d x %d at %d,%d: red along x = w/3 %.0f%%, y = 2h/3 %.0f%%, x = w/2 %.0f%%\n", f.w, f.h, f.x, f.y, 100 * v3, 100 * h23, 100 * mid);
+    CHECK(v3 > 0.9 && h23 > 0.9 && mid < 0.1);
+    /* A 2.39:1 camera letterboxes the Game view: the lines follow the frame, not the view. */
+    c->aspect_mode = 4;  // (an aspect other than the render's)
+    ed.command("set Camera.AspectRatio 2.39:1");
+    r34_steps(ed, 2);
+    const Recti f2 = ed.game_guides_frame_for_test();
+    std::printf("    letterboxed frame %d x %d\n", f2.w, f2.h);
+    CHECK(f2.w != f.w || f2.h != f.h);
+    CHECK(std::max({r55_red_line(ed, f2, false, f2.y + (int)std::lround(f2.h / 3.0) - 1), r55_red_line(ed, f2, false, f2.y + (int)std::lround(f2.h / 3.0)),
+                    r55_red_line(ed, f2, false, f2.y + (int)std::lround(f2.h / 3.0) + 1)}) > 0.9);
+  });
+
+  test("camera guides: each one toggles on its own, Show Guides off draws none, and renders and the render hash ignore them", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    const uint64_t h0 = hash_component(*c);
+    r34_steps(ed, 2);
+    const Recti f = ed.game_guides_frame_for_test();
+    const size_t none = r55_red_pixels(ed, f);
+    struct G {
+      const char *cmd;
+      bool *flag;
+    } guides[] = {{"thirds", &c->guide_thirds},     {"center", &c->guide_center},       {"diagonal", &c->guide_center_diagonal},
+                  {"golden", &c->guide_golden},     {"goldena", &c->guide_golden_tri_a}, {"goldenb", &c->guide_golden_tri_b},
+                  {"harmonya", &c->guide_harmony_a}, {"harmonyb", &c->guide_harmony_b},  {"title", &c->guide_title_safe},
+                  {"action", &c->guide_action_safe}};
+    int drawn = 0;
+    for (const G &g : guides) {
+      ed.command(std::string("guides ") + g.cmd + " on");
+      r34_steps(ed, 2);
+      const size_t n = r55_red_pixels(ed, f);
+      drawn += n > none + 50;
+      if (n <= none + 50) std::printf("    %s drew nothing\n", g.cmd);
+      ed.command(std::string("guides ") + g.cmd + " off");
+    }
+    CHECK(drawn == 10);
+    CHECK(hash_component(*c) == h0);  // guides don't touch the render hash: toggling them never re-renders
+    ed.command("guides thirds on");
+    ed.command("guides off");
+    r34_steps(ed, 2);
+    CHECK(r55_red_pixels(ed, f) == none);
+    /* F12 (rasterized) with the guides on is the same picture as with them off. */
+    ed.command("set Render.RenderEngine Rasterized");
+    ed.command("set Render.ResolutionX 160");
+    ed.command("set Render.ResolutionY 90");
+    ed.command("render");
+    const std::vector<uint32_t> off = ed.render_image_for_test().pixels;
+    ed.command("guides thirds on");
+    ed.command("guides title on");
+    ed.command("render");
+    CHECK(ed.render_image_for_test().pixels == off);
+  });
+
+  test("camera guides: the Game view's Guides menu, clicked with the mouse, turns Thirds on (the menu reads its camera when it runs)", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    CHECK(!c->show_guides && !c->guide_thirds);
+    const Recti b = ed.game_guides_rect_for_test("button");
+    CHECK(b.w > 0);
+    if (b.w <= 0) return;
+    auto click = [&](const Recti &r) {
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x, y)});
+    };
+    click(b);
+    ed.step_frame_headless();
+    const Recti t = ed.game_guides_rect_for_test("Thirds");
+    CHECK(t.w > 0);
+    if (t.w <= 0) return;
+    click(t);
+    r34_steps(ed, 2);
+    c = by_name(ed.scene(), "Main Camera")->camera();
+    std::printf("    after clicking Guides > Thirds: shown %d, thirds %d\n", (int)c->show_guides, (int)c->guide_thirds);
+    CHECK(c->show_guides && c->guide_thirds);
+    const Recti f = ed.game_guides_frame_for_test();
+    CHECK(r55_red_pixels(ed, f) > (size_t)f.w);  // the lines are drawn
+  });
+
+  test("camera guides: the golden and harmonious triangles are Blender's construction (endpoints on a 16:9 frame)", [] {
+    Camera c;
+    c.show_guides = true;
+    c.guide_thirds = false;
+    const Recti f{0, 0, 1600, 900};
+    auto lines_of = [&](bool Camera::*flag) {
+      Camera k = c;
+      k.*flag = true;
+      return camera_guide_lines(k, f);
+    };
+    auto near = [](Vec2 a, Vec2 b) { return length(a - b) < 0.5f; };
+    /* Golden Triangle A (Blender: golden = false, ofs = h^2 / w = 506.25): the rising diagonal, from the bottom-right
+     * corner to x = w - ofs on the top edge, from the top-left to x = ofs on the bottom edge. */
+    const auto g = lines_of(&Camera::guide_golden_tri_a);
+    CHECK(g.size() == 3);
+    if (g.size() == 3) {
+      CHECK(near(g[0].first, {0, 900}) && near(g[0].second, {1600, 0}));
+      CHECK(near(g[1].first, {1600, 900}) && near(g[1].second, {1600 - 506.25f, 0}));
+      CHECK(near(g[2].first, {0, 0}) && near(g[2].second, {506.25f, 900}));
+    }
+    /* Harmonious Triangle A (golden = true, ofs = 0.381966 w = 611.15). */
+    const auto hh = lines_of(&Camera::guide_harmony_a);
+    CHECK(hh.size() == 3);
+    if (hh.size() == 3) {
+      CHECK(near(hh[1].second, {1600 - 611.146f, 0}) && near(hh[2].second, {611.146f, 900}));
+    }
+    /* B mirrors A top to bottom; a zero safe margin draws nothing. */
+    const auto gb = lines_of(&Camera::guide_golden_tri_b);
+    CHECK(gb.size() == 3 && near(gb[0].first, {0, 0}) && near(gb[0].second, {1600, 900}));
+    Camera z = c;
+    z.guide_title_safe = true;
+    z.title_safe_x = z.title_safe_y = 0.0f;
+    CHECK(camera_guide_lines(z, f).empty());
+  });
+
+  test("camera guides: Title and Action Safe at Blender's margins (a fraction of half the frame per side)", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    ed.command("guides title on");
+    r34_steps(ed, 2);
+    const Recti f = ed.game_guides_frame_for_test();
+    const int top = f.y + (int)std::lround(c->title_safe_y * f.h * 0.5f), left = f.x + (int)std::lround(c->title_safe_x * f.w * 0.5f);
+    const Recti inner{left, top, f.w - 2 * (left - f.x), f.h - 2 * (top - f.y)};
+    auto near_line = [&](bool vertical, int at, const Recti &r) {
+      return std::max({r55_red_line(ed, r, vertical, at - 1), r55_red_line(ed, r, vertical, at), r55_red_line(ed, r, vertical, at + 1)});
+    };
+    const double t = near_line(false, top, inner), l = near_line(true, left, inner);
+    std::printf("    title safe: top edge %.0f%%, left edge %.0f%% red\n", 100 * t, 100 * l);
+    CHECK(t > 0.9 && l > 0.9);
+  });
+
+  test("camera guides: saved with the scene, undone, and set from the Inspector's fields and the console", [] {
+    Editor ed;
+    Camera *c = r55_open(ed);
+    ed.command("select Main Camera");
+    ed.step_frame_headless();
+    ed.command("guides golden on");
+    ed.step_frame_headless();
+    CHECK(c->show_guides && c->guide_golden);
+    ed.command("set Camera.TitleSafeX 0.2");
+    ed.step_frame_headless();
+    ed.command("set Camera.GuideOpacity 0.8");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    c = by_name(ed.scene(), "Main Camera")->camera();  // (undo restores a copy of the scene: a new Camera)
+    std::printf("    after two undos: title safe x %.2f, opacity %.2f, golden %d\n", c->title_safe_x, c->guide_opacity, (int)c->guide_golden);
+    CHECK(std::fabs(c->title_safe_x - 0.1f) < 1e-6f && std::fabs(c->guide_opacity - 1.0f) < 1e-6f && c->guide_golden);
+    ed.command("redo");
+    ed.step_frame_headless();
+    ed.command("redo");
+    ed.step_frame_headless();
+    Scene &sc = ed.scene();
+    const std::string path = fs::join(fs::join(scratch_project(), "Assets/Scenes"), "R55_Guides.scene");
+    CHECK(save_scene(sc, path));
+    Scene t;
+    std::string err;
+    CHECK(load_scene(path, t, err));
+    Camera *tc = t.find_by_name("Main Camera") ? t.find_by_name("Main Camera")->camera() : nullptr;
+    CHECK(tc && tc->show_guides && tc->guide_golden && std::fabs(tc->guide_opacity - 0.8f) < 1e-5f);
+    std::remove(path.c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 56 (task 0034): the Research window retired; papers in Learn     */
+/* ===================================================================== */
+
+static void round56_tests() {
+  test("references: an old layout holding the Research window loads without it, and opening it shows Learn > References", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));  // not in the default layout
+    /* A layout saved before: Research beside the Console, and alone in an area of its own. */
+    ed.command("layout H(0.5,V(0.5,L(0,1:0),L(5,7:1)),V(0.5,L(3:0),L(7:0)))");
+    ed.step_frame_headless();
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    CHECK(ed.window_docked_for_test(WindowKind::Console) && ed.window_docked_for_test(WindowKind::Inspector));
+    for (const char *preset : {"Default", "2 by 3", "Tall", "Wide", "Learning"}) {
+      ed.command(std::string("layout ") + preset);
+      CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    }
+    ed.command("window Research");
+    ed.step_frame_headless();
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    CHECK(ed.window_docked_for_test(WindowKind::Learn));
+    CHECK(std::string(lesson(ed.lesson_for_test()).title) == "References");
+    ed.command("research");
+    CHECK(std::string(lesson(ed.lesson_for_test()).title) == "References");
+    /* Ctrl+8 (its old shortcut) opens References, from any lesson. */
+    ed.command("lesson 3");
+    platform::Event k8;
+    k8.type = platform::EventType::KeyDown;
+    k8.key = platform::KEY_8;
+    k8.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({k8});
+    ed.step_frame_headless();
+    CHECK(std::string(lesson(ed.lesson_for_test()).title) == "References");
+    /* Research in the root area (beside the Console), and a layout that was only Research. */
+    ed.command("layout L(5,7:1)");
+    CHECK(!ed.window_docked_for_test(WindowKind::Research) && ed.window_docked_for_test(WindowKind::Console));
+    ed.command("layout L(7:0)");
+    CHECK(!ed.window_docked_for_test(WindowKind::Research) && ed.window_docked_for_test(WindowKind::Scene));  // the default
+  });
+
+  test("references: every feature built from a paper is cited in the References lesson, and its Try-it button runs", [] {
+    int idx = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "References") idx = i;
+    CHECK(idx >= 0);
+    if (idx < 0) return;
+    const std::string body = lesson(idx).body;
+    int missing = 0;
+    for (const auto &f : research::features()) {
+      /* The citation's first author's surname (the paper behind a feature; utilities cite none). */
+      std::string c = f.citation;
+      const size_t comma = c.find(',');
+      const std::string author = comma == std::string::npos ? c : c.substr(0, comma);
+      if (author.empty() || f.status == "utility") continue;  // (a tool, no paper)
+      if (body.find(author) == std::string::npos) {
+        std::printf("    not cited: %s (%s)\n", f.name.c_str(), f.citation.c_str());
+        missing++;
+      }
+    }
+    CHECK(missing == 0);
+    for (const char *paper : {"Taubin", "Catmull", "Thiedemann", "conformal maps", "Walter", "Karis", "Heitz", "Perlin", "Hosek"})
+      CHECK(body.find(paper) != std::string::npos);
+    /* The Taubin Try-it button: a noisy sphere smoothed (the mesh changes). */
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Sphere");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>());
+    if (!g || !g->get<MeshFilter>()) return;
+    ed.command("meshop research:surface_noise");
+    const std::vector<Vec3> noisy = g->get<MeshFilter>()->mesh->positions;
+    ed.command("meshop research:taubin_smoothing");
+    CHECK(g->get<MeshFilter>()->mesh->positions != noisy);
+  });
+
+  test("references: dropping a paper onto the editor copies nothing into the project (no research folder)", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const std::string src = fs::join(scratch_project(), "R56_paper.pdf");
+    {
+      std::FILE *f = std::fopen(src.c_str(), "wb");
+      if (f) {
+        std::fputs("%PDF-1.4 test", f);
+        std::fclose(f);
+      }
+    }
+    platform::Event drop;
+    drop.type = platform::EventType::Drop;
+    drop.paths = {src};
+    ed.step_frame_headless({drop});
+    ed.step_frame_headless();
+    CHECK(!fs::exists(fs::join(scratch_project(), "research/papers/R56_paper.pdf")));
+    CHECK(!ed.window_docked_for_test(WindowKind::Research));
+    std::remove(src.c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 57 (task 0035): transparent backgrounds in renders               */
+/* ===================================================================== */
+
+/* The default scene's Cube alone (no floor), rendered at 160 x 90 with the engine given. */
+static const Image &r57_render(Editor &ed, const char *engine, bool transparent) {
+  ed.command(std::string("set Render.RenderEngine ") + engine);
+  ed.command(std::string("set Render.Transparent ") + (transparent ? "true" : "false"));
+  ed.command("render");
+  for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+  return ed.render_image_for_test();
+}
+static void r57_open(Editor &ed) {
+  ed.init_headless(900, 600);
+  ed.step_frame_headless();
+  for (const char *n : {"Plane", "Sphere", "Cylinder", "Utah Teapot"})
+    if (GameObject *g = ed.scene().find_by_name(n)) g->active = false;
+  ed.command("set Render.ResolutionX 160");
+  ed.command("set Render.ResolutionY 90");
+  ed.command("set Render.Samples 16");
+  ed.command("set Render.Denoise false");
+  ed.command("device cpu");
+}
+static int r57_alpha(const Image &img, int x, int y) { return (int)(img.pixels[(size_t)y * img.width + x] >> 24); }
+
+static void round57_tests() {
+  test("transparent film: rasterized and path traced, the background's alpha is 0, the cube's 255, its edges between", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &img = r57_render(ed, engine, true);
+      CHECK(img.width == 160 && img.height == 90);
+      int zero = 0, full = 0, part = 0;
+      for (uint32_t c : img.pixels) {
+        const int a = (int)(c >> 24);
+        zero += a == 0, full += a == 255, part += a > 0 && a < 255;
+      }
+      std::printf("    %s: corner alpha %d, middle %d; %d transparent, %d solid, %d partial pixels\n", engine, r57_alpha(img, 1, 1),
+                  r57_alpha(img, 80, 45), zero, full, part);
+      CHECK(r57_alpha(img, 1, 1) == 0 && r57_alpha(img, 158, 88) == 0);
+      CHECK(r57_alpha(img, 80, 45) == 255);
+      CHECK(zero > 1000 && full > 100 && part > 0);
+    }
+    /* The GPU's coverage, as the CPU's. */
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const Image &g = r57_render(ed, "Path", true);
+      std::printf("    GPU: corner alpha %d, middle %d\n", r57_alpha(g, 1, 1), r57_alpha(g, 80, 45));
+      CHECK(r57_alpha(g, 1, 1) == 0 && r57_alpha(g, 80, 45) == 255);
+      ed.command("device cpu");
+    }
+    /* Off: every pixel opaque, as before. */
+    const Image &off = r57_render(ed, "Rasterized", false);
+    bool all = true;
+    for (uint32_t c : off.pixels) all = all && (c >> 24) == 255;
+    CHECK(all);
+  });
+
+  test("transparent film: a 50 % see-through quad gives alpha about 128 (rasterized and path traced)", [] {
+    /* (A single surface: a closed see-through cube is two, which the path tracer counts as 75 % and the rasterizer,
+     * culling the far face, as 50 %.) */
+    Editor ed;
+    r57_open(ed);
+    if (GameObject *cube = ed.scene().find_by_name("Cube")) cube->active = false;
+    ed.command("create Quad");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 1, 0});
+    g->set_local_scale({3, 3, 3});
+    g->set_world_rotation(by_name(ed.scene(), "Main Camera")->world_rotation());  // facing the camera
+    ed.command("material Transparent");
+    CHECK(g && g->get<MeshRenderer>() && !g->get<MeshRenderer>()->materials.empty());
+    if (!g || !g->get<MeshRenderer>() || g->get<MeshRenderer>()->materials.empty()) return;
+    MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+    m->alpha = 0.5f;
+    m->double_sided = true;
+    m->touch();
+    ed.command("set Render.Samples 256");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &img = r57_render(ed, engine, true);
+      double sum = 0;  // the mean over the middle (the quad covers it; the tracer's alpha is a noisy estimate)
+      for (int y = 40; y < 50; y++)
+        for (int x = 75; x < 85; x++) sum += r57_alpha(img, x, y);
+      const double a = sum / 100.0;
+      std::printf("    %s: the middle's alpha %.1f\n", engine, a);
+      CHECK(a > 112 && a < 144);
+    }
+  });
+
+  test("transparent film: a glass sphere is covered (alpha 255) in a path-traced render, CPU and GPU, and shows the world through it", [] {
+    Editor ed;
+    r57_open(ed);
+    if (GameObject *cube = ed.scene().find_by_name("Cube")) cube->active = false;
+    ed.command("create Sphere");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 1, 0});
+    ed.command("material Glass");
+    std::vector<const char *> devices = {"cpu"};
+    if (gpu::available()) devices.push_back("gpu");
+    for (const char *dev : devices) {
+      ed.command(std::string("device ") + dev);
+      const Image &img = r57_render(ed, "Path", true);
+      const uint32_t c = img.pixels[(size_t)45 * img.width + 80];
+      std::printf("    %s: the sphere's middle alpha %u, colour %06x; corner alpha %d\n", dev, c >> 24, c & 0xFFFFFF, r57_alpha(img, 1, 1));
+      CHECK((c >> 24) == 255);
+      CHECK((c & 0xFFFFFF) != 0);  // the world seen through it, not the empty background
+      CHECK(r57_alpha(img, 1, 1) == 0);
+    }
+    ed.command("device cpu");
+  });
+
+  test("transparent film: a Bloom filter doesn't make a rasterized cube see-through, and an outline keeps its alpha in a filtered trace", [] {
+    Editor ed;
+    r57_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Bloom");
+    const Image &img = r57_render(ed, "Rasterized", true);
+    int solid_inside = 0, n = 0;
+    for (int y = 40; y < 50; y++)
+      for (int x = 75; x < 85; x++) n++, solid_inside += r57_alpha(img, x, y) == 255;
+    std::printf("    Bloom: %d of %d of the cube's middle pixels opaque, corner alpha %d\n", solid_inside, n, r57_alpha(img, 1, 1));
+    CHECK(solid_inside == n);
+    CHECK(r57_alpha(img, 1, 1) == 0);
+    /* An Edge Outline in a filtered path-traced render: its lines (drawn over the background beside the cube) are
+     * opaque, as in the rasterizer. */
+    ed.command("filter remove 0");
+    ed.command("filter add Edge Outline");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &o = r57_render(ed, engine, true);
+      int dark_opaque = 0;
+      for (uint32_t c : o.pixels) dark_opaque += (c >> 24) == 255 && (c & 0xFFFFFF) < 0x202020;
+      std::printf("    %s with an Edge Outline: %d opaque dark (outline) pixels\n", engine, dark_opaque);
+      CHECK(dark_opaque > 40);
+    }
+  });
+
+  test("transparent film: the PNG keeps the alpha (and opens with it), a JPEG is composited, off writes an opaque PNG", [] {
+    Editor ed;
+    r57_open(ed);
+    r57_render(ed, "Rasterized", true);
+    const std::string base = fs::join(scratch_project(), "R57_render");
+    std::string written;
+    CHECK(ed.write_render_file_for_test(base, &written));
+    Bitmap b;
+    std::string err;
+    CHECK(load_image(written, b, err));
+    CHECK(b.width == 160 && b.height == 90);
+    if (b.width == 160 && b.height == 90) {
+      std::printf("    PNG alpha: corner %d, middle %d\n", b.rgba8[(1 * 160 + 1) * 4 + 3], b.rgba8[(45 * 160 + 80) * 4 + 3]);
+      CHECK(b.rgba8[(1 * 160 + 1) * 4 + 3] == 0 && b.rgba8[(45 * 160 + 80) * 4 + 3] == 255);
+    }
+    std::remove(written.c_str());
+    r57_render(ed, "Rasterized", false);
+    CHECK(ed.write_render_file_for_test(base, &written));
+    CHECK(load_image(written, b, err));
+    if (b.width == 160) CHECK(b.rgba8[(1 * 160 + 1) * 4 + 3] == 255);
+    std::remove(written.c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 58 (task 0036, ADR 0019): bake textures onto a mesh              */
+/* ===================================================================== */
+
+/* A baked image's texel at a baked UV (rows top to bottom, as textures are sampled). */
+static uint32_t r58_at(const std::vector<uint32_t> &img, int size, Vec2 uv) {
+  const int x = std::max(0, std::min(size - 1, (int)std::floor(uv.x * size)));
+  const int y = std::max(0, std::min(size - 1, (int)std::floor((1.0f - uv.y) * size)));
+  return img[(size_t)y * size + x];
+}
+static Vec3 r58_rgb(uint32_t c) { return Vec3((c >> 16 & 255) / 255.0f, (c >> 8 & 255) / 255.0f, (c & 255) / 255.0f); }
+/* Face f's centre in the baked UVs (the corners' average: a convex face's centre is inside its chart). */
+static Vec2 r58_face_uv(const Mesh &m, const TextureBakeResult &r, size_t f) {
+  Vec2 s;
+  const uint32_t n = m.face_size(f);
+  for (uint32_t k = 0; k < n; k++) s = s + r.uvs[m.face_offsets[f] + k];
+  return s / (float)n;
+}
+/* The colour a material shows (sRGB 0..1) where a point of the original surface has original UV q: found by the
+ * triangle holding q, and that point's baked UV. */
+static bool r58_baked_uv(const Mesh &m, const TextureBakeResult &r, Vec2 q, Vec2 &out) {
+  const RenderMesh &rm = m.render_mesh();
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    Vec2 a[3], b[3];
+    for (int k = 0; k < 3; k++) a[k] = m.uvs[rm.tri_corner[t * 3 + k]], b[k] = r.uvs[rm.tri_corner[t * 3 + k]];
+    const float d = (a[1].x - a[0].x) * (a[2].y - a[0].y) - (a[2].x - a[0].x) * (a[1].y - a[0].y);
+    if (std::fabs(d) < 1e-12f) continue;
+    const float w1 = ((q.x - a[0].x) * (a[2].y - a[0].y) - (a[2].x - a[0].x) * (q.y - a[0].y)) / d;
+    const float w2 = ((a[1].x - a[0].x) * (q.y - a[0].y) - (q.x - a[0].x) * (a[1].y - a[0].y)) / d;
+    if (w1 < -1e-5f || w2 < -1e-5f || w1 + w2 > 1.0f + 1e-5f) continue;
+    out = b[0] * (1.0f - w1 - w2) + b[1] * w1 + b[2] * w2;
+    return true;
+  }
+  return false;
+}
+static float r58_to_srgb(float v) { return linear_to_srgb(std::max(0.0f, std::min(1.0f, v))); }
+static bool r58_same(const std::vector<Vec2> &a, const std::vector<Vec2> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (a[i].x != b[i].x || a[i].y != b[i].y) return false;
+  return true;
+}
+
+static void r58_forget_baked(const std::string &name) {
+  for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"})
+    std::remove(resolve_asset_path("Assets/Textures/Baked/" + name + m).c_str());
+  std::remove(resolve_asset_path("Assets/Materials/" + name + " Baked.mat").c_str());
+}
+
+static void round58_tests() {
+  test("texture bake: a cube with a different material on each face bakes each colour at its face's centre, on one atlas", [] {
+    MeshPtr cube = primitives::cube();
+    Mesh &m = *mesh_make_mutable(cube);
+    m.face_material.assign(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++) m.face_material[f] = (int32_t)f;
+    m.touch();
+    const Vec3 cols[6] = {{0.9f, 0.1f, 0.1f}, {0.1f, 0.9f, 0.1f}, {0.1f, 0.1f, 0.9f}, {0.9f, 0.9f, 0.1f}, {0.1f, 0.9f, 0.9f}, {0.9f, 0.1f, 0.9f}};
+    std::vector<MaterialPtr> mats;
+    for (int k = 0; k < 6; k++) mats.push_back(make_material("F" + std::to_string(k), cols[k]));
+    TextureBakeSettings s;
+    s.size = 256;
+    const TextureBakeResult r = bake_textures(m, Mat4::identity(), mats, s);
+    CHECK(r.size == 256 && r.albedo.size() == 256u * 256u && r.uvs.size() == m.corner_verts.size());
+    std::printf("    %zu of %d texels covered\n", r.texels, 256 * 256);
+    CHECK(r.texels > 256 * 256 / 5);
+    for (Vec2 u : r.uvs) CHECK(u.x >= 0.0f && u.x <= 1.0f && u.y >= 0.0f && u.y <= 1.0f);
+    int right = 0;
+    for (size_t f = 0; f < m.face_count() && f < 6; f++) {
+      const Vec3 got = r58_rgb(r58_at(r.albedo, r.size, r58_face_uv(m, r, f)));
+      const Vec3 want(r58_to_srgb(cols[f].x), r58_to_srgb(cols[f].y), r58_to_srgb(cols[f].z));
+      const float err = std::max({std::fabs(got.x - want.x), std::fabs(got.y - want.y), std::fabs(got.z - want.z)});
+      right += err < 2.5f / 255.0f;
+      if (err >= 2.5f / 255.0f) std::printf("    face %zu: baked %.3f %.3f %.3f, wanted %.3f %.3f %.3f\n", f, got.x, got.y, got.z, want.x, want.y, want.z);
+    }
+    CHECK(right == 6);
+    /* Roughness and metallic hold the materials' values (0.5, 0); the normal map is flat. */
+    const uint32_t rough = r58_at(r.roughness, r.size, r58_face_uv(m, r, 2)), metal = r58_at(r.metallic, r.size, r58_face_uv(m, r, 2));
+    CHECK(std::abs((int)(rough & 255) - 128) <= 1 && (metal & 255) == 0);
+  });
+
+  test("texture bake: a checker on a plane's UVs bakes the colour the renderer shows at every cell centre", [] {
+    MeshPtr plane = primitives::plane(2.0f, 1);
+    CHECK(plane->has_uvs());
+    MaterialPtr mat = make_material("Checker", Vec3(0.9f, 0.85f, 0.2f));
+    mat->procedural = (int)Procedural::Checker;
+    mat->procedural_scale = 4.0f;
+    mat->procedural_color2 = Vec3(0.05f, 0.1f, 0.6f);
+    TextureBakeSettings s;
+    s.size = 256;
+    const TextureBakeResult r = bake_textures(*plane, Mat4::translate({1, 2, 3}), {mat}, s);
+    int checked = 0, right = 0;
+    for (int j = 0; j < 8; j++)
+      for (int i = 0; i < 8; i++) {
+        const Vec2 q((i + 0.5f) / 8.0f, (j + 0.5f) / 8.0f);  // the middle of a checker cell's quarter
+        Vec2 b;
+        if (!r58_baked_uv(*plane, r, q, b)) continue;
+        SurfacePoint sp;
+        sp.uv = q;
+        sp.normal = sp.geo_normal = sp.local_normal = Vec3(0, 1, 0);
+        const SurfaceSample want = evaluate_material(*mat, sp);
+        const Vec3 got = r58_rgb(r58_at(r.albedo, r.size, b));
+        checked++;
+        right += std::fabs(got.x - r58_to_srgb(want.albedo.x)) < 3.0f / 255.0f && std::fabs(got.z - r58_to_srgb(want.albedo.z)) < 3.0f / 255.0f;
+      }
+    std::printf("    %d of %d cell centres match\n", right, checked);
+    CHECK(checked == 64 && right == 64);
+  });
+
+  test("texture bake: an axis material bakes grass on the top's texels and dirt on the sides', whatever the object's rotation", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    const R51Mats am = r51_mats(1);
+    MeshPtr cube = primitives::cube();
+    TextureBakeSettings s;
+    s.size = 256;
+    for (int turn = 0; turn < 2; turn++) {
+      /* A quarter turn about X: the face that was +Z faces up. World mode follows the world's up, not the mesh's. */
+      const Mat4 model = turn ? Mat4::rotate(Quat::axis_angle(Vec3(1, 0, 0), -kPi * 0.5f)) : Mat4::identity();
+      const TextureBakeResult r = bake_textures(*cube, model, {am.axis}, s);
+      int top = 0, side = 0, tops = 0, sides = 0;
+      for (size_t f = 0; f < cube->face_count(); f++) {
+        const Vec3 n = normalize(model.dir(cube->face_normal(f)));
+        const Vec3 c = r58_rgb(r58_at(r.albedo, r.size, r58_face_uv(*cube, r, f)));
+        const Vec3 lin(srgb_to_linear(c.x), srgb_to_linear(c.y), srgb_to_linear(c.z));
+        if (n.y > 0.9f) tops++, top += r51_green(lin);
+        else if (std::fabs(n.y) < 0.1f) sides++, side += r51_brown(lin);
+      }
+      std::printf("    turn %d: %d of %d tops green, %d of %d sides brown\n", turn, top, tops, side, sides);
+      CHECK(tops == 1 && top == 1 && sides == 4 && side == 4);
+    }
+  });
+
+  test("texture bake: a flat surface bakes a flat normal map; a Bricks texture's normal bakes its mortar", [] {
+    MeshPtr cube = primitives::cube();
+    TextureBakeSettings s;
+    s.size = 128;
+    const TextureBakeResult flat = bake_textures(*cube, Mat4::scale({2, 1, 3}), {make_material("Grey", Vec3(0.5f))}, s);
+    float worst = 0.0f;
+    for (size_t i = 0; i < flat.normal.size(); i++) {
+      if (!flat.covered[i]) continue;
+      const Vec3 c = r58_rgb(flat.normal[i]) * 2.0f - Vec3(1.0f);
+      worst = std::max(worst, std::acos(std::min(1.0f, normalize(c).z)) * 180.0f / kPi);
+    }
+    std::printf("    flat: the most tilted texel is %.2f degrees off +Z\n", worst);
+    CHECK(worst < 2.0f);
+    /* Bricks: the normal map comes from the texture's height, so the mortar lines tilt the texels beside them. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("newtex R58Bricks Bricks");
+    MaterialPtr bricks = make_material("Bricks", Vec3(1.0f));
+    bricks->normal_map = TextureRef{"Assets/Textures/R58Bricks.ptex#normal", true};
+    bricks->touch();
+    CHECK(bricks->textures().normal != nullptr);
+    MeshPtr plane = primitives::plane(2.0f, 1);
+    s.size = 256;
+    const TextureBakeResult b = bake_textures(*plane, Mat4::identity(), {bricks}, s);
+    size_t tilted = 0;
+    for (size_t i = 0; i < b.normal.size(); i++) {
+      if (!b.covered[i]) continue;
+      const Vec3 c = normalize(r58_rgb(b.normal[i]) * 2.0f - Vec3(1.0f));
+      tilted += std::acos(std::min(1.0f, c.z)) * 180.0f / kPi > 5.0f;
+    }
+    std::printf("    bricks: %zu of %zu texels tilted more than 5 degrees\n", tilted, b.texels);
+    CHECK(tilted * 50 > b.texels && tilted * 2 < b.texels);  // mortar edges, not everything
+    std::remove(resolve_asset_path("Assets/Textures/R58Bricks.ptex").c_str());
+  });
+
+  test("texture bake: Object > Bake Textures keeps the look (rasterized within 5 %), writes the images and material, and undo restores the UVs and materials", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr mat = make_material("R58 Checker", Vec3(0.85f, 0.3f, 0.1f));
+    mat->procedural = (int)Procedural::Checker;
+    mat->procedural_scale = 3.0f;
+    mat->procedural_color2 = Vec3(0.1f, 0.3f, 0.8f);
+    mat->roughness = 0.35f;
+    cube->get<MeshRenderer>()->materials = {mat};
+    ed.mark_changed_for_test("R58 material");  // the state undo returns to (committed by the next frame)
+    ed.step_frame_headless();
+    cube = ed.scene().find_by_name("Cube");
+    ed.select_object(cube->id);
+    const std::vector<Vec2> uvs_before = cube->get<MeshFilter>()->mesh->uvs;
+    const Image before = r57_render(ed, "Rasterized", false);
+    ed.command("baketex 1024");
+    cube = ed.scene().find_by_name("Cube");
+    const Mesh &bm = *cube->get<MeshFilter>()->mesh;
+    const MaterialPtr &now = cube->get<MeshRenderer>()->materials[0];
+    CHECK(now && now->name == "Cube Baked" && now->asset_path == "Assets/Materials/Cube Baked.mat");
+    CHECK(!r58_same(bm.uvs, uvs_before));
+    for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"})
+      CHECK(fs::exists(resolve_asset_path(std::string("Assets/Textures/Baked/Cube") + m)));
+    const Image after = r57_render(ed, "Rasterized", false);
+    CHECK(after.pixels.size() == before.pixels.size());
+    double diff = 0.0;
+    for (size_t i = 0; i < before.pixels.size() && i < after.pixels.size(); i++)
+      for (int ch = 0; ch < 3; ch++) diff += std::abs((int)(before.pixels[i] >> (ch * 8) & 255) - (int)(after.pixels[i] >> (ch * 8) & 255));
+    diff /= std::max<size_t>(1, before.pixels.size()) * 3.0 * 255.0;
+    std::printf("    mean colour difference after the bake: %.2f %%\n", diff * 100.0);
+    CHECK(diff < 0.05);
+    ed.command("undo");
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(r58_same(cube->get<MeshFilter>()->mesh->uvs, uvs_before));
+    const std::vector<MaterialPtr> &slots = cube->get<MeshRenderer>()->materials;
+    CHECK(slots.size() == 1 && slots[0] && slots[0]->name == "R58 Checker");
+    r58_forget_baked("Cube");
+  });
+
+  test("texture bake: right-clicking an object in the Hierarchy offers Bake Textures, which bakes it", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+    int x = 0, y = 0;
+    CHECK(ed.hierarchy_row_for_test("Cube", x, y));
+    platform::Event e = r34_mouse(R34ET::MouseMove, x, y);
+    ed.step_frame_headless({e});
+    e.type = R34ET::MouseDown, e.button = 1;
+    ed.step_frame_headless({e});
+    e.type = R34ET::MouseUp;
+    ed.step_frame_headless({e});
+    r34_steps(ed, 1);
+    const Recti menu = r50_popup(ed);
+    CHECK(menu.w > 0 && ed.selected_object() && ed.selected_object()->name == "Cube");
+    if (menu.w <= 0) return;
+    /* Rows: Rename, Duplicate, Delete, Frame Selected, Select Children, Clear Parent, Join, Boolean, Separate By Loose
+     * Parts, Export Selection..., Bake Textures. Hovering it opens its sizes. */
+    const int row = ed.ui_for_test().row_h();
+    const int by = menu.y + ed.ui_for_test().px(4) + row * 10 + row / 2;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, menu.x + menu.w / 2, by)});
+    r34_steps(ed, 2);
+    const Recti sizes = r50_popup(ed);
+    CHECK(sizes.w > 0 && sizes.x != menu.x);
+    if (sizes.w <= 0 || sizes.x == menu.x) return;
+    r50_pick_row(ed, sizes, 0);  // 512 x 512
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>()->materials[0] && cube->get<MeshRenderer>()->materials[0]->name == "Cube Baked");
+    CHECK(fs::exists(resolve_asset_path("Assets/Textures/Baked/Cube_albedo.png")));
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+  });
+
+  test("texture bake: two objects with one name get their own images and material; a Mirror modifier is refused, the object unchanged", [] {
+    Editor ed;
+    r57_open(ed);
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+    GameObject *a = ed.scene().find_by_name("Cube");
+    if (!a) return;
+    ed.select_object(a->id);
+    ed.command("duplicate");
+    GameObject *b = ed.selected_object();
+    CHECK(b && b != a);
+    if (!b || b == a) return;
+    b->name = "Cube";
+    const uint64_t ida = a->id, idb = b->id;
+    ed.select_object(ida);
+    CHECK(ed.bake_object_textures_for_test(256));
+    ed.select_object(idb);
+    CHECK(ed.bake_object_textures_for_test(256));
+    a = ed.scene().find(ida), b = ed.scene().find(idb);
+    const MaterialPtr ma = a->get<MeshRenderer>()->materials[0], mb = b->get<MeshRenderer>()->materials[0];
+    std::printf("    first: %s, second: %s\n", ma->asset_path.c_str(), mb->asset_path.c_str());
+    CHECK(ma->asset_path == "Assets/Materials/Cube Baked.mat" && mb->asset_path == "Assets/Materials/Cube 2 Baked.mat");
+    CHECK(ma->base_map.path != mb->base_map.path);
+    CHECK(fs::exists(resolve_asset_path("Assets/Textures/Baked/Cube_albedo.png")) && fs::exists(resolve_asset_path("Assets/Textures/Baked/Cube 2_albedo.png")));
+    /* Mirror adds geometry: the bake would repeat the base's images, so it is refused and nothing changes. */
+    b->add<MirrorModifier>();
+    b->mark_dirty();
+    ed.mark_changed_for_test("R58 mirror");
+    ed.step_frame_headless();
+    b = ed.scene().find(idb);
+    const std::vector<Vec2> uvs = b->get<MeshFilter>()->mesh->uvs;
+    ed.select_object(idb);
+    CHECK(!ed.bake_object_textures_for_test(256));
+    b = ed.scene().find(idb);
+    CHECK(r58_same(b->get<MeshFilter>()->mesh->uvs, uvs) && b->get<MeshRenderer>()->materials[0]->asset_path == "Assets/Materials/Cube 2 Baked.mat");
+    CHECK(!fs::exists(resolve_asset_path("Assets/Materials/Cube 3 Baked.mat")));
+    for (const char *n : {"Cube", "Cube 2", "Cube 3"}) r58_forget_baked(n);
+  });
+
+  test("texture bake: alpha only from see-through surfaces: an Opaque material with alpha bakes solid, a Transparent slot gives the baked material its surface", [] {
+    MeshPtr cube = primitives::cube();
+    Mesh &m = *mesh_make_mutable(cube);
+    m.face_material.assign(m.face_count(), 0);
+    m.face_material[0] = 1;
+    m.touch();
+    MaterialPtr solid = make_material("Solid", Vec3(0.5f));
+    solid->alpha = 0.3f;  // ignored by every renderer on an Opaque surface
+    TextureBakeSettings s;
+    s.size = 128;
+    const TextureBakeResult r1 = bake_textures(m, Mat4::identity(), {solid}, s);
+    CHECK(!r1.any_alpha && r1.alpha_slot == -1);
+    bool opaque = true;
+    for (size_t i = 0; i < r1.albedo.size(); i++) opaque = opaque && (r1.albedo[i] >> 24) == 255;
+    CHECK(opaque);
+    CHECK(baked_material("X", "x", solid.get(), nullptr).surface == (int)MaterialSurface::Opaque);
+    MaterialPtr glassy = make_material_preset("Transparent");
+    glassy->alpha = 0.4f;
+    const TextureBakeResult r2 = bake_textures(m, Mat4::identity(), {solid, glassy}, s);
+    CHECK(r2.any_alpha && r2.alpha_slot == 1);
+    const uint32_t c = r58_at(r2.albedo, r2.size, r58_face_uv(m, r2, 0));
+    std::printf("    the Transparent face's alpha: %u\n", c >> 24);
+    CHECK(std::abs((int)(c >> 24) - 102) <= 1);
+    CHECK((r58_at(r2.albedo, r2.size, r58_face_uv(m, r2, 1)) >> 24) == 255);
+    const Material bm = baked_material("X", "x", solid.get(), glassy.get());
+    CHECK(bm.surface == (int)MaterialSurface::Transparent);
+  });
+
+
+  test("texture bake: OBJ, glb and FBX exports with Bake Textures write the images beside the file and reference them", [] {
+    Editor ed;
+    r57_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (!cube) return;
+    MaterialPtr mat = make_material("R58 Export", Vec3(0.2f, 0.7f, 0.3f));
+    mat->procedural = (int)Procedural::Noise;
+    cube->get<MeshRenderer>()->materials = {mat};
+    ed.select_object(cube->id);
+    const std::vector<Vec2> uvs_before = cube->get<MeshFilter>()->mesh->uvs;
+    const std::string dir = fs::join(scratch_project(), "R58Export");
+    for (int fmt : {(int)ExportFormat::OBJ, (int)ExportFormat::GLB, (int)ExportFormat::FBX}) {
+      ExportOptions o = export_defaults(fmt);
+      o.bake_textures = true;
+      o.bake_size = 256;
+      const std::string path = fs::join(dir, std::string("r58") + export_format_extension(fmt));
+      CHECK(ed.export_model_for_test(o, path) == path);
+      const std::string base = fs::join(dir, "r58_Cube");
+      for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) CHECK(fs::exists(base + m));
+      std::string file;
+      CHECK(fs::read_file(path, file));
+      if (fmt == (int)ExportFormat::OBJ) {
+        std::string mtl;
+        CHECK(fs::read_file(fs::join(dir, "r58.mtl"), mtl));
+        CHECK(mtl.find("map_Kd r58_Cube_albedo.png") != std::string::npos);
+        CHECK(mtl.find("map_Pr r58_Cube_roughness.png") != std::string::npos);
+        CHECK(mtl.find("map_Bump r58_Cube_normal.png") != std::string::npos);
+        CHECK(file.find("\nvt ") != std::string::npos);
+      }
+      else if (fmt == (int)ExportFormat::GLB) {
+        for (const char *k : {"baseColorTexture", "metallicRoughnessTexture", "normalTexture", "image/png"}) CHECK(file.find(k) != std::string::npos);
+      }
+      else {
+        for (const char *k : {"TextureVideoClip", "DiffuseColor", "NormalMap", "ShininessExponent", "r58_Cube_albedo.png"})
+          CHECK(file.find(k) != std::string::npos);
+      }
+    }
+    /* The scene is untouched. */
+    CHECK(r58_same(cube->get<MeshFilter>()->mesh->uvs, uvs_before) && cube->get<MeshRenderer>()->materials[0] == mat);
+    /* ufbx reads the FBX's textures on the material. */
+    std::string fbx;
+    fs::read_file(fs::join(dir, "r58.fbx"), fbx);
+    ufbx_load_opts opts = {};
+    ufbx_error uerr;
+    ufbx_scene *sc = ufbx_load_memory(fbx.data(), fbx.size(), &opts, &uerr);
+    CHECK(sc != nullptr);
+    if (sc) {
+      bool diffuse = false, normal = false;
+      for (size_t i = 0; i < sc->materials.count; i++) {
+        const ufbx_material *um = sc->materials.data[i];
+        diffuse = diffuse || (um->fbx.diffuse_color.texture && std::string(um->fbx.diffuse_color.texture->relative_filename.data).find("r58_Cube_albedo.png") != std::string::npos);
+        normal = normal || um->fbx.normal_map.texture != nullptr;
+      }
+      CHECK(diffuse && normal);
+      ufbx_free_scene(sc);
+    }
+  });
+
+  test("texture bake: exports reference image maps of ordinary materials too (glTF normal and packed metallic-roughness, FBX textures), never a .ptex output", [] {
+    const std::string dir = fs::join(scratch_project(), "R58Maps");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(16 * 16, 0xFF808080u);
+    const std::string rough = fs::join(dir, "rough.png"), nrm = fs::join(dir, "nrm.png");
+    CHECK(write_png(rough, px.data(), 16, 16, 16));
+    CHECK(write_png(nrm, px.data(), 16, 16, 16));
+    MaterialPtr mat = make_material("Maps", Vec3(0.5f));
+    mat->roughness_map = TextureRef{rough, true};
+    mat->normal_map = TextureRef{nrm, true};
+    MeshPtr cube = primitives::cube();
+    ExportItem it;
+    it.name = "Cube";
+    it.mesh = cube.get();
+    it.world = Mat4::identity();
+    it.materials = {mat};
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    CHECK(glb.find("metallicRoughnessTexture") != std::string::npos && glb.find("normalTexture") != std::string::npos);
+    const std::string fbx = export_fbx({it}, export_defaults((int)ExportFormat::FBX));
+    CHECK(fbx.find("rough.png") != std::string::npos && fbx.find("ShininessExponent") != std::string::npos);
+    /* A procedural texture's output isn't a file: the MTL leaves it out (the editor writes those as PNGs first). */
+    mat->base_map = TextureRef{"Assets/Textures/X.ptex#albedo", false};
+    std::string obj, mtl;
+    export_obj_mtl({it}, "x.mtl", obj, mtl);
+    CHECK(mtl.find(".ptex") == std::string::npos && mtl.find("map_Pr") != std::string::npos);
+    std::remove(rough.c_str());
+    std::remove(nrm.c_str());
+  });
+
+  test("texture bake: Keep UVs keeps a plane's own UVs, not a mesh whose UVs overlap; empty, NaN and degenerate meshes bake nothing", [] {
+    MeshPtr plane = primitives::plane(2.0f, 4);
+    TextureBakeSettings s;
+    s.size = 64;
+    s.keep_uvs = true;
+    const TextureBakeResult own = bake_textures(*plane, Mat4::identity(), {}, s);
+    CHECK(own.own_uvs && own.uvs.size() == plane->uvs.size());
+    bool same = own.uvs.size() == plane->uvs.size();
+    for (size_t i = 0; same && i < own.uvs.size(); i++) same = std::fabs(own.uvs[i].x - plane->uvs[i].x) < 1e-6f && std::fabs(own.uvs[i].y - plane->uvs[i].y) < 1e-6f;
+    CHECK(same);
+    MeshPtr stacked = primitives::plane(2.0f, 4);
+    Mesh &sm = *mesh_make_mutable(stacked);
+    for (size_t f = 0; f < sm.face_count(); f++)  // every face on the whole 0..1 square: all overlap
+      for (uint32_t k = 0; k < sm.face_size(f); k++) {
+        static const Vec2 sq[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+        sm.uvs[sm.face_offsets[f] + k] = sq[k % 4];
+      }
+    sm.touch();
+    const TextureBakeResult gen = bake_textures(sm, Mat4::identity(), {}, s);
+    CHECK(!gen.own_uvs && gen.texels > 0);
+    /* Nothing to bake: no faces, every position NaN, every vertex in one place. */
+    Mesh empty;
+    CHECK(bake_textures(empty, Mat4::identity(), {}, s).texels == 0);
+    MeshPtr bad = primitives::cube();
+    Mesh &bm = *mesh_make_mutable(bad);
+    for (Vec3 &p : bm.positions) p = Vec3(std::nanf(""), 0.0f, 0.0f);
+    bm.touch();
+    const TextureBakeResult nan = bake_textures(bm, Mat4::identity(), {}, s);
+    CHECK(nan.albedo.size() == 64u * 64u && nan.texels == 0);
+    MeshPtr dot = primitives::cube();
+    Mesh &dm = *mesh_make_mutable(dot);
+    for (Vec3 &p : dm.positions) p = Vec3(1.0f);
+    dm.touch();
+    const TextureBakeResult collapsed = bake_textures(dm, Mat4::identity(), {}, s);
+    CHECK(collapsed.albedo.size() == 64u * 64u && collapsed.texels == 0);
+    /* Out-of-range sizes are clamped (16..4096). */
+    s.size = 1;
+    CHECK(bake_textures(*plane, Mat4::identity(), {}, s).size == 16);
+  });
+}
+
+/* ===================================================================== */
+/* Round 59 (task 0037, ADR 0021): GPU devices open in the background     */
+/* ===================================================================== */
+
+static void round59_tests() {
+  test("GPU opening: a device that doesn't exist is refused at once (nothing pending, an error)", [] {
+    bool pending = true;
+    std::string err;
+    std::unique_ptr<gpu::Renderer> r = gpu::take_renderer(999, true, &pending, &err);
+    CHECK(!r && !pending && !err.empty());
+    CHECK(!gpu::open_renderer(-1, false, &err));
+  });
+
+  test("GPU opening: turning the Camera Preview to Rendered while the GPU opens slowly keeps every frame under 100 ms, traces on the CPU meanwhile, then on the GPU; the next view gets the spare at once", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));  // an earlier spare
+    gpu::drop_ready_renderers_for_test();
+    gpu::set_open_delay_for_test(3000);  // a cold driver cache, shortened
+    Editor ed;
+    r57_open(ed);
+    ed.set_background_gpu_open_for_test(true);
+    ed.command("device gpu");
+    ed.command("select Main Camera");
+    ed.command("camerapreview rendered");
+    ed.step_frame_headless();  // builds the preview's scene
+    /* The editor asks to be woken while the device opens (the run loop would otherwise sleep once the CPU samples
+     * are done, and never take the GPU). */
+    ed.step_frame_headless();
+    CHECK(!gpu::renderers_opening() || ed.next_wakeup_for_test() > 0.0);
+    const std::string gpu_name = gpu::devices()[0].name;
+    double worst = 0.0;
+    bool saw_cpu = false, saw_gpu = false;
+    int frames = 0;
+    ScopedTimer total;
+    while (total.ms() < 20000.0 && !saw_gpu) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      worst = std::max(worst, f.ms());
+      frames++;
+      const std::string d = ed.cam_preview_device_for_test();
+      saw_cpu = saw_cpu || d.find("GPU starting") != std::string::npos;
+      saw_gpu = d.find(gpu_name) != std::string::npos && d.find("starting") == std::string::npos;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    gpu::set_open_delay_for_test(0);
+    std::printf("    %d frames, the slowest %.1f ms; CPU while opening: %s; on the GPU after %.1f s: %s\n", frames, worst,
+                saw_cpu ? "yes" : "no", total.ms() / 1000.0, saw_gpu ? "yes" : "no");
+    CHECK(saw_cpu && saw_gpu);
+    CHECK(worst < 100.0);
+    /* The spare: once it has opened, the next view is served at once. */
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    bool pending = true;
+    std::unique_ptr<gpu::Renderer> spare = gpu::take_renderer(0, true, &pending);
+    CHECK(spare != nullptr && !pending);
+    gpu::return_renderer(std::move(spare), 0, true);
+  });
+
+  test("GPU opening: a tracer waiting for its GPU forgets it when the device turns back to the CPU; a lighting gather doesn't wait for an opening GPU", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    MeshPtr sphere = primitives::uv_sphere(0.5f, 16, 8);
+    std::vector<MaterialPtr> mats = {make_material("Grey", Vec3(0.5f))};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0.5f, 0.5f, 0.5f};
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));  // an earlier spare
+    gpu::drop_ready_renderers_for_test();
+    gpu::set_open_delay_for_test(1500);
+    PathTracer pt;
+    pt.set_background_gpu_open(true);
+    PTSettings st;
+    st.gpus = {0};
+    pt.set_settings(st);
+    pt.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    CHECK(pt.waiting_for_gpu());
+    st.gpus.clear();  // Render > Device: CPU
+    pt.set_settings(st);
+    pt.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    CHECK(!pt.gpu_starting() && pt.device_summary().find("starting") == std::string::npos);
+    /* The bake's gather: refused at once while the device opens (the bake does that slice on the CPU), then on it. */
+    PathTracer bake;
+    bake.set_background_gpu_open(true);
+    bake.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    std::vector<Vec3> origins(64, Vec3(0, 2, 0)), dirs(64, Vec3(0, -1, 0)), out;
+    std::string err;
+    ScopedTimer t;
+    const bool first = bake.gpu_gather(0, 1, origins, dirs, 4, out, nullptr, &err);
+    const double first_ms = t.ms();
+    CHECK(!first && bake.gpu_gather_waiting() && first_ms < 100.0);
+    bool later = false;
+    for (int i = 0; i < 300 && !later; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      later = bake.gpu_gather(0, 1, origins, dirs, 4, out, nullptr, &err);
+    }
+    std::printf("    the first gather returned in %.1f ms (waiting); on the GPU later: %s\n", first_ms, later ? "yes" : "no");
+    CHECK(later && out.size() == 64 && !bake.gpu_gather_waiting());
+    gpu::set_open_delay_for_test(0);
+  });
+
+  test("GPU opening: the pipeline cache is written, used by the next open, and a corrupt file is ignored and rewritten", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    /* In a scratch cache folder: never the user's (their Blendity may be using it). */
+    const char *old_env = std::getenv("BLENDITY_CACHE_DIR");
+    const std::string keep = old_env ? old_env : "";
+    const std::string dir = fs::join(test_dir(), "gpu_cache");
+    set_env("BLENDITY_CACHE_DIR", dir);
+    const std::string path = gpu::pipeline_cache_file(0, true);
+    CHECK(!path.empty() && path.find("gpu_cache") != std::string::npos);
+    std::remove(path.c_str());
+    std::string err;
+    std::unique_ptr<gpu::Renderer> a = gpu::Renderer::create(0, true, &err);
+    CHECK(a != nullptr);
+    if (!a) return;
+    CHECK(fs::exists(path) && !a->open_stats().from_pipeline_cache);
+    std::unique_ptr<gpu::Renderer> b = gpu::Renderer::create(0, true, &err);
+    CHECK(b && b->open_stats().from_pipeline_cache);
+    std::printf("    pipeline: %.0f ms without the cache file, %.0f ms with it (device %.0f ms; the driver's own cache is warm)\n",
+                a->open_stats().pipeline_ms, b ? b->open_stats().pipeline_ms : 0.0, a->open_stats().device_ms);
+    const std::string junk(4096, 'x');
+    CHECK(fs::write_file(path, junk));
+    std::unique_ptr<gpu::Renderer> c = gpu::Renderer::create(0, true, &err);
+    CHECK(c && !c->open_stats().from_pipeline_cache);
+    std::string good;
+    CHECK(fs::read_file(path, good) && good != junk && good.size() > 48);
+    /* A cache from another GPU (its UUID differs) with an intact trailer: the header check refuses it. */
+    if (good.size() > 48) {
+      std::string foreign = good.substr(0, good.size() - 16);
+      foreign[20] = (char)(foreign[20] ^ 0x5A);
+      uint64_t h = 1469598103934665603ull;
+      for (char ch : foreign) h = (h ^ (uint8_t)ch) * 1099511628211ull;
+      const uint32_t len = (uint32_t)foreign.size(), tag = 0x43504C42u;
+      foreign.append(reinterpret_cast<const char *>(&len), 4);
+      foreign.append(reinterpret_cast<const char *>(&tag), 4);
+      foreign.append(reinterpret_cast<const char *>(&h), 8);
+      CHECK(fs::write_file(path, foreign));
+      std::unique_ptr<gpu::Renderer> d = gpu::Renderer::create(0, true, &err);
+      CHECK(d && !d->open_stats().from_pipeline_cache);
+      /* and a torn copy of a good one (the trailer no longer matches) */
+      CHECK(fs::write_file(path, good.substr(0, good.size() / 2) + good.substr(good.size() - 16)));
+      std::unique_ptr<gpu::Renderer> e = gpu::Renderer::create(0, true, &err);
+      CHECK(e && !e->open_stats().from_pipeline_cache);
+    }
+    std::remove(path.c_str());
+    set_env("BLENDITY_CACHE_DIR", keep);
+  });
+}
+
+/* ===================================================================== */
+/* Round 60 (task 0038, ADR 0020): toon shading and outlines              */
+/* ===================================================================== */
+
+/* The round 57 scene with the Cube's mesh a sphere, a black world (no ambient: only the sun shades it) and a Toon
+ * material with `bands` tones, no rim, no highlight. Returns the sphere's object. */
+static GameObject *r60_open(Editor &ed, int bands, bool toon = true) {
+  r57_open(ed);
+  ed.scene().environment.mode = 3;
+  ed.scene().environment.color = Vec3(0.0f);
+  GameObject *g = ed.scene().find_by_name("Cube");
+  if (!g) return nullptr;
+  g->get<MeshFilter>()->mesh = primitives::uv_sphere(2.5f, 96, 48);  // big in the frame: anti-aliased edges are few of its pixels
+  MaterialPtr m = make_material_preset(toon ? "Toon" : "Solid");
+  m->base_color = Vec3(0.9f, 0.6f, 0.5f);
+  m->toon_bands = bands;
+  m->toon_softness = 0.0f;
+  m->toon_rim_width = 0.0f;
+  m->toon_specular_size = 0.0f;
+  g->get<MeshRenderer>()->materials = {m};
+  g->mark_dirty();
+  ed.mark_changed_for_test("R60 setup");
+  ed.step_frame_headless();
+  return ed.scene().find_by_name("Cube");
+}
+/* The solid pixels' colours (a transparent render: alpha 255 is the object), most common first, with their counts. */
+static std::vector<std::pair<uint32_t, int>> r60_colours(const Image &img, int *solid = nullptr) {
+  std::map<uint32_t, int> h;
+  int n = 0;
+  for (uint32_t c : img.pixels)
+    if ((c >> 24) == 255) h[c & 0xFFFFFF]++, n++;
+  std::vector<std::pair<uint32_t, int>> v(h.begin(), h.end());
+  std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+  if (solid) *solid = n;
+  return v;
+}
+static float r60_lum(uint32_t c) { return ((c >> 16 & 255) * 0.2126f + (c >> 8 & 255) * 0.7152f + (c & 255) * 0.0722f) / 255.0f; }
+
+static void round60_tests() {
+  test("toon: the tone of a surface steps through Toon Bands levels at the threshold, softness 0 a hard edge", [] {
+    Material m;
+    m.shading_model = 1;
+    m.toon_threshold = 0.2f;
+    m.toon_softness = 0.0f;
+    for (int bands : {1, 2, 3, 5}) {
+      m.toon_bands = bands;
+      std::set<int> levels;
+      for (int i = 0; i <= 1000; i++) levels.insert((int)std::lround(toon_level(m, i / 1000.0f) * 1000.0f));
+      CHECK((int)levels.size() == bands + 1);  // the shadow and the lit tones
+    }
+    m.toon_bands = 1;
+    CHECK(toon_level(m, 0.19f) == 0.0f && toon_level(m, 0.21f) == 1.0f);
+    CHECK(toon_level(m, std::nanf("")) == 0.0f);
+    m.toon_softness = 0.1f;
+    const float mid = toon_level(m, 0.2f);
+    CHECK(mid > 0.3f && mid < 0.7f);  // soft: half way at the edge
+  });
+
+  test("toon: the rim lights the silhouette and nothing facing the eye", [] {
+    Material m;
+    m.toon_rim_width = 0.3f;
+    m.toon_rim_strength = 1.0f;
+    m.toon_rim = Vec3(1.0f, 0.5f, 0.25f);
+    const Vec3 V(0, 0, 1);
+    CHECK(length(toon_rim(m, V, V)) == 0.0f);
+    const Vec3 edge = toon_rim(m, normalize(Vec3(1, 0, 0.05f)), V);
+    CHECK(edge.x > 0.9f && std::fabs(edge.y - 0.5f * edge.x) < 1e-4f);
+    m.toon_rim_width = 0.0f;
+    CHECK(length(toon_rim(m, normalize(Vec3(1, 0, 0.05f)), V)) == 0.0f);
+  });
+
+  test("toon: a rasterized toon sphere takes exactly its Toon Bands tones (plus the shadow); PBR shades smoothly", [] {
+    for (int bands : {1, 3}) {
+      Editor ed;
+      if (!r60_open(ed, bands)) return;
+      int solid = 0;
+      const auto v = r60_colours(r57_render(ed, "Rasterized", true), &solid);
+      int big = 0, covered = 0;
+      for (const auto &c : v)
+        if (c.second * 50 >= solid) big++, covered += c.second;  // a tone: at least 2 % of the sphere
+      std::printf("    %d band%s: %d tones cover %.1f %% of %d pixels\n", bands, bands == 1 ? "" : "s", big, 100.0 * covered / std::max(1, solid), solid);
+      CHECK(big == bands || big == bands + 1);
+      CHECK(covered * 100 >= solid * 85);  // the rest: anti-aliased edges between tones
+    }
+    Editor ed;
+    if (!r60_open(ed, 1, false)) return;
+    int solid = 0;
+    const auto v = r60_colours(r57_render(ed, "Rasterized", true), &solid);
+    int top = 0;
+    for (size_t i = 0; i < v.size() && i < 4; i++) top += v[i].second;
+    std::printf("    PBR: the 4 commonest colours cover %.1f %%\n", 100.0 * top / std::max(1, solid));
+    CHECK(top * 2 < solid);
+  });
+
+  test("toon: the CPU path tracer's direct light gives the rasterizer's tones (each tone's share within 4 %), the GPU's the CPU's", [] {
+    Editor ed;
+    if (!r60_open(ed, 2)) return;
+    const Image raster = r57_render(ed, "Rasterized", true);
+    int solid = 0;
+    const auto tones = r60_colours(raster, &solid);
+    std::vector<float> lum;
+    for (const auto &c : tones)
+      if (c.second * 50 >= solid) lum.push_back(r60_lum(c.first));
+    auto shares = [&](const Image &img) {
+      std::vector<double> sh(lum.size(), 0.0);
+      int n = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255) continue;
+        const float l = r60_lum(c);
+        size_t best = 0;
+        for (size_t k = 1; k < lum.size(); k++)
+          if (std::fabs(lum[k] - l) < std::fabs(lum[best] - l)) best = k;
+        sh[best] += 1.0, n++;
+      }
+      for (double &x : sh) x /= std::max(1, n);
+      return sh;
+    };
+    ed.command("set Render.Samples 64");
+    const Image cpu = r57_render(ed, "Path", true);
+    const auto a = shares(raster), b = shares(cpu);
+    double worst = 0.0;
+    for (size_t k = 0; k < a.size(); k++) worst = std::max(worst, std::fabs(a[k] - b[k]));
+    std::printf("    %zu tones; the largest share difference raster / CPU trace: %.1f %%\n", lum.size(), worst * 100.0);
+    CHECK(lum.size() >= 2 && worst < 0.04);
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const Image g = r57_render(ed, "Path", true);
+      double diff = 0.0;
+      int n = 0;
+      for (size_t i = 0; i < cpu.pixels.size() && i < g.pixels.size(); i++) {
+        if ((cpu.pixels[i] >> 24) != 255) continue;
+        for (int ch = 0; ch < 3; ch++) diff += std::abs((int)(cpu.pixels[i] >> (ch * 8) & 255) - (int)(g.pixels[i] >> (ch * 8) & 255));
+        n++;
+      }
+      diff /= std::max(1, n) * 3.0 * 255.0;
+      std::printf("    GPU vs CPU: mean difference %.2f %%\n", diff * 100.0);
+      CHECK(diff < 0.03);
+      ed.command("device cpu");
+    }
+  });
+
+  test("toon: an Outline draws a line of its colour round the silhouette (rasterized and path traced), none over the object, and thickness 0 draws nothing", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    const Image plain = r57_render(ed, "Rasterized", true);
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("set Outline.Color 1 0 0");
+    ed.command("set Outline.Thickness 0.08");
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g && g->find_role(Component::RenderRole::Outline) != nullptr);
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &o = r57_render(ed, engine, true);
+      /* The ring: solid pixels where the sphere alone left the background, red-dominant (the view transform
+       * desaturates pure red). Inside: the sphere's own pixels stay as they were, but for its edge. */
+      int ring = 0, ring_red = 0, inside = 0, inside_changed = 0;
+      for (size_t i = 0; i < o.pixels.size() && i < plain.pixels.size(); i++) {
+        const uint32_t c = o.pixels[i], p0 = plain.pixels[i];
+        if ((p0 >> 24) == 0 && (c >> 24) == 255) {
+          ring++;
+          ring_red += (int)(c >> 16 & 255) > 2 * (int)(c >> 8 & 255) + 20 && (int)(c >> 16 & 255) > 2 * (int)(c & 255) + 20;
+        }
+        if ((p0 >> 24) == 255) {
+          inside++;
+          int d = 0;
+          for (int ch = 0; ch < 3; ch++) d = std::max(d, std::abs((int)(c >> (ch * 8) & 255) - (int)(p0 >> (ch * 8) & 255)));
+          inside_changed += d > 40;
+        }
+      }
+      std::printf("    %s: %d new solid pixels round the sphere (%d red), %d of %d of its own pixels changed\n", engine, ring, ring_red,
+                  inside_changed, inside);
+      /* 80 %: a traced ring pixel next to the sphere averages the sphere's colour in (its samples spread over the
+       * pixel); the rasterizer's are all red. */
+      CHECK(ring > 60 && ring_red * 10 >= ring * 8);
+      CHECK(inside_changed * 25 < inside);  // only its edge: the hull doesn't cover or darken the sphere
+    }
+    /* The path tracer: the hull doesn't shadow or darken the sphere it surrounds. */
+    ed.command("set Outline.Thickness 0");
+    const Image none = r57_render(ed, "Rasterized", true);
+    int changed = 0;
+    for (size_t i = 0; i < none.pixels.size() && i < plain.pixels.size(); i++) changed += none.pixels[i] != plain.pixels[i];
+    CHECK(changed == 0);
+  });
+
+  test("toon: a mirrored (negative scale) object keeps its outline a rim, rasterized and traced, and draws its own front faces", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    g->set_local_scale({-1.0f, 1.0f, 1.0f});
+    ed.mark_changed_for_test("R60 mirror");
+    ed.step_frame_headless();
+    g = ed.scene().find_by_name("Cube");
+    const Image plain = r57_render(ed, "Rasterized", true);
+    int solid = 0;
+    const auto tones = r60_colours(plain, &solid);
+    CHECK(solid > 2000);
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("set Outline.Color 1 0 0");
+    ed.command("set Outline.Thickness 0.08");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      const Image &o = r57_render(ed, engine, true);
+      int ring = 0, inside = 0, changed = 0;
+      for (size_t i = 0; i < o.pixels.size() && i < plain.pixels.size(); i++) {
+        const uint32_t c = o.pixels[i], p0 = plain.pixels[i];
+        if ((p0 >> 24) == 0 && (c >> 24) == 255) ring++;
+        if ((p0 >> 24) == 255) {
+          inside++;
+          int d = 0;
+          for (int ch = 0; ch < 3; ch++) d = std::max(d, std::abs((int)(c >> (ch * 8) & 255) - (int)(p0 >> (ch * 8) & 255)));
+          changed += d > 40;
+        }
+      }
+      std::printf("    mirrored, %s: %d ring pixels, %d of %d of the sphere's own changed\n", engine, ring, changed, inside);
+      CHECK(ring > 60 && changed * 25 < inside);
+    }
+  });
+
+  test("toon: an outlined object with a modifier traced in the Camera Preview while the Scene view redraws (each view keeps its own shell)", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    g->add<MirrorModifier>();
+    g->mark_dirty();
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("select Main Camera");
+    ed.command("camerapreview rendered");
+    for (int i = 0; i < 30; i++) {
+      ed.command("redraw always");
+      ed.step_frame_headless();  // the Scene view's raster (viewport mesh) and the preview's trace (render mesh) both
+    }
+    ed.command("redraw changes");
+    const Image &o = r57_render(ed, "Path", true);
+    int solid = 0;
+    for (uint32_t c : o.pixels) solid += (c >> 24) == 255;
+    CHECK(solid > 2000);  // (the sanitizer build reads freed memory here if a view's shell is freed under a tracer)
+  });
+
+  test("toon: adding an Outline undoes; a toon field's edit is one undo step", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 2);
+    if (!g) return;
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.step_frame_headless();
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g && g->find_role(Component::RenderRole::Outline));
+    ed.command("undo");
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g && !g->find_role(Component::RenderRole::Outline));
+    MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+    m->toon_bands = 5;
+    m->touch();
+    ed.mark_changed_for_test("R60 bands");
+    ed.step_frame_headless();
+    ed.command("undo");
+    g = ed.scene().find_by_name("Cube");
+    CHECK(g->get<MeshRenderer>()->materials[0]->toon_bands == 2);
+  });
+
+  test("toon: under a large area light the rasterizer's tones match the CPU path tracer's (each share within 6 %)", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 2);
+    if (!g) return;
+    if (GameObject *sun = ed.scene().find_by_name("Directional Light")) {
+      Light *l = sun->get<Light>();
+      l->type = 3;  // Area
+      l->area_width = l->area_height = 3.0f;
+      l->range = 30.0f;
+      sun->set_world_position({0.0f, 6.0f, -4.0f});
+      sun->set_world_rotation(Quat::euler({60.0f, 0.0f, 0.0f}));
+      l->intensity = 3.0f;
+    }
+    ed.mark_changed_for_test("R60 area");
+    ed.step_frame_headless();
+    const Image raster = r57_render(ed, "Rasterized", true);
+    int solid = 0;
+    const auto tones = r60_colours(raster, &solid);
+    std::vector<float> lum;
+    for (const auto &c : tones)
+      if (c.second * 50 >= solid) lum.push_back(r60_lum(c.first));
+    auto shares = [&](const Image &img) {
+      std::vector<double> sh(lum.size(), 0.0);
+      int n = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255 || lum.empty()) continue;
+        const float l = r60_lum(c);
+        size_t best = 0;
+        for (size_t k = 1; k < lum.size(); k++)
+          if (std::fabs(lum[k] - l) < std::fabs(lum[best] - l)) best = k;
+        sh[best] += 1.0, n++;
+      }
+      for (double &x : sh) x /= std::max(1, n);
+      return sh;
+    };
+    ed.command("set Render.Samples 128");
+    const auto a = shares(raster), b = shares(r57_render(ed, "Path", true));
+    double worst = 0.0;
+    for (size_t k = 0; k < a.size(); k++) worst = std::max(worst, std::fabs(a[k] - b[k]));
+    std::printf("    area light: %zu tones, the largest share difference %.1f %%\n", lum.size(), worst * 100.0);
+    CHECK(lum.size() >= 2 && worst < 0.06);
+  });
+
+  test("toon: the outline shell is the mesh pushed out with its faces flipped; the Outline round-trips through the scene and the fields through a .mat", [] {
+    MeshPtr cube = primitives::cube();
+    Outline ol;
+    ol.thickness = 0.1f;
+    ol.world_space = false;
+    const Mesh *sh = ol.shell(*cube, 1.0f);
+    CHECK(sh && sh->face_count() == cube->face_count() && sh->positions.size() == cube->positions.size());
+    if (sh) {
+      CHECK(dot(sh->face_normal(0), cube->face_normal(0)) < -0.99f);
+      float far = 0.0f;
+      for (size_t i = 0; i < sh->positions.size(); i++) far = std::max(far, length(sh->positions[i] - cube->positions[i]));
+      CHECK(std::fabs(far - 0.1f) < 1e-4f);
+      CHECK(ol.shell(*cube, 1.0f) == sh);  // cached
+    }
+    ol.world_space = true;
+    const Mesh *scaled = ol.shell(*cube, 2.0f);
+    CHECK(scaled && std::fabs(length(scaled->positions[0] - cube->positions[0]) - 0.05f) < 1e-4f);  // 0.1 m on a 2x object
+    CHECK(ol.materials().size() == 1 && ol.materials()[0]->outline_hull && ol.materials()[0]->unlit && !ol.materials()[0]->cast_shadows);
+    ol.thickness = 0.0f;
+    CHECK(ol.shell(*cube, 1.0f) == nullptr);
+    Material m;
+    m.shading_model = 1;
+    m.toon_bands = 4;
+    m.toon_shadow = Vec3(0.1f, 0.2f, 0.3f);
+    m.toon_rim_width = 0.4f;
+    m.toon_flat_ambient = false;
+    Material back;
+    CHECK(load_material_text(save_material_text(m), back));
+    CHECK(back.shading_model == 1 && back.toon_bands == 4 && std::fabs(back.toon_shadow.z - 0.3f) < 1e-5f && back.toon_rim_width == 0.4f &&
+          !back.toon_flat_ambient);
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    ed.select_object(g->id);
+    ed.command("component Outline");
+    ed.command("set Outline.Thickness 0.07");
+    Scene back_scene;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back_scene, err));
+    GameObject *g2 = back_scene.find_by_name("Cube");
+    const Component *oc = g2 ? g2->find_role(Component::RenderRole::Outline) : nullptr;
+    CHECK(oc && std::fabs(static_cast<const Outline *>(oc)->thickness - 0.07f) < 1e-5f);
+  });
+}
+
+/* ===================================================================== */
+/* Round 61 (task 0039): anime and manga camera filters, looks            */
+/* ===================================================================== */
+
+/* An image of one grey, or a left-to-right gradient. */
+static Image r61_image(int w, int h, int grey, bool gradient = false) {
+  Image img;
+  img.resize(w, h);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      const int v = gradient ? (int)std::lround(255.0 * x / std::max(1, w - 1)) : grey;
+      img.pixels[(size_t)y * w + x] = 0xFF000000u | (uint32_t)v << 16 | (uint32_t)v << 8 | (uint32_t)v;
+    }
+  return img;
+}
+/* Connected groups of dark pixels (4-neighbour flood fill): halftone dots. */
+static int r61_blobs(const Image &img) {
+  std::vector<uint8_t> seen(img.pixels.size(), 0);
+  auto dark = [&](size_t i) { return ((img.pixels[i] >> 8) & 255) < 128; };
+  int n = 0;
+  std::vector<size_t> stack;
+  for (size_t i = 0; i < img.pixels.size(); i++) {
+    if (seen[i] || !dark(i)) continue;
+    n++;
+    stack.push_back(i);
+    seen[i] = 1;
+    while (!stack.empty()) {
+      const size_t j = stack.back();
+      stack.pop_back();
+      const int x = (int)(j % img.width), y = (int)(j / img.width);
+      const int nb[4][2] = {{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}};
+      for (auto &q : nb) {
+        if (q[0] < 0 || q[1] < 0 || q[0] >= img.width || q[1] >= img.height) continue;
+        const size_t k = (size_t)q[1] * img.width + q[0];
+        if (!seen[k] && dark(k)) seen[k] = 1, stack.push_back(k);
+      }
+    }
+  }
+  return n;
+}
+
+static void round61_tests() {
+  test("anime filters: Halftone's dots quadruple when the cell halves, and a 540p and a 1080p picture show the same dots", [] {
+    auto dots = [](int w, int h, float cell, float scale) {
+      Image img = r61_image(w, h, 200);  // light enough that neighbouring dots stay apart at 6-pixel cells (counted one by one)
+      RenderTarget rt;
+      rt.attach(img, {0, 0, w, h});
+      FilterFrame f;
+      f.pixel_scale = scale;
+      HalftoneParams p;
+      p.cell = cell;
+      apply_halftone(rt, p, &f);
+      return r61_blobs(img);
+    };
+    const int big = dots(960, 540, 16.0f, 1.0f), small = dots(960, 540, 8.0f, 1.0f);
+    const double ratio = (double)small / std::max(1, big);
+    const int at540 = dots(960, 540, 12.0f, 0.5f), at1080 = dots(1920, 1080, 12.0f, 1.0f);
+    std::printf("    dots: %d at cell 16, %d at cell 8 (x%.2f); %d at 540p, %d at 1080p\n", big, small, ratio, at540, at1080);
+    CHECK(ratio > 3.5 && ratio < 4.5);
+    CHECK(std::abs(at540 - at1080) * 10 <= at1080);
+    /* White stays paper, black is all ink. */
+    Image w = r61_image(64, 64, 255), b = r61_image(64, 64, 0);
+    RenderTarget rw, rb;
+    rw.attach(w, {0, 0, 64, 64});
+    rb.attach(b, {0, 0, 64, 64});
+    HalftoneParams p;
+    apply_halftone(rw, p, nullptr);
+    apply_halftone(rb, p, nullptr);
+    /* Exactly: no grey speck at a white cell's centre, none in a black cell's corners. */
+    bool all_white = true, all_black = true;
+    for (uint32_t c : w.pixels) all_white = all_white && (c & 0xFFFFFF) == 0xFFFFFF;
+    for (uint32_t c : b.pixels) all_black = all_black && ((c >> 8) & 255) <= 2;
+    CHECK(all_white && all_black);
+  });
+
+  test("anime filters: Hatching's ink falls as the picture brightens, white stays paper; Color Ramp Constant gives exactly its stops; Paper at 0 changes nothing", [] {
+    Image g = r61_image(800, 200, 0, true);
+    RenderTarget rt;
+    rt.attach(g, {0, 0, 800, 200});
+    HatchingParams hp;
+    apply_hatching(rt, hp, nullptr);
+    std::vector<double> ink(8, 0.0);
+    for (int y = 0; y < 200; y++)
+      for (int x = 0; x < 800; x++) ink[(size_t)x / 100] += ((g.pixels[(size_t)y * 800 + x] >> 8) & 255) < 128;
+    bool falling = true;
+    for (size_t k = 1; k < ink.size(); k++) falling = falling && ink[k] <= ink[k - 1] + 50;
+    int last_col_ink = 0;
+    for (int y = 0; y < 200; y++) last_col_ink += ((g.pixels[(size_t)y * 800 + 799] >> 8) & 255) < 250;
+    std::printf("    hatching ink per eighth (dark to light):");
+    for (double v : ink) std::printf(" %.0f", v);
+    std::printf("\n");
+    CHECK(falling && ink[0] > ink[7] * 4 && last_col_ink == 0);
+    Image r = r61_image(256, 4, 0, true);
+    RenderTarget rr;
+    rr.attach(r, {0, 0, 256, 4});
+    ColorRampParams cp;
+    cp.stops = 3;
+    cp.color[0] = {0.1f, 0.0f, 0.2f}, cp.color[1] = {0.5f, 0.5f, 0.0f}, cp.color[2] = {1.0f, 0.9f, 0.8f};
+    cp.position[0] = 0.0f, cp.position[1] = 0.4f, cp.position[2] = 0.7f;
+    apply_color_ramp(rr, cp);
+    std::set<uint32_t> cols(r.pixels.begin(), r.pixels.end());
+    CHECK(cols.size() == 3);
+    Image a = r61_image(300, 200, 0, true), b = a;
+    RenderTarget ra, rb2;
+    ra.attach(a, {0, 0, 300, 200});
+    PaperParams pp;
+    pp.strength = 0.0f;
+    apply_paper(ra, pp, nullptr);
+    CHECK(a.pixels == b.pixels);
+    pp.strength = 0.5f;
+    Image c1 = b, c2 = b;
+    RenderTarget r1, r2;
+    r1.attach(c1, {0, 0, 300, 200});
+    r2.attach(c2, {0, 0, 300, 200});
+    apply_paper(r1, pp, nullptr);
+    apply_paper(r2, pp, nullptr);
+    CHECK(c1.pixels == c2.pixels && c1.pixels != b.pixels);  // the same paper every time
+  });
+
+  test("anime filters: Line Art draws a cube's edges as creases (rasterized and path traced), a 30-degree fold at 20 but not at 40, and nothing on a smooth sphere", [] {
+    Editor ed;
+    r57_open(ed);
+    ed.command("select Main Camera");
+    ed.command("filter add Line Art");
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    LineArtEffect *la = cam ? cam->get<CameraFilters>()->find<LineArtEffect>() : nullptr;
+    CHECK(la != nullptr);
+    if (!la) return;
+    la->silhouettes = false, la->object_edges = false;  // creases alone
+    la->color = Vec3(1.0f, 0.0f, 1.0f);              // magenta: nothing else in the scene is
+    auto crease_pixels = [&](const char *engine) {
+      cam->get<CameraFilters>()->effects[0]->enabled = true;
+      ed.mark_changed_for_test("R61 crease");
+      ed.step_frame_headless();
+      const Image &img = r57_render(ed, engine, true);
+      int n = 0, solid = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255) continue;
+        solid++;
+        n += (int)((c >> 16) & 255) > 200 && (int)(c & 255) > 200 && (int)((c >> 8) & 255) < 90;
+      }
+      return std::make_pair(n, solid);
+    };
+    auto cube = crease_pixels("Rasterized");
+    const Image cube_raster = ed.render_image_for_test();
+    auto cube_pt = crease_pixels("Path");
+    const Image &cube_traced = ed.render_image_for_test();
+    /* The trace's creases where the rasterizer's are (within a pixel): its depth is the pixel centres', not the
+     * jittered samples' (which drew noise on the faces). */
+    auto magenta = [](uint32_t c) { return (c >> 24) == 255 && (int)((c >> 16) & 255) > 200 && (int)(c & 255) > 200 && (int)((c >> 8) & 255) < 90; };
+    int near_raster = 0, traced_lines = 0;
+    for (int y = 0; y < cube_traced.height; y++)
+      for (int x = 0; x < cube_traced.width; x++) {
+        if (!magenta(cube_traced.pixels[(size_t)y * cube_traced.width + x])) continue;
+        traced_lines++;
+        bool near = false;
+        for (int dy = -1; dy <= 1; dy++)
+          for (int dx = -1; dx <= 1; dx++) {
+            const int xx = x + dx, yy = y + dy;
+            if (xx >= 0 && yy >= 0 && xx < cube_raster.width && yy < cube_raster.height && magenta(cube_raster.pixels[(size_t)yy * cube_raster.width + xx])) near = true;
+          }
+        near_raster += near;
+      }
+    std::printf("    cube: %d crease pixels rasterized, %d traced (%d of them by the rasterized ones)\n", cube.first, cube_pt.first, near_raster);
+    CHECK(cube.first > 15 && cube_pt.first > 15);  // (the cube is small in a 160 x 90 render: its three visible edges)
+    CHECK(near_raster * 10 >= traced_lines * 9);
+    /* A plate folded 30 degrees along its middle. */
+    GameObject *g = ed.scene().find_by_name("Cube");
+    if (!g) return;
+    auto plate = std::make_shared<Mesh>();
+    const float a = 30.0f * kDeg2Rad;
+    plate->add_vert({-1.5f, 0.0f, -1.5f});
+    plate->add_vert({0.0f, 0.0f, -1.5f});
+    plate->add_vert({0.0f, 0.0f, 1.5f});
+    plate->add_vert({-1.5f, 0.0f, 1.5f});
+    plate->add_vert({1.5f * std::cos(a), 1.5f * std::sin(a), -1.5f});
+    plate->add_vert({1.5f * std::cos(a), 1.5f * std::sin(a), 1.5f});
+    plate->add_face({0, 3, 2, 1});
+    plate->add_face({1, 2, 5, 4});
+    g->get<MeshFilter>()->mesh = plate;
+    MaterialPtr both = make_material("Plate", Vec3(0.7f));  // (the default cube has no material slot of its own)
+    both->double_sided = true;
+    g->get<MeshRenderer>()->materials = {both};
+    g->mark_dirty();
+    la->crease_angle = 20.0f;
+    const auto plate20 = crease_pixels("Rasterized");
+    const int at20 = plate20.first;
+    std::printf("    the plate covers %d pixels\n", plate20.second);
+    la->crease_angle = 40.0f;
+    const int at40 = crease_pixels("Rasterized").first;
+    g->get<MeshFilter>()->mesh = primitives::uv_sphere(1.5f, 64, 32);
+    g->mark_dirty();
+    auto sph = crease_pixels("Rasterized");
+    std::printf("    30-degree fold: %d pixels at 20, %d at 40; smooth sphere: %d of %d\n", at20, at40, sph.first, sph.second);
+    CHECK(at20 > 10 && at40 == 0);
+    CHECK(sph.first * 100 <= sph.second);
+  });
+
+  test("material texture fields: a procedural texture's output shows its image and name (not missing, not Non-Color), a missing one says so", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("newtex R61Field Bricks");
+    TextureRef albedo{"Assets/Textures/R61Field.ptex#albedo", false}, normal{"Assets/Textures/R61Field.ptex#normal", true};
+    CHECK(resolve_texture_ref(albedo) != nullptr && resolve_texture_ref(normal) != nullptr);
+    CHECK(texture_ref_label(albedo) == "R61Field (albedo)" && texture_ref_label(normal) == "R61Field (normal)");
+    CHECK(texture_ref_is_procedural(normal) && !texture_ref_is_procedural(TextureRef{"Assets/Textures/x.png", true}));
+    /* The same image the material renders with. */
+    MaterialPtr m = make_material("Field", Vec3(1.0f));
+    m->base_map = albedo;
+    m->touch();
+    CHECK(m->textures().base == resolve_texture_ref(albedo));
+    CHECK(resolve_texture_ref(TextureRef{"Assets/Textures/NoSuch.ptex#albedo", false}) == nullptr);
+    CHECK(resolve_texture_ref(TextureRef{"generated:UV Grid", false}) != nullptr && texture_ref_label(TextureRef{"generated:UV Grid", false}) == "UV Grid");
+    std::remove(resolve_asset_path("Assets/Textures/R61Field.ptex").c_str());
+  });
+
+  test("procedural textures: the Normal / Roughness / Height Map switches make those outputs neutral while a Color Ramp still colours by the height", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("newtex R61Maps Bricks");
+    ProceduralTexturePtr pt = texture_asset("Assets/Textures/R61Maps.ptex");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    pt->width = pt->height = 64;
+    pt->add("Color Ramp");  // the albedo from the height: mortar and bricks two colours
+    pt->touch();
+    const Bitmap albedo_on = pt->output(0), normal_on = pt->output(1);
+    pt->use_normal = false, pt->use_roughness = false, pt->use_height = false;
+    pt->touch();
+    const Bitmap albedo_off = pt->output(0), normal_off = pt->output(1), rough_off = pt->output(2), height_off = pt->output(3);
+    CHECK(albedo_on.rgba8 == albedo_off.rgba8);  // the colour (and the ramp's input, the height inside) unchanged
+    std::set<uint32_t> cols;
+    for (size_t i = 0; i < albedo_off.rgba8.size(); i += 4) cols.insert((uint32_t)albedo_off.rgba8[i] << 16 | (uint32_t)albedo_off.rgba8[i + 1] << 8 | albedo_off.rgba8[i + 2]);
+    CHECK(cols.size() >= 2);  // the ramp still separates bricks from mortar
+    bool flat = true, rough1 = true, mid = true, bumpy = false;
+    for (size_t i = 0; i < normal_off.rgba8.size(); i += 4) {
+      flat = flat && normal_off.rgba8[i] == 128 && normal_off.rgba8[i + 1] == 128 && normal_off.rgba8[i + 2] == 255;
+      rough1 = rough1 && rough_off.rgba8[i] == 255;
+      mid = mid && height_off.rgba8[i] == 128;
+      bumpy = bumpy || normal_on.rgba8[i] != 128;
+    }
+    CHECK(flat && rough1 && mid && bumpy);
+    /* Assign to Selection gives only the maps that are on. */
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test("Assets/Textures/R61Maps.ptex");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const Material &m = *cube->get<MeshRenderer>()->materials[0];
+    CHECK(m.base_map.path == "Assets/Textures/R61Maps.ptex#albedo" && m.normal_map.empty() && m.roughness_map.empty());
+    /* The switches save with the texture. */
+    ProceduralTexture back;
+    CHECK(load_texture_text(save_texture_text(*pt), back));
+    CHECK(!back.use_normal && !back.use_roughness && !back.use_height);
+    std::remove(resolve_asset_path("Assets/Textures/R61Maps.ptex").c_str());
+  });
+
+  test("anime filters: the Anime and Manga looks add their effects in order, one undo step removes them, and a scene keeps them", [] {
+    Editor ed;
+    r57_open(ed);
+    ed.step_frame_headless();  // r57_open's settings as their own undo step (not merged with the look's)
+    ed.command("select Main Camera");
+    ed.command("filter look Manga");
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CameraFilters *cf = cam ? cam->get<CameraFilters>() : nullptr;
+    CHECK(cf && cf->effects.size() == 4);
+    if (!cf || cf->effects.size() != 4) return;
+    CHECK(std::string(cf->effects[0]->type_name()) == GrayscaleEffect::kName && std::string(cf->effects[1]->type_name()) == HalftoneEffect::kName &&
+          std::string(cf->effects[2]->type_name()) == LineArtEffect::kName && std::string(cf->effects[3]->type_name()) == PaperEffect::kName);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    GameObject *bc = back.find_by_name("Main Camera");
+    CHECK(bc && bc->get<CameraFilters>() && bc->get<CameraFilters>()->effects.size() == 4);
+    ed.step_frame_headless();
+    ed.command("undo");
+    cam = ed.scene().find_by_name("Main Camera");
+    cf = cam ? cam->get<CameraFilters>() : nullptr;
+    CHECK(!cf || cf->effects.empty());
+    ed.command("filter look Anime");
+    cam = ed.scene().find_by_name("Main Camera");
+    cf = cam->get<CameraFilters>();
+    CHECK(cf && cf->effects.size() == 3 && std::string(cf->effects[0]->type_name()) == LineArtEffect::kName);
+    /* The look renders. (NaN and huge fields: the stress section `filters` fuzzes every effect.) */
+    const Image &img = r57_render(ed, "Rasterized", false);
+    CHECK(img.width == 160);
+    ed.command("filter look Comic");  // unknown: a warning, nothing added
+    CHECK(cam->get<CameraFilters>()->effects.size() == 3);
+    ed.command("select Directional Light");  // and no empty stack on an object that had none
+    ed.command("filter look Comic");
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    CHECK(sun && !sun->get<CameraFilters>());
+  });
+}
+
+/* ===================================================================== */
+/* Round 62 (task 0040): axis materials by height, with a noisy border     */
+/* ===================================================================== */
+
+static bool r62_white(Vec3 c) { return c.x > 0.85f && c.y > 0.85f && c.z > 0.85f; }
+
+static void round62_tests() {
+  test("axis materials: Axis High covers the slope's parts above High Start, blends across High Blend, and nothing changes without it", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    R51Mats am = r51_mats(1);
+    Material snow;
+    snow.name = "Snow";
+    snow.base_color = {0.95f, 0.95f, 0.97f};
+    create_material_asset(snow, "Assets/Materials/R51/Snow.mat");
+    /* Without the band: the task-0029 result, bit for bit. */
+    const SurfaceSample before_top = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 20.0f, 0.1f});
+    am.axis->axis_high_start = 5.0f;
+    am.axis->axis_high_blend = 1.0f;
+    am.axis->touch();
+    const SurfaceSample same = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 20.0f, 0.1f});
+    CHECK(same.albedo.x == before_top.albedo.x && same.albedo.y == before_top.albedo.y && same.albedo.z == before_top.albedo.z);
+    am.axis->axis_high = "Assets/Materials/R51/Snow.mat";
+    am.axis->touch();
+    const Vec3 hi_top = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 7.0f, 0.1f}).albedo;
+    const Vec3 hi_side = r51_eval(*am.axis, {1, 0, 0}, {1, 0, 0}, {0.3f, 7.0f, 0.1f}).albedo;
+    const Vec3 lo_top = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 3.0f, 0.1f}).albedo;
+    const Vec3 lo_side = r51_eval(*am.axis, {1, 0, 0}, {1, 0, 0}, {0.3f, 3.0f, 0.1f}).albedo;
+    const Vec3 mid = r51_eval(*am.axis, {0, 1, 0}, {0, 1, 0}, {0.3f, 5.0f, 0.1f}).albedo;
+    CHECK(r62_white(hi_top) && r62_white(hi_side));
+    CHECK(r51_green(lo_top) && r51_brown(lo_side));
+    CHECK(!r62_white(mid) && !r51_green(mid) && mid.x > 0.4f);  // half way between snow and grass
+    /* Local mode measures the object's own height. */
+    am.axis->axis_mode = 2;
+    am.axis->touch();
+    SurfacePoint sp;
+    sp.position = {0, 100, 0};       // high up in the world...
+    sp.local_position = {0, 2, 0};   // ...but low on the object
+    sp.normal = sp.geo_normal = sp.local_normal = {0, 1, 0};
+    CHECK(r51_green(evaluate_material(*am.axis, am.axis->textures(), sp).albedo));
+  });
+
+  test("axis materials: Axis Noise 0 changes nothing; with noise the grass / dirt border wanders along the surface, the same at the same point", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    R51Mats am = r51_mats(1);
+    const float c = std::cos(45.0f * kDeg2Rad);
+    const Vec3 n_border = normalize(Vec3(std::sqrt(1.0f - c * c), c, 0.0f));  // right at the angle
+    std::vector<Vec3> before;
+    for (int i = 0; i < 64; i++) before.push_back(r51_eval(*am.axis, n_border, n_border, {i * 0.7f, 1.0f, i * 0.3f}).albedo);
+    am.axis->axis_noise = 0.0f;
+    am.axis->touch();
+    bool same = true;
+    for (int i = 0; i < 64; i++) {
+      const Vec3 a = r51_eval(*am.axis, n_border, n_border, {i * 0.7f, 1.0f, i * 0.3f}).albedo;
+      same = same && a.x == before[(size_t)i].x && a.y == before[(size_t)i].y && a.z == before[(size_t)i].z;
+    }
+    CHECK(same);
+    am.axis->axis_noise = 0.8f;
+    am.axis->axis_noise_scale = 2.0f;
+    am.axis->axis_blend = 0.02f;
+    am.axis->touch();
+    int green = 0, brown = 0;
+    bool stable = true;
+    for (int i = 0; i < 200; i++) {
+      const Vec3 pos{i * 0.37f, 1.0f, i * 0.21f};
+      const Vec3 a = r51_eval(*am.axis, n_border, n_border, pos).albedo, b = r51_eval(*am.axis, n_border, n_border, pos).albedo;
+      stable = stable && a.x == b.x && a.y == b.y && a.z == b.z;
+      green += r51_green(a), brown += r51_brown(a);
+    }
+    std::printf("    at the border angle with noise: %d grass, %d dirt of 200 points\n", green, brown);
+    CHECK(stable && green > 30 && brown > 30);
+    /* Noise 0: the slope rule alone (task 0029's formula: Top above the angle's cosine, Side below). */
+    am.axis->axis_noise = 0.0f;
+    am.axis->axis_blend = 0.0f;
+    am.axis->touch();
+    int ok = 0;
+    for (int i = 0; i < 90; i++) {
+      const float ang = i * kDeg2Rad, ny = std::cos(ang);
+      const Vec3 n = normalize(Vec3(std::sin(ang), ny, 0.0f));
+      const Vec3 a = r51_eval(*am.axis, n, n, {i * 0.3f, 1.0f, 0.0f}).albedo;
+      ok += ny >= c ? r51_green(a) : r51_brown(a);
+    }
+    CHECK(ok == 90);
+    /* NaN fields and positions don't make NaN colours, with a height band too. */
+    Material snow;
+    snow.base_color = {0.95f, 0.95f, 0.97f};
+    create_material_asset(snow, "Assets/Materials/R51/Snow.mat");
+    am.axis->axis_high = "Assets/Materials/R51/Snow.mat";
+    am.axis->axis_noise = 0.5f;
+    am.axis->axis_noise_scale = std::nanf("");
+    am.axis->axis_high_start = std::nanf("");
+    am.axis->axis_high_blend = std::numeric_limits<float>::infinity();
+    am.axis->touch();
+    for (const Vec3 pos : {Vec3(1, 1, 1), Vec3(std::nanf(""), 1, 1), Vec3(1, std::numeric_limits<float>::infinity(), 1)}) {
+      const Vec3 a = r51_eval(*am.axis, n_border, n_border, pos).albedo;
+      CHECK(std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z));
+    }
+  });
+
+  test("axis materials: a tilted plane crossing High Start: rasterized, CPU and GPU path traced agree on how much is snow", [] {
+    Editor ed;
+    r57_open(ed);
+    R51Mats am = r51_mats(1);
+    Material snow;
+    snow.name = "Snow";
+    snow.base_color = {0.95f, 0.95f, 0.97f};
+    create_material_asset(snow, "Assets/Materials/R51/Snow.mat");
+    am.axis->axis_high = "Assets/Materials/R51/Snow.mat";
+    am.axis->axis_high_start = 0.6f;
+    am.axis->axis_high_blend = 0.05f;
+    am.axis->axis_noise = 0.3f;
+    am.axis->axis_noise_scale = 0.5f;
+    am.axis->touch();
+    GameObject *g = ed.scene().find_by_name("Cube");
+    if (!g) return;
+    g->get<MeshFilter>()->mesh = primitives::plane(3.0f, 4);
+    g->get<MeshRenderer>()->materials = {am.axis};
+    g->set_world_rotation(Quat::euler({-25.0f, 0.0f, 0.0f}));
+    g->mark_dirty();
+    ed.mark_changed_for_test("R62 plane");
+    ed.step_frame_headless();
+    auto snow_share = [&](const Image &img) {
+      int solid = 0, white = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255) continue;
+        solid++;
+        /* Snow: bright and neutral (lit and tone mapped it isn't 255; grass is green, dirt brown). */
+        const int rr = (int)((c >> 16) & 255), gg = (int)((c >> 8) & 255), bb2 = (int)(c & 255);
+        white += std::max({rr, gg, bb2}) - std::min({rr, gg, bb2}) < 30 && rr > 110;
+      }
+      return solid ? (double)white / solid : 0.0;
+    };
+    const double r = snow_share(r57_render(ed, "Rasterized", true));
+    ed.command("set Render.Samples 32");
+    const double p = snow_share(r57_render(ed, "Path", true));
+    std::printf("    snow: %.1f %% rasterized, %.1f %% CPU traced\n", r * 100.0, p * 100.0);
+    CHECK(r > 0.1 && r < 0.9 && std::fabs(r - p) < 0.08);
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const double gp = snow_share(r57_render(ed, "Path", true));
+      std::printf("    GPU: %.1f %% (%s)\n", gp * 100.0, ed.render_device_for_test().c_str());
+      /* On the GPU indeed: a kernel that failed to build falls back to the CPU and would pass the comparison. */
+      CHECK(ed.render_gpu_error_for_test().empty() && ed.render_device_for_test().find("CPU") == std::string::npos);
+      CHECK(std::fabs(gp - p) < 0.03);
+      ed.command("device cpu");
+    }
+  });
+
+  test("axis materials: the height and noise fields round-trip through a .mat", [] {
+    Material m;
+    m.axis_mode = 1;
+    m.axis_high = "Assets/Materials/Snow.mat";
+    m.axis_high_start = 12.5f;
+    m.axis_high_blend = 2.0f;
+    m.axis_noise = 0.4f;
+    m.axis_noise_scale = 7.0f;
+    Material back;
+    CHECK(load_material_text(save_material_text(m), back));
+    CHECK(back.axis_high == "Assets/Materials/Snow.mat" && back.axis_high_start == 12.5f && back.axis_high_blend == 2.0f &&
+          back.axis_noise == 0.4f && back.axis_noise_scale == 7.0f);
+    /* A file from before (no such lines) loads with the defaults. */
+    Material old;
+    CHECK(load_material_text("blendity_material 1\n  Name \"Old\"\n  Axis_Mode 1\nend\n", old));
+    CHECK(old.axis_high.empty() && old.axis_noise == 0.0f && old.axis_high_start == 10.0f);
+    /* The pickers (Inspector and Materials window) set every part, Axis High included, as one undo step each. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    MaterialPtr parent = make_material("Ground", Vec3(1.0f));
+    parent->axis_mode = 1;
+    MaterialPtr high = create_material_asset(Material(), "Assets/Materials/R62High.mat");
+    for (const char *f : {"Axis Top", "Axis Side", "Axis Bottom", "Axis High"}) ed.set_material_ref_for_test(parent.get(), f, high);
+    CHECK(parent->axis_top == high->asset_path && parent->axis_side == high->asset_path && parent->axis_bottom == high->asset_path &&
+          parent->axis_high == high->asset_path);
+    std::remove(resolve_asset_path("Assets/Materials/R62High.mat").c_str());
+  });
+}
+
+/* ===================================================================== */
+/* Round 63 (task 0041): deforming modifiers move positions in place       */
+/* ===================================================================== */
+
+/* got (a deformed, in-place mesh) against ref (the same stack evaluated in full): the positions bit for
+ * bit, and per mesh corner the render vertex's position bit for bit and normal within max_dn. */
+static bool r63_same(const Mesh &got, const Mesh &ref, float *max_dn) {
+  if (got.positions.size() != ref.positions.size() || got.corner_count() != ref.corner_count()) return false;
+  bool ok = std::memcmp(got.positions.data(), ref.positions.data(), got.positions.size() * sizeof(Vec3)) == 0;
+  const RenderMesh &a = got.render_mesh(), &b = ref.render_mesh();
+  std::vector<uint32_t> ca(got.corner_count(), UINT32_MAX), cb(ref.corner_count(), UINT32_MAX);
+  for (size_t k = 0; k < a.tri_corner.size(); k++) ca[a.tri_corner[k]] = a.indices[k];
+  for (size_t k = 0; k < b.tri_corner.size(); k++) cb[b.tri_corner[k]] = b.indices[k];
+  float dn = 0.0f;
+  for (size_t c = 0; c < ca.size(); c++) {
+    if (ca[c] == UINT32_MAX || cb[c] == UINT32_MAX) {
+      ok = ok && ca[c] == cb[c];
+      continue;
+    }
+    ok = ok && std::memcmp(&a.positions[ca[c]], &b.positions[cb[c]], sizeof(Vec3)) == 0;
+    dn = std::max(dn, length(a.normals[ca[c]] - b.normals[cb[c]]));
+  }
+  *max_dn = dn;
+  return ok;
+}
+
+/* The five meshes of the spec: a cube, a UV sphere, a 50k-face grid, sharp edges, UV seams. */
+static std::vector<std::pair<std::string, MeshPtr>> r63_meshes() {
+  std::vector<std::pair<std::string, MeshPtr>> out;
+  out.push_back({"cube", primitives::cube(1.0f)});
+  MeshPtr sphere = primitives::uv_sphere(0.5f, 24, 16);
+  sphere->smooth = true;
+  out.push_back({"UV sphere", sphere});
+  MeshPtr grid = primitives::grid(4.0f, 224, 224);  // 50,176 faces
+  grid->smooth = true;
+  out.push_back({"50k-face grid", grid});
+  MeshPtr sharp = primitives::cylinder(0.5f, 2.0f, 24);
+  meshops::shade_auto_smooth(*sharp, 30.0f);  // smooth sides, hard caps (sharp edges)
+  out.push_back({"sharp edges", sharp});
+  MeshPtr seams = primitives::torus(0.5f, 0.2f, 32, 16);
+  seams->smooth = true;
+  seams->seams_sharp = true;
+  std::vector<std::pair<uint32_t, uint32_t>> edges;
+  seams->edges(edges);
+  for (size_t i = 0; i < edges.size(); i += 7) seams->set_seam(edges[i].first, edges[i].second, true);
+  out.push_back({"UV seams", seams});
+  return out;
+}
+
+static void round63_tests() {
+  test("deforming modifiers: changing a field moves the render mesh in place, the same as evaluating the stack in full, on five meshes", [] {
+    int cases = 0, in_place = 0, mismatches = 0;
+    float worst = 0.0f;
+    for (auto &[name, base] : r63_meshes()) {
+      for (int kind = 0; kind < 4; kind++) {
+        Scene s;
+        GameObject *g = s.create("Deformed");
+        g->add<MeshFilter>()->mesh = base;
+        Component *mod = nullptr;
+        std::function<void(float)> set;
+        if (kind == 0) {
+          auto *m = g->add<SimpleDeformModifier>();
+          set = [m](float v) { m->angle = v; };
+          mod = m;
+        }
+        else if (kind == 1) {
+          auto *m = g->add<DisplaceModifier>();
+          set = [m](float v) { m->strength = v / 300.0f; };
+          mod = m;
+        }
+        else if (kind == 2) {
+          auto *m = g->add<CastModifier>();
+          set = [m](float v) { m->factor = v / 100.0f; };
+          mod = m;
+        }
+        else {
+          auto *m = g->add<SmoothModifier>();
+          set = [m](float v) { m->factor = v / 100.0f; };
+          mod = m;
+        }
+        set(45.0f);
+        const RenderMesh &first = g->evaluated_mesh()->render_mesh_tangents();
+        const uint64_t build = first.build_serial;
+        for (float v : {60.0f, -30.0f, 10.0f}) {
+          set(v);
+          const Mesh *got = g->evaluated_mesh();
+          const RenderMesh &rm = got->render_mesh_tangents();
+          in_place += rm.build_serial == build;
+          Mesh ref = *base;
+          mod->modify(ref);
+          ref.touch();
+          float dn = 0.0f;
+          const bool same = r63_same(*got, ref, &dn);
+          mismatches += !same || dn > 1e-5f;
+          if (!same || dn > 1e-5f) std::printf("    %s, modifier %d, value %.0f: positions %s, normals off by %g\n", name.c_str(), kind, v, same ? "same" : "DIFFER", dn);
+          worst = std::max(worst, dn);
+          cases++;
+          /* Tangents stay unit length and at right angles to the normals. */
+          bool tangents_ok = rm.tangents.size() == rm.positions.size();
+          for (size_t i = 0; tangents_ok && i < rm.tangents.size(); i += 97)
+            tangents_ok = std::fabs(length(rm.tangents[i].xyz()) - 1.0f) < 1e-3f && std::fabs(dot(rm.tangents[i].xyz(), rm.normals[i])) < 1e-3f;
+          CHECK(tangents_ok);
+        }
+      }
+    }
+    std::printf("    %d changes, %d moved in place, worst normal difference %g\n", cases, in_place, worst);
+    CHECK(cases == 60);
+    CHECK(mismatches == 0);
+    CHECK(in_place == 60);  // these five keep their split pattern under these changes
+  });
+
+  test("deforming modifiers: only the deforming tail is re-run; the render mesh keeps its build while a generative modifier rebuilds", [] {
+    Scene s;
+    GameObject *g = s.create("Twist");
+    MeshPtr base = primitives::uv_sphere(0.5f, 32, 24);
+    base->smooth = true;
+    g->add<MeshFilter>()->mesh = base;
+    auto *sub = g->add<SubdivisionSurface>();  // a head: evaluated once, kept
+    auto *tw = g->add<SimpleDeformModifier>();
+    const Mesh *m0 = g->evaluated_mesh();
+    const RenderMesh &rm0 = m0->render_mesh();
+    const uint64_t build = rm0.build_serial, serial = rm0.serial, version = m0->version, deform = m0->deform_version;
+    tw->angle = 90.0f;
+    const Mesh *m1 = g->evaluated_mesh();
+    const RenderMesh &rm1 = m1->render_mesh();
+    CHECK(m1 == m0);  // the same mesh, written in place (nothing else holds it)
+    CHECK(m1->version == version && m1->deform_version == deform + 1);
+    CHECK(rm1.build_serial == build && rm1.serial != serial);
+    /* The same result as the whole stack from scratch. */
+    Mesh ref = *base;
+    sub->modify(ref);
+    tw->modify(ref);
+    ref.touch();
+    float dn = 0.0f;
+    CHECK(r63_same(*m1, ref, &dn) && dn <= 1e-5f);
+    /* The head's own field: a full evaluation. */
+    sub->levels = 2;
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial != build);
+    const uint64_t build2 = g->evaluated_mesh()->render_mesh().build_serial;
+    /* A generative modifier after the deformer: the whole stack is a head, every change rebuilds. */
+    g->add<MirrorModifier>();
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial != build2);
+    const uint64_t build3 = g->evaluated_mesh()->render_mesh().build_serial;
+    tw->angle = 30.0f;
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial != build3);
+    /* Edit Mode's cage (kind 2) keeps the full path. */
+    s.find_by_name("Twist")->components.pop_back();
+    const uint64_t b2 = g->evaluated_mesh(2)->render_mesh().build_serial;
+    tw->angle = 40.0f;
+    CHECK(g->evaluated_mesh(2)->render_mesh().build_serial != b2);
+  });
+
+  test("deforming modifiers: when a deform changes how corners split (a flat grid made bumpy) the render mesh is rebuilt, then follows in place", [] {
+    Scene s;
+    GameObject *g = s.create("Bumpy");
+    MeshPtr base = primitives::grid(2.0f, 16, 16);
+    base->smooth = false;  // flat: a flat grid's corners share one normal, a bumpy one's don't
+    g->add<MeshFilter>()->mesh = base;
+    auto *d = g->add<DisplaceModifier>();
+    d->strength = 0.0f;
+    const uint64_t b0 = g->evaluated_mesh()->render_mesh().build_serial;
+    const size_t verts0 = g->evaluated_mesh()->render_mesh().positions.size();
+    d->strength = 0.3f;
+    const RenderMesh &rm1 = g->evaluated_mesh()->render_mesh();
+    CHECK(rm1.build_serial != b0 && rm1.positions.size() > verts0);  // rebuilt, split per face
+    const uint64_t b1 = rm1.build_serial;
+    d->strength = 0.35f;
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial == b1);  // now in place
+    Mesh ref = *base;
+    d->modify(ref);
+    ref.touch();
+    float dn = 0.0f;
+    CHECK(r63_same(*g->evaluated_mesh(), ref, &dn) && dn <= 1e-5f);
+  });
+
+  test("deforming modifiers: a Boolean whose cutter is deformed re-cuts on every change of the deformer", [] {
+    if (!meshops::boolean_available()) return;
+    Scene s;
+    GameObject *a = s.create("Block");
+    a->add<MeshFilter>()->mesh = primitives::cube(2.0f);
+    auto *boolean = a->add<BooleanModifier>();
+    boolean->object = "Cutter";
+    GameObject *b = s.create("Cutter");
+    MeshPtr bar = primitives::cube(1.0f);
+    for (Vec3 &p : bar->positions) p = Vec3(p.x * 0.4f, p.y * 3.0f, p.z * 3.0f);  // a slab through the block
+    bar->touch();
+    b->add<MeshFilter>()->mesh = bar;
+    auto *tw = b->add<SimpleDeformModifier>();
+    tw->angle = 0.0f;
+    (void)a->evaluated_mesh()->render_mesh();
+    for (float ang : {30.0f, 60.0f}) {
+      tw->angle = ang;
+      const Mesh *cut = a->evaluated_mesh();
+      /* The reference: the same cut against a cutter evaluated from scratch. */
+      Mesh cutter = *bar;
+      tw->modify(cutter);
+      Mesh ref = *a->get<MeshFilter>()->mesh;
+      std::string err;
+      CHECK(meshops::boolean_op(ref, cutter, a->world_matrix().inverse() * b->world_matrix(), meshops::BooleanOp::Difference, &err));
+      CHECK(cut->positions == ref.positions && cut->corner_verts == ref.corner_verts);
+    }
+  });
+
+  test("deforming modifiers: tangents after a deform depend on the shape, not on the drag that led there, and follow a twisted cap", [] {
+    MeshPtr base = primitives::cylinder(0.3f, 2.0f, 24);
+    Scene s;
+    GameObject *g1 = s.create("Dragged"), *g2 = s.create("Direct");
+    g1->add<MeshFilter>()->mesh = base;
+    g2->add<MeshFilter>()->mesh = base;
+    auto *t1 = g1->add<SimpleDeformModifier>();
+    auto *t2 = g2->add<SimpleDeformModifier>();
+    t1->angle = t2->angle = 1.0f;
+    const uint64_t b1 = g1->evaluated_mesh()->render_mesh_tangents().build_serial;
+    const uint64_t b2 = g2->evaluated_mesh()->render_mesh_tangents().build_serial;
+    for (float a : {30.0f, 90.0f, 140.0f, 60.0f, 90.0f}) {
+      t1->angle = a;
+      (void)g1->evaluated_mesh()->render_mesh_tangents();
+    }
+    t2->angle = 90.0f;
+    const RenderMesh &r1 = g1->evaluated_mesh()->render_mesh_tangents(), &r2 = g2->evaluated_mesh()->render_mesh_tangents();
+    std::printf("    builds: dragged %s, direct %s\n", r1.build_serial == b1 ? "kept" : "rebuilt", r2.build_serial == b2 ? "kept" : "rebuilt");
+    CHECK(r1.build_serial != r2.build_serial);
+    CHECK(r1.tangents.size() == r2.tangents.size() &&
+          std::memcmp(r1.tangents.data(), r2.tangents.data(), r1.tangents.size() * sizeof(Vec4)) == 0);
+    /* Against MikkTSpace on the same twisted shape built in full: the caps turn with the twist too. */
+    Mesh ref = *base;
+    t2->modify(ref);
+    ref.touch();
+    const RenderMesh &rf = ref.render_mesh_tangents();
+    std::vector<uint32_t> ca(ref.corner_count(), UINT32_MAX), cb(ref.corner_count(), UINT32_MAX);
+    for (size_t k = 0; k < r2.tri_corner.size(); k++) ca[r2.tri_corner[k]] = r2.indices[k];
+    for (size_t k = 0; k < rf.tri_corner.size(); k++) cb[rf.tri_corner[k]] = rf.indices[k];
+    size_t close = 0, n = 0;
+    for (size_t c = 0; c < ca.size(); c++) {
+      if (ca[c] == UINT32_MAX || cb[c] == UINT32_MAX) continue;
+      n++;
+      close += dot(r2.tangents[ca[c]].xyz(), rf.tangents[cb[c]].xyz()) > 0.95f && r2.tangents[ca[c]].w == rf.tangents[cb[c]].w;
+    }
+    std::printf("    %zu of %zu corners within 18 degrees of MikkTSpace with the same handedness\n", close, n);
+    CHECK(n > 0 && close * 100 >= n * 95);
+  });
+
+  test("deforming modifiers: a saved and reloaded scene evaluates to the same deformed mesh", [] {
+    Scene s;
+    GameObject *g = s.create("Saved");
+    g->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 24, 16);
+    g->add<MeshRenderer>();
+    auto *c = g->add<CastModifier>();
+    c->shape = 2;
+    c->factor = 0.2f;
+    (void)g->evaluated_mesh()->render_mesh();
+    c->factor = 0.7f;  // in place
+    const std::vector<Vec3> want = g->evaluated_mesh()->positions;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    GameObject *h = back.find_by_name("Saved");
+    CHECK(h && h->evaluated_mesh() && h->evaluated_mesh()->positions == want);
+  });
+
+  test("deforming modifiers: a snapshot of the scene keeps its deformed mesh when the original changes again", [] {
+    Scene s;
+    GameObject *g = s.create("Bend");
+    MeshPtr base = primitives::cylinder(0.3f, 2.0f, 16);
+    g->add<MeshFilter>()->mesh = base;
+    auto *bend = g->add<SimpleDeformModifier>();
+    bend->mode = 1;
+    bend->angle = 60.0f;
+    const Mesh *m0 = g->evaluated_mesh();
+    (void)m0->render_mesh();
+    std::unique_ptr<Scene> snap = s.clone();  // shares the evaluated mesh (an undo step does this)
+    const std::vector<Vec3> kept = snap->find_by_name("Bend")->evaluated_mesh()->positions;
+    const std::vector<Vec3> kept_rm = snap->find_by_name("Bend")->evaluated_mesh()->render_mesh().positions;
+    bend->angle = 120.0f;
+    const Mesh *m1 = g->evaluated_mesh();
+    CHECK(m1 != m0);  // copied before writing: the snapshot's is shared
+    const Mesh *sm = snap->find_by_name("Bend")->evaluated_mesh();
+    CHECK(sm->positions == kept);
+    CHECK(sm->render_mesh().positions == kept_rm);
+    CHECK(m1->positions != kept);
+  });
+
+  test("deforming modifiers: dragging Simple Deform's angle re-renders the view and the shadows, no stale picture, and undo brings the old shape back", [] {
+    Editor ed;
+    r34_open(ed);
+    MeshPtr base = primitives::cylinder(0.3f, 2.0f, 24);
+    GameObject *g = ed.scene().create("Twisted");
+    g->add<MeshFilter>()->mesh = base;
+    g->add<MeshRenderer>();
+    auto *tw = g->add<SimpleDeformModifier>();
+    tw->mode = 1;
+    tw->angle = 20.0f;
+    ed.mark_changed_for_test("R63 twisted");
+    r34_steps(ed, 4);
+    const uint64_t build = g->evaluated_mesh()->render_mesh().build_serial;
+    const std::vector<Vec3> at20 = g->evaluated_mesh()->positions;
+    ed.command("set Lighting.RealtimeGI true");
+    r34_steps(ed, 3);
+    ed.set_render_cache_verify(true);
+    const uint64_t vox0 = ed.voxelized_for_test();
+    const R34Change c = r34_change(ed, [&] {
+      tw->angle = 80.0f;
+      ed.mark_changed_for_test("R63 bend");
+    }, 2);
+    std::printf("    the change: %llu view renders, %llu shadow renders, %llu objects voxelized, %llu stale\n", (unsigned long long)c.d.renders,
+                (unsigned long long)c.d.shadows, (unsigned long long)(ed.voxelized_for_test() - vox0), (unsigned long long)c.d.mismatches);
+    CHECK(c.d.renders > 0 && c.d.shadows > 0);
+    CHECK(ed.voxelized_for_test() > vox0);  // voxel GI re-made the bent object
+    CHECK(c.before != c.after);
+    CHECK(c.d.mismatches == 0);
+    /* More changes, each a frame, as a drag gives them. */
+    const uint64_t bad0 = Editor::render_cache_mismatches_all();
+    for (float a : {85.0f, 90.0f, 95.0f, 100.0f}) {
+      tw->angle = a;
+      r34_steps(ed, 1);
+    }
+    ed.mark_changed_for_test("R63 drag");
+    r34_steps(ed, 2);
+    CHECK(Editor::render_cache_mismatches_all() == bad0);
+    ed.set_render_cache_verify(false);
+    CHECK(g->evaluated_mesh()->render_mesh().build_serial == build);  // the whole drag stayed in place
+    /* Undo to 80 then 20 degrees: the positions are the full evaluation's. */
+    ed.command("undo");
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Twisted");
+    CHECK(u && u->get<SimpleDeformModifier>() && u->get<SimpleDeformModifier>()->angle == 20.0f);
+    if (u) CHECK(u->evaluated_mesh()->positions == at20);
+  });
+}
+
+/* ===================================================================== */
+/* Round 64 (task 0042): curve objects, the Curve modifier, Array along a curve */
+/* ===================================================================== */
+
+/* A beam along +X from 0 to `len`, `w` thick, cut into `segs` along its length. */
+static MeshPtr r64_beam(float len, float w, int segs) {
+  MeshPtr m = std::make_shared<Mesh>();
+  for (int i = 0; i <= segs; i++)
+    for (int k = 0; k < 4; k++) {
+      const float y = (k == 1 || k == 2) ? w : -w, z = (k >= 2) ? w : -w;
+      m->add_vert({len * i / segs, y, z});
+    }
+  for (int i = 0; i < segs; i++)
+    for (int k = 0; k < 4; k++) {
+      const uint32_t a = (uint32_t)(i * 4 + k), b = (uint32_t)(i * 4 + (k + 1) % 4);
+      m->add_face({a, b, b + 4, a + 4});
+    }
+  m->touch();
+  return m;
+}
+
+/* An object with the beam and a Curve modifier, and a Curve object at the origin. */
+struct R64Scene {
+  Scene s;
+  GameObject *beam = nullptr, *curve_obj = nullptr;
+  Curve *curve = nullptr;
+  CurveModifier *mod = nullptr;
+  MeshPtr base;
+  R64Scene(MeshPtr m) {
+    base = m;
+    beam = s.create("Beam");
+    beam->add<MeshFilter>()->mesh = m;
+    mod = beam->add<CurveModifier>();
+    mod->object = "Path";
+    curve_obj = s.create("Path");
+    curve = curve_obj->add<Curve>();
+  }
+};
+
+static void round64_tests() {
+  test("curves: a straight curve along X leaves the mesh as it is (Bezier, Catmull-Rom and Poly)", [] {
+    for (int type = 0; type < 3; type++) {
+      R64Scene t(r64_beam(3.0f, 0.2f, 12));
+      t.curve->type = type;
+      for (int i = 0; i < 4; i++) t.curve->points.push_back({Vec3(i * 2.0f, 0, 0), 0.0f, 1.0f});
+      const Mesh *m = t.beam->evaluated_mesh();
+      float worst = 0.0f;
+      for (size_t i = 0; i < m->positions.size(); i++) worst = std::max(worst, length(m->positions[i] - t.base->positions[i]));
+      std::printf("    type %d: largest move %g\n", type, worst);
+      CHECK(worst < 1e-4f);
+    }
+  });
+
+  test("curves: a straight curve along each of the six deform axes leaves a mesh as it is; Tilt turns it, Radius scales it", [] {
+    const Vec3 dirs[6] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+    for (int axis = 0; axis < 6; axis++) {
+      R64Scene t(primitives::uv_sphere(0.5f, 12, 8));
+      t.mod->deform_axis = axis;
+      t.curve->type = 2;
+      t.curve->points = {{Vec3(0.0f), 0, 1}, {dirs[axis] * 4.0f, 0, 1}};
+      const Mesh *m = t.beam->evaluated_mesh();
+      float worst = 0.0f;
+      for (size_t i = 0; i < m->positions.size(); i++) worst = std::max(worst, length(m->positions[i] - t.base->positions[i]));
+      if (worst >= 1e-4f) std::printf("    axis %d: largest move %g\n", axis, worst);
+      CHECK(worst < 1e-4f);
+    }
+    /* Tilt 90 degrees all along X turns the cross-section a quarter turn round X; Radius 2 doubles it. */
+    R64Scene t(r64_beam(2.0f, 0.1f, 4));
+    t.curve->type = 2;
+    t.curve->points = {{Vec3(0, 0, 0), 90.0f, 2.0f}, {Vec3(5, 0, 0), 90.0f, 2.0f}};
+    const Mesh *m = t.beam->evaluated_mesh();
+    float worst = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i];
+      const Vec3 turned = Quat::axis_angle({1, 0, 0}, kPi * 0.5f).rotate(Vec3(0, v.y, v.z)) * 2.0f + Vec3(v.x, 0, 0);
+      worst = std::max(worst, length(m->positions[i] - turned));
+    }
+    std::printf("    tilt 90 and radius 2: off by %g\n", worst);
+    CHECK(worst < 1e-4f);
+  });
+
+  test("curves: the Circle preset is round, and a closed curve that isn't flat meets itself without a twist", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Curve: Circle");
+    GameObject *g = ed.scene().find_by_name("BezierCircle");
+    CHECK(g && g->curve());
+    if (!g || !g->curve()) return;
+    const CurvePath &path = g->curve()->local_path();
+    float lo = 1e9f, hi = 0.0f;
+    for (const Vec3 &p : path.pos) lo = std::min(lo, length(p)), hi = std::max(hi, length(p));
+    std::printf("    circle radius from %.4f to %.4f\n", lo, hi);
+    CHECK(lo > 0.99f && hi < 1.01f);
+    /* A trefoil knot: the frame carried round comes back turned; the correction spreads that turn so the normal
+     * at the end (just before the start) is the start's, turned only by the last short step. */
+    Curve knot;
+    knot.type = 2;
+    knot.closed = true;
+    for (int i = 0; i < 300; i++) {
+      const float a = i / 300.0f * 2.0f * kPi;
+      knot.points.push_back({Vec3(std::sin(a) + 2 * std::sin(2 * a), std::cos(a) - 2 * std::cos(2 * a), -std::sin(3 * a)), 0, 1});
+    }
+    const CurvePath kp = sample_curve(knot, Mat4::identity());
+    Vec3 p0, t0, n0, pe, te, ne;
+    float r;
+    kp.at(0.0f, p0, t0, n0, r);
+    kp.at(kp.total() - 1e-3f, pe, te, ne, r);
+    std::printf("    trefoil: the normal meets itself within %.2f degrees\n", std::acos(std::min(1.0f, dot(n0, ne))) * kRad2Deg);
+    CHECK(dot(n0, ne) > std::cos(3.0f * kDeg2Rad));
+  });
+
+  test("curves: with a curve's points selected, Delete removes the points, not the curve; selecting another object lets go of them", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("create Curve: Path");
+    ed.command("curve select Path 1 3");
+    ed.command("delete");
+    GameObject *g = ed.scene().find_by_name("Path");
+    CHECK(g && g->curve() && g->curve()->points.size() == 3);
+    if (g && g->curve() && g->curve()->points.size() == 3) CHECK(g->curve()->points[1].position.x == 0.0f);  // -2, 0, 2 left
+    CHECK(ed.points_selected_for_test().empty());
+    ed.command("curve select Path 0");
+    ed.command("select Cube");
+    CHECK(ed.points_selected_for_test().empty());
+    ed.command("delete");
+    CHECK(ed.scene().find_by_name("Path") != nullptr);  // the Cube went, the curve stayed
+  });
+
+  test("curves: a quarter circle bends a beam onto the arc, keeping each offset and the length along it", [] {
+    const float R = 2.0f;
+    R64Scene t(r64_beam(R * kPi * 0.5f * 0.9f, 0.1f, 40));
+    t.curve->type = 2;
+    for (int i = 0; i <= 512; i++) {
+      const float a = i / 512.0f * kPi * 0.5f;
+      t.curve->points.push_back({Vec3(R * std::sin(a), 0.0f, R * (1.0f - std::cos(a))), 0.0f, 1.0f});
+    }
+    const Mesh *m = t.beam->evaluated_mesh();
+    const Vec3 c(0, 0, R);  // the arc's centre: the beam's +Z side faces it
+    float worst_r = 0.0f, worst_a = 0.0f, worst_y = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i], p = m->positions[i];
+      const Vec3 d = Vec3(p.x - c.x, 0.0f, p.z - c.z);
+      worst_r = std::max(worst_r, std::fabs(length(d) - (R - v.z)));
+      const float ang = std::atan2(p.x, c.z - p.z);  // turned from the start, round the centre
+      if (v.x > 0.05f) worst_a = std::max(worst_a, std::fabs(ang * R - v.x) / v.x);
+      worst_y = std::max(worst_y, std::fabs(p.y - v.y));
+    }
+    std::printf("    radius off by %g, length along the arc off by %.3f %%, height off by %g\n", worst_r, worst_a * 100.0f, worst_y);
+    CHECK(worst_r < 1e-3f);
+    CHECK(worst_a < 0.01f);
+    CHECK(worst_y < 1e-4f);
+  });
+
+  test("curves: a closed curve wraps a long beam round; an open one goes on straight past its end", [] {
+    const float r = 1.0f, L = 2.0f * kPi * r;
+    R64Scene t(r64_beam(L * 1.5f, 0.05f, 60));
+    t.curve->type = 2;
+    t.curve->closed = true;
+    for (int i = 0; i < 360; i++) {
+      const float a = i / 360.0f * 2.0f * kPi;
+      t.curve->points.push_back({Vec3(r * std::sin(a), 0.0f, r * (1.0f - std::cos(a))), 0.0f, 1.0f});
+    }
+    const CurvePath path = sample_curve(*t.curve, Mat4::identity());
+    CHECK(path.closed && std::fabs(path.total() - L) < 1e-3f);
+    Vec3 p0, p1, tg, n;
+    float rad;
+    path.at(0.3f, p0, tg, n, rad);
+    path.at(0.3f + path.total(), p1, tg, n, rad);
+    CHECK(length(p0 - p1) < 1e-4f);  // once round, the same place
+    const Mesh *m = t.beam->evaluated_mesh();
+    float off = 0.0f;
+    for (const Vec3 &p : m->positions) off = std::max(off, std::fabs(length(Vec3(p.x, 0, p.z - r)) - r));
+    CHECK(off < 0.06f);  // every vertex stays on the ring (within the beam's half width)
+    /* Open, straight: a beam three times longer than the curve continues along its end's direction. */
+    R64Scene o(r64_beam(9.0f, 0.1f, 9));
+    o.curve->type = 2;
+    o.curve->points = {{Vec3(0, 0, 0), 0, 1}, {Vec3(0, 0, -3), 0, 1}};  // along -Z
+    const Mesh *om = o.beam->evaluated_mesh();
+    const Vec3 end = om->positions[9 * 4];  // the far end's first corner, 6 past the curve's end
+    CHECK(std::fabs(end.z - (-9.0f)) < 1e-3f && std::fabs(end.x - (-0.1f)) < 1e-3f);
+  });
+
+  test("curves: Array's Fit Curve fills the curve's length, Fit Length a length; changing the curve changes the count", [] {
+    Scene s;
+    GameObject *g = s.create("Posts");
+    g->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    auto *arr = g->add<ArrayModifier>();
+    arr->fit_type = 2;
+    arr->curve = "Fence";
+    GameObject *fence = s.create("Fence");
+    Curve *cv = fence->add<Curve>();
+    cv->type = 2;
+    cv->points = {{Vec3(0, 0, 0), 0, 1}, {Vec3(5.5f, 0, 0), 0, 1}};
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 5);
+    cv->points[1].position = Vec3(7.2f, 0, 0);
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 7);
+    fence->set_local_scale({2, 2, 2});  // the curve is measured in the array's space
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 14);
+    arr->fit_type = 1;
+    arr->fit_length = 3.4f;
+    CHECK(g->evaluated_mesh()->vert_count() == 8 * 3);
+    arr->fit_length = std::numeric_limits<float>::quiet_NaN();
+    CHECK(g->evaluated_mesh()->vert_count() == 8);
+    arr->fit_type = 2;
+    arr->curve = "Nothing";
+    CHECK(g->evaluated_mesh()->vert_count() == 8);  // no curve: one copy
+  });
+
+  test("curves: moving the curve object or a point re-bends the mesh; a curve can't bend itself", [] {
+    R64Scene t(r64_beam(2.0f, 0.1f, 8));
+    t.curve->type = 1;
+    t.curve->points = {{Vec3(0, 0, 0), 0, 1}, {Vec3(1, 0, 0.5f), 0, 1}, {Vec3(2, 0, 0), 0, 1}};
+    const std::vector<Vec3> a = t.beam->evaluated_mesh()->positions;
+    t.curve->points[1].position = Vec3(1, 0, -0.5f);
+    const std::vector<Vec3> b = t.beam->evaluated_mesh()->positions;
+    CHECK(a != b);
+    t.curve_obj->set_world_position({0, 3, 0});
+    const std::vector<Vec3> c = t.beam->evaluated_mesh()->positions;
+    CHECK(b != c && std::fabs(c[0].y - (b[0].y + 3.0f)) < 1e-4f);
+    /* A modifier naming its own object, a missing one, or a curve with one point: the mesh as it is. */
+    for (const char *name : {"Beam", "Missing"}) {
+      t.mod->object = name;
+      CHECK(t.beam->evaluated_mesh()->positions == t.base->positions);
+    }
+    t.mod->object = "Path";
+    t.curve->points.resize(1);
+    CHECK(t.beam->evaluated_mesh()->positions == t.base->positions);
+  });
+
+  test("curves: odd points (NaN, huge, all in one place) and odd settings give a valid mesh", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    R64Scene t(r64_beam(2.0f, 0.1f, 6));
+    std::vector<std::vector<CurvePoint>> sets = {
+        {{Vec3(0, 0, 0), 0, 1}, {Vec3(nan, 0, 0), 0, 1}, {Vec3(2, 0, 0), nan, nan}},
+        {{Vec3(1, 1, 1), 0, 1}, {Vec3(1, 1, 1), 0, 1}, {Vec3(1, 1, 1), 0, 1}},
+        {{Vec3(0, 0, 0), 1e9f, 1e9f}, {Vec3(1e30f, 0, 0), 0, 1}, {Vec3(inf, 0, 0), 0, 1}},
+        {{Vec3(0, 0, 0), 0, 0}, {Vec3(0, 1, 0), 0, 0}, {Vec3(0, 2, 0), 0, -5}}};
+    int bad = 0;
+    for (int type = 0; type < 3; type++)
+      for (int closed = 0; closed < 2; closed++)
+        for (int axis = 0; axis < 6; axis++)
+          for (auto &pts : sets) {
+            t.curve->type = type;
+            t.curve->closed = closed != 0;
+            t.curve->resolution = type == 0 ? 0 : 100000;
+            t.curve->points = pts;
+            t.mod->deform_axis = axis;
+            const Mesh *m = t.beam->evaluated_mesh();
+            for (const Vec3 &p : m->positions) bad += !(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+            bad += m->positions.size() != t.base->positions.size();
+          }
+    CHECK(bad == 0);
+  });
+
+  test("curves: points, type, closed, resolution and the modifiers round-trip through a scene file", [] {
+    Scene s;
+    GameObject *c = s.create("Rail");
+    Curve *cv = c->add<Curve>();
+    cv->type = 1;
+    cv->closed = true;
+    cv->resolution = 20;
+    cv->points = {{Vec3(1, 2, 3), 15.0f, 0.5f}, {Vec3(-1, 0, 4), 0.0f, 2.0f}, {Vec3(0, 5, -2), -30.0f, 1.0f}};
+    GameObject *g = s.create("Train");
+    g->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    auto *a = g->add<ArrayModifier>();
+    a->fit_type = 2;
+    a->curve = "Rail";
+    auto *m = g->add<CurveModifier>();
+    m->object = "Rail";
+    m->deform_axis = 4;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    const Curve *bc = back.find_by_name("Rail") ? back.find_by_name("Rail")->curve() : nullptr;
+    CHECK(bc && bc->type == 1 && bc->closed && bc->resolution == 20 && bc->points.size() == 3);
+    if (bc && bc->points.size() == 3)
+      CHECK(bc->points[2].position.y == 5.0f && bc->points[2].tilt == -30.0f && bc->points[0].radius == 0.5f);
+    GameObject *bg = back.find_by_name("Train");
+    CHECK(bg && bg->get<ArrayModifier>() && bg->get<ArrayModifier>()->fit_type == 2 && bg->get<ArrayModifier>()->curve == "Rail");
+    CHECK(bg && bg->get<CurveModifier>() && bg->get<CurveModifier>()->deform_axis == 4 && bg->get<CurveModifier>()->object == "Rail");
+    if (bg) CHECK(bg->evaluated_mesh()->positions == g->evaluated_mesh()->positions);
+    /* `set` reaches a point by its prefix, as filters' fields do. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Curve: Path");
+    ed.command("set Curve.P2Position 0 3 0");
+    GameObject *p = ed.scene().find_by_name("Path");
+    CHECK(p && p->curve() && p->curve()->points.size() == 5 && p->curve()->points[2].position.y == 3.0f);
+  });
+
+  test("curves: in the editor, moving a point or the curve re-bends the mesh with no stale picture", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Bezier");
+    GameObject *beam = ed.scene().create("Beam");
+    beam->add<MeshFilter>()->mesh = r64_beam(3.0f, 0.1f, 30);
+    beam->add<MeshRenderer>();
+    beam->add<CurveModifier>()->object = "BezierCurve";
+    beam->set_world_position({-1.5f, 0.3f, 0});
+    ed.mark_changed_for_test("R64 beam");
+    r34_steps(ed, 3);
+    ed.set_render_cache_verify(true);
+    const uint64_t bad0 = Editor::render_cache_mismatches_all();
+    const std::vector<Vec3> a = beam->evaluated_mesh()->positions;
+    const R34Change c = r34_change(ed, [&] { ed.command("curve move BezierCurve 1 -0.5 0.8 -0.6"); }, 2);
+    CHECK(c.d.renders > 0 && c.before != c.after);
+    const std::vector<Vec3> b = beam->evaluated_mesh()->positions;
+    CHECK(a != b);
+    GameObject *cv = ed.scene().find_by_name("BezierCurve");
+    for (float z : {0.2f, 0.4f, 0.6f}) {
+      cv->set_world_position({0, 0, z});
+      ed.mark_changed_for_test("R64 move curve");
+      r34_steps(ed, 1);
+    }
+    r34_steps(ed, 2);
+    CHECK(beam->evaluated_mesh()->positions != b);
+    CHECK(Editor::render_cache_mismatches_all() == bad0);
+    ed.set_render_cache_verify(false);
+  });
+
+  test("curves: clicking a curve selects it, clicking its point selects the point, the Move gizmo moves only that point, undo puts it back", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    CHECK(g && g->curve());
+    if (!g || !g->curve()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Main Camera");  // something else selected, its gizmo far from the curve
+    ed.mark_changed_for_test("R64 setup");
+    r34_steps(ed, 3);
+    /* The line between two points: the object is selected. */
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point({0.5f, 0, 0}), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.active_object_for_test() == g);
+    /* Its second point (the third sits on the origin, under the gizmo). */
+    const Vec3 before[2] = {g->curve()->points[1].position, g->curve()->points[0].position};
+    const Vec3 w = g->world_matrix().point(before[0]);
+    CHECK(ed.project_to_window(w, x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{1});
+    CHECK(ed.active_object_for_test() == g);
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    r34_gizmo_drag_x(ed, w, 60);
+    r34_steps(ed, 2);
+    const Vec3 after[2] = {g->curve()->points[1].position, g->curve()->points[0].position};
+    std::printf("    point 1 moved by %.3f along X\n", after[0].x - before[0].x);
+    CHECK(after[0].x > before[0].x + 0.05f && std::fabs(after[0].y - before[0].y) < 1e-4f && std::fabs(after[0].z - before[0].z) < 1e-4f);
+    CHECK(after[1].x == before[1].x && after[1].y == before[1].y && after[1].z == before[1].z);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Path");
+    CHECK(u && u->curve() && u->curve()->points[1].position.x == before[0].x);
+    /* The console selects points too. */
+    ed.command("curve select Path 3 0");
+    CHECK(ed.points_selected_for_test() == (std::vector<int>{3, 0}));
+  });
+}
+
+/* ===================================================================== */
+/* Round 65 (task 0043): lattice objects and the Lattice modifier          */
+/* ===================================================================== */
+
+/* A mesh and a Lattice object at the origin (unit box, scaled by `box`), the mesh with a Lattice modifier on it. */
+struct R65Scene {
+  Scene s;
+  GameObject *obj = nullptr, *lat_obj = nullptr;
+  Lattice *lat = nullptr;
+  LatticeModifier *mod = nullptr;
+  MeshPtr base;
+  R65Scene(MeshPtr m, float box = 1.0f) {
+    base = m;
+    obj = s.create("Thing");
+    obj->add<MeshFilter>()->mesh = m;
+    mod = obj->add<LatticeModifier>();
+    mod->object = "Box";
+    lat_obj = s.create("Box");
+    lat = lat_obj->add<Lattice>();
+    lat_obj->set_local_scale(Vec3(box));
+  }
+  float worst_move() const {
+    const Mesh *m = obj->evaluated_mesh();
+    float w = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) w = std::max(w, length(m->positions[i] - base->positions[i]));
+    return w;
+  }
+};
+
+static void round65_tests() {
+  test("lattices: a lattice at rest leaves the mesh as it is, Linear or B-Spline, at any resolution", [] {
+    int bad = 0;
+    for (int interp = 0; interp < 2; interp++)
+      for (int res : {2, 3, 5}) {
+        R65Scene t(primitives::uv_sphere(0.5f, 16, 12), 0.8f);  // the sphere pokes out of the box too
+        t.lat->interpolation = interp;
+        t.lat->resample(res, res + 1, res);
+        bad += t.worst_move() > 1e-5f;
+      }
+    CHECK(bad == 0);
+  });
+
+  test("lattices: Linear: a corner moved by d moves the mesh's vertex there by d, the opposite one not at all, the centre by d / 8", [] {
+    R65Scene t(primitives::cube(1.0f));
+    t.lat->interpolation = 0;
+    const Vec3 d(0.3f, -0.1f, 0.2f);
+    t.lat->set_control_point(7, t.lat->control_point(7) + d);  // u = v = w = 1: the (+, +, +) corner
+    const Mesh *m = t.obj->evaluated_mesh();
+    float at_corner = 1e9f, at_opposite = 1e9f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i], moved = m->positions[i] - v;
+      if (v.x > 0 && v.y > 0 && v.z > 0) at_corner = length(moved - d);
+      if (v.x < 0 && v.y < 0 && v.z < 0) at_opposite = length(moved);
+    }
+    CHECK(at_corner < 1e-5f && at_opposite < 1e-6f);
+    CHECK(length(t.lat->displacement(Vec3(0.0f)) - d / 8.0f) < 1e-6f);
+    /* Strength 0.5: every vertex half as far. */
+    const std::vector<Vec3> full = m->positions;
+    t.mod->strength = 0.5f;
+    const Mesh *h = t.obj->evaluated_mesh();
+    float off = 0.0f;
+    for (size_t i = 0; i < h->positions.size(); i++)
+      off = std::max(off, length((h->positions[i] - t.base->positions[i]) * 2.0f - (full[i] - t.base->positions[i])));
+    CHECK(off < 1e-5f);
+  });
+
+  test("lattices: B-Spline: pulling an inner point moves the mesh smoothly, with no jump at cell borders", [] {
+    Lattice l;
+    l.resample(4, 4, 4);
+    const Vec3 d(0.0f, 0.4f, 0.0f);
+    const int inner = (1 * 4 + 1) * 4 + 1;
+    l.set_control_point(inner, l.control_point(inner) + d);
+    const float cell = 1.0f / 3.0f, h = 0.002f;
+    float worst = 0.0f, peak = 0.0f;
+    for (float x = -0.6f; x < 0.6f; x += h) {
+      const Vec3 a = l.displacement(Vec3(x, -0.17f, -0.17f)), b = l.displacement(Vec3(x + h, -0.17f, -0.17f));
+      worst = std::max(worst, length(b - a));
+      peak = std::max(peak, length(a));
+    }
+    std::printf("    largest step %.5f for %.3f along X (bound %.5f), largest move %.3f\n", worst, h, length(d) * h / cell, peak);
+    CHECK(peak > 0.05f && peak < length(d));  // B-Spline doesn't reach the point (it smooths)
+    CHECK(worst <= length(d) * h / cell);
+  });
+
+  test("lattices: B-Spline keeps its points through resolution changes (2 to 3 and back), and outside the box blends on smoothly", [] {
+    Lattice l;
+    l.interpolation = 1;
+    for (int i = 0; i < 8; i++) l.offsets[(size_t)i] = Vec3(l.rest_point(i).x, 0, 0);  // a stretch along X
+    const std::vector<Vec3> start = l.offsets;
+    l.resample(3, 2, 2);
+    CHECK(std::fabs(l.offsets[2].x - 0.5f) < 1e-5f && std::fabs(l.offsets[1].x) < 1e-5f);  // the net is sampled linearly
+    for (int k = 2; k <= 10; k++) l.resample(k, 2, 2);  // an Inspector drag across many resolutions
+    l.resample(2, 2, 2);
+    float drift = 0.0f;
+    for (size_t i = 0; i < 8; i++) drift = std::max(drift, length(l.offsets[i] - start[i]));
+    CHECK(drift < 1e-5f);
+    /* Past the +X face: no crease (the slope carries on), and it settles on the border point one cell out. */
+    const float a = l.displacement({0.49f, 0, 0}).x, b = l.displacement({0.51f, 0, 0}).x, far = l.displacement({1.6f, 0, 0}).x;
+    std::printf("    at the face %.4f / %.4f, far out %.4f\n", a, b, far);
+    CHECK(b > a && b - a < 0.02f);
+    CHECK(std::fabs(far - 0.5f) < 1e-5f);
+  });
+
+  test("lattices: a turned, stretched lattice on a turned, scaled object bends the mesh as the same lattice would in world space", [] {
+    R65Scene t(primitives::uv_sphere(0.4f, 12, 8));
+    t.obj->set_world_position({0.3f, 0.2f, -0.1f});
+    t.obj->set_world_rotation(Quat::euler({20, 35, -10}));
+    t.obj->set_local_scale({1.5f, 0.7f, 1.2f});
+    t.lat_obj->set_world_position({0.25f, 0.3f, 0.0f});
+    t.lat_obj->set_world_rotation(Quat::euler({-15, 50, 5}));
+    t.lat_obj->set_local_scale({1.4f, 2.0f, 1.7f});
+    t.lat->interpolation = 0;
+    t.lat->offsets[7] = Vec3(0.2f, 0.1f, -0.1f);
+    t.lat->offsets[0] = Vec3(-0.1f, 0.0f, 0.15f);
+    const Mesh *m = t.obj->evaluated_mesh();
+    const Mat4 ow = t.obj->world_matrix(), lw = t.lat_obj->world_matrix(), li = lw.inverse();
+    float off = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 w = ow.point(t.base->positions[i]);
+      const Vec3 want = w + lw.dir(t.lat->displacement(li.point(w)));
+      off = std::max(off, length(ow.point(m->positions[i]) - want));
+    }
+    std::printf("    off by %g\n", off);
+    CHECK(off < 1e-4f);
+    /* Moving the lattice object re-bends the mesh. */
+    const std::vector<Vec3> before = m->positions;
+    t.lat_obj->set_world_position({0.35f, 0.3f, 0.0f});
+    CHECK(t.obj->evaluated_mesh()->positions != before);
+  });
+
+  test("lattices: changing the resolution keeps the shape (an affine pull, Linear)", [] {
+    R65Scene t(primitives::uv_sphere(0.45f, 16, 12));
+    t.lat->interpolation = 0;
+    /* A shear and a stretch: every resolution holds them exactly. */
+    for (int i = 0; i < t.lat->control_point_count(); i++) {
+      const Vec3 r = t.lat->rest_point(i);
+      t.lat->offsets[(size_t)i] = Vec3(0.3f * r.y, 0.5f * r.y, 0.0f);
+    }
+    const std::vector<Vec3> before = t.obj->evaluated_mesh()->positions;
+    for (Vec3 res : {Vec3(5, 3, 4), Vec3(2, 7, 2), Vec3(32, 2, 3)}) {
+      t.lat->resample((int)res.x, (int)res.y, (int)res.z);
+      const std::vector<Vec3> after = t.obj->evaluated_mesh()->positions;
+      float w = 0.0f;
+      for (size_t i = 0; i < after.size(); i++) w = std::max(w, length(after[i] - before[i]));
+      CHECK(w < 1e-3f);
+    }
+    CHECK(t.lat->control_point_count() == 32 * 2 * 3);
+  });
+
+  test("lattices: a flat, missing or NaN lattice leaves the mesh valid", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    R65Scene t(primitives::cube(1.0f));
+    t.lat->set_control_point(0, Vec3(nan, 0, 0));
+    for (const Vec3 &p : t.obj->evaluated_mesh()->positions) CHECK(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
+    t.lat->offsets.assign(8, Vec3(0.1f, 0, 0));
+    t.lat_obj->set_local_scale({1, 0, 1});  // flattened: no inside
+    CHECK(t.worst_move() == 0.0f);
+    t.lat_obj->set_local_scale({1, 1, 1});
+    CHECK(t.worst_move() > 0.05f);
+    t.mod->object = "Thing";  // itself
+    CHECK(t.worst_move() == 0.0f);
+    t.mod->object = "Box";
+    t.mod->strength = nan;
+    CHECK(t.worst_move() == 0.0f);
+  });
+
+  test("lattices: GameObject > Lattice fits a box round the selected mesh with a modifier; clicking a point and dragging it reshapes the mesh; undo; a scene file keeps it", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("create Lattice");
+    GameObject *box = ed.scene().find_by_name("Lattice");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(box && box->lattice() && cube && cube->get<LatticeModifier>() && cube->get<LatticeModifier>()->object == "Lattice");
+    if (!box || !cube || !box->lattice()) return;
+    CHECK(ed.active_object_for_test() == box);
+    const std::vector<Vec3> rest = cube->evaluated_mesh()->positions;
+    r34_steps(ed, 3);
+    /* The (+X, +Y, -Z) corner. */
+    const int corner = 1 + 2;  // u = 1, v = 1, w = 0
+    const Vec3 w = box->world_matrix().point(box->lattice()->control_point(corner));
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(w, x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{corner});
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    CHECK(length(ed.gizmo_pivot_for_test() - w) < 1e-4f);  // the gizmo sits on the point
+    /* Drag the X arrow along the way it points on screen (it needn't point right from this corner). */
+    int ax = 0, ay = 0;
+    CHECK(ed.project_to_window(w + Vec3(0.2f, 0, 0), ax, ay));
+    const float dx = (float)(ax - x), dy = (float)(ay - y), dl = std::max(1.0f, std::sqrt(dx * dx + dy * dy));
+    auto at = [&](float px) { return std::make_pair(x + (int)std::lround(dx / dl * px), y + (int)std::lround(dy / dl * px)); };
+    const auto p0 = at(55.0f), p1 = at(85.0f), p2 = at(115.0f);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, p0.first, p0.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, p0.first, p0.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, p1.first, p1.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, p2.first, p2.second)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, p2.first, p2.second)});
+    r34_steps(ed, 2);
+    const Lattice &l = *box->lattice();
+    std::printf("    the corner moved by %.3f %.3f %.3f\n", l.offsets[(size_t)corner].x, l.offsets[(size_t)corner].y, l.offsets[(size_t)corner].z);
+    CHECK(l.offsets[(size_t)corner].x > 0.05f);
+    int others = 0;
+    for (size_t i = 0; i < l.offsets.size(); i++) others += i != (size_t)corner && length(l.offsets[i]) > 0.0f;
+    CHECK(others == 0);
+    CHECK(cube->evaluated_mesh()->positions != rest);
+    ed.command("points select Lattice 0 6");  // the console selects lattice points too
+    CHECK(ed.points_selected_for_test() == (std::vector<int>{0, 6}));
+    r34_steps(ed, 1);
+    ed.command("delete");  // a lattice's points come with its resolution: Delete removes the lattice itself
+    r34_steps(ed, 1);
+    CHECK(ed.scene().find_by_name("Lattice") == nullptr);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *back1 = ed.scene().find_by_name("Lattice");
+    CHECK(back1 && back1->lattice() && back1->lattice()->offsets[(size_t)corner].x > 0.05f);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Lattice");
+    CHECK(u && u->lattice() && length(u->lattice()->offsets[(size_t)corner]) == 0.0f);
+    /* `set` reaches the resolution and any point. */
+    ed.command("set Lattice.PointsU 4");
+    ed.command("set Lattice.P5Offset 0 0.25 0");
+    if (GameObject *l2 = ed.scene().find_by_name("Lattice")) {
+      CHECK(l2->lattice()->points_u == 4 && l2->lattice()->control_point_count() == 16);
+      CHECK(l2->lattice()->offsets[5].y == 0.25f);
+    }
+    /* A second lattice gets a name of its own, and its modifier names it. */
+    ed.command("select Sphere");
+    ed.command("create Lattice");
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(ed.scene().find_by_name("Lattice.001") && sphere && sphere->get<LatticeModifier>() &&
+          sphere->get<LatticeModifier>()->object == "Lattice.001");
+    /* A scene file: resolution, interpolation, offsets, the modifier. */
+    Scene s;
+    GameObject *lo = s.create("L");
+    Lattice *lt = lo->add<Lattice>();
+    lt->interpolation = 0;
+    lt->resample(3, 2, 4);
+    lt->offsets[5] = Vec3(0.1f, 0.2f, -0.3f);
+    GameObject *o = s.create("O");
+    o->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    auto *lm = o->add<LatticeModifier>();
+    lm->object = "L";
+    lm->strength = 0.75f;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    const Lattice *bl2 = back.find_by_name("L") ? back.find_by_name("L")->lattice() : nullptr;
+    CHECK(bl2 && bl2->points_u == 3 && bl2->points_v == 2 && bl2->points_w == 4 && bl2->interpolation == 0 && bl2->offsets.size() == 24);
+    if (bl2 && bl2->offsets.size() == 24) CHECK(bl2->offsets[5].z == -0.3f);
+    GameObject *bo = back.find_by_name("O");
+    CHECK(bo && bo->get<LatticeModifier>() && bo->get<LatticeModifier>()->strength == 0.75f);
+    if (bo) CHECK(bo->evaluated_mesh()->positions == o->evaluated_mesh()->positions);
+  });
+}
+
+/* ===================================================================== */
+/* Round 66 (task 0044): the Mesh Deform modifier (a cage)                 */
+/* ===================================================================== */
+
+/* A sphere inside a cage object, the sphere with a Mesh Deform modifier naming it. */
+struct R66Scene {
+  Scene s;
+  GameObject *obj = nullptr, *cage_obj = nullptr;
+  MeshDeformModifier *mod = nullptr;
+  MeshPtr base, cage;
+  R66Scene(MeshPtr cage_mesh, MeshPtr m = nullptr) {
+    base = m ? m : primitives::uv_sphere(0.35f, 16, 12);
+    obj = s.create("Thing");
+    obj->add<MeshFilter>()->mesh = base;
+    mod = obj->add<MeshDeformModifier>();
+    mod->object = "Cage";
+    cage = cage_mesh;
+    cage_obj = s.create("Cage");
+    cage_obj->add<MeshFilter>()->mesh = cage;
+  }
+  /* The cage's vertices moved by f (in place, as Edit Mode does). */
+  void move_cage(const std::function<Vec3(Vec3)> &f) {
+    Mesh &cm = *mesh_make_mutable(cage_obj->get<MeshFilter>()->mesh);
+    for (Vec3 &v : cm.positions) v = f(v);
+    cm.touch();
+  }
+  float worst(const std::function<Vec3(Vec3)> &want) const {
+    const Mesh *m = obj->evaluated_mesh();
+    float w = 0.0f;
+    for (size_t i = 0; i < m->positions.size(); i++) w = std::max(w, length(m->positions[i] - want(base->positions[i])));
+    return w;
+  }
+};
+
+static void round66_tests() {
+  test("mesh deform: right after Bind the mesh is unchanged; the weights sum to 1; moving or turning the whole cage moves the mesh the same way", [] {
+    for (int which = 0; which < 2; which++) {
+      R66Scene t(which == 0 ? primitives::cube(1.0f) : primitives::ico_sphere(0.6f, 2));
+      std::string err;
+      CHECK(t.mod->bind(&err));
+      if (!err.empty()) std::printf("    %s\n", err.c_str());
+      CHECK(t.worst([](Vec3 v) { return v; }) < 1e-4f);
+      /* Sums. */
+      float worst_sum = 0.0f;
+      std::vector<float> w(t.mod->bind_verts.size());
+      for (size_t i = 0; i < t.base->positions.size(); i += 7) {
+        mean_value_coordinates(t.base->positions[i], t.mod->bind_verts, t.mod->bind_tris, w.data());
+        float sum = 0.0f;
+        for (float x : w) sum += x;
+        worst_sum = std::max(worst_sum, std::fabs(sum - 1.0f));
+      }
+      CHECK(worst_sum < 1e-4f);
+      /* A move and a turn of every cage vertex. */
+      const Vec3 d(0.3f, -0.2f, 0.5f);
+      t.move_cage([&](Vec3 v) { return v + d; });
+      const float moved = t.worst([&](Vec3 v) { return v + d; });
+      const Quat q = Quat::euler({25, 40, -15});
+      t.move_cage([&](Vec3 v) { return q.rotate(v - d); });
+      const float turned = t.worst([&](Vec3 v) { return q.rotate(v); });
+      std::printf("    %s cage: sums off by %g, a move off by %g, a turn off by %g\n", which == 0 ? "cube" : "icosphere", worst_sum, moved, turned);
+      CHECK(moved < 1e-3f && turned < 1e-3f);
+    }
+  });
+
+  test("mesh deform: moving one cage vertex moves the mesh near it most and the far side least", [] {
+    R66Scene t(primitives::cube(1.0f));
+    CHECK(t.mod->bind(nullptr));
+    /* The cube's (+, +, +) corner pulled out. */
+    t.move_cage([](Vec3 v) { return v.x > 0 && v.y > 0 && v.z > 0 ? v + Vec3(0.4f) : v; });
+    const Mesh *m = t.obj->evaluated_mesh();
+    float near_move = 0.0f, far_move = 1e9f;
+    for (size_t i = 0; i < m->positions.size(); i++) {
+      const Vec3 v = t.base->positions[i];
+      const float mv = length(m->positions[i] - v);
+      const float to_corner = length(v - Vec3(0.5f));
+      if (to_corner < 0.6f) near_move = std::max(near_move, mv);  // the sphere (radius 0.35) comes within 0.52 of it
+      if (to_corner > 1.15f) far_move = std::min(far_move, mv);
+    }
+    std::printf("    near the corner %.3f, far side %.4f\n", near_move, far_move);
+    CHECK(near_move > 0.05f && near_move > 4.0f * far_move);
+  });
+
+  test("mesh deform: an open or flat cage is refused, Unbind leaves the mesh, a cage with other vertices stops with a message", [] {
+    {
+      R66Scene t(primitives::plane(1.0f, 2));  // open
+      std::string err;
+      CHECK(!t.mod->bind(&err) && err.find("open") != std::string::npos);
+      CHECK(!t.mod->bound());
+    }
+    {
+      MeshPtr flat = primitives::cube(1.0f);
+      for (Vec3 &v : flat->positions) v.y = 0.0f;
+      flat->touch();
+      R66Scene t(flat);
+      std::string err;
+      CHECK(!t.mod->bind(&err) && err.find("volume") != std::string::npos);
+    }
+    {
+      R66Scene t(primitives::cube(1.0f));
+      CHECK(t.mod->bind(nullptr));
+      t.move_cage([](Vec3 v) { return v * 1.3f; });
+      CHECK(t.worst([](Vec3 v) { return v * 1.3f; }) < 1e-3f);
+      t.mod->unbind();
+      CHECK(t.worst([](Vec3 v) { return v; }) == 0.0f);
+      CHECK(t.mod->bind(nullptr));
+      Mesh &cm = *mesh_make_mutable(t.cage_obj->get<MeshFilter>()->mesh);  // another vertex
+      cm.add_vert({0, 2, 0});
+      cm.touch();
+      CHECK(t.worst([](Vec3 v) { return v; }) == 0.0f);
+      CHECK(t.mod->last_error.find("Bind again") != std::string::npos);
+    }
+  });
+
+  test("mesh deform: cages of every kind: reversed winding works, mixed winding and doubled faces are refused, points on and outside the cage", [] {
+    /* Reversed winding binds too, and reproduces a stretch exactly (the quads may split along the other diagonal, so
+     * a non-affine move can differ a little from the other winding's). */
+    MeshPtr flipped = primitives::cube(1.0f);
+    meshops::flip_normals(*flipped);
+    R66Scene a(primitives::cube(1.0f)), b(flipped);
+    CHECK(a.mod->bind(nullptr) && b.mod->bind(nullptr));
+    CHECK(b.worst([](Vec3 v) { return v; }) < 1e-4f);
+    b.move_cage([](Vec3 v) { return Vec3(v.x, v.y * 1.4f, v.z * 0.8f); });
+    CHECK(b.worst([](Vec3 v) { return Vec3(v.x, v.y * 1.4f, v.z * 0.8f); }) < 1e-4f);
+    /* One face turned the other way, and a face doubled: refused. */
+    MeshPtr mixed = primitives::cube(1.0f);
+    std::reverse(mixed->corner_verts.begin(), mixed->corner_verts.begin() + mixed->face_offsets[1]);
+    mixed->touch();
+    R66Scene c(mixed);
+    std::string err;
+    CHECK(!c.mod->bind(&err) && err.find("opposite") != std::string::npos);
+    MeshPtr doubled = primitives::cube(1.0f);
+    doubled->add_face({doubled->corner_verts[0], doubled->corner_verts[1], doubled->corner_verts[2], doubled->corner_verts[3]});
+    doubled->touch();
+    R66Scene d(doubled);
+    CHECK(!d.mod->bind(&err));
+    /* A stray vertex far away doesn't spoil the volume test. */
+    MeshPtr stray = primitives::cube(1.0f);
+    stray->add_vert({1000, 0, 0});
+    stray->touch();
+    R66Scene e(stray);
+    CHECK(e.mod->bind(&err));
+    /* Weights at a cage vertex, on a face and outside the cage: finite, sum 1, reproduce the point. */
+    std::vector<float> w(a.mod->bind_verts.size());
+    for (Vec3 x : {a.mod->bind_verts[3], Vec3(0.5f, 0.1f, -0.2f), Vec3(1.5f, -0.7f, 2.0f), Vec3(0.0f)}) {
+      mean_value_coordinates(x, a.mod->bind_verts, a.mod->bind_tris, w.data());
+      Vec3 back(0.0f);
+      float sum = 0.0f;
+      for (size_t j = 0; j < w.size(); j++) back += a.mod->bind_verts[j] * w[j], sum += w[j];
+      if (!(std::fabs(sum - 1.0f) < 1e-4f && length(back - x) < 1e-4f))
+        std::printf("    at %g %g %g: sum %g, back off by %g\n", x.x, x.y, x.z, sum, length(back - x));
+      CHECK(std::fabs(sum - 1.0f) < 1e-4f && length(back - x) < 1e-4f);
+    }
+  });
+
+  test("mesh deform: two meshes caging each other don't hang or crash; editing the bound mesh gives what a fresh Bind would", [] {
+    Scene s;
+    GameObject *a = s.create("A"), *b = s.create("B");
+    a->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    b->add<MeshFilter>()->mesh = primitives::cube(2.0f);
+    auto *ma = a->add<MeshDeformModifier>();
+    auto *mb = b->add<MeshDeformModifier>();
+    ma->object = "B";
+    mb->object = "A";
+    (void)ma->bind(nullptr);
+    (void)mb->bind(nullptr);
+    CHECK(a->evaluated_mesh() && b->evaluated_mesh());  // ends (the cycle is cut), with valid meshes
+    uint64_t keys[3];
+    a->evaluated_keys(keys);
+    /* Editing the bound mesh: the moved vertices' weights are redone, the result is a fresh Bind's. */
+    R66Scene t(primitives::cube(1.2f));
+    CHECK(t.mod->bind(nullptr));
+    t.move_cage([](Vec3 v) { return v + Vec3(0, v.x * 0.3f, 0); });
+    (void)t.obj->evaluated_mesh();
+    Mesh &own = *mesh_make_mutable(t.obj->get<MeshFilter>()->mesh);
+    own.positions[5] += Vec3(0.05f, 0.1f, 0.0f);
+    own.touch();
+    const std::vector<Vec3> edited = t.obj->evaluated_mesh()->positions;
+    R66Scene fresh(primitives::cube(1.2f), std::make_shared<Mesh>(own));
+    CHECK(fresh.mod->bind(nullptr));
+    fresh.move_cage([](Vec3 v) { return v + Vec3(0, v.x * 0.3f, 0); });
+    float off = 0.0f;
+    for (size_t i = 0; i < edited.size(); i++) off = std::max(off, length(edited[i] - fresh.obj->evaluated_mesh()->positions[i]));
+    CHECK(off < 1e-6f);
+  });
+
+  test("mesh deform: the binding round-trips through a scene file and comes back with undo", [] {
+    R66Scene t(primitives::ico_sphere(0.7f, 1));
+    CHECK(t.mod->bind(nullptr));
+    t.move_cage([](Vec3 v) { return Vec3(v.x * 1.4f, v.y, v.z * 0.8f); });
+    const std::vector<Vec3> want = t.obj->evaluated_mesh()->positions;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(t.s), back, err));
+    GameObject *b = back.find_by_name("Thing");
+    CHECK(b && b->get<MeshDeformModifier>() && b->get<MeshDeformModifier>()->bound());
+    if (b) {
+      const std::vector<Vec3> got = b->evaluated_mesh()->positions;
+      float off = 0.0f;
+      for (size_t i = 0; i < got.size() && i < want.size(); i++) off = std::max(off, length(got[i] - want[i]));
+      CHECK(got.size() == want.size() && off < 1e-5f);
+    }
+    /* In the editor: Bind as one undo step; a refusal says why. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(ball && cube);
+    if (!ball || !cube) return;
+    auto *md = ball->add<MeshDeformModifier>();
+    md->object = "Plane";
+    ed.command("select Sphere");
+    ed.mark_changed_for_test("R66 modifier");
+    ed.step_frame_headless();
+    ed.command("meshdeform bind");
+    CHECK(!md->bound() && md->last_error.find("open") != std::string::npos);
+    md->object = "Cube";
+    ed.command("meshdeform bind Sphere");
+    CHECK(md->bound());
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *ub = ed.scene().find_by_name("Sphere");
+    CHECK(ub && ub->get<MeshDeformModifier>() && !ub->get<MeshDeformModifier>()->bound());
+    /* Bind, Unbind, then undo the Unbind: bound again. */
+    if (ub) ub->get<MeshDeformModifier>()->object = "Cube";
+    ed.mark_changed_for_test("R66 cube");
+    ed.step_frame_headless();
+    ed.command("meshdeform bind Sphere");
+    ed.step_frame_headless();
+    ed.command("meshdeform unbind Sphere");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Sphere") && !ed.scene().find_by_name("Sphere")->get<MeshDeformModifier>()->bound());
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *rb = ed.scene().find_by_name("Sphere");
+    CHECK(rb && rb->get<MeshDeformModifier>() && rb->get<MeshDeformModifier>()->bound());
+  });
+}
+
+/* ===================================================================== */
+/* Round 67 (task 0045): vertex groups                                     */
+/* ===================================================================== */
+
+/* A flat grid (y = 0, x and z in -1..1) with two groups: "Ramp" = (x + 1) / 2, linear, so any vertex on the plane
+ * should carry exactly that; "Right" = 1 for x > 0. */
+static MeshPtr r67_grid(int n = 6) {
+  MeshPtr m = primitives::grid(2.0f, n, n);
+  VertexGroup ramp{"Ramp", {}}, right{"Right", {}};
+  for (const Vec3 &p : m->positions) {
+    ramp.weights.push_back((p.x + 1.0f) * 0.5f);
+    right.weights.push_back(p.x > 0.0f ? 1.0f : 0.0f);
+  }
+  m->vertex_groups = {ramp, right};
+  return m;
+}
+
+/* Every group fits; on-plane vertices carry the ramp exactly; every weight finite and in 0..1. */
+static bool r67_ok(const Mesh &m, float *worst) {
+  bool ok = m.groups_fit() && m.find_group("Ramp") >= 0;
+  float w = 0.0f;
+  if (ok) {
+    const std::vector<float> &ramp = m.vertex_groups[(size_t)m.find_group("Ramp")].weights;
+    for (size_t i = 0; i < m.vert_count(); i++) {
+      ok = ok && std::isfinite(ramp[i]) && ramp[i] >= -1e-6f && ramp[i] <= 1.0f + 1e-6f;
+      if (std::fabs(m.positions[i].y) < 1e-5f && std::fabs(m.positions[i].x) <= 1.0f) w = std::max(w, std::fabs(ramp[i] - (m.positions[i].x + 1.0f) * 0.5f));
+    }
+  }
+  *worst = w;
+  return ok && w < 2e-4f;
+}
+
+static void round67_tests() {
+  test("vertex groups: every Edit Mode operator family keeps one weight per vertex; vertices that stay keep theirs; new ones on the surface take its weights", [] {
+    struct Case { const char *op; const char *select; bool creates; };
+    const Case cases[] = {{"merge_distance", "all", false}, {"delete", "faces", false}, {"dissolve_vertices", "some", false},
+                          {"subdivide_edges", "all", true}, {"loopcut", "edge", true}, {"bevel", "some", true}, {"extrude", "faces", false},
+                          {"inset", "faces", true}, {"triangulate_faces", "faces", true}, {"poke", "faces", true}, {"split", "faces", false},
+                          {"duplicate", "faces", false}, {"dissolve_faces", "faces", false}, {"tris_to_quads", "all", false},
+                          {"collapse", "edge", false}, {"connect", "some", true}, {"edge_split", "some", false}};
+    int bad = 0;
+    for (const Case &c : cases) {
+      Editor ed;
+      ed.init_headless(800, 600);
+      GameObject *g = ed.scene().create("Grid");
+      g->add<MeshFilter>()->mesh = r67_grid();
+      g->add<MeshRenderer>();
+      const MeshPtr before = g->mesh_filter()->mesh;
+      ed.command("select Grid");
+      ed.mark_changed_for_test("R67 grid");
+      ed.step_frame_headless();
+      const std::string sel = c.select;
+      if (sel == "faces") ed.command("edit face all");
+      else ed.command("edit vertex");
+      if (sel == "all") ed.command("edit vertex all");
+      if (sel == "some") ed.command("vsel 8 9 15 16 22");
+      if (sel == "edge") ed.command("vsel 8 9");
+      ed.step_frame_headless();
+      ed.command(std::string("editop ") + c.op);
+      ed.step_frame_headless();
+      ed.step_frame_headless();  // the undo commit mends the groups
+      ed.command("edit off");
+      ed.step_frame_headless();
+      GameObject *after = ed.scene().find_by_name("Grid");
+      const Mesh *m = after && after->mesh_filter() ? after->mesh_filter()->mesh.get() : nullptr;
+      bool ok = m && m->groups_fit() && m->vertex_groups.size() == 2;
+      int moved = 0;
+      float worst = 0.0f;
+      if (ok) {
+        /* Vertices at a place only one old vertex had keep both its weights. */
+        for (size_t i = 0; i < m->vert_count(); i++) {
+          int n = 0;
+          size_t src = 0;
+          for (size_t j = 0; j < before->vert_count(); j++)
+            if (std::memcmp(&before->positions[j], &m->positions[i], sizeof(Vec3)) == 0) n++, src = j;
+          if (n == 1)
+            for (int k = 0; k < 2; k++) moved += m->vertex_groups[(size_t)k].weights[i] != before->vertex_groups[(size_t)k].weights[src];
+        }
+        /* New vertices on the plane carry the linear ramp exactly (interpolated from the surface). */
+        if (c.creates) ok = r67_ok(*m, &worst);
+      }
+      ok = ok && moved == 0;
+      if (!ok) std::printf("    %s: %d weights moved, ramp off by %g\n", c.op, moved, worst);
+      bad += !ok;
+    }
+    CHECK(bad == 0);
+  });
+
+  test("vertex groups: adding or removing a group survives the undo commit; Separate and Join keep groups", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("select Cube");
+    ed.command("vgroup add A");
+    ed.step_frame_headless();
+    ed.command("vgroup add B");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Mesh *m = ed.scene().find_by_name("Cube")->mesh_filter()->mesh.get();
+    CHECK(m->find_group("A") == 0 && m->find_group("B") == 1);
+    ed.command("vgroup remove A");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    m = ed.scene().find_by_name("Cube")->mesh_filter()->mesh.get();
+    CHECK(m->vertex_groups.size() == 1 && m->find_group("B") == 0);
+    /* Separate by loose parts: a part keeps its vertices' weights. */
+    Scene s;
+    (void)s;
+    GameObject *two = ed.scene().create("Two");
+    MeshPtr tm = primitives::cube(1.0f);
+    Mesh other = *primitives::cube(1.0f);
+    meshops::append_mesh(*tm, other, Mat4::translate({3, 0, 0}));
+    tm->vertex_groups = {{"Side", {}}};
+    for (const Vec3 &p : tm->positions) tm->vertex_groups[0].weights.push_back(p.x > 1.0f ? 1.0f : 0.0f);
+    two->add<MeshFilter>()->mesh = tm;
+    two->add<MeshRenderer>();
+    ed.command("select Two");
+    ed.mark_changed_for_test("R67 two");
+    ed.step_frame_headless();
+    ed.command("separate loose");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    int parts = 0, right = 0;
+    ed.scene().for_each([&](GameObject &o) {
+      const MeshFilter *mf = o.mesh_filter();
+      if (!mf || !mf->mesh || mf->mesh->find_group("Side") < 0) return;
+      parts++;
+      const Mesh &pm = *mf->mesh;
+      bool all_one = pm.groups_fit(), all_zero = pm.groups_fit();
+      for (float w : pm.vertex_groups[(size_t)pm.find_group("Side")].weights) all_one = all_one && w == 1.0f, all_zero = all_zero && w == 0.0f;
+      right += all_one || all_zero;
+    });
+    CHECK(parts == 2 && right == 2);
+    /* Join through the editor: the other object's group comes along, by name. */
+    ed.command("select Cube");
+    ed.command("select Sphere");  // replace: Sphere only
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    {
+      Mesh &sm = *mesh_make_mutable(sphere->mesh_filter()->mesh);
+      sm.vertex_groups = {{"Leg", std::vector<float>(sm.vert_count(), 0.5f)}};
+      sm.touch();
+    }
+    ed.mark_changed_for_test("R67 leg");
+    ed.step_frame_headless();
+    ed.command("select Sphere");
+    ed.command("selectadd Cube");  // the Cube is active: it keeps the result
+    ed.command("join");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Mesh *joined = ed.scene().find_by_name("Cube")->mesh_filter()->mesh.get();
+    CHECK(joined->groups_fit() && joined->find_group("B") >= 0 && joined->find_group("Leg") >= 0);
+    if (joined->groups_fit() && joined->find_group("Leg") >= 0) {
+      const std::vector<float> &leg = joined->vertex_groups[(size_t)joined->find_group("Leg")].weights;
+      CHECK(leg.front() == 0.0f && leg.back() == 0.5f);  // the Cube's vertices first, the Sphere's after
+    }
+  });
+
+  test("vertex groups: Apply Modifiers bakes a deformer limited to a group as the viewport shows it", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *g = ed.scene().create("G");
+    g->add<MeshFilter>()->mesh = r67_grid(6);
+    g->add<MeshRenderer>();
+    auto *d = g->add<DisplaceModifier>();
+    d->direction = 2;
+    d->strength = 1.0f;
+    d->vertex_group = "Right";
+    const std::vector<Vec3> shown = g->evaluated_mesh()->positions;
+    ed.command("select G");
+    ed.mark_changed_for_test("R67 displace");
+    ed.step_frame_headless();
+    ed.command("applymods");
+    ed.step_frame_headless();
+    GameObject *a = ed.scene().find_by_name("G");
+    CHECK(a && a->mesh_filter()->mesh->positions == shown && !a->get<DisplaceModifier>());
+  });
+
+  test("vertex groups: Mirror, Array, Subdivision and Join carry them; mid-edge vertices get the average", [] {
+    Scene s;
+    GameObject *g = s.create("G");
+    g->add<MeshFilter>()->mesh = r67_grid(4);
+    auto *mir = g->add<MirrorModifier>();
+    mir->x = true;
+    mir->merge = false;
+    float worst = 0.0f;
+    const Mesh *m = g->evaluated_mesh();
+    CHECK(m->groups_fit() && m->vert_count() == 2 * 25);
+    if (m->groups_fit()) {
+      const std::vector<float> &ramp = m->vertex_groups[0].weights;
+      for (size_t i = 25; i < 50; i++) worst = std::max(worst, std::fabs(ramp[i] - ramp[i - 25]));  // the copy has its source's weights
+    }
+    CHECK(worst == 0.0f);
+    g->remove_component(mir);
+    auto *arr = g->add<ArrayModifier>();
+    arr->count = 3;
+    CHECK(g->evaluated_mesh()->groups_fit() && g->evaluated_mesh()->vert_count() == 3 * 25);
+    g->remove_component(arr);
+    g->add<SubdivisionSurface>()->smooth = false;  // simple: new vertices at edge midpoints and face centres, all on the plane
+    CHECK(r67_ok(*g->evaluated_mesh(), &worst));
+    /* Join: groups by name. */
+    Mesh a = *r67_grid(2), b = *primitives::cube(1.0f);
+    b.vertex_groups = {{"Other", std::vector<float>(b.vert_count(), 0.5f)}};
+    meshops::append_mesh(a, b, Mat4::identity());
+    CHECK(a.groups_fit() && a.find_group("Ramp") >= 0 && a.find_group("Other") >= 0);
+    if (a.groups_fit()) CHECK(a.vertex_groups[(size_t)a.find_group("Other")].weights.back() == 0.5f && a.vertex_groups[(size_t)a.find_group("Other")].weights[0] == 0.0f);
+  });
+
+  test("vertex groups: a Displace limited to a group moves only its vertices, by their weights; Invert does the opposite", [] {
+    Scene s;
+    GameObject *g = s.create("G");
+    MeshPtr base = r67_grid(8);
+    g->add<MeshFilter>()->mesh = base;
+    auto *d = g->add<DisplaceModifier>();
+    d->direction = 2;  // Y
+    d->strength = 1.0f;
+    d->midlevel = -1.0f;  // every vertex moves up
+    const std::vector<Vec3> all = g->evaluated_mesh()->positions;
+    d->vertex_group = "Ramp";
+    const Mesh *m = g->evaluated_mesh();
+    float off = 0.0f;
+    for (size_t i = 0; i < m->vert_count(); i++) {
+      const float w = (base->positions[i].x + 1.0f) * 0.5f;
+      off = std::max(off, length(m->positions[i] - (base->positions[i] + (all[i] - base->positions[i]) * w)));
+    }
+    CHECK(off < 1e-5f);
+    d->invert_group = true;
+    m = g->evaluated_mesh();
+    off = 0.0f;
+    for (size_t i = 0; i < m->vert_count(); i++) {
+      const float w = 1.0f - (base->positions[i].x + 1.0f) * 0.5f;
+      off = std::max(off, length(m->positions[i] - (base->positions[i] + (all[i] - base->positions[i]) * w)));
+    }
+    CHECK(off < 1e-5f);
+    d->vertex_group = "Nothing";  // a name the mesh hasn't: the whole mesh
+    CHECK(g->evaluated_mesh()->positions == all);
+  });
+
+  test("vertex groups: they round-trip through a scene file and undo; a file without them loads as before; the console edits them", [] {
+    Scene s;
+    GameObject *g = s.create("G");
+    g->add<MeshFilter>()->mesh = r67_grid(3);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    GameObject *b = back.find_by_name("G");
+    CHECK(b && b->mesh_filter()->mesh->vertex_groups.size() == 2);
+    if (b && b->mesh_filter()->mesh->vertex_groups.size() == 2)
+      CHECK(b->mesh_filter()->mesh->vertex_groups[0].weights == g->mesh_filter()->mesh->vertex_groups[0].weights &&
+            b->mesh_filter()->mesh->vertex_groups[1].name == "Right");
+    Scene plain;
+    plain.create("P")->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    Scene back2;
+    CHECK(load_scene_text(save_scene_text(plain), back2, err) && back2.find_by_name("P")->mesh_filter()->mesh->vertex_groups.empty());
+    /* Console, Edit Mode, undo. */
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("select Cube");
+    ed.command("vgroup add Lid");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->mesh_filter()->mesh->find_group("Lid") == 0);
+    ed.step_frame_headless();
+    ed.command("edit vertex");
+    ed.command("vsel 2 3 6 7");
+    ed.command("vgroup assign Lid 0.75");
+    ed.step_frame_headless();
+    ed.command("edit off");
+    ed.step_frame_headless();
+    cube = ed.scene().find_by_name("Cube");
+    const std::vector<float> &w = cube->mesh_filter()->mesh->vertex_groups[0].weights;
+    CHECK(w.size() == 8 && w[2] == 0.75f && w[7] == 0.75f && w[0] == 0.0f);
+    ed.command("vgroup rename Lid Top");
+    CHECK(ed.scene().find_by_name("Cube")->mesh_filter()->mesh->find_group("Top") == 0);
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Cube")->mesh_filter()->mesh->find_group("Lid") == 0);
+    ed.command("undo");
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Cube")->mesh_filter()->mesh->vertex_groups.empty());
+  });
+}
+
+/* ===================================================================== */
+/* Round 68 (task 0046): Weight Paint mode                                 */
+/* ===================================================================== */
+
+/* An editor looking down at a flat 2 x 2 pad (20 x 20 quads) high above the default scene, in Weight Paint with a
+ * group "G" at 0 everywhere. */
+struct R68 {
+  Editor ed;
+  GameObject *pad = nullptr;
+  explicit R68(MeshPtr mesh = nullptr) {
+    ed.init_headless(1000, 800);
+    pad = ed.scene().create("Pad");
+    MeshPtr m = mesh ? mesh : primitives::grid(2.0f, 20, 20);
+    m->vertex_groups = {{"G", std::vector<float>(m->vert_count(), 0.0f)}};
+    pad->add<MeshFilter>()->mesh = m;
+    pad->add<MeshRenderer>();
+    pad->set_world_position({0, 20, 0});
+    ed.command("select Pad");
+    ed.command("camera 0 89 3.5 0 20 0");
+    ed.mark_changed_for_test("R68 pad");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("weightpaint on");
+    ed.step_frame_headless();
+  }
+  const Mesh &mesh() { return *ed.scene().find_by_name("Pad")->mesh_filter()->mesh; }
+  float weight_at(Vec3 local) {  // the weight of the vertex nearest a local point
+    const Mesh &m = mesh();
+    size_t best = 0;
+    for (size_t i = 0; i < m.vert_count(); i++)
+      if (length(m.positions[i] - local) < length(m.positions[best] - local)) best = i;
+    return m.vertex_groups[0].weights[best];
+  }
+  /* A stroke through local points (projected into the window). */
+  void stroke(std::initializer_list<Vec3> pts) {
+    std::string cmd = "wpstroke";
+    for (Vec3 p : pts) {
+      int x = 0, y = 0;
+      CHECK(ed.project_to_window(pad->world_matrix().point(p), x, y));
+      cmd += " " + std::to_string(x) + " " + std::to_string(y);
+    }
+    ed.command(cmd);
+    ed.step_frame_headless();
+  }
+};
+
+static void round68_tests() {
+  test("weight paint: Add raises the weights under the brush only; Subtract lowers them; Draw moves them towards Weight", [] {
+    R68 t;
+    CHECK(t.ed.weight_paint_for_test());
+    t.ed.command("wpbrush add 40 1 1");
+    t.stroke({Vec3(-0.5f, 0, 0), Vec3(-0.4f, 0, 0)});
+    const float under = t.weight_at({-0.5f, 0, 0}), far = t.weight_at({0.8f, 0, 0.8f});
+    std::printf("    under the brush %.3f, far away %.3f\n", under, far);
+    CHECK(under > 0.5f && far == 0.0f);
+    t.ed.command("wpbrush subtract 40 0.5 1");
+    t.stroke({Vec3(-0.5f, 0, 0), Vec3(-0.4f, 0, 0)});
+    CHECK(t.weight_at({-0.5f, 0, 0}) < under);
+    t.ed.command("wpbrush draw 40 1 0.25");
+    t.stroke({Vec3(0.5f, 0, -0.5f), Vec3(0.5f, 0, -0.45f)});
+    CHECK(std::fabs(t.weight_at({0.5f, 0, -0.5f}) - 0.25f) < 0.02f);
+  });
+
+  test("weight paint: the Smooth falloff paints the centre more than the rim; Blur evens a hard edge", [] {
+    R68 t;
+    t.ed.command("wpbrush add 60 0.4 1");
+    t.ed.command("wpfalloff smooth");
+    t.stroke({Vec3(0, 0, 0)});
+    const float centre = t.weight_at({0, 0, 0});
+    float rim = 1.0f;
+    for (float d : {0.2f, 0.25f, 0.3f}) {
+      const float w = t.weight_at({d, 0, 0});
+      if (w > 0.0f) rim = std::min(rim, w);
+    }
+    std::printf("    centre %.3f, near the rim %.3f\n", centre, rim);
+    CHECK(centre > rim);
+    /* A hard edge: left half 1, right half 0; Blur across it. */
+    R68 b;
+    {
+      Mesh &m = *mesh_make_mutable(b.pad->mesh_filter()->mesh);
+      for (size_t i = 0; i < m.vert_count(); i++) m.vertex_groups[0].weights[i] = m.positions[i].x < 0.0f ? 1.0f : 0.0f;
+    }
+    b.ed.command("wpbrush blur 60 1 1");
+    b.stroke({Vec3(0, 0, -0.3f), Vec3(0, 0, 0.3f)});
+    const float l = b.weight_at({-0.1f, 0, 0}), r = b.weight_at({0.1f, 0, 0});
+    std::printf("    across the edge after Blur: %.3f | %.3f\n", l, r);
+    CHECK(l < 1.0f && r > 0.0f);
+  });
+
+  test("weight paint: Front Faces Only leaves a sphere's back alone; Mirror X paints the twin; a stroke is one undo step", [] {
+    R68 t(primitives::uv_sphere(0.6f, 24, 16));
+    t.ed.command("wpbrush add 200 1 1");
+    t.stroke({Vec3(0, 0.6f, 0)});  // the top, facing the camera above
+    CHECK(t.weight_at({0, 0.6f, 0}) > 0.5f && t.weight_at({0, -0.6f, 0}) == 0.0f);
+    t.ed.command("wpfront off");
+    t.stroke({Vec3(0, 0.6f, 0)});
+    CHECK(t.weight_at({0, -0.6f, 0}) > 0.0f);  // the brush now reaches through
+    /* Mirror X on the pad. */
+    R68 m;
+    m.ed.command("wpmirror on");
+    m.ed.command("wpbrush add 30 1 1");
+    m.stroke({Vec3(0.6f, 0, 0.3f)});
+    const float a = m.weight_at({0.6f, 0, 0.3f}), b = m.weight_at({-0.6f, 0, 0.3f});
+    CHECK(a > 0.5f && a == b);
+    /* One undo step takes the whole stroke back; leaving the mode keeps the weights. */
+    m.ed.command("weightpaint off");
+    CHECK(!m.ed.weight_paint_for_test() && m.weight_at({0.6f, 0, 0.3f}) == a);
+    m.ed.step_frame_headless();
+    m.ed.command("undo");
+    m.ed.step_frame_headless();
+    CHECK(m.weight_at({0.6f, 0, 0.3f}) == 0.0f && m.weight_at({-0.6f, 0, 0.3f}) == 0.0f);
+  });
+
+  test("weight paint: the view shows the weights, red at 1 and blue at 0; Normalize All and Clean", [] {
+    R68 t;
+    {
+      Mesh &m = *mesh_make_mutable(t.pad->mesh_filter()->mesh);
+      for (size_t i = 0; i < m.vert_count(); i++) m.vertex_groups[0].weights[i] = m.positions[i].x < 0.0f ? 1.0f : 0.0f;
+    }
+    t.ed.command("wpbrush add 1 0 1");
+    t.stroke({Vec3(0.95f, 0, 0.95f)});  // a dab of nothing: the view picks up the change
+    for (int i = 0; i < 2; i++) t.ed.step_frame_headless();
+    int x = 0, y = 0;
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({-0.6f, 0, 0.5f}), x, y));
+    const uint32_t red = r34_crop(t.ed, {x, y, 1, 1})[0];
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({0.6f, 0, 0.5f}), x, y));
+    const uint32_t blue = r34_crop(t.ed, {x, y, 1, 1})[0];
+    auto ch = [](uint32_t c, int k) { return (int)((c >> (8 * k)) & 0xFF); };
+    std::printf("    at weight 1: %d %d %d, at weight 0: %d %d %d\n", ch(red, 0), ch(red, 1), ch(red, 2), ch(blue, 0), ch(blue, 1), ch(blue, 2));
+    /* The framebuffer is 0xAARRGGBB: red is byte 2, blue byte 0. */
+    CHECK(ch(red, 2) > 200 && ch(red, 0) < 80);
+    CHECK(ch(blue, 0) > 200 && ch(blue, 2) < 80);
+    /* Normalize All and Clean. */
+    t.ed.command("vgroup add H");
+    {
+      Mesh &m = *mesh_make_mutable(t.ed.scene().find_by_name("Pad")->mesh_filter()->mesh);
+      for (size_t i = 0; i < m.vert_count(); i++) m.vertex_groups[1].weights[i] = 1.0f;
+    }
+    t.ed.command("wpnormalize");
+    const Mesh &n = t.mesh();
+    CHECK(n.vertex_groups[0].weights[0] + n.vertex_groups[1].weights[0] == 1.0f);
+    t.ed.command("wpclean 0.6");
+    CHECK(t.mesh().vertex_groups[1].weights[0] == 0.0f || t.mesh().vertex_groups[1].weights[0] >= 0.6f);
+  });
+
+  test("weight paint: a mouse drag in the Scene view is one stroke and one undo step; a stroke doesn't pile up past its strength, even along the mirror line", [] {
+    R68 t;
+    t.ed.command("wpbrush add 40 0.4 1");
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({-0.6f, 0, 0}), x0, y0));
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point({0.6f, 0, 0}), x1, y1));
+    t.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x0, y0)});
+    t.ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x0, y0)});
+    for (int k = 1; k <= 8; k++) t.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x0 + (x1 - x0) * k / 8, y0)});
+    for (int k = 8; k >= 0; k--) t.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x0 + (x1 - x0) * k / 8, y0)});  // back over it
+    t.ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x0, y0)});
+    t.ed.step_frame_headless();
+    float top = 0.0f;
+    for (float w : t.mesh().vertex_groups[0].weights) top = std::max(top, w);
+    std::printf("    after a drag there and back at strength 0.4: highest weight %.3f\n", top);
+    CHECK(top > 0.3f && top <= 0.4f + 1e-5f);  // Blender without Accumulate: one dab's worth per stroke
+    t.ed.command("undo");
+    t.ed.step_frame_headless();
+    top = 0.0f;
+    for (float w : t.mesh().vertex_groups[0].weights) top = std::max(top, w);
+    CHECK(top == 0.0f);  // the whole drag was one step
+    /* Mirror X along the centre line: twins both under the brush still get one dab's worth. */
+    t.ed.command("wpmirror on");
+    t.stroke({Vec3(0, 0, -0.8f), Vec3(0, 0, 0.8f)});
+    top = 0.0f;
+    for (float w : t.mesh().vertex_groups[0].weights) top = std::max(top, w);
+    CHECK(top > 0.3f && top <= 0.4f + 1e-5f);
+  });
+
+  test("weight paint: a new scene leaves the mode; the painted group stays the painted object's when another object is selected; a file keeps the weights", [] {
+    R68 t;
+    t.ed.command("vgroup add Second");
+    t.ed.command("vgroup active G");  // paint G
+    t.ed.command("select Cube");      // the selection moves on; the painted object and group stay
+    t.ed.command("wpbrush add 40 1 1");
+    t.stroke({Vec3(0.3f, 0, 0.3f)});
+    const Mesh &m = t.mesh();
+    CHECK(m.vertex_groups.size() == 2 && t.weight_at({0.3f, 0, 0.3f}) > 0.5f);
+    float second = 0.0f;
+    for (float w : m.vertex_groups[1].weights) second = std::max(second, w);
+    CHECK(second == 0.0f);
+    std::string err;
+    Scene back;
+    CHECK(load_scene_text(save_scene_text(t.ed.scene()), back, err));
+    const Mesh &bm = *back.find_by_name("Pad")->mesh_filter()->mesh;
+    CHECK(bm.vertex_groups.size() == 2 && bm.vertex_groups[0].weights == m.vertex_groups[0].weights);
+    t.ed.command("newscene");
+    t.ed.step_frame_headless();
+    CHECK(!t.ed.weight_paint_for_test());
+  });
+}
+
+/* ===================================================================== */
+/* Round 69 (task 0047): skeletons and skinning                            */
+/* ===================================================================== */
+
+/* A tube up +Y from 0 to 2 (radius 0.2, 21 rings of 16), an armature "Rig" with Lower (0..1) and Upper (1..2), the
+ * tube skinned: Lower below 0.9, Upper above 1.1, a blend between. */
+struct R69Rig {
+  Scene s;
+  GameObject *rig = nullptr, *lower = nullptr, *upper = nullptr, *tube = nullptr;
+  MeshPtr base;
+  R69Rig() {
+    rig = s.create("Rig");
+    rig->add<Armature>();
+    lower = s.create("Lower", rig);
+    lower->add<Bone>();
+    upper = s.create("Upper", lower);
+    upper->set_local_position({0, 1, 0});
+    Bone *ub = upper->add<Bone>();
+    ub->rest_position = {0, 1, 0};
+    base = std::make_shared<Mesh>();
+    const int rings = 21, seg = 16;
+    for (int r = 0; r < rings; r++)
+      for (int k = 0; k < seg; k++) {
+        const float a = k * 2.0f * kPi / seg;
+        base->add_vert({0.2f * std::cos(a), r * 0.1f, 0.2f * std::sin(a)});
+      }
+    for (int r = 0; r + 1 < rings; r++)
+      for (int k = 0; k < seg; k++) {
+        const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+        base->add_face({a, a + seg, b + seg, b});
+      }
+    VertexGroup lo{"Lower", {}}, up{"Upper", {}};
+    for (const Vec3 &p : base->positions) {
+      const float t = std::max(0.0f, std::min(1.0f, (p.y - 0.9f) / 0.2f));
+      lo.weights.push_back(1.0f - t);
+      up.weights.push_back(t);
+    }
+    base->vertex_groups = {lo, up};
+    base->touch();
+    tube = s.create("Tube");
+    tube->add<MeshFilter>()->mesh = base;
+    tube->add<SkinModifier>()->object = "Rig";
+  }
+  /* The ring at height y: its mean distance from the bone axis (Y). */
+  float ring_radius(float y) {
+    const Mesh *m = tube->evaluated_mesh();
+    float sum = 0.0f;
+    int n = 0;
+    for (size_t i = 0; i < base->vert_count(); i++)
+      if (std::fabs(base->positions[i].y - y) < 1e-4f) sum += length(Vec3(m->positions[i].x, 0, m->positions[i].z)), n++;
+    return n ? sum / n : 0.0f;
+  }
+};
+
+static void round69_tests() {
+  test("skins: at rest the mesh is unchanged; turning a bone 90 degrees turns the vertices it owns about its joint exactly", [] {
+    R69Rig t;
+    float rest = 0.0f;
+    const Mesh *m = t.tube->evaluated_mesh();
+    for (size_t i = 0; i < m->vert_count(); i++) rest = std::max(rest, length(m->positions[i] - t.base->positions[i]));
+    CHECK(rest < 1e-5f);
+    const Quat q = Quat::axis_angle({0, 0, 1}, kPi * 0.5f);
+    t.upper->set_local_rotation(q);
+    m = t.tube->evaluated_mesh();
+    float off = 0.0f, still = 0.0f;
+    for (size_t i = 0; i < m->vert_count(); i++) {
+      const Vec3 p = t.base->positions[i];
+      if (p.y >= 1.1f - 1e-4f) off = std::max(off, length(m->positions[i] - (q.rotate(p - Vec3(0, 1, 0)) + Vec3(0, 1, 0))));
+      if (p.y <= 0.9f + 1e-4f) still = std::max(still, length(m->positions[i] - p));
+    }
+    std::printf("    upper part off by %g, lower part moved by %g\n", off, still);
+    CHECK(off < 1e-4f && still < 1e-5f);
+    /* Rest Position shows it unposed; moving the whole rig moves nothing relative to it (the tube isn't its child). */
+    t.rig->get<Armature>()->rest_position = true;
+    CHECK(t.tube->evaluated_mesh()->positions == t.base->positions);
+  });
+
+  test("skins: Dual Quaternion keeps a twisted joint's girth where Linear collapses it; both agree at rest", [] {
+    R69Rig t;
+    t.upper->set_local_rotation(Quat::axis_angle({0, 1, 0}, kPi * 150.0f / 180.0f));  // a twist along the bone
+    const float linear = t.ring_radius(1.0f);
+    t.rig->get<Armature>()->deform = 1;
+    const float dq = t.ring_radius(1.0f);
+    std::printf("    the joint's radius after a 150 degree twist: linear %.3f, dual quaternion %.3f (rest 0.2)\n", linear, dq);
+    CHECK(linear < 0.1f && dq > 0.18f);
+    t.upper->set_local_rotation(Quat());
+    CHECK(std::fabs(t.ring_radius(1.0f) - 0.2f) < 1e-4f);
+    /* A single bone's vertices: both methods the same. */
+    t.upper->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.7f));
+    const std::vector<Vec3> d = t.tube->evaluated_mesh()->positions;
+    t.rig->get<Armature>()->deform = 0;
+    const std::vector<Vec3> l = t.tube->evaluated_mesh()->positions;
+    float off = 0.0f;
+    for (size_t i = 0; i < d.size(); i++)
+      if (t.base->positions[i].y > 1.15f) off = std::max(off, length(d[i] - l[i]));
+    CHECK(off < 1e-4f);
+  });
+
+  test("skins: the glTF and FBX two-bone tubes import with bones, an armature, weights summing to 1, and pose like the original", [] {
+    for (const char *file : {"tests/fixtures/rig_tube.glb", "tests/fixtures/rig_tube.fbx"}) {
+      ImportResult r;
+      CHECK(import_model(file, r));
+      Scene s;
+      instantiate_import(s, r, "Rig Import", nullptr);
+      GameObject *lower = s.find_by_name("Lower"), *upper = s.find_by_name("Upper"), *tube = s.find_by_name("Tube");
+      const bool shape = lower && upper && tube && lower->get<Bone>() && upper->get<Bone>() && upper->parent == lower && tube->get<SkinModifier>();
+      std::printf("    %s: %s, %zu skins\n", file, shape ? "bones, armature and skin" : "MISSING PARTS", r.skins.size());
+      CHECK(shape);
+      if (!shape) continue;
+      const GameObject *arm = s.find_by_name(tube->get<SkinModifier>()->object);
+      CHECK(arm && arm->get<Armature>());
+      const Mesh &m = *tube->mesh_filter()->mesh;
+      CHECK(m.find_group("Lower") >= 0 && m.find_group("Upper") >= 0 && m.groups_fit());
+      float worst = 0.0f;
+      for (size_t i = 0; i < m.vert_count(); i++) {
+        float sum = 0.0f;
+        for (const VertexGroup &g : m.vertex_groups) sum += g.weights[i];
+        worst = std::max(worst, std::fabs(sum - 1.0f));
+      }
+      if (!(worst < 1e-3f)) {
+        std::printf("    weights off by %g; groups:", worst);
+        for (const VertexGroup &g : m.vertex_groups) {
+          float mx = 0.0f;
+          for (float w : g.weights) mx = std::max(mx, w);
+          std::printf(" %s (max %.2f)", g.name.c_str(), mx);
+        }
+        std::printf("; %zu vertices\n", m.vert_count());
+      }
+      CHECK(worst < 1e-3f);
+      float rest = 0.0f;
+      const Mesh *e = tube->evaluated_mesh();
+      for (size_t i = 0; i < m.vert_count(); i++) rest = std::max(rest, length(e->positions[i] - m.positions[i]));
+      std::printf("    at rest, moved by %g\n", rest);
+      CHECK(rest < 1e-3f);
+      /* Turning Upper moves its vertices; Lower's own stay. */
+      upper->set_local_rotation(upper->local().rotation * Quat::axis_angle({1, 0, 0}, 1.0f));
+      e = tube->evaluated_mesh();
+      const std::vector<float> &uw = m.vertex_groups[(size_t)m.find_group("Upper")].weights;
+      float moved_up = 0.0f, moved_low = 0.0f;
+      const Mat4 &tw = tube->world_matrix();  // in metres: the FBX keeps centimetres inside a x100 scale
+      for (size_t i = 0; i < m.vert_count(); i++) {
+        const float d = length(tw.point(e->positions[i]) - tw.point(m.positions[i]));
+        if (uw[i] > 0.99f) moved_up = std::max(moved_up, d);
+        if (uw[i] == 0.0f) moved_low = std::max(moved_low, d);  // (auto weights reach a little way down)
+      }
+      CHECK(moved_up > 0.1f && moved_low < 1e-3f);
+    }
+  });
+
+  test("skins: GameObject > Armature binds a selected mesh with automatic weights; posing is undoable and saved; Reset Pose and Apply as Rest", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *col = ed.scene().create("Column");
+    col->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 16);
+    col->add<MeshRenderer>();
+    ed.command("select Column");
+    ed.mark_changed_for_test("R69 column");
+    ed.step_frame_headless();
+    ed.command("create Armature");
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(arm && arm->get<Armature>() && bone && bone->get<Bone>() && col->get<SkinModifier>());
+    if (!arm || !bone || !col->get<SkinModifier>()) return;
+    ed.command("bone add Bone 0.5");
+    GameObject *tip = ed.scene().find_by_name("Bone.001");
+    CHECK(tip && tip->parent == bone && tip->local().position.y == bone->get<Bone>()->length);
+    ed.command("skin bind Column");
+    const Mesh &m = *ed.scene().find_by_name("Column")->mesh_filter()->mesh;
+    CHECK(m.find_group("Bone") >= 0 && m.find_group("Bone.001") >= 0);
+    float worst = 0.0f;
+    for (size_t i = 0; i < m.vert_count(); i++) {
+      float sum = 0.0f;
+      for (const VertexGroup &g : m.vertex_groups) sum += g.weights[i];
+      worst = std::max(worst, std::fabs(sum - 1.0f));
+    }
+    CHECK(worst < 1e-4f);
+    ed.step_frame_headless();
+    /* Pose: one undo step; Reset Pose brings the rest back; a file keeps the pose and the rest. */
+    const std::vector<Vec3> rest = ed.scene().find_by_name("Column")->evaluated_mesh()->positions;
+    tip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.8f));
+    ed.mark_changed_for_test("R69 pose");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions != rest);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    CHECK(back.find_by_name("Column")->evaluated_mesh()->positions == ed.scene().find_by_name("Column")->evaluated_mesh()->positions);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions == rest);
+    tip = ed.scene().find_by_name("Bone.001");
+    tip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.5f));
+    ed.command("armature reset Armature");
+    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions == rest);
+    tip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.5f));
+    ed.command("armature apply Armature");  // this pose is the rest now: the mesh shows unposed in it
+    {
+      /* Within rounding, not bit for bit: the bone's world matrix times its rest's inverse is the identity only up to
+       * the last bit (macOS's clang fuses the multiply-adds differently and was 1 ulp off here). */
+      const std::vector<Vec3> &now = ed.scene().find_by_name("Column")->evaluated_mesh()->positions;
+      const std::vector<Vec3> &base = ed.scene().find_by_name("Column")->mesh_filter()->mesh->positions;
+      float off = now.size() == base.size() ? 0.0f : 1e9f;
+      for (size_t i = 0; i < now.size() && i < base.size(); i++) off = std::max(off, length(now[i] - base[i]));
+      CHECK(off < 1e-5f);
+    }
+  });
+
+  test("skins: a root bone resets, rests near 90 degrees stay exact, an unevenly scaled mesh keeps Dual Quaternion, a mesh under the armature follows it", [] {
+    /* The root itself a bone (as imports often make it): Reset Pose puts it back too. */
+    {
+      Editor ed;
+      ed.init_headless(400, 300);
+      GameObject *hips = ed.scene().create("Hips");
+      hips->add<Armature>();
+      hips->add<Bone>();
+      hips->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+      ed.command("armature reset Hips");
+      const Quat q = ed.scene().find_by_name("Hips")->local().rotation;
+      CHECK(std::fabs(q.w - 1.0f) < 1e-6f);
+    }
+    /* A rest rotation near 90 degrees about X (where Euler angles lose up to a degree): unchanged at rest. */
+    {
+      R69Rig t;
+      const Quat near90 = Quat::euler({89.6f, 20.0f, 35.0f});
+      t.upper->set_local_rotation(near90);
+      t.upper->get<Bone>()->set_rest(t.upper->local());
+      Scene back;
+      std::string err;
+      CHECK(load_scene_text(save_scene_text(t.s), back, err));  // through a file too
+      const Mesh *m = back.find_by_name("Tube")->evaluated_mesh();
+      float off = 0.0f;
+      for (size_t i = 0; i < m->vert_count(); i++) off = std::max(off, length(m->positions[i] - t.base->positions[i]));
+      std::printf("    a rest at (89.6, 20, 35) degrees, saved and loaded: moved by %g at rest\n", off);
+      CHECK(off < 1e-4f);
+    }
+    /* An unevenly scaled mesh: Dual Quaternion still keeps the twisted joint's girth (blended in world space). */
+    {
+      R69Rig t;
+      t.tube->set_local_scale({2.0f, 1.0f, 2.0f});
+      t.rig->get<Armature>()->deform = 1;
+      t.upper->set_local_rotation(Quat::axis_angle({0, 1, 0}, kPi * 150.0f / 180.0f));
+      const Mesh *m = t.tube->evaluated_mesh();
+      float sum = 0.0f;
+      int n = 0;
+      for (size_t i = 0; i < t.base->vert_count(); i++)
+        if (std::fabs(t.base->positions[i].y - 1.0f) < 1e-4f) sum += length(Vec3(m->positions[i].x, 0, m->positions[i].z)), n++;
+      std::printf("    scaled (2, 1, 2): the joint's local radius %.3f (rest 0.2)\n", sum / n);
+      CHECK(n > 0 && sum / n > 0.18f);
+    }
+    /* A mesh parented under the armature follows it when the armature moves; the Skin's own vertex group limits it. */
+    {
+      R69Rig t;
+      t.s.set_parent(t.tube, t.rig, -1, false);
+      t.rig->set_world_position({3, 0, 0});
+      {
+        const Mesh *e = t.tube->evaluated_mesh();
+        float off = 0.0f;
+        for (size_t i = 0; i < e->vert_count(); i++) off = std::max(off, length(e->positions[i] - t.base->positions[i]));
+        CHECK(off < 1e-4f);  // in its own space: unchanged (up to rounding through world space)
+      }
+      Mesh &bm = *mesh_make_mutable(t.tube->mesh_filter()->mesh);
+      VertexGroup half{"Half", {}};
+      for (const Vec3 &q : bm.positions) half.weights.push_back(q.x > 0.0f ? 1.0f : 0.0f);
+      bm.vertex_groups.push_back(half);
+      bm.touch();
+      t.tube->get<SkinModifier>()->vertex_group = "Half";
+      t.upper->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+      const Mesh *m = t.tube->evaluated_mesh();
+      float moved_neg = 0.0f;
+      for (size_t i = 0; i < bm.vert_count(); i++)
+        if (bm.positions[i].x < 0.0f) moved_neg = std::max(moved_neg, length(m->positions[i] - bm.positions[i]));
+      CHECK(moved_neg == 0.0f);
+    }
+  });
+
+  test("skins: automatic weights give each vertex mostly to its nearest bone", [] {
+    R69Rig t;
+    Mesh m = *t.base;
+    m.vertex_groups.clear();
+    CHECK(skin_bind_automatic(*t.tube->get<SkinModifier>(), m));
+    const std::vector<float> &lo = m.vertex_groups[(size_t)m.find_group("Lower")].weights;
+    int right = 0, total = 0;
+    for (size_t i = 0; i < m.vert_count(); i++) {
+      const float y = m.positions[i].y;
+      if (std::fabs(y - 1.0f) < 0.15f) continue;  // near the joint either may lead
+      total++;
+      right += (y < 1.0f) == (lo[i] > 0.5f);
+    }
+    std::printf("    %d of %d vertices mostly on their nearest bone\n", right, total);
+    CHECK(total > 0 && right == total);
+  });
+
+  /* ------------------------------------------------------------------ round 70: IK and rig presets (task 0048) */
+  test("IK: two bones reach a target exactly, point at one out of reach, and bend towards the pole", [] {
+    R69Rig t;
+    GameObject *target = t.s.create("Target");
+    target->set_world_position({0.8f, 1.2f, 0.3f});
+    IKConstraint *ik = t.upper->add<IKConstraint>();
+    ik->target = "Target";
+    CHECK(solve_constraints(t.s));
+    auto tip = [&] { return t.upper->world_matrix().point({0, 1, 0}); };
+    std::printf("    reachable: tip off the target by %g\n", length(tip() - target->world_position()));
+    CHECK(length(tip() - target->world_position()) < 1e-4f);
+    CHECK(length(t.lower->world_position()) < 1e-6f);  // the chain's root stays where it hangs
+    /* Out of reach: the chain straightens towards it. */
+    target->set_world_position({0.0f, 5.0f, 3.0f});
+    CHECK(solve_constraints(t.s));
+    const Vec3 dir = normalize(target->world_position());
+    CHECK(dot(normalize(tip()), dir) > 0.9999f && std::fabs(length(tip()) - 2.0f) < 1e-3f);
+    /* A pole: the knee lies in the plane of root, target and pole, on the pole's side. */
+    GameObject *pole = t.s.create("Pole");
+    pole->set_world_position({0.0f, 1.0f, 2.0f});
+    ik->pole = "Pole";
+    target->set_world_position({0.0f, 1.2f, 0.0f});
+    CHECK(solve_constraints(t.s));
+    const Vec3 knee = t.upper->world_position(), T = target->world_position(), P = pole->world_position();
+    const Vec3 n = normalize(cross(T, P));
+    std::printf("    knee off the pole plane by %g; tip off the target by %g\n", std::fabs(dot(knee, n)), length(tip() - T));
+    CHECK(std::fabs(dot(knee, n)) < 1e-4f && knee.z > 0.5f && length(tip() - T) < 1e-4f);
+    /* Nothing moved: nothing to solve. */
+    CHECK(!solve_constraints(t.s));
+    /* The skin follows the solved bones. */
+    const Mesh *m = t.tube->evaluated_mesh();
+    CHECK(length(m->positions.back() - t.base->positions.back()) > 0.5f);
+  });
+
+  test("IK: five bones converge on a target by CCD; weight blends with the pose; Reset Pose solves again", [] {
+    Scene s;
+    GameObject *root = s.create("Rig");
+    root->add<Armature>();
+    GameObject *parent = root, *end = nullptr;
+    for (int k = 0; k < 5; k++) {
+      GameObject *b = s.create(strprintf("B%d", k), parent);
+      if (k) b->set_local_position({0, 0.5f, 0});
+      b->add<Bone>()->length = 0.5f;
+      b->get<Bone>()->set_rest(b->local());
+      parent = end = b;
+    }
+    GameObject *target = s.create("Target");
+    target->set_world_position({1.0f, 1.2f, 0.5f});
+    IKConstraint *ik = end->add<IKConstraint>();
+    ik->target = "Target";
+    ik->chain_length = 5;
+    ik->iterations = 100;
+    CHECK(solve_constraints(s));
+    const float err = length(end->world_matrix().point({0, 0.5f, 0}) - target->world_position());
+    std::printf("    5 bones: tip off the target by %g\n", err);
+    CHECK(err < 1e-3f);
+    CHECK(length(s.find_by_name("B0")->world_position()) < 1e-6f);
+    /* Reset Pose turns the bones back; the next solve puts them on the target again. */
+    for (int k = 0; k < 5; k++) s.find_by_name(strprintf("B%d", k))->set_local_rotation(Quat());
+    CHECK(solve_constraints(s));
+    CHECK(length(end->world_matrix().point({0, 0.5f, 0}) - target->world_position()) < 1e-3f);
+    /* Weight 0: the pose as it was. */
+    for (int k = 0; k < 5; k++) s.find_by_name(strprintf("B%d", k))->set_local_rotation(Quat());
+    ik->weight = 0.0f;
+    solve_constraints(s);
+    for (int k = 0; k < 5; k++) CHECK(std::fabs(s.find_by_name(strprintf("B%d", k))->local().rotation.w - 1.0f) < 1e-6f);
+    /* A target the chain carries (a child of its bone) is refused rather than chased. */
+    s.set_parent(target, s.find_by_name("B2"), -1, true);
+    ik->weight = 1.0f;
+    CHECK(!solve_constraints(s));
+    /* Driven bones: the chain only. */
+    CHECK(ik_drives(s, *s.find_by_name("B0")) && ik_drives(s, *end) && !ik_drives(s, *root));
+  });
+
+  test("IK: rig presets make the named bones with IK on the limbs; auto IK finds Mixamo, Unity and Rigify limbs", [] {
+    Scene s;
+    GameObject *h = create_rig(s, false, {});
+    int iks = 0;
+    s.for_each([&](GameObject &g) { iks += g.get<IKConstraint>() != nullptr; });
+    CHECK(h && h->get<Armature>() && iks == 4);
+    for (const char *n : {"Hips", "Spine", "Chest", "Neck", "Head", "LeftUpperLeg", "RightLowerLeg", "LeftHand", "RightFoot", "LeftFootIK", "RightElbowPole"})
+      CHECK(s.find_by_name(n) && (std::strstr(n, "IK") || std::strstr(n, "Pole") || s.find_by_name(n)->get<Bone>()));
+    /* Lifting a foot target bends the knee forward (the pole's side) and the foot stays on it. */
+    GameObject *ft = s.find_by_name("LeftFootIK");
+    ft->set_world_position(ft->world_position() + Vec3(0, 0.3f, 0.1f));
+    CHECK(solve_constraints(s));
+    GameObject *shin = s.find_by_name("LeftLowerLeg");
+    const float err = length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - ft->world_position());
+    std::printf("    humanoid: foot off its lifted target by %g, knee forward by %.3f\n", err, shin->world_position().z);
+    CHECK(err < 1e-4f && shin->world_position().z > 0.05f);
+    Scene q;
+    create_rig(q, true, {});
+    iks = 0;
+    q.for_each([&](GameObject &g) { iks += g.get<IKConstraint>() != nullptr; });
+    CHECK(iks == 4 && q.find_by_name("Tail") && q.find_by_name("HindLeftFootIK"));
+    CHECK(create_rig(q, true, {})->name == "Quadruped.001");
+    /* Auto IK by names: Mixamo, Unity and Rigify skeletons get four limbs each; a spine or a hand matches nothing. */
+    const char *sets[3][8] = {
+        {"mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:LeftArm", "mixamorig:LeftForeArm",
+         "mixamorig:RightArm", "mixamorig:RightForeArm"},
+        {"LeftUpperLeg", "LeftLowerLeg", "RightUpperLeg", "RightLowerLeg", "LeftUpperArm", "LeftLowerArm", "RightUpperArm", "RightLowerArm"},
+        {"thigh.L", "shin.L", "thigh.R", "shin.R", "upper_arm.L", "forearm.L", "upper_arm.R", "forearm.R"}};
+    for (auto &names : sets) {
+      Scene k;
+      GameObject *root = k.create("Armature");
+      root->add<Armature>();
+      GameObject *hips = k.create("mixamorig:Hips", root);
+      hips->add<Bone>();
+      GameObject *spine = k.create("Spine", hips);
+      spine->add<Bone>();
+      for (int limb = 0; limb < 4; limb++) {
+        GameObject *up = k.create(names[limb * 2], limb < 2 ? hips : spine);
+        up->set_local_position({limb % 2 ? 0.2f : -0.2f, 0, 0});
+        up->set_local_rotation(Quat::axis_angle({0, 0, 1}, kPi));
+        up->add<Bone>()->length = 0.4f;
+        GameObject *lo = k.create(names[limb * 2 + 1], up);
+        lo->set_local_position({0, 0.4f, 0});
+        lo->add<Bone>()->length = 0.4f;
+        k.create(limb < 2 ? "LeftHand" : "LeftFoot", lo)->add<Bone>();
+      }
+      const int n = add_humanoid_ik(k, root);
+      std::printf("    %s...: %d limbs\n", names[0], n);
+      CHECK(n == 4);
+      CHECK(k.find_by_name(names[1])->get<IKConstraint>() && !k.find_by_name(names[0])->get<IKConstraint>());
+      CHECK(add_humanoid_ik(k, root) == 0);  // twice: nothing more
+    }
+  });
+
+  test("IK: the console adds IK and presets; moving the target with the gizmo poses the leg, a driven bone refuses the gizmo, undo", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.scene().find_by_name("Humanoid");
+    CHECK(rig && ed.active_object_for_test() == rig);
+    rig->set_world_position({0, 0, 3.0f});
+    ed.command("camera 0 1.2 9 0 0.8 3");  // facing the rig: the Move gizmo's X arrow points right on screen
+    ed.mark_changed_for_test("R70 setup");
+    r34_steps(ed, 2);
+    GameObject *ft = ed.scene().find_by_name("RightFootIK");
+    GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
+    auto foot_err = [&] { return length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - ft->world_position()); };
+    CHECK(foot_err() < 1e-4f);  // the frame solved after the rig moved
+    ft->set_world_position(ft->world_position() + Vec3(0, 0.25f, 0));  // a straight leg at rest: lift the foot so a sideways move stays in reach
+    ed.mark_changed_for_test("R70 lift");
+    r34_steps(ed, 1);
+    CHECK(foot_err() < 1e-4f);
+    ed.command("select RightFootIK");
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    const Vec3 before = ft->world_position();
+    r34_gizmo_drag_x(ed, before, 8);  // about 0.2 m: still in the leg's reach
+    r34_steps(ed, 2);
+    std::printf("    target moved by %.3f; foot off it by %g\n", ft->world_position().x - before.x, foot_err());
+    CHECK(ft->world_position().x > before.x + 0.02f && foot_err() < 1e-4f);
+    /* The shin is turned by IK: the gizmo refuses it. */
+    ed.command("select RightLowerLeg");
+    r34_steps(ed, 2);
+    const Vec3 shin_at = shin->world_position();
+    const Quat q0 = shin->local().rotation;
+    r34_gizmo_drag_x(ed, shin_at, 40);
+    r34_steps(ed, 2);
+    CHECK(length(shin->world_position() - shin_at) < 1e-5f && std::fabs(shin->local().rotation.x * q0.x + shin->local().rotation.y * q0.y + shin->local().rotation.z * q0.z + shin->local().rotation.w * q0.w) > 0.99999f);
+    /* Undo the target's move: the leg follows it back. */
+    ed.command("undo");
+    r34_steps(ed, 2);
+    ft = ed.scene().find_by_name("RightFootIK");
+    shin = ed.scene().find_by_name("RightLowerLeg");
+    CHECK(ft && shin && std::fabs(ft->world_position().x - before.x) < 1e-5f && foot_err() < 1e-4f);
+    /* ik add on a plain skeleton, through a scene file. */
+    ed.command("create Armature");
+    ed.command("bone add Bone 1");
+    ed.command("create Empty");
+    GameObject *e = ed.scene().find_by_name("GameObject");
+    CHECK(e != nullptr);
+    if (!e) return;
+    e->set_world_position({1.0f, 1.0f, 0.0f});
+    ed.command("ik add Bone.001 GameObject - 2");
+    GameObject *b1 = ed.scene().find_by_name("Bone.001");
+    CHECK(b1 && b1->get<IKConstraint>() && b1->get<IKConstraint>()->target == "GameObject");
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const IKConstraint *ik = back.find_by_name("Bone.001") ? back.find_by_name("Bone.001")->get<IKConstraint>() : nullptr;
+    CHECK(ik && ik->target == "GameObject" && ik->chain_length == 2 && ik->pole.empty());
+  });
+
+  test("IK: in Play a Rotator swinging a foot target animates the leg; Stop puts the pose back", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("rig humanoid");
+    Scene &s0 = ed.scene();
+    GameObject *ft = s0.find_by_name("RightFootIK");
+    const Vec3 foot = ft->world_position();
+    GameObject *spin = s0.create("Spin");
+    spin->set_world_position(foot + Vec3(0, 0.25f, 0));
+    spin->add<Rotator>()->degrees_per_second = {0, 3000, 0};
+    s0.set_parent(ft, spin, -1, true);
+    ft->set_world_position(foot + Vec3(0.15f, 0.25f, 0));  // a circle the leg reaches all the way round
+    ed.mark_changed_for_test("R70 play setup");
+    r34_steps(ed, 2);
+    const Quat rest = s0.find_by_name("RightLowerLeg")->local().rotation;
+    ed.command("play");
+    r34_steps(ed, 6);
+    GameObject *pft = ed.scene().find_by_name("RightFootIK");
+    GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
+    const float err = length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - pft->world_position());
+    const Vec3 off = pft->world_position() - (foot + Vec3(0.15f, 0.25f, 0));
+    std::printf("    in Play: the target swung by %.3f, the foot off it by %g\n", length(off), err);
+    CHECK(length(off) > 0.01f && err < 1e-4f);
+    ed.command("stop");
+    r34_steps(ed, 2);
+    const Quat q = ed.scene().find_by_name("RightLowerLeg")->local().rotation;
+    CHECK(std::fabs(q.x * rest.x + q.y * rest.y + q.z * rest.z + q.w * rest.w) > 0.99999f);
+  });
+
+  test("IK: a second rig has its own targets; a target that circles back leaves no twist; Weight 0.5 doesn't add up; a pole the chain carries is refused", [] {
+    /* Two humanoids: moving the second's foot target poses the second's leg, not the first's. */
+    {
+      Scene s;
+      create_rig(s, false, {});
+      GameObject *r2 = create_rig(s, false, {2.0f, 0, 0});
+      CHECK(r2->name == "Humanoid.001" && s.find_by_name("LeftFootIK.001"));
+      GameObject *shin2 = nullptr;
+      s.for_each([&](GameObject &g) {  // the bones keep their names: the second rig's shin is the one under it
+        if (!shin2 && g.name == "LeftLowerLeg" && s.is_ancestor(r2, &g)) shin2 = &g;
+      });
+      GameObject *t2 = s.find_by_name("LeftFootIK.001");
+      CHECK(shin2 && t2 && shin2->get<IKConstraint>()->target == "LeftFootIK.001");
+      t2->set_world_position(t2->world_position() + Vec3(0, 0.3f, 0));
+      solve_constraints(s);
+      CHECK(length(shin2->world_matrix().point({0, shin2->get<Bone>()->length, 0}) - t2->world_position()) < 1e-4f);
+    }
+    /* A target that goes round a circle and back: the same rotations as before the circle (no wound-up twist). */
+    {
+      R69Rig t;
+      GameObject *target = t.s.create("Target");
+      target->set_world_position({0.6f, 1.4f, 0.0f});
+      t.upper->add<IKConstraint>()->target = "Target";
+      solve_constraints(t.s);
+      const Quat a0 = t.lower->local().rotation, b0 = t.upper->local().rotation;
+      for (int k = 1; k <= 24; k++) {
+        const float ang = k * 2.0f * kPi / 24.0f;
+        target->set_world_position({0.6f * std::cos(ang), 1.4f, 0.6f * std::sin(ang)});
+        solve_constraints(t.s);
+      }
+      const Quat a1 = t.lower->local().rotation, b1 = t.upper->local().rotation;
+      auto same = [](Quat p, Quat q) { return std::fabs(p.x * q.x + p.y * q.y + p.z * q.z + p.w * q.w) > 0.99999f; };
+      CHECK(same(a0, a1) && same(b0, b1));
+      /* Weight 0.5: the same pose however many times the target moved on the way. */
+      IKConstraint *ik = t.upper->get<IKConstraint>();
+      ik->weight = 0.5f;
+      target->set_world_position({0.5f, 1.0f, 0.2f});
+      solve_constraints(t.s);
+      const Quat once = t.lower->local().rotation;
+      for (int k = 0; k < 10; k++) {
+        target->set_world_position({0.5f + 0.01f * k, 1.0f, 0.2f});
+        solve_constraints(t.s);
+      }
+      target->set_world_position({0.5f, 1.0f, 0.2f});
+      solve_constraints(t.s);
+      CHECK(same(once, t.lower->local().rotation));
+      /* A pole carried by the chain would move with every solve: refused, so the editor goes idle. */
+      ik->weight = 1.0f;
+      GameObject *pole = t.s.create("Pole", t.lower);
+      pole->set_local_position({0, 0.5f, 1.0f});
+      ik->pole = "Pole";
+      CHECK(!solve_constraints(t.s) && !solve_constraints(t.s));
+    }
+    /* A constraint whose target is gone doesn't hold the bone (the gizmo can turn it again). */
+    {
+      R69Rig t;
+      t.upper->add<IKConstraint>()->target = "Nowhere";
+      CHECK(!ik_drives(t.s, *t.upper));
+    }
+  });
+
+  test("IK: G / R on a bone turned by IK is refused, on a free bone it turns it", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("rig humanoid");
+    ed.step_frame_headless();
+    Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto key = [&](int k) {
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove;
+      m.x = d.x = u.x = cx + 40;
+      m.y = d.y = u.y = cy;
+      d.type = platform::EventType::KeyDown;
+      d.key = u.key = k;
+      u.type = platform::EventType::KeyUp;
+      ed.step_frame_headless({m, d, u});
+    };
+    auto type = [&](const char *s) {
+      for (const char *c = s; *c; c++) {
+        platform::Event t;
+        t.type = platform::EventType::Text;
+        t.codepoint = (uint32_t)*c;
+        t.x = cx + 40;
+        t.y = cy;
+        ed.step_frame_headless({t});
+      }
+    };
+    /* The head has no IK: G, R (rotate), X, 30, Enter turns it, FK as before. */
+    ed.command("select Head");
+    ed.step_frame_headless();
+    const Quat q0 = ed.scene().find_by_name("Head")->local().rotation;
+    key(platform::KEY_G);
+    CHECK(ed.transform_active_for_test());
+    key(platform::KEY_R);
+    key(platform::KEY_X);
+    type("30");
+    key(platform::KEY_ENTER);
+    ed.step_frame_headless();
+    const Quat q = ed.scene().find_by_name("Head")->local().rotation;
+    CHECK(std::fabs(q.x * q0.x + q.y * q0.y + q.z * q0.z + q.w * q0.w) < 0.999f);
+    /* IK drives the shin: G starts nothing (IK would only turn it back, after an undo step that changes nothing). */
+    ed.command("select LeftLowerLeg");
+    ed.step_frame_headless();
+    key(platform::KEY_G);
+    CHECK(!ed.transform_active_for_test());
+    key(platform::KEY_ESCAPE);
+    CHECK(ed.scene().find_by_name("LeftLowerLeg") != nullptr);
   });
 }

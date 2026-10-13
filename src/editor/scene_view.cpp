@@ -6,6 +6,7 @@
 //   Gizmos      : Unity handles; Blender's are in blender/source/blender/editors/gizmo_library
 //                 and blender/source/blender/editors/transform
 //   Edit Mode   : Blender's mesh editing (blender/source/blender/editors/mesh)
+#include "../scene/curve.h"
 #include "editor.h"
 
 #include "../core/core.h"
@@ -52,6 +53,7 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
   bool gizmo_busy = gizmo_update(view);
+  if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
   /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
   if (pushpull_update(view)) gizmo_busy = true;
   if (modal_update(view)) gizmo_busy = true;
@@ -87,12 +89,19 @@ void Editor::draw_scene_view(const Recti &r) {
       }
       else {
         if (edit_mode_) edit_pick(view, in.mx, in.my, mode);
-        else pick(view, in.mx, in.my, mode);
+        else if (!point_pick(view, in.mx, in.my, mode)) {
+          pt_sel_.clear();
+          pick(view, in.mx, in.my, mode);
+        }
       }
+      if (moved && !edit_mode_) pt_sel_.clear();
       drag_ = Drag::None;
       box_visible = false;
     }
   }
+  /* Esc drops a curve's point selection (the object stays selected). */
+  if (!pt_sel_.empty() && scene_hovered_ && drag_ == Drag::None && in.key_pressed[platform::KEY_ESCAPE] && !u.wants_keyboard())
+    pt_sel_.clear();
   /* Double-click frames the selection (Unity: double-click in Hierarchy; Blender: numpad '.'). */
   if (scene_hovered_ && in.double_clicked[0] && !edit_mode_ && active_) frame_selected();
 
@@ -137,6 +146,7 @@ void Editor::draw_scene_view(const Recti &r) {
   knife_draw(view);
   draw_preview(view);
   if (show_gizmos_ && !piloting) draw_gizmo(view);
+  wp_draw(view);
   draw_pushpull(view);
   draw_modal(view);
   draw_transform(view);
@@ -387,6 +397,12 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
     it.receive_shadows = mr->receive_shadows;
     it.id = (uint32_t)g.id;
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
+    if (!game && weight_paint_ && g.id == wp_obj_) {  // Weight Paint: the mesh being painted, in its weight colours
+      it.mesh = &mf->mesh->render_mesh();
+      it.vertex_colors = wp_colors(*mf->mesh, *it.mesh);
+      it.unlit = false;
+      it.materials = nullptr;  // (with materials, Solid shades per pixel from them: the weight colours are the point here)
+    }
     r3d.add(it);
   });
 }
@@ -614,9 +630,116 @@ void Editor::render_overlays(const Recti &) {
   }
 }
 
+void Editor::draw_curve(const GameObject &g, const Curve &cv) {
+  const bool sel = is_selected(g.id);
+  const CurvePath &path = cv.local_path();  // sampled once per change, placed here by the matrix
+  const Mat4 &w = g.world_matrix();
+  const uint32_t col = sel ? kSelectOrange : Color::hex(0x101010, 200);
+  for (size_t i = 1; i < path.pos.size(); i++) scene_r3d_.line(w.point(path.pos[i - 1]), w.point(path.pos[i]), col, false);
+  if (path.closed && path.pos.size() > 2) scene_r3d_.line(w.point(path.pos.back()), w.point(path.pos.front()), col, false);
+}
+
+/* A lattice's cage: each point joined to its next along U, V and W (task 0043). */
+void Editor::draw_lattice(const GameObject &g, const Lattice &l) {
+  const int n = l.control_point_count();
+  if (!n) return;
+  const Mat4 &w = g.world_matrix();
+  const uint32_t col = is_selected(g.id) ? kSelectOrange : Color::hex(0x101010, 200);
+  const int nu = l.points_u, nv = l.points_v;
+  for (int i = 0; i < n; i++) {
+    const int iu = i % nu, iv = (i / nu) % nv, iw = i / (nu * nv);
+    const Vec3 p = w.point(l.control_point(i));
+    if (iu + 1 < nu) scene_r3d_.line(p, w.point(l.control_point(i + 1)), col, false);
+    if (iv + 1 < nv) scene_r3d_.line(p, w.point(l.control_point(i + nu)), col, false);
+    if (iw + 1 < l.points_w) scene_r3d_.line(p, w.point(l.control_point(i + nu * nv)), col, false);
+  }
+}
+
+/* The active curve's or lattice's points: selected ones orange, the rest white; the first one larger (a curve's start). */
+void Editor::draw_control_points(const Recti &view, const GameObject &g, const Component &pc) {
+  auto &u = ui_;
+  for (int i = 0; i < pc.control_point_count(); i++) {
+    Vec2 sp;
+    float z;
+    if (!scene_r3d_.project(g.world_matrix().point(pc.control_point(i)), sp, z)) continue;
+    const bool on = pt_obj_ == g.id && std::find(pt_sel_.begin(), pt_sel_.end(), i) != pt_sel_.end();
+    const float r = (float)u.px(i == 0 && g.curve() ? 5 : 4);  // a curve's start is larger
+    u.canvas.fill_circle(view.x + sp.x, view.y + sp.y, r + 1.0f, Color::hex(0x000000, 200));
+    u.canvas.fill_circle(view.x + sp.x, view.y + sp.y, r, on ? kSelectOrange : Color::hex(0xF0F0F0));
+  }
+}
+
+bool Editor::point_pick(const Recti &view, int mx, int my, int mode) {
+  GameObject *g = active_object();
+  const Component *pc = g && is_selected(g->id) ? g->point_source() : nullptr;
+  if (!pc || edit_mode_) return false;
+  int hit = -1;
+  float best = (float)ui_.px(9);
+  for (int i = 0; i < pc->control_point_count(); i++) {
+    Vec2 sp;
+    float z;
+    if (!scene_r3d_.project(g->world_matrix().point(pc->control_point(i)), sp, z)) continue;
+    const float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
+    if (d < best) best = d, hit = (int)i;
+  }
+  if (hit < 0) return false;
+  if (pt_obj_ != g->id) pt_sel_.clear();
+  pt_obj_ = g->id;
+  auto it = std::find(pt_sel_.begin(), pt_sel_.end(), hit);
+  if (mode == SEL_REPLACE) pt_sel_ = {hit};
+  else if (it != pt_sel_.end()) pt_sel_.erase(it);
+  else pt_sel_.push_back(hit);
+  return true;
+}
+
+GameObject *Editor::point_target(std::vector<int> &points) {
+  points.clear();
+  if (edit_mode_ || !pt_obj_ || pt_obj_ != active_ || pt_sel_.empty()) return nullptr;
+  GameObject *g = scene_->find(pt_obj_);
+  const Component *pc = g ? g->point_source() : nullptr;
+  if (!pc) return nullptr;
+  for (int i : pt_sel_)
+    if (i >= 0 && i < pc->control_point_count()) points.push_back(i);
+  return points.empty() ? nullptr : g;
+}
+
+/* Blender's octahedral bone: from the head (the object's origin) along +Y by its length, widest a tenth of the way. */
+/* The armature a bone belongs to (the nearest Armature up from it, itself included). */
+static const Armature *bone_armature(const GameObject &g) {
+  for (const GameObject *p = &g; p; p = p->parent)
+    if (const Armature *a = p->get<Armature>()) return a;
+  return nullptr;
+}
+
+void Editor::draw_bone(const GameObject &g, const Bone &b) {
+  const Armature *arm = bone_armature(g);
+  if (arm && !arm->show_bones) return;
+  const bool over = !arm || arm->in_front;  // In Front: over the meshes; off: hidden behind them
+  const Mat4 &w = g.world_matrix();
+  const float L = finite_bits(b.length) ? std::max(1e-4f, b.length) : 1.0f, r = L * 0.1f;
+  const Vec3 head = w.point(Vec3(0.0f)), tail = w.point(Vec3(0, L, 0));
+  Vec3 ring[4];
+  for (int k = 0; k < 4; k++) {
+    const float a = k * kPi * 0.5f;
+    ring[k] = w.point(Vec3(std::cos(a) * r, L * 0.1f, std::sin(a) * r));
+  }
+  const uint32_t col = is_selected(g.id) ? kSelectOrange : Color::hex(0x202020, 220);
+  for (int k = 0; k < 4; k++) {
+    scene_r3d_.line(head, ring[k], col, !over);
+    scene_r3d_.line(ring[k], tail, col, !over);
+    scene_r3d_.line(ring[k], ring[(k + 1) % 4], col, !over);
+  }
+}
+
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
   scene_->for_each([&](GameObject &g) {
+    if (const Component *bc = g.find_role(Component::RenderRole::Bone); bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
+    if (const Component *pc = g.point_source(); pc && g.active_in_hierarchy()) {
+      if (const Curve *cv = g.curve()) draw_curve(g, *cv);
+      if (const Lattice *lt = g.lattice()) draw_lattice(g, *lt);
+      if (g.id == active_ && !edit_mode_) draw_control_points(view, g, *pc);
+    }
     auto *l = g.light();  // (the role lookups first: every object, every frame)
     auto *c = g.camera();
     if ((!l && !c) || !g.active_in_hierarchy()) return;
@@ -1093,6 +1216,60 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
   float best = (float)radius;
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
+    const Component *bc = g.find_role(Component::RenderRole::Bone);
+    if (bc && bone_armature(g) && !bone_armature(g)->show_bones) bc = nullptr;  // hidden bones aren't picked
+    if (bc) {  // a bone by its line (task 0047)
+      const Bone &bn = *static_cast<const Bone *>(bc);
+      const Mat4 &bw = g.world_matrix();
+      Vec2 sa, sb;
+      float za, zb;
+      if (scene_r3d_.project(bw.point(Vec3(0.0f)), sa, za) &&
+          scene_r3d_.project(bw.point(Vec3(0, finite_bits(bn.length) ? bn.length : 1.0f, 0)), sb, zb)) {
+        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
+        const float len2 = dot(d, d);
+        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
+        const float dist = length(p - (sa + d * t));
+        if (dist < best) best = dist, hit = g.id;
+      }
+    }
+    if (const Lattice *lt = g.lattice()) {  // a lattice by its cage (task 0043)
+      const Mat4 &lw = g.world_matrix();
+      const int n = lt->control_point_count(), nu = lt->points_u, nv = lt->points_v;
+      auto seg = [&](Vec3 a, Vec3 b) {
+        Vec2 sa, sb;
+        float za, zb;
+        if (!scene_r3d_.project(lw.point(a), sa, za) || !scene_r3d_.project(lw.point(b), sb, zb)) return;
+        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
+        const float len2 = dot(d, d);
+        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
+        const float dist = length(p - (sa + d * t));
+        if (dist < best) best = dist, hit = g.id;
+      };
+      /* Only the box's outer edges: the inner grid lines cross the mesh inside, which a click should select. */
+      const int nw = lt->points_w;
+      auto end = [](int i, int n) { return i == 0 || i == n - 1; };
+      for (int i = 0; i < n; i++) {
+        const int iu = i % nu, iv = (i / nu) % nv, iw = i / (nu * nv);
+        if (iu + 1 < nu && end(iv, nv) && end(iw, nw)) seg(lt->control_point(i), lt->control_point(i + 1));
+        if (iv + 1 < nv && end(iu, nu) && end(iw, nw)) seg(lt->control_point(i), lt->control_point(i + nu));
+        if (iw + 1 < nw && end(iu, nu) && end(iv, nv)) seg(lt->control_point(i), lt->control_point(i + nu * nv));
+      }
+    }
+    if (const Curve *cv = g.curve()) {  // a curve by its line (task 0042)
+      const CurvePath &path = cv->local_path();
+      const Mat4 &cw = g.world_matrix();
+      const size_t n = path.pos.size();
+      for (size_t i = 0; i + 1 < n + (path.closed ? 1 : 0); i++) {
+        Vec2 sa, sb;
+        float za, zb;
+        if (!scene_r3d_.project(cw.point(path.pos[i]), sa, za) || !scene_r3d_.project(cw.point(path.pos[(i + 1) % n]), sb, zb)) continue;
+        const Vec2 p((float)(mx - view.x), (float)(my - view.y)), d = sb - sa;
+        const float len2 = dot(d, d);
+        const float t = len2 > 0 ? clampf(dot(p - sa, d) / len2, 0.0f, 1.0f) : 0.0f;
+        const float dist = length(p - (sa + d * t));
+        if (dist < best) best = dist, hit = g.id;
+      }
+    }
     auto *mr = g.get<MeshRenderer>();
     if (!mr || !mr->enabled || mr->display_as == 0) return;
     const Mesh *m = g.evaluated_mesh();
@@ -1198,13 +1375,26 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
+  std::vector<int> cpts;  // a curve's selected control points (task 0042)
+  GameObject *co = eo ? nullptr : point_target(cpts);
   std::vector<GameObject *> objs;
   Vec3 pivot;
-  if (eo) {
+  if (co) {
+    const Component &pc = *co->point_source();
+    AABB b;
+    Vec3 sum(0.0f);
+    for (int i : cpts) {
+      const Vec3 w = co->world_matrix().point(pc.control_point(i));
+      sum += w;
+      b.add(w);
+    }
+    pivot = pivot_center_ ? b.center() : sum / (float)cpts.size();
+  }
+  else if (eo) {
     const Mesh &m = **edit_mesh_ptr();
     AABB b;
     Vec3 sum(0.0f);
@@ -1232,7 +1422,7 @@ bool Editor::gizmo_update(const Recti &view) {
       pivot = (a ? a : objs.back())->world_position();
     }
   }
-  if (origin_edit_ && !eo) {
+  if (origin_edit_ && !eo && !co) {
     /* Editing origins: the handles sit on the active object's origin. */
     GameObject *a = active_object();
     pivot = (a ? a : objs.back())->world_position();
@@ -1339,6 +1529,14 @@ bool Editor::gizmo_update(const Recti &view) {
   /* Holding V (Unity's vertex snapping): a press anywhere starts a free move
    * from the selection's vertex nearest the mouse. */
   if (drag_ != Drag::Gizmo && in.key_down[platform::KEY_V] && do_move && scene_hovered_ && !u.wants_keyboard()) gizmo_hot_ = H_MOVE_FREE;
+  /* A bone an IK chain turns would only be turned back (task 0048): its target is what moves it. */
+  if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt() && !eo && !co)
+    for (GameObject *g : objs)
+      if (g->get<Bone>() && ik_drives(*scene_, *g)) {
+        Log::warn("'%s' is turned by IK: move its target instead", g->name.c_str());
+        gizmo_hot_ = -1;
+        break;
+      }
   /* Start drag. */
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt()) {
     drag_ = Drag::Gizmo;
@@ -1399,6 +1597,8 @@ bool Editor::gizmo_update(const Recti &view) {
       for (size_t i = 0; i < mm.vert_count(); i++) gizmo_vert_starts_.push_back(eo->world_matrix().point(mm.positions[i]));
       compute_proportional_weights(eo->world_matrix());
     }
+    else if (co)
+      for (int i : cpts) gizmo_vert_starts_.push_back(co->world_matrix().point(co->point_source()->control_point(i)));
     else {
       for (GameObject *g : objs) gizmo_starts_.push_back({g->id, g->world_matrix(), g->world_position(), g->world_rotation(), g->local().scale});
     }
@@ -1420,6 +1620,12 @@ bool Editor::gizmo_update(const Recti &view) {
     gizmo_start_angle_ = std::atan2((float)in.my - ps.y, (float)in.mx - ps.x);
   }
 
+  /* A curve's or lattice's points: each from where it started (world), written back in the object's space. */
+  auto apply_points = [&](const std::function<Vec3(Vec3)> &to) {
+    Component &pc = *co->point_source();
+    const Mat4 inv = co->world_matrix().inverse();
+    for (size_t k = 0; k < cpts.size() && k < gizmo_vert_starts_.size(); k++) pc.set_control_point(cpts[k], inv.point(to(gizmo_vert_starts_[k])));
+  };
   /* Apply drag. */
   if (drag_ == Drag::Gizmo) {
     u.cursor = Cursor::Move;
@@ -1488,6 +1694,8 @@ bool Editor::gizmo_update(const Recti &view) {
         mm.touch();
         repair_moved_rings(mm);
       }
+      else if (co)
+        apply_points([&](Vec3 s) { return s + delta; });
       else
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) g->set_world_position(s.pos + delta);
@@ -1525,6 +1733,8 @@ bool Editor::gizmo_update(const Recti &view) {
         mm.touch();
         repair_moved_rings(mm);
       }
+      else if (co)
+        apply_points([&](Vec3 s) { return pivot + q.rotate(s - pivot); });
       else
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) {
@@ -1565,6 +1775,11 @@ bool Editor::gizmo_update(const Recti &view) {
         mm.touch();
         repair_moved_rings(mm);
       }
+      else if (co)
+        apply_points([&](Vec3 s) {
+          const Vec3 d = s - pivot;
+          return pivot + axis[0] * (dot(d, axis[0]) * f.x) + axis[1] * (dot(d, axis[1]) * f.y) + axis[2] * (dot(d, axis[2]) * f.z);
+        });
       else
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) {
@@ -1576,7 +1791,8 @@ bool Editor::gizmo_update(const Recti &view) {
             }
           }
     }
-    if (origin_edit_ && !eo) {
+    if (co) label = h <= H_MOVE_FREE ? "Move Points" : h <= H_ROT_VIEW ? "Rotate Points" : "Scale Points";
+    else if (origin_edit_ && !eo) {
       /* Only the origins move: the meshes (and children) are put back where they were in the world. */
       compensate_origin_drag();
       label = h <= H_MOVE_FREE ? "Move Origin" : "Rotate Origin";
@@ -1600,7 +1816,7 @@ bool Editor::gizmo_update(const Recti &view) {
 
 void Editor::draw_gizmo(const Recti &view) {
   auto &u = ui_;
-  if (tool_ == Tool::View) return;
+  if (tool_ == Tool::View || weight_paint_) return;  // Weight Paint: the brush, not the gizmo
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
   if (!has_target) return;
   /* Snapping markers: the vertex / surface point a move is snapping to, and with V
@@ -1737,6 +1953,7 @@ MeshPtr *Editor::edit_mesh_ptr() {
 }
 
 void Editor::enter_edit_mode() {
+  if (weight_paint_) set_weight_paint(false);  // one mode at a time
   if (playing_) return;
   if (pilot_cam_) toggle_pilot_camera();  // piloting hides the editor's overlays: editing needs them back
   GameObject *g = active_object();
@@ -2492,6 +2709,39 @@ void Editor::edit_op(const std::string &op_in) {
     sync_vert_face_selection(false);
     Log::info("Edge Split");
   }
+  else if (op == "select_coplanar") {
+    /* Selection only, and it only adds. In vertex or edge mode, the faces whose corners are all selected are
+     * the start, and the faces found add their corners (and edges) to what is selected. */
+    vert_sel_.resize(m.vert_count(), 0);
+    if (elem_ != EditElement::Face) {
+      face_sel_.assign(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++) {
+        bool all = m.face_size(f) > 0;
+        for (uint32_t k = 0; k < m.face_size(f); k++) all = all && vert_sel_[m.face_verts(f)[k]];
+        face_sel_[f] = all;
+      }
+    }
+    bool any = false;
+    for (uint8_t f : face_sel_) any = any || f;
+    if (!any) {
+      Log::warn("Select Coplanar: select a face first (or all the corners of one)");
+      return;
+    }
+    const size_t added = meshops::select_coplanar(m, face_sel_);
+    if (elem_ == EditElement::Face) sync_vert_face_selection(true);
+    else
+      for (size_t f = 0; f < m.face_count(); f++) {
+        if (!face_sel_[f]) continue;
+        const uint32_t *fv = m.face_verts(f);
+        const uint32_t ns = m.face_size(f);
+        for (uint32_t k = 0; k < ns; k++) {
+          vert_sel_[fv[k]] = 1;
+          if (elem_ == EditElement::Edge) edge_sel_.insert(Mesh::edge_key(fv[k], fv[(k + 1) % ns]));
+        }
+      }
+    Log::info("Select Coplanar: %zu face%s added", added, added == 1 ? "" : "s");
+    return;
+  }
   else if (op == "select_linked" || op == "select_more" || op == "select_less" || op == "select_invert" ||
            op == "select_non_manifold" || op == "select_ring") {
     /* Selection only: no undo step, nothing touched. */
@@ -2701,6 +2951,8 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"select_less", "Select Less", "Ctrl+-", "Shrink the selection by one ring. Blender: Ctrl+Numpad -.", ALL},
       {"select_invert", "Invert Selection", "Ctrl+Shift+I", "Select what isn't, deselect what is. Blender: Ctrl+I.", ALL},
       {"select_non_manifold", "Select Non-Manifold", "", "Select holes and edges shared by more than two faces. Blender: Select > All by Trait > Non Manifold.", ALL},
+      {"select_coplanar", "Select Coplanar", "", "Add every face lying in the same plane as a selected face (the same direction and the same\n"
+       "height), joined to it or not. Blender: Select > Select Similar > Coplanar.", ALL},
   };
   return ops;
 }
@@ -2954,8 +3206,46 @@ void Editor::draw_game_view(const Recti &r) {
     u.tooltip("The camera this view shows: the scene's Active Camera (Blender: the scene camera; Unity: MainCamera).\n"
               "Without one, \"Main Camera\" by name, else the first camera.");
   }
-  u.label({bar.x + u.px(182), bar.y, u.px(110), bar.h}, "Free Aspect", u.theme.text_dim);
+  if (bar.w > u.px(460)) u.label({bar.x + u.px(182), bar.y, u.px(110), bar.h}, "Free Aspect", u.theme.text_dim);  // (not under the buttons)
   int h = bh - u.px(6);
+  {
+    /* Composition guides of the camera shown (task 0033). */
+    GameObject *shown = nullptr;
+    Camera *gc = main_camera(*scene_, &shown);
+    Recti gr{bar.right() - u.px(144), bar.y + u.px(3), u.px(68), h};
+    game_guides_rects_["button"] = gr;
+    if (u.button(gr, "Guides", gc && gc->show_guides) && gc) u.open_popup(u.id("game_guides"), {gr.x, gr.bottom(), gr.w, 0});
+    u.tooltip("Composition guides over the camera's frame: rule of thirds, golden ratio, safe areas...\n"
+              "(Blender: Camera > Viewport Display > Composition Guides). Never in renders.");
+    u.popup(u.id("game_guides"), u.px(200), [this, gid = shown ? shown->id : 0] {
+      auto &u = ui_;
+      /* (Run at the frame's end: the camera by id, as it is then - deleted or swapped by undo, no menu.) */
+      GameObject *go = gid ? scene_->find(gid) : nullptr;
+      Camera *gc = go ? go->get<Camera>() : nullptr;
+      if (!gc) return;
+      auto item = [&](const char *label, bool &v) {
+        const bool clicked = u.menu_item(label, nullptr, v);
+        game_guides_rects_[label] = u.last_widget();
+        if (clicked) {
+          v = !v;
+          if (&v != &gc->show_guides && v) gc->show_guides = true;  // picking a guide shows the guides
+          mark_changed(std::string("Guides: ") + label);
+        }
+      };
+      item("Show Guides", gc->show_guides);
+      u.menu_separator();
+      item("Thirds", gc->guide_thirds);
+      item("Center", gc->guide_center);
+      item("Center Diagonal", gc->guide_center_diagonal);
+      item("Golden Ratio", gc->guide_golden);
+      item("Golden Triangle A", gc->guide_golden_tri_a);
+      item("Golden Triangle B", gc->guide_golden_tri_b);
+      item("Harmonious Triangle A", gc->guide_harmony_a);
+      item("Harmonious Triangle B", gc->guide_harmony_b);
+      item("Title Safe", gc->guide_title_safe);
+      item("Action Safe", gc->guide_action_safe);
+    });
+  }
   Recti sr{bar.right() - u.px(70), bar.y + u.px(3), u.px(62), h};
   if (u.button(sr, "Stats", game_stats_overlay_)) game_stats_overlay_ = !game_stats_overlay_;
   u.tooltip("Rendering statistics (Unity: Game view > Stats).");
@@ -3009,6 +3299,19 @@ void Editor::draw_game_view(const Recti &r) {
       view_cache_store(game_cache_, key, img);
     }
     prof_.ms_game += rt.ms();
+  }
+  /* Composition guides over the camera's frame: the image, or a filter's letterboxed frame inside it. */
+  {
+    Recti frame = img;
+    const FilterStack &fs = camera_filters(owner);
+    if (!fs.empty()) {
+      int iw, ih;
+      Recti d;
+      filter_layout(fs, img.w, img.h, iw, ih, d);
+      frame = {img.x + d.x, img.y + d.y, d.w, d.h};
+    }
+    game_guides_frame_ = frame;
+    draw_camera_guides(*cam, frame);
   }
   if (game_stats_overlay_) {
     Recti box{view.right() - u.px(250), view.y + u.px(8), u.px(240), u.row_h() * 6 + u.px(10)};

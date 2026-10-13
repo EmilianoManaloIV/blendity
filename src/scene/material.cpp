@@ -32,6 +32,34 @@ std::string make_asset_relative(const std::string &abs_path) {
   return abs_path;
 }
 
+TexturePtr resolve_texture_ref(const TextureRef &t) {
+  if (t.empty()) return nullptr;
+  if (t.path == "generated:UV Grid") return texture_uv_grid();
+  if (t.path == "generated:Color Grid") return texture_color_grid();
+  std::string asset;
+  int output = 0;
+  if (split_texture_ref(t.path, asset, output)) {
+    ProceduralTexturePtr pt = texture_asset(asset);
+    return pt ? procedural_texture_output(*pt, output) : nullptr;
+  }
+  return texture_load(resolve_asset_path(t.path), !t.non_color);
+}
+
+bool texture_ref_is_procedural(const TextureRef &t) {
+  std::string asset;
+  int output = 0;
+  return split_texture_ref(t.path, asset, output);
+}
+
+std::string texture_ref_label(const TextureRef &t) {
+  if (t.empty()) return "None (Texture)";
+  if (starts_with(t.path, "generated:")) return t.path.substr(10);
+  std::string asset;
+  int output = 0;
+  if (split_texture_ref(t.path, asset, output)) return fs::stem(asset) + " (" + texture_output_name(output) + ")";
+  return fs::filename(t.path);
+}
+
 void Material::reflect(Reflector &r) {
   static const char *mappings[] = {"UV", "Box (Triplanar)", "Generated (Object Bounds)"};
   static const char *procs[] = {"None (use Base Map)", "Checker", "Noise", "UV Grid", "Color Grid"};
@@ -81,11 +109,69 @@ void Material::reflect(Reflector &r) {
   r.field("Double Sided", double_sided);
   r.field("Unlit", unlit);
   r.field("Cast Shadows", cast_shadows);
+  static const char *axis_modes[] = {"Off", "World", "Local"};
+  r.enumeration("Axis Mode", axis_mode, axis_modes, 3);
+  r.help("Axis material: surfaces facing up use the Top material, steep ones Side, downward ones Bottom, projected\n"
+         "without UVs. World: up is the world's (grass stays on top however the object turns); Local: the object's.");
+  if (r.all_fields() || axis_mode != 0) {
+    r.material_ref("Axis Top", axis_top);
+    r.material_ref("Axis Side", axis_side);
+    r.material_ref("Axis Bottom", axis_bottom);
+    r.help("Material assets (.mat); empty uses this material's own maps for that part.");
+    r.field("Axis Angle", axis_angle, 0.5f, 0.0f, 90.0f);
+    r.help("Degrees from straight up where Top turns into Side.");
+    r.field("Axis Blend", axis_blend, 0.01f, 0.0f, 1.0f);
+    r.help("How wide the transition is (0: a hard edge).");
+    r.field("Axis Scale", axis_scale, 0.05f, 0.01f, 1000.0f);
+    r.help("Metres one texture tile covers in the projection.");
+    r.material_ref("Axis High", axis_high);
+    r.help("A material for everything above High Start, whatever the slope (snow on peaks, rock up high). Empty: none.");
+    if (r.all_fields() || !axis_high.empty()) {
+      r.field("High Start", axis_high_start, 0.1f, -100000.0f, 100000.0f);
+      r.help("The height in metres where Axis High begins (World mode: the world's; Local: the object's own).");
+      r.field("High Blend", axis_high_blend, 0.05f, 0.0f, 10000.0f);
+      r.help("Metres over which it fades in, each side of High Start.");
+    }
+    r.field("Axis Noise", axis_noise, 0.01f, 0.0f, 1.0f);
+    r.help("Breaks up the borders (grass to dirt, and the high band's) with noise, so they wander like real ground.");
+    if (r.all_fields() || axis_noise > 0.0f) {
+      r.field("Noise Scale", axis_noise_scale, 0.05f, 0.01f, 10000.0f);
+      r.help("Metres between the border's bumps.");
+    }
+  }
+  static const char *models[] = {"PBR (Principled)", "Toon (Cel)"};
+  r.enumeration("Shading Model", shading_model, models, 2);
+  r.help("Toon: the anime / cel look (Goo Engine; Blender: Shader to RGB + Color Ramp) - light in flat tones with a\n"
+         "hard edge, a shadow colour, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
+         "for the black lines.");
+  if (r.all_fields() || shading_model == 1) {
+    r.field("Toon Bands", toon_bands, 1, 8);
+    r.help("How many lit tones above the shadow (1: two-tone cel shading).");
+    r.field("Toon Softness", toon_softness, 0.005f, 0.0f, 0.5f);
+    r.help("How soft each tone's edge is (0: a hard line).");
+    r.field("Toon Threshold", toon_threshold, 0.01f, 0.0f, 0.95f);
+    r.help("Where light turns into shadow (the light's angle, shadows included).");
+    r.color("Toon Shadow Color", toon_shadow);
+    r.help("The shadow side's colour, times the base colour (a cool tint reads as anime shading).");
+    r.field("Toon Specular Size", toon_specular_size, 0.01f, 0.0f, 1.0f);
+    r.field("Toon Specular Smoothness", toon_specular_smooth, 0.005f, 0.0f, 0.5f);
+    r.color("Toon Rim Color", toon_rim);
+    r.field("Toon Rim Width", toon_rim_width, 0.01f, 0.0f, 1.0f);
+    r.help("A light edge around the silhouette (0: none).");
+    r.field("Toon Rim Strength", toon_rim_strength, 0.01f, 0.0f, 10.0f);
+    r.field("Toon Flat Ambient", toon_flat_ambient);
+    r.help("The sky's light as one flat tone, so only the lights shade the form.");
+  }
 }
 
 const Material::Resolved &Material::textures() const {
   size_t gen = g_texture_gen.load();
-  if (resolved_version_ == version && resolved_cache_gen_ == gen) return resolved_;
+  auto axis_current = [&] {  // an axis material's sub-materials unchanged since they were resolved
+    for (int k = 0; k < 4; k++)
+      if (resolved_.axis[k] && resolved_.axis[k]->version != axis_versions_[k]) return false;
+    return true;
+  };
+  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
   /* Resolving replaces the shared pointers, which frees textures another thread may be
    * sampling: the renderers call this on one thread before shading in parallel (sanitizer
    * finding, task 0004); the lock keeps two first callers from resolving at once. Re-entrant:
@@ -93,15 +179,24 @@ const Material::Resolved &Material::textures() const {
    * material on this same thread. */
   static std::recursive_mutex m;
   std::lock_guard<std::recursive_mutex> lock(m);
-  if (resolved_version_ == version && resolved_cache_gen_ == gen) return resolved_;
+  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
+  int slot = 0;  // which slot load() is resolving (the live snapshots follow the same order)
+  for (auto &l : resolved_.live) l = nullptr;
   auto load = [&](const TextureRef &t) -> TexturePtr {
+    const int s = slot++;
     if (t.empty()) return nullptr;
     if (t.path == "generated:UV Grid") return texture_uv_grid();
     if (t.path == "generated:Color Grid") return texture_color_grid();
     std::string asset;
     int output = 0;
     if (split_texture_ref(t.path, asset, output)) {  // a procedural texture's output (ADR 0017)
-      if (ProceduralTexturePtr pt = texture_asset(asset)) return procedural_texture_output(*pt, output);
+      if (ProceduralTexturePtr pt = texture_asset(asset)) {
+        if (pt->live_shading && s < 5) {
+          resolved_.live[s] = procedural_texture_live(*pt);
+          resolved_.live_output[s] = output;
+        }
+        return procedural_texture_output(*pt, output);
+      }
       Log::warn("Material '%s': no texture asset %s", name.c_str(), asset.c_str());
       return nullptr;
     }
@@ -110,6 +205,7 @@ const Material::Resolved &Material::textures() const {
     if (!p) Log::warn("Material '%s': %s", name.c_str(), err.c_str());
     return p;
   };
+  if (procedural == (int)Procedural::UVGrid || procedural == (int)Procedural::ColorGrid) slot++;  // (no base map read)
   resolved_.base = procedural == (int)Procedural::UVGrid ? texture_uv_grid()
                    : procedural == (int)Procedural::ColorGrid ? texture_color_grid()
                                                               : load(base_map);
@@ -117,6 +213,31 @@ const Material::Resolved &Material::textures() const {
   resolved_.roughness = load(roughness_map);
   resolved_.normal = load(TextureRef{normal_map.path, true});
   resolved_.emission = load(emission_map);
+  /* An axis material's sub-materials, resolved here with their textures (ADR 0018). One level: a sub-material that is
+   * itself an axis material is used plainly; this material itself means its own maps. */
+  for (int k = 0; k < 4; k++) {
+    resolved_.axis[k] = nullptr;
+    resolved_.axis_tx[k] = nullptr;
+    axis_versions_[k] = 0;
+  }
+  if (axis_mode != 0) {
+    const std::string *paths[4] = {&axis_top, &axis_side, &axis_bottom, &axis_high};
+    resolving_ = true;
+    for (int k = 0; k < 4; k++) {
+      if (paths[k]->empty()) continue;
+      MaterialPtr sub = material_asset(*paths[k]);
+      if (!sub) {
+        Log::warn("Material '%s': no material asset %s", name.c_str(), paths[k]->c_str());
+        continue;
+      }
+      /* Itself, or a material whose own resolve led here (A's part is B and B's is A): its own maps instead. */
+      if (sub.get() == this || sub->resolving_) continue;
+      resolved_.axis[k] = sub;
+      resolved_.axis_tx[k] = &sub->textures();
+      axis_versions_[k] = sub->version;
+    }
+    resolving_ = false;
+  }
   resolved_version_ = version;
   resolved_cache_gen_ = gen;
   return resolved_;
@@ -130,7 +251,7 @@ MaterialPtr make_material(const std::string &name, Vec3 color) {
 }
 
 const std::vector<std::string> &material_presets() {
-  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit"};
+  static const std::vector<std::string> names = {"Solid", "Transparent", "Cutout", "Glass", "Frosted Glass", "Metal", "Emissive", "Unlit", "Toon"};
   return names;
 }
 
@@ -167,6 +288,13 @@ MaterialPtr make_material_preset(const std::string &preset) {
   else if (preset == "Unlit") {
     m->unlit = true;
     m->base_color = {1.0f, 0.5f, 0.1f};
+  }
+  else if (preset == "Toon") {  // ADR 0020: two-tone cel shading with a soft rim
+    m->shading_model = 1;
+    m->base_color = {0.95f, 0.75f, 0.65f};
+    m->toon_specular_size = 0.15f;
+    m->toon_rim_width = 0.25f;
+    m->toon_rim_strength = 0.35f;
   }
   return m;
 }
