@@ -10,6 +10,46 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 8: the minimum machine (task 0050, ADR 0026)
+
+The user's minimum is a 4-core / 8-thread CPU at about 3 GHz with 8 GB of RAM and a GTX 1050 Ti. It is emulated here
+with a thread ceiling for the whole process (`blendity_stress --threads 8`; TBB's `global_control`, which Embree,
+OpenImageDenoise and OpenSubdiv share). The clock difference is not emulated, so the targets keep some headroom.
+`editor_render` (1600 x 1000, Scene + Game views + Camera Preview, 200 icospheres, a sun with shadows), ms per
+frame, the fastest of four runs:
+
+| Frame | 32 threads before | 8 threads before | 8 threads after, High (100 %) | 8 threads after, Low | Target (Low) |
+|---|---|---|---|---|---|
+| idle | 1.27 | 1.01 | 0.78 | 0.80 | 2 |
+| orbiting the Scene view | 7.40 | 17.92 | 14.37 | 7.06 | 12 |
+| moving an object | 18.42 | 47.16 | 36.11 | 15.49 | 16.7 |
+| editing a material colour | 18.19 | 48.12 | 36.58 | 19.81 | 16.7 (**not met**) |
+| playing | - | 39.26 | 33.78 | 17.62 | 16.7 (**not met**) |
+
+What it took, in the order the profile showed it:
+
+- **Viewport Resolution Scale.** The views' 3D is drawn at 67 % on Low (85 % on Medium) and scaled up bilinearly.
+  Depth and ids are scaled nearest, so picking and overlays stay exact.
+- **Cached shadows.** The sun's map was drawn again on every change. Now the casters that haven't moved for a second
+  keep a map of their own, and the moving ones are drawn over a copy of it: 3.8 ms became 0.9 ms a moved frame at
+  1024. The frame is snapped, so a drag keeps it. A material colour no longer redraws the map at all: its key holds
+  surface type and Cast Shadows, not the version.
+- **The sky last.** The background was evaluated for every pixel and then mostly shaded over: 2 ms a view. It is
+  now drawn after the opaque surfaces, only where none landed, and only every 4th pixel where the sky is smooth.
+  Polynomial atan2 / asin (2e-6 rad) replaced the library calls in every sky lookup, which is also each pixel's
+  reflection.
+- **Per-pixel footprints** (task 0031's live textures) are computed only for materials that have a live texture.
+- **Upscaling** the depth and id planes runs in parallel and with a column table: 1.66 ms became 0.45 ms.
+- **Physics:** Jolt's pool is half of Blendity's threads instead of all but one (it had the machine twice over in
+  Play).
+
+Memory: the editor with 10,200 objects, two views and 30 undo steps peaks at **448 MB** (target under 3 GB). The
+texture cache and undo now have byte budgets (a quarter and an eighth of RAM, each at most 2 GB).
+
+The two frames still over 16.7 ms are a material edit and Play. Both render the Scene view, Game view and Camera
+Preview, and are about 60 % deferred shading. The next step would be the shading itself (a cheaper shadow lookup
+than 3 x 3 PCF on Low, SIMD across a tile).
+
 ## Pass 7: idle frames (task 0023)
 
 Pass 6 left an idle frame at 2.1 ms and called it "almost all hash". A per-phase profile of 100 idle

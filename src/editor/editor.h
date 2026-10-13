@@ -178,6 +178,7 @@ struct UndoState {
   uint64_t active = 0;
   std::string label;
   std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
+  size_t bytes = 0;  // what only this state held when it was stored (its own meshes, objects, texts): the undo budget
 };
 
 /* A camera's composition guides as screen lines over its frame, Blender's construction (task 0033). */
@@ -436,7 +437,7 @@ class Editor {
   /* ---- scene view internals ---- */
   void scene_navigation(const Recti &r);
   void render_scene_view(const Recti &r);
-  void render_solid(const Recti &r, const Mat4 &v, const Mat4 &p);
+  void render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p);
   void render_overlays(const Recti &r);
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   /* render_view.cpp: shared rendering helpers */
@@ -938,6 +939,14 @@ class Editor {
   /* Editor frame rate (Preferences > Performance). */
   int max_fps_ = 120;           // 0: unlimited
   bool always_redraw_ = false;  // keep drawing at the cap even when nothing changes
+  float view_scale_ = 1.0f;     // Viewport Resolution Scale, 0.5..1 (task 0050)
+  int cpu_threads_ = 0;         // CPU Threads: 0 = all the machine has (JobSystem::set_thread_limit)
+  /* Quality tier (task 0050, ADR 0026): Low (a 4-core machine with a GTX 1050 Ti), Medium, High, or Custom once a
+   * setting it covers is changed by hand; -1 until the first run picks one for the machine. The caps hold in the
+   * editor's views only: F12 renders use the scene's settings. */
+  int quality_tier_ = -1;
+  int tier_shadow_cap_ = 0, tier_gi_rays_cap_ = 0, tier_rsm_cap_ = 0;  // 0 = no cap
+  bool final_render_ = false;  // an F12 raster render is drawing (the tier's caps don't apply)
   std::vector<double> frame_stamps_;  // the last second's frame start times
   float measured_fps_ = 0;
   void draw_performance_settings(ui::Layout *lay);  // Preferences and the Profiler
@@ -946,6 +955,15 @@ class Editor {
   /* Seconds to wait before the next frame may start (the cap), given the last frame's start. */
   double frame_wait_seconds(double now, double last_frame) const;
   int max_fps() const { return max_fps_; }
+  float view_scale() const { return view_scale_; }
+  void set_view_scale(float s);
+  enum QualityTier { TierLow = 0, TierMedium = 1, TierHigh = 2, TierCustom = 3 };
+  int quality_tier() const { return quality_tier_; }
+  void set_quality_tier(int tier);
+  static int recommended_tier();  // Low on 8 threads or fewer or 8 GB or less, else High
+  int shadow_resolution_for_view() const;
+  void set_cpu_threads(int n);
+  int cpu_threads() const { return cpu_threads_; }
   bool always_redraw() const { return always_redraw_; }
 
  private:
@@ -962,6 +980,26 @@ class Editor {
   uint64_t active_ = 0;
   bool scene_dirty_ = false;
   std::vector<UndoState> undo_, redo_;
+  /* Undo's memory budget (task 0050): the oldest steps go first once the states' own data passes it (a mesh shared
+   * with the scene or another step is counted once, where it was new). 0 = an eighth of the machine's memory, at most
+   * 2 GB. */
+  size_t undo_budget_ = 0;
+  size_t undo_budget() const;
+
+ public:
+  void set_undo_budget_for_test(size_t bytes) { undo_budget_ = bytes; }
+  /* Task 0050: the Scene view's reduced 3D picture (0 x 0 at full size), the cached shadows' still layer. */
+  int scaled_scene_width_for_test() const { return scene_vs_.img.width; }
+  int scaled_scene_height_for_test() const { return scene_vs_.img.height; }
+  uint64_t shadow_layer_renders_for_test() const { return shadow_layer_renders_; }
+  int shadow_map_size_for_test() const {
+    const ShadowEntry &e = shadow_cache_[0].used >= shadow_cache_[1].used ? shadow_cache_[0] : shadow_cache_[1];
+    return e.map.size;
+  }
+  size_t undo_steps_for_test() const { return undo_.size(); }
+  size_t undo_bytes() const;
+
+ private:
   bool pending_change_ = false;
   std::string pending_label_;
 
@@ -1304,6 +1342,19 @@ class Editor {
   };
   ShadowEntry shadow_cache_[2];
   uint64_t shadow_clock_ = 0;
+  /* Cached shadows (task 0050; Unity's cached shadow maps): the casters that haven't changed for a second, in a map
+   * of their own; while something is dragged only it is drawn over a copy of that map. The frame is snapped so small
+   * moves keep it. */
+  struct ShadowLayer {
+    uint64_t key = 0, used = 0;
+    ShadowMap map;
+  } shadow_static_[2];  // (two, as the maps: the Scene and Game views' still sets can differ)
+  struct CasterMotion {
+    uint64_t key = 0;
+    double changed = -1e30;  // when its placement last changed (the views' meshes of one object can differ: not those)
+  };
+  std::unordered_map<uint64_t, CasterMotion> caster_motion_;
+  uint64_t shadow_layer_renders_ = 0;  // the static layer drawn again (stress and tests)
   /* A view's finished picture (and, for the Scene view, the planes picking reads stay in scene_rt_),
    * reused while nothing it shows has changed (ADR 0009). */
   struct ViewCache {
@@ -1342,6 +1393,10 @@ class Editor {
   /* Camera filters: the internal-resolution image and target (render_camera); the Scene view
    * shows the main camera's filters when scene_filters_ is on. */
   FilterTarget scene_ft_, game_ft_, preview_ft_, render_ft_;  // one per view that can be filtered
+  /* Viewport Resolution Scale (task 0050): the views' 3D drawn this much smaller and scaled up (1 = full size). */
+  FilterTarget scene_vs_, game_vs_, preview_vs_;
+  void render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
+                     const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false);
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution
   /* A choice from a component's or modifier's menu in the Inspector. Popup menus run at the end
    * of the frame, after draw_inspector has returned, so they record the choice here and the

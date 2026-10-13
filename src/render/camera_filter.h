@@ -68,6 +68,9 @@ void filter_layout(const FilterStack &s, int fit, int dw, int dh, int &iw, int &
  * (a retro image's pixels stay crisp), a box average when shrinking (a Retro Preview rendered at its
  * true internal height into a smaller inset). */
 void upscale_nearest(const uint32_t *src, int sw, int sh, int sstride, uint32_t *dst, int dstride, const Recti &r);
+/* Bilinear enlargement of src into dst's rectangle r (Viewport Resolution Scale, task 0050): pixel centres line up,
+ * edges clamp; 8-bit fixed-point weights. */
+void upscale_bilinear(const uint32_t *src, int sw, int sh, int sstride, uint32_t *dst, int dstride, const Recti &r);
 
 /* The retro colour pass. */
 struct RetroImageParams {

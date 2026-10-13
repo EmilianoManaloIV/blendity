@@ -352,12 +352,9 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     if (env.lights[i].type == RenderLight::Directional) { li = (int)i; break; }
   if (li < 0) return nullptr;
   std::vector<const DrawItem *> caster_ptrs;  // copied into `casters` only when the map is rendered
+  std::vector<uint64_t> caster_keys, motion_keys;
   AABB bounds;
-  /* What the map depends on: each caster's triangles (the render mesh's serial: a new one whenever it is
-   * rebuilt) and placement, the light's direction and the resolution. */
-  uint64_t key = 1469598103934665603ull;
-  bool cacheable = true;
-  auto mix = [&](const void *p, size_t n) {
+  auto mixer = [](uint64_t &key, const void *p, size_t n) {
     const uint8_t *b = (const uint8_t *)p;
     for (size_t i = 0; i < n; i += 8) {
       uint64_t v = 0;
@@ -366,6 +363,11 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
       key ^= key >> 29;
     }
   };
+  /* What the map depends on: each caster's triangles (the render mesh's serial: a new one whenever it is rebuilt),
+   * placement and materials' surface type and Cast Shadows (see-through surfaces cast none; a colour doesn't matter),
+   * the light's direction and the resolution. */
+  uint64_t key = 1469598103934665603ull;
+  bool cacheable = true;
   for (const DrawItem &it : items) {
     bool casts = false;
     if (!it.materials || it.materials->empty()) casts = true;
@@ -376,20 +378,41 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     caster_ptrs.push_back(&it);
     bounds.add(it.mesh->bounds.transformed(it.model));
     if (it.mesh->serial == 0) cacheable = false;
-    mix(&it.mesh->serial, 8);
-    mix(it.model.m, sizeof(float) * 16);
-    if (it.materials)  // see-through surfaces cast no shadow: a material's surface type matters
+    uint64_t ck = 1469598103934665603ull ^ it.id;
+    mixer(ck, it.model.m, sizeof(float) * 16);
+    motion_keys.push_back(ck);  // what makes it "moving": its placement
+    mixer(ck, &it.mesh->serial, 8);
+    if (it.materials)
       for (const MaterialPtr &m : *it.materials) {
-        const uint64_t mv[2] = {(uint64_t)(uintptr_t)m.get(), m ? m->version : 0};
-        mix(mv, sizeof(mv));
+        const uint64_t mv[3] = {(uint64_t)(uintptr_t)m.get(), m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
+        mixer(ck, mv, sizeof(mv));
       }
+    caster_keys.push_back(ck);
+    mixer(key, &ck, 8);
   }
-  const int res = std::max(256, scene_->render.shadow_resolution);
+  const int res = shadow_resolution_for_view();
   const Vec3 dir = env.lights[li].direction;
-  mix(&dir, sizeof(Vec3));
-  mix(&res, sizeof(int));
+  /* The frame, snapped (task 0050): its radius up to a step of a geometric series, its centre to a sixteenth of that,
+   * so dragging one object about leaves the frame, and the casters that stayed still keep their map. */
+  AABB frame;
+  if (final_render_) frame = bounds;  // a render fits its casters exactly (as before the snapping)
+  else if (bounds.valid()) {
+    /* Steps of 10 % in the radius and 1/16 of it at the centre: shadow texels at most ~1.2 times larger than a tight fit. */
+    const float r = std::max(0.5f, length(bounds.extent()));
+    const float rs = std::pow(1.1f, std::ceil(std::log(r) / std::log(1.1f)));
+    const float step = rs / 16.0f;
+    const Vec3 c = bounds.center();
+    const Vec3 cs(std::round(c.x / step) * step, std::round(c.y / step) * step, std::round(c.z / step) * step);
+    const float rr = rs + length(cs - c);  // still holds every caster after the centre moved
+    const Vec3 h(rr / std::sqrt(3.0f));
+    frame.add(cs - h);
+    frame.add(cs + h);
+  }
+  mixer(key, &dir, sizeof(Vec3));
+  mixer(key, &res, sizeof(int));
+  mixer(key, &frame, sizeof(AABB));
   const uint64_t n = caster_ptrs.size();
-  mix(&n, 8);
+  mixer(key, &n, 8);
   if (key == 0) key = 1;  // 0 marks an empty entry
   shadow_clock_++;
   if (cacheable)
@@ -398,13 +421,57 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
         e.used = shadow_clock_;
         return e.map.valid() ? &e.map : nullptr;
       }
+  /* Which casters are moving: changed within the last second. */
+  const double now = now_seconds();
+  std::vector<uint8_t> moving(caster_ptrs.size(), 0);
+  size_t n_moving = 0;
+  for (size_t i = 0; i < caster_ptrs.size(); i++) {
+    CasterMotion &m = caster_motion_[caster_ptrs[i]->id];
+    if (m.key != motion_keys[i]) {
+      if (m.key != 0) m.changed = now;  // (a caster seen for the first time is still: nothing to compare)
+      m.key = motion_keys[i];
+    }
+    moving[i] = now - m.changed < 1.0;
+    n_moving += moving[i];
+  }
+  if (caster_motion_.size() > caster_ptrs.size() * 2 + 64) {  // forget objects that are gone
+    std::unordered_set<uint64_t> live;
+    for (const DrawItem *it : caster_ptrs) live.insert(it->id);
+    for (auto it = caster_motion_.begin(); it != caster_motion_.end();) it = live.count(it->first) ? std::next(it) : caster_motion_.erase(it);
+  }
   /* Render into the least recently used entry. */
   ShadowEntry &e = shadow_cache_[0].used <= shadow_cache_[1].used ? shadow_cache_[0] : shadow_cache_[1];
   ScopedTimer t;
   std::vector<DrawItem> casters;
-  casters.reserve(caster_ptrs.size());
-  for (const DrawItem *it : caster_ptrs) casters.push_back(*it);
-  render_shadow_map(e.map, casters, dir, bounds, res);
+  if (cacheable && n_moving > 0 && n_moving < caster_ptrs.size()) {
+    /* The still casters' layer (drawn again only when they or the frame change), then the moving ones over it. */
+    uint64_t skey = 1469598103934665603ull;
+    mixer(skey, &dir, sizeof(Vec3));
+    mixer(skey, &res, sizeof(int));
+    mixer(skey, &frame, sizeof(AABB));
+    for (size_t i = 0; i < caster_ptrs.size(); i++)
+      if (!moving[i]) mixer(skey, &caster_keys[i], 8);
+    if (skey == 0) skey = 1;
+    ShadowLayer *layer = shadow_static_[0].key == skey ? &shadow_static_[0] : shadow_static_[1].key == skey ? &shadow_static_[1] : nullptr;
+    if (!layer) {
+      layer = shadow_static_[0].used <= shadow_static_[1].used ? &shadow_static_[0] : &shadow_static_[1];
+      for (size_t i = 0; i < caster_ptrs.size(); i++)
+        if (!moving[i]) casters.push_back(*caster_ptrs[i]);
+      render_shadow_map(layer->map, casters, dir, frame, res);
+      layer->key = layer->map.valid() ? skey : 0;
+      shadow_layer_renders_++;
+      casters.clear();
+    }
+    layer->used = shadow_clock_;
+    for (size_t i = 0; i < caster_ptrs.size(); i++)
+      if (moving[i]) casters.push_back(*caster_ptrs[i]);
+    render_shadow_map(e.map, casters, dir, frame, res, layer->key ? &layer->map : nullptr);
+  }
+  else {
+    casters.reserve(caster_ptrs.size());
+    for (const DrawItem *it : caster_ptrs) casters.push_back(*it);
+    render_shadow_map(e.map, casters, dir, frame, res);
+  }
   prof_.shadow_renders++;
   prof_.ms_shadow += t.ms();
   e.key = cacheable ? key : 0;
@@ -547,12 +614,83 @@ const FilterStack &Editor::camera_filters(const GameObject *owner) {
 
 /* Nearest-neighbour copy of one plane (colour, depth or ids) into r of a w-wide destination. */
 template<class T> static void upscale_plane(const std::vector<T> &src, int sw, int sh, std::vector<T> &dst, int dw, const Recti &r) {
-  if (src.size() < (size_t)sw * sh || dst.empty()) return;
-  for (int y = 0; y < r.h; y++) {
-    const T *s = src.data() + (size_t)std::min(sh - 1, (int)((int64_t)y * sh / r.h)) * sw;
-    T *d = dst.data() + (size_t)(r.y + y) * dw + r.x;
-    for (int x = 0; x < r.w; x++) d[x] = s[std::min(sw - 1, (int)((int64_t)x * sw / r.w))];
+  if (src.size() < (size_t)sw * sh || dst.empty() || r.w <= 0 || r.h <= 0) return;
+  std::vector<int> col((size_t)r.w);  // (each view's planes every frame at a reduced Viewport Resolution: task 0050)
+  for (int x = 0; x < r.w; x++) col[(size_t)x] = std::min(sw - 1, (int)((int64_t)x * sw / r.w));
+  JobSystem::global().parallel_for(r.h, 32, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) {
+      const T *s = src.data() + (size_t)std::min<int64_t>(sh - 1, y * sh / r.h) * sw;
+      T *d = dst.data() + (size_t)(r.y + y) * dw + r.x;
+      for (int x = 0; x < r.w; x++) d[x] = s[col[(size_t)x]];
+    }
+  });
+}
+
+/* Viewport Resolution Scale (task 0050): on a 4-core machine the software rasterizer's cost is mostly per pixel, so the
+ * views can draw their 3D at 50-100 % and scale it up. Depth and ids follow at full size (nearest), so picking, the
+ * tools' visibility tests and the overlays (drawn after, at full size) work as before. */
+void Editor::render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
+                           const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner, bool fill) {
+  const float s = finite_bits(view_scale_) ? std::max(0.25f, std::min(1.0f, view_scale_)) : 1.0f;
+  const int iw = std::max(1, (int)std::lround(rt.width * s)), ih = std::max(1, (int)std::lround(rt.height * s));
+  bool own_size = false;  // a filter stack with its own internal resolution (a retro console's): its pixels stay crisp
+  if (filter_owner) {
+    const FilterStack &fs = camera_filters(filter_owner);
+    if (!fs.empty()) {
+      int fw, fh;
+      Recti d;
+      filter_layout(fs, fill ? (int)FilterStack::Fill : fs.fit, rt.width, rt.height, fw, fh, d);
+      own_size = fw != rt.width || fh != rt.height;
+    }
   }
+  if (own_size || s >= 0.999f || (iw >= rt.width && ih >= rt.height) || rt.width < 8 || rt.height < 8) {
+    draw(rt);
+    return;
+  }
+  if (vs.img.width != iw || vs.img.height != ih) vs.img.resize(iw, ih);
+  vs.rt.attach(vs.img, {0, 0, iw, ih});
+  draw(vs.rt);
+  upscale_bilinear(vs.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, {0, 0, rt.width, rt.height});
+  upscale_plane(vs.rt.depth, iw, ih, rt.depth, rt.width, {0, 0, rt.width, rt.height});
+  upscale_plane(vs.rt.ids, iw, ih, rt.ids, rt.width, {0, 0, rt.width, rt.height});
+  r3d.rebind(&rt, v, p);
+}
+
+void Editor::set_view_scale(float s) {
+  view_scale_ = finite_bits(s) ? std::max(0.5f, std::min(1.0f, s)) : 1.0f;
+  ui_.redraw = true;
+}
+
+int Editor::shadow_resolution_for_view() const {
+  const int res = std::max(256, scene_->render.shadow_resolution);
+  return !final_render_ && tier_shadow_cap_ > 0 ? std::min(res, tier_shadow_cap_) : res;
+}
+
+/* The tiers (ADR 0026). Low is measured at 8 threads on the minimum machine's budget: the views at 67 %, a 1024 shadow
+ * map, Realtime GI's rays and reflective shadow map halved, 60 fps. Custom keeps whatever was set by hand. */
+void Editor::set_quality_tier(int tier) {
+  quality_tier_ = std::max(0, std::min(3, tier));
+  if (quality_tier_ == TierCustom) return;
+  struct Tier { float scale; int shadow, rays, rsm, fps; };
+  static const Tier kTiers[3] = {{0.67f, 1024, 4, 128, 60}, {0.85f, 2048, 8, 256, 120}, {1.0f, 0, 0, 0, 144}};
+  const Tier &t = kTiers[quality_tier_];
+  view_scale_ = t.scale;
+  tier_shadow_cap_ = t.shadow;
+  tier_gi_rays_cap_ = t.rays;
+  tier_rsm_cap_ = t.rsm;
+  max_fps_ = t.fps;
+  ui_.redraw = true;
+}
+
+int Editor::recommended_tier() {
+  const uint64_t ram = sys::physical_memory_bytes();
+  const bool small = sys::hardware_threads() <= 8 || (ram > 0 && ram <= (uint64_t)9 << 30);  // "8 GB" machines report a little under
+  return small ? TierLow : TierHigh;
+}
+
+void Editor::set_cpu_threads(int n) {
+  cpu_threads_ = std::max(0, std::min(1024, n));
+  JobSystem::global().set_thread_limit(cpu_threads_);
 }
 
 void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
@@ -1021,6 +1159,11 @@ void Editor::resolve_final_render(bool finished) {
 /* A transparent rasterized render (Film > Transparent, task 0035): drawn over black, then over white; where the two
  * differ the background showed through. alpha = 1 - (white - black), colour = black / alpha (straight). */
 void Editor::render_with_alpha(const std::function<void()> &once) {
+  struct FinalRender {  // the quality tier's caps are for the editor's views, not for renders
+    bool &flag;
+    explicit FinalRender(bool &f) : flag(f) { flag = true; }
+    ~FinalRender() { flag = false; }
+  } final_render(final_render_);
   if (!render_transparent_) {
     once();
     return;
@@ -1233,7 +1376,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
       sun = &l;
       break;
     }
-  const int rsm_res = std::max(32, std::min(2048, ls.gi_rsm_resolution));
+  const int rsm_res = std::max(32, std::min(tier_rsm_cap_ > 0 && !final_render_ ? tier_rsm_cap_ : 2048, ls.gi_rsm_resolution));
   if (ls.gi_bounce && sun) {
     uint64_t key = 1469598103934665603ull;
     for (const DrawItem *it : occ) {
@@ -1269,7 +1412,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
     vgi.rsm_key = 0;
   }
   GiParams p;
-  p.rays = ls.gi_rays;
+  p.rays = tier_gi_rays_cap_ > 0 && !final_render_ ? std::min(ls.gi_rays, tier_gi_rays_cap_) : ls.gi_rays;  // (the views only)
   p.radius = ls.gi_radius;
   p.intensity = ls.gi_intensity;
   p.sky_occlusion = ls.gi_sky_occlusion;
@@ -1428,12 +1571,17 @@ bool Editor::view_cache_verify(const ViewCache &c, const Recti &r, const char *w
 /* The raster options (Profiler toggles: culling, threads, fast setup...), field by field. */
 uint64_t Editor::raster_opt_key() const {
   const RasterOptions &o = raster_opt_;
+  uint32_t vs;
+  std::memcpy(&vs, &view_scale_, 4);  // Viewport Resolution Scale: a different picture in every view it applies to
   uint64_t k = (uint64_t)o.multithreaded | (uint64_t)o.backface_culling << 1 | (uint64_t)o.frustum_culling << 2 |
                (uint64_t)o.span_rows << 3 | (uint64_t)o.fast_setup << 4 | (uint64_t)o.affine_uv << 5 | (uint64_t)o.screen_door << 6 |
                (uint64_t)o.shade << 8 | (uint64_t)(uint32_t)o.tile_size << 16;
   uint32_t snap;
   std::memcpy(&snap, &o.vertex_snap, 4);
   k ^= (uint64_t)snap << 32;
+  k ^= (uint64_t)vs * 0xC2B2AE3D27D4EB4Full;
+  /* The quality tier's caps (task 0050): the shadow map's size and Realtime GI's rays and reflective shadow map. */
+  k ^= ((uint64_t)(uint32_t)tier_shadow_cap_ << 40 | (uint64_t)(uint32_t)tier_gi_rays_cap_ << 20 | (uint64_t)(uint32_t)tier_rsm_cap_) * 0x165667B19E3779F9ull;
   return k * 0x9E3779B97F4A7C15ull;
 }
 
@@ -1554,7 +1702,9 @@ void Editor::draw_camera_preview(const Recti &view) {
       if (hit) before = cam_preview_img_.pixels;
       cam_preview_img_.resize(w, h);
       cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
-      render_camera(cam_preview_r3d_, cam_preview_rt_, preview_ft_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
+      render_scaled(cam_preview_r3d_, cam_preview_rt_, preview_vs_, v, p, [&](RenderTarget &t) {
+        render_camera(cam_preview_r3d_, t, preview_ft_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
+      }, g);
       prof_.view_renders++;
       if (hit && before != cam_preview_img_.pixels) {
         prof_.cache_mismatches++;

@@ -1221,9 +1221,34 @@ namespace {
 struct CacheEntry {
   TexturePtr tex;
   int64_t mtime;
+  uint64_t used = 0;   // the cache clock when last asked for
+  size_t bytes = 0;
 };
 std::mutex g_cache_mutex;
 std::unordered_map<std::string, CacheEntry> g_cache;
+uint64_t g_cache_clock = 0;
+size_t g_cache_bytes = 0;
+size_t g_cache_budget = (size_t)-1;  // (set on first use from the machine's memory)
+
+size_t default_budget() {
+  const uint64_t ram = sys::physical_memory_bytes();
+  const uint64_t quarter = ram ? ram / 4 : (uint64_t)1 << 30;
+  return (size_t)std::min<uint64_t>(quarter, (uint64_t)2 << 30);
+}
+
+/* Over budget: drop the least recently used entries that only the cache holds (under g_cache_mutex). */
+void enforce_budget() {
+  if (g_cache_budget == (size_t)-1) g_cache_budget = default_budget();
+  if (g_cache_budget == 0) return;
+  while (g_cache_bytes > g_cache_budget) {
+    auto victim = g_cache.end();
+    for (auto it = g_cache.begin(); it != g_cache.end(); ++it)
+      if (it->second.tex.use_count() == 1 && (victim == g_cache.end() || it->second.used < victim->second.used)) victim = it;
+    if (victim == g_cache.end()) return;  // everything left is in use
+    g_cache_bytes -= std::min(g_cache_bytes, victim->second.bytes);
+    g_cache.erase(victim);
+  }
+}
 
 int64_t file_mtime(const std::string &path) {
   std::error_code ec;
@@ -1238,7 +1263,10 @@ TexturePtr texture_load(const std::string &path, bool srgb, std::string *error) 
   {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     auto it = g_cache.find(key);
-    if (it != g_cache.end() && it->second.mtime == mt) return it->second.tex;
+    if (it != g_cache.end() && it->second.mtime == mt) {
+      it->second.used = ++g_cache_clock;
+      return it->second.tex;
+    }
   }
   Bitmap bmp;
   std::string err;
@@ -1252,19 +1280,45 @@ TexturePtr texture_load(const std::string &path, bool srgb, std::string *error) 
   t->mtime = mt;
   t->build(bmp, srgb && !bmp.is_float);
   std::lock_guard<std::mutex> lock(g_cache_mutex);
-  g_cache[key] = {t, mt};
+  CacheEntry &e = g_cache[key];
+  g_cache_bytes -= std::min(g_cache_bytes, e.bytes);  // (a file reloaded after it changed)
+  e = {t, mt, ++g_cache_clock, t->memory_bytes()};
+  g_cache_bytes += e.bytes;
+  enforce_budget();
   return t;
 }
 
 void texture_cache_clear() {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_cache.clear();
+  g_cache_bytes = 0;
 }
 
 void texture_cache_forget(const std::string &path) {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
-  g_cache.erase(path + "|srgb");
-  g_cache.erase(path + "|data");
+  for (const char *k : {"|srgb", "|data"}) {
+    auto it = g_cache.find(path + k);
+    if (it == g_cache.end()) continue;
+    g_cache_bytes -= std::min(g_cache_bytes, it->second.bytes);
+    g_cache.erase(it);
+  }
+}
+
+void texture_cache_set_budget(size_t bytes) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  g_cache_budget = bytes;
+  enforce_budget();
+}
+
+size_t texture_cache_budget() {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  if (g_cache_budget == (size_t)-1) g_cache_budget = default_budget();
+  return g_cache_budget;
+}
+
+size_t texture_cache_bytes() {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  return g_cache_bytes;
 }
 
 size_t texture_cache_size() {

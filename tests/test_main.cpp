@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -24261,5 +24262,243 @@ static void round69_tests() {
     CHECK(!ed.transform_active_for_test());
     key(platform::KEY_ESCAPE);
     CHECK(ed.scene().find_by_name("LeftLowerLeg") != nullptr);
+  });
+  /* ------------------------------------------------------------------ round 72: the minimum machine (task 0050) */
+  test("min spec: a thread ceiling holds every parallel loop to that many threads, and lifts again", [] {
+    JobSystem &js = JobSystem::global();
+    const int all = js.thread_count();
+    auto distinct = [&] {
+      std::mutex m;
+      std::set<std::thread::id> ids;
+      js.parallel_for(4096, 1, [&](int64_t a, int64_t b) {
+        volatile double x = 0;
+        for (int64_t i = a; i < b; i++)
+          for (int k = 0; k < 2000; k++) x = x + std::sqrt((double)(i + k));
+        std::lock_guard<std::mutex> lock(m);
+        ids.insert(std::this_thread::get_id());
+      });
+      return (int)ids.size();
+    };
+    js.set_thread_limit(3);
+    const int capped = distinct();
+    std::printf("    ceiling 3: %d threads ran the loop (the machine has %d), thread_count() says %d\n", capped, all, js.thread_count());
+    CHECK(capped <= 3 && js.thread_count() <= 3);
+    js.set_thread_limit(0);
+    CHECK(js.thread_count() == all);
+    if (all >= 4) CHECK(distinct() > 3);  // lifted: more than the old ceiling again
+    /* The dependency-free build's own pool (CI's): its workers already started, the ceiling still holds. */
+    const JobSystem::Backend was = js.backend();
+    js.set_backend(JobSystem::Backend::Builtin);
+    (void)distinct();  // the workers start
+    js.set_thread_limit(3);
+    const int pool = distinct();
+    js.set_thread_limit(0);
+    js.set_backend(was);
+    std::printf("    the built-in pool under a ceiling of 3: %d threads\n", pool);
+    CHECK(pool <= 3);
+  });
+
+  test("min spec: Viewport Resolution at 50 % draws a quarter of the pixels, keeps clicks exact, and is part of the views' picture keys", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");  // the scene's own cube
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("select Main Camera");
+    ed.mark_changed_for_test("R72 setup");
+    r34_steps(ed, 3);
+    const Recti view = ed.scene_view_rect();
+    const R34Count before = r34_totals(ed);
+    ed.command("viewscale 50");
+    CHECK(ed.quality_tier() == Editor::TierCustom && std::fabs(ed.view_scale() - 0.5f) < 1e-6f);
+    r34_steps(ed, 2);
+    CHECK(r34_totals(ed).renders > before.renders);  // a new picture: the scale is in the key, the old one isn't reused
+    const int sw = ed.scaled_scene_width_for_test(), sh = ed.scaled_scene_height_for_test();
+    std::printf("    Scene view %d x %d drawn at %d x %d\n", view.w, view.h, sw, sh);
+    CHECK(std::abs(sw - view.w / 2) <= 1 && std::abs(sh - view.h / 2) <= 1);
+    /* Clicking the cube still selects it: the ids are scaled up to the full view. */
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(cube->world_position(), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.active_object_for_test() == cube);
+    /* Back to 100 %: drawn at full size again. */
+    ed.command("viewscale 100");
+    const R34Count b2 = r34_totals(ed);
+    r34_steps(ed, 2);
+    CHECK(r34_totals(ed).renders > b2.renders);
+  });
+
+  test("min spec: the quality tiers set the views' scale, shadow map and frame rate; F12 keeps the scene's shadow map", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("set Render.ShadowResolution 2048");
+    ed.command("quality low");
+    CHECK(ed.quality_tier() == Editor::TierLow && std::fabs(ed.view_scale() - 0.67f) < 1e-6f && ed.max_fps() == 60);
+    CHECK(ed.shadow_resolution_for_view() == 1024);
+    r34_steps(ed, 2);
+    CHECK(ed.shadow_map_size_for_test() == 1024);
+    ed.command("render");
+    r34_steps(ed, 2);
+    std::printf("    Low: views at %.0f %%, their shadow map %d; F12's %d\n", ed.view_scale() * 100.0f, 1024, ed.shadow_map_size_for_test());
+    CHECK(ed.shadow_map_size_for_test() == 2048);  // a render isn't a view: the scene's own setting
+    ed.command("quality high");
+    CHECK(ed.view_scale() == 1.0f && ed.shadow_resolution_for_view() == 2048);
+    ed.command("quality medium");
+    CHECK(std::fabs(ed.view_scale() - 0.85f) < 1e-6f);
+    /* Two tiers at the same scale but different caps are different pictures: Custom at 85 % (no caps) -> Medium. */
+    ed.command("set Render.ShadowResolution 4096");
+    ed.command("quality high");
+    ed.command("viewscale 85");
+    r34_steps(ed, 2);
+    CHECK(ed.shadow_map_size_for_test() == 4096);
+    const R34Count t0 = r34_totals(ed);
+    ed.command("quality medium");
+    r34_steps(ed, 2);
+    CHECK(r34_totals(ed).renders > t0.renders && ed.shadow_map_size_for_test() == 2048);
+    const int rec = Editor::recommended_tier();
+    CHECK(rec == Editor::TierLow || rec == Editor::TierHigh);
+  });
+
+  test("min spec: a moving caster is drawn over the still casters' cached shadow map, the same map bit for bit", [] {
+    /* Raster level: still casters then the moving one over them == all at once. */
+    std::vector<DrawItem> all;
+    MeshPtr box = primitives::cube();
+    for (int k = 0; k < 4; k++) {
+      DrawItem it;
+      it.mesh = &box->render_mesh();
+      it.model = Mat4::trs({k * 1.5f - 2.0f, 0.5f + 0.3f * k, (k % 2) * 0.7f}, Quat::axis_angle({0, 1, 0}, 0.3f * k), {1, 1, 1});
+      it.id = (uint32_t)(k + 1);
+      all.push_back(it);
+    }
+    AABB b;
+    for (const DrawItem &it : all) b.add(it.mesh->bounds.transformed(it.model));
+    const Vec3 dir = normalize(Vec3(-0.4f, -1.0f, -0.3f));
+    ShadowMap whole, still, composed;
+    render_shadow_map(whole, all, dir, b, 512);
+    render_shadow_map(still, std::vector<DrawItem>(all.begin(), all.begin() + 3), dir, b, 512);
+    render_shadow_map(composed, std::vector<DrawItem>(all.begin() + 3, all.end()), dir, b, 512, &still);
+    CHECK(whole.valid() && composed.valid() && whole.depth == composed.depth);
+    /* Editor level: dragging one object draws the still layer once, then only the moving object. */
+    Editor ed;
+    r34_open(ed);
+    ed.command("stress 20 Cube");
+    r34_steps(ed, 3);
+    GameObject *mover = ed.scene().find_by_name("Cube");
+    CHECK(mover != nullptr);
+    if (!mover) return;
+    const uint64_t layer0 = ed.shadow_layer_renders_for_test();
+    for (int k = 1; k <= 6; k++) {
+      mover->set_local_position({0.05f * k, 0.5f, 0.0f});
+      r34_steps(ed, 1);
+    }
+    const uint64_t layers = ed.shadow_layer_renders_for_test() - layer0;
+    std::printf("    6 moved frames: the still layer drawn %llu time(s)\n", (unsigned long long)layers);
+    CHECK(layers >= 1 && layers <= 2);
+  });
+
+  test("min spec: the sky is drawn only where nothing opaque is, matching a per-pixel evaluation within a display step", [] {
+    Environment env;
+    env.mode = Environment::Gradient;
+    env.sky = {0.2f, 0.4f, 0.9f};
+    env.equator = {0.8f, 0.8f, 0.85f};
+    env.ground = {0.3f, 0.25f, 0.2f};
+    env.strength = 1.0f;
+    Image img;
+    img.resize(160, 90);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 160, 90});
+    Renderer3D r;
+    const Mat4 v = Mat4::look_at({0, 1, 5}, {0, 1, 0}, {0, 1, 0}), p = Mat4::perspective(1.0f, 160.0f / 90.0f, 0.1f, 100.0f);
+    LightingEnv le;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    r.begin(&rt, v, p, le, opt);
+    const Mat4 inv = (p * v).inverse();
+    r.clear_environment(inv, env, ViewTransform::Standard, 0.0f);
+    MeshPtr box = primitives::cube();
+    DrawItem it;
+    it.mesh = &box->render_mesh();
+    it.model = Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1});
+    it.id = 7;
+    r.add(it);
+    r.flush();
+    int worst = 0, sky = 0, covered = 0;
+    for (int y = 0; y < 90; y++)
+      for (int x = 0; x < 160; x++) {
+        if (rt.depth[(size_t)y * 160 + x] < 1.0f) {
+          covered++;
+          continue;
+        }
+        sky++;
+        const float nx = 2.0f * (x + 0.5f) / 160 - 1.0f, ny = 1.0f - 2.0f * (y + 0.5f) / 90;
+        const Vec4 a = inv * Vec4(nx, ny, 0, 1), c = inv * Vec4(nx, ny, 1, 1);
+        const Vec3 d = normalize(c.xyz() / c.w - a.xyz() / a.w);
+        const uint32_t want = to_display_pixel(env.radiance(d), ViewTransform::Standard, 0.0f), got = img.pixels[(size_t)y * 160 + x];
+        for (int s = 0; s < 24; s += 8) worst = std::max(worst, std::abs((int)(want >> s & 255) - (int)(got >> s & 255)));
+      }
+    std::printf("    %d sky pixels, %d covered; worst channel difference %d\n", sky, covered, worst);
+    CHECK(sky > 1000 && covered > 300 && worst <= 1);
+  });
+
+  test("min spec: the sky's image is found by polynomial atan2 / asin within 1e-5 of the library's", [] {
+    float worst = 0.0f;
+    for (int i = 0; i < 20000; i++) {
+      const float t = i * 0.000314159f * 2.0f, ph = std::sin(i * 0.37f) * 1.5f;
+      const Vec3 d = normalize(Vec3(std::cos(t) * std::cos(ph), std::sin(ph), std::sin(t) * std::cos(ph)));
+      const Vec2 uv = dir_to_equirect(d, 0.0f);
+      float u = 0.5f + std::atan2(d.x, d.z) / (2.0f * kPi);
+      u -= std::floor(u);
+      const float v = 0.5f + std::asin(std::max(-1.0f, std::min(1.0f, d.y))) / kPi;
+      float du = std::fabs(uv.x - u);
+      du = std::min(du, 1.0f - du);  // the seam
+      worst = std::max(worst, std::max(du, std::fabs(uv.y - v)));
+    }
+    std::printf("    worst difference %g of the image\n", worst);
+    CHECK(worst < 1e-5f);
+  });
+
+  test("min spec: the texture cache lets go of the least recently used textures nothing holds once past its budget", [] {
+    const std::string dir = fs::join(test_dir(), "r72_textures");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(64 * 64, 0xFF336699u);
+    const std::string a = fs::join(dir, "a.png"), b = fs::join(dir, "b.png"), c = fs::join(dir, "c.png");
+    CHECK(write_png(a, px.data(), 64, 64, 64) && write_png(b, px.data(), 64, 64, 64) && write_png(c, px.data(), 64, 64, 64));
+    texture_cache_clear();
+    const size_t old_budget = texture_cache_budget();
+    TexturePtr held = texture_load(a, true);
+    CHECK(held != nullptr);
+    if (!held) return;
+    texture_cache_set_budget(held->memory_bytes() + 16);  // room for about one
+    (void)texture_load(b, true);  // nothing holds b after this line
+    (void)texture_load(c, true);
+    std::printf("    budget %zu bytes: %zu cached, %zu bytes\n", texture_cache_budget(), texture_cache_size(), texture_cache_bytes());
+    CHECK(texture_cache_size() <= 2);              // b went: the oldest that nothing held
+    CHECK(texture_load(a, true) == held);          // the held one stayed (and is the same texture)
+    CHECK(texture_load(b, true) != nullptr);       // an evicted one loads again
+    texture_cache_set_budget(old_budget);
+    texture_cache_clear();
+  });
+
+  test("min spec: undo keeps its newest steps within its memory budget and they still undo", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("stress 300 Cube");
+    ed.step_frame_headless();
+    ed.set_undo_budget_for_test(600 * 300 * 3);  // about three steps of a 300-object scene
+    GameObject *g = ed.scene().find_by_name("Cube");
+    CHECK(g != nullptr);
+    if (!g) return;
+    for (int k = 1; k <= 12; k++) {
+      ed.scene().find_by_name("Cube")->set_local_position({0.1f * k, 0, 0});
+      ed.mark_changed_for_test("R72 move");
+      ed.step_frame_headless();
+    }
+    const size_t steps = ed.undo_steps_for_test();
+    std::printf("    12 moves: %zu steps kept, %zu bytes of their own\n", steps, ed.undo_bytes());
+    CHECK(steps >= 1 && steps <= 4);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(std::fabs(ed.scene().find_by_name("Cube")->local().position.x - 1.1f) < 1e-5f);
   });
 }

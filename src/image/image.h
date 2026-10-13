@@ -94,6 +94,12 @@ void texture_cache_clear();
  * within a second). */
 void texture_cache_forget(const std::string &path);
 size_t texture_cache_size();
+/* The cache's byte budget (task 0050): past it, the least recently used textures nothing else holds are let go (a
+ * material still using one keeps it; it is loaded again when asked for after that). Default: a quarter of the
+ * machine's memory, at most 2 GB. 0 = no budget. */
+void texture_cache_set_budget(size_t bytes);
+size_t texture_cache_budget();
+size_t texture_cache_bytes();  // what the cached textures hold
 
 /* Blender's generated test images (Image > New > Generated Type). */
 TexturePtr texture_uv_grid(int size = 1024);

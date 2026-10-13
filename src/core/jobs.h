@@ -34,6 +34,11 @@ class JobSystem {
   void parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn);
 
   int thread_count() const;
+  /* A ceiling on every thread the process runs work on, TBB's included (Embree, OpenImageDenoise, OpenSubdiv share
+   * them): 0 = the machine's. Set from Preferences > Performance > CPU Threads, the BLENDITY_THREADS environment
+   * variable or `blendity_stress --threads N` (task 0050: a 4-core / 8-thread machine is emulated with 8). */
+  void set_thread_limit(int n);
+  int thread_limit() const { return thread_limit_; }
   /* Restrict parallelism (1 = serial), used by profiler toggles & stress tests. */
   void set_max_threads(int n) { max_threads_ = n < 1 ? 1 : n; }
   int max_threads() const { return max_threads_; }
@@ -53,6 +58,7 @@ class JobSystem {
 
   Backend backend_ = Backend::Builtin;
   int requested_threads_ = 0;
+  int thread_limit_ = 0;
   std::once_flag workers_started_;
   struct TbbState;
   TbbState *tbb_ = nullptr;
