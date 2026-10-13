@@ -25101,4 +25101,133 @@ static void round69_tests() {
     ed.command("points merge Path -1 0");
     CHECK(g->curve()->points.size() == n);
   });
+  /* ------------------------------------------------------------------ round 77: layouts for each stage (task 0055) */
+  test("layouts: each stage's layout opens its windows and shows its tools; Show All Tools brings back the rest", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("layout UV Unwrapping");
+    ed.step_frame_headless();
+    CHECK(ed.workspace_name() == "UV Unwrapping" && ed.window_rect_for_test(WindowKind::UVEditor).w > 0 && ed.window_rect_for_test(WindowKind::Scene).w > 0);
+    CHECK(ed.shows(Editor::FocusUV) && ed.shows(Editor::FocusEdit) && !ed.shows(Editor::FocusRig));
+    ed.command("layout Texturing & Materials");
+    ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Materials).w > 0 && ed.window_rect_for_test(WindowKind::Textures).w > 0);
+    CHECK(ed.shows(Editor::FocusMaterial) && !ed.shows(Editor::FocusEdit));
+    ed.command("layout Rigging");
+    ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Rigging).w > 0 && ed.shows(Editor::FocusRig));
+    ed.command("layout Modeling & Topology");
+    ed.step_frame_headless();
+    CHECK(ed.shows(Editor::FocusEdit) && ed.shows(Editor::FocusCheck) && !ed.shows(Editor::FocusMaterial));
+    /* Blocking Out's Modeling Tools window hides the other stages' sections and says how to get them back. */
+    ed.command("layout Blocking Out");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti b;
+    bool found = false;
+    for (const std::string &l : ed.button_labels_for_test())
+      if (l.find("more for other stages: Show All Tools") != std::string::npos && ed.button_rect_for_test(l, b)) found = true;
+    CHECK(found && !ed.shows(Editor::FocusEdit));
+    if (found) {
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      CHECK(ed.show_all_tools() && ed.shows(Editor::FocusEdit));
+    }
+    ed.command("alltools off");
+    CHECK(!ed.shows(Editor::FocusEdit));
+    /* The console reaches what a layout hides: a Light while texturing. */
+    ed.command("layout Texturing & Materials");
+    CHECK(!ed.shows(Editor::FocusLight));
+    ed.command("create Point Light");
+    CHECK(ed.scene().find_by_name("Point Light") != nullptr);
+    /* Default shows everything, as before. */
+    ed.command("layout Default");
+    CHECK(ed.shows(Editor::FocusRig) && ed.shows(Editor::FocusEdit) && ed.shows(Editor::FocusMaterial));
+  });
+
+  test("layouts: Save Layout keeps the arrangement and the focus under a name; Delete Layout removes it; built-in names are refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("layout Rigging");
+    ed.command("window Lighting");
+    ed.step_frame_headless();
+    ed.command("layout save My Rig Stage");
+    const std::vector<std::string> names = ed.workspace_names();
+    CHECK(std::find(names.begin(), names.end(), "My Rig Stage") != names.end());
+    ed.command("layout Default");
+    ed.step_frame_headless();
+    ed.command("layout My Rig Stage");
+    ed.step_frame_headless();
+    CHECK(ed.workspace_name() == "My Rig Stage" && ed.window_rect_for_test(WindowKind::Lighting).w > 0 && ed.shows(Editor::FocusRig) &&
+          !ed.shows(Editor::FocusEdit));
+    ed.command("layout save Default");  // a built-in's name: refused
+    int defaults = 0;
+    for (const std::string &n : ed.workspace_names()) defaults += n == "Default";
+    CHECK(defaults == 1);
+    ed.command("layout delete My Rig Stage");
+    const std::vector<std::string> after = ed.workspace_names();
+    CHECK(std::find(after.begin(), after.end(), "My Rig Stage") == after.end());
+  });
+
+  test("layouts: a Reference Image is an unlit plane the image's shape, facing the view asked for, out of renders and shadows", [] {
+    const std::string png = fs::join(test_dir(), "r77_ref.png");
+    std::vector<uint32_t> px((size_t)200 * 100, 0xFF808080u);
+    CHECK(write_png(png, px.data(), 200, 100, 200));
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("refimage " + png + " top");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->name.rfind("Reference r77_ref", 0) == 0);
+    if (!g) return;
+    const MeshRenderer *mr = g->get<MeshRenderer>();
+    CHECK(mr && !mr->show_in_renders && !mr->cast_shadows && mr->materials.size() == 1 && mr->materials[0]->unlit);
+    CHECK(std::fabs(g->local().scale.x - 2.0f) < 1e-5f && std::fabs(g->local().scale.y - 1.0f) < 1e-5f);  // 2:1
+    const Vec3 facing = normalize(g->world_matrix().dir(Vec3(0, 0, -1)));  // the quad faces -Z before turning
+    std::printf("    top view: the image faces (%.2f, %.2f, %.2f)\n", facing.x, facing.y, facing.z);
+    CHECK(facing.y > 0.999f);
+    ed.command("refimage " + png + " side");
+    GameObject *s = ed.selected_object();
+    CHECK(s && s != g && normalize(s->world_matrix().dir(Vec3(0, 0, -1))).x > 0.999f);
+  });
+  test("layouts: a lesson's layout button arranges the windows too, and your own layouts survive a restart (preferences)", [] {
+    /* The lesson's "Use the UV Unwrapping layout" goes through dock_reset by name: the UV Editor opens beside the Scene. */
+    {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      ed.command("lesson 1");
+      ed.step_frame_headless();
+      ed.dock_reset_for_test("UV Unwrapping");
+      ed.step_frame_headless();
+      CHECK(ed.workspace_name() == "UV Unwrapping" && ed.window_rect_for_test(WindowKind::UVEditor).w > 0 && ed.shows(Editor::FocusUV));
+    }
+    const std::string prefs = fs::join(test_dir(), "r77_prefs.txt");
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(prefs), ec);
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.command("layout Lighting & Rendering");
+      ed.command("layout save Lights; and = Stuff");  // separators in a name are dropped, not saved broken
+      ed.command("layout Rigging");
+      ed.save_prefs_for_test();
+    }
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.load_prefs_for_test();
+      ed.step_frame_headless();
+      CHECK(ed.workspace_name() == "Rigging" && ed.shows(Editor::FocusRig) && !ed.shows(Editor::FocusEdit));
+      std::string mine;
+      for (const std::string &n : ed.workspace_names())
+        if (n.rfind("Lights", 0) == 0) mine = n;
+      std::printf("    restored: layout '%s', and yours '%s'\n", ed.workspace_name().c_str(), mine.c_str());
+      CHECK(!mine.empty() && mine.find(';') == std::string::npos && mine.find('=') == std::string::npos);
+      ed.command("layout " + mine);
+      ed.step_frame_headless();
+      CHECK(ed.window_rect_for_test(WindowKind::Lighting).w > 0 && ed.shows(Editor::FocusLight));
+    }
+  });
 }

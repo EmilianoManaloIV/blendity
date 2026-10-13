@@ -646,35 +646,55 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Create Empty", "Ctrl+Shift+N")) create_object("Empty");
     if (u.menu_item("Create Empty Child", "Alt+Shift+N", false, has_sel)) create_object("Empty", true);
-    u.submenu("3D Object", u.px(170), [this] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
-        if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
-    });
-    u.submenu("Shapes (Parametric)", u.px(190), [this] {
-      for (int k = 0; k < kShapeCount; k++)
-        if (ui_.menu_item(kShapeNames[k], nullptr, false, true, Icon::Cube)) create_object(std::string("Shape: ") + kShapeNames[k]);
-    });
-    u.tooltip("Shapes that keep their settings (size, steps, radius...) in the Inspector until you edit the mesh.\n"
-              "Unity: ProBuilder Shapes. Blender: Add Mesh + Adjust Last Operation.");
-    u.submenu("Light", u.px(190), [this] {
-      if (ui_.menu_item("Directional Light", nullptr, false, true, Icon::Light)) create_object("Directional Light");
-      if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light");
-      if (ui_.menu_item("Spot Light", nullptr, false, true, Icon::Light)) create_object("Spot Light");
-      if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light");
-    });
-    if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera");
-    u.submenu("Curve", u.px(170), [this] {
-      for (const char *k : {"Bezier", "Circle", "Path"})
-        if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k);
-    });
-    u.tooltip("A path to bend meshes along (Curve modifier) or fill with copies (Array > Fit Curve). Blender: Add > Curve.");
-    if (u.menu_item("Lattice")) create_object("Lattice");
-    u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
-              "or taper the mesh. Blender: Add > Lattice.");
-    if (u.menu_item("Armature")) create_object("Armature");
-    u.tooltip("A skeleton: a root with one bone (add more with the console's `bone add`). Select a mesh first and it gets\n"
-              "a Skin modifier with automatic weights. Blender: Add > Armature.");
-    u.submenu("Rig", u.px(200), [this] {
+    /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
+    if (shows(FocusCreate | FocusDraw | FocusEdit | FocusRig))
+      u.submenu("3D Object", u.px(170), [this] {
+        for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+          if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
+      });
+    if (shows(FocusReference)) {
+      if (u.menu_item("Reference Image...")) {
+        std::string path;
+        const std::vector<platform::FileFilter> filters = {{"Images", {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".exr", ".hdr"}}};
+        if (pick_open_path("Reference Image", assets_dir_, filters, path) == PathPick::Chosen) create_reference_image(path, "front");
+      }
+      u.tooltip("A picture to model from: an unlit plane the image's shape, facing the front view, kept out of renders and\n"
+                "shadows. Blender: Add > Image > Reference. Console: refimage <path> [front|side|top].");
+    }
+    if (shows(FocusCreate | FocusDraw | FocusEdit)) {
+      u.submenu("Shapes (Parametric)", u.px(190), [this] {
+        for (int k = 0; k < kShapeCount; k++)
+          if (ui_.menu_item(kShapeNames[k], nullptr, false, true, Icon::Cube)) create_object(std::string("Shape: ") + kShapeNames[k]);
+      });
+      u.tooltip("Shapes that keep their settings (size, steps, radius...) in the Inspector until you edit the mesh.\n"
+                "Unity: ProBuilder Shapes. Blender: Add Mesh + Adjust Last Operation.");
+    }
+    if (shows(FocusLight)) {
+      u.submenu("Light", u.px(190), [this] {
+        if (ui_.menu_item("Directional Light", nullptr, false, true, Icon::Light)) create_object("Directional Light");
+        if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light");
+        if (ui_.menu_item("Spot Light", nullptr, false, true, Icon::Light)) create_object("Spot Light");
+        if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light");
+      });
+      if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera");
+    }
+    if (shows(FocusDeform | FocusCreate | FocusRig)) {
+      u.submenu("Curve", u.px(170), [this] {
+        for (const char *k : {"Bezier", "Circle", "Path"})
+          if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k);
+      });
+      u.tooltip("A path to bend meshes along (Curve modifier) or fill with copies (Array > Fit Curve). Blender: Add > Curve.");
+      if (u.menu_item("Lattice")) create_object("Lattice");
+      u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
+                "or taper the mesh. Blender: Add > Lattice.");
+    }
+    if (shows(FocusRig)) {
+      if (u.menu_item("Armature")) create_object("Armature");
+      u.tooltip("A skeleton: a root with one bone (add more with the console's `bone add`). Select a mesh first and it gets\n"
+                "a Skin modifier with automatic weights. Blender: Add > Armature.");
+    }
+    if (shows(FocusRig))
+      u.submenu("Rig", u.px(200), [this] {
       if (ui_.menu_item("Humanoid")) run_console_command("rig humanoid");
       ui_.tooltip("A person's skeleton (Hips to Head, arms, legs) with IK on the hands and feet: move the HandIK / FootIK\n"
                   "objects and the limbs follow; the Pole objects aim the elbows and knees.");
@@ -696,13 +716,15 @@ void Editor::draw_menubar(const Recti &r) {
       ui_.tooltip("Move and rotate only the origin with the gizmo, or click a vertex, edge or face to snap it there.\n"
                   "Blender: Options > Affect Only > Origins.");
     });
-    u.submenu("Bake Textures", u.px(200), [this, has_sel] {
-      for (int size : {512, 1024, 2048, 4096})
-        if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) bake_object_textures(size);
-    });
-    u.tooltip("Bake the active object's look (procedural textures, axis materials, Box mapping, every material slot) into\n"
-              "one set of images on new UVs, and give it a material that uses them: what it looks like, as plain images\n"
-              "any program shows. Undo restores it. Blender: Cycles Bake. (Console: baketex [size] [keepuvs])");
+    if (shows(FocusMaterial)) {
+      u.submenu("Bake Textures", u.px(200), [this, has_sel] {
+        for (int size : {512, 1024, 2048, 4096})
+          if (ui_.menu_item(strprintf("%d x %d", size, size), nullptr, false, has_sel)) bake_object_textures(size);
+      });
+      u.tooltip("Bake the active object's look (procedural textures, axis materials, Box mapping, every material slot) into\n"
+                "one set of images on new UVs, and give it a material that uses them: what it looks like, as plain images\n"
+                "any program shows. Undo restores it. Blender: Cycles Bake. (Console: baketex [size] [keepuvs])");
+    }
     if (u.menu_item("Clear Parent", nullptr, false, has_sel)) {
       for (GameObject *g : selected_objects(true)) scene_->set_parent(g, nullptr);
       mark_changed("Clear Parent");
@@ -724,11 +746,14 @@ void Editor::draw_menubar(const Recti &r) {
     std::vector<std::string> cats;
     for (auto &ci : component_registry())
       if (std::find(cats.begin(), cats.end(), ci.category) == cats.end()) cats.push_back(ci.category);
-    for (auto &cat : cats)
+    for (auto &cat : cats) {
+      /* Rigging and Rendering components belong to their stages' layouts (task 0055). */
+      if ((cat == "Rigging" && !shows(FocusRig)) || (cat == "Rendering" && !shows(FocusLight | FocusMaterial | FocusReference))) continue;
       u.submenu(cat, u.px(220), [this, cat, has_sel] {
         for (auto &ci : component_registry())
           if (ci.category == cat && ui_.menu_item(ci.name, nullptr, false, has_sel)) add_component_to_selection(ci.name);
       });
+    }
   });
   u.popup(u.id("Mesh"), u.px(300), [this, has_sel] {
     auto &u = ui_;
@@ -855,9 +880,23 @@ void Editor::draw_menubar(const Recti &r) {
           u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
         dock_open((WindowKind)k);
     u.menu_separator();
-    u.submenu("Layouts", u.px(180), [this] {
-      for (const char *l : {"Default", "2 by 3", "Tall", "Wide", "Learning"})
-        if (ui_.menu_item(l)) dock_reset(l);
+    u.submenu("Layouts", u.px(230), [this] {
+      /* The stages of the work first, then the arrangements and the user's own (task 0055). */
+      int n = 0;
+      const Workspace *w = builtin_workspaces(n);
+      for (int i = 0; i < n; i++) {
+        if (i > 0 && w[i].stage != w[i - 1].stage) ui_.menu_separator();
+        if (ui_.menu_item(w[i].name, nullptr, workspace_ == w[i].name)) apply_workspace(w[i].name);
+      }
+      if (!user_layouts_.empty()) ui_.menu_separator();
+      for (const UserLayout &l : user_layouts_)
+        if (ui_.menu_item(l.name.c_str(), nullptr, workspace_ == l.name)) apply_workspace(l.name);
+      ui_.menu_separator();
+      if (ui_.menu_item("Show All Tools", nullptr, show_all_tools_)) show_all_tools_ = !show_all_tools_;
+      ui_.tooltip("A stage's layout hides the tools other stages use (the keys and the console still reach them).\n"
+                  "Show All Tools shows every one whatever the layout.");
+      if (ui_.menu_item("Save Layout...")) layout_save_open_ = true;
+      if (ui_.menu_item("Delete Layout...", nullptr, false, !user_layouts_.empty())) layout_delete_open_ = true;
     });
     u.submenu("UI Scale", u.px(160), [this] {
       for (float s : {0.0f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f}) {
@@ -948,12 +987,32 @@ void Editor::draw_toolbar(const Recti &r) {
   }
 
   /* Right side: Learn + layout dropdown. */
-  static const char *layouts[] = {"Default", "2 by 3", "Tall", "Wide", "Learning"};
-  int &layout_idx = layout_index_;
-  int lw = u.px(110);
+  /* The Layout dropdown (Unity's place): every layout, then Save / Delete Layout (task 0055). */
+  std::vector<std::string> names = workspace_names();
+  int layout_idx = -1;
+  for (size_t k = 0; k < names.size(); k++)
+    if (names[k] == workspace_) layout_idx = (int)k;
+  if (layout_idx < 0) {  // an arrangement of one's own (dragged tabs, `layout <dock string>`): shown as such, and any layout picks again
+    names.push_back("Custom");
+    layout_idx = (int)names.size() - 1;
+  }
+  const size_t n_layouts = names.size();
+  names.push_back("Save Layout...");
+  names.push_back("Delete Layout...");
+  std::vector<const char *> cnames;
+  for (const std::string &s : names) cnames.push_back(s.c_str());
+  int lw = u.px(170);
   int rx = r.right() - lw - u.px(8);
-  if (u.combo(u.id("layout_combo"), {rx, y, lw, bh}, layout_idx, layouts, 5)) dock_reset(layouts[layout_idx]);
-  u.tooltip("Editor layout presets (Window > Layouts). Blender calls these Workspaces.");
+  if (u.combo(u.id("layout_combo"), {rx, y, lw, bh}, layout_idx, cnames.data(), (int)cnames.size())) {
+    if (layout_idx < (int)n_layouts) {
+      if (names[(size_t)layout_idx] != "Custom") apply_workspace(names[(size_t)layout_idx]);
+    }
+    else if (layout_idx == (int)n_layouts) layout_save_open_ = true;
+    else layout_delete_open_ = true;
+  }
+  u.tooltip("Layouts for each stage of the work (Reference, Blocking Out, Modeling, UVs, Texturing, Lighting, Rigging,\n"
+            "Skinning, Animation): each arranges the windows and shows that stage's tools. Window > Layouts > Show All Tools\n"
+            "shows everything. Unity: the Layout dropdown; Blender: Workspaces.");
   int learn_w = u.font.text_width("Learn") + bh + u.px(14);
   rx -= learn_w + u.px(8);
   Recti lr{rx, y, learn_w, bh};
@@ -963,6 +1022,7 @@ void Editor::draw_toolbar(const Recti &r) {
   u.canvas.text(u.font, lr.x + bh, lr.y + (bh - u.font.line_height()) / 2, "Learn", 0xFFFFFFFF);
   if (hot && u.in.pressed[0]) dock_open(WindowKind::Learn);
   if (playing_) u.canvas.fill_rect({r.x, r.bottom() - u.px(2), r.w, u.px(2)}, u.theme.focus);
+  draw_layout_dialogs();  // Save / Delete Layout (task 0055)
 }
 
 void Editor::draw_statusbar(const Recti &r) {
@@ -1098,15 +1158,15 @@ void Editor::dock_fix_parents(DockNode *n, DockNode *parent) {
 
 void Editor::dock_reset(const std::string &preset) {
   /* Window ids: 0 Scene 1 Game 2 Hierarchy 3 Inspector 4 Project 5 Console 6 Learn 7 Research 8 Profiler */
-  std::string s = "H(0.78,V(0.68,H(0.21,L(2:0),L(0,1,6,10:0)),L(4,11,5,8,9:0)),L(3,12:0))";
-  if (preset == "2 by 3") s = "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,8:0),L(3,12:0))))";
-  else if (preset == "Tall") s = "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,8,9:0))),L(3,12:0))";
-  else if (preset == "Wide") s = "V(0.7,H(0.8,L(0,1,6,10:0),L(3,12:0)),H(0.3,L(2:0),L(4,11,5,8,9:0)))";
-  else if (preset == "Learning") s = "H(0.40,L(6:0),V(0.64,L(0,1,10:0),H(0.45,L(2:0),L(3,12,4,11,5,8,9:0))))";
+  /* A layout by name (the table in workspaces.cpp: its windows and its focus, task 0055), a raw dock string, or
+   * Default. */
+  int nw = 0;
+  std::string s = builtin_workspaces(nw)[0].dock;
+  if (const Workspace *w = find_workspace(preset)) {
+    s = w->dock;
+    focus_ = w->focus, workspace_ = w->name;  // (a lesson's layout button, --layout)
+  }
   else if (preset.size() > 2 && (preset[0] == 'H' || preset[0] == 'V' || preset[0] == 'L') && preset[1] == '(') s = preset;
-  static const char *names[] = {"Default", "2 by 3", "Tall", "Wide", "Learning"};
-  for (int i = 0; i < 5; i++)
-    if (preset == names[i]) layout_index_ = i;
   size_t pos = 0;
   dock_ = dock_parse(s, pos);
   dock_fix_parents(dock_.get(), nullptr);
@@ -2729,6 +2789,38 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (c == "layout") {
+    /* layout <name> | layout save <name> | layout delete <name> (task 0055); a raw dock string still works */
+    const std::string rest = line.substr(line.find(' ') + 1);
+    if (to_lower(arg(1, "")) == "save" && t.size() > 2) save_user_layout(rest.substr(rest.find(' ') + 1));
+    else if (to_lower(arg(1, "")) == "delete" && t.size() > 2) delete_user_layout(rest.substr(rest.find(' ') + 1));
+    else if (!apply_workspace(rest)) {
+      if (rest.size() > 1 && rest[1] == '(') {  // a raw dock string: every tool shows
+        dock_reset(rest);
+        focus_ = FocusAll;
+        workspace_ = "Custom";
+      }
+      else Log::warn("layout: no layout named '%s' (Window > Layouts lists them)", rest.c_str());
+    }
+    return;
+  }
+  if (c == "alltools") {  // alltools on|off (task 0055)
+    show_all_tools_ = to_lower(arg(1, "on")) != "off";
+    return;
+  }
+  if (c == "refimage") {  // refimage <path> [front|side|top] (task 0055); the path may hold spaces
+    std::string rest = line.size() > c.size() ? line.substr(line.find(c) + c.size() + 1) : std::string(), view = "front";
+    for (const char *v : {" front", " side", " top"}) {
+      const size_t l = std::strlen(v);
+      if (rest.size() > l && to_lower(rest.substr(rest.size() - l)) == v) {
+        view = v + 1;
+        rest.resize(rest.size() - l);
+        break;
+      }
+    }
+    create_reference_image(rest, view);
+    return;
+  }
   if (c == "matdelete" || c == "texdelete") {
     /* matdelete <name>[, <name>...] / texdelete <name>[, <name>...]: delete material or texture assets by name, at once
      * (task 0053; the windows ask first). Names are comma-separated, so they may hold spaces ("Wood Floor"). The scene
@@ -2848,7 +2940,6 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "play") enter_play();
   else if (c == "stop") exit_play();
-  else if (c == "layout") dock_reset(line.substr(line.find(' ') + 1));
   else if (c == "scale") { ui_scale_pref_ = (float)std::atof(arg(1, "0").c_str()); apply_ui_scale(); }
   else if (c == "screenshot") screenshot(t.size() > 1 ? line.substr(line.find(' ') + 1) : "");
   else if (c == "lesson") { lesson_ = std::atoi(arg(1, "0").c_str()); dock_open(WindowKind::Learn); }
@@ -3802,6 +3893,21 @@ void Editor::load_prefs() {
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str()))), had_fps = true;
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
+    else if (k == "workspace") workspace_ = v;
+    else if (k == "focus") focus_ = (uint32_t)std::strtoul(v.c_str(), nullptr, 10);
+    else if (k == "alltools") show_all_tools_ = v == "1";
+    else if (k == "user_layout") {  // name;focus;dock (task 0055)
+      const size_t a = v.find(';'), b = a == std::string::npos ? a : v.find(';', a + 1);
+      if (b != std::string::npos) {
+        UserLayout l;
+        l.name = v.substr(0, a);
+        l.dock = v.substr(b + 1);
+        l.ws = {nullptr, nullptr, (uint32_t)std::strtoul(v.substr(a + 1, b - a - 1).c_str(), nullptr, 10), true};
+        user_layouts_.erase(std::remove_if(user_layouts_.begin(), user_layouts_.end(), [&](const UserLayout &o) { return o.name == l.name; }),
+                            user_layouts_.end());
+        user_layouts_.push_back(l);
+      }
+    }
     else if (k == "view_scale") scale = (float)std::atof(v.c_str());
     else if (k == "cpu_threads") threads = std::atoi(v.c_str());
     else if (k == "tier_caps") std::sscanf(v.c_str(), "%d %d %d", &caps[0], &caps[1], &caps[2]);
@@ -3833,11 +3939,12 @@ void Editor::load_prefs() {
   }
   if (had_fps) max_fps_ = saved_fps;  // the frame cap as last chosen (preferences from before the tiers too)
   if (threads > 0) set_cpu_threads(threads);
+  fix_user_layout_pointers();
   parse_keymap_overrides(keymap_text);  // also builds the keymap from the preset
 }
 
 void Editor::save_prefs() {
-  if (headless_) return;
+  if (headless_ && !prefs_for_test_) return;
   std::string done;
   for (int l : lessons_done_) done += std::to_string(l) + " ";
   std::string off;
@@ -3851,6 +3958,8 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
                             view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
+  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0);
+  for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }
 

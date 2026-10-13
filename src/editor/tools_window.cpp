@@ -30,7 +30,25 @@ void Editor::draw_tools_window(const Recti &r) {
                                                          : std::string("Nothing selected - create or draw something");
     u.label(row, who, u.theme.text_bright);
   }
-  auto section = [&](const char *title) {
+  /* The current layout's focus (task 0055): a section of another stage isn't shown; the first row says so. */
+  {
+    int hidden = 0;
+    for (uint32_t g : {(uint32_t)FocusCreate, (uint32_t)FocusDraw, (uint32_t)FocusObject, (uint32_t)FocusEdit, (uint32_t)FocusCheck,
+                       (uint32_t)FocusCheck /* (two Check sections) */, (uint32_t)FocusUV, (uint32_t)FocusSnap})
+      hidden += !shows(g);
+    if (hidden > 0) {
+      Recti row = lay.row(u.row_h() + u.px(2));
+      if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, strprintf("%d more for other stages: Show All Tools", hidden)))
+        show_all_tools_ = true;
+      u.tooltip("The '" + workspace_ + "' layout shows this stage's tools (Window > Layouts). Keys and the console reach every tool.");
+    }
+    else if (show_all_tools_ && focus_ != FocusAll) {  // and back
+      Recti row = lay.row(u.row_h() + u.px(2));
+      if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Showing all tools: only this stage's")) show_all_tools_ = false;
+    }
+  }
+  auto section = [&](const char *title, uint32_t groups = FocusAll) {
+    if (!shows(groups)) return false;
     lay.space(u.px(4));
     Recti h = lay.row(u.row_h() + u.px(2));
     u.canvas.fill_rect({r.x, h.y, r.w, h.h}, u.theme.header);
@@ -63,7 +81,7 @@ void Editor::draw_tools_window(const Recti &r) {
       }
     }
   };
-  if (section("Create")) {
+  if (section("Create", FocusCreate)) {
     std::vector<B> prims, shapes;
     for (const char *k : {"Cube", "Sphere", "Cylinder", "Plane"})
       prims.push_back({k, std::string("GameObject > 3D Object > ") + k, true, [this, k] { create_object(k); }});
@@ -75,7 +93,7 @@ void Editor::draw_tools_window(const Recti &r) {
     u.label(lay.row(), "Parametric shapes (keep their settings)", u.theme.text_dim);
     grid(shapes, 4);
   }
-  if (section("Draw")) {
+  if (section("Draw", FocusDraw)) {
     std::vector<B> bs;
     for (int k = 0; k < kDrawShapeCount; k++)
       bs.push_back({kDrawShapes[k], k == 5 ? "A construction line through two points: drawing snaps to it, to where guides cross and to its\n"
@@ -149,7 +167,7 @@ void Editor::draw_tools_window(const Recti &r) {
     u.label({row.x + u.px(4), row.y, row.w / 2, row.h}, "Polygon Sides");
     u.int_field(u.id("tools_sides"), {row.x + row.w / 2, row.y, row.w / 2 - u.px(6), row.h}, draw_sides_, 3, 64);
   }
-  if (section("Object")) {
+  if (section("Object", FocusObject)) {
     const bool two = selection_.size() > 1;
     std::vector<B> bs = {
         {edit_mode_ ? "Exit Edit Mode" : "Edit Mode", "Tab", mesh || edit_mode_, [this] {
@@ -186,15 +204,15 @@ void Editor::draw_tools_window(const Recti &r) {
     grid(bs, 3);
   }
   if (edit_mode_ && edit_object()) {
-    if (section("Edit Mode")) draw_edit_tools(lay);
+    if (section("Edit Mode", FocusEdit)) draw_edit_tools(lay);
   }
-  else if (section("Edit Mode")) {
+  else if (section("Edit Mode", FocusEdit)) {
     Recti row = lay.row();
     u.label(row, mesh ? "Press Tab (or Edit Mode above) to edit the mesh." : "Select a mesh to edit it.", u.theme.text_dim);
   }
-  if (section("Check: Z-Fighting")) draw_zfight_panel(lay);
-  if (section("Check: Overlapping Vertices & Edges")) draw_overlap_panel(lay);
-  if (section("UV")) {
+  if (section("Check: Z-Fighting", FocusCheck)) draw_zfight_panel(lay);
+  if (section("Check: Overlapping Vertices & Edges", FocusCheck)) draw_overlap_panel(lay);
+  if (section("UV", FocusUV)) {
     std::vector<B> bs = {
         {"Unwrap", "Unwrap along the seams (U).", mesh, [this] { uv_op("unwrap"); }},
         {"Smart UV", "Smart UV Project: no seams needed.", mesh, [this] { uv_op("smart"); }},
@@ -205,7 +223,7 @@ void Editor::draw_tools_window(const Recti &r) {
     };
     grid(bs, 3);
   }
-  if (section("Snapping")) {
+  if (section("Snapping", FocusSnap)) {
     Recti row = lay.row();
     u.label(row, "Move gizmo: hold V for vertex snapping, Ctrl+Shift to drop onto surfaces.", u.theme.text_dim);
     row = lay.row(u.row_h() + u.px(2));

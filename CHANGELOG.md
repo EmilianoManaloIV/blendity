@@ -2,6 +2,51 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 77): layouts for each stage of the work (task 0055, ADR 0027)
+
+**Asked:** "Add different layouts that focus on different sections of the 3D modeling process such as:
+Reference/Planning, Blocking Out, Modeling and Topology, UV Unwrapping, Texturing and materials, and then lighting and
+Rendering; of course the generic editor too ... I want to avoid that feeling of so many tools ... separate layouts for
+rigging, skinning and weight painting, animation".
+
+**Added**
+- **Stage layouts** in the Layout dropdown (top right, Unity's place) and Window > Layouts: Reference & Planning,
+  Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Rigging, Skinning &
+  Weight Painting, Animation.
+- **Each layout arranges the windows** for its stage, for example the UV Editor beside the Scene view for UVs, or the
+  Materials and Textures windows for texturing.
+- **Each layout shows only its stage's tools** in the Modeling Tools window, the GameObject menu and Add Component.
+  The keys and console reach the rest; Show All Tools shows them.
+- **Save Layout... / Delete Layout...** for your own layouts, kept in preferences.
+- **GameObject > Reference Image...**: an unlit plane with the image, facing front, side or top. It casts no shadow and
+  stays out of renders; an image from outside the project is copied in.
+- Console: `layout <name>|save <name>|delete <name>`, `alltools on|off`, `refimage <path> [front|side|top]`.
+- Learn: "Layouts for each stage" in The Editor Layout lesson.
+
+**Checked**
+- New tests (round 77):
+  - The stage layouts open their windows and show their groups.
+  - Blocking Out's Tools window offers Show All Tools, and a click brings the Edit Mode section back.
+  - The console reaches a hidden Light.
+  - Save Layout keeps the windows and focus; built-in names are refused; Delete removes the layout.
+  - A lesson's layout button arranges the windows.
+  - Preferences bring back the layout and your own after a restart.
+  - A Reference Image is unlit, 2:1 for a 200 x 100 picture, faces up for "top" and +X for "side", out of renders.
+- Unit checks: Windows 9,470, 0 failed (591 tests); the whole suite in render-cache verify mode: 9,471,
+  0 failed, 0 stale pictures. Linux with libraries: 9,378, 0 failed. Sanitizer build: 9,296, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- A lesson's layout button (and `--layout`) changed the tools but not the windows; one table now serves both.
+- Tooltips of hidden GameObject menu items landed on others.
+- Also fixed:
+  - The dropdown couldn't get back to a layout from a custom arrangement.
+  - An unknown `layout` name went by silently.
+  - `refimage` split paths at spaces.
+  - Images outside the project were named by absolute path.
+  - Duplicate saved layouts weren't merged.
+  - The Tools window couldn't turn Show All Tools off.
+
 ## 2026-10-13 (round 76): curve and lattice points with the vertex and edge keys (task 0054)
 
 **Asked:** "Add the ability to add more points and loop cuts for lattice and curves using similar key binds for

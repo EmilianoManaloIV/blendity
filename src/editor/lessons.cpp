@@ -55,6 +55,23 @@ Unity and Blender both split one window into panels. Unity calls them windows an
 ? Which Blender editor plays the role of Unity's Inspector? | The Properties editor (space_buttons in the source). It also shows modifiers, materials and physics as tabs.
 ! layout:2 by 3 | Try the "2 by 3" layout
 ! layout:Default | Back to Default
+# Layouts for each stage
+A 3D job goes through stages, and each needs only some of the tools. The Layout dropdown (top right, as in Unity; Blender's Workspaces) has a layout for each: Reference & Planning, Blocking Out, Modeling & Topology, UV Unwrapping, Texturing & Materials, Lighting & Rendering, Rigging, Skinning & Weight Painting and Animation. Each arranges the windows for its stage (the UV Editor beside the Scene view for UVs; the Materials and Textures windows for texturing; the Rigging window for rigs) and shows that stage's tools in the Modeling Tools window, the GameObject menu and Add Component; the others step aside. Nothing is gone: the keys and the console reach every tool, and Window > Layouts > Show All Tools shows them all. Default shows everything, as do the arrangements (2 by 3, Tall, Wide, Learning). Save Layout... keeps your own arrangement under a name.
+| Stage | Windows | Tools shown
+| Reference & Planning | Scene, Game, Project | create, reference images, cameras
+| Blocking Out | Scene, Modeling Tools | primitives, drawing, snapping
+| Modeling & Topology | Scene, Modeling Tools | Edit Mode, checks, curves and lattices
+| UV Unwrapping | Scene + UV Editor | Edit Mode, UV
+| Texturing & Materials | Scene, Game, Materials, Textures | materials, textures, baking
+| Lighting & Rendering | Scene, Game, Lighting, Render | lights, cameras
+| Rigging / Skinning | Scene, Rigging | bones, skins, weights, IK
+Reference & Planning has GameObject > Reference Image...: a picture to model from, an unlit plane the picture's shape, kept out of renders (Blender: Add > Image > Reference; console `refimage <path> front|side|top`).
+! layout:Modeling & Topology | Use the Modeling & Topology layout
+! layout:UV Unwrapping | Use the UV Unwrapping layout
+! layout:Texturing & Materials | Use the Texturing & Materials layout
+! cmd:alltools on | Show All Tools
+! layout:Default | Back to Default (everything)
+? A tool you need isn't in the menu in this layout. What do you do? | Its key and its console command still work; or Window > Layouts > Show All Tools; or switch to the layout of that stage.
 )"},
     {"Navigating the Scene View", "Unity controls vs Blender controls (shortcut sheet)", R"(
 Both programs describe the viewport camera as a pivot point, an orientation and a distance. Navigation changes these three values. Blender stores them in RegionView3D as ofs, viewquat and dist. Unity's SceneView has pivot, rotation and size. Blendity uses Unity's mouse mapping.

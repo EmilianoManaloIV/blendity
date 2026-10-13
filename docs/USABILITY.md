@@ -187,6 +187,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | The Inspector's MeshFilter section was crowded: modeling buttons, vertex groups and the Weight Paint brush in one list. | A Rigging window (beside the Inspector) holds skeletons, skins, vertex groups, Weight Paint and IK; MeshFilter keeps modeling and one row that opens it. |
 | Deleting many materials or textures meant one at a time, a question each. | Ctrl / Shift click and Ctrl+A select several in the Materials, Textures and Project windows; Delete asks once for all of them. |
 | Curves only grew at the end, from the console, and lattices only by typing a resolution. | Extrude, Loop Cut (Ctrl+R), Merge at Center, Delete and Alt+C work on curve and lattice points with Edit Mode's keys. |
+| Every tool showed all the time: a first-time user faced all of them at once. | Layouts for each stage of the work (Layout dropdown) show that stage's tools; Show All Tools and the keys reach the rest. |
 
 ## Still worth doing
 

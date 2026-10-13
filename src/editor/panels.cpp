@@ -1609,6 +1609,9 @@ void Editor::draw_inspector(const Recti &r) {
     std::string last_cat;
     for (auto &ci : component_registry()) {
       if (!f.empty() && to_lower(ci.name).find(f) == std::string::npos) continue;
+      /* Another stage's components (task 0055) show only when searched for by name. */
+      if (f.empty() && ((ci.category == "Rigging" && !shows(FocusRig)) || (ci.category == "Rendering" && !shows(FocusLight | FocusMaterial | FocusReference))))
+        continue;
       if (ci.category != last_cat) {
         u.menu_label(ci.category);
         last_cat = ci.category;

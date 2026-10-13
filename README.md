@@ -34,6 +34,11 @@ GPU is only for path tracing). On such a machine Blendity starts on the **Low** 
 Performance): the Scene and Game views draw their 3D at 67 % and scale it up, with a 1024 shadow map and 60 fps.
 Renders (F12) always use the scene's own settings.
 
+**Layouts for each stage** (the Layout dropdown, top right): Reference & Planning, Blocking Out, Modeling & Topology,
+UV Unwrapping, Texturing & Materials, Lighting & Rendering, Rigging, Skinning & Weight Painting, Animation. Each
+arranges the windows and shows only that stage's tools (Window > Layouts > Show All Tools shows everything); Save
+Layout... keeps your own.
+
 New to the editor? Press **F1** (or the orange **Learn** button).
 
 ## Build it
@@ -52,7 +57,7 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-Each build produces **`Blendity`** (the editor), **`blendity_tests`** (9444 unit checks in 587 tests with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems, and runs the unit tests under AddressSanitizer / UBSan.
+Each build produces **`Blendity`** (the editor), **`blendity_tests`** (9470 unit checks in 591 tests with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems, and runs the unit tests under AddressSanitizer / UBSan.
 
 **Contributing.** `CLAUDE.md` holds the engineering standards. Work starts as a task spec in `docs/tasks/` (and a decision record in `docs/decisions/` when it is architectural), approved before code is written. It is implemented and independently tested and reviewed (the agents in `.claude/agents/`), then lands through a pull request that CI must pass and a human merges. What Blendity must do is in `docs/requirements.md`.
 

@@ -438,6 +438,14 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
+  /* Preferences in a headless test: written to and read from `path` (never the user's). */
+  void prefs_for_test(const std::string &path) {
+    prefs_path_ = path;
+    prefs_for_test_ = true;
+  }
+  void save_prefs_for_test() { save_prefs(); }
+  void dock_reset_for_test(const std::string &preset) { dock_reset(preset); }
+  void load_prefs_for_test() { load_prefs(); }
   void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }
   void project_open_folder_for_test(const std::string &dir, const std::string &search = "") { project_dir_ = dir; project_search_ = search; project_listed_ = -100; }
   std::vector<std::string> button_labels_for_test() const {
@@ -1565,6 +1573,46 @@ class Editor {
   /* ---- dock ---- */
   std::unique_ptr<DockNode> dock_;
   int layout_index_ = 0;  // toolbar Layout dropdown
+
+ public:
+  /* Layouts for each stage of the work (task 0055, ADR 0027, workspaces.cpp): a window arrangement plus the tool groups
+   * the stage shows. */
+  enum Focus : uint32_t {
+    FocusCreate = 1, FocusDraw = 2, FocusObject = 4, FocusEdit = 8, FocusCheck = 16, FocusUV = 32, FocusSnap = 64,
+    FocusLight = 128, FocusMaterial = 256, FocusDeform = 512, FocusRig = 1024, FocusReference = 2048, FocusAll = 0xFFFFFFFFu
+  };
+  struct Workspace {
+    const char *name;
+    const char *dock;
+    uint32_t focus;
+    bool stage;  // a stage of the work (false: one of the arrangements)
+  };
+  static const Workspace *builtin_workspaces(int &count);
+  const Workspace *find_workspace(const std::string &name) const;
+  std::vector<std::string> workspace_names() const;
+  bool apply_workspace(const std::string &name);
+  bool shows(uint32_t groups) const;  // the current layout shows these tool groups (or Show All Tools is on)
+  bool save_user_layout(const std::string &name);
+  bool delete_user_layout(const std::string &name);
+  GameObject *create_reference_image(const std::string &path, const std::string &view);
+  const std::string &workspace_name() const { return workspace_; }
+  uint32_t focus_for_test() const { return focus_; }
+  bool show_all_tools() const { return show_all_tools_; }
+
+ private:
+  struct UserLayout {
+    std::string name, dock;
+    Workspace ws{};
+  };
+  std::vector<UserLayout> user_layouts_;
+  void fix_user_layout_pointers();
+  uint32_t focus_ = FocusAll;
+  bool show_all_tools_ = false;
+  std::string workspace_ = "Default";
+  bool layout_save_open_ = false, layout_delete_open_ = false;
+  bool prefs_for_test_ = false;
+  std::string layout_save_name_;
+  void draw_layout_dialogs();
   WindowKind focused_ = WindowKind::Scene;
   DockNode *split_drag_ = nullptr;
   std::vector<WindowKind> tab_close_queue_;  // tabs closed this frame (applied after dock_draw)

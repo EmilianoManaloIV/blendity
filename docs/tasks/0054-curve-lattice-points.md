@@ -4,7 +4,7 @@
 - **Requirements:** R-02
 - **Decisions:** none needed
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/51
 
 ## Goal
 The user asked (2026-10-12): "Add the ability to add more points and loop cuts for lattice and curves using similar
