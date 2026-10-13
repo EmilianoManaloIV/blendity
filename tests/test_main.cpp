@@ -24501,4 +24501,81 @@ static void round69_tests() {
     ed.step_frame_headless();
     CHECK(std::fabs(ed.scene().find_by_name("Cube")->local().position.x - 1.1f) < 1e-5f);
   });
+  /* ------------------------------------------------------------------ round 73: the minimum machine's GPU (task 0051) */
+  test("min spec GPU: a scene too big for a card's memory goes with smaller textures, and to the CPU when even that won't fit", [] {
+    const std::string png = fs::join(test_dir(), "r73_big.png");
+    std::vector<uint32_t> px((size_t)2048 * 2048);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    CHECK(write_png(png, px.data(), 2048, 2048, 2048));
+    auto quad = primitives::quad(2.0f);
+    std::vector<MaterialPtr> mats{make_material("Big", {1, 1, 1})};
+    mats[0]->base_map.path = png;
+    Environment env;
+    env.mode = Environment::Color;
+    PathTracer pt;
+    pt.build({{&quad->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    pt.set_camera(Mat4::look_at({0, 0, -2}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 10), 16, 16);
+    gpu::Scene whole, fitted;
+    int skipped = -1;
+    CHECK(pt.build_gpu_scene_fit(whole, 0, &skipped) && skipped == 0);  // no limit known: whole
+    CHECK(whole.textures.size() == 1 && whole.textures[0].w == 2048);
+    CHECK(pt.build_gpu_scene_fit(fitted, 12, &skipped));  // 12 MB: a 2048 texture (16 MB) doesn't fit, 1024 (4 MB) does
+    std::printf("    12 MB card: %d level(s) smaller, the texture %u x %u\n", skipped, fitted.textures.empty() ? 0u : fitted.textures[0].w,
+                fitted.textures.empty() ? 0u : fitted.textures[0].h);
+    CHECK(skipped == 1 && fitted.textures.size() == 1 && fitted.textures[0].w == 1024);
+    /* A frame whose buffers alone pass the card's memory: no texture size helps, the CPU takes it. */
+    pt.set_camera(Mat4::look_at({0, 0, -2}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 10), 1024, 1024);
+    gpu::Scene none;
+    CHECK(!pt.build_gpu_scene_fit(none, 16, &skipped));
+  });
+
+  test("min spec GPU: Render > Device offers GPU + CPU (Auto), which renders on both by speed", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("set Render.Device 2");
+    CHECK(ed.scene().render.device == 2);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err) && back.render.device == 2);
+    const PTSettings s = ed.pt_settings_for_test();
+    if (gpu::available()) CHECK(s.use_cpu && !s.gpus.empty());
+    else CHECK(s.gpus.empty());  // no GPU: the CPU alone, quietly
+  });
+  test("min spec GPU: a frame too big for the card renders on the CPU with a message; the next scene that fits goes back to the GPU", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    auto quad = primitives::quad(2.0f);
+    std::vector<MaterialPtr> mats{make_material("M", {0.8f, 0.8f, 0.8f})};
+    Environment env;
+    env.mode = Environment::Color;
+    PathTracer pt;
+    PTSettings st;
+    st.gpus = {0};
+    st.use_cpu = false;
+    st.denoise = false;
+    pt.set_settings(st);
+    set_env("BLENDITY_GPU_VRAM_MB", "16");  // a 16 MB card: a 1024 x 1024 frame's buffers alone take 64 MB
+    pt.build({{&quad->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    pt.set_camera(Mat4::look_at({0, 0, -2}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 10), 1024, 1024);
+    pt.render(1e9, 1);
+    std::printf("    16 MB card, 1024 x 1024: \"%s\", parked %d\n", pt.gpu_error().c_str(), (int)pt.gpu_parked());
+    CHECK(pt.gpu_parked() && pt.gpu_error().find("16 MB") != std::string::npos && pt.stats().gpu_samples.empty());
+    /* A small frame and the scene built again: the same devices, on the GPU. */
+    pt.set_camera(Mat4::look_at({0, 0, -2}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 10), 32, 32);
+    pt.build({{&quad->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+    pt.render(1e9, 4);
+    set_env("BLENDITY_GPU_VRAM_MB", "0");
+    CHECK(!pt.gpu_parked() && !pt.stats().gpu_samples.empty() && pt.stats().gpu_samples[0] > 0);
+  });
+
+  test("min spec GPU: the console sets Device Auto", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("device auto");
+    CHECK(ed.scene().render.device == 2);
+    ed.command("device cpu");
+    CHECK(ed.scene().render.device == 0);
+  });
 }

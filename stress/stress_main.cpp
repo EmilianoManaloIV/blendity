@@ -2845,7 +2845,7 @@ static void test_gpu_devices(Report &rep, const Options &o) {
   }
   if (all.size() > 1) runs.push_back({"All GPUs", false, all, true});
   runs.push_back({"CPU + all GPUs", true, all, true});
-  rep.table({"device", "samples/s", "ms / sample", "vs CPU", "samples per device"});
+  rep.table({"device", "samples/s", "ms / sample", "vs CPU", "samples per device", "longest submission ms"});
   double cpu_rate = 0;
   for (const Run &r : runs) {
     PathTracer pt;
@@ -2861,7 +2861,7 @@ static void test_gpu_devices(Report &rep, const Options &o) {
     pt.set_camera(Mat4::look_at({0, 6, -16}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(55 * kDeg2Rad, W / (float)H, 0.1f, 200), W, H);
     ScopedTimer t;
     int done = 0;
-    while (done < SPP) done = pt.render(1e9, SPP);
+    while (done < SPP) done = pt.render(1e9, SPP);  // (set_camera's reset() cleared the warm-up's longest submission)
     double ms = t.ms(), rate = done / (ms / 1000.0);
     if (r.name == "CPU") cpu_rate = rate;
     std::string share = "-";
@@ -2869,8 +2869,11 @@ static void test_gpu_devices(Report &rep, const Options &o) {
       share = r.cpu ? strprintf("CPU %d", pt.stats().cpu_samples) : "";
       for (size_t g = 0; g < pt.stats().gpu_samples.size(); g++) share += strprintf("%sGPU%zu %d", share.empty() ? "" : ", ", g + 1, pt.stats().gpu_samples[g]);
     }
-    rep.row({r.name, f1(rate), f2(ms / done), f2(rate / std::max(cpu_rate, 1e-9)) + "x", share});
+    rep.row({r.name, f1(rate), f2(ms / done), f2(rate / std::max(cpu_rate, 1e-9)) + "x", share,
+             r.gpus.empty() ? std::string("-") : f1(pt.stats().max_submit_ms)});
   }
+  rep.note("Task 0051: a GPU submission stays near 100 ms (the first of a frame is one sample) so a slow card can't pass "
+           "Windows' 2 s driver timeout; a GTX 1050 Ti traces with the compute kernel (no ray tracing hardware).");
   rep.note("Every device renders whole samples of the frame and the sums are averaged, so devices of any speed combine "
            "without seams (Cycles splits work across devices the same way). The unit tests check each device against the CPU.");
 }

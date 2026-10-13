@@ -112,6 +112,7 @@ struct PTStats {
   int guiding_updates = 0;  // OpenPGL field updates so far
   int cpu_samples = 0;             // samples per device (combined rendering)
   std::vector<int> gpu_samples;
+  double max_submit_ms = 0;        // the longest single GPU submission (task 0051: under 100 ms after the first)
 };
 
 class PathTracer {
@@ -259,6 +260,7 @@ class PathTracer {
   mutable std::unique_ptr<gpu::Renderer> bake_gpu_;  // gpu_gather's device, and the build its scene came from
   mutable int bake_gpu_index_ = -1;
   mutable uint64_t bake_gpu_build_ = 0;
+  mutable uint64_t bake_nofit_build_ = ~0ull;  // the build whose scene didn't fit the bake's GPU (task 0051)
   uint64_t build_count_ = 0;
   mutable gpu::GParams bake_params_{};
   mutable std::mutex bake_gpu_mutex_;
@@ -279,7 +281,24 @@ class PathTracer {
   std::vector<uint32_t> centre_ids_;
   uint64_t centre_key_ = 0;
   std::vector<float> cpu_last_dist_, last_dist_;  // the last hitting sample's first-hit distance (0 = none yet)
-  void build_gpu_scene(gpu::Scene &s) const;
+  /* textures: when given, each texture the scene uses and the level it starts from (before tex_skip). */
+  void build_gpu_scene(gpu::Scene &s, int tex_skip = 0, std::vector<std::pair<const Texture *, size_t>> *textures = nullptr) const;
+
+ public:
+  /* The scene for GPUs with `memory_mb` of memory (task 0051): built whole, then with every texture a mip level
+   * smaller at a time until it takes at most 80 % of it (a texture never under 256 texels a side). False when even
+   * then it doesn't fit: the caller leaves the GPU to the CPU. The levels skipped go in *skipped. */
+  bool build_gpu_scene_fit(gpu::Scene &s, uint64_t memory_mb, int *skipped = nullptr, bool with_frame = true) const;
+  int gpu_texture_levels_skipped() const { return gpu_tex_skip_; }  // the last upload's (0: whole)
+  bool gpu_parked() const { return !parked_gpus_.empty(); }       // the scene didn't fit: the GPUs wait for the next one
+
+ private:
+  int gpu_tex_skip_ = 0;
+  /* Task 0051: the GPUs set aside (open, kept) while the scene or frame doesn't fit them; the next build takes them
+   * back. What the last upload took and the frame size it allowed for, and the card's memory. */
+  std::vector<std::unique_ptr<GpuSlot>> parked_gpus_;
+  uint64_t gpu_upload_bytes_ = 0, gpu_vram_mb_ = 0;
+  int gpu_fit_w_ = -1, gpu_fit_h_ = -1;
   void sync_gpus();
   bool background_gpu_open_ = gpu::background_open_default();
   bool gpu_starting_ = false;

@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 73): the minimum machine's GPU (task 0051)
+
+**Asked:** the same request: "at minimum run on a GTX 1050ti".
+
+**Added**
+- **Render > Device: GPU + CPU (Auto).** Both render, each taking samples as fast as it finishes them.
+
+**Changed**
+- **GPU submissions are at most about 100 ms** (were up to 64 samples at once), so a slow card can't pass Windows'
+  2 s driver timeout.
+- **A scene too big for a card's memory** goes with smaller textures (a mip level at a time, never under 256), or
+  to the CPU when even that won't fit, instead of failing to allocate. GPU bakes do the same.
+  `BLENDITY_GPU_VRAM_MB` emulates a smaller card.
+
+**Checked**
+- New tests (round 73):
+  - A 2048 texture on a 12 MB card arrives at 1024.
+  - A frame whose buffers alone pass the card's memory goes to the CPU.
+  - Device 2 is saved and renders on the CPU and the GPUs.
+- Stress `gpu`: the longest submission is 98 ms (3060 Ti, compute kernel) and 106 ms (4070 SUPER). At 8 threads,
+  the GPU-viewport spike is "go" only for ray-tracing cards; the minimum machine keeps the CPU viewport.
+- Unit checks: Windows 9,349, 0 failed (574 tests); the whole suite in render-cache verify mode: 9,350,
+  0 failed, 0 stale pictures. Linux with libraries: 9,257, 0 failed. Sanitizer build: 9,175, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- The memory check used the previous frame size, because the scene is sent before the camera sets the size. It is
+  checked again when the frame size changes.
+- A scene that didn't fit threw its GPUs away and was built up to seven times on every pass. The GPUs are now set
+  aside, open, for the next scene, and the texture sizes per level are worked out instead of built.
+- Also fixed:
+  - Bakes counted the render's frame in their budget.
+  - The longest-submission figure never reset.
+  - A card reporting no memory restarted the minimum.
+  - The CPU row in Auto could be unticked to no effect.
+  - `device auto` was missing from the console.
+- Tests added: the fallback path through `build` then `set_camera` with a 16 MB card, and the GPUs coming back for a
+  scene that fits.
+
 ## 2026-10-13 (round 72): the minimum machine, CPU and memory (task 0050)
 
 **Asked:** "Look for more optimizations project wide to at minimum run on a GTX 1050ti and at least a quad-core

@@ -51,6 +51,14 @@ every pixel before the surfaces covered most of it.
   - Undo drops its oldest steps past an eighth of RAM, at most 2 GB, counting what each step alone holds.
 - **Jolt** takes half of Blendity's threads instead of all of them but one.
 
+- **The GPU** (task 0051). A GTX 1050 Ti traces with the compute kernel:
+  - **Submissions** are cut to about 100 ms each, under Windows' 2 s driver timeout.
+  - **Memory.** A scene goes to the GPUs with every texture a mip level smaller at a time until it fits in 80 % of
+    the smallest card's memory. If it can't, the CPU renders it.
+  - **Render > Device** gains "GPU + CPU (Auto)", which shares samples by measured speed.
+  - **The viewport stays on the CPU** for this machine. ADR 0013 was re-measured at 8 threads: a GPU viewport only
+    pays on ray-tracing cards.
+
 ## Consequences
 - Low looks softer (bilinear-scaled 3D). Shadow texels can be up to about 1.2 times larger in the views.
 - Wall-clock time decides which casters are moving. Pixels never depend on it, because the composed map equals a

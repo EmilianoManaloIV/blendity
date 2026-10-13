@@ -989,6 +989,7 @@ class Editor {
  public:
   void set_undo_budget_for_test(size_t bytes) { undo_budget_ = bytes; }
   /* Task 0050: the Scene view's reduced 3D picture (0 x 0 at full size), the cached shadows' still layer. */
+  PTSettings pt_settings_for_test() const { return make_pt_settings(scene_->render); }  // task 0051
   int scaled_scene_width_for_test() const { return scene_vs_.img.width; }
   int scaled_scene_height_for_test() const { return scene_vs_.img.height; }
   uint64_t shadow_layer_renders_for_test() const { return shadow_layer_renders_; }

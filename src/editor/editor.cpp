@@ -353,7 +353,7 @@ void Editor::frame(std::vector<Event> &events) {
     invalidate_material_textures();
     texture_touch_pending_ = false;
   }
-  if (scene_ && scene_->render.device == 1) gpu::prewarm(!headless_, scene_->render.hardware_rt);  // once; the GPU kernel and devices off the UI thread
+  if (scene_ && scene_->render.device >= 1) gpu::prewarm(!headless_, scene_->render.hardware_rt);  // once; the GPU kernel and devices off the UI thread
   /* Picking another object (Hierarchy, Scene view) while in Edit Mode: edit that
    * mesh instead, or leave Edit Mode for anything without one. */
   if (edit_mode_ && active_ && active_ != edit_obj_ && !pp_.active && !modal_.active && !xf_.active) {
@@ -3162,13 +3162,14 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "preview") start_final_render(true);
   else if (c == "device") {
-    /* device cpu | device gpu [+cpu] [nort]: Render Properties > Device (path tracing). */
+    /* device cpu | device gpu [+cpu] [nort] | device auto: Render Properties > Device (path tracing). */
     RenderSettings &rs = scene_->render;
-    rs.device = arg(1, "cpu") == "gpu" ? 1 : 0;
+    rs.device = arg(1, "cpu") == "gpu" ? 1 : arg(1, "cpu") == "auto" ? 2 : 0;
     rs.gpu_with_cpu = line.find("+cpu") != std::string::npos;
     rs.hardware_rt = line.find("nort") == std::string::npos;
     mark_changed("Render Device");
-    Log::info("Device: %s%s", rs.device ? "GPU Compute" : "CPU", rs.device ? (rs.gpu_with_cpu ? " + CPU" : "") : "");
+    Log::info("Device: %s%s", rs.device == 2 ? "GPU + CPU (Auto)" : rs.device ? "GPU Compute" : "CPU",
+              rs.device == 1 ? (rs.gpu_with_cpu ? " + CPU" : "") : "");
     Log::info("%s", gpu::status().c_str());
   }
   else if (c == "pushpull") {

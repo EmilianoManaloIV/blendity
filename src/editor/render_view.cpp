@@ -765,9 +765,9 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   PTSettings s;
   /* GPU Compute: the ticked GPUs (and the CPU too when asked). With no GPU
    * available it quietly stays on the CPU. */
-  if (rs.device == 1 && gpu::available()) {
+  if (rs.device >= 1 && gpu::available()) {
     s.gpus = enabled_gpus();
-    s.use_cpu = rs.gpu_with_cpu || s.gpus.empty();
+    s.use_cpu = rs.gpu_with_cpu || rs.device == 2 || s.gpus.empty();  // Auto: both, by speed (task 0051)
     s.gpu_hardware_rt = rs.hardware_rt;
   }
   s.max_bounces = rs.max_bounces;

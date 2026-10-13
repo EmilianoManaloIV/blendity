@@ -2039,7 +2039,7 @@ void Editor::draw_render_window(const Recti &r) {
   {
     const auto &devs = gpu::devices();
     RenderSettings &rs = scene_->render;
-    const bool gpu_mode = rs.device == 1;
+    const bool gpu_mode = rs.device >= 1;
     auto device_row = [&](const std::string &title, const std::string &detail, bool on, bool enabled) {
       Recti row = lay.row(u.row_h() * 2);
       bool v = on;
@@ -2049,11 +2049,13 @@ void Editor::draw_render_window(const Recti &r) {
       return clicked;
     };
     if (device_row("CPU", strprintf("%d threads, %s", JobSystem::global().thread_count(), PathTracer::embree_available() && rs.use_embree ? "Embree" : "Blendity BVH"),
-                   !gpu_mode || rs.gpu_with_cpu, gpu_mode)) {
+                   !gpu_mode || rs.gpu_with_cpu || rs.device == 2, rs.device == 1)) {  // (Auto always uses it)
       rs.gpu_with_cpu = !rs.gpu_with_cpu;
       mark_changed("Render Devices");
     }
-    u.tooltip(gpu_mode ? "Tick to render on the CPU alongside the GPUs (combined rendering)." : "Set Device to GPU Compute to use the GPUs.");
+    u.tooltip(rs.device == 2 ? "GPU + CPU (Auto): the CPU always renders alongside the GPUs, each as fast as it can."
+              : gpu_mode     ? "Tick to render on the CPU alongside the GPUs (combined rendering)."
+                             : "Set Device to GPU Compute to use the GPUs.");
     for (const gpu::DeviceInfo &d : devs) {
       bool on = !render_devices_off_.count(d.name);
       std::string detail = strprintf("%s, %s, %llu MB, %s", d.vendor.c_str(), d.type.c_str(), (unsigned long long)d.memory_mb,

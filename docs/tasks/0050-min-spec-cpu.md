@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** ADR 0026 (minimum spec and quality tiers)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/47
 
 ## Goal
 Blendity runs well on the user's minimum machine: a quad-core, eight-thread CPU at about 3 GHz, 8 GB of RAM and a
