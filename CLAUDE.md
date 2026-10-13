@@ -74,7 +74,8 @@ non-trivial.
 3. **Test**: the `test-engineer` agent (Sonnet) writes tests from the spec's acceptance criteria.
 4. **Review**: the `code-reviewer` agent (Opus) reviews the diff against the spec, ADRs and this file.
 5. **Merge**: push a branch, open a PR (template in `.github/`), CI must pass. **The human reviews and
-   merges on GitHub.** Agents never merge.
+   merges on GitHub**, unless the user asks an agent to merge: then only after CI passes on all four jobs,
+   with a merge commit (`gh pr merge N --merge`), never squash or rebase of a stack.
 
 Run agents one after another; don't fan out. For a one-line fix, implement in the main session and still
 run the reviewer.
@@ -97,5 +98,5 @@ run the reviewer.
   polling the anonymous API (60 requests an hour).
 - `main` is protected: PRs only, `windows` / `linux` / `macos` / `linux-sanitizers` must pass on a branch
   up to date with `main`, no force pushes.
-- After the human merges: `git fetch origin main && git update-ref refs/heads/blendity-root origin/main`.
+- After a merge: `git fetch origin main && git update-ref refs/heads/blendity-root origin/main`.
 - No force pushes, no branch deletions, no history rewrites.

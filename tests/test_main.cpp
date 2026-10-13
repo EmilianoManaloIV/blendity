@@ -23842,7 +23842,15 @@ static void round69_tests() {
     CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions == rest);
     tip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.5f));
     ed.command("armature apply Armature");  // this pose is the rest now: the mesh shows unposed in it
-    CHECK(ed.scene().find_by_name("Column")->evaluated_mesh()->positions == ed.scene().find_by_name("Column")->mesh_filter()->mesh->positions);
+    {
+      /* Within rounding, not bit for bit: the bone's world matrix times its rest's inverse is the identity only up to
+       * the last bit (macOS's clang fuses the multiply-adds differently and was 1 ulp off here). */
+      const std::vector<Vec3> &now = ed.scene().find_by_name("Column")->evaluated_mesh()->positions;
+      const std::vector<Vec3> &base = ed.scene().find_by_name("Column")->mesh_filter()->mesh->positions;
+      float off = now.size() == base.size() ? 0.0f : 1e9f;
+      for (size_t i = 0; i < now.size() && i < base.size(); i++) off = std::max(off, length(now[i] - base[i]));
+      CHECK(off < 1e-5f);
+    }
   });
 
   test("skins: a root bone resets, rests near 90 degrees stay exact, an unevenly scaled mesh keeps Dual Quaternion, a mesh under the armature follows it", [] {

@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-12 (round 71): the macOS check, and merging the stack (task 0049)
+
+**Asked:** "check for any errors on the GitHub side ... and merge them".
+
+**Fixed**
+- macOS CI failed on #45 and #46: a test compared the skinned mesh with the base mesh bit for bit after Apply as
+  Rest; Apple clang's fused multiply-adds left one vertex one ulp off. The test compares within 1e-5 now (the
+  editor was right).
+
+**Changed**
+- CLAUDE.md: agents merge only when the user asks, after CI passes, with a merge commit.
+
+**Checked**
+- The test on Windows; CI's four jobs on #46 before merging.
+
 ## 2026-10-12 (round 70): inverse kinematics and rig presets (task 0048)
 
 **Asked:** the roadmap (2026-10-11): "IK/FK for humanoid and quadruped rigs", with name-based humanoid auto-map and
