@@ -105,7 +105,7 @@ void Armature::reflect(Reflector &r) {
 }
 
 void SkinModifier::reflect(Reflector &r) {
-  r.text("Armature", object);
+  r.object("Armature", object);
   r.help("Name of the armature's root object (Blender: Armature > Object). The vertex groups named after its bones are\n"
          "the weights.");
   r.field("Max Influences", max_influences, 1, 8);

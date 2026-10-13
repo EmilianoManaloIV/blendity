@@ -2,6 +2,50 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 79): drag objects onto fields; the Layout dropdown crash; a flaky CI check
+
+**Asked:** "Some checks fail, check those out." "Clicking the drop down for the layouts crashes the program." "Also
+add the ability to drag and drop objects from the hierarchy into the parameter field rather than just typing the name
+(applies to all tools)."
+
+**Fixed**
+- **Clicking the Layout dropdown crashed the editor.** A dropdown's list draws at the end of the frame, after the
+  Layout dropdown's per-frame list of names was gone. Every dropdown now keeps its own copy of its names while open.
+- **CI (Windows) failed on PRs #49 and #50** at "min spec: a thread ceiling holds ...": on a 4-core runner every
+  thread had to join one short loop. The check now takes the best of a few tries; the other Windows run of each PR
+  passed, and the failed jobs were re-run.
+
+**Added**
+- **Object fields** (Unity's `ObjectField`): every field that names another object (Boolean, Lattice, Curve and Mesh
+  Deform's Object, Array's Fit Curve, IK Target and Pole, a skin's Armature) takes an object dragged from the
+  Hierarchy. The field lights up under it, the drop is one undo step, and the Console warns when two objects share
+  the name.
+- **Pressing a Hierarchy row selects it when the button comes up**, so dragging a row onto a field keeps the
+  Inspector on the object you're editing (Unity selects on press, so its users lock the Inspector first). A click,
+  a wobbly click, a reparent or a drop in the Scene view still selects it.
+- Learn: "Object fields: drag, don't type" in the GameObjects lesson.
+
+**Checked**
+- New tests (round 79):
+  - Opening the Layout dropdown and picking UV Unwrapping by mouse, from a named layout and from a custom one.
+  - Dragging the Cylinder's row onto a Boolean's Object field fills it, keeps the Cube in the Inspector, and undoes
+    in one step; a click still selects.
+  - A click that slides 8 px still selects; a row dropped in the Scene view ends up selected; a press right after a
+    drop finds no drag still live.
+- Unit checks: Windows 9,511, 0 failed (597 tests); the whole suite in render-cache verify mode: 9,512,
+  0 failed, 0 stale pictures. Linux with libraries: 9,419, 0 failed. Sanitizer build: 9,337, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- A field scrolled out of view or under a popup took the drop.
+- The drag state could outlive the button and drop again on the next click.
+- Also fixed:
+  - A wobbly click no longer selected, and a row dropped in the Scene view stayed unselected.
+  - The lesson said Unity selects on release (it selects on press).
+  - Two objects with one name went unreported.
+  - A field being typed in wrote its old text back over a drop.
+  - Nested reflectors didn't pass object fields on.
+
 ## 2026-10-13 (round 78): bind poses on rigged imports (task 0056, ADR 0025 amended)
 
 **Asked:** "Yes, please follow Blender, Unity, and Maya methodology" (about rigged files saved in a pose).

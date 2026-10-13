@@ -500,6 +500,7 @@ void Editor::frame(std::vector<Event> &events) {
     }
   }
 
+  finish_hierarchy_drag();
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();

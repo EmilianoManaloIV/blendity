@@ -172,11 +172,14 @@ void Editor::draw_hierarchy(const Recti &r) {
           }
         }
         else if (in.ctrl()) select(g->id, SEL_TOGGLE);
-        else if (!sel) select(g->id);
+        else if (!sel) hier_pending_select_ = g->id;  // selected when the button comes up (finish_hierarchy_drag), unless an
+                                                      // object field took it: the Inspector then stays on the field's object
+                                                      // (Unity selects on press, so its users lock the Inspector first)
         else active_ = g->id;
         last_clicked_ = g->id;
         hier_drag_ = g->id;
         hier_dragging_ = false;
+        hier_press_x_ = in.mx;
         hier_press_y_ = in.my;
       }
       if (in.released[0] && !hier_dragging_ && sel && !in.ctrl() && !in.shift() && hier_drag_ == g->id && selection_.size() > 1) select(g->id);
@@ -192,7 +195,7 @@ void Editor::draw_hierarchy(const Recti &r) {
       }
     }
   }
-  if (hier_drag_ && in.down[0] && std::abs(in.my - hier_press_y_) > u.px(5)) hier_dragging_ = true;
+  if (hier_drag_ && in.down[0] && std::max(std::abs(in.mx - hier_press_x_), std::abs(in.my - hier_press_y_)) > u.px(5)) hier_dragging_ = true;
   if (hier_dragging_) {
     u.cursor = Cursor::Hand;
     if (drop_target) {
@@ -205,6 +208,8 @@ void Editor::draw_hierarchy(const Recti &r) {
     }
     if (in.released[0]) {
       auto moving = selected_objects(true);
+      if (hier_pending_select_)  // dragged a row that wasn't selected: just it moves (the selection stays as it was)
+        if (GameObject *dragged = scene_->find(hier_pending_select_)) moving = {dragged};
       if (drop_target) {
         bool valid = true;
         for (GameObject *mv : moving)
@@ -239,10 +244,7 @@ void Editor::draw_hierarchy(const Recti &r) {
       }
     }
   }
-  if (!in.down[0]) {
-    hier_drag_ = 0;
-    hier_dragging_ = false;
-  }
+  /* (The drag ends in finish_hierarchy_drag, after every window drew: a field drawn after this one takes the drop.) */
   /* Click on empty space clears selection; right-click opens create menu. */
   if (!hovered_row && u.hovered(body) && in.pressed[0] && !edit_mode_) clear_selection();
   if (!hovered_row && u.hovered(body) && in.pressed[1]) u.open_popup(create_menu, {in.mx, in.my, 0, 0});
@@ -555,6 +557,31 @@ struct InspectorReflector : Reflector {
     if (u.text_field(fid(n), field_rect(row), v)) {
       record(FieldEdit::Text, n).s_new = v;
       changed = true;
+    }
+  }
+  /* Unity's object field: type the name, or drag the object here from the Hierarchy. */
+  void object(const char *n, std::string &v) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    const Recti f = field_rect(row);
+    if (u.text_field(fid(n), f, v, nullptr, "None (drag an object here)")) {
+      record(FieldEdit::Text, n).s_new = v;
+      changed = true;
+    }
+    if (u.record_buttons) u.button_rects[std::string("field:") + n] = f;  // (tests drop onto a field by its name)
+    if (const GameObject *g = ed.hierarchy_drag_object(); g && u.hovered(f)) {
+      u.canvas.rect_outline(f, u.theme.focus, u.px(2));
+      if (u.in.released[0]) {
+        ed.object_field_took_drop();  // (the Hierarchy then leaves the selection as it was)
+        if (u.editing(fid(n))) u.stop_editing();  // (the edit buffer would write the old text back)
+        if (ed.scene().find_by_name(g->name) != g)
+          Log::warn("Two objects are named '%s': the field finds the other one first. Rename one of them.", g->name.c_str());
+        if (v != g->name) {
+          v = g->name;
+          record(FieldEdit::Text, n).s_new = v;
+          changed = true;
+        }
+      }
     }
   }
   void mesh(const char *n, MeshPtr &m) override {
@@ -2596,6 +2623,20 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
 
 /* A component's (or any reflected) fields with the Inspector's widgets, outside the Inspector (task 0052: the Rigging
  * window). True when one changed this frame. */
+/* The end of a Hierarchy press, once a frame after every window drew (so a field drawn after the Hierarchy took its
+ * drop first). A row pressed while unselected is selected now - a click, a wobbly click, a reparent, a drop in the
+ * Scene view - unless an object field took it; then the drag state goes. */
+void Editor::finish_hierarchy_drag() {
+  const ui::Input &in = ui_.in;
+  if (in.released[0] && hier_pending_select_ && !hier_field_took_drop_ && scene_->find(hier_pending_select_)) select(hier_pending_select_);
+  if (!in.down[0]) {
+    hier_drag_ = 0;
+    hier_dragging_ = false;
+    hier_pending_select_ = 0;
+    hier_field_took_drop_ = false;
+  }
+}
+
 bool Editor::draw_reflected(const std::function<void(Reflector &)> &fields, ui::Layout &lay) {
   InspectorReflector ir(*this, ui_, lay);
   fields(ir);

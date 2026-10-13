@@ -113,6 +113,10 @@ This is the component-based object model described in game engine literature. In
 ? A MeshRenderer without a MeshFilter draws nothing. Why does Unity split them? | Geometry (what) and rendering (how) are separate concerns. Different renderers, like a SkinnedMeshRenderer, can reuse the same idea. Blender separates Mesh data from Material slots for a similar reason.
 ! create:Cube | Create a Cube, then look at its components in the Inspector
 ! window:Inspector | Show the Inspector
+# Object fields: drag, don't type
+Some fields name another object: a Boolean's or a Lattice's Object, a Curve modifier's curve, an IK Target and Pole, a skin's Armature. Type the name, or drag the object from the Hierarchy and let go over the field, as with Unity's object fields (Blender: the eyedropper, or dragging from the Outliner). The field lights up while an object is over it. Pressing a row and dragging it onto a field doesn't select it, so the Inspector stays on the object whose field you're filling (in Unity the press selects, so you lock the Inspector first); a click, or a drag anywhere else, selects as usual.
+! cmd:select Cube; component BooleanModifier | Give the Cube a Boolean, then drag another object onto its Object field
+? Why does Unity need the Inspector's lock icon to drag one object onto another's field, and Blendity doesn't? | Unity selects a row as you press it, which turns the Inspector to the dragged object. Blendity selects when the button comes up, and not at all when an object field took the drop.
 )"},
     {"Hierarchy, Parenting and the Scene Graph", "Local vs world space", R"(
 The Hierarchy (Blender: Outliner) shows the scene graph: a tree in which every child is positioned relative to its parent. A child's world matrix is the parent's world matrix multiplied by the child's local matrix, applied recursively up to the root.

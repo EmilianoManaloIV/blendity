@@ -468,6 +468,11 @@ class Editor {
   ui::Context &ui_mut_for_test() { return ui_; }  // (tests that draw with the toolkit)
   Vec3 gizmo_pivot_for_test() const { return gizmo_pivot_; }
   bool project_delete_pending() const { return !project_delete_.empty(); }
+  /* The object being dragged from the Hierarchy (null when none): object fields take it when it's released over them. */
+  GameObject *hierarchy_drag_object() const {
+    return (hier_dragging_ && hier_drag_ && (ui_.in.down[0] || ui_.in.released[0])) ? scene_->find(hier_drag_) : nullptr;
+  }
+  void object_field_took_drop() { hier_field_took_drop_ = true; }
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
     if (it == hierarchy_rows_.end()) return false;
@@ -1630,7 +1635,10 @@ class Editor {
   std::string hierarchy_search_;
   uint64_t hier_drag_ = 0;
   bool hier_dragging_ = false;
-  int hier_press_y_ = 0;
+  int hier_press_x_ = 0, hier_press_y_ = 0;
+  uint64_t hier_pending_select_ = 0;  // a pressed, unselected row: selected when the button comes up...
+  bool hier_field_took_drop_ = false;  // ...unless an object field took it
+  void finish_hierarchy_drag();        // once a frame, after every window drew
   uint64_t last_clicked_ = 0;
   bool scroll_to_active_ = false;
 

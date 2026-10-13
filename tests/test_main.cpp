@@ -25386,4 +25386,93 @@ static void round69_tests() {
       CHECK(ed.workspace_name() == "UV Unwrapping" && ed.popup_count_for_test() == 0);
     }
   });
+  test("object fields: dragging an object from the Hierarchy onto an object field (a Boolean's Object) fills it in (Unity's object field) and keeps the Inspector where it was", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("component BooleanModifier");
+    r34_steps(ed, 3);
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    /* Press on the Cylinder's row, drag sideways into the Inspector, let go over the field. */
+    auto drag_onto = [&](const std::string &object, const std::string &field) {
+      int hx = 0, hy = 0;
+      Recti f;
+      if (!ed.hierarchy_row_for_test(object, hx, hy) || !ed.button_rect_for_test("field:" + field, f)) {
+        std::printf("    no row '%s' or field '%s'\n", object.c_str(), field.c_str());
+        return false;
+      }
+      const int fx = f.x + f.w / 2, fy = f.y + f.h / 2;
+      ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+      ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<BooleanModifier>());
+    if (!cube || !cube->get<BooleanModifier>()) return;
+    CHECK(drag_onto("Cylinder", "Object"));
+    std::printf("    Boolean's Object: '%s'; still showing Cube: %d\n", cube->get<BooleanModifier>()->object.c_str(),
+                (int)(ed.active_object_for_test() == cube));
+    CHECK(cube->get<BooleanModifier>()->object == "Cylinder");
+    CHECK(ed.active_object_for_test() == cube);  // the drag didn't select the Cylinder (the Inspector stays on the Cube)
+    ed.command("undo");
+    r34_steps(ed, 2);
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<BooleanModifier>() && cube->get<BooleanModifier>()->object.empty());  // one undo step
+    /* A plain click on a row still selects it. */
+    int hx = 0, hy = 0;
+    CHECK(ed.hierarchy_row_for_test("Cylinder", hx, hy));
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseUp, hx, hy)});
+    ed.step_frame_headless();
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Cylinder");
+  });
+  test("object fields: a wobbly click still selects, a row dropped in the Scene view ends up selected, and a drag ends with the button", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    int hx = 0, hy = 0;
+    CHECK(ed.hierarchy_row_for_test("Cylinder", hx, hy));
+    /* A click that slides 8 pixels sideways on the same row: a drag that went nowhere, still a selection. */
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseMove, hx + 8, hy)});
+    ed.step_frame_headless({at(ET::MouseUp, hx + 8, hy)});
+    ed.step_frame_headless();
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Cylinder");
+    /* Back to the Cube; drag the (unselected) Cylinder into the Scene view: it lands there and is selected. */
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    int sx = 0, sy = 0;
+    CHECK(ed.project_to_window(Vec3(2.0f, 0.0f, 2.0f), sx, sy));
+    CHECK(ed.hierarchy_row_for_test("Cylinder", hx, hy));
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (sx - hx) * k / 4, hy + (sy - hy) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, sx, sy)});
+    /* The very next frame presses again (no idle frame between): the old drag must not still be live. */
+    ed.step_frame_headless({at(ET::MouseDown, sx, sy)});
+    CHECK(ed.hierarchy_drag_object() == nullptr);
+    ed.step_frame_headless({at(ET::MouseUp, sx, sy)});
+    ed.step_frame_headless();
+    std::printf("    after the Scene-view drop: active '%s'\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "-");
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Cylinder");
+  });
 }
