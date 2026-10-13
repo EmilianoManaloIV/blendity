@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 76): curve and lattice points with the vertex and edge keys (task 0054)
+
+**Asked:** "Add the ability to add more points and loop cuts for lattice and curves using similar key binds for
+vertices and edges."
+
+**Added**
+- **Curves**, with a curve's points selected and outside Edit Mode:
+  - **Extrude** (Ctrl+E; Blender's E) grows the curve from a selected end.
+  - **Loop Cut** (Ctrl+R) puts a point on the segment under the mouse, where the mouse is.
+  - **Merge at Center** (Alt+M; Blender's M) joins the selected points.
+  - **Delete** removes the selected points, keeping two.
+  - **Alt+C** opens or closes the curve.
+- **Lattices**: Loop Cut over an edge adds a row across it, keeping the shape. Delete with a whole row selected
+  removes one.
+- Each is one undo step.
+- Console: `points extrude|cut|merge|close|lattice ...`.
+- Learn: "More points, by the vertex and edge keys" in the Modifiers lesson.
+
+**Checked**
+- New tests (round 76):
+  - By keys, Extrude puts the new point beyond the last in the curve's direction and selects it; undo is one step.
+  - In Blender's keymap, E grows the first point backwards.
+  - Ctrl+R puts the point on the old path (0.004 off).
+  - On a Poly curve, Ctrl+R puts it where the mouse was, away from the corners.
+  - Merge leaves one point at the middle.
+  - Delete keeps two points; Alt+C toggles Closed.
+  - A lattice's U row added by Ctrl+R leaves the deformation unchanged (0 off), and Delete of a full row takes it
+    away again; undo brings it back.
+  - A merge of bad indices from the console is refused.
+- Unit checks: Windows 9,444, 0 failed (587 tests); the whole suite in render-cache verify mode: 9,445,
+  0 failed, 0 stale pictures. Linux with libraries: 9,352, 0 failed. Sanitizer build: 9,270, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- Ctrl+R put the new point on top of the segment's first point (always on a Poly curve).
+- A console merge with an index out of range could crash.
+- Also fixed:
+  - The closing span of a closed curve couldn't be cut by the mouse.
+  - Finding the points' samples could take billions of steps on the biggest curves.
+  - Delete in the Hierarchy stopped deleting a lattice with points selected.
+  - The two-point rule now holds on every Delete path.
+  - Extrude at the point limit said nothing.
+
 ## 2026-10-13 (round 75): many assets at once (task 0053)
 
 **Asked:** "I want to be able to multiselect textures and materials in their tabs so I can en masse delete assets."

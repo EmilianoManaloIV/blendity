@@ -24922,4 +24922,183 @@ static void round69_tests() {
     r34_steps(ed, 2);
     CHECK(!fs::exists(resolve_asset_path("Assets/Materials/PA.mat")) && !fs::exists(resolve_asset_path("Assets/Materials/PB.mat")));
   });
+  /* ------------------------------------------------------------------ round 76: curve and lattice points by keys (task 0054) */
+  test("points: Extrude grows a curve from its end, Ctrl+R cuts a segment where the mouse is, Alt+M merges, Delete keeps two, Alt+C closes", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    CHECK(g && g->curve());
+    if (!g || !g->curve()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Path");
+    ed.mark_changed_for_test("R76 setup");
+    r34_steps(ed, 3);
+    const Recti view = ed.scene_view_rect();
+    auto key = [&](int k, int mods, int mx = -1, int my = -1) {
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+      m.x = d.x = u.x = mx >= 0 ? mx : view.x + view.w / 2;
+      m.y = d.y = u.y = my >= 0 ? my : view.y + view.h / 2;
+      d.key = u.key = k;
+      d.mods = u.mods = mods;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d, u});
+      ed.step_frame_headless();
+    };
+    Curve &c = *g->curve();
+    const int n0 = (int)c.points.size();
+    /* Extrude (Unity's Ctrl+E) on the last point: one beyond it, in the curve's direction, selected. */
+    ed.command(strprintf("curve select Path %d", n0 - 1));
+    const Vec3 last = c.points.back().position, prev = c.points[(size_t)n0 - 2].position;
+    key(platform::KEY_E, platform::MOD_CTRL);
+    CHECK((int)g->curve()->points.size() == n0 + 1);
+    CHECK(length(g->curve()->points.back().position - (last + (last - prev))) < 1e-5f);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{n0});
+    ed.command("undo");  // one step
+    r34_steps(ed, 2);
+    g = ed.scene().find_by_name("Path");
+    CHECK(g && (int)g->curve()->points.size() == n0);
+    /* Ctrl+R over the middle of the first segment: a point on the curve's own path there. */
+    const CurvePath &path = g->curve()->local_path();
+    const Vec3 mid_local = path.pos[path.pos.size() / (size_t)(2 * std::max(1, n0 - 1))];
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point(mid_local), x, y));
+    key(platform::KEY_R, platform::MOD_CTRL, x, y);
+    CHECK((int)g->curve()->points.size() == n0 + 1);
+    float off = 1e30f;
+    for (const Vec3 &p : path.pos) off = std::min(off, length(g->curve()->points[1].position - p));
+    std::printf("    Ctrl+R: the new point %.4f from the old path (length %.3f)\n", off, path.total());
+    CHECK(off < 0.02f * path.total());
+    /* Merge at Center (Unity's Alt+M) of points 0 and 1: one at their middle. */
+    const Vec3 p0 = g->curve()->points[0].position, p1 = g->curve()->points[1].position;
+    ed.command("curve select Path 0 1");
+    key(platform::KEY_M, platform::MOD_ALT);
+    CHECK((int)g->curve()->points.size() == n0 && length(g->curve()->points[0].position - (p0 + p1) * 0.5f) < 1e-5f);
+    /* Delete keeps two points. */
+    std::string all = "curve select Path";
+    for (int i = 0; i < (int)g->curve()->points.size(); i++) all += strprintf(" %d", i);
+    ed.command(all);
+    key(platform::KEY_DELETE, 0);
+    CHECK(g->curve()->points.size() == (size_t)n0 && ed.scene().find_by_name("Path"));  // refused: the curve and its points stay
+    ed.command("curve select Path 0");
+    key(platform::KEY_DELETE, 0);
+    CHECK((int)g->curve()->points.size() == n0 - 1);
+    /* Alt+C toggles Closed. */
+    const bool closed = g->curve()->closed;
+    key(platform::KEY_C, platform::MOD_ALT);
+    CHECK(g->curve()->closed != closed);
+  });
+
+  test("points: in Blender's keymap E extrudes the curve's first point backwards", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("keymap Blender");
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    if (!g || !g->curve()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Path");
+    ed.mark_changed_for_test("R76 setup");
+    r34_steps(ed, 3);
+    const Vec3 a = g->curve()->points[0].position, b = g->curve()->points[1].position;
+    const size_t n0 = g->curve()->points.size();
+    ed.command("curve select Path 0");
+    const Recti view = ed.scene_view_rect();
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+    m.x = d.x = u.x = view.x + view.w / 2, m.y = d.y = u.y = view.y + view.h / 2;
+    d.key = u.key = platform::KEY_E;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    CHECK(g->curve()->points.size() == n0 + 1 && length(g->curve()->points[0].position - (a + (a - b))) < 1e-5f);
+  });
+
+  test("points: Ctrl+R over a lattice's edge adds a row keeping the shape; Delete with a whole row selected removes one", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Lattice");
+    GameObject *g = ed.scene().find_by_name("Lattice");
+    CHECK(g && g->get<Lattice>());
+    if (!g || !g->get<Lattice>()) return;
+    g->set_world_position({0, 0.5f, 3.0f});
+    g->set_local_scale({2, 2, 2});
+    Lattice &l = *g->get<Lattice>();
+    l.interpolation = 0;  // Linear: the shape is kept exactly
+    l.set_control_point(7, l.control_point(7) + Vec3(0.2f, 0.1f, 0.0f));
+    ed.command("select Lattice");
+    ed.mark_changed_for_test("R76 lattice");
+    r34_steps(ed, 3);
+    std::vector<Vec3> probes;
+    for (int i = 0; i < 27; i++) probes.push_back(Vec3((i % 3) * 0.5f - 0.5f, ((i / 3) % 3) * 0.5f - 0.5f, (i / 9) * 0.5f - 0.5f));
+    std::vector<Vec3> before;
+    for (const Vec3 &q : probes) before.push_back(g->get<Lattice>()->displacement(q));
+    /* The mouse on the U edge between points 0 and 1. */
+    int x0, y0, x1, y1;
+    CHECK(ed.project_to_window(g->world_matrix().point(l.control_point(0)), x0, y0) && ed.project_to_window(g->world_matrix().point(l.control_point(1)), x1, y1));
+    const Recti view = ed.scene_view_rect();
+    (void)view;
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+    m.x = d.x = u.x = (x0 + x1) / 2, m.y = d.y = u.y = (y0 + y1) / 2;
+    d.key = u.key = platform::KEY_R;
+    d.mods = u.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    const Lattice &l2 = *ed.scene().find_by_name("Lattice")->get<Lattice>();
+    CHECK(l2.points_u == 3 && l2.points_v == 2 && l2.points_w == 2);
+    float worst = 0.0f;
+    for (size_t i = 0; i < probes.size(); i++) worst = std::max(worst, length(l2.displacement(probes[i]) - before[i]));
+    std::printf("    a row added along U: the deformation moved by at most %g\n", worst);
+    CHECK(worst < 1e-4f);
+    /* Delete with the whole first U row selected (u index 0): back to two along U. */
+    std::string sel = "points select Lattice";
+    for (int i = 0; i < l2.size(); i++)
+      if (i % l2.points_u == 0) sel += strprintf(" %d", i);
+    ed.command(sel);
+    d.key = u.key = platform::KEY_DELETE;
+    d.mods = u.mods = 0;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    GameObject *g3 = ed.scene().find_by_name("Lattice");
+    CHECK(g3 && g3->get<Lattice>()->points_u == 2);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    CHECK(ed.scene().find_by_name("Lattice")->get<Lattice>()->points_u == 3);
+  });
+  test("points: Ctrl+R on a Poly curve's segment puts the point where the mouse is along it, never on a corner; a merge of bad indices is refused", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Curve: Path");
+    GameObject *g = ed.scene().find_by_name("Path");
+    if (!g || !g->curve()) return;
+    g->curve()->type = 2;  // Poly: one sample per segment
+    g->set_world_position({0, 0.5f, 3.0f});
+    ed.command("select Path");
+    ed.mark_changed_for_test("R76 poly");
+    r34_steps(ed, 3);
+    const Vec3 a = g->curve()->points[0].position, b = g->curve()->points[1].position;
+    const Vec3 at = a + (b - a) * 0.3f;  // 30 % along the first segment
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point(at), x, y));
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+    m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+    d.key = u.key = platform::KEY_R;
+    d.mods = u.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d, u});
+    ed.step_frame_headless();
+    const Vec3 p = g->curve()->points[1].position;
+    std::printf("    Poly Ctrl+R at 30 %%: the new point %.3f from where the mouse was, %.3f from the nearest corner\n", length(p - at),
+                std::min(length(p - a), length(p - b)));
+    CHECK(length(p - at) < 0.05f * length(b - a) && std::min(length(p - a), length(p - b)) > 0.1f * length(b - a));
+    const size_t n = g->curve()->points.size();
+    ed.command("points merge Path 0 99");  // one point really there: nothing to merge, no crash
+    ed.command("points merge Path -1 0");
+    CHECK(g->curve()->points.size() == n);
+  });
 }

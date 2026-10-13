@@ -630,6 +630,14 @@ class Editor {
   void draw_rigging_window(const Recti &r);
   GameObject *rig_root() const;  // the selection's skeleton (a bone's, an armature, a skinned mesh's)
   GameObject *rig_mesh() const;  // the mesh the window works on: the painted one, else a selected mesh
+  /* Curve and lattice points with Edit Mode's keys (task 0054, point_edit.cpp). */
+  bool curve_extrude(GameObject *g, const std::vector<int> &pts);
+  bool curve_cut(GameObject *g, int segment, const Vec3 *at_local = nullptr);
+  bool curve_merge(GameObject *g, const std::vector<int> &pts);
+  bool lattice_resize(GameObject *g, int axis, int delta);
+  int lattice_selected_row_axis(const Lattice &l, const std::vector<int> &pts) const;
+  bool point_loop_cut_at(const Recti &view, int mx, int my);
+  bool point_shortcut(const std::string &id);
   GameObject *add_bone(GameObject *parent, float length);
   IKConstraint *add_ik(GameObject *bone);
   void draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay);

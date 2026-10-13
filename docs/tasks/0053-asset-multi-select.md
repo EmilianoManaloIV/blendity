@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** none needed
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/50
 
 ## Goal
 The user asked (2026-10-12): "I want to be able to multiselect textures and materials in their tabs so I can en

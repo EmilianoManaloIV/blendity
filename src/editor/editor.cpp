@@ -2295,6 +2295,10 @@ void Editor::delete_selected() {
     std::sort(pts.begin(), pts.end());
     pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
     Curve &cv = *co->curve();
+    if ((int)cv.points.size() - (int)pts.size() < 2) {  // (task 0054: whoever asks, a curve keeps two points)
+      Log::warn("Delete: a curve keeps at least two points");
+      return;
+    }
     for (auto it = pts.rbegin(); it != pts.rend(); ++it) cv.points.erase(cv.points.begin() + *it);
     pt_sel_.clear();
     mark_changed("Delete Curve Points");
@@ -3859,8 +3863,34 @@ void Editor::points_command(const std::vector<std::string> &t) {
   GameObject *g = scene_->find_by_name(arg(2, ""));
   Component *pc = g ? g->point_source() : nullptr;
   Curve *cv = g ? g->curve() : nullptr;
+  /* Task 0054: extrude | cut | merge <object> <index...> (a curve's), close <object>, lattice <object> <u|v|w> <+1|-1>. */
+  if (verb == "extrude" || verb == "cut" || verb == "merge" || verb == "close" || verb == "lattice") {
+    std::vector<int> idx;
+    for (size_t k = 3; k < t.size(); k++) idx.push_back(std::atoi(t[k].c_str()));
+    if (verb == "lattice") {
+      if (!g || !g->get<Lattice>()) {
+        Log::warn("%s lattice: no Lattice object named '%s'", t[0].c_str(), arg(2, "").c_str());
+        return;
+      }
+      const std::string ax = to_lower(arg(3, "u"));
+      lattice_resize(g, ax == "w" ? 2 : ax == "v" ? 1 : 0, std::atoi(arg(4, "1").c_str()) >= 0 ? 1 : -1);
+      return;
+    }
+    if (!cv) {
+      Log::warn("%s %s: no Curve object named '%s'", t[0].c_str(), verb.c_str(), arg(2, "").c_str());
+      return;
+    }
+    if (verb == "close") {
+      cv->closed = !cv->closed;
+      mark_changed(cv->closed ? "Close Curve" : "Open Curve");
+    }
+    else if (verb == "extrude") curve_extrude(g, idx);
+    else if (verb == "cut") curve_cut(g, idx.empty() ? 0 : idx[0]);
+    else curve_merge(g, idx);
+    return;
+  }
   if (verb != "add" && verb != "move" && verb != "delete" && verb != "select") {
-    Log::warn("%s: add | move | delete | select <object> ...", t[0].c_str());
+    Log::warn("%s: add | move | delete | select | extrude | cut | merge | close | lattice <object> ...", t[0].c_str());
     return;
   }
   if (!pc || ((verb == "add" || verb == "delete") && !cv)) {

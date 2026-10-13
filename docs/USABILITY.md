@@ -186,6 +186,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | On a 4-core laptop the editor stuttered: dragging an object took about 47 ms a frame. | Quality tiers (Low on small machines): views drawn at 67 % and scaled up, cached shadows, a cheaper sky; dragging is about 15 ms a frame at 8 threads. Preferences > Performance also has CPU Threads. |
 | The Inspector's MeshFilter section was crowded: modeling buttons, vertex groups and the Weight Paint brush in one list. | A Rigging window (beside the Inspector) holds skeletons, skins, vertex groups, Weight Paint and IK; MeshFilter keeps modeling and one row that opens it. |
 | Deleting many materials or textures meant one at a time, a question each. | Ctrl / Shift click and Ctrl+A select several in the Materials, Textures and Project windows; Delete asks once for all of them. |
+| Curves only grew at the end, from the console, and lattices only by typing a resolution. | Extrude, Loop Cut (Ctrl+R), Merge at Center, Delete and Alt+C work on curve and lattice points with Edit Mode's keys. |
 
 ## Still worth doing
 
