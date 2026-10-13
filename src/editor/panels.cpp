@@ -1327,32 +1327,14 @@ void Editor::draw_inspector(const Recti &r) {
             mark_changed("Seams Are Hard Edges");
           }
         }
-        draw_vertex_groups(g, mf, lay);
         if (mf->mesh) {
-          /* Weight Paint (task 0046): the toggle (a group is added when there is none), and the brush while painting
-           * this object. */
+          /* Vertex groups and Weight Paint live in the Rigging window (task 0052): one row leads there. */
           Recti wrow = lay.row(u.row_h() + u.px(2));
-          const bool painting = weight_paint_ && wp_obj_ == g->id;
-          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, painting ? "Exit Weight Paint" : "Weight Paint", painting, Icon::Vertex))
-            set_weight_paint(!painting);
-          u.tooltip("Paint the chosen group's weights with a brush (Blender: Weight Paint mode). Blue is 0, green 0.5, red 1.");
-          if (painting) {
-            InspectorReflector br(*this, u, lay);
-            br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
-            br.help("Add raises, Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
-            br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
-            br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
-            br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
-            br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
-            br.field("Mirror X", wp_brush_.mirror_x);
-            br.field("Front Faces Only", wp_brush_.front_only);
-            const int hw = (lay.area.w - u.px(16)) / 2;
-            Recti brow = lay.row(u.row_h() + u.px(2));
-            if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "Normalize All")) command("wpnormalize");
-            u.tooltip("Each vertex's weights over all groups add up to 1 (Blender: Normalize All).");
-            if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "Clean")) command("wpclean 0.01");
-            u.tooltip("Weights under 0.01 become 0 (Blender: Clean).");
-          }
+          const size_t ng = mf->mesh->vertex_groups.size();
+          const std::string label = ng ? strprintf("Vertex Groups (%zu), Weight Paint: Rigging...", ng) : std::string("Vertex Groups, Weight Paint: Rigging...");
+          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, label, weight_paint_ && wp_obj_ == g->id, Icon::Vertex))
+            dock_open(WindowKind::Rigging);
+          u.tooltip("Opens the Rigging window: skeletons, skins, vertex groups, Weight Paint and IK (Window > Rigging).");
         }
         Recti row = lay.row(u.row_h() + u.px(2));
         if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, edit_mode_ ? "Exit Edit Mode (Tab)" : "Enter Edit Mode (Tab)", edit_mode_, Icon::Vertex)) {
@@ -2607,6 +2589,41 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     text(strprintf("- %d fps: dragging and orbiting draw up to %d frames a second; idle costs nothing unless Redraw is Always.", max_fps_, max_fps_), dim);
   text("- A Rendered Camera Preview: editor frames share the CPU with sampling; a lower cap leaves more for samples.", dim);
   if (always_redraw_) text("- Always redraw: the cap's CPU cost continues while idle (handy with the Profiler; otherwise wasted power).", u.theme.warning);
+}
+
+/* A component's (or any reflected) fields with the Inspector's widgets, outside the Inspector (task 0052: the Rigging
+ * window). True when one changed this frame. */
+bool Editor::draw_reflected(const std::function<void(Reflector &)> &fields, ui::Layout &lay) {
+  InspectorReflector ir(*this, ui_, lay);
+  fields(ir);
+  return ir.changed;
+}
+
+/* Weight Paint's toggle and, while painting `g`, the brush (task 0046; in the Rigging window since task 0052). */
+void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay) {
+  auto &u = ui_;
+  if (!mf || !mf->mesh) return;
+  Recti wrow = lay.row(u.row_h() + u.px(2));
+  const bool painting = weight_paint_ && wp_obj_ == g->id;
+  if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, painting ? "Exit Weight Paint" : "Weight Paint", painting, Icon::Vertex))
+    set_weight_paint(!painting);
+  u.tooltip("Paint the chosen group's weights with a brush (Blender: Weight Paint mode). Blue is 0, green 0.5, red 1.");
+  if (!painting) return;
+  InspectorReflector br(*this, u, lay);
+  br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
+  br.help("Add raises, Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+  br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
+  br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
+  br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
+  br.field("Mirror X", wp_brush_.mirror_x);
+  br.field("Front Faces Only", wp_brush_.front_only);
+  const int hw = (lay.area.w - u.px(16)) / 2;
+  Recti brow = lay.row(u.row_h() + u.px(2));
+  if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "Normalize All")) command("wpnormalize");
+  u.tooltip("Each vertex's weights over all groups add up to 1 (Blender: Normalize All).");
+  if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "Clean")) command("wpclean 0.01");
+  u.tooltip("Weights under 0.01 become 0 (Blender: Clean).");
 }
 
 }  // namespace bl

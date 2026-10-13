@@ -24578,4 +24578,207 @@ static void round69_tests() {
     ed.command("device cpu");
     CHECK(ed.scene().render.device == 0);
   });
+  /* ------------------------------------------------------------------ round 74: the Rigging window (task 0052) */
+  test("rigging window: Window > Rigging opens beside the Inspector, its buttons add bones, reset and apply the pose, add IK", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("window Rigging");
+    ed.command("create Armature");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Rigging).w > 0);
+    auto click = [&](const char *label) {
+      ed.step_frame_headless();
+      Recti b;
+      if (!ed.button_rect_for_test(label, b)) {
+        std::printf("    no button '%s'\n", label);
+        return false;
+      }
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      return true;
+    };
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone && ed.active_object_for_test() == bone);
+    /* Add Bone: a child at the tip of the selected one. */
+    CHECK(click("Add Bone"));
+    GameObject *child = ed.scene().find_by_name("Bone.001");
+    CHECK(child && child->parent == ed.scene().find_by_name("Bone") && std::fabs(child->local().position.y - 1.0f) < 1e-5f);
+    if (!child) return;
+    /* Reset Pose and Apply as Rest, by clicks. */
+    child->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.6f));
+    ed.mark_changed_for_test("R74 pose");
+    ed.step_frame_headless();
+    CHECK(click("Reset Pose"));
+    CHECK(std::fabs(ed.scene().find_by_name("Bone.001")->local().rotation.w - 1.0f) < 1e-6f);
+    ed.scene().find_by_name("Bone.001")->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.4f));
+    ed.mark_changed_for_test("R74 pose 2");
+    ed.step_frame_headless();
+    CHECK(click("Apply as Rest"));
+    const Bone *rb = ed.scene().find_by_name("Bone.001")->get<Bone>();
+    CHECK(rb && std::fabs(rb->rest_rotation.x - Quat::axis_angle({1, 0, 0}, 0.4f).x) < 1e-6f);
+    /* Add IK to the child bone: a target and a pole; moving the target turns the bones. */
+    ed.command("select Bone.001");
+    CHECK(click("Add IK to Bone"));
+    GameObject *b1 = ed.scene().find_by_name("Bone.001");
+    GameObject *target = ed.scene().find_by_name("Bone.001IK");
+    CHECK(b1 && b1->get<IKConstraint>() && target && ed.scene().find_by_name("Bone.001Pole"));
+    if (!b1 || !target) return;
+    target->set_world_position(target->world_position() + Vec3(0.5f, -0.5f, 0.0f));
+    ed.mark_changed_for_test("R74 move target");
+    ed.step_frame_headless();
+    const float tip_err = length(b1->world_matrix().point({0, b1->get<Bone>()->length, 0}) - target->world_position());
+    std::printf("    IK added by a click: the tip off its moved target by %g\n", tip_err);
+    CHECK(tip_err < 1e-3f);
+  });
+
+  test("rigging window: the Inspector's MeshFilter keeps modeling only, and its Rigging row opens the window with the mesh's groups", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("create Cube");
+    ed.command("vgroup add Top");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti b;
+    CHECK(!ed.button_rect_for_test("Weight Paint", b));  // not in the Inspector any more
+    CHECK(ed.button_rect_for_test("Vertex Groups (1), Weight Paint: Rigging...", b));
+    r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+    ed.step_frame_headless();
+    CHECK(ed.window_rect_for_test(WindowKind::Rigging).w > 0);
+    ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("Weight Paint", b) && ed.button_rect_for_test("Top", b));  // the window shows the groups and the toggle
+  });
+
+  test("rigging window: while painting, selecting a bone paints the group named after it", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Cylinder");
+    GameObject *mesh = ed.selected_object();
+    CHECK(mesh != nullptr);
+    if (!mesh) return;
+    mesh->name = "Body";  // (the default scene has a Cylinder of its own)
+    ed.mark_changed_for_test("R74 name");
+    ed.step_frame_headless();
+    ed.command("create Armature");  // with the cylinder selected: bound, with a group for the bone
+    ed.command("bone add Bone 1");
+    ed.command("skin bind " + mesh->name);
+    ed.command("select " + mesh->name);
+    ed.command("weightpaint on");
+    ed.step_frame_headless();
+    const Mesh *m = mesh->mesh_filter()->mesh.get();
+    CHECK(m->find_group("Bone") >= 0 && m->find_group("Bone.001") >= 0);
+    ed.command("select Bone.001");
+    ed.step_frame_headless();
+    CHECK(ed.weight_paint_active_for_test() && ed.wp_group_name_for_test() == "Bone.001");
+    ed.command("select Bone");
+    ed.step_frame_headless();
+    CHECK(ed.wp_group_name_for_test() == "Bone");
+  });
+
+  test("rigging window: a saved layout with the Rigging tab loads back", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("window Rigging");
+    ed.step_frame_headless();
+    const std::string saved = ed.dock_serialize_for_test();
+    Editor ed2;
+    ed2.init_headless(1200, 800);
+    ed2.command("layout " + saved);
+    ed2.step_frame_headless();
+    CHECK(ed2.window_rect_for_test(WindowKind::Rigging).w > 0 || ed2.dock_serialize_for_test() == saved);
+  });
+  test("rigging window: with a mesh and a bone selected, Add Armature (Skin) binds the mesh; the window's Weight Paint paints by a drag", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("create Armature");  // nothing else selected: an armature on its own
+    ed.command("create Cylinder");
+    GameObject *mesh = ed.selected_object();
+    CHECK(mesh != nullptr);
+    if (!mesh) return;
+    mesh->name = "Body";
+    mesh->set_world_position({0, 1.0f, 3.0f});
+    ed.mark_changed_for_test("R74 body");
+    ed.step_frame_headless();
+    ed.select_for_test(mesh->id, false);
+    ed.select_for_test(ed.scene().find_by_name("Bone")->id, true);  // Ctrl+click: the mesh and a bone of the skeleton
+    ed.command("window Rigging");
+    auto click = [&](const char *label) {
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      Recti b;
+      if (!ed.button_rect_for_test(label, b)) {
+        std::printf("    no button '%s'\n", label);
+        return false;
+      }
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      ed.step_frame_headless();
+      return true;
+    };
+    CHECK(click("Add Armature (Skin)"));
+    const SkinModifier *sk = ed.scene().find_by_name("Body")->get<SkinModifier>();
+    CHECK(sk && sk->object == "Armature" && ed.scene().find_by_name("Body")->mesh_filter()->mesh->find_group("Bone") >= 0);
+    /* Weight Paint by the window's toggle, then a drag over the mesh raises the group's weights. */
+    ed.command("select Body");
+    CHECK(click("Weight Paint"));
+    CHECK(ed.weight_paint_active_for_test());
+    ed.command("wpbrush draw 80 1 0");  // Draw towards weight 0, a wide brush
+    const std::vector<float> before = ed.scene().find_by_name("Body")->mesh_filter()->mesh->vertex_groups[0].weights;
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(ed.scene().find_by_name("Body")->world_position(), x, y));
+    ed.command(strprintf("wpstroke %d %d %d %d", x - 10, y, x + 10, y));
+    ed.step_frame_headless();
+    const std::vector<float> &after = ed.scene().find_by_name("Body")->mesh_filter()->mesh->vertex_groups[0].weights;
+    size_t changed = 0;
+    for (size_t i = 0; i < before.size() && i < after.size(); i++) changed += before[i] != after[i];
+    std::printf("    a stroke from the window's Weight Paint changed %zu weights\n", changed);
+    CHECK(changed > 0);
+  });
+  test("learn: the Rigging window, quality tier and small GPU lessons' Try it buttons do what they say", [] {
+    /* Each new section's "! cmd:" actions, run as the Learn tab runs them (';'-separated console commands). */
+    auto action = [](const std::string &label) {
+      for (int i = 0; i < lesson_count(); i++) {
+        const std::string body = lesson(i).body;
+        const size_t at = body.find("| " + label);
+        if (at == std::string::npos) continue;
+        const size_t start = body.rfind("! cmd:", at);
+        if (start == std::string::npos) continue;
+        return body.substr(start + 6, at - start - 6);
+      }
+      return std::string();
+    };
+    auto run = [](Editor &ed, const std::string &cmds) {
+      size_t s = 0;
+      while (s <= cmds.size()) {
+        const size_t e = cmds.find(';', s);
+        std::string c = cmds.substr(s, e == std::string::npos ? std::string::npos : e - s);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        s = e + 1;
+      }
+    };
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const std::string rig = action("Make a humanoid rig and open the Rigging window");
+    CHECK(!rig.empty());
+    run(ed, rig);
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Humanoid") && ed.window_rect_for_test(WindowKind::Rigging).w > 0);
+    const std::string low = action("Switch to the Low tier (watch the views soften slightly)");
+    CHECK(!low.empty());
+    run(ed, low);
+    CHECK(ed.quality_tier() == Editor::TierLow);
+    run(ed, action("Feel the minimum machine: 8 threads, Low"));
+    CHECK(JobSystem::global().thread_count() <= 8);
+    run(ed, action("Every thread again"));
+    CHECK(JobSystem::global().thread_limit() == 0);
+    const std::string gpu = action("Render on the GPU and the CPU together (Auto)");
+    CHECK(gpu.find("device auto") != std::string::npos);
+    run(ed, "engine path; device auto");
+    CHECK(ed.scene().render.device == 2);
+  });
 }

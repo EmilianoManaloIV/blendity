@@ -81,7 +81,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -377,6 +377,20 @@ class Editor {
     return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   const ui::Context &ui_for_test() const { return ui_; }
+  void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
+  void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }
+  bool weight_paint_active_for_test() const { return weight_paint_; }
+  std::string wp_group_name_for_test() {
+    const Mesh *m = wp_mesh();
+    const int gi = m ? wp_group(*m) : -1;
+    return gi >= 0 ? m->vertex_groups[(size_t)gi].name : std::string();
+  }
+  bool button_rect_for_test(const std::string &label, Recti &r) const {
+    auto it = ui_.button_rects.find(label);
+    if (it == ui_.button_rects.end()) return false;
+    r = it->second;
+    return true;
+  }
   ui::Context &ui_mut_for_test() { return ui_; }  // (tests that draw with the toolkit)
   Vec3 gizmo_pivot_for_test() const { return gizmo_pivot_; }
   bool project_delete_pending() const { return !project_delete_.empty(); }
@@ -546,6 +560,15 @@ class Editor {
   bool bake_object_textures(int size, bool keep_uvs = false);
   /* The Textures window (task 0028, texture_window.cpp). */
   void draw_textures_window(const Recti &r);
+  /* The Rigging window (task 0052, rigging_window.cpp). */
+  void draw_rigging_window(const Recti &r);
+  GameObject *rig_root() const;  // the selection's skeleton (a bone's, an armature, a skinned mesh's)
+  GameObject *rig_mesh() const;  // the mesh the window works on: the painted one, else a selected mesh
+  GameObject *add_bone(GameObject *parent, float length);
+  IKConstraint *add_ik(GameObject *bone);
+  void draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay);
+  bool draw_reflected(const std::function<void(Reflector &)> &fields, ui::Layout &lay);
+  uint64_t wp_last_active_ = 0;  // Weight Paint: the selection last seen (a bone selected picks its group)
   const std::vector<std::string> &texture_asset_paths();
   ProceduralTexturePtr new_texture_asset(const std::string &preset);
   bool draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t);  // panels.cpp; true when a field changed

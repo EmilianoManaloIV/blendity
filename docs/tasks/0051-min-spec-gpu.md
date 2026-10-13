@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** ADR 0026 (amended: the GPU part)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/48
 
 ## Goal
 Path tracing and GPU bakes work on the user's minimum GPU, a GTX 1050 Ti. It has 4 GB, Pascal, Vulkan 1.2, and no

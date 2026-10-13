@@ -989,6 +989,8 @@ bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK ch
 GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
 /* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */
 int add_humanoid_ik(Scene &scene, GameObject *root);
+/* IK on a bone and its parent with a new target at its tip and a pole off its bend (the Rigging window's Add IK). */
+IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {
