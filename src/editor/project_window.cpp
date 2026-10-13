@@ -344,6 +344,13 @@ void Editor::draw_project(const Recti &r) {
   std::vector<const DirEntry *> shown;
   for (auto &en : project_entries_)
     if (f.empty() || to_lower(en.name).find(f) != std::string::npos) shown.push_back(&en);
+  /* The multi-selection (task 0053): this folder's shown files; the one selected the usual way always in it. */
+  std::vector<std::string> shown_paths;
+  for (const DirEntry *en : shown) shown_paths.push_back(fs::join(project_dir_, en->name));
+  project_multi_.keep_only(shown_paths);
+  if (project_selected_.empty()) project_multi_.items.clear();
+  else if (!project_multi_.has(project_selected_) && std::find(shown_paths.begin(), shown_paths.end(), project_selected_) != shown_paths.end())
+    project_multi_.only(project_selected_);
   bool can_up = project_dir_ != project_root_ && project_dir_.size() > project_root_.size();
   int rows = (int)shown.size() + (can_up ? 1 : 0);
   ui::Id sid = u.id("proj_scroll");
@@ -363,11 +370,13 @@ void Editor::draw_project(const Recti &r) {
     if (path_inside(fs::parent(project_dir_), assets_dir_)) folder_target(rr.intersect(right), fs::parent(project_dir_));
     row_clicked = row_clicked || (hot && (in.pressed[0] || in.pressed[1]));
   }
-  for (const DirEntry *en : shown) {
+  for (size_t si = 0; si < shown.size(); si++) {
+    const DirEntry *en = shown[si];
     Recti rr = row_rect(i++);
     if (rr.bottom() < right.y || rr.y > right.bottom()) continue;
     std::string full = fs::join(project_dir_, en->name);
-    bool sel = project_selected_ == full;
+    bool sel = project_selected_ == full || project_multi_.has(full);
+    if (u.record_buttons) u.button_rects["file:" + en->name] = rr;  // (tests click rows)
     bool hot = u.hovered(rr);
     if (sel) u.canvas.fill_rect(rr, u.theme.selection);
     else if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
@@ -407,10 +416,18 @@ void Editor::draw_project(const Recti &r) {
     if (!en->is_dir) u.label({rr.x, rr.y, rr.w - u.px(12), rh}, format_bytes(en->size), u.theme.text_dim, ui::Align::Right);
     if (en->is_dir) folder_target(rr.intersect(right), full);
     if (hot && in.pressed[0] && project_rename_ != full) {
-      project_selected_ = full;
-      clear_selection();
-      /* Anything drags onto folders; materials and images onto objects, faces and slots too (Unity). */
-      asset_drag_ = {true, false, full, nullptr, in.mx, in.my};
+      if (in.ctrl() || in.shift()) {  // Ctrl toggles, Shift selects a range (task 0053)
+        clear_selection();  // (the Inspector shows the files, as after a plain click)
+        project_multi_.click(shown_paths, si, in.ctrl(), in.shift());
+        project_selected_ = project_multi_.has(full) ? full : project_multi_.items.empty() ? std::string() : project_multi_.items.back();
+      }
+      else {
+        project_selected_ = full;
+        project_multi_.only(full);
+        clear_selection();
+        /* Anything drags onto folders; materials and images onto objects, faces and slots too (Unity). */
+        asset_drag_ = {true, false, full, nullptr, in.mx, in.my};
+      }
     }
     if (hot && in.double_clicked[0]) {
       asset_drag_ = AssetDrag{};
@@ -427,6 +444,7 @@ void Editor::draw_project(const Recti &r) {
       else if (ext != ".mat" && ext != ".ptex") fs::open_external(full);
     }
     if (hot && in.pressed[1]) {
+      if (!project_multi_.has(full)) project_multi_.only(full);
       project_selected_ = full;
       u.open_popup(u.id("proj_ctx"), {in.mx, in.my, 0, 0});
     }
@@ -456,10 +474,62 @@ void Editor::draw_project(const Recti &r) {
       project_rename_buf_ = fs::is_dir(project_selected_) ? fs::filename(project_selected_) : fs::stem(project_selected_);
       in.key_pressed[platform::KEY_F2] = false;
     }
-    if (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE]) {
-      project_delete_ = project_selected_;
+    if ((in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE]) && project_delete_.empty() && project_delete_many_.empty()) {
+      if (project_multi_.items.size() > 1) project_delete_many_ = project_multi_.items;
+      else project_delete_ = project_selected_;
       in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
     }
+  }
+  /* Ctrl+A over the files: every one shown (the search applies). */
+  if (u.hovered(right) && !u.any_editing() && in.ctrl() && in.key_pressed[platform::KEY_A]) {
+    if (!shown_paths.empty()) {
+      project_multi_.all(shown_paths);
+      project_selected_ = shown_paths.back();
+    }
+    in.key_pressed[platform::KEY_A] = false;  // (never the scene's Select All from over the files)
+  }
+  /* Several at once (task 0053): one question, then each to the Recycle Bin / Trash. */
+  if (!project_delete_many_.empty()) {
+    ui::Id did = u.id("proj_delete_many");
+    if (!u.popup_open(did)) u.open_popup(did, {r.x + r.w / 2 - u.px(170), r.y + r.h / 3, 0, 0});
+    const std::vector<std::string> targets = project_delete_many_;
+    u.popup(did, u.px(360), [this, targets] {
+      auto &u = ui_;
+      std::string names;
+      for (size_t k = 0; k < targets.size() && k < 4; k++) names += (k ? ", " : "") + fs::filename(targets[k]);
+      if (targets.size() > 4) names += strprintf(" and %zu more", targets.size() - 4);
+      Recti t = u.popup_row(u.row_h() + u.px(6));
+      u.label({t.x + u.px(10), t.y, t.w - u.px(20), t.h}, strprintf("Delete %zu items?", targets.size()), u.theme.text_bright);
+      Recti h0 = u.popup_row();
+      u.label({h0.x + u.px(10), h0.y, h0.w - u.px(20), h0.h}, names, u.theme.text_dim);
+      Recti h1 = u.popup_row();
+#ifdef _WIN32
+      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "They go to the Recycle Bin, where you can restore them.", u.theme.text_dim);
+#else
+      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "They go to the Trash, where you can restore them.", u.theme.text_dim);
+#endif
+      size_t folders = 0, mats = 0;
+      for (const std::string &p : targets) folders += fs::is_dir(p), mats += fs::extension(p) == ".mat";
+      if (folders || mats) {
+        Recti h2 = u.popup_row();
+        std::string note;
+        if (folders) note += strprintf("%zu folder(s) go with everything in them. ", folders);
+        if (mats) note += "Objects using a material keep it as a scene material.";
+        u.label({h2.x + u.px(10), h2.y, h2.w - u.px(20), h2.h}, note, u.theme.text_dim);
+      }
+      Recti b = u.popup_row(u.row_h() + u.px(10));
+      if (u.button({b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Delete All")) {
+        for (const std::string &p : targets) delete_project_entry(p);
+        project_delete_many_.clear();
+        project_multi_.items.clear();
+        u.close_popups();
+      }
+      if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {
+        project_delete_many_.clear();
+        u.close_popups();
+      }
+    });
+    if (!u.popup_open(did)) project_delete_many_.clear();  // clicked away
   }
   const std::string dir_now = path_inside(project_dir_, assets_dir_) ? project_dir_ : assets_dir_;
   u.popup(u.id("proj_create"), u.px(220), [this, dir_now] {
@@ -513,7 +583,11 @@ void Editor::draw_project(const Recti &r) {
       project_rename_ = sel;
       project_rename_buf_ = fs::is_dir(sel) ? fs::filename(sel) : fs::stem(sel);
     }
-    if (u.menu_item("Delete", "Del", false, in_assets)) project_delete_ = sel;
+    if (project_multi_.items.size() > 1) {
+      if (u.menu_item(strprintf("Delete %zu Items...", project_multi_.items.size()).c_str(), "Del", false, in_assets))
+        project_delete_many_ = project_multi_.items, project_delete_.clear();
+    }
+    else if (u.menu_item("Delete", "Del", false, in_assets)) project_delete_ = sel, project_delete_many_.clear();
     u.menu_separator();
     if (u.menu_item("Open with system viewer")) fs::open_external(sel);
     if (u.menu_item("Show in Explorer / Finder")) fs::open_external(fs::is_dir(sel) ? sel : fs::parent(sel));

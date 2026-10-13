@@ -340,6 +340,10 @@ Blendity's .scene format writes each shared mesh once and has objects reference 
 @ blender/source/blender/blenloader/intern/writefile.cc
 @ blender/source/blender/io/wavefront_obj
 ! window:Project | Open the Project window
+# Many at once
+The Project, Materials and Textures windows select like the Hierarchy and Unity's Project window: a click selects one, Ctrl+click adds or removes one, Shift+click selects everything from the last click to this one, and Ctrl+A (with the mouse over the list) selects everything shown; a search narrows what "everything" means. Delete (or Backspace) asks once for all of them ("Delete 7 materials?") and sends their files to the Recycle Bin / Trash, where they can be restored. Deleted from the Materials window, a material leaves its slots to the default material (one undo step brings them back); deleted as a file from the Project window, objects keep it as a scene material. Console: `matdelete Bricks, Wood Floor` (names separated by commas).
+! cmd:newmat Practice1; newmat Practice2; newmat Practice3; window Materials | Make three materials to practise on (Ctrl+click two, then press Delete over the window)
+? Where do deleted assets go? | To the Recycle Bin (Windows) or the Trash, so a mistake can be put back. From the Materials window the slots fall back to the default material (Undo restores them); from the Project window objects keep the material as a scene material.
 )"},
     {"Undo, Selection and Memory", "Snapshots and copy-on-write", R"(
 Unity records undo per object (Undo.RecordObject). Blender's global undo stores snapshots of the whole file ("memfile undo") and only writes the parts that changed. Edit Mode has its own mesh undo.

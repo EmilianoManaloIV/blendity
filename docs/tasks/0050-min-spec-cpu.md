@@ -54,8 +54,8 @@ GTX 1050 Ti (the GPU is task 0051). The editor stays responsive there, and its m
 ## As built
 - **Measured at 8 threads, Low** (fastest of four runs):
   - Met: idle 0.8 ms, orbit 7.1 ms, moving an object 15.5 ms.
-  - **Not met (needs the user's OK or a follow-up)**: editing a material colour 19.8 ms and Play 17.6 ms, against
-    16.7 ms.
+  - **Not met**: editing a material colour 19.8 ms and Play 17.6 ms, against 16.7 ms. The user accepted these
+    (2026-10-13: "If it's not possible to hit the frame return results, move on").
   - Peak working set with 10,200 objects: 448 MB. Numbers are in PERFORMANCE.md pass 8.
 - **What got the frame there, in measured order**:
   1. Viewport Resolution Scale: Low is 67 %, Medium 85 %.

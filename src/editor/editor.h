@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <algorithm>
 #include <unordered_map>
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -170,6 +171,55 @@ struct DockNode {
   int active = 0;
   Recti rect;
   DockNode *parent = nullptr;
+};
+
+/* A multi-selection in a list of assets (task 0053): the Hierarchy's clicks (Ctrl toggles, Shift selects the range
+ * from the last click in the order shown, Ctrl+Shift adds that range, a plain click selects one), Ctrl+A all shown. */
+template<class T> struct MultiSelect {
+  std::vector<T> items;
+  T anchor{};
+  bool has(const T &v) const { return std::find(items.begin(), items.end(), v) != items.end(); }
+  void only(const T &v) {
+    items.assign(1, v);
+    anchor = v;
+  }
+  void click(const std::vector<T> &shown, size_t i, bool ctrl, bool shift) {
+    if (i >= shown.size()) return;
+    const T &v = shown[i];
+    if (shift) {
+      auto a = std::find(shown.begin(), shown.end(), anchor);
+      if (a == shown.end()) {  // the last click is gone or hidden: this one starts the range
+        if (ctrl) {
+          if (!has(v)) items.push_back(v);
+          anchor = v;
+        }
+        else only(v);
+        return;
+      }
+      const size_t ai = (size_t)(a - shown.begin());
+      if (!ctrl) items.clear();
+      for (size_t k = std::min(ai, i); k <= std::max(ai, i); k++)
+        if (!has(shown[k])) items.push_back(shown[k]);
+      return;  // (the anchor stays: Shift+clicks again measure from it)
+    }
+    if (ctrl) {
+      auto it = std::find(items.begin(), items.end(), v);
+      if (it != items.end()) items.erase(it);
+      else items.push_back(v);
+      anchor = v;
+      return;
+    }
+    only(v);
+  }
+  void all(const std::vector<T> &shown) {
+    items = shown;
+    if (!shown.empty()) anchor = shown.front();
+  }
+  /* Drop what isn't shown any more (deleted, renamed away, hidden by a search: what Delete would remove is what the user sees). */
+  void keep_only(const std::vector<T> &all) {
+    items.erase(std::remove_if(items.begin(), items.end(), [&](const T &v) { return std::find(all.begin(), all.end(), v) == all.end(); }),
+                items.end());
+  }
 };
 
 struct UndoState {
@@ -354,7 +404,17 @@ class Editor {
   std::string last_op_name_for_test() const { return last_op_.op; }
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
-  bool material_delete_pending() const { return material_delete_ != nullptr; }
+  bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
+  size_t materials_selected_for_test() const { return material_multi_.items.size(); }
+  bool material_is_selected_for_test(const std::string &name) const {
+    for (const MaterialPtr &m : material_multi_.items)
+      if (m && m->name == name) return true;
+    return false;
+  }
+  size_t textures_selected_for_test() const { return texture_multi_.items.size(); }
+  void set_texture_search_for_test(const std::string &s) { texture_search_ = s; }
+  size_t texture_count_shown_for_test();  // texture_window.cpp
+  size_t project_selected_count_for_test() const { return project_multi_.items.size(); }
   void select_faces_for_test(const std::vector<size_t> &fs) {
     if (!edit_mesh_ptr()) return;
     face_sel_.assign((*edit_mesh_ptr())->face_count(), 0);
@@ -379,6 +439,12 @@ class Editor {
   const ui::Context &ui_for_test() const { return ui_; }
   void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
   void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }
+  void project_open_folder_for_test(const std::string &dir, const std::string &search = "") { project_dir_ = dir; project_search_ = search; project_listed_ = -100; }
+  std::vector<std::string> button_labels_for_test() const {
+    std::vector<std::string> out;
+    for (const auto &kv : ui_.button_rects) out.push_back(kv.first);
+    return out;
+  }
   bool weight_paint_active_for_test() const { return weight_paint_; }
   std::string wp_group_name_for_test() {
     const Mesh *m = wp_mesh();
@@ -580,6 +646,9 @@ class Editor {
   bool scene_drawn_ = false;  // the Scene view drew this frame (another tab can hide it)
   bool texture_touch_pending_ = false;  // a texture field was dragged: materials re-resolve on release
   ProceduralTexturePtr texture_selected_;
+  MultiSelect<ProceduralTexturePtr> texture_multi_;   // task 0053
+  std::vector<ProceduralTexturePtr> texture_delete_many_;
+  void delete_texture_asset(const ProceduralTexturePtr &t);
   std::string texture_search_;
   int texture_preview_output_ = 0;
   bool texture_preview_tiled_ = false, texture_dragging_ = false;
@@ -874,6 +943,8 @@ class Editor {
   void draw_tools_window(const Recti &r);  // Modeling Tools window (UModeler's tool panel)
   MaterialPtr material_selected_;
   MaterialPtr material_delete_;  // waiting for Delete Material's confirmation
+  MultiSelect<MaterialPtr> material_multi_;  // task 0053
+  std::vector<MaterialPtr> material_delete_many_;
   /* Delete a material (the Materials window): every slot using it is emptied (its faces
    * fall back to the default material, Blender's empty slot) and an asset's .mat goes to
    * the Recycle Bin. Returns the slots emptied. */
@@ -1586,6 +1657,8 @@ class Editor {
   std::unordered_map<std::string, std::vector<DirEntry>> project_dir_cache_;
   double project_listed_ = -100;
   std::string project_selected_;
+  MultiSelect<std::string> project_multi_;  // task 0053
+  std::vector<std::string> project_delete_many_;
   std::string project_search_;
   /* ---- Project window: folders, rename, delete (project_window.cpp) ---- */
   std::string project_rename_;  // the entry being renamed (absolute path)

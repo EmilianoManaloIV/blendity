@@ -100,6 +100,30 @@ ProceduralTexturePtr Editor::new_texture_asset(const std::string &preset) {
   return t;
 }
 
+size_t Editor::texture_count_shown_for_test() {
+  size_t n = 0;
+  const std::string f = to_lower(texture_search_);
+  for (const std::string &path : texture_asset_paths())
+    if (ProceduralTexturePtr t = texture_asset(path)) n += f.empty() || to_lower(t->name).find(f) != std::string::npos;
+  return n;
+}
+
+/* A texture asset to the Recycle Bin / Trash, after the question (one or several, task 0053). */
+void Editor::delete_texture_asset(const ProceduralTexturePtr &dt) {
+  if (!dt) return;
+  const std::string path = resolve_asset_path(dt->asset_path);
+  if (texture_selected_ == dt) texture_selected_ = nullptr;
+  if (texture_delete_ == dt) texture_delete_ = nullptr;
+  /* An undo past this point must not write the deleted texture's text into a new one of the same name. */
+  texture_before_.erase(std::remove_if(texture_before_.begin(), texture_before_.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }),
+                        texture_before_.end());
+  for (UndoState &st : undo_) st.textures.erase(std::remove_if(st.textures.begin(), st.textures.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }), st.textures.end());
+  for (UndoState &st : redo_) st.textures.erase(std::remove_if(st.textures.begin(), st.textures.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }), st.textures.end());
+  delete_project_entry(path);
+  texture_paths_listed_ = -100;  // list again now
+  invalidate_material_textures();  // materials naming it re-resolve (and show it missing)
+}
+
 void Editor::draw_textures_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
@@ -115,6 +139,13 @@ void Editor::draw_textures_window(const Recti &r) {
       if (f.empty() || to_lower(t->name).find(f) != std::string::npos) list.push_back(t);
     }
   if (texture_selected_ && texture_asset(texture_selected_->asset_path) != texture_selected_) texture_selected_ = nullptr;  // deleted or replaced
+  {  // the multi-selection (task 0053): only what is shown (deleted ones and a search's hidden ones drop), the edited one in it
+    texture_multi_.keep_only(list);
+    if (texture_selected_ && !texture_multi_.has(texture_selected_) && std::find(list.begin(), list.end(), texture_selected_) != list.end())
+      texture_multi_.only(texture_selected_);
+    if (!texture_selected_) texture_multi_.items.clear();
+  }
+  const bool asking = texture_delete_ || !texture_delete_many_.empty();  // a question is up: no new selection or Delete
   /* Toolbar: New (presets), size, Assign to Selection, search. */
   const int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
@@ -155,7 +186,10 @@ void Editor::draw_textures_window(const Recti &r) {
     x = ab.right() + u.px(6);
     const Recti db{x, bar.y + u.px(3), u.px(80), bh - u.px(6)};
     texture_ui_rects_["delete"] = db;
-    if (u.button(db, "Delete", false)) texture_delete_ = texture_selected_;
+    if (u.button(db, "Delete", false) && !asking) {
+      if (texture_multi_.items.size() > 1) texture_delete_many_ = texture_multi_.items;
+      else texture_delete_ = texture_selected_;
+    }
     u.tooltip("Delete this texture (it goes to the Recycle Bin / Trash). Also: right-click a thumbnail, or Del.");
     x = db.right() + u.px(6);
   }
@@ -179,18 +213,22 @@ void Editor::draw_textures_window(const Recti &r) {
     texture_ui_rects_["thumb:" + list[i]->name] = cell;
     if (cell.bottom() < grid.y || cell.y > grid.bottom()) continue;
     const ProceduralTexturePtr &t = list[i];
-    const bool sel = t == texture_selected_, hot = u.hovered(cell);
+    const bool sel = texture_multi_.has(t), hot = u.hovered(cell);
+    if (u.record_buttons) u.button_rects["tex:" + t->name] = cell;  // (tests click thumbnails)
     if (sel || hot) u.canvas.fill_round_rect(cell, u.px(4), sel ? u.theme.selection : Color::hex(0x444444));
     const TexThumb &th = texture_thumb(*t, 0, 64);
     draw_pixels(u, th.px, th.size, th.size, {cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)});
     u.label({cx, cy + tile, tile, u.row_h()}, t->name, u.theme.text, ui::Align::Center);
     u.tooltip(t->name + "  (" + t->asset_path + strprintf(")\n%d x %d, %zu layer(s). Click to edit; drag onto an object or a Hierarchy row to use it.", t->width, t->height,
                                                           t->layers.size()));
-    if (hot && in.pressed[0]) {
-      texture_selected_ = t;
-      asset_drag_ = {true, false, resolve_asset_path(t->asset_path), nullptr, in.mx, in.my};
+    if (hot && in.pressed[0] && !asking) {
+      /* Ctrl toggles, Shift selects the range from the last click (task 0053); a plain click selects it and may drag. */
+      texture_multi_.click(list, i, in.ctrl(), in.shift());
+      texture_selected_ = texture_multi_.has(t) ? t : texture_multi_.items.empty() ? nullptr : texture_multi_.items.back();
+      if (!in.ctrl() && !in.shift()) asset_drag_ = {true, false, resolve_asset_path(t->asset_path), nullptr, in.mx, in.my};
     }
     if (hot && in.pressed[1]) {  // right-click: the thumbnail's menu
+      if (!texture_multi_.has(t)) texture_multi_.only(t);
       texture_selected_ = t;
       u.open_popup(u.id("tex_ctx"), {in.mx, in.my, 0, 0});
     }
@@ -199,12 +237,60 @@ void Editor::draw_textures_window(const Recti &r) {
     if (!texture_selected_) return;
     if (ui_.menu_item("Assign to Selection")) assign_texture_asset_to_selection(texture_selected_->asset_path);
     ui_.menu_separator();
-    if (ui_.menu_item("Delete Texture...", "Del")) texture_delete_ = texture_selected_;
+    if (texture_multi_.items.size() > 1) {
+      if (ui_.menu_item(strprintf("Delete %zu Textures...", texture_multi_.items.size()).c_str(), "Del")) texture_delete_many_ = texture_multi_.items, texture_delete_ = nullptr;
+    }
+    else if (ui_.menu_item("Delete Texture...", "Del")) texture_delete_ = texture_selected_, texture_delete_many_.clear();
   });
-  /* Delete (or Backspace) over the window asks to delete the selected texture. */
-  if (u.hovered(r) && texture_selected_ && !u.wants_keyboard() && (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE])) {
-    texture_delete_ = texture_selected_;
+  /* Ctrl+A over the window: every texture shown (the search applies). */
+  if (u.hovered(r) && !u.wants_keyboard() && !asking && in.ctrl() && in.key_pressed[platform::KEY_A]) {
+    if (!list.empty()) {
+      texture_multi_.all(list);
+      texture_selected_ = list.back();
+    }
+    in.key_pressed[platform::KEY_A] = false;  // (never the scene's Select All from over this window)
+  }
+  /* Delete (or Backspace) over the window asks to delete the selected texture(s). */
+  if (u.hovered(r) && texture_selected_ && !u.wants_keyboard() && !asking && (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE])) {
+    if (texture_multi_.items.size() > 1) texture_delete_many_ = texture_multi_.items;
+    else texture_delete_ = texture_selected_;
     in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
+  }
+  /* Several at once (task 0053): one question, then each as one Delete does. */
+  if (!texture_delete_many_.empty()) {
+    const ui::Id did = u.id("tex_delete_many");
+    if (!u.popup_open(did)) u.open_popup(did, {r.x + r.w / 2 - u.px(190), r.y + u.px(40), 0, 0});
+    const std::vector<ProceduralTexturePtr> dts = texture_delete_many_;
+    u.popup(did, u.px(380), [this, dts] {
+      auto &u = ui_;
+      std::string names;
+      for (size_t k = 0; k < dts.size() && k < 4; k++) names += (k ? ", " : "") + dts[k]->name;
+      if (dts.size() > 4) names += strprintf(" and %zu more", dts.size() - 4);
+      Recti t = u.popup_row(u.row_h() + u.px(6));
+      u.label({t.x + u.px(10), t.y, t.w - u.px(20), t.h}, strprintf("Delete %zu textures?", dts.size()), u.theme.text_bright);
+      Recti h0 = u.popup_row();
+      u.label({h0.x + u.px(10), h0.y, h0.w - u.px(20), h0.h}, names, u.theme.text_dim);
+      Recti h1 = u.popup_row();
+#ifdef _WIN32
+      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "They go to the Recycle Bin, where you can restore them.", u.theme.text_dim);
+#else
+      u.label({h1.x + u.px(10), h1.y, h1.w - u.px(20), h1.h}, "They go to the Trash, where you can restore them.", u.theme.text_dim);
+#endif
+      Recti b = u.popup_row(u.row_h() + u.px(10));
+      const Recti del{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+      texture_ui_rects_["delete_many_confirm"] = del;
+      if (u.button(del, "Delete All")) {
+        for (const ProceduralTexturePtr &dt : dts) delete_texture_asset(dt);
+        texture_delete_many_.clear();
+        texture_multi_.items.clear();
+        u.close_popups();
+      }
+      if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {
+        texture_delete_many_.clear();
+        u.close_popups();
+      }
+    });
+    if (!u.popup_open(did)) texture_delete_many_.clear();  // clicked away
   }
   /* The confirmation (as the Project and Materials windows'): it goes to the Recycle Bin / Trash. */
   if (texture_delete_) {
@@ -245,17 +331,7 @@ void Editor::draw_textures_window(const Recti &r) {
       const Recti del{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)};
       texture_ui_rects_["delete_confirm"] = del;
       if (u.button(del, "Delete")) {
-        const std::string path = resolve_asset_path(dt->asset_path);
-        if (texture_selected_ == dt) texture_selected_ = nullptr;
-        texture_delete_ = nullptr;
-        /* An undo past this point must not write the deleted texture's text into a new one of the same name. */
-        texture_before_.erase(std::remove_if(texture_before_.begin(), texture_before_.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }),
-                              texture_before_.end());
-        for (UndoState &st : undo_) st.textures.erase(std::remove_if(st.textures.begin(), st.textures.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }), st.textures.end());
-        for (UndoState &st : redo_) st.textures.erase(std::remove_if(st.textures.begin(), st.textures.end(), [&](const auto &kv) { return kv.first == dt->asset_path; }), st.textures.end());
-        delete_project_entry(path);
-        texture_paths_listed_ = -100;  // list again now
-        invalidate_material_textures();  // materials naming it re-resolve (and show it missing)
+        delete_texture_asset(dt);
         u.close_popups();
       }
       if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) {

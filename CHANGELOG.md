@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 75): many assets at once (task 0053)
+
+**Asked:** "I want to be able to multiselect textures and materials in their tabs so I can en masse delete assets."
+
+**Added**
+- **Multi-select in the Materials, Textures and Project windows.** Ctrl+click toggles, Shift+click selects a range
+  (Ctrl+Shift adds it), Ctrl+A selects everything shown (a search narrows it).
+- **One question for many.** Delete, the toolbar or the context menu asks once ("Delete 3 materials?") and sends them
+  all to the Recycle Bin / Trash. The Materials window empties their slots in one undo step.
+- Console: `matdelete A, B` and `texdelete A, B`, with names separated by commas.
+- Learn: "Many at once" in the Assets lesson.
+
+**Checked**
+- New tests (round 75):
+  - By clicks: Ctrl, Shift and Ctrl+Shift select exactly the named materials.
+  - Delete asks once and deletes three of four. The slot that used one shows the default, and one undo brings it
+    back.
+  - Ctrl+A in the Textures window takes every texture shown, or only the search's.
+  - The console deletes two textures by name.
+  - The Project window's Ctrl+click selects two files and Delete removes both after one question.
+- The user accepted task 0050's two frames over 16.7 ms (material edit 19.8, Play 17.6).
+- Unit checks: Windows 9,422, 0 failed (583 tests); the whole suite in render-cache verify mode: 9,423,
+  0 failed, 0 stale pictures. Linux with libraries: 9,330, 0 failed. Sanitizer build: 9,248, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: two majors and several minor findings, fixed:
+- The Project window's context-menu Delete ignored the multi-selection.
+- The console couldn't name assets with spaces.
+- Also fixed:
+  - Items hidden by a search were still deleted.
+  - Two delete questions could fight.
+  - Ctrl+A could fall through to the scene's Select All.
+  - Shift with the anchor gone selected one item.
+  - The Learn text said Project-window deletes empty slots (they keep the material).
+
 ## 2026-10-13 (round 74): the Rigging window (task 0052)
 
 **Asked:** "rigging and weight painting tools should be in their own tab. The mesh filter area is getting a little

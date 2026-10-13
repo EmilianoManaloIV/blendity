@@ -24781,4 +24781,145 @@ static void round69_tests() {
     run(ed, "engine path; device auto");
     CHECK(ed.scene().render.device == 2);
   });
+  /* ------------------------------------------------------------------ round 75: many assets at once (task 0053) */
+  test("assets: Ctrl and Shift click select several materials, Delete asks once and deletes them all as one undo step", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    for (const char *n : {"MA", "MB", "MC", "MD"}) ed.command(std::string("newmat ") + n);
+    ed.command("select Cube");
+    ed.command("assignmat Assets/Materials/MA.mat");  // a slot that uses one of them
+    ed.command("window Materials");
+    r34_steps(ed, 3);
+    auto click = [&](const std::string &key, int mods) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) {
+        std::printf("    no '%s'\n", key.c_str());
+        return false;
+      }
+      const int x = b.x + b.w / 2, y = b.y + b.h / 2;
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+      m.mods = d.mods = u.mods = mods;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+      return true;
+    };
+    CHECK(click("mat:MA", 0));
+    CHECK(click("mat:MC", platform::MOD_CTRL));
+    CHECK(ed.materials_selected_for_test() == 2);
+    CHECK(click("mat:MD", platform::MOD_SHIFT));  // the range from the last click (MC) to MD
+    CHECK(ed.materials_selected_for_test() == 2);
+    CHECK(click("mat:MA", platform::MOD_CTRL));  // and MA again
+    CHECK(ed.materials_selected_for_test() == 3);
+    CHECK(click("mat:MB", platform::MOD_CTRL | platform::MOD_SHIFT));  // Ctrl+Shift adds the range from MA to MB
+    for (const char *n : {"MA", "MB", "MC", "MD"}) CHECK(ed.material_is_selected_for_test(n));  // (other tests' materials may lie between)
+    CHECK(click("mat:MB", platform::MOD_CTRL));  // MB out again; the range's others out by hand below
+    CHECK(!ed.material_is_selected_for_test("MB"));
+    CHECK(click("mat:MA", 0));  // back to exactly MA, MC, MD
+    CHECK(click("mat:MC", platform::MOD_CTRL) && click("mat:MD", platform::MOD_CTRL));
+    CHECK(ed.materials_selected_for_test() == 3);
+    /* Delete over the window: one question for all three. */
+    Recti wr = ed.window_rect_for_test(WindowKind::Materials);
+    platform::Event mv, kd;
+    mv.type = platform::EventType::MouseMove, mv.x = wr.x + wr.w / 2, mv.y = wr.y + wr.h / 3;
+    kd.type = platform::EventType::KeyDown, kd.key = platform::KEY_DELETE, kd.x = mv.x, kd.y = mv.y;
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({kd});
+    ed.step_frame_headless();
+    CHECK(ed.material_delete_pending());
+    for (const char *n : {"MA", "MC", "MD"}) CHECK(fs::exists(resolve_asset_path(std::string("Assets/Materials/") + n + ".mat")));  // only asked
+    Recti b;
+    CHECK(ed.button_rect_for_test("Delete All", b));
+    r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+    r34_steps(ed, 3);
+    int left = 0;
+    for (const char *n : {"MA", "MB", "MC", "MD"}) left += fs::exists(resolve_asset_path(std::string("Assets/Materials/") + n + ".mat"));
+    std::printf("    deleted three of four: %d material asset(s) left\n", left);
+    CHECK(left == 1 && !ed.material_delete_pending());
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>()->materials[0] == nullptr);  // its slot: the default material now
+    ed.command("undo");  // one step for the slots of all three
+    r34_steps(ed, 2);
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>()->materials[0] && cube->get<MeshRenderer>()->materials[0]->name == "MA");
+  });
+
+  test("assets: the Textures window takes Ctrl+A over its thumbnails and deletes every texture shown after one question", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    std::vector<std::string> paths;
+    for (const char *p : {"Bricks", "Noise", "Wood Floor"}) {
+      ProceduralTexturePtr t = ed.new_texture_asset_for_test(p);
+      CHECK(t != nullptr);
+      if (t) paths.push_back(resolve_asset_path(t->asset_path));
+    }
+    ed.command("window Textures");
+    r34_steps(ed, 3);
+    Recti b;
+    CHECK(ed.button_rect_for_test("tex:Bricks", b));
+    r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+    platform::Event a;
+    a.type = platform::EventType::KeyDown, a.key = platform::KEY_A, a.mods = platform::MOD_CTRL, a.x = b.x + b.w / 2, a.y = b.y + b.h / 2;
+    ed.step_frame_headless({a});
+    ed.step_frame_headless();
+    const size_t n = ed.textures_selected_for_test();
+    std::printf("    Ctrl+A: %zu textures selected\n", n);
+    CHECK(n == ed.texture_count_shown_for_test());
+    /* With a search, Ctrl+A takes only what shows. */
+    ed.set_texture_search_for_test("brick");
+    r34_steps(ed, 2);
+    ed.step_frame_headless({a});
+    ed.step_frame_headless();
+    CHECK(ed.textures_selected_for_test() == ed.texture_count_shown_for_test() && ed.texture_count_shown_for_test() >= 1);
+    ed.set_texture_search_for_test("");
+    ed.command("texdelete Bricks, Noise");  // the console path: names separated by commas
+    r34_steps(ed, 2);
+    CHECK(paths.size() == 3 && !fs::exists(paths[0]) && !fs::exists(paths[1]) && fs::exists(paths[2]));
+  });
+
+  test("assets: the Project window's Ctrl+click selects several files and Delete asks once", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    for (const char *nm : {"PA", "PB"}) ed.command(std::string("newmat ") + nm);
+    ed.command("window Project");
+    r34_steps(ed, 3);
+    ed.project_open_folder_for_test(fs::parent(resolve_asset_path("Assets/Materials/PA.mat")), "p");  // (the folder holds other tests' materials too)
+    r34_steps(ed, 3);
+    auto click = [&](const std::string &key, int mods) {
+      Recti b;
+      if (!ed.button_rect_for_test(key, b)) {
+        std::printf("    no '%s'\n", key.c_str());
+        return false;
+      }
+      platform::Event m, d, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      m.x = d.x = u.x = b.x + b.w / 2, m.y = d.y = u.y = b.y + b.h / 2;
+      m.mods = d.mods = u.mods = mods;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      return true;
+    };
+    CHECK(click("file:PA.mat", 0));
+    CHECK(click("file:PB.mat", platform::MOD_CTRL));
+    CHECK(ed.project_selected_count_for_test() == 2);
+    /* Delete with the mouse over the files: one question, then both go to the trash. */
+    Recti pb;
+    CHECK(ed.button_rect_for_test("file:PB.mat", pb));
+    platform::Event kd;
+    kd.type = platform::EventType::KeyDown, kd.key = platform::KEY_DELETE, kd.x = pb.x + pb.w / 2, kd.y = pb.y + pb.h / 2;
+    ed.step_frame_headless({kd});
+    ed.step_frame_headless();
+    Recti all;
+    CHECK(ed.button_rect_for_test("Delete All", all));
+    r34_click(ed, all.x + all.w / 2, all.y + all.h / 2);
+    r34_steps(ed, 2);
+    CHECK(!fs::exists(resolve_asset_path("Assets/Materials/PA.mat")) && !fs::exists(resolve_asset_path("Assets/Materials/PB.mat")));
+  });
 }
