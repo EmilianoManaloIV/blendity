@@ -2,6 +2,235 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 84): a README for GitHub and one user manual (task 0060)
+
+**Asked:** "Update the GitHub README and compress the tutorial docs into one document with examples and use cases",
+building on the Learn tab.
+
+**Added**
+- **docs/MANUAL.md**: one manual by stage of the work, the layouts' order:
+  - Getting around, reference and planning, blocking out, modeling, UVs, materials and textures, lighting and
+    rendering, rigging and skinning, animation, files, performance, shortcuts and the console.
+  - Each chapter has short examples to follow, its use cases, and the Learn lessons that go deeper.
+  - It takes in the old README's feature list and the lighting guide.
+- **Opening it:** Help > Open Manual and the `manual` console command open it (the project's copy, else GitHub's).
+  The Learn tab's Welcome lesson has a "The manual" section.
+
+**Changed**
+- **README.md** is a short front page:
+  - What Blendity is, the screenshots and a quick start.
+  - What it does by stage, the minimum and recommended machines, building, and links to the manual and the developer
+    documents.
+  - The stress highlights live in PERFORMANCE.md.
+- `docs/guides/lighting.md` points into the manual.
+- On Windows, opening a web address keeps its slashes.
+- `help` lists the rigging, auto-rig, animation and manual commands.
+- CMake's unit-test run starts in the source folder, as the fixtures need.
+
+**Checked**
+- New test (round 84): the manual has its 13 chapters, the README and the lighting guide link it, and every lesson
+  and lesson section it names is in the Learn tab under that lesson (with CRLF checkouts too).
+- Unit checks: Windows 9,658, 0 failed (628 tests); the whole suite in render-cache verify mode: 9,659,
+  0 failed, 0 stale pictures. Linux with libraries: 9,566, 0 failed. Sanitizer build: 9,483, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review**: the reviewer checked every menu path, field and number against the code. Fixed:
+- Shapes are under GameObject > Shapes (Parametric).
+- The lighting window is Window > Lighting.
+- Reference Image faces the front (`refimage ... side` for the others).
+- Rigging and Skinning are two layouts.
+- Preferences are Edit > Preferences... (Quality, Keymap).
+- The Bricks preset already has Edge Wear.
+- Axis Top / Side / Bottom and High Start.
+- Console: PlayStation (PS1).
+- Retiming drags the keys, not the ruler.
+- The GPU also bakes and runs realtime GI.
+- Two lessons were cited under the wrong lesson.
+- Old README sections were restored in the manual (origins, number expressions, Join / Follow / Shell..., Active
+  Camera, camera sequences, Transparent, the lighting settings).
+- The test's CRLF and working-folder handling.
+
+## 2026-10-13 (round 83): keyframe animation with a dopesheet, Unity's way (task 0059, ADR 0029)
+
+**Asked:** "A keyframe/animation system like Unity", "Dopesheet for now" (a Premiere-style clip sequencer later
+instead of a state machine).
+
+**Added**
+- **Animation clips**, `Assets/Animations/<name>.anim`:
+  - Tracks of numbers by path below the animated root: Position, Rotation (Euler degrees) and Scale, or any
+    component's number (`Light.Intensity`).
+  - Keys with Auto (Unity's Clamped Auto: smooth, no overshoot between two keys), Linear or Constant.
+- **The Animation window** (Window > Animation; the Animation layout along the bottom):
+  - Preview, Record, first / previous key / play / next key / last, the frame, the clip menu with Create New Clip,
+    and Add Property.
+  - The tracks, with a ruler, the playhead and key diamonds.
+  - Click, Shift+click or box-select keys; drag them in time; Delete; Ctrl+C / Ctrl+V at the playhead; double-click
+    to add; right-click for the interpolation.
+- **Record**: gizmo, Inspector or console changes to the animated objects become keys at the playhead.
+- **Preview**: scrubbing poses the scene without an undo step, and turning it off puts it back.
+- **The Animation component** (Unity's legacy one) plays its clip in Play (Loop, Once, Ping Pong, Clamp Forever,
+  Speed), before IK solves.
+- Key edits are undo steps; renaming a clip keeps the components pointing at it.
+- Console: `anim new|key|interp|frame|preview|record|play|stop`.
+- Learn: "Keyframes and the dopesheet" in the Bones and skins lesson, with questions.
+
+**Checked**
+- New tests (round 83):
+  - Sampling: Constant, Linear, and Auto through a peak without overshoot.
+  - The file, with names holding spaces and a bad line skipped.
+  - Wrapping, including a negative Speed.
+  - Keys on a lid: scrubbing makes no undo step, and Preview off puts the lid back.
+  - Record keys a move but not a rename or a new child, and one undo takes the keys back.
+  - Preview leaves unrelated objects alone, and an undo afterwards doesn't bring the pose back.
+  - In Play, a bone turns and the Blender tube's skin follows.
+  - Dopesheet clicks: the ruler, dragging a key, Delete.
+  - Renaming a clip, and undo after it.
+  - Preview refused in Play; New Scene clears the window.
+- Stress `animation`: 201 tracks in 0.074 ms a frame (target 0.2 ms).
+- Unit checks: Windows 9,653, 0 failed (627 tests); the whole suite in render-cache verify mode: 9,654,
+  0 failed, 0 stale pictures. Linux with libraries: 9,561, 0 failed. Sanitizer build: 9,478, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: seven majors and several minor findings, fixed:
+- Property names with spaces broke the file.
+- Preview put back every object in the scene.
+- The previewed pose leaked into undo.
+- Preview survived Play and scene switches.
+- Record keyed renames, new children and IK-driven bones.
+- Clips weren't forgotten on delete or cleared on another project.
+- A rename didn't reach undo states.
+- Also fixed:
+  - Bad numbers in a file.
+  - A negative Speed.
+  - Missing clips read every frame.
+  - The clip list walked every 2 s.
+  - Pasting into another clip.
+  - Moved keys' interpolation.
+  - Fractional record frames.
+  - Key edits in Play.
+  - Console objects outside the root.
+  - Unsafe clip file names.
+  - Euler flips on record.
+  - No dopesheet scroll.
+  - Nesting.
+
+## 2026-10-13 (round 82): the marker auto-rig, humanoid and quadruped (task 0058, ADR 0028 part 2)
+
+**Asked:** "A Mixamo-styled automatic weight paint ... I want the markers and inpainted weights, but I want support for
+quadruped auto rigging as well."
+
+**Added**
+- **Rigging > Auto-Rig**: Humanoid or Quadruped, with the character's mesh selected.
+  - The Scene view turns to an orthographic front view (an animal: its left side).
+  - A diagram shows the markers, the next one in orange.
+- **Placing**: each click puts the next marker inside the body, halfway through the first part under the mouse.
+  - Symmetry mirrors left and right.
+  - Drag a marker to move it; Remove Last takes one back.
+- **Markers**:
+  - A person (Mixamo's): chin, wrists, elbows, knees, groin.
+  - An animal: nose, base of the skull, withers, hips, base and tip of the tail, paws, front knees, hind hocks.
+- **Build Rig**:
+  - The skeleton with the presets' bone names (an animal also gets a three-bone tail).
+  - IK on every limb, the poles following each limb's own bend.
+  - The mesh bound with inpainted weights.
+  - Its markers stay for another try.
+- Console: `autorig humanoid|quadruped`, `autorig mark <marker> <x> <y> <z>`, `autorig symmetry on|off`,
+  `autorig build`, `autorig cancel`.
+- Learn: "Auto-rig with markers" in the Bones and skins lesson, with questions.
+
+**Checked**
+- New tests (round 82):
+  - A 1.7 m mannequin's and a dog's markers give their bones within 2 % of the height.
+  - Every vertex weighted.
+  - Bending the forearm moves the hand (0.31) not the hips; lifting a front paw moves it (0.30) not the head.
+  - Clicks in the front view land mid-depth (z = 0.000) and mirror.
+  - Bent limbs stay as placed (bones at rest within 6e-8).
+  - Markers on the wrong side, and a dog facing -Z, keep their sides.
+  - Upside-down markers and unknown names are refused.
+  - New Scene ends a session.
+  - The background bind, its undo, and markers kept for a rerun.
+- Unit checks: Windows 9,613, 0 failed (619 tests); the whole suite in render-cache verify mode: 9,614,
+  0 failed, 0 stale pictures. Linux with libraries: 9,521, 0 failed. Sanitizer build: 9,438, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review (code reviewer)**: three majors and several minor findings, fixed:
+- Build Rig turned limbs that weren't bent the poles' fixed way.
+- The mesh's move gizmo took marker clicks.
+- A session outlived New Scene, Open Scene and Play (a new scene's object ids could point it at another object).
+- Also fixed:
+  - Duplicate crossings at shared edges.
+  - Weight Paint and Edit Mode during a session.
+  - Double-clicks framing the view.
+  - Esc taken from G / R / S.
+  - Build while a solve ran.
+  - An animal facing -Z.
+  - Upside-down markers.
+  - A wide stance.
+  - Unknown marker names.
+
+## 2026-10-13 (round 81): automatic weights and weight transfer by inpainting (task 0057, ADR 0028)
+
+**Asked:** "A Mixamo-styled automatic weight paint ... based on Epic's Robust Skin Weights Transfer via Weight
+Inpainting", with transfer from a body onto clothing.
+
+**Added**
+- **Bind: Automatic Weights** now inpaints:
+  - A vertex clearly nearest one bone (under 0.8 of the next one's distance) that the bone can see (nothing of the
+    mesh in between) takes that bone whole.
+  - The rest get the smoothest weights that agree with those: one sparse solve per bone of `Q = -L + L M^-1 L` (the
+    cotangent Laplacian and Voronoi areas), by Eigen's LDLT or conjugate gradients.
+  - A hand hanging by a thigh, or below its own arm bone, takes no leg weight.
+  - A bone no vertex is nearest (a tip bone past the end of a column) takes the vertices nearest it, so posing it still
+    moves that end (round 69's Armature test).
+  - **Bind: Envelope** keeps the old distance weights.
+- **Transfer Weights** (Rigging window, `skin transfer <body> [mesh]`): a rigged body's weights onto clothing.
+  - Matches within 5 % of the clothing's size with normals within 30 degrees (or opposite) copy; the rest are
+    inpainted.
+  - An **InpaintMask** vertex group forces places to be inpainted.
+  - The clothing gets the body's Armature (Skin) modifier.
+  - The body is an object field: drag it from the Hierarchy.
+- **Large meshes (5,000+ vertices) solve on a worker thread**, in a job arena of their own, with a progress bar and
+  Cancel. They land as one undo step; undo, Play or another scene cancels them.
+- Console: `skin bind [object] [inpaint|envelope]`, `skin transfer <source> [target]`, `skin cancel`.
+- Learn: "Automatic weights by inpainting" and "Weights onto clothing" in the Bones and skins lesson, with questions.
+
+**Checked**
+- New tests (round 81):
+  - The Laplacian is symmetric, its rows sum to 0, and the masses add up to the area.
+  - Inpainting between known ends is a monotone partition of unity.
+  - A transfer onto a copy (renumbered and 2 mm out) gives back the weights within 1e-4.
+  - The paper's loose sleeve takes no torso weight (plain closest point gives it 1.0).
+  - InpaintMask vertices are inpainted, and a source's mask isn't carried.
+  - A hand by the thigh takes no leg weight, whether by the ratio test or by visibility.
+  - Short spine bones in a wide torso each get a band and blend (largest step between rings 0.14).
+  - A NaN vertex, a wire edge and a zero-area face still give a partition, by the direct solver.
+  - `skin bind` at once and on a worker thread, each one undo step; cancel, undo during a solve and closing the
+    editor mid-solve.
+  - Transfer by console and by dragging the body onto the Rigging window's field; the sleeve then bends with the arm.
+- Stress `skin_weights` (8 threads, Eigen): 50k vertices in 108 ms (automatic) and 31 ms (transfer), against the
+  2 s target. The editor's slowest frame while it solves 50k in the background: 1.4 ms.
+- Unit checks: Windows 9,576, 0 failed (613 tests); the whole suite in render-cache verify mode: 9,577,
+  0 failed, 0 stale pictures. Linux with libraries: 9,484, 0 failed. Sanitizer build: 9,401, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures, stress skin_weights: 50k vertices in 108 ms on 8 threads.
+
+**Review (code reviewer)**: five majors and several minor findings, fixed:
+- Short bones got hard bands.
+- A wire edge or NaN vertex made the solve singular and dropped it to conjugate gradients.
+- A transfer normalised over InpaintMask and non-bone groups.
+- A large mesh's Add Armature (Skin) had no undo step.
+- The background solve shared the job pool with the editor's frames.
+- Also fixed:
+  - Undo or Play during a solve.
+  - Vertices moved during a solve.
+  - No frames while a solve ran with the window closed.
+  - The Inspector's bind button.
+  - Unconverged solves went unreported.
+  - The solve depended on the mesh's scale.
+  - Exceptions in the worker.
+  - Copying render caches.
+  - Nesting.
+  - Tests that missed the closest-point path and the visibility rule.
+
 ## 2026-10-13 (round 80): flatter code after the review on PR #50
 
 **Asked:** "Can you read feedback in my GitHub and then make appropriate changes?" The one review (PR #50, task 0053):

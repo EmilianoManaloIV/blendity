@@ -184,6 +184,6 @@ add_executable(blendity_tests tests/test_main.cpp)
 target_link_libraries(blendity_tests PRIVATE blendity_engine)
 
 enable_testing()
-add_test(NAME unit_tests COMMAND blendity_tests)
+add_test(NAME unit_tests COMMAND blendity_tests WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})  # (fixtures and docs by relative path)
 add_test(NAME stress_quick COMMAND blendity_stress --quick --out ${CMAKE_BINARY_DIR}/stress_results
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

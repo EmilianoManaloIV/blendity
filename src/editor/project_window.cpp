@@ -51,12 +51,40 @@ const std::vector<std::string> &Editor::material_asset_paths() {
 void Editor::invalidate_project_listing() {
   project_listed_ = -100;
   material_paths_listed_ = -100;
+  anim_clip_paths_listed_ = -100;
+}
+
+/* Animation clips moved (task 0059): the library, every Animation component naming one - in the scene and in every
+ * undo / redo state, which aren't shared like materials - and the clips' texts the undo states keep. */
+void Editor::retarget_clip_references(const std::string &from, const std::string &to) {
+  retarget_clip_assets(from, to);
+  auto moved = [&](std::string &p) {
+    std::replace(p.begin(), p.end(), '\\', '/');
+    const bool under = p == from || (p.size() > from.size() && p.compare(0, from.size(), from) == 0 && p[from.size()] == '/');
+    if (under) p = to + p.substr(from.size());
+  };
+  auto fix_scene = [&](Scene *s) {
+    if (!s) return;
+    s->for_each([&](GameObject &g) {
+      if (Animation *an = g.get<Animation>()) moved(an->clip);
+    });
+  };
+  fix_scene(scene_.get());
+  fix_scene(stable_.get());
+  for (std::vector<UndoState> *list : {&undo_, &redo_})
+    for (UndoState &u : *list) {
+      fix_scene(u.scene.get());
+      for (auto &kv : u.clips) moved(kv.first);
+    }
+  for (auto &kv : clip_before_) moved(kv.first);
+  anim_clip_paths_listed_ = -100;
 }
 
 /* Every reference to `from` (a file or a folder, project-relative) now points at `to`. */
 void Editor::retarget_asset_references(const std::string &from, const std::string &to) {
   retarget_material_assets(from, to);
   retarget_texture_assets(from, to);
+  retarget_clip_references(from, to);
   auto fix = [&](Material &m) {
     for (TextureRef *t : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map}) {
       std::string p = t->path;
@@ -157,6 +185,7 @@ bool Editor::delete_project_entry(const std::string &path) {
   /* Materials from it stay on the objects that use them, as scene materials. */
   const size_t n = forget_material_assets(rel);
   forget_texture_assets(rel);
+  forget_clip_assets(rel);  // (a deleted clip isn't written back)
   if (path_inside(project_selected_, path)) project_selected_.clear();
   if (path_inside(project_dir_, path)) project_dir_ = fs::parent(path);
   invalidate_project_listing();

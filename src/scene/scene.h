@@ -960,6 +960,9 @@ void armature_bones(const GameObject &root, std::vector<ArmatureBone> &out);
 Mat4 armature_base(const GameObject &root);  // the root's parent's world matrix (rest matrices are relative to it)
 /* Automatic weights: groups named after the bones, from each vertex's distance to them (skin.cpp). */
 bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error = nullptr);
+struct BoneSegment;  // skin_weights.h
+/* Each deforming bone of the modifier's armature at rest, head to tail, in the mesh's space (task 0057). */
+bool skin_bone_segments(const SkinModifier &s, std::vector<BoneSegment> &out, std::string *error = nullptr);
 Quat slerp(Quat a, Quat b, float t);  // skin.cpp
 
 /* Blender: Inverse Kinematics bone constraint (task 0048). On a chain's end bone: the chain turns so the end's tip

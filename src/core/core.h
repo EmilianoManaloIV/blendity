@@ -85,6 +85,7 @@ std::string home_dir();
 std::string normalize(const std::string &path);
 /* Opens a file or folder with the OS default handler (papers, folders). */
 void open_external(const std::string &path);
+bool is_web_address(const std::string &path);  // "https://..." (open_external keeps its slashes)
 }  // namespace fs
 
 /* ---------------------------------------------------------------- System (task 0050: the minimum machine) */

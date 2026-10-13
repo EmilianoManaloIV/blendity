@@ -191,6 +191,10 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A character exported mid-pose imported with that pose as its rest: the skin was wrong and Reset Pose did nothing. | Bones rest at their bind pose (as in Blender, Unity, Maya); the saved pose stays on them and Reset Pose gives the bound shape. |
 | Fields that name another object (Boolean, Lattice, IK Target...) had to be typed. | Drag the object from the Hierarchy onto the field; the Inspector stays on the object being edited. |
 | Clicking the Layout dropdown crashed the editor. | Fixed: a dropdown's list keeps its own copy of its names. |
+| Automatic weights bled across gaps (a hand by a thigh took leg weight) and clothing had to be weighted by hand. | Bind: Automatic Weights inpaints from vertices each bone clearly owns and sees; Transfer Weights copies a body's weights onto clothing and inpaints where they don't match. |
+| Rigging a character meant placing every bone by hand. | Auto-Rig: click a few markers on the mesh (Mixamo's, or an animal's), Build Rig. |
+| Nothing could be animated. | The Animation window (a Unity-style dopesheet with Record and Preview) and the Animation component. |
+| How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 
 ## Still worth doing
 

@@ -31,9 +31,14 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/animation.h"
+#include "../scene/auto_rig.h"
+#include "../scene/skin_weights.h"
 #include "ui.h"
 
 #include <functional>
+#include <thread>
+#include <tuple>
 #include <map>
 #include <memory>
 #include <set>
@@ -82,7 +87,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -188,6 +193,58 @@ struct DeleteQuestion {
   std::function<void()> on_delete, on_close;  // on_close: answered either way, or clicked away
 };
 
+/* The Animation window's state (task 0059): which clip, the playhead, Preview and Record, the selected keys. */
+struct AnimEditorState {
+  uint64_t root = 0;  // the object last animated (its Animation component's clip is edited)
+  float frame = 0.0f;
+  bool preview = false, record = false, playing = false;
+  double play_clock = 0.0;
+  float play_from = 0.0f;
+  std::vector<std::pair<int, float>> selected;  // (track, key frame)
+  std::vector<std::pair<uint64_t, Transform>> saved_pose;  // every object's transform before Preview (put back after)
+  std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;  // the animated component numbers likewise
+  std::unordered_map<std::string, float> shown;  // each animated number as last shown (Record compares with it)
+  uint64_t shown_root = 0;  // the root and clip `shown` was taken for (another one: look again before recording)
+  const AnimationClip *shown_clip = nullptr;
+  int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
+  int drag_x = 0, drag_y = 0;
+  int scroll = 0;  // the first track row shown
+  std::vector<std::tuple<std::string, std::string, int, AnimKey>> clipboard;  // (path, property, axis, key from the first copied)
+};
+
+/* The marker auto-rig being placed (task 0058): which mesh, which kind, the markers so far. */
+struct AutoRigSession {
+  bool active = false;
+  RigKind kind = RigKind::Humanoid;
+  uint64_t mesh = 0;
+  MarkerMap markers;
+  std::vector<std::string> order;  // the ones placed by hand, in order (Remove Last)
+  bool symmetry = true;
+  std::string dragging;  // a marker being dragged in the Scene view
+};
+
+/* A skin-weight solve (task 0057): a copy of the mesh in, its new groups out, on a worker thread when the mesh is
+ * large (Editor::run_skin_job). */
+struct SkinWeightJob {
+  using Solve = std::function<bool(Mesh &, const InpaintOptions &, InpaintReport *, std::string *)>;
+  uint64_t object = 0;    // the mesh's GameObject
+  uint64_t source = 0;    // a transfer's source (its Skin modifier is copied to a target without one)
+  uint64_t topology = 0;  // meshops::topology_key at the start: a mesh edited meanwhile drops the result
+  std::string label;      // the undo step's name
+  std::vector<std::string> groups;  // the groups it makes
+  Mesh result;
+  Solve solve;
+  std::thread worker;
+  std::atomic<float> progress{0.0f};
+  std::atomic<bool> cancel{false}, done{false};
+  bool ok = false;
+  std::string error;
+  InpaintReport report;
+  uint64_t positions = 0;  // a hash of the mesh's positions at the start (vertices moved meanwhile: dropped too)
+  void run();
+  ~SkinWeightJob();
+};
+
 /* A multi-selection in a list of assets (task 0053): the Hierarchy's clicks (Ctrl toggles, Shift selects the range
  * from the last click in the order shown, Ctrl+Shift adds that range, a plain click selects one), Ctrl+A all shown. */
 template<class T> struct MultiSelect {
@@ -262,6 +319,7 @@ struct UndoState {
   uint64_t active = 0;
   std::string label;
   std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
+  std::vector<std::pair<std::string, std::string>> clips;     // animation clips' texts likewise (task 0059)
   size_t bytes = 0;  // what only this state held when it was stored (its own meshes, objects, texts): the undo budget
 };
 
@@ -492,6 +550,13 @@ class Editor {
     return out;
   }
   bool weight_paint_active_for_test() const { return weight_paint_; }
+  void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
+  bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
+  const AutoRigSession &autorig_for_test() const { return autorig_; }
+  const AnimEditorState &anim_for_test() const { return anim_; }
+  AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
+  std::string autorig_next_for_test() const { return autorig_next(); }
+  void autorig_remove_last_for_test() { autorig_remove_last(); }
   std::string wp_group_name_for_test() {
     const Mesh *m = wp_mesh();
     const int gi = m ? wp_group(*m) : -1;
@@ -511,6 +576,7 @@ class Editor {
     return (hier_dragging_ && hier_drag_ && (ui_.in.down[0] || ui_.in.released[0])) ? scene_->find(hier_drag_) : nullptr;
   }
   void object_field_took_drop() { hier_field_took_drop_ = true; }
+  bool object_field(const char *name, const Recti &f, std::string &v);  // panels.cpp
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
     if (it == hierarchy_rows_.end()) return false;
@@ -631,7 +697,82 @@ class Editor {
   /* Rigging (task 0047): bone add <parent> [length], armature reset|apply [root], skin bind [object]. */
   void rig_command(const std::vector<std::string> &t);
   bool armature_pose(GameObject *root, bool apply_as_rest);  // Reset Pose (false) / Apply as Rest (true)
-  bool skin_bind(GameObject *g);
+  enum class SkinBind { Inpaint, Envelope };
+  bool skin_bind(GameObject *g, SkinBind how = SkinBind::Inpaint);
+  bool skin_transfer(GameObject *source, GameObject *target);  // the body's weights onto clothing (task 0057)
+  void skin_command(const std::vector<std::string> &t);       // skin bind | transfer | cancel
+  bool run_skin_job(GameObject *g, const char *label, std::vector<std::string> names, SkinWeightJob::Solve solve, uint64_t source = 0);
+  void poll_skin_job();    // each frame: a finished background solve lands
+  bool finish_skin_job();  // applies the result as one undo step
+  void give_skin_modifier(GameObject *target, uint64_t source);
+  void draw_skin_job_progress(ui::Layout &lay);
+  void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
+  /* The Animation window (task 0059, animation_window.cpp). */
+  AnimEditorState anim_;
+  std::vector<std::pair<std::string, std::string>> clip_before_;  // clips' texts before their first edit since the last undo step
+  std::vector<std::string> anim_clip_paths_;
+  double anim_clip_paths_listed_ = -100;
+  GameObject *anim_root();
+  AnimationClipPtr anim_clip();
+  AnimationClipPtr anim_new_clip(GameObject *root, const std::string &name);
+  void anim_snapshot_shown();
+  void anim_apply();
+  void anim_set_frame(float f);
+  void anim_set_preview(bool on);
+  void note_clip_edit(AnimationClip &c);
+  void restore_clip_texts(const std::vector<std::pair<std::string, std::string>> &texts, std::vector<std::pair<std::string, std::string>> *current);
+  void anim_record_changes();
+  bool anim_changed(uint64_t id, const std::string &property, int axis, float v) const;
+  bool anim_record_vector(AnimationClip &clip, GameObject &g, const std::string &path, const char *prop, float frame);
+  void anim_reset();
+  void retarget_clip_references(const std::string &from, const std::string &to);
+  void anim_tick();
+  void anim_edit_keys(const char *label, const std::function<void(AnimationClip &)> &edit);
+  void anim_add_key(size_t track, float frame);
+  void anim_delete_selected();
+  void anim_move_selected(float delta);
+  void anim_set_interp(int interp);
+  void anim_copy();
+  void anim_paste();
+  void anim_add_property(GameObject *g, const std::string &property, int axes);
+  std::vector<float> anim_key_frames();
+  void anim_step_key(int dir);
+  const std::vector<std::string> &anim_clip_paths();
+  void draw_anim_toolbar(const Recti &bar, GameObject *root);
+  void anim_pick_clip(GameObject *root, const std::string &path);
+  void draw_anim_add_property(GameObject *root);
+  float anim_frame_at(const Recti &sheet, int x, float end) const;
+  int anim_x_of(const Recti &sheet, float frame, float end) const;
+  bool anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, int &track, float &frame);
+  bool anim_selected(int track, float frame) const;
+  void anim_sheet_input(const AnimationClip &clip, const Recti &ruler, const Recti &sheet, int row_h, float end);
+  void anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end);
+  void draw_animation_window(const Recti &r);
+  void anim_command(const std::vector<std::string> &t);
+  void open_manual();  // Help > Open Manual, `manual`
+  /* The marker auto-rig (task 0058, auto_rig_tool.cpp). */
+  AutoRigSession autorig_;
+  AutoRigSession autorig_last_;  // the last built session's markers: starting again on that mesh brings them back
+  bool autorig_start(GameObject *mesh, RigKind kind);
+  std::string autorig_next() const;  // the marker to place next ("" when all are)
+  void autorig_place(const std::string &name, Vec3 at);
+  void autorig_remove_last();
+  void autorig_cancel();
+  bool autorig_build();
+  bool autorig_update(const Recti &view);  // Scene view clicks while placing
+  std::string autorig_marker_at(int mx, int my);
+  void draw_autorig_markers(const Recti &view);
+  void draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj);
+  void draw_autorig_diagram(ui::Layout &lay);
+  void autorig_command(const std::vector<std::string> &t);
+  bool body_midpoint(GameObject *g, const Ray &ray, Vec3 &out);
+  void cancel_skin_job() {
+    if (skin_job_) skin_job_->cancel = true;  // (it ends at its next check; finish_skin_job drops it)
+  }
+  void draw_skin_transfer(GameObject *target, ui::Layout &lay);  // the Rigging window's Transfer Weights
+  std::unique_ptr<SkinWeightJob> skin_job_;
+  size_t skin_async_min_verts_ = 5000;  // smaller meshes solve at once
+  std::string skin_transfer_source_;    // the Rigging window's Transfer From field
   void draw_control_points(const Recti &view, const GameObject &g, const Component &pc);
   bool point_pick(const Recti &view, int mx, int my, int mode);
   GameObject *point_target(std::vector<int> &points);

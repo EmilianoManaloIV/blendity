@@ -1,6 +1,10 @@
 # Blendity
 
-**Blender's modeling, UV, texturing and rendering, driven like Unity.** Blendity is a 3D editor written in C++17. Its windows, navigation, shortcuts, gizmos, Inspector and Play mode follow the Unity editor. Underneath, its meshes, Edit Mode tools, UV unwrapping, Principled materials and two render engines (an EEVEE-like rasterizer and a Cycles-like path tracer) follow Blender's design and source code. A built-in **Learn** tab teaches how each piece maps across Unity, Blender and the graphics theory in the reference books.
+**Blender's modeling, UVs, materials, rendering, rigging and animation, driven like Unity.** Blendity is a 3D editor
+written in C++17. Its windows, navigation, shortcuts, gizmos, Inspector and Play mode follow the Unity editor;
+underneath, its meshes, Edit Mode tools, UV unwrapping, Principled materials, render engines (an EEVEE-like
+rasterizer and a Cycles-like path tracer on the CPU and any Vulkan GPU), skins and IK follow Blender's design and
+source code. A built-in **Learn** tab teaches each piece interactively.
 
 ![Blendity editor](docs/images/editor.png)
 
@@ -10,42 +14,61 @@
 | **Edit Mode: loop cuts** | **Learn tab** |
 | ![Edit mode](docs/images/editmode.png) | ![Learn tab](docs/images/learn.png) |
 
----
+**→ The [manual](docs/MANUAL.md)** walks through the work stage by stage, with examples.
 
-## Run it
+## Quick start
 
-| Platform | Executable | Status |
-|---|---|---|
-| **Windows** 10/11 x64 | `dist/windows/Blendity.exe`, with Blender's library DLLs beside it (the dependency-free build is one static file). No installer | Built and tested here (real window + headless) |
-| **Linux** x64 (X11 / XWayland) | `dist/linux/Blendity` + `dist/linux/lib/`: needs only `libX11` from the system | Built and tested here (WSL Ubuntu) |
-| **macOS** (Apple Silicon / Intel) | `dist/macos/Blendity.app` via `./build.sh` or the CI artifact | ⚠️ Written but **not compiled or run here** (no Mac available). The GitHub Actions workflow builds and tests it on `macos-latest` |
-
-Double-click the executable, or run it from a terminal:
+1. Build it (below) or download the build for your system from the GitHub Actions artifacts, then run
+   `dist/windows/Blendity.exe` (Windows: no installer), `dist/linux/Blendity` (Linux: needs only `libX11`, with
+   `dist/linux/lib/` beside it) or `dist/macos/Blendity.app`.
+2. Press **F1** for the Learn tab, or pick a stage from the **Layout** dropdown (top right).
+3. Alt+drag orbits, the wheel zooms, W / E / R move, rotate and scale, Tab enters Edit Mode, Ctrl+P plays.
 
 ```bash
 Blendity --layout Learning      # start with the Learn tab beside the Scene view
 Blendity --scene Assets/Scenes/SampleScene.scene
-Blendity --scale 1.5            # force UI scale (default follows OS DPI)
+Blendity --scale 1.5            # force the UI scale (default follows the OS DPI)
 Blendity --headless-screenshot out.png --cmd "select Cube" --cmd "shading rendered" --frames 30   # no window
 ```
 
-**Minimum machine**: a 4-core / 8-thread CPU at about 3 GHz, 8 GB of RAM, a GTX 1050 Ti class GPU (Vulkan 1.2; the
-GPU is only for path tracing). On such a machine Blendity starts on the **Low** quality tier (Preferences >
-Performance): the Scene and Game views draw their 3D at 67 % and scale it up, with a 1024 shadow map and 60 fps.
-Renders (F12) always use the scene's own settings.
+## What it does, stage by stage
 
-**Layouts for each stage** (the Layout dropdown, top right): Reference & Planning, Blocking Out, Modeling & Topology,
-UV Unwrapping, Texturing & Materials, Lighting & Rendering, Rigging, Skinning & Weight Painting, Animation. Each
-arranges the windows and shows only that stage's tools (Window > Layouts > Show All Tools shows everything); Save
-Layout... keeps your own.
+Each stage is a **layout** that arranges the windows and shows only that stage's tools (Show All Tools shows
+everything):
 
-New to the editor? Press **F1** (or the orange **Learn** button).
+- **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
+- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull**, Booleans, snapping.
+- **Modeling & Topology** - Blender's Edit Mode (extrude, inset, bevel, loop cut, bridge, knife, n-gons, F9), a
+  modifier stack (Array, Bevel, Boolean, Mirror, Subdivision, Lattice, Curve, Mesh Deform...), curves and lattices
+  edited with the same keys.
+- **UV Unwrapping** - a UV Editor with LSCM unwrap, Smart UV Project, projections and island packing.
+- **Texturing & Materials** - Principled materials and material assets, layered **procedural textures**, axis
+  materials, toon shading, texture baking.
+- **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps, probe volumes and voxel realtime GI;
+  F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan); camera filters from colour
+  grading to PlayStation and manga looks.
+- **Rigging**, and **Skinning & Weight Painting** - bones, skins, weight paint and IK in a Rigging window; **automatic
+  weights and weight transfer by inpainting** (Epic, 2023); a **Mixamo-style marker auto-rig** for people and
+  four-legged animals; rigged FBX / glTF import with bind poses.
+- **Animation** - a **Unity-style dopesheet** with Record and Preview, and the Animation component for Play.
+
+Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2. The keymap starts
+from Unity, Blender, Maya, 3ds Max or SketchUp.
+
+## Machines
+
+| | Minimum | Recommended |
+|---|---|---|
+| CPU | 4 cores / 8 threads, about 3 GHz | 8+ cores |
+| RAM | 8 GB | 16 GB+ |
+| GPU | GTX 1050 Ti class (Vulkan 1.2; for path tracing, baking and realtime GI) | a GPU with ray tracing hardware (RTX, RX 6000+, Arc) |
+
+The minimum machine starts on the **Low** quality tier (Edit > Preferences..., Quality): the views draw at 67 % and scale
+up, with a 1024 shadow map and 60 fps. Renders always use the scene's own settings.
 
 ## Build it
 
-You only need a compiler. Blender's own small bundled libraries are already in `extern/`.
-
-**Optional: Blender's prebuilt libraries.** Put Blender's library folder for your platform at `../blender/lib/<platform>` (from `projects.blender.org/blender/lib-windows_x64`, `lib-linux_x64` or `lib-macos_arm64`). The build then picks up Embree, OpenImageDenoise, oneTBB, Eigen, OpenSubdiv, OpenEXR, OpenColorIO, Manifold, meshoptimizer, Open PGL, Jolt, libjpeg-turbo, libpng, zlib, Zstandard, and Vulkan + shaderc (GPU rendering), and copies their runtime files next to the executables. Each one is optional and has a built-in fallback. `BLENDITY_NO_LIBS=1` (or `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
+You only need a compiler; Blender's small bundled libraries are in `extern/`.
 
 ```bash
 build.bat release all            # Windows: finds Visual Studio / Build Tools automatically
@@ -57,149 +80,37 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-Each build produces **`Blendity`** (the editor), **`blendity_tests`** (9523 unit checks in 599 tests with Blender's libraries; the dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). Pushing to GitHub runs `.github/workflows/build.yml`, which builds, tests and uploads binaries for all three operating systems, and runs the unit tests under AddressSanitizer / UBSan.
+**Optional: Blender's prebuilt libraries** (from `projects.blender.org/blender/lib-windows_x64`, `lib-linux_x64` or
+`lib-macos_arm64`) at `../blender/lib/<platform>` add Embree, OpenImageDenoise, oneTBB, Eigen,
+OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc and others; each has a built-in fallback,
+and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-**Contributing.** `CLAUDE.md` holds the engineering standards. Work starts as a task spec in `docs/tasks/` (and a decision record in `docs/decisions/` when it is architectural), approved before code is written. It is implemented and independently tested and reviewed (the agents in `.claude/agents/`), then lands through a pull request that CI must pass and a human merges. What Blendity must do is in `docs/requirements.md`.
+Each build produces **`Blendity`**, **`blendity_tests`** (9658 unit checks in 628 tests with Blender's libraries; the
+dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
+Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
+and tested only on CI (no Mac here).
 
-## What you can do
+## Documentation
 
-**Model (Blender's Edit Mode, Unity's handles).** Primitives (cube, UV/ico sphere, cylinder, cone, torus, plane, quad). Vertex, edge and face selection, box select, edge loops, gizmo editing with **proportional editing**. Extrude, inset, **loop cut** (any number of cuts, slide), **fill**, **merge at center**, **recalculate normals**, delete, subdivide, smooth, triangulate, merge by distance. Edge tools: **bevel** (rounded with segments), **bridge** two faces or two holes with a tube (at any angle, with different vertex counts, curved with segments), subdivide, connect (J), dissolve and collapse. The tools follow the **selection mode**, as in ProBuilder and Blender: vertex mode offers vertex operations (merge, connect, make face, smooth), edge mode edge operations (bevel, loop cut, bridge, subdivide, dissolve, collapse, seams) and face mode face operations (Push/Pull, extrude, inset, push through, bridge, fuse, materials), in the Mesh menu, the Inspector and the shortcuts alike. **Push/Pull** (P in face mode), like SketchUp's, is a confirmed operation: press P with faces selected, move the mouse or type a distance, then click or press Enter (Esc or right-click cancels). Faces around it that continue in the same plane stretch instead of growing walls, so a box top just moves and a face at an edge makes a clean notch or step. Push all the way to the far side and it becomes a **hole**, cut into the face it comes out of at that face's angle. Pull it onto another face and it **joins** that face, landing at the face's angle even when it isn't parallel. It never passes through the mesh: it stops at the far side or at whatever is in the way, and when the faces around it lean over it, its corners slide along them like Blender's face move. Ctrl keeps the original face. A stress test runs it 26,000 times on awkward meshes (concave n-gons, inside-out, unwelded, non-manifold, 0.1 mm to 10 km, far from the origin) and checks every result. Also from Blender: **Poke, Triangulate, Tris to Quads, Duplicate, Split, Dissolve Faces / Vertices, Extrude Individual, Edge Split, Shrink/Fatten, To Sphere, Randomize, Mark Sharp**, and selection tools (**Linked, More / Less, Invert, Non-Manifold, Edge Ring, Coplanar**). Edge mode keeps the edges you pick (two opposite sides of a quad stay two edges). **Shade Smooth / Flat work per face** and stop at sharp edges (and optionally at UV seams). Blender's modal **G / R / S** work alongside Unity's tools: X / Y / Z axis locks, typed values, Ctrl snap, Esc cancel; see [`docs/USABILITY.md`](docs/USABILITY.md) for how the two keymaps share the keyboard. **Set Origin** (GameObject menu, Inspector > Transform, or the `origin` command) moves the pivot to the bounds centre, the median, the surface or volume centre of mass, the bottom centre, a typed point, the edit selection or the Scene view pivot, without moving anything on screen. **Push Through** (Alt+P) does the hole in one step, and extruding or moving a face onto another face fuses them the same way. After each tool an **Adjust Last Operation** panel (Blender's F9) lets you change its settings and move the result in X / Y / Z or along the normal, as one undo step.
-
-**Build from points, lines and shapes.** **Extrude vertices and edges** (E / Ctrl+E in vertex or edge mode, then move): a lone vertex grows a new edge (Blender's wire edges, which save, select, extrude and draw like any edge), an edge grows a face, so a shape can start from a single point; faces whose corners are all selected extrude as a region, as in Blender. **Join** (Ctrl+J) combines the selected meshes into the active one, keeping placement and materials; **Separate** splits off the Edit Mode selection or every loose part. **Boolean** (Mesh > Boolean, or the Hierarchy menu): Union, Difference or Intersect, applied at once (the cutters are used up, like Bool Tool's Auto) or as a live modifier whose cutter turns into a wire outline kept out of renders (Bool Tool's Brush), on Blender's own Manifold solver. **Parametric shapes** (GameObject > 3D Object > Shapes, or the Hierarchy's create menu): Box, Plane, Cylinder, Cone / frustum, Sphere, Icosphere, Torus, Capsule, Pipe, Arch, Stairs (solid or a flight), Wedge and Prism keep their settings (size, steps, radius, thickness, segments...) in the Inspector and rebuild as you change them, like ProBuilder's Shapes and Blender's Adjust Last Operation; editing the mesh makes it an ordinary one.
-
-**SketchUp-style n-gons.** **N-gon Mode** (Edit Mode, Inspector or Mesh menu) treats each flat region as one face: its inner edges hide, one click selects all of it and Push/Pull moves it. **Merge Coplanar** (Blender's Limited Dissolve) turns those regions into real n-gons, and the **Knife / Line** tool (K) splits a face again along a line between two points on its edges, snapping to endpoints (green), midpoints (cyan) and anywhere on an edge (red), with lines chaining on like SketchUp's.
-
-**Origins.** **Edit Origin with Handles** (Inspector > Transform, or GameObject > Set Origin): the move and rotate gizmo moves only the origin while the mesh and children stay put (Blender's Affect Only Origins), and clicking a vertex, an edge (its midpoint) or a face (its centre) snaps the origin there, with a preview of the target. In Edit Mode, **Origin to Selection** puts it at the centre of the selected vertices, edges or faces. Transforms happen about the origin: the toolbar's handle position is **Pivot** by default (Center uses the selection's bounds for both the gizmo and the transform).
-
-**Drawing and UModeler tools.** **Draw** (Inspector or Mesh menu): Polyline, Rectangle, Circle, Arc and Polygon, drawn onto the mesh or the ground with snapping to corners, midpoints, edges, faces, the grid (Ctrl) and the plane's axes (Shift), with a live length. A closed shape inside a face is cut into it, ready for Push/Pull; a line across a face splits it through every bend; anything else becomes a new face or wire edges, so you can sketch a shape from nothing. From UModeler: **Follow** (sweep a face along a drawn path, SketchUp's Follow Me), **Spin / Lathe**, **Slice** (Blender's Bisect, optionally removing a side), **Reset XForm**, **Mirror** (applied), **Select Similar** (normal, area) and **Select by Material**. **Shift + drag** a gizmo handle extrudes first, so Shift + scale on a face makes an inset face, as Blender's E then S does.
-
-**Snapping, windows and cameras.** Drawing snaps SketchUp-style from the last point to the drawing plane's own axes (which follow a rotated face or object), to directions parallel or perpendicular to the mesh's edges and square to the previous segment, with a dotted guide. Moving objects: **Ctrl+Shift** drops them onto the surface under the mouse (resting on it, optionally aligned to its normal), dragging from the Hierarchy into the Scene view does the same, dragging a Hierarchy row onto an **object field** (a Boolean's or Lattice's Object, an IK Target, a skin's Armature) fills it in as Unity's object fields do, and holding **V** snaps the selection's nearest vertex onto another vertex, as in Unity. The **Materials** window shows every material and material asset as a preview sphere to edit or drag onto things, and the **Modeling Tools** window (UModeler's tool panel) keeps creating, drawing, object, Edit Mode, UV and snapping tools at hand. **Pilot Camera** frames a shot by flying the Scene view: the camera follows, Ctrl+wheel sets its field of view, and a frame with thirds guides shows the shot (Blender's Lock Camera to View). From Plasticity: **Shell**, **Thicken**, **Draft**, a **Radial** Array and rounded corners for drawn shapes. Push/Pull on a free-standing face (a shape drawn on the ground) makes a closed solid, as in SketchUp.
-
-**Projects, drawing modes and guides.** The Project window works like Unity's: nested folders, drag to move, F2 to rename, Delete to send to the Recycle Bin / Trash, with every reference to a moved material or image kept working, and a material's name is its file's name. In Edit Mode the **Face Material** field shows every material as a preview sphere to pick for the selected faces. Shapes drawn across several faces are cut into all of them. Rectangles draw from a corner, the centre or 3 points (optionally square) and circles from the centre, 2 or 3 points, as in Plasticity; **Guide** lines (or Guides from Edges) give drawing lines and crossings to snap to. Preferences set the editor's frame rate cap, with its measured cost and what each setting trades.
-
-**Cleaner modeling and focus.** Push/Pull goes exactly to where neighbouring walls end, merging faces back instead of leaving hair-thin walls or faces on top of each other, and carries on from there when asked for more; **Select Overlapping** finds any such faces and **Delete Loose** removes stray vertices and wire edges (Blender). Inset works on each face or on the selection as one (Inset Individual). Drawn circles and polygons can start at a face's exact centre (Plasticity). Depth of field shows in the Game view, the Camera Preview and while piloting: a blurred foreground over a sharp background, with the picked focus point kept in focus as the camera moves.
-
-**Filling, smoothing and shot lists.** **Smart Fill** closes holes and wire loops with faces (a fan for bent ones) and welds shut cracks and slits that have no area; holes punched through faces stay clean whatever their shape (archways included), and drawings over earlier shapes on either side push through cleanly. **Auto Smooth** shades bevels and other round results smooth by angle (Blender's Shade Auto Smooth). **Render Camera Sequence** renders every camera marked In Sequence, in order, each to its own image.
-
-**Your keys, your layout.** Every shortcut can be rebound in Preferences, starting from a Unity, Blender, Maya, 3ds Max or SketchUp keymap. Edit Mode's tools come in groups with all the selection tools together; a Z-fighting check finds faces on top of each other (also between objects) and removes the ones that can go; the UV editor selects faces and islands and rotates, scales, moves, flips, fits and aligns them; drawing snaps to local or global axes.
-
-**Drawing anywhere.** Shapes drawn off the mesh go on the ground, and guides take them anywhere else. The UV editor has the Scene view's move / rotate / scale gizmo, and Edit Mode has Blender's Merge by Distance.
-
-**Any plane, any path.** While drawing, X, Y and Z lay construction lines along the axes (Local or Global) and Ctrl+click lays one along an edge, as in Plasticity. A polyline can follow them off its plane into a 3D path for Follow, and it snaps square onto edges. Follow also runs along picked edges where they are, and Push/Pull moves several faces at once, each group (or each face) along its own normal. A shape drawn on a face can be turned freely, even across the Plane's grid: its ring of faces is zipped again instead of twisting. New scenes start with the Utah teapot, a camera and a point light.
-
-**Hard surface.** Bevels with a profile from concave to convex, Grid, Pipe, Array, Taper Extrude and Recess / Plate (each with a drag helper and F9 settings), one Make Face for holes and loose vertices, and live markers for vertices and edges lying on top of each other. The `curved` stress section runs every modeling tool on spheres, tori, rounded boxes and the teapot.
-
-**Modifier stack.** Like Blender's Modifier Properties: modifiers sit together in one panel, are applied top to bottom and each header has Blender's **Edit Mode, Viewport and Render** toggles, a menu (Apply, Duplicate, Copy to Selected, Move Up / Down / First / Last, Reset) and delete. Add Modifier groups them as Blender does: Edit (**Weld**), Generate (**Array, Bevel, Boolean, Decimate, Mirror, Screw, Solidify, Subdivision Surface, Triangulate, Wireframe**) and Deform (**Cast, Curve, Displace, Lattice, Mesh Deform, Simple Deform** (twist, bend, taper, stretch, ported from Blender's formulas), **Smooth**). **Curve objects** (GameObject > Curve: Bezier, Circle, Path) are paths you click and drag point by point with the gizmo; the **Curve** modifier bends a mesh along one and **Array > Fit Curve** fills one with copies (a fence, a chain, a ring of blocks). **Lattices** (GameObject > Lattice, fitted round the selected mesh with a Lattice modifier on it) are boxes of points: drag a point and the mesh squashes, bulges or tapers with it, Linear or B-Spline. **Mesh Deform** binds a detailed mesh to any closed low-poly cage round it (mean value coordinates): edit the cage and the mesh follows smoothly. **Vertex groups** (MeshFilter > Vertex Groups, `vgroup ...`) give each vertex a weight per named group; they follow the vertices through every edit, and every deforming modifier can be limited to one (Vertex Group, Invert). **Weight Paint** (MeshFilter > Weight Paint, `weightpaint on`) paints them with a brush (Add, Subtract, Draw, Blur; falloff curves, Mirror X, Front Faces Only), shown in Blender's blue-green-red weight colours. **Skeletons**: bones are GameObjects under an Armature root (GameObject > Armature binds a selected mesh with automatic weights); the **Armature (Skin)** modifier moves a mesh with its bones, Linear or Dual Quaternion; rigged FBX and glTF files import with their bones, weights and skin, ready to pose with the gizmo; a file saved mid-pose keeps its pose, with each bone resting at its bind pose (as Blender, Unity and Maya read it), so Reset Pose gives the shape it was bound in. The **Rigging** window (Window > Rigging) holds the skeleton, skin, vertex group, Weight Paint and IK tools together. **IK**: an IK constraint on a shin or forearm turns the limb so its tip reaches a target object (two bones solved exactly, bending towards a pole; longer chains by CCD); **GameObject > Rig > Humanoid / Quadruped** makes a skeleton with IK targets on the hands and feet, and **Auto IK** finds the arms and legs of an imported Mixamo, Unity or Rigify skeleton by their names. Edit Mode draws the result of the modifiers set to show in Edit Mode over the editable cage; renders use the ones set to show in renders.
-
-**UV map.** A UV Editor window (Ctrl+9) with move/rotate/scale, box select, linked select, snapping, a stretch overlay and background images. **Unwrap (LSCM)** with seams, **Smart UV Project**, cube / cylinder / sphere / view projections, reset, **pack islands** (with rotation) and average island scale.
-
-**Texture.** Unity-style Materials evaluating Blender's **Principled BSDF**: base colour, metallic, roughness, specular, normal and emission maps with tiling/offset, UV / box / generated mapping, procedural checker, noise and Blender's UV Grid / Color Grid test images. **Surface types**: Opaque (solid), Cutout (alpha clip), Transparent (alpha blend) and Glass (refraction by IOR, clear or frosted), in both render engines, plus Metal, Emissive and Unlit presets (Element > New Material of Type). Multiple material slots per mesh, assigned per face. PNG, JPEG, TGA, BMP, Radiance HDR and (with Blender's libraries) OpenEXR images, with mipmaps and trilinear filtering. Drag and drop images and models (**OBJ + MTL**, **FBX** via ufbx, which Blender bundles, **glTF**, **STL**, **PLY**, **USD**) and their textures come along.
-
-**Procedural textures.** `Assets/Textures/<name>.ptex` is a texture made by a stack of layers, as Blender's modifier stack: generators (Brick, Wood Floor, Tatami, Tiles, Voronoi, Noise, Wave, Checker, Stripes, Gradient, Image) and filters (Blur, Levels, Hue / Saturation, Warp, Edge Wear, Height AO, Mask by Height...), each with a blend mode and an opacity, evaluated to four seamless images: albedo, normal, roughness and height. A material uses them as `Bricks.ptex#albedo` and so on; *Assign to Selection* sets all three maps and the tiling; OBJ and glTF exports write the images beside the file. Texture edits undo like any other. With **Live Shading** (on by default) the views evaluate the layers per pixel up close, like a shader, so a texture stays sharp at any distance, and dragging a field updates the objects using it as you drag; the images at the set resolution are what exports, bakes and the path tracers use. The **Textures** window (Window > Textures) makes and edits them: New from a preset, the layer stack with Add Layer, each layer's fields, a preview of each output tiled 2 x 2, and thumbnails you drag onto objects; `newtex`, `texlayer` and `settex` do the same from the console. **Toon shading** (a material's Shading Model: Toon, or the Toon preset) draws light in flat tones with a hard edge, a shadow colour, a hard highlight and a rim light, the same in the views and in path-traced renders, and an **Outline** component draws the black line round an object (the inverted hull). **Bake Textures** (GameObject > Bake Textures or a Hierarchy row's right-click menu, `baketex`) turns everything an object's materials do (procedural and `.ptex` textures, axis materials, Box and Generated mapping, several material slots) into one set of images on new UVs: albedo, roughness, metallic and a normal map in `Assets/Textures/Baked`, with a `<Object> Baked` material that uses them; undo restores the object. The **Bake Textures** export option does the same on copies for OBJ, FBX and glTF, so other programs show what Blendity renders (checked by importing them in Blender). Exports now also carry normal and roughness / metallic maps to glTF and every image map to FBX.
-
-**Axis materials.** A material's Axis Mode picks Top, Side and Bottom materials by the slope of the surface (grass on top, dirt on the sides, whatever the object's rotation in World mode, or turning with the object in Local mode), projected without UVs, in every renderer. **Axis High** adds a material above a height (snow on peaks, rock up high) faded over High Blend, and **Axis Noise** makes the borders wander like real ground. The Textures and Materials windows delete with Del or a right-click (to the Recycle Bin), and a search never hides a new one.
-
-**Material assets.** As in Unity, a material can be a file: Assets > Create Material, or a slot's *Save as Material Asset*, writes `Assets/Materials/<name>.mat`. Drag it from the Project window onto an object in the Scene view (the face under the mouse picks the slot), onto a face in Edit Mode, onto a Hierarchy row or onto an Inspector slot; drag images onto a material's texture fields. Selecting a `.mat` shows its material editor; every object using it shares it and edits are saved back to the file. Each slot has an x to remove it, and **Remove Unused Slots** drops the ones no face uses. **Seams from Sharp Edges** (UV menu) marks a seam on every edge sharper than 30 degrees (and every edge marked sharp), as Blender's Select Sharp Edges + Mark Seam.
-
-**Render.** The scene has an **Active Camera** (Camera inspector, Hierarchy menu, the Game view's camera dropdown, `activecamera`, Ctrl+Numpad0 in the Blender keymap) that the Game view, F12 and the Scene view's filters use; without one, "Main Camera" by name, else the first camera. A camera's filters show in every picture it makes, path-traced ones included. Scene view modes: Wireframe, Solid, **Shaded** (deferred PBR with sun shadow maps and image-based lighting) and Shaded Wireframe; path tracing is for F12, the Render window and the Camera Preview, not the editing view. World: gradient, **Hosek-Wilkie physical sky**, **HDRI** or flat colour. View transforms: Standard, Filmic, ACES, plus exposure, and with OpenColorIO **Blender's own views (AgX, the default, Filmic, Khronos PBR Neutral…)**. **Preview** renders a quick low-resolution, low-sample version first (Live Preview re-renders it as you edit), and selecting a camera shows a Unity-style **Camera Preview** in the Scene view (which can be **locked** to keep showing while you edit meshes), either rasterized or **Rendered** (a small progressive path-traced render preview through that camera). **Physical cameras** (Unity's Physical Camera, Blender's lens): focal length, sensor size presets (full frame, APS-C, Super 35, IMAX ...), sensor fit, lens shift, an aspect ratio per camera (16:9, 2.39:1, 4:3, the sensor's ...; the Game view letterboxes to it), **depth of field** from the f-stop and focus distance (with a **focus eyedropper**: click a surface to focus there) with round or polygonal (bladed) bokeh, and exposure from ISO, shutter speed and f-stop. **Composition guides** (rule of thirds, golden ratio, golden and harmonious triangles, centre lines, title and action safe areas) draw over a camera's frame in the Game view, the Camera Preview and while piloting it, switched from the Camera inspector or the Game view's Guides menu. The `set` console command changes any field (`set Camera.FStop 1.4`). Sample counts have halve / double buttons and power-of-two presets (16, 32, 64, 128 ...). **Camera filters**, like Unity's post-processing stack: a **Camera Filters** component holds a list of effects, added from **Add Filter** by category, each with its own toggle, settings and menu (move, reset, remove). The **Retro Console** effect renders the camera the way old consoles drew 3D, with presets for the **PlayStation** (low resolution scaled up with square pixels, vertices snapped to whole pixels so edges wobble, affine texture warping, nearest texels, 15-bit colour through the PS1's own dither), the **Nintendo 64** (3-point texture filtering, tiny textures with mipmaps, fog), the **Sega Saturn** (checkerboard "mesh" transparency) and a **DOS PC** (320x200 in 256 colours with an ordered dither). Every field can be changed after picking a preset, and all of it shows in path-traced renders too, on the CPU and the GPU. Alongside it: **Color** (Color Grading in linear light with exposure, contrast, saturation, white balance and lift / gamma / gain; Posterize; Grayscale / Sepia; Invert), **Lens** (Vignette, Chromatic Aberration, Film Grain, Lens Distortion) and **Stylize** (Pixelate, Edge Outline for a toon look, CRT with scanlines, curvature and phosphor stripes, Sharpen). Grain and CRT flicker move in Play mode and hold still elsewhere, so renders are repeatable. **Anime and manga** (Stylize and Color): **Halftone** dots that grow with the darkness, pen **Hatching** that crosses in the darker tones, **Line Art** (silhouettes, object edges and creases sharper than an angle, the same in rasterized and path-traced pictures), a **Paper** texture and a **Color Ramp** (the brightness through a few colours); Add Filter > Looks applies a whole **Anime** or **Manga** stack at once (`filter look Manga`). **Bloom & glow** spills light brighter than a threshold (emissive materials, bright lights, sun glints) into the pixels around it, from the rasterizer's linear (HDR) light or the path tracer's. It shows in the Game view, Play mode, the Camera Preview, F12 renders and camera sequences, and in the Scene view with the camera-filter toggle (`filters on`). **Baked lighting**, like Unity's: mark static objects **Contribute GI** (MeshRenderer), set each light's **Mode** (Realtime, Mixed, or Baked: it exists only through the bake, as in Unity) and press **Generate Lighting** in the **Lighting** window. The path tracer bakes the sky, the Baked lights and every bounce of light into **lightmaps**, with lightmap UVs generated automatically, so the rasterized views show colour bleeding and soft sky shadowing at no cost per frame. The lightmaps are saved next to the scene; an object moved since shows realtime light and the status bar says "Lighting out of date". **Realtime GI**, from the first paper in `research/papers/` (Thiedemann et al., *Voxel-based Global Illumination*, I3D 2011): the scene is voxelized into bit columns, rays walk the paper's mip-map hierarchy, and one bounce of the sun's light (through a reflective shadow map) and the sky's occlusion light the rasterized views live. Move the sun or an object and the bounce follows, with nothing to bake; it fills in wherever a lightmap is missing or out of date, adds the bounce of lights the bake doesn't hold, and **Auto Generate** re-bakes once changes settle. Static objects get **realtime lightmaps** (Unity's Realtime Resolution), so moving the camera costs a texture lookup, and once a bake covers the scene Realtime GI does no live work at all. On a Vulkan GPU, realtime GI's gathers and **Generate Lighting** run 4 to 8 times faster (GI Device, Render > Device). **Lighting Updates: Manual** (the default) keeps the lighting as last computed while you move things, until **Update Lighting** (Ctrl+Shift+L) or Generate Lighting, and **Preview Lighting** shows a rough progressive bake once you stop, like Bakery's Realtime Preview. See [`docs/guides/lighting.md`](docs/guides/lighting.md). **Probe volumes**, like Unity 6's Adaptive Probe Volumes: add a **Probe Volume** component and light probes are placed automatically (dense near geometry, sparse in open space). Objects without a lightmap, moving ones included, take their indirect light from them per pixel; they are baked with Generate Lighting and kept live by Realtime GI, and a new sky colour relights them without a re-bake. `probes show` draws them in the Scene view. **Transparent** (Film > Transparent) leaves the world out of a render's background, so a saved PNG or EXR has an alpha channel. **F12** renders the Main Camera with either engine (rasterized with supersampling, or path traced with denoising) to PNG, JPEG, HDR or EXR. With Blender's libraries the path tracer runs on **Embree**, denoises with **OpenImageDenoise**, samples emissive meshes as lights, and offers Cycles-style **path guiding** (Open PGL).
-
-**GPU rendering.** Like Cycles, the path tracer can run on the **GPU**: set Render Settings > Device to *GPU Compute*. One portable backend, **Vulkan**, covers NVIDIA, AMD and Intel GPUs on Windows and Linux (and Apple GPUs through MoltenVK), so there is no separate CUDA / HIP / oneAPI build to pick. On GPUs with **ray tracing hardware** (RTX, Radeon RX 6000+, Arc) rays go through `VK_KHR_ray_query` and its hardware acceleration structures; *Hardware Ray Tracing* turns that off to compare. **Combined rendering** works like Blender's: tick the CPU and any GPUs under *Render Devices* and they all render the same frame, sharing out samples by speed, with results identical to a CPU render (same random sequences). The Vulkan loader is opened at run time, so machines without a GPU driver still start and render on the CPU. The editor never waits for a GPU to open: the first GPU render of a session (which can take a minute when the driver has to compile the kernel) traces on the CPU and says *GPU starting*, then moves to the GPU when it is ready, and a pipeline cache on disk makes later starts quick.
-
-**Lights.** Directional, Point, **Spot** (Unity's Spot Angle and Inner Spot Angle) and **Area** (rectangle or disc, soft shadows when path traced), in the rasterizer and on CPU and GPU path tracing alike, with an optional **colour temperature in kelvin** (black-body tint: 2700 K bulb, 5500 K sun, 6500 K white). **Aim at Point** turns a light to shine at a surface you click, like the camera's focus eyedropper.
-
-**Files.** **Export every mesh format Blender 5.2 exports**: Wavefront **OBJ** (+ MTL), **FBX** (binary like Blender's, or ASCII), **glTF 2.0** (.glb, or .gltf + .bin with the textures beside it), **STL** (binary / ASCII), Stanford **PLY** (binary / ASCII) and **USD** (.usda). File > Export opens Blender's options first (Selected Only, Apply Modifiers, Scale, Up Axis, Triangulate, Normals, UVs, Materials, ASCII), then the system's **Save As** dialog, so you choose the folder and name (typing another extension switches the format). Normals are split at sharp edges and flat faces like Blender's. **Import** reads the same formats (OBJ, FBX, glTF, STL, PLY, USD text), from File > Import Model's **Open** dialog or by dropping files on the window. Every format was checked both ways against the installed Blender 5.2: Blendity's files open in Blender at the same place, facing out, with their materials and textures, and Blender's exports open in Blendity the same way. Screenshots, renders and Save Scene As also ask where to save (Windows' common dialog, macOS' save panel, zenity or kdialog on Linux; without one they fall back to the project folders).
-
-**Inspector.** Colours work like Unity's: a swatch with an alpha bar, and a Color window with a saturation / value square, hue strip, RGB 0-255 / 0-1 / HSV, alpha, hex and swatches (Base Color carries the material's alpha). The Render window has **resolution presets** up to 8K and print sizes, each with its megapixels. Unity-style **multi-object editing**: change a field and every selected object follows. Click any number field (without dragging) and type a value; Tab / Shift+Tab move to the next / previous field, Enter commits, Esc cancels. Number fields take expressions: `2*pi`, `sqrt(2)`, `+=1`, `-=0.5`, `*=2`, `/=4` (relative to each object's own value), Unity's `L(0,10)` (spread evenly across the selection) and `R(0,1)` (random per object).
-
-**Scene and play.** GameObjects with Transform hierarchies and Components (MeshFilter, MeshRenderer, Light, Camera, Rotator, Oscillator, PlayerController, Rigidbody). Play mode copies the scene and restores it on Stop, as in Unity; rigid bodies use **Jolt Physics** when available. Undo/redo, a text `.scene` format, exports in every Blender mesh format, PNG screenshots (Shift+F12) saved where you choose.
-
-## Unity controls, Blender tools
-
-| | Blendity (Unity) | Blender |
-|---|---|---|
-| Orbit / Pan / Zoom | Alt+LMB / MMB / Wheel or Alt+RMB | MMB / Shift+MMB / Wheel |
-| Fly | Hold RMB + WASD, Q/E, Shift | Shift+` |
-| Frame selection | F | Numpad . |
-| Front / top / side views, Persp / Iso | click an axis of the scene gizmo / click its label or centre | Numpad 1 / 3 / 7, Numpad 5 |
-| Edit another mesh | click it (Edit Mode moves to it, same vertex / edge / face mode) | Tab out, select, Tab in |
-| Create objects | right-click in the Hierarchy | Shift+A |
-| View / Move / Rotate / Scale / Transform | Q / W / E / R / Y | — / G / R / S / Transform tool |
-| Duplicate / Delete / Rename | Ctrl+D / Del / F2 | Shift+D / X / F2 |
-| Play / Pause / Step | Ctrl+P / Ctrl+Shift+P / Ctrl+Alt+P | — |
-| Edit Mode / vertex / edge / face | Tab / 1 / 2 / 3 | Tab / 1 / 2 / 3 |
-| Grab / rotate / scale (modal) | G, then X / Y / Z, a typed value, click; R / S during a G (or Blender Transform Keys) | G / R / S |
-| Extrude / Inset / Bevel (follow the mouse) | Ctrl+E / I or Ctrl+I / Ctrl+B (wheel: segments) | E / I / Ctrl+B |
-| Select edge loop | double-click an edge, or **Alt+click** (Ctrl+Alt+click: ring; face mode: face loop) | Alt+click |
-| Loop cut | Ctrl+R over an edge | Ctrl+R |
-| Push/Pull (SketchUp), face mode | P, move or type a distance, click / Enter (Esc cancels) | (Extrude + Boolean) |
-| Set Origin | GameObject > Set Origin, Inspector > Transform > Origin | Object > Set Origin |
-| Triangulate / Tris to Quads / Duplicate / Dissolve | Ctrl+T / Alt+J / Shift+D or Ctrl+D / Ctrl+X | Ctrl+T / Alt+J / Shift+D / X > Dissolve |
-| Select Linked / More / Less / Invert | Ctrl+L / Ctrl+= / Ctrl+- / Ctrl+Shift+I | Ctrl+L / Ctrl+Numpad + / - / Ctrl+I |
-| Shrink/Fatten / To Sphere | Alt+S / Shift+Alt+S | Alt+S / Shift+Alt+S |
-| Bevel / Bridge / Push Through | Ctrl+B / Ctrl+Shift+B / Alt+P | Ctrl+B / Bridge Edge Loops / (a Boolean) |
-| Connect / Dissolve edges | J / Ctrl+X | J / Ctrl+X |
-| Adjust Last Operation | F9 (panel at the Scene view's bottom left) | F9 |
-| Fill / Merge at center / Recalculate normals | Alt+F / Alt+M / Shift+N | F / M / Shift+N |
-| Proportional editing | O (scroll while dragging to resize) | O |
-| UV Editor / Unwrap | Ctrl+9 / U | UV Editing workspace / U |
-| Render image / Render window | F12 / F11 | F12 / F11 |
-| Snap while dragging | hold Ctrl | hold Ctrl |
-| Windows | Ctrl+1 Scene, 2 Game, 3 Inspector, 4 Hierarchy, 5 Project, 6 Console, 7 Profiler, 8 Learn > References, 9 UV Editor | — |
-
-**Windows:** Scene, Game, Hierarchy, Inspector, Project, Console (with a command line; type `help`), **UV Editor**, **Render**, **Learn** and **Profiler**. Drag tabs to dock or split them; Window → Layouts has the Default, 2 by 3, Tall, Wide and Learning presets.
-
-## The Learn tab
-
-26 lessons, each linking the **Unity concept ↔ Blender concept and source file ↔ theory**, with chapter citations from the books in *Blender Documents*:
-
-- **[FoCG]** Marschner & Shirley, *Fundamentals of Computer Graphics*, 5th ed.
-- **[GEA1]** / **[GEA2]** Gregory, *Game Engine Architecture* Vol. I and II
-
-They cover the editor layout, navigation, GameObjects vs Objects, scene graphs, transforms, handedness, mesh storage, Edit Mode, modifiers, cameras, the rasterizer, lighting, the game loop, files, undo, performance, the **References** behind the features, **UV Mapping**, **Materials and Textures**, **Render Engines**, **Light, Sky and Tone Mapping**, **Advanced Modeling Tools**, **Libraries and Performance**, and new in this release **Bevel, Bridge and Push Through** (Blender's external libraries, profiling, SIMD and multithreading). Lessons have "Try it" buttons that drive the editor, reveal-on-click self-checks and links into the matching folder of the Blender source tree. The text is my own wording; the books are cited, not reproduced.
-
-## The papers behind the features
-
-Features built from research papers (Taubin's λ|μ smoothing, the voxel GI of Thiedemann et al., the GGX microfacet model, the area-light bake of Heitz et al. and others) are cited in the Learn tab's **References** lesson, each with the feature it became and where to find it; the code cites the same papers in its comments. Mesh features from papers are in Mesh > From Papers and the Inspector. (The Research window that collected papers was retired.)
-
-## Stress tests and efficiencies
-
-`blendity_stress` pushes every subsystem until it breaks a time budget and compares naive and optimized implementations. Highlights from this machine (Ryzen 9 5900XT, 32 threads):
-
-- **≈5.2M triangles at 60 FPS** in the software rasterizer (1280×720, measured on an idle machine; about half that under background load), after this pass's triangle-setup rework: an AVX2 kernel rejects 8 triangles per step, triangles that cover no pixel centre are dropped, and only vertices of surviving triangles are lit. 21M triangles went **174 → 34 ms** in a same-session A/B
-- **Display encoding 15.7× faster** on one core (SSE4.1 / AVX2 kernels chosen at run time, plus an exact sRGB table instead of `pow()`)
-- **GPU rendering (Vulkan): 55× the CPU** on an RTX 4070 SUPER with its ray tracing hardware (1,150 vs 21 samples/s at 1280×720), 7.5× with Blendity's BVH in a compute shader, and **60×** with an RTX 3060 Ti added (multi-GPU). Caching optimised SPIR-V cut the first GPU render on a new machine from 212 s (a cold driver compiling unoptimised SPIR-V) to 9 s
-- Path tracer: **22–47 Mrays/s** on Blendity's own BVH, **64–95 Mrays/s with Embree** (2–2.9×). Earlier releases quoted 70–240 Mrays/s from an approximate ray counter; rays are now counted exactly. A **two-level (instanced) BVH** made rebuilding a 21M-triangle scene **34 s → 16 ms**
-- Blender's libraries vs Blendity's fallbacks: TBB dispatch 6.5×, Jolt 13.9× at 2,000 bodies, libjpeg-turbo 3.2×, OpenImageDenoise 37% lower error than À-Trous, zstd scenes 51× smaller. Sampling emissive meshes as lights made path tracing 12.7× more efficient in a lit-doorway scene. **OpenSubdiv and path guiding were slower** here, so both stay opt-in
-- Edit-mode tools on a 1M-face mesh: **edge loop 46×**, loop cut 8×, recalculate normals 7× faster after replacing a hash map with a CSR adjacency table; LSCM unwrap 10× faster (and Eigen's direct solver another 1.2–1.8×)
-- Earlier passes: edge table 8.5×, scene save 13×, mesh load 3.6×, Catmull-Clark 2.2×, copy-on-write undo 1,500×
-- **Push/Pull stress:** 26,620 operations on 26 awkward meshes (concave n-gons, inside-out, unwelded, non-manifold, 0.1 mm to 10 km, far from the origin) went from **7,088 broken results to 2**, through ten fixes the test pointed at; every interactive Push/Pull undoes exactly
-
-Full results, including what didn't help, are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
-
-## Project layout
-
-```
-blendity/
-├── src/            engine + editor (docs/ARCHITECTURE.md maps each part to Blender's source)
-│   ├── image/      PNG/JPEG/TGA/BMP/HDR codecs (+ OpenEXR, libpng, libjpeg-turbo), mipmapped textures
-│   ├── render/     rasterizer, deferred shading, shadows, sky, path tracer, SIMD display encoding, OCIO
-│   ├── scene/      meshes + operators, UV tools, materials, import, scene IO, Boolean / Decimate, physics
-│   ├── editor/     Unity-style editor, UV Editor, Render window, Learn tab
-│   └── deps/       which of Blender's optional libraries were compiled in
-├── extern/         small libraries Blender bundles (ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky)
-├── stress/         stress suite + results/
-├── tests/          unit tests
-├── Assets/         your project's scenes, meshes and textures (the Project window)
-├── research/       your own notes and papers (not read by the editor; references are in Learn)
-├── docs/           ARCHITECTURE.md, PERFORMANCE.md, images/
-├── licenses/       license texts and what they mean for the executables
-└── build.bat · build.sh · CMakeLists.txt · .github/workflows/build.yml
-```
+- **[docs/MANUAL.md](docs/MANUAL.md)** - the user manual, by workflow, with examples and use cases.
+- **The Learn tab** (F1) - interactive lessons with Try-it buttons, linking Unity, Blender's source and the graphics
+  books (*Fundamentals of Computer Graphics*, *Game Engine Architecture*), and the papers behind the features.
+- **For developers:** [ARCHITECTURE.md](docs/ARCHITECTURE.md) (each part mapped to Blender's source),
+  [decisions/](docs/decisions/) (ADRs), [tasks/](docs/tasks/) (specs), [PERFORMANCE.md](docs/PERFORMANCE.md),
+  [USABILITY.md](docs/USABILITY.md), [requirements.md](docs/requirements.md), [CHANGELOG.md](CHANGELOG.md), and
+  [CLAUDE.md](CLAUDE.md) (engineering
+  standards). Work starts as a task spec, is reviewed and tested, and lands through a pull request that CI must pass.
 
 ## Why not a Blender fork?
 
-Blender's full build needs about 40 external libraries (Python, OpenImageIO, Boost, OSL, USD…) and a large build system. Blendity re-implements the subsystems you asked for in plain C++ and documents which Blender source files each part corresponds to, so it builds with nothing but a compiler. Where Blender's prebuilt libraries are available, it links the 16 that matter for these features (ray tracing, denoising, threading, colour management, booleans, physics, image formats) instead of reimplementing them. Each comes with a measured comparison against Blendity's own fallback. Not recreated: sculpting, animation and rigging, node editors, geometry nodes, grease pencil, the compositor and sequencer, Python, and `.blend` files. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Blender's full build needs about 40 external libraries and a large build system. Blendity re-implements the parts it
+needs in plain C++, documents which Blender source files each corresponds to, and links Blender's prebuilt libraries
+where they matter, each measured against Blendity's own fallback. Not recreated: sculpting, node editors, geometry
+nodes, grease pencil, the compositor and sequencer, Python, and `.blend` files.
 
 ## License
 
-Source: GPL-2.0-or-later, the same as Blender (`LICENSE`). The executables also contain MIT, BSD-3-Clause and Apache-2.0 code from Blender's bundled libraries, and, when built with Blender's prebuilt libraries, code under Apache-2.0, BSD, MIT, MPL-2.0, Zlib, libpng and TOST licenses. So **binaries are distributed under GPL-3.0-or-later**. The license texts are copied next to the executables. Details in [`licenses/README.md`](licenses/README.md).
+Source: GPL-2.0-or-later, the same as Blender (`LICENSE`). The executables also contain MIT, BSD-3-Clause and
+Apache-2.0 code from Blender's bundled libraries and, when built with Blender's prebuilt libraries, code under
+Apache-2.0, BSD, MIT, MPL-2.0, Zlib, libpng and TOST licenses, so **binaries are distributed under GPL-3.0-or-later**.
+Details in [licenses/README.md](licenses/README.md).

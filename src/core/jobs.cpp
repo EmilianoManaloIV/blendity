@@ -135,9 +135,30 @@ void JobSystem::worker_main() {
   }
 }
 
+namespace {
+thread_local bool tl_background = false;  // inside run_background on the built-in pool: loops run serially
+}
+
+void JobSystem::run_background(const std::function<void()> &fn) {
+#ifdef BL_WITH_TBB
+  if (backend_ == Backend::TBB) {
+    tbb::task_arena arena(std::max(1, thread_count() - 2));
+    arena.execute(fn);
+    return;
+  }
+#endif
+  tl_background = true;
+  fn();
+  tl_background = false;
+}
+
 void JobSystem::parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn) {
   if (count <= 0) return;
   grain = std::max<int64_t>(1, grain);
+  if (tl_background && backend_ != Backend::TBB) {
+    fn(0, count);
+    return;
+  }
 #ifdef BL_WITH_TBB
   if (backend_ == Backend::TBB) {
     if (count <= grain || max_threads_ <= 1) {

@@ -21,6 +21,8 @@
 #include "../extern/ufbx/ufbx.h"
 #include "../src/scene/import.h"
 #include "../src/scene/material.h"
+#include "../src/scene/skin_weights.h"
+#include "../src/scene/animation.h"
 #include "../src/scene/mesh.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
@@ -232,6 +234,7 @@ static void round66_tests();
 static void round67_tests();
 static void round68_tests();
 static void round69_tests();
+static void round81_tests();
 
 int main() {
   register_builtin_components();
@@ -878,6 +881,7 @@ int main() {
   round67_tests();
   round68_tests();
   round69_tests();
+  round81_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -25515,5 +25519,1122 @@ static void round69_tests() {
     const std::string *last = s.select_all(shown);
     CHECK(last && *last == "D" && s.items.size() == 4);
     CHECK(s.select_all({}) == nullptr);
+  });
+  /* ---------------------------------------------------------------- round 81: inpainted skin weights (task 0057) */
+}
+
+/* An open tube from a to b (rings x segments, normals out), appended to m: the test bodies of round 81. */
+static void r81_tube(Mesh &m, Vec3 a, Vec3 b, float radius, int rings, int segs) {
+  const Vec3 axis = normalize(b - a);
+  const Vec3 side = std::fabs(axis.y) < 0.9f ? normalize(cross(axis, Vec3(0, 1, 0))) : normalize(cross(axis, Vec3(1, 0, 0)));
+  const Vec3 up = cross(side, axis);
+  const uint32_t base = (uint32_t)m.vert_count();
+  for (int r = 0; r <= rings; r++)
+    for (int s = 0; s < segs; s++) {
+      const float t = (float)r / (float)rings, ang = 6.2831853f * (float)s / (float)segs;
+      m.add_vert(a + (b - a) * t + (side * std::cos(ang) + up * std::sin(ang)) * radius);
+    }
+  for (int r = 0; r < rings; r++)
+    for (int s = 0; s < segs; s++) {
+      const uint32_t i0 = base + (uint32_t)(r * segs + s), i1 = base + (uint32_t)(r * segs + (s + 1) % segs);
+      m.add_face({i0, i1, i1 + (uint32_t)segs, i0 + (uint32_t)segs});
+    }
+}
+
+/* Each vertex's weights over the groups: in [0, 1] and summing to 1 (the worst error). */
+static float r81_partition_error(const Mesh &m) {
+  float worst = 0.0f;
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    float sum = 0.0f;
+    for (const VertexGroup &g : m.vertex_groups) {
+      const float w = g.weights[v];
+      if (!(w >= 0.0f && w <= 1.0f)) worst = std::max(worst, 1.0f);
+      sum += w;
+    }
+    worst = std::max(worst, std::fabs(sum - 1.0f));
+  }
+  return worst;
+}
+
+static float r81_weight(const Mesh &m, const char *group, size_t v) {
+  const int gi = m.find_group(group);
+  return gi < 0 ? 0.0f : m.vertex_groups[(size_t)gi].weights[v];
+}
+
+static void round81_tests() {
+  test("skin weights: the cotangent Laplacian is symmetric with rows summing to 0, and the Voronoi masses add up to the surface's area", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 2, 0}, 0.5f, 8, 16);
+    std::vector<std::vector<std::pair<uint32_t, double>>> K;
+    std::vector<double> mass;
+    skinweights::cotangent_laplacian(m, K, mass);
+    double worst_sum = 0.0, worst_sym = 0.0, total = 0.0;
+    for (size_t i = 0; i < K.size(); i++) {
+      double s = 0.0;
+      for (const auto &[j, w] : K[i]) {
+        s += w;
+        double back = 0.0;
+        for (const auto &[k, w2] : K[j])
+          if (k == i) back = w2;
+        worst_sym = std::max(worst_sym, std::fabs(w - back));
+      }
+      worst_sum = std::max(worst_sum, std::fabs(s));
+      total += mass[i];
+    }
+    double area = 0.0;  // the quads' area, as two triangles each
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const uint32_t *q = m.face_verts(f);
+      const Vec3 a = m.positions[q[0]], b = m.positions[q[1]], c = m.positions[q[2]], d = m.positions[q[3]];
+      area += 0.5 * (length(cross(b - a, c - a)) + length(cross(c - a, d - a)));
+    }
+    std::printf("    rows sum to within %.2g, symmetric within %.2g; mass %.5f against area %.5f\n", worst_sum, worst_sym, total, area);
+    CHECK(worst_sum < 1e-9 && worst_sym < 1e-9);
+    CHECK(std::fabs(total - area) < 1e-4 * area);
+  });
+
+  test("skin weights: inpainting between two known ends of a tube gives weights in [0, 1] summing to 1, changing smoothly along it", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 2, 0}, 0.2f, 20, 12);
+    const size_t n = m.vert_count();
+    std::vector<uint8_t> known(n, 0);
+    std::vector<std::vector<float>> w(2, std::vector<float>(n, 0.0f));
+    for (size_t v = 0; v < n; v++) {
+      const float y = m.positions[v].y;
+      if (y < 0.5f) known[v] = 1, w[0][v] = 1.0f;
+      if (y > 1.5f) known[v] = 1, w[1][v] = 1.0f;
+    }
+    InpaintReport rep;
+    std::string err;
+    CHECK(skinweights::inpaint(m, known, w, true, InpaintOptions{}, &rep, &err));
+    m.vertex_groups = {{"Low", w[0]}, {"High", w[1]}};
+    float jump = 0.0f, prev = 1.0f;
+    bool falling = true;
+    for (int r = 0; r <= 20; r++) {  // one vertex per ring, bottom to top
+      const float x = w[0][(size_t)r * 12];
+      falling = falling && x <= prev + 1e-4f;
+      if (r) jump = std::max(jump, std::fabs(x - prev));
+      prev = x;
+    }
+    std::printf("    %zu inpainted by %s in %.1f ms; partition error %.2g, the largest step between rings %.3f\n", rep.inpainted, rep.solver, rep.ms,
+                r81_partition_error(m), jump);
+    CHECK(rep.inpainted > 0 && r81_partition_error(m) < 1e-4f);
+    CHECK(falling && jump < 0.2f);
+  });
+
+  test("skin weights: transferring a body's weights onto a copy of itself gives back the same weights", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> low(n), high(n);
+    for (size_t v = 0; v < n; v++) high[v] = std::max(0.0f, std::min(1.0f, body.positions[v].y - 0.5f)), low[v] = 1.0f - high[v];
+    body.vertex_groups = {{"Low", low}, {"High", high}};
+    Mesh copy = body;
+    copy.vertex_groups.clear();
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, copy, InpaintOptions{}, &rep, &err));
+    float worst = 0.0f;
+    for (size_t v = 0; v < n; v++) worst = std::max({worst, std::fabs(r81_weight(copy, "Low", v) - low[v]), std::fabs(r81_weight(copy, "High", v) - high[v])});
+    std::printf("    %zu matched, %zu inpainted; worst difference %.2g\n", rep.known, rep.inpainted, worst);
+    CHECK(rep.known == n && worst < 1e-4f);
+  });
+
+  test("skin weights: a loose sleeve takes the arm's weights, not the torso's it passes close to (the paper's figure 1)", [] {
+    /* The body: a torso (Y up, radius 0.3) and an arm out along +X from it, each weighted wholly to its bone. */
+    Mesh body;
+    r81_tube(body, {0, -1, 0}, {0, 1, 0}, 0.3f, 20, 24);
+    const size_t torso_n = body.vert_count();
+    r81_tube(body, {0.3f, 0.5f, 0}, {1.2f, 0.5f, 0}, 0.1f, 18, 12);
+    std::vector<float> torso(body.vert_count(), 0.0f), arm(body.vert_count(), 0.0f);
+    for (size_t v = 0; v < body.vert_count(); v++) (v < torso_n ? torso : arm)[v] = 1.0f;
+    body.vertex_groups = {{"Torso", torso}, {"Arm", arm}};
+    /* The sleeve: 3 cm off the arm (within the paper's 5 % of its size), starting right at the torso's side. */
+    Mesh sleeve;
+    r81_tube(sleeve, {0.32f, 0.5f, 0}, {0.9f, 0.5f, 0}, 0.13f, 12, 16);
+    auto worst_torso = [&](const InpaintOptions &o) {
+      Mesh s = sleeve;
+      std::string err;
+      InpaintReport rep;
+      CHECK(transfer_skin_weights(body, s, o, &rep, &err));
+      float t = 0.0f;
+      for (size_t v = 0; v < s.vert_count(); v++) t = std::max(t, r81_weight(s, "Torso", v));
+      std::printf("    angle %.0f, distance %.2f: %zu matched, %zu inpainted, most torso weight on the sleeve %.3f, partition error %.2g\n", o.angle,
+                  o.distance, rep.known, rep.inpainted, t, r81_partition_error(s));
+      CHECK(r81_partition_error(s) < 1e-3f);
+      return t;
+    };
+    InpaintOptions plain;  // plain closest point (Blender's Data Transfer): anything near, any normal
+    plain.angle = 180.0f, plain.distance = 10.0f;
+    const float naive = worst_torso(plain), robust = worst_torso(InpaintOptions{});
+    CHECK(naive > 0.5f);   // the sleeve's end by the torso copies the torso
+    CHECK(robust < 0.1f);  // matched by normals, its end is inpainted from the arm
+  });
+
+  test("skin weights: vertices in the InpaintMask group are inpainted, not copied", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> one(n, 1.0f);
+    body.vertex_groups = {{"Bone", one}};
+    Mesh copy = body;
+    copy.vertex_groups.clear();
+    std::vector<float> mask(n, 0.0f);
+    size_t masked = 0;
+    for (size_t v = 0; v < n; v++)
+      if (std::fabs(copy.positions[v].y - 1.0f) < 0.2f) mask[v] = 1.0f, masked++;
+    copy.vertex_groups.push_back({kInpaintMask, mask});
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, copy, InpaintOptions{}, &rep, &err));
+    std::printf("    %zu masked: %zu matched, %zu inpainted; the mask group kept: %d\n", masked, rep.known, rep.inpainted, copy.find_group(kInpaintMask) >= 0);
+    CHECK(masked > 0 && rep.inpainted == masked && rep.known == n - masked);
+    CHECK(copy.find_group(kInpaintMask) >= 0 && r81_weight(copy, "Bone", n / 2) > 0.999f);
+  });
+
+  test("skin weights: automatic weights by inpainting - a hand hanging beside the thigh takes none of the leg, and a bent tube splits at the joint", [] {
+    /* A hip block's leg and an arm hanging beside it (a loose part of the same mesh), with a bone in each. */
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 1, 0}, 0.12f, 12, 12);          // the leg
+    const size_t leg_n = m.vert_count();
+    r81_tube(m, {0.22f, 0.3f, 0}, {0.22f, 1.2f, 0}, 0.08f, 12, 12);  // the arm, 0.02 from the leg's surface
+    const std::vector<BoneSegment> bones{{"Leg", {0, 0, 0}, {0, 1, 0}}, {"Arm", {0.22f, 1.2f, 0}, {0.22f, 0.3f, 0}}};
+    Mesh env = m;
+    std::vector<float> e;
+    float env_leg_on_arm = 0.0f;
+    for (size_t v = leg_n; v < env.vert_count(); v++) {
+      skinweights::envelope_weights(env.positions[v], bones, e);
+      env_leg_on_arm = std::max(env_leg_on_arm, e[0]);
+    }
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, bones, InpaintOptions{}, &rep, &err));
+    float leg_on_arm = 0.0f;
+    for (size_t v = leg_n; v < m.vert_count(); v++) leg_on_arm = std::max(leg_on_arm, r81_weight(m, "Leg", v));
+    std::printf("    leg weight on the arm: distance weights %.3f, inpainted %.4f (%zu known, %zu inpainted, %zu by distance)\n", env_leg_on_arm, leg_on_arm,
+                rep.known, rep.inpainted, rep.fallback);
+    CHECK(env_leg_on_arm > 0.05f && leg_on_arm < 0.01f);
+    CHECK(r81_partition_error(m) < 1e-3f);
+    /* A two-bone tube: whole at each end, shared around the joint, smooth along it. */
+    Mesh tube;
+    r81_tube(tube, {0, 0, 0}, {0, 2, 0}, 0.2f, 20, 12);
+    const std::vector<BoneSegment> two{{"Lower", {0, 0, 0}, {0, 1, 0}}, {"Upper", {0, 1, 0}, {0, 2, 0}}};
+    CHECK(automatic_skin_weights(tube, two, InpaintOptions{}, &rep, &err));
+    const float bottom = r81_weight(tube, "Lower", 0), top = r81_weight(tube, "Upper", tube.vert_count() - 1), mid = r81_weight(tube, "Lower", 10 * 12);
+    float jump = 0.0f;
+    for (int r = 1; r <= 20; r++) jump = std::max(jump, std::fabs(r81_weight(tube, "Lower", (size_t)r * 12) - r81_weight(tube, "Lower", (size_t)(r - 1) * 12)));
+    std::printf("    two-bone tube: Lower %.3f at the bottom, %.3f at the joint; Upper %.3f at the top; largest step %.3f\n", bottom, mid, top, jump);
+    CHECK(bottom > 0.999f && top > 0.999f && mid > 0.2f && mid < 0.8f && jump < 0.35f);
+    CHECK(r81_partition_error(tube) < 1e-3f);
+  });
+  test("skin weights: `skin bind` inpaints the Blender tube's weights at once, a large mesh's on a worker thread, each one undo step", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ImportResult r;
+    CHECK(import_model("tests/fixtures/rig_tube.glb", r));
+    instantiate_import(ed.scene(), r, "Rig Import", nullptr);
+    ed.mark_changed_for_test("Import");
+    ed.step_frame_headless();
+    GameObject *tube = ed.scene().find_by_name("Tube");
+    CHECK(tube && tube->get<SkinModifier>());
+    if (!tube || !tube->get<SkinModifier>()) return;
+    /* Spoil the weights (an undo step, so undo comes back here), then bind again (at once: the tube is small). */
+    {
+      Mesh &m = *mesh_make_mutable(tube->mesh_filter()->mesh);
+      for (VertexGroup &g : m.vertex_groups) std::fill(g.weights.begin(), g.weights.end(), 0.5f);
+      m.touch();
+    }
+    ed.mark_changed_for_test("Spoil the weights");
+    ed.step_frame_headless();  // (one frame's changes are one undo step: the bind below gets its own)
+    ed.command("skin bind Tube");
+    const Mesh &m = *tube->mesh_filter()->mesh;
+    const float now = r81_partition_error(m);
+    std::printf("    bound at once: partition error %.2g, Lower at the bottom %.3f\n", now, r81_weight(m, "Lower", 0));
+    CHECK(!ed.skin_job_running_for_test() && now < 1e-3f && r81_weight(m, "Lower", 0) > 0.99f);
+    ed.command("undo");
+    tube = ed.scene().find_by_name("Tube");
+    CHECK(tube && std::fabs(r81_weight(*tube->mesh_filter()->mesh, "Lower", 0) - 0.5f) < 1e-6f);  // the spoiled ones back
+    /* The same on a worker thread: frames go on while it solves; it lands as one undo step. */
+    ed.set_skin_async_min_verts_for_test(0);
+    ed.command("skin bind Tube");
+    int frames = 0;
+    while (ed.skin_job_running_for_test() && frames < 2000) ed.step_frame_headless(), frames++;
+    tube = ed.scene().find_by_name("Tube");
+    CHECK(tube != nullptr);
+    if (!tube) return;
+    const Mesh &m2 = *tube->mesh_filter()->mesh;
+    std::printf("    on a worker thread: landed after %d frame(s); partition error %.2g\n", frames, r81_partition_error(m2));
+    CHECK(!ed.skin_job_running_for_test() && r81_partition_error(m2) < 1e-3f && r81_weight(m2, "Lower", 0) > 0.99f);
+    ed.command("undo");
+    tube = ed.scene().find_by_name("Tube");
+    CHECK(tube && std::fabs(r81_weight(*tube->mesh_filter()->mesh, "Lower", 0) - 0.5f) < 1e-6f);
+    /* Envelope stays available. */
+    ed.command("skin bind Tube envelope");
+    CHECK(r81_partition_error(*ed.scene().find_by_name("Tube")->mesh_filter()->mesh) < 1e-3f);
+  });
+
+  test("skin weights: Transfer Weights puts the body's weights on a sleeve, gives it the body's skeleton, and the sleeve bends with the arm", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ImportResult r;
+    CHECK(import_model("tests/fixtures/rig_tube.glb", r));
+    instantiate_import(ed.scene(), r, "Rig Import", nullptr);
+    GameObject *tube = ed.scene().find_by_name("Tube");
+    CHECK(tube != nullptr);
+    if (!tube) return;
+    /* Two sleeves round the tube, 5 % wider, where the tube is. */
+    auto make_sleeve = [&](const char *name) {
+      auto mesh = std::make_shared<Mesh>(*tube->mesh_filter()->mesh);
+      mesh->vertex_groups.clear();
+      for (Vec3 &p : mesh->positions) p = Vec3(p.x * 1.05f, p.y, p.z * 1.05f);  // (the tube runs along its Y)
+      GameObject *s = ed.scene().create(name, nullptr);
+      s->add<MeshFilter>()->mesh = mesh;
+      s->add<MeshRenderer>();
+      s->set_world_matrix(tube->world_matrix());
+      return s;
+    };
+    make_sleeve("SleeveA");
+    make_sleeve("SleeveB");
+    ed.step_frame_headless();
+    /* By console. */
+    ed.command("skin transfer Tube SleeveA");
+    GameObject *a = ed.scene().find_by_name("SleeveA");
+    const SkinModifier *sk = a ? a->get<SkinModifier>() : nullptr;
+    CHECK(sk && sk->object == tube->get<SkinModifier>()->object);
+    CHECK(a && r81_partition_error(*a->mesh_filter()->mesh) < 1e-3f);
+    /* By the Rigging window: drag the Tube from the Hierarchy onto From, then Transfer Weights. */
+    ed.command("select Tube");  // (shows its row: its parents expand)
+    ed.command("select SleeveB");
+    ed.command("window Rigging");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    int hx = 0, hy = 0;
+    Recti f;
+    const bool row = ed.hierarchy_row_for_test("Tube", hx, hy), field = ed.button_rect_for_test("field:skin_transfer_from", f);
+    std::printf("    the Tube's row shown: %d, the From field: %d\n", (int)row, (int)field);
+    const bool ready = row && field;
+    CHECK(ready);
+    if (!ready) return;
+    const int fx = f.x + f.w / 2, fy = f.y + f.h / 2;
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+    ed.step_frame_headless();
+    Recti b;
+    CHECK(ed.button_rect_for_test("Transfer Weights", b));
+    ed.step_frame_headless({at(ET::MouseMove, b.x + b.w / 2, b.y + b.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, b.x + b.w / 2, b.y + b.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, b.x + b.w / 2, b.y + b.h / 2)});
+    ed.step_frame_headless();
+    GameObject *sb = ed.scene().find_by_name("SleeveB");
+    CHECK(sb && sb->get<SkinModifier>() && sb->mesh_filter()->mesh->find_group("Upper") >= 0);
+    /* Bend the arm: the sleeve's top follows; its bottom stays. */
+    GameObject *upper = ed.scene().find_by_name("Upper");
+    CHECK(upper != nullptr);
+    if (!upper || !sb) return;
+    upper->set_local_rotation(upper->local().rotation * Quat::axis_angle({1, 0, 0}, 1.0f));
+    const Mesh &base = *sb->mesh_filter()->mesh;
+    const Mesh *e = sb->evaluated_mesh();
+    float top = 0.0f, bottom = 0.0f;
+    for (size_t v = 0; v < base.vert_count(); v++) {
+      const float d = length(e->positions[v] - base.positions[v]);
+      if (r81_weight(base, "Upper", v) > 0.99f) top = std::max(top, d);
+      if (r81_weight(base, "Lower", v) > 0.99f) bottom = std::max(bottom, d);
+    }
+    std::printf("    posed: the sleeve's upper part moved %.3f, its lower part %.4f\n", top, bottom);
+    CHECK(top > 0.1f && bottom < 1e-3f);
+  });
+  test("skin weights: a transfer onto a renumbered copy finds each vertex's closest point and gives back the same weights", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> high(n);
+    for (size_t v = 0; v < n; v++) high[v] = std::max(0.0f, std::min(1.0f, body.positions[v].y - 0.5f));
+    std::vector<float> low(n);
+    for (size_t v = 0; v < n; v++) low[v] = 1.0f - high[v];
+    body.vertex_groups = {{"Low", low}, {"High", high}};
+    /* The copy's vertices in reverse order (so not "the same mesh by index") and 2 mm out (so not "the same position"):
+     * each one's weights come from the closest point of the body's surface. Its faces are renumbered to match. */
+    Mesh copy;
+    for (size_t v = 0; v < n; v++) {
+      const Vec3 p = body.positions[n - 1 - v];
+      copy.add_vert({p.x * 1.0067f, p.y, p.z * 1.0067f});
+    }
+    for (size_t f = 0; f < body.face_count(); f++) {
+      const uint32_t *q = body.face_verts(f);
+      copy.add_face({(uint32_t)(n - 1 - q[0]), (uint32_t)(n - 1 - q[1]), (uint32_t)(n - 1 - q[2]), (uint32_t)(n - 1 - q[3])});
+    }
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, copy, InpaintOptions{}, &rep, &err));
+    float worst = 0.0f;
+    for (size_t v = 0; v < n; v++) worst = std::max(worst, std::fabs(r81_weight(copy, "High", n - 1 - v) - high[v]));
+    std::printf("    %zu matched; worst difference %.2g\n", rep.known, worst);
+    CHECK(rep.known == n && worst < 1e-4f);
+  });
+
+  test("skin weights: a hand below its arm bone's end, beside the thigh, takes no leg weight - the leg bone can't see it", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 1, 0}, 0.12f, 12, 12);  // the leg
+    const size_t leg_n = m.vert_count();
+    r81_tube(m, {0.22f, 0.3f, 0}, {0.22f, 1.2f, 0}, 0.08f, 18, 12);  // the arm with its hand at the bottom
+    /* The arm bone stops above the hand: the hand's vertices are nearer the leg bone, through the leg's surface. */
+    const std::vector<BoneSegment> bones{{"Leg", {0, 0, 0}, {0, 1, 0}}, {"Arm", {0.22f, 1.2f, 0}, {0.22f, 0.7f, 0}}};
+    std::vector<float> e;
+    float env_hand = 0.0f;
+    for (size_t v = leg_n; v < m.vert_count(); v++)
+      if (m.positions[v].y < 0.6f) skinweights::envelope_weights(m.positions[v], bones, e), env_hand = std::max(env_hand, e[0]);
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, bones, InpaintOptions{}, &rep, &err));
+    float hand = 0.0f;
+    for (size_t v = leg_n; v < m.vert_count(); v++)
+      if (m.positions[v].y < 0.6f) hand = std::max(hand, r81_weight(m, "Leg", v));
+    std::printf("    the hand's leg weight: by distance %.3f, inpainted %.4f\n", env_hand, hand);
+    CHECK(env_hand > 0.5f && hand < 0.01f);
+  });
+
+  test("skin weights: short spine bones in a wide torso each get their own band and blend into the next (no hard steps)", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 1, 0}, 0.15f, 40, 16);
+    std::vector<BoneSegment> bones;
+    const char *names[] = {"Hips", "Spine", "Chest", "Neck", "Head"};
+    for (int i = 0; i < 5; i++) bones.push_back({names[i], {0, 0.2f * (float)i, 0}, {0, 0.2f * (float)(i + 1), 0}});
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, bones, InpaintOptions{}, &rep, &err));
+    float step = 0.0f, weakest = 1.0f;
+    for (const char *nm : names) {
+      float most = 0.0f;
+      for (size_t v = 0; v < m.vert_count(); v++) most = std::max(most, r81_weight(m, nm, v));
+      weakest = std::min(weakest, most);
+      for (int r = 1; r <= 40; r++) step = std::max(step, std::fabs(r81_weight(m, nm, (size_t)r * 16) - r81_weight(m, nm, (size_t)(r - 1) * 16)));
+    }
+    std::printf("    %zu trusted, %zu inpainted; every bone's strongest weight at least %.2f; largest step between rings %.3f\n", rep.known, rep.inpainted,
+                weakest, step);
+    CHECK(weakest > 0.5f && step < 0.35f && r81_partition_error(m) < 1e-3f);
+  });
+
+  test("skin weights: a NaN vertex, a wire edge and a zero-area face leave every vertex weighted, summing to 1, still by the direct solver", [] {
+    Mesh m;
+    r81_tube(m, {0, 0, 0}, {0, 2, 0}, 0.2f, 20, 12);
+    const uint32_t a = m.add_vert({0.5f, 1.0f, 0.0f}), b = m.add_vert({0.6f, 1.0f, 0.0f});
+    m.add_loose_edge(a, b);  // a wire hanging off nothing
+    const uint32_t z0 = m.add_vert({1, 1, 1}), z1 = m.add_vert({1, 1, 1}), z2 = m.add_vert({1, 1, 1});
+    m.add_face({z0, z1, z2});  // no area
+    m.positions[5] = Vec3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f);
+    m.sync_attributes();
+    const std::vector<BoneSegment> two{{"Lower", {0, 0, 0}, {0, 1, 0}}, {"Upper", {0, 1, 0}, {0, 2, 0}}};
+    InpaintReport rep;
+    std::string err;
+    CHECK(automatic_skin_weights(m, two, InpaintOptions{}, &rep, &err));
+    bool finite = true;
+    for (const VertexGroup &g : m.vertex_groups)
+      for (float w : g.weights) finite = finite && finite_bits(w);
+    std::printf("    %zu kept their first guess; solver: %s; partition error %.2g\n", rep.fallback, rep.solver, r81_partition_error(m));
+    CHECK(finite && r81_partition_error(m) < 1e-3f && rep.fallback >= 5);
+#ifdef BL_WITH_EIGEN
+    CHECK(std::string(rep.solver) == "Eigen sparse Cholesky");  // (not thrown to conjugate gradients by a zero pivot)
+#endif
+  });
+
+  test("skin weights: a source's InpaintMask isn't transferred or counted - the target's bone weights still sum to 1", [] {
+    Mesh body;
+    r81_tube(body, {0, 0, 0}, {0, 2, 0}, 0.3f, 16, 12);
+    const size_t n = body.vert_count();
+    std::vector<float> low(n), high(n), mask(n, 0.0f);
+    for (size_t v = 0; v < n; v++) {
+      high[v] = std::max(0.0f, std::min(1.0f, body.positions[v].y - 0.5f)), low[v] = 1.0f - high[v];
+      if (body.positions[v].y > 1.8f) mask[v] = 1.0f;  // a collar painted on the body
+    }
+    body.vertex_groups = {{"Low", low}, {"High", high}, {kInpaintMask, mask}};
+    Mesh cloth = body;
+    cloth.vertex_groups.clear();
+    for (Vec3 &p : cloth.positions) p = Vec3(p.x * 1.03f, p.y, p.z * 1.03f);
+    InpaintReport rep;
+    std::string err;
+    CHECK(transfer_skin_weights(body, cloth, InpaintOptions{}, &rep, &err));
+    CHECK(cloth.find_group(kInpaintMask) < 0 && cloth.vertex_groups.size() == 2 && r81_partition_error(cloth) < 1e-3f);
+  });
+
+  test("skin weights: a background bind can be cancelled, is dropped by an undo, and an editor closed mid-solve waits for it", [] {
+    auto setup = [](Editor &ed, int rings) {
+      ed.init_headless(1000, 700);
+      ed.command("create Armature");
+      GameObject *arm = ed.scene().find_by_name("Armature");
+      GameObject *g = ed.scene().create("R81Body");
+      auto mesh = std::make_shared<Mesh>();
+      r81_tube(*mesh, {0, 0, 0}, {0, 2, 0}, 0.2f, rings, 64);
+      std::vector<float> half(mesh->vert_count(), 0.5f);
+      mesh->vertex_groups.push_back({arm && !arm->children.empty() ? arm->children[0]->name : "Bone", half});
+      g->add<MeshFilter>()->mesh = mesh;
+      g->add<MeshRenderer>();
+      g->add<SkinModifier>()->object = arm ? arm->name : "Armature";
+      ed.mark_changed_for_test("R81 body");
+      ed.step_frame_headless();
+      ed.set_skin_async_min_verts_for_test(0);
+      return g;
+    };
+    auto first_weight = [](Editor &ed) {
+      GameObject *g = ed.scene().find_by_name("R81Body");
+      return g && !g->mesh_filter()->mesh->vertex_groups.empty() ? g->mesh_filter()->mesh->vertex_groups[0].weights[0] : -1.0f;
+    };
+    auto settle = [](Editor &ed) {
+      for (int i = 0; i < 4000 && ed.skin_job_running_for_test(); i++) ed.step_frame_headless();
+    };
+    {
+      Editor ed;
+      setup(ed, 300);
+      ed.command("skin bind R81Body");
+      ed.command("skin cancel");
+      settle(ed);
+      std::printf("    cancelled: the first weight %.2f (0.50 before)\n", first_weight(ed));
+      CHECK(!ed.skin_job_running_for_test() && std::fabs(first_weight(ed) - 0.5f) < 1e-6f);
+    }
+    {
+      Editor ed;
+      setup(ed, 300);
+      ed.command("skin bind R81Body");
+      ed.command("undo");  // (back past the body: the solve was for a scene that's gone)
+      settle(ed);
+      CHECK(!ed.skin_job_running_for_test() && ed.scene().find_by_name("R81Body") == nullptr);
+    }
+    {
+      Editor ed;
+      setup(ed, 300);
+      ed.command("skin bind R81Body");
+    }  // (its destructor cancels and joins the worker)
+    CHECK(true);
+  });
+  /* ---------------------------------------------------------------- round 82: the marker auto-rig (task 0058) */
+  /* A 1.7 m mannequin in a T-pose facing +Z (left on -X), as one mesh of tubes. */
+  auto mannequin = [](Editor &ed) {
+    auto m = std::make_shared<Mesh>();
+    for (float sx : {-1.0f, 1.0f}) {
+      r81_tube(*m, {0.1f * sx, 0.0f, 0}, {0.1f * sx, 0.92f, 0}, 0.07f, 18, 12);    // a leg
+      r81_tube(*m, {0.15f * sx, 1.42f, 0}, {0.78f * sx, 1.42f, 0}, 0.05f, 24, 12);  // an arm
+    }
+    r81_tube(*m, {0, 0.85f, 0}, {0, 1.5f, 0}, 0.17f, 14, 16);   // the torso
+    r81_tube(*m, {0, 1.5f, 0}, {0, 1.72f, 0}, 0.1f, 6, 12);     // the head
+    GameObject *g = ed.scene().create("Mannequin");
+    g->add<MeshFilter>()->mesh = m;
+    g->add<MeshRenderer>();
+    ed.command("select Mannequin");
+    ed.mark_changed_for_test("R82 mannequin");
+    ed.step_frame_headless();
+    return g;
+  };
+  auto near_bone = [](Editor &ed, const char *bone, Vec3 at, float tolerance) {
+    GameObject *b = ed.scene().find_by_name(bone);
+    const float d = b ? length(b->world_position() - at) : 1e9f;
+    if (!(d <= tolerance)) std::printf("    %s: %.3f from (%.2f, %.2f, %.2f)\n", bone, d, at.x, at.y, at.z);
+    return d <= tolerance;
+  };
+
+  test("auto-rig: a humanoid's markers give a skeleton at its joints, weighted and posable, undone in one step (Mixamo's way)", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    GameObject *body = mannequin(ed);
+    ed.command("autorig humanoid");
+    CHECK(ed.autorig_for_test().active);
+    /* One side placed by hand (the left, on -X); Symmetry places the right. */
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.42 0", "autorig mark LeftKnee -0.1 0.48 0"})
+      ed.command(line);
+    CHECK(ed.autorig_next_for_test().empty());
+    ed.step_frame_headless();
+    ed.command("autorig build");
+    ed.step_frame_headless();
+    const float tol = 0.02f * 1.72f;  // 2 % of the height
+    CHECK(near_bone(ed, "LeftLowerArm", {-0.45f, 1.42f, 0}, tol) && near_bone(ed, "RightLowerArm", {0.45f, 1.42f, 0}, tol));
+    CHECK(near_bone(ed, "LeftHand", {-0.7f, 1.42f, 0}, tol) && near_bone(ed, "RightHand", {0.7f, 1.42f, 0}, tol));
+    CHECK(near_bone(ed, "LeftLowerLeg", {-0.1f, 0.48f, 0}, tol) && near_bone(ed, "RightLowerLeg", {0.1f, 0.48f, 0}, tol));
+    CHECK(near_bone(ed, "Head", {0, 1.55f, 0}, tol) && near_bone(ed, "LeftUpperLeg", {-0.1f, 0.88f + 0.03f * 1.72f, 0}, tol));
+    CHECK(ed.scene().find_by_name("LeftLowerArm") && ed.scene().find_by_name("LeftLowerArm")->get<IKConstraint>());
+    body = ed.scene().find_by_name("Mannequin");
+    const SkinModifier *sk = body ? body->get<SkinModifier>() : nullptr;
+    CHECK(sk && ed.scene().find_by_name(sk->object) && body->mesh_filter()->mesh->find_group("LeftHand") >= 0);
+    if (!sk) return;
+    const Mesh &m = *body->mesh_filter()->mesh;
+    std::printf("    %zu vertices, %zu groups; partition error %.2g\n", m.vert_count(), m.vertex_groups.size(), r81_partition_error(m));
+    CHECK(r81_partition_error(m) < 1e-3f);
+    /* Bend the left forearm: the hand moves, the hips don't. */
+    GameObject *fore = ed.scene().find_by_name("LeftLowerArm");
+    for (GameObject *ik_t : {ed.scene().find_by_name("LeftHandIK")})
+      if (ik_t) ik_t->set_world_position(ik_t->world_position() + Vec3(0, 0.3f, 0));  // (IK drives the forearm: move its target)
+    solve_constraints(ed.scene());
+    const Mesh *e = body->evaluated_mesh();
+    const Mat4 &w = body->world_matrix();
+    float hand = 0.0f, hips = 0.0f;
+    for (size_t v = 0; v < m.vert_count(); v++) {
+      const Vec3 p = m.positions[v];
+      const float d = length(w.point(e->positions[v]) - w.point(p));
+      if (p.x < -0.68f) hand = std::max(hand, d);
+      if (std::fabs(p.x) < 0.2f && p.y > 0.8f && p.y < 1.0f) hips = std::max(hips, d);
+    }
+    std::printf("    the left hand moved %.3f, the hips %.4f (forearm %s)\n", hand, hips, fore ? "found" : "missing");
+    CHECK(hand > 0.05f && hips < 1e-3f);
+    /* One undo: the rig and its bind went in together (a small mesh binds at once, in the same frame; a large one's
+     * bind lands later as its own step). */
+    ed.command("undo");
+    body = ed.scene().find_by_name("Mannequin");
+    CHECK(!ed.scene().find_by_name("LeftLowerArm") && body && !body->get<SkinModifier>() && body->mesh_filter()->mesh->find_group("LeftHand") < 0);
+  });
+
+  test("auto-rig: a quadruped's markers give a spine, neck, tail and four legs where they are; a front leg moves its paw, not the head", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    auto m = std::make_shared<Mesh>();
+    r81_tube(*m, {0, 0.6f, -0.42f}, {0, 0.6f, 0.4f}, 0.15f, 16, 16);      // the body, nose towards +Z
+    r81_tube(*m, {0, 0.65f, 0.38f}, {0, 0.82f, 0.68f}, 0.07f, 8, 12);     // neck and head
+    r81_tube(*m, {0, 0.62f, -0.42f}, {0, 0.76f, -0.8f}, 0.025f, 8, 8);    // the tail
+    for (float sx : {-1.0f, 1.0f})
+      for (float z : {-0.3f, 0.3f}) r81_tube(*m, {0.1f * sx, 0.55f, z}, {0.1f * sx, 0.0f, z}, 0.04f, 14, 10);  // the legs
+    GameObject *dog = ed.scene().create("Dog");
+    dog->add<MeshFilter>()->mesh = m;
+    dog->add<MeshRenderer>();
+    ed.command("select Dog");
+    ed.mark_changed_for_test("R82 dog");
+    ed.step_frame_headless();
+    ed.command("autorig quadruped");
+    for (const char *line : {"autorig mark Nose 0 0.8 0.66", "autorig mark Skull 0 0.74 0.55", "autorig mark Withers 0 0.65 0.3",
+                             "autorig mark Hips 0 0.6 -0.3", "autorig mark TailBase 0 0.62 -0.42", "autorig mark TailTip 0 0.75 -0.78",
+                             "autorig mark FrontLeftKnee -0.1 0.3 0.3", "autorig mark FrontLeftPaw -0.1 0.03 0.3",
+                             "autorig mark HindLeftHock -0.1 0.3 -0.3", "autorig mark HindLeftPaw -0.1 0.03 -0.3"})
+      ed.command(line);
+    CHECK(ed.autorig_next_for_test().empty());
+    ed.command("autorig build");
+    ed.step_frame_headless();
+    const float tol = 0.02f * 0.82f;
+    CHECK(near_bone(ed, "FrontLeftLowerLeg", {-0.1f, 0.3f, 0.3f}, tol) && near_bone(ed, "FrontRightLowerLeg", {0.1f, 0.3f, 0.3f}, tol));
+    CHECK(near_bone(ed, "HindLeftLowerLeg", {-0.1f, 0.3f, -0.3f}, tol) && near_bone(ed, "HindRightLowerLeg", {0.1f, 0.3f, -0.3f}, tol));
+    CHECK(near_bone(ed, "Head", {0, 0.74f, 0.55f}, tol) && near_bone(ed, "Neck", {0, 0.65f, 0.3f}, tol) && near_bone(ed, "Tail", {0, 0.62f, -0.42f}, tol));
+    CHECK(ed.scene().find_by_name("Tail2") && ed.scene().find_by_name("FrontLeftLowerLeg")->get<IKConstraint>());
+    dog = ed.scene().find_by_name("Dog");
+    const Mesh &mesh = *dog->mesh_filter()->mesh;
+    CHECK(r81_partition_error(mesh) < 1e-3f);
+    /* Lift the front left foot: its paw follows; the head stays. */
+    if (GameObject *t = ed.scene().find_by_name("FrontLeftFootIK")) t->set_world_position(t->world_position() + Vec3(0, 0.15f, 0.1f));
+    solve_constraints(ed.scene());
+    const Mesh *e = dog->evaluated_mesh();
+    float paw = 0.0f, head = 0.0f;
+    for (size_t v = 0; v < mesh.vert_count(); v++) {
+      const Vec3 p = mesh.positions[v];
+      const float d = length(e->positions[v] - p);
+      if (p.x < -0.05f && p.z > 0.2f && p.y < 0.1f) paw = std::max(paw, d);
+      if (p.z > 0.55f && p.y > 0.7f) head = std::max(head, d);
+    }
+    std::printf("    the front left paw moved %.3f, the head %.4f\n", paw, head);
+    CHECK(paw > 0.05f && head < 1e-3f);
+  });
+
+  test("auto-rig: clicks in the front view put markers inside the body (mid-depth), Symmetry mirrors them, Remove Last takes one back", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    mannequin(ed);
+    ed.command("autorig humanoid");
+    for (int i = 0; i < 90; i++) ed.step_frame_headless();  // (the view turns to the front)
+    auto click_at = [&](Vec3 world) {
+      int x = 0, y = 0;
+      if (!ed.project_to_window(world, x, y)) return false;
+      platform::Event mv, d, u;
+      mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      mv.x = d.x = u.x = x, mv.y = d.y = u.y = y;
+      ed.step_frame_headless({mv});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({u});
+      return true;
+    };
+    CHECK(click_at({0, 1.6f, 0.1f}));  // the chin, on the head's front surface
+    CHECK(click_at({-0.7f, 1.42f, 0.05f}));  // the left wrist
+    const MarkerMap &mk = ed.autorig_for_test().markers;
+    const bool have = mk.count("Chin") && mk.count("LeftWrist") && mk.count("RightWrist");
+    CHECK(have);
+    if (!have) return;
+    const Vec3 c = mk.at("Chin"), lw = mk.at("LeftWrist"), rw = mk.at("RightWrist");
+    std::printf("    chin (%.3f, %.3f, %.3f), left wrist (%.3f, %.3f, %.3f), right wrist (%.3f, %.3f, %.3f)\n", c.x, c.y, c.z, lw.x, lw.y, lw.z, rw.x, rw.y,
+                rw.z);
+    CHECK(std::fabs(c.z) < 0.02f && std::fabs(lw.z) < 0.01f);  // the middle of the head and of the arm, not their front
+    CHECK(std::fabs(lw.x + 0.7f) < 0.02f && std::fabs(rw.x - 0.7f) < 0.02f && std::fabs(rw.y - lw.y) < 1e-4f);
+    ed.autorig_remove_last_for_test();
+    CHECK(!ed.autorig_for_test().markers.count("LeftWrist") && !ed.autorig_for_test().markers.count("RightWrist") &&
+          ed.autorig_for_test().markers.count("Chin"));
+    CHECK(ed.autorig_next_for_test() == "LeftWrist");
+    ed.command("autorig cancel");
+    CHECK(!ed.autorig_for_test().active);
+  });
+  /* A dog of tubes; legs bent at the hocks and elbows unless `straight`; nose towards +Z (or -Z, `backwards`). */
+  auto dog_markers = [](bool straight, bool backwards) {
+    const float s = backwards ? -1.0f : 1.0f, bend = straight ? 0.0f : 0.06f;
+    std::vector<std::string> lines = {
+        strprintf("autorig mark Nose 0 0.8 %g", 0.66f * s), strprintf("autorig mark Skull 0 0.74 %g", 0.55f * s),
+        strprintf("autorig mark Withers 0 0.65 %g", 0.3f * s), strprintf("autorig mark Hips 0 0.6 %g", -0.3f * s),
+        strprintf("autorig mark TailBase 0 0.62 %g", -0.42f * s), strprintf("autorig mark TailTip 0 0.75 %g", -0.78f * s),
+        strprintf("autorig mark FrontLeftKnee %g 0.3 %g", -0.1f * s, (0.3f - bend) * s), strprintf("autorig mark FrontLeftPaw %g 0.03 %g", -0.1f * s, 0.3f * s),
+        strprintf("autorig mark HindLeftHock %g 0.3 %g", -0.1f * s, (-0.3f - bend) * s),
+        strprintf("autorig mark HindLeftPaw %g 0.03 %g", -0.1f * s, -0.3f * s)};
+    return lines;
+  };
+  auto make_dog = [](Editor &ed, bool backwards) {
+    const float s = backwards ? -1.0f : 1.0f;
+    auto m = std::make_shared<Mesh>();
+    r81_tube(*m, {0, 0.6f, -0.42f * s}, {0, 0.6f, 0.4f * s}, 0.15f, 16, 16);
+    r81_tube(*m, {0, 0.65f, 0.38f * s}, {0, 0.82f, 0.68f * s}, 0.07f, 8, 12);
+    r81_tube(*m, {0, 0.62f, -0.42f * s}, {0, 0.76f, -0.8f * s}, 0.025f, 8, 8);
+    for (float sx : {-1.0f, 1.0f})
+      for (float z : {-0.3f, 0.3f}) r81_tube(*m, {0.1f * sx, 0.55f, z}, {0.1f * sx, 0.0f, z}, 0.04f, 14, 10);
+    GameObject *dog = ed.scene().create("Dog");
+    dog->add<MeshFilter>()->mesh = m;
+    dog->add<MeshRenderer>();
+    ed.command("select Dog");
+    ed.mark_changed_for_test("R82 dog");
+    ed.step_frame_headless();
+    return dog;
+  };
+
+  test("auto-rig: bent legs and elbows stay as placed - Build Rig leaves every bone at its rest and the mesh unmoved", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    make_dog(ed, false);
+    ed.command("autorig quadruped");
+    for (const std::string &l : dog_markers(false, false)) ed.command(l);
+    ed.command("autorig build");
+    ed.step_frame_headless();
+    float worst_bone = 0.0f;
+    ed.scene().for_each([&](GameObject &g) {
+      const Bone *b = g.get<Bone>();
+      if (!b) return;
+      const Quat q = g.local().rotation, r = b->rest_rotation;
+      worst_bone = std::max(worst_bone, 1.0f - std::fabs(q.x * r.x + q.y * r.y + q.z * r.z + q.w * r.w));
+    });
+    GameObject *dog = ed.scene().find_by_name("Dog");
+    const Mesh &m = *dog->mesh_filter()->mesh;
+    const Mesh *e = dog->evaluated_mesh();
+    float moved = 0.0f;
+    for (size_t v = 0; v < m.vert_count(); v++) moved = std::max(moved, length(e->positions[v] - m.positions[v]));
+    std::printf("    after Build Rig: bones off their rest by %.2g (1 - |q.r|), the mesh moved %.2g\n", worst_bone, moved);
+    CHECK(worst_bone < 1e-5f && moved < 1e-4f);
+    /* A humanoid with the elbows a little in front of the shoulder-wrist line: the same. */
+    Editor h;
+    h.init_headless(1200, 800);
+    mannequin(h);
+    h.command("autorig humanoid");
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.40 0.04", "autorig mark LeftKnee -0.1 0.48 0.02"})
+      h.command(line);
+    h.command("autorig build");
+    h.step_frame_headless();
+    float worst = 0.0f;
+    std::string which;
+    h.scene().for_each([&](GameObject &g) {
+      const Bone *b = g.get<Bone>();
+      if (!b) return;
+      const Quat q = g.local().rotation, r = b->rest_rotation;
+      const float off = 1.0f - std::fabs(q.x * r.x + q.y * r.y + q.z * r.z + q.w * r.w);
+      if (off > worst) worst = off, which = g.name;
+    });
+    std::printf("    humanoid with bent elbows: bones off their rest by %.2g (%s)\n", worst, which.c_str());
+    CHECK(worst < 1e-5f);
+  });
+
+  test("auto-rig: left and right follow the body - markers placed on the wrong side swap, and a dog facing -Z has its left on +X", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    mannequin(ed);
+    ed.command("autorig humanoid");
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist 0.7 1.42 0",
+                             "autorig mark LeftElbow 0.45 1.42 0", "autorig mark LeftKnee 0.1 0.48 0"})  // (the "left" ones on +X)
+      ed.command(line);
+    ed.command("autorig build");
+    GameObject *la = ed.scene().find_by_name("LeftLowerArm");
+    CHECK(la && la->world_position().x < 0.0f);
+    Editor ed2;
+    ed2.init_headless(1200, 800);
+    make_dog(ed2, true);
+    ed2.command("autorig quadruped");
+    for (const std::string &l : dog_markers(true, true)) ed2.command(l);
+    ed2.command("autorig build");
+    GameObject *fl = ed2.scene().find_by_name("FrontLeftLowerLeg");
+    std::printf("    the backwards dog's front left knee at x = %.2f\n", fl ? fl->world_position().x : 0.0f);
+    CHECK(fl && fl->world_position().x > 0.0f && fl->world_position().z < 0.0f);
+  });
+
+  test("auto-rig: upside-down markers and unknown names are refused; New Scene ends a session; a large mesh binds in the background", [=] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    mannequin(ed);
+    ed.command("autorig humanoid");
+    ed.command("autorig mark chin 0 1.55 0");  // (lower case: not a marker's name)
+    CHECK(ed.autorig_for_test().markers.empty());
+    for (const char *line : {"autorig mark Chin 0 0.5 0", "autorig mark Groin 0 1.5 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.42 0", "autorig mark LeftKnee -0.1 0.48 0"})  // the groin above the chin
+      ed.command(line);
+    ed.command("autorig build");
+    CHECK(!ed.scene().find_by_name("Hips") && ed.autorig_for_test().active);  // refused; the markers stay to fix
+    ed.command("newscene");
+    CHECK(!ed.autorig_for_test().active);
+    /* Background: Build lands the rig at once, the bind later as its own step. */
+    Editor big;
+    big.init_headless(1200, 800);
+    mannequin(big);
+    big.set_skin_async_min_verts_for_test(0);
+    big.command("autorig humanoid");
+    for (const char *line : {"autorig mark Chin 0 1.55 0", "autorig mark Groin 0 0.88 0", "autorig mark LeftWrist -0.7 1.42 0",
+                             "autorig mark LeftElbow -0.45 1.42 0", "autorig mark LeftKnee -0.1 0.48 0"})
+      big.command(line);
+    big.command("autorig build");
+    CHECK(big.scene().find_by_name("LeftLowerArm") != nullptr);
+    for (int i = 0; i < 4000 && big.skin_job_running_for_test(); i++) big.step_frame_headless();
+    GameObject *body = big.scene().find_by_name("Mannequin");
+    CHECK(body && r81_partition_error(*body->mesh_filter()->mesh) < 1e-3f && body->mesh_filter()->mesh->find_group("LeftHand") >= 0);
+    big.command("undo");  // the bind (and the rig too, when the bind landed in the frame right after Build)
+    body = big.scene().find_by_name("Mannequin");
+    CHECK(body && body->mesh_filter()->mesh->find_group("LeftHand") < 0);
+    /* Starting again on the same mesh brings the markers back. */
+    big.command("select Mannequin");
+    big.command("autorig humanoid");
+    CHECK(big.autorig_for_test().markers.size() == 8);
+  });
+  /* ---------------------------------------------------------------- round 83: keyframe animation (task 0059) */
+  test("animation: Constant holds, Linear interpolates, Auto passes through every key without overshooting, and clips round-trip", [] {
+    AnimTrack t;
+    t.set_key(0, 0), t.set_key(10, 10), t.set_key(20, 0);
+    float worst = 0.0f;
+    for (float f = 0; f <= 20.0f; f += 0.25f) worst = std::max(worst, t.sample(f));
+    CHECK(std::fabs(t.sample(10) - 10.0f) < 1e-6f && worst <= 10.0f + 1e-5f);  // through the peak, never above it
+    /* Rising then rising more: the span between stays within its two keys. */
+    AnimTrack m;
+    m.set_key(0, 0), m.set_key(10, 1), m.set_key(20, 10);
+    bool inside = true;
+    for (float f = 10; f <= 20.0f; f += 0.25f) inside = inside && m.sample(f) >= 1.0f - 1e-5f && m.sample(f) <= 10.0f + 1e-5f;
+    CHECK(inside);
+    t.keys[0].interp = AnimLinear;
+    CHECK(std::fabs(t.sample(5) - 5.0f) < 1e-5f);
+    t.keys[0].interp = AnimConstant;
+    CHECK(t.sample(9.9f) == 0.0f && t.sample(10.0f) == 10.0f);
+    CHECK(t.sample(-5) == 0.0f && t.sample(50) == 0.0f);  // held outside the keys
+    AnimationClip c;
+    c.name = "Walk", c.frame_rate = 30, c.length = 48, c.loop = false;
+    c.track("Hips/Left Leg", "Rotation", 2).set_key(12, 45.5f, AnimLinear);
+    c.track("", "Light.Intensity", 0).set_key(3, 2.0f);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(c), back));
+    CHECK(back.frame_rate == 30 && back.length == 48 && !back.loop && back.tracks.size() == 2 && back.tracks[0].path == "Hips/Left Leg" &&
+          back.tracks[0].keys[0].value == 45.5f && back.tracks[0].keys[0].interp == AnimLinear && back.tracks[1].path.empty());
+    CHECK(wrap_frame(70, 60, 0) == 10.0f && wrap_frame(70, 60, 1) == 60.0f && wrap_frame(70, 60, 2) == 50.0f);
+  });
+
+  /* A box with a lid, for the editor tests. */
+  auto box_with_lid = [](Editor &ed) {
+    std::remove(resolve_asset_path("Assets/Animations/R83Box.anim").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R83Spin.anim").c_str());
+    GameObject *box = ed.scene().create("R83Box");
+    GameObject *lid = ed.scene().create("Lid", box);
+    lid->set_local_position({0, 2, 0});
+    ed.command("select R83Box");
+    ed.mark_changed_for_test("R83 box");
+    ed.step_frame_headless();
+    return box;
+  };
+
+  test("animation: the Animation window's clip on a box - keys on the lid, Preview scrubs without undo steps and puts the pose back", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("anim new");
+    CHECK(ed.scene().find_by_name("R83Box")->get<Animation>() && ed.anim_clip_for_test() &&
+          fs::exists(resolve_asset_path("Assets/Animations/R83Box.anim")));
+    ed.command("anim key Lid Position 1 0 0");
+    ed.command("anim key Lid Position 1 30 1");
+    ed.step_frame_headless();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("anim preview on");
+    for (int f : {0, 15, 30}) {
+      ed.command("anim frame " + std::to_string(f));
+      ed.step_frame_headless();
+    }
+    ed.command("anim frame 15");
+    GameObject *lid = ed.scene().find_by_name("Lid");
+    std::printf("    lid at frame 15: y = %.3f; undo steps %zu -> %zu\n", lid->local().position.y, steps, ed.undo_steps_for_test());
+    CHECK(std::fabs(lid->local().position.y - 0.5f) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps);  // scrubbing is no edit
+    ed.command("anim preview off");
+    CHECK(std::fabs(ed.scene().find_by_name("Lid")->local().position.y - 2.0f) < 1e-6f);  // back where it was
+    /* The file has the keys. */
+    AnimationClip back;
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path("Assets/Animations/R83Box.anim"), text) && load_clip_text(text, back));
+    CHECK(back.find("Lid", "Position", 1) && back.find("Lid", "Position", 1)->keys.size() == 2);
+  });
+
+  test("animation: Record turns a move into keys at the playhead (one undo step takes them back); renaming the clip keeps it playing", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("anim new");
+    ed.command("anim record on");
+    ed.command("anim frame 20");
+    ed.step_frame_headless();
+    GameObject *lid = ed.scene().find_by_name("Lid");
+    lid->set_local_position({0.5f, 2.0f, 0});
+    ed.mark_changed_for_test("Move Lid");
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *x = clip ? clip->find("Lid", "Position", 0) : nullptr;
+    std::printf("    recorded: %s\n", x ? strprintf("Lid x key at %g = %g", x->keys[0].frame, x->keys[0].value).c_str() : "nothing");
+    CHECK(x && x->keys.size() == 1 && x->keys[0].frame == 20.0f && x->keys[0].value == 0.5f);
+    CHECK(clip && clip->find("Lid", "Position", 1) && !clip->find("", "Position", 0));  // the lid's three axes, the box untouched
+    ed.command("undo");
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && !clip->find("Lid", "Position", 0));
+    /* Rename the clip in the Project window: the Animation component follows. */
+    ed.command("redo");
+    ed.command("renameasset Assets/Animations/R83Box.anim R83Spin");
+    ed.step_frame_headless();
+    const Animation *an = ed.scene().find_by_name("R83Box")->get<Animation>();
+    std::printf("    after the rename: '%s'\n", an ? an->clip.c_str() : "-");
+    CHECK(an && an->clip == "Assets/Animations/R83Spin.anim" && clip_asset(an->clip));
+  });
+
+  test("animation: in Play the Animation component turns a bone, and the skin follows", [] {
+    /* The component on its own (a fixed step), then in the editor's Play. */
+    Scene s;
+    GameObject *root = s.create("R83Arm");
+    GameObject *bone = s.create("Bone", root);
+    std::remove(resolve_asset_path("Assets/Animations/R83Arm.anim").c_str());
+    AnimationClipPtr c = create_clip_asset("Assets/Animations/R83Arm.anim", "R83Arm");
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->track("Bone", "Rotation", 0).set_key(0, 0, AnimLinear);
+    c->track("Bone", "Rotation", 0).set_key(60, 90);
+    Animation *an = root->add<Animation>();
+    an->clip = c->asset_path;
+    PlayContext ctx;
+    ctx.scene = &s;
+    an->start(ctx);
+    ctx.dt = 0.5f;  // 30 frames at 60 per second
+    an->update(ctx);
+    std::printf("    after half a second: the bone at %.2f degrees\n", bone->local().euler_hint.x);
+    CHECK(std::fabs(bone->local().euler_hint.x - 45.0f) < 1e-3f);
+    /* The editor: the Blender tube's Upper bone, keyed, moves its half of the mesh in Play. */
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ImportResult r;
+    CHECK(import_model("tests/fixtures/rig_tube.glb", r));
+    instantiate_import(ed.scene(), r, "Rig Import", nullptr);
+    GameObject *tube = ed.scene().find_by_name("Tube");
+    GameObject *arm = tube ? ed.scene().find_by_name(tube->get<SkinModifier>()->object) : nullptr;
+    CHECK(arm != nullptr);
+    if (!arm) return;
+    std::remove(resolve_asset_path("Assets/Animations/R83Tube.anim").c_str());
+    AnimationClipPtr bend = create_clip_asset("Assets/Animations/R83Tube.anim", "R83Tube");
+    const std::string path = anim_path(*arm, *ed.scene().find_by_name("Upper"));
+    bend->track(path, "Rotation", 0).set_key(0, 0, AnimLinear);
+    bend->track(path, "Rotation", 0).set_key(6, 60, AnimConstant);
+    arm->add<Animation>()->clip = bend->asset_path;
+    ed.mark_changed_for_test("R83 tube");
+    ed.step_frame_headless();
+    const std::vector<Vec3> rest = tube->evaluated_mesh()->positions;
+    ed.command("play");
+    const double t0 = now_seconds();
+    while (now_seconds() - t0 < 0.6) ed.step_frame_headless();
+    tube = ed.scene().find_by_name("Tube");
+    float moved = 0.0f;
+    for (size_t v = 0; v < rest.size(); v++) moved = std::max(moved, length(tube->evaluated_mesh()->positions[v] - rest[v]));
+    std::printf("    in Play the tube's vertices moved up to %.3f\n", moved);
+    CHECK(moved > 0.1f);
+    ed.command("stop");
+  });
+
+  test("animation: the dopesheet - clicking the ruler moves the playhead, dragging a key moves it in time, Delete removes it", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    box_with_lid(ed);
+    ed.command("window Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 10 1");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti sheet, ruler;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet) && ed.button_rect_for_test("anim_ruler", ruler));
+    if (sheet.w <= 0) return;
+    const float end = std::max(30.0f, ed.anim_clip_for_test()->end_frame()) * 1.1f;  // (the sheet's span: the clip and a tenth more)
+    auto x_of = [&](float f) { return sheet.x + (int)std::lround(f / end * (float)sheet.w); };
+    auto click = [&](int x, int y, bool drag_to = false, int x2 = 0) {
+      platform::Event m, d, mv, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, mv.type = platform::EventType::MouseMove, u.type = platform::EventType::MouseUp;
+      m.x = d.x = x, m.y = d.y = mv.y = u.y = y;
+      mv.x = u.x = drag_to ? x2 : x;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      if (drag_to) ed.step_frame_headless({mv});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+    };
+    click(x_of(20), ruler.y + ruler.h / 2);
+    std::printf("    the playhead after clicking the ruler at 20: %g\n", ed.anim_for_test().frame);
+    CHECK(std::fabs(ed.anim_for_test().frame - 20.0f) <= 1.0f);
+    const int row = sheet.y + ed.ui_for_test().row_h() / 2;  // the first (only) track
+    click(x_of(10), row, true, x_of(16));
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *t = clip ? clip->find("Lid", "Position", 1) : nullptr;
+    std::printf("    the key after dragging: frame %g\n", t && !t->keys.empty() ? t->keys[0].frame : -1.0f);
+    CHECK(t && t->keys.size() == 1 && std::fabs(t->keys[0].frame - 16.0f) <= 1.0f);
+    platform::Event del;
+    del.type = platform::EventType::KeyDown, del.key = platform::KEY_DELETE, del.x = sheet.x + sheet.w / 2, del.y = row;
+    ed.step_frame_headless({del});
+    ed.step_frame_headless();
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Lid", "Position", 1) && clip->find("Lid", "Position", 1)->keys.empty());
+  });
+  test("animation: names with spaces survive the file; Ping Pong, Once, Clamp and a negative Speed wrap as they should", [] {
+    AnimationClip c;
+    c.track("Lamp Post/Bulb", "Light.Spot Angle", 0).set_key(5, 40.0f);
+    c.track("Lamp Post/Bulb", "Light.Spot Angle", 0).set_key(10, 60.0f, AnimConstant);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(c), back));
+    const AnimTrack *t = back.find("Lamp Post/Bulb", "Light.Spot Angle", 0);
+    CHECK(back.tracks.size() == 1 && t && t->keys.size() == 2 && t->keys[1].value == 60.0f && t->keys[0].interp == AnimAuto);
+    AnimationClip bad;
+    CHECK(load_clip_text("blendity_anim 1\ntrack\t0\tPosition\tA\nkey 12 nan 0\nkey 3 1.5 1\n", bad));
+    CHECK(bad.tracks.size() == 1 && bad.tracks[0].keys.size() == 1 && bad.tracks[0].keys[0].frame == 3.0f);  // the bad line: no key
+    CHECK(wrap_frame(90, 60, 2) == 30.0f && wrap_frame(130, 60, 2) == 10.0f);  // ping pong: back down, then up again
+    CHECK(wrap_frame(-10, 60, 0) == 50.0f && wrap_frame(-10, 60, 2) == 10.0f);  // backwards
+    CHECK(wrap_frame(75, 60, 1) == 60.0f && wrap_frame(75, 60, 3) == 60.0f && wrap_frame(-5, 60, 3) == 0.0f);
+  });
+
+  test("animation: Record keys only real changes - a rename or a new child keys nothing - and Preview puts back only what it moved", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    GameObject *cube = ed.scene().create("R83Other");
+    cube->set_local_position({5, 0, 0});
+    ed.command("select R83Box");
+    ed.mark_changed_for_test("R83 other");
+    ed.step_frame_headless();
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 0 0");
+    ed.command("anim key Lid Position 1 30 1");
+    ed.command("anim record on");
+    ed.command("anim frame 15");
+    ed.step_frame_headless();
+    /* A rename and a new child: no keys. */
+    ed.scene().find_by_name("Lid")->name = "Lid2";
+    ed.mark_changed_for_test("Rename");
+    ed.step_frame_headless();
+    ed.scene().create("Handle", ed.scene().find_by_name("R83Box"))->set_local_position({0, 3, 0});
+    ed.mark_changed_for_test("Add child");
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    size_t keys = 0;
+    for (const AnimTrack &t : clip->tracks) keys += t.keys.size();
+    std::printf("    after a rename and a new child: %zu keys in %zu tracks\n", keys, clip->tracks.size());
+    CHECK(keys == 2 && clip->tracks.size() == 1);
+    ed.scene().find_by_name("Lid2")->name = "Lid";
+    ed.mark_changed_for_test("Rename back");
+    ed.step_frame_headless();
+    /* The unrelated cube moved while previewing stays moved; the lid goes back; an undo after that doesn't bring the
+     * previewed pose back. */
+    ed.command("anim record off");
+    ed.scene().find_by_name("R83Other")->set_local_position({7, 0, 0});
+    ed.mark_changed_for_test("Move other");
+    ed.step_frame_headless();
+    ed.command("anim preview off");
+    CHECK(ed.scene().find_by_name("R83Other")->local().position.x == 7.0f && std::fabs(ed.scene().find_by_name("Lid")->local().position.y - 2.0f) < 1e-6f);
+    ed.scene().find_by_name("R83Other")->set_local_position({9, 0, 0});
+    ed.mark_changed_for_test("Move other again");
+    ed.step_frame_headless();
+    ed.command("undo");
+    std::printf("    after the undo: other x = %g, lid y = %g\n", ed.scene().find_by_name("R83Other")->local().position.x, ed.scene().find_by_name("Lid")->local().position.y);
+    CHECK(ed.scene().find_by_name("R83Other")->local().position.x == 7.0f && std::fabs(ed.scene().find_by_name("Lid")->local().position.y - 2.0f) < 1e-6f);
+  });
+
+  test("animation: Preview is refused in Play, a new scene clears the window, and an undo after renaming the clip still finds it", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.step_frame_headless();
+    ed.command("play");
+    ed.command("anim preview on");
+    CHECK(!ed.anim_for_test().preview);
+    ed.command("stop");
+    /* Rename, then undo a step made before it: the Animation component (restored from before) still finds the clip. */
+    ed.command("anim key Lid Position 1 20 2");
+    ed.step_frame_headless();
+    ed.command("renameasset Assets/Animations/R83Box.anim R83Spin");
+    ed.step_frame_headless();
+    ed.command("undo");  // the second key
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    after rename + undo: clip %s, %zu key(s)\n", clip ? clip->asset_path.c_str() : "-", clip && !clip->tracks.empty() ? clip->tracks[0].keys.size() : 0);
+    CHECK(clip && clip->asset_path == "Assets/Animations/R83Spin.anim" && clip->tracks.size() == 1 && clip->tracks[0].keys.size() == 1);
+    ed.command("newscene");
+    CHECK(!ed.anim_for_test().preview && ed.anim_for_test().selected.empty());
+  });
+  /* ---------------------------------------------------------------- round 84: the README and the manual (task 0060) */
+  test("docs: the manual has its 13 chapters, the README and the lighting guide point to it, and every lesson it cites exists", [] {
+    /* The repository's folder: the working directory or one above it (ctest runs from build/, the exe from dist/). */
+    std::string top = fs::current_dir();
+    for (int up = 0; up < 4 && !fs::exists(fs::join(top, "docs/MANUAL.md")); up++) top = fs::parent(top);
+    std::string manual, readme, lighting;
+    CHECK(fs::read_file(fs::join(top, "docs/MANUAL.md"), manual) && fs::read_file(fs::join(top, "README.md"), readme) &&
+          fs::read_file(fs::join(top, "docs/guides/lighting.md"), lighting));
+    manual.erase(std::remove(manual.begin(), manual.end(), '\r'), manual.end());  // (a CRLF checkout)
+    int chapters = 0;
+    for (int k = 1; k <= 13; k++) chapters += manual.find("\n## " + std::to_string(k) + ". ") != std::string::npos;
+    CHECK(chapters == 13);
+    CHECK(readme.find("docs/MANUAL.md") != std::string::npos && lighting.find("MANUAL.md#7-lighting-and-rendering") != std::string::npos);
+    /* The Learn tab: lesson titles, and each lesson's "# " sections under it. */
+    std::map<std::string, std::set<std::string>> learn;
+    for (int i = 0; i < lesson_count(); i++) {
+      std::set<std::string> &sections = learn[lesson(i).title];
+      std::istringstream body(lesson(i).body);
+      std::string line;
+      while (std::getline(body, line))
+        if (line.rfind("# ", 0) == 0) sections.insert(line.substr(2));
+    }
+    /* Every *name* in the manual's "> Learn:" notes: a lesson ("Bevel, Bridge and Push Through": titles may hold
+     * commas), or "Lesson > section, section" with each section in that lesson. */
+    std::vector<std::string> wrong;
+    auto check = [&](std::string cited) {
+      for (size_t d; (d = cited.find("  ")) != std::string::npos;) cited.erase(d, 1);  // (a name wrapped onto the next line)
+      const size_t gt = cited.find(" > ");
+      if (gt == std::string::npos) {
+        if (!learn.count(cited)) wrong.push_back(cited);
+        return;
+      }
+      const auto it = learn.find(cited.substr(0, gt));
+      if (it == learn.end()) return wrong.push_back(cited.substr(0, gt));
+      for (const std::string &part : split_list(cited.substr(gt + 3), ','))
+        if (!it->second.count(part)) wrong.push_back(it->first + " > " + part);
+    };
+    std::istringstream is(manual);
+    std::string line, note;
+    bool in_note = false;
+    while (std::getline(is, line)) {
+      if (line.rfind("> Learn:", 0) == 0) in_note = true, note.clear();
+      if (!in_note) continue;
+      if (line.rfind(">", 0) != 0) {
+        in_note = false;
+        continue;
+      }
+      note += line.substr(1) + " ";
+      for (size_t a = note.find('*'), b; a != std::string::npos && (b = note.find('*', a + 1)) != std::string::npos; a = note.find('*')) {
+        const std::string cited = note.substr(a + 1, b - a - 1);
+        note.erase(0, b + 1);
+        check(cited);
+      }
+    }
+    for (const std::string &m : wrong) std::printf("    not in the Learn tab: '%s'\n", m.c_str());
+    CHECK(wrong.empty());
+    CHECK(fs::is_web_address("https://github.com/x") && !fs::is_web_address("C:/Users/x/MANUAL.md") && !fs::is_web_address("docs/MANUAL.md"));
   });
 }

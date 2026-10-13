@@ -27,6 +27,8 @@
 #include "../src/render/texture_bake.h"
 #include "../src/scene/material.h"
 #include "../src/scene/mesh.h"
+#include "../src/scene/skin_weights.h"
+#include "../src/scene/animation.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
@@ -3427,6 +3429,119 @@ static void test_pushpull_stress(Report &rep, const Options &o) {
 /* Task 0045 (ADR 0024): every Edit Mode operator, through the editor (so its undo commit carries the groups), on the
  * Push/Pull stress meshes with two vertex groups and random selections. Every group must keep one finite weight in
  * 0..1 per vertex, and a vertex left where an old one was must keep that vertex's weights. */
+/* Skin weights by inpainting (task 0057, ADR 0028): automatic weights and transfer on tubes of 5k to 50k vertices,
+ * and the editor's frames while a 50k bind solves on its worker thread. Target: 50k in at most 2 s on 8 threads. */
+static void sw_tube(Mesh &m, float radius, int rings, int segs) {
+  for (int r = 0; r <= rings; r++)
+    for (int s = 0; s < segs; s++) {
+      const float t = (float)r / (float)rings, a = 6.2831853f * (float)s / (float)segs;
+      m.add_vert({radius * std::cos(a), 4.0f * t, radius * std::sin(a)});
+    }
+  for (int r = 0; r < rings; r++)
+    for (int s = 0; s < segs; s++) {
+      const uint32_t i0 = (uint32_t)(r * segs + s), i1 = (uint32_t)(r * segs + (s + 1) % segs);
+      m.add_face({i0, i1, i1 + (uint32_t)segs, i0 + (uint32_t)segs});
+    }
+}
+
+static void test_skin_weights_stress(Report &rep, const Options &o) {
+  rep.title("Skin weights by inpainting (task 0057)",
+            "A tube along Y with 12 bones: automatic weights (trusted vertices, then the inpainting solve), and transfer onto a "
+            "5 % wider copy. Then the editor binds the 50k tube on its worker thread while frames go on.");
+  rep.table({"vertices", "auto ms", "inpainted", "transfer ms", "solver", "partition error"});
+  std::vector<BoneSegment> bones;
+  for (int i = 0; i < 12; i++) bones.push_back({strprintf("B%d", i), {0, 4.0f * i / 12.0f, 0}, {0, 4.0f * (i + 1) / 12.0f, 0}});
+  double ms50k = 0.0;
+  for (int segs : {48, 96, 128}) {
+    const int rings = segs == 48 ? 104 : segs == 96 ? 208 : 390;
+    if (o.quick && segs > 48) break;
+    Mesh body;
+    sw_tube(body, 0.3f, rings, segs);
+    InpaintReport ra, rt;
+    std::string err;
+    ScopedTimer ta;
+    const bool ok_a = automatic_skin_weights(body, bones, InpaintOptions{}, &ra, &err);
+    const double ms_a = ta.ms();
+    Mesh cloth;
+    sw_tube(cloth, 0.315f, rings, segs);
+    ScopedTimer tt;
+    const bool ok_t = transfer_skin_weights(body, cloth, InpaintOptions{}, &rt, &err);
+    const double ms_t = tt.ms();
+    float worst = 0.0f;
+    for (size_t v = 0; v < cloth.vert_count(); v++) {
+      float sum = 0.0f;
+      for (const VertexGroup &g : cloth.vertex_groups) sum += g.weights[v];
+      worst = std::max(worst, std::fabs(sum - 1.0f));
+    }
+    if (body.vert_count() > 45000) ms50k = ms_a;
+    rep.row({num((double)body.vert_count()), ok_a ? f1(ms_a) : "failed", num((double)ra.inpainted), ok_t ? f1(ms_t) : "failed", ra.solver,
+             strprintf("%.2g", worst)});
+  }
+  if (ms50k > 0.0)
+    rep.note(strprintf("50k vertices: %.0f ms on %d threads (target: 2000 ms on 8). %s", ms50k, JobSystem::global().thread_count(),
+                       ms50k <= 2000.0 ? "Within it." : "OVER the target."));
+  if (o.quick) return;
+  /* The editor: the bind runs on its worker thread; the frames meanwhile stay short. */
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.command("create Armature");
+  GameObject *arm = ed.scene().find_by_name("Armature");
+  GameObject *g = ed.scene().create("SkinBody");
+  auto mesh = std::make_shared<Mesh>();
+  sw_tube(*mesh, 0.3f, 390, 128);
+  g->add<MeshFilter>()->mesh = mesh;
+  g->add<MeshRenderer>();
+  g->add<SkinModifier>()->object = arm ? arm->name : "Armature";
+  ed.step_frame_headless();
+  ScopedTimer whole;
+  double worst_frame = 0.0;
+  {
+    ScopedTimer f;
+    ed.command("skin bind SkinBody");
+    ed.step_frame_headless();
+    worst_frame = f.ms();
+  }
+  int frames = 1;
+  while (ed.skin_job_running_for_test() && whole.ms() < 60000.0) {
+    ScopedTimer f;
+    ed.step_frame_headless();
+    worst_frame = std::max(worst_frame, f.ms());
+    frames++;
+  }
+  rep.note(strprintf("Editor, 50k-vertex bind on the worker thread: done in %.0f ms over %d frames; the slowest frame %.1f ms (the "
+                     "responsiveness rule: nothing over 100 ms).",
+                     whole.ms(), frames, worst_frame));
+}
+
+/* Keyframe animation (task 0059): sampling and applying a clip of 200 tracks (rotations of 67 bones, Auto keys) once a
+ * frame. Target: at most 0.2 ms. */
+static void test_animation_stress(Report &rep, const Options &o) {
+  rep.title("Keyframe animation (task 0059)",
+            "A chain of bones under a root, each turned by three Euler tracks with keys every 10 frames (Auto), applied with "
+            "apply_clip at frames across the clip.");
+  rep.table({"tracks", "keys", "ms per frame", "target"});
+  Scene s;
+  GameObject *root = s.create("Root");
+  GameObject *parent = root;
+  AnimationClip clip;
+  std::string path;
+  for (int b = 0; b < 67; b++) {
+    GameObject *g = s.create(strprintf("B%d", b), parent);
+    path = path.empty() ? g->name : path + "/" + g->name;
+    for (int a = 0; a < 3; a++)
+      for (int f = 0; f <= 120; f += 10) clip.track(path, "Rotation", a).set_key((float)f, (float)((b * 7 + a * 13 + f) % 90));
+    parent = g;
+  }
+  size_t keys = 0;
+  for (const AnimTrack &t : clip.tracks) keys += t.keys.size();
+  const int frames = o.quick ? 200 : 2000;
+  ScopedTimer t;
+  for (int i = 0; i < frames; i++) apply_clip(clip, *root, (float)(i % 120) + 0.5f);
+  const double per = t.ms() / frames;
+  rep.row({std::to_string(clip.tracks.size()), std::to_string(keys), strprintf("%.4f", per), "0.2"});
+  rep.note(strprintf("%zu tracks: %.4f ms a frame (target 0.2 ms). %s", clip.tracks.size(), per, per <= 0.2 ? "Within it." : "OVER the target."));
+}
+
 static void test_vgroups_stress(Report &rep, const Options &o) {
   using namespace ppstress;
   rep.title("Vertex groups through every Edit Mode operator",
@@ -4154,7 +4269,7 @@ int main(int argc, char **argv) {
                {"editor_fuzz", test_fuzz},       {"memory", test_memory},         {"shading", test_shading_cost},
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
-               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress},
+               {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
   ScopedTimer total;
   for (auto &t : tests) {

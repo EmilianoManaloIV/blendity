@@ -47,6 +47,55 @@ GameObject *Editor::rig_mesh() const {
   return nullptr;
 }
 
+/* Bind: Automatic Weights (inpainted) and Bind: Envelope (by distance), side by side; both wait while a solve runs.
+ * The Rigging window and the Inspector's Armature (Skin) modifier share them. */
+void Editor::draw_skin_bind_buttons(GameObject *g, ui::Layout &lay) {
+  auto &u = ui_;
+  const Recti row = lay.row(u.row_h() + u.px(2));
+  const int bw = (row.w - u.px(12)) / 2;
+  const Recti a{row.x + u.px(4), row.y, bw, row.h}, e{a.right() + u.px(4), row.y, bw, row.h};
+  auto button = [&](const Recti &r, const char *label, const char *tip, SkinBind how) {
+    if (skin_job_) {
+      u.frame(r, Color::hex(0x2A2A2A), u.theme.border, u.px(3));
+      u.label(r, label, u.theme.text_dim, ui::Align::Center);
+    }
+    else if (u.button(r, label)) skin_bind(g, how);
+    u.tooltip(tip);
+  };
+  button(a, "Bind: Automatic Weights",
+         "Vertex groups named after the bones. A vertex clearly nearest one bone, which sees it, takes it whole; the rest\n"
+         "are inpainted - the smoothest weights that agree with those (Epic's weight inpainting). Nothing bleeds across a\n"
+         "gap, such as a hand hanging by a thigh. Console: skin bind [object].",
+         SkinBind::Inpaint);
+  button(e, "Bind: Envelope", "Each vertex to the bones nearest it, by distance alone (the old automatic weights; quick). Console: skin bind\n"
+                              "[object] envelope.",
+         SkinBind::Envelope);
+}
+
+/* Transfer Weights (task 0057): a rigged body's weights onto this mesh - clothing, armour, hair - matched by distance
+ * and normals and inpainted where nothing matches (Epic's weight transfer). The body is an object field: type its
+ * name or drag it from the Hierarchy. */
+void Editor::draw_skin_transfer(GameObject *target, ui::Layout &lay) {
+  auto &u = ui_;
+  const int label_w = std::max(u.px(110), lay.area.w * 2 / 5);
+  const Recti row = lay.row();
+  u.label({row.x + u.px(4), row.y, label_w - u.px(8), row.h}, "From (a rigged body)");
+  object_field("skin_transfer_from", {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}, skin_transfer_source_);
+  u.tooltip("The body whose weights this mesh takes. Drag it here from the Hierarchy.");
+  GameObject *source = skin_transfer_source_.empty() ? nullptr : scene_->find_by_name(skin_transfer_source_);
+  const bool can = source && source != target && !skin_job_;
+  const Recti b = lay.row(u.row_h() + u.px(2));
+  const Recti br{b.x + u.px(4), b.y, b.w - u.px(8), b.h};
+  if (!can) {
+    u.frame(br, Color::hex(0x2A2A2A), u.theme.border, u.px(3));
+    u.label(br, "Transfer Weights", u.theme.text_dim, ui::Align::Center);
+  }
+  else if (u.button(br, "Transfer Weights")) skin_transfer(source, target);
+  u.tooltip("Close matches with the same facing copy the body's weights; the rest (a loose sleeve's end, a collar) are\n"
+            "inpainted from them. Paint an \"InpaintMask\" vertex group to force places to be inpainted. The mesh follows\n"
+            "the body's skeleton. Console: skin transfer <body> [mesh].");
+}
+
 void Editor::draw_rigging_window(const Recti &r) {
   auto &u = ui_;
   if (u.hovered(r) && u.in.pressed[0]) focused_ = WindowKind::Rigging;
@@ -119,6 +168,7 @@ void Editor::draw_rigging_window(const Recti &r) {
       }
   }
   if (section("Skin")) {
+    draw_skin_job_progress(lay);
     SkinModifier *sk = mf ? mesh_obj->get<SkinModifier>() : nullptr;
     if (!mf) u.label(lay.row(), "Select a mesh to bind it to a skeleton.", u.theme.text_dim);
     else if (!sk) {
@@ -126,20 +176,20 @@ void Editor::draw_rigging_window(const Recti &r) {
                                     "Select the mesh and a bone (or the armature) of the skeleton, Ctrl+click in the Hierarchy.",
              root != nullptr, [this, mesh_obj, root] {
                mesh_obj->add<SkinModifier>()->object = root->name;
-               if (!skin_bind(mesh_obj)) mark_changed("Add Armature (Skin)");  // (bound: skin_bind made the step)
+               mark_changed("Add Armature (Skin)");  // (a large mesh's bind lands later, as a step of its own)
+               skin_bind(mesh_obj);
              }}},
            1);
       if (!root) u.label(lay.row(), "Ctrl+click a bone or the armature in the Hierarchy too (or make one above).", u.theme.text_dim);
     }
     else {
-      grid({{"Bind: Automatic Weights", "Vertex groups named after the bones, from each vertex's distance to them (Blender: With Automatic Weights).",
-             true, [this, mesh_obj] { skin_bind(mesh_obj); }}},
-           1);
+      draw_skin_bind_buttons(mesh_obj, lay);
       u.push_id((ui::Id)(uintptr_t)sk);
       if (draw_reflected([sk](Reflector &rf) { sk->reflect(rf); }, lay)) mark_changed("Edit Armature (Skin)");
       u.pop_id();
     }
   }
+  if (mf && section("Transfer Weights")) draw_skin_transfer(mesh_obj, lay);
   if (section("Vertex Groups")) {
     if (mf) draw_vertex_groups(mesh_obj, mf, lay);
     else u.label(lay.row(), "Select a mesh to see its vertex groups.", u.theme.text_dim);
@@ -151,6 +201,7 @@ void Editor::draw_rigging_window(const Recti &r) {
     u.pop_id();
     if (weight_paint_) u.label(lay.row(), "Tip: select a bone (in the Hierarchy) to paint its group.", u.theme.text_dim);
   }
+  if (section("Auto-Rig")) draw_autorig_section(lay, mesh_obj);
   if (section("Inverse Kinematics")) {
     const bool chain = bone && a->parent && a->parent->get<Bone>() && !a->get<IKConstraint>();
     grid({{"Add IK to Bone", "The selected bone (a shin, a forearm) and its parent reach for a new target at its tip, bending towards a new pole.\n"
