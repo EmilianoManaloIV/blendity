@@ -7,6 +7,7 @@
 // to it working: the shared material instances, texture paths and the
 // .scene files that mention it.
 #include "editor.h"
+#include "../texture/procedural_texture.h"
 
 #include <algorithm>
 
@@ -417,8 +418,12 @@ void Editor::draw_project(const Recti &r) {
         project_listed_ = -100;
       }
       else if (ext == ".scene") open_scene(full);
+      else if (ext == ".ptex") {
+        if (ProceduralTexturePtr t = texture_asset(make_asset_relative(full))) texture_selected_ = t;
+        dock_open(WindowKind::Textures);
+      }
       else if (model_extension_supported(ext)) import_model_file(full, false);
-      else if (ext != ".mat") fs::open_external(full);
+      else if (ext != ".mat" && ext != ".ptex") fs::open_external(full);
     }
     if (hot && in.pressed[1]) {
       project_selected_ = full;

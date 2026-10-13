@@ -208,6 +208,7 @@ static void round46_tests();
 static void round47_tests();
 static void round48_tests();
 static void round49_tests();
+static void round50_tests();
 
 int main() {
   register_builtin_components();
@@ -834,6 +835,7 @@ int main() {
   round47_tests();
   round48_tests();
   round49_tests();
+  round50_tests();
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
    * differ from the cached picture. */
@@ -18594,5 +18596,203 @@ static void round49_tests() {
     std::string text;
     CHECK(fs::read_file(fs::join(scratch_project(), "Assets/Textures/Fresh.ptex"), text));
     CHECK(text.find("Checker") != std::string::npos && text.find("Width 128") != std::string::npos);
+  });
+}
+
+/* Round 50 (task 0028): the Textures window. */
+static Recti r50_popup(Editor &ed) {
+  const auto &rects = ed.ui_for_test().popup_rects();
+  return rects.empty() ? Recti{0, 0, 0, 0} : rects.back();
+}
+static void r50_pick_row(Editor &ed, const Recti &pop, int row_index) {
+  const int row = ed.ui_for_test().row_h();
+  r34_click(ed, pop.x + pop.w / 2, pop.y + ed.ui_for_test().px(4) + row * row_index + row / 2);
+  r34_steps(ed, 2);
+}
+static void r50_open(Editor &ed) {
+  /* Earlier runs' textures out of the scratch project (the grid would scroll them out of view). */
+  const std::string dir = fs::join(scratch_project(), "Assets/Textures");
+  for (const DirEntry &de : fs::list(dir))
+    if (fs::extension(de.name) == ".ptex") std::remove(fs::join(dir, de.name).c_str());
+  ed.init_headless(1600, 1200);
+  ed.step_frame_headless();
+  ed.set_render_cache_verify(false);
+  ed.command("shading wire");  // the window is under test: a cheap Scene view keeps the frames fast
+  ed.command("window Textures");
+  r34_steps(ed, 2);
+  /* The right half of the Scene view's area: tall enough for the stack, the Scene view still beside it (where it
+   * opens by itself, beside the Materials window, the short bottom area scrolls the stack out of view). */
+  ed.dock_split_for_test(WindowKind::Textures, 2);
+  r34_steps(ed, 3);
+}
+static void round50_tests() {
+  test("textures window: `window Textures` opens it beside the Materials window (the Scene view stays visible), and a layout holding it reads back", [] {
+    Editor ed;
+    ed.init_headless(1600, 1200);
+    ed.step_frame_headless();
+    ed.command("window Textures");
+    r34_steps(ed, 3);
+    CHECK(ed.scene_drawn_for_test());  // not opened over the Scene view
+    const Recti w = ed.window_rect_for_test(WindowKind::Textures);
+    CHECK(w.w > 0 && w.h > 0);
+    CHECK(std::string(window_title(WindowKind::Textures)) == "Textures");
+    const std::string s = ed.dock_serialize_for_test();
+    CHECK(s.find(std::to_string((int)WindowKind::Textures)) != std::string::npos);
+    CHECK(ed.dock_parse_roundtrip_for_test(s) == s);
+  });
+  test("textures window: New > Bricks by clicks creates the asset with the preset's layers and selects it", [] {
+    Editor ed;
+    r50_open(ed);
+    const Recti nb = ed.texture_ui_rect_for_test("new");
+    CHECK(nb.w > 0);
+    if (nb.w <= 0) return;
+    r34_click(ed, nb.x + nb.w / 2, nb.y + nb.h / 2);
+    r34_steps(ed, 2);
+    const Recti pop = r50_popup(ed);
+    CHECK(pop.w > 0);
+    if (pop.w <= 0) return;
+    r50_pick_row(ed, pop, 0);  // the first preset: Bricks
+    ProceduralTexturePtr t = ed.texture_selected_for_test();
+    std::printf("    popup %d,%d %dx%d; selected: %s\n", pop.x, pop.y, pop.w, pop.h, t ? t->name.c_str() : "none");
+    /* (Named Bricks, or Bricks 2, 3... when earlier runs left one in the scratch project.) */
+    CHECK(t && t->name.rfind("Bricks", 0) == 0 && t->layers.size() == 3 && std::string(t->layers[0]->type_name()) == "Brick");
+    CHECK(t && fs::exists(resolve_asset_path(t->asset_path)));
+  });
+  test("textures window: Add Layer > Blur by clicks appends it, its menu's Move Up moves it, its checkbox disables it, each one undo step", [] {
+    Editor ed;
+    r50_open(ed);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    CHECK(t && t->layers.size() == 1);
+    if (!t) return;
+    r34_steps(ed, 3);
+    const Recti ab = ed.texture_ui_rect_for_test("add_layer");
+    CHECK(ab.w > 0);
+    if (ab.w <= 0) return;
+    r34_click(ed, ab.x + ab.w / 2, ab.y + ab.h / 2);
+    r34_steps(ed, 2);
+    Recti pop = r50_popup(ed);
+    /* Rows: "Generators", 11 generators, "Filters", then Blur. */
+    int blur_row = 0;  // the layers before it plus a label row per category so far
+    std::string category;
+    for (const TextureLayerInfo &li : texture_layer_infos()) {
+      if (li.category != category) category = li.category, blur_row++;
+      if (li.name == "Blur") break;
+      blur_row++;
+    }
+    r50_pick_row(ed, pop, blur_row);
+    CHECK(t->layers.size() == 2 && std::string(t->layers[1]->type_name()) == "Blur");
+    const Recti mr = ed.texture_ui_rect_for_test("layer1");
+    CHECK(mr.w > 0);
+    r34_click(ed, mr.x + mr.w / 2, mr.y + mr.h / 2);
+    r34_steps(ed, 2);
+    pop = r50_popup(ed);
+    r50_pick_row(ed, pop, 0);  // Move Up
+    CHECK(std::string(t->layers[0]->type_name()) == "Blur");
+    const Recti cb = ed.texture_ui_rect_for_test("layer_enabled0");
+    r34_click(ed, cb.x + cb.w / 2, cb.y + cb.h / 2);
+    r34_steps(ed, 2);
+    CHECK(!t->layers[0]->enabled);
+    ed.command("undo");
+    CHECK(t->layers[0]->enabled);
+    ed.command("undo");
+    CHECK(std::string(t->layers[0]->type_name()) == "Noise");
+    ed.command("undo");
+    CHECK(t->layers.size() == 1);
+  });
+  test("textures window: a field typed in the window changes the texture and its preview; undo and redo restore both", [] {
+    Editor ed;
+    r50_open(ed);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    if (!t) return;
+    r34_steps(ed, 3);
+    const Recti tw = ed.texture_ui_rect_for_test("preview");  // the preview pane (the fields keep focus highlights)
+    const std::vector<uint32_t> before = r34_crop(ed, tw);
+    const uint64_t h0 = t->hash();
+    const Recti f = ed.texture_ui_rect_for_test("field:L0 Rows");
+    CHECK(f.w > 0);
+    if (f.w <= 0) return;
+    /* Type 3 into the int field: a click, select all, the digit, Enter. */
+    r34_click(ed, f.x + f.w / 2, f.y + f.h / 2);
+    platform::Event a;
+    a.type = platform::EventType::KeyDown;
+    a.key = platform::KEY_A;
+    a.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({a});
+    platform::Event ch;
+    ch.type = platform::EventType::Text;
+    ch.codepoint = '3';
+    ed.step_frame_headless({ch});
+    platform::Event en;
+    en.type = platform::EventType::KeyDown;
+    en.key = platform::KEY_ENTER;
+    ed.step_frame_headless({en});
+    r34_steps(ed, 3);
+    const uint64_t h1 = t->hash();
+    std::printf("    rows after typing: %s\n", h1 != h0 ? "changed" : "unchanged");
+    CHECK(h1 != h0);
+    const std::vector<uint32_t> after = r34_crop(ed, tw);
+    CHECK(before != after);
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(t->hash() == h0);
+    CHECK(r34_crop(ed, tw) == before);
+    ed.command("redo");
+    r34_steps(ed, 3);
+    CHECK(t->hash() == h1);
+  });
+  test("textures window: dragging a thumbnail onto the Cube in the Scene view gives it the texture's maps", [] {
+    Editor ed;
+    r50_open(ed);
+    ed.command("shading solid");
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Tiles");
+    if (!t) return;
+    r34_steps(ed, 3);
+    const Recti th = ed.texture_ui_rect_for_test("thumb:" + t->name);
+    CHECK(th.w > 0);
+    GameObject *cube = by_name(ed.scene(), "Cube");
+    CHECK(ed.scene_drawn_for_test());  // the drop needs this frame's Scene view, visible beside the window
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(cube->world_position(), cx, cy));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, th.x + th.w / 2, th.y + th.h / 3)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, th.x + th.w / 2, th.y + th.h / 3)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, (th.x + cx) / 2, (th.y + cy) / 2)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, cx, cy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, cx, cy)});
+    r34_steps(ed, 2);
+    const MeshRenderer *mr = cube->get<MeshRenderer>();
+    CHECK(mr && !mr->materials.empty() && mr->materials[0]);
+    if (!mr || mr->materials.empty() || !mr->materials[0]) return;
+    std::printf("    the Cube's base map: %s\n", mr->materials[0]->base_map.path.c_str());
+    CHECK(mr->materials[0]->base_map.path == t->asset_path + "#albedo");
+    CHECK(mr->materials[0]->normal_map.path == t->asset_path + "#normal");
+    CHECK(mr->materials[0]->roughness_map.path == t->asset_path + "#roughness");
+  });
+  test("textures window: the preview evaluates at 256 while a field is dragged, and at the texture's size on release", [] {
+    Editor ed;
+    r50_open(ed);
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Noise");
+    if (!t) return;
+    t->width = t->height = 1024;
+    t->touch();
+    r34_steps(ed, 3);
+    CHECK(ed.texture_preview_size_for_test() == 1024);
+    /* A drag on the Scale field's label (a float's drag label changes it while the mouse moves): Noise's Scale is
+     * the row just above its Detail field, whose rect the window records. */
+    const ui::Context &u = ed.ui_for_test();
+    const Recti row = ed.texture_ui_rect_for_test("field:L0 Detail");
+    CHECK(row.w > 0);
+    if (row.w <= 0) return;
+    const int lx = row.x - u.px(60), ly = row.y - u.row_h() / 2;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx, ly)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, lx, ly)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx + 30, ly)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, lx + 60, ly)});
+    const int during = ed.texture_preview_size_for_test();
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, lx + 60, ly)});
+    r34_steps(ed, 3);
+    const int after = ed.texture_preview_size_for_test();
+    std::printf("    preview size while dragging %d, after %d\n", during, after);
+    CHECK(during == 256);
+    CHECK(after == 1024);
   });
 }

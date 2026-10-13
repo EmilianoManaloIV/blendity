@@ -23,12 +23,14 @@ using ui::Icon;
 static const char *kVersion = "0.10.0";
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures"};
+  static_assert(sizeof(names) / sizeof(names[0]) == (size_t)WindowKind::Count, "a title per window");
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper};
+  static_assert(sizeof(icons) / sizeof(icons[0]) == (size_t)WindowKind::Count, "an icon per window");
   return icons[(int)k];
 }
 
@@ -410,6 +412,7 @@ void Editor::frame(std::vector<Event> &events) {
 
   if (filter_cache_.size() > 64) filter_cache_.clear();  // deleted cameras' stacks (ids are never reused within a scene)
   drop_slots_.clear();  // drop targets register again as the windows draw
+  scene_drawn_ = false;  // set by the Scene view when it draws: drops onto it need this frame's picture
   drop_textures_.clear();
   drop_rows_.clear();
   drop_folders_.clear();
@@ -794,7 +797,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn Research Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if (u.menu_item(window_title((WindowKind)k), keys[k], dock_find((WindowKind)k) != nullptr, true, window_icon((WindowKind)k)))
@@ -1179,6 +1182,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Profiler: draw_profiler(r); break;
     case WindowKind::Render: draw_render_window(r); break;
     case WindowKind::Lighting: draw_lighting_window(r); break;
+    case WindowKind::Textures: draw_textures_window(r); break;
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1237,7 +1241,10 @@ void Editor::dock_remove(WindowKind k) {
 void Editor::dock_open(WindowKind k, bool focus) {
   DockNode *leaf = dock_find(k);
   if (!leaf) {
-    leaf = dock_largest_leaf();
+    /* The Textures window goes beside the Materials window when it is docked (not over the Scene view, which a
+     * thumbnail is dragged onto); everything else into the largest area. */
+    if (k == WindowKind::Textures) leaf = dock_find(WindowKind::Materials);
+    if (!leaf) leaf = dock_largest_leaf();
     leaf->tabs.push_back(k);
   }
   leaf->active = (int)(std::find(leaf->tabs.begin(), leaf->tabs.end(), k) - leaf->tabs.begin());
@@ -1607,6 +1614,47 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
   if (!written.empty()) Log::info("Export: %zu procedural texture image(s) written beside the file", written.size());
 }
 
+bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name) {
+  ProceduralTexturePtr pt = texture_asset(asset);
+  if (!pt) return false;
+  const int n = (int)pt->layers.size();
+  if (op == "add") {
+    const TextureLayerInfo *info = find_texture_layer_info(name);
+    if (!info) {
+      Log::warn("Add Layer: no layer called '%s'", name.c_str());
+      return false;
+    }
+    note_texture_edit(*pt);
+    pt->add(info->name);
+    mark_changed("Add Layer " + info->name);
+    return true;
+  }
+  if (i < 0 || i >= n) {
+    Log::warn("Texture %s: layer %d is not in 0..%d", pt->name.c_str(), i, n - 1);
+    return false;
+  }
+  note_texture_edit(*pt);
+  if (op == "remove") {
+    pt->layers.erase(pt->layers.begin() + i);
+    mark_changed("Remove Layer");
+  }
+  else if (op == "move") {
+    j = std::max(0, std::min(n - 1, j));
+    if (j == i) return false;
+    auto l = std::move(pt->layers[(size_t)i]);
+    pt->layers.erase(pt->layers.begin() + i);
+    pt->layers.insert(pt->layers.begin() + j, std::move(l));
+    mark_changed("Move Layer");
+  }
+  else if (op == "reset") {
+    if (auto fresh = create_texture_layer(pt->layers[(size_t)i]->type_name())) pt->layers[(size_t)i] = std::move(fresh);
+    mark_changed("Reset Layer");
+  }
+  else return false;
+  pt->touch();
+  return true;
+}
+
 void Editor::assign_texture_asset_to_selection(const std::string &asset_path) {
   ProceduralTexturePtr pt = texture_asset(asset_path);
   if (!pt) {
@@ -1614,9 +1662,21 @@ void Editor::assign_texture_asset_to_selection(const std::string &asset_path) {
     return;
   }
   int n = 0;
-  for (GameObject *g : selected_objects(false)) {
+  for (GameObject *g : selected_objects(false))
+    if (g->get<MeshRenderer>()) {
+      assign_texture_asset(g, asset_path);
+      n++;
+    }
+  if (n) mark_changed("Assign Texture " + pt->name);
+  else Log::warn("Select objects with a MeshRenderer first");
+}
+
+void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) {
+  ProceduralTexturePtr pt = texture_asset(asset_path);
+  if (!pt || !g) return;
+  {
     auto *mr = g->get<MeshRenderer>();
-    if (!mr) continue;
+    if (!mr) return;
     if (mr->materials.empty() || !mr->materials[0]) mr->materials = {make_material(pt->name, Vec3(1.0f))};
     else if (!mr->materials[0]->asset_path.empty()) {  // a .mat asset is shared: this object gets its own copy
       auto copy = std::make_shared<Material>(*mr->materials[0]);
@@ -1632,10 +1692,7 @@ void Editor::assign_texture_asset_to_selection(const std::string &asset_path) {
     m.procedural = 0;
     m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
     m.touch();
-    n++;
   }
-  if (n) mark_changed("Assign Texture " + pt->name);
-  else Log::warn("Select objects with a MeshRenderer first");
 }
 
 /* File > Export (Blender: File > Export; Unity: the FBX Exporter). The
@@ -2975,35 +3032,14 @@ void Editor::run_console_command(const std::string &line) {
     for (size_t k = 3; k < t.size(); k++) name += (k > 3 ? " " : "") + t[k];
     const int i = std::atoi(arg(3, "0").c_str()), j = std::atoi(arg(4, "0").c_str());
     const int n = (int)pt->layers.size();
-    if (sub != "list") note_texture_edit(*pt);
-    if (sub == "add") {
-      if (pt->add(name)) Log::info("%s: added %s (%zu layers)", pt->name.c_str(), name.c_str(), pt->layers.size());
-      else Log::warn("texlayer add: no layer called '%s'", name.c_str());
-    }
-    else if (sub == "list") {
+    if (sub == "list") {
       for (int k = 0; k < n; k++) Log::info("  %d: %s%s", k, pt->layers[(size_t)k]->type_name(), pt->layers[(size_t)k]->enabled ? "" : " (off)");
       if (!n) Log::info("%s: no layers", pt->name.c_str());
     }
-    else if (i < 0 || i >= n) Log::warn("texlayer %s: layer %d is not in 0..%d", sub.c_str(), i, n - 1);
-    else if (sub == "remove") {
-      pt->layers.erase(pt->layers.begin() + i);
-      pt->touch();
-    }
-    else if (sub == "move") {
-      const int jj = std::max(0, std::min(n - 1, j));
-      if (jj != i) {
-        auto l = std::move(pt->layers[(size_t)i]);
-        pt->layers.erase(pt->layers.begin() + i);
-        pt->layers.insert(pt->layers.begin() + jj, std::move(l));
-        pt->touch();
-      }
-    }
-    else if (sub == "reset") {
-      if (auto fresh = create_texture_layer(pt->layers[(size_t)i]->type_name())) pt->layers[(size_t)i] = std::move(fresh);
-      pt->touch();
+    else if (sub == "add" || sub == "remove" || sub == "move" || sub == "reset") {
+      if (texture_stack_op(pt->asset_path, sub, i, j, name) && sub == "add") Log::info("%s: added %s (%zu layers)", pt->name.c_str(), name.c_str(), pt->layers.size());
     }
     else Log::warn("texlayer: add <type> | remove <i> | move <i> <j> | reset <i> | list");
-    if (sub != "list") mark_changed("Texture " + pt->name);
   }
   else if (c == "settex") {
     /* settex <asset> <Field> <value...>: a texture asset's field, or a layer's as "L0 Rows" / L0Rows. */
