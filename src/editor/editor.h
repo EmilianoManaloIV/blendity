@@ -63,8 +63,12 @@ struct ShortcutAction {
 };
 using Keymap = std::unordered_map<std::string, std::vector<KeyChord>>;
 const std::vector<ShortcutAction> &shortcut_actions();
-constexpr int kKeymapPresetCount = 5;
-extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Blender, Maya, 3ds Max, SketchUp
+constexpr int kKeymapPresetCount = 6;
+extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Unreal, Blender, Maya, 3ds Max, SketchUp
+/* The editor's feel (task 0063): another program's keys and Scene view mouse navigation. */
+enum class NavStyle { Unity, Unreal, Blender, Maya };
+constexpr int kEditorFeelCount = 4;
+extern const char *const kEditorFeels[kEditorFeelCount];
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys = false);
 std::string chord_text(const KeyChord &c);
 KeyChord parse_chord(const std::string &text);
@@ -587,6 +591,18 @@ class Editor {
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
+  NavStyle nav_style_for_test() const { return nav_style_; }
+  const SceneCamera &scene_camera_for_test() const { return cam_; }
+  Recti scene_rect_for_test() const { return scene_rect_; }
+  std::string shortcut_for_test(const std::string &id) const { return shortcut_text(id); }
+  size_t edge_sel_count_for_test() const { return edge_sel_.size(); }
+  bool screen_of_for_test(Vec3 world, int &x, int &y) {  // where the Scene view last drew a world point
+    Vec2 s;
+    float z;
+    if (!scene_r3d_.project(world, s, z)) return false;
+    x = scene_rect_.x + (int)std::lround(s.x), y = scene_rect_.y + (int)std::lround(s.y);
+    return true;
+  }
   AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
   const SeqEditorState &seq_for_test() const { return seqr_; }
   SequencePtr seq_for_test_sequence() { return seq_sequence(); }
@@ -1463,7 +1479,13 @@ class Editor {
   bool scene_lighting_ = true, show_grid_ = true, show_gizmos_ = true, show_stats_ = true;
   RasterOptions raster_opt_;
   RasterStats scene_stats_, game_stats_;
-  enum class Drag { None, Fly, Orbit, Pan, Zoom, Gizmo, Box, ViewTool } drag_ = Drag::None;
+  enum class Drag { None, Fly, Orbit, Pan, Zoom, Gizmo, Box, ViewTool, AltClick } drag_ = Drag::None;  // AltClick: Blender's Alt+click, the view still
+  int drag_button_ = 0;  // the mouse button holding a navigation drag (it ends when that one is let go)
+  NavStyle nav_style_ = NavStyle::Unity;  // the feel's mouse navigation (task 0063)
+  std::pair<Drag, int> nav_drag_for_press() const;  // which navigation a press starts in this feel, and its button
+  void set_editor_feel(const std::string &name);
+  void view_along(float yaw, float pitch, bool ortho);  // Unreal's Alt+H / J / K views
+  void drop_to_floor();
   int drag_x_ = 0, drag_y_ = 0;
   bool scene_hovered_ = false;
   double fly_last_ = 0;

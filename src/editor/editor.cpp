@@ -619,6 +619,11 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("G always grabs (move with the mouse, X / Y / Z to lock an axis).\n"
               "On: R and S also rotate and scale the Blender way, and Unity's Scale tool moves from R to T.\n"
               "Off: R stays Unity's Scale tool; press R or S during a grab to rotate or scale.");
+    u.submenu("Editor Feel", u.px(170), [this] {
+      for (int f = 0; f < kEditorFeelCount; f++)
+        if (ui_.menu_item(kEditorFeels[f], nullptr, (int)nav_style_ == f)) set_editor_feel(kEditorFeels[f]);
+    });
+    u.tooltip("Work like Unity, Unreal, Blender or Maya: their keys and their Scene view mouse navigation.");
     u.menu_separator();
     if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), "Ctrl+Z", false, !undo_.empty() || pending_change_)) undo();
     if (u.menu_item("Redo", "Ctrl+Y", false, !redo_.empty())) redo();
@@ -2908,6 +2913,11 @@ void Editor::run_console_command(const std::string &line) {
     delete_assets_command(c, line);
     return;
   }
+  if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
+    if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
+    set_editor_feel(t[1]);
+    return;
+  }
   if (c == "seq") {
     seq_command(t);
     return;
@@ -3977,6 +3987,13 @@ void Editor::load_prefs() {
     else if (k == "auto_smooth") auto_smooth_ = v == "1";
     else if (k == "draw_axes") draw_global_axes_ = v == "global";
     else if (k == "keymap_preset" && !v.empty()) keymap_preset_ = v;
+    else if (k == "feel") {
+      int found = -1;
+      for (int f = 0; f < kEditorFeelCount; f++)
+        if (v == kEditorFeels[f]) found = f;
+      if (found < 0) Log::warn("Preferences: no editor feel '%s' (Unity is used)", v.c_str());
+      nav_style_ = found < 0 ? NavStyle::Unity : (NavStyle)found;
+    }
     else if (k == "keymap") keymap_text = v;
     else if (k == "auto_smooth_angle") auto_smooth_angle_ = std::max(1.0f, std::min(180.0f, (float)std::atof(v.c_str())));
     else if (k == "render_devices_off") {
@@ -4021,7 +4038,8 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
                             view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
-  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0);
+  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
+                 kEditorFeels[(int)nav_style_]);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }

@@ -229,25 +229,52 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   (void)x;
 }
 
+/* Which navigation a press in the Scene view starts, by the editor's feel (task 0063), and the button that holds it:
+ * Unity: RMB look + fly, Alt+LMB orbit (Alt+Ctrl+LMB pan), MMB pan, Alt+RMB zoom. Unreal: as Unity, Alt+MMB pans and
+ * LMB+RMB pans. Blender: MMB orbit, Shift+MMB pan, Ctrl+MMB zoom (RMB and Alt+LMB stay menus and loop select). Maya:
+ * Alt+LMB tumble, Alt+MMB track, Alt+RMB dolly (RMB alone is Maya's marking menu: no fly). */
+std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
+  const auto &in = ui_.in;
+  const bool unity_like = nav_style_ == NavStyle::Unity || nav_style_ == NavStyle::Unreal;
+  if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active) {  // a right-click cancels a running Push/Pull, Inset or Bevel instead
+    if (nav_style_ == NavStyle::Unreal && in.down[0]) return {Drag::Pan, 1};
+    if (in.alt() && nav_style_ != NavStyle::Blender) return {Drag::Zoom, 1};
+    return {unity_like ? Drag::Fly : Drag::None, 1};
+  }
+  if (in.pressed[2]) {
+    if (nav_style_ == NavStyle::Maya) return {in.alt() ? Drag::Pan : Drag::None, 2};  // (plain MMB is Maya's manipulator drag)
+    if (nav_style_ != NavStyle::Blender || in.shift()) return {Drag::Pan, 2};
+    return {in.ctrl() ? Drag::Zoom : Drag::Orbit, 2};
+  }
+  if (in.pressed[0] && in.alt()) {
+    if (nav_style_ == NavStyle::Blender) return {Drag::AltClick, 0};  // (Blender: Alt+click selects a loop; the view stays)
+    const bool pan = nav_style_ == NavStyle::Unity && in.ctrl();
+    return {pan ? Drag::Pan : Drag::Orbit, 0};
+  }
+  if (in.pressed[0] && tool_ == Tool::View) return {Drag::ViewTool, 0};
+  return {Drag::None, 0};
+}
+
 void Editor::scene_navigation(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   double now = now_seconds();
   float k_pan = (2.0f * cam_.distance * std::tan(cam_.fov * 0.5f * kDeg2Rad)) / std::max(1, view.h);
 
+  if (nav_style_ == NavStyle::Unreal && drag_ == Drag::Box && in.pressed[1]) {  // Unreal: LMB then RMB held pans too
+    drag_ = Drag::Pan;
+    drag_button_ = 1;
+  }
   if (drag_ == Drag::None && scene_hovered_ && !u.any_active()) {
-    if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active) {  // a right-click cancels a running Push/Pull, Inset or Bevel instead
-      drag_ = in.alt() ? Drag::Zoom : Drag::Fly;
+    std::tie(drag_, drag_button_) = nav_drag_for_press();
+    if (drag_ == Drag::Fly) {
       fly_last_ = now;
       fly_accel_ = 1.0f;
     }
-    else if (in.pressed[2]) drag_ = Drag::Pan;
-    else if (in.pressed[0] && in.alt()) {
-      drag_ = in.ctrl() ? Drag::Pan : Drag::Orbit;
+    if (drag_button_ == 0 && in.alt() && (drag_ == Drag::Orbit || drag_ == Drag::Pan || drag_ == Drag::AltClick)) {
       alt_click_ = true;  // a click without moving selects a loop (Blender's Alt+click) instead
       alt_click_ring_ = in.ctrl();
     }
-    else if (in.pressed[0] && tool_ == Tool::View) drag_ = Drag::ViewTool;
     if (drag_ != Drag::None) {
       cam_.animating = false;
       drag_x_ = in.mx;
@@ -258,6 +285,10 @@ void Editor::scene_navigation(const Recti &view) {
   switch (drag_) {
     case Drag::Fly: {
       if (!in.down[1]) { drag_ = Drag::None; break; }
+      if (nav_style_ == NavStyle::Unreal && in.pressed[0]) {  // Unreal: both buttons held pan
+        drag_ = Drag::Pan;
+        break;
+      }
       u.cursor = Cursor::Move;
       Vec3 pos = cam_.position();
       cam_.yaw += dx * 0.25f;
@@ -282,8 +313,8 @@ void Editor::scene_navigation(const Recti &view) {
       break;
     }
     case Drag::Orbit:
-      if (!in.down[0]) {
-        alt_click_release(view);
+      if (!in.down[drag_button_]) {
+        if (drag_button_ == 0) alt_click_release(view);
         drag_ = Drag::None;
         break;
       }
@@ -293,8 +324,13 @@ void Editor::scene_navigation(const Recti &view) {
       break;
     case Drag::Pan:
     case Drag::ViewTool:
-      if (!in.down[2] && !in.down[0]) {
-        alt_click_release(view);
+      if (nav_style_ == NavStyle::Unreal && drag_ == Drag::Pan && drag_button_ == 1 && !in.down[0] && in.down[1]) {
+        drag_ = Drag::Fly;  // (Unreal: LMB let go, RMB still held: looking round again)
+        fly_last_ = now;
+        break;
+      }
+      if (!in.down[drag_button_]) {
+        if (drag_button_ == 0) alt_click_release(view);
         drag_ = Drag::None;
         break;
       }
@@ -302,8 +338,14 @@ void Editor::scene_navigation(const Recti &view) {
       cam_.pivot -= cam_.right() * (dx * k_pan);
       cam_.pivot += cam_.up() * (dy * k_pan);
       break;
+    case Drag::AltClick:
+      if (!in.down[0]) {
+        alt_click_release(view);
+        drag_ = Drag::None;
+      }
+      break;
     case Drag::Zoom:
-      if (!in.down[1]) { drag_ = Drag::None; break; }
+      if (!in.down[drag_button_]) { drag_ = Drag::None; break; }
       cam_.distance = clampf(cam_.distance * std::exp((dx - dy) * -0.008f), 0.01f, 100000.0f);
       break;
     default: break;

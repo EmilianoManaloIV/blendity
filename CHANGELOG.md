@@ -2,7 +2,55 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
-## 2026-10-13 (round 86): a Premiere-style clip sequencer instead of a state machine (task 0062, ADR 0030)
+## 2026-10-13 (round 87): switch the editor's feel: Unity, Unreal, Blender or Maya (task 0063)
+
+**Asked:** "Switch the editor's feel between Unity / Unreal / Blender / Maya". The user chose keys and mouse navigation
+only.
+
+**Added**
+- **Editor Feel**: Edit > Editor Feel, Preferences > Keymap, or `feel unity|unreal|blender|maya`. It sets the keymap
+  preset and the Scene view's mouse navigation together, and is kept in the prefs. Your own key changes stay on top.
+- **Navigation by feel:**
+  - Unity: as before.
+  - Unreal: RMB look + WASD; Alt+LMB orbit; MMB, Alt+MMB or LMB+RMB (in either order) pan; Alt+RMB dolly.
+    Letting go of LMB while RMB is still held looks round again.
+  - Blender: MMB orbit, Shift+MMB pan, Ctrl+MMB zoom. Alt+click selects an edge loop and Ctrl+Alt+click a ring,
+    without moving the view; RMB doesn't fly.
+  - Maya: Alt+LMB tumble, Alt+MMB track, Alt+RMB dolly. Plain MMB and RMB don't move the view.
+- **An Unreal keymap preset**: Unity's keys plus Alt+P Play, Ctrl+W duplicate, End drop to floor (the whole object
+  with its children, onto y = 0), and Alt+G / H / J / K for the perspective, front, top and side views.
+- New actions for any keymap: Perspective / Front / Top / Side View, Drop to Floor.
+- Learn: "Work like Unreal, Blender or Maya" in the Edit Mode lesson. MANUAL chapter 12 has a table of the feels.
+
+**Changed**
+- Navigation drags end when the button that started them is let go (needed by MMB orbit and LMB+RMB pan).
+- The test runner flushes after each test, so a crash shows which test was running.
+- The keymap presets list Unreal second, so the Preferences dropdown test (round 79) now picks Unreal from the second
+  row.
+
+**Checked**
+- New tests (round 87):
+  - Each feel's mouse buttons with real drags: Blender MMB, Shift+MMB, Ctrl+MMB; Maya Alt+LMB, Alt+MMB, Alt+RMB.
+  - Unreal RMB, and LMB then RMB.
+  - Unity's whole set unchanged.
+  - Each feel's keys; an unknown feel refused.
+  - Blender Alt+click loop and Ctrl+Alt+click ring with the view still.
+  - Unreal End on an object and on an empty with a child; Alt+J top view.
+  - The feel kept in the prefs (an unknown one falls back to Unity); your own key change kept across a feel switch.
+- Unit checks: Windows 9,774, 0 failed (641 tests); the whole suite in render-cache verify mode: 9,775,
+  0 failed, 0 stale pictures. Linux with libraries: 9,682, 0 failed. Sanitizer build: 9,599, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- Blender Alt+click loop select did nothing.
+- Unreal LMB-then-RMB box-selected instead of panning.
+- A feel switch wiped your own key changes.
+- `feel` with no argument switched to Unity.
+- Drop to Floor ignored children.
+- Maya's plain MMB panned.
+- The Learn answer about RMB, and the prefs test's path.
+
+: a Premiere-style clip sequencer instead of a state machine (task 0062, ADR 0030)
 
 **Asked:** "A clip editor like Premiere Pro to go between animation clips instead of using a state machine"; for Play,
 the user chose "a timeline plus triggers".

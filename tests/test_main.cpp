@@ -5993,14 +5993,14 @@ static void round17_tests() {
     /* Clicking it again closes only the list. */
     click(r.x + r.w / 2, r.y + r.h / 2);
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
-    /* Open it and pick "Blender", the list's second row below the field. */
+    /* Open it and pick "Unreal", the list's second row below the field (Unity, Unreal, Blender, ...: task 0063). */
     click(r.x + r.w / 2, r.y + r.h / 2);
     CHECK(ed.popup_count_for_test() == 2);
     const int row = r.h + 4;
     click(r.x + 20, r.bottom() + 4 + row + row / 2);
     std::printf("    picked: preset %s, dialog %d, popups %zu\n", ed.keymap_preset_name().c_str(), (int)ed.dialog_open_for_test(),
                 ed.popup_count_for_test());
-    CHECK(ed.keymap_preset_name() == "Blender");
+    CHECK(ed.keymap_preset_name() == "Unreal");
     CHECK(ed.dialog_open_for_test() && ed.popup_count_for_test() == 1);
     ed.command("keymap Unity");
   });
@@ -27141,5 +27141,183 @@ static void round81_tests() {
     const size_t at = text.find("clip");
     std::printf("    the moved sequence names: %s", at == std::string::npos ? "-\n" : text.substr(at).c_str());
     CHECK(text.find(dir2 + "/C.anim") != std::string::npos);
+  });
+  /* ---------------------------------------------------------------- round 87: the editor's feel (task 0063) */
+  test("feel: Blender, Maya, Unreal and Unity each navigate the Scene view with their own mouse buttons, and bind their own keys", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    /* A drag with `button` held (and modifiers), 60 px right and 20 down; what it did to the camera. */
+    auto drag = [&](int button, int mods) {
+      const SceneCamera before = ed.scene_camera_for_test();
+      platform::Event m, d, mv, u;
+      m.type = mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      d.button = u.button = button;
+      m.mods = d.mods = mv.mods = u.mods = mods;
+      m.x = d.x = cx, m.y = d.y = cy, mv.x = u.x = cx + 60, mv.y = u.y = cy + 20;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({mv});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+      const SceneCamera &after = ed.scene_camera_for_test();
+      struct { bool turned, panned, zoomed; } did{std::fabs(after.yaw - before.yaw) > 1.0f, length(after.pivot - before.pivot) > 1e-3f,
+                                                  std::fabs(after.distance - before.distance) > 1e-3f};
+      return did;
+    };
+    const int LMB = 0, RMB = 1, MMB = 2;
+    /* Blender: MMB orbits, Shift+MMB pans, Ctrl+MMB zooms; RMB and Alt+LMB don't move the view. */
+    ed.command("feel Blender");
+    CHECK(ed.nav_style_for_test() == NavStyle::Blender && ed.shortcut_for_test("transform.grab") == "G");
+    CHECK(drag(MMB, 0).turned);
+    auto pan = drag(MMB, platform::MOD_SHIFT);
+    CHECK(pan.panned && !pan.turned);
+    CHECK(drag(MMB, platform::MOD_CTRL).zoomed);
+    auto rmb = drag(RMB, 0);
+    CHECK(!rmb.turned && !rmb.panned && !rmb.zoomed);
+    CHECK(!drag(LMB, platform::MOD_ALT).turned);
+    /* Maya: Alt+LMB tumbles, Alt+MMB tracks, Alt+RMB dollies; RMB alone does nothing to the view. */
+    ed.command("feel Maya");
+    CHECK(ed.shortcut_for_test("tool.move") == "W" && ed.shortcut_for_test("mode.edit_toggle") == "F8");
+    CHECK(drag(LMB, platform::MOD_ALT).turned);
+    CHECK(drag(MMB, platform::MOD_ALT).panned);
+    CHECK(drag(RMB, platform::MOD_ALT).zoomed);
+    CHECK(!drag(RMB, 0).turned);
+    /* Unreal: RMB looks round (flies), Alt+P plays, End drops to the floor, Alt+J is the top view. */
+    ed.command("feel Unreal");
+    CHECK(ed.shortcut_for_test("play.toggle") == "Alt+P" && ed.shortcut_for_test("object.drop_to_floor") == "End" && ed.shortcut_for_test("view.top") == "Alt+J");
+    CHECK(drag(RMB, 0).turned);
+    CHECK(drag(LMB, platform::MOD_ALT).turned);
+    /* Unreal: LMB pressed first, then RMB: both held pan (not a box selection). */
+    {
+      const SceneCamera before = ed.scene_camera_for_test();
+      platform::Event m, dl, dr, mv, ur, ul;
+      m.type = mv.type = platform::EventType::MouseMove;
+      dl.type = dr.type = platform::EventType::MouseDown, ur.type = ul.type = platform::EventType::MouseUp;
+      dl.button = ul.button = LMB, dr.button = ur.button = RMB;
+      m.x = dl.x = dr.x = cx, m.y = dl.y = dr.y = cy, mv.x = ur.x = ul.x = cx + 40, mv.y = ur.y = ul.y = cy + 30;
+      for (const platform::Event &e : {m, dl, dr, mv, ur, ul}) ed.step_frame_headless({e});
+      ed.step_frame_headless();
+      CHECK(length(ed.scene_camera_for_test().pivot - before.pivot) > 1e-3f && std::fabs(ed.scene_camera_for_test().yaw - before.yaw) < 1e-3f);
+    }
+    /* Maya's plain MMB doesn't move the view (it is the manipulator's there). */
+    ed.command("feel Maya");
+    CHECK(!drag(MMB, 0).panned);
+    /* Unity: as it always was. */
+    ed.command("feel Unity");
+    CHECK(ed.nav_style_for_test() == NavStyle::Unity && ed.shortcut_for_test("tool.scale") == "R" && ed.shortcut_for_test("play.toggle") == "Ctrl+P");
+    CHECK(drag(RMB, 0).turned && drag(LMB, platform::MOD_ALT).turned && drag(MMB, 0).panned && !drag(MMB, 0).turned);
+    CHECK(drag(RMB, platform::MOD_ALT).zoomed && drag(LMB, platform::MOD_ALT | platform::MOD_CTRL).panned);
+    CHECK(!drag(MMB, 0).zoomed);
+    ed.command("feel Commodore");  // (refused: still Unity)
+    CHECK(ed.nav_style_for_test() == NavStyle::Unity);
+  });
+
+  test("feel: in the Blender feel Alt+click selects an edge loop, as in Blender, and the view stays put", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("feel Blender");
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("edit edge");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    /* The edge nearest the camera: its middle on screen. */
+    const Mesh &m = *cube->get<MeshFilter>()->mesh;
+    const Vec3 eye = ed.scene_camera_for_test().position();
+    Vec3 best_mid(0.0f);
+    float best = 1e30f;
+    for (size_t f = 0; f + 1 < m.face_offsets.size(); f++)
+      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
+        const uint32_t n = c + 1 < m.face_offsets[f + 1] ? c + 1 : m.face_offsets[f];
+        const Vec3 mid = cube->world_matrix().point((m.positions[m.corner_verts[c]] + m.positions[m.corner_verts[n]]) * 0.5f);
+        if (length(mid - eye) < best) best = length(mid - eye), best_mid = mid;
+      }
+    int x = 0, y = 0;
+    CHECK(ed.screen_of_for_test(best_mid, x, y));
+    const float yaw = ed.scene_camera_for_test().yaw;
+    platform::Event mv, d, u;
+    mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    mv.x = d.x = u.x = x, mv.y = d.y = u.y = y, mv.mods = d.mods = u.mods = platform::MOD_ALT;
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    std::printf("    Alt+click on an edge: %zu edge(s) selected (a cube's corners are poles: its loop is the edge)\n", ed.edge_sel_count_for_test());
+    CHECK(ed.edge_sel_count_for_test() == 1 && ed.scene_camera_for_test().yaw == yaw);
+    mv.mods = d.mods = u.mods = platform::MOD_ALT | platform::MOD_CTRL;  // Ctrl+Alt+click: the ring round the cube
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    std::printf("    Ctrl+Alt+click: %zu edges (a cube's ring is 4)\n", ed.edge_sel_count_for_test());
+    CHECK(ed.edge_sel_count_for_test() == 4 && ed.scene_camera_for_test().yaw == yaw);
+  });
+
+  test("feel: Unreal's End drops the selection onto the ground and Alt+J looks from the top; the feel is kept in the prefs", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("feel Unreal");
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->set_world_position({1, 3, 0});
+    ed.mark_changed_for_test("lift");
+    ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    platform::Event m, k;
+    m.type = platform::EventType::MouseMove, m.x = r.x + r.w / 2, m.y = r.y + r.h / 2;
+    k.type = platform::EventType::KeyDown, k.key = platform::KEY_END, k.x = m.x, k.y = m.y;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({k});
+    ed.step_frame_headless();
+    const AABB b = cube->world_bounds();
+    std::printf("    after End: the cube's bottom at y %.4f\n", b.min.y);
+    CHECK(std::fabs(b.min.y) < 1e-4f && std::fabs(cube->world_position().x - 1.0f) < 1e-5f);
+    platform::Event j = k;
+    j.key = platform::KEY_J, j.mods = platform::MOD_ALT;
+    ed.step_frame_headless({j});
+    const double t0 = now_seconds();  // (the view turns over 0.28 s of real time)
+    while (now_seconds() - t0 < 0.5) ed.step_frame_headless();
+    CHECK(ed.scene_camera_for_test().ortho && std::fabs(ed.scene_camera_for_test().pitch - 90.0f) < 1.0f);
+    /* The prefs keep the feel (and its keys). */
+    const std::string prefs = fs::join(test_dir(), "r87_prefs.txt");
+    ed.prefs_for_test(prefs);
+    ed.save_prefs_for_test();
+    Editor ed2;
+    ed2.init_headless(1400, 900);
+    ed2.prefs_for_test(prefs);
+    ed2.load_prefs_for_test();
+    CHECK(ed2.nav_style_for_test() == NavStyle::Unreal && ed2.shortcut_for_test("play.toggle") == "Alt+P");
+    /* An unknown feel in the prefs: Unity. */
+    fs::write_file(prefs, "feel=Commodore\n");
+    Editor ed3;
+    ed3.init_headless(800, 600);
+    ed3.prefs_for_test(prefs);
+    ed3.load_prefs_for_test();
+    CHECK(ed3.nav_style_for_test() == NavStyle::Unity);
+    std::remove(prefs.c_str());
+    /* The user's own key change survives a change of feel. */
+    ed.command("keymap bind view.frame Shift+F");
+    ed.command("feel Maya");
+    CHECK(ed.shortcut_for_test("view.frame") == "Shift+F" && ed.shortcut_for_test("mode.edit_toggle") == "F8");
+    /* An empty with a cube below it: End drops the pair by the cube's bottom. */
+    ed.command("feel Unreal");
+    GameObject *holder = ed.scene().create("R87Holder");
+    holder->set_world_position({0, 5, 0});
+    ed.scene().set_parent(cube, holder);
+    cube->set_local_position({0, -1, 0});
+    ed.select_for_test(holder->id, false);
+    ed.mark_changed_for_test("parent");
+    ed.step_frame_headless();
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({k});
+    ed.step_frame_headless();
+    std::printf("    the empty and its cube after End: cube bottom %.4f, empty at %.4f\n", cube->world_bounds().min.y, holder->world_position().y);
+    CHECK(std::fabs(cube->world_bounds().min.y) < 1e-4f && holder->world_position().y > 1.0f);
   });
 }

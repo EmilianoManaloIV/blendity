@@ -492,7 +492,19 @@ Surface's Levels at 1 while modelling, and turn on the Low tier for heavy scenes
 ## 12. Shortcuts: Unity and Blender side by side
 
 Blendity uses Unity's keys, and keeps Blender's where Unity has none. Edit > Preferences..., Keymap, starts from
-Unity, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
+Unity, Unreal, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
+
+**Editor Feel** (Edit > Editor Feel, or `feel unity|unreal|blender|maya`) switches the keys *and* the Scene view's
+mouse navigation to another program's:
+
+| Feel | Orbit | Pan | Zoom / dolly | Look + fly | Its own keys |
+|---|---|---|---|---|---|
+| Unity | Alt+LMB | MMB, Alt+Ctrl+LMB | Wheel, Alt+RMB | Hold RMB + WASD | the table below |
+| Unreal | Alt+LMB | MMB, LMB+RMB | Wheel, Alt+RMB | Hold RMB + WASD | Alt+P play, End drop to floor, Alt+G/H/J/K views |
+| Blender | MMB | Shift+MMB | Wheel, Ctrl+MMB | — | G/R/S, A, X, Shift+D |
+| Maya | Alt+LMB | Alt+MMB | Wheel, Alt+RMB | — | Q/W/E/R, F8, F9-F11 |
+
+Window names, layouts and the Y-up axis stay Unity's whatever the feel.
 
 | | Blendity (Unity) | Blender |
 |---|---|---|

@@ -4,7 +4,7 @@
 - **Requirements:** R-06
 - **Decisions:** ADR 0030
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/59
 
 ## Goal
 The user (2026-10-12): "I want a way to integrate a clip editor like Premiere Pro to go between animation clips
