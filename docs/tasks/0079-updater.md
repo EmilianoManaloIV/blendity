@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** ADR 0033 (updates and library fallback)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/71
 
 ## Goal
 The user (2026-10-14): "an option for the software while installed on a computer to check for updates and then ask the

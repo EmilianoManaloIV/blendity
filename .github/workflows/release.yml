@@ -102,8 +102,10 @@ jobs:
             (cd "$RUNNER_TEMP" && "$APP/Blendity.exe" --headless-screenshot "$(cygpath -w "$SHOT")")  # (away from the repo: a fresh project)
             for i in $(seq 1 30); do [ -e "$SHOT" ] && break; sleep 1; done  # (the full install hands over: the picture comes from Blendity-full)
             [ -e "$SHOT" ] || { echo "::error::the $type install made no picture"; exit 1; }
-            "$APP/unins000.exe" //VERYSILENT //SUPPRESSMSGBOXES
-            for i in $(seq 1 30); do [ -e "$APP/Blendity.exe" ] || break; sleep 1; done  # (the uninstaller runs on from %TEMP%)
+            UNINS=$(ls "$APP"/unins*.exe | tail -1)
+            "$UNINS" //VERYSILENT //SUPPRESSMSGBOXES
+            # (the uninstaller runs on from %TEMP%: wait for it to remove itself too before the next install)
+            for i in $(seq 1 60); do [ -e "$APP/Blendity.exe" ] || [ -e "$UNINS" ] || break; sleep 1; done
             [ ! -e "$APP/Blendity.exe" ] || { echo "::error::the uninstaller left Blendity.exe"; exit 1; }
             ! reg query 'HKCU\Software\Classes\Blendity.Scene' 2>/dev/null || { echo "::error::the uninstaller left the .scene association"; exit 1; }
           done

@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** ADR 0033 (updates and library fallback)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/71
 
 ## Goal
 The user (2026-10-14): "if the DLL or external libraries isn't found, result back to the fallback with the software
