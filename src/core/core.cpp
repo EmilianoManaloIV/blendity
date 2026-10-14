@@ -459,5 +459,79 @@ uint64_t peak_working_set_bytes() {
 
 int hardware_threads() { return (int)std::max(1u, std::thread::hardware_concurrency()); }
 
+/* One argument as the C runtime splits a command line: quotes round it when it has a space, tab or quote; a quote
+ * escaped by a backslash, and backslashes doubled only before a quote. */
+static std::string quote_argument(const std::string &a) {
+  if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos) return a;
+  std::string q = "\"";
+  size_t slashes = 0;
+  for (char c : a) {
+    if (c == '\\') {
+      slashes++;
+      continue;
+    }
+    q.append(c == '"' ? slashes * 2 + 1 : slashes, '\\');
+    slashes = 0;
+    q += c;
+  }
+  q.append(slashes * 2, '\\');
+  return q + "\"";
+}
+
+std::string windows_command_line(const std::vector<std::string> &argv) {
+  std::string line;
+  for (const std::string &a : argv) line += (line.empty() ? "" : " ") + quote_argument(a);
+  return line;
+}
+
+std::string find_program(const std::string &name) {
+  const char *path = std::getenv("PATH");
+  if (!path || name.empty()) return "";
+#ifdef _WIN32
+  const char sep = ';';
+  const std::string file = name + ".exe";
+#else
+  const char sep = ':';
+  const std::string &file = name;
+#endif
+  for (const std::string &dir : split_list(path, sep)) {
+    const std::string p = fs::join(dir, file);
+    if (fs::exists(p) && !fs::is_dir(p)) return p;
+  }
+  return "";
+}
+
+#ifdef _WIN32
+int run_program(const std::vector<std::string> &argv) {
+  if (argv.empty()) return -1;
+  std::wstring line = fs::widen(windows_command_line(argv));
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, &line[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return -1;
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return (int)code;
+}
+#else
+int run_program(const std::vector<std::string> &argv) {
+  if (argv.empty()) return -1;
+  std::vector<char *> args;
+  for (const std::string &a : argv) args.push_back((char *)a.c_str());
+  args.push_back(nullptr);
+  pid_t pid;
+  if (posix_spawnp(&pid, args[0], nullptr, nullptr, args.data(), environ) != 0) return -1;
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno == ECHILD) return kExitUnknown;  // (SIGCHLD ignored, as open_external sets it: the child reaped itself)
+    if (errno != EINTR) return -1;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+#endif
+
 }  // namespace sys
 }  // namespace bl

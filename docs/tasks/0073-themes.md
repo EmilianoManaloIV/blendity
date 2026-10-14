@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/66
 
 ## Goal
 The user (2026-10-14): an editor palette and theme option using the user's Figma site ("look at the variables tab in

@@ -186,7 +186,7 @@ void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 bool Editor::wants_continuous_redraw() const {
   return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
          lighting_update_requested_ || preview_running_ ||
-         seq_.active ||
+         seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
          !deferred_.empty() ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
@@ -401,6 +401,7 @@ void Editor::frame(std::vector<Event> &events) {
     start_final_render(true, false);
   step_final_render();
   step_render_sequence();
+  step_render_animation();
   step_bake();
 
   /* Pull new console lines. */
@@ -605,6 +606,8 @@ void Editor::draw_menubar(const Recti &r) {
     });
     u.menu_separator();
     if (u.menu_item("Render Image", "F12", false, true, Icon::Camera)) start_final_render();
+    if (u.menu_item("Render Animation", "Ctrl+F12", ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation();
+    u.tooltip("Every frame of the scene's sequence (or the selected object's clip) as PNGs in Renders/, then an MP4 when FFmpeg is there.");
     if (u.menu_item("Save Render...", nullptr, false, render_has_result_)) defer([this] { save_render(); });
     if (u.menu_item("Save Screenshot...", "Shift+F12")) screenshot_dialog();
     u.menu_separator();
@@ -3027,6 +3030,7 @@ void Editor::run_console_command(const std::string &line) {
     else set_theme(n);
     return;
   }
+  if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
     set_editor_feel(t[1]);
@@ -4081,6 +4085,7 @@ void Editor::load_prefs() {
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
+    else if (k == "ffmpeg") ffmpeg_path_ = v;
     else if (k == "stats") show_stats_ = v == "1";
     else if (k == "camera_filters") scene_filters_ = v == "1";
     else if (k == "snap_move") snap_move_ = (float)std::atof(v.c_str());
@@ -4164,6 +4169,7 @@ void Editor::save_prefs() {
                             view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
+  s += "ffmpeg=" + ffmpeg_path_ + "\n";
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }

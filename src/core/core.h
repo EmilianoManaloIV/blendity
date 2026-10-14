@@ -94,6 +94,14 @@ uint64_t physical_memory_bytes();  // installed RAM (0 if unknown)
 uint64_t working_set_bytes();      // this process's resident memory now
 uint64_t peak_working_set_bytes(); // and at its highest so far
 int hardware_threads();            // logical processors
+/* A program found on the PATH (".exe" added on Windows), or "" (task 0074: ffmpeg). */
+std::string find_program(const std::string &name);
+/* Runs argv[0] with the rest as its arguments, without a console window, and waits: its exit code, -1 if it didn't
+ * start. Call it off the main thread for anything slow. */
+int run_program(const std::vector<std::string> &argv);
+constexpr int kExitUnknown = -2;  // run_program: it ran, but its exit code was lost (SIGCHLD ignored)
+/* The Windows command line for `argv` (each argument quoted as CommandLineToArgvW reads it back); for tests. */
+std::string windows_command_line(const std::vector<std::string> &argv);
 }  // namespace sys
 
 /* ---------------------------------------------------------------- Strings */

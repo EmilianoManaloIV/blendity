@@ -37,6 +37,7 @@
 #include "../scene/skin_weights.h"
 #include "ui.h"
 
+#include <atomic>
 #include <functional>
 #include <thread>
 #include <tuple>
@@ -48,6 +49,9 @@
 #include <vector>
 
 namespace bl {
+
+/* FFmpeg's arguments to make an MP4 of numbered PNGs (task 0074). */
+std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out);
 
 /* A key with modifiers (platform::Mod bits): one binding of a shortcut. */
 struct KeyChord {
@@ -1133,10 +1137,38 @@ class Editor {
   } seq_;
   std::vector<GameObject *> sequence_cameras();
   void step_render_sequence();
+  /* Render > Render Animation (task 0074, render_animation.cpp): frames as PNGs, then FFmpeg's MP4. */
+  static constexpr int kVideoRunning = -1000000;
+  struct RenderAnimation {
+    bool active = false, started = false;
+    int source = 0;  // 1 the scene's sequence, 2 the selected object's clip
+    int first = 0, last = 0, frame = 0;
+    float fps = 30.0f;
+    uint64_t root = 0;  // a clip's object
+    std::string dir, video;
+    std::vector<std::string> written;
+    std::shared_ptr<std::atomic<int>> encode;  // FFmpeg's exit code once it's done (kVideoRunning till then)
+    std::string encode_video;                  // the MP4 it makes
+  } ranim_;
+  std::string ffmpeg_path_;  // Preferences: FFmpeg's program (empty: the PATH's)
+  std::string ffmpeg_found_;
+  bool ffmpeg_looked_ = false;
+  const char *render_animation_broken();
+  bool render_animation_source(int &source, int &last, float &fps);
+  void step_render_animation();
+  void finish_render_animation();
+  void poll_render_video();
+  void set_ffmpeg_path(const std::string &path);
+  void draw_render_animation_button(ui::Layout &lay);
   bool write_render_file(const std::string &path_without_ext, std::string *written = nullptr);
 
  public:
   bool start_render_sequence(const std::string &dir = "");
+  bool start_render_animation(int first = -1, int last = -1, float fps = 0.0f);
+  void stop_render_animation();
+  std::string ffmpeg_program();
+  void render_animation_command(const std::vector<std::string> &t);
+  const RenderAnimation &render_animation_for_test() const { return ranim_; }
   void stop_render_sequence();
   bool sequence_running() const { return seq_.active; }
   std::string render_camera_name() {

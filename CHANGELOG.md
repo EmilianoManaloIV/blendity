@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 100): render animations and sequences to video (task 0074)
+
+**Asked:** rendering sequences to video; the choice was PNG frames plus an MP4 through FFmpeg.
+
+**Changed**
+- **Render Animation** (File menu, the Render window, Ctrl+F12, `renderanim [first last] [fps] | stop`): every frame
+  of the scene's sequence - or, without one, the selected object's clip - through the F12 render, into
+  `Renders/<scene>_animation_<time>/0001.png...`; the pose goes back afterwards.
+- Then, when FFmpeg is installed (on the PATH, or `renderanim ffmpeg <path>`, kept with the preferences), an H.264 MP4
+  is made beside the frames in the background. Blendity runs FFmpeg rather than linking it: no new dependency.
+  Without it the frames are the result, and the log says how to make a video.
+- A render stops cleanly when something ends what it poses through: Play, a save, an undo, another scene, another
+  object selected for a clip. Camera Sequence and Render Animation don't run at once.
+- Fixed: the IK test "in Play a Rotator swinging a foot target" failed once on a fast CI runner (Play runs on the
+  clock); it now steps until the target has moved.
+
+**Checked**
+- New tests (round 100): 21 frames of a sequence written as 0001-0021.png at the render's size, the first and last
+  different, the pose put back; FFmpeg's arguments and the Windows command-line quoting; the MP4 made where FFmpeg is on
+  the PATH (not on this machine); a clip's render stops when another object is selected or its preview ends; a lone
+  number is refused.
+- Unit checks: Windows 9,935, 0 failed (662 tests); the whole suite in render-cache verify mode: 9,936,
+  0 failed, 0 stale pictures. Linux with libraries: 9,843, 0 failed. Sanitizer build: 9,760, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- The rasterizer's frames waited for mouse or key input in the real app (the editor slept between them).
+- A save, an undo, Play or another scene mid-render left the rest of the frames unposed; another object selected for
+  a clip was posed and left so. The render now stops with a message.
+- Camera Sequence could start over a running Render Animation.
+- FFmpeg read the terminal on Linux (`-nostdin`); its exit code was lost once SIGCHLD is ignored, and a failed encode
+  with a file left behind counted as made.
+- An empty scene sequence hid the selected clip; a frame rate of 0 or NaN from a file reached FFmpeg; a fractional end
+  rendered one frame too many.
+- The Render window's tooltip searched the PATH every frame; it is looked up when a render starts.
+- Two renders in one second shared a folder; a failed PNG went on with a gap; a lone number or unknown word in
+  `renderanim` started a render.
+- Left: a PATH entry with non-ASCII characters on Windows isn't searched (set the path with `renderanim ffmpeg`).
+
 ## 2026-10-14 (round 99): themes - Dark, Light, Emiliano Light and Emiliano Dark (task 0073)
 
 **Asked:** an editor palette / theme option using the user's Figma site ("look at the variables tab in figma").

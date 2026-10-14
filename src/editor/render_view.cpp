@@ -1799,6 +1799,7 @@ bool Editor::start_render_sequence(const std::string &dir_in) {
     return false;
   }
   stop_render_sequence();
+  stop_render_animation();  // (one thing drives the F12 render at a time)
   seq_ = RenderSequence{};
   for (GameObject *g : cams) seq_.cams.push_back(g->id);
   if (dir_in.empty()) {

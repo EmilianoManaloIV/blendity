@@ -620,6 +620,10 @@ F12 renders the Main Camera at the resolution in the Render window (F11), using 
 ! cmd:shading shaded | Switch the Scene view to Shaded
 ! cmd:camerapreview rendered | Path trace the selected camera's preview
 ! cmd:render; window Render | Render the Main Camera (F12)
+# Rendering an animation to video
+Render Animation (File menu, the Render window, or Ctrl+F12, Blender's key) renders every frame of the scene's sequence - or, without one, the selected object's clip - through the same render as F12, one frame after another: Renders/<scene>_animation_<time>/0001.png, 0002.png... Numbered images are what film studios keep, because a crash at frame 900 loses one frame, not the whole file. Then, if FFmpeg is installed (on the PATH, or its path set with the console's renderanim ffmpeg), Blendity runs it to make an MP4 (H.264) next to the frames, as Blender does with its FFmpeg output. Without FFmpeg the frames are the result: Blender's Video Sequencer, DaVinci Resolve or FFmpeg itself turn them into a video. Each frame takes the render's own settings, so a path-traced animation takes its samples on every frame: the rasterizer is the quick way to check timing first.
+? Why render numbered PNGs rather than straight to an MP4? | A video file is useless until it is finished, and its compression is lossy; frames survive a crash, can be re-rendered one at a time and keep full quality for editing.
+! cmd:engine raster; renderanim 0 30 24 | Render 31 frames of the scene's sequence (or the selected clip) at 24 fps with the rasterizer
 )"},
     {"Light, Sky and Tone Mapping", "World settings, HDRIs and view transforms", R"(
 Everything not covered by a light comes from the environment: Blender's World, Unity's Lighting window (Environment). Blendity's World settings live in the Render window.

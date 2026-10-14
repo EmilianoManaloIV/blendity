@@ -1979,6 +1979,7 @@ void Editor::draw_render_window(const Recti &r) {
       start_render_sequence();
     u.tooltip("Render the scene from every camera with Render in Sequence on (Camera Inspector), in Sequence Order,\n"
               "each saved to Renders/<scene>_sequence_<time>/NN_<camera>.<format> with these settings.");
+    draw_render_animation_button(lay);
     if (!cams.empty() && !seq_.active) {
       std::string names;
       for (size_t k = 0; k < cams.size() && k < 6; k++) names += (k ? ", " : "") + cams[k]->name;

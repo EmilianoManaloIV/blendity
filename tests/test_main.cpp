@@ -24146,11 +24146,18 @@ static void round69_tests() {
     r34_steps(ed, 2);
     const Quat rest = s0.find_by_name("RightLowerLeg")->local().rotation;
     ed.command("play");
-    r34_steps(ed, 6);
-    GameObject *pft = ed.scene().find_by_name("RightFootIK");
+    /* Play runs on the clock: a fast machine's frames swing the target less each, so step until it has moved (CI's
+     * runner once swung it 0.009 in 6 frames). */
+    GameObject *pft = nullptr;
+    Vec3 off;
+    for (int i = 0; i < 200 && length(off) <= 0.01f; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));  // (some real time each frame, however fast the machine)
+      r34_steps(ed, 1);
+      pft = ed.scene().find_by_name("RightFootIK");
+      off = pft->world_position() - (foot + Vec3(0.15f, 0.25f, 0));
+    }
     GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
     const float err = length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - pft->world_position());
-    const Vec3 off = pft->world_position() - (foot + Vec3(0.15f, 0.25f, 0));
     std::printf("    in Play: the target swung by %.3f, the foot off it by %g\n", length(off), err);
     CHECK(length(off) > 0.01f && err < 1e-4f);
     ed.command("stop");
@@ -28287,5 +28294,99 @@ static void round81_tests() {
     ed2.load_prefs_for_test();
     CHECK(ed2.theme_name_for_test() == "Emiliano Dark" && ed2.ui_for_test().theme.window == Color::hex(0x292927));
     std::remove(prefs.c_str());
+  });
+  /* ---------------------------------------------------------------- round 100: render animation (task 0074) */
+  test("render animation: the scene's sequence rendered frame by frame into numbered PNGs that differ, the pose put back; an MP4 when FFmpeg is there", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("engine raster");
+    ed.scene().render.width = 320, ed.scene().render.height = 180;
+    GameObject *root = ed.scene().create("R100Root");
+    ed.command("create Cube");
+    GameObject *lid = ed.active_object_for_test();
+    CHECK(lid != nullptr);
+    if (!lid) return;
+    lid->name = "Lid";
+    ed.scene().set_parent(lid, root);
+    const float y0 = lid->local().position.y;
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R100 Sequence.seq").c_str());
+    ed.command("seq new R100 Sequence");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R100Root");
+    ed.step_frame_headless();
+    ed.command("renderanim 0 20 24");
+    for (int i = 0; i < 200 && ed.render_animation_for_test().active; i++) ed.step_frame_headless();
+    const auto &ra = ed.render_animation_for_test();
+    std::printf("    %zu frame(s) in %s at %g fps\n", ra.written.size(), ra.dir.c_str(), ra.fps);
+    CHECK(!ra.active && ra.written.size() == 21 && ra.fps == 24.0f);
+    CHECK(ra.written.size() == 21 && fs::filename(ra.written[0]) == "0001.png" && fs::filename(ra.written[20]) == "0021.png");
+    if (ra.written.size() != 21) return;
+    Bitmap a, b;
+    std::string err;
+    CHECK(load_image(ra.written[0], a, err) && load_image(ra.written[20], b, err));
+    CHECK(a.width == 320 && a.height == 180 && b.width == 320);
+    CHECK(a.rgba8 != b.rgba8);  // (the lid rose 2 m between them)
+    CHECK(std::fabs(lid->local().position.y - y0) < 1e-4f);  // (the pose went back)
+    if (ed.ffmpeg_program().empty())
+      for (const std::string &f : ra.written) std::remove(f.c_str());  // (the test project's Renders/ stays small)
+    /* FFmpeg: its arguments; with one on the PATH (CI's Linux has it), the MP4 is made in the background. */
+    const std::vector<std::string> args = ffmpeg_png_to_mp4_args("ffmpeg", "R/a b", 24.0f, "R/a b.mp4");
+    CHECK(args.size() == 18 && args[2] == "-nostdin" && args[6] == "24" && args[10] == fs::join("R/a b", "%04d.png") && args.back() == "R/a b.mp4");
+    CHECK(sys::windows_command_line({"C:\\Program Files\\ffmpeg.exe", "a b", "x\"y", "e\\", "p\\ q\\"}) ==
+          "\"C:\\Program Files\\ffmpeg.exe\" \"a b\" \"x\\\"y\" e\\ \"p\\ q\\\\\"");
+    if (ed.ffmpeg_program().empty()) {
+      std::printf("    no FFmpeg here: frames only\n");
+      return;
+    }
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    bool made = false;
+    for (const DirEntry &de : fs::list(fs::parent(ra.video))) made = made || (de.name == fs::filename(ra.video) && de.size > 0);
+    std::printf("    MP4 %s: %d\n", ra.video.c_str(), (int)made);
+    CHECK(made);
+  });
+
+  test("render animation: without a sequence or a clip it refuses; Stop puts the pose back", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("engine raster");
+    ed.scene().render.width = 160, ed.scene().render.height = 90;
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.command("renderanim");
+    CHECK(!ed.render_animation_for_test().active);  // (nothing to render)
+    GameObject *root = ed.scene().create("R100B");
+    GameObject *lid = ed.scene().create("Lid", root);
+    ed.command("select R100B");
+    ed.command("component Animation");
+    CHECK(root->get<Animation>() != nullptr);
+    if (!root->get<Animation>()) return;
+    root->get<Animation>()->clip = "Assets/Animations/R86Up.anim";
+    ed.step_frame_headless();
+    ed.command("renderanim 30 59");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    rendering the clip: active %d, lid at %.2f\n", (int)ed.render_animation_for_test().active, lid->local().position.y);
+    CHECK(ed.render_animation_for_test().active && ed.render_animation_for_test().source == 2 && lid->local().position.y > 2.9f);
+    ed.command("renderanim stop");
+    CHECK(!ed.render_animation_for_test().active && lid->local().position.y == 0.0f);
+    /* Another object selected mid-render, or a save (which ends the preview): it stops, the pose goes back. */
+    ed.command("renderanim 30 59");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("select Cube");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    the Cube selected mid-render: active %d, lid at %.2f\n", (int)ed.render_animation_for_test().active, lid->local().position.y);
+    CHECK(!ed.render_animation_for_test().active && lid->local().position.y == 0.0f);
+    ed.command("select R100B");
+    ed.command("renderanim 30 59");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("anim preview off");  // (what a save, an undo or another scene does)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.render_animation_for_test().active);
+    ed.command("renderanim 24");  // (one number: refused, not a render)
+    CHECK(!ed.render_animation_for_test().active);
   });
 }
