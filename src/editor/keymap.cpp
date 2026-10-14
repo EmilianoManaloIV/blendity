@@ -699,7 +699,7 @@ bool Editor::run_action(const std::string &id) {
  * Scene view, then anywhere), so one key can mean different things there. */
 void Editor::handle_shortcuts() {
   auto &in = ui_.in;
-  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active) return;  // a running operator takes the keys
+  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active || bone_drag_.modal) return;  // a running operator takes the keys
   if (!capturing_binding_.empty()) return;  // Preferences is waiting for a key to bind
   int mods = 0;
   if (in.ctrl()) mods |= platform::MOD_CTRL;

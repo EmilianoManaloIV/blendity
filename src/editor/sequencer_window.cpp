@@ -49,7 +49,8 @@ uint32_t bar_colour(const std::string &clip) {
 GameObject *Editor::seq_root() {
   for (GameObject *a = active_object(); a; a = a->parent)
     if (a->get<Sequencer>()) return a;
-  return active_object();
+  GameObject *rig = rig_root_of(active_object());
+  return rig ? rig : active_object();
 }
 
 SequencePtr Editor::seq_sequence() {

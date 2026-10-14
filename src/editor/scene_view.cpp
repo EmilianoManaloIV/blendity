@@ -52,7 +52,8 @@ void Editor::draw_scene_view(const Recti &r) {
    * render, so transforms applied by a drag show up in the same frame. */
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
-  bool gizmo_busy = gizmo_update(view);
+  bool gizmo_busy = bone_handles_update(view);  // (before the gizmo: a pressed handle is the bone's, task 0066)
+  if (gizmo_update(view)) gizmo_busy = true;
   if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
   /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
   if (pushpull_update(view)) gizmo_busy = true;
@@ -149,6 +150,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
   draw_autorig_markers(view);
+  draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
   draw_pushpull(view);
   draw_modal(view);
   draw_transform(view);
@@ -236,7 +238,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
 std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   const auto &in = ui_.in;
   const bool unity_like = nav_style_ == NavStyle::Unity || nav_style_ == NavStyle::Unreal;
-  if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active) {  // a right-click cancels a running Push/Pull, Inset or Bevel instead
+  if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal) {  // a right-click cancels a running Push/Pull, Inset, Bevel or bone Extrude instead
     if (nav_style_ == NavStyle::Unreal && in.down[0]) return {Drag::Pan, 1};
     if (in.alt() && nav_style_ != NavStyle::Blender) return {Drag::Zoom, 1};
     return {unity_like ? Drag::Fly : Drag::None, 1};
@@ -769,7 +771,8 @@ void Editor::draw_bone(const GameObject &g, const Bone &b) {
     const float a = k * kPi * 0.5f;
     ring[k] = w.point(Vec3(std::cos(a) * r, L * 0.1f, std::sin(a) * r));
   }
-  const uint32_t col = is_selected(g.id) ? kSelectOrange : Color::hex(0x202020, 220);
+  /* IK's bones tinted (Blender draws them yellowish): a chain turned by its control, not posed by hand. */
+  const uint32_t col = is_selected(g.id) ? kSelectOrange : ik_bones_frame_.count(g.id) ? Color::hex(0xB8A040, 230) : Color::hex(0x202020, 220);
   for (int k = 0; k < 4; k++) {
     scene_r3d_.line(head, ring[k], col, !over);
     scene_r3d_.line(ring[k], tail, col, !over);
@@ -779,8 +782,11 @@ void Editor::draw_bone(const GameObject &g, const Bone &b) {
 
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
+  ik_bones_frame_ = ik_driven_bones();
   scene_->for_each([&](GameObject &g) {
     if (const Component *bc = g.find_role(Component::RenderRole::Bone); bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
+    if (RigControl::live.load(std::memory_order_relaxed) && g.active_in_hierarchy())
+      if (const RigControl *rc = g.get<RigControl>()) draw_rig_control(g, *rc);
     if (const Component *pc = g.point_source(); pc && g.active_in_hierarchy()) {
       if (const Curve *cv = g.curve()) draw_curve(g, *cv);
       if (const Lattice *lt = g.lattice()) draw_lattice(g, *lt);
@@ -1277,6 +1283,10 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
         const float dist = length(p - (sa + d * t));
         if (dist < best) best = dist, hit = g.id;
       }
+    }
+    if (const RigControl *rc = RigControl::live.load(std::memory_order_relaxed) ? g.get<RigControl>() : nullptr) {  // a control by its wire (task 0067)
+      const float d = rig_control_distance(view, g, *rc, mx, my) * 0.5f;  // (a control near a bone wins: animators grab controls)
+      if (d < best) best = d, hit = g.id;
     }
     if (const Lattice *lt = g.lattice()) {  // a lattice by its cage (task 0043)
       const Mat4 &lw = g.world_matrix();

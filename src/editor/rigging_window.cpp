@@ -176,6 +176,7 @@ void Editor::draw_rigging_window(const Recti &r) {
                                     "Select the mesh and a bone (or the armature) of the skeleton, Ctrl+click in the Hierarchy.",
              root != nullptr, [this, mesh_obj, root] {
                mesh_obj->add<SkinModifier>()->object = root->name;
+               nest_armature(root, mesh_obj);
                mark_changed("Add Armature (Skin)");  // (a large mesh's bind lands later, as a step of its own)
                skin_bind(mesh_obj);
              }}},
@@ -202,6 +203,18 @@ void Editor::draw_rigging_window(const Recti &r) {
     if (weight_paint_) u.label(lay.row(), "Tip: select a bone (in the Hierarchy) to paint its group.", u.theme.text_dim);
   }
   if (section("Auto-Rig")) draw_autorig_section(lay, mesh_obj);
+  if (section("FK Controls")) {
+    const std::vector<GameObject *> sel = selected_bones();
+    bool any_fk = false;
+    for (GameObject *b : sel) any_fk = any_fk || fk_control_of(*b);
+    grid({{"Add FK Controls", "A circle on each selected bone that turns it (Maya's FK controllers): animate the circles, not the bones.\n"
+                              "Console: fk add [bone...].",
+           !sel.empty(), [this, sel] { add_fk_controls(sel); }},
+          {"Remove FK Controls", "The selected bones' circles go; the bones keep their pose and are posed directly again. Console: fk remove.",
+           any_fk, [this, sel] { remove_fk_controls(sel); }}},
+         2);
+    if (sel.empty()) u.label(lay.row(), "Select bones (Ctrl+click in the Hierarchy) to give them FK controls.", u.theme.text_dim);
+  }
   if (section("Inverse Kinematics")) {
     const bool chain = bone && a->parent && a->parent->get<Bone>() && !a->get<IKConstraint>();
     grid({{"Add IK to Bone", "The selected bone (a shin, a forearm) and its parent reach for a new target at its tip, bending towards a new pole.\n"
@@ -217,6 +230,9 @@ void Editor::draw_rigging_window(const Recti &r) {
              }
            }}},
          2);
+    grid({{"Remove IK", "The selected bone's IK goes, with its target and pole (when no other IK uses them). Console: ik remove <bone>.",
+           a && a->get<IKConstraint>(), [this, a] { remove_ik(a); }}},
+         1);
     if (a)
       if (IKConstraint *ik = a->get<IKConstraint>()) {
         u.push_id((ui::Id)(uintptr_t)ik);

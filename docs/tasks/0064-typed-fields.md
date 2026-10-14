@@ -4,7 +4,7 @@
 - **Requirements:** R-01 (Unity-style editor)
 - **Decisions:** none new (extends the Reflector's object field, task 0052 round 79)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/61
 
 ## Goal
 The user (2026-10-14): "Add the ability to drop objects from hierarchy into parameter fields in the inspector and not

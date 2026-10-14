@@ -82,6 +82,9 @@ void register_builtin_components() {
   reg<IKConstraint>("Rigging", "On the end bone of a chain (a shin, a forearm): the chain turns so its tip reaches the Target. "
                     "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
                     "Inverse Kinematics bone constraint (with Pole Target)");
+  reg<RigControl>("Rigging", "A controller shape to grab instead of bones (an IK target or pole, an FK circle): drawn over the scene, "
+                  "coloured by side - left blue, right red, the middle yellow.",
+                  "a custom bone shape (Maya: a NURBS controller curve)");
   reg<Animation>("Animation", "Plays an animation clip (Assets/Animations/*.anim) on this object and the ones below it, in Play. "
                  "Make and edit clips in the Animation window.",
                  "an Action played by the object (Animation data)");

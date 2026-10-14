@@ -998,6 +998,34 @@ struct IKConstraint : ComponentBase<IKConstraint> {
   void reflect(Reflector &r) override;
 };
 Quat rotation_between(Vec3 a, Vec3 b);  // the shortest-arc rotation taking direction a to b (ik.cpp)
+std::vector<GameObject *> ik_chain(GameObject &end, int length);  // a constraint's bones, root first (ik.cpp)
+
+/* A rig control (task 0067, ADR 0031): the shape an animator grabs instead of a bone - Blender's custom bone shapes,
+ * Maya's NURBS controller curves - drawn as wire over the scene, coloured by side (left blue, right red, middle
+ * yellow). An IK target or pole, a general control, or an FK control that turns the bone it names (`drives`) as it
+ * is turned itself. */
+struct RigControl : ComponentBase<RigControl> {
+  static constexpr const char *kName = "Rig Control";
+  enum Shape : int { Circle, Square, Box, Diamond, Sphere, Arrows, Cross, Root };
+  enum Side : int { SideAuto, Centre, Left, Right };
+  enum Role : int { Control, IKTarget, IKPole, FK };
+  int shape = Circle, side = SideAuto, role = Control;
+  float size = 0.25f;
+  std::string drives;  // FK: the bone it turns, by name
+  uint64_t drives_id = 0;  // where the name was last found
+  bool in_front = true;
+  static std::atomic<int> live;  // controls in existence (none: the constraint pass skips them)
+  RigControl() { live.fetch_add(1, std::memory_order_relaxed); }
+  RigControl(const RigControl &o)
+      : ComponentBase<RigControl>(o), shape(o.shape), side(o.side), role(o.role), size(o.size), drives(o.drives), in_front(o.in_front) {
+    live.fetch_add(1, std::memory_order_relaxed);
+  }
+  RigControl &operator=(const RigControl &) = default;
+  ~RigControl() override { live.fetch_sub(1, std::memory_order_relaxed); }
+  void reflect(Reflector &r) override;
+};
+/* Left or Right from Side, or (Auto) from the name: Left / .L / _L / L_ ..., Right likewise; else Centre. */
+int rig_control_side(const GameObject &g, const RigControl &c);
 /* Solves every IK constraint whose inputs changed (after Scene::update in Play, before drawing in the editor). True
  * when bones turned. The solved rotations are a pose, not an edit: they make no undo step of their own. */
 bool solve_constraints(Scene &scene);

@@ -198,6 +198,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Going from one animation clip to another needed something like a state machine to wire up. | The Sequencer window: lay clips on tracks, overlap them to crossfade, and give keys to jump between them in Play (task 0062). |
 | Users of Unreal, Blender or Maya had to relearn the mouse: the Scene view only navigated Unity's way. | Edit > Editor Feel: Unreal, Blender or Maya keys and mouse navigation together (task 0063). |
 | Object fields took any object and asset references were typed paths: nothing said what a field wanted. | Unity's typed fields: "None (Armature)", wrong kinds refused, a picker per field; clips and sequences dragged from the Project window (task 0064). |
+| A rig's IK targets were invisible empties beside bones, bones could only be moved whole, the auto-rig's markers were all green in one view, and keys were picked one axis at a time. | Rig controls coloured by side, bone head/tail handles and Extrude, character roots, coloured markers in five views, grouped x/y/z rows with box select (tasks 0065-0069). |
 | How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 
 ## Still worth doing

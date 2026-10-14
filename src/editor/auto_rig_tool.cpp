@@ -68,11 +68,7 @@ bool Editor::autorig_start(GameObject *mesh, RigKind kind) {
   autorig_.dragging.clear();
   /* A front view of a person (facing +Z, so the camera looks down -Z), a left-side view of an animal; orthographic,
    * framed on the mesh. */
-  const AABB b = mesh->world_bounds();
-  const float half = 0.55f * std::max(b.max.y - b.min.y, kind == RigKind::Humanoid ? b.max.x - b.min.x : b.max.z - b.min.z);
-  cam_.ortho = true;
-  cam_.animate_to(b.center(), kind == RigKind::Humanoid ? 180.0f : 90.0f, 0.0f, std::max(0.1f, half) / std::tan(cam_.fov * 0.5f * kDeg2Rad),
-                  now_seconds());
+  autorig_set_view(kind == RigKind::Humanoid ? "Front" : "Left");
   dock_open(WindowKind::Rigging);
   Log::info("Auto-Rig (%s): click the %s", kind == RigKind::Humanoid ? "humanoid" : "quadruped", autorig_next().c_str());
   return true;
@@ -137,6 +133,7 @@ bool Editor::autorig_build() {
   SkinModifier *sk = mesh->get<SkinModifier>();
   if (!sk) sk = mesh->add<SkinModifier>();
   sk->object = root->name;
+  nest_armature(root, mesh);  // (inside the mesh's rig root, as Unity lays out a humanoid: task 0065)
   expanded_.insert(root->id);
   mark_changed("Auto-Rig");
   autorig_last_ = autorig_;
@@ -179,6 +176,15 @@ bool Editor::autorig_update(const Recti &view) {
   if (name.empty()) return true;
   const Ray r = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
   Vec3 p;
+  /* Away from the front view, a marker being dragged keeps its depth along the view (it slides on the plane through
+   * it facing the camera): the side view sets a knee's depth without jumping to the nearer leg. */
+  auto it = autorig_.markers.find(name);
+  if (!pressed || !near.empty())
+    if (autorig_.view != "Front" && it != autorig_.markers.end() && bone_drag_point(view, it->second, p)) {
+      autorig_place(name, p);
+      autorig_.dragging = name;
+      return true;
+    }
   if (!body_midpoint(mesh, {r.origin, normalize(r.dir)}, p)) {
     if (pressed) Log::warn("Auto-Rig: click on the mesh to put the %s marker", name.c_str());
     return true;
@@ -201,7 +207,45 @@ std::string Editor::autorig_marker_at(int mx, int my) {
   return best;
 }
 
-/* The markers over the Scene view: placed ones green, mirrored twins dimmer, the one being dragged white. */
+/* A marker's colour by the part of the body it is on (Maya's and Blender's rig colours): the left side blue, the right
+ * red, the middle (head, spine, hips) yellow, a tail purple. Placed: full; a mirrored twin: lighter; not yet placed:
+ * dark. */
+uint32_t Editor::autorig_marker_color(const std::string &m, int state) const {
+  auto has = [&](const char *s) { return m.find(s) != std::string::npos; };
+  uint32_t r = 0xFF, g = 0xD2, b = 0x1F;  // the middle
+  if (has("Left")) r = 0x3D, g = 0x7B, b = 0xFF;
+  else if (has("Right")) r = 0xFF, g = 0x3B, b = 0x3B;
+  else if (has("Tail")) r = 0xB0, g = 0x6B, b = 0xFF;
+  auto mix = [](uint32_t c, uint32_t to, float t) { return (uint32_t)((float)c + ((float)to - (float)c) * t); };
+  if (state == 2) r = mix(r, 255, 0.45f), g = mix(g, 255, 0.45f), b = mix(b, 255, 0.45f);
+  if (state == 0) r = mix(r, 0x30, 0.65f), g = mix(g, 0x30, 0.65f), b = mix(b, 0x30, 0.65f);
+  return Color::hex((r << 16) | (g << 8) | b);
+}
+
+/* The orthographic view to place in, framed on the mesh: Front looks at a figure's face (it faces +Z), Back at its back,
+ * Left and Right at its sides, Top down on it. Markers keep their depth (the middle of the body along the view ray), so
+ * placing a few in the side view fixes how deep a knee or an elbow sits. */
+bool Editor::autorig_set_view(const std::string &view_in) {
+  GameObject *mesh = scene_->find(autorig_.mesh);
+  if (!autorig_.active || !mesh) return false;
+  std::string v = to_lower(view_in);
+  float yaw = 180.0f, pitch = 0.0f;
+  if (v == "back") yaw = 0.0f;
+  else if (v == "left") yaw = 90.0f;
+  else if (v == "right") yaw = -90.0f;
+  else if (v == "top") pitch = 89.9f;
+  else if (v != "front") return Log::warn("autorig view: front, back, left, right or top, not '%s'", view_in.c_str()), false;
+  const AABB b = mesh->world_bounds();
+  const float side = (v == "left" || v == "right") ? b.max.z - b.min.z : b.max.x - b.min.x;
+  const float half = 0.55f * std::max(v == "top" ? b.max.z - b.min.z : b.max.y - b.min.y, side);
+  cam_.ortho = true;
+  cam_.animate_to(b.center(), yaw, pitch, std::max(0.1f, half) / std::tan(cam_.fov * 0.5f * kDeg2Rad), now_seconds());
+  v[0] = (char)std::toupper((unsigned char)v[0]);
+  autorig_.view = v;
+  return true;
+}
+
+/* The markers over the Scene view, coloured by body part (twins lighter), the one being dragged white. */
 void Editor::draw_autorig_markers(const Recti &view) {
   if (!autorig_.active) return;
   auto &u = ui_;
@@ -210,7 +254,7 @@ void Editor::draw_autorig_markers(const Recti &view) {
     int x = 0, y = 0;
     if (!project_to_window(kv.second, x, y)) continue;
     const bool by_hand = std::find(autorig_.order.begin(), autorig_.order.end(), kv.first) != autorig_.order.end();
-    const uint32_t c = kv.first == autorig_.dragging ? 0xFFFFFFFF : by_hand ? Color::hex(0x55DD66) : Color::hex(0x3A8A44);
+    const uint32_t c = kv.first == autorig_.dragging ? 0xFFFFFFFF : autorig_marker_color(kv.first, by_hand ? 1 : 2);
     u.canvas.fill_circle((float)x, (float)y, (float)u.px(5), c);
     u.canvas.circle((float)x, (float)y, (float)u.px(6), Color::hex(0x101010));
   }
@@ -239,6 +283,17 @@ void Editor::draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj) {
     return;
   }
   draw_autorig_diagram(lay);
+  {
+    Recti vr = lay.row(u.row_h() + u.px(2));
+    const char *views[] = {"Front", "Left", "Right", "Back", "Top"};
+    const int vw = (vr.w - u.px(8) - u.px(3) * 4) / 5;
+    for (int k = 0; k < 5; k++) {
+      const Recti br{vr.x + u.px(4) + k * (vw + u.px(3)), vr.y, vw, vr.h};
+      if (u.button(br, views[k], autorig_.view == views[k])) autorig_set_view(views[k]);
+    }
+    u.tooltip("Place markers from any side: each keeps its depth through the body, so a side view fixes a knee's or an elbow's depth.\n"
+              "Console: autorig view front|left|right|back|top.");
+  }
   const std::string next = autorig_next();
   u.label(lay.row(), next.empty() ? "Every marker placed. Drag one in the Scene view to move it." : "Next: click the " + next + " on the mesh.",
           u.theme.text_bright);
@@ -259,7 +314,7 @@ void Editor::draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj) {
   u.tooltip("The skeleton from the markers, IK on each limb, and the mesh bound to it with inpainted weights.");
 }
 
-/* A small figure with the markers on it: placed ones green, the next one orange and larger. */
+/* A small figure with the markers on it, coloured by body part; the next one ringed, unplaced ones dark. */
 void Editor::draw_autorig_diagram(ui::Layout &lay) {
   auto &u = ui_;
   const Recti area = lay.row(u.px(150));
@@ -295,11 +350,14 @@ void Editor::draw_autorig_diagram(ui::Layout &lay) {
   for (const RigMarker &k : ms) {
     const Vec2 p = at(k.dx, k.dy);
     const bool placed = autorig_.markers.count(k.name) != 0, is_next = next == k.name;
-    const uint32_t c = is_next ? Color::hex(0xFF9A2E) : placed ? Color::hex(0x55DD66) : Color::hex(0x555555);
+    const uint32_t c = autorig_marker_color(k.name, placed || is_next ? 1 : 0);
+    if (is_next) u.canvas.circle(p.x, p.y, (float)u.px(9), 0xFFFFFFFF, 2.0f);  // (the next one ringed; no animation: idle stays idle)
     u.canvas.fill_circle(p.x, p.y, (float)u.px(is_next ? 6 : 4), c);
   }
-  u.tooltip("The markers to place: orange is next, green are placed. A humanoid is seen from the front (its left on your\n"
-            "right); a quadruped from its left side.");
+  u.label({fig.x + u.px(4), fig.y + u.px(2), fig.w, u.row_h()}, autorig_.view + " view", u.theme.text_dim);
+  u.tooltip("The markers to place, coloured by body part: left blue, right red, the middle yellow, a tail purple; the ringed\n"
+            "one is next, dark ones aren't placed yet. A humanoid starts from the front (its left on your right), a quadruped\n"
+            "from its left side.");
 }
 
 /* autorig humanoid|quadruped [mesh], autorig mark <marker> <x> <y> <z>, autorig symmetry on|off, autorig build,
@@ -320,6 +378,10 @@ void Editor::autorig_command(const std::vector<std::string> &t) {
       return;
     }
     autorig_place(t[2], Vec3((float)std::atof(t[3].c_str()), (float)std::atof(t[4].c_str()), (float)std::atof(t[5].c_str())));
+    return;
+  }
+  if (verb == "view") {
+    autorig_set_view(arg(2, "front"));
     return;
   }
   if (verb == "symmetry") {

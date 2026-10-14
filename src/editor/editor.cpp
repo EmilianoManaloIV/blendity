@@ -517,7 +517,7 @@ void Editor::frame(std::vector<Event> &events) {
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
-  if (pending_change_ && !ui_.in.down[0] && !ui_.in.down[1] && !ui_.in.down[2] && drag_ != Drag::Gizmo) commit_undo();
+  if (pending_change_ && !ui_.in.down[0] && !ui_.in.down[1] && !ui_.in.down[2] && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
 
   std::string title = scene_display_name() + (scene_dirty_ ? "*" : "") + " - Blendity" + (playing_ ? " [Playing]" : "");
   if (title != last_title_ && window_) {
@@ -1640,6 +1640,7 @@ void Editor::new_scene() {
   autorig_cancel();
   anim_reset();
   seq_reset();
+  bone_drag_ = BoneDrag{};
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1662,6 +1663,7 @@ bool Editor::open_scene(const std::string &path) {
   autorig_cancel();
   anim_reset();
   seq_reset();
+  bone_drag_ = BoneDrag{};
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -2264,6 +2266,51 @@ void Editor::update_procedural_shapes() {
   }
 }
 
+/* The rig root `g` is in: the nearest object at or above it with an Armature among its children (and none of its
+ * own), or nullptr. */
+GameObject *Editor::rig_root_of(GameObject *g) const {
+  for (GameObject *a = g; a; a = a->parent) {
+    if (a->get<Armature>()) continue;
+    for (const GameObject *c : a->children)
+      if (c->get<Armature>()) return a;
+  }
+  return nullptr;
+}
+
+/* "<mesh> Rig" in the mesh's place (same parent and index, its world position and rotation), the mesh inside it
+ * keeping where it is; the root it is already in when it has one. */
+GameObject *Editor::wrap_in_rig_root(GameObject *mesh) {
+  if (GameObject *r = rig_root_of(mesh)) return r;
+  if (mesh->parent && mesh->parent->children.size() == 1 && mesh->parent->components.empty())
+    return mesh->parent;  // (already alone under a bare group: that group is the character)
+  std::string name = mesh->name + " Rig";
+  for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("%s Rig.%03d", mesh->name.c_str(), k);
+  GameObject *parent = mesh->parent;
+  const std::vector<GameObject *> &siblings = parent ? parent->children : scene_->roots;
+  const int index = (int)(std::find(siblings.begin(), siblings.end(), mesh) - siblings.begin());
+  GameObject *rig = scene_->create(name, parent);
+  scene_->set_parent(rig, parent, index, false);  // (in the mesh's place among its siblings)
+  rig->set_world_position(mesh->world_position());  // (not its turn: the skeleton is built upright, along the world's Y)
+  scene_->set_parent(mesh, rig, -1, true);
+  expanded_.insert(rig->id);
+  Log::info("'%s' is now inside '%s' (the character's root, with its Armature)", mesh->name.c_str(), rig->name.c_str());
+  return rig;
+}
+
+/* An armature bound to a mesh goes into the mesh's rig root - unless it is under something else already, or another
+ * mesh's skin uses it (one skeleton for several meshes stays where it is). */
+void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
+  if (!armature || !mesh || armature->parent || scene_->is_ancestor(armature, mesh)) return;  // (an import's layout: already one)
+  bool shared = false;
+  scene_->for_each([&](GameObject &g) {
+    const SkinModifier *sk = g.get<SkinModifier>();
+    shared = shared || (&g != mesh && sk && sk->object == armature->name);
+  });
+  if (shared) return;
+  GameObject *rig = wrap_in_rig_root(mesh);
+  if (rig && rig != armature && !scene_->is_ancestor(armature, rig)) scene_->set_parent(armature, rig, -1, true);
+}
+
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
   if (kind == "Armature") {
@@ -2273,13 +2320,16 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     MeshFilter *tmf = target && is_selected(target->id) ? target->mesh_filter() : nullptr;
     std::string name = "Armature";
     for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Armature.%03d", k);
+    /* Beside a selected mesh inside its rig root (Unity's imported humanoid: one object holds mesh and skeleton). */
+    const bool skin_mesh = tmf && tmf->mesh && !parent;
+    if (skin_mesh) parent = wrap_in_rig_root(target);
     GameObject *root = scene_->create(name, parent);
     root->add<Armature>();
     std::string bname = "Bone";
     for (int k = 1; scene_->find_by_name(bname); k++) bname = strprintf("Bone.%03d", k);
     GameObject *bone = scene_->create(bname, root);
     bone->add<Bone>();
-    if (tmf && tmf->mesh && !parent) {
+    if (skin_mesh) {
       const AABB b = target->world_bounds();
       root->set_world_position(Vec3(b.center().x, b.min.y, b.center().z));
       bone->get<Bone>()->length = std::max(0.1f, b.max.y - b.min.y);
@@ -2703,6 +2753,7 @@ void Editor::enter_play() {
   cancel_skin_job();  // (Stop would throw its result away)
   autorig_cancel();
   anim_set_preview(false);  // (Play plays from the scene's own pose)
+  bone_drag_ = BoneDrag{};
   seq_set_preview(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
@@ -2935,6 +2986,7 @@ void Editor::run_console_command(const std::string &line) {
     autorig_command(t);
     return;
   }
+  if ((c == "ik" || c == "fk") && rig_control_command(t)) return;  // ik remove, fk add|remove (task 0067)
   if (c == "bone" || c == "armature" || c == "skin" || c == "ik" || c == "rig") {
     rig_command(t);
     return;
@@ -4302,6 +4354,7 @@ void Editor::draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay) 
  * [root]: Reset Pose / Apply as Rest; skin bind [object]: automatic weights for its Skin modifier. */
 void Editor::rig_command(const std::vector<std::string> &t) {
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (t[0] == "bone" && bone_edit_command(t)) return;  // bone head|tail|extrude (task 0066)
   if (t[0] == "bone" && to_lower(arg(1, "")) == "add") {
     GameObject *parent = scene_->find_by_name(arg(2, ""));
     if (!parent) {
@@ -4423,6 +4476,7 @@ bool Editor::armature_pose(GameObject *root, bool apply_as_rest) {
     }
     for (GameObject *c : g->children) stack.push_back(c);
   }
+  if (!apply_as_rest) fk_controls_follow_bones(root);  // (else the controls would turn the bones back next frame)
   Log::info("%s: %d bones", apply_as_rest ? "Apply as Rest" : "Reset Pose", n);
   if (n) mark_changed(apply_as_rest ? "Apply as Rest" : "Reset Pose");
   return n > 0;

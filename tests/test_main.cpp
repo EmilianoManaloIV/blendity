@@ -27456,4 +27456,505 @@ static void round81_tests() {
     ed.step_frame_headless();
     CHECK(ed.active_object_for_test() == nullptr && ed.project_selected_for_test() == resolve_asset_path("Assets/Animations/R88Walk.anim"));
   });
+  /* ---------------------------------------------------------------- round 89: armatures nested as Unity's humanoids (task 0065) */
+  test("rig nesting: GameObject > Armature on a selected mesh puts mesh and Armature in '<mesh> Rig'; moving the root moves both; undo puts the mesh back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *group = ed.scene().create("R89Group");
+    ed.scene().create("R89First", group);
+    GameObject *body = ed.scene().create("R89Body", group);
+    MeshFilter *mf = body->add<MeshFilter>();
+    mf->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+    body->add<MeshRenderer>();
+    body->set_world_position({2, 0, 1});
+    ed.select_for_test(body->id, false);
+    ed.mark_changed_for_test("body");
+    ed.step_frame_headless();
+    const size_t index_before = 1;
+    ed.command("create Armature");
+    ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("R89Body Rig");
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    std::printf("    rig %d, its parent %s, children: %zu\n", (int)(rig != nullptr), rig && rig->parent ? rig->parent->name.c_str() : "-", rig ? rig->children.size() : 0);
+    CHECK(rig && rig->parent == group && group->children.size() == 2 && group->children[index_before] == rig);
+    CHECK(rig && body->parent == rig && arm && arm->parent == rig);
+    CHECK(length(body->world_position() - Vec3(2, 0, 1)) < 1e-4f && length(rig->world_position() - Vec3(2, 0, 1)) < 1e-4f);
+    CHECK(body->get<SkinModifier>() && body->get<SkinModifier>()->object == arm->name);
+    /* Moving the root moves mesh and skeleton together: the skinned mesh is the rest shape, moved. */
+    const Vec3 v0 = body->world_matrix().point(body->evaluated_mesh()->positions[0]);
+    rig->set_world_position({5, 0, 1});
+    ed.mark_changed_for_test("move rig");
+    ed.step_frame_headless();
+    const Vec3 v1 = body->world_matrix().point(body->evaluated_mesh()->positions[0]);
+    std::printf("    a vertex moved by (%.4f, %.4f, %.4f) for the root's (3, 0, 0)\n", v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+    CHECK(length((v1 - v0) - Vec3(3, 0, 0)) < 1e-3f);
+    /* A second armature on the same mesh goes into the same root. */
+    ed.select_for_test(body->id, false);
+    ed.step_frame_headless();
+    ed.command("create Armature");
+    ed.step_frame_headless();
+    GameObject *arm2 = ed.scene().find_by_name("Armature.001");
+    CHECK(arm2 && arm2->parent == rig && !ed.scene().find_by_name("R89Body Rig.001"));
+    /* Undo both armatures: the mesh is back in the group at its place, no root. */
+    ed.command("undo");
+    ed.command("undo");
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *b = ed.scene().find_by_name("R89Body");
+    GameObject *g = ed.scene().find_by_name("R89Group");
+    CHECK(b && g && b->parent == g && g->children.size() == 2 && g->children[index_before] == b && !ed.scene().find_by_name("R89Body Rig"));
+  });
+
+  test("rig nesting: Add Armature (Skin) moves an unused armature into the mesh's rig root, but leaves one another mesh uses", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    auto mesh = [&](const char *name) {
+      GameObject *g = ed.scene().create(name);
+      g->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+      g->add<MeshRenderer>();
+      return g;
+    };
+    GameObject *a = mesh("R89A"), *b = mesh("R89B");
+    ed.command("create Armature");  // (nothing selected: at the scene root)
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    CHECK(arm && !arm->parent);
+    ed.step_frame_headless();
+    /* The rigging window's button: through nest_armature, as the button does. */
+    a->add<SkinModifier>()->object = arm->name;
+    ed.nest_armature_for_test(arm, a);
+    CHECK(arm->parent && arm->parent->name == "R89A Rig" && a->parent == arm->parent);
+    /* B uses it too: a fresh unparented skeleton used by A stays put. */
+    GameObject *arm2 = ed.scene().create("Skeleton2");
+    arm2->add<Armature>();
+    a->get<SkinModifier>()->object = "Skeleton2";
+    b->add<SkinModifier>()->object = "Skeleton2";
+    ed.nest_armature_for_test(arm2, b);
+    CHECK(!arm2->parent && !b->parent);
+  });
+  /* ---------------------------------------------------------------- round 90: bone head/tail handles and extrude (task 0066) */
+  test("bones: dragging a bone's tail handle re-aims and lengthens it, its child stays put and the result is the rest pose; the head handle keeps the tail", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.command("bone add Bone 0.5");
+    GameObject *child = ed.scene().find_by_name("Bone.001");
+    CHECK(child != nullptr);
+    if (!child) return;
+    const Vec3 child_at = child->world_position();
+    ed.select_for_test(bone->id, false);
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti tail;
+    CHECK(ed.button_rect_for_test("bone_tail", tail));
+    const Vec3 head = bone->world_position(), tail0 = ed.bone_tail_for_test(*bone);
+    const size_t steps = ed.undo_steps_for_test();
+    platform::Event m, d, mv, u;
+    m.type = mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    const int tx = tail.x + 4, ty = tail.y + 4;
+    m.x = d.x = tx, m.y = d.y = ty, mv.x = u.x = tx + 80, mv.y = u.y = ty + 10;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    const Vec3 tail1 = ed.bone_tail_for_test(*bone);
+    std::printf("    tail (%.2f %.2f %.2f) -> (%.2f %.2f %.2f); head moved %.5f; child moved %.5f; length %.3f\n", tail0.x, tail0.y, tail0.z, tail1.x,
+                tail1.y, tail1.z, length(bone->world_position() - head), length(child->world_position() - child_at), bone->get<Bone>()->length);
+    CHECK(length(tail1 - tail0) > 0.1f && length(bone->world_position() - head) < 1e-4f);
+    CHECK(length(child->world_position() - child_at) < 1e-4f);
+    CHECK(std::fabs(bone->get<Bone>()->length - length(tail1 - head)) < 1e-4f);
+    CHECK(length(bone->get<Bone>()->rest_position - bone->local().position) < 1e-5f);  // the edit is the rest
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    /* The head, by the console: the tail stays. */
+    ed.command(strprintf("bone head Bone %g %g %g", head.x, head.y + 0.25f, head.z));
+    CHECK(length(ed.bone_tail_for_test(*bone) - tail1) < 1e-4f && length(bone->world_position() - (head + Vec3(0, 0.25f, 0))) < 1e-4f);
+    ed.command("undo");
+    ed.command("undo");
+    ed.step_frame_headless();
+    bone = ed.scene().find_by_name("Bone");
+    CHECK(bone && length(ed.bone_tail_for_test(*bone) - tail0) < 1e-4f);
+  });
+
+  test("bones: Extrude (Ctrl+E in Unity's keys, E in Blender's) grows a bone from the tip whose tail follows the mouse; a click keeps it, Esc takes it away", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.select_for_test(bone->id, false);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto ev = [](platform::EventType t, int x, int y, int key = 0, int mods = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key, e.mods = mods;
+      return e;
+    };
+    using ET = platform::EventType;
+    const size_t before = ed.scene().object_count();
+    ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_E, platform::MOD_CTRL)});
+    CHECK(ed.scene().object_count() == before + 1 && ed.bone_drag_for_test().modal);
+    GameObject *grown = ed.active_object_for_test();
+    CHECK(grown && grown->parent == bone);
+    if (!grown) return;
+    const Vec3 tip = ed.bone_tail_for_test(*bone);
+    CHECK(length(grown->world_position() - tip) < 1e-4f);
+    ed.step_frame_headless({ev(ET::MouseMove, cx + 120, cy - 60)});
+    const Vec3 t1 = ed.bone_tail_for_test(*grown);
+    ed.step_frame_headless({ev(ET::MouseDown, cx + 120, cy - 60)});
+    ed.step_frame_headless({ev(ET::MouseUp, cx + 120, cy - 60)});
+    ed.step_frame_headless();
+    std::printf("    the new bone's tail followed the mouse to (%.2f %.2f %.2f); kept: %d\n", t1.x, t1.y, t1.z, (int)!ed.bone_drag_for_test().modal);
+    CHECK(!ed.bone_drag_for_test().modal && ed.scene().object_count() == before + 1 && length(ed.bone_tail_for_test(*grown) - t1) < 1e-4f);
+    /* Again, then Esc: no new bone. */
+    ed.select_for_test(grown->id, false);
+    ed.step_frame_headless();
+    ed.step_frame_headless({ev(ET::KeyDown, cx + 120, cy - 60, platform::KEY_E, platform::MOD_CTRL)});
+    CHECK(ed.scene().object_count() == before + 2);
+    ed.step_frame_headless({ev(ET::KeyDown, cx + 120, cy - 60, platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(ed.scene().object_count() == before + 1 && !ed.bone_drag_for_test().bone);
+  });
+  /* ---------------------------------------------------------------- round 91: rig controls, IK and FK (task 0067) */
+  auto quat_dot = [](Quat a, Quat b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; };
+  test("rig controls: Add IK gives a box target and a diamond pole coloured by side; Remove IK takes the constraint, target and pole in one step", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    ed.command("bone add Bone 1");
+    GameObject *shin = ed.scene().find_by_name("Bone.001");
+    CHECK(shin != nullptr);
+    if (!shin) return;
+    ed.scene().find_by_name("Bone")->name = "LeftThigh";
+    shin->name = "LeftShin";
+    ed.command("ik add LeftShin");
+    ed.step_frame_headless();
+    const IKConstraint *ik = shin->get<IKConstraint>();
+    CHECK(ik != nullptr);
+    if (!ik) return;
+    GameObject *target = ed.scene().find_by_name(ik->target), *pole = ed.scene().find_by_name(ik->pole);
+    CHECK(target && pole && target->get<RigControl>() && pole->get<RigControl>());
+    if (!target || !pole) return;
+    CHECK(target->get<RigControl>()->shape == RigControl::Box && target->get<RigControl>()->role == RigControl::IKTarget);
+    CHECK(pole->get<RigControl>()->shape == RigControl::Diamond && pole->get<RigControl>()->role == RigControl::IKPole);
+    std::printf("    target '%s' side %d, pole '%s' side %d (2 = Left)\n", target->name.c_str(), rig_control_side(*target, *target->get<RigControl>()),
+                pole->name.c_str(), rig_control_side(*pole, *pole->get<RigControl>()));
+    CHECK(rig_control_side(*target, *target->get<RigControl>()) == RigControl::Left);
+    const size_t steps = ed.undo_steps_for_test(), objects = ed.scene().object_count();
+    ed.command("ik remove LeftShin");
+    ed.step_frame_headless();
+    CHECK(!shin->get<IKConstraint>() && ed.scene().object_count() == objects - 2 && ed.undo_steps_for_test() == steps + 1);
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *s2 = ed.scene().find_by_name("LeftShin");
+    CHECK(s2 && s2->get<IKConstraint>() && ed.scene().object_count() == objects);
+  });
+
+  test("rig controls: an FK circle turns its bone as it turns, a click on its wire selects it, and Remove FK Controls leaves the bone as posed", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.command("fk add Bone");
+    ed.step_frame_headless();
+    GameObject *ctl = ed.scene().find_by_name("BoneFK");
+    CHECK(ctl && ctl->get<RigControl>() && ctl->get<RigControl>()->role == RigControl::FK && ctl->get<RigControl>()->drives == "Bone");
+    if (!ctl) return;
+    CHECK(length(ctl->world_position() - bone->world_position()) < 1e-4f);
+    ctl->set_local_rotation(ctl->local().rotation * Quat::axis_angle(Vec3(0, 0, 1), 0.5f));
+    ed.mark_changed_for_test("turn FK");
+    ed.step_frame_headless();
+    std::printf("    the control and the bone after turning the control: dot %.6f\n", std::fabs(quat_dot(ctl->world_rotation(), bone->world_rotation())));
+    CHECK(std::fabs(quat_dot(ctl->world_rotation(), bone->world_rotation())) > 0.9999f);
+    /* A click on the circle's wire selects the control. */
+    std::vector<std::pair<Vec3, Vec3>> segs;
+    ed.rig_control_segments_for_test(*ctl, segs);
+    int x = 0, y = 0;
+    CHECK(!segs.empty() && ed.screen_of_for_test(segs[3].first, x, y));
+    ed.command("select Main Camera");  // (not the bone: its gizmo would sit on the circle and take the click)
+    ed.step_frame_headless();
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    std::printf("    clicked the circle: active '%s'\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "-");
+    CHECK(ed.active_object_for_test() == ctl);
+    const Quat posed = bone->world_rotation();
+    ed.command("fk remove Bone");
+    ed.step_frame_headless();
+    CHECK(!ed.scene().find_by_name("BoneFK") && std::fabs(quat_dot(bone->world_rotation(), posed)) > 0.9999f);
+  });
+  /* ---------------------------------------------------------------- round 92: the auto-rig's colours and views (task 0068) */
+  test("auto-rig: markers are coloured by body part (left blue, right red, middle yellow, tail purple) and the placing view switches", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    auto rgb = [](uint32_t c) { return std::array<int, 3>{(int)((c >> 16) & 255), (int)((c >> 8) & 255), (int)(c & 255)}; };
+    auto bluest = [&](uint32_t c) { auto v = rgb(c); return v[2] > v[0] && v[2] > v[1]; };
+    auto reddest = [&](uint32_t c) { auto v = rgb(c); return v[0] > v[1] + 60 && v[0] > v[2] + 60; };
+    auto yellow = [&](uint32_t c) { auto v = rgb(c); return v[0] > 200 && v[1] > 180 && v[2] < 120; };
+    CHECK(bluest(ed.autorig_marker_color("LeftWrist", 1)) && bluest(ed.autorig_marker_color("FrontLeftPaw", 1)));
+    CHECK(reddest(ed.autorig_marker_color("RightKnee", 1)) && reddest(ed.autorig_marker_color("HindRightHock", 1)));
+    CHECK(yellow(ed.autorig_marker_color("Chin", 1)) && yellow(ed.autorig_marker_color("Withers", 1)));
+    const auto tail = rgb(ed.autorig_marker_color("TailTip", 1));
+    CHECK(tail[0] > tail[1] && tail[2] > tail[1]);  // purple
+    /* A twin is lighter than the hand-placed marker, an unplaced one darker. */
+    auto sum = [&](uint32_t c) { auto v = rgb(c); return v[0] + v[1] + v[2]; };
+    CHECK(sum(ed.autorig_marker_color("LeftWrist", 2)) > sum(ed.autorig_marker_color("LeftWrist", 1)) &&
+          sum(ed.autorig_marker_color("LeftWrist", 0)) < sum(ed.autorig_marker_color("LeftWrist", 1)));
+    /* Views: start on a mesh, switch to the left side and the top. */
+    ed.command("create Cylinder");
+    ed.command("autorig humanoid");
+    CHECK(ed.autorig_for_test().active && ed.autorig_for_test().view == "Front");
+    ed.command("autorig view left");
+    const double t0 = now_seconds();
+    while (now_seconds() - t0 < 0.5) ed.step_frame_headless();
+    std::printf("    after 'autorig view left': view %s, yaw %.1f, ortho %d\n", ed.autorig_for_test().view.c_str(), ed.scene_camera_for_test().yaw,
+                (int)ed.scene_camera_for_test().ortho);
+    CHECK(ed.autorig_for_test().view == "Left" && std::fabs(std::remainder(ed.scene_camera_for_test().yaw - 90.0f, 360.0f)) < 1.0f && ed.scene_camera_for_test().ortho);
+    ed.command("autorig view top");
+    const double t1 = now_seconds();
+    while (now_seconds() - t1 < 0.5) ed.step_frame_headless();
+    CHECK(ed.autorig_for_test().view == "Top" && ed.scene_camera_for_test().pitch > 80.0f);
+    ed.command("autorig view sideways");  // (refused)
+    CHECK(ed.autorig_for_test().view == "Top");
+  });
+  test("rigging: an extrude is one undo step on its click and none after Esc; a scaled armature's tail lands where it's put; a rig at the scene root keeps its place", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.select_for_test(bone->id, false);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto ev = [](platform::EventType t, int x, int y, int key = 0, int mods = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key, e.mods = mods;
+      return e;
+    };
+    using ET = platform::EventType;
+    const size_t steps = ed.undo_steps_for_test(), objects = ed.scene().object_count();
+    ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_E, platform::MOD_CTRL)});
+    for (int k = 1; k <= 10; k++) ed.step_frame_headless({ev(ET::MouseMove, cx + 8 * k, cy - 4 * k)});
+    ed.step_frame_headless({ev(ET::KeyDown, cx + 80, cy - 40, platform::KEY_ESCAPE)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    after Esc: %zu undo steps more, %zu objects more\n", ed.undo_steps_for_test() - steps, ed.scene().object_count() - objects);
+    CHECK(ed.undo_steps_for_test() == steps && ed.scene().object_count() == objects);
+    ed.select_for_test(bone->id, false);
+    ed.step_frame_headless();
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_E, platform::MOD_CTRL)});
+    for (int k = 1; k <= 10; k++) ed.step_frame_headless({ev(ET::MouseMove, cx + 8 * k, cy - 4 * k)});
+    ed.step_frame_headless({ev(ET::MouseDown, cx + 80, cy - 40)});
+    ed.step_frame_headless({ev(ET::MouseUp, cx + 80, cy - 40)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    after a kept extrude: %zu undo steps more\n", ed.undo_steps_for_test() - steps);
+    CHECK(ed.undo_steps_for_test() == steps + 1 && ed.scene().object_count() == objects + 1);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().object_count() == objects);
+    /* A half-scale armature: the tail goes exactly where it's put. */
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    CHECK(arm != nullptr);
+    if (!arm) return;
+    Transform t = arm->local();
+    t.scale = Vec3(0.5f);
+    arm->set_local(t);
+    ed.mark_changed_for_test("scale");
+    ed.step_frame_headless();
+    bone = ed.scene().find_by_name("Bone");
+    const Vec3 want = bone->world_position() + Vec3(0.3f, 0.6f, 0.0f);
+    ed.command(strprintf("bone tail Bone %g %g %g", want.x, want.y, want.z));
+    std::printf("    the tail on a half-scale armature is off by %.6f\n", length(ed.bone_tail_for_test(*bone) - want));
+    CHECK(length(ed.bone_tail_for_test(*bone) - want) < 1e-4f);
+    /* A mesh at the scene root, between two others: its rig takes its place there. */
+    GameObject *a = ed.scene().create("R94A");
+    GameObject *m = ed.scene().create("R94Mesh");
+    m->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+    m->add<MeshRenderer>();
+    ed.scene().create("R94C");
+    size_t at = 0;
+    for (size_t i = 0; i < ed.scene().roots.size(); i++)
+      if (ed.scene().roots[i] == m) at = i;
+    ed.select_for_test(m->id, false);
+    ed.step_frame_headless();
+    ed.command("create Armature");
+    ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("R94Mesh Rig");
+    CHECK(rig && at < ed.scene().roots.size() && ed.scene().roots[at] == rig && ed.scene().roots[at - 1] == a);
+  });
+
+  test("rigging: Remove IK keeps a target of the user's own; FK isn't added to IK's bones; Reset Pose puts FK controls back; '.L' controls are blue", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    ed.command("bone add Bone 1");
+    GameObject *thigh = ed.scene().find_by_name("Bone"), *shin = ed.scene().find_by_name("Bone.001");
+    CHECK(thigh && shin);
+    if (!thigh || !shin) return;
+    thigh->name = "Thigh.L", shin->name = "Shin.L";
+    ed.command("ik add Shin.L");
+    ed.step_frame_headless();
+    GameObject *target = ed.scene().find_by_name("Shin.LIK");
+    CHECK(target && target->get<RigControl>() && rig_control_side(*target, *target->get<RigControl>()) == RigControl::Left);
+    /* A cup of the user's as the target instead: Remove IK leaves it. */
+    GameObject *cup = ed.scene().create("Cup");
+    shin->get<IKConstraint>()->target = "Cup";
+    ed.mark_changed_for_test("aim at the cup");
+    ed.step_frame_headless();
+    ed.command("ik remove Shin.L");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Cup") == cup && !shin->get<IKConstraint>() && !ed.scene().find_by_name("Shin.LPole"));
+    /* IK again: FK on its bones is refused. */
+    ed.command("ik add Shin.L");
+    ed.step_frame_headless();
+    ed.command("fk add Shin.L Thigh.L");
+    CHECK(!ed.scene().find_by_name("Shin.LFK") && !ed.scene().find_by_name("Thigh.LFK"));
+    ed.command("ik remove Shin.L");
+    ed.step_frame_headless();
+    /* FK on both, a turn on the thigh's control, then Reset Pose: the thigh and its control are back at rest and stay. */
+    ed.command("armature reset Armature");  // (the IK turned the thigh: back to its rest before the controls go on)
+    ed.step_frame_headless();
+    ed.command("fk add Shin.L Thigh.L");
+    ed.step_frame_headless();
+    GameObject *ctl = ed.scene().find_by_name("Thigh.LFK");
+    CHECK(ctl != nullptr);
+    if (!ctl) return;
+    const Quat rest = thigh->world_rotation();
+    ctl->set_local_rotation(ctl->local().rotation * Quat::axis_angle(Vec3(1, 0, 0), 0.6f));
+    ed.mark_changed_for_test("turn");
+    ed.step_frame_headless();
+    auto qd = [](Quat a, Quat b) { return std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w); };
+    CHECK(qd(thigh->world_rotation(), rest) < 0.999f);
+    ed.command("armature reset Armature");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    after Reset Pose: the thigh is at rest %d, its control with it %d\n", (int)(qd(thigh->world_rotation(), rest) > 0.9999f),
+                (int)(qd(ctl->world_rotation(), rest) > 0.9999f));
+    CHECK(qd(thigh->world_rotation(), rest) > 0.9999f && qd(ctl->world_rotation(), rest) > 0.9999f);
+    CHECK(!solve_constraints(ed.scene()));  // (nothing left to turn: the editor can go idle)
+  });
+  /* ---------------------------------------------------------------- round 93: the dopesheet's grouped rows and box select (task 0069) */
+  test("keyframes: a Position's x/y/z are one dopesheet row that unfolds; its diamond selects and moves all three; a thin box selects every key it touches", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R93Box");
+    ed.scene().create("Lid", box);
+    ed.command("select R93Box");
+    ed.command("layout Animation");  // (the Animation window along the bottom: wide enough to tell frames apart)
+    ed.command("anim new");
+    ed.command("anim key Lid Position 0 10 0");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.command("anim key Lid Position 2 10 2");
+    ed.command("anim key Lid Position 1 30 3");
+    ed.command("anim key Lid Scale 0 20 1");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti grp;
+    CHECK(ed.button_rect_for_test("anim_track:Lid : Position", grp));
+    Recti x_row;
+    CHECK(!ed.button_rect_for_test("anim_track:    .x", x_row));  // folded
+    const AnimEditorState &st = ed.anim_for_test();
+    auto key_x = [&](float f) { return st.sheet.x + (int)std::lround(f / st.sheet_end * (float)st.sheet.w); };
+    auto ev = [](platform::EventType t, int x, int y, int mods = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.mods = mods;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto click = [&](int x, int y, int mods = 0) {
+      ed.step_frame_headless({ev(ET::MouseMove, x, y, mods)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y, mods)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y, mods)});
+      ed.step_frame_headless();
+    };
+    /* The group's diamond at frame 10: all three axes' keys. */
+    const int gy = grp.y + grp.h / 2;
+    click(key_x(10), gy);
+    std::printf("    clicking the group's diamond at 10: %zu keys selected\n", st.selected.size());
+    CHECK(st.selected.size() == 3);
+    /* Dragged 10 frames right: all three move to 20, the y key at 30 stays. */
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(10), gy)});
+    ed.step_frame_headless({ev(ET::MouseDown, key_x(10), gy)});
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(20), gy)});
+    ed.step_frame_headless({ev(ET::MouseUp, key_x(20), gy)});
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    if (clip)
+      for (const AnimTrack &tr : clip->tracks) {
+        std::printf("    %s:", tr.label().c_str());
+        for (const AnimKey &k : tr.keys) std::printf(" %g", k.frame);
+        std::printf("\n");
+      }
+    /* Where they landed (10 frames on, give or take the pixel rounding of a frame): all three together. */
+    const float moved = clip && !clip->find("Lid", "Position", 0)->keys.empty() ? clip->find("Lid", "Position", 0)->keys[0].frame : -1.0f;
+    CHECK(clip && std::fabs(moved - 20.0f) <= 1.0f && clip->find("Lid", "Position", 2)->key_at(moved) >= 0 &&
+          clip->find("Lid", "Position", 1)->key_at(moved) >= 0 && clip->find("Lid", "Position", 1)->key_at(30) >= 0 &&
+          clip->find("Lid", "Position", 0)->key_at(10) < 0);
+    /* Unfold: the axes get rows of their own. */
+    click(grp.x + 8, gy);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("anim_track:    .x", x_row) && ed.button_rect_for_test("anim_track:    .z", x_row));
+    /* A thin box over the diamonds at 20 and 30 (not crossing any row's middle line), from empty space: it takes the
+     * keys it touches - the group's and the axes' rows below. */
+    Recti sheet;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet));
+    Recti zrow;
+    CHECK(ed.button_rect_for_test("anim_track:    .z", zrow));
+    click(sheet.right() - 5, sheet.bottom() - 5);  // (empty: clears the selection)
+    CHECK(st.selected.empty());
+    const int y0 = grp.y + 2, y1 = zrow.y + 3;  // (within the first row's top and the z row's top: no middle line of z)
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(17), y0)});
+    ed.step_frame_headless({ev(ET::MouseDown, key_x(17), y0)});
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(33), y1)});
+    ed.step_frame_headless({ev(ET::MouseUp, key_x(33), y1)});
+    ed.step_frame_headless();
+    std::printf("    the thin box selected %zu keys (x, y, z at 20 and y at 30: 4):", st.selected.size());
+    for (const auto &k : st.selected) std::printf(" (%d, %g)", k.first, k.second);
+    std::printf("; rows at y %d (group), %d (z); box %d..%d\n", grp.y, zrow.y, y0, y1);
+    CHECK(st.selected.size() == 4);
+    /* Ctrl+box takes them off again. */
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(15), y0, platform::MOD_CTRL)});  // (not where the last box began: that would be a double-click)
+    ed.step_frame_headless({ev(ET::MouseDown, key_x(15), y0, platform::MOD_CTRL)});
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(33), y1, platform::MOD_CTRL)});
+    ed.step_frame_headless({ev(ET::MouseUp, key_x(33), y1, platform::MOD_CTRL)});
+    ed.step_frame_headless();
+    CHECK(st.selected.empty());
+  });
+  test("auto-rig: a marker dragged in the side view keeps its depth through the body (it doesn't jump to the nearer leg)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Cylinder");
+    ed.command("autorig humanoid");
+    ed.command("autorig symmetry off");
+    ed.command("autorig mark LeftKnee 0.15 0.4 0.1");
+    ed.command("autorig view left");
+    const double t0 = now_seconds();
+    while (now_seconds() - t0 < 0.5) ed.step_frame_headless();
+    const Vec3 before = ed.autorig_for_test().markers.at("LeftKnee");
+    int x = 0, y = 0;
+    CHECK(ed.screen_of_for_test(before, x, y));
+    platform::Event m, d, mv, u;
+    m.type = mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    m.x = d.x = x, m.y = d.y = y, mv.x = u.x = x + 15, mv.y = u.y = y - 25;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    const Vec3 after = ed.autorig_for_test().markers.at("LeftKnee");
+    std::printf("    the knee (%.3f %.3f %.3f) -> (%.3f %.3f %.3f) in the left view\n", before.x, before.y, before.z, after.x, after.y, after.z);
+    CHECK(std::fabs(after.x - before.x) < 1e-3f && length(after - before) > 0.02f);
+  });
 }

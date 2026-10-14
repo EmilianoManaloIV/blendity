@@ -1215,6 +1215,10 @@ void Editor::draw_inspector(const Recti &r) {
       g->components[reset_idx] = std::move(fresh);
       mark_changed("Reset Component");
     }
+  if (remove_idx >= 0 && !std::strcmp(g->components[remove_idx]->type_name(), IKConstraint::kName)) {
+    remove_ik(g);  // (its target and pole go with it, task 0067)
+    remove_idx = -1;
+  }
   if (remove_idx >= 0) {
     g->components.erase(g->components.begin() + remove_idx);
     mark_changed("Remove Component");

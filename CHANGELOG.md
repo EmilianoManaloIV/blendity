@@ -2,6 +2,61 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (rounds 89-94): rigging - character roots, bone handles and extrude, rig controls, auto-rig colours and views, grouped keyframes (tasks 0065-0069, ADR 0031)
+
+**Asked** (2026-10-14):
+- "When adding an armature to a mesh/object nest it in the hierarchy itself; similar to how unity handle's humanoid
+  models being imported."
+- "Add the ability to move the base and tip of a bone ... add bones using extrude like vertices."
+- "Give the inverse kinematics a special gizmo ... (also add the option to remove FK/IK systems) ... like blender and
+  maya."
+- "For auto-rig ... make them different colors to indicate different parts of the body ... transfer to different
+  orthographic views."
+- "Select multiple keyframes in the animation block (drag select) ... x,y,z in the same frame and then expand as
+  needed."
+
+**Added**
+- **Character roots** (0065): GameObject > Armature on a mesh, Add Armature (Skin) and the auto-rig put the mesh and its
+  Armature inside "<mesh> Rig" in the mesh's old place; the Animation window and the Sequencer animate that root.
+- **Bone handles and Extrude** (0066): a selected bone's tail handle (and Shift+drag on its head) aims and stretches it,
+  children staying put, the result its rest pose; Extrude (Ctrl+E / E) grows a bone from the tip that follows the mouse
+  until a click (Esc cancels). Console `bone head|tail|extrude`.
+- **Rig controls** (0067, ADR 0031): the Rig Control component (Circle, Square, Box, Diamond, Sphere, Arrows, Cross,
+  Root) drawn as wire over the scene, coloured by side (left blue, right red, middle yellow). IK targets are boxes,
+  poles diamonds with a dashed line to their joint; IK's bones are tinted. FK controls (circles that turn their bones).
+  Remove IK, Add / Remove FK Controls; console `ik remove`, `fk add|remove`.
+- **Auto-rig** (0068): markers coloured by body part; Front / Left / Right / Back / Top views (`autorig view`), a
+  dragged marker keeping its depth away from the front view.
+- **Keyframes** (0069): the dopesheet groups a vector's axes in one row that unfolds; a group diamond selects and moves
+  all its axes' keys; box select takes every diamond it touches, lights them while dragging, Shift adds, Ctrl removes;
+  dragged keys show where they will land.
+- Learn: "A character's root", "Bone heads, tails and Extrude", "Rig controls: IK and FK", "Auto-rig colours and
+  views".
+
+**Checked**
+- New tests (rounds 89-94): the rig root's shape and place (in a group and at the scene's top level), undo; the skin
+  following the root; Add Armature (Skin) nesting and leaving a shared skeleton; tail and head drags (children kept, rest
+  pose, one step, a half-scale armature); Extrude kept (one step) and cancelled (no step, no bone); IK controls' shapes
+  and sides (including ".L" names), Remove IK (one step, a user's object kept); FK turning its bone, a click on its wire,
+  Remove FK, FK refused on IK bones, Reset Pose with FK, an idle solve; marker colours; view switching; a side-view drag
+  keeping depth; grouped rows, a group diamond's move, a thin box, Ctrl box.
+- Unit checks: Windows 9,873, 0 failed (654 tests); the whole suite in render-cache verify mode: 9,874,
+  0 failed, 0 stale pictures. Linux with libraries: 9,781, 0 failed. Sanitizer build: 9,698, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- The bone handles were drawn before the picture and painted over.
+- An extrude made an undo step per frame (and Esc left steps).
+- Remove IK could delete a user's object used as a target.
+- FK on an IK bone redrew the editor forever.
+- Reset Pose was undone by FK controls next frame.
+- The side and top views moved dragged markers to the wrong depth.
+- A scaled armature's tail landed away from the mouse.
+- Also: the head handle took the gizmo's centre (now Shift), roll drift and the grab offset, a stale bone drag across
+  scenes, shortcuts and right-click fly during an extrude, the rig root's place at the scene's top level, wrapping an
+  import's mesh again, any single-child parent taken as a root, Create Child > Armature's meaning, ".L" control
+  names, a misspelt `fk remove` name, disabled controls drawn and picked, FK lookups by name every frame.
+
 ## 2026-10-14 (round 88): typed object and asset fields, Unity's "None (Armature)" (task 0064)
 
 **Asked:** "Add the ability to drop objects from hierarchy into parameter fields in the inspector and not just rely on
@@ -51,7 +106,7 @@ armature, animation, sequencer etc."
 - A fast press-move-release on a file selected it before seeing the drag.
 - The missing type icon.
 
-: switch the editor's feel: Unity, Unreal, Blender or Maya (task 0063)
+## 2026-10-13 (round 87): switch the editor's feel: Unity, Unreal, Blender or Maya (task 0063)
 
 **Asked:** "Switch the editor's feel between Unity / Unreal / Blender / Maya". The user chose keys and mouse navigation
 only.
@@ -99,7 +154,7 @@ only.
 - Maya's plain MMB panned.
 - The Learn answer about RMB, and the prefs test's path.
 
-: a Premiere-style clip sequencer instead of a state machine (task 0062, ADR 0030)
+## 2026-10-13 (round 86): a Premiere-style clip sequencer instead of a state machine (task 0062, ADR 0030)
 
 **Asked:** "A clip editor like Premiere Pro to go between animation clips instead of using a state machine"; for Play,
 the user chose "a timeline plus triggers".
@@ -165,7 +220,7 @@ the user chose "a timeline plus triggers".
 - A bad `.seq` was read again every frame.
 - The stress test's clips stayed loaded after their files went.
 
-: the animation curve editor, Unity's Curves view (task 0061, ADR 0029 amended)
+## 2026-10-13 (round 85): the animation curve editor, Unity's Curves view (task 0061, ADR 0029 amended)
 
 **Asked:** "Start on the later list": first the curve editor for the keyframe animation of task 0059.
 

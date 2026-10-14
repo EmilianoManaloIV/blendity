@@ -373,6 +373,12 @@ keeps its pose, with each bone resting at its bind pose, so Reset Pose gives the
 2. Select the shirt; Rigging > Transfer Weights; drag the body onto From; Transfer Weights. The shirt gets the body's
    skeleton and follows its pose.
 
+**Shaping bones and controls:** select a bone and drag its blue tail handle to aim and stretch it (Shift+drag the
+orange head); the bones below keep their places. Ctrl+E (E with Blender's keys) extrudes a new bone from the tip: move
+the mouse, click to keep it. IK targets are boxes and poles diamonds, coloured by side (left blue, right red, middle
+yellow); Rigging > FK Controls puts circles on bones to turn them by. Remove IK and Remove FK Controls take them away.
+A character made with GameObject > Armature or the auto-rig lives under one root ("Robot Rig"), as Unity imports one.
+
 **Use cases:** game characters and creatures; posed renders; clothing and armour for an existing rig.
 
 > Learn: *Modifiers vs Components > Vertex groups, Weight painting, Bones and skins, Automatic weights by inpainting,

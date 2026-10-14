@@ -206,6 +206,7 @@ struct AnimEditorState {
   double play_clock = 0.0;
   float play_from = 0.0f;
   std::vector<std::pair<int, float>> selected;  // (track, key frame)
+  std::set<std::string> expanded;  // the dopesheet's unfolded groups ("path|property", task 0069)
   std::vector<std::pair<uint64_t, Transform>> saved_pose;  // every object's transform before Preview (put back after)
   std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;  // the animated component numbers likewise
   std::unordered_map<std::string, float> shown;  // each animated number as last shown (Record compares with it)
@@ -258,6 +259,7 @@ struct AutoRigSession {
   std::vector<std::string> order;  // the ones placed by hand, in order (Remove Last)
   bool symmetry = true;
   std::string dragging;  // a marker being dragged in the Scene view
+  std::string view = "Front";  // the orthographic view placing in (task 0068): Front, Back, Left, Right, Top
 };
 
 /* A skin-weight solve (task 0057): a copy of the mesh in, its new groups out, on a worker thread when the mesh is
@@ -658,6 +660,55 @@ class Editor {
   std::unordered_map<std::string, std::pair<bool, double>> asset_exists_cache_;
   bool asset_file_exists(const std::string &path);
   std::string project_selected_for_test() const { return project_selected_; }
+  /* Task 0065: a character's root, as Unity lays out an imported humanoid: "<mesh> Rig" holding the mesh and its
+   * Armature. rig_root_of finds the one `g` is in (an object with an Armature child), wrap_in_rig_root makes one. */
+  GameObject *rig_root_of(GameObject *g) const;
+  /* Task 0068: the auto-rig's markers coloured by body part, and its views. */
+  uint32_t autorig_marker_color(const std::string &marker, int state) const;  // state 0 unplaced, 1 placed, 2 mirrored twin
+  bool autorig_set_view(const std::string &view);
+  /* Task 0067 (rig_controls.cpp): rig controls drawn and picked, IK and FK added and removed. */
+  void rig_control_segments(const GameObject &g, const RigControl &rc, std::vector<std::pair<Vec3, Vec3>> &out) const;
+  uint32_t rig_control_color(const GameObject &g, const RigControl &rc) const;
+  void draw_rig_control(const GameObject &g, const RigControl &rc);
+  const GameObject *pole_joint(const GameObject &pole) const;
+  float rig_control_distance(const Recti &view, const GameObject &g, const RigControl &rc, int mx, int my) const;
+  std::unordered_set<uint64_t> ik_driven_bones() const;
+  std::unordered_set<uint64_t> ik_bones_frame_;  // this frame's IK-driven bones (drawn tinted)
+  bool remove_ik(GameObject *bone);
+  bool ik_names_object(const std::string &name) const;
+  int add_fk_controls(const std::vector<GameObject *> &bones);
+  GameObject *fk_control_of(const GameObject &bone) const;
+  int remove_fk_controls(const std::vector<GameObject *> &bones);
+  void fk_controls_follow_bones(GameObject *root);  // the FK controls of bones below `root` turned to their bones
+  std::vector<GameObject *> selected_bones();
+  bool rig_control_command(const std::vector<std::string> &t);
+  void rig_control_segments_for_test(const GameObject &g, std::vector<std::pair<Vec3, Vec3>> &out) const { rig_control_segments(g, *g.get<RigControl>(), out); }
+  /* Task 0066 (bone_edit.cpp): the selected bone's head and tail handles, Extrude, the console's bone head|tail|extrude. */
+  struct BoneDrag {
+    uint64_t bone = 0;
+    int end = 1;         // 0 the head, 1 the tail
+    bool modal = false;  // an extruded bone's tail: follows the mouse until a click
+    Vec3 head0, tail0;   // where the ends were when it started
+    Quat rot0;           // the bone's turn when it started (the drag turns from it)
+    Vec3 offset;         // from the mouse's point to the grabbed end
+  } bone_drag_;
+  int bone_handle_hot(const Recti &view, const GameObject &g);
+  void draw_bone_handles(const Recti &view);
+  Vec3 bone_head(const GameObject &g) const;
+  Vec3 bone_tail(const GameObject &g) const;
+  GameObject *bone_edit_target();
+  void set_bone_ends(GameObject &g, Vec3 head, Vec3 tail, const Quat *base = nullptr);
+  bool bone_drag_point(const Recti &view, Vec3 p, Vec3 &out);
+  bool bone_handles_update(const Recti &view);
+  bool bone_drag_update(const Recti &view);
+  bool bone_extrude(GameObject *g);
+  void delete_bone_extruded(GameObject *g);
+  bool bone_edit_command(const std::vector<std::string> &t);
+  const BoneDrag &bone_drag_for_test() const { return bone_drag_; }
+  Vec3 bone_tail_for_test(const GameObject &g) const { return bone_tail(g); }
+  GameObject *wrap_in_rig_root(GameObject *mesh);
+  void nest_armature(GameObject *armature, GameObject *mesh);  // into the mesh's rig root, unless another mesh uses it
+  void nest_armature_for_test(GameObject *armature, GameObject *mesh) { nest_armature(armature, mesh); }
   std::vector<std::string> asset_paths_with_ext(const std::string &ext);
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
@@ -864,13 +915,30 @@ class Editor {
   void draw_anim_add_property(GameObject *root);
   float anim_frame_at(const Recti &sheet, int x, float end) const;
   int anim_x_of(const Recti &sheet, float frame, float end) const;
-  bool anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, int &track, float &frame);
+  bool anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, std::vector<std::pair<int, float>> &keys);
   bool anim_selected(int track, float frame) const;
   void anim_sheet_input(const AnimationClip &clip, const Recti &ruler, const Recti &sheet, int row_h, float end);
   void anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end);
   void draw_animation_window(const Recti &r);
   void draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end);
   void anim_pick_curve(int track, bool add);
+  /* Task 0069: the dopesheet's rows (a vector property's axes grouped) and selecting keys by row or box. */
+  struct AnimRow {
+    std::vector<int> tracks;
+    std::string label;
+    bool group = false;
+    int depth = 0;  // 1: an axis under its group
+    std::string key;  // a group's "path|property"
+    bool open = false;
+  };
+  std::vector<AnimRow> anim_rows(const AnimationClip &clip) const;
+  std::vector<std::pair<int, float>> anim_row_keys(const AnimationClip &clip, const AnimRow &row, float frame) const;
+  std::vector<float> anim_row_frames(const AnimationClip &clip, const AnimRow &row) const;
+  bool anim_all_selected(const std::vector<std::pair<int, float>> &keys) const;
+  std::vector<std::pair<int, float>> anim_box_keys(const AnimationClip &clip, const Recti &sheet, int row_h, float end, const Recti &box) const;
+  void anim_select_key(int track, float frame, bool on);
+  void anim_add_row_key(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my);
+  void draw_anim_row_name(const AnimationClip &clip, GameObject *root, const AnimRow &row, const Recti &lr, const Recti &body, const Recti &sheet, int index);
   void anim_drag_cancel();   // a drag dropped (its clip went, the window can't draw, an undo)
   void anim_clip_changed();  // another clip (or the same one restored): drags, picked curves, the snapshot reset
   void anim_tangent_command(const std::vector<std::string> &t, AnimationClip &clip, const std::string &path, const std::string &prop, int axis, float frame);
