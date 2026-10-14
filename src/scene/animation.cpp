@@ -469,7 +469,7 @@ float wrap_frame(float frame, float end, int wrap) {
 /* ---------------------------------------------------------------- the component */
 
 void Animation::reflect(Reflector &r) {
-  r.text("Clip", clip);
+  r.asset("Clip", clip, ".anim", "Animation Clip");
   r.help("The .anim clip it plays (Assets/Animations). Make and edit clips in the Animation window (Window > Animation).");
   r.field("Play Automatically", play_automatically);
   r.help("Starts playing when Play starts (Unity: Play Automatically).");

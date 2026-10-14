@@ -642,7 +642,23 @@ class Editor {
     return (hier_dragging_ && hier_drag_ && (ui_.in.down[0] || ui_.in.released[0])) ? scene_->find(hier_drag_) : nullptr;
   }
   void object_field_took_drop() { hier_field_took_drop_ = true; }
-  bool object_field(const char *name, const Recti &f, std::string &v);  // panels.cpp
+  /* Unity's object field (task 0064, panels.cpp): "Robot (Armature)" / "None (Armature)", a typed name, a Hierarchy
+   * drop of the right kind, the picker. `type` a component name, nullptr for any object. */
+  bool object_field(const char *name, const Recti &f, std::string &v, const char *type = nullptr);
+  bool asset_field(const char *name, const Recti &f, std::string &path, const char *ext, const char *kind);
+  bool object_field_box(ui::Id id, const Recti &box, std::string &v, const std::string &shown, const std::string &none, bool bad, ui::Icon icon);
+  bool object_field_picked(ui::Id id, std::string &v);  // a picker's choice from last frame, for this field
+  bool picker_button(const Recti &r);                   // Unity's object picker (a ring and a dot)
+  struct FieldPick {
+    ui::Id field = 0;
+    std::string value;
+    int age = 0;  // frames since it was picked: a field not drawn the next frame lets it go
+  } field_pick_;  // the picker's choice, taken by its field when it draws next
+  std::vector<std::string> asset_pick_files_;  // an asset picker's list, read as it opens
+  std::unordered_map<std::string, std::pair<bool, double>> asset_exists_cache_;
+  bool asset_file_exists(const std::string &path);
+  std::string project_selected_for_test() const { return project_selected_; }
+  std::vector<std::string> asset_paths_with_ext(const std::string &ext);
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
     if (it == hierarchy_rows_.end()) return false;
@@ -1002,6 +1018,7 @@ class Editor {
   void edit_material_asset(const std::string &path);  // open a .mat in the Materials window
   void delete_assets_command(const std::string &cmd, const std::string &line);  // matdelete / texdelete
   void project_row_pressed(const std::string &full, const std::vector<std::string> &shown, size_t index);
+  std::string project_select_on_release_;  // a file row pressed: selected on release unless it was dragged
   std::string texture_search_;
   int texture_preview_output_ = 0;
   bool texture_preview_tiled_ = false, texture_dragging_ = false;

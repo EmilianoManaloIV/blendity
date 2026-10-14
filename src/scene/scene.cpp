@@ -672,7 +672,8 @@ struct PrefixReflector : Reflector {
     in.enumeration(n(name).c_str(), v, options, count);
   }
   void text(const char *name, std::string &v) override { in.text(n(name).c_str(), v); }
-  void object(const char *name, std::string &v) override { in.object(n(name).c_str(), v); }
+  void object(const char *name, std::string &v, const char *type) override { in.object(n(name).c_str(), v, type); }
+  void asset(const char *name, std::string &p, const char *ext, const char *kind) override { in.asset(n(name).c_str(), p, ext, kind); }
   void mesh(const char *name, MeshPtr &m) override { in.mesh(n(name).c_str(), m); }
   void help(const char *h) override { in.help(h); }
   void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
@@ -1285,7 +1286,7 @@ void ArrayModifier::reflect(Reflector &r) {
            "step, so the copies end within the length (Blender adds one more, ending past it).");
     if (all || fit_type == 1) r.field("Fit Length", fit_length, 0.05f, 0.0f, 1e5f);
     if (all || fit_type == 2) {
-      r.object("Curve", curve);
+      r.object("Curve", curve, "Curve");
       r.help("Name of the Curve object whose length the copies fill.");
     }
   }
@@ -1360,14 +1361,14 @@ void Lattice::reflect(Reflector &r) {
 }
 
 void LatticeModifier::reflect(Reflector &r) {
-  r.object("Object", object);
+  r.object("Object", object, "Lattice");
   r.help("Name of the Lattice object whose points move the mesh (Blender: Lattice > Object).");
   r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
   reflect_group_limit(r, vertex_group, invert_group);
 }
 
 void CurveModifier::reflect(Reflector &r) {
-  r.object("Object", object);
+  r.object("Object", object, "Curve");
   r.help("Name of the Curve object to bend along (Blender: Curve > Curve Object).");
   static const char *kAxes[] = {"X", "Y", "Z", "-X", "-Y", "-Z"};
   r.enumeration("Deform Axis", deform_axis, kAxes, 6);
@@ -1385,7 +1386,7 @@ void SolidifyModifier::reflect(Reflector &r) {
 void SolidifyModifier::modify(Mesh &m) const { meshops::solidify(m, thickness, offset, even_thickness, fill_rim); }
 
 void BooleanModifier::reflect(Reflector &r) {
-  r.object("Object", object);
+  r.object("Object", object, "MeshFilter");
   r.help("Name of the GameObject to cut with (Blender: Boolean > Object). Both meshes must be closed.");
   static const char *ops[] = {"Difference", "Union", "Intersect"};
   r.enumeration("Operation", operation, ops, 3);

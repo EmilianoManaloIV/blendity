@@ -443,6 +443,7 @@ void Editor::frame(std::vector<Event> &events) {
   drop_rows_.clear();
   drop_folders_.clear();
   drop_seq_tracks_.clear();
+  if (field_pick_.field && ++field_pick_.age > 1) field_pick_ = FieldPick{};  // (a pick its field didn't take at once)
   if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
   seqr_.drawn = false;
   sync_material_asset_names();

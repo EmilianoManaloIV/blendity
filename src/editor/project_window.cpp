@@ -254,15 +254,17 @@ void Editor::sync_material_asset_names() {
  * Inspector shows the files. */
 void Editor::project_row_pressed(const std::string &full, const std::vector<std::string> &shown, size_t index) {
   auto &in = ui_.in;
-  clear_selection();
   if (in.ctrl() || in.shift()) {
+    clear_selection();
     project_multi_.click(shown, index, in.ctrl(), in.shift());
     project_selected_ = project_multi_.has(full) ? full : project_multi_.items.empty() ? std::string() : project_multi_.items.back();
     return;
   }
-  project_selected_ = full;
-  project_multi_.only(full);
   asset_drag_ = {true, false, full, nullptr, in.mx, in.my};
+  /* A press that becomes a drag leaves the selection (and the Inspector) as it was, so a file can be dropped on an
+   * Inspector field without locking it (as the Hierarchy does for objects); a click selects it when the button comes
+   * up (task 0064). */
+  project_select_on_release_ = full;
 }
 
 /* The Recycle Bin (Windows) or the Trash: where deleted assets go. */

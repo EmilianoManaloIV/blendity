@@ -80,7 +80,7 @@ void Editor::draw_skin_transfer(GameObject *target, ui::Layout &lay) {
   const int label_w = std::max(u.px(110), lay.area.w * 2 / 5);
   const Recti row = lay.row();
   u.label({row.x + u.px(4), row.y, label_w - u.px(8), row.h}, "From (a rigged body)");
-  object_field("skin_transfer_from", {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}, skin_transfer_source_);
+  object_field("skin_transfer_from", {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}, skin_transfer_source_, "MeshFilter");
   u.tooltip("The body whose weights this mesh takes. Drag it here from the Hierarchy.");
   GameObject *source = skin_transfer_source_.empty() ? nullptr : scene_->find_by_name(skin_transfer_source_);
   const bool can = source && source != target && !skin_job_;

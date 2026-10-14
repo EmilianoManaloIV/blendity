@@ -198,7 +198,7 @@ void MeshDeformModifier::unbind() {
 /* The cage at Bind as one text field: "<vertices> <triangles> x y z ... a b c ...", floats exact (%.9g). Shown only to
  * files and undo (the Inspector shows Bind / Unbind instead); the change hash sees a 64-bit key of it. */
 void MeshDeformModifier::reflect(Reflector &r) {
-  r.object("Object", object);
+  r.object("Object", object, "MeshFilter");
   r.help("Name of the cage: a closed mesh round this one (Blender: Mesh Deform > Object). Move its vertices in Edit Mode\n"
          "after Bind and this mesh follows. Put Mesh Deform first among the deforming modifiers.");
   reflect_group_limit(r, vertex_group, invert_group);

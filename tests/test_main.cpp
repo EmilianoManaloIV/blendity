@@ -27320,4 +27320,140 @@ static void round81_tests() {
     std::printf("    the empty and its cube after End: cube bottom %.4f, empty at %.4f\n", cube->world_bounds().min.y, holder->world_position().y);
     CHECK(std::fabs(cube->world_bounds().min.y) < 1e-4f && holder->world_position().y > 1.0f);
   });
+  /* ---------------------------------------------------------------- round 88: typed object and asset fields (task 0064) */
+  test("fields: a Skin's Armature field refuses a Cube dragged from the Hierarchy and takes the Armature; its picker lists only armatures", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    ed.command("create Sphere");
+    ed.command("create Cube");
+    ed.command("component SkinModifier");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube && cube->get<SkinModifier>());
+    if (!cube || !cube->get<SkinModifier>()) return;
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto drag_onto = [&](const std::string &object, const std::string &field) {
+      int hx = 0, hy = 0;
+      Recti f;
+      if (!ed.hierarchy_row_for_test(object, hx, hy) || !ed.button_rect_for_test("field:" + field, f)) return false;
+      const int fx = f.x + f.w / 3, fy = f.y + f.h / 2;
+      ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+      ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    auto shows = [&](const std::string &text) {
+      const std::vector<std::string> l = ed.button_labels_for_test();
+      return std::find(l.begin(), l.end(), "shown:" + text) != l.end();
+    };
+    CHECK(shows("None (Armature)"));
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(drag_onto("Sphere", "Armature"));
+    std::printf("    after dropping the Sphere: '%s'\n", cube->get<SkinModifier>()->object.c_str());
+    CHECK(cube->get<SkinModifier>()->object.empty() && ed.active_object_for_test() == cube);
+    CHECK(drag_onto("Armature", "Armature"));
+    std::printf("    after dropping the Armature: '%s'\n", cube->get<SkinModifier>()->object.c_str());
+    CHECK(cube->get<SkinModifier>()->object == "Armature" && ed.undo_steps_for_test() == steps + 1);  // (the refused drop: no step)
+    ed.step_frame_headless();
+    CHECK(shows("Armature (Armature)"));
+    /* The picker: None and the one armature. */
+    Recti f;
+    CHECK(ed.button_rect_for_test("field:Armature", f));
+    const int px = f.right() - f.h / 2, py = f.y + f.h / 2;
+    ed.step_frame_headless({at(ET::MouseMove, px, py)});
+    ed.step_frame_headless({at(ET::MouseDown, px, py)});
+    ed.step_frame_headless({at(ET::MouseUp, px, py)});
+    ed.step_frame_headless();
+    std::vector<std::string> items = ed.button_labels_for_test();
+    const bool none = std::find(items.begin(), items.end(), "menu:None") != items.end();
+    const bool arm = std::find(items.begin(), items.end(), "menu:Armature") != items.end();
+    const bool sphere = std::find(items.begin(), items.end(), "menu:Sphere") != items.end();
+    std::printf("    picker: None %d, Armature %d, Sphere %d\n", (int)none, (int)arm, (int)sphere);
+    CHECK(none && arm && !sphere);
+    /* Picking None empties it: one more step, which undo takes back. */
+    Recti item;
+    CHECK(ed.button_rect_for_test("menu:None", item));
+    ed.step_frame_headless({at(ET::MouseMove, item.x + 10, item.y + item.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, item.x + 10, item.y + item.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, item.x + 10, item.y + item.h / 2)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    after picking None: '%s'\n", cube->get<SkinModifier>()->object.c_str());
+    CHECK(cube->get<SkinModifier>()->object.empty() && ed.undo_steps_for_test() == steps + 2);
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *c2 = ed.scene().find(cube->id);
+    CHECK(c2 && c2->get<SkinModifier>() && c2->get<SkinModifier>()->object == "Armature");
+  });
+
+  test("fields: a .anim dragged from the Project window onto an Animation's Clip field sets it, a .seq is refused, and the object stays selected", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    std::remove(resolve_asset_path("Assets/Animations/R88Walk.anim").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R88Seq.seq").c_str());
+    clear_clip_assets();
+    clear_sequence_assets();
+    CHECK(create_clip_asset("Assets/Animations/R88Walk.anim", "R88Walk") && create_sequence_asset("Assets/Animations/R88Seq.seq", "R88Seq"));
+    ed.command("create Cube");
+    ed.command("component Animation");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube && cube->get<Animation>());
+    if (!cube || !cube->get<Animation>()) return;
+    const uint64_t cube_id = cube->id;
+    ed.command("window Project");
+    ed.command("window Inspector");
+    ed.project_open_folder_for_test(resolve_asset_path("Assets/Animations"), "R88");  // (earlier runs leave many clips there)
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto drag_file = [&](const std::string &file) {
+      Recti row, f;
+      if (!ed.button_rect_for_test("file:" + file, row) || !ed.button_rect_for_test("field:Clip", f)) {
+        std::printf("    no row '%s' or field; recorded:", file.c_str());
+        for (const std::string &l : ed.button_labels_for_test())
+          if (l.rfind("file:", 0) == 0 || l.rfind("field:", 0) == 0) std::printf(" [%s]", l.c_str());
+        std::printf("\n");
+        return false;
+      }
+      const int x0 = row.x + row.w / 2, y0 = row.y + row.h / 2, fx = f.x + f.w / 3, fy = f.y + f.h / 2;
+      ed.step_frame_headless({at(ET::MouseMove, x0, y0)});
+      ed.step_frame_headless({at(ET::MouseDown, x0, y0)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, x0 + (fx - x0) * k / 4, y0 + (fy - y0) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    CHECK(drag_file("R88Seq.seq"));
+    CHECK(cube->get<Animation>()->clip.empty() && ed.active_object_for_test() == cube);
+    CHECK(drag_file("R88Walk.anim"));
+    std::printf("    the Clip after the drop: '%s'; the Cube still selected: %d\n", cube->get<Animation>()->clip.c_str(), (int)(ed.active_object_for_test() == cube));
+    CHECK(cube->get<Animation>()->clip == "Assets/Animations/R88Walk.anim" && ed.active_object_for_test() == cube);
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *after = ed.scene().find(cube_id);  // (by id: the sample scene has a Cube of its own)
+    const Animation *an = after ? after->get<Animation>() : nullptr;
+    std::printf("    after undo: cube %d, Animation %d, clip '%s'\n", (int)(after != nullptr), (int)(an != nullptr), an ? an->clip.c_str() : "-");
+    CHECK(an && an->clip.empty());  // (the drop alone undone)
+    /* A plain click on a file row still selects it (on release). */
+    Recti row;
+    CHECK(ed.button_rect_for_test("file:R88Walk.anim", row));
+    ed.step_frame_headless({at(ET::MouseMove, row.x + 10, row.y + row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, row.x + 10, row.y + row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, row.x + 10, row.y + row.h / 2)});
+    ed.step_frame_headless();
+    CHECK(ed.active_object_for_test() == nullptr && ed.project_selected_for_test() == resolve_asset_path("Assets/Animations/R88Walk.anim"));
+  });
 }

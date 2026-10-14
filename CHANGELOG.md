@@ -2,7 +2,56 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
-## 2026-10-13 (round 87): switch the editor's feel: Unity, Unreal, Blender or Maya (task 0063)
+## 2026-10-14 (round 88): typed object and asset fields, Unity's "None (Armature)" (task 0064)
+
+**Asked:** "Add the ability to drop objects from hierarchy into parameter fields in the inspector and not just rely on
+the name of an object (and indicate type just like unity3d), like armature parameter into skin under Rigging … such as
+armature, animation, sequencer etc."
+
+**Added**
+- **Object fields know their type** (`Reflector::object(name, value, type)`):
+  - Shown as Unity's object field: the type's icon and "Armature (Armature)", or "None (Armature)" when empty; yellow
+    when the object is missing or of the wrong kind.
+  - Dragging an object of another kind over a field turns it red, and the drop is refused with a Console line.
+  - The ⊙ picker at the field's right lists None and the scene's objects of that kind.
+  - Clicking the field still types a name.
+  - Typed fields:
+    - Skin Armature (Armature)
+    - Lattice Object (Lattice)
+    - Curve and Array Curve (Curve)
+    - Boolean and Mesh Deform Object (a mesh)
+    - Transfer Weights From (a mesh)
+    - IK Target and Pole take any object.
+- **Asset fields** (`Reflector::asset(name, path, ext, kind)`):
+  - The Animation's Clip (.anim) and the Sequencer's Sequence (.seq) take a file dragged from the Project window, and
+    refuse another kind.
+  - Their picker lists the project's files of that kind.
+- Learn: "Typed fields and asset fields" in the Inspector lesson.
+
+**Changed**
+- A press on a file in the Project window that turns into a drag no longer selects the file, so the Inspector stays on
+  the object whose field you're filling. A click selects it when the button comes up.
+
+**Checked**
+- New tests (round 88):
+  - A Skin's Armature field refuses a Sphere and takes the Armature (one undo step), and shows "None (Armature)" then
+    "Armature (Armature)".
+  - The picker lists None and the armature but not the Sphere; picking None is an undo step of its own.
+  - A .anim dragged from the Project window fills an Animation's Clip, a .seq is refused, the object stays selected,
+    undo empties it, and a click on a file still selects it.
+- Unit checks: Windows 9,795, 0 failed (643 tests); the whole suite in render-cache verify mode: 9,796,
+  0 failed, 0 stale pictures. Linux with libraries: 9,703, 0 failed. Sanitizer build: 9,620, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- A field's help tooltip (and the picker's) never showed: the picker had become the last widget.
+- The asset picker walked the project's folders every frame while open; it now reads them once, as it opens.
+- Each asset field checked the disk every frame; now once a second.
+- A pick whose field wasn't drawn the next frame could apply much later.
+- A fast press-move-release on a file selected it before seeing the drag.
+- The missing type icon.
+
+: switch the editor's feel: Unity, Unreal, Blender or Maya (task 0063)
 
 **Asked:** "Switch the editor's feel between Unity / Unreal / Blender / Maya". The user chose keys and mouse navigation
 only.

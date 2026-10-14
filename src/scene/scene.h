@@ -58,9 +58,20 @@ struct Reflector {
   }
   virtual void enumeration(const char *name, int &v, const char *const *options, int count) = 0;
   virtual void text(const char *name, std::string &v) = 0;
-  /* A GameObject by name (Unity's object field): stored and typed as text; the Inspector also takes an object dragged
-   * onto it from the Hierarchy. */
-  virtual void object(const char *name, std::string &v) { text(name, v); }
+  /* A GameObject by name (Unity's object field), of a kind when `type` names a component ("Armature"; nullptr: any
+   * object). Stored and typed as text; the Inspector shows "None (Armature)" and takes an object dragged onto it from
+   * the Hierarchy, refusing one without that component (task 0064). */
+  virtual void object(const char *name, std::string &v, const char *type = nullptr) {
+    (void)type;
+    text(name, v);
+  }
+  /* An asset by its project path ("Assets/Animations/Walk.anim"): `ext` its extension, `kind` what the field holds
+   * ("Animation Clip"). Text to files, undo and hashing; the Inspector takes the file dragged from the Project
+   * window (task 0064). */
+  virtual void asset(const char *name, std::string &path, const char *ext, const char *kind) {
+    (void)ext, (void)kind;
+    text(name, path);
+  }
   virtual void mesh(const char *name, MeshPtr &m) = 0;
   /* Help text for the previous field (shown as an Inspector tooltip). */
   virtual void help(const char *) {}

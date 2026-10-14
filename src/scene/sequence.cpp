@@ -427,7 +427,7 @@ int trigger_key_code(const std::string &name_in) {
 /* ---------------------------------------------------------------- the component */
 
 void Sequencer::reflect(Reflector &r) {
-  r.text("Sequence", sequence);
+  r.asset("Sequence", sequence, ".seq", "Sequence");
   r.help("The .seq sequence it plays (Assets/Animations). Lay clips out in the Sequencer window (Window > Sequencer).");
   r.field("Play Automatically", play_automatically);
   r.help("Starts the timeline when Play starts.");
