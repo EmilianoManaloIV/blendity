@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Updates (task 0079, ADR 0033): Blendity asks GitHub's releases list which builds exist (every merged PR's
-// pre-release and the v* releases), offers a newer one with its notes, and installs it - or any older one from Help >
+// Updates (task 0079, ADR 0033): Blendity asks GitHub's releases list which builds exist (the v* releases, and any
+// PR build published as a preview), offers a newer one with its notes, and installs it - or any older one from Help >
 // Version History - after checking its SHA-256. The network work runs on background threads; the dialogs only read
 // what they left.
 #include "editor.h"

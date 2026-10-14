@@ -8,6 +8,7 @@ One entry per round of requests, newest first: what was asked, what changed, and
 readMe in how to install. A non-technical person should be able to install it." "Have the release not contain the
 source files if the user doesn't want them. Only have an executable or similar on whatever platform it's downloaded
 to." Chosen: one-click links (v0.x releases are GitHub's Latest, still called pre-releases), extras moved aside.
+Then: "Make them artifacts" - a merged PR's build is no longer published as a release.
 
 **Changed**
 - **README, Download:** "Download for Windows / Mac / Linux" links that fetch the newest installer directly, then
@@ -21,6 +22,8 @@ to." Chosen: one-click links (v0.x releases are GitHub's Latest, still called pr
   every one); the notes say they're for developers.
 - **0.10.0 and later 0.x versions** are GitHub's Latest release (so the links work), titled "(pre-release)"; Version
   History calls them pre-releases. PR builds stay GitHub pre-releases.
+- **Merges into main make no release any more**, only build artifacts: a release comes from a `v*` tag, made when
+  the user asks for one ("Make them artifacts. I will let you know explicitly when I want a release.").
 - **Mac:** the app is signed ad hoc (when the signature verifies), so macOS offers Open Anyway instead of calling the
   download damaged.
 

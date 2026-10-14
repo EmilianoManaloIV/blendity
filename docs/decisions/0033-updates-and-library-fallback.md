@@ -12,10 +12,11 @@ library is missing or there is no internet, the libraries offered for download w
 the user's. Until now a build with Blender's libraries linked them at load time: a missing DLL stopped it starting.
 
 ## Decision
-- **Builds:** every PR merged into main publishes a GitHub pre-release `build-pr<N>` (its notes: the PR's
-  description); v* tags publish releases (v0.x: GitHub's Latest, titled a pre-release of the program; a suffixed
+- **Builds:** v* tags publish releases, pushed only when the user asks (2026-10-14: merges into main build
+  artifacts only; until then each merged PR published a pre-release `build-pr<N>`, which the updater still lists as
+  a preview). Kinds: v0.x: GitHub's Latest, titled a pre-release of the program; a suffixed
   tag such as v1.1.0-beta.1: a GitHub pre-release; the updater offers tagged versions with previews off either way,
-  tasks 0081-0082). A release lists only the installers, under names without the version (Blendity-Setup-Windows.exe,
+  tasks 0081-0082. A release lists only the installers, under names without the version (Blendity-Setup-Windows.exe,
   Blendity-macos.dmg, Blendity-linux-x86_64.AppImage, so the README's releases/latest/download links always fetch the
   newest), and SHA256SUMS.txt, which also lists the build's other files. Those - the libraries archives
   (blendity-libs-<system>-<tag>) and the Linux .tar.gz - go to one release tagged `libraries`, which the updater

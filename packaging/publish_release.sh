@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Publishes one build as a GitHub Release (tasks 0079, 0082), from the release workflow:
-#   packaging/publish_release.sh <tag> <version> <pr number or ""> <folder with the built files>
+# Publishes a v* tag's build as a GitHub Release (tasks 0079, 0082), from the release workflow:
+#   packaging/publish_release.sh <tag> <version> <folder with the built files>
 # - The release lists only what a person downloads: the three installers, under names without the version (so the
 #   README's links, releases/latest/download/<name>, always fetch the newest), and SHA256SUMS.txt. The Windows name
 #   keeps the "Blendity-Setup-" start that builds before task 0082 look for.
 # - Everything else - each build's libraries archives and the Linux .tar.gz - goes to one "libraries" release, named
-#   by the build's tag; Blendity's updater finds its own there. Kept: the archives of tagged releases and of the newest
-#   KEEP_PR_BUILDS PR builds.
-# - A merged PR's build is a GitHub pre-release, never "Latest". A suffixed tag (v0.11.0-beta.1) is a GitHub
-#   pre-release too. Other tags are releases (GitHub picks the Latest); v0.x ones are titled and described as
-#   pre-releases of the program, since 1.0 isn't out.
+#   by the build's tag; Blendity's updater finds its own there. Kept: the archives of existing releases (and of the
+#   newest KEEP_PR_BUILDS PR builds, from when merges made releases).
+# - A suffixed tag (v0.11.0-beta.1) is a GitHub pre-release. Other tags are releases (GitHub picks the Latest); v0.x
+#   ones are titled and described as pre-releases of the program, since 1.0 isn't out. Merges into main make no
+#   release (artifacts only, the user's choice).
 # GitHub adds "Source code" archives to every release by itself; they can't be left out (and the GPL wants the source
 # at hand anyway). The install guide in the notes tells people they don't need them.
 set -euo pipefail
 shopt -s nullglob
-TAG="$1" VERSION="$2" PR="$3" IN="$4"
+TAG="$1" VERSION="$2" IN="$3"
 REPO="${GITHUB_REPOSITORY:?}"
 EXTRAS=libraries
 KEEP_PR_BUILDS=20
@@ -26,7 +26,7 @@ work=$(mktemp -d)  # (the notes)
 
 # The built files, sorted: installers (renamed) to $out, the rest (named by tag) to $extras.
 sort_files() {
-  local f n platform
+  local f n platform ext
   for f in "$IN"/*; do
     n=$(basename "$f")
     case "$n" in
@@ -36,7 +36,9 @@ sort_files() {
       blendity-libs-*)  # blendity-libs-<platform>-<version>.<ext> -> blendity-libs-<platform>-<tag>.<ext>
         platform=${n#blendity-libs-}
         platform=${platform%%-*}
-        cp "$f" "$extras/blendity-libs-$platform-$TAG${n#*"-$VERSION"}" ;;
+        ext=.zip
+        [[ "$n" == *.tar.gz ]] && ext=.tar.gz
+        cp "$f" "$extras/blendity-libs-$platform-$TAG$ext" ;;
       *-linux-x86_64.tar.gz) cp "$f" "$extras/blendity-linux-x86_64-$TAG.tar.gz" ;;
       *) echo "not published: $n" ;;
     esac
@@ -64,13 +66,6 @@ upload_extras() {
       --title "Libraries for Blendity (downloaded by Blendity itself)" \
       --notes "Blender's libraries for each Blendity build, which Blendity downloads by itself when you choose to use them, and the Linux program as a plain folder (.tar.gz). You don't need anything here to install Blendity: see https://github.com/$REPO#download"
   gh release upload "$EXTRAS" --repo "$REPO" --clobber "${files[@]}"
-}
-
-publish_pr() {
-  gh pr view "$PR" --repo "$REPO" --json title,body --jq '"## " + .title + "\n\n" + .body' > "$work/notes.md"
-  { echo; cat packaging/install-notes.md; } >> "$work/notes.md"
-  gh release create "$TAG" --repo "$REPO" --target "${GITHUB_SHA:-main}" --prerelease --latest=false \
-    --title "Blendity $VERSION (PR #$PR)" --notes-file "$work/notes.md" "$out"/*
 }
 
 # The newest release's Linux folder under a fixed name too (the README links to it).
@@ -120,5 +115,5 @@ prune_extras() {
 sort_files
 write_checksums
 upload_extras  # (first, so a release is never seen without its libraries)
-if [ -n "$PR" ]; then publish_pr; else publish_tag; fi
+publish_tag
 prune_extras

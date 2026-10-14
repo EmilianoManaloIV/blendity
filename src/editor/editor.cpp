@@ -4148,7 +4148,7 @@ void Editor::draw_dialogs() {
         u.tooltip("Once a day at most, when online: a newer build is offered with what it brings (Help > Check for Updates any time).");
         if (u.checkbox({ru.x + u.px(320), ru.y + u.px(2), ru.h - u.px(4), ru.h - u.px(4)}, update_previews_)) save_prefs();
         u.label({ru.x + u.px(320) + ru.h, ru.y, u.px(200), ru.h}, "Include every PR's build");
-        u.tooltip("Off: only released versions (v0.10.0...). On: also the build made from each merged pull request.");
+        u.tooltip("Off: only released versions (v0.10.0...). On: also preview builds of single pull requests, when published.");
         draw_libraries_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
