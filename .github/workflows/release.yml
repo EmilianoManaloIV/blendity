@@ -1,0 +1,118 @@
+# Installers (task 0076): a Windows setup .exe (Inno Setup, per-user), a Linux AppImage and .tar.gz, and a macOS .dmg
+# (unsigned). A pull request that touches packaging builds them as artifacts to try; a v* tag (v0.10.0) also makes the
+# GitHub Release with them attached. Release builds are the dependency-free ones CI tests (BLENDITY_NO_LIBS).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths: ['packaging/**', '.github/workflows/release.yml', 'VERSION', 'build.bat', 'build.sh']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        shell: bash
+        run: echo "VERSION=$( [[ "$GITHUB_REF" == refs/tags/v* ]] && echo "${GITHUB_REF_NAME#v}" || cat VERSION )" >> "$GITHUB_ENV"
+      - name: Build
+        shell: cmd
+        run: build.bat release app
+      - name: Installer
+        shell: bash
+        run: |
+          python packaging/make_icon.py build/icons
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          [ -x "$ISCC" ] || { choco install innosetup -y --no-progress && ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"; }
+          "$ISCC" //DAppVersion=$VERSION //DIcons=..\\..\\build\\icons packaging/windows/blendity.iss
+      - name: Install, start headless, uninstall
+        shell: bash
+        run: |
+          ./dist/installers/Blendity-Setup-$VERSION.exe //VERYSILENT //SUPPRESSMSGBOXES //CURRENTUSER //TASKS="sceneassoc"
+          APP="$(cygpath -u "$LOCALAPPDATA")/Programs/Blendity"
+          reg query 'HKCU\Software\Classes\.scene' || { echo "::error::no .scene association"; exit 1; }
+          SHOT="$PWD/installed-windows.png"
+          (cd "$RUNNER_TEMP" && "$APP/Blendity.exe" --headless-screenshot "$(cygpath -w "$SHOT")")  # (away from the repo: a fresh project)
+          "$APP/unins000.exe" //VERYSILENT //SUPPRESSMSGBOXES
+          for i in $(seq 1 30); do [ -e "$APP/Blendity.exe" ] || break; sleep 1; done  # (the uninstaller runs on from %TEMP%)
+          [ ! -e "$APP/Blendity.exe" ] || { echo "::error::the uninstaller left Blendity.exe"; exit 1; }
+          ! reg query 'HKCU\Software\Classes\.scene' 2>/dev/null || { echo "::error::the uninstaller left the .scene association"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: |
+            dist/installers/*.exe
+            installed-windows.png
+
+  linux:
+    # The oldest supported Ubuntu: an AppImage runs on systems at least as new as the one it was built on.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        run: echo "VERSION=$( [[ "$GITHUB_REF" == refs/tags/v* ]] && echo "${GITHUB_REF_NAME#v}" || cat VERSION )" >> "$GITHUB_ENV"
+      - name: Install compiler + X11 headers
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core
+      - name: Build
+        run: ./build.sh release app
+      - name: Packages
+        run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$PWD/appimagetool" packaging/linux/make_packages.sh "$VERSION"
+      - name: Start the AppImage headless
+        run: |
+          IMG="$PWD/dist/installers/Blendity-$VERSION-x86_64.AppImage" SHOT="$PWD/installed-linux.png"
+          cd "$RUNNER_TEMP" && APPIMAGE_EXTRACT_AND_RUN=1 HOME="$RUNNER_TEMP" "$IMG" --headless-screenshot "$SHOT"
+          test -d "$RUNNER_TEMP/BlendityProject/Assets/Scenes"  # (a fresh machine's project)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-linux
+          path: |
+            dist/installers/*
+            installed-linux.png
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        run: echo "VERSION=$( [[ "$GITHUB_REF" == refs/tags/v* ]] && echo "${GITHUB_REF_NAME#v}" || cat VERSION )" >> "$GITHUB_ENV"
+      - name: Build
+        run: ./build.sh release app
+      - name: Disk image
+        run: packaging/macos/make_dmg.sh "$VERSION"
+      - name: Mount and start headless
+        run: |
+          hdiutil attach "dist/installers/Blendity-$VERSION-macos.dmg" -mountpoint /tmp/blendity
+          SHOT="$PWD/installed-macos.png"
+          (cd "$RUNNER_TEMP" && /tmp/blendity/Blendity.app/Contents/MacOS/Blendity --headless-screenshot "$SHOT")
+          hdiutil detach /tmp/blendity
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-macos
+          path: |
+            dist/installers/*.dmg
+            installed-macos.png
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Blendity ${GITHUB_REF_NAME#v}" --generate-notes \
+            artifacts/installer-windows/dist/installers/*.exe artifacts/installer-linux/dist/installers/*.AppImage \
+            artifacts/installer-linux/dist/installers/*.tar.gz artifacts/installer-macos/dist/installers/*.dmg

@@ -478,6 +478,24 @@ static std::string quote_argument(const std::string &a) {
   return q + "\"";
 }
 
+#ifdef _WIN32
+std::vector<std::string> utf8_arguments() {
+  int n = 0;
+  LPWSTR *w = CommandLineToArgvW(GetCommandLineW(), &n);
+  std::vector<std::string> out;
+  for (int i = 0; w && i < n; i++) {
+    const int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, nullptr, 0, nullptr, nullptr);
+    std::string s(len > 0 ? len - 1 : 0, '\0');
+    if (len > 1) WideCharToMultiByte(CP_UTF8, 0, w[i], -1, &s[0], len, nullptr, nullptr);
+    out.push_back(s);
+  }
+  if (w) LocalFree(w);
+  return out;
+}
+#else
+std::vector<std::string> utf8_arguments() { return {}; }
+#endif
+
 std::string windows_command_line(const std::vector<std::string> &argv) {
   std::string line;
   for (const std::string &a : argv) line += (line.empty() ? "" : " ") + quote_argument(a);

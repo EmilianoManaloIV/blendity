@@ -81,22 +81,40 @@ Editor::~Editor() {
   if (window_) destroy_window(window_);
 }
 
-void Editor::resolve_project_paths() {
-  auto is_root = [](const std::string &d) {  // (a research folder marked older projects; new ones have Assets/Scenes)
+/* The first project folder at or up to 6 levels above one of `starts`: a folder with Assets (and Assets/Scenes, or
+ * research for older projects). "" when none. */
+std::string Editor::find_project_root(const std::vector<std::string> &starts) {
+  auto is_root = [](const std::string &d) {
     return fs::is_dir(fs::join(d, "Assets")) && (fs::is_dir(fs::join(d, "research")) || fs::is_dir(fs::join(d, "Assets/Scenes")));
   };
-  std::vector<std::string> starts = {fs::executable_dir(), fs::current_dir()};
-  if (const char *env = std::getenv("BLENDITY_PROJECT")) project_root_ = env;  // tests: a scratch project
-  if (!project_root_.empty()) starts.clear();
   for (std::string d : starts) {
     for (int i = 0; i < 6 && !d.empty(); i++) {
-      if (is_root(d)) { project_root_ = d; break; }
-      std::string p = fs::parent(d);
+      if (is_root(d)) return d;
+      const std::string p = fs::parent(d);
       if (p == d) break;
       d = p;
     }
-    if (!project_root_.empty()) break;
   }
+  return "";
+}
+
+/* The scene the arguments name: --scene's value, or a .scene path given alone (a file double-clicked in Explorer or a
+ * file manager; any case, as Windows' associations); another option's value isn't one. */
+std::string Editor::scene_in_args(int argc, char **argv) {
+  for (int i = 1; i < argc; i++) {
+    const std::string a = argv[i], before = i > 1 ? argv[i - 1] : "";
+    if (before == "--scene") return fs::normalize(a);
+    const bool option_value = before.rfind("--", 0) == 0;
+    if (to_lower(fs::extension(a)) == ".scene" && !option_value) return fs::normalize(a);
+  }
+  return "";
+}
+
+void Editor::resolve_project_paths(const std::string &near) {
+  std::vector<std::string> starts = {fs::executable_dir(), fs::current_dir()};
+  if (!near.empty()) starts.insert(starts.begin(), fs::parent(near));  // (a .scene opened from Explorer: its project)
+  if (const char *env = std::getenv("BLENDITY_PROJECT")) project_root_ = env;  // tests: a scratch project
+  if (project_root_.empty()) project_root_ = find_project_root(starts);
   if (project_root_.empty()) project_root_ = fs::join(fs::home_dir(), "BlendityProject");
   project_root_ = fs::normalize(project_root_);
   assets_dir_ = fs::join(project_root_, "Assets");
@@ -126,9 +144,9 @@ bool Editor::init(int argc, char **argv) {
   gpu::set_background_open_default(true);
   cam_preview_pt_.set_background_gpu_open(true);
   final_pt_.set_background_gpu_open(true);
-  resolve_project_paths();
+  std::string scene_arg = scene_in_args(argc, argv), layout_arg;  // (a double-clicked .scene: task 0076)
+  resolve_project_paths(scene_arg);
   load_prefs();
-  std::string scene_arg, layout_arg;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--scene" && i + 1 < argc) scene_arg = argv[++i];

@@ -27288,8 +27288,11 @@ static void round81_tests() {
     platform::Event j = k;
     j.key = platform::KEY_J, j.mods = platform::MOD_ALT;
     ed.step_frame_headless({j});
-    const double t0 = now_seconds();  // (the view turns over 0.28 s of real time)
-    while (now_seconds() - t0 < 0.5) ed.step_frame_headless();
+    /* The view turns over 0.28 s of real time: frames until it has (a sanitizer build's frames are slow; CI once ran
+     * out of a fixed 0.5 s). */
+    const double t0 = now_seconds();
+    do ed.step_frame_headless();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.3) && now_seconds() - t0 < 20.0);
     CHECK(ed.scene_camera_for_test().ortho && std::fabs(ed.scene_camera_for_test().pitch - 90.0f) < 1.0f);
     /* The prefs keep the feel (and its keys). */
     const std::string prefs = fs::join(test_dir(), "r87_prefs.txt");
@@ -28474,5 +28477,28 @@ static void round81_tests() {
     std::string saved;
     CHECK(fs::read_file(prefs, saved) && saved.find("quality_tier=2") != std::string::npos);
     std::remove(prefs.c_str());
+  });
+  /* ---------------------------------------------------------------- round 102: installers (task 0076) */
+  test("installers: a .scene given alone (a double-click) is the scene to open and its project is found above it; option values aren't", [] {
+    const std::string proj = fs::join(test_dir(), "r102 project");
+    fs::make_dirs(fs::join(proj, "Assets/Scenes/Levels"));
+    const std::string scene = fs::join(proj, "Assets/Scenes/Levels/Level 1.scene");
+    {
+      std::string a0 = "Blendity.exe", a1 = scene;
+      char *argv[] = {&a0[0], &a1[0]};
+      const std::string got = Editor::scene_in_args(2, argv);
+      std::printf("    double-clicked: '%s'\n", got.c_str());
+      CHECK(got == fs::normalize(scene));
+      CHECK(Editor::find_project_root({fs::parent(got)}) == proj || fs::normalize(Editor::find_project_root({fs::parent(got)})) == fs::normalize(proj));
+    }
+    {
+      std::string a0 = "Blendity", a1 = "--layout", a2 = "x.scene", a3 = "--scene", a4 = "y.scene";
+      char *argv[] = {&a0[0], &a1[0], &a2[0], &a3[0], &a4[0]};
+      CHECK(Editor::scene_in_args(5, argv) == fs::normalize("y.scene"));  // (--layout's value isn't a scene; --scene's is)
+      std::string b0 = "Blendity", b1 = "LEVEL.SCENE";
+      char *argv2[] = {&b0[0], &b1[0]};
+      CHECK(Editor::scene_in_args(2, argv2) == fs::normalize("LEVEL.SCENE"));  // (any case, as Windows' associations)
+    }
+    CHECK(Editor::find_project_root({fs::join(test_dir(), "no such folder/deeper")}).empty());
   });
 }

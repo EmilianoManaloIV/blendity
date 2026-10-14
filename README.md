@@ -16,10 +16,21 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 
 **→ The [manual](docs/MANUAL.md)** walks through the work stage by stage, with examples.
 
+## Download
+
+From the [Releases](https://github.com/EmilianoManaloIV/blendity/releases) page:
+
+| System | File | Install |
+|---|---|---|
+| Windows 10 / 11 (x64) | `Blendity-Setup-<version>.exe` | Run it. It installs for you alone (no administrator), adds Start menu (and, if you like, desktop) shortcuts and opens `.scene` files; remove it from Settings > Apps. |
+| Linux (x86-64, Ubuntu 22.04 or newer) | `Blendity-<version>-x86_64.AppImage` | `chmod +x` it and run it. Or unpack `blendity-<version>-linux-x86_64.tar.gz` anywhere and run `Blendity` (it needs only `libX11`). |
+| macOS (Apple silicon) | `Blendity-<version>-macos.dmg` | Open it and drag Blendity onto Applications. The app isn't signed, so the first time macOS asks for a go-ahead: on macOS 15 or later, try to open it, then System Settings > Privacy & Security > **Open Anyway**; on macOS 14 or earlier, right-click it > **Open**. |
+
+Your work goes in a project folder, `BlendityProject` in your home folder unless you open another.
+
 ## Quick start
 
-1. Build it (below) or download the build for your system from the GitHub Actions artifacts, then run
-   `dist/windows/Blendity.exe` (Windows: no installer), `dist/linux/Blendity` (Linux: needs only `libX11`, with
+1. Install it (above), or build it (below) and run `dist/windows/Blendity.exe`, `dist/linux/Blendity` (with
    `dist/linux/lib/` beside it) or `dist/macos/Blendity.app`.
 2. Press **F1** for the Learn tab, or pick a stage from the **Layout** dropdown (top right).
 3. Alt+drag orbits, the wheel zooms, W / E / R move, rotate and scale, Tab enters Edit Mode, Ctrl+P plays.
@@ -92,7 +103,7 @@ cmake -B build && cmake --build build --parallel && ctest --test-dir build   # o
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (9948 unit checks in 665 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (9953 unit checks in 666 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

@@ -1,6 +1,7 @@
 @echo off
 rem Blendity - Windows build without CMake. Needs only Visual Studio (or Build Tools) with C++.
-rem Usage: build.bat [release|debug] [app|stress|tests|all]
+rem Usage: build.bat [release|debug] [app|stress|tests|all|installer]
+rem   installer: the app, then dist\installers\Blendity-Setup-<VERSION>.exe with Inno Setup 6 (task 0076).
 setlocal enabledelayedexpansion
 
 set CONFIG=%1
@@ -92,6 +93,7 @@ if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto app
 if /i "%TARGET%"=="app" goto app
+if /i "%TARGET%"=="installer" goto app
 if /i "%TARGET%"=="stress" goto stress
 if /i "%TARGET%"=="tests" goto tests
 
@@ -101,6 +103,7 @@ rem BLENDITY_OUT lets you build while a copy of the editor is still running.
 if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
 cl %FLAGS% /Fo%OBJ%\ /Fe:%BLENDITY_OUT% %LIBSRC% src\app\main.cpp %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
 if errorlevel 1 exit /b 1
+if /i "%TARGET%"=="installer" goto installer
 if /i not "%TARGET%"=="all" goto done
 
 :stress
@@ -113,6 +116,22 @@ if /i not "%TARGET%"=="all" goto done
 echo [blendity] Building unit tests (%CONFIG%)...
 cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_tests.exe %LIBSRC% tests\test_main.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
+goto done
+
+:installer
+rem Inno Setup 6's compiler, then the setup .exe with the app, its DLLs, data, manual and licences.
+set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" (
+  echo [blendity] No Inno Setup 6 ^(jrsoftware.org/isinfo.php^): dist\windows holds the app, unpackaged.
+  exit /b 1
+)
+set /p VERSION=<VERSION
+python packaging\make_icon.py build\icons >nul || py packaging\make_icon.py build\icons >nul
+"%ISCC%" /Q /DAppVersion=%VERSION% /DIcons=..\..\build\icons packaging\windows\blendity.iss
+if errorlevel 1 exit /b 1
+echo [blendity] Installer: dist\installers\Blendity-Setup-%VERSION%.exe
+goto done
 
 :done
 echo [blendity] Done. Binaries are in dist\windows\
@@ -135,7 +154,7 @@ rem openjph (OpenEXR) and dpcpp's SYCL runtime (Embree) are runtime-only depende
 for %%d in (%LIBDIRS% imath openjph dpcpp) do (
   if exist "%L%\%%d\bin" (
     for %%f in ("%L%\%%d\bin\*.dll") do (
-      echo %%~nxf| findstr /i /r "_d\. _d_ debug _cuda _hip _sycl eigen_ malloc_proxy" >nul || copy /y "%%f" dist\windows\ >nul
+      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll debug _cuda _hip _sycl eigen_ malloc_proxy" >nul || copy /y "%%f" dist\windows\ >nul
     )
   )
 )

@@ -4,7 +4,7 @@
 - **Requirements:** R-01, R-05
 - **Decisions:** ADR 0026 (amended)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/68
 
 ## Goal
 The user (2026-10-14): a new minimum machine, an i7 with 8 GB of RAM, the HP Envy 2-in-1 13.3".

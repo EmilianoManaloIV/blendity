@@ -33,6 +33,9 @@ Each lesson connects three layers so you can move between the two programs and u
 - Hover over almost any button or field in the editor to see its Blender equivalent.
 # The manual
 The same ground in one document, by stage of the work - getting around, reference and planning, blocking out, modeling, UVs, materials, lighting and rendering, rigging, animation, files, performance, shortcuts, the console - with short examples to follow (a brick wall material, rigging a character in five minutes) and what each stage is good for: docs/MANUAL.md, also on GitHub (Help > Open Manual). Each chapter names the lessons here that go deeper. Console: `manual`.
+# Installing and sharing
+Blendity comes as an installer for each system, from the Releases page on GitHub: a setup program for Windows that installs for you alone (no administrator needed) and opens .scene files with a double-click, an AppImage for Linux (one file: make it executable and run it) and a disk image for macOS. Your work is kept apart from the program, in a project folder - BlendityProject in your home folder unless you open another - so updating or removing Blendity never touches it. A project is just a folder with Assets inside, like Unity's: copy it to another machine and open a scene in it.
+? Why is the project kept outside the program's folder? | The program's folder belongs to the installer: an update replaces it and an uninstall removes it. Your scenes, materials and renders must survive both.
 ! cmd:manual | Open the manual
 ! layout:Learning | Use the Learning layout (Learn tab beside the Scene)
 ! lesson:1 | Next: the editor layout

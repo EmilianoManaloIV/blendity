@@ -1511,7 +1511,13 @@ class Editor {
   void load_prefs();
   void save_prefs();
   void apply_ui_scale();
-  void resolve_project_paths();
+  void resolve_project_paths(const std::string &near = "");  // near: a file whose project to look for first
+
+  public:
+  static std::string find_project_root(const std::vector<std::string> &starts);
+  static std::string scene_in_args(int argc, char **argv);
+
+  private:
   std::string scene_display_name() const;
 
   /* ---- platform / frame ---- */

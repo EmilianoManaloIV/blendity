@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 102): installers for Windows, Linux and macOS (task 0076)
+
+**Asked:** installers for Windows, Linux and macOS; the choice was an Inno Setup .exe, an AppImage and a .tar.gz, and
+an unsigned .dmg, attached to a GitHub Release on v* tags.
+
+**Changed**
+- **Windows:** `Blendity-Setup-<version>.exe` (Inno Setup, `packaging/windows/blendity.iss`): installs for the user
+  alone (no administrator), Start menu and optional desktop shortcuts, `.scene` files opening in Blendity, an
+  uninstaller in Settings > Apps. `build.bat installer` makes it locally when Inno Setup 6 is installed.
+- **Linux:** `Blendity-<version>-x86_64.AppImage` and `blendity-<version>-linux-x86_64.tar.gz`
+  (`packaging/linux/make_packages.sh`, built on Ubuntu 22.04 for older systems).
+- **macOS:** `Blendity-<version>-macos.dmg` (`packaging/macos/make_dmg.sh`): the app with its icon and version and an
+  Applications link; unsigned (right-click > Open the first time).
+- `.github/workflows/release.yml` builds all three on pull requests that touch packaging, installs or mounts each and
+  starts it headless, and on a v* tag makes the GitHub Release with them. `VERSION` is 0.10.0. No tag was pushed.
+- An icon (a cube in the Emiliano palette) drawn by `packaging/make_icon.py` without any library.
+- A `.scene` path given alone - a double-clicked file - opens, with the project folder above it.
+- The debug OpenJPH DLL (`openjph.0.25d.dll`) is no longer copied into `dist\windows`.
+- README: a Download section.
+- Fixed: the test "feel: Unreal's End drops the selection..." failed twice on CI's sanitizer build (#61, #67): it gave
+  Alt+J's camera turn a fixed 0.5 s, and a sanitizer frame can take most of that; it now waits for the turn to end.
+
+**Checked**
+- New test (round 102): a lone `.scene` argument is the scene and its project is found above it; an option's value
+  isn't.
+- The Linux .tar.gz from the WSL build, unpacked elsewhere, starts headless and makes `~/BlendityProject`.
+- Unit checks: Windows 9,953, 0 failed (666 tests); the whole suite in render-cache verify mode: 9,954,
+  0 failed, 0 stale pictures. Linux with libraries: 9,861, 0 failed. Sanitizer build: 9,778, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- The release workflow's own run on this PR (Inno Setup isn't installed on this machine).
+- A headless run writing to a path with an accented letter (UTF-8 arguments on Windows).
+
+**Review** (Opus code-reviewer). Fixed:
+- `build.bat release all` went on into the installer step (CI's Windows check would have failed without Inno Setup).
+- The release job looked for the installers where the artifacts don't put them: no release would have been made.
+- Installing "for all users" put the program in one user's folder: `{autopf}` follows the choice.
+- A double-clicked scene with an accented letter in its path didn't open (Windows' ANSI argv): the arguments come from
+  the wide command line as UTF-8. `--scene`'s value now finds its project too, and `.SCENE` in any case counts.
+- The macOS note: on macOS 15 an unsigned app is allowed in System Settings > Privacy & Security > Open Anyway.
+- The workflow's checks start each installed copy away from the repository (a fresh machine's project), wait for the
+  Windows uninstaller and check that it removes the `.scene` association; rerunning the dmg script no longer nests
+  the licences.
+
 ## 2026-10-14 (round 101): the laptop minimum - an i7, 8 GB, the HP Envy 13.3" 2-in-1 (task 0075, ADR 0026 amended)
 
 **Asked:** a new minimum machine: an i7 with 8 GB of RAM, the HP Envy 2-in-1 13.3".
