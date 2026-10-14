@@ -915,6 +915,23 @@ void relink_material_assets(Scene &scene, bool take_scene_values) {
   });
 }
 
+/* An undo or redo state being set aside (task 0081): its slots linked to a .mat get copies of their own. Restoring the
+ * other state writes its values into the shared asset; without copies that would change this one too, and a redo
+ * would bring back the undone values. */
+void detach_material_assets(Scene &scene) {
+  std::unordered_map<const Material *, MaterialPtr> copies;  // (slots sharing one material share its copy, as clone does)
+  scene.for_each([&](GameObject &g) {
+    auto *mr = g.get<MeshRenderer>();
+    if (!mr) return;
+    for (MaterialPtr &m : mr->materials) {
+      if (!m || m->asset_path.empty()) continue;
+      MaterialPtr &copy = copies[m.get()];
+      if (!copy) copy = std::make_shared<Material>(*m);
+      m = copy;
+    }
+  });
+}
+
 void clear_material_assets() {
   asset_library().clear();
   asset_redirects().clear();

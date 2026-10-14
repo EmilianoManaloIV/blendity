@@ -116,10 +116,13 @@ std::string sum_for(const std::string &sums, const std::string &file) {
   return "";
 }
 
+/* A PR's build. A tagged version counts as released even while GitHub marks it a pre-release (0.x, task 0081). */
+static bool offered(const Release &r, bool previews) { return previews || r.pr == 0; }
+
 std::vector<const Release *> installable(const std::vector<Release> &all, const std::string &platform, bool previews) {
   std::vector<const Release *> out;
   for (const Release &r : all)
-    if ((previews || !r.prerelease) && installer(r, platform)) out.push_back(&r);
+    if (offered(r, previews) && installer(r, platform)) out.push_back(&r);
   return out;
 }
 
@@ -128,7 +131,7 @@ std::vector<const Release *> newer(const std::vector<Release> &all, const std::s
   const auto mine = std::find_if(all.begin(), all.end(), [&](const Release &r) { return r.tag == own; });
   if (mine == all.end()) return out;
   for (auto it = all.begin(); it != mine; ++it)  // (newest first: everything before this build's own)
-    if ((previews || !it->prerelease) && installer(*it, platform)) out.push_back(&*it);
+    if (offered(*it, previews) && installer(*it, platform)) out.push_back(&*it);
   return out;
 }
 

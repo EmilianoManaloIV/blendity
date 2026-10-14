@@ -1411,6 +1411,7 @@ size_t retarget_scene_files(const std::string &dir, const std::string &from, con
 /* take_scene_values: true after undo / redo (the restored values win), false after
  * loading a scene (the .mat file wins, as in Unity). */
 void relink_material_assets(Scene &scene, bool take_scene_values);
+void detach_material_assets(Scene &scene);  // an undo / redo state set aside keeps its own copies (task 0081)
 void clear_material_assets();  // a different project
 /* Procedural texture assets (ADR 0017): Assets/Textures/<name>.ptex, kept in a library by path like the
  * materials; a material's map "X.ptex#albedo" resolves through texture_asset(). */

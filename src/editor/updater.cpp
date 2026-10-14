@@ -189,7 +189,7 @@ void Editor::draw_history_dialog(const std::function<void()> &close) {
     const bool mine = r->tag == releases::build_tag(), sel = r->tag == upd_.selected;
     if (sel) u.canvas.fill_rect(row, u.theme.selection);
     if (u.hovered(row) && u.in.pressed[0]) upd_.selected = r->tag;
-    const std::string label = r->name + "   " + r->published.substr(0, 10) + (r->prerelease ? "   preview" : "   stable") + (mine ? "   (this build)" : "");
+    const std::string label = r->name + "   " + r->published.substr(0, 10) + (r->pr ? "   preview" : r->prerelease ? "   pre-release" : "   stable") + (mine ? "   (this build)" : "");
     u.label({row.x + u.px(6), row.y, row.w - u.px(8), row.h}, label, mine ? u.theme.text_bright : u.theme.text);
   }
   content = (int)builds.size() * rh + u.px(4);

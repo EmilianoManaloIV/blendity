@@ -4,7 +4,8 @@
 #   over to Blendity-full when its libraries load and the user wants them.
 # - The full build and its libraries are also a separate asset (blendity-libs-<system>-<version>), which a
 #   dependency-free install downloads when the user agrees.
-# - A v* tag makes a stable GitHub Release; a pull request merged into main makes a pre-release `build-pr<N>` with the
+# - A v* tag makes a GitHub Release, marked a pre-release while the version is 0.x or has a suffix (v1.0.0-beta.1);
+#   a pull request merged into main makes a pre-release `build-pr<N>` with the
 #   PR's description as its notes, so the updater (Help > Version History) can go back to the build before any PR.
 #   Every release carries SHA256SUMS.txt, which the updater checks downloads against.
 # - A pull request that touches packaging builds everything as artifacts to try (no release).
@@ -240,5 +241,14 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
               --title "Blendity $VERSION (PR #$PR)" --notes-file notes.md out/*
           else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Blendity $VERSION" --generate-notes out/*
+            pre=()
+            title="Blendity $VERSION"
+            lead="Installers for Windows, Linux and macOS; SHA256SUMS.txt checks them."
+            if [[ "$VERSION" == 0.* || "$VERSION" == *-* ]]; then  # (before 1.0, or a beta: a pre-release of the program)
+              pre=(--prerelease)
+              title="Blendity $VERSION (pre-release)"
+              lead="A pre-release of Blendity: still being refined. $lead"
+            fi
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${pre[@]}" --title "$title" --generate-notes \
+              --notes "$lead" out/*
           fi

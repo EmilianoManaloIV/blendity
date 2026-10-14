@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 107): redo of material assets, tests that never touch the project, one version number (task 0081)
+
+**Asked:** merge the stack (done: #61-#71 into main); "push V1.0.0 (or whatever nomenclature you use for the first
+release before hotfixes)"; "test material shouldn't be even in the project at all when it comes to release"; "fix the
+redo material system". Then: "let's leave it at 0.10.0 because I don't want an official 1.0.0 release just yet (needs
+more refining)", and "still publish that version so people know it's a pre-release of the program" - so the version
+stays 0.10.0, published as the pre-release `v0.10.0`.
+
+**Changed**
+- **Blendity 0.10.0 published as a pre-release:** a `v*` tag before 1.0 (or with a suffix, v1.0.0-beta.1) makes a
+  GitHub Release marked "pre-release", titled "Blendity 0.10.0 (pre-release)". The updater still offers such a tagged
+  version with previews off (previews are the per-PR builds); Version History labels it "pre-release".
+- **One version number:** the VERSION file (still 0.10.0). CMake's project version and the macOS bundle read it (the
+  bundle said 0.9.0). A future stable release is a VERSION change plus a `v*` tag.
+- **Fixed: redo of a material linked to a .mat** brought back the undone values (any field) and the asset kept them:
+  an undo or redo state set aside keeps copies of its own linked materials now.
+- **Fixed: tests could write into the project they ran from.** A test making a clip or material before any editor
+  existed resolved its path against the working folder; the test and stress programs point the asset root at their
+  scratch projects first. The leaked R86Hold/R86Spin/R86Up.anim and the empty Materials/R51 were deleted from the
+  project. (Installers never carried Assets.)
+
+**Checked**
+- New tests (round 107): a .mat-linked material's edit undoes and redoes twice and the asset follows (it fails without
+  the fix: green 0.10 after the redo); objects sharing a .mat still share one copy in an undo state; the tests'
+  asset root is the scratch project before the first test, and a relative asset path lands there; a tagged version
+  GitHub marks a pre-release is offered with previews off, PR builds only with them on.
+- Unit checks: Windows 10,004, 0 failed (676 tests); the whole suite in render-cache verify mode: 9,999,
+  0 failed, 0 stale pictures. Linux with libraries (before the review fixes; CI runs them after): 9,906, 0 failed. Sanitizer build: 9,812, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- An undo state gave every slot its own copy of a shared .mat material, so objects that shared one material stopped
+  sharing it after an undo: slots sharing one material share one copy now (as duplicating a scene does).
+- The asset-root test passed whatever the tests did first: it checks the root main() set before any test now.
+- CMake's project version and the macOS bundle's version read the VERSION file instead of a number of their own.
+
 ## 2026-10-14 (rounds 105-106): updates, older builds, and Blender's libraries optional at run time (tasks 0079-0080, ADR 0033)
 
 **Asked:** "an option for the software while installed on a computer to check for updates and then ask the user if

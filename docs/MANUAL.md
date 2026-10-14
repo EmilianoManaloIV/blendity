@@ -475,7 +475,8 @@ checked both ways against Blender 5.2.
 > Learn: *Assets, Scenes and Files*, *Coordinate Systems and Handedness*.
 
 **Updates** (Help > Check for Updates, Help > Version History; Preferences > Updates): once a day, when online,
-Blendity looks for a newer build - every merged pull request makes one, version tags the stable releases - and shows
+Blendity looks for a newer build - every merged pull request makes one (a preview), version tags the releases (before 1.0 marked
+pre-release, as 0.10.0 is) - and shows
 what it brings with **Install** / **Not now** / **Skip this one**. Installs are checked against the release's SHA-256
 list. Version History installs any build, older ones too (the one before a certain change). Console: `update check`,
 `update history`, `update install <tag>`.

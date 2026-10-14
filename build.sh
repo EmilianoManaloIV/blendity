@@ -193,7 +193,8 @@ if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; 
   rm -rf "$APP/MacOS/lib" "$APP/MacOS/datafiles"
   [ -d "$OUT/lib" ] && cp -R "$OUT/lib" "$APP/MacOS/lib"
   [ -d "$OUT/datafiles" ] && cp -R "$OUT/datafiles" "$APP/MacOS/datafiles"
-  cat > "$APP/Info.plist" <<'PLIST'
+  BUNDLE_VERSION="$(tr -d ' \r\n' < VERSION)"  # (VERSION's number: task 0081)
+  cat > "$APP/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -201,7 +202,7 @@ if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; 
   <key>CFBundleIdentifier</key><string>org.blendity.editor</string>
   <key>CFBundleExecutable</key><string>Blendity</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.9.0</string>
+  <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
