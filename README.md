@@ -38,6 +38,10 @@ Intel processor aren't supported yet. (Every version, with what changed in it, i
 [Releases](https://github.com/EmilianoManaloIV/blendity/releases) page; the "Source code" files there are for
 developers.)
 
+If a link says "Not Found", open the [Releases](https://github.com/EmilianoManaloIV/blendity/releases) page, scroll
+to **Assets** under the newest release and click the file for your computer: the one ending in **`.exe`** for
+Windows, **`.dmg`** for a Mac, **`.AppImage`** for Linux.
+
 ### 2. Install it
 
 <details open>

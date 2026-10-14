@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** ADR 0033 (amended)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/73
 
 ## Goal
 The user (2026-10-14): "Note the installer in the releases and update the readMe in how to install. A non-technical
