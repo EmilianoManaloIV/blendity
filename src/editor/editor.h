@@ -1141,6 +1141,12 @@ class Editor {
   void step_render_sequence();
   /* Render > Render Animation (task 0074, render_animation.cpp): frames as PNGs, then FFmpeg's MP4. */
   static constexpr int kVideoRunning = -1000000;
+  /* An MP4 made off the main thread: the exit code (kVideoRunning till it's done) and, from the libraries, why not. */
+  struct VideoJob {
+    std::atomic<int> code{kVideoRunning};
+    std::atomic<bool> cancel{false};  // (the editor closing)
+    std::string error;
+  };
   struct RenderAnimation {
     bool active = false, started = false;
     int source = 0;  // 1 the scene's sequence, 2 the selected object's clip
@@ -1149,7 +1155,7 @@ class Editor {
     uint64_t root = 0;  // a clip's object
     std::string dir, video;
     std::vector<std::string> written;
-    std::shared_ptr<std::atomic<int>> encode;  // FFmpeg's exit code once it's done (kVideoRunning till then)
+    std::shared_ptr<VideoJob> encode;          // the MP4 being made in the background
     std::string encode_video;                  // the MP4 it makes
   } ranim_;
   std::string ffmpeg_path_;  // Preferences: FFmpeg's program (empty: the PATH's)
@@ -1159,6 +1165,8 @@ class Editor {
   bool render_animation_source(int &source, int &last, float &fps);
   void step_render_animation();
   void finish_render_animation();
+  void encode_render_video();
+  void cancel_render_video();
   void poll_render_video();
   void set_ffmpeg_path(const std::string &path);
   void draw_render_animation_button(ui::Layout &lay);

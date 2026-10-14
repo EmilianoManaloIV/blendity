@@ -286,8 +286,8 @@ ACES and (with OpenColorIO) AgX.
 **More for renders.** The scene's **Active Camera** (Camera inspector, the Game view's camera menu) is what F12 and
 the Game view use; **Render Camera Sequence** renders every camera marked In Sequence, each to its own image;
 **Render Animation** (Ctrl+F12, or `renderanim [first last] [fps]`) renders every frame of the scene's sequence (or the
-selected clip) as `Renders/<scene>_animation_<time>/0001.png...` and, when FFmpeg is installed (on the PATH, or
-`renderanim ffmpeg <path>`), an MP4 next to them;
+selected clip) as `Renders/<scene>_animation_<time>/0001.png...` and an H.264 MP4 next to them, encoded by the
+FFmpeg built in (Blender's; a build without it runs an `ffmpeg` on the PATH or `renderanim ffmpeg <path>`);
 **Film > Transparent** leaves the world out for a PNG or EXR with alpha; **Live Preview** re-renders a quick preview
 as you edit.
 

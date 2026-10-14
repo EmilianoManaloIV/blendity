@@ -9,6 +9,7 @@
 #include "../src/render/canvas.h"
 #include "../src/render/raster.h"
 #include "../src/render/dof.h"
+#include "../src/render/video_encode.h"
 #include "../src/research/research.h"
 #include "../src/image/image.h"
 #include "../src/render/colormanagement.h"
@@ -28335,14 +28336,15 @@ static void round81_tests() {
     CHECK(a.width == 320 && a.height == 180 && b.width == 320);
     CHECK(a.rgba8 != b.rgba8);  // (the lid rose 2 m between them)
     CHECK(std::fabs(lid->local().position.y - y0) < 1e-4f);  // (the pose went back)
-    if (ed.ffmpeg_program().empty())
+    const bool video = video::available() || !ed.ffmpeg_program().empty();  // (built with FFmpeg, or one on the PATH)
+    if (!video)
       for (const std::string &f : ra.written) std::remove(f.c_str());  // (the test project's Renders/ stays small)
     /* FFmpeg: its arguments; with one on the PATH (CI's Linux has it), the MP4 is made in the background. */
     const std::vector<std::string> args = ffmpeg_png_to_mp4_args("ffmpeg", "R/a b", 24.0f, "R/a b.mp4");
     CHECK(args.size() == 18 && args[2] == "-nostdin" && args[6] == "24" && args[10] == fs::join("R/a b", "%04d.png") && args.back() == "R/a b.mp4");
     CHECK(sys::windows_command_line({"C:\\Program Files\\ffmpeg.exe", "a b", "x\"y", "e\\", "p\\ q\\"}) ==
           "\"C:\\Program Files\\ffmpeg.exe\" \"a b\" \"x\\\"y\" e\\ \"p\\ q\\\\\"");
-    if (ed.ffmpeg_program().empty()) {
+    if (!video) {
       std::printf("    no FFmpeg here: frames only\n");
       return;
     }
@@ -28504,5 +28506,45 @@ static void round81_tests() {
       CHECK(Editor::scene_in_args(2, argv2) == fs::normalize("LEVEL.SCENE"));  // (any case, as Windows' associations)
     }
     CHECK(Editor::find_project_root({fs::join(test_dir(), "no such folder/deeper")}).empty());
+  });
+
+  /* ---------------------------------------------------------------- round 103: FFmpeg linked (task 0077) */
+  test("video: with FFmpeg linked, PNG frames become an H.264 MP4 of the same count, an odd size padded to even", [] {
+    if (!video::available()) {
+      std::printf("    built without FFmpeg: Render Animation runs an ffmpeg program or writes frames only\n");
+      CHECK(!video::encode_png_frames({"x.png"}, 24.0f, fs::join(test_dir(), "r103.mp4"), nullptr));
+      return;
+    }
+    std::printf("    %s\n", video::description().c_str());
+    CHECK(video::description().find("libx264") != std::string::npos);  // (Blender's FFmpeg brings x264)
+    std::vector<std::string> frames;
+    for (int k = 0; k < 6; k++) {  // a 101 x 57 square moving right
+      std::vector<uint32_t> px(101 * 57, 0xFF202020u);
+      for (int y = 20; y < 36; y++)
+        for (int x = 10 + k * 12; x < 26 + k * 12; x++) px[(size_t)y * 101 + x] = 0xFFE07020u;
+      frames.push_back(fs::join(test_dir(), strprintf("r103_%04d.png", k + 1)));
+      CHECK(write_png(frames.back(), px.data(), 101, 57, 101, false));
+    }
+    const std::string out = fs::join(test_dir(), "r103 clip é.mp4");  // (a space and an accent: UTF-8 to FFmpeg)
+    fs::remove_file(out);
+    std::string error;
+    video::init();
+    const bool ok = video::encode_png_frames(frames, 24.0f, out, &error);
+    int w = 0, h = 0;
+    const int n = ok ? video::probe_frames(out, &w, &h) : -1;
+    std::printf("    encoded %d: %d frame(s) of %d x %d %s\n", (int)ok, n, w, h, error.c_str());
+    CHECK(ok && n == 6 && w == 102 && h == 58);
+    CHECK(fs::remove_file(out));  // (the UTF-8 name FFmpeg wrote is the one asked for)
+    /* A frame missing halfway: refused with a reason, and no unplayable half-file left. */
+    std::vector<std::string> broken = frames;
+    broken[3] = fs::join(test_dir(), "no such frame.png");
+    std::string err2;
+    CHECK(!video::encode_png_frames(broken, 24.0f, out, &err2) && !err2.empty() && !fs::exists(out));
+    std::printf("    a missing frame: '%s'\n", err2.c_str());
+    /* Cancelled (the editor closing): stops, no file. */
+    std::atomic<bool> cancel{true};
+    std::string err3;
+    CHECK(!video::encode_png_frames(frames, 24.0f, out, &err3, &cancel) && !fs::exists(out));
+    for (const std::string &f : frames) std::remove(f.c_str());
   });
 }

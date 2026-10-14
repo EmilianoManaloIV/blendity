@@ -5,9 +5,11 @@
 // writes video through FFmpeg too; Blendity doesn't link FFmpeg, it runs it, so without it the frames are the result.
 #include "editor.h"
 #include "../render/canvas.h"
+#include "../render/video_encode.h"
 
 #include <cmath>
 #include <ctime>
+#include <chrono>
 #include <thread>
 
 namespace bl {
@@ -158,27 +160,58 @@ void Editor::finish_render_animation() {
   stop_render_animation();
   render_status_ = strprintf("Animation: %zu frame(s) in %s", frames, ranim_.dir.c_str());
   Log::info("%s", render_status_.c_str());
-  const std::string ffmpeg = ffmpeg_program();
   if (!frames) return;
+  if (video::available()) return encode_render_video();
+  const std::string ffmpeg = ffmpeg_program();
   if (ffmpeg.empty()) {
     Log::info("Render Animation: no FFmpeg, so the frames are the result. For an MP4, install FFmpeg (ffmpeg.org) on the "
               "PATH or set its path in Preferences, or open the frames in Blender's Video Sequencer.");
     return;
   }
-  auto result = std::make_shared<std::atomic<int>>(kVideoRunning);
-  ranim_.encode = result;
+  auto job = std::make_shared<VideoJob>();
+  ranim_.encode = job;
   ranim_.encode_video = ranim_.video;
   const std::vector<std::string> args = ffmpeg_png_to_mp4_args(ffmpeg, ranim_.dir, ranim_.fps, ranim_.video);
-  std::thread([args, result] { result->store(sys::run_program(args)); }).detach();
+  std::thread([args, job] { job->code.store(sys::run_program(args)); }).detach();
   render_status_ += "  |  making the MP4...";
   Log::info("Render Animation: FFmpeg is making %s", ranim_.video.c_str());
+}
+
+/* Built with FFmpeg's libraries (task 0077): the MP4 is encoded here, on a background thread, as Blender does. */
+void Editor::encode_render_video() {
+  auto job = std::make_shared<VideoJob>();
+  ranim_.encode = job;
+  ranim_.encode_video = ranim_.video;
+  const std::vector<std::string> frames = ranim_.written;
+  const std::string out = ranim_.video;
+  const float fps = ranim_.fps;
+  video::init();  // (FFmpeg's log, quieted from this thread)
+  std::thread([frames, out, fps, job] {
+    std::string error;
+    const bool ok = video::encode_png_frames(frames, fps, out, &error, &job->cancel);
+    job->error = error;  // (before the code: the main thread reads it once the code is set)
+    job->code.store(ok ? 0 : 1);
+  }).detach();
+  render_status_ += "  |  making the MP4...";
+  Log::info("Render Animation: %s is making %s", video::description().c_str(), out.c_str());
+}
+
+/* Closing with an MP4 still being encoded in here: it stops at the next frame (and deletes its unfinished file)
+ * before the program's statics go. An ffmpeg program finishes on its own. */
+void Editor::cancel_render_video() {
+  if (!ranim_.encode || !video::available()) return;
+  ranim_.encode->cancel.store(true);
+  const double t0 = now_seconds();
+  while (ranim_.encode->code.load() == kVideoRunning && now_seconds() - t0 < 10.0) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  Log::warn("Render Animation: closed while making %s; it was stopped", ranim_.encode_video.c_str());
 }
 
 /* The background FFmpeg done: say so (the file is checked, not only the exit code). */
 void Editor::poll_render_video() {
   if (!ranim_.encode) return;
-  const int code = ranim_.encode->load();
+  const int code = ranim_.encode->code.load();
   if (code == kVideoRunning) return;
+  const std::string why = ranim_.encode->error;
   ranim_.encode.reset();
   const std::string &video = ranim_.encode_video;
   const bool ran = code == 0 || code == sys::kExitUnknown;  // (unknown: on Linux once open_external reaps children itself)
@@ -188,6 +221,7 @@ void Editor::poll_render_video() {
     render_status_ = "Animation: " + video;
     Log::info("Render Animation: %s", video.c_str());
   }
+  else if (!why.empty()) Log::error("Render Animation: couldn't make %s (%s); the frames stay", video.c_str(), why.c_str());
   else Log::error("Render Animation: FFmpeg couldn't make %s (exit code %d); the frames stay", video.c_str(), code);
   invalidate_project_listing();
   ui_.redraw = true;

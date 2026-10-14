@@ -1,13 +1,16 @@
 # Installers (task 0076): a Windows setup .exe (Inno Setup, per-user), a Linux AppImage and .tar.gz, and a macOS .dmg
 # (unsigned). A pull request that touches packaging builds them as artifacts to try; a v* tag (v0.10.0) also makes the
-# GitHub Release with them attached. Release builds are the dependency-free ones CI tests (BLENDITY_NO_LIBS).
+# GitHub Release with them attached. Each is built with Blender's prebuilt libraries (task 0078: Embree,
+# OpenImageDenoise, OpenColorIO, Jolt, FFmpeg...), fetched at the commits pinned in packaging/blender-libs.txt and
+# shipped inside the installer, so nobody needs Blender's libraries of their own. (build.yml keeps testing the
+# dependency-free build.)
 name: release
 
 on:
   push:
     tags: ['v*']
   pull_request:
-    paths: ['packaging/**', '.github/workflows/release.yml', 'VERSION', 'build.bat', 'build.sh']
+    paths: ['packaging/**', '.github/workflows/release.yml', 'VERSION', 'build.bat', 'build.sh', 'CMakeLists.txt']
   workflow_dispatch:
 
 permissions:
@@ -21,9 +24,20 @@ jobs:
       - name: Version
         shell: bash
         run: echo "VERSION=$( [[ "$GITHUB_REF" == refs/tags/v* ]] && echo "${GITHUB_REF_NAME#v}" || cat VERSION )" >> "$GITHUB_ENV"
+      - name: Blender's libraries (cached by their pinned commits)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../blender
+          key: blender-libs-windows_x64-${{ hashFiles('packaging/blender-libs.txt', 'packaging/fetch_blender_libs.sh') }}
+      - name: Fetch Blender's libraries
+        shell: bash
+        run: bash packaging/fetch_blender_libs.sh windows_x64
       - name: Build
         shell: cmd
         run: build.bat release app
+      - name: The build has Blender's libraries
+        shell: bash
+        run: for f in Blendity.exe embree4.dll OpenImageDenoise.dll OpenColorIO_2_5.dll Jolt.dll avcodec-62.dll aom.dll datafiles/colormanagement/config.ocio; do test -e "dist/windows/$f" || { echo "::error::no dist/windows/$f"; exit 1; }; done
       - name: Installer
         shell: bash
         run: |
@@ -58,9 +72,20 @@ jobs:
       - name: Version
         run: echo "VERSION=$( [[ "$GITHUB_REF" == refs/tags/v* ]] && echo "${GITHUB_REF_NAME#v}" || cat VERSION )" >> "$GITHUB_ENV"
       - name: Install compiler + X11 headers
-        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev fonts-dejavu-core git-lfs
+      - name: Blender's libraries (cached by their pinned commits)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../blender
+          key: blender-libs-linux_x64-${{ hashFiles('packaging/blender-libs.txt', 'packaging/fetch_blender_libs.sh') }}
+      - name: Fetch Blender's libraries
+        run: bash packaging/fetch_blender_libs.sh linux_x64
       - name: Build
         run: ./build.sh release app
+      - name: The build has Blender's libraries
+        run: |
+          ls dist/linux/lib | grep -q libembree4 && ls dist/linux/lib | grep -q libOpenImageDenoise && test -f dist/linux/datafiles/colormanagement/config.ocio
+          nm -C dist/linux/Blendity | grep -q avcodec_send_frame  # (FFmpeg is static: inside the program)
       - name: Packages
         run: |
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
@@ -84,8 +109,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Version
         run: echo "VERSION=$( [[ "$GITHUB_REF" == refs/tags/v* ]] && echo "${GITHUB_REF_NAME#v}" || cat VERSION )" >> "$GITHUB_ENV"
+      - name: Blender's libraries (cached by their pinned commits)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../blender
+          key: blender-libs-macos_arm64-${{ hashFiles('packaging/blender-libs.txt', 'packaging/fetch_blender_libs.sh') }}
+      - name: Fetch Blender's libraries
+        run: bash packaging/fetch_blender_libs.sh macos_arm64
       - name: Build
         run: ./build.sh release app
+      - name: The build has Blender's libraries
+        run: |
+          ls dist/macos/Blendity.app/Contents/MacOS/lib | grep -q libembree4
+          nm dist/macos/Blendity | grep -q avcodec_send_frame
       - name: Disk image
         run: bash packaging/macos/make_dmg.sh "$VERSION"
       - name: Mount and start headless

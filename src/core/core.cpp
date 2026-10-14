@@ -401,6 +401,11 @@ void open_external(const std::string &path) {
 }
 #endif
 
+bool remove_file(const std::string &path) {
+  std::error_code ec;
+  return stdfs::remove(P(path), ec);
+}
+
 }  // namespace fs
 
 namespace sys {

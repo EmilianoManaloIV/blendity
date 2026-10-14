@@ -63,6 +63,8 @@ call :lib jolt             BL_WITH_JOLT        "jolt\include"                   
 call :lib jpeg             BL_WITH_LIBJPEG     "jpeg\include"                                  "jpeg\lib\libjpeg.lib"
 call :lib png              BL_WITH_LIBPNG      "png\include zlib\include"                      "png\lib\libpng.lib zlib\lib\libz_st.lib"
 call :lib zstd             BL_WITH_ZSTD        "zstd\include"                                  "zstd\lib\zstd_static.lib"
+rem Video files (task 0077): Blender's FFmpeg, whose DLLs sit in its lib folder (copied in :deploy_dlls).
+call :lib ffmpeg           BL_WITH_FFMPEG      "ffmpeg\include"                                "ffmpeg\lib\avformat.lib ffmpeg\lib\avcodec.lib ffmpeg\lib\swscale.lib ffmpeg\lib\avutil.lib"
 rem GPU rendering: the Vulkan headers (the loader comes with the GPU driver) and shaderc.
 if exist "%L%\vulkan\include" call :lib shaderc BL_WITH_VULKAN "shaderc\include vulkan\include" "shaderc\lib\shaderc_shared.lib"
 rem ABI settings the libraries were built with (blender\build_files\build_environment\cmake).
@@ -79,7 +81,7 @@ if /i "%CONFIG%"=="debug" (
 ) else (
   set FLAGS=%COMMON% /O2 /Oi /GL /fp:fast %CRT% /DNDEBUG
 )
-if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64^))
+if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64: bash packaging\fetch_blender_libs.sh windows_x64 fetches them^))
 set LIBSRC=
 for %%d in (core image render scene texture editor research platform deps) do (
   for %%f in (src\%%d\*.cpp) do set LIBSRC=!LIBSRC! %%f
@@ -150,14 +152,16 @@ exit /b 0
 rem Copy the release DLLs (no debug, GPU-device or Python files) and the MSVC
 rem runtime next to the executables, so dist\windows runs on any PC.
 :deploy_dlls
-rem openjph (OpenEXR) and dpcpp's SYCL runtime (Embree) are runtime-only dependencies.
-for %%d in (%LIBDIRS% imath openjph dpcpp) do (
+rem openjph (OpenEXR), dpcpp's SYCL runtime (Embree) and aom (FFmpeg's AV1) are runtime-only dependencies.
+for %%d in (%LIBDIRS% imath openjph dpcpp aom) do (
   if exist "%L%\%%d\bin" (
     for %%f in ("%L%\%%d\bin\*.dll") do (
       echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll debug _cuda _hip _sycl eigen_ malloc_proxy" >nul || copy /y "%%f" dist\windows\ >nul
     )
   )
 )
+rem FFmpeg keeps its DLLs in lib\, beside the import libraries (not ffmpeg.exe: Blendity encodes in-process).
+if exist "%L%\ffmpeg\lib" for %%n in (avcodec avformat avutil swscale swresample) do copy /y "%L%\ffmpeg\lib\%%n-*.dll" dist\windows\ >nul
 rem Blender's colour management config (OpenColorIO views: AgX, Filmic, ...).
 set "OCIO_CFG=%~dp0..\blender\release\datafiles\colormanagement"
 if exist "%L%\opencolorio" if exist "%OCIO_CFG%\config.ocio" xcopy /e /i /y /q "%OCIO_CFG%" dist\windows\datafiles\colormanagement >nul

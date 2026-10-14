@@ -205,6 +205,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | An animation or a sequence could only be rendered one image at a time. | Render Animation (Ctrl+F12): numbered PNGs and, with FFmpeg, an MP4 (task 0074). |
 | On a touch laptop the Scene view could only be navigated with a mouse, and a small machine was set to Low silently. | Two-finger zoom, pan and turn; pen pressure for weight paint; a first-run welcome offering High (task 0075). |
 | Getting Blendity meant building it or unpacking CI artifacts. | Installers for Windows, Linux (AppImage, tar.gz) and macOS (dmg), on GitHub Releases (task 0076). |
+| An MP4 needed FFmpeg installed separately, and the installers lacked Blender's libraries (Embree, denoising, colour management). | FFmpeg linked in; the installers carry every library; one script fetches them for a source build (tasks 0077-0078). |
 | How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 
 ## Still worth doing

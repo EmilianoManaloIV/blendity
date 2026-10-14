@@ -2,6 +2,46 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (rounds 103-104): FFmpeg linked like Blender's other libraries, and the libraries in the installers (tasks 0077-0078, ADR 0032)
+
+**Asked:** "Can we install ffmpeg and treat it like a blender dependency?" - link it, and "make sure other dependencies
+should be included when installing the project. The user shouldn't really have to worry on downloading blender on
+their own."
+
+**Changed**
+- **FFmpeg 8.1** (Blender's build: x264, x265, libvpx, libaom, Opus, Vorbis, Theora, LAME) is linked behind
+  `BL_WITH_FFMPEG` by build.bat, build.sh and CMake. Render Animation encodes its MP4 itself (H.264, CRF 18) on a
+  background thread; a build without it falls back to an `ffmpeg` program or PNG frames, as before. `libs` lists it.
+- Fetched into this machine's Blender library checkouts: `ffmpeg` (Windows 46 MB, Linux 67 MB) and Windows' `aom`
+  (FFmpeg's AV1 DLL, 9.5 MB); Linux also links OpenJPEG and Blender's `libc_compat` (copied to `extern/`).
+- **`packaging/fetch_blender_libs.sh <platform>`** fetches only the library folders Blendity uses, at commits pinned in
+  `packaging/blender-libs.txt` (about 600 MB a platform), plus Blender's colour config when missing.
+- **The installers carry Blender's libraries:** the release workflow fetches them (cached), builds all three with
+  them and checks each has Embree, OpenImageDenoise, OpenColorIO, Jolt and FFmpeg; the macOS app bundle holds `lib/`
+  and `datafiles/`. Nobody installing Blendity needs Blender or its libraries.
+- Licences: FFmpeg and its codecs listed; LGPL-2.1 and GPL-2.0 texts added.
+
+**Checked**
+- New test (round 103): six 101 x 57 PNG frames become an MP4 FFmpeg reads back as 6 frames of 102 x 58 with libx264;
+  a missing frame is refused with a reason. Render Animation's test made its MP4 in-process. Both on Windows and Linux.
+- Unit checks: Windows 9,965, 0 failed (667 tests); the whole suite in render-cache verify mode: 9,966,
+  0 failed, 0 stale pictures. Linux with libraries: 9,873, 0 failed. Sanitizer build: 9,779, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- CMake's Linux build wouldn't have linked: `libc_compat` sat in the static library, where nothing pulled it in before
+  the codecs asked; it is now on every executable's link line.
+- An odd frame size was stretched by a pixel (a soft, shifted picture): it is padded by repeating the edge now.
+- The video wasn't tagged and used BT.601 colours: it is BT.709, limited range, tagged, as Blender writes it.
+- Closing the editor while an MP4 was being encoded left the encoder running into the program's exit: it stops
+  between frames and the editor waits for it.
+- A failed or stopped encode left an unplayable half-MP4: it is deleted.
+- x264's options went to whatever encoder was found: a fallback encoder gets a high bit rate instead.
+- FFmpeg's log level was set from the worker thread: once, from the main thread.
+- Only the five FFmpeg DLLs Blendity uses are shipped (not avdevice / avfilter); CMake no longer links an FFmpeg
+  folder without its libraries; `extern/README.md` says where each copied file comes from.
+- Left: the FFmpeg DLLs load with the program (as the other libraries' do), so a missing one stops it starting.
+
 ## 2026-10-14 (round 102): installers for Windows, Linux and macOS (task 0076)
 
 **Asked:** installers for Windows, Linux and macOS; the choice was an Inno Setup .exe, an AppImage and a .tar.gz, and

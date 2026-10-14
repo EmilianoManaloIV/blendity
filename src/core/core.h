@@ -79,6 +79,7 @@ bool copy_file(const std::string &from, const std::string &to);
 bool move(const std::string &from, const std::string &to);
 /* Sends a file or folder to the Recycle Bin / Trash so it can be restored. */
 bool move_to_trash(const std::string &path, std::string *error = nullptr);
+bool remove_file(const std::string &path);  // deleted for good (a UTF-8 path, as everywhere here); false if it wasn't there
 std::string executable_dir();
 std::string current_dir();
 std::string home_dir();

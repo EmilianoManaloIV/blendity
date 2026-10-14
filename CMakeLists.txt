@@ -87,12 +87,34 @@ if(BLENDITY_USE_LIBS)
   bl_lib(png BL_WITH_LIBPNG INC png/include zlib/include WIN png/lib/libpng.lib zlib/lib/libz_st.lib
          UNIX png/lib/libpng.a zlib/lib/libz.a)
   bl_lib(zstd BL_WITH_ZSTD INC zstd/include WIN zstd/lib/zstd_static.lib UNIX zstd/lib/libzstd.a)
+  # Video files (task 0077, ADR 0032): Blender's FFmpeg - DLLs on Windows, static with its codecs elsewhere, in
+  # Blender's link order (platform_unix.cmake, platform_apple.cmake), then OpenJPEG and zlib.
+  set(_ff "")
+  foreach(c avformat avcodec swscale swresample avutil mp3lame opus theoraenc theoradec theora vorbisenc vorbisfile vorbis ogg vpx x264 x265 aom)
+    if(EXISTS "${BLENDITY_LIBDIR}/ffmpeg/lib/lib${c}.a")
+      list(APPEND _ff ffmpeg/lib/lib${c}.a)
+    endif()
+  endforeach()
+  if(EXISTS "${BLENDITY_LIBDIR}/openjpeg/lib/libopenjp2.a")
+    list(APPEND _ff openjpeg/lib/libopenjp2.a)
+  endif()
+  if(WIN32 OR _ff)  # (a partial checkout without the static libraries: no FFmpeg, as build.sh)
+    bl_lib(ffmpeg BL_WITH_FFMPEG INC ffmpeg/include
+           WIN ffmpeg/lib/avformat.lib ffmpeg/lib/avcodec.lib ffmpeg/lib/swscale.lib ffmpeg/lib/avutil.lib
+           UNIX ${_ff} zlib/lib/libz.a)
+  endif()
   if(EXISTS "${BLENDITY_LIBDIR}/vulkan/include")  # GPU rendering; the loader comes with the driver
     bl_lib(shaderc BL_WITH_VULKAN INC shaderc/include vulkan/include WIN shaderc/lib/shaderc_shared.lib UNIX shaderc/lib/libshaderc_combined.a)
   endif()
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
   if(NOT WIN32)
     list(APPEND BL_LIB_LINK "${BLENDITY_LIBDIR}/tbb/lib/libtbb${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  endif()
+  if(APPLE AND _ff)  # (FFmpeg's system frameworks, as Blender's platform_apple.cmake)
+    list(APPEND BL_LIB_LINK "-framework CoreImage" "-framework OpenGL" "-framework VideoToolbox" "-framework CoreMedia"
+         "-framework CoreVideo" iconv bz2)
+  elseif(UNIX AND _ff)
+    list(APPEND BL_LIB_LINK dl m)
   endif()
   # ABI settings the libraries were built with (blender/build_files/build_environment/cmake).
   # Jolt enables floating-point exceptions only in its MSVC builds; a mismatch
@@ -126,6 +148,12 @@ else()
 endif()
 
 add_library(blendity_engine STATIC ${BLENDITY_SOURCES})
+# glibc's dropped -ffast-math symbols for the static codecs: as objects on every executable's own link line (in the
+# static library above nothing of Blendity's would pull them in before the codecs ask).
+if(BLENDITY_USE_LIBS AND UNIX AND NOT APPLE)
+  add_library(blendity_libc_compat OBJECT extern/libc_compat/libc_compat.c)
+  target_link_libraries(blendity_engine INTERFACE $<TARGET_OBJECTS:blendity_libc_compat>)
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(blendity_engine PUBLIC Threads::Threads)
 target_include_directories(blendity_engine PUBLIC extern/sky/include)

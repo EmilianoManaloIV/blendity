@@ -47,6 +47,7 @@
 #ifdef BL_WITH_ZSTD
 #  include <zstd.h>
 #endif
+#include "../render/video_encode.h"
 
 namespace bl::deps {
 
@@ -139,6 +140,8 @@ const std::vector<Library> &libraries() {
       {"Zstandard", false, "",
 #endif
        "Compressed .scene files (like Blender's .blend compression)", "Uncompressed text scenes"},
+      {"FFmpeg", video::available(), video::description(), "Render Animation's MP4 (H.264), encoded in Blendity",
+       "an ffmpeg program on the PATH, else PNG frames"},
 #ifdef BL_WITH_VULKAN
       {"Vulkan + shaderc", true, "1.4",
 #else

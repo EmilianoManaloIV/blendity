@@ -1,0 +1,7 @@
+# Blender's prebuilt libraries Blendity builds against (task 0078), pinned so every build gets the same ones.
+# <name> <commit> - lib-<platform> repositories on projects.blender.org; "blender" is Blender's own repository, for
+# its colour-management config (release/datafiles/colormanagement). Fetched by packaging/fetch_blender_libs.sh.
+windows_x64 aa0c5db72fa9488bb685bdddbede780d19f483f5
+linux_x64 9f40913589d16fdf729b3ba841ef52ccfea51904
+macos_arm64 7d74150064b3263092281b269c6b62b891001fcb
+blender 741e5243a0a864eb2c75e770353b409dc59ee30e

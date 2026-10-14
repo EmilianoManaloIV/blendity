@@ -61,6 +61,19 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   addlib jpeg             BL_WITH_LIBJPEG    "jpeg/include"                   "jpeg/lib/libjpeg.a"
   addlib png              BL_WITH_LIBPNG     "png/include zlib/include"       "png/lib/libpng.a zlib/lib/libz.a"
   addlib zstd             BL_WITH_ZSTD       "zstd/include"                   "zstd/lib/libzstd.a"
+  # Video files (task 0077): Blender's FFmpeg, static with its codecs, in Blender's link order
+  # (build_files/cmake/platform/platform_unix.cmake, platform_apple.cmake); zlib again after it.
+  FFL=""
+  for c in avformat avcodec swscale swresample avutil mp3lame opus theoraenc theoradec theora vorbisenc vorbisfile vorbis ogg vpx x264 x265 aom; do
+    [ -f "$LIBDIR/ffmpeg/lib/lib$c.a" ] && FFL="$FFL ffmpeg/lib/lib$c.a"
+  done
+  [ -f "$LIBDIR/openjpeg/lib/libopenjp2.a" ] && FFL="$FFL openjpeg/lib/libopenjp2.a"  # (FFmpeg's JPEG 2000)
+  [ -n "$FFL" ] && addlib ffmpeg BL_WITH_FFMPEG "ffmpeg/include" "$FFL zlib/lib/libz.a"
+  if [ -n "$FFL" ] && [ "$OS" = "Darwin" ]; then
+    LIBLINK="$LIBLINK -framework CoreImage -framework OpenGL -framework VideoToolbox -framework CoreMedia -framework CoreVideo -liconv -lbz2"
+  elif [ -n "$FFL" ]; then
+    LIBLINK="$LIBLINK -ldl -lm"
+  fi
   # GPU rendering: Vulkan headers (the loader comes with the GPU driver, opened at run time) and shaderc.
   [ -d "$LIBDIR/vulkan/include" ] && addlib shaderc BL_WITH_VULKAN "shaderc/include vulkan/include" "shaderc/lib/libshaderc_combined.a"
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
@@ -80,7 +93,7 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   [ "$OS" = "Darwin" ] || LIBS="$LIBS -Wl,-rpath-link,$LIBDIR/openjph/lib:$LIBDIR/dpcpp/lib:$LIBDIR/tbb/lib:$LIBDIR/imath/lib"
   echo "[blendity] Using Blender libraries from $LIBDIR:$LIBDIRS"
 else
-  echo "[blendity] Dependency-free build (no $LIBDIR)"
+  echo "[blendity] Dependency-free build (no $LIBDIR: bash packaging/fetch_blender_libs.sh $LIBPLAT fetches them)"
 fi
 
 OBJ="build/obj_${CONFIG}_$(echo "$OS" | tr '[:upper:]' '[:lower:]')$([ "$USE_LIBS" = 1 ] && echo _libs || true)"
@@ -95,6 +108,9 @@ if [ "$(cat "$OBJ/flags.txt" 2>/dev/null)" != "$CXX $FLAGS" ]; then
 fi
 
 LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC"
+# Blender's libc_compat: the -ffast-math math symbols newer glibc dropped that its prebuilt static codecs (FFmpeg's
+# x265) still call (Linux only; empty elsewhere).
+[ "$USE_LIBS" = 1 ] && [ "$OS" != "Darwin" ] && LIB_SRC="$LIB_SRC extern/libc_compat/libc_compat.c"
 
 compile() {  # src -> object path (only rebuilds when the source or any header is newer)
   local src="$1"
@@ -157,6 +173,11 @@ if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; 
   APP="$OUT/Blendity.app/Contents"
   mkdir -p "$APP/MacOS"
   cp "$OUT/Blendity" "$APP/MacOS/Blendity"
+  # Blender's libraries and the colour config beside the program inside the bundle (its rpath is
+  # @executable_path/lib; executable_dir() finds datafiles/ there).
+  rm -rf "$APP/MacOS/lib" "$APP/MacOS/datafiles"
+  [ -d "$OUT/lib" ] && cp -R "$OUT/lib" "$APP/MacOS/lib"
+  [ -d "$OUT/datafiles" ] && cp -R "$OUT/datafiles" "$APP/MacOS/datafiles"
   cat > "$APP/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
