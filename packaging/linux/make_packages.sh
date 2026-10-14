@@ -18,6 +18,7 @@ STAGE="build/package/blendity-$VERSION-linux-x86_64"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/docs"
 cp "$DIST/Blendity" "$STAGE/"
+[ -x "$DIST/Blendity-full" ] && cp "$DIST/Blendity-full" "$STAGE/"  # (the full build Blendity hands over to, task 0080)
 [ -d "$DIST/lib" ] && cp -a "$DIST/lib" "$STAGE/"
 [ -d "$DIST/datafiles" ] && cp -a "$DIST/datafiles" "$STAGE/"
 cp -a licenses "$STAGE/licenses"

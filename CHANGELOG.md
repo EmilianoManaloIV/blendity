@@ -2,6 +2,73 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (rounds 105-106): updates, older builds, and Blender's libraries optional at run time (tasks 0079-0080, ADR 0033)
+
+**Asked:** "an option for the software while installed on a computer to check for updates and then ask the user if
+they want to install the update. The install note should note the changes that the update will bring. Furthermore,
+the user can choose to go to an older update (Before A Certain Pull Request)"; "if the DLL or external libraries isn't
+found, result back to the fallback with the software that doesn't rely on dependencies (such as situations with no
+internet, etc.). Then if there is internet, ask the user if they want to install the new libraries"; "The user should
+always have the option to use dependencies or not."
+
+**Changed**
+- **Builds for every merged PR:** a merge into `main` publishes a pre-release `build-pr<N>` (notes: the PR's
+  description); v* tags publish stable releases. Each carries the installers, the libraries archive and
+  SHA256SUMS.txt. Builds know their tag and version (shown in About and the status bar).
+- **Updates:** once a day, when online, Blendity asks GitHub's releases list (WinHTTP on Windows, `curl` elsewhere: no
+  new library) and offers a newer build with its notes - Install / Not now / Skip this one. Help > Check for Updates
+  and **Help > Version History** (every build for this system, older ones too: the build before a certain PR).
+  Downloads are checked against the release's SHA-256 list; Windows installs silently and restarts Blendity, an
+  AppImage replaces itself, macOS opens the disk image. Preferences > Updates: check at start, include PR builds.
+- **Libraries optional at run time:** an install holds Blendity (dependency-free, always starts) and Blendity-full.
+  Blendity hands over when the full build's libraries load (`--probe`) and **Preferences > Libraries > Use Blender's
+  libraries** is on; otherwise - a library missing or damaged, offline, turned off, `--no-libs` - it runs on its own
+  code, and online it offers this build's libraries (Download / Not now / Never ask), unpacked into
+  `~/.blendity/libs/<build>`. The Windows installer's "Blendity only" type leaves them out.
+- The JSON reader moved from the glTF importer to `core/json.h`; SHA-256, downloads, releases and the launcher are new
+  in `core/`.
+- #70's installer jobs needed: Windows Embree's SYCL runtime (`dpcpp`), Linux GCC 14 (Blender's libraries call its C++
+  runtime, shipped in `lib/`), macOS's own zlib.
+
+**Checked**
+- New tests (round 105): SHA-256 against FIPS 180-4's vectors; SHA256SUMS lines; a releases list gives the newer builds
+  (stable only or with PR builds), none for the newest or a local build, all in Version History; the Update and
+  History dialogs at 1280 x 720, Skip remembered; (opt-in, `BLENDITY_NET_TESTS=1`) GitHub's real list fetched, a 404
+  reported.
+- New test (round 106): this build knows whether it has the libraries; `--probe` answers; the Libraries dialog at
+  1280 x 720; Never ask and Use Blender's libraries kept with the preferences.
+- By hand on Windows: a scratch install with both programs - with the libraries it handed over, with `--no-libs` and
+  with `embree4.dll` removed it ran itself.
+- Unit checks: Windows 9,992, 0 failed (672 tests); the whole suite in render-cache verify mode: 9,993,
+  0 failed, 0 stale pictures. Linux with libraries: 9,900, 0 failed. Sanitizer build: 9,806, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- On Linux and macOS, opening a folder or starting a program ignored SIGCHLD for the whole process, after which every
+  download and the libraries probe failed: children nobody waits for are reaped by a thread of their own instead.
+- The Windows installer never started Blendity again after an update: it does now ([Run] after an update started
+  from Blendity), installing where the old copy is (for this user, or for everyone).
+- A build older than the newest 100 releases never saw an update or its libraries: its own release is fetched too.
+- Installing "Blendity only" over an install with the libraries left the old full build to be handed over to: it is
+  removed.
+- On Windows the dependency-free program returned at once while the full one worked: it waits and passes on the exit
+  code.
+- Downloads went to guessable names in the shared /tmp (another user could plant a link): a private
+  ~/.blendity/downloads, and only plain file names from a release.
+- Closing Version History by clicking outside stopped all later offers for the session.
+- Replacing an AppImage could lose it on a full disk, and restarting after a libraries download ran from the old
+  AppImage's vanished mount: the new one is copied beside the old first, and Blendity restarts as the AppImage.
+- Unpacking the libraries and copying an AppImage ran on the editor's thread (seconds): on the downloading thread now.
+- Releases are published one at a time, in merge order; the libraries are asked about at most once a day and never
+  turn into an update offer when update checks are off.
+- The workflow's token is read-only except in the release job (a pull request's build scripts run with it).
+- curl keeps to https (redirects too) with no fixed time limit on large downloads; WinHTTP treats an unfollowed
+  redirect as an error; SHA-256 streams the file; Windows' own tar.exe from System32; the probe gives up after 30 s;
+  a download stops when Blendity closes; Version History scrolls through every build; the title no longer reads
+  "Blendity Blendity".
+- Left: a full build that crashes after a good probe doesn't fall back by itself (Preferences > Libraries or
+  --no-libs does).
+
 ## 2026-10-14 (rounds 103-104): FFmpeg linked like Blender's other libraries, and the libraries in the installers (tasks 0077-0078, ADR 0032)
 
 **Asked:** "Can we install ffmpeg and treat it like a blender dependency?" - link it, and "make sure other dependencies

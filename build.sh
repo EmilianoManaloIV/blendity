@@ -12,7 +12,9 @@ OS="$(uname -s)"
 CXX="${CXX:-c++}"
 JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
-FLAGS="-Iextern/sky/include -std=c++17 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -pthread"
+# The build's identity (task 0079): VERSION's number, and CI's release tag (BLENDITY_BUILD) or "dev".
+IDFLAGS="-DBL_VERSION_NUMBER=$(tr -d ' \r\n' < VERSION) -DBL_BUILD=${BLENDITY_BUILD:-dev}"
+FLAGS="$IDFLAGS -Iextern/sky/include -std=c++17 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -pthread"
 if [ "$CONFIG" = "debug" ]; then FLAGS="$FLAGS -O0 -g -DBL_DEBUG"; else FLAGS="$FLAGS -O2 -DNDEBUG"; fi
 # Extra compiler and linker flags from the environment (CI's sanitizer job: EXTRA_FLAGS="-fsanitize=address,undefined").
 FLAGS="$FLAGS ${EXTRA_FLAGS:-}"
@@ -147,7 +149,7 @@ link() {  # main-source output-name
 }
 
 case "$TARGET" in
-  app|all) link src/app/main.cpp Blendity ;;
+  app|all) link src/app/main.cpp "${BLENDITY_APP:-Blendity}" ;;  # (BLENDITY_APP=Blendity-full: the full build of an install, task 0080)
 esac
 case "$TARGET" in
   stress|all) link stress/stress_main.cpp blendity_stress ;;
@@ -184,7 +186,8 @@ if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; 
   # Wrap the editor in a minimal .app bundle so it can be double-clicked in Finder.
   APP="$OUT/Blendity.app/Contents"
   mkdir -p "$APP/MacOS"
-  cp "$OUT/Blendity" "$APP/MacOS/Blendity"
+  # Both programs of an install (task 0080): Blendity, which starts, and Blendity-full when it was built.
+  for exe in Blendity Blendity-full; do [ -f "$OUT/$exe" ] && cp "$OUT/$exe" "$APP/MacOS/$exe"; done
   # Blender's libraries and the colour config beside the program inside the bundle (its rpath is
   # @executable_path/lib; executable_dir() finds datafiles/ there).
   rm -rf "$APP/MacOS/lib" "$APP/MacOS/datafiles"

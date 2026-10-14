@@ -7,6 +7,8 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../core/launch.h"
+#include "../core/releases.h"
 #include "../deps/deps.h"
 #include "../research/research.h"
 
@@ -23,7 +25,7 @@ namespace bl {
 using namespace platform;
 using ui::Icon;
 
-static const char *kVersion = "0.10.0";
+static const char *kVersion = releases::version();  // (VERSION, through the build scripts)
 
 const char *window_title(WindowKind k) {
   static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer"};
@@ -78,6 +80,7 @@ bool SceneCamera::update(double now) {
 Editor::Editor() = default;
 Editor::~Editor() {
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
+  cancel_update_download();
   procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
   if (window_) destroy_window(window_);
 }
@@ -181,6 +184,8 @@ bool Editor::init(int argc, char **argv) {
   }
   stable_ = scene_->clone();
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
+  if (update_check_ && std::time(nullptr) - update_last_check_ > 86400.0) start_update_check(false);  // (once a day, task 0079)
+  check_libraries_at_start();  // (the dependency-free build: offer Blender's libraries, task 0080)
   Log::info("New here? Open the Learn tab (F1).");
   Log::info("UI font: %s | worker threads: %d", ui_.font.source().c_str(), JobSystem::global().thread_count());
   return true;
@@ -433,6 +438,7 @@ void Editor::frame(std::vector<Event> &events) {
   step_final_render();
   step_render_sequence();
   step_render_animation();
+  poll_updates();
   step_bake();
 
   /* Pull new console lines. */
@@ -965,6 +971,11 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
     if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
+    if (u.menu_item("Check for Updates...")) start_update_check(true);
+    u.tooltip("Asks GitHub for a newer build of Blendity; if there is one, shows what it brings and offers to install it.");
+    if (u.menu_item("Version History...")) update_command({"update", "history"});
+    u.tooltip("Every build for this system with its notes: install a newer one, or go back to an older one.");
+    u.menu_separator();
     if (u.menu_item("About Blendity")) dialog_ = Dialog::About;
   });
 }
@@ -1096,7 +1107,7 @@ void Editor::draw_statusbar(const Recti &r) {
                                                    : std::string();
   std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
                                 playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
-                                scene_->object_count(), scene_stats_.tris_submitted, kVersion);
+                                scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
   u.label({r.x, r.y, r.w - u.px(10), r.h}, right, u.theme.text_dim, ui::Align::Right);
 }
 
@@ -3085,6 +3096,7 @@ void Editor::run_console_command(const std::string &line) {
     else set_theme(n);
     return;
   }
+  if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
@@ -3980,7 +3992,8 @@ void Editor::draw_dialogs() {
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
-  int w = u.px(dialog_ == Dialog::About ? 460 : dialog_ == Dialog::Preferences ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
+  const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries;
+  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -4063,6 +4076,24 @@ void Editor::draw_dialogs() {
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
         break;
       }
+      case Dialog::Update: {
+        const releases::Release *r = update_release(upd_.selected);
+        const std::string name = r && r->name.rfind("Blendity", 0) == 0 ? r->name : r ? "Blendity " + r->name : "";
+        title(r ? (name + " is available").c_str() : "Update");
+        draw_update_dialog(close);
+        break;
+      }
+      case Dialog::Libraries:
+        title("Blender's libraries");
+        draw_libraries_dialog(close);
+        break;
+      case Dialog::History:
+        title("Version History");
+        draw_history_dialog([&] {
+          upd_.history = false;
+          close();
+        });
+        break;
       case Dialog::FirstRunTier:
         title("Welcome: Blendity starts on Low here");
         draw_first_run_tier(close);
@@ -4079,6 +4110,10 @@ void Editor::draw_dialogs() {
           Recti r = u.popup_row();
           u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, l);
         }
+        Recti v = u.popup_row();  // (which build, and whether with Blender's libraries: tasks 0079-0080)
+        u.label({v.x + u.px(12), v.y, v.w - u.px(20), v.h},
+                "This build: " + releases::build_label() + (launch::status().full ? ", with Blender's libraries" : ", without Blender's libraries"),
+                u.theme.text_dim);
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -4104,6 +4139,15 @@ void Editor::draw_dialogs() {
         Recti r3 = u.popup_row(u.row_h() + u.px(4));
         u.label({r3.x + u.px(12), r3.y, u.px(140), r3.h}, "Rotate snap");
         u.float_field(u.id("pref_rsnap"), {r3.x + u.px(160), r3.y + u.px(2), u.px(80), r3.h - u.px(4)}, snap_rot_, 0.5f, 0.1f, 180.0f, "%.3g");
+        Recti ru = u.popup_row(u.row_h() + u.px(4));
+        u.label({ru.x + u.px(12), ru.y, u.px(140), ru.h}, "Updates");
+        if (u.checkbox({ru.x + u.px(160), ru.y + u.px(2), ru.h - u.px(4), ru.h - u.px(4)}, update_check_)) save_prefs();
+        u.label({ru.x + u.px(160) + ru.h, ru.y, u.px(140), ru.h}, "Check at start");
+        u.tooltip("Once a day at most, when online: a newer build is offered with what it brings (Help > Check for Updates any time).");
+        if (u.checkbox({ru.x + u.px(320), ru.y + u.px(2), ru.h - u.px(4), ru.h - u.px(4)}, update_previews_)) save_prefs();
+        u.label({ru.x + u.px(320) + ru.h, ru.y, u.px(200), ru.h}, "Include every PR's build");
+        u.tooltip("Off: only stable releases (v0.10.0...). On: also the build made from each merged pull request.");
+        draw_libraries_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
         Recti b = u.popup_row(u.row_h() + u.px(10));
@@ -4146,6 +4190,13 @@ void Editor::load_prefs() {
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
     else if (k == "ffmpeg") ffmpeg_path_ = v;
+    else if (k == "update_check") update_check_ = v != "0";
+    else if (k == "update_previews") update_previews_ = v != "0";
+    else if (k == "update_last") update_last_check_ = std::atof(v.c_str());
+    else if (k == "update_skip") update_skip_ = v;
+    else if (k == "use_libs") use_libs_ = v != "0";
+    else if (k == "libs_never_ask") libs_never_ask_ = v == "1";
+    else if (k == "libs_last") libs_last_check_ = std::atof(v.c_str());
     else if (k == "stats") show_stats_ = v == "1";
     else if (k == "camera_filters") scene_filters_ = v == "1";
     else if (k == "snap_move") snap_move_ = (float)std::atof(v.c_str());
@@ -4230,6 +4281,9 @@ void Editor::save_prefs() {
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
+                 update_last_check_, update_skip_.c_str());
+  s += strprintf("use_libs=%d\nlibs_never_ask=%d\nlibs_last=%.0f\n", use_libs_ ? 1 : 0, libs_never_ask_ ? 1 : 0, libs_last_check_);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }

@@ -10,6 +10,9 @@
 #include "../src/render/raster.h"
 #include "../src/render/dof.h"
 #include "../src/render/video_encode.h"
+#include "../src/core/net.h"
+#include "../src/core/releases.h"
+#include "../src/core/launch.h"
 #include "../src/research/research.h"
 #include "../src/image/image.h"
 #include "../src/render/colormanagement.h"
@@ -28546,5 +28549,132 @@ static void round81_tests() {
     std::string err3;
     CHECK(!video::encode_png_frames(frames, 24.0f, out, &err3, &cancel) && !fs::exists(out));
     for (const std::string &f : frames) std::remove(f.c_str());
+  });
+  /* ---------------------------------------------------------------- round 105: updates (task 0079) */
+  test("updates: SHA-256 matches FIPS 180-4's vectors; SHA256SUMS lines are read in both of sha256sum's forms", [] {
+    CHECK(net::sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    CHECK(net::sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    CHECK(net::sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    CHECK(net::sha256(std::string(1000000, 'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    const std::string sums = std::string(64, 'A') + "  Blendity-Setup-0.11.0.exe\r\n" + std::string(64, 'b') + " *Blendity-0.11.0-x86_64.AppImage\n";
+    CHECK(releases::sum_for(sums, "Blendity-Setup-0.11.0.exe") == std::string(64, 'a'));
+    CHECK(releases::sum_for(sums, "Blendity-0.11.0-x86_64.AppImage") == std::string(64, 'b'));
+    CHECK(releases::sum_for(sums, "other.dmg").empty());
+  });
+
+  test("updates: GitHub's releases list gives the newer builds for this system, newest first; older ones in the history", [] {
+    auto rel = [](const char *tag, const char *date, bool pre, const char *body) {
+      const std::string p = releases::platform();
+      const std::string inst = p == "windows" ? "Blendity-Setup-x.exe" : p == "linux" ? "Blendity-x-x86_64.AppImage" : "Blendity-x-macos.dmg";
+      return strprintf("{\"tag_name\":\"%s\",\"name\":\"%s\",\"body\":\"%s\",\"published_at\":\"%s\",\"prerelease\":%s,\"draft\":false,"
+                       "\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"https://x/%s\",\"size\":123},"
+                       "{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://x/sums\",\"size\":10}]}",
+                       tag, tag, body, date, pre ? "true" : "false", inst.c_str(), inst.c_str());
+    };
+    const std::string json = "[" + rel("build-pr72", "2026-10-16T10:00:00Z", true, "Adds the updater.\\n- Version History") + "," +
+                             rel("v0.10.0", "2026-10-15T10:00:00Z", false, "Stable") + "," + rel("build-pr70", "2026-10-14T10:00:00Z", true, "FFmpeg") + "," +
+                             rel("build-pr69", "2026-10-13T10:00:00Z", true, "Installers") +
+                             ",{\"tag_name\":\"draft\",\"draft\":true,\"published_at\":\"2026-10-17T00:00:00Z\",\"assets\":[]}]";
+    const std::vector<releases::Release> all = releases::parse(json);
+    std::printf("    %zu releases; the first %s (PR %d), notes '%s'\n", all.size(), all.empty() ? "-" : all[0].tag.c_str(), all.empty() ? 0 : all[0].pr,
+                all.empty() ? "" : all[0].notes.c_str());
+    CHECK(all.size() == 4 && all[0].tag == "build-pr72" && all[0].pr == 72 && all[0].notes == "Adds the updater.\n- Version History");
+    CHECK(all.size() == 4 && releases::installer(all[0], releases::platform()) && releases::checksums(all[0]));
+    /* From PR 69's build: everything above it; without previews only the stable one. */
+    const auto newer = releases::newer(all, "build-pr69", releases::platform(), true);
+    CHECK(newer.size() == 3 && newer[0]->tag == "build-pr72" && newer[2]->tag == "build-pr70");
+    const auto stable = releases::newer(all, "build-pr69", releases::platform(), false);
+    CHECK(stable.size() == 1 && stable[0]->tag == "v0.10.0");
+    CHECK(releases::newer(all, "build-pr72", releases::platform(), true).empty());  // (the newest: nothing)
+    CHECK(releases::newer(all, "dev", releases::platform(), true).empty());         // (a local build offers nothing)
+    CHECK(releases::installable(all, releases::platform(), true).size() == 4);       // (older ones too: Version History)
+    CHECK(releases::parse("not json").empty() && releases::parse("{}").empty());
+    std::printf("    this build: %s (%s)\n", releases::build_label().c_str(), releases::build_tag());
+  });
+
+  test("updates: the Update and Version History dialogs draw at 1280 x 720 from a releases list, and Skip is remembered", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.record_buttons_for_test(true);
+    const std::string p = releases::platform();
+    const std::string inst = p == "windows" ? "Blendity-Setup-x.exe" : p == "linux" ? "Blendity-x-x86_64.AppImage" : "Blendity-x-macos.dmg";
+    const std::string json = strprintf("[{\"tag_name\":\"build-pr80\",\"name\":\"0.11.0 (PR #80)\",\"body\":\"Line one\\n\\nA long paragraph %s\","
+                                       "\"published_at\":\"2026-10-20T00:00:00Z\",\"prerelease\":true,\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"https://x/a\",\"size\":5}]}]",
+                                       std::string(400, 'w').c_str(), inst.c_str());
+    ed.show_update_for_test(json, "build-pr80");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti b;
+    CHECK(ed.button_rect_for_test("Install", b) && b.bottom() <= 720);
+    CHECK(ed.button_rect_for_test("Skip this one", b));
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2;
+      ed.step_frame_headless({e});
+    }
+    CHECK(ed.update_skip_for_test() == "build-pr80");
+    ed.command("update history");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("Install this version", b) && b.bottom() <= 720);
+  });
+  test("updates (network, BLENDITY_NET_TESTS=1 only): GitHub's real releases list is fetched and read", [] {
+    const char *on = std::getenv("BLENDITY_NET_TESTS");
+    if (!on || std::string(on) != "1") {
+      std::printf("    skipped: set BLENDITY_NET_TESTS=1 to fetch from GitHub\n");
+      return;
+    }
+    std::string body, error;
+    const bool ok = net::get("https://api.github.com/repos/EmilianoManaloIV/blendity/releases?per_page=5", body, &error);
+    std::printf("    fetched %d: %zu bytes %s; %zu release(s)\n", (int)ok, body.size(), error.c_str(), releases::parse(body).size());
+    CHECK(ok && !body.empty() && body[0] == '[');
+    std::string none;
+    CHECK(!net::get("https://api.github.com/repos/EmilianoManaloIV/no-such-repo-xyz/releases", none, &error) && !error.empty());
+    std::printf("    a missing page: '%s'\n", error.c_str());
+  });
+  /* ---------------------------------------------------------------- round 106: libraries optional at run time (task 0080) */
+  test("libraries: this build knows whether it has Blender's libraries; --probe answers at once; the Libraries dialog and the choice", [] {
+    const launch::Status &st = launch::status();
+    std::printf("    built with the libraries: %d; full program '%s'; downloads go to %s\n", (int)st.full, launch::full_program_name().c_str(),
+                launch::user_libs_dir().c_str());
+#if defined(BL_WITH_TBB)
+    CHECK(st.full);
+#else
+    CHECK(!st.full);
+#endif
+    {
+      std::string a0 = "Blendity", a1 = "--probe";
+      char *argv[] = {&a0[0], &a1[0]};
+      CHECK(launch::hand_over(2, argv) == 0);  // (a probe: "my libraries loaded")
+    }
+    CHECK(!launch::full_build_ready(fs::join(test_dir(), "no such install")));
+    CHECK(launch::user_libs_dir().find(releases::build_tag()) != std::string::npos);
+    /* The Libraries dialog, from a release that has this build's libraries. */
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.record_buttons_for_test(true);
+    const std::string p = releases::platform();
+    const std::string json = strprintf("[{\"tag_name\":\"%s\",\"name\":\"this\",\"body\":\"\",\"published_at\":\"2026-10-20T00:00:00Z\",\"prerelease\":true,"
+                                       "\"assets\":[{\"name\":\"blendity-libs-%s-0.10.0.zip\",\"browser_download_url\":\"https://x/l\",\"size\":157286400},"
+                                       "{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://x/s\",\"size\":10}]}]",
+                                       releases::build_tag(), p.c_str());
+    CHECK(ed.show_libraries_for_test(json));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti b;
+    CHECK(ed.button_rect_for_test("Download", b) && b.bottom() <= 720);
+    CHECK(ed.button_rect_for_test("Never ask", b));
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2;
+      ed.step_frame_headless({e});
+    }
+    /* Never ask is kept with the preferences; so is turning the libraries off. */
+    const std::string prefs = fs::join(test_dir(), "r106_prefs.txt");
+    ed.prefs_for_test(prefs);
+    ed.command("update libsoff");
+    ed.save_prefs_for_test();
+    std::string saved;
+    CHECK(fs::read_file(prefs, saved) && saved.find("libs_never_ask=1") != std::string::npos && saved.find("use_libs=0") != std::string::npos);
+    std::remove(prefs.c_str());
   });
 }

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 #include <thread>
 
 #ifdef _WIN32
@@ -385,21 +386,33 @@ bool move_to_trash(const std::string &path, std::string *error) {
   return true;
 }
 
+/* A child nobody waits for (a viewer, the restarted editor), reaped by a thread of its own. (Not SIGCHLD ignored for
+ * the whole process: that would take run_program's exit codes too - curl's, the probe's.) */
+void reap_in_background(pid_t pid) {
+  std::thread([pid] {
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  }).detach();
+}
+
 void open_external(const std::string &path) {
 #  ifdef __APPLE__
   const char *tool = "open";
 #  else
   const char *tool = "xdg-open";
 #  endif
-  static bool reaper = (signal(SIGCHLD, SIG_IGN), true); /* auto-reap viewers */
-  (void)reaper;
   pid_t pid;
   char *argv[] = {(char *)tool, (char *)path.c_str(), nullptr};
-  if (posix_spawnp(&pid, tool, nullptr, nullptr, argv, environ) != 0) {
-    Log::warn("Could not launch '%s' to open %s", tool, path.c_str());
-  }
+  if (posix_spawnp(&pid, tool, nullptr, nullptr, argv, environ) != 0) return Log::warn("Could not launch '%s' to open %s", tool, path.c_str());
+  reap_in_background(pid);
 }
 #endif
+
+std::string temp_dir() {
+  std::error_code ec;
+  const stdfs::path p = stdfs::temp_directory_path(ec);
+  return ec ? std::string(".") : S(p);
+}
 
 bool remove_file(const std::string &path) {
   std::error_code ec;
@@ -525,32 +538,69 @@ std::string find_program(const std::string &name) {
 }
 
 #ifdef _WIN32
-int run_program(const std::vector<std::string> &argv) {
+int run_program(const std::vector<std::string> &argv, int timeout_s) {
   if (argv.empty()) return -1;
   std::wstring line = fs::widen(windows_command_line(argv));
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi{};
   if (!CreateProcessW(nullptr, &line[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return -1;
-  WaitForSingleObject(pi.hProcess, INFINITE);
+  if (WaitForSingleObject(pi.hProcess, timeout_s > 0 ? (DWORD)timeout_s * 1000 : INFINITE) == WAIT_TIMEOUT) {
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return kExitTimedOut;
+  }
   DWORD code = 1;
   GetExitCodeProcess(pi.hProcess, &code);
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
   return (int)code;
 }
+bool start_program(const std::vector<std::string> &argv) {
+  if (argv.empty()) return false;
+  std::wstring line = fs::widen(windows_command_line(argv));
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, &line[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return true;
+}
 #else
-int run_program(const std::vector<std::string> &argv) {
+bool start_program(const std::vector<std::string> &argv) {
+  if (argv.empty()) return false;
+  std::vector<char *> args;
+  for (const std::string &a : argv) args.push_back((char *)a.c_str());
+  args.push_back(nullptr);
+  pid_t pid;
+  if (posix_spawnp(&pid, args[0], nullptr, nullptr, args.data(), environ) != 0) return false;
+  fs::reap_in_background(pid);
+  return true;
+}
+
+int run_program(const std::vector<std::string> &argv, int timeout_s) {
   if (argv.empty()) return -1;
   std::vector<char *> args;
   for (const std::string &a : argv) args.push_back((char *)a.c_str());
   args.push_back(nullptr);
   pid_t pid;
   if (posix_spawnp(&pid, args[0], nullptr, nullptr, args.data(), environ) != 0) return -1;
+  const auto t0 = std::chrono::steady_clock::now();
   int status = 0;
-  while (waitpid(pid, &status, 0) < 0) {
-    if (errno == ECHILD) return kExitUnknown;  // (SIGCHLD ignored, as open_external sets it: the child reaped itself)
-    if (errno != EINTR) return -1;
+  while (true) {
+    const pid_t r = waitpid(pid, &status, timeout_s > 0 ? WNOHANG : 0);
+    if (r == pid) break;
+    if (r < 0 && errno == ECHILD) return kExitUnknown;  // (reaped elsewhere: the code is lost)
+    if (r < 0 && errno != EINTR) return -1;
+    if (timeout_s > 0 && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(timeout_s)) {
+      kill(pid, SIGKILL);
+      waitpid(pid, &status, 0);
+      return kExitTimedOut;
+    }
+    if (r == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }

@@ -26,7 +26,9 @@ From the [Releases](https://github.com/EmilianoManaloIV/blendity/releases) page:
 | Linux (x86-64, Ubuntu 22.04 or newer) | `Blendity-<version>-x86_64.AppImage` | `chmod +x` it and run it. Or unpack `blendity-<version>-linux-x86_64.tar.gz` anywhere and run `Blendity` (it needs only `libX11`). |
 | macOS (Apple silicon) | `Blendity-<version>-macos.dmg` | Open it and drag Blendity onto Applications. The app isn't signed, so the first time macOS asks for a go-ahead: on macOS 15 or later, try to open it, then System Settings > Privacy & Security > **Open Anyway**; on macOS 14 or earlier, right-click it > **Open**. |
 
-Your work goes in a project folder, `BlendityProject` in your home folder unless you open another.
+Your work goes in a project folder, `BlendityProject` in your home folder unless you open another. Blendity checks for
+updates once a day (Help > Check for Updates; Help > Version History goes back to an older build), and runs with or
+without Blender's libraries - your choice in Preferences > Libraries; without them, or offline, it uses its own code.
 
 ## Quick start
 
@@ -110,7 +112,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (9965 unit checks in 667 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (9992 unit checks in 672 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

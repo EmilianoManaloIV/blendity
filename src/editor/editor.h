@@ -38,6 +38,7 @@
 #include "ui.h"
 
 #include <atomic>
+#include "../core/releases.h"
 #include <functional>
 #include <thread>
 #include <tuple>
@@ -577,6 +578,16 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  void show_update_for_test(const std::string &json, const std::string &tag) {
+    upd_.list = releases::parse(json);
+    upd_.selected = tag;
+    dialog_ = Dialog::Update;
+  }
+  const std::string &update_skip_for_test() const { return update_skip_; }
+  bool show_libraries_for_test(const std::string &json) {
+    upd_.list = releases::parse(json);
+    return offer_libraries();
+  }
   void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
   /* Preferences in a headless test: written to and read from `path` (never the user's). */
   void prefs_for_test(const std::string &path) {
@@ -2260,7 +2271,54 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries } dialog_ = Dialog::None;
+  /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
+   * and an installer being downloaded. */
+  struct UpdateCheck {
+    enum { Running, Done, Failed };
+    std::atomic<int> state{Running};
+    std::string body, own, error;  // own: this build's release when the newest 100 don't include it
+  };
+  struct UpdateDownload {
+    enum { Running, Verifying, Done, Failed };
+    std::atomic<int> state{Running};
+    std::atomic<uint64_t> done{0}, total{0};
+    std::atomic<bool> cancel{false};
+    bool libraries = false;  // (Blender's libraries for the fallback, task 0080: unpacked, not installed)
+    std::string file, path, error;
+  };
+  struct UpdateState {
+    std::shared_ptr<UpdateCheck> check;
+    std::shared_ptr<UpdateDownload> download;
+    std::vector<releases::Release> list;
+    std::string offer, selected;  // tags
+    bool manual = false, history = false, want_libs = false, want_updates = false;
+  } upd_;
+  double libs_last_check_ = 0.0;  // (the libraries are asked about at most once a day)
+  static bool prepare_install(UpdateDownload &job, std::string &error);  // (on the downloading thread: no editor state)
+  void cancel_update_download();
+  bool use_libs_ = true, libs_never_ask_ = false;  // Preferences > Libraries (read by the launcher too, task 0080)
+  void check_libraries_at_start();
+  bool offer_libraries();
+  void draw_libraries_dialog(const std::function<void()> &close);
+  void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries);
+  static bool unpack_libraries(const std::string &archive, std::string &error);
+  void restart_program();
+  void draw_libraries_settings();
+  bool update_check_ = true, update_previews_ = true;  // Preferences > Updates
+  double update_last_check_ = 0.0;                     // (seconds since 1970)
+  std::string update_skip_;                            // "Skip this one"
+  void start_update_check(bool manual, bool updates = true);
+  void poll_updates();
+  void poll_update_download();
+  const releases::Release *update_release(const std::string &tag) const;
+  void draw_release_notes(const releases::Release &r, int h);
+  bool draw_update_progress();
+  void draw_update_dialog(const std::function<void()> &close);
+  void draw_history_dialog(const std::function<void()> &close);
+  void install_release(const std::string &tag);
+  void run_installer(const std::string &path);
+  void update_command(const std::vector<std::string> &t);
   void draw_first_run_tier(const std::function<void()> &close);  // task 0075
   std::string dialog_text_;
   std::vector<std::string> dialog_files_;

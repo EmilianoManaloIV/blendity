@@ -474,6 +474,18 @@ checked both ways against Blender 5.2.
 
 > Learn: *Assets, Scenes and Files*, *Coordinate Systems and Handedness*.
 
+**Updates** (Help > Check for Updates, Help > Version History; Preferences > Updates): once a day, when online,
+Blendity looks for a newer build - every merged pull request makes one, version tags the stable releases - and shows
+what it brings with **Install** / **Not now** / **Skip this one**. Installs are checked against the release's SHA-256
+list. Version History installs any build, older ones too (the one before a certain change). Console: `update check`,
+`update history`, `update install <tag>`.
+
+**With or without Blender's libraries** (Preferences > Libraries): an install holds Blendity (its own code only, always
+starts) and Blendity-full (with Blender's libraries). Blendity hands over to the full one when its libraries load and
+**Use Blender's libraries** is on; otherwise it runs itself - offline, with a library missing or damaged, or by your
+choice (`--no-libs` once). When the libraries are missing and Blendity is online it offers to download them for this
+build (**Download** / **Not now** / **Never ask**). The Windows installer's "Blendity only" type leaves them out.
+
 ---
 
 ## 11. Performance and the minimum machine

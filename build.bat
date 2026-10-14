@@ -71,6 +71,10 @@ rem ABI settings the libraries were built with (blender\build_files\build_enviro
 set LIBDEFS=%LIBDEFS% /DIMATH_DLL /DOPENEXR_DLL /DMANIFOLD_PAR=1 /DJPH_SHARED_LIBRARY /DJPH_FLOATING_POINT_EXCEPTIONS_ENABLED /DJPH_DOUBLE_PRECISION /DJPH_CROSS_PLATFORM_DETERMINISTIC /DJPH_USE_CPU_COMPUTE /DJPH_OBJECT_STREAM /DJPH_USE_SSE4_1 /DJPH_USE_SSE4_2
 :libs_done
 
+rem The build's identity (task 0079): VERSION's number, and CI's release tag (BLENDITY_BUILD) or "dev".
+set /p BL_VERSION_NUMBER=<VERSION
+if "%BLENDITY_BUILD%"=="" set BLENDITY_BUILD=dev
+set LIBDEFS=%LIBDEFS% /DBL_VERSION_NUMBER=%BL_VERSION_NUMBER% /DBL_BUILD=%BLENDITY_BUILD%
 set COMMON=/nologo /Iextern\sky\include /std:c++17 /EHsc /W3 /MP /utf-8 /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX /permissive- /Zc:__cplusplus %LIBDEFS% %LIBINC%
 rem Blender's libraries use the DLL runtime (/MD); the dependency-free build
 rem stays a single static executable (/MT).
@@ -81,7 +85,7 @@ if /i "%CONFIG%"=="debug" (
 ) else (
   set FLAGS=%COMMON% /O2 /Oi /GL /fp:fast %CRT% /DNDEBUG
 )
-if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64: bash packaging\fetch_blender_libs.sh windows_x64 fetches them^))
+if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else if "%BLENDITY_NO_LIBS%"=="1" (echo [blendity] Dependency-free build ^(BLENDITY_NO_LIBS^)) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64: bash packaging\fetch_blender_libs.sh windows_x64 fetches them^))
 set LIBSRC=
 for %%d in (core image render scene texture editor research platform deps) do (
   for %%f in (src\%%d\*.cpp) do set LIBSRC=!LIBSRC! %%f
@@ -89,8 +93,8 @@ for %%d in (core image render scene texture editor research platform deps) do (
 rem Blender's own bundled dependencies (see extern\README.md)
 set LIBSRC=!LIBSRC! extern\ufbx\ufbx.c extern\sky\source\sky_hosek.cpp
 set OBJ=build\obj_%CONFIG%
-set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib %LIBLINK%
-if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib %LIBLINK%
+set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib %LIBLINK%
+if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto app

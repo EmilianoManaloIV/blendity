@@ -83,6 +83,7 @@ bool remove_file(const std::string &path);  // deleted for good (a UTF-8 path, a
 std::string executable_dir();
 std::string current_dir();
 std::string home_dir();
+std::string temp_dir();  // the system's folder for temporary files
 std::string normalize(const std::string &path);
 /* Opens a file or folder with the OS default handler (papers, folders). */
 void open_external(const std::string &path);
@@ -102,8 +103,12 @@ std::vector<std::string> utf8_arguments();
 std::string find_program(const std::string &name);
 /* Runs argv[0] with the rest as its arguments, without a console window, and waits: its exit code, -1 if it didn't
  * start. Call it off the main thread for anything slow. */
-int run_program(const std::vector<std::string> &argv);
-constexpr int kExitUnknown = -2;  // run_program: it ran, but its exit code was lost (SIGCHLD ignored)
+int run_program(const std::vector<std::string> &argv, int timeout_s = 0);  // timeout_s > 0: killed after it
+/* Starts argv[0] with the rest as its arguments and returns at once (an installer, the full build): false if it
+ * didn't start. */
+bool start_program(const std::vector<std::string> &argv);
+constexpr int kExitUnknown = -2;   // run_program: it ran, but its exit code was lost (reaped elsewhere)
+constexpr int kExitTimedOut = -3;  // run_program: killed after timeout_s
 /* The Windows command line for `argv` (each argument quoted as CommandLineToArgvW reads it back); for tests. */
 std::string windows_command_line(const std::vector<std::string> &argv);
 }  // namespace sys
