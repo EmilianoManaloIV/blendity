@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** none (packaging only; no new dependency in Blendity itself)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/69
 
 ## Goal
 The user (2026-10-14): installers for Windows, Linux and macOS. Their choice: an Inno Setup .exe, an AppImage plus a

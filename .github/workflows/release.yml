@@ -42,7 +42,7 @@ jobs:
           "$APP/unins000.exe" //VERYSILENT //SUPPRESSMSGBOXES
           for i in $(seq 1 30); do [ -e "$APP/Blendity.exe" ] || break; sleep 1; done  # (the uninstaller runs on from %TEMP%)
           [ ! -e "$APP/Blendity.exe" ] || { echo "::error::the uninstaller left Blendity.exe"; exit 1; }
-          ! reg query 'HKCU\Software\Classes\.scene' 2>/dev/null || { echo "::error::the uninstaller left the .scene association"; exit 1; }
+          ! reg query 'HKCU\Software\Classes\Blendity.Scene' 2>/dev/null || { echo "::error::the uninstaller left the .scene association"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: installer-windows

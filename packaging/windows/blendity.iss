@@ -57,7 +57,7 @@ Name: "{autodesktop}\Blendity"; Filename: "{app}\Blendity.exe"; IconFilename: "{
 
 [Registry]
 ; Per user (HKCU\Software\Classes), so no administrator is needed; removed with the uninstaller.
-Root: HKA; Subkey: "Software\Classes\.scene"; ValueType: string; ValueName: ""; ValueData: "Blendity.Scene"; Flags: uninsdeletevalue; Tasks: sceneassoc
+Root: HKA; Subkey: "Software\Classes\.scene"; ValueType: string; ValueName: ""; ValueData: "Blendity.Scene"; Flags: uninsdeletevalue uninsdeletekeyifempty; Tasks: sceneassoc
 Root: HKA; Subkey: "Software\Classes\Blendity.Scene"; ValueType: string; ValueName: ""; ValueData: "Blendity Scene"; Flags: uninsdeletekey; Tasks: sceneassoc
 Root: HKA; Subkey: "Software\Classes\Blendity.Scene\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\blendity.ico"; Tasks: sceneassoc
 Root: HKA; Subkey: "Software\Classes\Blendity.Scene\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Blendity.exe"" ""%1"""; Tasks: sceneassoc
