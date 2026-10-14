@@ -28262,4 +28262,30 @@ static void round81_tests() {
     a2 = ed.scene().find(a->id);
     CHECK(a2 && std::fabs(a2->get<MeshRenderer>()->materials[0]->tiling.x - 0.25f) < 1e-5f);
   });
+  /* ---------------------------------------------------------------- round 99: themes (task 0073) */
+  test("themes: Emiliano Light and Dark take the site's colours, the choice is kept in the prefs, an unknown name is refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    CHECK(ed.theme_name_for_test() == "Dark");
+    ed.command("theme Emiliano Light");
+    CHECK(ed.theme_name_for_test() == "Emiliano Light");
+    CHECK(ed.ui_for_test().theme.window == Color::hex(0xF1EEE5) && ed.ui_for_test().theme.text == Color::hex(0x292927) &&
+          ed.ui_for_test().theme.focus == Color::hex(0xD7882B));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();  // (every window draws in a light theme)
+    ed.command("theme emiliano dark");  // (case aside)
+    CHECK(ed.ui_for_test().theme.window == Color::hex(0x292927) && ed.ui_for_test().theme.text == Color::hex(0xF1EEE5) &&
+          ed.ui_for_test().theme.ok == Color::hex(0x45E8A2));
+    ed.command("theme Neon");  // (refused)
+    CHECK(ed.theme_name_for_test() == "Emiliano Dark");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();  // (every window draws in it)
+    const std::string prefs = fs::join(test_dir(), "r99_prefs.txt");
+    ed.prefs_for_test(prefs);
+    ed.save_prefs_for_test();
+    Editor ed2;
+    ed2.init_headless(800, 600);
+    ed2.prefs_for_test(prefs);
+    ed2.load_prefs_for_test();
+    CHECK(ed2.theme_name_for_test() == "Emiliano Dark" && ed2.ui_for_test().theme.window == Color::hex(0x292927));
+    std::remove(prefs.c_str());
+  });
 }

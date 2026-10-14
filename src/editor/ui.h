@@ -51,7 +51,34 @@ struct Theme {
   uint32_t axis_y = Color::hex(0x9AF348);
   uint32_t axis_z = Color::hex(0x3A7AF8);
   uint32_t axis_hot = Color::hex(0xF6F232);
+  /* Task 0073: colours the windows used to write by hand. */
+  uint32_t row_alt = Color::hex(0x262626);       // every other row of a list (dopesheet, sequencer, UV)
+  uint32_t strip = Color::hex(0x2A2A2A);         // a ruler's or a toolbar group's strip, a disabled button
+  uint32_t row_hover = Color::hex(0x444444);     // a row or thumbnail under the mouse
+  uint32_t key = Color::hex(0xB8B8B8);           // a keyframe diamond
+  uint32_t key_group = Color::hex(0xE0E0E0);     // a group row's diamond
+  uint32_t key_selected = Color::hex(0x5AA9FF);  // a selected key
+  uint32_t canvas_bg = Color::hex(0x202020);     // a drawing's background (the auto-rig's figure, a graph)
+  uint32_t tooltip = Color::hex(0x1E1E1E), tooltip_border = Color::hex(0x5A5A5A);
+  uint32_t scroll_track = Color::hex(0x2E2E2E), scroll_thumb = Color::hex(0x5E5E5E);
+  uint32_t bar = Color::hex(0x2F2F2F);           // a window's own toolbar (Project, Materials, the views' headers)
+  uint32_t pane = Color::hex(0x333333);          // a side pane (the Project folder tree, the Lighting and Render settings)
+  uint32_t stripe = Color::hex(0x3C3C3C);        // every other Console line
+  uint32_t well = Color::hex(0x252525);          // a progress bar's empty part
+  uint32_t playhead = Color::hex(0xFFFFFF);      // the timeline's current frame, the dragged bar's outline
+  uint32_t note = Color::hex(0x3A322A), note_text = Color::hex(0xE9D8C4);  // a Learn note box (a cited book)
+  uint32_t link = Color::hex(0xA9C9EA), link_icon = Color::hex(0x7FB2E6);   // a Learn source-file link
+  uint32_t question = Color::hex(0x30353A), question_hover = Color::hex(0x34393F), question_border = Color::hex(0x47505A);
 };
+
+/* The theme's index in kThemeNames by name (case aside), or -1. */
+int theme_index(const std::string &name);
+
+/* The editor's colour themes (task 0073): Dark (Blendity's own), Light, and the two of the user's site (its Figma
+ * Variables "Branding Guide", Light and Dark modes). */
+constexpr int kThemeCount = 4;
+extern const char *const kThemeNames[kThemeCount];
+Theme theme_named(const std::string &name);
 
 enum class Icon {
   None, Hand, Move, Rotate, Scale, Transform, Play, Pause, Step, Cube, Camera, Light, Folder, File, Scene, Eye,

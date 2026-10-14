@@ -194,7 +194,7 @@ void Editor::draw_scene_view(const Recti &r) {
 
 void Editor::draw_scene_overlay_bar(const Recti &bar) {
   auto &u = ui_;
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   u.canvas.hline(bar.x, bar.right(), bar.bottom() - 1, u.theme.border);
   int h = bar.h - u.px(6), y = bar.y + u.px(3), x = bar.x + u.px(6);
   static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Shaded Wireframe"};
@@ -224,8 +224,9 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   bool hot = u.hovered(er);
   uint32_t bg = edit_mode_ ? u.theme.accent : (hot && can_edit ? u.theme.button_hover : u.theme.button);
   u.frame(er, bg, u.theme.border, u.px(3));
-  u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, can_edit ? 0xFFFFFFFF : u.theme.text_dim);
-  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", can_edit ? 0xFFFFFFFF : u.theme.text_dim);
+  const uint32_t ink = !can_edit ? u.theme.text_dim : edit_mode_ ? 0xFFFFFFFF : u.theme.text_bright;  // (white on the accent only)
+  u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
+  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", ink);
   if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
   u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
   (void)x;
@@ -3232,7 +3233,7 @@ void Editor::draw_game_view(const Recti &r) {
   auto &u = ui_;
   int bh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   {
     /* Which camera the view shows: the scene's Active Camera (Unity: the Display dropdown; Blender: the
      * scene camera). Choosing one here sets it. */
@@ -3645,7 +3646,7 @@ void Editor::draw_last_op_panel(const Recti &view) {
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
   Recti r{view.x + u.px(10), view.bottom() - h - u.px(10), w, h};
   last_op_rect_ = r;
-  u.frame(r, Color::hex(0x262626, 235), Color::hex(0x101010), u.px(4));
+  u.frame(r, (u.theme.popup & 0x00FFFFFFu) | (235u << 24), u.theme.border, u.px(4));
   Recti hr{r.x + pad, r.y + u.px(3), r.w - pad * 2, rh};
   int a = u.font.line_height() - u.px(4);
   u.draw_icon(last_op_open_ ? ui::Icon::ArrowDown : ui::Icon::ArrowRight, {hr.x, hr.y + (rh - a) / 2, a, a}, u.theme.text);

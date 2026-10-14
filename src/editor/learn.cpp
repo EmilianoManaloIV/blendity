@@ -62,14 +62,14 @@ void Editor::draw_learn(const Recti &r) {
   /* ---- lesson list ---- */
   int lw = std::min(u.px(250), r.w * 2 / 5);
   Recti left{r.x, r.y, lw, r.h};
-  u.canvas.fill_rect(left, Color::hex(0x313131));
+  u.canvas.fill_rect(left, u.theme.pane);
   u.canvas.vline(left.right(), left.y, left.bottom(), u.theme.border);
   Recti head{left.x, left.y, left.w, u.row_h() * 2 + u.px(10)};
   u.draw_icon(Icon::Book, {head.x + u.px(10), head.y + u.px(8), u.row_h(), u.row_h()}, u.theme.accent);
   u.label({head.x + u.px(16) + u.row_h(), head.y + u.px(6), head.w, u.row_h()}, "Learn Blendity", u.theme.text_bright);
   int done = (int)lessons_done_.size();
   Recti pb{head.x + u.px(10), head.y + u.row_h() + u.px(12), head.w - u.px(20), u.px(6)};
-  u.canvas.fill_round_rect(pb, u.px(3), Color::hex(0x252525));
+  u.canvas.fill_round_rect(pb, u.px(3), u.theme.well);
   u.canvas.fill_round_rect({pb.x, pb.y, pb.w * std::min(done, n) / n, pb.h}, u.px(3), u.theme.accent);
   u.label({head.x + u.px(10), pb.bottom(), head.w - u.px(20), u.row_h()}, strprintf("%d of %d lessons complete", std::min(done, n), n), u.theme.text_dim);
   Recti list{left.x, head.bottom() + u.px(10), left.w - 1, left.h - head.h - u.px(10)};
@@ -80,7 +80,7 @@ void Editor::draw_learn(const Recti &r) {
     bool cur = i == lesson_;
     bool hot = u.hovered(row);
     if (cur) u.canvas.fill_rect(row, u.theme.selection);
-    else if (hot) u.canvas.fill_rect(row, Color::hex(0x404040));
+    else if (hot) u.canvas.fill_rect(row, u.theme.row_hover);
     int a = u.font.line_height() - u.px(3);
     if (lessons_done_.count(i)) u.draw_icon(Icon::Check, {row.x + u.px(8), row.y + (rh - a) / 2, a, a}, u.theme.ok);
     else u.label({row.x + u.px(4), row.y, a + u.px(10), rh}, std::to_string(i), u.theme.text_dim, ui::Align::Center);
@@ -163,7 +163,7 @@ void Editor::draw_learn(const Recti &r) {
         maxl = std::max(maxl, wrapped.back().size());
       }
       int hgt = (int)maxl * lh + u.px(8);
-      uint32_t bg = table_header ? Color::hex(0x2A2A2A) : ((li % 2) ? Color::hex(0x3E3E3E) : Color::hex(0x393939));
+      uint32_t bg = table_header ? u.theme.strip : ((li % 2) ? u.theme.header : u.theme.panel_alt);
       u.canvas.fill_rect({x0, y, w, hgt}, bg);
       for (int c = 0; c < nc && c < (int)wrapped.size(); c++) {
         int yy = y + u.px(4);
@@ -171,7 +171,7 @@ void Editor::draw_learn(const Recti &r) {
           u.canvas.text(u.font, x0 + c * cw + u.px(6), yy, l, table_header ? u.theme.accent : (c == 0 ? u.theme.text_bright : u.theme.text));
           yy += lh;
         }
-        if (c > 0) u.canvas.vline(x0 + c * cw, y, y + hgt, Color::hex(0x2C2C2C));
+        if (c > 0) u.canvas.vline(x0 + c * cw, y, y + hgt, u.theme.separator);
       }
       y += hgt;
       table_header = false;
@@ -179,12 +179,12 @@ void Editor::draw_learn(const Recti &r) {
     else if (k == '>') {
       auto lines = wrap(u.font, rest, w - u.px(40));
       int hgt = (int)lines.size() * lh + u.px(10);
-      u.canvas.fill_rect({x0, y, w, hgt}, Color::hex(0x3A322A));
+      u.canvas.fill_rect({x0, y, w, hgt}, u.theme.note);
       u.canvas.fill_rect({x0, y, u.px(3), hgt}, u.theme.accent);
       int a = lh - u.px(3);
       u.draw_icon(Icon::Book, {x0 + u.px(10), y + u.px(6), a, a}, u.theme.accent);
       int yy = y + u.px(5);
-      for (auto &l : lines) { u.canvas.text(u.font, x0 + u.px(16) + a, yy, l, Color::hex(0xE9D8C4)); yy += lh; }
+      for (auto &l : lines) { u.canvas.text(u.font, x0 + u.px(16) + a, yy, l, u.theme.note_text); yy += lh; }
       y += hgt + u.px(4);
     }
     else if (k == '@') {
@@ -192,11 +192,11 @@ void Editor::draw_learn(const Recti &r) {
       int hgt = (int)lines.size() * lh + u.px(8);
       Recti br{x0, y, w, hgt};
       bool hot = u.hovered(br);
-      u.canvas.fill_rect(br, hot ? Color::hex(0x2C3540) : Color::hex(0x2A2F36));
+      u.canvas.fill_rect(br, hot ? u.theme.question_hover : u.theme.question);
       int a = lh - u.px(3);
-      u.draw_icon(Icon::Terminal, {x0 + u.px(8), y + u.px(5), a, a}, Color::hex(0x7FB2E6));
+      u.draw_icon(Icon::Terminal, {x0 + u.px(8), y + u.px(5), a, a}, u.theme.link_icon);
       int yy = y + u.px(4);
-      for (auto &l : lines) { u.canvas.text(u.font, x0 + u.px(14) + a, yy, l, Color::hex(0xA9C9EA)); yy += lh; }
+      for (auto &l : lines) { u.canvas.text(u.font, x0 + u.px(14) + a, yy, l, u.theme.link); yy += lh; }
       if (hot) {
         u.tooltip("Click to open this location from the Blender source tree next to Blendity.");
         if (in.pressed[0]) {
@@ -220,7 +220,7 @@ void Editor::draw_learn(const Recti &r) {
       int hgt = (int)(ql.size() + al.size()) * lh + u.px(14);
       Recti br{x0, y, w, hgt};
       bool hot = u.hovered(br);
-      u.frame(br, hot ? Color::hex(0x34393F) : Color::hex(0x30353A), Color::hex(0x47505A), u.px(4));
+      u.frame(br, hot ? u.theme.question_hover : u.theme.question, u.theme.question_border, u.px(4));
       int a2 = lh - u.px(3);
       u.draw_icon(Icon::Lightbulb, {x0 + u.px(8), y + u.px(6), a2, a2}, u.theme.warning);
       int yy = y + u.px(5);

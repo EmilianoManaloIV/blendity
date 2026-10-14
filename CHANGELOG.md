@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 99): themes - Dark, Light, Emiliano Light and Emiliano Dark (task 0073)
+
+**Asked:** an editor palette / theme option using the user's Figma site ("look at the variables tab in figma").
+
+**Changed**
+- **Preferences > Theme** (console: `theme <name>`): Dark (Blendity's), Light, **Emiliano Light** and **Emiliano Dark**.
+  The two Emiliano themes take the Figma file's Variables (Branding Guide, Light and Dark modes): paper F1EEE5 and
+  charcoal 292927 swapped between the modes, amber D7882B / A65E1E for buttons and selection, mint 45E8A2, red E6533C,
+  blue 4C76FF and amber FF9A00 as signal colours (focus, X / Y / Z, errors, warnings), stone, slate and silver for
+  borders and dim text. The choice is kept with the preferences.
+- Colours the windows wrote by hand (list stripes, ruler strips, row hover, keyframe diamonds, the auto-rig's figure)
+  are now theme colours.
+
+**Checked**
+- New test (round 99): Emiliano Light and Dark give the site's colours, case aside; an unknown name is refused; the
+  theme survives saving and loading the preferences.
+- Headless screenshots of both Emiliano themes (Animation layout).
+- Unit checks: Windows 9,919, 0 failed (660 tests); the whole suite in render-cache verify mode: 9,920,
+  0 failed, 0 stale pictures. Linux with libraries: 9,827, 0 failed. Sanitizer build: 9,744, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- In the light themes, tooltips, the F9 panel, the Hierarchy's scene row, every other Console line, the Learn sidebar,
+  notes and questions, the Lighting and Render settings and the Project folder tree kept dark fills under dark text:
+  they take theme colours now (tooltip, bar, pane, stripe, well, note, question, link), as do the scrollbars, menu
+  separators, popup outlines, the windows' toolbars, the timeline playhead and the Edit Mode button's label.
+- Emiliano Dark's borders and field outlines were the toolbar's colour; they show now. Its selected keys are amber.
+- Emiliano Light's auto-rig figure and graphs sit on stone, not charcoal.
+- `set_theme` and the Preferences combo share one name lookup (`ui::theme_index`).
+- The Dark theme's Learn table rows, Sequencer details and curve keys moved by a shade or two (now theme colours).
+- Left as they were: the Scene and Game views' and the UV editor's own drawing (they read over any picture).
+
 ## 2026-10-14 (round 98): a texture's Physical Size drives its materials' tiling (task 0072)
 
 **Asked:** a texture's Physical Size should really adjust its tiling.

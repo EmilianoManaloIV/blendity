@@ -736,7 +736,7 @@ void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const R
       });
       const float cx = (float)anim_x_of(sheet, f + (sel ? shift : 0.0f), end), cy = (float)(lr.y + row_h / 2);
       const float s = (float)u.px(row.group ? 6 : 5);
-      const uint32_t c = sel || lit ? Color::hex(0x5AA9FF) : row.group ? Color::hex(0xE0E0E0) : Color::hex(0xB8B8B8);
+      const uint32_t c = sel || lit ? u.theme.key_selected : row.group ? u.theme.key_group : u.theme.key;
       u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx, cy - s), Vec2(cx + s, cy), c);
       u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx + s, cy), Vec2(cx, cy + s), c);
     }
@@ -752,7 +752,7 @@ void Editor::draw_anim_row_name(const AnimationClip &clip, GameObject *root, con
   const int t = row.tracks.empty() ? -1 : row.tracks[0];
   const bool picked = row.tracks.size() == 1 && std::find(anim_.curve_tracks.begin(), anim_.curve_tracks.end(), t) != anim_.curve_tracks.end();
   if (anim_.curves && picked) u.canvas.fill_rect(lr, u.theme.selection);
-  else if (index % 2) u.canvas.fill_rect({body.x, lr.y, anim_.curves ? lr.w : body.w, lr.h}, Color::hex(0x262626));
+  else if (index % 2) u.canvas.fill_rect({body.x, lr.y, anim_.curves ? lr.w : body.w, lr.h}, u.theme.row_alt);
   const bool missing = t >= 0 && anim_target(*root, clip.tracks[(size_t)t].path) == nullptr;
   int x = lr.x + u.px(6) + row.depth * u.px(10);
   if (row.group) {
@@ -810,14 +810,14 @@ void Editor::draw_animation_window(const Recti &r) {
   const Recti list{body.x, body.y + row_h, list_w, body.h - row_h}, ruler{body.x + list_w, body.y, body.w - list_w - u.px(8), row_h};
   const Recti sheet{ruler.x, ruler.bottom(), ruler.w, body.h - row_h};
   const float end = std::max(30.0f, clip->end_frame()) * 1.1f;
-  u.canvas.fill_rect({body.x, body.y, body.w, row_h}, Color::hex(0x2A2A2A));
+  u.canvas.fill_rect({body.x, body.y, body.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, sheet, end);
   draw_anim_rows(*clip, root, list, body, sheet, row_h, end);
   anim_.sheet = sheet, anim_.sheet_end = end;
   if (anim_.curves) draw_anim_curves(*clip, sheet, end);
   /* The playhead (red while recording). */
   const int px = anim_x_of(sheet, anim_.frame, end);
-  u.canvas.vline(px, ruler.y, body.bottom(), anim_.record ? Color::hex(0xFF3B3B) : Color::hex(0xFFFFFF));
+  u.canvas.vline(px, ruler.y, body.bottom(), anim_.record ? Color::hex(0xFF3B3B) : u.theme.playhead);
   if (anim_.drag == 3) u.canvas.rect_outline({std::min(in.mx, anim_.drag_x), std::min(in.my, anim_.drag_y), std::abs(in.mx - anim_.drag_x), std::abs(in.my - anim_.drag_y)}, u.theme.focus);
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
   if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);

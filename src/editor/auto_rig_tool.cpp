@@ -307,7 +307,7 @@ void Editor::draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj) {
   const Recti b = lay.row(u.row_h() + u.px(4));
   const Recti br{b.x + u.px(4), b.y, b.w - u.px(8), b.h};
   if (!next.empty()) {
-    u.frame(br, Color::hex(0x2A2A2A), u.theme.border, u.px(3));
+    u.frame(br, u.theme.strip, u.theme.border, u.px(3));
     u.label(br, "Build Rig", u.theme.text_dim, ui::Align::Center);
   }
   else if (u.button(br, "Build Rig")) autorig_build();
@@ -319,7 +319,7 @@ void Editor::draw_autorig_diagram(ui::Layout &lay) {
   auto &u = ui_;
   const Recti area = lay.row(u.px(150));
   const Recti fig{area.x + area.w / 2 - u.px(75), area.y + u.px(4), u.px(150), area.h - u.px(8)};
-  u.canvas.fill_rect(fig, Color::hex(0x202020));
+  u.canvas.fill_rect(fig, u.theme.canvas_bg);
   const std::vector<RigMarker> &ms = rig_markers(autorig_.kind);
   auto at = [&](float dx, float dy) { return Vec2((float)fig.x + dx * (float)fig.w, (float)fig.y + dy * (float)fig.h); };
   auto pos = [&](const char *n) {
@@ -354,7 +354,7 @@ void Editor::draw_autorig_diagram(ui::Layout &lay) {
     if (is_next) u.canvas.circle(p.x, p.y, (float)u.px(9), 0xFFFFFFFF, 2.0f);  // (the next one ringed; no animation: idle stays idle)
     u.canvas.fill_circle(p.x, p.y, (float)u.px(is_next ? 6 : 4), c);
   }
-  u.label({fig.x + u.px(4), fig.y + u.px(2), fig.w, u.row_h()}, autorig_.view + " view", u.theme.text_dim);
+  u.label({fig.x + u.px(4), fig.y + u.px(2), fig.w, u.row_h()}, autorig_.view + " view", u.theme.text);
   u.tooltip("The markers to place, coloured by body part: left blue, right red, the middle yellow, a tail purple; the ringed\n"
             "one is next, dark ones aren't placed yet. A humanoid starts from the front (its left on your right), a quadruped\n"
             "from its left side.");

@@ -35,7 +35,7 @@ void Editor::draw_hierarchy(const Recti &r) {
   auto &in = u.in;
   int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   int h = bh - u.px(8);
   Recti plus{bar.x + u.px(5), bar.y + u.px(4), h + u.px(16), h};
   bool plus_hot = u.hovered(plus);
@@ -95,7 +95,7 @@ void Editor::draw_hierarchy(const Recti &r) {
   Recti list{r.x, bar.bottom(), r.w, r.h - bh};
   /* Scene header row like Unity ("SampleScene" with its own foldout). */
   Recti head{list.x, list.y, list.w, rh + u.px(2)};
-  u.canvas.fill_rect(head, Color::hex(0x323232));
+  u.canvas.fill_rect(head, u.theme.pane);
   int a = u.font.line_height() - u.px(2);
   u.draw_icon(Icon::Scene, {head.x + u.px(8), head.y + (head.h - a) / 2, a, a}, u.theme.text);
   u.label({head.x + u.px(14) + a, head.y, head.w - a - u.px(20), head.h}, scene_->name + (scene_dirty_ ? "*" : ""), u.theme.text_bright);
@@ -125,7 +125,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     if (row.intersect(body).h > 0) drop_rows_.push_back({row.intersect(body), g->id});  // material assets drop here
     if (headless_) hierarchy_rows_[g->name] = row;
     if (sel) u.canvas.fill_rect(row, focused_ == WindowKind::Hierarchy ? u.theme.selection : u.theme.selection_dim);
-    else if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
+    else if (hot) u.canvas.fill_rect(row, u.theme.row_hover);
     int x = row.x + u.px(6) + rows[i].depth * u.px(14);
     int arrow = u.font.line_height() - u.px(5);
     if (!g->children.empty() && filter.empty()) {
@@ -1672,7 +1672,7 @@ void Editor::draw_console(const Recti &r) {
   auto &in = u.in;
   int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   int h = bh - u.px(8), x = bar.x + u.px(6), y = bar.y + u.px(4);
   if (u.button({x, y, u.px(56), h}, "Clear")) Log::clear();
   x += u.px(60);
@@ -1710,7 +1710,7 @@ void Editor::draw_console(const Recti &r) {
     Recti row{list.x, list.y + i * rh - off, list.w, rh};
     const LogEntry &e = *lines[i].e;
     if (console_sel_ == i) u.canvas.fill_rect(row, u.theme.selection);
-    else if (i % 2) u.canvas.fill_rect(row, Color::hex(0x3C3C3C));
+    else if (i % 2) u.canvas.fill_rect(row, u.theme.stripe);
     Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
     uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
     int a = u.font.line_height() - u.px(4);
@@ -1751,7 +1751,7 @@ void Editor::draw_profiler(const Recti &r) {
   lay.row_h = u.row_h();
   u.label(lay.row(), "CPU frame time (ms) - editor frame (blue) and scene render (orange)", u.theme.text_bright);
   Recti graph = lay.row(u.px(120));
-  u.frame(graph, Color::hex(0x242424), u.theme.border, u.px(3));
+  u.frame(graph, u.theme.canvas_bg, u.theme.border, u.px(3));
   float maxv = 33.3f;
   for (float v : frame_history_) maxv = std::max(maxv, v * 1.1f);
   auto plot = [&](const std::vector<float> &hist, uint32_t col) {
@@ -1838,7 +1838,7 @@ void Editor::draw_profiler(const Recti &r) {
  * settings it bakes with (task 0012). */
 void Editor::draw_lighting_window(const Recti &r) {
   auto &u = ui_;
-  u.canvas.fill_rect(r, Color::hex(0x333333));
+  u.canvas.fill_rect(r, u.theme.pane);
   static int content_h = 0;
   int off = u.begin_scroll(u.id("lighting_window"), r, content_h);
   ui::Layout lay{{r.x + u.px(8), r.y, r.w - u.px(20), r.h}, r.y + u.px(8) - off};
@@ -1861,7 +1861,7 @@ void Editor::draw_lighting_window(const Recti &r) {
   u.tooltip("Removes the lightmaps (to the trash) and goes back to realtime ambient light.");
   if (baking_) {
     Recti pr = lay.row(u.px(6));
-    u.canvas.fill_round_rect(pr, u.px(3), Color::hex(0x252525));
+    u.canvas.fill_round_rect(pr, u.px(3), u.theme.well);
     u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * baker_.progress()), pr.h}, u.px(3), u.theme.accent);
     u.redraw = true;
   }
@@ -1944,7 +1944,7 @@ void Editor::draw_render_window(const Recti &r) {
   int lw = std::min(u.px(340), r.w * 2 / 5);
   Recti left{r.x, r.y, lw, r.h};
   Recti right{r.x + lw + 1, r.y, r.w - lw - 1, r.h};
-  u.canvas.fill_rect(left, Color::hex(0x333333));
+  u.canvas.fill_rect(left, u.theme.pane);
   u.canvas.vline(left.right(), left.y, left.bottom(), u.theme.border);
 
   /* ---- settings column ---- */
@@ -1993,7 +1993,7 @@ void Editor::draw_render_window(const Recti &r) {
   if (rendering_) {
     Recti pr = lay.row(u.px(6));
     float t = std::min(1.0f, final_pt_.samples() / (float)std::max(1, scene_->render.samples));
-    u.canvas.fill_round_rect(pr, u.px(3), Color::hex(0x252525));
+    u.canvas.fill_round_rect(pr, u.px(3), u.theme.well);
     u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * t), pr.h}, u.px(3), u.theme.accent);
     u.redraw = true;
   }

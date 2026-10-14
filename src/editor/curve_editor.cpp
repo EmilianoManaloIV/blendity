@@ -126,7 +126,7 @@ void Editor::draw_anim_curve(const AnimationClip &c, size_t t, const Recti &a, f
     const float kx = (float)anim_x_of(a, k.frame, end), ky = std::max(-1e5f, std::min(1e5f, anim_y_of(a, k.value)));
     const bool sel = anim_selected((int)t, k.frame);
     const float s = (float)u.px(sel ? 4 : 3);
-    u.canvas.fill_rect({(int)(kx - s), (int)(ky - s), (int)(2 * s), (int)(2 * s)}, sel ? Color::hex(0x5AA9FF) : Color::hex(0xDDDDDD));
+    u.canvas.fill_rect({(int)(kx - s), (int)(ky - s), (int)(2 * s), (int)(2 * s)}, sel ? u.theme.key_selected : u.theme.key_group);
     if (!sel) continue;
     /* The selected key's handles: before it (unless it's the first) and after it (unless the last, or held). */
     for (int side : {0, 1}) {

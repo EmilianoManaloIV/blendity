@@ -4,7 +4,7 @@
 - **Requirements:** R-04
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/65
 
 ## Goal
 The user (2026-10-14): "A texture's Physical Size should really adjust its tiling."

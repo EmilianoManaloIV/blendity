@@ -229,6 +229,11 @@ Coming from another program, your hands already know its keys and its mouse. Edi
 ? Which part of the editor doesn't change with the feel? | Window names, layouts and the up axis: only keys and mouse navigation change.
 ! cmd:feel Blender | Switch to the Blender feel (MMB orbits)
 ! cmd:feel Unity | Back to the Unity feel
+# Colours: Dark, Light and Emiliano
+The editor's colours are a theme: Preferences > Theme, or the console's theme command. Dark is Blendity's own, close to Unity's Professional skin; Light is like Unity's Personal skin. Emiliano Light and Emiliano Dark take the palette of the author's site, defined as variables in Figma: a warm paper background (#F1EEE5) with charcoal text (#292927) in Light, the two swapped in Dark, an amber accent (#D7882B) for selection and buttons, and its signal colours for meaning: mint for focus and the green axis, red for errors and X, blue for Z, amber for warnings. The windows draw from the theme, so a list's stripes, a key's diamond, a tooltip and a ruler change with it; the Scene and Game views and the UV editor's drawing keep their own colours, which read over any picture. The choice is kept with your preferences.
+? Why do the themes keep red, green and blue for the X, Y and Z axes? | Every 3D program uses them; a theme may change their shade, but changing their meaning would mislead.
+! cmd:theme Emiliano Light | Switch to Emiliano Light
+! cmd:theme Dark | Back to Dark
 )"},
     {"Modifiers vs Components", "Non-destructive editing and Catmull-Clark", R"(
 Blender's modifier stack changes a mesh on the fly without touching the original: Subdivision Surface, Mirror, Smooth... Each modifier feeds the next. Unity has no modifier stack. Any procedural change is done by a script component.

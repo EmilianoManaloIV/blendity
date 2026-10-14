@@ -383,7 +383,7 @@ void Editor::draw_project(const Recti &r) {
   };
   int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   /* Unity's "+" (Create) menu. */
   Recti plus{bar.x + u.px(4), bar.y + u.px(3), u.px(44), bh - u.px(6)};
   if (u.button(plus, "", false, Icon::Plus)) u.open_popup(u.id("proj_create"), plus);
@@ -424,7 +424,7 @@ void Editor::draw_project(const Recti &r) {
   int lw = std::min(u.px(200), r.w / 3);
   Recti left{r.x, bar.bottom(), lw, r.h - bh};
   Recti right{r.x + lw + 1, bar.bottom(), r.w - lw - 1, r.h - bh};
-  u.canvas.fill_rect(left, Color::hex(0x333333));
+  u.canvas.fill_rect(left, u.theme.pane);
   u.canvas.vline(left.right(), left.y, left.bottom(), u.theme.border);
   int rh = u.row_h();
   struct Fav {
@@ -445,7 +445,7 @@ void Editor::draw_project(const Recti &r) {
     bool cur = project_dir_ == f.path;
     bool hot = u.hovered(fr);
     if (cur) u.canvas.fill_rect(fr, u.theme.selection_dim);
-    else if (hot) u.canvas.fill_rect(fr, Color::hex(0x404040));
+    else if (hot) u.canvas.fill_rect(fr, u.theme.row_hover);
     u.draw_icon(f.icon, {fr.x + u.px(10), fr.y + (rh - a) / 2, a, a}, f.icon == Icon::Paper ? u.theme.accent : u.theme.text);
     u.label({fr.x + u.px(16) + a, fr.y, fr.w - a - u.px(20), rh}, f.label);
     if (hot && in.pressed[0]) {
@@ -474,7 +474,7 @@ void Editor::draw_project(const Recti &r) {
       if (fr.bottom() >= left.y && fr.y <= left.bottom()) {
         const bool hot = u.hovered(fr);
         if (project_dir_ == p) u.canvas.fill_rect(fr, u.theme.selection_dim);
-        else if (hot) u.canvas.fill_rect(fr, Color::hex(0x404040));
+        else if (hot) u.canvas.fill_rect(fr, u.theme.row_hover);
         Recti arrow{fr.x + ind, fr.y + (rh - a) / 2, a, a};
         if (has_sub) {
           u.draw_icon(open ? Icon::ArrowDown : Icon::ArrowRight, arrow, u.theme.text_dim);
@@ -521,7 +521,7 @@ void Editor::draw_project(const Recti &r) {
   if (can_up) {
     Recti rr = row_rect(i++);
     bool hot = u.hovered(rr);
-    if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
+    if (hot) u.canvas.fill_rect(rr, u.theme.row_hover);
     u.label({rr.x + u.px(10), rr.y, rr.w, rr.h}, "..", u.theme.text_dim);
     if (hot && in.double_clicked[0]) {
       project_dir_ = fs::parent(project_dir_);
@@ -539,7 +539,7 @@ void Editor::draw_project(const Recti &r) {
     if (u.record_buttons) u.button_rects["file:" + en->name] = rr;  // (tests click rows)
     bool hot = u.hovered(rr);
     if (sel) u.canvas.fill_rect(rr, u.theme.selection);
-    else if (hot) u.canvas.fill_rect(rr, Color::hex(0x444444));
+    else if (hot) u.canvas.fill_rect(rr, u.theme.row_hover);
     std::string ext = fs::extension(en->name);
     Icon ic = en->is_dir ? Icon::Folder
               : ext == ".mat" ? Icon::None

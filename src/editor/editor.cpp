@@ -952,7 +952,7 @@ void Editor::draw_toolbar(const Recti &r) {
       {Tool::Scale, Icon::Scale, "Scale Tool (R)\nBlender: S."},
       {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."}};
   /* Grouped segmented control, like Unity's tool strip. */
-  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 5 + u.px(2), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
+  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 5 + u.px(2), bh + u.px(2)}, u.theme.strip, u.theme.border, u.px(4));
   for (const T &t : tools) {
     if (u.icon_button({x, y, bh, bh}, t.i, tool_ == t.t, t.tip)) tool_ = t.t;
     x += bh + u.px(2);
@@ -992,7 +992,7 @@ void Editor::draw_toolbar(const Recti &r) {
 
   /* Play controls in the middle, like Unity. */
   int cx = r.x + r.w / 2 - (bh * 3 + u.px(4)) / 2;
-  u.frame({cx - u.px(2), y - u.px(1), bh * 3 + u.px(8), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
+  u.frame({cx - u.px(2), y - u.px(1), bh * 3 + u.px(8), bh + u.px(2)}, u.theme.strip, u.theme.border, u.px(4));
   if (u.icon_button({cx, y, bh, bh}, Icon::Play, playing_, "Play (Ctrl+P)\nEnters Play mode. Changes made while playing are discarded on Stop, like Unity.")) {
     if (playing_) exit_play(); else enter_play();
   }
@@ -2311,6 +2311,16 @@ void Editor::update_procedural_shapes() {
   }
 }
 
+/* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
+void Editor::set_theme(const std::string &name_in, bool save) {
+  const int k = ui::theme_index(name_in);
+  if (k < 0) return Log::warn("theme: Dark, Light, Emiliano Light or Emiliano Dark, not '%s'", name_in.c_str());
+  theme_name_ = ui::kThemeNames[k];
+  ui_.theme = ui::theme_named(theme_name_);
+  ui_.redraw = true;
+  if (save) save_prefs();
+}
+
 /* The rig root `g` is in: the nearest object at or above it with an Armature among its children (and none of its
  * own), or nullptr. */
 GameObject *Editor::rig_root_of(GameObject *g) const {
@@ -3008,6 +3018,13 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "matdelete" || c == "texdelete") {
     delete_assets_command(c, line);
+    return;
+  }
+  if (c == "theme") {  // theme <Dark|Light|Emiliano Light|Emiliano Dark> (task 0073)
+    std::string n;
+    for (size_t i = 1; i < t.size(); i++) n += (i > 1 ? " " : "") + t[i];
+    if (n.empty()) Log::info("Theme: %s (Dark, Light, Emiliano Light, Emiliano Dark)", theme_name_.c_str());
+    else set_theme(n);
     return;
   }
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
@@ -4012,6 +4029,12 @@ void Editor::draw_dialogs() {
           ui_scale_pref_ = s;
           apply_ui_scale();
         }
+        Recti rt = u.popup_row(u.row_h() + u.px(4));
+        u.label({rt.x + u.px(12), rt.y, u.px(140), rt.h}, "Theme");
+        int ti = std::max(0, ui::theme_index(theme_name_));
+        if (u.combo(u.id("pref_theme"), {rt.x + u.px(160), rt.y + u.px(2), u.px(160), rt.h - u.px(4)}, ti, ui::kThemeNames, ui::kThemeCount))
+          set_theme(ui::kThemeNames[ti]);
+        u.tooltip("The editor's colours: Dark (Blendity's), Light, or Emiliano Light / Dark (from your site's palette).");
         Recti r2 = u.popup_row(u.row_h() + u.px(4));
         u.label({r2.x + u.px(12), r2.y, u.px(140), r2.h}, "Move snap");
         u.float_field(u.id("pref_snap"), {r2.x + u.px(160), r2.y + u.px(2), u.px(80), r2.h - u.px(4)}, snap_move_, 0.01f, 0.001f, 100.0f, "%.3g");
@@ -4053,6 +4076,7 @@ void Editor::load_prefs() {
     std::string k = line.substr(0, eq), v = line.substr(eq + 1);
     if (!v.empty() && v.back() == '\r') v.pop_back();
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
+    else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
@@ -4138,8 +4162,8 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
                             view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
-  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
-                 kEditorFeels[(int)nav_style_]);
+  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
+                 kEditorFeels[(int)nav_style_], theme_name_.c_str());
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }

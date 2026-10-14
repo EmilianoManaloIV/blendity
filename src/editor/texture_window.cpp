@@ -175,7 +175,7 @@ void Editor::draw_textures_window(const Recti &r) {
   /* Toolbar: New (presets), size, Assign to Selection, search. */
   const int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   Recti nb{bar.x + u.px(6), bar.y + u.px(3), u.px(90), bh - u.px(6)};
   texture_ui_rects_["new"] = nb;
   if (u.button(nb, "New", false, ui::Icon::Plus)) u.open_popup(u.id("tex_new"), nb);
@@ -238,7 +238,7 @@ void Editor::draw_textures_window(const Recti &r) {
     const ProceduralTexturePtr &t = list[i];
     const bool sel = texture_multi_.has(t), hot = u.hovered(cell);
     if (u.record_buttons) u.button_rects["tex:" + t->name] = cell;  // (tests click thumbnails)
-    if (sel || hot) u.canvas.fill_round_rect(cell, u.px(4), sel ? u.theme.selection : Color::hex(0x444444));
+    if (sel || hot) u.canvas.fill_round_rect(cell, u.px(4), sel ? u.theme.selection : u.theme.row_hover);
     const TexThumb &th = texture_thumb(*t, 0, 64);
     draw_pixels(u, th.px, th.size, th.size, {cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)});
     u.label({cx, cy + tile, tile, u.row_h()}, t->name, u.theme.text, ui::Align::Center);

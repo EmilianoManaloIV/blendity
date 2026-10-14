@@ -409,7 +409,7 @@ void Editor::draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &l
     const SeqTrack &tr = s.tracks[t];
     const int ly = lanes.y + (int)t * lane_h;
     if (ly > lanes.bottom()) break;
-    if (t % 2) u.canvas.fill_rect({list.x, ly, list.w + lanes.w + u.px(8), lane_h}, Color::hex(0x262626));
+    if (t % 2) u.canvas.fill_rect({list.x, ly, list.w + lanes.w + u.px(8), lane_h}, u.theme.row_alt);
     const Recti name_r{list.x + u.px(6), ly, list.w - u.px(8), lane_h};
     u.label(name_r, tr.name, u.theme.text);
     if (!playing_) stack_drag_item("tracks", (int)t, name_r, {list.x, ly, list.w, lane_h});  // (drag a name to reorder)
@@ -444,7 +444,7 @@ void Editor::draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &l
   const AnimationClipPtr c = clip_asset(ghost.clip);
   const int gy = lanes.y + track * lane_h + u.px(3);
   const int gx0 = seq_x_of(lanes, ghost.start, end), gx1 = seq_x_of(lanes, ghost.start + ghost.duration(c.get()), end);
-  u.canvas.rect_outline({gx0, gy, std::max(u.px(4), gx1 - gx0), lane_h - u.px(6)}, Color::hex(0xFFFFFF), u.px(2));
+  u.canvas.rect_outline({gx0, gy, std::max(u.px(4), gx1 - gx0), lane_h - u.px(6)}, u.theme.playhead, u.px(2));
 }
 
 /* What the drag under way would make of the dragged instance: moved (to the lane under the mouse) or trimmed. */
@@ -637,17 +637,17 @@ void Editor::draw_sequencer_window(const Recti &r) {
   const Recti list{body.x, lanes.y, list_w, lanes.h};
   const Recti details{body.x, lanes.bottom(), body.w, det_h}, triggers{body.x, details.bottom(), body.w, trig_h};
   const float end = std::max(60.0f, s->end_frame()) * 1.15f;
-  u.canvas.fill_rect({body.x, body.y, body.w, row_h}, Color::hex(0x2A2A2A));
+  u.canvas.fill_rect({body.x, body.y, body.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, lanes, end);
   draw_seq_lanes(*s, list, lanes, lane_h, end);
   int from = 0, to = 0;
   if (stack_drag_end("tracks", from, to)) seq_move_track(from, to);
   seqr_.lanes = lanes, seqr_.lane_h = lane_h, seqr_.end = end;
   const int px = seq_x_of(lanes, seqr_.frame, end);
-  u.canvas.vline(px, ruler.y, lanes.bottom(), Color::hex(0xFFFFFF));
+  u.canvas.vline(px, ruler.y, lanes.bottom(), u.theme.playhead);
   if (u.record_buttons) u.button_rects["seq_lanes"] = lanes, u.button_rects["seq_ruler"] = ruler;  // (tests)
   seq_lanes_input(*s, ruler, lanes, lane_h, end);
-  u.canvas.fill_rect(details, Color::hex(0x2C2C2C));
+  u.canvas.fill_rect(details, u.theme.strip);
   draw_seq_details(*s, details);
   draw_seq_triggers(*s, triggers);
   u.popup(u.id("seq_bar_ctx"), u.px(160), [this] {

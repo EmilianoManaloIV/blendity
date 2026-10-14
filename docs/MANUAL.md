@@ -504,6 +504,10 @@ Surface's Levels at 1 while modelling, and turn on the Low tier for heavy scenes
 Blendity uses Unity's keys, and keeps Blender's where Unity has none. Edit > Preferences..., Keymap, starts from
 Unity, Unreal, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
 
+**Themes** (Preferences > Theme, or `theme Dark|Light|Emiliano Light|Emiliano Dark`): the editor's colours. The two
+Emiliano themes take the palette of the author's site (its Figma variables): paper #F1EEE5 and charcoal #292927, an amber
+accent #D7882B, mint / red / blue / amber signal colours.
+
 **Editor Feel** (Edit > Editor Feel, or `feel unity|unreal|blender|maya`) switches the keys *and* the Scene view's
 mouse navigation to another program's:
 

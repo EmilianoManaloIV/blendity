@@ -91,7 +91,7 @@ void Editor::draw_uv_editor(const Recti &r) {
   /* ---- toolbar ---- */
   int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   int x = bar.x + u.px(6), y = bar.y + u.px(3), h = bh - u.px(6);
   struct B { const char *label, *op, *tip; };
   const B buttons[] = {
@@ -678,7 +678,7 @@ bool Editor::uv_transform(const std::string &op, float a, float b) {
 /* The second toolbar row: selection mode and sync, selection, quick transforms. */
 void Editor::draw_uv_tool_row(const Recti &bar) {
   auto &u = ui_;
-  u.canvas.fill_rect(bar, Color::hex(0x2A2A2A));
+  u.canvas.fill_rect(bar, u.theme.strip);
   int x = bar.x + u.px(6);
   const int y = bar.y + u.px(3), h = bar.h - u.px(6);
   static const char *kModes[] = {"Vertex", "Face", "Island"};
