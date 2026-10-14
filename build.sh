@@ -12,7 +12,9 @@ OS="$(uname -s)"
 CXX="${CXX:-c++}"
 JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
-FLAGS="-Iextern/sky/include -std=c++17 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -pthread"
+# The build's identity (task 0079): VERSION's number, and CI's release tag (BLENDITY_BUILD) or "dev".
+IDFLAGS="-DBL_VERSION_NUMBER=$(tr -d ' \r\n' < VERSION) -DBL_BUILD=${BLENDITY_BUILD:-dev}"
+FLAGS="$IDFLAGS -Iextern/sky/include -std=c++17 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -pthread"
 if [ "$CONFIG" = "debug" ]; then FLAGS="$FLAGS -O0 -g -DBL_DEBUG"; else FLAGS="$FLAGS -O2 -DNDEBUG"; fi
 # Extra compiler and linker flags from the environment (CI's sanitizer job: EXTRA_FLAGS="-fsanitize=address,undefined").
 FLAGS="$FLAGS ${EXTRA_FLAGS:-}"
@@ -46,6 +48,9 @@ addlib() {  # folder define "include dirs" "libraries (lib/ relative files)"
 }
 if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   USE_LIBS=1
+  # zlib: Blender's static one (Linux); macOS's own where Blender's lib folder has none.
+  ZLIB_A="zlib/lib/libz.a"
+  [ -f "$LIBDIR/$ZLIB_A" ] || ZLIB_A=""
   addlib tbb              BL_WITH_TBB        "tbb/include"                    "tbb/lib/libtbb.$SOEXT"
   addlib embree           BL_WITH_EMBREE     "embree/include"                 "embree/lib/libembree4.$SOEXT"
   addlib openimagedenoise BL_WITH_OIDN       "openimagedenoise/include"       "openimagedenoise/lib/libOpenImageDenoise.$SOEXT"
@@ -59,8 +64,22 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   addlib openpgl          BL_WITH_OPENPGL    "openpgl/include"                "openpgl/lib/libopenpgl.a"
   addlib jolt             BL_WITH_JOLT       "jolt/include"                   "jolt/lib/libJolt.$SOEXT"
   addlib jpeg             BL_WITH_LIBJPEG    "jpeg/include"                   "jpeg/lib/libjpeg.a"
-  addlib png              BL_WITH_LIBPNG     "png/include zlib/include"       "png/lib/libpng.a zlib/lib/libz.a"
+  addlib png              BL_WITH_LIBPNG     "png/include zlib/include"       "png/lib/libpng.a $ZLIB_A"
   addlib zstd             BL_WITH_ZSTD       "zstd/include"                   "zstd/lib/libzstd.a"
+  # Video files (task 0077): Blender's FFmpeg, static with its codecs, in Blender's link order
+  # (build_files/cmake/platform/platform_unix.cmake, platform_apple.cmake); zlib again after it.
+  FFL=""
+  for c in avformat avcodec swscale swresample avutil mp3lame opus theoraenc theoradec theora vorbisenc vorbisfile vorbis ogg vpx x264 x265 aom; do
+    [ -f "$LIBDIR/ffmpeg/lib/lib$c.a" ] && FFL="$FFL ffmpeg/lib/lib$c.a"
+  done
+  [ -f "$LIBDIR/openjpeg/lib/libopenjp2.a" ] && FFL="$FFL openjpeg/lib/libopenjp2.a"  # (FFmpeg's JPEG 2000)
+  [ -n "$FFL" ] && addlib ffmpeg BL_WITH_FFMPEG "ffmpeg/include" "$FFL $ZLIB_A"
+  [ -z "$ZLIB_A" ] && LIBLINK="$LIBLINK -lz"
+  if [ -n "$FFL" ] && [ "$OS" = "Darwin" ]; then
+    LIBLINK="$LIBLINK -framework CoreImage -framework OpenGL -framework VideoToolbox -framework CoreMedia -framework CoreVideo -liconv -lbz2"
+  elif [ -n "$FFL" ]; then
+    LIBLINK="$LIBLINK -ldl -lm"
+  fi
   # GPU rendering: Vulkan headers (the loader comes with the GPU driver, opened at run time) and shaderc.
   [ -d "$LIBDIR/vulkan/include" ] && addlib shaderc BL_WITH_VULKAN "shaderc/include vulkan/include" "shaderc/lib/libshaderc_combined.a"
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
@@ -80,7 +99,7 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   [ "$OS" = "Darwin" ] || LIBS="$LIBS -Wl,-rpath-link,$LIBDIR/openjph/lib:$LIBDIR/dpcpp/lib:$LIBDIR/tbb/lib:$LIBDIR/imath/lib"
   echo "[blendity] Using Blender libraries from $LIBDIR:$LIBDIRS"
 else
-  echo "[blendity] Dependency-free build (no $LIBDIR)"
+  echo "[blendity] Dependency-free build (no $LIBDIR: bash packaging/fetch_blender_libs.sh $LIBPLAT fetches them)"
 fi
 
 OBJ="build/obj_${CONFIG}_$(echo "$OS" | tr '[:upper:]' '[:lower:]')$([ "$USE_LIBS" = 1 ] && echo _libs || true)"
@@ -95,6 +114,9 @@ if [ "$(cat "$OBJ/flags.txt" 2>/dev/null)" != "$CXX $FLAGS" ]; then
 fi
 
 LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC"
+# Blender's libc_compat: the -ffast-math math symbols newer glibc dropped that its prebuilt static codecs (FFmpeg's
+# x265) still call (Linux only; empty elsewhere).
+[ "$USE_LIBS" = 1 ] && [ "$OS" != "Darwin" ] && LIB_SRC="$LIB_SRC extern/libc_compat/libc_compat.c"
 
 compile() {  # src -> object path (only rebuilds when the source or any header is newer)
   local src="$1"
@@ -127,7 +149,7 @@ link() {  # main-source output-name
 }
 
 case "$TARGET" in
-  app|all) link src/app/main.cpp Blendity ;;
+  app|all) link src/app/main.cpp "${BLENDITY_APP:-Blendity}" ;;  # (BLENDITY_APP=Blendity-full: the full build of an install, task 0080)
 esac
 case "$TARGET" in
   stress|all) link stress/stress_main.cpp blendity_stress ;;
@@ -144,6 +166,14 @@ if [ "$USE_LIBS" = 1 ]; then
     find "$LIBDIR/$d/lib" -maxdepth 1 -name "*.$SOEXT*" ! -name "*_d.*" ! -name "*debug*" ! -name "*_cuda*" \
       ! -name "*_hip*" ! -name "*_sycl*" -exec cp -a {} "$OUT/lib/" \;
   done
+  # Linux: Blender's libraries need a C++ runtime as new as the compiler they were built with (GCC 14's); the one this
+  # build linked travels in lib/ too, so the program runs on a system whose own is older (an AppImage on Ubuntu 22.04).
+  if [ "$OS" != "Darwin" ]; then
+    for so in libstdc++.so.6 libgcc_s.so.1; do
+      f="$($CXX -print-file-name=$so)"
+      [ -f "$f" ] && cp -L "$f" "$OUT/lib/$so"
+    done
+  fi
   # Blender's colour management config (OpenColorIO views: AgX, Filmic, ...).
   OCIO_CFG="../blender/release/datafiles/colormanagement"
   if [ -d "$LIBDIR/opencolorio" ] && [ -f "$OCIO_CFG/config.ocio" ]; then
@@ -156,7 +186,13 @@ if [ "$OS" = "Darwin" ] && { [ "$TARGET" = "app" ] || [ "$TARGET" = "all" ]; }; 
   # Wrap the editor in a minimal .app bundle so it can be double-clicked in Finder.
   APP="$OUT/Blendity.app/Contents"
   mkdir -p "$APP/MacOS"
-  cp "$OUT/Blendity" "$APP/MacOS/Blendity"
+  # Both programs of an install (task 0080): Blendity, which starts, and Blendity-full when it was built.
+  for exe in Blendity Blendity-full; do [ -f "$OUT/$exe" ] && cp "$OUT/$exe" "$APP/MacOS/$exe"; done
+  # Blender's libraries and the colour config beside the program inside the bundle (its rpath is
+  # @executable_path/lib; executable_dir() finds datafiles/ there).
+  rm -rf "$APP/MacOS/lib" "$APP/MacOS/datafiles"
+  [ -d "$OUT/lib" ] && cp -R "$OUT/lib" "$APP/MacOS/lib"
+  [ -d "$OUT/datafiles" ] && cp -R "$OUT/datafiles" "$APP/MacOS/datafiles"
   cat > "$APP/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

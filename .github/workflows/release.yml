@@ -1,0 +1,244 @@
+# Builds and releases (tasks 0076-0080):
+# - Each system gets an installer holding Blendity (the dependency-free build, which always starts) and Blendity-full
+#   (built with Blender's prebuilt libraries: Embree, OpenImageDenoise, OpenColorIO, Jolt, FFmpeg...). Blendity hands
+#   over to Blendity-full when its libraries load and the user wants them.
+# - The full build and its libraries are also a separate asset (blendity-libs-<system>-<version>), which a
+#   dependency-free install downloads when the user agrees.
+# - A v* tag makes a stable GitHub Release; a pull request merged into main makes a pre-release `build-pr<N>` with the
+#   PR's description as its notes, so the updater (Help > Version History) can go back to the build before any PR.
+#   Every release carries SHA256SUMS.txt, which the updater checks downloads against.
+# - A pull request that touches packaging builds everything as artifacts to try (no release).
+# Blender's libraries are fetched at the commits pinned in packaging/blender-libs.txt (and cached).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  pull_request:
+    paths: ['packaging/**', '.github/workflows/release.yml', 'VERSION', 'build.bat', 'build.sh', 'CMakeLists.txt']
+  workflow_dispatch:
+
+# Read-only by default: a pull request's build.bat / build.sh run with this token. Only the release job writes.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # What this run is: a stable release, a merged PR's build, or a try-out (no release).
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.m.outputs.tag }}
+      pr: ${{ steps.m.outputs.pr }}
+      release: ${{ steps.m.outputs.release }}
+      version: ${{ steps.m.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(tr -d ' \r\n' < VERSION)
+          tag=dev release=false pr=
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME" version="${GITHUB_REF_NAME#v}" release=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number // empty' || true)
+            [ -n "$pr" ] && tag="build-pr$pr" release=true
+          fi
+          { echo "tag=$tag"; echo "pr=$pr"; echo "release=$release"; echo "version=$version"; } >> "$GITHUB_OUTPUT"
+          echo "build: $tag (release: $release)"
+
+  windows:
+    needs: meta
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      BLENDITY_BUILD: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Blender's libraries (cached by their pinned commits)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../blender
+          key: blender-libs-windows_x64-${{ hashFiles('packaging/blender-libs.txt', 'packaging/fetch_blender_libs.sh') }}
+      - name: Fetch Blender's libraries
+        shell: bash
+        run: bash packaging/fetch_blender_libs.sh windows_x64
+      - name: Build Blendity-full (with the libraries), then Blendity (dependency-free)
+        shell: cmd
+        run: |
+          set BLENDITY_OUT=dist\windows\Blendity-full.exe
+          call build.bat release app || exit /b 1
+          set BLENDITY_OUT=
+          set BLENDITY_NO_LIBS=1
+          call build.bat release app || exit /b 1
+      - name: The builds are what they should be
+        shell: bash
+        run: |
+          for f in Blendity.exe Blendity-full.exe embree4.dll sycl9.dll OpenImageDenoise.dll OpenColorIO_2_5.dll Jolt.dll avcodec-62.dll aom.dll datafiles/colormanagement/config.ocio; do
+            test -e "dist/windows/$f" || { echo "::error::no dist/windows/$f"; exit 1; }
+          done
+          ./dist/windows/Blendity-full.exe --probe || { echo "::error::Blendity-full's libraries don't load"; exit 1; }
+      - name: Installer and the libraries archive
+        shell: bash
+        run: |
+          python packaging/make_icon.py build/icons
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          [ -x "$ISCC" ] || { choco install innosetup -y --no-progress && ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"; }
+          "$ISCC" //DAppVersion=$VERSION //DIcons=..\\..\\build\\icons packaging/windows/blendity.iss
+          (cd dist/windows && 7z a -tzip "../installers/blendity-libs-windows-$VERSION.zip" Blendity-full.exe ./*.dll datafiles >/dev/null)
+      - name: Install (with and without the libraries), start headless, uninstall
+        shell: bash
+        run: |
+          APP="$(cygpath -u "$LOCALAPPDATA")/Programs/Blendity"
+          for type in full lite; do
+            ./dist/installers/Blendity-Setup-$VERSION.exe //VERYSILENT //SUPPRESSMSGBOXES //CURRENTUSER //TYPE=$type //TASKS="sceneassoc"
+            reg query 'HKCU\Software\Classes\.scene' || { echo "::error::no .scene association"; exit 1; }
+            if [ "$type" = full ] && [ ! -e "$APP/Blendity-full.exe" ]; then echo "::error::no Blendity-full in a full install"; exit 1; fi
+            if [ "$type" = lite ] && [ -e "$APP/Blendity-full.exe" ]; then echo "::error::Blendity-full in a dependency-free install"; exit 1; fi
+            SHOT="$PWD/installed-windows-$type.png"
+            (cd "$RUNNER_TEMP" && "$APP/Blendity.exe" --headless-screenshot "$(cygpath -w "$SHOT")")  # (away from the repo: a fresh project)
+            for i in $(seq 1 30); do [ -e "$SHOT" ] && break; sleep 1; done  # (the full install hands over: the picture comes from Blendity-full)
+            [ -e "$SHOT" ] || { echo "::error::the $type install made no picture"; exit 1; }
+            UNINS=$(ls "$APP"/unins*.exe | tail -1)
+            "$UNINS" //VERYSILENT //SUPPRESSMSGBOXES
+            # (the uninstaller runs on from %TEMP%: wait for it to remove itself too before the next install)
+            for i in $(seq 1 60); do [ -e "$APP/Blendity.exe" ] || [ -e "$UNINS" ] || break; sleep 1; done
+            [ ! -e "$APP/Blendity.exe" ] || { echo "::error::the uninstaller left Blendity.exe"; exit 1; }
+            ! reg query 'HKCU\Software\Classes\Blendity.Scene' 2>/dev/null || { echo "::error::the uninstaller left the .scene association"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: |
+            dist/installers/*
+            installed-windows-*.png
+
+  linux:
+    needs: meta
+    # The oldest supported Ubuntu: an AppImage runs on systems at least as new as the one it was built on.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      BLENDITY_BUILD: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler + X11 headers
+        # GCC 14 (Ubuntu's toolchain PPA): Blender's libraries call its C++ runtime, which build.sh ships in lib/.
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update && sudo apt-get install -y g++-14 libx11-dev fonts-dejavu-core git-lfs
+          echo "CXX=g++-14" >> "$GITHUB_ENV" && echo "CC=gcc-14" >> "$GITHUB_ENV"
+      - name: Blender's libraries (cached by their pinned commits)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../blender
+          key: blender-libs-linux_x64-${{ hashFiles('packaging/blender-libs.txt', 'packaging/fetch_blender_libs.sh') }}
+      - name: Fetch Blender's libraries
+        run: bash packaging/fetch_blender_libs.sh linux_x64
+      - name: Build Blendity-full (with the libraries), then Blendity (dependency-free)
+        run: |
+          BLENDITY_APP=Blendity-full ./build.sh release app
+          BLENDITY_NO_LIBS=1 ./build.sh release app
+      - name: The builds are what they should be
+        run: |
+          ls dist/linux/lib | grep -q libembree4 && ls dist/linux/lib | grep -q libOpenImageDenoise && test -f dist/linux/datafiles/colormanagement/config.ocio
+          nm -C dist/linux/Blendity-full | grep -q avcodec_send_frame  # (FFmpeg is static: inside the program)
+          ./dist/linux/Blendity-full --probe
+      - name: Packages and the libraries archive
+        run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$PWD/appimagetool" bash packaging/linux/make_packages.sh "$VERSION"
+          tar -C dist/linux -czf "dist/installers/blendity-libs-linux-$VERSION.tar.gz" Blendity-full lib datafiles
+      - name: Start the AppImage headless
+        run: |
+          IMG="$PWD/dist/installers/Blendity-$VERSION-x86_64.AppImage" SHOT="$PWD/installed-linux.png"
+          cd "$RUNNER_TEMP" && APPIMAGE_EXTRACT_AND_RUN=1 HOME="$RUNNER_TEMP" "$IMG" --headless-screenshot "$SHOT"
+          test -d "$RUNNER_TEMP/BlendityProject/Assets/Scenes"  # (a fresh machine's project)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-linux
+          path: |
+            dist/installers/*
+            installed-linux.png
+
+  macos:
+    needs: meta
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      BLENDITY_BUILD: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Blender's libraries (cached by their pinned commits)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../blender
+          key: blender-libs-macos_arm64-${{ hashFiles('packaging/blender-libs.txt', 'packaging/fetch_blender_libs.sh') }}
+      - name: Fetch Blender's libraries
+        run: bash packaging/fetch_blender_libs.sh macos_arm64
+      - name: Build Blendity-full (with the libraries), then Blendity (dependency-free)
+        run: |
+          BLENDITY_APP=Blendity-full ./build.sh release app
+          BLENDITY_NO_LIBS=1 ./build.sh release app
+      - name: The builds are what they should be
+        run: |
+          ls dist/macos/Blendity.app/Contents/MacOS/lib | grep -q libembree4
+          test -x dist/macos/Blendity.app/Contents/MacOS/Blendity-full
+          nm dist/macos/Blendity-full | grep -q avcodec_send_frame
+          dist/macos/Blendity.app/Contents/MacOS/Blendity-full --probe
+      - name: Disk image and the libraries archive
+        run: |
+          bash packaging/macos/make_dmg.sh "$VERSION"
+          tar -C dist/macos -czf "dist/installers/blendity-libs-macos-$VERSION.tar.gz" Blendity-full lib datafiles
+      - name: Mount and start headless
+        run: |
+          hdiutil attach "dist/installers/Blendity-$VERSION-macos.dmg" -mountpoint /tmp/blendity
+          SHOT="$PWD/installed-macos.png"
+          (cd "$RUNNER_TEMP" && /tmp/blendity/Blendity.app/Contents/MacOS/Blendity --headless-screenshot "$SHOT")
+          for i in $(seq 1 30); do [ -e "$SHOT" ] && break; sleep 1; done
+          hdiutil detach /tmp/blendity
+          test -e "$SHOT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-macos
+          path: |
+            dist/installers/*.dmg
+            dist/installers/blendity-libs-*
+            installed-macos.png
+
+  release:
+    needs: [meta, windows, linux, macos]
+    if: needs.meta.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    # One release at a time, in the order the merges came: the updater sorts by publishing time.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: GitHub Release (with SHA256SUMS.txt)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          PR: ${{ needs.meta.outputs.pr }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          mkdir out
+          cp artifacts/installer-*/dist/installers/* out/
+          (cd out && sha256sum * > SHA256SUMS.txt)
+          if [ -n "$PR" ]; then
+            gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body --jq '"## " + .title + "\n\n" + .body' > notes.md
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "Blendity $VERSION (PR #$PR)" --notes-file notes.md out/*
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Blendity $VERSION" --generate-notes out/*
+          fi

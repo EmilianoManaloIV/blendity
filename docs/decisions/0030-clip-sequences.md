@@ -35,3 +35,9 @@ without building a graph.
 - Sampled values are known by a 64-bit FNV-1a key of (path, property, axis). Two numbers whose keys clash would share a
   slot. With 64 bits and a few thousand numbers this is left unguarded.
 - An instance's clip frames advance one per sequence frame times its speed (the clip's own frame rate isn't used yet).
+
+## Amendment (task 0070, 2026-10-14): one sequence for the scene
+- The scene holds one sequence (`Scene::sequence`); each instance names the object it plays on (`target`, by name).
+  Values are keyed by (target, path, property, axis), so the same bone path on two characters is two numbers.
+- A crossfade needs both bars on the same object; otherwise each plays alone.
+- In Play the scene's director (a Sequencer without an object) plays it after the components' updates, before IK.

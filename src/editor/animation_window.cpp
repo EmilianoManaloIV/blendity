@@ -64,7 +64,8 @@ std::vector<GameObject *> subtree(GameObject *root) {
 GameObject *Editor::anim_root() {
   for (GameObject *a = active_object(); a; a = a->parent)
     if (a->get<Animation>()) return a;
-  return active_object();
+  GameObject *rig = rig_root_of(active_object());  // (a character: its rig root, Unity's animated root)
+  return rig ? rig : active_object();
 }
 
 AnimationClipPtr Editor::anim_clip() {
@@ -538,15 +539,87 @@ float Editor::anim_frame_at(const Recti &sheet, int x, float end) const { return
 int Editor::anim_x_of(const Recti &sheet, float frame, float end) const { return sheet.x + (int)std::lround(frame / end * (float)sheet.w); }
 
 /* The key under (mx, my) in the sheet: its track and frame. */
-bool Editor::anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, int &track, float &frame) {
+/* The dopesheet's rows (task 0069): a vector property's axes under one row ("Lid : Position", Unity's), unfolded into
+ * .x / .y / .z rows when expanded; a lone number one row. The Curves view lists every track on its own. */
+std::vector<Editor::AnimRow> Editor::anim_rows(const AnimationClip &clip) const {
+  std::vector<AnimRow> rows;
+  for (size_t t = 0; t < clip.tracks.size();) {
+    size_t e = t + 1;
+    if (!anim_.curves)
+      while (e < clip.tracks.size() && clip.tracks[e].path == clip.tracks[t].path && clip.tracks[e].property == clip.tracks[t].property) e++;
+    if (e - t == 1) {
+      rows.push_back({{(int)t}, clip.tracks[t].label(), false, 0});
+      t = e;
+      continue;
+    }
+    const AnimTrack &first = clip.tracks[t];
+    const std::string key = first.path + "|" + first.property;
+    const bool open = anim_.expanded.count(key) != 0;
+    AnimRow g{{}, (first.path.empty() ? std::string("(root)") : first.path) + " : " + first.property, true, 0};
+    for (size_t k = t; k < e; k++) g.tracks.push_back((int)k);
+    g.key = key, g.open = open;
+    rows.push_back(g);
+    if (open)
+      for (size_t k = t; k < e; k++) rows.push_back({{(int)k}, "    ." + std::string(1, "xyz"[std::max(0, std::min(2, clip.tracks[k].axis))]), false, 1});
+    t = e;
+  }
+  return rows;
+}
+
+/* The keys a row shows at `frame`: on a group row, each of its tracks' key there. */
+std::vector<std::pair<int, float>> Editor::anim_row_keys(const AnimationClip &clip, const AnimRow &row, float frame) const {
+  std::vector<std::pair<int, float>> out;
+  for (int t : row.tracks) {
+    const int k = clip.tracks[(size_t)t].key_at(frame);
+    if (k >= 0) out.push_back({t, clip.tracks[(size_t)t].keys[(size_t)k].frame});
+  }
+  return out;
+}
+
+/* The frames a row has keys on (a group: any of its tracks'). */
+std::vector<float> Editor::anim_row_frames(const AnimationClip &clip, const AnimRow &row) const {
+  std::vector<float> fs;
+  for (int t : row.tracks)
+    for (const AnimKey &k : clip.tracks[(size_t)t].keys)
+      if (std::none_of(fs.begin(), fs.end(), [&](float f) { return std::fabs(f - k.frame) < 0.01f; })) fs.push_back(k.frame);
+  std::sort(fs.begin(), fs.end());
+  return fs;
+}
+
+/* The diamond under (mx, my): the keys it stands for (a group row's: all its axes' at that frame). */
+bool Editor::anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, std::vector<std::pair<int, float>> &keys) {
+  const std::vector<AnimRow> rows = anim_rows(clip);
   const int r = (my - sheet.y) / std::max(1, row_h) + anim_.scroll;
-  if (my < sheet.y || r < 0 || (size_t)r >= clip.tracks.size()) return false;
-  for (const AnimKey &k : clip.tracks[(size_t)r].keys) {
-    if (std::abs(anim_x_of(sheet, k.frame, end) - mx) > ui_.px(5)) continue;
-    track = r, frame = k.frame;
-    return true;
+  if (my < sheet.y || r < 0 || (size_t)r >= rows.size()) return false;
+  for (float f : anim_row_frames(clip, rows[(size_t)r])) {
+    if (std::abs(anim_x_of(sheet, f, end) - mx) > ui_.px(5)) continue;
+    keys = anim_row_keys(clip, rows[(size_t)r], f);
+    return !keys.empty();
   }
   return false;
+}
+
+bool Editor::anim_all_selected(const std::vector<std::pair<int, float>> &keys) const {
+  return std::all_of(keys.begin(), keys.end(), [&](const auto &k) { return anim_selected(k.first, k.second); });
+}
+
+/* Box select (task 0069): every diamond the box touches (its row overlapping the box, its square within it), keys of a
+ * group row standing for their axes. Shift adds, Ctrl takes away. */
+std::vector<std::pair<int, float>> Editor::anim_box_keys(const AnimationClip &clip, const Recti &sheet, int row_h, float end, const Recti &box) const {
+  std::vector<std::pair<int, float>> out;
+  const std::vector<AnimRow> rows = anim_rows(clip);
+  const int half = ui_.px(5);
+  for (size_t r = (size_t)std::max(0, anim_.scroll); r < rows.size(); r++) {
+    const int y0 = sheet.y + ((int)r - anim_.scroll) * row_h;
+    if (y0 > sheet.bottom()) break;
+    if (y0 + row_h < box.y || y0 > box.bottom()) continue;
+    for (float f : anim_row_frames(clip, rows[r])) {
+      const int x = anim_x_of(sheet, f, end);
+      if (x + half < box.x || x - half > box.right()) continue;
+      for (const auto &k : anim_row_keys(clip, rows[r], f)) out.push_back(k);
+    }
+  }
+  return out;
 }
 
 bool Editor::anim_selected(int track, float frame) const {
@@ -568,32 +641,44 @@ void Editor::anim_sheet_input(const AnimationClip &clip, const Recti &ruler, con
     return;
   }
   if (!u.hovered(sheet)) return;
-  int track = -1;
-  float frame = 0.0f;
-  const bool on_key = anim_key_under(clip, sheet, row_h, end, mx, my, track, frame);
-  if (in.double_clicked[0] && !on_key) {
-    const int r = (my - sheet.y) / std::max(1, row_h) + anim_.scroll;
-    if (r >= 0 && (size_t)r < clip.tracks.size()) anim_add_key((size_t)r, std::round(anim_frame_at(sheet, mx, end)));
-    return;
-  }
+  std::vector<std::pair<int, float>> keys;
+  const bool on_key = anim_key_under(clip, sheet, row_h, end, mx, my, keys);
+  if (in.double_clicked[0] && !on_key) return anim_add_row_key(clip, sheet, row_h, end, mx, my);
   if (in.pressed[1] && on_key) {
-    if (!anim_selected(track, frame)) anim_.selected = {{track, frame}};
+    if (!anim_all_selected(keys)) anim_.selected = keys;
     u.open_popup(u.id("anim_key_ctx"), {mx, my, 0, 0});
     return;
   }
   if (!in.pressed[0]) return;
+  anim_.drag_x = mx, anim_.drag_y = my;
   if (!on_key) {
-    if (!in.shift()) anim_.selected.clear();
-    anim_.drag = 3, anim_.drag_x = mx, anim_.drag_y = my;
+    if (!in.shift() && !in.ctrl()) anim_.selected.clear();
+    anim_.drag = 3;
     return;
   }
-  if (in.shift()) {
-    auto it = std::find_if(anim_.selected.begin(), anim_.selected.end(), [&](const auto &s) { return s.first == track && std::fabs(s.second - frame) < 0.01f; });
-    if (it != anim_.selected.end()) anim_.selected.erase(it);
-    else anim_.selected.push_back({track, frame});
+  anim_.drag = 2;
+  if (!in.shift()) {
+    if (!anim_all_selected(keys)) anim_.selected = keys;
+    return;
   }
-  else if (!anim_selected(track, frame)) anim_.selected = {{track, frame}};
-  anim_.drag = 2, anim_.drag_x = mx, anim_.drag_y = my;
+  const bool all = anim_all_selected(keys);
+  for (const auto &k : keys) anim_select_key(k.first, k.second, !all);
+}
+
+/* A key on (or off) the selection. */
+void Editor::anim_select_key(int track, float frame, bool on) {
+  auto it = std::find_if(anim_.selected.begin(), anim_.selected.end(), [&](const auto &s) { return s.first == track && std::fabs(s.second - frame) < 0.01f; });
+  if (on && it == anim_.selected.end()) anim_.selected.push_back({track, frame});
+  if (!on && it != anim_.selected.end()) anim_.selected.erase(it);
+}
+
+/* A double-click on a row: a key at that frame on each of its tracks (a group row keys all its axes). */
+void Editor::anim_add_row_key(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my) {
+  const std::vector<AnimRow> rows = anim_rows(clip);
+  const int r = (my - sheet.y) / std::max(1, row_h) + anim_.scroll;
+  if (r < 0 || (size_t)r >= rows.size()) return;
+  const float f = std::round(anim_frame_at(sheet, mx, end));
+  for (int t : rows[(size_t)r].tracks) anim_add_key((size_t)t, f);
 }
 
 void Editor::anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end) {
@@ -605,16 +690,8 @@ void Editor::anim_end_drag(const AnimationClip &clip, const Recti &sheet, int ro
     return;
   }
   if (kind != 3) return;
-  /* Box select: every key inside. */
-  const int x0 = std::min(mx, anim_.drag_x), x1 = std::max(mx, anim_.drag_x), y0 = std::min(my, anim_.drag_y), y1 = std::max(my, anim_.drag_y);
-  for (size_t r = 0; r < clip.tracks.size(); r++) {
-    const int cy = sheet.y + ((int)r - anim_.scroll) * row_h + row_h / 2;
-    if (cy < y0 || cy > y1) continue;
-    for (const AnimKey &k : clip.tracks[r].keys) {
-      const int kx = anim_x_of(sheet, k.frame, end);
-      if (kx >= x0 && kx <= x1 && !anim_selected((int)r, k.frame)) anim_.selected.push_back({(int)r, k.frame});
-    }
-  }
+  const Recti box{std::min(mx, anim_.drag_x), std::min(my, anim_.drag_y), std::abs(mx - anim_.drag_x), std::abs(my - anim_.drag_y)};
+  for (const auto &k : anim_box_keys(clip, sheet, row_h, end, box)) anim_select_key(k.first, k.second, !ui_.in.ctrl());
 }
 
 /* The ruler: frame numbers every so many frames. */
@@ -628,37 +705,70 @@ void Editor::draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end) 
   }
 }
 
-/* The tracks: names on the left (missing objects in yellow); in the Dopesheet their keys on the right, in the Curves
- * view a click on a name picks it to show (Ctrl+click adds). The wheel over them scrolls. */
+/* The rows: names on the left (missing objects in yellow; a group's ▸ unfolds its axes); in the Dopesheet their keys
+ * on the right - while a box is dragged, the keys it would take light up, and selected keys being dragged show where
+ * they will land; in the Curves view a click on a name picks it to show (Ctrl+click adds). The wheel over them scrolls. */
 void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const Recti &list, const Recti &body, const Recti &sheet, int row_h, float end) {
   auto &u = ui_;
   auto &in = u.in;
+  const std::vector<AnimRow> rows = anim_rows(clip);
   const int fit = std::max(1, list.h / std::max(1, row_h));
   const Recti scroll_area = anim_.curves ? list : body;
   if (u.hovered(scroll_area) && in.wheel_y != 0.0f) anim_.scroll -= (int)in.wheel_y, in.wheel_y = 0.0f;
-  anim_.scroll = std::max(0, std::min(anim_.scroll, (int)clip.tracks.size() - fit));
-  for (size_t t = (size_t)anim_.scroll; t < clip.tracks.size(); t++) {
-    const AnimTrack &tr = clip.tracks[t];
-    const Recti lr{list.x, list.y + ((int)t - anim_.scroll) * row_h, list.w, row_h};
+  anim_.scroll = std::max(0, std::min(anim_.scroll, (int)rows.size() - fit));
+  std::vector<std::pair<int, float>> boxed;
+  if (anim_.drag == 3 && !anim_.curves) {
+    const Recti box{std::min(in.mx, anim_.drag_x), std::min(in.my, anim_.drag_y), std::abs(in.mx - anim_.drag_x), std::abs(in.my - anim_.drag_y)};
+    boxed = anim_box_keys(clip, sheet, row_h, end, box);
+  }
+  const float shift = anim_.drag == 2 ? std::round(anim_frame_at(sheet, in.mx, end) - anim_frame_at(sheet, anim_.drag_x, end)) : 0.0f;
+  for (size_t r = (size_t)anim_.scroll; r < rows.size(); r++) {
+    const AnimRow &row = rows[r];
+    const Recti lr{list.x, list.y + ((int)r - anim_.scroll) * row_h, list.w, row_h};
     if (lr.y > body.bottom()) break;
-    const bool picked = std::find(anim_.curve_tracks.begin(), anim_.curve_tracks.end(), (int)t) != anim_.curve_tracks.end();
-    if (anim_.curves && picked) u.canvas.fill_rect(lr, u.theme.selection);
-    else if (t % 2) u.canvas.fill_rect({body.x, lr.y, anim_.curves ? list.w : body.w, row_h}, Color::hex(0x262626));
-    const bool missing = anim_target(*root, tr.path) == nullptr;
-    u.label({lr.x + u.px(6), lr.y, lr.w - u.px(8), lr.h}, tr.label(), missing ? u.theme.warning : u.theme.text);
-    if (u.record_buttons) u.button_rects["anim_track:" + tr.label()] = lr;  // (tests)
-    if (anim_.curves) {
-      if (u.hovered(lr) && in.pressed[0]) anim_pick_curve((int)t, in.ctrl());
-      continue;
-    }
-    for (const AnimKey &k : tr.keys) {
-      const float cx = (float)anim_x_of(sheet, k.frame, end), cy = (float)(lr.y + row_h / 2);
-      const bool sel = anim_selected((int)t, k.frame);
-      const float s = (float)u.px(5);
-      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx, cy - s), Vec2(cx + s, cy), sel ? Color::hex(0x5AA9FF) : Color::hex(0xCCCCCC));
-      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx + s, cy), Vec2(cx, cy + s), sel ? Color::hex(0x5AA9FF) : Color::hex(0xCCCCCC));
+    draw_anim_row_name(clip, root, row, lr, body, sheet, (int)r);
+    if (anim_.curves) continue;
+    for (float f : anim_row_frames(clip, row)) {
+      const std::vector<std::pair<int, float>> ks = anim_row_keys(clip, row, f);
+      const bool sel = anim_all_selected(ks);
+      const bool lit = std::any_of(ks.begin(), ks.end(), [&](const auto &k) {
+        return std::any_of(boxed.begin(), boxed.end(), [&](const auto &b) { return b.first == k.first && std::fabs(b.second - k.second) < 0.01f; });
+      });
+      const float cx = (float)anim_x_of(sheet, f + (sel ? shift : 0.0f), end), cy = (float)(lr.y + row_h / 2);
+      const float s = (float)u.px(row.group ? 6 : 5);
+      const uint32_t c = sel || lit ? u.theme.key_selected : row.group ? u.theme.key_group : u.theme.key;
+      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx, cy - s), Vec2(cx + s, cy), c);
+      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx + s, cy), Vec2(cx, cy + s), c);
     }
   }
+}
+
+/* A row's name: a group's fold arrow (click to unfold its axes), a missing object's in yellow; in the Curves view a
+ * click picks the track. */
+void Editor::draw_anim_row_name(const AnimationClip &clip, GameObject *root, const AnimRow &row, const Recti &lr, const Recti &body, const Recti &sheet,
+                                int index) {
+  auto &u = ui_;
+  auto &in = u.in;
+  const int t = row.tracks.empty() ? -1 : row.tracks[0];
+  const bool picked = row.tracks.size() == 1 && std::find(anim_.curve_tracks.begin(), anim_.curve_tracks.end(), t) != anim_.curve_tracks.end();
+  if (anim_.curves && picked) u.canvas.fill_rect(lr, u.theme.selection);
+  else if (index % 2) u.canvas.fill_rect({body.x, lr.y, anim_.curves ? lr.w : body.w, lr.h}, u.theme.row_alt);
+  const bool missing = t >= 0 && anim_target(*root, clip.tracks[(size_t)t].path) == nullptr;
+  int x = lr.x + u.px(6) + row.depth * u.px(10);
+  if (row.group) {
+    const Recti arrow{x, lr.y, u.px(14), lr.h};
+    u.draw_icon(row.open ? Icon::ArrowDown : Icon::ArrowRight, {arrow.x, arrow.y + u.px(3), lr.h - u.px(6), lr.h - u.px(6)}, u.theme.text_dim);
+    if (u.hovered({lr.x, lr.y, x + u.px(16) - lr.x, lr.h}) && in.pressed[0]) {
+      if (row.open) anim_.expanded.erase(row.key);
+      else anim_.expanded.insert(row.key);
+      in.pressed[0] = false;
+    }
+    x += u.px(16);
+  }
+  u.label({x, lr.y, lr.right() - x - u.px(2), lr.h}, row.label, missing ? u.theme.warning : u.theme.text);
+  if (u.record_buttons) u.button_rects["anim_track:" + row.label] = lr;  // (tests)
+  if (anim_.curves && t >= 0 && u.hovered(lr) && in.pressed[0]) anim_pick_curve(t, in.ctrl());
+  (void)sheet;
 }
 
 /* A track name clicked in the Curves view: shown alone (Ctrl: added or taken away); the axis frames to it. */
@@ -700,14 +810,14 @@ void Editor::draw_animation_window(const Recti &r) {
   const Recti list{body.x, body.y + row_h, list_w, body.h - row_h}, ruler{body.x + list_w, body.y, body.w - list_w - u.px(8), row_h};
   const Recti sheet{ruler.x, ruler.bottom(), ruler.w, body.h - row_h};
   const float end = std::max(30.0f, clip->end_frame()) * 1.1f;
-  u.canvas.fill_rect({body.x, body.y, body.w, row_h}, Color::hex(0x2A2A2A));
+  u.canvas.fill_rect({body.x, body.y, body.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, sheet, end);
   draw_anim_rows(*clip, root, list, body, sheet, row_h, end);
   anim_.sheet = sheet, anim_.sheet_end = end;
   if (anim_.curves) draw_anim_curves(*clip, sheet, end);
   /* The playhead (red while recording). */
   const int px = anim_x_of(sheet, anim_.frame, end);
-  u.canvas.vline(px, ruler.y, body.bottom(), anim_.record ? Color::hex(0xFF3B3B) : Color::hex(0xFFFFFF));
+  u.canvas.vline(px, ruler.y, body.bottom(), anim_.record ? Color::hex(0xFF3B3B) : u.theme.playhead);
   if (anim_.drag == 3) u.canvas.rect_outline({std::min(in.mx, anim_.drag_x), std::min(in.my, anim_.drag_y), std::abs(in.mx - anim_.drag_x), std::abs(in.my - anim_.drag_y)}, u.theme.focus);
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
   if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);

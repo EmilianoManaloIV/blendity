@@ -160,7 +160,8 @@ struct LayerPrefixReflector : Reflector {
   void color(const char *name, Vec3 &v) override { in.color(n(name).c_str(), v); }
   void enumeration(const char *name, int &v, const char *const *o, int c) override { in.enumeration(n(name).c_str(), v, o, c); }
   void text(const char *name, std::string &v) override { in.text(n(name).c_str(), v); }
-  void object(const char *name, std::string &v) override { in.object(n(name).c_str(), v); }
+  void object(const char *name, std::string &v, const char *type) override { in.object(n(name).c_str(), v, type); }
+  void asset(const char *name, std::string &p, const char *ext, const char *kind) override { in.asset(n(name).c_str(), p, ext, kind); }
   void mesh(const char *name, MeshPtr &m) override { in.mesh(n(name).c_str(), m); }
   void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
   void help(const char *h) override { in.help(h); }
@@ -233,7 +234,8 @@ void ProceduralTexture::reflect(Reflector &r) {
   r.field("Height", height, 64, 4096);
   r.help("The images' size in texels (powers of two, 64 to 4096).");
   r.field("Physical Size", physical_size, 0.05f, 0.01f, 1000.0f);
-  r.help("Metres one tile covers: a material using the texture tiles it that often per metre by default.");
+  r.help("Metres one tile of the texture covers (Unity's Tiling the other way up: 2 m = Tiling 0.5). Changing it re-tiles every\n"
+         "material using the texture, unless its Tiling was set by hand.");
   r.field("Seamless", seamless);
   r.field("Normal Strength", normal_strength, 0.05f, 0.0f, 10.0f);
   r.field("Seed", seed, 0, 1000000);

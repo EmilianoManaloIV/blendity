@@ -31,7 +31,8 @@ enum Key : int {
 enum Mod : int { MOD_SHIFT = 1, MOD_CTRL = 2, MOD_ALT = 4, MOD_SUPER = 8 };
 
 enum class EventType {
-  Invalid, Quit, Resize, Repaint, MouseMove, MouseDown, MouseUp, Wheel, KeyDown, KeyUp, Text, Drop, FocusLost, DpiChanged
+  Invalid, Quit, Resize, Repaint, MouseMove, MouseDown, MouseUp, Wheel, KeyDown, KeyUp, Text, Drop, FocusLost, DpiChanged,
+  Gesture  // two fingers on a touch screen or pad (task 0075): zoom, pan, rotate
 };
 
 struct Event {
@@ -44,6 +45,10 @@ struct Event {
   bool repeat = false;
   uint32_t codepoint = 0;  // Text
   std::vector<std::string> paths;  // Drop (UTF-8)
+  /* Gesture: this event's change - the fingers' spread as a factor (2: twice as far apart), their middle's move in
+   * pixels, their turn in degrees (counter-clockwise). */
+  float zoom = 1.0f, pan_x = 0.0f, pan_y = 0.0f, rotate = 0.0f;
+  float pressure = 1.0f;  // MouseMove / MouseDown from a pen: how hard it presses (0..1); 1 for a mouse or a finger
 };
 
 enum class Cursor { Arrow, IBeam, ResizeH, ResizeV, Move, Hand };

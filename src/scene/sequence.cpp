@@ -74,7 +74,7 @@ std::string save_sequence_text(const Sequence &s) {
   for (const SeqTrack &t : s.tracks) {
     os << "track " << t.name << "\n";
     for (const SeqInstance &i : t.items)
-      os << "clip " << i.start << " " << i.trim_in << " " << i.trim_out << " " << i.speed << "\t" << i.name << "\t" << i.clip << "\n";
+      os << "clip " << i.start << " " << i.trim_in << " " << i.trim_out << " " << i.speed << "\t" << i.name << "\t" << i.clip << (i.target.empty() ? "" : "\t" + i.target) << "\n";
   }
   for (const SeqTrigger &g : s.triggers) os << "trigger " << g.blend << "\t" << g.key << "\t" << g.instance << "\n";
   return os.str();
@@ -124,6 +124,7 @@ bool load_sequence_text(const std::string &text, Sequence &s) {
       i.start = std::max(0.0f, i.start), i.trim_in = std::max(0.0f, i.trim_in);
       i.speed = std::fabs(i.speed) < 1e-3f ? 1.0f : std::min(10.0f, std::fabs(i.speed));  // (no reverse play: forwards)
       i.name = f[1], i.clip = f[2];
+      if (f.size() > 3) i.target = f[3];  // (task 0070; older files: none)
       s.tracks.back().items.push_back(std::move(i));
     }
     else if (word == "trigger") {
@@ -293,14 +294,14 @@ int AnimValues::find(uint64_t key) const {
     if (!slots_[i] || values[slots_[i] - 1].key == key) return (int)i;
 }
 
-void AnimValues::set_key(uint64_t key, const AnimTrack *t, float value) {
+void AnimValues::set_key(uint64_t key, const AnimTrack *t, float value, GameObject *target) {
   if (slots_.size() < 2 * (values.size() + 1)) {  // (at most half full: the probes stay short)
     slots_.assign(std::max<size_t>(64, slots_.size() * 2), 0u);
     for (size_t i = 0; i < values.size(); i++) slots_[(size_t)find(values[i].key)] = (uint32_t)i + 1;
   }
   const int s = find(key);
   if (slots_[(size_t)s]) return (void)(values[slots_[(size_t)s] - 1].value = value);
-  values.push_back({key, t, value});
+  values.push_back({key, t, value, target});
   slots_[(size_t)s] = (uint32_t)values.size();
 }
 
@@ -331,59 +332,95 @@ void sample_clip_values(const AnimationClip &clip, float frame, AnimValues &out)
 
 namespace {
 
-/* One instance's numbers at a sequence frame (its clip, trimmed, at its speed; a missing clip gives nothing). */
-void sample_instance(const SeqInstance &i, float frame, AnimValues &out) {
+/* One instance's numbers at a sequence frame (its clip, trimmed, at its speed; a missing clip gives nothing), keyed by
+ * its target too: the same bone path on two characters is two numbers. */
+void sample_instance(const SeqInstance &i, float frame, AnimValues &out, const Scene *scene) {
   const AnimationClipPtr c = clip_asset(i.clip);
   if (!c) return;
+  GameObject *target = scene && !i.target.empty() ? scene->find_by_name(i.target) : nullptr;
+  if (scene && !i.target.empty() && !target) return;  // (its object is gone: nothing to move)
+  const uint64_t salt = target ? target->id * 0x9E3779B97F4A7C15ull : 0;
   const float f = std::max(i.trim_in, std::min(i.clip_out(c.get()), i.clip_frame(frame)));
-  sample_clip_values(*c, f, out);
+  for (const AnimTrack &t : c->tracks) {
+    if (t.keys.empty()) continue;
+    const float v = t.sample(f);
+    if (std::isfinite(v)) out.set_key(anim_value_key(t.path, t.property, t.axis) ^ salt, &t, v, target);
+  }
 }
 
-/* The instances of a track covering `frame` (at most the last two that start before it: a cross dissolve). */
-void covering(const SeqTrack &t, float frame, const SeqInstance *&a, const SeqInstance *&b) {
-  a = b = nullptr;
+
+/* The bars of a track covering `frame`, per object: for each object, at most the last two that start before it (a cross
+ * dissolve); bars on different objects play side by side. */
+void covering(const SeqTrack &t, float frame, std::vector<std::pair<const SeqInstance *, const SeqInstance *>> &out) {
+  out.clear();
   for (const SeqInstance &i : t.items) {
     if (i.start > frame) break;
     if (frame >= i.start + i.duration(clip_asset(i.clip).get())) continue;
-    a = b, b = &i;
+    auto it = std::find_if(out.begin(), out.end(), [&](const auto &p) { return p.second->target == i.target; });
+    if (it == out.end()) out.push_back({nullptr, &i});
+    else it->first = it->second, it->second = &i;
   }
 }
 
 }  // namespace
 
-void sample_sequence(const Sequence &s, float frame, AnimValues &out) {
+static void sample_pair(const SeqInstance *a, const SeqInstance *b, float frame, AnimValues &out, const Scene *scene, AnimValues &va, AnimValues &vb);
+
+void sample_sequence(const Sequence &s, float frame, AnimValues &out, const Scene *scene) {
   static thread_local AnimValues va, vb;  // (kept warm: no allocation a frame)
+  static thread_local std::vector<std::pair<const SeqInstance *, const SeqInstance *>> pairs;
   for (const SeqTrack &t : s.tracks) {
-    const SeqInstance *a = nullptr, *b = nullptr;
-    covering(t, frame, a, b);
-    if (!b) continue;
+    covering(t, frame, pairs);
+    for (const auto &[a, b] : pairs) sample_pair(a, b, frame, out, scene, va, vb);
+  }
+}
+
+/* One object's bar at `frame` on a track, or two crossfading. */
+static void sample_pair(const SeqInstance *a, const SeqInstance *b, float frame, AnimValues &out, const Scene *scene, AnimValues &va, AnimValues &vb) {
+  {
     vb.clear();
-    sample_instance(*b, frame, vb);
+    sample_instance(*b, frame, vb, scene);
+    va.clear();
+    if (a) sample_instance(*a, frame, va, scene);
     if (!a) {
-      for (const AnimValue &v : vb.values) out.set_key(v.key, v.track, v.value);
-      continue;
+      for (const AnimValue &v : vb.values) out.set_key(v.key, v.track, v.value, v.target);
+      return;
     }
     /* The overlap: from b's start to a's end, b's weight rising from 0 to 1. A number only one of them has is its. */
-    va.clear();
-    sample_instance(*a, frame, va);
     const float a_end = a->start + a->duration(clip_asset(a->clip).get()), b_end = b->start + b->duration(clip_asset(b->clip).get());
     const float w = std::max(0.0f, std::min(1.0f, (frame - b->start) / std::max(1e-3f, std::min(a_end, b_end) - b->start)));
     for (const AnimValue &v : va.values) {
       const float *other = vb.get(v.key);
-      out.set_key(v.key, v.track, other ? blend_anim_value(v.track->property, v.value, *other, w) : v.value);
+      out.set_key(v.key, v.track, other ? blend_anim_value(v.track->property, v.value, *other, w) : v.value, v.target);
     }
     for (const AnimValue &v : vb.values)
-      if (!va.get(v.key)) out.set_key(v.key, v.track, v.value);
+      if (!va.get(v.key)) out.set_key(v.key, v.track, v.value, v.target);
   }
 }
 
-void apply_anim_values(const AnimValues &vals, GameObject &root) {
-  std::unordered_map<const std::string *, GameObject *> found;  // (by the track's path string: tracks of one object share none, so a few lookups more at worst)
+namespace {
+struct PathFrom {  // a track's path string and the object it starts from
+  const std::string *path;
+  GameObject *from;
+  bool operator==(const PathFrom &o) const { return path == o.path && from == o.from; }
+};
+struct PathFromHash {
+  size_t operator()(const PathFrom &k) const { return std::hash<const void *>()(k.path) * 31u ^ std::hash<const void *>()(k.from); }
+};
+}  // namespace
+
+void apply_anim_values(const AnimValues &vals, GameObject *root) {
+  /* Each object found once: by the track's path string and where it starts (tracks of one object share none, so a few
+   * lookups more at worst). */
+  std::unordered_map<PathFrom, GameObject *, PathFromHash> found;
   std::unordered_map<GameObject *, Transform> poses;
   for (const AnimValue &v : vals.values) {
     const AnimTrack &t = *v.track;
-    auto it = found.find(&t.path);
-    if (it == found.end()) it = found.emplace(&t.path, anim_target(root, t.path)).first;
+    GameObject *from = v.target ? v.target : root;
+    if (!from) continue;
+    const PathFrom key{&t.path, from};
+    auto it = found.find(key);
+    if (it == found.end()) it = found.emplace(key, anim_target(*from, t.path)).first;
     GameObject *g = it->second;
     if (!g || !std::isfinite(v.value)) continue;
     if (!is_transform_property(t.property)) {
@@ -403,13 +440,23 @@ void apply_anim_values(const AnimValues &vals, GameObject &root) {
   }
 }
 
-void read_anim_values(const AnimValues &names, GameObject &root, AnimValues &out) {
+void read_anim_values(const AnimValues &names, GameObject *root, AnimValues &out) {
   out.clear();
   for (const AnimValue &v : names.values) {
-    GameObject *g = anim_target(root, v.track->path);
+    GameObject *from = v.target ? v.target : root;
+    GameObject *g = from ? anim_target(*from, v.track->path) : nullptr;
     float now = 0.0f;
-    if (g && read_anim_value(*g, v.track->property, v.track->axis, now)) out.set_key(v.key, v.track, now);
+    if (g && read_anim_value(*g, v.track->property, v.track->axis, now)) out.set_key(v.key, v.track, now, v.target);
   }
+}
+
+bool scene_sequence_drives(const Scene &scene, const GameObject &g) {
+  const SequencePtr s = scene.sequence.empty() ? nullptr : sequence_asset(scene.sequence);
+  if (!s) return false;
+  for (const SeqTrack &t : s->tracks)
+    for (const SeqInstance &i : t.items)
+      if (i.target == g.name) return true;
+  return false;
 }
 
 int trigger_key_code(const std::string &name_in) {
@@ -427,7 +474,7 @@ int trigger_key_code(const std::string &name_in) {
 /* ---------------------------------------------------------------- the component */
 
 void Sequencer::reflect(Reflector &r) {
-  r.text("Sequence", sequence);
+  r.asset("Sequence", sequence, ".seq", "Sequence");
   r.help("The .seq sequence it plays (Assets/Animations). Lay clips out in the Sequencer window (Window > Sequencer).");
   r.field("Play Automatically", play_automatically);
   r.help("Starts the timeline when Play starts.");
@@ -437,7 +484,8 @@ void Sequencer::reflect(Reflector &r) {
   r.help("At the timeline's end: start again, or hold the last frame. A trigger's key jumps to its clip either way.");
 }
 
-void Sequencer::start(PlayContext &) {
+void Sequencer::start(PlayContext &ctx) {
+  scene_ = ctx.scene;  // (a jump before the first update finds the bars' objects)
   time = 0.0f;
   playing = play_automatically;
   blend_left = blend_total = 0.0f;
@@ -455,12 +503,12 @@ float Sequencer::frame() const {
 bool Sequencer::jump(const std::string &instance, float blend) {
   const SequencePtr s = sequence_asset(sequence);
   const SeqInstance *i = s ? s->find(instance) : nullptr;
-  if (!i || !owner) return false;
+  if (!i) return false;
   /* From the pose of the moment: the current numbers of what the sequence animates there and at the target. */
   AnimValues names;
-  sample_sequence(*s, frame(), names);
-  sample_sequence(*s, i->start, names);
-  read_anim_values(names, *owner, blend_from);
+  sample_sequence(*s, frame(), names, scene_);
+  sample_sequence(*s, i->start, names, scene_);
+  read_anim_values(names, owner, blend_from);
   blend_total = blend_left = std::max(0.0f, blend);
   time = i->start / s->frame_rate;
   playing = true;
@@ -468,7 +516,7 @@ bool Sequencer::jump(const std::string &instance, float blend) {
 }
 
 void Sequencer::update(PlayContext &ctx) {
-  if (!owner) return;
+  scene_ = ctx.scene;
   const SequencePtr s = sequence_asset(sequence);
   if (!s) return;
   was_down.resize(s->triggers.size(), 0);
@@ -481,14 +529,14 @@ void Sequencer::update(PlayContext &ctx) {
   if (!playing) return;
   time += ctx.dt * speed;
   scratch.clear();
-  sample_sequence(*s, frame(), scratch);
+  sample_sequence(*s, frame(), scratch, scene_);
   if (blend_left > 0.0f && blend_total > 0.0f) {
     blend_left = std::max(0.0f, blend_left - ctx.dt);
     const float t = 1.0f - blend_left / blend_total;
     for (AnimValue &v : scratch.values)
       if (const float *from = blend_from.get(v.key)) v.value = blend_anim_value(v.track->property, *from, v.value, t);
   }
-  apply_anim_values(scratch, *owner);
+  apply_anim_values(scratch, owner);
 }
 
 }  // namespace bl

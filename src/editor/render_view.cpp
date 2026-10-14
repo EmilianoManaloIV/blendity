@@ -346,6 +346,12 @@ bool Editor::camera_for_render(Mat4 &view, Mat4 &proj, float aspect) {
 /* Rasterized (EEVEE-like)                                                */
 /* ===================================================================== */
 
+/* A cached map for the views now: the Low tier's take the cheaper filter (renders keep 3 x 3). */
+const ShadowMap *Editor::shadow_for_view(ShadowMap &m) const {
+  m.fast = quality_tier_ == TierLow && !final_render_;
+  return m.valid() ? &m : nullptr;
+}
+
 const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env) {
   int li = -1;
   for (size_t i = 0; i < env.lights.size(); i++)
@@ -419,7 +425,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     for (ShadowEntry &e : shadow_cache_)
       if (e.key == key) {
         e.used = shadow_clock_;
-        return e.map.valid() ? &e.map : nullptr;
+        return shadow_for_view(e.map);
       }
   /* Which casters are moving: changed within the last second. */
   const double now = now_seconds();
@@ -476,7 +482,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   prof_.ms_shadow += t.ms();
   e.key = cacheable ? key : 0;
   e.used = shadow_clock_;
-  return e.map.valid() ? &e.map : nullptr;
+  return shadow_for_view(e.map);
 }
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
@@ -683,6 +689,7 @@ void Editor::set_quality_tier(int tier) {
 }
 
 int Editor::recommended_tier() {
+  if (const char *e = std::getenv("BLENDITY_MIN_SPEC"); e && *e && *e != '0') return TierLow;  // (try the minimum machine's start)
   const uint64_t ram = sys::physical_memory_bytes();
   const bool small = sys::hardware_threads() <= 8 || (ram > 0 && ram <= (uint64_t)9 << 30);  // "8 GB" machines report a little under
   return small ? TierLow : TierHigh;
@@ -1799,6 +1806,7 @@ bool Editor::start_render_sequence(const std::string &dir_in) {
     return false;
   }
   stop_render_sequence();
+  stop_render_animation();  // (one thing drives the F12 render at a time)
   seq_ = RenderSequence{};
   for (GameObject *g : cams) seq_.cams.push_back(g->id);
   if (dir_in.empty()) {

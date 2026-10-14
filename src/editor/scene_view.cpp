@@ -52,7 +52,8 @@ void Editor::draw_scene_view(const Recti &r) {
    * render, so transforms applied by a drag show up in the same frame. */
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
-  bool gizmo_busy = gizmo_update(view);
+  bool gizmo_busy = bone_handles_update(view);  // (before the gizmo: a pressed handle is the bone's, task 0066)
+  if (gizmo_update(view)) gizmo_busy = true;
   if (wp_update(view)) gizmo_busy = true;  // Weight Paint: the brush owns the mouse
   /* A running Push/Pull owns the mouse until it is confirmed or cancelled. */
   if (pushpull_update(view)) gizmo_busy = true;
@@ -149,6 +150,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
   draw_autorig_markers(view);
+  draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
   draw_pushpull(view);
   draw_modal(view);
   draw_transform(view);
@@ -192,7 +194,7 @@ void Editor::draw_scene_view(const Recti &r) {
 
 void Editor::draw_scene_overlay_bar(const Recti &bar) {
   auto &u = ui_;
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   u.canvas.hline(bar.x, bar.right(), bar.bottom() - 1, u.theme.border);
   int h = bar.h - u.px(6), y = bar.y + u.px(3), x = bar.x + u.px(6);
   static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Shaded Wireframe"};
@@ -222,8 +224,9 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   bool hot = u.hovered(er);
   uint32_t bg = edit_mode_ ? u.theme.accent : (hot && can_edit ? u.theme.button_hover : u.theme.button);
   u.frame(er, bg, u.theme.border, u.px(3));
-  u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, can_edit ? 0xFFFFFFFF : u.theme.text_dim);
-  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", can_edit ? 0xFFFFFFFF : u.theme.text_dim);
+  const uint32_t ink = !can_edit ? u.theme.text_dim : edit_mode_ ? 0xFFFFFFFF : u.theme.text_bright;  // (white on the accent only)
+  u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
+  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, "Edit Mode (Tab)", ink);
   if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
   u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
   (void)x;
@@ -236,7 +239,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
 std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   const auto &in = ui_.in;
   const bool unity_like = nav_style_ == NavStyle::Unity || nav_style_ == NavStyle::Unreal;
-  if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active) {  // a right-click cancels a running Push/Pull, Inset or Bevel instead
+  if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal) {  // a right-click cancels a running Push/Pull, Inset, Bevel or bone Extrude instead
     if (nav_style_ == NavStyle::Unreal && in.down[0]) return {Drag::Pan, 1};
     if (in.alt() && nav_style_ != NavStyle::Blender) return {Drag::Zoom, 1};
     return {unity_like ? Drag::Fly : Drag::None, 1};
@@ -363,8 +366,25 @@ void Editor::scene_navigation(const Recti &view) {
       (void)eye;
     }
   }
+  if (scene_hovered_ && drag_ == Drag::None && !modal_.active) touch_navigate(k_pan);
   if (pilot_cam_ && in.key_pressed[platform::KEY_ESCAPE] && !pp_.active && !modal_.active && !xf_.active && !draw_.active && !knife_.active)
     toggle_pilot_camera();
+}
+
+/* Two fingers on a touch screen or pad (task 0075), in every feel: pinch zooms toward the pivot, a two-finger drag
+ * pans the view with the fingers, a twist turns it round the pivot (as tablets' 3D apps do: Nomad, Shapr3D). */
+void Editor::touch_navigate(float k_pan) {
+  const auto &in = ui_.in;
+  const bool zoom = std::isfinite(in.touch_zoom) && in.touch_zoom > 0.0f && in.touch_zoom != 1.0f;
+  if (!zoom && in.touch_pan_x == 0.0f && in.touch_pan_y == 0.0f && in.touch_rotate == 0.0f) return;
+  cam_.animating = false;
+  if (zoom) cam_.distance = clampf(cam_.distance / in.touch_zoom, 0.01f, 100000.0f);
+  if (std::isfinite(in.touch_pan_x) && std::isfinite(in.touch_pan_y)) {
+    cam_.pivot -= cam_.right() * (in.touch_pan_x * k_pan);
+    cam_.pivot += cam_.up() * (in.touch_pan_y * k_pan);
+  }
+  if (std::isfinite(in.touch_rotate)) cam_.yaw -= in.touch_rotate;
+  ui_.redraw = true;
 }
 
 void Editor::set_active_camera(GameObject *g) {
@@ -769,7 +789,8 @@ void Editor::draw_bone(const GameObject &g, const Bone &b) {
     const float a = k * kPi * 0.5f;
     ring[k] = w.point(Vec3(std::cos(a) * r, L * 0.1f, std::sin(a) * r));
   }
-  const uint32_t col = is_selected(g.id) ? kSelectOrange : Color::hex(0x202020, 220);
+  /* IK's bones tinted (Blender draws them yellowish): a chain turned by its control, not posed by hand. */
+  const uint32_t col = is_selected(g.id) ? kSelectOrange : ik_bones_frame_.count(g.id) ? Color::hex(0xB8A040, 230) : Color::hex(0x202020, 220);
   for (int k = 0; k < 4; k++) {
     scene_r3d_.line(head, ring[k], col, !over);
     scene_r3d_.line(ring[k], tail, col, !over);
@@ -779,8 +800,11 @@ void Editor::draw_bone(const GameObject &g, const Bone &b) {
 
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
+  ik_bones_frame_ = ik_driven_bones();
   scene_->for_each([&](GameObject &g) {
     if (const Component *bc = g.find_role(Component::RenderRole::Bone); bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
+    if (RigControl::live.load(std::memory_order_relaxed) && g.active_in_hierarchy())
+      if (const RigControl *rc = g.get<RigControl>()) draw_rig_control(g, *rc);
     if (const Component *pc = g.point_source(); pc && g.active_in_hierarchy()) {
       if (const Curve *cv = g.curve()) draw_curve(g, *cv);
       if (const Lattice *lt = g.lattice()) draw_lattice(g, *lt);
@@ -1277,6 +1301,10 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
         const float dist = length(p - (sa + d * t));
         if (dist < best) best = dist, hit = g.id;
       }
+    }
+    if (const RigControl *rc = RigControl::live.load(std::memory_order_relaxed) ? g.get<RigControl>() : nullptr) {  // a control by its wire (task 0067)
+      const float d = rig_control_distance(view, g, *rc, mx, my) * 0.5f;  // (a control near a bone wins: animators grab controls)
+      if (d < best) best = d, hit = g.id;
     }
     if (const Lattice *lt = g.lattice()) {  // a lattice by its cage (task 0043)
       const Mat4 &lw = g.world_matrix();
@@ -3222,7 +3250,7 @@ void Editor::draw_game_view(const Recti &r) {
   auto &u = ui_;
   int bh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   {
     /* Which camera the view shows: the scene's Active Camera (Unity: the Display dropdown; Blender: the
      * scene camera). Choosing one here sets it. */
@@ -3635,7 +3663,7 @@ void Editor::draw_last_op_panel(const Recti &view) {
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
   Recti r{view.x + u.px(10), view.bottom() - h - u.px(10), w, h};
   last_op_rect_ = r;
-  u.frame(r, Color::hex(0x262626, 235), Color::hex(0x101010), u.px(4));
+  u.frame(r, (u.theme.popup & 0x00FFFFFFu) | (235u << 24), u.theme.border, u.px(4));
   Recti hr{r.x + pad, r.y + u.px(3), r.w - pad * 2, rh};
   int a = u.font.line_height() - u.px(4);
   u.draw_icon(last_op_open_ ? ui::Icon::ArrowDown : ui::Icon::ArrowRight, {hr.x, hr.y + (rh - a) / 2, a, a}, u.theme.text);

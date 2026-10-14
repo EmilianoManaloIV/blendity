@@ -197,6 +197,16 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Animated motion could only be timed, not shaped: every key eased the same way. | The Animation window's Curves view: drag keys in value, drag tangent handles, Free Smooth / Broken / Flat / Clamped Auto keys (task 0061). |
 | Going from one animation clip to another needed something like a state machine to wire up. | The Sequencer window: lay clips on tracks, overlap them to crossfade, and give keys to jump between them in Play (task 0062). |
 | Users of Unreal, Blender or Maya had to relearn the mouse: the Scene view only navigated Unity's way. | Edit > Editor Feel: Unreal, Blender or Maya keys and mouse navigation together (task 0063). |
+| Object fields took any object and asset references were typed paths: nothing said what a field wanted. | Unity's typed fields: "None (Armature)", wrong kinds refused, a picker per field; clips and sequences dragged from the Project window (task 0064). |
+| A rig's IK targets were invisible empties beside bones, bones could only be moved whole, the auto-rig's markers were all green in one view, and keys were picked one axis at a time. | Rig controls coloured by side, bone head/tail handles and Extrude, character roots, coloured markers in five views, grouped x/y/z rows with box select (tasks 0065-0069). |
+| Stacks (modifiers, camera filters, texture layers, Sequencer tracks) could only be reordered one step at a time from a menu. | Drag an item's name to its new place, as in Unity's Inspector and Blender's stack (task 0071). |
+| A texture's Physical Size changed nothing visible: its materials kept their old tiling. | Physical Size re-tiles the scene's materials using the texture, except ones tiled by hand (task 0072). |
+| The editor had one colour scheme. | Preferences > Theme: Dark, Light, and Emiliano Light / Dark from the author's site palette (task 0073). |
+| An animation or a sequence could only be rendered one image at a time. | Render Animation (Ctrl+F12): numbered PNGs and, with FFmpeg, an MP4 (task 0074). |
+| On a touch laptop the Scene view could only be navigated with a mouse, and a small machine was set to Low silently. | Two-finger zoom, pan and turn; pen pressure for weight paint; a first-run welcome offering High (task 0075). |
+| Getting Blendity meant building it or unpacking CI artifacts. | Installers for Windows, Linux (AppImage, tar.gz) and macOS (dmg), on GitHub Releases (task 0076). |
+| An MP4 needed FFmpeg installed separately, and the installers lacked Blender's libraries (Embree, denoising, colour management). | FFmpeg linked in; the installers carry every library; one script fetches them for a source build (tasks 0077-0078). |
+| Updating meant finding a new installer by hand; a missing library stopped Blendity starting. | Updates offered with their notes, any older build from Version History; Blendity runs without the libraries and offers them, by your choice (tasks 0079-0080). |
 | How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 
 ## Still worth doing

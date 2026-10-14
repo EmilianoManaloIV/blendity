@@ -36,8 +36,14 @@ When `blender/lib/<platform>` exists next to this project, the build scripts lin
 | [DPC++ runtime](https://github.com/intel/llvm) | 7.1.0 | runtime dependency of Embree's build (SYCL) | Apache-2.0 with LLVM exception (`LLVM-exception.txt`) |
 | [shaderc](https://github.com/google/shaderc) (with glslang, SPIRV-Tools) | v2025.4 | compiles the GPU path-tracing kernel (GLSL to SPIR-V) at run time | Apache-2.0 (glslang also BSD-3-Clause / MIT parts) |
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | 1.4.341 | GPU rendering API declarations (headers only; the Vulkan loader comes with the GPU driver) | Apache-2.0 / MIT |
+| [FFmpeg](https://ffmpeg.org/) (libavcodec, libavformat, libavutil, libswscale, libswresample) | 8.1 | Render Animation's MP4, encoded in-process (task 0077) | LGPL-2.1-or-later (`LGPL-2.1-or-later.txt`); Blender's build enables GPL parts (x264, x265), so as built it is GPL-2.0-or-later (`GPL-2.0-or-later.txt`) |
+| [x264](https://www.videolan.org/developers/x264.html) | 35fe20d | H.264 encoding, inside FFmpeg | GPL-2.0-or-later |
+| [x265](https://www.videolan.org/developers/x265.html) | 4.1 | H.265 encoding, inside FFmpeg (Linux, macOS) | GPL-2.0-or-later |
+| [libaom](https://aomedia.googlesource.com/aom/) | 3.13.1 | AV1, inside FFmpeg (`aom.dll` on Windows) | BSD-2-Clause (and the AOM patent licence) |
+| [libvpx](https://github.com/webmproject/libvpx), [Opus](https://opus-codec.org/), [libvorbis / libogg / libtheora](https://xiph.org/) | 1.15.2, 1.3.1, - | codecs inside FFmpeg | BSD-3-Clause |
+| [LAME](https://lame.sourceforge.io/) | 3.100 | MP3, inside FFmpeg | LGPL-2.0-or-later |
 
-All of these are permissive or weak-copyleft licenses that are compatible with GPL-3.0. MPL-2.0 (Eigen) only asks that changes to Eigen's own files stay available; Blendity doesn't modify them. A binary build that includes them is therefore also distributed under GPL-3.0-or-later, as Blender's is.
+All of these are permissive, weak-copyleft or GPL-2.0-or-later licenses that are compatible with GPL-3.0. MPL-2.0 (Eigen) only asks that changes to Eigen's own files stay available; Blendity doesn't modify them. A binary build that includes them is therefore also distributed under GPL-3.0-or-later, as Blender's is.
 
 ## What this means for the executables
 

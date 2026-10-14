@@ -7,6 +7,8 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../core/launch.h"
+#include "../core/releases.h"
 #include "../deps/deps.h"
 #include "../research/research.h"
 
@@ -23,7 +25,7 @@ namespace bl {
 using namespace platform;
 using ui::Icon;
 
-static const char *kVersion = "0.10.0";
+static const char *kVersion = releases::version();  // (VERSION, through the build scripts)
 
 const char *window_title(WindowKind k) {
   static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer"};
@@ -77,26 +79,46 @@ bool SceneCamera::update(double now) {
 
 Editor::Editor() = default;
 Editor::~Editor() {
+  cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
+  cancel_update_download();
   procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
   if (window_) destroy_window(window_);
 }
 
-void Editor::resolve_project_paths() {
-  auto is_root = [](const std::string &d) {  // (a research folder marked older projects; new ones have Assets/Scenes)
+/* The first project folder at or up to 6 levels above one of `starts`: a folder with Assets (and Assets/Scenes, or
+ * research for older projects). "" when none. */
+std::string Editor::find_project_root(const std::vector<std::string> &starts) {
+  auto is_root = [](const std::string &d) {
     return fs::is_dir(fs::join(d, "Assets")) && (fs::is_dir(fs::join(d, "research")) || fs::is_dir(fs::join(d, "Assets/Scenes")));
   };
-  std::vector<std::string> starts = {fs::executable_dir(), fs::current_dir()};
-  if (const char *env = std::getenv("BLENDITY_PROJECT")) project_root_ = env;  // tests: a scratch project
-  if (!project_root_.empty()) starts.clear();
   for (std::string d : starts) {
     for (int i = 0; i < 6 && !d.empty(); i++) {
-      if (is_root(d)) { project_root_ = d; break; }
-      std::string p = fs::parent(d);
+      if (is_root(d)) return d;
+      const std::string p = fs::parent(d);
       if (p == d) break;
       d = p;
     }
-    if (!project_root_.empty()) break;
   }
+  return "";
+}
+
+/* The scene the arguments name: --scene's value, or a .scene path given alone (a file double-clicked in Explorer or a
+ * file manager; any case, as Windows' associations); another option's value isn't one. */
+std::string Editor::scene_in_args(int argc, char **argv) {
+  for (int i = 1; i < argc; i++) {
+    const std::string a = argv[i], before = i > 1 ? argv[i - 1] : "";
+    if (before == "--scene") return fs::normalize(a);
+    const bool option_value = before.rfind("--", 0) == 0;
+    if (to_lower(fs::extension(a)) == ".scene" && !option_value) return fs::normalize(a);
+  }
+  return "";
+}
+
+void Editor::resolve_project_paths(const std::string &near) {
+  std::vector<std::string> starts = {fs::executable_dir(), fs::current_dir()};
+  if (!near.empty()) starts.insert(starts.begin(), fs::parent(near));  // (a .scene opened from Explorer: its project)
+  if (const char *env = std::getenv("BLENDITY_PROJECT")) project_root_ = env;  // tests: a scratch project
+  if (project_root_.empty()) project_root_ = find_project_root(starts);
   if (project_root_.empty()) project_root_ = fs::join(fs::home_dir(), "BlendityProject");
   project_root_ = fs::normalize(project_root_);
   assets_dir_ = fs::join(project_root_, "Assets");
@@ -126,9 +148,9 @@ bool Editor::init(int argc, char **argv) {
   gpu::set_background_open_default(true);
   cam_preview_pt_.set_background_gpu_open(true);
   final_pt_.set_background_gpu_open(true);
-  resolve_project_paths();
+  std::string scene_arg = scene_in_args(argc, argv), layout_arg;  // (a double-clicked .scene: task 0076)
+  resolve_project_paths(scene_arg);
   load_prefs();
-  std::string scene_arg, layout_arg;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--scene" && i + 1 < argc) scene_arg = argv[++i];
@@ -162,6 +184,8 @@ bool Editor::init(int argc, char **argv) {
   }
   stable_ = scene_->clone();
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
+  if (update_check_ && std::time(nullptr) - update_last_check_ > 86400.0) start_update_check(false);  // (once a day, task 0079)
+  check_libraries_at_start();  // (the dependency-free build: offer Blender's libraries, task 0080)
   Log::info("New here? Open the Learn tab (F1).");
   Log::info("UI font: %s | worker threads: %d", ui_.font.source().c_str(), JobSystem::global().thread_count());
   return true;
@@ -186,7 +210,7 @@ void Editor::step_frame_headless(std::vector<Event> events) { frame(events); }
 bool Editor::wants_continuous_redraw() const {
   return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
          lighting_update_requested_ || preview_running_ ||
-         seq_.active ||
+         seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
          !deferred_.empty() ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
@@ -256,6 +280,8 @@ void Editor::process_events(std::vector<Event> &events) {
   in.pmy = in.my;
   for (int b = 0; b < 3; b++) in.pressed[b] = in.released[b] = in.double_clicked[b] = false;
   in.wheel_x = in.wheel_y = 0;
+  in.touch_zoom = 1.0f;
+  in.touch_pan_x = in.touch_pan_y = in.touch_rotate = 0.0f;
   in.text.clear();
   in.dropped.clear();
   std::fill(std::begin(in.key_pressed), std::end(in.key_pressed), false);
@@ -264,10 +290,20 @@ void Editor::process_events(std::vector<Event> &events) {
       case EventType::Quit: request_close(); break;
       case EventType::MouseMove:
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
+        in.pressure = e.pressure;
+        break;
+      case EventType::Gesture:  // (task 0075: two fingers; the Scene view navigates with them)
+        if (!in.down[0] && !in.down[1] && !in.down[2]) in.mx = e.x, in.my = e.y;  // (a held button's drag keeps its own point)
+        in.mods = e.mods;
+        in.touch_zoom *= e.zoom;
+        in.touch_pan_x += e.pan_x;
+        in.touch_pan_y += e.pan_y;
+        in.touch_rotate += e.rotate;
         break;
       case EventType::MouseDown: {
         int b = e.button;
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
+        in.pressure = e.pressure;
         in.down[b] = true;
         in.pressed[b] = true;
         double t = now_seconds();
@@ -401,6 +437,8 @@ void Editor::frame(std::vector<Event> &events) {
     start_final_render(true, false);
   step_final_render();
   step_render_sequence();
+  step_render_animation();
+  poll_updates();
   step_bake();
 
   /* Pull new console lines. */
@@ -443,6 +481,7 @@ void Editor::frame(std::vector<Event> &events) {
   drop_rows_.clear();
   drop_folders_.clear();
   drop_seq_tracks_.clear();
+  if (field_pick_.field && ++field_pick_.age > 1) field_pick_ = FieldPick{};  // (a pick its field didn't take at once)
   if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
   seqr_.drawn = false;
   sync_material_asset_names();
@@ -516,7 +555,7 @@ void Editor::frame(std::vector<Event> &events) {
   if (window_) set_cursor(window_, ui_.cursor);
 
   /* Undo: commit once the interaction that changed things has finished. */
-  if (pending_change_ && !ui_.in.down[0] && !ui_.in.down[1] && !ui_.in.down[2] && drag_ != Drag::Gizmo) commit_undo();
+  if (pending_change_ && !ui_.in.down[0] && !ui_.in.down[1] && !ui_.in.down[2] && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
 
   std::string title = scene_display_name() + (scene_dirty_ ? "*" : "") + " - Blendity" + (playing_ ? " [Playing]" : "");
   if (title != last_title_ && window_) {
@@ -604,6 +643,8 @@ void Editor::draw_menubar(const Recti &r) {
     });
     u.menu_separator();
     if (u.menu_item("Render Image", "F12", false, true, Icon::Camera)) start_final_render();
+    if (u.menu_item("Render Animation", "Ctrl+F12", ranim_.active, true, Icon::Camera)) ranim_.active ? stop_render_animation() : (void)start_render_animation();
+    u.tooltip("Every frame of the scene's sequence (or the selected object's clip) as PNGs in Renders/, then an MP4 when FFmpeg is there.");
     if (u.menu_item("Save Render...", nullptr, false, render_has_result_)) defer([this] { save_render(); });
     if (u.menu_item("Save Screenshot...", "Shift+F12")) screenshot_dialog();
     u.menu_separator();
@@ -930,6 +971,11 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item("Open README")) fs::open_external(fs::join(project_root_, "README.md"));
     if (u.menu_item("References (papers)")) open_references();
     u.menu_separator();
+    if (u.menu_item("Check for Updates...")) start_update_check(true);
+    u.tooltip("Asks GitHub for a newer build of Blendity; if there is one, shows what it brings and offers to install it.");
+    if (u.menu_item("Version History...")) update_command({"update", "history"});
+    u.tooltip("Every build for this system with its notes: install a newer one, or go back to an older one.");
+    u.menu_separator();
     if (u.menu_item("About Blendity")) dialog_ = Dialog::About;
   });
 }
@@ -951,7 +997,7 @@ void Editor::draw_toolbar(const Recti &r) {
       {Tool::Scale, Icon::Scale, "Scale Tool (R)\nBlender: S."},
       {Tool::Transform, Icon::Transform, "Transform Tool (Y)\nMove, rotate and scale in one gizmo. Blender: Transform tool."}};
   /* Grouped segmented control, like Unity's tool strip. */
-  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 5 + u.px(2), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
+  u.frame({x - u.px(2), y - u.px(1), (bh + u.px(2)) * 5 + u.px(2), bh + u.px(2)}, u.theme.strip, u.theme.border, u.px(4));
   for (const T &t : tools) {
     if (u.icon_button({x, y, bh, bh}, t.i, tool_ == t.t, t.tip)) tool_ = t.t;
     x += bh + u.px(2);
@@ -991,7 +1037,7 @@ void Editor::draw_toolbar(const Recti &r) {
 
   /* Play controls in the middle, like Unity. */
   int cx = r.x + r.w / 2 - (bh * 3 + u.px(4)) / 2;
-  u.frame({cx - u.px(2), y - u.px(1), bh * 3 + u.px(8), bh + u.px(2)}, Color::hex(0x2A2A2A), u.theme.border, u.px(4));
+  u.frame({cx - u.px(2), y - u.px(1), bh * 3 + u.px(8), bh + u.px(2)}, u.theme.strip, u.theme.border, u.px(4));
   if (u.icon_button({cx, y, bh, bh}, Icon::Play, playing_, "Play (Ctrl+P)\nEnters Play mode. Changes made while playing are discarded on Stop, like Unity.")) {
     if (playing_) exit_play(); else enter_play();
   }
@@ -1061,7 +1107,7 @@ void Editor::draw_statusbar(const Recti &r) {
                                                    : std::string();
   std::string right = strprintf("%s%s%s%.1f ms  |  %zu objects  |  %zu tris  |  Blendity %s", lighting.c_str(),
                                 playing_ ? "PLAYING  |  " : "", edit_mode_ ? "EDIT MODE  |  " : "", frame_ms_,
-                                scene_->object_count(), scene_stats_.tris_submitted, kVersion);
+                                scene_->object_count(), scene_stats_.tris_submitted, releases::build_label().c_str());
   u.label({r.x, r.y, r.w - u.px(10), r.h}, right, u.theme.text_dim, ui::Align::Right);
 }
 
@@ -1523,6 +1569,7 @@ void Editor::commit_undo() {
   texture_before_.clear();
   s.clips = std::move(clip_before_);
   clip_before_.clear();
+  retile_followers_.clear();  // (the next step decides again which materials follow a texture's size)
   if (s.scene) {
     /* What this step alone holds: the meshes no other state or the scene shares (copy-on-write, ADR 0003), its
      * objects and its texture texts. */
@@ -1563,6 +1610,7 @@ size_t Editor::undo_bytes() const {
 
 void Editor::undo() {
   if (playing_) return;
+  stack_drag_cancel();  // (its item may not be where it was)
   cancel_skin_job();  // (its result was solved for the state being undone)
   anim_set_preview(false);  // (the pose shown goes back first: it isn't the scene's)
   seq_set_preview(false);
@@ -1598,6 +1646,7 @@ void Editor::undo() {
 
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
+  stack_drag_cancel();
   cancel_skin_job();
   anim_set_preview(false);
   seq_set_preview(false);
@@ -1639,6 +1688,7 @@ void Editor::new_scene() {
   autorig_cancel();
   anim_reset();
   seq_reset();
+  bone_drag_ = BoneDrag{};
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1661,6 +1711,7 @@ bool Editor::open_scene(const std::string &path) {
   autorig_cancel();
   anim_reset();
   seq_reset();
+  bone_drag_ = BoneDrag{};
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -2029,6 +2080,48 @@ void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) 
   }
 }
 
+/* Does material `m` use the texture whose outputs start with `prefix` ("Assets/Textures/Bricks.ptex#"), in any map? */
+static bool material_uses_texture(const Material &m, const std::string &prefix) {
+  for (const TextureRef *map : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map})
+    if (map->path.compare(0, prefix.size(), prefix) == 0) return true;
+  return false;
+}
+
+/* A texture's Physical Size changed (task 0072): the scene's materials using it whose tiling follows its size (1 tile =
+ * `from` metres) take the new one; a material tiled by hand keeps its tiling. Which ones follow is decided at the first
+ * change of an undo step, so a dragged size (a change every frame) never picks up a hand-tiled material it passes on
+ * the way. Part of the edit's undo step. (A .mat no object here uses isn't changed: undo couldn't put it back.) */
+int Editor::retile_texture_users(const std::string &asset_path, float from, float to) {
+  if (asset_path.empty() || !(to > 0.0f) || !std::isfinite(to)) return 0;
+  auto it = retile_followers_.find(asset_path);
+  if (it == retile_followers_.end()) it = retile_followers_.emplace(asset_path, texture_followers(asset_path, from)).first;
+  const float new_t = 1.0f / std::max(0.01f, to);
+  for (const auto &[m, z_too] : it->second) {
+    m->tiling.x = new_t, m->tiling.y = new_t;
+    if (z_too) m->tiling.z = new_t;  // (Box mapping tiles the sides by z)
+    m->touch();
+  }
+  if (!it->second.empty()) invalidate_material_textures();
+  return (int)it->second.size();
+}
+
+/* The scene's materials using the texture whose x and y tiling match a tile of `from` metres (z too, when it does). */
+std::vector<std::pair<MaterialPtr, bool>> Editor::texture_followers(const std::string &asset_path, float from) {
+  const float old_t = 1.0f / std::max(0.01f, from);
+  const std::string prefix = asset_path + "#";
+  auto follows = [old_t](float v) { return std::fabs(v - old_t) <= 1e-4f * old_t; };
+  std::unordered_set<Material *> seen;
+  std::vector<std::pair<MaterialPtr, bool>> out;
+  slots_using([&](const MaterialPtr &m) {
+    if (!m || !seen.insert(m.get()).second || !material_uses_texture(*m, prefix)) return false;
+    if (!follows(m->tiling.x) || !follows(m->tiling.y)) return false;  // (tiled by hand)
+    out.push_back({m, follows(m->tiling.z)});
+    return true;
+  });
+  if (!out.empty()) Log::info("%zu material%s follow %s's Physical Size", out.size(), out.size() == 1 ? "" : "s", fs::stem(asset_path).c_str());
+  return out;
+}
+
 /* File > Export (Blender: File > Export; Unity: the FBX Exporter). The
  * selection - or the whole scene - with world transforms baked in, materials
  * and UVs, in any of the formats Blender exports meshes to. */
@@ -2263,6 +2356,85 @@ void Editor::update_procedural_shapes() {
   }
 }
 
+/* The first run on a machine near the minimum (4 cores / 8 threads or 8 GB, e.g. an i7 laptop with Iris Xe): what Low
+ * does, and High one click away. Either choice can be changed in Preferences > Quality. */
+void Editor::draw_first_run_tier(const std::function<void()> &close) {
+  auto &u = ui_;
+  const uint64_t ram = sys::physical_memory_bytes();
+  const std::string found = strprintf("This machine has %d threads and %.0f GB of memory, near Blendity's minimum.", sys::hardware_threads(), ram / 1073741824.0);
+  for (const std::string &l : {found, std::string("Low keeps the editor smooth: the views draw at 67 % and scale up, a 1024 shadow map,"),
+                               std::string("60 fps. Renders (F12) always use the scene's own settings."),
+                               std::string("Change it any time in Edit > Preferences > Quality.")}) {
+    Recti r = u.popup_row();
+    u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, l);
+  }
+  Recti b = u.popup_row(u.row_h() + u.px(10));
+  if (u.button({b.right() - u.px(200), b.y + u.px(4), u.px(100), b.h - u.px(8)}, "Use High")) {
+    set_quality_tier(TierHigh);
+    save_prefs();
+    close();
+    return;
+  }
+  if (!u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Keep Low")) return;
+  save_prefs();
+  close();
+}
+
+/* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
+void Editor::set_theme(const std::string &name_in, bool save) {
+  const int k = ui::theme_index(name_in);
+  if (k < 0) return Log::warn("theme: Dark, Light, Emiliano Light or Emiliano Dark, not '%s'", name_in.c_str());
+  theme_name_ = ui::kThemeNames[k];
+  ui_.theme = ui::theme_named(theme_name_);
+  ui_.redraw = true;
+  if (save) save_prefs();
+}
+
+/* The rig root `g` is in: the nearest object at or above it with an Armature among its children (and none of its
+ * own), or nullptr. */
+GameObject *Editor::rig_root_of(GameObject *g) const {
+  for (GameObject *a = g; a; a = a->parent) {
+    if (a->get<Armature>()) continue;
+    for (const GameObject *c : a->children)
+      if (c->get<Armature>()) return a;
+  }
+  return nullptr;
+}
+
+/* "<mesh> Rig" in the mesh's place (same parent and index, its world position and rotation), the mesh inside it
+ * keeping where it is; the root it is already in when it has one. */
+GameObject *Editor::wrap_in_rig_root(GameObject *mesh) {
+  if (GameObject *r = rig_root_of(mesh)) return r;
+  if (mesh->parent && mesh->parent->children.size() == 1 && mesh->parent->components.empty())
+    return mesh->parent;  // (already alone under a bare group: that group is the character)
+  std::string name = mesh->name + " Rig";
+  for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("%s Rig.%03d", mesh->name.c_str(), k);
+  GameObject *parent = mesh->parent;
+  const std::vector<GameObject *> &siblings = parent ? parent->children : scene_->roots;
+  const int index = (int)(std::find(siblings.begin(), siblings.end(), mesh) - siblings.begin());
+  GameObject *rig = scene_->create(name, parent);
+  scene_->set_parent(rig, parent, index, false);  // (in the mesh's place among its siblings)
+  rig->set_world_position(mesh->world_position());  // (not its turn: the skeleton is built upright, along the world's Y)
+  scene_->set_parent(mesh, rig, -1, true);
+  expanded_.insert(rig->id);
+  Log::info("'%s' is now inside '%s' (the character's root, with its Armature)", mesh->name.c_str(), rig->name.c_str());
+  return rig;
+}
+
+/* An armature bound to a mesh goes into the mesh's rig root - unless it is under something else already, or another
+ * mesh's skin uses it (one skeleton for several meshes stays where it is). */
+void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
+  if (!armature || !mesh || armature->parent || scene_->is_ancestor(armature, mesh)) return;  // (an import's layout: already one)
+  bool shared = false;
+  scene_->for_each([&](GameObject &g) {
+    const SkinModifier *sk = g.get<SkinModifier>();
+    shared = shared || (&g != mesh && sk && sk->object == armature->name);
+  });
+  if (shared) return;
+  GameObject *rig = wrap_in_rig_root(mesh);
+  if (rig && rig != armature && !scene_->is_ancestor(armature, rig)) scene_->set_parent(armature, rig, -1, true);
+}
+
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   GameObject *parent = as_child ? active_object() : nullptr;
   if (kind == "Armature") {
@@ -2272,13 +2444,16 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     MeshFilter *tmf = target && is_selected(target->id) ? target->mesh_filter() : nullptr;
     std::string name = "Armature";
     for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("Armature.%03d", k);
+    /* Beside a selected mesh inside its rig root (Unity's imported humanoid: one object holds mesh and skeleton). */
+    const bool skin_mesh = tmf && tmf->mesh && !parent;
+    if (skin_mesh) parent = wrap_in_rig_root(target);
     GameObject *root = scene_->create(name, parent);
     root->add<Armature>();
     std::string bname = "Bone";
     for (int k = 1; scene_->find_by_name(bname); k++) bname = strprintf("Bone.%03d", k);
     GameObject *bone = scene_->create(bname, root);
     bone->add<Bone>();
-    if (tmf && tmf->mesh && !parent) {
+    if (skin_mesh) {
       const AABB b = target->world_bounds();
       root->set_world_position(Vec3(b.center().x, b.min.y, b.center().z));
       bone->get<Bone>()->length = std::max(0.1f, b.max.y - b.min.y);
@@ -2702,6 +2877,7 @@ void Editor::enter_play() {
   cancel_skin_job();  // (Stop would throw its result away)
   autorig_cancel();
   anim_set_preview(false);  // (Play plays from the scene's own pose)
+  bone_drag_ = BoneDrag{};
   seq_set_preview(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
@@ -2913,6 +3089,15 @@ void Editor::run_console_command(const std::string &line) {
     delete_assets_command(c, line);
     return;
   }
+  if (c == "theme") {  // theme <Dark|Light|Emiliano Light|Emiliano Dark> (task 0073)
+    std::string n;
+    for (size_t i = 1; i < t.size(); i++) n += (i > 1 ? " " : "") + t[i];
+    if (n.empty()) Log::info("Theme: %s (Dark, Light, Emiliano Light, Emiliano Dark)", theme_name_.c_str());
+    else set_theme(n);
+    return;
+  }
+  if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
+  if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
     set_editor_feel(t[1]);
@@ -2934,6 +3119,7 @@ void Editor::run_console_command(const std::string &line) {
     autorig_command(t);
     return;
   }
+  if ((c == "ik" || c == "fk") && rig_control_command(t)) return;  // ik remove, fk add|remove (task 0067)
   if (c == "bone" || c == "armature" || c == "skin" || c == "ik" || c == "rig") {
     rig_command(t);
     return;
@@ -3679,8 +3865,10 @@ void Editor::run_console_command(const std::string &line) {
       return;
     }
     note_texture_edit(*pt);
+    const float size_before = pt->physical_size;
     pt->reflect(sr);
     if (sr.done) {
+      if (pt->physical_size != size_before) retile_texture_users(pt->asset_path, size_before, pt->physical_size);  // (task 0072)
       pt->touch();
       mark_changed("Set " + pt->name + " " + sr.target);
     }
@@ -3804,7 +3992,8 @@ void Editor::draw_dialogs() {
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
-  int w = u.px(dialog_ == Dialog::About ? 460 : dialog_ == Dialog::Preferences ? 640 : 420);
+  const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries;
+  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -3887,6 +4076,28 @@ void Editor::draw_dialogs() {
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
         break;
       }
+      case Dialog::Update: {
+        const releases::Release *r = update_release(upd_.selected);
+        const std::string name = r && r->name.rfind("Blendity", 0) == 0 ? r->name : r ? "Blendity " + r->name : "";
+        title(r ? (name + " is available").c_str() : "Update");
+        draw_update_dialog(close);
+        break;
+      }
+      case Dialog::Libraries:
+        title("Blender's libraries");
+        draw_libraries_dialog(close);
+        break;
+      case Dialog::History:
+        title("Version History");
+        draw_history_dialog([&] {
+          upd_.history = false;
+          close();
+        });
+        break;
+      case Dialog::FirstRunTier:
+        title("Welcome: Blendity starts on Low here");
+        draw_first_run_tier(close);
+        break;
       case Dialog::About: {
         title("About Blendity");
         const char *lines[] = {"Blendity - a Unity-style editor built on Blender's modeling ideas.",
@@ -3899,6 +4110,10 @@ void Editor::draw_dialogs() {
           Recti r = u.popup_row();
           u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, l);
         }
+        Recti v = u.popup_row();  // (which build, and whether with Blender's libraries: tasks 0079-0080)
+        u.label({v.x + u.px(12), v.y, v.w - u.px(20), v.h},
+                "This build: " + releases::build_label() + (launch::status().full ? ", with Blender's libraries" : ", without Blender's libraries"),
+                u.theme.text_dim);
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -3912,12 +4127,27 @@ void Editor::draw_dialogs() {
           ui_scale_pref_ = s;
           apply_ui_scale();
         }
+        Recti rt = u.popup_row(u.row_h() + u.px(4));
+        u.label({rt.x + u.px(12), rt.y, u.px(140), rt.h}, "Theme");
+        int ti = std::max(0, ui::theme_index(theme_name_));
+        if (u.combo(u.id("pref_theme"), {rt.x + u.px(160), rt.y + u.px(2), u.px(160), rt.h - u.px(4)}, ti, ui::kThemeNames, ui::kThemeCount))
+          set_theme(ui::kThemeNames[ti]);
+        u.tooltip("The editor's colours: Dark (Blendity's), Light, or Emiliano Light / Dark (from your site's palette).");
         Recti r2 = u.popup_row(u.row_h() + u.px(4));
         u.label({r2.x + u.px(12), r2.y, u.px(140), r2.h}, "Move snap");
         u.float_field(u.id("pref_snap"), {r2.x + u.px(160), r2.y + u.px(2), u.px(80), r2.h - u.px(4)}, snap_move_, 0.01f, 0.001f, 100.0f, "%.3g");
         Recti r3 = u.popup_row(u.row_h() + u.px(4));
         u.label({r3.x + u.px(12), r3.y, u.px(140), r3.h}, "Rotate snap");
         u.float_field(u.id("pref_rsnap"), {r3.x + u.px(160), r3.y + u.px(2), u.px(80), r3.h - u.px(4)}, snap_rot_, 0.5f, 0.1f, 180.0f, "%.3g");
+        Recti ru = u.popup_row(u.row_h() + u.px(4));
+        u.label({ru.x + u.px(12), ru.y, u.px(140), ru.h}, "Updates");
+        if (u.checkbox({ru.x + u.px(160), ru.y + u.px(2), ru.h - u.px(4), ru.h - u.px(4)}, update_check_)) save_prefs();
+        u.label({ru.x + u.px(160) + ru.h, ru.y, u.px(140), ru.h}, "Check at start");
+        u.tooltip("Once a day at most, when online: a newer build is offered with what it brings (Help > Check for Updates any time).");
+        if (u.checkbox({ru.x + u.px(320), ru.y + u.px(2), ru.h - u.px(4), ru.h - u.px(4)}, update_previews_)) save_prefs();
+        u.label({ru.x + u.px(320) + ru.h, ru.y, u.px(200), ru.h}, "Include every PR's build");
+        u.tooltip("Off: only stable releases (v0.10.0...). On: also the build made from each merged pull request.");
+        draw_libraries_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
         Recti b = u.popup_row(u.row_h() + u.px(10));
@@ -3939,6 +4169,7 @@ void Editor::load_prefs() {
   rebuild_keymap();
   if (!fs::read_file(prefs_path_, text)) {
     set_quality_tier(recommended_tier());  // the first run: a tier that suits this machine (task 0050)
+    if (recommended_tier() == TierLow && (!headless_ || prefs_for_test_)) dialog_ = Dialog::FirstRunTier;  // ... and says so (task 0075)
     return;
   }
   std::string keymap_text;
@@ -3953,10 +4184,19 @@ void Editor::load_prefs() {
     std::string k = line.substr(0, eq), v = line.substr(eq + 1);
     if (!v.empty() && v.back() == '\r') v.pop_back();
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
+    else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
+    else if (k == "ffmpeg") ffmpeg_path_ = v;
+    else if (k == "update_check") update_check_ = v != "0";
+    else if (k == "update_previews") update_previews_ = v != "0";
+    else if (k == "update_last") update_last_check_ = std::atof(v.c_str());
+    else if (k == "update_skip") update_skip_ = v;
+    else if (k == "use_libs") use_libs_ = v != "0";
+    else if (k == "libs_never_ask") libs_never_ask_ = v == "1";
+    else if (k == "libs_last") libs_last_check_ = std::atof(v.c_str());
     else if (k == "stats") show_stats_ = v == "1";
     else if (k == "camera_filters") scene_filters_ = v == "1";
     else if (k == "snap_move") snap_move_ = (float)std::atof(v.c_str());
@@ -4038,8 +4278,12 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
                             view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
-  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
-                 kEditorFeels[(int)nav_style_]);
+  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
+                 kEditorFeels[(int)nav_style_], theme_name_.c_str());
+  s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
+                 update_last_check_, update_skip_.c_str());
+  s += strprintf("use_libs=%d\nlibs_never_ask=%d\nlibs_last=%.0f\n", use_libs_ ? 1 : 0, libs_never_ask_ ? 1 : 0, libs_last_check_);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }
@@ -4301,6 +4545,7 @@ void Editor::draw_vertex_groups(GameObject *g, MeshFilter *mf, ui::Layout &lay) 
  * [root]: Reset Pose / Apply as Rest; skin bind [object]: automatic weights for its Skin modifier. */
 void Editor::rig_command(const std::vector<std::string> &t) {
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (t[0] == "bone" && bone_edit_command(t)) return;  // bone head|tail|extrude (task 0066)
   if (t[0] == "bone" && to_lower(arg(1, "")) == "add") {
     GameObject *parent = scene_->find_by_name(arg(2, ""));
     if (!parent) {
@@ -4422,6 +4667,7 @@ bool Editor::armature_pose(GameObject *root, bool apply_as_rest) {
     }
     for (GameObject *c : g->children) stack.push_back(c);
   }
+  if (!apply_as_rest) fk_controls_follow_bones(root);  // (else the controls would turn the bones back next frame)
   Log::info("%s: %d bones", apply_as_rest ? "Apply as Rest" : "Reset Pose", n);
   if (n) mark_changed(apply_as_rest ? "Apply as Rest" : "Reset Pose");
   return n > 0;

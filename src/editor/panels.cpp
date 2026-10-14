@@ -35,7 +35,7 @@ void Editor::draw_hierarchy(const Recti &r) {
   auto &in = u.in;
   int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   int h = bh - u.px(8);
   Recti plus{bar.x + u.px(5), bar.y + u.px(4), h + u.px(16), h};
   bool plus_hot = u.hovered(plus);
@@ -95,7 +95,7 @@ void Editor::draw_hierarchy(const Recti &r) {
   Recti list{r.x, bar.bottom(), r.w, r.h - bh};
   /* Scene header row like Unity ("SampleScene" with its own foldout). */
   Recti head{list.x, list.y, list.w, rh + u.px(2)};
-  u.canvas.fill_rect(head, Color::hex(0x323232));
+  u.canvas.fill_rect(head, u.theme.pane);
   int a = u.font.line_height() - u.px(2);
   u.draw_icon(Icon::Scene, {head.x + u.px(8), head.y + (head.h - a) / 2, a, a}, u.theme.text);
   u.label({head.x + u.px(14) + a, head.y, head.w - a - u.px(20), head.h}, scene_->name + (scene_dirty_ ? "*" : ""), u.theme.text_bright);
@@ -125,7 +125,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     if (row.intersect(body).h > 0) drop_rows_.push_back({row.intersect(body), g->id});  // material assets drop here
     if (headless_) hierarchy_rows_[g->name] = row;
     if (sel) u.canvas.fill_rect(row, focused_ == WindowKind::Hierarchy ? u.theme.selection : u.theme.selection_dim);
-    else if (hot) u.canvas.fill_rect(row, Color::hex(0x444444));
+    else if (hot) u.canvas.fill_rect(row, u.theme.row_hover);
     int x = row.x + u.px(6) + rows[i].depth * u.px(14);
     int arrow = u.font.line_height() - u.px(5);
     if (!g->children.empty() && filter.empty()) {
@@ -559,12 +559,20 @@ struct InspectorReflector : Reflector {
       changed = true;
     }
   }
-  /* Unity's object field: type the name, or drag the object here from the Hierarchy. */
-  void object(const char *n, std::string &v) override {
+  /* Unity's object field: type the name, or drag the object here from the Hierarchy (of the field's type). */
+  void object(const char *n, std::string &v, const char *type) override {
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    if (!ed.object_field(n, field_rect(row), v)) return;
+    if (!ed.object_field(n, field_rect(row), v, type)) return;
     record(FieldEdit::Text, n).s_new = v;
+    changed = true;
+  }
+  /* An asset field: the file dragged here from the Project window, or picked. */
+  void asset(const char *n, std::string &p, const char *ext, const char *kind) override {
+    Recti row = lay.row();
+    u.label(label_rect(row), n);
+    if (!ed.asset_field(n, field_rect(row), p, ext, kind)) return;
+    record(FieldEdit::Text, n).s_new = p;
     changed = true;
   }
   void mesh(const char *n, MeshPtr &m) override {
@@ -843,6 +851,8 @@ struct InspectorReflector : Reflector {
       Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
       u.label(tr, l.type_name(), l.enabled ? u.theme.text_bright : u.theme.text_dim);
       if (u.hovered(tr) && u.in.pressed[0]) l.ui_expanded = !l.ui_expanded;
+      if (!path.empty()) ed.stack_drag_item("layers:" + path, i, tr, h, &l.ui_expanded);  // (an unsaved texture can't move)
+      if (u.record_buttons) u.button_rects["layer_head" + std::to_string(i)] = tr;  // (tests)
       if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
       const int bs = h.h - u.px(4);
       Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
@@ -868,6 +878,8 @@ struct InspectorReflector : Reflector {
       }
       u.pop_id();
     }
+    int from = 0, to = 0;
+    if (ed.stack_drag_end("layers:" + path, from, to)) ed.texture_stack_op(path, "move", from, to);
     lay.space(u.px(4));
     Recti ar = lay.row(u.row_h() + u.px(4));
     Recti ab{ar.x + u.px(4), ar.y, std::min(ar.w - u.px(8), u.px(200)), ar.h};
@@ -918,6 +930,8 @@ struct InspectorReflector : Reflector {
       Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
       u.label(tr, e.type_name(), e.enabled ? u.theme.text_bright : u.theme.text_dim);
       if (u.hovered(tr) && u.in.pressed[0]) e.ui_expanded = !e.ui_expanded;
+      ed.stack_drag_item("filters:" + std::to_string(gid), i, tr, h, &e.ui_expanded);
+      if (u.record_buttons) u.button_rects["filter_head" + std::to_string(i)] = tr;  // (tests)
       if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
       const int bs = h.h - u.px(4);
       Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
@@ -942,6 +956,8 @@ struct InspectorReflector : Reflector {
       }
       u.pop_id();
     }
+    int from = 0, to = 0;
+    if (ed.stack_drag_end("filters:" + std::to_string(gid), from, to)) ed.filter_stack_op(gid, "move", from, to);
     /* Add Filter, by category. */
     lay.space(u.px(4));
     Recti ar = lay.row(u.row_h() + u.px(4));
@@ -1207,6 +1223,10 @@ void Editor::draw_inspector(const Recti &r) {
       g->components[reset_idx] = std::move(fresh);
       mark_changed("Reset Component");
     }
+  if (remove_idx >= 0 && !std::strcmp(g->components[remove_idx]->type_name(), IKConstraint::kName)) {
+    remove_ik(g);  // (its target and pole go with it, task 0067)
+    remove_idx = -1;
+  }
   if (remove_idx >= 0) {
     g->components.erase(g->components.begin() + remove_idx);
     mark_changed("Remove Component");
@@ -1418,9 +1438,9 @@ void Editor::draw_inspector(const Recti &r) {
         group("Generate", kGenerate, sizeof(kGenerate) / sizeof(kGenerate[0]));
         group("Deform", kDeform, sizeof(kDeform) / sizeof(kDeform[0]));
       });
-      enum Act { None, Apply, Duplicate, CopyToSelected, Up, Down, First, Last, Remove, Reset };
+      enum Act { None, Apply, Duplicate, CopyToSelected, Up, Down, First, Last, Remove, Reset, DragTo };
       Act act = None;
-      size_t act_ci = 0;
+      size_t act_ci = 0, act_to = 0;
       if (inspector_action_.obj == g->id && inspector_action_.act > None && inspector_action_.act < kCompRemove) {
         for (size_t ci = 0; ci < g->components.size(); ci++)
           if (g->components[ci].get() == inspector_action_.comp) act = (Act)inspector_action_.act, act_ci = ci;
@@ -1475,6 +1495,8 @@ void Editor::draw_inspector(const Recti &r) {
         Recti tr{fr.right() + u.px(2), h.y, bx + bs - fr.right(), h.h};
         u.label(tr, pretty, c->enabled ? u.theme.text_bright : u.theme.text_dim);
         if (u.hovered(tr) && u.in.pressed[0]) c->ui_expanded = !c->ui_expanded;
+        stack_drag_item("mods:" + std::to_string(g->id), (int)k, tr, h, &c->ui_expanded);
+        if (u.record_buttons) u.button_rects["mod_head" + std::to_string(k)] = tr;  // (tests)
         if (const ComponentInfo *info = find_component_info(c->type_name())) u.tooltip(info->help + "\nBlender: " + info->blender);
         const size_t kk = k;
         u.popup(mid, u.px(210), [this, gid = g->id, c, kk, nmods = mods.size()] {
@@ -1525,6 +1547,9 @@ void Editor::draw_inspector(const Recti &r) {
         Recti er = lay.row();
         u.label({er.x + u.px(8), er.y, er.w - u.px(16), er.h}, "No modifiers. Add Modifier to start a stack.", u.theme.text_dim);
       }
+      int drag_from = 0, drag_to = 0;  // a header dragged to another place (task 0071)
+      if (stack_drag_end("mods:" + std::to_string(g->id), drag_from, drag_to) && (size_t)drag_from < mods.size())
+        act = DragTo, act_ci = mods[(size_t)drag_from], act_to = (size_t)drag_to;
       /* Apply the chosen action after drawing (it changes the component list). */
       if (act != None && act_ci < g->components.size()) {
         auto it = std::find(mods.begin(), mods.end(), act_ci);
@@ -1578,6 +1603,7 @@ void Editor::draw_inspector(const Recti &r) {
           case Down: move_to(pos + 1); mark_changed("Move Modifier"); break;
           case First: move_to(0); mark_changed("Move Modifier"); break;
           case Last: move_to(mods.size()); mark_changed("Move Modifier"); break;
+          case DragTo: move_to(act_to); mark_changed("Move Modifier"); break;
           case Remove:
             g->components.erase(g->components.begin() + (long)act_ci);
             mark_changed("Remove Modifier");
@@ -1646,7 +1672,7 @@ void Editor::draw_console(const Recti &r) {
   auto &in = u.in;
   int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   int h = bh - u.px(8), x = bar.x + u.px(6), y = bar.y + u.px(4);
   if (u.button({x, y, u.px(56), h}, "Clear")) Log::clear();
   x += u.px(60);
@@ -1684,7 +1710,7 @@ void Editor::draw_console(const Recti &r) {
     Recti row{list.x, list.y + i * rh - off, list.w, rh};
     const LogEntry &e = *lines[i].e;
     if (console_sel_ == i) u.canvas.fill_rect(row, u.theme.selection);
-    else if (i % 2) u.canvas.fill_rect(row, Color::hex(0x3C3C3C));
+    else if (i % 2) u.canvas.fill_rect(row, u.theme.stripe);
     Icon ic = e.level == LogLevel::Error ? Icon::Error : (e.level == LogLevel::Warning ? Icon::Warning : Icon::Info);
     uint32_t col = e.level == LogLevel::Error ? u.theme.error : (e.level == LogLevel::Warning ? u.theme.warning : u.theme.text_dim);
     int a = u.font.line_height() - u.px(4);
@@ -1725,7 +1751,7 @@ void Editor::draw_profiler(const Recti &r) {
   lay.row_h = u.row_h();
   u.label(lay.row(), "CPU frame time (ms) - editor frame (blue) and scene render (orange)", u.theme.text_bright);
   Recti graph = lay.row(u.px(120));
-  u.frame(graph, Color::hex(0x242424), u.theme.border, u.px(3));
+  u.frame(graph, u.theme.canvas_bg, u.theme.border, u.px(3));
   float maxv = 33.3f;
   for (float v : frame_history_) maxv = std::max(maxv, v * 1.1f);
   auto plot = [&](const std::vector<float> &hist, uint32_t col) {
@@ -1812,7 +1838,7 @@ void Editor::draw_profiler(const Recti &r) {
  * settings it bakes with (task 0012). */
 void Editor::draw_lighting_window(const Recti &r) {
   auto &u = ui_;
-  u.canvas.fill_rect(r, Color::hex(0x333333));
+  u.canvas.fill_rect(r, u.theme.pane);
   static int content_h = 0;
   int off = u.begin_scroll(u.id("lighting_window"), r, content_h);
   ui::Layout lay{{r.x + u.px(8), r.y, r.w - u.px(20), r.h}, r.y + u.px(8) - off};
@@ -1835,7 +1861,7 @@ void Editor::draw_lighting_window(const Recti &r) {
   u.tooltip("Removes the lightmaps (to the trash) and goes back to realtime ambient light.");
   if (baking_) {
     Recti pr = lay.row(u.px(6));
-    u.canvas.fill_round_rect(pr, u.px(3), Color::hex(0x252525));
+    u.canvas.fill_round_rect(pr, u.px(3), u.theme.well);
     u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * baker_.progress()), pr.h}, u.px(3), u.theme.accent);
     u.redraw = true;
   }
@@ -1918,7 +1944,7 @@ void Editor::draw_render_window(const Recti &r) {
   int lw = std::min(u.px(340), r.w * 2 / 5);
   Recti left{r.x, r.y, lw, r.h};
   Recti right{r.x + lw + 1, r.y, r.w - lw - 1, r.h};
-  u.canvas.fill_rect(left, Color::hex(0x333333));
+  u.canvas.fill_rect(left, u.theme.pane);
   u.canvas.vline(left.right(), left.y, left.bottom(), u.theme.border);
 
   /* ---- settings column ---- */
@@ -1953,6 +1979,7 @@ void Editor::draw_render_window(const Recti &r) {
       start_render_sequence();
     u.tooltip("Render the scene from every camera with Render in Sequence on (Camera Inspector), in Sequence Order,\n"
               "each saved to Renders/<scene>_sequence_<time>/NN_<camera>.<format> with these settings.");
+    draw_render_animation_button(lay);
     if (!cams.empty() && !seq_.active) {
       std::string names;
       for (size_t k = 0; k < cams.size() && k < 6; k++) names += (k ? ", " : "") + cams[k]->name;
@@ -1967,7 +1994,7 @@ void Editor::draw_render_window(const Recti &r) {
   if (rendering_) {
     Recti pr = lay.row(u.px(6));
     float t = std::min(1.0f, final_pt_.samples() / (float)std::max(1, scene_->render.samples));
-    u.canvas.fill_round_rect(pr, u.px(3), Color::hex(0x252525));
+    u.canvas.fill_round_rect(pr, u.px(3), u.theme.well);
     u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * t), pr.h}, u.px(3), u.theme.accent);
     u.redraw = true;
   }
@@ -2439,10 +2466,12 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
 bool Editor::draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t) {
   if (!t) return false;
   const std::string before = save_texture_text(*t);  // (small: the undo step keeps it if a field changes)
+  const float size_before = t->physical_size;
   InspectorReflector ir(*this, ui_, lay);
   ir.edited_texture = t.get();
   t->reflect(ir);
   if (ir.changed) {
+    if (t->physical_size != size_before) retile_texture_users(t->asset_path, size_before, t->physical_size);  // (task 0072)
     bool noted = false;
     for (const auto &kv : texture_before_) noted = noted || kv.first == t->asset_path;
     if (!noted && !t->asset_path.empty()) texture_before_.push_back({t->asset_path, before});
@@ -2600,22 +2629,176 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
   if (always_redraw_) text("- Always redraw: the cap's CPU cost continues while idle (handy with the Profiler; otherwise wasted power).", u.theme.warning);
 }
 
-/* An object field (Unity's ObjectField): a name typed in, or an object dropped on it from the Hierarchy, which lights
- * it up while it's over it. True when the name changed. `name` keys it among the fields drawn this frame. */
-bool Editor::object_field(const char *name, const Recti &f, std::string &v) {
+namespace {
+
+/* Whether `g` is of the field's kind: has a component of that type name (none: any object). */
+bool has_type(const GameObject &g, const char *type) {
+  if (!type) return true;
+  for (const auto &c : g.components)
+    if (!std::strcmp(c->type_name(), type)) return true;
+  return false;
+}
+
+/* What the field says it holds: "Transform" for any object (Unity's), "Mesh" for a MeshFilter (plainer than Unity's
+ * "Mesh Filter"), else the component's name. */
+std::string type_label(const char *type) {
+  if (!type) return "Transform";
+  if (!std::strcmp(type, "MeshFilter")) return "Mesh";
+  return type;
+}
+
+/* The kind's icon at the field's left. */
+Icon type_icon(const char *type) {
+  if (!type) return Icon::Transform;
+  if (!std::strcmp(type, "Camera")) return Icon::Camera;
+  if (!std::strcmp(type, "Light")) return Icon::Light;
+  if (!std::strcmp(type, "Armature") || !std::strcmp(type, "Bone")) return Icon::Move;
+  return Icon::Cube;
+}
+
+}  // namespace
+
+/* Unity's object picker button: a small target (a ring and a dot) at a field's right. */
+bool Editor::picker_button(const Recti &r) {
+  auto &u = ui_;
+  const bool hit = u.button(r, "");
+  const float cx = (float)r.x + (float)r.w * 0.5f, cy = (float)r.y + (float)r.h * 0.5f, rad = (float)std::min(r.w, r.h) * 0.3f;
+  const uint32_t col = u.hovered(r) ? u.theme.text_bright : u.theme.text;
+  u.canvas.fill_circle(cx, cy, rad, col);
+  u.canvas.fill_circle(cx, cy, rad - (float)u.px(1) - 0.5f, u.theme.button);
+  u.canvas.fill_circle(cx, cy, rad * 0.35f, col);
+  return hit;
+}
+
+/* The field's face (Unity's ObjectField): a box with what it holds ("Robot (Armature)", "None (Armature)"; yellow when
+ * missing or of the wrong kind). A click, or typing, edits the name as text. True when the text changed. */
+bool Editor::object_field_box(ui::Id id, const Recti &box, std::string &v, const std::string &shown, const std::string &none, bool bad,
+                              Icon icon) {
+  auto &u = ui_;
+  if (u.editing(id) || (u.hovered(box) && u.in.pressed[0])) return u.text_field(id, box, v, nullptr, none.c_str());
+  u.frame(box, u.theme.field, u.theme.field_border, u.px(3));
+  const uint32_t col = v.empty() ? u.theme.text_dim : bad ? u.theme.warning : u.theme.text;
+  const int is = box.h - u.px(6);
+  u.draw_icon(icon, {box.x + u.px(4), box.y + u.px(3), is, is}, col);
+  const std::string text = v.empty() ? none : shown;
+  u.label({box.x + is + u.px(8), box.y, box.w - is - u.px(10), box.h}, text, col);
+  if (u.record_buttons) u.button_rects["shown:" + text] = box;  // (tests read what a field says)
+  return false;
+}
+
+bool Editor::object_field_picked(ui::Id id, std::string &v) {
+  if (field_pick_.field != id || field_pick_.age > 1) return false;
+  field_pick_.field = 0;
+  if (v == field_pick_.value) return false;
+  v = field_pick_.value;
+  return true;
+}
+
+/* An object field (Unity's ObjectField): a name typed in, an object of its kind dropped on it from the Hierarchy (one
+ * of another kind is refused: the field turns red), or one chosen with the picker at its right. True when the name
+ * changed. `name` keys it among the fields drawn this frame. */
+bool Editor::object_field(const char *name, const Recti &f, std::string &v, const char *type) {
   auto &u = ui_;
   const ui::Id id = u.id(name);
-  bool changed = u.text_field(id, f, v, nullptr, "None (drag an object here)");
   if (u.record_buttons) u.button_rects[std::string("field:") + name] = f;  // (tests drop onto a field by its name)
+  const std::string label = type_label(type);
+  const Recti box{f.x, f.y, f.w - f.h, f.h}, pick{box.right(), f.y, f.h, f.h};
+  const GameObject *held = v.empty() ? nullptr : scene_->find_by_name(v);
+  bool changed = object_field_picked(id, v);
+  /* The picker: None and the scene's objects of the kind. */
+  const ui::Id pid = u.id(std::string("pick:") + name);
+  if (picker_button(pick)) u.open_popup(pid, {pick.x, pick.bottom(), 0, 0});
+  u.tooltip("Select " + label + ": the scene's objects that can go here");
+  u.popup(pid, u.px(220), [this, id, type] {
+    if (ui_.menu_item("None")) field_pick_ = {id, ""};
+    scene_->for_each_ordered([&](GameObject &g, int) {
+      if (has_type(g, type) && ui_.menu_item(g.name)) field_pick_ = {id, g.name};
+    });
+  });
+  changed = object_field_box(id, box, v, v + " (" + label + ")", "None (" + label + ")", !held || !has_type(*held, type), type_icon(type)) || changed;
+  u.mark_widget(box);  // (the field's own help tooltip goes on the box)
   const GameObject *g = hierarchy_drag_object();
   if (!g || !u.hovered(f)) return changed;
-  u.canvas.rect_outline(f, u.theme.focus, u.px(2));
+  const bool fits = has_type(*g, type);
+  u.canvas.rect_outline(f, fits ? u.theme.focus : u.theme.error, u.px(2));
   if (!u.in.released[0]) return changed;
   object_field_took_drop();  // (the Hierarchy then leaves the selection as it was)
   if (u.editing(id)) u.stop_editing();  // (the edit buffer would write the old text back)
+  if (!fits) {
+    Log::warn("'%s' isn't a %s: the %s field takes an object with a %s component", g->name.c_str(), label.c_str(), name, type);
+    return changed;
+  }
   if (scene_->find_by_name(g->name) != g) Log::warn("Two objects are named '%s': the field finds the other one first. Rename one of them.", g->name.c_str());
   if (v == g->name) return changed;
   v = g->name;
+  return true;
+}
+
+/* Whether an asset field's file is there, looked at once a second (not a disk check every frame). */
+bool Editor::asset_file_exists(const std::string &path) {
+  auto it = asset_exists_cache_.find(path);
+  if (it != asset_exists_cache_.end() && now_seconds() - it->second.second < 1.0) return it->second.first;
+  const bool there = fs::exists(resolve_asset_path(path));
+  if (asset_exists_cache_.size() > 256) asset_exists_cache_.clear();
+  asset_exists_cache_[path] = {there, now_seconds()};
+  return there;
+}
+
+/* The project's files of one kind (".anim"), project-relative with '/' (the asset fields' pickers). */
+std::vector<std::string> Editor::asset_paths_with_ext(const std::string &ext) {
+  std::vector<std::string> out, dirs{assets_dir_};
+  while (!dirs.empty()) {
+    const std::string d = dirs.back();
+    dirs.pop_back();
+    for (const DirEntry &de : fs::list(d)) {
+      const std::string p = fs::join(d, de.name);
+      if (de.is_dir) dirs.push_back(p);
+      else if (to_lower(fs::extension(de.name)) == ext) out.push_back(make_asset_relative(p));
+    }
+  }
+  for (std::string &p : out) std::replace(p.begin(), p.end(), '\\', '/');
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+/* An asset field: "Walk (Animation Clip)", a file of its kind dragged from the Project window (another kind is
+ * refused), or one chosen with the picker. True when the path changed. */
+bool Editor::asset_field(const char *name, const Recti &f, std::string &path, const char *ext, const char *kind) {
+  auto &u = ui_;
+  const ui::Id id = u.id(name);
+  if (u.record_buttons) u.button_rects[std::string("field:") + name] = f;
+  const Recti box{f.x, f.y, f.w - f.h, f.h}, pick{box.right(), f.y, f.h, f.h};
+  const bool there = !path.empty() && asset_file_exists(path);
+  bool changed = object_field_picked(id, path);
+  const ui::Id pid = u.id(std::string("pick:") + name);
+  if (picker_button(pick)) {
+    asset_pick_files_ = asset_paths_with_ext(ext);  // (the disk walked once, as the list opens)
+    u.open_popup(pid, {pick.x, pick.bottom(), 0, 0});
+  }
+  u.tooltip(std::string("Select ") + kind + ": the project's " + ext + " files");
+  u.popup(pid, u.px(260), [this, id] {
+    if (ui_.menu_item("None")) field_pick_ = {id, ""};
+    for (const std::string &p : asset_pick_files_)
+      if (ui_.menu_item(fs::stem(p))) field_pick_ = {id, p};
+  });
+  changed = object_field_box(id, box, path, fs::stem(path) + " (" + kind + ")", std::string("None (") + kind + ")", !there, Icon::File) || changed;
+  u.mark_widget(box);
+  AssetDrag &d = asset_drag_;
+  if (!d.dragging || d.mat || !u.hovered(f)) return changed;
+  const bool fits = to_lower(fs::extension(d.path)) == ext;
+  u.canvas.rect_outline(f, fits ? u.theme.focus : u.theme.error, u.px(2));
+  if (!u.in.released[0]) return changed;
+  const std::string dropped = d.path;
+  d = AssetDrag{};  // (taken here: nothing else acts on the drop)
+  if (u.editing(id)) u.stop_editing();
+  if (!fits) {
+    Log::warn("%s isn't a %s: the %s field takes %s files", fs::filename(dropped).c_str(), kind, name, ext);
+    return changed;
+  }
+  std::string rel = make_asset_relative(dropped);
+  std::replace(rel.begin(), rel.end(), '\\', '/');
+  if (rel == path) return changed;
+  path = rel;
   return true;
 }
 

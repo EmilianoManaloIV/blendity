@@ -165,7 +165,7 @@ void Editor::draw_materials_window(const Recti &r) {
   /* Toolbar */
   const int bh = u.row_h() + u.px(6);
   Recti bar{r.x, r.y, r.w, bh};
-  u.canvas.fill_rect(bar, Color::hex(0x2F2F2F));
+  u.canvas.fill_rect(bar, u.theme.bar);
   if (u.button({bar.x + u.px(6), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "New Material Asset", false, Icon::Plus)) {
     material_selected_ = new_material_asset(nullptr, false);
     /* The new one in view: a search left from earlier would hide it (the user saw nothing appear). */
@@ -200,7 +200,7 @@ void Editor::draw_materials_window(const Recti &r) {
     const bool sel = material_multi_.has(m);
     if (u.record_buttons) u.button_rects["mat:" + m->name] = cell;  // (tests click thumbnails)
     const bool hot = u.hovered(cell);
-    if (sel || hot) u.canvas.fill_round_rect(cell, u.px(4), sel ? u.theme.selection : Color::hex(0x444444));
+    if (sel || hot) u.canvas.fill_round_rect(cell, u.px(4), sel ? u.theme.selection : u.theme.row_hover);
     const Preview &p = material_preview(*m, tile - u.px(8));
     blit(u, p, {cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)});
     u.label({cx, cy + tile, tile, u.row_h()}, m->name, u.theme.text, ui::Align::Center);
@@ -398,7 +398,7 @@ void Editor::material_picker_popup(ui::Id pid, GameObject *g, std::function<void
         const MaterialPtr &m = list[k];
         Recti cell{row.x + pad + (int)(k - i) * (tile + pad), row.y + pad / 2, tile, tile + u.row_h()};
         const bool hot = u.hovered(cell);
-        if (hot) u.canvas.fill_round_rect(cell, u.px(4), Color::hex(0x4A4A4A));
+        if (hot) u.canvas.fill_round_rect(cell, u.px(4), u.theme.row_hover);
         blit(u, material_preview(*m, tile - u.px(6)), {cell.x + u.px(3), cell.y + u.px(3), tile - u.px(6), tile - u.px(6)});
         u.label({cell.x, cell.y + tile, cell.w, u.row_h()}, m->name, u.theme.text, ui::Align::Center);
         int slot = -1;

@@ -178,7 +178,8 @@ void Editor::wp_dab(float x, float y) {
   const Mat4 &W = g->world_matrix();
   const Mat4 N = W.inverse().transposed();
   const float R = std::max(1.0f, wp_brush_.radius * ui_.scale);
-  const float strength = finite_bits(wp_brush_.strength) ? std::max(0.0f, std::min(wp_brush_.strength, 1.0f)) : 0.0f;
+  const float pen = std::isfinite(ui_.in.pressure) ? std::max(0.0f, std::min(ui_.in.pressure, 1.0f)) : 1.0f;  // (a pen presses lighter)
+  const float strength = finite_bits(wp_brush_.strength) ? std::max(0.0f, std::min(wp_brush_.strength, 1.0f)) * pen : 0.0f;
   const float target = finite_bits(wp_brush_.weight) ? std::max(0.0f, std::min(wp_brush_.weight, 1.0f)) : 1.0f;
   const Vec3 eye = cam_.position(), fwd = cam_.forward();
   const size_t n = m.vert_count();

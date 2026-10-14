@@ -17,6 +17,7 @@ namespace bl {
  * to the clip's end), its speed, and the name triggers jump to. */
 struct SeqInstance {
   std::string clip, name;
+  std::string target;  // the object it plays on, by name (task 0070); empty: the Sequencer's own object
   float start = 0.0f;
   float trim_in = 0.0f, trim_out = -1.0f;
   float speed = 1.0f;
@@ -72,12 +73,13 @@ struct AnimValue {
   uint64_t key = 0;
   const AnimTrack *track = nullptr;
   float value = 0.0f;
+  GameObject *target = nullptr;  // the object the track's path starts from (none: the root apply is given)
 };
 struct AnimValues {
   std::vector<AnimValue> values;  // in the order first set
   void clear();
   void set(const AnimTrack &t, float value);
-  void set_key(uint64_t key, const AnimTrack *t, float value);
+  void set_key(uint64_t key, const AnimTrack *t, float value, GameObject *target = nullptr);
   const float *get(uint64_t key) const;
   const float *get(const std::string &path, const std::string &property, int axis) const;
 
@@ -91,11 +93,13 @@ float blend_anim_value(const std::string &property, float a, float b, float t);
 void sample_clip_values(const AnimationClip &clip, float frame, AnimValues &out);
 /* The sequence at `frame`: per track bottom-up, the instances there (two overlapping: crossfaded), the higher tracks'
  * numbers replacing the lower ones'. */
-void sample_sequence(const Sequence &s, float frame, AnimValues &out);
+void sample_sequence(const Sequence &s, float frame, AnimValues &out, const Scene *scene = nullptr);  // (scene: bars' targets found in it)
 /* The values onto the hierarchy under `root` (each object's transform set once). */
-void apply_anim_values(const AnimValues &v, GameObject &root);
+void apply_anim_values(const AnimValues &v, GameObject *root);  // (a value with a target starts from it)
 /* The current numbers of everything `v` names (what a jump blends from). */
-void read_anim_values(const AnimValues &names, GameObject &root, AnimValues &out);
+void read_anim_values(const AnimValues &names, GameObject *root, AnimValues &out);
+/* Whether the scene's sequence has a bar on `g` (its Animation component then steps aside in Play). */
+bool scene_sequence_drives(const Scene &scene, const GameObject &g);
 /* "J" / "1" / "Space" / "F5" -> the key's code (0: not a key). */
 int trigger_key_code(const std::string &name);
 
@@ -117,6 +121,7 @@ struct Sequencer : ComponentBase<Sequencer> {
   void start(PlayContext &ctx) override;
   void update(PlayContext &ctx) override;
   bool jump(const std::string &instance, float blend);  // false: no such instance
+  Scene *scene_ = nullptr;  // the scene it last played in (bars' targets are found there)
   float frame() const;  // the timeline frame now (wrapped)
 };
 

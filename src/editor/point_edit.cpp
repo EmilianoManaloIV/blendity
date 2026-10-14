@@ -244,6 +244,7 @@ bool Editor::point_loop_cut_at(const Recti &view, int mx, int my) {
 bool Editor::point_shortcut(const std::string &id) {
   if (edit_mode_) return false;
   GameObject *g = active_object();
+  if (id == "mesh.extrude" && g && is_selected(g->id) && g->get<Bone>()) return bone_extrude(g);  // (a bone: grow one from its tip)
   if (!g || !is_selected(g->id) || !g->point_source()) return false;
   std::vector<int> pts;
   GameObject *pg = point_target(pts);

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 #include <thread>
 
 #ifdef _WIN32
@@ -385,21 +386,38 @@ bool move_to_trash(const std::string &path, std::string *error) {
   return true;
 }
 
+/* A child nobody waits for (a viewer, the restarted editor), reaped by a thread of its own. (Not SIGCHLD ignored for
+ * the whole process: that would take run_program's exit codes too - curl's, the probe's.) */
+void reap_in_background(pid_t pid) {
+  std::thread([pid] {
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  }).detach();
+}
+
 void open_external(const std::string &path) {
 #  ifdef __APPLE__
   const char *tool = "open";
 #  else
   const char *tool = "xdg-open";
 #  endif
-  static bool reaper = (signal(SIGCHLD, SIG_IGN), true); /* auto-reap viewers */
-  (void)reaper;
   pid_t pid;
   char *argv[] = {(char *)tool, (char *)path.c_str(), nullptr};
-  if (posix_spawnp(&pid, tool, nullptr, nullptr, argv, environ) != 0) {
-    Log::warn("Could not launch '%s' to open %s", tool, path.c_str());
-  }
+  if (posix_spawnp(&pid, tool, nullptr, nullptr, argv, environ) != 0) return Log::warn("Could not launch '%s' to open %s", tool, path.c_str());
+  reap_in_background(pid);
 }
 #endif
+
+std::string temp_dir() {
+  std::error_code ec;
+  const stdfs::path p = stdfs::temp_directory_path(ec);
+  return ec ? std::string(".") : S(p);
+}
+
+bool remove_file(const std::string &path) {
+  std::error_code ec;
+  return stdfs::remove(P(path), ec);
+}
 
 }  // namespace fs
 
@@ -458,6 +476,135 @@ uint64_t peak_working_set_bytes() {
 }
 
 int hardware_threads() { return (int)std::max(1u, std::thread::hardware_concurrency()); }
+
+/* One argument as the C runtime splits a command line: quotes round it when it has a space, tab or quote; a quote
+ * escaped by a backslash, and backslashes doubled only before a quote. */
+static std::string quote_argument(const std::string &a) {
+  if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos) return a;
+  std::string q = "\"";
+  size_t slashes = 0;
+  for (char c : a) {
+    if (c == '\\') {
+      slashes++;
+      continue;
+    }
+    q.append(c == '"' ? slashes * 2 + 1 : slashes, '\\');
+    slashes = 0;
+    q += c;
+  }
+  q.append(slashes * 2, '\\');
+  return q + "\"";
+}
+
+#ifdef _WIN32
+std::vector<std::string> utf8_arguments() {
+  int n = 0;
+  LPWSTR *w = CommandLineToArgvW(GetCommandLineW(), &n);
+  std::vector<std::string> out;
+  for (int i = 0; w && i < n; i++) {
+    const int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, nullptr, 0, nullptr, nullptr);
+    std::string s(len > 0 ? len - 1 : 0, '\0');
+    if (len > 1) WideCharToMultiByte(CP_UTF8, 0, w[i], -1, &s[0], len, nullptr, nullptr);
+    out.push_back(s);
+  }
+  if (w) LocalFree(w);
+  return out;
+}
+#else
+std::vector<std::string> utf8_arguments() { return {}; }
+#endif
+
+std::string windows_command_line(const std::vector<std::string> &argv) {
+  std::string line;
+  for (const std::string &a : argv) line += (line.empty() ? "" : " ") + quote_argument(a);
+  return line;
+}
+
+std::string find_program(const std::string &name) {
+  const char *path = std::getenv("PATH");
+  if (!path || name.empty()) return "";
+#ifdef _WIN32
+  const char sep = ';';
+  const std::string file = name + ".exe";
+#else
+  const char sep = ':';
+  const std::string &file = name;
+#endif
+  for (const std::string &dir : split_list(path, sep)) {
+    const std::string p = fs::join(dir, file);
+    if (fs::exists(p) && !fs::is_dir(p)) return p;
+  }
+  return "";
+}
+
+#ifdef _WIN32
+int run_program(const std::vector<std::string> &argv, int timeout_s) {
+  if (argv.empty()) return -1;
+  std::wstring line = fs::widen(windows_command_line(argv));
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, &line[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return -1;
+  if (WaitForSingleObject(pi.hProcess, timeout_s > 0 ? (DWORD)timeout_s * 1000 : INFINITE) == WAIT_TIMEOUT) {
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return kExitTimedOut;
+  }
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return (int)code;
+}
+bool start_program(const std::vector<std::string> &argv) {
+  if (argv.empty()) return false;
+  std::wstring line = fs::widen(windows_command_line(argv));
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, &line[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return true;
+}
+#else
+bool start_program(const std::vector<std::string> &argv) {
+  if (argv.empty()) return false;
+  std::vector<char *> args;
+  for (const std::string &a : argv) args.push_back((char *)a.c_str());
+  args.push_back(nullptr);
+  pid_t pid;
+  if (posix_spawnp(&pid, args[0], nullptr, nullptr, args.data(), environ) != 0) return false;
+  fs::reap_in_background(pid);
+  return true;
+}
+
+int run_program(const std::vector<std::string> &argv, int timeout_s) {
+  if (argv.empty()) return -1;
+  std::vector<char *> args;
+  for (const std::string &a : argv) args.push_back((char *)a.c_str());
+  args.push_back(nullptr);
+  pid_t pid;
+  if (posix_spawnp(&pid, args[0], nullptr, nullptr, args.data(), environ) != 0) return -1;
+  const auto t0 = std::chrono::steady_clock::now();
+  int status = 0;
+  while (true) {
+    const pid_t r = waitpid(pid, &status, timeout_s > 0 ? WNOHANG : 0);
+    if (r == pid) break;
+    if (r < 0 && errno == ECHILD) return kExitUnknown;  // (reaped elsewhere: the code is lost)
+    if (r < 0 && errno != EINTR) return -1;
+    if (timeout_s > 0 && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(timeout_s)) {
+      kill(pid, SIGKILL);
+      waitpid(pid, &status, 0);
+      return kExitTimedOut;
+    }
+    if (r == 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+#endif
 
 }  // namespace sys
 }  // namespace bl

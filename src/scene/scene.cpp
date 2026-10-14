@@ -82,6 +82,9 @@ void register_builtin_components() {
   reg<IKConstraint>("Rigging", "On the end bone of a chain (a shin, a forearm): the chain turns so its tip reaches the Target. "
                     "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
                     "Inverse Kinematics bone constraint (with Pole Target)");
+  reg<RigControl>("Rigging", "A controller shape to grab instead of bones (an IK target or pole, an FK circle): drawn over the scene, "
+                  "coloured by side - left blue, right red, the middle yellow.",
+                  "a custom bone shape (Maya: a NURBS controller curve)");
   reg<Animation>("Animation", "Plays an animation clip (Assets/Animations/*.anim) on this object and the ones below it, in Play. "
                  "Make and edit clips in the Animation window.",
                  "an Action played by the object (Animation data)");
@@ -672,7 +675,8 @@ struct PrefixReflector : Reflector {
     in.enumeration(n(name).c_str(), v, options, count);
   }
   void text(const char *name, std::string &v) override { in.text(n(name).c_str(), v); }
-  void object(const char *name, std::string &v) override { in.object(n(name).c_str(), v); }
+  void object(const char *name, std::string &v, const char *type) override { in.object(n(name).c_str(), v, type); }
+  void asset(const char *name, std::string &p, const char *ext, const char *kind) override { in.asset(n(name).c_str(), p, ext, kind); }
   void mesh(const char *name, MeshPtr &m) override { in.mesh(n(name).c_str(), m); }
   void help(const char *h) override { in.help(h); }
   void texture(const char *name, TextureRef &t) override { in.texture(n(name).c_str(), t); }
@@ -1285,7 +1289,7 @@ void ArrayModifier::reflect(Reflector &r) {
            "step, so the copies end within the length (Blender adds one more, ending past it).");
     if (all || fit_type == 1) r.field("Fit Length", fit_length, 0.05f, 0.0f, 1e5f);
     if (all || fit_type == 2) {
-      r.object("Curve", curve);
+      r.object("Curve", curve, "Curve");
       r.help("Name of the Curve object whose length the copies fill.");
     }
   }
@@ -1360,14 +1364,14 @@ void Lattice::reflect(Reflector &r) {
 }
 
 void LatticeModifier::reflect(Reflector &r) {
-  r.object("Object", object);
+  r.object("Object", object, "Lattice");
   r.help("Name of the Lattice object whose points move the mesh (Blender: Lattice > Object).");
   r.field("Strength", strength, 0.01f, 0.0f, 1.0f);
   reflect_group_limit(r, vertex_group, invert_group);
 }
 
 void CurveModifier::reflect(Reflector &r) {
-  r.object("Object", object);
+  r.object("Object", object, "Curve");
   r.help("Name of the Curve object to bend along (Blender: Curve > Curve Object).");
   static const char *kAxes[] = {"X", "Y", "Z", "-X", "-Y", "-Z"};
   r.enumeration("Deform Axis", deform_axis, kAxes, 6);
@@ -1385,7 +1389,7 @@ void SolidifyModifier::reflect(Reflector &r) {
 void SolidifyModifier::modify(Mesh &m) const { meshops::solidify(m, thickness, offset, even_thickness, fill_rim); }
 
 void BooleanModifier::reflect(Reflector &r) {
-  r.object("Object", object);
+  r.object("Object", object, "MeshFilter");
   r.help("Name of the GameObject to cut with (Blender: Boolean > Object). Both meshes must be closed.");
   static const char *ops[] = {"Difference", "Union", "Intersect"};
   r.enumeration("Operation", operation, ops, 3);
@@ -1915,6 +1919,8 @@ void Scene::move_from(Scene &o) {
   lighting = o.lighting;
   guides = std::move(o.guides);
   active_camera = o.active_camera;
+  sequence = o.sequence;
+  director.reset();  // (a Play session's player belongs to it)
   roots = std::move(o.roots);
   objects_ = std::move(o.objects_);
   by_id_ = std::move(o.by_id_);
@@ -1968,6 +1974,8 @@ void Scene::clear() {
   roots.clear();
   next_id_ = 1;
   active_camera = 0;
+  sequence.clear();
+  director.reset();
 }
 
 GameObject *Scene::find(uint64_t id) const {
@@ -2043,6 +2051,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->lighting = lighting;
   s->guides = guides;
   s->active_camera = active_camera;
+  s->sequence = sequence;
   s->objects_.reserve(objects_.size());
   std::unordered_map<const Material *, MaterialPtr> mat_copy;
   for (auto &o : objects_) {
@@ -2124,6 +2133,14 @@ void Scene::start(PlayContext &ctx) {
         if (c->enabled) c->start(ctx);
   /* Jolt world for this play session (null without Jolt or rigid bodies). */
   physics = physics_create(*this);
+  /* The scene's sequence (task 0070): a Sequencer of the scene's own, with no object (its bars name theirs). */
+  director.reset();
+  if (!sequence.empty()) {
+    auto d = std::make_shared<Sequencer>();
+    d->sequence = sequence;
+    d->start(ctx);
+    director = d;
+  }
 }
 
 void Scene::update(PlayContext &ctx) {
@@ -2136,6 +2153,7 @@ void Scene::update(PlayContext &ctx) {
     if (o->active_in_hierarchy())
       for (auto &c : o->components)
         if (c->enabled) c->update(ctx);
+  if (director) director->update(ctx);  // (after the components: the scene's sequence has the last word, before IK)
   if (physics) physics_world_step(*physics, ctx.dt);
   else physics_step(*this, ctx.dt);
 }

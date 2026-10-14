@@ -56,7 +56,7 @@ void Editor::draw_skin_bind_buttons(GameObject *g, ui::Layout &lay) {
   const Recti a{row.x + u.px(4), row.y, bw, row.h}, e{a.right() + u.px(4), row.y, bw, row.h};
   auto button = [&](const Recti &r, const char *label, const char *tip, SkinBind how) {
     if (skin_job_) {
-      u.frame(r, Color::hex(0x2A2A2A), u.theme.border, u.px(3));
+      u.frame(r, u.theme.strip, u.theme.border, u.px(3));
       u.label(r, label, u.theme.text_dim, ui::Align::Center);
     }
     else if (u.button(r, label)) skin_bind(g, how);
@@ -80,14 +80,14 @@ void Editor::draw_skin_transfer(GameObject *target, ui::Layout &lay) {
   const int label_w = std::max(u.px(110), lay.area.w * 2 / 5);
   const Recti row = lay.row();
   u.label({row.x + u.px(4), row.y, label_w - u.px(8), row.h}, "From (a rigged body)");
-  object_field("skin_transfer_from", {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}, skin_transfer_source_);
+  object_field("skin_transfer_from", {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}, skin_transfer_source_, "MeshFilter");
   u.tooltip("The body whose weights this mesh takes. Drag it here from the Hierarchy.");
   GameObject *source = skin_transfer_source_.empty() ? nullptr : scene_->find_by_name(skin_transfer_source_);
   const bool can = source && source != target && !skin_job_;
   const Recti b = lay.row(u.row_h() + u.px(2));
   const Recti br{b.x + u.px(4), b.y, b.w - u.px(8), b.h};
   if (!can) {
-    u.frame(br, Color::hex(0x2A2A2A), u.theme.border, u.px(3));
+    u.frame(br, u.theme.strip, u.theme.border, u.px(3));
     u.label(br, "Transfer Weights", u.theme.text_dim, ui::Align::Center);
   }
   else if (u.button(br, "Transfer Weights")) skin_transfer(source, target);
@@ -140,7 +140,7 @@ void Editor::draw_rigging_window(const Recti &r) {
       for (size_t k = i; k < std::min(bs.size(), i + (size_t)per); k++) {
         Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
         if (!bs[k].enabled) {
-          u.frame(br, Color::hex(0x2A2A2A), u.theme.border, u.px(3));
+          u.frame(br, u.theme.strip, u.theme.border, u.px(3));
           u.label(br, bs[k].label, u.theme.text_dim, ui::Align::Center);
         }
         else if (u.button(br, bs[k].label)) bs[k].fn();
@@ -176,6 +176,7 @@ void Editor::draw_rigging_window(const Recti &r) {
                                     "Select the mesh and a bone (or the armature) of the skeleton, Ctrl+click in the Hierarchy.",
              root != nullptr, [this, mesh_obj, root] {
                mesh_obj->add<SkinModifier>()->object = root->name;
+               nest_armature(root, mesh_obj);
                mark_changed("Add Armature (Skin)");  // (a large mesh's bind lands later, as a step of its own)
                skin_bind(mesh_obj);
              }}},
@@ -202,6 +203,18 @@ void Editor::draw_rigging_window(const Recti &r) {
     if (weight_paint_) u.label(lay.row(), "Tip: select a bone (in the Hierarchy) to paint its group.", u.theme.text_dim);
   }
   if (section("Auto-Rig")) draw_autorig_section(lay, mesh_obj);
+  if (section("FK Controls")) {
+    const std::vector<GameObject *> sel = selected_bones();
+    bool any_fk = false;
+    for (GameObject *b : sel) any_fk = any_fk || fk_control_of(*b);
+    grid({{"Add FK Controls", "A circle on each selected bone that turns it (Maya's FK controllers): animate the circles, not the bones.\n"
+                              "Console: fk add [bone...].",
+           !sel.empty(), [this, sel] { add_fk_controls(sel); }},
+          {"Remove FK Controls", "The selected bones' circles go; the bones keep their pose and are posed directly again. Console: fk remove.",
+           any_fk, [this, sel] { remove_fk_controls(sel); }}},
+         2);
+    if (sel.empty()) u.label(lay.row(), "Select bones (Ctrl+click in the Hierarchy) to give them FK controls.", u.theme.text_dim);
+  }
   if (section("Inverse Kinematics")) {
     const bool chain = bone && a->parent && a->parent->get<Bone>() && !a->get<IKConstraint>();
     grid({{"Add IK to Bone", "The selected bone (a shin, a forearm) and its parent reach for a new target at its tip, bending towards a new pole.\n"
@@ -217,6 +230,9 @@ void Editor::draw_rigging_window(const Recti &r) {
              }
            }}},
          2);
+    grid({{"Remove IK", "The selected bone's IK goes, with its target and pole (when no other IK uses them). Console: ik remove <bone>.",
+           a && a->get<IKConstraint>(), [this, a] { remove_ik(a); }}},
+         1);
     if (a)
       if (IKConstraint *ik = a->get<IKConstraint>()) {
         u.push_id((ui::Id)(uintptr_t)ik);

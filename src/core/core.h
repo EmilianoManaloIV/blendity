@@ -79,9 +79,11 @@ bool copy_file(const std::string &from, const std::string &to);
 bool move(const std::string &from, const std::string &to);
 /* Sends a file or folder to the Recycle Bin / Trash so it can be restored. */
 bool move_to_trash(const std::string &path, std::string *error = nullptr);
+bool remove_file(const std::string &path);  // deleted for good (a UTF-8 path, as everywhere here); false if it wasn't there
 std::string executable_dir();
 std::string current_dir();
 std::string home_dir();
+std::string temp_dir();  // the system's folder for temporary files
 std::string normalize(const std::string &path);
 /* Opens a file or folder with the OS default handler (papers, folders). */
 void open_external(const std::string &path);
@@ -94,6 +96,21 @@ uint64_t physical_memory_bytes();  // installed RAM (0 if unknown)
 uint64_t working_set_bytes();      // this process's resident memory now
 uint64_t peak_working_set_bytes(); // and at its highest so far
 int hardware_threads();            // logical processors
+/* Windows: the program's arguments from the wide command line, as UTF-8 (main()'s argv is in the ANSI code page, which
+ * can't hold every file name). Elsewhere empty: argv is UTF-8 already. */
+std::vector<std::string> utf8_arguments();
+/* A program found on the PATH (".exe" added on Windows), or "" (task 0074: ffmpeg). */
+std::string find_program(const std::string &name);
+/* Runs argv[0] with the rest as its arguments, without a console window, and waits: its exit code, -1 if it didn't
+ * start. Call it off the main thread for anything slow. */
+int run_program(const std::vector<std::string> &argv, int timeout_s = 0);  // timeout_s > 0: killed after it
+/* Starts argv[0] with the rest as its arguments and returns at once (an installer, the full build): false if it
+ * didn't start. */
+bool start_program(const std::vector<std::string> &argv);
+constexpr int kExitUnknown = -2;   // run_program: it ran, but its exit code was lost (reaped elsewhere)
+constexpr int kExitTimedOut = -3;  // run_program: killed after timeout_s
+/* The Windows command line for `argv` (each argument quoted as CommandLineToArgvW reads it back); for tests. */
+std::string windows_command_line(const std::vector<std::string> &argv);
 }  // namespace sys
 
 /* ---------------------------------------------------------------- Strings */

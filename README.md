@@ -16,10 +16,23 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 
 **→ The [manual](docs/MANUAL.md)** walks through the work stage by stage, with examples.
 
+## Download
+
+From the [Releases](https://github.com/EmilianoManaloIV/blendity/releases) page:
+
+| System | File | Install |
+|---|---|---|
+| Windows 10 / 11 (x64) | `Blendity-Setup-<version>.exe` | Run it. It installs for you alone (no administrator), adds Start menu (and, if you like, desktop) shortcuts and opens `.scene` files; remove it from Settings > Apps. |
+| Linux (x86-64, Ubuntu 22.04 or newer) | `Blendity-<version>-x86_64.AppImage` | `chmod +x` it and run it. Or unpack `blendity-<version>-linux-x86_64.tar.gz` anywhere and run `Blendity` (it needs only `libX11`). |
+| macOS (Apple silicon) | `Blendity-<version>-macos.dmg` | Open it and drag Blendity onto Applications. The app isn't signed, so the first time macOS asks for a go-ahead: on macOS 15 or later, try to open it, then System Settings > Privacy & Security > **Open Anyway**; on macOS 14 or earlier, right-click it > **Open**. |
+
+Your work goes in a project folder, `BlendityProject` in your home folder unless you open another. Blendity checks for
+updates once a day (Help > Check for Updates; Help > Version History goes back to an older build), and runs with or
+without Blender's libraries - your choice in Preferences > Libraries; without them, or offline, it uses its own code.
+
 ## Quick start
 
-1. Build it (below) or download the build for your system from the GitHub Actions artifacts, then run
-   `dist/windows/Blendity.exe` (Windows: no installer), `dist/linux/Blendity` (Linux: needs only `libX11`, with
+1. Install it (above), or build it (below) and run `dist/windows/Blendity.exe`, `dist/linux/Blendity` (with
    `dist/linux/lib/` beside it) or `dist/macos/Blendity.app`.
 2. Press **F1** for the Learn tab, or pick a stage from the **Layout** dropdown (top right).
 3. Alt+drag orbits, the wheel zooms, W / E / R move, rotate and scale, Tab enters Edit Mode, Ctrl+P plays.
@@ -47,7 +60,9 @@ everything):
 - **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps, probe volumes and voxel realtime GI;
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan); camera filters from colour
   grading to PlayStation and manga looks.
-- **Rigging**, and **Skinning & Weight Painting** - bones, skins, weight paint and IK in a Rigging window; **automatic
+- **Rigging**, and **Skinning & Weight Painting** - bones (drag their heads and tails, Extrude new ones), Blender/Maya-style
+  **rig controls** (IK boxes and poles, FK circles, coloured by side), characters under one root as Unity imports them,
+  skins, weight paint and IK in a Rigging window; **automatic
   weights and weight transfer by inpainting** (Epic, 2023); a **Mixamo-style marker auto-rig** for people and
   four-legged animals; rigged FBX / glTF import with bind poses.
 - **Animation** - a **Unity-style dopesheet** and **Curves view** (key tangents: Clamped Auto, Free Smooth, Flat,
@@ -60,14 +75,16 @@ mouse navigation together to Unity's, Unreal's, Blender's or Maya's.
 
 ## Machines
 
-| | Minimum | Recommended |
+| | Minimum (a laptop such as the HP Envy 13.3" 2-in-1) | Recommended |
 |---|---|---|
-| CPU | 4 cores / 8 threads, about 3 GHz | 8+ cores |
-| RAM | 8 GB | 16 GB+ |
-| GPU | GTX 1050 Ti class (Vulkan 1.2; for path tracing, baking and realtime GI) | a GPU with ray tracing hardware (RTX, RX 6000+, Arc) |
+| CPU | Intel i7, 4 cores / 8 threads (i7-1165G7 class) | 8+ cores |
+| RAM | 8 GB (shared with the graphics) | 16 GB+ |
+| GPU | Iris Xe or a GTX 1050 Ti (Vulkan 1.2; for path tracing, baking and realtime GI) | a GPU with ray tracing hardware (RTX, RX 6000+, Arc) |
+| Screen | 1920 x 1080 at 150 % (1280 x 720 of layout), touch and pen | 1920 x 1080 or more |
 
-The minimum machine starts on the **Low** quality tier (Edit > Preferences..., Quality): the views draw at 67 % and scale
-up, with a 1024 shadow map and 60 fps. Renders always use the scene's own settings.
+The minimum machine starts on the **Low** quality tier (Edit > Preferences..., Quality) and says so on the first run:
+the views draw at 67 % and scale up, with a 1024 shadow map and 60 fps. Editing frames there run at about 35-40 fps,
+orbiting at 60. Renders always use the scene's own settings. Two fingers navigate the Scene view on a touch screen.
 
 ## Build it
 
@@ -83,12 +100,19 @@ build.bat release all            # Windows: finds Visual Studio / Build Tools au
 cmake -B build && cmake --build build --parallel && ctest --test-dir build   # optional CMake route
 ```
 
-**Optional: Blender's prebuilt libraries** (from `projects.blender.org/blender/lib-windows_x64`, `lib-linux_x64` or
-`lib-macos_arm64`) at `../blender/lib/<platform>` add Embree, OpenImageDenoise, oneTBB, Eigen,
-OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc and others; each has a built-in fallback,
+**Blender's prebuilt libraries** (the installers include them) come with one command, which fetches only the folders
+Blendity uses, at the commits pinned in `packaging/blender-libs.txt` (about 600 MB, needs git-lfs):
+
+```bash
+bash packaging/fetch_blender_libs.sh windows_x64     # or linux_x64, macos_arm64; then build as above
+```
+
+They land in `../blender/lib/<platform>` (Blender's own layout, from `projects.blender.org/blender/lib-<platform>`) and
+add Embree, OpenImageDenoise, oneTBB, Eigen,
+OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (9774 unit checks in 641 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (9992 unit checks in 672 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

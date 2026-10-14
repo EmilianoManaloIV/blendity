@@ -1,6 +1,7 @@
 @echo off
 rem Blendity - Windows build without CMake. Needs only Visual Studio (or Build Tools) with C++.
-rem Usage: build.bat [release|debug] [app|stress|tests|all]
+rem Usage: build.bat [release|debug] [app|stress|tests|all|installer]
+rem   installer: the app, then dist\installers\Blendity-Setup-<VERSION>.exe with Inno Setup 6 (task 0076).
 setlocal enabledelayedexpansion
 
 set CONFIG=%1
@@ -62,12 +63,18 @@ call :lib jolt             BL_WITH_JOLT        "jolt\include"                   
 call :lib jpeg             BL_WITH_LIBJPEG     "jpeg\include"                                  "jpeg\lib\libjpeg.lib"
 call :lib png              BL_WITH_LIBPNG      "png\include zlib\include"                      "png\lib\libpng.lib zlib\lib\libz_st.lib"
 call :lib zstd             BL_WITH_ZSTD        "zstd\include"                                  "zstd\lib\zstd_static.lib"
+rem Video files (task 0077): Blender's FFmpeg, whose DLLs sit in its lib folder (copied in :deploy_dlls).
+call :lib ffmpeg           BL_WITH_FFMPEG      "ffmpeg\include"                                "ffmpeg\lib\avformat.lib ffmpeg\lib\avcodec.lib ffmpeg\lib\swscale.lib ffmpeg\lib\avutil.lib"
 rem GPU rendering: the Vulkan headers (the loader comes with the GPU driver) and shaderc.
 if exist "%L%\vulkan\include" call :lib shaderc BL_WITH_VULKAN "shaderc\include vulkan\include" "shaderc\lib\shaderc_shared.lib"
 rem ABI settings the libraries were built with (blender\build_files\build_environment\cmake).
 set LIBDEFS=%LIBDEFS% /DIMATH_DLL /DOPENEXR_DLL /DMANIFOLD_PAR=1 /DJPH_SHARED_LIBRARY /DJPH_FLOATING_POINT_EXCEPTIONS_ENABLED /DJPH_DOUBLE_PRECISION /DJPH_CROSS_PLATFORM_DETERMINISTIC /DJPH_USE_CPU_COMPUTE /DJPH_OBJECT_STREAM /DJPH_USE_SSE4_1 /DJPH_USE_SSE4_2
 :libs_done
 
+rem The build's identity (task 0079): VERSION's number, and CI's release tag (BLENDITY_BUILD) or "dev".
+set /p BL_VERSION_NUMBER=<VERSION
+if "%BLENDITY_BUILD%"=="" set BLENDITY_BUILD=dev
+set LIBDEFS=%LIBDEFS% /DBL_VERSION_NUMBER=%BL_VERSION_NUMBER% /DBL_BUILD=%BLENDITY_BUILD%
 set COMMON=/nologo /Iextern\sky\include /std:c++17 /EHsc /W3 /MP /utf-8 /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX /permissive- /Zc:__cplusplus %LIBDEFS% %LIBINC%
 rem Blender's libraries use the DLL runtime (/MD); the dependency-free build
 rem stays a single static executable (/MT).
@@ -78,7 +85,7 @@ if /i "%CONFIG%"=="debug" (
 ) else (
   set FLAGS=%COMMON% /O2 /Oi /GL /fp:fast %CRT% /DNDEBUG
 )
-if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64^))
+if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else if "%BLENDITY_NO_LIBS%"=="1" (echo [blendity] Dependency-free build ^(BLENDITY_NO_LIBS^)) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64: bash packaging\fetch_blender_libs.sh windows_x64 fetches them^))
 set LIBSRC=
 for %%d in (core image render scene texture editor research platform deps) do (
   for %%f in (src\%%d\*.cpp) do set LIBSRC=!LIBSRC! %%f
@@ -86,12 +93,13 @@ for %%d in (core image render scene texture editor research platform deps) do (
 rem Blender's own bundled dependencies (see extern\README.md)
 set LIBSRC=!LIBSRC! extern\ufbx\ufbx.c extern\sky\source\sky_hosek.cpp
 set OBJ=build\obj_%CONFIG%
-set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib %LIBLINK%
-if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib %LIBLINK%
+set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib %LIBLINK%
+if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib winhttp.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto app
 if /i "%TARGET%"=="app" goto app
+if /i "%TARGET%"=="installer" goto app
 if /i "%TARGET%"=="stress" goto stress
 if /i "%TARGET%"=="tests" goto tests
 
@@ -101,6 +109,7 @@ rem BLENDITY_OUT lets you build while a copy of the editor is still running.
 if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
 cl %FLAGS% /Fo%OBJ%\ /Fe:%BLENDITY_OUT% %LIBSRC% src\app\main.cpp %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
 if errorlevel 1 exit /b 1
+if /i "%TARGET%"=="installer" goto installer
 if /i not "%TARGET%"=="all" goto done
 
 :stress
@@ -113,6 +122,22 @@ if /i not "%TARGET%"=="all" goto done
 echo [blendity] Building unit tests (%CONFIG%)...
 cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_tests.exe %LIBSRC% tests\test_main.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
+goto done
+
+:installer
+rem Inno Setup 6's compiler, then the setup .exe with the app, its DLLs, data, manual and licences.
+set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" (
+  echo [blendity] No Inno Setup 6 ^(jrsoftware.org/isinfo.php^): dist\windows holds the app, unpackaged.
+  exit /b 1
+)
+set /p VERSION=<VERSION
+python packaging\make_icon.py build\icons >nul || py packaging\make_icon.py build\icons >nul
+"%ISCC%" /Q /DAppVersion=%VERSION% /DIcons=..\..\build\icons packaging\windows\blendity.iss
+if errorlevel 1 exit /b 1
+echo [blendity] Installer: dist\installers\Blendity-Setup-%VERSION%.exe
+goto done
 
 :done
 echo [blendity] Done. Binaries are in dist\windows\
@@ -131,14 +156,16 @@ exit /b 0
 rem Copy the release DLLs (no debug, GPU-device or Python files) and the MSVC
 rem runtime next to the executables, so dist\windows runs on any PC.
 :deploy_dlls
-rem openjph (OpenEXR) and dpcpp's SYCL runtime (Embree) are runtime-only dependencies.
-for %%d in (%LIBDIRS% imath openjph dpcpp) do (
+rem openjph (OpenEXR), dpcpp's SYCL runtime (Embree) and aom (FFmpeg's AV1) are runtime-only dependencies.
+for %%d in (%LIBDIRS% imath openjph dpcpp aom) do (
   if exist "%L%\%%d\bin" (
     for %%f in ("%L%\%%d\bin\*.dll") do (
-      echo %%~nxf| findstr /i /r "_d\. _d_ debug _cuda _hip _sycl eigen_ malloc_proxy" >nul || copy /y "%%f" dist\windows\ >nul
+      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll loaderd\.dll zerod\.dll v2d\.dll debug _cuda _hip _sycl eigen_ malloc_proxy" >nul || copy /y "%%f" dist\windows\ >nul
     )
   )
 )
+rem FFmpeg keeps its DLLs in lib\, beside the import libraries (not ffmpeg.exe: Blendity encodes in-process).
+if exist "%L%\ffmpeg\lib" for %%n in (avcodec avformat avutil swscale swresample) do copy /y "%L%\ffmpeg\lib\%%n-*.dll" dist\windows\ >nul
 rem Blender's colour management config (OpenColorIO views: AgX, Filmic, ...).
 set "OCIO_CFG=%~dp0..\blender\release\datafiles\colormanagement"
 if exist "%L%\opencolorio" if exist "%OCIO_CFG%\config.ocio" xcopy /e /i /y /q "%OCIO_CFG%" dist\windows\datafiles\colormanagement >nul

@@ -2,6 +2,461 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (rounds 105-106): updates, older builds, and Blender's libraries optional at run time (tasks 0079-0080, ADR 0033)
+
+**Asked:** "an option for the software while installed on a computer to check for updates and then ask the user if
+they want to install the update. The install note should note the changes that the update will bring. Furthermore,
+the user can choose to go to an older update (Before A Certain Pull Request)"; "if the DLL or external libraries isn't
+found, result back to the fallback with the software that doesn't rely on dependencies (such as situations with no
+internet, etc.). Then if there is internet, ask the user if they want to install the new libraries"; "The user should
+always have the option to use dependencies or not."
+
+**Changed**
+- **Builds for every merged PR:** a merge into `main` publishes a pre-release `build-pr<N>` (notes: the PR's
+  description); v* tags publish stable releases. Each carries the installers, the libraries archive and
+  SHA256SUMS.txt. Builds know their tag and version (shown in About and the status bar).
+- **Updates:** once a day, when online, Blendity asks GitHub's releases list (WinHTTP on Windows, `curl` elsewhere: no
+  new library) and offers a newer build with its notes - Install / Not now / Skip this one. Help > Check for Updates
+  and **Help > Version History** (every build for this system, older ones too: the build before a certain PR).
+  Downloads are checked against the release's SHA-256 list; Windows installs silently and restarts Blendity, an
+  AppImage replaces itself, macOS opens the disk image. Preferences > Updates: check at start, include PR builds.
+- **Libraries optional at run time:** an install holds Blendity (dependency-free, always starts) and Blendity-full.
+  Blendity hands over when the full build's libraries load (`--probe`) and **Preferences > Libraries > Use Blender's
+  libraries** is on; otherwise - a library missing or damaged, offline, turned off, `--no-libs` - it runs on its own
+  code, and online it offers this build's libraries (Download / Not now / Never ask), unpacked into
+  `~/.blendity/libs/<build>`. The Windows installer's "Blendity only" type leaves them out.
+- The JSON reader moved from the glTF importer to `core/json.h`; SHA-256, downloads, releases and the launcher are new
+  in `core/`.
+- #70's installer jobs needed: Windows Embree's SYCL runtime (`dpcpp`), Linux GCC 14 (Blender's libraries call its C++
+  runtime, shipped in `lib/`), macOS's own zlib.
+
+**Checked**
+- New tests (round 105): SHA-256 against FIPS 180-4's vectors; SHA256SUMS lines; a releases list gives the newer builds
+  (stable only or with PR builds), none for the newest or a local build, all in Version History; the Update and
+  History dialogs at 1280 x 720, Skip remembered; (opt-in, `BLENDITY_NET_TESTS=1`) GitHub's real list fetched, a 404
+  reported.
+- New test (round 106): this build knows whether it has the libraries; `--probe` answers; the Libraries dialog at
+  1280 x 720; Never ask and Use Blender's libraries kept with the preferences.
+- By hand on Windows: a scratch install with both programs - with the libraries it handed over, with `--no-libs` and
+  with `embree4.dll` removed it ran itself.
+- Unit checks: Windows 9,992, 0 failed (672 tests); the whole suite in render-cache verify mode: 9,993,
+  0 failed, 0 stale pictures. Linux with libraries: 9,900, 0 failed. Sanitizer build: 9,806, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- On Linux and macOS, opening a folder or starting a program ignored SIGCHLD for the whole process, after which every
+  download and the libraries probe failed: children nobody waits for are reaped by a thread of their own instead.
+- The Windows installer never started Blendity again after an update: it does now ([Run] after an update started
+  from Blendity), installing where the old copy is (for this user, or for everyone).
+- A build older than the newest 100 releases never saw an update or its libraries: its own release is fetched too.
+- Installing "Blendity only" over an install with the libraries left the old full build to be handed over to: it is
+  removed.
+- On Windows the dependency-free program returned at once while the full one worked: it waits and passes on the exit
+  code.
+- Downloads went to guessable names in the shared /tmp (another user could plant a link): a private
+  ~/.blendity/downloads, and only plain file names from a release.
+- Closing Version History by clicking outside stopped all later offers for the session.
+- Replacing an AppImage could lose it on a full disk, and restarting after a libraries download ran from the old
+  AppImage's vanished mount: the new one is copied beside the old first, and Blendity restarts as the AppImage.
+- Unpacking the libraries and copying an AppImage ran on the editor's thread (seconds): on the downloading thread now.
+- Releases are published one at a time, in merge order; the libraries are asked about at most once a day and never
+  turn into an update offer when update checks are off.
+- The workflow's token is read-only except in the release job (a pull request's build scripts run with it).
+- curl keeps to https (redirects too) with no fixed time limit on large downloads; WinHTTP treats an unfollowed
+  redirect as an error; SHA-256 streams the file; Windows' own tar.exe from System32; the probe gives up after 30 s;
+  a download stops when Blendity closes; Version History scrolls through every build; the title no longer reads
+  "Blendity Blendity".
+- Left: a full build that crashes after a good probe doesn't fall back by itself (Preferences > Libraries or
+  --no-libs does).
+
+## 2026-10-14 (rounds 103-104): FFmpeg linked like Blender's other libraries, and the libraries in the installers (tasks 0077-0078, ADR 0032)
+
+**Asked:** "Can we install ffmpeg and treat it like a blender dependency?" - link it, and "make sure other dependencies
+should be included when installing the project. The user shouldn't really have to worry on downloading blender on
+their own."
+
+**Changed**
+- **FFmpeg 8.1** (Blender's build: x264, x265, libvpx, libaom, Opus, Vorbis, Theora, LAME) is linked behind
+  `BL_WITH_FFMPEG` by build.bat, build.sh and CMake. Render Animation encodes its MP4 itself (H.264, CRF 18) on a
+  background thread; a build without it falls back to an `ffmpeg` program or PNG frames, as before. `libs` lists it.
+- Fetched into this machine's Blender library checkouts: `ffmpeg` (Windows 46 MB, Linux 67 MB) and Windows' `aom`
+  (FFmpeg's AV1 DLL, 9.5 MB); Linux also links OpenJPEG and Blender's `libc_compat` (copied to `extern/`).
+- **`packaging/fetch_blender_libs.sh <platform>`** fetches only the library folders Blendity uses, at commits pinned in
+  `packaging/blender-libs.txt` (about 600 MB a platform), plus Blender's colour config when missing.
+- **The installers carry Blender's libraries:** the release workflow fetches them (cached), builds all three with
+  them and checks each has Embree, OpenImageDenoise, OpenColorIO, Jolt and FFmpeg; the macOS app bundle holds `lib/`
+  and `datafiles/`. Nobody installing Blendity needs Blender or its libraries.
+- Licences: FFmpeg and its codecs listed; LGPL-2.1 and GPL-2.0 texts added.
+
+**Checked**
+- New test (round 103): six 101 x 57 PNG frames become an MP4 FFmpeg reads back as 6 frames of 102 x 58 with libx264;
+  a missing frame is refused with a reason. Render Animation's test made its MP4 in-process. Both on Windows and Linux.
+- Unit checks: Windows 9,965, 0 failed (667 tests); the whole suite in render-cache verify mode: 9,966,
+  0 failed, 0 stale pictures. Linux with libraries: 9,873, 0 failed. Sanitizer build: 9,779, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- CMake's Linux build wouldn't have linked: `libc_compat` sat in the static library, where nothing pulled it in before
+  the codecs asked; it is now on every executable's link line.
+- An odd frame size was stretched by a pixel (a soft, shifted picture): it is padded by repeating the edge now.
+- The video wasn't tagged and used BT.601 colours: it is BT.709, limited range, tagged, as Blender writes it.
+- Closing the editor while an MP4 was being encoded left the encoder running into the program's exit: it stops
+  between frames and the editor waits for it.
+- A failed or stopped encode left an unplayable half-MP4: it is deleted.
+- x264's options went to whatever encoder was found: a fallback encoder gets a high bit rate instead.
+- FFmpeg's log level was set from the worker thread: once, from the main thread.
+- Only the five FFmpeg DLLs Blendity uses are shipped (not avdevice / avfilter); CMake no longer links an FFmpeg
+  folder without its libraries; `extern/README.md` says where each copied file comes from.
+- Left: the FFmpeg DLLs load with the program (as the other libraries' do), so a missing one stops it starting.
+
+## 2026-10-14 (round 102): installers for Windows, Linux and macOS (task 0076)
+
+**Asked:** installers for Windows, Linux and macOS; the choice was an Inno Setup .exe, an AppImage and a .tar.gz, and
+an unsigned .dmg, attached to a GitHub Release on v* tags.
+
+**Changed**
+- **Windows:** `Blendity-Setup-<version>.exe` (Inno Setup, `packaging/windows/blendity.iss`): installs for the user
+  alone (no administrator), Start menu and optional desktop shortcuts, `.scene` files opening in Blendity, an
+  uninstaller in Settings > Apps. `build.bat installer` makes it locally when Inno Setup 6 is installed.
+- **Linux:** `Blendity-<version>-x86_64.AppImage` and `blendity-<version>-linux-x86_64.tar.gz`
+  (`packaging/linux/make_packages.sh`, built on Ubuntu 22.04 for older systems).
+- **macOS:** `Blendity-<version>-macos.dmg` (`packaging/macos/make_dmg.sh`): the app with its icon and version and an
+  Applications link; unsigned (right-click > Open the first time).
+- `.github/workflows/release.yml` builds all three on pull requests that touch packaging, installs or mounts each and
+  starts it headless, and on a v* tag makes the GitHub Release with them. `VERSION` is 0.10.0. No tag was pushed.
+- An icon (a cube in the Emiliano palette) drawn by `packaging/make_icon.py` without any library.
+- A `.scene` path given alone - a double-clicked file - opens, with the project folder above it.
+- The debug OpenJPH DLL (`openjph.0.25d.dll`) is no longer copied into `dist\windows`.
+- README: a Download section.
+- Fixed: the test "feel: Unreal's End drops the selection..." failed twice on CI's sanitizer build (#61, #67): it gave
+  Alt+J's camera turn a fixed 0.5 s, and a sanitizer frame can take most of that; it now waits for the turn to end.
+  The auto-rig's view test (#68) and two others that waited the same way do too.
+
+**Checked**
+- New test (round 102): a lone `.scene` argument is the scene and its project is found above it; an option's value
+  isn't.
+- The Linux .tar.gz from the WSL build, unpacked elsewhere, starts headless and makes `~/BlendityProject`.
+- Unit checks: Windows 9,953, 0 failed (666 tests); the whole suite in render-cache verify mode: 9,954,
+  0 failed, 0 stale pictures. Linux with libraries: 9,861, 0 failed. Sanitizer build: 9,778, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- The release workflow's own run on this PR (Inno Setup isn't installed on this machine).
+- A headless run writing to a path with an accented letter (UTF-8 arguments on Windows).
+
+**Review** (Opus code-reviewer). Fixed:
+- `build.bat release all` went on into the installer step (CI's Windows check would have failed without Inno Setup).
+- The release job looked for the installers where the artifacts don't put them: no release would have been made.
+- Installing "for all users" put the program in one user's folder: `{autopf}` follows the choice.
+- A double-clicked scene with an accented letter in its path didn't open (Windows' ANSI argv): the arguments come from
+  the wide command line as UTF-8. `--scene`'s value now finds its project too, and `.SCENE` in any case counts.
+- The macOS note: on macOS 15 an unsigned app is allowed in System Settings > Privacy & Security > Open Anyway.
+- The workflow's checks start each installed copy away from the repository (a fresh machine's project), wait for the
+  Windows uninstaller and check that it removes the `.scene` association; rerunning the dmg script no longer nests
+  the licences.
+
+## 2026-10-14 (round 101): the laptop minimum - an i7, 8 GB, the HP Envy 13.3" 2-in-1 (task 0075, ADR 0026 amended)
+
+**Asked:** a new minimum machine: an i7 with 8 GB of RAM, the HP Envy 2-in-1 13.3".
+
+**Changed**
+- The minimum is now that laptop (i7-1165G7, 4 cores / 8 threads, 8 GB shared with Iris Xe, 1080p at 150 %): README,
+  MANUAL chapter 11, ADR 0026 and PERFORMANCE.md pass 9.
+- **First run** on such a machine: Low, and a welcome that says so, with **Use High** one click away
+  (`BLENDITY_MIN_SPEC=1` shows it on any machine).
+- **Touch (Windows):** two fingers over the Scene view pinch to zoom, drag to pan, twist to turn round the pivot, in
+  every editor feel; one finger is the mouse. **Pen:** its pressure scales the weight-paint brush.
+- The Low tier's views read shadows with a 2 x 2 bilinear filter (4 taps instead of 9).
+- An integrated GPU's path-tracing budget is a quarter of RAM (Iris Xe reports half as its own).
+- `blendity_stress --laptop`: 5 threads (4 cores' 8 threads), the times to be multiplied by 1.4 for the laptop's clock.
+
+**Checked**
+- `editor_render` at Low with `--laptop` x 1.4: orbiting 13.0 ms (60 fps), moving an object 26.0, a material edit 24.9,
+  Play 22.8 (30-40 fps; 60 while editing is **not met** on the laptop, and Low keeps 67 % rather than looking soft).
+  On 8 full cores (pass 8's setup) the frames pass 8 left over 16.7 ms are now 12.9 and 11.4.
+- New tests (round 101): a pinch of 2 halves the distance, a two-finger drag pans with the fingers, a twist turns the
+  view by its angle, over the Inspector nothing, NaN ignored; a stroke at pressure 0.5 adds half; the first run on the
+  minimum machine shows the welcome, which fits 1280 x 720, and Use High switches and is saved.
+- The Preferences dialog checked at 1280 x 720 (a headless screenshot).
+- Unit checks: Windows 9,948, 0 failed (665 tests); the whole suite in render-cache verify mode: 9,949,
+  0 failed, 0 stale pictures. Linux with libraries: 9,856, 0 failed. Sanitizer build: 9,773, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- `--laptop`'s message had a line break inside its string: the stress tool didn't compile.
+- A pen hovering after lift-off left its pressure 0 for every later mouse stroke: only mouse messages Windows made from
+  a pen carry it now, and lifting or leaving resets it.
+- The first finger's press, when Windows makes one, moved a held drag to the gesture's middle: gestures leave the
+  mouse position alone while a button is down.
+- Windows' own gestures (begin, end, taps) went unanswered; the pointer calls are looked up so the program starts
+  without them.
+- The 2 x 2 filter's edge is narrower than 3 x 3's, not as soft: the comments and lesson say so.
+- Left: the Low filter is a flag on the cached shadow map, safe while every render runs on the main thread (a note for
+  any render moved off it).
+
+## 2026-10-14 (round 100): render animations and sequences to video (task 0074)
+
+**Asked:** rendering sequences to video; the choice was PNG frames plus an MP4 through FFmpeg.
+
+**Changed**
+- **Render Animation** (File menu, the Render window, Ctrl+F12, `renderanim [first last] [fps] | stop`): every frame
+  of the scene's sequence - or, without one, the selected object's clip - through the F12 render, into
+  `Renders/<scene>_animation_<time>/0001.png...`; the pose goes back afterwards.
+- Then, when FFmpeg is installed (on the PATH, or `renderanim ffmpeg <path>`, kept with the preferences), an H.264 MP4
+  is made beside the frames in the background. Blendity runs FFmpeg rather than linking it: no new dependency.
+  Without it the frames are the result, and the log says how to make a video.
+- A render stops cleanly when something ends what it poses through: Play, a save, an undo, another scene, another
+  object selected for a clip. Camera Sequence and Render Animation don't run at once.
+- Fixed: the IK test "in Play a Rotator swinging a foot target" failed once on a fast CI runner (Play runs on the
+  clock); it now steps until the target has moved.
+
+**Checked**
+- New tests (round 100): 21 frames of a sequence written as 0001-0021.png at the render's size, the first and last
+  different, the pose put back; FFmpeg's arguments and the Windows command-line quoting; the MP4 made where FFmpeg is on
+  the PATH (not on this machine); a clip's render stops when another object is selected or its preview ends; a lone
+  number is refused.
+- Unit checks: Windows 9,935, 0 failed (662 tests); the whole suite in render-cache verify mode: 9,936,
+  0 failed, 0 stale pictures. Linux with libraries: 9,843, 0 failed. Sanitizer build: 9,760, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- The rasterizer's frames waited for mouse or key input in the real app (the editor slept between them).
+- A save, an undo, Play or another scene mid-render left the rest of the frames unposed; another object selected for
+  a clip was posed and left so. The render now stops with a message.
+- Camera Sequence could start over a running Render Animation.
+- FFmpeg read the terminal on Linux (`-nostdin`); its exit code was lost once SIGCHLD is ignored, and a failed encode
+  with a file left behind counted as made.
+- An empty scene sequence hid the selected clip; a frame rate of 0 or NaN from a file reached FFmpeg; a fractional end
+  rendered one frame too many.
+- The Render window's tooltip searched the PATH every frame; it is looked up when a render starts.
+- Two renders in one second shared a folder; a failed PNG went on with a gap; a lone number or unknown word in
+  `renderanim` started a render.
+- Left: a PATH entry with non-ASCII characters on Windows isn't searched (set the path with `renderanim ffmpeg`).
+
+## 2026-10-14 (round 99): themes - Dark, Light, Emiliano Light and Emiliano Dark (task 0073)
+
+**Asked:** an editor palette / theme option using the user's Figma site ("look at the variables tab in figma").
+
+**Changed**
+- **Preferences > Theme** (console: `theme <name>`): Dark (Blendity's), Light, **Emiliano Light** and **Emiliano Dark**.
+  The two Emiliano themes take the Figma file's Variables (Branding Guide, Light and Dark modes): paper F1EEE5 and
+  charcoal 292927 swapped between the modes, amber D7882B / A65E1E for buttons and selection, mint 45E8A2, red E6533C,
+  blue 4C76FF and amber FF9A00 as signal colours (focus, X / Y / Z, errors, warnings), stone, slate and silver for
+  borders and dim text. The choice is kept with the preferences.
+- Colours the windows wrote by hand (list stripes, ruler strips, row hover, keyframe diamonds, the auto-rig's figure)
+  are now theme colours.
+
+**Checked**
+- New test (round 99): Emiliano Light and Dark give the site's colours, case aside; an unknown name is refused; the
+  theme survives saving and loading the preferences.
+- Headless screenshots of both Emiliano themes (Animation layout).
+- Unit checks: Windows 9,919, 0 failed (660 tests); the whole suite in render-cache verify mode: 9,920,
+  0 failed, 0 stale pictures. Linux with libraries: 9,827, 0 failed. Sanitizer build: 9,744, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- In the light themes, tooltips, the F9 panel, the Hierarchy's scene row, every other Console line, the Learn sidebar,
+  notes and questions, the Lighting and Render settings and the Project folder tree kept dark fills under dark text:
+  they take theme colours now (tooltip, bar, pane, stripe, well, note, question, link), as do the scrollbars, menu
+  separators, popup outlines, the windows' toolbars, the timeline playhead and the Edit Mode button's label.
+- Emiliano Dark's borders and field outlines were the toolbar's colour; they show now. Its selected keys are amber.
+- Emiliano Light's auto-rig figure and graphs sit on stone, not charcoal.
+- `set_theme` and the Preferences combo share one name lookup (`ui::theme_index`).
+- The Dark theme's Learn table rows, Sequencer details and curve keys moved by a shade or two (now theme colours).
+- Left as they were: the Scene and Game views' and the UV editor's own drawing (they read over any picture).
+
+## 2026-10-14 (round 98): a texture's Physical Size drives its materials' tiling (task 0072)
+
+**Asked:** a texture's Physical Size should really adjust its tiling.
+
+**Changed**
+- Changing a procedural texture's **Physical Size** re-tiles every material of the scene using it (Tiling = 1 / size,
+  in any of its maps), in the same undo step. A material tiled by hand keeps its Tiling.
+
+**Checked**
+- New test (round 98): Bricks from 2 m to 4 m takes a material from Tiling 0.5 to 0.25, and one using it only as a normal
+  map; hand-tiled ones keep 3 and 1/3 (passed on the way); an unused `.mat` is left; undo and redo.
+- Unit checks: Windows 9,913, 0 failed (659 tests); the whole suite in render-cache verify mode: 9,914,
+  0 failed, 0 stale pictures. Linux with libraries: 9,821, 0 failed. Sanitizer build: 9,738, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- A `.mat` asset no object used was re-tiled but undo couldn't put it back: only the scene's materials follow now.
+- Only the colour map counted as using the texture: its normal, roughness, metallic and emission maps count too.
+- A dragged Physical Size passing a hand-tiled material's size picked it up: which materials follow is decided at
+  the first change of the undo step.
+- Box mapping's z tiling follows too when it matched.
+- The re-tile no longer scans every `.mat` file on each frame of a drag, nor logs each frame.
+- New checks: a normal-map-only material, a hand-tiled one passed on the way, the unused `.mat`, redo.
+- Left for its own task: redo of an edit to a material linked to a `.mat` (any field, not only tiling) keeps the
+  undone values (older than this task).
+
+## 2026-10-14 (round 97): drag stacks into order (task 0071)
+
+**Asked:** drag-and-drop reordering of the camera filter stack, the modifier stack and the other stacks.
+
+**Changed**
+- Drag a **modifier's**, a **camera filter's** or a **texture layer's** name in its header to another place in its stack:
+  a line shows where it lands and the item is outlined; letting go moves it, one undo step. A click without moving still
+  folds the header; the menus' Move Up / Down stay.
+- The **Sequencer's tracks** move the same way, by their names (clips go with them). Console: `seq trackmove <from> <to>`.
+
+**Checked**
+- New tests (round 97): Bevel dragged below Smooth in a Bevel / Array / Smooth stack ends last, undo puts it back in one
+  step, a click still folds; a camera's first filter dragged below the second ends last; a Sequencer track dragged
+  below another takes its clips, and `seq trackmove` moves it back.
+- Unit checks: Windows 9,902, 0 failed (658 tests); the whole suite in render-cache verify mode: 9,903,
+  0 failed, 0 stale pictures. Linux with libraries: 9,810, 0 failed. Sanitizer build: 9,727, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- A drag whose list stopped showing (another object selected, the Sequencer emptied by an undo) stayed alive and moved
+  an item the next time the list showed; it is now dropped.
+- Undo, redo and Esc during a drag now drop it (the item under its old index could have been another one).
+- The insert line could be drawn over the window above a scrolled Inspector; it is drawn inside the panel now.
+- Drags that couldn't land (a track in Play, an unsaved texture's layer) no longer start.
+- New checks: a filter dragged up, a drag whose list went away, Esc.
+- Left as is: the line below the last item sits under its header, above its open settings.
+
+## 2026-10-14 (round 95): a global sequencer - each clip names its object (task 0070, ADR 0030 amended)
+
+**Asked:** "The sequencer should work globally and have two things to consider when adding a clip. Which animation clip
+it is using and what object is it attributed to."
+
+**Changed**
+- The Sequencer window edits **the scene's sequence** (saved with the scene), with or without a selection.
+- **Each bar is a clip and an object:** a dropped clip plays on the selected character; the Object field below the
+  tracks takes an object dragged from the Hierarchy; bars read "Walk -> Robot". Console: `seq add <clip> <track>
+  <start> [object]`, `seq object <clip> <object>`.
+- Preview poses every bar's object and puts them all back. In Play the scene's sequence plays (triggers and `seq jump`
+  too); an object's Animation component steps aside while the sequence has a bar on it.
+- Overlapping bars crossfade only when they play on the same object.
+- `.seq` files gain a 4th column (the object); older files load unchanged. The Sequencer component still plays a
+  sequence on its own object.
+
+**Checked**
+- New test (round 95): one scene sequence moves two lids from two tracks in Preview (and puts them back), overlapping
+  bars on different objects don't blend, the `.seq` and the scene file keep the objects and the sequence, and Play
+  moves them.
+- New test (round 96): three objects' bars overlapping on one track all play; an object given a bar during Preview is
+  put back; renaming the `.seq` keeps the scene on it.
+- Unit checks: Windows 9,885, 0 failed (656 tests); the whole suite in render-cache verify mode: 9,886,
+  0 failed, 0 stale pictures. Linux with libraries: 9,793, 0 failed. Sanitizer build: 9,710, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress `animation`: 201 tracks 0.0735 ms a frame (target 0.2 ms); a sequence of 4 tracks crossfading 201-track
+  clips 0.3143 ms a frame (target 0.5 ms).
+
+**Review** (Opus code-reviewer). Fixed:
+- Two rigs could share a lookup key and pose each other's bones.
+- Renaming the scene's `.seq` lost it.
+- An object given a bar during Preview kept its previewed pose.
+- A track with three overlapping objects dropped one.
+- A jump before Play's first frame didn't find the bars' objects.
+- `seq jump` couldn't reach a component's sequence.
+- Sequences made before this task are editable again.
+
+## 2026-10-14 (rounds 89-94): rigging - character roots, bone handles and extrude, rig controls, auto-rig colours and views, grouped keyframes (tasks 0065-0069, ADR 0031)
+
+**Asked** (2026-10-14):
+- "When adding an armature to a mesh/object nest it in the hierarchy itself; similar to how unity handle's humanoid
+  models being imported."
+- "Add the ability to move the base and tip of a bone ... add bones using extrude like vertices."
+- "Give the inverse kinematics a special gizmo ... (also add the option to remove FK/IK systems) ... like blender and
+  maya."
+- "For auto-rig ... make them different colors to indicate different parts of the body ... transfer to different
+  orthographic views."
+- "Select multiple keyframes in the animation block (drag select) ... x,y,z in the same frame and then expand as
+  needed."
+
+**Added**
+- **Character roots** (0065): GameObject > Armature on a mesh, Add Armature (Skin) and the auto-rig put the mesh and its
+  Armature inside "<mesh> Rig" in the mesh's old place; the Animation window and the Sequencer animate that root.
+- **Bone handles and Extrude** (0066): a selected bone's tail handle (and Shift+drag on its head) aims and stretches it,
+  children staying put, the result its rest pose; Extrude (Ctrl+E / E) grows a bone from the tip that follows the mouse
+  until a click (Esc cancels). Console `bone head|tail|extrude`.
+- **Rig controls** (0067, ADR 0031): the Rig Control component (Circle, Square, Box, Diamond, Sphere, Arrows, Cross,
+  Root) drawn as wire over the scene, coloured by side (left blue, right red, middle yellow). IK targets are boxes,
+  poles diamonds with a dashed line to their joint; IK's bones are tinted. FK controls (circles that turn their bones).
+  Remove IK, Add / Remove FK Controls; console `ik remove`, `fk add|remove`.
+- **Auto-rig** (0068): markers coloured by body part; Front / Left / Right / Back / Top views (`autorig view`), a
+  dragged marker keeping its depth away from the front view.
+- **Keyframes** (0069): the dopesheet groups a vector's axes in one row that unfolds; a group diamond selects and moves
+  all its axes' keys; box select takes every diamond it touches, lights them while dragging, Shift adds, Ctrl removes;
+  dragged keys show where they will land.
+- Learn: "A character's root", "Bone heads, tails and Extrude", "Rig controls: IK and FK", "Auto-rig colours and
+  views".
+
+**Checked**
+- New tests (rounds 89-94): the rig root's shape and place (in a group and at the scene's top level), undo; the skin
+  following the root; Add Armature (Skin) nesting and leaving a shared skeleton; tail and head drags (children kept, rest
+  pose, one step, a half-scale armature); Extrude kept (one step) and cancelled (no step, no bone); IK controls' shapes
+  and sides (including ".L" names), Remove IK (one step, a user's object kept); FK turning its bone, a click on its wire,
+  Remove FK, FK refused on IK bones, Reset Pose with FK, an idle solve; marker colours; view switching; a side-view drag
+  keeping depth; grouped rows, a group diamond's move, a thin box, Ctrl box.
+- Unit checks: Windows 9,873, 0 failed (654 tests); the whole suite in render-cache verify mode: 9,874,
+  0 failed, 0 stale pictures. Linux with libraries: 9,781, 0 failed. Sanitizer build: 9,698, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- The bone handles were drawn before the picture and painted over.
+- An extrude made an undo step per frame (and Esc left steps).
+- Remove IK could delete a user's object used as a target.
+- FK on an IK bone redrew the editor forever.
+- Reset Pose was undone by FK controls next frame.
+- The side and top views moved dragged markers to the wrong depth.
+- A scaled armature's tail landed away from the mouse.
+- Also: the head handle took the gizmo's centre (now Shift), roll drift and the grab offset, a stale bone drag across
+  scenes, shortcuts and right-click fly during an extrude, the rig root's place at the scene's top level, wrapping an
+  import's mesh again, any single-child parent taken as a root, Create Child > Armature's meaning, ".L" control
+  names, a misspelt `fk remove` name, disabled controls drawn and picked, FK lookups by name every frame.
+
+## 2026-10-14 (round 88): typed object and asset fields, Unity's "None (Armature)" (task 0064)
+
+**Asked:** "Add the ability to drop objects from hierarchy into parameter fields in the inspector and not just rely on
+the name of an object (and indicate type just like unity3d), like armature parameter into skin under Rigging … such as
+armature, animation, sequencer etc."
+
+**Added**
+- **Object fields know their type** (`Reflector::object(name, value, type)`):
+  - Shown as Unity's object field: the type's icon and "Armature (Armature)", or "None (Armature)" when empty; yellow
+    when the object is missing or of the wrong kind.
+  - Dragging an object of another kind over a field turns it red, and the drop is refused with a Console line.
+  - The ⊙ picker at the field's right lists None and the scene's objects of that kind.
+  - Clicking the field still types a name.
+  - Typed fields:
+    - Skin Armature (Armature)
+    - Lattice Object (Lattice)
+    - Curve and Array Curve (Curve)
+    - Boolean and Mesh Deform Object (a mesh)
+    - Transfer Weights From (a mesh)
+    - IK Target and Pole take any object.
+- **Asset fields** (`Reflector::asset(name, path, ext, kind)`):
+  - The Animation's Clip (.anim) and the Sequencer's Sequence (.seq) take a file dragged from the Project window, and
+    refuse another kind.
+  - Their picker lists the project's files of that kind.
+- Learn: "Typed fields and asset fields" in the Inspector lesson.
+
+**Changed**
+- A press on a file in the Project window that turns into a drag no longer selects the file, so the Inspector stays on
+  the object whose field you're filling. A click selects it when the button comes up.
+
+**Checked**
+- New tests (round 88):
+  - A Skin's Armature field refuses a Sphere and takes the Armature (one undo step), and shows "None (Armature)" then
+    "Armature (Armature)".
+  - The picker lists None and the armature but not the Sphere; picking None is an undo step of its own.
+  - A .anim dragged from the Project window fills an Animation's Clip, a .seq is refused, the object stays selected,
+    undo empties it, and a click on a file still selects it.
+- Unit checks: Windows 9,795, 0 failed (643 tests); the whole suite in render-cache verify mode: 9,796,
+  0 failed, 0 stale pictures. Linux with libraries: 9,703, 0 failed. Sanitizer build: 9,620, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- A field's help tooltip (and the picker's) never showed: the picker had become the last widget.
+- The asset picker walked the project's folders every frame while open; it now reads them once, as it opens.
+- Each asset field checked the disk every frame; now once a second.
+- A pick whose field wasn't drawn the next frame could apply much later.
+- A fast press-move-release on a file selected it before seeing the drag.
+- The missing type icon.
+
 ## 2026-10-13 (round 87): switch the editor's feel: Unity, Unreal, Blender or Maya (task 0063)
 
 **Asked:** "Switch the editor's feel between Unity / Unreal / Blender / Maya". The user chose keys and mouse navigation
@@ -50,7 +505,7 @@ only.
 - Maya's plain MMB panned.
 - The Learn answer about RMB, and the prefs test's path.
 
-: a Premiere-style clip sequencer instead of a state machine (task 0062, ADR 0030)
+## 2026-10-13 (round 86): a Premiere-style clip sequencer instead of a state machine (task 0062, ADR 0030)
 
 **Asked:** "A clip editor like Premiere Pro to go between animation clips instead of using a state machine"; for Play,
 the user chose "a timeline plus triggers".
@@ -116,7 +571,7 @@ the user chose "a timeline plus triggers".
 - A bad `.seq` was read again every frame.
 - The stress test's clips stayed loaded after their files went.
 
-: the animation curve editor, Unity's Curves view (task 0061, ADR 0029 amended)
+## 2026-10-13 (round 85): the animation curve editor, Unity's Curves view (task 0061, ADR 0029 amended)
 
 **Asked:** "Start on the later list": first the curve editor for the keyframe animation of task 0059.
 

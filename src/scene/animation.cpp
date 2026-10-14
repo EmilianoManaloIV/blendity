@@ -469,7 +469,7 @@ float wrap_frame(float frame, float end, int wrap) {
 /* ---------------------------------------------------------------- the component */
 
 void Animation::reflect(Reflector &r) {
-  r.text("Clip", clip);
+  r.asset("Clip", clip, ".anim", "Animation Clip");
   r.help("The .anim clip it plays (Assets/Animations). Make and edit clips in the Animation window (Window > Animation).");
   r.field("Play Automatically", play_automatically);
   r.help("Starts playing when Play starts (Unity: Play Automatically).");
@@ -487,6 +487,7 @@ void Animation::start(PlayContext &) {
 void Animation::update(PlayContext &ctx) {
   if (!playing || !owner) return;
   if (const Sequencer *s = owner->get<Sequencer>(); s && s->enabled && sequence_asset(s->sequence)) return;  // (a sequence plays the clips: ADR 0030)
+  if (ctx.scene && ctx.scene->director && scene_sequence_drives(*ctx.scene, *owner)) return;  // (the scene's sequence has it, task 0070)
   const AnimationClipPtr c = clip_asset(clip);
   if (!c) return;
   time += ctx.dt * speed;

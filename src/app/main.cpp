@@ -2,12 +2,13 @@
 // Blendity entry point.
 //
 //   Blendity                       open the editor
-//   Blendity --scene file.scene    open a scene
+//   Blendity --scene file.scene    open a scene (or Blendity file.scene: a double-clicked file, with its project)
 //   Blendity --layout Learning     start with a layout preset
 //   Blendity --scale 1.5           force a UI scale
 //   Blendity --headless-screenshot out.png [--size 1600x900] [--cmd "console command"]...  [--click X Y]...
 //       renders the editor without a window (CI, docs, visual tests)
 #include "../core/core.h"
+#include "../core/launch.h"
 #include "../editor/editor.h"
 #include "../render/gpu_device.h"
 
@@ -82,6 +83,13 @@ static int headless(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+  std::vector<std::string> utf8 = sys::utf8_arguments();  // (Windows: the wide command line; elsewhere empty)
+  std::vector<char *> utf8_ptrs;
+  for (std::string &a : utf8) utf8_ptrs.push_back(&a[0]);
+  if (!utf8_ptrs.empty()) argc = (int)utf8_ptrs.size(), argv = utf8_ptrs.data();
+  /* The dependency-free Blendity hands over to Blendity-full when its libraries load and the user wants them (task
+   * 0080); `--probe` is that check, answered by the full build. */
+  if (const int code = launch::hand_over(argc, argv); code >= 0) return code;
   for (int i = 1; i < argc; i++)
     if (std::strcmp(argv[i], "--headless-screenshot") == 0) return headless(argc, argv);
   int code = 0;

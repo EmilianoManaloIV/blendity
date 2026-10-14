@@ -37,6 +37,8 @@
 #include "../scene/skin_weights.h"
 #include "ui.h"
 
+#include <atomic>
+#include "../core/releases.h"
 #include <functional>
 #include <thread>
 #include <tuple>
@@ -48,6 +50,9 @@
 #include <vector>
 
 namespace bl {
+
+/* FFmpeg's arguments to make an MP4 of numbered PNGs (task 0074). */
+std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out);
 
 /* A key with modifiers (platform::Mod bits): one binding of a shortcut. */
 struct KeyChord {
@@ -206,6 +211,7 @@ struct AnimEditorState {
   double play_clock = 0.0;
   float play_from = 0.0f;
   std::vector<std::pair<int, float>> selected;  // (track, key frame)
+  std::set<std::string> expanded;  // the dopesheet's unfolded groups ("path|property", task 0069)
   std::vector<std::pair<uint64_t, Transform>> saved_pose;  // every object's transform before Preview (put back after)
   std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;  // the animated component numbers likewise
   std::unordered_map<std::string, float> shown;  // each animated number as last shown (Record compares with it)
@@ -258,6 +264,7 @@ struct AutoRigSession {
   std::vector<std::string> order;  // the ones placed by hand, in order (Remove Last)
   bool symmetry = true;
   std::string dragging;  // a marker being dragged in the Scene view
+  std::string view = "Front";  // the orthographic view placing in (task 0068): Front, Back, Left, Right, Top
 };
 
 /* A skin-weight solve (task 0057): a copy of the mesh in, its new groups out, on a worker thread when the mesh is
@@ -570,6 +577,17 @@ class Editor {
     return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   const ui::Context &ui_for_test() const { return ui_; }
+  bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  void show_update_for_test(const std::string &json, const std::string &tag) {
+    upd_.list = releases::parse(json);
+    upd_.selected = tag;
+    dialog_ = Dialog::Update;
+  }
+  const std::string &update_skip_for_test() const { return update_skip_; }
+  bool show_libraries_for_test(const std::string &json) {
+    upd_.list = releases::parse(json);
+    return offer_libraries();
+  }
   void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
   /* Preferences in a headless test: written to and read from `path` (never the user's). */
   void prefs_for_test(const std::string &path) {
@@ -642,7 +660,93 @@ class Editor {
     return (hier_dragging_ && hier_drag_ && (ui_.in.down[0] || ui_.in.released[0])) ? scene_->find(hier_drag_) : nullptr;
   }
   void object_field_took_drop() { hier_field_took_drop_ = true; }
-  bool object_field(const char *name, const Recti &f, std::string &v);  // panels.cpp
+  /* Unity's object field (task 0064, panels.cpp): "Robot (Armature)" / "None (Armature)", a typed name, a Hierarchy
+   * drop of the right kind, the picker. `type` a component name, nullptr for any object. */
+  bool object_field(const char *name, const Recti &f, std::string &v, const char *type = nullptr);
+  bool asset_field(const char *name, const Recti &f, std::string &path, const char *ext, const char *kind);
+  bool object_field_box(ui::Id id, const Recti &box, std::string &v, const std::string &shown, const std::string &none, bool bad, ui::Icon icon);
+  bool object_field_picked(ui::Id id, std::string &v);  // a picker's choice from last frame, for this field
+  bool picker_button(const Recti &r);                   // Unity's object picker (a ring and a dot)
+  /* Reordering a stack by dragging its headers (task 0071, stack_drag.cpp). */
+  struct StackDrag {
+    std::string list;  // which list: "mods:<id>", "filters:<id>", "layers:<path>", "tracks"
+    int from = -1, x0 = 0, y0 = 0;
+    bool pending = false, active = false;
+    bool *folded = nullptr;                    // the dragged item's fold flag (a press on its name flipped it)
+    std::vector<std::pair<int, Recti>> rows;   // the list's items drawn this frame
+    uint64_t frame = 0;                        // the last frame the list was drawn
+  } stack_drag_;
+  void stack_drag_forget_stale();
+  void stack_drag_cancel();
+  void stack_drag_item(const std::string &list, int index, const Recti &grab, const Recti &whole, bool *folded = nullptr);
+  bool stack_drag_end(const std::string &list, int &from, int &to);
+  void draw_stack_drag(int line_y);
+  struct FieldPick {
+    ui::Id field = 0;
+    std::string value;
+    int age = 0;  // frames since it was picked: a field not drawn the next frame lets it go
+  } field_pick_;  // the picker's choice, taken by its field when it draws next
+  std::vector<std::string> asset_pick_files_;  // an asset picker's list, read as it opens
+  std::unordered_map<std::string, std::pair<bool, double>> asset_exists_cache_;
+  bool asset_file_exists(const std::string &path);
+  std::string project_selected_for_test() const { return project_selected_; }
+  /* Task 0065: a character's root, as Unity lays out an imported humanoid: "<mesh> Rig" holding the mesh and its
+   * Armature. rig_root_of finds the one `g` is in (an object with an Armature child), wrap_in_rig_root makes one. */
+  GameObject *rig_root_of(GameObject *g) const;
+  std::string theme_name_ = "Dark";
+  void set_theme(const std::string &name, bool save = true);
+  void touch_navigate(float k_pan);  // task 0075
+  const std::string &theme_name_for_test() const { return theme_name_; }
+  int retile_texture_users(const std::string &asset_path, float from, float to);  // task 0072
+  std::vector<std::pair<MaterialPtr, bool>> texture_followers(const std::string &asset_path, float from);
+  std::unordered_map<std::string, std::vector<std::pair<MaterialPtr, bool>>> retile_followers_;  // this undo step's
+  /* Task 0068: the auto-rig's markers coloured by body part, and its views. */
+  uint32_t autorig_marker_color(const std::string &marker, int state) const;  // state 0 unplaced, 1 placed, 2 mirrored twin
+  bool autorig_set_view(const std::string &view);
+  /* Task 0067 (rig_controls.cpp): rig controls drawn and picked, IK and FK added and removed. */
+  void rig_control_segments(const GameObject &g, const RigControl &rc, std::vector<std::pair<Vec3, Vec3>> &out) const;
+  uint32_t rig_control_color(const GameObject &g, const RigControl &rc) const;
+  void draw_rig_control(const GameObject &g, const RigControl &rc);
+  const GameObject *pole_joint(const GameObject &pole) const;
+  float rig_control_distance(const Recti &view, const GameObject &g, const RigControl &rc, int mx, int my) const;
+  std::unordered_set<uint64_t> ik_driven_bones() const;
+  std::unordered_set<uint64_t> ik_bones_frame_;  // this frame's IK-driven bones (drawn tinted)
+  bool remove_ik(GameObject *bone);
+  bool ik_names_object(const std::string &name) const;
+  int add_fk_controls(const std::vector<GameObject *> &bones);
+  GameObject *fk_control_of(const GameObject &bone) const;
+  int remove_fk_controls(const std::vector<GameObject *> &bones);
+  void fk_controls_follow_bones(GameObject *root);  // the FK controls of bones below `root` turned to their bones
+  std::vector<GameObject *> selected_bones();
+  bool rig_control_command(const std::vector<std::string> &t);
+  void rig_control_segments_for_test(const GameObject &g, std::vector<std::pair<Vec3, Vec3>> &out) const { rig_control_segments(g, *g.get<RigControl>(), out); }
+  /* Task 0066 (bone_edit.cpp): the selected bone's head and tail handles, Extrude, the console's bone head|tail|extrude. */
+  struct BoneDrag {
+    uint64_t bone = 0;
+    int end = 1;         // 0 the head, 1 the tail
+    bool modal = false;  // an extruded bone's tail: follows the mouse until a click
+    Vec3 head0, tail0;   // where the ends were when it started
+    Quat rot0;           // the bone's turn when it started (the drag turns from it)
+    Vec3 offset;         // from the mouse's point to the grabbed end
+  } bone_drag_;
+  int bone_handle_hot(const Recti &view, const GameObject &g);
+  void draw_bone_handles(const Recti &view);
+  Vec3 bone_head(const GameObject &g) const;
+  Vec3 bone_tail(const GameObject &g) const;
+  GameObject *bone_edit_target();
+  void set_bone_ends(GameObject &g, Vec3 head, Vec3 tail, const Quat *base = nullptr);
+  bool bone_drag_point(const Recti &view, Vec3 p, Vec3 &out);
+  bool bone_handles_update(const Recti &view);
+  bool bone_drag_update(const Recti &view);
+  bool bone_extrude(GameObject *g);
+  void delete_bone_extruded(GameObject *g);
+  bool bone_edit_command(const std::vector<std::string> &t);
+  const BoneDrag &bone_drag_for_test() const { return bone_drag_; }
+  Vec3 bone_tail_for_test(const GameObject &g) const { return bone_tail(g); }
+  GameObject *wrap_in_rig_root(GameObject *mesh);
+  void nest_armature(GameObject *armature, GameObject *mesh);  // into the mesh's rig root, unless another mesh uses it
+  void nest_armature_for_test(GameObject *armature, GameObject *mesh) { nest_armature(armature, mesh); }
+  std::vector<std::string> asset_paths_with_ext(const std::string &ext);
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
     if (it == hierarchy_rows_.end()) return false;
@@ -785,14 +889,16 @@ class Editor {
   SequencePtr seq_new(GameObject *root, const std::string &name);
   void note_sequence_edit(Sequence &s);
   bool seq_edit(const char *label, const std::function<void(Sequence &)> &edit);
+  bool seq_move_track(int from, int to);
   void seq_apply();
   void seq_set_frame(float f);
   void seq_set_preview(bool on);
-  void seq_save_pose(GameObject &root);
+  void seq_save_pose(GameObject *root);
+  void seq_remember_new_targets(const Sequence &s);
   void seq_tick();
   void seq_reset();
   void seq_drag_cancel();
-  bool seq_add_clip(const std::string &clip, int track, float start);
+  bool seq_add_clip(const std::string &clip, int track, float start, const std::string &target = "");
   SeqInstance *seq_selected(Sequence &s, int *track = nullptr, int *index = nullptr);
   bool seq_move(const std::string &name, int track, float start);
   bool seq_trim(const std::string &name, float trim_in, float trim_out, float start);
@@ -848,13 +954,30 @@ class Editor {
   void draw_anim_add_property(GameObject *root);
   float anim_frame_at(const Recti &sheet, int x, float end) const;
   int anim_x_of(const Recti &sheet, float frame, float end) const;
-  bool anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, int &track, float &frame);
+  bool anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, std::vector<std::pair<int, float>> &keys);
   bool anim_selected(int track, float frame) const;
   void anim_sheet_input(const AnimationClip &clip, const Recti &ruler, const Recti &sheet, int row_h, float end);
   void anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end);
   void draw_animation_window(const Recti &r);
   void draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end);
   void anim_pick_curve(int track, bool add);
+  /* Task 0069: the dopesheet's rows (a vector property's axes grouped) and selecting keys by row or box. */
+  struct AnimRow {
+    std::vector<int> tracks;
+    std::string label;
+    bool group = false;
+    int depth = 0;  // 1: an axis under its group
+    std::string key;  // a group's "path|property"
+    bool open = false;
+  };
+  std::vector<AnimRow> anim_rows(const AnimationClip &clip) const;
+  std::vector<std::pair<int, float>> anim_row_keys(const AnimationClip &clip, const AnimRow &row, float frame) const;
+  std::vector<float> anim_row_frames(const AnimationClip &clip, const AnimRow &row) const;
+  bool anim_all_selected(const std::vector<std::pair<int, float>> &keys) const;
+  std::vector<std::pair<int, float>> anim_box_keys(const AnimationClip &clip, const Recti &sheet, int row_h, float end, const Recti &box) const;
+  void anim_select_key(int track, float frame, bool on);
+  void anim_add_row_key(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my);
+  void draw_anim_row_name(const AnimationClip &clip, GameObject *root, const AnimRow &row, const Recti &lr, const Recti &body, const Recti &sheet, int index);
   void anim_drag_cancel();   // a drag dropped (its clip went, the window can't draw, an undo)
   void anim_clip_changed();  // another clip (or the same one restored): drags, picked curves, the snapshot reset
   void anim_tangent_command(const std::vector<std::string> &t, AnimationClip &clip, const std::string &path, const std::string &prop, int axis, float frame);
@@ -1002,6 +1125,7 @@ class Editor {
   void edit_material_asset(const std::string &path);  // open a .mat in the Materials window
   void delete_assets_command(const std::string &cmd, const std::string &line);  // matdelete / texdelete
   void project_row_pressed(const std::string &full, const std::vector<std::string> &shown, size_t index);
+  std::string project_select_on_release_;  // a file row pressed: selected on release unless it was dragged
   std::string texture_search_;
   int texture_preview_output_ = 0;
   bool texture_preview_tiled_ = false, texture_dragging_ = false;
@@ -1026,10 +1150,46 @@ class Editor {
   } seq_;
   std::vector<GameObject *> sequence_cameras();
   void step_render_sequence();
+  /* Render > Render Animation (task 0074, render_animation.cpp): frames as PNGs, then FFmpeg's MP4. */
+  static constexpr int kVideoRunning = -1000000;
+  /* An MP4 made off the main thread: the exit code (kVideoRunning till it's done) and, from the libraries, why not. */
+  struct VideoJob {
+    std::atomic<int> code{kVideoRunning};
+    std::atomic<bool> cancel{false};  // (the editor closing)
+    std::string error;
+  };
+  struct RenderAnimation {
+    bool active = false, started = false;
+    int source = 0;  // 1 the scene's sequence, 2 the selected object's clip
+    int first = 0, last = 0, frame = 0;
+    float fps = 30.0f;
+    uint64_t root = 0;  // a clip's object
+    std::string dir, video;
+    std::vector<std::string> written;
+    std::shared_ptr<VideoJob> encode;          // the MP4 being made in the background
+    std::string encode_video;                  // the MP4 it makes
+  } ranim_;
+  std::string ffmpeg_path_;  // Preferences: FFmpeg's program (empty: the PATH's)
+  std::string ffmpeg_found_;
+  bool ffmpeg_looked_ = false;
+  const char *render_animation_broken();
+  bool render_animation_source(int &source, int &last, float &fps);
+  void step_render_animation();
+  void finish_render_animation();
+  void encode_render_video();
+  void cancel_render_video();
+  void poll_render_video();
+  void set_ffmpeg_path(const std::string &path);
+  void draw_render_animation_button(ui::Layout &lay);
   bool write_render_file(const std::string &path_without_ext, std::string *written = nullptr);
 
  public:
   bool start_render_sequence(const std::string &dir = "");
+  bool start_render_animation(int first = -1, int last = -1, float fps = 0.0f);
+  void stop_render_animation();
+  std::string ffmpeg_program();
+  void render_animation_command(const std::vector<std::string> &t);
+  const RenderAnimation &render_animation_for_test() const { return ranim_; }
   void stop_render_sequence();
   bool sequence_running() const { return seq_.active; }
   std::string render_camera_name() {
@@ -1370,7 +1530,13 @@ class Editor {
   void load_prefs();
   void save_prefs();
   void apply_ui_scale();
-  void resolve_project_paths();
+  void resolve_project_paths(const std::string &near = "");  // near: a file whose project to look for first
+
+  public:
+  static std::string find_project_root(const std::vector<std::string> &starts);
+  static std::string scene_in_args(int argc, char **argv);
+
+  private:
   std::string scene_display_name() const;
 
   /* ---- platform / frame ---- */
@@ -1410,6 +1576,7 @@ class Editor {
   void set_quality_tier(int tier);
   static int recommended_tier();  // Low on 8 threads or fewer or 8 GB or less, else High
   int shadow_resolution_for_view() const;
+  const ShadowMap *shadow_for_view(ShadowMap &m) const;
   void set_cpu_threads(int n);
   int cpu_threads() const { return cpu_threads_; }
   bool always_redraw() const { return always_redraw_; }
@@ -2104,7 +2271,55 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries } dialog_ = Dialog::None;
+  /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
+   * and an installer being downloaded. */
+  struct UpdateCheck {
+    enum { Running, Done, Failed };
+    std::atomic<int> state{Running};
+    std::string body, own, error;  // own: this build's release when the newest 100 don't include it
+  };
+  struct UpdateDownload {
+    enum { Running, Verifying, Done, Failed };
+    std::atomic<int> state{Running};
+    std::atomic<uint64_t> done{0}, total{0};
+    std::atomic<bool> cancel{false};
+    bool libraries = false;  // (Blender's libraries for the fallback, task 0080: unpacked, not installed)
+    std::string file, path, error;
+  };
+  struct UpdateState {
+    std::shared_ptr<UpdateCheck> check;
+    std::shared_ptr<UpdateDownload> download;
+    std::vector<releases::Release> list;
+    std::string offer, selected;  // tags
+    bool manual = false, history = false, want_libs = false, want_updates = false;
+  } upd_;
+  double libs_last_check_ = 0.0;  // (the libraries are asked about at most once a day)
+  static bool prepare_install(UpdateDownload &job, std::string &error);  // (on the downloading thread: no editor state)
+  void cancel_update_download();
+  bool use_libs_ = true, libs_never_ask_ = false;  // Preferences > Libraries (read by the launcher too, task 0080)
+  void check_libraries_at_start();
+  bool offer_libraries();
+  void draw_libraries_dialog(const std::function<void()> &close);
+  void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries);
+  static bool unpack_libraries(const std::string &archive, std::string &error);
+  void restart_program();
+  void draw_libraries_settings();
+  bool update_check_ = true, update_previews_ = true;  // Preferences > Updates
+  double update_last_check_ = 0.0;                     // (seconds since 1970)
+  std::string update_skip_;                            // "Skip this one"
+  void start_update_check(bool manual, bool updates = true);
+  void poll_updates();
+  void poll_update_download();
+  const releases::Release *update_release(const std::string &tag) const;
+  void draw_release_notes(const releases::Release &r, int h);
+  bool draw_update_progress();
+  void draw_update_dialog(const std::function<void()> &close);
+  void draw_history_dialog(const std::function<void()> &close);
+  void install_release(const std::string &tag);
+  void run_installer(const std::string &path);
+  void update_command(const std::vector<std::string> &t);
+  void draw_first_run_tier(const std::function<void()> &close);  // task 0075
   std::string dialog_text_;
   std::vector<std::string> dialog_files_;
 };

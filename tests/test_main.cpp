@@ -9,6 +9,10 @@
 #include "../src/render/canvas.h"
 #include "../src/render/raster.h"
 #include "../src/render/dof.h"
+#include "../src/render/video_encode.h"
+#include "../src/core/net.h"
+#include "../src/core/releases.h"
+#include "../src/core/launch.h"
 #include "../src/research/research.h"
 #include "../src/image/image.h"
 #include "../src/render/colormanagement.h"
@@ -24146,11 +24150,18 @@ static void round69_tests() {
     r34_steps(ed, 2);
     const Quat rest = s0.find_by_name("RightLowerLeg")->local().rotation;
     ed.command("play");
-    r34_steps(ed, 6);
-    GameObject *pft = ed.scene().find_by_name("RightFootIK");
+    /* Play runs on the clock: a fast machine's frames swing the target less each, so step until it has moved (CI's
+     * runner once swung it 0.009 in 6 frames). */
+    GameObject *pft = nullptr;
+    Vec3 off;
+    for (int i = 0; i < 200 && length(off) <= 0.01f; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));  // (some real time each frame, however fast the machine)
+      r34_steps(ed, 1);
+      pft = ed.scene().find_by_name("RightFootIK");
+      off = pft->world_position() - (foot + Vec3(0.15f, 0.25f, 0));
+    }
     GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
     const float err = length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - pft->world_position());
-    const Vec3 off = pft->world_position() - (foot + Vec3(0.15f, 0.25f, 0));
     std::printf("    in Play: the target swung by %.3f, the foot off it by %g\n", length(off), err);
     CHECK(length(off) > 0.01f && err < 1e-4f);
     ed.command("stop");
@@ -26444,7 +26455,8 @@ static void round81_tests() {
     const std::vector<Vec3> rest = tube->evaluated_mesh()->positions;
     ed.command("play");
     const double t0 = now_seconds();
-    while (now_seconds() - t0 < 0.6) ed.step_frame_headless();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.6) && now_seconds() - t0 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
     tube = ed.scene().find_by_name("Tube");
     float moved = 0.0f;
     for (size_t v = 0; v < rest.size(); v++) moved = std::max(moved, length(tube->evaluated_mesh()->positions[v] - rest[v]));
@@ -26920,7 +26932,7 @@ static void round81_tests() {
     std::remove(resolve_asset_path("Assets/Animations/R86Box Sequence.seq").c_str());
     std::remove(resolve_asset_path("Assets/Animations/R86Rise.anim").c_str());
     ed.command("seq new");
-    CHECK(box->get<Sequencer>() && ed.seq_for_test_sequence());
+    CHECK(!ed.scene().sequence.empty() && ed.seq_for_test_sequence());  // (the scene's sequence since task 0070)
     ed.command("seq add Assets/Animations/R86Up.anim 0 0");
     ed.step_frame_headless();
     ed.command("renameasset Assets/Animations/R86Up.anim R86Rise");
@@ -27281,8 +27293,11 @@ static void round81_tests() {
     platform::Event j = k;
     j.key = platform::KEY_J, j.mods = platform::MOD_ALT;
     ed.step_frame_headless({j});
-    const double t0 = now_seconds();  // (the view turns over 0.28 s of real time)
-    while (now_seconds() - t0 < 0.5) ed.step_frame_headless();
+    /* The view turns over 0.28 s of real time: frames until it has (a sanitizer build's frames are slow; CI once ran
+     * out of a fixed 0.5 s). */
+    const double t0 = now_seconds();
+    do ed.step_frame_headless();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.3) && now_seconds() - t0 < 20.0);
     CHECK(ed.scene_camera_for_test().ortho && std::fabs(ed.scene_camera_for_test().pitch - 90.0f) < 1.0f);
     /* The prefs keep the feel (and its keys). */
     const std::string prefs = fs::join(test_dir(), "r87_prefs.txt");
@@ -27319,5 +27334,1347 @@ static void round81_tests() {
     ed.step_frame_headless();
     std::printf("    the empty and its cube after End: cube bottom %.4f, empty at %.4f\n", cube->world_bounds().min.y, holder->world_position().y);
     CHECK(std::fabs(cube->world_bounds().min.y) < 1e-4f && holder->world_position().y > 1.0f);
+  });
+  /* ---------------------------------------------------------------- round 88: typed object and asset fields (task 0064) */
+  test("fields: a Skin's Armature field refuses a Cube dragged from the Hierarchy and takes the Armature; its picker lists only armatures", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    ed.command("create Sphere");
+    ed.command("create Cube");
+    ed.command("component SkinModifier");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube && cube->get<SkinModifier>());
+    if (!cube || !cube->get<SkinModifier>()) return;
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto drag_onto = [&](const std::string &object, const std::string &field) {
+      int hx = 0, hy = 0;
+      Recti f;
+      if (!ed.hierarchy_row_for_test(object, hx, hy) || !ed.button_rect_for_test("field:" + field, f)) return false;
+      const int fx = f.x + f.w / 3, fy = f.y + f.h / 2;
+      ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+      ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    auto shows = [&](const std::string &text) {
+      const std::vector<std::string> l = ed.button_labels_for_test();
+      return std::find(l.begin(), l.end(), "shown:" + text) != l.end();
+    };
+    CHECK(shows("None (Armature)"));
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(drag_onto("Sphere", "Armature"));
+    std::printf("    after dropping the Sphere: '%s'\n", cube->get<SkinModifier>()->object.c_str());
+    CHECK(cube->get<SkinModifier>()->object.empty() && ed.active_object_for_test() == cube);
+    CHECK(drag_onto("Armature", "Armature"));
+    std::printf("    after dropping the Armature: '%s'\n", cube->get<SkinModifier>()->object.c_str());
+    CHECK(cube->get<SkinModifier>()->object == "Armature" && ed.undo_steps_for_test() == steps + 1);  // (the refused drop: no step)
+    ed.step_frame_headless();
+    CHECK(shows("Armature (Armature)"));
+    /* The picker: None and the one armature. */
+    Recti f;
+    CHECK(ed.button_rect_for_test("field:Armature", f));
+    const int px = f.right() - f.h / 2, py = f.y + f.h / 2;
+    ed.step_frame_headless({at(ET::MouseMove, px, py)});
+    ed.step_frame_headless({at(ET::MouseDown, px, py)});
+    ed.step_frame_headless({at(ET::MouseUp, px, py)});
+    ed.step_frame_headless();
+    std::vector<std::string> items = ed.button_labels_for_test();
+    const bool none = std::find(items.begin(), items.end(), "menu:None") != items.end();
+    const bool arm = std::find(items.begin(), items.end(), "menu:Armature") != items.end();
+    const bool sphere = std::find(items.begin(), items.end(), "menu:Sphere") != items.end();
+    std::printf("    picker: None %d, Armature %d, Sphere %d\n", (int)none, (int)arm, (int)sphere);
+    CHECK(none && arm && !sphere);
+    /* Picking None empties it: one more step, which undo takes back. */
+    Recti item;
+    CHECK(ed.button_rect_for_test("menu:None", item));
+    ed.step_frame_headless({at(ET::MouseMove, item.x + 10, item.y + item.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, item.x + 10, item.y + item.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, item.x + 10, item.y + item.h / 2)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    after picking None: '%s'\n", cube->get<SkinModifier>()->object.c_str());
+    CHECK(cube->get<SkinModifier>()->object.empty() && ed.undo_steps_for_test() == steps + 2);
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *c2 = ed.scene().find(cube->id);
+    CHECK(c2 && c2->get<SkinModifier>() && c2->get<SkinModifier>()->object == "Armature");
+  });
+
+  test("fields: a .anim dragged from the Project window onto an Animation's Clip field sets it, a .seq is refused, and the object stays selected", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    std::remove(resolve_asset_path("Assets/Animations/R88Walk.anim").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R88Seq.seq").c_str());
+    clear_clip_assets();
+    clear_sequence_assets();
+    CHECK(create_clip_asset("Assets/Animations/R88Walk.anim", "R88Walk") && create_sequence_asset("Assets/Animations/R88Seq.seq", "R88Seq"));
+    ed.command("create Cube");
+    ed.command("component Animation");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube && cube->get<Animation>());
+    if (!cube || !cube->get<Animation>()) return;
+    const uint64_t cube_id = cube->id;
+    ed.command("window Project");
+    ed.command("window Inspector");
+    ed.project_open_folder_for_test(resolve_asset_path("Assets/Animations"), "R88");  // (earlier runs leave many clips there)
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    auto at = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto drag_file = [&](const std::string &file) {
+      Recti row, f;
+      if (!ed.button_rect_for_test("file:" + file, row) || !ed.button_rect_for_test("field:Clip", f)) {
+        std::printf("    no row '%s' or field; recorded:", file.c_str());
+        for (const std::string &l : ed.button_labels_for_test())
+          if (l.rfind("file:", 0) == 0 || l.rfind("field:", 0) == 0) std::printf(" [%s]", l.c_str());
+        std::printf("\n");
+        return false;
+      }
+      const int x0 = row.x + row.w / 2, y0 = row.y + row.h / 2, fx = f.x + f.w / 3, fy = f.y + f.h / 2;
+      ed.step_frame_headless({at(ET::MouseMove, x0, y0)});
+      ed.step_frame_headless({at(ET::MouseDown, x0, y0)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, x0 + (fx - x0) * k / 4, y0 + (fy - y0) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+      ed.step_frame_headless();
+      return true;
+    };
+    CHECK(drag_file("R88Seq.seq"));
+    CHECK(cube->get<Animation>()->clip.empty() && ed.active_object_for_test() == cube);
+    CHECK(drag_file("R88Walk.anim"));
+    std::printf("    the Clip after the drop: '%s'; the Cube still selected: %d\n", cube->get<Animation>()->clip.c_str(), (int)(ed.active_object_for_test() == cube));
+    CHECK(cube->get<Animation>()->clip == "Assets/Animations/R88Walk.anim" && ed.active_object_for_test() == cube);
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *after = ed.scene().find(cube_id);  // (by id: the sample scene has a Cube of its own)
+    const Animation *an = after ? after->get<Animation>() : nullptr;
+    std::printf("    after undo: cube %d, Animation %d, clip '%s'\n", (int)(after != nullptr), (int)(an != nullptr), an ? an->clip.c_str() : "-");
+    CHECK(an && an->clip.empty());  // (the drop alone undone)
+    /* A plain click on a file row still selects it (on release). */
+    Recti row;
+    CHECK(ed.button_rect_for_test("file:R88Walk.anim", row));
+    ed.step_frame_headless({at(ET::MouseMove, row.x + 10, row.y + row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, row.x + 10, row.y + row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, row.x + 10, row.y + row.h / 2)});
+    ed.step_frame_headless();
+    CHECK(ed.active_object_for_test() == nullptr && ed.project_selected_for_test() == resolve_asset_path("Assets/Animations/R88Walk.anim"));
+  });
+  /* ---------------------------------------------------------------- round 89: armatures nested as Unity's humanoids (task 0065) */
+  test("rig nesting: GameObject > Armature on a selected mesh puts mesh and Armature in '<mesh> Rig'; moving the root moves both; undo puts the mesh back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *group = ed.scene().create("R89Group");
+    ed.scene().create("R89First", group);
+    GameObject *body = ed.scene().create("R89Body", group);
+    MeshFilter *mf = body->add<MeshFilter>();
+    mf->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+    body->add<MeshRenderer>();
+    body->set_world_position({2, 0, 1});
+    ed.select_for_test(body->id, false);
+    ed.mark_changed_for_test("body");
+    ed.step_frame_headless();
+    const size_t index_before = 1;
+    ed.command("create Armature");
+    ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("R89Body Rig");
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    std::printf("    rig %d, its parent %s, children: %zu\n", (int)(rig != nullptr), rig && rig->parent ? rig->parent->name.c_str() : "-", rig ? rig->children.size() : 0);
+    CHECK(rig && rig->parent == group && group->children.size() == 2 && group->children[index_before] == rig);
+    CHECK(rig && body->parent == rig && arm && arm->parent == rig);
+    CHECK(length(body->world_position() - Vec3(2, 0, 1)) < 1e-4f && length(rig->world_position() - Vec3(2, 0, 1)) < 1e-4f);
+    CHECK(body->get<SkinModifier>() && body->get<SkinModifier>()->object == arm->name);
+    /* Moving the root moves mesh and skeleton together: the skinned mesh is the rest shape, moved. */
+    const Vec3 v0 = body->world_matrix().point(body->evaluated_mesh()->positions[0]);
+    rig->set_world_position({5, 0, 1});
+    ed.mark_changed_for_test("move rig");
+    ed.step_frame_headless();
+    const Vec3 v1 = body->world_matrix().point(body->evaluated_mesh()->positions[0]);
+    std::printf("    a vertex moved by (%.4f, %.4f, %.4f) for the root's (3, 0, 0)\n", v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+    CHECK(length((v1 - v0) - Vec3(3, 0, 0)) < 1e-3f);
+    /* A second armature on the same mesh goes into the same root. */
+    ed.select_for_test(body->id, false);
+    ed.step_frame_headless();
+    ed.command("create Armature");
+    ed.step_frame_headless();
+    GameObject *arm2 = ed.scene().find_by_name("Armature.001");
+    CHECK(arm2 && arm2->parent == rig && !ed.scene().find_by_name("R89Body Rig.001"));
+    /* Undo both armatures: the mesh is back in the group at its place, no root. */
+    ed.command("undo");
+    ed.command("undo");
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *b = ed.scene().find_by_name("R89Body");
+    GameObject *g = ed.scene().find_by_name("R89Group");
+    CHECK(b && g && b->parent == g && g->children.size() == 2 && g->children[index_before] == b && !ed.scene().find_by_name("R89Body Rig"));
+  });
+
+  test("rig nesting: Add Armature (Skin) moves an unused armature into the mesh's rig root, but leaves one another mesh uses", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    auto mesh = [&](const char *name) {
+      GameObject *g = ed.scene().create(name);
+      g->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+      g->add<MeshRenderer>();
+      return g;
+    };
+    GameObject *a = mesh("R89A"), *b = mesh("R89B");
+    ed.command("create Armature");  // (nothing selected: at the scene root)
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    CHECK(arm && !arm->parent);
+    ed.step_frame_headless();
+    /* The rigging window's button: through nest_armature, as the button does. */
+    a->add<SkinModifier>()->object = arm->name;
+    ed.nest_armature_for_test(arm, a);
+    CHECK(arm->parent && arm->parent->name == "R89A Rig" && a->parent == arm->parent);
+    /* B uses it too: a fresh unparented skeleton used by A stays put. */
+    GameObject *arm2 = ed.scene().create("Skeleton2");
+    arm2->add<Armature>();
+    a->get<SkinModifier>()->object = "Skeleton2";
+    b->add<SkinModifier>()->object = "Skeleton2";
+    ed.nest_armature_for_test(arm2, b);
+    CHECK(!arm2->parent && !b->parent);
+  });
+  /* ---------------------------------------------------------------- round 90: bone head/tail handles and extrude (task 0066) */
+  test("bones: dragging a bone's tail handle re-aims and lengthens it, its child stays put and the result is the rest pose; the head handle keeps the tail", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.command("bone add Bone 0.5");
+    GameObject *child = ed.scene().find_by_name("Bone.001");
+    CHECK(child != nullptr);
+    if (!child) return;
+    const Vec3 child_at = child->world_position();
+    ed.select_for_test(bone->id, false);
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti tail;
+    CHECK(ed.button_rect_for_test("bone_tail", tail));
+    const Vec3 head = bone->world_position(), tail0 = ed.bone_tail_for_test(*bone);
+    const size_t steps = ed.undo_steps_for_test();
+    platform::Event m, d, mv, u;
+    m.type = mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    const int tx = tail.x + 4, ty = tail.y + 4;
+    m.x = d.x = tx, m.y = d.y = ty, mv.x = u.x = tx + 80, mv.y = u.y = ty + 10;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    const Vec3 tail1 = ed.bone_tail_for_test(*bone);
+    std::printf("    tail (%.2f %.2f %.2f) -> (%.2f %.2f %.2f); head moved %.5f; child moved %.5f; length %.3f\n", tail0.x, tail0.y, tail0.z, tail1.x,
+                tail1.y, tail1.z, length(bone->world_position() - head), length(child->world_position() - child_at), bone->get<Bone>()->length);
+    CHECK(length(tail1 - tail0) > 0.1f && length(bone->world_position() - head) < 1e-4f);
+    CHECK(length(child->world_position() - child_at) < 1e-4f);
+    CHECK(std::fabs(bone->get<Bone>()->length - length(tail1 - head)) < 1e-4f);
+    CHECK(length(bone->get<Bone>()->rest_position - bone->local().position) < 1e-5f);  // the edit is the rest
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    /* The head, by the console: the tail stays. */
+    ed.command(strprintf("bone head Bone %g %g %g", head.x, head.y + 0.25f, head.z));
+    CHECK(length(ed.bone_tail_for_test(*bone) - tail1) < 1e-4f && length(bone->world_position() - (head + Vec3(0, 0.25f, 0))) < 1e-4f);
+    ed.command("undo");
+    ed.command("undo");
+    ed.step_frame_headless();
+    bone = ed.scene().find_by_name("Bone");
+    CHECK(bone && length(ed.bone_tail_for_test(*bone) - tail0) < 1e-4f);
+  });
+
+  test("bones: Extrude (Ctrl+E in Unity's keys, E in Blender's) grows a bone from the tip whose tail follows the mouse; a click keeps it, Esc takes it away", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.select_for_test(bone->id, false);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto ev = [](platform::EventType t, int x, int y, int key = 0, int mods = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key, e.mods = mods;
+      return e;
+    };
+    using ET = platform::EventType;
+    const size_t before = ed.scene().object_count();
+    ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_E, platform::MOD_CTRL)});
+    CHECK(ed.scene().object_count() == before + 1 && ed.bone_drag_for_test().modal);
+    GameObject *grown = ed.active_object_for_test();
+    CHECK(grown && grown->parent == bone);
+    if (!grown) return;
+    const Vec3 tip = ed.bone_tail_for_test(*bone);
+    CHECK(length(grown->world_position() - tip) < 1e-4f);
+    ed.step_frame_headless({ev(ET::MouseMove, cx + 120, cy - 60)});
+    const Vec3 t1 = ed.bone_tail_for_test(*grown);
+    ed.step_frame_headless({ev(ET::MouseDown, cx + 120, cy - 60)});
+    ed.step_frame_headless({ev(ET::MouseUp, cx + 120, cy - 60)});
+    ed.step_frame_headless();
+    std::printf("    the new bone's tail followed the mouse to (%.2f %.2f %.2f); kept: %d\n", t1.x, t1.y, t1.z, (int)!ed.bone_drag_for_test().modal);
+    CHECK(!ed.bone_drag_for_test().modal && ed.scene().object_count() == before + 1 && length(ed.bone_tail_for_test(*grown) - t1) < 1e-4f);
+    /* Again, then Esc: no new bone. */
+    ed.select_for_test(grown->id, false);
+    ed.step_frame_headless();
+    ed.step_frame_headless({ev(ET::KeyDown, cx + 120, cy - 60, platform::KEY_E, platform::MOD_CTRL)});
+    CHECK(ed.scene().object_count() == before + 2);
+    ed.step_frame_headless({ev(ET::KeyDown, cx + 120, cy - 60, platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(ed.scene().object_count() == before + 1 && !ed.bone_drag_for_test().bone);
+  });
+  /* ---------------------------------------------------------------- round 91: rig controls, IK and FK (task 0067) */
+  auto quat_dot = [](Quat a, Quat b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; };
+  test("rig controls: Add IK gives a box target and a diamond pole coloured by side; Remove IK takes the constraint, target and pole in one step", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    ed.command("bone add Bone 1");
+    GameObject *shin = ed.scene().find_by_name("Bone.001");
+    CHECK(shin != nullptr);
+    if (!shin) return;
+    ed.scene().find_by_name("Bone")->name = "LeftThigh";
+    shin->name = "LeftShin";
+    ed.command("ik add LeftShin");
+    ed.step_frame_headless();
+    const IKConstraint *ik = shin->get<IKConstraint>();
+    CHECK(ik != nullptr);
+    if (!ik) return;
+    GameObject *target = ed.scene().find_by_name(ik->target), *pole = ed.scene().find_by_name(ik->pole);
+    CHECK(target && pole && target->get<RigControl>() && pole->get<RigControl>());
+    if (!target || !pole) return;
+    CHECK(target->get<RigControl>()->shape == RigControl::Box && target->get<RigControl>()->role == RigControl::IKTarget);
+    CHECK(pole->get<RigControl>()->shape == RigControl::Diamond && pole->get<RigControl>()->role == RigControl::IKPole);
+    std::printf("    target '%s' side %d, pole '%s' side %d (2 = Left)\n", target->name.c_str(), rig_control_side(*target, *target->get<RigControl>()),
+                pole->name.c_str(), rig_control_side(*pole, *pole->get<RigControl>()));
+    CHECK(rig_control_side(*target, *target->get<RigControl>()) == RigControl::Left);
+    const size_t steps = ed.undo_steps_for_test(), objects = ed.scene().object_count();
+    ed.command("ik remove LeftShin");
+    ed.step_frame_headless();
+    CHECK(!shin->get<IKConstraint>() && ed.scene().object_count() == objects - 2 && ed.undo_steps_for_test() == steps + 1);
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *s2 = ed.scene().find_by_name("LeftShin");
+    CHECK(s2 && s2->get<IKConstraint>() && ed.scene().object_count() == objects);
+  });
+
+  test("rig controls: an FK circle turns its bone as it turns, a click on its wire selects it, and Remove FK Controls leaves the bone as posed", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.command("fk add Bone");
+    ed.step_frame_headless();
+    GameObject *ctl = ed.scene().find_by_name("BoneFK");
+    CHECK(ctl && ctl->get<RigControl>() && ctl->get<RigControl>()->role == RigControl::FK && ctl->get<RigControl>()->drives == "Bone");
+    if (!ctl) return;
+    CHECK(length(ctl->world_position() - bone->world_position()) < 1e-4f);
+    ctl->set_local_rotation(ctl->local().rotation * Quat::axis_angle(Vec3(0, 0, 1), 0.5f));
+    ed.mark_changed_for_test("turn FK");
+    ed.step_frame_headless();
+    std::printf("    the control and the bone after turning the control: dot %.6f\n", std::fabs(quat_dot(ctl->world_rotation(), bone->world_rotation())));
+    CHECK(std::fabs(quat_dot(ctl->world_rotation(), bone->world_rotation())) > 0.9999f);
+    /* A click on the circle's wire selects the control. */
+    std::vector<std::pair<Vec3, Vec3>> segs;
+    ed.rig_control_segments_for_test(*ctl, segs);
+    int x = 0, y = 0;
+    CHECK(!segs.empty() && ed.screen_of_for_test(segs[3].first, x, y));
+    ed.command("select Main Camera");  // (not the bone: its gizmo would sit on the circle and take the click)
+    ed.step_frame_headless();
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    std::printf("    clicked the circle: active '%s'\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "-");
+    CHECK(ed.active_object_for_test() == ctl);
+    const Quat posed = bone->world_rotation();
+    ed.command("fk remove Bone");
+    ed.step_frame_headless();
+    CHECK(!ed.scene().find_by_name("BoneFK") && std::fabs(quat_dot(bone->world_rotation(), posed)) > 0.9999f);
+  });
+  /* ---------------------------------------------------------------- round 92: the auto-rig's colours and views (task 0068) */
+  test("auto-rig: markers are coloured by body part (left blue, right red, middle yellow, tail purple) and the placing view switches", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    auto rgb = [](uint32_t c) { return std::array<int, 3>{(int)((c >> 16) & 255), (int)((c >> 8) & 255), (int)(c & 255)}; };
+    auto bluest = [&](uint32_t c) { auto v = rgb(c); return v[2] > v[0] && v[2] > v[1]; };
+    auto reddest = [&](uint32_t c) { auto v = rgb(c); return v[0] > v[1] + 60 && v[0] > v[2] + 60; };
+    auto yellow = [&](uint32_t c) { auto v = rgb(c); return v[0] > 200 && v[1] > 180 && v[2] < 120; };
+    CHECK(bluest(ed.autorig_marker_color("LeftWrist", 1)) && bluest(ed.autorig_marker_color("FrontLeftPaw", 1)));
+    CHECK(reddest(ed.autorig_marker_color("RightKnee", 1)) && reddest(ed.autorig_marker_color("HindRightHock", 1)));
+    CHECK(yellow(ed.autorig_marker_color("Chin", 1)) && yellow(ed.autorig_marker_color("Withers", 1)));
+    const auto tail = rgb(ed.autorig_marker_color("TailTip", 1));
+    CHECK(tail[0] > tail[1] && tail[2] > tail[1]);  // purple
+    /* A twin is lighter than the hand-placed marker, an unplaced one darker. */
+    auto sum = [&](uint32_t c) { auto v = rgb(c); return v[0] + v[1] + v[2]; };
+    CHECK(sum(ed.autorig_marker_color("LeftWrist", 2)) > sum(ed.autorig_marker_color("LeftWrist", 1)) &&
+          sum(ed.autorig_marker_color("LeftWrist", 0)) < sum(ed.autorig_marker_color("LeftWrist", 1)));
+    /* Views: start on a mesh, switch to the left side and the top. */
+    ed.command("create Cylinder");
+    ed.command("autorig humanoid");
+    CHECK(ed.autorig_for_test().active && ed.autorig_for_test().view == "Front");
+    ed.command("autorig view left");
+    const double t0 = now_seconds();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.5) && now_seconds() - t0 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
+    std::printf("    after 'autorig view left': view %s, yaw %.1f, ortho %d\n", ed.autorig_for_test().view.c_str(), ed.scene_camera_for_test().yaw,
+                (int)ed.scene_camera_for_test().ortho);
+    CHECK(ed.autorig_for_test().view == "Left" && std::fabs(std::remainder(ed.scene_camera_for_test().yaw - 90.0f, 360.0f)) < 1.0f && ed.scene_camera_for_test().ortho);
+    ed.command("autorig view top");
+    const double t1 = now_seconds();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t1 < 0.5) && now_seconds() - t1 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
+    CHECK(ed.autorig_for_test().view == "Top" && ed.scene_camera_for_test().pitch > 80.0f);
+    ed.command("autorig view sideways");  // (refused)
+    CHECK(ed.autorig_for_test().view == "Top");
+  });
+  test("rigging: an extrude is one undo step on its click and none after Esc; a scaled armature's tail lands where it's put; a rig at the scene root keeps its place", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    GameObject *bone = ed.scene().find_by_name("Bone");
+    CHECK(bone != nullptr);
+    if (!bone) return;
+    ed.select_for_test(bone->id, false);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Recti r = ed.scene_rect_for_test();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    auto ev = [](platform::EventType t, int x, int y, int key = 0, int mods = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.key = key, e.mods = mods;
+      return e;
+    };
+    using ET = platform::EventType;
+    const size_t steps = ed.undo_steps_for_test(), objects = ed.scene().object_count();
+    ed.step_frame_headless({ev(ET::MouseMove, cx, cy)});
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_E, platform::MOD_CTRL)});
+    for (int k = 1; k <= 10; k++) ed.step_frame_headless({ev(ET::MouseMove, cx + 8 * k, cy - 4 * k)});
+    ed.step_frame_headless({ev(ET::KeyDown, cx + 80, cy - 40, platform::KEY_ESCAPE)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    after Esc: %zu undo steps more, %zu objects more\n", ed.undo_steps_for_test() - steps, ed.scene().object_count() - objects);
+    CHECK(ed.undo_steps_for_test() == steps && ed.scene().object_count() == objects);
+    ed.select_for_test(bone->id, false);
+    ed.step_frame_headless();
+    ed.step_frame_headless({ev(ET::KeyDown, cx, cy, platform::KEY_E, platform::MOD_CTRL)});
+    for (int k = 1; k <= 10; k++) ed.step_frame_headless({ev(ET::MouseMove, cx + 8 * k, cy - 4 * k)});
+    ed.step_frame_headless({ev(ET::MouseDown, cx + 80, cy - 40)});
+    ed.step_frame_headless({ev(ET::MouseUp, cx + 80, cy - 40)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    after a kept extrude: %zu undo steps more\n", ed.undo_steps_for_test() - steps);
+    CHECK(ed.undo_steps_for_test() == steps + 1 && ed.scene().object_count() == objects + 1);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().object_count() == objects);
+    /* A half-scale armature: the tail goes exactly where it's put. */
+    GameObject *arm = ed.scene().find_by_name("Armature");
+    CHECK(arm != nullptr);
+    if (!arm) return;
+    Transform t = arm->local();
+    t.scale = Vec3(0.5f);
+    arm->set_local(t);
+    ed.mark_changed_for_test("scale");
+    ed.step_frame_headless();
+    bone = ed.scene().find_by_name("Bone");
+    const Vec3 want = bone->world_position() + Vec3(0.3f, 0.6f, 0.0f);
+    ed.command(strprintf("bone tail Bone %g %g %g", want.x, want.y, want.z));
+    std::printf("    the tail on a half-scale armature is off by %.6f\n", length(ed.bone_tail_for_test(*bone) - want));
+    CHECK(length(ed.bone_tail_for_test(*bone) - want) < 1e-4f);
+    /* A mesh at the scene root, between two others: its rig takes its place there. */
+    GameObject *a = ed.scene().create("R94A");
+    GameObject *m = ed.scene().create("R94Mesh");
+    m->add<MeshFilter>()->mesh = primitives::cylinder(0.3f, 2.0f, 12);
+    m->add<MeshRenderer>();
+    ed.scene().create("R94C");
+    size_t at = 0;
+    for (size_t i = 0; i < ed.scene().roots.size(); i++)
+      if (ed.scene().roots[i] == m) at = i;
+    ed.select_for_test(m->id, false);
+    ed.step_frame_headless();
+    ed.command("create Armature");
+    ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("R94Mesh Rig");
+    CHECK(rig && at < ed.scene().roots.size() && ed.scene().roots[at] == rig && ed.scene().roots[at - 1] == a);
+  });
+
+  test("rigging: Remove IK keeps a target of the user's own; FK isn't added to IK's bones; Reset Pose puts FK controls back; '.L' controls are blue", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Armature");
+    ed.command("bone add Bone 1");
+    GameObject *thigh = ed.scene().find_by_name("Bone"), *shin = ed.scene().find_by_name("Bone.001");
+    CHECK(thigh && shin);
+    if (!thigh || !shin) return;
+    thigh->name = "Thigh.L", shin->name = "Shin.L";
+    ed.command("ik add Shin.L");
+    ed.step_frame_headless();
+    GameObject *target = ed.scene().find_by_name("Shin.LIK");
+    CHECK(target && target->get<RigControl>() && rig_control_side(*target, *target->get<RigControl>()) == RigControl::Left);
+    /* A cup of the user's as the target instead: Remove IK leaves it. */
+    GameObject *cup = ed.scene().create("Cup");
+    shin->get<IKConstraint>()->target = "Cup";
+    ed.mark_changed_for_test("aim at the cup");
+    ed.step_frame_headless();
+    ed.command("ik remove Shin.L");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Cup") == cup && !shin->get<IKConstraint>() && !ed.scene().find_by_name("Shin.LPole"));
+    /* IK again: FK on its bones is refused. */
+    ed.command("ik add Shin.L");
+    ed.step_frame_headless();
+    ed.command("fk add Shin.L Thigh.L");
+    CHECK(!ed.scene().find_by_name("Shin.LFK") && !ed.scene().find_by_name("Thigh.LFK"));
+    ed.command("ik remove Shin.L");
+    ed.step_frame_headless();
+    /* FK on both, a turn on the thigh's control, then Reset Pose: the thigh and its control are back at rest and stay. */
+    ed.command("armature reset Armature");  // (the IK turned the thigh: back to its rest before the controls go on)
+    ed.step_frame_headless();
+    ed.command("fk add Shin.L Thigh.L");
+    ed.step_frame_headless();
+    GameObject *ctl = ed.scene().find_by_name("Thigh.LFK");
+    CHECK(ctl != nullptr);
+    if (!ctl) return;
+    const Quat rest = thigh->world_rotation();
+    ctl->set_local_rotation(ctl->local().rotation * Quat::axis_angle(Vec3(1, 0, 0), 0.6f));
+    ed.mark_changed_for_test("turn");
+    ed.step_frame_headless();
+    auto qd = [](Quat a, Quat b) { return std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w); };
+    CHECK(qd(thigh->world_rotation(), rest) < 0.999f);
+    ed.command("armature reset Armature");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    after Reset Pose: the thigh is at rest %d, its control with it %d\n", (int)(qd(thigh->world_rotation(), rest) > 0.9999f),
+                (int)(qd(ctl->world_rotation(), rest) > 0.9999f));
+    CHECK(qd(thigh->world_rotation(), rest) > 0.9999f && qd(ctl->world_rotation(), rest) > 0.9999f);
+    CHECK(!solve_constraints(ed.scene()));  // (nothing left to turn: the editor can go idle)
+  });
+  /* ---------------------------------------------------------------- round 93: the dopesheet's grouped rows and box select (task 0069) */
+  test("keyframes: a Position's x/y/z are one dopesheet row that unfolds; its diamond selects and moves all three; a thin box selects every key it touches", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R93Box");
+    ed.scene().create("Lid", box);
+    ed.command("select R93Box");
+    ed.command("layout Animation");  // (the Animation window along the bottom: wide enough to tell frames apart)
+    ed.command("anim new");
+    ed.command("anim key Lid Position 0 10 0");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.command("anim key Lid Position 2 10 2");
+    ed.command("anim key Lid Position 1 30 3");
+    ed.command("anim key Lid Scale 0 20 1");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti grp;
+    CHECK(ed.button_rect_for_test("anim_track:Lid : Position", grp));
+    Recti x_row;
+    CHECK(!ed.button_rect_for_test("anim_track:    .x", x_row));  // folded
+    const AnimEditorState &st = ed.anim_for_test();
+    auto key_x = [&](float f) { return st.sheet.x + (int)std::lround(f / st.sheet_end * (float)st.sheet.w); };
+    auto ev = [](platform::EventType t, int x, int y, int mods = 0) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y, e.mods = mods;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto click = [&](int x, int y, int mods = 0) {
+      ed.step_frame_headless({ev(ET::MouseMove, x, y, mods)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y, mods)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y, mods)});
+      ed.step_frame_headless();
+    };
+    /* The group's diamond at frame 10: all three axes' keys. */
+    const int gy = grp.y + grp.h / 2;
+    click(key_x(10), gy);
+    std::printf("    clicking the group's diamond at 10: %zu keys selected\n", st.selected.size());
+    CHECK(st.selected.size() == 3);
+    /* Dragged 10 frames right: all three move to 20, the y key at 30 stays. */
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(10), gy)});
+    ed.step_frame_headless({ev(ET::MouseDown, key_x(10), gy)});
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(20), gy)});
+    ed.step_frame_headless({ev(ET::MouseUp, key_x(20), gy)});
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    if (clip)
+      for (const AnimTrack &tr : clip->tracks) {
+        std::printf("    %s:", tr.label().c_str());
+        for (const AnimKey &k : tr.keys) std::printf(" %g", k.frame);
+        std::printf("\n");
+      }
+    /* Where they landed (10 frames on, give or take the pixel rounding of a frame): all three together. */
+    const float moved = clip && !clip->find("Lid", "Position", 0)->keys.empty() ? clip->find("Lid", "Position", 0)->keys[0].frame : -1.0f;
+    CHECK(clip && std::fabs(moved - 20.0f) <= 1.0f && clip->find("Lid", "Position", 2)->key_at(moved) >= 0 &&
+          clip->find("Lid", "Position", 1)->key_at(moved) >= 0 && clip->find("Lid", "Position", 1)->key_at(30) >= 0 &&
+          clip->find("Lid", "Position", 0)->key_at(10) < 0);
+    /* Unfold: the axes get rows of their own. */
+    click(grp.x + 8, gy);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("anim_track:    .x", x_row) && ed.button_rect_for_test("anim_track:    .z", x_row));
+    /* A thin box over the diamonds at 20 and 30 (not crossing any row's middle line), from empty space: it takes the
+     * keys it touches - the group's and the axes' rows below. */
+    Recti sheet;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet));
+    Recti zrow;
+    CHECK(ed.button_rect_for_test("anim_track:    .z", zrow));
+    click(sheet.right() - 5, sheet.bottom() - 5);  // (empty: clears the selection)
+    CHECK(st.selected.empty());
+    const int y0 = grp.y + 2, y1 = zrow.y + 3;  // (within the first row's top and the z row's top: no middle line of z)
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(17), y0)});
+    ed.step_frame_headless({ev(ET::MouseDown, key_x(17), y0)});
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(33), y1)});
+    ed.step_frame_headless({ev(ET::MouseUp, key_x(33), y1)});
+    ed.step_frame_headless();
+    std::printf("    the thin box selected %zu keys (x, y, z at 20 and y at 30: 4):", st.selected.size());
+    for (const auto &k : st.selected) std::printf(" (%d, %g)", k.first, k.second);
+    std::printf("; rows at y %d (group), %d (z); box %d..%d\n", grp.y, zrow.y, y0, y1);
+    CHECK(st.selected.size() == 4);
+    /* Ctrl+box takes them off again. */
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(15), y0, platform::MOD_CTRL)});  // (not where the last box began: that would be a double-click)
+    ed.step_frame_headless({ev(ET::MouseDown, key_x(15), y0, platform::MOD_CTRL)});
+    ed.step_frame_headless({ev(ET::MouseMove, key_x(33), y1, platform::MOD_CTRL)});
+    ed.step_frame_headless({ev(ET::MouseUp, key_x(33), y1, platform::MOD_CTRL)});
+    ed.step_frame_headless();
+    CHECK(st.selected.empty());
+  });
+  test("auto-rig: a marker dragged in the side view keeps its depth through the body (it doesn't jump to the nearer leg)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Cylinder");
+    ed.command("autorig humanoid");
+    ed.command("autorig symmetry off");
+    ed.command("autorig mark LeftKnee 0.15 0.4 0.1");
+    ed.command("autorig view left");
+    const double t0 = now_seconds();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.5) && now_seconds() - t0 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
+    const Vec3 before = ed.autorig_for_test().markers.at("LeftKnee");
+    int x = 0, y = 0;
+    CHECK(ed.screen_of_for_test(before, x, y));
+    platform::Event m, d, mv, u;
+    m.type = mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    m.x = d.x = x, m.y = d.y = y, mv.x = u.x = x + 15, mv.y = u.y = y - 25;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({mv});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    const Vec3 after = ed.autorig_for_test().markers.at("LeftKnee");
+    std::printf("    the knee (%.3f %.3f %.3f) -> (%.3f %.3f %.3f) in the left view\n", before.x, before.y, before.z, after.x, after.y, after.z);
+    CHECK(std::fabs(after.x - before.x) < 1e-3f && length(after - before) > 0.02f);
+  });
+  /* ---------------------------------------------------------------- round 95: the scene's sequence (task 0070) */
+  test("global sequencer: one scene sequence plays clips on two objects at once, each bar naming its object; it survives a save and plays in Play", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *a = ed.scene().create("R95A");
+    GameObject *la = ed.scene().create("Lid", a);
+    GameObject *b = ed.scene().create("R95B");
+    GameObject *lb = ed.scene().create("Lid", b);
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R95 Sequence.seq").c_str());
+    ed.command("seq new R95 Sequence");
+    CHECK(!ed.scene().sequence.empty() && ed.seq_for_test_sequence());
+    /* Up on A and Hold on B, at the same time on two tracks: each moves its own lid. */
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R95A");
+    ed.command("seq add Assets/Animations/R86Hold.anim 1 0 R95B");
+    ed.step_frame_headless();
+    SequencePtr q = ed.seq_for_test_sequence();
+    CHECK(q && q->tracks[0].items.size() == 1 && q->tracks[0].items[0].target == "R95A" && q->tracks[1].items[0].target == "R95B");
+    ed.command("seq preview on");
+    ed.command("seq frame 30");
+    ed.step_frame_headless();
+    std::printf("    at 30: A's lid y %.3f (3), B's lid y %.3f (-1)\n", la->local().position.y, lb->local().position.y);
+    CHECK(std::fabs(la->local().position.y - 3.0f) < 1e-3f && std::fabs(lb->local().position.y + 1.0f) < 1e-3f);
+    ed.command("seq preview off");
+    ed.step_frame_headless();
+    CHECK(la->local().position.y == 0.0f && lb->local().position.y == 0.0f);
+    /* Two overlapping bars on one track for different objects don't blend: each plays fully. */
+    ed.command("seq add Assets/Animations/R86Hold.anim 0 20 R95B");
+    ed.step_frame_headless();
+    ed.command("seq preview on");
+    ed.command("seq frame 30");
+    ed.step_frame_headless();
+    CHECK(std::fabs(la->local().position.y - 3.0f) < 1e-3f && std::fabs(lb->local().position.y + 1.0f) < 1e-3f);
+    ed.command("seq preview off");
+    ed.step_frame_headless();
+    /* The file keeps the objects; the scene keeps its sequence. */
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path(q->asset_path), text) && text.find("\tR95A") != std::string::npos);
+    const std::string scene_file = fs::join(test_dir(), "r95.scene");
+    CHECK(save_scene(ed.scene(), scene_file));
+    Scene back;
+    std::string err;
+    CHECK(load_scene(scene_file, back, err) && back.sequence == ed.scene().sequence);
+    std::remove(scene_file.c_str());
+    /* Play: the scene's director moves both lids. */
+    ed.command("play");
+    for (int i = 0; i < 31; i++) ed.step_frame_headless();
+    GameObject *pa = ed.scene().find_by_name("R95A");
+    const float ya = pa && !pa->children.empty() ? pa->children[0]->local().position.y : -99.0f;
+    std::printf("    in Play after half a second: A's lid y %.3f\n", ya);
+    CHECK(ya > 0.5f);
+    ed.command("stop");
+  });
+  test("global sequencer: three objects' bars overlapping on one track all play; an object given a bar during Preview is put back; renaming the .seq keeps the scene on it", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *objs[3];
+    GameObject *lids[3];
+    for (int k = 0; k < 3; k++) {
+      objs[k] = ed.scene().create(strprintf("R96O%d", k));
+      lids[k] = ed.scene().create("Lid", objs[k]);
+    }
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R96Seq.seq").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R96Renamed.seq").c_str());
+    ed.command("seq new R96Seq");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R96O0");
+    ed.command("seq add Assets/Animations/R86Hold.anim 0 10 R96O1");
+    ed.step_frame_headless();
+    ed.command("seq preview on");
+    /* An object given a bar while previewing: its lid moves, and is put back with the others. */
+    ed.command("seq add Assets/Animations/R86Hold.anim 0 20 R96O2");
+    ed.command("seq frame 30");
+    ed.step_frame_headless();
+    std::printf("    at 30: lids %.2f %.2f %.2f (3, -1, -1)\n", lids[0]->local().position.y, lids[1]->local().position.y, lids[2]->local().position.y);
+    CHECK(std::fabs(lids[0]->local().position.y - 3.0f) < 1e-3f && lids[1]->local().position.y == -1.0f && lids[2]->local().position.y == -1.0f);
+    ed.command("seq preview off");
+    ed.step_frame_headless();
+    CHECK(lids[0]->local().position.y == 0.0f && lids[1]->local().position.y == 0.0f && lids[2]->local().position.y == 0.0f);
+    /* The .seq renamed in the Project window: the scene follows it. */
+    ed.command("renameasset Assets/Animations/R96Seq.seq R96Renamed");
+    ed.step_frame_headless();
+    std::printf("    the scene's sequence after the rename: '%s'\n", ed.scene().sequence.c_str());
+    CHECK(ed.scene().sequence == "Assets/Animations/R96Renamed.seq" && ed.seq_for_test_sequence());
+  });
+  /* ---------------------------------------------------------------- round 97: dragging stacks into order (task 0071) */
+  test("stacks: a modifier's or a filter's header dragged below another moves it there in one undo step; a click still folds it", [] {
+    Editor ed;
+    ed.init_headless(1400, 1000);
+    ed.command("layout Default");
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    auto at = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* Drag the header `from` to just below the header `below`'s middle. */
+    auto drag = [&](const std::string &from, const std::string &below) {
+      Recti a, b;
+      if (!ed.button_rect_for_test(from, a) || !ed.button_rect_for_test(below, b)) {
+        std::printf("    no header '%s' or '%s'\n", from.c_str(), below.c_str());
+        return false;
+      }
+      const int x = a.x + a.w / 2, y0 = a.y + a.h / 2, y1 = b.y + b.h - 2;
+      ed.step_frame_headless({at(ET::MouseMove, x, y0)});
+      ed.step_frame_headless({at(ET::MouseDown, x, y0)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, x, y0 + (y1 - y0) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, x, y1)});
+      ed.step_frame_headless();
+      return true;
+    };
+    ed.command("select Cube");
+    ed.command("component BevelModifier");
+    ed.command("component ArrayModifier");
+    ed.command("component SmoothModifier");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto order = [&] {
+      std::string s;
+      GameObject *g = ed.scene().find_by_name("Cube");
+      for (const auto &c : g->components)
+        if (c->is_modifier()) s += std::string(c->type_name()).substr(0, 3);
+      return s;
+    };
+    std::printf("    modifiers: %s\n", order().c_str());
+    CHECK(order() == "BevArrSmo");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const bool folded0 = cube->get<BevelModifier>()->ui_expanded;
+    CHECK(drag("mod_head0", "mod_head2"));  // Bevel to the bottom
+    std::printf("    after the drag: %s\n", order().c_str());
+    CHECK(order() == "ArrSmoBev");
+    CHECK(cube->get<BevelModifier>()->ui_expanded == folded0);  // (the press on its name didn't fold it)
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(order() == "BevArrSmo");  // one undo step
+    /* A click on a name still folds it. */
+    Recti h;
+    CHECK(ed.button_rect_for_test("mod_head0", h));
+    cube = ed.scene().find_by_name("Cube");
+    const bool was = cube->get<BevelModifier>()->ui_expanded;
+    ed.step_frame_headless({at(ET::MouseMove, h.x + h.w / 2, h.y + h.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, h.x + h.w / 2, h.y + h.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, h.x + h.w / 2, h.y + h.h / 2)});
+    std::printf("    click at %d,%d (%dx%d): folded %d -> %d, %s\n", h.x, h.y, h.w, h.h, (int)was, (int)cube->get<BevelModifier>()->ui_expanded, order().c_str());
+    CHECK(cube->get<BevelModifier>()->ui_expanded != was && order() == "BevArrSmo");
+    /* A camera's filters. */
+    ed.command("select Main Camera");
+    ed.command("filter add Film Grain");
+    ed.command("filter add Retro Console");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto filters = [&] {
+      std::string s;
+      GameObject *cam = ed.scene().find_by_name("Main Camera");
+      const auto *cf = cam ? cam->get<CameraFilters>() : nullptr;
+      if (!cf) return std::string("none");
+      for (const auto &e : cf->effects) s += std::string(e->type_name()).substr(0, 4) + " ";
+      return s;
+    };
+    std::printf("    filters: %s\n", filters().c_str());
+    const std::string before = filters();
+    CHECK(drag("filter_head0", "filter_head1"));
+    std::printf("    after the drag: %s\n", filters().c_str());
+    CHECK(filters() != before && filters().substr(5) == before.substr(0, 5));  // the first is last
+    /* Up: the second dragged above the first's middle puts them back. */
+    Recti f0, f1;
+    CHECK(ed.button_rect_for_test("filter_head0", f0) && ed.button_rect_for_test("filter_head1", f1));
+    const int fx = f1.x + f1.w / 2, fy0 = f1.y + f1.h / 2, fy1 = f0.y + 2;
+    ed.step_frame_headless({at(ET::MouseMove, fx, fy0)});
+    ed.step_frame_headless({at(ET::MouseDown, fx, fy0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, fx, fy0 + (fy1 - fy0) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy1)});
+    ed.step_frame_headless();
+    std::printf("    dragged up: %s\n", filters().c_str());
+    CHECK(filters() == before);
+    /* A drag whose list goes away (another object selected) is dropped: showing the list again doesn't move anything. */
+    ed.step_frame_headless({at(ET::MouseMove, fx, fy0)});
+    ed.step_frame_headless({at(ET::MouseDown, fx, fy0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, fx, fy0 + (fy1 - fy0) * k / 4)});
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy1)});
+    ed.command("select Main Camera");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(filters() == before);
+    /* Esc drops a drag. */
+    ed.step_frame_headless({at(ET::MouseMove, fx, fy0)});
+    ed.step_frame_headless({at(ET::MouseDown, fx, fy0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, fx, fy0 + (fy1 - fy0) * k / 4)});
+    platform::Event esc;
+    esc.type = ET::KeyDown, esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({esc});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy1)});
+    ed.step_frame_headless();
+    std::printf("    after Esc: %s\n", filters().c_str());
+    CHECK(filters() == before);
+  });
+
+  test("stacks: a Sequencer track's name dragged below another moves the track with its clips; seq trackmove does too", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("window Sequencer");
+    std::remove(resolve_asset_path("Assets/Animations/R97 Sequence.seq").c_str());
+    ed.record_buttons_for_test(true);
+    ed.scene().create("R97O");
+    ed.command("seq new R97 Sequence");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R97O");
+    ed.command("seq track");
+    ed.command("seq add Assets/Animations/R86Hold.anim 1 0 R97O");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto first_clip = [&](int t) {
+      SequencePtr s = ed.seq_for_test_sequence();
+      return s && (int)s->tracks.size() > t && !s->tracks[(size_t)t].items.empty() ? s->tracks[(size_t)t].items[0].clip : std::string("-");
+    };
+    CHECK(first_clip(0) == "Assets/Animations/R86Up.anim");
+    using ET = platform::EventType;
+    auto at = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    Recti a, b;
+    CHECK(ed.button_rect_for_test("seq_track0", a) && ed.button_rect_for_test("seq_track1", b));
+    const int x = a.x + a.w / 2, y0 = a.y + a.h / 2, y1 = b.y + b.h - 2;
+    ed.step_frame_headless({at(ET::MouseMove, x, y0)});
+    ed.step_frame_headless({at(ET::MouseDown, x, y0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, x, y0 + (y1 - y0) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, x, y1)});
+    ed.step_frame_headless();
+    std::printf("    track 0 after the drag: %s\n", first_clip(0).c_str());
+    CHECK(first_clip(0) == "Assets/Animations/R86Hold.anim" && first_clip(1) == "Assets/Animations/R86Up.anim");
+    ed.command("seq trackmove 1 0");
+    CHECK(first_clip(0) == "Assets/Animations/R86Up.anim");
+    std::remove(resolve_asset_path("Assets/Animations/R97 Sequence.seq").c_str());
+  });
+  /* ---------------------------------------------------------------- round 98: a texture's Physical Size tiles its materials (task 0072) */
+  test("textures: changing a texture's Physical Size re-tiles the materials using it, but not one tiled by hand; undo puts it back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    /* (earlier tests leave Bricks.ptex, Bricks 2.ptex...; a name with a space can't be typed into settex) */
+    std::remove(resolve_asset_path("Assets/Textures/Bricks.ptex").c_str());
+    for (int k = 2; k < 10; k++) std::remove(resolve_asset_path(strprintf("Assets/Textures/Bricks %d.ptex", k)).c_str());
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr && t->asset_path.find(' ') == std::string::npos);
+    if (!t) return;
+    ed.command("create Cube");
+    GameObject *a = ed.active_object_for_test();
+    ed.assign_texture_asset_for_test(t->asset_path);
+    ed.command("create Cube");
+    GameObject *b = ed.active_object_for_test();
+    ed.assign_texture_asset_for_test(t->asset_path);
+    ed.step_frame_headless();
+    CHECK(a && b && a != b);
+    if (!a || !b) return;
+    Material &ma = *a->get<MeshRenderer>()->materials[0], &mb = *b->get<MeshRenderer>()->materials[0];
+    const float size0 = t->physical_size;
+    std::printf("    Bricks: %g m a tile; tiling %.3f\n", size0, ma.tiling.x);
+    CHECK(std::fabs(ma.tiling.x - 1.0f / size0) < 1e-4f);
+    /* A .mat asset of the texture that no object here uses: left alone (undo couldn't put it back). */
+    Material lone = ma;
+    lone.name = "R98Lone";
+    std::remove(resolve_asset_path("Assets/Materials/R98Lone.mat").c_str());
+    MaterialPtr lone_asset = create_material_asset(lone, "Assets/Materials/R98Lone.mat");
+    mb.tiling = Vec3(3.0f, 3.0f, 1.0f);  // (tiled by hand)
+    /* A third object whose material uses the texture only as its normal map, and a fourth tiled by hand to 1/3 (a
+     * size the change below passes on its way to 4 m in the same undo step). */
+    ed.command("create Cube");
+    GameObject *c = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *d = ed.active_object_for_test();
+    CHECK(c && d);
+    if (!c || !d) return;
+    {
+      Material mc = ma, md = ma;
+      mc.base_map = TextureRef{}, mc.normal_map = TextureRef{t->asset_path + "#normal", true};
+      md.tiling = Vec3(1.0f / 3.0f, 1.0f / 3.0f, 1.0f);
+      c->get<MeshRenderer>()->materials = {std::make_shared<Material>(mc)};
+      d->get<MeshRenderer>()->materials = {std::make_shared<Material>(md)};
+    }
+    ed.mark_changed_for_test("by hand");
+    ed.step_frame_headless();
+    ed.command("settex " + t->asset_path + " PhysicalSize 3");
+    ed.command("settex " + t->asset_path + " PhysicalSize 4");  // (the same undo step, as a dragged number)
+    ed.step_frame_headless();
+    auto tiling = [&](GameObject *g) { return g->get<MeshRenderer>()->materials[0]->tiling; };
+    std::printf("    after Physical Size 4: the first %.3f (0.25), hand-tiled %.3f (3) and %.3f (0.333), normal map only %.3f (0.25), the unused .mat %.3f (0.5)\n",
+                tiling(a).x, tiling(b).x, tiling(d).x, tiling(c).x, lone_asset ? lone_asset->tiling.x : -1.0f);
+    CHECK(std::fabs(tiling(a).x - 0.25f) < 1e-5f && std::fabs(tiling(a).y - 0.25f) < 1e-5f);
+    CHECK(tiling(b).x == 3.0f && std::fabs(tiling(d).x - 1.0f / 3.0f) < 1e-6f);
+    CHECK(std::fabs(tiling(c).x - 0.25f) < 1e-5f);
+    CHECK(lone_asset && std::fabs(lone_asset->tiling.x - 0.5f) < 1e-5f);
+    std::remove(resolve_asset_path("Assets/Materials/R98Lone.mat").c_str());
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *a2 = ed.scene().find(a->id), *b2 = ed.scene().find(b->id);
+    CHECK(a2 && std::fabs(a2->get<MeshRenderer>()->materials[0]->tiling.x - 1.0f / size0) < 1e-4f);
+    CHECK(b2 && b2->get<MeshRenderer>()->materials[0]->tiling.x == 3.0f);
+    ed.command("redo");
+    ed.step_frame_headless();
+    a2 = ed.scene().find(a->id);
+    CHECK(a2 && std::fabs(a2->get<MeshRenderer>()->materials[0]->tiling.x - 0.25f) < 1e-5f);
+  });
+  /* ---------------------------------------------------------------- round 99: themes (task 0073) */
+  test("themes: Emiliano Light and Dark take the site's colours, the choice is kept in the prefs, an unknown name is refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    CHECK(ed.theme_name_for_test() == "Dark");
+    ed.command("theme Emiliano Light");
+    CHECK(ed.theme_name_for_test() == "Emiliano Light");
+    CHECK(ed.ui_for_test().theme.window == Color::hex(0xF1EEE5) && ed.ui_for_test().theme.text == Color::hex(0x292927) &&
+          ed.ui_for_test().theme.focus == Color::hex(0xD7882B));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();  // (every window draws in a light theme)
+    ed.command("theme emiliano dark");  // (case aside)
+    CHECK(ed.ui_for_test().theme.window == Color::hex(0x292927) && ed.ui_for_test().theme.text == Color::hex(0xF1EEE5) &&
+          ed.ui_for_test().theme.ok == Color::hex(0x45E8A2));
+    ed.command("theme Neon");  // (refused)
+    CHECK(ed.theme_name_for_test() == "Emiliano Dark");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();  // (every window draws in it)
+    const std::string prefs = fs::join(test_dir(), "r99_prefs.txt");
+    ed.prefs_for_test(prefs);
+    ed.save_prefs_for_test();
+    Editor ed2;
+    ed2.init_headless(800, 600);
+    ed2.prefs_for_test(prefs);
+    ed2.load_prefs_for_test();
+    CHECK(ed2.theme_name_for_test() == "Emiliano Dark" && ed2.ui_for_test().theme.window == Color::hex(0x292927));
+    std::remove(prefs.c_str());
+  });
+  /* ---------------------------------------------------------------- round 100: render animation (task 0074) */
+  test("render animation: the scene's sequence rendered frame by frame into numbered PNGs that differ, the pose put back; an MP4 when FFmpeg is there", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("engine raster");
+    ed.scene().render.width = 320, ed.scene().render.height = 180;
+    GameObject *root = ed.scene().create("R100Root");
+    ed.command("create Cube");
+    GameObject *lid = ed.active_object_for_test();
+    CHECK(lid != nullptr);
+    if (!lid) return;
+    lid->name = "Lid";
+    ed.scene().set_parent(lid, root);
+    const float y0 = lid->local().position.y;
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R100 Sequence.seq").c_str());
+    ed.command("seq new R100 Sequence");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R100Root");
+    ed.step_frame_headless();
+    ed.command("renderanim 0 20 24");
+    for (int i = 0; i < 200 && ed.render_animation_for_test().active; i++) ed.step_frame_headless();
+    const auto &ra = ed.render_animation_for_test();
+    std::printf("    %zu frame(s) in %s at %g fps\n", ra.written.size(), ra.dir.c_str(), ra.fps);
+    CHECK(!ra.active && ra.written.size() == 21 && ra.fps == 24.0f);
+    CHECK(ra.written.size() == 21 && fs::filename(ra.written[0]) == "0001.png" && fs::filename(ra.written[20]) == "0021.png");
+    if (ra.written.size() != 21) return;
+    Bitmap a, b;
+    std::string err;
+    CHECK(load_image(ra.written[0], a, err) && load_image(ra.written[20], b, err));
+    CHECK(a.width == 320 && a.height == 180 && b.width == 320);
+    CHECK(a.rgba8 != b.rgba8);  // (the lid rose 2 m between them)
+    CHECK(std::fabs(lid->local().position.y - y0) < 1e-4f);  // (the pose went back)
+    const bool video = video::available() || !ed.ffmpeg_program().empty();  // (built with FFmpeg, or one on the PATH)
+    if (!video)
+      for (const std::string &f : ra.written) std::remove(f.c_str());  // (the test project's Renders/ stays small)
+    /* FFmpeg: its arguments; with one on the PATH (CI's Linux has it), the MP4 is made in the background. */
+    const std::vector<std::string> args = ffmpeg_png_to_mp4_args("ffmpeg", "R/a b", 24.0f, "R/a b.mp4");
+    CHECK(args.size() == 18 && args[2] == "-nostdin" && args[6] == "24" && args[10] == fs::join("R/a b", "%04d.png") && args.back() == "R/a b.mp4");
+    CHECK(sys::windows_command_line({"C:\\Program Files\\ffmpeg.exe", "a b", "x\"y", "e\\", "p\\ q\\"}) ==
+          "\"C:\\Program Files\\ffmpeg.exe\" \"a b\" \"x\\\"y\" e\\ \"p\\ q\\\\\"");
+    if (!video) {
+      std::printf("    no FFmpeg here: frames only\n");
+      return;
+    }
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    bool made = false;
+    for (const DirEntry &de : fs::list(fs::parent(ra.video))) made = made || (de.name == fs::filename(ra.video) && de.size > 0);
+    std::printf("    MP4 %s: %d\n", ra.video.c_str(), (int)made);
+    CHECK(made);
+  });
+
+  test("render animation: without a sequence or a clip it refuses; Stop puts the pose back", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("engine raster");
+    ed.scene().render.width = 160, ed.scene().render.height = 90;
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.command("renderanim");
+    CHECK(!ed.render_animation_for_test().active);  // (nothing to render)
+    GameObject *root = ed.scene().create("R100B");
+    GameObject *lid = ed.scene().create("Lid", root);
+    ed.command("select R100B");
+    ed.command("component Animation");
+    CHECK(root->get<Animation>() != nullptr);
+    if (!root->get<Animation>()) return;
+    root->get<Animation>()->clip = "Assets/Animations/R86Up.anim";
+    ed.step_frame_headless();
+    ed.command("renderanim 30 59");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    rendering the clip: active %d, lid at %.2f\n", (int)ed.render_animation_for_test().active, lid->local().position.y);
+    CHECK(ed.render_animation_for_test().active && ed.render_animation_for_test().source == 2 && lid->local().position.y > 2.9f);
+    ed.command("renderanim stop");
+    CHECK(!ed.render_animation_for_test().active && lid->local().position.y == 0.0f);
+    /* Another object selected mid-render, or a save (which ends the preview): it stops, the pose goes back. */
+    ed.command("renderanim 30 59");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("select Cube");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    the Cube selected mid-render: active %d, lid at %.2f\n", (int)ed.render_animation_for_test().active, lid->local().position.y);
+    CHECK(!ed.render_animation_for_test().active && lid->local().position.y == 0.0f);
+    ed.command("select R100B");
+    ed.command("renderanim 30 59");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("anim preview off");  // (what a save, an undo or another scene does)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.render_animation_for_test().active);
+    ed.command("renderanim 24");  // (one number: refused, not a render)
+    CHECK(!ed.render_animation_for_test().active);
+  });
+  /* ---------------------------------------------------------------- round 101: touch, pen and the laptop minimum (task 0075) */
+  test("touch: two fingers over the Scene view pinch-zoom, pan with the fingers and twist round the pivot; elsewhere they do nothing", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);  // (1080p at 150 %: the HP Envy 13.3's logical size)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti sr = ed.scene_rect_for_test();
+    auto gesture = [&](int x, int y, float zoom, float px, float py, float rot) {
+      platform::Event e;
+      e.type = platform::EventType::Gesture;
+      e.x = x, e.y = y, e.zoom = zoom, e.pan_x = px, e.pan_y = py, e.rotate = rot;
+      ed.step_frame_headless({e});
+    };
+    const int cx = sr.x + sr.w / 2, cy = sr.y + sr.h / 2;
+    platform::Event mv;
+    mv.type = platform::EventType::MouseMove, mv.x = cx, mv.y = cy;
+    ed.step_frame_headless({mv});
+    const float d0 = ed.scene_camera_for_test().distance, yaw0 = ed.scene_camera_for_test().yaw;
+    const Vec3 p0 = ed.scene_camera_for_test().pivot;
+    gesture(cx, cy, 2.0f, 0, 0, 0);
+    std::printf("    pinch x2: distance %.3f -> %.3f\n", d0, ed.scene_camera_for_test().distance);
+    CHECK(std::fabs(ed.scene_camera_for_test().distance - d0 / 2.0f) < 1e-4f * d0);
+    gesture(cx, cy, 1.0f, 40.0f, 0.0f, 0.0f);
+    const Vec3 moved = ed.scene_camera_for_test().pivot - p0;
+    std::printf("    two-finger drag right 40 px: the pivot moved %.3f along the view's left\n", -dot(moved, ed.scene_camera_for_test().right()));
+    CHECK(dot(moved, ed.scene_camera_for_test().right()) < -0.01f);  // (the scene follows the fingers: the view goes left)
+    gesture(cx, cy, 1.0f, 0, 0, 30.0f);
+    CHECK(std::fabs(ed.scene_camera_for_test().yaw - (yaw0 - 30.0f)) < 1e-3f);
+    /* Over the Inspector: nothing. */
+    const float d1 = ed.scene_camera_for_test().distance;
+    gesture(1260, cy, 2.0f, 0, 0, 0);
+    CHECK(ed.scene_camera_for_test().distance == d1);
+    /* NaN from a driver: ignored. */
+    gesture(cx, cy, std::nanf(""), 0, 0, std::nanf(""));
+    CHECK(std::isfinite(ed.scene_camera_for_test().distance) && std::isfinite(ed.scene_camera_for_test().yaw));
+  });
+
+  test("pen: a stroke pressed half as hard adds half the weight", [] {
+    auto paint = [](float pressure) {
+      R68 t;
+      t.ed.command("wpbrush add 40 0.5 1");
+      platform::Event pen;
+      pen.type = platform::EventType::MouseMove, pen.x = 10, pen.y = 10, pen.pressure = pressure;
+      t.ed.step_frame_headless({pen});
+      t.stroke({Vec3(0, 0, 0)});
+      return t.weight_at({0, 0, 0});
+    };
+    const float full = paint(1.0f), half = paint(0.5f);
+    std::printf("    one dab: pressure 1 %.3f, pressure 0.5 %.3f\n", full, half);
+    CHECK(full > 0.1f && std::fabs(half - full * 0.5f) < 0.02f);
+  });
+
+  test("laptop minimum: the first run on a 4-core / 8-thread or 8 GB machine starts on Low and says so, offering High", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    const std::string prefs = fs::join(test_dir(), "r101_prefs_none.txt");
+    std::remove(prefs.c_str());
+    ed.prefs_for_test(prefs);
+    ed.load_prefs_for_test();  // (no file: the first run)
+    const bool low = Editor::recommended_tier() == 0;
+    std::printf("    this machine: %d threads, recommended %s, the welcome shown %d\n", sys::hardware_threads(), low ? "Low" : "High",
+                (int)ed.first_run_dialog_for_test());
+    CHECK(ed.first_run_dialog_for_test() == low);
+    /* The minimum machine (BLENDITY_MIN_SPEC emulates it): Low and the welcome; Use High switches and keeps it. */
+    set_env("BLENDITY_MIN_SPEC", "1");
+    Editor e2;
+    e2.init_headless(1280, 720);
+    e2.record_buttons_for_test(true);
+    e2.prefs_for_test(prefs);
+    e2.load_prefs_for_test();
+    set_env("BLENDITY_MIN_SPEC", "0");
+    CHECK(e2.first_run_dialog_for_test() && e2.quality_tier() == 0);
+    for (int i = 0; i < 2; i++) e2.step_frame_headless();  // (it draws at 1280 x 720)
+    Recti b;
+    CHECK(e2.button_rect_for_test("Use High", b) && b.bottom() <= 720 && b.right() <= 1280);  // (it fits 1080p at 150 %)
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2;
+      e2.step_frame_headless({e});
+    }
+    std::printf("    on the minimum machine: Use High clicked: tier %d, welcome %d\n", e2.quality_tier(), (int)e2.first_run_dialog_for_test());
+    CHECK(e2.quality_tier() == 2 && !e2.first_run_dialog_for_test());
+    std::string saved;
+    CHECK(fs::read_file(prefs, saved) && saved.find("quality_tier=2") != std::string::npos);
+    std::remove(prefs.c_str());
+  });
+  /* ---------------------------------------------------------------- round 102: installers (task 0076) */
+  test("installers: a .scene given alone (a double-click) is the scene to open and its project is found above it; option values aren't", [] {
+    const std::string proj = fs::join(test_dir(), "r102 project");
+    fs::make_dirs(fs::join(proj, "Assets/Scenes/Levels"));
+    const std::string scene = fs::join(proj, "Assets/Scenes/Levels/Level 1.scene");
+    {
+      std::string a0 = "Blendity.exe", a1 = scene;
+      char *argv[] = {&a0[0], &a1[0]};
+      const std::string got = Editor::scene_in_args(2, argv);
+      std::printf("    double-clicked: '%s'\n", got.c_str());
+      CHECK(got == fs::normalize(scene));
+      CHECK(Editor::find_project_root({fs::parent(got)}) == proj || fs::normalize(Editor::find_project_root({fs::parent(got)})) == fs::normalize(proj));
+    }
+    {
+      std::string a0 = "Blendity", a1 = "--layout", a2 = "x.scene", a3 = "--scene", a4 = "y.scene";
+      char *argv[] = {&a0[0], &a1[0], &a2[0], &a3[0], &a4[0]};
+      CHECK(Editor::scene_in_args(5, argv) == fs::normalize("y.scene"));  // (--layout's value isn't a scene; --scene's is)
+      std::string b0 = "Blendity", b1 = "LEVEL.SCENE";
+      char *argv2[] = {&b0[0], &b1[0]};
+      CHECK(Editor::scene_in_args(2, argv2) == fs::normalize("LEVEL.SCENE"));  // (any case, as Windows' associations)
+    }
+    CHECK(Editor::find_project_root({fs::join(test_dir(), "no such folder/deeper")}).empty());
+  });
+
+  /* ---------------------------------------------------------------- round 103: FFmpeg linked (task 0077) */
+  test("video: with FFmpeg linked, PNG frames become an H.264 MP4 of the same count, an odd size padded to even", [] {
+    if (!video::available()) {
+      std::printf("    built without FFmpeg: Render Animation runs an ffmpeg program or writes frames only\n");
+      CHECK(!video::encode_png_frames({"x.png"}, 24.0f, fs::join(test_dir(), "r103.mp4"), nullptr));
+      return;
+    }
+    std::printf("    %s\n", video::description().c_str());
+    CHECK(video::description().find("libx264") != std::string::npos);  // (Blender's FFmpeg brings x264)
+    std::vector<std::string> frames;
+    for (int k = 0; k < 6; k++) {  // a 101 x 57 square moving right
+      std::vector<uint32_t> px(101 * 57, 0xFF202020u);
+      for (int y = 20; y < 36; y++)
+        for (int x = 10 + k * 12; x < 26 + k * 12; x++) px[(size_t)y * 101 + x] = 0xFFE07020u;
+      frames.push_back(fs::join(test_dir(), strprintf("r103_%04d.png", k + 1)));
+      CHECK(write_png(frames.back(), px.data(), 101, 57, 101, false));
+    }
+    const std::string out = fs::join(test_dir(), "r103 clip é.mp4");  // (a space and an accent: UTF-8 to FFmpeg)
+    fs::remove_file(out);
+    std::string error;
+    video::init();
+    const bool ok = video::encode_png_frames(frames, 24.0f, out, &error);
+    int w = 0, h = 0;
+    const int n = ok ? video::probe_frames(out, &w, &h) : -1;
+    std::printf("    encoded %d: %d frame(s) of %d x %d %s\n", (int)ok, n, w, h, error.c_str());
+    CHECK(ok && n == 6 && w == 102 && h == 58);
+    CHECK(fs::remove_file(out));  // (the UTF-8 name FFmpeg wrote is the one asked for)
+    /* A frame missing halfway: refused with a reason, and no unplayable half-file left. */
+    std::vector<std::string> broken = frames;
+    broken[3] = fs::join(test_dir(), "no such frame.png");
+    std::string err2;
+    CHECK(!video::encode_png_frames(broken, 24.0f, out, &err2) && !err2.empty() && !fs::exists(out));
+    std::printf("    a missing frame: '%s'\n", err2.c_str());
+    /* Cancelled (the editor closing): stops, no file. */
+    std::atomic<bool> cancel{true};
+    std::string err3;
+    CHECK(!video::encode_png_frames(frames, 24.0f, out, &err3, &cancel) && !fs::exists(out));
+    for (const std::string &f : frames) std::remove(f.c_str());
+  });
+  /* ---------------------------------------------------------------- round 105: updates (task 0079) */
+  test("updates: SHA-256 matches FIPS 180-4's vectors; SHA256SUMS lines are read in both of sha256sum's forms", [] {
+    CHECK(net::sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    CHECK(net::sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    CHECK(net::sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    CHECK(net::sha256(std::string(1000000, 'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    const std::string sums = std::string(64, 'A') + "  Blendity-Setup-0.11.0.exe\r\n" + std::string(64, 'b') + " *Blendity-0.11.0-x86_64.AppImage\n";
+    CHECK(releases::sum_for(sums, "Blendity-Setup-0.11.0.exe") == std::string(64, 'a'));
+    CHECK(releases::sum_for(sums, "Blendity-0.11.0-x86_64.AppImage") == std::string(64, 'b'));
+    CHECK(releases::sum_for(sums, "other.dmg").empty());
+  });
+
+  test("updates: GitHub's releases list gives the newer builds for this system, newest first; older ones in the history", [] {
+    auto rel = [](const char *tag, const char *date, bool pre, const char *body) {
+      const std::string p = releases::platform();
+      const std::string inst = p == "windows" ? "Blendity-Setup-x.exe" : p == "linux" ? "Blendity-x-x86_64.AppImage" : "Blendity-x-macos.dmg";
+      return strprintf("{\"tag_name\":\"%s\",\"name\":\"%s\",\"body\":\"%s\",\"published_at\":\"%s\",\"prerelease\":%s,\"draft\":false,"
+                       "\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"https://x/%s\",\"size\":123},"
+                       "{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://x/sums\",\"size\":10}]}",
+                       tag, tag, body, date, pre ? "true" : "false", inst.c_str(), inst.c_str());
+    };
+    const std::string json = "[" + rel("build-pr72", "2026-10-16T10:00:00Z", true, "Adds the updater.\\n- Version History") + "," +
+                             rel("v0.10.0", "2026-10-15T10:00:00Z", false, "Stable") + "," + rel("build-pr70", "2026-10-14T10:00:00Z", true, "FFmpeg") + "," +
+                             rel("build-pr69", "2026-10-13T10:00:00Z", true, "Installers") +
+                             ",{\"tag_name\":\"draft\",\"draft\":true,\"published_at\":\"2026-10-17T00:00:00Z\",\"assets\":[]}]";
+    const std::vector<releases::Release> all = releases::parse(json);
+    std::printf("    %zu releases; the first %s (PR %d), notes '%s'\n", all.size(), all.empty() ? "-" : all[0].tag.c_str(), all.empty() ? 0 : all[0].pr,
+                all.empty() ? "" : all[0].notes.c_str());
+    CHECK(all.size() == 4 && all[0].tag == "build-pr72" && all[0].pr == 72 && all[0].notes == "Adds the updater.\n- Version History");
+    CHECK(all.size() == 4 && releases::installer(all[0], releases::platform()) && releases::checksums(all[0]));
+    /* From PR 69's build: everything above it; without previews only the stable one. */
+    const auto newer = releases::newer(all, "build-pr69", releases::platform(), true);
+    CHECK(newer.size() == 3 && newer[0]->tag == "build-pr72" && newer[2]->tag == "build-pr70");
+    const auto stable = releases::newer(all, "build-pr69", releases::platform(), false);
+    CHECK(stable.size() == 1 && stable[0]->tag == "v0.10.0");
+    CHECK(releases::newer(all, "build-pr72", releases::platform(), true).empty());  // (the newest: nothing)
+    CHECK(releases::newer(all, "dev", releases::platform(), true).empty());         // (a local build offers nothing)
+    CHECK(releases::installable(all, releases::platform(), true).size() == 4);       // (older ones too: Version History)
+    CHECK(releases::parse("not json").empty() && releases::parse("{}").empty());
+    std::printf("    this build: %s (%s)\n", releases::build_label().c_str(), releases::build_tag());
+  });
+
+  test("updates: the Update and Version History dialogs draw at 1280 x 720 from a releases list, and Skip is remembered", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.record_buttons_for_test(true);
+    const std::string p = releases::platform();
+    const std::string inst = p == "windows" ? "Blendity-Setup-x.exe" : p == "linux" ? "Blendity-x-x86_64.AppImage" : "Blendity-x-macos.dmg";
+    const std::string json = strprintf("[{\"tag_name\":\"build-pr80\",\"name\":\"0.11.0 (PR #80)\",\"body\":\"Line one\\n\\nA long paragraph %s\","
+                                       "\"published_at\":\"2026-10-20T00:00:00Z\",\"prerelease\":true,\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"https://x/a\",\"size\":5}]}]",
+                                       std::string(400, 'w').c_str(), inst.c_str());
+    ed.show_update_for_test(json, "build-pr80");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti b;
+    CHECK(ed.button_rect_for_test("Install", b) && b.bottom() <= 720);
+    CHECK(ed.button_rect_for_test("Skip this one", b));
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2;
+      ed.step_frame_headless({e});
+    }
+    CHECK(ed.update_skip_for_test() == "build-pr80");
+    ed.command("update history");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("Install this version", b) && b.bottom() <= 720);
+  });
+  test("updates (network, BLENDITY_NET_TESTS=1 only): GitHub's real releases list is fetched and read", [] {
+    const char *on = std::getenv("BLENDITY_NET_TESTS");
+    if (!on || std::string(on) != "1") {
+      std::printf("    skipped: set BLENDITY_NET_TESTS=1 to fetch from GitHub\n");
+      return;
+    }
+    std::string body, error;
+    const bool ok = net::get("https://api.github.com/repos/EmilianoManaloIV/blendity/releases?per_page=5", body, &error);
+    std::printf("    fetched %d: %zu bytes %s; %zu release(s)\n", (int)ok, body.size(), error.c_str(), releases::parse(body).size());
+    CHECK(ok && !body.empty() && body[0] == '[');
+    std::string none;
+    CHECK(!net::get("https://api.github.com/repos/EmilianoManaloIV/no-such-repo-xyz/releases", none, &error) && !error.empty());
+    std::printf("    a missing page: '%s'\n", error.c_str());
+  });
+  /* ---------------------------------------------------------------- round 106: libraries optional at run time (task 0080) */
+  test("libraries: this build knows whether it has Blender's libraries; --probe answers at once; the Libraries dialog and the choice", [] {
+    const launch::Status &st = launch::status();
+    std::printf("    built with the libraries: %d; full program '%s'; downloads go to %s\n", (int)st.full, launch::full_program_name().c_str(),
+                launch::user_libs_dir().c_str());
+#if defined(BL_WITH_TBB)
+    CHECK(st.full);
+#else
+    CHECK(!st.full);
+#endif
+    {
+      std::string a0 = "Blendity", a1 = "--probe";
+      char *argv[] = {&a0[0], &a1[0]};
+      CHECK(launch::hand_over(2, argv) == 0);  // (a probe: "my libraries loaded")
+    }
+    CHECK(!launch::full_build_ready(fs::join(test_dir(), "no such install")));
+    CHECK(launch::user_libs_dir().find(releases::build_tag()) != std::string::npos);
+    /* The Libraries dialog, from a release that has this build's libraries. */
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.record_buttons_for_test(true);
+    const std::string p = releases::platform();
+    const std::string json = strprintf("[{\"tag_name\":\"%s\",\"name\":\"this\",\"body\":\"\",\"published_at\":\"2026-10-20T00:00:00Z\",\"prerelease\":true,"
+                                       "\"assets\":[{\"name\":\"blendity-libs-%s-0.10.0.zip\",\"browser_download_url\":\"https://x/l\",\"size\":157286400},"
+                                       "{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://x/s\",\"size\":10}]}]",
+                                       releases::build_tag(), p.c_str());
+    CHECK(ed.show_libraries_for_test(json));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti b;
+    CHECK(ed.button_rect_for_test("Download", b) && b.bottom() <= 720);
+    CHECK(ed.button_rect_for_test("Never ask", b));
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2;
+      ed.step_frame_headless({e});
+    }
+    /* Never ask is kept with the preferences; so is turning the libraries off. */
+    const std::string prefs = fs::join(test_dir(), "r106_prefs.txt");
+    ed.prefs_for_test(prefs);
+    ed.command("update libsoff");
+    ed.save_prefs_for_test();
+    std::string saved;
+    CHECK(fs::read_file(prefs, saved) && saved.find("libs_never_ask=1") != std::string::npos && saved.find("use_libs=0") != std::string::npos);
+    std::remove(prefs.c_str());
   });
 }

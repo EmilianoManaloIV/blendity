@@ -13,6 +13,70 @@
 
 namespace bl::ui {
 
+const char *const kThemeNames[kThemeCount] = {"Dark", "Light", "Emiliano Light", "Emiliano Dark"};
+
+/* The themes. Emiliano's from the site's variables: background F1EEE5 / 292927, text 292927 / F1EEE5 (75 % for the
+ * light text), accent D7882B and A65E1E, signal mint 45E8A2, magenta ED24C7, blue 4C76FF, red E6533C, amber FF9A00,
+ * yellow FFE44D, supporting stone D8D3C9, slate 6B6B63, silver 9A9992, charcoal 1A1A1A. */
+int theme_index(const std::string &name) {
+  const std::string want = to_lower(name);
+  for (int k = 0; k < kThemeCount; k++)
+    if (want == to_lower(kThemeNames[k])) return k;
+  return -1;
+}
+
+Theme theme_named(const std::string &name) {
+  Theme t;  // Dark: the defaults
+  auto h = [](uint32_t rgb) { return Color::hex(rgb); };
+  if (name == "Light") {
+    t.window = t.panel = h(0xC8C8C8), t.panel_alt = h(0xC2C2C2), t.toolbar = h(0xA5A5A5), t.menubar = h(0xD6D6D6);
+    t.tabbar = h(0xB8B8B8), t.tab_active = h(0xC8C8C8), t.tab_hover = h(0xBEBEBE), t.border = h(0x8C8C8C), t.separator = h(0xA8A8A8);
+    t.text = h(0x101010), t.text_dim = h(0x505050), t.text_bright = h(0x000000);
+    t.field = h(0xEDEDED), t.field_border = h(0x9A9A9A), t.field_hover = h(0x7A7A7A), t.focus = h(0x3A79BB);
+    t.button = h(0xE4E4E4), t.button_hover = h(0xF2F2F2), t.button_active = h(0x9BB8D8), t.selection = h(0x8FB4DC), t.selection_dim = h(0xB0B0B0);
+    t.header = h(0xD2D2D2), t.popup = h(0xE6E6E6);
+    t.row_alt = h(0xBEBEBE), t.strip = h(0xB4B4B4), t.row_hover = h(0xD8D8D8), t.key = h(0x505050), t.key_group = h(0x202020);
+    t.key_selected = h(0x2B6CC4), t.canvas_bg = h(0xA8A8A8);
+    t.tooltip = h(0xF5F5F5), t.tooltip_border = h(0x8C8C8C), t.scroll_track = h(0xC2C2C2), t.scroll_thumb = h(0x9A9A9A);
+    t.bar = h(0xB8B8B8), t.pane = h(0xC2C2C2), t.stripe = h(0xBEBEBE), t.well = h(0xB0B0B0), t.playhead = h(0x202020);
+    t.note_text = h(0x5A4020), t.link = h(0x2B5C8C), t.link_icon = h(0x3A79BB);
+    t.note = h(0xE8DCC8), t.question = h(0xD8DEE6), t.question_hover = h(0xCED6E0), t.question_border = h(0x9AA6B4);
+  }
+  else if (name == "Emiliano Light") {
+    t.window = t.panel = h(0xF1EEE5), t.panel_alt = h(0xEAE6DB), t.toolbar = h(0xD8D3C9), t.menubar = h(0xD8D3C9);
+    t.tabbar = h(0xD8D3C9), t.tab_active = h(0xF1EEE5), t.tab_hover = h(0xE4DFD3), t.border = h(0x9A9992), t.separator = h(0xC9C4B9);
+    t.text = h(0x292927), t.text_dim = h(0x6B6B63), t.text_bright = h(0x1A1A1A);
+    t.field = h(0xFBFAF6), t.field_border = h(0x9A9992), t.field_hover = h(0x6B6B63), t.focus = h(0xD7882B);
+    t.button = h(0xE4DFD3), t.button_hover = h(0xEFEBE1), t.button_active = h(0xEBB57A), t.selection = h(0xEFB27A), t.selection_dim = h(0xD8D3C9);
+    t.header = h(0xE4DFD3), t.popup = h(0xF6F4EE);
+    t.accent = h(0xD7882B), t.warning = h(0xFF9A00), t.error = h(0xE6533C), t.ok = h(0x2FB57D);
+    t.axis_x = h(0xE6533C), t.axis_y = h(0x2FB57D), t.axis_z = h(0x4C76FF), t.axis_hot = h(0xFF9A00);
+    t.row_alt = h(0xEAE6DB), t.strip = h(0xE0DBCF), t.row_hover = h(0xE4DFD3), t.key = h(0x6B6B63), t.key_group = h(0x292927);
+    t.key_selected = h(0xD7882B), t.canvas_bg = h(0xD8D3C9);
+    t.tooltip = h(0xFBFAF6), t.tooltip_border = h(0x9A9992), t.scroll_track = h(0xE4DFD3), t.scroll_thumb = h(0x9A9992);
+    t.bar = h(0xD8D3C9), t.pane = h(0xEAE6DB), t.stripe = h(0xE4DFD3), t.well = h(0xD8D3C9), t.playhead = h(0xE6533C);
+    t.note_text = h(0x6B4A1E), t.link = h(0x3557C2), t.link_icon = h(0x4C76FF);
+    t.note = h(0xF6E3C8), t.question = h(0xE4DFD3), t.question_hover = h(0xD8D3C9), t.question_border = h(0x9A9992);
+  }
+  else if (name == "Emiliano Dark") {
+    t.window = t.panel = h(0x292927), t.panel_alt = h(0x2E2E2C), t.toolbar = h(0x1A1A1A), t.menubar = h(0x1A1A1A);
+    t.tabbar = h(0x222220), t.tab_active = h(0x33332F), t.tab_hover = h(0x2C2C29), t.border = h(0x3D3D39), t.separator = h(0x1F1F1D);
+    t.text = h(0xF1EEE5), t.text_dim = h(0x9A9992), t.text_bright = h(0xFFFFFF);
+    t.field = h(0x1F1F1D), t.field_border = h(0x4A4A45), t.field_hover = h(0x6B6B63), t.focus = h(0x45E8A2);
+    t.button = h(0x3D3D39), t.button_hover = h(0x4A4A45), t.button_active = h(0xA65E1E), t.selection = h(0xA65E1E), t.selection_dim = h(0x3D3D39);
+    t.header = h(0x33332F), t.popup = h(0x222220);
+    t.accent = h(0xD7882B), t.warning = h(0xFF9A00), t.error = h(0xE6533C), t.ok = h(0x45E8A2);
+    t.axis_x = h(0xE6533C), t.axis_y = h(0x45E8A2), t.axis_z = h(0x4C76FF), t.axis_hot = h(0xFFE44D);
+    t.row_alt = h(0x242422), t.strip = h(0x2A2A27), t.row_hover = h(0x3D3D39), t.key = h(0x9A9992), t.key_group = h(0xF1EEE5);
+    t.key_selected = h(0xD7882B), t.canvas_bg = h(0x1A1A1A);
+    t.tooltip = h(0x1A1A1A), t.tooltip_border = h(0x6B6B63), t.scroll_track = h(0x222220), t.scroll_thumb = h(0x6B6B63);
+    t.bar = h(0x222220), t.pane = h(0x2E2E2C), t.stripe = h(0x2E2E2C), t.well = h(0x1F1F1D), t.playhead = h(0xF1EEE5);
+    t.note_text = h(0xF6E3C8), t.link = h(0x9FB5FF), t.link_icon = h(0x4C76FF);
+    t.note = h(0x3A3024), t.question = h(0x33332F), t.question_hover = h(0x3D3D39), t.question_border = h(0x6B6B63);
+  }
+  return t;
+}
+
 using namespace platform;
 
 /* ===================================================================== */
@@ -255,7 +319,7 @@ void Context::draw_tooltip() {
   if (r.bottom() > canvas.height()) r.y = in.my - r.h - px(6);
   canvas.push_clip({0, 0, canvas.width(), canvas.height()});
   canvas.fill_rect({r.x + 2, r.y + 2, r.w, r.h}, Color::hex(0x000000, 90));
-  frame(r, Color::hex(0x1E1E1E), Color::hex(0x5A5A5A), px(3));
+  frame(r, theme.tooltip, theme.tooltip_border, px(3));
   for (size_t i = 0; i < lines.size(); i++) canvas.text(font, r.x + px(6), r.y + px(4) + (int)i * lh, lines[i], theme.text_bright);
   canvas.pop_clip();
 }
@@ -1070,8 +1134,8 @@ void Context::end_scroll() {
   int maxoff = s.content_h - s.r.h;
   int th = std::max(px(24), (int)((int64_t)s.r.h * s.r.h / s.content_h));
   int ty = s.r.y + (int)((int64_t)(s.r.h - th) * s.offset / std::max(1, maxoff));
-  canvas.fill_rect({s.r.right() - bw, s.r.y, bw, s.r.h}, Color::hex(0x2E2E2E));
-  canvas.fill_round_rect({s.r.right() - bw + px(2), ty, bw - px(4), th}, px(3), active_ == (s.id ^ 0x5C011ull) ? theme.button_hover : Color::hex(0x5E5E5E));
+  canvas.fill_rect({s.r.right() - bw, s.r.y, bw, s.r.h}, theme.scroll_track);
+  canvas.fill_round_rect({s.r.right() - bw + px(2), ty, bw - px(4), th}, px(3), active_ == (s.id ^ 0x5C011ull) ? theme.button_hover : theme.scroll_thumb);
 }
 
 /* ===================================================================== */
@@ -1147,7 +1211,7 @@ void Context::draw_popups() {
     canvas.push_clip({0, 0, canvas.width(), canvas.height()});
     canvas.fill_rect({r.x + px(3), r.y + px(3), r.w, r.h}, Color::hex(0x000000, 80));
     canvas.fill_rect(r, theme.popup);
-    canvas.rect_outline(r, Color::hex(0x161616));
+    canvas.rect_outline(r, theme.border);
     current_layer_ = (int)k + 1;
     popup_area_ = {r.x + 1, r.y + px(4), r.w - 2, r.h - px(8)};
     popup_cursor_y_ = r.y + px(4);
@@ -1220,7 +1284,7 @@ bool Context::submenu(const std::string &text, int width, std::function<void()> 
 
 void Context::menu_separator() {
   Recti r = popup_row(px(7));
-  canvas.hline(r.x + px(6), r.right() - px(6), r.y + r.h / 2, Color::hex(0x454545));
+  canvas.hline(r.x + px(6), r.right() - px(6), r.y + r.h / 2, theme.tooltip_border);
 }
 
 void Context::menu_label(const std::string &text) {

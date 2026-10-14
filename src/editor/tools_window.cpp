@@ -73,7 +73,7 @@ void Editor::draw_tools_window(const Recti &r) {
       for (size_t k = i; k < std::min(bs.size(), i + (size_t)per); k++) {
         Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
         if (!bs[k].enabled) {
-          u.frame(br, Color::hex(0x2A2A2A), u.theme.border, u.px(3));
+          u.frame(br, u.theme.strip, u.theme.border, u.px(3));
           u.label(br, bs[k].label, u.theme.text_dim, ui::Align::Center);
         }
         else if (u.button(br, bs[k].label)) bs[k].fn();

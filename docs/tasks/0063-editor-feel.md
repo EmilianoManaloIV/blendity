@@ -4,7 +4,7 @@
 - **Requirements:** R-01 (Unity-style editor), R-07 (usability)
 - **Decisions:** none new (keymap presets are ADR-less data; navigation styles extend the Scene view's input)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/60
 
 ## Goal
 The user's later list (2026-10-12): "switch the editor's feel between Unity / Unreal / Blender / Maya". Asked what a

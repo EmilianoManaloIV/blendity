@@ -59,6 +59,17 @@ every pixel before the surfaces covered most of it.
   - **The viewport stays on the CPU** for this machine. ADR 0013 was re-measured at 8 threads: a GPU viewport only
     pays on ray-tracing cards.
 
+## Amendment (task 0075, 2026-10-14): a laptop minimum
+The minimum is now the user's HP Envy 13.3" 2-in-1 (i7-1165G7, 4 cores / 8 threads, 8 GB shared with Iris Xe,
+1080p at 150 %, touch and pen).
+- Emulated by `blendity_stress --laptop` (5 threads, times x 1.4); the targets there are 60 fps orbiting and 30 fps
+  editing on Low (PERFORMANCE.md, pass 9). Low keeps 67 % rather than dropping further.
+- The first run on such a machine starts on Low and says so, offering High (`BLENDITY_MIN_SPEC=1` shows it anywhere).
+- Low's views take a 2 x 2 bilinear shadow filter; integrated GPUs get a quarter of RAM for the path tracer.
+- Touch: Windows gestures (two fingers zoom, pan, rotate the Scene view; one finger stays the mouse); pen pressure
+  from pointer messages scales the weight-paint brush. X11 and Cocoa keep the mouse only.
+- Layouts and dialogs fit 1280 x 720 (the first-run dialog and Preferences checked).
+
 ## Consequences
 - Low looks softer (bilinear-scaled 3D). Shadow texels can be up to about 1.2 times larger in the views.
 - Wall-clock time decides which casters are moving. Pixels never depend on it, because the composed map equals a

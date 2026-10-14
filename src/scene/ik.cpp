@@ -13,8 +13,17 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <unordered_set>
 
 namespace bl {
+
+/* The bones of a constraint's chain, root first; empty when the end isn't a bone. */
+std::vector<GameObject *> ik_chain(GameObject &end, int length) {
+  std::vector<GameObject *> chain;
+  for (GameObject *g = &end; g && (int)chain.size() < std::max(1, std::min(length, 64)) && g->get<Bone>(); g = g->parent) chain.push_back(g);
+  std::reverse(chain.begin(), chain.end());
+  return chain;
+}
 
 namespace {
 
@@ -23,14 +32,6 @@ bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bit
 Vec3 any_perpendicular(Vec3 u) {
   const Vec3 a = std::fabs(u.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
   return normalize(a - u * dot(u, a));
-}
-
-/* The bones of a constraint's chain, root first; empty when the end isn't a bone. */
-std::vector<GameObject *> ik_chain(GameObject &end, int length) {
-  std::vector<GameObject *> chain;
-  for (GameObject *g = &end; g && (int)chain.size() < std::max(1, std::min(length, 64)) && g->get<Bone>(); g = g->parent) chain.push_back(g);
-  std::reverse(chain.begin(), chain.end());
-  return chain;
 }
 
 Vec3 bone_tail(const GameObject &g) {
@@ -168,9 +169,68 @@ static bool solve_one(IKConstraint &ik) {
 
 std::atomic<int> IKConstraint::live{0};
 
-bool solve_constraints(Scene &scene) {
-  if (IKConstraint::live.load(std::memory_order_relaxed) == 0) return false;  // no IK anywhere: no walk (most scenes)
+std::atomic<int> RigControl::live{0};
+
+void RigControl::reflect(Reflector &r) {
+  static const char *kShapes[] = {"Circle", "Square", "Box", "Diamond", "Sphere", "Arrows", "Cross", "Root"};
+  r.enumeration("Shape", shape, kShapes, 8);
+  r.help("How the control is drawn (Maya's controller curves, Blender's custom bone shapes).");
+  static const char *kSides[] = {"Auto (by name)", "Centre", "Left", "Right"};
+  r.enumeration("Side", side, kSides, 4);
+  r.help("Its colour: left blue, right red, the middle yellow (Maya's and Blender's convention). Auto reads the name.");
+  static const char *kRoles[] = {"Control", "IK Target", "IK Pole", "FK"};
+  r.enumeration("Role", role, kRoles, 4);
+  r.field("Size", size, 0.01f, 0.001f, 1000.0f);
+  r.object("Drives", drives, "Bone");
+  r.help("FK: the bone that turns as this control turns.");
+  r.field("In Front", in_front);
+  r.help("Drawn over meshes (off: hidden behind them).");
+}
+
+int rig_control_side(const GameObject &g, const RigControl &c) {
+  if (c.side != RigControl::SideAuto) return c.side;
+  std::string n = g.name;
+  for (char &ch : n) ch = (char)std::tolower((unsigned char)ch);
+  for (const char *suffix : {"ik", "pole", "fk"})  // (a control is named after its bone: "Shin.L" + "IK")
+    if (n.size() > std::strlen(suffix) + 2 && n.compare(n.size() - std::strlen(suffix), std::strlen(suffix), suffix) == 0) {
+      n.erase(n.size() - std::strlen(suffix));
+      break;
+    }
+  auto ends = [&](const char *s) { return n.size() >= std::strlen(s) && n.compare(n.size() - std::strlen(s), std::strlen(s), s) == 0; };
+  auto has = [&](const char *s) { return n.find(s) != std::string::npos; };
+  if (has("left") || ends(".l") || ends("_l") || ends(" l") || n.rfind("l_", 0) == 0) return RigControl::Left;
+  if (has("right") || ends(".r") || ends("_r") || ends(" r") || n.rfind("r_", 0) == 0) return RigControl::Right;
+  return RigControl::Centre;
+}
+
+/* FK controls: each turns the bone it names to its own world rotation (before IK, which may turn it again). */
+static bool solve_fk(Scene &scene) {
   bool any = false;
+  std::unordered_set<const GameObject *> ik_bones;  // (IK turns these: FK leaves them, so the two never fight)
+  if (IKConstraint::live.load(std::memory_order_relaxed))
+    scene.for_each([&](GameObject &g) {
+      const IKConstraint *ik = g.get<IKConstraint>();
+      if (ik && ik->enabled && !ik->target.empty())
+        for (GameObject *b : ik_chain(g, ik->chain_length)) ik_bones.insert(b);
+    });
+  scene.for_each([&](GameObject &g) {
+    RigControl *rc = g.get<RigControl>();
+    if (!rc || !rc->enabled || rc->role != RigControl::FK || rc->drives.empty()) return;
+    GameObject *b = resolve(scene, rc->drives, rc->drives_id);
+    if (!b || b == &g || !b->get<Bone>() || ik_bones.count(b)) return;
+    const Quat want = g.world_rotation();
+    const Quat have = b->world_rotation();
+    if (std::fabs(want.x * have.x + want.y * have.y + want.z * have.z + want.w * have.w) > 0.999999f) return;
+    b->set_world_rotation(want);
+    any = true;
+  });
+  return any;
+}
+
+bool solve_constraints(Scene &scene) {
+  const bool fk = RigControl::live.load(std::memory_order_relaxed) != 0 && solve_fk(scene);
+  if (IKConstraint::live.load(std::memory_order_relaxed) == 0) return fk;  // no IK anywhere: no walk (most scenes)
+  bool any = fk;
   scene.for_each([&](GameObject &g) {
     for (auto &c : g.components)
       if (std::strcmp(c->type_name(), IKConstraint::kName) == 0) any = solve_one(*static_cast<IKConstraint *>(c.get())) || any;
@@ -224,6 +284,11 @@ void add_limb_ik(Scene &s, GameObject *root, GameObject *lower, const std::strin
   const float len = std::max(0.05f, lower->get<Bone>()->length);
   GameObject *t = make_empty(s, unique_name(s, target_name), root, bone_tail(*lower));  // a second rig's targets are its own
   GameObject *p = make_empty(s, unique_name(s, pole_name), root, lower->world_position() + pole_dir * (len * 1.5f));
+  /* Drawn as controls (task 0067): the target a box, the pole a diamond, coloured by side. */
+  RigControl *tc = t->add<RigControl>();
+  tc->shape = RigControl::Box, tc->role = RigControl::IKTarget, tc->size = len * 0.2f;
+  RigControl *pc = p->add<RigControl>();
+  pc->shape = RigControl::Diamond, pc->role = RigControl::IKPole, pc->size = len * 0.12f;
   IKConstraint *ik = lower->add<IKConstraint>();
   ik->target = t->name;
   ik->pole = p->name;

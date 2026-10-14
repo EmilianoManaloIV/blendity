@@ -36,6 +36,10 @@ struct Window {
   uint32_t high_surrogate = 0;
   int buttons_down = 0;
   bool in_refresh = false;
+  /* Touch and pen (task 0075): the gesture so far, and the pen's last pressure. */
+  double gesture_dist = 0.0, gesture_angle = 0.0;
+  POINT gesture_at{};
+  float pen_pressure = 1.0f;
 };
 
 static std::string narrow(const wchar_t *w, int len = -1) {
@@ -119,7 +123,69 @@ static float window_dpi(HWND hwnd) {
   return d;
 }
 
-static void push(Window *w, Event e) { w->queue.push_back(std::move(e)); }
+/* Is the mouse message being handled one Windows made from a pen? (Touch and pens mark theirs: MI_WP_SIGNATURE, with
+ * 0x80 set for touch.) A mouse's or a finger's moves press at 1, whatever a pen did before. */
+static bool message_from_pen() { return (GetMessageExtraInfo() & 0xFFFFFF80) == 0xFF515700; }
+
+static void push(Window *w, Event e) {
+  if (e.type == EventType::MouseMove || e.type == EventType::MouseDown) e.pressure = message_from_pen() ? w->pen_pressure : 1.0f;
+  w->queue.push_back(std::move(e));
+}
+
+/* Two fingers (Windows' gestures): pinch to zoom, drag to pan, twist to rotate; each event the change since the last.
+ * One finger stays the mouse (single-finger panning is turned off in create_window). */
+static void gesture_zoom(Window *w, const GESTUREINFO &gi, bool begin, Event &e) {
+  const double d = (double)gi.ullArguments;
+  if (!begin && w->gesture_dist > 0.0 && d > 0.0) e.zoom = (float)(d / w->gesture_dist);
+  w->gesture_dist = d;
+}
+
+static void gesture_pan(Window *w, POINT p, bool begin, Event &e) {
+  if (!begin) e.pan_x = (float)(p.x - w->gesture_at.x), e.pan_y = (float)(p.y - w->gesture_at.y);
+  w->gesture_at = p;
+}
+
+static void gesture_rotate(Window *w, const GESTUREINFO &gi, bool begin, Event &e) {
+  const double a = GID_ROTATE_ANGLE_FROM_ARGUMENT(LOWORD(gi.ullArguments)) * 57.29577951308232;  // (radians to degrees)
+  if (!begin) e.rotate = (float)(a - w->gesture_angle);
+  w->gesture_angle = a;
+}
+
+static LRESULT on_gesture(Window *w, HWND hwnd, WPARAM wp, LPARAM lp) {
+  GESTUREINFO gi{};
+  gi.cbSize = sizeof(gi);
+  if (!GetGestureInfo((HGESTUREINFO)lp, &gi)) return DefWindowProcW(hwnd, WM_GESTURE, wp, lp);
+  const bool ours = gi.dwID == GID_ZOOM || gi.dwID == GID_PAN || gi.dwID == GID_ROTATE;
+  if (!ours) return DefWindowProcW(hwnd, WM_GESTURE, wp, lp);  // (GID_BEGIN / END and the taps: Windows' own; it closes the handle)
+  POINT p{gi.ptsLocation.x, gi.ptsLocation.y};
+  ScreenToClient(hwnd, &p);
+  const bool begin = (gi.dwFlags & GF_BEGIN) != 0;
+  Event e;
+  e.type = EventType::Gesture;
+  e.x = p.x, e.y = p.y;
+  e.mods = current_mods();
+  if (gi.dwID == GID_ZOOM) gesture_zoom(w, gi, begin, e);
+  if (gi.dwID == GID_PAN) gesture_pan(w, p, begin, e);
+  if (gi.dwID == GID_ROTATE) gesture_rotate(w, gi, begin, e);
+  CloseGestureInfoHandle((HGESTUREINFO)lp);
+  if (!begin) push(w, e);
+  return 0;
+}
+
+/* Windows 8's pointer calls, looked up so the program still starts where they're missing. */
+using GetPointerTypeFn = BOOL(WINAPI *)(UINT32, POINTER_INPUT_TYPE *);
+using GetPointerPenInfoFn = BOOL(WINAPI *)(UINT32, POINTER_PEN_INFO *);
+
+/* A pen's pressure, noted from its pointer messages before Windows turns them into mouse messages (which carry it). */
+static void note_pointer(Window *w, WPARAM wp) {
+  static auto get_type = (GetPointerTypeFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetPointerType");
+  static auto get_pen = (GetPointerPenInfoFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetPointerPenInfo");
+  const UINT32 id = GET_POINTERID_WPARAM(wp);
+  POINTER_INPUT_TYPE type = PT_POINTER;
+  POINTER_PEN_INFO pen{};
+  if (!get_type || !get_pen || !get_type(id, &type) || type != PT_PEN || !get_pen(id, &pen)) return;
+  w->pen_pressure = (pen.penMask & PEN_MASK_PRESSURE) ? std::max(0.0f, std::min(pen.pressure / 1024.0f, 1.0f)) : 1.0f;
+}
 
 static void mouse_button(Window *w, int button, bool down, LPARAM lp) {
   Event e;
@@ -241,6 +307,16 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       return 0;
     }
+    case WM_GESTURE: return on_gesture(w, hwnd, wp, lp);
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+      note_pointer(w, wp);
+      break;  // (on to DefWindowProc: the pen and fingers still arrive as the mouse)
+    case WM_POINTERUP:
+    case WM_POINTERLEAVE:
+    case WM_POINTERCAPTURECHANGED:
+      w->pen_pressure = 1.0f;  // (lifted or gone: nothing presses)
+      break;
     case WM_DROPFILES: {
       HDROP drop = (HDROP)wp;
       Event e;
@@ -363,6 +439,11 @@ Window *create_window(const char *title, int width, int height) {
   SetWindowLongPtrW(w->hwnd, GWLP_USERDATA, (LONG_PTR)w);
   w->dpi = window_dpi(w->hwnd);
   DragAcceptFiles(w->hwnd, TRUE);
+  /* Two-finger gestures for the Scene view; one finger is the mouse, so single-finger panning is off. */
+  GESTURECONFIG gc[] = {{GID_ZOOM, GC_ZOOM, 0},
+                        {GID_ROTATE, GC_ROTATE, 0},
+                        {GID_PAN, GC_PAN, GC_PAN_WITH_SINGLE_FINGER_VERTICALLY | GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY | GC_PAN_WITH_INERTIA}};
+  SetGestureConfig(w->hwnd, 0, 3, gc, sizeof(GESTURECONFIG));
   ShowWindow(w->hwnd, SW_SHOWMAXIMIZED);
   UpdateWindow(w->hwnd);
   return w;

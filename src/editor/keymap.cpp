@@ -188,6 +188,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       /* Windows and rendering */
       {"render.image", "Render Image", "Render", CTX_GLOBAL},
       {"render.screenshot", "Screenshot", "Render", CTX_GLOBAL},
+      {"render.animation", "Render Animation", "Render", CTX_GLOBAL},
       {"window.render", "Render Window", "Windows", CTX_GLOBAL},
       {"window.learn", "Learn Window", "Windows", CTX_GLOBAL},
       {"window.scene", "Scene Window", "Windows", CTX_GLOBAL},
@@ -222,6 +223,7 @@ static void common_bindings(Keymap &k) {
   b("edit.redo", {"Ctrl+Y", "Ctrl+Shift+Z"});
   b("render.image", {"F12"});
   b("render.screenshot", {"Shift+F12"});
+  b("render.animation", {"Ctrl+F12"});
   b("window.render", {"F11"});
   b("window.learn", {"F1"});
   b("edit.adjust_last", {"F9"});
@@ -688,6 +690,7 @@ bool Editor::run_action(const std::string &id) {
   }
   else if (id == "render.image") start_final_render();
   else if (id == "render.screenshot") screenshot_dialog();
+  else if (id == "render.animation") ranim_.active ? stop_render_animation() : (void)start_render_animation();
   else if (id == "window.render") dock_open(WindowKind::Render);
   else if (id == "window.learn") dock_open(WindowKind::Learn);
   else return false;
@@ -699,7 +702,7 @@ bool Editor::run_action(const std::string &id) {
  * Scene view, then anywhere), so one key can mean different things there. */
 void Editor::handle_shortcuts() {
   auto &in = ui_.in;
-  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active) return;  // a running operator takes the keys
+  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active || bone_drag_.modal) return;  // a running operator takes the keys
   if (!capturing_binding_.empty()) return;  // Preferences is waiting for a key to bind
   int mods = 0;
   if (in.ctrl()) mods |= platform::MOD_CTRL;

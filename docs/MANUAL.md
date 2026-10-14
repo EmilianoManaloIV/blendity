@@ -175,7 +175,9 @@ does; the **Knife** (K) splits faces along a line.
 
 **Modifiers** stack non-destructively, top to bottom, as in Blender: Array, Bevel, Boolean, Decimate, Mirror, Screw,
 Solidify, Subdivision Surface, Triangulate, Wireframe, Weld; and the deformers Cast, Curve, Displace, Lattice, Mesh
-Deform, Simple Deform and Smooth. Each has Edit Mode / Viewport / Render toggles.
+Deform, Simple Deform and Smooth. Each has Edit Mode / Viewport / Render toggles. Drag a modifier's name to move it in
+the stack (a line shows where it lands); a camera's filters, a texture's layers and the Sequencer's tracks move the
+same way.
 
 **Curves and lattices.** GameObject > Curve makes Bezier, circle and path curves; a Curve modifier bends a mesh along
 one, Array > Fit Curve fills it with copies. A Lattice is a box of points that squashes the mesh inside it. Curve and
@@ -237,7 +239,8 @@ that uses them, as in Unity.
 **Procedural textures** (`Assets/Textures/<name>.ptex`): a stack of layers, like Blender's modifier stack:
 generators (Brick, Wood Floor, Tiles, Voronoi, Noise...) and filters (Blur, Levels, Warp, Edge Wear...), each with a
 blend mode. The **Textures** window makes and edits them; one texture gives albedo, normal, roughness and height
-maps, and stays sharp at any distance with Live Shading.
+maps, and stays sharp at any distance with Live Shading. Its **Physical Size** is the metres one tile covers:
+changing it re-tiles every material using the texture (Tiling = 1 / size), except one tiled by hand.
 
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.
@@ -282,6 +285,9 @@ ACES and (with OpenColorIO) AgX.
 
 **More for renders.** The scene's **Active Camera** (Camera inspector, the Game view's camera menu) is what F12 and
 the Game view use; **Render Camera Sequence** renders every camera marked In Sequence, each to its own image;
+**Render Animation** (Ctrl+F12, or `renderanim [first last] [fps]`) renders every frame of the scene's sequence (or the
+selected clip) as `Renders/<scene>_animation_<time>/0001.png...` and an H.264 MP4 next to them, encoded by the
+FFmpeg built in (Blender's; a build without it runs an `ffmpeg` on the PATH or `renderanim ffmpeg <path>`);
 **Film > Transparent** leaves the world out for a PNG or EXR with alpha; **Live Preview** re-renders a quick preview
 as you edit.
 
@@ -373,6 +379,12 @@ keeps its pose, with each bone resting at its bind pose, so Reset Pose gives the
 2. Select the shirt; Rigging > Transfer Weights; drag the body onto From; Transfer Weights. The shirt gets the body's
    skeleton and follows its pose.
 
+**Shaping bones and controls:** select a bone and drag its blue tail handle to aim and stretch it (Shift+drag the
+orange head); the bones below keep their places. Ctrl+E (E with Blender's keys) extrudes a new bone from the tip: move
+the mouse, click to keep it. IK targets are boxes and poles diamonds, coloured by side (left blue, right red, middle
+yellow); Rigging > FK Controls puts circles on bones to turn them by. Remove IK and Remove FK Controls take them away.
+A character made with GameObject > Armature or the auto-rig lives under one root ("Robot Rig"), as Unity imports one.
+
 **Use cases:** game characters and creatures; posed renders; clothing and armour for an existing rig.
 
 > Learn: *Modifiers vs Components > Vertex groups, Weight painting, Bones and skins, Automatic weights by inpainting,
@@ -429,8 +441,9 @@ same bone names. IK runs after the clip, so animating the IK targets is enough f
 ease-out, bounces and overshoots in the Curves view.
 
 **Sequencing clips (instead of a state machine):** Window > **Sequencer** is a Premiere-style timeline for clips.
-Select the character, press **Create** (it gets a **Sequencer** component and a `.seq`), and drag `.anim` clips from
-the Project window onto its tracks. Drag a bar to move it, its ends to trim it; set Speed, In and Out below the tracks.
+Press **Create** (the scene gets a `.seq`), and drag `.anim` clips from the Project window onto its tracks: each bar is
+a clip **and the object it plays on** (the selected character, or one dragged onto the bar's Object field), so one
+timeline animates a whole scene. Drag a bar to move it, its ends to trim it; set Speed, In and Out below the tracks.
 Bars overlapping on one track **crossfade**; a bar on a higher track wins for what it animates. **Triggers** (key,
 clip, blend seconds) jump to a clip in Play, blending from the pose of the moment; from the console, `seq jump <clip>`.
 
@@ -461,13 +474,30 @@ checked both ways against Blender 5.2.
 
 > Learn: *Assets, Scenes and Files*, *Coordinate Systems and Handedness*.
 
+**Updates** (Help > Check for Updates, Help > Version History; Preferences > Updates): once a day, when online,
+Blendity looks for a newer build - every merged pull request makes one, version tags the stable releases - and shows
+what it brings with **Install** / **Not now** / **Skip this one**. Installs are checked against the release's SHA-256
+list. Version History installs any build, older ones too (the one before a certain change). Console: `update check`,
+`update history`, `update install <tag>`.
+
+**With or without Blender's libraries** (Preferences > Libraries): an install holds Blendity (its own code only, always
+starts) and Blendity-full (with Blender's libraries). Blendity hands over to the full one when its libraries load and
+**Use Blender's libraries** is on; otherwise it runs itself - offline, with a library missing or damaged, or by your
+choice (`--no-libs` once). When the libraries are missing and Blendity is online it offers to download them for this
+build (**Download** / **Not now** / **Never ask**). The Windows installer's "Blendity only" type leaves them out.
+
 ---
 
 ## 11. Performance and the minimum machine
 
-**Minimum:** a 4-core / 8-thread CPU at about 3 GHz, 8 GB of RAM, a GTX 1050 Ti class GPU (Vulkan 1.2; the GPU is for
-path tracing, baking and realtime GI - the editing views draw on the CPU). On such a machine Blendity starts on the
-**Low** quality tier.
+**Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
+class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
+8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and
+says so on the first run, with High one click away. There, editing frames run at about 35-40 fps and orbiting at 60.
+The GPU is for path tracing, baking and realtime GI; an integrated one gets a quarter of the RAM for it.
+
+**Touch and pen (Windows):** two fingers over the Scene view pinch to zoom, drag to pan and twist to turn round the
+pivot, in every editor feel; one finger is the mouse. A pen's pressure scales the weight-paint brush.
 
 **Quality tiers** (Edit > Preferences..., Quality):
 
@@ -493,6 +523,10 @@ Surface's Levels at 1 while modelling, and turn on the Low tier for heavy scenes
 
 Blendity uses Unity's keys, and keeps Blender's where Unity has none. Edit > Preferences..., Keymap, starts from
 Unity, Unreal, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
+
+**Themes** (Preferences > Theme, or `theme Dark|Light|Emiliano Light|Emiliano Dark`): the editor's colours. The two
+Emiliano themes take the palette of the author's site (its Figma variables): paper #F1EEE5 and charcoal #292927, an amber
+accent #D7882B, mint / red / blue / amber signal colours.
 
 **Editor Feel** (Edit > Editor Feel, or `feel unity|unreal|blender|maya`) switches the keys *and* the Scene view's
 mouse navigation to another program's:
