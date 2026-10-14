@@ -855,11 +855,12 @@ class Editor {
   void seq_apply();
   void seq_set_frame(float f);
   void seq_set_preview(bool on);
-  void seq_save_pose(GameObject &root);
+  void seq_save_pose(GameObject *root);
+  void seq_remember_new_targets(const Sequence &s);
   void seq_tick();
   void seq_reset();
   void seq_drag_cancel();
-  bool seq_add_clip(const std::string &clip, int track, float start);
+  bool seq_add_clip(const std::string &clip, int track, float start, const std::string &target = "");
   SeqInstance *seq_selected(Sequence &s, int *track = nullptr, int *index = nullptr);
   bool seq_move(const std::string &name, int track, float start);
   bool seq_trim(const std::string &name, float trim_in, float trim_out, float start);

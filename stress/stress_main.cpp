@@ -3565,7 +3565,7 @@ static void test_animation_stress(Report &rep, const Options &o) {
   for (int i = 0; i < frames; i++) {
     vals.clear();
     sample_sequence(seq, (float)(60 + i % 60) + 0.5f, vals);  // (inside the overlap: both instances of each track sampled)
-    apply_anim_values(vals, *root);
+    apply_anim_values(vals, root);
   }
   const double per_seq = ts.ms() / frames;
   rep.row({"4 x 2 x " + std::to_string(clip.tracks.size()) + " (sequence)", std::to_string(keys * 8), strprintf("%.4f", per_seq), "0.5"});

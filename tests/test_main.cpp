@@ -26920,7 +26920,7 @@ static void round81_tests() {
     std::remove(resolve_asset_path("Assets/Animations/R86Box Sequence.seq").c_str());
     std::remove(resolve_asset_path("Assets/Animations/R86Rise.anim").c_str());
     ed.command("seq new");
-    CHECK(box->get<Sequencer>() && ed.seq_for_test_sequence());
+    CHECK(!ed.scene().sequence.empty() && ed.seq_for_test_sequence());  // (the scene's sequence since task 0070)
     ed.command("seq add Assets/Animations/R86Up.anim 0 0");
     ed.step_frame_headless();
     ed.command("renameasset Assets/Animations/R86Up.anim R86Rise");
@@ -27956,5 +27956,92 @@ static void round81_tests() {
     const Vec3 after = ed.autorig_for_test().markers.at("LeftKnee");
     std::printf("    the knee (%.3f %.3f %.3f) -> (%.3f %.3f %.3f) in the left view\n", before.x, before.y, before.z, after.x, after.y, after.z);
     CHECK(std::fabs(after.x - before.x) < 1e-3f && length(after - before) > 0.02f);
+  });
+  /* ---------------------------------------------------------------- round 95: the scene's sequence (task 0070) */
+  test("global sequencer: one scene sequence plays clips on two objects at once, each bar naming its object; it survives a save and plays in Play", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *a = ed.scene().create("R95A");
+    GameObject *la = ed.scene().create("Lid", a);
+    GameObject *b = ed.scene().create("R95B");
+    GameObject *lb = ed.scene().create("Lid", b);
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R95 Sequence.seq").c_str());
+    ed.command("seq new R95 Sequence");
+    CHECK(!ed.scene().sequence.empty() && ed.seq_for_test_sequence());
+    /* Up on A and Hold on B, at the same time on two tracks: each moves its own lid. */
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R95A");
+    ed.command("seq add Assets/Animations/R86Hold.anim 1 0 R95B");
+    ed.step_frame_headless();
+    SequencePtr q = ed.seq_for_test_sequence();
+    CHECK(q && q->tracks[0].items.size() == 1 && q->tracks[0].items[0].target == "R95A" && q->tracks[1].items[0].target == "R95B");
+    ed.command("seq preview on");
+    ed.command("seq frame 30");
+    ed.step_frame_headless();
+    std::printf("    at 30: A's lid y %.3f (3), B's lid y %.3f (-1)\n", la->local().position.y, lb->local().position.y);
+    CHECK(std::fabs(la->local().position.y - 3.0f) < 1e-3f && std::fabs(lb->local().position.y + 1.0f) < 1e-3f);
+    ed.command("seq preview off");
+    ed.step_frame_headless();
+    CHECK(la->local().position.y == 0.0f && lb->local().position.y == 0.0f);
+    /* Two overlapping bars on one track for different objects don't blend: each plays fully. */
+    ed.command("seq add Assets/Animations/R86Hold.anim 0 20 R95B");
+    ed.step_frame_headless();
+    ed.command("seq preview on");
+    ed.command("seq frame 30");
+    ed.step_frame_headless();
+    CHECK(std::fabs(la->local().position.y - 3.0f) < 1e-3f && std::fabs(lb->local().position.y + 1.0f) < 1e-3f);
+    ed.command("seq preview off");
+    ed.step_frame_headless();
+    /* The file keeps the objects; the scene keeps its sequence. */
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path(q->asset_path), text) && text.find("\tR95A") != std::string::npos);
+    const std::string scene_file = fs::join(test_dir(), "r95.scene");
+    CHECK(save_scene(ed.scene(), scene_file));
+    Scene back;
+    std::string err;
+    CHECK(load_scene(scene_file, back, err) && back.sequence == ed.scene().sequence);
+    std::remove(scene_file.c_str());
+    /* Play: the scene's director moves both lids. */
+    ed.command("play");
+    for (int i = 0; i < 31; i++) ed.step_frame_headless();
+    GameObject *pa = ed.scene().find_by_name("R95A");
+    const float ya = pa && !pa->children.empty() ? pa->children[0]->local().position.y : -99.0f;
+    std::printf("    in Play after half a second: A's lid y %.3f\n", ya);
+    CHECK(ya > 0.5f);
+    ed.command("stop");
+  });
+  test("global sequencer: three objects' bars overlapping on one track all play; an object given a bar during Preview is put back; renaming the .seq keeps the scene on it", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *objs[3];
+    GameObject *lids[3];
+    for (int k = 0; k < 3; k++) {
+      objs[k] = ed.scene().create(strprintf("R96O%d", k));
+      lids[k] = ed.scene().create("Lid", objs[k]);
+    }
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R96Seq.seq").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R96Renamed.seq").c_str());
+    ed.command("seq new R96Seq");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R96O0");
+    ed.command("seq add Assets/Animations/R86Hold.anim 0 10 R96O1");
+    ed.step_frame_headless();
+    ed.command("seq preview on");
+    /* An object given a bar while previewing: its lid moves, and is put back with the others. */
+    ed.command("seq add Assets/Animations/R86Hold.anim 0 20 R96O2");
+    ed.command("seq frame 30");
+    ed.step_frame_headless();
+    std::printf("    at 30: lids %.2f %.2f %.2f (3, -1, -1)\n", lids[0]->local().position.y, lids[1]->local().position.y, lids[2]->local().position.y);
+    CHECK(std::fabs(lids[0]->local().position.y - 3.0f) < 1e-3f && lids[1]->local().position.y == -1.0f && lids[2]->local().position.y == -1.0f);
+    ed.command("seq preview off");
+    ed.step_frame_headless();
+    CHECK(lids[0]->local().position.y == 0.0f && lids[1]->local().position.y == 0.0f && lids[2]->local().position.y == 0.0f);
+    /* The .seq renamed in the Project window: the scene follows it. */
+    ed.command("renameasset Assets/Animations/R96Seq.seq R96Renamed");
+    ed.step_frame_headless();
+    std::printf("    the scene's sequence after the rename: '%s'\n", ed.scene().sequence.c_str());
+    CHECK(ed.scene().sequence == "Assets/Animations/R96Renamed.seq" && ed.seq_for_test_sequence());
   });
 }

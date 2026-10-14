@@ -259,6 +259,7 @@ std::string save_scene_text(const Scene &scene) {
      << fmt(e.equator.y) << " " << fmt(e.equator.z) << " " << fmt(e.ground.x) << " " << fmt(e.ground.y) << " "
      << fmt(e.ground.z) << "\n";
   if (scene.active_camera) os << "active_camera " << scene.active_camera << "\n";
+  if (!scene.sequence.empty()) os << "sequence \"" << scene.sequence << "\"\n";  // (task 0070; quoted, as paths are: a rename finds it)
   for (const GuideLine &gl : scene.guides)
     os << "guide " << fmt(gl.p.x) << " " << fmt(gl.p.y) << " " << fmt(gl.p.z) << " " << fmt(gl.d.x) << " " << fmt(gl.d.y) << " " << fmt(gl.d.z)
        << "\n";
@@ -456,6 +457,11 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       fresh.environment.ground = {f(7), f(8), f(9)};
     }
     else if (k == "active_camera" && t.size() >= 2) fresh.active_camera = std::strtoull(t[1].c_str(), nullptr, 10);
+    else if (k == "sequence" && t.size() >= 2) {  // (a path may hold spaces; quoted since it was first written)
+      std::string v(line.substr(line.find(' ') + 1));
+      if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+      fresh.sequence = v;
+    }
     else if (k == "guide" && t.size() >= 7) {
       auto f = [&](int i) { return std::strtof(t[i].c_str(), nullptr); };
       GuideLine gl{{f(1), f(2), f(3)}, {f(4), f(5), f(6)}};

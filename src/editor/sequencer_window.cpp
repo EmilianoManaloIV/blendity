@@ -53,20 +53,21 @@ GameObject *Editor::seq_root() {
   return rig ? rig : active_object();
 }
 
+/* The window's sequence: the scene's (task 0070) - one timeline for the whole scene, each bar naming its object. */
 SequencePtr Editor::seq_sequence() {
+  if (!scene_->sequence.empty()) return sequence_asset(scene_->sequence);
+  /* No scene sequence: a selected object's own Sequencer component's (made before task 0070), so it stays editable. */
   GameObject *root = seq_root();
-  const Sequencer *s = root ? root->get<Sequencer>() : nullptr;
-  return s ? sequence_asset(s->sequence) : nullptr;
+  const Sequencer *c = root ? root->get<Sequencer>() : nullptr;
+  return c && !c->sequence.empty() ? sequence_asset(c->sequence) : nullptr;
 }
 
-/* Create New Sequence: Assets/Animations/<root's name> Sequence.seq (a free name), and a Sequencer playing it. */
+/* Create New Sequence: Assets/Animations/<scene> Sequence.seq (a free name), the scene's sequence. */
 SequencePtr Editor::seq_new(GameObject *root, const std::string &name_in) {
-  if (!root) {
-    Log::warn("Sequencer: select an object to sequence");
-    return nullptr;
-  }
+  (void)root;
   if (playing_) return nullptr;
-  const std::string base = seq_file_safe(name_in.empty() ? root->name + " Sequence" : name_in);
+  const std::string scene_name = scene_->path.empty() ? std::string("Scene") : fs::stem(scene_->path);
+  const std::string base = seq_file_safe(name_in.empty() ? scene_name + " Sequence" : name_in);
   std::string path = "Assets/Animations/" + base + ".seq";
   for (int k = 1; fs::exists(resolve_asset_path(path)); k++) path = strprintf("Assets/Animations/%s %d.seq", base.c_str(), k);
   SequencePtr s = create_sequence_asset(path, fs::stem(path));
@@ -74,14 +75,11 @@ SequencePtr Editor::seq_new(GameObject *root, const std::string &name_in) {
     Log::warn("Sequencer: couldn't write %s", path.c_str());
     return nullptr;
   }
-  Sequencer *c = root->get<Sequencer>();
-  if (!c) c = root->add<Sequencer>();
-  c->sequence = path;
-  seqr_.root = root->id;
+  scene_->sequence = path;
   seqr_.selected_name.clear();
   invalidate_project_listing();
   mark_changed("Create Sequence");
-  Log::info("Sequencer: %s on '%s'", path.c_str(), root->name.c_str());
+  Log::info("Sequencer: %s is the scene's sequence (each clip names the object it plays on)", path.c_str());
   return s;
 }
 
@@ -102,6 +100,7 @@ bool Editor::seq_edit(const char *label, const std::function<void(Sequence &)> &
   for (SeqTrack &t : s->tracks) t.sort();
   s->touch();
   mark_changed(label);
+  if (seqr_.preview) seq_remember_new_targets(*s);  // (an object the sequence now moves: put back too when Preview ends)
   seq_apply();
   return true;
 }
@@ -110,13 +109,12 @@ bool Editor::seq_edit(const char *label, const std::function<void(Sequence &)> &
 
 void Editor::seq_apply() {
   if (!seqr_.preview) return;
-  GameObject *root = scene_->find(seqr_.root);  // (the root Preview saved: selecting another object doesn't pose that one)
-  const Sequencer *c = root ? root->get<Sequencer>() : nullptr;
-  SequencePtr s = c ? sequence_asset(c->sequence) : nullptr;
+  GameObject *root = scene_->find(seqr_.root);  // (bars without an object: the one Preview started on)
+  SequencePtr s = seq_sequence();
   if (!s) return;
   AnimValues v;
-  sample_sequence(*s, seqr_.frame, v);
-  apply_anim_values(v, *root);
+  sample_sequence(*s, seqr_.frame, v, scene_.get());
+  apply_anim_values(v, root);
   solve_constraints(*scene_);
   scene_dirty_ = true;
 }
@@ -126,11 +124,18 @@ void Editor::seq_set_frame(float f) {
   seq_apply();
 }
 
-/* What Preview puts back: the transforms below the root (and the bones IK turns), and the component numbers any clip
- * of the sequence animates. */
-void Editor::seq_save_pose(GameObject &root) {
+/* What Preview puts back: the transforms below every bar's object and the default root (and the bones IK turns), and
+ * the component numbers any clip of the sequence animates. */
+void Editor::seq_save_pose(GameObject *root) {
   seqr_.saved_pose.clear();
-  for (GameObject *g : seq_subtree(&root)) seqr_.saved_pose.push_back({g->id, g->local()});
+  std::vector<GameObject *> tops;
+  if (root) tops.push_back(root);
+  if (SequencePtr q = seq_sequence())
+    for (const SeqTrack &t : q->tracks)
+      for (const SeqInstance &i : t.items)
+        if (GameObject *g = i.target.empty() ? nullptr : scene_->find_by_name(i.target); g && std::find(tops.begin(), tops.end(), g) == tops.end()) tops.push_back(g);
+  for (GameObject *top : tops)
+    for (GameObject *g : seq_subtree(top)) seqr_.saved_pose.push_back({g->id, g->local()});
   scene_->for_each([&](GameObject &g) {
     if (g.get<Bone>() && ik_drives(*scene_, g)) seqr_.saved_pose.push_back({g.id, g.local()});
   });
@@ -138,14 +143,28 @@ void Editor::seq_save_pose(GameObject &root) {
   SequencePtr s = seq_sequence();
   if (!s) return;
   AnimValues names, now;
+  sample_sequence(*s, 0.0f, names, scene_.get());
   for (const SeqTrack &t : s->tracks)
-    for (const SeqInstance &i : t.items)
-      if (AnimationClipPtr c = clip_asset(i.clip)) sample_clip_values(*c, 0.0f, names);
+    for (const SeqInstance &i : t.items) sample_sequence(*s, i.start, names, scene_.get());
   read_anim_values(names, root, now);
   for (const AnimValue &v : now.values) {
     if (is_transform_property(v.track->property)) continue;
-    if (GameObject *g = anim_target(root, v.track->path)) seqr_.saved_values.push_back({g->id, v.track->property, v.track->axis, v.value});
+    GameObject *from = v.target ? v.target : root;
+    if (GameObject *g = from ? anim_target(*from, v.track->path) : nullptr) seqr_.saved_values.push_back({g->id, v.track->property, v.track->axis, v.value});
   }
+}
+
+/* Preview on and the sequence now moves an object it didn't: that object's pose is kept to put back as well. */
+void Editor::seq_remember_new_targets(const Sequence &s) {
+  std::unordered_set<uint64_t> kept;
+  for (const auto &p : seqr_.saved_pose) kept.insert(p.first);
+  for (const SeqTrack &t : s.tracks)
+    for (const SeqInstance &i : t.items) {
+      GameObject *g = i.target.empty() ? nullptr : scene_->find_by_name(i.target);
+      if (!g || kept.count(g->id)) continue;
+      for (GameObject *k : seq_subtree(g))
+        if (kept.insert(k->id).second) seqr_.saved_pose.push_back({k->id, k->local()});
+    }
 }
 
 /* Preview on: the pose now is kept to put back (the Animation window's Preview steps aside: one thing poses the scene
@@ -153,15 +172,15 @@ void Editor::seq_save_pose(GameObject &root) {
 void Editor::seq_set_preview(bool on) {
   if (on == seqr_.preview) return;
   GameObject *root = seq_root();
-  if (on && (playing_ || !root)) {
+  if (on && (playing_ || !seq_sequence())) {
     if (playing_) Log::warn("Sequencer: Preview is for editing; Stop Play first");
     return;
   }
   if (on) {
     anim_set_preview(false);
-    seq_save_pose(*root);
+    seq_save_pose(root);
     seqr_.preview = true;
-    seqr_.root = root->id;
+    seqr_.root = root ? root->id : 0;  // (none selected: bars play on their own objects only)
     seq_apply();
     return;
   }
@@ -203,7 +222,7 @@ void Editor::seq_drag_cancel() {
 /* ---------------------------------------------------------------- editing */
 
 /* A clip onto a track at a frame (a new instance named after the clip). */
-bool Editor::seq_add_clip(const std::string &clip_in, int track, float start) {
+bool Editor::seq_add_clip(const std::string &clip_in, int track, float start, const std::string &target_in) {
   std::string clip = clip_in;
   std::replace(clip.begin(), clip.end(), '\\', '/');
   if (!clip_asset(clip)) {
@@ -212,6 +231,10 @@ bool Editor::seq_add_clip(const std::string &clip_in, int track, float start) {
   }
   SequencePtr s = seq_sequence();
   if (!s || !std::isfinite(start)) return false;
+  /* The object it plays on: the one named, else the selected character (its rig root) or object. */
+  GameObject *sel = seq_root();
+  const std::string target = !target_in.empty() ? target_in : sel ? sel->name : std::string();
+  if (target.empty()) Log::warn("Sequencer: the clip plays on no object yet - set its Object below the tracks (drag one from the Hierarchy)");
   if (track < 0 || track > (int)s->tracks.size()) {  // (the next track up is made; further is a typo)
     Log::warn("Sequencer: track %d isn't there (0 to %zu)", track, s->tracks.size());
     return false;
@@ -223,6 +246,7 @@ bool Editor::seq_add_clip(const std::string &clip_in, int track, float start) {
     }
     SeqInstance i;
     i.clip = clip, i.start = std::max(0.0f, std::round(start)), i.name = q.unique_name(fs::stem(clip));
+    i.target = target;
     q.tracks[(size_t)track].items.push_back(i);
     seqr_.selected_name = i.name;
   });
@@ -310,8 +334,7 @@ void Editor::draw_seq_toolbar(const Recti &bar, GameObject *root) {
   int fr = (int)seqr_.frame;
   if (u.int_field(u.id("seq_frame"), {x, y, u.px(56), bh}, fr, 0, 1000000)) seq_set_frame((float)fr);
   x += u.px(60);
-  if (!root) return;
-  /* The sequence menu: the sequence assets, then Create New Sequence. */
+  /* The sequence menu (the scene's sequence): the sequence assets, then Create New Sequence. */
   SequencePtr s = seq_sequence();
   std::vector<std::string> names{"(no sequence)"};
   const std::vector<std::string> &paths = seq_paths();
@@ -336,13 +359,11 @@ void Editor::draw_seq_toolbar(const Recti &bar, GameObject *root) {
     });
 }
 
-/* The sequence menu's choice: a sequence asset for the root's Sequencer, or none (""). */
+/* The sequence menu's choice: the scene's sequence, or none (""). */
 void Editor::seq_pick(GameObject *root, const std::string &path) {
+  (void)root;
   seq_set_preview(false);
-  Sequencer *c = root->get<Sequencer>();
-  if (!c) c = root->add<Sequencer>();
-  c->sequence = path;
-  seqr_.root = root->id;
+  scene_->sequence = path;
   seqr_.selected_name.clear();
   seq_drag_cancel();
   mark_changed("Sequence");
@@ -386,7 +407,8 @@ void Editor::draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &l
       const Recti b{x0, ly + u.px(3), std::max(u.px(4), x1 - x0), lane_h - u.px(6)};
       u.canvas.fill_rect(b, c ? bar_colour(i.clip) : Color::hex(0x7A6A2A));
       if (i.name == seqr_.selected_name) u.canvas.rect_outline(b, u.theme.focus, u.px(2));
-      u.label({b.x + u.px(4), b.y, b.w - u.px(6), b.h}, c ? i.name : i.name + " (missing)", u.theme.text_bright);
+      const std::string who = i.target.empty() ? std::string(" -> (no object)") : " -> " + i.target;  // (the clip, then what it plays on)
+      u.label({b.x + u.px(4), b.y, b.w - u.px(6), b.h}, (c ? i.name : i.name + " (missing)") + who, u.theme.text_bright);
       if (u.record_buttons) u.button_rects["seq_bar:" + i.name] = b;  // (tests)
       if (k == 0) continue;
       /* The overlap with the one before: a cross over it (Premiere's cross dissolve). */
@@ -500,6 +522,13 @@ void Editor::draw_seq_details(Sequence &s, const Recti &r) {
   u.text_field(u.id("seq_name"), {x, y, u.px(120), h}, name, &committed);
   x += u.px(126);
   if (committed && name != before.name && !name.empty()) seq_rename(before.name, name);
+  label("Object", u.px(50));
+  std::string target = i->target;
+  if (object_field("seq_target", {x, y, u.px(170), h}, target, nullptr))
+    seq_edit("Clip Object", [&](Sequence &q) {
+      if (SeqInstance *k = q.find(before.name)) k->target = target;
+    });
+  x += u.px(176);
   float speed = i->speed, tin = i->trim_in, tout = i->clip_out(clip_asset(i->clip).get());
   label("Speed", u.px(44));
   const bool sp = u.float_field(u.id("seq_speed"), {x, y, u.px(56), h}, speed, 0.01f, 0.05f, 10.0f);
@@ -579,13 +608,10 @@ void Editor::draw_sequencer_window(const Recti &r) {
   draw_seq_toolbar(bar, root);
   SequencePtr s = seq_sequence();
   const Recti body{r.x, bar.bottom(), r.w, r.h - bh};
-  if (!root || !s) seq_drag_cancel();
-  if (!root) {
-    u.label({body.x + u.px(10), body.y + u.px(10), body.w, u.row_h()}, "Select an object to sequence its clips.", u.theme.text_dim);
-    return;
-  }
   if (!s) {
-    u.label({body.x + u.px(10), body.y + u.px(10), body.w - u.px(20), u.row_h()}, "To lay out clips for " + root->name + ", create a Sequence.", u.theme.text_dim);
+    seq_drag_cancel();
+    u.label({body.x + u.px(10), body.y + u.px(10), body.w - u.px(20), u.row_h()},
+            "The scene has no sequence: create one, then drag clips onto its tracks (each plays on the object you choose).", u.theme.text_dim);
     if (u.button({body.x + u.px(10), body.y + u.px(16) + u.row_h(), u.px(110), u.row_h() + u.px(4)}, "Create")) seq_new(root, "");
     return;
   }
@@ -660,8 +686,12 @@ void Editor::seq_command(const std::vector<std::string> &t) {
   if (verb == "stop") return (void)(seqr_.playing = false);
   if (verb == "jump") return seq_jump_command(arg(2, ""), num(3, -1.0f));
   SequencePtr s = seq_sequence();
-  if (!s) return Log::warn("seq %s: the selected object has no sequence (seq new)", verb.c_str());
-  if (verb == "add" && t.size() >= 5) return (void)seq_add_clip(t[2], index(3), num(4, 0));
+  if (!s) return Log::warn("seq %s: the scene has no sequence (seq new)", verb.c_str());
+  if (verb == "add" && t.size() >= 5) return (void)seq_add_clip(t[2], index(3), num(4, 0), arg(5, ""));
+  if (verb == "object" && t.size() >= 4 && s->find(t[2])) {  // seq object <clip> <object>: what it plays on
+    seq_edit("Clip Object", [&](Sequence &q) { q.find(t[2])->target = t[3]; });
+    return;
+  }
   if (verb == "move" && t.size() >= 5) return (void)seq_move(t[2], index(3), num(4, 0));
   if (verb == "trim" && t.size() >= 5) {
     const SeqInstance *i = s->find(t[2]);
@@ -690,16 +720,20 @@ void Editor::seq_command(const std::vector<std::string> &t) {
     seq_edit("Add Trigger", [&](Sequence &q) { q.triggers.push_back({t[2], t[3], std::isfinite(blend) ? blend : 0.25f}); });
     return;
   }
-  Log::warn("seq new [name] | add <clip.anim> <track> <start> | move <name> <track> <start> | trim <name> <in> <out> | "
+  Log::warn("seq new [name] | add <clip.anim> <track> <start> [object] | object <name> <object> | move <name> <track> <start> | trim <name> <in> <out> | "
             "speed <name> <s> | rename <name> <new> | remove <name> | track | trigger <key> <name> [blend] | jump <name> [blend] | "
             "frame <n> | preview on|off | play | stop");
 }
 
-/* seq jump <clip> [blend] (Play): the Sequencer of the selected object (or the scene's first) jumps, as its trigger
- * would. */
+/* seq jump <clip> [blend] (Play): the scene's sequence jumps (else the Sequencer of the selected object, or the scene's
+ * first), as its trigger would. */
 void Editor::seq_jump_command(const std::string &name, float blend) {
   if (!playing_) return Log::warn("seq jump: in Play only (Ctrl+P)");
-  Sequencer *c = nullptr;
+  Sequencer *c = scene_->director ? static_cast<Sequencer *>(scene_->director.get()) : nullptr;
+  if (c) {  // (the scene's sequence, if the clip is one of its bars)
+    const SequencePtr ds = sequence_asset(c->sequence);
+    if (!ds || !ds->find(name)) c = nullptr;
+  }
   for (GameObject *a = active_object(); a && !c; a = a->parent) c = a->get<Sequencer>();
   if (!c) scene_->for_each([&](GameObject &g) {
       if (!c) c = g.get<Sequencer>();

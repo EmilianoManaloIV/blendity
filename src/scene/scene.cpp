@@ -1919,6 +1919,8 @@ void Scene::move_from(Scene &o) {
   lighting = o.lighting;
   guides = std::move(o.guides);
   active_camera = o.active_camera;
+  sequence = o.sequence;
+  director.reset();  // (a Play session's player belongs to it)
   roots = std::move(o.roots);
   objects_ = std::move(o.objects_);
   by_id_ = std::move(o.by_id_);
@@ -1972,6 +1974,8 @@ void Scene::clear() {
   roots.clear();
   next_id_ = 1;
   active_camera = 0;
+  sequence.clear();
+  director.reset();
 }
 
 GameObject *Scene::find(uint64_t id) const {
@@ -2047,6 +2051,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->lighting = lighting;
   s->guides = guides;
   s->active_camera = active_camera;
+  s->sequence = sequence;
   s->objects_.reserve(objects_.size());
   std::unordered_map<const Material *, MaterialPtr> mat_copy;
   for (auto &o : objects_) {
@@ -2128,6 +2133,14 @@ void Scene::start(PlayContext &ctx) {
         if (c->enabled) c->start(ctx);
   /* Jolt world for this play session (null without Jolt or rigid bodies). */
   physics = physics_create(*this);
+  /* The scene's sequence (task 0070): a Sequencer of the scene's own, with no object (its bars name theirs). */
+  director.reset();
+  if (!sequence.empty()) {
+    auto d = std::make_shared<Sequencer>();
+    d->sequence = sequence;
+    d->start(ctx);
+    director = d;
+  }
 }
 
 void Scene::update(PlayContext &ctx) {
@@ -2140,6 +2153,7 @@ void Scene::update(PlayContext &ctx) {
     if (o->active_in_hierarchy())
       for (auto &c : o->components)
         if (c->enabled) c->update(ctx);
+  if (director) director->update(ctx);  // (after the components: the scene's sequence has the last word, before IK)
   if (physics) physics_world_step(*physics, ctx.dt);
   else physics_step(*this, ctx.dt);
 }

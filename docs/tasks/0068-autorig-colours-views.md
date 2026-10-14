@@ -3,7 +3,7 @@
 - **Status:** done
 - **Requirements:** R-06 (rigging and animation)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/62
 
 ## Goal
 The user (2026-10-14): "For auto-rig when adding control points make them different colors to indicate different

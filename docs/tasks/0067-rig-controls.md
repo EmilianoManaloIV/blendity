@@ -4,7 +4,7 @@
 - **Decisions:** ADR 0031
 - **Requirements:** R-06 (rigging and animation)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/62
 
 ## Goal
 The user (2026-10-14): "Give the inverse kinematics a special gizmo to indicate it's part of a rig controller and not

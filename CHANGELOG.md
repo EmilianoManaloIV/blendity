@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 95): a global sequencer - each clip names its object (task 0070, ADR 0030 amended)
+
+**Asked:** "The sequencer should work globally and have two things to consider when adding a clip. Which animation clip
+it is using and what object is it attributed to."
+
+**Changed**
+- The Sequencer window edits **the scene's sequence** (saved with the scene), with or without a selection.
+- **Each bar is a clip and an object:** a dropped clip plays on the selected character; the Object field below the
+  tracks takes an object dragged from the Hierarchy; bars read "Walk -> Robot". Console: `seq add <clip> <track>
+  <start> [object]`, `seq object <clip> <object>`.
+- Preview poses every bar's object and puts them all back. In Play the scene's sequence plays (triggers and `seq jump`
+  too); an object's Animation component steps aside while the sequence has a bar on it.
+- Overlapping bars crossfade only when they play on the same object.
+- `.seq` files gain a 4th column (the object); older files load unchanged. The Sequencer component still plays a
+  sequence on its own object.
+
+**Checked**
+- New test (round 95): one scene sequence moves two lids from two tracks in Preview (and puts them back), overlapping
+  bars on different objects don't blend, the `.seq` and the scene file keep the objects and the sequence, and Play
+  moves them.
+- New test (round 96): three objects' bars overlapping on one track all play; an object given a bar during Preview is
+  put back; renaming the `.seq` keeps the scene on it.
+- Unit checks: Windows 9,885, 0 failed (656 tests); the whole suite in render-cache verify mode: 9,886,
+  0 failed, 0 stale pictures. Linux with libraries: 9,793, 0 failed. Sanitizer build: 9,710, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress `animation`: 201 tracks 0.0735 ms a frame (target 0.2 ms); a sequence of 4 tracks crossfading 201-track
+  clips 0.3143 ms a frame (target 0.5 ms).
+
+**Review** (Opus code-reviewer). Fixed:
+- Two rigs could share a lookup key and pose each other's bones.
+- Renaming the scene's `.seq` lost it.
+- An object given a bar during Preview kept its previewed pose.
+- A track with three overlapping objects dropped one.
+- A jump before Play's first frame didn't find the bars' objects.
+- `seq jump` couldn't reach a component's sequence.
+- Sequences made before this task are editable again.
+
 ## 2026-10-14 (rounds 89-94): rigging - character roots, bone handles and extrude, rig controls, auto-rig colours and views, grouped keyframes (tasks 0065-0069, ADR 0031)
 
 **Asked** (2026-10-14):

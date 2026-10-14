@@ -4,7 +4,7 @@
 - **Requirements:** R-01 (Unity-style editor), R-06 (rigging)
 - **Decisions:** none new
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/62
 
 ## Goal
 The user (2026-10-14): "When adding an armature to a mesh/object nest it in the hierarchy itself; similar to how

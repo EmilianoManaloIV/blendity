@@ -435,8 +435,9 @@ same bone names. IK runs after the clip, so animating the IK targets is enough f
 ease-out, bounces and overshoots in the Curves view.
 
 **Sequencing clips (instead of a state machine):** Window > **Sequencer** is a Premiere-style timeline for clips.
-Select the character, press **Create** (it gets a **Sequencer** component and a `.seq`), and drag `.anim` clips from
-the Project window onto its tracks. Drag a bar to move it, its ends to trim it; set Speed, In and Out below the tracks.
+Press **Create** (the scene gets a `.seq`), and drag `.anim` clips from the Project window onto its tracks: each bar is
+a clip **and the object it plays on** (the selected character, or one dragged onto the bar's Object field), so one
+timeline animates a whole scene. Drag a bar to move it, its ends to trim it; set Speed, In and Out below the tracks.
 Bars overlapping on one track **crossfade**; a bar on a higher track wins for what it animates. **Triggers** (key,
 clip, blend seconds) jump to a clip in Play, blending from the pose of the moment; from the console, `seq jump <clip>`.
 

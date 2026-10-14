@@ -1322,6 +1322,10 @@ class Scene {
   /* The camera the Game view, F12 and the Scene view's filters use (Blender's scene camera, Unity's
    * MainCamera tag): an object id, 0 = none chosen (then "Main Camera" by name, else the first camera). */
   uint64_t active_camera = 0;
+  /* The scene's sequence (task 0070, ADR 0030 amended): a .seq whose bars each name a clip and the object it plays
+   * on; played in Play by `director` (a Sequencer of the scene's, made at Play's start). */
+  std::string sequence;
+  std::shared_ptr<Component> director;
   std::vector<GameObject *> roots;
   /* Play mode: the Jolt world while playing (null otherwise or without Jolt). */
   std::shared_ptr<PhysicsWorld> physics;

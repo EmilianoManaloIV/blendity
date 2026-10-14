@@ -83,6 +83,7 @@ void Editor::retarget_clip_references(const std::string &from, const std::string
   };
   auto fix_scene = [&](Scene *s) {
     if (!s) return;
+    moved(s->sequence);  // (the scene's own, task 0070)
     s->for_each([&](GameObject &g) {
       if (Animation *an = g.get<Animation>()) moved(an->clip);
       if (Sequencer *sq = g.get<Sequencer>()) moved(sq->sequence);
