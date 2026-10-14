@@ -28195,4 +28195,71 @@ static void round81_tests() {
     CHECK(first_clip(0) == "Assets/Animations/R86Up.anim");
     std::remove(resolve_asset_path("Assets/Animations/R97 Sequence.seq").c_str());
   });
+  /* ---------------------------------------------------------------- round 98: a texture's Physical Size tiles its materials (task 0072) */
+  test("textures: changing a texture's Physical Size re-tiles the materials using it, but not one tiled by hand; undo puts it back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    /* (earlier tests leave Bricks.ptex, Bricks 2.ptex...; a name with a space can't be typed into settex) */
+    std::remove(resolve_asset_path("Assets/Textures/Bricks.ptex").c_str());
+    for (int k = 2; k < 10; k++) std::remove(resolve_asset_path(strprintf("Assets/Textures/Bricks %d.ptex", k)).c_str());
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr && t->asset_path.find(' ') == std::string::npos);
+    if (!t) return;
+    ed.command("create Cube");
+    GameObject *a = ed.active_object_for_test();
+    ed.assign_texture_asset_for_test(t->asset_path);
+    ed.command("create Cube");
+    GameObject *b = ed.active_object_for_test();
+    ed.assign_texture_asset_for_test(t->asset_path);
+    ed.step_frame_headless();
+    CHECK(a && b && a != b);
+    if (!a || !b) return;
+    Material &ma = *a->get<MeshRenderer>()->materials[0], &mb = *b->get<MeshRenderer>()->materials[0];
+    const float size0 = t->physical_size;
+    std::printf("    Bricks: %g m a tile; tiling %.3f\n", size0, ma.tiling.x);
+    CHECK(std::fabs(ma.tiling.x - 1.0f / size0) < 1e-4f);
+    /* A .mat asset of the texture that no object here uses: left alone (undo couldn't put it back). */
+    Material lone = ma;
+    lone.name = "R98Lone";
+    std::remove(resolve_asset_path("Assets/Materials/R98Lone.mat").c_str());
+    MaterialPtr lone_asset = create_material_asset(lone, "Assets/Materials/R98Lone.mat");
+    mb.tiling = Vec3(3.0f, 3.0f, 1.0f);  // (tiled by hand)
+    /* A third object whose material uses the texture only as its normal map, and a fourth tiled by hand to 1/3 (a
+     * size the change below passes on its way to 4 m in the same undo step). */
+    ed.command("create Cube");
+    GameObject *c = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *d = ed.active_object_for_test();
+    CHECK(c && d);
+    if (!c || !d) return;
+    {
+      Material mc = ma, md = ma;
+      mc.base_map = TextureRef{}, mc.normal_map = TextureRef{t->asset_path + "#normal", true};
+      md.tiling = Vec3(1.0f / 3.0f, 1.0f / 3.0f, 1.0f);
+      c->get<MeshRenderer>()->materials = {std::make_shared<Material>(mc)};
+      d->get<MeshRenderer>()->materials = {std::make_shared<Material>(md)};
+    }
+    ed.mark_changed_for_test("by hand");
+    ed.step_frame_headless();
+    ed.command("settex " + t->asset_path + " PhysicalSize 3");
+    ed.command("settex " + t->asset_path + " PhysicalSize 4");  // (the same undo step, as a dragged number)
+    ed.step_frame_headless();
+    auto tiling = [&](GameObject *g) { return g->get<MeshRenderer>()->materials[0]->tiling; };
+    std::printf("    after Physical Size 4: the first %.3f (0.25), hand-tiled %.3f (3) and %.3f (0.333), normal map only %.3f (0.25), the unused .mat %.3f (0.5)\n",
+                tiling(a).x, tiling(b).x, tiling(d).x, tiling(c).x, lone_asset ? lone_asset->tiling.x : -1.0f);
+    CHECK(std::fabs(tiling(a).x - 0.25f) < 1e-5f && std::fabs(tiling(a).y - 0.25f) < 1e-5f);
+    CHECK(tiling(b).x == 3.0f && std::fabs(tiling(d).x - 1.0f / 3.0f) < 1e-6f);
+    CHECK(std::fabs(tiling(c).x - 0.25f) < 1e-5f);
+    CHECK(lone_asset && std::fabs(lone_asset->tiling.x - 0.5f) < 1e-5f);
+    std::remove(resolve_asset_path("Assets/Materials/R98Lone.mat").c_str());
+    ed.command("undo");
+    ed.step_frame_headless();
+    GameObject *a2 = ed.scene().find(a->id), *b2 = ed.scene().find(b->id);
+    CHECK(a2 && std::fabs(a2->get<MeshRenderer>()->materials[0]->tiling.x - 1.0f / size0) < 1e-4f);
+    CHECK(b2 && b2->get<MeshRenderer>()->materials[0]->tiling.x == 3.0f);
+    ed.command("redo");
+    ed.step_frame_headless();
+    a2 = ed.scene().find(a->id);
+    CHECK(a2 && std::fabs(a2->get<MeshRenderer>()->materials[0]->tiling.x - 0.25f) < 1e-5f);
+  });
 }

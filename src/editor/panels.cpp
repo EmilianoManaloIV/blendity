@@ -2465,10 +2465,12 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
 bool Editor::draw_texture_fields(ui::Layout &lay, const ProceduralTexturePtr &t) {
   if (!t) return false;
   const std::string before = save_texture_text(*t);  // (small: the undo step keeps it if a field changes)
+  const float size_before = t->physical_size;
   InspectorReflector ir(*this, ui_, lay);
   ir.edited_texture = t.get();
   t->reflect(ir);
   if (ir.changed) {
+    if (t->physical_size != size_before) retile_texture_users(t->asset_path, size_before, t->physical_size);  // (task 0072)
     bool noted = false;
     for (const auto &kv : texture_before_) noted = noted || kv.first == t->asset_path;
     if (!noted && !t->asset_path.empty()) texture_before_.push_back({t->asset_path, before});

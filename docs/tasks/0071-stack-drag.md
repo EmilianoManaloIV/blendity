@@ -4,7 +4,7 @@
 - **Requirements:** R-01, R-10
 - **Decisions:** none (a UI helper)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/64
 
 ## Goal
 The user (2026-10-14): drag-and-drop reordering of the camera filter stack, the modifier stack and other stacks.

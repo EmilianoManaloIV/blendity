@@ -564,6 +564,10 @@ In Unity a material is a file in the Project window that many objects share; cha
 @ blender/intern/cycles/kernel/svm/checker.h, noise.h
 # Getting textures in
 Drag images onto the window: they're copied to Assets/Textures and, if an object is selected, assigned to its material. Drag an .obj or .fbx and its materials and textures come with it (OBJ uses the .mtl file; FBX is read with ufbx, a library Blender itself bundles).
+# How big is a tile?
+A procedural texture knows its real size: Physical Size is the metres one tile covers (bricks 2 m, a wood floor 2 m). A material using it tiles by its inverse, so 2 m is Tiling 0.5: one tile every two metres whatever the object's size, as SketchUp's textures keep their size. Change Physical Size and every material in the scene using that texture follows, in one undo step. A material whose Tiling you set by hand keeps it: Blendity sees that it no longer matches the old size.
+? A Bricks texture of Physical Size 2 m is changed to 4 m. What Tiling do the materials using it get? | 0.25: one tile every 4 metres.
+! cmd:newtex BigBricks Bricks; create Cube; settex BigBricks PhysicalSize 4 | Make a brick texture and set its tile to 4 m (put it on the Cube from the Textures window to see it)
 # Terrain: grass on top, dirt on the slopes, snow up high
 An axis material (Axis Mode: World) takes a Top, Side and Bottom material by how steep the surface is, projected
 without UVs, so a cliff's top is grassy and its face dirt or rock. Axis High adds a material above a height (High

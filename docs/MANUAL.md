@@ -239,7 +239,8 @@ that uses them, as in Unity.
 **Procedural textures** (`Assets/Textures/<name>.ptex`): a stack of layers, like Blender's modifier stack:
 generators (Brick, Wood Floor, Tiles, Voronoi, Noise...) and filters (Blur, Levels, Warp, Edge Wear...), each with a
 blend mode. The **Textures** window makes and edits them; one texture gives albedo, normal, roughness and height
-maps, and stays sharp at any distance with Live Shading.
+maps, and stays sharp at any distance with Live Shading. Its **Physical Size** is the metres one tile covers:
+changing it re-tiles every material using the texture (Tiling = 1 / size), except one tiled by hand.
 
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.

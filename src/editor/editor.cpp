@@ -1524,6 +1524,7 @@ void Editor::commit_undo() {
   texture_before_.clear();
   s.clips = std::move(clip_before_);
   clip_before_.clear();
+  retile_followers_.clear();  // (the next step decides again which materials follow a texture's size)
   if (s.scene) {
     /* What this step alone holds: the meshes no other state or the scene shares (copy-on-write, ADR 0003), its
      * objects and its texture texts. */
@@ -2032,6 +2033,48 @@ void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) 
     m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
     m.touch();
   }
+}
+
+/* Does material `m` use the texture whose outputs start with `prefix` ("Assets/Textures/Bricks.ptex#"), in any map? */
+static bool material_uses_texture(const Material &m, const std::string &prefix) {
+  for (const TextureRef *map : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map})
+    if (map->path.compare(0, prefix.size(), prefix) == 0) return true;
+  return false;
+}
+
+/* A texture's Physical Size changed (task 0072): the scene's materials using it whose tiling follows its size (1 tile =
+ * `from` metres) take the new one; a material tiled by hand keeps its tiling. Which ones follow is decided at the first
+ * change of an undo step, so a dragged size (a change every frame) never picks up a hand-tiled material it passes on
+ * the way. Part of the edit's undo step. (A .mat no object here uses isn't changed: undo couldn't put it back.) */
+int Editor::retile_texture_users(const std::string &asset_path, float from, float to) {
+  if (asset_path.empty() || !(to > 0.0f) || !std::isfinite(to)) return 0;
+  auto it = retile_followers_.find(asset_path);
+  if (it == retile_followers_.end()) it = retile_followers_.emplace(asset_path, texture_followers(asset_path, from)).first;
+  const float new_t = 1.0f / std::max(0.01f, to);
+  for (const auto &[m, z_too] : it->second) {
+    m->tiling.x = new_t, m->tiling.y = new_t;
+    if (z_too) m->tiling.z = new_t;  // (Box mapping tiles the sides by z)
+    m->touch();
+  }
+  if (!it->second.empty()) invalidate_material_textures();
+  return (int)it->second.size();
+}
+
+/* The scene's materials using the texture whose x and y tiling match a tile of `from` metres (z too, when it does). */
+std::vector<std::pair<MaterialPtr, bool>> Editor::texture_followers(const std::string &asset_path, float from) {
+  const float old_t = 1.0f / std::max(0.01f, from);
+  const std::string prefix = asset_path + "#";
+  auto follows = [old_t](float v) { return std::fabs(v - old_t) <= 1e-4f * old_t; };
+  std::unordered_set<Material *> seen;
+  std::vector<std::pair<MaterialPtr, bool>> out;
+  slots_using([&](const MaterialPtr &m) {
+    if (!m || !seen.insert(m.get()).second || !material_uses_texture(*m, prefix)) return false;
+    if (!follows(m->tiling.x) || !follows(m->tiling.y)) return false;  // (tiled by hand)
+    out.push_back({m, follows(m->tiling.z)});
+    return true;
+  });
+  if (!out.empty()) Log::info("%zu material%s follow %s's Physical Size", out.size(), out.size() == 1 ? "" : "s", fs::stem(asset_path).c_str());
+  return out;
 }
 
 /* File > Export (Blender: File > Export; Unity: the FBX Exporter). The
@@ -3734,8 +3777,10 @@ void Editor::run_console_command(const std::string &line) {
       return;
     }
     note_texture_edit(*pt);
+    const float size_before = pt->physical_size;
     pt->reflect(sr);
     if (sr.done) {
+      if (pt->physical_size != size_before) retile_texture_users(pt->asset_path, size_before, pt->physical_size);  // (task 0072)
       pt->touch();
       mark_changed("Set " + pt->name + " " + sr.target);
     }

@@ -234,7 +234,8 @@ void ProceduralTexture::reflect(Reflector &r) {
   r.field("Height", height, 64, 4096);
   r.help("The images' size in texels (powers of two, 64 to 4096).");
   r.field("Physical Size", physical_size, 0.05f, 0.01f, 1000.0f);
-  r.help("Metres one tile covers: a material using the texture tiles it that often per metre by default.");
+  r.help("Metres one tile of the texture covers (Unity's Tiling the other way up: 2 m = Tiling 0.5). Changing it re-tiles every\n"
+         "material using the texture, unless its Tiling was set by hand.");
   r.field("Seamless", seamless);
   r.field("Normal Strength", normal_strength, 0.05f, 0.0f, 10.0f);
   r.field("Seed", seed, 0, 1000000);

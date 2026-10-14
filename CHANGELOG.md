@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 98): a texture's Physical Size drives its materials' tiling (task 0072)
+
+**Asked:** a texture's Physical Size should really adjust its tiling.
+
+**Changed**
+- Changing a procedural texture's **Physical Size** re-tiles every material of the scene using it (Tiling = 1 / size,
+  in any of its maps), in the same undo step. A material tiled by hand keeps its Tiling.
+
+**Checked**
+- New test (round 98): Bricks from 2 m to 4 m takes a material from Tiling 0.5 to 0.25, and one using it only as a normal
+  map; hand-tiled ones keep 3 and 1/3 (passed on the way); an unused `.mat` is left; undo and redo.
+- Unit checks: Windows 9,913, 0 failed (659 tests); the whole suite in render-cache verify mode: 9,914,
+  0 failed, 0 stale pictures. Linux with libraries: 9,821, 0 failed. Sanitizer build: 9,738, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- A `.mat` asset no object used was re-tiled but undo couldn't put it back: only the scene's materials follow now.
+- Only the colour map counted as using the texture: its normal, roughness, metallic and emission maps count too.
+- A dragged Physical Size passing a hand-tiled material's size picked it up: which materials follow is decided at
+  the first change of the undo step.
+- Box mapping's z tiling follows too when it matched.
+- The re-tile no longer scans every `.mat` file on each frame of a drag, nor logs each frame.
+- New checks: a normal-map-only material, a hand-tiled one passed on the way, the unused `.mat`, redo.
+- Left for its own task: redo of an edit to a material linked to a `.mat` (any field, not only tiling) keeps the
+  undone values (older than this task).
+
 ## 2026-10-14 (round 97): drag stacks into order (task 0071)
 
 **Asked:** drag-and-drop reordering of the camera filter stack, the modifier stack and the other stacks.

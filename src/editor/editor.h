@@ -677,6 +677,9 @@ class Editor {
   /* Task 0065: a character's root, as Unity lays out an imported humanoid: "<mesh> Rig" holding the mesh and its
    * Armature. rig_root_of finds the one `g` is in (an object with an Armature child), wrap_in_rig_root makes one. */
   GameObject *rig_root_of(GameObject *g) const;
+  int retile_texture_users(const std::string &asset_path, float from, float to);  // task 0072
+  std::vector<std::pair<MaterialPtr, bool>> texture_followers(const std::string &asset_path, float from);
+  std::unordered_map<std::string, std::vector<std::pair<MaterialPtr, bool>>> retile_followers_;  // this undo step's
   /* Task 0068: the auto-rig's markers coloured by body part, and its views. */
   uint32_t autorig_marker_color(const std::string &marker, int state) const;  // state 0 unplaced, 1 placed, 2 mirrored twin
   bool autorig_set_view(const std::string &view);
