@@ -175,7 +175,9 @@ does; the **Knife** (K) splits faces along a line.
 
 **Modifiers** stack non-destructively, top to bottom, as in Blender: Array, Bevel, Boolean, Decimate, Mirror, Screw,
 Solidify, Subdivision Surface, Triangulate, Wireframe, Weld; and the deformers Cast, Curve, Displace, Lattice, Mesh
-Deform, Simple Deform and Smooth. Each has Edit Mode / Viewport / Render toggles.
+Deform, Simple Deform and Smooth. Each has Edit Mode / Viewport / Render toggles. Drag a modifier's name to move it in
+the stack (a line shows where it lands); a camera's filters, a texture's layers and the Sequencer's tracks move the
+same way.
 
 **Curves and lattices.** GameObject > Curve makes Bezier, circle and path curves; a Curve modifier bends a mesh along
 one, Array > Fit Curve fills it with copies. A Lattice is a box of points that squashes the mesh inside it. Curve and

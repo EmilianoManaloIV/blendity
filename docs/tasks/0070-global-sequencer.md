@@ -4,7 +4,7 @@
 - **Requirements:** R-06
 - **Decisions:** ADR 0030 (amended)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/63
 
 ## Goal
 The user (2026-10-14): "The sequencer should work globally and have two things to consider when adding a clip. Which

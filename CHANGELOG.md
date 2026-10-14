@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 97): drag stacks into order (task 0071)
+
+**Asked:** drag-and-drop reordering of the camera filter stack, the modifier stack and the other stacks.
+
+**Changed**
+- Drag a **modifier's**, a **camera filter's** or a **texture layer's** name in its header to another place in its stack:
+  a line shows where it lands and the item is outlined; letting go moves it, one undo step. A click without moving still
+  folds the header; the menus' Move Up / Down stay.
+- The **Sequencer's tracks** move the same way, by their names (clips go with them). Console: `seq trackmove <from> <to>`.
+
+**Checked**
+- New tests (round 97): Bevel dragged below Smooth in a Bevel / Array / Smooth stack ends last, undo puts it back in one
+  step, a click still folds; a camera's first filter dragged below the second ends last; a Sequencer track dragged
+  below another takes its clips, and `seq trackmove` moves it back.
+- Unit checks: Windows 9,902, 0 failed (658 tests); the whole suite in render-cache verify mode: 9,903,
+  0 failed, 0 stale pictures. Linux with libraries: 9,810, 0 failed. Sanitizer build: 9,727, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- A drag whose list stopped showing (another object selected, the Sequencer emptied by an undo) stayed alive and moved
+  an item the next time the list showed; it is now dropped.
+- Undo, redo and Esc during a drag now drop it (the item under its old index could have been another one).
+- The insert line could be drawn over the window above a scrolled Inspector; it is drawn inside the panel now.
+- Drags that couldn't land (a track in Play, an unsaved texture's layer) no longer start.
+- New checks: a filter dragged up, a drag whose list went away, Esc.
+- Left as is: the line below the last item sits under its header, above its open settings.
+
 ## 2026-10-14 (round 95): a global sequencer - each clip names its object (task 0070, ADR 0030 amended)
 
 **Asked:** "The sequencer should work globally and have two things to consider when adding a clip. Which animation clip

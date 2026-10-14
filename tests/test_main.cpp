@@ -28044,4 +28044,155 @@ static void round81_tests() {
     std::printf("    the scene's sequence after the rename: '%s'\n", ed.scene().sequence.c_str());
     CHECK(ed.scene().sequence == "Assets/Animations/R96Renamed.seq" && ed.seq_for_test_sequence());
   });
+  /* ---------------------------------------------------------------- round 97: dragging stacks into order (task 0071) */
+  test("stacks: a modifier's or a filter's header dragged below another moves it there in one undo step; a click still folds it", [] {
+    Editor ed;
+    ed.init_headless(1400, 1000);
+    ed.command("layout Default");
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    auto at = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* Drag the header `from` to just below the header `below`'s middle. */
+    auto drag = [&](const std::string &from, const std::string &below) {
+      Recti a, b;
+      if (!ed.button_rect_for_test(from, a) || !ed.button_rect_for_test(below, b)) {
+        std::printf("    no header '%s' or '%s'\n", from.c_str(), below.c_str());
+        return false;
+      }
+      const int x = a.x + a.w / 2, y0 = a.y + a.h / 2, y1 = b.y + b.h - 2;
+      ed.step_frame_headless({at(ET::MouseMove, x, y0)});
+      ed.step_frame_headless({at(ET::MouseDown, x, y0)});
+      for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, x, y0 + (y1 - y0) * k / 4)});
+      ed.step_frame_headless({at(ET::MouseUp, x, y1)});
+      ed.step_frame_headless();
+      return true;
+    };
+    ed.command("select Cube");
+    ed.command("component BevelModifier");
+    ed.command("component ArrayModifier");
+    ed.command("component SmoothModifier");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto order = [&] {
+      std::string s;
+      GameObject *g = ed.scene().find_by_name("Cube");
+      for (const auto &c : g->components)
+        if (c->is_modifier()) s += std::string(c->type_name()).substr(0, 3);
+      return s;
+    };
+    std::printf("    modifiers: %s\n", order().c_str());
+    CHECK(order() == "BevArrSmo");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const bool folded0 = cube->get<BevelModifier>()->ui_expanded;
+    CHECK(drag("mod_head0", "mod_head2"));  // Bevel to the bottom
+    std::printf("    after the drag: %s\n", order().c_str());
+    CHECK(order() == "ArrSmoBev");
+    CHECK(cube->get<BevelModifier>()->ui_expanded == folded0);  // (the press on its name didn't fold it)
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(order() == "BevArrSmo");  // one undo step
+    /* A click on a name still folds it. */
+    Recti h;
+    CHECK(ed.button_rect_for_test("mod_head0", h));
+    cube = ed.scene().find_by_name("Cube");
+    const bool was = cube->get<BevelModifier>()->ui_expanded;
+    ed.step_frame_headless({at(ET::MouseMove, h.x + h.w / 2, h.y + h.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, h.x + h.w / 2, h.y + h.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, h.x + h.w / 2, h.y + h.h / 2)});
+    std::printf("    click at %d,%d (%dx%d): folded %d -> %d, %s\n", h.x, h.y, h.w, h.h, (int)was, (int)cube->get<BevelModifier>()->ui_expanded, order().c_str());
+    CHECK(cube->get<BevelModifier>()->ui_expanded != was && order() == "BevArrSmo");
+    /* A camera's filters. */
+    ed.command("select Main Camera");
+    ed.command("filter add Film Grain");
+    ed.command("filter add Retro Console");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto filters = [&] {
+      std::string s;
+      GameObject *cam = ed.scene().find_by_name("Main Camera");
+      const auto *cf = cam ? cam->get<CameraFilters>() : nullptr;
+      if (!cf) return std::string("none");
+      for (const auto &e : cf->effects) s += std::string(e->type_name()).substr(0, 4) + " ";
+      return s;
+    };
+    std::printf("    filters: %s\n", filters().c_str());
+    const std::string before = filters();
+    CHECK(drag("filter_head0", "filter_head1"));
+    std::printf("    after the drag: %s\n", filters().c_str());
+    CHECK(filters() != before && filters().substr(5) == before.substr(0, 5));  // the first is last
+    /* Up: the second dragged above the first's middle puts them back. */
+    Recti f0, f1;
+    CHECK(ed.button_rect_for_test("filter_head0", f0) && ed.button_rect_for_test("filter_head1", f1));
+    const int fx = f1.x + f1.w / 2, fy0 = f1.y + f1.h / 2, fy1 = f0.y + 2;
+    ed.step_frame_headless({at(ET::MouseMove, fx, fy0)});
+    ed.step_frame_headless({at(ET::MouseDown, fx, fy0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, fx, fy0 + (fy1 - fy0) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy1)});
+    ed.step_frame_headless();
+    std::printf("    dragged up: %s\n", filters().c_str());
+    CHECK(filters() == before);
+    /* A drag whose list goes away (another object selected) is dropped: showing the list again doesn't move anything. */
+    ed.step_frame_headless({at(ET::MouseMove, fx, fy0)});
+    ed.step_frame_headless({at(ET::MouseDown, fx, fy0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, fx, fy0 + (fy1 - fy0) * k / 4)});
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy1)});
+    ed.command("select Main Camera");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(filters() == before);
+    /* Esc drops a drag. */
+    ed.step_frame_headless({at(ET::MouseMove, fx, fy0)});
+    ed.step_frame_headless({at(ET::MouseDown, fx, fy0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, fx, fy0 + (fy1 - fy0) * k / 4)});
+    platform::Event esc;
+    esc.type = ET::KeyDown, esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({esc});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy1)});
+    ed.step_frame_headless();
+    std::printf("    after Esc: %s\n", filters().c_str());
+    CHECK(filters() == before);
+  });
+
+  test("stacks: a Sequencer track's name dragged below another moves the track with its clips; seq trackmove does too", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("window Sequencer");
+    std::remove(resolve_asset_path("Assets/Animations/R97 Sequence.seq").c_str());
+    ed.record_buttons_for_test(true);
+    ed.scene().create("R97O");
+    ed.command("seq new R97 Sequence");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0 R97O");
+    ed.command("seq track");
+    ed.command("seq add Assets/Animations/R86Hold.anim 1 0 R97O");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto first_clip = [&](int t) {
+      SequencePtr s = ed.seq_for_test_sequence();
+      return s && (int)s->tracks.size() > t && !s->tracks[(size_t)t].items.empty() ? s->tracks[(size_t)t].items[0].clip : std::string("-");
+    };
+    CHECK(first_clip(0) == "Assets/Animations/R86Up.anim");
+    using ET = platform::EventType;
+    auto at = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    Recti a, b;
+    CHECK(ed.button_rect_for_test("seq_track0", a) && ed.button_rect_for_test("seq_track1", b));
+    const int x = a.x + a.w / 2, y0 = a.y + a.h / 2, y1 = b.y + b.h - 2;
+    ed.step_frame_headless({at(ET::MouseMove, x, y0)});
+    ed.step_frame_headless({at(ET::MouseDown, x, y0)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, x, y0 + (y1 - y0) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, x, y1)});
+    ed.step_frame_headless();
+    std::printf("    track 0 after the drag: %s\n", first_clip(0).c_str());
+    CHECK(first_clip(0) == "Assets/Animations/R86Hold.anim" && first_clip(1) == "Assets/Animations/R86Up.anim");
+    ed.command("seq trackmove 1 0");
+    CHECK(first_clip(0) == "Assets/Animations/R86Up.anim");
+    std::remove(resolve_asset_path("Assets/Animations/R97 Sequence.seq").c_str());
+  });
 }

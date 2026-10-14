@@ -252,6 +252,18 @@ bool Editor::seq_add_clip(const std::string &clip_in, int track, float start, co
   });
 }
 
+/* A track to another place (its name dragged, or `seq trackmove`): its clips go with it. */
+bool Editor::seq_move_track(int from, int to) {
+  SequencePtr s = seq_sequence();
+  const int n = s ? (int)s->tracks.size() : 0;
+  if (from < 0 || from >= n || to < 0 || to >= n || from == to) return false;
+  return seq_edit("Move Track", [from, to](Sequence &q) {
+    SeqTrack t = std::move(q.tracks[(size_t)from]);
+    q.tracks.erase(q.tracks.begin() + from);
+    q.tracks.insert(q.tracks.begin() + to, std::move(t));
+  });
+}
+
 /* The selected instance: its track and index, found again by name (sorting moves it). */
 SeqInstance *Editor::seq_selected(Sequence &s, int *track, int *index) {
   if (seqr_.selected_name.empty()) return nullptr;
@@ -398,7 +410,10 @@ void Editor::draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &l
     const int ly = lanes.y + (int)t * lane_h;
     if (ly > lanes.bottom()) break;
     if (t % 2) u.canvas.fill_rect({list.x, ly, list.w + lanes.w + u.px(8), lane_h}, Color::hex(0x262626));
-    u.label({list.x + u.px(6), ly, list.w - u.px(8), lane_h}, tr.name, u.theme.text);
+    const Recti name_r{list.x + u.px(6), ly, list.w - u.px(8), lane_h};
+    u.label(name_r, tr.name, u.theme.text);
+    if (!playing_) stack_drag_item("tracks", (int)t, name_r, {list.x, ly, list.w, lane_h});  // (drag a name to reorder)
+    if (u.record_buttons) u.button_rects["seq_track" + std::to_string(t)] = name_r;  // (tests)
     drop_seq_tracks_.push_back({Recti{lanes.x, ly, lanes.w, lane_h}, (int)t});
     for (size_t k = 0; k < tr.items.size(); k++) {
       const SeqInstance &i = tr.items[k];
@@ -625,6 +640,8 @@ void Editor::draw_sequencer_window(const Recti &r) {
   u.canvas.fill_rect({body.x, body.y, body.w, row_h}, Color::hex(0x2A2A2A));
   draw_anim_ruler(ruler, lanes, end);
   draw_seq_lanes(*s, list, lanes, lane_h, end);
+  int from = 0, to = 0;
+  if (stack_drag_end("tracks", from, to)) seq_move_track(from, to);
   seqr_.lanes = lanes, seqr_.lane_h = lane_h, seqr_.end = end;
   const int px = seq_x_of(lanes, seqr_.frame, end);
   u.canvas.vline(px, ruler.y, lanes.bottom(), Color::hex(0xFFFFFF));
@@ -708,6 +725,7 @@ void Editor::seq_command(const std::vector<std::string> &t) {
     seqr_.selected_name = t[2];
     return seq_delete_selected();
   }
+  if (verb == "trackmove" && t.size() >= 4) return (void)seq_move_track(index(2), index(3));
   if (verb == "track")
     return (void)seq_edit("Add Track", [](Sequence &q) {
       q.tracks.emplace_back();

@@ -851,6 +851,8 @@ struct InspectorReflector : Reflector {
       Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
       u.label(tr, l.type_name(), l.enabled ? u.theme.text_bright : u.theme.text_dim);
       if (u.hovered(tr) && u.in.pressed[0]) l.ui_expanded = !l.ui_expanded;
+      if (!path.empty()) ed.stack_drag_item("layers:" + path, i, tr, h, &l.ui_expanded);  // (an unsaved texture can't move)
+      if (u.record_buttons) u.button_rects["layer_head" + std::to_string(i)] = tr;  // (tests)
       if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
       const int bs = h.h - u.px(4);
       Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
@@ -876,6 +878,8 @@ struct InspectorReflector : Reflector {
       }
       u.pop_id();
     }
+    int from = 0, to = 0;
+    if (ed.stack_drag_end("layers:" + path, from, to)) ed.texture_stack_op(path, "move", from, to);
     lay.space(u.px(4));
     Recti ar = lay.row(u.row_h() + u.px(4));
     Recti ab{ar.x + u.px(4), ar.y, std::min(ar.w - u.px(8), u.px(200)), ar.h};
@@ -926,6 +930,8 @@ struct InspectorReflector : Reflector {
       Recti tr{fr.right() + a + u.px(8), h.y, h.w - (fr.right() - h.x) - a - u.px(36), h.h};
       u.label(tr, e.type_name(), e.enabled ? u.theme.text_bright : u.theme.text_dim);
       if (u.hovered(tr) && u.in.pressed[0]) e.ui_expanded = !e.ui_expanded;
+      ed.stack_drag_item("filters:" + std::to_string(gid), i, tr, h, &e.ui_expanded);
+      if (u.record_buttons) u.button_rects["filter_head" + std::to_string(i)] = tr;  // (tests)
       if (info) u.tooltip(info->category + " > " + info->name + "\n" + info->help);
       const int bs = h.h - u.px(4);
       Recti mr{h.right() - u.px(2) - bs, h.y + u.px(2), bs, bs};
@@ -950,6 +956,8 @@ struct InspectorReflector : Reflector {
       }
       u.pop_id();
     }
+    int from = 0, to = 0;
+    if (ed.stack_drag_end("filters:" + std::to_string(gid), from, to)) ed.filter_stack_op(gid, "move", from, to);
     /* Add Filter, by category. */
     lay.space(u.px(4));
     Recti ar = lay.row(u.row_h() + u.px(4));
@@ -1430,9 +1438,9 @@ void Editor::draw_inspector(const Recti &r) {
         group("Generate", kGenerate, sizeof(kGenerate) / sizeof(kGenerate[0]));
         group("Deform", kDeform, sizeof(kDeform) / sizeof(kDeform[0]));
       });
-      enum Act { None, Apply, Duplicate, CopyToSelected, Up, Down, First, Last, Remove, Reset };
+      enum Act { None, Apply, Duplicate, CopyToSelected, Up, Down, First, Last, Remove, Reset, DragTo };
       Act act = None;
-      size_t act_ci = 0;
+      size_t act_ci = 0, act_to = 0;
       if (inspector_action_.obj == g->id && inspector_action_.act > None && inspector_action_.act < kCompRemove) {
         for (size_t ci = 0; ci < g->components.size(); ci++)
           if (g->components[ci].get() == inspector_action_.comp) act = (Act)inspector_action_.act, act_ci = ci;
@@ -1487,6 +1495,8 @@ void Editor::draw_inspector(const Recti &r) {
         Recti tr{fr.right() + u.px(2), h.y, bx + bs - fr.right(), h.h};
         u.label(tr, pretty, c->enabled ? u.theme.text_bright : u.theme.text_dim);
         if (u.hovered(tr) && u.in.pressed[0]) c->ui_expanded = !c->ui_expanded;
+        stack_drag_item("mods:" + std::to_string(g->id), (int)k, tr, h, &c->ui_expanded);
+        if (u.record_buttons) u.button_rects["mod_head" + std::to_string(k)] = tr;  // (tests)
         if (const ComponentInfo *info = find_component_info(c->type_name())) u.tooltip(info->help + "\nBlender: " + info->blender);
         const size_t kk = k;
         u.popup(mid, u.px(210), [this, gid = g->id, c, kk, nmods = mods.size()] {
@@ -1537,6 +1547,9 @@ void Editor::draw_inspector(const Recti &r) {
         Recti er = lay.row();
         u.label({er.x + u.px(8), er.y, er.w - u.px(16), er.h}, "No modifiers. Add Modifier to start a stack.", u.theme.text_dim);
       }
+      int drag_from = 0, drag_to = 0;  // a header dragged to another place (task 0071)
+      if (stack_drag_end("mods:" + std::to_string(g->id), drag_from, drag_to) && (size_t)drag_from < mods.size())
+        act = DragTo, act_ci = mods[(size_t)drag_from], act_to = (size_t)drag_to;
       /* Apply the chosen action after drawing (it changes the component list). */
       if (act != None && act_ci < g->components.size()) {
         auto it = std::find(mods.begin(), mods.end(), act_ci);
@@ -1590,6 +1603,7 @@ void Editor::draw_inspector(const Recti &r) {
           case Down: move_to(pos + 1); mark_changed("Move Modifier"); break;
           case First: move_to(0); mark_changed("Move Modifier"); break;
           case Last: move_to(mods.size()); mark_changed("Move Modifier"); break;
+          case DragTo: move_to(act_to); mark_changed("Move Modifier"); break;
           case Remove:
             g->components.erase(g->components.begin() + (long)act_ci);
             mark_changed("Remove Modifier");

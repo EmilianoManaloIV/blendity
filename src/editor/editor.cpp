@@ -1564,6 +1564,7 @@ size_t Editor::undo_bytes() const {
 
 void Editor::undo() {
   if (playing_) return;
+  stack_drag_cancel();  // (its item may not be where it was)
   cancel_skin_job();  // (its result was solved for the state being undone)
   anim_set_preview(false);  // (the pose shown goes back first: it isn't the scene's)
   seq_set_preview(false);
@@ -1599,6 +1600,7 @@ void Editor::undo() {
 
 void Editor::redo() {
   if (playing_ || redo_.empty()) return;
+  stack_drag_cancel();
   cancel_skin_job();
   anim_set_preview(false);
   seq_set_preview(false);

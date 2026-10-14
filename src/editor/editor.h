@@ -651,6 +651,20 @@ class Editor {
   bool object_field_box(ui::Id id, const Recti &box, std::string &v, const std::string &shown, const std::string &none, bool bad, ui::Icon icon);
   bool object_field_picked(ui::Id id, std::string &v);  // a picker's choice from last frame, for this field
   bool picker_button(const Recti &r);                   // Unity's object picker (a ring and a dot)
+  /* Reordering a stack by dragging its headers (task 0071, stack_drag.cpp). */
+  struct StackDrag {
+    std::string list;  // which list: "mods:<id>", "filters:<id>", "layers:<path>", "tracks"
+    int from = -1, x0 = 0, y0 = 0;
+    bool pending = false, active = false;
+    bool *folded = nullptr;                    // the dragged item's fold flag (a press on its name flipped it)
+    std::vector<std::pair<int, Recti>> rows;   // the list's items drawn this frame
+    uint64_t frame = 0;                        // the last frame the list was drawn
+  } stack_drag_;
+  void stack_drag_forget_stale();
+  void stack_drag_cancel();
+  void stack_drag_item(const std::string &list, int index, const Recti &grab, const Recti &whole, bool *folded = nullptr);
+  bool stack_drag_end(const std::string &list, int &from, int &to);
+  void draw_stack_drag(int line_y);
   struct FieldPick {
     ui::Id field = 0;
     std::string value;
@@ -852,6 +866,7 @@ class Editor {
   SequencePtr seq_new(GameObject *root, const std::string &name);
   void note_sequence_edit(Sequence &s);
   bool seq_edit(const char *label, const std::function<void(Sequence &)> &edit);
+  bool seq_move_track(int from, int to);
   void seq_apply();
   void seq_set_frame(float f);
   void seq_set_preview(bool on);
