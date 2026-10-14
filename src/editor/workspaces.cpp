@@ -35,7 +35,7 @@ const Editor::Workspace kWorkspaces[] = {
     {"Rigging", "H(0.72,V(0.74,H(0.22,L(2:0),L(0,1:0)),L(4,5:0)),L(15,3:0))",
      Editor::FocusCreate | Editor::FocusObject | Editor::FocusRig | Editor::FocusDeform, true},
     {"Skinning & Weight Painting", "H(0.7,V(0.78,H(0.22,L(2:0),L(0:0)),L(4,5:0)),L(15,3:0))", Editor::FocusObject | Editor::FocusRig, true},
-    {"Animation", "H(0.74,V(0.6,H(0.5,L(0:0),L(1:0)),L(16,4,5:0)),L(3,15,2:0))", Editor::FocusObject | Editor::FocusRig | Editor::FocusLight, true},
+    {"Animation", "H(0.74,V(0.6,H(0.5,L(0:0),L(1:0)),L(16,17,4,5:0)),L(3,15,2:0))", Editor::FocusObject | Editor::FocusRig | Editor::FocusLight, true},
     /* The arrangements: every tool. */
     {"2 by 3", "H(0.55,V(0.5,L(0,6,10:0),L(1,9:0)),H(0.4,L(2:0),H(0.5,L(4,11,5,8:0),L(3,12:0))))", Editor::FocusAll, false},
     {"Tall", "H(0.76,H(0.62,L(0,1,6,10:0),V(0.5,L(2:0),L(4,11,5,8,9:0))),L(3,12:0))", Editor::FocusAll, false},

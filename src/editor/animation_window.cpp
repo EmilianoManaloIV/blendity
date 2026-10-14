@@ -148,6 +148,7 @@ void Editor::anim_set_preview(bool on) {
     return;
   }
   if (on) {
+    seq_set_preview(false);  // (one thing poses the scene at a time)
     /* What the clip can move: the objects below its root, and the bones IK turns after it (a chain driven by an
      * animated target may sit outside the root). */
     anim_.saved_pose.clear();
@@ -195,6 +196,15 @@ void Editor::note_clip_edit(AnimationClip &c) {
 
 void Editor::restore_clip_texts(const std::vector<std::pair<std::string, std::string>> &texts, std::vector<std::pair<std::string, std::string>> *current) {
   for (const auto &kv : texts) {
+    if (fs::extension(kv.first) == ".seq") {  // (a sequence's text: task 0062)
+      SequencePtr s = sequence_asset(kv.first);
+      if (!s) continue;
+      if (current) current->push_back({kv.first, save_sequence_text(*s)});
+      const std::string keep_path = s->asset_path, keep_name = s->name;
+      load_sequence_text(kv.second, *s);
+      s->asset_path = keep_path, s->name = keep_name;
+      continue;
+    }
     AnimationClipPtr c = clip_asset(kv.first);
     if (!c) continue;  // renamed or deleted since
     if (current) current->push_back({kv.first, save_clip_text(*c)});

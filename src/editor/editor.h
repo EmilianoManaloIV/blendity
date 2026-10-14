@@ -32,6 +32,7 @@
 #include "../scene/import.h"
 #include "../scene/scene.h"
 #include "../scene/animation.h"
+#include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
 #include "ui.h"
@@ -87,7 +88,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -223,6 +224,25 @@ struct AnimEditorState {
   Recti sheet;  // where the sheet was last drawn, and the frames across it (tests find keys by them)
   float sheet_end = 1.0f;
   std::vector<std::tuple<std::string, std::string, int, AnimKey>> clipboard;  // (path, property, axis, key from the first copied)
+};
+
+/* The Sequencer window's state (task 0062): the playhead, Preview, the selected bar (by name: sorting moves it), a drag. */
+struct SeqEditorState {
+  uint64_t root = 0;
+  float frame = 0.0f;
+  bool preview = false, playing = false;
+  double play_clock = 0.0;
+  float play_from = 0.0f;
+  std::string selected_name;
+  int drag = 0;  // 1 the playhead, 2 a bar moved, 3 its left end trimmed, 4 its right end
+  std::string drag_name, drag_seq;  // the bar dragged, in which sequence (another one: the drag is dropped)
+  int drag_track = 0, drag_x = 0, drag_y = 0;
+  std::vector<std::pair<uint64_t, Transform>> saved_pose;  // as the Animation window's Preview
+  std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;
+  Recti lanes{0, 0, 0, 0};  // where the lanes were last drawn and the frames across them (drops, tests)
+  int lane_h = 1;
+  float end = 60.0f;
+  bool drawn = false;  // the window drew this frame (a drag lives only while it does)
 };
 
 /* The marker auto-rig being placed (task 0058): which mesh, which kind, the markers so far. */
@@ -568,6 +588,9 @@ class Editor {
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
   AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
+  const SeqEditorState &seq_for_test() const { return seqr_; }
+  SequencePtr seq_for_test_sequence() { return seq_sequence(); }
+  bool seq_drop_clip_for_test(const std::string &abs_path, int mx, int my) { return seq_drop_clip(abs_path, mx, my); }
   /* Where the Curves view drew key `frame` of `track`, or its handle (side 0 before, 1 after). */
   bool anim_curve_point_for_test(int track, float frame, int side, int &x, int &y) {
     AnimationClipPtr c = anim_clip();
@@ -736,6 +759,45 @@ class Editor {
   void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
   /* The Animation window (task 0059, animation_window.cpp). */
   AnimEditorState anim_;
+  /* The Sequencer window (task 0062, sequencer_window.cpp). */
+  SeqEditorState seqr_;
+  std::vector<std::string> seq_paths_;
+  double seq_paths_listed_ = -100;
+  std::vector<std::pair<Recti, int>> drop_seq_tracks_;  // the Sequencer's tracks a dragged .anim lands on
+  GameObject *seq_root();
+  SequencePtr seq_sequence();
+  SequencePtr seq_new(GameObject *root, const std::string &name);
+  void note_sequence_edit(Sequence &s);
+  bool seq_edit(const char *label, const std::function<void(Sequence &)> &edit);
+  void seq_apply();
+  void seq_set_frame(float f);
+  void seq_set_preview(bool on);
+  void seq_save_pose(GameObject &root);
+  void seq_tick();
+  void seq_reset();
+  void seq_drag_cancel();
+  bool seq_add_clip(const std::string &clip, int track, float start);
+  SeqInstance *seq_selected(Sequence &s, int *track = nullptr, int *index = nullptr);
+  bool seq_move(const std::string &name, int track, float start);
+  bool seq_trim(const std::string &name, float trim_in, float trim_out, float start);
+  bool seq_rename(const std::string &from, const std::string &to);
+  void seq_delete_selected();
+  float seq_frame_at(const Recti &lanes, int x, float end) const;
+  int seq_x_of(const Recti &lanes, float frame, float end) const;
+  bool seq_bar_under(const Sequence &s, const Recti &lanes, int lane_h, float end, int mx, int my, std::string &name, int &part);
+  void draw_seq_toolbar(const Recti &bar, GameObject *root);
+  void seq_pick(GameObject *root, const std::string &path);
+  const std::vector<std::string> &seq_paths();
+  void draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &lanes, int lane_h, float end);
+  bool seq_drag_result(const Sequence &s, const Recti &lanes, int lane_h, float end, int mx, int my, SeqInstance &out, int &track) const;
+  void seq_lanes_input(const Sequence &s, const Recti &ruler, const Recti &lanes, int lane_h, float end);
+  void seq_end_drag(const Sequence &s, const Recti &lanes, int lane_h, float end);
+  void draw_seq_details(Sequence &s, const Recti &r);
+  void draw_seq_triggers(Sequence &s, const Recti &r);
+  void draw_sequencer_window(const Recti &r);
+  bool seq_drop_clip(const std::string &abs_path, int mx, int my);
+  void seq_command(const std::vector<std::string> &t);
+  void seq_jump_command(const std::string &name, float blend);
   std::vector<std::pair<std::string, std::string>> clip_before_;  // clips' texts before their first edit since the last undo step
   std::vector<std::string> anim_clip_paths_;
   double anim_clip_paths_listed_ = -100;

@@ -2,7 +2,73 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
-## 2026-10-13 (round 85): the animation curve editor, Unity's Curves view (task 0061, ADR 0029 amended)
+## 2026-10-13 (round 86): a Premiere-style clip sequencer instead of a state machine (task 0062, ADR 0030)
+
+**Asked:** "A clip editor like Premiere Pro to go between animation clips instead of using a state machine"; for Play,
+the user chose "a timeline plus triggers".
+
+**Added**
+- **Sequences**, `Assets/Animations/<name>.seq`:
+  - Tracks of clip instances. Each instance has its clip, start, In and Out (trim), speed and name.
+  - Two instances overlapping on a track crossfade over the overlap (Premiere's cross dissolve). Rotations blend the
+    short way round.
+  - A higher track's clip wins for the numbers it animates.
+- **The Sequencer component** plays a sequence in Play (Loop or Once, Speed).
+  - Its **triggers** jump to a named clip when a key is pressed (a letter, a digit, Space, F1-F12).
+  - A jump blends from the pose of that moment over the trigger's seconds, and the timeline plays on from there.
+  - An Animation component on the same object steps aside while a sequence plays.
+- **Window > Sequencer** (beside the Animation window in the Animation layout):
+  - Drag `.anim` clips from the Project window onto a track.
+  - Drag a bar to move it (onto another track too) and its ends to trim it; Esc cancels.
+  - Overlaps show the crossfade as a cross.
+  - Below the tracks: the selected bar's Name, Speed, In and Out, and the trigger list.
+  - Right-click a bar for Go To, Speed and Delete. Add Track.
+  - Preview and Play, as in the Animation window. Every edit is one undo step.
+- **Console:** `seq new | add | move | trim | speed | rename | remove | track | trigger | jump | frame | preview | play |
+  stop`.
+- **Renames follow:** renaming or moving a clip, a sequence or their folder keeps sequences, Sequencer components and
+  undo steps pointing at them. That includes sequences not loaded.
+- Learn: "Sequencing clips" in the Animation lesson. MANUAL chapter 9 has a walk/run example.
+
+**Changed**
+- Game keys (`PlayContext::key_down`) are not seen while a text field has the keyboard.
+- The two Previews take turns: turning on one turns off the other.
+
+**Checked**
+- New tests (round 86):
+  - Sampling: one clip trimmed and at speed; a crossfade; a higher track winning; a bar inside another; rotations the
+    short way.
+  - `.seq` round-trip, refusing bad lines, trigger key names.
+  - A clip rename and a folder rename (with a sequence not loaded) carry the sequences.
+  - In Play: a trigger's key jumps and blends from the pose of the moment. Once holds the last frame. An empty
+    Sequencer leaves the Animation playing.
+  - In the window: a drop places a clip, a drag moves a bar, its end trims it, each one undo step.
+  - Preview restores the pose with no undo step. The two Previews take turns.
+  - Huge or NaN track numbers are refused. Undo and redo of an edit.
+- Stress `animation`: a sequence of 4 tracks, each two crossfading 201-track clips, costs 0.31 ms a frame (target 0.5).
+  The first version took 1.30 ms (string keys and allocations per value). Values are now 64-bit keys in a reused
+  table.
+- Unit checks: Windows 9,741, 0 failed (638 tests); the whole suite in render-cache verify mode: 9,742,
+  0 failed, 0 stale pictures. Linux with libraries: 9,649, 0 failed. Sanitizer build: 9,566, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- The Animation window's Preview didn't put the Sequencer's away.
+- A folder rename missed sequences not yet loaded (the listing was walked before the move).
+- `seq add` with a huge track number made that many tracks.
+- A bar inside another snapped back at its end.
+- Once stopped a frame short.
+- A click in an overlap took the bar underneath; short bars couldn't be trimmed.
+- Editing In pinned Out.
+- A drag outlived its window.
+- Triggers fired while typing in the Console.
+- An empty Sequencer silenced the Animation component.
+- Dropping a clip elsewhere logged a warning.
+- Preview could pose another object after a selection change.
+- A bad `.seq` was read again every frame.
+- The stress test's clips stayed loaded after their files went.
+
+: the animation curve editor, Unity's Curves view (task 0061, ADR 0029 amended)
 
 **Asked:** "Start on the later list": first the curve editor for the keyframe animation of task 0059.
 

@@ -5,6 +5,7 @@
 #include "animation.h"
 
 #include "material.h"
+#include "sequence.h"
 
 #include "../core/core.h"
 
@@ -485,6 +486,7 @@ void Animation::start(PlayContext &) {
 
 void Animation::update(PlayContext &ctx) {
   if (!playing || !owner) return;
+  if (const Sequencer *s = owner->get<Sequencer>(); s && s->enabled && sequence_asset(s->sequence)) return;  // (a sequence plays the clips: ADR 0030)
   const AnimationClipPtr c = clip_asset(clip);
   if (!c) return;
   time += ctx.dt * speed;

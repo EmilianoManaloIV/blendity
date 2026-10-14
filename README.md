@@ -51,7 +51,8 @@ everything):
   weights and weight transfer by inpainting** (Epic, 2023); a **Mixamo-style marker auto-rig** for people and
   four-legged animals; rigged FBX / glTF import with bind poses.
 - **Animation** - a **Unity-style dopesheet** and **Curves view** (key tangents: Clamped Auto, Free Smooth, Flat,
-  Broken) with Record and Preview, and the Animation component for Play.
+  Broken) with Record and Preview, the Animation component for Play, and a **Premiere-style Sequencer**: clips laid out
+  on tracks crossfade where they overlap, and keys jump between them in Play.
 
 Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2. The keymap starts
 from Unity, Blender, Maya, 3ds Max or SketchUp.
@@ -86,7 +87,7 @@ cmake -B build && cmake --build build --parallel && ctest --test-dir build   # o
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (9694 unit checks in 632 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (9741 unit checks in 638 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

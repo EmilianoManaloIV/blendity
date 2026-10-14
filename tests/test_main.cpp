@@ -74,6 +74,7 @@ static void test(const char *name, const std::function<void()> &fn) {
   ScopedTimer t;
   fn();
   std::printf("%s %s (%.0f ms)\n", g_fail == before ? "[ ok ]" : "[FAIL]", name, t.ms());
+  std::fflush(stdout);  // (a crash in the next test still shows this one)
 }
 
 /* ------------------------------------------------------- shared helpers */
@@ -26826,5 +26827,319 @@ static void round81_tests() {
     ed.command("undo");
     ed.command("undo");
     CHECK(ed.anim_clip_for_test()->tracks[0].keys[1].tangent == TanAuto);
+  });
+  /* ---------------------------------------------------------------- round 86: the clip sequencer (task 0062) */
+  /* Two clips on a lid: Up raises it from 0 to 6 over 60 frames (linear), Spin turns it from 0 to 90 degrees. */
+  auto seq_clips = [] {
+    for (const char *f : {"Assets/Animations/R86Up.anim", "Assets/Animations/R86Spin.anim", "Assets/Animations/R86Hold.anim"})
+      std::remove(resolve_asset_path(f).c_str());
+    clear_clip_assets();
+    AnimationClipPtr up = create_clip_asset("Assets/Animations/R86Up.anim", "R86Up");
+    up->track("Lid", "Position", 1).set_key(0, 0, AnimLinear);
+    up->track("Lid", "Position", 1).set_key(60, 6, AnimLinear);
+    up->length = 60, up->touch();
+    AnimationClipPtr spin = create_clip_asset("Assets/Animations/R86Spin.anim", "R86Spin");
+    spin->track("Lid", "Rotation", 1).set_key(0, 0, AnimLinear);
+    spin->track("Lid", "Rotation", 1).set_key(60, 90, AnimLinear);
+    spin->track("Lid", "Position", 1).set_key(0, 10, AnimConstant);
+    spin->length = 60, spin->touch();
+    AnimationClipPtr hold = create_clip_asset("Assets/Animations/R86Hold.anim", "R86Hold");
+    hold->track("Lid", "Position", 1).set_key(0, -1, AnimConstant);
+    hold->length = 60, hold->touch();
+    save_dirty_clip_assets();
+  };
+
+  test("sequencer: one clip gives its own values (trimmed, at its speed); an overlap crossfades; a higher track wins", [=] {
+    seq_clips();
+    Sequence s;
+    s.tracks.resize(2);
+    SeqInstance a;
+    a.clip = "Assets/Animations/R86Up.anim", a.name = "Up", a.start = 0, a.trim_in = 30, a.speed = 2;  // frames 30-60 of Up in 15 frames
+    s.tracks[0].items.push_back(a);
+    AnimValues v;
+    sample_sequence(s, 5, v);
+    const float *y = v.get("Lid", "Position", 1);
+    std::printf("    trimmed at 30, speed 2, sequence frame 5: %.3f (Up at frame 40 is 4)\n", y ? *y : -99.0f);
+    CHECK(y && std::fabs(*y - 4.0f) < 1e-4f);
+    CHECK(std::fabs(a.duration(clip_asset(a.clip).get()) - 15.0f) < 1e-4f);
+    /* Up from 0 for 60 frames, Spin from 40: the overlap 40-60 crossfades from Up to Spin. */
+    s.tracks[0].items[0] = a;
+    s.tracks[0].items[0].trim_in = 0, s.tracks[0].items[0].speed = 1;
+    SeqInstance b;
+    b.clip = "Assets/Animations/R86Spin.anim", b.name = "Spin", b.start = 40;
+    s.tracks[0].items.push_back(b);
+    v.clear();
+    sample_sequence(s, 50, v);
+    y = v.get("Lid", "Position", 1);
+    const float *ry = v.get("Lid", "Rotation", 1);
+    /* Halfway through the overlap: Up's 5 and Spin's 10 half and half; the rotation only Spin has is Spin's 15. */
+    std::printf("    at 50 (halfway through the overlap): y %.3f (7.5), rotation %.3f (15)\n", y ? *y : -99.0f, ry ? *ry : -99.0f);
+    CHECK(y && std::fabs(*y - 7.5f) < 1e-3f && ry && std::fabs(*ry - 15.0f) < 1e-3f);
+    v.clear();
+    sample_sequence(s, 70, v);
+    CHECK(v.get("Lid", "Position", 1) && *v.get("Lid", "Position", 1) == 10.0f);  // after the overlap: Spin alone
+    /* Hold on the track above, at 45-105: its -1 wins over the crossfade. */
+    SeqInstance h;
+    h.clip = "Assets/Animations/R86Hold.anim", h.name = "Hold", h.start = 45;
+    s.tracks[1].items.push_back(h);
+    v.clear();
+    sample_sequence(s, 50, v);
+    CHECK(*v.get("Lid", "Position", 1) == -1.0f && std::fabs(*v.get("Lid", "Rotation", 1) - 15.0f) < 1e-3f);
+    /* Rotations blend the short way round: 350 to 10 through 0, not 180. */
+    CHECK(std::fabs(blend_anim_value("Rotation", 350.0f, 10.0f, 0.5f) - 360.0f) < 1e-3f && blend_anim_value("Position", 350.0f, 10.0f, 0.5f) == 180.0f);
+  });
+
+  test("sequencer: a .seq round-trips; moving a clip's file keeps the sequence on it; odd lines are refused", [=] {
+    seq_clips();
+    Sequence s;
+    s.name = "R86";
+    s.tracks.resize(1);
+    s.tracks[0].name = "Body Moves";
+    SeqInstance a;
+    a.clip = "Assets/Animations/R86Up.anim", a.name = "Up and away", a.start = 12, a.trim_in = 3, a.trim_out = 50, a.speed = 1.5f;
+    s.tracks[0].items.push_back(a);
+    s.triggers.push_back({"J", "Up and away", 0.4f});
+    Sequence back;
+    CHECK(load_sequence_text(save_sequence_text(s), back));
+    CHECK(back.tracks.size() == 1 && back.tracks[0].name == "Body Moves" && back.tracks[0].items.size() == 1);
+    const SeqInstance &i = back.tracks[0].items[0];
+    CHECK(i.clip == a.clip && i.name == a.name && i.start == 12 && i.trim_in == 3 && i.trim_out == 50 && i.speed == 1.5f);
+    CHECK(back.triggers.size() == 1 && back.triggers[0].key == "J" && back.triggers[0].instance == "Up and away" && back.triggers[0].blend == 0.4f);
+    Sequence odd;
+    CHECK(load_sequence_text("blendity_seq 1\nrate -5\ntrack T\nclip nan 0 -1 1\tA\tx.anim\nclip 0 0 -1 0\tB\ty.anim\nclip 1 2\nclip 0 0 -1 1\tC\t\ntrigger inf\tJ\tB\n", odd));
+    CHECK(odd.frame_rate == 60.0f && odd.tracks.size() == 1 && odd.tracks[0].items.size() == 1 && odd.tracks[0].items[0].speed == 1.0f && odd.triggers.empty());
+    CHECK(!load_sequence_text("not a sequence", odd));
+    CHECK(trigger_key_code("j") == 'J' && trigger_key_code("Space") == ' ' && trigger_key_code("F5") == platform::KEY_F5 && trigger_key_code("Enter!") == 0);
+    /* In the editor: a sequence naming Up, then Up renamed in the Project window. */
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R86Box");
+    ed.scene().create("Lid", box);
+    ed.command("select R86Box");
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R86Box Sequence.seq").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R86Rise.anim").c_str());
+    ed.command("seq new");
+    CHECK(box->get<Sequencer>() && ed.seq_for_test_sequence());
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0");
+    ed.step_frame_headless();
+    ed.command("renameasset Assets/Animations/R86Up.anim R86Rise");
+    ed.step_frame_headless();
+    SequencePtr q = ed.seq_for_test_sequence();
+    std::printf("    after renaming the clip: the sequence's instance names '%s'\n", q && !q->tracks[0].items.empty() ? q->tracks[0].items[0].clip.c_str() : "-");
+    CHECK(q && q->tracks[0].items.size() == 1 && q->tracks[0].items[0].clip == "Assets/Animations/R86Rise.anim");
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path(q->asset_path), text) && text.find("R86Rise.anim") != std::string::npos);
+    ed.command("renameasset Assets/Animations/R86Rise.anim R86Up");  // (the other tests' clip back)
+    ed.step_frame_headless();
+  });
+
+  test("sequencer: in Play a trigger's key jumps to its clip, blending from the pose of the moment", [=] {
+    seq_clips();
+    Scene sc;
+    GameObject *root = sc.create("R86Root");
+    GameObject *lid = sc.create("Lid", root);
+    std::remove(resolve_asset_path("Assets/Animations/R86Play.seq").c_str());
+    clear_sequence_assets();
+    SequencePtr s = create_sequence_asset("Assets/Animations/R86Play.seq", "R86Play");
+    SeqInstance up, hold;
+    up.clip = "Assets/Animations/R86Up.anim", up.name = "Up", up.start = 0;
+    hold.clip = "Assets/Animations/R86Hold.anim", hold.name = "Hold", hold.start = 100;
+    s->tracks[0].items = {up, hold};
+    s->triggers.push_back({"J", "Hold", 0.5f});
+    s->touch();
+    Sequencer *q = root->add<Sequencer>();
+    q->sequence = s->asset_path;
+    bool j = false;
+    PlayContext ctx;
+    ctx.scene = &sc;
+    ctx.dt = 1.0f / 60.0f;
+    ctx.key_down = [&](int k) { return j && k == 'J'; };
+    q->start(ctx);
+    for (int i = 0; i < 30; i++) q->update(ctx);  // half a second of Up: y 3
+    const float before = lid->local().position.y;
+    std::printf("    after half a second: y %.3f (3)\n", before);
+    CHECK(std::fabs(before - 3.0f) < 0.15f);
+    j = true;
+    q->update(ctx);  // J: to Hold (-1), over half a second
+    const float first = lid->local().position.y;
+    for (int i = 0; i < 14; i++) q->update(ctx);
+    const float mid = lid->local().position.y;
+    for (int i = 0; i < 30; i++) q->update(ctx);  // (J still held: no new jump)
+    const float after = lid->local().position.y;
+    std::printf("    J pressed: y %.3f, a quarter second on %.3f, after the blend %.3f (-1)\n", first, mid, after);
+    CHECK(first < before && first > 2.0f);         // the blend starts from the pose of the moment
+    CHECK(mid < first && mid > -1.0f && std::fabs(mid - 1.0f) < 0.2f);  // halfway: (3 + -1) / 2
+    CHECK(after == -1.0f && q->frame() > 100.0f);  // Hold's own value, the timeline playing on from Hold
+    /* The Animation component steps aside on an object with a Sequencer. */
+    Animation *an = root->add<Animation>();
+    an->clip = "Assets/Animations/R86Up.anim";
+    an->start(ctx);
+    an->update(ctx);
+    CHECK(lid->local().position.y == -1.0f);
+  });
+
+  test("sequencer: in the window, dropping a clip on a track places it, dragging a bar moves it, its end trims it; each one undo step", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R86Win");
+    ed.scene().create("Lid", box);
+    ed.command("select R86Win");
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R86Win Sequence.seq").c_str());
+    ed.command("window Sequencer");
+    ed.command("seq new");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const SeqEditorState &st = ed.seq_for_test();
+    CHECK(st.lanes.w > 0);
+    /* Up dropped on track 2 at about frame 20 (as the Project window's drag would). */
+    const int drop_x = ed.seq_for_test().lanes.x + (int)std::lround(20.0f / st.end * (float)st.lanes.w);
+    CHECK(ed.seq_drop_clip_for_test(resolve_asset_path("Assets/Animations/R86Up.anim"), drop_x, st.lanes.y + st.lane_h + st.lane_h / 2));
+    ed.step_frame_headless();
+    SequencePtr q = ed.seq_for_test_sequence();
+    CHECK(q && q->tracks.size() == 2 && q->tracks[1].items.size() == 1 && std::fabs(q->tracks[1].items[0].start - 20.0f) <= 1.0f);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti bar;
+    CHECK(ed.button_rect_for_test("seq_bar:R86Up", bar));
+    auto drag = [&](int x, int y, int x2, int y2) {
+      platform::Event m, d, mv, u;
+      m.type = mv.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+      m.x = d.x = x, m.y = d.y = y, mv.x = u.x = x2, mv.y = u.y = y2;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({mv});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+    };
+    float per_frame = (float)st.lanes.w / st.end;  // (the ruler fits the sequence: measured again after it grows)
+    const size_t steps = ed.undo_steps_for_test();
+    /* The middle, 30 frames right and up onto track 1. */
+    drag(bar.x + bar.w / 2, bar.y + bar.h / 2, bar.x + bar.w / 2 + (int)std::lround(30 * per_frame), bar.y + bar.h / 2 - st.lane_h);
+    q = ed.seq_for_test_sequence();
+    const float moved = q->tracks[0].items.empty() ? -1.0f : q->tracks[0].items[0].start;
+    std::printf("    moved: track 0 starts at %g (about 50)\n", moved);
+    CHECK(q->tracks[0].items.size() == 1 && q->tracks[1].items.empty() && std::fabs(moved - 50.0f) <= 1.0f);
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    /* The right end, 20 frames left: Up ends at its frame 40. */
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("seq_bar:R86Up", bar));
+    per_frame = (float)st.lanes.w / st.end;
+    drag(bar.right() - 2, bar.y + bar.h / 2, bar.right() - 2 - (int)std::lround(20 * per_frame), bar.y + bar.h / 2);
+    q = ed.seq_for_test_sequence();
+    const SeqInstance &i = q->tracks[0].items[0];
+    std::printf("    trimmed: out %g (about 40), %g frames long\n", i.trim_out, i.duration(clip_asset(i.clip).get()));
+    CHECK(std::fabs(i.trim_out - 40.0f) <= 1.0f && std::fabs(i.start - moved) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps + 2);
+    ed.command("undo");
+    q = ed.seq_for_test_sequence();
+    CHECK(q->tracks[0].items[0].trim_out < 0.0f);
+    ed.command("undo");
+    q = ed.seq_for_test_sequence();
+    CHECK(q->tracks[1].items.size() == 1 && q->tracks[0].items.empty());
+    /* Preview: scrubbing poses the lid, turning it off puts it back, with no undo step. */
+    const size_t before_preview = ed.undo_steps_for_test();
+    ed.command("seq preview on");
+    ed.command("seq frame 50");  // Up's frame 30: y 3
+    ed.step_frame_headless();
+    GameObject *lid = ed.scene().find_by_name("Lid");
+    CHECK(std::fabs(lid->local().position.y - 3.0f) < 1e-3f);
+    ed.command("seq preview off");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Lid")->local().position.y == 0.0f && ed.undo_steps_for_test() == before_preview);
+    /* Triggers from the console; renaming the clip carries its trigger. */
+    ed.command("seq trigger K R86Up 0.3");
+    ed.command("seq trigger K Nope");
+    ed.command("seq rename R86Up Rise");
+    ed.step_frame_headless();
+    q = ed.seq_for_test_sequence();
+    CHECK(q->triggers.size() == 1 && q->triggers[0].instance == "Rise" && q->triggers[0].blend == 0.3f && q->find("Rise"));
+  });
+  test("sequencer: a bar inside another fades in and out within itself; Once holds the last frame; an empty Sequencer leaves the Animation playing", [=] {
+    seq_clips();
+    Sequence s;
+    s.tracks.resize(1);
+    SeqInstance a, b;
+    a.clip = "Assets/Animations/R86Up.anim", a.name = "Up", a.start = 0;
+    b.clip = "Assets/Animations/R86Hold.anim", b.name = "Hold", b.start = 20, b.trim_out = 20;  // 20-40, inside Up's 0-60
+    s.tracks[0].items = {a, b};
+    AnimValues v;
+    sample_sequence(s, 30, v);  // halfway through Hold: Up's 3 and Hold's -1 half and half
+    std::printf("    a bar inside another, halfway through it: %.3f (1)\n", *v.get("Lid", "Position", 1));
+    CHECK(std::fabs(*v.get("Lid", "Position", 1) - 1.0f) < 1e-3f);
+    /* Once: two seconds of a one-second timeline end on Up's last value. */
+    Scene sc;
+    GameObject *root = sc.create("R86Once");
+    GameObject *lid = sc.create("Lid", root);
+    std::remove(resolve_asset_path("Assets/Animations/R86Once.seq").c_str());
+    SequencePtr q = create_sequence_asset("Assets/Animations/R86Once.seq", "R86Once");
+    q->tracks[0].items = {a};
+    Sequencer *c = root->add<Sequencer>();
+    c->sequence = q->asset_path, c->wrap = 1;
+    PlayContext ctx;
+    ctx.scene = &sc, ctx.dt = 1.0f / 60.0f;
+    c->start(ctx);
+    for (int i = 0; i < 120; i++) c->update(ctx);
+    std::printf("    Once after two seconds: y %.4f (6)\n", lid->local().position.y);
+    CHECK(std::fabs(lid->local().position.y - 6.0f) < 1e-2f);
+    /* No sequence named: the Animation component on the same object plays. */
+    c->sequence.clear();
+    Animation *an = root->add<Animation>();
+    an->clip = "Assets/Animations/R86Hold.anim";
+    an->start(ctx);
+    an->update(ctx);
+    CHECK(lid->local().position.y == -1.0f);
+  });
+
+  test("sequencer: the two Previews take turns; a huge track number is refused; redo puts an edit back; a renamed folder carries sequences not loaded", [=] {
+    seq_clips();
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R86Turns");
+    GameObject *lid = ed.scene().create("Lid", box);
+    ed.command("select R86Turns");
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R86Turns Sequence.seq").c_str());
+    ed.command("seq new");
+    ed.command("seq add Assets/Animations/R86Up.anim 0 0");
+    ed.step_frame_headless();
+    /* Sequencer Preview, then the Animation window's: the first is put away (the scene back) before the second. */
+    ed.command("seq preview on");
+    ed.command("seq frame 30");
+    CHECK(std::fabs(lid->local().position.y - 3.0f) < 1e-3f);
+    ed.command("anim preview on");
+    CHECK(!ed.seq_for_test().preview && lid->local().position.y == 0.0f);
+    ed.command("anim preview off");
+    ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Lid")->local().position.y == 0.0f);
+    /* Track numbers past the next one up, or not numbers, are refused. */
+    const size_t tracks = ed.seq_for_test_sequence()->tracks.size();
+    ed.command("seq add Assets/Animations/R86Up.anim 100000000 0");
+    ed.command("seq add Assets/Animations/R86Up.anim 1e20 0");
+    ed.command("seq add Assets/Animations/R86Up.anim nan 0");
+    CHECK(ed.seq_for_test_sequence()->tracks.size() == tracks);
+    /* Undo and redo of a sequence edit. */
+    ed.command("seq speed R86Up 2");
+    ed.step_frame_headless();
+    ed.command("undo");
+    CHECK(ed.seq_for_test_sequence()->find("R86Up")->speed == 1.0f);
+    ed.command("redo");
+    CHECK(ed.seq_for_test_sequence()->find("R86Up")->speed == 2.0f);
+    /* A folder holding a clip and a sequence that isn't loaded, renamed: the sequence on disk follows the clip. */
+    const std::string dir = "Assets/R86Dir", dir2 = "Assets/R86Dir2";
+    std::error_code ec;  // (earlier runs' folders: renaming onto one that exists is refused, as Unity does)
+    std::filesystem::remove_all(resolve_asset_path(dir), ec);
+    std::filesystem::remove_all(resolve_asset_path(dir2), ec);
+    fs::make_dirs(resolve_asset_path(dir));
+    fs::write_file(resolve_asset_path(dir + "/C.anim"), "blendity_anim 1\ntrack\t1\tPosition\tLid\nkey 0 0 0\n");
+    fs::write_file(resolve_asset_path(dir + "/S.seq"), "blendity_seq 1\ntrack T\nclip 0 0 -1 1\tC\t" + dir + "/C.anim\n");
+    ed.command("renameasset " + dir + " R86Dir2");
+    ed.step_frame_headless();
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path(dir2 + "/S.seq"), text));
+    const size_t at = text.find("clip");
+    std::printf("    the moved sequence names: %s", at == std::string::npos ? "-\n" : text.substr(at).c_str());
+    CHECK(text.find(dir2 + "/C.anim") != std::string::npos);
   });
 }

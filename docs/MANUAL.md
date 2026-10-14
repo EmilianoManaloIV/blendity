@@ -427,10 +427,21 @@ same bone names. IK runs after the clip, so animating the IK targets is enough f
 
 **Use cases:** props and doors; character cycles; light and camera animation for renders; shaping ease-in and
 ease-out, bounces and overshoots in the Curves view.
-**Later:** a Premiere-style clip sequencer for moving between clips.
+
+**Sequencing clips (instead of a state machine):** Window > **Sequencer** is a Premiere-style timeline for clips.
+Select the character, press **Create** (it gets a **Sequencer** component and a `.seq`), and drag `.anim` clips from
+the Project window onto its tracks. Drag a bar to move it, its ends to trim it; set Speed, In and Out below the tracks.
+Bars overlapping on one track **crossfade**; a bar on a higher track wins for what it animates. **Triggers** (key,
+clip, blend seconds) jump to a clip in Play, blending from the pose of the moment; from the console, `seq jump <clip>`.
+
+**Example: walk, then run on a key**
+1. Make two clips on the character, Walk and Run (Animation window > Create New Clip...).
+2. Sequencer > Create; drag Walk onto Track 1 at frame 0, Run onto Track 1 at frame 100.
+3. Drag Run left until it overlaps Walk's last 20 frames: the cross shows the crossfade.
+4. Add Trigger: key R, clip Run, blend 0.3. In Play, pressing R goes straight into the run from wherever the walk is.
 
 > Learn: *Modifiers vs Components > Keyframes and the dopesheet*, *Modifiers vs Components > Curves and tangents*,
-> *Play Mode and the Game Loop*.
+> *Modifiers vs Components > Sequencing clips*, *Play Mode and the Game Loop*.
 
 ---
 

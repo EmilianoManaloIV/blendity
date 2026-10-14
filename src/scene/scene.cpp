@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
 #include "animation.h"
+#include "sequence.h"
 #include "curve.h"
 
 #include "../core/core.h"
@@ -84,6 +85,9 @@ void register_builtin_components() {
   reg<Animation>("Animation", "Plays an animation clip (Assets/Animations/*.anim) on this object and the ones below it, in Play. "
                  "Make and edit clips in the Animation window.",
                  "an Action played by the object (Animation data)");
+  reg<Sequencer>("Animation", "Plays a sequence of animation clips (Assets/Animations/*.seq): clips laid out on tracks, crossfading where "
+                 "they overlap; its triggers' keys jump to a clip in Play. Lay sequences out in the Sequencer window.",
+                 "the Nonlinear Animation editor's strips (NLA)");
   reg<MeshDeformModifier>("Mesh", "Binds the mesh to a closed cage mesh round it; moving the cage's vertices shapes the mesh smoothly.",
                           "Mesh Deform modifier (Bind)");
   reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");

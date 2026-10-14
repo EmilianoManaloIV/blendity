@@ -4,7 +4,7 @@
 - **Requirements:** R-06
 - **Decisions:** ADR 0029 (amended: tangents on keys)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/58
 
 ## Goal
 The user's later list (2026-10-12): "a curve editor" for the keyframe animation of task 0059. Unity's Animation
