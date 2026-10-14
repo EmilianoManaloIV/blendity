@@ -65,7 +65,7 @@ jobs:
         run: |
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$PWD/appimagetool" packaging/linux/make_packages.sh "$VERSION"
+          APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$PWD/appimagetool" bash packaging/linux/make_packages.sh "$VERSION"
       - name: Start the AppImage headless
         run: |
           IMG="$PWD/dist/installers/Blendity-$VERSION-x86_64.AppImage" SHOT="$PWD/installed-linux.png"
@@ -87,7 +87,7 @@ jobs:
       - name: Build
         run: ./build.sh release app
       - name: Disk image
-        run: packaging/macos/make_dmg.sh "$VERSION"
+        run: bash packaging/macos/make_dmg.sh "$VERSION"
       - name: Mount and start headless
         run: |
           hdiutil attach "dist/installers/Blendity-$VERSION-macos.dmg" -mountpoint /tmp/blendity
