@@ -23,6 +23,7 @@ an unsigned .dmg, attached to a GitHub Release on v* tags.
 - README: a Download section.
 - Fixed: the test "feel: Unreal's End drops the selection..." failed twice on CI's sanitizer build (#61, #67): it gave
   Alt+J's camera turn a fixed 0.5 s, and a sanitizer frame can take most of that; it now waits for the turn to end.
+  The auto-rig's view test (#68) and two others that waited the same way do too.
 
 **Checked**
 - New test (round 102): a lone `.scene` argument is the scene and its project is found above it; an option's value

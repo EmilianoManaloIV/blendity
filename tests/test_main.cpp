@@ -26451,7 +26451,8 @@ static void round81_tests() {
     const std::vector<Vec3> rest = tube->evaluated_mesh()->positions;
     ed.command("play");
     const double t0 = now_seconds();
-    while (now_seconds() - t0 < 0.6) ed.step_frame_headless();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.6) && now_seconds() - t0 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
     tube = ed.scene().find_by_name("Tube");
     float moved = 0.0f;
     for (size_t v = 0; v < rest.size(); v++) moved = std::max(moved, length(tube->evaluated_mesh()->positions[v] - rest[v]));
@@ -27727,13 +27728,15 @@ static void round81_tests() {
     CHECK(ed.autorig_for_test().active && ed.autorig_for_test().view == "Front");
     ed.command("autorig view left");
     const double t0 = now_seconds();
-    while (now_seconds() - t0 < 0.5) ed.step_frame_headless();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.5) && now_seconds() - t0 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
     std::printf("    after 'autorig view left': view %s, yaw %.1f, ortho %d\n", ed.autorig_for_test().view.c_str(), ed.scene_camera_for_test().yaw,
                 (int)ed.scene_camera_for_test().ortho);
     CHECK(ed.autorig_for_test().view == "Left" && std::fabs(std::remainder(ed.scene_camera_for_test().yaw - 90.0f, 360.0f)) < 1.0f && ed.scene_camera_for_test().ortho);
     ed.command("autorig view top");
     const double t1 = now_seconds();
-    while (now_seconds() - t1 < 0.5) ed.step_frame_headless();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t1 < 0.5) && now_seconds() - t1 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
     CHECK(ed.autorig_for_test().view == "Top" && ed.scene_camera_for_test().pitch > 80.0f);
     ed.command("autorig view sideways");  // (refused)
     CHECK(ed.autorig_for_test().view == "Top");
@@ -27951,7 +27954,8 @@ static void round81_tests() {
     ed.command("autorig mark LeftKnee 0.15 0.4 0.1");
     ed.command("autorig view left");
     const double t0 = now_seconds();
-    while (now_seconds() - t0 < 0.5) ed.step_frame_headless();
+    while ((ed.scene_camera_for_test().animating || now_seconds() - t0 < 0.5) && now_seconds() - t0 < 20.0)
+      ed.step_frame_headless();  // (until the camera's turn ends: a sanitizer build's frames are slow)
     const Vec3 before = ed.autorig_for_test().markers.at("LeftKnee");
     int x = 0, y = 0;
     CHECK(ed.screen_of_for_test(before, x, y));
