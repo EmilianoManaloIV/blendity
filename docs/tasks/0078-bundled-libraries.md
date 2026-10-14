@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** ADR 0001 (amended by ADR 0032's consequences: the installers carry the libraries)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/70
 
 ## Goal
 The user (2026-10-14): "make sure other dependencies should be included when installing the project. The user

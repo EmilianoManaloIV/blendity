@@ -17,7 +17,7 @@ pin() { awk -v n="$1" '$1 == n { print $2 }' packaging/blender-libs.txt; }
 FOLDERS="tbb embree openimagedenoise eigen opensubdiv openexr imath openjph opencolorio manifold meshoptimizer openpgl"
 FOLDERS="$FOLDERS jolt jpeg png zlib zstd shaderc vulkan ffmpeg"
 case "$PLAT" in
-  windows_x64) FOLDERS="$FOLDERS aom" ;;       # (FFmpeg's AV1 DLL)
+  windows_x64) FOLDERS="$FOLDERS aom dpcpp" ;; # (FFmpeg's AV1 DLL; Embree's SYCL runtime)
   linux_x64) FOLDERS="$FOLDERS dpcpp openjpeg" ;;  # (Embree's SYCL runtime; inside FFmpeg's static build)
   macos_arm64) FOLDERS="$FOLDERS openjpeg" ;;
 esac

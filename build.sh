@@ -46,6 +46,9 @@ addlib() {  # folder define "include dirs" "libraries (lib/ relative files)"
 }
 if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   USE_LIBS=1
+  # zlib: Blender's static one (Linux); macOS's own where Blender's lib folder has none.
+  ZLIB_A="zlib/lib/libz.a"
+  [ -f "$LIBDIR/$ZLIB_A" ] || ZLIB_A=""
   addlib tbb              BL_WITH_TBB        "tbb/include"                    "tbb/lib/libtbb.$SOEXT"
   addlib embree           BL_WITH_EMBREE     "embree/include"                 "embree/lib/libembree4.$SOEXT"
   addlib openimagedenoise BL_WITH_OIDN       "openimagedenoise/include"       "openimagedenoise/lib/libOpenImageDenoise.$SOEXT"
@@ -59,7 +62,7 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   addlib openpgl          BL_WITH_OPENPGL    "openpgl/include"                "openpgl/lib/libopenpgl.a"
   addlib jolt             BL_WITH_JOLT       "jolt/include"                   "jolt/lib/libJolt.$SOEXT"
   addlib jpeg             BL_WITH_LIBJPEG    "jpeg/include"                   "jpeg/lib/libjpeg.a"
-  addlib png              BL_WITH_LIBPNG     "png/include zlib/include"       "png/lib/libpng.a zlib/lib/libz.a"
+  addlib png              BL_WITH_LIBPNG     "png/include zlib/include"       "png/lib/libpng.a $ZLIB_A"
   addlib zstd             BL_WITH_ZSTD       "zstd/include"                   "zstd/lib/libzstd.a"
   # Video files (task 0077): Blender's FFmpeg, static with its codecs, in Blender's link order
   # (build_files/cmake/platform/platform_unix.cmake, platform_apple.cmake); zlib again after it.
@@ -68,7 +71,8 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
     [ -f "$LIBDIR/ffmpeg/lib/lib$c.a" ] && FFL="$FFL ffmpeg/lib/lib$c.a"
   done
   [ -f "$LIBDIR/openjpeg/lib/libopenjp2.a" ] && FFL="$FFL openjpeg/lib/libopenjp2.a"  # (FFmpeg's JPEG 2000)
-  [ -n "$FFL" ] && addlib ffmpeg BL_WITH_FFMPEG "ffmpeg/include" "$FFL zlib/lib/libz.a"
+  [ -n "$FFL" ] && addlib ffmpeg BL_WITH_FFMPEG "ffmpeg/include" "$FFL $ZLIB_A"
+  [ -z "$ZLIB_A" ] && LIBLINK="$LIBLINK -lz"
   if [ -n "$FFL" ] && [ "$OS" = "Darwin" ]; then
     LIBLINK="$LIBLINK -framework CoreImage -framework OpenGL -framework VideoToolbox -framework CoreMedia -framework CoreVideo -liconv -lbz2"
   elif [ -n "$FFL" ]; then
@@ -160,6 +164,14 @@ if [ "$USE_LIBS" = 1 ]; then
     find "$LIBDIR/$d/lib" -maxdepth 1 -name "*.$SOEXT*" ! -name "*_d.*" ! -name "*debug*" ! -name "*_cuda*" \
       ! -name "*_hip*" ! -name "*_sycl*" -exec cp -a {} "$OUT/lib/" \;
   done
+  # Linux: Blender's libraries need a C++ runtime as new as the compiler they were built with (GCC 14's); the one this
+  # build linked travels in lib/ too, so the program runs on a system whose own is older (an AppImage on Ubuntu 22.04).
+  if [ "$OS" != "Darwin" ]; then
+    for so in libstdc++.so.6 libgcc_s.so.1; do
+      f="$($CXX -print-file-name=$so)"
+      [ -f "$f" ] && cp -L "$f" "$OUT/lib/$so"
+    done
+  fi
   # Blender's colour management config (OpenColorIO views: AgX, Filmic, ...).
   OCIO_CFG="../blender/release/datafiles/colormanagement"
   if [ -d "$LIBDIR/opencolorio" ] && [ -f "$OCIO_CFG/config.ocio" ]; then

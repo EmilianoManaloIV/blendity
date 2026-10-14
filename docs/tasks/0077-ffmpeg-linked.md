@@ -4,7 +4,7 @@
 - **Requirements:** R-05
 - **Decisions:** ADR 0032
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/70
 
 ## Goal
 The user (2026-10-14): "Can we install ffmpeg and treat it like a blender dependency?" - and link it, with every
