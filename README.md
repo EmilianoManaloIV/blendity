@@ -18,21 +18,91 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 
 ## Download
 
-From the [Releases](https://github.com/EmilianoManaloIV/blendity/releases) page:
+Blendity is free. You don't need Blender or anything else: the installer brings everything Blendity uses.
 
-| System | File | Install |
-|---|---|---|
-| Windows 10 / 11 (x64) | `Blendity-Setup-<version>.exe` | Run it. It installs for you alone (no administrator), adds Start menu (and, if you like, desktop) shortcuts and opens `.scene` files; remove it from Settings > Apps. |
-| Linux (x86-64, Ubuntu 22.04 or newer) | `Blendity-<version>-x86_64.AppImage` | `chmod +x` it and run it. Or unpack `blendity-<version>-linux-x86_64.tar.gz` anywhere and run `Blendity` (it needs only `libX11`). |
-| macOS (Apple silicon) | `Blendity-<version>-macos.dmg` | Open it and drag Blendity onto Applications. The app isn't signed, so the first time macOS asks for a go-ahead: on macOS 15 or later, try to open it, then System Settings > Privacy & Security > **Open Anyway**; on macOS 14 or earlier, right-click it > **Open**. |
+> Blendity is a **pre-release** (0.10.0): it works, but it is still being refined, so expect rough edges. Save
+> your work often.
 
-Your work goes in a project folder, `BlendityProject` in your home folder unless you open another. Blendity checks for
-updates once a day (Help > Check for Updates; Help > Version History goes back to an older build), and runs with or
-without Blender's libraries - your choice in Preferences > Libraries; without them, or offline, it uses its own code.
+### 1. Download
+
+Click the link for your computer. It downloads the one file you need, always the newest version:
+
+| Your computer | Download |
+|---|---|
+| Windows 10 or 11 | **[Download for Windows](https://github.com/EmilianoManaloIV/blendity/releases/latest/download/Blendity-Setup-Windows.exe)** (`Blendity-Setup-Windows.exe`) |
+| Mac with an Apple chip (M1, M2, M3, M4...) | **[Download for Mac](https://github.com/EmilianoManaloIV/blendity/releases/latest/download/Blendity-macos.dmg)** (`Blendity-macos.dmg`) |
+| Linux (Ubuntu 22.04 or newer, Fedora, Mint...) | **[Download for Linux](https://github.com/EmilianoManaloIV/blendity/releases/latest/download/Blendity-linux-x86_64.AppImage)** (`Blendity-linux-x86_64.AppImage`) |
+
+Not sure which Mac you have? Apple menu > **About This Mac**: "Chip: Apple M..." means an Apple chip. Macs with an
+Intel processor aren't supported yet. (Every version, with what changed in it, is on the
+[Releases](https://github.com/EmilianoManaloIV/blendity/releases) page; the "Source code" files there are for
+developers.)
+
+### 2. Install it
+
+<details open>
+<summary><b>Windows</b></summary>
+
+1. Open your **Downloads** folder and double-click **`Blendity-Setup-Windows.exe`**.
+2. If a blue box says **"Windows protected your PC"**, click **More info**, then **Run anyway**. (Windows shows this
+   for programs that aren't signed with a paid certificate; Blendity isn't yet.)
+3. If Windows asks whether to install for you only or for everyone, pick **for me only** (no administrator needed).
+4. Accept the licence and click **Next** through the steps. Keep **"Blendity with Blender's libraries
+   (recommended)"**. Tick **Create a desktop shortcut** if you want one.
+5. Click **Install**, then **Finish**. Blendity opens.
+
+Next time, open it from the **Start** menu (type "Blendity"). **To uninstall:** Settings > Apps > Installed apps >
+Blendity > **Uninstall**. Your projects are kept.
+</details>
+
+<details>
+<summary><b>Mac</b></summary>
+
+1. Double-click **`Blendity-macos.dmg`** in your Downloads.
+2. In the window that opens, drag the **Blendity** icon onto the **Applications** folder, then close the window.
+3. Open **Applications** and double-click **Blendity**.
+4. The first time, macOS says it can't check that the app is free of malware (Blendity isn't signed with a paid
+   Apple certificate yet):
+   - **macOS 15 (Sequoia) or newer:** click **Done**. Open **System Settings > Privacy & Security**, scroll down to
+     "Blendity was blocked..." and click **Open Anyway**, then **Open Anyway** again and enter your Mac's password.
+   - **macOS 14 or older:** right-click (or Control-click) Blendity in Applications, choose **Open**, then **Open**.
+
+   You only do this once. **If macOS says Blendity "is damaged":** open the **Terminal** app, paste this line and
+   press Return, then open Blendity again:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Blendity.app
+   ```
+
+**To uninstall:** drag Blendity from Applications to the Bin.
+</details>
+
+<details>
+<summary><b>Linux</b></summary>
+
+1. In your **Downloads** folder, right-click **`Blendity-linux-x86_64.AppImage`** and choose **Properties**.
+2. Under **Permissions**, turn on **Allow executing file as program** (or "Executable as Program").
+3. Close the window and double-click the file. Blendity opens. (You can move the file anywhere first, for example to
+   a folder called Applications in your home folder.)
+
+If double-clicking does nothing, download
+[the plain folder](https://github.com/EmilianoManaloIV/blendity/releases/download/libraries/blendity-linux-x86_64.tar.gz)
+instead, right-click it > **Extract Here**, open the new folder and double-click **Blendity**. **To uninstall:** delete the file (or the
+folder).
+</details>
+
+### 3. First steps
+
+- Your work is saved in a project folder, **BlendityProject** in your home folder, unless you open another.
+- Press **F1** for the **Learn** tab: short interactive lessons for each part of Blendity.
+- **Updates:** Blendity checks once a day and asks before installing anything (Help > Check for Updates). Help >
+  Version History goes back to an older version if a new one gives you trouble.
+- Blendity runs with or without Blender's libraries (faster rendering, denoising, video export...): your choice in
+  Preferences > Libraries. Without them, or offline, it uses its own code.
 
 ## Quick start
 
-1. Install it (above), or build it (below) and run `dist/windows/Blendity.exe`, `dist/linux/Blendity` (with
+1. Install it (above) - or, for developers, build it (below) and run `dist/windows/Blendity.exe`, `dist/linux/Blendity` (with
    `dist/linux/lib/` beside it) or `dist/macos/Blendity.app`.
 2. Press **F1** for the Learn tab, or pick a stage from the **Layout** dropdown (top right).
 3. Alt+drag orbits, the wheel zooms, W / E / R move, rotate and scale, Tab enters Edit Mode, Ctrl+P plays.
@@ -112,7 +182,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (10004 unit checks in 676 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (10011 unit checks in 678 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

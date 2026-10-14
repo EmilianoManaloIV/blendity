@@ -13,8 +13,13 @@ the user's. Until now a build with Blender's libraries linked them at load time:
 
 ## Decision
 - **Builds:** every PR merged into main publishes a GitHub pre-release `build-pr<N>` (its notes: the PR's
-  description); v* tags publish releases (marked pre-release before 1.0 or with a suffix, task 0081; the updater
-  offers them with previews off all the same). Each has the installers, the libraries archive and SHA256SUMS.txt.
+  description); v* tags publish releases (v0.x: GitHub's Latest, titled a pre-release of the program; a suffixed
+  tag such as v1.1.0-beta.1: a GitHub pre-release; the updater offers tagged versions with previews off either way,
+  tasks 0081-0082). A release lists only the installers, under names without the version (Blendity-Setup-Windows.exe,
+  Blendity-macos.dmg, Blendity-linux-x86_64.AppImage, so the README's releases/latest/download links always fetch the
+  newest), and SHA256SUMS.txt, which also lists the build's other files. Those - the libraries archives
+  (blendity-libs-<system>-<tag>) and the Linux .tar.gz - go to one release tagged `libraries`, which the updater
+  fetches by tag; archives of deleted builds are removed from it (packaging/publish_release.sh, task 0082).
   A build knows its tag (BLENDITY_BUILD) and version (VERSION).
 - **The updater** reads GitHub's releases list (no new library: WinHTTP on Windows, `curl` elsewhere; the JSON reader
   the glTF importer had, moved to core), offers newer builds of this system (Preferences: stable only or PR builds

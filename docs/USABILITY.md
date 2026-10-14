@@ -207,6 +207,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Getting Blendity meant building it or unpacking CI artifacts. | Installers for Windows, Linux (AppImage, tar.gz) and macOS (dmg), on GitHub Releases (task 0076). |
 | An MP4 needed FFmpeg installed separately, and the installers lacked Blender's libraries (Embree, denoising, colour management). | FFmpeg linked in; the installers carry every library; one script fetches them for a source build (tasks 0077-0078). |
 | Updating meant finding a new installer by hand; a missing library stopped Blendity starting. | Updates offered with their notes, any older build from Version History; Blendity runs without the libraries and offers them, by your choice (tasks 0079-0080). |
+| Installing meant finding one file among many on GitHub's release page, with no instructions. | One download link per system in the README, a step-by-step guide there and in each release, and releases holding only the installers (task 0082). |
 | Redoing an edit to a material saved as a .mat brought back the undone values. | Undo and redo keep each state's own material values (task 0081). |
 | How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 
