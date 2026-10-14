@@ -504,6 +504,21 @@ void Environment::compute_sh() {
 /* Shadows                                                                */
 /* ===================================================================== */
 
+/* The 2 x 2 texels round (x, y), each lit or not, weighted by how near (GPUs' hardware PCF): less than half the reads
+ * of 3 x 3, smooth rather than stepped, but a narrower penumbra (about a texel instead of three). */
+float ShadowMap::lookup_bilinear(float x, float y, float z) const {
+  const float fx = x - 0.5f, fy = y - 0.5f;
+  const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+  const float tx = fx - (float)x0, ty = fy - (float)y0;
+  auto lit = [&](int sx, int sy) {
+    sx = std::max(0, std::min(size - 1, sx)), sy = std::max(0, std::min(size - 1, sy));
+    return z <= depth[(size_t)sy * size + sx] ? 1.0f : 0.0f;
+  };
+  const float top = lit(x0, y0) * (1.0f - tx) + lit(x0 + 1, y0) * tx;
+  const float bottom = lit(x0, y0 + 1) * (1.0f - tx) + lit(x0 + 1, y0 + 1) * tx;
+  return top * (1.0f - ty) + bottom * ty;
+}
+
 float ShadowMap::lookup(Vec3 world, float ndl) const {
   if (!valid()) return 1.0f;
   Vec4 c = view_proj * Vec4(world, 1.0f);
@@ -511,6 +526,7 @@ float ShadowMap::lookup(Vec3 world, float ndl) const {
   float x = (c.x / c.w * 0.5f + 0.5f) * size, y = (0.5f - c.y / c.w * 0.5f) * size, z = c.z / c.w;
   if (x < 0 || y < 0 || x >= size || y >= size || z > 1.0f) return 1.0f;
   float b = bias * (1.0f + 3.0f * (1.0f - saturate(ndl)));  // slope-scaled bias
+  if (fast) return lookup_bilinear(x, y, z - b);
   int ix = (int)x, iy = (int)y;
   float lit = 0;
   for (int dy = -1; dy <= 1; dy++)

@@ -28389,4 +28389,90 @@ static void round81_tests() {
     ed.command("renderanim 24");  // (one number: refused, not a render)
     CHECK(!ed.render_animation_for_test().active);
   });
+  /* ---------------------------------------------------------------- round 101: touch, pen and the laptop minimum (task 0075) */
+  test("touch: two fingers over the Scene view pinch-zoom, pan with the fingers and twist round the pivot; elsewhere they do nothing", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);  // (1080p at 150 %: the HP Envy 13.3's logical size)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Recti sr = ed.scene_rect_for_test();
+    auto gesture = [&](int x, int y, float zoom, float px, float py, float rot) {
+      platform::Event e;
+      e.type = platform::EventType::Gesture;
+      e.x = x, e.y = y, e.zoom = zoom, e.pan_x = px, e.pan_y = py, e.rotate = rot;
+      ed.step_frame_headless({e});
+    };
+    const int cx = sr.x + sr.w / 2, cy = sr.y + sr.h / 2;
+    platform::Event mv;
+    mv.type = platform::EventType::MouseMove, mv.x = cx, mv.y = cy;
+    ed.step_frame_headless({mv});
+    const float d0 = ed.scene_camera_for_test().distance, yaw0 = ed.scene_camera_for_test().yaw;
+    const Vec3 p0 = ed.scene_camera_for_test().pivot;
+    gesture(cx, cy, 2.0f, 0, 0, 0);
+    std::printf("    pinch x2: distance %.3f -> %.3f\n", d0, ed.scene_camera_for_test().distance);
+    CHECK(std::fabs(ed.scene_camera_for_test().distance - d0 / 2.0f) < 1e-4f * d0);
+    gesture(cx, cy, 1.0f, 40.0f, 0.0f, 0.0f);
+    const Vec3 moved = ed.scene_camera_for_test().pivot - p0;
+    std::printf("    two-finger drag right 40 px: the pivot moved %.3f along the view's left\n", -dot(moved, ed.scene_camera_for_test().right()));
+    CHECK(dot(moved, ed.scene_camera_for_test().right()) < -0.01f);  // (the scene follows the fingers: the view goes left)
+    gesture(cx, cy, 1.0f, 0, 0, 30.0f);
+    CHECK(std::fabs(ed.scene_camera_for_test().yaw - (yaw0 - 30.0f)) < 1e-3f);
+    /* Over the Inspector: nothing. */
+    const float d1 = ed.scene_camera_for_test().distance;
+    gesture(1260, cy, 2.0f, 0, 0, 0);
+    CHECK(ed.scene_camera_for_test().distance == d1);
+    /* NaN from a driver: ignored. */
+    gesture(cx, cy, std::nanf(""), 0, 0, std::nanf(""));
+    CHECK(std::isfinite(ed.scene_camera_for_test().distance) && std::isfinite(ed.scene_camera_for_test().yaw));
+  });
+
+  test("pen: a stroke pressed half as hard adds half the weight", [] {
+    auto paint = [](float pressure) {
+      R68 t;
+      t.ed.command("wpbrush add 40 0.5 1");
+      platform::Event pen;
+      pen.type = platform::EventType::MouseMove, pen.x = 10, pen.y = 10, pen.pressure = pressure;
+      t.ed.step_frame_headless({pen});
+      t.stroke({Vec3(0, 0, 0)});
+      return t.weight_at({0, 0, 0});
+    };
+    const float full = paint(1.0f), half = paint(0.5f);
+    std::printf("    one dab: pressure 1 %.3f, pressure 0.5 %.3f\n", full, half);
+    CHECK(full > 0.1f && std::fabs(half - full * 0.5f) < 0.02f);
+  });
+
+  test("laptop minimum: the first run on a 4-core / 8-thread or 8 GB machine starts on Low and says so, offering High", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    const std::string prefs = fs::join(test_dir(), "r101_prefs_none.txt");
+    std::remove(prefs.c_str());
+    ed.prefs_for_test(prefs);
+    ed.load_prefs_for_test();  // (no file: the first run)
+    const bool low = Editor::recommended_tier() == 0;
+    std::printf("    this machine: %d threads, recommended %s, the welcome shown %d\n", sys::hardware_threads(), low ? "Low" : "High",
+                (int)ed.first_run_dialog_for_test());
+    CHECK(ed.first_run_dialog_for_test() == low);
+    /* The minimum machine (BLENDITY_MIN_SPEC emulates it): Low and the welcome; Use High switches and keeps it. */
+    set_env("BLENDITY_MIN_SPEC", "1");
+    Editor e2;
+    e2.init_headless(1280, 720);
+    e2.record_buttons_for_test(true);
+    e2.prefs_for_test(prefs);
+    e2.load_prefs_for_test();
+    set_env("BLENDITY_MIN_SPEC", "0");
+    CHECK(e2.first_run_dialog_for_test() && e2.quality_tier() == 0);
+    for (int i = 0; i < 2; i++) e2.step_frame_headless();  // (it draws at 1280 x 720)
+    Recti b;
+    CHECK(e2.button_rect_for_test("Use High", b) && b.bottom() <= 720 && b.right() <= 1280);  // (it fits 1080p at 150 %)
+    using ET = platform::EventType;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2;
+      e2.step_frame_headless({e});
+    }
+    std::printf("    on the minimum machine: Use High clicked: tier %d, welcome %d\n", e2.quality_tier(), (int)e2.first_run_dialog_for_test());
+    CHECK(e2.quality_tier() == 2 && !e2.first_run_dialog_for_test());
+    std::string saved;
+    CHECK(fs::read_file(prefs, saved) && saved.find("quality_tier=2") != std::string::npos);
+    std::remove(prefs.c_str());
+  });
 }

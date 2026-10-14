@@ -366,8 +366,25 @@ void Editor::scene_navigation(const Recti &view) {
       (void)eye;
     }
   }
+  if (scene_hovered_ && drag_ == Drag::None && !modal_.active) touch_navigate(k_pan);
   if (pilot_cam_ && in.key_pressed[platform::KEY_ESCAPE] && !pp_.active && !modal_.active && !xf_.active && !draw_.active && !knife_.active)
     toggle_pilot_camera();
+}
+
+/* Two fingers on a touch screen or pad (task 0075), in every feel: pinch zooms toward the pivot, a two-finger drag
+ * pans the view with the fingers, a twist turns it round the pivot (as tablets' 3D apps do: Nomad, Shapr3D). */
+void Editor::touch_navigate(float k_pan) {
+  const auto &in = ui_.in;
+  const bool zoom = std::isfinite(in.touch_zoom) && in.touch_zoom > 0.0f && in.touch_zoom != 1.0f;
+  if (!zoom && in.touch_pan_x == 0.0f && in.touch_pan_y == 0.0f && in.touch_rotate == 0.0f) return;
+  cam_.animating = false;
+  if (zoom) cam_.distance = clampf(cam_.distance / in.touch_zoom, 0.01f, 100000.0f);
+  if (std::isfinite(in.touch_pan_x) && std::isfinite(in.touch_pan_y)) {
+    cam_.pivot -= cam_.right() * (in.touch_pan_x * k_pan);
+    cam_.pivot += cam_.up() * (in.touch_pan_y * k_pan);
+  }
+  if (std::isfinite(in.touch_rotate)) cam_.yaw -= in.touch_rotate;
+  ui_.redraw = true;
 }
 
 void Editor::set_active_camera(GameObject *g) {

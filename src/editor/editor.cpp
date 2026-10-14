@@ -256,6 +256,8 @@ void Editor::process_events(std::vector<Event> &events) {
   in.pmy = in.my;
   for (int b = 0; b < 3; b++) in.pressed[b] = in.released[b] = in.double_clicked[b] = false;
   in.wheel_x = in.wheel_y = 0;
+  in.touch_zoom = 1.0f;
+  in.touch_pan_x = in.touch_pan_y = in.touch_rotate = 0.0f;
   in.text.clear();
   in.dropped.clear();
   std::fill(std::begin(in.key_pressed), std::end(in.key_pressed), false);
@@ -264,10 +266,20 @@ void Editor::process_events(std::vector<Event> &events) {
       case EventType::Quit: request_close(); break;
       case EventType::MouseMove:
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
+        in.pressure = e.pressure;
+        break;
+      case EventType::Gesture:  // (task 0075: two fingers; the Scene view navigates with them)
+        if (!in.down[0] && !in.down[1] && !in.down[2]) in.mx = e.x, in.my = e.y;  // (a held button's drag keeps its own point)
+        in.mods = e.mods;
+        in.touch_zoom *= e.zoom;
+        in.touch_pan_x += e.pan_x;
+        in.touch_pan_y += e.pan_y;
+        in.touch_rotate += e.rotate;
         break;
       case EventType::MouseDown: {
         int b = e.button;
         in.mx = e.x; in.my = e.y; in.mods = e.mods;
+        in.pressure = e.pressure;
         in.down[b] = true;
         in.pressed[b] = true;
         double t = now_seconds();
@@ -2314,6 +2326,30 @@ void Editor::update_procedural_shapes() {
   }
 }
 
+/* The first run on a machine near the minimum (4 cores / 8 threads or 8 GB, e.g. an i7 laptop with Iris Xe): what Low
+ * does, and High one click away. Either choice can be changed in Preferences > Quality. */
+void Editor::draw_first_run_tier(const std::function<void()> &close) {
+  auto &u = ui_;
+  const uint64_t ram = sys::physical_memory_bytes();
+  const std::string found = strprintf("This machine has %d threads and %.0f GB of memory, near Blendity's minimum.", sys::hardware_threads(), ram / 1073741824.0);
+  for (const std::string &l : {found, std::string("Low keeps the editor smooth: the views draw at 67 % and scale up, a 1024 shadow map,"),
+                               std::string("60 fps. Renders (F12) always use the scene's own settings."),
+                               std::string("Change it any time in Edit > Preferences > Quality.")}) {
+    Recti r = u.popup_row();
+    u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, l);
+  }
+  Recti b = u.popup_row(u.row_h() + u.px(10));
+  if (u.button({b.right() - u.px(200), b.y + u.px(4), u.px(100), b.h - u.px(8)}, "Use High")) {
+    set_quality_tier(TierHigh);
+    save_prefs();
+    close();
+    return;
+  }
+  if (!u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Keep Low")) return;
+  save_prefs();
+  close();
+}
+
 /* The editor's colours (task 0073), by name (case aside); saved with the prefs. */
 void Editor::set_theme(const std::string &name_in, bool save) {
   const int k = ui::theme_index(name_in);
@@ -3925,7 +3961,7 @@ void Editor::draw_dialogs() {
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
-  int w = u.px(dialog_ == Dialog::About ? 460 : dialog_ == Dialog::Preferences ? 640 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : dialog_ == Dialog::Preferences ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -4008,6 +4044,10 @@ void Editor::draw_dialogs() {
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
         break;
       }
+      case Dialog::FirstRunTier:
+        title("Welcome: Blendity starts on Low here");
+        draw_first_run_tier(close);
+        break;
       case Dialog::About: {
         title("About Blendity");
         const char *lines[] = {"Blendity - a Unity-style editor built on Blender's modeling ideas.",
@@ -4066,6 +4106,7 @@ void Editor::load_prefs() {
   rebuild_keymap();
   if (!fs::read_file(prefs_path_, text)) {
     set_quality_tier(recommended_tier());  // the first run: a tier that suits this machine (task 0050)
+    if (recommended_tier() == TierLow && (!headless_ || prefs_for_test_)) dialog_ = Dialog::FirstRunTier;  // ... and says so (task 0075)
     return;
   }
   std::string keymap_text;

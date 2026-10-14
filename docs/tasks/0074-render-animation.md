@@ -4,7 +4,7 @@
 - **Requirements:** R-05
 - **Decisions:** none (FFmpeg is run, not linked: no new dependency)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/67
 
 ## Goal
 The user (2026-10-14): rendering sequences to video. Their choice: PNG frames plus an MP4 through FFmpeg.

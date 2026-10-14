@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 101): the laptop minimum - an i7, 8 GB, the HP Envy 13.3" 2-in-1 (task 0075, ADR 0026 amended)
+
+**Asked:** a new minimum machine: an i7 with 8 GB of RAM, the HP Envy 2-in-1 13.3".
+
+**Changed**
+- The minimum is now that laptop (i7-1165G7, 4 cores / 8 threads, 8 GB shared with Iris Xe, 1080p at 150 %): README,
+  MANUAL chapter 11, ADR 0026 and PERFORMANCE.md pass 9.
+- **First run** on such a machine: Low, and a welcome that says so, with **Use High** one click away
+  (`BLENDITY_MIN_SPEC=1` shows it on any machine).
+- **Touch (Windows):** two fingers over the Scene view pinch to zoom, drag to pan, twist to turn round the pivot, in
+  every editor feel; one finger is the mouse. **Pen:** its pressure scales the weight-paint brush.
+- The Low tier's views read shadows with a 2 x 2 bilinear filter (4 taps instead of 9).
+- An integrated GPU's path-tracing budget is a quarter of RAM (Iris Xe reports half as its own).
+- `blendity_stress --laptop`: 5 threads (4 cores' 8 threads), the times to be multiplied by 1.4 for the laptop's clock.
+
+**Checked**
+- `editor_render` at Low with `--laptop` x 1.4: orbiting 13.0 ms (60 fps), moving an object 26.0, a material edit 24.9,
+  Play 22.8 (30-40 fps; 60 while editing is **not met** on the laptop, and Low keeps 67 % rather than looking soft).
+  On 8 full cores (pass 8's setup) the frames pass 8 left over 16.7 ms are now 12.9 and 11.4.
+- New tests (round 101): a pinch of 2 halves the distance, a two-finger drag pans with the fingers, a twist turns the
+  view by its angle, over the Inspector nothing, NaN ignored; a stroke at pressure 0.5 adds half; the first run on the
+  minimum machine shows the welcome, which fits 1280 x 720, and Use High switches and is saved.
+- The Preferences dialog checked at 1280 x 720 (a headless screenshot).
+- Unit checks: Windows 9,948, 0 failed (665 tests); the whole suite in render-cache verify mode: 9,949,
+  0 failed, 0 stale pictures. Linux with libraries: 9,856, 0 failed. Sanitizer build: 9,773, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- `--laptop`'s message had a line break inside its string: the stress tool didn't compile.
+- A pen hovering after lift-off left its pressure 0 for every later mouse stroke: only mouse messages Windows made from
+  a pen carry it now, and lifting or leaving resets it.
+- The first finger's press, when Windows makes one, moved a held drag to the gesture's middle: gestures leave the
+  mouse position alone while a button is down.
+- Windows' own gestures (begin, end, taps) went unanswered; the pointer calls are looked up so the program starts
+  without them.
+- The 2 x 2 filter's edge is narrower than 3 x 3's, not as soft: the comments and lesson say so.
+- Left: the Low filter is a flag on the cached shadow map, safe while every render runs on the main thread (a note for
+  any render moved off it).
+
 ## 2026-10-14 (round 100): render animations and sequences to video (task 0074)
 
 **Asked:** rendering sequences to video; the choice was PNG frames plus an MP4 through FFmpeg.

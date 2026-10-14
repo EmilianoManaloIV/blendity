@@ -4265,9 +4265,15 @@ int main(int argc, char **argv) {
     else if (a == "--budget" && i + 1 < argc) o.budget = std::atof(argv[++i]);
     else if (a == "--threads" && i + 1 < argc) JobSystem::global().set_thread_limit(std::atoi(argv[++i]));
     else if (a == "--min-spec") JobSystem::global().set_thread_limit(8);  // task 0050: a 4-core / 8-thread machine
+    else if (a == "--laptop") {
+      /* Task 0075: an i7-1165G7 laptop (the HP Envy 13.3" 2-in-1). Its 4 cores' 8 threads do about the work of 5 full
+       * cores, and its sustained clock under load is about 1 / 1.4 of a desktop's: multiply the times by 1.4. */
+      JobSystem::global().set_thread_limit(5);
+      std::printf("--laptop: 5 threads; multiply the times by about 1.4 for the laptop's sustained clock\n");
+    }
     else if (a == "--quality" && i + 1 < argc) o.quality = argv[++i];
     else if (a == "--help") {
-      std::printf("blendity_stress [--quick] [--only NAME] [--out DIR] [--budget MS] [--threads N | --min-spec]\n");
+      std::printf("blendity_stress [--quick] [--only NAME] [--out DIR] [--budget MS] [--threads N | --min-spec | --laptop]\n");
       return 0;
     }
   }

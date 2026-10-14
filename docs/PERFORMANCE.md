@@ -10,6 +10,29 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
+
+The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris
+Xe, 1920 x 1080 at 150 %. This machine (a Ryzen 9 5900XT, 16 cores) emulates it with `blendity_stress --laptop`: 5
+threads, because 4 cores' 8 threads do about the work of 5 full cores (pass 8's `--min-spec` gave 8 *full* cores), and
+the times multiplied by 1.4 for the laptop's sustained clock. `editor_render` at Low, ms per frame:
+
+| Frame | 8 full cores (pass 8 setup), now | `--laptop` raw | `--laptop` x 1.4 | Target |
+|---|---|---|---|---|
+| orbiting the Scene view | 6.5 | 9.3 | 13.0 | 16.7 (met) |
+| moving an object | 13.5 | 18.6 | 26.0 | 33 (30 fps; 60 not met) |
+| editing a material colour | 12.9 | 17.8 | 24.9 | 33 |
+| playing | 11.4 | 16.3 | 22.8 | 33 |
+
+- Pass 8's two frames over 16.7 ms on 8 full cores (a material edit at 19.8, Play at 17.6) are now under it (12.9 and
+  11.4) after the later tasks' work.
+- The Low tier's views read shadows with a 2 x 2 bilinear PCF (4 weighted taps) instead of 3 x 3: about 0.6 ms a frame
+  at laptop thread counts (3-4 %); the edge is smooth but narrower (about one texel against three).
+- On the laptop, 60 fps while editing would need the views below 67 %, which looks soft on a 13" screen. Low keeps 67 %
+  and accepts 35-40 fps while dragging; orbiting and idle stay at 60.
+- Iris Xe reports about half the RAM as its own; the path tracer's scene budget now takes a quarter of RAM on
+  integrated GPUs, so an 8 GB laptop's editor keeps room.
+
 ## Pass 8: the minimum machine (task 0050, ADR 0026)
 
 The user's minimum is a 4-core / 8-thread CPU at about 3 GHz with 8 GB of RAM and a GTX 1050 Ti. It is emulated here

@@ -239,6 +239,10 @@ bool init_global() {
     g.f.vkGetPhysicalDeviceMemoryProperties(pd, &mp);
     for (uint32_t h = 0; h < mp.memoryHeapCount; h++)
       if (mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) info.memory_mb = std::max<uint64_t>(info.memory_mb, mp.memoryHeaps[h].size >> 20);
+    /* An integrated GPU (Iris Xe) shares the system's memory and reports about half of it as its own: a scene sized to
+     * that would leave an 8 GB laptop's editor short. It gets a quarter of RAM (task 0075). */
+    const uint64_t ram_mb = sys::physical_memory_bytes() >> 20;
+    if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && ram_mb) info.memory_mb = std::min<uint64_t>(info.memory_mb, ram_mb / 4);
     uint32_t en = 0;
     g.f.vkEnumerateDeviceExtensionProperties(pd, nullptr, &en, nullptr);
     std::vector<VkExtensionProperties> dexts(en);

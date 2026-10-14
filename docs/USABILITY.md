@@ -203,6 +203,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A texture's Physical Size changed nothing visible: its materials kept their old tiling. | Physical Size re-tiles the scene's materials using the texture, except ones tiled by hand (task 0072). |
 | The editor had one colour scheme. | Preferences > Theme: Dark, Light, and Emiliano Light / Dark from the author's site palette (task 0073). |
 | An animation or a sequence could only be rendered one image at a time. | Render Animation (Ctrl+F12): numbered PNGs and, with FFmpeg, an MP4 (task 0074). |
+| On a touch laptop the Scene view could only be navigated with a mouse, and a small machine was set to Low silently. | Two-finger zoom, pan and turn; pen pressure for weight paint; a first-run welcome offering High (task 0075). |
 | How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 
 ## Still worth doing

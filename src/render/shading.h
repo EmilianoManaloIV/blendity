@@ -126,9 +126,11 @@ struct ShadowMap {
   int size = 0;
   std::vector<float> depth;
   float bias = 0.002f;
+  bool fast = false;  // the Low tier's views (task 0075): 4 bilinear-weighted taps instead of 9
   bool valid() const { return size > 0; }
-  /* 1 = lit, 0 = shadowed; 3x3 PCF. */
+  /* 1 = lit, 0 = shadowed; 3x3 PCF, or 2x2 bilinear PCF when `fast`. */
   float lookup(Vec3 world, float ndl) const;
+  float lookup_bilinear(float x, float y, float z) const;
 };
 
 /* --- view transform --- */

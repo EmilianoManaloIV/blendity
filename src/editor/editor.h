@@ -576,6 +576,7 @@ class Editor {
     return it == inspector_menu_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
   const ui::Context &ui_for_test() const { return ui_; }
+  bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
   void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
   /* Preferences in a headless test: written to and read from `path` (never the user's). */
   void prefs_for_test(const std::string &path) {
@@ -683,6 +684,7 @@ class Editor {
   GameObject *rig_root_of(GameObject *g) const;
   std::string theme_name_ = "Dark";
   void set_theme(const std::string &name, bool save = true);
+  void touch_navigate(float k_pan);  // task 0075
   const std::string &theme_name_for_test() const { return theme_name_; }
   int retile_texture_users(const std::string &asset_path, float from, float to);  // task 0072
   std::vector<std::pair<MaterialPtr, bool>> texture_followers(const std::string &asset_path, float from);
@@ -1549,6 +1551,7 @@ class Editor {
   void set_quality_tier(int tier);
   static int recommended_tier();  // Low on 8 threads or fewer or 8 GB or less, else High
   int shadow_resolution_for_view() const;
+  const ShadowMap *shadow_for_view(ShadowMap &m) const;
   void set_cpu_threads(int n);
   int cpu_threads() const { return cpu_threads_; }
   bool always_redraw() const { return always_redraw_; }
@@ -2243,7 +2246,8 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier } dialog_ = Dialog::None;
+  void draw_first_run_tier(const std::function<void()> &close);  // task 0075
   std::string dialog_text_;
   std::vector<std::string> dialog_files_;
 };

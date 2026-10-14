@@ -478,9 +478,14 @@ checked both ways against Blender 5.2.
 
 ## 11. Performance and the minimum machine
 
-**Minimum:** a 4-core / 8-thread CPU at about 3 GHz, 8 GB of RAM, a GTX 1050 Ti class GPU (Vulkan 1.2; the GPU is for
-path tracing, baking and realtime GI - the editing views draw on the CPU). On such a machine Blendity starts on the
-**Low** quality tier.
+**Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
+class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
+8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and
+says so on the first run, with High one click away. There, editing frames run at about 35-40 fps and orbiting at 60.
+The GPU is for path tracing, baking and realtime GI; an integrated one gets a quarter of the RAM for it.
+
+**Touch and pen (Windows):** two fingers over the Scene view pinch to zoom, drag to pan and twist to turn round the
+pivot, in every editor feel; one finger is the mouse. A pen's pressure scales the weight-paint brush.
 
 **Quality tiers** (Edit > Preferences..., Quality):
 

@@ -474,6 +474,10 @@ Two more tricks keep a small machine smooth. Cached shadows: while one object is
 ! cmd:threads 8; quality low | Feel the minimum machine: 8 threads, Low
 ! cmd:threads 0 | Every thread again
 ? Why do the overlays stay sharp at 67 %? | Only the 3D picture is drawn smaller; the grid, gizmos, outlines and text are drawn afterwards at the view's full size, on top of the scaled-up picture.
+# A laptop with a touch screen
+The minimum machine is now a thin laptop: an Intel i7 with 4 cores and 8 threads, 8 GB of memory shared with its Iris Xe graphics, and a 13.3" 1080p touch screen at 150 % (the HP Envy 2-in-1). On a first run like that Blendity starts on Low and says so, with High one click away. Its 4 cores' 8 threads do about the work of 5 full cores, and a laptop holds a lower clock under load than a desktop, so editing frames run at about 35-40 fps there and orbiting at 60. The Low tier's views read shadows with 4 weighted samples instead of 9: a little sharper-edged, a little faster. Iris Xe is given a quarter of the memory for path tracing, so the editor keeps room. On the screen, two fingers over the Scene view navigate in every editor feel: pinch to zoom, drag to pan, twist to turn round the pivot. One finger is the mouse. A pen's pressure sets how much the weight-paint brush adds, as in Blender's tablet support.
+? Why does one finger act as the mouse rather than orbiting? | One finger has to pick, drag gizmos and press buttons; the view takes two fingers, so nothing you touch moves the camera by accident.
+! cmd:quality low; threads 8 | Feel the laptop: Low and 8 threads (Envy-class machines also run slower per thread)
 )"},
     {"References", "The papers behind Blendity's features", R"(
 Some of Blendity's features come straight from research papers. Each one is listed here with the feature it became and where to find it, so you can read the original next to the code. The code cites the same papers in its comments.

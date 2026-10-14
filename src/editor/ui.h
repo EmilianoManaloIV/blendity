@@ -90,6 +90,9 @@ struct Input {
   int mx = 0, my = 0, pmx = 0, pmy = 0;
   bool down[3] = {}, pressed[3] = {}, released[3] = {}, double_clicked[3] = {};
   float wheel_x = 0, wheel_y = 0;
+  /* Two fingers this frame (task 0075): spread factor, the middle's move in pixels, the turn in degrees. */
+  float touch_zoom = 1.0f, touch_pan_x = 0.0f, touch_pan_y = 0.0f, touch_rotate = 0.0f;
+  float pressure = 1.0f;  // a pen's, else 1
   bool key_down[platform::KEY_COUNT] = {};
   bool key_pressed[platform::KEY_COUNT] = {};  // includes auto-repeat
   int mods = 0;

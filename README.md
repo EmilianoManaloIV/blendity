@@ -62,14 +62,16 @@ mouse navigation together to Unity's, Unreal's, Blender's or Maya's.
 
 ## Machines
 
-| | Minimum | Recommended |
+| | Minimum (a laptop such as the HP Envy 13.3" 2-in-1) | Recommended |
 |---|---|---|
-| CPU | 4 cores / 8 threads, about 3 GHz | 8+ cores |
-| RAM | 8 GB | 16 GB+ |
-| GPU | GTX 1050 Ti class (Vulkan 1.2; for path tracing, baking and realtime GI) | a GPU with ray tracing hardware (RTX, RX 6000+, Arc) |
+| CPU | Intel i7, 4 cores / 8 threads (i7-1165G7 class) | 8+ cores |
+| RAM | 8 GB (shared with the graphics) | 16 GB+ |
+| GPU | Iris Xe or a GTX 1050 Ti (Vulkan 1.2; for path tracing, baking and realtime GI) | a GPU with ray tracing hardware (RTX, RX 6000+, Arc) |
+| Screen | 1920 x 1080 at 150 % (1280 x 720 of layout), touch and pen | 1920 x 1080 or more |
 
-The minimum machine starts on the **Low** quality tier (Edit > Preferences..., Quality): the views draw at 67 % and scale
-up, with a 1024 shadow map and 60 fps. Renders always use the scene's own settings.
+The minimum machine starts on the **Low** quality tier (Edit > Preferences..., Quality) and says so on the first run:
+the views draw at 67 % and scale up, with a 1024 shadow map and 60 fps. Editing frames there run at about 35-40 fps,
+orbiting at 60. Renders always use the scene's own settings. Two fingers navigate the Scene view on a touch screen.
 
 ## Build it
 
@@ -90,7 +92,7 @@ cmake -B build && cmake --build build --parallel && ctest --test-dir build   # o
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (9935 unit checks in 662 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (9948 unit checks in 665 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).
