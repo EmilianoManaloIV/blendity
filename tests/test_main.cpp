@@ -26637,4 +26637,194 @@ static void round81_tests() {
     CHECK(wrong.empty());
     CHECK(fs::is_web_address("https://github.com/x") && !fs::is_web_address("C:/Users/x/MANUAL.md") && !fs::is_web_address("docs/MANUAL.md"));
   });
+  /* ---------------------------------------------------------------- round 85: the curve editor (task 0061) */
+  test("curves: Free Smooth leaves a key at its slope both sides, Broken at each side's own, Flat level; files keep them", [] {
+    auto slope_after = [](const AnimTrack &t, float f) { return (t.sample(f + 0.001f) - t.sample(f)) / 0.001f; };
+    auto slope_before = [](const AnimTrack &t, float f) { return (t.sample(f) - t.sample(f - 0.001f)) / 0.001f; };
+    AnimTrack t;
+    t.path = "Lid", t.property = "Position", t.axis = 1;
+    t.set_key(0, 0), t.set_key(10, 5), t.set_key(20, 0);
+    t.keys[1].tangent = TanFree, t.keys[1].in_slope = t.keys[1].out_slope = 2.0f;
+    std::printf("    Free Smooth 2: slope %.3f before, %.3f after\n", slope_before(t, 10), slope_after(t, 10));
+    CHECK(std::fabs(slope_before(t, 10) - 2.0f) < 0.02f && std::fabs(slope_after(t, 10) - 2.0f) < 0.02f);
+    t.keys[1].tangent = TanBroken, t.keys[1].in_slope = 1.0f, t.keys[1].out_slope = -3.0f;
+    CHECK(std::fabs(slope_before(t, 10) - 1.0f) < 0.02f && std::fabs(slope_after(t, 10) + 3.0f) < 0.02f);
+    t.keys[1].tangent = TanFlat;
+    CHECK(std::fabs(slope_before(t, 10)) < 0.02f && std::fabs(slope_after(t, 10)) < 0.02f);
+    t.keys[1].tangent = TanBroken;
+    AnimationClip c;
+    c.tracks.push_back(t);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(c), back) && back.tracks.size() == 1);
+    const AnimKey &k = back.tracks[0].keys[1];
+    CHECK(k.tangent == TanBroken && k.in_slope == 1.0f && k.out_slope == -3.0f && back.tracks[0].keys[0].tangent == TanAuto);
+    /* A task-0059 file (no tangents) loads with Clamped Auto keys. */
+    AnimationClip old;
+    CHECK(load_clip_text("blendity_anim 1\ntrack\t1\tPosition\tLid\nkey 0 0 0\nkey 30 1 0\n", old));
+    CHECK(old.tracks.size() == 1 && old.tracks[0].keys.size() == 2 && old.tracks[0].keys[1].tangent == TanAuto);
+  });
+
+  test("curves: in the Curves view dragging a key up raises its value, dragging its handle sets the slope (Free Smooth); each one undo step", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("window Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 0 0");
+    ed.command("anim key Lid Position 1 20 1");
+    ed.command("anim key Lid Position 1 40 0");
+    ed.step_frame_headless();
+    /* Into the Curves view: the toolbar's Curves button. */
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti cb;
+    CHECK(ed.button_rect_for_test("Curves", cb));
+    auto mouse = [&](int x, int y, int x2, int y2) {
+      platform::Event m, d, mv, u;
+      m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, mv.type = platform::EventType::MouseMove, u.type = platform::EventType::MouseUp;
+      m.x = d.x = x, m.y = d.y = y, mv.x = u.x = x2, mv.y = u.y = y2;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({d});
+      ed.step_frame_headless({mv});
+      ed.step_frame_headless({u});
+      ed.step_frame_headless();
+    };
+    mouse(cb.x + cb.w / 2, cb.y + cb.h / 2, cb.x + cb.w / 2, cb.y + cb.h / 2);
+    CHECK(ed.anim_for_test().curves);
+    int kx = 0, ky = 0;
+    CHECK(ed.anim_curve_point_for_test(0, 20, -1, kx, ky));
+    const size_t steps = ed.undo_steps_for_test();
+    mouse(kx, ky, kx, ky - 40);  // the middle key, 40 px up
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const float raised = clip->tracks[0].keys[1].value;
+    std::printf("    the key after dragging it up: frame %g, value %.3f (was 1)\n", clip->tracks[0].keys[1].frame, raised);
+    CHECK(raised > 1.05f && clip->tracks[0].keys[1].frame == 20.0f);
+    /* Its out handle (the key is selected now): dragged down to the right, a falling slope. */
+    int hx = 0, hy = 0;
+    ed.step_frame_headless();
+    CHECK(ed.anim_curve_point_for_test(0, 20, 1, hx, hy));
+    mouse(hx, hy, hx, hy + 60);
+    clip = ed.anim_clip_for_test();
+    const AnimKey &k = clip->tracks[0].keys[1];
+    std::printf("    after the handle: tangent mode %d, slope %.4f per frame\n", k.tangent, k.in_slope);
+    CHECK(k.tangent == TanFree && k.in_slope < -0.001f && k.in_slope == k.out_slope);
+    CHECK(ed.undo_steps_for_test() == steps + 2);
+    ed.command("undo");  // the handle
+    clip = ed.anim_clip_for_test();
+    CHECK(clip->tracks[0].keys[1].tangent == TanAuto && std::fabs(clip->tracks[0].keys[1].value - raised) < 1e-5f);
+    ed.command("undo");  // the move
+    clip = ed.anim_clip_for_test();
+    CHECK(std::fabs(clip->tracks[0].keys[1].value - 1.0f) < 1e-5f);
+    /* The console's tangents. */
+    ed.command("anim tangent Lid Position 1 20 broken 0.5 -0.25");
+    clip = ed.anim_clip_for_test();
+    CHECK(clip->tracks[0].keys[1].tangent == TanBroken && clip->tracks[0].keys[1].in_slope == 0.5f && clip->tracks[0].keys[1].out_slope == -0.25f);
+  });
+  test("curves: moving two keys of one track onto each other's frames keeps both; zooming far in on a value of 100 doesn't hang; a clip switched mid-drag gets no edit", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("window Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 0 0");
+    ed.command("anim key Lid Position 1 20 1");
+    ed.command("anim key Lid Position 1 40 2");
+    ed.step_frame_headless();
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti cb;
+    CHECK(ed.button_rect_for_test("Curves", cb));
+    auto ev = [](platform::EventType type, int x, int y, int mods = 0) {
+      platform::Event e;
+      e.type = type, e.x = x, e.y = y, e.mods = mods;
+      return e;
+    };
+    auto click = [&](int x, int y, int mods = 0) {
+      ed.step_frame_headless({ev(platform::EventType::MouseMove, x, y, mods)});
+      ed.step_frame_headless({ev(platform::EventType::MouseDown, x, y, mods)});
+      ed.step_frame_headless({ev(platform::EventType::MouseUp, x, y, mods)});
+      ed.step_frame_headless();
+    };
+    click(cb.x + cb.w / 2, cb.y + cb.h / 2);
+    CHECK(ed.anim_for_test().curves);
+    int x0 = 0, y0 = 0, x20 = 0, y20 = 0;
+    CHECK(ed.anim_curve_point_for_test(0, 0, -1, x0, y0) && ed.anim_curve_point_for_test(0, 20, -1, x20, y20));
+    click(x0, y0);
+    click(x20, y20, platform::MOD_SHIFT);
+    CHECK(ed.anim_for_test().selected.size() == 2);
+    /* Both 20 frames later: the key from 0 lands where the one from 20 was, that one where 40 was. */
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, x0, y0)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown, x0, y0)});
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, x20, y0)});
+    ed.step_frame_headless({ev(platform::EventType::MouseUp, x20, y0)});
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack &t = clip->tracks[0];
+    std::printf("    after the move: %zu keys:", t.keys.size());
+    for (const AnimKey &k : t.keys) std::printf(" (%g, %g)", k.frame, k.value);
+    std::printf("\n");
+    CHECK(t.keys.size() == 2 && t.key_at(20) >= 0 && t.key_at(40) >= 0);
+    CHECK(t.key_at(20) >= 0 && t.keys[(size_t)t.key_at(20)].value == 0.0f && t.keys[(size_t)t.key_at(40)].value == 1.0f);
+    CHECK(ed.anim_for_test().selected.size() == 2);
+    ed.command("undo");
+    CHECK(ed.anim_clip_for_test()->tracks[0].keys.size() == 3);
+
+    /* Zooming far in round a value of 100: the axis stops at a hair, and every frame still draws. */
+    ed.command("anim key Lid Position 1 20 100");
+    ed.step_frame_headless();
+    int kx = 0, ky = 0;
+    CHECK(ed.anim_curve_point_for_test(0, 20, -1, kx, ky));
+    for (int i = 0; i < 300; i++) {
+      platform::Event w = ev(platform::EventType::Wheel, kx, ky);
+      w.wheel_y = 3;
+      ed.step_frame_headless({w});
+    }
+    const float span = ed.anim_for_test().v_max - ed.anim_for_test().v_min;
+    std::printf("    the value axis after 300 wheel steps in: %g\n", span);
+    CHECK(span >= 1e-4f && std::isfinite(span));
+
+    /* A drag under way when another clip comes in: the new clip isn't edited, the old one isn't either. */
+    AnimationClipPtr before = ed.anim_clip_for_test();
+    const std::string before_text = save_clip_text(*before);
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, kx, ky)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown, kx, ky)});
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, kx, ky - 50)});
+    ed.command("anim new");
+    AnimationClipPtr other = ed.anim_clip_for_test();
+    CHECK(other && other != before);
+    const std::string other_text = save_clip_text(*other);
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, kx, ky - 60)});
+    ed.step_frame_headless({ev(platform::EventType::MouseUp, kx, ky - 60)});
+    ed.step_frame_headless();
+    CHECK(save_clip_text(*ed.anim_clip_for_test()) == other_text);
+    CHECK(save_clip_text(*before) == before_text);
+    CHECK(ed.anim_for_test().drag == 0);
+  });
+
+  test("curves: anim tangent with slopes is one undo step; an unknown mode changes nothing", [=] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    box_with_lid(ed);
+    ed.command("window Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 0 0");
+    ed.command("anim key Lid Position 1 20 1");
+    ed.command("anim key Lid Position 1 40 0");
+    ed.step_frame_headless();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("anim tangent Lid Position 1 20 free 0.75");
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip->tracks[0].keys[1].tangent == TanFree && clip->tracks[0].keys[1].in_slope == 0.75f && clip->tracks[0].keys[1].out_slope == 0.75f);
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    ed.command("anim tangent Lid Position 1 20 wobbly");
+    ed.step_frame_headless();
+    CHECK(ed.undo_steps_for_test() == steps + 1 && ed.anim_clip_for_test()->tracks[0].keys[1].tangent == TanFree);
+    ed.command("anim tangent Lid Position 1 20 broken 1e30 -1e30");
+    ed.step_frame_headless();
+    CHECK(ed.anim_clip_for_test()->tracks[0].keys[1].in_slope == 1e6f && ed.anim_clip_for_test()->tracks[0].keys[1].out_slope == -1e6f);
+    ed.command("undo");
+    ed.command("undo");
+    CHECK(ed.anim_clip_for_test()->tracks[0].keys[1].tangent == TanAuto);
+  });
 }

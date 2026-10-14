@@ -51,7 +51,34 @@ float AnimTrack::sample(float frame) const {
   if (!(span > 0.0f) || a.interp == AnimConstant) return a.value;
   const float u = (frame - a.frame) / span;
   if (a.interp == AnimLinear) return a.value + (b.value - a.value) * u;
-  return hermite(a.value, auto_tangent(keys, i), b.value, auto_tangent(keys, i + 1), u, span);
+  return hermite(a.value, out_tangent(i), b.value, in_tangent(i + 1), u, span);
+}
+
+float AnimTrack::in_tangent(size_t i) const {
+  if (i >= keys.size()) return 0.0f;
+  switch (keys[i].tangent) {
+    case TanFlat: return 0.0f;
+    case TanFree:
+    case TanBroken: return keys[i].in_slope;
+    default: return auto_tangent(keys, i);
+  }
+}
+
+float AnimTrack::out_tangent(size_t i) const {
+  if (i >= keys.size()) return 0.0f;
+  switch (keys[i].tangent) {
+    case TanFlat: return 0.0f;
+    case TanFree: return keys[i].in_slope;  // (one slope both sides)
+    case TanBroken: return keys[i].out_slope;
+    default: return auto_tangent(keys, i);
+  }
+}
+
+size_t AnimTrack::put_key(const AnimKey &k) {
+  const size_t i = set_key(k.frame, k.value, k.interp, false);
+  if (i == SIZE_MAX) return i;
+  keys[i].tangent = k.tangent, keys[i].in_slope = k.in_slope, keys[i].out_slope = k.out_slope;
+  return i;
 }
 
 int AnimTrack::key_at(float frame) const {
@@ -69,7 +96,10 @@ size_t AnimTrack::set_key(float frame, float value, int interp, bool keep_interp
     return (size_t)at;
   }
   const auto it = std::upper_bound(keys.begin(), keys.end(), frame, [](float f, const AnimKey &k) { return f < k.frame; });
-  return (size_t)(keys.insert(it, AnimKey{frame, value, interp}) - keys.begin());
+  AnimKey k;
+  k.frame = frame, k.value = value, k.interp = interp;
+  const auto at_new = keys.insert(it, k);  // (before begin(): insert may move the keys, and the order of a - b is unspecified)
+  return (size_t)(at_new - keys.begin());
 }
 
 std::string AnimTrack::label() const {
@@ -108,7 +138,11 @@ std::string save_clip_text(const AnimationClip &c) {
   os << "blendity_anim 1\nname " << c.name << "\nrate " << c.frame_rate << "\nlength " << c.length << "\nloop " << (c.loop ? 1 : 0) << "\n";
   for (const AnimTrack &t : c.tracks) {
     os << "track\t" << t.axis << "\t" << t.property << "\t" << t.path << "\n";
-    for (const AnimKey &k : t.keys) os << "key " << k.frame << " " << k.value << " " << k.interp << "\n";
+    for (const AnimKey &k : t.keys) {
+      os << "key " << k.frame << " " << k.value << " " << k.interp;
+      if (k.tangent != TanAuto) os << " " << k.tangent << " " << k.in_slope << " " << k.out_slope;  // (task 0061)
+      os << "\n";
+    }
   }
   return os.str();
 }
@@ -159,7 +193,14 @@ bool load_clip_text(const std::string &text, AnimationClip &c) {
     }
     else if (word == "key" && cur) {
       AnimKey k;
-      if (ls >> k.frame >> k.value >> k.interp) cur->set_key(k.frame, k.value, std::max(0, std::min(2, k.interp)));  // (a bad number: no key)
+      if (!(ls >> k.frame >> k.value >> k.interp)) continue;  // (a bad number: no key)
+      const size_t i = cur->set_key(k.frame, k.value, std::max(0, std::min(2, k.interp)));
+      int tan = TanAuto;
+      float in = 0.0f, out = 0.0f;
+      if (i == SIZE_MAX || !(ls >> tan >> in >> out) || !std::isfinite(in) || !std::isfinite(out)) continue;  // (no tangents: Clamped Auto)
+      const float limit = 1e6f;  // (a slope steeper than this draws as a vertical line anyway)
+      cur->keys[i].tangent = std::max(0, std::min(3, tan));
+      cur->keys[i].in_slope = std::max(-limit, std::min(limit, in)), cur->keys[i].out_slope = std::max(-limit, std::min(limit, out));
     }
   }
   if (!(c.frame_rate > 0.0f) || !std::isfinite(c.frame_rate)) c.frame_rate = 60.0f;

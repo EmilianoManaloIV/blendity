@@ -2,6 +2,61 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-13 (round 85): the animation curve editor, Unity's Curves view (task 0061, ADR 0029 amended)
+
+**Asked:** "Start on the later list": first the curve editor for the keyframe animation of task 0059.
+
+**Added**
+- **Tangents on keys** (Unity's modes):
+  - Clamped Auto (the old Auto), Free Smooth (one slope both sides), Flat (level) and Broken (each side its own).
+  - Linear and Constant spans stay.
+  - `.anim` files keep a key's mode and slopes; files from task 0059 load with Clamped Auto keys.
+- **The Curves view**: the Animation window's Dopesheet | Curves buttons.
+  - Each property is a line of its value over time (x red, y green, z blue) on a value axis with grid lines and
+    numbers.
+  - Click track names to choose the curves (Ctrl+click for several); F frames them; the wheel zooms the values.
+- **Editing curves:**
+  - Drag keys in time and value (Shift: one direction only); drag a box to select.
+  - A selected key's handles set its slope: Free Smooth moves both, Broken each alone.
+  - Right-click a key for the tangent and span modes, or Delete.
+  - Double-click a curve to add a key that keeps its shape.
+  - In Preview the scene follows the drag.
+  - Each edit is one undo step.
+- Console: `anim tangent <object|.> <property> <axis> <frame> auto|free|flat|broken [in] [out]`.
+- Learn: "Curves and tangents" in the Animation lesson.
+
+**Changed**
+- The Animation window's code is split into the ruler, the rows and the new `curve_editor.cpp`.
+- Moving and pasting keys keep their tangents.
+
+**Checked**
+- New tests (round 85):
+  - Free Smooth, Broken and Flat slopes on both sides of a key, and the file round-trip (old files too).
+  - In the Curves view, dragging a key raises it and dragging its handle sets a Free Smooth slope, each one undo step.
+  - Two keys of one track moved onto each other's frames both survive.
+  - 300 wheel steps in on a value of 100 stop at a hair and don't hang.
+  - A clip switched mid-drag gets no edit.
+  - `anim tangent` with slopes is one undo step; an unknown mode changes nothing; slopes are kept to +-1e6.
+- Unit checks: Windows 9,694, 0 failed (632 tests); the whole suite in render-cache verify mode: 9,695,
+  0 failed, 0 stale pictures. Linux with libraries: 9,602, 0 failed. Sanitizer build: 9,519, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures, stress `animation`: 201 tracks in 0.075 ms a frame (target 0.2).
+
+**Review** (Opus code-reviewer). Fixed:
+- Moving several keys of one track could lose keys (each was moved onto the next before it moved).
+- The value grid could loop for ever when zoomed far in on a large value: whole steps, at most 200 lines, and the zoom
+  is clamped.
+- A drag could commit into another clip after a clip change, an undo or the window losing its object.
+- The commit now uses the last preview's amounts; handles and picks are limited to the shown curves; the in-handle
+  shows only where the span before is a curve.
+- `anim tangent` with slopes was two undo steps.
+- A double-clicked key now keeps the curve's shape.
+- Slopes are clamped on load; a refused edit no longer shifts the selection.
+- Ctrl+wheel time zoom, in the spec, was not built: moved to the spec's "As built".
+
+**Found on Linux**: loading a key with tangents wrote through a wrong index under GCC (the sanitizer build stopped on it).
+`set_key` returned `keys.insert(...) - keys.begin()`, and C++ leaves the order of the two sides open: GCC took `begin()`
+before the insert moved the keys. Now in two statements.
+
 ## 2026-10-13 (round 84): a README for GitHub and one user manual (task 0060)
 
 **Asked:** "Update the GitHub README and compress the tutorial docs into one document with examples and use cases",

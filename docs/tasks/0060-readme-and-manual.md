@@ -4,7 +4,7 @@
 - **Requirements:** R-01
 - **Decisions:** none (documentation)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/57
 
 ## Goal
 The user asked (2026-10-12) to "update the GitHub README and compress the tutorial docs into one document with

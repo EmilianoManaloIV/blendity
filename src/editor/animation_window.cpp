@@ -329,7 +329,10 @@ void Editor::anim_move_selected(float delta) {
       taken.push_back({track, t.keys[(size_t)k]});
       t.keys.erase(t.keys.begin() + k);
     }
-    for (auto &[track, key] : taken) c.tracks[(size_t)track].set_key(std::max(0.0f, key.frame + delta), key.value, key.interp, false);
+    for (auto &[track, key] : taken) {
+      key.frame = std::max(0.0f, key.frame + delta);
+      c.tracks[(size_t)track].put_key(key);  // (its tangents too)
+    }
   });
   for (auto &s : anim_.selected) s.second = std::max(0.0f, s.second + delta);
 }
@@ -367,7 +370,11 @@ void Editor::anim_paste() {
   const auto board = anim_.clipboard;
   const float at = anim_.frame;
   anim_edit_keys("Paste Keys", [&](AnimationClip &c) {
-    for (const auto &[path, property, axis, key] : board) c.track(path, property, axis).set_key(at + key.frame, key.value, key.interp, false);
+    for (const auto &[path, property, axis, key] : board) {
+      AnimKey k = key;
+      k.frame += at;
+      c.track(path, property, axis).put_key(k);
+    }
   });
 }
 
@@ -473,6 +480,13 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
   x += u.px(154);
   if (button(u.px(96), "Add Property", false, "Animate a number of the selected object (or the root): Position, Rotation, Scale or a component's.") && clip)
     u.open_popup(u.id("anim_add_prop"), {x - u.px(99), bar.bottom(), 0, 0});
+  if (button(u.px(76), "Dopesheet", !anim_.curves, "The keys as diamonds along the time line (Unity's Dopesheet).")) anim_.curves = false;
+  if (button(u.px(64), "Curves", anim_.curves,
+             "Each property's value over time: drag keys in time and value, and their tangent handles to shape the curve.\n"
+             "Click track names to pick which curves show; F frames them; the wheel zooms the values.")) {
+    anim_.curves = true;
+    anim_.v_framed.clear();
+  }
 }
 
 /* The clip menu's choice: a clip asset for the root's Animation, none ("-"), or a new clip (""). */
@@ -486,8 +500,7 @@ void Editor::anim_pick_clip(GameObject *root, const std::string &path) {
   if (!an) an = root->add<Animation>();
   an->clip = path == "-" ? std::string() : path;
   anim_.root = root->id;
-  anim_.selected.clear();
-  anim_.shown_clip = nullptr;
+  anim_clip_changed();
   mark_changed("Animation Clip");
 }
 
@@ -594,6 +607,62 @@ void Editor::anim_end_drag(const AnimationClip &clip, const Recti &sheet, int ro
   }
 }
 
+/* The ruler: frame numbers every so many frames. */
+void Editor::draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end) {
+  auto &u = ui_;
+  const int step = std::max(1, (int)std::ceil(end / std::max(1.0f, (float)ruler.w / (float)u.px(50)) / 5.0f) * 5);
+  for (int f = 0; f <= (int)end; f += step) {
+    const int fx = anim_x_of(sheet, (float)f, end);
+    u.canvas.vline(fx, ruler.y + ruler.h / 2, ruler.bottom(), Color::hex(0x666666));
+    u.label({fx + u.px(2), ruler.y, u.px(40), ruler.h}, std::to_string(f), u.theme.text_dim);
+  }
+}
+
+/* The tracks: names on the left (missing objects in yellow); in the Dopesheet their keys on the right, in the Curves
+ * view a click on a name picks it to show (Ctrl+click adds). The wheel over them scrolls. */
+void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const Recti &list, const Recti &body, const Recti &sheet, int row_h, float end) {
+  auto &u = ui_;
+  auto &in = u.in;
+  const int fit = std::max(1, list.h / std::max(1, row_h));
+  const Recti scroll_area = anim_.curves ? list : body;
+  if (u.hovered(scroll_area) && in.wheel_y != 0.0f) anim_.scroll -= (int)in.wheel_y, in.wheel_y = 0.0f;
+  anim_.scroll = std::max(0, std::min(anim_.scroll, (int)clip.tracks.size() - fit));
+  for (size_t t = (size_t)anim_.scroll; t < clip.tracks.size(); t++) {
+    const AnimTrack &tr = clip.tracks[t];
+    const Recti lr{list.x, list.y + ((int)t - anim_.scroll) * row_h, list.w, row_h};
+    if (lr.y > body.bottom()) break;
+    const bool picked = std::find(anim_.curve_tracks.begin(), anim_.curve_tracks.end(), (int)t) != anim_.curve_tracks.end();
+    if (anim_.curves && picked) u.canvas.fill_rect(lr, u.theme.selection);
+    else if (t % 2) u.canvas.fill_rect({body.x, lr.y, anim_.curves ? list.w : body.w, row_h}, Color::hex(0x262626));
+    const bool missing = anim_target(*root, tr.path) == nullptr;
+    u.label({lr.x + u.px(6), lr.y, lr.w - u.px(8), lr.h}, tr.label(), missing ? u.theme.warning : u.theme.text);
+    if (u.record_buttons) u.button_rects["anim_track:" + tr.label()] = lr;  // (tests)
+    if (anim_.curves) {
+      if (u.hovered(lr) && in.pressed[0]) anim_pick_curve((int)t, in.ctrl());
+      continue;
+    }
+    for (const AnimKey &k : tr.keys) {
+      const float cx = (float)anim_x_of(sheet, k.frame, end), cy = (float)(lr.y + row_h / 2);
+      const bool sel = anim_selected((int)t, k.frame);
+      const float s = (float)u.px(5);
+      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx, cy - s), Vec2(cx + s, cy), sel ? Color::hex(0x5AA9FF) : Color::hex(0xCCCCCC));
+      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx + s, cy), Vec2(cx, cy + s), sel ? Color::hex(0x5AA9FF) : Color::hex(0xCCCCCC));
+    }
+  }
+}
+
+/* A track name clicked in the Curves view: shown alone (Ctrl: added or taken away); the axis frames to it. */
+void Editor::anim_pick_curve(int track, bool add) {
+  auto it = std::find(anim_.curve_tracks.begin(), anim_.curve_tracks.end(), track);
+  if (!add) anim_.curve_tracks = {track};
+  else if (it != anim_.curve_tracks.end()) anim_.curve_tracks.erase(it);
+  else anim_.curve_tracks.push_back(track);
+  anim_.v_framed.clear();
+  anim_.selected.erase(std::remove_if(anim_.selected.begin(), anim_.selected.end(),
+                                      [&](const auto &s) { return std::find(anim_.curve_tracks.begin(), anim_.curve_tracks.end(), s.first) == anim_.curve_tracks.end(); }),
+                       anim_.selected.end());
+}
+
 void Editor::draw_animation_window(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
@@ -605,6 +674,7 @@ void Editor::draw_animation_window(const Recti &r) {
   draw_anim_toolbar(bar, root);
   AnimationClipPtr clip = anim_clip();
   const Recti body{r.x, bar.bottom(), r.w, r.h - bh};
+  if (!root || !clip) anim_drag_cancel();  // (nothing to drag in; a drag under way is dropped, not committed later)
   if (!root) {
     u.label({body.x + u.px(10), body.y + u.px(10), body.w, u.row_h()}, "Select an object to animate.", u.theme.text_dim);
     return;
@@ -620,42 +690,25 @@ void Editor::draw_animation_window(const Recti &r) {
   const Recti list{body.x, body.y + row_h, list_w, body.h - row_h}, ruler{body.x + list_w, body.y, body.w - list_w - u.px(8), row_h};
   const Recti sheet{ruler.x, ruler.bottom(), ruler.w, body.h - row_h};
   const float end = std::max(30.0f, clip->end_frame()) * 1.1f;
-  /* The ruler: frame numbers every so many frames. */
   u.canvas.fill_rect({body.x, body.y, body.w, row_h}, Color::hex(0x2A2A2A));
-  const int step = std::max(1, (int)std::ceil(end / std::max(1.0f, (float)ruler.w / (float)u.px(50)) / 5.0f) * 5);
-  for (int f = 0; f <= (int)end; f += step) {
-    const int fx = anim_x_of(sheet, (float)f, end);
-    u.canvas.vline(fx, ruler.y + row_h / 2, ruler.bottom(), Color::hex(0x666666));
-    u.label({fx + u.px(2), ruler.y, u.px(40), row_h}, std::to_string(f), u.theme.text_dim);
-  }
-  /* The tracks: names on the left (missing objects in yellow), keys on the right. */
-  /* The wheel over the window scrolls the rows (more tracks than fit). */
-  const int fit = std::max(1, (body.h - row_h) / std::max(1, row_h));
-  if (u.hovered(body) && in.wheel_y != 0.0f) anim_.scroll -= (int)in.wheel_y;
-  anim_.scroll = std::max(0, std::min(anim_.scroll, (int)clip->tracks.size() - fit));
-  for (size_t t = (size_t)anim_.scroll; t < clip->tracks.size(); t++) {
-    const AnimTrack &tr = clip->tracks[t];
-    const Recti lr{list.x, list.y + ((int)t - anim_.scroll) * row_h, list.w, row_h};
-    if (lr.y > body.bottom()) break;
-    if (t % 2) u.canvas.fill_rect({body.x, lr.y, body.w, row_h}, Color::hex(0x262626));
-    const bool missing = anim_target(*root, tr.path) == nullptr;
-    u.label({lr.x + u.px(6), lr.y, lr.w - u.px(8), lr.h}, tr.label(), missing ? u.theme.warning : u.theme.text);
-    for (const AnimKey &k : tr.keys) {
-      const float cx = (float)anim_x_of(sheet, k.frame, end), cy = (float)(lr.y + row_h / 2);
-      const bool sel = anim_selected((int)t, k.frame);
-      const float s = (float)u.px(5);
-      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx, cy - s), Vec2(cx + s, cy), sel ? Color::hex(0x5AA9FF) : Color::hex(0xCCCCCC));
-      u.canvas.fill_triangle(Vec2(cx - s, cy), Vec2(cx + s, cy), Vec2(cx, cy + s), sel ? Color::hex(0x5AA9FF) : Color::hex(0xCCCCCC));
-    }
-  }
+  draw_anim_ruler(ruler, sheet, end);
+  draw_anim_rows(*clip, root, list, body, sheet, row_h, end);
+  anim_.sheet = sheet, anim_.sheet_end = end;
+  if (anim_.curves) draw_anim_curves(*clip, sheet, end);
   /* The playhead (red while recording). */
   const int px = anim_x_of(sheet, anim_.frame, end);
   u.canvas.vline(px, ruler.y, body.bottom(), anim_.record ? Color::hex(0xFF3B3B) : Color::hex(0xFFFFFF));
   if (anim_.drag == 3) u.canvas.rect_outline({std::min(in.mx, anim_.drag_x), std::min(in.my, anim_.drag_y), std::abs(in.mx - anim_.drag_x), std::abs(in.my - anim_.drag_y)}, u.theme.focus);
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
-  anim_sheet_input(*clip, ruler, sheet, row_h, end);
-  u.popup(u.id("anim_key_ctx"), u.px(160), [this] {
-    if (ui_.menu_item("Auto")) anim_set_interp(AnimAuto);
+  if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);
+  else anim_sheet_input(*clip, ruler, sheet, row_h, end);
+  u.popup(u.id("anim_key_ctx"), u.px(180), [this] {
+    if (ui_.menu_item("Clamped Auto")) anim_set_tangent(TanAuto);
+    if (ui_.menu_item("Free Smooth")) anim_set_tangent(TanFree);
+    if (ui_.menu_item("Flat")) anim_set_tangent(TanFlat);
+    if (ui_.menu_item("Broken")) anim_set_tangent(TanBroken);
+    ui_.menu_separator();
+    if (ui_.menu_item("Auto (curve)")) anim_set_interp(AnimAuto);
     if (ui_.menu_item("Linear")) anim_set_interp(AnimLinear);
     if (ui_.menu_item("Constant")) anim_set_interp(AnimConstant);
     ui_.menu_separator();
@@ -671,6 +724,30 @@ void Editor::draw_animation_window(const Recti &r) {
 }
 
 /* ---------------------------------------------------------------- console */
+
+/* anim tangent <object|.> <property> <axis> <frame> auto|free|flat|broken [in] [out]: the mode and slopes in one undo
+ * step (slopes kept to +-1e6). */
+void Editor::anim_tangent_command(const std::vector<std::string> &t, AnimationClip &clip, const std::string &path, const std::string &prop, int axis, float frame) {
+  const std::string how = to_lower(t.size() > 6 ? t[6] : "auto");
+  const int mode = how == "free" ? TanFree : how == "flat" ? TanFlat : how == "broken" ? TanBroken : how == "auto" ? TanAuto : -1;
+  if (mode < 0) return Log::warn("anim tangent: auto, free, flat or broken, not '%s'", how.c_str());
+  AnimTrack *tr = clip.find(path, prop, axis);
+  const int k = tr ? tr->key_at(frame) : -1;
+  if (k < 0) return Log::warn("anim tangent: no key on frame %g of %s.%d", frame, prop.c_str(), axis);
+  const size_t index = (size_t)(tr - clip.tracks.data());
+  auto slope = [&](size_t i, float def) {
+    const float v = t.size() > i ? (float)std::atof(t[i].c_str()) : def;
+    return std::isfinite(v) ? std::max(-1e6f, std::min(1e6f, v)) : def;
+  };
+  anim_edit_keys("Key Tangents", [&](AnimationClip &c) {
+    AnimTrack &track = c.tracks[index];
+    const size_t i = (size_t)track.key_at(frame);
+    const float in = slope(7, track.in_tangent(i)), out = slope(8, t.size() > 7 ? in : track.out_tangent(i));
+    AnimKey &key = track.keys[i];
+    key.tangent = mode, key.in_slope = in, key.out_slope = mode == TanFree ? in : out;
+    if (mode == TanFree || mode == TanBroken) key.interp = AnimAuto;
+  });
+}
 
 /* anim new [name] | key <object> <property> <axis> <frame> [value] | interp <object> <property> <axis> <frame>
  * auto|linear|constant | frame <n> | preview on|off | record on|off | play | stop (task 0059). The object is by name;
@@ -695,7 +772,7 @@ void Editor::anim_command(const std::vector<std::string> &t) {
   if (verb == "stop") return (void)(anim_.playing = false);
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
-  if ((verb == "key" || verb == "interp") && root && clip && t.size() >= 6) {
+  if ((verb == "key" || verb == "interp" || verb == "tangent") && root && clip && t.size() >= 6) {
     GameObject *g = arg(2, ".") == "." ? root : scene_->find_by_name(t[2]);
     bool under = false;
     for (GameObject *x = g; x && !under; x = x->parent) under = x == root;
@@ -703,6 +780,7 @@ void Editor::anim_command(const std::vector<std::string> &t) {
     const std::string path = anim_path(*root, *g), prop = t[3];
     const int axis = std::max(0, std::min(2, std::atoi(t[4].c_str())));
     const float frame = (float)std::atof(t[5].c_str());
+    if (verb == "tangent") return anim_tangent_command(t, *clip, path, prop, axis, frame);
     if (verb == "interp") {
       const std::string how = to_lower(arg(6, "auto"));
       const int k = how == "linear" ? AnimLinear : how == "constant" ? AnimConstant : AnimAuto;

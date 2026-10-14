@@ -1574,8 +1574,7 @@ void Editor::undo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   save_dirty_clip_assets();
-  anim_.selected.clear();
-  anim_.shown_clip = nullptr;
+  anim_clip_changed();
   stable_ = scene_->clone();
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
@@ -1605,8 +1604,7 @@ void Editor::redo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   save_dirty_clip_assets();
-  anim_.selected.clear();
-  anim_.shown_clip = nullptr;
+  anim_clip_changed();
   stable_ = scene_->clone();
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();

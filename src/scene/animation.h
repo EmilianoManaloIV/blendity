@@ -13,11 +13,16 @@
 namespace bl {
 
 enum AnimInterp : int { AnimAuto = 0, AnimLinear = 1, AnimConstant = 2 };
+/* A key's tangents (Unity's key tangent modes, task 0061): Clamped Auto works them out from the neighbours; Free
+ * Smooth has one slope both sides; Flat is level; Broken has its own slope on each side. */
+enum AnimTangent : int { TanAuto = 0, TanFree = 1, TanFlat = 2, TanBroken = 3 };
 
 struct AnimKey {
   float frame = 0.0f;
   float value = 0.0f;
-  int interp = AnimAuto;  // how the curve leaves this key for the next
+  int interp = AnimAuto;  // how the curve leaves this key for the next (a curve, a line, or held)
+  int tangent = TanAuto;
+  float in_slope = 0.0f, out_slope = 0.0f;  // value per frame (Free Smooth: both the same; Broken: each its own)
 };
 
 /* One number of one object: its path below the animated root ("" the root itself, "Hips/Spine" a bone), the property
@@ -30,7 +35,11 @@ struct AnimTrack {
   /* A key at `frame` (replacing the value of one there, and its interpolation unless `keep_interp`); returns its index.
    * Non-finite frames or values are refused (returns SIZE_MAX). */
   size_t set_key(float frame, float value, int interp = AnimAuto, bool keep_interp = true);
+  size_t put_key(const AnimKey &k);  // the whole key (tangents too), replacing one on its frame
   int key_at(float frame) const;  // the key on that frame (within a hundredth of one), or -1
+  /* Key i's slopes as the curve uses them (value per frame): what its tangent mode makes of them. */
+  float in_tangent(size_t i) const;
+  float out_tangent(size_t i) const;
   std::string label() const;      // "Hips : Rotation.y"
 };
 

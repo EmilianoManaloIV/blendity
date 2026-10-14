@@ -209,6 +209,19 @@ struct AnimEditorState {
   int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
+  /* The Curves view (task 0061). */
+  bool curves = false;
+  float v_min = -1.0f, v_max = 1.0f;  // the value axis
+  std::string v_framed;  // the clip the axis was framed for (another: framed again)
+  std::vector<int> curve_tracks;  // the tracks shown (none picked: all)
+  AnimationClip drag_clip;  // a drag's edited copy, drawn while it lasts
+  bool drag_clip_on = false;
+  int drag_track = -1, drag_side = 0;  // a tangent handle being dragged: its track, its key's frame, before / after
+  float drag_key = 0.0f;
+  std::string drag_clip_path;     // the clip a drag edits: committed only into it
+  float drag_df = 0.0f, drag_dv = 0.0f;  // what the last preview moved the keys by (the commit and the selection use it)
+  Recti sheet;  // where the sheet was last drawn, and the frames across it (tests find keys by them)
+  float sheet_end = 1.0f;
   std::vector<std::tuple<std::string, std::string, int, AnimKey>> clipboard;  // (path, property, axis, key from the first copied)
 };
 
@@ -555,6 +568,20 @@ class Editor {
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
   AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
+  /* Where the Curves view drew key `frame` of `track`, or its handle (side 0 before, 1 after). */
+  bool anim_curve_point_for_test(int track, float frame, int side, int &x, int &y) {
+    AnimationClipPtr c = anim_clip();
+    if (!c || track < 0 || (size_t)track >= c->tracks.size()) return false;
+    const int k = c->tracks[(size_t)track].key_at(frame);
+    if (k < 0) return false;
+    if (side < 0) {
+      x = anim_x_of(anim_.sheet, frame, anim_.sheet_end), y = (int)anim_y_of(anim_.sheet, c->tracks[(size_t)track].keys[(size_t)k].value);
+      return true;
+    }
+    const Vec2 h = anim_handle_at(c->tracks[(size_t)track], (size_t)k, side, anim_.sheet, anim_.sheet_end);
+    x = (int)std::lround(h.x), y = (int)std::lround(h.y);
+    return true;
+  }
   std::string autorig_next_for_test() const { return autorig_next(); }
   void autorig_remove_last_for_test() { autorig_remove_last(); }
   std::string wp_group_name_for_test() {
@@ -748,6 +775,33 @@ class Editor {
   void anim_sheet_input(const AnimationClip &clip, const Recti &ruler, const Recti &sheet, int row_h, float end);
   void anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end);
   void draw_animation_window(const Recti &r);
+  void draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end);
+  void anim_pick_curve(int track, bool add);
+  void anim_drag_cancel();   // a drag dropped (its clip went, the window can't draw, an undo)
+  void anim_clip_changed();  // another clip (or the same one restored): drags, picked curves, the snapshot reset
+  void anim_tangent_command(const std::vector<std::string> &t, AnimationClip &clip, const std::string &path, const std::string &prop, int axis, float frame);
+  void draw_anim_rows(const AnimationClip &clip, GameObject *root, const Recti &list, const Recti &body, const Recti &sheet, int row_h, float end);
+  /* The Curves view (task 0061, curve_editor.cpp). */
+  float anim_y_of(const Recti &a, float v) const;
+  float anim_value_at(const Recti &a, int y) const;
+  std::vector<size_t> anim_curve_tracks(const AnimationClip &c) const;
+  void anim_frame_values(const AnimationClip &c);
+  Vec2 anim_handle_at(const AnimTrack &t, size_t i, int side, const Recti &a, float end) const;
+  void draw_anim_curves(const AnimationClip &clip, const Recti &a, float end);
+  void draw_anim_curve(const AnimationClip &c, size_t t, const Recti &a, float end);
+  void anim_preview_move(const AnimationClip &clip, float dframes, float dvalue);
+  void anim_preview_handle(const AnimationClip &clip, const Recti &a, float end, int mx, int my);
+  void anim_set_tangent(int mode);
+  bool anim_handle_shown(const AnimTrack &t, size_t i, int side) const;
+  void anim_show_drag();
+  bool anim_handle_under(const AnimationClip &c, const Recti &a, float end, int mx, int my);
+  bool anim_curve_key_under(const AnimationClip &c, const Recti &a, float end, int mx, int my, int &track, float &frame);
+  int anim_curve_near(const AnimationClip &c, const Recti &a, float end, int mx, int my);
+  void anim_curve_input(const AnimationClip &clip, const Recti &ruler, const Recti &a, float end);
+  void anim_curve_drag(const AnimationClip &clip, const Recti &a, float end);
+  void anim_curve_end_drag(const AnimationClip &clip, const Recti &a, float end);
+  void anim_curve_box_select(const AnimationClip &clip, const Recti &a, float end);
+  void anim_curve_add_key(const AnimationClip &clip, const Recti &a, float end, int mx, int my);
   void anim_command(const std::vector<std::string> &t);
   void open_manual();  // Help > Open Manual, `manual`
   /* The marker auto-rig (task 0058, auto_rig_tool.cpp). */
