@@ -397,6 +397,13 @@ Ctrl+V at the playhead, double-click a row to add one, right-click for the inter
 overshooting, Unity's Clamped Auto), **Linear** or **Constant**. **Add Property** animates any number of a component
 too (a light's Intensity, a camera's field of view).
 
+**Curves:** the window's **Curves** button (beside Dopesheet) shows how each value travels between keys: a line per
+number, x red, y green, z blue. Click track names to choose the curves (Ctrl+click for several), **F** frames them,
+the wheel zooms the values. Drag a key up or down to change its value, sideways to retime it (Shift: one direction
+only). A selected key shows its **tangent handles**; dragging one makes the key **Free Smooth** (one slope both
+sides). Right-click a key for **Broken** (each side its own slope: a bounce), **Flat** (an ease in and out) or
+**Clamped Auto** (worked out from the neighbours). Double-click a curve to add a key without changing its shape.
+
 A clip names objects by their path below the animated root ("Hips/Spine"), so it plays on any character with the
 same bone names. IK runs after the clip, so animating the IK targets is enough for arms and legs.
 
@@ -411,10 +418,30 @@ same bone names. IK runs after the clip, so animating the IK targets is enough f
 2. At frames 0, 15, 30, 45 move the FootIK and HandIK targets into the contact, passing, contact and passing poses;
    at 60 copy frame 0 (select its keys, Ctrl+C, playhead to 60, Ctrl+V) so it loops.
 
-**Use cases:** props and doors; character cycles; light and camera animation for renders.
-**Later:** a curve editor, and a Premiere-style clip sequencer for moving between clips.
+**Example: a ball that bounces**
+1. Key the ball's Position y at 2 on frame 0, 0 on frame 15, 2 on frame 30.
+2. Curves view, click the Position.y track. Right-click the key on frame 15 > Broken.
+3. Drag its left handle steeply down and its right handle steeply up: the ball now hits the floor hard and leaves it
+   fast, instead of easing in.
+4. Right-click the top keys > Flat for a hang at the top.
 
-> Learn: *Modifiers vs Components > Keyframes and the dopesheet*, *Play Mode and the Game Loop*.
+**Use cases:** props and doors; character cycles; light and camera animation for renders; shaping ease-in and
+ease-out, bounces and overshoots in the Curves view.
+
+**Sequencing clips (instead of a state machine):** Window > **Sequencer** is a Premiere-style timeline for clips.
+Select the character, press **Create** (it gets a **Sequencer** component and a `.seq`), and drag `.anim` clips from
+the Project window onto its tracks. Drag a bar to move it, its ends to trim it; set Speed, In and Out below the tracks.
+Bars overlapping on one track **crossfade**; a bar on a higher track wins for what it animates. **Triggers** (key,
+clip, blend seconds) jump to a clip in Play, blending from the pose of the moment; from the console, `seq jump <clip>`.
+
+**Example: walk, then run on a key**
+1. Make two clips on the character, Walk and Run (Animation window > Create New Clip...).
+2. Sequencer > Create; drag Walk onto Track 1 at frame 0, Run onto Track 1 at frame 100.
+3. Drag Run left until it overlaps Walk's last 20 frames: the cross shows the crossfade.
+4. Add Trigger: key R, clip Run, blend 0.3. In Play, pressing R goes straight into the run from wherever the walk is.
+
+> Learn: *Modifiers vs Components > Keyframes and the dopesheet*, *Modifiers vs Components > Curves and tangents*,
+> *Modifiers vs Components > Sequencing clips*, *Play Mode and the Game Loop*.
 
 ---
 
@@ -465,7 +492,19 @@ Surface's Levels at 1 while modelling, and turn on the Low tier for heavy scenes
 ## 12. Shortcuts: Unity and Blender side by side
 
 Blendity uses Unity's keys, and keeps Blender's where Unity has none. Edit > Preferences..., Keymap, starts from
-Unity, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
+Unity, Unreal, Blender, Maya, 3ds Max or SketchUp and rebinds anything.
+
+**Editor Feel** (Edit > Editor Feel, or `feel unity|unreal|blender|maya`) switches the keys *and* the Scene view's
+mouse navigation to another program's:
+
+| Feel | Orbit | Pan | Zoom / dolly | Look + fly | Its own keys |
+|---|---|---|---|---|---|
+| Unity | Alt+LMB | MMB, Alt+Ctrl+LMB | Wheel, Alt+RMB | Hold RMB + WASD | the table below |
+| Unreal | Alt+LMB | MMB, LMB+RMB | Wheel, Alt+RMB | Hold RMB + WASD | Alt+P play, End drop to floor, Alt+G/H/J/K views |
+| Blender | MMB | Shift+MMB | Wheel, Ctrl+MMB | — | G/R/S, A, X, Shift+D |
+| Maya | Alt+LMB | Alt+MMB | Wheel, Alt+RMB | — | Q/W/E/R, F8, F9-F11 |
+
+Window names, layouts and the Y-up axis stay Unity's whatever the feel.
 
 | | Blendity (Unity) | Blender |
 |---|---|---|

@@ -52,12 +52,30 @@ void Editor::invalidate_project_listing() {
   project_listed_ = -100;
   material_paths_listed_ = -100;
   anim_clip_paths_listed_ = -100;
+  seq_paths_listed_ = -100;
 }
 
 /* Animation clips moved (task 0059): the library, every Animation component naming one - in the scene and in every
  * undo / redo state, which aren't shared like materials - and the clips' texts the undo states keep. */
 void Editor::retarget_clip_references(const std::string &from, const std::string &to) {
   retarget_clip_assets(from, to);
+  retarget_sequence_assets(from, to);
+  seq_paths_listed_ = -100;  // (the files have moved already: the listing is walked again)
+  for (const std::string &p : seq_paths()) sequence_asset(p);  // (every sequence loaded: the ones naming a moved clip follow it)
+  retarget_sequence_clips(from, to);
+  save_dirty_sequence_assets();
+  auto moved_seq_text = [&](std::pair<std::string, std::string> &kv) {
+    if (fs::extension(kv.first) != ".seq") return;
+    Sequence s;
+    if (!load_sequence_text(kv.second, s)) return;
+    for (SeqTrack &t : s.tracks)
+      for (SeqInstance &i : t.items) {
+        std::replace(i.clip.begin(), i.clip.end(), '\\', '/');
+        if (i.clip == from || (i.clip.size() > from.size() && i.clip.compare(0, from.size(), from) == 0 && i.clip[from.size()] == '/'))
+          i.clip = to + i.clip.substr(from.size());
+      }
+    kv.second = save_sequence_text(s);
+  };
   auto moved = [&](std::string &p) {
     std::replace(p.begin(), p.end(), '\\', '/');
     const bool under = p == from || (p.size() > from.size() && p.compare(0, from.size(), from) == 0 && p[from.size()] == '/');
@@ -67,6 +85,7 @@ void Editor::retarget_clip_references(const std::string &from, const std::string
     if (!s) return;
     s->for_each([&](GameObject &g) {
       if (Animation *an = g.get<Animation>()) moved(an->clip);
+      if (Sequencer *sq = g.get<Sequencer>()) moved(sq->sequence);
     });
   };
   fix_scene(scene_.get());
@@ -74,10 +93,11 @@ void Editor::retarget_clip_references(const std::string &from, const std::string
   for (std::vector<UndoState> *list : {&undo_, &redo_})
     for (UndoState &u : *list) {
       fix_scene(u.scene.get());
-      for (auto &kv : u.clips) moved(kv.first);
+      for (auto &kv : u.clips) moved(kv.first), moved_seq_text(kv);
     }
-  for (auto &kv : clip_before_) moved(kv.first);
+  for (auto &kv : clip_before_) moved(kv.first), moved_seq_text(kv);
   anim_clip_paths_listed_ = -100;
+  seq_paths_listed_ = -100;
 }
 
 /* Every reference to `from` (a file or a folder, project-relative) now points at `to`. */
@@ -186,6 +206,7 @@ bool Editor::delete_project_entry(const std::string &path) {
   const size_t n = forget_material_assets(rel);
   forget_texture_assets(rel);
   forget_clip_assets(rel);  // (a deleted clip isn't written back)
+  forget_sequence_assets(rel);
   if (path_inside(project_selected_, path)) project_selected_.clear();
   if (path_inside(project_dir_, path)) project_dir_ = fs::parent(path);
   invalidate_project_listing();

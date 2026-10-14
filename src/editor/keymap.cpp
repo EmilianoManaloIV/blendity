@@ -141,6 +141,11 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"transform.scale", "Scale with the mouse", "Tools", CTX_SCENE},
       {"view.frame", "Frame Selected", "View", CTX_SCENE},
       {"view.active_camera", "Set Active Camera (the selected one)", "View", CTX_SCENE},
+      {"view.perspective", "Perspective View", "View", CTX_SCENE},  // task 0063 (Unreal: Alt+G / H / J / K)
+      {"view.front", "Front View", "View", CTX_SCENE},
+      {"view.top", "Top View", "View", CTX_SCENE},
+      {"view.side", "Side View", "View", CTX_SCENE},
+      {"object.drop_to_floor", "Drop to Floor", "Object", CTX_SCENE},
       /* Modes */
       {"mode.edit_toggle", "Edit Mode On / Off", "Modes", CTX_SCENE},
       {"mode.vertex", "Vertex Select Mode", "Modes", CTX_SCENE_EDIT},
@@ -198,7 +203,8 @@ const std::vector<ShortcutAction> &shortcut_actions() {
   return acts;
 }
 
-const char *const kKeymapPresets[kKeymapPresetCount] = {"Unity", "Blender", "Maya", "3ds Max", "SketchUp"};
+const char *const kKeymapPresets[kKeymapPresetCount] = {"Unity", "Unreal", "Blender", "Maya", "3ds Max", "SketchUp"};
+const char *const kEditorFeels[kEditorFeelCount] = {"Unity", "Unreal", "Blender", "Maya"};
 
 /* The bindings shared by every preset: files, undo, windows, rendering. */
 static void common_bindings(Keymap &k) {
@@ -230,6 +236,25 @@ static void common_bindings(Keymap &k) {
   const char *wins[] = {"window.scene", "window.game", "window.inspector", "window.hierarchy", "window.project",
                         "window.console", "window.profiler", "window.research", "window.uv"};
   for (int i = 0; i < 9; i++) k[wins[i]] = {KeyChord{platform::KEY_1 + i, platform::MOD_CTRL}};
+}
+
+/* Unreal Editor's keys where they differ from Unity's: Alt+P plays in the editor, Ctrl+W duplicates as well, End drops
+ * the selection to the floor, Alt+G / H / J / K are the perspective, front, top and side views. */
+static void unreal_bindings(Keymap &k) {
+  auto b = [&](const char *id, std::initializer_list<const char *> chords) {
+    auto &v = k[id];
+    v.clear();
+    for (const char *c : chords) v.push_back(parse_chord(c));
+  };
+  b("play.toggle", {"Alt+P", "Ctrl+P"});
+  b("mesh.push_through", {});  // (Alt+P is Play here)
+  b("edit.duplicate", {"Ctrl+D", "Ctrl+W"});
+  b("object.drop_to_floor", {"End"});
+  b("view.perspective", {"Alt+G"});
+  b("view.front", {"Alt+H"});
+  b("view.top", {"Alt+J"});
+  b("view.side", {"Alt+K"});
+  b("mesh.tris_to_quads", {});  // (Alt+J is the top view)
 }
 
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
@@ -428,6 +453,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
       b("tool.scale", {"T"});
     }
   }
+  if (p == "unreal") unreal_bindings(k);  // (Unity's keys, with Unreal's own on top)
   return k;
 }
 
@@ -589,6 +615,11 @@ bool Editor::run_action(const std::string &id) {
     for (GameObject *g : selected_objects(true)) g->set_world_position(cam_.pivot);
     mark_changed("Move To View");
   }
+  else if (id == "view.perspective") cam_.ortho = false;
+  else if (id == "view.front") view_along(0.0f, 0.0f, true);
+  else if (id == "view.top") view_along(0.0f, 90.0f, true);
+  else if (id == "view.side") view_along(-90.0f, 0.0f, true);
+  else if (id == "object.drop_to_floor") drop_to_floor();
   else if (id == "play.toggle") {
     if (playing_) exit_play();
     else enter_play();
@@ -723,6 +754,49 @@ void Editor::handle_shortcuts() {
   }
 }
 
+/* The editor's feel (task 0063): Unity, Unreal, Blender or Maya keys and mouse navigation, together. The keymap preset
+ * can still be chosen on its own afterwards (3ds Max, SketchUp: Unity's navigation). */
+void Editor::set_editor_feel(const std::string &name_in) {
+  const std::string n = to_lower(name_in);
+  NavStyle style = NavStyle::Unity;
+  if (n == "unreal") style = NavStyle::Unreal;
+  else if (n == "blender") style = NavStyle::Blender;
+  else if (n == "maya") style = NavStyle::Maya;
+  else if (n != "unity") return Log::warn("feel: Unity, Unreal, Blender or Maya, not '%s'", name_in.c_str());
+  nav_style_ = style;
+  keymap_preset_ = kEditorFeels[(int)style];
+  rebuild_keymap();  // (the user's own key changes stay on top)
+  save_prefs();
+  Log::info("Editor feel: %s (keys and Scene view navigation%s)", kEditorFeels[(int)style],
+            keymap_overrides_.empty() ? "" : strprintf("; your %zu own key changes kept", keymap_overrides_.size()).c_str());
+}
+
+void Editor::view_along(float yaw, float pitch, bool ortho) {
+  cam_.animate_to(cam_.pivot, yaw, pitch, cam_.distance, now_seconds());
+  cam_.ortho = ortho;
+}
+
+/* Unreal's End: each selected object comes down (or up) so the bottom of its bounds rests on the ground (y = 0). */
+void Editor::drop_to_floor() {
+  bool moved = false;
+  for (GameObject *g : selected_objects(true)) {
+    AABB b;  // (the object and everything below it: Unreal drops the whole actor)
+    std::vector<GameObject *> stack{g};
+    while (!stack.empty()) {
+      GameObject *x = stack.back();
+      stack.pop_back();
+      b.add(x->world_bounds());
+      for (GameObject *c : x->children) stack.push_back(c);
+    }
+    if (!b.valid() || !std::isfinite(b.min.y)) continue;
+    Vec3 p = g->world_position();
+    p.y -= b.min.y;
+    g->set_world_position(p);
+    moved = true;
+  }
+  if (moved) mark_changed("Drop to Floor");
+}
+
 /* Preferences > Keymap: a preset, then each action's bindings. Click a binding and
  * press the new key (Esc cancels, Backspace clears it); clashes are listed. */
 void Editor::draw_keymap_settings() {
@@ -741,8 +815,16 @@ void Editor::draw_keymap_settings() {
     if (keymap_preset_ == kKeymapPresets[k]) pi = k;
   if (u.combo(u.id("km_preset"), {pr.x + u.px(150), pr.y + u.px(2), u.px(140), pr.h - u.px(4)}, pi, kKeymapPresets, kKeymapPresetCount))
     set_keymap_preset(kKeymapPresets[pi]);
-  u.tooltip("Shortcuts laid out like another program: Unity (Blendity's own), Blender, Maya, 3ds Max or SketchUp.\n"
-            "Choosing one replaces your own changes.");
+  u.tooltip("Shortcuts laid out like another program: Unity (Blendity's own), Unreal, Blender, Maya, 3ds Max or SketchUp.\n"
+            "Choosing one replaces your own changes. Editor Feel (below) sets the keys and the mouse navigation together.");
+  Recti fr = row(u.row_h() + u.px(4));
+  u.label({fr.x, fr.y, u.px(150), fr.h}, "Editor Feel");
+  int fi = (int)nav_style_;
+  if (u.combo(u.id("km_feel"), {fr.x + u.px(150), fr.y + u.px(2), u.px(140), fr.h - u.px(4)}, fi, kEditorFeels, kEditorFeelCount))
+    set_editor_feel(kEditorFeels[fi]);
+  u.tooltip("Work the way another program does: its keys (the preset above) and its Scene view mouse navigation.\n"
+            "Unity: RMB look + WASD, Alt+LMB orbit, MMB pan, Alt+RMB zoom.  Unreal: RMB look + WASD, Alt+LMB orbit, MMB or LMB+RMB pan.\n"
+            "Blender: MMB orbit, Shift+MMB pan, Ctrl+MMB zoom.  Maya: Alt+LMB tumble, Alt+MMB track, Alt+RMB dolly.");
   if (u.button({pr.x + u.px(300), pr.y + u.px(2), u.px(150), pr.h - u.px(4)}, strprintf("Reset Changes (%zu)", keymap_overrides_.size())) &&
       !keymap_overrides_.empty()) {
     keymap_overrides_.clear();

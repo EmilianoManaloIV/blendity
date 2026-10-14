@@ -34,3 +34,11 @@ objects it moves, so a clip can be reused on another character with the same bon
 - Clips are reusable across characters and survive scene edits that keep names.
 - Every animated number is its own track: a rotation is three tracks, as in Unity's dopesheet.
 - Euler curves can flip at +-180 degrees like Unity's; quaternion curves are left for the curve editor.
+
+## Amendment (task 0061, 2026-10-13): tangents on keys
+- Each key has a **tangent mode** and its own slopes, as Unity's keys: **Clamped Auto** (the Auto above, the default),
+  **Free Smooth** (one slope for both sides), **Flat** (0) and **Broken** (an in slope and an out slope). A span is
+  the cubic Hermite between its two keys' out and in slopes; Linear and Constant spans ignore them.
+- The file adds `tangent in out` after a key's interpolation only when the mode isn't Clamped Auto, so task-0059
+  files load unchanged. Slopes are clamped to +-1e6 on load.
+- Weighted (Bezier) tangents are still out: no file field until they are built.

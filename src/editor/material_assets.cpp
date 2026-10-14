@@ -160,6 +160,9 @@ void Editor::update_asset_drag() {
       if (image && t.r.contains(in.mx, in.my)) target = t.r;
     for (auto &r : drop_rows_)
       if (!image && r.first.contains(in.mx, in.my)) target = r.first;
+    if (fs::extension(d.path) == ".anim")
+      for (auto &t : drop_seq_tracks_)
+        if (t.first.contains(in.mx, in.my)) target = t.first;
     ui_.overlay([this, label, target] {
       auto &cv = ui_.canvas;
       if (target.w > 0) cv.rect_outline(target, Color::hex(0x3A79BB), ui_.px(2));
@@ -183,6 +186,7 @@ void Editor::update_asset_drag() {
         }
       }
       else if (fs::extension(d.path) == ".ptex") drop_texture_asset(d.path, in.mx, in.my);
+      else if (fs::extension(d.path) == ".anim") seq_drop_clip(d.path, in.mx, in.my);
       else if (d.mat || fs::extension(d.path) == ".mat" || image_extension_supported(fs::extension(d.path)))
         drop_asset(d.path, in.mx, in.my, d.mat);
     }

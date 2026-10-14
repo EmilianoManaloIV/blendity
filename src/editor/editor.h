@@ -32,6 +32,7 @@
 #include "../scene/import.h"
 #include "../scene/scene.h"
 #include "../scene/animation.h"
+#include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
 #include "ui.h"
@@ -62,8 +63,12 @@ struct ShortcutAction {
 };
 using Keymap = std::unordered_map<std::string, std::vector<KeyChord>>;
 const std::vector<ShortcutAction> &shortcut_actions();
-constexpr int kKeymapPresetCount = 5;
-extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Blender, Maya, 3ds Max, SketchUp
+constexpr int kKeymapPresetCount = 6;
+extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Unreal, Blender, Maya, 3ds Max, SketchUp
+/* The editor's feel (task 0063): another program's keys and Scene view mouse navigation. */
+enum class NavStyle { Unity, Unreal, Blender, Maya };
+constexpr int kEditorFeelCount = 4;
+extern const char *const kEditorFeels[kEditorFeelCount];
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys = false);
 std::string chord_text(const KeyChord &c);
 KeyChord parse_chord(const std::string &text);
@@ -87,7 +92,7 @@ extern const char *const kWeightFalloffs[6];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, Count };
 const char *window_title(WindowKind k);
 
 /* What frames cost and did (Profiler window, stress suite, tests): milliseconds in the expensive parts
@@ -209,7 +214,39 @@ struct AnimEditorState {
   int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
+  /* The Curves view (task 0061). */
+  bool curves = false;
+  float v_min = -1.0f, v_max = 1.0f;  // the value axis
+  std::string v_framed;  // the clip the axis was framed for (another: framed again)
+  std::vector<int> curve_tracks;  // the tracks shown (none picked: all)
+  AnimationClip drag_clip;  // a drag's edited copy, drawn while it lasts
+  bool drag_clip_on = false;
+  int drag_track = -1, drag_side = 0;  // a tangent handle being dragged: its track, its key's frame, before / after
+  float drag_key = 0.0f;
+  std::string drag_clip_path;     // the clip a drag edits: committed only into it
+  float drag_df = 0.0f, drag_dv = 0.0f;  // what the last preview moved the keys by (the commit and the selection use it)
+  Recti sheet;  // where the sheet was last drawn, and the frames across it (tests find keys by them)
+  float sheet_end = 1.0f;
   std::vector<std::tuple<std::string, std::string, int, AnimKey>> clipboard;  // (path, property, axis, key from the first copied)
+};
+
+/* The Sequencer window's state (task 0062): the playhead, Preview, the selected bar (by name: sorting moves it), a drag. */
+struct SeqEditorState {
+  uint64_t root = 0;
+  float frame = 0.0f;
+  bool preview = false, playing = false;
+  double play_clock = 0.0;
+  float play_from = 0.0f;
+  std::string selected_name;
+  int drag = 0;  // 1 the playhead, 2 a bar moved, 3 its left end trimmed, 4 its right end
+  std::string drag_name, drag_seq;  // the bar dragged, in which sequence (another one: the drag is dropped)
+  int drag_track = 0, drag_x = 0, drag_y = 0;
+  std::vector<std::pair<uint64_t, Transform>> saved_pose;  // as the Animation window's Preview
+  std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;
+  Recti lanes{0, 0, 0, 0};  // where the lanes were last drawn and the frames across them (drops, tests)
+  int lane_h = 1;
+  float end = 60.0f;
+  bool drawn = false;  // the window drew this frame (a drag lives only while it does)
 };
 
 /* The marker auto-rig being placed (task 0058): which mesh, which kind, the markers so far. */
@@ -554,7 +591,36 @@ class Editor {
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
+  NavStyle nav_style_for_test() const { return nav_style_; }
+  const SceneCamera &scene_camera_for_test() const { return cam_; }
+  Recti scene_rect_for_test() const { return scene_rect_; }
+  std::string shortcut_for_test(const std::string &id) const { return shortcut_text(id); }
+  size_t edge_sel_count_for_test() const { return edge_sel_.size(); }
+  bool screen_of_for_test(Vec3 world, int &x, int &y) {  // where the Scene view last drew a world point
+    Vec2 s;
+    float z;
+    if (!scene_r3d_.project(world, s, z)) return false;
+    x = scene_rect_.x + (int)std::lround(s.x), y = scene_rect_.y + (int)std::lround(s.y);
+    return true;
+  }
   AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
+  const SeqEditorState &seq_for_test() const { return seqr_; }
+  SequencePtr seq_for_test_sequence() { return seq_sequence(); }
+  bool seq_drop_clip_for_test(const std::string &abs_path, int mx, int my) { return seq_drop_clip(abs_path, mx, my); }
+  /* Where the Curves view drew key `frame` of `track`, or its handle (side 0 before, 1 after). */
+  bool anim_curve_point_for_test(int track, float frame, int side, int &x, int &y) {
+    AnimationClipPtr c = anim_clip();
+    if (!c || track < 0 || (size_t)track >= c->tracks.size()) return false;
+    const int k = c->tracks[(size_t)track].key_at(frame);
+    if (k < 0) return false;
+    if (side < 0) {
+      x = anim_x_of(anim_.sheet, frame, anim_.sheet_end), y = (int)anim_y_of(anim_.sheet, c->tracks[(size_t)track].keys[(size_t)k].value);
+      return true;
+    }
+    const Vec2 h = anim_handle_at(c->tracks[(size_t)track], (size_t)k, side, anim_.sheet, anim_.sheet_end);
+    x = (int)std::lround(h.x), y = (int)std::lround(h.y);
+    return true;
+  }
   std::string autorig_next_for_test() const { return autorig_next(); }
   void autorig_remove_last_for_test() { autorig_remove_last(); }
   std::string wp_group_name_for_test() {
@@ -709,6 +775,45 @@ class Editor {
   void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
   /* The Animation window (task 0059, animation_window.cpp). */
   AnimEditorState anim_;
+  /* The Sequencer window (task 0062, sequencer_window.cpp). */
+  SeqEditorState seqr_;
+  std::vector<std::string> seq_paths_;
+  double seq_paths_listed_ = -100;
+  std::vector<std::pair<Recti, int>> drop_seq_tracks_;  // the Sequencer's tracks a dragged .anim lands on
+  GameObject *seq_root();
+  SequencePtr seq_sequence();
+  SequencePtr seq_new(GameObject *root, const std::string &name);
+  void note_sequence_edit(Sequence &s);
+  bool seq_edit(const char *label, const std::function<void(Sequence &)> &edit);
+  void seq_apply();
+  void seq_set_frame(float f);
+  void seq_set_preview(bool on);
+  void seq_save_pose(GameObject &root);
+  void seq_tick();
+  void seq_reset();
+  void seq_drag_cancel();
+  bool seq_add_clip(const std::string &clip, int track, float start);
+  SeqInstance *seq_selected(Sequence &s, int *track = nullptr, int *index = nullptr);
+  bool seq_move(const std::string &name, int track, float start);
+  bool seq_trim(const std::string &name, float trim_in, float trim_out, float start);
+  bool seq_rename(const std::string &from, const std::string &to);
+  void seq_delete_selected();
+  float seq_frame_at(const Recti &lanes, int x, float end) const;
+  int seq_x_of(const Recti &lanes, float frame, float end) const;
+  bool seq_bar_under(const Sequence &s, const Recti &lanes, int lane_h, float end, int mx, int my, std::string &name, int &part);
+  void draw_seq_toolbar(const Recti &bar, GameObject *root);
+  void seq_pick(GameObject *root, const std::string &path);
+  const std::vector<std::string> &seq_paths();
+  void draw_seq_lanes(const Sequence &s, const Recti &list, const Recti &lanes, int lane_h, float end);
+  bool seq_drag_result(const Sequence &s, const Recti &lanes, int lane_h, float end, int mx, int my, SeqInstance &out, int &track) const;
+  void seq_lanes_input(const Sequence &s, const Recti &ruler, const Recti &lanes, int lane_h, float end);
+  void seq_end_drag(const Sequence &s, const Recti &lanes, int lane_h, float end);
+  void draw_seq_details(Sequence &s, const Recti &r);
+  void draw_seq_triggers(Sequence &s, const Recti &r);
+  void draw_sequencer_window(const Recti &r);
+  bool seq_drop_clip(const std::string &abs_path, int mx, int my);
+  void seq_command(const std::vector<std::string> &t);
+  void seq_jump_command(const std::string &name, float blend);
   std::vector<std::pair<std::string, std::string>> clip_before_;  // clips' texts before their first edit since the last undo step
   std::vector<std::string> anim_clip_paths_;
   double anim_clip_paths_listed_ = -100;
@@ -748,6 +853,33 @@ class Editor {
   void anim_sheet_input(const AnimationClip &clip, const Recti &ruler, const Recti &sheet, int row_h, float end);
   void anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end);
   void draw_animation_window(const Recti &r);
+  void draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end);
+  void anim_pick_curve(int track, bool add);
+  void anim_drag_cancel();   // a drag dropped (its clip went, the window can't draw, an undo)
+  void anim_clip_changed();  // another clip (or the same one restored): drags, picked curves, the snapshot reset
+  void anim_tangent_command(const std::vector<std::string> &t, AnimationClip &clip, const std::string &path, const std::string &prop, int axis, float frame);
+  void draw_anim_rows(const AnimationClip &clip, GameObject *root, const Recti &list, const Recti &body, const Recti &sheet, int row_h, float end);
+  /* The Curves view (task 0061, curve_editor.cpp). */
+  float anim_y_of(const Recti &a, float v) const;
+  float anim_value_at(const Recti &a, int y) const;
+  std::vector<size_t> anim_curve_tracks(const AnimationClip &c) const;
+  void anim_frame_values(const AnimationClip &c);
+  Vec2 anim_handle_at(const AnimTrack &t, size_t i, int side, const Recti &a, float end) const;
+  void draw_anim_curves(const AnimationClip &clip, const Recti &a, float end);
+  void draw_anim_curve(const AnimationClip &c, size_t t, const Recti &a, float end);
+  void anim_preview_move(const AnimationClip &clip, float dframes, float dvalue);
+  void anim_preview_handle(const AnimationClip &clip, const Recti &a, float end, int mx, int my);
+  void anim_set_tangent(int mode);
+  bool anim_handle_shown(const AnimTrack &t, size_t i, int side) const;
+  void anim_show_drag();
+  bool anim_handle_under(const AnimationClip &c, const Recti &a, float end, int mx, int my);
+  bool anim_curve_key_under(const AnimationClip &c, const Recti &a, float end, int mx, int my, int &track, float &frame);
+  int anim_curve_near(const AnimationClip &c, const Recti &a, float end, int mx, int my);
+  void anim_curve_input(const AnimationClip &clip, const Recti &ruler, const Recti &a, float end);
+  void anim_curve_drag(const AnimationClip &clip, const Recti &a, float end);
+  void anim_curve_end_drag(const AnimationClip &clip, const Recti &a, float end);
+  void anim_curve_box_select(const AnimationClip &clip, const Recti &a, float end);
+  void anim_curve_add_key(const AnimationClip &clip, const Recti &a, float end, int mx, int my);
   void anim_command(const std::vector<std::string> &t);
   void open_manual();  // Help > Open Manual, `manual`
   /* The marker auto-rig (task 0058, auto_rig_tool.cpp). */
@@ -1347,7 +1479,13 @@ class Editor {
   bool scene_lighting_ = true, show_grid_ = true, show_gizmos_ = true, show_stats_ = true;
   RasterOptions raster_opt_;
   RasterStats scene_stats_, game_stats_;
-  enum class Drag { None, Fly, Orbit, Pan, Zoom, Gizmo, Box, ViewTool } drag_ = Drag::None;
+  enum class Drag { None, Fly, Orbit, Pan, Zoom, Gizmo, Box, ViewTool, AltClick } drag_ = Drag::None;  // AltClick: Blender's Alt+click, the view still
+  int drag_button_ = 0;  // the mouse button holding a navigation drag (it ends when that one is let go)
+  NavStyle nav_style_ = NavStyle::Unity;  // the feel's mouse navigation (task 0063)
+  std::pair<Drag, int> nav_drag_for_press() const;  // which navigation a press starts in this feel, and its button
+  void set_editor_feel(const std::string &name);
+  void view_along(float yaw, float pitch, bool ortho);  // Unreal's Alt+H / J / K views
+  void drop_to_floor();
   int drag_x_ = 0, drag_y_ = 0;
   bool scene_hovered_ = false;
   double fly_last_ = 0;

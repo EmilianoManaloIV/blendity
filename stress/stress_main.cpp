@@ -29,6 +29,7 @@
 #include "../src/scene/mesh.h"
 #include "../src/scene/skin_weights.h"
 #include "../src/scene/animation.h"
+#include "../src/scene/sequence.h"
 #include "../src/scene/physics.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
@@ -3540,6 +3541,41 @@ static void test_animation_stress(Report &rep, const Options &o) {
   const double per = t.ms() / frames;
   rep.row({std::to_string(clip.tracks.size()), std::to_string(keys), strprintf("%.4f", per), "0.2"});
   rep.note(strprintf("%zu tracks: %.4f ms a frame (target 0.2 ms). %s", clip.tracks.size(), per, per <= 0.2 ? "Within it." : "OVER the target."));
+
+  /* A sequence (task 0062): 4 tracks, each two copies of the clip overlapping by half (a crossfade all the way along
+   * the overlap), sampled and applied once a frame. Target: at most 0.5 ms. */
+  for (int k = 0; k < 4; k++) {
+    const std::string cp = strprintf("Assets/Animations/StressSeq%d.anim", k);
+    AnimationClipPtr c = create_clip_asset(cp, "");
+    if (!c) return rep.note("Couldn't write the sequence's clips (BLENDITY_PROJECT)");
+    c->tracks = clip.tracks;
+    c->length = 120;
+    c->touch();
+  }
+  Sequence seq;
+  seq.tracks.resize(4);
+  for (int k = 0; k < 4; k++)
+    for (int n = 0; n < 2; n++) {
+      SeqInstance i;
+      i.clip = strprintf("Assets/Animations/StressSeq%d.anim", k), i.name = strprintf("C%d_%d", k, n), i.start = (float)(n * 60);
+      seq.tracks[(size_t)k].items.push_back(i);
+    }
+  AnimValues vals;
+  ScopedTimer ts;
+  for (int i = 0; i < frames; i++) {
+    vals.clear();
+    sample_sequence(seq, (float)(60 + i % 60) + 0.5f, vals);  // (inside the overlap: both instances of each track sampled)
+    apply_anim_values(vals, *root);
+  }
+  const double per_seq = ts.ms() / frames;
+  rep.row({"4 x 2 x " + std::to_string(clip.tracks.size()) + " (sequence)", std::to_string(keys * 8), strprintf("%.4f", per_seq), "0.5"});
+  rep.note(strprintf("A sequence of 4 tracks crossfading 201-track clips: %.4f ms a frame (target 0.5 ms). %s", per_seq,
+                     per_seq <= 0.5 ? "Within it." : "OVER the target."));
+  for (int k = 0; k < 4; k++) {
+    const std::string cp = strprintf("Assets/Animations/StressSeq%d.anim", k);
+    std::remove(resolve_asset_path(cp).c_str());
+    forget_clip_assets(cp);
+  }
 }
 
 static void test_vgroups_stress(Report &rep, const Options &o) {

@@ -26,13 +26,13 @@ using ui::Icon;
 static const char *kVersion = "0.10.0";
 
 const char *window_title(WindowKind k) {
-  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation"};
+  static const char *names[] = {"Scene", "Game", "Hierarchy", "Inspector", "Project", "Console", "Learn", "Research", "Profiler", "Render", "UV Editor", "Materials", "Modeling Tools", "Lighting", "Textures", "Rigging", "Animation", "Sequencer"};
   static_assert(sizeof(names) / sizeof(names[0]) == (size_t)WindowKind::Count, "a title per window");
   return names[(int)k];
 }
 
 ui::Icon window_icon(WindowKind k) {
-  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step};
+  static const Icon icons[] = {Icon::Grid, Icon::Play, Icon::Menu, Icon::Info, Icon::Folder, Icon::Terminal, Icon::Book, Icon::Flask, Icon::Chart, Icon::Camera, Icon::Face, Icon::Eye, Icon::Vertex, Icon::Lightbulb, Icon::Paper, Icon::Move, Icon::Step, Icon::Play};
   static_assert(sizeof(icons) / sizeof(icons[0]) == (size_t)WindowKind::Count, "an icon per window");
   return icons[(int)k];
 }
@@ -110,6 +110,7 @@ void Editor::resolve_project_paths() {
   clear_material_assets();  // assets belong to one project
   clear_texture_assets();
   clear_clip_assets();
+  clear_sequence_assets();
   project_dir_ = assets_dir_;
 }
 
@@ -384,7 +385,7 @@ void Editor::frame(std::vector<Event> &events) {
       play_time_ += dt;
       ctx.time = play_time_;
       ctx.dt = dt;
-      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && ui_.in.key_down[k]; };
+      ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && ui_.in.key_down[k]; };
       scene_->update(ctx);
       step_requested_ = false;
     }
@@ -441,6 +442,9 @@ void Editor::frame(std::vector<Event> &events) {
   drop_textures_.clear();
   drop_rows_.clear();
   drop_folders_.clear();
+  drop_seq_tracks_.clear();
+  if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
+  seqr_.drawn = false;
   sync_material_asset_names();
   draw_toolbar(toolbar);
   dock_layout(dock_.get(), dock_area);
@@ -504,6 +508,7 @@ void Editor::frame(std::vector<Event> &events) {
   finish_hierarchy_drag();
   poll_skin_job();
   anim_tick();
+  seq_tick();
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();
@@ -614,6 +619,11 @@ void Editor::draw_menubar(const Recti &r) {
     u.tooltip("G always grabs (move with the mouse, X / Y / Z to lock an axis).\n"
               "On: R and S also rotate and scale the Blender way, and Unity's Scale tool moves from R to T.\n"
               "Off: R stays Unity's Scale tool; press R or S during a grab to rotate or scale.");
+    u.submenu("Editor Feel", u.px(170), [this] {
+      for (int f = 0; f < kEditorFeelCount; f++)
+        if (ui_.menu_item(kEditorFeels[f], nullptr, (int)nav_style_ == f)) set_editor_feel(kEditorFeels[f]);
+    });
+    u.tooltip("Work like Unity, Unreal, Blender or Maya: their keys and their Scene view mouse navigation.");
     u.menu_separator();
     if (u.menu_item("Undo " + (undo_.empty() ? std::string() : undo_.back().label), "Ctrl+Z", false, !undo_.empty() || pending_change_)) undo();
     if (u.menu_item("Redo", "Ctrl+Y", false, !redo_.empty())) redo();
@@ -877,7 +887,7 @@ void Editor::draw_menubar(const Recti &r) {
   u.popup(u.id("Window"), u.px(250), [this] {
     auto &u = ui_;
     /* Order: Scene Game Hierarchy Inspector Project Console Learn (Research, retired) Profiler (Unity's Ctrl+N bindings). */
-    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    const char *keys[] = {"Ctrl+1", "Ctrl+2", "Ctrl+4", "Ctrl+3", "Ctrl+5", "Ctrl+6", "F1", "Ctrl+8", "Ctrl+7", "F11", "Ctrl+9", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     static_assert(sizeof(keys) / sizeof(keys[0]) == (size_t)WindowKind::Count, "a shortcut label (or nullptr) per window");
     for (int k = 0; k < (int)WindowKind::Count; k++)
       if ((WindowKind)k != WindowKind::Research &&  // retired (task 0034): papers are cited in Learn > References
@@ -1307,6 +1317,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Textures: draw_textures_window(r); break;
     case WindowKind::Rigging: draw_rigging_window(r); break;
     case WindowKind::Animation: draw_animation_window(r); break;
+    case WindowKind::Sequencer: draw_sequencer_window(r); break;
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1535,7 +1546,7 @@ void Editor::commit_undo() {
   redo_.clear();
   stable_ = scene_->clone();
   pending_change_ = false;
-  if (save_dirty_material_assets() + save_dirty_texture_assets() + save_dirty_clip_assets()) project_listed_ = -100;  // edited assets go back to their files
+  if (save_dirty_material_assets() + save_dirty_texture_assets() + save_dirty_clip_assets() + save_dirty_sequence_assets()) project_listed_ = -100;  // edited assets go back to their files
 }
 
 size_t Editor::undo_budget() const {
@@ -1554,6 +1565,7 @@ void Editor::undo() {
   if (playing_) return;
   cancel_skin_job();  // (its result was solved for the state being undone)
   anim_set_preview(false);  // (the pose shown goes back first: it isn't the scene's)
+  seq_set_preview(false);
   wp_abort_stroke();  // a stroke under way would write into the restored scene's (shared) mesh
   commit_undo();
   if (undo_.empty()) return;
@@ -1574,8 +1586,9 @@ void Editor::undo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   save_dirty_clip_assets();
-  anim_.selected.clear();
-  anim_.shown_clip = nullptr;
+  save_dirty_sequence_assets();
+  anim_clip_changed();
+  seq_drag_cancel();
   stable_ = scene_->clone();
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
@@ -1587,6 +1600,7 @@ void Editor::redo() {
   if (playing_ || redo_.empty()) return;
   cancel_skin_job();
   anim_set_preview(false);
+  seq_set_preview(false);
   wp_abort_stroke();
   UndoState s = std::move(redo_.back());
   redo_.pop_back();
@@ -1605,8 +1619,9 @@ void Editor::redo() {
   save_dirty_material_assets();
   save_dirty_texture_assets();
   save_dirty_clip_assets();
-  anim_.selected.clear();
-  anim_.shown_clip = nullptr;
+  save_dirty_sequence_assets();
+  anim_clip_changed();
+  seq_drag_cancel();
   stable_ = scene_->clone();
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
@@ -1623,6 +1638,7 @@ void Editor::new_scene() {
   cancel_skin_job();
   autorig_cancel();
   anim_reset();
+  seq_reset();
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
@@ -1644,6 +1660,7 @@ bool Editor::open_scene(const std::string &path) {
   cancel_skin_job();
   autorig_cancel();
   anim_reset();
+  seq_reset();
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
@@ -1667,7 +1684,9 @@ bool Editor::open_scene(const std::string &path) {
 
 void Editor::save_scene_cmd(bool save_as) {
   anim_set_preview(false);  // (the scene is saved in its own pose, not the one previewed)
+  seq_set_preview(false);
   save_dirty_clip_assets();
+  save_dirty_sequence_assets();
   if (playing_) {
     Log::warn("Cannot save while in Play mode (Unity has the same rule). Press Stop first.");
     return;
@@ -2683,6 +2702,7 @@ void Editor::enter_play() {
   cancel_skin_job();  // (Stop would throw its result away)
   autorig_cancel();
   anim_set_preview(false);  // (Play plays from the scene's own pose)
+  seq_set_preview(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
   commit_undo();
@@ -2893,6 +2913,15 @@ void Editor::run_console_command(const std::string &line) {
     delete_assets_command(c, line);
     return;
   }
+  if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
+    if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
+    set_editor_feel(t[1]);
+    return;
+  }
+  if (c == "seq") {
+    seq_command(t);
+    return;
+  }
   if (c == "anim") {
     anim_command(t);
     return;
@@ -2947,6 +2976,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] [inpaint|envelope], skin transfer <body> [mesh] (rigging)");
     Log::info("  autorig humanoid|quadruped, autorig mark <marker> <x> <y> <z>, autorig build|cancel (the marker auto-rig)");
     Log::info("  anim new|key|interp|frame|preview|record|play|stop (the Animation window); manual (the user manual)");
+    Log::info("  seq new|add|move|trim|speed|rename|remove|track|trigger|jump|frame|preview|play|stop (the Sequencer window)");
     Log::info("  vgroup add|remove|rename|assign|unassign|select|deselect|active <name> [weight | new name] (vertex groups)");
     Log::info("  weightpaint on|off, wpbrush add|subtract|draw|blur [radius] [strength] [weight], wpfalloff <curve>, wpmirror on|off,");
     Log::info("  wpfront on|off, wpstroke x y x y ..., wpnormalize, wpclean [threshold] (Weight Paint)");
@@ -3957,6 +3987,13 @@ void Editor::load_prefs() {
     else if (k == "auto_smooth") auto_smooth_ = v == "1";
     else if (k == "draw_axes") draw_global_axes_ = v == "global";
     else if (k == "keymap_preset" && !v.empty()) keymap_preset_ = v;
+    else if (k == "feel") {
+      int found = -1;
+      for (int f = 0; f < kEditorFeelCount; f++)
+        if (v == kEditorFeels[f]) found = f;
+      if (found < 0) Log::warn("Preferences: no editor feel '%s' (Unity is used)", v.c_str());
+      nav_style_ = found < 0 ? NavStyle::Unity : (NavStyle)found;
+    }
     else if (k == "keymap") keymap_text = v;
     else if (k == "auto_smooth_angle") auto_smooth_angle_ = std::max(1.0f, std::min(180.0f, (float)std::atof(v.c_str())));
     else if (k == "render_devices_off") {
@@ -4001,7 +4038,8 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
                             view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
-  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0);
+  s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
+                 kEditorFeels[(int)nav_style_]);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }

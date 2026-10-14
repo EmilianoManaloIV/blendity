@@ -194,6 +194,9 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Automatic weights bled across gaps (a hand by a thigh took leg weight) and clothing had to be weighted by hand. | Bind: Automatic Weights inpaints from vertices each bone clearly owns and sees; Transfer Weights copies a body's weights onto clothing and inpaints where they don't match. |
 | Rigging a character meant placing every bone by hand. | Auto-Rig: click a few markers on the mesh (Mixamo's, or an animal's), Build Rig. |
 | Nothing could be animated. | The Animation window (a Unity-style dopesheet with Record and Preview) and the Animation component. |
+| Animated motion could only be timed, not shaped: every key eased the same way. | The Animation window's Curves view: drag keys in value, drag tangent handles, Free Smooth / Broken / Flat / Clamped Auto keys (task 0061). |
+| Going from one animation clip to another needed something like a state machine to wire up. | The Sequencer window: lay clips on tracks, overlap them to crossfade, and give keys to jump between them in Play (task 0062). |
+| Users of Unreal, Blender or Maya had to relearn the mouse: the Scene view only navigated Unity's way. | Edit > Editor Feel: Unreal, Blender or Maya keys and mouse navigation together (task 0063). |
 | How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 
 ## Still worth doing
