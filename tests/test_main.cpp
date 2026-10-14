@@ -113,6 +113,8 @@ static std::string test_dir() {
 /* Every Editor in the tests works in a scratch project (and a scratch trash), never
  * the real Assets folder: the Project window can now move, rename and delete files.
  * Setting BLENDITY_PROJECT to "" returns to this default. */
+static std::string g_asset_root_at_start;  // the asset root main() set before any test (task 0081)
+
 static std::string scratch_project() {
   const std::string p = fs::join(test_dir(), "default_project");
   fs::make_dirs(fs::join(p, "Assets/Scenes"));
@@ -247,6 +249,10 @@ int main() {
   Log::echo_stdout = false;
   set_env("BLENDITY_PROJECT", "");  // the scratch project
   set_env("BLENDITY_TRASH", "");
+  /* Assets a test makes before any editor exists (clips, materials) go into the scratch project too: with no asset
+   * root a relative path is the folder the tests run from - a real project's Assets (task 0081). */
+  set_asset_root(std::getenv("BLENDITY_PROJECT"));
+  g_asset_root_at_start = asset_root();
   /* GI Device Auto gathers on the CPU here, so a machine with a GPU and CI (without one) run the same
    * code; the GPU's own tests ask for it (task 0018). */
   if (!std::getenv("BLENDITY_GI_DEVICE")) set_env("BLENDITY_GI_DEVICE", "cpu");
@@ -28676,5 +28682,84 @@ static void round81_tests() {
     std::string saved;
     CHECK(fs::read_file(prefs, saved) && saved.find("libs_never_ask=1") != std::string::npos && saved.find("use_libs=0") != std::string::npos);
     std::remove(prefs.c_str());
+  });
+  /* ---------------------------------------------------------------- round 107: redo of material assets, tests stay in their project (task 0081) */
+  test("materials: an edit to a material linked to a .mat undoes and redoes, twice over (redo used to keep the undone values)", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    const std::string path = "Assets/Materials/R107Red.mat";
+    std::remove(resolve_asset_path(path).c_str());
+    MaterialPtr asset = create_material_asset(*make_material("R107Red", Vec3(0.8f, 0.1f, 0.1f)), path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("select Cube");
+    ed.command("assignmat " + path);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    auto colour = [&] {
+      GameObject *cube = ed.scene().find_by_name("Cube");
+      return cube && cube->get<MeshRenderer>() && !cube->get<MeshRenderer>()->materials.empty() ? cube->get<MeshRenderer>()->materials[0]->base_color : Vec3(-1.0f);
+    };
+    CHECK(std::fabs(colour().x - 0.8f) < 1e-5f);
+    /* An edit in place (as the Inspector makes it): the shared asset turns green. */
+    ed.scene().find_by_name("Cube")->get<MeshRenderer>()->materials[0]->base_color = Vec3(0.1f, 0.8f, 0.1f);
+    ed.scene().find_by_name("Cube")->get<MeshRenderer>()->materials[0]->touch();
+    ed.mark_changed_for_test("Edit R107Red");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    for (int round = 0; round < 2; round++) {
+      ed.command("undo");
+      ed.step_frame_headless();
+      const float red = colour().x;
+      ed.command("redo");
+      ed.step_frame_headless();
+      const float green = colour().y;
+      std::printf("    round %d: after undo red %.2f (0.8), after redo green %.2f (0.8); the asset's own %.2f\n", round, red, green,
+                  material_asset(path) ? material_asset(path)->base_color.y : -1.0f);
+      CHECK(std::fabs(red - 0.8f) < 1e-5f && std::fabs(green - 0.8f) < 1e-5f);
+    }
+    CHECK(material_asset(path) && std::fabs(material_asset(path)->base_color.y - 0.8f) < 1e-5f);  // (the file's asset follows)
+    std::remove(resolve_asset_path(path).c_str());
+  });
+
+  test("materials: objects sharing a .mat still share one material in an undo state (one copy, not one each)", [] {
+    Scene scene;
+    MaterialPtr shared = make_material("R107Shared", Vec3(0.2f));
+    shared->asset_path = "Assets/Materials/R107Shared.mat";
+    GameObject *a = create_primitive(scene, "Cube");
+    GameObject *b = create_primitive(scene, "Cube");
+    a->get<MeshRenderer>()->materials = {shared, shared};
+    b->get<MeshRenderer>()->materials = {shared};
+    detach_material_assets(scene);
+    const MaterialPtr &copy = a->get<MeshRenderer>()->materials[0];
+    CHECK(copy != shared);
+    CHECK(a->get<MeshRenderer>()->materials[1] == copy && b->get<MeshRenderer>()->materials[0] == copy);
+  });
+
+  test("updates: a tagged version GitHub marks a pre-release (v0.10.0) is still offered with previews off; PR builds are not", [] {
+    const std::string p = releases::platform();
+    const std::string inst = p == "windows" ? "Blendity-Setup-x.exe" : p == "linux" ? "Blendity-x-x86_64.AppImage" : "Blendity-x-macos.dmg";
+    auto rel = [&](const char *tag, const char *date) {
+      return strprintf("{\"tag_name\":\"%s\",\"name\":\"%s\",\"body\":\"\",\"published_at\":\"%s\",\"prerelease\":true,\"draft\":false,"
+                       "\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"https://x/a\",\"size\":5}]}",
+                       tag, tag, date, inst.c_str());
+    };
+    const std::vector<releases::Release> all = releases::parse("[" + rel("build-pr73", "2026-10-16T00:00:00Z") + "," +
+                                                                rel("v0.10.0", "2026-10-15T00:00:00Z") + "," +
+                                                                rel("build-pr72", "2026-10-14T00:00:00Z") + "]");
+    const auto stable = releases::newer(all, "build-pr72", p, false);
+    std::printf("    %zu releases; with previews off from PR 72's build: %zu offered\n", all.size(), stable.size());
+    CHECK(all.size() == 3 && all[1].prerelease && all[1].pr == 0);
+    CHECK(stable.size() == 1 && stable[0]->tag == "v0.10.0");
+    CHECK(releases::installable(all, p, false).size() == 1 && releases::installable(all, p, true).size() == 3);
+  });
+
+  test("tests: an asset made before any editor exists lands in the scratch project, never the folder the tests run from", [] {
+    /* What main() set before the first test (every editor since has set its own, all under the test folder). */
+    std::printf("    the asset root before any test: '%s'\n", g_asset_root_at_start.c_str());
+    CHECK(!g_asset_root_at_start.empty() && fs::normalize(g_asset_root_at_start) == fs::normalize(scratch_project()));
+    const std::string was = asset_root();
+    set_asset_root(g_asset_root_at_start);
+    const std::string p = fs::normalize(resolve_asset_path("Assets/Animations/R107Probe.anim"));
+    set_asset_root(was);
+    CHECK(p.rfind(fs::normalize(test_dir()), 0) == 0);
   });
 }

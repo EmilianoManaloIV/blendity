@@ -13,7 +13,8 @@ the user's. Until now a build with Blender's libraries linked them at load time:
 
 ## Decision
 - **Builds:** every PR merged into main publishes a GitHub pre-release `build-pr<N>` (its notes: the PR's
-  description); v* tags publish stable releases. Each has the installers, the libraries archive and SHA256SUMS.txt.
+  description); v* tags publish releases (marked pre-release before 1.0 or with a suffix, task 0081; the updater
+  offers them with previews off all the same). Each has the installers, the libraries archive and SHA256SUMS.txt.
   A build knows its tag (BLENDITY_BUILD) and version (VERSION).
 - **The updater** reads GitHub's releases list (no new library: WinHTTP on Windows, `curl` elsewhere; the JSON reader
   the glTF importer had, moved to core), offers newer builds of this system (Preferences: stable only or PR builds

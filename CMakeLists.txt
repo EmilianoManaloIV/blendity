@@ -1,7 +1,11 @@
 # Blendity - optional CMake build (the build.bat / build.sh scripts need no CMake).
 #   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
 cmake_minimum_required(VERSION 3.16)
-project(Blendity VERSION 0.10.0 LANGUAGES C CXX)
+# VERSION holds the one version number (task 0081); a new number reconfigures.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" BL_VERSION_TEXT)
+string(STRIP "${BL_VERSION_TEXT}" BL_VERSION_TEXT)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS VERSION)
+project(Blendity VERSION ${BL_VERSION_TEXT} LANGUAGES C CXX)
 if(APPLE)
   enable_language(OBJCXX)
 endif()
@@ -148,6 +152,12 @@ else()
 endif()
 
 add_library(blendity_engine STATIC ${BLENDITY_SOURCES})
+# The build's identity (task 0079): VERSION's number (read at the top), and CI's release tag (BLENDITY_BUILD) or "dev".
+set(BL_BUILD_ID "$ENV{BLENDITY_BUILD}")
+if(NOT BL_BUILD_ID)
+  set(BL_BUILD_ID dev)
+endif()
+target_compile_definitions(blendity_engine PUBLIC BL_VERSION_NUMBER=${BL_VERSION_TEXT} BL_BUILD=${BL_BUILD_ID})
 # glibc's dropped -ffast-math symbols for the static codecs: as objects on every executable's own link line (in the
 # static library above nothing of Blendity's would pull them in before the codecs ask).
 if(BLENDITY_USE_LIBS AND UNIX AND NOT APPLE)

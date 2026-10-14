@@ -4294,6 +4294,7 @@ int main(int argc, char **argv) {
     setenv("BLENDITY_PROJECT", proj.c_str(), 1);
     setenv("BLENDITY_TRASH", trash.c_str(), 1);
 #endif
+    set_asset_root(proj);  // (assets made before an editor exists: here too, never the real Assets - task 0081)
   }
   std::printf("Blendity stress test - %d hardware threads, budget %.1f ms%s\n", JobSystem::global().thread_count(),
               o.budget, o.quick ? " (quick)" : "");

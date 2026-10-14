@@ -24,8 +24,8 @@ struct Asset {
 
 struct Release {
   std::string tag, name, notes, published;  // published: ISO 8601, sorts as text
-  bool prerelease = false;
-  int pr = 0;  // the PR a build-pr<N> release was made from
+  bool prerelease = false;  // GitHub's flag: a PR's build, or a tagged version before 1.0 (v0.10.0)
+  int pr = 0;  // the PR a build-pr<N> release was made from (a preview: offered only with previews on)
   std::vector<Asset> assets;
 };
 
@@ -39,8 +39,8 @@ const Asset *libraries(const Release &r, const std::string &platform);
 const Asset *checksums(const Release &r);
 /* The lower-case SHA-256 a SHA256SUMS.txt (sha256sum's format) gives for `file`, or "". */
 std::string sum_for(const std::string &sums, const std::string &file);
-/* The releases newer than the one tagged `own` that this system can install, newest first (only stable ones unless
- * `previews`). A build not in the list (a local one) has none newer: it offers nothing by itself. */
+/* The releases newer than the one tagged `own` that this system can install, newest first (only tagged versions, v*,
+ * unless `previews` adds the PR builds). A build not in the list (a local one) has none newer: it offers nothing. */
 std::vector<const Release *> newer(const std::vector<Release> &all, const std::string &own, const std::string &platform, bool previews);
 /* Every release this system can install, newest first (Version History). */
 std::vector<const Release *> installable(const std::vector<Release> &all, const std::string &platform, bool previews);
