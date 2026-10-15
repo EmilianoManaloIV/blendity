@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 116): in place, faster - only moved faces split again, face normals in parallel (task 0090)
+
+**Asked:** the performance pass ("carry on the next tasks").
+
+**Changed**
+- **A drag on a big mesh:** its render data followed the drag by splitting every quad into triangles again and working
+  out every face's normal on one thread; now only faces with a moved vertex are split again (a face's triangles depend
+  on its own corners alone) and the normals are worked out in parallel - the same results to the bit. On a 50k-face
+  mesh, laptop setting: 9.1 -> 6.7 ms a frame for the two caches; a gizmo drag 35.4 -> 33.7 ms, G 34.4 -> 33.0 ms.
+
+**Checked**
+- New test (round 116): a cache read after several moves it missed, a vertex pulled across a quad's diagonal and back
+  to the same bits, and a fold that refuses the in-place update followed by more moves all draw exactly what a rebuild
+  draws; round 112's 48 random drag steps still find no difference.
+- Unit checks: Windows 10,311, 0 failed (704 tests); the whole suite in render-cache verify mode: 10,312,
+  0 failed, 0 stale pictures. Linux with libraries: 10,219, 0 failed. Sanitizer build: 10,125, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; the per-face work runs through a plain lambda (no `std::function` per face)
+and the moved-face test is a small function of its own.
+
 ## 2026-10-15 (round 115): the Edit Mode cage drawn from parallel batches (task 0089)
 
 **Asked:** "carry on the next tasks" (the performance pass; with the next task now written while the last one's

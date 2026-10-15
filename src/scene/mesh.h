@@ -166,7 +166,8 @@ struct Mesh {
   };
   uint64_t topology_serial() const;
   void build_edge_sides() const;
-  bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv) const;
+  /* `moved`: per face, whether any of its vertices moved (null: all of them); the others keep their triangles. */
+  bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint8_t> *moved) const;
   mutable Topology topo_;
   mutable uint64_t topo_version_ = 0, topo_serial_ = 0;
   /* The manifold edges' two sides, for smooth fans (corner_normals): built once per topology, not every call. */

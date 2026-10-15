@@ -466,19 +466,27 @@ void Mesh::build_edge_sides() const {
 void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
   const size_t nf = face_count();
   std::vector<Vec3> fnormal(nf);
-  for (size_t f = 0; f < nf; f++) fnormal[f] = face_normal(f);
+  /* Each face's own work in parallel (task 0090: a 50k-face mesh follows a drag every frame); what adds faces up
+   * stays in face order, so the normals are the same to the bit. */
+  auto each_face = [&](auto &&fn) {
+    JobSystem::global().parallel_for((int64_t)nf, 2048, [&](int64_t a, int64_t b) {
+      for (int64_t f = a; f < b; f++) fn((size_t)f);
+    });
+  };
+  each_face([&](size_t f) { fnormal[f] = face_normal(f); });
 
   /* Per-corner normal: flat = face normal; smooth = area-weighted average of
    * the faces around the vertex, restricted to faces within smooth_angle
    * (Blender's "Smooth by Angle" / Unity's import smoothing angle). */
   cnormal.assign(corner_verts.size(), Vec3(0.0f));
   if (flat) {
-    for (size_t f = 0; f < nf; f++)
+    each_face([&](size_t f) {
       for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) cnormal[c] = fnormal[f];
+    });
   }
   else {
     std::vector<Vec3> fweighted(nf);
-    for (size_t f = 0; f < nf; f++) {
+    each_face([&](size_t f) {
       const uint32_t *v = face_verts(f);
       uint32_t n = face_size(f);
       Vec3 w(0.0f);
@@ -489,7 +497,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
         w.z += (p.x - q.x) * (p.y + q.y);
       }
       fweighted[f] = w;
-    }
+    });
     const bool per_face = !face_smooth.empty() || !sharp_edges.empty() || (seams_sharp && !seams.empty());
     if (per_face) {
       /* Smooth fans, as Blender builds them: around each vertex, the corners of
@@ -552,6 +560,15 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
   }
 }
 
+/* Whether any of face f's vertices is marked in `vmoved`. */
+static bool face_moved(const Mesh &m, size_t f, const std::vector<uint8_t> &vmoved) {
+  for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
+    const uint32_t v = m.corner_verts[c];
+    if (v < vmoved.size() && vmoved[v]) return true;
+  }
+  return false;
+}
+
 /* The positions moved and nothing else (a deform, ADR 0022, or an Edit Mode drag, ADR 0034): the topology and the
  * UVs are the build's. Positions and normals are written per render vertex; if two corners of one render vertex now
  * have different normals (the full build would split it), the caller rebuilds instead. Quads and n-gons are
@@ -562,6 +579,14 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
   if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return false;
+  /* Which faces moved (a vertex whose position differs from the one the cache drew), before anything is written:
+   * only they are split into triangles again (task 0090). */
+  std::vector<uint8_t> vmoved(positions.size(), 0), fmoved(face_count(), 0);
+  for (size_t c = 0; c < corner_verts.size(); c++) {
+    const uint32_t rv = crv[c], v = corner_verts[c];
+    if (rv < rm.positions.size() && v < positions.size() && std::memcmp(&rm.positions[rv], &positions[v], sizeof(Vec3)) != 0) vmoved[v] = 1;
+  }
+  for (size_t f = 0; f < face_count(); f++) fmoved[f] = face_moved(*this, f, vmoved);
   std::vector<Vec3> cnormal;
   corner_normals(flat, cnormal);
   std::vector<uint8_t> seen(rm.positions.size(), 0);
@@ -577,7 +602,7 @@ bool Mesh::update_in_place(int ci, bool flat) const {
     else if (!(rm.normals[rv].x == n.x && rm.normals[rv].y == n.y && rm.normals[rv].z == n.z))
       return false;  // the build's key compares the same way
   }
-  if (!retriangulate(rm, crv)) return false;
+  if (!retriangulate(rm, crv, &fmoved)) return false;
   if (cache_tangents_[ci] && rm.tangents.size() == rm.positions.size() && rm.uvs.size() == rm.positions.size()) {
     /* Tangents from the UV gradients of the deformed triangles (Lengyel's method), averaged per render vertex and
      * made orthogonal to the new normal: they depend on the shape alone, not on the drag that led there.
@@ -619,7 +644,7 @@ bool Mesh::update_in_place(int ci, bool flat) const {
 /* Quads and n-gons triangulated from the current positions, written over the build's triangles in place: face f's
  * triangles start where the faces before it end (n - 2 each, as the build emits them). False if the slots don't add
  * up (a render mesh from another topology). */
-bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv) const {
+bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint8_t> *moved) const {
   const size_t nf = face_count();
   const uint64_t topo = topology_serial();
   if (tri_topo_ != topo) {  // (once per topology, not every frame of a drag or a deform)
@@ -639,6 +664,7 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv) const
     std::vector<uint32_t> local;
     for (int64_t f = f0; f < f1; f++) {
       if (face_size((size_t)f) <= 3) continue;
+      if (moved && (size_t)f < moved->size() && !(*moved)[(size_t)f]) continue;  // (its triangles stand: only its own corners decide them)
       triangulate_face(*this, (size_t)f, local);
       const uint32_t base = face_offsets[(size_t)f];
       const size_t t0 = (size_t)start[(size_t)f] * 3;

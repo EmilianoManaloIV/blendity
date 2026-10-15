@@ -29595,4 +29595,54 @@ static void round81_tests() {
     }
     CHECK(a.pixels == b.pixels);
   });
+
+  /* ---------------------------------------------------------------- round 116: in place, only moved faces split again (task 0090) */
+  test("Edit Mode: a cache read after several moves it missed, a vertex moved and back, and a refused update all draw as a rebuild", [] {
+    auto draw_same = [](const RenderMesh &a, const RenderMesh &b) {
+      if (a.indices.size() != b.indices.size() || a.tri_corner != b.tri_corner || a.tri_face != b.tri_face) return false;
+      for (size_t k = 0; k < a.indices.size(); k++)
+        if (std::memcmp(&a.positions[a.indices[k]], &b.positions[b.indices[k]], sizeof(Vec3)) != 0 ||
+            std::memcmp(&a.normals[a.indices[k]], &b.normals[b.indices[k]], sizeof(Vec3)) != 0)
+          return false;
+      return true;
+    };
+    auto rebuilt = [](const Mesh &m, bool flat) {
+      Mesh r = m;
+      r.forget_caches();
+      return r.render_mesh(flat);  // (a copy of the fresh build)
+    };
+    /* A grid of quads, smooth: two caches (flat for Edit Mode, smooth for renders). */
+    MeshPtr m = primitives::grid(2.0f, 12, 12);
+    m->smooth = true;
+    (void)m->render_mesh(true);
+    (void)m->render_mesh(false);
+    /* Several moves read by the flat cache only; then the smooth cache catches up in one go. */
+    for (int k = 0; k < 5; k++) {
+      m->positions[(size_t)(17 + 9 * k)].y += 0.2f;
+      m->touch();
+      (void)m->render_mesh(true);
+    }
+    CHECK(draw_same(m->render_mesh(false), rebuilt(*m, false)));
+    CHECK(draw_same(m->render_mesh(true), rebuilt(*m, true)));
+    /* A vertex of a quad pulled across its diagonal and back to exactly where it was. */
+    const Vec3 home = m->positions[30];
+    m->positions[30] = home + Vec3(0.3f, 0.0f, 0.3f);
+    m->touch();
+    CHECK(draw_same(m->render_mesh(true), rebuilt(*m, true)));
+    m->positions[30] = home;
+    m->touch();
+    CHECK(draw_same(m->render_mesh(true), rebuilt(*m, true)));
+    /* Smoothing by angle: a fold that splits a fan refuses in place (a full build), then moves go back in place. */
+    m->smooth_angle = 30.0f;
+    m->touch();
+    (void)m->render_mesh(false);
+    const MeshCounts c0 = mesh_counts();
+    m->positions[40].y += 1.5f;  // a sharp spike: the fans around it split
+    m->touch();
+    CHECK(draw_same(m->render_mesh(false), rebuilt(*m, false)));
+    CHECK((mesh_counts() - c0).full_builds >= 1);
+    m->positions[90].y += 0.01f;
+    m->touch();
+    CHECK(draw_same(m->render_mesh(false), rebuilt(*m, false)));
+  });
 }

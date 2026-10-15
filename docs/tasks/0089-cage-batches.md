@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/80
 
 ## Goal
 The Edit Mode overlay of a 50k-face mesh took about 7.5 ms a frame on the laptop setting, and half of it was the
