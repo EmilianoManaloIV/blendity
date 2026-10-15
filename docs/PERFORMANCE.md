@@ -62,6 +62,19 @@ any drag the overlap check and the lighting key wait. The Move-gizmo drag on 50k
 the pass), G **42 ms**. What is left: the Scene view 24 ms (the 50k mesh's raster and shading, its Edit Mode overlay
 7.5 ms), the Game view 16.5 ms, the render meshes moved in place 9 ms, the shadow map 6.9 ms.
 
+**Task 0088**: a material that is the same everywhere but for the normal is evaluated once per triangle (the deferred
+shader's setup), each pixel taking it with its own normal - bit for bit the same picture. The Scene view's shading on a
+moved-object frame 5.12 → 4.53 ms, the Game view's 5.53 → 5.08. And the shadow map keys on a caster's shape (the same
+for an edited mesh's flat and smooth caches), so a drag renders it once a frame, not twice. Laptop setting, ms a frame:
+
+| Frame | Before the pass | After 0088 |
+|---|---|---|
+| moving an object | 19.53 | 17.23 |
+| editing a material colour | 17.96 | 16.49 |
+| playing | 16.97 | 15.53 |
+| Edit Mode: Move-gizmo drag, 50k faces | 97.75 | 38.63 |
+| Edit Mode: G, 50k faces | 100.20 | 37.01 |
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris

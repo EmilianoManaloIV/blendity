@@ -29368,4 +29368,161 @@ static void round81_tests() {
     m->touch();
     CHECK(m->vertex_faces().faces.size() == m->corner_count());
   });
+  /* ---------------------------------------------------------------- round 114: shading and shadows (task 0088) */
+  test("shading: a uniform material evaluated once per triangle is bit for bit what evaluating it per pixel gives", [] {
+    uint32_t seed = 114;
+    auto rnd = [&] { return (float)((seed = seed * 1664525u + 1013904223u) >> 8) / 16777216.0f; };
+    int checked = 0, differ = 0;
+    for (int k = 0; k < 200; k++) {
+      Material m;
+      m.base_color = {rnd(), rnd(), rnd()};
+      m.metallic = rnd() * 1.4f - 0.2f;  // (out of range too: both clamp)
+      m.roughness = rnd() * 1.4f - 0.2f;
+      m.specular = rnd();
+      m.alpha = rnd();
+      m.unlit = k % 7 == 0;
+      m.emission = {rnd(), rnd(), rnd()};
+      m.emission_strength = rnd() * 3.0f;
+      m.shading_model = k % 5 == 0 ? 1 : 0;
+      CHECK(material_uniform(m, m.textures()));
+      const SurfaceSample once = evaluate_material(m, m.textures(), SurfacePoint{});
+      SurfacePoint sp;
+      sp.position = {rnd() * 10, rnd() * 10, rnd() * 10};
+      sp.normal = normalize(Vec3(rnd() - 0.5f, rnd() - 0.5f, rnd() - 0.5f));
+      sp.local_position = {rnd(), rnd(), rnd()};
+      sp.local_normal = sp.normal;
+      sp.uv = {rnd() * 4, rnd() * 4};
+      sp.duvdx = {rnd() * 0.01f, 0};
+      SurfaceSample per = evaluate_material(m, m.textures(), sp);
+      SurfaceSample fast = once;
+      fast.normal = sp.normal;
+      checked++;
+      differ += std::memcmp(&fast.albedo, &per.albedo, sizeof(Vec3)) || std::memcmp(&fast.normal, &per.normal, sizeof(Vec3)) ||
+                std::memcmp(&fast.emission, &per.emission, sizeof(Vec3)) || fast.metallic != per.metallic || fast.roughness != per.roughness ||
+                fast.specular != per.specular || fast.alpha != per.alpha || fast.unlit != per.unlit || fast.toon != per.toon;
+    }
+    CHECK(checked == 200 && differ == 0);
+    /* Not uniform: a procedural, an axis material. */
+    Material p;
+    p.procedural = (int)Procedural::Checker;
+    CHECK(!material_uniform(p, p.textures()));
+    Material a;
+    a.axis_mode = 1;
+    CHECK(!material_uniform(a, a.textures()));
+  });
+
+  test("shading: a deferred view with uniform materials once per triangle draws exactly what per pixel draws (sun, shadows, point and spot lights, flat and smooth)", [] {
+    std::vector<MeshPtr> keep;
+    std::vector<std::vector<MaterialPtr>> mats;
+    std::vector<DrawItem> items;
+    mats.reserve(8);
+    auto add = [&](MeshPtr m, Mat4 model, uint32_t id, MaterialPtr mat) {
+      keep.push_back(m);
+      mats.push_back({mat});
+      DrawItem it;
+      it.mesh = &m->render_mesh();
+      it.model = model;
+      it.id = id;
+      it.materials = &mats.back();
+      items.push_back(it);
+    };
+    MeshPtr smooth = primitives::uv_sphere(1.0f, 32, 24);
+    smooth->smooth = true;
+    auto red = make_material("R", Vec3(0.8f, 0.2f, 0.1f));
+    red->roughness = 0.3f;
+    red->metallic = 0.4f;
+    auto glow = make_material("G", Vec3(0.2f, 0.7f, 0.3f));
+    glow->emission = Vec3(1, 1, 0);
+    glow->emission_strength = 0.5f;
+    auto checker = make_material("C", Vec3(0.9f));
+    checker->procedural = (int)Procedural::Checker;
+    add(smooth, Mat4::translate({-1.5f, 0, 6}), 1, red);
+    add(primitives::cube(1.5f), Mat4::translate({1.5f, 0, 6}), 2, glow);
+    add(primitives::plane(20.0f), Mat4::translate({0, -1.2f, 6}), 3, checker);
+    const Mat4 v = Mat4::look_at({0, 1.5f, 0}, {0, 0, 6}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(60 * kDeg2Rad, 320 / 200.0f, 0.1f, 100);
+    LightingEnv env;
+    RenderLight sun, pt, spot;
+    sun.direction = normalize(Vec3(-0.3f, -1, 0.4f));
+    pt.type = RenderLight::Point;
+    pt.position = {0, 2, 5};
+    pt.intensity = 3.0f;
+    pt.range = 8.0f;
+    spot.type = RenderLight::Spot;
+    spot.position = {2, 3, 4};
+    spot.direction = normalize(Vec3(-0.3f, -1, 0.5f));
+    spot.intensity = 4.0f;
+    spot.range = 10.0f;
+    env.lights = {sun, pt, spot};
+    env.camera_pos = {0, 1.5f, 0};
+    ShadowMap sm;
+    AABB b;
+    for (const DrawItem &it : items) b.add(it.mesh->bounds.transformed(it.model));
+    render_shadow_map(sm, items, sun.direction, b, 1024);
+    env.shadow = &sm;
+    env.shadow_light = 0;
+    Image img[2];
+    RenderTarget rt[2];
+    for (int k = 0; k < 2; k++) {
+      img[k].resize(320, 200);
+      rt[k].attach(img[k], {0, 0, 320, 200});
+      Renderer3D r;
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      opt.uniform_shading = k == 0;
+      r.begin(&rt[k], v, p, env, opt);
+      r.clear(0xFF000000);
+      for (auto &it : items) r.add(it);
+      r.flush();
+    }
+    size_t lit = 0;
+    for (uint32_t px : img[0].pixels) lit += (px & 0xFFFFFF) != 0;
+    std::printf("    %zu of %zu pixels drawn\n", lit, img[0].pixels.size());
+    CHECK(lit > 20000);
+    CHECK(img[0].pixels == img[1].pixels);
+  });
+
+  test("shadows: an Edit Mode mesh's flat and smooth render caches share a shape; a copy or an edit makes a new one", [] {
+    MeshPtr m = primitives::uv_sphere(1.0f, 16, 12);
+    m->smooth = true;
+    const uint64_t flat = m->render_mesh(true).shape, shaded = m->render_mesh(false).shape;
+    CHECK(flat != 0 && flat == shaded);
+    CHECK(m->render_mesh(true).serial != m->render_mesh(false).serial);  // (two caches: different pictures)
+    m->positions[0].y += 0.1f;
+    m->touch();
+    CHECK(m->render_mesh(true).shape != flat && m->render_mesh(true).shape == m->render_mesh(false).shape);
+    Mesh copy = *m;
+    copy.forget_caches();
+    CHECK(copy.render_mesh(true).shape != m->render_mesh(true).shape);  // (a copy is a mesh of its own)
+  });
+
+  test("shadows: an Edit Mode drag renders the sun's shadow map once a frame, not once for each view", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->get<MeshFilter>()->mesh->smooth = true;  // (a flat Edit Mode cache and a smooth render cache)
+    cube->get<MeshFilter>()->mesh->touch();
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    const Vec3 wp = cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]);
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(wp, x, y));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+    const FrameProfile p0 = ed.frame_profile_totals();
+    for (int k = 1; k <= 6; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + 4 * k, y)});
+    const FrameProfile p1 = ed.frame_profile_totals();
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 79, y)});
+    const uint64_t frames = p1.frames - p0.frames, shadows = p1.shadow_renders - p0.shadow_renders, views = p1.view_renders - p0.view_renders;
+    std::printf("    %llu drag frames: %llu view renders, %llu shadow renders\n", (unsigned long long)frames, (unsigned long long)views,
+                (unsigned long long)shadows);
+    CHECK(views > frames);       // (more than one view drew the moving mesh)
+    CHECK(shadows <= frames);    // (but one map served them)
+  });
 }

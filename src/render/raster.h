@@ -38,6 +38,10 @@ struct RenderMesh {
   /* Different for every build (never reused, unlike a pointer + version after a free), so caches of
    * what was drawn from it (shadow maps, voxel grids) can key on it. 0 = not cacheable (built by hand). */
   uint64_t serial = 0;
+  /* The same for every render cache of one mesh at one version (task 0088): the triangles and their positions,
+   * whatever the normals or UVs - the flat cache Edit Mode shades and the smooth one renders use have one shape. What
+   * depth alone depends on (a shadow map) keys on it. 0 = not known (built by hand): use `serial`. */
+  uint64_t shape = 0;
   /* The serial of the full build this one came from: it stays while the positions move in place (a deforming
    * modifier, ADR 0022; an Edit Mode drag, ADR 0034), when `serial` moves. Same topology, split pattern and triangle
    * order - but not the same `indices`: quads and n-gons are split again from the new positions. */
@@ -184,6 +188,9 @@ struct RasterOptions {
    * has it) and a no-clipping fast path. Off = the general path only (tests
    * check both give the same image). */
   bool fast_setup = true;
+  /* A material the same everywhere but for the normal is evaluated once per triangle, not per pixel (task 0088).
+   * Off = per pixel (tests check both give the same image). */
+  bool uniform_shading = true;
   int tile_size = 64;
   ShadeMode shade = ShadeMode::Gouraud;
   /* Camera filters' raster stage (ADR 0007), all off by default:

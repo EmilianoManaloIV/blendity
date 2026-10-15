@@ -1246,6 +1246,10 @@ void Renderer3D::shade_deferred() {
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
+    /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
+     * with its own normal - what evaluate_material would give it - and skips the texture-space work nothing reads. */
+    bool uniform = false;
+    SurfaceSample surface;
   };
   auto setup_tri = [&](TriSetup &T, uint32_t ref) {
     T.ref = ref;
@@ -1303,6 +1307,8 @@ void Renderer3D::shade_deferred() {
       if (mp) T.mat = mp.get();
     }
     T.tex = &T.mat->textures();  // (resolved before the parallel stages: a cached reference)
+    T.uniform = opt_.uniform_shading && material_uniform(*T.mat, *T.tex);
+    if (T.uniform) T.surface = evaluate_material(*T.mat, *T.tex, SurfacePoint{});
     T.live = false;
     for (int k = 0; k < 5; k++) T.live = T.live || T.tex->live[k] != nullptr;
     for (int a = 0; a < 4; a++)
@@ -1438,13 +1444,15 @@ void Renderer3D::shade_deferred() {
         auto ratio = [](Vec3 n, float s) { return n * (1.0f / (std::fabs(s) < 1e-20f ? 1e-20f : s)); };
         Vec3 B = ratio(N, S);
         SurfacePoint sp;
-        sp.local_position = T.p[0] * B.x + T.p[1] * B.y + T.p[2] * B.z;
-        sp.local_normal = normalize(T.n[0] * B.x + T.n[1] * B.y + T.n[2] * B.z);
-        sp.local_bounds = T.bounds;
+        if (!T.uniform) {  // (texture space: only a material that varies over the surface reads it)
+          sp.local_position = T.p[0] * B.x + T.p[1] * B.y + T.p[2] * B.z;
+          sp.local_normal = normalize(T.n[0] * B.x + T.n[1] * B.y + T.n[2] * B.z);
+          sp.local_bounds = T.bounds;
+        }
         sp.position = T.wp[0] * B.x + T.wp[1] * B.y + T.wp[2] * B.z;
         sp.normal = normalize(T.wn[0] * B.x + T.wn[1] * B.y + T.wn[2] * B.z);
         sp.geo_normal = T.geo_normal;
-        if (T.has_uv) {
+        if (T.has_uv && !T.uniform) {
           auto uv_at = [&](Vec3 b) { return T.uv[0] * b.x + T.uv[1] * b.y + T.uv[2] * b.z; };
           if (opt_.affine_uv) {
             /* Linear across the screen, as the PS1 drew textures: they swim and bend on
@@ -1463,7 +1471,7 @@ void Renderer3D::shade_deferred() {
         if (opt_.tex.active()) sp.tex = &opt_.tex;
         /* Live procedural textures (task 0031): the object-space size of this pixel, so a texture whose texel
          * is larger is evaluated here instead of magnified. Not for the reflective shadow map. */
-        if (!rsm_out_ && T.live) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
+        if (!rsm_out_ && T.live && !T.uniform) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
           sp.live_textures = true;
           auto lp = [&](Vec3 b) { return T.p[0] * b.x + T.p[1] * b.y + T.p[2] * b.z; };
           auto wp = [&](Vec3 b) { return T.wp[0] * b.x + T.wp[1] * b.y + T.wp[2] * b.z; };
@@ -1476,7 +1484,7 @@ void Renderer3D::shade_deferred() {
           sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
           sp.has_lightmap = true;
         }
-        if (T.has_tangent) {
+        if (T.has_tangent && !T.uniform) {  // (a normal map's: a uniform material has none)
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
         }
@@ -1538,7 +1546,8 @@ void Renderer3D::shade_deferred() {
             sp.probe = pq.irr;
           }
         }
-        SurfaceSample s = evaluate_material(*T.mat, *T.tex, sp);
+        SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
+        if (T.uniform) s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
         if (rsm_out_) {
           /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
           const size_t k = (size_t)y * W + x;

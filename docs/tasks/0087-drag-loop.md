@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/78
 
 ## Goal
 After task 0086 a Move-gizmo drag on 50k faces still spent 25 ms a frame in its writes (task 0083's measure): ring

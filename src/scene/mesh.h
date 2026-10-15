@@ -126,6 +126,18 @@ struct Mesh {
   /* Drops the render and edge caches: the next render_mesh() builds from scratch (tests compare the two). */
   void forget_caches() const;
   uint64_t version = 1;
+  /* An id of its own: a copy gets a new one (task 0088: a render cache's `shape` is this mesh at this version). */
+  struct Uid {
+    uint64_t v = next();
+    Uid() = default;
+    Uid(const Uid &) noexcept : v(next()) {}
+    Uid &operator=(const Uid &) noexcept {
+      v = next();
+      return *this;
+    }
+    static uint64_t next() noexcept;
+  };
+  Uid uid;
   /* Bumped by settle(): the same mesh, drawn a little differently (the views' scene hash mixes it in). */
   mutable uint64_t looks = 0;
   /* Bumped instead of `version` when only the positions changed (a deforming modifier, ADR 0022): the

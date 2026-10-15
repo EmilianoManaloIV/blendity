@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 114): uniform materials shaded once per triangle; one shadow map for an edited mesh (task 0088)
+
+**Asked:** the performance pass ("Keep looking for performance gains throughout the project", overnight).
+
+**Changed**
+- **Plain materials** (no textures, procedural or axis mapping - most of a blocked-out scene) are worked out once per
+  triangle instead of once per pixel, with the same picture to the bit. On the laptop setting: moving an object
+  19.5 -> 17.2 ms a frame, editing a material colour 17.9 -> 16.5, playing 16.6 -> 15.5. The Profiler's renderer
+  options can switch it off to compare.
+- **An Edit Mode drag renders the sun's shadow once a frame**, not once for the Scene view and again for the Game
+  view (the edited mesh's two render caches have the same shape): a gizmo drag on 50k faces 42.5 -> 38.6 ms.
+
+**Checked**
+- New tests (round 114): 200 random plain materials evaluated once equal per-pixel evaluation to the bit; a deferred
+  view with a sun and its shadows, point and spot lights, flat and smooth meshes, emission and a procedural draws
+  the same pixels either way; an edited mesh's two caches share a shape and a copy or an edit makes a new one; a
+  drag renders the shadow map once a frame.
+- Unit checks: Windows 10,301, 0 failed (702 tests); the whole suite in render-cache verify mode: 10,302,
+  0 failed, 0 stale pictures. Linux with libraries: 10,209, 0 failed. Sanitizer build: 10,115, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; tidied: a live texture's footprint isn't worked out for a plain material's
+pixels, a vertex-snapped copy of a render mesh drops its shape, the option's cache-key bit no longer overlaps the shade
+mode's, a mesh id's copy is `noexcept` (moves stay moves).
+
 ## 2026-10-15 (round 113): the Edit Mode drag loop stops redoing whole-mesh work (task 0087)
 
 **Asked:** the performance pass (plan item 0087).

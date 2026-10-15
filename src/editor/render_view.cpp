@@ -393,7 +393,10 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     uint64_t ck = 1469598103934665603ull ^ it.id;
     mixer(ck, it.model.m, sizeof(float) * 16);
     motion_keys.push_back(ck);  // what makes it "moving": its placement
-    mixer(ck, &it.mesh->serial, 8);
+    /* Its shape (task 0088): the Scene view's flat Edit Mode cache and the Game view's smooth one share it, so the two
+     * views share one map instead of each rendering its own every frame of a drag. */
+    const uint64_t shape = it.mesh->shape ? it.mesh->shape : it.mesh->serial;
+    mixer(ck, &shape, 8);
     if (it.materials)
       for (const MaterialPtr &m : *it.materials) {
         const uint64_t mv[3] = {(uint64_t)(uintptr_t)m.get(), m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
@@ -858,6 +861,7 @@ static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p,
     }
     auto m = std::make_shared<RenderMesh>(*it.mesh);
     m->serial = 0;
+    m->shape = 0;  // (its positions are snapped: not the mesh's shape any more)
     for (Vec3 &pos : m->positions) {
       const Vec4 c = mvp * Vec4(pos, 1.0f);
       if (!(c.w > 1e-6f)) continue;  // behind the camera: as it is
@@ -1589,7 +1593,7 @@ uint64_t Editor::raster_opt_key() const {
   std::memcpy(&vs, &view_scale_, 4);  // Viewport Resolution Scale: a different picture in every view it applies to
   uint64_t k = (uint64_t)o.multithreaded | (uint64_t)o.backface_culling << 1 | (uint64_t)o.frustum_culling << 2 |
                (uint64_t)o.span_rows << 3 | (uint64_t)o.fast_setup << 4 | (uint64_t)o.affine_uv << 5 | (uint64_t)o.screen_door << 6 |
-               (uint64_t)o.shade << 8 | (uint64_t)(uint32_t)o.tile_size << 16;
+               (uint64_t)o.shade << 8 | (uint64_t)o.uniform_shading << 7 | (uint64_t)(uint32_t)o.tile_size << 16;
   uint32_t snap;
   std::memcpy(&snap, &o.vertex_snap, 4);
   k ^= (uint64_t)snap << 32;
