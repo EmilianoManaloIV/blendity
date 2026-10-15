@@ -558,6 +558,7 @@ class Editor {
   float last_op_amount_for_test() const { return last_op_.amount; }
   std::string last_op_name_for_test() const { return last_op_.op; }
   bool last_op_valid_for_test() { return last_op_valid(); }
+  void planes_always_for_test(bool on) { planes_always_ = on; }
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
@@ -2056,7 +2057,10 @@ class Editor {
   /* Viewport Resolution Scale (task 0050): the views' 3D drawn this much smaller and scaled up (1 = full size). */
   FilterTarget scene_vs_, game_vs_, preview_vs_;
   void render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
-                     const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false);
+                     const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false,
+                     bool planes = true);  // planes: depth and ids at full size too (for picking)
+  bool planes_wanted_ = true;  // (render_scaled's `planes` while it draws: a filter stack's upscale follows it too)
+  bool planes_always_ = false;  // tests: every view copies its planes, as before task 0092
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution
   /* A choice from a component's or modifier's menu in the Inspector. Popup menus run at the end
    * of the frame, after draw_inspector has returned, so they record the choice here and the

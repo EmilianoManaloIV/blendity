@@ -29755,4 +29755,33 @@ static void round81_tests() {
       CHECK(worst < 1e-4);
     }
   });
+
+  /* ---------------------------------------------------------------- round 118: views nobody picks in keep no full-size planes (task 0092) */
+  test("views: the Game view at a reduced resolution looks the same without its full-size depth and ids, with a camera filter too", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("quality low");  // (67 %: the views are drawn small and scaled up)
+    ed.command("select Main Camera");  // (the Camera Preview is up too)
+    const Recti game = ed.window_rect_for_test(WindowKind::Game);
+    CHECK(game.w > 0);
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam != nullptr);
+    if (!cam) return;
+    for (int filtered = 0; filtered < 2; filtered++) {
+      if (filtered) cf_add_retro(cam);  // (a filter stack with its own resolution: render_camera's own upscale)
+      std::vector<uint32_t> shot[2];
+      for (int k = 0; k < 2; k++) {
+        ed.planes_always_for_test(k == 0);
+        GameObject *cube = ed.scene().find_by_name("Cube");
+        if (cube) cube->set_local_position({0.05f * (k + 1), 0.5f, 0.0f});  // (a change: both views draw again)
+        r34_steps(ed, 2);
+        if (cube) cube->set_local_position({0.0f, 0.5f, 0.0f});
+        r34_steps(ed, 2);
+        shot[k] = r34_crop(ed, game);
+      }
+      std::printf("    %s: %s\n", filtered ? "with a retro filter" : "plain", shot[0] == shot[1] ? "the same pixels" : "DIFFERENT");
+      CHECK(shot[0] == shot[1]);
+    }
+    ed.planes_always_for_test(false);
+  });
 }

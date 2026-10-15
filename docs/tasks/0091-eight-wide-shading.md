@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** ADR 0035
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/82
 
 ## Goal
 The plan's 8-wide deferred shader: the per-pixel lighting of plain materials, the largest cost left in a view.

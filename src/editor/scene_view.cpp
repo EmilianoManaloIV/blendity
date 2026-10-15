@@ -3390,7 +3390,7 @@ void Editor::draw_game_view(const Recti &r) {
     else {
       render_scaled(game_r3d_, game_rt_, game_vs_, v, p, [&](RenderTarget &t) {
         render_camera(game_r3d_, t, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain
-      }, owner);
+      }, owner, false, false);  // (nothing picks in the Game view: no full-size depth and ids)
       game_stats_ = game_r3d_.stats();
       prof_.view_renders++;
       if (hit) view_cache_verify(game_cache_, img, "Game view");

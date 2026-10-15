@@ -90,6 +90,10 @@ view's shading 4.45 / 3.86 ms (75,728 pixels lit 8 at a time). After it: moving 
 colour 15.82, playing 14.88, the gizmo drag 32.90. Honest negative: the shadow lookup and each pixel's end
 (reflections, ambient: an `exp2` each) stay one pixel at a time, so the gain is a third of the lights' share, not more.
 
+**Task 0092**: below full resolution the Game view and the Camera Preview no longer scale their depth and ids up to
+full size (only the Scene view is picked in). Honest result: a moved-object frame 16.16 → 16.09 ms; the colour's
+upscale is most of the cost and stays.
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris

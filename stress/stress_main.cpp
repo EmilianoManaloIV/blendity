@@ -1069,6 +1069,26 @@ static void test_editor_render(Report &rep, const Options &o) {
                        off, on, s_off.ms_shade, s_on.ms_shade, s_on.pixels_simd));
   }
   {
+    /* Task 0092: the same moves with the Game view and Camera Preview copying their full-size depth and ids again (as
+     * before) and not, twice in turn so neither goes first only. They matter only below full resolution. */
+    auto moves = [&](int base) {
+      return time_ms([&] {
+        static int k = 0;
+        if (mover) mover->set_local_position({0.1f * (base + (k++ % 9)), 1.0f, 0.0f});
+        ed.step_frame_headless();
+      }, n);
+    };
+    double old_ms = 0, new_ms = 0;
+    for (int r = 0; r < 2; r++) {
+      ed.planes_always_for_test(true);
+      old_ms += moves(80) / 2;
+      ed.planes_always_for_test(false);
+      new_ms += moves(100) / 2;
+    }
+    rep.note(strprintf("Moving an object with the Game view's full-size depth and ids copied / not (task 0092): %.2f / %.2f ms a frame",
+                       old_ms, new_ms));
+  }
+  {
     /* Where a moved frame's raster time goes, view by view (task 0050 profiled the minimum machine with this). */
     const RasterStats &s = ed.scene_stats_for_test(), &g = ed.game_stats_for_test();
     rep.note(strprintf("Moving an object, the last frame's rasterizer: Scene view %zu of %zu triangles, setup %.2f ms, raster %.2f ms, shade %.2f ms "

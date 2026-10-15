@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 118): views nobody picks in keep no full-size depth and ids (task 0092)
+
+**Asked:** the performance pass ("carry on the next tasks").
+
+**Changed**
+- **At a reduced viewport resolution** (Low draws the views at 67 % and scales them up), the Game view and the Camera
+  Preview no longer scale their depth and object ids up to full size as well - only the Scene view is clicked in, so
+  only it needs them. The same pictures.
+  Small: on the laptop setting a moved-object frame went 16.16 -> 16.09 ms (copied / not, in turn in one run);
+  most of a scaled view's cost is its colour, which stays.
+
+**Checked**
+- New test (round 118): at Low, with the Camera Preview up, the Game view shows the same pixels with the planes copied
+  and not, without and with a retro filter (a camera's filter stack scales up on its own path).
+- Unit checks: Windows 10,323, 0 failed (706 tests); the whole suite in render-cache verify mode: 10,324,
+  0 failed, 0 stale pictures. Linux with libraries: 10,231, 0 failed. Sanitizer build: 10,137, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; tidied: a camera's filter stack follows the view's choice (its upscale had
+its own copy of the planes), and the test has a hook that puts the old copy back to compare.
+
 ## 2026-10-15 (round 117): plain-material pixels lit 8 at a time (task 0091, ADR 0035)
 
 **Asked:** the performance pass ("carry on the next tasks"; checks overlapping the next task).

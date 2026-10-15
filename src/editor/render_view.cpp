@@ -643,9 +643,10 @@ template<class T> static void upscale_plane(const std::vector<T> &src, int sw, i
 
 /* Viewport Resolution Scale (task 0050): on a 4-core machine the software rasterizer's cost is mostly per pixel, so the
  * views can draw their 3D at 50-100 % and scale it up. Depth and ids follow at full size (nearest), so picking, the
- * tools' visibility tests and the overlays (drawn after, at full size) work as before. */
+ * tools' visibility tests and the overlays (drawn after, at full size) work as before - unless `planes` is false: a
+ * view nobody picks in (the Game view, the Camera Preview) keeps only the colour (task 0092). */
 void Editor::render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
-                           const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner, bool fill) {
+                           const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner, bool fill, bool planes) {
   const float s = finite_bits(view_scale_) ? std::max(0.25f, std::min(1.0f, view_scale_)) : 1.0f;
   const int iw = std::max(1, (int)std::lround(rt.width * s)), ih = std::max(1, (int)std::lround(rt.height * s));
   bool own_size = false;  // a filter stack with its own internal resolution (a retro console's): its pixels stay crisp
@@ -658,16 +659,24 @@ void Editor::render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, 
       own_size = fw != rt.width || fh != rt.height;
     }
   }
+  const bool was = planes_wanted_;
+  planes_wanted_ = planes || planes_always_;
   if (own_size || s >= 0.999f || (iw >= rt.width && ih >= rt.height) || rt.width < 8 || rt.height < 8) {
     draw(rt);
+    planes_wanted_ = was;
     return;
   }
   if (vs.img.width != iw || vs.img.height != ih) vs.img.resize(iw, ih);
   vs.rt.attach(vs.img, {0, 0, iw, ih});
   draw(vs.rt);
+  planes_wanted_ = was;
   upscale_bilinear(vs.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, {0, 0, rt.width, rt.height});
-  upscale_plane(vs.rt.depth, iw, ih, rt.depth, rt.width, {0, 0, rt.width, rt.height});
-  upscale_plane(vs.rt.ids, iw, ih, rt.ids, rt.width, {0, 0, rt.width, rt.height});
+  /* Depth and ids at full size are for picking and the tools (the Scene view); a view nobody picks in (the Game view,
+   * the Camera Preview) skips them (task 0092). */
+  if (planes) {
+    upscale_plane(vs.rt.depth, iw, ih, rt.depth, rt.width, {0, 0, rt.width, rt.height});
+    upscale_plane(vs.rt.ids, iw, ih, rt.ids, rt.width, {0, 0, rt.width, rt.height});
+  }
   r3d.rebind(&rt, v, p);
 }
 
@@ -755,12 +764,14 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, 
   for (const FilterPass &pass : fs.passes) pass(*t, &frame);
   if (!scaled) return;
   /* Scale up into the view; its depth and ids follow, so picking and overlays still work. */
-  if (boxed) {
+  if (boxed)
     for (int y = 0; y < rt.height; y++) std::fill(rt.color + (size_t)y * rt.stride, rt.color + (size_t)y * rt.stride + rt.width, 0xFF000000u);
+  upscale_nearest(ft.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, dst);
+  if (!planes_wanted_) return r3d.rebind(&rt, v, p);  // (a view nobody picks in: task 0092)
+  if (boxed) {
     std::fill(rt.depth.begin(), rt.depth.end(), 1.0f);
     std::fill(rt.ids.begin(), rt.ids.end(), 0u);
   }
-  upscale_nearest(ft.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, dst);
   upscale_plane(ft.rt.depth, iw, ih, rt.depth, rt.width, dst);
   upscale_plane(ft.rt.ids, iw, ih, rt.ids, rt.width, dst);
   r3d.rebind(&rt, v, p);  // overlays (grid, gizmos) draw on the full-size view; the stats stay
@@ -1722,7 +1733,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
       render_scaled(cam_preview_r3d_, cam_preview_rt_, preview_vs_, v, p, [&](RenderTarget &t) {
         render_camera(cam_preview_r3d_, t, preview_ft_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
-      }, g);
+      }, g, false, false);  // (nothing picks in the Camera Preview: no full-size depth and ids)
       prof_.view_renders++;
       if (hit && before != cam_preview_img_.pixels) {
         prof_.cache_mismatches++;
