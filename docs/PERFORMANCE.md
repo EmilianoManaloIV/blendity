@@ -52,6 +52,10 @@ and writes an ids plane (0.68 → 0.48 ms a moved frame), and a view checking it
 column pyramid to do it. Honest negative: the Realtime GI drag in Automatic mode stays at 71 ms; that is the
 automatic lighting update itself (its Camera Preview and its UI-side update), not the grid.
 
+**Task 0086** (ADR 0034): the render mesh follows a positions-only edit in place. The Move-gizmo drag on 50k faces:
+98 → 69 ms a frame (two render meshes moved in place, 10.3 ms, instead of built, 38.6 ms; no edge table); G 100 → 67
+ms. What is left of the drag: its writes, 25.8 ms (ring repair, task 0087), the shadow map 7.0 ms, the overlay 7.4 ms.
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris

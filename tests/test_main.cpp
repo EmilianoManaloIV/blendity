@@ -29065,4 +29065,190 @@ static void round81_tests() {
     CHECK(hit > 1000);  // (the full target did record what it drew)
     CHECK(shadow.id_at(128, 128) == 0);
   });
+  /* ---------------------------------------------------------------- round 112: the render mesh follows a drag in place (task 0086) */
+  /* Whether two render meshes draw the same: the same triangles from the same faces and corners, and bit for bit the
+   * same position, normal and UV at every triangle corner (an in-place cache can keep two vertices a rebuild would
+   * merge: it draws the same, so vertices aren't compared by number). */
+  auto r112_draw_same = [](const RenderMesh &a, const RenderMesh &b, std::string *why) {
+    auto fail = [&](const std::string &w) {
+      if (why) *why = w;
+      return false;
+    };
+    if (a.indices.size() != b.indices.size()) return fail(strprintf("%zu vs %zu triangle corners", a.indices.size(), b.indices.size()));
+    if (a.tri_face != b.tri_face || a.tri_material != b.tri_material) return fail("faces or materials of the triangles differ");
+    if (a.tri_corner != b.tri_corner) return fail("the triangulation differs");
+    const bool uv = !a.uvs.empty();
+    if (uv != !b.uvs.empty()) return fail("one has UVs");
+    for (size_t k = 0; k < a.indices.size(); k++) {
+      const uint32_t i = a.indices[k], j = b.indices[k];
+      if (std::memcmp(&a.positions[i], &b.positions[j], sizeof(Vec3)) != 0) return fail(strprintf("position at triangle corner %zu", k));
+      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0) return fail(strprintf("normal at triangle corner %zu", k));
+      if (uv && std::memcmp(&a.uvs[i], &b.uvs[j], sizeof(Vec2)) != 0) return fail(strprintf("UV at triangle corner %zu", k));
+    }
+    return true;
+  };
+
+  test("Edit Mode: moving vertices updates the shaded mesh in place exactly as a rebuild would - flat and smooth, sharp edges, seams, n-gons, concave quads", [=] {
+    auto meshes = r63_meshes();
+    {
+      /* A dart (concave quad) and an L-shaped n-gon, next to a square, UVs on. */
+      MeshPtr m = std::make_shared<Mesh>();
+      for (Vec3 p : {Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(1, 0, 0.4f), Vec3(1, 0, 2), Vec3(3, 0, 0), Vec3(5, 0, 0), Vec3(5, 0, 1), Vec3(4, 0, 1),
+                     Vec3(4, 0, 3), Vec3(3, 0, 3)})
+        m->add_vert(p);
+      const uint32_t dart[] = {0, 1, 3, 2}, ell[] = {4, 5, 6, 7, 8, 9};
+      const Vec2 uv4[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}}, uv6[] = {{0, 0}, {1, 0}, {1, .3f}, {.5f, .3f}, {.5f, 1}, {0, 1}};
+      m->add_face(dart, 4, uv4);
+      m->add_face(ell, 6, uv6);
+      meshes.push_back({"dart and n-gon", m});
+    }
+    uint32_t seed = 112;  // (a small LCG: the same drags on every system)
+    auto rng = [&] { return (seed = seed * 1664525u + 1013904223u) >> 8; };
+    auto d = [&](decltype(rng) &r) { return (float)(r() % 3001) / 10000.0f - 0.15f; };
+    int cases = 0, in_place = 0, mismatches = 0;
+    for (auto &[name, base] : meshes) {
+      for (bool flat : {false, true}) {
+        MeshPtr m = std::make_shared<Mesh>(*base);
+        (void)m->render_mesh(flat);  // (the build the drag starts from)
+        for (int step = 0; step < 4; step++) {
+          /* A drag: a handful of vertices move, as a selection does. */
+          for (int k = 0; k < 6; k++) {
+            Vec3 &p = m->positions[rng() % m->positions.size()];
+            const float dx = d(rng), dy = d(rng), dz = d(rng);  // (in this order on every compiler)
+            p = p + Vec3(dx, dy, dz);
+          }
+          m->touch();
+          const MeshCounts c0 = mesh_counts();
+          const RenderMesh &got = m->render_mesh(flat);
+          in_place += (mesh_counts() - c0).in_place > 0;
+          Mesh ref = *m;
+          ref.forget_caches();
+          std::string why;
+          cases++;
+          if (!r112_draw_same(got, ref.render_mesh(flat), &why)) {
+            mismatches++;
+            std::printf("    %s, %s, step %d: %s\n", name.c_str(), flat ? "flat" : "as shaded", step, why.c_str());
+          }
+        }
+      }
+    }
+    std::printf("    %d drag steps on %zu meshes: %d followed in place, %d drew differently from a rebuild\n", cases, meshes.size(), in_place, mismatches);
+    CHECK(mismatches == 0);
+    CHECK(in_place >= cases * 3 / 4);  // (a step whose smoothing splits change rebuilds instead)
+  });
+
+  test("Edit Mode: a quad whose shorter diagonal changes during a drag is split the way a rebuild splits it", [=] {
+    Mesh m;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}) m.add_vert(p);
+    m.add_face({0, 1, 2, 3});
+    const std::vector<uint32_t> before = m.render_mesh().tri_corner;
+    m.positions[2] = Vec3(3, 0, 3);  // 0-2 is the long diagonal now
+    m.touch();
+    const std::vector<uint32_t> after = m.render_mesh().tri_corner;
+    Mesh ref = m;
+    ref.forget_caches();
+    std::string why;
+    CHECK(after != before);
+    CHECK(r112_draw_same(m.render_mesh(), ref.render_mesh(), &why));
+  });
+
+  test("Edit Mode: an extrude (new faces) builds the render mesh again; moving vertices keeps the edge table", [] {
+    MeshPtr m = primitives::cube(1.0f);
+    (void)m->render_mesh();
+    (void)m->edge_cache();
+    MeshCounts c0 = mesh_counts();
+    m->positions[0].y += 0.1f;
+    m->touch();
+    (void)m->render_mesh();
+    (void)m->edge_cache();
+    MeshCounts d = mesh_counts() - c0;
+    CHECK(d.in_place == 1 && d.full_builds == 0 && d.edge_builds == 0);
+    c0 = mesh_counts();
+    const uint32_t top[] = {2, 3, 7, 6};  // (any quad: a new face over existing vertices changes the topology)
+    m->add_face(top, 4);
+    m->touch();
+    (void)m->render_mesh();
+    (void)m->edge_cache();
+    d = mesh_counts() - c0;
+    CHECK(d.full_builds == 1 && d.in_place == 0 && d.edge_builds == 1);
+  });
+
+  test("Edit Mode: tangents follow a drag the quick way, within a few degrees of MikkTSpace, and settle() makes them MikkTSpace's", [=] {
+    MeshPtr m = primitives::uv_sphere(1.0f, 24, 16);
+    m->smooth = true;
+    (void)m->render_mesh_tangents();
+    for (int k = 0; k < 10; k++) m->positions[(size_t)(k * 23) % m->positions.size()].y += 0.05f;
+    m->touch();
+    const RenderMesh &quick = m->render_mesh_tangents();
+    CHECK(m->tangents_approximate());
+    Mesh ref = *m;
+    ref.forget_caches();
+    const RenderMesh &mikk = ref.render_mesh_tangents();
+    float worst = 0.0f;
+    for (size_t k = 0; k < quick.indices.size(); k++) {
+      const Vec4 a = quick.tangents[quick.indices[k]], b = mikk.tangents[mikk.indices[k]];
+      worst = std::max(worst, std::acos(std::min(1.0f, std::max(-1.0f, dot(a.xyz(), b.xyz())))) * kRad2Deg);
+    }
+    std::printf("    the quick tangents: at most %.2f degrees from MikkTSpace's\n", worst);
+    CHECK(worst < 10.0f);  // (Lengyel's gradients against MikkTSpace's splits: furthest apart in a UV sphere's pole fans; settle() below makes them exact)
+    const uint64_t v0 = m->version, l0 = m->looks;
+    CHECK(m->settle());
+    CHECK(m->version == v0 && m->looks != l0 && !m->tangents_approximate());  // (drawn again; the mesh itself unchanged)
+    const RenderMesh &settled = m->render_mesh_tangents();
+    bool same = settled.indices.size() == mikk.indices.size();
+    for (size_t k = 0; same && k < settled.indices.size(); k++)
+      same = std::memcmp(&settled.tangents[settled.indices[k]], &mikk.tangents[mikk.indices[k]], sizeof(Vec4)) == 0;
+    CHECK(same);
+    const uint64_t l1 = m->looks;
+    CHECK(!m->settle() && m->looks == l1);  // (nothing quick left: nothing to do)
+  });
+
+  test("Edit Mode: a drag that changes where smoothing splits builds the render mesh again, and NaN positions stay drawable", [=] {
+    /* Two faces meeting at 20 degrees, smoothing limited to 30: one smooth fan. Folding them to 60 splits it. */
+    Mesh m;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1), Vec3(-1, 0.36f, 1), Vec3(-1, 0.36f, 0)}) m.add_vert(p);
+    m.add_face({0, 1, 2, 3});
+    m.add_face({0, 3, 4, 5});
+    m.smooth = true;
+    m.smooth_angle = 30.0f;
+    (void)m.render_mesh();
+    MeshCounts c0 = mesh_counts();
+    m.positions[4].y = m.positions[5].y = 1.7f;  // about 60 degrees
+    m.touch();
+    const RenderMesh &got = m.render_mesh();
+    const MeshCounts d = mesh_counts() - c0;
+    Mesh ref = m;
+    ref.forget_caches();
+    std::string why;
+    CHECK(d.full_builds == 1);  // (the split changed: in place refused it)
+    CHECK(r112_draw_same(got, ref.render_mesh(), &why));
+    /* A NaN position: whatever path it takes, the result is a rebuild's. */
+    m.positions[2] = Vec3(std::nanf(""), 0, 1);
+    m.touch();
+    const RenderMesh &nan_got = m.render_mesh();
+    Mesh nan_ref = m;
+    nan_ref.forget_caches();
+    CHECK(nan_got.indices.size() == nan_ref.render_mesh().indices.size());
+    CHECK(nan_got.tri_corner == nan_ref.render_mesh().tri_corner);
+  });
+
+  test("Edit Mode: after a positions-only operator on a normal-mapped mesh, F9 can still adjust it (settling the tangents leaves the mesh's version)", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->get<MeshRenderer>()->material(0)->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0 1 2 3 4 5 6 7");
+    r34_steps(ed, 2);
+    ed.command("editop smooth");
+    r34_steps(ed, 3);  // (drawn - tangents follow in place - and the undo step committed, which settles them)
+    const Mesh &m = *ed.scene().find_by_name("Cube")->get<MeshFilter>()->mesh;
+    std::printf("    after the operator: %s, quick tangents %s\n", ed.last_op_name_for_test().c_str(), m.tangents_approximate() ? "left" : "settled");
+    CHECK(ed.last_op_name_for_test() == "smooth");
+    CHECK(ed.last_op_valid_for_test());
+    CHECK(!m.tangents_approximate());
+  });
 }

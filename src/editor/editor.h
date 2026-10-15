@@ -557,6 +557,7 @@ class Editor {
   float last_op_profile_for_test() const { return last_op_.profile; }
   float last_op_amount_for_test() const { return last_op_.amount; }
   std::string last_op_name_for_test() const { return last_op_.op; }
+  bool last_op_valid_for_test() { return last_op_valid(); }
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
@@ -1278,6 +1279,7 @@ class Editor {
   };
   bool edit_op_redoable(const std::string &op) const;
   bool last_op_valid();
+  void settle_meshes();
   bool last_op_hidden_ = false;  // put away (x, Esc, a selection click) until the next operator or F9
   void run_last_op(bool first);
   void remember_last_op_settings();

@@ -100,14 +100,27 @@ struct Mesh {
   size_t memory_bytes() const;
 
   /* Triangulated, render-ready cache. Rebuilt lazily when `version` changes.
-   * Vertices are split where normals or UVs differ (like a Unity mesh). */
+   * Vertices are split where normals or UVs differ (like a Unity mesh). When only the positions changed since it
+   * was built - an Edit Mode drag, a deforming modifier - it follows them in place instead (ADR 0034): the same
+   * triangles and the same picture as a rebuild, without the cost. */
   const RenderMesh &render_mesh(bool force_flat = false) const;
   /* Same, plus MikkTSpace tangents for normal mapping (blender/intern/mikktspace). */
   const RenderMesh &render_mesh_tangents(bool force_flat = false) const;
   /* Unique edges, cached per version (wireframe & edit-mode overlays). */
   const std::vector<std::pair<uint32_t, uint32_t>> &edge_cache() const;
   void touch() { version++; }
+  /* After a drag (ADR 0034): tangents that followed it the quick way (Lengyel's, while the render mesh moved in
+   * place) are made again with MikkTSpace on the next read, as a rebuild would. Changes how the mesh is drawn, not
+   * what it is: `version` stays (an F9 adjustment and modifier caches still hold), `looks` moves (the views redraw).
+   * True when there was something to settle. */
+  bool settle() const;
+  /* Whether a render mesh's tangents are the quick ones (settle() redoes them). */
+  bool tangents_approximate() const { return cache_approx_[0] || cache_approx_[1]; }
+  /* Drops the render and edge caches: the next render_mesh() builds from scratch (tests compare the two). */
+  void forget_caches() const;
   uint64_t version = 1;
+  /* Bumped by settle(): the same mesh, drawn a little differently (the views' scene hash mixes it in). */
+  mutable uint64_t looks = 0;
   /* Bumped instead of `version` when only the positions changed (a deforming modifier, ADR 0022): the
    * render mesh then moves its vertices in place rather than being rebuilt. Code that caches positions
    * on `version` alone must check this too. */
@@ -116,8 +129,40 @@ struct Mesh {
  private:
   /* Per-corner shading normals (flat, smooth, smooth by angle, sharp edges): what render_mesh splits by. */
   void corner_normals(bool flat, std::vector<Vec3> &out) const;
-  /* The render mesh follows a deform: false when the split pattern no longer holds (a full build then). */
-  bool deform_in_place(int ci, bool flat) const;
+  /* The render mesh follows new positions (a deform, or an edit that moved vertices only): positions, normals and
+   * the triangulation of quads and n-gons rewritten in place. False when the split pattern no longer holds (a full
+   * build then). */
+  bool update_in_place(int ci, bool flat) const;
+  /* What the render and edge caches were built from besides positions (ADR 0034): when a new `version` has the
+   * same, they can follow in place. `topology_serial()` changes whenever this does. */
+  struct Topology {
+    size_t verts = 0;
+    std::vector<uint32_t> face_offsets, corner_verts;
+    std::vector<Vec2> uvs;
+    std::vector<int32_t> face_material;
+    std::vector<uint8_t> face_smooth;
+    std::vector<uint64_t> seams, sharp_edges, loose_edges;
+    bool smooth = false, seams_sharp = false;
+    float smooth_angle = 180.0f;
+  };
+  uint64_t topology_serial() const;
+  void build_edge_sides() const;
+  bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv) const;
+  mutable Topology topo_;
+  mutable uint64_t topo_version_ = 0, topo_serial_ = 0;
+  /* The manifold edges' two sides, for smooth fans (corner_normals): built once per topology, not every call. */
+  struct EdgeSides {
+    uint32_t sf, sca, scb, tf, tca, tcb;
+    bool hard;  // marked sharp, or a seam when seams are sharp, or a face beside it shaded flat
+  };
+  mutable std::vector<EdgeSides> sides_;
+  mutable uint64_t sides_topo_ = 0;
+  /* Where each face's triangles start in a build (n - 2 per face, in face order), and whether any face has more than
+   * three corners: per topology, for retriangulate(). */
+  mutable std::vector<uint32_t> tri_start_;
+  mutable bool tri_big_ = false;
+  mutable uint64_t tri_topo_ = 0;
+  mutable uint64_t edges_topo_ = 0;
   mutable std::vector<std::pair<uint32_t, uint32_t>> edges_;
   mutable uint64_t edges_version_ = 0;
   /* One cache per variant (0 = as shaded, 1 = forced flat for Edit Mode) so a
@@ -126,6 +171,9 @@ struct Mesh {
   mutable uint64_t cache_version_[2] = {0, 0};
   mutable bool cache_tangents_[2] = {false, false};
   mutable uint64_t cache_deform_[2] = {0, 0};
+  mutable uint64_t cache_topo_[2] = {0, 0};
+  mutable bool cache_flat_[2] = {false, false};
+  mutable bool cache_approx_[2] = {false, false};  // tangents made the quick way while following a drag
   mutable std::vector<uint32_t> corner_rv_[2];  // each corner's render vertex in cache_[i]
 };
 

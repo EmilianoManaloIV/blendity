@@ -273,6 +273,9 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     uint64_t k[3];
     g.evaluated_keys(k);
     mix(k, sizeof(k));
+    /* Settled tangents (ADR 0034): the same mesh drawn a little differently - the views draw again, nothing that
+     * keys on the evaluated meshes (a modifier stack's cache) sees a change. */
+    if (const MeshFilter *mf = g.mesh_filter(); mf && mf->mesh) mix(&mf->mesh->looks, 8);
   }
   if (outline) {  // a toon outline's thickness, colour and on / off (ADR 0020)
     const uint64_t oh = hash_component(*outline) ^ (uint64_t)outline->enabled << 63;

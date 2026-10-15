@@ -1621,8 +1621,21 @@ void Editor::mark_changed(const std::string &label) {
   pending_label_ = label;
 }
 
+/* The interaction is over: tangents that followed it the quick way - an Edit Mode drag, an origin moved, any
+ * positions-only change - are made with MikkTSpace again (ADR 0034), so a bake or a render never depends on how the
+ * mesh got its shape. Only the caches change (not `version`): the views draw it again. */
+void Editor::settle_meshes() {
+  bool any = false;
+  scene_->for_each([&](GameObject &g) {
+    const MeshFilter *mf = g.mesh_filter();
+    if (mf && mf->mesh && mf->mesh->settle()) any = true;
+  });
+  if (any) ui_.redraw = true;
+}
+
 void Editor::commit_undo() {
   if (!pending_change_) return;
+  settle_meshes();
   if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
   s.scene = std::move(stable_);

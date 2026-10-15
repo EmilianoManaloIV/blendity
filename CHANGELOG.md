@@ -2,6 +2,35 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 112): Edit Mode - the render mesh follows a drag in place (task 0086, ADR 0034)
+
+**Asked:** the performance pass (plan item 0086).
+
+**Changed**
+- **Dragging vertices in Edit Mode no longer rebuilds the mesh's render data every frame.** When only positions
+  moved, the shaded mesh follows them in place - the same triangles and the same picture as a rebuild (quads and
+  n-gons are split again from the new positions) - and the edge table and smoothing adjacency are kept. A Move-gizmo
+  drag on a 50k-face mesh went from 98 to 69 ms a frame on the laptop setting, G from 100 to 67 ms.
+- Normal-mapped meshes' tangents follow a drag the quick way and are made with MikkTSpace again when the drag ends.
+- Deforming modifiers move their render mesh with the exact triangulation now (they kept the build's before).
+
+**Checked**
+- New tests (round 112): 48 random drag steps on six kinds of mesh draw bit for bit what a rebuild draws; a quad's
+  diagonal flipping during a drag; a new face builds again while moved vertices keep the edge table; quick tangents
+  within 10 degrees of MikkTSpace's, exact after the drag ends; a fold that changes where smoothing splits builds
+  again; NaN positions draw as a rebuild's; F9 still adjusts a positions-only operator on a normal-mapped mesh.
+- Unit checks: Windows 10,078, 0 failed (695 tests); the whole suite in render-cache verify mode: 10,079,
+  0 failed, 0 stale pictures. Linux with libraries: 9,986, 0 failed. Sanitizer build: 9,892, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- Settling the tangents after a drag bumped the mesh's version, which ended an F9 adjustment and re-ran modifier
+  stacks: it only drops the caches now, and a separate counter the views key on makes them redraw.
+- Meshes changed outside Edit Mode (an origin moved) kept their quick tangents until their topology changed, so a
+  bake could depend on how a mesh got its shape: every mesh with quick tangents is settled when an interaction ends.
+- Deforms worked out the triangle slots every frame: once per topology now. `memory_bytes()` (and so the undo budget)
+  counts the kept topology; the test's drags are the same on every compiler.
+
 ## 2026-10-15 (round 111): per-view waste - the voxel GI grid's columns, the shadow map's ids plane (task 0085)
 
 **Asked:** the performance pass (plan item 0085).
