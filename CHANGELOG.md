@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 120): the denoiser on the GPU (task 0094)
+
+**Asked:** "Can we also look into Cuda and Optix support?" - then "Go for it" on the plan: the denoiser first (no SDK),
+then an OptiX spike. The download of OpenImageDenoise's CUDA and HIP modules from Blender's library repositories
+(33.6 MB) was approved first.
+
+**Changed**
+- **Render Settings > Denoise Device (Auto / CPU / GPU):** OpenImageDenoise runs on an NVIDIA (CUDA) or AMD (HIP) card
+  when there is one, with the CPU as the fallback. The installers and `dist` carry the two modules (never a Git LFS
+  placeholder). A 1080p denoise: 580.9 ms on this 16-core CPU before, 43.1 ms on the RTX 4070 SUPER.
+- **The CPU denoise is faster too** (580.9 -> 463.4 ms at 1080p): the filter is kept between frames of one size
+  instead of made anew each time, and the images are prepared in parallel.
+- The status line names the device ("denoised (OpenImageDenoise, CUDA: NVIDIA GeForce RTX 4070 SUPER)"); a Learn
+  section in "Rendering on the GPU".
+
+**Checked**
+- New tests (round 120): the GPU's denoise matches the CPU's on screen (mean 0.078 / 255, 100 % within 3 / 255;
+  skipped without a GPU); a GPU that fails gives exactly the CPU's picture and counts one fallback; Denoise Device is
+  saved with the scene, and Auto stays on the CPU when the tests pin it.
+- Unit checks: Windows 10,339, 0 failed (709 tests); the whole suite in render-cache verify mode: 10,340,
+  0 failed, 0 stale pictures. Linux with libraries: 10,247, 0 failed. Sanitizer build: 10,139, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; fixed: the filter and buffers are dropped before a new size (a card never
+holds both), after an error (now also checked after the filter's commit) and before a GPU render fits its scene to
+the card; a card OIDN lists but can't open counts a fallback; the test's failure comes after a real run on the card;
+the CMake build ships the modules too. Kept: alternating sizes remake the filter once per finished frame.
+
 ## 2026-10-15 (round 119): performance pass 10 written up (task 0093)
 
 **Asked:** the performance pass ("Let's increase overall editor performance in general"), its last task.

@@ -100,7 +100,7 @@ Blender's full build uses about 40 external libraries, prebuilt per platform at 
 | Library | `BL_WITH_` | Blendity code | Fallback | Blender uses it in |
 |---|---|---|---|---|
 | Embree 4 | `EMBREE` | `render/pathtracer.cpp` (`build_embree`): instanced two-level scene, BLAS cached by mesh hash, built in parallel | own SAH BVH | `intern/cycles/bvh/embree.cpp` |
-| OpenImageDenoise 2 | `OIDN` | `PathTracer::denoised_oidn` (beauty + albedo + normal) | À-Trous filter | `intern/cycles/integrator/denoiser_oidn.cpp` |
+| OpenImageDenoise 2 | `OIDN` | `PathTracer::denoised_oidn` (beauty + albedo + normal); task 0094: Denoise Device Auto / CPU / GPU, its CUDA and HIP modules on NVIDIA / AMD cards, a filter and buffers kept per device and size, a GPU's in its own memory | À-Trous filter (no OIDN); the CPU device (no GPU, or a GPU error) | `intern/cycles/integrator/denoiser_oidn.cpp`, `denoiser_oidn_gpu.cpp` |
 | Open PGL | `OPENPGL` | path guiding: field trained per render, product-MIS with the BSDF (opt-in) | off | `intern/cycles/integrator/guiding.h` |
 | oneTBB | `TBB` | `core/jobs.cpp` backend (`tbb::parallel_for` in a `task_arena`) | own thread pool | `source/blender/blenlib/BLI_task.hh` |
 | Eigen | `EIGEN` | `scene/uv.cpp` LSCM: `SimplicialLDLT` direct solve | block-Jacobi CG | `intern/slim`, `intern/itasc` |

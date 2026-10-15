@@ -257,6 +257,8 @@ int main() {
   /* GI Device Auto gathers on the CPU here, so a machine with a GPU and CI (without one) run the same
    * code; the GPU's own tests ask for it (task 0018). */
   if (!std::getenv("BLENDITY_GI_DEVICE")) set_env("BLENDITY_GI_DEVICE", "cpu");
+  /* The same for OpenImageDenoise's Denoise Device Auto (task 0094). */
+  if (!std::getenv("BLENDITY_DENOISE_DEVICE")) set_env("BLENDITY_DENOISE_DEVICE", "cpu");
   /* Scenes default to Automatic lighting updates here (the behaviour the tests before task 0020 were written
    * for); Manual's own tests ask for it. */
   if (!std::getenv("BLENDITY_LIGHTING_UPDATES")) set_env("BLENDITY_LIGHTING_UPDATES", "automatic");
@@ -29783,5 +29785,96 @@ static void round81_tests() {
       CHECK(shot[0] == shot[1]);
     }
     ed.planes_always_for_test(false);
+  });
+  /* ---------------------------------------------------------------- round 120: the denoiser on the GPU (task 0094) */
+  /* A 4-sample path-traced frame of a sphere on a plane, denoised with Denoise Device `device` (0 Auto, 1 CPU, 2 GPU). */
+  auto r120_denoised = [](int device, std::string *backend) {
+    static auto sphere = primitives::uv_sphere(0.5f, 32, 24);
+    static auto plane = primitives::plane(6.0f, 1);
+    static std::vector<MaterialPtr> mats = {make_material("grey", {0.7f, 0.7f, 0.7f})};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.5f, -1.0f, 0.3f));
+    sun.intensity = 2.0f;
+    std::vector<PTObject> objs = {{&sphere->render_mesh_tangents(), Mat4::translate({0, 0.5f, 0}), &mats},
+                                  {&plane->render_mesh_tangents(), Mat4::identity(), &mats}};
+    PathTracer pt;
+    PTSettings st;
+    st.denoise_device = device;
+    pt.set_settings(st);
+    pt.build(objs, {sun}, Environment{});
+    pt.set_camera(Mat4::look_at({0, 1.5f, -3}, {0, 0.4f, 0}, {0, 1, 0}), Mat4::perspective(45 * kDeg2Rad, 1, 0.1f, 50), 96, 96);
+    pt.render(1e9, 4);
+    std::vector<float> rgb = pt.linear_rgb(true);
+    if (backend) *backend = pt.denoise_backend();
+    return rgb;
+  };
+  test("denoise: OpenImageDenoise on the GPU looks like the CPU's (mean under 1/255, 99 % within 3/255; skipped without a GPU)",
+       [&] {
+    if (!PathTracer::oidn_available() || !PathTracer::oidn_gpu_available()) {
+      std::printf("    skipped: no GPU for OpenImageDenoise here\n");
+      return;
+    }
+    std::string on_cpu, on_gpu;
+    const std::vector<float> c = r120_denoised(1, &on_cpu), g = r120_denoised(2, &on_gpu);
+    std::printf("    %s / %s (GPU fallbacks so far: %zu)\n", on_cpu.c_str(), on_gpu.c_str(), PathTracer::oidn_gpu_fallbacks());
+    CHECK(on_cpu == "OpenImageDenoise");
+    CHECK(on_gpu.find("OpenImageDenoise, ") == 0);
+    CHECK(c.size() == g.size() && !c.empty());
+    if (c.size() != g.size() || c.empty()) return;
+    /* Compared as displayed (sRGB, 8 bits), as the bar of ADR 0013 / 0014 is written. */
+    std::vector<uint32_t> pc(c.size() / 3), pg(g.size() / 3);
+    display::encode_span(c.data(), pc.data(), pc.size(), ViewTransform::Standard, 0.0f);
+    display::encode_span(g.data(), pg.data(), pg.size(), ViewTransform::Standard, 0.0f);
+    double sum = 0;
+    size_t within = 0;
+    for (size_t i = 0; i < pc.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((pc[i] >> k) & 255) - (int)((pg[i] >> k) & 255)));
+      sum += worst;
+      within += worst <= 3;
+    }
+    const double mean = sum / pc.size(), share = (double)within / pc.size();
+    std::printf("    mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, share * 100);
+    CHECK(mean < 1.0);
+    CHECK(share >= 0.99);
+  });
+  test("denoise: a GPU that fails denoises on the CPU (exactly the CPU's picture) and counts a fallback", [&] {
+    if (!PathTracer::oidn_available()) {
+      std::printf("    skipped: built without OpenImageDenoise\n");
+      return;
+    }
+    const std::vector<float> cpu = r120_denoised(1, nullptr);
+    const size_t before = PathTracer::oidn_gpu_fallbacks();
+    PathTracer::oidn_fail_gpu_for_test(true);
+    std::string backend;
+    const std::vector<float> asked_gpu = r120_denoised(2, &backend);
+    PathTracer::oidn_fail_gpu_for_test(false);
+    CHECK(asked_gpu == cpu);
+    CHECK(backend == "OpenImageDenoise");
+    /* (Without a GPU, GPU is the CPU from the start: nothing failed.) The failure came after a real run on the card,
+     * so its filter and buffers were dropped, and the next GPU frame makes them again. */
+    CHECK(PathTracer::oidn_gpu_fallbacks() == before + (PathTracer::oidn_gpu_available() ? 1u : 0u));
+    CHECK(!PathTracer::oidn_gpu_holds_buffers());
+    if (PathTracer::oidn_gpu_available()) {
+      std::string again;
+      r120_denoised(2, &again);
+      CHECK(again.find("OpenImageDenoise, ") == 0);
+      CHECK(PathTracer::oidn_gpu_holds_buffers());
+      PathTracer::oidn_release_gpu();  // (what a GPU render does before fitting its scene)
+      CHECK(!PathTracer::oidn_gpu_holds_buffers());
+    }
+  });
+  test("denoise: Denoise Device is saved with the scene, and Auto stays on the CPU when BLENDITY_DENOISE_DEVICE=cpu", [&] {
+    Scene sc;
+    sc.render.denoise_device = 2;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(sc), back, err));
+    CHECK(back.render.denoise_device == 2);
+    if (!PathTracer::oidn_available()) return;
+    std::string backend;
+    const std::vector<float> autod = r120_denoised(0, &backend);  // (the tests pin BLENDITY_DENOISE_DEVICE=cpu)
+    CHECK(backend == "OpenImageDenoise");
+    CHECK(autod == r120_denoised(1, nullptr));
   });
 }

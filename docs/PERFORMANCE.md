@@ -10,6 +10,29 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## The denoiser on the GPU (task 0094)
+
+`blendity_stress --only pathtracer`, the denoiser table (this machine: 16-core Ryzen 9 5900XT, RTX 4070 SUPER), ms a
+frame:
+
+| Resolution | A-Trous | OpenImageDenoise, CPU (before) | CPU (after) | GPU (CUDA) |
+|---|---|---|---|---|
+| 640 x 360 | 31.9 | 70.8 | 51.9 | 5.1 |
+| 1280 x 720 | 112.3 | 240.6 | 207.8 | 19.5 |
+| 1920 x 1080 | 251.0 | 580.9 | 463.4 | 43.1 |
+
+- **The filter is kept between frames** of one size, as Cycles keeps its denoiser: a new filter loads its weights and
+  plans its work again (CPU 580.9 → 463.4 ms at 1080p).
+- **A GPU's images live in its own memory.** OIDN's default on CUDA is managed memory, which Windows pages across the
+  bus while the network reads it: 220 ms for the filter alone at 1080p, whatever the quality setting, against 15 ms in
+  device memory.
+- **The images are prepared in parallel** (20 ms on one thread at 1080p).
+- **Opening the GPU** the first time costs 92-139 ms, once.
+
+Honest limits: the laptop's Iris Xe isn't supported by OIDN's GPU modules (SYCL needs Intel Arc), so it denoises on
+the CPU. The images still go up and come back through the host each frame. Sharing Vulkan's memory with CUDA would
+skip that, but it is about 10 of the 43 ms.
+
 ## Pass 10: viewport frame rate and big meshes in Edit Mode (tasks 0083-0092)
 
 **Summary** (task 0093). `editor_render` on the laptop setting, ms a frame, raw (x 1.4 for the laptop):

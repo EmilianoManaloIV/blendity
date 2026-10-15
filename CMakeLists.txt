@@ -188,7 +188,10 @@ if(BLENDITY_USE_LIBS)
       get_filename_component(dir "${dir}" DIRECTORY)
       get_filename_component(pkg "${dir}" NAME)
       list(FIND BL_LIB_DIRS "${pkg}" _used)
-      if((_used GREATER -1 OR pkg MATCHES "^(imath|openjph|dpcpp)$") AND NOT n MATCHES "(_d\.|_d_|debug|_cuda|_hip|_sycl|eigen_|malloc_proxy)")
+      # OpenImageDenoise's CUDA and HIP modules go too (task 0094), never a Git LFS pointer (a few hundred bytes).
+      file(SIZE "${d}" _size)
+      if((_used GREATER -1 OR pkg MATCHES "^(imath|openjph|dpcpp)$") AND NOT n MATCHES "(_d\.|_d_|debug|_sycl|eigen_|malloc_proxy)"
+         AND _size GREATER 4096)
         file(COPY "${d}" DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
       endif()
     endforeach()

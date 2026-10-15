@@ -2746,27 +2746,34 @@ static void test_pathtracer(Report &rep, const Options &o) {
              "sampling), but here the OpenPGL lookups cost more than the noise it removes - it stays opt-in, as in Cycles.");
   }
   /* Denoisers: time per frame (quality is checked by the unit tests). */
-  rep.table({"resolution", "A-Trous ms", "OpenImageDenoise ms"});
+  rep.table({"resolution", "A-Trous ms", "OpenImageDenoise ms", "OpenImageDenoise on the GPU ms"});
   const bool oidn = PathTracer::oidn_available();
+  bool oidn_gpu = false;  // (task 0094: its CUDA / HIP module; opening it the first time is timed: the editor's first denoise pays it)
+  const double gpu_open_ms = time_ms([&] { oidn_gpu = oidn && PathTracer::oidn_gpu_available(); });
+  std::string gpu_label;
   std::vector<PTObject> objs;
   for (int i = 0; i < 64; i++) objs.push_back({&rm, Mat4::translate({(i % 8 - 4) * 1.3f, 0, (i / 8 - 4) * 1.3f}), &mats});
   std::vector<std::pair<int, int>> sizes = {{640, 360}, {1280, 720}};
   if (!o.quick) sizes.push_back({1920, 1080});
   for (auto [w, h] : sizes) {
-    double ms[2] = {0, 0};
-    for (int k = 0; k < (oidn ? 2 : 1); k++) {
+    double ms[3] = {0, 0, 0};
+    for (int k = 0; k < (oidn_gpu ? 3 : oidn ? 2 : 1); k++) {
       PathTracer pt;
       PTSettings st;
-      st.use_oidn = k == 1;
+      st.use_oidn = k >= 1;
+      st.denoise_device = k == 2 ? 2 : 1;
       pt.set_settings(st);
       pt.build(objs, {sun}, env);
       pt.set_camera(Mat4::look_at({0, 8, -9}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, w / (float)h, 0.1f, 1000), w, h);
       pt.render(0, 2);
       pt.linear_rgb(true);  // warm-up (OIDN loads its weights once)
       ms[k] = time_ms([&] { pt.linear_rgb(true); }, 2);
+      if (k == 2) gpu_label = pt.denoise_backend();
     }
-    rep.row({strprintf("%dx%d", w, h), f1(ms[0]), oidn ? f1(ms[1]) : "-"});
+    rep.row({strprintf("%dx%d", w, h), f1(ms[0]), oidn ? f1(ms[1]) : "-", oidn_gpu ? f1(ms[2]) : "-"});
   }
+  rep.note(oidn_gpu ? "The GPU column: " + gpu_label + strprintf(" (the images go up and come back each time; opening it took %.0f ms, once).", gpu_open_ms)
+                    : std::string("No GPU for OpenImageDenoise here (its CUDA module needs an NVIDIA card, HIP an AMD one)."));
 }
 
 static void test_uv_unwrap(Report &rep, const Options &o) {

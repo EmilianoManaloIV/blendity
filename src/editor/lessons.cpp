@@ -715,7 +715,7 @@ They stack with SubdivisionSurface: Mirror, then Solidify, then Subdivision is a
 Blender doesn't write everything itself. It builds on about 40 external libraries: ray tracing, denoising, colour science and image formats. Blendity uses the same prebuilt set when it finds a blender/lib folder next to the project. Without it, every feature falls back to Blendity's own dependency-free code. Type libs in the Console to see which backends are active.
 | Library | Used for in Blendity | Used in Blender for | Fallback
 | Embree | Path tracer ray casts (2-3x faster) | Cycles CPU BVH | Built-in BVH
-| OpenImageDenoise | Final-frame denoising | Cycles denoiser | A-Trous filter
+| OpenImageDenoise | Denoising path-traced renders (on an NVIDIA or AMD card when there is one) | Cycles denoiser | A-Trous filter
 | TBB | Job system (parallel_for) | BLI_task, Cycles threads | Built-in thread pool
 | Eigen | LSCM unwrap solver | UV unwrap, IK, deform | Conjugate gradient
 | OpenColorIO | AgX / Filmic view transforms | Colour management | Built-in curves
@@ -806,6 +806,11 @@ With several devices ticked, they share one counter of sample numbers. Each devi
 A GTX 1050 Ti has no ray tracing hardware: it traces with Blendity's compute kernel, roughly as fast as a 4-core CPU. Render > Device > GPU + CPU (Auto) uses both, each taking samples as fast as it finishes them, so neither waits for the other. A scene that wouldn't fit in the card's memory goes with its textures a mip level smaller at a time; one that can't fit renders on the CPU, with a message, instead of failing. Each submission to the GPU stays near 100 ms, under the 2 seconds after which Windows resets a GPU that seems stuck.
 ! cmd:engine path; device auto; window Render | Render on the GPU and the CPU together (Auto)
 ? Why are GPU submissions kept short? | Windows' driver watchdog (TDR) resets a GPU whose work takes over 2 seconds; a slow card given 64 samples of a big frame at once could pass it.
+# The denoiser on the GPU
+OpenImageDenoise, Cycles' denoiser, is a neural network that turns a few noisy samples into a clean picture using each pixel's colour, albedo and normal. Blender's libraries ship it with modules for NVIDIA cards (CUDA) and AMD cards (HIP), so Render Settings > Denoise Device on Auto runs it there when there is one. A 1080p frame took 463 ms on a 16-core CPU and 43 ms on an RTX 4070 SUPER. The CPU stays the fallback: without such a card, or after an error, the frame is denoised on the CPU, and the two pictures differ by well under one step of 255. Intel's integrated graphics (Iris Xe) aren't supported by its GPU modules, so a laptop like that denoises on the CPU.
+@ blender/intern/cycles/integrator/denoiser_oidn.cpp, blender/intern/cycles/integrator/denoiser_oidn_gpu.cpp
+? Why are the GPU's images kept in its own memory rather than shared with the CPU? | Shared ("managed") memory moves across the PCIe bus page by page while the network reads it. A 1080p denoise took 220 ms that way and 15 ms with the images in the card's memory.
+! cmd:set Render.DenoiseDevice GPU; engine path; render; window Render | Render the Main Camera and denoise it on the GPU
 )"},
     {"Points, Lines, N-gons and Booleans", "Building from a vertex, SketchUp faces, combining solids", R"(
 Blender can start a model from a single vertex. Ctrl+E (Blender's E) on a vertex grows an edge: a "wire" or loose edge that no face uses yet. Ctrl+E on that edge grows a face. Blendity keeps those wire edges in the mesh (Mesh::loose_edges), saves them, and lets the Screw modifier sweep them into a solid.

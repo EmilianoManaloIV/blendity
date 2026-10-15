@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** ADR 0026 (results noted)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/84
 
 ## Goal
 Close performance pass 10 (tasks 0083-0092): the before / after table on the laptop setting, what the plan's targets

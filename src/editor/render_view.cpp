@@ -801,6 +801,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   s.clamp_indirect = rs.clamp_indirect;
   s.denoise = rs.denoise;
   s.use_oidn = rs.denoiser == 0;
+  s.denoise_device = rs.denoise_device;
   s.use_embree = rs.use_embree;
   s.use_guiding = rs.path_guiding;
   s.view_transform = view_transform_from_setting(rs.view_transform);
