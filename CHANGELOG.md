@@ -2,6 +2,200 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 115): the Edit Mode cage drawn from parallel batches (task 0089)
+
+**Asked:** "carry on the next tasks" (the performance pass; with the next task now written while the last one's
+checks run).
+
+**Changed**
+- **The edges and vertex dots of a big mesh in Edit Mode** were recorded one call at a time, each edge placing both
+  its vertices in the world; now each vertex is placed once and the edges and dots are prepared in parallel and
+  recorded in order - the same picture. The overlays of a 50k-face mesh went from 7.4 to 4.5 ms a frame on the laptop
+  setting: a gizmo drag 38.6 -> 35.4 ms, G 37.0 -> 34.4 ms.
+
+**Checked**
+- New tests (round 115): 30,000 lines and 10,000 dots (depth-tested, clipped, some behind the eye) drawn from
+  batches give exactly the pixels one call each gives; an item left out stays out.
+- Unit checks: Windows 10,304, 0 failed (703 tests); the whole suite in render-cache verify mode: 10,305,
+  0 failed, 0 stale pictures. Linux with libraries: 10,212, 0 failed. Sanitizer build: 10,118, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; the batch reserves its room in the overlay list before appending.
+
+## 2026-10-15 (round 114): uniform materials shaded once per triangle; one shadow map for an edited mesh (task 0088)
+
+**Asked:** the performance pass ("Keep looking for performance gains throughout the project", overnight).
+
+**Changed**
+- **Plain materials** (no textures, procedural or axis mapping - most of a blocked-out scene) are worked out once per
+  triangle instead of once per pixel, with the same picture to the bit. On the laptop setting: moving an object
+  19.5 -> 17.2 ms a frame, editing a material colour 17.9 -> 16.5, playing 16.6 -> 15.5. The Profiler's renderer
+  options can switch it off to compare.
+- **An Edit Mode drag renders the sun's shadow once a frame**, not once for the Scene view and again for the Game
+  view (the edited mesh's two render caches have the same shape): a gizmo drag on 50k faces 42.5 -> 38.6 ms.
+
+**Checked**
+- New tests (round 114): 200 random plain materials evaluated once equal per-pixel evaluation to the bit; a deferred
+  view with a sun and its shadows, point and spot lights, flat and smooth meshes, emission and a procedural draws
+  the same pixels either way; an edited mesh's two caches share a shape and a copy or an edit makes a new one; a
+  drag renders the shadow map once a frame.
+- Unit checks: Windows 10,301, 0 failed (702 tests); the whole suite in render-cache verify mode: 10,302,
+  0 failed, 0 stale pictures. Linux with libraries: 10,209, 0 failed. Sanitizer build: 10,115, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; tidied: a live texture's footprint isn't worked out for a plain material's
+pixels, a vertex-snapped copy of a render mesh drops its shape, the option's cache-key bit no longer overlaps the shade
+mode's, a mesh id's copy is `noexcept` (moves stay moves).
+
+## 2026-10-15 (round 113): the Edit Mode drag loop stops redoing whole-mesh work (task 0087)
+
+**Asked:** the performance pass (plan item 0087).
+
+**Changed**
+- **Dragging vertices of a big mesh:** the check for flat rings of faces that a drag folds (they are zipped again)
+  built a map of every edge of the mesh on every frame; it now looks edges up in per-vertex face lists kept while the
+  mesh's faces don't change. The drag's own work on a 50k-face mesh went from 25 ms a frame to 1.6.
+- **G** reuses its copy of the mesh from frame to frame instead of copying the whole mesh each time.
+- **During any drag** (a mouse button held, G / R / S, Push/Pull, a modal adjustment) the overlapping-vertices check
+  and the "Lighting out of date" status wait for it to end; the Modeling Tools panel shows what it found before.
+- With task 0086: a Move-gizmo drag on 50k faces went from 98 ms a frame to 43 on the laptop setting, G from 100 to 42.
+
+**Checked**
+- New tests (round 113): a 10-frame gizmo drag on a big mesh copies it at most once, builds no render mesh, checks no
+  overlaps and hashes no lighting key, and releasing checks once; G reuses its copy and Esc restores the mesh exactly;
+  the per-vertex face lists give exactly what the old edge map gave, odd faces included, and are kept while only
+  positions move.
+- Unit checks: Windows 10,088, 0 failed (698 tests); the whole suite in render-cache verify mode: 10,089,
+  0 failed, 0 stale pictures. Linux with libraries: 9,996, 0 failed. Sanitizer build: 9,902, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- Holding the lighting answer during a drag froze Live GI and the status bar until release: during a drag a change is
+  taken as out of date without the exact (costly) check, which runs when the drag ends.
+- The overlapping-vertices overlay vanished whenever a mouse button was held (orbiting, a click): it keeps showing a
+  result that is still current, and hides only while a drag changes the mesh.
+- G's copy is remembered as a weak reference rather than an address; edge lookups scan the shorter vertex list.
+
+## 2026-10-15 (round 112): Edit Mode - the render mesh follows a drag in place (task 0086, ADR 0034)
+
+**Asked:** the performance pass (plan item 0086).
+
+**Changed**
+- **Dragging vertices in Edit Mode no longer rebuilds the mesh's render data every frame.** When only positions
+  moved, the shaded mesh follows them in place - the same triangles and the same picture as a rebuild (quads and
+  n-gons are split again from the new positions) - and the edge table and smoothing adjacency are kept. A Move-gizmo
+  drag on a 50k-face mesh went from 98 to 69 ms a frame on the laptop setting, G from 100 to 67 ms.
+- Normal-mapped meshes' tangents follow a drag the quick way and are made with MikkTSpace again when the drag ends.
+- Deforming modifiers move their render mesh with the exact triangulation now (they kept the build's before).
+
+**Checked**
+- New tests (round 112): 48 random drag steps on six kinds of mesh draw bit for bit what a rebuild draws; a quad's
+  diagonal flipping during a drag; a new face builds again while moved vertices keep the edge table; quick tangents
+  within 10 degrees of MikkTSpace's, exact after the drag ends; a fold that changes where smoothing splits builds
+  again; NaN positions draw as a rebuild's; F9 still adjusts a positions-only operator on a normal-mapped mesh.
+- Unit checks: Windows 10,078, 0 failed (695 tests); the whole suite in render-cache verify mode: 10,079,
+  0 failed, 0 stale pictures. Linux with libraries: 9,986, 0 failed. Sanitizer build: 9,892, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- Settling the tangents after a drag bumped the mesh's version, which ended an F9 adjustment and re-ran modifier
+  stacks: it only drops the caches now, and a separate counter the views key on makes them redraw.
+- Meshes changed outside Edit Mode (an origin moved) kept their quick tangents until their topology changed, so a
+  bake could depend on how a mesh got its shape: every mesh with quick tangents is settled when an interaction ends.
+- Deforms worked out the triangle slots every frame: once per topology now. `memory_bytes()` (and so the undo budget)
+  counts the kept topology; the test's drags are the same on every compiler.
+
+## 2026-10-15 (round 111): per-view waste - the voxel GI grid's columns, the shadow map's ids plane (task 0085)
+
+**Asked:** the performance pass (plan item 0085).
+
+**Changed**
+- **Realtime GI:** a view checking whether its voxel grid still fits the scene no longer allocates a fresh column
+  pyramid (about 87,000 columns at 256) every frame to find out; only a grid it actually takes gets its columns.
+- **Shadow maps** keep no picking-ids plane: nothing is cleared or written for it. The sun's map on a moved-object
+  frame went from 0.68 to 0.48 ms on the laptop setting.
+- **The GI blur** no longer copies its input plane before writing every texel anyway.
+- **Measured and left alone:** gathering the views' draw items (0.07 ms a moved frame) and the scene hashes (0.03 ms)
+  are too small to be worth changing in these scenes; shading is 5.1 of the Scene view's 7.2 ms (tasks 0088-0089).
+  The Realtime GI drag in Automatic mode (71 ms) is the automatic lighting update, not the grid.
+
+**Checked**
+- New tests (round 111): small moves inside the GI grid make no new pyramid, leaving it makes one; a grid fitted
+  without columns has the same placement and key; a shadow map has no ids plane and the same depth.
+- Unit checks: Windows 10,058, 0 failed (689 tests); the whole suite in render-cache verify mode: 10,059,
+  0 failed, 0 stale pictures. Linux with libraries: 9,966, 0 failed. Sanitizer build: 9,872, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; hardened: the Gouraud raster path and the selection outline also skip a
+target without ids (a shadow map), so a future pass drawing into one can't index an empty plane; a shadow target
+gives its ids memory back.
+
+## 2026-10-15 (round 110): the frame-rate cap holds, and only what changed is presented (task 0084)
+
+**Asked:** the performance pass (task 0083 measured; this is its first fix).
+
+**Fixed**
+- **A 60 fps cap ran at about 33 fps on Windows**, whatever the frame cost: every wait was rounded up to Windows'
+  15.6 ms timer tick, so a frame that left less than a tick to wait lost a whole one more. The editor now waits on a
+  high-resolution timer, and a frame pacer blocks only for as long as the waits have proved on time and polls for
+  the rest: a real window's 13 ms frames under a 60 fps cap went from 30.6 ms apart to 16.6 ms (95 % within 16.7).
+- **Presenting** sends only the bands of rows that changed: 0.68 ms instead of 2.42 for a Scene-view-sized change
+  (95 % within 0.70 ms instead of 9.38), and 0.07 ms when nothing changed.
+- **A window repaint drew the same frame twice** (the paint, then a queued event); now once.
+
+**Checked**
+- New tests (round 110): the pacer under a pretend 15.6 ms timer (the old loop 31.2 ms apart, the pacer 16.6); with
+  a precise timer it blocks for nearly the whole wait; input waking it early doesn't start the frame early; only
+  changed bands are presented, everything on a new size or when asked; one 30 ms-late wake-up doesn't leave the
+  pacer polling for good; a change only in pixels' top bits is still seen.
+- Unit checks: Windows 10,037, 0 failed (686 tests); the whole suite in render-cache verify mode: 10,038,
+  0 failed, 0 stale pictures. Linux with libraries: 9,945, 0 failed. Sanitizer build: 9,851, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- On Linux (and Windows' fallback) a window uncovered or first shown asked for a repaint as an event, which presented
+  nothing when the frame hadn't changed: a repaint, resize or DPI change now presents all of it.
+- One very late wake-up could leave the pacer polling for good (it only learnt from waits it blocked in): an unused
+  margin now shrinks each frame.
+- The band hash could miss a change confined to pixels' top bits: each chain rotates and is finalised.
+- macOS presented the whole picture once per changed run: once per frame now. `winmm` is linked for CMake builds too.
+- Waits were truncated to whole milliseconds: `poll_events_for` takes seconds; Windows' waits wake for input already
+  queued and can't hang on a timer that never fires.
+
+## 2026-10-15 (round 109): performance pass 10 begins - measuring Edit Mode drags, the mesh caches and frame pacing (task 0083)
+
+**Asked:** "Let's increase overall editor performance in general." Chosen: the viewport's frame rate and big meshes
+in Edit Mode, keeping the CPU renderer; plan of tasks 0083-0091. This first task only measures.
+
+**Added**
+- **The Profiler** shows the time between frames (what the screen sees, the cap's waiting included) and what the
+  mesh caches did in the last frame: copies for an edit, render meshes built or moved in place, tangents, edge
+  tables; plus an Edit Mode drag's writes, the overlap check, the lighting key, snapping, the views' draw items and
+  the scene hashes. The Learn tab's performance lesson explains them ("Reading a frame").
+- **blendity_stress:** `editor_render` drags the 50k-face mesh for real (the Move gizmo, and G) and notes each part;
+  `--only present` opens a window to time presenting frames and the cap's pacing.
+
+**Found** (the laptop setting, `--laptop --quality low`; docs/PERFORMANCE.md, Pass 10)
+- A 60 fps cap with 13 ms frames gave **30.6 ms between frames** (33 fps): Windows rounds the loop's waits to its
+  15.6 ms timer. Presenting a frame costs 2.4 ms on average (9.3 ms at the 95th percentile).
+- A gizmo drag on 50k faces costs 98 ms a frame: two render meshes built from scratch (38.6 ms, the Scene view's flat
+  one and the Game view's smooth one), the drag's writes 24.5 ms (ring repair scans every face), the shadow map
+  7.5 ms, the Edit Mode overlay 8.7 ms. G is the same plus a 2.7 ms mesh copy a frame.
+
+**Checked**
+- New tests (round 109): a gizmo drag moves the counters; the Profiler draws its new rows during a drag.
+- Unit checks: Windows 10,022, 0 failed (680 tests); the whole suite in render-cache verify mode: 10,021,
+  0 failed, 0 stale pictures. Linux with libraries: 9,928, 0 failed. Sanitizer build: 9,834, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No behaviour changed; fixed:
+- The pacing figure was measured with present on top of 13 ms of work: present now counts inside the 13 ms (the
+  result held: 30.6 ms between frames).
+- "Moved in place" counted refused moves too; the first frame after start showed everything counted before it.
+- The 95th percentile was rounded down (the Profiler and stress); the Profiler shows it from two frames on.
+- The stress run's undo after the gizmo drag could undo an earlier step if the drag had missed.
+- The tests now look for the Profiler's rows by name, and no longer pin today's rebuilds; ARCHITECTURE has a row.
+
 ## 2026-10-14 (round 108): installing without knowing GitHub - one-click downloads, releases of installers only (task 0082)
 
 **Asked:** "Remove build-pr71" (done: the release and its tag). "Note the installer in the releases and update the

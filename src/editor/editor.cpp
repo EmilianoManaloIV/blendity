@@ -14,11 +14,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <ctime>
 #include <cctype>
 #include <cstdio>
 #include <functional>
 #include <sstream>
+#include <thread>
 
 namespace bl {
 
@@ -169,6 +171,7 @@ bool Editor::init(int argc, char **argv) {
   ui_.clipboard_set = [this](const std::string &s) { set_clipboard(window_, s); };
   set_refresh_callback(window_, [this] {
     std::vector<Event> none;
+    present_all_ = true;  // (the system asked for the window to be painted: all of it)
     frame(none);
   });
   if (!layout_arg.empty()) dock_reset(layout_arg);
@@ -220,6 +223,58 @@ double Editor::frame_wait_seconds(double now, double last_frame) const {
   return std::max(0.0, last_frame + 1.0 / (double)max_fps_ - now);
 }
 
+/* MurmurHash3's finaliser: every input bit reaches every output bit. */
+static uint64_t fmix64(uint64_t k) {
+  k ^= k >> 33, k *= 0xFF51AFD7ED558CCDull;
+  k ^= k >> 33, k *= 0xC4CEB9FE1A85EC53ull;
+  return k ^ (k >> 33);
+}
+
+/* A band of pixels' hash: four chains over 8-byte words (independent, so the multiplies overlap), each word rotated in
+ * so a change in its high bits isn't left in the top bits alone, then finalised and combined. */
+static uint64_t band_hash(const uint8_t *p, size_t n) {
+  uint64_t h[4] = {1, 2, 3, 4};
+  size_t i = 0;
+  for (; i + 32 <= n; i += 32)
+    for (int k = 0; k < 4; k++) {
+      uint64_t v;
+      std::memcpy(&v, p + i + 8 * k, 8);
+      const uint64_t x = h[k] ^ v;
+      h[k] = ((x << 27) | (x >> 37)) * 0x9E3779B97F4A7C15ull;
+    }
+  for (; i < n; i++) h[0] = (h[0] ^ p[i]) * 0x100000001B3ull;
+  return fmix64(h[0]) ^ fmix64(h[1] + 1) * 3 ^ fmix64(h[2] + 2) * 5 ^ fmix64(h[3] + 3) * 7 ^ n;
+}
+
+std::vector<std::pair<int, int>> Editor::changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all) {
+  constexpr int kBand = 16;
+  const int nb = (height + kBand - 1) / kBand;
+  std::vector<uint64_t> fresh((size_t)nb);
+  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+    for (int b = (int)b0; b < (int)b1; b++)
+      fresh[(size_t)b] = band_hash((const uint8_t *)(px + (size_t)b * kBand * width), (size_t)std::min(kBand, height - b * kBand) * width * 4);
+  });
+  all = all || bands.size() != fresh.size();
+  std::vector<std::pair<int, int>> runs;
+  for (int b = 0; b < nb; b++) {
+    if (!all && bands[(size_t)b] == fresh[(size_t)b]) continue;
+    const int y0 = b * kBand, y1 = std::min(height, y0 + kBand);
+    if (!runs.empty() && runs.back().second == y0) runs.back().second = y1;
+    else runs.emplace_back(y0, y1);
+  }
+  bands.swap(fresh);
+  return runs;
+}
+
+void Editor::present_changed() {
+  const bool all = present_all_ || fb_.width != present_w_ || fb_.height != present_h_;
+  present_w_ = fb_.width, present_h_ = fb_.height;
+  const std::vector<std::pair<int, int>> runs = changed_rows(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  present_all_ = false;
+  if (all) return present(window_, fb_.pixels.data(), fb_.width, fb_.height);
+  present_rows(window_, fb_.pixels.data(), fb_.width, fb_.height, runs);
+}
+
 int Editor::run() {
   std::vector<Event> events, more;
   double last_frame = 0;
@@ -229,7 +284,7 @@ int Editor::run() {
     double now = now_seconds();
     const bool continuous = always_redraw_ || wants_continuous_redraw();
     int timeout = 1000;
-    if (continuous) timeout = (int)std::ceil(frame_wait_seconds(now, last_frame) * 1000.0);
+    if (continuous) timeout = 0;  // (the pacer below waits for the frame's turn, precisely)
     else if (ui_.next_wakeup > 0) timeout = std::max(1, (int)((ui_.next_wakeup - now) * 1000.0) + 1);
     if (ui_.redraw || first) timeout = 0;
     poll_events(window_, events, timeout);
@@ -240,13 +295,16 @@ int Editor::run() {
     if (Log::fetch(log_seen_ + log_.size(), tmp) > log_seen_ + log_.size()) need = true;
     if (!need) continue;
     /* The cap holds for input too: mouse moves arriving sooner are gathered
-     * into the next frame instead of each drawing one. */
-    for (double wait = first ? 0.0 : frame_wait_seconds(now, last_frame); wait > 0.0005; wait = frame_wait_seconds(now, last_frame)) {
-      more.clear();
-      poll_events(window_, more, std::max(1, (int)(wait * 1000.0)));
-      events.insert(events.end(), more.begin(), more.end());
-      now = now_seconds();
-    }
+     * into the next frame instead of each drawing one. The pacer (task 0084) keeps the waits from
+     * oversleeping the frame's turn by a timer tick. */
+    if (!first && max_fps_ > 0)
+      pacer_.wait_until(now + frame_wait_seconds(now, last_frame), now_seconds, [&](double s) {
+        more.clear();
+        poll_events_for(window_, more, s);
+        events.insert(events.end(), more.begin(), more.end());
+        if (s <= 0.0) std::this_thread::yield();
+      });
+    now = now_seconds();
     first = false;
     last_frame = now;
     frame(events);
@@ -377,6 +435,9 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
+  /* The system asked for the window to be painted, or it changed: present all of it (what it showed may be gone). */
+  for (const Event &e : events)
+    if (e.type == EventType::Repaint || e.type == EventType::Resize || e.type == EventType::DpiChanged) present_all_ = true;
   double now = now_seconds();
   ScopedTimer frame_timer;
   /* Frames in the last second: the measured rate (Preferences > Performance). */
@@ -563,13 +624,16 @@ void Editor::frame(std::vector<Event> &events) {
     last_title_ = title;
   }
   ui_ms_ = (float)frame_timer.ms();
-  if (window_) present(window_, fb_.pixels.data(), fb_.width, fb_.height);
+  if (window_) present_changed();
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
   prof_.ms_present = frame_ms_ - ui_ms_;
   prof_.ms_ui = std::max(0.0, ui_ms_ - prof_.ms_scene3d - prof_.ms_game - prof_.ms_preview);
   prof_last_ = prof_;
   prof_total_.add(prof_);
+  const MeshCounts mc = mesh_counts();
+  mesh_last_ = mc - mesh_seen_;
+  mesh_seen_ = mc;
   prof_ = FrameProfile{};
   frame_history_.push_back(frame_ms_);
   if (frame_history_.size() > 240) frame_history_.erase(frame_history_.begin());
@@ -1557,8 +1621,21 @@ void Editor::mark_changed(const std::string &label) {
   pending_label_ = label;
 }
 
+/* The interaction is over: tangents that followed it the quick way - an Edit Mode drag, an origin moved, any
+ * positions-only change - are made with MikkTSpace again (ADR 0034), so a bake or a render never depends on how the
+ * mesh got its shape. Only the caches change (not `version`): the views draw it again. */
+void Editor::settle_meshes() {
+  bool any = false;
+  scene_->for_each([&](GameObject &g) {
+    const MeshFilter *mf = g.mesh_filter();
+    if (mf && mf->mesh && mf->mesh->settle()) any = true;
+  });
+  if (any) ui_.redraw = true;
+}
+
 void Editor::commit_undo() {
   if (!pending_change_) return;
+  settle_meshes();
   if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
   s.scene = std::move(stable_);
