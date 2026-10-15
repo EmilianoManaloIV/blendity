@@ -153,14 +153,16 @@ for %%i in (%~4) do set LIBLINK=!LIBLINK! "%L%\%%i"
 set LIBDIRS=!LIBDIRS! %~1
 exit /b 0
 
-rem Copy the release DLLs (no debug, GPU-device or Python files) and the MSVC
-rem runtime next to the executables, so dist\windows runs on any PC.
+rem Copy the release DLLs (no debug, SYCL-device or Python files) and the MSVC
+rem runtime next to the executables, so dist\windows runs on any PC. OpenImageDenoise's
+rem CUDA and HIP modules go too (task 0094), but never a Git LFS pointer left by a
+rem clone that didn't fetch them (a few hundred bytes): every DLL must be over 4 KB.
 :deploy_dlls
 rem openjph (OpenEXR), dpcpp's SYCL runtime (Embree) and aom (FFmpeg's AV1) are runtime-only dependencies.
 for %%d in (%LIBDIRS% imath openjph dpcpp aom) do (
   if exist "%L%\%%d\bin" (
     for %%f in ("%L%\%%d\bin\*.dll") do (
-      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll loaderd\.dll zerod\.dll v2d\.dll debug _cuda _hip _sycl eigen_ malloc_proxy" >nul || copy /y "%%f" dist\windows\ >nul
+      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll loaderd\.dll zerod\.dll v2d\.dll debug _sycl eigen_ malloc_proxy" >nul || if %%~zf GTR 4096 copy /y "%%f" dist\windows\ >nul
     )
   )
 )

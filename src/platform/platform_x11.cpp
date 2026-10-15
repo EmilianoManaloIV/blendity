@@ -381,13 +381,16 @@ static void handle_event(Window *w, XEvent &xe) {
   }
 }
 
-void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) {
-  if (XPending(w->dpy) == 0 && w->queue.empty() && timeout_ms > 0) {
+void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) { poll_events_for(w, out, timeout_ms / 1000.0); }
+
+void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
+  if (XPending(w->dpy) == 0 && w->queue.empty() && seconds > 0.0) {
     int fd = ConnectionNumber(w->dpy);
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(fd, &fds);
-    timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    const long us = (long)(seconds * 1e6);
+    timeval tv{us / 1000000, us % 1000000};
     select(fd + 1, &fds, nullptr, nullptr, &tv);
   }
   while (XPending(w->dpy)) {
@@ -415,6 +418,17 @@ void present(Window *w, const uint32_t *pixels, int width, int height) {
   }
   std::memcpy(w->image_pixels.data(), pixels, (size_t)width * height * 4);
   XPutImage(w->dpy, w->win, w->gc, w->image, 0, 0, 0, 0, width, height);
+  XFlush(w->dpy);
+}
+
+void present_rows(Window *w, const uint32_t *pixels, int width, int height, const std::vector<std::pair<int, int>> &rows) {
+  if (!w->image || w->img_w != width || w->img_h != height) return present(w, pixels, width, height);
+  for (auto [y0, y1] : rows) {
+    y0 = std::max(0, y0), y1 = std::min(height, y1);
+    if (y1 <= y0) continue;
+    std::memcpy(w->image_pixels.data() + (size_t)y0 * width, pixels + (size_t)y0 * width, (size_t)width * (y1 - y0) * 4);
+    XPutImage(w->dpy, w->win, w->gc, w->image, 0, y0, 0, y0, width, y1 - y0);
+  }
   XFlush(w->dpy);
 }
 

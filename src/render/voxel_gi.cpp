@@ -5,6 +5,7 @@
 #include "../core/jobs.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -127,7 +128,20 @@ bool VoxelGrid::voxel_set(int x, int y, int z) const {
   return y < 64 ? (c.lo >> y) & 1 : (c.hi >> (y - 64)) & 1;
 }
 
-void voxel_grid_fit(VoxelGrid &g, const AABB &bounds, int n) {
+static std::atomic<uint64_t> g_grid_allocations{0};
+
+uint64_t voxel_grid_allocations() { return g_grid_allocations.load(std::memory_order_relaxed); }
+
+void voxel_grid_allocate(VoxelGrid &g) {
+  if (g.n <= 0 || !g.levels.empty()) return;
+  int levels = 1;
+  while ((g.n >> levels) >= 1) levels++;
+  g.levels.resize((size_t)levels);
+  for (int l = 0; l < levels; l++) g.levels[(size_t)l].assign((size_t)g.side(l) * g.side(l), VoxelColumn{});
+  g_grid_allocations.fetch_add(1, std::memory_order_relaxed);
+}
+
+void voxel_grid_fit(VoxelGrid &g, const AABB &bounds, int n, bool allocate) {
   g = VoxelGrid{};
   if (!bounds.valid() || !finite3(bounds.min) || !finite3(bounds.max)) return;
   n = n <= 64 ? 64 : n <= 128 ? 128 : 256;
@@ -140,10 +154,6 @@ void voxel_grid_fit(VoxelGrid &g, const AABB &bounds, int n) {
   g.n = n;
   const float snap = 8.0f * v;
   g.origin = Vec3(std::floor(bounds.min.x / snap) * snap, std::floor(bounds.min.y / snap) * snap, std::floor(bounds.min.z / snap) * snap);
-  int levels = 1;
-  while ((n >> levels) >= 1) levels++;
-  g.levels.resize((size_t)levels);
-  for (int l = 0; l < levels; l++) g.levels[(size_t)l].assign((size_t)g.side(l) * g.side(l), VoxelColumn{});
   uint64_t k = 1469598103934665603ull;
   auto mix = [&](const void *p, size_t sz) {
     const uint8_t *b = (const uint8_t *)p;
@@ -153,6 +163,7 @@ void voxel_grid_fit(VoxelGrid &g, const AABB &bounds, int n) {
   mix(&g.voxel, sizeof(float));
   mix(&g.n, sizeof(int));
   g.key = k ? k : 1;
+  if (allocate) voxel_grid_allocate(g);
 }
 
 void voxelize_mesh(const VoxelGrid &g, const RenderMesh &rm, const Mat4 &model, std::vector<VoxelSpan> &out) {
