@@ -28798,4 +28798,57 @@ static void round81_tests() {
     CHECK(!ed.show_libraries_for_test(json));
     CHECK(ed.show_libraries_for_test(json, extras));
   });
+  /* ---------------------------------------------------------------- round 109: measuring the editor's frames (task 0083) */
+  test("profiler: an Edit Mode drag with the Move gizmo is counted - the mesh's copy, its render mesh builds, the writes, the hashes", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const Vec3 wp = cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]);
+    const FrameProfile p0 = ed.frame_profile_totals();
+    const MeshCounts m0 = mesh_counts();
+    r34_gizmo_drag_x(ed, wp, 50);
+    const FrameProfile p = ed.frame_profile_totals();
+    const MeshCounts m = mesh_counts() - m0;
+    std::printf("    a 5-frame drag: %llu mesh copies, %llu render meshes built, %llu moved in place, %llu edge tables, %llu scene hashes; "
+                "writes %.3f ms\n",
+                (unsigned long long)m.copies, (unsigned long long)m.full_builds, (unsigned long long)m.in_place, (unsigned long long)m.edge_builds,
+                (unsigned long long)(p.scene_hashes - p0.scene_hashes), p.ms_edit_apply - p0.ms_edit_apply);
+    CHECK(m.copies >= 1);       // (the mesh was shared with the undo step: the first write copies it)
+    CHECK(m.full_builds + m.in_place >= 2);  // (every moved frame updates the render mesh: built, or moved in place)
+    CHECK(p.ms_edit_apply > p0.ms_edit_apply && p.scene_hashes > p0.scene_hashes);
+    /* Readings subtract field by field. */
+    MeshCounts a, b;
+    a.copies = 5, a.ms_edges = 2.5, b.copies = 2, b.ms_edges = 1.0;
+    const MeshCounts d = a - b;
+    CHECK(d.copies == 3 && std::fabs(d.ms_edges - 1.5) < 1e-9);
+  });
+
+  test("profiler: the Profiler window draws the time between frames and the mesh caches' work while a drag runs", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("window Profiler");
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && ed.window_rect_for_test(WindowKind::Profiler).w > 0);
+    if (cube) r34_gizmo_drag_x(ed, cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]), 40);
+    r34_steps(ed, 2);  // (drawn with a full second of frame times and a frame's mesh work: no crash, nothing out of range)
+    Recti r;
+    CHECK(ed.button_rect_for_test("Between frames (last second)", r));
+    CHECK(ed.button_rect_for_test("Mesh copies / render meshes built / moved in place", r));
+    CHECK(ed.button_rect_for_test("Edit Mode: mesh writes / overlap check", r));
+  });
 }

@@ -570,6 +570,9 @@ void Editor::frame(std::vector<Event> &events) {
   prof_.ms_ui = std::max(0.0, ui_ms_ - prof_.ms_scene3d - prof_.ms_game - prof_.ms_preview);
   prof_last_ = prof_;
   prof_total_.add(prof_);
+  const MeshCounts mc = mesh_counts();
+  mesh_last_ = mc - mesh_seen_;
+  mesh_seen_ = mc;
   prof_ = FrameProfile{};
   frame_history_.push_back(frame_ms_);
   if (frame_history_.size() > 240) frame_history_.erase(frame_history_.begin());

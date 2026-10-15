@@ -10,6 +10,30 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 10: viewport frame rate and big meshes in Edit Mode (tasks 0083-0091)
+
+The laptop setting (`blendity_stress --laptop --quality low --only editor_render`, and `--only present`, run on the
+development machine on 2026-10-15; raw times, multiply by 1.4 for the laptop's clock). `editor_render` rows, ms per
+frame:
+
+| Frame | Before (task 0083) |
+|---|---|
+| idle | 0.76 |
+| orbiting the Scene view | 9.36 |
+| moving an object | 19.53 |
+| editing a material colour | 17.96 |
+| playing | 16.97 |
+| Edit Mode: Move-gizmo drag of a vertex, 50k faces | 97.75 |
+| Edit Mode: G, 50k faces | 100.20 |
+
+Where the gizmo drag goes, per frame: two render meshes built from scratch (38.6 ms: the Scene view's flat cache and
+the Game view's smooth one), the drag's writes 24.5 ms (`repair_moved_rings` scans every face), the shadow map 7.5 ms
+(the big mesh casts), the Edit Mode overlay 8.7 ms, one edge table 1.1 ms. G adds a whole-mesh copy (2.7 ms) a frame.
+
+`present` (a real window, 2560 x 1369 at this desktop's scale): 2.40 ms a present on average, 9.34 ms at the 95th
+percentile. **Pacing:** a 60 fps cap with 13 ms frames (present included) gave 30.6 ms between frames (95 % within 32.0), with no input arriving: the loop's
+waits are rounded up to Windows' 15.6 ms timer, so a frame that leaves less than a tick waits a whole one more.
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris
