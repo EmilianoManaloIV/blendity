@@ -35,10 +35,11 @@ void RenderTarget::attach(Image &img, const Recti &r) {
   resize_planes();
 }
 
-void RenderTarget::resize_planes() {
+void RenderTarget::resize_planes(bool with_ids) {
   size_t n = (size_t)std::max(0, width) * std::max(0, height);
   if (depth.size() != n) depth.resize(n);
-  if (ids.size() != n) ids.resize(n);
+  if (!with_ids) ids = {};  // (and its memory: a thread's shadow target keeps none)
+  else if (ids.size() != n) ids.resize(n);
   if (!vis.empty() && vis.size() != n) vis.clear();  // only deferred shading needs it: begin() sizes it then
 }
 
@@ -47,7 +48,7 @@ void RenderTarget::make_depth_only(int w, int h) {
   stride = w;
   width = w;
   height = h;
-  resize_planes();
+  resize_planes(false);
 }
 
 void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, const LightingEnv &env,
@@ -83,6 +84,7 @@ void Renderer3D::clear_planes(const uint32_t *color) {
   ScopedTimer t;
   const int W = rt_->width, H = rt_->height;
   const bool with_vis = rt_->vis.size() == (size_t)W * H && W > 0;
+  const bool with_ids = !rt_->ids.empty();
   auto &js = JobSystem::global();
   const int saved = js.max_threads();
   if (!opt_.multithreaded) js.set_max_threads(1);
@@ -91,7 +93,7 @@ void Renderer3D::clear_planes(const uint32_t *color) {
       const size_t o = (size_t)y * W;
       if (color && rt_->color) std::fill(rt_->color + (size_t)y * rt_->stride, rt_->color + (size_t)y * rt_->stride + W, *color);
       std::fill(rt_->depth.begin() + o, rt_->depth.begin() + o + W, 1.0f);
-      std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
+      if (with_ids) std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
       if (with_vis) std::fill(rt_->vis.begin() + o, rt_->vis.begin() + o + W, 0u);
     }
   });
@@ -949,7 +951,7 @@ void Renderer3D::raster_tile(int tile_index) {
   const int rx1 = std::min(rt_->width, rx0 + T), ry1 = std::min(rt_->height, ry0 + T);
   const int W = rt_->width;
   float *depth = rt_->depth.data();
-  uint32_t *ids = rt_->ids.data();
+  uint32_t *ids = rt_->ids.empty() ? nullptr : rt_->ids.data();  // (none in a shadow map)
   uint32_t *vis = rt_->vis.data();
   const ShadeMode mode = opt_.shade;
 
@@ -1006,14 +1008,14 @@ void Renderer3D::raster_tile(int tile_index) {
           dz = z;
           if (mode != ShadeMode::Gouraud) {
             if (mode == ShadeMode::Deferred) vis[row + x] = ref;
-            ids[row + x] = st.id;  // depth-only passes keep picking working
+            if (ids) ids[row + x] = st.id;  // depth-only passes into a view keep picking working
             continue;
           }
           const float iw = 1.0f / (b0 * st.iw[0] + b1 * st.iw[1] + b2 * st.iw[2]);
           const Vec3 &c0 = st.c[0], &c1 = st.c[1], &c2 = st.c[2];
           crow[x] = pack_rgb((b0 * c0.x + b1 * c1.x + b2 * c2.x) * iw, (b0 * c0.y + b1 * c1.y + b2 * c2.y) * iw,
                              (b0 * c0.z + b1 * c1.z + b2 * c2.z) * iw);
-          ids[row + x] = st.id;
+          if (ids) ids[row + x] = st.id;
         }
       }
     }
@@ -1137,6 +1139,47 @@ void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
   else draw_overlay(c, 0, rt_->height);
 }
 
+template <class Prepare>
+void Renderer3D::record_many(size_t n, const Prepare &prepare) {
+  constexpr size_t kChunk = 4096;
+  const size_t nc = (n + kChunk - 1) / kChunk;
+  std::vector<std::vector<OverlayCmd>> parts(nc);
+  JobSystem::global().parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t c = c0; c < c1; c++) {
+      std::vector<OverlayCmd> &out = parts[(size_t)c];
+      out.reserve(kChunk);
+      for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++) {
+        OverlayCmd cmd;
+        if (prepare(i, cmd)) out.push_back(cmd);
+      }
+    }
+  });
+  size_t total = 0;
+  for (const std::vector<OverlayCmd> &part : parts) total += part.size();
+  if (batching_) overlay_cmds_.reserve(overlay_cmds_.size() + total);
+  for (const std::vector<OverlayCmd> &part : parts)
+    for (const OverlayCmd &cmd : part) {
+      if (batching_) overlay_cmds_.push_back(cmd);
+      else draw_overlay(cmd, 0, rt_->height);
+    }
+}
+
+void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias) {
+  record_many(n, [&](size_t i, OverlayCmd &cmd) {
+    Vec3 a, b;
+    uint32_t color = 0;
+    return get(i, a, b, color) && prepare_line(a, b, color, depth_test, bias, cmd);
+  });
+}
+
+void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test) {
+  record_many(n, [&](size_t i, OverlayCmd &cmd) {
+    Vec3 p;
+    uint32_t color = 0;
+    return get(i, p, color) && prepare_point(p, r, color, depth_test, cmd);
+  });
+}
+
 void Renderer3D::begin_overlay_batch() {
   batching_ = true;
   overlay_cmds_.clear();
@@ -1170,7 +1213,7 @@ void Renderer3D::end_overlay_batch() {
 }
 
 void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, int width) {
-  if (sel.empty()) return;
+  if (sel.empty() || rt_->ids.empty()) return;  // (a view's target: a shadow map has no ids)
   if (batching_) {  // overlays recorded so far go under the outline
     end_overlay_batch();
     begin_overlay_batch();
@@ -1244,6 +1287,10 @@ void Renderer3D::shade_deferred() {
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
+    /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
+     * with its own normal - what evaluate_material would give it - and skips the texture-space work nothing reads. */
+    bool uniform = false;
+    SurfaceSample surface;
   };
   auto setup_tri = [&](TriSetup &T, uint32_t ref) {
     T.ref = ref;
@@ -1301,6 +1348,8 @@ void Renderer3D::shade_deferred() {
       if (mp) T.mat = mp.get();
     }
     T.tex = &T.mat->textures();  // (resolved before the parallel stages: a cached reference)
+    T.uniform = opt_.uniform_shading && material_uniform(*T.mat, *T.tex);
+    if (T.uniform) T.surface = evaluate_material(*T.mat, *T.tex, SurfacePoint{});
     T.live = false;
     for (int k = 0; k < 5; k++) T.live = T.live || T.tex->live[k] != nullptr;
     for (int a = 0; a < 4; a++)
@@ -1361,11 +1410,12 @@ void Renderer3D::shade_deferred() {
     });
     stats_.gi_traced = traced.load();
     /* Nothing traced (every surface reads a realtime lightmap): no blur, and nothing reads gi_blur_. */
-    if (stats_.gi_traced) gi_blur_ = gi_lo_;
+    if (stats_.gi_traced) gi_blur_.resize(gi_lo_.size());  // (every texel is written below: no copy first)
     if (stats_.gi_traced) js.parallel_for(gh, 4, [&](int64_t a, int64_t b) {
       for (int64_t gy = a; gy < b; gy++)
         for (int gx = 0; gx < gw; gx++) {
           const GiTexel &c = gi_lo_[(size_t)gy * gw + gx];
+          gi_blur_[(size_t)gy * gw + gx] = c;
           if (!c.valid) continue;
           Vec3 bounce(0.0f);
           float sky = 0.0f, wsum = 0.0f;
@@ -1435,13 +1485,15 @@ void Renderer3D::shade_deferred() {
         auto ratio = [](Vec3 n, float s) { return n * (1.0f / (std::fabs(s) < 1e-20f ? 1e-20f : s)); };
         Vec3 B = ratio(N, S);
         SurfacePoint sp;
-        sp.local_position = T.p[0] * B.x + T.p[1] * B.y + T.p[2] * B.z;
-        sp.local_normal = normalize(T.n[0] * B.x + T.n[1] * B.y + T.n[2] * B.z);
-        sp.local_bounds = T.bounds;
+        if (!T.uniform) {  // (texture space: only a material that varies over the surface reads it)
+          sp.local_position = T.p[0] * B.x + T.p[1] * B.y + T.p[2] * B.z;
+          sp.local_normal = normalize(T.n[0] * B.x + T.n[1] * B.y + T.n[2] * B.z);
+          sp.local_bounds = T.bounds;
+        }
         sp.position = T.wp[0] * B.x + T.wp[1] * B.y + T.wp[2] * B.z;
         sp.normal = normalize(T.wn[0] * B.x + T.wn[1] * B.y + T.wn[2] * B.z);
         sp.geo_normal = T.geo_normal;
-        if (T.has_uv) {
+        if (T.has_uv && !T.uniform) {
           auto uv_at = [&](Vec3 b) { return T.uv[0] * b.x + T.uv[1] * b.y + T.uv[2] * b.z; };
           if (opt_.affine_uv) {
             /* Linear across the screen, as the PS1 drew textures: they swim and bend on
@@ -1460,7 +1512,7 @@ void Renderer3D::shade_deferred() {
         if (opt_.tex.active()) sp.tex = &opt_.tex;
         /* Live procedural textures (task 0031): the object-space size of this pixel, so a texture whose texel
          * is larger is evaluated here instead of magnified. Not for the reflective shadow map. */
-        if (!rsm_out_ && T.live) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
+        if (!rsm_out_ && T.live && !T.uniform) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
           sp.live_textures = true;
           auto lp = [&](Vec3 b) { return T.p[0] * b.x + T.p[1] * b.y + T.p[2] * b.z; };
           auto wp = [&](Vec3 b) { return T.wp[0] * b.x + T.wp[1] * b.y + T.wp[2] * b.z; };
@@ -1473,7 +1525,7 @@ void Renderer3D::shade_deferred() {
           sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
           sp.has_lightmap = true;
         }
-        if (T.has_tangent) {
+        if (T.has_tangent && !T.uniform) {  // (a normal map's: a uniform material has none)
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
         }
@@ -1535,7 +1587,8 @@ void Renderer3D::shade_deferred() {
             sp.probe = pq.irr;
           }
         }
-        SurfaceSample s = evaluate_material(*T.mat, *T.tex, sp);
+        SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
+        if (T.uniform) s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
         if (rsm_out_) {
           /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
           const size_t k = (size_t)y * W + x;

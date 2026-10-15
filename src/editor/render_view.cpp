@@ -31,6 +31,7 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 }
 
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
+  ProfileScope prof{prof_.ms_collect, {}};
   std::vector<DrawItem> items;
   /* (Of what is shown: the preview's own staleness while there is one.) */
   lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
@@ -272,6 +273,9 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     uint64_t k[3];
     g.evaluated_keys(k);
     mix(k, sizeof(k));
+    /* Settled tangents (ADR 0034): the same mesh drawn a little differently - the views draw again, nothing that
+     * keys on the evaluated meshes (a modifier stack's cache) sees a change. */
+    if (const MeshFilter *mf = g.mesh_filter(); mf && mf->mesh) mix(&mf->mesh->looks, 8);
   }
   if (outline) {  // a toon outline's thickness, colour and on / off (ADR 0020)
     const uint64_t oh = hash_component(*outline) ^ (uint64_t)outline->enabled << 63;
@@ -291,6 +295,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
 }
 
 uint64_t Editor::scene_render_hash(bool memo) {
+  ProfileScope prof{prof_.ms_hash, {}};
+  prof_.scene_hashes++;
   uint64_t h = 1469598103934665603ull;
   auto mix = [&](const void *p, size_t n) {
     const uint8_t *b = (const uint8_t *)p;
@@ -387,7 +393,10 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     uint64_t ck = 1469598103934665603ull ^ it.id;
     mixer(ck, it.model.m, sizeof(float) * 16);
     motion_keys.push_back(ck);  // what makes it "moving": its placement
-    mixer(ck, &it.mesh->serial, 8);
+    /* Its shape (task 0088): the Scene view's flat Edit Mode cache and the Game view's smooth one share it, so the two
+     * views share one map instead of each rendering its own every frame of a drag. */
+    const uint64_t shape = it.mesh->shape ? it.mesh->shape : it.mesh->serial;
+    mixer(ck, &shape, 8);
     if (it.materials)
       for (const MaterialPtr &m : *it.materials) {
         const uint64_t mv[3] = {(uint64_t)(uintptr_t)m.get(), m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
@@ -852,6 +861,7 @@ static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p,
     }
     auto m = std::make_shared<RenderMesh>(*it.mesh);
     m->serial = 0;
+    m->shape = 0;  // (its positions are snapped: not the mesh's shape any more)
     for (Vec3 &pos : m->positions) {
       const Vec4 c = mvp * Vec4(pos, 1.0f);
       if (!(c.w > 1e-6f)) continue;  // behind the camera: as it is
@@ -1337,8 +1347,8 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
   }
   const int n = ls.gi_resolution <= 0 ? 64 : ls.gi_resolution == 1 ? 128 : 256;
   VoxelGrid fit;
-  voxel_grid_fit(fit, bounds, n);
-  if (!fit.valid()) return nullptr;
+  voxel_grid_fit(fit, bounds, n, false);  // (its placement: the columns only if it's taken below)
+  if (fit.n <= 0) return nullptr;
   /* Keep the grid while the scene still fits it at the same voxel size (dragging the outermost object
    * would otherwise move the grid every 8 voxels and re-voxelize everything). */
   const bool keep = vgi.grid.valid() && vgi.grid.n == fit.n && vgi.grid.voxel == fit.voxel && bounds.min.x >= vgi.grid.origin.x &&
@@ -1346,6 +1356,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
                     bounds.max.x <= vgi.grid.origin.x + fit.n * fit.voxel && bounds.max.y <= vgi.grid.origin.y + VoxelGrid::kDepth * fit.voxel &&
                     bounds.max.z <= vgi.grid.origin.z + fit.n * fit.voxel;
   if (!keep && fit.key != vgi.grid.key) {  // a new grid: every object's voxels are re-made
+    voxel_grid_allocate(fit);
     vgi.grid = std::move(fit);
     vgi.objects.clear();
     vgi.assembled = 0;
@@ -1582,7 +1593,7 @@ uint64_t Editor::raster_opt_key() const {
   std::memcpy(&vs, &view_scale_, 4);  // Viewport Resolution Scale: a different picture in every view it applies to
   uint64_t k = (uint64_t)o.multithreaded | (uint64_t)o.backface_culling << 1 | (uint64_t)o.frustum_culling << 2 |
                (uint64_t)o.span_rows << 3 | (uint64_t)o.fast_setup << 4 | (uint64_t)o.affine_uv << 5 | (uint64_t)o.screen_door << 6 |
-               (uint64_t)o.shade << 8 | (uint64_t)(uint32_t)o.tile_size << 16;
+               (uint64_t)o.shade << 8 | (uint64_t)o.uniform_shading << 7 | (uint64_t)(uint32_t)o.tile_size << 16;
   uint32_t snap;
   std::memcpy(&snap, &o.vertex_snap, 4);
   k ^= (uint64_t)snap << 32;

@@ -55,7 +55,12 @@ struct VoxelGrid {
 /* Fits a grid of n x n columns (and 128 deep) around `bounds`: the voxel size is the smallest power of
  * two that covers the bounds, and the origin snaps to a multiple of 8 voxels, so small moves keep the
  * grid (and every object's spans). */
-void voxel_grid_fit(VoxelGrid &g, const AABB &bounds, int n);
+void voxel_grid_fit(VoxelGrid &g, const AABB &bounds, int n, bool allocate = true);
+/* A grid fitted with allocate = false has its placement (n, voxel, origin, key) but no columns yet: this makes them
+ * (task 0085: a view checks every frame whether its grid still fits, and allocated a fresh pyramid to find out). */
+void voxel_grid_allocate(VoxelGrid &g);
+/* Column pyramids made so far, process-wide (tests). */
+uint64_t voxel_grid_allocations();
 
 /* One object's voxels: for each column it touches, a run of set bits. */
 struct VoxelSpan {
