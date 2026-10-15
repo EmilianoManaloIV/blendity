@@ -1774,6 +1774,7 @@ void Editor::draw_profiler(const Recti &r) {
   u.label(lay.row(), "Scene view render breakdown (last frame)", u.theme.text_bright);
   auto stat = [&](const std::string &k, const std::string &v) {
     Recti row = lay.row();
+    if (u.record_buttons) u.button_rects[k] = row;  // (tests find a row by its name, as a button by its label)
     u.label({row.x, row.y, row.w / 2, row.h}, k, u.theme.text_dim);
     u.label({row.x + row.w / 2, row.y, row.w / 2, row.h}, v);
   };
@@ -1798,6 +1799,27 @@ void Editor::draw_profiler(const Recti &r) {
   stat("Shadow map", fp.shadow_renders ? strprintf("%.2f ms (rendered)", fp.ms_shadow) : std::string("reused"));
   stat("UI / present", strprintf("%.2f ms / %.2f ms", fp.ms_ui, fp.ms_present));
   stat("Views rendered / reused", strprintf("%llu / %llu", (unsigned long long)fp.view_renders, (unsigned long long)fp.view_cache_hits));
+  /* Task 0083: what the frames are really apart (the rate the screen sees, cap and timer included), and the parts
+   * an Edit Mode drag pays for. */
+  if (frame_stamps_.size() >= 2) {
+    std::vector<double> gaps;
+    for (size_t k = 1; k < frame_stamps_.size(); k++) gaps.push_back((frame_stamps_[k] - frame_stamps_[k - 1]) * 1000.0);
+    double mean = 0;
+    for (double g : gaps) mean += g;
+    mean /= (double)gaps.size();
+    std::sort(gaps.begin(), gaps.end());
+    const size_t p95 = std::min(gaps.size() - 1, (size_t)std::ceil(0.95 * (double)gaps.size()) - 1);  // (nearest rank)
+    stat("Between frames (last second)", strprintf("%.1f ms on average, 95%% within %.1f ms", mean, gaps[p95]));
+  }
+  stat("Draw items / scene hashes", strprintf("%.2f ms / %.2f ms (%llu)", fp.ms_collect, fp.ms_hash, (unsigned long long)fp.scene_hashes));
+  stat("Edit Mode: mesh writes / overlap check", strprintf("%.2f ms / %.2f ms", fp.ms_edit_apply, fp.ms_overlap));
+  stat("Lighting key / snapping", strprintf("%.2f ms (%llu) / %.2f ms", fp.ms_lighting_key, (unsigned long long)fp.lightmap_key_hashes, fp.ms_snap_pick));
+  const MeshCounts &mc = mesh_last_;
+  stat("Mesh copies / render meshes built / moved in place",
+       strprintf("%llu (%.1f ms) / %llu (%.1f ms) / %llu (%.1f ms)", (unsigned long long)mc.copies, mc.ms_copies, (unsigned long long)mc.full_builds,
+                 mc.ms_full_builds, (unsigned long long)mc.in_place, mc.ms_in_place));
+  stat("Tangents / edge tables built", strprintf("%llu (%.1f ms) / %llu (%.1f ms)", (unsigned long long)mc.tangent_builds, mc.ms_tangents,
+                                                   (unsigned long long)mc.edge_builds, mc.ms_edges));
 
   lay.space(u.px(6));
   draw_performance_settings(&lay);

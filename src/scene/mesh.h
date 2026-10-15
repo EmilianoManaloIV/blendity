@@ -131,10 +131,23 @@ struct Mesh {
 
 using MeshPtr = std::shared_ptr<Mesh>;
 
+/* What the meshes' caches cost, process-wide - every thread and every editor (task 0083: the Profiler, the stress
+ * suite and tests read it): how
+ * often a mesh was copied for an edit, its render mesh built from scratch or moved in place, its tangents and
+ * its edge table built, and the milliseconds each took. Subtract two readings for what happened in between. */
+struct MeshCounts {
+  uint64_t copies = 0, full_builds = 0, in_place = 0, tangent_builds = 0, edge_builds = 0;
+  double ms_copies = 0, ms_full_builds = 0, ms_in_place = 0, ms_tangents = 0, ms_edges = 0;
+  MeshCounts operator-(const MeshCounts &o) const;
+};
+MeshCounts mesh_counts();
+
 /* Copy-on-write: returns a uniquely owned mesh, cloning if shared. This is
  * Blender's implicit sharing (blender/source/blender/blenlib/BLI_implicit_sharing.hh)
  * and is what makes undo snapshots cheap. */
 MeshPtr &mesh_make_mutable(MeshPtr &m);
+/* A new copy of `m` (counted in MeshCounts::copies, as mesh_make_mutable's are). */
+MeshPtr mesh_copy(const Mesh &m);
 
 /* ------------------------------------------------------------- Primitives */
 /* Equivalent to blender/source/blender/bmesh/operators/bmo_primitive.cc and
