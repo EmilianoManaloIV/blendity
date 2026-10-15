@@ -314,6 +314,8 @@ void present_rows(Window *w, const uint32_t *pixels, int width, int height, cons
   if (!rows.empty()) present(w, pixels, width, height);
 }
 
+void *native_handle(Window *) { return nullptr; }  // (task 0095's swapchain spike is Windows only)
+
 void get_framebuffer_size(Window *w, int &width, int &height) {
   NSRect b = [w->view bounds];
   CGFloat s = [w->window backingScaleFactor];

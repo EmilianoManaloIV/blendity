@@ -19,6 +19,7 @@
 #include "../src/render/colormanagement.h"
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
+#include "../src/render/gpu_raster.h"
 #include "../src/render/realtime_lightmap.h"
 #include "../src/render/voxel_gi_gpu.h"
 #include "../src/core/cpu.h"
@@ -4379,6 +4380,303 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
 
 static void test_curved_surfaces(Report &rep, const Options &o);  // after main, with the crash handler
 
+/* Task 0095 (spike, amends ADR 0013): a rasterising GPU view against the CPU's, both ways to the window. */
+static std::vector<gpu::RasterVertex> raster_vertices(const RenderMesh &rm) {
+  std::vector<gpu::RasterVertex> v(rm.positions.size());
+  for (size_t i = 0; i < v.size(); i++) {
+    const Vec3 p = rm.positions[i], n = i < rm.normals.size() ? rm.normals[i] : Vec3(0, 1, 0);
+    v[i] = {{p.x, p.y, p.z}, {n.x, n.y, n.z}};
+  }
+  return v;
+}
+
+/* The spike's scene: editor_render's content, the CPU's view of it and the GPU's frame description. */
+struct GpuRasterScene {
+  static constexpr int W = 1920, H = 1080;
+  MeshPtr ico = primitives::ico_sphere(0.5f, 3), floor_mesh = primitives::plane(40.0f, 1), big = primitives::uv_sphere(1.0f, 256, 196);
+  std::vector<MaterialPtr> mats = {make_material("bench", {0.7f, 0.5f, 0.3f})}, mfloor = {make_material("floor", {0.8f, 0.8f, 0.8f})},
+                           mbig = {make_material("big", {0.4f, 0.6f, 0.8f})};
+  Scene grid = make_grid_scene(200, ico, 1.3f);
+  std::vector<DrawItem> items;
+  Bench3D b{W, H};
+  ShadowMap sm;
+
+  GpuRasterScene() {
+    add(&floor_mesh->render_mesh(), Mat4::translate({0, -0.6f, 0}), 1, &mfloor);
+    grid.for_each([&](GameObject &g) { add(&ico->render_mesh(), g.world_matrix(), (uint32_t)g.id + 3, &mats); });
+    add(&big->render_mesh(), Mat4::translate({0, 2, -8}), 2, &mbig);  // (last: its instance is the big mesh's)
+    AABB bounds;
+    for (auto &it : items) bounds.add(it.mesh->bounds.transformed(it.model));
+    render_shadow_map(sm, items, b.env.lights[0].direction, bounds, 2048);
+  }
+  void add(const RenderMesh *m, Mat4 model, uint32_t id, std::vector<MaterialPtr> *mm) {
+    DrawItem it;
+    it.mesh = m;
+    it.model = model;
+    it.id = id;
+    it.materials = mm;
+    items.push_back(it);
+  }
+  static void camera(int f, Mat4 &v, Mat4 &p, Vec3 &eye) {
+    const float a = 0.15f * (float)f;
+    eye = Vec3(std::sin(a) * 16.0f, 10.0f, -std::cos(a) * 16.0f);
+    v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0});
+    p = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 1000.0f);
+  }
+  void cpu_frame(int f) {
+    Mat4 v, p;
+    Vec3 eye;
+    camera(f, v, p, eye);
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env = b.env;
+    env.camera_pos = eye;
+    env.shadow = &sm;
+    env.shadow_light = 0;
+    b.r3d.begin(&b.rt, v, p, env, opt);
+    b.r3d.clear(0xFF303030);
+    for (auto &it : items) b.r3d.add(it);
+    b.r3d.flush();
+  }
+  gpu::RasterFrame gpu_frame(int f) const {
+    Mat4 v, p;
+    Vec3 eye;
+    camera(f, v, p, eye);
+    gpu::RasterFrame fr;
+    fr.width = W;
+    fr.height = H;
+    const Mat4 vp = p * v;
+    std::memcpy(fr.view_proj, vp.m, 64);
+    std::memcpy(fr.sun_view_proj, sm.view_proj.m, 64);
+    fr.eye[0] = eye.x, fr.eye[1] = eye.y, fr.eye[2] = eye.z;
+    fr.shadow_size = sm.size;
+    fr.shadow_bias = sm.bias;
+    for (const RenderLight &l : b.env.lights) fr.lights.push_back(light(l));
+    const Vec3 sky = b.env.sky, eq = b.env.equator, gr = b.env.ground;
+    fr.sky[0] = sky.x, fr.sky[1] = sky.y, fr.sky[2] = sky.z;
+    fr.equator[0] = eq.x, fr.equator[1] = eq.y, fr.equator[2] = eq.z;
+    fr.ground[0] = gr.x, fr.ground[1] = gr.y, fr.ground[2] = gr.z;
+    return fr;
+  }
+  static gpu::RasterLight light(const RenderLight &l) {
+    gpu::RasterLight g;
+    g.type = (int)l.type;
+    g.position[0] = l.position.x, g.position[1] = l.position.y, g.position[2] = l.position.z;
+    g.direction[0] = l.direction.x, g.direction[1] = l.direction.y, g.direction[2] = l.direction.z;
+    g.color[0] = l.color.x, g.color[1] = l.color.y, g.color[2] = l.color.z;
+    g.intensity = l.intensity;
+    g.range = l.range;
+    g.spot_cos_outer = l.cos_outer;
+    g.spot_cos_inner = l.cos_inner;
+    return g;
+  }
+  static gpu::RasterInstance instance(const DrawItem &it, uint32_t mesh) {
+    gpu::RasterInstance in;
+    std::memcpy(in.model, it.model.m, 64);
+    const Material &m = *(*it.materials)[0];
+    in.albedo_rough[0] = m.base_color.x, in.albedo_rough[1] = m.base_color.y, in.albedo_rough[2] = m.base_color.z, in.albedo_rough[3] = m.roughness;
+    in.metal_spec[0] = m.metallic;
+    in.metal_spec[1] = m.specular;
+    in.mesh = mesh;
+    in.id = it.id;
+    return in;
+  }
+  /* The meshes up and every object as an instance; false (with the reason) if the GPU refused any. */
+  bool upload(gpu::Raster &r, std::vector<gpu::RasterInstance> &inst, int &m_big, std::string &err) {
+    const int m_floor = r.add_mesh(raster_vertices(floor_mesh->render_mesh()), floor_mesh->render_mesh().indices, &err);
+    const int m_ico = r.add_mesh(raster_vertices(ico->render_mesh()), ico->render_mesh().indices, &err);
+    m_big = r.add_mesh(raster_vertices(big->render_mesh()), big->render_mesh().indices, &err);
+    if (m_floor < 0 || m_ico < 0 || m_big < 0) return false;
+    inst.clear();
+    for (size_t i = 0; i < items.size(); i++)
+      inst.push_back(instance(items[i], (uint32_t)(i == 0 ? m_floor : i + 1 == items.size() ? m_big : m_ico)));
+    r.set_instances(inst);
+    return true;
+  }
+};
+
+/* One card's (A) row: frames rendered and read back; a moved object; the 50k sphere's vertices sent again (the CPU's
+ * own mesh work for a drag is the same on both sides and left out); the picture at frame 0. False if anything failed. */
+static bool gpu_raster_card(Report &rep, GpuRasterScene &sc, const gpu::DeviceInfo &d, int frames, double cpu_ms, const std::vector<uint32_t> &cpu_px,
+                            const std::vector<uint32_t> &cpu_ids, double &ratio) {
+  std::string err;
+  auto failed = [&] {
+    rep.row({d.name, "(" + (err.empty() ? std::string("failed") : err) + ")", "-", "-", "-", "-", "-", "-", "-"});
+    return false;
+  };
+  std::unique_ptr<gpu::Raster> r = gpu::Raster::create(d.index, &err);
+  std::vector<gpu::RasterInstance> inst;
+  int m_big = -1;
+  if (!r || !sc.upload(*r, inst, m_big, err) || !r->render(sc.gpu_frame(1), &err)) return failed();
+  const int W = GpuRasterScene::W, H = GpuRasterScene::H;
+  std::vector<uint32_t> px((size_t)W * H), ids((size_t)W * H);
+  std::vector<float> depth((size_t)W * H);
+  gpu::RasterTimes gt;
+  double render_ms = 0, rb_ms = 0, moved_ms = 0, drag_ms = 0;
+  bool ok = true;
+  for (int f = 1; f <= frames && ok; f++) {
+    ScopedTimer t;
+    ok = r->render(sc.gpu_frame(f), &err);
+    render_ms += t.ms();
+    const gpu::RasterTimes ft = r->times();
+    gt.shadow += ft.shadow, gt.gbuffer += ft.gbuffer, gt.lighting += ft.lighting, gt.total += ft.total;
+    ScopedTimer tr;
+    ok = ok && r->read_back(px.data(), depth.data(), ids.data(), &err);
+    rb_ms += tr.ms();
+  }
+  for (int f = 1; f <= frames && ok; f++) {
+    ScopedTimer t;
+    inst[5].model[12] = 0.05f * (float)f;
+    r->set_instances(inst);
+    ok = r->render(sc.gpu_frame(0), &err) && r->read_back(px.data(), depth.data(), ids.data(), &err);
+    moved_ms += t.ms();
+  }
+  std::vector<gpu::RasterVertex> big_v = raster_vertices(sc.big->render_mesh());
+  for (int f = 1; f <= frames && ok; f++) {
+    ScopedTimer t;
+    big_v[24897].p[1] += 0.001f;
+    ok = r->update_mesh(m_big, big_v, &err) && r->render(sc.gpu_frame(0), &err) && r->read_back(px.data(), depth.data(), ids.data(), &err);
+    drag_ms += t.ms();
+  }
+  /* The picture at frame 0, as the CPU drew it: the sphere and every instance back where they were. */
+  big_v = raster_vertices(sc.big->render_mesh());
+  for (size_t i = 0; i < sc.items.size(); i++) inst[i] = GpuRasterScene::instance(sc.items[i], inst[i].mesh);
+  r->set_instances(inst);
+  ok = ok && r->update_mesh(m_big, big_v, &err) && r->render(sc.gpu_frame(0), &err) && r->read_back(px.data(), depth.data(), ids.data(), &err);
+  if (!ok) return failed();
+  render_ms /= frames, rb_ms /= frames, moved_ms /= frames, drag_ms /= frames;
+  const gpu::RasterMatch m = gpu::raster_match(cpu_px.data(), cpu_ids.data(), px.data(), ids.data(), W, H);
+  ratio = (render_ms + rb_ms) / cpu_ms;  // (two views each way: the ratio of one)
+  rep.row({d.name, strprintf("%.2f (%.2f / %.2f / %.2f)", gt.total / frames, gt.shadow / frames, gt.gbuffer / frames, gt.lighting / frames), f2(render_ms),
+           f2(render_ms + rb_ms), f2(moved_ms), f2(drag_ms), f2(ratio) + "x", strprintf("%.2f / %.1f %%", m.mean, 100.0 * m.within3),
+           strprintf("%.2f %% of %zu", 100.0 * m.ids_same, m.pixels)});
+  return true;
+}
+
+static void gpu_raster_stats(Report &rep, const std::string &what, std::vector<double> v, double *mean_out) {
+  double mean = 0;
+  for (double x : v) mean += x;
+  mean /= (double)v.size();
+  std::sort(v.begin(), v.end());
+  rep.row({what, std::to_string(v.size()), f2(mean), f2(v[std::min(v.size() - 1, (size_t)std::ceil(0.95 * (double)v.size()) - 1)])});
+  if (mean_out) *mean_out = mean;
+}
+
+/* (B) for one card: a window of its own, the view rendered and shown with the UI's changed rows each frame. */
+static bool gpu_raster_window(Report &rep, GpuRasterScene &sc, const gpu::DeviceInfo &d, int frames, int vx, int vy, double &mean) {
+  std::string err;
+  std::unique_ptr<gpu::Raster> r = gpu::Raster::create(d.index, &err);
+  platform::Window *w = r ? platform::create_window("Blendity stress: GPU view (swapchain)", 2400, 1300) : nullptr;
+  std::vector<gpu::RasterInstance> inst;
+  int m_big = -1;
+  bool ok = r && w && r->attach_window(platform::native_handle(w), &err) && sc.upload(*r, inst, m_big, err);
+  int fw = 0, fh = 0;
+  if (w) platform::get_framebuffer_size(w, fw, fh);
+  std::vector<uint32_t> canvas((size_t)std::max(fw, 1) * std::max(fh, 1), 0xFF2B2B2Bu);
+  ok = ok && r->render(sc.gpu_frame(0), &err) && r->present(canvas.data(), fw, fh, {{0, fh}}, vx, vy, &err);
+  std::vector<double> ms;
+  std::vector<platform::Event> ev;
+  for (int k = 0; k < frames && ok; k++) {
+    ev.clear();
+    platform::poll_events(w, ev, 0);
+    ScopedTimer t;
+    ok = r->render(sc.gpu_frame(k), &err);
+    for (int y = fh - 24; y < fh; y++) canvas[(size_t)y * fw + (k * 13) % fw] = 0xFF000000u | (uint32_t)(k * 977 + y);
+    ok = ok && r->present(canvas.data(), fw, fh, {{fh - 24, fh}}, vx, vy, &err);
+    ms.push_back(t.ms());
+  }
+  if (w) platform::destroy_window(w);
+  if (!ok || ms.empty()) {
+    rep.row({d.name + " (" + (err.empty() ? std::string("failed") : err) + ")", "-", "-", "-"});
+    return false;
+  }
+  gpu_raster_stats(rep, d.name + ": the view rendered, the UI's rows up, shown", ms, &mean);
+  return true;
+}
+
+static void test_gpu_raster(Report &rep, const Options &o) {
+  rep.title("GPU viewport spike 2 (task 0095): a rasterising GPU view vs the CPU's, two ways to the window",
+            "1080p, the editor_render scene's content: 200 icospheres, a floor and a 50k-face sphere, plain materials, a sun with "
+            "its 2048 shadow map (3x3 PCF), the camera orbiting. CPU: the deferred view with the shadow map cached (as in the "
+            "editor). GPU: Vulkan shadow pass (drawn every frame), G-buffer and full-screen lighting (the CPU's formulas), then (A) "
+            "colour, depth and ids read back into CPU memory every frame, or (B) shown through a swapchain with the UI canvas's "
+            "changed rows uploaded. Both are harder on the GPU than a viewport would be.");
+  rep.note(gpu::status());
+  const int frames = o.quick ? 6 : 30;
+  GpuRasterScene sc;
+  sc.cpu_frame(1);
+  ScopedTimer tc;
+  for (int f = 1; f <= frames; f++) sc.cpu_frame(f);
+  const double cpu_ms = tc.ms() / frames;
+  sc.cpu_frame(0);  // (the picture the GPU's is compared with)
+  const std::vector<uint32_t> cpu_px(sc.b.img.pixels.begin(), sc.b.img.pixels.end()), cpu_ids(sc.b.rt.ids.begin(), sc.b.rt.ids.end());
+  rep.table({"device", "GPU work ms (shadow / G-buffer / lighting)", "render, waited ms", "(A) + read-back ms", "moved object ms", "50k drag ms",
+             "(A) vs CPU", "picture: mean / within 3 (of 255)", "ids (covered, away from edges)"});
+  rep.row({"CPU (deferred + cached shadow map)", "-", f2(cpu_ms), "-", f2(cpu_ms), f2(cpu_ms), "1.00x", "-", "-"});
+  if (!gpu::available()) {
+    rep.note("No Vulkan GPU here: the spike needs one (the verdict is measured on the developer's machine).");
+    return;
+  }
+  /* A verdict only when every card was measured: one that failed leaves it open. */
+  double worst_a = 0;
+  size_t measured = 0;
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    double ratio = 0;
+    if (!gpu_raster_card(rep, sc, d, frames, cpu_ms, cpu_px, cpu_ids, ratio)) continue;
+    measured++;
+    worst_a = std::max(worst_a, ratio);
+  }
+  if (measured < gpu::devices().size()) rep.note("(A) verdict: none - not every card could be measured.");
+  else rep.note(strprintf("(A) verdict (ADR 0013: go at or under 0.50x on every card): the slowest card %.2fx, %s.", worst_a, worst_a <= 0.5 ? "go" : "no-go"));
+  /* (B): a real window. The CPU's way first (the view drawn, its rows presented), then each card's swapchain on a window
+   * of its own (a window shown through GDI and Vulkan at once would measure neither). */
+  platform::Window *w = platform::create_window("Blendity stress: GPU view (CPU present)", 2400, 1300);
+  if (!w || !platform::native_handle(w)) {
+    if (w) platform::destroy_window(w);
+    rep.note("(B) not measured: no native window here (the swapchain spike is Windows only).");
+    return;
+  }
+  const int W = GpuRasterScene::W, H = GpuRasterScene::H;
+  int fw = 0, fh = 0;
+  platform::get_framebuffer_size(w, fw, fh);
+  const int vx = std::max(0, (fw - W) / 2), vy = std::max(0, (fh - H) / 2);
+  std::vector<uint32_t> canvas((size_t)fw * fh, 0xFF2B2B2Bu);
+  std::vector<platform::Event> ev;
+  rep.table({"(B) device", "frames", "view + present, mean ms", "95% within ms"});
+  std::vector<double> cpu_b;
+  platform::present(w, canvas.data(), fw, fh);
+  for (int k = 0; k < frames * 2; k++) {
+    ev.clear();
+    platform::poll_events(w, ev, 0);
+    ScopedTimer t;
+    sc.cpu_frame(k);
+    for (int y = 0; y < H && vy + y < fh; y++)
+      std::memcpy(&canvas[(size_t)(vy + y) * fw + vx], &sc.b.img.pixels[(size_t)y * W], (size_t)std::min(W, fw - vx) * 4);
+    for (int y = fh - 24; y < fh; y++) canvas[(size_t)y * fw + (k * 13) % fw] = 0xFF000000u | (uint32_t)(k * 977 + y);
+    platform::present_rows(w, canvas.data(), fw, fh, {{vy, std::min(fh, vy + H)}, {fh - 24, fh}});
+    cpu_b.push_back(t.ms());
+  }
+  platform::destroy_window(w);
+  double cpu_b_ms = 1.0, worst_b = 0;
+  gpu_raster_stats(rep, "CPU: the view drawn, its rows presented", cpu_b, &cpu_b_ms);
+  measured = 0;
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    double g = 0;
+    if (!gpu_raster_window(rep, sc, d, frames * 2, vx, vy, g)) continue;
+    measured++;
+    worst_b = std::max(worst_b, g / cpu_b_ms);
+  }
+  if (measured < gpu::devices().size()) rep.note("(B) verdict: none - not every card could be measured.");
+  else
+    rep.note(strprintf("(B) verdict: GPU vs CPU, the slowest card %.2fx, %s (go at or under 0.50x on every card). Each GPU frame is rendered, "
+                       "presented and its copies waited for, one at a time (a viewport would overlap them); the system's own work after "
+                       "the present (the compositor's blit, a copy to the display's card) isn't timed, where the CPU row's GDI copy is.",
+                       worst_b, worst_b <= 0.5 ? "go" : "no-go"));
+  rep.note("Laptop (Iris Xe, estimated, not measured): about 1/7 of the RTX 3060 Ti's FP32 rate and 1/6 of its memory bandwidth, so "
+           "about 7x its GPU work; (A)'s read-back there is a copy within shared memory. Run with --laptop for the CPU row's laptop "
+           "setting.");
+}
+
 /* Task 0083: what headless runs can't see - putting a frame on a real window, and how evenly a frame-rate cap holds.
  * Opens a window, so it runs only when asked for by name (--only present); without a display it says so. */
 static void test_present(Report &rep, const Options &o) {
@@ -4529,11 +4827,13 @@ int main(int argc, char **argv) {
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
-               {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present}};
+               {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
+               {"gpu_raster", test_gpu_raster}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
     if (std::string(t.name) == "present" && o.only != "present") continue;  // (it opens a window: only when asked for)
+    if (std::string(t.name) == "gpu_raster" && o.only != "gpu_raster") continue;  // (a spike with windows: only when asked for)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);

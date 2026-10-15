@@ -541,6 +541,8 @@ void present_rows(Window *w, const uint32_t *pixels, int width, int height, cons
   ReleaseDC(w->hwnd, dc);
 }
 
+void *native_handle(Window *w) { return w ? (void *)w->hwnd : nullptr; }
+
 void get_framebuffer_size(Window *w, int &width, int &height) {
   RECT r;
   GetClientRect(w->hwnd, &r);

@@ -72,6 +72,8 @@ void present(Window *w, const uint32_t *pixels, int width, int height);
 void present_rows(Window *w, const uint32_t *pixels, int width, int height, const std::vector<std::pair<int, int>> &rows);
 
 void get_framebuffer_size(Window *w, int &width, int &height);
+/* The system's own handle (Win32: the HWND), for a GPU swapchain (task 0095's spike); null where there is none yet. */
+void *native_handle(Window *w);
 float dpi_scale(Window *w);
 void set_title(Window *w, const std::string &title);
 void set_cursor(Window *w, Cursor c);

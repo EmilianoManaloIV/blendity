@@ -19,6 +19,7 @@
 #include "../src/render/colormanagement.h"
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
+#include "../src/render/gpu_raster.h"
 #include "../src/render/lightmapper.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/shading.h"
@@ -29876,5 +29877,140 @@ static void round81_tests() {
     const std::vector<float> autod = r120_denoised(0, &backend);  // (the tests pin BLENDITY_DENOISE_DEVICE=cpu)
     CHECK(backend == "OpenImageDenoise");
     CHECK(autod == r120_denoised(1, nullptr));
+  });
+  /* ---------------------------------------------------------------- round 121: the GPU view spike (task 0095) */
+  test("gpu view (spike): asking for a GPU that isn't there fails cleanly, with a reason", [] {
+    std::string err;
+    CHECK(gpu::Raster::create(-1, &err) == nullptr);
+    CHECK(!err.empty());
+    err.clear();
+    CHECK(gpu::Raster::create(1000, &err) == nullptr);
+    CHECK(!err.empty());
+  });
+  test("gpu view (spike): a small deferred frame on the GPU looks like the CPU's (ids exact away from edges; skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const int W = 240, H = 135;
+    auto ico = primitives::ico_sphere(0.5f, 3);
+    auto floor_mesh = primitives::plane(12.0f, 1);
+    std::vector<MaterialPtr> mats = {make_material("a", {0.7f, 0.5f, 0.3f})}, mfloor = {make_material("f", {0.8f, 0.8f, 0.8f})};
+    mats[0]->roughness = 0.3f;
+    mats[0]->metallic = 0.2f;
+    std::vector<DrawItem> items;
+    auto add = [&](const RenderMesh *m, Mat4 model, uint32_t id, std::vector<MaterialPtr> *mm) {
+      DrawItem it;
+      it.mesh = m;
+      it.model = model;
+      it.id = id;
+      it.materials = mm;
+      items.push_back(it);
+    };
+    add(&floor_mesh->render_mesh(), Mat4::translate({0, -0.6f, 0}), 1, &mfloor);
+    for (int i = 0; i < 9; i++) add(&ico->render_mesh(), Mat4::translate({(i % 3 - 1) * 1.4f, 0, (i / 3 - 1) * 1.4f}), (uint32_t)(10 + i), &mats);
+    AABB bounds;
+    for (auto &it : items) bounds.add(it.mesh->bounds.transformed(it.model));
+    LightingEnv env;
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
+    env.lights.push_back(sun);
+    RenderLight point;
+    point.type = RenderLight::Point;
+    point.position = {1.5f, 1.5f, -1.5f};
+    point.color = {1.0f, 0.6f, 0.3f};
+    point.range = 6.0f;
+    env.lights.push_back(point);
+    RenderLight spot;  // (its cone's soft edge crosses the spheres)
+    spot.type = RenderLight::Spot;
+    spot.position = {-1.0f, 3.0f, -1.0f};
+    spot.direction = normalize(Vec3(0.3f, -1.0f, 0.4f));
+    spot.cos_outer = std::cos(30 * kDeg2Rad);
+    spot.cos_inner = std::cos(20 * kDeg2Rad);
+    spot.color = {0.4f, 0.6f, 1.0f};
+    spot.intensity = 2.0f;
+    spot.range = 8.0f;
+    env.lights.push_back(spot);
+    ShadowMap sm;
+    render_shadow_map(sm, items, sun.direction, bounds, 1024);
+    const Vec3 eye{3.5f, 4.0f, -5.0f};
+    const Mat4 v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 100.0f);
+    Image img;
+    img.resize(W, H);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, W, H});
+    Renderer3D r3d;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    env.camera_pos = eye;
+    env.shadow = &sm;
+    env.shadow_light = 0;
+    r3d.begin(&rt, v, p, env, opt);
+    r3d.clear(0xFF303030);
+    for (auto &it : items) r3d.add(it);
+    r3d.flush();
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g && err.find("no graphics queue") != std::string::npos) {  // (a compute-only device: nothing to draw with)
+      std::printf("    skipped: %s\n", err.c_str());
+      return;
+    }
+    CHECK(g != nullptr);
+    if (!g) {
+      std::printf("    %s\n", err.c_str());
+      return;
+    }
+    auto verts = [](const RenderMesh &rm) {
+      std::vector<gpu::RasterVertex> out(rm.positions.size());
+      for (size_t i = 0; i < out.size(); i++) out[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+      return out;
+    };
+    const int mf = g->add_mesh(verts(floor_mesh->render_mesh()), floor_mesh->render_mesh().indices, &err);
+    const int mi = g->add_mesh(verts(ico->render_mesh()), ico->render_mesh().indices, &err);
+    std::vector<gpu::RasterInstance> inst;
+    for (size_t i = 0; i < items.size(); i++) {
+      gpu::RasterInstance in;
+      std::memcpy(in.model, items[i].model.m, 64);
+      const Material &m = *(*items[i].materials)[0];
+      in.albedo_rough[0] = m.base_color.x, in.albedo_rough[1] = m.base_color.y, in.albedo_rough[2] = m.base_color.z, in.albedo_rough[3] = m.roughness;
+      in.metal_spec[0] = m.metallic;
+      in.metal_spec[1] = m.specular;
+      in.mesh = (uint32_t)(i == 0 ? mf : mi);
+      in.id = items[i].id;
+      inst.push_back(in);
+    }
+    g->set_instances(inst);
+    gpu::RasterFrame fr;
+    fr.width = W;
+    fr.height = H;
+    const Mat4 vp = p * v;
+    std::memcpy(fr.view_proj, vp.m, 64);
+    std::memcpy(fr.sun_view_proj, sm.view_proj.m, 64);
+    fr.eye[0] = eye.x, fr.eye[1] = eye.y, fr.eye[2] = eye.z;
+    fr.shadow_size = sm.size;
+    fr.shadow_bias = sm.bias;
+    for (const RenderLight &l : env.lights) {
+      gpu::RasterLight gl;
+      gl.type = (int)l.type;
+      gl.position[0] = l.position.x, gl.position[1] = l.position.y, gl.position[2] = l.position.z;
+      gl.direction[0] = l.direction.x, gl.direction[1] = l.direction.y, gl.direction[2] = l.direction.z;
+      gl.color[0] = l.color.x, gl.color[1] = l.color.y, gl.color[2] = l.color.z;
+      gl.intensity = l.intensity;
+      gl.range = l.range;
+      gl.spot_cos_outer = l.cos_outer;
+      gl.spot_cos_inner = l.cos_inner;
+      fr.lights.push_back(gl);
+    }
+    std::vector<uint32_t> px((size_t)W * H), ids((size_t)W * H);
+    CHECK(g->render(fr, &err) && g->read_back(px.data(), nullptr, ids.data(), &err));
+    const gpu::RasterMatch m = gpu::raster_match(img.pixels.data(), rt.ids.data(), px.data(), ids.data(), W, H);
+    std::printf("    %s: %zu covered pixels away from edges: mean %.2f / 255, %.1f %% within 3 / 255, ids %.2f %%\n", g->info().name.c_str(),
+                m.pixels, m.mean, m.within3 * 100, m.ids_same * 100);
+    /* ADR 0013's bar for a GPU view, on covered pixels away from silhouettes (where two rasterisers may each take a
+     * pixel the other doesn't): mean under 1/255, 99 % within 3/255, ids exact. */
+    CHECK(m.pixels > 5000);
+    CHECK(m.mean < 1.0);
+    CHECK(m.within3 >= 0.99);
+    CHECK(m.ids_same == 1.0);
   });
 }

@@ -432,6 +432,8 @@ void present_rows(Window *w, const uint32_t *pixels, int width, int height, cons
   XFlush(w->dpy);
 }
 
+void *native_handle(Window *) { return nullptr; }  // (task 0095's swapchain spike is Windows only)
+
 void get_framebuffer_size(Window *w, int &width, int &height) {
   width = w->width;
   height = w->height;

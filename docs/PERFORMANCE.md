@@ -10,6 +10,29 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## A GPU view, spike 2 (task 0095, ADR 0013 amended)
+
+`blendity_stress --only gpu_raster`, 1080p, the editor scene's content, two runs:
+
+| | CPU, one 1080p view (32 threads) | RTX 4070 SUPER | RTX 3060 Ti |
+|---|---|---|---|
+| GPU work: shadow / G-buffer / lighting | - | 0.05 / 0.15 / 0.05 ms | 0.08-0.09 / 0.21-0.24 / 0.09-0.10 ms |
+| rendered, waited for | 14.33-14.56 ms | 0.37 ms | 0.50-0.57 ms |
+| (A) plus colour, depth and ids read back | - | 2.67-2.70 ms (0.18-0.19x) | 5.71-5.78 ms (0.40x) |
+| a moved object / a 50k-face drag, (A) | 14.3-14.6 ms | 2.62-2.64 / 2.78-2.79 ms | 5.64-5.68 / 6.06-6.10 ms |
+| (B) rendered and shown in a window (the UI's changed rows up) | 16.52-16.77 ms (drawn, its rows presented) | 0.52 ms (0.03x) | 2.22 ms (0.13x) |
+| picture vs the CPU's (1.33 M covered pixels away from edges) | - | mean 0.32 / 255, 99.8 % within 3 / 255, ids 100 % | the same |
+
+Task 0015's no-go measured a path tracer standing in for a view. Drawing triangles costs the GPU under half a
+millisecond. What is left of (A) is reading back 24 MB a frame, and (B) skips even that. The CPU's view on the laptop
+setting is 40.1 ms raw.
+
+- **Where the comparison is harder on the GPU than a viewport would be:** the GPU draws its shadow map every frame (the
+  CPU's is cached). (A) reads back colour, depth and ids every frame, where a viewport would read ids only on a click.
+- **Where it is easier:** (B)'s timing ends at the GPU's copies. The system's own work after the present (the
+  compositor's blit, and a copy to the display's card for the RTX 3060 Ti) isn't timed, where the CPU's GDI copy is.
+  Even three times 2.2 ms stays under the bar.
+
 ## The denoiser on the GPU (task 0094)
 
 `blendity_stress --only pathtracer`, the denoiser table (this machine: 16-core Ryzen 9 5900XT, RTX 4070 SUPER), ms a

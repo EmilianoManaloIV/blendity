@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** none (ADR 0001: the same dependency, more of its modules)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/85
 
 ## Goal
 OpenImageDenoise always ran on the CPU (`oidn::DeviceType::CPU`). Blender's libraries ship its GPU modules too:

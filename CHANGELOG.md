@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 121): a GPU view, spike 2 - go (task 0095, ADR 0013 amended)
+
+**Asked:** "Can we look into rendering the editor with the GPU and not just the CPU?" The plan was a new spike first,
+both ways to the window, then a decision by its numbers. Then "Go for it".
+
+**Changed**
+- **A measurement, not a feature yet:** a Vulkan rasteriser (`gpu::Raster`) draws the editor scene's content at 1080p
+  the way the CPU's deferred view does (shadow map, G-buffer, the same lighting formulas). Then it either reads the
+  picture back (A) or shows it in a window through a swapchain (B). Stress section `--only gpu_raster`.
+- **Result, go on both cards:**
+  - the GPU's work is 0.3-0.4 ms a frame;
+  - (A) takes 2.7 ms on the RTX 4070 SUPER and 5.7 ms on the RTX 3060 Ti, against the CPU's 14.4 ms;
+  - (B) takes 0.5 and 2.2 ms, against 16.6 ms;
+  - the same picture: mean 0.32 / 255 on covered pixels, ids exact away from edges.
+
+  The laptop is estimated (Iris Xe isn't here): about 2.5 ms of GPU work, against the CPU's 56 ms on the laptop
+  setting. ADR 0013 records it. The GPU viewport itself waits for approval.
+
+**Checked**
+- New tests (round 121): asking for a GPU that isn't there fails cleanly with a reason; a small deferred frame (sun,
+  point and spot lights) on the GPU matches the CPU's (mean 0.08 / 255, 100 % within 3 / 255, ids exact; covered pixels
+  away from edges; skipped without a GPU).
+- Unit checks: Windows 10,349, 0 failed (711 tests); the whole suite in render-cache verify mode: 10,350,
+  0 failed, 0 stale pictures. Linux with libraries: 10,251, 0 failed. Sanitizer build: 10,143, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). The go stands; fixed: the verdict needs every card measured and every call in the
+timed loops is checked, explicit pass dependencies, the shadow map always cleared, the swapchain asked for only where
+the card lists it, one semaphore per swapchain image, the picture scored on covered pixels away from edges by one
+helper, and the shader takes the triangle's own normal and the material's specular as the CPU does.
+
 ## 2026-10-15 (round 120): the denoiser on the GPU (task 0094)
 
 **Asked:** "Can we also look into Cuda and Optix support?" - then "Go for it" on the plan: the denoiser first (no SDK),
