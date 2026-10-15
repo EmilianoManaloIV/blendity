@@ -246,12 +246,14 @@ void Editor::overlap_refresh() {
     return;
   }
   if (overlap_.mesh == m && overlap_.version == m->version && overlap_.obj == g->id) return;
+  ProfileScope prof{prof_.ms_overlap, {}};
   overlap_.mesh = m;
   overlap_.version = m->version;
   overlap_.obj = g->id;
   overlap_.verts.clear();
   overlap_.edges.clear();
   if (m->vert_count() > 200000) return;  // too big to check on every change
+  prof_.overlap_checks++;
   overlap_.verts = meshops::overlapping_vertices(*m, overlap_eps_);
   overlap_.edges = meshops::overlapping_edges(*m, overlap_eps_);
 }

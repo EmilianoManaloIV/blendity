@@ -28798,4 +28798,457 @@ static void round81_tests() {
     CHECK(!ed.show_libraries_for_test(json));
     CHECK(ed.show_libraries_for_test(json, extras));
   });
+  /* ---------------------------------------------------------------- round 109: measuring the editor's frames (task 0083) */
+  test("profiler: an Edit Mode drag with the Move gizmo is counted - the mesh's copy, its render mesh builds, the writes, the hashes", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const Vec3 wp = cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]);
+    const FrameProfile p0 = ed.frame_profile_totals();
+    const MeshCounts m0 = mesh_counts();
+    r34_gizmo_drag_x(ed, wp, 50);
+    const FrameProfile p = ed.frame_profile_totals();
+    const MeshCounts m = mesh_counts() - m0;
+    std::printf("    a 5-frame drag: %llu mesh copies, %llu render meshes built, %llu moved in place, %llu edge tables, %llu scene hashes; "
+                "writes %.3f ms\n",
+                (unsigned long long)m.copies, (unsigned long long)m.full_builds, (unsigned long long)m.in_place, (unsigned long long)m.edge_builds,
+                (unsigned long long)(p.scene_hashes - p0.scene_hashes), p.ms_edit_apply - p0.ms_edit_apply);
+    CHECK(m.copies >= 1);       // (the mesh was shared with the undo step: the first write copies it)
+    CHECK(m.full_builds + m.in_place >= 2);  // (every moved frame updates the render mesh: built, or moved in place)
+    CHECK(p.ms_edit_apply > p0.ms_edit_apply && p.scene_hashes > p0.scene_hashes);
+    /* Readings subtract field by field. */
+    MeshCounts a, b;
+    a.copies = 5, a.ms_edges = 2.5, b.copies = 2, b.ms_edges = 1.0;
+    const MeshCounts d = a - b;
+    CHECK(d.copies == 3 && std::fabs(d.ms_edges - 1.5) < 1e-9);
+  });
+
+  test("profiler: the Profiler window draws the time between frames and the mesh caches' work while a drag runs", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("window Profiler");
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && ed.window_rect_for_test(WindowKind::Profiler).w > 0);
+    if (cube) r34_gizmo_drag_x(ed, cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]), 40);
+    r34_steps(ed, 2);  // (drawn with a full second of frame times and a frame's mesh work: no crash, nothing out of range)
+    Recti r;
+    CHECK(ed.button_rect_for_test("Between frames (last second)", r));
+    CHECK(ed.button_rect_for_test("Mesh copies / render meshes built / moved in place", r));
+    CHECK(ed.button_rect_for_test("Edit Mode: mesh writes / overlap check", r));
+  });
+  /* ---------------------------------------------------------------- round 110: frame pacing (task 0084) */
+  test("pacing: a 60 fps cap holds with 13 ms frames even when every blocking wait is rounded up to a 15.6 ms timer tick", [] {
+    /* A pretend clock and a pretend wait as coarse as Windows' default timer: a blocking wait ends at the next tick
+     * after it was due; a wait of 0 just lets a tenth of a millisecond go by (a poll). */
+    double t = 0.0;
+    const double tick = 0.015625;
+    auto now = [&] { return t; };
+    auto coarse = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001;
+        return;
+      }
+      t = std::ceil((t + s) / tick) * tick;
+    };
+    auto run = [&](bool pacer_on) {
+      FramePacer pacer;
+      std::vector<double> gaps;
+      t = 0.0;
+      double last = 0.0, prev = -1.0;
+      for (int k = 0; k < 600; k++) {
+        if (pacer_on) pacer.wait_until(last + 1.0 / 60.0, now, coarse);
+        for (double wait = last + 1.0 / 60.0 - t; !pacer_on && wait > 0.0005; wait = last + 1.0 / 60.0 - t) coarse(wait);  // (the old loop)
+        if (prev >= 0) gaps.push_back((t - prev) * 1000.0);
+        prev = last = t;
+        t += 0.013;  // the frame's work
+      }
+      gaps.erase(gaps.begin(), gaps.begin() + 20);  // (after it has learnt)
+      double mean = 0;
+      for (double g : gaps) mean += g;
+      std::sort(gaps.begin(), gaps.end());
+      return std::make_pair(mean / (double)gaps.size(), gaps[gaps.size() * 95 / 100]);
+    };
+    const auto before = run(false), after = run(true);
+    std::printf("    between frames: waiting in poll_events %.1f ms (95%% within %.1f); the pacer %.2f ms (95%% within %.2f)\n", before.first, before.second,
+                after.first, after.second);
+    CHECK(before.first > 25.0);                                  // (what task 0083 measured: 33 fps)
+    /* 60 fps, 95 % of frames on time. (The margin that keeps the pacer from oversleeping a coarse tick shrinks now and
+     * then so it can't get stuck - the test below; under a coarse timer that costs a late frame in about seventy.) */
+    CHECK(std::fabs(after.first - 1000.0 / 60.0) < 0.3 && after.second < 17.2);
+  });
+
+  test("pacing: with a precise timer the pacer blocks for nearly all of the wait (no spinning)", [] {
+    double t = 0.0, blocked = 0.0;
+    int polls = 0;
+    auto now = [&] { return t; };
+    auto precise = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001, polls++;
+        return;
+      }
+      t += s + 0.0001;  // (a tenth of a millisecond late)
+      blocked += s;
+    };
+    FramePacer pacer;
+    for (int k = 0; k < 60; k++) pacer.wait_until(t + 0.004, now, precise);
+    std::printf("    60 waits of 4 ms: %.1f ms blocked, %d polls, margin %.2f ms\n", blocked * 1000.0, polls, pacer.lateness() * 1000.0);
+    CHECK(blocked > 0.8 * 60 * 0.004);
+    CHECK(pacer.lateness() < 0.001);
+  });
+
+  test("pacing: input wakes a wait early and the pacer goes on waiting until the frame's turn", [] {
+    double t = 0.0;
+    int calls = 0;
+    auto now = [&] { return t; };
+    auto woken = [&](double s) {  // every blocking wait is cut short by a mouse move after 2 ms
+      calls++;
+      t += s <= 0.0 ? 0.0001 : std::min(s, 0.002);
+    };
+    FramePacer pacer;
+    pacer.wait_until(0.016, now, woken);
+    CHECK(t >= 0.016 - 0.0001 && t < 0.0175);
+    CHECK(calls >= 7);  // (several waits, each woken)
+  });
+  test("present: only the bands of rows that changed go to the window; a size change or a paint request sends all of it", [] {
+    const int w = 300, h = 100;  // (100 rows: six 16-row bands and one of 4)
+    std::vector<uint32_t> px((size_t)w * h, 0xFF202020u);
+    std::vector<uint64_t> bands;
+    auto runs = Editor::changed_rows(px.data(), w, h, bands, false);
+    CHECK(runs.size() == 1 && runs[0].first == 0 && runs[0].second == h);  // (nothing presented yet: all)
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).empty());    // (the same frame again: nothing)
+    px[(size_t)20 * w + 7] = 0xFFFFFFFFu;                                  // one pixel in band 1 (rows 16-31)
+    px[(size_t)40 * w + 299] = 0xFF00FF00u;                                // and one in band 2 (rows 32-47), at a row's end
+    px[(size_t)99 * w + 0] = 0xFF0000FFu;                                  // and one in the short last band
+    runs = Editor::changed_rows(px.data(), w, h, bands, false);
+    std::printf("    %zu runs:", runs.size());
+    for (auto &r : runs) std::printf(" [%d, %d)", r.first, r.second);
+    std::printf("\n");
+    CHECK(runs.size() == 2 && runs[0] == std::make_pair(16, 48) && runs[1] == std::make_pair(96, 100));
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, true).size() == 1);  // (asked for all)
+    std::vector<uint32_t> taller((size_t)w * 120, 0xFF202020u);
+    runs = Editor::changed_rows(taller.data(), w, 120, bands, false);
+    CHECK(runs.size() == 1 && runs[0].second == 120);  // (a new size: all)
+  });
+  test("pacing: one very late wake-up (a debugger, a busy machine) doesn't leave the pacer polling for good", [] {
+    double t = 0.0, blocked = 0.0;
+    bool hiccup = true;
+    auto now = [&] { return t; };
+    auto wait = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001;
+        return;
+      }
+      t += s + (hiccup ? 0.030 : 0.0001);  // the first blocking wait ends 30 ms late; then on time
+      hiccup = false;
+      blocked += s;
+    };
+    FramePacer pacer;
+    double last = 0.0;
+    for (int k = 0; k < 200; k++) {
+      pacer.wait_until(last + 1.0 / 60.0, now, wait);
+      last = t;
+      t += 0.013;
+    }
+    const double before = blocked;
+    for (int k = 0; k < 20; k++) {
+      pacer.wait_until(last + 1.0 / 60.0, now, wait);
+      last = t;
+      t += 0.013;
+    }
+    std::printf("    after the hiccup: margin %.2f ms; the last 20 frames blocked %.1f ms of their waits\n", pacer.lateness() * 1000.0,
+                (blocked - before) * 1000.0);
+    CHECK(pacer.lateness() < 0.002);
+    CHECK(blocked - before > 20 * 0.002);  // (blocking again, not polling)
+  });
+
+  test("present: a change only in a pixel's top bits (alpha), in two places of one band, is still seen", [] {
+    const int w = 64, h = 16;
+    std::vector<uint32_t> px((size_t)w * h, 0xFF000000u);
+    std::vector<uint64_t> bands;
+    Editor::changed_rows(px.data(), w, h, bands, true);
+    px[1] ^= 0x80000000u;  // the top bit of the first 8-byte word
+    px[9] ^= 0x80000000u;  // and of another word in the same chain
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
+    px[3] ^= 0x80000000u;  // two words in different chains
+    px[5] ^= 0x80000000u;
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
+  });
+  /* ---------------------------------------------------------------- round 111: per-view waste (task 0085) */
+  test("voxel GI: moving an object inside the grid makes no new column pyramid; growing the scene past it makes one", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    GameObject *box = r35_add(ed, "Cube", "Box", {-3.0f, 0.5f, 2.0f}, {1, 1, 1}, Vec3(0.8f));
+    ed.commit_change("add Box");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r34_steps(ed, 3);
+    CHECK(ed.voxel_grid_for_test().valid());
+    const uint64_t a0 = voxel_grid_allocations();
+    for (int k = 0; k < 6; k++) {
+      box->set_local_position({-3.0f + 0.05f * k, 0.5f, 2.0f});
+      r34_steps(ed, 1);
+    }
+    const uint64_t moved = voxel_grid_allocations() - a0;
+    std::printf("    6 small moves: %llu new pyramids (before task 0085: one per view per frame)\n", (unsigned long long)moved);
+    CHECK(moved == 0);
+    CHECK(ed.voxel_grid_for_test().valid());
+    /* Far outside: the grid can't hold the scene any more - a new one, with its columns. */
+    box->set_local_position({60.0f, 0.5f, 2.0f});
+    r34_steps(ed, 2);
+    CHECK(voxel_grid_allocations() > a0 && ed.voxel_grid_for_test().valid());
+  });
+
+  test("voxel GI: a grid fitted without its columns has the same placement and key as one fitted with them", [] {
+    AABB b;
+    b.add({-3, 0, -2});
+    b.add({5, 4, 7});
+    VoxelGrid with, without;
+    voxel_grid_fit(with, b, 128);
+    voxel_grid_fit(without, b, 128, false);
+    CHECK(with.valid() && !without.valid());
+    CHECK(with.n == without.n && with.voxel == without.voxel && with.key == without.key);
+    CHECK(with.origin.x == without.origin.x && with.origin.y == without.origin.y && with.origin.z == without.origin.z);
+    voxel_grid_allocate(without);
+    CHECK(without.valid() && without.level_count() == with.level_count());
+    for (int l = 0; l < with.level_count(); l++) CHECK(without.levels[(size_t)l].size() == with.levels[(size_t)l].size());
+  });
+
+  test("shadows: a shadow map keeps no ids plane, and its depth is what it was with one", [] {
+    /* A small scene's sun shadow, rendered into a depth-only target; then the same into a full target (ids too). */
+    std::vector<MeshPtr> keep;
+    std::vector<DrawItem> items;
+    for (int i = 0; i < 3; i++) {
+      MeshPtr m = primitives::cube();
+      keep.push_back(m);
+      DrawItem it;
+      it.mesh = &m->render_mesh();
+      it.model = Mat4::translate({(float)i * 1.5f - 1.5f, 0.5f * i, 0.0f});
+      it.id = (uint32_t)(i + 1);
+      items.push_back(it);
+    }
+    const Mat4 view = Mat4::look_at({4, 6, 5}, {0, 0, 0}, {0, 1, 0});
+    const Mat4 proj = Mat4::ortho(5.0f, 1.0f, 0.1f, 30.0f);
+    RasterOptions opt;
+    opt.shade = ShadeMode::DepthOnly;
+    opt.backface_culling = false;
+    LightingEnv env;
+    RenderTarget shadow, full;
+    shadow.make_depth_only(256, 256);
+    CHECK(shadow.ids.empty() && shadow.depth.size() == 256u * 256u);
+    full.width = full.height = full.stride = 256;
+    full.resize_planes();
+    CHECK(full.ids.size() == 256u * 256u);
+    for (RenderTarget *rt : {&shadow, &full}) {
+      Renderer3D r;
+      r.begin(rt, view, proj, env, opt);
+      r.clear(0);
+      for (const DrawItem &it : items) r.add(it);
+      r.flush();
+    }
+    CHECK(shadow.depth == full.depth);
+    size_t hit = 0;
+    for (uint32_t id : full.ids) hit += id != 0;
+    CHECK(hit > 1000);  // (the full target did record what it drew)
+    CHECK(shadow.id_at(128, 128) == 0);
+  });
+  /* ---------------------------------------------------------------- round 112: the render mesh follows a drag in place (task 0086) */
+  /* Whether two render meshes draw the same: the same triangles from the same faces and corners, and bit for bit the
+   * same position, normal and UV at every triangle corner (an in-place cache can keep two vertices a rebuild would
+   * merge: it draws the same, so vertices aren't compared by number). */
+  auto r112_draw_same = [](const RenderMesh &a, const RenderMesh &b, std::string *why) {
+    auto fail = [&](const std::string &w) {
+      if (why) *why = w;
+      return false;
+    };
+    if (a.indices.size() != b.indices.size()) return fail(strprintf("%zu vs %zu triangle corners", a.indices.size(), b.indices.size()));
+    if (a.tri_face != b.tri_face || a.tri_material != b.tri_material) return fail("faces or materials of the triangles differ");
+    if (a.tri_corner != b.tri_corner) return fail("the triangulation differs");
+    const bool uv = !a.uvs.empty();
+    if (uv != !b.uvs.empty()) return fail("one has UVs");
+    for (size_t k = 0; k < a.indices.size(); k++) {
+      const uint32_t i = a.indices[k], j = b.indices[k];
+      if (std::memcmp(&a.positions[i], &b.positions[j], sizeof(Vec3)) != 0) return fail(strprintf("position at triangle corner %zu", k));
+      if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0) return fail(strprintf("normal at triangle corner %zu", k));
+      if (uv && std::memcmp(&a.uvs[i], &b.uvs[j], sizeof(Vec2)) != 0) return fail(strprintf("UV at triangle corner %zu", k));
+    }
+    return true;
+  };
+
+  test("Edit Mode: moving vertices updates the shaded mesh in place exactly as a rebuild would - flat and smooth, sharp edges, seams, n-gons, concave quads", [=] {
+    auto meshes = r63_meshes();
+    {
+      /* A dart (concave quad) and an L-shaped n-gon, next to a square, UVs on. */
+      MeshPtr m = std::make_shared<Mesh>();
+      for (Vec3 p : {Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(1, 0, 0.4f), Vec3(1, 0, 2), Vec3(3, 0, 0), Vec3(5, 0, 0), Vec3(5, 0, 1), Vec3(4, 0, 1),
+                     Vec3(4, 0, 3), Vec3(3, 0, 3)})
+        m->add_vert(p);
+      const uint32_t dart[] = {0, 1, 3, 2}, ell[] = {4, 5, 6, 7, 8, 9};
+      const Vec2 uv4[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}}, uv6[] = {{0, 0}, {1, 0}, {1, .3f}, {.5f, .3f}, {.5f, 1}, {0, 1}};
+      m->add_face(dart, 4, uv4);
+      m->add_face(ell, 6, uv6);
+      meshes.push_back({"dart and n-gon", m});
+    }
+    uint32_t seed = 112;  // (a small LCG: the same drags on every system)
+    auto rng = [&] { return (seed = seed * 1664525u + 1013904223u) >> 8; };
+    auto d = [&](decltype(rng) &r) { return (float)(r() % 3001) / 10000.0f - 0.15f; };
+    int cases = 0, in_place = 0, mismatches = 0;
+    for (auto &[name, base] : meshes) {
+      for (bool flat : {false, true}) {
+        MeshPtr m = std::make_shared<Mesh>(*base);
+        (void)m->render_mesh(flat);  // (the build the drag starts from)
+        for (int step = 0; step < 4; step++) {
+          /* A drag: a handful of vertices move, as a selection does. */
+          for (int k = 0; k < 6; k++) {
+            Vec3 &p = m->positions[rng() % m->positions.size()];
+            const float dx = d(rng), dy = d(rng), dz = d(rng);  // (in this order on every compiler)
+            p = p + Vec3(dx, dy, dz);
+          }
+          m->touch();
+          const MeshCounts c0 = mesh_counts();
+          const RenderMesh &got = m->render_mesh(flat);
+          in_place += (mesh_counts() - c0).in_place > 0;
+          Mesh ref = *m;
+          ref.forget_caches();
+          std::string why;
+          cases++;
+          if (!r112_draw_same(got, ref.render_mesh(flat), &why)) {
+            mismatches++;
+            std::printf("    %s, %s, step %d: %s\n", name.c_str(), flat ? "flat" : "as shaded", step, why.c_str());
+          }
+        }
+      }
+    }
+    std::printf("    %d drag steps on %zu meshes: %d followed in place, %d drew differently from a rebuild\n", cases, meshes.size(), in_place, mismatches);
+    CHECK(mismatches == 0);
+    CHECK(in_place >= cases * 3 / 4);  // (a step whose smoothing splits change rebuilds instead)
+  });
+
+  test("Edit Mode: a quad whose shorter diagonal changes during a drag is split the way a rebuild splits it", [=] {
+    Mesh m;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}) m.add_vert(p);
+    m.add_face({0, 1, 2, 3});
+    const std::vector<uint32_t> before = m.render_mesh().tri_corner;
+    m.positions[2] = Vec3(3, 0, 3);  // 0-2 is the long diagonal now
+    m.touch();
+    const std::vector<uint32_t> after = m.render_mesh().tri_corner;
+    Mesh ref = m;
+    ref.forget_caches();
+    std::string why;
+    CHECK(after != before);
+    CHECK(r112_draw_same(m.render_mesh(), ref.render_mesh(), &why));
+  });
+
+  test("Edit Mode: an extrude (new faces) builds the render mesh again; moving vertices keeps the edge table", [] {
+    MeshPtr m = primitives::cube(1.0f);
+    (void)m->render_mesh();
+    (void)m->edge_cache();
+    MeshCounts c0 = mesh_counts();
+    m->positions[0].y += 0.1f;
+    m->touch();
+    (void)m->render_mesh();
+    (void)m->edge_cache();
+    MeshCounts d = mesh_counts() - c0;
+    CHECK(d.in_place == 1 && d.full_builds == 0 && d.edge_builds == 0);
+    c0 = mesh_counts();
+    const uint32_t top[] = {2, 3, 7, 6};  // (any quad: a new face over existing vertices changes the topology)
+    m->add_face(top, 4);
+    m->touch();
+    (void)m->render_mesh();
+    (void)m->edge_cache();
+    d = mesh_counts() - c0;
+    CHECK(d.full_builds == 1 && d.in_place == 0 && d.edge_builds == 1);
+  });
+
+  test("Edit Mode: tangents follow a drag the quick way, within a few degrees of MikkTSpace, and settle() makes them MikkTSpace's", [=] {
+    MeshPtr m = primitives::uv_sphere(1.0f, 24, 16);
+    m->smooth = true;
+    (void)m->render_mesh_tangents();
+    for (int k = 0; k < 10; k++) m->positions[(size_t)(k * 23) % m->positions.size()].y += 0.05f;
+    m->touch();
+    const RenderMesh &quick = m->render_mesh_tangents();
+    CHECK(m->tangents_approximate());
+    Mesh ref = *m;
+    ref.forget_caches();
+    const RenderMesh &mikk = ref.render_mesh_tangents();
+    float worst = 0.0f;
+    for (size_t k = 0; k < quick.indices.size(); k++) {
+      const Vec4 a = quick.tangents[quick.indices[k]], b = mikk.tangents[mikk.indices[k]];
+      worst = std::max(worst, std::acos(std::min(1.0f, std::max(-1.0f, dot(a.xyz(), b.xyz())))) * kRad2Deg);
+    }
+    std::printf("    the quick tangents: at most %.2f degrees from MikkTSpace's\n", worst);
+    CHECK(worst < 10.0f);  // (Lengyel's gradients against MikkTSpace's splits: furthest apart in a UV sphere's pole fans; settle() below makes them exact)
+    const uint64_t v0 = m->version, l0 = m->looks;
+    CHECK(m->settle());
+    CHECK(m->version == v0 && m->looks != l0 && !m->tangents_approximate());  // (drawn again; the mesh itself unchanged)
+    const RenderMesh &settled = m->render_mesh_tangents();
+    bool same = settled.indices.size() == mikk.indices.size();
+    for (size_t k = 0; same && k < settled.indices.size(); k++)
+      same = std::memcmp(&settled.tangents[settled.indices[k]], &mikk.tangents[mikk.indices[k]], sizeof(Vec4)) == 0;
+    CHECK(same);
+    const uint64_t l1 = m->looks;
+    CHECK(!m->settle() && m->looks == l1);  // (nothing quick left: nothing to do)
+  });
+
+  test("Edit Mode: a drag that changes where smoothing splits builds the render mesh again, and NaN positions stay drawable", [=] {
+    /* Two faces meeting at 20 degrees, smoothing limited to 30: one smooth fan. Folding them to 60 splits it. */
+    Mesh m;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1), Vec3(-1, 0.36f, 1), Vec3(-1, 0.36f, 0)}) m.add_vert(p);
+    m.add_face({0, 1, 2, 3});
+    m.add_face({0, 3, 4, 5});
+    m.smooth = true;
+    m.smooth_angle = 30.0f;
+    (void)m.render_mesh();
+    MeshCounts c0 = mesh_counts();
+    m.positions[4].y = m.positions[5].y = 1.7f;  // about 60 degrees
+    m.touch();
+    const RenderMesh &got = m.render_mesh();
+    const MeshCounts d = mesh_counts() - c0;
+    Mesh ref = m;
+    ref.forget_caches();
+    std::string why;
+    CHECK(d.full_builds == 1);  // (the split changed: in place refused it)
+    CHECK(r112_draw_same(got, ref.render_mesh(), &why));
+    /* A NaN position: whatever path it takes, the result is a rebuild's. */
+    m.positions[2] = Vec3(std::nanf(""), 0, 1);
+    m.touch();
+    const RenderMesh &nan_got = m.render_mesh();
+    Mesh nan_ref = m;
+    nan_ref.forget_caches();
+    CHECK(nan_got.indices.size() == nan_ref.render_mesh().indices.size());
+    CHECK(nan_got.tri_corner == nan_ref.render_mesh().tri_corner);
+  });
+
+  test("Edit Mode: after a positions-only operator on a normal-mapped mesh, F9 can still adjust it (settling the tangents leaves the mesh's version)", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->get<MeshRenderer>()->material(0)->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0 1 2 3 4 5 6 7");
+    r34_steps(ed, 2);
+    ed.command("editop smooth");
+    r34_steps(ed, 3);  // (drawn - tangents follow in place - and the undo step committed, which settles them)
+    const Mesh &m = *ed.scene().find_by_name("Cube")->get<MeshFilter>()->mesh;
+    std::printf("    after the operator: %s, quick tangents %s\n", ed.last_op_name_for_test().c_str(), m.tangents_approximate() ? "left" : "settled");
+    CHECK(ed.last_op_name_for_test() == "smooth");
+    CHECK(ed.last_op_valid_for_test());
+    CHECK(!m.tangents_approximate());
+  });
 }

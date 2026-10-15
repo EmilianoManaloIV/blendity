@@ -95,6 +95,8 @@ bool Editor::lighting_out_of_date() {
   if (lighting_data_.empty()) return false;
   const uint64_t k = scene_render_hash() ^ hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }) * 31 ^ lighting_gen_ * 131;
   if (k != ood_key_) {
+    ProfileScope prof{prof_.ms_lighting_key, {}};
+    prof_.lightmap_key_hashes++;
     ood_key_ = k;
     ood_ = lighting_data_.scene_key != lightmap_scene_key();
   }
