@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 119): performance pass 10 written up (task 0093)
+
+**Asked:** the performance pass ("Let's increase overall editor performance in general"), its last task.
+
+**Changed**
+- **docs/PERFORMANCE.md, pass 10:** the before / after table on the laptop setting (x 1.4). The editor's own frames,
+  laptop setting: orbiting 13.1 -> 11.3 ms (88 fps), moving an object 27.3 -> 22.6 (44 fps), editing a material
+  colour 25.1 -> 21.9, playing 23.8 -> 20.6; Edit Mode drags on 50k faces 137 -> 46 ms (7 -> 22 fps); a 60 fps cap now
+  holds (30.6 -> 16.6 ms between frames). ADR 0026's laptop targets (60 fps orbiting, 30 fps editing) are met; the
+  plan's 60 fps while editing and 30 fps for 50k-face drags are not, and the write-up says what is left and why.
+  Next candidates refreshed (the Game view during a drag, the shader's shadow lookup, the sky, incremental overlap
+  checks). ADR 0026 notes the results.
+
+**Checked**
+- Docs only; every number is from a `blendity_stress --laptop --quality low` run on this machine (2026-10-15).
+
 ## 2026-10-15 (round 118): views nobody picks in keep no full-size depth and ids (task 0092)
 
 **Asked:** the performance pass ("carry on the next tasks").

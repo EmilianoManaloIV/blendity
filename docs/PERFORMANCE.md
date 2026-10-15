@@ -10,7 +10,37 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
-## Pass 10: viewport frame rate and big meshes in Edit Mode (tasks 0083-0091)
+## Pass 10: viewport frame rate and big meshes in Edit Mode (tasks 0083-0092)
+
+**Summary** (task 0093). `editor_render` on the laptop setting, ms a frame, raw (x 1.4 for the laptop):
+
+| Frame | Before the pass | After 0092 | On the laptop (x 1.4) |
+|---|---|---|---|
+| idle | 0.76 | 0.77 | 1.1 |
+| orbiting the Scene view | 9.36 | 8.04 | 11.3 (88 fps) |
+| moving an object | 19.53 | 16.12 | 22.6 (44 fps) |
+| editing a material colour | 17.96 | 15.66 | 21.9 (46 fps) |
+| playing | 16.97 | 14.70 | 20.6 (49 fps) |
+| Edit Mode: Move-gizmo drag, 50k faces | 97.75 | 33.09 | 46.3 (22 fps) |
+| Edit Mode: G, 50k faces | 100.20 | 31.32 | 43.8 (23 fps) |
+
+Pacing at a 60 fps cap with 13 ms frames: 30.6 → 16.6 ms between frames (95 % within 32.0 → 16.7); a present when
+nothing changed 2.42 → 0.07 ms.
+
+What the plan's targets came to:
+- **ADR 0026's laptop targets** (60 fps orbiting, 30 fps editing on Low): met - orbiting 88 fps, editing 44-49 fps.
+- **The plan's stretch, 60 fps while moving, editing materials and playing:** missed (44-49 fps on the
+  laptop). What is left of a moved-object frame: the Scene view 7.8 ms (its shading 3.8, sky 0.5), the Game view
+  6.3, the Camera Preview 1.3, the UI 0.8, the shadow map 0.5.
+- **Edit Mode drags on 50k faces, 30 fps:** missed (22-23 fps on the laptop, from 7). What is left: the Scene view
+  drawing the 50k-face mesh flat with its cage (19.2 ms, the cage 4.7), the Game view (11.2 ms), the render meshes
+  moved in place (5-7 ms, inside the views' gathering of draw items), the shadow map (3.7 ms), the UI (2.7 ms).
+- Pictures: the same throughout; the 8-wide shader (0091) the same on screen, its colours before display within
+  1.5e-5. Verify mode stayed at 0 stale pictures in every task.
+
+Honest negatives: the Realtime GI drag in Automatic mode (71 ms, the lighting update itself); the 8-wide shader's
+gain is held back by the per-pixel shadow lookup and end; 0092 saved 0.07 ms. Not done: reusing the sky between
+frames (it would change background pixels slightly), BVH face picking and snapping (not seen in the drag's numbers).
 
 The laptop setting (`blendity_stress --laptop --quality low --only editor_render`, and `--only present`, run on the
 development machine on 2026-10-15; raw times, multiply by 1.4 for the laptop's clock). `editor_render` rows, ms per
@@ -475,15 +505,19 @@ gradients): 6.6 ms, 8.3 ms with sharp edges (smoothing fans) (stress `modifiers_
 
 ## Next candidates
 
-- **Positions-only Edit Mode updates** (pass 6). Keep the triangulation, edges and n-gon regions while a
-  drag only moves vertices, and check overlaps incrementally.
+- **During an Edit Mode drag:** draw the Game view less often than the Scene view (it is a third of the drag), and
+  the 50k-face flat raster of the Scene view itself.
+- **The 8-wide shader's rest:** the shadow lookup (gathers) and each pixel's end (reflections, ambient) 8 at a time.
+- **The sky behind the views:** reuse it while the camera stays (0.5 ms a view), if slightly different background
+  pixels are acceptable.
+- **Incremental overlap checks** after an Edit Mode drag (a 50k-face mesh changed every frame outside a drag
+  costs 332 ms, the check included).
 
 Done since the last list: SIMD in the rasterizer (pass 3, in triangle setup rather than the per-pixel edge functions, which the timings showed aren't the bottleneck), a direct sparse solver for large LSCM islands (Eigen), and a real broad phase for physics (Jolt).
 
-1. An 8-pixels-at-a-time deferred shader (ISPC style), now the largest remaining cost of the Shaded view.
-2. SIMD vertex transform in the rasterizer's fused vertex stage (8 vertices per step).
-3. 4-wide BVH traversal in the built-in path tracer, for builds without Embree (GEA Vol. I 4.10).
-4. Reuse the path tracer's per-mesh BVH for Edit Mode face picking (currently linear in triangle count).
-5. Parallel mip-map generation for 4K+ textures.
-6. Replacing the per-component `std::map` in the scene loader with a flat vector.
-7. A uniform-grid broad phase for the fallback `physics_step` (O(bodies²) without Jolt).
+1. SIMD vertex transform in the rasterizer's fused vertex stage (8 vertices per step).
+2. 4-wide BVH traversal in the built-in path tracer, for builds without Embree (GEA Vol. I 4.10).
+3. Reuse the path tracer's per-mesh BVH for Edit Mode face picking (currently linear in triangle count).
+4. Parallel mip-map generation for 4K+ textures.
+5. Replacing the per-component `std::map` in the scene loader with a flat vector.
+6. A uniform-grid broad phase for the fallback `physics_step` (O(bodies²) without Jolt).

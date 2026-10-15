@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none (task 0050's resolution scale, narrowed)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/83
 
 ## Goal
 At a reduced viewport resolution (the laptop's Low tier draws at 67 %) every view scales its picture up and then
