@@ -2,6 +2,50 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-14 (round 108): installing without knowing GitHub - one-click downloads, releases of installers only (task 0082)
+
+**Asked:** "Remove build-pr71" (done: the release and its tag). "Note the installer in the releases and update the
+readMe in how to install. A non-technical person should be able to install it." "Have the release not contain the
+source files if the user doesn't want them. Only have an executable or similar on whatever platform it's downloaded
+to." Chosen: one-click links (v0.x releases are GitHub's Latest, still called pre-releases), extras moved aside.
+Then: "Make them artifacts" - a merged PR's build is no longer published as a release.
+
+**Changed**
+- **README, Download:** "Download for Windows / Mac / Linux" links that fetch the newest installer directly, then
+  step-by-step installs (Windows' "Windows protected your PC" > Run anyway; the Mac's Open Anyway; Linux's Allow
+  executing), uninstalling and first steps.
+- **Each release's notes** say which file to download and how to install it. An update inside Blendity still shows
+  only what changed.
+- **A release lists only the installers** (Blendity-Setup-Windows.exe, Blendity-macos.dmg, Blendity-linux-x86_64.AppImage)
+  and SHA256SUMS.txt. The libraries archives and the Linux .tar.gz moved to one "libraries" release that Blendity's
+  updater reads by itself. GitHub's own "Source code" files can't be removed from a release (GitHub adds them to
+  every one); the notes say they're for developers.
+- **0.10.0 and later 0.x versions** are GitHub's Latest release (so the links work), titled "(pre-release)"; Version
+  History calls them pre-releases. PR builds stay GitHub pre-releases.
+- **Merges into main make no release any more**, only build artifacts: a release comes from a `v*` tag, made when
+  the user asks for one ("Make them artifacts. I will let you know explicitly when I want a release.").
+- **Mac:** the app is signed ad hoc (when the signature verifies), so macOS offers Open Anyway instead of calling the
+  download damaged.
+
+**Review** (Opus code-reviewer). Fixed:
+- Builds installed before this change look for "Blendity-Setup-...": the Windows installer is
+  Blendity-Setup-Windows.exe, so they are still offered updates.
+- A 0.x beta would have become the Latest release (and the README's download): betas are checked first now, and
+  GitHub picks the Latest.
+- Tagged releases had lost their "what changed" notes: GitHub's summary of the merged PRs comes before the install
+  guide again.
+- The "libraries" release would have grown without end: it keeps tagged releases' archives and the newest 20 PR
+  builds'. The publishing script stops if an installer is missing, copes with no archives, and is split into steps.
+- Ad-hoc signing could fail on the bundle's data files: it is kept only when it verifies.
+
+**Checked**
+- New tests (round 108): an update's notes leave out the install guide; a release of version-free installers finds
+  its installer, takes its libraries from the "libraries" release by exact tag (build-pr7's never build-pr72's) and
+  the "libraries" release is never offered.
+- The publishing script against a stand-in `gh`: installers to the release, the rest to "libraries", a deleted
+  build's archive removed.
+- Unit checks: Windows 10,011, 0 failed (678 tests). Linux and the sanitizer build: on CI for this PR.
+
 ## 2026-10-14 (round 107): redo of material assets, tests that never touch the project, one version number (task 0081)
 
 **Asked:** merge the stack (done: #61-#71 into main); "push V1.0.0 (or whatever nomenclature you use for the first

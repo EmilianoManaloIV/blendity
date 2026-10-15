@@ -4,7 +4,7 @@
 - **Requirements:** R-04, R-01
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/72
 
 ## Goal
 The user (2026-10-14), after the stack #61-#71 was merged: "test material shouldn't be even in the project at all when

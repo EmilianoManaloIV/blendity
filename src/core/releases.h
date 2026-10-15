@@ -23,7 +23,7 @@ struct Asset {
 };
 
 struct Release {
-  std::string tag, name, notes, published;  // published: ISO 8601, sorts as text
+  std::string tag, name, notes, published;  // notes: what changed (without the install guide); published: ISO 8601
   bool prerelease = false;  // GitHub's flag: a PR's build, or a tagged version before 1.0 (v0.10.0)
   int pr = 0;  // the PR a build-pr<N> release was made from (a preview: offered only with previews on)
   std::vector<Asset> assets;
@@ -33,8 +33,11 @@ struct Release {
 std::vector<Release> parse(const std::string &json);
 /* The installer this system runs ("Blendity-Setup-*.exe", "*.AppImage", "*.dmg"), or null. */
 const Asset *installer(const Release &r, const std::string &platform);
-/* The libraries archive for the fallback (blendity-libs-<platform>-*), or null. */
-const Asset *libraries(const Release &r, const std::string &platform);
+/* The release holding every build's libraries archives (task 0082), so a release lists only its installers. */
+constexpr const char *kExtrasTag = "libraries";
+/* The libraries archive for the fallback of the build tagged `r.tag`: in the extras release
+ * (blendity-libs-<platform>-<tag>.*), or in `r` itself (releases made before task 0082). Null when neither has it. */
+const Asset *libraries(const Release &r, const Release *extras, const std::string &platform);
 /* SHA256SUMS.txt's asset, or null. */
 const Asset *checksums(const Release &r);
 /* The lower-case SHA-256 a SHA256SUMS.txt (sha256sum's format) gives for `file`, or "". */

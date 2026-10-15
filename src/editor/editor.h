@@ -584,8 +584,9 @@ class Editor {
     dialog_ = Dialog::Update;
   }
   const std::string &update_skip_for_test() const { return update_skip_; }
-  bool show_libraries_for_test(const std::string &json) {
+  bool show_libraries_for_test(const std::string &json, const std::string &extras = "") {
     upd_.list = releases::parse(json);
+    upd_.extras = extras.empty() ? std::vector<releases::Release>() : releases::parse("[" + extras + "]");
     return offer_libraries();
   }
   void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
@@ -2277,7 +2278,7 @@ class Editor {
   struct UpdateCheck {
     enum { Running, Done, Failed };
     std::atomic<int> state{Running};
-    std::string body, own, error;  // own: this build's release when the newest 100 don't include it
+    std::string body, own, extras, error;  // own: this build's release when the newest 100 don't include it
   };
   struct UpdateDownload {
     enum { Running, Verifying, Done, Failed };
@@ -2291,6 +2292,7 @@ class Editor {
     std::shared_ptr<UpdateCheck> check;
     std::shared_ptr<UpdateDownload> download;
     std::vector<releases::Release> list;
+    std::vector<releases::Release> extras;  // the libraries archives' release (task 0082), when GitHub has it
     std::string offer, selected;  // tags
     bool manual = false, history = false, want_libs = false, want_updates = false;
   } upd_;
@@ -2312,6 +2314,7 @@ class Editor {
   void poll_updates();
   void poll_update_download();
   const releases::Release *update_release(const std::string &tag) const;
+  const releases::Release *extras_release() const;
   void draw_release_notes(const releases::Release &r, int h);
   bool draw_update_progress();
   void draw_update_dialog(const std::function<void()> &close);

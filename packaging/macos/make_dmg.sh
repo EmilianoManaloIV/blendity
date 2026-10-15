@@ -22,6 +22,15 @@ plist="$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string blendity.icns" "$plist" 2>/dev/null ||
   /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile blendity.icns" "$plist"
+# An ad-hoc signature over the whole bundle (no certificate): an unsigned Apple-silicon app downloaded from the web can
+# be reported as "damaged"; signed ad hoc, macOS offers Open Anyway instead (README, Download; task 0082). If it
+# doesn't verify (the bundle holds data beside the programs), the build goes on and the README's
+# quarantine line covers "damaged".
+if codesign --force --deep --sign - "$APP" && codesign --verify --deep --strict "$APP"; then
+  echo "signed ad hoc"
+else
+  echo "warning: the ad-hoc signature over the bundle did not verify (its programs keep their own)" >&2
+fi
 STAGE=build/package/dmg
 rm -rf "$STAGE"
 mkdir -p "$STAGE"

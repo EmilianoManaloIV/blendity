@@ -2,13 +2,14 @@
 # - Each system gets an installer holding Blendity (the dependency-free build, which always starts) and Blendity-full
 #   (built with Blender's prebuilt libraries: Embree, OpenImageDenoise, OpenColorIO, Jolt, FFmpeg...). Blendity hands
 #   over to Blendity-full when its libraries load and the user wants them.
-# - The full build and its libraries are also a separate asset (blendity-libs-<system>-<version>), which a
+# - The full build and its libraries are also an archive (blendity-libs-<system>-<tag>, in the "libraries" release), which a
 #   dependency-free install downloads when the user agrees.
-# - A v* tag makes a GitHub Release, marked a pre-release while the version is 0.x or has a suffix (v1.0.0-beta.1);
-#   a pull request merged into main makes a pre-release `build-pr<N>` with the
-#   PR's description as its notes, so the updater (Help > Version History) can go back to the build before any PR.
-#   Every release carries SHA256SUMS.txt, which the updater checks downloads against.
-# - A pull request that touches packaging builds everything as artifacts to try (no release).
+# - Only a v* tag makes a GitHub Release - pushed when the user asks for one (v0.x: the Latest, titled a pre-release of
+#   the program; v1.0.0-beta.1: a GitHub pre-release). Every release carries SHA256SUMS.txt, which the updater checks
+#   downloads against. A release lists only the installers; the libraries archives go to the "libraries" release
+#   (packaging/publish_release.sh, task 0082).
+# - A pull request merged into main, and a pull request that touches packaging, build everything as artifacts to try
+#   (no release; the user's choice, 2026-10-14). A merge's build still knows its PR (BLENDITY_BUILD=build-pr<N>).
 # Blender's libraries are fetched at the commits pinned in packaging/blender-libs.txt (and cached).
 name: release
 
@@ -26,7 +27,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  # What this run is: a stable release, a merged PR's build, or a try-out (no release).
+  # What this run is: a release (a v* tag), or a build to try (a merge into main, a pull request): artifacts only.
   meta:
     runs-on: ubuntu-latest
     outputs:
@@ -46,7 +47,7 @@ jobs:
             tag="$GITHUB_REF_NAME" version="${GITHUB_REF_NAME#v}" release=true
           elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
             pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].number // empty' || true)
-            [ -n "$pr" ] && tag="build-pr$pr" release=true
+            [ -n "$pr" ] && tag="build-pr$pr"  # (artifacts only: releases come from v* tags)
           fi
           { echo "tag=$tag"; echo "pr=$pr"; echo "release=$release"; echo "version=$version"; } >> "$GITHUB_OUTPUT"
           echo "build: $tag (release: $release)"
@@ -223,32 +224,18 @@ jobs:
       group: release-publish
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: packaging
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: GitHub Release (with SHA256SUMS.txt)
+      - name: GitHub Release (installers only; libraries in the "libraries" release; SHA256SUMS.txt)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.meta.outputs.tag }}
-          PR: ${{ needs.meta.outputs.pr }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          mkdir out
-          cp artifacts/installer-*/dist/installers/* out/
-          (cd out && sha256sum * > SHA256SUMS.txt)
-          if [ -n "$PR" ]; then
-            gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body --jq '"## " + .title + "\n\n" + .body' > notes.md
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-              --title "Blendity $VERSION (PR #$PR)" --notes-file notes.md out/*
-          else
-            pre=()
-            title="Blendity $VERSION"
-            lead="Installers for Windows, Linux and macOS; SHA256SUMS.txt checks them."
-            if [[ "$VERSION" == 0.* || "$VERSION" == *-* ]]; then  # (before 1.0, or a beta: a pre-release of the program)
-              pre=(--prerelease)
-              title="Blendity $VERSION (pre-release)"
-              lead="A pre-release of Blendity: still being refined. $lead"
-            fi
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${pre[@]}" --title "$title" --generate-notes \
-              --notes "$lead" out/*
-          fi
+          mkdir built
+          cp artifacts/installer-*/dist/installers/* built/
+          bash packaging/publish_release.sh "$TAG" "$VERSION" "$PWD/built"

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Updates (task 0079, ADR 0033): Blendity asks GitHub's releases list which builds exist (every merged PR's
-// pre-release and the v* releases), offers a newer one with its notes, and installs it - or any older one from Help >
+// Updates (task 0079, ADR 0033): Blendity asks GitHub's releases list which builds exist (the v* releases, and any
+// PR build published as a preview), offers a newer one with its notes, and installs it - or any older one from Help >
 // Version History - after checking its SHA-256. The network work runs on background threads; the dialogs only read
 // what they left.
 #include "editor.h"
@@ -36,6 +36,7 @@ void Editor::start_update_check(bool manual, bool updates) {
     const bool ok = net::get(std::string(kReleases) + "?per_page=100", body, &error);
     const bool listed = body.find("\"tag_name\":\"" + own + "\"") != std::string::npos;
     if (ok && own != "dev" && !listed) net::get(std::string(kReleases) + "/tags/" + own, job->own, nullptr);
+    if (ok) net::get(std::string(kReleases) + "/tags/" + releases::kExtrasTag, job->extras, nullptr);  // (libraries)
     job->body = std::move(body);
     job->error = std::move(error);
     job->state.store(ok ? UpdateCheck::Done : UpdateCheck::Failed);
@@ -58,6 +59,7 @@ void Editor::poll_updates() {
   upd_.list = releases::parse(job->body);
   const std::vector<releases::Release> own = releases::parse("[" + job->own + "]");
   if (!own.empty() && !update_release(own[0].tag)) upd_.list.push_back(own[0]);  // (older than the 100 listed: last)
+  upd_.extras = job->extras.empty() ? std::vector<releases::Release>() : releases::parse("[" + job->extras + "]");
   const auto newer = releases::newer(upd_.list, releases::build_tag(), releases::platform(), update_previews_);
   upd_.offer = newer.empty() ? "" : newer.front()->tag;
   if (dialog_ == Dialog::History) return;  // (Version History was waiting for the list: it shows it now)
@@ -71,6 +73,9 @@ void Editor::poll_updates() {
   upd_.selected = upd_.offer;
   dialog_ = Dialog::Update;
 }
+
+/* The release holding the libraries archives, or null (not fetched, or none on GitHub). */
+const releases::Release *Editor::extras_release() const { return upd_.extras.empty() ? nullptr : &upd_.extras[0]; }
 
 const releases::Release *Editor::update_release(const std::string &tag) const {
   for (const releases::Release &r : upd_.list)
@@ -189,7 +194,7 @@ void Editor::draw_history_dialog(const std::function<void()> &close) {
     const bool mine = r->tag == releases::build_tag(), sel = r->tag == upd_.selected;
     if (sel) u.canvas.fill_rect(row, u.theme.selection);
     if (u.hovered(row) && u.in.pressed[0]) upd_.selected = r->tag;
-    const std::string label = r->name + "   " + r->published.substr(0, 10) + (r->pr ? "   preview" : r->prerelease ? "   pre-release" : "   stable") + (mine ? "   (this build)" : "");
+    const std::string label = r->name + "   " + r->published.substr(0, 10) + (r->pr ? "   preview" : r->prerelease || r->tag.rfind("v0.", 0) == 0 ? "   pre-release" : "   stable") + (mine ? "   (this build)" : "");
     u.label({row.x + u.px(6), row.y, row.w - u.px(8), row.h}, label, mine ? u.theme.text_bright : u.theme.text);
   }
   content = (int)builds.size() * rh + u.px(4);
@@ -316,7 +321,7 @@ void Editor::check_libraries_at_start() {
 bool Editor::offer_libraries() {
   upd_.want_libs = false;
   const releases::Release *mine = update_release(releases::build_tag());
-  const releases::Asset *a = mine ? releases::libraries(*mine, releases::platform()) : nullptr;
+  const releases::Asset *a = mine ? releases::libraries(*mine, extras_release(), releases::platform()) : nullptr;
   if (!a || !releases::checksums(*mine)) {
     Log::info("Libraries: none to download for this build (%s)", releases::build_label().c_str());
     return false;
@@ -330,7 +335,7 @@ bool Editor::offer_libraries() {
 void Editor::draw_libraries_dialog(const std::function<void()> &close) {
   auto &u = ui_;
   const releases::Release *r = update_release(upd_.selected);
-  const releases::Asset *a = r ? releases::libraries(*r, releases::platform()) : nullptr;
+  const releases::Asset *a = r ? releases::libraries(*r, extras_release(), releases::platform()) : nullptr;
   if (!a) return close();
   const std::string size = strprintf("%.0f MB", a->size / 1048576.0);
   for (const std::string &l : {launch::status().reason + ", so Blendity runs on its own code.",

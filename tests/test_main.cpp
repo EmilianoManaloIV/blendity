@@ -28762,4 +28762,40 @@ static void round81_tests() {
     set_asset_root(was);
     CHECK(p.rfind(fs::normalize(test_dir()), 0) == 0);
   });
+
+  /* ---------------------------------------------------------------- round 108: install guide in the releases (task 0082) */
+  test("updates: an update shows what changed, not the release page's install guide", [] {
+    const std::vector<releases::Release> all = releases::parse(
+        "[{\"tag_name\":\"v0.10.0\",\"name\":\"Blendity 0.10.0\",\"body\":\"Faster renders.\\n\\n<!-- install -->\\n## How to install\\nDownload one file\","
+        "\"published_at\":\"2026-10-15T00:00:00Z\",\"prerelease\":true,\"assets\":[]},"
+        "{\"tag_name\":\"build-pr72\",\"name\":\"x\",\"body\":\"<!-- install -->\\n## How to install\",\"published_at\":\"2026-10-14T00:00:00Z\",\"assets\":[]}]");
+    std::printf("    notes: '%s' and '%s'\n", all.size() > 0 ? all[0].notes.c_str() : "-", all.size() > 1 ? all[1].notes.c_str() : "-");
+    CHECK(all.size() == 2 && all[0].notes == "Faster renders." && all[1].notes.empty());
+  });
+
+  test("updates: a release lists only its installers; the libraries come from the extras release, matched by tag", [] {
+    const std::string p = releases::platform();
+    const std::string inst = p == "windows" ? "Blendity-Setup-Windows.exe" : p == "linux" ? "Blendity-linux-x86_64.AppImage" : "Blendity-macos.dmg";
+    const std::string own = releases::build_tag();
+    const std::string json = strprintf("[{\"tag_name\":\"%s\",\"name\":\"this\",\"body\":\"\",\"published_at\":\"2026-10-20T00:00:00Z\",\"prerelease\":false,"
+                                       "\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"https://x/i\",\"size\":5},"
+                                       "{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://x/s\",\"size\":10}]}]",
+                                       own.c_str(), inst.c_str());
+    const std::string extras = strprintf("{\"tag_name\":\"libraries\",\"name\":\"Libraries\",\"body\":\"\",\"published_at\":\"2026-10-01T00:00:00Z\",\"prerelease\":true,"
+                                         "\"assets\":[{\"name\":\"blendity-libs-%s-%s7.zip\",\"browser_download_url\":\"https://x/wrong\",\"size\":1},"
+                                         "{\"name\":\"blendity-libs-%s-%s.zip\",\"browser_download_url\":\"https://x/right\",\"size\":157286400}]}",
+                                         p.c_str(), own.c_str(), p.c_str(), own.c_str());
+    const std::vector<releases::Release> all = releases::parse(json), ex = releases::parse("[" + extras + "]");
+    CHECK(all.size() == 1 && ex.size() == 1 && releases::installer(all[0], p));  // (the version-free installer name)
+    const releases::Asset *a = all.empty() || ex.empty() ? nullptr : releases::libraries(all[0], &ex[0], p);
+    std::printf("    this build (%s): libraries %s\n", own.c_str(), a ? a->url.c_str() : "none");
+    CHECK(a && a->url == "https://x/right");
+    CHECK(all.empty() || !releases::libraries(all[0], nullptr, p));  // (no extras release: nothing to offer)
+    /* The extras release itself has no installer: never offered as an update or in Version History. */
+    CHECK(releases::installable(ex, p, true).empty());
+    Editor ed;
+    ed.init_headless(1280, 720);
+    CHECK(!ed.show_libraries_for_test(json));
+    CHECK(ed.show_libraries_for_test(json, extras));
+  });
 }

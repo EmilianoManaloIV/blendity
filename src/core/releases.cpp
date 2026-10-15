@@ -56,6 +56,13 @@ static Release release_from(const Json &j) {
   r.tag = j["tag_name"].str;
   r.name = j["name"].str.empty() ? r.tag : j["name"].str;
   r.notes = j["body"].str;
+  /* The release page's install guide (packaging/install-notes.md) is for people downloading by hand, not the
+   * "what's new" an update shows. */
+  const size_t guide = r.notes.find("<!-- install -->");
+  if (guide != std::string::npos) {
+    r.notes.erase(guide);
+    while (!r.notes.empty() && std::isspace((unsigned char)r.notes.back())) r.notes.pop_back();
+  }
   r.published = j["published_at"].str;
   r.prerelease = j["prerelease"].type == Json::Bool && j["prerelease"].b;
   if (r.tag.rfind("build-pr", 0) == 0) r.pr = std::atoi(r.tag.c_str() + 8);
@@ -88,10 +95,14 @@ const Asset *installer(const Release &r, const std::string &platform) {
   return nullptr;
 }
 
-const Asset *libraries(const Release &r, const std::string &platform) {
+const Asset *libraries(const Release &r, const Release *extras, const std::string &platform) {
   const std::string prefix = "blendity-libs-" + platform + "-";
   for (const Asset &a : r.assets)
     if (a.name.rfind(prefix, 0) == 0) return &a;
+  if (!extras) return nullptr;
+  const std::string mine = prefix + r.tag + ".";  // (".zip" / ".tar.gz": "build-pr7" never matches build-pr72's)
+  for (const Asset &a : extras->assets)
+    if (a.name.rfind(mine, 0) == 0) return &a;
   return nullptr;
 }
 
