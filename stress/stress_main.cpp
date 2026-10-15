@@ -1037,10 +1037,37 @@ static void test_editor_render(Report &rep, const Options &o) {
   });
   row("orbiting the Scene view", [&](int k) { ed.command(strprintf("camera %d 20 14", 30 + k * 3)); ed.step_frame_headless(); });
   GameObject *mover = ed.scene().find_by_name("Icosphere");
+  const FrameProfile mp0 = ed.frame_profile_totals();
   row("moving an object", [&](int k) {
     if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.0f});
     ed.step_frame_headless();
   });
+  {
+    /* Task 0085: what the views' own setup costs around the rasterizer (n + 1 frames: the warm-up's too). */
+    const FrameProfile p = ed.frame_profile_totals();
+    const double f = n + 1;
+    rep.note(strprintf("Moving an object, per frame: gathering the views' draw items %.2f ms, scene hashes %.2f ms (%.1f of them)",
+                       (p.ms_collect - mp0.ms_collect) / f, (p.ms_hash - mp0.ms_hash) / f, (p.scene_hashes - mp0.scene_hashes) / f));
+  }
+  {
+    /* Task 0091: the same moves with the 8-wide shader off and on again, back to back (the picture is the same). */
+    auto moves = [&](int base) {
+      return time_ms([&] {
+        static int k = 0;
+        if (mover) mover->set_local_position({0.1f * (base + (k++ % 9)), 1.0f, 0.0f});
+        ed.step_frame_headless();
+      }, n);
+    };
+    ed.command("raster simd off");
+    const double off = moves(40);
+    const RasterStats s_off = ed.scene_stats_for_test();
+    ed.command("raster simd on");
+    const double on = moves(60);
+    const RasterStats s_on = ed.scene_stats_for_test();
+    rep.note(strprintf("Moving an object with the 8-wide shader off / on: %.2f / %.2f ms a frame; the Scene view's shading %.2f / %.2f ms "
+                       "(%zu pixels lit 8 at a time)",
+                       off, on, s_off.ms_shade, s_on.ms_shade, s_on.pixels_simd));
+  }
   {
     /* Where a moved frame's raster time goes, view by view (task 0050 profiled the minimum machine with this). */
     const RasterStats &s = ed.scene_stats_for_test(), &g = ed.game_stats_for_test();
@@ -1131,6 +1158,77 @@ static void test_editor_render(Report &rep, const Options &o) {
     }
     rep.note(strprintf("Edit Mode drag on the 50k-face mesh, per move: render mesh rebuilt %.1f ms, tangents %.1f ms, edge table %.1f ms.",
                        rm / n, tg / n, ec / n));
+  }
+  /* Task 0083: real drags on the 50k-face mesh, through the mouse and keys as a person makes them - the Move gizmo
+   * on one vertex, and G (the modal transform) - with where each frame goes. */
+  {
+    const Mesh &m0 = *big->get<MeshFilter>()->mesh;
+    size_t front = 0;  // the vertex facing the camera: the one furthest along +z
+    for (size_t v = 1; v < m0.vert_count(); v++)
+      if (m0.positions[v].z > m0.positions[front].z) front = v;
+    const Vec3 wp = big->world_matrix().point(m0.positions[front]);
+    ed.command(strprintf("vsel %zu", front));
+    ed.command(strprintf("camera 0 10 4 %g %g %g", wp.x, wp.y, wp.z));
+    ed.command("tool move");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int px = 0, py = 0;
+    const bool on_screen = ed.project_to_window(wp, px, py);
+    auto mouse = [&](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    auto key = [&](int k, int x, int y) {
+      platform::Event d = mouse(ET::KeyDown, x, y), u = mouse(ET::KeyUp, x, y);
+      d.key = u.key = k;
+      ed.step_frame_headless({d, u});
+    };
+    /* What a row's frames did beyond the table's columns: the drag's parts and the mesh caches' work. */
+    auto drag_note = [&](const char *what, const FrameProfile &p0, const MeshCounts &m0c, int frames) {
+      const FrameProfile p = ed.frame_profile_totals();
+      const MeshCounts mc = mesh_counts() - m0c;
+      const double f = frames;
+      rep.note(strprintf("%s, per frame: mesh writes %.2f ms, overlap check %.2f ms (%.1f), lighting key %.2f ms, snapping %.2f ms, "
+                         "draw items %.2f ms, scene hashes %.2f ms (%.1f); mesh copies %.1f (%.2f ms), render meshes built %.1f (%.2f ms), "
+                         "moved in place %.1f (%.2f ms), tangents %.1f (%.2f ms), edge tables %.1f (%.2f ms).",
+                         what, (p.ms_edit_apply - p0.ms_edit_apply) / f, (p.ms_overlap - p0.ms_overlap) / f, (p.overlap_checks - p0.overlap_checks) / f,
+                         (p.ms_lighting_key - p0.ms_lighting_key) / f, (p.ms_snap_pick - p0.ms_snap_pick) / f, (p.ms_collect - p0.ms_collect) / f,
+                         (p.ms_hash - p0.ms_hash) / f, (p.scene_hashes - p0.scene_hashes) / f, mc.copies / f, mc.ms_copies / f, mc.full_builds / f,
+                         mc.ms_full_builds / f, mc.in_place / f, mc.ms_in_place / f, mc.tangent_builds / f, mc.ms_tangents / f, mc.edge_builds / f,
+                         mc.ms_edges / f));
+    };
+    const Vec3 before = m0.positions[front];
+    FrameProfile p0 = ed.frame_profile_totals();
+    MeshCounts c0 = mesh_counts();
+    row("Edit Mode: dragging a vertex of the 50k-face mesh with the Move gizmo", [&](int k) {
+      if (k == 0) {  // (the warm-up frame presses the gizmo's X arm)
+        ed.step_frame_headless({mouse(ET::MouseMove, px + 55, py)});
+        ed.step_frame_headless({mouse(ET::MouseDown, px + 55, py)});
+        p0 = ed.frame_profile_totals(), c0 = mesh_counts();
+        return;
+      }
+      ed.step_frame_headless({mouse(ET::MouseMove, px + 55 + 2 * k, py)});
+    });
+    drag_note("The Move gizmo drag", p0, c0, n);
+    ed.step_frame_headless({mouse(ET::MouseUp, px + 55 + 2 * n, py)});
+    const Vec3 after = big->get<MeshFilter>()->mesh->positions[front];
+    rep.note(strprintf("(The gizmo drag %s: vertex %zu %s.)", on_screen ? "started on screen" : "did NOT find the vertex on screen", front,
+                       length(after - before) > 1e-5f ? "moved" : "did NOT move"));
+    if (length(after - before) > 1e-5f) ed.command("undo");  // (only the drag's own step: a missed drag made none)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    row("Edit Mode: G (moving a vertex of the 50k-face mesh with the mouse)", [&](int k) {
+      if (k == 0) {
+        ed.step_frame_headless({mouse(ET::MouseMove, px + 40, py)});
+        key(platform::KEY_G, px + 40, py);
+        p0 = ed.frame_profile_totals(), c0 = mesh_counts();
+        return;
+      }
+      ed.step_frame_headless({mouse(ET::MouseMove, px + 40 + 2 * k, py + k)});
+    });
+    drag_note("G", p0, c0, n);
+    rep.note(strprintf("(G %s.)", ed.transform_active_for_test() ? "was running" : "was NOT running"));
+    key(platform::KEY_ESCAPE, px + 40 + 2 * n, py + n);
+    ed.step_frame_headless();
   }
   ed.command("edit off");
   ed.command("select Main Camera");
@@ -4254,6 +4352,97 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
 
 static void test_curved_surfaces(Report &rep, const Options &o);  // after main, with the crash handler
 
+/* Task 0083: what headless runs can't see - putting a frame on a real window, and how evenly a frame-rate cap holds.
+ * Opens a window, so it runs only when asked for by name (--only present); without a display it says so. */
+static void test_present(Report &rep, const Options &o) {
+  rep.title("Presenting frames in a window",
+            "A real window, 1920 x 1080 logical (the desktop's scale makes it larger): the time to put one frame on it, and the time between frames when a 13 ms frame "
+            "is paced to the editor's 60 fps cap the way the editor's loop waits (Windows' timer included).");
+  platform::Window *w = platform::create_window("Blendity stress: present", 1920, 1080);
+  if (!w) {
+    rep.note("No window could be opened (no display): nothing measured.");
+    return;
+  }
+  int fw = 1920, fh = 1080;
+  platform::get_framebuffer_size(w, fw, fh);
+  std::vector<uint32_t> px((size_t)fw * fh);
+  std::vector<platform::Event> ev;
+  auto paint = [&](int k) {  // (a changing picture, so nothing can skip it)
+    for (int y = 0; y < fh; y += 4) std::fill(px.begin() + (size_t)y * fw, px.begin() + (size_t)y * fw + fw, 0xFF000000u | (uint32_t)(k * 2654435761u + y));
+  };
+  rep.table({"what", "frames", "mean ms", "95% within ms", "worst ms"});
+  auto stats = [&](const char *what, std::vector<double> v) {
+    double mean = 0;
+    for (double x : v) mean += x;
+    mean /= (double)v.size();
+    std::sort(v.begin(), v.end());
+    const size_t p95 = std::min(v.size() - 1, (size_t)std::ceil(0.95 * (double)v.size()) - 1);  // (nearest rank)
+    rep.row({what, strprintf("%zu", v.size()), f2(mean), f2(v[p95]), f2(v.back())});
+  };
+  const int frames = o.quick ? 30 : 120;
+  std::vector<double> present_ms;
+  for (int k = 0; k < frames; k++) {
+    ev.clear();
+    platform::poll_events(w, ev, 0);
+    paint(k);
+    ScopedTimer t;
+    platform::present(w, px.data(), fw, fh);
+    present_ms.push_back(t.ms());
+  }
+  stats(strprintf("present, %d x %d", fw, fh).c_str(), present_ms);
+  /* Task 0084: as the editor presents - only the bands of rows that changed (hashing them included). Here a view-sized
+   * block of rows changes each frame, as while dragging in the Scene view; and then nothing (an idle redraw). */
+  auto present_changed = [&](int y0, int y1, bool change) {
+    std::vector<double> ms;
+    std::vector<uint64_t> bands;
+    Editor::changed_rows(px.data(), fw, fh, bands, true);
+    platform::present(w, px.data(), fw, fh);
+    for (int k = 0; k < frames; k++) {
+      ev.clear();
+      platform::poll_events(w, ev, 0);
+      for (int y = y0; change && y < y1; y += 2) px[(size_t)y * fw + (k * 7) % fw] = 0xFF000000u | (uint32_t)(k * 977 + y);
+      ScopedTimer t;
+      platform::present_rows(w, px.data(), fw, fh, Editor::changed_rows(px.data(), fw, fh, bands, false));
+      ms.push_back(t.ms());
+    }
+    return ms;
+  };
+  stats(strprintf("present, rows %d-%d changed (as a Scene view drag)", fh / 6, fh * 5 / 6).c_str(), present_changed(fh / 6, fh * 5 / 6, true));
+  stats("present, nothing changed", present_changed(0, 0, false));
+  /* A 60 fps cap over 13 ms frames, waited for two ways: blocking in poll_events until the frame's time (the editor's
+   * loop before task 0084), and the editor's FramePacer (since). */
+  const double cap = 60.0, work_ms = 13.0;
+  auto paced = [&](bool pacer_on) {
+    std::vector<double> gaps;
+    FramePacer pacer;
+    double last = now_seconds(), prev_start = -1;
+    for (int k = 0; k < frames; k++) {
+      if (pacer_on)
+        pacer.wait_until(last + 1.0 / cap, now_seconds, [&](double s) {
+          ev.clear();
+          platform::poll_events_for(w, ev, s);
+          if (s <= 0.0) std::this_thread::yield();
+        });
+      for (double wait = last + 1.0 / cap - now_seconds(); !pacer_on && wait > 0.0005; wait = last + 1.0 / cap - now_seconds()) {
+        ev.clear();
+        platform::poll_events(w, ev, std::max(1, (int)(wait * 1000.0)));
+      }
+      const double start = now_seconds();
+      if (prev_start >= 0) gaps.push_back((start - prev_start) * 1000.0);
+      prev_start = last = start;
+      paint(k);
+      platform::present(w, px.data(), fw, fh);
+      while ((now_seconds() - start) * 1000.0 < work_ms) {}  // the rest of a 13 ms frame (a spin: no sleep to round)
+    }
+    return gaps;
+  };
+  stats("between frames, 60 fps cap, 13 ms frames, waits in poll_events (16.7 is on time)", paced(false));
+  stats("between frames, 60 fps cap, 13 ms frames, the FramePacer", paced(true));
+  platform::destroy_window(w);
+  rep.note("Over 16.7 ms between frames means the cap made a frame late: the waits are rounded to the system timer. "
+           "(No input arrives here; in the editor, input wakes the wait early.)");
+}
+
 int main(int argc, char **argv) {
   install_crash_handler();
   Options o;
@@ -4313,10 +4502,11 @@ int main(int argc, char **argv) {
                {"pathtracer", test_pathtracer},  {"uv", test_uv_unwrap},         {"textures", test_texture_sampling}, {"texbake", test_texture_bake},
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
-               {"curved", test_curved_surfaces},  {"filters", test_camera_filters}};
+               {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
+    if (std::string(t.name) == "present" && o.only != "present") continue;  // (it opens a window: only when asked for)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);

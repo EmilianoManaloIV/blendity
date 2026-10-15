@@ -483,17 +483,29 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
   for (size_t f = 0; f < nf; f++)
     if (cand[f])
       for (uint32_t i = 0; i < m.face_size(f); i++) touched[m.face_verts(f)[i]] = 1;
-  std::unordered_map<uint64_t, std::vector<uint32_t>> edge_faces;
-  for (size_t f = 0; f < nf; f++) {
-    const uint32_t n = m.face_size(f);
-    bool near = false;
-    for (uint32_t i = 0; i < n && !near; i++) near = touched[m.face_verts(f)[i]] != 0;
-    if (!near) continue;
-    for (uint32_t i = 0; i < n; i++) edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % n])].push_back((uint32_t)f);
-  }
+  std::vector<uint8_t> near(nf, 0);
+  for (size_t f = 0; f < nf; f++)
+    for (uint32_t i = 0; i < m.face_size(f) && !near[f]; i++) near[f] = touched[m.face_verts(f)[i]] != 0;
+  /* The faces on edge a-b, in face order, each once per time the edge is one of its sides - near the ring only, or
+   * any. From the mesh's per-vertex face lists, kept while the topology holds (task 0087: an edge -> faces map of
+   * the whole mesh was built here on every frame of a drag). */
+  const Mesh::VertexFaces &vf = m.vertex_faces();
+  auto faces_at = [&](uint32_t a, uint32_t b, bool near_only) {
+    std::vector<uint32_t> out;
+    if ((size_t)a + 1 >= vf.offsets.size() || (size_t)b + 1 >= vf.offsets.size()) return out;
+    const uint32_t s = vf.offsets[b + 1] - vf.offsets[b] < vf.offsets[a + 1] - vf.offsets[a] ? b : a;  // (the shorter list)
+    for (uint32_t k = vf.offsets[s]; k < vf.offsets[s + 1]; k++) {
+      const uint32_t f = vf.faces[k];
+      if (k > vf.offsets[s] && vf.faces[k - 1] == f) continue;  // (a face with the vertex twice: looked at once)
+      if (near_only && !near[f]) continue;
+      const uint32_t n = m.face_size(f), *v = m.face_verts(f);
+      for (uint32_t i = 0; i < n; i++)
+        if (Mesh::edge_key(v[i], v[(i + 1) % n]) == Mesh::edge_key(a, b)) out.push_back(f);
+    }
+    return out;
+  };
   auto loop_of = [&](size_t f) { return std::vector<uint32_t>(m.face_verts(f), m.face_verts(f) + m.face_size(f)); };
   std::vector<uint8_t> seen(nf, 0), drop(nf, 0);
-  std::unordered_map<uint64_t, std::vector<uint32_t>> full_edge_faces;  // every face, built when a ring has to grow
   struct Patch {
     std::vector<uint32_t> outer, inner;
     Vec3 n;
@@ -527,7 +539,7 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
       stack.pop_back();
       const uint32_t n = m.face_size(f);
       for (uint32_t i = 0; i < n; i++)
-        for (uint32_t g : edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % n])])
+        for (uint32_t g : faces_at(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % n], true))
           if (cand[g] && !seen[g] && flat(g)) {
             seen[g] = 1;
             region.push_back(g);
@@ -543,14 +555,10 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
     bool usable = false;
     for (int grow = 0; grow <= 8 && !usable; grow++) {
       if (grow > 0) {
-        if (full_edge_faces.empty())
-          for (size_t f = 0; f < nf; f++)
-            for (uint32_t i = 0; i < m.face_size(f); i++)
-              full_edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])].push_back((uint32_t)f);
         std::vector<uint32_t> add;
         for (uint32_t f : region)
           for (uint32_t i = 0; i < m.face_size(f); i++)
-            for (uint32_t g : full_edge_faces[Mesh::edge_key(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)])]) {
+            for (uint32_t g : faces_at(m.face_verts(f)[i], m.face_verts(f)[(i + 1) % m.face_size(f)], false)) {
               if (in_region.count(g) || !flat(g)) continue;
               bool all_moved = true;
               for (uint32_t k = 0; k < m.face_size(g); k++) all_moved = all_moved && is_moved(m.face_verts(g)[k]);
@@ -608,7 +616,7 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
       bool from_neighbour = false;
       for (const auto &loop : loops)
         for (size_t i = 0; i < loop.size() && !from_neighbour; i++)
-          for (uint32_t g : edge_faces[Mesh::edge_key(loop[i], loop[(i + 1) % loop.size()])])
+          for (uint32_t g : faces_at(loop[i], loop[(i + 1) % loop.size()], true))
             if (!cand[g] && !in_region.count(g) && flat(g)) {
               const Vec3 gn = loop_newell(m, loop_of(g));
               if (length(gn) > 1e-10f) {
