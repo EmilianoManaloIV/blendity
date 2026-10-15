@@ -31,6 +31,7 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 }
 
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
+  ProfileScope prof{prof_.ms_collect, {}};
   std::vector<DrawItem> items;
   /* (Of what is shown: the preview's own staleness while there is one.) */
   lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
@@ -291,6 +292,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
 }
 
 uint64_t Editor::scene_render_hash(bool memo) {
+  ProfileScope prof{prof_.ms_hash, {}};
+  prof_.scene_hashes++;
   uint64_t h = 1469598103934665603ull;
   auto mix = [&](const void *p, size_t n) {
     const uint8_t *b = (const uint8_t *)p;

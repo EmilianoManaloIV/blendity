@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 109): performance pass 10 begins - measuring Edit Mode drags, the mesh caches and frame pacing (task 0083)
+
+**Asked:** "Let's increase overall editor performance in general." Chosen: the viewport's frame rate and big meshes
+in Edit Mode, keeping the CPU renderer; plan of tasks 0083-0091. This first task only measures.
+
+**Added**
+- **The Profiler** shows the time between frames (what the screen sees, the cap's waiting included) and what the
+  mesh caches did in the last frame: copies for an edit, render meshes built or moved in place, tangents, edge
+  tables; plus an Edit Mode drag's writes, the overlap check, the lighting key, snapping, the views' draw items and
+  the scene hashes. The Learn tab's performance lesson explains them ("Reading a frame").
+- **blendity_stress:** `editor_render` drags the 50k-face mesh for real (the Move gizmo, and G) and notes each part;
+  `--only present` opens a window to time presenting frames and the cap's pacing.
+
+**Found** (the laptop setting, `--laptop --quality low`; docs/PERFORMANCE.md, Pass 10)
+- A 60 fps cap with 13 ms frames gave **30.6 ms between frames** (33 fps): Windows rounds the loop's waits to its
+  15.6 ms timer. Presenting a frame costs 2.4 ms on average (9.3 ms at the 95th percentile).
+- A gizmo drag on 50k faces costs 98 ms a frame: two render meshes built from scratch (38.6 ms, the Scene view's flat
+  one and the Game view's smooth one), the drag's writes 24.5 ms (ring repair scans every face), the shadow map
+  7.5 ms, the Edit Mode overlay 8.7 ms. G is the same plus a 2.7 ms mesh copy a frame.
+
+**Checked**
+- New tests (round 109): a gizmo drag moves the counters; the Profiler draws its new rows during a drag.
+- Unit checks: Windows 10,022, 0 failed (680 tests); the whole suite in render-cache verify mode: 10,021,
+  0 failed, 0 stale pictures. Linux with libraries: 9,928, 0 failed. Sanitizer build: 9,834, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No behaviour changed; fixed:
+- The pacing figure was measured with present on top of 13 ms of work: present now counts inside the 13 ms (the
+  result held: 30.6 ms between frames).
+- "Moved in place" counted refused moves too; the first frame after start showed everything counted before it.
+- The 95th percentile was rounded down (the Profiler and stress); the Profiler shows it from two frames on.
+- The stress run's undo after the gizmo drag could undo an earlier step if the drag had missed.
+- The tests now look for the Profiler's rows by name, and no longer pin today's rebuilds; ARCHITECTURE has a row.
+
 ## 2026-10-14 (round 108): installing without knowing GitHub - one-click downloads, releases of installers only (task 0082)
 
 **Asked:** "Remove build-pr71" (done: the release and its tag). "Note the installer in the releases and update the
