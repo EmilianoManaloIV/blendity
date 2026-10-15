@@ -38,8 +38,13 @@ struct RenderMesh {
   /* Different for every build (never reused, unlike a pointer + version after a free), so caches of
    * what was drawn from it (shadow maps, voxel grids) can key on it. 0 = not cacheable (built by hand). */
   uint64_t serial = 0;
-  /* The serial of the full build this one came from: it stays while a deforming modifier only moves the
-   * positions in place (ADR 0022), when `serial` moves. Same topology, triangulation and split pattern. */
+  /* The same for every render cache of one mesh at one version (task 0088): the triangles and their positions,
+   * whatever the normals or UVs - the flat cache Edit Mode shades and the smooth one renders use have one shape. What
+   * depth alone depends on (a shadow map) keys on it. 0 = not known (built by hand): use `serial`. */
+  uint64_t shape = 0;
+  /* The serial of the full build this one came from: it stays while the positions move in place (a deforming
+   * modifier, ADR 0022; an Edit Mode drag, ADR 0034), when `serial` moves. Same topology, split pattern and triangle
+   * order - but not the same `indices`: quads and n-gons are split again from the new positions. */
   uint64_t build_serial = 0;
   size_t tri_count() const { return indices.size() / 3; }
 };
@@ -183,6 +188,9 @@ struct RasterOptions {
    * has it) and a no-clipping fast path. Off = the general path only (tests
    * check both give the same image). */
   bool fast_setup = true;
+  /* A material the same everywhere but for the normal is evaluated once per triangle, not per pixel (task 0088).
+   * Off = per pixel (tests check both give the same image). */
+  bool uniform_shading = true;
   int tile_size = 64;
   ShadeMode shade = ShadeMode::Gouraud;
   /* Camera filters' raster stage (ADR 0007), all off by default:
@@ -222,10 +230,11 @@ struct RenderTarget {
   ViewTransform hdr_view_transform = ViewTransform::Standard;
   float hdr_exposure = 0.0f;
   void attach(Image &img, const Recti &r);
+  /* Depth alone (a shadow map): no colour and no ids plane - nothing picks in it (task 0085). */
   void make_depth_only(int w, int h);
-  void resize_planes();
+  void resize_planes(bool with_ids = true);
   uint32_t id_at(int x, int y) const {
-    return (x >= 0 && y >= 0 && x < width && y < height) ? ids[(size_t)y * width + x] : 0;
+    return (x >= 0 && y >= 0 && x < width && y < height && !ids.empty()) ? ids[(size_t)y * width + x] : 0;
   }
   float depth_at(int x, int y) const {
     return (x >= 0 && y >= 0 && x < width && y < height) ? depth[(size_t)y * width + x] : 1.0f;

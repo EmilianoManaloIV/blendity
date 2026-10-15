@@ -10,6 +10,71 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 10: viewport frame rate and big meshes in Edit Mode (tasks 0083-0091)
+
+The laptop setting (`blendity_stress --laptop --quality low --only editor_render`, and `--only present`, run on the
+development machine on 2026-10-15; raw times, multiply by 1.4 for the laptop's clock). `editor_render` rows, ms per
+frame:
+
+| Frame | Before (task 0083) |
+|---|---|
+| idle | 0.76 |
+| orbiting the Scene view | 9.36 |
+| moving an object | 19.53 |
+| editing a material colour | 17.96 |
+| playing | 16.97 |
+| Edit Mode: Move-gizmo drag of a vertex, 50k faces | 97.75 |
+| Edit Mode: G, 50k faces | 100.20 |
+
+Where the gizmo drag goes, per frame: two render meshes built from scratch (38.6 ms: the Scene view's flat cache and
+the Game view's smooth one), the drag's writes 24.5 ms (`repair_moved_rings` scans every face), the shadow map 7.5 ms
+(the big mesh casts), the Edit Mode overlay 8.7 ms, one edge table 1.1 ms. G adds a whole-mesh copy (2.7 ms) a frame.
+
+`present` (a real window, 2560 x 1369 at this desktop's scale): 2.40 ms a present on average, 9.34 ms at the 95th
+percentile. **Pacing:** a 60 fps cap with 13 ms frames (present included) gave 30.6 ms between frames (95 % within 32.0), with no input arriving: the loop's
+waits are rounded up to Windows' 15.6 ms timer, so a frame that leaves less than a tick waits a whole one more.
+
+**Task 0084** (`--only present`, same window):
+
+| | Before | After |
+|---|---|---|
+| 60 fps cap, 13 ms frames: between frames (mean / 95 %) | 30.55 / 31.98 ms | 16.58 / 16.70 ms (`FramePacer` + a high-resolution timer) |
+| the same, the high-resolution timer alone | - | 16.56 / 17.61 ms |
+| presenting while a Scene-view-sized block of rows changes | 2.42 / 9.38 ms (all of it) | 0.68 / 0.70 ms (the changed bands, hashing included) |
+| presenting when nothing changed | 2.42 / 9.38 ms | 0.07 / 0.08 ms |
+
+The full present's long tail (9 ms at the 95th percentile) went with it: smaller copies don't wait as long on the
+desktop compositor.
+
+**Task 0085** (per-view waste): a moved-object frame's own setup around the rasterizer was measured first - draw
+items 0.07 ms, scene hashes 0.03 ms (three) - so only what showed was changed: the sun's shadow map no longer clears
+and writes an ids plane (0.68 → 0.48 ms a moved frame), and a view checking its voxel GI grid no longer allocates a
+column pyramid to do it. Honest negative: the Realtime GI drag in Automatic mode stays at 71 ms; that is the
+automatic lighting update itself (its Camera Preview and its UI-side update), not the grid.
+
+**Task 0086** (ADR 0034): the render mesh follows a positions-only edit in place. The Move-gizmo drag on 50k faces:
+98 → 69 ms a frame (two render meshes moved in place, 10.3 ms, instead of built, 38.6 ms; no edge table); G 100 → 67
+ms. What is left of the drag: its writes, 25.8 ms (ring repair, task 0087), the shadow map 7.0 ms, the overlay 7.4 ms.
+
+**Task 0087**: ring repair looked edges up in a map of the whole mesh it built every frame; per-vertex face lists kept
+per topology replace it (the drag's writes 25.8 → 1.6 ms). G reuses its copy (one copy in about ten frames). During
+any drag the overlap check and the lighting key wait. The Move-gizmo drag on 50k faces: **43 ms** a frame (98 before
+the pass), G **42 ms**. What is left: the Scene view 24 ms (the 50k mesh's raster and shading, its Edit Mode overlay
+7.5 ms), the Game view 16.5 ms, the render meshes moved in place 9 ms, the shadow map 6.9 ms.
+
+**Task 0088**: a material that is the same everywhere but for the normal is evaluated once per triangle (the deferred
+shader's setup), each pixel taking it with its own normal - bit for bit the same picture. The Scene view's shading on a
+moved-object frame 5.12 → 4.53 ms, the Game view's 5.53 → 5.08. And the shadow map keys on a caster's shape (the same
+for an edited mesh's flat and smooth caches), so a drag renders it once a frame, not twice. Laptop setting, ms a frame:
+
+| Frame | Before the pass | After 0088 |
+|---|---|---|
+| moving an object | 19.53 | 17.23 |
+| editing a material colour | 17.96 | 16.49 |
+| playing | 16.97 | 15.53 |
+| Edit Mode: Move-gizmo drag, 50k faces | 97.75 | 38.63 |
+| Edit Mode: G, 50k faces | 100.20 | 37.01 |
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris

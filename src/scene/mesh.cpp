@@ -2,6 +2,7 @@
 #include "mesh.h"
 #include "mesh_internal.h"
 
+#include "../core/core.h"
 #include "../core/jobs.h"
 
 #include <algorithm>
@@ -224,12 +225,118 @@ void Mesh::edges(std::vector<std::pair<uint32_t, uint32_t>> &out) const {
   }
 }
 
-const std::vector<std::pair<uint32_t, uint32_t>> &Mesh::edge_cache() const {
-  if (edges_version_ != version) {
-    edges(edges_);
-    edges_version_ = version;
+namespace {
+/* MeshCounts' tallies (atomic: render meshes are also built on worker threads), microseconds for the times. */
+enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, kStatCount };
+std::atomic<uint64_t> g_stat_count[kStatCount], g_stat_us[kStatCount];
+struct StatTimer {
+  MeshStat stat;
+  ScopedTimer t;
+  bool count = true;  // (false: the time is spent, but the thing wasn't done - a refused in-place move)
+  ~StatTimer() {
+    if (count) g_stat_count[stat].fetch_add(1, std::memory_order_relaxed);
+    g_stat_us[stat].fetch_add((uint64_t)(t.ms() * 1000.0), std::memory_order_relaxed);
   }
+};
+}  // namespace
+
+MeshCounts mesh_counts() {
+  MeshCounts c;
+  uint64_t *n[kStatCount] = {&c.copies, &c.full_builds, &c.in_place, &c.tangent_builds, &c.edge_builds};
+  double *ms[kStatCount] = {&c.ms_copies, &c.ms_full_builds, &c.ms_in_place, &c.ms_tangents, &c.ms_edges};
+  for (int i = 0; i < kStatCount; i++) {
+    *n[i] = g_stat_count[i].load(std::memory_order_relaxed);
+    *ms[i] = g_stat_us[i].load(std::memory_order_relaxed) / 1000.0;
+  }
+  return c;
+}
+
+MeshCounts MeshCounts::operator-(const MeshCounts &o) const {
+  MeshCounts d;
+  d.copies = copies - o.copies, d.full_builds = full_builds - o.full_builds, d.in_place = in_place - o.in_place;
+  d.tangent_builds = tangent_builds - o.tangent_builds, d.edge_builds = edge_builds - o.edge_builds;
+  d.ms_copies = ms_copies - o.ms_copies, d.ms_full_builds = ms_full_builds - o.ms_full_builds;
+  d.ms_in_place = ms_in_place - o.ms_in_place, d.ms_tangents = ms_tangents - o.ms_tangents, d.ms_edges = ms_edges - o.ms_edges;
+  return d;
+}
+
+const std::vector<std::pair<uint32_t, uint32_t>> &Mesh::edge_cache() const {
+  if (edges_version_ == version) return edges_;
+  const uint64_t topo = topology_serial();
+  if (edges_version_ == 0 || edges_topo_ != topo) {  // (moved vertices keep their edges: ADR 0034)
+    StatTimer st{kStatEdges, {}};
+    edges(edges_);
+    edges_topo_ = topo;
+  }
+  edges_version_ = version;
   return edges_;
+}
+
+template <class T>
+static bool same_bytes(const std::vector<T> &a, const std::vector<T> &b) {
+  return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+
+uint64_t Mesh::Uid::next() noexcept {
+  static std::atomic<uint64_t> n{1};
+  return n.fetch_add(1, std::memory_order_relaxed);
+}
+
+/* This mesh's shape now (its id, version and deform version mixed): what both its render caches share. */
+static uint64_t shape_key(uint64_t uid, uint64_t version, uint64_t deform) {
+  uint64_t k = 1469598103934665603ull;
+  for (uint64_t v : {uid, version, deform}) k = (k ^ v) * 1099511628211ull, k ^= k >> 31;
+  return k ? k : 1;
+}
+
+uint64_t Mesh::topology_serial() const {
+  if (topo_serial_ && topo_version_ == version) return topo_serial_;
+  topo_version_ = version;
+  const Topology &t = topo_;
+  const bool same = topo_serial_ && t.verts == positions.size() && same_bytes(t.face_offsets, face_offsets) &&
+                    same_bytes(t.corner_verts, corner_verts) && same_bytes(t.uvs, uvs) && same_bytes(t.face_material, face_material) &&
+                    same_bytes(t.face_smooth, face_smooth) && same_bytes(t.seams, seams) && same_bytes(t.sharp_edges, sharp_edges) &&
+                    same_bytes(t.loose_edges, loose_edges) && t.smooth == smooth && t.seams_sharp == seams_sharp &&
+                    std::memcmp(&t.smooth_angle, &smooth_angle, sizeof(float)) == 0;
+  if (same) return topo_serial_;
+  topo_ = Topology{positions.size(), face_offsets, corner_verts, uvs, face_material, face_smooth, seams, sharp_edges, loose_edges,
+                   smooth, seams_sharp, smooth_angle};
+  return ++topo_serial_;
+}
+
+void Mesh::forget_caches() const {
+  cache_version_[0] = cache_version_[1] = 0;
+  cache_approx_[0] = cache_approx_[1] = false;
+  edges_version_ = 0;
+  sides_topo_ = tri_topo_ = vf_topo_ = 0;
+}
+
+const Mesh::VertexFaces &Mesh::vertex_faces() const {
+  const uint64_t topo = topology_serial();
+  if (vf_topo_ == topo) return vf_;
+  const size_t nv = positions.size();
+  vf_.offsets.assign(nv + 1, 0);
+  for (uint32_t v : corner_verts)
+    if (v < nv) vf_.offsets[v + 1]++;
+  for (size_t v = 0; v < nv; v++) vf_.offsets[v + 1] += vf_.offsets[v];
+  vf_.faces.assign(vf_.offsets[nv], 0);
+  std::vector<uint32_t> fill(vf_.offsets.begin(), vf_.offsets.end() - 1);
+  for (size_t f = 0; f < face_count(); f++)
+    for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++)
+      if (corner_verts[c] < nv) vf_.faces[fill[corner_verts[c]]++] = (uint32_t)f;
+  vf_topo_ = topo;
+  return vf_;
+}
+
+bool Mesh::settle() const {
+  if (!tangents_approximate()) return false;
+  for (int ci = 0; ci < 2; ci++) {
+    if (!cache_approx_[ci]) continue;
+    cache_version_[ci] = 0;  // (the next read builds it, tangents with MikkTSpace)
+    cache_approx_[ci] = false;
+  }
+  looks++;
+  return true;
 }
 
 size_t Mesh::edge_count() const {
@@ -243,12 +350,24 @@ size_t Mesh::memory_bytes() const {
   b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8;
   for (const RenderMesh &c : cache_)
     b += c.positions.capacity() * sizeof(Vec3) * 2 + c.uvs.capacity() * sizeof(Vec2) + c.tangents.capacity() * sizeof(Vec4) +
-         c.indices.capacity() * 4 + c.tri_face.capacity() * 6;
+         c.indices.capacity() * 4 + c.tri_face.capacity() * 6 + c.tri_corner.capacity() * 4;
+  /* What the caches keep beside them: the topology they follow (ADR 0034), the smoothing sides, edges, corner maps. */
+  b += topo_.face_offsets.capacity() * 4 + topo_.corner_verts.capacity() * 4 + topo_.uvs.capacity() * sizeof(Vec2) +
+       topo_.face_material.capacity() * 4 + topo_.face_smooth.capacity() + (topo_.seams.capacity() + topo_.sharp_edges.capacity() +
+       topo_.loose_edges.capacity()) * 8;
+  b += sides_.capacity() * sizeof(EdgeSides) + edges_.capacity() * 8 + tri_start_.capacity() * 4;
+  for (const auto &crv : corner_rv_) b += crv.capacity() * 4;
   return b + sizeof(Mesh);
+}
+
+MeshPtr mesh_copy(const Mesh &m) {
+  StatTimer st{kStatCopy, {}};
+  return std::make_shared<Mesh>(m);
 }
 
 MeshPtr &mesh_make_mutable(MeshPtr &m) {
   if (m && m.use_count() > 1) {
+    StatTimer st{kStatCopy, {}};
     m = std::make_shared<Mesh>(*m);
     m->touch();
   }
@@ -320,6 +439,30 @@ static uint64_t next_render_serial() {
   return next_serial.fetch_add(1, std::memory_order_relaxed);
 }
 
+/* The manifold edges' two sides and whether the edge is hard whatever its angle, once per topology (task 0086:
+ * an Edit Mode drag asks for corner normals every frame). Open and non-manifold edges are left out: always hard. */
+void Mesh::build_edge_sides() const {
+  const uint64_t topo = topology_serial();
+  if (sides_topo_ == topo) return;
+  struct Side { uint32_t face, ca, cb; };  // the face and its corners at the edge's two ends
+  std::unordered_map<uint64_t, std::vector<Side>> by_edge;
+  by_edge.reserve(corner_verts.size());
+  for (size_t f = 0; f < face_count(); f++) {
+    const uint32_t b0 = face_offsets[f], n = face_size(f);
+    for (uint32_t i = 0; i < n; i++)
+      by_edge[edge_key(corner_verts[b0 + i], corner_verts[b0 + (i + 1) % n])].push_back({(uint32_t)f, b0 + i, b0 + (i + 1) % n});
+  }
+  sides_.clear();
+  for (auto &[k, sides] : by_edge) {
+    if (sides.size() != 2) continue;
+    const Side &s = sides[0], &t = sides[1];
+    const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFFu);
+    const bool hard = !smooth_of(s.face) || !smooth_of(t.face) || is_sharp(a, b) || (seams_sharp && is_seam(a, b));
+    sides_.push_back({s.face, s.ca, s.cb, t.face, t.ca, t.cb, hard});
+  }
+  sides_topo_ = topo;
+}
+
 void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
   const size_t nf = face_count();
   std::vector<Vec3> fnormal(nf);
@@ -355,35 +498,23 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
        * sharp) and the angle within smooth_angle. Each fan averages its faces. */
       std::vector<uint32_t> parent(corner_verts.size());
       for (size_t c = 0; c < parent.size(); c++) parent[c] = (uint32_t)c;
-      std::function<uint32_t(uint32_t)> root = [&](uint32_t c) {
+      auto root = [&](uint32_t c) {
         while (parent[c] != c) c = parent[c] = parent[parent[c]];
         return c;
       };
-      struct Side { uint32_t face, ca, cb; };  // the face and its corners at the edge's two ends
-      std::unordered_map<uint64_t, std::vector<Side>> by_edge;
-      by_edge.reserve(corner_verts.size());
-      for (size_t f = 0; f < nf; f++) {
-        const uint32_t b0 = face_offsets[f], n = face_size(f);
-        for (uint32_t i = 0; i < n; i++)
-          by_edge[edge_key(corner_verts[b0 + i], corner_verts[b0 + (i + 1) % n])].push_back({(uint32_t)f, b0 + i, b0 + (i + 1) % n});
-      }
+      auto join = [&](uint32_t c1, uint32_t c2) { parent[root(c1)] = root(c2); };
+      build_edge_sides();
       const float cos_limit = smooth_angle >= 179.9f ? -2.0f : std::cos(smooth_angle * kDeg2Rad);
-      for (auto &[k, sides] : by_edge) {
-        if (sides.size() != 2) continue;  // open or non-manifold: hard
-        const Side &s = sides[0], &t = sides[1];
-        if (!smooth_of(s.face) || !smooth_of(t.face)) continue;
-        const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFFu);
-        if (is_sharp(a, b) || (seams_sharp && is_seam(a, b))) continue;
-        if (dot(fnormal[s.face], fnormal[t.face]) < cos_limit) continue;
+      for (const EdgeSides &e : sides_) {
+        if (e.hard || dot(fnormal[e.sf], fnormal[e.tf]) < cos_limit) continue;
         /* Join the corners that sit on the same vertex. */
-        auto join = [&](uint32_t c1, uint32_t c2) { parent[root(c1)] = root(c2); };
-        if (corner_verts[s.ca] == corner_verts[t.ca]) {
-          join(s.ca, t.ca);
-          join(s.cb, t.cb);
+        if (corner_verts[e.sca] == corner_verts[e.tca]) {
+          join(e.sca, e.tca);
+          join(e.scb, e.tcb);
         }
         else {
-          join(s.ca, t.cb);
-          join(s.cb, t.ca);
+          join(e.sca, e.tcb);
+          join(e.scb, e.tca);
         }
       }
       std::vector<Vec3> sum(corner_verts.size(), Vec3(0.0f));
@@ -421,10 +552,13 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
   }
 }
 
-/* A deform moved the positions only (ADR 0022): the topology, the triangulation and the UVs are the
- * build's. Positions and normals are written per render vertex; if two corners of one render vertex now
- * have different normals (the full build would split it), the caller rebuilds instead. */
-bool Mesh::deform_in_place(int ci, bool flat) const {
+/* The positions moved and nothing else (a deform, ADR 0022, or an Edit Mode drag, ADR 0034): the topology and the
+ * UVs are the build's. Positions and normals are written per render vertex; if two corners of one render vertex now
+ * have different normals (the full build would split it), the caller rebuilds instead. Quads and n-gons are
+ * triangulated again from the new positions, into the same slots (a face always makes n - 2 triangles), so the
+ * triangles are a rebuild's. */
+bool Mesh::update_in_place(int ci, bool flat) const {
+  StatTimer st{kStatInPlace, {}, false};  // (counted once it worked; a refused one's time is still spent)
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
   if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return false;
@@ -443,6 +577,7 @@ bool Mesh::deform_in_place(int ci, bool flat) const {
     else if (!(rm.normals[rv].x == n.x && rm.normals[rv].y == n.y && rm.normals[rv].z == n.z))
       return false;  // the build's key compares the same way
   }
+  if (!retriangulate(rm, crv)) return false;
   if (cache_tangents_[ci] && rm.tangents.size() == rm.positions.size() && rm.uvs.size() == rm.positions.size()) {
     /* Tangents from the UV gradients of the deformed triangles (Lengyel's method), averaged per render vertex and
      * made orthogonal to the new normal: they depend on the shape alone, not on the drag that led there.
@@ -473,10 +608,46 @@ bool Mesh::deform_in_place(int ci, bool flat) const {
       if (!(length_sq(t) > 0.5f)) t = Vec3(1, 0, 0);  // a NaN normal: as the build's default
       rm.tangents[i] = Vec4(t, dot(cross(n, t), tdir[i]) < 0.0f ? -1.0f : 1.0f);
     }
+    cache_approx_[ci] = true;
   }
   rm.bounds = bounds();
   rm.serial = next_render_serial();  // what was drawn from it changed: every cache keyed on it re-renders
-  cache_deform_[ci] = deform_version;
+  st.count = true;
+  return true;
+}
+
+/* Quads and n-gons triangulated from the current positions, written over the build's triangles in place: face f's
+ * triangles start where the faces before it end (n - 2 each, as the build emits them). False if the slots don't add
+ * up (a render mesh from another topology). */
+bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv) const {
+  const size_t nf = face_count();
+  const uint64_t topo = topology_serial();
+  if (tri_topo_ != topo) {  // (once per topology, not every frame of a drag or a deform)
+    tri_start_.assign(nf + 1, 0);
+    tri_big_ = false;
+    for (size_t f = 0; f < nf; f++) {
+      const uint32_t n = face_size(f);
+      tri_start_[f + 1] = tri_start_[f] + (n >= 3 ? n - 2 : 0);
+      tri_big_ = tri_big_ || n > 3;
+    }
+    tri_topo_ = topo;
+  }
+  const std::vector<uint32_t> &start = tri_start_;
+  if ((size_t)start[nf] * 3 != rm.indices.size() || rm.tri_corner.size() != rm.indices.size()) return false;
+  if (!tri_big_) return true;
+  JobSystem::global().parallel_for((int64_t)nf, 1024, [&](int64_t f0, int64_t f1) {
+    std::vector<uint32_t> local;
+    for (int64_t f = f0; f < f1; f++) {
+      if (face_size((size_t)f) <= 3) continue;
+      triangulate_face(*this, (size_t)f, local);
+      const uint32_t base = face_offsets[(size_t)f];
+      const size_t t0 = (size_t)start[(size_t)f] * 3;
+      for (size_t i = 0; i < local.size(); i++) {
+        rm.indices[t0 + i] = crv[base + local[i]];
+        rm.tri_corner[t0 + i] = base + local[i];
+      }
+    }
+  });
   return true;
 }
 
@@ -484,10 +655,16 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   const bool has_smooth = any_smooth();
   bool flat = force_flat || !has_smooth;
   const int ci = force_flat && has_smooth ? 1 : 0;
-  if (cache_version_[ci] == version) {
-    if (cache_deform_[ci] == deform_version) return cache_[ci];
-    if (deform_in_place(ci, flat)) return cache_[ci];
+  if (cache_version_[ci] == version && cache_deform_[ci] == deform_version) return cache_[ci];
+  /* Only the positions changed since the build (a deform, an Edit Mode drag): follow them in place (ADR 0034). */
+  const uint64_t topo = topology_serial();
+  if (cache_version_[ci] != 0 && cache_topo_[ci] == topo && cache_flat_[ci] == flat && update_in_place(ci, flat)) {
+    cache_version_[ci] = version;
+    cache_deform_[ci] = deform_version;
+    cache_[ci].shape = shape_key(uid.v, version, deform_version);
+    return cache_[ci];
   }
+  StatTimer st{kStatFull, {}};
   RenderMesh &rm = cache_[ci];
   rm.positions.clear();
   rm.normals.clear();
@@ -550,9 +727,13 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   }
   rm.bounds = bounds();
   rm.serial = rm.build_serial = next_render_serial();
+  rm.shape = shape_key(uid.v, version, deform_version);
   cache_version_[ci] = version;
   cache_deform_[ci] = deform_version;
   cache_tangents_[ci] = false;
+  cache_approx_[ci] = false;
+  cache_topo_[ci] = topo;
+  cache_flat_[ci] = flat;
   corner_rv_[ci] = std::move(corner_rv);
   return rm;
 }
@@ -587,6 +768,7 @@ const RenderMesh &Mesh::render_mesh_tangents(bool force_flat) const {
   const RenderMesh &rm0 = render_mesh(force_flat);
   const int ci = force_flat && any_smooth() ? 1 : 0;
   if (cache_tangents_[ci]) return rm0;
+  StatTimer st{kStatTangents, {}};
   RenderMesh &rm = cache_[ci];
   rm.tangents.assign(rm.positions.size(), Vec4(1, 0, 0, 1));
   if (!rm.uvs.empty() && rm.tri_count()) {
@@ -608,6 +790,7 @@ const RenderMesh &Mesh::render_mesh_tangents(bool force_flat) const {
     }
   }
   cache_tangents_[ci] = true;
+  cache_approx_[ci] = false;
   return rm;
 }
 
