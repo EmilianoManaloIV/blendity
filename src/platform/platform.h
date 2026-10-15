@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bl::platform {
@@ -61,11 +62,18 @@ void destroy_window(Window *w);
 /* Collects pending events. If none are queued it blocks for up to timeout_ms
  * (0 = never block). This is how the idle editor uses ~0% CPU. */
 void poll_events(Window *w, std::vector<Event> &out, int timeout_ms);
+/* The same with a wait in seconds, not rounded to milliseconds (task 0084: the frame pacer's waits). */
+void poll_events_for(Window *w, std::vector<Event> &out, double seconds);
 
 /* Copies a 0xAARRGGBB pixel buffer (stride = width) to the window. */
 void present(Window *w, const uint32_t *pixels, int width, int height);
+/* Copies only these runs of rows [first, second) of it (the rest of the window keeps what it showed), after a whole
+ * present of the same size (task 0084). Where a system can't, the whole buffer goes, once. */
+void present_rows(Window *w, const uint32_t *pixels, int width, int height, const std::vector<std::pair<int, int>> &rows);
 
 void get_framebuffer_size(Window *w, int &width, int &height);
+/* The system's own handle (Win32: the HWND), for a GPU swapchain (task 0095's spike); null where there is none yet. */
+void *native_handle(Window *w);
 float dpi_scale(Window *w);
 void set_title(Window *w, const std::string &title);
 void set_cursor(Window *w, Cursor c);
