@@ -35,10 +35,11 @@ void RenderTarget::attach(Image &img, const Recti &r) {
   resize_planes();
 }
 
-void RenderTarget::resize_planes() {
+void RenderTarget::resize_planes(bool with_ids) {
   size_t n = (size_t)std::max(0, width) * std::max(0, height);
   if (depth.size() != n) depth.resize(n);
-  if (ids.size() != n) ids.resize(n);
+  if (!with_ids) ids = {};  // (and its memory: a thread's shadow target keeps none)
+  else if (ids.size() != n) ids.resize(n);
   if (!vis.empty() && vis.size() != n) vis.clear();  // only deferred shading needs it: begin() sizes it then
 }
 
@@ -47,7 +48,7 @@ void RenderTarget::make_depth_only(int w, int h) {
   stride = w;
   width = w;
   height = h;
-  resize_planes();
+  resize_planes(false);
 }
 
 void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, const LightingEnv &env,
@@ -83,6 +84,7 @@ void Renderer3D::clear_planes(const uint32_t *color) {
   ScopedTimer t;
   const int W = rt_->width, H = rt_->height;
   const bool with_vis = rt_->vis.size() == (size_t)W * H && W > 0;
+  const bool with_ids = !rt_->ids.empty();
   auto &js = JobSystem::global();
   const int saved = js.max_threads();
   if (!opt_.multithreaded) js.set_max_threads(1);
@@ -91,7 +93,7 @@ void Renderer3D::clear_planes(const uint32_t *color) {
       const size_t o = (size_t)y * W;
       if (color && rt_->color) std::fill(rt_->color + (size_t)y * rt_->stride, rt_->color + (size_t)y * rt_->stride + W, *color);
       std::fill(rt_->depth.begin() + o, rt_->depth.begin() + o + W, 1.0f);
-      std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
+      if (with_ids) std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
       if (with_vis) std::fill(rt_->vis.begin() + o, rt_->vis.begin() + o + W, 0u);
     }
   });
@@ -949,7 +951,7 @@ void Renderer3D::raster_tile(int tile_index) {
   const int rx1 = std::min(rt_->width, rx0 + T), ry1 = std::min(rt_->height, ry0 + T);
   const int W = rt_->width;
   float *depth = rt_->depth.data();
-  uint32_t *ids = rt_->ids.data();
+  uint32_t *ids = rt_->ids.empty() ? nullptr : rt_->ids.data();  // (none in a shadow map)
   uint32_t *vis = rt_->vis.data();
   const ShadeMode mode = opt_.shade;
 
@@ -1006,14 +1008,14 @@ void Renderer3D::raster_tile(int tile_index) {
           dz = z;
           if (mode != ShadeMode::Gouraud) {
             if (mode == ShadeMode::Deferred) vis[row + x] = ref;
-            ids[row + x] = st.id;  // depth-only passes keep picking working
+            if (ids) ids[row + x] = st.id;  // depth-only passes into a view keep picking working
             continue;
           }
           const float iw = 1.0f / (b0 * st.iw[0] + b1 * st.iw[1] + b2 * st.iw[2]);
           const Vec3 &c0 = st.c[0], &c1 = st.c[1], &c2 = st.c[2];
           crow[x] = pack_rgb((b0 * c0.x + b1 * c1.x + b2 * c2.x) * iw, (b0 * c0.y + b1 * c1.y + b2 * c2.y) * iw,
                              (b0 * c0.z + b1 * c1.z + b2 * c2.z) * iw);
-          ids[row + x] = st.id;
+          if (ids) ids[row + x] = st.id;
         }
       }
     }
@@ -1170,7 +1172,7 @@ void Renderer3D::end_overlay_batch() {
 }
 
 void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, int width) {
-  if (sel.empty()) return;
+  if (sel.empty() || rt_->ids.empty()) return;  // (a view's target: a shadow map has no ids)
   if (batching_) {  // overlays recorded so far go under the outline
     end_overlay_batch();
     begin_overlay_batch();
@@ -1361,11 +1363,12 @@ void Renderer3D::shade_deferred() {
     });
     stats_.gi_traced = traced.load();
     /* Nothing traced (every surface reads a realtime lightmap): no blur, and nothing reads gi_blur_. */
-    if (stats_.gi_traced) gi_blur_ = gi_lo_;
+    if (stats_.gi_traced) gi_blur_.resize(gi_lo_.size());  // (every texel is written below: no copy first)
     if (stats_.gi_traced) js.parallel_for(gh, 4, [&](int64_t a, int64_t b) {
       for (int64_t gy = a; gy < b; gy++)
         for (int gx = 0; gx < gw; gx++) {
           const GiTexel &c = gi_lo_[(size_t)gy * gw + gx];
+          gi_blur_[(size_t)gy * gw + gx] = c;
           if (!c.valid) continue;
           Vec3 bounce(0.0f);
           float sky = 0.0f, wsum = 0.0f;

@@ -1734,7 +1734,10 @@ bool Editor::gizmo_update(const Recti &view) {
       if (gizmo_vsnap_ && in.key_down[platform::KEY_V]) {
         /* Vertex snapping (Unity's V): the anchor vertex lands on the vertex under the mouse. */
         Vec3 target;
-        if (nearest_vertex_on_screen(view, in.mx, in.my, (float)u.px(24), false, !eo, target)) {
+        ScopedTimer st;
+        const bool found = nearest_vertex_on_screen(view, in.mx, in.my, (float)u.px(24), false, !eo, target);
+        prof_.ms_snap_pick += st.ms();
+        if (found) {
           delta = target - gizmo_vsnap_anchor_;
           gizmo_snap_shown_ = true;
           gizmo_snap_point_ = target;
@@ -1747,7 +1750,10 @@ bool Editor::gizmo_update(const Recti &view) {
           if (GameObject *g = scene_->find(s.id)) moving.push_back(g);
         const Ray r2 = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
         Vec3 p, n;
-        if (!moving.empty() && raycast_surface({r2.origin, normalize(r2.dir)}, p, n, moving)) {
+        ScopedTimer st;
+        const bool hit = !moving.empty() && raycast_surface({r2.origin, normalize(r2.dir)}, p, n, moving);
+        prof_.ms_snap_pick += st.ms();
+        if (hit) {
           GameObject *lead = moving.back();
           const GizmoStart &ls = gizmo_starts_.back();
           Quat rot;
@@ -1760,6 +1766,7 @@ bool Editor::gizmo_update(const Recti &view) {
       }
       gizmo_live_delta_ = delta;
       if (eo) {
+        ProfileScope prof{prof_.ms_edit_apply, {}};
         MeshPtr &mp = *edit_mesh_ptr();
         Mesh &mm = *mesh_make_mutable(mp);
         Mat4 inv = eo->world_matrix().inverse();
@@ -1798,6 +1805,7 @@ bool Editor::gizmo_update(const Recti &view) {
       if (snap) angle = std::round(angle * kRad2Deg / snap_rot_) * snap_rot_ * kDeg2Rad;
       Quat q = Quat::axis_angle(ax, angle);
       if (eo) {
+        ProfileScope prof{prof_.ms_edit_apply, {}};
         MeshPtr &mp = *edit_mesh_ptr();
         Mesh &mm = *mesh_make_mutable(mp);
         Mat4 inv = eo->world_matrix().inverse();
@@ -1836,6 +1844,7 @@ bool Editor::gizmo_update(const Recti &view) {
         for (int k = 0; k < 3; k++) f[k] = std::round(f[k] / snap_scale_) * snap_scale_;
       gizmo_live_scale_ = f;
       if (eo) {
+        ProfileScope prof{prof_.ms_edit_apply, {}};
         MeshPtr &mp = *edit_mesh_ptr();
         Mesh &mm = *mesh_make_mutable(mp);
         Mat4 inv = eo->world_matrix().inverse();
@@ -2125,17 +2134,18 @@ bool Editor::edit_selection_frame(Quat &out) {
   return true;
 }
 
-void Editor::repair_moved_rings(Mesh &m) {
+bool Editor::repair_moved_rings(Mesh &m) {
   std::vector<uint8_t> moved(m.vert_count(), 0);
   for (size_t v = 0; v < moved.size() && v < vert_sel_.size(); v++) moved[v] = vert_sel_[v];
   std::vector<uint8_t> dropped;
-  if (!meshops::repair_rings(m, moved, &dropped)) return;
+  if (!meshops::repair_rings(m, moved, &dropped)) return false;
   /* The selection follows the faces that stayed; the ring's new faces come last, unselected. */
   std::vector<uint8_t> sel;
   for (size_t f = 0; f < dropped.size(); f++)
     if (!dropped[f]) sel.push_back(f < face_sel_.size() ? face_sel_[f] : 0);
   sel.resize(m.face_count(), 0);
   face_sel_ = std::move(sel);
+  return true;
 }
 
 void Editor::sync_vert_face_selection(bool from_faces) {
