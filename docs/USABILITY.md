@@ -207,6 +207,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | Getting Blendity meant building it or unpacking CI artifacts. | Installers for Windows, Linux (AppImage, tar.gz) and macOS (dmg), on GitHub Releases (task 0076). |
 | An MP4 needed FFmpeg installed separately, and the installers lacked Blender's libraries (Embree, denoising, colour management). | FFmpeg linked in; the installers carry every library; one script fetches them for a source build (tasks 0077-0078). |
 | Updating meant finding a new installer by hand; a missing library stopped Blendity starting. | Updates offered with their notes, any older build from Version History; Blendity runs without the libraries and offers them, by your choice (tasks 0079-0080). |
+| Dragging vertices of a big mesh in Edit Mode was slow (98 ms a frame on 50k faces, laptop setting). | The render mesh follows the drag in place and the drag's own work stays near the moved vertices: 43 ms (tasks 0086-0087). |
 | On Windows the editor ran at about 33 fps where 60 was asked for, however light the frame. | The frame-rate cap holds: precise waits and a frame pacer (task 0084). |
 | Installing meant finding one file among many on GitHub's release page, with no instructions. | One download link per system in the README, a step-by-step guide there and in each release, and releases holding only the installers (task 0082). |
 | Redoing an edit to a material saved as a .mat brought back the undone values. | Undo and redo keep each state's own material values (task 0081). |

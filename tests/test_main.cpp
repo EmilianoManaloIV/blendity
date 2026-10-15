@@ -29251,4 +29251,121 @@ static void round81_tests() {
     CHECK(ed.last_op_valid_for_test());
     CHECK(!m.tangents_approximate());
   });
+  /* ---------------------------------------------------------------- round 113: the Edit Mode drag loop (task 0087) */
+  test("Edit Mode: a 10-frame gizmo drag on a big mesh copies it at most once, builds nothing, checks no overlaps and hashes no lighting key; release checks once", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 128, 96);  // about 12k faces
+    big->add<MeshRenderer>();
+    ed.commit_change("add Big");
+    ed.command("select Big");
+    ed.command("edit vertex");
+    const Mesh &m0 = *big->get<MeshFilter>()->mesh;
+    size_t front = 0;
+    for (size_t v = 1; v < m0.vert_count(); v++)
+      if (m0.positions[v].z > m0.positions[front].z) front = v;
+    const Vec3 wp = big->world_matrix().point(m0.positions[front]);
+    ed.command(strprintf("vsel %zu", front));
+    ed.command(strprintf("camera 0 10 4 %g %g %g", wp.x, wp.y, wp.z));
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(wp, x, y));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+    const FrameProfile p0 = ed.frame_profile_totals();
+    const MeshCounts c0 = mesh_counts();
+    for (int k = 1; k <= 10; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + 3 * k, y)});
+    const FrameProfile p1 = ed.frame_profile_totals();
+    const MeshCounts d = mesh_counts() - c0;
+    std::printf("    10 drag frames: %llu copies, %llu render meshes built, %llu moved in place, %llu overlap checks, %llu lighting keys; writes %.2f ms\n",
+                (unsigned long long)d.copies, (unsigned long long)d.full_builds, (unsigned long long)d.in_place,
+                (unsigned long long)(p1.overlap_checks - p0.overlap_checks), (unsigned long long)(p1.lightmap_key_hashes - p0.lightmap_key_hashes),
+                p1.ms_edit_apply - p0.ms_edit_apply);
+    CHECK(d.copies <= 1 && d.full_builds == 0 && d.in_place >= 10);
+    CHECK(p1.overlap_checks == p0.overlap_checks && p1.lightmap_key_hashes == p0.lightmap_key_hashes);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 85, y)});
+    r34_steps(ed, 2);
+    CHECK(ed.frame_profile_totals().overlap_checks > p1.overlap_checks);  // (checked once the drag ended)
+  });
+
+  test("Edit Mode: G reuses its own copy frame to frame and Esc puts the mesh back exactly", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0 1");
+    ed.command("camera 0 20 6 0 0.5 0");
+    r34_steps(ed, 2);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const Mesh before = *cube->get<MeshFilter>()->mesh;
+    const Recti v = ed.scene_view_rect();
+    const int cx = v.x + v.w / 2, cy = v.y + v.h / 2;
+    auto key = [&](int k) {
+      platform::Event d = r34_mouse(R34ET::KeyDown, cx, cy), u = r34_mouse(R34ET::KeyUp, cx, cy);
+      d.key = u.key = k;
+      ed.step_frame_headless({d, u});
+    };
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, cx, cy)});
+    key(platform::KEY_G);
+    CHECK(ed.transform_active_for_test());
+    const MeshCounts c0 = mesh_counts();
+    for (int k = 1; k <= 8; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, cx + 6 * k, cy + 2 * k)});
+    const MeshCounts d = mesh_counts() - c0;
+    std::printf("    8 frames of G: %llu copies\n", (unsigned long long)d.copies);
+    CHECK(d.copies <= 1);
+    key(platform::KEY_ESCAPE);
+    r34_steps(ed, 1);
+    const Mesh &after = *ed.scene().find_by_name("Cube")->get<MeshFilter>()->mesh;
+    bool same = after.positions.size() == before.positions.size() && after.corner_verts == before.corner_verts;
+    for (size_t i = 0; same && i < after.positions.size(); i++) same = std::memcmp(&after.positions[i], &before.positions[i], sizeof(Vec3)) == 0;
+    CHECK(same);
+  });
+
+  test("rings: looking edges up through the per-vertex face lists finds what an edge map of the whole mesh did", [] {
+    /* What repair_rings used to build every call - an edge -> faces map, a face once per side on the edge - against
+     * the lookup it does now through vertex_faces() (from the shorter of the two lists, a face visited once): the same
+     * faces, in the same order, the same number of times, on a grid with odd faces added (a degenerate a-a side, a
+     * face with a vertex twice, a side two faces share twice). */
+    MeshPtr m = primitives::grid(2.0f, 6, 6);
+    const uint32_t odd1[] = {0, 0, 1, 8}, odd2[] = {2, 3, 2, 10}, odd3[] = {4, 5, 12};
+    m->add_face(odd1, 4);
+    m->add_face(odd2, 4);
+    m->add_face(odd3, 3);
+    m->add_face(odd3, 3);
+    m->touch();
+    std::unordered_map<uint64_t, std::vector<uint32_t>> map;
+    for (size_t f = 0; f < m->face_count(); f++)
+      for (uint32_t i = 0; i < m->face_size(f); i++)
+        map[Mesh::edge_key(m->face_verts(f)[i], m->face_verts(f)[(i + 1) % m->face_size(f)])].push_back((uint32_t)f);
+    const Mesh::VertexFaces &vf = m->vertex_faces();
+    auto lookup = [&](uint32_t a, uint32_t b) {
+      std::vector<uint32_t> out;
+      const uint32_t s = vf.offsets[b + 1] - vf.offsets[b] < vf.offsets[a + 1] - vf.offsets[a] ? b : a;
+      for (uint32_t k = vf.offsets[s]; k < vf.offsets[s + 1]; k++) {
+        const uint32_t f = vf.faces[k];
+        if (k > vf.offsets[s] && vf.faces[k - 1] == f) continue;
+        for (uint32_t i = 0; i < m->face_size(f); i++)
+          if (Mesh::edge_key(m->face_verts(f)[i], m->face_verts(f)[(i + 1) % m->face_size(f)]) == Mesh::edge_key(a, b)) out.push_back(f);
+      }
+      return out;
+    };
+    size_t edges = 0, differ = 0;
+    for (const auto &[k, faces] : map) {
+      const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFFu);
+      edges++;
+      differ += lookup(a, b) != faces || lookup(b, a) != faces;
+    }
+    std::printf("    %zu edges (odd ones too): %zu looked up differently\n", edges, differ);
+    CHECK(edges > 80 && differ == 0);
+    /* The lists: kept while only positions change; made again for new faces. */
+    const uint32_t *before = vf.faces.data();
+    m->positions[0].y += 0.1f;
+    m->touch();
+    CHECK(m->vertex_faces().faces.data() == before);
+    m->add_face({0, 1, 9});
+    m->touch();
+    CHECK(m->vertex_faces().faces.size() == m->corner_count());
+  });
 }

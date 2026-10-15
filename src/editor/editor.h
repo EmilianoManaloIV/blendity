@@ -1234,7 +1234,7 @@ class Editor {
    * selected faces' normal, X along their longest edge. False when nothing gives a direction. */
   bool edit_selection_frame(Quat &out);
   /* After the selection moved: a folded ring round a drawn shape is zipped again (meshops::repair_rings). */
-  void repair_moved_rings(Mesh &m);
+  bool repair_moved_rings(Mesh &m);  // true when a ring was rebuilt (the faces changed)
   bool edge_is_selected(uint32_t a, uint32_t b) const;  // explicit in edge mode, else both ends
   void edges_from_verts();  // edge_sel_ = edges with both ends selected
   void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
@@ -1280,6 +1280,12 @@ class Editor {
   bool edit_op_redoable(const std::string &op) const;
   bool last_op_valid();
   void settle_meshes();
+  /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
+   * Push/Pull, a modal adjustment. Whole-scene checks wait for it to end (task 0087). */
+  bool interacting() const { return ui_.in.down[0] || ui_.in.down[1] || ui_.in.down[2] || xf_.active || pp_.active || modal_.active; }
+  /* The overlapping-vertices check (zfight.cpp): refreshed when not interacting; during an interaction its result is
+   * still shown while the mesh hasn't changed (orbiting, a click), and not once it has (a drag). */
+  bool overlap_current();
   bool last_op_hidden_ = false;  // put away (x, Esc, a selection click) until the next operator or F9
   void run_last_op(bool first);
   void remember_last_op_settings();
@@ -1334,6 +1340,7 @@ class Editor {
     Vec3 current;               // move so far
     float value = 0.0f;         // degrees or scale factor so far
     bool from_extrude = false;  // started by Extrude (E): one undo step with it
+    std::weak_ptr<Mesh> copy;  // the mesh it made last frame, still its own while no ring was rebuilt (task 0087)
   };
   ModalTransform xf_;
   bool blender_keys_ = false;  // preference: R / S start rotate / scale (the Scale tool moves to T)

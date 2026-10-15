@@ -94,6 +94,9 @@ uint64_t Editor::lightmap_scene_key() {
 bool Editor::lighting_out_of_date() {
   if (lighting_data_.empty()) return false;
   const uint64_t k = scene_render_hash() ^ hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }) * 31 ^ lighting_gen_ * 131;
+  /* During a drag, a change is taken as out of date without the exact check (the baked scene's key hashes every
+   * mesh, every frame): Live GI and the status bar follow as they did; the check itself runs when it ends. */
+  if (interacting() && k != ood_key_) return true;
   if (k != ood_key_) {
     ProfileScope prof{prof_.ms_lighting_key, {}};
     prof_.lightmap_key_hashes++;

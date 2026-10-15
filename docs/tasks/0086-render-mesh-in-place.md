@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** ADR 0034 (amends 0022)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/77
 
 ## Goal
 Task 0083 measured a Move-gizmo drag on a 50k-face mesh at 98 ms a frame on the laptop setting, 38.6 ms of it two

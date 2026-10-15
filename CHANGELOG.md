@@ -2,6 +2,35 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 113): the Edit Mode drag loop stops redoing whole-mesh work (task 0087)
+
+**Asked:** the performance pass (plan item 0087).
+
+**Changed**
+- **Dragging vertices of a big mesh:** the check for flat rings of faces that a drag folds (they are zipped again)
+  built a map of every edge of the mesh on every frame; it now looks edges up in per-vertex face lists kept while the
+  mesh's faces don't change. The drag's own work on a 50k-face mesh went from 25 ms a frame to 1.6.
+- **G** reuses its copy of the mesh from frame to frame instead of copying the whole mesh each time.
+- **During any drag** (a mouse button held, G / R / S, Push/Pull, a modal adjustment) the overlapping-vertices check
+  and the "Lighting out of date" status wait for it to end; the Modeling Tools panel shows what it found before.
+- With task 0086: a Move-gizmo drag on 50k faces went from 98 ms a frame to 43 on the laptop setting, G from 100 to 42.
+
+**Checked**
+- New tests (round 113): a 10-frame gizmo drag on a big mesh copies it at most once, builds no render mesh, checks no
+  overlaps and hashes no lighting key, and releasing checks once; G reuses its copy and Esc restores the mesh exactly;
+  the per-vertex face lists give exactly what the old edge map gave, odd faces included, and are kept while only
+  positions move.
+- Unit checks: Windows 10,088, 0 failed (698 tests); the whole suite in render-cache verify mode: 10,089,
+  0 failed, 0 stale pictures. Linux with libraries: 9,996, 0 failed. Sanitizer build: 9,902, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- Holding the lighting answer during a drag froze Live GI and the status bar until release: during a drag a change is
+  taken as out of date without the exact (costly) check, which runs when the drag ends.
+- The overlapping-vertices overlay vanished whenever a mouse button was held (orbiting, a click): it keeps showing a
+  result that is still current, and hides only while a drag changes the mesh.
+- G's copy is remembered as a weak reference rather than an address; edge lookups scan the shorter vertex list.
+
 ## 2026-10-15 (round 112): Edit Mode - the render mesh follows a drag in place (task 0086, ADR 0034)
 
 **Asked:** the performance pass (plan item 0086).

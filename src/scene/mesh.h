@@ -108,6 +108,13 @@ struct Mesh {
   const RenderMesh &render_mesh_tangents(bool force_flat = false) const;
   /* Unique edges, cached per version (wireframe & edit-mode overlays). */
   const std::vector<std::pair<uint32_t, uint32_t>> &edge_cache() const;
+  /* The faces at each vertex, in face order (faces[offsets[v]] to faces[offsets[v + 1]], a face listed once per
+   * corner on the vertex), kept per topology: what a drag looks edges up in every frame (task 0087). Like the other
+   * caches, for the main thread: not safe to call from jobs while the mesh changes. */
+  struct VertexFaces {
+    std::vector<uint32_t> offsets, faces;
+  };
+  const VertexFaces &vertex_faces() const;
   void touch() { version++; }
   /* After a drag (ADR 0034): tangents that followed it the quick way (Lengyel's, while the render mesh moved in
    * place) are made again with MikkTSpace on the next read, as a rebuild would. Changes how the mesh is drawn, not
@@ -159,6 +166,8 @@ struct Mesh {
   mutable uint64_t sides_topo_ = 0;
   /* Where each face's triangles start in a build (n - 2 per face, in face order), and whether any face has more than
    * three corners: per topology, for retriangulate(). */
+  mutable VertexFaces vf_;
+  mutable uint64_t vf_topo_ = 0;
   mutable std::vector<uint32_t> tri_start_;
   mutable bool tri_big_ = false;
   mutable uint64_t tri_topo_ = 0;

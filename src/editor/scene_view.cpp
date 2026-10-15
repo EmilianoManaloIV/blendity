@@ -2134,17 +2134,18 @@ bool Editor::edit_selection_frame(Quat &out) {
   return true;
 }
 
-void Editor::repair_moved_rings(Mesh &m) {
+bool Editor::repair_moved_rings(Mesh &m) {
   std::vector<uint8_t> moved(m.vert_count(), 0);
   for (size_t v = 0; v < moved.size() && v < vert_sel_.size(); v++) moved[v] = vert_sel_[v];
   std::vector<uint8_t> dropped;
-  if (!meshops::repair_rings(m, moved, &dropped)) return;
+  if (!meshops::repair_rings(m, moved, &dropped)) return false;
   /* The selection follows the faces that stayed; the ring's new faces come last, unselected. */
   std::vector<uint8_t> sel;
   for (size_t f = 0; f < dropped.size(); f++)
     if (!dropped[f]) sel.push_back(f < face_sel_.size() ? face_sel_[f] : 0);
   sel.resize(m.face_count(), 0);
   face_sel_ = std::move(sel);
+  return true;
 }
 
 void Editor::sync_vert_face_selection(bool from_faces) {

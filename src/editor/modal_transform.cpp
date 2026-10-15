@@ -179,7 +179,12 @@ void Editor::transform_apply(const Mat4 &d) {
     MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
     if (!mf || !t.mesh_before) return;
     ProfileScope prof{prof_.ms_edit_apply, {}};
-    mf->mesh = mesh_copy(*t.mesh_before);
+    /* Last frame's copy, if it is still this transform's own and no ring was rebuilt in it (the same topology as at
+     * the start): only its positions go back to the start. Otherwise a fresh copy. */
+    const bool mine = mf->mesh && !t.copy.expired() && !t.copy.owner_before(mf->mesh) && !mf->mesh.owner_before(t.copy);
+    const bool reuse = mine && mf->mesh.use_count() == 1 && mf->mesh->positions.size() == t.mesh_before->positions.size();
+    if (reuse) mf->mesh->positions = t.mesh_before->positions;
+    else mf->mesh = mesh_copy(*t.mesh_before);
     Mesh &m = *mf->mesh;
     m.version = t.mesh_before->version + 1 + (++redo_serial_);
     const Mat4 &w = g->world_matrix();
@@ -188,7 +193,8 @@ void Editor::transform_apply(const Mat4 &d) {
       if (vert_sel_[v]) m.positions[v] = to_local.point(m.positions[v]);
     m.touch();
     face_sel_ = t.fsel_before;
-    repair_moved_rings(m);
+    if (repair_moved_rings(m)) t.copy.reset();  // (a rebuilt ring changed the faces: a fresh copy next frame)
+    else t.copy = mf->mesh;
     return;
   }
   for (auto &[id, w0] : t.objects)

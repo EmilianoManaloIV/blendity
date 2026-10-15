@@ -296,7 +296,24 @@ void Mesh::forget_caches() const {
   cache_version_[0] = cache_version_[1] = 0;
   cache_approx_[0] = cache_approx_[1] = false;
   edges_version_ = 0;
-  sides_topo_ = tri_topo_ = 0;
+  sides_topo_ = tri_topo_ = vf_topo_ = 0;
+}
+
+const Mesh::VertexFaces &Mesh::vertex_faces() const {
+  const uint64_t topo = topology_serial();
+  if (vf_topo_ == topo) return vf_;
+  const size_t nv = positions.size();
+  vf_.offsets.assign(nv + 1, 0);
+  for (uint32_t v : corner_verts)
+    if (v < nv) vf_.offsets[v + 1]++;
+  for (size_t v = 0; v < nv; v++) vf_.offsets[v + 1] += vf_.offsets[v];
+  vf_.faces.assign(vf_.offsets[nv], 0);
+  std::vector<uint32_t> fill(vf_.offsets.begin(), vf_.offsets.end() - 1);
+  for (size_t f = 0; f < face_count(); f++)
+    for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++)
+      if (corner_verts[c] < nv) vf_.faces[fill[corner_verts[c]]++] = (uint32_t)f;
+  vf_topo_ = topo;
+  return vf_;
 }
 
 bool Mesh::settle() const {
