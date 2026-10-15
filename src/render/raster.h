@@ -192,6 +192,9 @@ struct RasterOptions {
   /* A material the same everywhere but for the normal is evaluated once per triangle, not per pixel (task 0088).
    * Off = per pixel (tests check both give the same image). */
   bool uniform_shading = true;
+  /* Plain-material pixels lit 8 at a time with AVX2 where the CPU has it (task 0091, ADR 0035): the same operations in
+   * the same order as the scalar shader, so the same picture. Off = one pixel at a time. */
+  bool simd_shading = true;
   int tile_size = 64;
   ShadeMode shade = ShadeMode::Gouraud;
   /* Camera filters' raster stage (ADR 0007), all off by default:
@@ -212,6 +215,7 @@ struct RasterStats {
   double ms_clear = 0;  // clearing the planes (not in ms_total, which is flush())
   double ms_gi = 0;     // voxel GI's per-pixel pass: tracing and blurring the receivers (part of ms_shade)
   size_t gi_traced = 0; // receivers the per-pixel pass traced (realtime lightmaps spare theirs)
+  size_t pixels_simd = 0;  // pixels lit 8 at a time (task 0091)
 };
 
 /* Color plus depth, id and visibility planes. color may point into a larger
@@ -241,6 +245,8 @@ struct RenderTarget {
     return (x >= 0 && y >= 0 && x < width && y < height) ? depth[(size_t)y * width + x] : 1.0f;
   }
 };
+
+struct Shade8Tri;  // a triangle as the 8-wide shader takes it (raster.cpp, task 0091)
 
 class Renderer3D {
  public:
@@ -322,6 +328,11 @@ class Renderer3D {
   void draw_see_through(const std::vector<uint8_t> &see_through);
   /* Lights + image-based lighting for one shaded point (deferred and forward). */
   Vec3 light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const;
+  /* light_surface after its lights' loop (`lo`): reflections, ambient, emission (the 8-wide shader's per-pixel end). */
+  Vec3 light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const;
+  /* 8 pixels of a row on one plain-material triangle, lit at once (task 0091; x86 with AVX2): appended in order. */
+  void shade_run8(const Shade8Tri &t, const SurfaceSample &surface, int x, int64_t y, Vec3 eye, const Environment &env,
+                  std::vector<Vec3> &row_hdr, std::vector<int> &row_x) const;
 
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;

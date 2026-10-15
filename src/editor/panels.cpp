@@ -1830,6 +1830,7 @@ void Editor::draw_profiler(const Recti &r) {
   u.toggle_row(lay.row(), "Back-face culling (FoCG ch. 9.4)", raster_opt_.backface_culling);
   u.toggle_row(lay.row(), "Frustum culling (FoCG ch. 9.4 / GEA Vol. II 11.5)", raster_opt_.frustum_culling);
   u.toggle_row(lay.row(), "Uniform materials once per triangle", raster_opt_.uniform_shading);
+  u.toggle_row(lay.row(), "8 pixels at a time (AVX2)", raster_opt_.simd_shading);
   Recti tr = lay.row();
   u.label({tr.x, tr.y, tr.w / 2, tr.h}, "Tile size (px)");
   static const char *tiles[] = {"16", "32", "64", "128", "256"};

@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 117): plain-material pixels lit 8 at a time (task 0091, ADR 0035)
+
+**Asked:** the performance pass ("carry on the next tasks"; checks overlapping the next task).
+
+**Changed**
+- **Shading a view:** on a processor with AVX2, the pixels of a plain material (no textures, procedural or axis
+  mapping) are lit 8 at a time - the light directions, falloffs and highlights of every sun, point and spot light -
+  with the same pixels on screen. Lightmaps, probes, voxel GI, toon and area lights keep the one-pixel path. On the
+  laptop setting, off / on back to back: moving an object 17.18 -> 16.31 ms a frame, the Scene view's shading 4.45 ->
+  3.86 ms. The Profiler's renderer options (and the console's `raster simd on|off`) can switch it off to compare.
+
+**Checked**
+- New test (round 117): a view with a sun and its 3x3 and 2x2 shadows, point and spot lights, highlighted faces, a
+  two-sided face seen from behind and a procedural beside plain materials shows the same pixels with the 8-wide path on
+  and off, its colours before display within 1e-4 relative (1.5e-5 measured: the release build lets the compiler
+  reorder the one-pixel path's sums), and thousands of its pixels went through the 8-wide path. Skipped, and said so,
+  on a processor without AVX2.
+- Unit checks: Windows 10,319, 0 failed (705 tests); the whole suite in render-cache verify mode: 10,320,
+  0 failed, 0 stale pictures. Linux with libraries: 10,227, 0 failed. Sanitizer build: 10,133, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; tidied: the test compares the colours before display too (not only the 8-bit
+pixels), the kernel's helpers are functions (GCC can't give a lambda the AVX2 target), the ADR's claims say "the same
+displayed pixels" rather than "bit for bit".
+
 ## 2026-10-15 (round 116): in place, faster - only moved faces split again, face normals in parallel (task 0090)
 
 **Asked:** the performance pass ("carry on the next tasks").

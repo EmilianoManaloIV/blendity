@@ -3,6 +3,7 @@
 #include "../src/scene/curve.h"
 #include "../src/core/core.h"
 #include "../src/core/jobs.h"
+#include "../src/core/cpu.h"
 #include "../src/editor/editor.h"
 #include "../src/editor/learn.h"
 #include "../src/render/camera_filter.h"
@@ -29644,5 +29645,114 @@ static void round81_tests() {
     m->positions[90].y += 0.01f;
     m->touch();
     CHECK(draw_same(m->render_mesh(false), rebuilt(*m, false)));
+  });
+
+  /* ---------------------------------------------------------------- round 117: 8 pixels at a time (task 0091) */
+  test("shading: pixels lit 8 at a time (AVX2) are the same picture as one at a time - sun with 3x3 and 2x2 shadows, point and spot lights, highlighted faces, both sides", [] {
+    if (!cpu::features().avx2) {
+      std::printf("    (this CPU has no AVX2: the 8-wide shader isn't used here - skipped)\n");
+      return;
+    }
+    std::vector<MeshPtr> keep;
+    std::vector<std::vector<MaterialPtr>> mats;
+    std::vector<DrawItem> items;
+    mats.reserve(8);
+    std::vector<uint8_t> highlight(400, 0);
+    for (size_t i = 0; i < highlight.size(); i += 3) highlight[i] = 1;
+    auto add = [&](MeshPtr m, Mat4 model, uint32_t id, MaterialPtr mat, bool two_sided, bool hl) {
+      keep.push_back(m);
+      mats.push_back({mat});
+      DrawItem it;
+      it.mesh = &m->render_mesh();
+      it.model = model;
+      it.id = id;
+      it.materials = &mats.back();
+      it.double_sided = two_sided;
+      if (hl) {
+        it.face_highlight = &highlight;
+        it.highlight_color = Vec3(1.0f, 0.6f, 0.1f);
+      }
+      items.push_back(it);
+    };
+    MeshPtr smooth = primitives::uv_sphere(1.0f, 32, 24);
+    smooth->smooth = true;
+    auto red = make_material("R", Vec3(0.8f, 0.2f, 0.1f));
+    red->roughness = 0.3f;
+    red->metallic = 0.4f;
+    auto rough = make_material("G", Vec3(0.2f, 0.7f, 0.3f));
+    rough->roughness = 0.9f;
+    rough->emission = Vec3(0.2f, 0.2f, 0.0f);
+    rough->emission_strength = 0.5f;
+    auto shiny = make_material("S", Vec3(0.9f));
+    shiny->roughness = 0.0f;  // (the floored roughness)
+    shiny->metallic = 1.0f;
+    auto checker = make_material("C", Vec3(0.9f));
+    checker->procedural = (int)Procedural::Checker;  // (not plain: one pixel at a time, side by side with the others)
+    add(smooth, Mat4::translate({-1.5f, 0, 6}), 1, red, false, true);
+    add(primitives::cube(1.5f), Mat4::translate({1.5f, 0, 6}), 2, rough, false, false);
+    add(primitives::ico_sphere(0.8f, 3), Mat4::translate({0, 1.6f, 7}), 3, shiny, false, false);
+    add(primitives::plane(20.0f), Mat4::translate({0, -1.2f, 6}), 4, checker, true, false);
+    add(primitives::quad(3.0f), Mat4::translate({3.5f, 1, 5}) * Mat4::rotate(Quat::axis_angle({0, 1, 0}, 2.6f)), 5, rough, true, false);  // (its back)
+    const Mat4 v = Mat4::look_at({0, 1.5f, 0}, {0, 0, 6}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(60 * kDeg2Rad, 320 / 200.0f, 0.1f, 100);
+    LightingEnv env;
+    RenderLight sun, pt, spot;
+    sun.direction = normalize(Vec3(-0.3f, -1, 0.4f));
+    pt.type = RenderLight::Point;
+    pt.position = {0, 2, 5};
+    pt.intensity = 3.0f;
+    pt.range = 8.0f;
+    spot.type = RenderLight::Spot;
+    spot.position = {2, 3, 4};
+    spot.direction = normalize(Vec3(-0.3f, -1, 0.5f));
+    spot.intensity = 4.0f;
+    spot.range = 10.0f;
+    spot.cos_outer = 0.8f, spot.cos_inner = 0.9f;
+    env.lights = {sun, pt, spot};
+    env.camera_pos = {0, 1.5f, 0};
+    ShadowMap sm;
+    AABB b;
+    for (const DrawItem &it : items) b.add(it.mesh->bounds.transformed(it.model));
+    render_shadow_map(sm, items, sun.direction, b, 1024);
+    env.shadow = &sm;
+    env.shadow_light = 0;
+    for (bool fast_pcf : {false, true}) {
+      sm.fast = fast_pcf;
+      Image img[2];
+      RenderTarget rt[2];
+      size_t simd = 0;
+      for (int k = 0; k < 2; k++) {
+        img[k].resize(320, 200);
+        rt[k].attach(img[k], {0, 0, 320, 200});
+        rt[k].want_hdr = true;  // (the colours before display encoding: a float differing anywhere shows there)
+        Renderer3D r;
+        RasterOptions opt;
+        opt.shade = ShadeMode::Deferred;
+        opt.simd_shading = k == 0;
+        r.begin(&rt[k], v, p, env, opt);
+        r.clear(0xFF000000);
+        for (auto &it : items) r.add(it);
+        r.flush();
+        if (k == 0) simd = r.stats().pixels_simd;
+      }
+      /* The displayed pixels are the same. The colours before display encoding can differ in their last bits: the
+       * kernel keeps the scalar shader's order of operations, but a release build may let the compiler reorder the
+       * scalar code (MSVC's /fp:fast). Measured: about 1e-5 relative at most.  */
+      size_t differ = 0, hdr_differ = 0;
+      double worst = 0.0;
+      for (size_t i = 0; i < img[0].pixels.size(); i++) differ += img[0].pixels[i] != img[1].pixels[i];
+      CHECK(rt[0].hdr.size() == img[0].pixels.size() && rt[1].hdr.size() == rt[0].hdr.size());
+      for (size_t i = 0; i < rt[0].hdr.size() && i < rt[1].hdr.size(); i++) {
+        const Vec3 a = rt[0].hdr[i], b = rt[1].hdr[i];
+        if (std::memcmp(&a, &b, sizeof(Vec3)) == 0) continue;
+        hdr_differ++;
+        for (int c = 0; c < 3; c++) worst = std::max(worst, std::fabs((double)a[c] - b[c]) / std::max(1e-3, std::fabs((double)b[c])));  // (relative; absolute below 0.001)
+      }
+      std::printf("    %s shadows: %zu pixels lit 8 at a time; %zu pixels differ; %zu HDR colours differ, by at most %.2g relative\n",
+                  fast_pcf ? "2x2" : "3x3", simd, differ, hdr_differ, worst);
+      CHECK(simd > 5000);
+      CHECK(differ == 0);
+      CHECK(worst < 1e-4);
+    }
   });
 }

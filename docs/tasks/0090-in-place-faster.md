@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none (ADR 0034's path, made cheaper)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/81
 
 ## Goal
 After task 0086 a drag on a 50k-face mesh still spent about 9 ms a frame moving its two render caches in place:

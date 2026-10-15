@@ -1593,7 +1593,7 @@ uint64_t Editor::raster_opt_key() const {
   std::memcpy(&vs, &view_scale_, 4);  // Viewport Resolution Scale: a different picture in every view it applies to
   uint64_t k = (uint64_t)o.multithreaded | (uint64_t)o.backface_culling << 1 | (uint64_t)o.frustum_culling << 2 |
                (uint64_t)o.span_rows << 3 | (uint64_t)o.fast_setup << 4 | (uint64_t)o.affine_uv << 5 | (uint64_t)o.screen_door << 6 |
-               (uint64_t)o.shade << 8 | (uint64_t)o.uniform_shading << 7 | (uint64_t)(uint32_t)o.tile_size << 16;
+               (uint64_t)o.shade << 8 | (uint64_t)o.uniform_shading << 7 | (uint64_t)o.simd_shading << 11 | (uint64_t)(uint32_t)o.tile_size << 16;
   uint32_t snap;
   std::memcpy(&snap, &o.vertex_snap, 4);
   k ^= (uint64_t)snap << 32;

@@ -1050,6 +1050,25 @@ static void test_editor_render(Report &rep, const Options &o) {
                        (p.ms_collect - mp0.ms_collect) / f, (p.ms_hash - mp0.ms_hash) / f, (p.scene_hashes - mp0.scene_hashes) / f));
   }
   {
+    /* Task 0091: the same moves with the 8-wide shader off and on again, back to back (the picture is the same). */
+    auto moves = [&](int base) {
+      return time_ms([&] {
+        static int k = 0;
+        if (mover) mover->set_local_position({0.1f * (base + (k++ % 9)), 1.0f, 0.0f});
+        ed.step_frame_headless();
+      }, n);
+    };
+    ed.command("raster simd off");
+    const double off = moves(40);
+    const RasterStats s_off = ed.scene_stats_for_test();
+    ed.command("raster simd on");
+    const double on = moves(60);
+    const RasterStats s_on = ed.scene_stats_for_test();
+    rep.note(strprintf("Moving an object with the 8-wide shader off / on: %.2f / %.2f ms a frame; the Scene view's shading %.2f / %.2f ms "
+                       "(%zu pixels lit 8 at a time)",
+                       off, on, s_off.ms_shade, s_on.ms_shade, s_on.pixels_simd));
+  }
+  {
     /* Where a moved frame's raster time goes, view by view (task 0050 profiled the minimum machine with this). */
     const RasterStats &s = ed.scene_stats_for_test(), &g = ed.game_stats_for_test();
     rep.note(strprintf("Moving an object, the last frame's rasterizer: Scene view %zu of %zu triangles, setup %.2f ms, raster %.2f ms, shade %.2f ms "

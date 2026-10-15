@@ -3423,6 +3423,15 @@ void Editor::run_console_command(const std::string &line) {
     else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
     else Log::warn("drawmode rect <corner|center|3point> | circle <center|2point|3point> | square <on|off>");
   }
+  else if (c == "raster" && t.size() >= 3) {
+    /* raster simd|uniform on|off: the shader's 8-wide path (task 0091) and plain materials once per triangle (0088) */
+    const bool on = to_lower(t[2]) != "off";
+    const std::string what = to_lower(t[1]);
+    if (what == "simd") raster_opt_.simd_shading = on;
+    else if (what == "uniform") raster_opt_.uniform_shading = on;
+    else Log::warn("raster simd|uniform on|off");
+    ui_.redraw = true;
+  }
   else if (c == "fps") {
     /* fps <n | 0 / unlimited>: the editor's frame rate cap */
     const std::string v = to_lower(arg(1, "120"));
