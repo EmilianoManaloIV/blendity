@@ -28988,4 +28988,81 @@ static void round81_tests() {
     px[5] ^= 0x80000000u;
     CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
   });
+  /* ---------------------------------------------------------------- round 111: per-view waste (task 0085) */
+  test("voxel GI: moving an object inside the grid makes no new column pyramid; growing the scene past it makes one", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    GameObject *box = r35_add(ed, "Cube", "Box", {-3.0f, 0.5f, 2.0f}, {1, 1, 1}, Vec3(0.8f));
+    ed.commit_change("add Box");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r34_steps(ed, 3);
+    CHECK(ed.voxel_grid_for_test().valid());
+    const uint64_t a0 = voxel_grid_allocations();
+    for (int k = 0; k < 6; k++) {
+      box->set_local_position({-3.0f + 0.05f * k, 0.5f, 2.0f});
+      r34_steps(ed, 1);
+    }
+    const uint64_t moved = voxel_grid_allocations() - a0;
+    std::printf("    6 small moves: %llu new pyramids (before task 0085: one per view per frame)\n", (unsigned long long)moved);
+    CHECK(moved == 0);
+    CHECK(ed.voxel_grid_for_test().valid());
+    /* Far outside: the grid can't hold the scene any more - a new one, with its columns. */
+    box->set_local_position({60.0f, 0.5f, 2.0f});
+    r34_steps(ed, 2);
+    CHECK(voxel_grid_allocations() > a0 && ed.voxel_grid_for_test().valid());
+  });
+
+  test("voxel GI: a grid fitted without its columns has the same placement and key as one fitted with them", [] {
+    AABB b;
+    b.add({-3, 0, -2});
+    b.add({5, 4, 7});
+    VoxelGrid with, without;
+    voxel_grid_fit(with, b, 128);
+    voxel_grid_fit(without, b, 128, false);
+    CHECK(with.valid() && !without.valid());
+    CHECK(with.n == without.n && with.voxel == without.voxel && with.key == without.key);
+    CHECK(with.origin.x == without.origin.x && with.origin.y == without.origin.y && with.origin.z == without.origin.z);
+    voxel_grid_allocate(without);
+    CHECK(without.valid() && without.level_count() == with.level_count());
+    for (int l = 0; l < with.level_count(); l++) CHECK(without.levels[(size_t)l].size() == with.levels[(size_t)l].size());
+  });
+
+  test("shadows: a shadow map keeps no ids plane, and its depth is what it was with one", [] {
+    /* A small scene's sun shadow, rendered into a depth-only target; then the same into a full target (ids too). */
+    std::vector<MeshPtr> keep;
+    std::vector<DrawItem> items;
+    for (int i = 0; i < 3; i++) {
+      MeshPtr m = primitives::cube();
+      keep.push_back(m);
+      DrawItem it;
+      it.mesh = &m->render_mesh();
+      it.model = Mat4::translate({(float)i * 1.5f - 1.5f, 0.5f * i, 0.0f});
+      it.id = (uint32_t)(i + 1);
+      items.push_back(it);
+    }
+    const Mat4 view = Mat4::look_at({4, 6, 5}, {0, 0, 0}, {0, 1, 0});
+    const Mat4 proj = Mat4::ortho(5.0f, 1.0f, 0.1f, 30.0f);
+    RasterOptions opt;
+    opt.shade = ShadeMode::DepthOnly;
+    opt.backface_culling = false;
+    LightingEnv env;
+    RenderTarget shadow, full;
+    shadow.make_depth_only(256, 256);
+    CHECK(shadow.ids.empty() && shadow.depth.size() == 256u * 256u);
+    full.width = full.height = full.stride = 256;
+    full.resize_planes();
+    CHECK(full.ids.size() == 256u * 256u);
+    for (RenderTarget *rt : {&shadow, &full}) {
+      Renderer3D r;
+      r.begin(rt, view, proj, env, opt);
+      r.clear(0);
+      for (const DrawItem &it : items) r.add(it);
+      r.flush();
+    }
+    CHECK(shadow.depth == full.depth);
+    size_t hit = 0;
+    for (uint32_t id : full.ids) hit += id != 0;
+    CHECK(hit > 1000);  // (the full target did record what it drew)
+    CHECK(shadow.id_at(128, 128) == 0);
+  });
 }

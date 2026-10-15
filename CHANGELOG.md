@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 111): per-view waste - the voxel GI grid's columns, the shadow map's ids plane (task 0085)
+
+**Asked:** the performance pass (plan item 0085).
+
+**Changed**
+- **Realtime GI:** a view checking whether its voxel grid still fits the scene no longer allocates a fresh column
+  pyramid (about 87,000 columns at 256) every frame to find out; only a grid it actually takes gets its columns.
+- **Shadow maps** keep no picking-ids plane: nothing is cleared or written for it. The sun's map on a moved-object
+  frame went from 0.68 to 0.48 ms on the laptop setting.
+- **The GI blur** no longer copies its input plane before writing every texel anyway.
+- **Measured and left alone:** gathering the views' draw items (0.07 ms a moved frame) and the scene hashes (0.03 ms)
+  are too small to be worth changing in these scenes; shading is 5.1 of the Scene view's 7.2 ms (tasks 0088-0089).
+  The Realtime GI drag in Automatic mode (71 ms) is the automatic lighting update, not the grid.
+
+**Checked**
+- New tests (round 111): small moves inside the GI grid make no new pyramid, leaving it makes one; a grid fitted
+  without columns has the same placement and key; a shadow map has no ids plane and the same depth.
+- Unit checks: Windows 10,058, 0 failed (689 tests); the whole suite in render-cache verify mode: 10,059,
+  0 failed, 0 stale pictures. Linux with libraries: 9,966, 0 failed. Sanitizer build: 9,872, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; hardened: the Gouraud raster path and the selection outline also skip a
+target without ids (a shadow map), so a future pass drawing into one can't index an empty plane; a shadow target
+gives its ids memory back.
+
 ## 2026-10-15 (round 110): the frame-rate cap holds, and only what changed is presented (task 0084)
 
 **Asked:** the performance pass (task 0083 measured; this is its first fix).

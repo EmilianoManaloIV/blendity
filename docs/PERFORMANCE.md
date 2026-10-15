@@ -46,6 +46,12 @@ waits are rounded up to Windows' 15.6 ms timer, so a frame that leaves less than
 The full present's long tail (9 ms at the 95th percentile) went with it: smaller copies don't wait as long on the
 desktop compositor.
 
+**Task 0085** (per-view waste): a moved-object frame's own setup around the rasterizer was measured first - draw
+items 0.07 ms, scene hashes 0.03 ms (three) - so only what showed was changed: the sun's shadow map no longer clears
+and writes an ids plane (0.68 → 0.48 ms a moved frame), and a view checking its voxel GI grid no longer allocates a
+column pyramid to do it. Honest negative: the Realtime GI drag in Automatic mode stays at 71 ms; that is the
+automatic lighting update itself (its Camera Preview and its UI-side update), not the grid.
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris

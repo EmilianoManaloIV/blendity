@@ -1037,10 +1037,18 @@ static void test_editor_render(Report &rep, const Options &o) {
   });
   row("orbiting the Scene view", [&](int k) { ed.command(strprintf("camera %d 20 14", 30 + k * 3)); ed.step_frame_headless(); });
   GameObject *mover = ed.scene().find_by_name("Icosphere");
+  const FrameProfile mp0 = ed.frame_profile_totals();
   row("moving an object", [&](int k) {
     if (mover) mover->set_local_position({0.1f * k, 1.0f, 0.0f});
     ed.step_frame_headless();
   });
+  {
+    /* Task 0085: what the views' own setup costs around the rasterizer (n + 1 frames: the warm-up's too). */
+    const FrameProfile p = ed.frame_profile_totals();
+    const double f = n + 1;
+    rep.note(strprintf("Moving an object, per frame: gathering the views' draw items %.2f ms, scene hashes %.2f ms (%.1f of them)",
+                       (p.ms_collect - mp0.ms_collect) / f, (p.ms_hash - mp0.ms_hash) / f, (p.scene_hashes - mp0.scene_hashes) / f));
+  }
   {
     /* Where a moved frame's raster time goes, view by view (task 0050 profiled the minimum machine with this). */
     const RasterStats &s = ed.scene_stats_for_test(), &g = ed.game_stats_for_test();

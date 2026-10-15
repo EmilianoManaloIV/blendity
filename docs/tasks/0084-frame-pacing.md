@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/75
 
 ## Goal
 Task 0083 measured a 60 fps cap running at 33 fps (30.6 ms between 13 ms frames): Windows rounds every wait up to its
