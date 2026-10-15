@@ -34,6 +34,18 @@ the Game view's smooth one), the drag's writes 24.5 ms (`repair_moved_rings` sca
 percentile. **Pacing:** a 60 fps cap with 13 ms frames (present included) gave 30.6 ms between frames (95 % within 32.0), with no input arriving: the loop's
 waits are rounded up to Windows' 15.6 ms timer, so a frame that leaves less than a tick waits a whole one more.
 
+**Task 0084** (`--only present`, same window):
+
+| | Before | After |
+|---|---|---|
+| 60 fps cap, 13 ms frames: between frames (mean / 95 %) | 30.55 / 31.98 ms | 16.58 / 16.70 ms (`FramePacer` + a high-resolution timer) |
+| the same, the high-resolution timer alone | - | 16.56 / 17.61 ms |
+| presenting while a Scene-view-sized block of rows changes | 2.42 / 9.38 ms (all of it) | 0.68 / 0.70 ms (the changed bands, hashing included) |
+| presenting when nothing changed | 2.42 / 9.38 ms | 0.07 / 0.08 ms |
+
+The full present's long tail (9 ms at the 95th percentile) went with it: smaller copies don't wait as long on the
+desktop compositor.
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris

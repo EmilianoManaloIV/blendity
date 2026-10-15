@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include "../core/core.h"
+#include "../core/pacer.h"
 #include "../platform/platform.h"
 #include "../render/camera_filter.h"
 #include "../render/pathtracer.h"
@@ -592,6 +593,9 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  /* The rows of a frame to present: runs of 16-row bands whose pixels differ from `bands` (the hashes of the last
+   * frame presented, updated here); every row when `all` or the size changed (task 0084). */
+  static std::vector<std::pair<int, int>> changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all);
   void show_update_for_test(const std::string &json, const std::string &tag) {
     upd_.list = releases::parse(json);
     upd_.selected = tag;
@@ -1577,6 +1581,13 @@ class Editor {
   int tier_shadow_cap_ = 0, tier_gi_rays_cap_ = 0, tier_rsm_cap_ = 0;  // 0 = no cap
   bool final_render_ = false;  // an F12 raster render is drawing (the tier's caps don't apply)
   std::vector<double> frame_stamps_;  // the last second's frame start times
+  FramePacer pacer_;  // waits for each frame's turn under the cap (task 0084)
+  /* Presenting only what changed (task 0084): a hash per band of rows as last presented; a whole present when the
+   * window asked to be painted or changed size. */
+  std::vector<uint64_t> present_bands_;
+  bool present_all_ = true;
+  int present_w_ = 0, present_h_ = 0;
+  void present_changed();
   /* The mesh caches' tallies at the last frame's end, and that frame's share (task 0083). Process-wide: work on other
    * threads (a skin bind) lands in the frame it finished in. */
   MeshCounts mesh_seen_ = mesh_counts(), mesh_last_;

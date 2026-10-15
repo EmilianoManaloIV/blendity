@@ -28851,4 +28851,141 @@ static void round81_tests() {
     CHECK(ed.button_rect_for_test("Mesh copies / render meshes built / moved in place", r));
     CHECK(ed.button_rect_for_test("Edit Mode: mesh writes / overlap check", r));
   });
+  /* ---------------------------------------------------------------- round 110: frame pacing (task 0084) */
+  test("pacing: a 60 fps cap holds with 13 ms frames even when every blocking wait is rounded up to a 15.6 ms timer tick", [] {
+    /* A pretend clock and a pretend wait as coarse as Windows' default timer: a blocking wait ends at the next tick
+     * after it was due; a wait of 0 just lets a tenth of a millisecond go by (a poll). */
+    double t = 0.0;
+    const double tick = 0.015625;
+    auto now = [&] { return t; };
+    auto coarse = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001;
+        return;
+      }
+      t = std::ceil((t + s) / tick) * tick;
+    };
+    auto run = [&](bool pacer_on) {
+      FramePacer pacer;
+      std::vector<double> gaps;
+      t = 0.0;
+      double last = 0.0, prev = -1.0;
+      for (int k = 0; k < 600; k++) {
+        if (pacer_on) pacer.wait_until(last + 1.0 / 60.0, now, coarse);
+        for (double wait = last + 1.0 / 60.0 - t; !pacer_on && wait > 0.0005; wait = last + 1.0 / 60.0 - t) coarse(wait);  // (the old loop)
+        if (prev >= 0) gaps.push_back((t - prev) * 1000.0);
+        prev = last = t;
+        t += 0.013;  // the frame's work
+      }
+      gaps.erase(gaps.begin(), gaps.begin() + 20);  // (after it has learnt)
+      double mean = 0;
+      for (double g : gaps) mean += g;
+      std::sort(gaps.begin(), gaps.end());
+      return std::make_pair(mean / (double)gaps.size(), gaps[gaps.size() * 95 / 100]);
+    };
+    const auto before = run(false), after = run(true);
+    std::printf("    between frames: waiting in poll_events %.1f ms (95%% within %.1f); the pacer %.2f ms (95%% within %.2f)\n", before.first, before.second,
+                after.first, after.second);
+    CHECK(before.first > 25.0);                                  // (what task 0083 measured: 33 fps)
+    /* 60 fps, 95 % of frames on time. (The margin that keeps the pacer from oversleeping a coarse tick shrinks now and
+     * then so it can't get stuck - the test below; under a coarse timer that costs a late frame in about seventy.) */
+    CHECK(std::fabs(after.first - 1000.0 / 60.0) < 0.3 && after.second < 17.2);
+  });
+
+  test("pacing: with a precise timer the pacer blocks for nearly all of the wait (no spinning)", [] {
+    double t = 0.0, blocked = 0.0;
+    int polls = 0;
+    auto now = [&] { return t; };
+    auto precise = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001, polls++;
+        return;
+      }
+      t += s + 0.0001;  // (a tenth of a millisecond late)
+      blocked += s;
+    };
+    FramePacer pacer;
+    for (int k = 0; k < 60; k++) pacer.wait_until(t + 0.004, now, precise);
+    std::printf("    60 waits of 4 ms: %.1f ms blocked, %d polls, margin %.2f ms\n", blocked * 1000.0, polls, pacer.lateness() * 1000.0);
+    CHECK(blocked > 0.8 * 60 * 0.004);
+    CHECK(pacer.lateness() < 0.001);
+  });
+
+  test("pacing: input wakes a wait early and the pacer goes on waiting until the frame's turn", [] {
+    double t = 0.0;
+    int calls = 0;
+    auto now = [&] { return t; };
+    auto woken = [&](double s) {  // every blocking wait is cut short by a mouse move after 2 ms
+      calls++;
+      t += s <= 0.0 ? 0.0001 : std::min(s, 0.002);
+    };
+    FramePacer pacer;
+    pacer.wait_until(0.016, now, woken);
+    CHECK(t >= 0.016 - 0.0001 && t < 0.0175);
+    CHECK(calls >= 7);  // (several waits, each woken)
+  });
+  test("present: only the bands of rows that changed go to the window; a size change or a paint request sends all of it", [] {
+    const int w = 300, h = 100;  // (100 rows: six 16-row bands and one of 4)
+    std::vector<uint32_t> px((size_t)w * h, 0xFF202020u);
+    std::vector<uint64_t> bands;
+    auto runs = Editor::changed_rows(px.data(), w, h, bands, false);
+    CHECK(runs.size() == 1 && runs[0].first == 0 && runs[0].second == h);  // (nothing presented yet: all)
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).empty());    // (the same frame again: nothing)
+    px[(size_t)20 * w + 7] = 0xFFFFFFFFu;                                  // one pixel in band 1 (rows 16-31)
+    px[(size_t)40 * w + 299] = 0xFF00FF00u;                                // and one in band 2 (rows 32-47), at a row's end
+    px[(size_t)99 * w + 0] = 0xFF0000FFu;                                  // and one in the short last band
+    runs = Editor::changed_rows(px.data(), w, h, bands, false);
+    std::printf("    %zu runs:", runs.size());
+    for (auto &r : runs) std::printf(" [%d, %d)", r.first, r.second);
+    std::printf("\n");
+    CHECK(runs.size() == 2 && runs[0] == std::make_pair(16, 48) && runs[1] == std::make_pair(96, 100));
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, true).size() == 1);  // (asked for all)
+    std::vector<uint32_t> taller((size_t)w * 120, 0xFF202020u);
+    runs = Editor::changed_rows(taller.data(), w, 120, bands, false);
+    CHECK(runs.size() == 1 && runs[0].second == 120);  // (a new size: all)
+  });
+  test("pacing: one very late wake-up (a debugger, a busy machine) doesn't leave the pacer polling for good", [] {
+    double t = 0.0, blocked = 0.0;
+    bool hiccup = true;
+    auto now = [&] { return t; };
+    auto wait = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001;
+        return;
+      }
+      t += s + (hiccup ? 0.030 : 0.0001);  // the first blocking wait ends 30 ms late; then on time
+      hiccup = false;
+      blocked += s;
+    };
+    FramePacer pacer;
+    double last = 0.0;
+    for (int k = 0; k < 200; k++) {
+      pacer.wait_until(last + 1.0 / 60.0, now, wait);
+      last = t;
+      t += 0.013;
+    }
+    const double before = blocked;
+    for (int k = 0; k < 20; k++) {
+      pacer.wait_until(last + 1.0 / 60.0, now, wait);
+      last = t;
+      t += 0.013;
+    }
+    std::printf("    after the hiccup: margin %.2f ms; the last 20 frames blocked %.1f ms of their waits\n", pacer.lateness() * 1000.0,
+                (blocked - before) * 1000.0);
+    CHECK(pacer.lateness() < 0.002);
+    CHECK(blocked - before > 20 * 0.002);  // (blocking again, not polling)
+  });
+
+  test("present: a change only in a pixel's top bits (alpha), in two places of one band, is still seen", [] {
+    const int w = 64, h = 16;
+    std::vector<uint32_t> px((size_t)w * h, 0xFF000000u);
+    std::vector<uint64_t> bands;
+    Editor::changed_rows(px.data(), w, h, bands, true);
+    px[1] ^= 0x80000000u;  // the top bit of the first 8-byte word
+    px[9] ^= 0x80000000u;  // and of another word in the same chain
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
+    px[3] ^= 0x80000000u;  // two words in different chains
+    px[5] ^= 0x80000000u;
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
+  });
 }

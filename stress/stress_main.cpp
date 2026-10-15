@@ -4363,23 +4363,54 @@ static void test_present(Report &rep, const Options &o) {
     present_ms.push_back(t.ms());
   }
   stats(strprintf("present, %d x %d", fw, fh).c_str(), present_ms);
-  /* The editor's loop (Editor::run): wait in poll_events until a frame's time has come, then draw. */
-  const double cap = 60.0, work_ms = 13.0;
-  std::vector<double> gaps;
-  double last = now_seconds(), prev_start = -1;
-  for (int k = 0; k < frames; k++) {
-    for (double wait = last + 1.0 / cap - now_seconds(); wait > 0.0005; wait = last + 1.0 / cap - now_seconds()) {
-      ev.clear();
-      platform::poll_events(w, ev, std::max(1, (int)(wait * 1000.0)));
-    }
-    const double start = now_seconds();
-    if (prev_start >= 0) gaps.push_back((start - prev_start) * 1000.0);
-    prev_start = last = start;
-    paint(k);
+  /* Task 0084: as the editor presents - only the bands of rows that changed (hashing them included). Here a view-sized
+   * block of rows changes each frame, as while dragging in the Scene view; and then nothing (an idle redraw). */
+  auto present_changed = [&](int y0, int y1, bool change) {
+    std::vector<double> ms;
+    std::vector<uint64_t> bands;
+    Editor::changed_rows(px.data(), fw, fh, bands, true);
     platform::present(w, px.data(), fw, fh);
-    while ((now_seconds() - start) * 1000.0 < work_ms) {}  // the rest of a 13 ms frame (a spin: no sleep to round)
-  }
-  stats("between frames, 60 fps cap, 13 ms frames (16.7 is on time)", gaps);
+    for (int k = 0; k < frames; k++) {
+      ev.clear();
+      platform::poll_events(w, ev, 0);
+      for (int y = y0; change && y < y1; y += 2) px[(size_t)y * fw + (k * 7) % fw] = 0xFF000000u | (uint32_t)(k * 977 + y);
+      ScopedTimer t;
+      platform::present_rows(w, px.data(), fw, fh, Editor::changed_rows(px.data(), fw, fh, bands, false));
+      ms.push_back(t.ms());
+    }
+    return ms;
+  };
+  stats(strprintf("present, rows %d-%d changed (as a Scene view drag)", fh / 6, fh * 5 / 6).c_str(), present_changed(fh / 6, fh * 5 / 6, true));
+  stats("present, nothing changed", present_changed(0, 0, false));
+  /* A 60 fps cap over 13 ms frames, waited for two ways: blocking in poll_events until the frame's time (the editor's
+   * loop before task 0084), and the editor's FramePacer (since). */
+  const double cap = 60.0, work_ms = 13.0;
+  auto paced = [&](bool pacer_on) {
+    std::vector<double> gaps;
+    FramePacer pacer;
+    double last = now_seconds(), prev_start = -1;
+    for (int k = 0; k < frames; k++) {
+      if (pacer_on)
+        pacer.wait_until(last + 1.0 / cap, now_seconds, [&](double s) {
+          ev.clear();
+          platform::poll_events_for(w, ev, s);
+          if (s <= 0.0) std::this_thread::yield();
+        });
+      for (double wait = last + 1.0 / cap - now_seconds(); !pacer_on && wait > 0.0005; wait = last + 1.0 / cap - now_seconds()) {
+        ev.clear();
+        platform::poll_events(w, ev, std::max(1, (int)(wait * 1000.0)));
+      }
+      const double start = now_seconds();
+      if (prev_start >= 0) gaps.push_back((start - prev_start) * 1000.0);
+      prev_start = last = start;
+      paint(k);
+      platform::present(w, px.data(), fw, fh);
+      while ((now_seconds() - start) * 1000.0 < work_ms) {}  // the rest of a 13 ms frame (a spin: no sleep to round)
+    }
+    return gaps;
+  };
+  stats("between frames, 60 fps cap, 13 ms frames, waits in poll_events (16.7 is on time)", paced(false));
+  stats("between frames, 60 fps cap, 13 ms frames, the FramePacer", paced(true));
   platform::destroy_window(w);
   rep.note("Over 16.7 ms between frames means the cap made a frame late: the waits are rounded to the system timer. "
            "(No input arrives here; in the editor, input wakes the wait early.)");

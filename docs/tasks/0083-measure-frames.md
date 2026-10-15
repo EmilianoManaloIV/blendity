@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/74
 
 ## Goal
 First task of the performance pass (plan: viewport frame rate and big meshes in Edit Mode, the CPU renderer kept;

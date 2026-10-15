@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 110): the frame-rate cap holds, and only what changed is presented (task 0084)
+
+**Asked:** the performance pass (task 0083 measured; this is its first fix).
+
+**Fixed**
+- **A 60 fps cap ran at about 33 fps on Windows**, whatever the frame cost: every wait was rounded up to Windows'
+  15.6 ms timer tick, so a frame that left less than a tick to wait lost a whole one more. The editor now waits on a
+  high-resolution timer, and a frame pacer blocks only for as long as the waits have proved on time and polls for
+  the rest: a real window's 13 ms frames under a 60 fps cap went from 30.6 ms apart to 16.6 ms (95 % within 16.7).
+- **Presenting** sends only the bands of rows that changed: 0.68 ms instead of 2.42 for a Scene-view-sized change
+  (95 % within 0.70 ms instead of 9.38), and 0.07 ms when nothing changed.
+- **A window repaint drew the same frame twice** (the paint, then a queued event); now once.
+
+**Checked**
+- New tests (round 110): the pacer under a pretend 15.6 ms timer (the old loop 31.2 ms apart, the pacer 16.6); with
+  a precise timer it blocks for nearly the whole wait; input waking it early doesn't start the frame early; only
+  changed bands are presented, everything on a new size or when asked; one 30 ms-late wake-up doesn't leave the
+  pacer polling for good; a change only in pixels' top bits is still seen.
+- Unit checks: Windows 10,037, 0 failed (686 tests); the whole suite in render-cache verify mode: 10,038,
+  0 failed, 0 stale pictures. Linux with libraries: 9,945, 0 failed. Sanitizer build: 9,851, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- On Linux (and Windows' fallback) a window uncovered or first shown asked for a repaint as an event, which presented
+  nothing when the frame hadn't changed: a repaint, resize or DPI change now presents all of it.
+- One very late wake-up could leave the pacer polling for good (it only learnt from waits it blocked in): an unused
+  margin now shrinks each frame.
+- The band hash could miss a change confined to pixels' top bits: each chain rotates and is finalised.
+- macOS presented the whole picture once per changed run: once per frame now. `winmm` is linked for CMake builds too.
+- Waits were truncated to whole milliseconds: `poll_events_for` takes seconds; Windows' waits wake for input already
+  queued and can't hang on a timer that never fires.
+
 ## 2026-10-15 (round 109): performance pass 10 begins - measuring Edit Mode drags, the mesh caches and frame pacing (task 0083)
 
 **Asked:** "Let's increase overall editor performance in general." Chosen: the viewport's frame rate and big meshes
