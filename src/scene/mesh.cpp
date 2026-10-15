@@ -2,6 +2,7 @@
 #include "mesh.h"
 #include "mesh_internal.h"
 
+#include "../core/core.h"
 #include "../core/jobs.h"
 
 #include <algorithm>
@@ -224,8 +225,44 @@ void Mesh::edges(std::vector<std::pair<uint32_t, uint32_t>> &out) const {
   }
 }
 
+namespace {
+/* MeshCounts' tallies (atomic: render meshes are also built on worker threads), microseconds for the times. */
+enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, kStatCount };
+std::atomic<uint64_t> g_stat_count[kStatCount], g_stat_us[kStatCount];
+struct StatTimer {
+  MeshStat stat;
+  ScopedTimer t;
+  bool count = true;  // (false: the time is spent, but the thing wasn't done - a refused in-place move)
+  ~StatTimer() {
+    if (count) g_stat_count[stat].fetch_add(1, std::memory_order_relaxed);
+    g_stat_us[stat].fetch_add((uint64_t)(t.ms() * 1000.0), std::memory_order_relaxed);
+  }
+};
+}  // namespace
+
+MeshCounts mesh_counts() {
+  MeshCounts c;
+  uint64_t *n[kStatCount] = {&c.copies, &c.full_builds, &c.in_place, &c.tangent_builds, &c.edge_builds};
+  double *ms[kStatCount] = {&c.ms_copies, &c.ms_full_builds, &c.ms_in_place, &c.ms_tangents, &c.ms_edges};
+  for (int i = 0; i < kStatCount; i++) {
+    *n[i] = g_stat_count[i].load(std::memory_order_relaxed);
+    *ms[i] = g_stat_us[i].load(std::memory_order_relaxed) / 1000.0;
+  }
+  return c;
+}
+
+MeshCounts MeshCounts::operator-(const MeshCounts &o) const {
+  MeshCounts d;
+  d.copies = copies - o.copies, d.full_builds = full_builds - o.full_builds, d.in_place = in_place - o.in_place;
+  d.tangent_builds = tangent_builds - o.tangent_builds, d.edge_builds = edge_builds - o.edge_builds;
+  d.ms_copies = ms_copies - o.ms_copies, d.ms_full_builds = ms_full_builds - o.ms_full_builds;
+  d.ms_in_place = ms_in_place - o.ms_in_place, d.ms_tangents = ms_tangents - o.ms_tangents, d.ms_edges = ms_edges - o.ms_edges;
+  return d;
+}
+
 const std::vector<std::pair<uint32_t, uint32_t>> &Mesh::edge_cache() const {
   if (edges_version_ != version) {
+    StatTimer st{kStatEdges, {}};
     edges(edges_);
     edges_version_ = version;
   }
@@ -247,8 +284,14 @@ size_t Mesh::memory_bytes() const {
   return b + sizeof(Mesh);
 }
 
+MeshPtr mesh_copy(const Mesh &m) {
+  StatTimer st{kStatCopy, {}};
+  return std::make_shared<Mesh>(m);
+}
+
 MeshPtr &mesh_make_mutable(MeshPtr &m) {
   if (m && m.use_count() > 1) {
+    StatTimer st{kStatCopy, {}};
     m = std::make_shared<Mesh>(*m);
     m->touch();
   }
@@ -425,6 +468,7 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
  * build's. Positions and normals are written per render vertex; if two corners of one render vertex now
  * have different normals (the full build would split it), the caller rebuilds instead. */
 bool Mesh::deform_in_place(int ci, bool flat) const {
+  StatTimer st{kStatInPlace, {}, false};  // (counted once it worked; a refused one's time is still spent)
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
   if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return false;
@@ -477,6 +521,7 @@ bool Mesh::deform_in_place(int ci, bool flat) const {
   rm.bounds = bounds();
   rm.serial = next_render_serial();  // what was drawn from it changed: every cache keyed on it re-renders
   cache_deform_[ci] = deform_version;
+  st.count = true;
   return true;
 }
 
@@ -488,6 +533,7 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
     if (cache_deform_[ci] == deform_version) return cache_[ci];
     if (deform_in_place(ci, flat)) return cache_[ci];
   }
+  StatTimer st{kStatFull, {}};
   RenderMesh &rm = cache_[ci];
   rm.positions.clear();
   rm.normals.clear();
@@ -587,6 +633,7 @@ const RenderMesh &Mesh::render_mesh_tangents(bool force_flat) const {
   const RenderMesh &rm0 = render_mesh(force_flat);
   const int ci = force_flat && any_smooth() ? 1 : 0;
   if (cache_tangents_[ci]) return rm0;
+  StatTimer st{kStatTangents, {}};
   RenderMesh &rm = cache_[ci];
   rm.tangents.assign(rm.positions.size(), Vec4(1, 0, 0, 1));
   if (!rm.uvs.empty() && rm.tri_count()) {

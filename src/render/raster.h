@@ -222,10 +222,11 @@ struct RenderTarget {
   ViewTransform hdr_view_transform = ViewTransform::Standard;
   float hdr_exposure = 0.0f;
   void attach(Image &img, const Recti &r);
+  /* Depth alone (a shadow map): no colour and no ids plane - nothing picks in it (task 0085). */
   void make_depth_only(int w, int h);
-  void resize_planes();
+  void resize_planes(bool with_ids = true);
   uint32_t id_at(int x, int y) const {
-    return (x >= 0 && y >= 0 && x < width && y < height) ? ids[(size_t)y * width + x] : 0;
+    return (x >= 0 && y >= 0 && x < width && y < height && !ids.empty()) ? ids[(size_t)y * width + x] : 0;
   }
   float depth_at(int x, int y) const {
     return (x >= 0 && y >= 0 && x < width && y < height) ? depth[(size_t)y * width + x] : 1.0f;

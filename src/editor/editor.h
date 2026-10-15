@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include "../core/core.h"
+#include "../core/pacer.h"
 #include "../platform/platform.h"
 #include "../render/camera_filter.h"
 #include "../render/pathtracer.h"
@@ -106,13 +107,27 @@ struct FrameProfile {
   double ms_scene3d = 0, ms_overlays = 0, ms_game = 0, ms_preview = 0, ms_shadow = 0, ms_ui = 0, ms_present = 0;
   uint64_t frames = 0, shadow_renders = 0, view_renders = 0, view_cache_hits = 0, cache_mismatches = 0;
   uint64_t filter_target_resizes = 0, filter_stack_builds = 0;  // task 0024: both should stay still in a steady frame
+  /* Task 0083: parts inside the times above (not subtracted from them): an Edit Mode drag's writes to the mesh,
+   * the overlapping-vertices check, the "Lighting out of date" key, snapping's searches, gathering the views'
+   * draw items (render meshes built on the way included) and the scene hashes - and how often the costly ones ran. */
+  double ms_edit_apply = 0, ms_overlap = 0, ms_lighting_key = 0, ms_snap_pick = 0, ms_collect = 0, ms_hash = 0;
+  uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
     ms_ui += o.ms_ui, ms_present += o.ms_present;
     frames += o.frames, shadow_renders += o.shadow_renders, view_renders += o.view_renders;
     view_cache_hits += o.view_cache_hits, cache_mismatches += o.cache_mismatches;
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
+    ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
+    ms_collect += o.ms_collect, ms_hash += o.ms_hash;
+    overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
   }
+};
+/* Adds the time to the end of its scope to a FrameProfile field. */
+struct ProfileScope {
+  double &ms;
+  ScopedTimer t;
+  ~ProfileScope() { ms += t.ms(); }
 };
 ui::Icon window_icon(WindowKind k);
 
@@ -578,6 +593,9 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  /* The rows of a frame to present: runs of 16-row bands whose pixels differ from `bands` (the hashes of the last
+   * frame presented, updated here); every row when `all` or the size changed (task 0084). */
+  static std::vector<std::pair<int, int>> changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all);
   void show_update_for_test(const std::string &json, const std::string &tag) {
     upd_.list = releases::parse(json);
     upd_.selected = tag;
@@ -1563,6 +1581,16 @@ class Editor {
   int tier_shadow_cap_ = 0, tier_gi_rays_cap_ = 0, tier_rsm_cap_ = 0;  // 0 = no cap
   bool final_render_ = false;  // an F12 raster render is drawing (the tier's caps don't apply)
   std::vector<double> frame_stamps_;  // the last second's frame start times
+  FramePacer pacer_;  // waits for each frame's turn under the cap (task 0084)
+  /* Presenting only what changed (task 0084): a hash per band of rows as last presented; a whole present when the
+   * window asked to be painted or changed size. */
+  std::vector<uint64_t> present_bands_;
+  bool present_all_ = true;
+  int present_w_ = 0, present_h_ = 0;
+  void present_changed();
+  /* The mesh caches' tallies at the last frame's end, and that frame's share (task 0083). Process-wide: work on other
+   * threads (a skin bind) lands in the frame it finished in. */
+  MeshCounts mesh_seen_ = mesh_counts(), mesh_last_;
   float measured_fps_ = 0;
   void draw_performance_settings(ui::Layout *lay);  // Preferences and the Profiler
 

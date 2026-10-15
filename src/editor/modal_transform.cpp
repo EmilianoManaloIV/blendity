@@ -178,7 +178,8 @@ void Editor::transform_apply(const Mat4 &d) {
     GameObject *g = scene_->find(t.obj);
     MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
     if (!mf || !t.mesh_before) return;
-    mf->mesh = std::make_shared<Mesh>(*t.mesh_before);
+    ProfileScope prof{prof_.ms_edit_apply, {}};
+    mf->mesh = mesh_copy(*t.mesh_before);
     Mesh &m = *mf->mesh;
     m.version = t.mesh_before->version + 1 + (++redo_serial_);
     const Mat4 &w = g->world_matrix();

@@ -28798,4 +28798,271 @@ static void round81_tests() {
     CHECK(!ed.show_libraries_for_test(json));
     CHECK(ed.show_libraries_for_test(json, extras));
   });
+  /* ---------------------------------------------------------------- round 109: measuring the editor's frames (task 0083) */
+  test("profiler: an Edit Mode drag with the Move gizmo is counted - the mesh's copy, its render mesh builds, the writes, the hashes", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const Vec3 wp = cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]);
+    const FrameProfile p0 = ed.frame_profile_totals();
+    const MeshCounts m0 = mesh_counts();
+    r34_gizmo_drag_x(ed, wp, 50);
+    const FrameProfile p = ed.frame_profile_totals();
+    const MeshCounts m = mesh_counts() - m0;
+    std::printf("    a 5-frame drag: %llu mesh copies, %llu render meshes built, %llu moved in place, %llu edge tables, %llu scene hashes; "
+                "writes %.3f ms\n",
+                (unsigned long long)m.copies, (unsigned long long)m.full_builds, (unsigned long long)m.in_place, (unsigned long long)m.edge_builds,
+                (unsigned long long)(p.scene_hashes - p0.scene_hashes), p.ms_edit_apply - p0.ms_edit_apply);
+    CHECK(m.copies >= 1);       // (the mesh was shared with the undo step: the first write copies it)
+    CHECK(m.full_builds + m.in_place >= 2);  // (every moved frame updates the render mesh: built, or moved in place)
+    CHECK(p.ms_edit_apply > p0.ms_edit_apply && p.scene_hashes > p0.scene_hashes);
+    /* Readings subtract field by field. */
+    MeshCounts a, b;
+    a.copies = 5, a.ms_edges = 2.5, b.copies = 2, b.ms_edges = 1.0;
+    const MeshCounts d = a - b;
+    CHECK(d.copies == 3 && std::fabs(d.ms_edges - 1.5) < 1e-9);
+  });
+
+  test("profiler: the Profiler window draws the time between frames and the mesh caches' work while a drag runs", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("window Profiler");
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && ed.window_rect_for_test(WindowKind::Profiler).w > 0);
+    if (cube) r34_gizmo_drag_x(ed, cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]), 40);
+    r34_steps(ed, 2);  // (drawn with a full second of frame times and a frame's mesh work: no crash, nothing out of range)
+    Recti r;
+    CHECK(ed.button_rect_for_test("Between frames (last second)", r));
+    CHECK(ed.button_rect_for_test("Mesh copies / render meshes built / moved in place", r));
+    CHECK(ed.button_rect_for_test("Edit Mode: mesh writes / overlap check", r));
+  });
+  /* ---------------------------------------------------------------- round 110: frame pacing (task 0084) */
+  test("pacing: a 60 fps cap holds with 13 ms frames even when every blocking wait is rounded up to a 15.6 ms timer tick", [] {
+    /* A pretend clock and a pretend wait as coarse as Windows' default timer: a blocking wait ends at the next tick
+     * after it was due; a wait of 0 just lets a tenth of a millisecond go by (a poll). */
+    double t = 0.0;
+    const double tick = 0.015625;
+    auto now = [&] { return t; };
+    auto coarse = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001;
+        return;
+      }
+      t = std::ceil((t + s) / tick) * tick;
+    };
+    auto run = [&](bool pacer_on) {
+      FramePacer pacer;
+      std::vector<double> gaps;
+      t = 0.0;
+      double last = 0.0, prev = -1.0;
+      for (int k = 0; k < 600; k++) {
+        if (pacer_on) pacer.wait_until(last + 1.0 / 60.0, now, coarse);
+        for (double wait = last + 1.0 / 60.0 - t; !pacer_on && wait > 0.0005; wait = last + 1.0 / 60.0 - t) coarse(wait);  // (the old loop)
+        if (prev >= 0) gaps.push_back((t - prev) * 1000.0);
+        prev = last = t;
+        t += 0.013;  // the frame's work
+      }
+      gaps.erase(gaps.begin(), gaps.begin() + 20);  // (after it has learnt)
+      double mean = 0;
+      for (double g : gaps) mean += g;
+      std::sort(gaps.begin(), gaps.end());
+      return std::make_pair(mean / (double)gaps.size(), gaps[gaps.size() * 95 / 100]);
+    };
+    const auto before = run(false), after = run(true);
+    std::printf("    between frames: waiting in poll_events %.1f ms (95%% within %.1f); the pacer %.2f ms (95%% within %.2f)\n", before.first, before.second,
+                after.first, after.second);
+    CHECK(before.first > 25.0);                                  // (what task 0083 measured: 33 fps)
+    /* 60 fps, 95 % of frames on time. (The margin that keeps the pacer from oversleeping a coarse tick shrinks now and
+     * then so it can't get stuck - the test below; under a coarse timer that costs a late frame in about seventy.) */
+    CHECK(std::fabs(after.first - 1000.0 / 60.0) < 0.3 && after.second < 17.2);
+  });
+
+  test("pacing: with a precise timer the pacer blocks for nearly all of the wait (no spinning)", [] {
+    double t = 0.0, blocked = 0.0;
+    int polls = 0;
+    auto now = [&] { return t; };
+    auto precise = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001, polls++;
+        return;
+      }
+      t += s + 0.0001;  // (a tenth of a millisecond late)
+      blocked += s;
+    };
+    FramePacer pacer;
+    for (int k = 0; k < 60; k++) pacer.wait_until(t + 0.004, now, precise);
+    std::printf("    60 waits of 4 ms: %.1f ms blocked, %d polls, margin %.2f ms\n", blocked * 1000.0, polls, pacer.lateness() * 1000.0);
+    CHECK(blocked > 0.8 * 60 * 0.004);
+    CHECK(pacer.lateness() < 0.001);
+  });
+
+  test("pacing: input wakes a wait early and the pacer goes on waiting until the frame's turn", [] {
+    double t = 0.0;
+    int calls = 0;
+    auto now = [&] { return t; };
+    auto woken = [&](double s) {  // every blocking wait is cut short by a mouse move after 2 ms
+      calls++;
+      t += s <= 0.0 ? 0.0001 : std::min(s, 0.002);
+    };
+    FramePacer pacer;
+    pacer.wait_until(0.016, now, woken);
+    CHECK(t >= 0.016 - 0.0001 && t < 0.0175);
+    CHECK(calls >= 7);  // (several waits, each woken)
+  });
+  test("present: only the bands of rows that changed go to the window; a size change or a paint request sends all of it", [] {
+    const int w = 300, h = 100;  // (100 rows: six 16-row bands and one of 4)
+    std::vector<uint32_t> px((size_t)w * h, 0xFF202020u);
+    std::vector<uint64_t> bands;
+    auto runs = Editor::changed_rows(px.data(), w, h, bands, false);
+    CHECK(runs.size() == 1 && runs[0].first == 0 && runs[0].second == h);  // (nothing presented yet: all)
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).empty());    // (the same frame again: nothing)
+    px[(size_t)20 * w + 7] = 0xFFFFFFFFu;                                  // one pixel in band 1 (rows 16-31)
+    px[(size_t)40 * w + 299] = 0xFF00FF00u;                                // and one in band 2 (rows 32-47), at a row's end
+    px[(size_t)99 * w + 0] = 0xFF0000FFu;                                  // and one in the short last band
+    runs = Editor::changed_rows(px.data(), w, h, bands, false);
+    std::printf("    %zu runs:", runs.size());
+    for (auto &r : runs) std::printf(" [%d, %d)", r.first, r.second);
+    std::printf("\n");
+    CHECK(runs.size() == 2 && runs[0] == std::make_pair(16, 48) && runs[1] == std::make_pair(96, 100));
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, true).size() == 1);  // (asked for all)
+    std::vector<uint32_t> taller((size_t)w * 120, 0xFF202020u);
+    runs = Editor::changed_rows(taller.data(), w, 120, bands, false);
+    CHECK(runs.size() == 1 && runs[0].second == 120);  // (a new size: all)
+  });
+  test("pacing: one very late wake-up (a debugger, a busy machine) doesn't leave the pacer polling for good", [] {
+    double t = 0.0, blocked = 0.0;
+    bool hiccup = true;
+    auto now = [&] { return t; };
+    auto wait = [&](double s) {
+      if (s <= 0.0) {
+        t += 0.0001;
+        return;
+      }
+      t += s + (hiccup ? 0.030 : 0.0001);  // the first blocking wait ends 30 ms late; then on time
+      hiccup = false;
+      blocked += s;
+    };
+    FramePacer pacer;
+    double last = 0.0;
+    for (int k = 0; k < 200; k++) {
+      pacer.wait_until(last + 1.0 / 60.0, now, wait);
+      last = t;
+      t += 0.013;
+    }
+    const double before = blocked;
+    for (int k = 0; k < 20; k++) {
+      pacer.wait_until(last + 1.0 / 60.0, now, wait);
+      last = t;
+      t += 0.013;
+    }
+    std::printf("    after the hiccup: margin %.2f ms; the last 20 frames blocked %.1f ms of their waits\n", pacer.lateness() * 1000.0,
+                (blocked - before) * 1000.0);
+    CHECK(pacer.lateness() < 0.002);
+    CHECK(blocked - before > 20 * 0.002);  // (blocking again, not polling)
+  });
+
+  test("present: a change only in a pixel's top bits (alpha), in two places of one band, is still seen", [] {
+    const int w = 64, h = 16;
+    std::vector<uint32_t> px((size_t)w * h, 0xFF000000u);
+    std::vector<uint64_t> bands;
+    Editor::changed_rows(px.data(), w, h, bands, true);
+    px[1] ^= 0x80000000u;  // the top bit of the first 8-byte word
+    px[9] ^= 0x80000000u;  // and of another word in the same chain
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
+    px[3] ^= 0x80000000u;  // two words in different chains
+    px[5] ^= 0x80000000u;
+    CHECK(Editor::changed_rows(px.data(), w, h, bands, false).size() == 1);
+  });
+  /* ---------------------------------------------------------------- round 111: per-view waste (task 0085) */
+  test("voxel GI: moving an object inside the grid makes no new column pyramid; growing the scene past it makes one", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    GameObject *box = r35_add(ed, "Cube", "Box", {-3.0f, 0.5f, 2.0f}, {1, 1, 1}, Vec3(0.8f));
+    ed.commit_change("add Box");
+    r36_cmd(ed, "set Lighting.RealtimeGI true");
+    r34_steps(ed, 3);
+    CHECK(ed.voxel_grid_for_test().valid());
+    const uint64_t a0 = voxel_grid_allocations();
+    for (int k = 0; k < 6; k++) {
+      box->set_local_position({-3.0f + 0.05f * k, 0.5f, 2.0f});
+      r34_steps(ed, 1);
+    }
+    const uint64_t moved = voxel_grid_allocations() - a0;
+    std::printf("    6 small moves: %llu new pyramids (before task 0085: one per view per frame)\n", (unsigned long long)moved);
+    CHECK(moved == 0);
+    CHECK(ed.voxel_grid_for_test().valid());
+    /* Far outside: the grid can't hold the scene any more - a new one, with its columns. */
+    box->set_local_position({60.0f, 0.5f, 2.0f});
+    r34_steps(ed, 2);
+    CHECK(voxel_grid_allocations() > a0 && ed.voxel_grid_for_test().valid());
+  });
+
+  test("voxel GI: a grid fitted without its columns has the same placement and key as one fitted with them", [] {
+    AABB b;
+    b.add({-3, 0, -2});
+    b.add({5, 4, 7});
+    VoxelGrid with, without;
+    voxel_grid_fit(with, b, 128);
+    voxel_grid_fit(without, b, 128, false);
+    CHECK(with.valid() && !without.valid());
+    CHECK(with.n == without.n && with.voxel == without.voxel && with.key == without.key);
+    CHECK(with.origin.x == without.origin.x && with.origin.y == without.origin.y && with.origin.z == without.origin.z);
+    voxel_grid_allocate(without);
+    CHECK(without.valid() && without.level_count() == with.level_count());
+    for (int l = 0; l < with.level_count(); l++) CHECK(without.levels[(size_t)l].size() == with.levels[(size_t)l].size());
+  });
+
+  test("shadows: a shadow map keeps no ids plane, and its depth is what it was with one", [] {
+    /* A small scene's sun shadow, rendered into a depth-only target; then the same into a full target (ids too). */
+    std::vector<MeshPtr> keep;
+    std::vector<DrawItem> items;
+    for (int i = 0; i < 3; i++) {
+      MeshPtr m = primitives::cube();
+      keep.push_back(m);
+      DrawItem it;
+      it.mesh = &m->render_mesh();
+      it.model = Mat4::translate({(float)i * 1.5f - 1.5f, 0.5f * i, 0.0f});
+      it.id = (uint32_t)(i + 1);
+      items.push_back(it);
+    }
+    const Mat4 view = Mat4::look_at({4, 6, 5}, {0, 0, 0}, {0, 1, 0});
+    const Mat4 proj = Mat4::ortho(5.0f, 1.0f, 0.1f, 30.0f);
+    RasterOptions opt;
+    opt.shade = ShadeMode::DepthOnly;
+    opt.backface_culling = false;
+    LightingEnv env;
+    RenderTarget shadow, full;
+    shadow.make_depth_only(256, 256);
+    CHECK(shadow.ids.empty() && shadow.depth.size() == 256u * 256u);
+    full.width = full.height = full.stride = 256;
+    full.resize_planes();
+    CHECK(full.ids.size() == 256u * 256u);
+    for (RenderTarget *rt : {&shadow, &full}) {
+      Renderer3D r;
+      r.begin(rt, view, proj, env, opt);
+      r.clear(0);
+      for (const DrawItem &it : items) r.add(it);
+      r.flush();
+    }
+    CHECK(shadow.depth == full.depth);
+    size_t hit = 0;
+    for (uint32_t id : full.ids) hit += id != 0;
+    CHECK(hit > 1000);  // (the full target did record what it drew)
+    CHECK(shadow.id_at(128, 128) == 0);
+  });
 }
