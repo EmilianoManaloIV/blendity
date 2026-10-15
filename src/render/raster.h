@@ -20,6 +20,7 @@
 #include "canvas.h"
 #include "shading.h"
 
+#include <functional>
 #include <vector>
 
 namespace bl {
@@ -268,6 +269,11 @@ class Renderer3D {
   /* Overlays drawn after flush() (grid, wireframes, gizmo lines). */
   void line(Vec3 a, Vec3 b, uint32_t color, bool depth_test = true, float depth_bias = 0.0f);
   void point(Vec3 p, float radius_px, uint32_t color, bool depth_test = true);
+  /* Many lines, or points, at once (task 0089: an Edit Mode cage of 100,000 edges): `get(i, ...)` fills item i and
+   * returns false to leave it out. Prepared in parallel, recorded in the order given: the same commands as one call
+   * each. */
+  void lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias = 0.0f);
+  void points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test);
   /* Between begin_overlay_batch() and end_overlay_batch(), line() and point() are recorded and then
    * drawn in parallel bands of rows. Each pixel still sees them in the order they were given, so the
    * picture is the same as drawing them one by one; the grid and an Edit Mode cage are thousands. */
@@ -356,6 +362,9 @@ class Renderer3D {
   };
   std::vector<GiTexel> gi_lo_, gi_blur_;
   bool prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias, OverlayCmd &out) const;
+  /* Records prepared in parallel chunks, then appended in the order given (task 0089). */
+  template <class Prepare>
+  void record_many(size_t n, const Prepare &prepare);
   bool prepare_point(Vec3 p, float r, uint32_t color, bool depth_test, OverlayCmd &out) const;
   void draw_overlay(const OverlayCmd &c, int ymin, int ymax);  // only rows [ymin, ymax)
   std::vector<Mat4> normal_mats_;

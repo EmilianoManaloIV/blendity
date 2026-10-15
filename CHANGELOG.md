@@ -2,6 +2,26 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 115): the Edit Mode cage drawn from parallel batches (task 0089)
+
+**Asked:** "carry on the next tasks" (the performance pass; with the next task now written while the last one's
+checks run).
+
+**Changed**
+- **The edges and vertex dots of a big mesh in Edit Mode** were recorded one call at a time, each edge placing both
+  its vertices in the world; now each vertex is placed once and the edges and dots are prepared in parallel and
+  recorded in order - the same picture. The overlays of a 50k-face mesh went from 7.4 to 4.5 ms a frame on the laptop
+  setting: a gizmo drag 38.6 -> 35.4 ms, G 37.0 -> 34.4 ms.
+
+**Checked**
+- New tests (round 115): 30,000 lines and 10,000 dots (depth-tested, clipped, some behind the eye) drawn from
+  batches give exactly the pixels one call each gives; an item left out stays out.
+- Unit checks: Windows 10,304, 0 failed (703 tests); the whole suite in render-cache verify mode: 10,305,
+  0 failed, 0 stale pictures. Linux with libraries: 10,212, 0 failed. Sanitizer build: 10,118, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; the batch reserves its room in the overlay list before appending.
+
 ## 2026-10-15 (round 114): uniform materials shaded once per triangle; one shadow map for an edited mesh (task 0088)
 
 **Asked:** the performance pass ("Keep looking for performance gains throughout the project", overnight).

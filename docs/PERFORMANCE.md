@@ -75,6 +75,10 @@ for an edited mesh's flat and smooth caches), so a drag renders it once a frame,
 | Edit Mode: Move-gizmo drag, 50k faces | 97.75 | 38.63 |
 | Edit Mode: G, 50k faces | 100.20 | 37.01 |
 
+**Task 0089**: the Edit Mode cage (100,000 edges and 50,000 dots of the 50k-face mesh) is placed in the world once per
+vertex and recorded in parallel batches, in order: the overlays 7.4 → 4.5 ms a frame, the gizmo drag 38.6 → 35.4 ms,
+G 37.0 → 34.4 ms.
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris

@@ -29525,4 +29525,74 @@ static void round81_tests() {
     CHECK(views > frames);       // (more than one view drew the moving mesh)
     CHECK(shadows <= frames);    // (but one map served them)
   });
+
+  /* ---------------------------------------------------------------- round 115: the Edit Mode cage in parallel (task 0089) */
+  test("overlays: lines and points recorded in parallel batches draw exactly what one call each draws (depth-tested, clipped, behind the eye)", [] {
+    /* A scene's depth to test against, then 30,000 lines and 10,000 points - some off screen, some behind the camera
+     * - drawn one call each into one target and in batches into another. */
+    MeshPtr ball = primitives::uv_sphere(1.0f, 32, 24);
+    std::vector<DrawItem> items(1);
+    items[0].mesh = &ball->render_mesh();
+    items[0].model = Mat4::translate({0, 0, 5});
+    const Mat4 v = Mat4::look_at({0, 0, 0}, {0, 0, 5}, {0, 1, 0});
+    const Mat4 p = Mat4::perspective(60 * kDeg2Rad, 320 / 200.0f, 0.1f, 100);
+    LightingEnv env;
+    uint32_t seed = 115;
+    auto rnd = [&] { return (float)((seed = seed * 1664525u + 1013904223u) >> 8) / 16777216.0f; };
+    std::vector<Vec3> pts(40000);
+    for (Vec3 &q : pts) q = Vec3(rnd() * 12 - 6, rnd() * 8 - 4, rnd() * 14 - 4);  // (z from -4: some behind the eye)
+    Image img[3];  // one call each, batches, no overlays (what they covered)
+    RenderTarget rt[3];
+    for (int k = 0; k < 3; k++) {
+      img[k].resize(320, 200);
+      rt[k].attach(img[k], {0, 0, 320, 200});
+      Renderer3D r;
+      RasterOptions opt;
+      opt.shade = ShadeMode::Deferred;
+      r.begin(&rt[k], v, p, env, opt);
+      r.clear(0xFF303030);
+      for (auto &it : items) r.add(it);
+      r.flush();
+      r.begin_overlay_batch();
+      auto line_col = [](size_t i) { return i % 3 == 0 ? Color::hex(0xFFA733) : Color::hex(0x0A0A0A, 220); };
+      if (k == 0) {
+        for (size_t i = 0; i + 1 < 60000; i += 2) r.line(pts[i % 40000], pts[i % 40000] + Vec3(0.15f, 0.1f, 0.05f), line_col(i / 2), true, 5e-4f);
+        for (size_t i = 0; i < 10000; i++) r.point(pts[i * 4], 2.5f, i % 5 ? Color::hex(0x000000) : Color::hex(0xFFA733), true);
+      }
+      else if (k == 1) {
+        r.lines(30000, [&](size_t i, Vec3 &a, Vec3 &b, uint32_t &col) {
+          a = pts[(2 * i) % 40000], b = pts[(2 * i) % 40000] + Vec3(0.15f, 0.1f, 0.05f), col = line_col(i);
+          return true;
+        }, true, 5e-4f);
+        r.points(10000, 2.5f, [&](size_t i, Vec3 &q, uint32_t &col) {
+          q = pts[i * 4], col = i % 5 ? Color::hex(0x000000) : Color::hex(0xFFA733);
+          return true;
+        }, true);
+      }
+      r.end_overlay_batch();
+    }
+    size_t drawn = 0;
+    for (size_t i = 0; i < img[0].pixels.size(); i++) drawn += img[0].pixels[i] != img[2].pixels[i];
+    std::printf("    %zu of %zu pixels changed by the overlays\n", drawn, img[0].pixels.size());
+    CHECK(drawn > 5000 && drawn < img[0].pixels.size());
+    CHECK(img[0].pixels == img[1].pixels);
+    /* A `get` returning false leaves its item out, as not calling line() would. */
+    Image a, b;
+    RenderTarget ra, rb;
+    a.resize(64, 64), b.resize(64, 64);
+    ra.attach(a, {0, 0, 64, 64}), rb.attach(b, {0, 0, 64, 64});
+    for (int k = 0; k < 2; k++) {
+      Renderer3D r;
+      RasterOptions opt;
+      r.begin(k ? &rb : &ra, v, p, env, opt);
+      r.clear(0xFF000000);
+      if (k == 0) r.line({-1, 0, 5}, {1, 0, 5}, 0xFFFFFFFF, false);
+      else
+        r.lines(2, [](size_t i, Vec3 &x, Vec3 &y, uint32_t &c) {
+          x = {-1, (float)i, 5}, y = {1, (float)i, 5}, c = 0xFFFFFFFF;
+          return i == 0;
+        }, false);
+    }
+    CHECK(a.pixels == b.pixels);
+  });
 }

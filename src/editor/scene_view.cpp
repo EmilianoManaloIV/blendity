@@ -668,17 +668,29 @@ void Editor::render_overlays(const Recti &) {
       face_sel_.resize(m.face_count(), 0);
       /* N-gon mode (SketchUp): edges inside a flat region are hidden, as SketchUp hides coplanar edges. */
       if (ngon_mode_) ngon_cache(m);
-      for (auto &e : m.edge_cache()) {
-        bool s = edge_is_selected(e.first, e.second);
-        if (ngon_mode_ && !s && ngon_hidden_.count(Mesh::edge_key(e.first, e.second))) continue;
-        bool seam = !m.seams.empty() && m.is_seam(e.first, e.second);
-        uint32_t col = s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
-        scene_r3d_.line(w.point(m.positions[e.first]), w.point(m.positions[e.second]), col, true, 5e-4f);
-      }
+      /* The cage, recorded in parallel (task 0089: 100,000 edges of a 50k-face mesh were half the overlay's time),
+       * from the vertices placed in the world once each rather than once per edge. */
+      std::vector<Vec3> wp(m.vert_count());
+      JobSystem::global().parallel_for((int64_t)wp.size(), 4096, [&](int64_t a, int64_t b) {
+        for (int64_t i = a; i < b; i++) wp[(size_t)i] = w.point(m.positions[(size_t)i]);
+      });
+      const auto &edges = m.edge_cache();
+      scene_r3d_.lines(edges.size(), [&](size_t k, Vec3 &a, Vec3 &b, uint32_t &col) {
+        const auto &e = edges[k];
+        const bool s = edge_is_selected(e.first, e.second);
+        if (ngon_mode_ && !s && ngon_hidden_.count(Mesh::edge_key(e.first, e.second))) return false;
+        const bool seam = !m.seams.empty() && m.is_seam(e.first, e.second);
+        col = s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
+        a = wp[e.first], b = wp[e.second];
+        return true;
+      }, true, 5e-4f);
       if (elem_ == EditElement::Vertex) {
         float rad = std::max(1.5f, ui_.px(2.5f) * 1.0f);
-        for (size_t i = 0; i < m.vert_count(); i++)
-          scene_r3d_.point(w.point(m.positions[i]), rad, vert_sel_[i] ? Color::hex(0xFFA733) : Color::hex(0x000000), true);
+        scene_r3d_.points(wp.size(), rad, [&](size_t i, Vec3 &p, uint32_t &col) {
+          p = wp[i];
+          col = vert_sel_[i] ? Color::hex(0xFFA733) : Color::hex(0x000000);
+          return true;
+        }, true);
       }
       else if (elem_ == EditElement::Face && ngon_mode_) {
         /* One dot per flat region: the "face" SketchUp would show. */

@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/79
 
 ## Goal
 Shading is most of a view's raster time (5.1 of the Scene view's 7.2 ms on a moved-object frame, laptop setting).

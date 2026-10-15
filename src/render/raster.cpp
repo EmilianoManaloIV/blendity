@@ -1139,6 +1139,47 @@ void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
   else draw_overlay(c, 0, rt_->height);
 }
 
+template <class Prepare>
+void Renderer3D::record_many(size_t n, const Prepare &prepare) {
+  constexpr size_t kChunk = 4096;
+  const size_t nc = (n + kChunk - 1) / kChunk;
+  std::vector<std::vector<OverlayCmd>> parts(nc);
+  JobSystem::global().parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t c = c0; c < c1; c++) {
+      std::vector<OverlayCmd> &out = parts[(size_t)c];
+      out.reserve(kChunk);
+      for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++) {
+        OverlayCmd cmd;
+        if (prepare(i, cmd)) out.push_back(cmd);
+      }
+    }
+  });
+  size_t total = 0;
+  for (const std::vector<OverlayCmd> &part : parts) total += part.size();
+  if (batching_) overlay_cmds_.reserve(overlay_cmds_.size() + total);
+  for (const std::vector<OverlayCmd> &part : parts)
+    for (const OverlayCmd &cmd : part) {
+      if (batching_) overlay_cmds_.push_back(cmd);
+      else draw_overlay(cmd, 0, rt_->height);
+    }
+}
+
+void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias) {
+  record_many(n, [&](size_t i, OverlayCmd &cmd) {
+    Vec3 a, b;
+    uint32_t color = 0;
+    return get(i, a, b, color) && prepare_line(a, b, color, depth_test, bias, cmd);
+  });
+}
+
+void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test) {
+  record_many(n, [&](size_t i, OverlayCmd &cmd) {
+    Vec3 p;
+    uint32_t color = 0;
+    return get(i, p, color) && prepare_point(p, r, color, depth_test, cmd);
+  });
+}
+
 void Renderer3D::begin_overlay_batch() {
   batching_ = true;
   overlay_cmds_.clear();
