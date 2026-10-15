@@ -15,14 +15,17 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <windowsx.h>
+#include <mmsystem.h>
 
 #include <algorithm>
+#include <cmath>
 
 #ifdef _MSC_VER
 #  pragma comment(lib, "user32.lib")
 #  pragma comment(lib, "gdi32.lib")
 #  pragma comment(lib, "shell32.lib")
 #  pragma comment(lib, "comdlg32.lib")
+#  pragma comment(lib, "winmm.lib")
 #endif
 
 namespace bl::platform {
@@ -213,8 +216,15 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       PAINTSTRUCT ps;
       BeginPaint(hwnd, &ps);
       EndPaint(hwnd, &ps);
-      push(w, {EventType::Repaint});
-      if (w->refresh && !w->in_refresh) { w->in_refresh = true; w->refresh(); w->in_refresh = false; }
+      /* Drawn here when the editor can (its refresh); otherwise asked for by an event. Not both: the event would
+       * draw the same frame again (task 0084). */
+      if (!w->refresh || w->in_refresh) {
+        push(w, {EventType::Repaint});
+        return 0;
+      }
+      w->in_refresh = true;
+      w->refresh();
+      w->in_refresh = false;
       return 0;
     }
     case WM_SIZE: {
@@ -455,10 +465,43 @@ void destroy_window(Window *w) {
   delete w;
 }
 
-void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) {
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#  define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+/* Waits that end when asked (task 0084): Windows rounds a wait's timeout up to its system timer's tick, 15.6 ms
+ * unless a program raises it, and a 60 fps cap then ran at 33 fps. A high-resolution waitable timer (Windows 10
+ * 1803 and later) isn't rounded; where there is none, the tick is raised to 1 ms for this process instead. One timer,
+ * for the thread that polls the window's events (only ever the editor's main thread). */
+static HANDLE precise_timer() {
+  static const HANDLE timer = [] {
+    HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!h) timeBeginPeriod(1);
+    return h;
+  }();
+  return timer;
+}
+
+/* Until input arrives (or is already waiting) or `seconds` have passed. */
+static void wait_for_input(double seconds) {
+  const DWORD ms = (DWORD)std::ceil(seconds * 1000.0);
+  HANDLE timer = precise_timer();
+  LARGE_INTEGER due;
+  due.QuadPart = -(LONGLONG)(seconds * 1e7);  // (relative, in 100 ns)
+  if (!timer || !SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+    MsgWaitForMultipleObjectsEx(0, nullptr, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    return;
+  }
+  MsgWaitForMultipleObjectsEx(1, &timer, ms + 2, QS_ALLINPUT, MWMO_INPUTAVAILABLE);  // (+2: never hangs on the timer)
+  CancelWaitableTimer(timer);
+}
+
+void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) { poll_events_for(w, out, timeout_ms / 1000.0); }
+
+void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
   MSG msg;
   bool any = PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE) || !w->queue.empty();
-  if (!any && timeout_ms > 0) MsgWaitForMultipleObjects(0, nullptr, FALSE, (DWORD)timeout_ms, QS_ALLINPUT);
+  if (!any && seconds > 0.0) wait_for_input(seconds);
   while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
     if (msg.message == WM_QUIT) w->queue.push_back({EventType::Quit});
     TranslateMessage(&msg);
@@ -478,6 +521,23 @@ void present(Window *w, const uint32_t *pixels, int width, int height) {
   bi.bmiHeader.biCompression = BI_RGB;
   HDC dc = GetDC(w->hwnd);
   SetDIBitsToDevice(dc, 0, 0, width, height, 0, 0, 0, height, pixels, &bi, DIB_RGB_COLORS);
+  ReleaseDC(w->hwnd, dc);
+}
+
+void present_rows(Window *w, const uint32_t *pixels, int width, int height, const std::vector<std::pair<int, int>> &rows) {
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = width;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  HDC dc = GetDC(w->hwnd);
+  for (auto [y0, y1] : rows) {
+    y0 = std::max(0, y0), y1 = std::min(height, y1);
+    if (y1 <= y0) continue;
+    bi.bmiHeader.biHeight = -(y1 - y0);  // (the band alone, top-down)
+    SetDIBitsToDevice(dc, 0, y0, width, y1 - y0, 0, 0, 0, y1 - y0, pixels + (size_t)y0 * width, &bi, DIB_RGB_COLORS);
+  }
   ReleaseDC(w->hwnd, dc);
 }
 

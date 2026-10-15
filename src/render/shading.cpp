@@ -47,6 +47,11 @@ static inline float axis_step(float e0, float e1, float x) {  // smoothstep that
 
 static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp);
 
+bool material_uniform(const Material &m, const Material::Resolved &tx) {
+  if (m.axis_mode != 0 || m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) return false;
+  return !tx.base && !tx.metallic && !tx.roughness && !tx.emission && !tx.normal;
+}
+
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
   SurfaceSample s = evaluate_any(m, tx, sp);
   if (m.shading_model == 1) s.toon = &m;  // an axis material's parts shade by the parent's model
