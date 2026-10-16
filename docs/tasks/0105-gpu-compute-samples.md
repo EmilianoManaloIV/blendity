@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** none new (ADR 0037's follow-up: measure before deciding on an OptiX device)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/94
 
 ## Goal
 Task 0097 measured OptiX at 1.78-2.08x GPU Compute's samples a second, as an upper bound: part of the gap is GPU

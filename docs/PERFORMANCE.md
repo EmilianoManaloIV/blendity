@@ -15,6 +15,31 @@ The raw reports are in [`stress/results/`](../stress/results/): the first pass i
 The user asked "What should be more optimization gains?" and chose all four areas. Numbers are
 `--laptop --quality low --only editor_render`, two runs on a quiet machine.
 
+**Pass 11 in one table** (task 0106; laptop setting, ms a frame; the GPU is an RTX 4070 SUPER):
+
+| | Before pass 11 | After | Tasks |
+|---|---|---|---|
+| 50k-face Edit Mode drag, views on the GPU | 25 | 11.5-12.3 | 0099, 0100 |
+| 50k-face Edit Mode drag, views on the CPU | 45 | 20.9-21.5 | 0099, 0103, 0104 |
+| A textured scene, Gradient world, views on the GPU | all on the CPU (18.0) | 10.4 | 0101 |
+| The same with a Sky world | all on the CPU (22.1) | 9.9 | 0101, 0102 |
+| Toon materials and outlines | on the CPU | on the card | 0102 |
+| GPU Compute, samples a second (gpu_optix scene, 4070 SUPER) | 538-574 | 592-611 | 0105 |
+
+- **Met:** the 50k-face drag's target (12-15 ms on the GPU path; 60+ fps); textured scenes and the default Sky on the
+  card; the CPU fallback's drags (ADR 0026's 30 fps target for big Edit Mode drags, now about 30 ms at the laptop's
+  sustained clock).
+- **Smaller than hoped:** GPU Compute's dispatch batching (+2-10 %); OptiX stays 1.6-2.1x ahead, so a full OptiX
+  device is the user's call (ADR 0037's note).
+- **Costs:** the Scene view on the card draws at full size (Play about 1 ms dearer); vertices on the card are 48 bytes;
+  a mesh with several materials or a normal map sends the whole mesh during a drag.
+- **Still on the CPU:** realtime GI, probes and lightmaps, area lights, axis, see-through and cutout materials, live
+  procedural textures, camera filters.
+- **Next candidates:** realtime GI and probes on the card (the last big reason a view falls back); area lights;
+  route (B) of ADR 0036 (the views straight to a swapchain: spike 2 read back a 1080p view in 2.7-5.7 ms, a swapchain
+  showed it in 0.5-2.2); the cage's
+  overlay drawing for the CPU path (still 4 ms of a CPU drag); an OptiX device if the user wants one.
+
 **Measured first (task 0098):**
 - A textured scene with a Sky world, the views set to the GPU: all 33 views drew on the CPU ("a Sky or HDRI world").
   The world goes to the card first (task 0102), then textures (task 0101).

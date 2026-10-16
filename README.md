@@ -132,7 +132,8 @@ everything):
 - **Texturing & Materials** - Principled materials and material assets, layered **procedural textures**, axis
   materials, toon shading, texture baking.
 - **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps, probe volumes and voxel realtime GI;
-  F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan); camera filters from colour
+  F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan); the editor's views drawn on
+  the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour
   grading to PlayStation and manga looks.
 - **Rigging**, and **Skinning & Weight Painting** - bones (drag their heads and tails, Extrude new ones), Blender/Maya-style
   **rig controls** (IK boxes and poles, FK circles, coloured by side), characters under one root as Unity imports them,

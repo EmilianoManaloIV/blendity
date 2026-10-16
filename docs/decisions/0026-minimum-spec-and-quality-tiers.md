@@ -79,3 +79,12 @@ On the laptop setting the targets above hold: orbiting 88 fps, editing (moving a
 - Wall-clock time decides which casters are moving. Pixels never depend on it, because the composed map equals a
   full one; only the work does. Verify mode stays exact.
 - A user's own frame cap survives an update; a first run on a small machine starts on Low.
+
+## Note (pass 11, tasks 0099-0104)
+- The Edit Mode target is met: the 50k-face drag on the laptop setting takes 20.9-21.5 ms on the CPU path (about 30
+  ms at the laptop's sustained clock, 33 fps) and 11.5-12.3 ms with the views on the GPU.
+  - Task 0099: normals and corners worked out only around what moved.
+  - Task 0103: the other views keep their picture during a drag.
+  - Task 0104: the CPU views' shadow map is cheaper while you move (ADR 0039).
+- On the GPU the Scene view ignores the Viewport Resolution Scale (ADR 0036's note): the scale stays this ADR's tool
+  for the CPU's per-pixel cost.

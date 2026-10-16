@@ -2,6 +2,19 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 131): performance pass 11 written up (task 0106)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed** (documentation only)
+- PERFORMANCE's pass 11 opens with one table, before and after, on both paths; the targets met and missed, the
+  costs, what still draws on the CPU, and the next candidates.
+- ADR 0026 notes that the laptop setting's 30 fps target for big Edit Mode drags is now met on the CPU path too.
+- README's rendering paragraph mentions the views drawn on the GPU.
+
+**Checked**
+- No code changed: the suite, verify mode and the stress sections stand as round 130 ran them.
+
 ## 2026-10-16 (round 130): GPU Compute traces several samples a dispatch; OptiX measured again (task 0105, ADR 0037 note)
 
 **Asked:** pass 11 continued ("Continue all remaining tasks").
