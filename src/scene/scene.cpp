@@ -323,6 +323,12 @@ void RenderSettings::reflect(Reflector &r) {
     static const char *denoisers[] = {"OpenImageDenoise", "A-Trous (built-in)"};
     r.enumeration("Denoiser", denoiser, denoisers, 2);
     r.help("OpenImageDenoise is Cycles' default AI denoiser (needs Blender's libraries). A-Trous is the built-in edge-avoiding filter.");
+    if (r.all_fields() || denoiser == 0) {
+      static const char *denoise_devices[] = {"Auto", "CPU", "GPU"};
+      r.enumeration("Denoise Device", denoise_device, denoise_devices, 3);
+      r.help("Where OpenImageDenoise runs. Auto: an NVIDIA (CUDA) or AMD (HIP) card when there is one, else the CPU.\n"
+             "GPU falls back to the CPU without one or after an error. Blender: Preferences > System > Cycles Render Devices.");
+    }
     r.field("Embree Ray Tracing", use_embree);
     r.help("Use Embree, Cycles' CPU ray tracing kernels, instead of Blendity's own BVH (needs Blender's libraries).");
     r.field("Path Guiding", path_guiding);

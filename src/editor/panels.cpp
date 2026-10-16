@@ -1774,6 +1774,7 @@ void Editor::draw_profiler(const Recti &r) {
   u.label(lay.row(), "Scene view render breakdown (last frame)", u.theme.text_bright);
   auto stat = [&](const std::string &k, const std::string &v) {
     Recti row = lay.row();
+    if (u.record_buttons) u.button_rects[k] = row;  // (tests find a row by its name, as a button by its label)
     u.label({row.x, row.y, row.w / 2, row.h}, k, u.theme.text_dim);
     u.label({row.x + row.w / 2, row.y, row.w / 2, row.h}, v);
   };
@@ -1798,6 +1799,27 @@ void Editor::draw_profiler(const Recti &r) {
   stat("Shadow map", fp.shadow_renders ? strprintf("%.2f ms (rendered)", fp.ms_shadow) : std::string("reused"));
   stat("UI / present", strprintf("%.2f ms / %.2f ms", fp.ms_ui, fp.ms_present));
   stat("Views rendered / reused", strprintf("%llu / %llu", (unsigned long long)fp.view_renders, (unsigned long long)fp.view_cache_hits));
+  /* Task 0083: what the frames are really apart (the rate the screen sees, cap and timer included), and the parts
+   * an Edit Mode drag pays for. */
+  if (frame_stamps_.size() >= 2) {
+    std::vector<double> gaps;
+    for (size_t k = 1; k < frame_stamps_.size(); k++) gaps.push_back((frame_stamps_[k] - frame_stamps_[k - 1]) * 1000.0);
+    double mean = 0;
+    for (double g : gaps) mean += g;
+    mean /= (double)gaps.size();
+    std::sort(gaps.begin(), gaps.end());
+    const size_t p95 = std::min(gaps.size() - 1, (size_t)std::ceil(0.95 * (double)gaps.size()) - 1);  // (nearest rank)
+    stat("Between frames (last second)", strprintf("%.1f ms on average, 95%% within %.1f ms", mean, gaps[p95]));
+  }
+  stat("Draw items / scene hashes", strprintf("%.2f ms / %.2f ms (%llu)", fp.ms_collect, fp.ms_hash, (unsigned long long)fp.scene_hashes));
+  stat("Edit Mode: mesh writes / overlap check", strprintf("%.2f ms / %.2f ms", fp.ms_edit_apply, fp.ms_overlap));
+  stat("Lighting key / snapping", strprintf("%.2f ms (%llu) / %.2f ms", fp.ms_lighting_key, (unsigned long long)fp.lightmap_key_hashes, fp.ms_snap_pick));
+  const MeshCounts &mc = mesh_last_;
+  stat("Mesh copies / render meshes built / moved in place",
+       strprintf("%llu (%.1f ms) / %llu (%.1f ms) / %llu (%.1f ms)", (unsigned long long)mc.copies, mc.ms_copies, (unsigned long long)mc.full_builds,
+                 mc.ms_full_builds, (unsigned long long)mc.in_place, mc.ms_in_place));
+  stat("Tangents / edge tables built", strprintf("%llu (%.1f ms) / %llu (%.1f ms)", (unsigned long long)mc.tangent_builds, mc.ms_tangents,
+                                                   (unsigned long long)mc.edge_builds, mc.ms_edges));
 
   lay.space(u.px(6));
   draw_performance_settings(&lay);
@@ -1807,6 +1829,8 @@ void Editor::draw_profiler(const Recti &r) {
   u.toggle_row(lay.row(), "Multithreaded tiles (GEA Vol. I ch. 4)", raster_opt_.multithreaded);
   u.toggle_row(lay.row(), "Back-face culling (FoCG ch. 9.4)", raster_opt_.backface_culling);
   u.toggle_row(lay.row(), "Frustum culling (FoCG ch. 9.4 / GEA Vol. II 11.5)", raster_opt_.frustum_culling);
+  u.toggle_row(lay.row(), "Uniform materials once per triangle", raster_opt_.uniform_shading);
+  u.toggle_row(lay.row(), "8 pixels at a time (AVX2)", raster_opt_.simd_shading);
   Recti tr = lay.row();
   u.label({tr.x, tr.y, tr.w / 2, tr.h}, "Tile size (px)");
   static const char *tiles[] = {"16", "32", "64", "128", "256"};
@@ -2595,6 +2619,18 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
   u.label({r2.x, r2.y, u.px(150), r2.h}, "Redraw");
   if (u.combo(u.id("pref_redraw"), {r2.x + u.px(150), r2.y + u.px(2), u.px(200), r2.h - u.px(4)}, ri, kRedraw, 2)) always_redraw_ = ri == 1;
   u.tooltip("When something changes: idle costs nothing (the default). Always: a steady rate at the cap even when idle.");
+  /* Task 0096: where the views' 3D is drawn. */
+  static const char *kDevices[] = {"Auto (GPU when there is one)", "CPU", "GPU"};
+  int di = viewport_device_;
+  Recti r3 = row(u.row_h() + u.px(4));
+  u.label({r3.x, r3.y, u.px(150), r3.h}, "Viewport Device");
+  if (u.combo(u.id("pref_viewdev"), {r3.x + u.px(150), r3.y + u.px(2), u.px(220), r3.h - u.px(4)}, di, kDevices, 3)) {
+    set_viewport_device(di);
+    save_prefs();
+  }
+  u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster; anything it doesn't draw\n"
+            "yet (textures, toon, GI, camera filters...) draws on the CPU, as before. F12 renders stay on the CPU.");
+  text("Now: " + gpu_view_status(), u.theme.text_dim);
   /* Measured: the last 60 frames' cost. */
   float avg = 0, worst = 0;
   const size_t n = std::min<size_t>(60, frame_history_.size());
@@ -2616,7 +2652,9 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
          u.theme.text_dim);
   const uint32_t dim = u.theme.text_dim;
   text("What it costs:", u.theme.text);
-  text("- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.", dim);
+  text(gpu_view_ ? "- The views' 3D is drawn on the GPU; the UI, overlays and picking on the CPU."
+                 : "- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.",
+       dim);
   if (max_fps_ == 0)
     text("- Unlimited: a CPU core runs flat out while anything moves; fans and battery suffer, and frames beyond the monitor's refresh rate are never seen.", dim);
   else if (max_fps_ > 144)

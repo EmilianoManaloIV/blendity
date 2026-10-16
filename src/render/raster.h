@@ -20,6 +20,7 @@
 #include "canvas.h"
 #include "shading.h"
 
+#include <functional>
 #include <vector>
 
 namespace bl {
@@ -38,8 +39,13 @@ struct RenderMesh {
   /* Different for every build (never reused, unlike a pointer + version after a free), so caches of
    * what was drawn from it (shadow maps, voxel grids) can key on it. 0 = not cacheable (built by hand). */
   uint64_t serial = 0;
-  /* The serial of the full build this one came from: it stays while a deforming modifier only moves the
-   * positions in place (ADR 0022), when `serial` moves. Same topology, triangulation and split pattern. */
+  /* The same for every render cache of one mesh at one version (task 0088): the triangles and their positions,
+   * whatever the normals or UVs - the flat cache Edit Mode shades and the smooth one renders use have one shape. What
+   * depth alone depends on (a shadow map) keys on it. 0 = not known (built by hand): use `serial`. */
+  uint64_t shape = 0;
+  /* The serial of the full build this one came from: it stays while the positions move in place (a deforming
+   * modifier, ADR 0022; an Edit Mode drag, ADR 0034), when `serial` moves. Same topology, split pattern and triangle
+   * order - but not the same `indices`: quads and n-gons are split again from the new positions. */
   uint64_t build_serial = 0;
   size_t tri_count() const { return indices.size() / 3; }
 };
@@ -183,6 +189,12 @@ struct RasterOptions {
    * has it) and a no-clipping fast path. Off = the general path only (tests
    * check both give the same image). */
   bool fast_setup = true;
+  /* A material the same everywhere but for the normal is evaluated once per triangle, not per pixel (task 0088).
+   * Off = per pixel (tests check both give the same image). */
+  bool uniform_shading = true;
+  /* Plain-material pixels lit 8 at a time with AVX2 where the CPU has it (task 0091, ADR 0035): the same operations in
+   * the same order as the scalar shader, so the same picture. Off = one pixel at a time. */
+  bool simd_shading = true;
   int tile_size = 64;
   ShadeMode shade = ShadeMode::Gouraud;
   /* Camera filters' raster stage (ADR 0007), all off by default:
@@ -203,6 +215,7 @@ struct RasterStats {
   double ms_clear = 0;  // clearing the planes (not in ms_total, which is flush())
   double ms_gi = 0;     // voxel GI's per-pixel pass: tracing and blurring the receivers (part of ms_shade)
   size_t gi_traced = 0; // receivers the per-pixel pass traced (realtime lightmaps spare theirs)
+  size_t pixels_simd = 0;  // pixels lit 8 at a time (task 0091)
 };
 
 /* Color plus depth, id and visibility planes. color may point into a larger
@@ -222,15 +235,18 @@ struct RenderTarget {
   ViewTransform hdr_view_transform = ViewTransform::Standard;
   float hdr_exposure = 0.0f;
   void attach(Image &img, const Recti &r);
+  /* Depth alone (a shadow map): no colour and no ids plane - nothing picks in it (task 0085). */
   void make_depth_only(int w, int h);
-  void resize_planes();
+  void resize_planes(bool with_ids = true);
   uint32_t id_at(int x, int y) const {
-    return (x >= 0 && y >= 0 && x < width && y < height) ? ids[(size_t)y * width + x] : 0;
+    return (x >= 0 && y >= 0 && x < width && y < height && !ids.empty()) ? ids[(size_t)y * width + x] : 0;
   }
   float depth_at(int x, int y) const {
     return (x >= 0 && y >= 0 && x < width && y < height) ? depth[(size_t)y * width + x] : 1.0f;
   }
 };
+
+struct Shade8Tri;  // a triangle as the 8-wide shader takes it (raster.cpp, task 0091)
 
 class Renderer3D {
  public:
@@ -259,6 +275,11 @@ class Renderer3D {
   /* Overlays drawn after flush() (grid, wireframes, gizmo lines). */
   void line(Vec3 a, Vec3 b, uint32_t color, bool depth_test = true, float depth_bias = 0.0f);
   void point(Vec3 p, float radius_px, uint32_t color, bool depth_test = true);
+  /* Many lines, or points, at once (task 0089: an Edit Mode cage of 100,000 edges): `get(i, ...)` fills item i and
+   * returns false to leave it out. Prepared in parallel, recorded in the order given: the same commands as one call
+   * each. */
+  void lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias = 0.0f);
+  void points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test);
   /* Between begin_overlay_batch() and end_overlay_batch(), line() and point() are recorded and then
    * drawn in parallel bands of rows. Each pixel still sees them in the order they were given, so the
    * picture is the same as drawing them one by one; the grid and an Edit Mode cage are thousands. */
@@ -277,6 +298,11 @@ class Renderer3D {
   Ray screen_ray(float x, float y) const;
   const Mat4 &view_proj() const { return vp_; }
   const RasterStats &stats() const { return stats_; }
+  /* A frame drawn elsewhere (task 0096: the GPU views) still reports what it drew. */
+  void note_submitted(int objects, size_t tris) {
+    stats_.objects_submitted = objects;
+    stats_.tris_submitted = tris;
+  }
   RenderTarget *target() const { return rt_; }
 
  private:
@@ -307,6 +333,11 @@ class Renderer3D {
   void draw_see_through(const std::vector<uint8_t> &see_through);
   /* Lights + image-based lighting for one shaded point (deferred and forward). */
   Vec3 light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const;
+  /* light_surface after its lights' loop (`lo`): reflections, ambient, emission (the 8-wide shader's per-pixel end). */
+  Vec3 light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const;
+  /* 8 pixels of a row on one plain-material triangle, lit at once (task 0091; x86 with AVX2): appended in order. */
+  void shade_run8(const Shade8Tri &t, const SurfaceSample &surface, int x, int64_t y, Vec3 eye, const Environment &env,
+                  std::vector<Vec3> &row_hdr, std::vector<int> &row_x) const;
 
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;
@@ -347,6 +378,9 @@ class Renderer3D {
   };
   std::vector<GiTexel> gi_lo_, gi_blur_;
   bool prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, float bias, OverlayCmd &out) const;
+  /* Records prepared in parallel chunks, then appended in the order given (task 0089). */
+  template <class Prepare>
+  void record_many(size_t n, const Prepare &prepare);
   bool prepare_point(Vec3 p, float r, uint32_t color, bool depth_test, OverlayCmd &out) const;
   void draw_overlay(const OverlayCmd &c, int ymin, int ymax);  // only rows [ymin, ymax)
   std::vector<Mat4> normal_mats_;
@@ -364,5 +398,7 @@ class Renderer3D {
  * bit (a depth buffer keeps the nearest surface whatever the order). Task 0050: the casters that didn't move. */
 void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds,
                        int resolution, const ShadowMap *base = nullptr);
+/* The matrix render_shadow_map fits to `bounds` (task 0096: the GPU views render the map themselves from it). */
+Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds);
 
 }  // namespace bl
