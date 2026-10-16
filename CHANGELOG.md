@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 122): the views on the GPU - Viewport Device (task 0096, ADR 0036)
+
+**Asked:** "If it's more performant, then yes" (the GPU viewport after spike 2's go); "For the OptiX system let me
+know what I need to do" (answered with the setup steps: CUDA Toolkit 12.8, the OptiX SDK 8.0+, `OPTIX_ROOT_DIR`).
+
+**Changed**
+- **Preferences > Viewport Device (Auto / CPU / GPU):** the Scene view, Game view and Camera Preview draw their 3D on
+  the GPU (Vulkan) and read it back into the editor's canvas. Overlays, gizmos, picking, the UI and the camera
+  filters' passes are unchanged.
+- **What it draws:** plain materials, sun, point and spot lights with the sun's shadows (3x3 or Low's 2x2), Gradient
+  and Color worlds, the editor's sky, a camera's solid background, Standard / Filmic / ACES and every OpenColorIO view
+  (AgX included, through the CPU's own LUT).
+- **Anything else** draws on the CPU, as before, and Preferences says why: textures, procedurals, toon, see-through,
+  several materials on one mesh, GI, area lights, Sky / HDRI worlds, camera filters. F12 renders stay on the CPU.
+- **On the laptop setting, this machine's GPU:** moving an object 16.6-16.9 -> 4.1 ms a frame, playing 20.6-22.1 ->
+  5.6-6.8, an Edit Mode drag on 50k faces 43.7-46.6 -> 24.7-25.1. A view the GPU draws renders its own shadow map.
+  The GPU opens in the background when the editor starts.
+
+**Checked**
+- New tests (round 122), each skipped without a GPU:
+  - the Scene and Game views of the default scene match the CPU's (mean 0.086 / 255, 99.99 % within 3 / 255);
+  - a procedural sends the view to the CPU with its reason, and the picture is then the CPU's exactly;
+  - a plane seen from below matches (back faces culled as on the CPU; round 121 now compares depth too), and a click
+    picks the Cube from the GPU's ids;
+  - an Edit Mode gizmo drag updates the mesh on the card in place (3 updates, 1 upload);
+  - Scene lighting off (the editor's headlight) and a mirrored Cube match too (mean 0.083 and 0.087 / 255);
+  - Viewport Device is kept in the prefs, and Auto stays on the CPU when the tests pin it.
+- Unit checks: Windows 10,374, 0 failed (717 tests); the whole suite in render-cache verify mode: 10,375,
+  0 failed, 0 stale pictures. Linux with libraries: 10,255, 0 failed. Sanitizer build: 10,147, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- mirrored placements cull the other side;
+- the CPU no longer renders the shadow map for a GPU-drawn view, and depth comes back only when something reads it;
+- the colour is read straight into the canvas;
+- the meshes on the card have a budget;
+- casting follows the CPU's any-slot rule;
+- each view's reason is kept, and Solid / Wireframe are named;
+- the views' statistics count the GPU's triangles;
+- the GPU opens in the background.
+
+Checked and kept: the editor's own lighting already matched the CPU (a finding the new test disproves).
+
 ## 2026-10-15 (round 121): a GPU view, spike 2 - go (task 0095, ADR 0013 amended)
 
 **Asked:** "Can we look into rendering the editor with the GPU and not just the CPU?" The plan was a new spike first,

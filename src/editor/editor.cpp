@@ -3432,6 +3432,16 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("raster simd|uniform on|off");
     ui_.redraw = true;
   }
+  else if (c == "viewport" && to_lower(arg(1, "")) == "device") {
+    /* viewport device auto|cpu|gpu (task 0096): where the views' 3D is drawn */
+    const std::string d = to_lower(arg(2, "auto"));
+    if (d != "auto" && d != "cpu" && d != "gpu") Log::warn("viewport device auto|cpu|gpu (not '%s')", d.c_str());
+    else {
+      set_viewport_device(d == "cpu" ? 1 : d == "gpu" ? 2 : 0);
+      save_prefs();
+      Log::info("Viewport Device: %s", d == "cpu" ? "CPU" : d == "gpu" ? "GPU" : "Auto");
+    }
+  }
   else if (c == "fps") {
     /* fps <n | 0 / unlimited>: the editor's frame rate cap */
     const std::string v = to_lower(arg(1, "120"));
@@ -4292,6 +4302,7 @@ void Editor::load_prefs() {
     else if (k == "blender_transform_keys") blender_keys_ = v == "1";
     else if (k == "pivot_center") pivot_center_ = v == "1";
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str()))), had_fps = true;
+    else if (k == "viewport_device") set_viewport_device(std::atoi(v.c_str()));
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
     else if (k == "workspace") workspace_ = v;
@@ -4369,6 +4380,7 @@ void Editor::save_prefs() {
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += strprintf("viewport_device=%d\n", viewport_device_);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
   s += strprintf("use_libs=%d\nlibs_never_ask=%d\nlibs_last=%.0f\n", use_libs_ ? 1 : 0, libs_never_ask_ ? 1 : 0, libs_last_check_);

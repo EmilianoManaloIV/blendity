@@ -298,6 +298,11 @@ class Renderer3D {
   Ray screen_ray(float x, float y) const;
   const Mat4 &view_proj() const { return vp_; }
   const RasterStats &stats() const { return stats_; }
+  /* A frame drawn elsewhere (task 0096: the GPU views) still reports what it drew. */
+  void note_submitted(int objects, size_t tris) {
+    stats_.objects_submitted = objects;
+    stats_.tris_submitted = tris;
+  }
   RenderTarget *target() const { return rt_; }
 
  private:
@@ -393,5 +398,7 @@ class Renderer3D {
  * bit (a depth buffer keeps the nearest surface whatever the order). Task 0050: the casters that didn't move. */
 void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds,
                        int resolution, const ShadowMap *base = nullptr);
+/* The matrix render_shadow_map fits to `bounds` (task 0096: the GPU views render the map themselves from it). */
+Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds);
 
 }  // namespace bl

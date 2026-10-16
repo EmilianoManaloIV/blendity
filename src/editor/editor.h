@@ -29,6 +29,7 @@
 #include "../render/probe_volume.h"
 #include "../render/realtime_lightmap.h"
 #include "../render/voxel_gi_gpu.h"
+#include "../render/gpu_raster.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -46,6 +47,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <future>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -112,6 +114,10 @@ struct FrameProfile {
    * draw items (render meshes built on the way included) and the scene hashes - and how often the costly ones ran. */
   double ms_edit_apply = 0, ms_overlap = 0, ms_lighting_key = 0, ms_snap_pick = 0, ms_collect = 0, ms_hash = 0;
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
+  /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
+   * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
+  uint64_t gpu_views = 0, gpu_fallbacks = 0, gpu_mesh_uploads = 0, gpu_mesh_updates = 0;
+  double ms_gpu = 0;
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
     ms_ui += o.ms_ui, ms_present += o.ms_present;
@@ -121,6 +127,8 @@ struct FrameProfile {
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
+    gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
+    ms_gpu += o.ms_gpu;
   }
 };
 /* Adds the time to the end of its scope to a FrameProfile field. */
@@ -559,6 +567,12 @@ class Editor {
   std::string last_op_name_for_test() const { return last_op_.op; }
   bool last_op_valid_for_test() { return last_op_valid(); }
   void planes_always_for_test(bool on) { planes_always_ = on; }
+  /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
+  void viewport_device_for_test(int d) { set_viewport_device(d); }
+  int viewport_device() const { return viewport_device_; }
+  const std::string &gpu_view_reason() const { return gpu_view_reason_; }
+  std::string gpu_view_status() const;
+  double gpu_view_open_ms() const { return gpu_view_open_ms_; }  // opening the GPU view took (device, pipelines, shaders)
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
@@ -836,7 +850,8 @@ class Editor {
   void update_environment();
   /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
    * (null without a sun or casters). */
-  const ShadowMap *update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env);
+  /* frame_only (task 0096): only the fitted frame, for the GPU views that render the map themselves. */
+  const ShadowMap *update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env, bool frame_only = false);
   void render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                        bool scene_lights, const Camera *cam, const FilterStack *filters = nullptr);
   /* A camera's image through its filter components (ADR 0007): the raster stage, the internal
@@ -2061,6 +2076,41 @@ class Editor {
                      bool planes = true);  // planes: depth and ids at full size too (for picking)
   bool planes_wanted_ = true;  // (render_scaled's `planes` while it draws: a filter stack's upscale follows it too)
   bool planes_always_ = false;  // tests: every view copies its planes, as before task 0092
+  /* Task 0096 (ADR 0036): the views' deferred 3D on the GPU (gpu_views.cpp). One device for every view, each view its
+   * own slot of targets; the meshes kept on the card while they're drawn. */
+  struct GpuMesh {
+    int id = -1;
+    uint64_t serial = 0;
+    uint32_t vertices = 0, indices = 0;
+    uint64_t used = 0;  // the gpu_calls_ count it was last drawn at
+    uint64_t bytes = 0;
+  };
+  int viewport_device_ = 0;          // Preferences > Viewport Device: 0 Auto, 1 CPU, 2 GPU
+  std::unique_ptr<gpu::Raster> gpu_view_;
+  bool gpu_view_tried_ = false;      // opening it was tried (not again until the setting changes)
+  bool gpu_view_off_ = false;        // while F12 draws: the CPU (the reference)
+  std::string gpu_view_error_;       // why there is no GPU view at all (none here, an error)
+  std::string gpu_view_reason_;      // why the last view the GPU was wanted for drew on the CPU ("" = it didn't)
+  std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
+  std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
+  double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)
+  ShadowMap gpu_shadow_;             // the shadow map's frame for the GPU views (no depth: they render it)
+  std::vector<uint32_t> gpu_color_;  // a view's colour when its rows aren't contiguous in the canvas
+  uint64_t gpu_mesh_bytes_ = 0;      // what the meshes on the card take
+  std::unordered_map<const RenderMesh *, GpuMesh> gpu_meshes_;
+  uint64_t gpu_calls_ = 0;
+  const RenderTarget *gpu_slot_rt_[gpu::Raster::kSlots] = {};
+  uint64_t gpu_slot_used_[gpu::Raster::kSlots] = {};
+  void set_viewport_device(int d);
+  bool gpu_view_wanted() const;
+  gpu::Raster *gpu_view();
+  const char *gpu_view_unsupported(const RenderTarget &rt, const LightingEnv &env, const std::vector<DrawItem> &items, const FilterStack *filters) const;
+  bool gpu_view_may_draw(const RenderTarget &rt, const LightingEnv &env, const std::vector<DrawItem> &items, const FilterStack *filters);
+  bool gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, const LightingEnv &env, const std::vector<DrawItem> &items,
+                     const Camera *cam, bool scene_lights, const FilterStack *filters, const RasterOptions &opt);
+  int gpu_mesh(const RenderMesh &rm, std::string &err);
+  int gpu_slot(const RenderTarget &rt);
+  void gpu_forget_meshes();
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution
   /* A choice from a component's or modifier's menu in the Inspector. Popup menus run at the end
    * of the frame, after draw_inspector has returned, so they record the choice here and the

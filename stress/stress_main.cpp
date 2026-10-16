@@ -1090,6 +1090,21 @@ static void test_editor_render(Report &rep, const Options &o) {
                        old_ms, new_ms));
   }
   {
+    /* Task 0096: the same moves with the views' 3D on the GPU (Viewport Device GPU, read back into the canvas). */
+    ed.viewport_device_for_test(2);
+    const FrameProfile g0 = ed.frame_profile_totals();
+    row("moving an object, the views on the GPU (task 0096)", [&](int k) {
+      if (mover) mover->set_local_position({0.1f * k + 0.05f, 1.0f, 0.0f});
+      ed.step_frame_headless();
+    });
+    const FrameProfile g1 = ed.frame_profile_totals();
+    rep.note(strprintf("The views on the GPU: %s (opened in %.0f ms, once: the editor opens it on a worker); %llu views drawn there, "
+                       "%llu on the CPU instead, %.2f ms a frame in the GPU path (rendering and reading back).",
+                       ed.gpu_view_status().c_str(), ed.gpu_view_open_ms(), (unsigned long long)(g1.gpu_views - g0.gpu_views),
+                       (unsigned long long)(g1.gpu_fallbacks - g0.gpu_fallbacks), (g1.ms_gpu - g0.ms_gpu) / (n + 1)));
+    ed.viewport_device_for_test(1);
+  }
+  {
     /* Where a moved frame's raster time goes, view by view (task 0050 profiled the minimum machine with this). */
     const RasterStats &s = ed.scene_stats_for_test(), &g = ed.game_stats_for_test();
     rep.note(strprintf("Moving an object, the last frame's rasterizer: Scene view %zu of %zu triangles, setup %.2f ms, raster %.2f ms, shade %.2f ms "
@@ -1250,12 +1265,38 @@ static void test_editor_render(Report &rep, const Options &o) {
     rep.note(strprintf("(G %s.)", ed.transform_active_for_test() ? "was running" : "was NOT running"));
     key(platform::KEY_ESCAPE, px + 40 + 2 * n, py + n);
     ed.step_frame_headless();
+    /* Task 0096: the gizmo drag again with the views on the GPU. */
+    ed.viewport_device_for_test(2);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const FrameProfile g0 = ed.frame_profile_totals();
+    row("Edit Mode: the same Move gizmo drag, the views on the GPU (task 0096)", [&](int k) {
+      if (k == 0) {
+        ed.step_frame_headless({mouse(ET::MouseMove, px + 55, py)});
+        ed.step_frame_headless({mouse(ET::MouseDown, px + 55, py)});
+        return;
+      }
+      ed.step_frame_headless({mouse(ET::MouseMove, px + 55 + 2 * k, py)});
+    });
+    const FrameProfile g1 = ed.frame_profile_totals();
+    ed.step_frame_headless({mouse(ET::MouseUp, px + 55 + 2 * n, py)});
+    rep.note(strprintf("The gizmo drag on the GPU: %s; %llu views there, %llu on the CPU instead; meshes updated in place %llu, sent whole %llu.",
+                       ed.gpu_view_status().c_str(), (unsigned long long)(g1.gpu_views - g0.gpu_views),
+                       (unsigned long long)(g1.gpu_fallbacks - g0.gpu_fallbacks), (unsigned long long)(g1.gpu_mesh_updates - g0.gpu_mesh_updates),
+                       (unsigned long long)(g1.gpu_mesh_uploads - g0.gpu_mesh_uploads)));
+    /* (The first drag's undo restored the scene from its snapshot: `big` is gone, the sphere is found again by name.) */
+    const GameObject *big_now = ed.scene().find_by_name("Big Sphere");
+    if (big_now && length(big_now->get<MeshFilter>()->mesh->positions[front] - before) > 1e-5f) ed.command("undo");
+    ed.viewport_device_for_test(1);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
   }
   ed.command("edit off");
   ed.command("select Main Camera");
   ed.step_frame_headless();
   ed.command("play");
   row("playing", [&](int) { ed.step_frame_headless(); });
+  ed.viewport_device_for_test(2);
+  row("playing, the views on the GPU (task 0096)", [&](int) { ed.step_frame_headless(); });
+  ed.viewport_device_for_test(1);
   ed.command("stop");
   Log::echo_stdout = true;
   rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
@@ -4521,28 +4562,28 @@ static bool gpu_raster_card(Report &rep, GpuRasterScene &sc, const gpu::DeviceIn
     const gpu::RasterTimes ft = r->times();
     gt.shadow += ft.shadow, gt.gbuffer += ft.gbuffer, gt.lighting += ft.lighting, gt.total += ft.total;
     ScopedTimer tr;
-    ok = ok && r->read_back(px.data(), depth.data(), ids.data(), &err);
+    ok = ok && r->read_back(0, px.data(), depth.data(), ids.data(), &err);
     rb_ms += tr.ms();
   }
   for (int f = 1; f <= frames && ok; f++) {
     ScopedTimer t;
     inst[5].model[12] = 0.05f * (float)f;
     r->set_instances(inst);
-    ok = r->render(sc.gpu_frame(0), &err) && r->read_back(px.data(), depth.data(), ids.data(), &err);
+    ok = r->render(sc.gpu_frame(0), &err) && r->read_back(0, px.data(), depth.data(), ids.data(), &err);
     moved_ms += t.ms();
   }
   std::vector<gpu::RasterVertex> big_v = raster_vertices(sc.big->render_mesh());
   for (int f = 1; f <= frames && ok; f++) {
     ScopedTimer t;
     big_v[24897].p[1] += 0.001f;
-    ok = r->update_mesh(m_big, big_v, &err) && r->render(sc.gpu_frame(0), &err) && r->read_back(px.data(), depth.data(), ids.data(), &err);
+    ok = r->update_mesh(m_big, big_v, nullptr, &err) && r->render(sc.gpu_frame(0), &err) && r->read_back(0, px.data(), depth.data(), ids.data(), &err);
     drag_ms += t.ms();
   }
   /* The picture at frame 0, as the CPU drew it: the sphere and every instance back where they were. */
   big_v = raster_vertices(sc.big->render_mesh());
   for (size_t i = 0; i < sc.items.size(); i++) inst[i] = GpuRasterScene::instance(sc.items[i], inst[i].mesh);
   r->set_instances(inst);
-  ok = ok && r->update_mesh(m_big, big_v, &err) && r->render(sc.gpu_frame(0), &err) && r->read_back(px.data(), depth.data(), ids.data(), &err);
+  ok = ok && r->update_mesh(m_big, big_v, nullptr, &err) && r->render(sc.gpu_frame(0), &err) && r->read_back(0, px.data(), depth.data(), ids.data(), &err);
   if (!ok) return failed();
   render_ms /= frames, rb_ms /= frames, moved_ms /= frames, drag_ms /= frames;
   const gpu::RasterMatch m = gpu::raster_match(cpu_px.data(), cpu_ids.data(), px.data(), ids.data(), W, H);
@@ -4808,6 +4849,15 @@ int main(int argc, char **argv) {
     setenv("BLENDITY_PROJECT", proj.c_str(), 1);
     setenv("BLENDITY_TRASH", trash.c_str(), 1);
 #endif
+    /* The editor sections measure the CPU's views, as every pass before (task 0096's GPU views are measured by
+     * name, with Viewport Device GPU asked for). */
+    if (!std::getenv("BLENDITY_VIEWPORT_DEVICE")) {
+#ifdef _WIN32
+      _putenv_s("BLENDITY_VIEWPORT_DEVICE", "cpu");
+#else
+      setenv("BLENDITY_VIEWPORT_DEVICE", "cpu", 1);
+#endif
+    }
     set_asset_root(proj);  // (assets made before an editor exists: here too, never the real Assets - task 0081)
   }
   std::printf("Blendity stress test - %d hardware threads, budget %.1f ms%s\n", JobSystem::global().thread_count(),

@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* Task 0095 (spike, ADR 0013): a rasterising GPU view, to measure what a GPU viewport would cost.
+/* The views' 3D on the GPU (task 0095's spike, then task 0096; ADR 0013 amended, ADR 0036).
  *
- * It draws the scene the way the CPU's deferred views do, with plain materials only:
- * - the sun's shadow map;
- * - a G-buffer (normal and roughness, albedo and metallic, object id, depth);
- * - a full-screen lighting pass: sun with 3x3 PCF, point and spot lights, the sky's gradient as ambient, the Standard
- *   view transform.
+ * It draws a view the way the CPU's deferred renderer does for what it supports - plain materials, sun / point / spot
+ * lights with the sun's shadow map, a Gradient or Color world, the Standard / Filmic / ACES view transforms:
+ * - the sun's shadow map (the CPU's fitted matrix, casters as the CPU decides);
+ * - a G-buffer (normal and roughness, albedo and metallic, the triangle's own normal and specular, emission and
+ *   flags, object id, depth);
+ * - a full-screen lighting pass with the CPU's formulas, and the background.
  *
  * The picture then goes one of two ways:
- * - (A) read back into CPU memory (colour 0xAARRGGBB, depth, ids), as today's window shows the CPU's canvas;
+ * - (A) read back into CPU memory (colour 0xAARRGGBB, depth, ids), as the editor's canvas takes it (task 0096);
  * - (B) straight to a window through a Vulkan swapchain, with the CPU's UI canvas uploaded (only its changed rows) and
- *   the view copied into its rectangle.
+ *   the view copied into its rectangle (the spike; the editor's next step).
  *
- * Not the viewport: no textures, overlays or picking. Behind BL_WITH_VULKAN; create() fails cleanly without it. */
+ * Each view draws into a slot of its own (its own targets), so the Scene view, the Game view and the Camera Preview
+ * don't make each other's images again every frame. Behind BL_WITH_VULKAN; create() fails cleanly without it. */
 #pragma once
 
 #include "gpu_device.h"
@@ -32,9 +34,13 @@ struct RasterVertex {
 
 /* One drawn object: its mesh (from add_mesh), its model matrix (column-major) and its plain material. */
 struct RasterInstance {
+  /* Mirrored: a placement that turns the faces inside out (negative determinant); culling keeps the other side. */
+  enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16 };
   float model[16];
   float albedo_rough[4];  // albedo rgb, roughness
   float metal_spec[4];    // metallic, specular (Principled's IOR Level), 0, 0
+  float emission[3] = {0, 0, 0};
+  uint32_t flags = ReceiveShadows | CastShadows;
   uint32_t mesh = 0;
   uint32_t id = 0;        // written to the ids plane
 };
@@ -51,6 +57,7 @@ struct RasterLight {
 };
 
 struct RasterFrame {
+  int slot = 0;               // which view (0-3): its own targets
   int width = 0, height = 0;
   float view_proj[16];        // the CPU's convention (left-handed, depth 0..1, y up); the GPU flips y itself
   float eye[3] = {0, 0, 0};
@@ -58,9 +65,21 @@ struct RasterFrame {
   int shadow_size = 2048;     // 0: no shadow map
   int shadow_light = 0;       // which light casts it
   float shadow_bias = 0.002f;
+  bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
+  bool cull_backfaces = true; // (double-sided instances never are)
   std::vector<RasterLight> lights;
+  /* The world's light (Environment Gradient or Color, times its strength). */
+  int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour
   float sky[3] = {0.45f, 0.52f, 0.62f}, equator[3] = {0.32f, 0.34f, 0.36f}, ground[3] = {0.16f, 0.15f, 0.14f};
-  uint32_t clear = 0xFF303030u;  // the background (0xAARRGGBB)
+  float env_color[3] = {0.05f, 0.05f, 0.05f};
+  float env_strength = 1.0f;
+  /* The background: 0 one colour (`clear`, as displayed), 1 the editor's own sky (bg_*: Renderer3D::clear_sky's
+   * gradient, not tone mapped), 2 the world (as lit, through the view transform). */
+  int background = 0;
+  uint32_t clear = 0xFF303030u;
+  float bg_sky[3] = {0, 0, 0}, bg_horizon[3] = {0, 0, 0}, bg_ground[3] = {0, 0, 0};
+  int view_transform = 0;     // 0 Standard, 1 Filmic, 2 ACES, 3 the LUT given by set_view_lut (an OpenColorIO view)
+  float exposure = 0.0f;      // stops
 };
 
 /* GPU time of the last render() (timestamps), in ms. */
@@ -82,21 +101,28 @@ RasterMatch raster_match(const uint32_t *cpu_color, const uint32_t *cpu_ids, con
 
 class Raster {
  public:
+  static constexpr int kSlots = 4;
   static std::unique_ptr<Raster> create(int device_index, std::string *error);
   virtual ~Raster() = default;
   /* A mesh in GPU memory; its index for RasterInstance::mesh, or -1. */
   virtual int add_mesh(const std::vector<RasterVertex> &v, const std::vector<uint32_t> &indices, std::string *error) = 0;
-  /* New positions and normals for the same vertex count (an Edit Mode drag). */
-  virtual bool update_mesh(int mesh, const std::vector<RasterVertex> &v, std::string *error) = 0;
+  /* New positions and normals for the same vertex count (an Edit Mode drag), and new indices when given (the same
+   * count: quads split again from the new positions). */
+  virtual bool update_mesh(int mesh, const std::vector<RasterVertex> &v, const std::vector<uint32_t> *indices, std::string *error) = 0;
+  /* Frees a mesh's memory; its index may be handed out again. */
+  virtual void remove_mesh(int mesh) = 0;
+  /* An OpenColorIO view's LUT as colormanagement::view_lut gives it (size^3 colours, red fastest, a log2 shaper);
+   * uploaded only when `key` changes. */
+  virtual bool set_view_lut(uint64_t key, const float *rgb, int size, float log_min, float log_max, std::string *error) = 0;
   /* The objects drawn by the next render (uploaded then). */
   virtual void set_instances(const std::vector<RasterInstance> &instances) = 0;
-  /* Draws the frame and waits for the GPU. */
+  /* Draws the frame into its slot and waits for the GPU. */
   virtual bool render(const RasterFrame &frame, std::string *error) = 0;
   virtual RasterTimes times() const = 0;
-  /* (A): the last frame into CPU memory; any pointer may be null. */
-  virtual bool read_back(uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
-  /* (B): a swapchain on the window (Win32 HWND), then each present: the UI canvas's changed rows go up, the view
-   * (the last render) is copied to (view_x, view_y), and the frame is shown and waited for. */
+  /* (A): a slot's last frame into CPU memory; any pointer may be null (not read back then). */
+  virtual bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
+  /* (B): a swapchain on the window (Win32 HWND), then each present: the UI canvas's changed rows go up, slot 0's view
+   * (its last render) is copied to (view_x, view_y), and the frame is shown and its copies waited for. */
   virtual bool attach_window(void *native, std::string *error) = 0;
   virtual bool present(const uint32_t *ui, int width, int height, const std::vector<std::pair<int, int>> &rows, int view_x, int view_y,
                        std::string *error) = 0;

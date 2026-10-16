@@ -112,17 +112,27 @@ layout(std140, set = 0, binding = 0) uniform Frame {
   vec4 eye;
   vec4 sky; vec4 equator; vec4 ground;
   vec4 view;           // width, height, light count, shadow light (-1: none)
-  vec4 shadow;         // size, bias, 0, 0
-  vec4 background;     // the clear colour as displayed (already encoded: written out as it is)
+  vec4 shadow;         // size, bias, fast (2 x 2 bilinear), 0
+  vec4 background;     // a one-colour background as displayed (already encoded: written out as it is)
+  vec4 env;            // world mode (0 gradient, 1 colour), strength, view transform (0 Standard, 1 Filmic, 2 ACES), exposure
+  vec4 env_color;
+  vec4 bg;             // background mode (0 colour, 1 the editor's sky, 2 the world)
+  vec4 bg_sky; vec4 bg_horizon; vec4 bg_ground;
+  vec4 lut;            // an OpenColorIO view's LUT: size, log2 shaper min, max
   Light lights[16];
 };
-struct Inst { mat4 model; vec4 albedo_rough; vec4 metal_spec; uvec4 id; };
+struct Inst { mat4 model; vec4 albedo_rough; vec4 metal_spec; vec4 emission; uvec4 id; };  // id: id, flags
 layout(std430, set = 0, binding = 1) readonly buffer Instances { Inst inst[]; };
+const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u;
 )";
 
+/* Objects that cast no shadow are sent outside the map's clip volume (clipped away). */
 const char *kShadowVert = R"(
 layout(location = 0) in vec3 p;
-void main() { gl_Position = sun_vp * (inst[gl_InstanceIndex].model * vec4(p, 1.0)); }
+void main() {
+  Inst I = inst[gl_InstanceIndex];
+  gl_Position = (I.id.y & F_CAST) != 0u ? sun_vp * (I.model * vec4(p, 1.0)) : vec4(2.0, 2.0, 2.0, 1.0);
+}
 )";
 
 const char *kGbufVert = R"(
@@ -148,7 +158,8 @@ layout(location = 2) in vec3 wpos;
 layout(location = 0) out vec4 o_normal;  // normal, roughness
 layout(location = 1) out vec4 o_albedo;  // albedo, metallic
 layout(location = 2) out vec4 o_geo;     // the triangle's own normal (turned to the smooth one's side), specular
-layout(location = 3) out uint o_id;
+layout(location = 3) out vec4 o_emit;    // emission, flags
+layout(location = 4) out uint o_id;
 void main() {
   vec3 n = normalize(wn);
   vec3 g = cross(dFdx(wpos), dFdy(wpos));
@@ -157,6 +168,7 @@ void main() {
   o_normal = vec4(n, inst[ii].albedo_rough.w);
   o_albedo = vec4(inst[ii].albedo_rough.rgb, inst[ii].metal_spec.x);
   o_geo = vec4(g, inst[ii].metal_spec.y);
+  o_emit = vec4(inst[ii].emission.rgb, float(inst[ii].id.y));
   o_id = inst[ii].id.x;
 }
 )";
@@ -169,13 +181,16 @@ void main() {
 )";
 
 /* The CPU's deferred shader for a plain material (raster.cpp light_surface / light_finish, shading.cpp brdf_eval,
- * light_falloff, ShadowMap::lookup's 3x3 PCF, the gradient environment), then the Standard view transform. */
+ * light_falloff, ShadowMap::lookup and lookup_bilinear, Environment's Gradient / Color, tonemap), and the backgrounds
+ * (Renderer3D::clear_sky, clear_environment). */
 const char *kLightFrag = R"(
 layout(set = 0, binding = 2) uniform sampler2D g_normal;
 layout(set = 0, binding = 3) uniform sampler2D g_albedo;
 layout(set = 0, binding = 4) uniform sampler2D g_depth;
 layout(set = 0, binding = 5) uniform sampler2D g_shadow;
 layout(set = 0, binding = 6) uniform sampler2D g_geo;
+layout(set = 0, binding = 7) uniform sampler2D g_emit;
+layout(std430, set = 0, binding = 8) readonly buffer Lut { vec4 lut_data[]; };
 layout(location = 0) out vec4 o_color;
 const float PI = 3.14159265358979;
 vec3 fresnel_f0(vec3 albedo, float metallic, float specular) { return mix(vec3(0.08 * specular), albedo, metallic); }
@@ -209,6 +224,19 @@ float falloff(Light l, vec3 p, vec3 L) {
   }
   return f;
 }
+float lit_at(int sx, int sy, float z, int size) {
+  ivec2 s = clamp(ivec2(sx, sy), ivec2(0), ivec2(size - 1));
+  return z <= texelFetch(g_shadow, s, 0).r ? 1.0 : 0.0;
+}
+/* ShadowMap::lookup_bilinear: 4 taps, weighted (the Low tier's views). */
+float lookup_bilinear(float x, float y, float z, int size) {
+  float fx = x - 0.5, fy = y - 0.5;
+  int x0 = int(floor(fx)), y0 = int(floor(fy));
+  float tx = fx - float(x0), ty = fy - float(y0);
+  float top = lit_at(x0, y0, z, size) * (1.0 - tx) + lit_at(x0 + 1, y0, z, size) * tx;
+  float bottom = lit_at(x0, y0 + 1, z, size) * (1.0 - tx) + lit_at(x0 + 1, y0 + 1, z, size) * tx;
+  return top * (1.0 - ty) + bottom * ty;
+}
 float shadow_lookup(vec3 world, float ndl) {
   int size = int(shadow.x);
   if (size <= 0) return 1.0;
@@ -217,38 +245,109 @@ float shadow_lookup(vec3 world, float ndl) {
   float x = (c.x / c.w * 0.5 + 0.5) * size, y = (c.y / c.w * 0.5 + 0.5) * size, z = c.z / c.w;
   if (x < 0.0 || y < 0.0 || x >= size || y >= size || z > 1.0) return 1.0;
   float b = shadow.y * (1.0 + 3.0 * (1.0 - clamp(ndl, 0.0, 1.0)));
+  if (shadow.z > 0.5) return lookup_bilinear(x, y, z - b, size);
   int ix = int(x), iy = int(y);
   float lit = 0.0;
   for (int dy = -1; dy <= 1; dy++)
-    for (int dx = -1; dx <= 1; dx++) {
-      ivec2 s = clamp(ivec2(ix + dx, iy + dy), ivec2(0), ivec2(size - 1));
-      lit += (z - b <= texelFetch(g_shadow, s, 0).r) ? 1.0 : 0.0;
-    }
+    for (int dx = -1; dx <= 1; dx++) lit += lit_at(ix + dx, iy + dy, z - b, size);
   return lit / 9.0;
 }
-vec3 irradiance(vec3 n) { return n.y >= 0.0 ? mix(equator.rgb, sky.rgb, n.y) : mix(equator.rgb, ground.rgb, -n.y); }
-vec3 gradient(vec3 d) {
-  return d.y >= 0.0 ? mix(equator.rgb, sky.rgb, sqrt(clamp(d.y, 0.0, 1.0))) : mix(equator.rgb, ground.rgb, sqrt(clamp(-d.y * 4.0, 0.0, 1.0)));
+/* Environment::irradiance / radiance / specular for Gradient and Color, times the strength. */
+vec3 irradiance(vec3 n) {
+  if (env.x > 0.5) return env_color.rgb * env.y;
+  return (n.y >= 0.0 ? mix(equator.rgb, sky.rgb, n.y) : mix(equator.rgb, ground.rgb, -n.y)) * env.y;
+}
+vec3 radiance(vec3 d) {
+  if (env.x > 0.5) return env_color.rgb * env.y;
+  return (d.y >= 0.0 ? mix(equator.rgb, sky.rgb, sqrt(clamp(d.y, 0.0, 1.0))) : mix(equator.rgb, ground.rgb, sqrt(clamp(-d.y * 4.0, 0.0, 1.0)))) * env.y;
 }
 vec3 env_brdf_approx(vec3 f0, float r, float nv) {
   float rx = r * -1.0 + 1.0, ry = r * -0.0275 + 0.0425, rz = r * -0.572 + 1.04, rw = r * 0.022 - 0.04;
   float a004 = min(rx * rx, exp2(-9.28 * nv)) * rx + ry;
   return f0 * (-1.04 * a004 + rz) + vec3(1.04 * a004 + rw);
 }
+float hable(float x) {
+  const float A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
+  return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+float aces(float x) {
+  x *= 0.6;
+  return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+}
+/* shading.cpp tonemap: the exposure, then Standard, Filmic or ACES. */
+vec3 tonemap(vec3 c) {
+  c *= exp2(env.w);
+  int vt = int(env.z);
+  if (vt == 1) {
+    float wscale = 1.0 / hable(11.2);
+    return vec3(hable(c.r * 2.0), hable(c.g * 2.0), hable(c.b * 2.0)) * wscale;
+  }
+  if (vt == 2) return vec3(aces(c.r), aces(c.g), aces(c.b));
+  return c;
+}
 float srgb(float c) {
   c = clamp(c, 0.0, 1.0);
   return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
 }
+float shaper(float x) { return x > 0.0 ? clamp((log2(x) - lut.y) / (lut.z - lut.y), 0.0, 1.0) : 0.0; }
+vec3 lut_at(ivec3 i, int r, int g, int b) {
+  int N = int(lut.x);
+  return lut_data[((i.z + b) * N + (i.y + g)) * N + (i.x + r)].rgb;
+}
+/* colormanagement::display_rgb: the shaper, then the same tetrahedral interpolation in the same table. */
+vec3 ocio(vec3 c) {
+  int N = int(lut.x);
+  vec3 f = vec3(shaper(c.r), shaper(c.g), shaper(c.b)) * float(N - 1);
+  ivec3 i = min(ivec3(f), ivec3(N - 2));
+  vec3 t = f - vec3(i);
+  float fr = t.x, fg = t.y, fb = t.z;
+  vec3 c000 = lut_at(i, 0, 0, 0), c111 = lut_at(i, 1, 1, 1);
+  if (fr > fg) {
+    if (fg > fb) return c000 + (lut_at(i, 1, 0, 0) - c000) * fr + (lut_at(i, 1, 1, 0) - lut_at(i, 1, 0, 0)) * fg + (c111 - lut_at(i, 1, 1, 0)) * fb;
+    if (fr > fb) return c000 + (lut_at(i, 1, 0, 0) - c000) * fr + (c111 - lut_at(i, 1, 0, 1)) * fg + (lut_at(i, 1, 0, 1) - lut_at(i, 1, 0, 0)) * fb;
+    return c000 + (lut_at(i, 1, 0, 1) - lut_at(i, 0, 0, 1)) * fr + (c111 - lut_at(i, 1, 0, 1)) * fg + (lut_at(i, 0, 0, 1) - c000) * fb;
+  }
+  if (fb > fg) return c000 + (c111 - lut_at(i, 0, 1, 1)) * fr + (lut_at(i, 0, 1, 1) - lut_at(i, 0, 0, 1)) * fg + (lut_at(i, 0, 0, 1) - c000) * fb;
+  if (fb > fr) return c000 + (c111 - lut_at(i, 0, 1, 1)) * fr + (lut_at(i, 0, 1, 0) - c000) * fg + (lut_at(i, 0, 1, 1) - lut_at(i, 0, 1, 0)) * fb;
+  return c000 + (lut_at(i, 1, 1, 0) - lut_at(i, 0, 1, 0)) * fr + (lut_at(i, 0, 1, 0) - c000) * fg + (c111 - lut_at(i, 1, 1, 0)) * fb;
+}
+vec4 display(vec3 hdr) {
+  if (int(env.z) == 3) return vec4(clamp(ocio(hdr * exp2(env.w)), 0.0, 1.0), 1.0);
+  vec3 t = tonemap(hdr);
+  return vec4(srgb(t.r), srgb(t.g), srgb(t.b), 1.0);
+}
+vec3 view_dir(vec2 ndc) {
+  vec4 a = inv_view_proj * vec4(ndc, 0.0, 1.0), b = inv_view_proj * vec4(ndc, 1.0, 1.0);
+  return normalize(b.xyz / b.w - a.xyz / a.w);
+}
+/* What shows where nothing was drawn: one colour, the editor's sky (clear_sky: not tone mapped) or the world. */
+vec4 background_at(vec2 ndc) {
+  int mode = int(bg.x);
+  if (mode == 0) return background;
+  vec3 d = view_dir(ndc);
+  if (mode == 2) return display(radiance(d));
+  float t = d.y;
+  vec3 c = t >= 0.0 ? mix(bg_horizon.rgb, bg_sky.rgb, pow(clamp(t, 0.0, 1.0), 0.55)) : mix(bg_horizon.rgb, bg_ground.rgb, pow(clamp(-t * 6.0, 0.0, 1.0), 0.6));
+  return vec4(clamp(c, 0.0, 1.0), 1.0);
+}
 void main() {
   ivec2 px = ivec2(gl_FragCoord.xy);
-  float d = texelFetch(g_depth, px, 0).r;
-  if (d >= 1.0) { o_color = background; return; }
   vec2 ndc = (vec2(px) + 0.5) / view.xy * 2.0 - 1.0;
+  float d = texelFetch(g_depth, px, 0).r;
+  if (d >= 1.0) {
+    o_color = background_at(ndc);
+    return;
+  }
   vec4 wp = inv_view_proj * vec4(ndc, d, 1.0);
   vec3 P = wp.xyz / wp.w;
-  vec4 nr = texelFetch(g_normal, px, 0), am = texelFetch(g_albedo, px, 0), gs = texelFetch(g_geo, px, 0);
-  vec3 n = normalize(nr.xyz), geo = normalize(gs.xyz), albedo = am.rgb;
+  vec4 nr = texelFetch(g_normal, px, 0), am = texelFetch(g_albedo, px, 0), gs = texelFetch(g_geo, px, 0), em = texelFetch(g_emit, px, 0);
+  vec3 n = normalize(nr.xyz), geo = normalize(gs.xyz), albedo = am.rgb, emission = em.rgb;
   float rough = nr.w, metallic = am.a, specular = gs.w;
+  uint flags = uint(em.a + 0.5);
+  if ((flags & F_UNLIT) != 0u) {
+    o_color = display(albedo + emission);
+    return;
+  }
   vec3 V = normalize(eye.xyz - P);
   if (dot(geo, V) < 0.0) {  // the back side of a double-sided surface (as the CPU turns both normals)
     n = -n;
@@ -256,6 +355,7 @@ void main() {
   }
   vec3 lo = vec3(0.0);
   int count = int(view.z), shadow_light = int(view.w);
+  bool receive = (flags & F_RECEIVE) != 0u;
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
     vec3 L;
@@ -269,16 +369,15 @@ void main() {
     }
     float ndl = dot(n, L);
     if (ndl <= 0.0 || atten <= 0.0) continue;
-    float vis = li == shadow_light ? shadow_lookup(P + geo * 0.01, dot(geo, L)) : 1.0;
+    float vis = li == shadow_light && receive ? shadow_lookup(P + geo * 0.01, dot(geo, L)) : 1.0;
     if (vis <= 0.0) continue;
     lo += brdf_eval(albedo, rough, metallic, specular, n, V, L) * l.color.rgb * (atten * vis);
   }
   float nv = max(dot(n, V), 1e-4);
   vec3 f0 = fresnel_f0(albedo, metallic, specular);
   vec3 R = n * (2.0 * dot(n, V)) - V;
-  vec3 spec = mix(gradient(R), irradiance(R), clamp(rough * 1.2, 0.0, 1.0)) * env_brdf_approx(f0, rough, nv);
-  vec3 c = lo + irradiance(n) * albedo * (1.0 - metallic) + spec;
-  o_color = vec4(srgb(c.r), srgb(c.g), srgb(c.b), 1.0);
+  vec3 spec = mix(radiance(R), irradiance(R), clamp(rough * 1.2, 0.0, 1.0)) * env_brdf_approx(f0, rough, nv);
+  o_color = display(lo + irradiance(n) * albedo * (1.0 - metallic) + spec + emission);
 }
 )";
 
@@ -300,17 +399,25 @@ struct Img {
 struct Mesh {
   Buf vb, ib;
   uint32_t vertices = 0, indices = 0;
+  bool live = false;  // false: removed (its index may be given out again)
+};
+/* One view's targets: the shadow map, the G-buffer, the picture, their framebuffers and the set that reads them. */
+struct Slot {
+  Img shadow, normal, albedo, geo, emit, ids, depth, color;
+  VkFramebuffer fb_shadow = VK_NULL_HANDLE, fb_gbuf = VK_NULL_HANDLE, fb_light = VK_NULL_HANDLE;
+  VkDescriptorSet set = VK_NULL_HANDLE;
 };
 
 /* The frame's uniform block, as kCommon declares it. */
 struct FrameUbo {
   float view_proj[16], inv_view_proj[16], sun_vp[16];
   float eye[4], sky[4], equator[4], ground[4], view[4], shadow[4], background[4];
+  float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4];
   float lights[16][16];
 };
 struct InstGpu {
-  float model[16], albedo_rough[4], metal_spec[4];
-  uint32_t id[4];
+  float model[16], albedo_rough[4], metal_spec[4], emission[4];
+  uint32_t id[4];  // id, flags
 };
 
 /* The CPU's matrices are left-handed with y up and depth 0..1; Vulkan's clip space has y down. */
@@ -385,6 +492,9 @@ class VulkanRaster final : public Raster {
     f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_);
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
+    /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
+    if (!make_buffer(lut_buf_, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+      return fail(err, "out of memory");
     return make_layout(err) && make_render_passes(err) && make_pipelines(err);
   }
 
@@ -398,37 +508,80 @@ class VulkanRaster final : public Raster {
       fail(err, info_.name + ": out of memory for a mesh");
       return -1;
     }
-    if (!upload(m.vb, v.data(), v.size() * sizeof(RasterVertex), err) || !upload(m.ib, idx.data(), idx.size() * sizeof(uint32_t), err)) return -1;
+    if (!upload(m.vb, v.data(), v.size() * sizeof(RasterVertex), err) || !upload(m.ib, idx.data(), idx.size() * sizeof(uint32_t), err)) {
+      free_mesh(m);
+      return -1;
+    }
+    m.live = true;
+    for (size_t i = 0; i < meshes_.size(); i++)
+      if (!meshes_[i].live) {
+        meshes_[i] = m;
+        return (int)i;
+      }
     meshes_.push_back(m);
     return (int)meshes_.size() - 1;
   }
 
-  bool update_mesh(int mesh, const std::vector<RasterVertex> &v, std::string *err) override {
-    if (mesh < 0 || mesh >= (int)meshes_.size() || v.size() != meshes_[(size_t)mesh].vertices) return fail(err, "no such mesh, or another size");
-    return upload(meshes_[(size_t)mesh].vb, v.data(), v.size() * sizeof(RasterVertex), err);
+  bool update_mesh(int mesh, const std::vector<RasterVertex> &v, const std::vector<uint32_t> *idx, std::string *err) override {
+    if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
+    Mesh &m = meshes_[(size_t)mesh];
+    if (v.size() != m.vertices || (idx && idx->size() != m.indices)) return fail(err, "a mesh of another size");
+    if (!upload(m.vb, v.data(), v.size() * sizeof(RasterVertex), err)) return false;
+    return !idx || upload(m.ib, idx->data(), idx->size() * sizeof(uint32_t), err);
+  }
+
+  void remove_mesh(int mesh) override {
+    if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return;
+    free_mesh(meshes_[(size_t)mesh]);  // (no wait: every submission here is waited for before its call returns)
   }
 
   void set_instances(const std::vector<RasterInstance> &in) override { instances_ = in; }
 
+  bool set_view_lut(uint64_t key, const float *rgb, int size, float log_min, float log_max, std::string *err) override {
+    if (key == lut_key_ && lut_size_ == size) return true;
+    std::vector<float> rgba((size_t)size * size * size * 4);
+    for (size_t i = 0; i < rgba.size() / 4; i++) {
+      rgba[i * 4] = rgb[i * 3], rgba[i * 4 + 1] = rgb[i * 3 + 1], rgba[i * 4 + 2] = rgb[i * 3 + 2], rgba[i * 4 + 3] = 1.0f;
+    }
+    const size_t bytes = rgba.size() * sizeof(float);
+    if (lut_buf_.size < bytes) {
+      f_.vkDeviceWaitIdle(dev_);
+      free_buffer(lut_buf_);
+      if (!make_buffer(lut_buf_, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+        return fail(err, info_.name + ": out of memory for the view's LUT");
+      for (Slot &sl : slots_) bind_buffers(sl.set);
+    }
+    if (!upload(lut_buf_, rgba.data(), bytes, err)) return false;
+    lut_key_ = key;
+    lut_size_ = size;
+    lut_min_ = log_min;
+    lut_max_ = log_max;
+    return true;
+  }
+
   bool render(const RasterFrame &fr, std::string *err) override {
-    if (!targets(fr.width, fr.height, fr.shadow_size, err) || !write_frame(fr, err)) return false;
+    if (fr.slot < 0 || fr.slot >= kSlots) return fail(err, "no such view slot");
+    for (const RasterInstance &in : instances_)
+      if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
+    Slot &sl = slots_[fr.slot];
+    if (!targets(sl, fr.width, fr.height, fr.shadow_size, err) || !write_frame(fr, err)) return false;
     begin();
     if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 4);
     stamp(0);
-    draw_pass(rp_shadow_, fb_shadow_, shadow_.w, shadow_.h, pl_shadow_, 1, fr.shadow_size > 0);  // (cleared even when unused)
+    draw_pass(rp_shadow_, sl.fb_shadow, sl.shadow.w, sl.shadow.h, sl.set, 1, fr.shadow_size > 0 ? DrawShadow : DrawNothing, false);  // (cleared even when unused)
     barrier();
     stamp(1);
-    draw_pass(rp_gbuf_, fb_gbuf_, fr.width, fr.height, pl_gbuf_, 5, true);
+    draw_pass(rp_gbuf_, sl.fb_gbuf, fr.width, fr.height, sl.set, 6, DrawGbuffer, fr.cull_backfaces);
     barrier();
     stamp(2);
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rb.renderPass = rp_light_;
-    rb.framebuffer = fb_light_;
+    rb.framebuffer = sl.fb_light;
     rb.renderArea = {{0, 0}, {(uint32_t)fr.width, (uint32_t)fr.height}};
     f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
     viewport(fr.width, fr.height);
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_light_);
-    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
+    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
@@ -440,8 +593,10 @@ class VulkanRaster final : public Raster {
 
   RasterTimes times() const override { return times_; }
 
-  bool read_back(uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
-    const size_t px = (size_t)color_.w * color_.h;
+  bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
+    if (slot < 0 || slot >= kSlots) return fail(err, "no such view slot");
+    const Slot &sl = slots_[slot];
+    const size_t px = (size_t)sl.color.w * sl.color.h;
     if (!px) return fail(err, "nothing rendered yet");
     if (!readback_.buf || readback_.size < px * 12) {
       free_buffer(readback_);
@@ -451,9 +606,9 @@ class VulkanRaster final : public Raster {
         return fail(err, info_.name + ": out of memory for a read-back");
     }
     begin();
-    copy_out(color_, VK_IMAGE_ASPECT_COLOR_BIT, 0);
-    copy_out(depth_, VK_IMAGE_ASPECT_DEPTH_BIT, px * 4);
-    copy_out(ids_, VK_IMAGE_ASPECT_COLOR_BIT, px * 8);
+    if (color) copy_out(sl.color, VK_IMAGE_ASPECT_COLOR_BIT, 0);
+    if (depth) copy_out(sl.depth, VK_IMAGE_ASPECT_DEPTH_BIT, px * 4);
+    if (ids) copy_out(sl.ids, VK_IMAGE_ASPECT_COLOR_BIT, px * 8);
     if (!submit_wait(err)) return false;
     const uint8_t *m = (const uint8_t *)readback_.mapped;
     if (color) std::memcpy(color, m, px * 4);
@@ -526,12 +681,13 @@ class VulkanRaster final : public Raster {
     whole.srcSubresource = whole.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     whole.extent = {(uint32_t)w, (uint32_t)h, 1};
     f_.vkCmdCopyImage(cmd_, ui_img_.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc_images_[image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &whole);
-    if (color_.img) {
+    const Img &color = slots_[0].color;
+    if (color.img) {
       VkImageCopy v{};
       v.srcSubresource = v.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
       v.dstOffset = {vx, vy, 0};
-      v.extent = {(uint32_t)std::min(color_.w, w - vx), (uint32_t)std::min(color_.h, h - vy), 1};
-      f_.vkCmdCopyImage(cmd_, color_.img, VK_IMAGE_LAYOUT_GENERAL, sc_images_[image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &v);
+      v.extent = {(uint32_t)std::min(color.w, w - vx), (uint32_t)std::min(color.h, h - vy), 1};
+      f_.vkCmdCopyImage(cmd_, color.img, VK_IMAGE_LAYOUT_GENERAL, sc_images_[image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &v);
     }
     to_layout(sc_images_[image], sc_layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
   }
@@ -576,19 +732,24 @@ class VulkanRaster final : public Raster {
   bool timestamps_ = false;
   float ts_period_ns_ = 1.0f;
   RasterTimes times_;
-  Buf ubo_, inst_buf_, staging_, readback_, ui_staging_;
+  Buf ubo_, inst_buf_, staging_, readback_, ui_staging_, lut_buf_;
+  uint64_t lut_key_ = ~0ull;
+  int lut_size_ = 0;
+  float lut_min_ = 0, lut_max_ = 1;
   std::vector<Mesh> meshes_;
   std::vector<RasterInstance> instances_;
-  Img shadow_, normal_, albedo_, geo_, ids_, depth_, color_, ui_img_;
+  Slot slots_[kSlots];
+  Img ui_img_;
   VkImageLayout ui_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
   VkSampler sampler_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout layout_ = VK_NULL_HANDLE;
   VkDescriptorPool dpool_ = VK_NULL_HANDLE;
-  VkDescriptorSet set_ = VK_NULL_HANDLE;
   VkRenderPass rp_shadow_ = VK_NULL_HANDLE, rp_gbuf_ = VK_NULL_HANDLE, rp_light_ = VK_NULL_HANDLE;
-  VkFramebuffer fb_shadow_ = VK_NULL_HANDLE, fb_gbuf_ = VK_NULL_HANDLE, fb_light_ = VK_NULL_HANDLE;
-  VkPipeline pl_shadow_ = VK_NULL_HANDLE, pl_gbuf_ = VK_NULL_HANDLE, pl_light_ = VK_NULL_HANDLE;
+  /* The G-buffer twice: back faces culled (the view's option) and not (double-sided objects, or culling off). */
+  VkPipeline pl_shadow_ = VK_NULL_HANDLE, pl_gbuf_ = VK_NULL_HANDLE, pl_gbuf_cull_ = VK_NULL_HANDLE, pl_gbuf_cull_front_ = VK_NULL_HANDLE,
+             pl_light_ = VK_NULL_HANDLE;
+  enum DrawWhat { DrawNothing, DrawShadow, DrawGbuffer };
   VkSurfaceKHR surface_ = VK_NULL_HANDLE;
   VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
   VkExtent2D sc_extent_{0, 0};
@@ -645,6 +806,11 @@ class VulkanRaster final : public Raster {
     b.size = size;
     if (props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) f_.vkMapMemory(dev_, b.mem, 0, VK_WHOLE_SIZE, 0, &b.mapped);
     return true;
+  }
+  void free_mesh(Mesh &m) {
+    free_buffer(m.vb);
+    free_buffer(m.ib);
+    m = Mesh{};
   }
   void free_buffer(Buf &b) {
     if (b.mapped) f_.vkUnmapMemory(dev_, b.mem);
@@ -761,9 +927,10 @@ class VulkanRaster final : public Raster {
     f_.vkCmdCopyImageToBuffer(cmd_, im.img, VK_IMAGE_LAYOUT_GENERAL, readback_.buf, 1, &c);
   }
 
-  /* One geometry pass: every instance, each its own indexed draw (firstInstance picks its row of the instances). */
-  void draw_pass(VkRenderPass rp, VkFramebuffer fb, int w, int h, VkPipeline pl, int clears, bool draw) {
-    VkClearValue cv[5];
+  /* One geometry pass: every instance, each its own indexed draw (firstInstance picks its row of the instances); the
+   * G-buffer's pipeline culls back faces unless culling is off or the object is double-sided. */
+  void draw_pass(VkRenderPass rp, VkFramebuffer fb, int w, int h, VkDescriptorSet set, int clears, DrawWhat what, bool cull) {
+    VkClearValue cv[6];
     std::memset(cv, 0, sizeof(cv));
     cv[clears - 1].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -774,9 +941,13 @@ class VulkanRaster final : public Raster {
     rb.pClearValues = cv;
     f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
     viewport(w, h);
-    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
-    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
-    for (size_t i = 0; draw && i < instances_.size(); i++) {
+    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+    VkPipeline bound = VK_NULL_HANDLE;
+    for (size_t i = 0; what != DrawNothing && i < instances_.size(); i++) {
+      const uint32_t fl = instances_[i].flags;
+      const bool culled = what == DrawGbuffer && cull && !(fl & RasterInstance::DoubleSided);
+      const VkPipeline pl = what == DrawShadow ? pl_shadow_ : !culled ? pl_gbuf_ : (fl & RasterInstance::Mirrored) ? pl_gbuf_cull_front_ : pl_gbuf_cull_;
+      if (pl != bound) f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = pl);
       const Mesh &m = meshes_[instances_[i].mesh];
       VkDeviceSize off = 0;
       f_.vkCmdBindVertexBuffers(cmd_, 0, 1, &m.vb.buf, &off);
@@ -793,7 +964,7 @@ class VulkanRaster final : public Raster {
       free_buffer(inst_buf_);
       if (!make_buffer(inst_buf_, instances_.size() * sizeof(InstGpu) * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
         return fail(err, "out of memory for the instances");
-      bind_buffers();
+      for (Slot &sl : slots_) bind_buffers(sl.set);
     }
     InstGpu *dst = (InstGpu *)inst_buf_.mapped;
     for (size_t i = 0; i < instances_.size(); i++) {
@@ -801,7 +972,10 @@ class VulkanRaster final : public Raster {
       std::memcpy(dst[i].model, s.model, sizeof(s.model));
       std::memcpy(dst[i].albedo_rough, s.albedo_rough, sizeof(s.albedo_rough));
       std::memcpy(dst[i].metal_spec, s.metal_spec, sizeof(s.metal_spec));
+      std::memcpy(dst[i].emission, s.emission, sizeof(s.emission));
+      dst[i].emission[3] = 0.0f;
       dst[i].id[0] = s.id;
+      dst[i].id[1] = s.flags;
     }
     FrameUbo u{};
     const Mat4 vp = vulkan_clip(fr.view_proj), sun = vulkan_clip(fr.sun_view_proj), inv = vp.inverse();
@@ -821,8 +995,23 @@ class VulkanRaster final : public Raster {
     u.view[3] = fr.shadow_size > 0 ? (float)fr.shadow_light : -1.0f;
     u.shadow[0] = (float)fr.shadow_size;
     u.shadow[1] = fr.shadow_bias;
+    u.shadow[2] = fr.shadow_fast ? 1.0f : 0.0f;
     for (int k = 0; k < 3; k++) u.background[k] = ((fr.clear >> (16 - 8 * k)) & 255) / 255.0f;
     u.background[3] = 1.0f;
+    u.env[0] = (float)fr.env_mode;
+    u.env[1] = fr.env_strength;
+    u.env[2] = (float)fr.view_transform;
+    u.env[3] = fr.exposure;
+    u.bg[0] = (float)fr.background;
+    u.lut[0] = (float)lut_size_;
+    u.lut[1] = lut_min_;
+    u.lut[2] = lut_max_;
+    for (int k = 0; k < 3; k++) {
+      u.env_color[k] = fr.env_color[k];
+      u.bg_sky[k] = fr.bg_sky[k];
+      u.bg_horizon[k] = fr.bg_horizon[k];
+      u.bg_ground[k] = fr.bg_ground[k];
+    }
     for (int i = 0; i < nl; i++) {
       const RasterLight &l = fr.lights[(size_t)i];
       float *o = u.lights[i];
@@ -843,7 +1032,8 @@ class VulkanRaster final : public Raster {
     std::vector<VkDescriptorSetLayoutBinding> b = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
-    for (uint32_t i = 2; i <= 6; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    for (uint32_t i = 2; i <= 7; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    b.push_back({8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
@@ -852,24 +1042,32 @@ class VulkanRaster final : public Raster {
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
-    VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5}};
+    VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 1;
+    dpi.maxSets = kSlots;
     dpi.poolSizeCount = 3;
     dpi.pPoolSizes = ps;
     f_.vkCreateDescriptorPool(dev_, &dpi, nullptr, &dpool_);
-    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = dpool_;
-    dai.descriptorSetCount = 1;
-    dai.pSetLayouts = &set_layout_;
-    if (f_.vkAllocateDescriptorSets(dev_, &dai, &set_) != VK_SUCCESS) return fail(err, "could not make the descriptor set");
-    bind_buffers();
+    for (Slot &sl : slots_) {
+      VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+      dai.descriptorPool = dpool_;
+      dai.descriptorSetCount = 1;
+      dai.pSetLayouts = &set_layout_;
+      if (f_.vkAllocateDescriptorSets(dev_, &dai, &sl.set) != VK_SUCCESS) return fail(err, "could not make the descriptor sets");
+      bind_buffers(sl.set);
+    }
     return true;
   }
-  void bind_buffers() {
-    VkDescriptorBufferInfo ub{ubo_.buf, 0, VK_WHOLE_SIZE}, sb{inst_buf_.buf, 0, VK_WHOLE_SIZE};
-    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
-    w[0].dstSet = w[1].dstSet = set_;
+  void bind_buffers(VkDescriptorSet set) {
+    VkDescriptorBufferInfo ub{ubo_.buf, 0, VK_WHOLE_SIZE}, sb{inst_buf_.buf, 0, VK_WHOLE_SIZE}, lb{lut_buf_.buf, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet w[3] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    w[0].dstSet = w[1].dstSet = w[2].dstSet = set;
+    w[2].dstBinding = 8;
+    w[2].descriptorCount = 1;
+    w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[2].pBufferInfo = &lb;
     w[0].dstBinding = 0;
     w[0].descriptorCount = 1;
     w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -878,22 +1076,22 @@ class VulkanRaster final : public Raster {
     w[1].descriptorCount = 1;
     w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[1].pBufferInfo = &sb;
-    f_.vkUpdateDescriptorSets(dev_, 2, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 3, w, 0, nullptr);
   }
-  void bind_images() {
-    const Img *im[5] = {&normal_, &albedo_, &depth_, &shadow_, &geo_};
-    VkDescriptorImageInfo ii[5];
-    VkWriteDescriptorSet w[5];
-    for (int i = 0; i < 5; i++) {
+  void bind_images(Slot &sl) {
+    const Img *im[6] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit};
+    VkDescriptorImageInfo ii[6];
+    VkWriteDescriptorSet w[6];
+    for (int i = 0; i < 6; i++) {
       ii[i] = {sampler_, im[i]->view, VK_IMAGE_LAYOUT_GENERAL};
       w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-      w[i].dstSet = set_;
+      w[i].dstSet = sl.set;
       w[i].dstBinding = (uint32_t)(2 + i);
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       w[i].pImageInfo = &ii[i];
     }
-    f_.vkUpdateDescriptorSets(dev_, 5, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 6, w, 0, nullptr);
   }
 
   /* Render passes whose attachments end in GENERAL: read by the next pass and copied out without other moves. */
@@ -952,7 +1150,9 @@ class VulkanRaster final : public Raster {
   }
   bool make_render_passes(std::string *err) {
     rp_shadow_ = make_pass({}, true, false);
-    rp_gbuf_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32_UINT}, true, false);
+    rp_gbuf_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_FORMAT_R32_UINT},
+                         true, false);
     rp_light_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, true);
     return rp_shadow_ && rp_gbuf_ && rp_light_ ? true : fail(err, "could not make the render passes");
   }
@@ -967,9 +1167,10 @@ class VulkanRaster final : public Raster {
     f_.vkCreateShaderModule(dev_, &smi, nullptr, &m);
     return m;
   }
-  /* A graphics pipeline: the vertex layout (position, normal) unless full-screen, depth test unless full-screen,
-   * no culling (the spike draws both sides, as the CPU's deferred view does for two-sided materials). */
-  VkPipeline make_pipeline(VkRenderPass rp, VkShaderModule vs, VkShaderModule fs, int colors, bool geometry) {
+  /* A graphics pipeline: the vertex layout (position, normal) and the depth test unless full-screen; back faces culled
+   * when asked. Front faces are the CPU's: clockwise on screen (Unity's convention), and the y flip keeps the screen's
+   * orientation, so clockwise in Vulkan's framebuffer too. */
+  VkPipeline make_pipeline(VkRenderPass rp, VkShaderModule vs, VkShaderModule fs, int colors, bool geometry, VkCullModeFlags cull) {
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     st[0].module = vs;
@@ -992,7 +1193,7 @@ class VulkanRaster final : public Raster {
     vp.viewportCount = vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
-    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.cullMode = cull;
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rs.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
@@ -1031,46 +1232,49 @@ class VulkanRaster final : public Raster {
                    gf = module(kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
                    lf = module(kLightFrag, shaderc_fragment_shader, err);
     if (sv && gv && gf && fv && lf) {
-      pl_shadow_ = make_pipeline(rp_shadow_, sv, VK_NULL_HANDLE, 0, true);
-      pl_gbuf_ = make_pipeline(rp_gbuf_, gv, gf, 4, true);
-      pl_light_ = make_pipeline(rp_light_, fv, lf, 1, false);
+      pl_shadow_ = make_pipeline(rp_shadow_, sv, VK_NULL_HANDLE, 0, true, VK_CULL_MODE_NONE);
+      pl_gbuf_ = make_pipeline(rp_gbuf_, gv, gf, 5, true, VK_CULL_MODE_NONE);
+      pl_gbuf_cull_ = make_pipeline(rp_gbuf_, gv, gf, 5, true, VK_CULL_MODE_BACK_BIT);
+      pl_gbuf_cull_front_ = make_pipeline(rp_gbuf_, gv, gf, 5, true, VK_CULL_MODE_FRONT_BIT);
+      pl_light_ = make_pipeline(rp_light_, fv, lf, 1, false, VK_CULL_MODE_NONE);
     }
     for (VkShaderModule m : {sv, gv, gf, fv, lf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
-    if (pl_shadow_ && pl_gbuf_ && pl_light_) return true;
+    if (pl_shadow_ && pl_gbuf_ && pl_gbuf_cull_ && pl_gbuf_cull_front_ && pl_light_) return true;
     return fail(err, err && !err->empty() ? *err : "could not make the pipelines");
   }
 
-  /* The images and framebuffers for this size (made again only when it changes). */
-  bool targets(int w, int h, int shadow, std::string *err) {
+  /* A slot's images and framebuffers for this size (made again only when it changes). */
+  bool targets(Slot &sl, int w, int h, int shadow, std::string *err) {
     if (w <= 0 || h <= 0) return fail(err, "an empty frame");
-    const bool view_ok = color_.w == w && color_.h == h, shadow_ok = shadow <= 0 || shadow_.w == shadow;
+    const bool view_ok = sl.color.w == w && sl.color.h == h, shadow_ok = sl.shadow.img && (shadow <= 0 || sl.shadow.w == shadow);
     if (view_ok && shadow_ok) return true;
     f_.vkDeviceWaitIdle(dev_);
     const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     const VkImageUsageFlags dep = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    if (!shadow_ok || !shadow_.img) {
-      if (fb_shadow_) f_.vkDestroyFramebuffer(dev_, fb_shadow_, nullptr);
-      free_image(shadow_);
+    if (!shadow_ok) {
+      if (sl.fb_shadow) f_.vkDestroyFramebuffer(dev_, sl.fb_shadow, nullptr);
+      free_image(sl.shadow);
       const int s = std::max(shadow, 16);
-      if (!make_image(shadow_, s, s, VK_FORMAT_D32_SFLOAT, dep, VK_IMAGE_ASPECT_DEPTH_BIT)) return fail(err, "out of memory for the shadow map");
-      fb_shadow_ = framebuffer(rp_shadow_, {shadow_.view}, s, s);
+      if (!make_image(sl.shadow, s, s, VK_FORMAT_D32_SFLOAT, dep, VK_IMAGE_ASPECT_DEPTH_BIT)) return fail(err, "out of memory for the shadow map");
+      sl.fb_shadow = framebuffer(rp_shadow_, {sl.shadow.view}, s, s);
     }
     if (!view_ok) {
-      for (VkFramebuffer fb : {fb_gbuf_, fb_light_})
+      for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&normal_, &albedo_, &geo_, &ids_, &depth_, &color_}) free_image(*im);
-      const bool ok = make_image(normal_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
-                      make_image(albedo_, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
-                      make_image(geo_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
-                      make_image(ids_, w, h, VK_FORMAT_R32_UINT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
-                      make_image(depth_, w, h, VK_FORMAT_D32_SFLOAT, dep, VK_IMAGE_ASPECT_DEPTH_BIT) &&
-                      make_image(color_, w, h, VK_FORMAT_B8G8R8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT);
+      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.depth, &sl.color}) free_image(*im);
+      const bool ok = make_image(sl.normal, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
+                      make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
+                      make_image(sl.geo, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
+                      make_image(sl.emit, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
+                      make_image(sl.ids, w, h, VK_FORMAT_R32_UINT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
+                      make_image(sl.depth, w, h, VK_FORMAT_D32_SFLOAT, dep, VK_IMAGE_ASPECT_DEPTH_BIT) &&
+                      make_image(sl.color, w, h, VK_FORMAT_B8G8R8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT);
       if (!ok) return fail(err, "out of memory for a frame");
-      fb_gbuf_ = framebuffer(rp_gbuf_, {normal_.view, albedo_.view, geo_.view, ids_.view, depth_.view}, w, h);
-      fb_light_ = framebuffer(rp_light_, {color_.view}, w, h);
+      sl.fb_gbuf = framebuffer(rp_gbuf_, {sl.normal.view, sl.albedo.view, sl.geo.view, sl.emit.view, sl.ids.view, sl.depth.view}, w, h);
+      sl.fb_light = framebuffer(rp_light_, {sl.color.view}, w, h);
     }
-    bind_images();
+    bind_images(sl);
     return true;
   }
   VkFramebuffer framebuffer(VkRenderPass rp, const std::vector<VkImageView> &views, int w, int h) {
@@ -1137,18 +1341,18 @@ class VulkanRaster final : public Raster {
     if (acquired_) f_.vkDestroySemaphore(dev_, acquired_, nullptr);
     for (VkSemaphore s : rendered_)
       if (s) f_.vkDestroySemaphore(dev_, s, nullptr);
-    for (VkFramebuffer fb : {fb_shadow_, fb_gbuf_, fb_light_})
-      if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_light_})
+    for (Slot &sl : slots_) {
+      for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light})
+        if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
+      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.depth, &sl.color}) free_image(*im);
+    }
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
-    for (Img *im : {&shadow_, &normal_, &albedo_, &geo_, &ids_, &depth_, &color_, &ui_img_}) free_image(*im);
-    for (Mesh &m : meshes_) {
-      free_buffer(m.vb);
-      free_buffer(m.ib);
-    }
-    for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_}) free_buffer(*b);
+    free_image(ui_img_);
+    for (Mesh &m : meshes_) free_mesh(m);
+    for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_, &lut_buf_}) free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
     if (layout_) f_.vkDestroyPipelineLayout(dev_, layout_, nullptr);

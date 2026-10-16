@@ -260,6 +260,8 @@ int main() {
   if (!std::getenv("BLENDITY_GI_DEVICE")) set_env("BLENDITY_GI_DEVICE", "cpu");
   /* The same for OpenImageDenoise's Denoise Device Auto (task 0094). */
   if (!std::getenv("BLENDITY_DENOISE_DEVICE")) set_env("BLENDITY_DENOISE_DEVICE", "cpu");
+  /* And Viewport Device Auto draws the views on the CPU (task 0096); the GPU view's own tests ask for it. */
+  if (!std::getenv("BLENDITY_VIEWPORT_DEVICE")) set_env("BLENDITY_VIEWPORT_DEVICE", "cpu");
   /* Scenes default to Automatic lighting updates here (the behaviour the tests before task 0020 were written
    * for); Manual's own tests ask for it. */
   if (!std::getenv("BLENDITY_LIGHTING_UPDATES")) set_env("BLENDITY_LIGHTING_UPDATES", "automatic");
@@ -30002,7 +30004,15 @@ static void round81_tests() {
       fr.lights.push_back(gl);
     }
     std::vector<uint32_t> px((size_t)W * H), ids((size_t)W * H);
-    CHECK(g->render(fr, &err) && g->read_back(px.data(), nullptr, ids.data(), &err));
+    std::vector<float> depth((size_t)W * H);
+    CHECK(g->render(fr, &err) && g->read_back(0, px.data(), depth.data(), ids.data(), &err));
+    /* Back faces culled as the CPU culls them (its front faces, not the far insides): the depth is the near side's. */
+    double depth_diff = 0;
+    size_t covered = 0;
+    for (size_t i = 0; i < depth.size(); i++)
+      if (rt.ids[i] && ids[i] == rt.ids[i]) depth_diff = std::max(depth_diff, (double)std::fabs(depth[i] - rt.depth[i])), covered++;
+    std::printf("    depth: worst difference %.2e over %zu pixels\n", depth_diff, covered);
+    CHECK(covered > 5000 && depth_diff < 1e-3);
     const gpu::RasterMatch m = gpu::raster_match(img.pixels.data(), rt.ids.data(), px.data(), ids.data(), W, H);
     std::printf("    %s: %zu covered pixels away from edges: mean %.2f / 255, %.1f %% within 3 / 255, ids %.2f %%\n", g->info().name.c_str(),
                 m.pixels, m.mean, m.within3 * 100, m.ids_same * 100);
@@ -30012,5 +30022,180 @@ static void round81_tests() {
     CHECK(m.mean < 1.0);
     CHECK(m.within3 >= 0.99);
     CHECK(m.ids_same == 1.0);
+  });
+  /* ---------------------------------------------------------------- round 122: the views on the GPU (task 0096) */
+  /* The Scene view and Game view (Camera Preview up) drawn again with Viewport Device `device`: their crops. */
+  auto r122_views = [](Editor &ed, int device) {
+    ed.viewport_device_for_test(device);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (cube) cube->set_local_position({0.01f * (device + 1), 0.5f, 0.0f});  // (a change: every view draws again)
+    r34_steps(ed, 2);
+    if (cube) cube->set_local_position({0.0f, 0.5f, 0.0f});
+    r34_steps(ed, 2);
+    std::vector<uint32_t> s = r34_crop(ed, ed.scene_view_rect()), g = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    s.insert(s.end(), g.begin(), g.end());
+    return s;
+  };
+  /* Mean and share within 3 / 255 of the worst channel's difference, over every pixel (the overlays and the UI are the
+   * CPU's on both, so they match exactly). */
+  auto r122_compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+    double sum = 0;
+    size_t within = 0;
+    for (size_t i = 0; i < a.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      sum += worst;
+      within += worst <= 3;
+    }
+    mean = a.empty() ? 0 : sum / (double)a.size();
+    within3 = a.empty() ? 0 : (double)within / (double)a.size();
+  };
+  test("gpu views: the Scene view and Game view of a plain scene look the same drawn on the GPU as on the CPU (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    const std::vector<uint32_t> cpu = r122_views(ed, 1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = r122_views(ed, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    std::printf("    %s; %llu views on the GPU, %llu on the CPU instead\n", ed.gpu_view_status().c_str(),
+                (unsigned long long)(after.gpu_views - before.gpu_views), (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks));
+    CHECK(after.gpu_views > before.gpu_views);
+    CHECK(ed.gpu_view_reason().empty());
+    CHECK(cpu.size() == gpu.size());
+    double mean = 0, within3 = 0;
+    r122_compare(cpu, gpu, mean, within3);
+    std::printf("    mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, within3 * 100);
+    CHECK(mean < 1.0);
+    CHECK(within3 >= 0.99);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views: a procedural material sends the view to the CPU, says why, and the picture is then the CPU's exactly", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr checker = make_material("Checker", {0.8f, 0.8f, 0.8f});
+    checker->procedural = (int)Procedural::Checker;
+    cube->get<MeshRenderer>()->materials = {checker};
+    const std::vector<uint32_t> cpu = r122_views(ed, 1), gpu = r122_views(ed, 2);
+    std::printf("    %s\n", ed.gpu_view_status().c_str());
+    CHECK(ed.gpu_view_reason().find("procedural") != std::string::npos);
+    CHECK(cpu == gpu);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views: back faces are culled as on the CPU (a plane seen from below shows the sky), and picking finds the same object", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Plane");
+    ed.command("camera 25 -30 6 0 0.5 0");  // (from below the plane)
+    r34_steps(ed, 2);
+    const std::vector<uint32_t> cpu = r122_views(ed, 1), gpu = r122_views(ed, 2);
+    double mean = 0, within3 = 0;
+    r122_compare(cpu, gpu, mean, within3);
+    std::printf("    from below: mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, within3 * 100);
+    CHECK(mean < 1.0 && within3 >= 0.99);
+    /* A click on the Cube in the GPU-drawn Scene view picks it (the ids came back from the GPU). */
+    ed.command("camera 25 20 7 0 0.5 0");
+    ed.command("select Main Camera");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    int x = 0, y = 0;
+    CHECK(cube && ed.project_to_window(cube->world_position(), x, y));
+    if (cube) r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.selected_object() == cube);
+    CHECK(ed.gpu_view_reason().empty());
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views: an Edit Mode drag moves the mesh's copy on the GPU in place (no new copy each frame)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(2);
+    ed.command("select Cube");
+    ed.command("edit vertex");
+    ed.command("vsel 0");
+    ed.command("camera 0 20 6 0 0.5 0");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (!cube) return;
+    const FrameProfile before = ed.frame_profile_totals();
+    const Vec3 wp = cube->world_matrix().point(cube->get<MeshFilter>()->mesh->positions[0]);
+    r34_gizmo_drag_x(ed, wp, 50);
+    const FrameProfile after = ed.frame_profile_totals();
+    const uint64_t updates = after.gpu_mesh_updates - before.gpu_mesh_updates, uploads = after.gpu_mesh_uploads - before.gpu_mesh_uploads;
+    std::printf("    the drag: %llu views on the GPU, %llu in-place updates, %llu whole uploads (%s)\n",
+                (unsigned long long)(after.gpu_views - before.gpu_views), (unsigned long long)updates, (unsigned long long)uploads,
+                ed.gpu_view_status().c_str());
+    CHECK(after.gpu_views > before.gpu_views);
+    CHECK(updates >= 2);
+    CHECK(uploads <= 2);  // (at most the cube's two caches once: the drag's first frame)
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views: Viewport Device is kept in the prefs, and Auto stays on the CPU when BLENDITY_VIEWPORT_DEVICE=cpu", [&] {
+    const std::string prefs = fs::join(test_dir(), "r122_prefs.txt");
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(prefs), ec);
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.command("viewport device gpu");
+      CHECK(ed.viewport_device() == 2);
+    }
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.load_prefs_for_test();
+      CHECK(ed.viewport_device() == 2);
+      ed.command("viewport device auto");
+      CHECK(ed.viewport_device() == 0);
+      CHECK(ed.gpu_view_status() == "CPU (Viewport Device)");  // (the tests pin Auto to the CPU)
+    }
+  });
+  test("gpu views: the editor's own lighting (Scene lighting off) and a mirrored object look the same on the GPU as on the CPU", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->set_local_scale({-1.0f, 1.0f, 1.0f});  // (mirrored: its faces inside out, culled the other way)
+    double mean = 0, within3 = 0;
+    std::vector<uint32_t> cpu = r122_views(ed, 1), gpu = r122_views(ed, 2);  // (in this order: the device stays GPU)
+    r122_compare(cpu, gpu, mean, within3);
+    std::printf("    a mirrored Cube: mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, within3 * 100);
+    CHECK(mean < 1.0 && within3 >= 0.99);
+    r34_toolbar_click(ed, 0);  // Scene lighting off: the headlight and the default gradient
+    r34_steps(ed, 2);
+    cpu = r122_views(ed, 1);
+    gpu = r122_views(ed, 2);
+    r122_compare(cpu, gpu, mean, within3);
+    std::printf("    the editor's lighting: mean difference %.3f / 255, %.2f %% within 3 / 255 (%s)\n", mean, within3 * 100, ed.gpu_view_status().c_str());
+    CHECK(mean < 1.0 && within3 >= 0.99);
+    CHECK(ed.gpu_view_reason().empty());
+    ed.viewport_device_for_test(1);
   });
 }

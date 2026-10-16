@@ -811,6 +811,11 @@ OpenImageDenoise, Cycles' denoiser, is a neural network that turns a few noisy s
 @ blender/intern/cycles/integrator/denoiser_oidn.cpp, blender/intern/cycles/integrator/denoiser_oidn_gpu.cpp
 ? Why are the GPU's images kept in its own memory rather than shared with the CPU? | Shared ("managed") memory moves across the PCIe bus page by page while the network reads it. A 1080p denoise took 220 ms that way and 15 ms with the images in the card's memory.
 ! cmd:set Render.DenoiseDevice GPU; engine path; render; window Render | Render the Main Camera and denoise it on the GPU
+# The views on the GPU
+The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (Preferences > Viewport Device). They use the same formulas as the CPU's views: the same lighting, the same shadow lookups, even the same colour table for AgX and the other OpenColorIO views. So the two pictures agree to within a step of 255. The GPU draws the frame in about a third of a millisecond; reading it back into the editor's canvas takes a few more. The overlays, gizmos and picking run on the CPU as before. Anything the GPU doesn't draw yet - textures, toon materials, GI, camera filters - draws on the CPU, and Preferences tells you why.
+? Why does an Edit Mode drag on a huge mesh barely get faster on the GPU? | Most of that frame is the CPU's own work: moving the render mesh, drawing the cage's edges and dots, and sending the mesh to the card. The views' drawing was only part of it.
+! cmd:viewport device gpu | Draw the views on the GPU
+! cmd:viewport device cpu | Draw the views on the CPU again
 )"},
     {"Points, Lines, N-gons and Booleans", "Building from a vertex, SketchUp faces, combining solids", R"(
 Blender can start a model from a single vertex. Ctrl+E (Blender's E) on a vertex grows an edge: a "wire" or loose edge that no face uses yet. Ctrl+E on that edge grows a face. Blendity keeps those wire edges in the mesh (Mesh::loose_edges), saves them, and lets the Screw modifier sweep them into a solid.

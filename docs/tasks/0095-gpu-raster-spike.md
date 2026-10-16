@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0013 (amended with the result)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/86
 
 ## Goal
 ADR 0013's spike (task 0015) said no-go to a GPU viewport. But it stood in for a GPU view with the path tracer: one

@@ -2619,6 +2619,18 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
   u.label({r2.x, r2.y, u.px(150), r2.h}, "Redraw");
   if (u.combo(u.id("pref_redraw"), {r2.x + u.px(150), r2.y + u.px(2), u.px(200), r2.h - u.px(4)}, ri, kRedraw, 2)) always_redraw_ = ri == 1;
   u.tooltip("When something changes: idle costs nothing (the default). Always: a steady rate at the cap even when idle.");
+  /* Task 0096: where the views' 3D is drawn. */
+  static const char *kDevices[] = {"Auto (GPU when there is one)", "CPU", "GPU"};
+  int di = viewport_device_;
+  Recti r3 = row(u.row_h() + u.px(4));
+  u.label({r3.x, r3.y, u.px(150), r3.h}, "Viewport Device");
+  if (u.combo(u.id("pref_viewdev"), {r3.x + u.px(150), r3.y + u.px(2), u.px(220), r3.h - u.px(4)}, di, kDevices, 3)) {
+    set_viewport_device(di);
+    save_prefs();
+  }
+  u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster; anything it doesn't draw\n"
+            "yet (textures, toon, GI, camera filters...) draws on the CPU, as before. F12 renders stay on the CPU.");
+  text("Now: " + gpu_view_status(), u.theme.text_dim);
   /* Measured: the last 60 frames' cost. */
   float avg = 0, worst = 0;
   const size_t n = std::min<size_t>(60, frame_history_.size());
@@ -2640,7 +2652,9 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
          u.theme.text_dim);
   const uint32_t dim = u.theme.text_dim;
   text("What it costs:", u.theme.text);
-  text("- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.", dim);
+  text(gpu_view_ ? "- The views' 3D is drawn on the GPU; the UI, overlays and picking on the CPU."
+                 : "- Every frame is drawn on the CPU, so a bigger window, more triangles or Shaded views cost more per frame.",
+       dim);
   if (max_fps_ == 0)
     text("- Unlimited: a CPU core runs flat out while anything moves; fans and battery suffer, and frames beyond the monitor's refresh rate are never seen.", dim);
   else if (max_fps_ > 144)

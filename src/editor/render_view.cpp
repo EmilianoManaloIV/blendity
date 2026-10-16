@@ -358,7 +358,7 @@ const ShadowMap *Editor::shadow_for_view(ShadowMap &m) const {
   return m.valid() ? &m : nullptr;
 }
 
-const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env) {
+const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env, bool frame_only) {
   int li = -1;
   for (size_t i = 0; i < env.lights.size(); i++)
     if (env.lights[i].type == RenderLight::Directional) { li = (int)i; break; }
@@ -422,6 +422,14 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     const Vec3 h(rr / std::sqrt(3.0f));
     frame.add(cs - h);
     frame.add(cs + h);
+  }
+  if (frame_only) {
+    /* The GPU views render the map themselves from its frame (task 0096): nothing drawn here, nothing cached. */
+    gpu_shadow_.depth.clear();
+    gpu_shadow_.size = frame.valid() && !caster_ptrs.empty() ? res : 0;
+    if (gpu_shadow_.size) gpu_shadow_.view_proj = shadow_view_proj(dir, frame);
+    gpu_shadow_.bias = ShadowMap{}.bias;
+    return shadow_for_view(gpu_shadow_);
   }
   mixer(key, &dir, sizeof(Vec3));
   mixer(key, &res, sizeof(int));
@@ -499,8 +507,11 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   std::vector<DrawItem> items = collect_items(game, true);
-  if (scene_lights && scene_->render.shadows) {
-    if (const ShadowMap *sm = update_shadow_map(items, env)) {
+  /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
+  const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
+  const bool shadows = scene_lights && scene_->render.shadows;
+  if (shadows) {
+    if (const ShadowMap *sm = update_shadow_map(items, env, gpu_maybe)) {
       for (size_t i = 0; i < env.lights.size(); i++)
         if (env.lights[i].type == RenderLight::Directional) { env.shadow_light = (int)i; break; }
       env.shadow = sm;
@@ -559,7 +570,17 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);
-  r3d.begin(&rt, v, p, env, opt);
+  r3d.begin(&rt, v, p, env, opt);  // (also for the GPU: the overlays drawn next go through it)
+  if (gpu_maybe && gpu_view_draw(rt, v, p, eye, env, items, cam, scene_lights, filters, opt)) {
+    size_t tris = 0;
+    for (const DrawItem &it : items) tris += it.mesh ? it.mesh->tri_count() : 0;
+    r3d.note_submitted((int)items.size(), tris);
+    return;
+  }
+  if (gpu_maybe && env.shadow) {  // (the GPU couldn't after all: the CPU needs the map itself, not only its frame)
+    env.shadow = update_shadow_map(items, env);
+    r3d.begin(&rt, v, p, env, opt);
+  }
   Mat4 inv = (p * v).inverse();
   if (render_clear_override_on_) {  // a transparent F12's black / white pass (task 0035)
     r3d.clear(render_clear_override_);
@@ -973,6 +994,13 @@ void Editor::update_camera_focus() {
 }
 
 void Editor::start_final_render(bool preview, bool open_window) {
+  /* F12 and the Render window's preview draw on the CPU, the reference (the GPU is the interactive views'). */
+  struct KeepCpu {
+    bool &off;
+    bool was;
+    ~KeepCpu() { off = was; }
+  } keep_cpu{gpu_view_off_, gpu_view_off_};
+  gpu_view_off_ = true;
   const RenderSettings &rs = scene_->render;
   const int pct = preview ? std::max(1, rs.percent * rs.preview_percent / 100) : rs.percent;
   int w = std::max(16, rs.width * pct / 100), h = std::max(16, rs.height * pct / 100);

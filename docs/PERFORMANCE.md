@@ -10,6 +10,28 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## The views on the GPU (task 0096, ADR 0036)
+
+`blendity_stress --laptop --quality low --only editor_render`, rows with Viewport Device GPU (this machine's RTX 4070
+SUPER) beside the CPU's:
+
+| Laptop setting (`--laptop --quality low`), ms a frame, two runs | CPU | GPU (RTX 4070 SUPER) |
+|---|---|---|
+| moving an object | 16.63-16.85 | 4.05-4.10 |
+| playing | 20.58-22.07 | 5.61-6.78 |
+| Edit Mode: Move-gizmo drag, 50k faces | 43.68-46.57 | 24.68-25.05 |
+
+- **The views' cost goes:** a moved object's three views take 2.6-3.7 ms a frame in the GPU path, rendering and
+  reading back included. A view the GPU draws renders its own shadow map; the CPU only fits its frame.
+- **What is left is the CPU's:** the UI, the overlays, the draw items and the shadow map's fit.
+- **What is left of the Edit Mode drag (25 ms):**
+  - the render mesh moved in place (about 6.8 ms);
+  - the cage overlays (6.5 ms);
+  - the draw items;
+  - the sphere's caches sent to the card (the in-place update sends every vertex).
+
+  Next: send only the moved vertices, and draw the cage on the GPU (route (B)).
+
 ## A GPU view, spike 2 (task 0095, ADR 0013 amended)
 
 `blendity_stress --only gpu_raster`, 1080p, the editor scene's content, two runs:
