@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** none needed (the Blender-ideas plan; the user chose "Catch up on release")
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/93
 
 ## Goal
 Dragging in the Scene view (a gizmo, G / R / S, an Edit Mode drag, a slider) also redraws the Game view and the Camera

@@ -87,7 +87,9 @@ layout(std430, binding = 15) readonly buffer TlasOrder { uint tlas_obj[]; };  //
 #ifdef USE_RAY_QUERY
 layout(binding = 16) uniform accelerationStructureEXT tlas;
 #endif
-layout(push_constant) uniform Push { int sample_index; } PC;
+/* Task 0105: a dispatch traces `sample_count` samples from `sample_index` on, summed in registers and written once
+ * (each sample's random numbers are its own, as before: the same picture, a fraction of the memory traffic). */
+layout(push_constant) uniform Push { int sample_index; int sample_count; } PC;
 
 /* ---------------------------------------------------------------- utils */
 uint pcg_hash(uint v) {
@@ -810,11 +812,13 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
   return L;
 }
 
+)GLSL",
+R"GLSL(
 void main() {
   ivec2 px = ivec2(gl_GlobalInvocationID.xy);
   int W = P.size.x, H = P.size.y;
   if (px.x >= W || px.y >= H) return;
-  int s = PC.sample_index;
+  int count = max(PC.sample_count, 1);
   if (P.env_i.z != 0) {
     /* Baking (task 0018): one point per invocation, its origin in Aux [0, n) and its normal (mode 1:
      * cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
@@ -822,46 +826,69 @@ void main() {
     int i = px.y * W + px.x;
     if (i >= P.env_i.w) return;
     vec3 o = aux[i].xyz, nd = aux[W * H + i].xyz;
-    uint brng = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + uint(s) * 6271u + 7u);  // cam_pos.w: the batch's first point
-    vec3 d = nd;
-    if (P.env_i.z == 1) {
-      float r1 = rnd(brng), r2 = rnd(brng), r = sqrt(r1), phi = 6.28318530718 * r2;
-      vec3 t, b;
-      onb(nd, t, b);
-      d = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
+    vec4 sum = vec4(0.0);
+    for (int k = 0; k < count; k++) {
+      int s = PC.sample_index + k;
+      uint brng = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + uint(s) * 6271u + 7u);  // cam_pos.w: the batch's first point
+      vec3 d = nd;
+      if (P.env_i.z == 1) {
+        float r1 = rnd(brng), r2 = rnd(brng), r = sqrt(r1), phi = 6.28318530718 * r2;
+        vec3 t, b;
+        onb(nd, t, b);
+        d = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
+      }
+      vec3 balb, bnrm;
+      float bdep;
+      float bid;
+      vec3 bc = trace(o, d, brng, balb, bnrm, bdep, bid, false);
+      if (any(isnan(bc)) || any(isinf(bc))) bc = vec3(0.0);
+      sum += vec4(bc, dot(bnrm, bnrm) > 0.25 ? 1.0 : 0.0);
     }
-    vec3 balb, bnrm;
-    float bdep;
-    float bid;
-    vec3 bc = trace(o, d, brng, balb, bnrm, bdep, bid, false);
-    if (any(isnan(bc)) || any(isinf(bc))) bc = vec3(0.0);
-    accum[i] += vec4(bc, dot(bnrm, bnrm) > 0.25 ? 1.0 : 0.0);
+    accum[i] += sum;
     return;
   }
-  uint rng = pcg_hash(uint(px.y * W + px.x) * 9781u + uint(s) * 6271u + 1u);
-  float jx = rnd(rng), jy = rnd(rng);
-  float nx = 2.0 * (float(px.x) + jx) / float(W) - 1.0, ny = 1.0 - 2.0 * (float(px.y) + jy) / float(H);
-  vec4 a = P.inv_vp * vec4(nx, ny, 0.0, 1.0), b = P.inv_vp * vec4(nx, ny, 1.0, 1.0);
-  vec3 pa = a.xyz / a.w, pb = b.xyz / b.w;
-  vec3 ro = pa, rd = normalize(pb - pa);
-  if (P.lens.x > 0.0) {
-    /* Thin lens, as PathTracer::render: start on the aperture, aim at the focus plane. */
-    float lu = rnd(rng), lv = rnd(rng);
-    vec2 l = sample_aperture(lu, lv, int(P.lens.z), P.lens.w) * P.lens.x;
-    float t = (P.lens.y - dot(pa - P.cam_pos.xyz, P.cam_fwd.xyz)) / max(1e-6, dot(rd, P.cam_fwd.xyz));
-    vec3 focus = pa + rd * t;
-    ro = pa + P.cam_right.xyz * l.x + P.cam_up.xyz * l.y;
-    rd = normalize(focus - ro);
-  }
-  vec3 alb, nrm;
-  float dep, hit_id;
-  vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, true);
-  if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
   int i = px.y * W + px.x;
-  accum[i] = vec4(accum[i].xyz + c, hit_id > 0.0 ? dep : accum[i].w);  // w: the last hitting sample's first-hit distance
-  aux[i] = vec4(aux[i].xyz + alb, hit_id);  // w: the first hit's object index + 1 (the last sample's; 0 = sky)
-  aux[W * H + i] += vec4(nrm, dep);
-  if (P.background.w > 1.5) aux[2 * W * H + i] += vec4(hit_id > 0.0 ? 1.0 : 0.0, 0.0, 0.0, 0.0);  // coverage: a transparent film's alpha
+  vec3 csum = vec3(0.0), asum = vec3(0.0);
+  vec4 nsum = vec4(0.0);
+  float cover = 0.0, last_dep = -1.0, last_id = 0.0;
+  bool any_hit = false;
+  for (int k = 0; k < count; k++) {
+    int s = PC.sample_index + k;
+    uint rng = pcg_hash(uint(px.y * W + px.x) * 9781u + uint(s) * 6271u + 1u);
+    float jx = rnd(rng), jy = rnd(rng);
+    float nx = 2.0 * (float(px.x) + jx) / float(W) - 1.0, ny = 1.0 - 2.0 * (float(px.y) + jy) / float(H);
+    vec4 a = P.inv_vp * vec4(nx, ny, 0.0, 1.0), b = P.inv_vp * vec4(nx, ny, 1.0, 1.0);
+    vec3 pa = a.xyz / a.w, pb = b.xyz / b.w;
+    vec3 ro = pa, rd = normalize(pb - pa);
+    if (P.lens.x > 0.0) {
+      /* Thin lens, as PathTracer::render: start on the aperture, aim at the focus plane. */
+      float lu = rnd(rng), lv = rnd(rng);
+      vec2 l = sample_aperture(lu, lv, int(P.lens.z), P.lens.w) * P.lens.x;
+      float t = (P.lens.y - dot(pa - P.cam_pos.xyz, P.cam_fwd.xyz)) / max(1e-6, dot(rd, P.cam_fwd.xyz));
+      vec3 focus = pa + rd * t;
+      ro = pa + P.cam_right.xyz * l.x + P.cam_up.xyz * l.y;
+      rd = normalize(focus - ro);
+    }
+    vec3 alb, nrm;
+    float dep, hit_id;
+    vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, true);
+    if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+    csum += c;
+    asum += alb;
+    nsum += vec4(nrm, dep);
+    if (hit_id > 0.0) {
+      cover += 1.0;
+      any_hit = true;
+      last_dep = dep;
+    }
+    last_id = hit_id;
+  }
+  /* One read and write of each plane for the dispatch's samples. */
+  vec4 acc = accum[i];
+  accum[i] = vec4(acc.xyz + csum, any_hit ? last_dep : acc.w);  // w: the last hitting sample's first-hit distance
+  aux[i] = vec4(aux[i].xyz + asum, last_id);  // w: the first hit's object index + 1 (the last sample's; 0 = sky)
+  aux[W * H + i] += nsum;
+  if (P.background.w > 1.5) aux[2 * W * H + i] += vec4(cover, 0.0, 0.0, 0.0);  // coverage: a transparent film's alpha
 }
 )GLSL",
 };

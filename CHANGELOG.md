@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 130): GPU Compute traces several samples a dispatch; OptiX measured again (task 0105, ADR 0037 note)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed**
+- **The GPU path tracer's kernel traces up to 8 samples a dispatch,** each with its own random numbers as before,
+  summed in registers. The accumulation and the denoiser's albedo, normal and depth planes (and a transparent film's
+  coverage) are read and written once for them, instead of once a sample. Baking too.
+- **GPU Compute, `--only gpu_optix`, samples a second:**
+  - RTX 4070 SUPER 538-574 -> 592-611;
+  - RTX 3060 Ti 279-281 -> 284-286.
+
+  A small gain: the memory traffic was a smaller share of a sample than estimated.
+- **OptiX measured again:** 1.62-1.69x on the 4070 SUPER, 2.07-2.12x on the 3060 Ti. Still over ADR 0037's 1.5x, so
+  still a go as an upper bound. A full OptiX device (with GPU Compute's shading) is the user's decision, as a task of
+  its own.
+- The kernel's last source part is split before `main()` (MSVC's 16 KB literal limit was near).
+
+**Checked**
+- New test (round 130): eleven samples in one call (a dispatch of 8, then 3, from sample 3) equal eleven one-sample
+  calls, to 2e-7: colour, the last hit's distance and id, albedo, normal, depth and coverage.
+- The GPU path tracer's tests as they were (225 GPU checks).
+- Unit checks: Windows 10,555, 0 failed (738 tests); the whole suite in render-cache verify mode: 10,556,
+  0 failed, 0 stale pictures. Linux with libraries: 10,288, 0 failed. Sanitizer build: 10,180, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems; `pathtracer` as
+  before.
+
+**Review** (Opus code-reviewer). No correctness bugs: the accumulation's and the planes' meanings are kept, each
+sample keeps its own seed, the pipeline cache is keyed on the kernel's source, and a submission stays near 100 ms.
+Taken: the source split, the test widened to a dispatch's remainder, a non-zero first sample and the coverage plane.
+
 ## 2026-10-16 (round 128): the other views catch up on release, and cheaper frames while moving (tasks 0103, 0104, ADR 0039)
 
 **Asked:** pass 11 continued ("Continue all remaining tasks"). In the Blender-ideas plan the user chose "Catch up on

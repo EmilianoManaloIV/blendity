@@ -52,3 +52,21 @@ whether OptiX would be faster enough to justify a second GPU kernel.
     CPU and Vulkan kernels are now.
 - **A build with OptiX needs the two SDKs on that machine.** Such a build ships only Blendity's own files. It runs
   without NVIDIA's software (the OptiX path then reports no device).
+
+## Note (task 0105): measured again after GPU Compute's own per-sample costs were cut
+- GPU Compute now traces up to 8 samples a dispatch, summed in registers, and writes the accumulation and the
+  denoiser's planes once for them (as the OptiX kernel does).
+- `--only gpu_optix`, two runs each, before / after:
+
+  | Card | GPU Compute before | GPU Compute after | OptiX | OptiX vs GPU Compute after |
+  |---|---|---|---|---|
+  | RTX 4070 SUPER | 538 / 574 | 592 / 611 | 993 / 1000 | 1.62x / 1.69x |
+  | RTX 3060 Ti | 279 / 281 | 284 / 286 | 593 / 602 | 2.07x / 2.12x |
+
+- The memory traffic was a smaller part of GPU Compute's sample than estimated (at most +5 % on the 4070 SUPER, +2 % on
+  the 3060 Ti; the "before" runs had the Linux checks running in WSL beside them). The rest of the gap is the work
+  itself: GPU Compute's GGX with MIS, smooth normals, textures and Russian roulette, against OptiX's Lambert with flat
+  normals, and OptiX's own traversal.
+- **Verdict, in this ADR's terms:** OptiX's lead stays above 1.5x on both cards, so it is still a go as an upper
+  bound. A full OptiX device (the same shading as GPU Compute, then measured again) is the user's decision, as a
+  task of its own.

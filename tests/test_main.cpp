@@ -31259,4 +31259,66 @@ static void round81_tests() {
     std::printf("    %llu stale pictures\n", (unsigned long long)(Editor::render_cache_mismatches_all() - stale0));
     CHECK(Editor::render_cache_mismatches_all() == stale0);
   });
+  /* ---------------------------------------------------------------- round 130: GPU Compute, several samples a dispatch (task 0105) */
+  test("gpu path tracer: eleven samples in one call (a dispatch of 8, then 3) add up to what eleven one-sample calls do, colour, albedo, normal, depth and coverage (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const int W = 96, H = 64;
+    auto ball = primitives::uv_sphere(0.8f, 24, 16);
+    auto floor = primitives::plane(10.0f, 1);
+    MaterialPtr red = make_material("red", {0.8f, 0.2f, 0.1f}), grey = make_material("grey", {0.7f, 0.7f, 0.7f});
+    red->roughness = 0.3f;
+    std::vector<MaterialPtr> mr = {red}, mg = {grey};
+    std::vector<PTObject> objs = {{&ball->render_mesh_tangents(), Mat4::translate({0, 0.8f, 0}), &mr},
+                                  {&floor->render_mesh_tangents(), Mat4::identity(), &mg}};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
+    Environment env;
+    PathTracer pt;
+    PTSettings st;
+    st.use_cpu = false;
+    st.denoise = false;
+    pt.set_settings(st);
+    pt.build(objs, {sun}, env);
+    const Mat4 view = Mat4::look_at({0, 2, -4}, {0, 0.6f, 0}, {0, 1, 0}), proj = Mat4::perspective(50 * kDeg2Rad, W / (float)H, 0.1f, 100.0f);
+    pt.set_camera(view, proj, W, H);
+    gpu::Scene scene;
+    CHECK(pt.build_gpu_scene_fit(scene, 4096));
+    /* The frame, as PathTracer::render fills it in (a pinhole camera: no lens). */
+    const Mat4 inv = (proj * view).inverse();
+    std::memcpy(scene.params.inv_vp, inv.m, 64);
+    scene.params.cam_pos[0] = 0, scene.params.cam_pos[1] = 2, scene.params.cam_pos[2] = -4;
+    scene.params.size[0] = W, scene.params.size[1] = H;
+    scene.params.background[3] = 2.0f;  // (a transparent film: the coverage plane is summed too)
+    std::string err;
+    std::unique_ptr<gpu::Renderer> r = gpu::Renderer::create(0, true, &err);
+    if (!r) {
+      std::printf("    skipped: %s\n", err.c_str());
+      return;
+    }
+    CHECK(r->upload(scene, &err));
+    auto planes = [&](bool at_once) {
+      r->set_params(scene.params);  // (clears)
+      if (at_once) CHECK(r->render(3, 11, &err));  // (from sample 3: the samples' own seeds, not the call's)
+      else
+        for (int k = 0; k < 11; k++) CHECK(r->render(3 + k, 1, &err));
+      std::vector<float> acc, alb, nd, cov;
+      r->download_accum(acc);
+      r->download_aux(alb, nd, &cov);
+      for (const std::vector<float> *v : {&alb, &nd, &cov}) acc.insert(acc.end(), v->begin(), v->end());
+      return acc;
+    };
+    const std::vector<float> once = planes(true), each = planes(false);
+    CHECK(once.size() == each.size() && !once.empty());
+    double worst = 0, total = 0;
+    for (size_t i = 0; i < once.size() && i < each.size(); i++) {
+      worst = std::max(worst, (double)std::fabs(once[i] - each[i]) / std::max(1.0, (double)std::fabs(each[i])));
+      total += std::fabs(each[i]);
+    }
+    std::printf("    %zu sums: worst difference %.2e (relative), their total %.1f\n", once.size(), worst, total);
+    CHECK(total > 100.0);  // (something was traced)
+    CHECK(worst < 1e-4);
+  });
 }

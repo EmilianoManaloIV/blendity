@@ -508,9 +508,12 @@ class VulkanRenderer final : public Renderer {
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
     const uint32_t gx = (uint32_t)(scene_params_.size[0] + 7) / 8, gy = (uint32_t)(scene_params_.size[1] + 7) / 8;
-    for (int i = 0; i < count; i++) {
-      int s = first + i;
-      f_.vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &s);
+    /* Task 0105: up to kSamplesPerDispatch samples a dispatch, summed in registers: the accumulation and the
+     * denoiser's planes are read and written once for them, not once a sample (~200 MB a sample at 1080p). */
+    constexpr int kSamplesPerDispatch = 8;
+    for (int i = 0; i < count; i += kSamplesPerDispatch) {
+      const int pc[2] = {first + i, std::min(kSamplesPerDispatch, count - i)};
+      f_.vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, pc);
       f_.vkCmdDispatch(cmd_, gx, gy, 1);
       VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
       mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -710,7 +713,7 @@ class VulkanRenderer final : public Renderer {
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
     f_.vkCreateDescriptorSetLayout(dev_, &dli, nullptr, &set_layout_);
-    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};  // the first sample and how many (task 0105)
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &set_layout_;

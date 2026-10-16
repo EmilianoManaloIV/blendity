@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0039 (new): a view's picture may differ from the exact one only while you interact
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/93
 
 ## Goal
 On a computer without a GPU the views draw on the CPU, and a drag or an orbit redraws the Scene view every frame at full

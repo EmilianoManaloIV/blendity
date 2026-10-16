@@ -82,6 +82,22 @@ overlay, drawn on the CPU (task 0100 moves it to the GPU).
   reflection.
 - A Sky's map is made anew when its sun changes: the card lets the old one go at once.
 
+**GPU Compute: several samples a dispatch (task 0105):**
+
+| `--only gpu_optix`, samples a second (two runs) | Before | After | OptiX |
+|---|---|---|---|
+| RTX 4070 SUPER, GPU Compute | 538 / 574 | 592 / 611 | 993 / 1000 (1.62x / 1.69x) |
+| RTX 3060 Ti, GPU Compute | 279 / 281 | 284 / 286 | 593 / 602 (2.07x / 2.12x) |
+
+- The kernel traces up to 8 samples a dispatch, summed in registers; the accumulation and the denoiser's planes are
+  read and written once for them instead of once a sample. The picture is the same: eleven samples in one call equal
+  eleven one-sample calls to 2e-7.
+- The gain is small, and partly the machine: the "before" runs were taken while the Linux checks ran in WSL. The memory
+  traffic was a smaller share of a sample than the estimate (about 200 MB a sample at
+  1080p) suggested. The scheduler's sample counts are rarely multiples of 8; the last dispatch of a call takes the
+  remainder.
+- OptiX stays over 1.5x on both cards (ADR 0037's note): a full OptiX device is the user's call.
+
 **The other views catch up on release, and cheaper CPU frames while moving (tasks 0103, 0104, ADR 0039):**
 
 | Laptop setting, views on the CPU | Before | Now |
