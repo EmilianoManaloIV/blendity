@@ -17,9 +17,7 @@
 #include <thread>
 
 #if defined(BL_WITH_VULKAN)
-#  define VK_NO_PROTOTYPES
-#  include <vulkan/vulkan.h>
-#  include <shaderc/shaderc.h>
+#  include "gpu_vk.h"
 #  include "gpu_kernel.h"
 #  ifdef _WIN32
 #    ifndef WIN32_LEAN_AND_MEAN
@@ -111,6 +109,7 @@ struct VkGlobal {
   std::vector<DeviceInfo> infos;
   std::string error;
   bool tried = false;
+  bool surfaces = false;  // VK_KHR_surface and the platform's surface extension are on (task 0095)
 };
 
 VkGlobal &G() {
@@ -190,6 +189,17 @@ bool init_global() {
     flags |= 0x00000001;  // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
   }
   if (has_ext(exts, "VK_KHR_get_physical_device_properties2")) enable.push_back("VK_KHR_get_physical_device_properties2");
+  /* Window surfaces (task 0095: a GPU view shown through a swapchain). Asked for only where both are there. */
+#ifdef _WIN32
+  const char *platform_surface = "VK_KHR_win32_surface";
+#else
+  const char *platform_surface = "VK_KHR_xlib_surface";
+#endif
+  if (has_ext(exts, "VK_KHR_surface") && has_ext(exts, platform_surface)) {
+    enable.push_back("VK_KHR_surface");
+    enable.push_back(platform_surface);
+    g.surfaces = true;
+  }
   VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
   app.pApplicationName = "Blendity";
   app.pEngineName = "Blendity";
@@ -1028,13 +1038,14 @@ std::unique_ptr<Renderer> Renderer::create(int index, bool hardware_rt, std::str
 namespace {
 
 /* GLSL to SPIR-V, cached in memory per source and on disk like the path tracer's kernel. */
-std::vector<uint32_t> compile_compute(const std::string &src, std::string *error) {
+std::vector<uint32_t> compile_glsl(const std::string &src, shaderc_shader_kind kind, std::string *error) {
   static std::mutex &m = *new std::mutex;
   static std::map<uint64_t, std::vector<uint32_t>> &mem = *new std::map<uint64_t, std::vector<uint32_t>>;
   uint64_t key = 1469598103934665603ull;
   for (char c : src) key = (key ^ (uint8_t)c) * 1099511628211ull;
   const char *opts = "compute v1 vk1.2 spv1.4 performance";
   for (const char *p = opts; *p; p++) key = (key ^ (uint8_t)*p) * 1099511628211ull;
+  if (kind != shaderc_compute_shader) key = (key ^ (uint64_t)(kind + 1)) * 1099511628211ull;  // (the compute key as before)
   std::lock_guard<std::mutex> lock(m);
   std::vector<uint32_t> &out = mem[key];
   if (!out.empty()) return out;
@@ -1055,9 +1066,9 @@ std::vector<uint32_t> compile_compute(const std::string &src, std::string *error
   shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
   shaderc_compile_options_set_target_spirv(o, shaderc_spirv_version_1_4);
   shaderc_compile_options_set_optimization_level(o, shaderc_optimization_level_performance);
-  shaderc_compilation_result_t r = shaderc_compile_into_spv(c, src.data(), src.size(), shaderc_compute_shader, "compute.comp", "main", o);
+  shaderc_compilation_result_t r = shaderc_compile_into_spv(c, src.data(), src.size(), kind, "shader.glsl", "main", o);
   if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
-    if (error) *error = std::string("GPU compute kernel failed to compile: ") + shaderc_result_get_error_message(r);
+    if (error) *error = std::string("A GPU shader failed to compile: ") + shaderc_result_get_error_message(r);
   }
   else {
     const size_t n = shaderc_result_get_length(r) / 4;
@@ -1075,6 +1086,8 @@ std::vector<uint32_t> compile_compute(const std::string &src, std::string *error
   if (out.empty()) mem.erase(key);
   return copy;
 }
+
+std::vector<uint32_t> compile_compute(const std::string &src, std::string *error) { return compile_glsl(src, shaderc_compute_shader, error); }
 
 class VulkanCompute final : public Compute {
  public:
@@ -1345,6 +1358,17 @@ class VulkanCompute final : public Compute {
 };
 
 }  // namespace
+
+namespace vk {
+PFN_vkGetInstanceProcAddr get_instance_proc_addr() { return available() ? G().f.vkGetInstanceProcAddr : nullptr; }
+VkInstance instance() { return available() ? G().instance : VK_NULL_HANDLE; }
+VkPhysicalDevice physical(int index) {
+  if (!available() || index < 0 || index >= (int)G().phys.size()) return VK_NULL_HANDLE;
+  return G().phys[(size_t)index];
+}
+bool surfaces() { return available() && G().surfaces; }
+std::vector<uint32_t> compile(const std::string &glsl, shaderc_shader_kind kind, std::string *error) { return compile_glsl(glsl, kind, error); }
+}  // namespace vk
 
 std::unique_ptr<Compute> Compute::create(int index, const std::string &glsl, std::string *error) {
   if (!available() || index < 0 || index >= (int)G().infos.size()) {
