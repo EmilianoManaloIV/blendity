@@ -159,12 +159,13 @@ case "$TARGET" in
 esac
 
 if [ "$USE_LIBS" = 1 ]; then
-  # Ship the shared libraries (release only: no debug, GPU-device or Python files).
+  # Ship the shared libraries (release only: no debug, SYCL-device or Python files). OpenImageDenoise's CUDA and HIP
+  # modules go too (task 0094), but never a Git LFS pointer a clone didn't fetch: files over 4 KB (or links).
   mkdir -p "$OUT/lib"
   for d in $LIBDIRS imath openjph dpcpp; do
     [ -d "$LIBDIR/$d/lib" ] || continue
-    find "$LIBDIR/$d/lib" -maxdepth 1 -name "*.$SOEXT*" ! -name "*_d.*" ! -name "*debug*" ! -name "*_cuda*" \
-      ! -name "*_hip*" ! -name "*_sycl*" -exec cp -a {} "$OUT/lib/" \;
+    find "$LIBDIR/$d/lib" -maxdepth 1 -name "*.$SOEXT*" ! -name "*_d.*" ! -name "*debug*" ! -name "*_sycl*" \
+      \( -type l -o -size +4k \) -exec cp -a {} "$OUT/lib/" \;
   done
   # Linux: Blender's libraries need a C++ runtime as new as the compiler they were built with (GCC 14's); the one this
   # build linked travels in lib/ too, so the program runs on a system whose own is older (an AppImage on Ubuntu 22.04).

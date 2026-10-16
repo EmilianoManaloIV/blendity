@@ -74,6 +74,10 @@ struct SurfaceSample {
 };
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
+/* Whether a material is the same at every point of a surface but for its normal (task 0088): no textures, no
+ * procedural, no axis mapping. Then evaluate_material gives the same sample whatever the point, with the point's
+ * normal: the rasterizer evaluates it once per triangle. */
+bool material_uniform(const Material &m, const Material::Resolved &tx);
 /* The same with the material's textures already resolved: the rasterizer resolves each material once per
  * flush (Material::textures() checks a version and an atomic generation on every call) and shades through
  * this; the path tracer keeps the one above. */

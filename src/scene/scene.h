@@ -1272,6 +1272,7 @@ struct RenderSettings {
   float clamp_indirect = 10.0f;
   bool denoise = true;
   int denoiser = 0;           // 0 OpenImageDenoise (when built with it), 1 A-Trous
+  int denoise_device = 0;     // task 0094: OpenImageDenoise's device: 0 Auto (a GPU when there is one), 1 CPU, 2 GPU
   bool use_embree = true;     // Embree ray tracing (when built with it)
   bool path_guiding = false;  // OpenPGL path guiding (when built with it)
   int device = 0;             // 0 CPU, 1 GPU Compute, 2 GPU + CPU by speed (Cycles: Render Properties > Device)
