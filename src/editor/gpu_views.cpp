@@ -103,12 +103,14 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh) {
   return in;
 }
 
+gpu::RasterVertex raster_vertex(const RenderMesh &rm, size_t i) {
+  const Vec3 p = rm.positions[i], n = i < rm.normals.size() ? rm.normals[i] : Vec3(0, 1, 0);
+  return {{p.x, p.y, p.z}, {n.x, n.y, n.z}};
+}
+
 std::vector<gpu::RasterVertex> raster_vertices(const RenderMesh &rm) {
   std::vector<gpu::RasterVertex> v(rm.positions.size());
-  for (size_t i = 0; i < v.size(); i++) {
-    const Vec3 p = rm.positions[i], n = i < rm.normals.size() ? rm.normals[i] : Vec3(0, 1, 0);
-    v[i] = {{p.x, p.y, p.z}, {n.x, n.y, n.z}};
-  }
+  for (size_t i = 0; i < v.size(); i++) v[i] = raster_vertex(rm, i);
   return v;
 }
 
@@ -258,7 +260,10 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   GpuMesh &e = gpu_meshes_[&rm];
   e.used = gpu_calls_;
   if (e.id >= 0 && rm.serial != 0 && e.serial == rm.serial) return e.id;
+  if (gpu_mesh_moved(e, rm, err)) return e.id;
+  err.clear();  // (a refused partial update falls back to the whole mesh)
   const std::vector<gpu::RasterVertex> v = raster_vertices(rm);
+  prof_.gpu_upload_bytes += (uint64_t)v.size() * sizeof(gpu::RasterVertex) + (uint64_t)rm.indices.size() * 4;
   if (e.id >= 0 && e.vertices == rm.positions.size() && e.indices == rm.indices.size() && gpu_view_->update_mesh(e.id, v, &rm.indices, &err)) {
     prof_.gpu_mesh_updates++;
     e.serial = rm.serial;
@@ -276,6 +281,24 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   gpu_mesh_bytes_ += e.bytes;
   prof_.gpu_mesh_uploads++;
   return e.id;
+}
+
+/* Task 0099: the card's copy is the render mesh this one moved from in place: only what the move changed goes up. */
+bool Editor::gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err) {
+  if (e.id < 0 || rm.moved_from == 0 || e.serial != rm.moved_from || e.vertices != rm.positions.size() || e.indices != rm.indices.size()) return false;
+  std::vector<gpu::RasterVertex> v;  // (just the moved ranges' vertices, one range after another)
+  for (const auto &r : rm.moved_vertices)
+    for (uint32_t i = r.first; i < r.first + r.second && i < rm.positions.size(); i++) v.push_back(raster_vertex(rm, i));
+  if (!gpu_view_->update_mesh_ranges(e.id, v, rm.moved_vertices, rm.indices, rm.moved_indices, &err)) return false;
+  uint64_t bytes = 0;
+  for (const auto &r : rm.moved_vertices) bytes += (uint64_t)r.second * sizeof(gpu::RasterVertex);
+  for (const auto &r : rm.moved_indices) bytes += (uint64_t)r.second * 4;
+  prof_.gpu_upload_bytes += bytes;
+  prof_.gpu_partial_bytes += bytes;
+  prof_.gpu_mesh_partial++;
+  prof_.gpu_mesh_updates++;
+  e.serial = rm.serial;
+  return true;
 }
 
 /* Meshes not drawn for a while leave the card, and the least recently drawn when they take more than the budget (a

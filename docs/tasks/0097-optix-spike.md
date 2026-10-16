@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0037
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/88
 
 ## Goal
 The user asked about CUDA and OptiX ("Denoiser first, then spike"), and installed the CUDA Toolkit 12.8 and the OptiX

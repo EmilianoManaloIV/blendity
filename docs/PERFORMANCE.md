@@ -10,6 +10,35 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 11: real scenes on the GPU, big meshes in Edit Mode, the CPU fallback, path-traced renders (tasks 0098-0106)
+
+The user asked "What should be more optimization gains?" and chose all four areas. Numbers are
+`--laptop --quality low --only editor_render`, two runs on a quiet machine.
+
+**Measured first (task 0098):**
+- A textured scene with a Sky world, the views set to the GPU: all 33 views drew on the CPU ("a Sky or HDRI world").
+  The world goes to the card first (task 0102), then textures (task 0101).
+- The 50k-face Edit Mode drag on the GPU is now broken down: mesh writes, the render mesh moved in place, draw items
+  (the cage), the GPU path's time a frame and the bytes sent to the card.
+
+**Edit Mode drags work out only what moved (task 0099):**
+
+| The 50k-face Move gizmo drag, a frame | Pass 10 | Now |
+|---|---|---|
+| Views on the CPU | 45 ms | 28.3 / 28.4 ms |
+| Views on the GPU | 25 ms | 15.1 / 14.3 ms |
+| Render meshes moved in place (both caches), CPU path | about 6.8 ms | 1.76 / 1.64 ms |
+| The same, GPU path | about 6.8 ms | 1.24 / 1.13 ms |
+| Sent to the card | every vertex and index of each drawn cache | under 1 KB |
+| The GPU path (send, render, read back) | 7.0-7.3 ms | 5.0 ms |
+
+The in-place update used to visit the whole mesh: every corner to find what moved, every face and corner normal,
+every corner written back. Now each step works on the moved faces and the vertices around them. A `NormalState` kept
+per render cache holds the face and corner normals of the last pass, and each sum runs in the full pass's order, so
+the result is the same to the bit (tested on 7 kinds of mesh, on Windows, Linux and under the sanitizers). The card
+gets only the changed vertex ranges and the re-split triangles. What is left in the GPU drag is mostly the cage
+overlay, drawn on the CPU (task 0100 moves it to the GPU).
+
 ## OptiX against GPU Compute (task 0097, ADR 0037)
 
 `blendity_stress --only gpu_optix` (1920x1080, 256 icospheres and a floor, Lambert-like materials, 64 samples, 4

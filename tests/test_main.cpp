@@ -30274,4 +30274,156 @@ static void round81_tests() {
     /* The same light on the same scene, a simpler shader (flat normals): close, not equal. */
     CHECK(b > 0 && std::fabs(a / b - 1.0) < 0.1);
   });
+  /* ---------------------------------------------------------------- round 124: normals only around what moved (task 0099) */
+  test("Edit Mode: on big meshes a drag works out normals only around the moved faces, and draws exactly what a rebuild draws (smooth, by angle, sharp edges and seams, flat)", [] {
+    /* Each triangle corner's position and normal bit for bit (as round 112 compares). */
+    auto same = [](const RenderMesh &a, const RenderMesh &b) {
+      if (a.indices.size() != b.indices.size() || a.tri_corner != b.tri_corner) return false;
+      for (size_t k = 0; k < a.indices.size(); k++) {
+        const uint32_t i = a.indices[k], j = b.indices[k];
+        if (std::memcmp(&a.positions[i], &b.positions[j], sizeof(Vec3)) || std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3))) return false;
+      }
+      return true;
+    };
+    std::vector<std::pair<std::string, MeshPtr>> meshes;
+    meshes.push_back({"smooth sphere", primitives::uv_sphere(1.0f, 32, 24)});
+    {
+      MeshPtr g = primitives::grid(4.0f, 24, 24);
+      for (Vec3 &p : g->positions) p.y = 0.3f * std::sin(p.x * 2.0f) * std::cos(p.z * 2.0f);
+      g->smooth = true;
+      g->smooth_angle = 30.0f;  // (smooth by angle)
+      meshes.push_back({"grid smooth by angle", g});
+    }
+    {
+      MeshPtr g = primitives::grid(4.0f, 24, 24);
+      for (Vec3 &p : g->positions) p.y = 0.2f * std::sin(p.x * 3.0f);
+      g->smooth = true;
+      for (uint32_t i = 0; i + 1 < 25; i++) g->sharp_edges.push_back(((uint64_t)std::min(i * 25 + 12, i * 25 + 37) << 32) | std::max(i * 25 + 12, i * 25 + 37));
+      g->seams.push_back(((uint64_t)300 << 32) | 301);
+      g->seams_sharp = true;
+      meshes.push_back({"grid with sharp edges and a seam", g});
+      MeshPtr a = std::make_shared<Mesh>(*g);  // (fans with an angle limit too)
+      a->smooth_angle = 30.0f;
+      meshes.push_back({"grid with sharp edges and smooth by angle", a});
+      MeshPtr d = std::make_shared<Mesh>(*g);  // (a quad with one vertex twice: an edge whose two ends are one vertex)
+      d->corner_verts[d->face_offsets[40] + 1] = d->corner_verts[d->face_offsets[40]];
+      meshes.push_back({"grid with a degenerate quad", d});
+    }
+    {
+      MeshPtr g = primitives::grid(4.0f, 24, 24);
+      for (Vec3 &p : g->positions) p.y = 0.3f * std::sin(p.x * 2.0f) * std::cos(p.z * 1.5f);
+      g->smooth = true;
+      for (size_t f = 0; f < g->face_count(); f += 3) g->set_face_smooth(f, false);  // (some faces flat among smooth ones)
+      meshes.push_back({"grid with flat and smooth faces", g});
+    }
+    {
+      MeshPtr g = primitives::uv_sphere(1.0f, 24, 16);
+      g->smooth = false;  // (nothing smooth: the shaded cache is the flat one)
+      meshes.push_back({"flat sphere", g});
+    }
+    uint32_t seed = 124;
+    auto rng = [&] { return (seed = seed * 1664525u + 1013904223u) >> 8; };
+    int cases = 0, mismatches = 0;
+    const MeshCounts c0 = mesh_counts();
+    for (auto &[name, base] : meshes) {
+      for (bool flat : {false, true}) {
+        MeshPtr m = std::make_shared<Mesh>(*base);
+        (void)m->render_mesh(flat);
+        for (int step = 0; step < 8; step++) {
+          for (int k = 0; k < 4; k++) {  // (a few vertices: a small share of the faces)
+            Vec3 &p = m->positions[rng() % m->positions.size()];
+            const float dy = (float)(rng() % 2001) / 20000.0f - 0.05f;
+            p.y += dy;
+          }
+          m->touch();
+          const RenderMesh &got = m->render_mesh(flat);
+          Mesh ref = *m;
+          ref.forget_caches();
+          cases++;
+          if (!same(got, ref.render_mesh(flat))) {
+            mismatches++;
+            std::printf("    %s, %s, step %d: differs from a rebuild\n", name.c_str(), flat ? "flat" : "as shaded", step);
+          }
+        }
+      }
+    }
+    const MeshCounts d = mesh_counts() - c0;
+    std::printf("    %d drag steps: %llu worked out only around what moved, %d differed from a rebuild\n", cases, (unsigned long long)d.partial_normals,
+                mismatches);
+    CHECK(mismatches == 0);
+    CHECK(d.partial_normals >= (uint64_t)cases / 2);  // (a step whose splits change rebuilds instead)
+  });
+  test("gpu views: an Edit Mode drag on a big mesh sends the card only what moved, and draws what the CPU draws (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 128, 96);  // (about 12k faces)
+    big->add<MeshRenderer>();
+    big->set_local_position({0.0f, 1.0f, 0.0f});
+    ed.command("select Big");
+    ed.command("edit vertex");
+    ed.command("vsel 4000");
+    ed.command("camera 0 15 5 0 1 0");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    const Mesh &m0 = *big->get<MeshFilter>()->mesh;
+    const Vec3 wp = big->world_matrix().point(m0.positions[4000]);
+    const uint64_t whole = (uint64_t)m0.render_mesh().positions.size() * sizeof(gpu::RasterVertex) + m0.render_mesh().indices.size() * 4;
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 2);
+    const FrameProfile before = ed.frame_profile_totals();
+    /* The Move gizmo's X arrow dragged with the mouse; after each frame of it, the card's copy of what the views drew
+     * holds exactly what a whole upload would (a missed range would leave old vertices or triangles there). */
+    int x = 0, y = 0, checked = 0, differ = 0;
+    CHECK(ed.project_to_window(wp, x, y));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+    for (int k = 1; k <= 6; k++) {
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + k * 7, y)});
+      const Mesh &m = *big->get<MeshFilter>()->mesh;
+      for (bool flat : {false, true}) {
+        const RenderMesh &rm = m.render_mesh(flat);
+        std::vector<gpu::RasterVertex> card;
+        std::vector<uint32_t> card_indices;
+        if (!ed.gpu_mesh_for_test(rm, card, card_indices)) continue;
+        std::vector<gpu::RasterVertex> want(rm.positions.size());  // (as the views send it: position, normal)
+        for (size_t i = 0; i < want.size(); i++)
+          want[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+        checked++;
+        if (card.size() != want.size() || card_indices != rm.indices || std::memcmp(card.data(), want.data(), want.size() * sizeof(gpu::RasterVertex)))
+          differ++;
+      }
+    }
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 55 + 42, y)});
+    const FrameProfile after = ed.frame_profile_totals();
+    std::printf("    the card's copy read back after %d drag frames: %d differed from a whole upload\n", checked, differ);
+    CHECK(checked >= 3 && differ == 0);
+    const uint64_t views = after.gpu_views - before.gpu_views, partial = after.gpu_mesh_partial - before.gpu_mesh_partial;
+    const uint64_t pbytes = after.gpu_partial_bytes - before.gpu_partial_bytes;
+    std::printf("    %llu views on the GPU; %llu updates sent only what moved, %llu KB each on average (the mesh whole is %llu KB)\n",
+                (unsigned long long)views, (unsigned long long)partial, (unsigned long long)(partial ? pbytes / partial / 1024 : 0),
+                (unsigned long long)(whole / 1024));
+    CHECK(views > 0);
+    /* (The drag's first frame copies the mesh and its release finishes the tangents: those caches go up whole. The
+     * frames between follow in place, and send a small part.) */
+    CHECK(partial >= 3);
+    CHECK(partial && pbytes / partial < whole / 4);
+    /* And the picture after the drag is the CPU's. */
+    const std::vector<uint32_t> gpu = r34_crop(ed, ed.scene_view_rect());
+    ed.viewport_device_for_test(1);
+    big->set_local_position({0.0f, 1.0001f, 0.0f});  // (a change: the CPU draws again)
+    r34_steps(ed, 2);
+    big->set_local_position({0.0f, 1.0f, 0.0f});
+    r34_steps(ed, 2);
+    double mean = 0, within3 = 0;
+    r122_compare(r34_crop(ed, ed.scene_view_rect()), gpu, mean, within3);
+    std::printf("    after the drag: mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, within3 * 100);
+    /* (The same difference with whole uploads instead of ranges, 0.899 / 255 either way: what's left is the GPU's
+     * picture against the CPU's on this scene, not what was sent.) */
+    CHECK(mean < 1.0 && within3 >= 0.99);
+  });
 }

@@ -47,6 +47,10 @@ struct RenderMesh {
    * modifier, ADR 0022; an Edit Mode drag, ADR 0034), when `serial` moves. Same topology, split pattern and triangle
    * order - but not the same `indices`: quads and n-gons are split again from the new positions. */
   uint64_t build_serial = 0;
+  /* Task 0099: after an in-place move, the serial it moved from and what changed since - vertex ranges and index
+   * ranges, each (first, count) - so a copy kept elsewhere (the GPU views') sends only those. 0 after a build. */
+  uint64_t moved_from = 0;
+  std::vector<std::pair<uint32_t, uint32_t>> moved_vertices, moved_indices;
   size_t tri_count() const { return indices.size() / 3; }
 };
 

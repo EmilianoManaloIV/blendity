@@ -229,6 +229,7 @@ namespace {
 /* MeshCounts' tallies (atomic: render meshes are also built on worker threads), microseconds for the times. */
 enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, kStatCount };
 std::atomic<uint64_t> g_stat_count[kStatCount], g_stat_us[kStatCount];
+std::atomic<uint64_t> g_partial_normals{0};
 struct StatTimer {
   MeshStat stat;
   ScopedTimer t;
@@ -248,6 +249,7 @@ MeshCounts mesh_counts() {
     *n[i] = g_stat_count[i].load(std::memory_order_relaxed);
     *ms[i] = g_stat_us[i].load(std::memory_order_relaxed) / 1000.0;
   }
+  c.partial_normals = g_partial_normals.load(std::memory_order_relaxed);
   return c;
 }
 
@@ -255,6 +257,7 @@ MeshCounts MeshCounts::operator-(const MeshCounts &o) const {
   MeshCounts d;
   d.copies = copies - o.copies, d.full_builds = full_builds - o.full_builds, d.in_place = in_place - o.in_place;
   d.tangent_builds = tangent_builds - o.tangent_builds, d.edge_builds = edge_builds - o.edge_builds;
+  d.partial_normals = partial_normals - o.partial_normals;
   d.ms_copies = ms_copies - o.ms_copies, d.ms_full_builds = ms_full_builds - o.ms_full_builds;
   d.ms_in_place = ms_in_place - o.ms_in_place, d.ms_tangents = ms_tangents - o.ms_tangents, d.ms_edges = ms_edges - o.ms_edges;
   return d;
@@ -357,6 +360,7 @@ size_t Mesh::memory_bytes() const {
        topo_.loose_edges.capacity()) * 8;
   b += sides_.capacity() * sizeof(EdgeSides) + edges_.capacity() * 8 + tri_start_.capacity() * 4;
   for (const auto &crv : corner_rv_) b += crv.capacity() * 4;
+  b += (vside_off_.capacity() + vside_.capacity()) * 4 + nstate_[0].bytes() + nstate_[1].bytes();  // (task 0099)
   return b + sizeof(Mesh);
 }
 
@@ -463,7 +467,49 @@ void Mesh::build_edge_sides() const {
   sides_topo_ = topo;
 }
 
-void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
+Vec3 Mesh::face_weighted(size_t f) const {
+  const uint32_t *v = face_verts(f);
+  const uint32_t n = face_size(f);
+  Vec3 w(0.0f);
+  for (uint32_t i = 0; i < n; i++) {
+    Vec3 p = positions[v[i]], q = positions[v[(i + 1) % n]];
+    w.x += (p.y - q.y) * (p.z + q.z);
+    w.y += (p.z - q.z) * (p.x + q.x);
+    w.z += (p.x - q.x) * (p.y + q.y);
+  }
+  return w;
+}
+
+/* Which of sides_ touch each vertex, once per topology: a vertex's smooth fans only join across those. */
+void Mesh::build_vertex_sides() const {
+  build_edge_sides();
+  const uint64_t topo = topology_serial();
+  if (vside_topo_ == topo) return;
+  const size_t nv = positions.size();
+  vside_off_.assign(nv + 1, 0);
+  auto ends = [&](const EdgeSides &e, uint32_t &a, uint32_t &b) {
+    a = corner_verts[e.sca];
+    b = corner_verts[e.scb];
+  };
+  for (const EdgeSides &e : sides_) {
+    uint32_t a, b;
+    ends(e, a, b);
+    if (a < nv) vside_off_[a + 1]++;
+    if (b < nv && b != a) vside_off_[b + 1]++;
+  }
+  for (size_t v = 0; v < nv; v++) vside_off_[v + 1] += vside_off_[v];
+  vside_.assign(vside_off_[nv], 0);
+  std::vector<uint32_t> fill(vside_off_.begin(), vside_off_.end() - 1);
+  for (size_t i = 0; i < sides_.size(); i++) {
+    uint32_t a, b;
+    ends(sides_[i], a, b);
+    if (a < nv) vside_[fill[a]++] = (uint32_t)i;
+    if (b < nv && b != a) vside_[fill[b]++] = (uint32_t)i;
+  }
+  vside_topo_ = topo;
+}
+
+void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *keep) const {
   const size_t nf = face_count();
   std::vector<Vec3> fnormal(nf);
   /* Each face's own work in parallel (task 0090: a 50k-face mesh follows a drag every frame); what adds faces up
@@ -486,18 +532,8 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
   }
   else {
     std::vector<Vec3> fweighted(nf);
-    each_face([&](size_t f) {
-      const uint32_t *v = face_verts(f);
-      uint32_t n = face_size(f);
-      Vec3 w(0.0f);
-      for (uint32_t i = 0; i < n; i++) {
-        Vec3 p = positions[v[i]], q = positions[v[(i + 1) % n]];
-        w.x += (p.y - q.y) * (p.z + q.z);
-        w.y += (p.z - q.z) * (p.x + q.x);
-        w.z += (p.x - q.x) * (p.y + q.y);
-      }
-      fweighted[f] = w;
-    });
+    each_face([&](size_t f) { fweighted[f] = face_weighted(f); });
+    if (keep) keep->fweighted = fweighted;
     const bool per_face = !face_smooth.empty() || !sharp_edges.empty() || (seams_sharp && !seams.empty());
     if (per_face) {
       /* Smooth fans, as Blender builds them: around each vertex, the corners of
@@ -558,15 +594,126 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal) const {
         }
     }
   }
+  if (!keep) return;
+  keep->topo = topology_serial();
+  keep->flat = flat;
+  keep->fnormal = std::move(fnormal);
+  if (flat) keep->fweighted.clear();
+  if (&keep->cnormal != &cnormal) keep->cnormal = cnormal;
+  keep->valid = true;
 }
 
-/* Whether any of face f's vertices is marked in `vmoved`. */
-static bool face_moved(const Mesh &m, size_t f, const std::vector<uint8_t> &vmoved) {
-  for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
-    const uint32_t v = m.corner_verts[c];
-    if (v < vmoved.size() && vmoved[v]) return true;
+/* The corners at vertex v, in corner_normals' order (faces ascending, then their corners): each with its face. A face
+ * listed twice at v (v twice in it) is visited once. */
+static void corners_at(const Mesh &m, const Mesh::VertexFaces &vf, uint32_t v, std::vector<std::pair<uint32_t, uint32_t>> &out) {
+  out.clear();
+  for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++) {
+    const uint32_t f = vf.faces[k];
+    if (k > vf.offsets[v] && vf.faces[k - 1] == f) continue;
+    for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++)
+      if (m.corner_verts[c] == v) out.push_back({c, f});
   }
-  return false;
+}
+
+/* Smooth fans at one vertex (corner_normals' sharp-edge path): its corners join across the smooth sides that touch it,
+ * and each fan adds its faces' weighted normals in corner order. */
+void Mesh::smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, float cos_limit, std::vector<uint32_t> &parent,
+                          std::vector<Vec3> &sum) const {
+  const size_t n = at.size();
+  parent.resize(n);
+  for (size_t i = 0; i < n; i++) parent[i] = (uint32_t)i;
+  auto local = [&](uint32_t c) {  // (`at` is in corner order: a vertex with thousands of faces stays cheap)
+    const auto it = std::lower_bound(at.begin(), at.end(), c, [](const std::pair<uint32_t, uint32_t> &p, uint32_t x) { return p.first < x; });
+    return it != at.end() && it->first == c ? (int)(it - at.begin()) : -1;
+  };
+  auto root = [&](uint32_t i) {
+    while (parent[i] != i) i = parent[i] = parent[parent[i]];
+    return i;
+  };
+  auto join = [&](uint32_t x, uint32_t y) {  // (a pair not at v belongs to the side's other end)
+    const int a = local(x), b = local(y);
+    if (a >= 0 && b >= 0) parent[root((uint32_t)a)] = root((uint32_t)b);
+  };
+  for (uint32_t k = vside_off_[v]; k < vside_off_[v + 1]; k++) {
+    const EdgeSides &e = sides_[vside_[k]];
+    if (e.hard || dot(st.fnormal[e.sf], st.fnormal[e.tf]) < cos_limit) continue;
+    /* The full pass's two pairs (both sit on v when the edge's ends are one vertex). */
+    if (corner_verts[e.sca] == corner_verts[e.tca]) {
+      join(e.sca, e.tca);
+      join(e.scb, e.tcb);
+    }
+    else {
+      join(e.sca, e.tcb);
+      join(e.scb, e.tca);
+    }
+  }
+  sum.assign(n, Vec3(0.0f));
+  for (size_t i = 0; i < n; i++) sum[root((uint32_t)i)] += st.fweighted[at[i].second];
+  for (size_t i = 0; i < n; i++) {
+    const uint32_t c = at[i].first, f = at[i].second;
+    st.cnormal[c] = smooth_of(f) ? normalize(sum[root((uint32_t)i)]) : st.fnormal[f];
+  }
+}
+
+/* One smooth normal for the vertex (no sharp edges, no angle limit). */
+void Mesh::smooth_vertex_at(NormalState &st, const CornerFaces &at) const {
+  Vec3 sum(0.0f);
+  for (const auto &cf : at) sum += st.fweighted[cf.second];
+  const Vec3 n = normalize(sum);
+  for (const auto &cf : at) st.cnormal[cf.first] = n;
+}
+
+/* Smooth by angle: each corner adds the faces around its vertex within the angle of its own face. */
+void Mesh::smooth_by_angle_at(NormalState &st, const VertexFaces &vf, uint32_t v, const CornerFaces &at) const {
+  const float cos_limit = std::cos(smooth_angle * kDeg2Rad);
+  for (const auto &cf : at) {
+    Vec3 sum(0.0f);
+    for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++)
+      if (dot(st.fnormal[vf.faces[k]], st.fnormal[cf.second]) >= cos_limit) sum += st.fweighted[vf.faces[k]];
+    st.cnormal[cf.first] = normalize(sum);
+  }
+}
+
+bool Mesh::corner_normals_moved(NormalState &st, bool flat, const std::vector<uint32_t> &faces, std::vector<uint32_t> &verts) const {
+  const size_t nf = face_count();
+  if (!st.fits(topology_serial(), flat, nf, corner_verts.size())) return false;
+  if (faces.size() * 4 > nf) return false;  // (a large share moved: the whole pass costs no more)
+  for (uint32_t f : faces) {
+    st.fnormal[f] = face_normal(f);
+    if (!flat) st.fweighted[f] = face_weighted(f);
+  }
+  /* The vertices of the moved faces: every corner whose normal or position can change sits on one of them. */
+  std::vector<uint8_t> mark(positions.size(), 0);
+  verts.clear();
+  for (uint32_t f : faces)
+    for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) {
+      const uint32_t v = corner_verts[c];
+      if (v >= mark.size() || mark[v]) continue;
+      mark[v] = 1;
+      verts.push_back(v);
+    }
+  if (flat) {
+    for (uint32_t f : faces)
+      for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) st.cnormal[c] = st.fnormal[f];
+    return true;
+  }
+  const VertexFaces &vf = vertex_faces();
+  const bool per_face = !face_smooth.empty() || !sharp_edges.empty() || (seams_sharp && !seams.empty());
+  if (per_face) build_vertex_sides();
+  const float cos_fan = smooth_angle >= 179.9f ? -2.0f : std::cos(smooth_angle * kDeg2Rad);
+  JobSystem::global().parallel_for((int64_t)verts.size(), 256, [&](int64_t a, int64_t b) {
+    std::vector<std::pair<uint32_t, uint32_t>> at;
+    std::vector<uint32_t> parent;
+    std::vector<Vec3> sum;
+    for (int64_t i = a; i < b; i++) {
+      const uint32_t v = verts[(size_t)i];
+      corners_at(*this, vf, v, at);
+      if (per_face) smooth_fans_at(st, v, at, cos_fan, parent, sum);
+      else if (smooth_angle >= 179.9f) smooth_vertex_at(st, at);
+      else smooth_by_angle_at(st, vf, v, at);
+    }
+  });
+  return true;
 }
 
 /* The positions moved and nothing else (a deform, ADR 0022, or an Edit Mode drag, ADR 0034): the topology and the
@@ -579,29 +726,18 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
   if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return false;
-  /* Which faces moved (a vertex whose position differs from the one the cache drew), before anything is written:
-   * only they are split into triangles again (task 0090). */
-  std::vector<uint8_t> vmoved(positions.size(), 0), fmoved(face_count(), 0);
-  for (size_t c = 0; c < corner_verts.size(); c++) {
-    const uint32_t rv = crv[c], v = corner_verts[c];
-    if (rv < rm.positions.size() && v < positions.size() && std::memcmp(&rm.positions[rv], &positions[v], sizeof(Vec3)) != 0) vmoved[v] = 1;
-  }
-  for (size_t f = 0; f < face_count(); f++) fmoved[f] = face_moved(*this, f, vmoved);
-  std::vector<Vec3> cnormal;
-  corner_normals(flat, cnormal);
-  std::vector<uint8_t> seen(rm.positions.size(), 0);
-  for (size_t c = 0; c < corner_verts.size(); c++) {
-    const uint32_t rv = crv[c], v = corner_verts[c];
-    if (rv >= rm.positions.size() || v >= positions.size()) return false;
-    const Vec3 n = cnormal[c];
-    if (!seen[rv]) {
-      seen[rv] = 1;
-      rm.positions[rv] = positions[v];
-      rm.normals[rv] = n;
-    }
-    else if (!(rm.normals[rv].x == n.x && rm.normals[rv].y == n.y && rm.normals[rv].z == n.z))
-      return false;  // the build's key compares the same way
-  }
+  /* Which faces moved, before anything is written: only they are split into triangles again (task 0090). */
+  std::vector<uint32_t> faces;
+  moved_faces(ci, faces);
+  std::vector<uint8_t> fmoved(face_count(), 0);
+  for (uint32_t f : faces) fmoved[f] = 1;
+  /* Task 0099: only the normals around the moved faces, from what this cache's last in-place pass kept (the same to
+   * the bit), and only their corners written. The first frame after a build or a copy works out the whole mesh. */
+  NormalState &ns = nstate_[ci];
+  std::vector<uint32_t> verts, changed;
+  const bool partial = corner_normals_moved(ns, flat, faces, verts);
+  if (!partial) corner_normals(flat, ns.cnormal, &ns);
+  if (!(partial ? write_corners_at(ci, ns.cnormal, verts, changed) : write_corners(ci, ns.cnormal, changed))) return false;
   if (!retriangulate(rm, crv, &fmoved)) return false;
   if (cache_tangents_[ci] && rm.tangents.size() == rm.positions.size() && rm.uvs.size() == rm.positions.size()) {
     /* Tangents from the UV gradients of the deformed triangles (Lengyel's method), averaged per render vertex and
@@ -636,9 +772,109 @@ bool Mesh::update_in_place(int ci, bool flat) const {
     cache_approx_[ci] = true;
   }
   rm.bounds = bounds();
+  record_moved(rm, changed, faces);
   rm.serial = next_render_serial();  // what was drawn from it changed: every cache keyed on it re-renders
+  if (partial) g_partial_normals.fetch_add(1, std::memory_order_relaxed);
   st.count = true;
   return true;
+}
+
+/* One test per vertex, against the render vertex of its first corner (every render vertex of a vertex carries its
+ * position), and the faces from the moved vertices' own: no pass over every corner and face. */
+void Mesh::moved_faces(int ci, std::vector<uint32_t> &faces) const {
+  const RenderMesh &rm = cache_[ci];
+  const std::vector<uint32_t> &crv = corner_rv_[ci];
+  std::vector<uint32_t> &first = nstate_[ci].vfirst;
+  if (first.size() != positions.size()) {
+    first.assign(positions.size(), UINT32_MAX);
+    for (size_t c = corner_verts.size(); c-- > 0;)
+      if (corner_verts[c] < first.size()) first[corner_verts[c]] = crv[c];
+  }
+  const VertexFaces &vf = vertex_faces();
+  std::vector<uint8_t> mark(face_count(), 0);
+  size_t marked = 0;
+  for (size_t v = 0; v < positions.size(); v++) {
+    const uint32_t rv = first[v];
+    if (rv >= rm.positions.size() || std::memcmp(&rm.positions[rv], &positions[v], sizeof(Vec3)) == 0) continue;
+    for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++) {
+      marked += !mark[vf.faces[k]];
+      mark[vf.faces[k]] = 1;
+    }
+  }
+  faces.clear();
+  faces.reserve(marked);
+  for (size_t f = 0; f < mark.size() && faces.size() < marked; f++)
+    if (mark[f]) faces.push_back((uint32_t)f);
+}
+
+/* One corner into its render vertex: the first of its corners writes (noting whether that changed it), the others
+ * must agree, compared as the build's key compares. */
+static bool put_corner(RenderMesh &rm, uint32_t rv, const Vec3 &p, const Vec3 &n, bool first, std::vector<uint32_t> &changed) {
+  if (!first) return rm.normals[rv].x == n.x && rm.normals[rv].y == n.y && rm.normals[rv].z == n.z;
+  if (std::memcmp(&rm.positions[rv], &p, sizeof(Vec3)) != 0 || std::memcmp(&rm.normals[rv], &n, sizeof(Vec3)) != 0) changed.push_back(rv);
+  rm.positions[rv] = p;
+  rm.normals[rv] = n;
+  return true;
+}
+
+bool Mesh::write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed) const {
+  RenderMesh &rm = cache_[ci];
+  const std::vector<uint32_t> &crv = corner_rv_[ci];
+  std::vector<uint8_t> seen(rm.positions.size(), 0);
+  for (size_t c = 0; c < corner_verts.size(); c++) {
+    const uint32_t rv = crv[c], v = corner_verts[c];
+    if (rv >= rm.positions.size() || v >= positions.size()) return false;
+    if (!put_corner(rm, rv, positions[v], cnormal[c], !seen[rv], changed)) return false;
+    seen[rv] = 1;
+  }
+  return true;
+}
+
+/* Only the corners at `verts`: a render vertex's corners all sit on its one vertex, and corners_at lists them in
+ * corner order, so the same corner writes as in write_corners. */
+bool Mesh::write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const {
+  RenderMesh &rm = cache_[ci];
+  const std::vector<uint32_t> &crv = corner_rv_[ci];
+  const VertexFaces &vf = vertex_faces();
+  CornerFaces at;
+  std::vector<uint32_t> written;  // (the render vertices at this vertex already written: a handful)
+  for (uint32_t v : verts) {
+    corners_at(*this, vf, v, at);
+    written.clear();
+    for (const auto &cf : at) {
+      const uint32_t rv = crv[cf.first];
+      if (rv >= rm.positions.size()) return false;
+      const bool first = std::find(written.begin(), written.end(), rv) == written.end();
+      if (!put_corner(rm, rv, positions[v], cnormal[cf.first], first, changed)) return false;
+      if (first) written.push_back(rv);
+    }
+  }
+  return true;
+}
+
+/* Sorted indices as (first, count) runs, runs closer than `gap` joined (one copy beats many tiny ones). */
+static void index_ranges(const std::vector<uint32_t> &sorted, uint32_t gap, std::vector<std::pair<uint32_t, uint32_t>> &out) {
+  out.clear();
+  for (uint32_t i : sorted) {
+    if (!out.empty() && i <= out.back().first + out.back().second + gap) out.back().second = std::max(out.back().second, i + 1 - out.back().first);
+    else out.push_back({i, 1});
+  }
+}
+
+/* What this in-place move changed, for copies kept elsewhere (task 0099): the render vertices whose position or normal
+ * changed, and the triangles of the faces split again (as retriangulate picks them). */
+void Mesh::record_moved(RenderMesh &rm, std::vector<uint32_t> &changed, const std::vector<uint32_t> &faces) const {
+  rm.moved_from = rm.serial;
+  std::sort(changed.begin(), changed.end());
+  index_ranges(changed, 64, rm.moved_vertices);
+  std::vector<uint32_t> tris;
+  for (uint32_t f : faces)
+    if (face_size(f) > 3 && f + 1 < tri_start_.size())
+      for (uint32_t t = tri_start_[f]; t < tri_start_[f + 1]; t++) tris.push_back(t);
+  std::vector<std::pair<uint32_t, uint32_t>> runs;
+  index_ranges(tris, 64, runs);
+  rm.moved_indices.clear();
+  for (const auto &r : runs) rm.moved_indices.push_back({r.first * 3, r.second * 3});
 }
 
 /* Quads and n-gons triangulated from the current positions, written over the build's triangles in place: face f's
@@ -704,6 +940,10 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   const size_t nf = face_count();
   std::vector<Vec3> cnormal;
   corner_normals(flat, cnormal);
+  nstate_[ci].reset();  // (kept from the first in-place frame on: a mesh never dragged doesn't hold it)
+  rm.moved_from = 0;    // (a build: copies elsewhere take it whole)
+  rm.moved_vertices.clear();
+  rm.moved_indices.clear();
 
   /* Emit render vertices, sharing corners with identical vertex + normal + uv
    * (the same splitting a game engine does at hard edges and UV seams). */

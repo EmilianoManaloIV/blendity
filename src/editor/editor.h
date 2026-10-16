@@ -117,6 +117,8 @@ struct FrameProfile {
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
    * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
   uint64_t gpu_views = 0, gpu_fallbacks = 0, gpu_mesh_uploads = 0, gpu_mesh_updates = 0;
+  uint64_t gpu_upload_bytes = 0;  // task 0098: what the meshes sent to the card took
+  uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
   double ms_gpu = 0;
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
@@ -128,6 +130,8 @@ struct FrameProfile {
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
+    gpu_upload_bytes += o.gpu_upload_bytes;
+    gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     ms_gpu += o.ms_gpu;
   }
 };
@@ -569,6 +573,12 @@ class Editor {
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
   void viewport_device_for_test(int d) { set_viewport_device(d); }
+  /* The card's copy of a render mesh the views drew, read back (empty when it isn't there). */
+  bool gpu_mesh_for_test(const RenderMesh &rm, std::vector<gpu::RasterVertex> &v, std::vector<uint32_t> &indices) {
+    const auto it = gpu_meshes_.find(&rm);
+    std::string err;
+    return gpu_view_ && it != gpu_meshes_.end() && it->second.id >= 0 && gpu_view_->read_mesh(it->second.id, v, indices, &err);
+  }
   int viewport_device() const { return viewport_device_; }
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
@@ -2109,6 +2119,7 @@ class Editor {
   bool gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, const LightingEnv &env, const std::vector<DrawItem> &items,
                      const Camera *cam, bool scene_lights, const FilterStack *filters, const RasterOptions &opt);
   int gpu_mesh(const RenderMesh &rm, std::string &err);
+  bool gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err);
   int gpu_slot(const RenderTarget &rt);
   void gpu_forget_meshes();
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution

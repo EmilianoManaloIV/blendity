@@ -503,8 +503,9 @@ class VulkanRaster final : public Raster {
     m.vertices = (uint32_t)v.size();
     m.indices = (uint32_t)idx.size();
     const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    if (!make_buffer(m.vb, v.size() * sizeof(RasterVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, local) ||
-        !make_buffer(m.ib, idx.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, local)) {
+    const VkBufferUsageFlags copies = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;  // (SRC: read_mesh)
+    if (!make_buffer(m.vb, v.size() * sizeof(RasterVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | copies, local) ||
+        !make_buffer(m.ib, idx.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT | copies, local)) {
       fail(err, info_.name + ": out of memory for a mesh");
       return -1;
     }
@@ -528,6 +529,73 @@ class VulkanRaster final : public Raster {
     if (v.size() != m.vertices || (idx && idx->size() != m.indices)) return fail(err, "a mesh of another size");
     if (!upload(m.vb, v.data(), v.size() * sizeof(RasterVertex), err)) return false;
     return !idx || upload(m.ib, idx->data(), idx->size() * sizeof(uint32_t), err);
+  }
+
+  bool update_mesh_ranges(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &vr,
+                          const std::vector<uint32_t> &idx, const std::vector<std::pair<uint32_t, uint32_t>> &ir, std::string *err) override {
+    if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
+    Mesh &m = meshes_[(size_t)mesh];
+    if (idx.size() != m.indices) return fail(err, "a mesh of another size");
+    size_t nv = 0, bytes = 0;
+    for (const auto &r : vr) {
+      if ((uint64_t)r.first + r.second > m.vertices) return fail(err, "a vertex range past the mesh");
+      nv += r.second;
+    }
+    for (const auto &r : ir)
+      if ((uint64_t)r.first + r.second > idx.size()) return fail(err, "an index range past the mesh");
+    if (nv != v.size()) return fail(err, "vertices for other ranges");
+    /* Every range into one staging buffer, then one submission of all the copies. */
+    bytes = nv * sizeof(RasterVertex);
+    for (const auto &r : ir) bytes += (size_t)r.second * 4;
+    if (!bytes) return true;
+    if (!staging_.buf || staging_.size < bytes) {
+      free_buffer(staging_);
+      if (!make_buffer(staging_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props())) return fail(err, info_.name + ": out of memory for an upload");
+    }
+    std::vector<VkBufferCopy> vc, ic;
+    size_t at = 0;
+    auto stage = [&](const void *src, size_t dst_offset, size_t size, std::vector<VkBufferCopy> &out) {
+      std::memcpy((uint8_t *)staging_.mapped + at, src, size);
+      out.push_back({at, dst_offset, size});
+      at += size;
+    };
+    size_t from = 0;  // (the vertices come one range after another)
+    for (const auto &r : vr) {
+      stage(v.data() + from, (size_t)r.first * sizeof(RasterVertex), (size_t)r.second * sizeof(RasterVertex), vc);
+      from += r.second;
+    }
+    for (const auto &r : ir) stage(idx.data() + r.first, (size_t)r.first * 4, (size_t)r.second * 4, ic);
+    begin();
+    if (!vc.empty()) f_.vkCmdCopyBuffer(cmd_, staging_.buf, m.vb.buf, (uint32_t)vc.size(), vc.data());
+    if (!ic.empty()) f_.vkCmdCopyBuffer(cmd_, staging_.buf, m.ib.buf, (uint32_t)ic.size(), ic.data());
+    uploaded();
+    return submit_wait(err);
+  }
+
+  bool read_mesh(int mesh, std::vector<RasterVertex> &v, std::vector<uint32_t> &idx, std::string *err) override {
+    if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
+    const Mesh &m = meshes_[(size_t)mesh];
+    const size_t vb = (size_t)m.vertices * sizeof(RasterVertex), ib = (size_t)m.indices * 4;
+    if (!vb || !ib) return fail(err, "an empty mesh");
+    Buf host;
+    if (!make_buffer(host, vb + ib, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host_props())) return fail(err, info_.name + ": out of memory for a read-back");
+    begin();
+    const VkBufferCopy a{0, 0, vb}, b{0, vb, ib};
+    f_.vkCmdCopyBuffer(cmd_, m.vb.buf, host.buf, 1, &a);
+    f_.vkCmdCopyBuffer(cmd_, m.ib.buf, host.buf, 1, &b);
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    const bool ok = submit_wait(err);
+    if (ok) {
+      v.resize(m.vertices);
+      idx.resize(m.indices);
+      std::memcpy(v.data(), host.mapped, vb);
+      std::memcpy(idx.data(), (const uint8_t *)host.mapped + vb, ib);
+    }
+    free_buffer(host);
+    return ok;
   }
 
   void remove_mesh(int mesh) override {
@@ -879,7 +947,16 @@ class VulkanRaster final : public Raster {
     begin();
     VkBufferCopy c{0, 0, bytes};
     f_.vkCmdCopyBuffer(cmd_, staging_.buf, dst.buf, 1, &c);
+    uploaded();
     return submit_wait(err);
+  }
+  /* An upload's writes made visible to the reads of later submissions (a fence wait alone doesn't promise it). */
+  void uploaded() {
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
+                       VK_ACCESS_TRANSFER_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
   }
   /* Every pass's writes are seen by everything after it (the spike's passes are few; one global barrier each). */
   void barrier() {

@@ -109,8 +109,15 @@ class Raster {
   /* New positions and normals for the same vertex count (an Edit Mode drag), and new indices when given (the same
    * count: quads split again from the new positions). */
   virtual bool update_mesh(int mesh, const std::vector<RasterVertex> &v, const std::vector<uint32_t> *indices, std::string *error) = 0;
+  /* Only parts changed (task 0099): vertex ranges, each (first, count), from `v` holding just those vertices one range
+   * after another; index ranges from the whole `indices`. False (nothing sent) when a range doesn't fit. */
+  virtual bool update_mesh_ranges(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &vertex_ranges,
+                                  const std::vector<uint32_t> &indices, const std::vector<std::pair<uint32_t, uint32_t>> &index_ranges,
+                                  std::string *error) = 0;
   /* Frees a mesh's memory; its index may be handed out again. */
   virtual void remove_mesh(int mesh) = 0;
+  /* What the card holds for a mesh, read back (tests: partial updates leave it as a whole upload would). */
+  virtual bool read_mesh(int mesh, std::vector<RasterVertex> &v, std::vector<uint32_t> &indices, std::string *error) = 0;
   /* An OpenColorIO view's LUT as colormanagement::view_lut gives it (size^3 colours, red fastest, a log2 shaper);
    * uploaded only when `key` changes. */
   virtual bool set_view_lut(uint64_t key, const float *rgb, int size, float log_min, float log_max, std::string *error) = 0;

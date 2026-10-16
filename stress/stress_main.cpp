@@ -1269,18 +1269,23 @@ static void test_editor_render(Report &rep, const Options &o) {
     /* Task 0096: the gizmo drag again with the views on the GPU. */
     ed.viewport_device_for_test(2);
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
-    const FrameProfile g0 = ed.frame_profile_totals();
+    FrameProfile g0 = ed.frame_profile_totals();
     row("Edit Mode: the same Move gizmo drag, the views on the GPU (task 0096)", [&](int k) {
       if (k == 0) {
         ed.step_frame_headless({mouse(ET::MouseMove, px + 55, py)});
         ed.step_frame_headless({mouse(ET::MouseDown, px + 55, py)});
+        g0 = p0 = ed.frame_profile_totals(), c0 = mesh_counts();
         return;
       }
       ed.step_frame_headless({mouse(ET::MouseMove, px + 55 + 2 * k, py)});
     });
     const FrameProfile g1 = ed.frame_profile_totals();
+    /* Task 0098: where the GPU drag's frame goes (the baseline of pass 11). */
+    drag_note("The Move gizmo drag on the GPU", p0, c0, n);
+    rep.note(strprintf("The GPU drag, per frame: the GPU path %.2f ms (its meshes sent up, rendered, read back), %.1f KB sent to the card.",
+                       (g1.ms_gpu - g0.ms_gpu) / n, (g1.gpu_upload_bytes - g0.gpu_upload_bytes) / (n * 1024.0)));
     ed.step_frame_headless({mouse(ET::MouseUp, px + 55 + 2 * n, py)});
-    rep.note(strprintf("The gizmo drag on the GPU: %s; %llu views there, %llu on the CPU instead; meshes updated in place %llu, sent whole %llu.",
+    rep.note(strprintf("The gizmo drag on the GPU, from the mouse press on: %s; %llu views there, %llu on the CPU instead; meshes updated in place %llu, sent whole %llu.",
                        ed.gpu_view_status().c_str(), (unsigned long long)(g1.gpu_views - g0.gpu_views),
                        (unsigned long long)(g1.gpu_fallbacks - g0.gpu_fallbacks), (unsigned long long)(g1.gpu_mesh_updates - g0.gpu_mesh_updates),
                        (unsigned long long)(g1.gpu_mesh_uploads - g0.gpu_mesh_uploads)));
@@ -1299,6 +1304,30 @@ static void test_editor_render(Report &rep, const Options &o) {
   row("playing, the views on the GPU (task 0096)", [&](int) { ed.step_frame_headless(); });
   ed.viewport_device_for_test(1);
   ed.command("stop");
+  {
+    /* Task 0098: a scene as people make them - a textured (procedural) material on the icospheres and a Sky world -
+     * with the views on the GPU: what still draws on the CPU, and why. */
+    MaterialPtr checker = make_material("Checker", {0.8f, 0.8f, 0.8f});
+    checker->procedural = (int)Procedural::Checker;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Icosphere", 0) == 0)
+        if (MeshRenderer *mr = g.get<MeshRenderer>()) mr->materials = {checker};
+    });
+    ed.scene().environment.mode = 1;  // Sky
+    ed.viewport_device_for_test(2);
+    /* (The Edit Mode drag's undo restored the scene from its snapshot: the mover is found again by name.) */
+    GameObject *moved = ed.scene().find_by_name("Icosphere");
+    if (!moved) rep.note("The textured scene has no Icosphere: its row measures a still scene.");
+    const FrameProfile t0 = ed.frame_profile_totals();
+    row("moving an object, a textured scene with a Sky world, the views on the GPU (task 0098)", [&](int k) {
+      if (moved) moved->set_local_position({0.1f * k + 0.07f, 1.0f, 0.0f});
+      ed.step_frame_headless();
+    });
+    const FrameProfile t1 = ed.frame_profile_totals();
+    rep.note(strprintf("The textured scene: %llu views on the GPU, %llu on the CPU instead (%s).", (unsigned long long)(t1.gpu_views - t0.gpu_views),
+                       (unsigned long long)(t1.gpu_fallbacks - t0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+    ed.viewport_device_for_test(1);
+  }
   Log::echo_stdout = true;
   rep.note("Idle and panel-only frames should cost a copy of each view, and the shadow map should be rendered only when "
            "casters or the light change (task 0011).");

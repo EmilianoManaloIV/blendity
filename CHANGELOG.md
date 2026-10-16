@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 124): pass 11 begins - measured first, and Edit Mode drags work out only what moved (tasks 0098, 0099)
+
+**Asked:** "What should be more optimization gains?" (all four areas chosen: real scenes on the GPU, Edit Mode on big
+meshes, computers without a GPU, path-traced renders; the pass 11 plan approved).
+
+**Changed**
+- **Measured first (task 0098):** `editor_render` breaks down the 50k-face Edit Mode drag with the views on the GPU
+  (moved in place, draw items, the GPU path's time, the bytes sent to the card). It also adds a textured scene with a
+  Sky world on the GPU device: all its views still draw on the CPU, because of the Sky.
+- **Edit Mode drags (task 0099):** moving a few vertices of a big mesh no longer redoes the whole mesh every frame.
+  - What moved is found with one test per vertex.
+  - Only the moved faces' normals and the corners at their vertices are worked out again: the same to the bit as a
+    rebuild, in every shading mode.
+  - Only those corners are written, and the GPU views send the card only the changed ranges.
+  - The 50k-face drag on the laptop setting: 45 -> 28 ms with the views on the CPU, 25 -> 14-15 ms on the GPU.
+- The kept normals aren't copied with a mesh, and a mesh never dragged doesn't hold them (`memory_bytes` counts
+  them).
+- GPU uploads end in a barrier that makes their writes visible to later draws.
+
+**Checked**
+- New tests (round 124):
+  - 112 random drag steps on 7 kinds of mesh, in both caches, are bit for bit a rebuild: smooth, smooth by angle,
+    sharp edges with a seam, sharp edges with an angle, a degenerate quad, mixed flat / smooth faces, flat;
+  - with the views on the GPU, the card's copy is read back after every frame of a real gizmo drag and equals a
+    whole upload. Leaving out one range made all 12 frames differ, checked once by hand;
+  - the picture after the drag is the CPU's within ADR 0013's bar.
+- Unit checks: Windows 10,385, 0 failed (721 tests); the whole suite in render-cache verify mode: 10,386, 0 failed,
+  0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no reports.
+  `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems.
+
+**Review** (Opus code-reviewer). Fixed:
+- the kept normals are no longer copied with every mesh, and are counted;
+- a degenerate edge (both ends one vertex) is joined as the whole pass joins it;
+- the fan's corner lookup is a binary search, so a vertex with thousands of faces stays cheap;
+- the partial counter counts only updates that worked;
+- a range that doesn't fit is refused, and the whole mesh goes up instead;
+- only the moved vertices are converted for the card;
+- the upload barrier;
+- the tests: more mesh kinds, and the card's copy compared exactly.
+
 ## 2026-10-15 (round 123): OptiX against GPU Compute - a spike (task 0097, ADR 0037)
 
 **Asked:** "They are installed but haven't restarted my computer" (the CUDA Toolkit 12.8 and the OptiX SDK 9.1.0 for

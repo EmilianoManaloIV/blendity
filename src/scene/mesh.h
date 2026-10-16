@@ -146,8 +146,57 @@ struct Mesh {
   uint64_t deform_version = 0;
 
  private:
-  /* Per-corner shading normals (flat, smooth, smooth by angle, sharp edges): what render_mesh splits by. */
-  void corner_normals(bool flat, std::vector<Vec3> &out) const;
+  /* Task 0099: what corner_normals last worked out for a render cache (from the positions that cache drew), so an
+   * in-place update works out again only what a drag moved. */
+  struct NormalState {
+    uint64_t topo = 0;
+    bool flat = false, valid = false;
+    std::vector<Vec3> fnormal, fweighted, cnormal;  // per face; per face (smooth only); per corner
+    std::vector<uint32_t> vfirst;                   // per vertex: the render vertex of its first corner
+    /* A copy starts empty (a mesh copied for an edit doesn't carry it, nor pay for it): its first in-place frame
+     * works the whole mesh out again and keeps it from there. */
+    NormalState() = default;
+    NormalState(const NormalState &) {}
+    NormalState &operator=(const NormalState &) {
+      reset();
+      return *this;
+    }
+    void reset() {
+      topo = 0;
+      flat = valid = false;
+      std::vector<Vec3>().swap(fnormal), std::vector<Vec3>().swap(fweighted), std::vector<Vec3>().swap(cnormal);
+      std::vector<uint32_t>().swap(vfirst);
+    }
+    bool fits(uint64_t topology, bool is_flat, size_t faces, size_t corners) const {
+      return valid && topo == topology && flat == is_flat && fnormal.size() == faces && cnormal.size() == corners &&
+             (is_flat || fweighted.size() == faces);
+    }
+    size_t bytes() const {
+      return (fnormal.capacity() + fweighted.capacity() + cnormal.capacity()) * sizeof(Vec3) + vfirst.capacity() * 4;
+    }
+  };
+  /* Per-corner shading normals (flat, smooth, smooth by angle, sharp edges): what render_mesh splits by. `keep`
+   * receives the faces' normals and the result, for corner_normals_moved. */
+  void corner_normals(bool flat, std::vector<Vec3> &out, NormalState *keep = nullptr) const;
+  /* The same after only `faces` (ascending) moved: their normals and the corners at their vertices are worked out
+   * again, each sum in corner_normals' order, so the result is the same to the bit. `verts` receives those vertices.
+   * False when `st` isn't from this topology and shading, or too much moved (the caller then does the whole mesh). */
+  bool corner_normals_moved(NormalState &st, bool flat, const std::vector<uint32_t> &faces, std::vector<uint32_t> &verts) const;
+  Vec3 face_weighted(size_t f) const;  // the face's area-weighted normal (Newell), as corner_normals sums it
+  void build_vertex_sides() const;
+  /* The faces with a vertex whose position differs from the one cache ci drew, ascending. */
+  void moved_faces(int ci, std::vector<uint32_t> &faces) const;
+  /* Positions and corner normals into cache ci's render vertices: every corner, or only those at `verts`. The changed
+   * render vertices are added to `changed`; false when a render vertex's corners now differ (the build would split). */
+  bool write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed) const;
+  bool write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const;
+  void record_moved(RenderMesh &rm, std::vector<uint32_t> &changed, const std::vector<uint32_t> &faces) const;
+  /* corner_normals' three smooth modes for the corners `at` one vertex (corner, face), into st.cnormal. */
+  using CornerFaces = std::vector<std::pair<uint32_t, uint32_t>>;
+  void smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, float cos_limit, std::vector<uint32_t> &parent,
+                      std::vector<Vec3> &sum) const;
+  void smooth_vertex_at(NormalState &st, const CornerFaces &at) const;
+  void smooth_by_angle_at(NormalState &st, const VertexFaces &vf, uint32_t v, const CornerFaces &at) const;
   /* The render mesh follows new positions (a deform, or an edit that moved vertices only): positions, normals and
    * the triangulation of quads and n-gons rewritten in place. False when the split pattern no longer holds (a full
    * build then). */
@@ -177,6 +226,9 @@ struct Mesh {
   };
   mutable std::vector<EdgeSides> sides_;
   mutable uint64_t sides_topo_ = 0;
+  mutable std::vector<uint32_t> vside_off_, vside_;  // sides_ at each vertex (CSR), per topology (task 0099)
+  mutable uint64_t vside_topo_ = 0;
+  mutable NormalState nstate_[2];
   /* Where each face's triangles start in a build (n - 2 per face, in face order), and whether any face has more than
    * three corners: per topology, for retriangulate(). */
   mutable VertexFaces vf_;
@@ -207,6 +259,7 @@ using MeshPtr = std::shared_ptr<Mesh>;
  * its edge table built, and the milliseconds each took. Subtract two readings for what happened in between. */
 struct MeshCounts {
   uint64_t copies = 0, full_builds = 0, in_place = 0, tangent_builds = 0, edge_builds = 0;
+  uint64_t partial_normals = 0;  // task 0099: in-place moves whose normals were worked out only around what moved
   double ms_copies = 0, ms_full_builds = 0, ms_in_place = 0, ms_tangents = 0, ms_edges = 0;
   MeshCounts operator-(const MeshCounts &o) const;
 };
