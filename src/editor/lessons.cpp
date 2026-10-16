@@ -487,6 +487,11 @@ Two more tricks keep a small machine smooth. Cached shadows: while one object is
 The minimum machine is now a thin laptop: an Intel i7 with 4 cores and 8 threads, 8 GB of memory shared with its Iris Xe graphics, and a 13.3" 1080p touch screen at 150 % (the HP Envy 2-in-1). On a first run like that Blendity starts on Low and says so, with High one click away. Its 4 cores' 8 threads do about the work of 5 full cores, and a laptop holds a lower clock under load than a desktop, so editing frames run at about 35-40 fps there and orbiting at 60. The Low tier's views read shadows with 4 weighted samples instead of 9: a little sharper-edged, a little faster. Iris Xe is given a quarter of the memory for path tracing, so the editor keeps room. On the screen, two fingers over the Scene view navigate in every editor feel: pinch to zoom, drag to pan, twist to turn round the pivot. One finger is the mouse. A pen's pressure sets how much the weight-paint brush adds, as in Blender's tablet support.
 ? Why does one finger act as the mouse rather than orbiting? | One finger has to pick, drag gizmos and press buttons; the view takes two fingers, so nothing you touch moves the camera by accident.
 ! cmd:quality low; threads 8 | Feel the laptop: Low and 8 threads (Envy-class machines also run slower per thread)
+# Reading a frame
+The Profiler's frame breakdown says where the last frame went. Between frames is what the screen sees: the time from one frame's start to the next, cap and waiting included; at a 60 fps cap it should sit near 16.7 ms. Below the views' times come the parts an edit pays for: draw items (gathering what the views draw, building any render mesh that changed), the scene hashes, an Edit Mode drag's writes to the mesh, the overlapping-vertices check, the lighting key and snapping. The mesh rows count what the mesh caches did that frame: copies made for an edit, render meshes built from scratch or moved in place, tangents and edge tables. A big mesh dragged in Edit Mode shows its cost there. blendity_stress --only editor_render drags a 50k-face mesh the same way, and --only present opens a window to time putting frames on screen.
+! window:Profiler | Open the Profiler
+! cmd:create Sphere; edit vertex | Edit a sphere, then drag a vertex and watch the mesh rows
+? Why can Between frames be longer than the frame itself? | The loop waits for the next frame's turn under the cap. Blendity's frame pacer keeps that wait from running long (Windows rounds plain waits up to 15.6 ms), so at a 60 fps cap the frames start 16.7 ms apart unless a frame itself takes longer.
 )"},
     {"References", "The papers behind Blendity's features", R"(
 Some of Blendity's features come straight from research papers. Each one is listed here with the feature it became and where to find it, so you can read the original next to the code. The code cites the same papers in its comments.
@@ -710,7 +715,7 @@ They stack with SubdivisionSurface: Mirror, then Solidify, then Subdivision is a
 Blender doesn't write everything itself. It builds on about 40 external libraries: ray tracing, denoising, colour science and image formats. Blendity uses the same prebuilt set when it finds a blender/lib folder next to the project. Without it, every feature falls back to Blendity's own dependency-free code. Type libs in the Console to see which backends are active.
 | Library | Used for in Blendity | Used in Blender for | Fallback
 | Embree | Path tracer ray casts (2-3x faster) | Cycles CPU BVH | Built-in BVH
-| OpenImageDenoise | Final-frame denoising | Cycles denoiser | A-Trous filter
+| OpenImageDenoise | Denoising path-traced renders (on an NVIDIA or AMD card when there is one) | Cycles denoiser | A-Trous filter
 | TBB | Job system (parallel_for) | BLI_task, Cycles threads | Built-in thread pool
 | Eigen | LSCM unwrap solver | UV unwrap, IK, deform | Conjugate gradient
 | OpenColorIO | AgX / Filmic view transforms | Colour management | Built-in curves
@@ -801,6 +806,28 @@ With several devices ticked, they share one counter of sample numbers. Each devi
 A GTX 1050 Ti has no ray tracing hardware: it traces with Blendity's compute kernel, roughly as fast as a 4-core CPU. Render > Device > GPU + CPU (Auto) uses both, each taking samples as fast as it finishes them, so neither waits for the other. A scene that wouldn't fit in the card's memory goes with its textures a mip level smaller at a time; one that can't fit renders on the CPU, with a message, instead of failing. Each submission to the GPU stays near 100 ms, under the 2 seconds after which Windows resets a GPU that seems stuck.
 ! cmd:engine path; device auto; window Render | Render on the GPU and the CPU together (Auto)
 ? Why are GPU submissions kept short? | Windows' driver watchdog (TDR) resets a GPU whose work takes over 2 seconds; a slow card given 64 samples of a big frame at once could pass it.
+# The denoiser on the GPU
+OpenImageDenoise, Cycles' denoiser, is a neural network that turns a few noisy samples into a clean picture using each pixel's colour, albedo and normal. Blender's libraries ship it with modules for NVIDIA cards (CUDA) and AMD cards (HIP), so Render Settings > Denoise Device on Auto runs it there when there is one. A 1080p frame took 463 ms on a 16-core CPU and 43 ms on an RTX 4070 SUPER. The CPU stays the fallback: without such a card, or after an error, the frame is denoised on the CPU, and the two pictures differ by well under one step of 255. Intel's integrated graphics (Iris Xe) aren't supported by its GPU modules, so a laptop like that denoises on the CPU.
+@ blender/intern/cycles/integrator/denoiser_oidn.cpp, blender/intern/cycles/integrator/denoiser_oidn_gpu.cpp
+? Why are the GPU's images kept in its own memory rather than shared with the CPU? | Shared ("managed") memory moves across the PCIe bus page by page while the network reads it. A 1080p denoise took 220 ms that way and 15 ms with the images in the card's memory.
+! cmd:set Render.DenoiseDevice GPU; engine path; render; window Render | Render the Main Camera and denoise it on the GPU
+# The views on the GPU
+The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (Preferences > Viewport Device). They use the same formulas as the CPU's views: the same lighting, the same shadow lookups, even the same colour table for AgX and the other OpenColorIO views. So the two pictures agree to within a step of 255. The GPU draws the frame in about a third of a millisecond; reading it back into the editor's canvas takes a few more. Picking and most overlays run on the CPU; the Edit Mode cage's edges and dots are drawn by the card too. Textures are sampled the CPU's way from its own mip chain, so a textured object, a Sky or HDRI world and a toon material look the same on both. What the GPU doesn't draw yet - GI and probes, axis materials, see-through materials, camera filters - draws on the CPU, and Preferences tells you why.
+? Why does an Edit Mode drag on a 50,000-face mesh only send a few bytes to the card each frame? | The drag works out normals only around the faces that moved, and only those vertices and triangles go up: the rest of the mesh on the card is already right.
+? Why does a Sky world cost the GPU almost nothing extra? | Its picture is one texture the card keeps: the background and the reflections read it, and the diffuse light comes from nine numbers (spherical harmonics) worked out once on the CPU.
+! cmd:set World.Source Sky; viewport device gpu | A Sky world, drawn on the GPU
+? Why does the GPU read textures from storage buffers instead of using its texture units? | The texture units filter, choose mip levels and decode sRGB in their own slightly different ways. Reading the CPU's own mip chain and filtering it with the CPU's formulas keeps the two pictures within a step of 255.
+! cmd:viewport device gpu | Draw the views on the GPU
+! cmd:viewport device cpu | Draw the views on the CPU again
+# Drags that stay quick
+While you drag something in the Scene view, the Game view and the Camera Preview keep the picture they had and draw once when you let go, as Blender's sculpt mode updates its other views when the stroke ends. Play always draws every frame. Preferences > Other Views Follow Drags makes them follow every frame instead. On the CPU, the Scene view also draws more cheaply while you drag or orbit: the sun's shadow map at half size with a softer filter. The frame after you stop is exact again, as Blender's viewport is after it lowers its quality while you navigate (Preferences > Simpler While Moving).
+@ blender/source/blender/editors/sculpt_paint/mesh/sculpt.cc, blender/source/blender/draw/engines/eevee/eevee_instance.cc
+? Why does the Game view seem to lag behind a drag and then jump? | It keeps its last picture during the drag and draws once on release: rendering the scene again for it every frame of a drag is what made drags slow. Turn on Other Views Follow Drags to see it follow.
+? Is the picture you see after a drag ever the cheaper one? | No. A picture drawn the cheaper way is never reused: the first frame after you stop draws exactly, and the tests check it pixel for pixel.
+! cmd:views follow on | The Game view follows every frame of a drag
+! cmd:views follow off | It catches up when you let go (the default)
+! cmd:viewport device cpu; views simpler off | Every frame exact on the CPU, even while you move
+! cmd:views simpler on | Cheaper shadows while you move (the default)
 )"},
     {"Points, Lines, N-gons and Booleans", "Building from a vertex, SketchUp faces, combining solids", R"(
 Blender can start a model from a single vertex. Ctrl+E (Blender's E) on a vertex grows an edge: a "wire" or loose edge that no face uses yet. Ctrl+E on that edge grows a face. Blendity keeps those wire edges in the mesh (Mesh::loose_edges), saves them, and lets the Screw modifier sweep them into a solid.

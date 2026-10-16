@@ -10,6 +10,300 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 11: real scenes on the GPU, big meshes in Edit Mode, the CPU fallback, path-traced renders (tasks 0098-0106)
+
+The user asked "What should be more optimization gains?" and chose all four areas. Numbers are
+`--laptop --quality low --only editor_render`, two runs on a quiet machine.
+
+**Measured first (task 0098):**
+- A textured scene with a Sky world, the views set to the GPU: all 33 views drew on the CPU ("a Sky or HDRI world").
+  The world goes to the card first (task 0102), then textures (task 0101).
+- The 50k-face Edit Mode drag on the GPU is now broken down: mesh writes, the render mesh moved in place, draw items
+  (the cage), the GPU path's time a frame and the bytes sent to the card.
+
+**Edit Mode drags work out only what moved (task 0099):**
+
+| The 50k-face Move gizmo drag, a frame | Pass 10 | Now |
+|---|---|---|
+| Views on the CPU | 45 ms | 28.3 / 28.4 ms |
+| Views on the GPU | 25 ms | 15.1 / 14.3 ms |
+| Render meshes moved in place (both caches), CPU path | about 6.8 ms | 1.76 / 1.64 ms |
+| The same, GPU path | about 6.8 ms | 1.24 / 1.13 ms |
+| Sent to the card | every vertex and index of each drawn cache | under 1 KB |
+| The GPU path (send, render, read back) | 7.0-7.3 ms | 5.0 ms |
+
+The in-place update used to visit the whole mesh: every corner to find what moved, every face and corner normal,
+every corner written back. Now each step works on the moved faces and the vertices around them. A `NormalState` kept
+per render cache holds the face and corner normals of the last pass, and each sum runs in the full pass's order, so
+the result is the same to the bit (tested on 7 kinds of mesh, on Windows, Linux and under the sanitizers). The card
+gets only the changed vertex ranges and the re-split triangles. What is left in the GPU drag is mostly the cage
+overlay, drawn on the CPU (task 0100 moves it to the GPU).
+
+**The Edit Mode cage on the GPU (task 0100):**
+
+| Laptop setting, views on the GPU | Before | Now |
+|---|---|---|
+| The 50k-face Move gizmo drag | 14.3 ms | 11.5 / 12.3 ms |
+| ... of it the CPU's overlays | 4.3 ms (the cage prepared 1.6, drawn 2.9) | 0.5 ms |
+| Moving an object | 3.9 ms | 3.9 / 4.2 ms |
+| Playing | 6.7 ms | 7.5 / 8.1 ms |
+
+- The card draws the cage's 100,000 edges and 50,000 vertex dots into the picture before the read-back, with the
+  CPU's own line and dot rules. Its vertices and edge colours stay on the card: a drag frame sends the moved vertices
+  (16 bytes for one), and the edge colours are worked out again only when the selection or topology changes.
+- Each small upload used to wait for the card on its own (three round trips a drag frame); they now go in front of
+  the frame's own submission.
+- The Scene view on the card draws at full size: sharper on the laptop setting, and the overlays sit on a full-size
+  picture. Playing costs 0.8-1.4 ms more for it (a bigger read-back).
+
+**Textures on the GPU (task 0101, ADR 0038):**
+
+| Laptop setting, moving an object | Views on the CPU | Views on the GPU |
+|---|---|---|
+| The editor scene, a Checker on the 200 icospheres, Gradient world | 18.0 ms | 10.4 ms (all 33 views on the card; before: all on the CPU) |
+
+- The scene still holds the 50k-face sphere of the Edit Mode rows in both, so these are heavier than the plain
+  scene's rows.
+- The card samples textures the CPU's way, in its shaders, from the CPU's own mip chain (ADR 0038): storage buffers,
+  four texels per level per map, not the texture units. A 1080p G-buffer of textured objects took under 1 ms of GPU
+  time here.
+- Every vertex sent to the card is now 48 bytes, not 24 (UVs and tangents): a mesh takes twice the card's memory
+  and a whole upload twice the bytes. A mesh with several materials is grouped by material on the card, so its Edit
+  Mode drag sends the whole mesh rather than the moved ranges.
+
+**Sky / HDRI worlds and toon on the GPU (task 0102):**
+
+| Laptop setting, moving an object | Before | Now |
+|---|---|---|
+| The textured editor scene with a Sky world, views set to the GPU | 22.1 ms (all 33 views fell back to the CPU) | 9.9 ms (all on the card) |
+
+- The world's map is one more texture on the card (a Sky's 512 x 256 float map with its mips); its diffuse light is
+  nine numbers worked out once on the CPU. A Sky world costs the card a texture read per background pixel and per
+  reflection.
+- A Sky's map is made anew when its sun changes: the card lets the old one go at once.
+
+**The other views catch up on release, and cheaper CPU frames while moving (tasks 0103, 0104, ADR 0039):**
+
+| Laptop setting, views on the CPU | Before | Now |
+|---|---|---|
+| The 50k-face Edit Mode drag, Move gizmo | 28.3 ms | 21.5 ms |
+| ... the Game view | 8.6 ms | 0.2 ms (it keeps its picture; it draws on release) |
+| ... the shadow map | 3.5 ms | 2.3 ms (half size, 2 x 2 filter, while moving) |
+| The same drag with G | 27.8 ms | 20.9 ms |
+
+- Only a drag or navigation in the Scene view itself counts as moving: a click in the Hierarchy or a slider held in
+  the Inspector holds no view and makes nothing cheaper.
+- The release frame draws the Scene view again (exactly) and the held views once.
+- The shadow cache holds two maps; a drag's first half-size map can push out one of the exact ones, which the release
+  then renders again.
+- Rows that move an object from code (no mouse drag) are unchanged.
+
+## OptiX against GPU Compute (task 0097, ADR 0037)
+
+`blendity_stress --only gpu_optix` (1920x1080, 256 icospheres and a floor, Lambert-like materials, 64 samples, 4
+bounces), samples a second, two runs:
+
+| Card | GPU Compute (Vulkan, RT cores) | OptiX | OptiX vs GPU Compute |
+|---|---|---|---|
+| RTX 4070 SUPER | 550.7 / 593.1 | 1040.6 / 1058.5 | 1.89x / 1.78x |
+| RTX 3060 Ti | 285.8 / 286.7 | 593.5 / 588.8 | 2.08x / 2.05x |
+
+Both include bringing the picture back. The pictures agree in mean brightness (100.0 %). Scene builds take 7-15 ms
+on OptiX, against 182-252 ms for GPU Compute, whose CPU-side flattening and upload are counted.
+
+What makes the OptiX kernel cheaper per sample, besides OptiX:
+- **Shading:** it is Lambert with flat normals. There are no textures or mesh lights, no GGX, a sharp sun, and no
+  smooth-normal interpolation.
+- **Memory traffic:** GPU Compute reads and writes its accumulation and its denoiser passes (albedo, normal, depth)
+  for every sample, about 200 MB a sample at 1080p, and runs a dispatch per sample. OptiX adds 8 samples in registers
+  and writes once per launch.
+- **The other way:** OptiX traces more rays. It has no Russian roulette, where GPU Compute's stops most paths after
+  the third bounce.
+
+So these numbers are the most OptiX could gain. A full port, with the same shading and passes, would gain less.
+
+## The views on the GPU (task 0096, ADR 0036)
+
+`blendity_stress --laptop --quality low --only editor_render`, rows with Viewport Device GPU (this machine's RTX 4070
+SUPER) beside the CPU's:
+
+| Laptop setting (`--laptop --quality low`), ms a frame, two runs | CPU | GPU (RTX 4070 SUPER) |
+|---|---|---|
+| moving an object | 16.63-16.85 | 4.05-4.10 |
+| playing | 20.58-22.07 | 5.61-6.78 |
+| Edit Mode: Move-gizmo drag, 50k faces | 43.68-46.57 | 24.68-25.05 |
+
+- **The views' cost goes:** a moved object's three views take 2.6-3.7 ms a frame in the GPU path, rendering and
+  reading back included. A view the GPU draws renders its own shadow map; the CPU only fits its frame.
+- **What is left is the CPU's:** the UI, the overlays, the draw items and the shadow map's fit.
+- **What is left of the Edit Mode drag (25 ms):**
+  - the render mesh moved in place (about 6.8 ms);
+  - the cage overlays (6.5 ms);
+  - the draw items;
+  - the sphere's caches sent to the card (the in-place update sends every vertex).
+
+  Next: send only the moved vertices, and draw the cage on the GPU (route (B)).
+
+## A GPU view, spike 2 (task 0095, ADR 0013 amended)
+
+`blendity_stress --only gpu_raster`, 1080p, the editor scene's content, two runs:
+
+| | CPU, one 1080p view (32 threads) | RTX 4070 SUPER | RTX 3060 Ti |
+|---|---|---|---|
+| GPU work: shadow / G-buffer / lighting | - | 0.05 / 0.15 / 0.05 ms | 0.08-0.09 / 0.21-0.24 / 0.09-0.10 ms |
+| rendered, waited for | 14.33-14.56 ms | 0.37 ms | 0.50-0.57 ms |
+| (A) plus colour, depth and ids read back | - | 2.67-2.70 ms (0.18-0.19x) | 5.71-5.78 ms (0.40x) |
+| a moved object / a 50k-face drag, (A) | 14.3-14.6 ms | 2.62-2.64 / 2.78-2.79 ms | 5.64-5.68 / 6.06-6.10 ms |
+| (B) rendered and shown in a window (the UI's changed rows up) | 16.52-16.77 ms (drawn, its rows presented) | 0.52 ms (0.03x) | 2.22 ms (0.13x) |
+| picture vs the CPU's (1.33 M covered pixels away from edges) | - | mean 0.32 / 255, 99.8 % within 3 / 255, ids 100 % | the same |
+
+Task 0015's no-go measured a path tracer standing in for a view. Drawing triangles costs the GPU under half a
+millisecond. What is left of (A) is reading back 24 MB a frame, and (B) skips even that. The CPU's view on the laptop
+setting is 40.1 ms raw.
+
+- **Where the comparison is harder on the GPU than a viewport would be:** the GPU draws its shadow map every frame (the
+  CPU's is cached). (A) reads back colour, depth and ids every frame, where a viewport would read ids only on a click.
+- **Where it is easier:** (B)'s timing ends at the GPU's copies. The system's own work after the present (the
+  compositor's blit, and a copy to the display's card for the RTX 3060 Ti) isn't timed, where the CPU's GDI copy is.
+  Even three times 2.2 ms stays under the bar.
+
+## The denoiser on the GPU (task 0094)
+
+`blendity_stress --only pathtracer`, the denoiser table (this machine: 16-core Ryzen 9 5900XT, RTX 4070 SUPER), ms a
+frame:
+
+| Resolution | A-Trous | OpenImageDenoise, CPU (before) | CPU (after) | GPU (CUDA) |
+|---|---|---|---|---|
+| 640 x 360 | 31.9 | 70.8 | 51.9 | 5.1 |
+| 1280 x 720 | 112.3 | 240.6 | 207.8 | 19.5 |
+| 1920 x 1080 | 251.0 | 580.9 | 463.4 | 43.1 |
+
+- **The filter is kept between frames** of one size, as Cycles keeps its denoiser: a new filter loads its weights and
+  plans its work again (CPU 580.9 → 463.4 ms at 1080p).
+- **A GPU's images live in its own memory.** OIDN's default on CUDA is managed memory, which Windows pages across the
+  bus while the network reads it: 220 ms for the filter alone at 1080p, whatever the quality setting, against 15 ms in
+  device memory.
+- **The images are prepared in parallel** (20 ms on one thread at 1080p).
+- **Opening the GPU** the first time costs 92-139 ms, once.
+
+Honest limits: the laptop's Iris Xe isn't supported by OIDN's GPU modules (SYCL needs Intel Arc), so it denoises on
+the CPU. The images still go up and come back through the host each frame. Sharing Vulkan's memory with CUDA would
+skip that, but it is about 10 of the 43 ms.
+
+## Pass 10: viewport frame rate and big meshes in Edit Mode (tasks 0083-0092)
+
+**Summary** (task 0093). `editor_render` on the laptop setting, ms a frame, raw (x 1.4 for the laptop):
+
+| Frame | Before the pass | After 0092 | On the laptop (x 1.4) |
+|---|---|---|---|
+| idle | 0.76 | 0.77 | 1.1 |
+| orbiting the Scene view | 9.36 | 8.04 | 11.3 (88 fps) |
+| moving an object | 19.53 | 16.12 | 22.6 (44 fps) |
+| editing a material colour | 17.96 | 15.66 | 21.9 (46 fps) |
+| playing | 16.97 | 14.70 | 20.6 (49 fps) |
+| Edit Mode: Move-gizmo drag, 50k faces | 97.75 | 33.09 | 46.3 (22 fps) |
+| Edit Mode: G, 50k faces | 100.20 | 31.32 | 43.8 (23 fps) |
+
+Pacing at a 60 fps cap with 13 ms frames: 30.6 → 16.6 ms between frames (95 % within 32.0 → 16.7); a present when
+nothing changed 2.42 → 0.07 ms.
+
+What the plan's targets came to:
+- **ADR 0026's laptop targets** (60 fps orbiting, 30 fps editing on Low): met - orbiting 88 fps, editing 44-49 fps.
+- **The plan's stretch, 60 fps while moving, editing materials and playing:** missed (44-49 fps on the
+  laptop). What is left of a moved-object frame: the Scene view 7.8 ms (its shading 3.8, sky 0.5), the Game view
+  6.3, the Camera Preview 1.3, the UI 0.8, the shadow map 0.5.
+- **Edit Mode drags on 50k faces, 30 fps:** missed (22-23 fps on the laptop, from 7). What is left: the Scene view
+  drawing the 50k-face mesh flat with its cage (19.2 ms, the cage 4.7), the Game view (11.2 ms), the render meshes
+  moved in place (5-7 ms, inside the views' gathering of draw items), the shadow map (3.7 ms), the UI (2.7 ms).
+- Pictures: the same throughout; the 8-wide shader (0091) the same on screen, its colours before display within
+  1.5e-5. Verify mode stayed at 0 stale pictures in every task.
+
+Honest negatives: the Realtime GI drag in Automatic mode (71 ms, the lighting update itself); the 8-wide shader's
+gain is held back by the per-pixel shadow lookup and end; 0092 saved 0.07 ms. Not done: reusing the sky between
+frames (it would change background pixels slightly), BVH face picking and snapping (not seen in the drag's numbers).
+
+The laptop setting (`blendity_stress --laptop --quality low --only editor_render`, and `--only present`, run on the
+development machine on 2026-10-15; raw times, multiply by 1.4 for the laptop's clock). `editor_render` rows, ms per
+frame:
+
+| Frame | Before (task 0083) |
+|---|---|
+| idle | 0.76 |
+| orbiting the Scene view | 9.36 |
+| moving an object | 19.53 |
+| editing a material colour | 17.96 |
+| playing | 16.97 |
+| Edit Mode: Move-gizmo drag of a vertex, 50k faces | 97.75 |
+| Edit Mode: G, 50k faces | 100.20 |
+
+Where the gizmo drag goes, per frame: two render meshes built from scratch (38.6 ms: the Scene view's flat cache and
+the Game view's smooth one), the drag's writes 24.5 ms (`repair_moved_rings` scans every face), the shadow map 7.5 ms
+(the big mesh casts), the Edit Mode overlay 8.7 ms, one edge table 1.1 ms. G adds a whole-mesh copy (2.7 ms) a frame.
+
+`present` (a real window, 2560 x 1369 at this desktop's scale): 2.40 ms a present on average, 9.34 ms at the 95th
+percentile. **Pacing:** a 60 fps cap with 13 ms frames (present included) gave 30.6 ms between frames (95 % within 32.0), with no input arriving: the loop's
+waits are rounded up to Windows' 15.6 ms timer, so a frame that leaves less than a tick waits a whole one more.
+
+**Task 0084** (`--only present`, same window):
+
+| | Before | After |
+|---|---|---|
+| 60 fps cap, 13 ms frames: between frames (mean / 95 %) | 30.55 / 31.98 ms | 16.58 / 16.70 ms (`FramePacer` + a high-resolution timer) |
+| the same, the high-resolution timer alone | - | 16.56 / 17.61 ms |
+| presenting while a Scene-view-sized block of rows changes | 2.42 / 9.38 ms (all of it) | 0.68 / 0.70 ms (the changed bands, hashing included) |
+| presenting when nothing changed | 2.42 / 9.38 ms | 0.07 / 0.08 ms |
+
+The full present's long tail (9 ms at the 95th percentile) went with it: smaller copies don't wait as long on the
+desktop compositor.
+
+**Task 0085** (per-view waste): a moved-object frame's own setup around the rasterizer was measured first - draw
+items 0.07 ms, scene hashes 0.03 ms (three) - so only what showed was changed: the sun's shadow map no longer clears
+and writes an ids plane (0.68 → 0.48 ms a moved frame), and a view checking its voxel GI grid no longer allocates a
+column pyramid to do it. Honest negative: the Realtime GI drag in Automatic mode stays at 71 ms; that is the
+automatic lighting update itself (its Camera Preview and its UI-side update), not the grid.
+
+**Task 0086** (ADR 0034): the render mesh follows a positions-only edit in place. The Move-gizmo drag on 50k faces:
+98 → 69 ms a frame (two render meshes moved in place, 10.3 ms, instead of built, 38.6 ms; no edge table); G 100 → 67
+ms. What is left of the drag: its writes, 25.8 ms (ring repair, task 0087), the shadow map 7.0 ms, the overlay 7.4 ms.
+
+**Task 0087**: ring repair looked edges up in a map of the whole mesh it built every frame; per-vertex face lists kept
+per topology replace it (the drag's writes 25.8 → 1.6 ms). G reuses its copy (one copy in about ten frames). During
+any drag the overlap check and the lighting key wait. The Move-gizmo drag on 50k faces: **43 ms** a frame (98 before
+the pass), G **42 ms**. What is left: the Scene view 24 ms (the 50k mesh's raster and shading, its Edit Mode overlay
+7.5 ms), the Game view 16.5 ms, the render meshes moved in place 9 ms, the shadow map 6.9 ms.
+
+**Task 0088**: a material that is the same everywhere but for the normal is evaluated once per triangle (the deferred
+shader's setup), each pixel taking it with its own normal - bit for bit the same picture. The Scene view's shading on a
+moved-object frame 5.12 → 4.53 ms, the Game view's 5.53 → 5.08. And the shadow map keys on a caster's shape (the same
+for an edited mesh's flat and smooth caches), so a drag renders it once a frame, not twice. Laptop setting, ms a frame:
+
+| Frame | Before the pass | After 0088 |
+|---|---|---|
+| moving an object | 19.53 | 17.23 |
+| editing a material colour | 17.96 | 16.49 |
+| playing | 16.97 | 15.53 |
+| Edit Mode: Move-gizmo drag, 50k faces | 97.75 | 38.63 |
+| Edit Mode: G, 50k faces | 100.20 | 37.01 |
+
+**Task 0089**: the Edit Mode cage (100,000 edges and 50,000 dots of the 50k-face mesh) is placed in the world once per
+vertex and recorded in parallel batches, in order: the overlays 7.4 → 4.5 ms a frame, the gizmo drag 38.6 → 35.4 ms,
+G 37.0 → 34.4 ms.
+
+**Task 0090**: an in-place update splits only the faces with a moved vertex into triangles again and works out face
+normals in parallel (bit-identical): the two caches 9.1 → 6.7 ms a frame; the gizmo drag 35.4 → 33.7 ms, G 34.4 →
+33.0 ms. Honest negative: at ×1.4 that is about 47 ms on the laptop, short of the plan's 33 ms; the rest is the Scene
+view drawing the 50k-face mesh flat (19 ms, its overlays 4.5), the Game view (11 ms) and the shadow map (3.5 ms).
+
+**Task 0091** (ADR 0035): a plain material's pixels are lit 8 at a time with AVX2 (the same displayed pixels; colours
+before display within 1.5e-5). Back to back in one run, off / on: moving an object 17.18 / 16.31 ms a frame, the Scene
+view's shading 4.45 / 3.86 ms (75,728 pixels lit 8 at a time). After it: moving an object 16.35 ms, editing a material
+colour 15.82, playing 14.88, the gizmo drag 32.90. Honest negative: the shadow lookup and each pixel's end
+(reflections, ambient: an `exp2` each) stay one pixel at a time, so the gain is a third of the lights' share, not more.
+
+**Task 0092**: below full resolution the Game view and the Camera Preview no longer scale their depth and ids up to
+full size (only the Scene view is picked in). Honest result: a moved-object frame 16.16 → 16.09 ms; the colour's
+upscale is most of the cost and stays.
+
 ## Pass 9: the laptop minimum (task 0075, ADR 0026 amended)
 
 The minimum became the user's HP Envy 13.3" 2-in-1: an i7-1165G7 (4 cores / 8 threads, 28 W), 8 GB shared with Iris
@@ -391,15 +685,19 @@ gradients): 6.6 ms, 8.3 ms with sharp edges (smoothing fans) (stress `modifiers_
 
 ## Next candidates
 
-- **Positions-only Edit Mode updates** (pass 6). Keep the triangulation, edges and n-gon regions while a
-  drag only moves vertices, and check overlaps incrementally.
+- **During an Edit Mode drag:** draw the Game view less often than the Scene view (it is a third of the drag), and
+  the 50k-face flat raster of the Scene view itself.
+- **The 8-wide shader's rest:** the shadow lookup (gathers) and each pixel's end (reflections, ambient) 8 at a time.
+- **The sky behind the views:** reuse it while the camera stays (0.5 ms a view), if slightly different background
+  pixels are acceptable.
+- **Incremental overlap checks** after an Edit Mode drag (a 50k-face mesh changed every frame outside a drag
+  costs 332 ms, the check included).
 
 Done since the last list: SIMD in the rasterizer (pass 3, in triangle setup rather than the per-pixel edge functions, which the timings showed aren't the bottleneck), a direct sparse solver for large LSCM islands (Eigen), and a real broad phase for physics (Jolt).
 
-1. An 8-pixels-at-a-time deferred shader (ISPC style), now the largest remaining cost of the Shaded view.
-2. SIMD vertex transform in the rasterizer's fused vertex stage (8 vertices per step).
-3. 4-wide BVH traversal in the built-in path tracer, for builds without Embree (GEA Vol. I 4.10).
-4. Reuse the path tracer's per-mesh BVH for Edit Mode face picking (currently linear in triangle count).
-5. Parallel mip-map generation for 4K+ textures.
-6. Replacing the per-component `std::map` in the scene loader with a flat vector.
-7. A uniform-grid broad phase for the fallback `physics_step` (O(bodies²) without Jolt).
+1. SIMD vertex transform in the rasterizer's fused vertex stage (8 vertices per step).
+2. 4-wide BVH traversal in the built-in path tracer, for builds without Embree (GEA Vol. I 4.10).
+3. Reuse the path tracer's per-mesh BVH for Edit Mode face picking (currently linear in triangle count).
+4. Parallel mip-map generation for 4K+ textures.
+5. Replacing the per-component `std::map` in the scene loader with a flat vector.
+6. A uniform-grid broad phase for the fallback `physics_step` (O(bodies²) without Jolt).
