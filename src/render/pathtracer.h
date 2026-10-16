@@ -72,6 +72,9 @@ struct PTSettings {
    * use_embree takes effect on the next build(). */
   bool use_embree = true;
   bool use_oidn = true;
+  /* Task 0094: where OpenImageDenoise runs. 0 Auto (a GPU when OIDN's CUDA or HIP module finds one, unless
+   * BLENDITY_DENOISE_DEVICE=cpu), 1 CPU, 2 GPU (the CPU without one). A GPU error denoises on the CPU. */
+  int denoise_device = 0;
   /* Path guiding with OpenPGL (Cycles: Light Paths > Path Guiding): learns
    * where light comes from during the first training samples and steers
    * bounces there, mixed with BSDF sampling (one-sample MIS). Opt-in, as in
@@ -176,9 +179,19 @@ class PathTracer {
 
   static bool embree_available();
   static bool oidn_available();
+  /* Task 0094: OIDN found a GPU and opened it (whatever Denoise Device says); its fallbacks to the CPU so far; a
+   * test hook that makes the GPU fail. */
+  static bool oidn_gpu_available();
+  static size_t oidn_gpu_fallbacks();
+  static void oidn_fail_gpu_for_test(bool on);
+  /* The GPU denoiser's filter and buffers (about 0.6-1.2 GB at 1080p) leave the card; the next denoise makes them
+   * again. Called before a GPU render fits its scene to the card's memory. */
+  static void oidn_release_gpu();
+  static bool oidn_gpu_holds_buffers();
   static bool guiding_available();
   bool guiding_active() const;  // the field has learned something and steers bounces
-  /* "Embree" or "Blendity BVH", and "OpenImageDenoise" or "A-Trous". */
+  /* "Embree" or "Blendity BVH", and "OpenImageDenoise" (", CUDA: <card>" when the last denoise ran there) or
+   * "A-Trous". */
   const char *ray_backend() const;
   const char *denoise_backend() const;
   /* "CPU", "NVIDIA GeForce RTX 4070 SUPER (RT cores)", "CPU + 2 GPUs" ... */
@@ -215,6 +228,7 @@ class PathTracer {
   float mesh_light_pdf(uint32_t light, float dist, float cos_light) const;
   const Material *surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const;
   std::vector<float> denoised_oidn() const;
+  mutable const char *oidn_label_ = "OpenImageDenoise";  // the device the last OIDN denoise ran on
   struct Tri {
     Vec3 v0, e1, e2;
   };
