@@ -2631,6 +2631,16 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
   u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster; anything it doesn't draw\n"
             "yet (GI and probes, axis or see-through materials, camera filters...) draws on the CPU, as before. F12 renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
+  /* Task 0103: the other views during a drag. */
+  if (u.toggle_row(row(u.row_h()), "Other Views Follow Drags", other_views_follow_)) save_prefs();
+  u.tooltip("Off (the default): while you drag in the Scene view, the Game view and the Camera Preview keep their last picture and\n"
+            "draw once when you let go, so the drag itself stays fast (Blender's sculpt mode does the same). On: they follow\n"
+            "every frame of the drag. Play mode always draws every frame.");
+  /* Task 0104: cheaper CPU frames while moving. */
+  if (u.toggle_row(row(u.row_h()), "Simpler While Moving", simpler_while_moving_)) save_prefs();
+  u.tooltip("On (the default): while you drag or orbit, the views drawn on the CPU render the sun's shadow map at half size with a\n"
+            "softer 2 x 2 filter, and draw exactly again the moment you stop (Blender lowers its viewport's quality while you\n"
+            "navigate the same way). Off: every frame exact.");
   /* Measured: the last 60 frames' cost. */
   float avg = 0, worst = 0;
   const size_t n = std::min<size_t>(60, frame_history_.size());

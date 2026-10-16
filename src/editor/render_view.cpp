@@ -352,9 +352,10 @@ bool Editor::camera_for_render(Mat4 &view, Mat4 &proj, float aspect) {
 /* Rasterized (EEVEE-like)                                                */
 /* ===================================================================== */
 
-/* A cached map for the views now: the Low tier's take the cheaper filter (renders keep 3 x 3). */
-const ShadowMap *Editor::shadow_for_view(ShadowMap &m) const {
-  m.fast = quality_tier_ == TierLow && !final_render_;
+/* A cached map for the views now: the Low tier's take the cheaper filter (renders keep 3 x 3), and so do the CPU
+ * views while you interact (task 0104). */
+const ShadowMap *Editor::shadow_for_view(ShadowMap &m, bool cpu_view) const {
+  m.fast = (quality_tier_ == TierLow || (cpu_view && moving_cheap())) && !final_render_;
   return m.valid() ? &m : nullptr;
 }
 
@@ -405,7 +406,8 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     caster_keys.push_back(ck);
     mixer(key, &ck, 8);
   }
-  const int res = shadow_resolution_for_view();
+  const int res = shadow_resolution_for_view(!frame_only);  // (the GPU's own map stays whole: it costs it little)
+  if (!frame_only && res < shadow_resolution_for_view()) prof_.cheap_shadows++;
   const Vec3 dir = env.lights[li].direction;
   /* The frame, snapped (task 0050): its radius up to a step of a geometric series, its centre to a sixteenth of that,
    * so dragging one object about leaves the frame, and the casters that stayed still keep their map. */
@@ -442,7 +444,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     for (ShadowEntry &e : shadow_cache_)
       if (e.key == key) {
         e.used = shadow_clock_;
-        return shadow_for_view(e.map);
+        return shadow_for_view(e.map, true);
       }
   /* Which casters are moving: changed within the last second. */
   const double now = now_seconds();
@@ -499,7 +501,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   prof_.ms_shadow += t.ms();
   e.key = cacheable ? key : 0;
   e.used = shadow_clock_;
-  return shadow_for_view(e.map);
+  return shadow_for_view(e.map, true);
 }
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
@@ -707,9 +709,10 @@ void Editor::set_view_scale(float s) {
   ui_.redraw = true;
 }
 
-int Editor::shadow_resolution_for_view() const {
+int Editor::shadow_resolution_for_view(bool cpu_view) const {
   const int res = std::max(256, scene_->render.shadow_resolution);
-  return !final_render_ && tier_shadow_cap_ > 0 ? std::min(res, tier_shadow_cap_) : res;
+  const int capped = !final_render_ && tier_shadow_cap_ > 0 ? std::min(res, tier_shadow_cap_) : res;
+  return cpu_view && moving_cheap() ? std::max(256, capped / 2) : capped;
 }
 
 /* The tiers (ADR 0026). Low is measured at 8 threads on the minimum machine's budget: the views at 67 %, a 1024 shadow
@@ -1604,6 +1607,15 @@ bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
   return true;
 }
 
+bool Editor::view_cache_show(ViewCache &c, const Recti &r) {
+  if (c.key == 0 || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height)
+    return false;
+  JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
+  });
+  return true;
+}
+
 void Editor::view_cache_store(ViewCache &c, uint64_t key, const Recti &r) {
   c.key = 0;
   if (key == 0 || r.w <= 0 || r.h <= 0 || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height) return;
@@ -1642,6 +1654,8 @@ uint64_t Editor::raster_opt_key() const {
   k ^= (uint64_t)vs * 0xC2B2AE3D27D4EB4Full;
   /* The quality tier's caps (task 0050): the shadow map's size and Realtime GI's rays and reflective shadow map. */
   k ^= ((uint64_t)(uint32_t)tier_shadow_cap_ << 40 | (uint64_t)(uint32_t)tier_gi_rays_cap_ << 20 | (uint64_t)(uint32_t)tier_rsm_cap_) * 0x165667B19E3779F9ull;
+  /* Task 0104: a picture drawn the cheaper way while moving is never reused once you stop (ADR 0039). */
+  k ^= moving_cheap() ? 0xD6E8FEB86659FD93ull : 0;
   return k * 0x9E3779B97F4A7C15ull;
 }
 
@@ -1756,7 +1770,10 @@ void Editor::draw_camera_preview(const Recti &view) {
     ScopedTimer rt;
     const uint64_t key = (camera_render_hash(g, cam) ^ raster_opt_key() ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id) | 1;
     const bool hit = key == cam_preview_key_ && cam_preview_img_.width == w && cam_preview_img_.height == h;
+    const bool held = !hit && hold_other_views() && cam_preview_key_ != 0 && cam_preview_of_ == g->id && cam_preview_img_.width == w &&
+                      cam_preview_img_.height == h;
     if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else if (held) prof_.views_held++;  // (task 0103: the drag's last picture until it ends; the key still differs then)
     else {
       std::vector<uint32_t> before;
       if (hit) before = cam_preview_img_.pixels;
@@ -1772,6 +1789,7 @@ void Editor::draw_camera_preview(const Recti &view) {
         Log::warn("Render cache: the Camera Preview would have shown a stale picture");
       }
       cam_preview_key_ = key;
+      cam_preview_of_ = g->id;
     }
     prof_.ms_preview += rt.ms();
   }

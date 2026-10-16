@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** none new (ADR 0036, ADR 0038's sampling contract for the world's map)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/92
 
 ## Goal
 After task 0101, a view whose world is a Sky or an HDRI, or with a toon material or its outline, still drew on the CPU.

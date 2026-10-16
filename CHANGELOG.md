@@ -2,6 +2,55 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 128): the other views catch up on release, and cheaper frames while moving (tasks 0103, 0104, ADR 0039)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks"). In the Blender-ideas plan the user chose "Catch up on
+release" and "Yes, cheaper while moving".
+
+**Changed**
+- **The other views catch up on release (task 0103):**
+  - while you drag or navigate in the Scene view, the Game view and the Camera Preview keep their last picture and
+    draw once when you let go, as Blender's sculpt mode updates its other views when the stroke ends;
+  - Play always draws every frame;
+  - Preferences > Other Views Follow Drags (off) brings the old way back; the console's `views follow on|off`.
+- **Cheaper frames while moving (task 0104, ADR 0039):**
+  - while you drag or orbit, the views drawn on the CPU render the sun's shadow map at half size with the 2 x 2
+    filter, as Blender lowers its viewport's quality while you navigate;
+  - the frame after you stop is exact: the views' picture keys carry the cheap state, so a cheap picture is never
+    reused;
+  - Preferences > Simpler While Moving (on); the console's `views simpler on|off`; the GPU's own map stays whole.
+- **What counts as moving:** only a drag or navigation in the Scene view itself (a gizmo, an orbit, G / R / S,
+  Push/Pull, a modal tool), not any mouse button held anywhere. The frame after a move always draws.
+- **Speed:** the 50k-face Edit Mode drag on the CPU path, laptop setting: 28.3 -> 21.5 ms (the Game view 8.6 -> 0.2
+  ms, the shadow map 3.5 -> 2.3 ms).
+- A Learn section, "Drags that stay quick", with Try its for both switches.
+- The console's `views` command shares the `viewport` branch: MSVC's limit on nested blocks (C1061) was reached.
+
+**Checked**
+- **New tests (round 128):**
+  - during a 10-frame gizmo drag the Game view and the Camera Preview hold 20 pictures between them and render
+    nothing; on release both draw again, and both equal a fresh render; with Follow on they draw every frame;
+  - a gizmo drag in Play holds nothing;
+  - a click in the Hierarchy holds nothing, makes no cheap shadow and draws no view.
+- **New tests (round 129):**
+  - with Simpler While Moving, 6 drag frames take 6 half-size shadow maps and the settled frame is the exact picture,
+    pixel for pixel; off, none;
+  - verify mode finds no stale picture across such a drag.
+- Round 92's shadow-sharing test turns Follow on (it needs the Game view drawing during the drag).
+- Unit checks: Windows 10,538, 0 failed (737 tests); the whole suite in render-cache verify mode: 10,539,
+  0 failed, 0 stale pictures. Linux with libraries: 10,288, 0 failed. Sanitizer build: 10,180, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems.
+
+**Review** (Opus code-reviewer). Fixed:
+- any mouse button down anywhere counted as moving, so a click in the Hierarchy redrew the Scene view twice and
+  softened its shadows; now only a drag in the Scene view counts;
+- a held Camera Preview could show another camera's picture: it is held only for the same camera;
+- the frame after a move always draws;
+- the counter counts only maps that were actually halved;
+- the Play test now drags a gizmo, and the Camera Preview's pixels are compared after release;
+- Try its for Simpler While Moving.
+
 ## 2026-10-16 (round 127): Sky / HDRI worlds and toon on the GPU (task 0102)
 
 **Asked:** pass 11 continued ("Continue all remaining tasks").

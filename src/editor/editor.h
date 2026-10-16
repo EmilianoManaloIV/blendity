@@ -109,6 +109,8 @@ const char *window_title(WindowKind k);
 struct FrameProfile {
   double ms_scene3d = 0, ms_overlays = 0, ms_game = 0, ms_preview = 0, ms_shadow = 0, ms_ui = 0, ms_present = 0;
   uint64_t frames = 0, shadow_renders = 0, view_renders = 0, view_cache_hits = 0, cache_mismatches = 0;
+  uint64_t views_held = 0;  // task 0103: the Game view or Camera Preview kept its last picture during a drag
+  uint64_t cheap_shadows = 0;  // task 0104: shadow maps asked for at half size while you moved (cached ones too)
   uint64_t filter_target_resizes = 0, filter_stack_builds = 0;  // task 0024: both should stay still in a steady frame
   /* Task 0083: parts inside the times above (not subtracted from them): an Edit Mode drag's writes to the mesh,
    * the overlapping-vertices check, the "Lighting out of date" key, snapping's searches, gathering the views'
@@ -128,6 +130,7 @@ struct FrameProfile {
     ms_ui += o.ms_ui, ms_present += o.ms_present;
     frames += o.frames, shadow_renders += o.shadow_renders, view_renders += o.view_renders;
     view_cache_hits += o.view_cache_hits, cache_mismatches += o.cache_mismatches;
+    views_held += o.views_held, cheap_shadows += o.cheap_shadows;
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
@@ -1316,6 +1319,24 @@ class Editor {
   /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
    * Push/Pull, a modal adjustment. Whole-scene checks wait for it to end (task 0087). */
   bool interacting() const { return ui_.in.down[0] || ui_.in.down[1] || ui_.in.down[2] || xf_.active || pp_.active || modal_.active; }
+  /* Task 0103 (Blender's sculpt: flush_update_step / flush_update_done): during a drag the Game view and the Camera
+   * Preview keep their last picture and draw once on release, unless Preferences > Other Views Follow Drags is on.
+   * Play is never held back. */
+  /* A drag or navigation in the Scene view itself (a gizmo, an orbit, G / R / S, Push/Pull, a modal tool): not any
+   * mouse button down anywhere - a click in the Hierarchy or a slider held in the Inspector neither holds the other
+   * views nor makes the Scene view cheaper. */
+  bool scene_moving() const {
+    const bool nav = drag_ != Drag::None && drag_ != Drag::Box && drag_ != Drag::AltClick;
+    return nav || xf_.active || pp_.active || modal_.active;
+  }
+  bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
+  bool other_views_follow_ = false;
+  void views_command(const std::string &what, const std::string &value);
+  bool hold_other_views() const { return !other_views_follow_ && scene_moving() && !(playing_ && !paused_); }
+  /* Task 0104 (ADR 0039; Blender's is_navigating / is_transforming): while you interact, the CPU views' shadow map is
+   * rendered at half size with the 2 x 2 filter; the frame after is exact (the views' keys carry this). */
+  bool simpler_while_moving_ = true;
+  bool moving_cheap() const { return simpler_while_moving_ && scene_moving() && !final_render_; }
   /* The overlapping-vertices check (zfight.cpp): refreshed when not interacting; during an interaction its result is
    * still shown while the mesh hasn't changed (orbiting, a click), and not once it has (a drag). */
   bool overlap_current();
@@ -1646,8 +1667,8 @@ class Editor {
   int quality_tier() const { return quality_tier_; }
   void set_quality_tier(int tier);
   static int recommended_tier();  // Low on 8 threads or fewer or 8 GB or less, else High
-  int shadow_resolution_for_view() const;
-  const ShadowMap *shadow_for_view(ShadowMap &m) const;
+  int shadow_resolution_for_view(bool cpu_view = false) const;  // cpu_view: halved while moving (task 0104)
+  const ShadowMap *shadow_for_view(ShadowMap &m, bool cpu_view = false) const;
   void set_cpu_threads(int n);
   int cpu_threads() const { return cpu_threads_; }
   bool always_redraw() const { return always_redraw_; }
@@ -2055,7 +2076,9 @@ class Editor {
     Image img;
   };
   ViewCache scene_cache_, game_cache_;
+  bool view_cache_show(ViewCache &c, const Recti &r);  // its last picture whatever the key (a held view, task 0103)
   uint64_t cam_preview_key_ = 0;
+  uint64_t cam_preview_of_ = 0;  // the camera its picture is of (a held one must be the same camera's: task 0103)
   bool cache_verify_ = std::getenv("BLENDITY_RENDER_CACHE_VERIFY") != nullptr;
   FrameProfile prof_, prof_last_, prof_total_;
   uint64_t frame_scene_hash(uint64_t *scene_hash = nullptr);

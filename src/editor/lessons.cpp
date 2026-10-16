@@ -819,6 +819,15 @@ The Scene view, Game view and Camera Preview can draw their 3D on the GPU too (P
 ? Why does the GPU read textures from storage buffers instead of using its texture units? | The texture units filter, choose mip levels and decode sRGB in their own slightly different ways. Reading the CPU's own mip chain and filtering it with the CPU's formulas keeps the two pictures within a step of 255.
 ! cmd:viewport device gpu | Draw the views on the GPU
 ! cmd:viewport device cpu | Draw the views on the CPU again
+# Drags that stay quick
+While you drag something in the Scene view, the Game view and the Camera Preview keep the picture they had and draw once when you let go, as Blender's sculpt mode updates its other views when the stroke ends. Play always draws every frame. Preferences > Other Views Follow Drags makes them follow every frame instead. On the CPU, the Scene view also draws more cheaply while you drag or orbit: the sun's shadow map at half size with a softer filter. The frame after you stop is exact again, as Blender's viewport is after it lowers its quality while you navigate (Preferences > Simpler While Moving).
+@ blender/source/blender/editors/sculpt_paint/mesh/sculpt.cc, blender/source/blender/draw/engines/eevee/eevee_instance.cc
+? Why does the Game view seem to lag behind a drag and then jump? | It keeps its last picture during the drag and draws once on release: rendering the scene again for it every frame of a drag is what made drags slow. Turn on Other Views Follow Drags to see it follow.
+? Is the picture you see after a drag ever the cheaper one? | No. A picture drawn the cheaper way is never reused: the first frame after you stop draws exactly, and the tests check it pixel for pixel.
+! cmd:views follow on | The Game view follows every frame of a drag
+! cmd:views follow off | It catches up when you let go (the default)
+! cmd:viewport device cpu; views simpler off | Every frame exact on the CPU, even while you move
+! cmd:views simpler on | Cheaper shadows while you move (the default)
 )"},
     {"Points, Lines, N-gons and Booleans", "Building from a vertex, SketchUp faces, combining solids", R"(
 Blender can start a model from a single vertex. Ctrl+E (Blender's E) on a vertex grows an edge: a "wire" or loose edge that no face uses yet. Ctrl+E on that edge grows a face. Blendity keeps those wire edges in the mesh (Mesh::loose_edges), saves them, and lets the Screw modifier sweep them into a solid.

@@ -82,6 +82,22 @@ overlay, drawn on the CPU (task 0100 moves it to the GPU).
   reflection.
 - A Sky's map is made anew when its sun changes: the card lets the old one go at once.
 
+**The other views catch up on release, and cheaper CPU frames while moving (tasks 0103, 0104, ADR 0039):**
+
+| Laptop setting, views on the CPU | Before | Now |
+|---|---|---|
+| The 50k-face Edit Mode drag, Move gizmo | 28.3 ms | 21.5 ms |
+| ... the Game view | 8.6 ms | 0.2 ms (it keeps its picture; it draws on release) |
+| ... the shadow map | 3.5 ms | 2.3 ms (half size, 2 x 2 filter, while moving) |
+| The same drag with G | 27.8 ms | 20.9 ms |
+
+- Only a drag or navigation in the Scene view itself counts as moving: a click in the Hierarchy or a slider held in
+  the Inspector holds no view and makes nothing cheaper.
+- The release frame draws the Scene view again (exactly) and the held views once.
+- The shadow cache holds two maps; a drag's first half-size map can push out one of the exact ones, which the release
+  then renders again.
+- Rows that move an object from code (no mouse drag) are unchanged.
+
 ## OptiX against GPU Compute (task 0097, ADR 0037)
 
 `blendity_stress --only gpu_optix` (1920x1080, 256 icospheres and a floor, Lambert-like materials, 64 samples, 4

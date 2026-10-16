@@ -3408,6 +3408,7 @@ void Editor::draw_game_view(const Recti &r) {
         animating ? 0 : camera_render_hash(owner, cam) ^ raster_opt_key() ^ time_key ^ ((uint64_t)img.w << 48) ^ ((uint64_t)img.h << 32) ^ ((uint64_t)img.x << 16) ^ (uint64_t)img.y;
     const bool hit = view_cache_hit(game_cache_, key, img);
     if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else if (!hit && hold_other_views() && view_cache_show(game_cache_, img)) prof_.views_held++;  // (task 0103: drawn on release)
     else {
       render_scaled(game_r3d_, game_rt_, game_vs_, v, p, [&](RenderTarget &t) {
         render_camera(game_r3d_, t, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain

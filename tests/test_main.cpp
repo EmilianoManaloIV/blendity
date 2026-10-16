@@ -29511,6 +29511,7 @@ static void round81_tests() {
     if (!cube) return;
     cube->get<MeshFilter>()->mesh->smooth = true;  // (a flat Edit Mode cache and a smooth render cache)
     cube->get<MeshFilter>()->mesh->touch();
+    ed.command("views follow on");  // (the Game view draws during the drag too: it and the Scene view share the map; task 0103)
     ed.command("select Cube");
     ed.command("edit vertex");
     ed.command("vsel 0");
@@ -31099,5 +31100,163 @@ static void round81_tests() {
                   slab->set_local_position({0.4f, 1.6f, 0.2f});
                   slab->set_local_scale({1.2f, 0.1f, 1.2f});
                 }));
+  });
+  /* ---------------------------------------------------------------- round 128: the other views catch up on release (task 0103) */
+  test("views: during a gizmo drag the Game view and the Camera Preview keep their last picture, draw once on release as a fresh render would, and follow every frame with Other Views Follow Drags on", [] {
+    for (bool follow : {false, true}) {
+      Editor ed;
+      r34_open(ed);
+      ed.command(follow ? "views follow on" : "views follow off");
+      ed.command("select Main Camera");  // (the Camera Preview up, and kept up while the cube is selected)
+      ed.command("camerapreview lock");
+      r34_steps(ed, 3);
+      GameObject *cube = ed.scene().find_by_name("Cube");
+      CHECK(cube != nullptr);
+      if (!cube) return;
+      ed.command("select Cube");
+      ed.command("camera 0 20 6 0 0.5 0");  // (the X arrow points straight right on screen)
+      ed.command("tool move");
+      r34_steps(ed, 3);
+      int x = 0, y = 0;
+      CHECK(ed.project_to_window(cube->world_position(), x, y));
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+      const FrameProfile before = ed.frame_profile_totals();
+      for (int k = 1; k <= 10; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + 4 * k, y)});
+      const FrameProfile during = ed.frame_profile_totals();
+      ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 95, y)});
+      r34_steps(ed, 1);
+      const FrameProfile after = ed.frame_profile_totals();
+      const std::vector<uint32_t> game = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+      const std::vector<uint32_t> preview = r34_crop(ed, ed.cam_preview_rect_for_test());
+      const uint64_t held = during.views_held - before.views_held, renders = during.view_renders - before.view_renders;
+      std::printf("    %s: 10 drag frames - %llu pictures held, %llu views rendered; on release %llu rendered\n", follow ? "following" : "catching up",
+                  (unsigned long long)held, (unsigned long long)renders, (unsigned long long)(after.view_renders - during.view_renders));
+      if (follow) {
+        CHECK(held == 0);
+        CHECK(renders >= 20);  // (the Scene view and the Game view every frame, at least)
+        continue;
+      }
+      CHECK(held >= 10);                                 // (the Game view at least, every frame of the drag)
+      CHECK(renders <= 10 + 1);                          // (the Scene view's own, and no more)
+      CHECK(after.view_renders - during.view_renders >= 2);  // (the release: the Game view and the Camera Preview again)
+      /* What the Game view shows after the release is what it draws afresh (a change made and taken back). */
+      const Vec3 at = cube->local().position;
+      cube->set_local_position(at + Vec3(0.001f, 0, 0));
+      r34_steps(ed, 2);
+      cube->set_local_position(at);
+      r34_steps(ed, 2);
+      CHECK(game == r34_crop(ed, ed.window_rect_for_test(WindowKind::Game)));
+      CHECK(preview == r34_crop(ed, ed.cam_preview_rect_for_test()));
+    }
+  });
+  test("views: in Play the Game view draws every frame, a gizmo drag or not", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("views follow off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("select Cube");
+    ed.command("camera 0 20 6 0 0.5 0");  // (the X arrow points straight right on screen)
+    ed.command("tool move");
+    ed.command("play");
+    r34_steps(ed, 2);
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(cube->world_position(), x, y));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+    const FrameProfile before = ed.frame_profile_totals();
+    for (int k = 1; k <= 5; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + 4 * k, y)});
+    const FrameProfile after = ed.frame_profile_totals();
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 75, y)});
+    ed.command("stop");
+    std::printf("    5 frames of a drag in Play: %llu pictures held, %llu views drawn\n", (unsigned long long)(after.views_held - before.views_held),
+                (unsigned long long)(after.view_renders - before.view_renders));
+    CHECK(after.views_held == before.views_held);
+    CHECK(after.view_renders - before.view_renders >= 10);  // (the Scene view and the Game view, every frame)
+  });
+  test("views: a click in the Hierarchy holds no view and doesn't draw the Scene view again (only a drag in the Scene view does)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(1);
+    r34_steps(ed, 3);
+    const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+    const FrameProfile before = ed.frame_profile_totals();
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, h.x + h.w / 2, h.y + h.h - 12)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, h.x + h.w / 2, h.y + h.h - 12)});
+    r34_steps(ed, 2);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, h.x + h.w / 2, h.y + h.h - 12)});
+    r34_steps(ed, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    std::printf("    a click in the Hierarchy's empty space: %llu pictures held, %llu cheap shadow maps, %llu views drawn\n",
+                (unsigned long long)(after.views_held - before.views_held), (unsigned long long)(after.cheap_shadows - before.cheap_shadows),
+                (unsigned long long)(after.view_renders - before.view_renders));
+    CHECK(after.views_held == before.views_held);
+    CHECK(after.cheap_shadows == before.cheap_shadows);
+    CHECK(after.view_renders == before.view_renders);
+  });
+  /* ---------------------------------------------------------------- round 129: cheaper frames while moving (task 0104) */
+  test("views: while a gizmo drag moves the cube the CPU views take a half-size shadow map, and the frame after release is the exact picture; off, every frame is exact", [] {
+    for (bool simpler : {true, false}) {
+      Editor ed;
+      r34_open(ed);
+      ed.viewport_device_for_test(1);
+      ed.command(simpler ? "views simpler on" : "views simpler off");
+      GameObject *cube = ed.scene().find_by_name("Cube");
+      CHECK(cube != nullptr);
+      if (!cube) return;
+      ed.command("select Cube");
+    ed.command("camera 0 20 6 0 0.5 0");  // (the X arrow points straight right on screen)
+      ed.command("tool move");
+      r34_steps(ed, 3);
+      int x = 0, y = 0;
+      CHECK(ed.project_to_window(cube->world_position(), x, y));
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+      const FrameProfile before = ed.frame_profile_totals();
+      for (int k = 1; k <= 6; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + 5 * k, y)});
+      const FrameProfile during = ed.frame_profile_totals();
+      ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 85, y)});
+      r34_steps(ed, 1);
+      const std::vector<uint32_t> settled = r34_crop(ed, ed.scene_view_rect());
+      /* The exact picture of the same scene: a change made and taken back, nothing held. */
+      const Vec3 at = cube->local().position;
+      cube->set_local_position(at + Vec3(0.001f, 0, 0));
+      r34_steps(ed, 2);
+      cube->set_local_position(at);
+      r34_steps(ed, 2);
+      const std::vector<uint32_t> exact = r34_crop(ed, ed.scene_view_rect());
+      const uint64_t cheap = during.cheap_shadows - before.cheap_shadows;
+      std::printf("    simpler %s: %llu cheap shadow maps in 6 drag frames; the settled frame %s the exact picture\n", simpler ? "on" : "off",
+                  (unsigned long long)cheap, settled == exact ? "is" : "is NOT");
+      CHECK(settled == exact);
+      CHECK(simpler ? cheap >= 6 : cheap == 0);
+    }
+  });
+  test("views: verify mode finds no stale picture across a drag with Simpler While Moving on", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(1);
+    ed.command("views simpler on");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("select Cube");
+    ed.command("camera 0 20 6 0 0.5 0");  // (the X arrow points straight right on screen)
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(cube->world_position(), x, y));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + 5 * k, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 75, y)});
+    r34_steps(ed, 3);
+    ed.set_render_cache_verify(false);
+    std::printf("    %llu stale pictures\n", (unsigned long long)(Editor::render_cache_mismatches_all() - stale0));
+    CHECK(Editor::render_cache_mismatches_all() == stale0);
   });
 }
