@@ -668,17 +668,29 @@ void Editor::render_overlays(const Recti &) {
       face_sel_.resize(m.face_count(), 0);
       /* N-gon mode (SketchUp): edges inside a flat region are hidden, as SketchUp hides coplanar edges. */
       if (ngon_mode_) ngon_cache(m);
-      for (auto &e : m.edge_cache()) {
-        bool s = edge_is_selected(e.first, e.second);
-        if (ngon_mode_ && !s && ngon_hidden_.count(Mesh::edge_key(e.first, e.second))) continue;
-        bool seam = !m.seams.empty() && m.is_seam(e.first, e.second);
-        uint32_t col = s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
-        scene_r3d_.line(w.point(m.positions[e.first]), w.point(m.positions[e.second]), col, true, 5e-4f);
-      }
+      /* The cage, recorded in parallel (task 0089: 100,000 edges of a 50k-face mesh were half the overlay's time),
+       * from the vertices placed in the world once each rather than once per edge. */
+      std::vector<Vec3> wp(m.vert_count());
+      JobSystem::global().parallel_for((int64_t)wp.size(), 4096, [&](int64_t a, int64_t b) {
+        for (int64_t i = a; i < b; i++) wp[(size_t)i] = w.point(m.positions[(size_t)i]);
+      });
+      const auto &edges = m.edge_cache();
+      scene_r3d_.lines(edges.size(), [&](size_t k, Vec3 &a, Vec3 &b, uint32_t &col) {
+        const auto &e = edges[k];
+        const bool s = edge_is_selected(e.first, e.second);
+        if (ngon_mode_ && !s && ngon_hidden_.count(Mesh::edge_key(e.first, e.second))) return false;
+        const bool seam = !m.seams.empty() && m.is_seam(e.first, e.second);
+        col = s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
+        a = wp[e.first], b = wp[e.second];
+        return true;
+      }, true, 5e-4f);
       if (elem_ == EditElement::Vertex) {
         float rad = std::max(1.5f, ui_.px(2.5f) * 1.0f);
-        for (size_t i = 0; i < m.vert_count(); i++)
-          scene_r3d_.point(w.point(m.positions[i]), rad, vert_sel_[i] ? Color::hex(0xFFA733) : Color::hex(0x000000), true);
+        scene_r3d_.points(wp.size(), rad, [&](size_t i, Vec3 &p, uint32_t &col) {
+          p = wp[i];
+          col = vert_sel_[i] ? Color::hex(0xFFA733) : Color::hex(0x000000);
+          return true;
+        }, true);
       }
       else if (elem_ == EditElement::Face && ngon_mode_) {
         /* One dot per flat region: the "face" SketchUp would show. */
@@ -1734,7 +1746,10 @@ bool Editor::gizmo_update(const Recti &view) {
       if (gizmo_vsnap_ && in.key_down[platform::KEY_V]) {
         /* Vertex snapping (Unity's V): the anchor vertex lands on the vertex under the mouse. */
         Vec3 target;
-        if (nearest_vertex_on_screen(view, in.mx, in.my, (float)u.px(24), false, !eo, target)) {
+        ScopedTimer st;
+        const bool found = nearest_vertex_on_screen(view, in.mx, in.my, (float)u.px(24), false, !eo, target);
+        prof_.ms_snap_pick += st.ms();
+        if (found) {
           delta = target - gizmo_vsnap_anchor_;
           gizmo_snap_shown_ = true;
           gizmo_snap_point_ = target;
@@ -1747,7 +1762,10 @@ bool Editor::gizmo_update(const Recti &view) {
           if (GameObject *g = scene_->find(s.id)) moving.push_back(g);
         const Ray r2 = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
         Vec3 p, n;
-        if (!moving.empty() && raycast_surface({r2.origin, normalize(r2.dir)}, p, n, moving)) {
+        ScopedTimer st;
+        const bool hit = !moving.empty() && raycast_surface({r2.origin, normalize(r2.dir)}, p, n, moving);
+        prof_.ms_snap_pick += st.ms();
+        if (hit) {
           GameObject *lead = moving.back();
           const GizmoStart &ls = gizmo_starts_.back();
           Quat rot;
@@ -1760,6 +1778,7 @@ bool Editor::gizmo_update(const Recti &view) {
       }
       gizmo_live_delta_ = delta;
       if (eo) {
+        ProfileScope prof{prof_.ms_edit_apply, {}};
         MeshPtr &mp = *edit_mesh_ptr();
         Mesh &mm = *mesh_make_mutable(mp);
         Mat4 inv = eo->world_matrix().inverse();
@@ -1798,6 +1817,7 @@ bool Editor::gizmo_update(const Recti &view) {
       if (snap) angle = std::round(angle * kRad2Deg / snap_rot_) * snap_rot_ * kDeg2Rad;
       Quat q = Quat::axis_angle(ax, angle);
       if (eo) {
+        ProfileScope prof{prof_.ms_edit_apply, {}};
         MeshPtr &mp = *edit_mesh_ptr();
         Mesh &mm = *mesh_make_mutable(mp);
         Mat4 inv = eo->world_matrix().inverse();
@@ -1836,6 +1856,7 @@ bool Editor::gizmo_update(const Recti &view) {
         for (int k = 0; k < 3; k++) f[k] = std::round(f[k] / snap_scale_) * snap_scale_;
       gizmo_live_scale_ = f;
       if (eo) {
+        ProfileScope prof{prof_.ms_edit_apply, {}};
         MeshPtr &mp = *edit_mesh_ptr();
         Mesh &mm = *mesh_make_mutable(mp);
         Mat4 inv = eo->world_matrix().inverse();
@@ -2125,17 +2146,18 @@ bool Editor::edit_selection_frame(Quat &out) {
   return true;
 }
 
-void Editor::repair_moved_rings(Mesh &m) {
+bool Editor::repair_moved_rings(Mesh &m) {
   std::vector<uint8_t> moved(m.vert_count(), 0);
   for (size_t v = 0; v < moved.size() && v < vert_sel_.size(); v++) moved[v] = vert_sel_[v];
   std::vector<uint8_t> dropped;
-  if (!meshops::repair_rings(m, moved, &dropped)) return;
+  if (!meshops::repair_rings(m, moved, &dropped)) return false;
   /* The selection follows the faces that stayed; the ring's new faces come last, unselected. */
   std::vector<uint8_t> sel;
   for (size_t f = 0; f < dropped.size(); f++)
     if (!dropped[f]) sel.push_back(f < face_sel_.size() ? face_sel_[f] : 0);
   sel.resize(m.face_count(), 0);
   face_sel_ = std::move(sel);
+  return true;
 }
 
 void Editor::sync_vert_face_selection(bool from_faces) {
@@ -3368,7 +3390,7 @@ void Editor::draw_game_view(const Recti &r) {
     else {
       render_scaled(game_r3d_, game_rt_, game_vs_, v, p, [&](RenderTarget &t) {
         render_camera(game_r3d_, t, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain
-      }, owner);
+      }, owner, false, false);  // (nothing picks in the Game view: no full-size depth and ids)
       game_stats_ = game_r3d_.stats();
       prof_.view_renders++;
       if (hit) view_cache_verify(game_cache_, img, "Game view");
