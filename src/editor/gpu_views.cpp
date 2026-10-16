@@ -8,6 +8,7 @@
  * compare the two. */
 #include "editor.h"
 
+#include "../core/jobs.h"
 #include "../render/colormanagement.h"
 
 #include <algorithm>
@@ -372,6 +373,12 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
   raster_world(fr, env, cam, scene_lights);
   ok = ok && raster_view_lut(*g, fr, env.view_transform, err);
+  std::string cage_err;  // (a cage the card refuses is drawn by the CPU, as before)
+  const bool cage = scene_full_call_ && edit_mode_ && ok && gpu_cage(*g, fr, cage_err);
+  if (!cage_err.empty() && !cage_err_logged_) {
+    Log::warn("The GPU view can't take the Edit Mode cage (%s): the CPU draws it", cage_err.c_str());
+    cage_err_logged_ = true;
+  }
   g->set_instances(inst);
   /* The picture, and the planes later work reads: depth for picking and overlays, and for a camera's depth of field
    * when it has one; ids for picking (not in a view nobody picks in: task 0092). The colour comes straight into the
@@ -388,9 +395,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     Log::warn("The GPU view failed (%s): drawing on the CPU", err.c_str());
     gpu_view_error_ = err;
     gpu_slot_reason_[slot] = gpu_view_reason_ = "a GPU error";
-    gpu_meshes_.clear();
-    gpu_mesh_bytes_ = 0;
-    gpu_view_.reset();
+    gpu_view_drop();
     prof_.gpu_fallbacks++;
     return false;
   }
@@ -399,6 +404,116 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   gpu_slot_reason_[slot].clear();
   gpu_view_reason_.clear();
   prof_.gpu_views++;
+  if (scene_gpu_call_) scene_on_gpu_ = true;
+  cage_on_gpu_ = cage_on_gpu_ || cage;
+  prof_.gpu_cage_frames += cage ? 1 : 0;
+  return true;
+}
+
+/* The card set aside (an error): what was kept there is forgotten with it, so a card opened again - perhaps at the
+ * same address - gets everything again. */
+void Editor::gpu_view_drop() {
+  gpu_meshes_.clear();
+  gpu_mesh_bytes_ = 0;
+  gpu_cage_v_.clear();
+  gpu_cage_e_.clear();
+  gpu_cage_owner_ = nullptr;
+  gpu_cage_edges_key_ = 0;
+  scene_on_gpu_ = false;
+  gpu_view_.reset();
+}
+
+/* The elements of `now` that differ from `before`, as (first, count) runs, runs closer than 64 joined. False when the
+ * sizes differ (everything goes). */
+template <class T>
+static bool changed_runs(const std::vector<T> &now, const std::vector<T> &before, std::vector<std::pair<uint32_t, uint32_t>> &out) {
+  out.clear();
+  if (now.size() != before.size()) return false;
+  for (uint32_t i = 0; i < (uint32_t)now.size(); i++) {
+    if (std::memcmp(&now[i], &before[i], sizeof(T)) == 0) continue;
+    if (!out.empty() && i <= out.back().first + out.back().second + 64) out.back().second = i + 1 - out.back().first;
+    else out.push_back({i, 1});
+  }
+  return true;
+}
+
+/* What the cage's edge colours depend on (cage_edge_color), hashed as scene_view_key hashes the selection. */
+uint64_t Editor::cage_edges_key(const Mesh &m) const {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
+  };
+  const uint64_t head[5] = {m.uid.v, m.topology_serial(), (uint64_t)elem_, ngon_mode_ ? m.version : 0, ngon_mode_ ? m.deform_version : 0};
+  mix(head, sizeof(head));
+  mix(vert_sel_.data(), vert_sel_.size());
+  uint64_t es = edge_sel_.size();  // order-free: the set's iteration order isn't stable
+  for (uint64_t k : edge_sel_) es += (k * 0x9E3779B97F4A7C15ull) ^ (k >> 31);
+  mix(&es, 8);
+  return h;
+}
+
+/* Task 0100: the Edit Mode cage for the card - the edges and vertex dots render_overlays would draw, their colours by
+ * its rules - sent as only what changed since the last frame (a drag moves a few vertices; a click recolours a few). */
+bool Editor::gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err) {
+  GameObject *obj = edit_object();
+  if (!obj || !edit_mesh_ptr() || !*edit_mesh_ptr() || !g.can_draw_cage()) return false;
+  const Mesh &m = **edit_mesh_ptr();
+  const Mat4 &w = obj->world_matrix();
+  vert_sel_.resize(m.vert_count(), 0);
+  if (ngon_mode_) ngon_cache(m);
+  const bool dots = elem_ == EditElement::Vertex;
+  std::vector<gpu::CageVertex> v(m.vert_count());
+  JobSystem::global().parallel_for((int64_t)v.size(), 4096, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) {
+      const Vec3 p = w.point(m.positions[(size_t)i]);
+      v[(size_t)i] = {{p.x, p.y, p.z}, dots ? cage_dot_color((size_t)i) : 0u};
+    }
+  });
+  if (gpu_cage_owner_ != &g) {  // (a card opened again holds nothing yet)
+    gpu_cage_v_.clear();
+    gpu_cage_e_.clear();
+    gpu_cage_owner_ = &g;
+  }
+  /* The edges' colours follow the selection, the topology (its seams), the mode, and in N-gon mode the shape (which
+   * edges lie inside a flat region): worked out again only when one of them changed. */
+  const uint64_t key = cage_edges_key(m);
+  const bool edges_same = key == gpu_cage_edges_key_ && gpu_cage_e_.size() == m.edge_cache().size();
+  std::vector<gpu::CageEdge> e;
+  if (!edges_same) {
+    const auto &edges = m.edge_cache();
+    e.resize(edges.size());
+    JobSystem::global().parallel_for((int64_t)e.size(), 4096, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) {
+        const auto &ed = edges[(size_t)i];
+        e[(size_t)i] = {ed.first, ed.second, cage_edge_color(m, ed.first, ed.second), 0};
+      }
+    });
+  }
+  std::vector<std::pair<uint32_t, uint32_t>> vr, er;
+  const bool vpart = changed_runs(v, gpu_cage_v_, vr), epart = edges_same || changed_runs(e, gpu_cage_e_, er);
+  uint64_t bytes = 0;
+  for (const auto &r : vr) bytes += (uint64_t)r.second * sizeof(gpu::CageVertex);
+  for (const auto &r : er) bytes += (uint64_t)r.second * sizeof(gpu::CageEdge);
+  bytes += vpart ? 0 : v.size() * sizeof(gpu::CageVertex);
+  bytes += epart ? 0 : e.size() * sizeof(gpu::CageEdge);
+  if (!g.set_cage_vertices(v, vpart ? &vr : nullptr, &err) || (!edges_same && !g.set_cage_edges(e, epart ? &er : nullptr, &err))) {
+    gpu_cage_owner_ = nullptr;  // (what the card holds is unknown: everything again next time)
+    gpu_cage_edges_key_ = 0;
+    return false;
+  }
+  prof_.gpu_cage_bytes += bytes;
+  gpu_cage_v_ = std::move(v);
+  if (!edges_same) gpu_cage_e_ = std::move(e);
+  gpu_cage_edges_key_ = key;
+  fr.cage = true;
+  fr.cage_bias = kCageBias;
+  fr.cage_point_radius = dots ? cage_dot_radius() : 0.0f;
   return true;
 }
 

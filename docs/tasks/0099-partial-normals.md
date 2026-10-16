@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** none needed (ADR 0034's in-place update, made proportional to what moved)
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/89
 
 ## Goal
 Dragging a few vertices of a big mesh in Edit Mode moves its render mesh in place every frame (ADR 0034, task 0090).

@@ -45,6 +45,18 @@ struct RasterInstance {
   uint32_t id = 0;        // written to the ids plane
 };
 
+/* The Edit Mode cage (task 0100), drawn over the picture as the CPU draws its overlay lines and dots
+ * (Renderer3D::prepare_line / draw_overlay / prepare_point). Colours are 0xAARRGGBB; alpha 0 leaves one out. */
+struct CageVertex {
+  float p[3];      // in the world
+  uint32_t color;  // its dot's
+};
+struct CageEdge {
+  uint32_t a, b;   // vertices
+  uint32_t color;
+  uint32_t pad = 0;
+};
+
 /* A light: type 0 sun, 1 point, 2 spot (as RenderLight; a sun's direction points where its light goes). */
 struct RasterLight {
   int type = 0;
@@ -80,6 +92,10 @@ struct RasterFrame {
   float bg_sky[3] = {0, 0, 0}, bg_horizon[3] = {0, 0, 0}, bg_ground[3] = {0, 0, 0};
   int view_transform = 0;     // 0 Standard, 1 Filmic, 2 ACES, 3 the LUT given by set_view_lut (an OpenColorIO view)
   float exposure = 0.0f;      // stops
+  /* The cage set by set_cage_vertices / set_cage_edges, over the picture (task 0100): its edges with this depth bias,
+   * its vertices as dots of this radius in pixels (0: no dots). */
+  bool cage = false;
+  float cage_bias = 0.0f, cage_point_radius = 0.0f;
 };
 
 /* GPU time of the last render() (timestamps), in ms. */
@@ -110,12 +126,19 @@ class Raster {
    * count: quads split again from the new positions). */
   virtual bool update_mesh(int mesh, const std::vector<RasterVertex> &v, const std::vector<uint32_t> *indices, std::string *error) = 0;
   /* Only parts changed (task 0099): vertex ranges, each (first, count), from `v` holding just those vertices one range
-   * after another; index ranges from the whole `indices`. False (nothing sent) when a range doesn't fit. */
+   * after another; index ranges from the whole `indices`. False (nothing sent) when a range doesn't fit. Sent with the
+   * next render() (task 0100). */
   virtual bool update_mesh_ranges(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &vertex_ranges,
                                   const std::vector<uint32_t> &indices, const std::vector<std::pair<uint32_t, uint32_t>> &index_ranges,
                                   std::string *error) = 0;
   /* Frees a mesh's memory; its index may be handed out again. */
   virtual void remove_mesh(int mesh) = 0;
+  /* Whether its cage pipelines were made (task 0100: else the CPU draws the cage). */
+  virtual bool can_draw_cage() const = 0;
+  /* The Edit Mode cage, kept on the card (task 0100): sent whole when the count changes or `ranges` is null, else only
+   * those (first, count) ranges of the arrays given, with the next render(). */
+  virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
+  virtual bool set_cage_edges(const std::vector<CageEdge> &e, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
   /* What the card holds for a mesh, read back (tests: partial updates leave it as a whole upload would). */
   virtual bool read_mesh(int mesh, std::vector<RasterVertex> &v, std::vector<uint32_t> &indices, std::string *error) = 0;
   /* An OpenColorIO view's LUT as colormanagement::view_lut gives it (size^3 colours, red fastest, a log2 shaper);

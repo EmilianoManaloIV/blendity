@@ -51,3 +51,18 @@ passes and the window's present are all CPU code that reads the view's colour, d
 - Two renderers must stay in step. The picture-match tests (rounds 121-122) are what hold them together, and every
   feature ported later comes with its own.
 - macOS and Windows on ARM have no Vulkan in Blender's libraries and keep the CPU views.
+
+## Note (task 0100): the Edit Mode cage on the card, the Scene view at full size there
+- **The cage's edges and vertex dots are drawn by the card** in the lighting pass, before the read-back. Its shaders
+  work out the CPU's own overlay rules per pixel: `prepare_line` / `draw_overlay`'s clip and Xiaolin Wu coverage,
+  `prepare_point`'s centre depth test and disc, and `Color::blend` through the blender (within 1 / 255). The cage's
+  vertices and edges stay on the card, updated by ranges. Small range uploads (the cage's, task 0099's meshes') go
+  in front of the next frame's submission instead of a round trip each.
+- **Drawing order:** the grid, other objects' wireframes (Shaded + Wireframe), loose edges and probe dots, still drawn
+  by the CPU after the read-back, now lie over the cage instead of under it. They rarely meet it: the cage sits on
+  the surface, and they are depth-tested behind it.
+- **The Scene view on the card draws at full size.** The Viewport Resolution Scale (ADR 0026) saves the CPU's
+  per-pixel work; on the card the 3D costs little at full size, and the overlays sit on a full-size picture. The
+  Game view and the Camera Preview keep the scale. A view's first frame on the card still draws at the scale (whether
+  it will draw there is known only then); the picture cache's key carries the choice.
+- If the cage's shaders can't be made, the CPU draws the cage as before; the rest of the view stays on the card.

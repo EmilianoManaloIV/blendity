@@ -667,8 +667,9 @@ template<class T> static void upscale_plane(const std::vector<T> &src, int sw, i
  * tools' visibility tests and the overlays (drawn after, at full size) work as before - unless `planes` is false: a
  * view nobody picks in (the Game view, the Camera Preview) keeps only the colour (task 0092). */
 void Editor::render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
-                           const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner, bool fill, bool planes) {
-  const float s = finite_bits(view_scale_) ? std::max(0.25f, std::min(1.0f, view_scale_)) : 1.0f;
+                           const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner, bool fill, bool planes,
+                           bool full_size) {
+  const float s = full_size ? 1.0f : finite_bits(view_scale_) ? std::max(0.25f, std::min(1.0f, view_scale_)) : 1.0f;
   const int iw = std::max(1, (int)std::lround(rt.width * s)), ih = std::max(1, (int)std::lround(rt.height * s));
   bool own_size = false;  // a filter stack with its own internal resolution (a retro console's): its pixels stay crisp
   if (filter_owner) {
@@ -1564,7 +1565,8 @@ uint64_t Editor::scene_view_key(const Recti &view) {
   mix(v.m, sizeof(v.m));
   mix(p.m, sizeof(p.m));
   const uint64_t flags = (uint64_t)shading_ | (uint64_t)scene_lighting_ << 8 | (uint64_t)scene_filters_ << 9 | (uint64_t)show_grid_ << 10 |
-                         (uint64_t)edit_mode_ << 11 | (uint64_t)ngon_mode_ << 12 | (uint64_t)elem_ << 16;
+                         (uint64_t)edit_mode_ << 11 | (uint64_t)ngon_mode_ << 12 | (uint64_t)elem_ << 16 |
+                         (uint64_t)scene_full_size() << 24;  // (the card's frames draw at full size: task 0100)
   mix(&flags, 8);
   mix(&ui_.scale, sizeof(float));
   mix(&cam_.distance, sizeof(float));  // the grid's level follows the orbit distance and pivot

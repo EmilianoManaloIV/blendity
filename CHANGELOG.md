@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 125): the Edit Mode cage on the GPU, and the Scene view at full size there (task 0100, ADR 0036 note)
+
+**Asked:** pass 11 continued ("What should be more optimization gains?").
+
+**Changed**
+- **The cage on the card:** with the views on the GPU, the card draws the Edit Mode cage's edges and vertex dots
+  into the Scene view's picture before it comes back. Its shaders follow the CPU's own rules: the line's clip and
+  two-pixel coverage, the dot's centre depth test and disc, the 8-bit blend. The cage's vertices and edge colours stay
+  on the card and only what changed goes up. The CPU then draws only the rest of the overlays.
+- **The Scene view on the card draws at full size**, whatever the Viewport Resolution Scale (the scale saves the
+  CPU's per-pixel work). The Game view and the Camera Preview keep it.
+- Small uploads to the card (the cage's ranges, task 0099's mesh ranges) go in front of the frame's own submission
+  instead of waiting for the card each.
+- The 50k-face Edit Mode drag on the laptop setting, views on the GPU: 14.3 -> 11.5-12.3 ms (the CPU's overlays
+  4.3 -> 0.5 ms). Playing costs about 1 ms more (the Scene view's bigger read-back).
+- `Mesh::topology_serial()` is public: the GPU cage keys its edge colours on it.
+
+**Checked**
+- New tests (round 125), each skipped without a GPU:
+  - the cage drawn by the card in vertex, edge and N-gon modes (selected and plain vertices, a seam, hidden edges)
+    matches the CPU's on the cage's own pixels: mean 0.46-0.63 / 255, 99.6 % within 3 (much of it the 3D beneath);
+  - a gizmo drag sends the card 16 bytes a frame for the cage, the picture mid-drag matches the CPU's, and a click
+    picks the same vertex on both devices;
+  - the Scene view on the card is the same at 67 % and 100 %, the Game view isn't;
+  - switching to the card at 67 %: the view goes to full size, and verify mode finds no stale picture;
+  - after a GPU error, the card opened again gets the whole cage.
+- Unit checks: Windows 10,412, 0 failed (726 tests); the whole suite in render-cache verify mode: 10,413,
+  0 failed, 0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems.
+
+**Review** (Opus code-reviewer). Fixed:
+- a card opened again after an error (perhaps at the same address) could miss the cage's edges: everything kept for
+  the card is forgotten with it;
+- the full-size choice is in the Scene view's picture key (a scaled first frame could have stayed);
+- the cage is drawn by the card only on a full-size frame;
+- each line is a strip along it, not a box around it (a long diagonal edge was mostly discarded pixels);
+- the cage's shaders are optional: if they can't be made, the CPU draws the cage and the view stays on the card;
+- the dot colour and the depth bias shared by both paths; a cage the card refuses is logged once;
+- the drawing-order change (the grid and wireframes now over the cage) noted in ADR 0036.
+
 ## 2026-10-16 (round 124): pass 11 begins - measured first, and Edit Mode drags work out only what moved (tasks 0098, 0099)
 
 **Asked:** "What should be more optimization gains?" (all four areas chosen: real scenes on the GPU, Edit Mode on big

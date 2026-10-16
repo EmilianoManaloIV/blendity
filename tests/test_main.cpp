@@ -30426,4 +30426,216 @@ static void round81_tests() {
      * picture against the CPU's on this scene, not what was sent.) */
     CHECK(mean < 1.0 && within3 >= 0.99);
   });
+  /* ---------------------------------------------------------------- round 125: the Edit Mode cage on the GPU (task 0100) */
+  /* A big sphere with a flat top in Edit Mode (some vertices selected, a seam) seen close up; the Scene view drawn again with `device`. */
+  auto r125_open = [](Editor &ed) {
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    MeshPtr m = primitives::uv_sphere(1.0f, 64, 48);
+    for (uint32_t i = 600; i < 620; i++) m->seams.push_back(Mesh::edge_key(i, i + 1));
+    for (Vec3 &p : m->positions) p.y = std::min(p.y, 0.8f);  // (a flat top: N-gon mode hides the edges inside it)
+    big->add<MeshFilter>()->mesh = m;
+    big->add<MeshRenderer>();
+    big->set_local_position({0.0f, 1.0f, 0.0f});
+    ed.command("select Big");
+    ed.command("edit vertex");
+    ed.command("vsel 1000 1001 1002 1064 1065 1066 1500");
+    ed.command("camera 0 4 3 0 1 0");
+    r34_steps(ed, 3);
+    return big;
+  };
+  auto r125_scene = [](Editor &ed, GameObject *big, int device) {
+    ed.viewport_device_for_test(device);
+    for (int k = 0; k < 2; k++) {  // (a change, then back: the view draws again, at full size once it drew on the GPU)
+      big->set_local_position({0.0f, k ? 1.0f : 1.0001f, 0.0f});
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  /* Over the pixels the cage changes (where the CPU's Edit Mode picture differs from its Object Mode one): mean and
+   * share within 3 / 255 of the worst channel. */
+  auto r125_cage_compare = [](const std::vector<uint32_t> &cpu, const std::vector<uint32_t> &plain, const std::vector<uint32_t> &gpu, size_t &n,
+                              double &mean, double &within3) {
+    auto worst = [](uint32_t a, uint32_t b) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)));
+      return w;
+    };
+    double sum = 0;
+    size_t within = 0;
+    n = 0;
+    for (size_t i = 0; i < cpu.size() && i < plain.size() && i < gpu.size(); i++) {
+      if (worst(cpu[i], plain[i]) <= 8) continue;
+      const int w = worst(cpu[i], gpu[i]);
+      n++;
+      sum += w;
+      within += w <= 3;
+    }
+    mean = n ? sum / (double)n : 0;
+    within3 = n ? (double)within / (double)n : 0;
+  };
+  test("gpu views: the Edit Mode cage is drawn by the card, as the CPU draws it - edges, seams, selected and plain vertex dots, N-gon mode's hidden edges (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    for (const char *mode : {"vertex", "edge", "N-gon"}) {
+      Editor ed;
+      GameObject *big = r125_open(ed);
+      if (std::string(mode) == "edge") ed.command("edit edge");
+      if (std::string(mode) == "N-gon") ed.command("ngon on");
+      const std::vector<uint32_t> cpu = r125_scene(ed, big, 1);
+      const FrameProfile before = ed.frame_profile_totals();
+      const std::vector<uint32_t> gpu = r125_scene(ed, big, 2);
+      const FrameProfile after = ed.frame_profile_totals();
+      ed.viewport_device_for_test(1);
+      ed.command("edit off");  // (Object Mode: the same view without the cage)
+      const std::vector<uint32_t> plain = r125_scene(ed, big, 1);
+      double mean = 0, within3 = 0, cmean = 0, cwithin3 = 0;
+      size_t n = 0;
+      r122_compare(cpu, gpu, mean, within3);
+      r125_cage_compare(cpu, plain, gpu, n, cmean, cwithin3);
+      std::printf("    %s mode: the card drew the cage in %llu frames; the view: mean difference %.3f / 255, %.2f %% within 3; the cage's %zu "
+                  "pixels: %.3f, %.2f %%\n",
+                  mode, (unsigned long long)(after.gpu_cage_frames - before.gpu_cage_frames), mean, within3 * 100, n, cmean, cwithin3 * 100);
+      CHECK(after.gpu_cage_frames > before.gpu_cage_frames);
+      CHECK(n > 2000);
+      CHECK(mean < 1.0 && within3 >= 0.99);
+      CHECK(cmean < 1.0 && cwithin3 >= 0.99);
+    }
+  });
+  test("gpu views: during an Edit Mode drag the card's cage follows, sending only the moved vertices, and a click picks the same vertex on both devices (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *big = r125_open(ed);
+    ed.command("tool move");
+    ed.command("vsel 1000");
+    r125_scene(ed, big, 2);
+    const Mesh &m0 = *big->get<MeshFilter>()->mesh;
+    const Vec3 wp = big->world_matrix().point(m0.positions[1000]);
+    const uint64_t whole = (uint64_t)m0.vert_count() * sizeof(gpu::CageVertex) + m0.edge_cache().size() * sizeof(gpu::CageEdge);
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(wp, x, y));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 60, y)});
+    const FrameProfile before = ed.frame_profile_totals();
+    for (int k = 2; k <= 5; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + 5 * k, y)});
+    const FrameProfile after = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t frames = after.gpu_cage_frames - before.gpu_cage_frames, bytes = after.gpu_cage_bytes - before.gpu_cage_bytes;
+    std::printf("    %llu drag frames with the cage on the card, %llu bytes sent each on average (all of it is %llu)\n", (unsigned long long)frames,
+                (unsigned long long)(frames ? bytes / frames : 0), (unsigned long long)whole);
+    CHECK(frames == 4);
+    CHECK(frames && bytes / frames < whole / 20);
+    /* The same moment on the CPU (the mouse still down): the cage where the CPU puts it. */
+    ed.viewport_device_for_test(1);
+    big->set_local_position({0.0f, 1.0001f, 0.0f});
+    r34_steps(ed, 1);
+    big->set_local_position({0.0f, 1.0f, 0.0f});
+    r34_steps(ed, 1);
+    double mean = 0, within3 = 0;
+    r122_compare(r34_crop(ed, ed.scene_view_rect()), gpu, mean, within3);
+    std::printf("    mid-drag: mean difference %.3f / 255, %.2f %% within 3 / 255\n", mean, within3 * 100);
+    CHECK(mean < 1.0 && within3 >= 0.99);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 80, y)});
+    /* A click on another vertex picks it on either device. */
+    ed.command("tool select");
+    std::vector<int> picked;
+    for (int device : {1, 2}) {
+      r125_scene(ed, big, device);
+      const Mesh &m = *big->get<MeshFilter>()->mesh;
+      int px = 0, py = 0;
+      CHECK(ed.project_to_window(big->world_matrix().point(m.positions[1500]), px, py));
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px, py)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseDown, px, py)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseUp, px, py)});
+      int one = -1, count = 0;
+      for (size_t i = 0; i < ed.vert_sel_for_test().size(); i++)
+        if (ed.vert_sel_for_test()[i]) one = (int)i, count++;
+      picked.push_back(count == 1 ? one : -1);
+    }
+    std::printf("    a click picked vertex %d on the CPU, %d on the GPU\n", picked[0], picked[1]);
+    CHECK(picked[0] == 1500 && picked[1] == 1500);
+  });
+  test("gpu views: the Scene view on the card draws at full size whatever the Viewport Resolution Scale; the Game view keeps it (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *big = r125_open(ed);
+    ed.command("edit off");
+    const std::vector<uint32_t> full = r125_scene(ed, big, 2);
+    const std::vector<uint32_t> game_full = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    ed.set_view_scale(0.67f);
+    const std::vector<uint32_t> scaled = r125_scene(ed, big, 2);
+    const std::vector<uint32_t> game_scaled = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    size_t scene_diff = 0, game_diff = 0;
+    for (size_t i = 0; i < full.size() && i < scaled.size(); i++) scene_diff += full[i] != scaled[i];
+    for (size_t i = 0; i < game_full.size() && i < game_scaled.size(); i++) game_diff += game_full[i] != game_scaled[i];
+    std::printf("    at 67 %%: %zu Scene view pixels differ from full size, %zu Game view pixels\n", scene_diff, game_diff);
+    CHECK(scene_diff == 0);
+    CHECK(game_diff > 1000);
+    ed.set_view_scale(1.0f);
+  });
+  test("gpu views: switching to the card in Edit Mode at a 67 % scale, the Scene view goes to full size with its cage on the card, and verify mode finds no stale picture (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *big = r125_open(ed);
+    ed.set_view_scale(0.67f);
+    r34_steps(ed, 2);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    ed.viewport_device_for_test(2);
+    big->set_local_position({0.0f, 1.0001f, 0.0f});  // (one change, kept: the first frame on the card draws at the scale)
+    const FrameProfile before = ed.frame_profile_totals();
+    r34_steps(ed, 4);
+    const FrameProfile after = ed.frame_profile_totals();
+    const std::vector<uint32_t> switched = r34_crop(ed, ed.scene_view_rect());
+    ed.set_view_scale(1.0f);
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> full = r34_crop(ed, ed.scene_view_rect());
+    ed.set_render_cache_verify(false);
+    size_t differ = 0;
+    for (size_t i = 0; i < switched.size() && i < full.size(); i++) differ += switched[i] != full[i];
+    const uint64_t stale = Editor::render_cache_mismatches_all() - stale0;
+    std::printf("    cage on the card in %llu of 4 frames; %zu pixels differ from the view at 100 %%; %llu stale pictures\n",
+                (unsigned long long)(after.gpu_cage_frames - before.gpu_cage_frames), differ, (unsigned long long)stale);
+    CHECK(after.gpu_cage_frames > before.gpu_cage_frames);
+    CHECK(differ == 0);
+    CHECK(stale == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views: after a GPU error the card opened again gets the whole cage, and draws it as the CPU does (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *big = r125_open(ed);
+    const std::vector<uint32_t> cpu = r125_scene(ed, big, 1);
+    r125_scene(ed, big, 2);
+    ed.gpu_view_drop_for_test();  // (as an error does)
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = r125_scene(ed, big, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    ed.viewport_device_for_test(1);
+    ed.command("edit off");
+    const std::vector<uint32_t> plain = r125_scene(ed, big, 1);
+    size_t n = 0;
+    double mean = 0, within3 = 0;
+    r125_cage_compare(cpu, plain, gpu, n, mean, within3);
+    std::printf("    opened again: the cage on the card in %llu frames; its %zu pixels: mean difference %.3f / 255, %.2f %% within 3\n",
+                (unsigned long long)(after.gpu_cage_frames - before.gpu_cage_frames), n, mean, within3 * 100);
+    CHECK(after.gpu_cage_frames > before.gpu_cage_frames);
+    CHECK(n > 2000);
+    CHECK(mean < 1.0 && within3 >= 0.99);
+  });
 }

@@ -556,14 +556,24 @@ void Editor::render_scene_view(const Recti &view) {
     scene_r3d_.rebind(&scene_rt_, v, p);  // the tools project with the editor's view, over the whole view
     return;
   }
+  cage_on_gpu_ = false;
   if (shading_ == Shading::Shaded || shading_ == Shading::ShadedWireframe) {
     GameObject *fowner = nullptr;
     if (scene_filters_) main_camera(*scene_, &fowner);
+    const bool filtered = fowner && !camera_filters(fowner).empty();
+    /* On the card the Scene view draws at full size (task 0100): when its last frame drew there, this one will too. */
+    const bool full = !filtered && scene_full_size();
+    scene_on_gpu_ = false;
     render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) {
-      if (fowner && !camera_filters(fowner).empty())  // the main camera's filters on the editor's view
+      if (filtered)  // the main camera's filters on the editor's view
         render_camera(scene_r3d_, t, scene_ft_, v, p, cam_.position(), cam_.forward(), fowner, nullptr, aspect, false, scene_lighting_);
-      else render_deferred(scene_r3d_, t, v, p, cam_.position(), false, scene_lighting_, nullptr);
-    }, fowner, true);
+      else {
+        scene_gpu_call_ = true;
+        scene_full_call_ = full;
+        render_deferred(scene_r3d_, t, v, p, cam_.position(), false, scene_lighting_, nullptr);
+        scene_gpu_call_ = scene_full_call_ = false;
+      }
+    }, fowner, true, true, full);
     scene_stats_ = scene_r3d_.stats();
   }
   else render_scaled(scene_r3d_, scene_rt_, scene_vs_, v, p, [&](RenderTarget &t) { render_solid(t, v, p); });
@@ -675,22 +685,21 @@ void Editor::render_overlays(const Recti &) {
         for (int64_t i = a; i < b; i++) wp[(size_t)i] = w.point(m.positions[(size_t)i]);
       });
       const auto &edges = m.edge_cache();
-      scene_r3d_.lines(edges.size(), [&](size_t k, Vec3 &a, Vec3 &b, uint32_t &col) {
-        const auto &e = edges[k];
-        const bool s = edge_is_selected(e.first, e.second);
-        if (ngon_mode_ && !s && ngon_hidden_.count(Mesh::edge_key(e.first, e.second))) return false;
-        const bool seam = !m.seams.empty() && m.is_seam(e.first, e.second);
-        col = s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
-        a = wp[e.first], b = wp[e.second];
-        return true;
-      }, true, 5e-4f);
+      if (!cage_on_gpu_) {  // (else the card drew the edges and the vertex dots into the picture: task 0100)
+        scene_r3d_.lines(edges.size(), [&](size_t k, Vec3 &a, Vec3 &b, uint32_t &col) {
+          const auto &e = edges[k];
+          col = cage_edge_color(m, e.first, e.second);
+          a = wp[e.first], b = wp[e.second];
+          return col != 0;
+        }, true, kCageBias);
+      }
       if (elem_ == EditElement::Vertex) {
-        float rad = std::max(1.5f, ui_.px(2.5f) * 1.0f);
-        scene_r3d_.points(wp.size(), rad, [&](size_t i, Vec3 &p, uint32_t &col) {
-          p = wp[i];
-          col = vert_sel_[i] ? Color::hex(0xFFA733) : Color::hex(0x000000);
-          return true;
-        }, true);
+        if (!cage_on_gpu_)
+          scene_r3d_.points(wp.size(), cage_dot_radius(), [&](size_t i, Vec3 &p, uint32_t &col) {
+            p = wp[i];
+            col = cage_dot_color(i);
+            return true;
+          }, true);
       }
       else if (elem_ == EditElement::Face && ngon_mode_) {
         /* One dot per flat region: the "face" SketchUp would show. */
@@ -2181,6 +2190,18 @@ void Editor::sync_vert_face_selection(bool from_faces) {
   }
   if (elem_ == EditElement::Edge) edges_from_verts();
 }
+
+/* An Edit Mode cage edge's colour: selected, a seam, or plain; 0 when N-gon mode hides it (inside a flat region). */
+uint32_t Editor::cage_edge_color(const Mesh &m, uint32_t a, uint32_t b) const {
+  const bool s = edge_is_selected(a, b);
+  if (ngon_mode_ && !s && ngon_hidden_.count(Mesh::edge_key(a, b))) return 0;
+  const bool seam = !m.seams.empty() && m.is_seam(a, b);
+  return s ? Color::hex(0xFFA733) : (seam ? Color::hex(0xFF3030) : Color::hex(0x0A0A0A, 220));
+}
+
+uint32_t Editor::cage_dot_color(size_t v) const { return v < vert_sel_.size() && vert_sel_[v] ? Color::hex(0xFFA733) : Color::hex(0x000000); }
+
+float Editor::cage_dot_radius() const { return std::max(1.5f, ui_.px(2.5f) * 1.0f); }
 
 bool Editor::edge_is_selected(uint32_t a, uint32_t b) const {
   if (elem_ == EditElement::Edge) return edge_sel_.count(Mesh::edge_key(a, b)) > 0;

@@ -119,6 +119,7 @@ struct FrameProfile {
   uint64_t gpu_views = 0, gpu_fallbacks = 0, gpu_mesh_uploads = 0, gpu_mesh_updates = 0;
   uint64_t gpu_upload_bytes = 0;  // task 0098: what the meshes sent to the card took
   uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
+  uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   double ms_gpu = 0;
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
@@ -132,6 +133,7 @@ struct FrameProfile {
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
     gpu_upload_bytes += o.gpu_upload_bytes;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
+    gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     ms_gpu += o.ms_gpu;
   }
 };
@@ -573,6 +575,7 @@ class Editor {
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
   void viewport_device_for_test(int d) { set_viewport_device(d); }
+  void gpu_view_drop_for_test() { gpu_view_drop(); }  // as a GPU error does: the card set aside, everything sent again
   /* The card's copy of a render mesh the views drew, read back (empty when it isn't there). */
   bool gpu_mesh_for_test(const RenderMesh &rm, std::vector<gpu::RasterVertex> &v, std::vector<uint32_t> &indices) {
     const auto it = gpu_meshes_.find(&rm);
@@ -2083,7 +2086,7 @@ class Editor {
   FilterTarget scene_vs_, game_vs_, preview_vs_;
   void render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
                      const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false,
-                     bool planes = true);  // planes: depth and ids at full size too (for picking)
+                     bool planes = true, bool full_size = false);  // planes: depth and ids at full size too (for picking)
   bool planes_wanted_ = true;  // (render_scaled's `planes` while it draws: a filter stack's upscale follows it too)
   bool planes_always_ = false;  // tests: every view copies its planes, as before task 0092
   /* Task 0096 (ADR 0036): the views' deferred 3D on the GPU (gpu_views.cpp). One device for every view, each view its
@@ -2120,6 +2123,25 @@ class Editor {
                      const Camera *cam, bool scene_lights, const FilterStack *filters, const RasterOptions &opt);
   int gpu_mesh(const RenderMesh &rm, std::string &err);
   bool gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err);
+  /* Task 0100: the Scene view's 3D drawn by the card at full size (the Viewport Resolution Scale saves the CPU's
+   * per-pixel work), and its Edit Mode cage drawn there too, before the read-back. */
+  bool scene_gpu_call_ = false;   // this render_deferred is the Scene view's (render_scene_view sets it)
+  bool scene_full_call_ = false;  // ... and at full size: the card may draw the cage (its pixels and dots are the view's)
+  bool scene_on_gpu_ = false;     // its last frame drew on the card: this one draws at full size
+  bool scene_full_size() const { return scene_on_gpu_ && gpu_view_wanted(); }  // (scene_view_key mixes it in)
+  bool cage_err_logged_ = false;
+  static constexpr float kCageBias = 5e-4f;  // the cage's lines' depth bias, on either device
+  void gpu_view_drop();
+  bool cage_on_gpu_ = false;     // the card drew this frame's cage: render_overlays leaves it out
+  std::vector<gpu::CageVertex> gpu_cage_v_;  // what the card holds
+  std::vector<gpu::CageEdge> gpu_cage_e_;
+  const gpu::Raster *gpu_cage_owner_ = nullptr;
+  uint64_t gpu_cage_edges_key_ = 0;  // what the edges' colours were worked out from
+  bool gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err);
+  uint32_t cage_edge_color(const Mesh &m, uint32_t a, uint32_t b) const;  // 0: not drawn
+  uint32_t cage_dot_color(size_t v) const;
+  uint64_t cage_edges_key(const Mesh &m) const;
+  float cage_dot_radius() const;
   int gpu_slot(const RenderTarget &rt);
   void gpu_forget_meshes();
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution

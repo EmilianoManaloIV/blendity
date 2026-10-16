@@ -39,6 +39,23 @@ the result is the same to the bit (tested on 7 kinds of mesh, on Windows, Linux 
 gets only the changed vertex ranges and the re-split triangles. What is left in the GPU drag is mostly the cage
 overlay, drawn on the CPU (task 0100 moves it to the GPU).
 
+**The Edit Mode cage on the GPU (task 0100):**
+
+| Laptop setting, views on the GPU | Before | Now |
+|---|---|---|
+| The 50k-face Move gizmo drag | 14.3 ms | 11.5 / 12.3 ms |
+| ... of it the CPU's overlays | 4.3 ms (the cage prepared 1.6, drawn 2.9) | 0.5 ms |
+| Moving an object | 3.9 ms | 3.9 / 4.2 ms |
+| Playing | 6.7 ms | 7.5 / 8.1 ms |
+
+- The card draws the cage's 100,000 edges and 50,000 vertex dots into the picture before the read-back, with the
+  CPU's own line and dot rules. Its vertices and edge colours stay on the card: a drag frame sends the moved vertices
+  (16 bytes for one), and the edge colours are worked out again only when the selection or topology changes.
+- Each small upload used to wait for the card on its own (three round trips a drag frame); they now go in front of
+  the frame's own submission.
+- The Scene view on the card draws at full size: sharper on the laptop setting, and the overlays sit on a full-size
+  picture. Playing costs 0.8-1.4 ms more for it (a bigger read-back).
+
 ## OptiX against GPU Compute (task 0097, ADR 0037)
 
 `blendity_stress --only gpu_optix` (1920x1080, 256 icospheres and a floor, Lambert-like materials, 64 samples, 4

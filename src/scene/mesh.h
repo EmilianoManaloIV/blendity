@@ -144,6 +144,9 @@ struct Mesh {
    * render mesh then moves its vertices in place rather than being rebuilt. Code that caches positions
    * on `version` alone must check this too. */
   uint64_t deform_version = 0;
+  /* Changes whenever what the render and edge caches are built from besides positions changes (ADR 0034): faces,
+   * UVs, materials, smoothing, seams and sharp edges. Caches elsewhere key on it too (the GPU cage's edge colours). */
+  uint64_t topology_serial() const;
 
  private:
   /* Task 0099: what corner_normals last worked out for a render cache (from the positions that cache drew), so an
@@ -213,7 +216,6 @@ struct Mesh {
     bool smooth = false, seams_sharp = false;
     float smooth_angle = 180.0f;
   };
-  uint64_t topology_serial() const;
   void build_edge_sides() const;
   /* `moved`: per face, whether any of its vertices moved (null: all of them); the others keep their triangles. */
   bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint8_t> *moved) const;
