@@ -27,6 +27,10 @@ int view_index(const std::string &name);  // -1 if missing
 /* Display-encoded (sRGB) colour 0..1 for scene-linear Rec.709 input. */
 Vec3 display_rgb(int view, Vec3 scene_linear);
 uint32_t display_pixel(int view, Vec3 scene_linear);
+/* The view's LUT exactly as display_rgb applies it (task 0096: the GPU views apply the same table the same way):
+ * size^3 display-encoded colours, red fastest, over a log2 shaper from log_min to log_max (below it: node 0). False
+ * without OpenColorIO or for an unknown view. */
+bool view_lut(int view, const std::vector<Vec3> *&data, int &size, float &log_min, float &log_max);
 /* The exact OpenColorIO result (no LUT), for tests and stress comparisons. */
 bool reference(int view, const float *rgb_in, float *rgb_out, size_t count);
 

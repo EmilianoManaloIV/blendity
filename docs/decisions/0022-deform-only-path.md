@@ -36,3 +36,6 @@ of the roadmap (tasks 0041-0045) are all of this kind, and a pose change must be
   the shape alone (not the drag's history), but normal maps may shade slightly differently from the next full build.
 - A stack with a head and a deforming tail keeps two evaluated meshes per kind (the head's and the deformed one).
 - Anything caching on an evaluated mesh's `version` (the Boolean's cutter dependency) also mixes `deform_version`.
+
+**Amended by ADR 0034** (task 0086): the in-place path now also serves positions-only edits (it decides by the topology
+the cache was built from, not only `deform_version`) and re-triangulates quads and n-gons from the new positions.
