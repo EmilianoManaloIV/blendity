@@ -73,7 +73,7 @@ const std::vector<Library> &libraries() {
 #else
       {"OpenImageDenoise", false, "",
 #endif
-       "AI denoiser for path-traced renders (Cycles' default)", "A-Trous wavelet filter"},
+       "AI denoiser for path-traced renders (Cycles' default; on an NVIDIA or AMD card when there is one)", "A-Trous wavelet filter"},
 #ifdef BL_WITH_EIGEN
       {"Eigen", true, strprintf("%d.%d.%d", EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION, EIGEN_MINOR_VERSION),
 #else

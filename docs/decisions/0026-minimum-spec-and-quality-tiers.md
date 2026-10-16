@@ -70,6 +70,10 @@ The minimum is now the user's HP Envy 13.3" 2-in-1 (i7-1165G7, 4 cores / 8 threa
   from pointer messages scales the weight-paint brush. X11 and Cocoa keep the mouse only.
 - Layouts and dialogs fit 1280 x 720 (the first-run dialog and Preferences checked).
 
+## Note (task 0093, 2026-10-15): pass 10's results
+On the laptop setting the targets above hold: orbiting 88 fps, editing (moving an object, a material colour, Play)
+44-49 fps. Edit Mode drags on a 50k-face mesh reach 22-23 fps (from 7), short of 30 (PERFORMANCE.md, pass 10).
+
 ## Consequences
 - Low looks softer (bilinear-scaled 3D). Shadow texels can be up to about 1.2 times larger in the views.
 - Wall-clock time decides which casters are moving. Pixels never depend on it, because the composed map equals a
