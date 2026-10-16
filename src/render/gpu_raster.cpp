@@ -2,6 +2,8 @@
 #include "gpu_raster.h"
 
 #include "../core/core.h"
+#include "../image/image.h"
+#include "gpu_glsl.h"
 #include "../core/math.h"
 
 #include <algorithm>
@@ -122,7 +124,16 @@ layout(std140, set = 0, binding = 0) uniform Frame {
   vec4 cage;           // the Edit Mode cage: its lines' depth bias, its dots' radius
   Light lights[16];
 };
-struct Inst { mat4 model; vec4 albedo_rough; vec4 metal_spec; vec4 emission; uvec4 id; };  // id: id, flags
+struct Inst {
+  mat4 model; vec4 albedo_rough; vec4 metal_spec; vec4 emission; uvec4 id;  // id: id, flags
+  vec4 tiling;   // xyz, w normal map strength (task 0101: a textured material)
+  vec4 offset;   // xyz, w procedural scale
+  vec4 color2;   // the procedural's second colour
+  ivec4 tex0;    // base, metallic, roughness, normal maps (-1: none)
+  ivec4 tex1;    // emission map, mapping (0 UV, 1 Box, 2 Generated), procedural (1 Checker, 2 Noise), wrap
+  ivec4 tex2;    // filter, has UVs, has tangents, textured
+  vec4 bmin; vec4 bmax;  // the mesh's local bounds
+};
 layout(std430, set = 0, binding = 1) readonly buffer Instances { Inst inst[]; };
 const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u;
 )";
@@ -139,16 +150,164 @@ void main() {
 const char *kGbufVert = R"(
 layout(location = 0) in vec3 p;
 layout(location = 1) in vec3 n;
+layout(location = 2) in vec2 uv;
+layout(location = 3) in vec4 t;
 layout(location = 0) out vec3 wn;
 layout(location = 1) flat out uint ii;
 layout(location = 2) out vec3 wpos;
+layout(location = 3) out vec3 lp;                // task 0101: object space (Box / Generated mapping, procedurals)
+layout(location = 4) out vec3 ln;
+layout(location = 5) noperspective out vec3 uvw; // UV / w, 1 / w: linear on screen (the next pixel's UV, exactly)
+layout(location = 6) out vec3 wt;                // the tangent in the world; its sign the triangle's first vertex's
+layout(location = 7) flat out float tw;
 void main() {
   mat4 m = inst[gl_InstanceIndex].model;
   vec4 w = m * vec4(p, 1.0);
   gl_Position = view_proj * w;
-  wn = transpose(inverse(mat3(m))) * n;
+  mat3 nm = transpose(inverse(mat3(m)));
+  wn = nm * n;
   wpos = w.xyz;
   ii = uint(gl_InstanceIndex);
+  lp = p;
+  ln = n;
+  uvw = vec3(uv, 1.0) / gl_Position.w;
+  wt = nm * t.xyz;
+  tw = t.w;
+}
+)";
+
+/* Task 0101 (ADR 0038): textures sampled the CPU's way - Texture::fetch, sample_level, sample and texture_lod - from
+ * its own mip chain in storage buffers, and evaluate_surface's material. */
+const char *kMaterialFrag = R"(
+struct TexInfo { uint first; uint count; uint flags; uint pad; };  // flags: 1 sRGB, 2 float
+struct TexLevel { uint offset; int w; int h; uint pad; };
+layout(std430, set = 0, binding = 11) readonly buffer Tex8 { uint tex8[]; };
+layout(std430, set = 0, binding = 12) readonly buffer TexF { vec4 texf[]; };
+layout(std430, set = 0, binding = 13) readonly buffer TexInfos { TexInfo texinfo[]; };
+layout(std430, set = 0, binding = 14) readonly buffer TexLevels { TexLevel texlevel[]; };
+float srgb_dec(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+/* (GLSL leaves % of a negative number open; glslang emits OpSMod, the sign of the divisor: never negative here.) */
+int wrap_coord(int v, int n, int w) {  // TexWrap: 0 Repeat, 1 Extend, 2 Clip, 3 Mirror
+  if (w == 0) { v %= n; return v < 0 ? v + n : v; }
+  if (w == 3) { int p = 2 * n; v %= p; if (v < 0) v += p; return v < n ? v : p - 1 - v; }
+  return clamp(v, 0, n - 1);
+}
+vec4 tex_fetch(int t, int lv, int x, int y, int wrap) {
+  TexInfo ti = texinfo[t];
+  TexLevel l = texlevel[ti.first + uint(clamp(lv, 0, int(ti.count) - 1))];
+  if (wrap == 2 && (x < 0 || y < 0 || x >= l.w || y >= l.h)) return vec4(0.0);
+  x = wrap_coord(x, l.w, wrap);
+  y = wrap_coord(y, l.h, wrap);
+  uint i = l.offset + uint(y * l.w + x);
+  if ((ti.flags & 2u) != 0u) return texf[i];
+  uint c = tex8[i];
+  vec4 v = vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), float((c >> 24) & 255u)) / 255.0;
+  if ((ti.flags & 1u) != 0u) v.xyz = vec3(srgb_dec(v.x), srgb_dec(v.y), srgb_dec(v.z));
+  return v;
+}
+vec4 tex_level(int t, vec2 uv, int lv, int wrap, int filt) {  // TexFilter: 0 Closest, 1 Linear, 2 Trilinear, 3 3-point
+  TexInfo ti = texinfo[t];
+  lv = clamp(lv, 0, int(ti.count) - 1);
+  TexLevel l = texlevel[ti.first + uint(lv)];
+  float fx = uv.x * float(l.w) - 0.5, fy = (1.0 - uv.y) * float(l.h) - 0.5;
+  if (filt == 0) return tex_fetch(t, lv, int(floor(fx + 0.5)), int(floor(fy + 0.5)), wrap);
+  int x0 = int(floor(fx)), y0 = int(floor(fy));
+  float tx = fx - float(x0), ty = fy - float(y0);
+  vec4 a = tex_fetch(t, lv, x0, y0, wrap), b = tex_fetch(t, lv, x0 + 1, y0, wrap);
+  vec4 c = tex_fetch(t, lv, x0, y0 + 1, wrap), d = tex_fetch(t, lv, x0 + 1, y0 + 1, wrap);
+  if (filt == 3) {
+    if (tx + ty <= 1.0) return a + (b - a) * tx + (c - a) * ty;
+    return d + (c - d) * (1.0 - tx) + (b - d) * (1.0 - ty);
+  }
+  return mix(mix(a, b, tx), mix(c, d, tx), ty);
+}
+vec4 tex_sample(int t, vec2 uv, float lod, int wrap, int filt) {
+  if (t < 0) return vec4(1.0, 0.0, 1.0, 1.0);
+  if (filt != 2 || lod <= 0.0) return tex_level(t, uv, 0, wrap, filt);
+  int maxl = int(texinfo[t].count) - 1;
+  lod = min(lod, float(maxl));
+  int l0 = int(floor(lod));
+  float f = lod - float(l0);
+  vec4 a = tex_level(t, uv, l0, wrap, filt);
+  if (f < 1e-3 || l0 >= maxl) return a;
+  return mix(a, tex_level(t, uv, l0 + 1, wrap, filt), f);
+}
+float texture_lod(int t, vec2 ddx, vec2 ddy) {
+  TexLevel l = texlevel[texinfo[t].first];
+  float dx = max(abs(ddx.x) * float(l.w), abs(ddx.y) * float(l.h));
+  float dy = max(abs(ddy.x) * float(l.w), abs(ddy.y) * float(l.h));
+  float d = max(dx, dy);
+  return d > 1e-8 ? log2(d) : 0.0;
+}
+)";
+
+/* evaluate_surface's material, after kGlslProcedurals. */
+const char *kMaterialEval = R"(
+struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; };
+/* evaluate_surface (shading.cpp) for a pixel: uv / ddx / ddy as the deferred shader's (forward differences). */
+Surf evaluate(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3 lnor, vec4 tangent, bool has_tangent) {
+  Surf s;
+  s.albedo = I.albedo_rough.rgb;
+  s.metallic = I.metal_spec.x;
+  s.rough = I.albedo_rough.w;
+  s.n = n;
+  vec2 uv = uv0 * I.tiling.xy + I.offset.xy;
+  vec2 ddx = dux * I.tiling.xy, ddy = duy * I.tiling.xy;
+  vec3 gen = lpos;
+  if (I.bmin.x <= I.bmax.x) gen = (lpos - I.bmin.xyz) / max(I.bmax.xyz - I.bmin.xyz, vec3(1e-6));
+  int mapping = I.tex1.y, wrap = I.tex1.w, filt = I.tex2.x;
+  if (mapping == 2) {
+    uv = gen.xy * I.tiling.xy + I.offset.xy;
+    ddx = ddy = vec2(0.0);
+  }
+  bool box = mapping == 1;
+  vec3 bw = vec3(0.0), bp = lpos * I.tiling.xyz + I.offset.xyz;
+  if (box) {
+    vec3 an = abs(lnor);
+    an = an * an;
+    an = an * an;
+    bw = an / max(an.x + an.y + an.z, 1e-6);
+  }
+  bool no_d = ddx.x == 0.0 && ddx.y == 0.0 && ddy.x == 0.0 && ddy.y == 0.0;
+#define SAMPLE(t, out_) { \
+    if (!box) out_ = tex_sample(t, uv, no_d ? 0.0 : texture_lod(t, ddx, ddy), wrap, filt); \
+    else { \
+      out_ = vec4(0.0); \
+      if (bw.x > 0.001) out_ += tex_sample(t, vec2(bp.z, bp.y), 0.0, wrap, filt) * bw.x; \
+      if (bw.y > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.z), 0.0, wrap, filt) * bw.y; \
+      if (bw.z > 0.001) out_ += tex_sample(t, vec2(bp.x, bp.y), 0.0, wrap, filt) * bw.z; \
+    } }
+  int proc = I.tex1.z;
+  vec4 c;
+  if (proc == 1 || proc == 2) {
+    vec3 pp = (mapping == 0 ? vec3(uv, 0.0) : gen) * I.offset.w;
+    float t;  // (a branch, not a select: the noise is forty hashes a pixel, not paid for a checker)
+    if (proc == 1) t = checker(pp);
+    else t = clamp(0.5 + 0.5 * fbm_noise(pp, 5, 0.5) * 1.4, 0.0, 1.0);
+    s.albedo = mix(I.color2.rgb, I.albedo_rough.rgb, t);
+  }
+  else if (I.tex0.x >= 0) {
+    SAMPLE(I.tex0.x, c);
+    s.albedo *= c.rgb;
+  }
+  if (I.tex0.y >= 0) { SAMPLE(I.tex0.y, c); s.metallic *= c.x; }
+  if (I.tex0.z >= 0) { SAMPLE(I.tex0.z, c); s.rough *= c.x; }
+  s.emission = I.emission.rgb;
+  if (I.tex1.x >= 0) { SAMPLE(I.tex1.x, c); s.emission *= c.rgb; }
+  float ns = I.tiling.w;
+  if (I.tex0.w >= 0 && has_tangent && ns > 0.0) {
+    SAMPLE(I.tex0.w, c);
+    vec3 tn = c.xyz * 2.0 - 1.0;
+    vec3 t = normalize(tangent.xyz - n * dot(n, tangent.xyz));
+    vec3 b = cross(n, t) * tangent.w;
+    vec3 mapped = normalize(t * tn.x + b * tn.y + n * tn.z);
+    s.n = normalize(mix(n, mapped, min(ns, 1.0)));
+    if (ns > 1.0) s.n = normalize(mapped + (mapped - n) * (ns - 1.0));
+  }
+#undef SAMPLE
+  s.rough = clamp(s.rough, 0.0, 1.0);
+  s.metallic = clamp(s.metallic, 0.0, 1.0);
+  return s;
 }
 )";
 
@@ -156,6 +315,11 @@ const char *kGbufFrag = R"(
 layout(location = 0) in vec3 wn;
 layout(location = 1) flat in uint ii;
 layout(location = 2) in vec3 wpos;
+layout(location = 3) in vec3 lp;
+layout(location = 4) in vec3 ln;
+layout(location = 5) noperspective in vec3 uvw;
+layout(location = 6) in vec3 wt;
+layout(location = 7) flat in float tw;
 layout(location = 0) out vec4 o_normal;  // normal, roughness
 layout(location = 1) out vec4 o_albedo;  // albedo, metallic
 layout(location = 2) out vec4 o_geo;     // the triangle's own normal (turned to the smooth one's side), specular
@@ -166,11 +330,38 @@ void main() {
   vec3 g = cross(dFdx(wpos), dFdy(wpos));
   g = dot(g, g) > 0.0 ? normalize(g) : n;
   if (dot(g, n) < 0.0) g = -g;
-  o_normal = vec4(n, inst[ii].albedo_rough.w);
-  o_albedo = vec4(inst[ii].albedo_rough.rgb, inst[ii].metal_spec.x);
-  o_geo = vec4(g, inst[ii].metal_spec.y);
-  o_emit = vec4(inst[ii].emission.rgb, float(inst[ii].id.y));
-  o_id = inst[ii].id.x;
+  Inst I = inst[ii];
+  vec3 albedo = I.albedo_rough.rgb, emission = I.emission.rgb;
+  float rough = I.albedo_rough.w, metallic = I.metal_spec.x;
+  if (I.tex2.w != 0) {
+    /* The back side's normals turned first, as the CPU turns them before evaluate_material (a normal map's result
+     * depends on it); the light pass then finds them facing. */
+    if (dot(g, eye.xyz - wpos) < 0.0) {
+      n = -n;
+      g = -g;
+    }
+    /* The UVs here and at the next pixel right and below: UV / w and 1 / w are linear on screen, so their
+     * derivatives are exact, and the next pixel's UV is their ratio there (the deferred shader's forward
+     * difference). No UVs: (0, 0), no differences. */
+    vec2 uv = vec2(0.0), dux = vec2(0.0), duy = vec2(0.0);
+    if (I.tex2.y != 0) {
+      vec3 ex = dFdxFine(uvw), ey = dFdyFine(uvw);
+      uv = uvw.xy / uvw.z;
+      dux = (uvw.xy + ex.xy) / (uvw.z + ex.z) - uv;
+      duy = (uvw.xy + ey.xy) / (uvw.z + ey.z) - uv;
+    }
+    Surf s = evaluate(I, n, uv, dux, duy, lp, normalize(ln), vec4(normalize(wt), tw), I.tex2.z != 0);
+    n = s.n;
+    albedo = s.albedo;
+    metallic = s.metallic;
+    rough = s.rough;
+    emission = s.emission;
+  }
+  o_normal = vec4(n, rough);
+  o_albedo = vec4(albedo, metallic);
+  o_geo = vec4(g, I.metal_spec.y);
+  o_emit = vec4(emission, float(I.id.y));
+  o_id = I.id.x;
 }
 )";
 
@@ -569,6 +760,9 @@ struct FrameUbo {
 struct InstGpu {
   float model[16], albedo_rough[4], metal_spec[4], emission[4];
   uint32_t id[4];  // id, flags
+  float tiling[4], offset[4], color2[4];
+  int32_t tex0[4], tex1[4], tex2[4];
+  float bmin[4], bmax[4];
 };
 
 /* The CPU's matrices are left-handed with y up and depth 0..1; Vulkan's clip space has y down. */
@@ -597,6 +791,7 @@ class VulkanRaster final : public Raster {
     VkPhysicalDeviceProperties props;
     f_.vkGetPhysicalDeviceProperties(pd_, &props);
     ts_period_ns_ = props.limits.timestampPeriod;
+    max_storage_ = props.limits.maxStorageBufferRange;
     f_.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
     uint32_t qn = 0;
     f_.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
@@ -644,8 +839,11 @@ class VulkanRaster final : public Raster {
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
-    for (Buf *b : {&lut_buf_, &cage_v_, &cage_e_})
-      if (!make_buffer(*b, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+    /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
+     * arena's, which is copied over when it grows.) */
+    for (Buf *b : {&lut_buf_, &cage_v_, &cage_e_, &tex8_, &texf_, &texinfo_buf_, &texlevel_buf_})
+      if (!make_buffer(*b, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
         return fail(err, "out of memory");
     return make_layout(err) && make_render_passes(err) && make_pipelines(err);
   }
@@ -737,6 +935,56 @@ class VulkanRaster final : public Raster {
   }
 
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
+
+  int add_texture(const Texture &t, std::string *err) override {
+    if (t.levels.empty()) {
+      fail(err, "an empty texture");
+      return -1;
+    }
+    TexSlot s;
+    s.is_float = t.is_float;
+    s.flags = (t.srgb && !t.is_float ? 1u : 0u) | (t.is_float ? 2u : 0u);
+    for (const Texture::Level &l : t.levels) {
+      s.levels.push_back({l.w, l.h});
+      s.size += (size_t)l.w * l.h;
+    }
+    const size_t elem = s.is_float ? 16 : 4;
+    for (const Texture::Level &l : t.levels) {
+      const size_t n = (size_t)l.w * l.h;
+      if (s.is_float ? l.pxf.size() != n : l.px8.size() != n) {
+        fail(err, "a texture level of the wrong size");
+        return -1;
+      }
+    }
+    if (s.size * elem > max_storage_) {  // (before copying anything: an 8k float image is over a gigabyte)
+      fail(err, "a texture too large for the card's storage buffers");
+      return -1;
+    }
+    Buf &arena = s.is_float ? texf_ : tex8_;
+    size_t &used = s.is_float ? texf_used_ : tex8_used_;
+    if (!arena_room(arena, used, s.size, elem, err)) return -1;
+    s.at = used;
+    if (!upload_levels(arena, s.at * elem, t, elem, s.size * elem, err)) return -1;
+    used += s.size;
+    s.live = true;
+    int id = -1;
+    for (size_t i = 0; i < texs_.size() && id < 0; i++)
+      if (!texs_[i].live) id = (int)i;
+    if (id < 0) {
+      id = (int)texs_.size();
+      texs_.push_back(s);
+    }
+    else texs_[(size_t)id] = s;
+    tex_tables_dirty_ = true;
+    return id;
+  }
+  void remove_texture(int texture) override {
+    if (texture < 0 || (size_t)texture >= texs_.size() || !texs_[(size_t)texture].live) return;
+    TexSlot &s = texs_[(size_t)texture];
+    s.live = false;
+    (s.is_float ? texf_waste_ : tex8_waste_) += s.size;
+    tex_tables_dirty_ = true;
+  }
   bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *err) override {
     return set_cage(cage_v_, cage_nv_, v.data(), sizeof(CageVertex), v.size(), ranges, err);
   }
@@ -778,7 +1026,12 @@ class VulkanRaster final : public Raster {
     for (const RasterInstance &in : instances_)
       if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
     Slot &sl = slots_[fr.slot];
-    if (!targets(sl, fr.width, fr.height, fr.shadow_size, err) || !write_frame(fr, err) || !stage_pending(err)) return false;
+    if (!targets(sl, fr.width, fr.height, fr.shadow_size, err) || !write_frame(fr, err) || !send_tex_tables(err) || !stage_pending(err)) return false;
+    for (const RasterInstance &in : instances_)
+      if ((uint64_t)in.first_index + in.index_count > meshes_[in.mesh].indices) return fail(err, "an instance's part past its mesh");
+    for (const RasterInstance &in : instances_)
+      for (int t : in.tex)
+        if (in.textured && t >= 0 && ((size_t)t >= texs_.size() || !texs_[(size_t)t].live)) return fail(err, "an instance of a texture that isn't there");
     begin();
     record_pending();  // (the meshes' and the cage's queued ranges, before anything draws)
     if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 4);
@@ -950,7 +1203,20 @@ class VulkanRaster final : public Raster {
   RasterTimes times_;
   Buf ubo_, inst_buf_, staging_, readback_, ui_staging_, lut_buf_;
   Buf cage_v_, cage_e_;  // the Edit Mode cage (task 0100)
+  /* Task 0101: the textures. Their texels in two arenas (8-bit as stored, float), each texture's levels one after
+   * another; the tables of textures and levels mirrored here and sent when they change. */
+  struct TexSlot {
+    bool live = false, is_float = false;
+    size_t at = 0, size = 0;  // in its arena, in texels
+    std::vector<std::pair<int, int>> levels;  // sizes
+    uint32_t flags = 0;
+  };
+  Buf tex8_, texf_, texinfo_buf_, texlevel_buf_;
+  size_t tex8_used_ = 0, texf_used_ = 0, tex8_waste_ = 0, texf_waste_ = 0;
+  std::vector<TexSlot> texs_;
+  bool tex_tables_dirty_ = false;
   uint32_t cage_nv_ = 0, cage_ne_ = 0;
+  VkDeviceSize max_storage_ = 128u << 20;
   uint64_t lut_key_ = ~0ull;
   int lut_size_ = 0;
   float lut_min_ = 0, lut_max_ = 1;
@@ -1110,6 +1376,120 @@ class VulkanRaster final : public Raster {
                        VK_ACCESS_TRANSFER_READ_BIT;
     f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
   }
+  /* Task 0101: room for n more texels in a texture arena. Mostly unused (textures let go): compacted on the card,
+   * the live textures copied to the front. Still too small: a bigger buffer, the old texels copied over. */
+  bool arena_room(Buf &arena, size_t &used, size_t n, size_t elem, std::string *err) {
+    const bool is_float = &arena == &texf_;
+    size_t &waste = is_float ? texf_waste_ : tex8_waste_;
+    if ((used + n) * elem <= arena.size) return true;
+    const VkDeviceSize limit = max_storage_;
+    if (waste * 2 > used && !compact(arena, used, waste, is_float, elem)) return fail(err, info_.name + ": the textures couldn't be compacted");
+    if ((used + n) * elem <= arena.size) return true;
+    const VkDeviceSize want = std::max<VkDeviceSize>((used + n) * elem, std::min<VkDeviceSize>(arena.size * 2, limit));
+    if (want > limit) return fail(err, "textures too large for the card's storage buffers");
+    Buf bigger;
+    if (!make_buffer(bigger, want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+      return fail(err, info_.name + ": out of memory for textures");
+    if (used) {
+      begin();
+      const VkBufferCopy c{0, 0, used * elem};
+      f_.vkCmdCopyBuffer(cmd_, arena.buf, bigger.buf, 1, &c);
+      uploaded();
+      if (!submit_wait(err)) {
+        free_buffer(bigger);
+        return false;
+      }
+    }
+    f_.vkDeviceWaitIdle(dev_);
+    free_buffer(arena);
+    arena = bigger;
+    for (Slot &sl : slots_) bind_buffers(sl.set);
+    return true;
+  }
+  bool compact(Buf &arena, size_t &used, size_t &waste, bool is_float, size_t elem) {
+    Buf fresh;
+    if (!make_buffer(fresh, std::max<VkDeviceSize>(arena.size, 16),
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+      return true;  // (no room to compact: it only grows)
+    std::vector<VkBufferCopy> copies;
+    std::vector<size_t> moved_to;
+    size_t at = 0;
+    for (const TexSlot &s : texs_) {
+      if (!s.live || s.is_float != is_float) continue;
+      copies.push_back({s.at * elem, at * elem, s.size * elem});
+      moved_to.push_back(at);
+      at += s.size;
+    }
+    begin();
+    if (!copies.empty()) f_.vkCmdCopyBuffer(cmd_, arena.buf, fresh.buf, (uint32_t)copies.size(), copies.data());
+    uploaded();
+    std::string e;
+    if (!submit_wait(&e)) {  // (nothing changed: the old arena and its offsets stand)
+      free_buffer(fresh);
+      return false;
+    }
+    size_t k = 0;
+    for (TexSlot &s : texs_)
+      if (s.live && s.is_float == is_float) s.at = moved_to[k++];
+    f_.vkDeviceWaitIdle(dev_);
+    free_buffer(arena);
+    arena = fresh;
+    used = at;
+    waste = 0;
+    tex_tables_dirty_ = true;
+    for (Slot &sl : slots_) bind_buffers(sl.set);
+    return true;
+  }
+  /* A texture's levels one after another at an offset of its arena, written straight into the staging buffer (no
+   * copy of the chain between). A staging buffer grown past 64 MB for it is let go after. */
+  bool upload_levels(Buf &dst, size_t offset, const Texture &t, size_t elem, size_t bytes, std::string *err) {
+    if (!bytes) return true;
+    if (!staging_.buf || staging_.size < bytes) {
+      free_buffer(staging_);
+      if (!make_buffer(staging_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props())) return fail(err, info_.name + ": out of memory for an upload");
+    }
+    size_t at = 0;
+    for (const Texture::Level &l : t.levels) {
+      const size_t n = (size_t)l.w * l.h * elem;
+      std::memcpy((uint8_t *)staging_.mapped + at, t.is_float ? (const void *)l.pxf.data() : (const void *)l.px8.data(), n);
+      at += n;
+    }
+    begin();
+    const VkBufferCopy c{0, offset, bytes};
+    f_.vkCmdCopyBuffer(cmd_, staging_.buf, dst.buf, 1, &c);
+    uploaded();
+    const bool ok = submit_wait(err);
+    if (staging_.size > (64u << 20)) free_buffer(staging_);
+    return ok;
+  }
+  /* The textures' and levels' tables, as kMaterialFrag reads them, when they changed. */
+  bool send_tex_tables(std::string *err) {
+    if (!tex_tables_dirty_) return true;
+    std::vector<uint32_t> info, lv;
+    for (const TexSlot &s : texs_) {
+      info.insert(info.end(), {(uint32_t)(lv.size() / 4), (uint32_t)s.levels.size(), s.live ? s.flags : 0u, 0u});
+      size_t at = s.at;
+      for (const auto &l : s.levels) {
+        lv.insert(lv.end(), {(uint32_t)at, (uint32_t)l.first, (uint32_t)l.second, 0u});
+        at += (size_t)l.first * l.second;
+      }
+    }
+    for (auto [buf, v] : {std::pair<Buf *, std::vector<uint32_t> *>{&texinfo_buf_, &info}, {&texlevel_buf_, &lv}}) {
+      if (v->empty()) continue;
+      if (buf->size < v->size() * 4) {
+        f_.vkDeviceWaitIdle(dev_);
+        free_buffer(*buf);
+        if (!make_buffer(*buf, v->size() * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+          return fail(err, info_.name + ": out of memory for the textures' tables");
+        for (Slot &sl : slots_) bind_buffers(sl.set);
+      }
+      if (!upload(*buf, v->data(), v->size() * 4, err)) return false;
+    }
+    tex_tables_dirty_ = false;
+    return true;
+  }
   /* The cage over the picture (task 0100): its lines, then its dots, as the CPU records them. */
   void draw_cage(const RasterFrame &fr) {
     if (cage_ne_) {
@@ -1254,11 +1634,28 @@ class VulkanRaster final : public Raster {
       VkDeviceSize off = 0;
       f_.vkCmdBindVertexBuffers(cmd_, 0, 1, &m.vb.buf, &off);
       f_.vkCmdBindIndexBuffer(cmd_, m.ib.buf, 0, VK_INDEX_TYPE_UINT32);
-      f_.vkCmdDrawIndexed(cmd_, m.indices, 1, 0, 0, (uint32_t)i);
+      const RasterInstance &in = instances_[i];  // (render() checked each part lies within its mesh)
+      f_.vkCmdDrawIndexed(cmd_, in.index_count ? in.index_count : m.indices, 1, in.index_count ? in.first_index : 0, 0, (uint32_t)i);
     }
     f_.vkCmdEndRenderPass(cmd_);
   }
 
+  /* Task 0101: a textured instance's material, as kMaterialFrag reads it. */
+  static void write_material(const RasterInstance &s, InstGpu &d) {
+    for (int k = 0; k < 3; k++) {
+      d.tiling[k] = s.tiling[k];
+      d.offset[k] = s.offset[k];
+      d.color2[k] = s.color2[k];
+      d.bmin[k] = s.bounds_min[k];
+      d.bmax[k] = s.bounds_max[k];
+    }
+    d.tiling[3] = s.normal_strength;
+    d.offset[3] = s.procedural_scale;
+    d.color2[3] = d.bmin[3] = d.bmax[3] = 0.0f;
+    for (int k = 0; k < 4; k++) d.tex0[k] = s.tex[k];
+    d.tex1[0] = s.tex[4], d.tex1[1] = s.mapping, d.tex1[2] = s.procedural, d.tex1[3] = s.wrap;
+    d.tex2[0] = s.filter, d.tex2[1] = s.has_uv ? 1 : 0, d.tex2[2] = s.has_tangent ? 1 : 0, d.tex2[3] = s.textured ? 1 : 0;
+  }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {
     if (instances_.size() * sizeof(InstGpu) > inst_buf_.size) {
@@ -1278,6 +1675,7 @@ class VulkanRaster final : public Raster {
       dst[i].emission[3] = 0.0f;
       dst[i].id[0] = s.id;
       dst[i].id[1] = s.flags;
+      write_material(s, dst[i]);
     }
     FrameUbo u{};
     const Mat4 vp = vulkan_clip(fr.view_proj), sun = vulkan_clip(fr.sun_view_proj), inv = vp.inverse();
@@ -1341,6 +1739,8 @@ class VulkanRaster final : public Raster {
     b.push_back({8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 9; i <= 10; i++)  // the cage's vertices and edges (task 0100)
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    for (uint32_t i = 11; i <= 14; i++)  // the textures: 8-bit texels, float texels, textures, levels (task 0101)
+      b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
@@ -1350,7 +1750,7 @@ class VulkanRaster final : public Raster {
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
     VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 * kSlots},
                                   {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
@@ -1369,15 +1769,18 @@ class VulkanRaster final : public Raster {
   }
   void bind_buffers(VkDescriptorSet set) {
     VkDescriptorBufferInfo ub{ubo_.buf, 0, VK_WHOLE_SIZE}, sb{inst_buf_.buf, 0, VK_WHOLE_SIZE}, lb{lut_buf_.buf, 0, VK_WHOLE_SIZE};
-    VkDescriptorBufferInfo cvb{cage_v_.buf, 0, VK_WHOLE_SIZE}, ceb{cage_e_.buf, 0, VK_WHOLE_SIZE};
-    VkWriteDescriptorSet w[5] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET},
-                                 {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
-    w[0].dstSet = w[1].dstSet = w[2].dstSet = w[3].dstSet = w[4].dstSet = set;
-    for (int i = 3; i < 5; i++) {
+    /* Bindings 9 to 14: the cage's vertices and edges (task 0100), the textures' arenas and tables (task 0101). */
+    const VkDescriptorBufferInfo more[6] = {{cage_v_.buf, 0, VK_WHOLE_SIZE},    {cage_e_.buf, 0, VK_WHOLE_SIZE},
+                                            {tex8_.buf, 0, VK_WHOLE_SIZE},      {texf_.buf, 0, VK_WHOLE_SIZE},
+                                            {texinfo_buf_.buf, 0, VK_WHOLE_SIZE}, {texlevel_buf_.buf, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[9];
+    for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    for (VkWriteDescriptorSet &x : w) x.dstSet = set;
+    for (int i = 3; i < 9; i++) {
       w[i].dstBinding = (uint32_t)(9 + i - 3);
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      w[i].pBufferInfo = i == 3 ? &cvb : &ceb;
+      w[i].pBufferInfo = &more[i - 3];
     }
     w[2].dstBinding = 8;
     w[2].descriptorCount = 1;
@@ -1391,7 +1794,7 @@ class VulkanRaster final : public Raster {
     w[1].descriptorCount = 1;
     w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[1].pBufferInfo = &sb;
-    f_.vkUpdateDescriptorSets(dev_, 5, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 9, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
     const Img *im[6] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit};
@@ -1495,12 +1898,15 @@ class VulkanRaster final : public Raster {
     st[1].module = fs;
     st[1].pName = "main";
     VkVertexInputBindingDescription vb{0, sizeof(RasterVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription va[2] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12}};
+    VkVertexInputAttributeDescription va[4] = {{0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+                                               {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},
+                                               {2, 0, VK_FORMAT_R32G32_SFLOAT, 24},
+                                               {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32}};
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     if (geometry) {
       vi.vertexBindingDescriptionCount = 1;
       vi.pVertexBindingDescriptions = &vb;
-      vi.vertexAttributeDescriptionCount = 2;
+      vi.vertexAttributeDescriptionCount = 4;
       vi.pVertexAttributeDescriptions = va;
     }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -1556,7 +1962,7 @@ class VulkanRaster final : public Raster {
   }
   bool make_pipelines(std::string *err) {
     VkShaderModule sv = module(kShadowVert, shaderc_vertex_shader, err), gv = module(kGbufVert, shaderc_vertex_shader, err),
-                   gf = module(kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
+                   gf = module(std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
                    lf = module(kLightFrag, shaderc_fragment_shader, err);
     const std::string cc = kCageCommon;
     const std::string cv = cc + kCageVertCommon;
@@ -1691,7 +2097,9 @@ class VulkanRaster final : public Raster {
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     free_image(ui_img_);
     for (Mesh &m : meshes_) free_mesh(m);
-    for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_}) free_buffer(*b);
+    for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &ui_staging_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
+                   &texinfo_buf_, &texlevel_buf_})
+      free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
     if (layout_) f_.vkDestroyPipelineLayout(dev_, layout_, nullptr);

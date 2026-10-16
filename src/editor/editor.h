@@ -41,6 +41,7 @@
 
 #include <atomic>
 #include "../core/releases.h"
+#include <array>
 #include <functional>
 #include <thread>
 #include <tuple>
@@ -120,6 +121,7 @@ struct FrameProfile {
   uint64_t gpu_upload_bytes = 0;  // task 0098: what the meshes sent to the card took
   uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
+  uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
   double ms_gpu = 0;
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
@@ -134,6 +136,7 @@ struct FrameProfile {
     gpu_upload_bytes += o.gpu_upload_bytes;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
+    gpu_texture_uploads += o.gpu_texture_uploads;
     ms_gpu += o.ms_gpu;
   }
 };
@@ -2092,6 +2095,7 @@ class Editor {
   /* Task 0096 (ADR 0036): the views' deferred 3D on the GPU (gpu_views.cpp). One device for every view, each view its
    * own slot of targets; the meshes kept on the card while they're drawn. */
   struct GpuMesh {
+    std::vector<std::array<uint32_t, 3>> parts;  // task 0101: per material slot, its triangles' (slot, first index, count)
     int id = -1;
     uint64_t serial = 0;
     uint32_t vertices = 0, indices = 0;
@@ -2123,6 +2127,14 @@ class Editor {
                      const Camera *cam, bool scene_lights, const FilterStack *filters, const RasterOptions &opt);
   int gpu_mesh(const RenderMesh &rm, std::string &err);
   bool gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err);
+  struct GpuTexture {
+    int id = -1;
+    TexturePtr keep;  // (held while the card has it: its address stays this texture's)
+    uint64_t used = 0;
+    std::string refused;  // id -1: why the card can't hold it
+  };
+  std::unordered_map<const Texture *, GpuTexture> gpu_textures_;
+  int gpu_texture(const TexturePtr &t, std::string &err);
   /* Task 0100: the Scene view's 3D drawn by the card at full size (the Viewport Resolution Scale saves the CPU's
    * per-pixel work), and its Edit Mode cage drawn there too, before the read-back. */
   bool scene_gpu_call_ = false;   // this render_deferred is the Scene view's (render_scene_view sets it)

@@ -25,11 +25,17 @@
 #include <utility>
 #include <vector>
 
+namespace bl {
+class Texture;
+}
+
 namespace bl::gpu {
 
 struct RasterVertex {
   float p[3];
   float n[3];
+  float uv[2] = {0, 0};        // task 0101: the render mesh's UVs and tangents (0 where it has none)
+  float t[4] = {0, 0, 0, 0};
 };
 
 /* One drawn object: its mesh (from add_mesh), its model matrix (column-major) and its plain material. */
@@ -43,6 +49,19 @@ struct RasterInstance {
   uint32_t flags = ReceiveShadows | CastShadows;
   uint32_t mesh = 0;
   uint32_t id = 0;        // written to the ids plane
+  /* Task 0101 (ADR 0038): a material that varies over the surface, evaluated per pixel as evaluate_surface does.
+   * Then albedo_rough, metal_spec and emission hold the material's own values (base colour, roughness; metallic,
+   * specular; emission x strength), which the maps multiply. */
+  bool textured = false;
+  float tiling[3] = {1, 1, 1}, offset[3] = {0, 0, 0};
+  float normal_strength = 1.0f, procedural_scale = 1.0f;
+  float color2[3] = {0, 0, 0};             // the procedural's second colour
+  int32_t tex[5] = {-1, -1, -1, -1, -1};   // base, metallic, roughness, normal, emission: add_texture's ids
+  int32_t mapping = 0, procedural = 0, wrap = 0, filter = 2;  // MaterialMapping, Procedural, TexWrap, TexFilter
+  float bounds_min[3] = {0, 0, 0}, bounds_max[3] = {-1, -1, -1};  // the mesh's own (Generated mapping; empty: none)
+  bool has_uv = false, has_tangent = false;
+  /* The part of the mesh drawn (a material's triangles, grouped on the card): count 0 is all of it. */
+  uint32_t first_index = 0, index_count = 0;
 };
 
 /* The Edit Mode cage (task 0100), drawn over the picture as the CPU draws its overlay lines and dots
@@ -139,6 +158,10 @@ class Raster {
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
   virtual bool set_cage_edges(const std::vector<CageEdge> &e, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
+  /* Task 0101: a texture's mip chain, as Texture holds it (8-bit texels as stored, or float), kept on the card; the id
+   * is RasterInstance::tex's. -1 when it doesn't fit (the error says why). */
+  virtual int add_texture(const Texture &t, std::string *error) = 0;
+  virtual void remove_texture(int texture) = 0;
   /* What the card holds for a mesh, read back (tests: partial updates leave it as a whole upload would). */
   virtual bool read_mesh(int mesh, std::vector<RasterVertex> &v, std::vector<uint32_t> &indices, std::string *error) = 0;
   /* An OpenColorIO view's LUT as colormanagement::view_lut gives it (size^3 colours, red fastest, a log2 shaper);

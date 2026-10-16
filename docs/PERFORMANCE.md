@@ -56,6 +56,21 @@ overlay, drawn on the CPU (task 0100 moves it to the GPU).
 - The Scene view on the card draws at full size: sharper on the laptop setting, and the overlays sit on a full-size
   picture. Playing costs 0.8-1.4 ms more for it (a bigger read-back).
 
+**Textures on the GPU (task 0101, ADR 0038):**
+
+| Laptop setting, moving an object | Views on the CPU | Views on the GPU |
+|---|---|---|
+| The editor scene, a Checker on the 200 icospheres, Gradient world | 18.0 ms | 10.4 ms (all 33 views on the card; before: all on the CPU) |
+
+- The scene still holds the 50k-face sphere of the Edit Mode rows in both, so these are heavier than the plain
+  scene's rows.
+- The card samples textures the CPU's way, in its shaders, from the CPU's own mip chain (ADR 0038): storage buffers,
+  four texels per level per map, not the texture units. A 1080p G-buffer of textured objects took under 1 ms of GPU
+  time here.
+- Every vertex sent to the card is now 48 bytes, not 24 (UVs and tangents): a mesh takes twice the card's memory
+  and a whole upload twice the bytes. A mesh with several materials is grouped by material on the card, so its Edit
+  Mode drag sends the whole mesh rather than the moved ranges.
+
 ## OptiX against GPU Compute (task 0097, ADR 0037)
 
 `blendity_stress --only gpu_optix` (1920x1080, 256 icospheres and a floor, Lambert-like materials, 64 samples, 4

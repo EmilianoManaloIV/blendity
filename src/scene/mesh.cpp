@@ -739,7 +739,9 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   if (!partial) corner_normals(flat, ns.cnormal, &ns);
   if (!(partial ? write_corners_at(ci, ns.cnormal, verts, changed) : write_corners(ci, ns.cnormal, changed))) return false;
   if (!retriangulate(rm, crv, &fmoved)) return false;
+  bool tangents_rewritten = false;
   if (cache_tangents_[ci] && rm.tangents.size() == rm.positions.size() && rm.uvs.size() == rm.positions.size()) {
+    tangents_rewritten = true;
     /* Tangents from the UV gradients of the deformed triangles (Lengyel's method), averaged per render vertex and
      * made orthogonal to the new normal: they depend on the shape alone, not on the drag that led there.
      * MikkTSpace (the next full build) is the same idea with more care at splits, so they differ slightly. */
@@ -773,6 +775,7 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   }
   rm.bounds = bounds();
   record_moved(rm, changed, faces);
+  if (tangents_rewritten) rm.moved_from = 0;  // (every tangent written again: copies take it whole)
   rm.serial = next_render_serial();  // what was drawn from it changed: every cache keyed on it re-renders
   if (partial) g_partial_normals.fetch_add(1, std::memory_order_relaxed);
   st.count = true;

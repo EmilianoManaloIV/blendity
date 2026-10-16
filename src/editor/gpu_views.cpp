@@ -19,22 +19,38 @@ namespace bl {
 
 namespace {
 
-/* The plain material a mesh shows (its one slot), or null when the mesh has several. */
-const Material *only_material(const DrawItem &it) {
-  const RenderMesh &rm = *it.mesh;
-  const uint16_t slot = rm.tri_material.empty() ? 0 : rm.tri_material[0];
-  for (uint16_t s : rm.tri_material)
-    if (s != slot) return nullptr;
+/* The material a triangle's slot shows, as Renderer3D::setup_tri picks it. */
+const Material *slot_material(const DrawItem &it, uint32_t slot) {
   if (!it.materials || it.materials->empty()) return default_material().get();
   const MaterialPtr &mp = (*it.materials)[std::min<size_t>(slot, it.materials->size() - 1)];
   return mp ? mp.get() : default_material().get();
 }
 
-/* Why a material can't be drawn on the GPU yet, or null. */
+/* The material slots a mesh's triangles use, ascending (one, 0, for a mesh without them). */
+std::vector<uint32_t> mesh_slots(const RenderMesh &rm) {
+  const uint16_t first = rm.tri_material.empty() ? 0 : rm.tri_material[0];
+  if (std::all_of(rm.tri_material.begin(), rm.tri_material.end(), [&](uint16_t s) { return s == first; })) return {first};  // (most meshes)
+  std::vector<uint8_t> seen;
+  for (uint16_t s : rm.tri_material) {
+    if (s >= seen.size()) seen.resize((size_t)s + 1, 0);
+    seen[s] = 1;
+  }
+  std::vector<uint32_t> out;
+  for (size_t s = 0; s < seen.size(); s++)
+    if (seen[s]) out.push_back((uint32_t)s);
+  if (out.empty()) out.push_back(0);
+  return out;
+}
+
+/* Why a material can't be drawn on the GPU yet, or null. Textures, procedurals and Box / Generated mapping are drawn
+ * there since task 0101 (ADR 0038). */
 const char *material_unsupported(const Material &m) {
   if (!m.opaque()) return "a see-through material";
   if (m.shading_model == 1) return "a toon material";
-  if (!material_uniform(m, m.textures())) return "a material with textures, a procedural or axis mapping";
+  if (m.axis_mode != 0) return "an axis material";
+  const Material::Resolved &tx = m.textures();
+  for (int k = 0; k < 5; k++)
+    if (tx.live[k]) return "a live procedural texture";
   return nullptr;
 }
 
@@ -45,9 +61,26 @@ const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (it.vertex_colors) return "vertex colours (Weight Paint)";
   if (it.always_cull) return "a toon outline";
   if (it.lightmap || it.rt_bounce || (it.use_probes && env.probes)) return "lightmaps, probes or realtime GI";
-  const Material *m = only_material(it);
-  if (!m) return "several materials on one mesh";
-  return material_unsupported(*m);
+  for (uint32_t slot : mesh_slots(*it.mesh))
+    if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
+  return nullptr;
+}
+
+/* The mesh's indices for the card: as they are with one material; with several, its triangles grouped by slot (each
+ * group one part, drawn with its own material), in their order within each. */
+std::vector<uint32_t> card_indices(const RenderMesh &rm, std::vector<std::array<uint32_t, 3>> &parts) {
+  parts.clear();
+  const std::vector<uint32_t> slots = mesh_slots(rm);
+  if (slots.size() < 2 || rm.tri_material.size() * 3 != rm.indices.size()) return rm.indices;
+  std::vector<uint32_t> out;
+  out.reserve(rm.indices.size());
+  for (uint32_t s : slots) {
+    const uint32_t first = (uint32_t)out.size();
+    for (size_t t = 0; t < rm.tri_material.size(); t++)
+      if (rm.tri_material[t] == s) out.insert(out.end(), rm.indices.begin() + (ptrdiff_t)t * 3, rm.indices.begin() + (ptrdiff_t)t * 3 + 3);
+    parts.push_back({s, first, (uint32_t)out.size() - first});
+  }
+  return out;
 }
 
 /* Whether an object casts into the shadow map: as update_shadow_map decides it (any slot that casts, or none set). */
@@ -81,23 +114,53 @@ gpu::RasterLight raster_light(const RenderLight &l) {
 
 void set3(float *d, Vec3 v) { d[0] = v.x, d[1] = v.y, d[2] = v.z; }
 
-/* An object as the GPU draws it: the material sampled once (a plain one is the same everywhere but for the normal),
- * the flags as the CPU decides them. */
-gpu::RasterInstance raster_instance(const DrawItem &it, int mesh) {
+/* A material that varies over the surface (task 0101, ADR 0038): its own values and its maps, which the card
+ * evaluates per pixel as evaluate_surface does. `tex` gives a texture's id on the card. */
+void raster_textured(gpu::RasterInstance &in, const Material &m, const RenderMesh &rm, const std::function<int(const TexturePtr &)> &tex) {
+  const Material::Resolved &tx = m.textures();
+  in.textured = true;
+  set3(in.albedo_rough, m.base_color);
+  in.albedo_rough[3] = m.roughness;
+  in.metal_spec[0] = m.metallic;
+  in.metal_spec[1] = m.specular;
+  set3(in.emission, m.emission * m.emission_strength);
+  set3(in.tiling, m.tiling);
+  set3(in.offset, m.offset);
+  set3(in.color2, m.procedural_color2);
+  in.normal_strength = m.normal_strength;
+  in.procedural_scale = m.procedural_scale;
+  const bool proc = m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise;
+  in.procedural = proc ? m.procedural : 0;
+  const TexturePtr *maps[5] = {&tx.base, &tx.metallic, &tx.roughness, &tx.normal, &tx.emission};
+  for (int k = 0; k < 5; k++) in.tex[k] = *maps[k] && !(k == 0 && proc) ? tex(*maps[k]) : -1;
+  in.mapping = m.mapping;
+  in.wrap = m.wrap;
+  in.filter = m.filter;
+  if (rm.bounds.valid()) {
+    set3(in.bounds_min, rm.bounds.min);
+    set3(in.bounds_max, rm.bounds.max);
+  }
+  in.has_uv = !rm.uvs.empty();
+  in.has_tangent = !rm.tangents.empty();
+}
+
+/* An object (one material's part of it) as the GPU draws it: a plain material sampled once (the same everywhere but
+ * for the normal), else evaluated per pixel; the flags as the CPU decides them. */
+gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material &m, const std::function<int(const TexturePtr &)> &tex) {
   gpu::RasterInstance in;
   std::memcpy(in.model, it.model.m, 64);
-  const Material &m = *only_material(it);
   const SurfaceSample s = evaluate_material(m, m.textures(), SurfacePoint{});
   set3(in.albedo_rough, s.albedo);
   in.albedo_rough[3] = s.roughness;
   in.metal_spec[0] = s.metallic;
   in.metal_spec[1] = s.specular;
   set3(in.emission, s.emission);
+  if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
   in.flags = 0;
   if (s.unlit) in.flags |= gpu::RasterInstance::Unlit;
   if (it.receive_shadows) in.flags |= gpu::RasterInstance::ReceiveShadows;
   if (casts_shadows(it)) in.flags |= gpu::RasterInstance::CastShadows;
-  if (it.double_sided || m.double_sided) in.flags |= gpu::RasterInstance::DoubleSided;
+  if (it.double_sided) in.flags |= gpu::RasterInstance::DoubleSided;  // (per object, as the CPU culls: its first material's)
   if (mirrored(it.model)) in.flags |= gpu::RasterInstance::Mirrored;
   in.mesh = (uint32_t)mesh;
   in.id = it.id;
@@ -106,7 +169,10 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh) {
 
 gpu::RasterVertex raster_vertex(const RenderMesh &rm, size_t i) {
   const Vec3 p = rm.positions[i], n = i < rm.normals.size() ? rm.normals[i] : Vec3(0, 1, 0);
-  return {{p.x, p.y, p.z}, {n.x, n.y, n.z}};
+  gpu::RasterVertex v{{p.x, p.y, p.z}, {n.x, n.y, n.z}};
+  if (i < rm.uvs.size()) v.uv[0] = rm.uvs[i].x, v.uv[1] = rm.uvs[i].y;
+  if (i < rm.tangents.size()) v.t[0] = rm.tangents[i].x, v.t[1] = rm.tangents[i].y, v.t[2] = rm.tangents[i].z, v.t[3] = rm.tangents[i].w;
+  return v;
 }
 
 std::vector<gpu::RasterVertex> raster_vertices(const RenderMesh &rm) {
@@ -264,8 +330,9 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   if (gpu_mesh_moved(e, rm, err)) return e.id;
   err.clear();  // (a refused partial update falls back to the whole mesh)
   const std::vector<gpu::RasterVertex> v = raster_vertices(rm);
+  const std::vector<uint32_t> indices = card_indices(rm, e.parts);
   prof_.gpu_upload_bytes += (uint64_t)v.size() * sizeof(gpu::RasterVertex) + (uint64_t)rm.indices.size() * 4;
-  if (e.id >= 0 && e.vertices == rm.positions.size() && e.indices == rm.indices.size() && gpu_view_->update_mesh(e.id, v, &rm.indices, &err)) {
+  if (e.id >= 0 && e.vertices == rm.positions.size() && e.indices == rm.indices.size() && gpu_view_->update_mesh(e.id, v, &indices, &err)) {
     prof_.gpu_mesh_updates++;
     e.serial = rm.serial;
     return e.id;
@@ -274,7 +341,7 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
     gpu_view_->remove_mesh(e.id);
     gpu_mesh_bytes_ -= e.bytes;
   }
-  e.id = gpu_view_->add_mesh(v, rm.indices, &err);
+  e.id = gpu_view_->add_mesh(v, indices, &err);
   e.serial = rm.serial;
   e.vertices = (uint32_t)rm.positions.size();
   e.indices = (uint32_t)rm.indices.size();
@@ -284,9 +351,32 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   return e.id;
 }
 
+/* Task 0101: a texture on the card, sent once while it is drawn (its mip chain as the CPU built it). -1 and `err`
+ * when the card can't hold it. */
+int Editor::gpu_texture(const TexturePtr &t, std::string &err) {
+  if (!t) return -1;
+  auto found = gpu_textures_.find(t.get());
+  if (found != gpu_textures_.end()) {
+    found->second.used = gpu_calls_;
+    if (found->second.id < 0 && err.empty()) err = found->second.refused;
+    return found->second.id;
+  }
+  std::string why;
+  const int id = gpu_view_->add_texture(*t, &why);
+  /* Refused (too large): remembered, so it isn't copied and tried again every frame; forgotten with the others. */
+  gpu_textures_[t.get()] = {id, t, gpu_calls_, id < 0 ? (why.empty() ? "a texture the card can't hold" : why) : std::string()};
+  if (id < 0) {
+    if (err.empty()) err = gpu_textures_[t.get()].refused;
+    return -1;
+  }
+  prof_.gpu_texture_uploads++;
+  return id;
+}
+
 /* Task 0099: the card's copy is the render mesh this one moved from in place: only what the move changed goes up. */
 bool Editor::gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err) {
   if (e.id < 0 || rm.moved_from == 0 || e.serial != rm.moved_from || e.vertices != rm.positions.size() || e.indices != rm.indices.size()) return false;
+  if (!e.parts.empty()) return false;  // (its triangles are grouped by material on the card: the index ranges don't hold)
   std::vector<gpu::RasterVertex> v;  // (just the moved ranges' vertices, one range after another)
   for (const auto &r : rm.moved_vertices)
     for (uint32_t i = r.first; i < r.first + r.second && i < rm.positions.size(); i++) v.push_back(raster_vertex(rm, i));
@@ -306,6 +396,14 @@ bool Editor::gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err) 
  * mesh made anew every frame - a time-driven modifier in Play - would otherwise pile up). Never one drawn in this
  * call. */
 void Editor::gpu_forget_meshes() {
+  for (auto it = gpu_textures_.begin(); it != gpu_textures_.end();) {  // (textures not drawn for a while: let go)
+    if (gpu_calls_ - it->second.used <= 256) {
+      ++it;
+      continue;
+    }
+    if (it->second.id >= 0) gpu_view_->remove_texture(it->second.id);
+    it = gpu_textures_.erase(it);
+  }
   const uint64_t budget = gpu_mesh_budget(gpu_view_->info());
   if (gpu_calls_ % 64 && gpu_mesh_bytes_ <= budget) return;
   std::vector<std::pair<uint64_t, const RenderMesh *>> by_age;
@@ -349,11 +447,29 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   std::vector<gpu::RasterInstance> inst;
   inst.reserve(items.size());
   bool ok = true;
+  std::string tex_err;  // (a texture the card can't hold: this view on the CPU, the card kept)
+  auto tex = [&](const TexturePtr &t) { return gpu_texture(t, tex_err); };
   for (const DrawItem &it : items) {
     if (!it.mesh || it.mesh->indices.empty()) continue;
     const int mesh = gpu_mesh(*it.mesh, err);
     ok = ok && mesh >= 0;
-    if (mesh >= 0) inst.push_back(raster_instance(it, mesh));
+    if (mesh < 0) continue;
+    const GpuMesh &e = gpu_meshes_[it.mesh];
+    if (e.parts.empty()) {
+      inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), tex));
+      continue;
+    }
+    for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
+      gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), tex);
+      in.first_index = part[1];
+      in.index_count = part[2];
+      inst.push_back(in);
+    }
+  }
+  if (ok && !tex_err.empty()) {
+    gpu_slot_reason_[slot] = gpu_view_reason_ = tex_err;
+    prof_.gpu_fallbacks++;
+    return false;
   }
   gpu::RasterFrame fr;
   fr.slot = slot;
@@ -414,6 +530,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
  * same address - gets everything again. */
 void Editor::gpu_view_drop() {
   gpu_meshes_.clear();
+  gpu_textures_.clear();
   gpu_mesh_bytes_ = 0;
   gpu_cage_v_.clear();
   gpu_cage_e_.clear();

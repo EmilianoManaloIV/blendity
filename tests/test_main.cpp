@@ -30075,7 +30075,7 @@ static void round81_tests() {
     CHECK(within3 >= 0.99);
     ed.viewport_device_for_test(1);
   });
-  test("gpu views: a procedural material sends the view to the CPU, says why, and the picture is then the CPU's exactly", [&] {
+  test("gpu views: a material the card doesn't draw yet (an axis material) sends the view to the CPU, says why, and the picture is then the CPU's exactly", [&] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
@@ -30085,12 +30085,13 @@ static void round81_tests() {
     GameObject *cube = ed.scene().find_by_name("Cube");
     CHECK(cube != nullptr);
     if (!cube) return;
-    MaterialPtr checker = make_material("Checker", {0.8f, 0.8f, 0.8f});
-    checker->procedural = (int)Procedural::Checker;
-    cube->get<MeshRenderer>()->materials = {checker};
+    /* (A procedural was the example until task 0101 drew them on the card.) */
+    MaterialPtr axis = make_material("Axis", {0.8f, 0.8f, 0.8f});
+    axis->axis_mode = 1;
+    cube->get<MeshRenderer>()->materials = {axis};
     const std::vector<uint32_t> cpu = r122_views(ed, 1), gpu = r122_views(ed, 2);
     std::printf("    %s\n", ed.gpu_view_status().c_str());
-    CHECK(ed.gpu_view_reason().find("procedural") != std::string::npos);
+    CHECK(ed.gpu_view_reason().find("axis") != std::string::npos);
     CHECK(cpu == gpu);
     ed.viewport_device_for_test(1);
   });
@@ -30390,10 +30391,15 @@ static void round81_tests() {
         std::vector<gpu::RasterVertex> card;
         std::vector<uint32_t> card_indices;
         if (!ed.gpu_mesh_for_test(rm, card, card_indices)) continue;
-        std::vector<gpu::RasterVertex> want(rm.positions.size());  // (as the views send it: position, normal)
-        for (size_t i = 0; i < want.size(); i++)
+        std::vector<gpu::RasterVertex> want(rm.positions.size());  // (as the views send it: position, normal, UV, tangent)
+        for (size_t i = 0; i < want.size(); i++) {
           want[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+          if (i < rm.uvs.size()) want[i].uv[0] = rm.uvs[i].x, want[i].uv[1] = rm.uvs[i].y;
+          if (i < rm.tangents.size())
+            want[i].t[0] = rm.tangents[i].x, want[i].t[1] = rm.tangents[i].y, want[i].t[2] = rm.tangents[i].z, want[i].t[3] = rm.tangents[i].w;
+        }
         checked++;
+        /* (One material: the card keeps the indices' order; several are grouped by material there, task 0101.) */
         if (card.size() != want.size() || card_indices != rm.indices || std::memcmp(card.data(), want.data(), want.size() * sizeof(gpu::RasterVertex)))
           differ++;
       }
@@ -30637,5 +30643,312 @@ static void round81_tests() {
     CHECK(after.gpu_cage_frames > before.gpu_cage_frames);
     CHECK(n > 2000);
     CHECK(mean < 1.0 && within3 >= 0.99);
+  });
+  /* ---------------------------------------------------------------- round 126: textures on the GPU (task 0101) */
+  /* A small image written into the tests' folder (0xAARRGGBB), as a material's map takes it. */
+  auto r126_png = [](const std::string &name, int w, int h, const std::function<uint32_t(int, int)> &px) {
+    const std::string path = fs::join(test_dir(), name);
+    std::vector<uint32_t> g((size_t)w * h);
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) g[(size_t)y * w + x] = px(x, y);
+    write_png(path, g.data(), w, h, w);
+    return path;
+  };
+  /* One object with `mat` in front of the camera, the Scene view drawn on the CPU and on the card: the difference over
+   * the object's own pixels (where the view differs from the same view without it), and whether the card drew it. */
+  struct R126Result {
+    size_t pixels = 0;
+    double mean = 0, within3 = 0;
+    uint64_t gpu_views = 0, fallbacks = 0;
+    std::string reason;
+    std::vector<uint32_t> cpu;
+  };
+  auto r126_case = [&](MeshPtr mesh, const std::vector<MaterialPtr> &mats, Vec3 eye, Vec3 at, Quat rot) {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    GameObject *obj = ed.scene().create("Textured");
+    obj->add<MeshFilter>()->mesh = mesh;
+    obj->add<MeshRenderer>()->materials = mats;
+    obj->set_local_position({0.0f, 1.0f, 0.0f});
+    obj->set_local_rotation(rot);
+    ed.command(strprintf("camera %g %g %g %g %g %g", eye.x, eye.y, eye.z, at.x, at.y, at.z));
+    r34_steps(ed, 3);
+    auto draw = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {  // (a change, then back: the view draws again; on the card, then at full size)
+        obj->set_local_position({0.0f, k ? 1.0f : 1.0001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    R126Result r;
+    const std::vector<uint32_t> cpu = draw(1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = draw(2);
+    const FrameProfile after = ed.frame_profile_totals();
+    r.gpu_views = after.gpu_views - before.gpu_views;
+    r.fallbacks = after.gpu_fallbacks - before.gpu_fallbacks;
+    r.reason = ed.gpu_view_reason();
+    obj->active = false;
+    const std::vector<uint32_t> empty = draw(1);
+    auto worst = [](uint32_t a, uint32_t b) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)));
+      return w;
+    };
+    double sum = 0;
+    size_t within = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size() && i < empty.size(); i++) {
+      if (worst(cpu[i], empty[i]) <= 8) continue;
+      const int w = worst(cpu[i], gpu[i]);
+      r.pixels++;
+      sum += w;
+      within += w <= 3;
+    }
+    r.mean = r.pixels ? sum / (double)r.pixels : 0;
+    r.within3 = r.pixels ? (double)within / (double)r.pixels : 0;
+    r.cpu = cpu;
+    return r;
+  };
+  test("gpu views: textured materials draw on the card as the CPU draws them - UV, Box and Generated mapping, mips at a grazing angle, normal / metallic / roughness / emission maps, Checker and Noise, filters and wraps, several materials on one mesh (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const std::string bumps = r126_png("r126_normal.png", 64, 64, [](int x, int y) {  // (a tangent-space normal map: ridges)
+      const float a = std::sin(x * 0.4f) * 0.6f, b = std::cos(y * 0.3f) * 0.4f;
+      const Vec3 n = normalize(Vec3(a, b, 1.0f));
+      auto c = [](float v) { return (uint32_t)std::lround((v * 0.5f + 0.5f) * 255.0f); };
+      return 0xFF000000u | c(n.x) << 16 | c(n.y) << 8 | c(n.z);
+    });
+    const std::string stripes = r126_png("r126_stripes.png", 32, 32, [](int x, int y) {
+      const uint32_t v = ((x / 4 + y / 8) & 1) ? 230u : 40u;
+      return 0xFF000000u | v << 16 | v << 8 | v;
+    });
+    const std::string glow = r126_png("r126_glow.png", 16, 16, [](int x, int y) {
+      return 0xFF000000u | (uint32_t)(x * 16) << 16 | (uint32_t)(y * 16) << 8 | 64u;
+    });
+    auto mat = [](const char *name, const std::function<void(Material &)> &set) {
+      MaterialPtr m = make_material(name, {0.9f, 0.85f, 0.8f});
+      set(*m);
+      m->touch();
+      return m;
+    };
+    const Vec3 close(0.0f, 2.2f, 2.4f), at(0.0f, 1.0f, 0.0f);
+    MeshPtr two = primitives::cube(1.4f);  // (several materials: the cube's faces alternate)
+    two->face_material.assign(two->face_count(), 0);
+    for (size_t f = 0; f < two->face_count(); f += 2) two->face_material[f] = 1;
+    two->touch();
+    struct Case {
+      const char *name;
+      MeshPtr mesh;
+      std::vector<MaterialPtr> mats;
+      Vec3 eye;
+      Quat rot;
+    };
+    std::vector<Case> cases = {
+        {"UV Grid on UVs", primitives::uv_sphere(0.9f, 48, 32), {mat("a", [](Material &m) { m.base_map.path = "generated:UV Grid"; })}, close, Quat()},
+        {"a plane at a grazing angle (mips)", primitives::grid(12.0f, 4, 4),
+         {mat("b", [](Material &m) { m.base_map.path = "generated:Color Grid"; m.tiling = {6, 6, 1}; })}, {0.0f, 1.35f, 5.0f}, Quat()},
+        {"Box mapping", primitives::cube(1.4f), {mat("c", [](Material &m) { m.base_map.path = "generated:UV Grid"; m.mapping = 1; m.tiling = {2, 2, 2}; })},
+         close, Quat::euler({20, 30, 0})},
+        {"Generated mapping", primitives::uv_sphere(0.9f, 48, 32),
+         {mat("d", [](Material &m) { m.base_map.path = "generated:Color Grid"; m.mapping = 2; })}, close, Quat()},
+        {"Checker", primitives::cube(1.4f), {mat("e", [](Material &m) { m.procedural = (int)Procedural::Checker; m.procedural_scale = 3; })}, close,
+         Quat::euler({10, 40, 0})},
+        {"Noise", primitives::uv_sphere(0.9f, 48, 32), {mat("f", [](Material &m) { m.procedural = (int)Procedural::Noise; m.procedural_scale = 4; })},
+         close, Quat()},
+        {"a normal map", primitives::uv_sphere(0.9f, 48, 32),
+         {mat("g", [&](Material &m) { m.normal_map.path = bumps; m.normal_map.non_color = true; m.normal_strength = 1.5f; })}, close, Quat()},
+        {"metallic, roughness and emission maps", primitives::uv_sphere(0.9f, 48, 32), {mat("h", [&](Material &m) {
+           m.metallic = 1.0f;
+           m.metallic_map.path = stripes;
+           m.metallic_map.non_color = true;
+           m.roughness_map.path = stripes;
+           m.roughness_map.non_color = true;
+           m.emission_map.path = glow;
+           m.emission_strength = 0.6f;
+         })},
+         close, Quat()},
+        {"Closest filter, Mirror wrap", primitives::cube(1.4f),
+         {mat("i", [&](Material &m) { m.base_map.path = stripes; m.filter = 0; m.wrap = 3; m.tiling = {2.5f, 2.5f, 1}; })}, close, Quat::euler({15, 25, 0})},
+        {"Linear filter, Clip wrap", primitives::cube(1.4f),
+         {mat("j", [&](Material &m) { m.base_map.path = glow; m.filter = 1; m.wrap = 2; m.tiling = {1.6f, 1.6f, 1}; m.offset = {-0.3f, -0.3f, 0}; })},
+         close, Quat::euler({15, 25, 0})},
+        {"two materials on one mesh", two,
+         {mat("k", [](Material &m) { m.base_map.path = "generated:UV Grid"; }), mat("l", [](Material &m) { m.procedural = (int)Procedural::Checker; })},
+         close, Quat::euler({15, 35, 0})},
+    };
+    std::vector<std::vector<uint32_t>> pictures;
+    for (const Case &c : cases) {
+      const R126Result r = r126_case(c.mesh, c.mats, c.eye, at, c.rot);
+      pictures.push_back(r.cpu);
+      std::printf("    %s: %llu views on the card, %llu on the CPU%s%s; its %zu pixels: mean difference %.3f / 255, %.2f %% within 3\n", c.name,
+                  (unsigned long long)r.gpu_views, (unsigned long long)r.fallbacks, r.reason.empty() ? "" : " - ", r.reason.c_str(), r.pixels, r.mean,
+                  r.within3 * 100);
+      CHECK(r.gpu_views > 0 && r.fallbacks == 0);
+      CHECK(r.pixels > 3000);
+      CHECK(r.mean < 1.0 && r.within3 >= 0.99);
+    }
+    /* The normal map does show (the sphere's render mesh has tangents): its picture against the same sphere plain. */
+    const R126Result plain = r126_case(primitives::uv_sphere(0.9f, 48, 32), {mat("m", [](Material &) {})}, close, at, Quat());
+    size_t bumped = 0;
+    for (size_t i = 0; i < plain.cpu.size() && i < pictures[6].size(); i++) bumped += plain.cpu[i] != pictures[6][i];
+    std::printf("    the normal map changes %zu pixels of the plain sphere\n", bumped);
+    CHECK(bumped > 10000);
+  });
+  test("gpu views: an axis material, a live procedural texture or a cutout still send the view to the CPU, saying why", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    MaterialPtr axis = make_material("axis", {0.5f, 0.5f, 0.5f});
+    axis->axis_mode = 1;
+    axis->touch();
+    MaterialPtr cut = make_material("cut", {0.5f, 0.5f, 0.5f});
+    cut->surface = (int)MaterialSurface::Cutout;
+    cut->touch();
+    Editor maker;  // (a Brick texture asset with Live Shading, read by the material through its path)
+    maker.init_headless(320, 240);
+    maker.step_frame_headless();
+    ProceduralTexturePtr bricks = maker.new_texture_asset_for_test("Bricks");
+    CHECK(bricks != nullptr);
+    if (!bricks) return;
+    bricks->live_shading = true;
+    bricks->touch();
+    MaterialPtr live = make_material("live", {1, 1, 1});
+    live->base_map.path = bricks->asset_path + "#albedo";
+    live->touch();
+    for (const MaterialPtr &m : {axis, cut, live}) {
+      const R126Result r = r126_case(primitives::cube(1.0f), {m}, {0.0f, 2.2f, 2.4f}, {0.0f, 1.0f, 0.0f}, Quat());
+      std::printf("    %s: %llu views on the CPU instead: %s\n", m->name.c_str(), (unsigned long long)r.fallbacks, r.reason.c_str());
+      CHECK(r.fallbacks > 0 && !r.reason.empty());
+    }
+  });
+  test("gpu views: an Edit Mode drag on a big textured mesh still sends the card only what moved (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    GameObject *big = ed.scene().create("Big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 128, 96);
+    MaterialPtr grid = make_material("grid", {1, 1, 1});
+    grid->base_map.path = "generated:UV Grid";
+    grid->touch();
+    big->add<MeshRenderer>()->materials = {grid};
+    big->set_local_position({0.0f, 1.0f, 0.0f});
+    ed.command("select Big");
+    ed.command("edit vertex");
+    ed.command("vsel 4000");
+    ed.command("camera 0 15 5 0 1 0");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    const Vec3 wp = big->world_matrix().point(big->get<MeshFilter>()->mesh->positions[4000]);
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 3);
+    const FrameProfile before = ed.frame_profile_totals();
+    r34_gizmo_drag_x(ed, wp, 40);
+    const FrameProfile after = ed.frame_profile_totals();
+    const uint64_t partial = after.gpu_mesh_partial - before.gpu_mesh_partial, fallbacks = after.gpu_fallbacks - before.gpu_fallbacks;
+    std::printf("    %llu updates sent only what moved; %llu views on the CPU instead%s%s\n", (unsigned long long)partial, (unsigned long long)fallbacks,
+                ed.gpu_view_reason().empty() ? "" : ": ", ed.gpu_view_reason().c_str());
+    CHECK(partial >= 2);
+    CHECK(fallbacks == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views: the card's texture store - a 1 x 1 texture first, fifty more, most let go, compaction and growth - still draws the textures it holds (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g) {
+      std::printf("    skipped: %s\n", err.c_str());
+      return;
+    }
+    /* A texture of one colour, w x h, sRGB (its texels as stored). */
+    auto solid = [](int w, int h, uint8_t r, uint8_t gg, uint8_t b, bool hdr = false) {
+      Bitmap bmp;
+      bmp.width = w, bmp.height = h, bmp.is_float = hdr;
+      for (int i = 0; i < w * h; i++) {
+        if (hdr) bmp.rgbaf.insert(bmp.rgbaf.end(), {r / 255.0f, gg / 255.0f, b / 255.0f, 1.0f});
+        else bmp.rgba8.insert(bmp.rgba8.end(), {r, gg, b, 255});
+      }
+      auto t = std::make_shared<Texture>();
+      t->build(bmp, !hdr);
+      return t;
+    };
+    std::vector<std::shared_ptr<Texture>> keep;
+    std::vector<int> ids;
+    auto add = [&](std::shared_ptr<Texture> t) {
+      keep.push_back(t);
+      ids.push_back(g->add_texture(*t, &err));
+      return ids.back();
+    };
+    const int tiny = add(solid(1, 1, 200, 40, 30));  // (fits the arena's placeholder: the growth that follows copies from it)
+    for (int i = 0; i < 50; i++) add(solid(16 + (i % 7) * 24, 8 + (i % 5) * 20, (uint8_t)(i * 5), 90, 160, i % 9 == 0));
+    bool all_added = true;
+    for (int id : ids) all_added = all_added && id >= 0;
+    CHECK(all_added);
+    for (size_t i = 1; i < ids.size(); i++)
+      if (i % 5 != 0) g->remove_texture(ids[i]);  // (four in five let go: the next growth compacts first)
+    const int big = add(solid(512, 512, 40, 180, 90));
+    const int hdr = add(solid(64, 64, 120, 120, 250, true));
+    CHECK(big >= 0 && hdr >= 0);
+    /* Three cubes side by side, unlit, each showing one texture: the tiny one, a survivor of the fifty, the big one. */
+    MeshPtr cube = primitives::cube(1.0f);
+    const RenderMesh &rm = cube->render_mesh();
+    std::vector<gpu::RasterVertex> vs(rm.positions.size());
+    for (size_t i = 0; i < vs.size(); i++) {
+      vs[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+      if (i < rm.uvs.size()) vs[i].uv[0] = rm.uvs[i].x, vs[i].uv[1] = rm.uvs[i].y;
+    }
+    const int mesh = g->add_mesh(vs, rm.indices, &err);
+    CHECK(mesh >= 0);
+    const int shown[4] = {tiny, ids[5], big, hdr};
+    std::vector<gpu::RasterInstance> inst;
+    for (int k = 0; k < 4; k++) {
+      gpu::RasterInstance in;
+      const Mat4 model = Mat4::translate({-2.7f + 1.8f * k, 0.0f, 0.0f});
+      std::memcpy(in.model, model.m, 64);
+      in.albedo_rough[0] = in.albedo_rough[1] = in.albedo_rough[2] = 1.0f;
+      in.flags = gpu::RasterInstance::Unlit;
+      in.mesh = (uint32_t)mesh;
+      in.id = (uint32_t)k + 1;
+      in.textured = true;
+      in.tex[0] = shown[k];
+      in.has_uv = true;
+      in.filter = 1;
+      inst.push_back(in);
+    }
+    g->set_instances(inst);
+    const int W = 320, H = 120;
+    gpu::RasterFrame fr;
+    fr.width = W, fr.height = H, fr.shadow_size = 0;
+    const Mat4 vp = Mat4::perspective(40 * kDeg2Rad, W / (float)H, 0.1f, 100.0f) * Mat4::look_at({0, 0, 7}, {0, 0, 0}, {0, 1, 0});
+    std::memcpy(fr.view_proj, vp.m, 64);
+    std::memcpy(fr.sun_view_proj, vp.m, 64);
+    fr.eye[2] = 7;
+    std::vector<uint32_t> px((size_t)W * H);
+    CHECK(g->render(fr, &err) && g->read_back(0, px.data(), nullptr, nullptr, &err));
+    auto enc = [](int v) {  // a float texture's linear value, as the Standard view shows it
+      const float l = v / 255.0f;
+      return (uint32_t)std::lround((l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f) * 255.0f);
+    };
+    const uint32_t want[4] = {0xC8281E, 0x145AA0, 0x28B45A, enc(120) << 16 | enc(120) << 8 | enc(250)};  // (unlit: each texture's colour)
+    for (int k = 0; k < 4; k++) {
+      int x = 0, y = 0;
+      const Vec4 c = vp * Vec4(-2.7f + 1.8f * k, 0.0f, 0.5f, 1.0f);
+      x = (int)((c.x / c.w * 0.5f + 0.5f) * W), y = (int)((0.5f - c.y / c.w * 0.5f) * H);
+      const uint32_t got = px[(size_t)y * W + x];
+      int worst = 0;
+      for (int s = 0; s < 24; s += 8) worst = std::max(worst, std::abs((int)((got >> s) & 255) - (int)((want[k] >> s) & 255)));
+      std::printf("    cube %d: %06X, its texture %06X\n", k, got & 0xFFFFFF, want[k]);
+      CHECK(worst <= 2);
+    }
   });
 }

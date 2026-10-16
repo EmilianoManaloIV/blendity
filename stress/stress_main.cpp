@@ -1326,6 +1326,24 @@ static void test_editor_render(Report &rep, const Options &o) {
     const FrameProfile t1 = ed.frame_profile_totals();
     rep.note(strprintf("The textured scene: %llu views on the GPU, %llu on the CPU instead (%s).", (unsigned long long)(t1.gpu_views - t0.gpu_views),
                        (unsigned long long)(t1.gpu_fallbacks - t0.gpu_fallbacks), ed.gpu_view_status().c_str()));
+    /* Task 0101: the same with a Gradient world - the textures alone - and on the CPU for comparison (the scene still
+     * holds the 50k-face sphere of the Edit Mode rows, in both). */
+    ed.scene().environment.mode = 0;  // Gradient
+    for (int device : {2, 1}) {
+      ed.viewport_device_for_test(device);
+      const FrameProfile g0 = ed.frame_profile_totals();
+      row(device == 2 ? "moving an object, the textured scene with a Gradient world, the views on the GPU (task 0101)"
+                      : "moving an object, the textured scene with a Gradient world, the views on the CPU",
+          [&](int k) {
+            if (moved) moved->set_local_position({0.1f * k + 0.05f, 1.0f, 0.0f});
+            ed.step_frame_headless();
+          });
+      const FrameProfile g1 = ed.frame_profile_totals();
+      if (device == 2)
+        rep.note(strprintf("The textured scene with a Gradient world: %llu views on the GPU, %llu on the CPU instead (%s); the GPU path %.2f ms a frame, gathering draw items %.2f ms.",
+                           (unsigned long long)(g1.gpu_views - g0.gpu_views), (unsigned long long)(g1.gpu_fallbacks - g0.gpu_fallbacks),
+                           ed.gpu_view_status().c_str(), (g1.ms_gpu - g0.ms_gpu) / (n + 1.0), (g1.ms_collect - g0.ms_collect) / (n + 1.0)));
+    }
     ed.viewport_device_for_test(1);
   }
   Log::echo_stdout = true;

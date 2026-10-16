@@ -2,6 +2,61 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 126): textures on the GPU (task 0101, ADR 0038)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed**
+- **Textured materials draw on the card.** With Viewport Device on the GPU, these no longer send the view back to the
+  CPU:
+  - image textures on UVs, Box or Generated mapping, with tiling and offset;
+  - base colour, metallic, roughness, emission and normal maps;
+  - the Checker and Noise procedurals;
+  - several materials on one mesh.
+- **Sampled the CPU's way (ADR 0038).** The card reads the CPU's own mip chain from storage buffers, ports
+  `Texture::sample` (filters, wraps, the level of detail from the next pixel's UVs) and `evaluate_surface`, and turns
+  a back face's normals before the normal map, as the CPU does.
+- **Several materials on one mesh:** its triangles are grouped by material on the card and drawn as one part each.
+- **Textures stay on the card while drawn,** in two arenas that grow and are compacted on the card. A texture too
+  large for the card sends the view to the CPU with the reason, once, not every frame.
+- **Still on the CPU** (Preferences says why): axis materials, live procedural textures, see-through, cutout and toon
+  materials, and Sky / HDRI worlds (toon and the worlds are task 0102).
+- **Speed:** the editor scene with a Checker on its icospheres, laptop setting: 18.0 ms on the CPU, 10.4 ms with all
+  its views on the card (before, all of them fell back).
+- **Costs:**
+  - every vertex on the card is 48 bytes now (UVs and tangents);
+  - a mesh with several materials sends the whole mesh during an Edit Mode drag;
+  - a normal-mapped mesh does too, since every tangent is written again.
+- The procedurals' GLSL is one string shared by the path tracer's kernel and the views (`gpu_glsl.h`).
+
+**Checked**
+- **New tests (round 126)**, each skipped without a GPU:
+  - **Picture match:** 11 features match the CPU on the object's own pixels: mean 0.15-0.69 / 255, 99.1-100 % within
+    3. The features: UV Grid, a plane at a grazing angle (mips), Box, Generated, Checker, Noise, a normal map (which
+    does change the picture: 64,264 pixels), metallic / roughness / emission maps, Closest + Mirror, Linear + Clip,
+    and two materials on one mesh.
+  - **Still on the CPU:** an axis material, a cutout and a live procedural texture send the view there, saying why.
+  - **Texture store:** a 1 x 1 texture, fifty more, most let go, then a big one and a float one: compaction and
+    growth keep the right texels.
+  - **Drag:** an Edit Mode drag on a big textured mesh still sends only what moved.
+- Round 122's fallback test now uses an axis material (procedurals draw on the card).
+- Unit checks: Windows 10,461, 0 failed (730 tests); the whole suite in render-cache verify mode: 10,462,
+  0 failed, 0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems; `pathtracer` (its
+  kernel now takes the shared procedurals) runs as before.
+
+**Review** (Opus code-reviewer). The sampling and the material match the CPU line for line. Fixed:
+- a texture of 4 texels or fewer fit the arena's placeholder, which couldn't be copied from when the arena grew;
+- a texture too large for the card was copied and tried again every frame: the size is checked first, the refusal
+  is remembered, and the levels go straight into the staging buffer;
+- culling is per object, as the CPU's (not per material);
+- a compaction that fails changes nothing;
+- a part past its mesh fails the frame instead of drawing the whole mesh;
+- the slots of a one-material mesh are found without a list;
+- the shared procedurals;
+- tests for the texture store and the live texture.
+
 ## 2026-10-16 (round 125): the Edit Mode cage on the GPU, and the Scene view at full size there (task 0100, ADR 0036 note)
 
 **Asked:** pass 11 continued ("What should be more optimization gains?").

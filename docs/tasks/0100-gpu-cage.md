@@ -5,7 +5,7 @@
 - **Decisions:** ADR 0036 (the views on the GPU) gains a note: the Scene view on the GPU draws at full size; the
   Viewport Resolution Scale (ADR 0026) stays the CPU's
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/90
 
 ## Goal
 After task 0099, a 50k-face Edit Mode drag with the views on the GPU takes about 14-15 ms a frame on the laptop setting.
