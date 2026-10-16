@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0036 (new): the views' 3D on the GPU, the CPU renderer the reference and fallback
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/87
 
 ## Goal
 Task 0095's spike said go. The user approved building it ("if it's more performant, then yes"). This first step puts

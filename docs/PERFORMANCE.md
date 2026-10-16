@@ -10,6 +10,30 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## OptiX against GPU Compute (task 0097, ADR 0037)
+
+`blendity_stress --only gpu_optix` (1920x1080, 256 icospheres and a floor, Lambert-like materials, 64 samples, 4
+bounces), samples a second, two runs:
+
+| Card | GPU Compute (Vulkan, RT cores) | OptiX | OptiX vs GPU Compute |
+|---|---|---|---|
+| RTX 4070 SUPER | 550.7 / 593.1 | 1040.6 / 1058.5 | 1.89x / 1.78x |
+| RTX 3060 Ti | 285.8 / 286.7 | 593.5 / 588.8 | 2.08x / 2.05x |
+
+Both include bringing the picture back. The pictures agree in mean brightness (100.0 %). Scene builds take 7-15 ms
+on OptiX, against 182-252 ms for GPU Compute, whose CPU-side flattening and upload are counted.
+
+What makes the OptiX kernel cheaper per sample, besides OptiX:
+- **Shading:** it is Lambert with flat normals. There are no textures or mesh lights, no GGX, a sharp sun, and no
+  smooth-normal interpolation.
+- **Memory traffic:** GPU Compute reads and writes its accumulation and its denoiser passes (albedo, normal, depth)
+  for every sample, about 200 MB a sample at 1080p, and runs a dispatch per sample. OptiX adds 8 samples in registers
+  and writes once per launch.
+- **The other way:** OptiX traces more rays. It has no Russian roulette, where GPU Compute's stops most paths after
+  the third bounce.
+
+So these numbers are the most OptiX could gain. A full port, with the same shading and passes, would gain less.
+
 ## The views on the GPU (task 0096, ADR 0036)
 
 `blendity_stress --laptop --quality low --only editor_render`, rows with Viewport Device GPU (this machine's RTX 4070

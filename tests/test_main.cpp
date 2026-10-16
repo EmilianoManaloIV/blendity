@@ -20,6 +20,7 @@
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
 #include "../src/render/gpu_raster.h"
+#include "../src/render/optix_spike.h"
 #include "../src/render/lightmapper.h"
 #include "../src/render/pathtracer.h"
 #include "../src/render/shading.h"
@@ -30197,5 +30198,80 @@ static void round81_tests() {
     CHECK(mean < 1.0 && within3 >= 0.99);
     CHECK(ed.gpu_view_reason().empty());
     ed.viewport_device_for_test(1);
+  });
+  /* ---------------------------------------------------------------- round 123: the OptiX spike (task 0097) */
+  test("optix (spike): a build without OptiX, or a machine without NVIDIA's driver, says so instead of failing", [] {
+    std::string err;
+    const std::vector<std::string> devs = gpu::OptixTracer::devices(&err);
+    if (!gpu::OptixTracer::compiled_in()) {
+      CHECK(devs.empty() && !err.empty());
+      CHECK(gpu::OptixTracer::create(0, &err) == nullptr && !err.empty());
+      std::printf("    built without OptiX: %s\n", err.c_str());
+      return;
+    }
+    std::printf("    OptiX built in; CUDA devices: %zu%s\n", devs.size(), devs.empty() ? (" (" + err + ")").c_str() : "");
+    err.clear();
+    CHECK(gpu::OptixTracer::create(1000, &err) == nullptr && !err.empty());
+  });
+  test("optix (spike): a small scene path traced with OptiX comes out as bright as GPU Compute's (skipped without OptiX or a GPU)", [] {
+    std::string err;
+    if (!gpu::OptixTracer::compiled_in() || gpu::OptixTracer::devices(&err).empty() || !gpu::available()) {
+      std::printf("    skipped: %s\n", gpu::OptixTracer::compiled_in() ? "no CUDA device or Vulkan GPU" : "built without OptiX");
+      return;
+    }
+    const int W = 96, H = 64, spp = 64;
+    auto ico = primitives::ico_sphere(0.5f, 2);
+    auto plane = primitives::plane(6.0f, 1);
+    MaterialPtr m = make_material("m", {0.7f, 0.6f, 0.5f});
+    m->roughness = 1.0f, m->metallic = 0.0f, m->specular = 0.0f;
+    std::vector<MaterialPtr> mats = {m};
+    const Mat4 sphere_at = Mat4::translate({0, 0.5f, 0});
+    std::vector<PTObject> objs = {{&plane->render_mesh_tangents(), Mat4::identity(), &mats}, {&ico->render_mesh_tangents(), sphere_at, &mats}};
+    RenderLight sun;
+    sun.direction = normalize(Vec3(-0.5f, -1.0f, 0.3f));
+    const Vec3 eye(0, 1.5f, -3);
+    const Mat4 v = Mat4::look_at(eye, {0, 0.4f, 0}, {0, 1, 0}), p = Mat4::perspective(45 * kDeg2Rad, W / (float)H, 0.1f, 50);
+    PathTracer pt;
+    PTSettings st;
+    st.use_cpu = false;
+    st.gpus = {gpu::devices()[0].index};
+    st.denoise = false;
+    pt.set_settings(st);
+    pt.build(objs, {sun}, Environment{});
+    pt.set_camera(v, p, W, H);
+    pt.render(1e9, spp);
+    const std::vector<float> vk = pt.linear_rgb(false);
+    std::vector<std::vector<float>> pos(2);
+    const RenderMesh *rms[2] = {&plane->render_mesh(), &ico->render_mesh()};
+    std::vector<gpu::OptixMeshIn> meshes(2);
+    for (int i = 0; i < 2; i++) {
+      for (const Vec3 &q : rms[i]->positions) pos[(size_t)i].insert(pos[(size_t)i].end(), {q.x, q.y, q.z});
+      meshes[(size_t)i] = {pos[(size_t)i].data(), rms[i]->positions.size(), rms[i]->indices.data(), rms[i]->indices.size()};
+    }
+    std::vector<gpu::OptixObjectIn> objects(2);
+    std::memcpy(objects[0].model, Mat4::identity().m, 64);
+    std::memcpy(objects[1].model, sphere_at.m, 64);
+    objects[1].mesh = 1;
+    for (gpu::OptixObjectIn &o : objects) o.albedo[0] = 0.7f, o.albedo[1] = 0.6f, o.albedo[2] = 0.5f;
+    gpu::OptixFrameIn fr;
+    fr.width = W, fr.height = H, fr.samples = spp;
+    std::memcpy(fr.inv_view_proj, (p * v).inverse().m, 64);
+    fr.sun_dir[0] = sun.direction.x, fr.sun_dir[1] = sun.direction.y, fr.sun_dir[2] = sun.direction.z;
+    std::unique_ptr<gpu::OptixTracer> t = gpu::OptixTracer::create(0, &err);
+    if (!t) {  // (a driver older than the SDK, or a card the kernel's target doesn't cover: not this test's failure)
+      std::printf("    skipped: OptiX can't start here (%s)\n", err.c_str());
+      return;
+    }
+    double ms = 0;
+    std::vector<float> ox;
+    const bool ok = t && t->build(meshes, objects, ms, &err) && t->clear(W, H, &err) && t->render(fr, 0, &err) && t->read(ox, &err);
+    if (!ok) std::printf("    %s\n", err.c_str());
+    CHECK(ok);
+    if (!ok || ox.size() != vk.size()) return;
+    double a = 0, b = 0;
+    for (size_t i = 0; i < ox.size(); i++) a += ox[i], b += vk[i];
+    std::printf("    %s: OptiX's mean brightness %.3f %% of GPU Compute's\n", t->name().c_str(), 100.0 * a / b);
+    /* The same light on the same scene, a simpler shader (flat normals): close, not equal. */
+    CHECK(b > 0 && std::fabs(a / b - 1.0) < 0.1);
   });
 }

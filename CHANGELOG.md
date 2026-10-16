@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-15 (round 123): OptiX against GPU Compute - a spike (task 0097, ADR 0037)
+
+**Asked:** "They are installed but haven't restarted my computer" (the CUDA Toolkit 12.8 and the OptiX SDK 9.1.0 for
+the OptiX spike).
+
+**Changed**
+- **A measurement, not a render device yet:** a small OptiX path tracer (`gpu::OptixTracer`) races GPU Compute
+  (Vulkan with the RT cores) on the same scene. Stress `--only gpu_optix`.
+- **Result:** OptiX renders 1.78-2.08x the samples a second on both cards: RTX 4070 SUPER 1041-1059 against 551-593,
+  RTX 3060 Ti 589-594 against 286-287 (picture read-backs timed on both). That is the most it could gain: its kernel
+  is simpler (Lambert, flat normals, no per-sample denoiser passes). ADR 0037 records it, and a full OptiX device
+  waits for approval.
+- **Build:** with the CUDA Toolkit and the OptiX SDK on the machine, `build.bat` compiles the kernel to PTX through
+  NVRTC (CUDA 12.8's nvcc can't parse Visual Studio 2026's headers) and builds OptiX in. Without them (CI, the
+  installers) nothing changes. At run time only NVIDIA's driver is needed, through Blender's `extern/cuew`
+  (Apache-2.0).
+
+**Checked**
+- New tests (round 123): a build without OptiX says so; with it, a small scene traced by OptiX matches GPU Compute's
+  mean brightness (100.024 %). Run here with an OptiX build; the chain's builds have no SDK and report it skipped.
+- Unit checks: Windows 10,376, 0 failed (719 tests); the whole suite in render-cache verify mode: 10,377,
+  0 failed, 0 stale pictures. Linux with libraries: 10,257, 0 failed. Sanitizer build: 10,149, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). The go stands, and the upper-bound framing is right. Fixed:
+- OptiX's read-back is timed, as GPU Compute's merge is (2.15-2.35x before, 1.78-2.08x now);
+- the per-sample differences are listed in the docs;
+- the test skips when OptiX can't start;
+- a null error string, leaks on failed allocations, and the mesh index checked;
+- `build.bat` picks the newest SDK, checks for NVRTC, builds its PTX compiler once, says why it falls back, and never
+  builds OptiX into the installers;
+- the OptiX loader's BSD-3 notice and cuew's own licence text are in `licenses/`.
+
 ## 2026-10-15 (round 122): the views on the GPU - Viewport Device (task 0096, ADR 0036)
 
 **Asked:** "If it's more performant, then yes" (the GPU viewport after spike 2's go); "For the OptiX system let me

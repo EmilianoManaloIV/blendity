@@ -20,6 +20,7 @@
 #include "../src/render/display.h"
 #include "../src/render/gpu_device.h"
 #include "../src/render/gpu_raster.h"
+#include "../src/render/optix_spike.h"
 #include "../src/render/realtime_lightmap.h"
 #include "../src/render/voxel_gi_gpu.h"
 #include "../src/core/cpu.h"
@@ -4718,6 +4719,143 @@ static void test_gpu_raster(Report &rep, const Options &o) {
            "setting.");
 }
 
+/* Task 0097 (spike, ADR 0037): an OptiX path tracer against the Vulkan one (GPU Compute with ray tracing hardware), the
+ * same scene and settings, samples a second at 1080p. The OptiX kernel is simpler (Lambert, flat normals), so its
+ * number is an upper bound of what OptiX would gain. */
+static void test_gpu_optix(Report &rep, const Options &o) {
+  rep.title("OptiX spike (task 0097): an OptiX path tracer vs GPU Compute (Vulkan, ray tracing hardware)",
+            "1920x1080, 256 icospheres and a floor (Lambert-like materials: roughness 1, no specular), a sun with a shadow ray per "
+            "bounce, the gradient sky, 4 bounces. Samples a second over 64 samples, each device's best of two runs. The OptiX "
+            "kernel is deliberately simpler than GPU Compute's (Lambert with flat normals, no textures or MIS): its speed is the "
+            "most OptiX could gain.");
+  const int W = 1920, H = 1080, spp = o.quick ? 16 : 64, bounces = 4;
+  auto mesh = primitives::ico_sphere(0.5f, 3);
+  Scene s = make_grid_scene(256, mesh, 1.3f);
+  auto floor = primitives::plane(40.0f, 1);
+  MaterialPtr bench = make_material("bench", {0.7f, 0.5f, 0.3f}), mfl = make_material("floor", {0.8f, 0.8f, 0.8f});
+  for (MaterialPtr &m : {std::ref(bench), std::ref(mfl)}) m->roughness = 1.0f, m->metallic = 0.0f, m->specular = 0.0f;
+  std::vector<MaterialPtr> mats = {bench}, mfloor = {mfl};
+  std::vector<PTObject> objs;
+  std::vector<gpu::OptixObjectIn> oobjs;
+  const Mat4 floor_model = Mat4::translate({0, -0.6f, 0});
+  objs.push_back({&floor->render_mesh_tangents(), floor_model, &mfloor});
+  gpu::OptixObjectIn fo;
+  fo.mesh = 0;
+  std::memcpy(fo.model, floor_model.m, 64);
+  fo.albedo[0] = fo.albedo[1] = fo.albedo[2] = 0.8f;
+  oobjs.push_back(fo);
+  s.for_each([&](GameObject &g) {
+    objs.push_back({&g.get<MeshFilter>()->mesh->render_mesh_tangents(), g.world_matrix(), &mats});
+    gpu::OptixObjectIn oo;
+    oo.mesh = 1;
+    std::memcpy(oo.model, g.world_matrix().m, 64);
+    oo.albedo[0] = 0.7f, oo.albedo[1] = 0.5f, oo.albedo[2] = 0.3f;
+    oobjs.push_back(oo);
+  });
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
+  Environment env;  // (the gradient sky)
+  const Vec3 eye(10.0f, 8.0f, -14.0f);
+  const Mat4 v = Mat4::look_at(eye, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 1000.0f);
+  rep.table({"device", "scene build ms", "samples / s", "ms per sample", "vs GPU Compute"});
+  if (!gpu::available()) {
+    rep.note("No Vulkan GPU here: nothing to compare.");
+    return;
+  }
+  /* GPU Compute, each Vulkan GPU with its ray tracing hardware (merging its samples only at the end). */
+  std::map<std::string, double> vulkan_sps;
+  std::vector<float> vulkan_rgb;
+  for (const gpu::DeviceInfo &d : gpu::devices()) {
+    PathTracer pt;
+    PTSettings st;
+    st.use_cpu = false;
+    st.gpus = {d.index};
+    st.gpu_hardware_rt = true;
+    st.max_bounces = bounces;
+    st.denoise = false;
+    st.use_guiding = false;
+    st.merge_interval_ms = 1e9;
+    pt.set_settings(st);
+    ScopedTimer tb;
+    pt.build(objs, {sun}, env);
+    const double build_ms = tb.ms();
+    pt.set_camera(v, p, W, H);
+    pt.render(1e9, 2);  // warm-up (the kernel's pipeline)
+    double best = 1e30;
+    for (int run = 0; run < 2; run++) {
+      pt.set_camera(v, p, W, H);
+      ScopedTimer t;
+      pt.render(1e9, spp);
+      best = std::min(best, t.ms());
+    }
+    if (!pt.gpu_error().empty()) rep.note(d.name + ": " + pt.gpu_error());
+    const double sps = spp / (best / 1000.0);
+    vulkan_sps[d.name] = sps;
+    if (vulkan_rgb.empty()) vulkan_rgb = pt.linear_rgb(false);
+    rep.row({d.name + " - GPU Compute (Vulkan, RT cores)", f1(build_ms), f1(sps), f2(best / spp), "1.00x"});
+  }
+  std::string err;
+  if (!gpu::OptixTracer::compiled_in()) {
+    rep.note("This build has no OptiX (built without the CUDA Toolkit and the OptiX SDK): nothing to compare.");
+    return;
+  }
+  const std::vector<std::string> cuda = gpu::OptixTracer::devices(&err);
+  if (cuda.empty()) rep.note("OptiX: no CUDA device (" + err + ").");
+  /* The meshes as OptiX takes them. */
+  std::vector<std::vector<float>> pos(2);
+  const RenderMesh *rms[2] = {&floor->render_mesh(), &mesh->render_mesh()};
+  std::vector<gpu::OptixMeshIn> omeshes(2);
+  for (int i = 0; i < 2; i++) {
+    for (const Vec3 &q : rms[i]->positions) pos[(size_t)i].insert(pos[(size_t)i].end(), {q.x, q.y, q.z});
+    omeshes[(size_t)i] = {pos[(size_t)i].data(), rms[i]->positions.size(), rms[i]->indices.data(), rms[i]->indices.size()};
+  }
+  gpu::OptixFrameIn fr;
+  fr.width = W, fr.height = H, fr.max_bounces = bounces, fr.samples = 8;
+  const Mat4 inv = (p * v).inverse();
+  std::memcpy(fr.inv_view_proj, inv.m, 64);
+  fr.sun_dir[0] = sun.direction.x, fr.sun_dir[1] = sun.direction.y, fr.sun_dir[2] = sun.direction.z;
+  double worst = 1e30;
+  for (size_t i = 0; i < cuda.size(); i++) {
+    std::unique_ptr<gpu::OptixTracer> t = gpu::OptixTracer::create((int)i, &err);
+    double build_ms = 0;
+    if (!t || !t->build(omeshes, oobjs, build_ms, &err) || !t->clear(W, H, &err) || !t->render(fr, 0, &err)) {
+      rep.row({cuda[i] + " - OptiX (" + err + ")", "-", "-", "-", "-"});
+      worst = 0;
+      continue;
+    }
+    double best = 1e30;
+    bool ok = true;
+    std::vector<float> rgb;
+    for (int run = 0; run < 2 && ok; run++) {
+      ok = t->clear(W, H, &err);
+      ScopedTimer tt;
+      for (int k = 0; k < spp && ok; k += fr.samples) ok = t->render(fr, k, &err);
+      ok = ok && t->read(rgb, &err);  // (inside the time, as GPU Compute's render merges its samples back at the end)
+      best = std::min(best, tt.ms());
+    }
+    if (!ok) {
+      rep.row({cuda[i] + " - OptiX (" + err + ")", "-", "-", "-", "-"});
+      worst = 0;
+      continue;
+    }
+    const double sps = spp / (best / 1000.0);
+    const auto vk = vulkan_sps.find(cuda[i]);
+    const double ratio = vk != vulkan_sps.end() ? sps / vk->second : 0.0;
+    worst = std::min(worst, ratio);
+    /* A sanity check that it rendered the same scene: the mean brightness against GPU Compute's picture. */
+    double a = 0, b = 0;
+    for (size_t k = 0; k < rgb.size() && k < vulkan_rgb.size(); k++) a += rgb[k], b += vulkan_rgb[k];
+    rep.row({cuda[i] + " - OptiX", f1(build_ms), f1(sps), f2(best / spp), ratio > 0 ? f2(ratio) + "x" : "-"});
+    rep.note(strprintf("%s: the OptiX picture's mean brightness is %.1f %% of GPU Compute's (a simpler shader: close, not equal).", cuda[i].c_str(),
+                       b > 0 ? 100.0 * a / b : 0.0));
+  }
+  if (worst <= 0 || worst > 1e29) rep.note("Verdict: none - not every card could be measured.");
+  else
+    rep.note(strprintf("Verdict (ADR 0037: go if OptiX gives at least 1.5x GPU Compute's samples a second on every card): the slowest card "
+                       "%.2fx, %s. The OptiX kernel does less per sample than GPU Compute's, so this is the most it could gain.",
+                       worst, worst >= 1.5 ? "go" : "no-go"));
+}
+
 /* Task 0083: what headless runs can't see - putting a frame on a real window, and how evenly a frame-rate cap holds.
  * Opens a window, so it runs only when asked for by name (--only present); without a display it says so. */
 static void test_present(Report &rep, const Options &o) {
@@ -4878,12 +5016,13 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
     if (std::string(t.name) == "present" && o.only != "present") continue;  // (it opens a window: only when asked for)
     if (std::string(t.name) == "gpu_raster" && o.only != "gpu_raster") continue;  // (a spike with windows: only when asked for)
+    if (std::string(t.name) == "gpu_optix" && o.only != "gpu_optix") continue;  // (a spike: only when asked for)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);
