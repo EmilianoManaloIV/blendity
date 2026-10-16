@@ -121,6 +121,8 @@ layout(std140, set = 0, binding = 0) uniform Frame {
   vec4 bg;             // background mode (0 colour, 1 the editor's sky, 2 the world)
   vec4 bg_sky; vec4 bg_horizon; vec4 bg_ground;
   vec4 lut;            // an OpenColorIO view's LUT: size, log2 shaper min, max
+  vec4 env_map;        // task 0102: a Sky / HDRI world's map (texture id, -1 none), rotation (degrees), its last level, SH valid
+  vec4 sh[9];          // its irradiance (spherical harmonics)
   vec4 cage;           // the Edit Mode cage: its lines' depth bias, its dots' radius
   Light lights[16];
 };
@@ -133,9 +135,13 @@ struct Inst {
   ivec4 tex1;    // emission map, mapping (0 UV, 1 Box, 2 Generated), procedural (1 Checker, 2 Noise), wrap
   ivec4 tex2;    // filter, has UVs, has tangents, textured
   vec4 bmin; vec4 bmax;  // the mesh's local bounds
+  vec4 toon0;    // task 0102: bands, softness, threshold, specular smoothness
+  vec4 toon1;    // shadow colour, specular size
+  vec4 toon2;    // rim colour, rim width
+  vec4 toon3;    // rim strength, flat ambient
 };
 layout(std430, set = 0, binding = 1) readonly buffer Instances { Inst inst[]; };
-const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u;
+const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u, F_TOON = 64u;
 )";
 
 /* Objects that cast no shadow are sent outside the map's clip volume (clipped away). */
@@ -325,6 +331,7 @@ layout(location = 1) out vec4 o_albedo;  // albedo, metallic
 layout(location = 2) out vec4 o_geo;     // the triangle's own normal (turned to the smooth one's side), specular
 layout(location = 3) out vec4 o_emit;    // emission, flags
 layout(location = 4) out uint o_id;
+layout(location = 5) out uint o_inst;    // task 0102: the instance (the lighting pass reads its toon settings)
 void main() {
   vec3 n = normalize(wn);
   vec3 g = cross(dFdx(wpos), dFdy(wpos));
@@ -362,6 +369,7 @@ void main() {
   o_geo = vec4(g, I.metal_spec.y);
   o_emit = vec4(emission, float(I.id.y));
   o_id = I.id.x;
+  o_inst = ii;
 }
 )";
 
@@ -533,6 +541,7 @@ layout(set = 0, binding = 5) uniform sampler2D g_shadow;
 layout(set = 0, binding = 6) uniform sampler2D g_geo;
 layout(set = 0, binding = 7) uniform sampler2D g_emit;
 layout(std430, set = 0, binding = 8) readonly buffer Lut { vec4 lut_data[]; };
+layout(set = 0, binding = 15) uniform usampler2D g_inst;
 layout(location = 0) out vec4 o_color;
 const float PI = 3.14159265358979;
 vec3 fresnel_f0(vec3 albedo, float metallic, float specular) { return mix(vec3(0.08 * specular), albedo, metallic); }
@@ -594,14 +603,89 @@ float shadow_lookup(vec3 world, float ndl) {
     for (int dx = -1; dx <= 1; dx++) lit += lit_at(ix + dx, iy + dy, z - b, size);
   return lit / 9.0;
 }
-/* Environment::irradiance / radiance / specular for Gradient and Color, times the strength. */
+/* Environment::irradiance / radiance / specular, times the strength: Gradient, Color, and since task 0102 a Sky or
+ * HDRI world's map (dir_to_equirect with shading.cpp's polynomial atan2 and asin, so the texels are the CPU's). */
+float fast_atan2(float y, float x) {
+  float ax = abs(x), ay = abs(y), mx = max(ax, ay), mn = min(ax, ay);
+  if (!(mx > 0.0)) return 0.0;
+  float a = mn / mx, s = a * a;
+  float r = ((((-0.0117212 * s + 0.05265332) * s - 0.11643287) * s + 0.19354346) * s - 0.33262347) * s * a + 0.99997726 * a;
+  if (ay > ax) r = 1.57079637 - r;
+  if (x < 0.0) r = 3.14159274 - r;
+  return y < 0.0 ? -r : r;
+}
+float fast_asin(float x) {
+  float a = abs(x), p = -0.0012624911;
+  p = p * a + 0.0066700901;
+  p = p * a - 0.0170881256;
+  p = p * a + 0.0308918810;
+  p = p * a - 0.0501743046;
+  p = p * a + 0.0889789874;
+  p = p * a - 0.2145988016;
+  p = p * a + 1.5707963050;
+  float r = 1.57079637 - sqrt(max(0.0, 1.0 - a)) * p;
+  return x < 0.0 ? -r : r;
+}
+vec2 dir_to_equirect(vec3 d, float rot) {
+  float phi = fast_atan2(d.x, d.z) + rot * (PI / 180.0);
+  float u = 0.5 + phi / (2.0 * PI);
+  u -= floor(u);
+  return vec2(u, 0.5 + fast_asin(clamp(d.y, -1.0, 1.0)) / PI);
+}
+bool env_has_map() { return int(env.x + 0.5) == 2 && env_map.x >= 0.0; }
 vec3 irradiance(vec3 n) {
-  if (env.x > 0.5) return env_color.rgb * env.y;
+  if (env_has_map() && env_map.w > 0.5) {
+    float x = n.x, y = n.y, z = n.z;
+    vec3 r = sh[0].rgb * 0.282095 + sh[1].rgb * (0.488603 * y) + sh[2].rgb * (0.488603 * z) + sh[3].rgb * (0.488603 * x) +
+             sh[4].rgb * (1.092548 * x * y) + sh[5].rgb * (1.092548 * y * z) + sh[6].rgb * (0.315392 * (3.0 * z * z - 1.0)) +
+             sh[7].rgb * (1.092548 * x * z) + sh[8].rgb * (0.546274 * (x * x - y * y));
+    return max(r, vec3(0.0)) * (env.y / PI);
+  }
+  if (int(env.x + 0.5) == 1) return env_color.rgb * env.y;
   return (n.y >= 0.0 ? mix(equator.rgb, sky.rgb, n.y) : mix(equator.rgb, ground.rgb, -n.y)) * env.y;
 }
-vec3 radiance(vec3 d) {
-  if (env.x > 0.5) return env_color.rgb * env.y;
+vec3 radiance(vec3 d, float lod) {
+  if (int(env.x + 0.5) == 1) return env_color.rgb * env.y;
+  if (env_has_map()) return tex_sample(int(env_map.x), dir_to_equirect(d, env_map.y), lod, 0, 2).xyz * env.y;
   return (d.y >= 0.0 ? mix(equator.rgb, sky.rgb, sqrt(clamp(d.y, 0.0, 1.0))) : mix(equator.rgb, ground.rgb, sqrt(clamp(-d.y * 4.0, 0.0, 1.0)))) * env.y;
+}
+vec3 radiance(vec3 d) { return radiance(d, 0.0); }
+vec3 env_specular(vec3 r, float rough) {
+  if (env_has_map()) return radiance(r, rough * env_map.z * 0.85);
+  return mix(radiance(r), irradiance(r), clamp(rough * 1.2, 0.0, 1.0));
+}
+/* Toon (ADR 0020; shading.cpp's toon_level, shade_toon, toon_rim): bands of N.L, the shadow colour, a hard spot. */
+float axis_step(float e0, float e1, float x) {
+  if (e1 - e0 < 1e-5) return x >= e0 ? 1.0 : 0.0;
+  float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+float toon_level(Inst I, float lit) {
+  int bands = clamp(int(I.toon0.x), 1, 8);
+  float th = clamp(I.toon0.z, 0.0, 0.95), w = clamp(I.toon0.y, 0.0, 0.5);
+  if (isnan(lit) || isinf(lit)) lit = 0.0;
+  float q = 0.0;
+  for (int k = 0; k < bands; k++) {
+    float e = th + float(k) * (1.0 - th) / float(bands);
+    q += axis_step(e - w, e + w, lit);
+  }
+  return q / float(bands);
+}
+vec3 shade_toon(Inst I, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit) {
+  float q = toon_level(I, lit);
+  vec3 c = albedo * mix(I.toon1.rgb, vec3(1.0), q);
+  if (I.toon1.w > 0.0 && q > 0.0) {
+    float nh = dot(n, normalize(V + L)), e = 1.0 - 0.2 * clamp(I.toon1.w, 0.0, 1.0);
+    float w = 0.1 * clamp(I.toon0.w, 0.0, 0.5);
+    c += mix(vec3(1.0), albedo, metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * specular);
+  }
+  return c;
+}
+vec3 toon_rim(Inst I, vec3 n, vec3 V) {
+  if (!(I.toon2.w > 0.0) || !(I.toon3.x > 0.0)) return vec3(0.0);
+  float f = 1.0 - max(0.0, dot(n, V)), e = 1.0 - clamp(I.toon2.w, 0.0, 1.0);
+  float w = clamp(I.toon0.y, 0.0, 0.5) + 0.02;
+  return I.toon2.rgb * (axis_step(e - w, e + w, f) * I.toon3.x);
 }
 vec3 env_brdf_approx(vec3 f0, float r, float nv) {
   float rx = r * -1.0 + 1.0, ry = r * -0.0275 + 0.0425, rz = r * -0.572 + 1.04, rw = r * 0.022 - 0.04;
@@ -698,6 +782,28 @@ void main() {
   vec3 lo = vec3(0.0);
   int count = int(view.z), shadow_light = int(view.w);
   bool receive = (flags & F_RECEIVE) != 0u;
+  if ((flags & F_TOON) != 0u) {  // (Renderer3D::light_surface's toon branch, then light_finish's)
+    Inst I = inst[texelFetch(g_inst, px, 0).r];
+    for (int li = 0; li < count; li++) {
+      Light l = lights[li];
+      vec3 L;
+      float fall = 1.0;
+      if (int(l.pos_type.w) == 0) L = -l.dir_range.xyz;
+      else {
+        vec3 dd = l.pos_type.xyz - P;
+        float dist = length(dd);
+        L = dist > 1e-6 ? dd / dist : vec3(0.0, 1.0, 0.0);
+        fall = falloff(l, P, L);
+      }
+      if (!(fall > 0.0) || !(l.color.w > 0.0)) continue;
+      float ndl = dot(n, L), vis = 1.0;
+      if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
+      lo += shade_toon(I, albedo, metallic, specular, n, V, L, max(ndl, 0.0) * vis * min(fall, 1.0)) * l.color.rgb * l.color.w;
+    }
+    vec3 amb = I.toon3.y > 0.5 ? (irradiance(vec3(0.0, 1.0, 0.0)) + irradiance(vec3(0.0, -1.0, 0.0))) * 0.5 : irradiance(n);
+    o_color = display(lo + amb * albedo + toon_rim(I, n, V) + emission);
+    return;
+  }
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
     vec3 L;
@@ -718,7 +824,7 @@ void main() {
   float nv = max(dot(n, V), 1e-4);
   vec3 f0 = fresnel_f0(albedo, metallic, specular);
   vec3 R = n * (2.0 * dot(n, V)) - V;
-  vec3 spec = mix(radiance(R), irradiance(R), clamp(rough * 1.2, 0.0, 1.0)) * env_brdf_approx(f0, rough, nv);
+  vec3 spec = env_specular(R, rough) * env_brdf_approx(f0, rough, nv);
   o_color = display(lo + irradiance(n) * albedo * (1.0 - metallic) + spec + emission);
 }
 )";
@@ -745,7 +851,7 @@ struct Mesh {
 };
 /* One view's targets: the shadow map, the G-buffer, the picture, their framebuffers and the set that reads them. */
 struct Slot {
-  Img shadow, normal, albedo, geo, emit, ids, depth, color;
+  Img shadow, normal, albedo, geo, emit, ids, inst, depth, color;
   VkFramebuffer fb_shadow = VK_NULL_HANDLE, fb_gbuf = VK_NULL_HANDLE, fb_light = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
 };
@@ -754,7 +860,7 @@ struct Slot {
 struct FrameUbo {
   float view_proj[16], inv_view_proj[16], sun_vp[16];
   float eye[4], sky[4], equator[4], ground[4], view[4], shadow[4], background[4];
-  float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4], cage[4];
+  float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4], env_map[4], sh[9][4], cage[4];
   float lights[16][16];
 };
 struct InstGpu {
@@ -763,6 +869,7 @@ struct InstGpu {
   float tiling[4], offset[4], color2[4];
   int32_t tex0[4], tex1[4], tex2[4];
   float bmin[4], bmax[4];
+  float toon0[4], toon1[4], toon2[4], toon3[4];
 };
 
 /* The CPU's matrices are left-handed with y up and depth 0..1; Vulkan's clip space has y down. */
@@ -1039,7 +1146,7 @@ class VulkanRaster final : public Raster {
     draw_pass(rp_shadow_, sl.fb_shadow, sl.shadow.w, sl.shadow.h, sl.set, 1, fr.shadow_size > 0 ? DrawShadow : DrawNothing, false);  // (cleared even when unused)
     barrier();
     stamp(1);
-    draw_pass(rp_gbuf_, sl.fb_gbuf, fr.width, fr.height, sl.set, 6, DrawGbuffer, fr.cull_backfaces);
+    draw_pass(rp_gbuf_, sl.fb_gbuf, fr.width, fr.height, sl.set, 7, DrawGbuffer, fr.cull_backfaces);
     barrier();
     stamp(2);
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -1612,7 +1719,7 @@ class VulkanRaster final : public Raster {
   /* One geometry pass: every instance, each its own indexed draw (firstInstance picks its row of the instances); the
    * G-buffer's pipeline culls back faces unless culling is off or the object is double-sided. */
   void draw_pass(VkRenderPass rp, VkFramebuffer fb, int w, int h, VkDescriptorSet set, int clears, DrawWhat what, bool cull) {
-    VkClearValue cv[6];
+    VkClearValue cv[7];
     std::memset(cv, 0, sizeof(cv));
     cv[clears - 1].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -1627,7 +1734,8 @@ class VulkanRaster final : public Raster {
     VkPipeline bound = VK_NULL_HANDLE;
     for (size_t i = 0; what != DrawNothing && i < instances_.size(); i++) {
       const uint32_t fl = instances_[i].flags;
-      const bool culled = what == DrawGbuffer && cull && !(fl & RasterInstance::DoubleSided);
+      /* (A toon outline's hull is culled whatever the view's setting, as the CPU's always_cull.) */
+      const bool culled = what == DrawGbuffer && ((cull && !(fl & RasterInstance::DoubleSided)) || (fl & RasterInstance::AlwaysCull));
       const VkPipeline pl = what == DrawShadow ? pl_shadow_ : !culled ? pl_gbuf_ : (fl & RasterInstance::Mirrored) ? pl_gbuf_cull_front_ : pl_gbuf_cull_;
       if (pl != bound) f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = pl);
       const Mesh &m = meshes_[instances_[i].mesh];
@@ -1655,6 +1763,11 @@ class VulkanRaster final : public Raster {
     for (int k = 0; k < 4; k++) d.tex0[k] = s.tex[k];
     d.tex1[0] = s.tex[4], d.tex1[1] = s.mapping, d.tex1[2] = s.procedural, d.tex1[3] = s.wrap;
     d.tex2[0] = s.filter, d.tex2[1] = s.has_uv ? 1 : 0, d.tex2[2] = s.has_tangent ? 1 : 0, d.tex2[3] = s.textured ? 1 : 0;
+    const float t0[4] = {(float)s.toon_bands, s.toon_softness, s.toon_threshold, s.toon_specular_smooth};
+    const float t1[4] = {s.toon_shadow[0], s.toon_shadow[1], s.toon_shadow[2], s.toon_specular_size};
+    const float t2[4] = {s.toon_rim[0], s.toon_rim[1], s.toon_rim[2], s.toon_rim_width};
+    const float t3[4] = {s.toon_rim_strength, s.toon_flat_ambient ? 1.0f : 0.0f, 0.0f, 0.0f};
+    std::memcpy(d.toon0, t0, 16), std::memcpy(d.toon1, t1, 16), std::memcpy(d.toon2, t2, 16), std::memcpy(d.toon3, t3, 16);
   }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {
@@ -1708,6 +1821,13 @@ class VulkanRaster final : public Raster {
     u.lut[0] = (float)lut_size_;
     u.lut[1] = lut_min_;
     u.lut[2] = lut_max_;
+    const bool map = fr.env_mode == 2 && fr.env_map >= 0 && (size_t)fr.env_map < texs_.size() && texs_[(size_t)fr.env_map].live;
+    u.env_map[0] = map ? (float)fr.env_map : -1.0f;
+    u.env_map[1] = fr.env_rotation;
+    u.env_map[2] = map ? (float)texs_[(size_t)fr.env_map].levels.size() - 1.0f : 0.0f;
+    u.env_map[3] = fr.sh_valid ? 1.0f : 0.0f;
+    for (int k = 0; k < 9; k++)
+      for (int c = 0; c < 3; c++) u.sh[k][c] = fr.sh[k][c];
     for (int k = 0; k < 3; k++) {
       u.env_color[k] = fr.env_color[k];
       u.bg_sky[k] = fr.bg_sky[k];
@@ -1741,6 +1861,7 @@ class VulkanRaster final : public Raster {
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 11; i <= 14; i++)  // the textures: 8-bit texels, float texels, textures, levels (task 0101)
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    b.push_back({15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // each pixel's instance (task 0102)
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
@@ -1751,7 +1872,7 @@ class VulkanRaster final : public Raster {
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
     VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
                                   {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 * kSlots},
-                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 * kSlots}};
+                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
     dpi.poolSizeCount = 3;
@@ -1797,19 +1918,19 @@ class VulkanRaster final : public Raster {
     f_.vkUpdateDescriptorSets(dev_, 9, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
-    const Img *im[6] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit};
-    VkDescriptorImageInfo ii[6];
-    VkWriteDescriptorSet w[6];
-    for (int i = 0; i < 6; i++) {
+    const Img *im[7] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst};
+    VkDescriptorImageInfo ii[7];
+    VkWriteDescriptorSet w[7];
+    for (int i = 0; i < 7; i++) {
       ii[i] = {sampler_, im[i]->view, VK_IMAGE_LAYOUT_GENERAL};
       w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       w[i].dstSet = sl.set;
-      w[i].dstBinding = (uint32_t)(2 + i);
+      w[i].dstBinding = (uint32_t)(i < 6 ? 2 + i : 15);  // (the instances' plane: binding 15, task 0102)
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       w[i].pImageInfo = &ii[i];
     }
-    f_.vkUpdateDescriptorSets(dev_, 6, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 7, w, 0, nullptr);
   }
 
   /* Render passes whose attachments end in GENERAL: read by the next pass and copied out without other moves. */
@@ -1869,7 +1990,7 @@ class VulkanRaster final : public Raster {
   bool make_render_passes(std::string *err) {
     rp_shadow_ = make_pass({}, true, false);
     rp_gbuf_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
-                          VK_FORMAT_R32_UINT},
+                          VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT},
                          true, false);
     rp_light_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, true);
     return rp_shadow_ && rp_gbuf_ && rp_light_ ? true : fail(err, "could not make the render passes");
@@ -1963,7 +2084,7 @@ class VulkanRaster final : public Raster {
   bool make_pipelines(std::string *err) {
     VkShaderModule sv = module(kShadowVert, shaderc_vertex_shader, err), gv = module(kGbufVert, shaderc_vertex_shader, err),
                    gf = module(std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kGbufFrag, shaderc_fragment_shader, err), fv = module(kFullVert, shaderc_vertex_shader, err),
-                   lf = module(kLightFrag, shaderc_fragment_shader, err);
+                   lf = module(std::string(kMaterialFrag) + kLightFrag, shaderc_fragment_shader, err);
     const std::string cc = kCageCommon;
     const std::string cv = cc + kCageVertCommon;
     std::string cerr;  // (its own: the cage is optional)
@@ -1978,9 +2099,9 @@ class VulkanRaster final : public Raster {
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
     if (sv && gv && gf && fv && lf) {
       pl_shadow_ = make_pipeline(rp_shadow_, sv, VK_NULL_HANDLE, 0, true, VK_CULL_MODE_NONE);
-      pl_gbuf_ = make_pipeline(rp_gbuf_, gv, gf, 5, true, VK_CULL_MODE_NONE);
-      pl_gbuf_cull_ = make_pipeline(rp_gbuf_, gv, gf, 5, true, VK_CULL_MODE_BACK_BIT);
-      pl_gbuf_cull_front_ = make_pipeline(rp_gbuf_, gv, gf, 5, true, VK_CULL_MODE_FRONT_BIT);
+      pl_gbuf_ = make_pipeline(rp_gbuf_, gv, gf, 6, true, VK_CULL_MODE_NONE);
+      pl_gbuf_cull_ = make_pipeline(rp_gbuf_, gv, gf, 6, true, VK_CULL_MODE_BACK_BIT);
+      pl_gbuf_cull_front_ = make_pipeline(rp_gbuf_, gv, gf, 6, true, VK_CULL_MODE_FRONT_BIT);
       pl_light_ = make_pipeline(rp_light_, fv, lf, 1, false, VK_CULL_MODE_NONE);
     }
     for (VkShaderModule m : {sv, gv, gf, fv, lf})
@@ -2007,16 +2128,17 @@ class VulkanRaster final : public Raster {
     if (!view_ok) {
       for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.depth, &sl.color}) free_image(*im);
+      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color}) free_image(*im);
       const bool ok = make_image(sl.normal, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.geo, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.emit, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.ids, w, h, VK_FORMAT_R32_UINT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
+                      make_image(sl.inst, w, h, VK_FORMAT_R32_UINT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.depth, w, h, VK_FORMAT_D32_SFLOAT, dep, VK_IMAGE_ASPECT_DEPTH_BIT) &&
                       make_image(sl.color, w, h, VK_FORMAT_B8G8R8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT);
       if (!ok) return fail(err, "out of memory for a frame");
-      sl.fb_gbuf = framebuffer(rp_gbuf_, {sl.normal.view, sl.albedo.view, sl.geo.view, sl.emit.view, sl.ids.view, sl.depth.view}, w, h);
+      sl.fb_gbuf = framebuffer(rp_gbuf_, {sl.normal.view, sl.albedo.view, sl.geo.view, sl.emit.view, sl.ids.view, sl.inst.view, sl.depth.view}, w, h);
       sl.fb_light = framebuffer(rp_light_, {sl.color.view}, w, h);
     }
     bind_images(sl);
@@ -2089,7 +2211,7 @@ class VulkanRaster final : public Raster {
     for (Slot &sl : slots_) {
       for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.depth, &sl.color}) free_image(*im);
+      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color}) free_image(*im);
     }
     for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);

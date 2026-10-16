@@ -579,6 +579,7 @@ class Editor {
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
   void viewport_device_for_test(int d) { set_viewport_device(d); }
   void gpu_view_drop_for_test() { gpu_view_drop(); }  // as a GPU error does: the card set aside, everything sent again
+  RasterOptions &raster_options_for_test() { return raster_opt_; }
   /* The card's copy of a render mesh the views drew, read back (empty when it isn't there). */
   bool gpu_mesh_for_test(const RenderMesh &rm, std::vector<gpu::RasterVertex> &v, std::vector<uint32_t> &indices) {
     const auto it = gpu_meshes_.find(&rm);
@@ -2135,6 +2136,9 @@ class Editor {
   };
   std::unordered_map<const Texture *, GpuTexture> gpu_textures_;
   int gpu_texture(const TexturePtr &t, std::string &err);
+  const Texture *gpu_world_tex_ = nullptr;  // the world's map the card holds (task 0102)
+  void gpu_forget_old_world(const LightingEnv &env);
+  bool gpu_view_refuse(int slot, const std::string &why);
   /* Task 0100: the Scene view's 3D drawn by the card at full size (the Viewport Resolution Scale saves the CPU's
    * per-pixel work), and its Edit Mode cage drawn there too, before the read-back. */
   bool scene_gpu_call_ = false;   // this render_deferred is the Scene view's (render_scene_view sets it)

@@ -2629,7 +2629,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     save_prefs();
   }
   u.tooltip("Where the Scene view, Game view and Camera Preview draw their 3D. The GPU is many times faster; anything it doesn't draw\n"
-            "yet (textures, toon, GI, camera filters...) draws on the CPU, as before. F12 renders stay on the CPU.");
+            "yet (GI and probes, axis or see-through materials, camera filters...) draws on the CPU, as before. F12 renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
   /* Measured: the last 60 frames' cost. */
   float avg = 0, worst = 0;

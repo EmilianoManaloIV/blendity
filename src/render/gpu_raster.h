@@ -38,10 +38,13 @@ struct RasterVertex {
   float t[4] = {0, 0, 0, 0};
 };
 
-/* One drawn object: its mesh (from add_mesh), its model matrix (column-major) and its plain material. */
+/* One drawn object: its mesh (from add_mesh), its model matrix (column-major) and its material - plain, textured
+ * (task 0101) or toon (task 0102). */
 struct RasterInstance {
   /* Mirrored: a placement that turns the faces inside out (negative determinant); culling keeps the other side. */
-  enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16 };
+  /* AlwaysCull: back faces culled whatever the view's setting (a toon outline's inverted hull). Toon: the toon
+   * settings below shade it (task 0102, ADR 0020). */
+  enum Flags : uint32_t { Unlit = 1, ReceiveShadows = 2, CastShadows = 4, DoubleSided = 8, Mirrored = 16, AlwaysCull = 32, Toon = 64 };
   float model[16];
   float albedo_rough[4];  // albedo rgb, roughness
   float metal_spec[4];    // metallic, specular (Principled's IOR Level), 0, 0
@@ -62,6 +65,12 @@ struct RasterInstance {
   bool has_uv = false, has_tangent = false;
   /* The part of the mesh drawn (a material's triangles, grouped on the card): count 0 is all of it. */
   uint32_t first_index = 0, index_count = 0;
+  /* Task 0102: a toon material's settings (Material's toon_*), as shade_toon, toon_rim and light_finish read them. */
+  int toon_bands = 1;
+  float toon_softness = 0.02f, toon_threshold = 0.15f, toon_specular_size = 0.0f, toon_specular_smooth = 0.05f;
+  float toon_shadow[3] = {0.55f, 0.5f, 0.68f}, toon_rim[3] = {1, 1, 1};
+  float toon_rim_width = 0.0f, toon_rim_strength = 0.5f;
+  bool toon_flat_ambient = true;
 };
 
 /* The Edit Mode cage (task 0100), drawn over the picture as the CPU draws its overlay lines and dots
@@ -100,7 +109,13 @@ struct RasterFrame {
   bool cull_backfaces = true; // (double-sided instances never are)
   std::vector<RasterLight> lights;
   /* The world's light (Environment Gradient or Color, times its strength). */
-  int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour
+  int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
+  /* Task 0102: a Sky or HDRI world (env_mode 2): its equirectangular map (add_texture's id; -1: none yet, the
+   * gradient), turned env_rotation degrees round +Y, and its irradiance as nine spherical-harmonic coefficients. */
+  int env_map = -1;
+  float env_rotation = 0.0f;
+  float sh[9][3] = {};
+  bool sh_valid = false;
   float sky[3] = {0.45f, 0.52f, 0.62f}, equator[3] = {0.32f, 0.34f, 0.36f}, ground[3] = {0.16f, 0.15f, 0.14f};
   float env_color[3] = {0.05f, 0.05f, 0.05f};
   float env_strength = 1.0f;

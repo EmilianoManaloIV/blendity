@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0038 (new): one texture-sampling contract for the CPU and GPU views
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/91
 
 ## Goal
 A view whose objects have image textures, a Checker or Noise procedural, Box or Generated mapping, normal maps or

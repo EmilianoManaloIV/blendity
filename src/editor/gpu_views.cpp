@@ -46,7 +46,6 @@ std::vector<uint32_t> mesh_slots(const RenderMesh &rm) {
  * there since task 0101 (ADR 0038). */
 const char *material_unsupported(const Material &m) {
   if (!m.opaque()) return "a see-through material";
-  if (m.shading_model == 1) return "a toon material";
   if (m.axis_mode != 0) return "an axis material";
   const Material::Resolved &tx = m.textures();
   for (int k = 0; k < 5; k++)
@@ -59,7 +58,6 @@ const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
   if (it.face_highlight) return "Edit Mode's face highlight";
   if (it.vertex_colors) return "vertex colours (Weight Paint)";
-  if (it.always_cull) return "a toon outline";
   if (it.lightmap || it.rt_bounce || (it.use_probes && env.probes)) return "lightmaps, probes or realtime GI";
   for (uint32_t slot : mesh_slots(*it.mesh))
     if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
@@ -144,6 +142,22 @@ void raster_textured(gpu::RasterInstance &in, const Material &m, const RenderMes
   in.has_tangent = !rm.tangents.empty();
 }
 
+/* A toon material's settings (ADR 0020), as the lighting pass's shade_toon / toon_rim read them (task 0102). */
+void raster_toon(gpu::RasterInstance &in, const Material &m) {
+  /* (A NaN setting: clampf's result on the CPU, where GLSL's clamp of a NaN is undefined.) */
+  auto clean = [](float v, float lo, float hi) { return clampf(v, lo, hi); };
+  in.toon_bands = m.toon_bands;
+  in.toon_softness = clean(m.toon_softness, 0.0f, 0.5f);
+  in.toon_threshold = clean(m.toon_threshold, 0.0f, 0.95f);
+  in.toon_specular_size = m.toon_specular_size;
+  in.toon_specular_smooth = m.toon_specular_smooth;
+  set3(in.toon_shadow, m.toon_shadow);
+  set3(in.toon_rim, m.toon_rim);
+  in.toon_rim_width = m.toon_rim_width;
+  in.toon_rim_strength = m.toon_rim_strength;
+  in.toon_flat_ambient = m.toon_flat_ambient;
+}
+
 /* An object (one material's part of it) as the GPU draws it: a plain material sampled once (the same everywhere but
  * for the normal), else evaluated per pixel; the flags as the CPU decides them. */
 gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material &m, const std::function<int(const TexturePtr &)> &tex) {
@@ -156,12 +170,15 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   in.metal_spec[1] = s.specular;
   set3(in.emission, s.emission);
   if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
+  if (m.shading_model == 1) raster_toon(in, m);
   in.flags = 0;
   if (s.unlit) in.flags |= gpu::RasterInstance::Unlit;
   if (it.receive_shadows) in.flags |= gpu::RasterInstance::ReceiveShadows;
   if (casts_shadows(it)) in.flags |= gpu::RasterInstance::CastShadows;
   if (it.double_sided) in.flags |= gpu::RasterInstance::DoubleSided;  // (per object, as the CPU culls: its first material's)
   if (mirrored(it.model)) in.flags |= gpu::RasterInstance::Mirrored;
+  if (it.always_cull) in.flags |= gpu::RasterInstance::AlwaysCull;
+  if (m.shading_model == 1) in.flags |= gpu::RasterInstance::Toon;
   in.mesh = (uint32_t)mesh;
   in.id = it.id;
   return in;
@@ -207,6 +224,17 @@ void raster_world(gpu::RasterFrame &fr, const LightingEnv &env, const Camera *ca
     return;
   }
   fr.background = 2;
+}
+
+/* Task 0102: a Sky or HDRI world - its map on the card (as a texture, ADR 0038), its rotation and irradiance. */
+void raster_world_map(gpu::RasterFrame &fr, const LightingEnv &env, const std::function<int(const TexturePtr &)> &tex) {
+  const Environment *e = env.environment;
+  if (!e || (e->mode != Environment::Sky && e->mode != Environment::Hdri)) return;
+  fr.env_mode = 2;
+  fr.env_rotation = e->rotation;
+  fr.env_map = e->map ? tex(e->map) : -1;  // (no map yet: the gradient, as Environment::radiance)
+  fr.sh_valid = e->sh_valid;
+  for (int k = 0; k < 9; k++) set3(fr.sh[k], e->sh[k]);
 }
 
 /* An OpenColorIO view: its table goes to the GPU (once per view), which applies it as the CPU does. False when the
@@ -299,7 +327,6 @@ const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingE
   if (render_clear_override_on_) return "a transparent render";
   if (rt.want_hdr) return "a picture kept in linear light";
   if (env.gi || env.probes) return "realtime GI or probes";
-  if (env.environment && (env.environment->mode == Environment::Sky || env.environment->mode == Environment::Hdri)) return "a Sky or HDRI world";
   for (const RenderLight &l : env.lights)
     if (l.type == RenderLight::Area) return "an area light";
   if (env.lights.size() > 16) return "more than 16 lights";
@@ -349,6 +376,27 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   gpu_mesh_bytes_ += e.bytes;
   prof_.gpu_mesh_uploads++;
   return e.id;
+}
+
+/* This view on the CPU after all (what it shows can't go to the card), the card kept: the reason for Preferences. */
+bool Editor::gpu_view_refuse(int slot, const std::string &why) {
+  gpu_slot_reason_[slot] = gpu_view_reason_ = why;
+  prof_.gpu_fallbacks++;
+  return false;
+}
+
+/* Task 0102: a Sky world's map is made anew whenever its sun changes. The one before leaves the card at once rather
+ * than after 256 calls unused (rotating the sun would otherwise hold dozens of float maps there). */
+void Editor::gpu_forget_old_world(const LightingEnv &env) {
+  const Environment *e = env.environment;
+  const Texture *now = e && (e->mode == Environment::Sky || e->mode == Environment::Hdri) ? e->map.get() : nullptr;
+  if (now == gpu_world_tex_) return;
+  auto old = gpu_world_tex_ ? gpu_textures_.find(gpu_world_tex_) : gpu_textures_.end();
+  if (old != gpu_textures_.end()) {
+    if (old->second.id >= 0) gpu_view_->remove_texture(old->second.id);
+    gpu_textures_.erase(old);
+  }
+  gpu_world_tex_ = now;
 }
 
 /* Task 0101: a texture on the card, sent once while it is drawn (its mip chain as the CPU built it). -1 and `err`
@@ -466,11 +514,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       inst.push_back(in);
     }
   }
-  if (ok && !tex_err.empty()) {
-    gpu_slot_reason_[slot] = gpu_view_reason_ = tex_err;
-    prof_.gpu_fallbacks++;
-    return false;
-  }
+  if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
   gpu::RasterFrame fr;
   fr.slot = slot;
   fr.width = rt.width;
@@ -488,6 +532,9 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   fr.cull_backfaces = opt.backface_culling;
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
   raster_world(fr, env, cam, scene_lights);
+  raster_world_map(fr, env, tex);
+  gpu_forget_old_world(env);
+  if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);  // (the world's map too large for the card)
   ok = ok && raster_view_lut(*g, fr, env.view_transform, err);
   std::string cage_err;  // (a cage the card refuses is drawn by the CPU, as before)
   const bool cage = scene_full_call_ && edit_mode_ && ok && gpu_cage(*g, fr, cage_err);
@@ -531,6 +578,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
 void Editor::gpu_view_drop() {
   gpu_meshes_.clear();
   gpu_textures_.clear();
+  gpu_world_tex_ = nullptr;
   gpu_mesh_bytes_ = 0;
   gpu_cage_v_.clear();
   gpu_cage_e_.clear();

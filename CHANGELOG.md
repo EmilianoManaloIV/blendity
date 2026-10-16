@@ -2,6 +2,49 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 127): Sky / HDRI worlds and toon on the GPU (task 0102)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed**
+- **Sky and HDRI worlds draw on the card.**
+  - The world's map goes into the card's texture store (ADR 0038's sampling, mips and all).
+  - Its irradiance is the CPU's nine spherical-harmonic numbers.
+  - The lighting pass has the CPU's `radiance`, `irradiance` and `specular`, through `dir_to_equirect`'s polynomial
+    atan2 and asin. The background is the world's light through the view transform.
+- **Toon materials and outlines draw on the card.**
+  - `shade_toon` per light (the bands, the shadow colour, the specular spot), the rim, and the flat or normal
+    ambient, as `light_surface` and `light_finish` do.
+  - The G-buffer gains a plane with each pixel's instance, so the lighting pass reads its toon settings.
+  - An outline's inverted hull is always culled, whatever the view's setting.
+- A Sky's map is made anew when its sun changes; the card lets the old one go at once (rotating the sun would have
+  held dozens of float maps there).
+- **Speed:** the textured editor scene with a Sky world on the laptop setting: 22.1 ms with every view fallen back to
+  the CPU, 9.9 ms with all 33 on the card.
+- **Still on the CPU (Preferences says why):** realtime GI, probes and lightmaps, area lights, axis and see-through
+  materials, camera filters.
+- The Learn lesson "The views on the GPU" and the Viewport Device tooltip now say what the card draws; a Try it shows
+  a Sky world on the GPU.
+
+**Checked**
+- **New tests (round 127)**, each skipped without a GPU, compared on the object's own pixels and on the whole view:
+  - **Worlds:** a Sky and an HDRI world, under a rough and a glossy metal sphere. Mean 0.18-0.27 / 255 on the
+    object, 0.13-0.14 on the view, 99.97 % or more within 3. The world's map is checked to reach the card.
+  - **Toon:** two-tone; three bands with a specular spot and a rim; flat ambient off under a Sky; in a slab's shadow;
+    an outline with the view's culling on and off, and mirrored. Mean 0.04-0.28 / 255.
+- Unit checks: Windows 10,509, 0 failed (732 tests); the whole suite in render-cache verify mode: 10,510,
+  0 failed, 0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems; `editor_render`'s textured Sky row draws all its views on
+  the card.
+
+**Review** (Opus code-reviewer). The shading ports match the CPU line for line. Fixed:
+- the Sky's old maps left the card only after 256 calls;
+- the two fallbacks share one helper;
+- the toon settings are cleaned on the CPU (GLSL's clamp of a NaN is undefined);
+- tests for an outline with culling off and mirrored, and for the toon shadow;
+- the lesson gained a question and a Try it for the worlds.
+
 ## 2026-10-16 (round 126): textures on the GPU (task 0101, ADR 0038)
 
 **Asked:** pass 11 continued ("Continue all remaining tasks").

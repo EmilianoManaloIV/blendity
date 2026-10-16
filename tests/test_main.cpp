@@ -30951,4 +30951,153 @@ static void round81_tests() {
       CHECK(worst <= 2);
     }
   });
+  /* ---------------------------------------------------------------- round 127: Sky / HDRI worlds and toon on the GPU (task 0102) */
+  /* As r126_case, with the scene's world set by `world` and the object given its own components by `extra`; also the
+   * whole view's difference (the background is the world too). */
+  struct R127Result {
+    size_t pixels = 0;
+    double mean = 0, within3 = 0, view_mean = 0, view_within3 = 0;
+    uint64_t gpu_views = 0, fallbacks = 0, textures = 0;
+    std::string reason;
+  };
+  auto r127_case = [&](const std::function<void(EnvironmentSettings &)> &world, MeshPtr mesh, MaterialPtr mat,
+                       const std::function<void(GameObject &)> &extra, bool cull = true) {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    ed.raster_options_for_test().backface_culling = cull;
+    world(ed.scene().environment);
+    GameObject *obj = ed.scene().create("Subject");
+    obj->add<MeshFilter>()->mesh = mesh;
+    obj->add<MeshRenderer>()->materials = {mat};
+    obj->set_local_position({0.0f, 1.0f, 0.0f});
+    extra(*obj);
+    ed.command("camera 0 2.2 2.4 0 1 0");
+    r34_steps(ed, 3);
+    auto draw = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {
+        obj->set_local_position({0.0f, k ? 1.0f : 1.0001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    R127Result r;
+    const std::vector<uint32_t> cpu = draw(1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = draw(2);
+    const FrameProfile after = ed.frame_profile_totals();
+    r.gpu_views = after.gpu_views - before.gpu_views;
+    r.fallbacks = after.gpu_fallbacks - before.gpu_fallbacks;
+    r.textures = after.gpu_texture_uploads - before.gpu_texture_uploads;
+    r.reason = ed.gpu_view_reason();
+    obj->active = false;
+    const std::vector<uint32_t> empty = draw(1);
+    auto worst = [](uint32_t a, uint32_t b) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)));
+      return w;
+    };
+    double sum = 0, vsum = 0;
+    size_t within = 0, vwithin = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size() && i < empty.size(); i++) {
+      const int w = worst(cpu[i], gpu[i]);
+      vsum += w;
+      vwithin += w <= 3;
+      if (worst(cpu[i], empty[i]) <= 8) continue;
+      r.pixels++;
+      sum += w;
+      within += w <= 3;
+    }
+    r.mean = r.pixels ? sum / (double)r.pixels : 0;
+    r.within3 = r.pixels ? (double)within / (double)r.pixels : 0;
+    r.view_mean = cpu.empty() ? 0 : vsum / (double)cpu.size();
+    r.view_within3 = cpu.empty() ? 0 : (double)vwithin / (double)cpu.size();
+    return r;
+  };
+  auto r127_report = [](const char *name, const R127Result &r) {
+    std::printf("    %s: %llu views on the card, %llu on the CPU%s%s; its %zu pixels: %.3f / 255, %.2f %% within 3; the view: %.3f, %.2f %%\n", name,
+                (unsigned long long)r.gpu_views, (unsigned long long)r.fallbacks, r.reason.empty() ? "" : " - ", r.reason.c_str(), r.pixels, r.mean,
+                r.within3 * 100, r.view_mean, r.view_within3 * 100);
+    CHECK(r.gpu_views > 0 && r.fallbacks == 0);
+    CHECK(r.pixels > 2000);
+    CHECK(r.mean < 1.0 && r.within3 >= 0.99);
+    CHECK(r.view_mean < 1.0 && r.view_within3 >= 0.99);
+  };
+  test("gpu views: a Sky world and an HDRI world draw on the card as on the CPU - the background, the diffuse light from the map, rough and glossy reflections (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const std::string hdri = r126_png("r127_world.png", 128, 64, [](int x, int y) {  // (a sky, a horizon, a bright window)
+      if (x > 20 && x < 30 && y > 18 && y < 26) return 0xFFFFF0D0u;
+      const uint32_t r = (uint32_t)(40 + y * 2), g = (uint32_t)(80 + y), b = (uint32_t)(200 - y * 2) + (uint32_t)(x % 32);
+      return 0xFF000000u | r << 16 | g << 8 | std::min(255u, b);
+    });
+    auto sky = [](EnvironmentSettings &e) { e.mode = 1; };  // (the Sky's rotation follows its sun: the HDRI's checks the sign)
+    auto map = [&](EnvironmentSettings &e) {
+      e.mode = 2;
+      e.hdri.path = hdri;
+      e.strength = 1.4f;
+      e.rotation = -60.0f;
+    };
+    MaterialPtr rough = make_material("rough", {0.8f, 0.75f, 0.7f});
+    rough->roughness = 0.7f;
+    MaterialPtr glossy = make_material("glossy", {0.95f, 0.9f, 0.85f});
+    glossy->metallic = 1.0f;
+    glossy->roughness = 0.15f;
+    auto none = [](GameObject &) {};
+    for (auto &[name, world, mat] : std::vector<std::tuple<const char *, std::function<void(EnvironmentSettings &)>, MaterialPtr>>{
+             {"Sky, rough", sky, rough}, {"Sky, glossy metal", sky, glossy}, {"HDRI, rough", map, rough}, {"HDRI, glossy metal", map, glossy}}) {
+      const R127Result r = r127_case(world, primitives::uv_sphere(0.9f, 48, 32), mat, none);
+      r127_report(name, r);
+      CHECK(r.textures > 0);  // (the world's map went to the card: the match isn't two gradients)
+    }
+  });
+  test("gpu views: toon materials and an outline draw on the card as on the CPU - bands, the shadow colour, the specular spot, a rim, flat ambient on and off (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    auto toon = [](const std::function<void(Material &)> &set) {
+      MaterialPtr m = make_material("toon", {0.9f, 0.5f, 0.4f});
+      m->shading_model = 1;
+      set(*m);
+      m->touch();
+      return m;
+    };
+    auto gradient = [](EnvironmentSettings &e) { e.mode = 0; };
+    auto sky = [](EnvironmentSettings &e) { e.mode = 1; };
+    auto none = [](GameObject &) {};
+    r127_report("two-tone", r127_case(gradient, primitives::uv_sphere(0.9f, 48, 32), toon([](Material &) {}), none));
+    r127_report("three bands, a specular spot, a rim", r127_case(gradient, primitives::uv_sphere(0.9f, 48, 32), toon([](Material &m) {
+                  m.toon_bands = 3;
+                  m.toon_softness = 0.05f;
+                  m.toon_specular_size = 0.5f;
+                  m.toon_rim_width = 0.3f;
+                  m.toon_rim_strength = 0.8f;
+                  m.toon_rim = {0.4f, 0.6f, 1.0f};
+                }),
+                none));
+    r127_report("flat ambient off, a Sky world", r127_case(sky, primitives::uv_sphere(0.9f, 48, 32), toon([](Material &m) { m.toon_flat_ambient = false; }), none));
+    r127_report("with an outline", r127_case(gradient, primitives::uv_sphere(0.9f, 48, 32), toon([](Material &) {}), [](GameObject &g) {
+                  g.add<Outline>()->thickness = 0.04f;
+                }));
+    r127_report("an outline, the view's back-face culling off", r127_case(gradient, primitives::uv_sphere(0.9f, 48, 32), toon([](Material &) {}),
+                                                                         [](GameObject &g) { g.add<Outline>()->thickness = 0.04f; }, false));
+    r127_report("an outline, mirrored", r127_case(gradient, primitives::uv_sphere(0.9f, 48, 32), toon([](Material &) {}), [](GameObject &g) {
+                  g.add<Outline>()->thickness = 0.04f;
+                  g.set_local_scale({-1.0f, 1.0f, 1.0f});
+                }));
+    r127_report("in its own shadow", r127_case(gradient, primitives::uv_sphere(0.9f, 48, 32), toon([](Material &m) { m.toon_bands = 2; }), [](GameObject &g) {
+                  /* A slab above the sphere casts on it (as a child: hidden with it for the comparison's empty view). */
+                  GameObject *slab = g.scene ? g.scene->create("Slab") : nullptr;
+                  if (!slab) return;
+                  slab->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+                  slab->add<MeshRenderer>();
+                  g.scene->set_parent(slab, &g, -1, false);
+                  slab->set_local_position({0.4f, 1.6f, 0.2f});
+                  slab->set_local_scale({1.2f, 0.1f, 1.2f});
+                }));
+  });
 }

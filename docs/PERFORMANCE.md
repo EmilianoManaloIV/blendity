@@ -71,6 +71,17 @@ overlay, drawn on the CPU (task 0100 moves it to the GPU).
   and a whole upload twice the bytes. A mesh with several materials is grouped by material on the card, so its Edit
   Mode drag sends the whole mesh rather than the moved ranges.
 
+**Sky / HDRI worlds and toon on the GPU (task 0102):**
+
+| Laptop setting, moving an object | Before | Now |
+|---|---|---|
+| The textured editor scene with a Sky world, views set to the GPU | 22.1 ms (all 33 views fell back to the CPU) | 9.9 ms (all on the card) |
+
+- The world's map is one more texture on the card (a Sky's 512 x 256 float map with its mips); its diffuse light is
+  nine numbers worked out once on the CPU. A Sky world costs the card a texture read per background pixel and per
+  reflection.
+- A Sky's map is made anew when its sun changes: the card lets the old one go at once.
+
 ## OptiX against GPU Compute (task 0097, ADR 0037)
 
 `blendity_stress --only gpu_optix` (1920x1080, 256 icospheres and a floor, Lambert-like materials, 64 samples, 4
