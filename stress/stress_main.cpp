@@ -1295,6 +1295,67 @@ static void test_editor_render(Report &rep, const Options &o) {
     ed.viewport_device_for_test(1);
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
   }
+  /* Task 0107 (pass 12's baseline): the frames that aren't drags - entering Edit Mode with the mesh's caches cold, an
+   * operator, an undo - each frame's parts: the overlap check, the mesh's builds, the uploads to the card. */
+  auto edit_frame = [&](const char *what, int reps, const std::function<void()> &before, const std::function<void()> &act) {
+    double total = 0, overlap = 0, builds = 0, edges = 0, next = 0;
+    uint64_t checks = 0, nbuilds = 0, uploads = 0;
+    for (int r = 0; r < reps; r++) {
+      before();
+      const FrameProfile p0 = ed.frame_profile_totals();
+      const MeshCounts c0 = mesh_counts();
+      total += time_ms([&] {
+        act();
+        ed.step_frame_headless();
+      });
+      const FrameProfile p1 = ed.frame_profile_totals();
+      const MeshCounts c1 = mesh_counts() - c0;
+      next += time_ms([&] { ed.step_frame_headless(); });
+      overlap += p1.ms_overlap - p0.ms_overlap;
+      checks += p1.overlap_checks - p0.overlap_checks;
+      builds += c1.ms_full_builds;
+      nbuilds += c1.full_builds;
+      edges += c1.ms_edges;
+      uploads += p1.gpu_mesh_uploads - p0.gpu_mesh_uploads;
+    }
+    const double r = reps;
+    rep.note(strprintf("%s: %.1f ms (the overlap check %.1f ms, %.1f of them; render meshes built %.1f ms, %.1f of them; edge table %.1f ms; "
+                       "meshes sent to the card whole %.1f); the frame after %.1f ms.",
+                       what, total / r, overlap / r, checks / r, builds / r, nbuilds / r, edges / r, uploads / r, next / r));
+  };
+  for (int device : {1, 2}) {
+    ed.viewport_device_for_test(device);
+    const std::string on = device == 2 ? ", the views on the GPU" : ", the views on the CPU";
+    edit_frame(("Entering Edit Mode on the 50k-face mesh, its caches cold" + on).c_str(), 3,
+               [&] {
+                 ed.command("edit off");
+                 if (GameObject *b = ed.scene().find_by_name("Big Sphere"))
+                   if (auto *mf = b->get<MeshFilter>()) {  // (a mesh never edited: a copy without its caches)
+                     MeshPtr fresh = std::make_shared<Mesh>(*mf->mesh);
+                     fresh->forget_caches();
+                     ed.overlap_forget_for_test();  // (and no answer known for it: the first entry checks it whole)
+                     mf->mesh = fresh;
+                   }
+                 ed.command("select Big Sphere");
+                 for (int i = 0; i < 3; i++) ed.step_frame_headless();  // (Object Mode draws it first: its smooth cache)
+               },
+               [&] { ed.command("edit vertex"); });
+    edit_frame(("Entering Edit Mode again, nothing changed" + on).c_str(), 3,
+               [&] {
+                 ed.command("edit off");
+                 for (int i = 0; i < 2; i++) ed.step_frame_headless();
+               },
+               [&] { ed.command("edit vertex"); });
+    edit_frame(("An operator: extrude three faces" + on).c_str(), 3,
+               [&] {
+                 ed.command("fsel 100 101 102");
+                 ed.step_frame_headless();
+               },
+               [&] { ed.command("editop extrude"); });
+    edit_frame(("Undo after it" + on).c_str(), 3, [&] {}, [&] { ed.command("undo"); });
+    edit_frame(("A selection operator after the undo (Select More)" + on).c_str(), 2, [&] {}, [&] { ed.command("edittool select_more"); });
+  }
+  ed.viewport_device_for_test(1);
   ed.command("edit off");
   ed.command("select Main Camera");
   ed.step_frame_headless();

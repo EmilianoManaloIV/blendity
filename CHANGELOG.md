@@ -2,6 +2,59 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 132): Edit Mode's overlap check reused, fast and local; pass 12 measured (tasks 0107, 0108, ADR 0040)
+
+**Asked:** "Look for performance gains in edit mode; compare to how blender implements their edit mode." The user chose
+entering Edit Mode as the scope, "Background + local" for the overlap check, and then asked for "the most optimized
+way".
+
+**Measured first (task 0107):** new `editor_render` rows for the frames that aren't drags: entering Edit Mode with the
+mesh's caches cold, entering again, an extrude, an undo, a selection after it. On the 50k-face sphere the overlap
+check (the yellow rings and magenta lines) was most of every stall: 310-360 ms on the main thread.
+
+**Changed (task 0108, ADR 0040)**
+- **Answers kept by what was checked:** the topology, eps and every position. An undo or redo to checked geometry,
+  re-entering Edit Mode and a selection that copied the mesh take the answer at once (the last four are kept).
+- **A check about 15x faster** (21-24 ms on 50k faces, from 315-575 ms), on every thread, finding exactly the pairs the
+  old check finds (kept as the reference the tests compare with).
+- **After a drag only what moved is checked again:** the moved vertices and the edges at them.
+- **Past 200,000 vertices the check runs beside the editor** ("Checking..." in the panel, no rings until the answer
+  for the mesh as it is now). The old cap, no check at all past 200,000 vertices, is gone.
+- Mesh topology serials come from one counter for all meshes, so two copies changed apart never share one.
+- A vertex at infinity no longer makes the check's distance infinite (every vertex was a pair, and Merge Overlapping
+  then refused to weld anything); grid cells are held in range for meshes far from the origin; a line to a point at
+  infinity is no longer drawn from NaN rows (found by the sanitizer job).
+
+**Pass 12 so far** (laptop setting, `--laptop --quality low --only editor_render`, quiet machine):
+
+| Laptop setting, 50k-face sphere, ms | CPU before | CPU after | GPU before | GPU after |
+|---|---|---|---|---|
+| Entering Edit Mode, caches cold (of it the overlap check) | 421 (360) | 80 (24) | 360 (308) | 70 (23) |
+| Entering again, nothing changed | 24 | 21 | 11 | 5 |
+| Extrude three faces (the overlap check) | 466 (316) | 179 (27) | 487 (336) | 163 (26) |
+| Undo after it (the overlap check) | 337 (311) | 27 (0.4) | 334 (311) | 23 (0.4) |
+| Select More after the undo (the overlap check) | 208 (153) | 56 (0.2) | 213 (155) | 55 (0.2) |
+
+The rest of the extrude is its render meshes (two full builds, 54 ms: task 0109 threads them) and the operator itself.
+
+**Checked**
+- New tests (round 132): the fast check equals the reference on a cube, planted doubles, a 50k-face sphere, an empty
+  mesh, one vertex, wires only, infinities, a mesh far out, random soups and wires near the 512-cell limit (at least
+  3x faster on 50k faces in optimized builds with 8 threads or more); topology serials of diverging copies differ; the
+  local check equals a full check through random drags and refuses or equals it near the 512-cell limit; in the
+  editor a drag's release is local, a selection that copied the mesh and an undo reuse the answer; on a worker the
+  editor doesn't wait, every frame shows nothing or the current geometry's pairs, a mesh changed meanwhile gets its own
+  answer and an undo to the superseded geometry reuses its; Merge welds only the found doubles beside a vertex at
+  infinity.
+- Two Opus reviews; every finding fixed (see task 0108's spec).
+- Unit checks: Windows 10,591, 0 failed (746 tests); the whole suite in render-cache verify mode: 10,592, 0 failed,
+  0 stale pictures. Linux with libraries: 10,324, 0 failed. Sanitizer build: 10,216 checks, its one failure the
+  speed ratio (2.7x in a debug sanitizer build), now asserted only in optimized builds; the overlap tests again under
+  the sanitizers: 85 checks, 0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale
+  pictures.
+- Stress: `editor`, `pushpull` (26,620 operations, 0 problems), `modifiers_ngon` (11,514 operations, 0 problems),
+  `editor_render`: no change in problem counts.
+
 ## 2026-10-16 (round 131): performance pass 11 written up (task 0106)
 
 **Asked:** pass 11 continued ("Continue all remaining tasks").

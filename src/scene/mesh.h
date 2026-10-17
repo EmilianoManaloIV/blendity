@@ -613,6 +613,30 @@ std::vector<ZFightPair> zfight_pairs(const Mesh &m, float plane_dist = 0.0f, con
  * length (doubled edges, or one running along another). eps <= 0: 1e-5 of the mesh's size. */
 std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices(const Mesh &m, float eps = 0.0f);
 std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, float eps = 0.0f);
+/* The same pairs, sorted, by the checks before task 0108 (a map of cells, one thread): kept for the tests that compare. */
+std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices_reference(const Mesh &m, float eps = 0.0f);
+std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges_reference(const Mesh &m, float eps = 0.0f);
+/* Task 0108: a full overlap check's cells and result, kept so a later check after positions alone moved (a drag) re-tests
+ * only the pairs of what moved. Both lists of pairs sorted. */
+struct OverlapIndex {
+  bool valid = false;
+  float eps = 0.0f, cs = 0.0f, bs = 0.0f;               // the vertex cell size, the reference's edge cell size, egrid's
+  uint64_t topo = 0;                                    // the topology it was checked at
+  std::vector<Vec3> positions;                          // as checked
+  std::vector<std::pair<uint64_t, uint32_t>> vgrid;     // (cell, vertex), sorted
+  std::vector<uint64_t> edges;                          // the edge keys, sorted, unique
+  std::vector<std::pair<uint64_t, uint32_t>> egrid;     // (cell, edge index), sorted
+  std::vector<std::pair<uint32_t, uint32_t>> verts;     // overlapping vertices (u < v)
+  std::vector<std::pair<uint64_t, uint64_t>> edge_pairs;  // overlapping edges (the lower key first)
+  size_t retested = 0;                                  // the last local check's moved vertices
+};
+float overlap_eps(const Mesh &m, float eps);  // eps <= 0: 1e-5 of the mesh's size
+void overlap_check(const Mesh &m, float eps, OverlapIndex &out);
+void overlap_check_parts(const Mesh &m, float eps, OverlapIndex &out, bool vertices, bool edges);
+/* After positions alone moved since `idx` (the same topology and eps): the moved vertices' pairs and those of the edges
+ * at them tested again, the rest kept. False (idx untouched) when it can't - another topology or eps, or more than
+ * max_moved vertices moved: a full check then. */
+bool overlap_check_local(const Mesh &m, float eps, OverlapIndex &idx, size_t max_moved);
 /* The face's area-weighted centre (Plasticity's face centre snap), not the average of its corners. */
 Vec3 face_area_center(const Mesh &m, size_t f);
 /* A closed shape drawn across several coplanar faces: cut into all of them. inner_faces gets the

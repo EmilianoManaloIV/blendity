@@ -4,7 +4,7 @@
 - **Requirements:** R-05, Q-01
 - **Decisions:** ADR 0026 (the minimum machine) gains a note
 - **Model:** main session (Opus)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/95
 
 ## Goal
 Pass 11 (tasks 0098-0105) answered "What should be more optimization gains?" in the four areas the user chose. Write it

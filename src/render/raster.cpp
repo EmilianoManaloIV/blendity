@@ -1050,6 +1050,8 @@ bool Renderer3D::prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, f
   const float W = (float)rt_->width, H = (float)rt_->height;
   float x0 = (ca.x / ca.w * 0.5f + 0.5f) * W, y0 = (0.5f - ca.y / ca.w * 0.5f) * H, z0 = ca.z / ca.w;
   float x1 = (cb.x / cb.w * 0.5f + 0.5f) * W, y1 = (0.5f - cb.y / cb.w * 0.5f) * H, z1 = cb.z / cb.w;
+  /* An end at infinity (an edge to a vertex there, in Edit Mode) projects to NaN: no line, not a NaN row cast to int. */
+  if (!finite_bits(x0) || !finite_bits(y0) || !finite_bits(z0) || !finite_bits(x1) || !finite_bits(y1) || !finite_bits(z1)) return false;
   /* Liang-Barsky clip to the viewport (z is affine in screen space). */
   float t0 = 0, t1 = 1, dx = x1 - x0, dy = y1 - y0;
   auto clipt = [&](float p, float q) {

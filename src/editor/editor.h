@@ -117,6 +117,7 @@ struct FrameProfile {
    * draw items (render meshes built on the way included) and the scene hashes - and how often the costly ones ran. */
   double ms_edit_apply = 0, ms_overlap = 0, ms_lighting_key = 0, ms_snap_pick = 0, ms_collect = 0, ms_hash = 0;
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
+  uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
    * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
   uint64_t gpu_views = 0, gpu_fallbacks = 0, gpu_mesh_uploads = 0, gpu_mesh_updates = 0;
@@ -135,6 +136,7 @@ struct FrameProfile {
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
+    overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
     gpu_upload_bytes += o.gpu_upload_bytes;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
@@ -581,6 +583,16 @@ class Editor {
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
   void viewport_device_for_test(int d) { set_viewport_device(d); }
+  void overlap_background_from_for_test(size_t n) { overlap_background_from_ = n; }
+  void overlap_worker_delay_for_test(int ms) { overlap_worker_delay_ms_ = ms; }  // (the worker sleeps first: seen pending)
+  void overlap_forget_for_test() {  // (no answer known: the next check is a full one, as for a mesh never checked)
+    overlap_known_.clear();
+    overlap_ = {};
+    overlap_index_ = {};
+  }
+  bool overlap_pending_for_test() const { return overlap_pending(); }
+  const std::vector<std::pair<uint32_t, uint32_t>> &overlap_verts_for_test() const { return overlap_.verts; }
+  const std::vector<std::pair<uint64_t, uint64_t>> &overlap_edges_for_test() const { return overlap_.edges; }
   void gpu_view_drop_for_test() { gpu_view_drop(); }  // as a GPU error does: the card set aside, everything sent again
   RasterOptions &raster_options_for_test() { return raster_opt_; }
   /* The card's copy of a render mesh the views drew, read back (empty when it isn't there). */
@@ -2320,12 +2332,31 @@ class Editor {
   struct OverlapCache {
     const Mesh *mesh = nullptr;
     uint64_t version = 0, obj = 0;
+    uint64_t key = 0;  // what was checked (task 0108: the topology, eps and positions), 0: nothing yet
     std::vector<std::pair<uint32_t, uint32_t>> verts;
     std::vector<std::pair<uint64_t, uint64_t>> edges;
   } overlap_;
   bool overlap_show_ = true;   // dots and lines over overlapping vertices / edges while editing
   float overlap_eps_ = 0.0f;   // 0: 1e-5 of the mesh's size
-  void overlap_refresh();      // re-check the edited mesh when it changed
+  /* Task 0108 (ADR 0040): results kept by what was checked (an undo, a redo or a selection that copied the mesh finds
+   * its answer), the last full check's cells (a drag's release re-tests only what moved), and a worker for meshes past
+   * overlap_background_from_ vertices. */
+  struct OverlapKnown {
+    uint64_t key = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> verts;
+    std::vector<std::pair<uint64_t, uint64_t>> edges;
+  };
+  std::vector<OverlapKnown> overlap_known_;  // the last used last, at most 4
+  meshops::OverlapIndex overlap_index_;
+  std::future<meshops::OverlapIndex> overlap_job_;
+  uint64_t overlap_job_key_ = 0;
+  size_t overlap_background_from_ = 200000;
+  int overlap_worker_delay_ms_ = 0;
+  bool overlap_pending() const { return overlap_job_.valid(); }
+  void overlap_keep(uint64_t key, const std::vector<std::pair<uint32_t, uint32_t>> &verts, const std::vector<std::pair<uint64_t, uint64_t>> &edges);
+  void overlap_start_job(uint64_t key, float eps);
+  void overlap_take_job(bool wait);
+  void overlap_refresh(bool wait = false);  // re-check the edited mesh when it changed (wait: for a worker's check too)
   void draw_overlap_overlay(const Recti &view);
   void draw_overlap_panel(ui::Layout &lay);
   size_t overlap_select();     // select the vertices involved (Edit Mode)

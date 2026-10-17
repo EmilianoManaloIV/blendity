@@ -29294,7 +29294,9 @@ static void round81_tests() {
     CHECK(p1.overlap_checks == p0.overlap_checks && p1.lightmap_key_hashes == p0.lightmap_key_hashes);
     ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 85, y)});
     r34_steps(ed, 2);
-    CHECK(ed.frame_profile_totals().overlap_checks > p1.overlap_checks);  // (checked once the drag ended)
+    /* (Checked once the drag ended: since task 0108 locally - only what moved - from the check made before it.) */
+    const FrameProfile p2 = ed.frame_profile_totals();
+    CHECK(p2.overlap_checks + p2.overlap_local > p1.overlap_checks + p1.overlap_local);
   });
 
   test("Edit Mode: G reuses its own copy frame to frame and Esc puts the mesh back exactly", [] {
@@ -31320,5 +31322,350 @@ static void round81_tests() {
     std::printf("    %zu sums: worst difference %.2e (relative), their total %.1f\n", once.size(), worst, total);
     CHECK(total > 100.0);  // (something was traced)
     CHECK(worst < 1e-4);
+  });
+  /* ---------------------------------------------------------------- round 132: the overlap check, fast and local (task 0108) */
+  /* Meshes with overlaps planted: an unwelded copy of a patch of faces, a wire edge along an edge, a vertex on another. */
+  auto r132_meshes = [] {
+    std::vector<std::pair<std::string, MeshPtr>> out;
+    out.push_back({"a cube", primitives::cube(1.0f)});
+    {
+      MeshPtr s = primitives::uv_sphere(1.0f, 48, 32);
+      const size_t n = s->vert_count();
+      for (size_t f = 0; f < 40; f++) {  // (forty faces again on new vertices at the same places)
+        std::vector<uint32_t> face;
+        for (uint32_t c = s->face_offsets[f]; c < s->face_offsets[f + 1]; c++) face.push_back(s->add_vert(s->positions[s->corner_verts[c]]));
+        s->add_face(face.data(), face.size());
+      }
+      s->add_loose_edge(s->add_vert(s->positions[100]), s->add_vert(lerp(s->positions[100], s->positions[101], 0.5f)));
+      (void)n;
+      out.push_back({"a sphere with an unwelded patch and a wire edge", s});
+    }
+    {
+      MeshPtr g = primitives::grid(4.0f, 30, 30);
+      g->positions[17] = g->positions[18];  // (a vertex moved onto its neighbour: a zero-length edge, overlapping edges)
+      g->positions[200] = Vec3(std::nanf(""), 0, 0);  // (not a number: never paired)
+      out.push_back({"a grid with a collapsed edge and a NaN", g});
+    }
+    {
+      MeshPtr big = primitives::uv_sphere(1.0f, 256, 196);  // (about 50k faces)
+      for (size_t f = 1000; f < 1400; f++) {
+        std::vector<uint32_t> face;
+        for (uint32_t c = big->face_offsets[f]; c < big->face_offsets[f + 1]; c++) face.push_back(big->add_vert(big->positions[big->corner_verts[c]]));
+        big->add_face(face.data(), face.size());
+      }
+      out.push_back({"a 50k-face sphere with 400 faces doubled", big});
+    }
+    return out;
+  };
+  /* The ones a kernel trips on: nothing, one vertex, edges and no faces, infinities, random soups, edges near the
+   * reference's 512-cell limit. */
+  auto r132_odd_meshes = [] {
+    std::vector<std::pair<std::string, MeshPtr>> out;
+    out.push_back({"an empty mesh", std::make_shared<Mesh>()});
+    {
+      MeshPtr one = std::make_shared<Mesh>();
+      one->add_vert({1, 2, 3});
+      out.push_back({"a single vertex", one});
+    }
+    {
+      MeshPtr w = std::make_shared<Mesh>();  // (wire only: a doubled edge, a piece on a longer one, a lone one)
+      const uint32_t a = w->add_vert({0, 0, 0}), b = w->add_vert({1, 0, 0}), c = w->add_vert({0, 0, 0}), d = w->add_vert({1, 0, 0});
+      const uint32_t e = w->add_vert({0.25f, 0, 0}), f = w->add_vert({0.75f, 0, 0}), g = w->add_vert({0, 1, 0}), h = w->add_vert({0, 2, 0});
+      w->add_loose_edge(a, b), w->add_loose_edge(c, d), w->add_loose_edge(e, f), w->add_loose_edge(g, h);
+      out.push_back({"edges and no faces", w});
+    }
+    {
+      MeshPtr g = primitives::grid(2.0f, 12, 12);
+      g->positions[5] = Vec3(INFINITY, 0, 0);
+      g->positions[6] = Vec3(0, -INFINITY, 0);
+      g->positions[40] = g->positions[41];
+      out.push_back({"a grid with infinities", g});
+    }
+    {
+      MeshPtr far = primitives::grid(2.0f, 8, 8);  // (1e11 out, sized 1e-8: cells past int64 once cast)
+      for (Vec3 &p : far->positions) p = Vec3(1e11f, -3e11f, 1e11f) + p * 1e-12f;
+      far->add_loose_edge(far->add_vert({-3e12f, -3e12f, -3e12f}), far->add_vert({3e12f, 3e12f, 3e12f}));
+      out.push_back({"a grid far out, collapsed to a point", far});
+    }
+    uint32_t seed = 1320;
+    auto rng = [&] { return (seed = seed * 1664525u + 1013904223u) >> 8; };
+    for (int k = 0; k < 3; k++) {  // (random triangles over few points: many shared places, many doubled edges)
+      MeshPtr r = std::make_shared<Mesh>();
+      for (int v = 0; v < 300; v++) r->add_vert(Vec3((float)(rng() % 12), (float)(rng() % 12), (float)(rng() % 3)) * 0.1f);
+      for (int f = 0; f < 400; f++) {
+        uint32_t t[3] = {rng() % 300u, rng() % 300u, rng() % 300u};
+        if (t[0] != t[1] && t[1] != t[2] && t[0] != t[2]) r->add_face(t, 3);
+      }
+      out.push_back({"a random soup " + std::to_string(k + 1), r});
+    }
+    {
+      /* Diagonal wires across about 7 to 9 of the reference's cells each way (the wires lift the mean a third): boxes of about 512 cells, some skipped and
+       * some not, and which ones moves with the mean edge length. */
+      MeshPtr g = primitives::grid(4.0f, 16, 16);
+      double total = 0;
+      for (auto &e : g->edge_cache()) total += length(g->positions[e.second] - g->positions[e.first]);
+      const float mean = (float)(total / (double)g->edge_cache().size());
+      for (int k = 0; k < 8; k++) {
+        const Vec3 p = Vec3(0.37f + 0.05f * (float)k, 0.41f, 0.53f) * mean, dir = Vec3(1.0f) * ((8.6f + 0.3f * (float)k) * mean);
+        g->add_loose_edge(g->add_vert(p), g->add_vert(p + dir));
+        g->add_loose_edge(g->add_vert(p), g->add_vert(p + dir * 0.5f));  // (along it from the same end: found only if both are binned)
+      }
+      out.push_back({"a grid with wires along each other", g});
+    }
+    return out;
+  };
+  test("overlap check: the fast check equals the reference on empty, single-vertex, wire-only, infinite, random and long-edged meshes", [&] {
+    int differ = 0;
+    for (auto &[name, m] : r132_odd_meshes()) {
+      const bool same = meshops::overlapping_vertices(*m) == meshops::overlapping_vertices_reference(*m) &&
+                        meshops::overlapping_edges(*m) == meshops::overlapping_edges_reference(*m);
+      std::printf("    %s: %zu vertex pairs, %zu edge pairs, %s\n", name.c_str(), meshops::overlapping_vertices(*m).size(),
+                  meshops::overlapping_edges(*m).size(), same ? "the same" : "DIFFERENT");
+      differ += !same;
+      /* Its size is of its finite points: a vertex at infinity once made eps infinite, every vertex a pair. */
+      if (name == "a grid with infinities") CHECK(meshops::overlapping_vertices(*m).size() == 1);
+    }
+    CHECK(differ == 0);
+  });
+  test("overlap check: the fast check finds exactly the pairs the reference check finds (vertices and edges), in a fraction of its time", [&] {
+    for (auto &[name, m] : r132_meshes()) {
+      double ref_ms = 0, fast_ms = 0;
+      std::vector<std::pair<uint32_t, uint32_t>> rv, fv;
+      std::vector<std::pair<uint64_t, uint64_t>> re, fe;
+      {
+        ScopedTimer t;
+        rv = meshops::overlapping_vertices_reference(*m);
+        re = meshops::overlapping_edges_reference(*m);
+        ref_ms = t.ms();
+      }
+      {
+        ScopedTimer t;
+        fv = meshops::overlapping_vertices(*m);
+        fe = meshops::overlapping_edges(*m);
+        fast_ms = t.ms();
+      }
+      std::printf("    %s: %zu vertex pairs, %zu edge pairs; the reference %.1f ms, the fast check %.1f ms\n", name.c_str(), fv.size(), fe.size(), ref_ms,
+                  fast_ms);
+      CHECK(fv == rv);
+      CHECK(fe == re);
+      /* (Measured about 15x on 32 threads. A small runner, a debug or a sanitizer build (2.7x there) only print it.) */
+#if defined(NDEBUG) && !defined(__SANITIZE_ADDRESS__)
+      if (m->face_count() > 40000 && JobSystem::global().thread_count() >= 8) CHECK(fast_ms * 3.0 < ref_ms);
+#endif
+    }
+  });
+  test("overlap check: a mesh's topology serial is its own - two copies changed apart never share one", [] {
+    MeshPtr a = primitives::cube(1.0f);
+    const uint64_t s0 = a->topology_serial();
+    Mesh b = *a, c = *a;
+    CHECK(b.topology_serial() == s0);  // (an untouched copy: the same topology)
+    b.add_loose_edge(0, 6);
+    b.touch();
+    c.add_loose_edge(1, 7);
+    c.touch();
+    std::printf("    the source %llu, one copy %llu, the other %llu\n", (unsigned long long)s0, (unsigned long long)b.topology_serial(),
+                (unsigned long long)c.topology_serial());
+    CHECK(b.topology_serial() != s0 && c.topology_serial() != s0 && b.topology_serial() != c.topology_serial());
+  });
+  test("overlap check: Merge welds only the doubled vertices the check found, with a vertex at infinity in the mesh", [&] {
+    Editor ed;
+    r34_open(ed);
+    MeshPtr m = std::make_shared<Mesh>();  // (two doubled spots a unit apart, and one vertex at infinity)
+    m->add_vert({0, 0, 0}), m->add_vert({0, 0, 0}), m->add_vert({1, 0, 0}), m->add_vert({1, 0, 0}), m->add_vert({INFINITY, 0, 0});
+    m->add_loose_edge(0, 2), m->add_loose_edge(1, 3), m->add_loose_edge(2, 4);  // (edges: Merge drops unused vertices)
+    GameObject *obj = ed.scene().create("Far");
+    obj->add<MeshFilter>()->mesh = m;
+    obj->add<MeshRenderer>();
+    ed.command("select Far");
+    ed.command("edit vertex");
+    r34_steps(ed, 2);
+    const size_t pairs = ed.overlap_vert_pairs_for_test();
+    ed.command("overlaps merge");
+    const size_t left = ed.scene().find_by_name("Far")->get<MeshFilter>()->mesh->vert_count();
+    std::printf("    %zu doubled pairs found; after Merge %zu vertices (3: one at each spot and the one at infinity)\n", pairs, left);
+    CHECK(pairs == 2);  // (eps was infinite once: every finite vertex paired with every other, 6 pairs)
+    CHECK(left == 3);  // (its distance was infinite once: Merge refused it and welded nothing)
+  });
+  test("overlap check: the local check near the 512-cell limit (wires the reference may skip as the mean edge length moves) refuses or equals a full check", [&] {
+    MeshPtr base = r132_odd_meshes().back().second;  // (the grid with long wires)
+    uint32_t seed = 1321;
+    auto rng = [&] { return (seed = seed * 1664525u + 1013904223u) >> 8; };
+    Mesh m = *base;
+    meshops::OverlapIndex idx;
+    meshops::overlap_check(m, 0.0f, idx);
+    int local = 0, refused = 0, differ = 0;
+    for (int step = 0; step < 40; step++) {
+      const uint32_t v = rng() % 289u;  // (a grid vertex: the mean edge length moves, the wires don't)
+      m.positions[v] = m.positions[v] + Vec3(((float)(rng() % 200) - 100.0f) * 2e-3f, 0, ((float)(rng() % 200) - 100.0f) * 2e-3f);
+      m.touch();
+      if (!meshops::overlap_check_local(m, 0.0f, idx, m.vert_count())) {
+        refused++;
+        meshops::overlap_check(m, 0.0f, idx);
+        continue;
+      }
+      local++;
+      meshops::OverlapIndex full;
+      meshops::overlap_check(m, 0.0f, full);
+      differ += idx.verts != full.verts || idx.edge_pairs != full.edge_pairs;
+    }
+    std::printf("    %d steps checked locally, %d refused (a full check instead), %d differ from a full check\n", local, refused, differ);
+    CHECK(local > 0);
+    CHECK(differ == 0);
+  });
+  test("overlap check: after only positions moved, the local check re-tests what moved and equals a full check (random drags, onto and off other vertices)", [&] {
+    uint32_t seed = 132;
+    auto rng = [&] { return (seed = seed * 1664525u + 1013904223u) >> 8; };
+    int steps = 0, differ = 0, refused = 0;
+    for (auto &[name, base] : r132_meshes()) {
+      Mesh m = *base;
+      meshops::OverlapIndex idx;
+      meshops::overlap_check(m, 0.0f, idx);
+      const float eps = idx.eps;
+      for (int step = 0; step < 6; step++) {
+        for (int k = 0; k < 5; k++) {
+          const uint32_t v = rng() % (uint32_t)m.vert_count();
+          if (k == 0) m.positions[v] = m.positions[rng() % (uint32_t)m.vert_count()];  // (onto another vertex: a new overlap)
+          else m.positions[v] = m.positions[v] + Vec3((float)(rng() % 100) * 1e-4f, 0, 0);
+        }
+        m.touch();
+        if (meshops::overlap_eps(m, 0.0f) != eps) break;  // (the mesh's size changed: a full check, not this test's case)
+        const bool local = meshops::overlap_check_local(m, 0.0f, idx, m.vert_count());
+        meshops::OverlapIndex full;
+        meshops::overlap_check(m, 0.0f, full);
+        steps++;
+        if (!local) {  // (an edge moved across the sphere lies near the 512-cell limit: the editor checks whole then)
+          refused++;
+          idx = full;
+          continue;
+        }
+        if (idx.verts != full.verts || idx.edge_pairs != full.edge_pairs) {
+          differ++;
+          std::printf("    %s, step %d: differs from a full check\n", name.c_str(), step);
+        }
+      }
+    }
+    std::printf("    %d drag steps, %d of them refused (a full check instead), %d differ from a full check\n", steps, refused, differ);
+    CHECK(steps >= 18 && steps - refused >= 12);
+    CHECK(differ == 0);
+  });
+  test("overlap check in the editor: a drag's release checks only what moved, a selection that copied the mesh and an undo reuse the answer, and the rings are the full check's", [&] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *obj = ed.scene().create("Doubled");
+    obj->add<MeshFilter>()->mesh = r132_meshes()[1].second;
+    obj->add<MeshRenderer>();
+    obj->set_local_position({0, 1, 0});
+    ed.mark_changed_for_test("Add the doubled sphere");  // (its own undo step: the drag's undo goes back to it, not before it)
+    ed.command("select Doubled");
+    ed.command("edit vertex");
+    r34_steps(ed, 2);
+    /* (An undo restores the scene from its snapshot: the object is found again by name each time.) */
+    auto mesh = [&]() -> const Mesh & { return *ed.scene().find_by_name("Doubled")->get<MeshFilter>()->mesh; };
+    auto same_as_full = [&] {
+      return ed.overlap_verts_for_test() == meshops::overlapping_vertices_reference(mesh()) &&
+             ed.overlap_edges_for_test() == meshops::overlapping_edges_reference(mesh());
+    };
+    CHECK(!ed.overlap_verts_for_test().empty() && same_as_full());
+    /* A drag of one vertex: its release checks locally. */
+    ed.command("vsel 7");
+    ed.command("camera 0 4 3 0 1 0");
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    const Vec3 before = mesh().positions[7];
+    const Vec3 wp = ed.scene().find_by_name("Doubled")->world_matrix().point(before);
+    const FrameProfile p0 = ed.frame_profile_totals();
+    r34_gizmo_drag_x(ed, wp, 30);
+    r34_steps(ed, 2);
+    const FrameProfile p1 = ed.frame_profile_totals();
+    std::printf("    a drag's release (the vertex moved %.3f): %llu full checks, %llu local\n", length(mesh().positions[7] - before),
+                (unsigned long long)(p1.overlap_checks - p0.overlap_checks), (unsigned long long)(p1.overlap_local - p0.overlap_local));
+    CHECK(length(mesh().positions[7] - before) > 1e-4f);
+    CHECK(p1.overlap_local > p0.overlap_local && p1.overlap_checks == p0.overlap_checks);
+    CHECK(same_as_full());
+    /* A selection operator after the drag's undo step: it copies the mesh (shared with the step), a new version, the
+     * same geometry. */
+    const Mesh *was = &mesh();
+    ed.command("vsel 5");
+    ed.command("edittool select_more");
+    r34_steps(ed, 2);
+    const FrameProfile p2 = ed.frame_profile_totals();
+    std::printf("    a selection operator (%s the mesh): %llu full checks, %llu answers reused\n", &mesh() != was ? "it copied" : "it did NOT copy",
+                (unsigned long long)(p2.overlap_checks - p1.overlap_checks), (unsigned long long)(p2.overlap_reused - p1.overlap_reused));
+    CHECK(p2.overlap_checks == p1.overlap_checks && p2.overlap_local == p1.overlap_local);
+    CHECK(&mesh() == was || p2.overlap_reused > p1.overlap_reused);
+    /* Undo: back to the geometry from before the drag, checked on entering. */
+    ed.command("undo");
+    r34_steps(ed, 2);
+    const FrameProfile p3 = ed.frame_profile_totals();
+    std::printf("    an undo (the vertex back: %s): %llu full checks, %llu local, %llu reused\n",
+                length(mesh().positions[7] - before) < 1e-6f ? "yes" : "no", (unsigned long long)(p3.overlap_checks - p2.overlap_checks),
+                (unsigned long long)(p3.overlap_local - p2.overlap_local), (unsigned long long)(p3.overlap_reused - p2.overlap_reused));
+    CHECK(p3.overlap_checks == p2.overlap_checks && p3.overlap_reused > p2.overlap_reused);
+    CHECK(same_as_full());
+  });
+  test("overlap check on a worker past the size threshold: the editor doesn't wait, no ring is shown for older geometry, and the answer is the full check's", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.overlap_background_from_for_test(100);  // (any mesh here counts as huge)
+    ed.overlap_worker_delay_for_test(150);     // (each worker sleeps first: still pending a frame later on any machine)
+    GameObject *obj = ed.scene().create("Doubled");
+    obj->add<MeshFilter>()->mesh = r132_meshes()[1].second;  // (the sphere with an unwelded patch)
+    obj->add<MeshRenderer>();
+    obj->set_local_position({0, 1, 0});
+    ed.mark_changed_for_test("Add the doubled sphere");  // (its own undo step: the drag's undo goes back to it)
+    ed.command("select Doubled");
+    auto mesh = [&]() -> const Mesh & { return *ed.scene().find_by_name("Doubled")->get<MeshFilter>()->mesh; };
+    /* Every frame: nothing shown, or the pairs of the mesh as it is in that frame. */
+    int frames = 0, wrong = 0, shown = 0;
+    auto frame = [&] {
+      ed.step_frame_headless();
+      frames++;
+      if (ed.overlap_verts_for_test().empty() && ed.overlap_edges_for_test().empty()) return;
+      shown++;
+      wrong += ed.overlap_verts_for_test() != meshops::overlapping_vertices(mesh()) || ed.overlap_edges_for_test() != meshops::overlapping_edges(mesh());
+    };
+    const FrameProfile p0 = ed.frame_profile_totals();
+    ed.command("edit vertex");
+    const Vec3 entered_at = mesh().positions[7];
+    frame();
+    const bool pending = ed.overlap_pending_for_test();
+    const size_t shown_while_pending = ed.overlap_verts_for_test().size();
+    /* While that worker sleeps, a vertex dragged onto new ground: the worker's answer is for older geometry. */
+    ed.command("vsel 7");
+    ed.command("camera 0 4 3 0 1 0");
+    ed.command("tool move");
+    frame();
+    const Vec3 wp = ed.scene().find_by_name("Doubled")->world_matrix().point(mesh().positions[7]);
+    r34_gizmo_drag_x(ed, wp, 30);
+    const bool pending_after_drag = ed.overlap_pending_for_test();
+    /* (Headless frames don't sleep to the next wake-up: waited for by the clock, not by a count of frames.) */
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while ((ed.overlap_pending_for_test() || ed.overlap_verts_for_test().empty()) && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      frame();
+    }
+    const FrameProfile p1 = ed.frame_profile_totals();
+    const bool same = ed.overlap_verts_for_test() == meshops::overlapping_vertices_reference(mesh()) &&
+                      ed.overlap_edges_for_test() == meshops::overlapping_edges_reference(mesh());
+    std::printf("    pending after the first frame: %s (%zu pairs shown meanwhile); after the drag: %s; %d frames, %d of them showing pairs, %d "
+                "for other geometry; %llu on the worker, %llu local, %llu on the main thread; the answer %s the full check's\n",
+                pending ? "yes" : "no", shown_while_pending, pending_after_drag ? "yes" : "no", frames, shown, wrong,
+                (unsigned long long)(p1.overlap_background - p0.overlap_background), (unsigned long long)(p1.overlap_local - p0.overlap_local),
+                (unsigned long long)(p1.overlap_checks - p0.overlap_checks), same ? "is" : "is NOT");
+    CHECK(pending && shown_while_pending == 0);
+    CHECK(length(mesh().positions[7] - entered_at) > 1e-4f);
+    /* The drag's geometry: a local check from the first worker's cells once it ended, or a worker of its own. */
+    CHECK(p1.overlap_background - p0.overlap_background + p1.overlap_local - p0.overlap_local >= 2 && p1.overlap_checks == p0.overlap_checks);
+    CHECK(wrong == 0);
+    CHECK(same && !ed.overlap_verts_for_test().empty());
+    /* Undo to the geometry the first worker checked (superseded when it ended): its answer was kept. */
+    ed.command("undo");
+    frame();
+    const FrameProfile p2 = ed.frame_profile_totals();
+    std::printf("    the undo back to the entered geometry (the vertex back: %s): %llu answers reused, %llu new workers\n",
+                length(mesh().positions[7] - entered_at) < 1e-6f ? "yes" : "no", (unsigned long long)(p2.overlap_reused - p1.overlap_reused),
+                (unsigned long long)(p2.overlap_background - p1.overlap_background));
+    CHECK(p2.overlap_reused > p1.overlap_reused && p2.overlap_background == p1.overlap_background && !ed.overlap_pending_for_test());
+    CHECK(wrong == 0);
   });
 }

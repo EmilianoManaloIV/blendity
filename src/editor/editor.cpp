@@ -3398,7 +3398,7 @@ void Editor::run_console_command(const std::string &line) {
     else if (s == "merge") overlap_merge();
     else if (s == "show") overlap_show_ = to_lower(arg(2, "on")) != "off";
     else {
-      overlap_refresh();
+      overlap_refresh(true);
       Log::info("%zu overlapping vertex pair(s), %zu overlapping edge pair(s)", overlap_.verts.size(), overlap_.edges.size());
     }
   }

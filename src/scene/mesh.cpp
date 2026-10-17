@@ -304,7 +304,10 @@ uint64_t Mesh::topology_serial() const {
   if (same) return topo_serial_;
   topo_ = Topology{positions.size(), face_offsets, corner_verts, uvs, face_material, face_smooth, seams, sharp_edges, loose_edges,
                    smooth, seams_sharp, smooth_angle};
-  return ++topo_serial_;
+  /* From one counter for every mesh: a copy keeps its source's serial, but two copies that change apart never meet
+   * on one (the overlap check's answers are keyed on it, task 0108). */
+  static std::atomic<uint64_t> serials{1};
+  return topo_serial_ = serials.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Mesh::forget_caches() const {

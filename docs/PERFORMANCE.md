@@ -10,6 +10,33 @@ dist/windows/blendity_stress --only raster
 
 The raw reports are in [`stress/results/`](../stress/results/): the first pass in `report_20261006_001100.md`, the rendering/UV/modeling pass in `report_20261006_091049.md`, and the libraries + bare-metal pass in `report_20261006_233746.md` (`latest.md`, about 130 s).
 
+## Pass 12: Edit Mode's frames that aren't drags, compared with Blender (tasks 0107-0110)
+
+The user asked to "look for performance gains in edit mode; compare to how blender implements their edit mode", and
+chose entering Edit Mode as the scope. Numbers are `--laptop --quality low --only editor_render` on a quiet machine.
+
+**Measured first (task 0107).** Pass 11 made drags cheap; the frames that aren't drags had never been timed. On the
+50k-face sphere the overlap check was most of every stall, and the serial full build of the render mesh came next.
+
+**The overlap check (task 0108, ADR 0040).** Blender has no check running all the time (Merge by Distance is an
+operator); Blendity keeps its rings and makes them cheap the way Blender makes big meshes cheap: don't redo work
+(`BMPartialUpdate`'s idea), then thread what is left.
+- Answers kept by content: an undo, a redo, re-entering and a selection's copy take them at once.
+- The full check on every thread, the old one's pairs exactly: 315-575 ms -> 21-24 ms on 50k faces.
+- A drag's release re-checks only the moved vertices and the edges at them.
+- Past 200,000 vertices, a worker; never rings for older geometry.
+
+| Laptop setting, 50k-face sphere, ms | CPU before | CPU after | GPU before | GPU after |
+|---|---|---|---|---|
+| Entering Edit Mode, caches cold (of it the overlap check) | 421 (360) | 80 (24) | 360 (308) | 70 (23) |
+| Entering again, nothing changed | 24 | 21 | 11 | 5 |
+| Extrude three faces (the overlap check) | 466 (316) | 179 (27) | 487 (336) | 163 (26) |
+| Undo after it (the overlap check) | 337 (311) | 27 (0.4) | 334 (311) | 23 (0.4) |
+| Select More after the undo (the overlap check) | 208 (153) | 56 (0.2) | 213 (155) | 55 (0.2) |
+
+**Still to do in pass 12:** the full render-mesh build threaded (task 0109; 33 ms of the cold entry, 54 ms of the
+extrude's two builds), and the write-up (task 0110).
+
 ## Pass 11: real scenes on the GPU, big meshes in Edit Mode, the CPU fallback, path-traced renders (tasks 0098-0106)
 
 The user asked "What should be more optimization gains?" and chose all four areas. Numbers are
