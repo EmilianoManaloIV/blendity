@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** ADR 0040 (a note: the worker also takes a check predicted past a frame)
 - **Model:** main session (Opus)
-- **PR:** (this task's)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/97
 
 ## Goal
 After task 0108, entering Edit Mode on a 50k-face mesh still cost two serial pieces of work in its first frame: the

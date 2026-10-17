@@ -41,7 +41,32 @@ to the bit as the serial one (Blender threads its tessellation and draw extracti
 flat cache on the laptop setting. A full overlap check predicted past about a frame goes to the worker, so the
 entering frame does none on the main thread. With the views on the CPU the entry now costs about one CPU-view frame.
 
-**Still to do in pass 12:** the write-up (task 0110).
+**Targets (task 0110).**
+- No overlap-check stall on a 50k-face mesh: met. Its main-thread time is 0.2-0.6 ms in every row (the content key
+  and handing the work to the worker); the full check, when it runs there, is 21-24 ms.
+- Entering Edit Mode in about one frame, under 30 ms on the laptop setting: met with the views on the GPU (20 ms);
+  with the views on the CPU 39 ms, about one CPU-view frame (entering again with nothing changed costs 32 ms).
+- The overlap results identical to before: the fast, local and worker paths are tested against the old check, and
+  the render mesh's threaded build against the serial one, bit for bit.
+
+**What it cost.** The worker can show the rings a frame or two after an edit on a mesh past a frame's check (the
+panel says Checking..., never rings for older geometry). The overlap index keeps the last check's grids, about
+40 bytes a vertex. The serial render-mesh build and the old overlap check stay in the code as the tests' references.
+
+**Blender's mechanisms, adopted and left.**
+
+| Blender | In Blendity |
+|---|---|
+| Partial updates during transform (`BMPartialUpdate`) | Pass 11 (task 0099); the overlap check's local re-check after a drag (0108) |
+| Threaded tessellation and draw extraction | The render mesh's full build (0109); the overlap check (0108) |
+| No always-on overlap check (Merge by Distance on demand) | Blendity keeps its rings, reused by content and moved off the main thread past a frame (0108, 0109) |
+| Selection updates only small flag buffers | Left: a selection still draws the Scene view again (Select More: 55-68 ms) |
+| Edit Mode elements picked from an id buffer on the GPU (`DRW_select_buffer`) | Left: objects are picked from an id buffer, but Edit Mode elements by projecting them and casting rays on the CPU |
+| Operators rebuild what they touched | Left: an extrude copies and rebuilds the mesh (115-118 ms, most of it the operator) |
+| Chunk-deduplicated undo (`BLI_array_store`) | Left: undo steps share meshes by pointer, whole |
+
+**Next candidates.** The operators' own cost (the extrude's ~95 ms beyond its builds), selection that doesn't draw
+the view again, GPU picking of Edit Mode elements, and the face-dot and n-gon modes on big meshes.
 
 ## Pass 11: real scenes on the GPU, big meshes in Edit Mode, the CPU fallback, path-traced renders (tasks 0098-0106)
 

@@ -2,6 +2,19 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 134): performance pass 12 written up (task 0110)
+
+**Asked:** pass 12 continued (the approved plan's last task).
+
+**Changed** (documentation only)
+- PERFORMANCE's pass 12: the targets met (no overlap-check stall; entering Edit Mode under 30 ms with the views on the
+  GPU, about one frame on the CPU), what it cost, Blender's mechanisms adopted and left, and the next candidates (the
+  operators' own cost, selection without drawing the view again, picking Edit Mode elements on the GPU).
+- README's modeling paragraph mentions entering Edit Mode in about a frame.
+
+**Checked**
+- No code changed: the suite, verify mode and the stress sections stand as round 133 ran them.
+
 ## 2026-10-16 (round 133): entering Edit Mode in about one frame: the render mesh built on every thread (task 0109)
 
 **Asked:** pass 12 continued (the plan the user approved: entering Edit Mode in about one frame).
