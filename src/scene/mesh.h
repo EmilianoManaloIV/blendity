@@ -194,6 +194,10 @@ struct Mesh {
   bool write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed) const;
   bool write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const;
   void record_moved(RenderMesh &rm, std::vector<uint32_t> &changed, const std::vector<uint32_t> &faces) const;
+  /* A full build's render vertices and triangles (corner_rv: each corner's render vertex): on every thread (task 0109),
+   * or the serial build before it (the tests compare). */
+  void build_render_vertices(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;
+  void render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;
   /* corner_normals' three smooth modes for the corners `at` one vertex (corner, face), into st.cnormal. */
   using CornerFaces = std::vector<std::pair<uint32_t, uint32_t>>;
   void smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, float cos_limit, std::vector<uint32_t> &parent,
@@ -275,6 +279,9 @@ MeshPtr &mesh_make_mutable(MeshPtr &m);
 MeshPtr mesh_copy(const Mesh &m);
 
 /* ------------------------------------------------------------- Primitives */
+/* Tests: render meshes built the way before task 0109 (one thread), to compare the threaded build with. */
+void mesh_serial_build_for_test(bool on);
+
 /* Equivalent to blender/source/blender/bmesh/operators/bmo_primitive.cc and
  * Unity's GameObject > 3D Object menu. All are sized like Unity primitives. */
 namespace primitives {

@@ -585,6 +585,8 @@ class Editor {
   void viewport_device_for_test(int d) { set_viewport_device(d); }
   void overlap_background_from_for_test(size_t n) { overlap_background_from_ = n; }
   void overlap_worker_delay_for_test(int ms) { overlap_worker_delay_ms_ = ms; }  // (the worker sleeps first: seen pending)
+  void overlap_budget_for_test(double ms) { overlap_budget_ms_ = ms; }  // (a huge one: every check below the size on the main thread)
+  void overlap_learn_rate_for_test(size_t verts, double ms) { overlap_learn_rate(verts, ms); }
   void overlap_forget_for_test() {  // (no answer known: the next check is a full one, as for a mesh never checked)
     overlap_known_.clear();
     overlap_ = {};
@@ -2352,6 +2354,10 @@ class Editor {
   uint64_t overlap_job_key_ = 0;
   size_t overlap_background_from_ = 200000;
   int overlap_worker_delay_ms_ = 0;
+  double overlap_ms_per_vertex_ = 6e-4;  // a full check's time a vertex on this machine (learned; the laptop's ~5e-4)
+  double overlap_budget_ms_ = 12.0;      // a full check predicted past it goes to the worker (task 0109)
+  bool overlap_on_worker(size_t verts) const;
+  void overlap_learn_rate(size_t verts, double ms);
   bool overlap_pending() const { return overlap_job_.valid(); }
   void overlap_keep(uint64_t key, const std::vector<std::pair<uint32_t, uint32_t>> &verts, const std::vector<std::pair<uint64_t, uint64_t>> &edges);
   void overlap_start_job(uint64_t key, float eps);

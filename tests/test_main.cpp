@@ -29296,7 +29296,7 @@ static void round81_tests() {
     r34_steps(ed, 2);
     /* (Checked once the drag ended: since task 0108 locally - only what moved - from the check made before it.) */
     const FrameProfile p2 = ed.frame_profile_totals();
-    CHECK(p2.overlap_checks + p2.overlap_local > p1.overlap_checks + p1.overlap_local);
+    CHECK(p2.overlap_checks + p2.overlap_local + p2.overlap_background > p1.overlap_checks + p1.overlap_local + p1.overlap_background);
   });
 
   test("Edit Mode: G reuses its own copy frame to frame and Esc puts the mesh back exactly", [] {
@@ -31667,5 +31667,185 @@ static void round81_tests() {
                 (unsigned long long)(p2.overlap_background - p1.overlap_background));
     CHECK(p2.overlap_reused > p1.overlap_reused && p2.overlap_background == p1.overlap_background && !ed.overlap_pending_for_test());
     CHECK(wrong == 0);
+  });
+  /* ---------------------------------------------------------------- round 133: the render mesh built on every thread (task 0109) */
+  test("render mesh: the threaded full build equals the serial one bit for bit (positions, normals, UVs, triangles, corners, materials) on smooth, by angle, sharp, seamed, n-gon, several-material, flat, degenerate, pole, UV-less and empty meshes", [] {
+    std::vector<std::pair<std::string, MeshPtr>> ms;
+    ms.push_back({"a smooth sphere", primitives::uv_sphere(1.0f, 64, 48)});
+    {
+      MeshPtr g = primitives::grid(4.0f, 40, 40);
+      for (Vec3 &p : g->positions) p.y = 0.3f * std::sin(p.x * 2.0f) * std::cos(p.z * 2.0f);
+      g->smooth = true;
+      g->smooth_angle = 30.0f;
+      ms.push_back({"a grid smooth by angle", g});
+    }
+    {
+      MeshPtr g = primitives::grid(4.0f, 30, 30);
+      g->smooth = true;
+      for (uint32_t i = 0; i + 1 < 31; i++) g->sharp_edges.push_back(Mesh::edge_key(i * 31 + 12, i * 31 + 43));
+      g->seams.push_back(Mesh::edge_key(300, 301));
+      g->seams_sharp = true;
+      ms.push_back({"a grid with sharp edges and a seam", g});
+    }
+    {
+      MeshPtr c = primitives::cube(2.0f);  // (n-gons: two of its quads joined into one hexagon-ish face)
+      c->face_material.assign(c->face_count(), 0);
+      for (size_t f = 0; f < c->face_count(); f += 2) c->face_material[f] = 1;
+      ms.push_back({"a cube with two materials", c});
+    }
+    {
+      MeshPtr s = primitives::uv_sphere(1.0f, 24, 16);
+      s->smooth = false;
+      ms.push_back({"a flat sphere", s});
+    }
+    {
+      MeshPtr d = primitives::grid(2.0f, 10, 10);
+      d->smooth = true;
+      d->corner_verts[d->face_offsets[7] + 1] = d->corner_verts[d->face_offsets[7]];  // (a quad with a vertex twice)
+      d->positions[30] = d->positions[31];  // (a zero-length edge)
+      d->positions[60] = Vec3(std::nanf(""), 0, 0);  // (NaN normals around it: corners the serial build never shares)
+      ms.push_back({"a degenerate grid", d});
+    }
+    ms.push_back({"a cylinder (n-gon caps)", primitives::cylinder(1.0f, 2.0f, 32)});
+    {
+      MeshPtr fan = primitives::cone(1.0f, 0.5f, 3000);  // (its tip: 3,000 corners at one vertex, sorted rather than compared pairwise)
+      fan->smooth = true;
+      ms.push_back({"a 3000-segment cone (a pole)", fan});
+    }
+    {
+      MeshPtr g = primitives::grid(2.0f, 12, 12);
+      g->uvs.clear();
+      g->smooth = true;
+      ms.push_back({"a grid without UVs", g});
+    }
+    ms.push_back({"an empty mesh", std::make_shared<Mesh>()});
+    int differ = 0;
+    for (auto &[name, base] : ms) {
+      for (bool flat : {false, true}) {
+        Mesh a = *base, b = *base;
+        a.forget_caches();
+        b.forget_caches();
+        const RenderMesh &fast = a.render_mesh(flat);
+        mesh_serial_build_for_test(true);
+        const RenderMesh &slow = b.render_mesh(flat);
+        mesh_serial_build_for_test(false);
+        auto bits = [](const auto &x, const auto &y) {
+          return x.size() == y.size() && (x.empty() || std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0);
+        };
+        const bool same = bits(fast.positions, slow.positions) && bits(fast.normals, slow.normals) && bits(fast.uvs, slow.uvs) &&
+                          fast.indices == slow.indices && fast.tri_face == slow.tri_face && fast.tri_material == slow.tri_material &&
+                          fast.tri_corner == slow.tri_corner;
+        if (!same) {
+          differ++;
+          std::printf("    %s (%s): differs (%zu / %zu render vertices, %zu / %zu indices)\n", name.c_str(), flat ? "flat" : "as shaded", fast.positions.size(),
+                      slow.positions.size(), fast.indices.size(), slow.indices.size());
+        }
+      }
+    }
+    std::printf("    %zu meshes, both caches: %d differ\n", ms.size(), differ);
+    CHECK(differ == 0);
+  });
+  test("render mesh: the threaded full build of a 50k-face mesh takes a fraction of the serial one", [] {
+    MeshPtr big = primitives::uv_sphere(1.0f, 256, 196);
+    double fast = 1e9, slow = 1e9;
+    for (int k = 0; k < 3; k++) {
+      Mesh a = *big;
+      a.forget_caches();
+      {
+        ScopedTimer t;
+        (void)a.render_mesh(true);
+        fast = std::min(fast, t.ms());
+      }
+      Mesh b = *big;
+      b.forget_caches();
+      mesh_serial_build_for_test(true);
+      {
+        ScopedTimer t;
+        (void)b.render_mesh(true);
+        slow = std::min(slow, t.ms());
+      }
+      mesh_serial_build_for_test(false);
+    }
+    std::printf("    the flat cache of a 50k-face sphere: %.1f ms on every thread, %.1f ms serial (the face normals included in both)\n", fast, slow);
+    const JobSystem &js = JobSystem::global();
+    if (js.thread_count() > 1 && js.max_threads() > 1 && js.thread_limit() != 1) CHECK(fast < slow);  // (one thread: only printed)
+  });
+  test("render mesh: after a threaded build, a drag's in-place update and the tangents equal the serial build's", [] {
+    MeshPtr base = primitives::uv_sphere(1.0f, 48, 32);
+    int differ = 0;
+    for (bool flat : {false, true}) {
+      Mesh a = *base, b = *base;
+      a.forget_caches();
+      b.forget_caches();
+      (void)a.render_mesh(flat);
+      mesh_serial_build_for_test(true);
+      (void)b.render_mesh(flat);
+      mesh_serial_build_for_test(false);
+      for (Mesh *m : {&a, &b}) {  // (a drag: positions alone, the in-place path reads each corner's render vertex)
+        for (uint32_t v = 100; v < 140; v++) m->positions[v] = m->positions[v] * 1.1f;
+        m->touch();
+      }
+      const RenderMesh &ra = a.render_mesh(flat), &rb = b.render_mesh(flat);
+      auto bits = [](const auto &x, const auto &y) {
+        return x.size() == y.size() && (x.empty() || std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0);
+      };
+      differ += !(bits(ra.positions, rb.positions) && bits(ra.normals, rb.normals) && ra.indices == rb.indices);
+      const RenderMesh &ta = a.render_mesh_tangents(flat), &tb = b.render_mesh_tangents(flat);
+      differ += !bits(ta.tangents, tb.tangents);
+    }
+    std::printf("    in place after a drag, then tangents, both caches: %d differ\n", differ);
+    CHECK(differ == 0);
+  });
+  test("entering Edit Mode on a 50k-face mesh: the overlap check predicted past a frame goes to the worker (none on the main thread), its rings arrive; with no budget it runs on the main thread", [] {
+    for (bool budget : {true, false}) {
+      Editor ed;
+      r34_open(ed);
+      if (!budget) ed.overlap_budget_for_test(1e9);
+      MeshPtr big = primitives::uv_sphere(1.0f, 256, 196);
+      for (size_t f = 1000; f < 1040; f++) {  // (forty faces doubled: rings to wait for)
+        std::vector<uint32_t> face;
+        for (uint32_t c = big->face_offsets[f]; c < big->face_offsets[f + 1]; c++) face.push_back(big->add_vert(big->positions[big->corner_verts[c]]));
+        big->add_face(face.data(), face.size());
+      }
+      GameObject *obj = ed.scene().create("Big");
+      obj->add<MeshFilter>()->mesh = big;
+      obj->add<MeshRenderer>();
+      ed.command("select Big");
+      r34_steps(ed, 2);
+      const FrameProfile p0 = ed.frame_profile_totals();
+      ed.command("edit vertex");
+      ed.step_frame_headless();
+      const FrameProfile p1 = ed.frame_profile_totals();
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+      while (ed.overlap_verts_for_test().empty() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        ed.step_frame_headless();
+      }
+      std::printf("    %s: the entering frame %llu checks on the main thread (%.1f ms), %llu on the worker; then %zu vertex pairs\n",
+                  budget ? "a frame's budget" : "no budget", (unsigned long long)(p1.overlap_checks - p0.overlap_checks), p1.ms_overlap - p0.ms_overlap,
+                  (unsigned long long)(p1.overlap_background - p0.overlap_background), ed.overlap_verts_for_test().size());
+      CHECK(ed.overlap_verts_for_test() == meshops::overlapping_vertices(*ed.scene().find_by_name("Big")->get<MeshFilter>()->mesh));
+      CHECK(!ed.overlap_verts_for_test().empty());
+      if (budget) CHECK(p1.overlap_checks == p0.overlap_checks && p1.overlap_background > p0.overlap_background);
+      else CHECK(p1.overlap_checks > p0.overlap_checks && p1.overlap_background == p0.overlap_background);
+    }
+  });
+  test("overlap check: a few stalled checks don't send every later check of a mid-size mesh to the worker (the learned rate is held)", [] {
+    Editor ed;
+    r34_open(ed);
+    for (int k = 0; k < 5; k++) ed.overlap_learn_rate_for_test(6000, 2000.0);  // (five checks stalled 2 s each)
+    GameObject *obj = ed.scene().create("Mid");
+    obj->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 80, 64);  // (about 5,000 vertices)
+    obj->add<MeshRenderer>();
+    ed.command("select Mid");
+    r34_steps(ed, 2);
+    const FrameProfile p0 = ed.frame_profile_totals();
+    ed.command("edit vertex");
+    ed.step_frame_headless();
+    const FrameProfile p1 = ed.frame_profile_totals();
+    std::printf("    %zu vertices after the stalls: %llu checks on the main thread, %llu on the worker\n",
+                obj->get<MeshFilter>()->mesh->vert_count(), (unsigned long long)(p1.overlap_checks - p0.overlap_checks),
+                (unsigned long long)(p1.overlap_background - p0.overlap_background));
+    CHECK(p1.overlap_checks > p0.overlap_checks && p1.overlap_background == p0.overlap_background);
   });
 }

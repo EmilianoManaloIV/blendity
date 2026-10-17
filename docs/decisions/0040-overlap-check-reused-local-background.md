@@ -41,6 +41,11 @@ In order: don't redo work, then make the work cheap, then hide what is left.
    behaviour); far cells merge, which only adds candidates for the exact tests. The reference check takes the same
    rules, so the two stay equal.
 
+6. **Also on the worker when predicted past a frame** (task 0109): the time a vertex of this machine's full checks
+   (from checks of 5,000 vertices or more on the main thread, held under 2e-3 ms so a 5,000-vertex check always
+   stays there and keeps correcting it) times the vertices, past 12 ms. Entering Edit Mode on a 50k-face mesh does
+   no check on the main thread.
+
 ## Consequences
 - Entering Edit Mode on a 50k-face mesh, an extrude, an undo and a selection after it no longer stall on the check.
 - The rings are always the full check's for the mesh as it is, or absent while a worker runs; never for older

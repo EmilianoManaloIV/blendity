@@ -338,14 +338,31 @@ void Editor::overlap_refresh(bool wait) {
     return;
   }
   overlap_.verts.clear(), overlap_.edges.clear();  // (until the new answer: never rings for the geometry before)
-  if (m->vert_count() >= overlap_background_from_ && !wait) {
+  if (!wait && overlap_on_worker(m->vert_count())) {
     overlap_start_job(key, eps);
     return;
   }
   prof_.overlap_checks++;
+  const auto t0 = std::chrono::steady_clock::now();
   meshops::overlap_check(*m, eps, overlap_index_);
+  overlap_learn_rate(m->vert_count(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
   overlap_.verts = overlap_index_.verts, overlap_.edges = overlap_index_.edge_pairs;
   overlap_keep(key, overlap_.verts, overlap_.edges);
+}
+
+/* Task 0109: a full check goes to the worker past overlap_background_from_ vertices, or when it would take more than
+ * about a frame at the rate this machine's checks have run (entering Edit Mode on a 50k-face mesh: ~25 ms). */
+bool Editor::overlap_on_worker(size_t verts) const {
+  return verts >= overlap_background_from_ || overlap_ms_per_vertex_ * (double)verts > overlap_budget_ms_;
+}
+
+/* The rate from checks big enough that their fixed costs don't swamp it, eased so one slow check doesn't swing it.
+ * Held under 2e-3 ms a vertex: a 5,000-vertex check then stays under the budget, on the main thread, and keeps
+ * correcting the rate (a worker's checks don't feed it: one stalled check could otherwise send every later one there). */
+void Editor::overlap_learn_rate(size_t verts, double ms) {
+  if (verts < 5000) return;
+  const double rate = 0.5 * overlap_ms_per_vertex_ + 0.5 * ms / (double)verts;
+  overlap_ms_per_vertex_ = std::min(2e-3, std::max(1e-5, rate));
 }
 
 /* The full check of the edited mesh on a worker. While one runs on an older mesh, nothing starts and the main thread

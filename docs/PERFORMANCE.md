@@ -26,16 +26,22 @@ operator); Blendity keeps its rings and makes them cheap the way Blender makes b
 - A drag's release re-checks only the moved vertices and the edges at them.
 - Past 200,000 vertices, a worker; never rings for older geometry.
 
-| Laptop setting, 50k-face sphere, ms | CPU before | CPU after | GPU before | GPU after |
-|---|---|---|---|---|
-| Entering Edit Mode, caches cold (of it the overlap check) | 421 (360) | 80 (24) | 360 (308) | 70 (23) |
-| Entering again, nothing changed | 24 | 21 | 11 | 5 |
-| Extrude three faces (the overlap check) | 466 (316) | 179 (27) | 487 (336) | 163 (26) |
-| Undo after it (the overlap check) | 337 (311) | 27 (0.4) | 334 (311) | 23 (0.4) |
-| Select More after the undo (the overlap check) | 208 (153) | 56 (0.2) | 213 (155) | 55 (0.2) |
+| Laptop setting, 50k-face sphere, ms | CPU before | 0108 | 0109 | GPU before | 0108 | 0109 |
+|---|---|---|---|---|---|---|
+| Entering Edit Mode, caches cold | 421 | 80 | 39 | 360 | 70 | 20 |
+| of it the overlap check on the main thread | 360 | 24 | 0.5 | 308 | 23 | 0.6 |
+| of it the render mesh's full build | 37 | 33 | 5.4 | 33 | 32 | 5.7 |
+| Entering again, nothing changed | 24 | 21 | 32 | 11 | 5 | 6 |
+| Extrude three faces | 466 | 179 | 118 | 487 | 163 | 115 |
+| Undo after it | 337 | 27 | 38 | 334 | 23 | 30 |
+| Select More after the undo | 208 | 56 | 68 | 213 | 55 | 62 |
 
-**Still to do in pass 12:** the full render-mesh build threaded (task 0109; 33 ms of the cold entry, 54 ms of the
-extrude's two builds), and the write-up (task 0110).
+**Entering Edit Mode in about one frame (task 0109).** The full build of a render cache runs on every thread, the same
+to the bit as the serial one (Blender threads its tessellation and draw extraction): 33 -> 5.4 ms for the 50k-face
+flat cache on the laptop setting. A full overlap check predicted past about a frame goes to the worker, so the
+entering frame does none on the main thread. With the views on the CPU the entry now costs about one CPU-view frame.
+
+**Still to do in pass 12:** the write-up (task 0110).
 
 ## Pass 11: real scenes on the GPU, big meshes in Edit Mode, the CPU fallback, path-traced renders (tasks 0098-0106)
 

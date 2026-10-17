@@ -230,6 +230,7 @@ namespace {
 enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, kStatCount };
 std::atomic<uint64_t> g_stat_count[kStatCount], g_stat_us[kStatCount];
 std::atomic<uint64_t> g_partial_normals{0};
+std::atomic<bool> g_serial_build{false};  // tests: the build before task 0109 (one thread, a map of corners), to compare against
 struct StatTimer {
   MeshStat stat;
   ScopedTimer t;
@@ -943,7 +944,6 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   rm.tri_material.clear();
   rm.tri_corner.clear();
   const bool uv = has_uvs();
-  const size_t nf = face_count();
   std::vector<Vec3> cnormal;
   corner_normals(flat, cnormal);
   nstate_[ci].reset();  // (kept from the first in-place frame on: a mesh never dragged doesn't hold it)
@@ -951,12 +951,33 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   rm.moved_vertices.clear();
   rm.moved_indices.clear();
 
+  if (!g_serial_build.load(std::memory_order_relaxed)) build_render_vertices(rm, cnormal, uv, corner_rv_[ci]);
+  else render_vertices_serial(rm, cnormal, uv, corner_rv_[ci]);
+  rm.bounds = bounds();
+  rm.serial = rm.build_serial = next_render_serial();
+  rm.shape = shape_key(uid.v, version, deform_version);
+  cache_version_[ci] = version;
+  cache_deform_[ci] = deform_version;
+  cache_tangents_[ci] = false;
+  cache_approx_[ci] = false;
+  cache_topo_[ci] = topo;
+  cache_flat_[ci] = flat;
+  return rm;
+}
+
+/* The build before task 0109, on one thread: kept for the tests that compare the threaded one with it. */
+void Mesh::render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const {
+  const size_t nf = face_count();
   /* Emit render vertices, sharing corners with identical vertex + normal + uv
    * (the same splitting a game engine does at hard edges and UV seams). */
   struct Key {
     uint32_t v;
     float nx, ny, nz, u, w;
-    bool operator==(const Key &o) const { return v == o.v && nx == o.nx && ny == o.ny && nz == o.nz && u == o.u && w == o.w; }
+    /* The same bits and no NaN (the threaded build's rule; == let /fp:fast and the hash's buckets decide NaN, -0 / +0). */
+    bool operator==(const Key &o) const {
+      if (v != o.v || std::memcmp(&nx, &o.nx, 5 * sizeof(float)) != 0) return false;
+      return !nan_bits(nx) && !nan_bits(ny) && !nan_bits(nz) && !nan_bits(u) && !nan_bits(w);
+    }
   };
   struct KeyHash {
     size_t operator()(const Key &k) const {
@@ -971,7 +992,7 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   };
   std::unordered_map<Key, uint32_t, KeyHash> lookup;
   lookup.reserve(corner_verts.size());
-  std::vector<uint32_t> corner_rv(corner_verts.size());
+  corner_rv.assign(corner_verts.size(), 0);
   for (size_t c = 0; c < corner_verts.size(); c++) {
     Vec2 t = uv ? uvs[c] : Vec2();
     Key k{corner_verts[c], cnormal[c].x, cnormal[c].y, cnormal[c].z, t.x, t.y};
@@ -997,18 +1018,178 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
       rm.tri_corner.insert(rm.tri_corner.end(), {base + local[i], base + local[i + 1], base + local[i + 2]});
     }
   }
-  rm.bounds = bounds();
-  rm.serial = rm.build_serial = next_render_serial();
-  rm.shape = shape_key(uid.v, version, deform_version);
-  cache_version_[ci] = version;
-  cache_deform_[ci] = deform_version;
-  cache_tangents_[ci] = false;
-  cache_approx_[ci] = false;
-  cache_topo_[ci] = topo;
-  cache_flat_[ci] = flat;
-  corner_rv_[ci] = std::move(corner_rv);
-  return rm;
 }
+
+/* The corners' sharing rule, both builds': two corners at one vertex share a render vertex when their normals (and
+ * UVs) are the same bits and none is NaN (task 0109: the serial build's == once let /fp:fast or a hash bucket decide
+ * NaN and -0 / +0). */
+namespace {
+struct CornerAttrs {
+  const std::vector<Vec3> &normal;
+  const std::vector<Vec2> *uv;  // null: the mesh has none
+  bool nan(uint32_t c) const {
+    const Vec3 &n = normal[c];
+    if (nan_bits(n.x) || nan_bits(n.y) || nan_bits(n.z)) return true;
+    return uv && (nan_bits((*uv)[c].x) || nan_bits((*uv)[c].y));
+  }
+  /* <0, 0, >0 by the bits: equal bits sort together. */
+  int order(uint32_t a, uint32_t b) const {
+    const int n = std::memcmp(&normal[a], &normal[b], sizeof(Vec3));
+    if (n != 0 || !uv) return n;
+    return std::memcmp(&(*uv)[a], &(*uv)[b], sizeof(Vec2));
+  }
+  bool shares(uint32_t a, uint32_t b) const { return order(a, b) == 0 && !nan(a); }
+};
+
+/* One vertex's corners (`at`, in corner order): each takes the first earlier one it shares with, or itself. A few are
+ * compared pairwise; many (a pole, a fan's centre, the flat cache's one normal a face) are sorted by their bits, the
+ * first of each run the earliest (a stable sort). */
+void share_corners(const uint32_t *at, size_t k, const CornerAttrs &ca, std::vector<uint32_t> &rep, std::vector<uint32_t> &sorted) {
+  if (k <= 32) {
+    for (size_t i = 0; i < k; i++) {
+      rep[at[i]] = at[i];
+      for (size_t j = 0; j < i; j++) {
+        if (rep[at[j]] != at[j] || !ca.shares(at[j], at[i])) continue;
+        rep[at[i]] = at[j];
+        break;
+      }
+    }
+    return;
+  }
+  sorted.assign(at, at + k);
+  std::stable_sort(sorted.begin(), sorted.end(), [&](uint32_t a, uint32_t b) { return ca.order(a, b) < 0; });
+  uint32_t first = 0;
+  for (size_t i = 0; i < k; i++) {
+    const uint32_t c = sorted[i];
+    if (i == 0 || ca.order(sorted[i - 1], c) != 0) first = c;
+    rep[c] = ca.nan(c) ? c : first;  // (a run is all NaN or none: the same bits)
+  }
+}
+
+/* Each corner's representative: the first corner at its vertex it shares a render vertex with (itself if none). */
+std::vector<uint32_t> share_render_vertices(const Mesh &m, const CornerAttrs &ca) {
+  const size_t nc = m.corner_verts.size(), nv = m.positions.size();
+  /* Corners by vertex, in corner order within each (a counting sort). */
+  std::vector<uint32_t> off(nv + 1, 0), by(nc);
+  for (uint32_t v : m.corner_verts) off[v + 1]++;
+  for (size_t v = 0; v < nv; v++) off[v + 1] += off[v];
+  std::vector<uint32_t> fill(off.begin(), off.end() - 1);
+  for (size_t c = 0; c < nc; c++) by[fill[m.corner_verts[c]]++] = (uint32_t)c;
+  std::vector<uint32_t> rep(nc);
+  JobSystem::global().parallel_for((int64_t)nv, 2048, [&](int64_t a, int64_t b) {
+    std::vector<uint32_t> sorted;
+    for (int64_t v = a; v < b; v++) share_corners(by.data() + off[(size_t)v], off[(size_t)v + 1] - off[(size_t)v], ca, rep, sorted);
+  });
+  return rep;
+}
+
+/* Render vertices numbered by a prefix sum over the corners that start one (in corner order, as the serial walk). */
+void number_render_vertices(const Mesh &m, RenderMesh &rm, const std::vector<uint32_t> &rep, const std::vector<Vec3> &cnormal, bool uv,
+                            std::vector<uint32_t> &corner_rv) {
+  JobSystem &js = JobSystem::global();
+  const size_t nc = m.corner_verts.size(), chunk = 8192, chunks = (nc + chunk - 1) / chunk;
+  auto chunk_end = [&](size_t k) { return std::min(nc, (k + 1) * chunk); };
+  std::vector<uint32_t> base(chunks + 1, 0);
+  js.parallel_for((int64_t)chunks, 1, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++) {
+      uint32_t n = 0;
+      for (size_t c = (size_t)k * chunk; c < chunk_end((size_t)k); c++) n += rep[c] == c;
+      base[(size_t)k + 1] = n;
+    }
+  });
+  for (size_t k = 0; k < chunks; k++) base[k + 1] += base[k];
+  const uint32_t nrv = base[chunks];
+  rm.positions.resize(nrv);
+  rm.normals.resize(nrv);
+  if (uv) rm.uvs.resize(nrv);
+  corner_rv.assign(nc, 0);
+  js.parallel_for((int64_t)chunks, 1, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++) {
+      uint32_t at = base[(size_t)k];
+      for (size_t c = (size_t)k * chunk; c < chunk_end((size_t)k); c++) {
+        if (rep[c] != c) continue;
+        corner_rv[c] = at;
+        rm.positions[at] = m.positions[m.corner_verts[c]];
+        rm.normals[at] = cnormal[c];
+        if (uv) rm.uvs[at] = m.uvs[c];
+        at++;
+      }
+    }
+  });
+  /* The others take their representative's (written by the loop before). */
+  js.parallel_for((int64_t)nc, 16384, [&](int64_t a, int64_t b) {
+    for (int64_t c = a; c < b; c++)
+      if (rep[(size_t)c] != (uint32_t)c) corner_rv[(size_t)c] = corner_rv[rep[(size_t)c]];
+  });
+}
+
+/* Triangles per range of faces (three corners and the face each), then joined in face order. */
+void build_render_triangles(const Mesh &m, RenderMesh &rm, const std::vector<uint32_t> &corner_rv) {
+  JobSystem &js = JobSystem::global();
+  const size_t nf = m.face_count(), fchunk = 2048, fchunks = (nf + fchunk - 1) / fchunk;
+  std::vector<std::vector<uint32_t>> tris(fchunks);
+  js.parallel_for((int64_t)fchunks, 1, [&](int64_t a, int64_t b) {
+    std::vector<uint32_t> local;
+    for (int64_t k = a; k < b; k++) {
+      const size_t f0 = (size_t)k * fchunk, f1 = std::min(nf, f0 + fchunk);
+      std::vector<uint32_t> &out = tris[(size_t)k];
+      out.reserve(4 * (m.face_offsets[f1] - m.face_offsets[f0]));  // (a face of n corners: n - 2 triangles)
+      for (size_t f = f0; f < f1; f++) {
+        triangulate_face(m, f, local);
+        const uint32_t fb = m.face_offsets[f];
+        for (size_t i = 0; i + 2 < local.size(); i += 3) out.insert(out.end(), {fb + local[i], fb + local[i + 1], fb + local[i + 2], (uint32_t)f});
+      }
+    }
+  });
+  std::vector<size_t> tbase(fchunks + 1, 0);
+  for (size_t k = 0; k < fchunks; k++) tbase[k + 1] = tbase[k] + tris[k].size() / 4;
+  const size_t nt = tbase[fchunks];
+  rm.indices.resize(nt * 3);
+  rm.tri_corner.resize(nt * 3);
+  rm.tri_face.resize(nt);
+  rm.tri_material.resize(nt);
+  js.parallel_for((int64_t)fchunks, 1, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++) {
+      const std::vector<uint32_t> &t = tris[(size_t)k];
+      size_t at = tbase[(size_t)k];
+      uint32_t face = UINT32_MAX;
+      uint16_t mat = 0;
+      for (size_t i = 0; i < t.size(); i += 4, at++) {
+        for (size_t j = 0; j < 3; j++) {
+          rm.tri_corner[at * 3 + j] = t[i + j];
+          rm.indices[at * 3 + j] = corner_rv[t[i + j]];
+        }
+        if (t[i + 3] != face) face = t[i + 3], mat = (uint16_t)std::max(0, std::min(65535, m.material_of(face)));  // (once a face)
+        rm.tri_face[at] = face;
+        rm.tri_material[at] = mat;
+      }
+    }
+  });
+}
+}  // namespace
+
+/* Task 0109: a full build's render vertices and triangles on every thread, the same to the bit as the serial build
+ * (Blender threads its tessellation and its draw extraction the same way).
+ * - Corners sharing a vertex are compared with each other only (grouped by vertex): each takes its first earlier corner
+ *   there with the same normal and UV.
+ * - Render vertices are numbered in the order of their first corners, as the serial walk numbered them: a prefix sum.
+ * - Faces are triangulated in ranges and joined in face order. */
+void Mesh::build_render_vertices(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const {
+  const size_t nv = positions.size();
+  /* A corner past the vertices would be written out of range below: such a mesh draws nothing (it is invalid
+   * everywhere; the serial build read past its vertices). */
+  for (uint32_t v : corner_verts) {
+    if (v < nv) continue;
+    corner_rv.assign(corner_verts.size(), 0);
+    return;
+  }
+  const CornerAttrs ca{cnormal, uv ? &uvs : nullptr};
+  const std::vector<uint32_t> rep = share_render_vertices(*this, ca);
+  number_render_vertices(*this, rm, rep, cnormal, uv, corner_rv);
+  build_render_triangles(*this, rm, corner_rv);
+}
+
+void mesh_serial_build_for_test(bool on) { g_serial_build.store(on, std::memory_order_relaxed); }
 
 namespace {
 /* Adapter for Blender's MikkTSpace implementation over a triangulated RenderMesh. */

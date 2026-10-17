@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none
 - **Model:** main session (Opus)
-- **PR:** (with task 0108)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/96 (with task 0108)
 
 ## Goal
 The user asked to "look for performance gains in edit mode; compare to how blender implements their edit mode", and

@@ -4,7 +4,7 @@
 - **Requirements:** Q-04, Q-01
 - **Decisions:** ADR 0040 (new)
 - **Model:** main session (Opus)
-- **PR:** (this task's)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/96
 
 ## Goal
 Task 0107 found the overlap check (Edit Mode's yellow rings and magenta lines) was most of every Edit Mode stall on a

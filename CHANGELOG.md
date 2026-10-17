@@ -2,6 +2,53 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 133): entering Edit Mode in about one frame: the render mesh built on every thread (task 0109)
+
+**Asked:** pass 12 continued (the plan the user approved: entering Edit Mode in about one frame).
+
+**Changed**
+- **The full build of a mesh's render cache runs on every thread,** the same to the bit as the serial build (kept for
+  the tests): corners grouped by vertex, each sharing with the first earlier corner of the same normal and UV bits;
+  render vertices numbered by a prefix sum in corner order; triangles per range of faces. A vertex with many corners
+  (a pole, a fan's centre) is sorted rather than compared pairwise. The 50k-face flat cache: 42 -> 6.6 ms
+  (development machine), 33 -> 5.4 ms (laptop setting). Blender threads its tessellation and draw extraction the same
+  way.
+- The sharing rule is exact in both builds: the same bits, never a NaN (the serial build's `==` let `/fp:fast` and
+  its hash's buckets decide NaN and -0 / +0).
+- A mesh with a corner past its vertices draws nothing instead of building from memory past them.
+- **A full overlap check predicted past about a frame goes to the worker** (the rate learned from this machine's
+  checks), not only past 200,000 vertices: entering Edit Mode on a 50k-face mesh does no check on the main thread,
+  the rings arrive a moment later. The learned rate is held so a few stalled checks can't send every later one there.
+
+**Pass 12** (laptop setting, `--laptop --quality low --only editor_render`, ms):
+
+| Laptop setting, 50k-face sphere, ms | CPU before | 0108 | 0109 | GPU before | 0108 | 0109 |
+|---|---|---|---|---|---|---|
+| Entering Edit Mode, caches cold | 421 | 80 | 39 | 360 | 70 | 20 |
+| of it the overlap check on the main thread | 360 | 24 | 0.5 | 308 | 23 | 0.6 |
+| of it the render mesh's full build | 37 | 33 | 5.4 | 33 | 32 | 5.7 |
+| Entering again, nothing changed | 24 | 21 | 32 | 11 | 5 | 6 |
+| Extrude three faces | 466 | 179 | 118 | 487 | 163 | 115 |
+| Undo after it | 337 | 27 | 38 | 334 | 23 | 30 |
+| Select More after the undo | 208 | 56 | 68 | 213 | 55 | 62 |
+
+Entering Edit Mode now costs about one frame: with the views on the CPU, entering again with nothing changed is
+32 ms. The extrude's and Select More's rest is the operators themselves (left for later).
+
+**Checked**
+- New tests (round 133): the threaded build equals the serial one bit for bit on 10 meshes (smooth, by angle, sharp
+  edges and a seam, two materials, flat, degenerate with a NaN, a cylinder, a 3,000-segment cone's pole, no UVs,
+  empty), both caches; a drag's in-place update and the tangents after it equal the serial build's; the 50k-face flat
+  cache builds faster threaded (asserted with more than one thread); entering Edit Mode on a 50k-face mesh checks on
+  the worker, and with no budget on the main thread, the same rings either way; stalled checks don't send a
+  5,000-vertex mesh's check to the worker.
+- Two Opus reviews; every finding fixed (see task 0109's spec).
+- Unit checks: Windows 10,601, 0 failed (751 tests); the whole suite in render-cache verify mode: 10,602,
+  0 failed, 0 stale pictures. Linux with libraries: 10,334, 0 failed. Sanitizer build: 10,225, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull` (26,620 operations, 0 problems), `modifiers_ngon` (11,514 operations, 0 problems),
+  `editor_render`: no change in problem counts.
+
 ## 2026-10-16 (round 132): Edit Mode's overlap check reused, fast and local; pass 12 measured (tasks 0107, 0108, ADR 0040)
 
 **Asked:** "Look for performance gains in edit mode; compare to how blender implements their edit mode." The user chose
