@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include "../core/core.h"
+#include "../core/pacer.h"
 #include "../platform/platform.h"
 #include "../render/camera_filter.h"
 #include "../render/pathtracer.h"
@@ -28,6 +29,7 @@
 #include "../render/probe_volume.h"
 #include "../render/realtime_lightmap.h"
 #include "../render/voxel_gi_gpu.h"
+#include "../render/gpu_raster.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -39,12 +41,14 @@
 
 #include <atomic>
 #include "../core/releases.h"
+#include <array>
 #include <functional>
 #include <thread>
 #include <tuple>
 #include <map>
 #include <memory>
 #include <set>
+#include <future>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -105,14 +109,47 @@ const char *window_title(WindowKind k);
 struct FrameProfile {
   double ms_scene3d = 0, ms_overlays = 0, ms_game = 0, ms_preview = 0, ms_shadow = 0, ms_ui = 0, ms_present = 0;
   uint64_t frames = 0, shadow_renders = 0, view_renders = 0, view_cache_hits = 0, cache_mismatches = 0;
+  uint64_t views_held = 0;  // task 0103: the Game view or Camera Preview kept its last picture during a drag
+  uint64_t cheap_shadows = 0;  // task 0104: shadow maps asked for at half size while you moved (cached ones too)
   uint64_t filter_target_resizes = 0, filter_stack_builds = 0;  // task 0024: both should stay still in a steady frame
+  /* Task 0083: parts inside the times above (not subtracted from them): an Edit Mode drag's writes to the mesh,
+   * the overlapping-vertices check, the "Lighting out of date" key, snapping's searches, gathering the views'
+   * draw items (render meshes built on the way included) and the scene hashes - and how often the costly ones ran. */
+  double ms_edit_apply = 0, ms_overlap = 0, ms_lighting_key = 0, ms_snap_pick = 0, ms_collect = 0, ms_hash = 0;
+  uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
+  uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
+  /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
+   * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
+  uint64_t gpu_views = 0, gpu_fallbacks = 0, gpu_mesh_uploads = 0, gpu_mesh_updates = 0;
+  uint64_t gpu_upload_bytes = 0;  // task 0098: what the meshes sent to the card took
+  uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
+  uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
+  uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
+  double ms_gpu = 0;
   void add(const FrameProfile &o) {
     ms_scene3d += o.ms_scene3d, ms_overlays += o.ms_overlays, ms_game += o.ms_game, ms_preview += o.ms_preview, ms_shadow += o.ms_shadow;
     ms_ui += o.ms_ui, ms_present += o.ms_present;
     frames += o.frames, shadow_renders += o.shadow_renders, view_renders += o.view_renders;
     view_cache_hits += o.view_cache_hits, cache_mismatches += o.cache_mismatches;
+    views_held += o.views_held, cheap_shadows += o.cheap_shadows;
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
+    ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
+    ms_collect += o.ms_collect, ms_hash += o.ms_hash;
+    overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
+    overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
+    gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
+    gpu_upload_bytes += o.gpu_upload_bytes;
+    gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
+    gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
+    gpu_texture_uploads += o.gpu_texture_uploads;
+    ms_gpu += o.ms_gpu;
   }
+};
+/* Adds the time to the end of its scope to a FrameProfile field. */
+struct ProfileScope {
+  double &ms;
+  ScopedTimer t;
+  ~ProfileScope() { ms += t.ms(); }
 };
 ui::Icon window_icon(WindowKind k);
 
@@ -542,6 +579,32 @@ class Editor {
   float last_op_profile_for_test() const { return last_op_.profile; }
   float last_op_amount_for_test() const { return last_op_.amount; }
   std::string last_op_name_for_test() const { return last_op_.op; }
+  bool last_op_valid_for_test() { return last_op_valid(); }
+  void planes_always_for_test(bool on) { planes_always_ = on; }
+  /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
+  void viewport_device_for_test(int d) { set_viewport_device(d); }
+  void overlap_background_from_for_test(size_t n) { overlap_background_from_ = n; }
+  void overlap_worker_delay_for_test(int ms) { overlap_worker_delay_ms_ = ms; }  // (the worker sleeps first: seen pending)
+  void overlap_forget_for_test() {  // (no answer known: the next check is a full one, as for a mesh never checked)
+    overlap_known_.clear();
+    overlap_ = {};
+    overlap_index_ = {};
+  }
+  bool overlap_pending_for_test() const { return overlap_pending(); }
+  const std::vector<std::pair<uint32_t, uint32_t>> &overlap_verts_for_test() const { return overlap_.verts; }
+  const std::vector<std::pair<uint64_t, uint64_t>> &overlap_edges_for_test() const { return overlap_.edges; }
+  void gpu_view_drop_for_test() { gpu_view_drop(); }  // as a GPU error does: the card set aside, everything sent again
+  RasterOptions &raster_options_for_test() { return raster_opt_; }
+  /* The card's copy of a render mesh the views drew, read back (empty when it isn't there). */
+  bool gpu_mesh_for_test(const RenderMesh &rm, std::vector<gpu::RasterVertex> &v, std::vector<uint32_t> &indices) {
+    const auto it = gpu_meshes_.find(&rm);
+    std::string err;
+    return gpu_view_ && it != gpu_meshes_.end() && it->second.id >= 0 && gpu_view_->read_mesh(it->second.id, v, indices, &err);
+  }
+  int viewport_device() const { return viewport_device_; }
+  const std::string &gpu_view_reason() const { return gpu_view_reason_; }
+  std::string gpu_view_status() const;
+  double gpu_view_open_ms() const { return gpu_view_open_ms_; }  // opening the GPU view took (device, pipelines, shaders)
   MaterialPtr material_selected_for_test() const { return material_selected_; }
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
@@ -578,6 +641,9 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  /* The rows of a frame to present: runs of 16-row bands whose pixels differ from `bands` (the hashes of the last
+   * frame presented, updated here); every row when `all` or the size changed (task 0084). */
+  static std::vector<std::pair<int, int>> changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all);
   void show_update_for_test(const std::string &json, const std::string &tag) {
     upd_.list = releases::parse(json);
     upd_.selected = tag;
@@ -816,7 +882,8 @@ class Editor {
   void update_environment();
   /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
    * (null without a sun or casters). */
-  const ShadowMap *update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env);
+  /* frame_only (task 0096): only the fitted frame, for the GPU views that render the map themselves. */
+  const ShadowMap *update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env, bool frame_only = false);
   void render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                        bool scene_lights, const Camera *cam, const FilterStack *filters = nullptr);
   /* A camera's image through its filter components (ADR 0007): the raster stage, the internal
@@ -1215,7 +1282,7 @@ class Editor {
    * selected faces' normal, X along their longest edge. False when nothing gives a direction. */
   bool edit_selection_frame(Quat &out);
   /* After the selection moved: a folded ring round a drawn shape is zipped again (meshops::repair_rings). */
-  void repair_moved_rings(Mesh &m);
+  bool repair_moved_rings(Mesh &m);  // true when a ring was rebuilt (the faces changed)
   bool edge_is_selected(uint32_t a, uint32_t b) const;  // explicit in edge mode, else both ends
   void edges_from_verts();  // edge_sel_ = edges with both ends selected
   void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
@@ -1260,6 +1327,31 @@ class Editor {
   };
   bool edit_op_redoable(const std::string &op) const;
   bool last_op_valid();
+  void settle_meshes();
+  /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
+   * Push/Pull, a modal adjustment. Whole-scene checks wait for it to end (task 0087). */
+  bool interacting() const { return ui_.in.down[0] || ui_.in.down[1] || ui_.in.down[2] || xf_.active || pp_.active || modal_.active; }
+  /* Task 0103 (Blender's sculpt: flush_update_step / flush_update_done): during a drag the Game view and the Camera
+   * Preview keep their last picture and draw once on release, unless Preferences > Other Views Follow Drags is on.
+   * Play is never held back. */
+  /* A drag or navigation in the Scene view itself (a gizmo, an orbit, G / R / S, Push/Pull, a modal tool): not any
+   * mouse button down anywhere - a click in the Hierarchy or a slider held in the Inspector neither holds the other
+   * views nor makes the Scene view cheaper. */
+  bool scene_moving() const {
+    const bool nav = drag_ != Drag::None && drag_ != Drag::Box && drag_ != Drag::AltClick;
+    return nav || xf_.active || pp_.active || modal_.active;
+  }
+  bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
+  bool other_views_follow_ = false;
+  void views_command(const std::string &what, const std::string &value);
+  bool hold_other_views() const { return !other_views_follow_ && scene_moving() && !(playing_ && !paused_); }
+  /* Task 0104 (ADR 0039; Blender's is_navigating / is_transforming): while you interact, the CPU views' shadow map is
+   * rendered at half size with the 2 x 2 filter; the frame after is exact (the views' keys carry this). */
+  bool simpler_while_moving_ = true;
+  bool moving_cheap() const { return simpler_while_moving_ && scene_moving() && !final_render_; }
+  /* The overlapping-vertices check (zfight.cpp): refreshed when not interacting; during an interaction its result is
+   * still shown while the mesh hasn't changed (orbiting, a click), and not once it has (a drag). */
+  bool overlap_current();
   bool last_op_hidden_ = false;  // put away (x, Esc, a selection click) until the next operator or F9
   void run_last_op(bool first);
   void remember_last_op_settings();
@@ -1314,6 +1406,7 @@ class Editor {
     Vec3 current;               // move so far
     float value = 0.0f;         // degrees or scale factor so far
     bool from_extrude = false;  // started by Extrude (E): one undo step with it
+    std::weak_ptr<Mesh> copy;  // the mesh it made last frame, still its own while no ring was rebuilt (task 0087)
   };
   ModalTransform xf_;
   bool blender_keys_ = false;  // preference: R / S start rotate / scale (the Scale tool moves to T)
@@ -1563,6 +1656,16 @@ class Editor {
   int tier_shadow_cap_ = 0, tier_gi_rays_cap_ = 0, tier_rsm_cap_ = 0;  // 0 = no cap
   bool final_render_ = false;  // an F12 raster render is drawing (the tier's caps don't apply)
   std::vector<double> frame_stamps_;  // the last second's frame start times
+  FramePacer pacer_;  // waits for each frame's turn under the cap (task 0084)
+  /* Presenting only what changed (task 0084): a hash per band of rows as last presented; a whole present when the
+   * window asked to be painted or changed size. */
+  std::vector<uint64_t> present_bands_;
+  bool present_all_ = true;
+  int present_w_ = 0, present_h_ = 0;
+  void present_changed();
+  /* The mesh caches' tallies at the last frame's end, and that frame's share (task 0083). Process-wide: work on other
+   * threads (a skin bind) lands in the frame it finished in. */
+  MeshCounts mesh_seen_ = mesh_counts(), mesh_last_;
   float measured_fps_ = 0;
   void draw_performance_settings(ui::Layout *lay);  // Preferences and the Profiler
 
@@ -1576,8 +1679,8 @@ class Editor {
   int quality_tier() const { return quality_tier_; }
   void set_quality_tier(int tier);
   static int recommended_tier();  // Low on 8 threads or fewer or 8 GB or less, else High
-  int shadow_resolution_for_view() const;
-  const ShadowMap *shadow_for_view(ShadowMap &m) const;
+  int shadow_resolution_for_view(bool cpu_view = false) const;  // cpu_view: halved while moving (task 0104)
+  const ShadowMap *shadow_for_view(ShadowMap &m, bool cpu_view = false) const;
   void set_cpu_threads(int n);
   int cpu_threads() const { return cpu_threads_; }
   bool always_redraw() const { return always_redraw_; }
@@ -1985,7 +2088,9 @@ class Editor {
     Image img;
   };
   ViewCache scene_cache_, game_cache_;
+  bool view_cache_show(ViewCache &c, const Recti &r);  // its last picture whatever the key (a held view, task 0103)
   uint64_t cam_preview_key_ = 0;
+  uint64_t cam_preview_of_ = 0;  // the camera its picture is of (a held one must be the same camera's: task 0103)
   bool cache_verify_ = std::getenv("BLENDITY_RENDER_CACHE_VERIFY") != nullptr;
   FrameProfile prof_, prof_last_, prof_total_;
   uint64_t frame_scene_hash(uint64_t *scene_hash = nullptr);
@@ -2019,7 +2124,77 @@ class Editor {
   /* Viewport Resolution Scale (task 0050): the views' 3D drawn this much smaller and scaled up (1 = full size). */
   FilterTarget scene_vs_, game_vs_, preview_vs_;
   void render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
-                     const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false);
+                     const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner = nullptr, bool fill = false,
+                     bool planes = true, bool full_size = false);  // planes: depth and ids at full size too (for picking)
+  bool planes_wanted_ = true;  // (render_scaled's `planes` while it draws: a filter stack's upscale follows it too)
+  bool planes_always_ = false;  // tests: every view copies its planes, as before task 0092
+  /* Task 0096 (ADR 0036): the views' deferred 3D on the GPU (gpu_views.cpp). One device for every view, each view its
+   * own slot of targets; the meshes kept on the card while they're drawn. */
+  struct GpuMesh {
+    std::vector<std::array<uint32_t, 3>> parts;  // task 0101: per material slot, its triangles' (slot, first index, count)
+    int id = -1;
+    uint64_t serial = 0;
+    uint32_t vertices = 0, indices = 0;
+    uint64_t used = 0;  // the gpu_calls_ count it was last drawn at
+    uint64_t bytes = 0;
+  };
+  int viewport_device_ = 0;          // Preferences > Viewport Device: 0 Auto, 1 CPU, 2 GPU
+  std::unique_ptr<gpu::Raster> gpu_view_;
+  bool gpu_view_tried_ = false;      // opening it was tried (not again until the setting changes)
+  bool gpu_view_off_ = false;        // while F12 draws: the CPU (the reference)
+  std::string gpu_view_error_;       // why there is no GPU view at all (none here, an error)
+  std::string gpu_view_reason_;      // why the last view the GPU was wanted for drew on the CPU ("" = it didn't)
+  std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
+  std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
+  double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)
+  ShadowMap gpu_shadow_;             // the shadow map's frame for the GPU views (no depth: they render it)
+  std::vector<uint32_t> gpu_color_;  // a view's colour when its rows aren't contiguous in the canvas
+  uint64_t gpu_mesh_bytes_ = 0;      // what the meshes on the card take
+  std::unordered_map<const RenderMesh *, GpuMesh> gpu_meshes_;
+  uint64_t gpu_calls_ = 0;
+  const RenderTarget *gpu_slot_rt_[gpu::Raster::kSlots] = {};
+  uint64_t gpu_slot_used_[gpu::Raster::kSlots] = {};
+  void set_viewport_device(int d);
+  bool gpu_view_wanted() const;
+  gpu::Raster *gpu_view();
+  const char *gpu_view_unsupported(const RenderTarget &rt, const LightingEnv &env, const std::vector<DrawItem> &items, const FilterStack *filters) const;
+  bool gpu_view_may_draw(const RenderTarget &rt, const LightingEnv &env, const std::vector<DrawItem> &items, const FilterStack *filters);
+  bool gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, const LightingEnv &env, const std::vector<DrawItem> &items,
+                     const Camera *cam, bool scene_lights, const FilterStack *filters, const RasterOptions &opt);
+  int gpu_mesh(const RenderMesh &rm, std::string &err);
+  bool gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err);
+  struct GpuTexture {
+    int id = -1;
+    TexturePtr keep;  // (held while the card has it: its address stays this texture's)
+    uint64_t used = 0;
+    std::string refused;  // id -1: why the card can't hold it
+  };
+  std::unordered_map<const Texture *, GpuTexture> gpu_textures_;
+  int gpu_texture(const TexturePtr &t, std::string &err);
+  const Texture *gpu_world_tex_ = nullptr;  // the world's map the card holds (task 0102)
+  void gpu_forget_old_world(const LightingEnv &env);
+  bool gpu_view_refuse(int slot, const std::string &why);
+  /* Task 0100: the Scene view's 3D drawn by the card at full size (the Viewport Resolution Scale saves the CPU's
+   * per-pixel work), and its Edit Mode cage drawn there too, before the read-back. */
+  bool scene_gpu_call_ = false;   // this render_deferred is the Scene view's (render_scene_view sets it)
+  bool scene_full_call_ = false;  // ... and at full size: the card may draw the cage (its pixels and dots are the view's)
+  bool scene_on_gpu_ = false;     // its last frame drew on the card: this one draws at full size
+  bool scene_full_size() const { return scene_on_gpu_ && gpu_view_wanted(); }  // (scene_view_key mixes it in)
+  bool cage_err_logged_ = false;
+  static constexpr float kCageBias = 5e-4f;  // the cage's lines' depth bias, on either device
+  void gpu_view_drop();
+  bool cage_on_gpu_ = false;     // the card drew this frame's cage: render_overlays leaves it out
+  std::vector<gpu::CageVertex> gpu_cage_v_;  // what the card holds
+  std::vector<gpu::CageEdge> gpu_cage_e_;
+  const gpu::Raster *gpu_cage_owner_ = nullptr;
+  uint64_t gpu_cage_edges_key_ = 0;  // what the edges' colours were worked out from
+  bool gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err);
+  uint32_t cage_edge_color(const Mesh &m, uint32_t a, uint32_t b) const;  // 0: not drawn
+  uint32_t cage_dot_color(size_t v) const;
+  uint64_t cage_edges_key(const Mesh &m) const;
+  float cage_dot_radius() const;
+  int gpu_slot(const RenderTarget &rt);
+  void gpu_forget_meshes();
   Image cam_preview_small_;  // a Rendered Camera Preview at its filters' resolution
   /* A choice from a component's or modifier's menu in the Inspector. Popup menus run at the end
    * of the frame, after draw_inspector has returned, so they record the choice here and the
@@ -2157,12 +2332,31 @@ class Editor {
   struct OverlapCache {
     const Mesh *mesh = nullptr;
     uint64_t version = 0, obj = 0;
+    uint64_t key = 0;  // what was checked (task 0108: the topology, eps and positions), 0: nothing yet
     std::vector<std::pair<uint32_t, uint32_t>> verts;
     std::vector<std::pair<uint64_t, uint64_t>> edges;
   } overlap_;
   bool overlap_show_ = true;   // dots and lines over overlapping vertices / edges while editing
   float overlap_eps_ = 0.0f;   // 0: 1e-5 of the mesh's size
-  void overlap_refresh();      // re-check the edited mesh when it changed
+  /* Task 0108 (ADR 0040): results kept by what was checked (an undo, a redo or a selection that copied the mesh finds
+   * its answer), the last full check's cells (a drag's release re-tests only what moved), and a worker for meshes past
+   * overlap_background_from_ vertices. */
+  struct OverlapKnown {
+    uint64_t key = 0;
+    std::vector<std::pair<uint32_t, uint32_t>> verts;
+    std::vector<std::pair<uint64_t, uint64_t>> edges;
+  };
+  std::vector<OverlapKnown> overlap_known_;  // the last used last, at most 4
+  meshops::OverlapIndex overlap_index_;
+  std::future<meshops::OverlapIndex> overlap_job_;
+  uint64_t overlap_job_key_ = 0;
+  size_t overlap_background_from_ = 200000;
+  int overlap_worker_delay_ms_ = 0;
+  bool overlap_pending() const { return overlap_job_.valid(); }
+  void overlap_keep(uint64_t key, const std::vector<std::pair<uint32_t, uint32_t>> &verts, const std::vector<std::pair<uint64_t, uint64_t>> &edges);
+  void overlap_start_job(uint64_t key, float eps);
+  void overlap_take_job(bool wait);
+  void overlap_refresh(bool wait = false);  // re-check the edited mesh when it changed (wait: for a worker's check too)
   void draw_overlap_overlay(const Recti &view);
   void draw_overlap_panel(ui::Layout &lay);
   size_t overlap_select();     // select the vertices involved (Edit Mode)

@@ -7,9 +7,11 @@
 //   spin    UModeler Lathe, Blender Spin (bmesh/operators/bmo_extrude.cc spin)
 #include "mesh.h"
 #include "mesh_internal.h"
+#include "../core/jobs.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -822,20 +824,51 @@ Vec3 face_area_center(const Mesh &m, size_t f) {
   return std::fabs(area) > 1e-20f ? acc / area : m.face_center(f);
 }
 
-/* Pairs of faces that lie in one plane and cover some of the same area (z-fighting,
- * "overlapping face artifacts"): compared triangle by triangle in 2D. */
-std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices(const Mesh &m, float eps) {
+/* Finite from the bits: the fast-math builds may fold std::isfinite to true (core/math.h). */
+static bool overlap_finite(Vec3 p) { return finite_bits(p.x) && finite_bits(p.y) && finite_bits(p.z); }
+
+/* The overlap checks' distance: eps if given, else 1e-5 of the mesh's size. The size is of its finite positions: one
+ * vertex at infinity made eps infinite (every vertex paired, and -inf / inf cells). */
+float overlap_eps(const Mesh &m, float eps) {
+  if (eps > 0 && finite_bits(eps)) return eps;
+  Vec3 lo(INFINITY), hi(-INFINITY);
+  for (const Vec3 &p : m.positions)
+    if (overlap_finite(p)) lo = vmin(lo, p), hi = vmax(hi, p);
+  return 1e-5f * std::max(1e-3f, lo.x <= hi.x ? length(hi - lo) : 0.0f);
+}
+/* The edges' cell size: their mean length, at least 4 eps. An edge to a point at infinity has no length to count. */
+static float overlap_edge_cell(const Mesh &m, const std::vector<uint64_t> &edges, float eps) {
+  double total = 0;
+  for (uint64_t k : edges) {
+    const float len = length(m.positions[(uint32_t)(k >> 32)] - m.positions[(uint32_t)(k & 0xFFFFFFFF)]);
+    if (finite_bits(len)) total += len;
+  }
+  return std::max(eps * 4.0f, (float)(total / (double)edges.size()));
+}
+
+/* The grid cell of v in cells of `size`, in double and held within +-2^60: a point far out (1e11 with eps 1e-8) once cast
+ * a number past int64 (undefined). Cells far out merge, which only adds candidates: the distance tests decide. */
+static int64_t overlap_cell(float v, float size) {
+  const double c = std::floor((double)v / (double)size), lim = 1152921504606846976.0;
+  if (!finite_bits(c)) return nan_bits(c) ? 0 : std::signbit(c) ? -(int64_t)lim : (int64_t)lim;
+  return c < -lim ? -(int64_t)lim : c < lim ? (int64_t)c : (int64_t)lim;
+}
+/* Whether a box spans more than 512 cells: each side compared first, so the product can't overflow. */
+static bool overlap_over_512(int64_t rx, int64_t ry, int64_t rz) { return rx > 512 || ry > 512 || rz > 512 || rx * ry * rz > 512; }
+
+/* The check before task 0108 (one thread, maps of vectors): the tests compare the fast one against it. */
+std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices_reference(const Mesh &m, float eps) {
   std::vector<std::pair<uint32_t, uint32_t>> out;
   if (m.positions.empty()) return out;
-  if (!(eps > 0)) eps = 1e-5f * std::max(1e-3f, length(m.bounds().extent()));
+  eps = overlap_eps(m, eps);
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
   auto cell = [&](Vec3 p, int dx, int dy, int dz) {
-    const int64_t x = (int64_t)std::floor(p.x / eps) + dx, y = (int64_t)std::floor(p.y / eps) + dy, z = (int64_t)std::floor(p.z / eps) + dz;
+    const int64_t x = overlap_cell(p.x, eps) + dx, y = overlap_cell(p.y, eps) + dy, z = overlap_cell(p.z, eps) + dz;
     return ((uint64_t)(x & 0x1FFFFF) << 42) | ((uint64_t)(y & 0x1FFFFF) << 21) | (uint64_t)(z & 0x1FFFFF);
   };
   for (uint32_t v = 0; v < m.vert_count(); v++) {
     const Vec3 p = m.positions[v];
-    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+    if (!overlap_finite(p)) continue;
     for (int dx = -1; dx <= 1; dx++)
       for (int dy = -1; dy <= 1; dy++)
         for (int dz = -1; dz <= 1; dz++) {
@@ -846,13 +879,14 @@ std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices(const Mesh &m, f
         }
     grid[cell(p, 0, 0, 0)].push_back(v);
   }
+  std::sort(out.begin(), out.end());
   return out;
 }
 
-std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, float eps) {
+std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges_reference(const Mesh &m, float eps) {
   std::vector<std::pair<uint64_t, uint64_t>> out;
   if (m.positions.empty()) return out;
-  if (!(eps > 0)) eps = 1e-5f * std::max(1e-3f, length(m.bounds().extent()));
+  eps = overlap_eps(m, eps);
   std::vector<uint64_t> edges;
   for (auto &e : m.edge_cache()) edges.push_back(Mesh::edge_key(e.first, e.second));
   for (uint64_t k : m.loose_edges) edges.push_back(k);
@@ -860,18 +894,16 @@ std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, floa
   edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
   if (edges.size() < 2) return out;
   /* A grid of cells the size of a typical edge; each edge sits in the cells its box covers. */
-  double total = 0;
-  for (uint64_t k : edges) total += length(m.positions[(uint32_t)(k >> 32)] - m.positions[(uint32_t)(k & 0xFFFFFFFF)]);
-  const float cs = std::max(eps * 4.0f, (float)(total / (double)edges.size()));
+  const float cs = overlap_edge_cell(m, edges, eps);
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
   auto key = [](int64_t x, int64_t y, int64_t z) { return ((uint64_t)(x & 0x1FFFFF) << 42) | ((uint64_t)(y & 0x1FFFFF) << 21) | (uint64_t)(z & 0x1FFFFF); };
   for (uint32_t i = 0; i < edges.size(); i++) {
     const Vec3 a = m.positions[(uint32_t)(edges[i] >> 32)], b = m.positions[(uint32_t)(edges[i] & 0xFFFFFFFF)];
-    if (!std::isfinite(a.x + a.y + a.z + b.x + b.y + b.z)) continue;
+    if (!overlap_finite(a) || !overlap_finite(b)) continue;
     const Vec3 lo = vmin(a, b) - Vec3(eps), hi = vmax(a, b) + Vec3(eps);
-    const int64_t x0 = (int64_t)std::floor(lo.x / cs), x1 = (int64_t)std::floor(hi.x / cs), y0 = (int64_t)std::floor(lo.y / cs),
-                  y1 = (int64_t)std::floor(hi.y / cs), z0 = (int64_t)std::floor(lo.z / cs), z1 = (int64_t)std::floor(hi.z / cs);
-    if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) continue;  // an edge across the whole mesh: skipped
+    const int64_t x0 = overlap_cell(lo.x, cs), x1 = overlap_cell(hi.x, cs), y0 = overlap_cell(lo.y, cs), y1 = overlap_cell(hi.y, cs),
+                  z0 = overlap_cell(lo.z, cs), z1 = overlap_cell(hi.z, cs);
+    if (overlap_over_512(x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1)) continue;  // an edge across the whole mesh: skipped
     for (int64_t x = x0; x <= x1; x++)
       for (int64_t y = y0; y <= y1; y++)
         for (int64_t z = z0; z <= z1; z++) grid[key(x, y, z)].push_back(i);
@@ -899,6 +931,298 @@ std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, floa
       }
   std::sort(out.begin(), out.end());
   return out;
+}
+
+/* ---- Task 0108: the overlap check on sorted cells, in parallel, and again locally after a drag.
+ * The cells are the reference checks' (keys of 21 bits a coordinate, wrapping): they only pick candidates, and the
+ * distance tests decide, so the pairs are the reference's. Cells in a sorted array of (cell, element) rather than a
+ * map of vectors; pairs per vertex or per cell in parallel, then sorted. */
+namespace {
+using CellItem = std::pair<uint64_t, uint32_t>;
+inline uint64_t ov_key(int64_t x, int64_t y, int64_t z) {
+  return ((uint64_t)(x & 0x1FFFFF) << 42) | ((uint64_t)(y & 0x1FFFFF) << 21) | (uint64_t)(z & 0x1FFFFF);
+}
+inline bool ov_finite(Vec3 p) { return overlap_finite(p); }
+/* The items of one cell: a run of the sorted array. */
+inline std::pair<size_t, size_t> ov_run(const std::vector<CellItem> &g, uint64_t key) {
+  const size_t lo = (size_t)(std::lower_bound(g.begin(), g.end(), CellItem{key, 0u}) - g.begin());
+  size_t hi = lo;
+  while (hi < g.size() && g[hi].first == key) hi++;
+  return {lo, hi};
+}
+inline void ov_vcell(Vec3 p, float eps, int64_t c[3]) {
+  c[0] = overlap_cell(p.x, eps), c[1] = overlap_cell(p.y, eps), c[2] = overlap_cell(p.z, eps);
+}
+/* Whether the reference skips an edge: not finite, or over 512 of its cells of size cs (an edge across the whole mesh). */
+inline bool ov_eskipped(const Mesh &m, uint64_t e, float eps, float cs) {
+  const Vec3 a = m.positions[(uint32_t)(e >> 32)], b = m.positions[(uint32_t)(e & 0xFFFFFFFF)];
+  if (!overlap_finite(a) || !overlap_finite(b)) return true;
+  const Vec3 l = vmin(a, b) - Vec3(eps), h = vmax(a, b) + Vec3(eps);
+  return overlap_over_512(overlap_cell(h.x, cs) - overlap_cell(l.x, cs) + 1, overlap_cell(h.y, cs) - overlap_cell(l.y, cs) + 1,
+                          overlap_cell(h.z, cs) - overlap_cell(l.z, cs) + 1);
+}
+/* The cells an edge's box (grown by eps) covers, cells of size bs (twice the reference's: a third of the entries; any
+ * two boxes that meet still share one); false when the reference skips it at its cell size cs. */
+inline bool ov_ecells(const Mesh &m, uint64_t e, float eps, float cs, float bs, int64_t lo[3], int64_t hi[3]) {
+  if (ov_eskipped(m, e, eps, cs)) return false;
+  const Vec3 a = m.positions[(uint32_t)(e >> 32)], b = m.positions[(uint32_t)(e & 0xFFFFFFFF)];
+  const Vec3 l = vmin(a, b) - Vec3(eps), h = vmax(a, b) + Vec3(eps);
+  lo[0] = overlap_cell(l.x, bs), hi[0] = overlap_cell(h.x, bs);
+  lo[1] = overlap_cell(l.y, bs), hi[1] = overlap_cell(h.y, bs);
+  lo[2] = overlap_cell(l.z, bs), hi[2] = overlap_cell(h.z, bs);
+  return true;
+}
+/* A sort on every thread: ranges sorted at once, then merged pairwise. */
+template <class T>
+void ov_sort(std::vector<T> &v) {
+  const size_t n = v.size(), parts = n < 16384 ? 1 : 16;
+  if (parts == 1) {
+    std::sort(v.begin(), v.end());
+    return;
+  }
+  std::vector<size_t> cut(parts + 1);
+  for (size_t k = 0; k <= parts; k++) cut[k] = n * k / parts;
+  JobSystem::global().parallel_for((int64_t)parts, 1, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++) std::sort(v.begin() + (ptrdiff_t)cut[(size_t)k], v.begin() + (ptrdiff_t)cut[(size_t)k + 1]);
+  });
+  for (size_t width = 1; width < parts; width *= 2) {
+    const int64_t merges = (int64_t)((parts + 2 * width - 1) / (2 * width));
+    JobSystem::global().parallel_for(merges, 1, [&](int64_t a, int64_t b) {
+      for (int64_t k = a; k < b; k++) {
+        const size_t lo = (size_t)k * 2 * width, mid = std::min(parts, lo + width), hi = std::min(parts, lo + 2 * width);
+        if (mid < hi)
+          std::inplace_merge(v.begin() + (ptrdiff_t)cut[lo], v.begin() + (ptrdiff_t)cut[mid], v.begin() + (ptrdiff_t)cut[hi]);
+      }
+    });
+  }
+}
+template <class Fn>
+inline void ov_each_cell(const int64_t lo[3], const int64_t hi[3], Fn &&fn) {
+  for (int64_t x = lo[0]; x <= hi[0]; x++)
+    for (int64_t y = lo[1]; y <= hi[1]; y++)
+      for (int64_t z = lo[2]; z <= hi[2]; z++) fn(ov_key(x, y, z));
+}
+/* Whether edge j lies along edge i (i the reference line, as the reference check tests it) sharing more than eps. */
+bool ov_edges_overlap(const Mesh &m, uint64_t ei, uint64_t ej, float eps) {
+  const uint32_t a0 = (uint32_t)(ei >> 32), a1 = (uint32_t)(ei & 0xFFFFFFFF), b0 = (uint32_t)(ej >> 32), b1 = (uint32_t)(ej & 0xFFFFFFFF);
+  const Vec3 A = m.positions[a0], B = m.positions[a1], C = m.positions[b0], D = m.positions[b1];
+  /* Most candidates only share a cell: their boxes (grown by eps) apart, no point of one within eps of the other. */
+  const Vec3 lo1 = vmin(A, B) - Vec3(eps), hi1 = vmax(A, B) + Vec3(eps), lo2 = vmin(C, D) - Vec3(eps), hi2 = vmax(C, D) + Vec3(eps);
+  if (lo2.x > hi1.x || lo2.y > hi1.y || lo2.z > hi1.z || hi2.x < lo1.x || hi2.y < lo1.y || hi2.z < lo1.z) return false;
+  const Vec3 d = B - A;
+  const float len = length(d);
+  if (len <= eps || length(D - C) <= eps) return false;
+  const Vec3 u = d / len;
+  auto off_line = [&](Vec3 P) { return length(cross(P - A, u)); };
+  if (off_line(C) > eps || off_line(D) > eps) return false;
+  const float tc = dot(C - A, u), td = dot(D - A, u);
+  const float lo = std::max(0.0f, std::min(tc, td)), hi = std::min(len, std::max(tc, td));
+  return hi - lo > eps;
+}
+/* Per-range outputs of a parallel loop, joined in range order. */
+template <class T, class Fn>
+std::vector<T> ov_parallel(int64_t n, int64_t grain, Fn &&fn) {
+  const int64_t ranges = std::max<int64_t>(1, (n + grain - 1) / grain);
+  std::vector<std::vector<T>> parts((size_t)ranges);
+  JobSystem::global().parallel_for(ranges, 1, [&](int64_t r0, int64_t r1) {
+    for (int64_t r = r0; r < r1; r++) fn(r * grain, std::min(n, (r + 1) * grain), parts[(size_t)r]);
+  });
+  std::vector<T> out;
+  for (auto &part : parts) out.insert(out.end(), part.begin(), part.end());
+  return out;
+}
+/* The vertices near v (u != v, within eps) in the grid. */
+template <class Fn>
+inline void ov_near(const Mesh &m, const std::vector<CellItem> &g, uint32_t v, float eps, Fn &&fn) {
+  const Vec3 p = m.positions[v];
+  int64_t c[3];
+  ov_vcell(p, eps, c);
+  for (int dx = -1; dx <= 1; dx++)
+    for (int dy = -1; dy <= 1; dy++)
+      for (int dz = -1; dz <= 1; dz++) {
+        const auto run = ov_run(g, ov_key(c[0] + dx, c[1] + dy, c[2] + dz));
+        for (size_t k = run.first; k < run.second; k++) {
+          const uint32_t u = g[k].second;
+          if (u != v && length(m.positions[u] - p) <= eps) fn(u);
+        }
+      }
+}
+void ov_vertex_grid(const Mesh &m, float eps, std::vector<CellItem> &g) {
+  g = ov_parallel<CellItem>((int64_t)m.vert_count(), 8192, [&](int64_t a, int64_t b, std::vector<CellItem> &out) {
+    for (int64_t v = a; v < b; v++) {
+      const Vec3 p = m.positions[(size_t)v];
+      if (!ov_finite(p)) continue;
+      int64_t c[3];
+      ov_vcell(p, eps, c);
+      out.push_back({ov_key(c[0], c[1], c[2]), (uint32_t)v});
+    }
+  });
+  ov_sort(g);
+}
+void ov_edge_items(const Mesh &m, const std::vector<uint64_t> &edges, const std::vector<uint32_t> &which, float eps, float cs, float bs,
+                   std::vector<CellItem> &out) {
+  out = ov_parallel<CellItem>((int64_t)which.size(), 4096, [&](int64_t a, int64_t b, std::vector<CellItem> &part) {
+    for (int64_t k = a; k < b; k++) {
+      const uint32_t i = which[(size_t)k];
+      int64_t lo[3], hi[3];
+      if (!ov_ecells(m, edges[i], eps, cs, bs, lo, hi)) continue;
+      ov_each_cell(lo, hi, [&](uint64_t key) { part.push_back({key, i}); });
+    }
+  });
+  ov_sort(out);
+}
+/* Each vertex's neighbourhood in the grid, the pair kept from its higher index; sorted. */
+std::vector<std::pair<uint32_t, uint32_t>> ov_vertex_pairs(const Mesh &m, const std::vector<CellItem> &g, float eps) {
+  auto out = ov_parallel<std::pair<uint32_t, uint32_t>>((int64_t)m.vert_count(), 2048, [&](int64_t a, int64_t b, auto &part) {
+    for (int64_t v = a; v < b; v++) {
+      if (!ov_finite(m.positions[(size_t)v])) continue;
+      ov_near(m, g, (uint32_t)v, eps, [&](uint32_t u) {
+        if (u < (uint32_t)v) part.push_back({u, (uint32_t)v});
+      });
+    }
+  });
+  ov_sort(out);
+  return out;
+}
+}  // namespace
+
+void overlap_check(const Mesh &m, float eps, OverlapIndex &idx) { overlap_check_parts(m, eps, idx, true, true); }
+
+/* The vertices' half, the edges' half or both (overlapping_vertices / overlapping_edges want one each). */
+void overlap_check_parts(const Mesh &m, float eps, OverlapIndex &idx, bool vertices, bool edges) {
+  idx = OverlapIndex{};
+  if (m.positions.empty()) return;
+  eps = overlap_eps(m, eps);
+  idx.eps = eps;
+  idx.topo = m.topology_serial();
+  idx.positions = m.positions;
+  idx.valid = vertices && edges;  // (only a whole check is a base for local ones)
+  if (vertices) {
+    ov_vertex_grid(m, eps, idx.vgrid);
+    idx.verts = ov_vertex_pairs(m, idx.vgrid, eps);
+  }
+  if (!edges) return;
+  /* Edges: the cell size the reference takes (the mean length, summed in the same order). */
+  for (auto &e : m.edge_cache()) idx.edges.push_back(Mesh::edge_key(e.first, e.second));
+  for (uint64_t k : m.loose_edges) idx.edges.push_back(k);
+  std::sort(idx.edges.begin(), idx.edges.end());
+  idx.edges.erase(std::unique(idx.edges.begin(), idx.edges.end()), idx.edges.end());
+  if (idx.edges.size() < 2) return;
+  idx.cs = overlap_edge_cell(m, idx.edges, eps);
+  idx.bs = idx.cs * 2.0f;
+  std::vector<uint32_t> all(idx.edges.size());
+  for (size_t i = 0; i < all.size(); i++) all[i] = (uint32_t)i;
+  ov_edge_items(m, idx.edges, all, eps, idx.cs, idx.bs, idx.egrid);
+  /* Pairs within each cell's run (in parallel over the runs); a pair sharing several cells is found in each: unique. */
+  std::vector<size_t> runs;
+  for (size_t k = 0; k < idx.egrid.size(); k++)
+    if (k == 0 || idx.egrid[k].first != idx.egrid[k - 1].first) runs.push_back(k);
+  runs.push_back(idx.egrid.size());
+  idx.edge_pairs = ov_parallel<std::pair<uint64_t, uint64_t>>((int64_t)runs.size() - 1, 256, [&](int64_t a, int64_t b, auto &out) {
+    for (int64_t r = a; r < b; r++)
+      for (size_t p0 = runs[(size_t)r]; p0 < runs[(size_t)r + 1]; p0++)
+        for (size_t q0 = p0 + 1; q0 < runs[(size_t)r + 1]; q0++) {
+          const uint32_t i = std::min(idx.egrid[p0].second, idx.egrid[q0].second), j = std::max(idx.egrid[p0].second, idx.egrid[q0].second);
+          if (i != j && ov_edges_overlap(m, idx.edges[i], idx.edges[j], eps)) out.push_back({idx.edges[i], idx.edges[j]});
+        }
+  });
+  ov_sort(idx.edge_pairs);
+  idx.edge_pairs.erase(std::unique(idx.edge_pairs.begin(), idx.edge_pairs.end()), idx.edge_pairs.end());
+}
+
+bool overlap_check_local(const Mesh &m, float eps, OverlapIndex &idx, size_t max_moved) {
+  eps = overlap_eps(m, eps);
+  const size_t n = m.vert_count();
+  if (!idx.valid || idx.eps != eps || idx.topo != m.topology_serial() || idx.positions.size() != n) return false;
+  std::vector<uint32_t> moved;
+  for (size_t v = 0; v < n; v++)
+    if (std::memcmp(&m.positions[v], &idx.positions[v], sizeof(Vec3)) != 0) moved.push_back((uint32_t)v);
+  if (moved.size() > max_moved) return false;
+  if (moved.empty()) {
+    idx.retested = 0;
+    return true;
+  }
+  std::vector<uint8_t> is_moved(n, 0);
+  for (uint32_t v : moved) is_moved[v] = 1;
+  /* The edges' cell size follows the mean length, as a full check takes it. An edge that didn't move but which the
+   * reference skips at one size and not the other (an edge near 512 cells long) would need every pair again: a full check. */
+  const bool has_edges = idx.edges.size() >= 2;
+  const float cs = has_edges ? overlap_edge_cell(m, idx.edges, eps) : 0.0f;
+  if (has_edges && cs > idx.bs) return false;  // (cells past the bins' size: a moved edge could take thousands)
+  if (has_edges && cs != idx.cs)
+    for (uint64_t e : idx.edges) {
+      if (is_moved[(uint32_t)(e >> 32)] || is_moved[(uint32_t)(e & 0xFFFFFFFF)]) continue;
+      if (ov_eskipped(m, e, eps, cs) != ov_eskipped(m, e, eps, idx.cs)) return false;
+    }
+  idx.cs = cs;
+  idx.retested = moved.size();
+  /* Vertices: the moved ones binned again; their pairs dropped and found again (a pair of two moved ones once). */
+  idx.verts.erase(std::remove_if(idx.verts.begin(), idx.verts.end(), [&](const auto &pr) { return is_moved[pr.first] || is_moved[pr.second]; }),
+                  idx.verts.end());
+  idx.vgrid.erase(std::remove_if(idx.vgrid.begin(), idx.vgrid.end(), [&](const CellItem &c) { return is_moved[c.second] != 0; }), idx.vgrid.end());
+  std::vector<CellItem> add;
+  for (uint32_t v : moved) {
+    if (!ov_finite(m.positions[v])) continue;
+    int64_t c[3];
+    ov_vcell(m.positions[v], eps, c);
+    add.push_back({ov_key(c[0], c[1], c[2]), v});
+  }
+  std::sort(add.begin(), add.end());
+  const size_t mid = idx.vgrid.size();
+  idx.vgrid.insert(idx.vgrid.end(), add.begin(), add.end());
+  std::inplace_merge(idx.vgrid.begin(), idx.vgrid.begin() + (ptrdiff_t)mid, idx.vgrid.end());
+  for (uint32_t v : moved) {
+    if (!ov_finite(m.positions[v])) continue;
+    ov_near(m, idx.vgrid, v, eps, [&](uint32_t u) {
+      if (!is_moved[u] || u < v) idx.verts.push_back({std::min(u, v), std::max(u, v)});
+    });
+  }
+  std::sort(idx.verts.begin(), idx.verts.end());
+  /* Edges at a moved vertex: binned again (the index's cell size), their pairs dropped and tested again. */
+  std::vector<uint8_t> is_hit(idx.edges.size(), 0);
+  std::vector<uint32_t> hit;
+  for (size_t i = 0; i < idx.edges.size(); i++)
+    if (is_moved[(uint32_t)(idx.edges[i] >> 32)] || is_moved[(uint32_t)(idx.edges[i] & 0xFFFFFFFF)]) is_hit[i] = 1, hit.push_back((uint32_t)i);
+  if (has_edges && !hit.empty()) {  // (under two edges a full check bins none: nothing to pair)
+    auto edge_hit = [&](uint64_t key) {
+      const size_t i = (size_t)(std::lower_bound(idx.edges.begin(), idx.edges.end(), key) - idx.edges.begin());
+      return i < idx.edges.size() && idx.edges[i] == key && is_hit[i];
+    };
+    idx.edge_pairs.erase(std::remove_if(idx.edge_pairs.begin(), idx.edge_pairs.end(),
+                                        [&](const auto &pr) { return edge_hit(pr.first) || edge_hit(pr.second); }),
+                         idx.edge_pairs.end());
+    idx.egrid.erase(std::remove_if(idx.egrid.begin(), idx.egrid.end(), [&](const CellItem &c) { return is_hit[c.second] != 0; }), idx.egrid.end());
+    std::vector<CellItem> eadd;
+    ov_edge_items(m, idx.edges, hit, eps, idx.cs, idx.bs, eadd);  // (in the bins the rest are in)
+    const size_t emid = idx.egrid.size();
+    idx.egrid.insert(idx.egrid.end(), eadd.begin(), eadd.end());
+    std::inplace_merge(idx.egrid.begin(), idx.egrid.begin() + (ptrdiff_t)emid, idx.egrid.end());
+    for (const CellItem &item : eadd) {
+      const auto run = ov_run(idx.egrid, item.first);
+      for (size_t k = run.first; k < run.second; k++) {
+        const uint32_t a = item.second, b = idx.egrid[k].second;
+        if (a == b || (is_hit[b] && b < a)) continue;  // (two moved edges: from the lower one)
+        const uint32_t i = std::min(a, b), j = std::max(a, b);
+        if (ov_edges_overlap(m, idx.edges[i], idx.edges[j], eps)) idx.edge_pairs.push_back({idx.edges[i], idx.edges[j]});
+      }
+    }
+    std::sort(idx.edge_pairs.begin(), idx.edge_pairs.end());
+    idx.edge_pairs.erase(std::unique(idx.edge_pairs.begin(), idx.edge_pairs.end()), idx.edge_pairs.end());
+  }
+  idx.positions = m.positions;
+  return true;
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices(const Mesh &m, float eps) {
+  OverlapIndex idx;
+  overlap_check_parts(m, eps, idx, true, false);
+  return idx.verts;
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, float eps) {
+  OverlapIndex idx;
+  overlap_check_parts(m, eps, idx, false, true);
+  return idx.edge_pairs;
 }
 
 size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<uint32_t, uint32_t>> *out) {

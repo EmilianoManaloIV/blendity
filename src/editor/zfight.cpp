@@ -5,8 +5,12 @@
 // go - a duplicate's copy, both sides of an inner wall, a face hidden under
 // another - outlines them in the Scene view, and removes the suggested faces.
 #include "editor.h"
+#include "../core/jobs.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <thread>
 
 namespace bl {
 
@@ -238,29 +242,146 @@ uint64_t Editor::overlap_shorter(const Mesh &m, const std::pair<uint64_t, uint64
   return len(p.second) < len(p.first) ? p.second : p.first;
 }
 
-void Editor::overlap_refresh() {
+/* What a check's answer depends on: the topology, eps and every position (bit for bit). */
+static uint64_t overlap_key(const Mesh &m, float eps) {
+  uint64_t h = 1469598103934665603ull ^ m.topology_serial();
+  auto mix = [&](const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
+      h = (h ^ v) * 1099511628211ull;
+      h ^= h >> 29;
+    }
+  };
+  mix(&eps, sizeof(eps));
+  const size_t n = m.positions.size();
+  mix(&n, sizeof(n));
+  if (n) mix(m.positions.data(), n * sizeof(Vec3));
+  return h | 1;  // (0: nothing checked)
+}
+
+void Editor::overlap_keep(uint64_t key, const std::vector<std::pair<uint32_t, uint32_t>> &verts,
+                          const std::vector<std::pair<uint64_t, uint64_t>> &edges) {
+  overlap_known_.erase(std::remove_if(overlap_known_.begin(), overlap_known_.end(), [&](const OverlapKnown &k) { return k.key == key; }),
+                       overlap_known_.end());
+  overlap_known_.push_back({key, verts, edges});
+  if (overlap_known_.size() > 4) overlap_known_.erase(overlap_known_.begin());
+}
+
+/* A worker's check: kept by what it checked either way (an undo may come back to it), shown only if it is of the mesh
+ * as it is now. One worker at a time: if the mesh changed while it ran, the next refresh starts one for the new mesh. */
+void Editor::overlap_take_job(bool wait) {
+  if (!overlap_job_.valid()) return;
+  if (!wait && overlap_job_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+  const uint64_t key = overlap_job_key_;
+  overlap_job_key_ = 0;
+  meshops::OverlapIndex idx;
+  try {
+    idx = overlap_job_.get();
+  } catch (const std::exception &e) {  // (out of memory on a huge mesh: no rings until the mesh changes, no retry each frame)
+    Log::warn("The overlap check stopped: %s", e.what());
+    return;
+  }
+  overlap_keep(key, idx.verts, idx.edge_pairs);
+  ui_.redraw = true;
+  overlap_index_ = std::move(idx);  // (a base for a local check even when superseded: a drag since moved a few vertices)
+  if (key != overlap_.key) {  // (superseded: look again - a known answer, a local check from this one, or a new worker)
+    overlap_.mesh = nullptr;
+    overlap_.key = 0;
+    return;
+  }
+  overlap_.verts = overlap_index_.verts;
+  overlap_.edges = overlap_index_.edge_pairs;
+}
+
+/* Task 0108 (ADR 0040), in order: the answer already known for this geometry; a local check after only positions moved;
+ * a full check (fast and parallel); past overlap_background_from_ vertices the full check on a worker. */
+void Editor::overlap_refresh(bool wait) {
+  overlap_take_job(wait);
+  if (overlap_pending()) {  // (the run loop sleeps between events: wake to take the answer)
+    const double wake = ui_.time + 0.05;
+    ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, wake) : wake;
+  }
   GameObject *g = edit_mode_ ? edit_object() : nullptr;
   const Mesh *m = g && edit_mesh_ptr() ? edit_mesh_ptr()->get() : nullptr;
   if (!m) {
-    overlap_ = OverlapCache{};
+    overlap_.mesh = nullptr, overlap_.key = 0;
+    overlap_.verts.clear(), overlap_.edges.clear();
     return;
   }
   if (overlap_.mesh == m && overlap_.version == m->version && overlap_.obj == g->id) return;
+  ProfileScope prof{prof_.ms_overlap, {}};
   overlap_.mesh = m;
   overlap_.version = m->version;
   overlap_.obj = g->id;
-  overlap_.verts.clear();
-  overlap_.edges.clear();
-  if (m->vert_count() > 200000) return;  // too big to check on every change
-  overlap_.verts = meshops::overlapping_vertices(*m, overlap_eps_);
-  overlap_.edges = meshops::overlapping_edges(*m, overlap_eps_);
+  const float eps = meshops::overlap_eps(*m, overlap_eps_);
+  const uint64_t key = overlap_key(*m, eps);
+  if (key == overlap_.key) {  // (the same geometry in a new copy: a selection that copied the mesh)
+    prof_.overlap_reused++;
+    return;
+  }
+  overlap_.key = key;
+  for (size_t i = 0; i < overlap_known_.size(); i++) {
+    if (overlap_known_[i].key != key) continue;
+    std::rotate(overlap_known_.begin() + (std::ptrdiff_t)i, overlap_known_.begin() + (std::ptrdiff_t)i + 1, overlap_known_.end());  // (used last: kept longest)
+    overlap_.verts = overlap_known_.back().verts, overlap_.edges = overlap_known_.back().edges;
+    prof_.overlap_reused++;
+    return;
+  }
+  /* (Up to an eighth of the vertices moved; past the worker's threshold a few thousand, so a release stays quick.) */
+  const size_t max_moved = m->vert_count() >= overlap_background_from_ ? 4096 : std::max<size_t>(64, m->vert_count() / 8);
+  if (meshops::overlap_check_local(*m, eps, overlap_index_, max_moved)) {
+    overlap_.verts = overlap_index_.verts, overlap_.edges = overlap_index_.edge_pairs;
+    prof_.overlap_local++;
+    overlap_keep(key, overlap_.verts, overlap_.edges);
+    return;
+  }
+  overlap_.verts.clear(), overlap_.edges.clear();  // (until the new answer: never rings for the geometry before)
+  if (m->vert_count() >= overlap_background_from_ && !wait) {
+    overlap_start_job(key, eps);
+    return;
+  }
+  prof_.overlap_checks++;
+  meshops::overlap_check(*m, eps, overlap_index_);
+  overlap_.verts = overlap_index_.verts, overlap_.edges = overlap_index_.edge_pairs;
+  overlap_keep(key, overlap_.verts, overlap_.edges);
+}
+
+/* The full check of the edited mesh on a worker. While one runs on an older mesh, nothing starts and the main thread
+ * doesn't wait: taking that one's answer looks again (overlap_take_job). */
+void Editor::overlap_start_job(uint64_t key, float eps) {
+  if (overlap_job_.valid()) return;
+  MeshPtr held = *edit_mesh_ptr();  // (copy-on-write: never written while held)
+  /* Its caches made here, so the worker only reads them while this thread may read them too. */
+  (void)held->edge_cache();
+  (void)held->topology_serial();
+  overlap_job_key_ = key;
+  overlap_job_ = std::async(std::launch::async, [held, eps, delay = overlap_worker_delay_ms_] {
+    if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));  // (tests)
+    meshops::OverlapIndex idx;
+    JobSystem::global().run_background([&] { meshops::overlap_check(*held, eps, idx); });
+    return idx;
+  });
+  prof_.overlap_background++;
+  const double wake = ui_.time + 0.05;
+  ui_.next_wakeup = ui_.next_wakeup > 0 ? std::min(ui_.next_wakeup, wake) : wake;
+}
+
+bool Editor::overlap_current() {
+  if (!interacting()) {
+    overlap_refresh();
+    return true;
+  }
+  GameObject *g = edit_mode_ ? edit_object() : nullptr;
+  const Mesh *m = g && edit_mesh_ptr() ? edit_mesh_ptr()->get() : nullptr;
+  return m && overlap_.mesh == m && overlap_.version == m->version && overlap_.obj == g->id;
 }
 
 /* Yellow rings on vertices lying on top of each other, magenta lines on edges that do. */
 void Editor::draw_overlap_overlay(const Recti &view) {
   if (!overlap_show_ || !edit_mode_) return;
-  if (drag_ == Drag::Gizmo || xf_.active) return;  // not re-checked on every frame of a drag
-  overlap_refresh();
+  if (!overlap_current()) return;  // a drag is changing the mesh: not re-checked every frame (290 ms on 50k faces)
   GameObject *g = edit_object();
   if (!g || (overlap_.verts.empty() && overlap_.edges.empty())) return;
   const Mesh &m = **edit_mesh_ptr();
@@ -289,7 +410,7 @@ void Editor::draw_overlap_overlay(const Recti &view) {
 }
 
 size_t Editor::overlap_select() {
-  overlap_refresh();
+  overlap_refresh(true);  // (a worker's check waited for: the selection needs it)
   if (!edit_mode_ || !edit_object()) return 0;
   const Mesh &m = **edit_mesh_ptr();
   vert_sel_.assign(m.vert_count(), 0);
@@ -312,7 +433,7 @@ size_t Editor::overlap_select() {
 }
 
 size_t Editor::overlap_merge() {
-  overlap_refresh();
+  overlap_refresh(true);
   if (!edit_mode_ || !edit_object() || overlap_.verts.empty()) {
     if (!overlap_.edges.empty()) Log::warn("The overlapping edges have no doubled vertices to weld: select them and use Dissolve or Merge");
     return 0;
@@ -321,8 +442,7 @@ size_t Editor::overlap_merge() {
   Mesh &m = *mesh_make_mutable(mp);
   std::vector<uint8_t> sel(m.vert_count(), 0);
   for (auto &p : overlap_.verts) sel[p.first] = sel[p.second] = 1;
-  float eps = overlap_eps_;
-  if (!(eps > 0)) eps = 1e-5f * std::max(1e-3f, length(m.bounds().extent()));
+  const float eps = meshops::overlap_eps(m, overlap_eps_);  // (the check's own: of the finite points only)
   const size_t n = meshops::merge_by_distance_selected(m, eps * 1.01f, sel);
   m.touch();
   vert_sel_.assign(m.vert_count(), 0);
@@ -335,14 +455,14 @@ size_t Editor::overlap_merge() {
 
 void Editor::draw_overlap_panel(ui::Layout &lay) {
   auto &u = ui_;
-  overlap_refresh();
+  overlap_current();  // (during a drag the panel shows what was found before it)
   if (!edit_mode_ || !edit_object()) {
     u.label(lay.row(), "Edit a mesh (Tab) to see overlapping vertices and edges.", u.theme.text_dim);
     return;
   }
   Recti r = lay.row();
-  u.label({r.x + u.px(4), r.y, r.w - u.px(8), r.h},
-          strprintf("%zu overlapping vertex pair(s), %zu overlapping edge pair(s)", overlap_.verts.size(), overlap_.edges.size()),
+  const std::string found = strprintf("%zu overlapping vertex pair(s), %zu overlapping edge pair(s)", overlap_.verts.size(), overlap_.edges.size());
+  u.label({r.x + u.px(4), r.y, r.w - u.px(8), r.h}, overlap_pending() ? std::string("Checking...") : found,
           overlap_.verts.empty() && overlap_.edges.empty() ? u.theme.text_dim : u.theme.text);
   Recti b = lay.row(u.row_h() + u.px(2));
   const int bw = (b.w - u.px(12)) / 3;
