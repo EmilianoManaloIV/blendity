@@ -275,10 +275,11 @@ void destroy_window(Window *w) {
   delete w;
 }
 
-void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) {
+void poll_events(Window *w, std::vector<Event> &out, int timeout_ms) { poll_events_for(w, out, timeout_ms / 1000.0); }
+
+void poll_events_for(Window *w, std::vector<Event> &out, double seconds) {
   @autoreleasepool {
-    NSDate *until = (timeout_ms > 0 && w->queue.empty()) ? [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0]
-                                                         : [NSDate distantPast];
+    NSDate *until = (seconds > 0.0 && w->queue.empty()) ? [NSDate dateWithTimeIntervalSinceNow:seconds] : [NSDate distantPast];
     for (;;) {
       NSEvent *e = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:until inMode:NSDefaultRunLoopMode dequeue:YES];
       if (!e) break;
@@ -307,6 +308,13 @@ void present(Window *w, const uint32_t *pixels, int width, int height) {
     CGColorSpaceRelease(cs);
   }
 }
+
+/* The layer takes a whole picture: the changed rows go with the rest, once. */
+void present_rows(Window *w, const uint32_t *pixels, int width, int height, const std::vector<std::pair<int, int>> &rows) {
+  if (!rows.empty()) present(w, pixels, width, height);
+}
+
+void *native_handle(Window *) { return nullptr; }  // (task 0095's swapchain spike is Windows only)
 
 void get_framebuffer_size(Window *w, int &width, int &height) {
   NSRect b = [w->view bounds];

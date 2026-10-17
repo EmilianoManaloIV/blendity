@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -1503,24 +1504,167 @@ const char *PathTracer::ray_backend() const { return use_embree_ ? "Embree" : "B
 
 #ifdef BL_WITH_OIDN
 namespace {
-struct OidnState {
-  std::mutex mutex;
+/* Task 0094: OIDN's CPU device and, when its CUDA or HIP module finds a card, a GPU device. Each opens once. A GPU
+ * that fails is set aside until Denoise Device changes; the CPU is the reference and the fallback. */
+struct OidnDevice {
   oidn::DeviceRef device;
   bool tried = false, ok = false;
-  bool init() {
-    if (tried) return ok;
-    tried = true;
-    device = oidn::newDevice(oidn::DeviceType::CPU);
-    device.commit();
-    const char *msg = nullptr;
-    ok = device.getError(msg) == oidn::Error::None;
-    if (!ok) Log::warn("OpenImageDenoise unavailable: %s", msg ? msg : "unknown error");
-    return ok;
+  bool on_gpu = false;
+  std::string label;  // for the status line (kept for the program's life: denoise_backend returns its c_str)
+  /* Kept between frames of one size, as Cycles keeps its denoiser: a new filter loads its weights and plans its work
+   * again, and a GPU allocates its buffers again. */
+  oidn::FilterRef filter;
+  oidn::BufferRef color, albedo, normal, output;
+  int w = 0, h = 0;
+};
+
+bool commit_device(oidn::DeviceRef &d, const char *where) {
+  d.commit();
+  const char *msg = nullptr;
+  if (d.getError(msg) == oidn::Error::None) return true;
+  Log::warn("OpenImageDenoise can't run on the %s: %s", where, msg ? msg : "unknown error");
+  return false;
+}
+
+const char *oidn_type_name(oidn::DeviceType t) {
+  switch (t) {
+    case oidn::DeviceType::CUDA: return "CUDA";
+    case oidn::DeviceType::HIP: return "HIP";
+    case oidn::DeviceType::SYCL: return "SYCL";
+    case oidn::DeviceType::Metal: return "Metal";
+    default: return "CPU";
+  }
+}
+
+/* The first physical device OIDN lists that isn't the CPU, or -1. */
+int oidn_first_gpu() {
+  const int n = oidn::getNumPhysicalDevices();
+  for (int i = 0; i < n; i++)
+    if (oidn::PhysicalDeviceRef(i).get<oidn::DeviceType>("type") != oidn::DeviceType::CPU) return i;
+  return -1;
+}
+
+/* Denoise Device GPU, or Auto unless BLENDITY_DENOISE_DEVICE=cpu (the unit tests: this machine and CI agree). */
+bool oidn_wants_gpu(int setting) {
+  if (setting == 1) return false;
+  if (setting == 2) return true;
+  const char *e = std::getenv("BLENDITY_DENOISE_DEVICE");
+  return !(e && to_lower(e) == "cpu");
+}
+
+struct OidnState {
+  std::mutex mutex;
+  OidnDevice cpu, gpu;
+  bool gpu_failed = false;
+  int failed_setting = -1;  // the Denoise Device the GPU failed under (choosing another tries it again)
+  bool fail_gpu_for_test = false;
+  size_t fallbacks = 0;
+
+  bool open_cpu() {
+    if (cpu.tried) return cpu.ok;
+    cpu.tried = true;
+    cpu.label = "OpenImageDenoise";
+    cpu.device = oidn::newDevice(oidn::DeviceType::CPU);
+    cpu.ok = commit_device(cpu.device, "CPU");
+    return cpu.ok;
+  }
+  bool open_gpu() {
+    if (gpu.tried) return gpu.ok;
+    gpu.tried = true;
+    const int id = oidn_first_gpu();
+    if (id < 0) return false;
+    const oidn::PhysicalDeviceRef pd(id);
+    gpu.label = strprintf("OpenImageDenoise, %s: %s", oidn_type_name(pd.get<oidn::DeviceType>("type")),
+                          pd.get<std::string>("name").c_str());
+    gpu.device = oidn::newDevice(id);
+    gpu.on_gpu = true;
+    gpu.ok = commit_device(gpu.device, "GPU");
+    if (!gpu.ok) fallbacks++;  // (a card OIDN lists but can't open: the CPU denoises, as after any GPU error)
+    return gpu.ok;
+  }
+  bool use_gpu(int setting) {
+    if (setting != failed_setting) gpu_failed = false;
+    if (gpu_failed || !oidn_wants_gpu(setting)) return false;
+    return open_gpu();
+  }
+  void gpu_fell_back(int setting) {
+    Log::warn("OpenImageDenoise: the GPU failed, denoising on the CPU");
+    gpu_failed = true;
+    failed_setting = setting;
+    fallbacks++;
   }
 };
+
 OidnState &oidn_state() {
   static OidnState s;
   return s;
+}
+
+/* Drops a device's filter and buffers (the device stays): after an error, before a new size, and before a GPU
+ * render uploads its scene (the card's memory is the path tracer's then). */
+void oidn_drop(OidnDevice &d) {
+  d.filter = nullptr;
+  d.color = d.albedo = d.normal = d.output = nullptr;
+  d.w = d.h = 0;
+}
+
+/* The device's filter and buffers for a W x H frame (made again only when the size changes; the old ones are
+ * dropped first, so a card never holds both). A GPU's buffers live in its own memory: OIDN's default on CUDA is
+ * managed memory, which Windows pages across the bus on every run (a 1080p denoise took 220 ms on an RTX 4070
+ * SUPER, 15 ms in device memory). False if OIDN couldn't make them. */
+bool oidn_prepare(OidnDevice &d, int W, int H) {
+  if (d.filter && d.w == W && d.h == H) return true;
+  oidn_drop(d);
+  const size_t bytes = (size_t)W * H * 3 * sizeof(float);
+  const oidn::Storage storage = d.on_gpu ? oidn::Storage::Device : oidn::Storage::Host;
+  d.color = d.device.newBuffer(bytes, storage);
+  d.albedo = d.device.newBuffer(bytes, storage);
+  d.normal = d.device.newBuffer(bytes, storage);
+  d.output = d.device.newBuffer(bytes, storage);
+  d.filter = d.device.newFilter("RT");
+  d.filter.setImage("color", d.color, oidn::Format::Float3, W, H);
+  d.filter.setImage("albedo", d.albedo, oidn::Format::Float3, W, H);
+  d.filter.setImage("normal", d.normal, oidn::Format::Float3, W, H);
+  d.filter.setImage("output", d.output, oidn::Format::Float3, W, H);
+  d.filter.set("hdr", true);
+  d.filter.commit();
+  const char *msg = nullptr;
+  if (d.device.getError(msg) != oidn::Error::None) {
+    Log::warn("OpenImageDenoise can't denoise %dx%d on the %s: %s", W, H, d.on_gpu ? "GPU" : "CPU", msg ? msg : "unknown error");
+    oidn_drop(d);
+    return false;
+  }
+  d.w = W;
+  d.h = H;
+  return true;
+}
+
+/* One RT filter run (Cycles' inputs: noisy HDR colour, albedo, normal). False on any error, which also drops the
+ * filter and buffers (the next frame makes them again). `fail` is the tests' stand-in for an error after the run. */
+bool oidn_run(OidnDevice &d, const std::vector<float> &color, const std::vector<float> &albedo,
+              const std::vector<float> &normal, std::vector<float> &out, int W, int H, bool fail = false) {
+  if (!oidn_prepare(d, W, H)) return false;
+  const size_t bytes = out.size() * sizeof(float);
+  d.color.write(0, bytes, color.data());
+  d.albedo.write(0, bytes, albedo.data());
+  d.normal.write(0, bytes, normal.data());
+  d.filter.execute();
+  d.output.read(0, bytes, out.data());
+  const char *msg = nullptr;
+  if (d.device.getError(msg) == oidn::Error::None && !fail) return true;
+  Log::warn("OpenImageDenoise failed on the %s: %s", d.on_gpu ? "GPU" : "CPU", fail ? "(a test's failure)" : msg ? msg : "unknown error");
+  oidn_drop(d);
+  return false;
+}
+
+/* The frame on the GPU when Denoise Device and the card allow; false sends it to the CPU (an error counts a
+ * fallback and sets the GPU aside until the setting changes). */
+bool oidn_try_gpu(OidnState &s, int setting, const std::vector<float> &color, const std::vector<float> &albedo,
+                  const std::vector<float> &normal, std::vector<float> &out, int W, int H) {
+  if (!s.use_gpu(setting)) return false;
+  if (oidn_run(s.gpu, color, albedo, normal, out, W, H, s.fail_gpu_for_test)) return true;
+  s.gpu_fell_back(setting);
+  return false;
 }
 }  // namespace
 #endif
@@ -1529,14 +1673,64 @@ bool PathTracer::oidn_available() {
 #ifdef BL_WITH_OIDN
   OidnState &s = oidn_state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  return s.init();
+  return s.open_cpu();
 #else
   return false;
 #endif
 }
 
+bool PathTracer::oidn_gpu_available() {
+#ifdef BL_WITH_OIDN
+  OidnState &s = oidn_state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  return s.open_gpu();
+#else
+  return false;
+#endif
+}
+
+size_t PathTracer::oidn_gpu_fallbacks() {
+#ifdef BL_WITH_OIDN
+  OidnState &s = oidn_state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  return s.fallbacks;
+#else
+  return 0;
+#endif
+}
+
+void PathTracer::oidn_release_gpu() {
+#ifdef BL_WITH_OIDN
+  OidnState &s = oidn_state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  oidn_drop(s.gpu);
+#endif
+}
+
+bool PathTracer::oidn_gpu_holds_buffers() {
+#ifdef BL_WITH_OIDN
+  OidnState &s = oidn_state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  return (bool)s.gpu.filter;
+#else
+  return false;
+#endif
+}
+
+void PathTracer::oidn_fail_gpu_for_test(bool on) {
+#ifdef BL_WITH_OIDN
+  OidnState &s = oidn_state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  s.fail_gpu_for_test = on;
+  s.gpu_failed = false;
+  s.failed_setting = -1;
+#else
+  (void)on;
+#endif
+}
+
 const char *PathTracer::denoise_backend() const {
-  return settings_.use_oidn && oidn_available() ? "OpenImageDenoise" : "A-Trous";
+  return settings_.use_oidn && oidn_available() ? oidn_label_ : "A-Trous";
 }
 
 std::vector<float> PathTracer::denoised_oidn() const {
@@ -1547,32 +1741,27 @@ std::vector<float> PathTracer::denoised_oidn() const {
   /* Inputs as Cycles passes them: noisy HDR colour, first-hit albedo and
    * normal (the "prefiltered" auxiliary passes are noise-free enough here). */
   std::vector<float> color(n * 3), albedo(n * 3), normal(n * 3), out(n * 3);
-  for (size_t i = 0; i < n; i++) {
-    Vec3 c = accum_[i] * inv, a = albedo_[i] * inv, nn = normal_[i] * inv;
-    a = Vec3(saturate(a.x), saturate(a.y), saturate(a.z));
-    if (length_sq(nn) > 0) nn = normalize(nn);
-    for (int k = 0; k < 3; k++) {
-      color[i * 3 + k] = c[k];
-      albedo[i * 3 + k] = a[k];
-      normal[i * 3 + k] = nn[k];
+  /* Each pixel on its own: in parallel (task 0094: 20 ms of a 1080p denoise on one thread). */
+  JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
+    for (int64_t i = b; i < e; i++) {
+      Vec3 c = accum_[i] * inv, a = albedo_[i] * inv, nn = normal_[i] * inv;
+      a = Vec3(saturate(a.x), saturate(a.y), saturate(a.z));
+      if (length_sq(nn) > 0) nn = normalize(nn);
+      for (int k = 0; k < 3; k++) {
+        color[i * 3 + k] = c[k];
+        albedo[i * 3 + k] = a[k];
+        normal[i * 3 + k] = nn[k];
+      }
     }
-  }
+  });
   OidnState &s = oidn_state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  if (!s.init()) return {};
-  oidn::FilterRef f = s.device.newFilter("RT");
-  f.setImage("color", color.data(), oidn::Format::Float3, W, H);
-  f.setImage("albedo", albedo.data(), oidn::Format::Float3, W, H);
-  f.setImage("normal", normal.data(), oidn::Format::Float3, W, H);
-  f.setImage("output", out.data(), oidn::Format::Float3, W, H);
-  f.set("hdr", true);
-  f.commit();
-  f.execute();
-  const char *msg = nullptr;
-  if (s.device.getError(msg) != oidn::Error::None) {
-    Log::warn("OpenImageDenoise failed: %s", msg ? msg : "unknown error");
-    return {};
+  if (oidn_try_gpu(s, settings_.denoise_device, color, albedo, normal, out, W, H)) {
+    oidn_label_ = s.gpu.label.c_str();
+    return out;
   }
+  if (!s.open_cpu() || !oidn_run(s.cpu, color, albedo, normal, out, W, H)) return {};
+  oidn_label_ = s.cpu.label.c_str();
   return out;
 #else
   return {};
@@ -1689,6 +1878,7 @@ static uint64_t level_bytes(const Texture &t, size_t lv) {
 }
 
 bool PathTracer::build_gpu_scene_fit(gpu::Scene &s, uint64_t memory_mb, int *skipped, bool with_frame) const {
+  oidn_release_gpu();  // (task 0094: the denoiser's buffers leave the card before the scene is fitted to it)
   if (const char *e = std::getenv("BLENDITY_GPU_VRAM_MB"))  // a smaller card's memory, for testing on a bigger one
     if (std::atoll(e) > 0) memory_mb = memory_mb ? std::min<uint64_t>(memory_mb, (uint64_t)std::atoll(e)) : (uint64_t)std::atoll(e);
   /* The accumulation and output buffers come out of the same memory: about 64 bytes a pixel (a bake has its own). */

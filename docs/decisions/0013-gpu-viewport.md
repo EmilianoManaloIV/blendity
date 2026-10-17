@@ -50,6 +50,41 @@ table is in task 0015.
 The recommendation is to keep the views on the CPU and look next at the per-pixel passes: voxel GI and
 probe sampling, about 12–15 ms each at 1080p.
 
+## Amendment (task 0095, 2026-10-15): spike 2 says go
+Task 0015's spike stood in for a GPU view with the path tracer: one sample of primary rays, its float buffers read back.
+Task 0095 measured what a viewport does instead:
+- a Vulkan rasteriser (`gpu::Raster`, `render/gpu_raster.*`) draws the editor scene's content (200 icospheres, a floor, a
+  50k-face sphere) at 1080p: a shadow pass, a G-buffer, and full-screen lighting with the CPU's formulas;
+- the picture then goes (A) back into CPU memory, or (B) to the window through a swapchain, with the UI canvas's
+  changed rows uploaded.
+
+Two runs on this machine, within 3 % of each other (`blendity_stress --only gpu_raster`):
+
+| | CPU, one 1080p view (32 threads) | RTX 4070 SUPER | RTX 3060 Ti |
+|---|---|---|---|
+| GPU work: shadow / G-buffer / lighting | - | 0.05 / 0.15 / 0.05 ms | 0.08-0.09 / 0.21-0.24 / 0.09-0.10 ms |
+| rendered, waited for | 14.33-14.56 ms | 0.37 ms | 0.50-0.57 ms |
+| (A) plus colour, depth and ids read back | - | 2.67-2.70 ms (0.18-0.19x) | 5.71-5.78 ms (0.40x) |
+| a moved object / a 50k-face drag, (A) | 14.3-14.6 ms | 2.62-2.64 / 2.78-2.79 ms | 5.64-5.68 / 6.06-6.10 ms |
+| (B) rendered and shown in a window (the UI's changed rows up) | 16.52-16.77 ms (drawn, its rows presented) | 0.52 ms (0.03x) | 2.22 ms (0.13x) |
+| picture vs the CPU's (1.33 M covered pixels away from edges) | - | mean 0.32 / 255, 99.8 % within 3 / 255, ids 100 % | the same |
+
+- **The verdict is go on both cards, both ways:** two views at most 0.50x the CPU's on the slower card (0.40x for (A),
+  0.13x for (B)).
+- **Where the comparison is harder on the GPU than a viewport would be:** the GPU draws its shadow map every frame (the
+  CPU's is cached). (A) reads back colour, depth and ids every frame, where a viewport would read ids only on a click.
+- **Where it is easier:** (B)'s timing ends at the GPU's copies. The system's own work after the present (the
+  compositor's blit, and a copy to the display's card for the RTX 3060 Ti) isn't timed, where the CPU's GDI copy is.
+  Even three times 2.2 ms stays under the bar.
+- **Where the time goes:** the GPU's own work is under half a millisecond. What remains of (A) is reading back three
+  1080p planes (24 MB a frame over PCIe). (B) reads nothing back.
+- **The laptop (estimated, not measured):** Iris Xe has about 1/7 of the RTX 3060 Ti's FP32 rate and 1/6 of its
+  memory bandwidth, so about 2.5 ms of GPU work. Its read-back is a copy within shared memory. The CPU view on the
+  laptop setting (`--laptop`) is 40.1 ms raw, about 56 ms on the laptop.
+
+**What follows:** a GPU viewport is worth building (the plan's next tasks), with the user's approval as this ADR
+requires. The CPU renderer stays the reference and the fallback.
+
 ## Consequences
 - **No GPU code is written until a spike says go** and the user approves task 0015's spec.
 - **Where the GPU view wouldn't exist:** macOS and Windows on ARM keep the CPU views, as Blender's

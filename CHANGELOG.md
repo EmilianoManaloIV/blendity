@@ -2,6 +2,792 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-16 (round 133): entering Edit Mode in about one frame: the render mesh built on every thread (task 0109)
+
+**Asked:** pass 12 continued (the plan the user approved: entering Edit Mode in about one frame).
+
+**Changed**
+- **The full build of a mesh's render cache runs on every thread,** the same to the bit as the serial build (kept for
+  the tests): corners grouped by vertex, each sharing with the first earlier corner of the same normal and UV bits;
+  render vertices numbered by a prefix sum in corner order; triangles per range of faces. A vertex with many corners
+  (a pole, a fan's centre) is sorted rather than compared pairwise. The 50k-face flat cache: 42 -> 6.6 ms
+  (development machine), 33 -> 5.4 ms (laptop setting). Blender threads its tessellation and draw extraction the same
+  way.
+- The sharing rule is exact in both builds: the same bits, never a NaN (the serial build's `==` let `/fp:fast` and
+  its hash's buckets decide NaN and -0 / +0).
+- A mesh with a corner past its vertices draws nothing instead of building from memory past them.
+- **A full overlap check predicted past about a frame goes to the worker** (the rate learned from this machine's
+  checks), not only past 200,000 vertices: entering Edit Mode on a 50k-face mesh does no check on the main thread,
+  the rings arrive a moment later. The learned rate is held so a few stalled checks can't send every later one there.
+
+**Pass 12** (laptop setting, `--laptop --quality low --only editor_render`, ms):
+
+| Laptop setting, 50k-face sphere, ms | CPU before | 0108 | 0109 | GPU before | 0108 | 0109 |
+|---|---|---|---|---|---|---|
+| Entering Edit Mode, caches cold | 421 | 80 | 39 | 360 | 70 | 20 |
+| of it the overlap check on the main thread | 360 | 24 | 0.5 | 308 | 23 | 0.6 |
+| of it the render mesh's full build | 37 | 33 | 5.4 | 33 | 32 | 5.7 |
+| Entering again, nothing changed | 24 | 21 | 32 | 11 | 5 | 6 |
+| Extrude three faces | 466 | 179 | 118 | 487 | 163 | 115 |
+| Undo after it | 337 | 27 | 38 | 334 | 23 | 30 |
+| Select More after the undo | 208 | 56 | 68 | 213 | 55 | 62 |
+
+Entering Edit Mode now costs about one frame: with the views on the CPU, entering again with nothing changed is
+32 ms. The extrude's and Select More's rest is the operators themselves (left for later).
+
+**Checked**
+- New tests (round 133): the threaded build equals the serial one bit for bit on 10 meshes (smooth, by angle, sharp
+  edges and a seam, two materials, flat, degenerate with a NaN, a cylinder, a 3,000-segment cone's pole, no UVs,
+  empty), both caches; a drag's in-place update and the tangents after it equal the serial build's; the 50k-face flat
+  cache builds faster threaded (asserted with more than one thread); entering Edit Mode on a 50k-face mesh checks on
+  the worker, and with no budget on the main thread, the same rings either way; stalled checks don't send a
+  5,000-vertex mesh's check to the worker.
+- Two Opus reviews; every finding fixed (see task 0109's spec).
+- Unit checks: Windows 10,601, 0 failed (751 tests); the whole suite in render-cache verify mode: 10,602,
+  0 failed, 0 stale pictures. Linux with libraries: 10,334, 0 failed. Sanitizer build: 10,225, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull` (26,620 operations, 0 problems), `modifiers_ngon` (11,514 operations, 0 problems),
+  `editor_render`: no change in problem counts.
+
+## 2026-10-16 (round 132): Edit Mode's overlap check reused, fast and local; pass 12 measured (tasks 0107, 0108, ADR 0040)
+
+**Asked:** "Look for performance gains in edit mode; compare to how blender implements their edit mode." The user chose
+entering Edit Mode as the scope, "Background + local" for the overlap check, and then asked for "the most optimized
+way".
+
+**Measured first (task 0107):** new `editor_render` rows for the frames that aren't drags: entering Edit Mode with the
+mesh's caches cold, entering again, an extrude, an undo, a selection after it. On the 50k-face sphere the overlap
+check (the yellow rings and magenta lines) was most of every stall: 310-360 ms on the main thread.
+
+**Changed (task 0108, ADR 0040)**
+- **Answers kept by what was checked:** the topology, eps and every position. An undo or redo to checked geometry,
+  re-entering Edit Mode and a selection that copied the mesh take the answer at once (the last four are kept).
+- **A check about 15x faster** (21-24 ms on 50k faces, from 315-575 ms), on every thread, finding exactly the pairs the
+  old check finds (kept as the reference the tests compare with).
+- **After a drag only what moved is checked again:** the moved vertices and the edges at them.
+- **Past 200,000 vertices the check runs beside the editor** ("Checking..." in the panel, no rings until the answer
+  for the mesh as it is now). The old cap, no check at all past 200,000 vertices, is gone.
+- Mesh topology serials come from one counter for all meshes, so two copies changed apart never share one.
+- A vertex at infinity no longer makes the check's distance infinite (every vertex was a pair, and Merge Overlapping
+  then refused to weld anything); grid cells are held in range for meshes far from the origin; a line to a point at
+  infinity is no longer drawn from NaN rows (found by the sanitizer job).
+
+**Pass 12 so far** (laptop setting, `--laptop --quality low --only editor_render`, quiet machine):
+
+| Laptop setting, 50k-face sphere, ms | CPU before | CPU after | GPU before | GPU after |
+|---|---|---|---|---|
+| Entering Edit Mode, caches cold (of it the overlap check) | 421 (360) | 80 (24) | 360 (308) | 70 (23) |
+| Entering again, nothing changed | 24 | 21 | 11 | 5 |
+| Extrude three faces (the overlap check) | 466 (316) | 179 (27) | 487 (336) | 163 (26) |
+| Undo after it (the overlap check) | 337 (311) | 27 (0.4) | 334 (311) | 23 (0.4) |
+| Select More after the undo (the overlap check) | 208 (153) | 56 (0.2) | 213 (155) | 55 (0.2) |
+
+The rest of the extrude is its render meshes (two full builds, 54 ms: task 0109 threads them) and the operator itself.
+
+**Checked**
+- New tests (round 132): the fast check equals the reference on a cube, planted doubles, a 50k-face sphere, an empty
+  mesh, one vertex, wires only, infinities, a mesh far out, random soups and wires near the 512-cell limit (at least
+  3x faster on 50k faces in optimized builds with 8 threads or more); topology serials of diverging copies differ; the
+  local check equals a full check through random drags and refuses or equals it near the 512-cell limit; in the
+  editor a drag's release is local, a selection that copied the mesh and an undo reuse the answer; on a worker the
+  editor doesn't wait, every frame shows nothing or the current geometry's pairs, a mesh changed meanwhile gets its own
+  answer and an undo to the superseded geometry reuses its; Merge welds only the found doubles beside a vertex at
+  infinity.
+- Two Opus reviews; every finding fixed (see task 0108's spec).
+- Unit checks: Windows 10,591, 0 failed (746 tests); the whole suite in render-cache verify mode: 10,592, 0 failed,
+  0 stale pictures. Linux with libraries: 10,324, 0 failed. Sanitizer build: 10,216 checks, its one failure the
+  speed ratio (2.7x in a debug sanitizer build), now asserted only in optimized builds; the overlap tests again under
+  the sanitizers: 85 checks, 0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale
+  pictures.
+- Stress: `editor`, `pushpull` (26,620 operations, 0 problems), `modifiers_ngon` (11,514 operations, 0 problems),
+  `editor_render`: no change in problem counts.
+
+## 2026-10-16 (round 131): performance pass 11 written up (task 0106)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed** (documentation only)
+- PERFORMANCE's pass 11 opens with one table, before and after, on both paths; the targets met and missed, the
+  costs, what still draws on the CPU, and the next candidates.
+- ADR 0026 notes that the laptop setting's 30 fps target for big Edit Mode drags is now met on the CPU path too.
+- README's rendering paragraph mentions the views drawn on the GPU.
+
+**Checked**
+- No code changed: the suite, verify mode and the stress sections stand as round 130 ran them.
+
+## 2026-10-16 (round 130): GPU Compute traces several samples a dispatch; OptiX measured again (task 0105, ADR 0037 note)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed**
+- **The GPU path tracer's kernel traces up to 8 samples a dispatch,** each with its own random numbers as before,
+  summed in registers. The accumulation and the denoiser's albedo, normal and depth planes (and a transparent film's
+  coverage) are read and written once for them, instead of once a sample. Baking too.
+- **GPU Compute, `--only gpu_optix`, samples a second:**
+  - RTX 4070 SUPER 538-574 -> 592-611;
+  - RTX 3060 Ti 279-281 -> 284-286.
+
+  A small gain: the memory traffic was a smaller share of a sample than estimated.
+- **OptiX measured again:** 1.62-1.69x on the 4070 SUPER, 2.07-2.12x on the 3060 Ti. Still over ADR 0037's 1.5x, so
+  still a go as an upper bound. A full OptiX device (with GPU Compute's shading) is the user's decision, as a task of
+  its own.
+- The kernel's last source part is split before `main()` (MSVC's 16 KB literal limit was near).
+
+**Checked**
+- New test (round 130): eleven samples in one call (a dispatch of 8, then 3, from sample 3) equal eleven one-sample
+  calls, to 2e-7: colour, the last hit's distance and id, albedo, normal, depth and coverage.
+- The GPU path tracer's tests as they were (225 GPU checks).
+- Unit checks: Windows 10,555, 0 failed (738 tests); the whole suite in render-cache verify mode: 10,556,
+  0 failed, 0 stale pictures. Linux with libraries: 10,288, 0 failed. Sanitizer build: 10,180, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems; `pathtracer` as
+  before.
+
+**Review** (Opus code-reviewer). No correctness bugs: the accumulation's and the planes' meanings are kept, each
+sample keeps its own seed, the pipeline cache is keyed on the kernel's source, and a submission stays near 100 ms.
+Taken: the source split, the test widened to a dispatch's remainder, a non-zero first sample and the coverage plane.
+
+## 2026-10-16 (round 128): the other views catch up on release, and cheaper frames while moving (tasks 0103, 0104, ADR 0039)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks"). In the Blender-ideas plan the user chose "Catch up on
+release" and "Yes, cheaper while moving".
+
+**Changed**
+- **The other views catch up on release (task 0103):**
+  - while you drag or navigate in the Scene view, the Game view and the Camera Preview keep their last picture and
+    draw once when you let go, as Blender's sculpt mode updates its other views when the stroke ends;
+  - Play always draws every frame;
+  - Preferences > Other Views Follow Drags (off) brings the old way back; the console's `views follow on|off`.
+- **Cheaper frames while moving (task 0104, ADR 0039):**
+  - while you drag or orbit, the views drawn on the CPU render the sun's shadow map at half size with the 2 x 2
+    filter, as Blender lowers its viewport's quality while you navigate;
+  - the frame after you stop is exact: the views' picture keys carry the cheap state, so a cheap picture is never
+    reused;
+  - Preferences > Simpler While Moving (on); the console's `views simpler on|off`; the GPU's own map stays whole.
+- **What counts as moving:** only a drag or navigation in the Scene view itself (a gizmo, an orbit, G / R / S,
+  Push/Pull, a modal tool), not any mouse button held anywhere. The frame after a move always draws.
+- **Speed:** the 50k-face Edit Mode drag on the CPU path, laptop setting: 28.3 -> 21.5 ms (the Game view 8.6 -> 0.2
+  ms, the shadow map 3.5 -> 2.3 ms).
+- A Learn section, "Drags that stay quick", with Try its for both switches.
+- The console's `views` command shares the `viewport` branch: MSVC's limit on nested blocks (C1061) was reached.
+
+**Checked**
+- **New tests (round 128):**
+  - during a 10-frame gizmo drag the Game view and the Camera Preview hold 20 pictures between them and render
+    nothing; on release both draw again, and both equal a fresh render; with Follow on they draw every frame;
+  - a gizmo drag in Play holds nothing;
+  - a click in the Hierarchy holds nothing, makes no cheap shadow and draws no view.
+- **New tests (round 129):**
+  - with Simpler While Moving, 6 drag frames take 6 half-size shadow maps and the settled frame is the exact picture,
+    pixel for pixel; off, none;
+  - verify mode finds no stale picture across such a drag.
+- Round 92's shadow-sharing test turns Follow on (it needs the Game view drawing during the drag).
+- Unit checks: Windows 10,538, 0 failed (737 tests); the whole suite in render-cache verify mode: 10,539,
+  0 failed, 0 stale pictures. Linux with libraries: 10,288, 0 failed. Sanitizer build: 10,180, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems.
+
+**Review** (Opus code-reviewer). Fixed:
+- any mouse button down anywhere counted as moving, so a click in the Hierarchy redrew the Scene view twice and
+  softened its shadows; now only a drag in the Scene view counts;
+- a held Camera Preview could show another camera's picture: it is held only for the same camera;
+- the frame after a move always draws;
+- the counter counts only maps that were actually halved;
+- the Play test now drags a gizmo, and the Camera Preview's pixels are compared after release;
+- Try its for Simpler While Moving.
+
+## 2026-10-16 (round 127): Sky / HDRI worlds and toon on the GPU (task 0102)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed**
+- **Sky and HDRI worlds draw on the card.**
+  - The world's map goes into the card's texture store (ADR 0038's sampling, mips and all).
+  - Its irradiance is the CPU's nine spherical-harmonic numbers.
+  - The lighting pass has the CPU's `radiance`, `irradiance` and `specular`, through `dir_to_equirect`'s polynomial
+    atan2 and asin. The background is the world's light through the view transform.
+- **Toon materials and outlines draw on the card.**
+  - `shade_toon` per light (the bands, the shadow colour, the specular spot), the rim, and the flat or normal
+    ambient, as `light_surface` and `light_finish` do.
+  - The G-buffer gains a plane with each pixel's instance, so the lighting pass reads its toon settings.
+  - An outline's inverted hull is always culled, whatever the view's setting.
+- A Sky's map is made anew when its sun changes; the card lets the old one go at once (rotating the sun would have
+  held dozens of float maps there).
+- **Speed:** the textured editor scene with a Sky world on the laptop setting: 22.1 ms with every view fallen back to
+  the CPU, 9.9 ms with all 33 on the card.
+- **Still on the CPU (Preferences says why):** realtime GI, probes and lightmaps, area lights, axis and see-through
+  materials, camera filters.
+- The Learn lesson "The views on the GPU" and the Viewport Device tooltip now say what the card draws; a Try it shows
+  a Sky world on the GPU.
+
+**Checked**
+- **New tests (round 127)**, each skipped without a GPU, compared on the object's own pixels and on the whole view:
+  - **Worlds:** a Sky and an HDRI world, under a rough and a glossy metal sphere. Mean 0.18-0.27 / 255 on the
+    object, 0.13-0.14 on the view, 99.97 % or more within 3. The world's map is checked to reach the card.
+  - **Toon:** two-tone; three bands with a specular spot and a rim; flat ambient off under a Sky; in a slab's shadow;
+    an outline with the view's culling on and off, and mirrored. Mean 0.04-0.28 / 255.
+- Unit checks: Windows 10,509, 0 failed (732 tests); the whole suite in render-cache verify mode: 10,510,
+  0 failed, 0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems; `editor_render`'s textured Sky row draws all its views on
+  the card.
+
+**Review** (Opus code-reviewer). The shading ports match the CPU line for line. Fixed:
+- the Sky's old maps left the card only after 256 calls;
+- the two fallbacks share one helper;
+- the toon settings are cleaned on the CPU (GLSL's clamp of a NaN is undefined);
+- tests for an outline with culling off and mirrored, and for the toon shadow;
+- the lesson gained a question and a Try it for the worlds.
+
+## 2026-10-16 (round 126): textures on the GPU (task 0101, ADR 0038)
+
+**Asked:** pass 11 continued ("Continue all remaining tasks").
+
+**Changed**
+- **Textured materials draw on the card.** With Viewport Device on the GPU, these no longer send the view back to the
+  CPU:
+  - image textures on UVs, Box or Generated mapping, with tiling and offset;
+  - base colour, metallic, roughness, emission and normal maps;
+  - the Checker and Noise procedurals;
+  - several materials on one mesh.
+- **Sampled the CPU's way (ADR 0038).** The card reads the CPU's own mip chain from storage buffers, ports
+  `Texture::sample` (filters, wraps, the level of detail from the next pixel's UVs) and `evaluate_surface`, and turns
+  a back face's normals before the normal map, as the CPU does.
+- **Several materials on one mesh:** its triangles are grouped by material on the card and drawn as one part each.
+- **Textures stay on the card while drawn,** in two arenas that grow and are compacted on the card. A texture too
+  large for the card sends the view to the CPU with the reason, once, not every frame.
+- **Still on the CPU** (Preferences says why): axis materials, live procedural textures, see-through, cutout and toon
+  materials, and Sky / HDRI worlds (toon and the worlds are task 0102).
+- **Speed:** the editor scene with a Checker on its icospheres, laptop setting: 18.0 ms on the CPU, 10.4 ms with all
+  its views on the card (before, all of them fell back).
+- **Costs:**
+  - every vertex on the card is 48 bytes now (UVs and tangents);
+  - a mesh with several materials sends the whole mesh during an Edit Mode drag;
+  - a normal-mapped mesh does too, since every tangent is written again.
+- The procedurals' GLSL is one string shared by the path tracer's kernel and the views (`gpu_glsl.h`).
+
+**Checked**
+- **New tests (round 126)**, each skipped without a GPU:
+  - **Picture match:** 11 features match the CPU on the object's own pixels: mean 0.15-0.69 / 255, 99.1-100 % within
+    3. The features: UV Grid, a plane at a grazing angle (mips), Box, Generated, Checker, Noise, a normal map (which
+    does change the picture: 64,264 pixels), metallic / roughness / emission maps, Closest + Mirror, Linear + Clip,
+    and two materials on one mesh.
+  - **Still on the CPU:** an axis material, a cutout and a live procedural texture send the view there, saying why.
+  - **Texture store:** a 1 x 1 texture, fifty more, most let go, then a big one and a float one: compaction and
+    growth keep the right texels.
+  - **Drag:** an Edit Mode drag on a big textured mesh still sends only what moved.
+- Round 122's fallback test now uses an axis material (procedurals draw on the card).
+- Unit checks: Windows 10,461, 0 failed (730 tests); the whole suite in render-cache verify mode: 10,462,
+  0 failed, 0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems; `pathtracer` (its
+  kernel now takes the shared procedurals) runs as before.
+
+**Review** (Opus code-reviewer). The sampling and the material match the CPU line for line. Fixed:
+- a texture of 4 texels or fewer fit the arena's placeholder, which couldn't be copied from when the arena grew;
+- a texture too large for the card was copied and tried again every frame: the size is checked first, the refusal
+  is remembered, and the levels go straight into the staging buffer;
+- culling is per object, as the CPU's (not per material);
+- a compaction that fails changes nothing;
+- a part past its mesh fails the frame instead of drawing the whole mesh;
+- the slots of a one-material mesh are found without a list;
+- the shared procedurals;
+- tests for the texture store and the live texture.
+
+## 2026-10-16 (round 125): the Edit Mode cage on the GPU, and the Scene view at full size there (task 0100, ADR 0036 note)
+
+**Asked:** pass 11 continued ("What should be more optimization gains?").
+
+**Changed**
+- **The cage on the card:** with the views on the GPU, the card draws the Edit Mode cage's edges and vertex dots
+  into the Scene view's picture before it comes back. Its shaders follow the CPU's own rules: the line's clip and
+  two-pixel coverage, the dot's centre depth test and disc, the 8-bit blend. The cage's vertices and edge colours stay
+  on the card and only what changed goes up. The CPU then draws only the rest of the overlays.
+- **The Scene view on the card draws at full size**, whatever the Viewport Resolution Scale (the scale saves the
+  CPU's per-pixel work). The Game view and the Camera Preview keep it.
+- Small uploads to the card (the cage's ranges, task 0099's mesh ranges) go in front of the frame's own submission
+  instead of waiting for the card each.
+- The 50k-face Edit Mode drag on the laptop setting, views on the GPU: 14.3 -> 11.5-12.3 ms (the CPU's overlays
+  4.3 -> 0.5 ms). Playing costs about 1 ms more (the Scene view's bigger read-back).
+- `Mesh::topology_serial()` is public: the GPU cage keys its edge colours on it.
+
+**Checked**
+- New tests (round 125), each skipped without a GPU:
+  - the cage drawn by the card in vertex, edge and N-gon modes (selected and plain vertices, a seam, hidden edges)
+    matches the CPU's on the cage's own pixels: mean 0.46-0.63 / 255, 99.6 % within 3 (much of it the 3D beneath);
+  - a gizmo drag sends the card 16 bytes a frame for the cage, the picture mid-drag matches the CPU's, and a click
+    picks the same vertex on both devices;
+  - the Scene view on the card is the same at 67 % and 100 %, the Game view isn't;
+  - switching to the card at 67 %: the view goes to full size, and verify mode finds no stale picture;
+  - after a GPU error, the card opened again gets the whole cage.
+- Unit checks: Windows 10,412, 0 failed (726 tests); the whole suite in render-cache verify mode: 10,413,
+  0 failed, 0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems.
+
+**Review** (Opus code-reviewer). Fixed:
+- a card opened again after an error (perhaps at the same address) could miss the cage's edges: everything kept for
+  the card is forgotten with it;
+- the full-size choice is in the Scene view's picture key (a scaled first frame could have stayed);
+- the cage is drawn by the card only on a full-size frame;
+- each line is a strip along it, not a box around it (a long diagonal edge was mostly discarded pixels);
+- the cage's shaders are optional: if they can't be made, the CPU draws the cage and the view stays on the card;
+- the dot colour and the depth bias shared by both paths; a cage the card refuses is logged once;
+- the drawing-order change (the grid and wireframes now over the cage) noted in ADR 0036.
+
+## 2026-10-16 (round 124): pass 11 begins - measured first, and Edit Mode drags work out only what moved (tasks 0098, 0099)
+
+**Asked:** "What should be more optimization gains?" (all four areas chosen: real scenes on the GPU, Edit Mode on big
+meshes, computers without a GPU, path-traced renders; the pass 11 plan approved).
+
+**Changed**
+- **Measured first (task 0098):** `editor_render` breaks down the 50k-face Edit Mode drag with the views on the GPU
+  (moved in place, draw items, the GPU path's time, the bytes sent to the card). It also adds a textured scene with a
+  Sky world on the GPU device: all its views still draw on the CPU, because of the Sky.
+- **Edit Mode drags (task 0099):** moving a few vertices of a big mesh no longer redoes the whole mesh every frame.
+  - What moved is found with one test per vertex.
+  - Only the moved faces' normals and the corners at their vertices are worked out again: the same to the bit as a
+    rebuild, in every shading mode.
+  - Only those corners are written, and the GPU views send the card only the changed ranges.
+  - The 50k-face drag on the laptop setting: 45 -> 28 ms with the views on the CPU, 25 -> 14-15 ms on the GPU.
+- The kept normals aren't copied with a mesh, and a mesh never dragged doesn't hold them (`memory_bytes` counts
+  them).
+- GPU uploads end in a barrier that makes their writes visible to later draws.
+
+**Checked**
+- New tests (round 124):
+  - 112 random drag steps on 7 kinds of mesh, in both caches, are bit for bit a rebuild: smooth, smooth by angle,
+    sharp edges with a seam, sharp edges with an angle, a degenerate quad, mixed flat / smooth faces, flat;
+  - with the views on the GPU, the card's copy is read back after every frame of a real gizmo drag and equals a
+    whole upload. Leaving out one range made all 12 frames differ, checked once by hand;
+  - the picture after the drag is the CPU's within ADR 0013's bar.
+- Unit checks: Windows 10,385, 0 failed (721 tests); the whole suite in render-cache verify mode: 10,386, 0 failed,
+  0 stale pictures. Linux with libraries: 10,259, 0 failed. Sanitizer build: 10,151, 0 failed, no reports.
+  `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `pushpull` 26,620 operations, 0 problems, 394 overlaps (unchanged); `modifiers_ngon` 0 problems.
+
+**Review** (Opus code-reviewer). Fixed:
+- the kept normals are no longer copied with every mesh, and are counted;
+- a degenerate edge (both ends one vertex) is joined as the whole pass joins it;
+- the fan's corner lookup is a binary search, so a vertex with thousands of faces stays cheap;
+- the partial counter counts only updates that worked;
+- a range that doesn't fit is refused, and the whole mesh goes up instead;
+- only the moved vertices are converted for the card;
+- the upload barrier;
+- the tests: more mesh kinds, and the card's copy compared exactly.
+
+## 2026-10-15 (round 123): OptiX against GPU Compute - a spike (task 0097, ADR 0037)
+
+**Asked:** "They are installed but haven't restarted my computer" (the CUDA Toolkit 12.8 and the OptiX SDK 9.1.0 for
+the OptiX spike).
+
+**Changed**
+- **A measurement, not a render device yet:** a small OptiX path tracer (`gpu::OptixTracer`) races GPU Compute
+  (Vulkan with the RT cores) on the same scene. Stress `--only gpu_optix`.
+- **Result:** OptiX renders 1.78-2.08x the samples a second on both cards: RTX 4070 SUPER 1041-1059 against 551-593,
+  RTX 3060 Ti 589-594 against 286-287 (picture read-backs timed on both). That is the most it could gain: its kernel
+  is simpler (Lambert, flat normals, no per-sample denoiser passes). ADR 0037 records it, and a full OptiX device
+  waits for approval.
+- **Build:** with the CUDA Toolkit and the OptiX SDK on the machine, `build.bat` compiles the kernel to PTX through
+  NVRTC (CUDA 12.8's nvcc can't parse Visual Studio 2026's headers) and builds OptiX in. Without them (CI, the
+  installers) nothing changes. At run time only NVIDIA's driver is needed, through Blender's `extern/cuew`
+  (Apache-2.0).
+
+**Checked**
+- New tests (round 123): a build without OptiX says so; with it, a small scene traced by OptiX matches GPU Compute's
+  mean brightness (100.024 %). Run here with an OptiX build; the chain's builds have no SDK and report it skipped.
+- Unit checks: Windows 10,376, 0 failed (719 tests); the whole suite in render-cache verify mode: 10,377,
+  0 failed, 0 stale pictures. Linux with libraries: 10,257, 0 failed. Sanitizer build: 10,149, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). The go stands, and the upper-bound framing is right. Fixed:
+- OptiX's read-back is timed, as GPU Compute's merge is (2.15-2.35x before, 1.78-2.08x now);
+- the per-sample differences are listed in the docs;
+- the test skips when OptiX can't start;
+- a null error string, leaks on failed allocations, and the mesh index checked;
+- `build.bat` picks the newest SDK, checks for NVRTC, builds its PTX compiler once, says why it falls back, and never
+  builds OptiX into the installers;
+- the OptiX loader's BSD-3 notice and cuew's own licence text are in `licenses/`.
+
+## 2026-10-15 (round 122): the views on the GPU - Viewport Device (task 0096, ADR 0036)
+
+**Asked:** "If it's more performant, then yes" (the GPU viewport after spike 2's go); "For the OptiX system let me
+know what I need to do" (answered with the setup steps: CUDA Toolkit 12.8, the OptiX SDK 8.0+, `OPTIX_ROOT_DIR`).
+
+**Changed**
+- **Preferences > Viewport Device (Auto / CPU / GPU):** the Scene view, Game view and Camera Preview draw their 3D on
+  the GPU (Vulkan) and read it back into the editor's canvas. Overlays, gizmos, picking, the UI and the camera
+  filters' passes are unchanged.
+- **What it draws:** plain materials, sun, point and spot lights with the sun's shadows (3x3 or Low's 2x2), Gradient
+  and Color worlds, the editor's sky, a camera's solid background, Standard / Filmic / ACES and every OpenColorIO view
+  (AgX included, through the CPU's own LUT).
+- **Anything else** draws on the CPU, as before, and Preferences says why: textures, procedurals, toon, see-through,
+  several materials on one mesh, GI, area lights, Sky / HDRI worlds, camera filters. F12 renders stay on the CPU.
+- **On the laptop setting, this machine's GPU:** moving an object 16.6-16.9 -> 4.1 ms a frame, playing 20.6-22.1 ->
+  5.6-6.8, an Edit Mode drag on 50k faces 43.7-46.6 -> 24.7-25.1. A view the GPU draws renders its own shadow map.
+  The GPU opens in the background when the editor starts.
+
+**Checked**
+- New tests (round 122), each skipped without a GPU:
+  - the Scene and Game views of the default scene match the CPU's (mean 0.086 / 255, 99.99 % within 3 / 255);
+  - a procedural sends the view to the CPU with its reason, and the picture is then the CPU's exactly;
+  - a plane seen from below matches (back faces culled as on the CPU; round 121 now compares depth too), and a click
+    picks the Cube from the GPU's ids;
+  - an Edit Mode gizmo drag updates the mesh on the card in place (3 updates, 1 upload);
+  - Scene lighting off (the editor's headlight) and a mirrored Cube match too (mean 0.083 and 0.087 / 255);
+  - Viewport Device is kept in the prefs, and Auto stays on the CPU when the tests pin it.
+- Unit checks: Windows 10,374, 0 failed (717 tests); the whole suite in render-cache verify mode: 10,375,
+  0 failed, 0 stale pictures. Linux with libraries: 10,255, 0 failed. Sanitizer build: 10,147, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- mirrored placements cull the other side;
+- the CPU no longer renders the shadow map for a GPU-drawn view, and depth comes back only when something reads it;
+- the colour is read straight into the canvas;
+- the meshes on the card have a budget;
+- casting follows the CPU's any-slot rule;
+- each view's reason is kept, and Solid / Wireframe are named;
+- the views' statistics count the GPU's triangles;
+- the GPU opens in the background.
+
+Checked and kept: the editor's own lighting already matched the CPU (a finding the new test disproves).
+
+## 2026-10-15 (round 121): a GPU view, spike 2 - go (task 0095, ADR 0013 amended)
+
+**Asked:** "Can we look into rendering the editor with the GPU and not just the CPU?" The plan was a new spike first,
+both ways to the window, then a decision by its numbers. Then "Go for it".
+
+**Changed**
+- **A measurement, not a feature yet:** a Vulkan rasteriser (`gpu::Raster`) draws the editor scene's content at 1080p
+  the way the CPU's deferred view does (shadow map, G-buffer, the same lighting formulas). Then it either reads the
+  picture back (A) or shows it in a window through a swapchain (B). Stress section `--only gpu_raster`.
+- **Result, go on both cards:**
+  - the GPU's work is 0.3-0.4 ms a frame;
+  - (A) takes 2.7 ms on the RTX 4070 SUPER and 5.7 ms on the RTX 3060 Ti, against the CPU's 14.4 ms;
+  - (B) takes 0.5 and 2.2 ms, against 16.6 ms;
+  - the same picture: mean 0.32 / 255 on covered pixels, ids exact away from edges.
+
+  The laptop is estimated (Iris Xe isn't here): about 2.5 ms of GPU work, against the CPU's 56 ms on the laptop
+  setting. ADR 0013 records it. The GPU viewport itself waits for approval.
+
+**Checked**
+- New tests (round 121): asking for a GPU that isn't there fails cleanly with a reason; a small deferred frame (sun,
+  point and spot lights) on the GPU matches the CPU's (mean 0.08 / 255, 100 % within 3 / 255, ids exact; covered pixels
+  away from edges; skipped without a GPU).
+- Unit checks: Windows 10,349, 0 failed (711 tests); the whole suite in render-cache verify mode: 10,350,
+  0 failed, 0 stale pictures. Linux with libraries: 10,251, 0 failed. Sanitizer build: 10,143, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). The go stands; fixed: the verdict needs every card measured and every call in the
+timed loops is checked, explicit pass dependencies, the shadow map always cleared, the swapchain asked for only where
+the card lists it, one semaphore per swapchain image, the picture scored on covered pixels away from edges by one
+helper, and the shader takes the triangle's own normal and the material's specular as the CPU does.
+
+## 2026-10-15 (round 120): the denoiser on the GPU (task 0094)
+
+**Asked:** "Can we also look into Cuda and Optix support?" - then "Go for it" on the plan: the denoiser first (no SDK),
+then an OptiX spike. The download of OpenImageDenoise's CUDA and HIP modules from Blender's library repositories
+(33.6 MB) was approved first.
+
+**Changed**
+- **Render Settings > Denoise Device (Auto / CPU / GPU):** OpenImageDenoise runs on an NVIDIA (CUDA) or AMD (HIP) card
+  when there is one, with the CPU as the fallback. The installers and `dist` carry the two modules (never a Git LFS
+  placeholder). A 1080p denoise: 580.9 ms on this 16-core CPU before, 43.1 ms on the RTX 4070 SUPER.
+- **The CPU denoise is faster too** (580.9 -> 463.4 ms at 1080p): the filter is kept between frames of one size
+  instead of made anew each time, and the images are prepared in parallel.
+- The status line names the device ("denoised (OpenImageDenoise, CUDA: NVIDIA GeForce RTX 4070 SUPER)"); a Learn
+  section in "Rendering on the GPU".
+
+**Checked**
+- New tests (round 120): the GPU's denoise matches the CPU's on screen (mean 0.078 / 255, 100 % within 3 / 255;
+  skipped without a GPU); a GPU that fails gives exactly the CPU's picture and counts one fallback; Denoise Device is
+  saved with the scene, and Auto stays on the CPU when the tests pin it.
+- Unit checks: Windows 10,339, 0 failed (709 tests); the whole suite in render-cache verify mode: 10,340,
+  0 failed, 0 stale pictures. Linux with libraries: 10,247, 0 failed. Sanitizer build: 10,139, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; fixed: the filter and buffers are dropped before a new size (a card never
+holds both), after an error (now also checked after the filter's commit) and before a GPU render fits its scene to
+the card; a card OIDN lists but can't open counts a fallback; the test's failure comes after a real run on the card;
+the CMake build ships the modules too. Kept: alternating sizes remake the filter once per finished frame.
+
+## 2026-10-15 (round 119): performance pass 10 written up (task 0093)
+
+**Asked:** the performance pass ("Let's increase overall editor performance in general"), its last task.
+
+**Changed**
+- **docs/PERFORMANCE.md, pass 10:** the before / after table on the laptop setting (x 1.4). The editor's own frames,
+  laptop setting: orbiting 13.1 -> 11.3 ms (88 fps), moving an object 27.3 -> 22.6 (44 fps), editing a material
+  colour 25.1 -> 21.9, playing 23.8 -> 20.6; Edit Mode drags on 50k faces 137 -> 46 ms (7 -> 22 fps); a 60 fps cap now
+  holds (30.6 -> 16.6 ms between frames). ADR 0026's laptop targets (60 fps orbiting, 30 fps editing) are met; the
+  plan's 60 fps while editing and 30 fps for 50k-face drags are not, and the write-up says what is left and why.
+  Next candidates refreshed (the Game view during a drag, the shader's shadow lookup, the sky, incremental overlap
+  checks). ADR 0026 notes the results.
+
+**Checked**
+- Docs only; every number is from a `blendity_stress --laptop --quality low` run on this machine (2026-10-15).
+
+## 2026-10-15 (round 118): views nobody picks in keep no full-size depth and ids (task 0092)
+
+**Asked:** the performance pass ("carry on the next tasks").
+
+**Changed**
+- **At a reduced viewport resolution** (Low draws the views at 67 % and scales them up), the Game view and the Camera
+  Preview no longer scale their depth and object ids up to full size as well - only the Scene view is clicked in, so
+  only it needs them. The same pictures.
+  Small: on the laptop setting a moved-object frame went 16.16 -> 16.09 ms (copied / not, in turn in one run);
+  most of a scaled view's cost is its colour, which stays.
+
+**Checked**
+- New test (round 118): at Low, with the Camera Preview up, the Game view shows the same pixels with the planes copied
+  and not, without and with a retro filter (a camera's filter stack scales up on its own path).
+- Unit checks: Windows 10,323, 0 failed (706 tests); the whole suite in render-cache verify mode: 10,324,
+  0 failed, 0 stale pictures. Linux with libraries: 10,231, 0 failed. Sanitizer build: 10,137, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; tidied: a camera's filter stack follows the view's choice (its upscale had
+its own copy of the planes), and the test has a hook that puts the old copy back to compare.
+
+## 2026-10-15 (round 117): plain-material pixels lit 8 at a time (task 0091, ADR 0035)
+
+**Asked:** the performance pass ("carry on the next tasks"; checks overlapping the next task).
+
+**Changed**
+- **Shading a view:** on a processor with AVX2, the pixels of a plain material (no textures, procedural or axis
+  mapping) are lit 8 at a time - the light directions, falloffs and highlights of every sun, point and spot light -
+  with the same pixels on screen. Lightmaps, probes, voxel GI, toon and area lights keep the one-pixel path. On the
+  laptop setting, off / on back to back: moving an object 17.18 -> 16.31 ms a frame, the Scene view's shading 4.45 ->
+  3.86 ms. The Profiler's renderer options (and the console's `raster simd on|off`) can switch it off to compare.
+
+**Checked**
+- New test (round 117): a view with a sun and its 3x3 and 2x2 shadows, point and spot lights, highlighted faces, a
+  two-sided face seen from behind and a procedural beside plain materials shows the same pixels with the 8-wide path on
+  and off, its colours before display within 1e-4 relative (1.5e-5 measured: the release build lets the compiler
+  reorder the one-pixel path's sums), and thousands of its pixels went through the 8-wide path. Skipped, and said so,
+  on a processor without AVX2.
+- Unit checks: Windows 10,319, 0 failed (705 tests); the whole suite in render-cache verify mode: 10,320,
+  0 failed, 0 stale pictures. Linux with libraries: 10,227, 0 failed. Sanitizer build: 10,133, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; tidied: the test compares the colours before display too (not only the 8-bit
+pixels), the kernel's helpers are functions (GCC can't give a lambda the AVX2 target), the ADR's claims say "the same
+displayed pixels" rather than "bit for bit".
+
+## 2026-10-15 (round 116): in place, faster - only moved faces split again, face normals in parallel (task 0090)
+
+**Asked:** the performance pass ("carry on the next tasks").
+
+**Changed**
+- **A drag on a big mesh:** its render data followed the drag by splitting every quad into triangles again and working
+  out every face's normal on one thread; now only faces with a moved vertex are split again (a face's triangles depend
+  on its own corners alone) and the normals are worked out in parallel - the same results to the bit. On a 50k-face
+  mesh, laptop setting: 9.1 -> 6.7 ms a frame for the two caches; a gizmo drag 35.4 -> 33.7 ms, G 34.4 -> 33.0 ms.
+
+**Checked**
+- New test (round 116): a cache read after several moves it missed, a vertex pulled across a quad's diagonal and back
+  to the same bits, and a fold that refuses the in-place update followed by more moves all draw exactly what a rebuild
+  draws; round 112's 48 random drag steps still find no difference.
+- Unit checks: Windows 10,311, 0 failed (704 tests); the whole suite in render-cache verify mode: 10,312,
+  0 failed, 0 stale pictures. Linux with libraries: 10,219, 0 failed. Sanitizer build: 10,125, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; the per-face work runs through a plain lambda (no `std::function` per face)
+and the moved-face test is a small function of its own.
+
+## 2026-10-15 (round 115): the Edit Mode cage drawn from parallel batches (task 0089)
+
+**Asked:** "carry on the next tasks" (the performance pass; with the next task now written while the last one's
+checks run).
+
+**Changed**
+- **The edges and vertex dots of a big mesh in Edit Mode** were recorded one call at a time, each edge placing both
+  its vertices in the world; now each vertex is placed once and the edges and dots are prepared in parallel and
+  recorded in order - the same picture. The overlays of a 50k-face mesh went from 7.4 to 4.5 ms a frame on the laptop
+  setting: a gizmo drag 38.6 -> 35.4 ms, G 37.0 -> 34.4 ms.
+
+**Checked**
+- New tests (round 115): 30,000 lines and 10,000 dots (depth-tested, clipped, some behind the eye) drawn from
+  batches give exactly the pixels one call each gives; an item left out stays out.
+- Unit checks: Windows 10,304, 0 failed (703 tests); the whole suite in render-cache verify mode: 10,305,
+  0 failed, 0 stale pictures. Linux with libraries: 10,212, 0 failed. Sanitizer build: 10,118, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; the batch reserves its room in the overlay list before appending.
+
+## 2026-10-15 (round 114): uniform materials shaded once per triangle; one shadow map for an edited mesh (task 0088)
+
+**Asked:** the performance pass ("Keep looking for performance gains throughout the project", overnight).
+
+**Changed**
+- **Plain materials** (no textures, procedural or axis mapping - most of a blocked-out scene) are worked out once per
+  triangle instead of once per pixel, with the same picture to the bit. On the laptop setting: moving an object
+  19.5 -> 17.2 ms a frame, editing a material colour 17.9 -> 16.5, playing 16.6 -> 15.5. The Profiler's renderer
+  options can switch it off to compare.
+- **An Edit Mode drag renders the sun's shadow once a frame**, not once for the Scene view and again for the Game
+  view (the edited mesh's two render caches have the same shape): a gizmo drag on 50k faces 42.5 -> 38.6 ms.
+
+**Checked**
+- New tests (round 114): 200 random plain materials evaluated once equal per-pixel evaluation to the bit; a deferred
+  view with a sun and its shadows, point and spot lights, flat and smooth meshes, emission and a procedural draws
+  the same pixels either way; an edited mesh's two caches share a shape and a copy or an edit makes a new one; a
+  drag renders the shadow map once a frame.
+- Unit checks: Windows 10,301, 0 failed (702 tests); the whole suite in render-cache verify mode: 10,302,
+  0 failed, 0 stale pictures. Linux with libraries: 10,209, 0 failed. Sanitizer build: 10,115, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; tidied: a live texture's footprint isn't worked out for a plain material's
+pixels, a vertex-snapped copy of a render mesh drops its shape, the option's cache-key bit no longer overlaps the shade
+mode's, a mesh id's copy is `noexcept` (moves stay moves).
+
+## 2026-10-15 (round 113): the Edit Mode drag loop stops redoing whole-mesh work (task 0087)
+
+**Asked:** the performance pass (plan item 0087).
+
+**Changed**
+- **Dragging vertices of a big mesh:** the check for flat rings of faces that a drag folds (they are zipped again)
+  built a map of every edge of the mesh on every frame; it now looks edges up in per-vertex face lists kept while the
+  mesh's faces don't change. The drag's own work on a 50k-face mesh went from 25 ms a frame to 1.6.
+- **G** reuses its copy of the mesh from frame to frame instead of copying the whole mesh each time.
+- **During any drag** (a mouse button held, G / R / S, Push/Pull, a modal adjustment) the overlapping-vertices check
+  and the "Lighting out of date" status wait for it to end; the Modeling Tools panel shows what it found before.
+- With task 0086: a Move-gizmo drag on 50k faces went from 98 ms a frame to 43 on the laptop setting, G from 100 to 42.
+
+**Checked**
+- New tests (round 113): a 10-frame gizmo drag on a big mesh copies it at most once, builds no render mesh, checks no
+  overlaps and hashes no lighting key, and releasing checks once; G reuses its copy and Esc restores the mesh exactly;
+  the per-vertex face lists give exactly what the old edge map gave, odd faces included, and are kept while only
+  positions move.
+- Unit checks: Windows 10,088, 0 failed (698 tests); the whole suite in render-cache verify mode: 10,089,
+  0 failed, 0 stale pictures. Linux with libraries: 9,996, 0 failed. Sanitizer build: 9,902, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- Holding the lighting answer during a drag froze Live GI and the status bar until release: during a drag a change is
+  taken as out of date without the exact (costly) check, which runs when the drag ends.
+- The overlapping-vertices overlay vanished whenever a mouse button was held (orbiting, a click): it keeps showing a
+  result that is still current, and hides only while a drag changes the mesh.
+- G's copy is remembered as a weak reference rather than an address; edge lookups scan the shorter vertex list.
+
+## 2026-10-15 (round 112): Edit Mode - the render mesh follows a drag in place (task 0086, ADR 0034)
+
+**Asked:** the performance pass (plan item 0086).
+
+**Changed**
+- **Dragging vertices in Edit Mode no longer rebuilds the mesh's render data every frame.** When only positions
+  moved, the shaded mesh follows them in place - the same triangles and the same picture as a rebuild (quads and
+  n-gons are split again from the new positions) - and the edge table and smoothing adjacency are kept. A Move-gizmo
+  drag on a 50k-face mesh went from 98 to 69 ms a frame on the laptop setting, G from 100 to 67 ms.
+- Normal-mapped meshes' tangents follow a drag the quick way and are made with MikkTSpace again when the drag ends.
+- Deforming modifiers move their render mesh with the exact triangulation now (they kept the build's before).
+
+**Checked**
+- New tests (round 112): 48 random drag steps on six kinds of mesh draw bit for bit what a rebuild draws; a quad's
+  diagonal flipping during a drag; a new face builds again while moved vertices keep the edge table; quick tangents
+  within 10 degrees of MikkTSpace's, exact after the drag ends; a fold that changes where smoothing splits builds
+  again; NaN positions draw as a rebuild's; F9 still adjusts a positions-only operator on a normal-mapped mesh.
+- Unit checks: Windows 10,078, 0 failed (695 tests); the whole suite in render-cache verify mode: 10,079,
+  0 failed, 0 stale pictures. Linux with libraries: 9,986, 0 failed. Sanitizer build: 9,892, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- Settling the tangents after a drag bumped the mesh's version, which ended an F9 adjustment and re-ran modifier
+  stacks: it only drops the caches now, and a separate counter the views key on makes them redraw.
+- Meshes changed outside Edit Mode (an origin moved) kept their quick tangents until their topology changed, so a
+  bake could depend on how a mesh got its shape: every mesh with quick tangents is settled when an interaction ends.
+- Deforms worked out the triangle slots every frame: once per topology now. `memory_bytes()` (and so the undo budget)
+  counts the kept topology; the test's drags are the same on every compiler.
+
+## 2026-10-15 (round 111): per-view waste - the voxel GI grid's columns, the shadow map's ids plane (task 0085)
+
+**Asked:** the performance pass (plan item 0085).
+
+**Changed**
+- **Realtime GI:** a view checking whether its voxel grid still fits the scene no longer allocates a fresh column
+  pyramid (about 87,000 columns at 256) every frame to find out; only a grid it actually takes gets its columns.
+- **Shadow maps** keep no picking-ids plane: nothing is cleared or written for it. The sun's map on a moved-object
+  frame went from 0.68 to 0.48 ms on the laptop setting.
+- **The GI blur** no longer copies its input plane before writing every texel anyway.
+- **Measured and left alone:** gathering the views' draw items (0.07 ms a moved frame) and the scene hashes (0.03 ms)
+  are too small to be worth changing in these scenes; shading is 5.1 of the Scene view's 7.2 ms (tasks 0088-0089).
+  The Realtime GI drag in Automatic mode (71 ms) is the automatic lighting update, not the grid.
+
+**Checked**
+- New tests (round 111): small moves inside the GI grid make no new pyramid, leaving it makes one; a grid fitted
+  without columns has the same placement and key; a shadow map has no ids plane and the same depth.
+- Unit checks: Windows 10,058, 0 failed (689 tests); the whole suite in render-cache verify mode: 10,059,
+  0 failed, 0 stale pictures. Linux with libraries: 9,966, 0 failed. Sanitizer build: 9,872, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No bugs; hardened: the Gouraud raster path and the selection outline also skip a
+target without ids (a shadow map), so a future pass drawing into one can't index an empty plane; a shadow target
+gives its ids memory back.
+
+## 2026-10-15 (round 110): the frame-rate cap holds, and only what changed is presented (task 0084)
+
+**Asked:** the performance pass (task 0083 measured; this is its first fix).
+
+**Fixed**
+- **A 60 fps cap ran at about 33 fps on Windows**, whatever the frame cost: every wait was rounded up to Windows'
+  15.6 ms timer tick, so a frame that left less than a tick to wait lost a whole one more. The editor now waits on a
+  high-resolution timer, and a frame pacer blocks only for as long as the waits have proved on time and polls for
+  the rest: a real window's 13 ms frames under a 60 fps cap went from 30.6 ms apart to 16.6 ms (95 % within 16.7).
+- **Presenting** sends only the bands of rows that changed: 0.68 ms instead of 2.42 for a Scene-view-sized change
+  (95 % within 0.70 ms instead of 9.38), and 0.07 ms when nothing changed.
+- **A window repaint drew the same frame twice** (the paint, then a queued event); now once.
+
+**Checked**
+- New tests (round 110): the pacer under a pretend 15.6 ms timer (the old loop 31.2 ms apart, the pacer 16.6); with
+  a precise timer it blocks for nearly the whole wait; input waking it early doesn't start the frame early; only
+  changed bands are presented, everything on a new size or when asked; one 30 ms-late wake-up doesn't leave the
+  pacer polling for good; a change only in pixels' top bits is still seen.
+- Unit checks: Windows 10,037, 0 failed (686 tests); the whole suite in render-cache verify mode: 10,038,
+  0 failed, 0 stale pictures. Linux with libraries: 9,945, 0 failed. Sanitizer build: 9,851, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). Fixed:
+- On Linux (and Windows' fallback) a window uncovered or first shown asked for a repaint as an event, which presented
+  nothing when the frame hadn't changed: a repaint, resize or DPI change now presents all of it.
+- One very late wake-up could leave the pacer polling for good (it only learnt from waits it blocked in): an unused
+  margin now shrinks each frame.
+- The band hash could miss a change confined to pixels' top bits: each chain rotates and is finalised.
+- macOS presented the whole picture once per changed run: once per frame now. `winmm` is linked for CMake builds too.
+- Waits were truncated to whole milliseconds: `poll_events_for` takes seconds; Windows' waits wake for input already
+  queued and can't hang on a timer that never fires.
+
+## 2026-10-15 (round 109): performance pass 10 begins - measuring Edit Mode drags, the mesh caches and frame pacing (task 0083)
+
+**Asked:** "Let's increase overall editor performance in general." Chosen: the viewport's frame rate and big meshes
+in Edit Mode, keeping the CPU renderer; plan of tasks 0083-0091. This first task only measures.
+
+**Added**
+- **The Profiler** shows the time between frames (what the screen sees, the cap's waiting included) and what the
+  mesh caches did in the last frame: copies for an edit, render meshes built or moved in place, tangents, edge
+  tables; plus an Edit Mode drag's writes, the overlap check, the lighting key, snapping, the views' draw items and
+  the scene hashes. The Learn tab's performance lesson explains them ("Reading a frame").
+- **blendity_stress:** `editor_render` drags the 50k-face mesh for real (the Move gizmo, and G) and notes each part;
+  `--only present` opens a window to time presenting frames and the cap's pacing.
+
+**Found** (the laptop setting, `--laptop --quality low`; docs/PERFORMANCE.md, Pass 10)
+- A 60 fps cap with 13 ms frames gave **30.6 ms between frames** (33 fps): Windows rounds the loop's waits to its
+  15.6 ms timer. Presenting a frame costs 2.4 ms on average (9.3 ms at the 95th percentile).
+- A gizmo drag on 50k faces costs 98 ms a frame: two render meshes built from scratch (38.6 ms, the Scene view's flat
+  one and the Game view's smooth one), the drag's writes 24.5 ms (ring repair scans every face), the shadow map
+  7.5 ms, the Edit Mode overlay 8.7 ms. G is the same plus a 2.7 ms mesh copy a frame.
+
+**Checked**
+- New tests (round 109): a gizmo drag moves the counters; the Profiler draws its new rows during a drag.
+- Unit checks: Windows 10,022, 0 failed (680 tests); the whole suite in render-cache verify mode: 10,021,
+  0 failed, 0 stale pictures. Linux with libraries: 9,928, 0 failed. Sanitizer build: 9,834, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+
+**Review** (Opus code-reviewer). No behaviour changed; fixed:
+- The pacing figure was measured with present on top of 13 ms of work: present now counts inside the 13 ms (the
+  result held: 30.6 ms between frames).
+- "Moved in place" counted refused moves too; the first frame after start showed everything counted before it.
+- The 95th percentile was rounded down (the Profiler and stress); the Profiler shows it from two frames on.
+- The stress run's undo after the gizmo drag could undo an earlier step if the drag had missed.
+- The tests now look for the Profiler's rows by name, and no longer pin today's rebuilds; ARCHITECTURE has a row.
+
 ## 2026-10-14 (round 108): installing without knowing GitHub - one-click downloads, releases of installers only (task 0082)
 
 **Asked:** "Remove build-pr71" (done: the release and its tag). "Note the installer in the releases and update the
