@@ -118,8 +118,10 @@ jobs:
         with:
           path: /Applications/MoonRay/installs
           key: moonray-deps-macos-arm64-py311-${{ env.MOONRAY_TAG }}-${{ hashFiles('tools/moonray/macos_build.sh') }}
+          # (a change to the script's MoonRay half still finds the dependencies an earlier run built: they take hours)
+          restore-keys: moonray-deps-macos-arm64-py311-${{ env.MOONRAY_TAG }}-
       - name: Build the dependencies
-        if: steps.deps.outputs.cache-hit != 'true'
+        if: steps.deps.outputs.cache-matched-key == ''
         run: bash tools/moonray/macos_build.sh deps
       # (saved at once, not at the job's end: a failure building MoonRay keeps hours of dependencies)
       - name: Keep the dependencies
