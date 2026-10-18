@@ -72,6 +72,8 @@ void Bone::reflect(Reflector &r) {
   r.help("How long the bone is drawn along its +Y (Blender's bones point along their Y).");
   r.field("Deform", deform);
   r.help("Moves the vertices of the vertex group named after it (Blender: Bone > Deform).");
+  r.field("Not a Spring Chain", spring_ignored);
+  r.help("Find Spring Chains doesn't offer the chain this bone starts (set by None or Remove; untick to offer it again).");
   r.field("Rest Position", rest_position);
   if (r.all_fields()) {  // files, undo, hashing: the exact quaternion
     Vec3 xyz(rest_rotation.x, rest_rotation.y, rest_rotation.z);

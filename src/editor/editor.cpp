@@ -216,6 +216,7 @@ bool Editor::wants_continuous_redraw() const {
   return (playing_ && !paused_) || cam_.animating || drag_ == Drag::Fly || tab_dragging_ || rendering_ || baking_ || probe_live_left_ > 0 || rtlm_busy_ ||
          lighting_update_requested_ || preview_running_ ||
          seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
+         body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
          !deferred_.empty() ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
 }
@@ -475,6 +476,7 @@ void Editor::frame(std::vector<Event> &events) {
   }
 
   /* Play mode tick (GEA Vol. I ch. 8 "The Game Loop and Real-Time Simulation"). */
+  float play_dt = 0.0f;  // (this frame's Play step: the springs take it after IK)
   if (playing_) {
     float dt = (float)std::min(0.05, now - last_play_tick_);
     last_play_tick_ = now;
@@ -486,11 +488,13 @@ void Editor::frame(std::vector<Event> &events) {
       ctx.dt = dt;
       ctx.key_down = [this](int k) { return (focused_ == WindowKind::Game || scene_hovered_ == false) && !ui_.wants_keyboard() && ui_.in.key_down[k]; };
       scene_->update(ctx);
+      play_dt = dt;
       step_requested_ = false;
     }
   }
   /* IK after scripts move the targets, before anything draws (task 0048); unchanged inputs cost a hash per chain. */
   if (solve_constraints(*scene_)) ui_.redraw = true;
+  if (play_dt > 0.0f) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
   if (cam_.update(now)) ui_.redraw = true;
   update_camera_focus();
   /* Live preview: re-render the preview when anything it depends on changes
@@ -503,6 +507,7 @@ void Editor::frame(std::vector<Event> &events) {
   step_render_animation();
   poll_updates();
   poll_moonray();
+  body_poll();
   step_bake();
 
   /* Pull new console lines. */
@@ -2968,6 +2973,7 @@ void Editor::enter_play() {
   if (edit_mode_) exit_edit_mode();
   commit_undo();
   play_backup_ = scene_->clone();
+  spring::reset(*scene_);  // (the springs start from the pose Play starts in)
   playing_ = true;
   paused_ = false;
   play_time_ = 0;
@@ -3202,7 +3208,8 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
   if (c == "moonray") return moonray_command(t);  // moonray status | install [archive] | remove | folder [path] | check (task 0112)
-  if (c == "body") return body_command(t);  // body show on|off | mass [kg] | com [frame] (task 0115)
+  if (c == "body") return body_command(t);
+  if (c == "spring") return spring_command(t);  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);

@@ -2,6 +2,117 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 139): spring bones for hair, ears, tails and cloth, found automatically (task 0120)
+
+**Asked:** the physics plan's secondary motion, with "auto select hair bone, ear bone, cloth bone sequences
+automatically. Or recursively if I select a parent bone that is the start of that specific chain" and "make sure that I
+can also deselect or uncatogorize the chains if it's unneeded"; then "Finish and do all tasks please."
+
+**Added**
+- **SpringBone** on a chain's first bone: hair, ear, tail or cloth, each with its own stiffness, damping, gravity and
+  radius.
+  - The chain lags behind the body, swings past and settles, kept outside the body's bones.
+  - It is the same at any frame rate: substeps, with rates per 1/60 s.
+  - Live in Play, on the pose IK finished. **Bake into Clip** keys it frame by frame from the rest pose (the same keys
+    when baked again, from the UI too), turns the live simulation off, and is one undo step.
+- **Chains found automatically** (Rigging > Spring Bones > Find Spring Chains).
+  - **By name:** hair, ponytail, ear, tail, skirt, cape and more, from Mixamo, VRM's `J_Sec_` and Japanese rigs'
+    kami / mimi / shippo / sukato.
+  - **By shape:** every branch of a fork is its own chain.
+  - **Never offered:** limbs, fingers, toes, head, eyes or jaw.
+  - Named chains come ticked and labelled; unnamed extras are listed unticked.
+- **Your choice wins:**
+  - untick a chain, change its label, or set it to **None**;
+  - None and Remove are remembered on the chain's first bone ("Not a Spring Chain"), so Find doesn't offer it again;
+  - Show Ignored and Unignore bring one back;
+  - **Add Spring Bones** on a selected bone works recursively (a hair root's strands, a chain each);
+  - **Remove** on a chain or a parent takes everything under it off, in one undo step.
+- The console: `spring find [all] | apply | tick | label | add | remove | ignore | unignore | bake | list`.
+- Learn: "Spring bones: hair, ears, tails and cloth".
+
+**Checked**
+- New tests (round 139):
+  - 27 names across rig conventions read right;
+  - Find on a Mixamo body picks exactly the 5 strands, 2 ears, the tail and 2 skirt strips, labelled, with an unnamed
+    extra unticked;
+  - a hair root makes five chains and leaves out a body bone under it;
+  - at rest nothing moves; a stopping hip makes the tail swing past (1.8 cm) and settle;
+  - collision keeps a tail out of a thigh (off: through it);
+  - baking twice gives identical keys and puts the scene back;
+  - in the editor: untick, None and Apply; ignored until Unignore; Remove on the hair root as one undo step, undone
+    whole;
+  - labels, settings and the ignored mark saved and loaded;
+  - live in Play, and not when baked;
+  - the same swing at 30, 60 and 144 frames a second (1.70, 1.70 and 1.74 cm past);
+  - a 50 m teleport starts the chain afresh.
+- An Opus review; every finding fixed:
+  - the Find list held the bones themselves: Play and Stop, or an undo, left it pointing at freed objects (it keeps
+    their ids now);
+  - other chains' bones counted as the body: strands pushed each other apart (and the body's capsules were rebuilt
+    per chain per step: now once per armature);
+  - springs stepped before IK, a frame behind a limb IK moves;
+  - Add again reset tuned chains and re-added chains set to None;
+  - Add on a strand's middle bone split it;
+  - None took off the chains below a fork too;
+  - names looked up across characters;
+  - `spring add <bone> none` added cloth;
+  - a second bake found nothing;
+  - Euler keys could flip near 90 degrees;
+  - a zero-length bone's tip drifted;
+  - a teleport whipped the chain;
+  - ignoring a middle bone did nothing;
+  - a frame's whole move kicked the chain at once (30 fps swung less than 60).
+- Unit checks (rounds 138 and 139 in one chain): Windows 10,811, 0 failed (789 tests); the whole suite in render-cache
+  verify mode: 10,812, 0 failed, 0 stale pictures. Linux with libraries: 10,547, 0 failed. Sanitizer build: 10,438,
+  one failed - "spring bones in Play" measured 3.0 mm of lag against its 3 mm floor, the sanitizer's slow frames
+  hitting Play's 0.05 s step cap. Its hips now move 5 cm a frame (the lag clear of the floor at any frame time); no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 138): AutoPhysics: the whole clip made physically possible (tasks 0118, 0119, ADR 0043)
+
+**Asked:** "Finish and do all tasks please" (the physics plan's next tasks: the AutoPhysics spike, then AutoPhysics).
+
+**Added**
+- **The spike (task 0118, ADR 0043): GO.**
+  - The body is reduced to its center of mass and its spin, pushed only by gravity and the contacts' forces
+    (centroidal dynamics).
+  - One trajectory optimisation over the clip finds the nearest motion with Newton's and Euler's laws holding at
+    every frame and each force pushing inside its friction pyramid.
+  - Measured on four clips of 100 frames (a jump, a run, a flip, a fall onto the hands): 221-493 ms each, the laws
+    held to 7e-6 to 1.3e-4 of the body's weight, flights falling at exactly g, and a flip's spin constant in the air.
+- **Blendity's own QP solver** (`core/qp`): ADMM as OSQP does it, with a banded Cholesky factorisation (a trajectory
+  couples only frames a few apart), warm starts, an adaptive step and cancel. No new dependency.
+- **AutoPhysics (task 0119):** the Animation window's AutoPhysics button.
+  - Sampled on the editor's thread, solved on a worker ("Solving..."), shown with Flight's ghost, frame colours and
+    Apply (one undo step).
+  - The hips carry the correction; the feet's and hands' targets are held through their contacts and follow the body
+    again over 4 frames after.
+  - A clip edited while it solves isn't shown. The console: `body physics show|apply|off`.
+- Learn: "AutoPhysics: the whole clip", with questions.
+
+**Checked**
+- New tests (round 138):
+  - the QP's known answers, an equality, bounds, a warm start, a 2,000-unknown chain in its band, an empty constraint
+    refused;
+  - the four clips' times, residuals and moves;
+  - standing coming back as it was, and bad input refused;
+  - a jump keyed in straight lines made a parabola, with the foot held and the keyed clip realising the solved
+    center;
+  - a possible clip all green; missing contacts or contacts on bones that aren't IK ends explained; a cancelled
+    solve;
+  - in the editor: the worker, the ghost, Apply and undo, an edited clip not shown, Off.
+- An Opus review (the math, the solver and the worker's lifetimes checked: correct); every finding fixed:
+  - a finished solve waited for the mouse to move (the editor slept);
+  - the turn left at the end was taken back in the air too, where nothing could do it;
+  - Euler's central difference let the momentum zig-zag between even and odd frames;
+  - results were judged by the solver's status, not the laws (a long clip thrown away, an unsettled one kept);
+  - no limit on a clip's length, no cancel between passes, non-finite lengths not refused;
+  - a result could arrive in Play, show on another scene with a clip where the old one was, or replace Flight's;
+  - a contact pushed at its first frame's tip, not where the clip has it.
+- Unit checks: with round 139's (one chain for both; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
 ## 2026-10-18 (round 137): physics for animation: the body's masses, contacts and flight (tasks 0115-0117, ADR 0042)
 
 **Asked:** "Is there a way to implement body simulation for animation like in Cascadeur." The user chose the center of

@@ -527,9 +527,10 @@ struct Sampled {
   std::vector<std::vector<Mat4>> motion;  // [frame][bone of body.bones]
   std::vector<Mat4> hips, hips_parent;
   std::vector<std::vector<Mat4>> targets, target_parents;  // [frame][target]
+  std::vector<std::vector<Vec3>> tips;                     // [frame][tip bone]: where each ends (AutoPhysics' contacts)
 };
 Sampled sample_body(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body, const GameObject *hips,
-                    const std::vector<GameObject *> &targets, int last) {
+                    const std::vector<GameObject *> &targets, int last, const std::vector<GameObject *> &tip_bones = {}) {
   Sampled sm;
   std::vector<ArmatureBone> now;
   for_each_frame(scene, anim_root, clip, 0, last, [&](int) {
@@ -551,6 +552,9 @@ Sampled sample_body(Scene &scene, GameObject &anim_root, const AnimationClip &cl
     }
     sm.targets.push_back(tw);
     sm.target_parents.push_back(tp);
+    std::vector<Vec3> tips;
+    for (const GameObject *b : tip_bones) tips.push_back(bone_tip(*b));
+    sm.tips.push_back(tips);
   });
   return sm;
 }
@@ -620,9 +624,10 @@ Vec3 euler_near(Vec3 e, Vec3 near) {
   auto far = [&](Vec3 v) { return std::fabs(v.x - near.x) + std::fabs(v.y - near.y) + std::fabs(v.z - near.z); };
   return far(b) < far(a) ? b : a;
 }
-/* The hips (and the targets the body carries) at frame k moved by X, keyed into the corrected clip. */
+/* The hips (and the targets the body carries) at frame k moved by X, keyed into the corrected clip; `target_X`, when
+ * given, moves each target by its own (a foot held on the ground while the body moves). */
 void key_hips(FlightResult &out, const Sampled &sm, int k, const Mat4 &X, const std::vector<GameObject *> &targets,
-              const std::vector<std::string> &target_paths) {
+              const std::vector<std::string> &target_paths, const std::vector<Mat4> *target_X = nullptr) {
   const Mat4 local = sm.hips_parent[(size_t)k].inverse() * (X * sm.hips[(size_t)k]);
   const Vec3 pos = local.translation();
   const Quat rq = quat_of(local);
@@ -643,7 +648,8 @@ void key_hips(FlightResult &out, const Sampled &sm, int k, const Mat4 &X, const 
     key(out.hips_path, "Rotation", a, (&e.x)[a]);
   }
   for (size_t ti = 0; ti < targets.size(); ti++) {  // (the feet's and hands' targets go with the body)
-    const Vec3 tl = (sm.target_parents[(size_t)k][ti].inverse() * (X * sm.targets[(size_t)k][ti])).translation();
+    const Mat4 &Xt = target_X ? (*target_X)[ti] : X;
+    const Vec3 tl = (sm.target_parents[(size_t)k][ti].inverse() * (Xt * sm.targets[(size_t)k][ti])).translation();
     for (int a = 0; a < 3; a++) key(target_paths[ti], "Position", a, (&tl.x)[a]);
   }
 }
@@ -784,6 +790,153 @@ bool correct_flight(Scene &scene, GameObject &anim_root, const AnimationClip &cl
   if (out.flights.empty()) return error = "no flight: no frames in the air between two contacts", false;
   out.corrected.touch();
   return true;
+}
+
+/* ---------------------------------------------------------------- AutoPhysics (task 0119) */
+
+struct AutoPhysicsPrep {
+  AnimationClip clip;
+  Body body;
+  AutoPhysicsSettings s;
+  Sampled sm;
+  std::vector<GameObject *> targets;
+  std::vector<std::string> target_paths;
+  std::vector<std::vector<float>> hold;  // [frame][target]: 1 in a contact of its effector, fading to 0 away from it
+  std::string hips_path;
+  float dt = 1.0f / 60.0f;
+  int last = 0;
+  CentroidalInput input;
+};
+
+CentroidalInput &autophysics_input(AutoPhysicsPrep &p) { return p.input; }
+
+std::shared_ptr<AutoPhysicsPrep> autophysics_prepare(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body,
+                                                     const AutoPhysicsSettings &s, std::string &error) {
+  if (!body.valid()) return error = "the body has no mass (an armature with bones, skinned or not)", nullptr;
+  GameObject *hips = hips_of(*body.root, &body);
+  if (!hips) return error = "the armature has no bones", nullptr;
+  if (hips != &anim_root && !scene.is_ancestor(&anim_root, hips)) return error = "the hips aren't below the animated object", nullptr;
+  if (clip.contacts.empty()) return error = "the clip has no contacts (find them first: the solve needs to know what holds the body up)", nullptr;
+  auto p = std::make_shared<AutoPhysicsPrep>();
+  p->clip = clip, p->body = body, p->s = s;
+  p->hips_path = anim_path(anim_root, *hips);
+  const float end = clip.end_frame();
+  if (!std::isfinite(end)) return error = "the clip's length isn't a number", nullptr;
+  if (end > 1999.0f) return error = strprintf("the clip is too long (%.0f frames; 2,000 at most: solve it in parts)", end + 1.0f), nullptr;
+  p->last = std::max(0, (int)std::ceil(end));
+  if (p->last < 3) return error = "the clip is too short (4 frames or more)", nullptr;
+  p->dt = 1.0f / (clip.frame_rate > 0.0f ? clip.frame_rate : 60.0f);
+  const std::vector<Effector> eff = effectors(scene, anim_root, *body.root);
+  std::vector<GameObject *> tip_bones;
+  for (const Effector &e : eff) {
+    tip_bones.push_back(e.bone);
+    if (e.target && !e.target_path.empty() && !scene.is_ancestor(hips, e.target) &&
+        std::find(p->targets.begin(), p->targets.end(), e.target) == p->targets.end()) {
+      p->targets.push_back(e.target);
+      p->target_paths.push_back(e.target_path);
+    }
+  }
+  p->sm = sample_body(scene, anim_root, clip, body, hips, p->targets, p->last, tip_bones);
+  const int n = p->last + 1;
+  /* The contacts as points (each effector's tip where the contact starts: pinning holds it there), and the frames
+   * each carried target is held. */
+  std::vector<std::vector<uint8_t>> held((size_t)p->targets.size(), std::vector<uint8_t>((size_t)n, 0));
+  for (const AnimationClip::Contact &k : clip.contacts) {
+    if (!std::isfinite(k.from) || !std::isfinite(k.to)) continue;
+    const int from = (int)std::max(0.0f, std::ceil(k.from)), to = (int)std::min((float)p->last, std::floor(k.to));
+    size_t i = 0;
+    while (i < eff.size() && eff[i].bone->name != k.bone) i++;
+    if (i == eff.size() || from > to) continue;
+    /* Where it pushes: the tip's mean over the contact (where the clip has it; Pin first makes that one place). */
+    Vec3 at(0.0f);
+    for (int f = from; f <= to; f++) at = at + p->sm.tips[(size_t)f][i];
+    p->input.contacts.push_back({at / (float)(to - from + 1), from, to});
+    const size_t ti = (size_t)(std::find(p->targets.begin(), p->targets.end(), eff[i].target) - p->targets.begin());
+    for (int f = from; ti < p->targets.size() && f <= to; f++) held[ti][(size_t)f] = 1;
+  }
+  if (p->input.contacts.empty()) return error = "none of the clip's contacts is on a foot or hand this rig has (an IK chain's end)", nullptr;
+  p->hold.assign((size_t)n, std::vector<float>(p->targets.size(), 0.0f));
+  const int blend = std::max(0, s.blend_frames);
+  for (size_t ti = 0; ti < p->targets.size(); ti++)
+    for (int f = 0; f < n; f++) {
+      int d = blend + 1;  // (frames to the nearest held one)
+      for (int g = std::max(0, f - blend); g <= std::min(n - 1, f + blend); g++)
+        if (held[ti][(size_t)g]) d = std::min(d, std::abs(f - g));
+      p->hold[(size_t)f][ti] = 1.0f - (float)d / (float)(blend + 1);
+    }
+  CentroidalInput &in = p->input;
+  in.mass = body.mass, in.dt = p->dt;
+  in.friction = s.friction, in.momentum_weight = s.momentum_weight, in.jerk_weight = s.jerk_weight;
+  for (int f = 0; f < n; f++) {
+    in.com.push_back(state_of(body, p->sm.motion[(size_t)f]).com);
+    in.momentum.push_back(momentum_at(body, p->sm, f, p->dt));
+  }
+  return p;
+}
+
+bool autophysics_finish(const AutoPhysicsPrep &p, const CentroidalResult &r, FlightResult &out, std::string &error) {
+  out = FlightResult();
+  out.corrected = p.clip;
+  out.hips_path = p.hips_path;
+  const int n = p.last + 1;
+  if (!r.solved) return error = "the solve didn't finish (" + r.status + ")", false;
+  if ((int)r.com.size() != n || (int)r.momentum.size() != n) return error = "the solve is for another clip", false;
+  out.com_before = p.input.com;
+  out.com_after = r.com;
+  /* The body turned about its center so its spin is the solved one: the difference's rate is I^-1 dL (in the already
+   * turned axes, as a flight's), the turn left at the end spread back so the last pose is the animator's. */
+  std::vector<Quat> turn((size_t)n, Quat());
+  for (int k = 0; k + 1 < n; k++) {
+    const Quat q = turn[(size_t)k];
+    const State st = state_of(p.body, p.sm.motion[(size_t)k]);
+    const Vec3 dL = r.momentum[(size_t)k] - p.input.momentum[(size_t)k];
+    const Vec3 w = q.rotate(inverse(st.inertia) * q.conjugate().rotate(dL));
+    const float a = length(w) * p.dt;
+    turn[(size_t)k + 1] = a > 1e-9f ? normalize(Quat::axis_angle(w, a) * q) : q;
+  }
+  /* The turn left at the end taken back over the frames in contact only (in the air nothing could turn the body back),
+   * evenly over them; a clip with no frame in contact keeps it. */
+  std::vector<uint8_t> touching((size_t)n, 0);
+  for (const CentroidalContact &c : p.input.contacts)
+    for (int f = c.from; f <= c.to; f++) touching[(size_t)f] = 1;
+  int contact_frames = 0;
+  for (uint8_t t : touching) contact_frames += t;
+  const Quat back = turn.back().conjugate();
+  for (int k = 0, seen = 0; k < n && contact_frames > 0; k++) {
+    seen += touching[(size_t)k];
+    turn[(size_t)k] = normalize(slerp(Quat(), back, (float)seen / (float)contact_frames) * turn[(size_t)k]);
+  }
+  Flight fl;
+  fl.takeoff = 0, fl.landing = p.last;
+  out.marks.assign((size_t)n, MarkFine);
+  for (int k = 0; k < n; k++) {
+    const float shift = length(r.com[(size_t)k] - p.input.com[(size_t)k]), deg = length(rotation_vector(turn[(size_t)k])) * 57.2957795f;
+    fl.shift = std::max(fl.shift, shift), fl.turn = std::max(fl.turn, deg);
+    out.marks[(size_t)k] = shift > p.s.max_shift ? MarkImpossible : (shift > p.s.tolerance || deg > p.s.turn_tolerance) ? MarkChanged : MarkFine;
+  }
+  if (fl.shift > p.s.max_shift) fl.possible = false, fl.why = strprintf("the body would move %.2f m: the keys ask for more than contacts can give", fl.shift);
+  if (fl.possible) {
+    std::vector<Mat4> target_X(p.targets.size());
+    for (int k = 0; k < n; k++) {
+      const Vec3 c = p.input.com[(size_t)k], d = r.com[(size_t)k] - c;
+      const Quat q = turn[(size_t)k];
+      for (size_t ti = 0; ti < p.targets.size(); ti++) {  // (held on the ground in a contact, with the body away from one)
+        const float follow = 1.0f - p.hold[(size_t)k][ti];
+        target_X[ti] = Mat4::trs(d * follow, Quat(), Vec3(1.0f)) * rotation_about(normalize(slerp(Quat(), q, follow)), c);
+      }
+      key_hips(out, p.sm, k, Mat4::trs(d, Quat(), Vec3(1.0f)) * rotation_about(q, c), p.targets, p.target_paths, &target_X);
+    }
+  }
+  out.flights.push_back(fl);
+  out.corrected.touch();
+  return true;
+}
+
+bool autophysics(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body, const AutoPhysicsSettings &s, FlightResult &out,
+                 std::string &error) {
+  std::shared_ptr<AutoPhysicsPrep> p = autophysics_prepare(scene, anim_root, clip, body, s, error);
+  if (!p) return false;
+  return autophysics_finish(*p, solve_centroidal(p->input), out, error);
 }
 
 }  // namespace body

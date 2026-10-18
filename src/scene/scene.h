@@ -926,6 +926,7 @@ struct Bone : ComponentBase<Bone> {
   Quat rest_rotation;     // exact (Euler angles lose up to a degree near 90 degrees of X)
   Vec3 rest_euler_hint;   // what the Inspector shows for it
   Vec3 rest_scale{1, 1, 1};
+  bool spring_ignored = false;  // "not a spring chain": Find Spring Chains doesn't offer the chain it starts (task 0120)
   Mat4 rest_matrix() const;
   void set_rest(const Transform &t);  // the bone's current local transform becomes its rest (skin.cpp)
   void reflect(Reflector &r) override;

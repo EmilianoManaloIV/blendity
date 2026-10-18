@@ -48,7 +48,8 @@ bool Editor::body_refresh() {
 
 bool Editor::flight_current(const AnimationClip *clip) {
   const GameObject *root = anim_root();
-  return body_.ghost && clip && root && body_.flight_clip == clip && body_.flight_root == root->id && body_.flight_clip_version == clip->version;
+  return body_.ghost && clip && root && body_.flight_clip.lock().get() == clip && body_.flight_root == root->id &&
+         body_.flight_clip_version == clip->version;
 }
 
 /* The center of mass: its path over the clip, where it is now (a ball) and straight below it on the ground. */
@@ -142,6 +143,7 @@ void Editor::body_contacts_command(const std::vector<std::string> &t) {
 /* body flight show | apply | off (task 0117): the corrected flight as a ghost and frame colours, then into the clip. */
 void Editor::body_flight_command(const std::vector<std::string> &t) {
   const std::string sub = t.size() > 2 ? to_lower(t[2]) : "show";
+  if (sub != "apply") body_.solve.reset();  // (an AutoPhysics solve under way would replace what this shows)
   if (sub == "off") {
     body_.ghost = false;
     body_.ghost_bones.clear();
@@ -153,31 +155,19 @@ void Editor::body_flight_command(const std::vector<std::string> &t) {
   if (sub == "apply") {
     if (playing_) return Log::warn("body flight: stop Play first (a clip isn't edited in Play)");
     if (!flight_current(clip.get())) return Log::warn("body flight: show it first (for this character's clip, as it is now)");
+    if (!body_.flight.keys) return Log::warn("%s: nothing to apply (impossible: red frames)", body_.kind.c_str());
     const AnimationClip corrected = body_.flight.corrected;
-    anim_edit_keys("Apply Flight", [&](AnimationClip &c) { c.tracks = corrected.tracks; });
+    anim_edit_keys(body_.kind == "Flight" ? "Apply Flight" : "Apply AutoPhysics", [&](AnimationClip &c) { c.tracks = corrected.tracks; });
     body_.ghost = false;
     body_.ghost_bones.clear();
-    return Log::info("Flight applied: %zu keys (%zu of them changed keys the clip had)", body_.flight.keys, body_.flight.replaced);
+    return Log::info("%s applied: %zu keys (%zu of them changed keys the clip had)", body_.kind.c_str(), body_.flight.keys, body_.flight.replaced);
   }
   std::string error;
   if (!body::correct_flight(*scene_, *root, *clip, body_.body, body::FlightSettings(), body_.flight, error)) {
     body_.ghost = false;
     return Log::warn("Flight: %s", error.c_str());
   }
-  body_.ghost = true;
-  body_.flight_clip_version = clip->version;
-  body_.flight_clip = clip.get();
-  body_.flight_root = root->id;
-  /* The corrected body's bones at every frame, once (the ghost then costs nothing a frame). */
-  body_.ghost_bones.clear();
-  const int last = (int)body_.flight.marks.size() - 1;
-  std::vector<ArmatureBone> bones;
-  body::for_each_frame(*scene_, *root, body_.flight.corrected, 0, last, [&](int) {
-    armature_bones(*body_.body.root, bones);
-    std::vector<std::pair<Vec3, Vec3>> segs;
-    for (const ArmatureBone &b : bones) segs.push_back({b.object->world_position(), body::bone_tip(*b.object)});
-    body_.ghost_bones.push_back(segs);
-  });
+  body_show_result(*root, clip, "Flight");
   size_t red = 0, blue = 0;
   for (uint8_t m : body_.flight.marks) red += m == body::MarkImpossible, blue += m == body::MarkChanged;
   for (const body::Flight &fl : body_.flight.flights)
@@ -186,11 +176,81 @@ void Editor::body_flight_command(const std::vector<std::string> &t) {
   Log::info("Flight: %zu frame(s) changed (blue), %zu impossible (red); Apply writes it", blue, red);
 }
 
+/* A correction worked out (body_.flight) shown: for this clip as it is now, its corrected bones at every frame once (the
+ * ghost then costs nothing a frame). */
+void Editor::body_show_result(GameObject &root, const AnimationClipPtr &clip, const char *kind) {
+  body_.ghost = true;
+  body_.kind = kind;
+  body_.flight_clip_version = clip->version;
+  body_.flight_clip = clip;
+  body_.flight_root = root.id;
+  body_.ghost_bones.clear();
+  const int last = (int)body_.flight.marks.size() - 1;
+  std::vector<ArmatureBone> bones;
+  body::for_each_frame(*scene_, root, body_.flight.corrected, 0, last, [&](int) {
+    armature_bones(*body_.body.root, bones);
+    std::vector<std::pair<Vec3, Vec3>> segs;
+    for (const ArmatureBone &b : bones) segs.push_back({b.object->world_position(), body::bone_tip(*b.object)});
+    body_.ghost_bones.push_back(segs);
+  });
+}
+
+/* body physics show | apply | off (task 0119): the clip sampled now, solved on a worker, shown when it's done. */
+void Editor::body_physics_command(const std::vector<std::string> &t) {
+  const std::string sub = t.size() > 2 ? to_lower(t[2]) : "show";
+  if (sub == "apply") return body_flight_command({"body", "flight", "apply"});
+  body_.solve.reset();  // (one under way is stopped: a new one, or none)
+  if (sub == "off") {
+    body_.ghost = false;
+    body_.ghost_bones.clear();
+    return;
+  }
+  GameObject *root = anim_root();
+  AnimationClipPtr clip = anim_clip();
+  if (!root || !clip || !body_refresh()) return Log::warn("body physics: select an animated character with a clip");
+  if (playing_) return Log::warn("body physics: stop Play first (a clip isn't solved while it plays)");
+  std::string error;
+  std::shared_ptr<body::AutoPhysicsPrep> prep = body::autophysics_prepare(*scene_, *root, *clip, body_.body, body::AutoPhysicsSettings(), error);
+  if (!prep) return Log::warn("AutoPhysics: %s", error.c_str());
+  auto s = std::make_unique<BodyView::Solve>();
+  s->prep = prep;
+  s->clip = clip, s->clip_version = clip->version, s->root = root->id;
+  body::autophysics_input(*prep).cancel = &s->cancel;
+  BodyView::Solve *sp = s.get();  // (the solve outlives its thread: its destructor joins it)
+  s->thread = std::thread([sp] {
+    sp->result = body::solve_centroidal(body::autophysics_input(*sp->prep));
+    sp->done = true;
+  });
+  body_.solve = std::move(s);
+  body_.ghost = false;
+  Log::info("AutoPhysics: solving %d frames...", (int)body::autophysics_input(*prep).com.size());
+}
+
+/* Each frame: a finished solve keyed and shown, when it is still for the clip on screen as it is. */
+void Editor::body_poll() {
+  if (!body_.solve || !body_.solve->done.load() || playing_) return;  // (kept till Play ends: showing it poses the scene)
+  std::unique_ptr<BodyView::Solve> s = std::move(body_.solve);
+  s->thread.join();
+  GameObject *root = anim_root();
+  AnimationClipPtr clip = anim_clip();
+  if (!root || !clip || clip != s->clip.lock() || clip->version != s->clip_version || root->id != s->root)
+    return Log::info("AutoPhysics: the clip changed while it was solving; run it again");
+  std::string error;
+  if (!body::autophysics_finish(*s->prep, s->result, body_.flight, error)) return Log::warn("AutoPhysics: %s", error.c_str());
+  body_show_result(*root, clip, "AutoPhysics");
+  const body::Flight &fl = body_.flight.flights.front();
+  size_t red = 0, blue = 0;
+  for (uint8_t m : body_.flight.marks) red += m == body::MarkImpossible, blue += m == body::MarkChanged;
+  Log::info("AutoPhysics: %d frames in %.0f ms; the body moved up to %.3f m and %.1f degrees, %zu frame(s) changed (blue), %zu impossible (red)%s%s",
+            (int)body_.flight.marks.size(), s->result.ms, fl.shift, fl.turn, blue, red, fl.possible ? "; Apply writes it" : ": ", fl.why.c_str());
+}
+
 /* body show on|off | mass [kg] | com [frame] | contacts ... | flight ...: the console's physics for animation. */
 void Editor::body_command(const std::vector<std::string> &t) {
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "mass";
   if (sub == "contacts") return body_contacts_command(t);
   if (sub == "flight") return body_flight_command(t);
+  if (sub == "physics") return body_physics_command(t);
   if (sub == "show") {
     body_.show_com = t.size() < 3 || to_lower(t[2]) != "off";
     ui_.redraw = true;
@@ -221,7 +281,7 @@ void Editor::body_command(const std::vector<std::string> &t) {
     const Vec3 c = body_.path[i];
     return Log::info("Center of mass at frame %.0f: (%.3f, %.3f, %.3f)", f, c.x, c.y, c.z);
   }
-  Log::warn("body show on|off | mass [kg] | com [frame]");
+  Log::warn("body show on|off | mass [kg] | com [frame] | contacts ... | flight show|apply|off | physics show|apply|off");
 }
 
 }  // namespace bl

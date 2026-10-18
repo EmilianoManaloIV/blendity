@@ -12,7 +12,9 @@
 #pragma once
 #include "../core/math.h"
 #include "animation.h"
+#include "autophysics.h"
 #include "scene.h"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -136,6 +138,27 @@ GameObject *hips_of(const GameObject &armature, const Body *body = nullptr);
  * `error` when there is nothing to correct. */
 bool correct_flight(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body, const FlightSettings &s, FlightResult &out,
                     std::string &error);
+/* ---------------------------------------------------------------- AutoPhysics (task 0119, ADR 0043) */
+struct AutoPhysicsSettings {
+  float friction = 0.8f;           // the contacts' friction coefficient
+  float momentum_weight = 0.2f;    // how closely the clip's spin is kept, against its center (solve_centroidal)
+  float jerk_weight = 1.0f;
+  float tolerance = 0.005f;        // metres: a frame moved less than this is fine (green) ...
+  float turn_tolerance = 1.0f;     // ... and degrees
+  float max_shift = 1.0f;          // metres: a frame moved further is impossible (red), and nothing is written
+  int blend_frames = 4;            // a foot's or hand's target let go by a contact follows the body over this many frames
+};
+/* AutoPhysics in three steps, so the solve can run on a worker: the clip sampled (on the editor's thread: it poses the
+ * scene), `input` solved anywhere (solve_centroidal: a few hundred milliseconds), the result keyed into a copy of the
+ * clip (FlightResult: the same ghost, frame colours and Apply as a flight). */
+struct AutoPhysicsPrep;
+std::shared_ptr<AutoPhysicsPrep> autophysics_prepare(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body,
+                                                     const AutoPhysicsSettings &s, std::string &error);
+CentroidalInput &autophysics_input(AutoPhysicsPrep &p);
+bool autophysics_finish(const AutoPhysicsPrep &p, const CentroidalResult &r, FlightResult &out, std::string &error);
+/* The three at once (the tests'). */
+bool autophysics(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body, const AutoPhysicsSettings &s, FlightResult &out,
+                 std::string &error);
 /* The whole body's angular momentum about its center of mass at each frame (kg m^2/s; from the bones' motion). */
 std::vector<Vec3> angular_momentum(Scene &scene, GameObject &anim_root, const AnimationClip &clip, const Body &body);
 /* A rotation matrix's quaternion (its columns normalised). */

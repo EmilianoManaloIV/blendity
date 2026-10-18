@@ -44,6 +44,7 @@
 #include "../render/moonray.h"
 #include "../render/moonray_export.h"
 #include "../scene/body_physics.h"
+#include "../scene/spring_bones.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -965,9 +966,24 @@ class Editor {
     body::FlightResult flight;
     uint64_t flight_clip_version = 0;  // the clip it was worked out for (edited since: shown no more) ...
     uint64_t flight_root = 0;          // ... and whose: another character's clip is never shown or written with it
-    const AnimationClip *flight_clip = nullptr;
+    std::weak_ptr<AnimationClip> flight_clip;  // (weak: a clip gone with its scene never matches one made where it was)
     size_t builds = 0;                 // bodies built (tests: the overlay doesn't build one a frame)
     std::vector<std::vector<std::pair<Vec3, Vec3>>> ghost_bones;  // per frame: each bone, head to tip, corrected
+    std::string kind = "Flight";       // what the ghost shows: a flight's correction or AutoPhysics' (task 0119)
+    /* AutoPhysics' solve on a worker (a few hundred milliseconds): sampled here, solved there, keyed here when done. */
+    struct Solve {
+      std::shared_ptr<body::AutoPhysicsPrep> prep;
+      std::thread thread;
+      std::atomic<bool> done{false}, cancel{false};
+      body::CentroidalResult result;
+      std::weak_ptr<AnimationClip> clip;
+      uint64_t clip_version = 0, root = 0;
+      ~Solve() {
+        cancel = true;
+        if (thread.joinable()) thread.join();
+      }
+    };
+    std::unique_ptr<Solve> solve;
   } body_;
   bool body_refresh();
   bool flight_current(const AnimationClip *clip);  // the flight shown is this clip's, as it is now
@@ -976,6 +992,34 @@ class Editor {
   void body_command(const std::vector<std::string> &t);
   void body_contacts_command(const std::vector<std::string> &t);
   void body_flight_command(const std::vector<std::string> &t);
+  void body_physics_command(const std::vector<std::string> &t);
+  void body_show_result(GameObject &root, const AnimationClipPtr &clip, const char *kind);
+  void body_poll();
+  /* ---- Spring bones (task 0120, spring_ui.cpp) ---- */
+  struct SpringView {
+    struct Row {
+      uint64_t id = 0;  // the chain's first bone (by id: Play, undo and loading replace the objects)
+      size_t bones = 0;
+      int label = 0;
+      bool named = false, ignored = false, added = false, tick = false;
+    };
+    std::vector<Row> found;  // the last Find, for the skeleton `root`
+    uint64_t root = 0;
+    bool with_ignored = false;
+  } spring_;
+  GameObject *spring_root();
+  GameObject *spring_bone_named(const std::string &name);
+  GameObject *spring_first_of(GameObject &bone);
+  void spring_find(bool with_ignored);
+  SpringView::Row *spring_row(const GameObject &first);
+  void spring_unignore(GameObject &first);
+  void spring_set_label(GameObject &first, int label);
+  void spring_apply();
+  void spring_add(GameObject &bone, int label);
+  void spring_remove(GameObject &bone);
+  void spring_bake();
+  void spring_command(const std::vector<std::string> &t);
+  void draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *bone);
   /* The Sequencer window (task 0062, sequencer_window.cpp). */
   SeqEditorState seqr_;
   std::vector<std::string> seq_paths_;
@@ -2599,6 +2643,8 @@ class Editor {
   bool moonray_busy_for_test() const { return mr_task_ || mr_locate_; }
   size_t body_builds_for_test() const { return body_.builds; }
   bool body_ghost_for_test() const { return body_.ghost; }
+  bool body_solving_for_test() const { return body_.solve != nullptr; }
+  const body::FlightResult &body_result_for_test() const { return body_.flight; }
  private:
   double libs_last_check_ = 0.0;  // (the libraries are asked about at most once a day)
   static bool prepare_install(UpdateDownload &job, std::string &error);  // (on the downloading thread: no editor state)

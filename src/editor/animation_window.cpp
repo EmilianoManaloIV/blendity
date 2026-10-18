@@ -506,12 +506,18 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
              "Find where the feet and hands rest (low and still) and mark those frames as contacts under the ruler (Cascadeur's\n"
              "fulcrum points). Contacts set by hand (console: body contacts add) are kept. Pin holds them still: body contacts pin."))
     body_contacts_command({"body", "contacts", "find"});
-  if (button(u.px(60), "Flight", body_.ghost,
+  if (button(u.px(60), "Flight", body_.ghost && body_.kind == "Flight",
              "Physics in the air (Cascadeur's AutoPhysics): between contacts the center of mass follows a parabola under gravity\n"
              "and the spin keeps its angular momentum. Shows the corrected body as a ghost; frames green (fine), blue (changed),\n"
              "red (impossible: change the timing or the poses). Apply writes it into the clip."))
-    body_flight_command({"body", "flight", body_.ghost ? "off" : "show"});
-  if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected flight into the clip (one undo step)."))
+    body_flight_command({"body", "flight", body_.ghost && body_.kind == "Flight" ? "off" : "show"});
+  const bool solving = body_.solve != nullptr, shown = body_.ghost && body_.kind == "AutoPhysics";
+  if (button(u.px(86), solving ? "Solving..." : "AutoPhysics", shown || solving,
+             "The whole clip made physically possible (Cascadeur's AutoPhysics): the center of mass and the spin moved as little as\n"
+             "they can while the contacts' forces stay inside their friction and gravity does the rest - the take-offs and landings\n"
+             "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colours, then Apply."))
+    body_physics_command({"body", "physics", shown || solving ? "off" : "show"});
+  if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
     body_flight_command({"body", "flight", "apply"});
 }
 
