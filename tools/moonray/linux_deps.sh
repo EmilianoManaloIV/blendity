@@ -4,6 +4,7 @@
 # superbuild (building/Rocky9). Mounts: /src the openmoonray checkout, /opt/MoonRay/installs the cached install root.
 # Each dependency's licence is kept in /opt/MoonRay/installs/licenses/<name> for the archive.
 set -euo pipefail
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}  # (the script reads it; set -u)
 source /src/building/Rocky9/install_packages.sh --nocuda --noqt --nocgroup  # (libcgroup: for Arras only; its RPM link is gone)
 export PATH=/installs/cmake-3.23.1-linux-x86_64/bin:$PATH
 mkdir -p /work/build-deps
