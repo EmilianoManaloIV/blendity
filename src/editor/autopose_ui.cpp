@@ -158,6 +158,7 @@ bool Editor::autopose_gizmo(uint64_t id, Vec3 target) {
 
 /* autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks */
 void Editor::autopose_command(const std::vector<std::string> &t) {
+  if (!assist_require(Assist::Physics)) return;
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "";
   if (sub == "on" || sub == "off") {
     autopose_.on = sub == "on";

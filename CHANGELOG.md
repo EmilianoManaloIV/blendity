@@ -2,6 +2,89 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 145): Walk Cycle, walking made from the rig (task 0125)
+
+**Asked:** "Is there an automatic walk system in cascadeuer and other smart systems that would be ideal?" Cascadeur
+has none (its locomotion is AI inbetweening and AI root motion). The user chose procedural gaits (as 3ds Max's
+CATMotion) and footsteps along a path (as Biped's), in clips and live in Play, AI inbetweening as an optional
+download, every one of them a switch, and hand animation unchanged.
+
+**Added**
+- **Walk Cycle** (the Rigging window's section and the Animation window's button, with the assistant on).
+  - **Presets:** walk, jog, run, sneak and limp, or walk, trot and gallop for four legs.
+  - **Numbers:** speed, stride, feet-down share, foot lift, heel-toe roll, bounce, sway, hip twist and drop, the spine's
+    counter-turn, arm swing, elbows, lean and crouch.
+  - **Generate** keys the rig's own controls (hips, the feet's IK targets and poles, feet, spine, head, arms):
+    - feet planted while down, never sliding;
+    - the stride from the Froude number, so a style fits any size;
+    - a treadmill loop or travelling forward;
+    - the planted frames written as contacts.
+  - Presets are blended by weight and saved as `.gait` files. Console: `walk cycle | set | save | load | presets`.
+- Learn: "Walk Cycle: walking made from the rig".
+
+**Fixed on the way**
+- **The loop's seam:** rounding a cycle to whole frames through the speed also changed the stride (the Froude number),
+  so the period never landed on a frame. It adjusts the stride now.
+- **A foot at a cycle's boundary:** float time left it "mid-swing" for a frame, so the pelvis wasn't lowered for it and
+  IK fell 5 cm short. The phase is snapped at whole cycles, and every foot is kept within reach.
+
+**Fixed after review**
+- The hands kept still: the arms' IK pulled them back to rest. Their IK targets and poles are keyed now.
+- The heel-toe roll turned the foot about the ankle, so the toes went through the floor at push-off. It rolls about the
+  heel, then the toes, and just off the ground the ankle is raised until the toes clear (18 mm low before, 0 now).
+- `walk set` reset every other number to the defaults; it changes only the one named.
+- A rig facing -Z walked backwards: forward is read from the feet (ankle to toes), else the armature's turn.
+- Shapes taken for legs too eagerly; a heel bone taken for the toes; IK controls found outside the character.
+- Legs without IK bent their knees the wrong way: the knee bends the way it did at rest.
+- Generate on a failed walk left an empty clip, cut a longer clip short and removed the hands' contacts. It works on a
+  copy now, keeps the clip's length and replaces only the legs' contacts and the tracks it wrote.
+- The preset list stuck on a loaded or blended style (it says "custom"); the Animation window's body strip and the
+  Inspector's Body Mass showed with the physics tools off.
+
+**Checked**
+- New tests (round 145):
+  - a planted foot's heel or toes (whichever is on the ground) move 0.000 mm; the treadmill's seam is 0.0002 mm;
+  - the soles never below the floor; the hands swing 37 cm through their IK targets; a rig facing -Z walks -Z;
+  - `walk set` keeps the other numbers; a walk too long to make leaves no clip;
+  - a leg twice as long gives a cycle twice as long and sqrt(2) as slow;
+  - a run is airborne, a walk never;
+  - a trot moves diagonal pairs together;
+  - presets, blending and `.gait` files;
+  - the quadruped walks;
+  - AutoPhysics moves a walk at most a few centimetres;
+  - in the editor: refused while off, on as ordinary keys that edit by hand and undo in one step.
+- Unit checks (rounds 144-145 in one chain): Windows 10,857, 0 failed (808 tests); the whole suite in render-cache
+  verify mode: 10,858, 0 failed, 0 stale pictures. Linux with libraries: 10,593, 0 failed. Sanitizer build: 10,471,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 144): animation assistants switched on, and the rig read for walking (task 0124, ADR 0045)
+
+**Asked:** "Make sure that this is a toggle feature. Not all animation needs these feature." and "Still have the
+ability to traditionally pose and animate models."
+
+**Added**
+- **Preferences > Animation Assistants:** a switch each for the Physics Tools (on, as they were), Walk Cycle,
+  Footsteps, Locomotion and AI Inbetweening (off).
+  - Off, a tool's buttons, sections, overlays and live work are gone, and its console command says how to turn it on.
+  - Hand animation never changes.
+  - Console: `assist list | on <name> | off <name>`.
+- **`gait::analyse`:**
+  - legs, arms, hips, spine and head, by names (Mixamo, Unity, Rigify, `create_rig`'s; `limb_of` is now public) and
+    then by shape;
+  - two legs or four, each with its IK target and pole;
+  - the measures and the rest pose;
+  - a reason when a rig can't walk.
+
+**Checked**
+- New tests (round 144):
+  - the switches' first state, refusals and keeping through a restart;
+  - the humanoid and quadruped rigs, Mixamo and Rigify names and an unnamed stick figure read right;
+  - degenerate rigs refused with why.
+- Unit checks: with round 145's (one chain for rounds 144-145; there). With every assistant off, the existing
+  animation tests pass unchanged.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
 ## 2026-10-18 (round 143): MoonRay built for macOS too (task 0111)
 
 **Asked:** round 135's "Do and finish all tasks" - the MoonRay archive for macOS, which CI hadn't built yet.

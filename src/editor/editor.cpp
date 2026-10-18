@@ -494,7 +494,7 @@ void Editor::frame(std::vector<Event> &events) {
   }
   /* IK after scripts move the targets, before anything draws (task 0048); unchanged inputs cost a hash per chain. */
   if (solve_constraints(*scene_)) ui_.redraw = true;
-  if (play_dt > 0.0f) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
+  if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
   if (cam_.update(now)) ui_.redraw = true;
   update_camera_focus();
   /* Live preview: re-render the preview when anything it depends on changes
@@ -3212,7 +3212,9 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "moonray") return moonray_command(t);  // moonray status | install [archive] | remove | folder [path] | check (task 0112)
   if (c == "body") return body_command(t);
   if (c == "spring") return spring_command(t);
-  if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
+  if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)
+  if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
+  if (c == "walk") return walk_command(t);          // walk cycle | set | save | load | presets (task 0125)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
@@ -4295,6 +4297,7 @@ void Editor::draw_dialogs() {
         u.tooltip("Off: only released versions (v0.10.0...). On: also preview builds of single pull requests, when published.");
         draw_libraries_settings();
         draw_moonray_settings();
+        draw_assist_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
         Recti b = u.popup_row(u.row_h() + u.px(10));
@@ -4331,6 +4334,7 @@ void Editor::load_prefs() {
     std::string k = line.substr(0, eq), v = line.substr(eq + 1);
     if (!v.empty() && v.back() == '\r') v.pop_back();
     if (moonray_pref(k, v)) continue;
+    if (assist_pref(k, v)) continue;
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
@@ -4432,6 +4436,7 @@ void Editor::save_prefs() {
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += assist_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\n", viewport_device_, other_views_follow_ ? 1 : 0,
                  simpler_while_moving_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,

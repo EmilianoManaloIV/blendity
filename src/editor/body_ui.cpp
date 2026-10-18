@@ -54,6 +54,7 @@ bool Editor::flight_current(const AnimationClip *clip) {
 
 /* The center of mass: its path over the clip, where it is now (a ball) and straight below it on the ground. */
 void Editor::draw_body_overlay() {
+  if (!assist_on(Assist::Physics)) return;
   AnimationClipPtr clip = anim_clip();
   if (flight_current(clip.get()) && !body_.ghost_bones.empty()) {
     const size_t f = (size_t)std::max(0, std::min((int)body_.ghost_bones.size() - 1, (int)std::lround(anim_.frame)));
@@ -75,6 +76,7 @@ void Editor::draw_body_overlay() {
 
 /* Under the ruler: each contact as a bar (one row per bone), the flight's frames in Cascadeur's colours. */
 void Editor::draw_body_strip(const Recti &ruler, float end) {
+  if (!assist_on(Assist::Physics)) return;
   AnimationClipPtr clip = anim_clip();
   if (!clip) return;
   auto &u = ui_;
@@ -317,6 +319,7 @@ void Editor::body_poll() {
 
 /* body show on|off | mass [kg] | com [frame] | contacts ... | flight ...: the console's physics for animation. */
 void Editor::body_command(const std::vector<std::string> &t) {
+  if (!assist_require(Assist::Physics)) return;
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "mass";
   if (sub == "contacts") return body_contacts_command(t);
   if (sub == "flight") return body_flight_command(t);

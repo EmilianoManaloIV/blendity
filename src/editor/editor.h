@@ -47,6 +47,7 @@
 #include "../scene/spring_bones.h"
 #include "../scene/ragdoll.h"
 #include "../scene/autopose.h"
+#include "../scene/gait.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -1028,6 +1029,28 @@ class Editor {
   void spring_bake();
   void spring_command(const std::vector<std::string> &t);
   void draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *bone);
+  /* ---- Animation assistants (task 0124, ADR 0045, assist_prefs.cpp): each switched on in Preferences ---- */
+ public:
+  enum class Assist { Physics, Walk, Footsteps, Locomotion, Ai, Count };
+  bool assist_on(Assist a) const;
+  void assist_set(Assist a, bool on);
+  void assist_command(const std::vector<std::string> &t);
+
+ private:
+  bool assist_[(int)Assist::Count] = {true, false, false, false, false};  // (physics tools as before; the rest off)
+  bool assist_require(Assist a);
+  bool assist_pref(const std::string &key, const std::string &value);
+  std::string assist_prefs_text() const;
+  void draw_assist_settings();
+  /* ---- Walk Cycle (task 0125, walk_ui.cpp) ---- */
+  struct WalkView {
+    gait::WalkSettings settings;
+  } walk_;
+  gait::Rig walk_rig();
+  void walk_preset(const std::string &name);
+  void walk_generate();
+  void draw_walk_section(ui::Layout &lay);
+  void walk_command(const std::vector<std::string> &t);
   /* ---- AutoPosing (task 0122, autopose_ui.cpp) ---- */
   struct AutoPoseView {
     bool on = false;
@@ -2672,6 +2695,9 @@ class Editor {
   bool moonray_busy_for_test() const { return mr_task_ || mr_locate_; }
   size_t body_builds_for_test() const { return body_.builds; }
   bool body_ghost_for_test() const { return body_.ghost; }
+  bool body_show_com_for_test() const { return body_.show_com; }
+  bool autopose_on_for_test() const { return autopose_.on; }
+  const gait::WalkSettings &walk_settings_for_test() const { return walk_.settings; }
   bool body_solving_for_test() const { return body_.solve != nullptr; }
   const body::FlightResult &body_result_for_test() const { return body_.flight; }
  private:

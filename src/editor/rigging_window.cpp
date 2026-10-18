@@ -240,7 +240,8 @@ void Editor::draw_rigging_window(const Recti &r) {
         u.pop_id();
       }
   }
-  if (section("Spring Bones")) draw_spring_section(lay, root, a);
+  if (assist_on(Assist::Physics) && section("Spring Bones")) draw_spring_section(lay, root, a);
+  if (assist_on(Assist::Walk) && section("Walk Cycle")) draw_walk_section(lay);
   u.pop_id();
   content_h = lay.y + off - r.y + u.px(20);
   u.end_scroll();

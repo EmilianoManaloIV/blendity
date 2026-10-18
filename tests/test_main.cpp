@@ -37,6 +37,7 @@
 #include "../src/scene/spring_bones.h"
 #include "../src/scene/ragdoll.h"
 #include "../src/scene/autopose.h"
+#include "../src/scene/gait.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
@@ -33946,5 +33947,360 @@ static void round81_tests() {
     std::printf("    %zu contacts found; the flight shown: %s, %zu flight(s), up to %.2f m changed\n", contacts, ed.body_ghost_for_test() ? "yes" : "no",
                 fr.flights.size(), fr.flights.empty() ? 0.0f : fr.flights[0].shift);
     CHECK(contacts >= 2 && ed.body_ghost_for_test() && fr.flights.size() == 1 && fr.flights[0].shift > 0.05f);
+  });
+  /* ---------------------------------------------------------------- round 144: animation assistants and the rig read for walking (task 0124) */
+  test("assistants: the physics tools on and the rest off at first; a switched-off one does nothing and says how to turn it on; kept in the preferences", [] {
+    const std::string prefs = fs::join(test_dir(), "r144_prefs.txt");
+    fs::remove_file(prefs);
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      const bool first = ed.assist_on(Editor::Assist::Physics) && !ed.assist_on(Editor::Assist::Walk) && !ed.assist_on(Editor::Assist::Footsteps) &&
+                         !ed.assist_on(Editor::Assist::Locomotion) && !ed.assist_on(Editor::Assist::Ai);
+      ed.command("assist off physics");
+      ed.command("body show on");     // (refused: off)
+      ed.command("autopose on");      // (refused: off)
+      const bool refused = !ed.body_show_com_for_test() && !ed.autopose_on_for_test();
+      for (int f = 0; f < 3; f++) ed.step_frame_headless();  // (the windows draw without them: no crash)
+      ed.command("assist on walk");
+      ed.command("assist on nonsense");  // (warned, nothing changes)
+      ed.save_prefs_for_test();
+      std::printf("    at first: physics on, the rest off: %s; physics off refuses body / autopose: %s\n", first ? "yes" : "no", refused ? "yes" : "no");
+      CHECK(first && refused);
+    }
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.load_prefs_for_test();
+      CHECK(!ed.assist_on(Editor::Assist::Physics) && ed.assist_on(Editor::Assist::Walk) && !ed.assist_on(Editor::Assist::Ai));
+      ed.command("assist on physics");
+      ed.command("body show on");
+      CHECK(ed.assist_on(Editor::Assist::Physics) && ed.body_show_com_for_test());
+    }
+    fs::remove_file(prefs);
+  });
+  test("gait: the humanoid and quadruped rigs read for walking - legs, feet, sides, IK controls, hips, spine, head and measures", [] {
+    {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f));
+      const gait::Rig r = gait::analyse(s, *rig);
+      std::printf("    humanoid: %s; %zu legs (%s %s), %zu arms, hips %s, head %s, %zu spine bones; hip height %.3f, leg %.3f, stance %.3f\n",
+                  r.valid() ? "ok" : r.problem.c_str(), r.legs.size(), r.legs.size() > 0 ? r.legs[0].upper->name.c_str() : "-",
+                  r.legs.size() > 1 ? r.legs[1].upper->name.c_str() : "-", r.arms.size(), r.hips ? r.hips->name.c_str() : "-",
+                  r.head ? r.head->name.c_str() : "-", r.spine.size(), r.hip_height, r.leg_length, r.stance_width);
+      CHECK(r.valid() && !r.quadruped && r.legs.size() == 2 && r.arms.size() == 2);
+      CHECK(r.legs[0].side == 0 && r.legs[1].side == 1 && r.legs[0].foot && r.legs[0].foot->name == "LeftFoot" && r.legs[0].ik_target &&
+            r.legs[0].ik_target->name == "LeftFootIK");
+      CHECK(r.hips && r.hips->name == "Hips" && r.head && r.head->name == "Head" && r.spine.size() == 3);
+      CHECK(std::fabs(r.leg_length - 0.88f) < 0.02f && r.hip_height > 0.85f && r.stance_width > 0.15f);
+    }
+    {
+      Scene s;
+      GameObject *rig = create_rig(s, true, Vec3(0.0f));
+      const gait::Rig r = gait::analyse(s, *rig);
+      int front = 0;
+      for (const gait::Leg &l : r.legs) front += l.front;
+      std::printf("    quadruped: %s; %zu legs, %d front, first %s\n", r.valid() ? "ok" : r.problem.c_str(), r.legs.size(), front,
+                  r.legs.empty() ? "-" : r.legs[0].upper->name.c_str());
+      CHECK(r.valid() && r.quadruped && r.legs.size() == 4 && front == 2 && r.legs[0].front && r.legs[0].upper->name.find("Front") != std::string::npos);
+    }
+  });
+  test("gait: Mixamo and Rigify names, an unnamed stick figure by its shape; a rig without legs or with one is refused with why", [&] {
+    auto stick = [&](Scene &s, const std::vector<std::string> &names, bool second_leg = true) {
+      /* hips at 1 m, a spine and head, legs (upper, lower, foot) and arms (upper, lower, hand) - named as given */
+      GameObject *arm = s.create("Rig");
+      arm->add<Armature>();
+      const Quat down = Quat::euler({180, 0, 0}), out_l = Quat::euler({0, 0, 90}), out_r = Quat::euler({0, 0, -90});
+      GameObject *hips = r139_bone(s, names[0], arm, {0, 1, 0}, Quat(), 0.1f);
+      GameObject *spine = r139_bone(s, names[1], hips, {0, 0.1f, 0}, Quat(), 0.3f);
+      r139_bone(s, names[2], spine, {0, 0.3f, 0}, Quat(), 0.2f);
+      for (int side = 0; side < (second_leg ? 2 : 1); side++) {
+        const float x = side ? 0.1f : -0.1f;
+        GameObject *up = r139_bone(s, names[3 + side * 3], hips, {x, 0, 0}, down, 0.45f);
+        GameObject *lo = r139_bone(s, names[4 + side * 3], up, {0, 0.45f, 0}, Quat(), 0.43f);
+        r139_bone(s, names[5 + side * 3], lo, {0, 0.43f, 0}, Quat::euler({-90, 0, 0}), 0.12f);
+        GameObject *ua = r139_bone(s, names[9 + side * 3], spine, {x * 1.5f, 0.25f, 0}, side ? out_r : out_l, 0.28f);
+        GameObject *la = r139_bone(s, names[10 + side * 3], ua, {0, 0.28f, 0}, Quat(), 0.25f);
+        r139_bone(s, names[11 + side * 3], la, {0, 0.25f, 0}, Quat(), 0.08f);
+      }
+      return arm;
+    };
+    const std::vector<std::string> mixamo = {"mixamorig:Hips", "mixamorig:Spine", "mixamorig:Head", "mixamorig:LeftUpLeg", "mixamorig:LeftLeg",
+                                             "mixamorig:LeftFoot", "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:RightFoot",
+                                             "mixamorig:LeftArm", "mixamorig:LeftForeArm", "mixamorig:LeftHand", "mixamorig:RightArm",
+                                             "mixamorig:RightForeArm", "mixamorig:RightHand"};
+    const std::vector<std::string> rigify = {"spine", "spine.001", "head", "thigh.L", "shin.L", "foot.L", "thigh.R", "shin.R", "foot.R",
+                                             "upper_arm.L", "forearm.L", "hand.L", "upper_arm.R", "forearm.R", "hand.R"};
+    std::vector<std::string> unnamed;
+    for (int i = 0; i < 15; i++) unnamed.push_back(i ? strprintf("Bone.%03d", i) : std::string("Bone"));
+    int ok = 0;
+    const std::vector<std::string> *sets[3] = {&mixamo, &rigify, &unnamed};
+    for (const std::vector<std::string> *names : sets) {
+      Scene s;
+      GameObject *arm = stick(s, *names);
+      const gait::Rig r = gait::analyse(s, *arm);
+      const bool legs = r.valid() && r.legs.size() == 2 && r.legs[0].side == 0 && r.legs[1].side == 1 && r.legs[0].foot && r.hips &&
+                        r.hips->name == (*names)[0];
+      std::printf("    %-16s %s: %zu legs, %zu arms, hips %s, left foot %s\n", (*names)[3].c_str(), r.valid() ? "ok" : r.problem.c_str(), r.legs.size(),
+                  r.arms.size(), r.hips ? r.hips->name.c_str() : "-", r.legs.empty() || !r.legs[0].foot ? "-" : r.legs[0].foot->name.c_str());
+      ok += legs;
+    }
+    CHECK(ok == 3);
+    Scene one;
+    const gait::Rig r1 = gait::analyse(one, *stick(one, mixamo, false));
+    Scene none;
+    GameObject *bare = none.create("Rig");
+    bare->add<Armature>();
+    r139_bone(none, "Lonely", bare, {0, 1, 0});
+    const gait::Rig r0 = gait::analyse(none, *bare);
+    std::printf("    one leg: '%s'; no legs: '%s'\n", r1.problem.c_str(), r0.problem.c_str());
+    CHECK(!r1.valid() && !r0.valid() && !r1.problem.empty() && !r0.problem.empty());
+  });
+  /* ---------------------------------------------------------------- round 145: Walk Cycle, the procedural gait (task 0125) */
+  /* The humanoid rig walking: `gen` generates into `clip` and returns each frame's ankles (the feet's heads) as keyed. */
+  struct R145Walk {
+    Scene s;
+    GameObject *rig = nullptr;
+    gait::Rig g;
+    AnimationClip clip;
+    std::vector<std::vector<Vec3>> ankles;  // [frame][leg]
+    std::vector<std::vector<Vec3>> heels, toes;  // [frame][leg]: the sole's back and front, where the foot rolls about
+    int frames = 0;
+  };
+  auto r145_walk = [](R145Walk &w, const char *preset, bool in_place, int cycles = 2, bool quadruped = false) {
+    w.rig = create_rig(w.s, quadruped, Vec3(0.0f));
+    w.g = gait::analyse(w.s, *w.rig);
+    gait::WalkSettings ws;
+    gait::preset(preset, w.g, ws.style);
+    ws.in_place = in_place, ws.cycles = cycles;
+    std::string error;
+    w.frames = gait::generate(w.s, *w.rig, w.g, ws, AnimationClip(), w.clip, error);
+    if (!w.frames) std::printf("    %s\n", error.c_str());
+    body::for_each_frame(w.s, *w.rig, w.clip, 0, std::max(0, w.frames - 1), [&](int) {
+      std::vector<Vec3> a, h, t;
+      const Vec3 up(0, 1, 0), fwd = normalize(Vec3(w.g.forward.x, 0.0f, w.g.forward.z));
+      for (const gait::Leg &l : w.g.legs) {
+        const Vec3 at = l.foot->world_position();
+        const Quat turn = l.foot->world_rotation() * l.rest_foot.conjugate();  // (the foot's turn from its rest)
+        a.push_back(at);
+        h.push_back(at + turn.rotate(up * -w.g.sole));
+        t.push_back(at + turn.rotate(fwd * l.foot_length - up * w.g.sole));
+      }
+      w.ankles.push_back(a), w.heels.push_back(h), w.toes.push_back(t);
+    });
+  };
+  test("walk cycle: a planted foot stays put (no sliding); a treadmill cycle loops; the keys are on the rig's own controls", [&] {
+    R145Walk w;
+    r145_walk(w, "walk", false);
+    /* A planted foot rolls - about its heel as it lands, its toes as it leaves - so the ankle rises; what must not move
+     * is the part on the ground: every planted frame has its heel or its toes where they are mid-stance (foot flat). */
+    float slide = 0;
+    int planted = 0;
+    for (const AnimationClip::Contact &k : w.clip.contacts) {
+      const size_t leg = k.bone == w.g.legs[0].lower->name ? 0 : 1, mid = (size_t)((k.from + k.to) * 0.5f);
+      if (mid >= w.ankles.size()) continue;
+      for (int f = (int)k.from; f <= (int)k.to && f < (int)w.ankles.size(); f++, planted++)
+        slide = std::max(slide, std::min(length(w.heels[(size_t)f][leg] - w.heels[mid][leg]), length(w.toes[(size_t)f][leg] - w.toes[mid][leg])));
+    }
+    const bool on_controls = w.clip.find("LeftFootIK", "Position", 2) && w.clip.find("Hips", "Position", 1) && !w.clip.find("LeftUpperLeg", "Rotation", 0);
+    std::printf("    travelling walk: %d frames, %zu contacts, %d planted frames, the most a planted heel or toe moved %.3f mm; keyed on the IK targets: %s\n",
+                w.frames, w.clip.contacts.size(), planted, slide * 1000.0f, on_controls ? "yes" : "no");
+    CHECK(w.frames > 20 && w.clip.contacts.size() >= 4 && slide < 1e-3f && on_controls);
+    R145Walk loop;
+    r145_walk(loop, "walk", true);
+    float seam = 0;
+    for (size_t i = 0; i < loop.g.legs.size(); i++) seam = std::max(seam, length(loop.ankles.back()[i] - loop.ankles.front()[i]));
+    const float drift = length(loop.ankles[loop.ankles.size() / 8][0] - loop.ankles[0][0]);  // (a quarter of a cycle on)
+    std::printf("    treadmill: the last frame's ankles %.4f mm from the first's; a quarter cycle on the left ankle %.3f m away (it moves under the body)\n",
+                seam * 1000.0f, drift);
+    CHECK(seam < 1e-3f && drift > 0.05f);
+  });
+  test("walk cycle: stride and cadence scale with the leg (Froude); a run has both feet up, a walk never; a trot moves diagonal pairs together", [&] {
+    Scene s;
+    GameObject *small = create_rig(s, false, Vec3(0.0f)), *big = create_rig(s, false, Vec3(5, 0, 0));
+    big->set_local_scale({2, 2, 2});
+    const gait::Rig a = gait::analyse(s, *small), b = gait::analyse(s, *big);
+    gait::Style walk;
+    gait::preset("walk", a, walk);
+    const gait::Cycle ca = gait::cycle_of(a, walk), cb = gait::cycle_of(b, walk);
+    std::printf("    a %.2f m leg: %.2f m cycles at %.2f m/s every %.2f s; a %.2f m leg: %.2f m at %.2f m/s every %.2f s\n", a.leg_length, ca.length, ca.speed,
+                ca.period, b.leg_length, cb.length, cb.speed, cb.period);
+    CHECK(std::fabs(cb.length / ca.length - 2.0f) < 0.02f && std::fabs(cb.period / ca.period - std::sqrt(2.0f)) < 0.02f);
+    auto airborne = [&](const char *name) {
+      gait::Style st;
+      gait::preset(name, a, st);
+      const gait::Cycle c = gait::cycle_of(a, st);
+      int up = 0;
+      for (int k = 0; k < 200; k++) {
+        const gait::Pose p = gait::pose_at(a, st, c.period * k / 200.0f, true);
+        bool any = false;
+        for (uint8_t d : p.down) any = any || d;
+        up += !any;
+      }
+      return up;
+    };
+    const int run = airborne("run"), walked = airborne("walk");
+    Scene q;
+    GameObject *dog = create_rig(q, true, Vec3(0.0f));
+    const gait::Rig d = gait::analyse(q, *dog);
+    gait::Style trot;
+    gait::preset("trot", d, trot);
+    int together = 0, apart = 0;
+    for (int k = 0; k < 100; k++) {
+      const gait::Pose p = gait::pose_at(d, trot, gait::cycle_of(d, trot).period * k / 100.0f, true);
+      together += p.down[0] == p.down[3] && p.down[1] == p.down[2];  // (front left with hind right, front right with hind left)
+      apart += p.down[0] != p.down[1];
+    }
+    std::printf("    airborne samples of 200: run %d, walk %d; trot: diagonals together %d of 100, the front pair apart %d\n", run, walked, together, apart);
+    CHECK(run > 10 && walked == 0 && together == 100 && apart > 50);
+  });
+  test("walk cycle: presets for two and four legs, blended by weight, saved as .gait text; the quadruped walks; AutoPhysics barely changes a walk", [&] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const gait::Rig g = gait::analyse(s, *rig);
+    int ok = 0;
+    for (const std::string &n : gait::preset_names(false)) {
+      gait::Style st;
+      ok += gait::preset(n, g, st);
+    }
+    gait::Style w, r, back;
+    gait::preset("walk", g, w), gait::preset("run", g, r);
+    const gait::Style mid = gait::blend(w, r, 0.25f);
+    CHECK(ok == 5 && std::fabs(mid.speed - (w.speed + (r.speed - w.speed) * 0.25f)) < 1e-5f);
+    CHECK(gait::style_from_text(gait::style_text(mid), back) && std::fabs(back.duty - mid.duty) < 1e-5f && back.name == mid.name);
+    CHECK(!gait::style_from_text("nonsense", back));
+    R145Walk dog;
+    r145_walk(dog, "walk", false, 2, true);
+    std::printf("    quadruped walk: %d frames, %zu contacts\n", dog.frames, dog.clip.contacts.size());
+    CHECK(dog.frames > 20 && dog.clip.contacts.size() >= 8);
+    R145Walk walk;
+    r145_walk(walk, "walk", false);
+    const body::Body b = body::build(walk.s, *walk.rig, 75.0f);
+    body::FlightResult res;
+    std::string error;
+    const bool solved = body::autophysics(walk.s, *walk.rig, walk.clip, b, body::AutoPhysicsSettings(), res, error);
+    std::printf("    AutoPhysics on the generated walk: %s, the body moved up to %.1f mm\n", solved ? "solved" : error.c_str(), solved ? res.flights[0].shift * 1000.0f : 0.0f);
+    /* (a few centimetres, spread over the walk: the pelvis goes forward at one speed, where a real walk slows over each
+     * planted foot and speeds up between - physics evens that out) */
+    CHECK(solved && res.flights[0].shift < 0.06f);
+  });
+  test("walk cycle in the editor: refused while switched off; on, a run is keyed into the character's clip as ordinary keys - edited by hand, undone in one step", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk cycle walk");  // (off: refused)
+    const bool refused = ed.anim_clip_for_test() == nullptr;
+    ed.command("assist on walk");
+    ed.command("window Rigging");
+    ed.step_frame_headless();  // (the Walk Cycle section draws)
+    ed.command("walk cycle run 4.2 2 inplace");
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *hips = clip ? clip->find("Hips", "Position", 1) : nullptr;
+    const size_t keys = hips ? hips->keys.size() : 0, contacts = clip ? clip->contacts.size() : 0;
+    /* By hand, after: a key moved like any other. */
+    ed.command("anim key Hips Position 1 3 1.5");
+    ed.step_frame_headless();
+    const AnimTrack *edited = ed.anim_clip_for_test() ? ed.anim_clip_for_test()->find("Hips", "Position", 1) : nullptr;
+    const bool hand = edited && std::fabs(edited->sample(3.0f) - 1.5f) < 1e-4f;
+    ed.command("undo");  // (the hand edit)
+    ed.step_frame_headless();
+    ed.command("undo");  // (the whole cycle)
+    ed.step_frame_headless();
+    AnimationClipPtr after = ed.anim_clip_for_test();
+    const bool undone = !after || !after->find("Hips", "Position", 1) || after->find("Hips", "Position", 1)->keys.empty();
+    std::printf("    off: refused %s; on: %zu keys on the hips' height, %zu contacts; a hand edit kept: %s; undone in one step: %s\n", refused ? "yes" : "no", keys,
+                contacts, hand ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(refused && keys > 20 && contacts >= 4 && hand && undone);
+  });
+  test("learn: the Walk Cycle lesson's Try it switches the assistant on and makes a person walk two cycles forward", [] {
+    std::string cmds;
+    for (int i = 0; i < lesson_count() && cmds.empty(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find("| A person walking two cycles forward");
+      const size_t start = at == std::string::npos ? std::string::npos : body.rfind("! cmd:", at);
+      if (start != std::string::npos) cmds = body.substr(start + 6, at - start - 6);
+    }
+    CHECK(!cmds.empty());
+    Editor ed;
+    ed.init_headless(1400, 900);
+    size_t a = 0;
+    while (a <= cmds.size()) {
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *z = clip ? clip->find("Hips", "Position", 2) : nullptr;
+    const float went = z && !z->keys.empty() ? z->keys.back().value - z->keys.front().value : 0.0f;
+    std::printf("    the walk assistant %s; the hips went %.2f m forward over %zu keys\n", ed.assist_on(Editor::Assist::Walk) ? "on" : "off", went,
+                z ? z->keys.size() : 0);
+    CHECK(ed.assist_on(Editor::Assist::Walk) && went > 1.5f);
+  });
+  test("walk cycle: the toes and heels never go through the floor; the hands swing through their IK targets; a rig facing -Z walks its own way", [&] {
+    R145Walk w;
+    r145_walk(w, "walk", false);
+    float floor = 1e9f, lowest = 1e9f;
+    for (size_t i = 0; i < w.g.legs.size(); i++) floor = std::min(floor, w.heels[0][i].y);  // (both feet planted at the start)
+    for (size_t f = 0; f < w.toes.size(); f++)
+      for (size_t i = 0; i < w.g.legs.size(); i++) lowest = std::min(lowest, std::min(w.toes[f][i].y, w.heels[f][i].y));
+    /* The hands: their IK targets keyed (else the arm IK would pull them back to rest), the hand swinging along the walk. */
+    const AnimTrack *hand_ik = w.clip.find("LeftHandIK", "Position", 2);
+    GameObject *hand = w.s.find_by_name("LeftHand");
+    float lo = 1e9f, hi = -1e9f;
+    body::for_each_frame(w.s, *w.rig, w.clip, 0, w.frames - 1, [&](int) {
+      const float rel = hand->world_position().z - w.g.hips->world_position().z;  // (relative to the body, which travels)
+      lo = std::min(lo, rel), hi = std::max(hi, rel);
+    });
+    std::printf("    the soles' lowest point %.2f mm below the floor; the left hand IK keyed: %s, the hand swings %.0f mm fore and aft\n",
+                (floor - lowest) * 1000.0f, hand_ik ? "yes" : "no", (hi - lo) * 1000.0f);
+    CHECK(floor - lowest < 1e-3f && hand_ik && hi - lo > 0.08f);
+    /* Turned round: the walk goes the way the feet point, not +Z. */
+    R145Walk back;
+    back.rig = create_rig(back.s, false, Vec3(0.0f));
+    back.rig->set_local_rotation(Quat::axis_angle(Vec3(0, 1, 0), 3.14159265f));
+    back.g = gait::analyse(back.s, *back.rig);
+    gait::WalkSettings ws;
+    gait::preset("walk", back.g, ws.style);
+    ws.in_place = false;
+    std::string error;
+    back.frames = gait::generate(back.s, *back.rig, back.g, ws, AnimationClip(), back.clip, error);
+    float z0 = 0, z1 = 0;
+    body::for_each_frame(back.s, *back.rig, back.clip, 0, back.frames - 1, [&](int f) {
+      const float z = back.g.hips->world_position().z;
+      if (f == 0) z0 = z;
+      z1 = z;
+    });
+    std::printf("    turned round: forward (%.2f, %.2f, %.2f); the hips went %.2f m along z\n", back.g.forward.x, back.g.forward.y, back.g.forward.z, z1 - z0);
+    CHECK(back.g.forward.z < -0.9f && z1 - z0 < -1.0f);
+  });
+  test("walk cycle in the editor: `walk set` changes one number and keeps the rest; a walk that can't be made leaves no clip behind", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("assist on walk");
+    ed.command("walk set lift 0.2");
+    ed.command("walk set duty 0.7");
+    const gait::Style s = ed.walk_settings_for_test().style;
+    const bool kept = std::fabs(s.lift - 0.2f) < 1e-5f && std::fabs(s.duty - 0.7f) < 1e-5f;
+    /* 64 cycles at a crawl: over the 4,000-frame limit - refused, and the character still has no clip. */
+    ed.command("walk cycle walk 0.05 64");
+    ed.step_frame_headless();
+    const bool none = ed.anim_clip_for_test() == nullptr;
+    std::printf("    after two `walk set`s: lift %.2f, duty %.2f; the refused walk left a clip: %s\n", s.lift, s.duty, none ? "no" : "yes");
+    CHECK(kept && none);
   });
 }

@@ -151,7 +151,8 @@ everything):
   as a ghost before it is applied. **Spring bones** for hair, ears, tails and cloth, found automatically by name and
   shape (Mixamo, VRM, Japanese rigs), live in Play or baked into the clip. An **active ragdoll** (Jolt) plays the clip
   with motors, so hits and falls react, and **AutoPosing** poses the whole body by dragging one hand, foot, head or
-  the hips, balanced over the feet.
+  the hips, balanced over the feet. **Walk Cycle** makes walking and running cycles from the rig (feet never sliding,
+  for two legs or four). Every such assistant is a switch in Preferences: hand animation never changes.
 
 Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2. The keymap starts
 from Unity, Unreal, Blender, Maya, 3ds Max or SketchUp, and **Edit > Editor Feel** switches the keys and the Scene view's
@@ -196,7 +197,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (10832 unit checks in 798 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (10857 unit checks in 808 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).
