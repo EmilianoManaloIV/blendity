@@ -67,7 +67,11 @@ jobs:
       matrix:
         image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12', 'fedora:41']
     runs-on: ubuntu-latest
-    container: ${{ matrix.image }}
+    # (MoonRay places its memory on NUMA nodes with mbind, which Docker's default seccomp profile refuses; a machine
+    # or WSL2 has no such filter.)
+    container:
+      image: ${{ matrix.image }}
+      options: --security-opt seccomp=unconfined
     defaults:
       run:
         shell: bash
