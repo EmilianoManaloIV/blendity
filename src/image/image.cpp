@@ -989,6 +989,120 @@ bool write_pfm(const std::string &path, const float *rgb, int width, int height)
   return fs::write_file(path, data);
 }
 
+namespace {
+
+void exr_put(std::string &d, const void *p, size_t n) { d.append((const char *)p, n); }
+void exr_u32(std::string &d, uint32_t v) {
+  const unsigned char b[4] = {(unsigned char)v, (unsigned char)(v >> 8), (unsigned char)(v >> 16), (unsigned char)(v >> 24)};
+  exr_put(d, b, 4);
+}
+void exr_f32(std::string &d, float f) {
+  uint32_t v;
+  std::memcpy(&v, &f, 4);
+  exr_u32(d, v);
+}
+void exr_attr(std::string &d, const char *name, const char *type, uint32_t size) {
+  exr_put(d, name, std::strlen(name) + 1), exr_put(d, type, std::strlen(type) + 1), exr_u32(d, size);
+}
+
+/* One axis of a box resize: each of the n outputs the area-weighted mean of the source span it covers (count of them,
+ * stride apart, in rows of `row` floats), so an odd size loses nothing and weighs nothing twice. */
+std::vector<float> exr_box_axis(const float *src, size_t size, int count, int n, size_t stride, size_t lines, size_t line_step,
+                                size_t out_step) {
+  std::vector<float> out(size / count * n);
+  const double scale = (double)count / n;
+  for (size_t l = 0; l < lines; l++)
+    for (int i = 0; i < n; i++) {
+      const double a = i * scale, b = (i + 1) * scale;
+      double sum[3] = {0, 0, 0};
+      for (int s = (int)a; s < count && s < b; s++) {
+        const double wt = std::min(b, s + 1.0) - std::max(a, (double)s);
+        for (int c = 0; c < 3; c++) sum[c] += wt * src[l * line_step + s * stride + c];
+      }
+      for (int c = 0; c < 3; c++) out[l * out_step + i * stride + c] = (float)(sum[c] / scale);
+    }
+  return out;
+}
+
+/* The next mip level, half the size rounded down (at least 1), box-filtered by area. */
+std::vector<float> exr_halve(const float *src, int w, int h, int nw, int nh) {
+  const std::vector<float> across = exr_box_axis(src, (size_t)w * h * 3, w, nw, 3, (size_t)h, (size_t)w * 3, (size_t)nw * 3);  // (rows)
+  return exr_box_axis(across.data(), across.size(), h, nh, (size_t)nw * 3, (size_t)nw, 3, 3);  // (columns: h -> nh)
+}
+
+}  // namespace
+
+bool write_texture_exr(const std::string &path, const float *rgb, int width, int height) {
+  if (width <= 0 || height <= 0 || width > (1 << 16) || height > (1 << 16)) return false;
+  const int tile = 64;
+  int levels = 1;
+  while ((std::max(width, height) >> levels) > 0) levels++;  // (round down: down to 1 x 1)
+  std::string d;
+  exr_u32(d, 20000630u);  // (the magic number)
+  exr_u32(d, 2u | 0x200u);  // (version 2, one tiled part)
+  exr_attr(d, "channels", "chlist", 3 * 18 + 1);
+  for (const char *ch : {"B", "G", "R"}) {  // (sorted by name, as the format wants)
+    exr_put(d, ch, 2);
+    exr_u32(d, 2);  // (32-bit float)
+    exr_u32(d, 0);  // (pLinear and three reserved bytes)
+    exr_u32(d, 1), exr_u32(d, 1);
+  }
+  d.push_back('\0');
+  exr_attr(d, "compression", "compression", 1);
+  d.push_back('\0');
+  for (const char *name : {"dataWindow", "displayWindow"}) {
+    exr_attr(d, name, "box2i", 16);
+    exr_u32(d, 0), exr_u32(d, 0), exr_u32(d, (uint32_t)(width - 1)), exr_u32(d, (uint32_t)(height - 1));
+  }
+  exr_attr(d, "lineOrder", "lineOrder", 1);
+  d.push_back('\0');
+  exr_attr(d, "pixelAspectRatio", "float", 4);
+  exr_f32(d, 1.0f);
+  exr_attr(d, "screenWindowCenter", "v2f", 8);
+  exr_f32(d, 0.0f), exr_f32(d, 0.0f);
+  exr_attr(d, "screenWindowWidth", "float", 4);
+  exr_f32(d, 1.0f);
+  exr_attr(d, "tiles", "tiledesc", 9);
+  exr_u32(d, tile), exr_u32(d, tile);
+  d.push_back('\1');  // (mip-map levels, rounded down)
+  static const char wrap[] = "periodic,periodic";
+  exr_attr(d, "wrapmodes", "string", (uint32_t)std::strlen(wrap));
+  exr_put(d, wrap, std::strlen(wrap));
+  d.push_back('\0');  // (the header's end)
+  /* The offset table (every level's tiles, row by row), then the tiles: each B, G, R a line at a time. */
+  size_t tiles = 0, pixels = 0;
+  for (int l = 0; l < levels; l++) {
+    const int lw = std::max(1, width >> l), lh = std::max(1, height >> l);
+    tiles += (size_t)((lw + tile - 1) / tile) * ((lh + tile - 1) / tile);
+    pixels += (size_t)lw * lh;
+  }
+  const size_t table = d.size();
+  d.reserve(table + tiles * (8 + 20) + pixels * 12);  // (the file's exact size: no copying as it grows)
+  d.resize(table + tiles * 8);
+  const float *level = rgb;  // (level 0 is the caller's; each next one made from the last)
+  std::vector<float> made;
+  size_t k = 0;
+  for (int l = 0, lw = width, lh = height; l < levels; l++) {
+    for (int ty = 0; ty * tile < lh; ty++)
+      for (int tx = 0; tx * tile < lw; tx++, k++) {
+        const uint64_t at = d.size();
+        for (int b = 0; b < 8; b++) d[table + k * 8 + b] = (char)(at >> (8 * b));
+        const int x0 = tx * tile, y0 = ty * tile, tw = std::min(tile, lw - x0), th = std::min(tile, lh - y0);
+        exr_u32(d, tx), exr_u32(d, ty), exr_u32(d, l), exr_u32(d, l);
+        exr_u32(d, (uint32_t)(tw * th * 3 * 4));
+        for (int y = y0; y < y0 + th; y++)
+          for (int c = 2; c >= 0; c--)
+            for (int x = x0; x < x0 + tw; x++) exr_f32(d, level[((size_t)y * lw + x) * 3 + c]);
+      }
+    if (l + 1 == levels) break;
+    const int nw = std::max(1, width >> (l + 1)), nh = std::max(1, height >> (l + 1));
+    made = exr_halve(level, lw, lh, nw, nh);
+    level = made.data();
+    lw = nw, lh = nh;
+  }
+  return fs::write_file(path, d);
+}
+
 bool load_image(const std::string &path, Bitmap &out, std::string &error) {
   std::string bytes;
   if (!fs::read_file(path, bytes)) {

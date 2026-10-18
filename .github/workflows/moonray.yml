@@ -30,7 +30,7 @@ jobs:
           bash tools/moonray/clone.sh "$RUNNER_TEMP/src"
       - name: Dependencies (cached)
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/deps
           key: moonray-deps-rocky9-${{ env.MOONRAY_TAG }}-${{ hashFiles('tools/moonray/linux_deps.sh') }}
@@ -40,6 +40,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/deps"
           docker run --rm --security-opt seccomp=unconfined -v "$RUNNER_TEMP/src:/src" -v "$RUNNER_TEMP/deps:/opt/MoonRay/installs" \
             -v "$PWD/tools/moonray:/tools" rockylinux:9 bash /tools/linux_deps.sh
+      - name: Keep the dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
       - name: Build and package MoonRay (rockylinux:9)
         run: |
           mkdir -p "$RUNNER_TEMP/out"
@@ -61,7 +67,11 @@ jobs:
       matrix:
         image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12', 'fedora:41']
     runs-on: ubuntu-latest
-    container: ${{ matrix.image }}
+    # (MoonRay places its memory on NUMA nodes with mbind, which Docker's default seccomp profile refuses; a machine
+    # or WSL2 has no such filter.)
+    container:
+      image: ${{ matrix.image }}
+      options: --security-opt seccomp=unconfined
     defaults:
       run:
         shell: bash
@@ -88,6 +98,14 @@ jobs:
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
+      # (Boost.Python and USD need a Python before 3.13, which dropped PyEval_CallMethod; USD's build reads jinja2.)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Python modules USD's build reads
+        run: python3 -m pip install jinja2 PyOpenGL
+      - name: Autotools (MicroHttpd's build may regenerate its configure script)
+        run: brew install automake autoconf libtool
       - name: MoonRay's source
         run: |
           sudo mkdir -p /Applications/MoonRay/source
@@ -96,13 +114,20 @@ jobs:
           bash tools/moonray/clone.sh /Applications/MoonRay/source/openmoonray
       - name: Dependencies (cached)
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /Applications/MoonRay/installs
-          key: moonray-deps-macos-arm64-${{ env.MOONRAY_TAG }}-${{ hashFiles('tools/moonray/macos_build.sh') }}
+          key: moonray-deps-macos-arm64-py311-${{ env.MOONRAY_TAG }}-${{ hashFiles('tools/moonray/macos_build.sh') }}
       - name: Build the dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: bash tools/moonray/macos_build.sh deps
+      # (saved at once, not at the job's end: a failure building MoonRay keeps hours of dependencies)
+      - name: Keep the dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /Applications/MoonRay/installs
+          key: ${{ steps.deps.outputs.cache-primary-key }}
       - name: Build MoonRay
         run: bash tools/moonray/macos_build.sh moonray
       - name: Package

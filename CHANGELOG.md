@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 136): MoonRay checked against the real renderer (task 0113)
+
+**Asked:** "Do and finish all tasks" (round 135's), with CI's Linux MoonRay archive downloaded into WSL to check the
+export against the real thing ("Yes, download it into WSL").
+
+**Fixed** (each measured in MoonRay v2026.29.1 against F12's path tracer on the same scene)
+- **Textured materials rendered black:** MoonRay's texture system takes only tiled, mip-mapped files (as `maketx`
+  makes them), so every PNG failed. Textures now go as tiled float EXRs with every mip level (`write_texture_exr`,
+  dependency-free, area-weighted levels, wrapping), linear (an 8-bit colour map's sRGB undone first), made on the
+  render's thread and kept while the source is unchanged.
+- **The world map was turned:** its directions were measured with a map whose pixels are their own coordinates; the
+  world, its sky and its azimuth now match to 0.1%.
+- **A sun was twice as bright:** a DistantLight's normalized intensity is Blendity's intensity as it is (both give
+  pi x I of irradiance); it matches to 1%.
+- The world didn't show behind the scene (MoonRay hides lights from the camera by default), and an empty scene
+  rendered black (MoonRay needs geometry in its layer: a speck far below is added).
+- MoonRay's own error lines are in the log.
+- CI's MoonRay build: Python 3.11 (Boost.Python failed on 3.13), autotools on macOS, the dependencies' cache saved
+  even when a later step fails, the check containers allowed `mbind`.
+
+**Checked**
+- New tests (round 136): the texture EXR's tiles where its table says on every level, down to one pixel of the
+  image's exact mean (odd sizes too), made once while its source is unchanged, an unreadable one white; with `BLENDITY_REAL_MOONRAY=1` and MoonRay installed, five scenes rendered in
+  both: the world 1.000, a sky's azimuth 1.000, a sun 0.991, a point light at 1 m 0.891 (MoonRay's falloff is
+  physical), a four-colour texture the same colour in each quadrant.
+- An Opus review (the EXR format checked field by field: no fault); every finding fixed:
+  - textures were converted on the editor's thread, and again on every frame of an animation: they are now made on
+    the render's own thread before MoonRay starts, kept while their source is unchanged, and written without copies;
+  - a texture used by two materials was converted twice;
+  - MoonRay's last error line was lost without its newline, and its errors were logged again on every frame.
+- Unit checks: Windows 10,706 (763 tests); this round's tree alone, Linux without Blender's libraries: 10,334,
+  0 failed. Run together with round 137 (the full chain): Windows 10,753, render-cache verify mode 10,754 (0 stale
+  pictures), Linux with libraries 10,489, the sanitizer build 10,380 (no reports), all 0 failed; `editor_fuzz` in
+  verify mode 6,000 frames, no crash, 0 stale pictures.
+
 ## 2026-10-18 (round 135): MoonRay as an optional external renderer (tasks 0111-0114, ADR 0041)
 
 **Asked:** "Is it possible to integrate MoonRay from DreamWorks into this project?", then "Let's make this an external

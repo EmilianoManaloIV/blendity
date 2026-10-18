@@ -444,6 +444,7 @@ class Editor {
   Vec3 scene_eye() const { return cam_.position(); }
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
+  const std::vector<float> &render_linear_for_test() const { return render_linear_; }  // (the finished render's light, 3 floats a pixel)
   bool rendering_for_test() const { return rendering_; }
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
@@ -2523,6 +2524,7 @@ class Editor {
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel{false};
     std::string image, error;  // (the EXR it writes; what went wrong, with its output's end)
+    std::vector<std::string> complaints;  // (MoonRay's own "Error:" lines: logged even when it renders)
     std::thread thread;
     ~MoonRayJob() {
       cancel.store(true);

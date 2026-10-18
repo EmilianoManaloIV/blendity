@@ -32153,7 +32153,7 @@ static void round81_tests() {
     const float L = std::strtof(text.c_str() + text.find("[\"intensity\"] = ", sp) + 16, nullptr);
     CHECK_NEAR(L, 0.81f / (0.1f * 0.1f), 1e-2);
     const size_t dl = text.find("DistantLight(");
-    CHECK_NEAR(std::strtof(text.c_str() + text.find("[\"intensity\"] = ", dl) + 16, nullptr), 2.0f * 3.14159265f, 1e-4);
+    CHECK_NEAR(std::strtof(text.c_str() + text.find("[\"intensity\"] = ", dl) + 16, nullptr), 2.0f, 1e-4);  // (MoonRay's normalized sun gives pi x its intensity, as Blendity's)
     /* The camera: MoonRay's film width 24 and the focal length giving the same horizontal field of view. */
     const float focal = std::strtof(text.c_str() + text.find("[\"focal\"] = ") + 12, nullptr);
     CHECK_NEAR(24.0f / (2.0f * focal), std::tan(30.0f * 3.14159265f / 180.0f) * 16.0f / 9.0f, 1e-4);
@@ -32166,7 +32166,10 @@ static void round81_tests() {
       worst = std::max(worst, length(a - Vec3(b.x, b.y, -b.z)));
     }
     CHECK(worst < 1e-4f);
-    CHECK(length(moonray::env_map_direction(0.5f, 0.0f) - Vec3(0, 1, 0)) < 1e-4f);
+    /* MoonRay's way round, as measured: v 1 up, u 0 -Z, 0.25 +X, 0.5 +Z (right-handed). */
+    CHECK(length(moonray::env_map_direction(0.5f, 1.0f) - Vec3(0, -1, 0)) < 1e-4f);
+    CHECK(length(moonray::env_map_direction(0.0f, 0.5f) - Vec3(0, 0, -1)) < 1e-4f);
+    CHECK(length(moonray::env_map_direction(0.25f, 0.5f) - Vec3(1, 0, 0)) < 1e-4f);
     CHECK(std::fabs(moonray::env_map_direction(0.3f, 0.5f).y) < 1e-4f);
     for (float u : {0.0f, 0.25f, 0.7f}) CHECK_NEAR(length(moonray::env_map_direction(u, 0.3f)), 1.0f, 1e-5);
     CHECK_NEAR(moonray::ior_from_specular(0.5f), 1.5f, 1e-4);
@@ -32373,5 +32376,250 @@ static void round81_tests() {
     for (int k = 0; k < 4000 && ed.rendering_for_test(); k++) ed.step_frame_headless();
     std::printf("    orthographic: '%s'\n", ed.render_status_for_test().substr(0, 40).c_str());
     CHECK(ed.render_status_for_test().find("MoonRay") == std::string::npos);
+  });
+  /* ---------------------------------------------------------------- round 136: MoonRay checked against the real renderer (task 0113) */
+  test("moonray export: a texture goes as a tiled, mip-mapped EXR (MoonRay takes nothing else) - every level's tiles where the table says, down to one pixel of the image's mean; made once while its source is unchanged", [] {
+    struct Parsed {
+      bool ok = false;
+      int levels = 0, tiles = 0;
+      Vec3 last;  // (the 1 x 1 level's colour)
+    };
+    auto parse = [](const std::string &d, int w, int h) {
+      Parsed p;
+      auto u32 = [&](size_t at) { uint32_t v = 0; std::memcpy(&v, &d[at], 4); return v; };
+      if (d.size() < 8 || u32(0) != 20000630u || !(u32(4) & 0x200u)) return p;
+      size_t at = 8;
+      bool tiled = false;
+      while (at < d.size() && d[at]) {  // (the header's attributes, to the empty name)
+        const std::string name = d.c_str() + at;
+        at += name.size() + 1;
+        at += std::strlen(d.c_str() + at) + 1;
+        const uint32_t size = u32(at);
+        at += 4;
+        if (name == "tiles") tiled = u32(at) == 64 && u32(at + 4) == 64 && d[at + 8] == 1;
+        at += size;
+      }
+      at++;
+      int levels = 1;
+      while ((std::max(w, h) >> levels) > 0) levels++;
+      p.levels = levels;
+      bool good = tiled;
+      for (int l = 0; l < levels; l++) {
+        const int lw = std::max(1, w >> l), lh = std::max(1, h >> l);
+        for (int ty = 0; ty * 64 < lh; ty++)
+          for (int tx = 0; tx * 64 < lw; tx++, p.tiles++) {
+            uint64_t off = 0;
+            std::memcpy(&off, &d[at + (size_t)p.tiles * 8], 8);
+            const int tw = std::min(64, lw - tx * 64), th = std::min(64, lh - ty * 64);
+            good = good && off + 20 + (uint64_t)tw * th * 12 <= d.size() && u32(off) == (uint32_t)tx && u32(off + 4) == (uint32_t)ty &&
+                   u32(off + 8) == (uint32_t)l && u32(off + 12) == (uint32_t)l && u32(off + 16) == (uint32_t)(tw * th * 12);
+            if (good && l + 1 == levels) {
+              float bgr[3];
+              std::memcpy(bgr, &d[off + 20], 12);
+              p.last = Vec3(bgr[2], bgr[1], bgr[0]);
+            }
+          }
+      }
+      p.ok = good;
+      return p;
+    };
+    const std::string dir = fs::join(fs::temp_dir(), "blendity-test-texture-exr");
+    fs::make_dirs(dir);
+    for (Vec2 size : {Vec2(100, 37), Vec2(128, 64)}) {
+      const int w = (int)size.x, h = (int)size.y;
+      std::vector<float> rgb((size_t)w * h * 3);
+      Vec3 mean(0.0f);
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+          const Vec3 c((float)x / w, (float)y / h, 0.25f);
+          rgb[((size_t)y * w + x) * 3] = c.x, rgb[((size_t)y * w + x) * 3 + 1] = c.y, rgb[((size_t)y * w + x) * 3 + 2] = c.z;
+          mean = mean + c / (float)(w * h);
+        }
+      const std::string file = fs::join(dir, "t.exr");
+      CHECK(write_texture_exr(file, rgb.data(), w, h));
+      std::string bytes;
+      fs::read_file(file, bytes);
+      const Parsed p = parse(bytes, w, h);
+      std::printf("    %d x %d: %d levels, %d tiles, %s; the last level (%.3f %.3f %.3f), the mean (%.3f %.3f %.3f)\n", w, h, p.levels, p.tiles,
+                  p.ok ? "each where the table says" : "BROKEN", p.last.x, p.last.y, p.last.z, mean.x, mean.y, mean.z);
+      CHECK(p.ok && p.levels == (w == 100 ? 7 : 8) && p.tiles == (w == 100 ? 8 : 9));
+      CHECK(length(p.last - mean) < 1e-4f);  // (area-weighted all the way down, odd sizes too: the image's mean exactly)
+    }
+    CHECK(!write_texture_exr(fs::join(dir, "none.exr"), nullptr, 0, 0));
+    /* Made once while the source is unchanged (an animation's frames reuse it), again when it changes; an unreadable
+     * source gives a white pixel (the material's own colour) and says so. */
+    const std::string png = fs::join(dir, "src.png"), out = fs::join(dir, "made.exr");
+    std::vector<uint32_t> px(8 * 4, 0xFF808080u);
+    write_png(png, px.data(), 8, 4, 8);
+    std::string e, bytes;
+    const moonray::TextureJob job{png, out, false};
+    CHECK(moonray::convert_texture(job, e));
+    fs::write_file(out, "kept");  // (a stand-in: if it's made again, this goes)
+    CHECK(moonray::convert_texture(job, e));
+    fs::read_file(out, bytes);
+    const bool reused = bytes == "kept";
+    px.assign(64 * 64, 0xFF808080u);
+    for (size_t i = 0; i < px.size(); i += 2) px[i] = 0xFF7F7F7Fu, px[i + 1] = 0xFF818181u;  // (grey on average; a bigger file)
+    write_png(png, px.data(), 64, 64, 64);  // (another size: changed, whatever the clock's resolution)
+    CHECK(moonray::convert_texture(job, e));
+    fs::read_file(out, bytes);
+    const Parsed again = parse(bytes, 64, 64);
+    fs::write_file(png, "not an image");
+    const bool bad = moonray::convert_texture(job, e);
+    fs::read_file(out, bytes);
+    const Parsed white = parse(bytes, 1, 1);
+    std::printf("    the same source: %s; changed: %s (its mean %.4f linear); unreadable: %s, '%s', (%.1f %.1f %.1f)\n", reused ? "reused" : "MADE AGAIN",
+                again.ok ? "made again" : "NOT MADE", again.last.x, bad ? "CONVERTED" : "refused", e.c_str(), white.last.x, white.last.y, white.last.z);
+    CHECK(reused && again.ok && std::fabs(again.last.x - 0.5f * (srgb_byte_to_linear(0x7F) + srgb_byte_to_linear(0x81))) < 1e-5f);
+    CHECK(!bad && !e.empty() && white.ok && length(white.last - Vec3(1.0f)) < 1e-6f);
+    for (const char *f : {"t.exr", "src.png", "made.exr", "made.exr.source"}) fs::remove_file(fs::join(dir, f));
+  });
+  test("moonray (real, BLENDITY_REAL_MOONRAY=1): the installed MoonRay renders scenes as the path tracer does - the world's orientation, a sun's and a point light's brightness, a texture's way round", [] {
+    if (!std::getenv("BLENDITY_REAL_MOONRAY")) {
+      std::printf("    skipped (set BLENDITY_REAL_MOONRAY=1 with MoonRay installed: it renders in it)\n");
+      return;
+    }
+    const moonray::Install in = moonray::locate("");
+    std::printf("    MoonRay: %s %s%s\n", in.ready() ? in.version.c_str() : "not ready", in.root.c_str(), in.problem.empty() ? "" : (" - " + in.problem).c_str());
+    CHECK(in.ready());
+    if (!in.ready()) return;
+    std::string probe_error;
+    CHECK(moonray::probe(in, probe_error));
+    if (!probe_error.empty()) std::printf("    probe: %s\n", probe_error.c_str());
+    /* A scene: a matte floor (albedo 0.5) at y = 0, no other object, the scene's camera off (F12 takes the editor's). */
+    auto scene = [&](Editor &ed) {
+      r34_open(ed);
+      Scene &s = ed.scene();
+      std::vector<GameObject *> drop;
+      s.for_each([&](GameObject &g) {
+        if (g.get<MeshRenderer>() || g.get<Light>() || g.get<Camera>()) drop.push_back(&g);
+      });
+      for (GameObject *g : drop) {
+        if (Camera *c = g->get<Camera>()) c->enabled = false;
+        if (Light *l = g->get<Light>()) l->enabled = false;
+        if (MeshRenderer *m = g->get<MeshRenderer>()) m->enabled = false;
+      }
+      GameObject *floor = s.create("Floor");
+      floor->add<MeshFilter>()->mesh = primitives::grid(40.0f, 4, 4);
+      floor->add<MeshRenderer>()->materials = {make_material("Grey", {0.5f, 0.5f, 0.5f})};
+      ed.scene().render.width = 96, ed.scene().render.height = 54, ed.scene().render.percent = 100, ed.scene().render.samples = 64;
+      ed.scene().render.denoise = false;
+      ed.scene().render.view_transform = 0;  // (Standard: the numbers compared as they are)
+      return floor;
+    };
+    auto render = [&](Editor &ed, bool moon) {
+      ed.moonray_set_for_test(in);
+      ed.command(moon ? "engine moonray" : "engine path");
+      ed.command("render");
+      for (int k = 0; k < 20000 && ed.rendering_for_test(); k++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(moon ? 20 : 0));
+        ed.step_frame_headless();
+      }
+      return ed.render_linear_for_test();
+    };
+    /* The mean light over a part of the image (rows y0..y1, columns x0..x1 in 0..1). */
+    auto mean = [](const std::vector<float> &lin, float x0, float x1, float y0, float y1) {
+      Vec3 s(0.0f);
+      int n = 0;
+      const int w = 96, h = 54;
+      if (lin.size() < (size_t)w * h * 3) return Vec3(-1.0f);
+      for (int y = (int)(y0 * h); y < (int)(y1 * h); y++)
+        for (int x = (int)(x0 * w); x < (int)(x1 * w); x++, n++) s = s + Vec3(lin[((size_t)y * w + x) * 3], lin[((size_t)y * w + x) * 3 + 1], lin[((size_t)y * w + x) * 3 + 2]);
+      return n ? s / (float)n : s;
+    };
+    auto report = [](const char *what, Vec3 pt, Vec3 mr) {
+      std::printf("    %-34s path tracer (%.4f %.4f %.4f), MoonRay (%.4f %.4f %.4f), ratio %.3f\n", what, pt.x, pt.y, pt.z, mr.x, mr.y, mr.z,
+                  (mr.x + mr.y + mr.z) / std::max(1e-6f, pt.x + pt.y + pt.z));
+    };
+    {  // The world alone (Unity's gradient), looking at the horizon: sky above, ground's colour below (the floor hidden).
+      Editor ed;
+      GameObject *floor = scene(ed);
+      floor->get<MeshRenderer>()->enabled = false;
+      ed.command("camera 0 0 10 0 1 0");  // (yaw, pitch, distance, pivot: level, at the horizon)
+      const std::vector<float> pt = render(ed, false), mr = render(ed, true);
+      report("the world, top rows (sky)", mean(pt, 0, 1, 0, 0.2f), mean(mr, 0, 1, 0, 0.2f));
+      report("the world, bottom rows (ground)", mean(pt, 0, 1, 0.8f, 1), mean(mr, 0, 1, 0.8f, 1));
+      report("the world, left third", mean(pt, 0, 0.33f, 0.3f, 0.7f), mean(mr, 0, 0.33f, 0.3f, 0.7f));
+      for (float y0 : {0.0f, 0.8f}) {
+        const Vec3 a = mean(pt, 0, 1, y0, y0 + 0.2f), b = mean(mr, 0, 1, y0, y0 + 0.2f);
+        CHECK(length(a - b) < 0.03f * length(a));
+      }
+    }
+    {  // A sun straight down, the world black: the floor's light.
+      Editor ed;
+      scene(ed);
+      ed.scene().environment.mode = 3;
+      ed.scene().environment.color = Vec3(0.0f);
+      GameObject *sun = ed.scene().create("Sun");
+      Light *l = sun->add<Light>();
+      l->type = 0, l->intensity = 1.0f, l->color = Vec3(1.0f);
+      sun->set_local_rotation(Quat::euler({90, 0, 0}));
+      ed.command("camera 0 35 6 0 0 0");
+      const std::vector<float> pt = render(ed, false), mr = render(ed, true);
+      report("a sun from above, the floor", mean(pt, 0.3f, 0.7f, 0.4f, 0.8f), mean(mr, 0.3f, 0.7f, 0.4f, 0.8f));
+      const Vec3 a = mean(pt, 0.3f, 0.7f, 0.4f, 0.8f), b = mean(mr, 0.3f, 0.7f, 0.4f, 0.8f);
+      CHECK(length(a - b) < 0.03f * length(a));
+    }
+    {  // A point light 1 m above the floor, the world black: the floor below it.
+      Editor ed;
+      scene(ed);
+      ed.scene().environment.mode = 3;
+      ed.scene().environment.color = Vec3(0.0f);
+      GameObject *lamp = ed.scene().create("Lamp");
+      Light *l = lamp->add<Light>();
+      l->type = 1, l->intensity = 1.0f, l->range = 10.0f, l->color = Vec3(1.0f);
+      lamp->set_local_position({0, 1, 0});
+      ed.command("camera 0 60 4 0 0 0");
+      const std::vector<float> pt = render(ed, false), mr = render(ed, true);
+      report("a point light 1 m up, under it", mean(pt, 0.45f, 0.55f, 0.4f, 0.6f), mean(mr, 0.45f, 0.55f, 0.4f, 0.6f));
+      const Vec3 a = mean(pt, 0.45f, 0.55f, 0.4f, 0.6f), b = mean(mr, 0.45f, 0.55f, 0.4f, 0.6f);
+      const float r = (b.x + b.y + b.z) / std::max(1e-6f, a.x + a.y + a.z);
+      CHECK(r > 0.8f && r < 1.25f);  // (MoonRay's falls off physically, Blendity's by Unity's Range: matched at 1 m)
+    }
+    auto ratio = [&](const std::vector<float> &pt, const std::vector<float> &mr, float x0, float x1, float y0, float y1) {
+      const Vec3 a = mean(pt, x0, x1, y0, y1), b = mean(mr, x0, x1, y0, y1);
+      return (b.x + b.y + b.z) / std::max(1e-6f, a.x + a.y + a.z);
+    };
+    {  // The physical sky with its sun to one side: the world map turned the same way (its brightest third the same side).
+      Editor ed;
+      GameObject *floor = scene(ed);
+      floor->get<MeshRenderer>()->enabled = false;
+      ed.scene().environment.mode = 1;
+      GameObject *sun = ed.scene().create("Sun");
+      Light *l = sun->add<Light>();
+      l->type = 0, l->intensity = 0.0001f;  // (it places the sky's sun; too faint to light anything)
+      sun->set_local_rotation(Quat::euler({20, 60, 0}));
+      ed.command("camera 0 10 10 0 1 0");
+      const std::vector<float> pt = render(ed, false), mr = render(ed, true);
+      report("a sky, left third", mean(pt, 0, 0.33f, 0.2f, 0.5f), mean(mr, 0, 0.33f, 0.2f, 0.5f));
+      report("a sky, right third", mean(pt, 0.67f, 1, 0.2f, 0.5f), mean(mr, 0.67f, 1, 0.2f, 0.5f));
+      CHECK(std::fabs(ratio(pt, mr, 0, 0.33f, 0.2f, 0.5f) - 1.0f) < 0.05f && std::fabs(ratio(pt, mr, 0.67f, 1, 0.2f, 0.5f) - 1.0f) < 0.05f);
+    }
+    {  // A floor with a four-colour texture (red, green / blue, white): each quadrant the same colour in both (the UVs' way round).
+      Editor ed;
+      GameObject *floor = scene(ed);
+      floor->get<MeshFilter>()->mesh = primitives::grid(4.0f, 1, 1);
+      const std::string png = fs::join(fs::temp_dir(), "blendity-test-quadrants.png");
+      std::vector<uint32_t> px(64 * 64);
+      for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) px[(size_t)y * 64 + x] = y < 32 ? (x < 32 ? 0xFFFF0000u : 0xFF00FF00u) : (x < 32 ? 0xFF0000FFu : 0xFFFFFFFFu);
+      write_png(png, px.data(), 64, 64, 64);
+      MaterialPtr m = make_material("Quadrants", {1, 1, 1});
+      m->base_map.path = png;
+      m->unlit = true;  // (its colour exactly, no light needed)
+      floor->get<MeshRenderer>()->materials = {m};
+      ed.scene().environment.mode = 3;
+      ed.scene().environment.color = Vec3(0.0f);
+      ed.command("camera 0 89 4 0 0 0");
+      const std::vector<float> pt = render(ed, false), mr = render(ed, true);
+      int same = 0;
+      for (float qx : {0.3f, 0.6f})
+        for (float qy : {0.3f, 0.6f}) {
+          const Vec3 a = mean(pt, qx, qx + 0.1f, qy, qy + 0.1f), b = mean(mr, qx, qx + 0.1f, qy, qy + 0.1f);
+          std::printf("    quadrant at (%.1f, %.1f): path tracer (%.2f %.2f %.2f), MoonRay (%.2f %.2f %.2f)\n", qx, qy, a.x, a.y, a.z, b.x, b.y, b.z);
+          same += length(a - b) < 0.1f * std::max(0.1f, length(a));
+        }
+      CHECK(same == 4);
+    }
   });
 }

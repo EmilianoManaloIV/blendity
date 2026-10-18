@@ -235,14 +235,34 @@ bool Editor::begin_moonray_render(const moonray::ExportScene &sc, const MoonRayF
   job->image = rep.image_path;
   const std::string scene = moonray::path_for(in, rep.scene_path);
   MoonRayJob *j = job.get();  // (the job outlives its thread: its destructor joins it)
-  job->thread = std::thread([j, in, scene] {
-    std::string tail;
+  job->thread = std::thread([j, in, scene, textures = std::move(rep.texture_jobs)] {
+    for (const moonray::TextureJob &tj : textures) {  // (here, not on the editor's thread: a big image takes a while)
+      if (j->cancel.load()) return j->state.store(MoonRayJob::Cancelled);
+      std::string e;
+      if (!moonray::convert_texture(tj, e) && j->complaints.size() < 20)
+        j->complaints.push_back("the texture " + tj.source + " couldn't be read (" + e + "): its material's colour is used");
+    }
+    std::string tail, line;
+    auto complain = [&] {  // (its "Error:" lines - a texture it couldn't read - kept to be logged, even when it renders)
+      const size_t at = line.find("Error:");
+      if (at != std::string::npos && j->complaints.size() < 20) {
+        std::string msg = line.substr(at);
+        msg.erase(std::remove(msg.begin(), msg.end(), '\x1b'), msg.end());
+        j->complaints.push_back(msg);
+      }
+      line.clear();
+    };
     const int code = moonray::run(in, {"-in", scene}, [&](const std::string &s) {
       tail += s;
+      for (char c : s) {
+        if (c == '\n' || c == '\r') complain();
+        else line += c;
+      }
       if (tail.size() > 4096) tail.erase(0, tail.size() - 2048);
       const float p = moonray::parse_progress(tail.size() > 200 ? tail.substr(tail.size() - 200) : tail);
       if (p >= 0.0f) j->progress.store(p);
     }, &j->cancel);
+    complain();  // (a last line without its newline)
     if (code == sys::kExitCancelled) return j->state.store(MoonRayJob::Cancelled);
     if (code == 0 && fs::exists(j->image)) return j->state.store(MoonRayJob::Done);
     j->error = strprintf("exit %d: %s", code, tail.size() > 600 ? tail.substr(tail.size() - 600).c_str() : tail.c_str());
@@ -274,6 +294,11 @@ void Editor::step_moonray_render() {
   }
   const std::shared_ptr<MoonRayJob> job = std::move(mr_job_);
   rendering_ = false;
+  for (const std::string &c : job->complaints) {  // (once each: an animation's frames all say the same)
+    if (std::find(mr_notes_shown_.begin(), mr_notes_shown_.end(), c) != mr_notes_shown_.end()) continue;
+    mr_notes_shown_.push_back(c);
+    Log::warn("MoonRay: %s", c.c_str());
+  }
   if (st != MoonRayJob::Done) {
     render_status_ = st == MoonRayJob::Cancelled ? "MoonRay: stopped" : "MoonRay failed: " + job->error;
     (st == MoonRayJob::Cancelled ? Log::info : Log::error)("%s", render_status_.c_str());
