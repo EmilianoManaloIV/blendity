@@ -33176,7 +33176,10 @@ static void round81_tests() {
       if (c.flight_from >= 0) CHECK(flight_err < 0.2 && spin_spread < 0.5);
     }
     std::printf("    the slowest: %.0f ms for 100 frames (GO under about 1 s)\n", worst_ms);
-    CHECK(worst_ms < 5000.0);  // (a guard: the GO was measured alone on the development machine, under 0.5 s; CI's runners are slower and shared)
+#if defined(NDEBUG) && !defined(__SANITIZE_ADDRESS__)
+    CHECK(worst_ms < 5000.0);  // (a guard in optimized builds: the GO was measured alone on the development machine, under 0.5 s;
+                               // CI's runners are slower and shared, its sanitizer build took 13 s)
+#endif
   });
   test("autophysics spike: a clip that is already possible comes back nearly as it was; bad input is refused", [&] {
     body::CentroidalInput in;  // (standing still on both feet: possible as it is)

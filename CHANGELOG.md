@@ -110,7 +110,8 @@ can also deselect or uncatogorize the chains if it's unneeded"; then "Finish and
   - no limit on a clip's length, no cancel between passes, non-finite lengths not refused;
   - a result could arrive in Play, show on another scene with a clip where the old one was, or replace Flight's;
   - a contact pushed at its first frame's tip, not where the clip has it.
-- Unit checks: with round 139's (one chain for both; there).
+- Unit checks: with round 139's (one chain for both; there). CI's sanitizer runner took 13 s on the spike's four clips
+  (the guard was 5 s): their time is checked in optimized builds only.
 - Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
 
 ## 2026-10-18 (round 137): physics for animation: the body's masses, contacts and flight (tasks 0115-0117, ADR 0042)
