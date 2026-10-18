@@ -48,6 +48,8 @@
 #include "../scene/ragdoll.h"
 #include "../scene/autopose.h"
 #include "../scene/gait.h"
+#include "../scene/footsteps.h"
+#include "../scene/locomotion.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -1051,6 +1053,21 @@ class Editor {
   void walk_generate();
   void draw_walk_section(ui::Layout &lay);
   void walk_command(const std::vector<std::string> &t);
+  /* ---- Footsteps along a path (task 0126, footsteps_ui.cpp) ---- */
+  std::string steps_path_;  // the Rigging window's Path field
+  GroundGrid play_ground_;  // Locomotion's ground in Play: the scene's static meshes, gathered at Play start (task 0127)
+  void steps_focus();
+  GameObject *steps_group();
+  std::vector<steps::Plan::Print> steps_prints(GameObject &group, std::vector<steps::Plan::Print> *planned = nullptr);
+  GameObject *steps_root();
+  std::function<bool(Vec3, Vec3 &, Vec3 &)> steps_ground(const GameObject *root, const GameObject *path);
+  bool steps_apply(const steps::Plan &plan, const std::vector<steps::Plan::Print> &planned, const std::string &path_name, const char *label);
+  void steps_walk_path(const std::string &curve_name, bool keep_moved);
+  void steps_update();
+  void steps_command(const std::vector<std::string> &t);
+  void draw_steps_section(ui::Layout &lay);
+  void draw_footprint_soles();
+  void draw_footprint_frames(const Recti &view);
   /* ---- AutoPosing (task 0122, autopose_ui.cpp) ---- */
   struct AutoPoseView {
     bool on = false;

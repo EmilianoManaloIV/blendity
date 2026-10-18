@@ -494,6 +494,41 @@ Vec3 euler_near(Vec3 e, Vec3 near) {
 
 }  // namespace
 
+void apply(Scene &scene, const Rig &rig, const Pose &p, float elbow, const Drive &d) {
+  const Vec3 up(0, 1, 0), f = normalize(flat(d.turn.rotate(rig.forward))), right = cross(up, f);
+  rig.hips->set_world_position(p.hips_pos);
+  rig.hips->set_world_rotation(p.hips_rot);
+  if (d.upper) {
+    for (size_t i = 0; i < rig.spine.size() && i < p.spine.size(); i++) rig.spine[i]->set_world_rotation(normalize(p.spine[i] * rig.spine[i]->world_rotation()));
+    if (rig.head) rig.head->set_world_rotation(normalize(p.head * rig.head->world_rotation()));
+    /* The arms placed, then their IK controls where the arm now ends (IK then holds them there). */
+    for (size_t i = 0; i < rig.arms.size() && i < p.arm.size(); i++) {
+      const Arm &a = rig.arms[i];
+      place_arm(a, p.arm[i], elbow, up, right);
+      if (i >= d.arm_ik.size() || !d.arm_ik[i] || !a.hand) continue;
+      a.ik_target->set_world_position(a.hand->world_position());
+      if (a.ik_pole && a.lower) {
+        const Vec3 root = a.upper->world_position(), mid = a.lower->world_position(), line = a.hand->world_position() - root;
+        Vec3 bend = (mid - root) - line * (dot(mid - root, line) / std::max(1e-9f, dot(line, line)));
+        if (length(bend) > 1e-4f) a.ik_pole->set_world_position(mid + normalize(bend) * std::max(0.3f, length(line)));
+      }
+    }
+  }
+  for (size_t i = 0; i < rig.legs.size() && i < p.ankle.size(); i++)
+    if (i < d.leg_ik.size() && d.leg_ik[i]) {
+      rig.legs[i].ik_target->set_world_position(p.ankle[i]);
+      if (rig.legs[i].ik_pole && i < d.pole_at.size()) rig.legs[i].ik_pole->set_world_position(d.pole_at[i]);
+    }
+  solve_constraints(scene);
+  for (size_t i = 0; i < rig.legs.size() && i < p.ankle.size(); i++) {
+    const Leg &l = rig.legs[i];
+    if (i >= d.leg_ik.size() || !d.leg_ik[i]) two_bone(*l.upper, *l.lower, *l.foot, p.ankle[i], d.turn.rotate(l.rest_bend));
+    l.foot->set_world_rotation(p.foot_turn[i]);
+  }
+}
+
+std::vector<float> leg_phases(const Rig &rig, const Style &s) { return phases_of(rig, s); }
+
 int bake(Scene &scene, GameObject &anim_root, const Rig &rig, int frames, float fps, float elbow, const std::function<Pose(int)> &pose,
          const AnimationClip &clip, AnimationClip &out, std::string &error) {
   out = clip;
@@ -548,41 +583,17 @@ int bake(Scene &scene, GameObject &anim_root, const Rig &rig, int frames, float 
   for (const Keyed &k : keyed) keep(k.g);
   std::vector<Vec3> pole_rest;
   for (const Leg &l : rig.legs) pole_rest.push_back(l.ik_pole ? l.ik_pole->world_position() : Vec3(0.0f));
-  const Vec3 up(0, 1, 0), f = normalize(flat(rig.forward)), right = cross(up, f);
   std::vector<std::vector<Transform>> locals((size_t)frames + 1);
   std::vector<std::vector<uint8_t>> down((size_t)frames + 1);
   for (int fr = 0; fr <= frames; fr++) {
     for (const auto &st : start) st.first->set_local(st.second);
     const Pose p = pose(fr);
     if (p.ankle.size() != rig.legs.size()) return error = "a frame without its feet", 0;
-    rig.hips->set_world_position(p.hips_pos);
-    rig.hips->set_world_rotation(p.hips_rot);
-    for (size_t i = 0; i < rig.spine.size() && i < p.spine.size(); i++) rig.spine[i]->set_world_rotation(normalize(p.spine[i] * rig.spine[i]->world_rotation()));
-    if (rig.head) rig.head->set_world_rotation(normalize(p.head * rig.head->world_rotation()));
-    /* The arms placed, then their IK controls where the arm now ends (IK then holds them there). */
-    for (size_t i = 0; i < rig.arms.size() && i < p.arm.size(); i++) {
-      const Arm &a = rig.arms[i];
-      place_arm(a, p.arm[i], elbow, up, right);
-      if (!arm_ik[i] || !a.hand) continue;
-      a.ik_target->set_world_position(a.hand->world_position());
-      if (a.ik_pole && a.lower) {
-        const Vec3 root = a.upper->world_position(), mid = a.lower->world_position(), line = a.hand->world_position() - root;
-        Vec3 bend = (mid - root) - line * (dot(mid - root, line) / std::max(1e-9f, dot(line, line)));
-        if (length(bend) > 1e-4f) a.ik_pole->set_world_position(mid + normalize(bend) * std::max(0.3f, length(line)));
-      }
-    }
+    Drive d;
+    d.leg_ik = leg_ik, d.arm_ik = arm_ik;
     const Vec3 moved = flat(p.hips_pos - rig.rest_hips);
-    for (size_t i = 0; i < rig.legs.size(); i++)
-      if (leg_ik[i]) {
-        rig.legs[i].ik_target->set_world_position(p.ankle[i]);
-        if (rig.legs[i].ik_pole) rig.legs[i].ik_pole->set_world_position(pole_rest[i] + moved);
-      }
-    solve_constraints(scene);
-    for (size_t i = 0; i < rig.legs.size(); i++) {
-      const Leg &l = rig.legs[i];
-      if (!leg_ik[i]) two_bone(*l.upper, *l.lower, *l.foot, p.ankle[i], l.rest_bend);
-      l.foot->set_world_rotation(p.foot_turn[i]);
-    }
+    for (size_t i = 0; i < rig.legs.size(); i++) d.pole_at.push_back(pole_rest[i] + moved);
+    apply(scene, rig, p, elbow, d);
     for (const Keyed &k : keyed) locals[(size_t)fr].push_back(k.g->local());
     down[(size_t)fr] = p.down;
   }

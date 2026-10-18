@@ -492,7 +492,9 @@ void Editor::frame(std::vector<Event> &events) {
       step_requested_ = false;
     }
   }
-  /* IK after scripts move the targets, before anything draws (task 0048); unchanged inputs cost a hash per chain. */
+  /* Locomotion's legs on the moved characters (task 0127), then IK after scripts move the targets, before anything
+   * draws (task 0048); unchanged inputs cost a hash per chain. */
+  if (play_dt > 0.0f && assist_on(Assist::Locomotion)) locomotion::step(*scene_, play_dt, play_ground_);
   if (solve_constraints(*scene_)) ui_.redraw = true;
   if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
   if (cam_.update(now)) ui_.redraw = true;
@@ -2976,6 +2978,7 @@ void Editor::enter_play() {
   commit_undo();
   play_backup_ = scene_->clone();
   spring::reset(*scene_);  // (the springs start from the pose Play starts in)
+  play_ground_ = assist_on(Assist::Locomotion) ? locomotion::ground_for(*scene_) : GroundGrid();
   playing_ = true;
   paused_ = false;
   play_time_ = 0;
@@ -2989,6 +2992,7 @@ void Editor::enter_play() {
 void Editor::exit_play() {
   if (!playing_) return;
   clip_before_.clear();  // (key edits are refused in Play; nothing of it belongs to the next step)
+  play_ground_ = GroundGrid();  // (Locomotion's: gathered again at the next Play)
   playing_ = false;
   paused_ = false;
   scene_ = std::move(play_backup_);

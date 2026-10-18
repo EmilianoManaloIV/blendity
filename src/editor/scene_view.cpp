@@ -140,6 +140,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (!piloting) {
     draw_scene_icons(view);
     draw_origins(view);
+    draw_footprint_frames(view);
     draw_guides(view);
     draw_zfight_overlay(view);
     draw_overlap_overlay(view);
@@ -607,6 +608,7 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
 
 void Editor::render_overlays(const Recti &) {
   draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
+  draw_footprint_soles();  // (task 0126)
   /* Wireframes. */
   bool all_wire = shading_ == Shading::Wireframe || shading_ == Shading::ShadedWireframe;
   scene_->for_each([&](GameObject &g) {

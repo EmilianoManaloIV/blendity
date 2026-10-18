@@ -42,6 +42,7 @@ bool Editor::assist_pref(const std::string &k, const std::string &v) {
   for (int i = 0; i < (int)Assist::Count; i++)
     if (k.substr(7) == kAssists[i].key) assist_[i] = v == "1";
   Armature::show_body_mass = assist_[(int)Assist::Physics];
+  Locomotion::live = assist_[(int)Assist::Locomotion];
   return true;
 }
 
@@ -71,6 +72,8 @@ void Editor::assist_set(Assist a, bool on) {
   if (a >= Assist::Count || assist_[(int)a] == on) return;
   assist_[(int)a] = on;
   Armature::show_body_mass = assist_[(int)Assist::Physics];
+  Locomotion::live = assist_[(int)Assist::Locomotion];
+  if (a == Assist::Locomotion && on && playing_) play_ground_ = locomotion::ground_for(*scene_);  // (switched on in Play)
   if (!on && a == Assist::Physics) {  // (what it showed goes with it)
     body_.ghost = false, body_.ghost_bones.clear(), body_.show_com = false;
     body_.solve.reset();

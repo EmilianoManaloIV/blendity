@@ -108,8 +108,9 @@ void Editor::draw_walk_section(ui::Layout &lay) {
 
 /* walk cycle [preset] [speed] [cycles] [inplace|travel] | set <number> <value> | save <file> | load <file> | presets */
 void Editor::walk_command(const std::vector<std::string> &t) {
-  if (!assist_require(Assist::Walk)) return;
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "";
+  if (sub == "path" || sub == "steps") return steps_command(t);  // (footsteps: their own switch)
+  if (!assist_require(Assist::Walk)) return;
   if (sub == "cycle") {
     if (t.size() > 2) walk_preset(to_lower(t[2]));
     if (t.size() > 3) walk_.settings.style.speed = std::max(0.05f, (float)std::atof(t[3].c_str()));

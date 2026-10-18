@@ -2,6 +2,77 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 147): Locomotion, walking live in Play (task 0127)
+
+**Asked:** the plan's "both baked into clips and live in Play" (round 145's question).
+
+**Added**
+- **The Locomotion component** (with the Locomotion assistant on): Walk Cycle's gait made frame by frame from how the
+  character moves - W walks, Shift+W runs, A and D turn, or a PlayerController, a Rigidbody or a script's `set_move`
+  moves it.
+  - The phase goes on with the speed; the walk blends into the run; let go, and it finishes the step and stands.
+  - Each swinging foot is aimed at where the body will be when it lands, on the ground there (a grid of the scene's
+    meshes gathered at Play start): ramps and stairs.
+  - The pelvis stays in reach of both feet and leans into turns. Upper Body off leaves the spine, head and arms to a
+    clip.
+- `gait::apply`: putting a pose on the rig, shared by bake and Locomotion.
+- Learn: "Locomotion: walking live in Play".
+
+**Fixed after review**
+- A prop held in a hand was snapped back every frame (and one a script destroyed would have been written to after):
+  only bones and IK controls are posed now, kept by id, and the rig is read again if one goes.
+- A dog let go kept stepping on the spot (its feet are never all down while it walks): a foot that lands stays down.
+- The ground left out physics bodies and other characters; Follow Ground off while physics or a controller moves the
+  object.
+
+**Checked**
+- New tests (round 147):
+  - 3 s of W: 3.97 m (3.95 expected), planted feet still to 0.001 mm, the stride Walk Cycle's to the millimetre,
+    0.013 ms a frame;
+  - running round a turn the hips lean into it; let go of a run, standing in 0.92 s (within the slowing and one step);
+    a dog stops too;
+  - up a ramp every landing on its surface; a prop a script moves is left alone, and destroyed in Play breaks nothing;
+  - the assistant off, through the editor's Play: no object moves;
+  - the lesson's Try-it, then Play with a script's `set_move`.
+- Unit checks (rounds 146-147 in one chain): Windows 10,872, 0 failed (817 tests); the whole suite in render-cache
+  verify mode: 10,873, 0 failed, 0 stale pictures. Linux with libraries: 10,608, 0 failed. Sanitizer build: 10,486,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 146): Footsteps, walking along a path (task 0126)
+
+**Asked:** the plan's footsteps along a path, as 3ds Max's Biped (round 145's question).
+
+**Added**
+- **Footsteps** (the Rigging window's section, with the assistant on): Walk Along Path lays footprints along a curve at
+  Walk Cycle's stride - short first and last steps, the inner foot's shorter in turns - each dropped onto the mesh
+  under it, and keys the character walking on them (feet planted, the pelvis over them at their height, a higher swing
+  over a step up).
+  - Each print is an object (blue left, red right, its landing frame drawn on it): move or turn it, or change its Frame,
+    then Update. Re-plan lays them out again and keeps the ones moved by hand. One undo step each.
+  - Console: `walk path <curve> | walk steps update | walk steps replan`.
+- `scene_raycast` and a ground grid in the scene module (the footprints; Locomotion's feet).
+- Learn: "Footsteps: walking along a path".
+
+**Fixed after review**
+- A print dragged beyond the leg's reach wasn't reached: the pelvis now goes towards it.
+- Re-plan kept only moved prints, matched by frame (lost after a style change): turned and retimed prints count, and
+  each is matched to the nearest new print of its foot; any left over is reported.
+- A failed clip after the prints were replaced; two characters with one name sharing prints (refused now); a renamed
+  path's message; a first print retimed past frame 0; prints retimed closer than a swing; a huge ground's grid.
+
+**Checked**
+- New tests (round 146):
+  - a straight path: every foot on its print to 0.000 mm, planted feet still, first and last steps short;
+  - a left turn: the inner steps 0.74 m against the outer's 0.81 m, no print on the wrong side;
+  - box stairs: every print on a step, the hips rising 0.90 m;
+  - in the editor: refused while off, a moved print kept by Re-plan and walked on, undone in one step (keys and every
+    print as before), saved and loaded;
+  - a print 0.8 m out reached; a turned print and a moved one kept through a faster style; twin names refused;
+  - the lesson's Try-it.
+- Unit checks: with round 147's (one chain for rounds 146-147; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
 ## 2026-10-18 (round 145): Walk Cycle, walking made from the rig (task 0125)
 
 **Asked:** "Is there an automatic walk system in cascadeuer and other smart systems that would be ideal?" Cascadeur

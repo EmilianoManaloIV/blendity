@@ -135,6 +135,21 @@ int generate(Scene &scene, GameObject &anim_root, const Rig &rig, const WalkSett
 int bake(Scene &scene, GameObject &anim_root, const Rig &rig, int frames, float fps, float elbow, const std::function<Pose(int frame)> &pose,
          const AnimationClip &clip, AnimationClip &out, std::string &error);
 
+/* How a pose is put on the rig: which limbs go through their IK controls, where the legs' poles go, the body's turn
+ * from the rig's rest (the poses' world directions turned by it), and whether the spine, head and arms are posed. */
+struct Drive {
+  std::vector<uint8_t> leg_ik, arm_ik;  // per leg / arm: through its IK target (else its bones are turned here)
+  std::vector<Vec3> pole_at;            // per leg: its IK pole's place
+  Quat turn;                            // the rig's turn since it was read (Locomotion's: the object turned in Play)
+  bool upper = true;                    // the spine, head and arms too
+};
+/* `p` put on the rig (from the pose it is in: bake and Locomotion start each frame from the rest), IK solved, the feet
+ * turned last. */
+void apply(Scene &scene, const Rig &rig, const Pose &p, float elbow, const Drive &d);
+
+/* Each leg's phase offset in the cycle (two legs half a cycle apart; a quadruped's by its gait). */
+std::vector<float> leg_phases(const Rig &rig, const Style &s);
+
 /* The pose `t` seconds into the gait - the generator's own, for the tests and Locomotion (task 0127). `travel`: the body
  * goes forward at the style's speed (off: a treadmill, the feet going back under it). */
 Pose pose_at(const Rig &rig, const Style &s, float t, bool travel);

@@ -38,6 +38,8 @@
 #include "../src/scene/ragdoll.h"
 #include "../src/scene/autopose.h"
 #include "../src/scene/gait.h"
+#include "../src/scene/footsteps.h"
+#include "../src/scene/locomotion.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
@@ -34302,5 +34304,565 @@ static void round81_tests() {
     const bool none = ed.anim_clip_for_test() == nullptr;
     std::printf("    after two `walk set`s: lift %.2f, duty %.2f; the refused walk left a clip: %s\n", s.lift, s.duty, none ? "no" : "yes");
     CHECK(kept && none);
+  });
+  /* ---------------------------------------------------------------- round 146: footsteps along a path (task 0126) */
+  /* A curve object through `pts` (a poly path: straight between its points). */
+  auto r146_path = [](Scene &s, const std::vector<Vec3> &pts) {
+    GameObject *g = s.create("Path");
+    Curve *cv = g->add<Curve>();
+    cv->type = 1;
+    for (Vec3 p : pts) cv->points.push_back({p, 0.0f, 1.0f});
+    return g;
+  };
+  /* The planned walk keyed, and each frame's ankles, heels and toes (as R145Walk's). */
+  struct R146Steps {
+    Scene s;
+    GameObject *rig = nullptr;
+    gait::Rig g;
+    gait::Style style;
+    steps::Plan plan;
+    AnimationClip clip;
+    int frames = 0;
+    std::vector<std::vector<Vec3>> ankles, heels, toes;
+  };
+  auto r146_walk = [](R146Steps &w, const CurvePath &path, const std::function<bool(Vec3, Vec3 &, Vec3 &)> &ground = nullptr) {
+    w.g = gait::analyse(w.s, *w.rig);
+    gait::preset("walk", w.g, w.style);
+    w.plan = steps::plan(w.g, w.style, path, 30.0f, ground);
+    std::string error;
+    w.frames = steps::walk(w.s, *w.rig, w.g, w.style, w.plan, 30.0f, AnimationClip(), w.clip, error);
+    if (!w.frames) std::printf("    %s\n", error.c_str());
+    body::for_each_frame(w.s, *w.rig, w.clip, 0, std::max(0, w.frames - 1), [&](int) {
+      std::vector<Vec3> a, h, t;
+      for (const gait::Leg &l : w.g.legs) {
+        const Vec3 at = l.foot->world_position();
+        const Quat turn = l.foot->world_rotation() * l.rest_foot.conjugate();
+        const Vec3 fwd = turn.rotate(normalize(Vec3(w.g.forward.x, 0.0f, w.g.forward.z)));
+        a.push_back(at);
+        h.push_back(at + turn.rotate(Vec3(0, -w.g.sole, 0)));
+        t.push_back(at + fwd * l.foot_length + turn.rotate(Vec3(0, -w.g.sole, 0)));
+      }
+      w.ankles.push_back(a), w.heels.push_back(h), w.toes.push_back(t);
+    });
+  };
+  test("footsteps: along a straight path every foot lands on its print, planted feet never slide, the first and last steps are short", [&] {
+    R146Steps w;
+    w.rig = create_rig(w.s, false, Vec3(0.0f));
+    GameObject *p = r146_path(w.s, {Vec3(0, 0, 0), Vec3(0, 0, 5)});
+    r146_walk(w, sample_curve(*p->curve(), p->world_matrix()));
+    /* Mid-stance (the foot flat): the ankle on the print. */
+    float miss = 0;
+    int landed = 0;
+    for (size_t i = 2; i + 1 < w.plan.prints.size(); i++) {
+      const steps::Plan::Print &pr = w.plan.prints[i];
+      float next = (float)w.frames;
+      for (size_t j = i + 1; j < w.plan.prints.size(); j++)
+        if (w.plan.prints[j].side == pr.side) { next = w.plan.prints[j].frame; break; }
+      const int mid = (int)std::lround(pr.frame + (next - pr.frame) * 0.3f);
+      if (mid >= (int)w.ankles.size()) continue;
+      miss = std::max(miss, length(w.ankles[(size_t)mid][(size_t)pr.side] - pr.pos)), landed++;
+    }
+    /* A planted foot's heel or toes still (as Walk Cycle's). */
+    float slide = 0;
+    for (const AnimationClip::Contact &k : w.clip.contacts) {
+      const size_t leg = k.bone == w.g.legs[0].lower->name ? 0 : 1, mid = (size_t)((k.from + k.to) * 0.5f);
+      if (mid >= w.ankles.size()) continue;
+      for (int f = (int)k.from; f <= (int)k.to && f < (int)w.ankles.size(); f++)
+        slide = std::max(slide, std::min(length(w.heels[(size_t)f][leg] - w.heels[mid][leg]), length(w.toes[(size_t)f][leg] - w.toes[mid][leg])));
+    }
+    std::vector<float> step;
+    for (size_t i = 2; i < w.plan.prints.size(); i++) step.push_back(w.plan.prints[i].pos.z - w.plan.prints[i - 2].pos.z);
+    const float first = step.front(), last = step.back(), middle = step[step.size() / 2];
+    std::printf("    %zu prints over %d frames: %d landed within %.3f mm; planted feet moved %.3f mm; steps first %.2f, middle %.2f, last %.2f m\n",
+                w.plan.prints.size(), w.frames, landed, miss * 1000.0f, slide * 1000.0f, first, middle, last);
+    CHECK(landed >= 6 && miss < 1e-3f && slide < 1e-3f);
+    CHECK(first < 0.7f * middle && last < 0.9f * middle && std::fabs(w.plan.prints.back().pos.z - 5.0f) < 0.01f);
+  });
+  test("footsteps: on a curve the inner foot takes the shorter steps and the feet never cross; box stairs put every print on a step, the body rising", [&] {
+    R146Steps w;
+    w.rig = create_rig(w.s, false, Vec3(0.0f));
+    /* A quarter circle of radius 2 turning left: the rig walks +Z with its right +X, so about (-2, 0, 0). */
+    std::vector<Vec3> arc;
+    for (int i = 0; i <= 16; i++) {
+      const float a = 3.14159265f * 0.5f * i / 16.0f;
+      arc.push_back(Vec3(2.0f * std::cos(a) - 2.0f, 0.0f, 2.0f * std::sin(a)));
+    }
+    GameObject *p = r146_path(w.s, arc);
+    r146_walk(w, sample_curve(*p->curve(), p->world_matrix()));
+    float inner = 0, outer = 0;
+    int ni = 0, no = 0, crossed = 0;
+    const int left = 0;  // (side 0: the left foot)
+    for (size_t i = 2; i < w.plan.prints.size(); i++) {
+      const steps::Plan::Print &a = w.plan.prints[i - 2], &b = w.plan.prints[i];
+      if (a.side != b.side) continue;
+      const float d = length(b.pos - a.pos);
+      if (b.side == left) inner += d, ni++;
+      else outer += d, no++;
+    }
+    for (const steps::Plan::Print &pr : w.plan.prints) {
+      const float r = length(Vec3(pr.pos.x + 2.0f, 0.0f, pr.pos.z));  // (from the turn's centre)
+      crossed += pr.side == left ? r > 2.0f : r < 2.0f;
+    }
+    inner /= std::max(1, ni), outer /= std::max(1, no);
+    std::printf("    a left turn: the inner (left) foot's steps %.2f m, the outer's %.2f m; prints on the wrong side %d\n", inner, outer, crossed);
+    CHECK(inner < outer * 0.95f && crossed == 0);
+    /* Stairs: six boxes, 15 cm rises and 40 cm goings, walked up along +Z. */
+    Editor ed;
+    r34_open(ed);
+    std::vector<float> tops;
+    for (int k = 0; k < 6; k++) {
+      ed.command("create Cube");
+      GameObject *c = ed.active_object_for_test();
+      const float h = 0.15f * (k + 1);
+      c->set_local_scale({2.0f, h, 0.4f});
+      c->set_world_position(Vec3(20.0f, h * 0.5f, 1.2f + 0.4f * k));
+      tops.push_back(h);
+    }
+    tops.push_back(0.0f);  // (the floor before the stairs)
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));  // (away from the sample scene's objects)
+    GameObject *path = r146_path(ed.scene(), {Vec3(20, 0, 0), Vec3(20, 0, 3.2f)});
+    ed.mark_changed_for_test("Stairs");
+    ed.command("assist on footsteps");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk path " + path->name);
+    ed.step_frame_headless();
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    int prints = 0, on_step = 0;
+    float highest = 0;
+    for (const auto &o : ed.scene().objects()) {
+      if (!o->get<Footprint>()) continue;
+      prints++;
+      const float ground = o->world_position().y - g.sole;
+      for (float t : tops) on_step += std::fabs(ground - t) < 1e-3f;
+      highest = std::max(highest, ground);
+    }
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *hy = clip ? clip->find("Hips", "Position", 1) : nullptr;
+    const float rise = hy && !hy->keys.empty() ? hy->keys.back().value - hy->keys.front().value : 0.0f;
+    std::printf("    stairs: %d prints, %d on a step's top or the floor, the highest at %.2f m; the hips rose %.2f m (%zu keys)\n", prints, on_step, highest, rise,
+                hy ? hy->keys.size() : (size_t)0);
+    CHECK(prints >= 8 && on_step == prints && highest > 0.6f && rise > 0.6f);
+  });
+  test("footsteps in the editor: refused while off; a print moved by hand survives Re-plan and Update walks it; one undo step; saved with the scene", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));  // (away from the sample scene's objects)
+    GameObject *path = ed.scene().create("Walkway");
+    Curve *cv = path->add<Curve>();
+    cv->type = 1;
+    cv->points.push_back({Vec3(20, 0, 0), 0.0f, 1.0f}), cv->points.push_back({Vec3(20, 0, 4), 0.0f, 1.0f});
+    ed.mark_changed_for_test("Add the rig and path");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk path Walkway");  // (off: refused)
+    auto count = [&] {
+      int n = 0;
+      for (const auto &o : ed.scene().objects()) n += o->get<Footprint>() != nullptr;
+      return n;
+    };
+    const bool refused = count() == 0 && !ed.anim_clip_for_test();
+    ed.command("assist on footsteps");
+    ed.command("walk path Walkway");
+    ed.step_frame_headless();
+    const int made = count();
+    /* A print moved 10 cm sideways by hand (selected: Update and Re-plan find the character from it). */
+    GameObject *moved = nullptr;
+    for (const auto &o : ed.scene().objects())
+      if (const Footprint *f = o->get<Footprint>(); f && f->side == 0 && f->frame > 20.0f && !moved) moved = o.get();
+    const std::string name = moved ? moved->name : "";
+    const Vec3 to = moved ? moved->world_position() + Vec3(0.1f, 0.0f, 0.0f) : Vec3();
+    if (moved) moved->set_world_position(to);
+    ed.mark_changed_for_test("Move a print");
+    ed.command("select " + name);
+    ed.step_frame_headless();
+    /* Before the Re-plan: the left foot's keys and every print's place (undo must bring back exactly these). */
+    auto foot_keys = [&] {
+      std::vector<float> v;
+      AnimationClipPtr c = ed.anim_clip_for_test();
+      if (const AnimTrack *t = c ? c->find("LeftFootIK", "Position", 0) : nullptr)
+        for (const auto &k : t->keys) v.push_back(k.value);
+      return v;
+    };
+    auto places = [&] {
+      std::vector<Vec3> v;
+      for (const auto &o : ed.scene().objects())
+        if (o->get<Footprint>()) v.push_back(o->world_position());
+      return v;
+    };
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    const std::vector<float> keys_before = foot_keys();
+    const std::vector<Vec3> places_before = places();
+    ed.command("select " + name);
+    ed.step_frame_headless();
+    ed.command("walk steps replan");
+    ed.step_frame_headless();
+    const bool replanned_keys = foot_keys() != keys_before;  // (the left foot now walks to the moved print)
+    GameObject *after = ed.scene().find_by_name(name);
+    const bool kept = after && length(after->world_position() - to) < 1e-4f;
+    /* The walk follows it: at that print's mid-stance the left ankle is over the moved print. */
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    float off = 1e9f;
+    if (after) {
+      const int f = (int)std::lround(after->get<Footprint>()->frame) + 6;  // (past the toes coming down: the foot flat)
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      if (clip) body::for_each_frame(ed.scene(), *rig, *clip, f, f, [&](int) { off = length(g.legs[0].foot->world_position() - to); });
+    }
+    /* Undo: the whole Re-plan in one step - the keys and every print as they were before it. */
+    ed.command("undo");
+    ed.step_frame_headless();
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    const std::vector<Vec3> places_after = places();
+    bool same = places_after.size() == places_before.size();
+    for (size_t i = 0; same && i < places_after.size(); i++) same = length(places_after[i] - places_before[i]) < 1e-5f;
+    const bool one_step = replanned_keys && same && foot_keys() == keys_before && count() == made;
+    /* Saved and loaded: the prints and their numbers. */
+    Scene back;
+    std::string error;
+    const bool loaded = load_scene_text(save_scene_text(ed.scene()), back, error);
+    int prints = 0;
+    float moved_planned = 0;
+    for (const auto &o : back.objects())
+      if (const Footprint *f = o->get<Footprint>()) {
+        prints++;
+        if (o->name == name) moved_planned = length(f->planned - to);
+      }
+    std::printf("    off: refused %s; %d prints made; the moved one kept by Re-plan: %s, the ankle %.1f mm from it; undone in one step: %s; "
+                "after save and load %d prints, the moved one still 'moved' (%.0f mm from where it was planned)\n",
+                refused ? "yes" : "no", made, kept ? "yes" : "no", off * 1000.0f, one_step ? "yes" : "no", prints, moved_planned * 1000.0f);
+    CHECK(refused && made >= 6 && kept && off < 0.01f && one_step);
+    CHECK(loaded && prints == made && std::fabs(moved_planned - 0.1f) < 1e-3f);
+  });
+  test("footsteps: a print dragged far is still reached; a print only turned is the animator's too; a faster style keeps the moved prints; two characters with one name refused", [&] {
+    /* Far: a print 0.8 m out to the side - the pelvis goes towards it, the foot lands on it. */
+    R146Steps w;
+    w.rig = create_rig(w.s, false, Vec3(0.0f));
+    GameObject *p = r146_path(w.s, {Vec3(0, 0, 0), Vec3(0, 0, 4)});
+    r146_walk(w, sample_curve(*p->curve(), p->world_matrix()));
+    steps::Plan far = w.plan;
+    size_t k = 0;
+    for (size_t i = 2; i < far.prints.size() && !k; i++)
+      if (far.prints[i].side == 0 && far.prints[i].frame > 30.0f) k = i;
+    far.prints[k].pos.x -= 0.8f;  // (the left foot's side: further out)
+    AnimationClip out;
+    std::string error;
+    const int frames = steps::walk(w.s, *w.rig, w.g, w.style, far, 30.0f, AnimationClip(), out, error);
+    float miss = 1e9f;
+    const int mid = (int)std::lround(far.prints[k].frame) + 6;
+    if (frames) body::for_each_frame(w.s, *w.rig, out, mid, mid, [&](int) { miss = length(w.g.legs[0].foot->world_position() - far.prints[k].pos); });
+    /* In the editor: one print only turned 30 degrees, another moved; then a faster style and Re-plan. */
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    GameObject *path = ed.scene().create("Walkway");
+    Curve *cv = path->add<Curve>();
+    cv->type = 1;
+    cv->points.push_back({Vec3(20, 0, 0), 0.0f, 1.0f}), cv->points.push_back({Vec3(20, 0, 5), 0.0f, 1.0f});
+    ed.mark_changed_for_test("Add the rig and path");
+    ed.command("assist on footsteps");
+    ed.command("assist on walk");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk path Walkway");
+    ed.step_frame_headless();
+    GameObject *turned = nullptr, *moved = nullptr;
+    for (const auto &o : ed.scene().objects()) {
+      const Footprint *f = o->get<Footprint>();
+      if (!f || f->frame < 20.0f) continue;
+      if (!turned && f->side == 1) turned = o.get();
+      else if (!moved && f->side == 0) moved = o.get();
+    }
+    const Quat turn = turned ? Quat::axis_angle(Vec3(0, 1, 0), 0.5236f) * turned->world_rotation() : Quat();
+    const Vec3 to = moved ? moved->world_position() + Vec3(-0.12f, 0.0f, 0.05f) : Vec3();
+    if (turned) turned->set_world_rotation(turn);
+    if (moved) moved->set_world_position(to);
+    ed.mark_changed_for_test("Turn and move prints");
+    ed.command("walk set speed 1.8");  // (a faster style: every frame moves)
+    ed.command("walk steps replan");
+    ed.step_frame_headless();
+    bool turn_kept = false, move_kept = false;
+    for (const auto &o : ed.scene().objects()) {
+      if (!o->get<Footprint>()) continue;
+      const Quat q = o->world_rotation();
+      turn_kept = turn_kept || std::fabs(q.x * turn.x + q.y * turn.y + q.z * turn.z + q.w * turn.w) > 0.9999f;
+      move_kept = move_kept || length(o->world_position() - to) < 1e-4f;
+    }
+    /* Two objects named as the character: refused, nothing made. */
+    Editor twin;
+    r34_open(twin);
+    GameObject *a = create_rig(twin.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    GameObject *b = create_rig(twin.scene(), false, Vec3(25.0f, 0.0f, 0.0f));
+    b->name = a->name;
+    GameObject *tp = twin.scene().create("Walkway");
+    tp->add<Curve>()->type = 1;
+    tp->curve()->points.push_back({Vec3(20, 0, 0), 0.0f, 1.0f}), tp->curve()->points.push_back({Vec3(20, 0, 4), 0.0f, 1.0f});
+    twin.mark_changed_for_test("Twins");
+    twin.command("assist on footsteps");
+    twin.command("select " + a->name);  // (the first of the two)
+    twin.step_frame_headless();
+    twin.command("walk path Walkway");
+    int twin_prints = 0;
+    for (const auto &o : twin.scene().objects()) twin_prints += o->get<Footprint>() != nullptr;
+    std::printf("    a print 0.8 m out: the foot lands %.1f mm from it; after a faster style and Re-plan the turned print kept: %s, the moved one: %s; "
+                "two characters named alike: %d prints made\n",
+                miss * 1000.0f, turn_kept ? "yes" : "no", move_kept ? "yes" : "no", twin_prints);
+    CHECK(frames && miss < 0.01f && turn_kept && move_kept && twin_prints == 0);
+  });
+  /* A lesson's Try-it run as Learn runs it: the commands before `caption`, one by one. */
+  auto r146_try = [](Editor &ed, const char *caption) {
+    std::string cmds;
+    for (int i = 0; i < lesson_count() && cmds.empty(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find(std::string("| ") + caption);
+      const size_t start = at == std::string::npos ? std::string::npos : body.rfind("! cmd:", at);
+      if (start != std::string::npos) cmds = body.substr(start + 6, at - start - 6);
+    }
+    size_t a = 0;
+    while (!cmds.empty() && a <= cmds.size()) {
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      ed.step_frame_headless();
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    return !cmds.empty();
+  };
+  test("learn: the Footsteps lesson's Try it switches the assistant on and walks a person along a path on its footprints", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const bool found = r146_try(ed, "A person walking along a path on its footprints");
+    int prints = 0;
+    for (const auto &o : ed.scene().objects()) prints += o->get<Footprint>() != nullptr;
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    the footsteps assistant %s; %d prints, %zu contacts in the clip\n", ed.assist_on(Editor::Assist::Footsteps) ? "on" : "off", prints,
+                clip ? clip->contacts.size() : (size_t)0);
+    CHECK(found && ed.assist_on(Editor::Assist::Footsteps) && prints >= 4 && clip && clip->contacts.size() >= 3);
+  });
+  /* ---------------------------------------------------------------- round 147: Locomotion in Play (task 0127) */
+  /* A person with Locomotion, played by hand: `keys` says which keys are down at each time; each frame the scene's
+   * components update (moving the object), Locomotion steps and IK solves, as the Play loop does. */
+  struct R147Play {
+    Scene *s = nullptr;
+    GameObject *rig = nullptr;
+    Locomotion *lc = nullptr;
+    GroundGrid ground;
+    float t = 0.0f, cost = 0.0f;
+    int frames = 0;
+  };
+  auto r147_start = [](R147Play &p, Scene &s, Vec3 at = Vec3(0.0f)) {
+    p.s = &s;
+    p.rig = create_rig(s, false, at);
+    p.lc = p.rig->add<Locomotion>();
+    p.ground = locomotion::ground_for(s);
+    PlayContext ctx;
+    s.start(ctx);
+  };
+  auto r147_run = [](R147Play &p, float seconds, const std::function<bool(int key)> &keys, const std::function<void()> &each = nullptr) {
+    const float dt = 1.0f / 60.0f;
+    for (int i = 0; i < (int)std::lround(seconds / dt); i++) {
+      PlayContext ctx;
+      ctx.dt = dt, ctx.time = p.t, ctx.key_down = keys;
+      p.s->update(ctx);
+      locomotion::step(*p.s, dt, p.ground);
+      solve_constraints(*p.s);
+      p.t += dt, p.cost += p.lc->cost_ms_, p.frames++;
+      if (each) each();
+    }
+  };
+  auto key_is = [](std::vector<int> down) { return [down](int k) { return std::find(down.begin(), down.end(), k) != down.end(); }; };
+  test("locomotion: W walks the person forward at the walk speed with planted feet that never slide, its stride the Walk Cycle's", [&] {
+    Locomotion::live = true;
+    Scene s;
+    R147Play p;
+    r147_start(p, s);
+    /* A planted foot: where it was when it landed, every frame it stays down. */
+    std::vector<Vec3> landed(2);
+    std::vector<uint8_t> was(2, 1);
+    std::vector<std::vector<float>> plants(2);
+    float slide = 0;
+    r147_run(p, 3.0f, key_is({platform::KEY_W}), [&] {
+      for (size_t i = 0; i < 2; i++) {
+        const bool down = p.lc->legs_[i].down;
+        const Vec3 a = p.lc->rig_.legs[i].foot->world_position();
+        if (down && !was[i]) landed[i] = a, plants[i].push_back(a.z);
+        else if (down && plants[i].size()) slide = std::max(slide, length(a - landed[i]));
+        was[i] = down;
+      }
+    });
+    const float went = p.rig->world_position().z;
+    float stride = 0;
+    int n = 0;
+    for (const auto &z : plants)
+      for (size_t k = 2; k < z.size(); k++) stride += z[k] - z[k - 1], n++;  // (from the second step: the first starts from standing)
+    stride /= std::max(1, n);
+    gait::Style w;
+    gait::preset("walk", p.lc->rig_, w);
+    w.speed = 1.4f / std::sqrt(p.lc->rig_.leg_length / 0.9f);
+    const float cycle = gait::cycle_of(p.lc->rig_, w).length;
+    std::printf("    3 s of W: %.2f m forward (%.2f expected), planted feet moved at most %.3f mm; a stride %.3f m, Walk Cycle's %.3f m; %.3f ms a frame\n",
+                went, 1.4f * (3.0f - 0.175f), slide * 1000.0f, stride, cycle, p.cost / p.frames);
+    CHECK(std::fabs(went - 1.4f * (3.0f - 0.175f)) < 0.05f && slide < 1e-3f && n >= 2 && std::fabs(stride / cycle - 1.0f) < 0.05f);
+    CHECK(p.cost / p.frames < 0.2f);
+    Locomotion::live = false;
+  });
+  test("locomotion: turning leans the body into the turn; letting go of W stops within a step, both feet down and still", [&] {
+    Locomotion::live = true;
+    Scene s;
+    R147Play p;
+    r147_start(p, s);
+    p.lc->turn_speed = 90.0f;
+    r147_run(p, 1.5f, key_is({platform::KEY_W, platform::KEY_SHIFT}));
+    float lean = 0;  // (the hips' up leaning towards the turn's inside - right, turning with D - in degrees)
+    r147_run(p, 1.0f, key_is({platform::KEY_W, platform::KEY_SHIFT, platform::KEY_D}), [&] {
+      const Vec3 up = p.lc->rig_.hips->world_rotation().rotate(Vec3(0, 1, 0)) , right = p.rig->world_rotation().rotate(Vec3(1, 0, 0));
+      lean = std::asin(std::max(-1.0f, std::min(1.0f, dot(up, right)))) * 57.29578f;
+    });
+    /* Let go: slowing at the acceleration (3.5 m/s at 4 m/s a second: 0.875 s), the step under way finished, then
+     * standing - within the slowing and one more step (a walk's cycle). */
+    const float released = p.t;
+    float stood = -1.0f;
+    r147_run(p, 2.5f, key_is({}), [&] {
+      if (stood < 0.0f && p.lc->speed_ == 0.0f && p.lc->legs_[0].down && p.lc->legs_[1].down) stood = p.t - released;
+    });
+    const Vec3 a0 = p.lc->rig_.legs[0].foot->world_position(), b0 = p.lc->rig_.legs[1].foot->world_position(), r0 = p.rig->world_position();
+    r147_run(p, 0.5f, key_is({}));
+    const float still = std::max(length(p.lc->rig_.legs[0].foot->world_position() - a0), length(p.lc->rig_.legs[1].foot->world_position() - b0));
+    gait::Style w;
+    gait::preset("walk", p.lc->rig_, w);
+    const float limit = 3.5f / 4.0f + gait::cycle_of(p.lc->rig_, w).period;
+    std::printf("    running in a right turn the hips lean %.1f degrees into it; let go, standing with both feet down after %.2f s (at most %.2f); "
+                "then the feet move %.3f mm in 0.5 s, the body %.3f mm\n",
+                lean, stood, limit, still * 1000.0f, length(p.rig->world_position() - r0) * 1000.0f);
+    CHECK(lean > 3.0f && stood > 0.0f && stood < limit && still < 1e-3f && length(p.rig->world_position() - r0) < 1e-3f);
+    /* Four legs: a dog walking (its feet never all down at once while it walks) stops too. */
+    Scene ds;
+    R147Play dog;
+    dog.s = &ds;
+    dog.rig = create_rig(ds, true, Vec3(0.0f));
+    dog.lc = dog.rig->add<Locomotion>();
+    PlayContext dctx;
+    ds.start(dctx);
+    r147_run(dog, 2.0f, key_is({platform::KEY_W}));
+    r147_run(dog, 2.5f, key_is({}));
+    bool all = true;
+    for (const Locomotion::Leg &l : dog.lc->legs_) all = all && l.down;
+    const float phase = dog.lc->phase_;
+    r147_run(dog, 0.5f, key_is({}));
+    std::printf("    a dog let go: all four feet down %s, its gait %s\n", all ? "yes" : "no", dog.lc->phase_ == phase ? "stopped" : "still stepping");
+    CHECK(dog.lc->legs_.size() == 4 && all && dog.lc->phase_ == phase);
+    Locomotion::live = false;
+  });
+  test("locomotion: up a ramp every foot lands on its surface; switched off (the assistant) the keys move nothing", [&] {
+    Locomotion::live = true;
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");  // (a 10 degree ramp, 8 m long, rising along +Z from z = 1)
+    GameObject *ramp = ed.active_object_for_test();
+    const float a = 10.0f * 3.14159265f / 180.0f;
+    ramp->set_local_scale({3.0f, 0.2f, 8.0f});
+    ramp->set_local_rotation(Quat::axis_angle(Vec3(1, 0, 0), -a));
+    ramp->set_world_position(Vec3(0.0f, 4.0f * std::sin(a) - 0.1f * std::cos(a), 1.0f + 4.0f * std::cos(a)));
+    ed.step_frame_headless();
+    R147Play p;
+    r147_start(p, ed.scene());
+    float worst = 0;
+    int landings = 0;
+    std::vector<uint8_t> was(2, 1);
+    r147_run(p, 4.0f, key_is({platform::KEY_W}), [&] {
+      for (size_t i = 0; i < 2; i++) {
+        const bool down = p.lc->legs_[i].down;
+        if (down && !was[i]) {
+          const Vec3 at = p.lc->legs_[i].plant;
+          SceneHit hit;
+          const bool on = scene_raycast(ed.scene(), at + Vec3(0, 1, 0), Vec3(0, -1, 0), 3.0f, hit, [&](const GameObject &g) { return ed.scene().is_ancestor(p.rig, &g) || &g == p.rig; });
+          if (on) worst = std::max(worst, std::fabs(at.y - p.lc->rig_.sole - hit.point.y)), landings++;  // (the ramp's: before it, no floor)
+        }
+        was[i] = down;
+      }
+    });
+    const float climbed = p.rig->world_position().y;
+    std::printf("    up the ramp: %d landings, each within %.1f mm of the surface under it; the body climbed %.2f m\n", landings, worst * 1000.0f, climbed);
+    CHECK(landings >= 6 && worst < 0.01f && climbed > 0.3f);
+    /* A prop in the hand: a script moves it and Locomotion leaves it be; destroyed in Play, nothing breaks. */
+    Scene ps;
+    R147Play q;
+    r147_start(q, ps);
+    GameObject *sword = ps.create("Sword", ps.find_by_name("LeftHand"));
+    r147_run(q, 0.5f, key_is({platform::KEY_W}));
+    sword->set_local_position(Vec3(0.0f, 0.3f, 0.0f));
+    r147_run(q, 0.2f, key_is({platform::KEY_W}));
+    const bool left_be = length(sword->local().position - Vec3(0.0f, 0.3f, 0.0f)) < 1e-6f;
+    ps.destroy(sword);
+    r147_run(q, 0.5f, key_is({platform::KEY_W}));
+    Locomotion::live = false;
+    /* Switched off, through the editor's Play: a script's wish moves nothing - not the object, not a bone. */
+    Editor eo;
+    r34_open(eo);
+    GameObject *person = create_rig(eo.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    person->add<Locomotion>();
+    const std::string who = person->name;
+    eo.mark_changed_for_test("A person with Locomotion");
+    eo.command("assist off locomotion");
+    eo.command("play");
+    GameObject *pr = eo.scene().find_by_name(who);
+    std::vector<std::pair<GameObject *, Transform>> before;
+    std::vector<GameObject *> stack{pr};
+    while (!stack.empty()) {
+      GameObject *g = stack.back();
+      stack.pop_back();
+      before.push_back({g, g->local()});
+      for (GameObject *c : g->children) stack.push_back(c);
+    }
+    if (Locomotion *l = pr->get<Locomotion>()) l->set_move(Vec3(0, 0, 1.4f));
+    for (int i = 0; i < 30; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      eo.step_frame_headless();
+    }
+    int changed = 0;
+    for (const auto &b : before)
+      changed += length(b.first->local().position - b.second.position) > 1e-6f || std::fabs(b.first->local().rotation.x * b.second.rotation.x + b.first->local().rotation.y * b.second.rotation.y + b.first->local().rotation.z * b.second.rotation.z + b.first->local().rotation.w * b.second.rotation.w) < 0.999999f;
+    eo.command("stop");
+    eo.step_frame_headless();
+    std::printf("    a prop the script moved left where it put it: %s (then destroyed in Play: no crash); the assistant off, in Play %d of %zu objects moved\n",
+                left_be ? "yes" : "no", changed, before.size());
+    CHECK(left_be && changed == 0);
+  });
+  test("learn: the Locomotion lesson's Try it gives a person Locomotion; in the editor's Play a script's set_move walks it, its legs stepping", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const bool found = r146_try(ed, "A person with Locomotion");
+    std::string name;
+    for (const auto &o : ed.scene().objects())
+      if (o->get<Locomotion>()) name = o->name;
+    const bool has = !name.empty();
+    ed.command("play");
+    Locomotion *lc = nullptr;
+    for (const auto &o : ed.scene().objects())
+      if (Locomotion *l = o->get<Locomotion>()) lc = l;
+    if (lc) lc->set_move(Vec3(0, 0, 1.4f));
+    float went = 0.0f;
+    int landings = 0;
+    bool was = true;
+    for (int i = 0; i < 400 && lc && (went < 1.0f || landings < 2); i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));  // (Play runs on the clock)
+      ed.step_frame_headless();
+      went = lc->owner->world_position().z;
+      if (!lc->legs_.empty()) {
+        if (lc->legs_[0].down && !was) landings++;
+        was = lc->legs_[0].down;
+      }
+    }
+    ed.command("stop");
+    ed.step_frame_headless();
+    GameObject *back = has ? ed.scene().find_by_name(name) : nullptr;  // (Stop puts the scene back as it was)
+    std::printf("    the locomotion assistant %s, the component on the person: %s; in Play it went %.2f m, the left foot landing %d times; after Stop back at %.2f\n",
+                ed.assist_on(Editor::Assist::Locomotion) ? "on" : "off", has ? "yes" : "no", went, landings, back ? back->world_position().z : -1.0f);
+    CHECK(found && has && ed.assist_on(Editor::Assist::Locomotion) && went >= 1.0f && landings >= 2);
+    Locomotion::live = false;
   });
 }
