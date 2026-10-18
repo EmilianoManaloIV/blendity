@@ -2,6 +2,7 @@
 # to download as an optional render engine: blendity-moonray-<platform>-<tag>.tar.gz with its .sha256, as artifacts.
 # They reach a release only when the user says so (uploaded by hand to the "libraries" extras release).
 # Run by hand, or by pushing to a moonray-build/* branch: the build takes hours, so ordinary pushes never start it.
+# "[skip linux]" or "[skip macos]" in the pushed commit's message leaves that platform out (a fix for the other).
 name: moonray
 
 on:
@@ -14,6 +15,7 @@ env:
 
 jobs:
   linux:
+    if: ${{ !contains(github.event.head_commit.message, '[skip linux]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
@@ -81,6 +83,7 @@ jobs:
           moonray/bin/blendity-moonray -help 2>&1 | head -80 || true
 
   macos:
+    if: ${{ !contains(github.event.head_commit.message, '[skip macos]') }}
     runs-on: macos-14
     timeout-minutes: 355
     steps:

@@ -6,6 +6,8 @@
 #   macos_build.sh moonray     MoonRay itself into installs/openmoonray
 # The openmoonray checkout must already be at /Applications/MoonRay/source/openmoonray.
 set -euo pipefail
+# (The runner's CMake 4 refuses projects asking for CMake older than 3.5, as some dependencies still do.)
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
 M=/Applications/MoonRay
 cd "$M"
 mkdir -p installs/{bin,lib,include} build build-deps
