@@ -3202,6 +3202,7 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
   if (c == "moonray") return moonray_command(t);  // moonray status | install [archive] | remove | folder [path] | check (task 0112)
+  if (c == "body") return body_command(t);  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);

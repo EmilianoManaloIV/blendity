@@ -43,6 +43,7 @@
 #include "../core/releases.h"
 #include "../render/moonray.h"
 #include "../render/moonray_export.h"
+#include "../scene/body_physics.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -952,6 +953,29 @@ class Editor {
   void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
   /* The Animation window (task 0059, animation_window.cpp). */
   AnimEditorState anim_;
+  /* ---- Physics for animation (tasks 0115-0122, body_ui.cpp) ---- */
+  struct BodyView {
+    bool show_com = false;  // the center of mass's path over the clip, drawn in the Scene view
+    uint64_t key = 0;       // what the body and the path were made for (body_refresh)
+    body::Body body;
+    std::vector<Vec3> path;  // the center of mass at each frame from first to last
+    float first = 0.0f, last = 0.0f;
+    /* Ballistic flight (task 0117): the corrected clip shown as a ghost and as frame colours until applied. */
+    bool ghost = false;
+    body::FlightResult flight;
+    uint64_t flight_clip_version = 0;  // the clip it was worked out for (edited since: shown no more) ...
+    uint64_t flight_root = 0;          // ... and whose: another character's clip is never shown or written with it
+    const AnimationClip *flight_clip = nullptr;
+    size_t builds = 0;                 // bodies built (tests: the overlay doesn't build one a frame)
+    std::vector<std::vector<std::pair<Vec3, Vec3>>> ghost_bones;  // per frame: each bone, head to tip, corrected
+  } body_;
+  bool body_refresh();
+  bool flight_current(const AnimationClip *clip);  // the flight shown is this clip's, as it is now
+  void draw_body_overlay();
+  void draw_body_strip(const Recti &ruler, float end);
+  void body_command(const std::vector<std::string> &t);
+  void body_contacts_command(const std::vector<std::string> &t);
+  void body_flight_command(const std::vector<std::string> &t);
   /* The Sequencer window (task 0062, sequencer_window.cpp). */
   SeqEditorState seqr_;
   std::vector<std::string> seq_paths_;
@@ -2573,6 +2597,8 @@ class Editor {
   void moonray_offer_pending_for_test(bool on) { mr_offer_pending_ = on; }
   bool moonray_offer_pending_for_test() const { return mr_offer_pending_; }
   bool moonray_busy_for_test() const { return mr_task_ || mr_locate_; }
+  size_t body_builds_for_test() const { return body_.builds; }
+  bool body_ghost_for_test() const { return body_.ghost; }
  private:
   double libs_last_check_ = 0.0;  // (the libraries are asked about at most once a day)
   static bool prepare_install(UpdateDownload &job, std::string &error);  // (on the downloading thread: no editor state)

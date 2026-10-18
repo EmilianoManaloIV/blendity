@@ -49,6 +49,14 @@ struct AnimationClip {
   float length = 60.0f;  // frames; at least the last key's
   bool loop = true;
   std::vector<AnimTrack> tracks;
+  /* Where a bone's tip rests on something (task 0116, Cascadeur's fulcrum points): found from the motion, or set by hand
+   * (kept when contacts are found again). Frames inclusive. */
+  struct Contact {
+    std::string bone;
+    float from = 0.0f, to = 0.0f;
+    bool manual = false;
+  };
+  std::vector<Contact> contacts;
   uint64_t version = 1;  // bumped by every edit (saving, undo snapshots)
   void touch() { version++; }
   float end_frame() const;  // the length, or the last key if later

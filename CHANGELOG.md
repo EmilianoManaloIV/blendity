@@ -2,6 +2,55 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 137): physics for animation: the body's masses, contacts and flight (tasks 0115-0117, ADR 0042)
+
+**Asked:** "Is there a way to implement body simulation for animation like in Cascadeur." The user chose the center of
+mass with ballistics, the full AutoPhysics solve, secondary motion, an active ragdoll (Jolt) and rule-based
+AutoPosing; then that hair, ear and cloth chains be found automatically (or from a parent bone) and can be unticked or
+relabelled; then "Finish and do all tasks please." This round is the first three tasks of that plan.
+
+**Added**
+- **The body's masses (task 0115, ADR 0042):** each deforming bone weighs its share of the skinned mesh's volume
+  (tetrahedra against the bone's own middle, shared by the corners' weights), with its center and inertia; bones
+  without a skin get capsules; all scaled to the armature's **Body Mass** (75 kg, in the Inspector). The center of
+  mass and the whole body's inertia follow any pose, the rig root's motion included.
+- **The center of mass in a clip:** the Animation window's **Center of Mass** button draws its path over the clip,
+  where it is at the playhead and the point under it. The body is built once per rig and skin, not every frame.
+- **Contacts (task 0116):** an IK chain's end within 5 cm of the ground and slower than 0.5 m/s for 2 frames or more
+  is a contact, shown as bars under the ruler (set by hand brighter, and kept when contacts are found again). Pin
+  keys the IK target still through each one, its parent's motion frame by frame taken into account. Contacts are
+  saved in the clip.
+- **Flight (task 0117):** between a take-off and a landing the center of mass is put on the parabola through them at
+  their times (g = 9.81 m/s^2), and the body turned about it so the angular momentum stays the take-off's (solved in
+  the turned axes, refined until it holds); the landing pose kept by default. **Flight** shows the corrected body as a
+  ghost, its frames green (fine), blue (changed) or red (impossible: nothing written); **Apply** keys it into the
+  clip as one undo step, only into the clip it was worked out for.
+- The console: `body show on|off`, `body mass [kg]`, `body com [frame]`, `body contacts find|pin|clear|list|add|remove`,
+  `body flight show|apply|off`.
+- Learn: "Physics for animation: the center of mass" and "Contacts and flight", each with Try it and questions.
+
+**Checked**
+- New tests (round 137): two skinned boxes weigh 25 and 50 of 75 kg with their centers and inertias; the center of
+  mass and inertia follow a pose (parallel axes), capsules without a skin; a clip's trajectory follows the root and
+  leaves the scene as it was; an IK leg's rests found within a frame, a manual contact kept, pinning holding the
+  target, contacts saved and loaded; a straight jump made an exact parabola, a tuck's angular momentum kept within 3%
+  (0.5% on a double spin), the landing pose kept, an impossible jump marked red and not written; in the editor Body
+  Mass, contacts, the ghost and Apply as one undo step.
+- An Opus review; every finding fixed:
+  - the overlay rebuilt the body every frame;
+  - IK targets were keyed against a fixed parent with a moving root;
+  - Apply could write the clip of another character selected since;
+  - contacts outside the clip weren't clamped, and replaced keys weren't counted;
+  - the hips were guessed from the first bone (now the root, else the heaviest top bone);
+  - a turn could flip Euler angles (the other solution is now taken when nearer);
+  - the momentum correction worked in the wrong axes for a large turn;
+  - the body's cache ignored the bones; Apply ran while playing; animated values other than transforms weren't put
+    back; `body com` read the wrong frame; manual contacts didn't trim found ones.
+- Unit checks: Windows 10,753, 0 failed (773 tests); the whole suite in render-cache verify mode: 10,754,
+  0 failed, 0 stale pictures. Linux with libraries: 10,489, 0 failed. Sanitizer build: 10,380, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
 ## 2026-10-18 (round 136): MoonRay checked against the real renderer (task 0113)
 
 **Asked:** "Do and finish all tasks" (round 135's), with CI's Linux MoonRay archive downloaded into WSL to check the

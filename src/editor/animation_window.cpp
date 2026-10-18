@@ -498,6 +498,21 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     anim_.curves = true;
     anim_.v_framed.clear();
   }
+  if (button(u.px(118), "Center of Mass", body_.show_com,
+             "Physics (Cascadeur's center of mass): the body's center of mass over the whole clip in the Scene view, where it is\n"
+             "at the playhead and straight below it. Each bone weighs what its share of the skinned mesh does (Armature > Body Mass)."))
+    body_command({"body", "show", body_.show_com ? "off" : "on"});
+  if (button(u.px(76), "Contacts", false,
+             "Find where the feet and hands rest (low and still) and mark those frames as contacts under the ruler (Cascadeur's\n"
+             "fulcrum points). Contacts set by hand (console: body contacts add) are kept. Pin holds them still: body contacts pin."))
+    body_contacts_command({"body", "contacts", "find"});
+  if (button(u.px(60), "Flight", body_.ghost,
+             "Physics in the air (Cascadeur's AutoPhysics): between contacts the center of mass follows a parabola under gravity\n"
+             "and the spin keeps its angular momentum. Shows the corrected body as a ghost; frames green (fine), blue (changed),\n"
+             "red (impossible: change the timing or the poses). Apply writes it into the clip."))
+    body_flight_command({"body", "flight", body_.ghost ? "off" : "show"});
+  if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected flight into the clip (one undo step)."))
+    body_flight_command({"body", "flight", "apply"});
 }
 
 /* The clip menu's choice: a clip asset for the root's Animation, none ("-"), or a new clip (""). */
@@ -812,6 +827,7 @@ void Editor::draw_animation_window(const Recti &r) {
   const float end = std::max(30.0f, clip->end_frame()) * 1.1f;
   u.canvas.fill_rect({body.x, body.y, body.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, sheet, end);
+  draw_body_strip(ruler, end);  // (contacts and the flight's frames under the ruler: tasks 0116, 0117)
   draw_anim_rows(*clip, root, list, body, sheet, row_h, end);
   anim_.sheet = sheet, anim_.sheet_end = end;
   if (anim_.curves) draw_anim_curves(*clip, sheet, end);

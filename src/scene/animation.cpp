@@ -145,6 +145,7 @@ std::string save_clip_text(const AnimationClip &c) {
       os << "\n";
     }
   }
+  for (const AnimationClip::Contact &k : c.contacts) os << "contact\t" << k.from << "\t" << k.to << "\t" << (k.manual ? 1 : 0) << "\t" << k.bone << "\n";
   return os.str();
 }
 
@@ -175,6 +176,7 @@ bool load_clip_text(const std::string &text, AnimationClip &c) {
   std::string line;
   if (!std::getline(is, line) || line.rfind("blendity_anim", 0) != 0) return false;
   c.tracks.clear();
+  c.contacts.clear();
   AnimTrack *cur = nullptr;
   while (std::getline(is, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -191,6 +193,14 @@ bool load_clip_text(const std::string &text, AnimationClip &c) {
     }
     else if (word == "track") {
       cur = read_track(line, c);
+    }
+    else if (word == "contact") {  // ("contact<TAB>from<TAB>to<TAB>manual<TAB>bone", task 0116)
+      AnimationClip::Contact k;
+      int manual = 0;
+      if (!(ls >> k.from >> k.to >> manual) || !std::isfinite(k.from) || !std::isfinite(k.to)) continue;
+      std::getline(ls >> std::ws, k.bone);
+      k.manual = manual != 0;
+      if (!k.bone.empty() && k.to >= k.from) c.contacts.push_back(k);
     }
     else if (word == "key" && cur) {
       AnimKey k;

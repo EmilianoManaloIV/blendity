@@ -19,6 +19,7 @@ What Blendity must do and the constraints it works under. Task specs (`docs/task
 | R-10 | Camera filters: components on a camera that change how it renders wherever its image shows (Game view, Camera Preview, F12, sequences, optionally the Scene view), starting with old consoles' 3D looks (PS1, N64, Saturn, DOS). |
 | R-11 | Global illumination like Unity's: baked lighting (Contribute GI, light modes Realtime / Mixed / Baked, generated lightmap UVs, Generate Lighting into lightmaps) and probe volumes (automatically placed light probes, as Unity 6's Adaptive Probe Volumes), kept current by realtime GI so lighting changes don't need a manual re-bake. |
 | R-12 | Realtime global illumination from the research folder: voxel-based GI (Thiedemann et al., I3D 2011) for one bounce of light and sky occlusion in the rasterized views, feeding the lightmaps and probes of R-11. |
+| R-13 | Animation with physics as in Cascadeur: the body weighed from its skin, its center of mass, contacts, ballistic flight and angular momentum, a full physics solve, spring bones, an active ragdoll and AutoPosing; corrections written as ordinary keys (tasks 0115-0123). |
 
 ## Quality
 

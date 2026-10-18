@@ -32622,4 +32622,430 @@ static void round81_tests() {
       CHECK(same == 4);
     }
   });
+  /* ---------------------------------------------------------------- round 137: the body's masses and center of mass (task 0115) */
+  /* An armature "Rig": Lower (0..1 up +Y) and Upper (1..2), skinned to one mesh of two closed boxes: a 1 m cube centred at
+   * (0, 0.5, 0) all Lower's, a 1 x 1 x 2 box centred at (0, 1.5, 0) all Upper's (twice the volume). */
+  struct R136Body {
+    Scene s;
+    GameObject *rig = nullptr, *lower = nullptr, *upper = nullptr, *skin = nullptr;
+    R136Body(bool skinned = true) {
+      rig = s.create("Rig");
+      rig->add<Armature>();
+      lower = s.create("Lower", rig);
+      lower->add<Bone>();
+      upper = s.create("Upper", lower);
+      upper->set_local_position({0, 1, 0});
+      upper->add<Bone>()->rest_position = {0, 1, 0};
+      if (!skinned) return;
+      MeshPtr m = std::make_shared<Mesh>();
+      VertexGroup lo{"Lower", {}}, up{"Upper", {}};
+      const MeshPtr cube = primitives::cube(1.0f);
+      for (int part = 0; part < 2; part++) {
+        const uint32_t base = (uint32_t)m->vert_count();
+        for (const Vec3 &p : cube->positions) {
+          m->add_vert(part == 0 ? p + Vec3(0, 0.5f, 0) : Vec3(p.x, p.y, p.z * 2.0f) + Vec3(0, 1.5f, 0));
+          lo.weights.push_back(part == 0 ? 1.0f : 0.0f);
+          up.weights.push_back(part == 0 ? 0.0f : 1.0f);
+        }
+        for (size_t f = 0; f < cube->face_count(); f++) {
+          std::vector<uint32_t> face;
+          for (uint32_t c = cube->face_offsets[f]; c < cube->face_offsets[f + 1]; c++) face.push_back(base + cube->corner_verts[c]);
+          m->add_face(face.data(), face.size());
+        }
+      }
+      m->vertex_groups = {lo, up};
+      skin = s.create("Body");
+      skin->add<MeshFilter>()->mesh = m;
+      skin->add<SkinModifier>()->object = "Rig";
+    }
+  };
+  test("body: each bone weighs its share of the skinned mesh's volume, with its center and inertia (two boxes: 25 and 50 of 75 kg)", [] {
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    const body::BoneMass *lo = nullptr, *up = nullptr;
+    for (const body::BoneMass &bm : b.bones) (bm.name == "Lower" ? lo : up) = &bm;
+    CHECK(lo && up && b.valid() && !b.from_capsules);
+    if (!lo || !up) return;
+    std::printf("    Lower %.3f kg at (%.3f, %.3f, %.3f); Upper %.3f kg at (%.3f, %.3f, %.3f); inertia of Upper %.3f %.3f %.3f\n", lo->mass, lo->center.x,
+                lo->center.y, lo->center.z, up->mass, up->center.x, up->center.y, up->center.z, up->inertia(0, 0), up->inertia(1, 1), up->inertia(2, 2));
+    CHECK_NEAR(lo->mass, 25.0f, 1e-3);
+    CHECK_NEAR(up->mass, 50.0f, 1e-3);
+    CHECK_NEAR(b.mass, 75.0f, 1e-3);
+    CHECK(length(lo->center - Vec3(0, 0.5f, 0)) < 1e-4f && length(up->center - Vec3(0, 1.5f, 0)) < 1e-4f);
+    /* A box's inertia: m (b^2 + c^2) / 12 about each axis, the other two sides b and c (1 x 1 x 2 here). */
+    CHECK_NEAR(up->inertia(0, 0), 50.0f * (1 + 4) / 12.0f, 1e-2);
+    CHECK_NEAR(up->inertia(1, 1), 50.0f * (1 + 4) / 12.0f, 1e-2);
+    CHECK_NEAR(up->inertia(2, 2), 50.0f * (1 + 1) / 12.0f, 1e-2);
+    CHECK(std::fabs(up->inertia(0, 1)) < 1e-3f && std::fabs(up->inertia(0, 2)) < 1e-3f && std::fabs(up->inertia(1, 2)) < 1e-3f);
+    CHECK_NEAR(lo->inertia(1, 1), 25.0f * 2 / 12.0f, 1e-2);
+  });
+  test("body: the center of mass and the whole body's inertia follow the pose; an armature without a skin gets capsules round its bones", [] {
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    std::vector<ArmatureBone> now;
+    armature_bones(*r.rig, now);
+    const body::State rest = body::state(b, now);
+    r.upper->set_local_rotation(Quat::euler({0, 0, 90}));  // (Upper turned a quarter about z at its joint: its box goes to -x)
+    armature_bones(*r.rig, now);
+    const body::State bent = body::state(b, now);
+    const Vec3 want_rest(0, (25 * 0.5f + 50 * 1.5f) / 75.0f, 0), want_bent((50 * -0.5f) / 75.0f, (25 * 0.5f + 50 * 1.0f) / 75.0f, 0);
+    std::printf("    at rest (%.4f, %.4f, %.4f), bent (%.4f, %.4f, %.4f); the bent body's inertia %.2f %.2f %.2f\n", rest.com.x, rest.com.y, rest.com.z,
+                bent.com.x, bent.com.y, bent.com.z, bent.inertia(0, 0), bent.inertia(1, 1), bent.inertia(2, 2));
+    CHECK(length(rest.com - want_rest) < 1e-4f && length(bent.com - want_bent) < 1e-4f);
+    /* The whole body about its center (parallel axes): about z, the two boxes' own plus their masses at their distances. */
+    const Vec3 dl = Vec3(0, 0.5f, 0) - want_bent, du = Vec3(-0.5f, 1.0f, 0) - want_bent;
+    const float izz = 25.0f * 2 / 12.0f + 50.0f * 2 / 12.0f + 25.0f * (dl.x * dl.x + dl.y * dl.y) + 50.0f * (du.x * du.x + du.y * du.y);
+    CHECK_NEAR(bent.inertia(2, 2), izz, 1e-2);
+    R136Body bare(false);
+    const body::Body cap = body::build(bare.s, *bare.rig, 75.0f);
+    armature_bones(*bare.rig, now);
+    const body::State cs = body::state(cap, now);
+    std::printf("    no skin: %s, %.1f kg, center (%.4f, %.4f, %.4f)\n", cap.from_capsules ? "capsules" : "NOT capsules", cap.mass, cs.com.x, cs.com.y, cs.com.z);
+    CHECK(cap.from_capsules && std::fabs(cap.mass - 75.0f) < 1e-3f && std::fabs(cs.com.x) < 1e-4f && std::fabs(cs.com.z) < 1e-4f && cs.com.y > 0.5f);
+    Scene empty;
+    GameObject *lone = empty.create("Lone");
+    lone->add<Armature>();
+    CHECK(!body::build(empty, *lone, 75.0f).valid());  // (no bones: no body, no crash)
+  });
+  test("body: the center of mass at every frame of a clip (the scene posed and put back as it was)", [] {
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    AnimationClip clip;
+    AnimTrack &x = clip.track("", "Position", 0);
+    x.set_key(0.0f, 0.0f, AnimLinear);
+    x.set_key(10.0f, 10.0f, AnimLinear);
+    const Vec3 before = r.rig->local().position;
+    const std::vector<Vec3> path = body::com_trajectory(r.s, *r.rig, clip, b, 0.0f, 10.0f, 11);
+    float worst = 0;
+    for (size_t i = 0; i < path.size(); i++) worst = std::max(worst, std::fabs(path[i].x - (float)i));
+    std::printf("    %zu frames, the largest step error %.5f; the rig back at x %.3f\n", path.size(), worst, r.rig->local().position.x);
+    CHECK(path.size() == 11 && worst < 1e-4f);
+    CHECK(length(r.rig->local().position - before) < 1e-6f);
+  });
+  /* ---------------------------------------------------------------- round 137: contacts and fulcrum points (task 0116) */
+  test("contacts: an IK leg's rests are found from its motion (low and still), a manual contact is kept, and pinning holds the target still through each", [] {
+    R136Body r;
+    GameObject *foot = r.s.create("Foot", r.rig);
+    foot->set_local_position({0.5f, 1.2f, 0});
+    IKConstraint *ik = r.upper->add<IKConstraint>();
+    ik->target = "Foot";
+    ik->chain_length = 2;
+    solve_constraints(r.s);
+    /* The target rests (drifting a millimetre a frame) 0-10, lifts and moves on 10-20, rests 20-30. */
+    AnimationClip clip;
+    clip.frame_rate = 30.0f;
+    clip.length = 30.0f;
+    for (int f = 0; f <= 30; f++) {
+      const float lift = f > 10 && f < 20 ? 0.4f * std::sin((f - 10) / 10.0f * 3.14159265f) : 0.0f;
+      const float x = f <= 10 ? 0.5f + 0.001f * f : f >= 20 ? 0.7f + 0.001f * (f - 20) : 0.51f + 0.019f * (f - 10);
+      clip.track("Foot", "Position", 0).set_key((float)f, x, AnimLinear);
+      clip.track("Foot", "Position", 1).set_key((float)f, 1.2f + lift, AnimLinear);
+      clip.track("Foot", "Position", 2).set_key((float)f, 0.0f, AnimLinear);
+    }
+    clip.contacts.push_back({"Lower", 3.0f, 4.0f, true});  // (by hand, on another bone: kept)
+    const std::vector<body::Effector> eff = body::effectors(r.s, *r.rig, *r.rig);
+    CHECK(eff.size() == 1 && eff[0].bone == r.upper && eff[0].target == foot && eff[0].target_path == "Foot");
+    body::ContactSettings cs;
+    cs.speed = 0.1f;
+    clip.contacts = body::find_contacts(r.s, *r.rig, clip, eff, cs);
+    std::string list;
+    for (const auto &k : clip.contacts) list += strprintf("%s %.0f-%.0f%s; ", k.bone.c_str(), k.from, k.to, k.manual ? " (manual)" : "");
+    std::printf("    contacts: %s\n", list.c_str());
+    int found = 0;
+    for (const auto &k : clip.contacts) {
+      if (k.manual) continue;
+      found++;
+      const bool first = k.from <= 1.0f && k.to >= 9.0f && k.to <= 11.0f, second = k.from >= 19.0f && k.from <= 21.0f && k.to >= 29.0f;
+      CHECK(k.bone == "Upper" && (first || second));
+    }
+    CHECK(found == 2 && clip.contacts.size() == 3);
+    size_t unpinned = 0;
+    const size_t keys = body::pin_contacts(r.s, *r.rig, clip, eff, &unpinned);
+    float drift = 0;
+    for (const auto &k : clip.contacts) {
+      if (k.manual) continue;
+      const float x0 = clip.track("Foot", "Position", 0).sample(k.from);
+      for (float f = k.from; f <= k.to; f += 1.0f) drift = std::max(drift, std::fabs(clip.track("Foot", "Position", 0).sample(f) - x0));
+    }
+    std::printf("    pinned with %zu keys (%zu contact(s) on a bone without IK skipped); the target's drift in contact %.6f\n", keys, unpinned, drift);
+    CHECK(keys > 0 && unpinned == 1 && drift < 1e-6f);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(clip), back) && back.contacts.size() == clip.contacts.size() && back.contacts[0].bone == clip.contacts[0].bone);
+  });
+
+  /* ---------------------------------------------------------------- round 137: ballistic flight and angular momentum (task 0117) */
+  /* A jump the wrong shape: the rig rises in a straight line to 1 m by frame 15 and falls back by 25 (30 fps), on the
+   * ground (a manual contact) 0-5 and 25-30. `tuck`: Upper turns half a turn about z through the flight. */
+  auto r138_jump = [](R136Body &r, bool tuck, float far = 0.0f) {
+    AnimationClip clip;
+    clip.frame_rate = 30.0f;
+    clip.length = 30.0f;
+    for (int f = 0; f <= 30; f++) {
+      const float y = f <= 5 || f >= 25 ? 0.0f : f <= 15 ? (f - 5) / 10.0f : (25 - f) / 10.0f;
+      clip.track("", "Position", 0).set_key((float)f, f <= 5 ? 0.0f : f >= 25 ? far : far * (f - 5) / 20.0f, AnimLinear);
+      clip.track("", "Position", 1).set_key((float)f, y, AnimLinear);
+      if (tuck) clip.track("Lower/Upper", "Rotation", 2).set_key((float)f, f <= 5 ? 0.0f : f >= 25 ? 180.0f : 9.0f * (f - 5), AnimLinear);
+    }
+    clip.contacts = {{"Upper", 0.0f, 5.0f, true}, {"Upper", 25.0f, 30.0f, true}};
+    (void)r;
+    return clip;
+  };
+  test("flight: in the air the center of mass follows a parabola under gravity between take-off and landing; the keyed correction gives exactly that", [&] {
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    const AnimationClip clip = r138_jump(r, false);
+    body::FlightSettings fs;
+    fs.keep_momentum = false;
+    body::FlightResult res;
+    std::string error;
+    const bool ok = body::correct_flight(r.s, *r.rig, clip, b, fs, res, error);
+    const float dt = 1.0f / 30.0f;
+    float worst = 0;  // (the second difference of a parabola: g dt^2 everywhere)
+    for (int f = 6; f <= 24; f++) {
+      const float acc = (res.com_after[(size_t)f + 1].y - 2 * res.com_after[(size_t)f].y + res.com_after[(size_t)f - 1].y) / (dt * dt);
+      worst = std::max(worst, std::fabs(acc + 9.81f));
+    }
+    const std::vector<Vec3> keyed = body::com_trajectory(r.s, *r.rig, res.corrected, b, 0.0f, 30.0f, 31);
+    float realised = 0;
+    for (int f = 0; f <= 30; f++) realised = std::max(realised, length(keyed[(size_t)f] - res.com_after[(size_t)f]));
+    std::printf("    %s: %zu flight(s), take-off %.2f m/s up; the worst acceleration error %.4f m/s^2; the keyed clip within %.6f m; %zu keys\n",
+                ok ? "corrected" : error.c_str(), res.flights.size(), res.flights.empty() ? 0.0f : res.flights[0].v0.y, worst, realised, res.keys);
+    CHECK(ok && res.flights.size() == 1 && res.flights[0].takeoff == 5 && res.flights[0].landing == 25 && res.flights[0].possible);
+    CHECK(worst < 1e-2f && realised < 1e-4f);
+    CHECK(length(res.com_after[5] - res.com_before[5]) < 1e-6f && length(res.com_after[25] - res.com_before[25]) < 1e-6f);
+    int changed = 0, ground = 0;
+    for (size_t f = 0; f < res.marks.size(); f++) {
+      changed += res.marks[f] == body::MarkChanged;
+      ground += res.marks[f] == body::MarkGround;
+    }
+    CHECK(changed >= 15 && ground == 12);  // (0-5 and 25-30 on the ground; the flight's frames moved: it was the wrong shape)
+  });
+  test("flight: a tuck's angular momentum is kept through the flight; the landing pose kept too when asked; an impossible jump is marked and not written", [&] {
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    const AnimationClip clip = r138_jump(r, true);
+    const std::vector<Vec3> L_before = body::angular_momentum(r.s, *r.rig, clip, b);
+    body::FlightSettings fs;
+    fs.keep_landing = false;
+    body::FlightResult res;
+    std::string error;
+    CHECK(body::correct_flight(r.s, *r.rig, clip, b, fs, res, error));
+    const std::vector<Vec3> L_after = body::angular_momentum(r.s, *r.rig, res.corrected, b);
+    const Vec3 L0 = L_after[7];
+    float spread_before = 0, spread_after = 0;
+    for (int f = 7; f <= 23; f++) {
+      spread_before = std::max(spread_before, length(L_before[(size_t)f] - L_before[7]));
+      spread_after = std::max(spread_after, length(L_after[(size_t)f] - L0));
+    }
+    std::printf("    |L| at take-off %.3f; its largest change in the air: %.3f before, %.3f after (%.1f%%)\n", length(L0), spread_before, spread_after,
+                100.0f * spread_after / std::max(1e-6f, length(L0)));
+    CHECK(length(L0) > 1e-3f && spread_after < 0.01f * length(L0) && spread_after < spread_before);
+    fs.keep_landing = true;
+    body::FlightResult kept;
+    CHECK(body::correct_flight(r.s, *r.rig, clip, b, fs, kept, error));
+    const std::vector<Vec3> c_kept = body::com_trajectory(r.s, *r.rig, kept.corrected, b, 24.0f, 25.0f, 2);
+    CHECK(length(c_kept[1] - kept.com_before[25]) < 1e-5f);  // (the landing frame untouched)
+    const AnimationClip far = r138_jump(r, false, 100.0f);
+    body::FlightResult wild;
+    CHECK(body::correct_flight(r.s, *r.rig, far, b, body::FlightSettings(), wild, error));
+    std::printf("    100 m in 0.7 s: %s (%s), %zu keys\n", wild.flights[0].possible ? "possible" : "impossible", wild.flights[0].why.c_str(), wild.keys);
+    CHECK(!wild.flights[0].possible && wild.keys == 0 && wild.marks[15] == body::MarkImpossible);
+    AnimationClip none = clip;
+    none.contacts.clear();
+    CHECK(!body::correct_flight(r.s, *r.rig, none, b, fs, res, error) && error.find("contacts") != std::string::npos);
+  });
+  test("physics in the editor: Body Mass, contacts by hand and found, the flight shown as a ghost with its frames' colours, Apply as one undo step", [] {
+    Editor ed;
+    r34_open(ed);
+    Scene &s = ed.scene();
+    GameObject *rig = s.create("Rig");
+    rig->add<Armature>();
+    GameObject *lower = s.create("Lower", rig);
+    lower->add<Bone>();
+    GameObject *upper = s.create("Upper", lower);
+    upper->set_local_position({0, 1, 0});
+    upper->add<Bone>()->rest_position = {0, 1, 0};
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select Rig");
+    ed.command("anim new Jump");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    clip->frame_rate = 30.0f;
+    clip->length = 30.0f;
+    for (int f = 0; f <= 30; f++)
+      clip->track("", "Position", 1).set_key((float)f, f <= 5 || f >= 25 ? 0.0f : f <= 15 ? (f - 5) / 10.0f : (25 - f) / 10.0f, AnimLinear);
+    clip->touch();
+    ed.command("body mass 80");
+    CHECK_NEAR(rig->get<Armature>()->body_mass, 80.0f, 1e-4);
+    ed.command("body contacts add Upper 0 5");
+    ed.command("body contacts add Upper 25 30");
+    CHECK(clip->contacts.size() == 2 && clip->contacts[0].manual);
+    ed.command("body flight show");
+    ed.step_frame_headless();
+    const bool shown = clip->find("Lower", "Position", 1) == nullptr;  // (shown only: nothing written yet)
+    ed.command("body flight apply");
+    const AnimTrack *hips = clip->find("Lower", "Position", 1);
+    const float y15 = hips ? hips->sample(15.0f) : 0.0f;
+    ed.command("undo");
+    AnimationClipPtr after_undo = ed.anim_clip_for_test();
+    const bool undone = after_undo && after_undo->find("Lower", "Position", 1) == nullptr;
+    std::printf("    shown without writing: %s; applied: the hips at frame 15 moved %.3f m; undone: %s\n", shown ? "yes" : "no", y15, undone ? "yes" : "no");
+    CHECK(shown && hips && std::fabs(y15) > 1e-3f && undone);
+    ed.command("body show on");
+    ed.step_frame_headless();  // (the center of mass's path drawn: no crash, no change to the scene)
+    CHECK(length(rig->local().position) < 1e-6f);
+  });
+  test("physics (review): pinning and a flight carry IK targets right with a moving root; a contact outside the clip is skipped; a manual contact trims a found one", [] {
+    R136Body r;
+    GameObject *foot = r.s.create("Foot", r.rig);
+    foot->set_local_position({0.5f, 1.2f, 0});
+    IKConstraint *ik = r.upper->add<IKConstraint>();
+    ik->target = "Foot";
+    solve_constraints(r.s);
+    /* The rig walks along x (root motion); the target drifts in its own space, so in the world it moves twice. */
+    AnimationClip clip;
+    clip.frame_rate = 30.0f;
+    clip.length = 30.0f;
+    for (int f = 0; f <= 30; f++) {
+      clip.track("", "Position", 0).set_key((float)f, 0.05f * f, AnimLinear);
+      clip.track("Foot", "Position", 0).set_key((float)f, 0.5f + 0.002f * f, AnimLinear);
+      clip.track("Foot", "Position", 1).set_key((float)f, 1.2f, AnimLinear);
+    }
+    clip.contacts = {{"Upper", 5.0f, 12.0f, true}, {"Upper", 100.0f, 110.0f, true}};
+    const std::vector<body::Effector> eff = body::effectors(r.s, *r.rig, *r.rig);
+    size_t skipped = 0, replaced = 0;
+    body::pin_contacts(r.s, *r.rig, clip, eff, &skipped, &replaced);
+    float drift = 0;
+    Vec3 first(0.0f);
+    body::for_each_frame(r.s, *r.rig, clip, 5, 12, [&](int f) {
+      const Vec3 w = foot->world_position();
+      if (f == 5) first = w;
+      drift = std::max(drift, length(w - first));
+    });
+    std::printf("    pinned under a walking root: the target's world drift %.6f; skipped %zu (outside the clip), %zu keys replaced; end %.0f\n", drift, skipped,
+                replaced, clip.end_frame());
+    CHECK(drift < 1e-5f && skipped == 1 && replaced > 0 && clip.end_frame() <= 30.0f);
+    /* A manual contact over part of a rest: the rest outside it is still found. */
+    AnimationClip rest;
+    rest.frame_rate = 30.0f;
+    rest.length = 30.0f;
+    rest.track("Foot", "Position", 1).set_key(0.0f, 1.2f, AnimLinear);
+    rest.track("Foot", "Position", 1).set_key(30.0f, 1.2f, AnimLinear);
+    rest.contacts = {{"Upper", 10.0f, 12.0f, true}};
+    const std::vector<AnimationClip::Contact> found = body::find_contacts(r.s, *r.rig, rest, eff, body::ContactSettings());
+    std::string list;
+    for (const auto &k : found) list += strprintf("%.0f-%.0f%s ", k.from, k.to, k.manual ? "m" : "");
+    std::printf("    a still foot with a manual contact 10-12: %s\n", list.c_str());
+    CHECK(found.size() == 3);
+  });
+  test("physics (review): a flight with a moving root keeps the feet with the body; a smooth key already there keeps its curve; a fast double spin keeps its momentum; an imported skeleton's root bone is the hips", [] {
+    R136Body r;
+    GameObject *foot = r.s.create("Foot", r.rig);
+    foot->set_local_position({0.5f, 1.2f, 0});
+    r.upper->add<IKConstraint>()->target = "Foot";
+    solve_constraints(r.s);
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    AnimationClip clip;
+    clip.frame_rate = 30.0f;
+    clip.length = 30.0f;
+    for (int f = 0; f <= 30; f++) {
+      clip.track("", "Position", 0).set_key((float)f, 0.05f * f, AnimLinear);
+      clip.track("", "Position", 1).set_key((float)f, f <= 5 || f >= 25 ? 0.0f : f <= 15 ? (f - 5) / 10.0f : (25 - f) / 10.0f, AnimLinear);
+      clip.track("Foot", "Position", 0).set_key((float)f, 0.5f, AnimLinear);
+      clip.track("Foot", "Position", 1).set_key((float)f, 1.2f, AnimLinear);
+    }
+    clip.track("Lower", "Position", 1).set_key(25.0f, 0.0f, AnimAuto);  // (the animator's own smooth key at the landing)
+    clip.contacts = {{"Upper", 0.0f, 5.0f, true}, {"Upper", 25.0f, 30.0f, true}};
+    body::FlightResult res;
+    std::string error;
+    CHECK(body::correct_flight(r.s, *r.rig, clip, b, body::FlightSettings(), res, error));
+    /* The foot's target in the hips' space: as it was, every frame (the body moved as one, the legs not stretched). */
+    std::vector<Vec3> before, after;
+    body::for_each_frame(r.s, *r.rig, clip, 0, 30, [&](int) { before.push_back(r.lower->world_matrix().inverse().point(foot->world_position())); });
+    body::for_each_frame(r.s, *r.rig, res.corrected, 0, 30, [&](int) { after.push_back(r.lower->world_matrix().inverse().point(foot->world_position())); });
+    float worst = 0;
+    for (size_t f = 0; f < before.size(); f++) worst = std::max(worst, length(after[f] - before[f]));
+    const AnimTrack *hy = res.corrected.find("Lower", "Position", 1);
+    const int landing = hy ? hy->key_at(25.0f) : -1;
+    std::printf("    the foot in the hips' space moved at most %.6f; the landing key's interpolation %d (kept: %d); %zu keys replaced\n", worst,
+                landing >= 0 ? hy->keys[(size_t)landing].interp : -1, AnimAuto, res.replaced);
+    CHECK(worst < 1e-4f);
+    CHECK(landing >= 0 && hy->keys[(size_t)landing].interp == AnimAuto && res.replaced > 0);
+    /* Two whole turns of Upper in 20 frames: a large correction, still the take-off's momentum. */
+    AnimationClip spin;
+    spin.frame_rate = 30.0f;
+    spin.length = 30.0f;
+    for (int f = 0; f <= 30; f++) {
+      spin.track("", "Position", 1).set_key((float)f, f <= 5 || f >= 25 ? 0.0f : f <= 15 ? (f - 5) / 10.0f : (25 - f) / 10.0f, AnimLinear);
+      spin.track("Lower/Upper", "Rotation", 2).set_key((float)f, f <= 5 ? 0.0f : f >= 25 ? 720.0f : 36.0f * (f - 5), AnimLinear);
+    }
+    spin.contacts = {{"Upper", 0.0f, 5.0f, true}, {"Upper", 25.0f, 30.0f, true}};
+    R136Body plain;
+    const body::Body pb = body::build(plain.s, *plain.rig, 75.0f);
+    body::FlightSettings fs;
+    fs.keep_landing = false;
+    CHECK(body::correct_flight(plain.s, *plain.rig, spin, pb, fs, res, error));
+    const std::vector<Vec3> L = body::angular_momentum(plain.s, *plain.rig, res.corrected, pb);
+    float spread = 0;
+    for (int f = 7; f <= 23; f++) spread = std::max(spread, length(L[(size_t)f] - L[7]));
+    std::printf("    a double spin: |L| %.2f, its largest change in the air %.2f (%.1f%%), the body turned up to %.0f degrees\n", length(L[7]), spread,
+                100.0f * spread / std::max(1e-6f, length(L[7])), res.flights[0].turn);
+    CHECK(spread < 0.01f * length(L[7]));
+    Scene s;
+    GameObject *top = s.create("Hips");
+    top->add<Armature>();
+    top->add<Bone>();
+    GameObject *leg = s.create("Leg", top);
+    leg->add<Bone>();
+    CHECK(body::hips_of(*top) == top);
+  });
+  test("physics in the editor (review): the center of mass's overlay builds the body once, not every frame; Apply never writes one character's flight into another's clip", [] {
+    Editor ed;
+    r34_open(ed);
+    Scene &s = ed.scene();
+    auto make = [&](const char *name, float x) {
+      GameObject *rig = s.create(name);
+      rig->add<Armature>();
+      rig->set_local_position({x, 0, 0});
+      GameObject *lower = s.create(std::string(name) + "Lower", rig);
+      lower->add<Bone>();
+      GameObject *upper = s.create(std::string(name) + "Upper", lower);
+      upper->set_local_position({0, 1, 0});
+      upper->add<Bone>()->rest_position = {0, 1, 0};
+      MeshPtr m = primitives::cube(0.5f);
+      m->vertex_groups = {{std::string(name) + "Lower", std::vector<float>(m->vert_count(), 1.0f)}};
+      GameObject *skin = s.create(std::string(name) + "Skin");
+      skin->add<MeshFilter>()->mesh = m;
+      skin->add<SkinModifier>()->object = name;
+      return rig;
+    };
+    make("A", 0.0f);
+    make("B", 3.0f);
+    ed.mark_changed_for_test("Add the rigs");
+    for (const char *name : {"B", "A"}) {
+      ed.command(std::string("select ") + name);
+      ed.command(std::string("anim new ") + name + "Jump");
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      if (!clip) continue;
+      clip->frame_rate = 30.0f;
+      clip->length = 30.0f;
+      for (int f = 0; f <= 30; f++)
+        clip->track("", "Position", 1).set_key((float)f, f <= 5 || f >= 25 ? 0.0f : f <= 15 ? (f - 5) / 10.0f : (25 - f) / 10.0f, AnimLinear);
+      clip->contacts = {{std::string(name) + "Upper", 0.0f, 5.0f, true}, {std::string(name) + "Upper", 25.0f, 30.0f, true}};
+      clip->touch();
+    }
+    ed.command("body show on");
+    for (int k = 0; k < 4; k++) ed.step_frame_headless();
+    const size_t builds = ed.body_builds_for_test();
+    ed.command("body flight show");
+    const bool shown = ed.body_ghost_for_test();
+    ed.command("select B");
+    AnimationClipPtr b = ed.anim_clip_for_test();
+    const size_t tracks = b ? b->tracks.size() : 0;
+    ed.command("body flight apply");
+    std::printf("    4 frames with the overlay: %zu body built; A's flight shown: %s; B's tracks after Apply on B: %zu (was %zu)\n", builds, shown ? "yes" : "no",
+                b ? b->tracks.size() : 0, tracks);
+    CHECK(builds == 1 && shown && b && b->tracks.size() == tracks);
+  });
 }

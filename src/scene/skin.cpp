@@ -103,6 +103,9 @@ void Armature::reflect(Reflector &r) {
   r.field("Rest Position", rest_position);
   r.help("Shows every skin bound to this armature unposed (Blender: Rest Position).");
   r.field("In Front", in_front);
+  r.field("Body Mass", body_mass, 0.5f, 0.01f, 100000.0f);
+  r.help("The whole body in kilograms, shared among the bones by the volume of mesh each moves (Animation > Physics:\n"
+         "the center of mass, ballistic jumps). Cascadeur: the character's mass.");
 }
 
 void SkinModifier::reflect(Reflector &r) {

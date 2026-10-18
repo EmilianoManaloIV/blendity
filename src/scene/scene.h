@@ -939,6 +939,7 @@ struct Armature : ComponentBase<Armature> {
   bool show_bones = true;
   bool rest_position = false;  // skins show the mesh unposed
   bool in_front = true;        // bones drawn over the meshes
+  float body_mass = 75.0f;     // kg: the whole body, shared among the bones by the volume each moves (task 0115)
   void reflect(Reflector &r) override;
 };
 

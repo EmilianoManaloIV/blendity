@@ -606,6 +606,7 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
 }
 
 void Editor::render_overlays(const Recti &) {
+  draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
   /* Wireframes. */
   bool all_wire = shading_ == Shading::Wireframe || shading_ == Shading::ShadedWireframe;
   scene_->for_each([&](GameObject &g) {
