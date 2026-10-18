@@ -4,7 +4,7 @@
 # installed, then packaged for Blendity by package_linux.sh. Mounts: /src the openmoonray checkout,
 # /opt/MoonRay/installs the dependencies, /tools this folder, /out where the archive goes.
 set -euo pipefail
-source /src/building/Rocky9/install_packages.sh --nocuda --noqt
+source /src/building/Rocky9/install_packages.sh --nocuda --noqt --nocgroup  # (libcgroup: for Arras only; its RPM link is gone)
 export PATH=/installs/cmake-3.23.1-linux-x86_64/bin:$PATH
 cd /src
 # (The preset builds in /build and installs into /installs/openmoonray; no GPU, no Qt apps.)
