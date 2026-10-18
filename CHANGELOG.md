@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 143): MoonRay built for macOS too (task 0111)
+
+**Asked:** round 135's "Do and finish all tasks" - the MoonRay archive for macOS, which CI hadn't built yet.
+
+**Fixed**
+- CI's macOS packaging stopped silently (`set -e`): `otool` failing on a scene object folder's non-library files, and a
+  library's `@rpath` install name found nowhere. Both are passed over now, with progress printed.
+
+**Checked**
+- CI run 39130702928: MoonRay built on Apple silicon and packaged into a 240 MB archive (149 libraries). On a clean
+  macOS 15 runner the archive unpacked and rendered its test scene in 8 s. With Linux's (round 136), both archives
+  Blendity offers are built and checked; publishing them to a release is the user's call.
+- No source changed (CI scripts and docs only): the suite stands as round 142 ran it.
+
 ## 2026-10-18 (round 142): physics for animation written up (task 0123)
 
 **Asked:** the physics plan's last task, finishing "Finish and do all tasks please."

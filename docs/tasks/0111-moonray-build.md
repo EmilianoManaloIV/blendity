@@ -42,7 +42,13 @@ something a clean machine runs.
   - Python 3.11 (Boost.Python fails on 3.13);
   - the dependencies cached the moment they are built;
   - the check containers need `seccomp=unconfined` (MoonRay calls `mbind`).
-- **macOS: still building in CI.** CMake 4 needs `CMAKE_POLICY_VERSION_MINIMUM`, and autotools come from Homebrew.
-  freetype2 was put on the include path for MoonRay's telemetry overlay. The dependency cache is now found by prefix
-  after a script change.
+- **macOS (Apple silicon): GO.**
+  - Run 39130702928 builds MoonRay and packages a 240 MB archive (455 MB unpacked, 149 libraries).
+  - On a clean macOS 15 runner it unpacks the archive and renders the test scene in 8 s.
+- What macOS took:
+  - CMake 4 needs `CMAKE_POLICY_VERSION_MINIMUM`, and autotools come from Homebrew;
+  - freetype2 is on the include path for MoonRay's telemetry overlay;
+  - the dependency cache is found by prefix after a script change;
+  - packaging no longer stops silently: `set -e` ended the script without a word when `otool` met a file that isn't a
+    library, and again when an `@rpath` install name was found nowhere.
 - **Not yet published:** the archives stay CI artifacts until the user says to put them on a release.
