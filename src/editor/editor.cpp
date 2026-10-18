@@ -189,6 +189,8 @@ bool Editor::init(int argc, char **argv) {
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
   if (update_check_ && std::time(nullptr) - update_last_check_ > 86400.0) start_update_check(false);  // (once a day, task 0079)
   check_libraries_at_start();  // (the dependency-free build: offer Blender's libraries, task 0080)
+  /* MoonRay (task 0112): offered on the first run, and a day after Not now; looking for it (WSL on Windows) only then. */
+  if (!headless_ && !mr_never_ask_ && !mr_installed_ && std::time(nullptr) - mr_last_ask_ >= 86400.0) mr_offer_pending_ = true;
   Log::info("New here? Open the Learn tab (F1).");
   Log::info("UI font: %s | worker threads: %d", ui_.font.source().c_str(), JobSystem::global().thread_count());
   return true;
@@ -500,6 +502,7 @@ void Editor::frame(std::vector<Event> &events) {
   step_render_sequence();
   step_render_animation();
   poll_updates();
+  poll_moonray();
   step_bake();
 
   /* Pull new console lines. */
@@ -3198,6 +3201,7 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
+  if (c == "moonray") return moonray_command(t);  // moonray status | install [archive] | remove | folder [path] | check (task 0112)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
@@ -3815,7 +3819,8 @@ void Editor::run_console_command(const std::string &line) {
     mark_changed("World");
   }
   else if (c == "engine") {
-    scene_->render.engine = to_lower(arg(1, "raster")).rfind("path", 0) == 0 ? 1 : 0;
+    const std::string e = to_lower(arg(1, "raster"));  // raster | path | moonray (task 0114)
+    scene_->render.engine = e.rfind("path", 0) == 0 ? 1 : e.rfind("moon", 0) == 0 ? 2 : 0;
     mark_changed("Render Engine");
   }
   else if (c == "samples") {
@@ -4117,7 +4122,8 @@ void Editor::draw_dialogs() {
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
-  const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries;
+  const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
+                    dialog_ == Dialog::MoonRay;
   int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
@@ -4223,6 +4229,10 @@ void Editor::draw_dialogs() {
         title("Welcome: Blendity starts on Low here");
         draw_first_run_tier(close);
         break;
+      case Dialog::MoonRay:
+        title("MoonRay, an optional render engine");
+        draw_moonray_dialog(close);
+        break;
       case Dialog::About: {
         title("About Blendity");
         const char *lines[] = {"Blendity - a Unity-style editor built on Blender's modeling ideas.",
@@ -4273,6 +4283,7 @@ void Editor::draw_dialogs() {
         u.label({ru.x + u.px(320) + ru.h, ru.y, u.px(200), ru.h}, "Include every PR's build");
         u.tooltip("Off: only released versions (v0.10.0...). On: also preview builds of single pull requests, when published.");
         draw_libraries_settings();
+        draw_moonray_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
         Recti b = u.popup_row(u.row_h() + u.px(10));
@@ -4308,6 +4319,7 @@ void Editor::load_prefs() {
     if (eq == std::string::npos) continue;
     std::string k = line.substr(0, eq), v = line.substr(eq + 1);
     if (!v.empty() && v.back() == '\r') v.pop_back();
+    if (moonray_pref(k, v)) continue;
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
@@ -4414,6 +4426,8 @@ void Editor::save_prefs() {
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
   s += strprintf("use_libs=%d\nlibs_never_ask=%d\nlibs_last=%.0f\n", use_libs_ ? 1 : 0, libs_never_ask_ ? 1 : 0, libs_last_check_);
+  s += strprintf("moonray_never_ask=%d\nmoonray_last=%.0f\nmoonray_folder=%s\nmoonray_installed=%d\n", mr_never_ask_ ? 1 : 0, mr_last_ask_,
+                 mr_folder_.c_str(), mr_installed_ ? 1 : 0);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }

@@ -41,6 +41,8 @@
 
 #include <atomic>
 #include "../core/releases.h"
+#include "../render/moonray.h"
+#include "../render/moonray_export.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -2472,7 +2474,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {
@@ -2486,6 +2488,8 @@ class Editor {
     std::atomic<uint64_t> done{0}, total{0};
     std::atomic<bool> cancel{false};
     bool libraries = false;  // (Blender's libraries for the fallback, task 0080: unpacked, not installed)
+    bool moonray = false;    // (MoonRay, task 0112: unpacked where it runs, then its test scene rendered)
+    moonray::Install mr;     // (where: located before the download)
     std::string file, path, error;
   };
   struct UpdateState {
@@ -2494,8 +2498,80 @@ class Editor {
     std::vector<releases::Release> list;
     std::vector<releases::Release> extras;  // the libraries archives' release (task 0082), when GitHub has it
     std::string offer, selected;  // tags
-    bool manual = false, history = false, want_libs = false, want_updates = false;
+    bool manual = false, history = false, want_libs = false, want_updates = false, want_moonray = false;
   } upd_;
+  /* ---- MoonRay, an external renderer (tasks 0112-0114, ADR 0041; moonray_ui.cpp) ---- */
+  struct MoonRayLocate {
+    std::atomic<bool> done{false};
+    std::string folder;  // (what it looked in: a search for a folder since changed is dropped)
+    moonray::Install found;
+  };
+  /* A slow MoonRay chore (check, remove, install from a file) on a thread of its own: never on the editor's. */
+  struct MoonRayTask {
+    std::atomic<bool> done{false};
+    bool ok = false;
+    std::string message;
+    moonray::Install install;  // (where things stand after it)
+  };
+  std::shared_ptr<MoonRayTask> mr_task_;
+  std::vector<std::string> mr_queued_;  // a console command waiting for MoonRay to be located
+  bool mr_installed_ = false;           // (saved: MoonRay was installed - not looked for at every start)
+  void moonray_task(const std::string &what, const std::function<bool(moonray::Install &, std::string &)> &chore);
+  struct MoonRayJob {
+    enum { Running, Done, Failed, Cancelled };
+    std::atomic<int> state{Running};
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{false};
+    std::string image, error;  // (the EXR it writes; what went wrong, with its output's end)
+    std::thread thread;
+    ~MoonRayJob() {
+      cancel.store(true);
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::shared_ptr<MoonRayLocate> mr_locate_;
+  moonray::Install mr_;          // where MoonRay runs and what is installed (moonray_locate)
+  bool mr_located_ = false;      // mr_ has been found at least once
+  std::string mr_folder_;        // Preferences > Renderers: the user's own MoonRay ("" = Blendity's download)
+  bool mr_never_ask_ = false;    // "Never ask" to the install question
+  bool mr_offer_pending_ = false;  // ask when MoonRay is located (the first run, or a day after Not now)
+  double mr_last_ask_ = 0.0;
+  std::shared_ptr<MoonRayJob> mr_job_;  // an F12 render running in MoonRay
+  struct MoonRayFrame {
+    int width = 0, height = 0;
+    bool transparent = false, solid = false;
+    Vec3 background{0.0f};
+    ViewTransform view_transform = ViewTransform::Filmic;
+    float exposure = 0.0f;
+  } mr_frame_;
+  std::vector<std::string> mr_notes_shown_;  // export notes already logged (each once a session)
+  void moonray_locate();
+  void poll_moonray();
+  bool offer_moonray();
+  void draw_moonray_dialog(const std::function<void()> &close);
+  void draw_moonray_settings();
+  void moonray_command(const std::vector<std::string> &t);
+  bool begin_moonray_render(const moonray::ExportScene &sc, const MoonRayFrame &frame);
+  void step_moonray_render();
+  void moonray_frame_failed();
+  bool start_moonray(int w, int h, const Mat4 &v, const Mat4 &p, const Camera *cam, Vec3 eye);  // F12 (render_view.cpp)
+  bool mr_waiting_render_ = false;  // F12 asked for MoonRay before it was located: started once it is
+  bool moonray_pref(const std::string &key, const std::string &value);  // (load_prefs: its keys)
+ public:
+  /* Tests: MoonRay as given (a program standing in for it: Install::launcher), without looking for WSL. */
+  void moonray_set_for_test(const moonray::Install &in) {
+    mr_ = in;
+    mr_located_ = true;
+    mr_locate_.reset();
+  }
+  const moonray::Install &moonray_for_test() const { return mr_; }
+  bool moonray_rendering_for_test() const { return mr_job_ != nullptr; }
+  const std::string &render_status_for_test() const { return render_status_; }
+  void stop_render_for_test() { rendering_ = false; }  // (the Render window's Stop)
+  void moonray_offer_pending_for_test(bool on) { mr_offer_pending_ = on; }
+  bool moonray_offer_pending_for_test() const { return mr_offer_pending_; }
+  bool moonray_busy_for_test() const { return mr_task_ || mr_locate_; }
+ private:
   double libs_last_check_ = 0.0;  // (the libraries are asked about at most once a day)
   static bool prepare_install(UpdateDownload &job, std::string &error);  // (on the downloading thread: no editor state)
   void cancel_update_download();
@@ -2503,7 +2579,7 @@ class Editor {
   void check_libraries_at_start();
   bool offer_libraries();
   void draw_libraries_dialog(const std::function<void()> &close);
-  void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries);
+  void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray = false);
   static bool unpack_libraries(const std::string &archive, std::string &error);
   void restart_program();
   void draw_libraries_settings();

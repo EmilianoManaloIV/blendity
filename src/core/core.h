@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -109,6 +110,14 @@ int run_program(const std::vector<std::string> &argv, int timeout_s = 0);  // ti
 bool start_program(const std::vector<std::string> &argv);
 constexpr int kExitUnknown = -2;   // run_program: it ran, but its exit code was lost (reaped elsewhere)
 constexpr int kExitTimedOut = -3;  // run_program: killed after timeout_s
+constexpr int kExitCancelled = -4; // run_streaming: killed when *cancel turned true
+/* Task 0112: runs argv[0] like run_program, its output (stdout and stderr together) handed to `out` as it comes, in
+ * chunks; killed when `cancel` turns true or after timeout_s. Its exit code, or -1 / kExitTimedOut / kExitCancelled.
+ * Call it off the main thread. */
+int run_streaming(const std::vector<std::string> &argv, const std::function<void(const std::string &)> &out,
+                  const std::atomic<bool> *cancel = nullptr, int timeout_s = 0);
+/* Its output whole (run_streaming's); for short programs (`wsl.exe -l`). */
+int run_capture(const std::vector<std::string> &argv, std::string &out, int timeout_s = 30);
 /* The Windows command line for `argv` (each argument quoted as CommandLineToArgvW reads it back); for tests. */
 std::string windows_command_line(const std::vector<std::string> &argv);
 }  // namespace sys

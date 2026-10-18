@@ -1,0 +1,129 @@
+# Task 0111 (ADR 0041): builds DreamWorks' MoonRay (Apache-2.0) at a pinned release into the archives Blendity offers
+# to download as an optional render engine: blendity-moonray-<platform>-<tag>.tar.gz with its .sha256, as artifacts.
+# They reach a release only when the user says so (uploaded by hand to the "libraries" extras release).
+# Run by hand, or by pushing to a moonray-build/* branch: the build takes hours, so ordinary pushes never start it.
+# "[skip linux]" or "[skip macos]" in the pushed commit's message leaves that platform out (a fix for the other).
+name: moonray
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['moonray-build/**']
+
+env:
+  MOONRAY_TAG: v2026.29.1
+
+jobs:
+  linux:
+    if: ${{ !contains(github.event.head_commit.message, '[skip linux]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Room on the disk (the build needs ~40 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - name: MoonRay's source
+        run: |
+          git lfs install
+          bash tools/moonray/clone.sh "$RUNNER_TEMP/src"
+      - name: Dependencies (cached)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/deps
+          key: moonray-deps-rocky9-${{ env.MOONRAY_TAG }}-${{ hashFiles('tools/moonray/linux_deps.sh') }}
+      - name: Build the dependencies (rockylinux:9)
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/deps"
+          docker run --rm --security-opt seccomp=unconfined -v "$RUNNER_TEMP/src:/src" -v "$RUNNER_TEMP/deps:/opt/MoonRay/installs" \
+            -v "$PWD/tools/moonray:/tools" rockylinux:9 bash /tools/linux_deps.sh
+      - name: Build and package MoonRay (rockylinux:9)
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          docker run --rm --security-opt seccomp=unconfined -e MOONRAY_TAG -v "$RUNNER_TEMP/src:/src" \
+            -v "$RUNNER_TEMP/deps:/opt/MoonRay/installs" -v "$PWD/tools/moonray:/tools" -v "$RUNNER_TEMP/out:/out" \
+            rockylinux:9 bash /tools/linux_build.sh
+          ls -l "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moonray-linux-x64
+          path: ${{ runner.temp }}/out/*
+          compression-level: 0
+
+  # The archive on clean systems: nothing installed but what the distribution ships.
+  linux-check:
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12', 'fedora:41']
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: tar and gzip (a minimal image may lack them)
+        shell: sh
+        run: command -v tar >/dev/null && command -v gzip >/dev/null || dnf install -y tar gzip
+      - uses: actions/download-artifact@v4
+        with:
+          name: moonray-linux-x64
+      - name: Check, unpack, render
+        run: |
+          f=$(ls blendity-moonray-linux-x64-*.tar.gz)
+          sha256sum -c "$f.sha256"
+          tar xzf "$f"
+          du -sh moonray
+          time moonray/bin/blendity-moonray -in moonray/test/rectangle.rdla -out /tmp/rectangle.exr
+          ls -l /tmp/rectangle.exr
+          moonray/bin/blendity-moonray -help 2>&1 | head -80 || true
+
+  macos:
+    if: ${{ !contains(github.event.head_commit.message, '[skip macos]') }}
+    runs-on: macos-14
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: MoonRay's source
+        run: |
+          sudo mkdir -p /Applications/MoonRay/source
+          sudo chown -R "$USER" /Applications/MoonRay
+          git lfs install
+          bash tools/moonray/clone.sh /Applications/MoonRay/source/openmoonray
+      - name: Dependencies (cached)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: /Applications/MoonRay/installs
+          key: moonray-deps-macos-arm64-${{ env.MOONRAY_TAG }}-${{ hashFiles('tools/moonray/macos_build.sh') }}
+      - name: Build the dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: bash tools/moonray/macos_build.sh deps
+      - name: Build MoonRay
+        run: bash tools/moonray/macos_build.sh moonray
+      - name: Package
+        run: bash tools/moonray/package_macos.sh /Applications/MoonRay/installs/openmoonray "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moonray-macos-arm64
+          path: ${{ runner.temp }}/out/*
+          compression-level: 0
+
+  macos-check:
+    needs: macos
+    runs-on: macos-15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: moonray-macos-arm64
+      - name: Check, unpack, render
+        run: |
+          f=$(ls blendity-moonray-macos-arm64-*.tar.gz)
+          shasum -a 256 -c "$f.sha256"
+          tar xzf "$f"
+          time moonray/bin/blendity-moonray -in moonray/test/rectangle.rdla -out /tmp/rectangle.exr
+          ls -l /tmp/rectangle.exr

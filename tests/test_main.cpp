@@ -246,7 +246,118 @@ static void round68_tests();
 static void round69_tests();
 static void round81_tests();
 
-int main() {
+/* Tests (round 135, tasks 0112-0114): an uncompressed scanline OpenEXR, float channels A B G R (EXR's order), as
+ * MoonRay writes them for Blendity. */
+static std::string test_exr_plain(int w, int h, const std::vector<float> &rgba, bool half = false) {
+  std::string o("\x76\x2F\x31\x01", 4);
+  auto i32 = [&](int32_t v) { o.append((const char *)&v, 4); };
+  auto attr = [&](const std::string &name, const std::string &type, const std::string &value) {
+    o += name + '\0' + type + '\0';
+    i32((int32_t)value.size());
+    o += value;
+  };
+  i32(2);
+  std::string ch;
+  for (const char *c : {"A", "B", "G", "R"}) {
+    ch += std::string(c) + '\0';
+    const int32_t t = half ? 1 : 2, one = 1;
+    ch.append((const char *)&t, 4);
+    ch += std::string(4, '\0');
+    ch.append((const char *)&one, 4);
+    ch.append((const char *)&one, 4);
+  }
+  ch += '\0';
+  attr("channels", "chlist", ch);
+  attr("compression", "compression", std::string(1, '\0'));
+  const int32_t box[4] = {0, 0, w - 1, h - 1};
+  attr("dataWindow", "box2i", std::string((const char *)box, 16));
+  attr("displayWindow", "box2i", std::string((const char *)box, 16));
+  attr("lineOrder", "lineOrder", std::string(1, '\0'));
+  o += '\0';
+  const size_t row = (size_t)w * 4 * (half ? 2 : 4);
+  uint64_t at = o.size() + (size_t)h * 8;
+  for (int y = 0; y < h; y++, at += 8 + row) o.append((const char *)&at, 8);
+  for (int y = 0; y < h; y++) {
+    i32(y);
+    i32((int32_t)row);
+    for (int c : {3, 2, 1, 0})
+      for (int x = 0; x < w; x++) {
+        const float v = rgba[((size_t)y * w + x) * 4 + c];
+        if (!half) {
+          o.append((const char *)&v, 4);
+          continue;
+        }
+        uint32_t b;  // (exact for the test's values: no rounding needed)
+        std::memcpy(&b, &v, 4);
+        const uint16_t hv = v == 0.0f ? 0 : (uint16_t)(((b >> 16) & 0x8000) | ((((b >> 23) & 0xFF) - 112) << 10) | ((b >> 13) & 0x3FF));
+        o.append((const char *)&hv, 2);
+      }
+  }
+  return o;
+}
+
+/* `blendity_tests --fake-moonray -in scene.rdla`: stands in for MoonRay (tasks 0112-0114). It reads the scene's size
+ * and its RenderOutput's file name, prints MoonRay's progress, and writes an uncompressed float EXR of one colour
+ * (0.5, 0.25, 0.125; alpha 1, or 0 on the left half when the scene hides its background). BLENDITY_FAKE_MOONRAY=slow
+ * takes 20 s; =fail exits 3. */
+static int fake_moonray(int argc, char **argv) {
+  std::string in, text;
+  for (int i = 2; i + 1 < argc; i++)
+    if (std::string(argv[i]) == "-in") in = argv[i + 1];
+  if (in.empty() || !fs::read_file(in, text)) {
+    std::printf("Error: can't read the scene '%s'\n", in.c_str());
+    return 2;
+  }
+  auto value = [&](const std::string &key) {
+    const size_t k = text.find("[\"" + key + "\"] = ");
+    if (k == std::string::npos) return std::string();
+    const size_t a = k + key.size() + 7;  // (past ["key"] = )
+    const size_t b = text.find_first_of(",\n", a);
+    std::string v = text.substr(a, b - a);
+    if (!v.empty() && v.front() == '"') v = v.substr(1, v.size() - 2);
+    std::string plain;  // (Lua's escapes undone: a Windows path's backslashes are written doubled)
+    for (size_t i = 0; i < v.size(); i++) plain += v[i] == '\\' && i + 1 < v.size() ? v[++i] : v[i];
+    return plain;
+  };
+  const int w = std::atoi(value("image_width").c_str()), h = std::atoi(value("image_height").c_str());
+  const std::string out = value("file_name");
+  const char *mode = std::getenv("BLENDITY_FAKE_MOONRAY");
+  const std::string m = mode ? mode : "";
+  std::printf("Loading Scene File(s): %s\n", in.c_str());
+  for (int k = 1; k <= 4; k++) {
+    std::printf("  [+] Rendering [%-20s] %.1f%%\r", std::string(k * 5, '=').c_str(), k * 25.0);
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::milliseconds(m == "slow" ? 5000 : 20));
+  }
+  if (m == "fail") {
+    std::printf("\nError: the fake renderer was told to fail\n");
+    return 3;
+  }
+  if (w <= 0 || h <= 0 || out.empty()) return 4;
+  const bool hide = text.find("\"force off\"") != std::string::npos;
+  std::vector<float> px((size_t)w * h * 4);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      float *p = &px[((size_t)y * w + x) * 4];
+      const float a = hide && x < w / 2 ? 0.0f : 1.0f;
+      p[0] = 0.5f * a, p[1] = 0.25f * a, p[2] = 0.125f * a, p[3] = a;
+    }
+  if (!fs::write_file(out, test_exr_plain(w, h, px))) return 5;
+  std::printf("\nWrote %s\n", out.c_str());
+  return 0;
+}
+
+/* This program, for tests that run it as another program (the fake MoonRay). */
+static std::string test_program() {
+#ifdef _WIN32
+  return fs::join(fs::executable_dir(), "blendity_tests.exe");
+#else
+  return fs::join(fs::executable_dir(), "blendity_tests");
+#endif
+}
+
+int main(int argc, char **argv) {
+  if (argc > 1 && std::string(argv[1]) == "--fake-moonray") return fake_moonray(argc, argv);
   register_builtin_components();
   research::register_features();
   Log::echo_stdout = false;
@@ -31847,5 +31958,420 @@ static void round81_tests() {
                 obj->get<MeshFilter>()->mesh->vert_count(), (unsigned long long)(p1.overlap_checks - p0.overlap_checks),
                 (unsigned long long)(p1.overlap_background - p0.overlap_background));
     CHECK(p1.overlap_checks > p0.overlap_checks && p1.overlap_background == p0.overlap_background);
+  });
+  /* ---------------------------------------------------------------- round 135: MoonRay, an external renderer (tasks 0111-0114) */
+  test("moonray: WSL's distribution list (UTF-16 or UTF-8), Windows paths as WSL sees them, MoonRay's progress from its output", [] {
+    std::string u16 = "\xFF\xFE";  // (a BOM, then UTF-16LE text, as wsl.exe writes)
+    for (char c : std::string("Ubuntu\r\nDebian\r\n")) u16 += c, u16 += '\0';
+    const std::vector<std::string> a = moonray::parse_wsl_list(u16), b = moonray::parse_wsl_list("Ubuntu-24.04\nkali\n\n");
+    std::printf("    UTF-16: %zu (%s, %s); UTF-8: %zu\n", a.size(), a.size() > 0 ? a[0].c_str() : "-", a.size() > 1 ? a[1].c_str() : "-", b.size());
+    CHECK(a.size() == 2 && a[0] == "Ubuntu" && a[1] == "Debian");
+    CHECK(b.size() == 2 && b[0] == "Ubuntu-24.04" && b[1] == "kali");
+    CHECK(moonray::parse_wsl_list("").empty());
+    CHECK(moonray::wsl_path("C:\\Users\\a b\\scene.rdla") == "/mnt/c/Users/a b/scene.rdla");
+    CHECK(moonray::wsl_path("D:/x/y.exr") == "/mnt/d/x/y.exr");
+    CHECK(moonray::wsl_path("/already/linux") == "/already/linux");
+    CHECK_NEAR(moonray::parse_progress("Loading\n  [+] Rendering [=====     ] 45.2%"), 0.452f, 1e-4);
+    CHECK_NEAR(moonray::parse_progress("[==] 10.0%\r[====] 20.5%\r"), 0.205f, 1e-4);
+    CHECK_NEAR(moonray::parse_progress("100.0%"), 1.0f, 1e-6);
+    CHECK(moonray::parse_progress("Render prep time = 00:00:00.008") < 0.0f);
+    CHECK(moonray::parse_progress("") < 0.0f);
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    in.root = "/opt/mr";
+    const std::vector<std::string> cmd = moonray::command(in, {"-in", "s.rdla"});
+#ifdef _WIN32
+    in.kind = moonray::Install::Wsl;
+    const std::vector<std::string> w = moonray::command(in, {"-in", "/mnt/c/s.rdla"});
+    CHECK(w.size() >= 4 && to_lower(fs::filename(w[0])) == "wsl.exe" && std::find(w.begin(), w.end(), "-e") != w.end() &&
+          std::find(w.begin(), w.end(), "/opt/mr/bin/blendity-moonray") != w.end());
+    CHECK(moonray::path_for(in, "C:\\t\\a.exr") == "/mnt/c/t/a.exr");
+#else
+    CHECK(cmd.size() == 3 && cmd[0] == "/opt/mr/bin/blendity-moonray" && cmd[2] == "s.rdla");
+#endif
+    in.launcher = {"fake", "--x"};
+    const std::vector<std::string> f = moonray::command(in, {"-in", "s"});
+    CHECK(f.size() == 4 && f[0] == "fake" && f[1] == "--x");
+    CHECK(moonray::path_for(in, "C:\\t\\a.exr") == "C:\\t\\a.exr");  // (a stand-in runs here: no WSL paths)
+    CHECK(!moonray::archive_name().empty() || std::string(releases::platform()) == "macos");
+  });
+  test("moonray: a program's output streamed as it comes, its exit code, and stopped at once when cancelled", [] {
+    const std::string dir = fs::join(fs::temp_dir(), "blendity-test-moonray");
+    fs::make_dirs(dir);
+    const std::string scene = fs::join(dir, "stream.rdla"), out = fs::join(dir, "stream.exr");
+    std::string lua_out;  // (as the exporter quotes it: backslashes doubled)
+    for (char ch : out) lua_out += ch == '\\' ? std::string("\\\\") : std::string(1, ch);
+    fs::write_file(scene, "SceneVariables {\n    [\"image_width\"] = 4,\n    [\"image_height\"] = 2,\n}\nRenderOutput(\"beauty\") {\n    [\"file_name\"] = \"" +
+                              lua_out + "\",\n}\n");
+    fs::remove_file(out);
+    std::string text;
+    int chunks = 0;
+    const int code = sys::run_streaming({test_program(), "--fake-moonray", "-in", scene}, [&](const std::string &s) { text += s, chunks++; });
+    Bitmap bm;
+    std::string error;
+    const bool read = load_image(out, bm, error);
+    std::printf("    exit %d, %d pieces of output, the last progress %.2f; the image %s (%dx%d)\n", code, chunks, moonray::parse_progress(text),
+                read ? "read" : error.c_str(), bm.width, bm.height);
+    CHECK(code == 0 && chunks >= 1 && moonray::parse_progress(text) == 1.0f);
+    CHECK(read && bm.width == 4 && bm.height == 2 && bm.is_float && std::fabs(bm.rgbaf[0] - 0.5f) < 1e-6f && std::fabs(bm.rgbaf[2] - 0.125f) < 1e-6f);
+    set_env("BLENDITY_FAKE_MOONRAY", "fail");
+    std::string ftext;
+    const int fcode = sys::run_streaming({test_program(), "--fake-moonray", "-in", scene}, [&](const std::string &s) { ftext += s; });
+    set_env("BLENDITY_FAKE_MOONRAY", "slow");
+    std::atomic<bool> cancel{false};
+    std::thread stopper([&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      cancel.store(true);
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    const int ccode = sys::run_streaming({test_program(), "--fake-moonray", "-in", scene}, [](const std::string &) {}, &cancel);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    stopper.join();
+    set_env("BLENDITY_FAKE_MOONRAY", "");
+    const int tcode = sys::run_streaming({test_program(), "--fake-moonray", "-in", scene}, [](const std::string &) {}, nullptr, 0);
+    std::printf("    told to fail: exit %d (%s); cancelled after %.0f ms: %d; a missing program: %d\n", fcode,
+                ftext.find("told to fail") != std::string::npos ? "its message seen" : "NO message", ms, ccode,
+                sys::run_streaming({"blendity-no-such-program"}, [](const std::string &) {}));
+    CHECK(fcode == 3 && ftext.find("told to fail") != std::string::npos);
+    CHECK(ccode == sys::kExitCancelled && ms < 3000.0);
+    CHECK(tcode == 0);
+    CHECK(sys::run_streaming({"blendity-no-such-program"}, [](const std::string &) {}) == -1);
+    std::string cap;
+    CHECK(sys::run_capture({test_program(), "--fake-moonray", "-in", scene}, cap) == 0 && cap.find("Wrote") != std::string::npos);
+  });
+  test("images: an uncompressed OpenEXR reads without Blender's libraries (float and half, channels by name); a compressed or broken one is refused; a PFM is written bottom row first", [] {
+    std::vector<float> px = {1.0f, 0.5f, 0.25f, 1.0f, 2.0f, 0.0f, 0.125f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 8.0f, 0.5f, 1.0f};
+    for (bool half : {false, true}) {
+      Bitmap bm;
+      std::string error;
+      const bool ok = decode_exr_plain(test_exr_plain(2, 2, px, half), bm, error);
+      bool same = ok && bm.width == 2 && bm.height == 2;
+      for (size_t i = 0; same && i < px.size(); i++) same = std::fabs(bm.rgbaf[i] - px[i]) < 1e-6f;
+      std::printf("    %s channels: %s\n", half ? "half" : "float", same ? "the same values" : ("DIFFERENT " + error).c_str());
+      CHECK(same);
+      Bitmap via;
+      CHECK(decode_image(test_exr_plain(2, 2, px, half), via, error) && via.width == 2);  // (decode_image too, libraries or not)
+    }
+    std::string zipped = test_exr_plain(2, 2, px);
+    const size_t c = zipped.find("compression");
+    zipped[c + 12 + 12 + 4] = 3;  // (name, type, size: then ZIP)
+    Bitmap bm;
+    std::string error;
+    CHECK(!decode_exr_plain(zipped, bm, error) && error.find("compressed") != std::string::npos);
+    CHECK(!decode_exr_plain(test_exr_plain(2, 2, px).substr(0, 200), bm, error));
+    CHECK(!decode_exr_plain("not an exr", bm, error));
+    const std::string pfm = fs::join(fs::temp_dir(), "blendity-test.pfm");
+    const float rgb[6] = {1, 2, 3, 4, 5, 6};  // (a 1 x 2 image: top (1, 2, 3), bottom (4, 5, 6))
+    CHECK(write_pfm(pfm, rgb, 1, 2));
+    std::string data;
+    fs::read_file(pfm, data);
+    float first = 0;
+    std::memcpy(&first, data.data() + std::string("PF\n1 2\n-1.0\n").size(), 4);
+    CHECK(data.rfind("PF\n1 2\n-1.0\n", 0) == 0 && first == 4.0f);
+    fs::remove_file(pfm);
+  });
+
+  /* A scene for the exporter: a turned cube with one material, the four light kinds, a gradient world. */
+  auto r135_scene = [](std::vector<std::shared_ptr<Mesh>> &keep, std::vector<MaterialPtr> &mats, Environment &env) {
+    moonray::ExportScene sc;
+    keep.push_back(primitives::cube(1.0f));
+    mats = {make_material("Red", {1, 0, 0})};
+    sc.objects.push_back({&keep.back()->render_mesh(false), Mat4::trs({1, 2, 3}, Quat::euler({0, 30, 0}), {1, 1, 1}), &mats});
+    RenderLight sun, point, spot, rect, disk;
+    sun.type = RenderLight::Directional, sun.direction = normalize(Vec3(0, -1, 1)), sun.intensity = 2;
+    point.type = RenderLight::Point, point.position = {0, 3, 0}, point.intensity = 1, point.range = 10;
+    spot.type = RenderLight::Spot, spot.position = {2, 3, 0}, spot.direction = {0, -1, 0}, spot.cos_outer = std::cos(0.5f), spot.cos_inner = std::cos(0.3f);
+    rect.type = RenderLight::Area, rect.position = {0, 4, 0}, rect.direction = {0, -1, 0}, rect.width = 2, rect.height = 1;
+    disk = rect, disk.disk = true;
+    sc.lights = {sun, point, spot, rect, disk};
+    env.mode = Environment::Gradient;
+    sc.world = &env;
+    sc.world_map_width = 64;
+    sc.view = Mat4::trs({0, 1, -5}, Quat::euler({0, 0, 0}), {1, 1, 1}).inverse();
+    sc.proj = Mat4::perspective(60.0f * 3.14159265f / 180.0f, 16.0f / 9.0f, 0.1f, 100.0f);
+    sc.width = 64, sc.height = 36, sc.samples = 64, sc.max_bounces = 5;
+    return sc;
+  };
+  /* The numbers after `key` in an RDLA text, up to the closing brace. */
+  auto r135_numbers = [](const std::string &text, const std::string &key) {
+    std::vector<float> v;
+    const size_t k = text.find("[\"" + key + "\"]");
+    if (k == std::string::npos) return v;
+    const size_t open = text.find('{', k), close = text.find('}', open);
+    const char *p = text.c_str() + open + 1, *end = text.c_str() + close;
+    while (p < end) {
+      if (std::isalpha((unsigned char)*p)) {  // (a name such as Vec3: its digits aren't numbers)
+        while (p < end && std::isalnum((unsigned char)*p)) p++;
+        continue;
+      }
+      if (std::isdigit((unsigned char)*p) || *p == '-' || *p == '.') {
+        char *q;
+        v.push_back(std::strtof(p, &q));
+        p = q;
+      }
+      else p++;
+    }
+    return v;
+  };
+  test("moonray export: a scene's meshes, material, lights, world, camera and settings in MoonRay's RDLA, balanced and finite", [&] {
+    std::vector<std::shared_ptr<Mesh>> keep;
+    std::vector<MaterialPtr> mats;
+    Environment env;
+    const moonray::ExportScene sc = r135_scene(keep, mats, env);
+    const std::string dir = fs::join(fs::temp_dir(), "blendity-test-moonray-export");
+    moonray::ExportReport rep;
+    std::string error, text;
+    const bool ok = moonray::export_scene(sc, dir, [](const std::string &p) { return p; }, rep, error);
+    fs::read_file(rep.scene_path, text);
+    int braces = 0, parens = 0;
+    for (char c : text) braces += c == '{' ? 1 : c == '}' ? -1 : 0, parens += c == '(' ? 1 : c == ')' ? -1 : 0;
+    std::printf("    %s: %zu bytes, %zu meshes (%zu triangles), %zu lights, %zu materials; braces %d, parentheses %d; %zu notes\n", ok ? "written" : error.c_str(),
+                text.size(), rep.meshes, rep.triangles, rep.lights, rep.materials, braces, parens, rep.notes.size());
+    CHECK(ok && rep.meshes == 1 && rep.triangles == 12 && rep.lights == 6 && rep.materials == 1);
+    CHECK(braces == 0 && parens == 0);
+    CHECK(text.find("nan") == std::string::npos && text.find("inf") == std::string::npos);
+    for (const char *s : {"RdlMeshGeometry(\"mesh0\")", "DwaBaseMaterial(\"mat0\")", "DistantLight(", "SphereLight(", "SpotLight(", "RectLight(", "DiskLight(",
+                          "EnvLight(\"world\")", "PerspectiveCamera(\"camera\")", "RenderOutput(\"beauty\")", "RenderOutput(\"alpha\")", "[\"pixel_samples\"] = 8,",
+                          "[\"max_depth\"] = 5,", "[\"compression\"] = \"none\"", "[\"result\"] = \"alpha\"", "[\"scene_scale\"] = 1,", "Layer(\"layer\")"}) {
+      if (text.find(s) == std::string::npos) std::printf("    missing: %s\n", s);
+      CHECK(text.find(s) != std::string::npos);
+    }
+    std::string pfm;
+    CHECK(fs::read_file(fs::join(dir, "world.pfm"), pfm) && pfm.size() == std::string("PF\n64 32\n-1.0\n").size() + 64 * 32 * 12);
+    /* The cube faces out after the mirror: each triangle's winding agrees with its normals. */
+    const std::vector<float> pos = r135_numbers(text, "vertex_list_0"), idx = r135_numbers(text, "vertices_by_index"), nrm = r135_numbers(text, "normal_list");
+    int agree = 0, tris = (int)idx.size() / 3;
+    for (int t = 0; t < tris; t++) {
+      auto P = [&](int k) { const int i = (int)idx[t * 3 + k]; return Vec3(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]); };
+      const int i0 = (int)idx[t * 3];
+      agree += dot(cross(P(1) - P(0), P(2) - P(0)), Vec3(nrm[i0 * 3], nrm[i0 * 3 + 1], nrm[i0 * 3 + 2])) > 0;
+    }
+    std::printf("    %d of %d triangles wound as their normals face\n", agree, tris);
+    CHECK(tris == 12 && agree == tris);
+    /* A point light of intensity 1 (range 10): the path tracer's pi x 0.81 at 1 m from a sphere of radius 0.1. */
+    const size_t sp = text.find("SphereLight(");
+    const float L = std::strtof(text.c_str() + text.find("[\"intensity\"] = ", sp) + 16, nullptr);
+    CHECK_NEAR(L, 0.81f / (0.1f * 0.1f), 1e-2);
+    const size_t dl = text.find("DistantLight(");
+    CHECK_NEAR(std::strtof(text.c_str() + text.find("[\"intensity\"] = ", dl) + 16, nullptr), 2.0f * 3.14159265f, 1e-4);
+    /* The camera: MoonRay's film width 24 and the focal length giving the same horizontal field of view. */
+    const float focal = std::strtof(text.c_str() + text.find("[\"focal\"] = ") + 12, nullptr);
+    CHECK_NEAR(24.0f / (2.0f * focal), std::tan(30.0f * 3.14159265f / 180.0f) * 16.0f / 9.0f, 1e-4);
+  });
+  test("moonray export: the right-handed conversion keeps every point where it was (mirrored), the world map's directions, Principled's IOR", [] {
+    const Mat4 m = Mat4::trs({1, -2, 3}, Quat::euler({10, 40, -20}), {1, 2, 0.5f});
+    float worst = 0;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 2, 3), Vec3(-4, 0.5f, 7)}) {
+      const Vec3 a = moonray::to_right_handed(m).point(Vec3(p.x, p.y, -p.z)), b = m.point(p);
+      worst = std::max(worst, length(a - Vec3(b.x, b.y, -b.z)));
+    }
+    CHECK(worst < 1e-4f);
+    CHECK(length(moonray::env_map_direction(0.5f, 0.0f) - Vec3(0, 1, 0)) < 1e-4f);
+    CHECK(std::fabs(moonray::env_map_direction(0.3f, 0.5f).y) < 1e-4f);
+    for (float u : {0.0f, 0.25f, 0.7f}) CHECK_NEAR(length(moonray::env_map_direction(u, 0.3f)), 1.0f, 1e-5);
+    CHECK_NEAR(moonray::ior_from_specular(0.5f), 1.5f, 1e-4);
+    CHECK(moonray::ior_from_specular(0.0f) == 1.0f);
+    CHECK(moonray::lua_number(std::nanf("")) == "0" && moonray::lua_number(0.25f) == "0.25");
+  });
+  test("moonray export: what MoonRay doesn't take is noted (a non-finite mesh, a generated texture, toon, alpha clipping), a hidden background, a 50k-face mesh quickly", [&] {
+    std::vector<std::shared_ptr<Mesh>> keep;
+    std::vector<MaterialPtr> mats;
+    Environment env;
+    moonray::ExportScene sc = r135_scene(keep, mats, env);
+    MaterialPtr odd = make_material("Odd", {0, 1, 0});
+    odd->base_map.path = "generated:UV Grid";
+    odd->shading_model = 1;
+    odd->surface = (int)MaterialSurface::Cutout;
+    std::vector<MaterialPtr> odd_mats{odd};
+    RenderMesh bad = sc.objects[0].mesh ? *sc.objects[0].mesh : RenderMesh();
+    bad.positions[0] = Vec3(std::nanf(""), 0, 0);
+    sc.objects.push_back({sc.objects[0].mesh, Mat4(), &odd_mats});
+    sc.objects.push_back({&bad, Mat4(), &mats});
+    sc.hide_background = true;
+    moonray::ExportReport rep;
+    std::string error, text;
+    CHECK(moonray::export_scene(sc, fs::join(fs::temp_dir(), "blendity-test-moonray-odd"), [](const std::string &p) { return p; }, rep, error));
+    fs::read_file(rep.scene_path, text);
+    std::string all;
+    for (const std::string &n : rep.notes) all += n + " | ";
+    std::printf("    %zu meshes; notes: %s\n", rep.meshes, all.c_str());
+    CHECK(rep.meshes == 2);
+    for (const char *s : {"non-finite", "generated texture", "toon", "alpha clipping", "fade physically"}) CHECK(all.find(s) != std::string::npos);
+    CHECK(text.find("\"force off\"") != std::string::npos);
+    moonray::ExportScene big = sc;
+    keep.push_back(primitives::uv_sphere(1.0f, 256, 196));
+    big.objects = {{&keep.back()->render_mesh(false), Mat4(), &mats}};
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(moonray::export_scene(big, fs::join(fs::temp_dir(), "blendity-test-moonray-big"), [](const std::string &p) { return p; }, rep, error));
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    a 50k-face sphere (%zu triangles): written in %.0f ms\n", rep.triangles, ms);
+    CHECK(rep.triangles > 90000 && ms < 5000.0);
+  });
+  test("moonray in F12: the scene sent to MoonRay (a stand-in here), its progress shown, its image read back through the view transform; transparent, failed, stopped, and the path tracer when it isn't installed", [] {
+    auto run_f12 = [](Editor &ed, double limit_s) {
+      ed.command("render");
+      const auto t0 = std::chrono::steady_clock::now();
+      std::string seen;
+      while (ed.rendering_for_test() && std::chrono::steady_clock::now() - t0 < std::chrono::duration<double>(limit_s)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        ed.step_frame_headless();
+        if (ed.render_status_for_test().find('%') != std::string::npos) seen = ed.render_status_for_test();
+      }
+      return seen;
+    };
+    Editor ed;
+    r34_open(ed);
+    CHECK(!ed.moonray_offer_pending_for_test());  // (never asked in a headless run)
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    in.root = "stand-in";
+    in.version = "test";
+    in.launcher = {test_program(), "--fake-moonray"};
+    ed.moonray_set_for_test(in);
+    ed.command("engine moonray");
+    ed.scene().render.width = 64, ed.scene().render.height = 36, ed.scene().render.percent = 100;
+    const std::string progress = run_f12(ed, 30.0);
+    const Image &img = ed.render_image_for_test();
+    const uint32_t c = img.pixels.empty() ? 0 : img.pixels[img.pixels.size() / 2];
+    const int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+    std::printf("    engine %d; progress seen '%s'; '%s'; %dx%d, the middle pixel %d %d %d\n", ed.scene().render.engine, progress.c_str(),
+                ed.render_status_for_test().c_str(), img.width, img.height, r, g, b);
+    CHECK(ed.scene().render.engine == 2);
+    CHECK(ed.render_status_for_test().rfind("MoonRay 64x36", 0) == 0);
+    CHECK(img.width == 64 && img.height == 36 && r > g && g > b && b > 0);
+    ed.scene().render.transparent = true;
+    run_f12(ed, 30.0);
+    const uint32_t left = img.pixels[(size_t)18 * 64 + 5], right = img.pixels[(size_t)18 * 64 + 60];
+    std::printf("    transparent: alpha %u on the left (the stand-in's empty half), %u on the right\n", left >> 24, right >> 24);
+    CHECK((left >> 24) == 0 && (right >> 24) == 255);
+    ed.scene().render.transparent = false;
+    set_env("BLENDITY_FAKE_MOONRAY", "fail");
+    run_f12(ed, 30.0);
+    std::printf("    told to fail: '%s'\n", ed.render_status_for_test().substr(0, 80).c_str());
+    CHECK(ed.render_status_for_test().find("MoonRay failed: exit 3") != std::string::npos);
+    set_env("BLENDITY_FAKE_MOONRAY", "slow");
+    ed.command("render");
+    for (int k = 0; k < 20; k++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      ed.step_frame_headless();
+    }
+    const bool was = ed.moonray_rendering_for_test();
+    const auto t0 = std::chrono::steady_clock::now();
+    ed.stop_render_for_test();
+    ed.step_frame_headless();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    set_env("BLENDITY_FAKE_MOONRAY", "");
+    std::printf("    stopped while rendering (%s): MoonRay gone after %.0f ms\n", was ? "it was" : "it was NOT", ms);
+    CHECK(was && !ed.moonray_rendering_for_test() && ms < 3000.0);
+    moonray::Install none;
+    none.kind = moonray::Install::Native;
+    ed.moonray_set_for_test(none);
+    ed.scene().render.samples = 2;
+    run_f12(ed, 60.0);
+    std::printf("    not installed: '%s'\n", ed.render_status_for_test().substr(0, 60).c_str());
+    CHECK(ed.render_status_for_test().find("MoonRay") == std::string::npos && !img.pixels.empty());
+  });
+  test("moonray install: an archive whose checksum doesn't match is refused; one unpacks, renders its test scene and is removed again (Linux and macOS)", [] {
+    Editor ed;
+    r34_open(ed);
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    ed.moonray_set_for_test(in);
+    const std::string dir = fs::join(fs::temp_dir(), "blendity-test-moonray-install");
+    fs::make_dirs(dir);
+    const std::string archive = fs::join(dir, "blendity-moonray-test.tar.gz");
+    fs::write_file(archive, "not really an archive");
+    fs::write_file(archive + ".sha256", std::string(64, '0') + "  blendity-moonray-test.tar.gz\n");
+    ed.command("moonray install " + archive);  // (checked on a thread of its own: the editor isn't held up)
+    for (int k = 0; k < 2000 && ed.moonray_busy_for_test(); k++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      ed.step_frame_headless();
+    }
+    CHECK(!ed.moonray_busy_for_test() && !ed.moonray_for_test().ready() && fs::exists(archive));
+#ifndef _WIN32
+    /* A stand-in archive: bin/blendity-moonray writes whatever -out names. Installed under a scratch HOME. */
+    const std::string src = fs::join(dir, "src/moonray");
+    fs::make_dirs(fs::join(src, "bin"));
+    fs::make_dirs(fs::join(src, "test"));
+    fs::write_file(fs::join(src, "bin/blendity-moonray"),
+                   "#!/bin/sh\nout=\nwhile [ $# -gt 0 ]; do [ \"$1\" = -out ] && out=$2; shift; done\necho '  [+] Rendering 100.0%'\nprintf x > \"$out\"\n");
+    sys::run_program({"chmod", "+x", fs::join(src, "bin/blendity-moonray")});
+    fs::write_file(fs::join(src, "test/rectangle.rdla"), "SceneVariables {}\n");
+    fs::write_file(fs::join(src, "VERSION"), "vtest\n");
+    const std::string tgz = fs::join(dir, "good.tar.gz");
+    CHECK(sys::run_program({"tar", "-czf", tgz, "-C", fs::join(dir, "src"), "moonray"}) == 0);
+    const char *home = std::getenv("HOME");
+    const std::string old_home = home ? home : "";
+    set_env("HOME", dir);
+    moonray::Install here = moonray::locate("");
+    std::string error;
+    const bool unpacked = moonray::unpack(here, tgz, error);
+    std::printf("    unpacked: %s (%s, version '%s'); \n", unpacked ? "yes" : error.c_str(), here.root.c_str(), here.version.c_str());
+    CHECK(unpacked && here.ready() && here.version == "vtest" && here.root.find(dir) == 0);
+    CHECK(moonray::locate("").ready());
+    CHECK(moonray::remove(here, error) && !here.ready() && !moonray::locate("").ready());
+    if (home) set_env("HOME", old_home);
+    else unsetenv("HOME");
+#endif
+  });
+  test("moonray (review): a short EXR claiming a huge image is refused before anything is allocated; a program whose child keeps the pipe open still ends when it does", [] {
+    std::vector<float> px(4 * 4, 0.5f);
+    std::string bomb = test_exr_plain(2, 2, px);
+    const size_t dw = bomb.find("dataWindow");
+    const int32_t huge[4] = {0, 0, 65535, 65535};
+    std::memcpy(&bomb[dw + 11 + 6 + 4], huge, 16);  // (name, type "box2i", size: then the box)
+    Bitmap bm;
+    std::string error;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool read = decode_exr_plain(bomb, bm, error);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    65536 x 65536 claimed in %zu bytes: %s in %.1f ms\n", bomb.size(), read ? "READ" : error.c_str(), ms);
+    CHECK(!read && error.find("truncated") != std::string::npos && ms < 100.0 && bm.rgbaf.empty());
+#ifdef _WIN32
+    const std::vector<std::string> holder = {"cmd", "/c", "start /b ping -n 6 127.0.0.1 >nul & echo hi"};
+#else
+    const std::vector<std::string> holder = {"sh", "-c", "sleep 5 & echo hi"};
+#endif
+    std::string out;
+    const auto t1 = std::chrono::steady_clock::now();
+    const int code = sys::run_streaming(holder, [&](const std::string &s) { out += s; });
+    const double ms1 = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    std::printf("    a child still holding the pipe: exit %d after %.0f ms ('%s')\n", code, ms1, out.substr(0, out.find_first_of("\r\n")).c_str());
+    CHECK(code == 0 && out.find("hi") != std::string::npos && ms1 < 3000.0);
+  });
+  test("moonray in F12 (review): a new render replaces a MoonRay one under way; an orthographic camera path traces", [] {
+    Editor ed;
+    r34_open(ed);
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    in.root = "stand-in";
+    in.version = "test";
+    in.launcher = {test_program(), "--fake-moonray"};
+    ed.moonray_set_for_test(in);
+    ed.command("engine moonray");
+    ed.scene().render.width = 64, ed.scene().render.height = 36, ed.scene().render.percent = 100, ed.scene().render.samples = 2;
+    set_env("BLENDITY_FAKE_MOONRAY", "slow");
+    ed.command("render");
+    ed.step_frame_headless();
+    const bool moon = ed.moonray_rendering_for_test();
+    ed.command("engine path");
+    const auto t0 = std::chrono::steady_clock::now();
+    ed.command("render");
+    const bool replaced = !ed.moonray_rendering_for_test();
+    for (int k = 0; k < 4000 && ed.rendering_for_test(); k++) ed.step_frame_headless();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    set_env("BLENDITY_FAKE_MOONRAY", "");
+    std::printf("    MoonRay under way: %s; replaced by the path tracer: %s; it finished in %.0f ms: '%s'\n", moon ? "yes" : "no", replaced ? "yes" : "no", ms,
+                ed.render_status_for_test().substr(0, 40).c_str());
+    CHECK(moon && replaced && !ed.rendering_for_test() && ed.render_status_for_test().find("MoonRay") == std::string::npos);
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CHECK(cam && cam->get<Camera>());
+    if (cam && cam->get<Camera>()) cam->get<Camera>()->orthographic = true;
+    ed.command("engine moonray");
+    ed.command("render");
+    CHECK(!ed.moonray_rendering_for_test());  // (orthographic: not sent; the path tracer renders)
+    for (int k = 0; k < 4000 && ed.rendering_for_test(); k++) ed.step_frame_headless();
+    std::printf("    orthographic: '%s'\n", ed.render_status_for_test().substr(0, 40).c_str());
+    CHECK(ed.render_status_for_test().find("MoonRay") == std::string::npos);
   });
 }

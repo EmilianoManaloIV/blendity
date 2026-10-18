@@ -963,6 +963,57 @@ FilterFrame Editor::trace_filter_frame(PathTracer &pt, RenderTarget &rt, const M
 /* ===================================================================== */
 
 /* The camera's thin lens for the path tracer (Cycles: camera_sample_aperture). */
+static PTLens camera_lens(const Camera *cam, float aspect);
+
+/* F12 in MoonRay (task 0114): the scene exported as the path tracer would be given it, run in the background. False
+ * when MoonRay can't render here (not installed): the path tracer renders instead. */
+bool Editor::start_moonray(int w, int h, const Mat4 &v, const Mat4 &p, const Camera *cam, Vec3 eye) {
+  if (!mr_located_) {  // (looked for in the background - WSL takes a moment to start - and started then)
+    moonray_locate();
+    mr_waiting_render_ = true;
+    rendering_ = true;
+    render_status_ = "MoonRay: looking for it...";
+    return true;
+  }
+  if (!mr_.ready()) {
+    Log::warn("MoonRay %s: rendering with the path tracer instead (Edit > Preferences > Renderers)",
+              mr_.problem.empty() ? "isn't installed" : ("can't run here: " + mr_.problem).c_str());
+    return false;
+  }
+  if (cam && cam->orthographic) {
+    Log::warn("MoonRay: an orthographic camera isn't sent yet: rendering with the path tracer instead");
+    return false;
+  }
+  const RenderSettings &rs = scene_->render;
+  render_filtered_ = false;  // (camera filters are Blendity's: noted, not drawn)
+  if (!render_filters_.empty()) Log::info("MoonRay: the camera's filters aren't applied to its render");
+  moonray::ExportScene sc;
+  for (const DrawItem &it : collect_items(true, true)) sc.objects.push_back({it.mesh, it.model, it.materials});
+  sc.lights = make_lighting(eye, true, false).lights;
+  sc.world = &env_;
+  sc.view = v;
+  sc.proj = p;
+  sc.lens = camera_lens(cam, w / (float)h);
+  sc.width = w;
+  sc.height = h;
+  sc.samples = rs.samples;
+  sc.max_bounces = rs.max_bounces;
+  const PTSettings ps = make_pt_settings(rs);
+  sc.point_radius = ps.point_radius;
+  sc.sun_angle_deg = ps.sun_angle_deg;
+  MoonRayFrame fr;
+  fr.width = w;
+  fr.height = h;
+  fr.transparent = rs.transparent;
+  fr.solid = !rs.transparent && cam && cam->clear_flags == 1;
+  fr.view_transform = ps.view_transform;
+  fr.exposure = ps.exposure + (cam ? cam->exposure_stops() : 0.0f);
+  if (fr.solid) fr.background = Vec3(srgb_to_linear(cam->background.x), srgb_to_linear(cam->background.y), srgb_to_linear(cam->background.z)) /
+                                std::exp2(std::max(-16.0f, std::min(16.0f, fr.exposure)));
+  sc.hide_background = fr.transparent || fr.solid;
+  return begin_moonray_render(sc, fr);
+}
+
 static PTLens camera_lens(const Camera *cam, float aspect) {
   PTLens l;
   if (!cam) return l;
@@ -1005,6 +1056,8 @@ void Editor::start_final_render(bool preview, bool open_window) {
     ~KeepCpu() { off = was; }
   } keep_cpu{gpu_view_off_, gpu_view_off_};
   gpu_view_off_ = true;
+  mr_job_.reset();  // (a MoonRay render under way stops: this render replaces it)
+  mr_waiting_render_ = false;
   const RenderSettings &rs = scene_->render;
   const int pct = preview ? std::max(1, rs.percent * rs.preview_percent / 100) : rs.percent;
   int w = std::max(16, rs.width * pct / 100), h = std::max(16, rs.height * pct / 100);
@@ -1027,6 +1080,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
   if (open_window) dock_open(WindowKind::Render);
   render_filters_ = camera_filters(cam ? owner : nullptr);
   render_filtered_ = !render_filters_.empty();
+  if (rs.engine == 2 && !preview && start_moonray(w, h, v, p, cam, eye)) return;  // (task 0114; else the path tracer)
   if (rs.engine == 0 && render_filtered_) {
     /* A filtered camera: its own resolution and passes; no supersampling (it would soften
      * the pixels the filter is there to make). */
@@ -1114,6 +1168,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
 
 void Editor::step_final_render() {
   if (!rendering_) return;
+  if (mr_job_ || mr_waiting_render_) return step_moonray_render();
   const RenderSettings &rs = scene_->render;
   int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
   if (final_pt_.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there

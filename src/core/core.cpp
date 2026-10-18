@@ -27,6 +27,8 @@
 #  include <sys/resource.h>
 #  include <signal.h>
 #  include <spawn.h>
+#  include <fcntl.h>
+#  include <poll.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
 #  ifdef __APPLE__
@@ -605,6 +607,150 @@ int run_program(const std::vector<std::string> &argv, int timeout_s) {
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 #endif
+
+#ifdef _WIN32
+int run_streaming(const std::vector<std::string> &argv, const std::function<void(const std::string &)> &out,
+                  const std::atomic<bool> *cancel, int timeout_s) {
+  if (argv.empty()) return -1;
+  SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+  HANDLE rd = nullptr, wr = nullptr;
+  if (!CreatePipe(&rd, &wr, &sa, 0)) return -1;
+  SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);  // (only the child's end is inherited)
+  HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+  /* The child inherits these two handles and no others: a program started meanwhile on another thread keeps no copy
+   * of this pipe (which would hold it open after the child ended). */
+  HANDLE inherit[2] = {wr, nul};
+  SIZE_T bytes = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+  std::vector<char> attr_mem(bytes);
+  auto *attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)attr_mem.data();
+  const bool listed = InitializeProcThreadAttributeList(attrs, 1, 0, &bytes) &&
+                      UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                                (nul != INVALID_HANDLE_VALUE ? 2 : 1) * sizeof(HANDLE), nullptr, nullptr);
+  std::wstring line = fs::widen(windows_command_line(argv));
+  STARTUPINFOEXW si{};
+  si.StartupInfo.cb = sizeof(si);
+  si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  si.StartupInfo.hStdInput = nul;
+  si.StartupInfo.hStdOutput = si.StartupInfo.hStdError = wr;
+  si.lpAttributeList = listed ? attrs : nullptr;
+  PROCESS_INFORMATION pi{};
+  const DWORD flags = CREATE_NO_WINDOW | (listed ? EXTENDED_STARTUPINFO_PRESENT : 0);
+  const BOOL started = CreateProcessW(nullptr, &line[0], nullptr, nullptr, TRUE, flags, nullptr, nullptr, &si.StartupInfo, &pi);
+  if (listed) DeleteProcThreadAttributeList(attrs);
+  CloseHandle(wr);  // (ours: the pipe ends when the child's copy closes)
+  if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+  if (!started) {
+    CloseHandle(rd);
+    return -1;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  int result = 0;
+  char buf[4096];
+  for (;;) {
+    /* Whatever has arrived, then a short wait for the child: cancel and the timeout are looked at every pass. */
+    DWORD avail = 0;
+    PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr);
+    if (avail > 0) {
+      DWORD got = 0;
+      if (ReadFile(rd, buf, (DWORD)std::min<size_t>(sizeof(buf), avail), &got, nullptr) && got > 0) out(std::string(buf, got));
+    }
+    const bool done = WaitForSingleObject(pi.hProcess, avail > 0 ? 0 : 20) == WAIT_OBJECT_0;
+    if (done) {  // (ended: what is left in the pipe, then the end)
+      while (PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+        DWORD got = 0;
+        if (!ReadFile(rd, buf, (DWORD)std::min<size_t>(sizeof(buf), avail), &got, nullptr) || got == 0) break;
+        out(std::string(buf, got));
+      }
+      break;
+    }
+    const bool cancelled = cancel && cancel->load();
+    const bool late = timeout_s > 0 && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(timeout_s);
+    if (!cancelled && !late) continue;
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    result = cancelled ? kExitCancelled : kExitTimedOut;
+    break;
+  }
+  DWORD code = 1;
+  if (result == 0) GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(rd);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return result != 0 ? result : (int)code;
+}
+#else
+int run_streaming(const std::vector<std::string> &argv, const std::function<void(const std::string &)> &out,
+                  const std::atomic<bool> *cancel, int timeout_s) {
+  if (argv.empty()) return -1;
+  int fds[2];
+  if (pipe(fds) != 0) return -1;
+  /* Close-on-exec: a program started meanwhile elsewhere keeps no copy of this pipe (the child's dup2'd 1 and 2 don't
+   * carry the flag). */
+  fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+  posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
+  posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
+  std::vector<char *> args;
+  for (const std::string &a : argv) args.push_back((char *)a.c_str());
+  args.push_back(nullptr);
+  pid_t pid;
+  const int sp = posix_spawnp(&pid, args[0], &fa, nullptr, args.data(), environ);
+  posix_spawn_file_actions_destroy(&fa);
+  close(fds[1]);
+  if (sp != 0) {
+    close(fds[0]);
+    return -1;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  int result = 0, status = 0;
+  bool reaped = false;
+  char buf[4096];
+  auto drain = [&] {  // (what is left once it has ended)
+    for (;;) {
+      pollfd p{fds[0], POLLIN, 0};
+      if (poll(&p, 1, 0) <= 0) return;
+      const ssize_t got = read(fds[0], buf, sizeof(buf));
+      if (got <= 0) return;
+      out(std::string(buf, (size_t)got));
+    }
+  };
+  for (;;) {
+    pollfd p{fds[0], POLLIN, 0};
+    if (poll(&p, 1, 20) > 0) {
+      const ssize_t got = read(fds[0], buf, sizeof(buf));
+      if (got > 0) out(std::string(buf, (size_t)got));
+    }
+    /* The child's end, whether or not something else still holds the pipe. */
+    const pid_t r = waitpid(pid, &status, WNOHANG);
+    if (r == pid) {
+      reaped = true;
+      drain();
+      break;
+    }
+    if (r < 0 && errno != EINTR) break;
+    const bool cancelled = cancel && cancel->load();
+    const bool late = timeout_s > 0 && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(timeout_s);
+    if (!cancelled && !late) continue;
+    kill(pid, SIGKILL);
+    result = cancelled ? kExitCancelled : kExitTimedOut;
+    break;
+  }
+  close(fds[0]);
+  while (!reaped && waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+  }
+  if (result != 0) return result;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+#endif
+
+int run_capture(const std::vector<std::string> &argv, std::string &out, int timeout_s) {
+  out.clear();
+  return run_streaming(argv, [&](const std::string &s) { out += s; }, nullptr, timeout_s);
+}
 
 }  // namespace sys
 }  // namespace bl

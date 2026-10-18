@@ -4,7 +4,7 @@
 - **Requirements:** Q-04
 - **Decisions:** none (ADR 0040 covers the pass)
 - **Model:** main session (Opus)
-- **PR:** (this task's)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/98
 
 ## Goal
 Pass 12 (tasks 0107-0109) answered "Look for performance gains in edit mode; compare to how blender implements their

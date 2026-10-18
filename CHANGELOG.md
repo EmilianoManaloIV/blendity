@@ -2,6 +2,74 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 135): MoonRay as an optional external renderer (tasks 0111-0114, ADR 0041)
+
+**Asked:** "Is it possible to integrate MoonRay from DreamWorks into this project?", then "Let's make this an external
+renderer. Just like other dependencies making it an optional install when using Blendity for the first time." The
+user chose to build and host it and to run it through WSL2 on Windows, then "Do and finish all tasks."
+
+**Added**
+- **MoonRay built by CI (task 0111):** `.github/workflows/moonray.yml` and `tools/moonray/` build MoonRay v2026.29.1
+  (Linux x86-64 in Rocky Linux 9, macOS on Apple silicon) into `blendity-moonray-<platform>-<tag>.tar.gz` with a
+  `.sha256`: the renderer, every library it loads but the system's, its scene objects, a launcher, a test scene and
+  every licence. Each archive is checked on clean Ubuntu 22.04 / 24.04, Debian 12, Fedora 41 and macOS 15. It is
+  run by hand or by a push to `moonray-build/*`; publishing it is the user's call.
+- **The optional install (task 0112):**
+  - The first run asks "Download it?" (Download / Not now / Never ask), as Blender's libraries are offered: online
+    only, never headless, again at most once a day after Not now.
+  - MoonRay is looked for only then (on Windows that starts WSL).
+  - Preferences > Renderers installs or removes it; the console's `moonray` (status, install [archive], remove,
+    folder for your own build, check) does the same.
+  - On Windows it runs inside WSL2, and says how to get WSL when it's missing.
+- **The scene in MoonRay's RDLA (task 0113):** what F12's path tracer is given:
+  - meshes mirrored into MoonRay's right-handed space (each triangle still facing out);
+  - Principled materials as DwaBaseMaterial, with image, normal and emission maps;
+  - the four light kinds, matched in brightness to the path tracer at 1 m;
+  - the world baked to an environment map;
+  - the camera with depth of field.
+
+  What MoonRay doesn't take (toon, camera filters, procedural textures, alpha clipping, the lights' Range curve) is
+  named in the log once.
+- **MoonRay in F12 (task 0114):** Render Engine > MoonRay renders F12 images, camera sequences and animations.
+  - It runs on its own thread, its progress in the Render window, and Stop ends it.
+  - Its image is read back through Blendity's view transform and exposure: a new uncompressed-EXR reader works
+    without Blender's libraries.
+  - Without MoonRay, or with an orthographic camera, F12 path traces and says why.
+- `sys::run_streaming` / `run_capture`: a program's output as it comes, with cancel and timeout. On POSIX the pipe is
+  close-on-exec and the child's end is watched; on Windows only the child inherits it.
+- A Learn section: "MoonRay, an optional third engine".
+
+**Checked**
+- New tests (round 135), with `blendity_tests --fake-moonray` standing in for MoonRay so CI needs neither MoonRay
+  nor WSL:
+  - WSL's distribution list in UTF-16 and UTF-8, Windows paths in WSL, MoonRay's progress parsed;
+  - a program's output streamed, its exit code, a cancel within a moment, a child holding the pipe open;
+  - uncompressed EXR in float and half, a compressed one refused by name, a short file claiming a huge image refused
+    before anything is allocated, PFM's row order;
+  - the export's objects, values, balance and winding, the right-handed conversion, the notes, a 50k-face mesh in
+    about 0.2 s;
+  - F12 with the stand-in: progress, the image through the view transform, a transparent film's alpha, a failure's
+    message, Stop, a new render replacing it, the path tracer without MoonRay or with an orthographic camera;
+  - an archive with the wrong checksum refused, a good one unpacked, probed and removed (Linux and macOS).
+- An Opus review; every finding fixed:
+  - a pipe a later program inherited could keep a render open;
+  - a new render didn't replace a MoonRay one;
+  - Stop during the search started it anyway;
+  - the console's and Preferences' MoonRay chores ran on the editor's thread;
+  - a folder change during a search was lost;
+  - WSL was started at every launch once installed;
+  - the first-run question could be covered by an update;
+  - a short EXR could ask for gigabytes;
+  - the packaging check could pass with missing libraries;
+  - orthographic cameras;
+  - a stale MoonRay in the macOS cache;
+  - shared scratch folders.
+- Unit checks: Windows 10,692, 0 failed (761 tests); the whole suite in render-cache verify mode: 10,693,
+  0 failed, 0 stale pictures. Linux with libraries: 10,428, 0 failed. Sanitizer build: 10,319, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull` (26,620 operations, 0 problems), `modifiers_ngon` (11,514 operations, 0 problems),
+  `editor_render`: no change in problem counts.
+
 ## 2026-10-16 (round 134): performance pass 12 written up (task 0110)
 
 **Asked:** pass 12 continued (the approved plan's last task).

@@ -283,10 +283,17 @@ void RenderSettings::reflect_raster(Reflector &r) {
 }
 
 void RenderSettings::reflect(Reflector &r) {
-  static const char *engines[] = {"Rasterized (EEVEE-like)", "Path Traced (Cycles-like)"};
+  static const char *engines[] = {"Rasterized (EEVEE-like)", "Path Traced (Cycles-like)", "MoonRay (external)"};
   static const char *formats[] = {"PNG", "JPEG", "Radiance HDR", "OpenEXR (half float)"};
-  r.enumeration("Render Engine", engine, engines, 2);
-  r.help("Rasterized: real-time deferred PBR with shadow maps. Path Traced: unbiased Monte Carlo light transport.");
+  r.enumeration("Render Engine", engine, engines, 3);
+  r.help("Rasterized: real-time deferred PBR with shadow maps. Path Traced: unbiased Monte Carlo light transport.\n"
+         "MoonRay: DreamWorks' production renderer, an optional download (Edit > Preferences > Renderers), for F12 renders;\n"
+         "previews use the path tracer. Without it installed, F12 path traces.");
+  if (!r.all_fields() && engine == 2) {  // (MoonRay takes these two; saved with the path tracer's below)
+    r.samples("Samples", samples, 1, 65536);
+    r.help("Samples per pixel. MoonRay takes their square root per axis (64 -> 8 x 8).");
+    r.field("Max Bounces", max_bounces, 0, 64);
+  }
   r.field("Resolution X", width, 16, 16384);
   r.field("Resolution Y", height, 16, 16384);
   r.field("Resolution %", percent, 1, 400);
@@ -334,7 +341,7 @@ void RenderSettings::reflect(Reflector &r) {
     r.field("Path Guiding", path_guiding);
     r.help("Learns where light comes from and steers bounces there (OpenPGL, as Cycles' Light Paths > Path Guiding). Helps light that arrives indirectly or from small emissive surfaces.");
   }
-  if (r.all_fields() || engine != 1) {
+  if (r.all_fields() || engine == 0) {
     r.field("Anti-Aliasing (SSAA)", raster_aa, 1, 4);
     r.field("Shadows", shadows);
     r.field("Shadow Resolution", shadow_resolution, 256, 8192);
