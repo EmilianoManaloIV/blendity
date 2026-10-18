@@ -192,6 +192,8 @@ std::shared_ptr<PhysicsWorld> physics_create(Scene &scene) {
   return w;
 }
 
+void physics_jolt_init() { jolt_init(); }
+
 void physics_world_step(PhysicsWorld &w, float dt) {
   if (dt <= 0) return;
   dt = std::min(dt, 0.1f);  // a stalled frame must not explode the simulation
@@ -217,6 +219,7 @@ void physics_world_step(PhysicsWorld &w, float dt) {
 struct PhysicsWorld {};
 std::shared_ptr<PhysicsWorld> physics_create(Scene &) { return nullptr; }
 void physics_world_step(PhysicsWorld &, float) {}
+void physics_jolt_init() {}
 #endif
 
 }  // namespace bl

@@ -511,12 +511,25 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
              "and the spin keeps its angular momentum. Shows the corrected body as a ghost; frames green (fine), blue (changed),\n"
              "red (impossible: change the timing or the poses). Apply writes it into the clip."))
     body_flight_command({"body", "flight", body_.ghost && body_.kind == "Flight" ? "off" : "show"});
-  const bool solving = body_.solve != nullptr, shown = body_.ghost && body_.kind == "AutoPhysics";
+  const bool solving = body_.solve && body_.solve->kind == "AutoPhysics", shown = body_.ghost && body_.kind == "AutoPhysics";
   if (button(u.px(86), solving ? "Solving..." : "AutoPhysics", shown || solving,
              "The whole clip made physically possible (Cascadeur's AutoPhysics): the center of mass and the spin moved as little as\n"
              "they can while the contacts' forces stay inside their friction and gravity does the rest - the take-offs and landings\n"
              "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colours, then Apply."))
     body_physics_command({"body", "physics", shown || solving ? "off" : "show"});
+  if (button(u.px(86), "AutoPosing", autopose_.on,
+             "Drag a hand, a foot, the head or the hips with the move gizmo and the whole body follows (Cascadeur's AutoPosing):\n"
+             "the spine and limbs bend within their limits, the feet stay on the ground, the center of mass stays over them. Keys\n"
+             "at the playhead on release. Locks: autopose lock <bone>."))
+    autopose_command({"autopose", autopose_.on ? "off" : "on"});
+  if (ragdoll::available()) {
+    const bool rag_shown = body_.ghost && body_.kind == "Ragdoll", rag_busy = body_.solve && body_.solve->kind == "Ragdoll";
+    if (button(u.px(70), rag_busy ? "Simulating..." : "Ragdoll", rag_shown || rag_busy,
+               "The clip played by an active ragdoll (Jolt): a capsule a bone, its joints' motors following the clip, so hits and\n"
+               "falls react physically. Events in the clip: body ragdoll hit <bone> <frame> <x> <y> <z>, limp <frame> (motors off: a\n"
+               "fall), strong <frame>. Simulated in the background, shown as a ghost, then Apply."))
+      body_ragdoll_command({"body", "ragdoll", rag_shown || rag_busy ? "off" : "show"});
+  }
   if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
     body_flight_command({"body", "flight", "apply"});
 }

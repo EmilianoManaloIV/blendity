@@ -157,7 +157,8 @@ void Editor::body_flight_command(const std::vector<std::string> &t) {
     if (!flight_current(clip.get())) return Log::warn("body flight: show it first (for this character's clip, as it is now)");
     if (!body_.flight.keys) return Log::warn("%s: nothing to apply (impossible: red frames)", body_.kind.c_str());
     const AnimationClip corrected = body_.flight.corrected;
-    anim_edit_keys(body_.kind == "Flight" ? "Apply Flight" : "Apply AutoPhysics", [&](AnimationClip &c) { c.tracks = corrected.tracks; });
+    const std::string label = "Apply " + body_.kind;
+    anim_edit_keys(label.c_str(), [&](AnimationClip &c) { c.tracks = corrected.tracks; });
     body_.ghost = false;
     body_.ghost_bones.clear();
     return Log::info("%s applied: %zu keys (%zu of them changed keys the clip had)", body_.kind.c_str(), body_.flight.keys, body_.flight.replaced);
@@ -212,18 +213,87 @@ void Editor::body_physics_command(const std::vector<std::string> &t) {
   std::string error;
   std::shared_ptr<body::AutoPhysicsPrep> prep = body::autophysics_prepare(*scene_, *root, *clip, body_.body, body::AutoPhysicsSettings(), error);
   if (!prep) return Log::warn("AutoPhysics: %s", error.c_str());
+  const int frames = (int)body::autophysics_input(*prep).com.size();
+  body_start("AutoPhysics", clip, *root, [prep](BodyView::Solve &s, body::FlightResult &out, std::string &e) {
+    body::autophysics_input(*prep).cancel = &s.cancel;
+    const body::CentroidalResult r = body::solve_centroidal(body::autophysics_input(*prep));
+    s.ms = r.ms;
+    return body::autophysics_finish(*prep, r, out, e);  // (no scene objects: the sampled clip and the solve only)
+  });
+  Log::info("AutoPhysics: solving %d frames...", frames);
+}
+
+/* A correction worked out on a worker (it reads only what `work` captured); body_poll shows it when it's done. */
+void Editor::body_start(const char *kind, const AnimationClipPtr &clip, GameObject &root,
+                        const std::function<bool(BodyView::Solve &, body::FlightResult &, std::string &)> &work) {
   auto s = std::make_unique<BodyView::Solve>();
-  s->prep = prep;
-  s->clip = clip, s->clip_version = clip->version, s->root = root->id;
-  body::autophysics_input(*prep).cancel = &s->cancel;
+  s->kind = kind;
+  s->clip = clip, s->clip_version = clip->version, s->root = root.id;
   BodyView::Solve *sp = s.get();  // (the solve outlives its thread: its destructor joins it)
-  s->thread = std::thread([sp] {
-    sp->result = body::solve_centroidal(body::autophysics_input(*sp->prep));
+  s->thread = std::thread([sp, work] {
+    const auto t0 = std::chrono::steady_clock::now();
+    sp->ok = work(*sp, sp->result, sp->error);
+    if (sp->ms <= 0.0) sp->ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     sp->done = true;
   });
   body_.solve = std::move(s);
   body_.ghost = false;
-  Log::info("AutoPhysics: solving %d frames...", (int)body::autophysics_input(*prep).com.size());
+}
+
+/* body ragdoll show [strength] | apply | off | hit <bone> <frame> <x> <y> <z> | limp <frame> | strong <frame> | events |
+ * clear (task 0121): the clip played by the active ragdoll, on a worker; its events kept in the clip. */
+void Editor::body_ragdoll_command(const std::vector<std::string> &t) {
+  const std::string sub = t.size() > 2 ? to_lower(t[2]) : "show";
+  if (sub == "apply") return body_flight_command({"body", "flight", "apply"});
+  if (sub == "off") return body_physics_command({"body", "physics", "off"});
+  GameObject *root = anim_root();
+  AnimationClipPtr clip = anim_clip();
+  if (!root || !clip || !body_refresh()) return Log::warn("body ragdoll: select an animated character with a clip");
+  if (playing_) return Log::warn("body ragdoll: stop Play first");
+  using E = AnimationClip::RagdollEvent;
+  if (sub == "hit" && t.size() > 6) {
+    E e;
+    e.kind = E::Impulse, e.bone = t[3], e.frame = (float)std::atof(t[4].c_str());
+    e.impulse = Vec3((float)std::atof(t[5].c_str()), (float)std::atof(t[6].c_str()), t.size() > 7 ? (float)std::atof(t[7].c_str()) : 0.0f);
+    if (!scene_->find_by_name(e.bone)) return Log::warn("body ragdoll hit: no bone named '%s'", e.bone.c_str());
+    anim_edit_keys("Ragdoll Hit", [&](AnimationClip &c) { c.ragdoll.push_back(e); });
+    return Log::info("Ragdoll: %s hit at frame %.0f with (%.0f, %.0f, %.0f) N s", e.bone.c_str(), e.frame, e.impulse.x, e.impulse.y, e.impulse.z);
+  }
+  if ((sub == "limp" || sub == "strong") && t.size() > 3) {
+    E e;
+    e.kind = sub == "limp" ? E::MotorsOff : E::MotorsOn, e.frame = (float)std::atof(t[3].c_str());
+    anim_edit_keys(sub == "limp" ? "Ragdoll Limp" : "Ragdoll Strong", [&](AnimationClip &c) { c.ragdoll.push_back(e); });
+    return Log::info("Ragdoll: the motors %s from frame %.0f", sub == "limp" ? "off" : "on", e.frame);
+  }
+  if (sub == "clear") {
+    anim_edit_keys("Clear Ragdoll Events", [](AnimationClip &c) { c.ragdoll.clear(); });
+    return Log::info("Ragdoll events cleared");
+  }
+  if (sub == "events") {
+    for (const E &e : clip->ragdoll)
+      Log::info("  frame %.0f: %s", e.frame, e.kind == E::Impulse ? strprintf("hit %s (%.0f, %.0f, %.0f)", e.bone.c_str(), e.impulse.x, e.impulse.y, e.impulse.z).c_str()
+                                                       : e.kind == E::MotorsOff ? "limp (motors off)" : "strong (motors on)");
+    return;
+  }
+  if (sub != "show") return Log::warn("body ragdoll show [strength] | apply | off | hit <bone> <frame> <x> <y> <z> | limp <frame> | strong <frame> | events | clear");
+  if (!ragdoll::available()) return Log::warn("Ragdoll: needs Blender's libraries (Jolt Physics); this build has none");
+  ragdoll::Settings rs;
+  if (t.size() > 3) {
+    char *end = nullptr;
+    const float v = std::strtof(t[3].c_str(), &end);
+    if (end == t[3].c_str() || !std::isfinite(v)) return Log::warn("body ragdoll show [strength 0..1]: '%s' isn't a number", t[3].c_str());
+    rs.strength = std::max(0.0f, std::min(1.0f, v));
+  }
+  body_.solve.reset();
+  std::string error;
+  std::shared_ptr<ragdoll::Prep> prep = ragdoll::prepare(*scene_, *root, *clip, body_.body, rs, error);
+  if (!prep) return Log::warn("Ragdoll: %s", error.c_str());
+  for (const std::string &b : ragdoll::unmatched_events(*prep))
+    Log::warn("Ragdoll: the hit on %s does nothing (it isn't one of the body's weighed bones)", b.c_str());
+  body_start("Ragdoll", clip, *root, [prep](BodyView::Solve &s, body::FlightResult &out, std::string &e) {
+    return ragdoll::run(*prep, out, e, nullptr, &s.cancel);
+  });
+  Log::info("Ragdoll: simulating at strength %.2f...", rs.strength);
 }
 
 /* Each frame: a finished solve keyed and shown, when it is still for the clip on screen as it is. */
@@ -234,15 +304,15 @@ void Editor::body_poll() {
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (!root || !clip || clip != s->clip.lock() || clip->version != s->clip_version || root->id != s->root)
-    return Log::info("AutoPhysics: the clip changed while it was solving; run it again");
-  std::string error;
-  if (!body::autophysics_finish(*s->prep, s->result, body_.flight, error)) return Log::warn("AutoPhysics: %s", error.c_str());
-  body_show_result(*root, clip, "AutoPhysics");
+    return Log::info("%s: the clip changed while it was worked out; run it again", s->kind.c_str());
+  if (!s->ok) return Log::warn("%s: %s", s->kind.c_str(), s->error.c_str());
+  body_.flight = std::move(s->result);
+  body_show_result(*root, clip, s->kind.c_str());
   const body::Flight &fl = body_.flight.flights.front();
   size_t red = 0, blue = 0;
   for (uint8_t m : body_.flight.marks) red += m == body::MarkImpossible, blue += m == body::MarkChanged;
-  Log::info("AutoPhysics: %d frames in %.0f ms; the body moved up to %.3f m and %.1f degrees, %zu frame(s) changed (blue), %zu impossible (red)%s%s",
-            (int)body_.flight.marks.size(), s->result.ms, fl.shift, fl.turn, blue, red, fl.possible ? "; Apply writes it" : ": ", fl.why.c_str());
+  Log::info("%s: %d frames in %.0f ms; the body moved up to %.3f m and %.1f degrees, %zu frame(s) changed (blue), %zu impossible (red)%s%s",
+            s->kind.c_str(), (int)body_.flight.marks.size(), s->ms, fl.shift, fl.turn, blue, red, fl.possible ? "; Apply writes it" : ": ", fl.why.c_str());
 }
 
 /* body show on|off | mass [kg] | com [frame] | contacts ... | flight ...: the console's physics for animation. */
@@ -251,6 +321,7 @@ void Editor::body_command(const std::vector<std::string> &t) {
   if (sub == "contacts") return body_contacts_command(t);
   if (sub == "flight") return body_flight_command(t);
   if (sub == "physics") return body_physics_command(t);
+  if (sub == "ragdoll") return body_ragdoll_command(t);
   if (sub == "show") {
     body_.show_com = t.size() < 3 || to_lower(t[2]) != "off";
     ui_.redraw = true;

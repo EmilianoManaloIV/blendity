@@ -146,6 +146,8 @@ std::string save_clip_text(const AnimationClip &c) {
     }
   }
   for (const AnimationClip::Contact &k : c.contacts) os << "contact\t" << k.from << "\t" << k.to << "\t" << (k.manual ? 1 : 0) << "\t" << k.bone << "\n";
+  for (const AnimationClip::RagdollEvent &e : c.ragdoll)
+    os << "ragdoll\t" << e.kind << "\t" << e.frame << "\t" << e.impulse.x << "\t" << e.impulse.y << "\t" << e.impulse.z << "\t" << e.bone << "\n";
   return os.str();
 }
 
@@ -177,6 +179,7 @@ bool load_clip_text(const std::string &text, AnimationClip &c) {
   if (!std::getline(is, line) || line.rfind("blendity_anim", 0) != 0) return false;
   c.tracks.clear();
   c.contacts.clear();
+  c.ragdoll.clear();
   AnimTrack *cur = nullptr;
   while (std::getline(is, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -201,6 +204,14 @@ bool load_clip_text(const std::string &text, AnimationClip &c) {
       std::getline(ls >> std::ws, k.bone);
       k.manual = manual != 0;
       if (!k.bone.empty() && k.to >= k.from) c.contacts.push_back(k);
+    }
+    else if (word == "ragdoll") {  // ("ragdoll<TAB>kind<TAB>frame<TAB>x<TAB>y<TAB>z<TAB>bone", task 0121)
+      AnimationClip::RagdollEvent e;
+      if (!(ls >> e.kind >> e.frame >> e.impulse.x >> e.impulse.y >> e.impulse.z) || e.kind < 0 || e.kind > 2 || !std::isfinite(e.frame) ||
+          !std::isfinite(e.impulse.x) || !std::isfinite(e.impulse.y) || !std::isfinite(e.impulse.z))
+        continue;
+      std::getline(ls >> std::ws, e.bone);
+      c.ragdoll.push_back(e);
     }
     else if (word == "key" && cur) {
       AnimKey k;

@@ -16,5 +16,7 @@ bool physics_jolt_available();
  * (nullptr without Jolt or without rigid bodies). */
 std::shared_ptr<PhysicsWorld> physics_create(Scene &scene);
 void physics_world_step(PhysicsWorld &world, float dt);
+/* Jolt's factory and types, once (the Play world and the active ragdoll share them; nothing without Jolt). */
+void physics_jolt_init();
 
 }  // namespace bl

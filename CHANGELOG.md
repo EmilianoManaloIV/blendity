@@ -2,6 +2,131 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 142): physics for animation written up (task 0123)
+
+**Asked:** the physics plan's last task, finishing "Finish and do all tasks please."
+
+**Added**
+- Learn: "Physics for animation: a jump from start to finish".
+  - The whole set in Cascadeur's order: weigh, contacts, flight or AutoPhysics, then spring bones, the ragdoll and
+    AutoPosing.
+  - The ghost and its colours, shared by all of them.
+  - A Try-it: a person jumping in straight lines, its contacts found and its flight shown corrected.
+- CI's MoonRay build on macOS:
+  - freetype2 on the include path for MoonRay's telemetry overlay;
+  - the dependencies' cache found by prefix when the build script changes (it takes hours to rebuild).
+
+**Checked**
+- A new test (round 142) runs the Try-it as the Learn tab does: 4 contacts and one flight, moved up to 0.84 m (the
+  keyed 1 m peak was too high for 0.67 s in the air).
+- Unit checks (rounds 140-142 in one chain): Windows 10,832, 0 failed (798 tests); the whole suite in render-cache
+  verify mode: 10,833, 0 failed, 0 stale pictures. Linux with libraries: 10,568, 0 failed. Sanitizer build: 10,447,
+  0 failed, no reports (without Jolt: the ragdoll's tests say so and skip). `editor_fuzz` in verify mode: 6,000
+  frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 141): AutoPosing: the whole body posed by one end (task 0122)
+
+**Asked:** the physics plan's AutoPosing (the user chose rule-based), as part of "Finish and do all tasks please."
+
+**Added**
+- **AutoPosing** (the Animation window's button, `autopose on`): drag a hand, a foot, the head or the hips with the move
+  gizmo and the whole body follows.
+  - **The solver:** a full-body inverse kinematics by damped least squares over every body bone and the hips' place.
+  - **Feet:** the feet stay (the contacts at the playhead, bones you lock, or else the feet).
+  - **Balance:** the center of mass stays over them.
+  - **Natural poses:** each joint stays within 75 degrees of the pose it started in (the spine half of that) and is
+    pulled back towards it.
+  - **Speed:** under a millisecond for a humanoid, live while dragging.
+  - **IK:** the targets move with the pose, so IK agrees with it.
+  - **On release:** the moved bones are keyed at the playhead, in the drag's undo step.
+- The console: `autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks`.
+- Learn: "AutoPosing: pose the whole body by one end".
+
+**Fixed on the way**
+- The Windows build's command line passed cmd's 8,191-character limit with the new files ("The input line is too
+  long"): the sources now go to the compiler in a response file.
+- A target far out of reach walked the body off its feet (a foot 2 m). Now:
+  - each goal pulls at most 10 cm a step;
+  - pins weigh ten times a goal;
+  - the hips move at most 30 cm with feet pinned;
+  - settle passes put a slipped pin back (29 cm before them, 0 after).
+
+**Checked**
+- New tests (round 141):
+  - a hand in reach: 0.6 mm off, the feet held, joints within their limits, the head barely turned, 0.5 ms;
+  - the head forward: the center of mass 3.4 cm from over the feet with balance, against 6.6 cm without;
+  - 5 m out of reach: the arm points at the target (2 degrees), a foot within 12 mm, all finite;
+  - the hips dragged 25 cm down: a crouch 5.6 mm off, the feet held and flat, the knees bending forward;
+  - in the editor: a drag posed and keyed, one undo step, the IK targets and poles following (the elbow kept to
+    0.0 mm through IK), a locked hand staying.
+- An Opus review (the Jacobians, the solve and the limits checked: correct); every finding fixed:
+  - dragging the hips pinned nothing (the feet were "below the dragged bone"), so the body slid;
+  - IK poles weren't moved, so IK undid the knees' and elbows' bend;
+  - a pinned foot kept its place but not its turn (toes through the floor);
+  - the costs per drag frame (subtree sums by parents now, pins and IK chains worked out once a drag, the body kept
+    between drags, settling stopping when done);
+  - limits were measured from where each drag started, so they piled up, and knees could bend sideways (now from the
+    rest, and a knee or elbow turns only about its bend axis);
+  - a drag cut short left stale state;
+  - every moved bone got Position keys, and IK-driven bones were keyed;
+  - Play logged keys it didn't write;
+  - balance counted locked hands as support;
+  - the locks outlived the scene.
+- Found while fixing:
+  - balance fought a dragged goal (a crouch stopped 5 cm short). It now works only with joints that move no goal and
+    no pin, leaning the torso instead.
+  - A locked hand had switched off the feet's pinning.
+- Unit checks: with round 142's (one chain for rounds 140-142; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 140): the active ragdoll: hits and falls that react (task 0121, ADR 0044)
+
+**Asked:** the physics plan's active ragdoll (the user chose Jolt), as part of "Finish and do all tasks please."
+
+**Added**
+- **The active ragdoll** (with Blender's libraries: Jolt Physics):
+  - the character as capsules, one per weighed bone, joined with humanoid limits;
+  - joint motors drive it to the clip's pose with a strength; the hips are pulled to their place;
+  - a floor under the clip's lowest point;
+  - simulated on one thread, so the same clip always gives the same keys.
+- **Events in the clip:** a hit (an impulse on a bone at a frame), limp (the motors off from a frame: a fall) and strong
+  (on again). They are saved with the clip.
+- The Animation window's **Ragdoll** button: simulated in the background, shown as a ghost, Apply one undo step. The
+  console: `body ragdoll show [strength] | apply | off | hit | limp | strong | events | clear`.
+- AutoPhysics and the ragdoll share one background worker, which hands back the finished result.
+- Learn: "The active ragdoll: hits and falls".
+
+**Fixed on the way**
+- Blender's Jolt is built without RTTI, so a `dynamic_cast` on its constraints crashed. They are told apart by Jolt's
+  own type.
+
+**Checked**
+- New tests (round 140), skipped without Jolt:
+  - full strength follows the clip within 6.2 degrees, strength 0.2 within 64;
+  - limp from a tipped pose, it falls from 1.17 m to the floor and rests;
+  - a hit on a bone moves it most (0.32 m against 0.05 m);
+  - a hit on the hips knocks the body back 0.7 m even at full strength;
+  - an absurd impulse leaves finite keys;
+  - two runs give identical keys;
+  - events survive saving;
+  - in the editor: a worker, the ghost, Apply and undo.
+- An Opus review (no crash or lifetime fault; the threading checked); every finding fixed:
+  - the hips' drive erased a hit (it now gives way for half a second after one);
+  - the strength only capped the torque (it now sets the motors' stiffness too, and each joint's torque comes from the
+    weight it carries);
+  - the joints' limits were centred on the clip's first frame, not the rest pose;
+  - bones touching in the first pose (thighs, shoulders and chest) could push apart;
+  - a bone under a weightless helper was keyed in the wrong place;
+  - the floor started inside the capsules;
+  - the AutoPhysics button lit up for a ragdoll;
+  - Jolt's layers were destroyed before the system, and a failed ragdoll left the floor in it;
+  - early hits were lost, hits on bones that aren't joints said nothing, and huge ones could write non-finite keys;
+  - a fallen body could sleep through "strong";
+  - Apply's label, the replaced-key count, and a strength that isn't a number.
+- Unit checks: with round 142's (one chain for rounds 140-142; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
 ## 2026-10-18 (round 139): spring bones for hair, ears, tails and cloth, found automatically (task 0120)
 
 **Asked:** the physics plan's secondary motion, with "auto select hair bone, ear bone, cloth bone sequences

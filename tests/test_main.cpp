@@ -35,6 +35,8 @@
 #include "../src/scene/autophysics.h"
 #include "../src/core/qp.h"
 #include "../src/scene/spring_bones.h"
+#include "../src/scene/ragdoll.h"
+#include "../src/scene/autopose.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
@@ -33652,5 +33654,294 @@ static void round81_tests() {
     GameObject *tail = back.find_by_name("Tail1"), *ear = back.find_by_name("Ear_Left_1");
     const SpringBone *sb = tail ? tail->get<SpringBone>() : nullptr;
     CHECK(sb && sb->label == 2 && std::fabs(sb->stiffness - 0.42f) < 1e-6f && ear && ear->get<Bone>()->spring_ignored);
+  });
+  /* ---------------------------------------------------------------- round 140: the active ragdoll (task 0121, ADR 0044) */
+  /* Round 137's two-box body (Lower 25 kg, Upper 50 kg, standing 2 m) with Upper tipping 60 degrees about z over a second. */
+  auto r140_clip = [] {
+    AnimationClip clip;
+    clip.frame_rate = 30.0f;
+    clip.length = 60.0f;
+    for (int f = 0; f <= 60; f++) clip.track("Lower/Upper", "Rotation", 2).set_key((float)f, f <= 30 ? 2.0f * f : 60.0f, AnimLinear);
+    return clip;
+  };
+  test("ragdoll: at full strength the motors follow the clip within a few degrees; limp from frame 15 it falls and comes to rest on the ground", [&] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    const AnimationClip clip = r140_clip();
+    body::FlightResult res;
+    std::string error;
+    ragdoll::Report rep;
+    const bool ok = ragdoll::simulate(r.s, *r.rig, clip, b, ragdoll::Settings(), res, error, &rep);
+    std::printf("    strong: %s, %d bodies, %d frames in %.0f ms; the largest difference from the clip %.1f degrees; %zu keys\n", ok ? "simulated" : error.c_str(),
+                rep.bodies, rep.frames, rep.ms, rep.max_angle, res.keys);
+    CHECK(ok && rep.bodies == 2 && rep.max_angle < 8.0f && res.keys > 0);
+    AnimationClip limp = clip;
+    limp.ragdoll.push_back({AnimationClip::RagdollEvent::MotorsOff, 15.0f, "", Vec3(0.0f)});  // (tipped 30 degrees by then: it goes over)
+    body::FlightResult fell;
+    CHECK(ragdoll::simulate(r.s, *r.rig, limp, b, ragdoll::Settings(), fell, error, &rep));
+    const std::vector<Vec3> c = body::com_trajectory(r.s, *r.rig, fell.corrected, b, 0.0f, 60.0f, 61);
+    std::printf("    limp from frame 15: the center of mass from %.3f m to %.3f m high; its last step %.5f m\n", c.front().y, c.back().y, length(c[60] - c[59]));
+    CHECK(c.back().y < c.front().y - 0.3f && length(c[60] - c[59]) < 2e-3f && c.back().y > 0.0f);
+  });
+  test("ragdoll: an impulse on a bone moves that bone most; the same clip simulates to the same keys; events are saved with the clip", [&] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    AnimationClip calm = r140_clip(), hit = r140_clip();
+    hit.ragdoll.push_back({AnimationClip::RagdollEvent::Impulse, 10.0f, "Upper", Vec3(0, 0, 150.0f)});
+    body::FlightResult a, h, again;
+    std::string error;
+    CHECK(ragdoll::simulate(r.s, *r.rig, calm, b, ragdoll::Settings(), a, error) && ragdoll::simulate(r.s, *r.rig, hit, b, ragdoll::Settings(), h, error) &&
+          ragdoll::simulate(r.s, *r.rig, hit, b, ragdoll::Settings(), again, error));
+    /* Each bone's middle in the world two frames after the hit, with the hit and without. */
+    auto middles = [&](const body::FlightResult &x) {
+      std::vector<Vec3> m;
+      body::for_each_frame(r.s, *r.rig, x.corrected, 12, 12, [&](int) {
+        for (GameObject *g : {r.lower, r.upper}) m.push_back((g->world_position() + body::bone_tip(*g)) * 0.5f);
+      });
+      return m;
+    };
+    const std::vector<Vec3> ma = middles(a), mh = middles(h);
+    const float lower = length(mh[0] - ma[0]), upper = length(mh[1] - ma[1]);
+    float same = 0;
+    for (const AnimTrack &t : h.corrected.tracks)
+      if (const AnimTrack *u = again.corrected.find(t.path, t.property, t.axis))
+        for (int f = 0; f <= 60; f++) same = std::max(same, std::fabs(t.sample((float)f) - u->sample((float)f)));
+    std::printf("    two frames after the hit: Upper's middle moved %.3f m, Lower's %.3f m; run twice: the largest difference %.6f\n", upper, lower, same);
+    CHECK(upper > 0.01f && upper > lower && same < 1e-4f);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(hit), back) && back.ragdoll.size() == 1 && back.ragdoll[0].bone == "Upper" &&
+          std::fabs(back.ragdoll[0].impulse.z - 150.0f) < 1e-4f && back.ragdoll[0].frame == 10.0f);
+  });
+  test("ragdoll (review): a weaker body follows less; a hit on the hips knocks the body back even at full strength; an absurd impulse leaves finite keys", [&] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    const AnimationClip clip = r140_clip();
+    std::string error;
+    float angle[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      ragdoll::Settings s;
+      s.strength = k ? 0.2f : 1.0f;
+      body::FlightResult res;
+      ragdoll::Report rep;
+      CHECK(ragdoll::simulate(r.s, *r.rig, clip, b, s, res, error, &rep));
+      angle[k] = rep.max_angle;
+    }
+    AnimationClip hit = clip;
+    hit.ragdoll.push_back({AnimationClip::RagdollEvent::Impulse, 10.0f, "Lower", Vec3(200.0f, 0, 0)});
+    body::FlightResult calm, knocked;
+    CHECK(ragdoll::simulate(r.s, *r.rig, clip, b, ragdoll::Settings(), calm, error) && ragdoll::simulate(r.s, *r.rig, hit, b, ragdoll::Settings(), knocked, error));
+    auto hips_x = [](body::FlightResult &x, float f) {
+      const AnimTrack *t = x.corrected.find("Lower", "Position", 0);
+      return t ? t->sample(f) : 0.0f;
+    };
+    const float back = hips_x(knocked, 14.0f) - hips_x(calm, 14.0f);
+    AnimationClip wild = clip;
+    wild.ragdoll.push_back({AnimationClip::RagdollEvent::Impulse, 5.0f, "Upper", Vec3(1e12f, 0, 0)});
+    body::FlightResult w;
+    const bool ok = ragdoll::simulate(r.s, *r.rig, wild, b, ragdoll::Settings(), w, error);
+    bool finite = true;
+    for (const AnimTrack &t : w.corrected.tracks)
+      for (const AnimKey &k : t.keys) finite = finite && std::isfinite(k.value);
+    std::printf("    the largest difference from the clip: %.1f degrees at full strength, %.1f at 0.2; a hit on the hips moved them %.3f m; an absurd hit: %s, %s keys\n",
+                angle[0], angle[1], back, ok ? "simulated" : error.c_str(), finite ? "finite" : "NOT FINITE");
+    CHECK(angle[1] > angle[0] + 2.0f && back > 0.02f && finite);
+  });
+  test("ragdoll in the editor: events by the console, simulated on a worker, shown, Apply one undo step", [] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    Editor ed;
+    r34_open(ed);
+    Scene &s = ed.scene();
+    GameObject *rig = s.create("Rig");
+    rig->add<Armature>();
+    GameObject *lower = s.create("Lower", rig);
+    lower->add<Bone>();
+    GameObject *upper = s.create("Upper", lower);
+    upper->set_local_position({0, 1, 0});
+    upper->add<Bone>()->rest_position = {0, 1, 0};
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select Rig");
+    ed.command("anim new Fall");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    clip->frame_rate = 30.0f;
+    clip->length = 30.0f;
+    clip->track("Lower", "Rotation", 2).set_key(0.0f, 0.0f, AnimLinear);
+    clip->touch();
+    ed.step_frame_headless();
+    ed.command("body ragdoll limp 5");
+    ed.step_frame_headless();
+    const bool event = ed.anim_clip_for_test() && ed.anim_clip_for_test()->ragdoll.size() == 1;
+    ed.command("body ragdoll show");
+    const bool started = ed.body_solving_for_test();
+    const auto t0 = std::chrono::steady_clock::now();
+    while (ed.body_solving_for_test() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60)) ed.step_frame_headless();
+    const bool shown = ed.body_ghost_for_test();
+    ed.command("body ragdoll apply");
+    ed.step_frame_headless();
+    AnimationClipPtr c2 = ed.anim_clip_for_test();
+    const AnimTrack *up = c2 ? c2->find("Lower/Upper", "Rotation", 0) : nullptr;
+    ed.command("undo");
+    ed.step_frame_headless();
+    AnimationClipPtr c3 = ed.anim_clip_for_test();
+    const bool undone = c3 && c3->find("Lower/Upper", "Rotation", 0) == nullptr;
+    std::printf("    the event in the clip: %s; simulated on a worker: %s; shown: %s; applied: %s; undone: %s\n", event ? "yes" : "no", started ? "yes" : "no",
+                shown ? "yes" : "no", up ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(event && started && shown && up && undone);
+  });
+  /* ---------------------------------------------------------------- round 141: AutoPosing (task 0122) */
+  /* GameObject > Rig > Humanoid's person (1.7 m, IK on the hands and feet), weighed with capsules. */
+  auto r141_pose_of = [](GameObject &arm) {
+    std::vector<std::pair<GameObject *, Quat>> out;
+    std::vector<GameObject *> st{&arm};
+    while (!st.empty()) {
+      GameObject *g = st.back();
+      st.pop_back();
+      for (GameObject *c : g->children) st.push_back(c);
+      if (g->get<Bone>()) out.push_back({g, g->local().rotation});
+    }
+    return out;
+  };
+  auto r141_angle = [](Quat a, Quat b) {
+    const Quat d = normalize(a * b.conjugate());
+    return 2.0f * std::acos(std::min(1.0f, std::fabs(d.w))) * 57.2957795f;
+  };
+  test("autopose: a dragged hand reaches a target in reach, the pinned feet stay, every joint within its limit, the rest of the body barely moved", [&] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const body::Body b = body::build(s, *rig, 75.0f);
+    GameObject *hand = s.find_by_name("LeftHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    const auto before = r141_pose_of(*rig);
+    const Vec3 lf0 = lf->world_position(), rf0 = rf->world_position(), to = hand->world_position() + Vec3(0.15f, 0.3f, 0.25f);
+    const autopose::Result r = autopose::solve(*rig, {{hand, to, 1.0f}}, {lf, rf}, &b);
+    float worst = 0, head = 0;
+    for (const auto &p : before) {
+      const float a = r141_angle(p.first->local().rotation, p.second);
+      worst = std::max(worst, a);
+      if (p.first->name == "Head") head = a;
+    }
+    std::printf("    %zu joints, %d iterations, %.2f ms: the hand %.2f mm off, the feet %.2f mm; the largest turn %.1f degrees, the head's %.1f; balance %.1f cm\n",
+                r.bones, r.iterations, r.ms, r.error * 1000.0f, r.pin_error * 1000.0f, worst, head, r.balance * 100.0f);
+    CHECK(r.error < 0.01f && length(lf->world_position() - lf0) < 0.005f && length(rf->world_position() - rf0) < 0.005f);
+    CHECK(worst <= 75.0f + 0.5f && head < 10.0f && r.ms < 16.0f);  // (live while dragging: under a frame)
+  });
+  test("autopose: balance keeps the center of mass over the feet when the head is pushed forward; out of reach the arm points at the target, nothing breaks", [&] {
+    float off[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f));
+      const body::Body b = body::build(s, *rig, 75.0f);
+      GameObject *head = s.find_by_name("Head"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+      autopose::Settings st;
+      st.balance = k == 0;
+      const autopose::Result r = autopose::solve(*rig, {{head, head->world_position() + Vec3(0, -0.1f, 0.35f), 1.0f}}, {lf, rf}, &b, st);
+      std::vector<ArmatureBone> now;
+      armature_bones(*rig, now);
+      const Vec3 c = body::state(b, now).com, mid = (lf->world_position() + rf->world_position()) * 0.5f;
+      off[k] = std::sqrt((c.x - mid.x) * (c.x - mid.x) + (c.z - mid.z) * (c.z - mid.z));
+      (void)r;
+    }
+    std::printf("    head forward: the center of mass %.1f cm from over the feet with balance, %.1f cm without\n", off[0] * 100.0f, off[1] * 100.0f);
+    CHECK(off[0] < 0.6f * off[1]);
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const body::Body b = body::build(s, *rig, 75.0f);
+    GameObject *hand = s.find_by_name("LeftHand"), *ua = s.find_by_name("LeftUpperArm"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    const Vec3 lf0 = lf->world_position(), far = Vec3(-5.0f, 1.5f, 0.0f);
+    const autopose::Result r = autopose::solve(*rig, {{hand, far, 1.0f}}, {lf, rf}, &b);
+    const Vec3 arm = normalize(hand->world_position() - ua->world_position()), want = normalize(far - ua->world_position());
+    bool finite = true;
+    for (const auto &p : r141_pose_of(*rig)) finite = finite && std::isfinite(p.first->local().rotation.w);
+    std::printf("    5 m away: %.2f m short (said), the arm %.1f degrees off the target's direction, the foot %.2f mm, all finite: %s\n", r.error,
+                std::acos(std::min(1.0f, dot(arm, want))) * 57.2957795f, length(lf->world_position() - lf0) * 1000.0f, finite ? "yes" : "NO");
+    /* (a 5 m pull leans the hips to their 30 cm limit and the legs to theirs: the feet within 2 cm then; a reach within
+     * the body's holds them to a millimetre, above) */
+    CHECK(finite && r.error > 3.0f && dot(arm, want) > 0.9f && length(lf->world_position() - lf0) < 0.02f);
+  });
+  test("autopose (review): the hips dragged down crouch the body - the feet stay down and flat, the knees bend forward, not sideways", [&] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const body::Body b = body::build(s, *rig, 75.0f);
+    GameObject *hips = s.find_by_name("Hips"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot"), *knee = s.find_by_name("LeftLowerLeg");
+    const Vec3 lf0 = lf->world_position(), rf0 = rf->world_position(), knee0 = knee->world_position();
+    const Quat lq0 = lf->world_rotation();
+    const autopose::Result r = autopose::solve(*rig, {{hips, hips->world_position() + Vec3(0, -0.25f, 0), 1.0f}}, {lf, rf}, &b);
+    const Vec3 dk = knee->world_position() - knee0;
+    const Quat dq = normalize(lf->world_rotation() * lq0.conjugate());
+    const float foot_turn = 2.0f * std::acos(std::min(1.0f, std::fabs(dq.w))) * 57.2957795f;
+    std::printf("    hips 25 cm down: %.1f mm off; the feet %.2f mm and %.2f degrees; the knee moved (%.3f, %.3f, %.3f)\n", r.error * 1000.0f,
+                std::max(length(lf->world_position() - lf0), length(rf->world_position() - rf0)) * 1000.0f, foot_turn, dk.x, dk.y, dk.z);
+    CHECK(r.error < 0.01f && length(lf->world_position() - lf0) < 0.005f && length(rf->world_position() - rf0) < 0.005f && foot_turn < 1.0f);
+    CHECK(dk.z > 0.03f && std::fabs(dk.x) < 0.5f * dk.z);  // (forward, the way the knee already bends - the rig faces +Z)
+  });
+  test("autopose in the editor: a drag poses the body, keys it at the playhead (one undo step); IK targets follow; a locked hand stays", [&] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Pose");
+    ed.step_frame_headless();
+    ed.command("autopose on");
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    /* (within the arm's reach: with the other hand locked the chest can't turn to help) */
+    const Vec3 to = hand->world_position() + Vec3(0.15f, 0.2f, 0.1f), rh0 = ed.scene().find_by_name("RightHand")->world_position();
+    ed.command("autopose lock RightHand");
+    ed.command(strprintf("autopose drag LeftHand %f %f %f", to.x, to.y, to.z));
+    const Vec3 elbow = ed.scene().find_by_name("LeftLowerArm")->world_position();
+    auto dbg = [&](const char *when) {
+      const Vec3 h = ed.scene().find_by_name("Hips")->world_position();
+      std::printf("    DEBUG %s: hand %.3f off, hips (%.3f %.3f %.3f)\n", when, length(ed.scene().find_by_name("LeftHand")->world_position() - to), h.x, h.y, h.z);
+    };
+    dbg("after drag");
+    ed.step_frame_headless();  // (IK solves on the pose: its target and pole moved with it, nothing pulls back)
+    dbg("after IK");
+    Scene &s = ed.scene();
+    const float elbow_kept = length(s.find_by_name("LeftLowerArm")->world_position() - elbow);
+    const float reached = length(s.find_by_name("LeftHand")->world_position() - to), kept = length(s.find_by_name("RightHand")->world_position() - rh0);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    /* (IK turns the arm: its target is what's keyed, and IK poses the arm from it) */
+    const std::string arm_path = clip ? anim_path(*rig, *s.find_by_name("LeftHandIK")) : "";
+    const bool keyed = clip && clip->find(arm_path, "Position", 0) != nullptr;
+    ed.command("undo");
+    ed.step_frame_headless();
+    AnimationClipPtr c2 = ed.anim_clip_for_test();
+    const bool undone = c2 && c2->find(arm_path, "Position", 0) == nullptr;
+    std::printf("    the hand %.1f mm from the target after IK, the elbow %.1f mm from where AutoPose put it; the locked hand moved %.1f mm; keyed: %s; "
+                "undone in one step: %s\n", reached * 1000.0f, elbow_kept * 1000.0f, kept * 1000.0f, keyed ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(reached < 0.02f && elbow_kept < 0.02f && kept < 0.01f && keyed && undone);
+  });
+  /* ---------------------------------------------------------------- round 142: physics for animation written up (task 0123) */
+  test("learn: the physics lesson's Try it makes a person jump in straight lines, finds its contacts and shows the flight corrected", [] {
+    std::string cmds;
+    for (int i = 0; i < lesson_count() && cmds.empty(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find("| A person jumping in straight lines");
+      const size_t start = at == std::string::npos ? std::string::npos : body.rfind("! cmd:", at);
+      if (start != std::string::npos) cmds = body.substr(start + 6, at - start - 6);
+    }
+    CHECK(!cmds.empty());
+    Editor ed;
+    ed.init_headless(1400, 900);
+    size_t a = 0;
+    while (a <= cmds.size()) {  // (as the Learn tab runs them: ';'-separated console commands)
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const size_t contacts = clip ? clip->contacts.size() : 0;
+    const body::FlightResult &fr = ed.body_result_for_test();
+    std::printf("    %zu contacts found; the flight shown: %s, %zu flight(s), up to %.2f m changed\n", contacts, ed.body_ghost_for_test() ? "yes" : "no",
+                fr.flights.size(), fr.flights.empty() ? 0.0f : fr.flights[0].shift);
+    CHECK(contacts >= 2 && ed.body_ghost_for_test() && fr.flights.size() == 1 && fr.flights[0].shift > 0.05f);
   });
 }

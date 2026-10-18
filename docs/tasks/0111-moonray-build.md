@@ -30,4 +30,19 @@ something a clean machine runs.
 3. Its size is reasonable for a download (target under about 500 MB).
 
 ## As built
-- (Filled in from the CI runs.)
+- **Linux: GO.**
+  - CI builds MoonRay v2026.29.1 in Rocky Linux 9: dependencies cached, about an hour from scratch.
+  - It packages a 296 MB archive with every library MoonRay loads but the system's, its scene objects, a launcher, a
+    test scene and every licence.
+  - Run 39114195746 renders the test scene on clean Ubuntu 22.04 and 24.04, Debian 12 and Fedora 41.
+  - The archive, installed in WSL on Windows, renders Blendity's scenes as the path tracer does (task 0113, round 136).
+- What it took:
+  - MoonRay's private `materialx_shaders` submodule is skipped;
+  - `--nocgroup` (libcgroup's RPM is gone);
+  - Python 3.11 (Boost.Python fails on 3.13);
+  - the dependencies cached the moment they are built;
+  - the check containers need `seccomp=unconfined` (MoonRay calls `mbind`).
+- **macOS: still building in CI.** CMake 4 needs `CMAKE_POLICY_VERSION_MINIMUM`, and autotools come from Homebrew.
+  freetype2 was put on the include path for MoonRay's telemetry overlay. The dependency cache is now found by prefix
+  after a script change.
+- **Not yet published:** the archives stay CI artifacts until the user says to put them on a release.

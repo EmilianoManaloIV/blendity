@@ -45,6 +45,8 @@
 #include "../render/moonray_export.h"
 #include "../scene/body_physics.h"
 #include "../scene/spring_bones.h"
+#include "../scene/ragdoll.h"
+#include "../scene/autopose.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -972,10 +974,13 @@ class Editor {
     std::string kind = "Flight";       // what the ghost shows: a flight's correction or AutoPhysics' (task 0119)
     /* AutoPhysics' solve on a worker (a few hundred milliseconds): sampled here, solved there, keyed here when done. */
     struct Solve {
-      std::shared_ptr<body::AutoPhysicsPrep> prep;
+      std::string kind;  // "AutoPhysics", "Ragdoll"
       std::thread thread;
       std::atomic<bool> done{false}, cancel{false};
-      body::CentroidalResult result;
+      bool ok = false;  // (the result, made on the thread from its own copies)
+      body::FlightResult result;
+      std::string error;
+      double ms = 0.0;
       std::weak_ptr<AnimationClip> clip;
       uint64_t clip_version = 0, root = 0;
       ~Solve() {
@@ -993,6 +998,9 @@ class Editor {
   void body_contacts_command(const std::vector<std::string> &t);
   void body_flight_command(const std::vector<std::string> &t);
   void body_physics_command(const std::vector<std::string> &t);
+  void body_ragdoll_command(const std::vector<std::string> &t);
+  void body_start(const char *kind, const AnimationClipPtr &clip, GameObject &root,
+                  const std::function<bool(BodyView::Solve &, body::FlightResult &, std::string &)> &work);
   void body_show_result(GameObject &root, const AnimationClipPtr &clip, const char *kind);
   void body_poll();
   /* ---- Spring bones (task 0120, spring_ui.cpp) ---- */
@@ -1020,6 +1028,27 @@ class Editor {
   void spring_bake();
   void spring_command(const std::vector<std::string> &t);
   void draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *bone);
+  /* ---- AutoPosing (task 0122, autopose_ui.cpp) ---- */
+  struct AutoPoseView {
+    bool on = false;
+    uint64_t bone = 0, armature = 0;                        // the drag under way (0: none)
+    std::vector<std::pair<uint64_t, Transform>> start;      // everything under the armature as the drag started
+    body::Body body;
+    uint64_t body_key = 0;                                  // what `body` was weighed for (body::body_key)
+    std::vector<uint64_t> pins;                             // this drag's pinned bones
+    struct Ik {
+      uint64_t bone, target, pole;
+    };
+    std::vector<Ik> iks;                                    // this drag's IK chains (their targets and poles follow the pose)
+    std::vector<uint64_t> locks;                            // bones the user keeps where they are (cleared with the scene)
+    autopose::Result last;
+  } autopose_;
+  void autopose_begin(GameObject &bone);
+  std::vector<GameObject *> autopose_pins(GameObject &arm, GameObject &dragged);
+  void autopose_to(GameObject &bone, Vec3 target);
+  void autopose_end();
+  bool autopose_gizmo(uint64_t id, Vec3 target);
+  void autopose_command(const std::vector<std::string> &t);
   /* The Sequencer window (task 0062, sequencer_window.cpp). */
   SeqEditorState seqr_;
   std::vector<std::string> seq_paths_;

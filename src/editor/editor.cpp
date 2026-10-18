@@ -1783,6 +1783,7 @@ void Editor::new_scene() {
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
   scene_ = std::make_unique<Scene>();
+  autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
   build_starter_scene(*scene_);
   scene_->name = "Untitled";
   load_lighting_data();  // none: the scene has no file yet
@@ -1812,6 +1813,7 @@ bool Editor::open_scene(const std::string &path) {
     return false;
   }
   scene_ = std::move(s);
+  autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
   relink_material_assets(*scene_, false);  // slots naming a .mat use the asset file
   load_lighting_data();  // <scene folder>/<scene name>/: its lightmaps, if baked
   stable_ = scene_->clone();
@@ -3209,7 +3211,8 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
   if (c == "moonray") return moonray_command(t);  // moonray status | install [archive] | remove | folder [path] | check (task 0112)
   if (c == "body") return body_command(t);
-  if (c == "spring") return spring_command(t);  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
+  if (c == "spring") return spring_command(t);
+  if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
