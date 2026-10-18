@@ -32,6 +32,7 @@ case "$1" in
     du -sh "$M/installs"
     ;;
   moonray)
+    rm -rf "$M/installs/openmoonray"  # (the dependencies' cache may hold a MoonRay from an earlier run)
     cd openmoonray
     cmake --preset macos-release -DMOONRAY_USE_OPTIX=NO -DBUILD_QT_APPS=NO
     cmake --build --preset macos-release -- -jobs "$(sysctl -n hw.ncpu)"

@@ -38,8 +38,9 @@ while :; do
   done </tmp/needed
   [ "$added" = 1 ] || break
 done
-if ldd "$P/bin/moonray" "$P"/rdl2dso/*.so* | grep -q "not found"; then
-  ldd "$P/bin/moonray" "$P"/rdl2dso/*.so* | grep "not found" | sort -u
+missing=$(ldd "$P/bin/moonray" "$P"/rdl2dso/*.so* "$P"/lib/*.so* 2>&1 | grep "not found" | sort -u || true)
+if [ -n "$missing" ]; then
+  echo "$missing"
   echo "missing libraries" >&2
   exit 1
 fi
