@@ -24,7 +24,7 @@ find_lib() {  # an install name -> a file
   for d in "$P/lib" "$INST/lib" "$DEPS/lib" "$DEPS/lib64"; do
     [ -e "$d/$b" ] && { echo "$d/$b"; return; }
   done
-  [ -e "$n" ] && echo "$n"
+  if [ -e "$n" ]; then echo "$n"; fi
 }
 while :; do
   added=0
@@ -38,7 +38,7 @@ while :; do
     case "$n" in /usr/lib/*|/System/*) continue ;; esac
     b=$(basename "$n")
     [ -e "$P/lib/$b" ] && continue
-    l=$(find_lib "$n")
+    l=$(find_lib "$n" || true)  # (an @rpath name found nowhere returns false: set -e would stop here)
     if [ -z "$l" ]; then
       echo "not found: $n" >&2
       continue
