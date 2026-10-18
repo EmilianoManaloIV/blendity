@@ -13,6 +13,7 @@ SRC=/Applications/MoonRay/source/openmoonray
 W=$(mktemp -d)
 P=$W/moonray
 mkdir -p "$P"/{bin,lib,rdl2dso,licenses,test} "$OUT"
+echo "packaging MoonRay $TAG from $INST"
 cp "$INST/bin/moonray" "$P/bin/"
 cp -a "$INST/rdl2dso/." "$P/rdl2dso/"
 find "$INST/lib" "$INST/lib64" -maxdepth 1 -name '*.dylib' -exec cp -a {} "$P/lib/" \; 2>/dev/null || true
@@ -29,7 +30,9 @@ while :; do
   added=0
   for f in "$P/bin/moonray" "$P"/rdl2dso/*.so* "$P"/rdl2dso/*.dylib "$P"/lib/*.dylib; do
     [ -f "$f" ] || continue
-    otool -L "$f" | tail -n +2 | awk '{print $1}'
+    # (a scene object folder holds more than libraries - proxies, data - and otool fails on those: skipped, as
+    # pipefail would otherwise end the script there without a word)
+    { otool -L "$f" 2>/dev/null || true; } | tail -n +2 | awk '{print $1}'
   done | sort -u >"$W/needed"
   while read -r n; do
     case "$n" in /usr/lib/*|/System/*) continue ;; esac
@@ -46,6 +49,7 @@ while :; do
   done <"$W/needed"
   [ "$added" = 1 ] || break
 done
+echo "libraries: $(ls "$P/lib" | wc -l)"
 cat >"$P/bin/blendity-moonray" <<'EOF'
 #!/bin/sh
 # Runs MoonRay from this folder (Blendity's archive): its libraries and scene objects beside it.
