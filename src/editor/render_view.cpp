@@ -31,6 +31,7 @@ static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
 }
 
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
+  ProfileScope prof{prof_.ms_collect, {}};
   std::vector<DrawItem> items;
   /* (Of what is shown: the preview's own staleness while there is one.) */
   lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
@@ -272,6 +273,9 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     uint64_t k[3];
     g.evaluated_keys(k);
     mix(k, sizeof(k));
+    /* Settled tangents (ADR 0034): the same mesh drawn a little differently - the views draw again, nothing that
+     * keys on the evaluated meshes (a modifier stack's cache) sees a change. */
+    if (const MeshFilter *mf = g.mesh_filter(); mf && mf->mesh) mix(&mf->mesh->looks, 8);
   }
   if (outline) {  // a toon outline's thickness, colour and on / off (ADR 0020)
     const uint64_t oh = hash_component(*outline) ^ (uint64_t)outline->enabled << 63;
@@ -291,6 +295,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
 }
 
 uint64_t Editor::scene_render_hash(bool memo) {
+  ProfileScope prof{prof_.ms_hash, {}};
+  prof_.scene_hashes++;
   uint64_t h = 1469598103934665603ull;
   auto mix = [&](const void *p, size_t n) {
     const uint8_t *b = (const uint8_t *)p;
@@ -346,13 +352,14 @@ bool Editor::camera_for_render(Mat4 &view, Mat4 &proj, float aspect) {
 /* Rasterized (EEVEE-like)                                                */
 /* ===================================================================== */
 
-/* A cached map for the views now: the Low tier's take the cheaper filter (renders keep 3 x 3). */
-const ShadowMap *Editor::shadow_for_view(ShadowMap &m) const {
-  m.fast = quality_tier_ == TierLow && !final_render_;
+/* A cached map for the views now: the Low tier's take the cheaper filter (renders keep 3 x 3), and so do the CPU
+ * views while you interact (task 0104). */
+const ShadowMap *Editor::shadow_for_view(ShadowMap &m, bool cpu_view) const {
+  m.fast = (quality_tier_ == TierLow || (cpu_view && moving_cheap())) && !final_render_;
   return m.valid() ? &m : nullptr;
 }
 
-const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env) {
+const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env, bool frame_only) {
   int li = -1;
   for (size_t i = 0; i < env.lights.size(); i++)
     if (env.lights[i].type == RenderLight::Directional) { li = (int)i; break; }
@@ -387,7 +394,10 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     uint64_t ck = 1469598103934665603ull ^ it.id;
     mixer(ck, it.model.m, sizeof(float) * 16);
     motion_keys.push_back(ck);  // what makes it "moving": its placement
-    mixer(ck, &it.mesh->serial, 8);
+    /* Its shape (task 0088): the Scene view's flat Edit Mode cache and the Game view's smooth one share it, so the two
+     * views share one map instead of each rendering its own every frame of a drag. */
+    const uint64_t shape = it.mesh->shape ? it.mesh->shape : it.mesh->serial;
+    mixer(ck, &shape, 8);
     if (it.materials)
       for (const MaterialPtr &m : *it.materials) {
         const uint64_t mv[3] = {(uint64_t)(uintptr_t)m.get(), m ? (uint64_t)m->surface : 0, m ? (uint64_t)m->cast_shadows : 1};
@@ -396,7 +406,8 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     caster_keys.push_back(ck);
     mixer(key, &ck, 8);
   }
-  const int res = shadow_resolution_for_view();
+  const int res = shadow_resolution_for_view(!frame_only);  // (the GPU's own map stays whole: it costs it little)
+  if (!frame_only && res < shadow_resolution_for_view()) prof_.cheap_shadows++;
   const Vec3 dir = env.lights[li].direction;
   /* The frame, snapped (task 0050): its radius up to a step of a geometric series, its centre to a sixteenth of that,
    * so dragging one object about leaves the frame, and the casters that stayed still keep their map. */
@@ -414,6 +425,14 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     frame.add(cs - h);
     frame.add(cs + h);
   }
+  if (frame_only) {
+    /* The GPU views render the map themselves from its frame (task 0096): nothing drawn here, nothing cached. */
+    gpu_shadow_.depth.clear();
+    gpu_shadow_.size = frame.valid() && !caster_ptrs.empty() ? res : 0;
+    if (gpu_shadow_.size) gpu_shadow_.view_proj = shadow_view_proj(dir, frame);
+    gpu_shadow_.bias = ShadowMap{}.bias;
+    return shadow_for_view(gpu_shadow_);
+  }
   mixer(key, &dir, sizeof(Vec3));
   mixer(key, &res, sizeof(int));
   mixer(key, &frame, sizeof(AABB));
@@ -425,7 +444,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     for (ShadowEntry &e : shadow_cache_)
       if (e.key == key) {
         e.used = shadow_clock_;
-        return shadow_for_view(e.map);
+        return shadow_for_view(e.map, true);
       }
   /* Which casters are moving: changed within the last second. */
   const double now = now_seconds();
@@ -482,7 +501,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   prof_.ms_shadow += t.ms();
   e.key = cacheable ? key : 0;
   e.used = shadow_clock_;
-  return shadow_for_view(e.map);
+  return shadow_for_view(e.map, true);
 }
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
@@ -490,8 +509,11 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   std::vector<DrawItem> items = collect_items(game, true);
-  if (scene_lights && scene_->render.shadows) {
-    if (const ShadowMap *sm = update_shadow_map(items, env)) {
+  /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
+  const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
+  const bool shadows = scene_lights && scene_->render.shadows;
+  if (shadows) {
+    if (const ShadowMap *sm = update_shadow_map(items, env, gpu_maybe)) {
       for (size_t i = 0; i < env.lights.size(); i++)
         if (env.lights[i].type == RenderLight::Directional) { env.shadow_light = (int)i; break; }
       env.shadow = sm;
@@ -550,7 +572,17 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);
-  r3d.begin(&rt, v, p, env, opt);
+  r3d.begin(&rt, v, p, env, opt);  // (also for the GPU: the overlays drawn next go through it)
+  if (gpu_maybe && gpu_view_draw(rt, v, p, eye, env, items, cam, scene_lights, filters, opt)) {
+    size_t tris = 0;
+    for (const DrawItem &it : items) tris += it.mesh ? it.mesh->tri_count() : 0;
+    r3d.note_submitted((int)items.size(), tris);
+    return;
+  }
+  if (gpu_maybe && env.shadow) {  // (the GPU couldn't after all: the CPU needs the map itself, not only its frame)
+    env.shadow = update_shadow_map(items, env);
+    r3d.begin(&rt, v, p, env, opt);
+  }
   Mat4 inv = (p * v).inverse();
   if (render_clear_override_on_) {  // a transparent F12's black / white pass (task 0035)
     r3d.clear(render_clear_override_);
@@ -634,10 +666,12 @@ template<class T> static void upscale_plane(const std::vector<T> &src, int sw, i
 
 /* Viewport Resolution Scale (task 0050): on a 4-core machine the software rasterizer's cost is mostly per pixel, so the
  * views can draw their 3D at 50-100 % and scale it up. Depth and ids follow at full size (nearest), so picking, the
- * tools' visibility tests and the overlays (drawn after, at full size) work as before. */
+ * tools' visibility tests and the overlays (drawn after, at full size) work as before - unless `planes` is false: a
+ * view nobody picks in (the Game view, the Camera Preview) keeps only the colour (task 0092). */
 void Editor::render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, const Mat4 &v, const Mat4 &p,
-                           const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner, bool fill) {
-  const float s = finite_bits(view_scale_) ? std::max(0.25f, std::min(1.0f, view_scale_)) : 1.0f;
+                           const std::function<void(RenderTarget &)> &draw, const GameObject *filter_owner, bool fill, bool planes,
+                           bool full_size) {
+  const float s = full_size ? 1.0f : finite_bits(view_scale_) ? std::max(0.25f, std::min(1.0f, view_scale_)) : 1.0f;
   const int iw = std::max(1, (int)std::lround(rt.width * s)), ih = std::max(1, (int)std::lround(rt.height * s));
   bool own_size = false;  // a filter stack with its own internal resolution (a retro console's): its pixels stay crisp
   if (filter_owner) {
@@ -649,16 +683,24 @@ void Editor::render_scaled(Renderer3D &r3d, RenderTarget &rt, FilterTarget &vs, 
       own_size = fw != rt.width || fh != rt.height;
     }
   }
+  const bool was = planes_wanted_;
+  planes_wanted_ = planes || planes_always_;
   if (own_size || s >= 0.999f || (iw >= rt.width && ih >= rt.height) || rt.width < 8 || rt.height < 8) {
     draw(rt);
+    planes_wanted_ = was;
     return;
   }
   if (vs.img.width != iw || vs.img.height != ih) vs.img.resize(iw, ih);
   vs.rt.attach(vs.img, {0, 0, iw, ih});
   draw(vs.rt);
+  planes_wanted_ = was;
   upscale_bilinear(vs.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, {0, 0, rt.width, rt.height});
-  upscale_plane(vs.rt.depth, iw, ih, rt.depth, rt.width, {0, 0, rt.width, rt.height});
-  upscale_plane(vs.rt.ids, iw, ih, rt.ids, rt.width, {0, 0, rt.width, rt.height});
+  /* Depth and ids at full size are for picking and the tools (the Scene view); a view nobody picks in (the Game view,
+   * the Camera Preview) skips them (task 0092). */
+  if (planes) {
+    upscale_plane(vs.rt.depth, iw, ih, rt.depth, rt.width, {0, 0, rt.width, rt.height});
+    upscale_plane(vs.rt.ids, iw, ih, rt.ids, rt.width, {0, 0, rt.width, rt.height});
+  }
   r3d.rebind(&rt, v, p);
 }
 
@@ -667,9 +709,10 @@ void Editor::set_view_scale(float s) {
   ui_.redraw = true;
 }
 
-int Editor::shadow_resolution_for_view() const {
+int Editor::shadow_resolution_for_view(bool cpu_view) const {
   const int res = std::max(256, scene_->render.shadow_resolution);
-  return !final_render_ && tier_shadow_cap_ > 0 ? std::min(res, tier_shadow_cap_) : res;
+  const int capped = !final_render_ && tier_shadow_cap_ > 0 ? std::min(res, tier_shadow_cap_) : res;
+  return cpu_view && moving_cheap() ? std::max(256, capped / 2) : capped;
 }
 
 /* The tiers (ADR 0026). Low is measured at 8 threads on the minimum machine's budget: the views at 67 %, a 1024 shadow
@@ -746,12 +789,14 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, 
   for (const FilterPass &pass : fs.passes) pass(*t, &frame);
   if (!scaled) return;
   /* Scale up into the view; its depth and ids follow, so picking and overlays still work. */
-  if (boxed) {
+  if (boxed)
     for (int y = 0; y < rt.height; y++) std::fill(rt.color + (size_t)y * rt.stride, rt.color + (size_t)y * rt.stride + rt.width, 0xFF000000u);
+  upscale_nearest(ft.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, dst);
+  if (!planes_wanted_) return r3d.rebind(&rt, v, p);  // (a view nobody picks in: task 0092)
+  if (boxed) {
     std::fill(rt.depth.begin(), rt.depth.end(), 1.0f);
     std::fill(rt.ids.begin(), rt.ids.end(), 0u);
   }
-  upscale_nearest(ft.img.pixels.data(), iw, ih, iw, rt.color, rt.stride, dst);
   upscale_plane(ft.rt.depth, iw, ih, rt.depth, rt.width, dst);
   upscale_plane(ft.rt.ids, iw, ih, rt.ids, rt.width, dst);
   r3d.rebind(&rt, v, p);  // overlays (grid, gizmos) draw on the full-size view; the stats stay
@@ -781,6 +826,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   s.clamp_indirect = rs.clamp_indirect;
   s.denoise = rs.denoise;
   s.use_oidn = rs.denoiser == 0;
+  s.denoise_device = rs.denoise_device;
   s.use_embree = rs.use_embree;
   s.use_guiding = rs.path_guiding;
   s.view_transform = view_transform_from_setting(rs.view_transform);
@@ -852,6 +898,7 @@ static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p,
     }
     auto m = std::make_shared<RenderMesh>(*it.mesh);
     m->serial = 0;
+    m->shape = 0;  // (its positions are snapped: not the mesh's shape any more)
     for (Vec3 &pos : m->positions) {
       const Vec4 c = mvp * Vec4(pos, 1.0f);
       if (!(c.w > 1e-6f)) continue;  // behind the camera: as it is
@@ -916,6 +963,57 @@ FilterFrame Editor::trace_filter_frame(PathTracer &pt, RenderTarget &rt, const M
 /* ===================================================================== */
 
 /* The camera's thin lens for the path tracer (Cycles: camera_sample_aperture). */
+static PTLens camera_lens(const Camera *cam, float aspect);
+
+/* F12 in MoonRay (task 0114): the scene exported as the path tracer would be given it, run in the background. False
+ * when MoonRay can't render here (not installed): the path tracer renders instead. */
+bool Editor::start_moonray(int w, int h, const Mat4 &v, const Mat4 &p, const Camera *cam, Vec3 eye) {
+  if (!mr_located_) {  // (looked for in the background - WSL takes a moment to start - and started then)
+    moonray_locate();
+    mr_waiting_render_ = true;
+    rendering_ = true;
+    render_status_ = "MoonRay: looking for it...";
+    return true;
+  }
+  if (!mr_.ready()) {
+    Log::warn("MoonRay %s: rendering with the path tracer instead (Edit > Preferences > Renderers)",
+              mr_.problem.empty() ? "isn't installed" : ("can't run here: " + mr_.problem).c_str());
+    return false;
+  }
+  if (cam && cam->orthographic) {
+    Log::warn("MoonRay: an orthographic camera isn't sent yet: rendering with the path tracer instead");
+    return false;
+  }
+  const RenderSettings &rs = scene_->render;
+  render_filtered_ = false;  // (camera filters are Blendity's: noted, not drawn)
+  if (!render_filters_.empty()) Log::info("MoonRay: the camera's filters aren't applied to its render");
+  moonray::ExportScene sc;
+  for (const DrawItem &it : collect_items(true, true)) sc.objects.push_back({it.mesh, it.model, it.materials});
+  sc.lights = make_lighting(eye, true, false).lights;
+  sc.world = &env_;
+  sc.view = v;
+  sc.proj = p;
+  sc.lens = camera_lens(cam, w / (float)h);
+  sc.width = w;
+  sc.height = h;
+  sc.samples = rs.samples;
+  sc.max_bounces = rs.max_bounces;
+  const PTSettings ps = make_pt_settings(rs);
+  sc.point_radius = ps.point_radius;
+  sc.sun_angle_deg = ps.sun_angle_deg;
+  MoonRayFrame fr;
+  fr.width = w;
+  fr.height = h;
+  fr.transparent = rs.transparent;
+  fr.solid = !rs.transparent && cam && cam->clear_flags == 1;
+  fr.view_transform = ps.view_transform;
+  fr.exposure = ps.exposure + (cam ? cam->exposure_stops() : 0.0f);
+  if (fr.solid) fr.background = Vec3(srgb_to_linear(cam->background.x), srgb_to_linear(cam->background.y), srgb_to_linear(cam->background.z)) /
+                                std::exp2(std::max(-16.0f, std::min(16.0f, fr.exposure)));
+  sc.hide_background = fr.transparent || fr.solid;
+  return begin_moonray_render(sc, fr);
+}
+
 static PTLens camera_lens(const Camera *cam, float aspect) {
   PTLens l;
   if (!cam) return l;
@@ -951,6 +1049,15 @@ void Editor::update_camera_focus() {
 }
 
 void Editor::start_final_render(bool preview, bool open_window) {
+  /* F12 and the Render window's preview draw on the CPU, the reference (the GPU is the interactive views'). */
+  struct KeepCpu {
+    bool &off;
+    bool was;
+    ~KeepCpu() { off = was; }
+  } keep_cpu{gpu_view_off_, gpu_view_off_};
+  gpu_view_off_ = true;
+  mr_job_.reset();  // (a MoonRay render under way stops: this render replaces it)
+  mr_waiting_render_ = false;
   const RenderSettings &rs = scene_->render;
   const int pct = preview ? std::max(1, rs.percent * rs.preview_percent / 100) : rs.percent;
   int w = std::max(16, rs.width * pct / 100), h = std::max(16, rs.height * pct / 100);
@@ -973,6 +1080,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
   if (open_window) dock_open(WindowKind::Render);
   render_filters_ = camera_filters(cam ? owner : nullptr);
   render_filtered_ = !render_filters_.empty();
+  if (rs.engine == 2 && !preview && start_moonray(w, h, v, p, cam, eye)) return;  // (task 0114; else the path tracer)
   if (rs.engine == 0 && render_filtered_) {
     /* A filtered camera: its own resolution and passes; no supersampling (it would soften
      * the pixels the filter is there to make). */
@@ -1060,6 +1168,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
 
 void Editor::step_final_render() {
   if (!rendering_) return;
+  if (mr_job_ || mr_waiting_render_) return step_moonray_render();
   const RenderSettings &rs = scene_->render;
   int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
   if (final_pt_.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there
@@ -1337,8 +1446,8 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
   }
   const int n = ls.gi_resolution <= 0 ? 64 : ls.gi_resolution == 1 ? 128 : 256;
   VoxelGrid fit;
-  voxel_grid_fit(fit, bounds, n);
-  if (!fit.valid()) return nullptr;
+  voxel_grid_fit(fit, bounds, n, false);  // (its placement: the columns only if it's taken below)
+  if (fit.n <= 0) return nullptr;
   /* Keep the grid while the scene still fits it at the same voxel size (dragging the outermost object
    * would otherwise move the grid every 8 voxels and re-voxelize everything). */
   const bool keep = vgi.grid.valid() && vgi.grid.n == fit.n && vgi.grid.voxel == fit.voxel && bounds.min.x >= vgi.grid.origin.x &&
@@ -1346,6 +1455,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
                     bounds.max.x <= vgi.grid.origin.x + fit.n * fit.voxel && bounds.max.y <= vgi.grid.origin.y + VoxelGrid::kDepth * fit.voxel &&
                     bounds.max.z <= vgi.grid.origin.z + fit.n * fit.voxel;
   if (!keep && fit.key != vgi.grid.key) {  // a new grid: every object's voxels are re-made
+    voxel_grid_allocate(fit);
     vgi.grid = std::move(fit);
     vgi.objects.clear();
     vgi.assembled = 0;
@@ -1513,7 +1623,8 @@ uint64_t Editor::scene_view_key(const Recti &view) {
   mix(v.m, sizeof(v.m));
   mix(p.m, sizeof(p.m));
   const uint64_t flags = (uint64_t)shading_ | (uint64_t)scene_lighting_ << 8 | (uint64_t)scene_filters_ << 9 | (uint64_t)show_grid_ << 10 |
-                         (uint64_t)edit_mode_ << 11 | (uint64_t)ngon_mode_ << 12 | (uint64_t)elem_ << 16;
+                         (uint64_t)edit_mode_ << 11 | (uint64_t)ngon_mode_ << 12 | (uint64_t)elem_ << 16 |
+                         (uint64_t)scene_full_size() << 24;  // (the card's frames draw at full size: task 0100)
   mix(&flags, 8);
   mix(&ui_.scale, sizeof(float));
   mix(&cam_.distance, sizeof(float));  // the grid's level follows the orbit distance and pivot
@@ -1544,6 +1655,15 @@ uint64_t Editor::scene_view_key(const Recti &view) {
 bool Editor::view_cache_hit(ViewCache &c, uint64_t key, const Recti &r) {
   if (key == 0 || c.key != key || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width ||
       r.bottom() > fb_.height)
+    return false;
+  JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
+  });
+  return true;
+}
+
+bool Editor::view_cache_show(ViewCache &c, const Recti &r) {
+  if (c.key == 0 || c.img.width != r.w || c.img.height != r.h || r.x < 0 || r.y < 0 || r.right() > fb_.width || r.bottom() > fb_.height)
     return false;
   JobSystem::global().parallel_for(r.h, 64, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++) std::memcpy(fb_.row((int)(r.y + y)) + r.x, c.img.row((int)y), sizeof(uint32_t) * r.w);
@@ -1582,13 +1702,15 @@ uint64_t Editor::raster_opt_key() const {
   std::memcpy(&vs, &view_scale_, 4);  // Viewport Resolution Scale: a different picture in every view it applies to
   uint64_t k = (uint64_t)o.multithreaded | (uint64_t)o.backface_culling << 1 | (uint64_t)o.frustum_culling << 2 |
                (uint64_t)o.span_rows << 3 | (uint64_t)o.fast_setup << 4 | (uint64_t)o.affine_uv << 5 | (uint64_t)o.screen_door << 6 |
-               (uint64_t)o.shade << 8 | (uint64_t)(uint32_t)o.tile_size << 16;
+               (uint64_t)o.shade << 8 | (uint64_t)o.uniform_shading << 7 | (uint64_t)o.simd_shading << 11 | (uint64_t)(uint32_t)o.tile_size << 16;
   uint32_t snap;
   std::memcpy(&snap, &o.vertex_snap, 4);
   k ^= (uint64_t)snap << 32;
   k ^= (uint64_t)vs * 0xC2B2AE3D27D4EB4Full;
   /* The quality tier's caps (task 0050): the shadow map's size and Realtime GI's rays and reflective shadow map. */
   k ^= ((uint64_t)(uint32_t)tier_shadow_cap_ << 40 | (uint64_t)(uint32_t)tier_gi_rays_cap_ << 20 | (uint64_t)(uint32_t)tier_rsm_cap_) * 0x165667B19E3779F9ull;
+  /* Task 0104: a picture drawn the cheaper way while moving is never reused once you stop (ADR 0039). */
+  k ^= moving_cheap() ? 0xD6E8FEB86659FD93ull : 0;
   return k * 0x9E3779B97F4A7C15ull;
 }
 
@@ -1703,7 +1825,10 @@ void Editor::draw_camera_preview(const Recti &view) {
     ScopedTimer rt;
     const uint64_t key = (camera_render_hash(g, cam) ^ raster_opt_key() ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id) | 1;
     const bool hit = key == cam_preview_key_ && cam_preview_img_.width == w && cam_preview_img_.height == h;
+    const bool held = !hit && hold_other_views() && cam_preview_key_ != 0 && cam_preview_of_ == g->id && cam_preview_img_.width == w &&
+                      cam_preview_img_.height == h;
     if (hit && !cache_verify_) prof_.view_cache_hits++;
+    else if (held) prof_.views_held++;  // (task 0103: the drag's last picture until it ends; the key still differs then)
     else {
       std::vector<uint32_t> before;
       if (hit) before = cam_preview_img_.pixels;
@@ -1711,7 +1836,7 @@ void Editor::draw_camera_preview(const Recti &view) {
       cam_preview_rt_.attach(cam_preview_img_, {0, 0, w, h});
       render_scaled(cam_preview_r3d_, cam_preview_rt_, preview_vs_, v, p, [&](RenderTarget &t) {
         render_camera(cam_preview_r3d_, t, preview_ft_, v, p, eye, q.rotate({0, 0, 1}), g, cam, aspect);
-      }, g);
+      }, g, false, false);  // (nothing picks in the Camera Preview: no full-size depth and ids)
       prof_.view_renders++;
       if (hit && before != cam_preview_img_.pixels) {
         prof_.cache_mismatches++;
@@ -1719,6 +1844,7 @@ void Editor::draw_camera_preview(const Recti &view) {
         Log::warn("Render cache: the Camera Preview would have shown a stale picture");
       }
       cam_preview_key_ = key;
+      cam_preview_of_ = g->id;
     }
     prof_.ms_preview += rt.ms();
   }

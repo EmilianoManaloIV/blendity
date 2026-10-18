@@ -838,12 +838,155 @@ bool decode_image(const std::string &bytes, Bitmap &out, std::string &error) {
     out = Bitmap();
     return decode_jpeg(d, n, out, error);
   }
-  if (n >= 4 && d[0] == 0x76 && d[1] == 0x2F && d[2] == 0x31 && d[3] == 0x01) return decode_exr_lib(bytes, out, error);
+  if (n >= 4 && d[0] == 0x76 && d[1] == 0x2F && d[2] == 0x31 && d[3] == 0x01) {
+    if (decode_exr_lib(bytes, out, lib_error)) return true;
+    out = Bitmap();
+    if (decode_exr_plain(bytes, out, error)) return true;  // (without the libraries: an uncompressed one still reads)
+    if (!lib_error.empty()) error = lib_error;
+    return false;
+  }
   if (n >= 2 && d[0] == 'B' && d[1] == 'M') return decode_bmp(d, n, out, error);
   if (n >= 2 && d[0] == '#' && d[1] == '?') return decode_hdr(d, n, out, error);
   if (n >= 18) return decode_tga(d, n, out, error);  // TGA has no magic number
   error = "unknown image format";
   return false;
+}
+
+namespace {
+float half_to_float(uint16_t h) {
+  const uint32_t sign = (uint32_t)(h & 0x8000) << 16, exp = (h >> 10) & 0x1F, man = h & 0x3FF;
+  uint32_t bits;
+  if (exp == 0) {
+    if (man == 0) bits = sign;
+    else {  // (subnormal: normalised)
+      int e = -1;
+      uint32_t m = man;
+      do {
+        e++;
+        m <<= 1;
+      } while (!(m & 0x400));
+      bits = sign | (uint32_t)(127 - 15 - e) << 23 | (m & 0x3FF) << 13;
+    }
+  }
+  else if (exp == 31) bits = sign | 0x7F800000u | man << 13;
+  else bits = sign | (exp + 127 - 15) << 23 | man << 13;
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+template <class T>
+bool exr_read(const uint8_t *d, size_t n, size_t &at, T &v) {
+  if (at + sizeof(T) > n) return false;
+  std::memcpy(&v, d + at, sizeof(T));
+  at += sizeof(T);
+  return true;
+}
+bool exr_cstr(const uint8_t *d, size_t n, size_t &at, std::string &s) {
+  s.clear();
+  while (at < n && d[at]) s += (char)d[at++];
+  if (at >= n) return false;
+  at++;
+  return true;
+}
+}  // namespace
+
+bool decode_exr_plain(const std::string &bytes, Bitmap &out, std::string &error) {
+  const uint8_t *d = (const uint8_t *)bytes.data();
+  const size_t n = bytes.size();
+  size_t at = 4;
+  uint32_t version = 0;
+  if (n < 8 || std::memcmp(d, "\x76\x2F\x31\x01", 4) != 0 || !exr_read(d, n, at, version)) return error = "not an OpenEXR file", false;
+  if (version & 0x1A00) return error = "a tiled, deep or multi-part OpenEXR (only plain scanline images read here)", false;
+  struct Channel {
+    std::string name;
+    int32_t type = 0;  // 0 uint, 1 half, 2 float
+  };
+  std::vector<Channel> channels;
+  int compression = -1;
+  int32_t box[4] = {0, 0, -1, -1};
+  for (;;) {
+    std::string name, type;
+    if (!exr_cstr(d, n, at, name)) return error = "a broken OpenEXR header", false;
+    if (name.empty()) break;
+    int32_t size = 0;
+    if (!exr_cstr(d, n, at, type) || !exr_read(d, n, at, size) || size < 0 || at + (size_t)size > n) return error = "a broken OpenEXR header", false;
+    const size_t end = at + (size_t)size;
+    if (name == "channels" && type == "chlist") {
+      while (at < end && d[at]) {
+        Channel c;
+        int32_t sx = 1, sy = 1;
+        uint8_t skip[4];
+        if (!exr_cstr(d, end, at, c.name) || !exr_read(d, end, at, c.type) || !exr_read(d, end, at, skip) || !exr_read(d, end, at, sx) ||
+            !exr_read(d, end, at, sy))
+          return error = "a broken OpenEXR channel list", false;
+        if (sx != 1 || sy != 1 || c.type < 0 || c.type > 2) return error = "an OpenEXR with subsampled or unknown channels", false;
+        channels.push_back(c);
+      }
+    }
+    else if (name == "compression" && size >= 1) compression = d[at];
+    else if (name == "dataWindow" && size >= 16) std::memcpy(box, d + at, 16);
+    at = end;
+  }
+  if (compression != 0) return error = strprintf("a compressed OpenEXR (compression %d): without Blender's libraries only uncompressed ones read", compression), false;
+  const int64_t w = (int64_t)box[2] - box[0] + 1, h = (int64_t)box[3] - box[1] + 1;
+  if (channels.empty() || w <= 0 || h <= 0 || w > 65536 || h > 65536) return error = "an OpenEXR without channels or pixels", false;
+  if (channels.size() > 64) return error = "an OpenEXR with too many channels", false;
+  size_t row = 0;
+  for (const Channel &c : channels) row += (size_t)w * (c.type == 1 ? 2 : 4);
+  at += (size_t)h * 8;  // (the line offsets: uncompressed lines follow in order)
+  /* Every line there before anything is allocated (a short file can't claim a huge image). */
+  if (at > n || (n - at) / (8 + row) < (size_t)h) return error = "a truncated OpenEXR", false;
+  out = Bitmap();
+  out.width = (int)w;
+  out.height = (int)h;
+  out.is_float = true;
+  out.rgbaf.assign((size_t)w * h * 4, 0.0f);
+  for (size_t i = 3; i < out.rgbaf.size(); i += 4) out.rgbaf[i] = 1.0f;
+  auto slot = [](const std::string &name) {
+    const size_t dot = name.rfind('.');
+    const std::string last = dot == std::string::npos ? name : name.substr(dot + 1);
+    return last == "R" ? 0 : last == "G" ? 1 : last == "B" ? 2 : last == "A" ? 3 : -1;
+  };
+  for (int64_t line = 0; line < h; line++) {
+    int32_t y = 0, size = 0;
+    if (!exr_read(d, n, at, y) || !exr_read(d, n, at, size) || (size_t)size != row || at + row > n) return error = "a truncated OpenEXR", false;
+    const int64_t py = (int64_t)y - box[1];
+    if (py < 0 || py >= h) return error = "an OpenEXR line outside its image", false;
+    for (const Channel &c : channels) {
+      const int k = slot(c.name);
+      for (int64_t x = 0; x < w; x++) {
+        float v = 0.0f;
+        if (c.type == 1) {
+          uint16_t hv;
+          std::memcpy(&hv, d + at, 2);
+          v = half_to_float(hv);
+          at += 2;
+        }
+        else if (c.type == 2) {
+          std::memcpy(&v, d + at, 4);
+          at += 4;
+        }
+        else {
+          uint32_t u;
+          std::memcpy(&u, d + at, 4);
+          v = (float)u;
+          at += 4;
+        }
+        if (k >= 0) out.rgbaf[((size_t)py * w + x) * 4 + k] = v;
+      }
+    }
+  }
+  return true;
+}
+
+bool write_pfm(const std::string &path, const float *rgb, int width, int height) {
+  if (width <= 0 || height <= 0) return false;
+  std::string data = strprintf("PF\n%d %d\n-1.0\n", width, height);  // (-1: little-endian)
+  const size_t head = data.size(), line = (size_t)width * 3 * sizeof(float);
+  data.resize(head + line * height);
+  for (int y = 0; y < height; y++)  // (PFM's rows run bottom to top)
+    std::memcpy(&data[head + line * (height - 1 - y)], rgb + (size_t)y * width * 3, line);
+  return fs::write_file(path, data);
 }
 
 bool load_image(const std::string &path, Bitmap &out, std::string &error) {

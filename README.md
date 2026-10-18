@@ -125,14 +125,17 @@ everything):
 
 - **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
 - **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull**, Booleans, snapping.
-- **Modeling & Topology** - Blender's Edit Mode (extrude, inset, bevel, loop cut, bridge, knife, n-gons, F9), a
+- **Modeling & Topology** - Blender's Edit Mode (extrude, inset, bevel, loop cut, bridge, knife, n-gons, F9; a
+  50k-face mesh enters it in about a frame, its overlapping-vertex check off the main thread), a
   modifier stack (Array, Bevel, Boolean, Mirror, Subdivision, Lattice, Curve, Mesh Deform...), curves and lattices
   edited with the same keys.
 - **UV Unwrapping** - a UV Editor with LSCM unwrap, Smart UV Project, projections and island packing.
 - **Texturing & Materials** - Principled materials and material assets, layered **procedural textures**, axis
   materials, toon shading, texture baking.
 - **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps, probe volumes and voxel realtime GI;
-  F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan); camera filters from colour
+  F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
+  optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
+  the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour
   grading to PlayStation and manga looks.
 - **Rigging**, and **Skinning & Weight Painting** - bones (drag their heads and tails, Extrude new ones), Blender/Maya-style
   **rig controls** (IK boxes and poles, FK circles, coloured by side), characters under one root as Unity imports them,
@@ -186,7 +189,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (10011 unit checks in 678 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (10692 unit checks in 761 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

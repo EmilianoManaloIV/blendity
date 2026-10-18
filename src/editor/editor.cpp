@@ -14,11 +14,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <ctime>
 #include <cctype>
 #include <cstdio>
 #include <functional>
 #include <sstream>
+#include <thread>
 
 namespace bl {
 
@@ -169,6 +171,7 @@ bool Editor::init(int argc, char **argv) {
   ui_.clipboard_set = [this](const std::string &s) { set_clipboard(window_, s); };
   set_refresh_callback(window_, [this] {
     std::vector<Event> none;
+    present_all_ = true;  // (the system asked for the window to be painted: all of it)
     frame(none);
   });
   if (!layout_arg.empty()) dock_reset(layout_arg);
@@ -186,6 +189,8 @@ bool Editor::init(int argc, char **argv) {
   Log::info("Welcome to Blendity %s - Blender's modeling core inside a Unity-style editor.", kVersion);
   if (update_check_ && std::time(nullptr) - update_last_check_ > 86400.0) start_update_check(false);  // (once a day, task 0079)
   check_libraries_at_start();  // (the dependency-free build: offer Blender's libraries, task 0080)
+  /* MoonRay (task 0112): offered on the first run, and a day after Not now; looking for it (WSL on Windows) only then. */
+  if (!headless_ && !mr_never_ask_ && !mr_installed_ && std::time(nullptr) - mr_last_ask_ >= 86400.0) mr_offer_pending_ = true;
   Log::info("New here? Open the Learn tab (F1).");
   Log::info("UI font: %s | worker threads: %d", ui_.font.source().c_str(), JobSystem::global().thread_count());
   return true;
@@ -220,6 +225,58 @@ double Editor::frame_wait_seconds(double now, double last_frame) const {
   return std::max(0.0, last_frame + 1.0 / (double)max_fps_ - now);
 }
 
+/* MurmurHash3's finaliser: every input bit reaches every output bit. */
+static uint64_t fmix64(uint64_t k) {
+  k ^= k >> 33, k *= 0xFF51AFD7ED558CCDull;
+  k ^= k >> 33, k *= 0xC4CEB9FE1A85EC53ull;
+  return k ^ (k >> 33);
+}
+
+/* A band of pixels' hash: four chains over 8-byte words (independent, so the multiplies overlap), each word rotated in
+ * so a change in its high bits isn't left in the top bits alone, then finalised and combined. */
+static uint64_t band_hash(const uint8_t *p, size_t n) {
+  uint64_t h[4] = {1, 2, 3, 4};
+  size_t i = 0;
+  for (; i + 32 <= n; i += 32)
+    for (int k = 0; k < 4; k++) {
+      uint64_t v;
+      std::memcpy(&v, p + i + 8 * k, 8);
+      const uint64_t x = h[k] ^ v;
+      h[k] = ((x << 27) | (x >> 37)) * 0x9E3779B97F4A7C15ull;
+    }
+  for (; i < n; i++) h[0] = (h[0] ^ p[i]) * 0x100000001B3ull;
+  return fmix64(h[0]) ^ fmix64(h[1] + 1) * 3 ^ fmix64(h[2] + 2) * 5 ^ fmix64(h[3] + 3) * 7 ^ n;
+}
+
+std::vector<std::pair<int, int>> Editor::changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all) {
+  constexpr int kBand = 16;
+  const int nb = (height + kBand - 1) / kBand;
+  std::vector<uint64_t> fresh((size_t)nb);
+  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+    for (int b = (int)b0; b < (int)b1; b++)
+      fresh[(size_t)b] = band_hash((const uint8_t *)(px + (size_t)b * kBand * width), (size_t)std::min(kBand, height - b * kBand) * width * 4);
+  });
+  all = all || bands.size() != fresh.size();
+  std::vector<std::pair<int, int>> runs;
+  for (int b = 0; b < nb; b++) {
+    if (!all && bands[(size_t)b] == fresh[(size_t)b]) continue;
+    const int y0 = b * kBand, y1 = std::min(height, y0 + kBand);
+    if (!runs.empty() && runs.back().second == y0) runs.back().second = y1;
+    else runs.emplace_back(y0, y1);
+  }
+  bands.swap(fresh);
+  return runs;
+}
+
+void Editor::present_changed() {
+  const bool all = present_all_ || fb_.width != present_w_ || fb_.height != present_h_;
+  present_w_ = fb_.width, present_h_ = fb_.height;
+  const std::vector<std::pair<int, int>> runs = changed_rows(fb_.pixels.data(), fb_.width, fb_.height, present_bands_, all);
+  present_all_ = false;
+  if (all) return present(window_, fb_.pixels.data(), fb_.width, fb_.height);
+  present_rows(window_, fb_.pixels.data(), fb_.width, fb_.height, runs);
+}
+
 int Editor::run() {
   std::vector<Event> events, more;
   double last_frame = 0;
@@ -229,7 +286,7 @@ int Editor::run() {
     double now = now_seconds();
     const bool continuous = always_redraw_ || wants_continuous_redraw();
     int timeout = 1000;
-    if (continuous) timeout = (int)std::ceil(frame_wait_seconds(now, last_frame) * 1000.0);
+    if (continuous) timeout = 0;  // (the pacer below waits for the frame's turn, precisely)
     else if (ui_.next_wakeup > 0) timeout = std::max(1, (int)((ui_.next_wakeup - now) * 1000.0) + 1);
     if (ui_.redraw || first) timeout = 0;
     poll_events(window_, events, timeout);
@@ -240,13 +297,16 @@ int Editor::run() {
     if (Log::fetch(log_seen_ + log_.size(), tmp) > log_seen_ + log_.size()) need = true;
     if (!need) continue;
     /* The cap holds for input too: mouse moves arriving sooner are gathered
-     * into the next frame instead of each drawing one. */
-    for (double wait = first ? 0.0 : frame_wait_seconds(now, last_frame); wait > 0.0005; wait = frame_wait_seconds(now, last_frame)) {
-      more.clear();
-      poll_events(window_, more, std::max(1, (int)(wait * 1000.0)));
-      events.insert(events.end(), more.begin(), more.end());
-      now = now_seconds();
-    }
+     * into the next frame instead of each drawing one. The pacer (task 0084) keeps the waits from
+     * oversleeping the frame's turn by a timer tick. */
+    if (!first && max_fps_ > 0)
+      pacer_.wait_until(now + frame_wait_seconds(now, last_frame), now_seconds, [&](double s) {
+        more.clear();
+        poll_events_for(window_, more, s);
+        events.insert(events.end(), more.begin(), more.end());
+        if (s <= 0.0) std::this_thread::yield();
+      });
+    now = now_seconds();
     first = false;
     last_frame = now;
     frame(events);
@@ -377,6 +437,9 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
+  /* The system asked for the window to be painted, or it changed: present all of it (what it showed may be gone). */
+  for (const Event &e : events)
+    if (e.type == EventType::Repaint || e.type == EventType::Resize || e.type == EventType::DpiChanged) present_all_ = true;
   double now = now_seconds();
   ScopedTimer frame_timer;
   /* Frames in the last second: the measured rate (Preferences > Performance). */
@@ -439,6 +502,7 @@ void Editor::frame(std::vector<Event> &events) {
   step_render_sequence();
   step_render_animation();
   poll_updates();
+  poll_moonray();
   step_bake();
 
   /* Pull new console lines. */
@@ -563,13 +627,19 @@ void Editor::frame(std::vector<Event> &events) {
     last_title_ = title;
   }
   ui_ms_ = (float)frame_timer.ms();
-  if (window_) present(window_, fb_.pixels.data(), fb_.width, fb_.height);
+  if (window_) present_changed();
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
+  /* A move just ended (task 0103 / 0104): one more frame, whatever ends it, so no held or cheap picture stays up. */
+  if (was_moving_ && !scene_moving()) ui_.redraw = true;
+  was_moving_ = scene_moving();
   prof_.ms_present = frame_ms_ - ui_ms_;
   prof_.ms_ui = std::max(0.0, ui_ms_ - prof_.ms_scene3d - prof_.ms_game - prof_.ms_preview);
   prof_last_ = prof_;
   prof_total_.add(prof_);
+  const MeshCounts mc = mesh_counts();
+  mesh_last_ = mc - mesh_seen_;
+  mesh_seen_ = mc;
   prof_ = FrameProfile{};
   frame_history_.push_back(frame_ms_);
   if (frame_history_.size() > 240) frame_history_.erase(frame_history_.begin());
@@ -1557,8 +1627,21 @@ void Editor::mark_changed(const std::string &label) {
   pending_label_ = label;
 }
 
+/* The interaction is over: tangents that followed it the quick way - an Edit Mode drag, an origin moved, any
+ * positions-only change - are made with MikkTSpace again (ADR 0034), so a bake or a render never depends on how the
+ * mesh got its shape. Only the caches change (not `version`): the views draw it again. */
+void Editor::settle_meshes() {
+  bool any = false;
+  scene_->for_each([&](GameObject &g) {
+    const MeshFilter *mf = g.mesh_filter();
+    if (mf && mf->mesh && mf->mesh->settle()) any = true;
+  });
+  if (any) ui_.redraw = true;
+}
+
 void Editor::commit_undo() {
   if (!pending_change_) return;
+  settle_meshes();
   if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
   s.scene = std::move(stable_);
@@ -2966,6 +3049,25 @@ struct SetFieldReflector : Reflector {
 };
 }  // namespace
 
+/* views follow on|off (task 0103): the Game view and Camera Preview follow drags as they happen, or catch up on release.
+ * views simpler on|off (task 0104): the CPU views' shadows cheaper while you move, exact when you stop. No value: the
+ * other way round; anything but "on" is off. */
+void Editor::views_command(const std::string &what, const std::string &value) {
+  if (what == "simpler") {  // views simpler on|off (task 0104): the CPU views' shadows cheaper while you interact, exact when you stop
+    simpler_while_moving_ = value.empty() ? !simpler_while_moving_ : value == "on";
+    save_prefs();
+    Log::info("Simpler while moving: %s", simpler_while_moving_ ? "on" : "off");
+    return;
+  }
+  if (what != "follow") {
+    Log::warn("views follow|simpler on|off");
+    return;
+  }
+  other_views_follow_ = value.empty() ? !other_views_follow_ : value == "on";
+  save_prefs();
+  Log::info("Other views follow drags: %s", other_views_follow_ ? "on" : "off (they catch up on release)");
+}
+
 bool Editor::set_field_command(const std::string &path, const std::string &value) {
   size_t dot = path.find('.');
   if (dot == std::string::npos) {
@@ -3099,6 +3201,7 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (c == "update") return update_command(t);  // update check | history | install <tag> | auto on|off | previews on|off (task 0079)
+  if (c == "moonray") return moonray_command(t);  // moonray status | install [archive] | remove | folder [path] | check (task 0112)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
     if (t.size() < 2) return Log::info("Editor feel: %s (feel unity|unreal|blender|maya)", kEditorFeels[(int)nav_style_]);
@@ -3299,7 +3402,7 @@ void Editor::run_console_command(const std::string &line) {
     else if (s == "merge") overlap_merge();
     else if (s == "show") overlap_show_ = to_lower(arg(2, "on")) != "off";
     else {
-      overlap_refresh();
+      overlap_refresh(true);
       Log::info("%zu overlapping vertex pair(s), %zu overlapping edge pair(s)", overlap_.verts.size(), overlap_.edges.size());
     }
   }
@@ -3345,6 +3448,30 @@ void Editor::run_console_command(const std::string &line) {
     else if (s == "rect" || s == "rectangle") draw_rect_mode_ = v == "center" ? 1 : v == "3point" ? 2 : 0;
     else if (s == "circle" || s == "polygon") draw_circle_mode_ = v == "2point" ? 1 : v == "3point" ? 2 : 0;
     else Log::warn("drawmode rect <corner|center|3point> | circle <center|2point|3point> | square <on|off>");
+  }
+  else if (c == "raster" && t.size() >= 3) {
+    /* raster simd|uniform on|off: the shader's 8-wide path (task 0091) and plain materials once per triangle (0088) */
+    const bool on = to_lower(t[2]) != "off";
+    const std::string what = to_lower(t[1]);
+    if (what == "simd") raster_opt_.simd_shading = on;
+    else if (what == "uniform") raster_opt_.uniform_shading = on;
+    else Log::warn("raster simd|uniform on|off");
+    ui_.redraw = true;
+  }
+  else if (c == "views" || (c == "viewport" && to_lower(arg(1, "")) == "device")) {
+    /* views follow|simpler on|off (tasks 0103, 0104): in this branch, not one of its own (MSVC's nesting limit) */
+    if (c == "views") {
+      views_command(to_lower(arg(1, "")), to_lower(arg(2, "")));
+      return;
+    }
+    /* viewport device auto|cpu|gpu (task 0096): where the views' 3D is drawn */
+    const std::string d = to_lower(arg(2, "auto"));
+    if (d != "auto" && d != "cpu" && d != "gpu") Log::warn("viewport device auto|cpu|gpu (not '%s')", d.c_str());
+    else {
+      set_viewport_device(d == "cpu" ? 1 : d == "gpu" ? 2 : 0);
+      save_prefs();
+      Log::info("Viewport Device: %s", d == "cpu" ? "CPU" : d == "gpu" ? "GPU" : "Auto");
+    }
   }
   else if (c == "fps") {
     /* fps <n | 0 / unlimited>: the editor's frame rate cap */
@@ -3692,7 +3819,8 @@ void Editor::run_console_command(const std::string &line) {
     mark_changed("World");
   }
   else if (c == "engine") {
-    scene_->render.engine = to_lower(arg(1, "raster")).rfind("path", 0) == 0 ? 1 : 0;
+    const std::string e = to_lower(arg(1, "raster"));  // raster | path | moonray (task 0114)
+    scene_->render.engine = e.rfind("path", 0) == 0 ? 1 : e.rfind("moon", 0) == 0 ? 2 : 0;
     mark_changed("Render Engine");
   }
   else if (c == "samples") {
@@ -3994,7 +4122,8 @@ void Editor::draw_dialogs() {
   }
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
-  const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries;
+  const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
+                    dialog_ == Dialog::MoonRay;
   int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
@@ -4100,6 +4229,10 @@ void Editor::draw_dialogs() {
         title("Welcome: Blendity starts on Low here");
         draw_first_run_tier(close);
         break;
+      case Dialog::MoonRay:
+        title("MoonRay, an optional render engine");
+        draw_moonray_dialog(close);
+        break;
       case Dialog::About: {
         title("About Blendity");
         const char *lines[] = {"Blendity - a Unity-style editor built on Blender's modeling ideas.",
@@ -4150,6 +4283,7 @@ void Editor::draw_dialogs() {
         u.label({ru.x + u.px(320) + ru.h, ru.y, u.px(200), ru.h}, "Include every PR's build");
         u.tooltip("Off: only released versions (v0.10.0...). On: also preview builds of single pull requests, when published.");
         draw_libraries_settings();
+        draw_moonray_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
         Recti b = u.popup_row(u.row_h() + u.px(10));
@@ -4185,6 +4319,7 @@ void Editor::load_prefs() {
     if (eq == std::string::npos) continue;
     std::string k = line.substr(0, eq), v = line.substr(eq + 1);
     if (!v.empty() && v.back() == '\r') v.pop_back();
+    if (moonray_pref(k, v)) continue;
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
@@ -4206,6 +4341,9 @@ void Editor::load_prefs() {
     else if (k == "blender_transform_keys") blender_keys_ = v == "1";
     else if (k == "pivot_center") pivot_center_ = v == "1";
     else if (k == "max_fps") max_fps_ = std::max(0, std::min(1000, std::atoi(v.c_str()))), had_fps = true;
+    else if (k == "viewport_device") set_viewport_device(std::atoi(v.c_str()));
+    else if (k == "other_views_follow") other_views_follow_ = v == "1";
+    else if (k == "simpler_while_moving") simpler_while_moving_ = v == "1";
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
     else if (k == "workspace") workspace_ = v;
@@ -4283,9 +4421,13 @@ void Editor::save_prefs() {
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\n", viewport_device_, other_views_follow_ ? 1 : 0,
+                 simpler_while_moving_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
   s += strprintf("use_libs=%d\nlibs_never_ask=%d\nlibs_last=%.0f\n", use_libs_ ? 1 : 0, libs_never_ask_ ? 1 : 0, libs_last_check_);
+  s += strprintf("moonray_never_ask=%d\nmoonray_last=%.0f\nmoonray_folder=%s\nmoonray_installed=%d\n", mr_never_ask_ ? 1 : 0, mr_last_ask_,
+                 mr_folder_.c_str(), mr_installed_ ? 1 : 0);
   for (const UserLayout &l : user_layouts_) s += "user_layout=" + l.name + ";" + std::to_string(l.ws.focus) + ";" + l.dock + "\n";
   fs::write_file(prefs_path_, s);
 }

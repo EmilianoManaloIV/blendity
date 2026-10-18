@@ -63,6 +63,10 @@ void Editor::poll_updates() {
   const auto newer = releases::newer(upd_.list, releases::build_tag(), releases::platform(), update_previews_);
   upd_.offer = newer.empty() ? "" : newer.front()->tag;
   if (dialog_ == Dialog::History) return;  // (Version History was waiting for the list: it shows it now)
+  if (upd_.want_moonray) {  // (task 0112: the MoonRay question, asked through the same check)
+    upd_.want_moonray = false;
+    if (offer_moonray()) return;  // (an update is offered by the next check: one question at a time)
+  }
   const bool libs_shown = upd_.want_libs && offer_libraries();
   if (libs_shown || !updates) return;  // (a libraries-only check never offers an update the user turned off)
   if (upd_.offer.empty()) {
@@ -220,9 +224,11 @@ void Editor::install_release(const std::string &tag) {
 
 /* `a` downloaded and checked against the release's SHA256SUMS.txt in the background; then installed, or unpacked as
  * the libraries (`libraries`), by poll_update_download. */
-void Editor::download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries) {
+void Editor::download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray) {
   auto job = std::make_shared<UpdateDownload>();
   job->libraries = libraries;
+  job->moonray = moonray;
+  job->mr = mr_;
   job->file = net::safe_file_name(a.name);
   if (job->file.empty()) return Log::warn("Updates: '%s' isn't a plain file name: not downloaded", a.name.c_str());
   job->path = fs::join(net::downloads_dir(), job->file);
@@ -258,6 +264,14 @@ void Editor::poll_update_download() {
   if (job->libraries) {
     Log::info("Libraries: installed in %s; starting Blendity again with them", launch::user_libs_dir().c_str());
     return restart_program();
+  }
+  if (job->moonray) {  // (task 0112: unpacked and its test scene rendered on the downloading thread)
+    mr_ = job->mr;
+    mr_located_ = true;
+    mr_installed_ = true;
+    save_prefs();
+    if (dialog_ == Dialog::MoonRay) dialog_ = Dialog::None;
+    return Log::info("MoonRay %s is installed: Render Settings > Render Engine > MoonRay", mr_.version.c_str());
   }
   run_installer(job->path);
 }
@@ -359,6 +373,7 @@ void Editor::draw_libraries_dialog(const std::function<void()> &close) {
  * unpacked into ~/.blendity/libs/<build> and checked to load; an AppImage copied beside the running one. */
 bool Editor::prepare_install(UpdateDownload &job, std::string &error) {
   if (job.libraries) return unpack_libraries(job.path, error);
+  if (job.moonray) return moonray::unpack(job.mr, job.path, error);
 #if !defined(_WIN32) && !defined(__APPLE__)
   const char *appimage = std::getenv("APPIMAGE");
   if (!appimage || !*appimage) return true;

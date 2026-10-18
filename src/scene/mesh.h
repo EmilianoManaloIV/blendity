@@ -100,24 +100,149 @@ struct Mesh {
   size_t memory_bytes() const;
 
   /* Triangulated, render-ready cache. Rebuilt lazily when `version` changes.
-   * Vertices are split where normals or UVs differ (like a Unity mesh). */
+   * Vertices are split where normals or UVs differ (like a Unity mesh). When only the positions changed since it
+   * was built - an Edit Mode drag, a deforming modifier - it follows them in place instead (ADR 0034): the same
+   * triangles and the same picture as a rebuild, without the cost. */
   const RenderMesh &render_mesh(bool force_flat = false) const;
   /* Same, plus MikkTSpace tangents for normal mapping (blender/intern/mikktspace). */
   const RenderMesh &render_mesh_tangents(bool force_flat = false) const;
   /* Unique edges, cached per version (wireframe & edit-mode overlays). */
   const std::vector<std::pair<uint32_t, uint32_t>> &edge_cache() const;
+  /* The faces at each vertex, in face order (faces[offsets[v]] to faces[offsets[v + 1]], a face listed once per
+   * corner on the vertex), kept per topology: what a drag looks edges up in every frame (task 0087). Like the other
+   * caches, for the main thread: not safe to call from jobs while the mesh changes. */
+  struct VertexFaces {
+    std::vector<uint32_t> offsets, faces;
+  };
+  const VertexFaces &vertex_faces() const;
   void touch() { version++; }
+  /* After a drag (ADR 0034): tangents that followed it the quick way (Lengyel's, while the render mesh moved in
+   * place) are made again with MikkTSpace on the next read, as a rebuild would. Changes how the mesh is drawn, not
+   * what it is: `version` stays (an F9 adjustment and modifier caches still hold), `looks` moves (the views redraw).
+   * True when there was something to settle. */
+  bool settle() const;
+  /* Whether a render mesh's tangents are the quick ones (settle() redoes them). */
+  bool tangents_approximate() const { return cache_approx_[0] || cache_approx_[1]; }
+  /* Drops the render and edge caches: the next render_mesh() builds from scratch (tests compare the two). */
+  void forget_caches() const;
   uint64_t version = 1;
+  /* An id of its own: a copy gets a new one (task 0088: a render cache's `shape` is this mesh at this version). */
+  struct Uid {
+    uint64_t v = next();
+    Uid() = default;
+    Uid(const Uid &) noexcept : v(next()) {}
+    Uid &operator=(const Uid &) noexcept {
+      v = next();
+      return *this;
+    }
+    static uint64_t next() noexcept;
+  };
+  Uid uid;
+  /* Bumped by settle(): the same mesh, drawn a little differently (the views' scene hash mixes it in). */
+  mutable uint64_t looks = 0;
   /* Bumped instead of `version` when only the positions changed (a deforming modifier, ADR 0022): the
    * render mesh then moves its vertices in place rather than being rebuilt. Code that caches positions
    * on `version` alone must check this too. */
   uint64_t deform_version = 0;
+  /* Changes whenever what the render and edge caches are built from besides positions changes (ADR 0034): faces,
+   * UVs, materials, smoothing, seams and sharp edges. Caches elsewhere key on it too (the GPU cage's edge colours). */
+  uint64_t topology_serial() const;
 
  private:
-  /* Per-corner shading normals (flat, smooth, smooth by angle, sharp edges): what render_mesh splits by. */
-  void corner_normals(bool flat, std::vector<Vec3> &out) const;
-  /* The render mesh follows a deform: false when the split pattern no longer holds (a full build then). */
-  bool deform_in_place(int ci, bool flat) const;
+  /* Task 0099: what corner_normals last worked out for a render cache (from the positions that cache drew), so an
+   * in-place update works out again only what a drag moved. */
+  struct NormalState {
+    uint64_t topo = 0;
+    bool flat = false, valid = false;
+    std::vector<Vec3> fnormal, fweighted, cnormal;  // per face; per face (smooth only); per corner
+    std::vector<uint32_t> vfirst;                   // per vertex: the render vertex of its first corner
+    /* A copy starts empty (a mesh copied for an edit doesn't carry it, nor pay for it): its first in-place frame
+     * works the whole mesh out again and keeps it from there. */
+    NormalState() = default;
+    NormalState(const NormalState &) {}
+    NormalState &operator=(const NormalState &) {
+      reset();
+      return *this;
+    }
+    void reset() {
+      topo = 0;
+      flat = valid = false;
+      std::vector<Vec3>().swap(fnormal), std::vector<Vec3>().swap(fweighted), std::vector<Vec3>().swap(cnormal);
+      std::vector<uint32_t>().swap(vfirst);
+    }
+    bool fits(uint64_t topology, bool is_flat, size_t faces, size_t corners) const {
+      return valid && topo == topology && flat == is_flat && fnormal.size() == faces && cnormal.size() == corners &&
+             (is_flat || fweighted.size() == faces);
+    }
+    size_t bytes() const {
+      return (fnormal.capacity() + fweighted.capacity() + cnormal.capacity()) * sizeof(Vec3) + vfirst.capacity() * 4;
+    }
+  };
+  /* Per-corner shading normals (flat, smooth, smooth by angle, sharp edges): what render_mesh splits by. `keep`
+   * receives the faces' normals and the result, for corner_normals_moved. */
+  void corner_normals(bool flat, std::vector<Vec3> &out, NormalState *keep = nullptr) const;
+  /* The same after only `faces` (ascending) moved: their normals and the corners at their vertices are worked out
+   * again, each sum in corner_normals' order, so the result is the same to the bit. `verts` receives those vertices.
+   * False when `st` isn't from this topology and shading, or too much moved (the caller then does the whole mesh). */
+  bool corner_normals_moved(NormalState &st, bool flat, const std::vector<uint32_t> &faces, std::vector<uint32_t> &verts) const;
+  Vec3 face_weighted(size_t f) const;  // the face's area-weighted normal (Newell), as corner_normals sums it
+  void build_vertex_sides() const;
+  /* The faces with a vertex whose position differs from the one cache ci drew, ascending. */
+  void moved_faces(int ci, std::vector<uint32_t> &faces) const;
+  /* Positions and corner normals into cache ci's render vertices: every corner, or only those at `verts`. The changed
+   * render vertices are added to `changed`; false when a render vertex's corners now differ (the build would split). */
+  bool write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed) const;
+  bool write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const;
+  void record_moved(RenderMesh &rm, std::vector<uint32_t> &changed, const std::vector<uint32_t> &faces) const;
+  /* A full build's render vertices and triangles (corner_rv: each corner's render vertex): on every thread (task 0109),
+   * or the serial build before it (the tests compare). */
+  void build_render_vertices(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;
+  void render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;
+  /* corner_normals' three smooth modes for the corners `at` one vertex (corner, face), into st.cnormal. */
+  using CornerFaces = std::vector<std::pair<uint32_t, uint32_t>>;
+  void smooth_fans_at(NormalState &st, uint32_t v, const CornerFaces &at, float cos_limit, std::vector<uint32_t> &parent,
+                      std::vector<Vec3> &sum) const;
+  void smooth_vertex_at(NormalState &st, const CornerFaces &at) const;
+  void smooth_by_angle_at(NormalState &st, const VertexFaces &vf, uint32_t v, const CornerFaces &at) const;
+  /* The render mesh follows new positions (a deform, or an edit that moved vertices only): positions, normals and
+   * the triangulation of quads and n-gons rewritten in place. False when the split pattern no longer holds (a full
+   * build then). */
+  bool update_in_place(int ci, bool flat) const;
+  /* What the render and edge caches were built from besides positions (ADR 0034): when a new `version` has the
+   * same, they can follow in place. `topology_serial()` changes whenever this does. */
+  struct Topology {
+    size_t verts = 0;
+    std::vector<uint32_t> face_offsets, corner_verts;
+    std::vector<Vec2> uvs;
+    std::vector<int32_t> face_material;
+    std::vector<uint8_t> face_smooth;
+    std::vector<uint64_t> seams, sharp_edges, loose_edges;
+    bool smooth = false, seams_sharp = false;
+    float smooth_angle = 180.0f;
+  };
+  void build_edge_sides() const;
+  /* `moved`: per face, whether any of its vertices moved (null: all of them); the others keep their triangles. */
+  bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint8_t> *moved) const;
+  mutable Topology topo_;
+  mutable uint64_t topo_version_ = 0, topo_serial_ = 0;
+  /* The manifold edges' two sides, for smooth fans (corner_normals): built once per topology, not every call. */
+  struct EdgeSides {
+    uint32_t sf, sca, scb, tf, tca, tcb;
+    bool hard;  // marked sharp, or a seam when seams are sharp, or a face beside it shaded flat
+  };
+  mutable std::vector<EdgeSides> sides_;
+  mutable uint64_t sides_topo_ = 0;
+  mutable std::vector<uint32_t> vside_off_, vside_;  // sides_ at each vertex (CSR), per topology (task 0099)
+  mutable uint64_t vside_topo_ = 0;
+  mutable NormalState nstate_[2];
+  /* Where each face's triangles start in a build (n - 2 per face, in face order), and whether any face has more than
+   * three corners: per topology, for retriangulate(). */
+  mutable VertexFaces vf_;
+  mutable uint64_t vf_topo_ = 0;
+  mutable std::vector<uint32_t> tri_start_;
+  mutable bool tri_big_ = false;
+  mutable uint64_t tri_topo_ = 0;
+  mutable uint64_t edges_topo_ = 0;
   mutable std::vector<std::pair<uint32_t, uint32_t>> edges_;
   mutable uint64_t edges_version_ = 0;
   /* One cache per variant (0 = as shaded, 1 = forced flat for Edit Mode) so a
@@ -126,17 +251,37 @@ struct Mesh {
   mutable uint64_t cache_version_[2] = {0, 0};
   mutable bool cache_tangents_[2] = {false, false};
   mutable uint64_t cache_deform_[2] = {0, 0};
+  mutable uint64_t cache_topo_[2] = {0, 0};
+  mutable bool cache_flat_[2] = {false, false};
+  mutable bool cache_approx_[2] = {false, false};  // tangents made the quick way while following a drag
   mutable std::vector<uint32_t> corner_rv_[2];  // each corner's render vertex in cache_[i]
 };
 
 using MeshPtr = std::shared_ptr<Mesh>;
 
+/* What the meshes' caches cost, process-wide - every thread and every editor (task 0083: the Profiler, the stress
+ * suite and tests read it): how
+ * often a mesh was copied for an edit, its render mesh built from scratch or moved in place, its tangents and
+ * its edge table built, and the milliseconds each took. Subtract two readings for what happened in between. */
+struct MeshCounts {
+  uint64_t copies = 0, full_builds = 0, in_place = 0, tangent_builds = 0, edge_builds = 0;
+  uint64_t partial_normals = 0;  // task 0099: in-place moves whose normals were worked out only around what moved
+  double ms_copies = 0, ms_full_builds = 0, ms_in_place = 0, ms_tangents = 0, ms_edges = 0;
+  MeshCounts operator-(const MeshCounts &o) const;
+};
+MeshCounts mesh_counts();
+
 /* Copy-on-write: returns a uniquely owned mesh, cloning if shared. This is
  * Blender's implicit sharing (blender/source/blender/blenlib/BLI_implicit_sharing.hh)
  * and is what makes undo snapshots cheap. */
 MeshPtr &mesh_make_mutable(MeshPtr &m);
+/* A new copy of `m` (counted in MeshCounts::copies, as mesh_make_mutable's are). */
+MeshPtr mesh_copy(const Mesh &m);
 
 /* ------------------------------------------------------------- Primitives */
+/* Tests: render meshes built the way before task 0109 (one thread), to compare the threaded build with. */
+void mesh_serial_build_for_test(bool on);
+
 /* Equivalent to blender/source/blender/bmesh/operators/bmo_primitive.cc and
  * Unity's GameObject > 3D Object menu. All are sized like Unity primitives. */
 namespace primitives {
@@ -475,6 +620,30 @@ std::vector<ZFightPair> zfight_pairs(const Mesh &m, float plane_dist = 0.0f, con
  * length (doubled edges, or one running along another). eps <= 0: 1e-5 of the mesh's size. */
 std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices(const Mesh &m, float eps = 0.0f);
 std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges(const Mesh &m, float eps = 0.0f);
+/* The same pairs, sorted, by the checks before task 0108 (a map of cells, one thread): kept for the tests that compare. */
+std::vector<std::pair<uint32_t, uint32_t>> overlapping_vertices_reference(const Mesh &m, float eps = 0.0f);
+std::vector<std::pair<uint64_t, uint64_t>> overlapping_edges_reference(const Mesh &m, float eps = 0.0f);
+/* Task 0108: a full overlap check's cells and result, kept so a later check after positions alone moved (a drag) re-tests
+ * only the pairs of what moved. Both lists of pairs sorted. */
+struct OverlapIndex {
+  bool valid = false;
+  float eps = 0.0f, cs = 0.0f, bs = 0.0f;               // the vertex cell size, the reference's edge cell size, egrid's
+  uint64_t topo = 0;                                    // the topology it was checked at
+  std::vector<Vec3> positions;                          // as checked
+  std::vector<std::pair<uint64_t, uint32_t>> vgrid;     // (cell, vertex), sorted
+  std::vector<uint64_t> edges;                          // the edge keys, sorted, unique
+  std::vector<std::pair<uint64_t, uint32_t>> egrid;     // (cell, edge index), sorted
+  std::vector<std::pair<uint32_t, uint32_t>> verts;     // overlapping vertices (u < v)
+  std::vector<std::pair<uint64_t, uint64_t>> edge_pairs;  // overlapping edges (the lower key first)
+  size_t retested = 0;                                  // the last local check's moved vertices
+};
+float overlap_eps(const Mesh &m, float eps);  // eps <= 0: 1e-5 of the mesh's size
+void overlap_check(const Mesh &m, float eps, OverlapIndex &out);
+void overlap_check_parts(const Mesh &m, float eps, OverlapIndex &out, bool vertices, bool edges);
+/* After positions alone moved since `idx` (the same topology and eps): the moved vertices' pairs and those of the edges
+ * at them tested again, the rest kept. False (idx untouched) when it can't - another topology or eps, or more than
+ * max_moved vertices moved: a full check then. */
+bool overlap_check_local(const Mesh &m, float eps, OverlapIndex &idx, size_t max_moved);
 /* The face's area-weighted centre (Plasticity's face centre snap), not the average of its corners. */
 Vec3 face_area_center(const Mesh &m, size_t f);
 /* A closed shape drawn across several coplanar faces: cut into all of them. inner_faces gets the

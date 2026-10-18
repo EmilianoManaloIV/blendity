@@ -175,6 +175,16 @@ Vec3 display_rgb(int view, Vec3 c) {
   return c000 + (at(1, 1, 0) - at(0, 1, 0)) * fr + (at(0, 1, 0) - c000) * fg + (c111 - at(1, 1, 0)) * fb;
 }
 
+bool view_lut(int view, const std::vector<Vec3> *&data, int &size, float &log_min, float &log_max) {
+  const ViewLut *L = lut(view);
+  if (!L || L->data.size() != (size_t)kLutSize * kLutSize * kLutSize) return false;
+  data = &L->data;
+  size = kLutSize;
+  log_min = kLogMin;
+  log_max = kLogMax;
+  return true;
+}
+
 uint32_t display_pixel(int view, Vec3 c) {
   Vec3 d = display_rgb(view, c);
   auto q = [](float v) {

@@ -41,6 +41,11 @@ bool write_hdr(const std::string &path, const float *rgb, int width, int height)
 /* alpha (optional, one float a pixel): an RGBA EXR (a transparent render, task 0035). */
 bool write_exr(const std::string &path, const float *rgb, int width, int height, bool half = true, const float *alpha = nullptr);
 bool exr_available();
+/* Task 0114: an uncompressed scanline OpenEXR (half, float or uint channels; R G B and A, by their names' last part),
+ * read without Blender's libraries - what MoonRay writes for Blendity. Float RGBA out (A 1 when absent). */
+bool decode_exr_plain(const std::string &bytes, Bitmap &out, std::string &error);
+/* Linear float RGB (3 floats per pixel, top row first) as a Portable Float Map (MoonRay's world maps). */
+bool write_pfm(const std::string &path, const float *rgb, int width, int height);
 /* Use libjpeg-turbo / libpng for decoding when built with them (default on);
  * off = Blendity's own decoders (stress tests compare both). */
 void set_image_library_codecs(bool on);

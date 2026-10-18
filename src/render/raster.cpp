@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstring>
 
+/* The AVX2 kernels here are "avx2" without "fma" on purpose: the 8-wide shader matches the scalar one to the bit only
+ * while neither contracts a * b + c (a build with -mfma / -march=native would; ADR 0035). */
 #if defined(_M_X64) || defined(__x86_64__)
 #  define BL_RASTER_X86 1
 #  include <immintrin.h>
@@ -35,10 +37,11 @@ void RenderTarget::attach(Image &img, const Recti &r) {
   resize_planes();
 }
 
-void RenderTarget::resize_planes() {
+void RenderTarget::resize_planes(bool with_ids) {
   size_t n = (size_t)std::max(0, width) * std::max(0, height);
   if (depth.size() != n) depth.resize(n);
-  if (ids.size() != n) ids.resize(n);
+  if (!with_ids) ids = {};  // (and its memory: a thread's shadow target keeps none)
+  else if (ids.size() != n) ids.resize(n);
   if (!vis.empty() && vis.size() != n) vis.clear();  // only deferred shading needs it: begin() sizes it then
 }
 
@@ -47,7 +50,7 @@ void RenderTarget::make_depth_only(int w, int h) {
   stride = w;
   width = w;
   height = h;
-  resize_planes();
+  resize_planes(false);
 }
 
 void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, const LightingEnv &env,
@@ -83,6 +86,7 @@ void Renderer3D::clear_planes(const uint32_t *color) {
   ScopedTimer t;
   const int W = rt_->width, H = rt_->height;
   const bool with_vis = rt_->vis.size() == (size_t)W * H && W > 0;
+  const bool with_ids = !rt_->ids.empty();
   auto &js = JobSystem::global();
   const int saved = js.max_threads();
   if (!opt_.multithreaded) js.set_max_threads(1);
@@ -91,7 +95,7 @@ void Renderer3D::clear_planes(const uint32_t *color) {
       const size_t o = (size_t)y * W;
       if (color && rt_->color) std::fill(rt_->color + (size_t)y * rt_->stride, rt_->color + (size_t)y * rt_->stride + W, *color);
       std::fill(rt_->depth.begin() + o, rt_->depth.begin() + o + W, 1.0f);
-      std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
+      if (with_ids) std::fill(rt_->ids.begin() + o, rt_->ids.begin() + o + W, 0u);
       if (with_vis) std::fill(rt_->vis.begin() + o, rt_->vis.begin() + o + W, 0u);
     }
   });
@@ -949,7 +953,7 @@ void Renderer3D::raster_tile(int tile_index) {
   const int rx1 = std::min(rt_->width, rx0 + T), ry1 = std::min(rt_->height, ry0 + T);
   const int W = rt_->width;
   float *depth = rt_->depth.data();
-  uint32_t *ids = rt_->ids.data();
+  uint32_t *ids = rt_->ids.empty() ? nullptr : rt_->ids.data();  // (none in a shadow map)
   uint32_t *vis = rt_->vis.data();
   const ShadeMode mode = opt_.shade;
 
@@ -1006,14 +1010,14 @@ void Renderer3D::raster_tile(int tile_index) {
           dz = z;
           if (mode != ShadeMode::Gouraud) {
             if (mode == ShadeMode::Deferred) vis[row + x] = ref;
-            ids[row + x] = st.id;  // depth-only passes keep picking working
+            if (ids) ids[row + x] = st.id;  // depth-only passes into a view keep picking working
             continue;
           }
           const float iw = 1.0f / (b0 * st.iw[0] + b1 * st.iw[1] + b2 * st.iw[2]);
           const Vec3 &c0 = st.c[0], &c1 = st.c[1], &c2 = st.c[2];
           crow[x] = pack_rgb((b0 * c0.x + b1 * c1.x + b2 * c2.x) * iw, (b0 * c0.y + b1 * c1.y + b2 * c2.y) * iw,
                              (b0 * c0.z + b1 * c1.z + b2 * c2.z) * iw);
-          ids[row + x] = st.id;
+          if (ids) ids[row + x] = st.id;
         }
       }
     }
@@ -1046,6 +1050,8 @@ bool Renderer3D::prepare_line(Vec3 a, Vec3 b, uint32_t color, bool depth_test, f
   const float W = (float)rt_->width, H = (float)rt_->height;
   float x0 = (ca.x / ca.w * 0.5f + 0.5f) * W, y0 = (0.5f - ca.y / ca.w * 0.5f) * H, z0 = ca.z / ca.w;
   float x1 = (cb.x / cb.w * 0.5f + 0.5f) * W, y1 = (0.5f - cb.y / cb.w * 0.5f) * H, z1 = cb.z / cb.w;
+  /* An end at infinity (an edge to a vertex there, in Edit Mode) projects to NaN: no line, not a NaN row cast to int. */
+  if (!finite_bits(x0) || !finite_bits(y0) || !finite_bits(z0) || !finite_bits(x1) || !finite_bits(y1) || !finite_bits(z1)) return false;
   /* Liang-Barsky clip to the viewport (z is affine in screen space). */
   float t0 = 0, t1 = 1, dx = x1 - x0, dy = y1 - y0;
   auto clipt = [&](float p, float q) {
@@ -1137,6 +1143,47 @@ void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
   else draw_overlay(c, 0, rt_->height);
 }
 
+template <class Prepare>
+void Renderer3D::record_many(size_t n, const Prepare &prepare) {
+  constexpr size_t kChunk = 4096;
+  const size_t nc = (n + kChunk - 1) / kChunk;
+  std::vector<std::vector<OverlayCmd>> parts(nc);
+  JobSystem::global().parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t c = c0; c < c1; c++) {
+      std::vector<OverlayCmd> &out = parts[(size_t)c];
+      out.reserve(kChunk);
+      for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++) {
+        OverlayCmd cmd;
+        if (prepare(i, cmd)) out.push_back(cmd);
+      }
+    }
+  });
+  size_t total = 0;
+  for (const std::vector<OverlayCmd> &part : parts) total += part.size();
+  if (batching_) overlay_cmds_.reserve(overlay_cmds_.size() + total);
+  for (const std::vector<OverlayCmd> &part : parts)
+    for (const OverlayCmd &cmd : part) {
+      if (batching_) overlay_cmds_.push_back(cmd);
+      else draw_overlay(cmd, 0, rt_->height);
+    }
+}
+
+void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias) {
+  record_many(n, [&](size_t i, OverlayCmd &cmd) {
+    Vec3 a, b;
+    uint32_t color = 0;
+    return get(i, a, b, color) && prepare_line(a, b, color, depth_test, bias, cmd);
+  });
+}
+
+void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test) {
+  record_many(n, [&](size_t i, OverlayCmd &cmd) {
+    Vec3 p;
+    uint32_t color = 0;
+    return get(i, p, color) && prepare_point(p, r, color, depth_test, cmd);
+  });
+}
+
 void Renderer3D::begin_overlay_batch() {
   batching_ = true;
   overlay_cmds_.clear();
@@ -1170,7 +1217,7 @@ void Renderer3D::end_overlay_batch() {
 }
 
 void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, int width) {
-  if (sel.empty()) return;
+  if (sel.empty() || rt_->ids.empty()) return;  // (a view's target: a shadow map has no ids)
   if (batching_) {  // overlays recorded so far go under the outline
     end_overlay_batch();
     begin_overlay_batch();
@@ -1214,6 +1261,166 @@ void Renderer3D::outline_ids(const std::vector<uint32_t> &sel, uint32_t color, i
 /* Deferred shading (EEVEE-like "Shaded" viewport and Game view)          */
 /* ===================================================================== */
 
+
+#ifdef BL_RASTER_X86
+/* What the 8-wide shader (task 0091, ADR 0035) needs from a triangle and its plain material. */
+struct Shade8Tri {
+  float ox, oy;
+  Vec3 na, nb, nc;
+  float sa, sb, sc;
+  Vec3 wp[3], wn[3], geo;
+  Vec3 f0, diff;  // the material's Fresnel at normal incidence, and its diffuse albedo / pi
+  float a2;       // its roughness squared, squared (floored as brdf_eval floors it)
+  bool shadows;   // it receives the shadow
+};
+namespace {
+/* 8 pixels' results: what light_finish takes from each. */
+struct Shade8Out {
+  float px[8], py[8], pz[8], nx[8], ny[8], nz[8], gx[8], gy[8], gz[8], vx[8], vy[8], vz[8], lx[8], ly[8], lz[8];
+};
+struct V8 {
+  __m256 x, y, z;
+};
+/* std::max / std::min exactly (b if a < b, else a), NaNs included - not _mm256_max_ps's rule. */
+BL_TARGET_AVX2 static inline __m256 s8_max(__m256 a, __m256 b) { return _mm256_blendv_ps(a, b, _mm256_cmp_ps(a, b, _CMP_LT_OQ)); }
+BL_TARGET_AVX2 static inline __m256 s8_add(__m256 a, __m256 b) { return _mm256_add_ps(a, b); }
+BL_TARGET_AVX2 static inline __m256 s8_sub(__m256 a, __m256 b) { return _mm256_sub_ps(a, b); }
+BL_TARGET_AVX2 static inline __m256 s8_mul(__m256 a, __m256 b) { return _mm256_mul_ps(a, b); }
+BL_TARGET_AVX2 static inline __m256 s8_div(__m256 a, __m256 b) { return _mm256_div_ps(a, b); }
+BL_TARGET_AVX2 static inline __m256 s8_set(float v) { return _mm256_set1_ps(v); }
+/* dot(a, b) as math.h's: (x x' + y y') + z z'. */
+BL_TARGET_AVX2 static inline __m256 s8_dot(const V8 &a, const V8 &b) {
+  return s8_add(s8_add(s8_mul(a.x, b.x), s8_mul(a.y, b.y)), s8_mul(a.z, b.z));
+}
+/* normalize as math.h's: a / length(a) when the length passes 1e-20, else 0. */
+BL_TARGET_AVX2 static inline V8 s8_normalize(const V8 &a) {
+  const __m256 l = _mm256_sqrt_ps(s8_dot(a, a));
+  const __m256 ok = _mm256_cmp_ps(l, s8_set(1e-20f), _CMP_GT_OQ);
+  return {_mm256_and_ps(ok, s8_div(a.x, l)), _mm256_and_ps(ok, s8_div(a.y, l)), _mm256_and_ps(ok, s8_div(a.z, l))};
+}
+/* (a0 b.x + a1 b.y) + a2 b.z: one component of the scalar shader's interpolation. (Helpers, not lambdas: GCC doesn't
+ * give a lambda its enclosing function's target, and AVX2 intrinsics won't inline into it.) */
+BL_TARGET_AVX2 static inline __m256 s8_bary1(float a0, float a1, float a2, const V8 &b) {
+  return s8_add(s8_add(s8_mul(s8_set(a0), b.x), s8_mul(s8_set(a1), b.y)), s8_mul(s8_set(a2), b.z));
+}
+BL_TARGET_AVX2 static inline V8 s8_bary(const Vec3 *p, const V8 &b) {
+  return {s8_bary1(p[0].x, p[1].x, p[2].x, b), s8_bary1(p[0].y, p[1].y, p[2].y, b), s8_bary1(p[0].z, p[1].z, p[2].z, b)};
+}
+/* (a dx + b dy) + c: a screen-linear plane, as the scalar shader evaluates it. */
+BL_TARGET_AVX2 static inline __m256 s8_plane(float a, float b, float c, __m256 dx, __m256 dy) {
+  return s8_add(s8_add(s8_mul(s8_set(a), dx), s8_mul(s8_set(b), dy)), s8_set(c));
+}
+/* light_falloff for a point or spot light, 8 lanes: the range curve, then a spot's cone. */
+BL_TARGET_AVX2 static inline __m256 s8_falloff(const RenderLight &l, __m256 dist, const V8 &L) {
+  const __m256 one = s8_set(1.0f), zero = _mm256_setzero_ps();
+  __m256 f = s8_sub(one, s8_div(dist, s8_set(l.range > 1e-3f ? l.range : 1e-3f)));
+  f = _mm256_blendv_ps(zero, s8_mul(f, f), _mm256_cmp_ps(f, zero, _CMP_GT_OQ));
+  if (l.type != RenderLight::Spot) return f;
+  const __m256 c =
+      _mm256_xor_ps(s8_add(s8_add(s8_mul(s8_set(l.direction.x), L.x), s8_mul(s8_set(l.direction.y), L.y)), s8_mul(s8_set(l.direction.z), L.z)), s8_set(-0.0f));
+  const float dd = l.cos_inner - l.cos_outer;
+  __m256 tt = dd > 1e-6f ? s8_div(s8_sub(c, s8_set(l.cos_outer)), s8_set(dd)) : _mm256_blendv_ps(zero, one, _mm256_cmp_ps(c, s8_set(l.cos_outer), _CMP_GE_OQ));
+  tt = _mm256_blendv_ps(tt, zero, _mm256_cmp_ps(tt, zero, _CMP_LT_OQ));
+  tt = _mm256_blendv_ps(tt, one, _mm256_cmp_ps(tt, one, _CMP_GT_OQ));
+  return s8_mul(f, s8_mul(s8_mul(tt, tt), s8_sub(s8_set(3.0f), s8_mul(s8_set(2.0f), tt))));
+}
+
+/* One colour channel of brdf_eval(...) * colour * (atten * vis), added where `on`. */
+BL_TARGET_AVX2 static inline void s8_channel(float f0c, float diffc, float colc, __m256 fw, __m256 Dv, __m256 ndl, __m256 av, __m256 on, __m256 &acc) {
+  const __m256 one = s8_set(1.0f);
+  const __m256 F = s8_add(s8_set(f0c), s8_mul(s8_set(1.0f - f0c), fw));
+  const __m256 b = s8_mul(s8_add(s8_mul(s8_set(diffc), s8_sub(one, F)), s8_mul(F, Dv)), ndl);
+  acc = _mm256_blendv_ps(acc, s8_add(acc, s8_mul(s8_mul(b, s8_set(colc)), av)), on);
+}
+
+/* Eight pixels x0..x0+7 of row y on one triangle with a plain material: everything light_surface does before its end
+ * (position, normal, the view, every light with its falloff, shadow and BRDF), the same operations in the same order
+ * as the scalar shader. The shadow lookups are the scalar function's, lane by lane. */
+BL_TARGET_AVX2 static void shade8_avx2(const Shade8Tri &t, int x0, int64_t y, Vec3 eye, const std::vector<RenderLight> &lights, int shadow_light,
+                                      const ShadowMap *shadow, Shade8Out &o) {
+  const __m256 dx = s8_sub(_mm256_setr_ps(x0 + 0.5f, (x0 + 1) + 0.5f, (x0 + 2) + 0.5f, (x0 + 3) + 0.5f, (x0 + 4) + 0.5f, (x0 + 5) + 0.5f,
+                                          (x0 + 6) + 0.5f, (x0 + 7) + 0.5f),
+                           s8_set(t.ox));
+  const __m256 dy = s8_set((y + 0.5f) - t.oy);
+  const V8 N = {s8_plane(t.na.x, t.nb.x, t.nc.x, dx, dy), s8_plane(t.na.y, t.nb.y, t.nc.y, dx, dy), s8_plane(t.na.z, t.nb.z, t.nc.z, dx, dy)};
+  __m256 S = s8_plane(t.sa, t.sb, t.sc, dx, dy);
+  const __m256 tiny = _mm256_cmp_ps(_mm256_andnot_ps(s8_set(-0.0f), S), s8_set(1e-20f), _CMP_LT_OQ);
+  S = _mm256_blendv_ps(S, s8_set(1e-20f), tiny);
+  const __m256 r = s8_div(s8_set(1.0f), S);
+  const V8 B = {s8_mul(N.x, r), s8_mul(N.y, r), s8_mul(N.z, r)};
+  const V8 pos = s8_bary(t.wp, B);
+  V8 n = s8_normalize(s8_bary(t.wn, B));
+  const V8 V = s8_normalize({s8_sub(s8_set(eye.x), pos.x), s8_sub(s8_set(eye.y), pos.y), s8_sub(s8_set(eye.z), pos.z)});
+  /* The back of a double-sided surface: the normal and the face's own turn round. */
+  V8 g = {s8_set(t.geo.x), s8_set(t.geo.y), s8_set(t.geo.z)};
+  const __m256 back = _mm256_cmp_ps(s8_dot(g, V), _mm256_setzero_ps(), _CMP_LT_OQ);
+  const __m256 sign = _mm256_and_ps(back, s8_set(-0.0f));
+  n = {_mm256_xor_ps(n.x, sign), _mm256_xor_ps(n.y, sign), _mm256_xor_ps(n.z, sign)};
+  g = {_mm256_xor_ps(g.x, sign), _mm256_xor_ps(g.y, sign), _mm256_xor_ps(g.z, sign)};
+  const __m256 nv = s8_max(s8_dot(n, V), s8_set(1e-4f));
+  const __m256 one = s8_set(1.0f), zero = _mm256_setzero_ps();
+  V8 lo = {zero, zero, zero};
+  alignas(32) float lane_a[8], lane_b[8], lane_c[8], lane_d[8], lane_vis[8], lane_on[8];
+  for (size_t li = 0; li < lights.size(); li++) {
+    const RenderLight &l = lights[li];
+    V8 L;
+    __m256 atten = s8_set(l.intensity * kPi);
+    if (l.type == RenderLight::Directional) {
+      const Vec3 d = -l.direction;
+      L = {s8_set(d.x), s8_set(d.y), s8_set(d.z)};
+    }
+    else {
+      const V8 d = {s8_sub(s8_set(l.position.x), pos.x), s8_sub(s8_set(l.position.y), pos.y), s8_sub(s8_set(l.position.z), pos.z)};
+      const __m256 dist = _mm256_sqrt_ps(s8_dot(d, d));
+      const __m256 far = _mm256_cmp_ps(dist, s8_set(1e-6f), _CMP_GT_OQ);
+      L = {_mm256_blendv_ps(zero, s8_div(d.x, dist), far), _mm256_blendv_ps(one, s8_div(d.y, dist), far), _mm256_blendv_ps(zero, s8_div(d.z, dist), far)};
+      atten = s8_mul(atten, s8_falloff(l, dist, L));
+    }
+    const __m256 ndl = s8_dot(n, L);
+    __m256 on = _mm256_andnot_ps(_mm256_or_ps(_mm256_cmp_ps(ndl, zero, _CMP_LE_OQ), _mm256_cmp_ps(atten, zero, _CMP_LE_OQ)), _mm256_castsi256_ps(_mm256_set1_epi32(-1)));
+    if (_mm256_testz_ps(on, on)) continue;  // (no lane lit: nothing to add)
+    __m256 vis = one;
+    if ((int)li == shadow_light && shadow && t.shadows) {
+      /* The scalar lookup, lane by lane: at the point nudged off the surface along its face. */
+      const __m256 k = s8_set(0.01f);
+      _mm256_store_ps(lane_a, s8_add(pos.x, s8_mul(g.x, k)));
+      _mm256_store_ps(lane_b, s8_add(pos.y, s8_mul(g.y, k)));
+      _mm256_store_ps(lane_c, s8_add(pos.z, s8_mul(g.z, k)));
+      _mm256_store_ps(lane_d, s8_dot(g, L));
+      _mm256_store_ps(lane_on, on);
+      for (int i = 0; i < 8; i++) {
+        uint32_t bits;
+        std::memcpy(&bits, &lane_on[i], 4);
+        lane_vis[i] = bits ? shadow->lookup(Vec3(lane_a[i], lane_b[i], lane_c[i]), lane_d[i]) : 1.0f;
+      }
+      vis = _mm256_load_ps(lane_vis);
+      on = _mm256_andnot_ps(_mm256_cmp_ps(vis, zero, _CMP_LE_OQ), on);
+    }
+    /* brdf_eval(s, n, V, L) * colour * (atten * vis). */
+    const V8 h = s8_normalize({s8_add(V.x, L.x), s8_add(V.y, L.y), s8_add(V.z, L.z)});
+    const __m256 nh = s8_max(s8_dot(n, h), zero), vh = s8_max(s8_dot(V, h), zero);
+    const __m256 a2 = s8_set(t.a2), a2m1 = s8_set(t.a2 - 1.0f), one_a2 = s8_set(1 - t.a2);
+    const __m256 d = s8_add(s8_mul(s8_mul(nh, nh), a2m1), one);
+    const __m256 D = s8_div(a2, s8_mul(s8_mul(s8_set(kPi), d), d));
+    const __m256 vterm = s8_div(s8_set(0.5f), s8_add(s8_mul(ndl, _mm256_sqrt_ps(s8_add(s8_mul(s8_mul(nv, nv), one_a2), a2))),
+                                                     s8_mul(nv, _mm256_sqrt_ps(s8_add(s8_mul(s8_mul(ndl, ndl), one_a2), a2)))));
+    const __m256 ivh = s8_sub(one, vh);
+    __m256 fw = s8_mul(ivh, ivh);
+    fw = s8_mul(s8_mul(fw, fw), ivh);
+    const __m256 Dv = s8_mul(D, vterm), av = s8_mul(atten, vis);
+    s8_channel(t.f0.x, t.diff.x, l.color.x, fw, Dv, ndl, av, on, lo.x);
+    s8_channel(t.f0.y, t.diff.y, l.color.y, fw, Dv, ndl, av, on, lo.y);
+    s8_channel(t.f0.z, t.diff.z, l.color.z, fw, Dv, ndl, av, on, lo.z);
+  }
+  _mm256_storeu_ps(o.px, pos.x), _mm256_storeu_ps(o.py, pos.y), _mm256_storeu_ps(o.pz, pos.z);
+  _mm256_storeu_ps(o.nx, n.x), _mm256_storeu_ps(o.ny, n.y), _mm256_storeu_ps(o.nz, n.z);
+  _mm256_storeu_ps(o.gx, g.x), _mm256_storeu_ps(o.gy, g.y), _mm256_storeu_ps(o.gz, g.z);
+  _mm256_storeu_ps(o.vx, V.x), _mm256_storeu_ps(o.vy, V.y), _mm256_storeu_ps(o.vz, V.z);
+  _mm256_storeu_ps(o.lx, lo.x), _mm256_storeu_ps(o.ly, lo.y), _mm256_storeu_ps(o.lz, lo.z);
+}
+}  // namespace
+#endif
+
 void Renderer3D::shade_deferred() {
   const int W = rt_->width, H = rt_->height;
   static Environment fallback_env;
@@ -1244,6 +1451,16 @@ void Renderer3D::shade_deferred() {
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
+    /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
+     * with its own normal - what evaluate_material would give it - and skips the texture-space work nothing reads. */
+    bool uniform = false;
+    SurfaceSample surface;
+#ifdef BL_RASTER_X86
+    /* Its pixels can be lit 8 at a time (task 0091): a plain material, not unlit or toon, nothing baked or probed. */
+    bool fast = false;
+    SurfaceSample fast_surface;  // `surface` as the pixel takes it (highlighted, if the face is)
+    Shade8Tri s8;
+#endif
   };
   auto setup_tri = [&](TriSetup &T, uint32_t ref) {
     T.ref = ref;
@@ -1301,6 +1518,8 @@ void Renderer3D::shade_deferred() {
       if (mp) T.mat = mp.get();
     }
     T.tex = &T.mat->textures();  // (resolved before the parallel stages: a cached reference)
+    T.uniform = opt_.uniform_shading && material_uniform(*T.mat, *T.tex);
+    if (T.uniform) T.surface = evaluate_material(*T.mat, *T.tex, SurfacePoint{});
     T.live = false;
     for (int k = 0; k < 5; k++) T.live = T.live || T.tex->live[k] != nullptr;
     for (int a = 0; a < 4; a++)
@@ -1318,6 +1537,23 @@ void Renderer3D::shade_deferred() {
       T.highlighted = f < it.face_highlight->size() && (*it.face_highlight)[f];
     }
     T.item = &it;
+#ifdef BL_RASTER_X86
+    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
+    if (T.fast) {
+      SurfaceSample fs = T.surface;
+      if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);  // (as the pixel loop applies it)
+      T.fast_surface = fs;
+      Shade8Tri &e = T.s8;
+      e.ox = T.ox, e.oy = T.oy, e.na = T.na, e.nb = T.nb, e.nc = T.nc, e.sa = T.sa, e.sb = T.sb, e.sc = T.sc;
+      for (int k = 0; k < 3; k++) e.wp[k] = T.wp[k], e.wn[k] = T.wn[k];
+      e.geo = T.geo_normal;
+      e.f0 = fresnel_f0(fs);
+      e.diff = fs.albedo * ((1.0f - fs.metallic) / kPi);
+      const float a = std::max(fs.roughness * fs.roughness, 0.002f);
+      e.a2 = a * a;
+      e.shadows = it.receive_shadows;
+    }
+#endif
     T.valid = true;
   };
   JobSystem &js = JobSystem::global();
@@ -1361,11 +1597,12 @@ void Renderer3D::shade_deferred() {
     });
     stats_.gi_traced = traced.load();
     /* Nothing traced (every surface reads a realtime lightmap): no blur, and nothing reads gi_blur_. */
-    if (stats_.gi_traced) gi_blur_ = gi_lo_;
+    if (stats_.gi_traced) gi_blur_.resize(gi_lo_.size());  // (every texel is written below: no copy first)
     if (stats_.gi_traced) js.parallel_for(gh, 4, [&](int64_t a, int64_t b) {
       for (int64_t gy = a; gy < b; gy++)
         for (int gx = 0; gx < gw; gx++) {
           const GiTexel &c = gi_lo_[(size_t)gy * gw + gx];
+          gi_blur_[(size_t)gy * gw + gx] = c;
           if (!c.valid) continue;
           Vec3 bounce(0.0f);
           float sky = 0.0f, wsum = 0.0f;
@@ -1394,6 +1631,14 @@ void Renderer3D::shade_deferred() {
   /* Unique to this pass across every renderer, so a thread's shared probe samples never outlive it. */
   static std::atomic<uint32_t> g_probe_stamp{0};
   const uint32_t probe_stamp = ++g_probe_stamp;
+#ifdef BL_RASTER_X86
+  /* 8 pixels at a time (task 0091) when nothing in this pass needs the per-pixel extras: no reflective shadow map, no
+   * traced GI, no area light (its terms stay scalar). */
+  bool lights_plain = true;
+  for (const RenderLight &l : env_.lights) lights_plain = lights_plain && l.type != RenderLight::Area;
+  const bool fast_pass = opt_.simd_shading && cpu::features().avx2 && !rsm_out_ && !(gi && stats_.gi_traced) && lights_plain;
+#endif
+  std::atomic<size_t> simd_pixels{0};
   /* Rows go out in pairs, so a 2 x 2 quad's shared probe sample is always taken by the thread that shades
    * both its rows, whatever the scheduling: the picture doesn't depend on it. */
   js.parallel_for((H + 1) / 2, 2, [&](int64_t p0, int64_t p1) {
@@ -1406,6 +1651,8 @@ void Renderer3D::shade_deferred() {
       static thread_local std::vector<uint32_t> row_px;
       row_hdr.clear();
       row_x.clear();
+      size_t row_simd = 0;  // pixels lit 8 at a time (counted once per row)
+      int run_break = 0;
       TriSetup T;
       int probe_hint = -1;  // the brick the last probe sample in this row used
       /* Probe samples shared by 2 x 2 pixels on one triangle: kept per thread, valid for this flush only
@@ -1424,6 +1671,18 @@ void Renderer3D::shade_deferred() {
         /* Neighbouring pixels mostly share a triangle: set it up once. */
         if (ref != T.ref) setup_tri(T, ref);
         if (!T.valid) continue;
+#ifdef BL_RASTER_X86
+        if (fast_pass && T.fast && x >= run_break && x + 8 <= W) {
+          const uint32_t *end = std::find_if(vrow + x, vrow + x + 8, [ref](uint32_t r) { return r != ref; });
+          if (end == vrow + x + 8) {
+            shade_run8(T.s8, T.fast_surface, x, y, eye, env, row_hdr, row_x);
+            row_simd += 8;
+            x += 7;
+            continue;
+          }
+          run_break = (int)(end - vrow);  // (no run of 8 starts before the triangle changes there)
+        }
+#endif
         const DrawItem &it = *T.item;
         float px = x + 0.5f, py = y + 0.5f;
         /* Perspective-correct barycentrics in the source triangle: a ratio of
@@ -1435,13 +1694,15 @@ void Renderer3D::shade_deferred() {
         auto ratio = [](Vec3 n, float s) { return n * (1.0f / (std::fabs(s) < 1e-20f ? 1e-20f : s)); };
         Vec3 B = ratio(N, S);
         SurfacePoint sp;
-        sp.local_position = T.p[0] * B.x + T.p[1] * B.y + T.p[2] * B.z;
-        sp.local_normal = normalize(T.n[0] * B.x + T.n[1] * B.y + T.n[2] * B.z);
-        sp.local_bounds = T.bounds;
+        if (!T.uniform) {  // (texture space: only a material that varies over the surface reads it)
+          sp.local_position = T.p[0] * B.x + T.p[1] * B.y + T.p[2] * B.z;
+          sp.local_normal = normalize(T.n[0] * B.x + T.n[1] * B.y + T.n[2] * B.z);
+          sp.local_bounds = T.bounds;
+        }
         sp.position = T.wp[0] * B.x + T.wp[1] * B.y + T.wp[2] * B.z;
         sp.normal = normalize(T.wn[0] * B.x + T.wn[1] * B.y + T.wn[2] * B.z);
         sp.geo_normal = T.geo_normal;
-        if (T.has_uv) {
+        if (T.has_uv && !T.uniform) {
           auto uv_at = [&](Vec3 b) { return T.uv[0] * b.x + T.uv[1] * b.y + T.uv[2] * b.z; };
           if (opt_.affine_uv) {
             /* Linear across the screen, as the PS1 drew textures: they swim and bend on
@@ -1460,7 +1721,7 @@ void Renderer3D::shade_deferred() {
         if (opt_.tex.active()) sp.tex = &opt_.tex;
         /* Live procedural textures (task 0031): the object-space size of this pixel, so a texture whose texel
          * is larger is evaluated here instead of magnified. Not for the reflective shadow map. */
-        if (!rsm_out_ && T.live) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
+        if (!rsm_out_ && T.live && !T.uniform) {  // (only a live texture reads it: a pixel spared four lengths and two divisions)
           sp.live_textures = true;
           auto lp = [&](Vec3 b) { return T.p[0] * b.x + T.p[1] * b.y + T.p[2] * b.z; };
           auto wp = [&](Vec3 b) { return T.wp[0] * b.x + T.wp[1] * b.y + T.wp[2] * b.z; };
@@ -1473,7 +1734,7 @@ void Renderer3D::shade_deferred() {
           sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
           sp.has_lightmap = true;
         }
-        if (T.has_tangent) {
+        if (T.has_tangent && !T.uniform) {  // (a normal map's: a uniform material has none)
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
         }
@@ -1535,7 +1796,8 @@ void Renderer3D::shade_deferred() {
             sp.probe = pq.irr;
           }
         }
-        SurfaceSample s = evaluate_material(*T.mat, *T.tex, sp);
+        SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
+        if (T.uniform) s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
         if (rsm_out_) {
           /* The reflective shadow map: where the sun's light lands and what that surface reflects. */
           const size_t k = (size_t)y * W + x;
@@ -1550,6 +1812,7 @@ void Renderer3D::shade_deferred() {
         row_hdr.push_back(color);
         row_x.push_back(x);
       }
+      if (row_simd) simd_pixels.fetch_add(row_simd, std::memory_order_relaxed);
       if (row_hdr.empty()) continue;
       row_px.resize(row_hdr.size());
       display::encode_span(&row_hdr[0].x, row_px.data(), row_hdr.size(), env_.view_transform, env_.exposure);
@@ -1558,12 +1821,12 @@ void Renderer3D::shade_deferred() {
         for (size_t i = 0; i < row_x.size(); i++) rt_->hdr[(size_t)y * W + row_x[i]] = row_hdr[i];
     }
   });
+  stats_.pixels_simd = simd_pixels.load();
 }
 
 Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const {
   if (s.unlit) return s.albedo + s.emission;
   Vec3 n = s.normal;
-  float nv = std::max(dot(n, V), 1e-4f);
   Vec3 lo(0.0f);
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
@@ -1625,6 +1888,30 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     if (vis <= 0) continue;
     lo += brdf_eval(s, n, V, L) * l.color * (atten * vis);
   }
+  return light_finish(s, sp, V, lo, env);
+}
+
+#ifdef BL_RASTER_X86
+void Renderer3D::shade_run8(const Shade8Tri &t, const SurfaceSample &surface, int x, int64_t y, Vec3 eye, const Environment &env,
+                            std::vector<Vec3> &row_hdr, std::vector<int> &row_x) const {
+  Shade8Out o;
+  shade8_avx2(t, x, y, eye, env_.lights, env_.shadow_light, env_.shadow, o);
+  for (int i = 0; i < 8; i++) {
+    SurfacePoint sp;
+    sp.position = Vec3(o.px[i], o.py[i], o.pz[i]);
+    sp.normal = Vec3(o.nx[i], o.ny[i], o.nz[i]);
+    sp.geo_normal = Vec3(o.gx[i], o.gy[i], o.gz[i]);
+    SurfaceSample s = surface;
+    s.normal = sp.normal;
+    row_hdr.push_back(light_finish(s, sp, Vec3(o.vx[i], o.vy[i], o.vz[i]), Vec3(o.lx[i], o.ly[i], o.lz[i]), env));
+    row_x.push_back(x + i);
+  }
+}
+#endif
+
+Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const {
+  Vec3 n = s.normal;
+  float nv = std::max(dot(n, V), 1e-4f);
   if (s.toon) {
     /* Toon: the ambient as one flat tone (unless baked light holds more), no reflections, the rim on top. */
     Vec3 amb;
@@ -1873,6 +2160,14 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
   });
 }
 
+Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds) {
+  const Vec3 c = bounds.center();
+  const float r = std::max(0.5f, length(bounds.extent()));
+  const Vec3 d = normalize(light_dir);
+  const Vec3 up = std::fabs(d.y) > 0.99f ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+  return Mat4::ortho(r, 1.0f, r * 0.5f, r * 3.5f) * Mat4::look_at(c - d * r * 2.0f, c, up);
+}
+
 void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds, int res,
                        const ShadowMap *base) {
   out.size = 0;
@@ -1883,7 +2178,7 @@ void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec
   Vec3 d = normalize(light_dir);
   Vec3 up = std::fabs(d.y) > 0.99f ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
   Mat4 view = Mat4::look_at(c - d * r * 2.0f, c, up);
-  Mat4 proj = Mat4::ortho(r, 1.0f, r * 0.5f, r * 3.5f);
+  Mat4 proj = Mat4::ortho(r, 1.0f, r * 0.5f, r * 3.5f);  // (shadow_view_proj below: the same, kept in step)
   static thread_local RenderTarget rt;
   static thread_local Renderer3D r3d;
   rt.make_depth_only(res, res);
