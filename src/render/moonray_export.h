@@ -46,10 +46,23 @@ struct ExportScene {
 };
 
 /* What was written, and what MoonRay doesn't take as Blendity draws it (shown once, not silently dropped). */
+/* A texture to make for MoonRay before it renders: its texture system takes only tiled, mip-mapped files (as maketx
+ * makes them), so each image goes as such an EXR, linear. Made on the render's thread, not the editor's, and kept in
+ * the scratch folder while the source file is unchanged (an animation converts each texture once). */
+struct TextureJob {
+  std::string source, dest;
+  bool data = false;  // a normal or non-colour map: an 8-bit one's bytes / 255 (a colour map's sRGB is undone)
+};
+/* Makes `dest` from `source` unless it's there from the same source (size and time); an unreadable source gives a
+ * white 1 x 1 map (the material's own colour then, as the path tracer draws a missing texture) and false. */
+bool convert_texture(const TextureJob &job, std::string &error);
+
 struct ExportReport {
   std::string scene_path, image_path;  // ours (scene.rdla, frame.exr)
+  std::string progress_path;           // MoonRay's checkpoints while it renders (progress.exr): the image filling in
   size_t meshes = 0, triangles = 0, lights = 0, materials = 0, textures = 0;
   std::vector<std::string> notes;
+  std::vector<TextureJob> texture_jobs;  // to run (convert_texture) before MoonRay reads the scene
 };
 
 /* A file of ours as MoonRay sees it (moonray::path_for: WSL's /mnt/c/... on Windows). */

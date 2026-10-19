@@ -58,3 +58,14 @@ In practice:
 - The license texts and notices in this folder must ship with any binary distribution.
 
 The scenes, meshes, textures and renders you make with Blendity are yours. The GPL covers the program, not its output.
+
+## Optional downloads
+
+Not part of any Blendity build; downloaded only when the user asks:
+
+- **AI inbetweening** (tasks 0128-0131, ADR 0046):
+  - ONNX Runtime 1.31.0 by Microsoft, MIT (`onnxruntime-MIT.txt`; its third-party notices ship in the download);
+  - the inbetweening network, Blendity's own, trained on the CMU Graphics Lab Motion Capture Database
+    (mocap.cs.cmu.edu; free to copy, modify and redistribute; "The data used in this project was obtained from
+    mocap.cs.cmu.edu. The database was created with funding from NSF EIA-0196217.").
+  - The C API's headers are in `extern/onnxruntime/`.

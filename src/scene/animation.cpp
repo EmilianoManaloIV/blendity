@@ -145,6 +145,9 @@ std::string save_clip_text(const AnimationClip &c) {
       os << "\n";
     }
   }
+  for (const AnimationClip::Contact &k : c.contacts) os << "contact\t" << k.from << "\t" << k.to << "\t" << (k.manual ? 1 : 0) << "\t" << k.bone << "\n";
+  for (const AnimationClip::RagdollEvent &e : c.ragdoll)
+    os << "ragdoll\t" << e.kind << "\t" << e.frame << "\t" << e.impulse.x << "\t" << e.impulse.y << "\t" << e.impulse.z << "\t" << e.bone << "\n";
   return os.str();
 }
 
@@ -175,6 +178,8 @@ bool load_clip_text(const std::string &text, AnimationClip &c) {
   std::string line;
   if (!std::getline(is, line) || line.rfind("blendity_anim", 0) != 0) return false;
   c.tracks.clear();
+  c.contacts.clear();
+  c.ragdoll.clear();
   AnimTrack *cur = nullptr;
   while (std::getline(is, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -191,6 +196,22 @@ bool load_clip_text(const std::string &text, AnimationClip &c) {
     }
     else if (word == "track") {
       cur = read_track(line, c);
+    }
+    else if (word == "contact") {  // ("contact<TAB>from<TAB>to<TAB>manual<TAB>bone", task 0116)
+      AnimationClip::Contact k;
+      int manual = 0;
+      if (!(ls >> k.from >> k.to >> manual) || !std::isfinite(k.from) || !std::isfinite(k.to)) continue;
+      std::getline(ls >> std::ws, k.bone);
+      k.manual = manual != 0;
+      if (!k.bone.empty() && k.to >= k.from) c.contacts.push_back(k);
+    }
+    else if (word == "ragdoll") {  // ("ragdoll<TAB>kind<TAB>frame<TAB>x<TAB>y<TAB>z<TAB>bone", task 0121)
+      AnimationClip::RagdollEvent e;
+      if (!(ls >> e.kind >> e.frame >> e.impulse.x >> e.impulse.y >> e.impulse.z) || e.kind < 0 || e.kind > 2 || !std::isfinite(e.frame) ||
+          !std::isfinite(e.impulse.x) || !std::isfinite(e.impulse.y) || !std::isfinite(e.impulse.z))
+        continue;
+      std::getline(ls >> std::ws, e.bone);
+      c.ragdoll.push_back(e);
     }
     else if (word == "key" && cur) {
       AnimKey k;

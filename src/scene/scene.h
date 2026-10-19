@@ -926,6 +926,7 @@ struct Bone : ComponentBase<Bone> {
   Quat rest_rotation;     // exact (Euler angles lose up to a degree near 90 degrees of X)
   Vec3 rest_euler_hint;   // what the Inspector shows for it
   Vec3 rest_scale{1, 1, 1};
+  bool spring_ignored = false;  // "not a spring chain": Find Spring Chains doesn't offer the chain it starts (task 0120)
   Mat4 rest_matrix() const;
   void set_rest(const Transform &t);  // the bone's current local transform becomes its rest (skin.cpp)
   void reflect(Reflector &r) override;
@@ -939,6 +940,8 @@ struct Armature : ComponentBase<Armature> {
   bool show_bones = true;
   bool rest_position = false;  // skins show the mesh unposed
   bool in_front = true;        // bones drawn over the meshes
+  float body_mass = 75.0f;     // kg: the whole body, shared among the bones by the volume each moves (task 0115)
+  static inline bool show_body_mass = true;  // (the Inspector shows it while the physics tools are switched on: task 0124)
   void reflect(Reflector &r) override;
 };
 
@@ -1034,6 +1037,9 @@ bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK ch
 GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
 /* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */
 int add_humanoid_ik(Scene &scene, GameObject *root);
+/* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L"): side 0 left,
+ * 1 right; limb 0 upper leg, 1 lower leg, 2 upper arm, 3 lower arm (ik.cpp; the walking rig reads it too, task 0124). */
+bool limb_of(const std::string &name, int &side, int &limb);
 /* IK on a bone and its parent with a new target at its tip and a pole off its bend (the Rigging window's Add IK). */
 IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
 

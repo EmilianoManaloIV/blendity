@@ -2,6 +2,659 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 153): MoonRay's image fills in while it renders
+
+**Asked:** "Why does MoonRay doesn't seem to render?" It did: a 1280x720 frame at 128 samples takes about a minute,
+and nothing showed until it was done. The user agreed: "the image fill is also good."
+
+**Changed**
+- **MoonRay renders with checkpoints:** an image after every quality step, about a second apart, written beside its
+  scene.
+  - A watcher on the render's own thread reads each new checkpoint (never the editor's thread: it is 14 MB).
+  - The Render panel shows it through the same view transform as the final image, with "filling in (N updates)" and
+    the time.
+  - MoonRay prints no percentage in this mode.
+
+**Fixed**
+- MoonRay's own default image (`scene.exr`) was written into whatever folder it ran from (an untracked
+  `blendity/scene.exr` came from it). It now goes into Blendity's scratch folder with the rest.
+
+**Checked**
+- **A new test (round 153):** the stand-in MoonRay writes a checkpoint at half brightness, then the final image; the
+  Render panel shows 0.250, then 0.500.
+- **With the real MoonRay:** 53 s into a 1280x720 frame the panel showed the image, after 43 updates; nothing was
+  written where it ran.
+- Unit checks: Windows 10,882, 0 failed (827 tests); render-cache verify mode 10,883, 0 stale pictures. Linux with
+  libraries: 10,618, 0 failed. Sanitizer build: 10,496, 0 failed, no reports. `editor_fuzz` in verify mode: 6,000
+  frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no
+  change.
+
+## 2026-10-18 (round 152): automatic walking and AI inbetweening written up (task 0132)
+
+**Asked:** the plan's write-up.
+
+**Added**
+- Learn: "Automatic walking: which tool when" (Walk Cycle, Footsteps, Locomotion) and "AI inbetweening: the motion
+  between two keys", each with a Try-it and questions.
+- README, ARCHITECTURE, USABILITY; ADR 0046; the licences of the optional download (ONNX Runtime's MIT notice, the CMU
+  database's credit) and `extern/onnxruntime/`.
+
+**Checked**
+- A new test (round 152) runs both lessons' Try-its.
+- Unit checks (rounds 148-152 in one chain): Windows 10,881, 0 failed (826 tests); the whole suite in render-cache
+  verify mode: 10,882, 0 failed, 0 stale pictures. Linux with libraries: 10,617, 0 failed. Sanitizer build: 10,495,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- With a real install (`BLENDITY_AI_TEST_INSTALL`): Windows 60 frames in 3.1 ms; Linux under the sanitizers 4.2 ms,
+  no reports; on both the walk's middle made again 9.3 cm from the walk, the keys' interpolation 14.5 cm.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 151): fine-tuning on your own clips (task 0131)
+
+**Added**
+- **Fit to Clips** (`ai finetune`):
+  - every clip of the project that animates the character (about three minutes at most) is sampled, then fitted on
+    a worker with progress and Stop;
+  - a correction of the network's last layer, solved exactly (ridge regression), saved as
+    `Assets/AI/<character>.aihead` and used for that character's spans;
+  - `ai finetune off | on` goes back to the shipped model and returns to the fit.
+- ONNX Runtime's standard build has no on-device training (its training API is null in 1.31.0), so the plan's training
+  API became a fit of the last layer in Blendity's own code (ADR 0046).
+
+**Checked**
+- A new test (round 151) with a stand-in network:
+  - the fit lowers the RMS error on the clips it was fitted to;
+  - off, a made span is exactly the shipped model's;
+  - Stop keeps the last fit.
+- Unit checks: with round 152's (one chain for rounds 148-152; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 150): AI inbetweening in the Animation window (task 0130)
+
+**Added**
+- **AI Inbetween** (the Animation window, with the switch on and the download installed):
+  - makes the span between the keys around the playhead in a style (walk, run, jump, fall, crawl, combat,
+    acrobatic, other), on a worker, shown as a purple ghost (grey once the keys change);
+  - Variation, and Apply as one undo step;
+  - `ai span [from to] | style | styles | variation | apply | off`.
+- `ai::make_request` and `ai::apply`:
+  - the rig mapped onto the model's skeleton (mirrored, faced, scaled by the legs, each bone's rest direction aligned
+    to the data's), a 60 fps clip resampled to the model's 30;
+  - only the frames strictly between the keys keyed, the keys at the ends kept with their outer slopes frozen;
+  - a turn keyed whole turns away spread over the span.
+
+**Fixed after review**
+- **Clips told apart only by their version:** Apply could write one character's span into another's clip. A span now
+  knows its clip and character.
+- **The ends' Auto slopes followed the new keys** and bent the curves outside the span. They are frozen now.
+- **A yaw keyed past 180 degrees** spun round on the last frame. It is spread over the span now.
+- **Fine-tuning kept every window in memory.** It now uses running sums, capped at about 4,000 windows and three
+  minutes of clips.
+- **Work on the editor's thread:** check, install and loading the runtime now run on workers, and the model's
+  description is read once.
+- **Installs:**
+  - an archive's members are checked before unpacking, into a staging folder moved into place;
+  - removing deletes only the install's own files;
+  - the model's output size is checked.
+- **Other fixes:**
+  - the hands', head's and toes' rest alignment;
+  - Variation's seed sticking;
+  - a span past the clip's end refused;
+  - the AI workers waited for on closing.
+
+**Checked**
+- New tests (round 150), with a stand-in network:
+  - only the span is made (29 of 29 frames), its ends and every key outside untouched;
+  - the curves outside the span move 0.000000 m; a 200 degree yaw is met in steps of 6.7 degrees at most;
+  - another character's clip is never written;
+  - the same seed gives the same keys; Apply is undone whole;
+  - four legs, a span past the end and a NaN answer are refused;
+  - a pose goes to the model's skeleton and back to 0.000 degrees.
+- With the real model (where `BLENDITY_AI_TEST_INSTALL` names an install; skipped on CI): a walk's middle 29 frames
+  made again are 9.3 cm from the walk, the keys' interpolation 14.5 cm.
+- Unit checks: with round 152's (one chain for rounds 148-152; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 149): the AI download, optional as MoonRay (task 0129)
+
+**Added**
+- **The download:** `tools/inbetween/package.py` builds `blendity-ai-<platform>-ai-v1` with a `.sha256` each, from
+  Microsoft's ONNX Runtime 1.31.0 (MIT) and the trained model: Windows 23.6 MB, Linux 28.0 MB, macOS on Apple silicon
+  29.3 MB. Publishing them is the user's call.
+- **In Blendity:**
+  - the AI dialog, offered once when the switch is first turned on (never at startup);
+  - Preferences > Animation Assistants: Install / Remove;
+  - `ai status | install [archive] | remove | check`.
+- ONNX Runtime is loaded with LoadLibrary or dlopen through its C API only when used, so the base build has no
+  dependency on it.
+
+**Checked**
+- New tests (round 149):
+  - a wrong checksum is refused;
+  - an install that can't run is removed again;
+  - an archive holding a foreign file is refused;
+  - without the download, AI Inbetween says how to get it.
+- With a real install: ONNX Runtime loads and makes 60 frames in 3.1 ms.
+- Unit checks: with round 152's (one chain for rounds 148-152; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 148): the inbetweening network trained on CMU, GO (task 0128, ADR 0046)
+
+**Asked:** the plan's AI inbetweening, trained on CMU motion capture. The user approved the downloads (PyTorch,
+NumPy, ONNX, onnxruntime; the CMU database).
+
+**Added**
+- `tools/inbetween/` (build-time only):
+  - `cmu.py`: the CMU database (2,503 clips, 10.5 hours) on one 22-joint skeleton at 30 fps, labelled by style;
+  - `model.py`, `train.py`: a 4.9M-parameter transformer correcting interpolation;
+  - `export.py`: ONNX with its last features, any window length;
+  - `styles_eval.py`; `package.py`.
+- The data and the Python environment stay outside the repository (`.venv/` and `runs/` git-ignored).
+
+**Checked**
+- **On the held-out subjects:** the joints' mean error, interpolation against the network:
+
+  | Gap | Interpolation | Network |
+  |---|---|---|
+  | 15 frames | 2.7 cm | 2.0 cm |
+  | 30 frames | 5.7 cm | 4.0 cm |
+  | 60 frames | 10.2 cm | 7.2 cm |
+  | 120 frames | 16.8 cm | 13.1 cm |
+
+- **By style:** walk 62% better, jump 53%, acrobatic 40%, combat 35%, fall 20%, other 18%.
+- **Foot sliding:** worse than interpolation past two seconds, recorded.
+- **Speed:** 60 frames in 3 ms on the CPU. **GO.**
+- **Fixed on the way:** the first export fixed the window's length inside attention (every other span failed in
+  Blendity). The encoder is written out for export, and the export is checked at gaps of 1, 29 and 120 frames.
+
+## 2026-10-18 (round 147): Locomotion, walking live in Play (task 0127)
+
+**Asked:** the plan's "both baked into clips and live in Play" (round 145's question).
+
+**Added**
+- **The Locomotion component** (with the Locomotion assistant on): Walk Cycle's gait made frame by frame from how the
+  character moves - W walks, Shift+W runs, A and D turn, or a PlayerController, a Rigidbody or a script's `set_move`
+  moves it.
+  - The phase goes on with the speed; the walk blends into the run; let go, and it finishes the step and stands.
+  - Each swinging foot is aimed at where the body will be when it lands, on the ground there (a grid of the scene's
+    meshes gathered at Play start): ramps and stairs.
+  - The pelvis stays in reach of both feet and leans into turns. Upper Body off leaves the spine, head and arms to a
+    clip.
+- `gait::apply`: putting a pose on the rig, shared by bake and Locomotion.
+- Learn: "Locomotion: walking live in Play".
+
+**Fixed after review**
+- A prop held in a hand was snapped back every frame (and one a script destroyed would have been written to after):
+  only bones and IK controls are posed now, kept by id, and the rig is read again if one goes.
+- A dog let go kept stepping on the spot (its feet are never all down while it walks): a foot that lands stays down.
+- The ground left out physics bodies and other characters; Follow Ground off while physics or a controller moves the
+  object.
+
+**Checked**
+- New tests (round 147):
+  - 3 s of W: 3.97 m (3.95 expected), planted feet still to 0.001 mm, the stride Walk Cycle's to the millimetre,
+    0.013 ms a frame;
+  - running round a turn the hips lean into it; let go of a run, standing in 0.92 s (within the slowing and one step);
+    a dog stops too;
+  - up a ramp every landing on its surface; a prop a script moves is left alone, and destroyed in Play breaks nothing;
+  - the assistant off, through the editor's Play: no object moves;
+  - the lesson's Try-it, then Play with a script's `set_move`.
+- Unit checks (rounds 146-147 in one chain): Windows 10,872, 0 failed (817 tests); the whole suite in render-cache
+  verify mode: 10,873, 0 failed, 0 stale pictures. Linux with libraries: 10,608, 0 failed. Sanitizer build: 10,486,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 146): Footsteps, walking along a path (task 0126)
+
+**Asked:** the plan's footsteps along a path, as 3ds Max's Biped (round 145's question).
+
+**Added**
+- **Footsteps** (the Rigging window's section, with the assistant on): Walk Along Path lays footprints along a curve at
+  Walk Cycle's stride - short first and last steps, the inner foot's shorter in turns - each dropped onto the mesh
+  under it, and keys the character walking on them (feet planted, the pelvis over them at their height, a higher swing
+  over a step up).
+  - Each print is an object (blue left, red right, its landing frame drawn on it): move or turn it, or change its Frame,
+    then Update. Re-plan lays them out again and keeps the ones moved by hand. One undo step each.
+  - Console: `walk path <curve> | walk steps update | walk steps replan`.
+- `scene_raycast` and a ground grid in the scene module (the footprints; Locomotion's feet).
+- Learn: "Footsteps: walking along a path".
+
+**Fixed after review**
+- A print dragged beyond the leg's reach wasn't reached: the pelvis now goes towards it.
+- Re-plan kept only moved prints, matched by frame (lost after a style change): turned and retimed prints count, and
+  each is matched to the nearest new print of its foot; any left over is reported.
+- A failed clip after the prints were replaced; two characters with one name sharing prints (refused now); a renamed
+  path's message; a first print retimed past frame 0; prints retimed closer than a swing; a huge ground's grid.
+
+**Checked**
+- New tests (round 146):
+  - a straight path: every foot on its print to 0.000 mm, planted feet still, first and last steps short;
+  - a left turn: the inner steps 0.74 m against the outer's 0.81 m, no print on the wrong side;
+  - box stairs: every print on a step, the hips rising 0.90 m;
+  - in the editor: refused while off, a moved print kept by Re-plan and walked on, undone in one step (keys and every
+    print as before), saved and loaded;
+  - a print 0.8 m out reached; a turned print and a moved one kept through a faster style; twin names refused;
+  - the lesson's Try-it.
+- Unit checks: with round 147's (one chain for rounds 146-147; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 145): Walk Cycle, walking made from the rig (task 0125)
+
+**Asked:** "Is there an automatic walk system in cascadeuer and other smart systems that would be ideal?" Cascadeur
+has none (its locomotion is AI inbetweening and AI root motion). The user chose procedural gaits (as 3ds Max's
+CATMotion) and footsteps along a path (as Biped's), in clips and live in Play, AI inbetweening as an optional
+download, every one of them a switch, and hand animation unchanged.
+
+**Added**
+- **Walk Cycle** (the Rigging window's section and the Animation window's button, with the assistant on).
+  - **Presets:** walk, jog, run, sneak and limp, or walk, trot and gallop for four legs.
+  - **Numbers:** speed, stride, feet-down share, foot lift, heel-toe roll, bounce, sway, hip twist and drop, the spine's
+    counter-turn, arm swing, elbows, lean and crouch.
+  - **Generate** keys the rig's own controls (hips, the feet's IK targets and poles, feet, spine, head, arms):
+    - feet planted while down, never sliding;
+    - the stride from the Froude number, so a style fits any size;
+    - a treadmill loop or travelling forward;
+    - the planted frames written as contacts.
+  - Presets are blended by weight and saved as `.gait` files. Console: `walk cycle | set | save | load | presets`.
+- Learn: "Walk Cycle: walking made from the rig".
+
+**Fixed on the way**
+- **The loop's seam:** rounding a cycle to whole frames through the speed also changed the stride (the Froude number),
+  so the period never landed on a frame. It adjusts the stride now.
+- **A foot at a cycle's boundary:** float time left it "mid-swing" for a frame, so the pelvis wasn't lowered for it and
+  IK fell 5 cm short. The phase is snapped at whole cycles, and every foot is kept within reach.
+
+**Fixed after review**
+- The hands kept still: the arms' IK pulled them back to rest. Their IK targets and poles are keyed now.
+- The heel-toe roll turned the foot about the ankle, so the toes went through the floor at push-off. It rolls about the
+  heel, then the toes, and just off the ground the ankle is raised until the toes clear (18 mm low before, 0 now).
+- `walk set` reset every other number to the defaults; it changes only the one named.
+- A rig facing -Z walked backwards: forward is read from the feet (ankle to toes), else the armature's turn.
+- Shapes taken for legs too eagerly; a heel bone taken for the toes; IK controls found outside the character.
+- Legs without IK bent their knees the wrong way: the knee bends the way it did at rest.
+- Generate on a failed walk left an empty clip, cut a longer clip short and removed the hands' contacts. It works on a
+  copy now, keeps the clip's length and replaces only the legs' contacts and the tracks it wrote.
+- The preset list stuck on a loaded or blended style (it says "custom"); the Animation window's body strip and the
+  Inspector's Body Mass showed with the physics tools off.
+
+**Checked**
+- New tests (round 145):
+  - a planted foot's heel or toes (whichever is on the ground) move 0.000 mm; the treadmill's seam is 0.0002 mm;
+  - the soles never below the floor; the hands swing 37 cm through their IK targets; a rig facing -Z walks -Z;
+  - `walk set` keeps the other numbers; a walk too long to make leaves no clip;
+  - a leg twice as long gives a cycle twice as long and sqrt(2) as slow;
+  - a run is airborne, a walk never;
+  - a trot moves diagonal pairs together;
+  - presets, blending and `.gait` files;
+  - the quadruped walks;
+  - AutoPhysics moves a walk at most a few centimetres;
+  - in the editor: refused while off, on as ordinary keys that edit by hand and undo in one step.
+- Unit checks (rounds 144-145 in one chain): Windows 10,857, 0 failed (808 tests); the whole suite in render-cache
+  verify mode: 10,858, 0 failed, 0 stale pictures. Linux with libraries: 10,593, 0 failed. Sanitizer build: 10,471,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 144): animation assistants switched on, and the rig read for walking (task 0124, ADR 0045)
+
+**Asked:** "Make sure that this is a toggle feature. Not all animation needs these feature." and "Still have the
+ability to traditionally pose and animate models."
+
+**Added**
+- **Preferences > Animation Assistants:** a switch each for the Physics Tools (on, as they were), Walk Cycle,
+  Footsteps, Locomotion and AI Inbetweening (off).
+  - Off, a tool's buttons, sections, overlays and live work are gone, and its console command says how to turn it on.
+  - Hand animation never changes.
+  - Console: `assist list | on <name> | off <name>`.
+- **`gait::analyse`:**
+  - legs, arms, hips, spine and head, by names (Mixamo, Unity, Rigify, `create_rig`'s; `limb_of` is now public) and
+    then by shape;
+  - two legs or four, each with its IK target and pole;
+  - the measures and the rest pose;
+  - a reason when a rig can't walk.
+
+**Checked**
+- New tests (round 144):
+  - the switches' first state, refusals and keeping through a restart;
+  - the humanoid and quadruped rigs, Mixamo and Rigify names and an unnamed stick figure read right;
+  - degenerate rigs refused with why.
+- Unit checks: with round 145's (one chain for rounds 144-145; there). With every assistant off, the existing
+  animation tests pass unchanged.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 143): MoonRay built for macOS too (task 0111)
+
+**Asked:** round 135's "Do and finish all tasks" - the MoonRay archive for macOS, which CI hadn't built yet.
+
+**Fixed**
+- CI's macOS packaging stopped silently (`set -e`): `otool` failing on a scene object folder's non-library files, and a
+  library's `@rpath` install name found nowhere. Both are passed over now, with progress printed.
+
+**Checked**
+- CI run 39130702928: MoonRay built on Apple silicon and packaged into a 240 MB archive (149 libraries). On a clean
+  macOS 15 runner the archive unpacked and rendered its test scene in 8 s. With Linux's (round 136), both archives
+  Blendity offers are built and checked; publishing them to a release is the user's call.
+- No source changed (CI scripts and docs only): the suite stands as round 142 ran it.
+
+## 2026-10-18 (round 142): physics for animation written up (task 0123)
+
+**Asked:** the physics plan's last task, finishing "Finish and do all tasks please."
+
+**Added**
+- Learn: "Physics for animation: a jump from start to finish".
+  - The whole set in Cascadeur's order: weigh, contacts, flight or AutoPhysics, then spring bones, the ragdoll and
+    AutoPosing.
+  - The ghost and its colours, shared by all of them.
+  - A Try-it: a person jumping in straight lines, its contacts found and its flight shown corrected.
+- CI's MoonRay build on macOS:
+  - freetype2 on the include path for MoonRay's telemetry overlay;
+  - the dependencies' cache found by prefix when the build script changes (it takes hours to rebuild).
+
+**Checked**
+- A new test (round 142) runs the Try-it as the Learn tab does: 4 contacts and one flight, moved up to 0.84 m (the
+  keyed 1 m peak was too high for 0.67 s in the air).
+- Unit checks (rounds 140-142 in one chain): Windows 10,832, 0 failed (798 tests); the whole suite in render-cache
+  verify mode: 10,833, 0 failed, 0 stale pictures. Linux with libraries: 10,568, 0 failed. Sanitizer build: 10,447,
+  0 failed, no reports (without Jolt: the ragdoll's tests say so and skip). `editor_fuzz` in verify mode: 6,000
+  frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 141): AutoPosing: the whole body posed by one end (task 0122)
+
+**Asked:** the physics plan's AutoPosing (the user chose rule-based), as part of "Finish and do all tasks please."
+
+**Added**
+- **AutoPosing** (the Animation window's button, `autopose on`): drag a hand, a foot, the head or the hips with the move
+  gizmo and the whole body follows.
+  - **The solver:** a full-body inverse kinematics by damped least squares over every body bone and the hips' place.
+  - **Feet:** the feet stay (the contacts at the playhead, bones you lock, or else the feet).
+  - **Balance:** the center of mass stays over them.
+  - **Natural poses:** each joint stays within 75 degrees of the pose it started in (the spine half of that) and is
+    pulled back towards it.
+  - **Speed:** under a millisecond for a humanoid, live while dragging.
+  - **IK:** the targets move with the pose, so IK agrees with it.
+  - **On release:** the moved bones are keyed at the playhead, in the drag's undo step.
+- The console: `autopose on|off | drag <bone> <x> <y> <z> | lock <bone> | unlock <bone> | locks`.
+- Learn: "AutoPosing: pose the whole body by one end".
+
+**Fixed on the way**
+- The Windows build's command line passed cmd's 8,191-character limit with the new files ("The input line is too
+  long"): the sources now go to the compiler in a response file.
+- A target far out of reach walked the body off its feet (a foot 2 m). Now:
+  - each goal pulls at most 10 cm a step;
+  - pins weigh ten times a goal;
+  - the hips move at most 30 cm with feet pinned;
+  - settle passes put a slipped pin back (29 cm before them, 0 after).
+
+**Checked**
+- New tests (round 141):
+  - a hand in reach: 0.6 mm off, the feet held, joints within their limits, the head barely turned, 0.5 ms;
+  - the head forward: the center of mass 3.4 cm from over the feet with balance, against 6.6 cm without;
+  - 5 m out of reach: the arm points at the target (2 degrees), a foot within 12 mm, all finite;
+  - the hips dragged 25 cm down: a crouch 5.6 mm off, the feet held and flat, the knees bending forward;
+  - in the editor: a drag posed and keyed, one undo step, the IK targets and poles following (the elbow kept to
+    0.0 mm through IK), a locked hand staying.
+- An Opus review (the Jacobians, the solve and the limits checked: correct); every finding fixed:
+  - dragging the hips pinned nothing (the feet were "below the dragged bone"), so the body slid;
+  - IK poles weren't moved, so IK undid the knees' and elbows' bend;
+  - a pinned foot kept its place but not its turn (toes through the floor);
+  - the costs per drag frame (subtree sums by parents now, pins and IK chains worked out once a drag, the body kept
+    between drags, settling stopping when done);
+  - limits were measured from where each drag started, so they piled up, and knees could bend sideways (now from the
+    rest, and a knee or elbow turns only about its bend axis);
+  - a drag cut short left stale state;
+  - every moved bone got Position keys, and IK-driven bones were keyed;
+  - Play logged keys it didn't write;
+  - balance counted locked hands as support;
+  - the locks outlived the scene.
+- Found while fixing:
+  - balance fought a dragged goal (a crouch stopped 5 cm short). It now works only with joints that move no goal and
+    no pin, leaning the torso instead.
+  - A locked hand had switched off the feet's pinning.
+- Unit checks: with round 142's (one chain for rounds 140-142; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 140): the active ragdoll: hits and falls that react (task 0121, ADR 0044)
+
+**Asked:** the physics plan's active ragdoll (the user chose Jolt), as part of "Finish and do all tasks please."
+
+**Added**
+- **The active ragdoll** (with Blender's libraries: Jolt Physics):
+  - the character as capsules, one per weighed bone, joined with humanoid limits;
+  - joint motors drive it to the clip's pose with a strength; the hips are pulled to their place;
+  - a floor under the clip's lowest point;
+  - simulated on one thread, so the same clip always gives the same keys.
+- **Events in the clip:** a hit (an impulse on a bone at a frame), limp (the motors off from a frame: a fall) and strong
+  (on again). They are saved with the clip.
+- The Animation window's **Ragdoll** button: simulated in the background, shown as a ghost, Apply one undo step. The
+  console: `body ragdoll show [strength] | apply | off | hit | limp | strong | events | clear`.
+- AutoPhysics and the ragdoll share one background worker, which hands back the finished result.
+- Learn: "The active ragdoll: hits and falls".
+
+**Fixed on the way**
+- Blender's Jolt is built without RTTI, so a `dynamic_cast` on its constraints crashed. They are told apart by Jolt's
+  own type.
+
+**Checked**
+- New tests (round 140), skipped without Jolt:
+  - full strength follows the clip within 6.2 degrees, strength 0.2 within 64;
+  - limp from a tipped pose, it falls from 1.17 m to the floor and rests;
+  - a hit on a bone moves it most (0.32 m against 0.05 m);
+  - a hit on the hips knocks the body back 0.7 m even at full strength;
+  - an absurd impulse leaves finite keys;
+  - two runs give identical keys;
+  - events survive saving;
+  - in the editor: a worker, the ghost, Apply and undo.
+- An Opus review (no crash or lifetime fault; the threading checked); every finding fixed:
+  - the hips' drive erased a hit (it now gives way for half a second after one);
+  - the strength only capped the torque (it now sets the motors' stiffness too, and each joint's torque comes from the
+    weight it carries);
+  - the joints' limits were centred on the clip's first frame, not the rest pose;
+  - bones touching in the first pose (thighs, shoulders and chest) could push apart;
+  - a bone under a weightless helper was keyed in the wrong place;
+  - the floor started inside the capsules;
+  - the AutoPhysics button lit up for a ragdoll;
+  - Jolt's layers were destroyed before the system, and a failed ragdoll left the floor in it;
+  - early hits were lost, hits on bones that aren't joints said nothing, and huge ones could write non-finite keys;
+  - a fallen body could sleep through "strong";
+  - Apply's label, the replaced-key count, and a strength that isn't a number.
+- Unit checks: with round 142's (one chain for rounds 140-142; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 139): spring bones for hair, ears, tails and cloth, found automatically (task 0120)
+
+**Asked:** the physics plan's secondary motion, with "auto select hair bone, ear bone, cloth bone sequences
+automatically. Or recursively if I select a parent bone that is the start of that specific chain" and "make sure that I
+can also deselect or uncatogorize the chains if it's unneeded"; then "Finish and do all tasks please."
+
+**Added**
+- **SpringBone** on a chain's first bone: hair, ear, tail or cloth, each with its own stiffness, damping, gravity and
+  radius.
+  - The chain lags behind the body, swings past and settles, kept outside the body's bones.
+  - It is the same at any frame rate: substeps, with rates per 1/60 s.
+  - Live in Play, on the pose IK finished. **Bake into Clip** keys it frame by frame from the rest pose (the same keys
+    when baked again, from the UI too), turns the live simulation off, and is one undo step.
+- **Chains found automatically** (Rigging > Spring Bones > Find Spring Chains).
+  - **By name:** hair, ponytail, ear, tail, skirt, cape and more, from Mixamo, VRM's `J_Sec_` and Japanese rigs'
+    kami / mimi / shippo / sukato.
+  - **By shape:** every branch of a fork is its own chain.
+  - **Never offered:** limbs, fingers, toes, head, eyes or jaw.
+  - Named chains come ticked and labelled; unnamed extras are listed unticked.
+- **Your choice wins:**
+  - untick a chain, change its label, or set it to **None**;
+  - None and Remove are remembered on the chain's first bone ("Not a Spring Chain"), so Find doesn't offer it again;
+  - Show Ignored and Unignore bring one back;
+  - **Add Spring Bones** on a selected bone works recursively (a hair root's strands, a chain each);
+  - **Remove** on a chain or a parent takes everything under it off, in one undo step.
+- The console: `spring find [all] | apply | tick | label | add | remove | ignore | unignore | bake | list`.
+- Learn: "Spring bones: hair, ears, tails and cloth".
+
+**Checked**
+- New tests (round 139):
+  - 27 names across rig conventions read right;
+  - Find on a Mixamo body picks exactly the 5 strands, 2 ears, the tail and 2 skirt strips, labelled, with an unnamed
+    extra unticked;
+  - a hair root makes five chains and leaves out a body bone under it;
+  - at rest nothing moves; a stopping hip makes the tail swing past (1.8 cm) and settle;
+  - collision keeps a tail out of a thigh (off: through it);
+  - baking twice gives identical keys and puts the scene back;
+  - in the editor: untick, None and Apply; ignored until Unignore; Remove on the hair root as one undo step, undone
+    whole;
+  - labels, settings and the ignored mark saved and loaded;
+  - live in Play, and not when baked;
+  - the same swing at 30, 60 and 144 frames a second (1.70, 1.70 and 1.74 cm past);
+  - a 50 m teleport starts the chain afresh.
+- An Opus review; every finding fixed:
+  - the Find list held the bones themselves: Play and Stop, or an undo, left it pointing at freed objects (it keeps
+    their ids now);
+  - other chains' bones counted as the body: strands pushed each other apart (and the body's capsules were rebuilt
+    per chain per step: now once per armature);
+  - springs stepped before IK, a frame behind a limb IK moves;
+  - Add again reset tuned chains and re-added chains set to None;
+  - Add on a strand's middle bone split it;
+  - None took off the chains below a fork too;
+  - names looked up across characters;
+  - `spring add <bone> none` added cloth;
+  - a second bake found nothing;
+  - Euler keys could flip near 90 degrees;
+  - a zero-length bone's tip drifted;
+  - a teleport whipped the chain;
+  - ignoring a middle bone did nothing;
+  - a frame's whole move kicked the chain at once (30 fps swung less than 60).
+- Unit checks (rounds 138 and 139 in one chain): Windows 10,811, 0 failed (789 tests); the whole suite in render-cache
+  verify mode: 10,812, 0 failed, 0 stale pictures. Linux with libraries: 10,547, 0 failed. Sanitizer build: 10,438,
+  one failed - "spring bones in Play" measured 3.0 mm of lag against its 3 mm floor, the sanitizer's slow frames
+  hitting Play's 0.05 s step cap. Its hips now move 5 cm a frame (the lag clear of the floor at any frame time); no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 138): AutoPhysics: the whole clip made physically possible (tasks 0118, 0119, ADR 0043)
+
+**Asked:** "Finish and do all tasks please" (the physics plan's next tasks: the AutoPhysics spike, then AutoPhysics).
+
+**Added**
+- **The spike (task 0118, ADR 0043): GO.**
+  - The body is reduced to its center of mass and its spin, pushed only by gravity and the contacts' forces
+    (centroidal dynamics).
+  - One trajectory optimisation over the clip finds the nearest motion with Newton's and Euler's laws holding at
+    every frame and each force pushing inside its friction pyramid.
+  - Measured on four clips of 100 frames (a jump, a run, a flip, a fall onto the hands): 221-493 ms each, the laws
+    held to 7e-6 to 1.3e-4 of the body's weight, flights falling at exactly g, and a flip's spin constant in the air.
+- **Blendity's own QP solver** (`core/qp`): ADMM as OSQP does it, with a banded Cholesky factorisation (a trajectory
+  couples only frames a few apart), warm starts, an adaptive step and cancel. No new dependency.
+- **AutoPhysics (task 0119):** the Animation window's AutoPhysics button.
+  - Sampled on the editor's thread, solved on a worker ("Solving..."), shown with Flight's ghost, frame colours and
+    Apply (one undo step).
+  - The hips carry the correction; the feet's and hands' targets are held through their contacts and follow the body
+    again over 4 frames after.
+  - A clip edited while it solves isn't shown. The console: `body physics show|apply|off`.
+- Learn: "AutoPhysics: the whole clip", with questions.
+
+**Checked**
+- New tests (round 138):
+  - the QP's known answers, an equality, bounds, a warm start, a 2,000-unknown chain in its band, an empty constraint
+    refused;
+  - the four clips' times, residuals and moves;
+  - standing coming back as it was, and bad input refused;
+  - a jump keyed in straight lines made a parabola, with the foot held and the keyed clip realising the solved
+    center;
+  - a possible clip all green; missing contacts or contacts on bones that aren't IK ends explained; a cancelled
+    solve;
+  - in the editor: the worker, the ghost, Apply and undo, an edited clip not shown, Off.
+- An Opus review (the math, the solver and the worker's lifetimes checked: correct); every finding fixed:
+  - a finished solve waited for the mouse to move (the editor slept);
+  - the turn left at the end was taken back in the air too, where nothing could do it;
+  - Euler's central difference let the momentum zig-zag between even and odd frames;
+  - results were judged by the solver's status, not the laws (a long clip thrown away, an unsettled one kept);
+  - no limit on a clip's length, no cancel between passes, non-finite lengths not refused;
+  - a result could arrive in Play, show on another scene with a clip where the old one was, or replace Flight's;
+  - a contact pushed at its first frame's tip, not where the clip has it.
+- Unit checks: with round 139's (one chain for both; there). CI's sanitizer runner took 13 s on the spike's four clips
+  (the guard was 5 s): their time is checked in optimized builds only.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 137): physics for animation: the body's masses, contacts and flight (tasks 0115-0117, ADR 0042)
+
+**Asked:** "Is there a way to implement body simulation for animation like in Cascadeur." The user chose the center of
+mass with ballistics, the full AutoPhysics solve, secondary motion, an active ragdoll (Jolt) and rule-based
+AutoPosing; then that hair, ear and cloth chains be found automatically (or from a parent bone) and can be unticked or
+relabelled; then "Finish and do all tasks please." This round is the first three tasks of that plan.
+
+**Added**
+- **The body's masses (task 0115, ADR 0042):** each deforming bone weighs its share of the skinned mesh's volume
+  (tetrahedra against the bone's own middle, shared by the corners' weights), with its center and inertia; bones
+  without a skin get capsules; all scaled to the armature's **Body Mass** (75 kg, in the Inspector). The center of
+  mass and the whole body's inertia follow any pose, the rig root's motion included.
+- **The center of mass in a clip:** the Animation window's **Center of Mass** button draws its path over the clip,
+  where it is at the playhead and the point under it. The body is built once per rig and skin, not every frame.
+- **Contacts (task 0116):** an IK chain's end within 5 cm of the ground and slower than 0.5 m/s for 2 frames or more
+  is a contact, shown as bars under the ruler (set by hand brighter, and kept when contacts are found again). Pin
+  keys the IK target still through each one, its parent's motion frame by frame taken into account. Contacts are
+  saved in the clip.
+- **Flight (task 0117):** between a take-off and a landing the center of mass is put on the parabola through them at
+  their times (g = 9.81 m/s^2), and the body turned about it so the angular momentum stays the take-off's (solved in
+  the turned axes, refined until it holds); the landing pose kept by default. **Flight** shows the corrected body as a
+  ghost, its frames green (fine), blue (changed) or red (impossible: nothing written); **Apply** keys it into the
+  clip as one undo step, only into the clip it was worked out for.
+- The console: `body show on|off`, `body mass [kg]`, `body com [frame]`, `body contacts find|pin|clear|list|add|remove`,
+  `body flight show|apply|off`.
+- Learn: "Physics for animation: the center of mass" and "Contacts and flight", each with Try it and questions.
+
+**Checked**
+- New tests (round 137): two skinned boxes weigh 25 and 50 of 75 kg with their centers and inertias; the center of
+  mass and inertia follow a pose (parallel axes), capsules without a skin; a clip's trajectory follows the root and
+  leaves the scene as it was; an IK leg's rests found within a frame, a manual contact kept, pinning holding the
+  target, contacts saved and loaded; a straight jump made an exact parabola, a tuck's angular momentum kept within 3%
+  (0.5% on a double spin), the landing pose kept, an impossible jump marked red and not written; in the editor Body
+  Mass, contacts, the ghost and Apply as one undo step.
+- An Opus review; every finding fixed:
+  - the overlay rebuilt the body every frame;
+  - IK targets were keyed against a fixed parent with a moving root;
+  - Apply could write the clip of another character selected since;
+  - contacts outside the clip weren't clamped, and replaced keys weren't counted;
+  - the hips were guessed from the first bone (now the root, else the heaviest top bone);
+  - a turn could flip Euler angles (the other solution is now taken when nearer);
+  - the momentum correction worked in the wrong axes for a large turn;
+  - the body's cache ignored the bones; Apply ran while playing; animated values other than transforms weren't put
+    back; `body com` read the wrong frame; manual contacts didn't trim found ones.
+- Unit checks: Windows 10,753, 0 failed (773 tests); the whole suite in render-cache verify mode: 10,754,
+  0 failed, 0 stale pictures. Linux with libraries: 10,489, 0 failed. Sanitizer build: 10,380, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 136): MoonRay checked against the real renderer (task 0113)
+
+**Asked:** "Do and finish all tasks" (round 135's), with CI's Linux MoonRay archive downloaded into WSL to check the
+export against the real thing ("Yes, download it into WSL").
+
+**Fixed** (each measured in MoonRay v2026.29.1 against F12's path tracer on the same scene)
+- **Textured materials rendered black:** MoonRay's texture system takes only tiled, mip-mapped files (as `maketx`
+  makes them), so every PNG failed. Textures now go as tiled float EXRs with every mip level (`write_texture_exr`,
+  dependency-free, area-weighted levels, wrapping), linear (an 8-bit colour map's sRGB undone first), made on the
+  render's thread and kept while the source is unchanged.
+- **The world map was turned:** its directions were measured with a map whose pixels are their own coordinates; the
+  world, its sky and its azimuth now match to 0.1%.
+- **A sun was twice as bright:** a DistantLight's normalized intensity is Blendity's intensity as it is (both give
+  pi x I of irradiance); it matches to 1%.
+- The world didn't show behind the scene (MoonRay hides lights from the camera by default), and an empty scene
+  rendered black (MoonRay needs geometry in its layer: a speck far below is added).
+- MoonRay's own error lines are in the log.
+- CI's MoonRay build: Python 3.11 (Boost.Python failed on 3.13), autotools on macOS, the dependencies' cache saved
+  even when a later step fails, the check containers allowed `mbind`.
+
+**Checked**
+- New tests (round 136): the texture EXR's tiles where its table says on every level, down to one pixel of the
+  image's exact mean (odd sizes too), made once while its source is unchanged, an unreadable one white; with `BLENDITY_REAL_MOONRAY=1` and MoonRay installed, five scenes rendered in
+  both: the world 1.000, a sky's azimuth 1.000, a sun 0.991, a point light at 1 m 0.891 (MoonRay's falloff is
+  physical), a four-colour texture the same colour in each quadrant.
+- An Opus review (the EXR format checked field by field: no fault); every finding fixed:
+  - textures were converted on the editor's thread, and again on every frame of an animation: they are now made on
+    the render's own thread before MoonRay starts, kept while their source is unchanged, and written without copies;
+  - a texture used by two materials was converted twice;
+  - MoonRay's last error line was lost without its newline, and its errors were logged again on every frame.
+- Unit checks: Windows 10,706 (763 tests); this round's tree alone, Linux without Blender's libraries: 10,334,
+  0 failed. Run together with round 137 (the full chain): Windows 10,753, render-cache verify mode 10,754 (0 stale
+  pictures), Linux with libraries 10,489, the sanitizer build 10,380 (no reports), all 0 failed; `editor_fuzz` in
+  verify mode 6,000 frames, no crash, 0 stale pictures.
+
 ## 2026-10-18 (round 135): MoonRay as an optional external renderer (tasks 0111-0114, ADR 0041)
 
 **Asked:** "Is it possible to integrate MoonRay from DreamWorks into this project?", then "Let's make this an external

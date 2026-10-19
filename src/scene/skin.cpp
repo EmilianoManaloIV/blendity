@@ -72,6 +72,8 @@ void Bone::reflect(Reflector &r) {
   r.help("How long the bone is drawn along its +Y (Blender's bones point along their Y).");
   r.field("Deform", deform);
   r.help("Moves the vertices of the vertex group named after it (Blender: Bone > Deform).");
+  r.field("Not a Spring Chain", spring_ignored);
+  r.help("Find Spring Chains doesn't offer the chain this bone starts (set by None or Remove; untick to offer it again).");
   r.field("Rest Position", rest_position);
   if (r.all_fields()) {  // files, undo, hashing: the exact quaternion
     Vec3 xyz(rest_rotation.x, rest_rotation.y, rest_rotation.z);
@@ -103,6 +105,10 @@ void Armature::reflect(Reflector &r) {
   r.field("Rest Position", rest_position);
   r.help("Shows every skin bound to this armature unposed (Blender: Rest Position).");
   r.field("In Front", in_front);
+  if (!show_body_mass && !r.all_fields()) return;  // (the physics tools switched off: not shown; files and undo keep it)
+  r.field("Body Mass", body_mass, 0.5f, 0.01f, 100000.0f);
+  r.help("The whole body in kilograms, shared among the bones by the volume of mesh each moves (Animation > Physics:\n"
+         "the center of mass, ballistic jumps). Cascadeur: the character's mass.");
 }
 
 void SkinModifier::reflect(Reflector &r) {

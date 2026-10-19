@@ -67,6 +67,10 @@ void Editor::poll_updates() {
     upd_.want_moonray = false;
     if (offer_moonray()) return;  // (an update is offered by the next check: one question at a time)
   }
+  if (upd_.want_ai) {  // (task 0129: the AI download, asked through the same check)
+    upd_.want_ai = false;
+    if (offer_ai()) return;
+  }
   const bool libs_shown = upd_.want_libs && offer_libraries();
   if (libs_shown || !updates) return;  // (a libraries-only check never offers an update the user turned off)
   if (upd_.offer.empty()) {
@@ -224,10 +228,11 @@ void Editor::install_release(const std::string &tag) {
 
 /* `a` downloaded and checked against the release's SHA256SUMS.txt in the background; then installed, or unpacked as
  * the libraries (`libraries`), by poll_update_download. */
-void Editor::download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray) {
+void Editor::download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray, bool ai) {
   auto job = std::make_shared<UpdateDownload>();
   job->libraries = libraries;
   job->moonray = moonray;
+  job->ai = ai;
   job->mr = mr_;
   job->file = net::safe_file_name(a.name);
   if (job->file.empty()) return Log::warn("Updates: '%s' isn't a plain file name: not downloaded", a.name.c_str());
@@ -272,6 +277,11 @@ void Editor::poll_update_download() {
     save_prefs();
     if (dialog_ == Dialog::MoonRay) dialog_ = Dialog::None;
     return Log::info("MoonRay %s is installed: Render Settings > Render Engine > MoonRay", mr_.version.c_str());
+  }
+  if (job->ai) {  // (task 0129: unpacked and a test inference run on the downloading thread)
+    ai_.rt.reset();
+    if (dialog_ == Dialog::Ai) dialog_ = Dialog::None;
+    return Log::info("AI Inbetweening is installed: the Animation window's AI Inbetween");
   }
   run_installer(job->path);
 }
@@ -374,6 +384,7 @@ void Editor::draw_libraries_dialog(const std::function<void()> &close) {
 bool Editor::prepare_install(UpdateDownload &job, std::string &error) {
   if (job.libraries) return unpack_libraries(job.path, error);
   if (job.moonray) return moonray::unpack(job.mr, job.path, error);
+  if (job.ai) return ai::unpack(job.path, error);
 #if !defined(_WIN32) && !defined(__APPLE__)
   const char *appimage = std::getenv("APPIMAGE");
   if (!appimage || !*appimage) return true;

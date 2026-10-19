@@ -64,6 +64,8 @@ struct Textures {
   std::map<std::string, std::string> nodes;  // key -> node name
   std::string defs;
   size_t count = 0;
+  std::string dir;                             // where the textures are made (tiled, mip-mapped EXRs)
+  std::map<std::string, std::string> files;  // source and mode -> the EXR made from it (shared by every node using it)
 };
 }  // namespace
 
@@ -83,7 +85,9 @@ Mat4 to_right_handed(const Mat4 &m) {
 }
 
 Vec3 env_map_direction(float u, float v) {
-  const float phi = (u - 0.5f) * 2.0f * kPiF, theta = v * kPiF;
+  /* Measured against MoonRay v2026.29.1 (a map whose pixels are their own u and v, looked at along each axis): u 0 is
+   * -Z, 0.25 +X, 0.5 +Z, 0.75 -X; the rows as write_pfm takes them, v 0 straight up and 1 straight down. */
+  const float phi = u * 2.0f * kPiF, theta = v * kPiF;
   return {std::sin(phi) * std::sin(theta), std::cos(theta), -std::cos(phi) * std::sin(theta)};
 }
 
@@ -110,14 +114,25 @@ std::string image_map(const TextureRef &t, const Material &m, bool normal, Vec3 
                           (t.non_color ? "1" : "0");
   auto it = tx.nodes.find(key);
   if (it != tx.nodes.end()) return it->second;
+  /* Made later, on the render's thread (convert_texture): its name from the source and how it's read, so a later
+   * render finds it made. */
+  const bool data = normal || t.non_color;
+  const std::string source_key = file + (data ? "|data" : "|colour");
+  std::string &tex_file = tx.files[source_key];
+  if (tex_file.empty()) {
+    uint64_t hsh = 1469598103934665603ull;  // (FNV-1a)
+    for (char ch : source_key) hsh = (hsh ^ (unsigned char)ch) * 1099511628211ull;
+    tex_file = fs::join(tx.dir, strprintf("tex-%016llx.exr", (unsigned long long)hsh));
+    rep.texture_jobs.push_back({file, tex_file, data});
+  }
   const std::string name = strprintf("%s(\"tex%zu\")", normal ? "ImageNormalMap" : "ImageMap", tx.count++);
   std::string &d = tx.defs;
   d += name + " {\n";
-  d += strprintf("    [\"%s\"] = %s,\n", normal ? "tangent_space_normal_texture" : "texture", quote(path(file)).c_str());
+  d += strprintf("    [\"%s\"] = %s,\n", normal ? "tangent_space_normal_texture" : "texture", quote(path(tex_file)).c_str());
   d += "    [\"scale\"] = " + vec2({m.tiling.x, m.tiling.y}) + ",\n";
   d += "    [\"offset\"] = " + vec2({m.offset.x, m.offset.y}) + ",\n";
   if (!normal) {
-    d += std::string("    [\"gamma\"] = \"") + (t.non_color ? "off" : "auto") + "\",\n";
+    d += "    [\"gamma\"] = \"off\",\n";  // (linear already)
     if (tint.x != 1.0f || tint.y != 1.0f || tint.z != 1.0f) d += "    [\"gain_offset_enabled\"] = true,\n    [\"gain\"] = " + rgb(tint) + ",\n";
   }
   d += "}\n";
@@ -241,7 +256,9 @@ std::string light(const RenderLight &l, size_t i, const ExportScene &sc, std::st
   };
   if (l.type == RenderLight::Directional) {
     head("DistantLight", light_frame(Vec3(0.0f), l.direction, Vec3(1, 0, 0)));
-    d += "    [\"normalized\"] = true,\n    [\"intensity\"] = " + lua_number(I) + ",\n";
+    /* Normalized, MoonRay's sun gives pi x its intensity of irradiance, as Blendity's does: the same number (measured
+     * against MoonRay v2026.29.1: a floor under both, within a percent). */
+    d += "    [\"normalized\"] = true,\n    [\"intensity\"] = " + lua_number(l.intensity) + ",\n";
     d += "    [\"angular_extent\"] = " + lua_number(sc.sun_angle_deg) + ",\n";
     return d + "}\n";
   }
@@ -285,7 +302,9 @@ std::string light(const RenderLight &l, size_t i, const ExportScene &sc, std::st
 std::string world_light(const ExportScene &sc, const std::string &dir, const PathMap &path, ExportReport &rep) {
   const Environment &env = *sc.world;
   std::string d = "EnvLight(\"world\") {\n";
-  if (sc.hide_background) d += "    [\"visible_in_camera\"] = \"force off\",\n";
+  /* Seen by the camera unless the background is hidden (SceneVariables keep other lights out of sight: lamps aren't drawn
+   * in Blendity, but its world is its background). */
+  d += sc.hide_background ? "    [\"visible_in_camera\"] = \"force off\",\n" : "    [\"visible_in_camera\"] = \"force on\",\n";
   if (env.mode == Environment::Color) {
     const Vec3 c = env.radiance(Vec3(0, 1, 0));
     if (!(c.x > 0 || c.y > 0 || c.z > 0)) return "";
@@ -312,15 +331,50 @@ std::string world_light(const ExportScene &sc, const std::string &dir, const Pat
 }
 }  // namespace
 
+bool convert_texture(const TextureJob &job, std::string &error) {
+  /* The source's size and time, kept beside what was made from it: unchanged, nothing to do. */
+  std::string stamp = "?";
+  for (const DirEntry &e : fs::list(fs::parent(job.source)))
+    if (e.name == fs::filename(job.source)) stamp = strprintf("%llu %lld", (unsigned long long)e.size, (long long)e.mtime);
+  const std::string stamp_file = job.dest + ".source";
+  std::string had;
+  if (stamp != "?" && fs::exists(job.dest) && fs::read_file(stamp_file, had) && had == stamp) return true;
+  fs::remove_file(stamp_file);
+  Bitmap bm;
+  if (!load_image(job.source, bm, error) || bm.width <= 0 || bm.height <= 0) {
+    const float white[3] = {1.0f, 1.0f, 1.0f};
+    write_texture_exr(job.dest, white, 1, 1);
+    if (error.empty()) error = "it has no pixels";
+    return false;
+  }
+  const size_t n = (size_t)bm.width * bm.height;
+  std::vector<float> px(n * 3);
+  JobSystem::global().parallel_for((int64_t)n, 1 << 14, [&](int64_t i0, int64_t i1) {
+    for (int64_t i = i0; i < i1; i++)
+      for (int c = 0; c < 3; c++) {
+        float v = bm.is_float ? bm.rgbaf[i * 4 + c] : job.data ? bm.rgba8[i * 4 + c] / 255.0f : srgb_byte_to_linear(bm.rgba8[i * 4 + c]);
+        px[i * 3 + c] = std::isfinite(v) ? v : 0.0f;
+      }
+  });
+  const int w = bm.width, h = bm.height;
+  bm = Bitmap();  // (its memory back before the levels are made)
+  if (!write_texture_exr(job.dest, px.data(), w, h)) return error = "it couldn't be written for MoonRay", false;
+  if (stamp != "?") fs::write_file(stamp_file, stamp);
+  return true;
+}
+
 bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &path, ExportReport &rep, std::string &error) {
   rep = ExportReport();
   if (sc.width <= 0 || sc.height <= 0) return error = "the image has no size", false;
   if (!fs::make_dirs(dir) && !fs::is_dir(dir)) return error = "can't make " + dir, false;
   rep.scene_path = fs::join(dir, "scene.rdla");
   rep.image_path = fs::join(dir, "frame.exr");
+  rep.progress_path = fs::join(dir, "progress.exr");
+  fs::remove_file(rep.progress_path);  // (the last render's: the new one starts empty)
   fs::remove_file(rep.image_path);
   Writer w;
   Textures tx;
+  tx.dir = dir;
   w.line("-- Written by Blendity for MoonRay " + std::string(kTag) + " (task 0113): the scene as F12 renders it.");
   /* Materials: one per distinct Blendity material. */
   std::map<const Material *, std::string> mats;
@@ -357,6 +411,16 @@ bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &
       rows.push_back("{" + g + ", " + quote(p) + ", " + material_for(s < slots.size() ? slots[s] : nullptr) +
                      ", LightSet(\"lights\"), undef(), undef(), undef(), undef()},");
     }
+  }
+  if (geoms.empty()) {  // (MoonRay renders nothing for a layer without geometry: a speck far below, so the world still shows)
+    w.line("RdlMeshGeometry(\"speck\") {");
+    w.line("    [\"vertices_by_index\"] = {0, 1, 2},");
+    w.line("    [\"vertex_list_0\"] = {Vec3(0, -100000, 0), Vec3(0.001, -100000, 0), Vec3(0, -100000, 0.001)},");
+    w.line("    [\"face_vertex_count\"] = {3},");
+    w.line("    [\"is_subd\"] = false,");
+    w.line("}");
+    geoms.push_back("RdlMeshGeometry(\"speck\")");
+    rows.push_back("{RdlMeshGeometry(\"speck\"), \"\", " + material_for(nullptr) + ", LightSet(\"lights\"), undef(), undef(), undef(), undef()},");
   }
   rep.materials = mats.size();
   /* Lights. */
@@ -420,12 +484,14 @@ bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &
   w.line("RenderOutput(\"beauty\") {");
   w.line("    [\"result\"] = \"beauty\",");
   w.line("    [\"file_name\"] = " + quote(path(rep.image_path)) + ",");
+  w.line("    [\"checkpoint_file_name\"] = " + quote(path(rep.progress_path)) + ",");
   w.line("    [\"compression\"] = \"none\",");
   w.line("    [\"channel_format\"] = \"float\",");
   w.line("}");
   w.line("RenderOutput(\"alpha\") {");
   w.line("    [\"result\"] = \"alpha\",");
   w.line("    [\"file_name\"] = " + quote(path(rep.image_path)) + ",");
+  w.line("    [\"checkpoint_file_name\"] = " + quote(path(rep.progress_path)) + ",");
   w.line("    [\"compression\"] = \"none\",");
   w.line("    [\"channel_format\"] = \"float\",");
   w.line("}");
@@ -439,6 +505,13 @@ bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &
   w.line(strprintf("    [\"max_depth\"] = %d,", std::max(1, sc.max_bounces)));
   w.line("    [\"lights_visible_in_camera\"] = false,");
   w.line("    [\"scene_scale\"] = 1,");  // (Blendity's unit is a metre; MoonRay's default is a centimetre)
+  /* The image as it fills in: a checkpoint after every quality step (about a second), which the Render panel shows. */
+  w.line("    [\"checkpoint_active\"] = true,");
+  w.line("    [\"checkpoint_mode\"] = 1,");  // (quality steps, not minutes)
+  w.line("    [\"checkpoint_quality_steps\"] = 1,");
+  w.line("    [\"checkpoint_start_sample\"] = 1,");
+  /* Its default image (scene.exr, unused: our RenderOutputs are the image) in our folder, not wherever MoonRay ran from. */
+  w.line("    [\"output_file\"] = " + quote(path(fs::join(fs::parent(rep.image_path), "scene.exr"))) + ",");
   w.line("}");
   if (!fs::write_file(rep.scene_path, w.out)) return error = "can't write " + rep.scene_path, false;
   return true;

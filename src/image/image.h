@@ -46,6 +46,9 @@ bool exr_available();
 bool decode_exr_plain(const std::string &bytes, Bitmap &out, std::string &error);
 /* Linear float RGB (3 floats per pixel, top row first) as a Portable Float Map (MoonRay's world maps). */
 bool write_pfm(const std::string &path, const float *rgb, int width, int height);
+/* Linear float RGB (top row first) as an uncompressed tiled OpenEXR with every mip level, box-filtered, wrapping
+ * periodically - what maketx makes. MoonRay's texture system takes nothing else (it refuses untiled and unmipped files). */
+bool write_texture_exr(const std::string &path, const float *rgb, int width, int height);
 /* Use libjpeg-turbo / libpng for decoding when built with them (default on);
  * off = Blendity's own decoders (stress tests compare both). */
 void set_image_library_codecs(bool on);

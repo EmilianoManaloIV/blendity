@@ -498,6 +498,47 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     anim_.curves = true;
     anim_.v_framed.clear();
   }
+  if (assist_on(Assist::Walk) &&
+      button(u.px(80), "Walk Cycle", false,
+             "A walking or running cycle made from the rig with the Rigging window's Walk Cycle settings (a preset and its numbers):\n"
+             "keys on the hips, the feet's IK targets, spine and arms, feet never sliding. Ordinary keys, one undo step."))
+    walk_generate();
+  if (assist_on(Assist::Ai)) draw_ai_toolbar(x, y, bh);
+  if (!assist_on(Assist::Physics)) return;  // (Preferences > Animation Assistants: the physics tools off)
+  if (button(u.px(118), "Center of Mass", body_.show_com,
+             "Physics (Cascadeur's center of mass): the body's center of mass over the whole clip in the Scene view, where it is\n"
+             "at the playhead and straight below it. Each bone weighs what its share of the skinned mesh does (Armature > Body Mass)."))
+    body_command({"body", "show", body_.show_com ? "off" : "on"});
+  if (button(u.px(76), "Contacts", false,
+             "Find where the feet and hands rest (low and still) and mark those frames as contacts under the ruler (Cascadeur's\n"
+             "fulcrum points). Contacts set by hand (console: body contacts add) are kept. Pin holds them still: body contacts pin."))
+    body_contacts_command({"body", "contacts", "find"});
+  if (button(u.px(60), "Flight", body_.ghost && body_.kind == "Flight",
+             "Physics in the air (Cascadeur's AutoPhysics): between contacts the center of mass follows a parabola under gravity\n"
+             "and the spin keeps its angular momentum. Shows the corrected body as a ghost; frames green (fine), blue (changed),\n"
+             "red (impossible: change the timing or the poses). Apply writes it into the clip."))
+    body_flight_command({"body", "flight", body_.ghost && body_.kind == "Flight" ? "off" : "show"});
+  const bool solving = body_.solve && body_.solve->kind == "AutoPhysics", shown = body_.ghost && body_.kind == "AutoPhysics";
+  if (button(u.px(86), solving ? "Solving..." : "AutoPhysics", shown || solving,
+             "The whole clip made physically possible (Cascadeur's AutoPhysics): the center of mass and the spin moved as little as\n"
+             "they can while the contacts' forces stay inside their friction and gravity does the rest - the take-offs and landings\n"
+             "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colours, then Apply."))
+    body_physics_command({"body", "physics", shown || solving ? "off" : "show"});
+  if (button(u.px(86), "AutoPosing", autopose_.on,
+             "Drag a hand, a foot, the head or the hips with the move gizmo and the whole body follows (Cascadeur's AutoPosing):\n"
+             "the spine and limbs bend within their limits, the feet stay on the ground, the center of mass stays over them. Keys\n"
+             "at the playhead on release. Locks: autopose lock <bone>."))
+    autopose_command({"autopose", autopose_.on ? "off" : "on"});
+  if (ragdoll::available()) {
+    const bool rag_shown = body_.ghost && body_.kind == "Ragdoll", rag_busy = body_.solve && body_.solve->kind == "Ragdoll";
+    if (button(u.px(70), rag_busy ? "Simulating..." : "Ragdoll", rag_shown || rag_busy,
+               "The clip played by an active ragdoll (Jolt): a capsule a bone, its joints' motors following the clip, so hits and\n"
+               "falls react physically. Events in the clip: body ragdoll hit <bone> <frame> <x> <y> <z>, limp <frame> (motors off: a\n"
+               "fall), strong <frame>. Simulated in the background, shown as a ghost, then Apply."))
+      body_ragdoll_command({"body", "ragdoll", rag_shown || rag_busy ? "off" : "show"});
+  }
+  if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
+    body_flight_command({"body", "flight", "apply"});
 }
 
 /* The clip menu's choice: a clip asset for the root's Animation, none ("-"), or a new clip (""). */
@@ -812,6 +853,7 @@ void Editor::draw_animation_window(const Recti &r) {
   const float end = std::max(30.0f, clip->end_frame()) * 1.1f;
   u.canvas.fill_rect({body.x, body.y, body.w, row_h}, u.theme.strip);
   draw_anim_ruler(ruler, sheet, end);
+  draw_body_strip(ruler, end);  // (contacts and the flight's frames under the ruler: tasks 0116, 0117)
   draw_anim_rows(*clip, root, list, body, sheet, row_h, end);
   anim_.sheet = sheet, anim_.sheet_end = end;
   if (anim_.curves) draw_anim_curves(*clip, sheet, end);

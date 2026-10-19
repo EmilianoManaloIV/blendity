@@ -4,7 +4,10 @@
 #include "editor.h"
 #include "../core/net.h"
 #include "../render/display.h"
+#include <chrono>
 #include <ctime>
+#include <filesystem>
+#include <mutex>
 
 namespace bl {
 
@@ -233,16 +236,58 @@ bool Editor::begin_moonray_render(const moonray::ExportScene &sc, const MoonRayF
   mr_frame_ = frame;
   auto job = std::make_shared<MoonRayJob>();
   job->image = rep.image_path;
+  job->progress_path = rep.progress_path;
   const std::string scene = moonray::path_for(in, rep.scene_path);
   MoonRayJob *j = job.get();  // (the job outlives its thread: its destructor joins it)
-  job->thread = std::thread([j, in, scene] {
-    std::string tail;
+  job->thread = std::thread([j, in, scene, textures = std::move(rep.texture_jobs)] {
+    for (const moonray::TextureJob &tj : textures) {  // (here, not on the editor's thread: a big image takes a while)
+      if (j->cancel.load()) return j->state.store(MoonRayJob::Cancelled);
+      std::string e;
+      if (!moonray::convert_texture(tj, e) && j->complaints.size() < 20)
+        j->complaints.push_back("the texture " + tj.source + " couldn't be read (" + e + "): its material's colour is used");
+    }
+    std::string tail, line;
+    /* MoonRay's checkpoints, watched twice a second while it renders (it prints nothing meanwhile): each new one read
+     * here, off the editor's thread, for the Render panel. MoonRay writes them whole (a .part file renamed). */
+    std::atomic<bool> ran{false};
+    std::thread watch([j, &ran] {
+      std::filesystem::file_time_type seen{};
+      while (!ran.load() && !j->cancel.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::error_code ec;
+        const auto t = std::filesystem::last_write_time(std::filesystem::u8path(j->progress_path), ec);
+        if (ec || t == seen) continue;
+        Bitmap bm;
+        std::string e;
+        if (!load_image(j->progress_path, bm, e) || !bm.is_float) continue;
+        seen = t;
+        std::lock_guard<std::mutex> lock(j->preview_mu);
+        j->preview = std::move(bm);
+        j->preview_version.fetch_add(1);
+      }
+    });
+    auto complain = [&] {  // (its "Error:" lines - a texture it couldn't read - kept to be logged, even when it renders)
+      const size_t at = line.find("Error:");
+      if (at != std::string::npos && j->complaints.size() < 20) {
+        std::string msg = line.substr(at);
+        msg.erase(std::remove(msg.begin(), msg.end(), '\x1b'), msg.end());
+        j->complaints.push_back(msg);
+      }
+      line.clear();
+    };
     const int code = moonray::run(in, {"-in", scene}, [&](const std::string &s) {
       tail += s;
+      for (char c : s) {
+        if (c == '\n' || c == '\r') complain();
+        else line += c;
+      }
       if (tail.size() > 4096) tail.erase(0, tail.size() - 2048);
       const float p = moonray::parse_progress(tail.size() > 200 ? tail.substr(tail.size() - 200) : tail);
       if (p >= 0.0f) j->progress.store(p);
     }, &j->cancel);
+    ran.store(true);
+    watch.join();
+    complain();  // (a last line without its newline)
     if (code == sys::kExitCancelled) return j->state.store(MoonRayJob::Cancelled);
     if (code == 0 && fs::exists(j->image)) return j->state.store(MoonRayJob::Done);
     j->error = strprintf("exit %d: %s", code, tail.size() > 600 ? tail.substr(tail.size() - 600).c_str() : tail.c_str());
@@ -269,11 +314,23 @@ void Editor::step_moonray_render() {
   const int st = mr_job_->state.load();
   render_time_ = now_seconds() - render_start_;
   if (st == MoonRayJob::Running) {
-    render_status_ = strprintf("MoonRay: %.0f%%  |  %.1f s", mr_job_->progress.load() * 100.0f, render_time_);
+    const float p = mr_job_->progress.load();
+    render_status_ = p > 0.0f ? strprintf("MoonRay: %.0f%%  |  %.1f s", p * 100.0f, render_time_)
+                              : strprintf("MoonRay: filling in (%d update%s)  |  %.1f s", mr_job_->preview_version.load(),
+                                          mr_job_->preview_version.load() == 1 ? "" : "s", render_time_);  // (checkpoints: no percentage)
+    const int v = mr_job_->preview_version.load();
+    if (v == mr_job_->preview_shown) return;
+    std::lock_guard<std::mutex> lock(mr_job_->preview_mu);
+    if (show_moonray_image(mr_job_->preview)) mr_job_->preview_shown = v, ui_.redraw = true;  // (the image filling in)
     return;
   }
   const std::shared_ptr<MoonRayJob> job = std::move(mr_job_);
   rendering_ = false;
+  for (const std::string &c : job->complaints) {  // (once each: an animation's frames all say the same)
+    if (std::find(mr_notes_shown_.begin(), mr_notes_shown_.end(), c) != mr_notes_shown_.end()) continue;
+    mr_notes_shown_.push_back(c);
+    Log::warn("MoonRay: %s", c.c_str());
+  }
   if (st != MoonRayJob::Done) {
     render_status_ = st == MoonRayJob::Cancelled ? "MoonRay: stopped" : "MoonRay failed: " + job->error;
     (st == MoonRayJob::Cancelled ? Log::info : Log::error)("%s", render_status_.c_str());
@@ -281,11 +338,19 @@ void Editor::step_moonray_render() {
   }
   Bitmap bm;
   std::string error;
-  if (!load_image(job->image, bm, error) || !bm.is_float || bm.width != mr_frame_.width || bm.height != mr_frame_.height) {
+  if (!load_image(job->image, bm, error) || !show_moonray_image(bm)) {
     render_status_ = "MoonRay's image couldn't be read: " + (error.empty() ? std::string("the wrong size") : error);
     Log::error("%s", render_status_.c_str());
     return moonray_frame_failed();
   }
+  render_status_ = strprintf("MoonRay %dx%d, %.1f s", mr_frame_.width, mr_frame_.height, render_time_);
+  Log::info("Render finished: %s", render_status_.c_str());
+}
+
+/* MoonRay's image (a checkpoint or the final one) in the Render panel: through Blendity's view transform and exposure,
+ * as the path tracer's, the background a camera's solid colour or transparent. False when it isn't this frame's. */
+bool Editor::show_moonray_image(const Bitmap &bm) {
+  if (!bm.is_float || bm.width != mr_frame_.width || bm.height != mr_frame_.height) return false;
   const MoonRayFrame &f = mr_frame_;
   const size_t n = (size_t)f.width * f.height;
   render_linear_.assign(n * 3, 0.0f);
@@ -312,8 +377,7 @@ void Editor::step_moonray_render() {
     }
     render_alpha_lin_ = alpha;
   }
-  render_status_ = strprintf("MoonRay %dx%d, %.1f s", f.width, f.height, render_time_);
-  Log::info("Render finished: %s", render_status_.c_str());
+  return true;
 }
 
 }  // namespace bl

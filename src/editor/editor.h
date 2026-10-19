@@ -40,9 +40,18 @@
 #include "ui.h"
 
 #include <atomic>
+#include <mutex>
 #include "../core/releases.h"
 #include "../render/moonray.h"
 #include "../render/moonray_export.h"
+#include "../scene/body_physics.h"
+#include "../scene/spring_bones.h"
+#include "../scene/ragdoll.h"
+#include "../scene/autopose.h"
+#include "../scene/gait.h"
+#include "../scene/footsteps.h"
+#include "../scene/locomotion.h"
+#include "../scene/inbetween.h"
 #include <array>
 #include <functional>
 #include <thread>
@@ -444,6 +453,7 @@ class Editor {
   Vec3 scene_eye() const { return cam_.position(); }
   /* Tests: the last F12 render's pixels (the Render window's image). */
   const Image &render_image_for_test() const { return render_img_; }
+  const std::vector<float> &render_linear_for_test() const { return render_linear_; }  // (the finished render's light, 3 floats a pixel)
   bool rendering_for_test() const { return rendering_; }
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
@@ -951,6 +961,208 @@ class Editor {
   void draw_skin_bind_buttons(GameObject *g, ui::Layout &lay);
   /* The Animation window (task 0059, animation_window.cpp). */
   AnimEditorState anim_;
+  /* ---- Physics for animation (tasks 0115-0122, body_ui.cpp) ---- */
+  struct BodyView {
+    bool show_com = false;  // the center of mass's path over the clip, drawn in the Scene view
+    uint64_t key = 0;       // what the body and the path were made for (body_refresh)
+    body::Body body;
+    std::vector<Vec3> path;  // the center of mass at each frame from first to last
+    float first = 0.0f, last = 0.0f;
+    /* Ballistic flight (task 0117): the corrected clip shown as a ghost and as frame colours until applied. */
+    bool ghost = false;
+    body::FlightResult flight;
+    uint64_t flight_clip_version = 0;  // the clip it was worked out for (edited since: shown no more) ...
+    uint64_t flight_root = 0;          // ... and whose: another character's clip is never shown or written with it
+    std::weak_ptr<AnimationClip> flight_clip;  // (weak: a clip gone with its scene never matches one made where it was)
+    size_t builds = 0;                 // bodies built (tests: the overlay doesn't build one a frame)
+    std::vector<std::vector<std::pair<Vec3, Vec3>>> ghost_bones;  // per frame: each bone, head to tip, corrected
+    std::string kind = "Flight";       // what the ghost shows: a flight's correction or AutoPhysics' (task 0119)
+    /* AutoPhysics' solve on a worker (a few hundred milliseconds): sampled here, solved there, keyed here when done. */
+    struct Solve {
+      std::string kind;  // "AutoPhysics", "Ragdoll"
+      std::thread thread;
+      std::atomic<bool> done{false}, cancel{false};
+      bool ok = false;  // (the result, made on the thread from its own copies)
+      body::FlightResult result;
+      std::string error;
+      double ms = 0.0;
+      std::weak_ptr<AnimationClip> clip;
+      uint64_t clip_version = 0, root = 0;
+      ~Solve() {
+        cancel = true;
+        if (thread.joinable()) thread.join();
+      }
+    };
+    std::unique_ptr<Solve> solve;
+  } body_;
+  bool body_refresh();
+  bool flight_current(const AnimationClip *clip);  // the flight shown is this clip's, as it is now
+  void draw_body_overlay();
+  void draw_body_strip(const Recti &ruler, float end);
+  void body_command(const std::vector<std::string> &t);
+  void body_contacts_command(const std::vector<std::string> &t);
+  void body_flight_command(const std::vector<std::string> &t);
+  void body_physics_command(const std::vector<std::string> &t);
+  void body_ragdoll_command(const std::vector<std::string> &t);
+  void body_start(const char *kind, const AnimationClipPtr &clip, GameObject &root,
+                  const std::function<bool(BodyView::Solve &, body::FlightResult &, std::string &)> &work);
+  void body_show_result(GameObject &root, const AnimationClipPtr &clip, const char *kind);
+  void body_poll();
+  /* ---- Spring bones (task 0120, spring_ui.cpp) ---- */
+  struct SpringView {
+    struct Row {
+      uint64_t id = 0;  // the chain's first bone (by id: Play, undo and loading replace the objects)
+      size_t bones = 0;
+      int label = 0;
+      bool named = false, ignored = false, added = false, tick = false;
+    };
+    std::vector<Row> found;  // the last Find, for the skeleton `root`
+    uint64_t root = 0;
+    bool with_ignored = false;
+  } spring_;
+  GameObject *spring_root();
+  GameObject *spring_bone_named(const std::string &name);
+  GameObject *spring_first_of(GameObject &bone);
+  void spring_find(bool with_ignored);
+  SpringView::Row *spring_row(const GameObject &first);
+  void spring_unignore(GameObject &first);
+  void spring_set_label(GameObject &first, int label);
+  void spring_apply();
+  void spring_add(GameObject &bone, int label);
+  void spring_remove(GameObject &bone);
+  void spring_bake();
+  void spring_command(const std::vector<std::string> &t);
+  void draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *bone);
+  /* ---- Animation assistants (task 0124, ADR 0045, assist_prefs.cpp): each switched on in Preferences ---- */
+ public:
+  enum class Assist { Physics, Walk, Footsteps, Locomotion, Ai, Count };
+  bool assist_on(Assist a) const;
+  void assist_set(Assist a, bool on);
+  void assist_command(const std::vector<std::string> &t);
+
+ private:
+  bool assist_[(int)Assist::Count] = {true, false, false, false, false};  // (physics tools as before; the rest off)
+  bool assist_require(Assist a);
+  bool assist_pref(const std::string &key, const std::string &value);
+  std::string assist_prefs_text() const;
+  void draw_assist_settings();
+  /* ---- Walk Cycle (task 0125, walk_ui.cpp) ---- */
+  struct WalkView {
+    gait::WalkSettings settings;
+  } walk_;
+  gait::Rig walk_rig();
+  void walk_preset(const std::string &name);
+  void walk_generate();
+  void draw_walk_section(ui::Layout &lay);
+  void walk_command(const std::vector<std::string> &t);
+  /* ---- Footsteps along a path (task 0126, footsteps_ui.cpp) ---- */
+  std::string steps_path_;  // the Rigging window's Path field
+  GroundGrid play_ground_;  // Locomotion's ground in Play: the scene's static meshes, gathered at Play start (task 0127)
+  /* ---- AI inbetweening (tasks 0129-0130, ai_ui.cpp) ---- */
+  struct AiJob {
+    std::atomic<bool> done{false};
+    ai::Request req;
+    std::vector<float> result;
+    std::string error;
+    uint64_t clip_version = 0;
+    std::weak_ptr<AnimationClip> clip;  // the clip and character it was made for (another one's never gets it)
+    uint64_t root = 0;
+    double ms = 0.0;
+    std::shared_ptr<ai::Runtime> rt;
+    ai::Head head;  // (a fine-tuned correction, when on)
+  };
+  /* A slow AI chore (a check, an install from a file) on a worker; logged when done. */
+  struct AiChore {
+    std::atomic<bool> done{false};
+    bool ok = false;
+    std::string what, message;
+  };
+  /* Fine-tuning on the character's clips (task 0131): on a worker, with progress and Stop. */
+  struct AiTune {
+    std::atomic<bool> done{false}, cancel{false};
+    std::atomic<int> progress{0}, total{0};
+    std::shared_ptr<ai::Runtime> rt;
+    std::vector<std::pair<std::vector<float>, int>> clips;  // each clip's frames on the model's skeleton, and how many
+    int style = 0;
+    ai::Head head;
+    std::string error, path, character;
+  };
+  struct AiState {
+    std::shared_ptr<ai::Runtime> rt;  // ONNX Runtime and the model, loaded on first use (on the job's thread)
+    std::shared_ptr<AiJob> job;
+    int style = 0;
+    uint32_t seed = 0;                // 0: as the keys say; others: Variation's
+    bool ghost = false;
+    ai::Span span;
+    AnimationClip result;             // the clip with the span made (Apply writes its tracks)
+    uint64_t clip_version = 0;        // the clip's when made (changed since: stale)
+    std::weak_ptr<AnimationClip> clip; // which clip, and whose (another selected: no ghost, no Apply)
+    uint64_t root = 0;
+    ai::ModelInfo info;               // the install's inbetween.json, read once (cleared on install / remove)
+    bool info_read = false;
+    std::shared_ptr<AiChore> chore;   // ai check / ai install <file>: on a worker
+    std::vector<std::vector<std::pair<Vec3, Vec3>>> poses;  // each made frame's bones, for the ghost
+    bool never_ask = false, asked = false;
+    std::shared_ptr<AiTune> tune;
+    ai::Head head;                    // the fine-tuned correction for `head_for` (task 0131)
+    std::string head_for;             // the character it belongs to
+    bool head_on = true;              // off: the shipped model alone
+  } ai_;
+  void ai_finetune(const std::string &sub);
+  static void ai_fit(AiTune &t);
+  void poll_ai_tune();
+  std::string ai_head_path(const GameObject &root) const;
+  bool ai_head_ready(const GameObject &root);
+  bool ai_current(GameObject *root, const AnimationClipPtr &clip) const;
+  void ai_chore(const std::string &what, const std::function<bool(std::string &)> &fn);
+  void ai_shutdown();
+  bool ai_info(ai::ModelInfo &info);
+  void ai_generate(int from, int to);
+  void poll_ai();
+  void draw_ai_overlay();
+  void draw_ai_toolbar(int &x, int y, int bh);
+  void ai_apply();
+  void ai_command(const std::vector<std::string> &t);
+  void ai_install(const std::string &archive);
+  bool offer_ai();
+  void draw_ai_dialog(const std::function<void()> &close);
+  void draw_ai_settings(const Recti &row);  // (on the AI Inbetweening switch's row)
+  void ai_switched_on();
+  bool ai_pref(const std::string &key, const std::string &value);
+  std::string ai_prefs_text() const;
+  void steps_focus();
+  GameObject *steps_group();
+  std::vector<steps::Plan::Print> steps_prints(GameObject &group, std::vector<steps::Plan::Print> *planned = nullptr);
+  GameObject *steps_root();
+  std::function<bool(Vec3, Vec3 &, Vec3 &)> steps_ground(const GameObject *root, const GameObject *path);
+  bool steps_apply(const steps::Plan &plan, const std::vector<steps::Plan::Print> &planned, const std::string &path_name, const char *label);
+  void steps_walk_path(const std::string &curve_name, bool keep_moved);
+  void steps_update();
+  void steps_command(const std::vector<std::string> &t);
+  void draw_steps_section(ui::Layout &lay);
+  void draw_footprint_soles();
+  void draw_footprint_frames(const Recti &view);
+  /* ---- AutoPosing (task 0122, autopose_ui.cpp) ---- */
+  struct AutoPoseView {
+    bool on = false;
+    uint64_t bone = 0, armature = 0;                        // the drag under way (0: none)
+    std::vector<std::pair<uint64_t, Transform>> start;      // everything under the armature as the drag started
+    body::Body body;
+    uint64_t body_key = 0;                                  // what `body` was weighed for (body::body_key)
+    std::vector<uint64_t> pins;                             // this drag's pinned bones
+    struct Ik {
+      uint64_t bone, target, pole;
+    };
+    std::vector<Ik> iks;                                    // this drag's IK chains (their targets and poles follow the pose)
+    std::vector<uint64_t> locks;                            // bones the user keeps where they are (cleared with the scene)
+    autopose::Result last;
+  } autopose_;
+  void autopose_begin(GameObject &bone);
+  std::vector<GameObject *> autopose_pins(GameObject &arm, GameObject &dragged);
+  void autopose_to(GameObject &bone, Vec3 target);
+  void autopose_end();
+  bool autopose_gizmo(uint64_t id, Vec3 target);
+  void autopose_command(const std::vector<std::string> &t);
   /* The Sequencer window (task 0062, sequencer_window.cpp). */
   SeqEditorState seqr_;
   std::vector<std::string> seq_paths_;
@@ -2474,7 +2686,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {
@@ -2489,6 +2701,7 @@ class Editor {
     std::atomic<bool> cancel{false};
     bool libraries = false;  // (Blender's libraries for the fallback, task 0080: unpacked, not installed)
     bool moonray = false;    // (MoonRay, task 0112: unpacked where it runs, then its test scene rendered)
+    bool ai = false;         // (AI inbetweening, task 0129: unpacked into ~/.blendity/ai, then a test inference)
     moonray::Install mr;     // (where: located before the download)
     std::string file, path, error;
   };
@@ -2498,7 +2711,7 @@ class Editor {
     std::vector<releases::Release> list;
     std::vector<releases::Release> extras;  // the libraries archives' release (task 0082), when GitHub has it
     std::string offer, selected;  // tags
-    bool manual = false, history = false, want_libs = false, want_updates = false, want_moonray = false;
+    bool manual = false, history = false, want_libs = false, want_updates = false, want_moonray = false, want_ai = false;
   } upd_;
   /* ---- MoonRay, an external renderer (tasks 0112-0114, ADR 0041; moonray_ui.cpp) ---- */
   struct MoonRayLocate {
@@ -2523,6 +2736,13 @@ class Editor {
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel{false};
     std::string image, error;  // (the EXR it writes; what went wrong, with its output's end)
+    std::vector<std::string> complaints;  // (MoonRay's own "Error:" lines: logged even when it renders)
+    /* The image filling in: MoonRay's newest checkpoint, read on the job's thread (a 14 MB EXR: never the editor's). */
+    std::string progress_path;
+    std::mutex preview_mu;
+    Bitmap preview;
+    std::atomic<int> preview_version{0};
+    int preview_shown = 0;  // (the editor's: the version it shows)
     std::thread thread;
     ~MoonRayJob() {
       cancel.store(true);
@@ -2554,6 +2774,7 @@ class Editor {
   bool begin_moonray_render(const moonray::ExportScene &sc, const MoonRayFrame &frame);
   void step_moonray_render();
   void moonray_frame_failed();
+  bool show_moonray_image(const Bitmap &bm);
   bool start_moonray(int w, int h, const Mat4 &v, const Mat4 &p, const Camera *cam, Vec3 eye);  // F12 (render_view.cpp)
   bool mr_waiting_render_ = false;  // F12 asked for MoonRay before it was located: started once it is
   bool moonray_pref(const std::string &key, const std::string &value);  // (load_prefs: its keys)
@@ -2571,6 +2792,20 @@ class Editor {
   void moonray_offer_pending_for_test(bool on) { mr_offer_pending_ = on; }
   bool moonray_offer_pending_for_test() const { return mr_offer_pending_; }
   bool moonray_busy_for_test() const { return mr_task_ || mr_locate_; }
+  size_t body_builds_for_test() const { return body_.builds; }
+  bool body_ghost_for_test() const { return body_.ghost; }
+  bool body_show_com_for_test() const { return body_.show_com; }
+  bool autopose_on_for_test() const { return autopose_.on; }
+  const gait::WalkSettings &walk_settings_for_test() const { return walk_.settings; }
+  void ai_set_runtime_for_test(std::shared_ptr<ai::Runtime> r) { ai_.rt = std::move(r); }
+  bool ai_busy_for_test() const { return (bool)ai_.job; }
+  bool ai_ghost_for_test() const { return ai_.ghost; }
+  const AnimationClip &ai_result_for_test() const { return ai_.result; }
+  bool ai_tuning_for_test() const { return (bool)ai_.tune; }
+  bool ai_chore_busy_for_test() const { return (bool)ai_.chore; }
+  const ai::Head &ai_head_for_test() const { return ai_.head; }
+  bool body_solving_for_test() const { return body_.solve != nullptr; }
+  const body::FlightResult &body_result_for_test() const { return body_.flight; }
  private:
   double libs_last_check_ = 0.0;  // (the libraries are asked about at most once a day)
   static bool prepare_install(UpdateDownload &job, std::string &error);  // (on the downloading thread: no editor state)
@@ -2579,7 +2814,7 @@ class Editor {
   void check_libraries_at_start();
   bool offer_libraries();
   void draw_libraries_dialog(const std::function<void()> &close);
-  void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray = false);
+  void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray = false, bool ai = false);
   static bool unpack_libraries(const std::string &archive, std::string &error);
   void restart_program();
   void draw_libraries_settings();

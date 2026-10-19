@@ -10,6 +10,9 @@
 #include "../render/colormanagement.h"
 #include "../render/shading.h"
 #include "physics.h"
+#include "spring_bones.h"  // (SpringBone's registration)
+#include "footsteps.h"     // (Footprint's and Footsteps')
+#include "locomotion.h"    // (Locomotion's)
 
 #include <algorithm>
 #include <cstdlib>
@@ -79,6 +82,16 @@ void register_builtin_components() {
   reg<Bone>("Rigging", "A bone of a skeleton: a skin moves the vertices of the vertex group named after it.", "Bone (in an Armature)");
   reg<Armature>("Rigging", "On a skeleton's root: how skins deform (Linear or Dual Quaternion), Rest Position, Show Bones.",
                 "Armature object data");
+  reg<SpringBone>("Rigging", "Secondary motion on the chain this bone starts (hair, an ear, a tail, a cloth strip): it lags, swings past and\n"
+                             "settles as the body moves, kept outside the body's bones. Rigging > Spring Bones finds chains by name.",
+                   "Spring bones (VRM, Cascadeur), Blender's Wiggle Bones add-on");
+  reg<Locomotion>("Animation", "Walks and runs the character in Play wherever it goes (WASD, a PlayerController, a script's set_move): the\n"
+                  "gait of Walk Cycle made live, the feet put on the ground. Needs Preferences > Animation Assistants > Locomotion.",
+                  "a locomotion controller (Unity's Animator with a blend tree; CATMotion's path walking)");
+  reg<Footprint>("Animation", "One footprint of a walk along a path: when the foot lands (Frame) and which foot. Move and turn it with the\n"
+                 "gizmo; Rigging > Footsteps > Update walks the character on it.", "Biped's footsteps (3ds Max)");
+  reg<Footsteps>("Animation", "Holds a character's footprints (its children) and the path they were laid along: Rigging > Footsteps.",
+                 "Biped's footsteps (3ds Max)");
   reg<IKConstraint>("Rigging", "On the end bone of a chain (a shin, a forearm): the chain turns so its tip reaches the Target. "
                     "Move the target, not the bones; a Pole sets which way the knee or elbow points.",
                     "Inverse Kinematics bone constraint (with Pole Target)");
