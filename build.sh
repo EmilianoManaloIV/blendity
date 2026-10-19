@@ -21,7 +21,7 @@ FLAGS="$FLAGS ${EXTRA_FLAGS:-}"
 
 if [ "$OS" = "Darwin" ]; then
   PLATFORM_SRC="src/platform/platform_cocoa.mm"
-  LIBS="-framework Cocoa -framework QuartzCore"
+  LIBS="-framework Cocoa -framework QuartzCore -liconv"  # (iconv: Shift-JIS text, task 0136)
   OUT="dist/macos"
 else
   PLATFORM_SRC="src/platform/platform_x11.cpp"

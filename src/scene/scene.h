@@ -1052,6 +1052,8 @@ int add_humanoid_ik(Scene &scene, GameObject *root);
 bool limb_of(const std::string &name, int &side, int &limb);
 /* IK on a bone and its parent with a new target at its tip and a pole off its bend (the Rigging window's Add IK). */
 IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
+/* The object the IK constraint on `bone` aims at, looked for in its own character first (two copies share names). */
+GameObject *ik_target_of(const Scene &scene, const GameObject &bone);
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {

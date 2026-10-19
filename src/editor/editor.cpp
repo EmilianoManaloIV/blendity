@@ -1199,8 +1199,8 @@ void Editor::handle_drop() {
   for (const std::string &path : ui_.in.dropped) {
     std::string ext = fs::extension(path);
     std::string name = fs::filename(path);
-    if (model_extension_supported(ext)) {
-      import_model_file(path, true);  // copies model + textures into Assets like Unity
+    if (model_extension_supported(ext) || motion_extension_supported(ext)) {
+      import_model_file(path, true);  // copies model + textures into Assets like Unity (a motion: onto the character)
     }
     else if (image_extension_supported(ext)) {
       std::string dir = fs::join(assets_dir_, "Textures");
@@ -1873,10 +1873,10 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 
 void Editor::import_dialog() {
   defer([this] {
-    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda"}}};
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}}};
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
-    switch (pick_open_path("Import Model", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {
+    switch (pick_open_path("Import Model or Motion", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {
       case PathPick::Cancelled: return;
       case PathPick::Unavailable: dialog_ = Dialog::ImportObj; return;  // the Assets list
       case PathPick::Chosen: break;

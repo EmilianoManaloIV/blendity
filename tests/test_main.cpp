@@ -35,6 +35,7 @@
 #include "../src/scene/autophysics.h"
 #include "../src/core/qp.h"
 #include "../src/scene/spring_bones.h"
+#include "../src/core/text_encoding.h"
 #include "../src/scene/ragdoll.h"
 #include "../src/scene/autopose.h"
 #include "../src/scene/gait.h"
@@ -35660,5 +35661,1098 @@ static void round81_tests() {
       for (size_t i = 0; i < mf->mesh->vert_count(); i++) out = std::max(out, length(g->evaluated_mesh()->positions[i] - mf->mesh->positions[i]));
     std::printf("    key: %s, weight %.2f, the surface moved %.3f m\n", mf && mf->mesh && mf->mesh->find_shape("Puff") >= 0 ? "yes" : "no", mr ? mr->shape_weight("Puff") : -1.0f, out);
     CHECK(found && mr && std::fabs(mr->shape_weight("Puff") - 0.5f) < 1e-6f && std::fabs(out - 0.1f) < 1e-3f);
+  });
+  /* ---------------------------------------------------------------- round 156: MMD models (task 0136) */
+  /* A synthetic MMD character written by the tests (no third-party model): a lower body, a left leg of three bones with
+   * MMD's leg IK, a two-bone hair chain under physics, a front-facing quad skinned to the thigh and the knee, and a hair
+   * card on the hair; a vertex morph "あ" and a group morph "笑い" (half of it); one material with a texture in a
+   * subfolder (a backslash path), an edge and a toon ramp; a right leg without IK (two legs: a rig the walking tools
+   * read). MMD's space: facing -Z, 8 cm units. */
+  struct R156Bin {
+    std::string s;
+    void u8(int v) { s += (char)(uint8_t)v; }
+    void u16(int v) { u8(v & 0xFF), u8(v >> 8 & 0xFF); }
+    void i32(int64_t v) {
+      for (int k = 0; k < 4; k++) u8((int)((uint64_t)v >> (8 * k) & 0xFF));
+    }
+    void f(float v) {
+      char b[4];
+      std::memcpy(b, &v, 4);
+      s.append(b, 4);
+    }
+    void v3(Vec3 v) { f(v.x), f(v.y), f(v.z); }
+    /* PMX text: UTF-8 as it is, or UTF-16LE (the common case) from UTF-8 (the Basic Multilingual Plane is enough). */
+    void text(const std::string &t, bool utf8) {
+      if (utf8) return i32((int64_t)t.size()), void(s += t);
+      std::string w;
+      for (size_t i = 0; i < t.size();) {
+        const uint8_t a = (uint8_t)t[i];
+        uint32_t c = a;
+        if (a >= 0xE0) c = (a & 0x0F) << 12 | ((uint8_t)t[i + 1] & 0x3F) << 6 | ((uint8_t)t[i + 2] & 0x3F), i += 3;
+        else if (a >= 0xC0) c = (a & 0x1F) << 6 | ((uint8_t)t[i + 1] & 0x3F), i += 2;
+        else i++;
+        w += (char)(c & 0xFF), w += (char)(c >> 8);
+      }
+      i32((int64_t)w.size()), s += w;
+    }
+    void fixed(const std::string &t, size_t n) { s += t.substr(0, n) + std::string(n - std::min(n, t.size()), '\0'); }
+  };
+  /* The character's parts, shared by the PMX and PMD writers. */
+  struct R156Bone {
+    const char *name, *sjis;
+    Vec3 head;
+    int parent, tail;  // tail: a bone, or -1 (then `offset`)
+    Vec3 offset;
+  };
+  static const R156Bone r156_bones[] = {
+      {"センター", "\x83\x5a\x83\x93\x83\x5e\x81\x5b", {0, 8, 0}, -1, -1, {0, -1, 0}},
+      {"下半身", "\x89\xba\x94\xbc\x90\x67", {0, 10, 0}, 0, -1, {0, -2, 0}},
+      {"左足", "\x8d\xb6\x91\xab", {1, 10, 0}, 1, 3, {}},
+      {"左ひざ", "\x8d\xb6\x82\xd0\x82\xb4", {1, 5, 0}, 2, 4, {}},
+      {"左足首", "\x8d\xb6\x91\xab\x8e\xf1", {1, 1, 0}, 3, -1, {0, -1, -1}},
+      {"左足ＩＫ", "\x8d\xb6\x91\xab\x82\x68\x82\x6a", {1, 1, 0}, 0, -1, {0, 0, 1}},
+      {"髪1", "\x94\xaf\x31", {0, 15, 1}, 1, 7, {}},
+      {"髪2", "\x94\xaf\x32", {0, 12, 1.5f}, 6, -1, {0, -2, 0.5f}},
+      {"右足", "\x89\x45\x91\xab", {-1, 10, 0}, 1, 9, {}},
+      {"右ひざ", "\x89\x45\x82\xd0\x82\xb4", {-1, 5, 0}, 8, 10, {}},
+      {"右足首", "\x89\x45\x91\xab\x8e\xf1", {-1, 1, 0}, 9, -1, {0, -1, -1}}};
+  constexpr int r156_nbones = (int)(sizeof(r156_bones) / sizeof(r156_bones[0]));
+  /* Vertices: the quad on the leg (0-3, facing the viewer at -Z), the hair card (4-7). */
+  struct R156Vert {
+    Vec3 p;
+    float u, v;
+    int b0, b1;
+    float w0;
+  };
+  static const R156Vert r156_verts[] = {{{0.5f, 4, -0.5f}, 0, 1, 3, 3, 1}, {{0.5f, 9, -0.5f}, 0, 0, 2, 2, 1}, {{1.5f, 4, -0.5f}, 1, 1, 3, 3, 1},
+                                        {{1.5f, 9, -0.5f}, 1, 0, 2, 2, 1}, {{-0.5f, 15, 1}, 0, 0, 6, 6, 1}, {{-0.5f, 12, 1.5f}, 0, 1, 6, 7, 0.5f},
+                                        {{0.5f, 15, 1}, 1, 0, 6, 6, 1}, {{0.5f, 12, 1.5f}, 1, 1, 6, 7, 0.5f}};
+  static const int r156_tris[] = {0, 1, 2, 2, 1, 3, 4, 6, 5, 6, 7, 5};  // (clockwise as the viewer sees them: MMD's front)
+  /* What the PMX writer can add to the character: every optional record MMD files use (the "kitchen sink": two extra
+   * UVs, BDEF4 / SDEF / QDEF vertices, every bone flag, bone / UV / material / flip / impulse morphs, a display frame, a
+   * joint); 130 unused vertices first, so the real ones have one-byte indices past 127 (unsigned); D bones the leg's
+   * skin is weighted to; a fork in the hair's dynamic bones; MMD's shared toon03 instead of a ramp beside the model; a
+   * second copy of the leg quad with other normals (a hard edge); the triangles written the other way round. */
+  struct R156Opts {
+    bool utf8 = false, sink = false, pad = false, dbones = false, fork = false, shared_toon = false, hard = false, mirrored = false;
+  };
+  auto r156_pmx = [](const R156Opts &o) {
+    const bool utf8 = o.utf8;
+    const int pad = o.pad ? 130 : 0, extra_uvs = o.sink ? 2 : 0;
+    const int nverts = pad + 8 + (o.hard ? 4 : 0), nbones = r156_nbones + (o.dbones ? 3 : 0) + (o.fork ? 1 : 0);
+    const int dleg[3] = {r156_nbones, r156_nbones + 1, r156_nbones + 2};  // (左足D, 左ひざD, 左足首D)
+    auto leg_bone = [&](int bone) { return o.dbones && bone >= 2 && bone <= 4 ? dleg[bone - 2] : bone; };
+    R156Bin b;
+    b.s = "PMX ";
+    b.f(2.0f);
+    b.u8(8);
+    for (int g : {utf8 ? 1 : 0, extra_uvs, 1, 1, 1, 2, 1, 1}) b.u8(g);  // (one-byte indices but the bones' two: both kinds read)
+    b.text("テスト", utf8), b.text("Test", utf8), b.text("", utf8), b.text("", utf8);
+    b.i32(nverts);
+    for (int i = 0; i < pad; i++) {
+      b.v3({0, 0, 0}), b.v3({0, 0, -1}), b.f(0), b.f(0);
+      for (int k = 0; k < 4 * extra_uvs; k++) b.f(0);
+      b.u8(0), b.u16(0), b.f(1.0f);
+    }
+    for (int copy = 0; copy < (o.hard ? 2 : 1); copy++)
+      for (size_t i = 0; i < 8; i++) {
+        if (copy == 1 && i >= 4) break;  // (the hard copy: the leg quad again)
+        const R156Vert &v = r156_verts[i];
+        b.v3(v.p), b.v3(copy ? Vec3(0, 1, 0) : Vec3(0, 0, -1)), b.f(v.u), b.f(v.v);
+        for (int k = 0; k < 4 * extra_uvs; k++) b.f(0.25f);
+        const int b0 = leg_bone(v.b0), b1 = leg_bone(v.b1);
+        if (o.sink && i == 0) {  // (BDEF4: the one bone four times)
+          b.u8(2);
+          for (int k = 0; k < 4; k++) b.u16(b0);
+          for (int k = 0; k < 4; k++) b.f(0.25f);
+        }
+        else if (o.sink && i == 1) {  // (SDEF: as BDEF2, then its centre and two points)
+          b.u8(3), b.u16(b0), b.u16(b1), b.f(v.w0);
+          for (int k = 0; k < 9; k++) b.f(0);
+        }
+        else if (o.sink && i == 2) {  // (QDEF)
+          b.u8(4);
+          for (int k = 0; k < 4; k++) b.u16(b0);
+          for (int k = 0; k < 4; k++) b.f(0.25f);
+        }
+        else if (v.w0 >= 1.0f) b.u8(0), b.u16(b0);
+        else b.u8(1), b.u16(b0), b.u16(b1), b.f(v.w0);
+        b.f(1.0f);
+      }
+    const int ntris = 4 + (o.hard ? 2 : 0);
+    b.i32(3 * ntris);
+    for (int t = 0; t < ntris; t++) {
+      const int base = t < 4 ? pad : pad + 8 - 4;  // (the hard copy's triangles on its vertices)
+      const int *tri = r156_tris + 3 * (t < 4 ? t : t - 4);
+      if (o.mirrored) b.u8(base + tri[0]), b.u8(base + tri[2]), b.u8(base + tri[1]);
+      else b.u8(base + tri[0]), b.u8(base + tri[1]), b.u8(base + tri[2]);
+    }
+    b.i32(2), b.text("tex\\skin.png", utf8), b.text("toon.png", utf8);
+    b.i32(1);
+    b.text("肌", utf8), b.text("skin", utf8);
+    b.f(0.8f), b.f(0.6f), b.f(0.5f), b.f(1.0f), b.v3({0, 0, 0}), b.f(5.0f), b.v3({0.2f, 0.2f, 0.2f});
+    b.u8(0x10 | 0x04);
+    b.f(0.1f), b.f(0.05f), b.f(0.2f), b.f(1.0f), b.f(1.5f);  // (its edge: colour, size)
+    b.u8(0), b.u8(0xFF), b.u8(0);                             // (texture 0, no sphere, mode 0)
+    if (o.shared_toon) b.u8(1), b.u8(2);                      // (MMD's toon03)
+    else b.u8(0), b.u8(1);                                    // (a toon texture: 1)
+    b.text("", utf8), b.i32(3 * ntris);
+    b.i32(nbones);
+    for (int i = 0; i < nbones; i++) {
+      const bool d = i >= r156_nbones && i < r156_nbones + 3 && o.dbones, hair3 = i == nbones - 1 && o.fork;
+      const R156Bone &bn = r156_bones[d ? 2 + (i - r156_nbones) : hair3 ? 7 : i];
+      b.text(d ? std::string(bn.name) + "D" : hair3 ? "髪3" : bn.name, utf8), b.text("", utf8);
+      b.v3(d ? bn.head : hair3 ? Vec3(0, 12, -1.5f) : bn.head);
+      b.u16(d ? (i == r156_nbones ? 1 : i - 1) : hair3 ? 6 : bn.parent < 0 ? 0xFFFF : bn.parent), b.i32(0);
+      const bool ik = !d && !hair3 && std::string(bn.name) == "左足ＩＫ";
+      const bool sink_flags = o.sink && !d && !hair3 && i == 7;  // (髪2: a fixed axis, local axes, an external parent)
+      const bool tail_bone = bn.tail >= 0 && !hair3;
+      b.u16((tail_bone ? 0x0001 : 0) | 0x0002 | 0x0008 | 0x0010 | (ik ? 0x0020 | 0x0004 : 0) | (d ? 0x0100 : 0) | (sink_flags ? 0x0400 | 0x0800 | 0x2000 : 0));
+      if (tail_bone) b.u16(d ? leg_bone(bn.tail) : bn.tail);
+      else b.v3(hair3 ? Vec3(0, -2, -0.5f) : bn.offset);
+      if (d) b.u16(2 + (i - r156_nbones)), b.f(1.0f);  // (copies the leg bone's turn, all of it)
+      if (sink_flags) b.v3({0, 1, 0}), b.v3({1, 0, 0}), b.v3({0, 0, 1}), b.i32(0);
+      if (!ik) continue;
+      b.u16(4), b.i32(40), b.f(2.0f), b.i32(2);
+      b.u16(3), b.u8(1), b.v3({-3.14f, 0, 0}), b.v3({-0.01f, 0, 0});  // (the knee: limited to X)
+      b.u16(2), b.u8(0);
+    }
+    b.i32(2 + (o.sink ? 5 : 0));
+    b.text("あ", utf8), b.text("a", utf8), b.u8(3), b.u8(1), b.i32(1), b.u8(pad), b.v3({0, 1, 0});
+    b.text("笑い", utf8), b.text("smile", utf8), b.u8(4), b.u8(0), b.i32(1), b.u8(0), b.f(0.5f);
+    if (o.sink) {  // (a bone, a UV, a material, a flip and an impulse morph, one record each)
+      b.text("bone", utf8), b.text("", utf8), b.u8(4), b.u8(2), b.i32(1), b.u16(2), b.v3({0, 0, 0}), b.f(0), b.f(0), b.f(0), b.f(1);
+      b.text("uv", utf8), b.text("", utf8), b.u8(4), b.u8(3), b.i32(1), b.u8(pad), b.f(0), b.f(0), b.f(0), b.f(0);
+      b.text("mat", utf8), b.text("", utf8), b.u8(4), b.u8(8), b.i32(1), b.u8(0), b.u8(0);
+      for (int k = 0; k < 28; k++) b.f(1.0f);
+      b.text("flip", utf8), b.text("", utf8), b.u8(4), b.u8(9), b.i32(1), b.u8(0), b.f(1.0f);
+      b.text("impulse", utf8), b.text("", utf8), b.u8(4), b.u8(10), b.i32(1), b.u8(0), b.u8(0), b.v3({}), b.v3({});
+    }
+    b.i32(o.sink ? 1 : 0);  // (display frames)
+    if (o.sink) b.text("Root", utf8), b.text("", utf8), b.u8(1), b.i32(2), b.u8(0), b.u16(0), b.u8(1), b.u8(0);
+    const int nrigids = 2 + (o.fork ? 2 : 0);
+    b.i32(nrigids);
+    for (int k = 0; k < nrigids; k++) {
+      const int bone = k == 0 ? 6 : k == 1 ? 1 : k == 2 ? 7 : nbones - 1;
+      b.text("", utf8), b.text("", utf8), b.u16(bone), b.u8(0), b.u16(0), b.u8(0), b.v3({0.5f, 0, 0}), b.v3({}), b.v3({});
+      for (int j = 0; j < 5; j++) b.f(0.5f);
+      b.u8(bone == 1 ? 0 : 1);
+    }
+    b.i32(o.sink ? 1 : 0);  // (joints)
+    if (o.sink) {
+      b.text("j", utf8), b.text("", utf8), b.u8(0), b.u8(0), b.u8(1);
+      for (int k = 0; k < 24; k++) b.f(0);
+    }
+    return b.s;
+  };
+  auto r156_pmd = []() {
+    R156Bin b;
+    b.s = "Pmd";
+    b.f(1.0f), b.fixed("\x83\x65\x83\x58\x83\x67", 20), b.fixed("", 256);
+    b.i32(8);
+    for (const R156Vert &v : r156_verts) {
+      b.v3(v.p), b.v3({0, 0, -1}), b.f(v.u), b.f(v.v), b.u16(v.b0), b.u16(v.b1), b.u8((int)std::lround(v.w0 * 100)), b.u8(0);
+    }
+    b.i32(12);
+    for (int i : r156_tris) b.u16(i);
+    b.i32(1);
+    b.v3({0.8f, 0.6f, 0.5f}), b.f(1.0f), b.f(5.0f), b.v3({0, 0, 0}), b.v3({0.2f, 0.2f, 0.2f}), b.u8(0), b.u8(1), b.i32(12);
+    b.fixed("tex\\skin.png*face.sph", 20);
+    b.u16(r156_nbones);
+    for (const R156Bone &bn : r156_bones) {
+      b.fixed(bn.sjis, 20), b.u16(bn.parent < 0 ? 0xFFFF : bn.parent), b.u16(bn.tail < 0 ? 0 : bn.tail), b.u8(0), b.u16(0), b.v3(bn.head);
+    }
+    b.u16(1), b.u16(5), b.u16(4), b.u8(2), b.u16(40), b.f(1.0f), b.u16(3), b.u16(2);
+    /* Morphs: the base (vertex 0, where it is), then "あ" by its place in the base's list. */
+    b.u16(2);
+    b.fixed("base", 20), b.i32(1), b.u8(0), b.i32(0), b.v3(r156_verts[0].p);
+    b.fixed("\x82\xa0", 20), b.i32(1), b.u8(3), b.i32(0), b.v3({0, 1, 0});
+    b.u8(0), b.u8(0), b.i32(0), b.u8(0);  // (display lists, no English names)
+    b.fixed("toon.png", 100);
+    for (int k = 1; k < 10; k++) b.fixed("", 100);
+    b.i32(1);
+    b.fixed("", 20), b.u16(6), b.u8(0), b.u16(0), b.u8(0), b.v3({0.5f, 0, 0}), b.v3({}), b.v3({});
+    for (int k = 0; k < 5; k++) b.f(0.5f);
+    b.u8(1);
+    b.i32(0);
+    return b.s;
+  };
+  /* The files beside each other: the model, tex/skin.png (warm), toon.png (white above a violet shadow). */
+  auto r156_write = [&](const std::string &dir, const std::string &file, const std::string &data) {
+    fs::make_dirs(fs::join(dir, "tex"));
+    std::vector<uint32_t> skin(16, 0xFFE0A080u), toon(16, 0xFFFFFFFFu);
+    for (int x = 0; x < 4; x++) toon[12 + x] = 0xFF664D80u;  // (the bottom row)
+    write_png(fs::join(dir, "tex/skin.png"), skin.data(), 4, 4, 4, false);
+    write_png(fs::join(dir, "toon.png"), toon.data(), 4, 4, 4, false);
+    fs::write_file(fs::join(dir, file), data);
+    return fs::join(dir, file);
+  };
+  test("mmd: Shift-JIS and UTF-16 names come in as UTF-8", [&] {
+    const std::string sj = sjis_to_utf8("\x8d\xb6\x91\xab\x82\x68\x82\x6a" + std::string("\0junk", 5));
+    const std::string w = utf16le_to_utf8(std::string("\x42\x30\x3d\xd8\x00\xde", 6));  // あ, then U+1F600 as a surrogate pair
+    std::printf("    Shift-JIS: %s; UTF-16: %zu bytes\n", sj.c_str(), w.size());
+    CHECK(sj == "左足ＩＫ" && w == "あ\xF0\x9F\x98\x80" && sjis_to_utf8("Head") == "Head");
+    CHECK(mmd_bone_name("左足ＩＫ") == "LeftFootIK" && mmd_bone_name("右ひざ") == "RightLeg" && mmd_bone_name("髪1") == "髪1");
+  });
+  test("mmd: a PMX character comes in turned to face +Z at 8 cm a unit, skinned, its bones pointing at their tails, IK on the leg with a pole at the knee, the hair a spring chain", [&] {
+    /* Three files: UTF-16 text, UTF-8 text, and the kitchen sink with the skin on D bones, unsigned indices past 127
+     * and the triangles the other way round (every optional record read past, the skin's weights moved onto the leg
+     * bones, the file's normals putting the faces right). */
+    const char *labels[3] = {"UTF-16", "UTF-8", "kitchen sink"};
+    for (int variant = 0; variant < 3; variant++) {
+      R156Opts opts;
+      opts.utf8 = variant == 1;
+      opts.sink = opts.pad = opts.dbones = opts.mirrored = variant == 2;
+      const char *utf8 = labels[variant];
+      const std::string file = r156_write(fs::join(test_dir(), "r156_pmx"), strprintf("test%d.pmx", variant), r156_pmx(opts));
+      ImportResult r;
+      const bool ok = import_model(file, r);
+      CHECK(ok);
+      if (!ok) return (void)std::printf("    %s\n", r.error.c_str());
+      Scene s;
+      GameObject *root = instantiate_import(s, r, "Test", nullptr);
+      GameObject *thigh = s.find_by_name("LeftUpLeg"), *knee = s.find_by_name("LeftLeg"), *ik = s.find_by_name("LeftFootIK"), *hair = s.find_by_name("髪1");
+      CHECK(root && thigh && knee && ik && hair && s.find_by_name("Hips") && s.find_by_name("LeftFoot") && s.find_by_name("Center"));
+      if (!thigh || !knee || !ik || !hair) return;
+      /* Placed: MMD's left knee at (1, 5, 0) is at (-0.08, 0.4, 0) here (the character's left, facing +Z). */
+      const float placed = length(knee->world_position() - Vec3(-0.08f, 0.4f, 0.0f));
+      const Vec3 down = thigh->world_rotation().rotate(Vec3(0, 1, 0));
+      const IKConstraint *c = knee->get<IKConstraint>();
+      GameObject *pole = c ? s.find_by_name(c->pole) : nullptr;
+      const SpringBone *sb = hair->get<SpringBone>();
+      std::printf("    %s: knee off by %g; the thigh's +Y %.2f %.2f %.2f; IK on the knee -> %s%s, chain %d, pole %s %.2f m in front; spring on the hair: %s; %s\n",
+                  utf8, placed, down.x, down.y, down.z, c ? c->target.c_str() : "-", c ? "" : "", c ? c->chain_length : 0,
+                  pole ? pole->name.c_str() : "-", pole ? pole->world_position().z - knee->world_position().z : 0.0f, sb ? "yes" : "no", r.summary.c_str());
+      CHECK(placed < 1e-5f && down.y < -0.999f && c && c->target == "LeftFootIK" && c->chain_length == 2 && pole &&
+            pole->world_position().z > knee->world_position().z + 0.1f && sb && std::fabs(sb->radius - 0.04f) < 1e-5f);
+      /* The mesh: its front quad faces +Z; the knee's half follows the knee. */
+      GameObject *body = nullptr;
+      s.for_each([&](GameObject &g) { if (g.get<MeshFilter>() && !body) body = &g; });
+      const Mesh *m = body ? body->get<MeshFilter>()->mesh.get() : nullptr;
+      CHECK(m && m->face_count() == 4 && body->get<SkinModifier>() && body->get<Outline>());
+      if (!m) return;
+      std::vector<Vec3> fn;
+      for (size_t f = 0; f < m->face_count(); f++) fn.push_back(normalize(m->face_normal(f)));
+      const Vec3 before = body->evaluated_mesh()->positions[0];
+      int low = -1;
+      for (size_t i = 0; i < m->vert_count(); i++)
+        if (std::fabs(m->positions[i].y - 0.32f) < 1e-4f && std::fabs(m->positions[i].x + 0.04f) < 1e-4f) low = (int)i;
+      knee->set_local_rotation(Quat::axis_angle({1, 0, 0}, kPi * 0.5f) * knee->local().rotation);
+      const Vec3 after = low >= 0 ? body->evaluated_mesh()->positions[(size_t)low] : Vec3(0.0f);
+      std::printf("    the front quad's normal %.2f %.2f %.2f; the knee turned: its vertex moved %.3f m\n", fn.empty() ? 0.0f : fn[0].x,
+                  fn.empty() ? 0.0f : fn[0].y, fn.empty() ? 0.0f : fn[0].z, low >= 0 ? length(after - m->positions[(size_t)low]) : -1.0f);
+      CHECK(!fn.empty() && fn[0].z > 0.999f && low >= 0 && length(after - m->positions[(size_t)low]) > 0.01f);
+      (void)before;
+      /* Morphs: "あ" lifts the leg quad's first corner 8 cm; "笑い" half that. */
+      const int a = m->find_shape("あ"), smile = m->find_shape("笑い");
+      float lift = 0.0f, half = 0.0f;
+      for (size_t i = 0; a >= 0 && smile >= 0 && i < m->vert_count(); i++)
+        lift = std::max(lift, m->shape_keys[(size_t)a].delta[i].y), half = std::max(half, m->shape_keys[(size_t)smile].delta[i].y);
+      /* The material: toon, MMD's lit colour (diffuse + ambient), its texture from tex\, the ramp's shadow, the edge. */
+      const Material &mt = *body->get<MeshRenderer>()->materials[0];
+      const Outline *o = body->get<Outline>();
+      std::printf("    keys: あ %.3f m, 笑い %.3f m; material '%s' toon %d, colour %.2f %.2f %.2f, map %s, shadow %.2f %.2f %.2f; outline %.4f m\n", lift, half,
+                  mt.name.c_str(), mt.shading_model, mt.base_color.x, mt.base_color.y, mt.base_color.z, fs::filename(mt.base_map.path).c_str(),
+                  mt.toon_shadow.x, mt.toon_shadow.y, mt.toon_shadow.z, o ? o->thickness : 0.0f);
+      CHECK(std::fabs(lift - 0.08f) < 1e-5f && std::fabs(half - 0.04f) < 1e-5f && mt.name == "肌" && mt.shading_model == 1 &&
+            std::fabs(mt.base_color.x - 1.0f) < 1e-5f && std::fabs(mt.base_color.z - 0.7f) < 1e-5f && fs::filename(mt.base_map.path) == "skin.png" &&
+            fs::exists(mt.base_map.path) && std::fabs(mt.toon_shadow.x - 0x66 / 255.0f) < 0.01f && o && std::fabs(o->thickness - 0.006f) < 1e-5f);
+    }
+  });
+  test("mmd: a PMD character (Shift-JIS names, morphs by the base's list) comes in as its PMX twin", [&] {
+    const std::string file = r156_write(fs::join(test_dir(), "r156_pmd"), "test.pmd", r156_pmd());
+    ImportResult r;
+    CHECK(import_model(file, r));
+    Scene s;
+    instantiate_import(s, r, "Test", nullptr);
+    GameObject *knee = s.find_by_name("LeftLeg"), *hair = s.find_by_name("髪1");
+    const IKConstraint *c = knee ? knee->get<IKConstraint>() : nullptr;
+    const Mesh *m = nullptr;
+    s.for_each([&](GameObject &g) { if (g.get<MeshFilter>() && !m) m = g.get<MeshFilter>()->mesh.get(); });
+    float lift = 0.0f;
+    const int a = m ? m->find_shape("あ") : -1;
+    for (size_t i = 0; a >= 0 && i < m->vert_count(); i++) lift = std::max(lift, m->shape_keys[(size_t)a].delta[i].y);
+    /* Its material (the colour, the texture before the star, the toon list's ramp), its outline, its front face. */
+    GameObject *body = nullptr;
+    s.for_each([&](GameObject &g) { if (g.get<MeshFilter>() && !body) body = &g; });
+    const MeshRenderer *mr = body ? body->get<MeshRenderer>() : nullptr;
+    const Material *mt = mr && !mr->materials.empty() ? mr->materials[0].get() : nullptr;
+    const Outline *o = body ? body->get<Outline>() : nullptr;
+    const Vec3 fn = m && m->face_count() ? normalize(m->face_normal(0)) : Vec3(0.0f);
+    bool sphere_note = false;
+    for (const std::string &n : r.notes) sphere_note = sphere_note || n.find("sphere") != std::string::npos;
+    std::printf("    %s; knee IK -> %s; hair spring %s; あ lifts %.3f m; material '%s' toon %d, colour %.2f %.2f %.2f, map %s, shadow %.2f; outline %.4f; front %.2f; the sphere map reported: %s\n",
+                r.summary.c_str(), c ? c->target.c_str() : "-", hair && hair->get<SpringBone>() ? "yes" : "no", lift, mt ? mt->name.c_str() : "-",
+                mt ? mt->shading_model : -1, mt ? mt->base_color.x : 0.0f, mt ? mt->base_color.y : 0.0f, mt ? mt->base_color.z : 0.0f,
+                mt ? fs::filename(mt->base_map.path).c_str() : "-", mt ? mt->toon_shadow.x : 0.0f, o ? o->thickness : 0.0f, fn.z, sphere_note ? "yes" : "no");
+    CHECK(knee && c && c->target == "LeftFootIK" && hair && hair->get<SpringBone>() && std::fabs(lift - 0.08f) < 1e-5f && m && m->face_count() == 4);
+    CHECK(knee && length(knee->world_position() - Vec3(-0.08f, 0.4f, 0.0f)) < 1e-5f);
+    CHECK(mt && mt->shading_model == 1 && std::fabs(mt->base_color.x - 1.0f) < 1e-5f && std::fabs(mt->base_color.z - 0.7f) < 1e-5f && fs::filename(mt->base_map.path) == "skin.png" &&
+          std::fabs(mt->toon_shadow.x - 0x66 / 255.0f) < 0.01f && o && std::fabs(o->thickness - 0.004f) < 1e-5f && fn.z > 0.999f && sphere_note);
+  });
+  test("mmd: a damaged PMX or PMD, cut anywhere or with bytes flipped, imports or refuses without harm", [&] {
+    uint32_t rng = 156;
+    auto next = [&](uint32_t n) { rng = rng * 1664525u + 1013904223u; return (size_t)((rng >> 8) % n); };
+    int refused = 0, imported = 0;
+    for (const std::string &whole : {r156_pmx(R156Opts()), r156_pmd()}) {
+      const std::string ext = whole[0] == 'P' && whole[1] == 'M' && whole[2] == 'X' ? ".pmx" : ".pmd";
+      for (int k = 0; k < 120; k++) {
+        std::string d = whole;
+        if (k < 60) d.resize(next((uint32_t)d.size()));
+        else
+          for (int f = 0; f < 4; f++) d[next((uint32_t)d.size())] = (char)next(256);
+        const std::string file = fs::join(test_dir(), "r156_bad" + ext);
+        fs::write_file(file, d);
+        ImportResult r;
+        if (!import_model(file, r)) {
+          refused++;
+          continue;
+        }
+        imported++;
+        Scene s;
+        instantiate_import(s, r, "Bad", nullptr);
+        s.for_each([&](GameObject &g) { (void)g.evaluated_mesh(); });
+      }
+    }
+    std::printf("    240 damaged files: %d refused, %d imported\n", refused, imported);
+    CHECK(refused + imported == 240 && refused > 0);
+  });
+  test("mmd: dropped into the editor, a PMX becomes a character with its .mat, its texture in Assets, IK and springs; the lesson's Try-it opens the Project window", [&] {
+    const std::string file = r156_write(fs::join(test_dir(), "r156_editor"), "r156miku.pmx", r156_pmx(R156Opts()));
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + file);
+    ed.step_frame_headless();
+    GameObject *knee = ed.scene().find_by_name("LeftLeg"), *hair = ed.scene().find_by_name("髪1");
+    MaterialPtr mat = material_asset("Assets/Materials/r156miku/肌.mat");
+    const bool tex = mat && fs::exists(resolve_asset_path(mat->base_map.path)) && mat->base_map.path.find("Assets/Textures/r156miku") == 0;
+    /* The rig tools read it: the walking analysis finds the hips and the legs by their mapped names. */
+    GameObject *arm = nullptr;
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Armature>() && !arm) arm = &g; });
+    const gait::Rig rig = arm ? gait::analyse(ed.scene(), *arm) : gait::Rig();
+    const bool leg = rig.legs.size() == 2 && rig.hips && rig.legs[0].upper && rig.legs[0].foot &&
+                     (rig.legs[0].upper->name == "LeftUpLeg" || rig.legs[1].upper->name == "LeftUpLeg");
+    const bool found = r146_try(ed, "Open the Project window: drop a .pmx or .pmd there or onto the Scene view");
+    std::printf("    knee IK %s, hair spring %s, 肌.mat %s (texture %s); the walking analysis: hips %s, %zu leg(s); the lesson's Try-it %s\n",
+                knee && knee->get<IKConstraint>() ? "yes" : "no", hair && hair->get<SpringBone>() ? "yes" : "no", mat ? "yes" : "no",
+                mat ? mat->base_map.path.c_str() : "-", rig.hips ? rig.hips->name.c_str() : "-", rig.legs.size(), found ? "ran" : "not found");
+    CHECK(knee && knee->get<IKConstraint>() && hair && hair->get<SpringBone>() && mat && mat->shading_model == 1 && tex && found && leg);
+  });
+  test("mmd: two copies of one character each aim their IK at their own controls; a forked hair gets a chain per strand; a shared toon ramp is reported; hard edges stay split", [&] {
+    const std::string dir = fs::join(test_dir(), "r156_more");
+    ImportResult r;
+    CHECK(import_model(r156_write(dir, "twin.pmx", r156_pmx(R156Opts())), r));
+    Scene s;
+    GameObject *a = instantiate_import(s, r, "A", nullptr), *b = instantiate_import(s, r, "B", nullptr);
+    int own = 0, total = 0;
+    for (GameObject *root : {a, b}) {
+      std::vector<GameObject *> stack{root};
+      while (!stack.empty()) {
+        GameObject *g = stack.back();
+        stack.pop_back();
+        for (GameObject *c : g->children) stack.push_back(c);
+        const IKConstraint *ik = g->get<IKConstraint>();
+        if (!ik) continue;
+        total++;
+        GameObject *t = ik_target_of(s, *g);
+        uint64_t pid = 0;
+        GameObject *p = s.find_by_name(ik->pole);  // (the scene-wide lookup: the first copy's)
+        (void)pid, (void)p;
+        own += t && s.is_ancestor(root, t);
+      }
+    }
+    /* After a save and a load the ids are gone and the names are all there is: still each its own. */
+    Scene back;
+    std::string error;
+    load_scene_text(save_scene_text(s), back, error);
+    int own_back = 0;
+    back.for_each([&](GameObject &g) {
+      if (!g.get<IKConstraint>()) return;
+      GameObject *top = &g;
+      while (top->parent) top = top->parent;
+      GameObject *t = ik_target_of(back, g);
+      own_back += t && back.is_ancestor(top, t);
+    });
+    R156Opts fork;
+    fork.fork = true;
+    ImportResult rf;
+    CHECK(import_model(r156_write(dir, "fork.pmx", r156_pmx(fork)), rf));
+    R156Opts toon;
+    toon.shared_toon = true;
+    ImportResult rt;
+    CHECK(import_model(r156_write(dir, "toon.pmx", r156_pmx(toon)), rt));
+    bool toon_note = false;
+    for (const std::string &n : rt.notes) toon_note = toon_note || n.find("toon") != std::string::npos;
+    R156Opts hard;
+    hard.hard = true;
+    ImportResult rh;
+    CHECK(import_model(r156_write(dir, "hard.pmx", r156_pmx(hard)), rh));
+    const Mesh *hm = nullptr;
+    for (const ImportedNode &n : rh.nodes) if (n.mesh) hm = n.mesh.get();
+    std::printf("    IK aimed inside its own copy: %d of %d (after a save and a load %d); the fork: %zu spring chain(s); shared toon03 reported: %s; the hard copy: %zu vertices, %zu faces\n",
+                own, total, own_back, rf.springs.size(), toon_note ? "yes" : "no", hm ? hm->vert_count() : 0, hm ? hm->face_count() : 0);
+    CHECK(total == 2 && own == 2 && own_back == 2 && rf.springs.size() == 3 && toon_note && hm && hm->vert_count() == 12 && hm->face_count() == 6);
+  });
+  test("mmd: crafted files - too many morphs, bones nested too deep, a parent loop, a vertex a million units away - are bounded or refused", [&] {
+    const std::string dir = fs::join(test_dir(), "r156_crafted");
+    fs::make_dirs(dir);
+    auto pmx_head = [](R156Bin &b, int nverts) {
+      b.s = "PMX ";
+      b.f(2.0f), b.u8(8);
+      for (int g : {1, 0, 2, 1, 1, 2, 2, 1}) b.u8(g);
+      for (int k = 0; k < 4; k++) b.text("", true);
+      b.i32(nverts);
+      for (int i = 0; i < nverts; i++) b.v3({(float)i, 0, 0}), b.v3({0, 0, -1}), b.f(0), b.f(0), b.u8(0), b.u16(0), b.f(1.0f);
+      b.i32(3), b.u16(0), b.u16(1), b.u16(2);
+      b.i32(0), b.i32(0);  // (textures, materials)
+    };
+    /* 5,000 vertex morphs of one offset each on 200 vertices: 4,096 keys kept, the rest said so. */
+    R156Bin many;
+    pmx_head(many, 200);
+    many.i32(1), many.text("root", true), many.text("", true), many.v3({}), many.u16(0xFFFF), many.i32(0), many.u16(0x0002 | 0x0008 | 0x0010), many.v3({0, 1, 0});
+    many.i32(5000);
+    for (int i = 0; i < 5000; i++) many.text("m" + std::to_string(i), true), many.text("", true), many.u8(4), many.u8(1), many.i32(1), many.u16(0), many.v3({0, 1, 0});
+    many.i32(0), many.i32(0), many.i32(0);
+    fs::write_file(fs::join(dir, "many.pmx"), many.s);
+    ImportResult rm;
+    const bool many_ok = import_model(fs::join(dir, "many.pmx"), rm);
+    const Mesh *mm = nullptr;
+    for (const ImportedNode &n : rm.nodes) if (n.mesh) mm = n.mesh.get();
+    /* 1,000 bones each under the one before: refused (nested too deep). Two bones each other's parent: a loop, broken. */
+    auto chain = [&](int n, bool loop) {
+      R156Bin b;
+      pmx_head(b, 3);
+      b.i32(n);
+      for (int i = 0; i < n; i++) {
+        b.text("", true), b.text("", true), b.v3({0, (float)i, 0});
+        b.u16(loop ? (i + 1) % n : i == 0 ? 0xFFFF : i - 1), b.i32(0), b.u16(0x0002 | 0x0008 | 0x0010), b.v3({0, 1, 0});
+      }
+      b.i32(0), b.i32(0), b.i32(0), b.i32(0);
+      return b.s;
+    };
+    fs::write_file(fs::join(dir, "deep.pmx"), chain(1000, false));
+    fs::write_file(fs::join(dir, "loop.pmx"), chain(2, true));
+    ImportResult rd, rl;
+    const bool deep_ok = import_model(fs::join(dir, "deep.pmx"), rd), loop_ok = import_model(fs::join(dir, "loop.pmx"), rl);
+    int roots = 0;
+    for (const ImportedNode &n : rl.nodes) roots += n.is_bone && n.parent < 0;
+    /* A vertex at 1e30: refused. */
+    R156Bin far;
+    pmx_head(far, 3);
+    far.s.replace(37 + 39, 4, std::string("\x00\x00\x80\x71", 4));  // (the second vertex's x, 1e30: the header is 37 bytes, a vertex 39)
+    far.i32(0), far.i32(0), far.i32(0), far.i32(0);
+    fs::write_file(fs::join(dir, "far.pmx"), far.s);
+    ImportResult rfar;
+    const bool far_ok = import_model(fs::join(dir, "far.pmx"), rfar);
+    std::printf("    5,000 morphs: %zu keys kept (%s); 1,000 deep: %s; a loop: imported with %d root bone(s); a vertex at 1e30: %s\n",
+                mm ? mm->shape_keys.size() : 0, rm.notes.empty() ? "no note" : rm.notes.back().c_str(), deep_ok ? "imported" : rd.error.c_str(), roots,
+                far_ok ? "imported" : rfar.error.c_str());
+    CHECK(many_ok && mm && mm->shape_keys.size() == 4096 && !rm.notes.empty() && !deep_ok && rd.error.find("deep") != std::string::npos && loop_ok && roots == 1 &&
+          !far_ok && rfar.error.find("million") != std::string::npos);
+  });
+  /* ---------------------------------------------------------------- round 157: MMD motions (task 0137) */
+  /* A VMD written by the tests: the lower body turned 90 degrees about MMD's X in 30 frames on a straight timing curve;
+   * the left ankle turned 170 degrees about Y in 20 frames, eased in and out; the centre moved 5 units towards the
+   * viewer; the "あ" morph to 1 in 10 frames; the left leg's IK off from frame 15. */
+  auto r157_angle = [](Quat a, Quat b) { return 2.0f * std::acos(std::min(1.0f, std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w))); };
+  auto r157_vmd = []() {
+    R156Bin b;
+    b.fixed("Vocaloid Motion Data 0002", 30), b.fixed("\x83\x65\x83\x58\x83\x67", 20);
+    struct Key {
+      const char *sjis;
+      uint32_t frame;
+      Vec3 pos;
+      Quat rot;
+      uint8_t curve[4];  // the rotation's and the X and Y moves' (x1, y1, x2, y2); the Z move's is eased when `ease_z`
+      bool ease_z = false;
+    };
+    const Quat hips90 = Quat::axis_angle({1, 0, 0}, kPi * 0.5f), ankle170 = Quat::axis_angle({0, 1, 0}, 170.0f * kDeg2Rad);
+    const Key keys[] = {{"\x89\xba\x94\xbc\x90\x67", 0, {}, Quat(), {20, 20, 107, 107}},
+                        {"\x89\xba\x94\xbc\x90\x67", 30, {}, hips90, {20, 20, 107, 107}},
+                        {"\x8d\xb6\x91\xab\x8e\xf1", 0, {}, Quat(), {127, 0, 0, 127}},
+                        {"\x8d\xb6\x91\xab\x8e\xf1", 20, {}, ankle170, {127, 0, 0, 127}},
+                        {"\x83\x5a\x83\x93\x83\x5e\x81\x5b", 0, {}, Quat(), {20, 20, 107, 107}},
+                        {"\x83\x5a\x83\x93\x83\x5e\x81\x5b", 30, {2, 0, -5}, Quat(), {20, 20, 107, 107}, true},  // (X straight, Z eased: the channels apart)
+                        {"\x96\xb3\x82\xa2", 0, {}, Quat(), {20, 20, 107, 107}}};  // (a bone this character hasn't)
+    b.i32((int64_t)(sizeof(keys) / sizeof(keys[0])));
+    for (const Key &k : keys) {
+      b.fixed(k.sjis, 15), b.i32(k.frame), b.v3(k.pos), b.f(k.rot.x), b.f(k.rot.y), b.f(k.rot.z), b.f(k.rot.w);
+      std::string interp(64, '\0');
+      const uint8_t eased[4] = {127, 0, 0, 127};
+      for (int c = 0; c < 4; c++)
+        for (int p = 0; p < 4; p++) interp[(size_t)(p * 4 + c)] = (char)(c == 2 && k.ease_z ? eased[p] : k.curve[p]);
+      b.s += interp;
+    }
+    b.i32(2);
+    b.fixed("\x82\xa0", 15), b.i32(0), b.f(0.0f);
+    b.fixed("\x82\xa0", 15), b.i32(10), b.f(1.0f);
+    b.i32(0), b.i32(0), b.i32(0);  // (camera, light, self-shadow)
+    b.i32(2);
+    for (int f : {0, 15}) b.i32(f), b.u8(1), b.i32(1), b.fixed("\x8d\xb6\x91\xab\x82\x68\x82\x6a", 20), b.u8(f == 0 ? 1 : 0);
+    return b.s;
+  };
+  test("vmd: a motion onto an MMD character: turns as MMD makes them (straight and eased timing, a 170-degree turn), the centre moved, a morph and the leg's IK keyed", [&] {
+    const std::string dir = fs::join(test_dir(), "r157");
+    const std::string model = r156_write(dir, "test.pmx", r156_pmx(R156Opts()));
+    fs::write_file(fs::join(dir, "dance.vmd"), r157_vmd());
+    ImportResult r;
+    CHECK(import_model(model, r));
+    Scene s;
+    GameObject *root = instantiate_import(s, r, "Test", nullptr);
+    GameObject *hips = s.find_by_name("Hips"), *foot = s.find_by_name("LeftFoot"), *center = s.find_by_name("Center"), *knee = s.find_by_name("LeftLeg");
+    CHECK(root && hips && foot && center && knee);
+    if (!root || !hips || !foot || !center || !knee) return;
+    const Quat hips_rest = hips->world_rotation(), foot_rest = foot->world_rotation();
+    const Vec3 center_rest = center->world_position();
+    AnimationClip clip;
+    std::vector<std::string> notes;
+    std::string error;
+    const bool ok = import_vmd_file(fs::join(dir, "dance.vmd"), *root, clip, notes, error);
+    CHECK(ok);
+    for (const std::string &n : notes) std::printf("    note: %s\n", n.c_str());
+    auto C = [](Quat q) { return Quat(-q.x, q.y, -q.z, q.w); };  // MMD's space to ours: half a turn about Y
+    const Quat hips90 = C(Quat::axis_angle({1, 0, 0}, kPi * 0.5f)), ankle170 = C(Quat::axis_angle({0, 1, 0}, 170.0f * kDeg2Rad));
+    float hips_err = 0.0f;
+    for (float f : {0.0f, 7.0f, 15.0f, 22.0f, 30.0f}) {
+      apply_clip(clip, *root, f);
+      const Quat want = slerp(Quat(), hips90, f / 30.0f) * hips_rest;
+      hips_err = std::max(hips_err, r157_angle(hips->world_rotation(), want));
+    }
+    /* The ankle, relative to the hips: eased, so halfway at frame 10 (the curve is symmetric) and well short of a
+     * quarter at frame 5. */
+    auto ankle_turn = [&](float f) {
+      apply_clip(clip, *root, f);
+      const Quat d = normalize((hips->world_rotation() * hips_rest.conjugate()).conjugate() * foot->world_rotation() * foot_rest.conjugate());
+      return d;
+    };
+    const float mid = r157_angle(ankle_turn(10.0f), slerp(Quat(), ankle170, 0.5f)), end = r157_angle(ankle_turn(20.0f), ankle170);
+    const float early = r157_angle(ankle_turn(5.0f), Quat());
+    apply_clip(clip, *root, 15.0f);
+    const Vec3 moved = center->world_position() - center_rest;  // (halfway: X straight at 0.08 m, Z eased to 0.2 m too)
+    const IKConstraint *ik = knee->get<IKConstraint>();
+    const float ik_off = ik ? ik->weight : -1.0f;  // (switched off at frame 15)
+    apply_clip(clip, *root, 10.0f);
+    const float ik_on = ik ? ik->weight : -1.0f;
+    apply_clip(clip, *root, 7.5f);
+    const Vec3 quarter = center->world_position() - center_rest;  // (a quarter in: X at 0.04 m, Z eased well short of 0.1)
+    GameObject *body = nullptr;
+    s.for_each([&](GameObject &g) { if (g.get<MeshFilter>() && !body) body = &g; });
+    apply_clip(clip, *root, 5.0f);
+    const float morph = body && body->get<MeshRenderer>() ? body->get<MeshRenderer>()->shape_weight("あ") : -1.0f;
+    std::printf("    the hips off by at most %.3f deg; the ankle: at frame 5 %.1f deg (eased), at 10 off by %.3f, at 20 off by %.3f; the centre moved %.3f %.3f %.3f at frame 15; あ %.2f at 5; IK weight %.0f, then %.0f\n",
+                hips_err / kDeg2Rad, early / kDeg2Rad, mid / kDeg2Rad, end / kDeg2Rad, moved.x, moved.y, moved.z, morph, ik_on, ik_off);
+    CHECK(hips_err < 0.6f * kDeg2Rad && mid < 0.6f * kDeg2Rad && end < 0.01f * kDeg2Rad && early < 0.25f * 170.0f * kDeg2Rad && early > 0.0f);
+    std::printf("    a quarter in: x %.3f (0.04 straight), z %.3f (eased: under 0.05)\n", quarter.x, quarter.z);
+    CHECK(length(moved - Vec3(-0.08f, 0, 0.2f)) < 2e-3f && std::fabs(morph - 0.5f) < 1e-5f && ik_on == 1.0f && ik_off == 0.0f);  // (the slopes follow the ease within a millimetre)
+    CHECK(std::fabs(quarter.x + 0.04f) < 2e-3f && quarter.z > 0.0f && quarter.z < 0.05f);
+    CHECK(!notes.empty() && notes[0].find("無い") != std::string::npos);
+  });
+  test("vmd: dropped into the editor after its character, a motion becomes Assets/Animations/<character>/<motion>.anim played by the character; the lesson's Try-it", [&] {
+    const std::string dir = fs::join(test_dir(), "r157_editor");
+    const std::string model = r156_write(dir, "r157miku.pmx", r156_pmx(R156Opts()));
+    fs::write_file(fs::join(dir, "dance.vmd"), r157_vmd());
+    const std::string anim = fs::join(scratch_project(), "Assets/Animations/r157miku");
+    if (fs::exists(anim)) forget_clip_assets("Assets/Animations/r157miku"), fs::move_to_trash(anim);  // (an earlier run's)
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + model);
+    ed.step_frame_headless();
+    ed.command("import " + fs::join(dir, "dance.vmd"));
+    ed.step_frame_headless();
+    GameObject *root = nullptr;
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Animation>() && !root) root = &g; });
+    const Animation *an = root ? root->get<Animation>() : nullptr;
+    const AnimationClipPtr clip = an ? clip_asset(an->clip) : nullptr;
+    const bool found = r146_try(ed, "Open the Project window: drop a .vmd onto the Scene view with its character selected");
+    std::printf("    '%s' plays %s: %zu tracks, %.0f frames at %.0f fps (%s); the lesson's Try-it %s\n", root ? root->name.c_str() : "-", an ? an->clip.c_str() : "-",
+                clip ? clip->tracks.size() : 0, clip ? clip->length : 0.0f, clip ? clip->frame_rate : 0.0f, clip && fs::exists(resolve_asset_path(an->clip)) ? "on disk" : "missing",
+                found ? "ran" : "not found");
+    const bool made = root && an && an->clip.rfind("Assets/Animations/r157miku/dance", 0) == 0 && clip && clip->tracks.size() >= 7 &&
+                      std::fabs(clip->length - 30.0f) < 1e-3f && std::fabs(clip->frame_rate - 30.0f) < 1e-3f && fs::exists(resolve_asset_path(an->clip)) && found;
+    const bool beside = an && fs::exists(fs::join(fs::parent(resolve_asset_path(an->clip)), "dance.vmd"));  // (the motion copied in beside its clip)
+    /* Played: Play turns the hips (and restores the scene after: the objects above are gone by then). */
+    const Quat before = ed.scene().find_by_name("Hips") ? ed.scene().find_by_name("Hips")->world_rotation() : Quat();
+    ed.command("play");
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    GameObject *hips = ed.scene().find_by_name("Hips");
+    const float turned = hips ? 2.0f * std::acos(std::min(1.0f, std::fabs(before.x * hips->world_rotation().x + before.y * hips->world_rotation().y +
+                                                                             before.z * hips->world_rotation().z + before.w * hips->world_rotation().w))) : 0.0f;
+    ed.command("stop");
+    std::printf("    in Play the hips turned %.1f degrees\n", turned / kDeg2Rad);
+    CHECK(made && turned > 5.0f * kDeg2Rad);
+    CHECK(beside);
+  });
+  /* ---------------------------------------------------------------- round 158: VRM characters (task 0138) */
+  /* A synthetic VRM written as a GLB: a humanoid of hips, spine, head, a left leg and a two-bone hair chain; a face quad
+   * skinned to the head with two morph targets; one MToon material; the VRM extension in 0.x or 1.0 form. A 0.x model
+   * faces -Z in glTF (its left at -X, its hair at +Z), a 1.0 model +Z: both must come in facing +Z. */
+  auto r158_vrm = [](bool v1) {
+    R156Bin bin;  // (the binary chunk)
+    const float fz = v1 ? 0.1f : -0.1f;  // the face in front of the head
+    const Vec3 quad[4] = {{-0.1f, 1.5f, fz}, {0.1f, 1.5f, fz}, {0.1f, 1.7f, fz}, {-0.1f, 1.7f, fz}};
+    for (const Vec3 &p : quad) bin.v3(p);  // accessor 0: 48 bytes at 0
+    const int tris[6] = {0, 1, 2, 0, 2, 3};  // (facing +Z in glTF; 0.x: the other way, to face -Z)
+    for (int k = 0; k < 6; k++) bin.u16(v1 ? tris[k] : tris[k == 1 ? 2 : k == 2 ? 1 : k == 4 ? 5 : k == 5 ? 4 : k]);  // accessor 1: 12 bytes at 48
+    bin.u16(0), bin.u16(0);  // (padding to 64)
+    for (int v = 0; v < 4; v++) bin.u8(2), bin.u8(0), bin.u8(0), bin.u8(0);  // accessor 2 (JOINTS_0, the head): 16 bytes at 64
+    for (int v = 0; v < 4; v++) bin.f(1), bin.f(0), bin.f(0), bin.f(0);      // accessor 3 (WEIGHTS_0): 64 bytes at 80
+    for (int v = 0; v < 4; v++) bin.v3({0, 0.05f, 0});                        // accessor 4 (target 0): 48 bytes at 144
+    for (int v = 0; v < 4; v++) bin.v3({0, -0.02f, 0});                       // accessor 5 (target 1): 48 bytes at 192
+    const float lx = v1 ? 0.1f : -0.1f, hz = v1 ? -0.05f : 0.05f;  // the left leg on the model's left, the hair behind
+    /* Accessor 6: the six skin joints' inverse bind matrices (each the inverse of its place in glTF): 384 bytes at 240. The
+     * hair's two nodes are not skin joints: VRM's spring bones only need nodes. */
+    const Vec3 joints[6] = {{0, 0.9f, 0}, {0, 1.1f, 0}, {0, 1.5f, 0}, {lx, 0.9f, 0}, {lx, 0.5f, 0}, {lx, 0.1f, 0}};
+    for (const Vec3 &j : joints)
+      for (int c = 0; c < 16; c++) bin.f(c == 0 || c == 5 || c == 10 || c == 15 ? 1.0f : c == 12 ? -j.x : c == 13 ? -j.y : c == 14 ? -j.z : 0.0f);
+    std::string json = strprintf(
+        R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,8]}],
+"nodes":[{"name":"J_Bip_C_Hips","translation":[0,0.9,0],"children":[1,3,6]},{"name":"J_Bip_C_Spine","translation":[0,0.2,0],"children":[2]},
+{"name":"J_Bip_C_Head","translation":[0,0.4,0]},{"name":"J_Bip_L_UpperLeg","translation":[%g,0,0],"children":[4]},
+{"name":"J_Bip_L_LowerLeg","translation":[0,-0.4,0],"children":[5]},{"name":"J_Bip_L_Foot","translation":[0,-0.4,0]},
+{"name":"J_Sec_Hair1","translation":[0,0.6,%g],"children":[7]},{"name":"J_Sec_Hair2","translation":[0,-0.15,0]},
+{"name":"Face","mesh":0,"skin":0}],
+"skins":[{"joints":[0,1,2,3,4,5],"inverseBindMatrices":6}],
+"meshes":[{"name":"Face","primitives":[{"attributes":{"POSITION":0,"JOINTS_0":2,"WEIGHTS_0":3},"indices":1,"material":0,
+"targets":[{"POSITION":4},{"POSITION":5}]}],"extras":{"targetNames":["Face.a","Face.blink"]}}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-0.1,1.5,-0.1],"max":[0.1,1.7,0.1]},
+{"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"},{"bufferView":2,"componentType":5121,"count":4,"type":"VEC4"},
+{"bufferView":3,"componentType":5126,"count":4,"type":"VEC4"},{"bufferView":4,"componentType":5126,"count":4,"type":"VEC3"},
+{"bufferView":5,"componentType":5126,"count":4,"type":"VEC3"},{"bufferView":6,"componentType":5126,"count":6,"type":"MAT4"}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":12},{"buffer":0,"byteOffset":64,"byteLength":16},
+{"buffer":0,"byteOffset":80,"byteLength":64},{"buffer":0,"byteOffset":144,"byteLength":48},{"buffer":0,"byteOffset":192,"byteLength":48},
+{"buffer":0,"byteOffset":240,"byteLength":384}],
+"buffers":[{"byteLength":624}],
+"materials":[{"name":"Skin","pbrMetallicRoughness":{"baseColorFactor":[1,0.9,0.8,1]}%s}],
+"extensionsUsed":[%s],"extensions":{%s}})",
+        lx, hz,
+        v1 ? R"(,"extensions":{"VRMC_materials_mtoon":{"shadeColorFactor":[0.5,0.45,0.4],"shadingToonyFactor":0.9,"outlineWidthMode":"worldCoordinates",
+"outlineWidthFactor":0.005,"outlineColorFactor":[0.1,0,0]}})" : "",
+        v1 ? R"("VRMC_vrm","VRMC_springBone","VRMC_materials_mtoon")" : R"("VRM")",
+        v1 ? R"("VRMC_vrm":{"specVersion":"1.0","meta":{"name":"Test VRM","authors":["Tests"],"licenseUrl":"https://vrm.dev/licenses/1.0/"},
+"humanoid":{"humanBones":{"hips":{"node":0},"spine":{"node":1},"head":{"node":2},"leftUpperLeg":{"node":3},"leftLowerLeg":{"node":4},"leftFoot":{"node":5}}},
+"expressions":{"preset":{"aa":{"morphTargetBinds":[{"node":8,"index":0,"weight":1}]},"blink":{"morphTargetBinds":[{"node":8,"index":1,"weight":0.5}]}}}},
+"VRMC_springBone":{"springs":[{"name":"hair","joints":[{"node":6,"hitRadius":0.03,"stiffness":2,"gravityPower":0.5,"dragForce":0.4},{"node":7}]}]})"
+           : R"("VRM":{"exporterVersion":"test","meta":{"title":"Test VRM","author":"Tests","licenseName":"CC0"},
+"humanoid":{"humanBones":[{"bone":"hips","node":0},{"bone":"spine","node":1},{"bone":"head","node":2},{"bone":"leftUpperLeg","node":3},
+{"bone":"leftLowerLeg","node":4},{"bone":"leftFoot","node":5}]},
+"blendShapeMaster":{"blendShapeGroups":[{"name":"A","presetName":"a","binds":[{"mesh":0,"index":0,"weight":100}]},
+{"name":"Blink","presetName":"blink","binds":[{"mesh":0,"index":1,"weight":50}]}]},
+"secondaryAnimation":{"boneGroups":[{"comment":"hair","stiffiness":2,"gravityPower":0.5,"dragForce":0.4,"hitRadius":0.03,"bones":[6]}]},
+"materialProperties":[{"name":"Skin","shader":"VRM/MToon","floatProperties":{"_ShadeToony":0.9,"_OutlineWidthMode":1,"_OutlineWidth":0.5},
+"vectorProperties":{"_ShadeColor":[0.5,0.45,0.4,1],"_OutlineColor":[0.1,0,0,1]}}]})");
+    while (json.size() % 4) json += ' ';
+    R156Bin glb;
+    glb.s = "glTF";
+    glb.i32(2), glb.i32((int64_t)(12 + 8 + json.size() + 8 + bin.s.size()));
+    glb.i32((int64_t)json.size()), glb.i32(0x4E4F534A), glb.s += json;
+    glb.i32((int64_t)bin.s.size()), glb.i32(0x004E4942), glb.s += bin.s;
+    return glb.s;
+  };
+  test("vrm: 0.x and 1.0 avatars come in facing +Z with their humanoid bones named for the rig tools, expressions as shape keys, the hair a spring chain with its settings, MToon as Toon with an outline", [&] {
+    for (bool v1 : {false, true}) {
+      const std::string dir = fs::join(test_dir(), "r158");
+      fs::make_dirs(dir);
+      const std::string file = fs::join(dir, v1 ? "avatar1.vrm" : "avatar0.vrm");
+      fs::write_file(file, r158_vrm(v1));
+      ImportResult r;
+      const bool ok = import_model(file, r);
+      CHECK(ok);
+      if (!ok) return (void)std::printf("    %s\n", r.error.c_str());
+      Scene s;
+      instantiate_import(s, r, "Avatar", nullptr);
+      GameObject *upleg = s.find_by_name("LeftUpLeg"), *hair = s.find_by_name("J_Sec_Hair1"), *face = s.find_by_name("Face");
+      const bool named = s.find_by_name("Hips") && s.find_by_name("Spine") && s.find_by_name("Head") && upleg && s.find_by_name("LeftLeg") && s.find_by_name("LeftFoot");
+      const Mesh *m = face && face->get<MeshFilter>() ? face->get<MeshFilter>()->mesh.get() : nullptr;
+      const int a = m ? m->find_shape(v1 ? "aa" : "a") : -1, blink = m ? m->find_shape("blink") : -1;
+      float lift = 0.0f, drop = 0.0f;
+      for (size_t i = 0; m && a >= 0 && blink >= 0 && i < m->vert_count(); i++) lift = std::max(lift, m->shape_keys[(size_t)a].delta[i].y), drop = std::min(drop, m->shape_keys[(size_t)blink].delta[i].y);
+      const Vec3 fn = m && m->face_count() ? face->world_matrix().dir(normalize(m->face_normal(0))) : Vec3(0.0f);
+      const SpringBone *sb = hair ? hair->get<SpringBone>() : nullptr;
+      const Material *mt = face && face->get<MeshRenderer>() && !face->get<MeshRenderer>()->materials.empty() ? face->get<MeshRenderer>()->materials[0].get() : nullptr;
+      const Outline *o = face ? face->get<Outline>() : nullptr;
+      bool meta = false;
+      for (const std::string &n : r.notes) meta = meta || n.find("Test VRM") != std::string::npos;
+      /* Bound (inverse bind matrices): at rest the skinned face stays where its vertices are; posed, it follows the head. */
+      float rest_err = 0.0f;
+      for (size_t i = 0; m && i < m->vert_count(); i++) rest_err = std::max(rest_err, length(face->evaluated_mesh()->positions[i] - m->positions[i]));
+      GameObject *head = s.find_by_name("Head");
+      if (head) head->set_local_position(head->local().position + Vec3(0.0f, 0.3f, 0.0f));
+      const float followed = m && face && head ? face->evaluated_mesh()->positions[0].y - m->positions[0].y : 0.0f;
+      /* 0.x colours are sRGB (Unity's), 1.0's linear: the shade ratio differs. */
+      const Vec3 shade(0.5f, 0.45f, 0.4f), base(1.0f, 0.9f, 0.8f);
+      Vec3 want_shadow;
+      for (int k = 0; k < 3; k++) want_shadow[k] = (v1 ? shade[k] : srgb_to_linear(shade[k])) / base[k];
+      const float want_outline_r = v1 ? 0.1f : srgb_to_linear(0.1f);
+      std::printf("    %s: bones named %s; the left leg at x %.2f, the hair at z %.2f; %s lifts %.3f, blink drops %.3f; the face's normal z %.2f; spring %s (stiffness %.2f, damping %.2f, gravity %.2f, radius %.3f); material toon %d shadow %.2f %.2f %.2f; outline %.4f (%.2f %.0f %.0f); meta %s; at rest off by %g, the head lifted 0.3: the face by %.3f\n",
+                  v1 ? "1.0" : "0.x", named ? "yes" : "no", upleg ? upleg->world_position().x : 0.0f, hair ? hair->world_position().z : 0.0f, v1 ? "aa" : "a", lift, drop, fn.z,
+                  sb ? "yes" : "no", sb ? sb->stiffness : 0.0f, sb ? sb->damping : 0.0f, sb ? sb->gravity : 0.0f, sb ? sb->radius : 0.0f, mt ? mt->shading_model : -1,
+                  mt ? mt->toon_shadow.x : 0.0f, mt ? mt->toon_shadow.y : 0.0f, mt ? mt->toon_shadow.z : 0.0f, o ? o->thickness : 0.0f, o ? o->color.x : 0.0f, o ? o->color.y : 0.0f,
+                  o ? o->color.z : 0.0f, meta ? "yes" : "no", rest_err, followed);
+      CHECK(named && upleg && std::fabs(upleg->world_position().x + 0.1f) < 1e-5f && hair && std::fabs(hair->world_position().z + 0.05f) < 1e-5f);
+      CHECK(rest_err < 1e-5f && std::fabs(followed - 0.3f) < 1e-4f);
+      CHECK(m && m->vert_count() == 4 && std::fabs(lift - 0.05f) < 1e-6f && std::fabs(drop + 0.01f) < 1e-6f && fn.z > 0.999f);
+      CHECK(sb && std::fabs(sb->stiffness - 0.5f) < 1e-6f && std::fabs(sb->damping - 0.4f) < 1e-6f && std::fabs(sb->gravity - 0.5f) < 1e-6f && std::fabs(sb->radius - 0.03f) < 1e-6f);
+      CHECK(mt && mt->shading_model == 1 && length(mt->toon_shadow - want_shadow) < 2e-3f && o && std::fabs(o->thickness - 0.005f) < 1e-6f &&
+            std::fabs(o->color.x - want_outline_r) < 1e-4f && meta);
+    }
+  });
+  test("vrm: dropped into the editor, an avatar gets its .mat (Toon) and its outline; the lesson's Try-it opens the Project window", [&] {
+    const std::string dir = fs::join(test_dir(), "r158_editor");
+    fs::make_dirs(dir);
+    const std::string file = fs::join(dir, "r158avatar.vrm");
+    fs::write_file(file, r158_vrm(true));
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + file);
+    ed.step_frame_headless();
+    GameObject *face = ed.scene().find_by_name("Face");
+    MaterialPtr mat = material_asset("Assets/Materials/r158avatar/Skin.mat");
+    const bool found = r146_try(ed, "Open the Project window: drop a .vrm onto the Scene view");
+    std::printf("    Skin.mat %s (toon %d); outline on the face: %s; the lesson's Try-it %s\n", mat ? "yes" : "no", mat ? mat->shading_model : -1,
+                face && face->get<Outline>() ? "yes" : "no", found ? "ran" : "not found");
+    CHECK(mat && mat->shading_model == 1 && face && face->get<Outline>() && found);
+  });
+  /* ---------------------------------------------------------------- round 159: animation clips from FBX and glTF (task 0139) */
+  test("animation import: Blender's FBX and GLB bring their clips at 24 fps: between a clip's start and its end the upper bone turns 90 degrees and the shape key goes 0 to 1", [&] {
+    /* (Blender saves the FBX mid-pose, so the start is compared with the end, not with the rest; and its GLB has the
+     * arm's action and the key's action as two animations, so the key is looked for across the clips.) */
+    for (const char *file : {"tests/fixtures/anim_arm.fbx", "tests/fixtures/anim_arm.glb"}) {
+      ImportResult r;
+      const bool ok = import_model(file, r);
+      CHECK(ok && !r.clips.empty() && r.clips.size() <= 2);
+      if (!ok || r.clips.empty()) continue;
+      Scene s;
+      GameObject *root = instantiate_import(s, r, "anim_arm", nullptr);
+      GameObject *upper = s.find_by_name("Upper"), *cube = s.find_by_name("Cube");
+      const MeshRenderer *mr = cube ? cube->get<MeshRenderer>() : nullptr;
+      CHECK(root && upper && mr);
+      if (!root || !upper || !mr) continue;
+      float turned = 0.0f, w0 = 0.0f, w1 = 0.0f, drift = 0.0f, rate = 0.0f, len = 0.0f;
+      std::string names;
+      for (const AnimationClip &c : r.clips) {
+        names += (names.empty() ? "" : ", ") + c.name;
+        rate = c.frame_rate, len = std::max(len, c.length);
+        apply_clip(c, *root, 0.0f);
+        const Quat q0 = upper->world_rotation();
+        const Vec3 p0 = upper->world_position();
+        w0 = std::max(w0, mr->shape_weight("Puff"));
+        apply_clip(c, *root, c.length);
+        const Quat q1 = upper->world_rotation();
+        turned = std::max(turned, 2.0f * std::acos(std::min(1.0f, std::fabs(q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w))));
+        w1 = std::max(w1, mr->shape_weight("Puff"));
+        drift = std::max(drift, length(upper->world_position() - p0));
+      }
+      std::printf("    %s: clip(s) '%s', %.0f frames at %.0f fps; start to end the upper bone turns %.1f deg (its place drifting %.4f m), Puff %.2f -> %.2f\n",
+                  fs::filename(file).c_str(), names.c_str(), len, rate, turned / kDeg2Rad, drift, w0, w1);
+      CHECK(std::fabs(rate - 24.0f) < 1e-3f && std::fabs(len - 24.0f) < 0.5f && std::fabs(turned - 90.0f * kDeg2Rad) < 1.0f * kDeg2Rad && w0 < 0.01f &&
+            std::fabs(w1 - 1.0f) < 0.01f && drift < 1e-4f);
+    }
+  });
+  test("animation import: dropped into the editor, the FBX's clip 'Armature|ArmatureAction' is saved under a name Windows takes and plays; a second copy's clip finds its renamed armature; the lesson's Try-it", [&] {
+    for (const char *d : {"Assets/Animations/anim_arm", "Assets/Animations/anim_arm 2", "Assets/Materials/anim_arm", "Assets/Materials/anim_arm 2",
+                          "Assets/Textures/anim_arm", "Assets/Textures/anim_arm 2"})  // (an earlier run's: the GLB of the same name)
+      if (fs::exists(fs::join(scratch_project(), d))) forget_clip_assets(d), fs::move_to_trash(fs::join(scratch_project(), d));
+    Editor ed;
+    r34_open(ed);
+    ed.command("import tests/fixtures/anim_arm.fbx");
+    ed.step_frame_headless();
+    ed.command("import tests/fixtures/anim_arm.fbx");  // (a second copy: its armature is renamed for uniqueness)
+    ed.step_frame_headless();
+    std::vector<GameObject *> roots;
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Animation>()) roots.push_back(&g); });
+    const Animation *an = roots.empty() ? nullptr : roots[0]->get<Animation>(), *an2 = roots.size() > 1 ? roots[1]->get<Animation>() : nullptr;
+    const AnimationClipPtr clip = an ? clip_asset(an->clip) : nullptr, clip2 = an2 ? clip_asset(an2->clip) : nullptr;
+    /* The second copy's clip, applied at its end, turns its own upper bone (its tracks were rewritten onto the renamed armature). */
+    float turned2 = 0.0f;
+    if (clip2 && roots.size() > 1) {
+      GameObject *upper = nullptr;
+      std::function<void(GameObject &)> walk = [&](GameObject &g) {
+        if (g.name == "Upper" && !upper) upper = &g;
+        for (GameObject *c : g.children) walk(*c);
+      };
+      walk(*roots[1]);
+      if (upper) {
+        apply_clip(*clip2, *roots[1], 0.0f);
+        const Quat q0 = upper->world_rotation();
+        apply_clip(*clip2, *roots[1], clip2->length);
+        const Quat q1 = upper->world_rotation();
+        turned2 = 2.0f * std::acos(std::min(1.0f, std::fabs(q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w)));
+      }
+    }
+    const bool found = r146_try(ed, "Open the Animation window: an imported model's clips play on its root");
+    std::printf("    '%s' plays %s: %zu tracks (%s); the second copy '%s' plays %s, its upper bone turning %.1f deg; the lesson's Try-it %s\n", roots.empty() ? "-" : roots[0]->name.c_str(),
+                an ? an->clip.c_str() : "-", clip ? clip->tracks.size() : 0, an && fs::exists(resolve_asset_path(an->clip)) ? "on disk" : "missing",
+                roots.size() > 1 ? roots[1]->name.c_str() : "-", an2 ? an2->clip.c_str() : "-", turned2 / kDeg2Rad, found ? "ran" : "not found");
+    CHECK(an && an->clip == "Assets/Animations/anim_arm/Armature_ArmatureAction.anim" && clip && clip->tracks.size() == 2 && fs::exists(resolve_asset_path(an->clip)) && found);
+    CHECK(an2 && clip2 && std::fabs(turned2 - 90.0f * kDeg2Rad) < 1.0f * kDeg2Rad);
+  });
+  /* ---------------------------------------------------------------- round 160: BVH motion capture (task 0140) */
+  /* A BVH written by the tests, in centimetres: hips (6 channels) walking a metre forward, a spine (Z X Y rotations)
+   * bending 90 degrees about X, a head, an end site; 25 frames at 24 fps. */
+  auto r160_bvh = []() {
+    std::string s = "HIERARCHY\nROOT Hips\n{\n  OFFSET 0.0 100.0 0.0\n  CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation\n"
+                    "  JOINT Spine\n  {\n    OFFSET 0.0 20.0 0.0\n    CHANNELS 3 Zrotation Xrotation Yrotation\n    JOINT Head\n    {\n      OFFSET 0.0 30.0 0.0\n"
+                    "      CHANNELS 3 Zrotation Xrotation Yrotation\n      End Site\n      {\n        OFFSET 0.0 15.0 0.0\n      }\n    }\n  }\n}\nMOTION\nFrames: 25\nFrame Time: 0.0416667\n";
+    for (int f = 0; f < 25; f++) s += strprintf("0.0 100.0 %.4f 0.0 0.0 0.0 0.0 %.4f 0.0 0.0 0.0 0.0\n", 100.0f * f / 24.0f, 90.0f * f / 24.0f);
+    return s;
+  };
+  test("bvh: motion capture in centimetres comes in as a skeleton in metres with its clip: the hips walk a metre forward and the spine bends 90 degrees over 24 frames at 24 fps", [&] {
+    const std::string dir = fs::join(test_dir(), "r160");
+    fs::make_dirs(dir);
+    const std::string file = fs::join(dir, "walk.bvh");
+    fs::write_file(file, r160_bvh());
+    ImportResult r;
+    const bool ok = import_model(file, r);
+    CHECK(ok && r.clips.size() == 1);
+    if (!ok || r.clips.empty()) return (void)std::printf("    %s\n", r.error.c_str());
+    const AnimationClip &c = r.clips[0];
+    Scene s;
+    GameObject *root = instantiate_import(s, r, "walk", nullptr);
+    GameObject *hips = s.find_by_name("Hips"), *spine = s.find_by_name("Spine"), *head = s.find_by_name("Head");
+    CHECK(root && hips && spine && head && hips->get<Bone>());
+    if (!root || !hips || !spine || !head) return;
+    const Vec3 hips0 = hips->world_position(), head0 = head->world_position();
+    const Quat spine0 = spine->world_rotation();
+    apply_clip(c, *root, c.length);
+    const Vec3 moved = hips->world_position() - hips0;
+    const Quat q = spine->world_rotation();
+    const float turned = 2.0f * std::acos(std::min(1.0f, std::fabs(spine0.x * q.x + spine0.y * q.y + spine0.z * q.z + spine0.w * q.w)));
+    const Vec3 axis = normalize(Vec3(q.x, q.y, q.z));
+    std::printf("    %s; hips at %.2f m, head %.2f m above them; clip %.0f frames at %.1f fps; at the end the hips moved %.3f %.3f %.3f, the spine turned %.2f deg about %.2f %.2f %.2f\n",
+                r.summary.c_str(), hips0.y, head0.y - hips0.y, c.length, c.frame_rate, moved.x, moved.y, moved.z, turned / kDeg2Rad, axis.x, axis.y, axis.z);
+    CHECK(std::fabs(hips0.y - 1.0f) < 1e-5f && std::fabs(head0.y - hips0.y - 0.5f) < 1e-5f && std::fabs(c.length - 24.0f) < 0.5f && std::fabs(c.frame_rate - 24.0f) < 0.01f);
+    CHECK(length(moved - Vec3(0, 0, 1.0f)) < 1e-4f && std::fabs(turned - 90.0f * kDeg2Rad) < 0.1f * kDeg2Rad && std::fabs(std::fabs(axis.x) - 1.0f) < 1e-3f);
+    /* Damaged: cut anywhere, a brace too many, a NaN; what imports is whole (every key finite). The same file with
+     * CRLF line ends, tabs and "Frames:25" imports the same. */
+    int refused = 0, imported = 0, broken = 0;
+    const std::string whole = r160_bvh();
+    for (int k = 0; k < 40; k++) {
+      std::string d = k < 30 ? whole.substr(0, whole.size() * (size_t)k / 30) : k == 30 ? whole + "}\n" : k == 31 ? whole + "nan nan\n" : whole.substr(0, 60) + "}}}" + whole.substr(60);
+      fs::write_file(file, d);
+      ImportResult rd;
+      if (!import_model(file, rd)) {
+        refused++;
+        continue;
+      }
+      imported++;
+      for (const AnimationClip &cc : rd.clips)
+        for (const AnimTrack &t : cc.tracks)
+          for (const AnimKey &kk : t.keys) broken += !std::isfinite(kk.value) || !std::isfinite(kk.frame);
+    }
+    std::string crlf;
+    for (char ch : whole) crlf += ch == '\n' ? std::string("\r\n") : ch == ' ' && crlf.size() % 7 == 0 ? std::string("\t") : std::string(1, ch);
+    const size_t fr = crlf.find("Frames: 25");
+    if (fr != std::string::npos) crlf.replace(fr, 10, "Frames:25");
+    fs::write_file(file, crlf);
+    ImportResult rc;
+    const bool crlf_ok = import_model(file, rc) && rc.clips.size() == 1 && rc.clips[0].tracks.size() == 2 && std::fabs(rc.clips[0].length - 24.0f) < 0.5f;
+    std::printf("    40 damaged files: %d refused, %d imported (%d bad keys); with CRLF, tabs and Frames:25: %s\n", refused, imported, broken, crlf_ok ? "the same" : "broken");
+    CHECK(refused + imported == 40 && refused > 0 && broken == 0 && crlf_ok);
+  });
+  test("bvh: dropped into the editor, the capture's clip plays on its skeleton; the lesson's Try-it", [&] {
+    const std::string dir = fs::join(test_dir(), "r160_editor");
+    fs::make_dirs(dir);
+    fs::write_file(fs::join(dir, "r160walk.bvh"), r160_bvh());
+    const std::string anim = fs::join(scratch_project(), "Assets/Animations/r160walk");
+    if (fs::exists(anim)) forget_clip_assets("Assets/Animations/r160walk"), fs::move_to_trash(anim);  // (an earlier run's)
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + fs::join(dir, "r160walk.bvh"));
+    ed.step_frame_headless();
+    GameObject *root = nullptr;
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Animation>() && !root) root = &g; });
+    const Animation *an = root ? root->get<Animation>() : nullptr;
+    const AnimationClipPtr clip = an ? clip_asset(an->clip) : nullptr;
+    const bool found = r146_try(ed, "Open the Animation window: a capture's clip plays on its skeleton");
+    std::printf("    '%s' plays %s (%zu tracks); the lesson's Try-it %s\n", root ? root->name.c_str() : "-", an ? an->clip.c_str() : "-", clip ? clip->tracks.size() : 0, found ? "ran" : "not found");
+    CHECK(root && an && an->clip.rfind("Assets/Animations/r160walk/", 0) == 0 && clip && clip->tracks.size() == 2 && found);  // (the hips' Z, the spine's X: constant axes get no track)
+  });
+  /* ---------------------------------------------------------------- round 161: Collada (task 0141) */
+  /* A Collada file written by the tests, Z up in centimetres: a 1 m square standing on the ground and facing -Y (its
+   * front, in Z-up terms), textured, skinned to two joints (Upper at the ground, Lower 50 cm up), and the upper joint
+   * turning 90 degrees about X over a second (a matrix channel, as Blender writes). */
+  auto r161_dae = []() {
+    return std::string(R"(<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><up_axis>Z_UP</up_axis><unit name="centimeter" meter="0.01"/></asset>
+  <library_images><image id="img"><init_from>tex/skin.png</init_from></image></library_images>
+  <library_effects><effect id="fx"><profile_COMMON>
+    <newparam sid="surf"><surface type="2D"><init_from>img</init_from></surface></newparam>
+    <newparam sid="samp"><sampler2D><source>surf</source></sampler2D></newparam>
+    <technique sid="common"><phong>
+      <emission><color>0.1 0.2 0.3 1</color></emission>
+      <diffuse><texture texture="samp" texcoord="UVMap"/></diffuse>
+      <shininess><float>50</float></shininess>
+    </phong></technique></profile_COMMON></effect></library_effects>
+  <library_materials><material id="mat" name="Skin"><instance_effect url="#fx"/></material></library_materials>
+  <library_geometries><geometry id="quad" name="Quad"><mesh>
+    <source id="pos"><float_array id="posa" count="12">-50 0 0 50 0 0 50 0 100 -50 0 100</float_array>
+      <technique_common><accessor source="#posa" count="4" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <source id="uv"><float_array id="uva" count="8">0 0 1 0 1 1 0 1</float_array>
+      <technique_common><accessor source="#uva" count="4" stride="2"><param name="S" type="float"/><param name="T" type="float"/></accessor></technique_common></source>
+    <vertices id="verts"><input semantic="POSITION" source="#pos"/></vertices>
+    <polylist material="mat-symbol" count="1"><input semantic="VERTEX" source="#verts" offset="0"/><input semantic="TEXCOORD" source="#uv" offset="1" set="0"/>
+      <vcount>4</vcount><p>0 0 1 1 2 2 3 3</p></polylist>
+  </mesh></geometry></library_geometries>
+  <library_controllers><controller id="ctrl"><skin source="#quad">
+    <bind_shape_matrix>1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</bind_shape_matrix>
+    <source id="joints"><Name_array id="jn" count="2">Upper Lower</Name_array><technique_common><accessor source="#jn" count="2" stride="1"><param name="JOINT" type="name"/></accessor></technique_common></source>
+    <source id="ibm"><float_array id="ibma" count="32">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 1 0 0 0 0 1 0 0 0 0 1 -50 0 0 0 1</float_array>
+      <technique_common><accessor source="#ibma" count="2" stride="16"><param name="TRANSFORM" type="float4x4"/></accessor></technique_common></source>
+    <source id="w"><float_array id="wa" count="1">1</float_array><technique_common><accessor source="#wa" count="1" stride="1"><param name="WEIGHT" type="float"/></accessor></technique_common></source>
+    <joints><input semantic="JOINT" source="#joints"/><input semantic="INV_BIND_MATRIX" source="#ibm"/></joints>
+    <vertex_weights count="4"><input semantic="JOINT" source="#joints" offset="0"/><input semantic="WEIGHT" source="#w" offset="1"/>
+      <vcount>1 1 1 1</vcount><v>0 0 0 0 1 0 1 0</v></vertex_weights>
+  </skin></controller></library_controllers>
+  <library_animations><animation id="anim"><animation id="upper_anim">
+    <source id="t"><float_array id="ta" count="2">0 1</float_array><technique_common><accessor source="#ta" count="2" stride="1"><param name="TIME" type="float"/></accessor></technique_common></source>
+    <source id="m"><float_array id="ma" count="32">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 1 0 0 0 0 0 -1 0 0 1 0 0 0 0 0 1</float_array>
+      <technique_common><accessor source="#ma" count="2" stride="16"><param name="TRANSFORM" type="float4x4"/></accessor></technique_common></source>
+    <source id="i"><Name_array id="ia" count="2">LINEAR LINEAR</Name_array><technique_common><accessor source="#ia" count="2" stride="1"><param name="INTERPOLATION" type="name"/></accessor></technique_common></source>
+    <sampler id="s"><input semantic="INPUT" source="#t"/><input semantic="OUTPUT" source="#m"/><input semantic="INTERPOLATION" source="#i"/></sampler>
+    <channel source="#s" target="Upper/transform"/>
+  </animation></animation></library_animations>
+  <library_visual_scenes><visual_scene id="Scene" name="Scene">
+    <node id="Armature" name="Armature" type="NODE"><matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+      <node id="Upper" name="Upper" sid="Upper" type="JOINT"><matrix sid="transform">1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1</matrix>
+        <node id="Lower" name="Lower" sid="Lower" type="JOINT"><translate sid="location">0 0 50</translate></node>
+      </node>
+      <node id="QuadNode" name="Quad" type="NODE"><instance_controller url="#ctrl"><skeleton>#Upper</skeleton>
+        <bind_material><technique_common><instance_material symbol="mat-symbol" target="#mat"/></technique_common></bind_material></instance_controller></node>
+    </node>
+  </visual_scene></library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>
+)");
+  };
+  test("collada: a Z-up file in centimetres comes in standing in metres, facing +Z, textured, skinned to its joints, its matrix animation a clip turning the upper joint 90 degrees", [&] {
+    const std::string dir = fs::join(test_dir(), "r161");
+    fs::make_dirs(fs::join(dir, "tex"));
+    std::vector<uint32_t> px(16, 0xFFE0A080u);
+    write_png(fs::join(dir, "tex/skin.png"), px.data(), 4, 4, 4, false);
+    const std::string file = fs::join(dir, "stand.dae");
+    fs::write_file(file, r161_dae());
+    ImportResult r;
+    const bool ok = import_model(file, r);
+    CHECK(ok);
+    if (!ok) return (void)std::printf("    %s\n", r.error.c_str());
+    Scene s;
+    GameObject *root = instantiate_import(s, r, "stand", nullptr);
+    GameObject *upper = s.find_by_name("Upper"), *lower = s.find_by_name("Lower"), *quad = s.find_by_name("Quad");
+    CHECK(root && upper && lower && quad && upper->get<Bone>() && lower->get<Bone>() && quad->get<SkinModifier>());
+    if (!root || !upper || !lower || !quad) return;
+    const Mesh *m = quad->get<MeshFilter>() ? quad->get<MeshFilter>()->mesh.get() : nullptr;
+    const Material *mt = quad->get<MeshRenderer>() && !quad->get<MeshRenderer>()->materials.empty() ? quad->get<MeshRenderer>()->materials[0].get() : nullptr;
+    float top = -1.0f, zmax = 0.0f;
+    for (size_t i = 0; m && i < m->vert_count(); i++) top = std::max(top, m->positions[i].y), zmax = std::max(zmax, std::fabs(m->positions[i].z));
+    const Vec3 fn = m && m->face_count() ? normalize(m->face_normal(0)) : Vec3(0.0f);
+    float rest_err = 0.0f;
+    for (size_t i = 0; m && i < m->vert_count(); i++) rest_err = std::max(rest_err, length(quad->evaluated_mesh()->positions[i] - m->positions[i]));
+    const bool groups = m && m->find_group("Upper") >= 0 && m->find_group("Lower") >= 0;
+    std::printf("    %s; Lower at %.2f m up; the quad %.2f m tall, flat (|z| %.3f), normal z %.2f, at rest off by %g; material '%s' map %s, emission %.1f %.1f %.1f, roughness %.2f; groups %s; %s\n",
+                r.summary.c_str(), lower->world_position().y, top, zmax, fn.z, rest_err, mt ? mt->name.c_str() : "-", mt ? fs::filename(mt->base_map.path).c_str() : "-",
+                mt ? mt->emission.x : 0.0f, mt ? mt->emission.y : 0.0f, mt ? mt->emission.z : 0.0f, mt ? mt->roughness : 0.0f, groups ? "yes" : "no",
+                r.notes.empty() ? "" : r.notes.back().c_str());
+    CHECK(std::fabs(lower->world_position().y - 0.5f) < 1e-5f && std::fabs(top - 1.0f) < 1e-5f && zmax < 1e-5f && fn.z > 0.999f && rest_err < 1e-5f);
+    CHECK(mt && mt->name == "Skin" && fs::filename(mt->base_map.path) == "skin.png" && fs::exists(mt->base_map.path) && std::fabs(mt->emission.z - 0.3f) < 1e-5f && groups);
+    /* The clip: at its end the upper joint has turned 90 degrees, so Lower lies along Z and the top of the quad with it. */
+    CHECK(r.clips.size() == 1);
+    if (r.clips.empty()) return;
+    const AnimationClip &c = r.clips[0];
+    apply_clip(c, *root, c.length);
+    const Vec3 low = lower->world_position();
+    float moved = 0.0f;
+    for (size_t i = 0; m && i < m->vert_count(); i++) moved = std::max(moved, length(quad->evaluated_mesh()->positions[i] - m->positions[i]));
+    std::printf("    clip '%s': %.0f frames at %.0f fps, %zu tracks; at its end Lower is at %.3f %.3f %.3f, the quad's farthest vertex moved %.3f m\n", c.name.c_str(), c.length,
+                c.frame_rate, c.tracks.size(), low.x, low.y, low.z, moved);
+    CHECK(std::fabs(c.length - 24.0f) < 0.5f && std::fabs(low.y) < 1e-3f && std::fabs(std::fabs(low.z) - 0.5f) < 1e-3f && moved > 0.4f);
+    /* Damaged: cut anywhere. */
+    int refused = 0, imported = 0;
+    const std::string whole = r161_dae();
+    for (int k = 0; k < 40; k++) {
+      fs::write_file(file, whole.substr(0, whole.size() * (size_t)k / 40));
+      ImportResult rd;
+      (import_model(file, rd) ? imported : refused)++;
+    }
+    std::printf("    40 files cut short: %d refused, %d imported\n", refused, imported);
+    CHECK(refused + imported == 40 && refused > 0);
+  });
+  test("collada: dropped into the editor, the model's .mat and texture are made and its clip plays; the lesson's Try-it", [&] {
+    const std::string dir = fs::join(test_dir(), "r161_editor");
+    fs::make_dirs(fs::join(dir, "tex"));
+    std::vector<uint32_t> px(16, 0xFFE0A080u);
+    write_png(fs::join(dir, "tex/skin.png"), px.data(), 4, 4, 4, false);
+    fs::write_file(fs::join(dir, "r161stand.dae"), r161_dae());
+    const std::string anim = fs::join(scratch_project(), "Assets/Animations/r161stand");
+    if (fs::exists(anim)) forget_clip_assets("Assets/Animations/r161stand"), fs::move_to_trash(anim);  // (an earlier run's)
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + fs::join(dir, "r161stand.dae"));
+    ed.step_frame_headless();
+    MaterialPtr mat = material_asset("Assets/Materials/r161stand/Skin.mat");
+    GameObject *root = nullptr;
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Animation>() && !root) root = &g; });
+    const Animation *an = root ? root->get<Animation>() : nullptr;
+    const bool found = r146_try(ed, "Open the Project window: drop a .dae onto the Scene view");
+    std::printf("    Skin.mat %s (texture %s); '%s' plays %s; the lesson's Try-it %s\n", mat ? "yes" : "no", mat ? mat->base_map.path.c_str() : "-", root ? root->name.c_str() : "-",
+                an ? an->clip.c_str() : "-", found ? "ran" : "not found");
+    CHECK(mat && mat->base_map.path.rfind("Assets/Textures/r161stand", 0) == 0 && an && an->clip.rfind("Assets/Animations/r161stand/", 0) == 0 && found);
+  });
+  test("collada: a Y-up metre cube (a byte-order mark, CDATA) comes in facing out, its translate and rotate channels a clip moving it 2 m and turning it 90 degrees", [&] {
+    /* The cube's faces wound counter-clockwise seen from outside (right-handed): they must face out after the mirror. */
+    std::string dae = "\xEF\xBB\xBF" R"(<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><up_axis>Y_UP</up_axis><unit name="meter" meter="1"/></asset>
+  <extra><technique profile="test"><![CDATA[ <not a tag> & not an entity ]]></technique></extra>
+  <library_geometries><geometry id="cube" name="Cube"><mesh>
+    <source id="pos"><float_array id="posa" count="24">-1 -1 1 1 -1 1 1 1 1 -1 1 1 -1 -1 -1 1 -1 -1 1 1 -1 -1 1 -1</float_array>
+      <technique_common><accessor source="#posa" count="8" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <vertices id="verts"><input semantic="POSITION" source="#pos"/></vertices>
+    <polylist count="6"><input semantic="VERTEX" source="#verts" offset="0"/><vcount>4 4 4 4 4 4</vcount>
+      <p>0 1 2 3  5 4 7 6  4 0 3 7  1 5 6 2  3 2 6 7  4 5 1 0</p></polylist>
+  </mesh></geometry></library_geometries>
+  <library_animations><animation id="a">
+    <source id="t"><float_array id="ta" count="2">0 1</float_array><technique_common><accessor source="#ta" count="2" stride="1"><param name="TIME" type="float"/></accessor></technique_common></source>
+    <source id="x"><float_array id="xa" count="2">0 2</float_array><technique_common><accessor source="#xa" count="2" stride="1"><param name="X" type="float"/></accessor></technique_common></source>
+    <source id="r"><float_array id="ra" count="2">0 90</float_array><technique_common><accessor source="#ra" count="2" stride="1"><param name="ANGLE" type="float"/></accessor></technique_common></source>
+    <source id="i"><Name_array id="ia" count="2">LINEAR LINEAR</Name_array><technique_common><accessor source="#ia" count="2" stride="1"><param name="INTERPOLATION" type="name"/></accessor></technique_common></source>
+    <sampler id="sx"><input semantic="INPUT" source="#t"/><input semantic="OUTPUT" source="#x"/><input semantic="INTERPOLATION" source="#i"/></sampler>
+    <sampler id="sr"><input semantic="INPUT" source="#t"/><input semantic="OUTPUT" source="#r"/><input semantic="INTERPOLATION" source="#i"/></sampler>
+    <channel source="#sx" target="Box/location.X"/>
+    <channel source="#sr" target="Box/rotationZ.ANGLE"/>
+  </animation></library_animations>
+  <library_visual_scenes><visual_scene id="Scene">
+    <node id="Box" name="Box"><translate sid="location">0 0 0</translate><rotate sid="rotationZ">0 0 1 0</rotate>
+      <instance_geometry url="#cube"/></node>
+  </visual_scene></library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>
+)";
+    const std::string dir = fs::join(test_dir(), "r161b");
+    fs::make_dirs(dir);
+    const std::string file = fs::join(dir, "box.dae");
+    fs::write_file(file, dae);
+    ImportResult r;
+    const bool ok = import_model(file, r);
+    CHECK(ok);
+    if (!ok) return (void)std::printf("    %s\n", r.error.c_str());
+    Scene s;
+    GameObject *root = instantiate_import(s, r, "box", nullptr);
+    GameObject *box = root;  // (a single node: the import's root is the box itself)
+    const Mesh *m = box && box->get<MeshFilter>() ? box->get<MeshFilter>()->mesh.get() : nullptr;
+    const bool outward = m && m->face_count() == 6 && normals_outward(*m, Vec3(0.0f));
+    const Quat rest = box ? box->world_rotation() : Quat();
+    float turned = 0.0f;
+    Vec3 at(0.0f);
+    if (root && box && !r.clips.empty()) {
+      apply_clip(r.clips[0], *root, r.clips[0].length);
+      const Quat q = box->world_rotation();
+      turned = 2.0f * std::acos(std::min(1.0f, std::fabs(rest.x * q.x + rest.y * q.y + rest.z * q.z + rest.w * q.w)));
+      at = box->world_position();
+    }
+    std::printf("    %zu faces facing out: %s; clip(s) %zu, %.0f frames; at the end the box is at %.2f %.2f %.2f, turned %.1f deg\n", m ? m->face_count() : 0,
+                outward ? "yes" : "no", r.clips.size(), r.clips.empty() ? 0.0f : r.clips[0].length, at.x, at.y, at.z, turned / kDeg2Rad);
+    CHECK(outward && r.clips.size() == 1 && std::fabs(r.clips[0].length - 24.0f) < 0.5f && std::fabs(at.x + 2.0f) < 1e-4f && std::fabs(at.y) < 1e-4f &&
+          std::fabs(turned - 90.0f * kDeg2Rad) < 0.1f * kDeg2Rad);
   });
 }

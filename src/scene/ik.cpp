@@ -39,16 +39,35 @@ Vec3 bone_tail(const GameObject &g) {
   return g.world_matrix().point(Vec3(0, b && finite_bits(b->length) ? b->length : 1.0f, 0));
 }
 
-/* An object by name, remembered by id (a hash lookup each frame instead of a walk over every object). */
-GameObject *resolve(const Scene &scene, const std::string &name, uint64_t &id) {
+GameObject *named_below(GameObject &g, const std::string &name) {
+  if (g.name == name) return &g;
+  for (GameObject *c : g.children)
+    if (GameObject *f = named_below(*c, name)) return f;
+  return nullptr;
+}
+
+/* An object by name, remembered by id (a hash lookup each frame instead of a walk over every object). Looked for first
+ * in the character `from` is part of (its topmost object): two copies of one character have the same names, and each
+ * one's IK aims at its own controls. */
+GameObject *resolve(const Scene &scene, const GameObject &from, const std::string &name, uint64_t &id) {
   if (GameObject *g = id ? scene.find(id) : nullptr)
     if (g->name == name) return g;
-  GameObject *g = scene.find_by_name(name);
+  const GameObject *top = &from;
+  while (top->parent) top = top->parent;
+  GameObject *g = named_below(*const_cast<GameObject *>(top), name);
+  if (!g) g = scene.find_by_name(name);
   id = g ? g->id : 0;
   return g;
 }
 
 }  // namespace
+
+GameObject *ik_target_of(const Scene &scene, const GameObject &bone) {
+  const IKConstraint *ik = bone.get<IKConstraint>();
+  if (!ik || ik->target.empty()) return nullptr;
+  uint64_t id = ik->target_id;
+  return resolve(scene, bone, ik->target, id);
+}
 
 /* The rotation taking unit direction a to unit direction b (the shortest arc). */
 Quat rotation_between(Vec3 a, Vec3 b) {
@@ -77,8 +96,8 @@ static bool solve_one(IKConstraint &ik) {
   GameObject *end = ik.owner;
   Scene *scene = end ? end->scene : nullptr;
   if (!scene || !ik.enabled || ik.target.empty()) return false;
-  GameObject *target = resolve(*scene, ik.target, ik.target_id);
-  GameObject *pole = ik.pole.empty() ? nullptr : resolve(*scene, ik.pole, ik.pole_id);
+  GameObject *target = resolve(*scene, *end, ik.target, ik.target_id);
+  GameObject *pole = ik.pole.empty() ? nullptr : resolve(*scene, *end, ik.pole, ik.pole_id);
   std::vector<GameObject *> chain = ik_chain(*end, ik.chain_length);
   if (!target || chain.empty()) return false;
   for (GameObject *g : chain)  // a target or pole that the chain itself carries would be chased for ever
@@ -216,7 +235,7 @@ static bool solve_fk(Scene &scene) {
   scene.for_each([&](GameObject &g) {
     RigControl *rc = g.get<RigControl>();
     if (!rc || !rc->enabled || rc->role != RigControl::FK || rc->drives.empty()) return;
-    GameObject *b = resolve(scene, rc->drives, rc->drives_id);
+    GameObject *b = resolve(scene, g, rc->drives, rc->drives_id);
     if (!b || b == &g || !b->get<Bone>() || ik_bones.count(b)) return;
     const Quat want = g.world_rotation();
     const Quat have = b->world_rotation();
@@ -245,7 +264,7 @@ bool ik_drives(const Scene &scene, const GameObject &bone) {
     for (auto &c : g.components)
       if (std::strcmp(c->type_name(), IKConstraint::kName) == 0 && c->enabled) {
         IKConstraint &ik = *static_cast<IKConstraint *>(c.get());
-        if (ik.target.empty() || !resolve(scene, ik.target, ik.target_id)) continue;  // a lost target turns nothing
+        if (ik.target.empty() || !resolve(scene, g, ik.target, ik.target_id)) continue;  // a lost target turns nothing
         for (GameObject *b : ik_chain(g, ik.chain_length)) driven = driven || b == &bone;
       }
   });

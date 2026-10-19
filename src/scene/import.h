@@ -4,10 +4,15 @@
 //   .glb .gltf .stl .ply .usda - import_formats.cpp
 //   .fbx         - ufbx, the FBX loader Blender itself uses (blender/extern/ufbx,
 //                  blender/source/blender/io/fbx)
+//   .pmx .pmd    - MikuMikuDance models, own reader (import_mmd.cpp, task 0136)
+//   .vrm         - VRM characters: glTF plus the VRM extension (import_vrm.cpp, task 0138)
+//   .bvh         - motion capture: a skeleton and its clip (import_bvh.cpp, task 0140)
+//   .dae         - Collada, own XML reader (import_dae.cpp, core/xml.h, task 0141)
 // Everything is converted to Unity's left-handed Y-up metre space by
 // mirroring X and reversing face winding, the same thing Unity's importer does.
 #pragma once
 
+#include "animation.h"
 #include "material.h"
 #include "mesh.h"
 #include "scene.h"
@@ -32,6 +37,26 @@ struct ImportedNode {
   bool has_bind = false;
   Mat4 bind_world;
   std::vector<std::pair<std::string, float>> shape_weights;  // the mesh's shape keys' weights as the file left them (task 0135)
+  float length = 0.0f;  // a bone's length when the file says it (MMD: to its tail); 0: to its first child
+};
+
+/* Rig parts beyond the bones (task 0136), on nodes by index. IK on a chain's end bone (its tip reaches the target);
+ * a spring chain's first bone; an object's toon outline. */
+struct ImportedIK {
+  int node = -1;
+  std::string target, pole;  // node names
+  int chain_length = 2, iterations = 20;
+};
+struct ImportedSpring {
+  int node = -1;
+  int label = 0;  // spring::kLabels
+  float radius = 0.02f;
+  float stiffness = -1.0f, damping = -1.0f, gravity = -1.0f;  // (below 0: the label's defaults)
+};
+struct ImportedOutline {
+  int node = -1;
+  float thickness = 0.005f;
+  Vec3 color;
 };
 
 /* A file's right-handed matrix in Blendity's axes: the X mirror on both sides (S M S, S = diag(-1, 1, 1, 1)). */
@@ -54,6 +79,10 @@ struct ImportResult {
   std::vector<MaterialPtr> materials;
   std::vector<std::string> textures;  // absolute paths referenced by materials
   std::vector<ImportedSkin> skins;
+  std::vector<ImportedIK> iks;
+  std::vector<ImportedSpring> springs;
+  std::vector<ImportedOutline> outlines;
+  std::vector<AnimationClip> clips;  // the file's animations, paths relative to the import's root (task 0139)
   std::string error;
   std::string summary;
   std::string source;               // the model file (its folder is where textures are looked for)
@@ -73,7 +102,32 @@ bool import_gltf_file(const std::string &path, ImportResult &out);  // import_fo
 bool import_stl_file(const std::string &path, ImportResult &out);   // Z up, like Blender writes it
 bool import_ply_file(const std::string &path, ImportResult &out);   // Z up, like Blender writes it
 bool import_usda_file(const std::string &path, ImportResult &out);  // text USD; the stage says its up axis
+bool import_pmx_file(const std::string &path, ImportResult &out);   // .pmx and .pmd (import_mmd.cpp)
+bool import_bvh_file(const std::string &path, ImportResult &out);   // the joints as bones, the motion as a clip (import_bvh.cpp)
+bool import_dae_file(const std::string &path, ImportResult &out);   // Collada: geometry, materials, skins, nodes, animations (import_dae.cpp)
+/* VRM (task 0138, import_vrm.cpp): what the extension adds to a glTF. Called by the glTF reader with its node map
+ * (glTF node index -> import node), before the skins (the humanoid's bones named for the rig tools) and after them
+ * (expressions as shape keys, spring chains, MToon as Toon with outlines, a 0.x model turned to face +Z). */
+struct Json;
+bool vrm_present(const Json &doc);
+void vrm_name_bones(const Json &doc, const std::vector<int> &node_index, ImportResult &out);
+void vrm_complete(const Json &doc, const std::vector<int> &node_index, const std::vector<MeshPtr> &meshes, const std::vector<MaterialPtr> &materials,
+                  ImportResult &out);
+/* MMD's standard bone names in the words Blendity's rig tools read ("左ひざ" -> "LeftLeg"); any other name as it is.
+ * Motions (.vmd) name bones in Japanese: the same mapping finds them. */
+std::string mmd_bone_name(const std::string &japanese);
+int mmd_spring_label(const std::string &name);  // hair, ear, tail or cloth from a physics bone's name
+/* Welds vertices at identical positions with the same weights and shape keys (STL, glTF and MMD split them), and the
+ * same normal when `normals` (one a vertex) is given: a hard edge stays split. */
+void weld_exact(Mesh &m, const std::vector<Vec3> *normals = nullptr);
 bool model_extension_supported(const std::string &ext);
+
+/* ---- Motions onto a character (task 0137) ---- */
+bool motion_extension_supported(const std::string &ext);  // .vmd
+/* A MikuMikuDance motion's keys for the character under `root` (bones found by MMD's names, as mmd_bone_name maps
+ * them), into `clip`: bone turns and moves, morphs as shape-key weights, the legs' IK switched off and on. `notes`:
+ * what it couldn't place. */
+bool import_vmd_file(const std::string &path, GameObject &root, AnimationClip &clip, std::vector<std::string> &notes, std::string &error);
 
 /* ---- Materials made on import (task 0134, import_materials.cpp) ---- */
 /* A texture a file links: the link, beside the model, in its .fbm, textures or images folder, by name in any case. */
@@ -87,7 +141,10 @@ std::string import_cache_dir(const ImportResult &r);
  * (Body_BaseColor, T_Body_N, ...) onto the materials the file left without textures. */
 void complete_materials(ImportResult &r);
 
-/* Creates GameObjects for an import result under `parent` (may be null). */
-GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent);
+/* Creates GameObjects for an import result under `parent` (may be null). `made`: the object of each node. */
+GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent, std::vector<GameObject *> *made = nullptr);
+/* A node's path below the import's root, as anim_path names it (a single node is the root itself: ""). The clips'
+ * tracks are made with these; the editor rewrites them onto the objects made (an armature renamed for uniqueness). */
+std::string import_node_path(const ImportResult &r, int node);
 
 }  // namespace bl

@@ -39,6 +39,19 @@
   -Z.
 - **What a format carries that Blendity can't show** (MMD sphere maps, UV and material morphs, SDEF) is named in the
   import's notes.
+- **VRM rides on glTF:** the reader runs the glTF import, then the extension (0.x `VRM`, 1.0 `VRMC_vrm` and its
+  companions). A 0.x model faces -Z in glTF and is turned half a turn about Y; a 1.0 model faces +Z. MToon becomes
+  Toon shading (the shade colour as a ratio of the lit one, 0.x's sRGB colours made linear; toony as the edge's
+  softness, shift as its place) with an Outline per mesh of the widest width its materials ask.
+- **A model's own animations become clips** (`Assets/Animations/<model>/<clip>.anim`, the first on the root's
+  Animation component): FBX stacks sampled a frame at a time at the file's rate, glTF samplers at their own keys with
+  rotation baked, BVH rows at 1 / Frame Time. Rotations are keyed as Euler angles each nearest the frame before.
+- **Motions become ordinary clips** (`Assets/Animations/<character>/<motion>.anim`, 30 fps for MMD), the motion file
+  copied in beside its clip. MMD keys a bone as a turn in its rest frame, so a key becomes the local rotation
+  `R_parent^-1 · C(q) · R_bone` (R: the rests relative to the root, C: MMD's space turned half a turn about Y) and the
+  position `rest + R_parent^-1 · C(t) · 0.08`. MMD's Bezier timing becomes the keys' Hermite slopes; a run the slopes
+  can't follow within half a degree or a millimetre (a long turn, an Euler wrap) is keyed every frame from the true
+  slerp, linear, each frame's Euler angles chosen nearest the frame before.
 
 ## Consequences
 - Re-importing a model whose materials were renamed in the file makes new `.mat` files beside the old ones. The old

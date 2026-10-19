@@ -223,6 +223,15 @@ bool read_file(const std::string &path, std::string &out) {
   return true;
 }
 
+bool read_prefix(const std::string &path, size_t n, std::string &out) {
+  std::ifstream f(P(path), std::ios::binary);
+  if (!f) return false;
+  out.assign(n, '\0');
+  f.read(&out[0], (std::streamsize)n);
+  out.resize((size_t)std::max<std::streamsize>(0, f.gcount()));
+  return true;
+}
+
 bool write_file(const std::string &path, const std::string &data) {
   std::ofstream f(P(path), std::ios::binary | std::ios::trunc);
   if (!f) return false;

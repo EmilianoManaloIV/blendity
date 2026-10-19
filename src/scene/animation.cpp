@@ -336,6 +336,40 @@ void clear_clip_assets() { clip_library().clear(); }
 
 bool is_transform_property(const std::string &p) { return p == "Position" || p == "Rotation" || p == "Scale"; }
 
+float best_frame_rate(const std::vector<float> &times) {
+  float best = 30.0f, best_err = 1e30f;
+  for (float rate : {24.0f, 25.0f, 30.0f, 50.0f, 60.0f, 120.0f}) {
+    float err = 0.0f;
+    for (float t : times) err += std::fabs(t * rate - std::round(t * rate));
+    err = times.empty() ? 1.0f : err / (float)times.size();
+    if (err < best_err - 1e-4f) best_err = err, best = rate;
+  }
+  return best_err < 0.05f ? best : 30.0f;
+}
+
+void reduce_keys(std::vector<AnimKey> &keys, float tolerance) {
+  if (keys.size() < 3) return;
+  std::vector<AnimKey> kept{keys[0]};
+  for (size_t i = 1; i + 1 < keys.size(); i++) {
+    const AnimKey &a = kept.back(), &b = keys[i + 1], &k = keys[i];
+    const float span = b.frame - a.frame;
+    const float on_line = span > 1e-6f ? a.value + (b.value - a.value) * (k.frame - a.frame) / span : a.value;
+    if (std::fabs(k.value - on_line) > tolerance) kept.push_back(k);
+  }
+  kept.push_back(keys.back());
+  keys = std::move(kept);
+}
+
+Vec3 euler_near(Quat q, Vec3 near) {
+  const Vec3 a = q.to_euler(), b(180.0f - a.x, a.y + 180.0f, a.z + 180.0f);
+  auto fold = [&](Vec3 e) {
+    for (int k = 0; k < 3; k++) e[k] += 360.0f * std::round((near[k] - e[k]) / 360.0f);
+    return e;
+  };
+  const Vec3 fa = fold(a), fb = fold(b);
+  return length(fa - near) <= length(fb - near) ? fa : fb;
+}
+
 namespace {
 GameObject *child_named(GameObject *g, const std::string &name) {
   const auto it = std::find_if(g->children.begin(), g->children.end(), [&](const GameObject *c) { return c->name == name; });

@@ -74,6 +74,7 @@ bool is_dir(const std::string &path);
 bool make_dirs(const std::string &path);
 std::vector<DirEntry> list(const std::string &dir);
 bool read_file(const std::string &path, std::string &out);
+bool read_prefix(const std::string &path, size_t n, std::string &out);  // at most the first n bytes (a header)
 bool write_file(const std::string &path, const std::string &data);
 bool copy_file(const std::string &from, const std::string &to);
 /* Moves or renames a file or folder (also across drives). Fails if `to` exists. */

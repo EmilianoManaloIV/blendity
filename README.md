@@ -156,7 +156,12 @@ everything):
   slopes), and **Locomotion** walks and runs it live in Play wherever it is moved. **AI Inbetweening** (an optional download:
   ONNX Runtime and a network Blendity trained on ten hours of CMU motion capture) fills the motion between two keys
   in a style, shown as a ghost before it is applied, and can be fitted to your own clips. Imported models arrive with
-  their materials as `.mat` assets and textures found or extracted, and with their **shape keys** (faces, morphs). Every such assistant is a
+  their materials as `.mat` assets and textures found or extracted, and with their **shape keys** (faces, morphs).
+  **MikuMikuDance** characters (`.pmx`, `.pmd`) come in rigged: leg IK, their hair and skirts as spring chains, their
+  faces as shape keys, toon-shaded with their outline, and their `.vmd` dances play on them. **VRM** avatars (0.x,
+  1.0) come in with their humanoid names, expressions, spring bones and MToon look. A model's **animations** (FBX
+  stacks, glTF animations) become clips in `Assets/Animations/<model>/`, the first playing on it; **BVH** motion
+  capture comes in as a skeleton with its clip; **Collada** scenes with their skins and animations. Every such assistant is a
   switch in Preferences: hand animation never changes.
 
 Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2. The keymap starts
@@ -202,7 +207,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (10907 unit checks in 841 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (10985 unit checks in 859 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

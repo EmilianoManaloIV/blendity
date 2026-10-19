@@ -1832,6 +1832,11 @@ class Editor {
   bool inside_assets(const std::string &path) const;
   void shape_command(const std::vector<std::string> &t);
   std::string copy_model_into_assets(const std::string &path);
+  void import_motion_file(const std::string &path);
+  /* A clip imported with a model or a motion saved as Assets/Animations/<folder>/<clip>.anim (a free name), and played
+   * by `root`'s Animation component when `play`; the asset's path ("" when it couldn't be written). */
+  std::string save_imported_clip(GameObject &root, const AnimationClip &clip, const std::string &folder, bool play);  // (the folder and the clip's name made file-safe)
+  GameObject *motion_target();
   std::string import_folder(const std::vector<std::string> &sources, const std::string &stem);
   bool import_folder_matches(const std::string &dir, const std::vector<std::string> &sources) const;
   bool import_folder_reused(const std::vector<std::string> &sources, const std::string &stem) const;

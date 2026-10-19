@@ -4,6 +4,8 @@
 #include "../core/core.h"
 #include "../../extern/fast_float/fast_float.h"
 #include "../../extern/ufbx/ufbx.h"
+#include "import_anim.h"
+#include "spring_bones.h"
 
 #include <algorithm>
 #include <cstring>
@@ -14,18 +16,24 @@
 namespace bl {
 
 bool model_extension_supported(const std::string &ext) {
-  return ext == ".obj" || ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".stl" || ext == ".ply" || ext == ".usda";
+  return ext == ".obj" || ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".stl" || ext == ".ply" || ext == ".usda" ||
+         ext == ".pmx" || ext == ".pmd" || ext == ".vrm" || ext == ".bvh" || ext == ".dae";
 }
+
+bool motion_extension_supported(const std::string &ext) { return ext == ".vmd"; }
 
 namespace {
 bool import_by_format(const std::string &path, ImportResult &out) {
   const std::string ext = fs::extension(path);
   if (ext == ".obj") return import_obj_file(path, out);
   if (ext == ".fbx") return import_fbx_file(path, out);
-  if (ext == ".glb" || ext == ".gltf") return import_gltf_file(path, out);
+  if (ext == ".glb" || ext == ".gltf" || ext == ".vrm") return import_gltf_file(path, out);
   if (ext == ".stl") return import_stl_file(path, out);
   if (ext == ".ply") return import_ply_file(path, out);
   if (ext == ".usda" || ext == ".usd") return import_usda_file(path, out);
+  if (ext == ".pmx" || ext == ".pmd") return import_pmx_file(path, out);
+  if (ext == ".bvh") return import_bvh_file(path, out);
+  if (ext == ".dae") return import_dae_file(path, out);
   out.error = "unsupported model format " + ext;
   return false;
 }
@@ -552,6 +560,7 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
         skin.joints.push_back(it->second);
     out.skins.push_back(std::move(skin));
   }
+  if (!out.nodes.empty()) fbx_import_clips(scene, index, out);  // (task 0139: the stacks as clips)
   ufbx_free_scene(scene);
   if (out.nodes.empty()) {
     out.error = "FBX contains no nodes";
@@ -561,7 +570,46 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
   return true;
 }
 
-GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent) {
+/* IK, spring chains and outlines (task 0136) on the objects made for their nodes. */
+static void add_rig_parts(const ImportResult &r, const std::vector<GameObject *> &made) {
+  auto at = [&](int i) { return i >= 0 && (size_t)i < made.size() ? made[(size_t)i] : nullptr; };
+  for (const ImportedIK &k : r.iks)
+    if (GameObject *g = at(k.node); g && !g->get<IKConstraint>()) {
+      IKConstraint *c = g->add<IKConstraint>();
+      c->target = k.target, c->pole = k.pole, c->chain_length = k.chain_length, c->iterations = k.iterations;
+    }
+  for (const ImportedSpring &s : r.springs) {
+    GameObject *g = at(s.node);
+    if (!g || !g->get<Bone>()) continue;
+    /* A root that forks (a skirt's ring of strands under one bone) gets a chain per strand, with the same settings. */
+    std::vector<GameObject *> firsts = spring::chains_under(*g);
+    if (std::find(firsts.begin(), firsts.end(), g) == firsts.end() && !g->get<SpringBone>()) firsts.push_back(g);
+    for (GameObject *f : firsts) {
+      if (f->get<SpringBone>()) continue;
+      spring::add(*f, s.label);
+      SpringBone *sb = f->get<SpringBone>();
+      if (!sb) continue;
+      sb->radius = s.radius;
+      if (s.stiffness >= 0.0f) sb->stiffness = s.stiffness;
+      if (s.damping >= 0.0f) sb->damping = s.damping;
+      if (s.gravity >= 0.0f) sb->gravity = s.gravity;
+    }
+  }
+  for (const ImportedOutline &o : r.outlines)
+    if (GameObject *g = at(o.node); g && !g->get<Outline>()) {
+      Outline *ol = g->add<Outline>();
+      ol->thickness = o.thickness, ol->color = o.color, ol->world_space = true;
+    }
+}
+
+std::string import_node_path(const ImportResult &r, int node) {
+  if (r.nodes.size() == 1) return "";
+  std::string p;
+  for (int n = node; n >= 0 && (size_t)n < r.nodes.size(); n = r.nodes[(size_t)n].parent) p = p.empty() ? r.nodes[(size_t)n].name : r.nodes[(size_t)n].name + "/" + p;
+  return p;
+}
+
+GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent, std::vector<GameObject *> *made_out) {
   GameObject *root = r.nodes.size() == 1 && r.nodes[0].parent < 0 ? nullptr : scene.create(root_name, parent);
   std::vector<GameObject *> made(r.nodes.size(), nullptr);
   for (size_t i = 0; i < r.nodes.size(); i++) {
@@ -628,8 +676,8 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
   for (size_t i = 0; i < r.nodes.size(); i++) {
     Bone *b = r.nodes[i].is_bone && made[i] ? made[i]->get<Bone>() : nullptr;
     if (!b) continue;
-    float len = 0.0f;
-    for (size_t c = 0; c < r.nodes.size(); c++)
+    float len = r.nodes[i].length;
+    for (size_t c = 0; c < r.nodes.size() && len <= 0.0f; c++)
       if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone && made[c])
         if (const Bone *cb = made[c]->get<Bone>()) len = std::max(len, length(cb->rest_position));
     b->length = len > 1e-4f ? len : 0.1f;
@@ -670,6 +718,8 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
     GameObject *mg = made[(size_t)sk.mesh_node];
     if (!mg->get<SkinModifier>()) mg->add<SkinModifier>()->object = arm->name;
   }
+  add_rig_parts(r, made);
+  if (made_out) *made_out = made;
   return root ? root : (made.empty() ? nullptr : made[0]);
 }
 

@@ -2,6 +2,186 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-19 (round 161): Collada (task 0141, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": Collada, what Blender, Maya, SketchUp and Mixamo export.
+
+**Added**
+- **Collada (.dae) import** through Blendity's own XML reader (`core/xml.h`): geometry (triangles, polylists,
+  polygons) with its materials (the effect's diffuse colour or texture, emission, shininess as roughness,
+  transparency), skins with their joints and bind matrices, the node hierarchy, and the animations (matrix channels,
+  or translate / rotate / scale channels by name) as one clip. The file's up axis and unit are honoured, so a Z-up
+  model in centimetres stands the right way up at the right size.
+- **Learn:** "Collada: .dae scenes".
+
+**Checked**
+- New tests (round 161), on a Collada file the tests write themselves (Z up, centimetres, a textured square skinned to
+  two joints, a matrix animation):
+  - standing in metres and facing +Z, its texture found in `tex/`, its emission and roughness read, its groups named
+    after the joints, at rest unmoved;
+  - the clip of 24 frames: at its end the upper joint has turned 90 degrees and the square's top with it;
+  - 40 files cut short refuse or import without harm;
+  - dropped into the editor: `Skin.mat` with the texture copied in, the clip playing on the root; the lesson's Try-it;
+  - after the review: a Y-up metre cube with a byte-order mark and CDATA comes in facing out, its translate and rotate
+    component channels moving it 2 m and turning it 90 degrees.
+- **Fixed on review:** the `<source>` cache outlived its file (a later import could read another file's UVs); CDATA cut
+  short read past the buffer; a skin over Blender's morph controller lost its mesh; X-up files came in inside out.
+- Unit checks (the whole stack, rounds 156-161): Windows 10,985, 0 failed (859 tests); render-cache verify mode
+  10,986, 0 failed, 0 stale pictures. Linux with libraries: 10,721, 0 failed. Sanitizer build: 10,599, 0 failed, no
+  reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`,
+  `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-19 (round 160): BVH motion capture (task 0140, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": motion capture.
+
+**Added**
+- **BVH import:** a `.bvh` (Biovision motion capture: CMU, Mixamo's exports, Rokoko) comes in as a skeleton of bones at
+  the file's offsets and its motion as a clip (`Assets/Animations/<file>/<file>.anim`) playing on it, at the file's
+  frame rate. Rotation channels are composed in the file's order; a skeleton taller than 10 units is taken to be in
+  centimetres.
+- **Learn:** "Motion capture: BVH".
+- Out (said in the Console): retargeting onto another character (bake the clip or copy its keys by name).
+
+**Checked**
+- New tests (round 160), on a BVH the tests write themselves (hips, spine, head and an end site; the hips walking a
+  metre forward and the spine bending 90 degrees over 24 frames at 24 fps, in centimetres):
+  - the skeleton in metres (the hips 1 m up, the head above the spine), the clip of 24 frames at 24 fps;
+  - at its end the hips have moved 1 m towards +Z and the spine has turned 90 degrees (within 0.1 degree);
+  - damaged files (cut anywhere, a brace too many, a NaN) refuse or import without harm;
+  - dropped into the editor: the clip made and playing on the skeleton's root; the lesson's Try-it;
+  - after the review: CRLF, tabs and `Frames:25` read the same; what a damaged file gives is whole.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-19 (round 159): animation clips from FBX and glTF (task 0139, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": a model's own animations (Mixamo, Blender actions, glTF).
+
+**Added**
+- **A model's animations come in as clips**, as Unity's importer makes them: `Assets/Animations/<model>/<clip>.anim`
+  for each, the first playing on the model's root through an Animation component.
+  - **FBX:** each animation stack, at the file's frame rate, every node's turn, move and scale a frame at a time (a
+    track for each that changes); blend-shape channels as BlendShape tracks.
+  - **glTF:** each animation at the frame rate its keys fit (24, 25, 30, 50, 60, 120; else 30); moves, scales and
+    morph weights at the file's own keys (step and linear; cubic splines baked), turns baked a frame at a time from
+    the file's slerp.
+  - Euler angles chosen nearest the frame before: no wraps.
+- **Learn:** "Imported animations: a model's clips".
+
+**Checked**
+- New tests (round 159), on Blender's FBX and GLB of a two-bone arm (`tests/fixtures/anim_arm.*`, `make_anim.py`):
+  - one clip of 24 frames at 24 fps from each; at its end the upper bone has turned 90 degrees (within a degree) and
+    the shape key is at 1; at its start nothing has moved;
+  - dropped into the editor: the FBX's `Armature|ArmatureAction` saved as `Armature_ArmatureAction.anim` and playing
+    on the root; a second copy of the model plays its own clip (its armature renamed); the lesson's Try-it.
+- **Fixed on review:** Blender's clip names (`Armature|ArmatureAction`) couldn't be written on Windows, so every FBX
+  action was dropped silently; a second import of a model lost its clip to the armature's uniqueness rename; baked
+  clips kept every frame (now reduced to the frames that matter); a glTF clip started a frame early.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-19 (round 158): VRM characters (task 0138, ADR 0047)
+
+**Asked:** round 154's "other rigged character formats": VRM, the VTuber avatar format.
+
+**Added**
+- **VRM import** (0.x and 1.0; VRoid Studio, UniVRM): a `.vrm` dropped onto the window comes in as a character facing
+  +Z.
+  - **Bones:** the humanoid's bones named for the rig tools (`leftUpperLeg` -> `LeftUpLeg`).
+  - **Expressions** (A, I, U, E, O, blink, joy...) as shape keys on the meshes they move, each the weighted mix of
+    morph targets the file binds.
+  - **Spring bones** as Spring Bones chains with the file's stiffness, drag, gravity and hit radius.
+  - **MToon** as Toon shading (the shade colour, toony edge, shift; cutout and transparent modes; unlit shaders) with
+    an Outline of the file's width.
+  - **Meta:** the title, author and license in the Console.
+  - **Not carried over:** shade textures, rim light, matcaps, first-person and look-at settings.
+- **Learn:** "VRM characters: VRoid and UniVRM avatars".
+
+**Checked**
+- New tests (round 158), on an avatar the tests write themselves as a GLB, in 0.x and 1.0 form:
+  - the bones named; the left leg on the character's left and the hair behind the head in both (the 0.x model turned
+    half a turn);
+  - `a` / `aa` the whole first morph (5 cm), `blink` half the second; the face facing +Z;
+  - the hair's chain with stiffness 0.5, damping 0.4, gravity 0.5, radius 3 cm;
+  - the material Toon with a shadow ratio of 0.5, a 5 mm outline in the file's colour; the meta in the notes;
+  - dropped into the editor: `Skin.mat` (Toon), the outline, the lesson's Try-it;
+  - after the review: bound with inverse bind matrices, the face stays at rest and follows the head; the hair outside
+    the skin's joints still gets its chain; a 0.x shadow comes in at its sRGB-corrected ratio.
+- **Fixed on review:** 0.x colours are sRGB (a VRoid shadow came in much too light); a forking spring root got one
+  chain (every strand below it hung rigid); a spring on an accessory node outside the skin was dropped.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-19 (round 157): MMD motions (task 0137, ADR 0047)
+
+**Asked:** round 154's MMD request: its dances.
+
+**Added**
+- **VMD import:** drop a `.vmd` onto the Scene view with an MMD character selected (or File > Import, the Project
+  window, the console's `import <file>`), and it becomes `Assets/Animations/<character>/<motion>.anim`, played by the
+  character's Animation component.
+  - **Bones** by MMD's names (`左ひざ`, `頭`): a motion fits any model with the standard bones. The keys are turned
+    from MMD's rest-frame quaternions into each bone's own rotation (Blendity's bones point at their tails).
+  - **Timing:** MMD's Bezier curves become the keys' slopes; a run the curves can't follow within half a degree or a
+    millimetre is keyed every frame from the true arc.
+  - **Faces:** morph keys on the BlendShape sliders of every mesh with that morph.
+  - **IK:** the legs' IK switched off and on keys the constraint's Weight.
+  - **Reported:** bones and morphs the character hasn't; the motion's camera (not imported).
+- **Learn:** "MMD motions: VMD dances on your character".
+
+**Checked**
+- New tests (round 157), on a motion the tests write themselves:
+  - the hips' 90-degree turn within 0.6 degrees at every checked frame; the ankle's eased 170-degree turn half done at
+    its midpoint, exact at its end;
+  - the centre moved 0.2 m towards +Z; `あ` at 0.5 halfway; the IK weight 1 then 0; the missing bone reported;
+  - dropped into the editor: the `.anim` made and played (the hips turn in Play), the `.vmd` copied in beside it, and
+    the lesson's Try-it.
+- **Fixed on review:** keys are built per track and assigned whole (a long dance was inserting each of thousands of
+  keys into a growing list); a densified run can't flick into its last key; a bone keyed at its rest gets no track
+  (its hair would have fought its spring); the motion file is kept beside its clip.
+- Checked with round 161's chain (see its entry).
+
+## 2026-10-18 (round 156): MMD models (task 0136, ADR 0047)
+
+**Asked:** round 154's "make the program be able to handle mmd models as well".
+
+**Added**
+- **PMX (2.0, 2.1) and PMD import**, read by Blendity's own code. Drop a `.pmx` or `.pmd` onto the window.
+  - **Scale and facing:** scaled from MMD's 8 cm unit to metres and turned to face +Z like every other character.
+  - **Skin:** skinned to its bones (BDEF1/2/4; SDEF and QDEF read as linear).
+  - **Bones:** each bone points at its tail. The standard bones get the names the rig tools read (`左ひざ` ->
+    `LeftLeg`), so Walk Cycle and the physics tools find its legs.
+  - **Leg IK:** an IKConstraint on each knee, aimed at the foot's IK bone, with a pole in front of the knee.
+  - **Physics:** the bones MMD simulates (hair, skirts) become Spring Bones chains.
+  - **Faces:** vertex and group morphs become shape keys.
+  - **Materials:** Toon shading with MMD's colours, textures and toon ramp; the model's edge becomes an Outline.
+  - **Not carried over** (listed in the Console): bone, UV and material morphs, and inherited rotation.
+- **Japanese text:** PMX's UTF-16 or UTF-8, and PMD's Shift-JIS, decoded by the operating system (Windows' code page
+  932, iconv on Linux and macOS).
+- **Learn:** "MMD models: PMX and PMD".
+
+**Checked**
+- New tests (round 156), on a character the tests write themselves (no third-party model):
+  - Shift-JIS and UTF-16 names decode;
+  - the PMX, in UTF-16 and UTF-8:
+    - placed to the micrometre, the thigh pointing down its length;
+    - the knee's IK on `LeftFootIK` with its pole in front, the hair a spring chain of its body's radius;
+    - its front faces +Z, and a turned knee moves the vertices it carries;
+    - the morphs lift 8 cm and 4 cm;
+    - a Toon material of MMD's lit colour with its texture and its ramp's shadow, and a 6 mm outline;
+  - the PMD twin, Shift-JIS names and all, the same;
+  - 240 damaged files (cut short, bytes flipped) imported or refused without harm;
+  - dropped into the editor: `肌.mat`, its texture in Assets, the walking analysis finding the hips and both legs, and
+    the lesson's Try-it;
+  - after the review: the kitchen sink (every optional PMX record, vertex indices past 127, the skin on D bones, the
+    triangles the other way round) imports the same; two copies of one character each aim their IK at their own
+    controls, through a save and a load too; a forked hair gets three chains; a shared toon ramp is reported; a hard
+    edge stays split; 5,000 morphs are capped at 4,096 keys; 1,000 nested bones and a vertex at 1e30 are refused; a
+    parent loop is broken.
+- **Fixed on review:** IK constraints found their target by name anywhere in the scene, so a second copy of a
+  character aimed its legs at the first (now its own character first, `ik_target_of`); the "D bones" most PMX models
+  weight their legs to now hand their weights to the bones IK and walking drive.
+- Checked with round 161's chain (see its entry); round 156's own chain on task 0136 alone: Windows 10,939, 0 failed
+  (848 tests), verify 10,940, 0 stale; Linux 10,675; sanitizers 10,553; stress no change.
+
 ## 2026-10-18 (round 155): shape keys (task 0135, ADR 0047)
 
 **Asked:** round 154's MMD question: its faces, and VRM's and many FBX faces, are shape keys.

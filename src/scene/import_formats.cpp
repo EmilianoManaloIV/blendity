@@ -8,6 +8,7 @@
 // (STL and PLY as Blender writes them, USD stages with upAxis "Z") are first
 // stood up, the inverse of Blender's forward -Z / up Y axis conversion.
 #include "import.h"
+#include "import_anim.h"
 
 #include "../core/core.h"
 #include "../core/json.h"
@@ -69,8 +70,9 @@ void set_node_trs(ImportedNode &n, Vec3 t, Quat r, Vec3 s) {
   n.scale = s;
 }
 
-/* Welds vertices at identical positions (STL and glTF store split triangles). */
-void weld_exact(Mesh &m) {
+}  // namespace
+
+void weld_exact(Mesh &m, const std::vector<Vec3> *normals) {
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
   std::vector<uint32_t> remap(m.vert_count());
   std::vector<Vec3> kept;
@@ -94,6 +96,7 @@ void weld_exact(Mesh &m) {
         if (g.weights.size() == m.vert_count() && g.weights[i] != g.weights[first[k]]) same = false;
       for (const ShapeKey &s : m.shape_keys)  // (and with the same shape keys: a mouth's corners must part)
         if (s.delta.size() == m.vert_count() && !(s.delta[i] == s.delta[first[k]])) same = false;
+      if (normals && normals->size() == m.vert_count() && dot((*normals)[i], (*normals)[first[k]]) < 0.9999f) same = false;  // (a hard edge)
       if (same) {
         found = k;
         break;
@@ -108,7 +111,7 @@ void weld_exact(Mesh &m) {
     remap[i] = found;
   }
   /* Vertex groups (a skin's weights): a welded vertex keeps the first copy's (they were at the same place). */
-  std::vector<VertexGroup> groups = m.vertex_groups;
+  std::vector<VertexGroup> groups = std::move(m.vertex_groups);  // (moved, not copied: a character's can be large)
   for (VertexGroup &g : groups) {
     if (g.weights.size() != m.vert_count()) {
       g.weights.assign(kept.size(), 0.0f);
@@ -120,7 +123,7 @@ void weld_exact(Mesh &m) {
       if (!set[remap[i]]) w[remap[i]] = g.weights[i], set[remap[i]] = 1;
     g.weights = std::move(w);
   }
-  std::vector<ShapeKey> shapes = m.shape_keys;  // (renumbered as the vertices: a welded vertex keeps the first copy's)
+  std::vector<ShapeKey> shapes = std::move(m.shape_keys);  // (renumbered as the vertices: a welded vertex keeps the first copy's)
   for (ShapeKey &s : shapes) {
     std::vector<Vec3> d(kept.size(), Vec3(0.0f));
     for (size_t i = 0; i < remap.size() && s.delta.size() == m.vert_count(); i++)
@@ -151,6 +154,8 @@ void weld_exact(Mesh &m) {
   }
   m = std::move(clean);
 }
+
+namespace {
 
 std::string base64_decode(const std::string &s) {
   static int8_t t[256];
@@ -573,7 +578,11 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     out.error = "glTF: no meshes or nodes";
     return false;
   }
+  const bool vrm = vrm_present(doc);  // (task 0138: the humanoid's names before the skins take them for the groups)
+  if (vrm) vrm_name_bones(doc, node_index, out);
   skins_and_bones();
+  if (vrm) vrm_complete(doc, node_index, meshes, mats, out);
+  gltf_import_clips(doc, node_index, read_accessor, out);  // (task 0139)
   out.summary = strprintf("%zu node(s), %zu vertices, %zu faces, %zu material(s)", out.nodes.size(), verts, faces, out.materials.size());
   return true;
 }

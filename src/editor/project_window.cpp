@@ -587,7 +587,7 @@ void Editor::draw_project(const Recti &r) {
         if (ProceduralTexturePtr t = texture_asset(make_asset_relative(full))) texture_selected_ = t;
         dock_open(WindowKind::Textures);
       }
-      else if (model_extension_supported(ext)) import_model_file(full, false);
+      else if (model_extension_supported(ext) || motion_extension_supported(ext)) import_model_file(full, false);
       else if (ext != ".mat" && ext != ".ptex") fs::open_external(full);
     }
     if (hot && in.pressed[1]) {

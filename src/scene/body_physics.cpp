@@ -341,7 +341,7 @@ std::vector<Effector> effectors(Scene &scene, GameObject &anim_root, const GameO
     if (!g->get<Bone>() || !ik || !ik->enabled) continue;
     Effector e;
     e.bone = g;
-    e.target = ik->target.empty() ? nullptr : scene.find_by_name(ik->target);
+    e.target = ik_target_of(scene, *g);
     if (e.target && (e.target == &anim_root || scene.is_ancestor(&anim_root, e.target))) e.target_path = anim_path(anim_root, *e.target);
     else if (e.target) e.target_path.clear();
     out.push_back(e);

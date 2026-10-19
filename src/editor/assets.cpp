@@ -4,6 +4,7 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../scene/animation.h"
 #include "../scene/import.h"
 
 #include <algorithm>
@@ -19,6 +20,15 @@ std::string safe_file_name(const std::string &name) {
   for (char c : name) s += std::isalnum((unsigned char)c) || c == ' ' || c == '-' || c == '_' || c == '.' || c == '(' || c == ')' || (unsigned char)c >= 0x80 ? c : '_';
   while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
   return s.empty() ? std::string("Material") : s;
+}
+
+/* A clip's file name: nothing Windows refuses (Blender's stacks are "Armature|ArmatureAction"). */
+std::string clip_file_name(std::string n) {
+  for (char &ch : n)
+    if (std::strchr("/\\:*?\"<>|", ch)) ch = '_';
+  while (!n.empty() && (n.front() == '.' || n.front() == ' ')) n.erase(n.begin());
+  while (!n.empty() && (n.back() == '.' || n.back() == ' ')) n.pop_back();
+  return n.empty() ? std::string("Clip") : n;
 }
 
 bool same_file_content(const std::string &a, const std::string &b) {
@@ -64,6 +74,7 @@ std::vector<MaterialPtr> Editor::scene_materials() {
 }
 
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
+  if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion: onto a character)
   ScopedTimer t;
   ImportResult r;
   if (!import_model(path, r)) {
@@ -92,10 +103,26 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
     }
   }
   const size_t made = import_material_assets(r, model);
-  GameObject *root = instantiate_import(*scene_, r, fs::stem(path), nullptr);
+  std::vector<GameObject *> objects;
+  GameObject *root = instantiate_import(*scene_, r, fs::stem(path), nullptr, &objects);
   if (root) {
     root->set_world_position(cam_.pivot);
     select(root->id);
+  }
+  /* Its animations as clips (task 0139), the first playing on the root. The tracks name the nodes; the objects made
+   * may differ (an armature renamed for uniqueness): each path is rewritten onto its object. */
+  std::vector<std::string> clip_paths;
+  std::unordered_map<std::string, int> node_of_path;
+  for (size_t i = 0; i < r.nodes.size(); i++) node_of_path.emplace(import_node_path(r, (int)i), (int)i);
+  for (size_t i = 0; root && i < r.clips.size(); i++) {
+    AnimationClip clip = r.clips[i];
+    for (AnimTrack &t : clip.tracks) {
+      const auto it = node_of_path.find(t.path);
+      if (it != node_of_path.end() && objects[(size_t)it->second]) t.path = anim_path(*root, *objects[(size_t)it->second]);
+    }
+    const std::string rel = save_imported_clip(*root, clip, model, i == 0);
+    if (!rel.empty()) clip_paths.push_back(rel);
+    else Log::warn("Import: the clip '%s' couldn't be written under Assets/Animations/%s", clip.name.c_str(), model.c_str());
   }
   mark_changed("Import " + fs::filename(path));
   project_listed_ = -100;
@@ -103,8 +130,72 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   invalidate_material_textures();
   Log::info("Imported %s: %s in %.0f ms", fs::filename(path).c_str(), r.summary.c_str(), t.ms());
   if (made) Log::info("Materials: %zu in Assets/Materials/%s (an edited one is kept when the model is imported again)", made, model.c_str());
+  for (const std::string &c : clip_paths) Log::info("Clip: %s%s", c.c_str(), c == clip_paths.front() ? " (playing on the root: Window > Animation)" : "");
   for (const std::string &n : r.notes) Log::info("Import: %s", n.c_str());
   if (missing) Log::warn("%zu texture reference(s) could not be found next to the model", missing);
+}
+
+/* The character a motion goes onto: the one the selection is in (its topmost object), else the scene's only one. */
+GameObject *Editor::motion_target() {
+  auto has_rig = [](GameObject &top) {
+    bool found = false;
+    std::function<void(GameObject &)> walk = [&](GameObject &g) {
+      found = found || g.get<Armature>() || g.get<Bone>();
+      for (GameObject *c : g.children)
+        if (!found) walk(*c);
+    };
+    walk(top);
+    return found;
+  };
+  GameObject *top = active_object();
+  while (top && top->parent) top = top->parent;
+  if (top && has_rig(*top)) return top;
+  GameObject *only = nullptr;
+  int count = 0;
+  for (GameObject *g : scene_->roots)
+    if (has_rig(*g)) only = g, count++;
+  return count == 1 ? only : nullptr;
+}
+
+/* A motion file (task 0137: MMD's .vmd) onto a character: Assets/Animations/<character>/<motion>.anim, played by the
+ * character's Animation component (Unity's way), shown in the Animation window. */
+void Editor::import_motion_file(const std::string &path) {
+  if (playing_) return Log::warn("Import Motion: stop Play first");
+  GameObject *root = motion_target();
+  if (!root) return Log::warn("Import %s: select the character it moves (an object with bones)", fs::filename(path).c_str());
+  AnimationClip clip;
+  std::vector<std::string> notes;
+  std::string error;
+  if (!import_vmd_file(path, *root, clip, notes, error)) return Log::error("Import failed (%s): %s", fs::filename(path).c_str(), error.c_str());
+  const std::string rel = save_imported_clip(*root, clip, root->name, true);
+  if (rel.empty()) return Log::warn("Import Motion: couldn't write the clip for %s", fs::filename(path).c_str());
+  const std::string copy = fs::join(fs::parent(resolve_asset_path(rel)), fs::filename(path));  // (the motion kept beside its clip, as models are)
+  if (fs::normalize(copy) != fs::normalize(path)) fs::copy_file(path, copy);
+  mark_changed("Import Motion");
+  Log::info("Imported %s onto '%s': %s", fs::filename(path).c_str(), root->name.c_str(), rel.c_str());
+  for (const std::string &n : notes) Log::info("Import: %s", n.c_str());
+}
+
+std::string Editor::save_imported_clip(GameObject &root, const AnimationClip &clip, const std::string &folder, bool play) {
+  const std::string dir = "Assets/Animations/" + clip_file_name(folder), base = clip_file_name(clip.name);
+  std::string rel = dir + "/" + base + ".anim";
+  for (int k = 2; fs::exists(resolve_asset_path(rel)); k++) rel = dir + "/" + base + " " + std::to_string(k) + ".anim";
+  fs::make_dirs(fs::parent(resolve_asset_path(rel)));
+  AnimationClipPtr c = create_clip_asset(rel, clip.name);
+  if (!c) return "";
+  const std::string asset_path = c->asset_path;
+  *c = clip;
+  c->asset_path = asset_path;
+  c->touch();
+  save_dirty_clip_assets();
+  anim_clip_paths_listed_ = -100;
+  invalidate_project_listing();
+  if (!play) return rel;
+  Animation *an = root.get<Animation>();
+  if (!an) an = root.add<Animation>();
+  an->clip = rel;
+  anim_.root = root.id;
+  return rel;
 }
 
 /* shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135): the selected object's shape keys.

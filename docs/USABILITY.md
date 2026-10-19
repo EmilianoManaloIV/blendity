@@ -215,6 +215,12 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A walk or run cycle had to be keyed pose by pose. | Walk Cycle: a preset's numbers, Generate, and the rig walks or runs, feet planted, as ordinary keys to tweak (task 0125). |
 | Walking a character along a route, up stairs or round a corner meant placing every step by hand. | Footsteps: Walk Along Path lays footprints along a curve onto whatever is under them; move one and Update, or Re-plan keeping the moved ones (task 0126). |
 | An imported FBX came in grey: textures inside the file or at another machine's path were lost, and the materials existed only in the scene. | Materials are made as `.mat` assets and applied, embedded textures extracted, links and texture sets found beside the model (task 0134). |
+| MMD characters (.pmx, .pmd) couldn't be opened at all. | They import rigged, toon-shaded, with leg IK, spring chains and their faces (task 0136). |
+| A Collada export (.dae) couldn't be opened. | It imports with its materials, skins and animation, the right way up and size (task 0141). |
+| Motion capture (.bvh) couldn't be opened. | It imports as a skeleton with its clip playing (task 0140). |
+| A Mixamo FBX or a glTF came in without its animation. | Its clips are saved under `Assets/Animations/<model>/` and the first plays on the root (task 0139). |
+| A VRM avatar (.vrm) couldn't be opened. | It imports as a character: humanoid names, expressions, spring bones, MToon look (task 0138). |
+| An MMD dance (.vmd) couldn't be played on its character. | Dropped onto the character, it becomes a clip asset played by its Animation component (task 0137). |
 | Faces from FBX or glTF couldn't make expressions. | Shape keys: imported with their values, BlendShape sliders, animatable (task 0135). |
 | A MoonRay render showed nothing for a minute, so it looked as if it wasn't rendering. | The image fills in about once a second from MoonRay's checkpoints, with how many updates and how long so far (round 153). |
 | Filling the motion between two key poses meant keying every in-between by hand. | AI Inbetween: the span between the keys around the playhead made by a network trained on motion capture, in a style, shown as a ghost; Apply writes it as keys and nothing outside the span changes (tasks 0128-0131). |
