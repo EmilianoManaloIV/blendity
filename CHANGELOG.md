@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 153): MoonRay's image fills in while it renders
+
+**Asked:** "Why does MoonRay doesn't seem to render?" It did: a 1280x720 frame at 128 samples takes about a minute,
+and nothing showed until it was done. The user agreed: "the image fill is also good."
+
+**Changed**
+- **MoonRay renders with checkpoints:** an image after every quality step, about a second apart, written beside its
+  scene.
+  - A watcher on the render's own thread reads each new checkpoint (never the editor's thread: it is 14 MB).
+  - The Render panel shows it through the same view transform as the final image, with "filling in (N updates)" and
+    the time.
+  - MoonRay prints no percentage in this mode.
+
+**Fixed**
+- MoonRay's own default image (`scene.exr`) was written into whatever folder it ran from (an untracked
+  `blendity/scene.exr` came from it). It now goes into Blendity's scratch folder with the rest.
+
+**Checked**
+- **A new test (round 153):** the stand-in MoonRay writes a checkpoint at half brightness, then the final image; the
+  Render panel shows 0.250, then 0.500.
+- **With the real MoonRay:** 53 s into a 1280x720 frame the panel showed the image, after 43 updates; nothing was
+  written where it ran.
+- Unit checks: Windows 10,882, 0 failed (827 tests); render-cache verify mode 10,883, 0 stale pictures. Linux with
+  libraries: 10,618, 0 failed. Sanitizer build: 10,496, 0 failed, no reports. `editor_fuzz` in verify mode: 6,000
+  frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no
+  change.
+
 ## 2026-10-18 (round 152): automatic walking and AI inbetweening written up (task 0132)
 
 **Asked:** the plan's write-up.

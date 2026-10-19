@@ -308,7 +308,8 @@ static std::string test_exr_plain(int w, int h, const std::vector<float> &rgba, 
 /* `blendity_tests --fake-moonray -in scene.rdla`: stands in for MoonRay (tasks 0112-0114). It reads the scene's size
  * and its RenderOutput's file name, prints MoonRay's progress, and writes an uncompressed float EXR of one colour
  * (0.5, 0.25, 0.125; alpha 1, or 0 on the left half when the scene hides its background). BLENDITY_FAKE_MOONRAY=slow
- * takes 20 s; =fail exits 3. */
+ * takes 20 s; =fail exits 3; =progress first writes a checkpoint at half the brightness (its checkpoint_file_name),
+ * then prints progress for 1.5 s before the final image. */
 static int fake_moonray(int argc, char **argv) {
   std::string in, text;
   for (int i = 2; i + 1 < argc; i++)
@@ -344,14 +345,25 @@ static int fake_moonray(int argc, char **argv) {
   }
   if (w <= 0 || h <= 0 || out.empty()) return 4;
   const bool hide = text.find("\"force off\"") != std::string::npos;
-  std::vector<float> px((size_t)w * h * 4);
-  for (int y = 0; y < h; y++)
-    for (int x = 0; x < w; x++) {
-      float *p = &px[((size_t)y * w + x) * 4];
-      const float a = hide && x < w / 2 ? 0.0f : 1.0f;
-      p[0] = 0.5f * a, p[1] = 0.25f * a, p[2] = 0.125f * a, p[3] = a;
+  auto image = [&](float k) {
+    std::vector<float> px((size_t)w * h * 4);
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        float *p = &px[((size_t)y * w + x) * 4];
+        const float a = hide && x < w / 2 ? 0.0f : 1.0f;
+        p[0] = 0.5f * a * k, p[1] = 0.25f * a * k, p[2] = 0.125f * a * k, p[3] = a;
+      }
+    return test_exr_plain(w, h, px);
+  };
+  if (m == "progress") {  // (a checkpoint, then the render going on a while: the editor shows the checkpoint meanwhile)
+    if (!fs::write_file(value("checkpoint_file_name"), image(0.5f))) return 6;
+    for (int k = 0; k < 15; k++) {
+      std::printf("  [+] Rendering [%-20s] %.1f%%\r", "==========", 50.0 + k);
+      std::fflush(stdout);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-  if (!fs::write_file(out, test_exr_plain(w, h, px))) return 5;
+  }
+  if (!fs::write_file(out, image(1.0f))) return 5;
   std::printf("\nWrote %s\n", out.c_str());
   return 0;
 }
@@ -32386,6 +32398,32 @@ static void round81_tests() {
     for (int k = 0; k < 4000 && ed.rendering_for_test(); k++) ed.step_frame_headless();
     std::printf("    orthographic: '%s'\n", ed.render_status_for_test().substr(0, 40).c_str());
     CHECK(ed.render_status_for_test().find("MoonRay") == std::string::npos);
+  });
+  test("moonray in F12: the image fills in - MoonRay's checkpoint shown while it renders, then the final image", [] {
+    Editor ed;
+    r34_open(ed);
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    in.root = "stand-in";
+    in.version = "test";
+    in.launcher = {test_program(), "--fake-moonray"};
+    ed.moonray_set_for_test(in);
+    ed.command("engine moonray");
+    ed.scene().render.width = 64, ed.scene().render.height = 36, ed.scene().render.percent = 100, ed.scene().render.samples = 2;
+    set_env("BLENDITY_FAKE_MOONRAY", "progress");
+    ed.command("render");
+    /* While it renders: the checkpoint (half as bright) in the Render panel. */
+    float during = -1.0f;
+    for (int k = 0; k < 3000 && ed.rendering_for_test() && during < 0.0f; k++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      ed.step_frame_headless();
+      if (ed.rendering_for_test() && ed.render_linear_for_test().size() >= 3) during = ed.render_linear_for_test()[0];
+    }
+    for (int k = 0; k < 4000 && ed.rendering_for_test(); k++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    set_env("BLENDITY_FAKE_MOONRAY", "");
+    const float after = ed.render_linear_for_test().size() >= 3 ? ed.render_linear_for_test()[0] : -1.0f;
+    std::printf("    red while rendering %.3f (the checkpoint), when done %.3f; '%s'\n", during, after, ed.render_status_for_test().substr(0, 40).c_str());
+    CHECK(std::fabs(during - 0.25f) < 1e-3f && std::fabs(after - 0.5f) < 1e-3f);
   });
   /* ---------------------------------------------------------------- round 136: MoonRay checked against the real renderer (task 0113) */
   test("moonray export: a texture goes as a tiled, mip-mapped EXR (MoonRay takes nothing else) - every level's tiles where the table says, down to one pixel of the image's mean; made once while its source is unchanged", [] {

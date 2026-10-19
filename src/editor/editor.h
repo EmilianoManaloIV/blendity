@@ -40,6 +40,7 @@
 #include "ui.h"
 
 #include <atomic>
+#include <mutex>
 #include "../core/releases.h"
 #include "../render/moonray.h"
 #include "../render/moonray_export.h"
@@ -2736,6 +2737,12 @@ class Editor {
     std::atomic<bool> cancel{false};
     std::string image, error;  // (the EXR it writes; what went wrong, with its output's end)
     std::vector<std::string> complaints;  // (MoonRay's own "Error:" lines: logged even when it renders)
+    /* The image filling in: MoonRay's newest checkpoint, read on the job's thread (a 14 MB EXR: never the editor's). */
+    std::string progress_path;
+    std::mutex preview_mu;
+    Bitmap preview;
+    std::atomic<int> preview_version{0};
+    int preview_shown = 0;  // (the editor's: the version it shows)
     std::thread thread;
     ~MoonRayJob() {
       cancel.store(true);
@@ -2767,6 +2774,7 @@ class Editor {
   bool begin_moonray_render(const moonray::ExportScene &sc, const MoonRayFrame &frame);
   void step_moonray_render();
   void moonray_frame_failed();
+  bool show_moonray_image(const Bitmap &bm);
   bool start_moonray(int w, int h, const Mat4 &v, const Mat4 &p, const Camera *cam, Vec3 eye);  // F12 (render_view.cpp)
   bool mr_waiting_render_ = false;  // F12 asked for MoonRay before it was located: started once it is
   bool moonray_pref(const std::string &key, const std::string &value);  // (load_prefs: its keys)

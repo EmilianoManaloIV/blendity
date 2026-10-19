@@ -59,6 +59,7 @@ bool convert_texture(const TextureJob &job, std::string &error);
 
 struct ExportReport {
   std::string scene_path, image_path;  // ours (scene.rdla, frame.exr)
+  std::string progress_path;           // MoonRay's checkpoints while it renders (progress.exr): the image filling in
   size_t meshes = 0, triangles = 0, lights = 0, materials = 0, textures = 0;
   std::vector<std::string> notes;
   std::vector<TextureJob> texture_jobs;  // to run (convert_texture) before MoonRay reads the scene
