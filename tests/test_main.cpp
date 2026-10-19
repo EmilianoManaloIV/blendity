@@ -40,6 +40,7 @@
 #include "../src/scene/gait.h"
 #include "../src/scene/footsteps.h"
 #include "../src/scene/locomotion.h"
+#include "../src/scene/inbetween.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
@@ -371,6 +372,7 @@ int main(int argc, char **argv) {
   Log::echo_stdout = false;
   set_env("BLENDITY_PROJECT", "");  // the scratch project
   set_env("BLENDITY_TRASH", "");
+  set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));  // (never the user's AI download: task 0129)
   /* Assets a test makes before any editor exists (clips, materials) go into the scratch project too: with no asset
    * root a relative path is the folder the tests run from - a real project's Assets (task 0081). */
   set_asset_root(std::getenv("BLENDITY_PROJECT"));
@@ -34863,6 +34865,405 @@ static void round81_tests() {
     std::printf("    the locomotion assistant %s, the component on the person: %s; in Play it went %.2f m, the left foot landing %d times; after Stop back at %.2f\n",
                 ed.assist_on(Editor::Assist::Locomotion) ? "on" : "off", has ? "yes" : "no", went, landings, back ? back->world_position().z : -1.0f);
     CHECK(found && has && ed.assist_on(Editor::Assist::Locomotion) && went >= 1.0f && landings >= 2);
+    Locomotion::live = false;
+  });
+  /* ---------------------------------------------------------------- round 149: the AI download (task 0129) */
+  /* The model's skeleton (tools/inbetween/cmu.py's, from the CMU data) and a stand-in for the network: the interpolation
+   * it is given, the hips lifted by `bump` metres mid-span (so the tests see the span made), counted. */
+  struct R149Fake : ai::Runtime {
+    float bump = 0.0f;
+    int calls = 0;
+    R149Fake() {
+      const float o[22][3] = {{0.000f, 0.000f, 0.000f}, {0.090f, -0.096f, 0.047f}, {0.135f, -0.371f, 0.000f}, {0.144f, -0.396f, 0.000f}, {0.010f, -0.026f, 0.110f},
+                              {-0.088f, -0.096f, 0.047f}, {-0.136f, -0.375f, 0.000f}, {-0.144f, -0.395f, 0.000f}, {-0.012f, -0.032f, 0.112f}, {0.000f, 0.000f, 0.000f},
+                              {0.000f, 0.114f, -0.008f}, {0.001f, 0.114f, 0.001f}, {0.001f, 0.115f, 0.005f}, {0.001f, 0.188f, -0.004f}, {0.001f, 0.115f, 0.005f},
+                              {0.181f, 0.067f, -0.006f}, {0.283f, 0.000f, 0.000f}, {0.189f, 0.000f, 0.000f}, {0.001f, 0.115f, 0.005f}, {-0.178f, 0.068f, -0.009f},
+                              {-0.287f, 0.000f, 0.000f}, {-0.189f, 0.000f, 0.000f}};
+      for (const auto &v : o) info.offsets.push_back(Vec3(v[0], v[1], v[2]));
+      info.parents = {-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12, 11, 14, 15, 16, 11, 18, 19, 20};
+      info.styles = {"walk", "run", "jump", "fall", "crawl", "combat", "acrobatic", "other"};
+      info.hidden = 4;
+    }
+    bool run(const std::vector<float> &frames, const std::vector<float> &known, int, int W, std::vector<float> &out, std::string &,
+             std::vector<float> *hidden) override {
+      calls++;
+      out = frames;
+      int first = -1, last = -1;
+      for (int t = 0; t < W; t++)
+        if (known[(size_t)t] == 0.0f) last = t, first = first < 0 ? t : first;
+      for (int t = first; first >= 0 && t <= last; t++) out[(size_t)t * ai::kFeatures + 1] += bump * std::sin(3.14159265f * (float)(t - first + 1) / (float)(last - first + 2));
+      if (!hidden) return true;
+      /* Its "last features": where each frame is in the span (enough for a fit to learn the lift away). */
+      hidden->assign((size_t)W * info.hidden, 0.0f);
+      for (int t = first; first >= 0 && t <= last; t++) {
+        const float u = (float)(t - first + 1) / (float)(last - first + 2);
+        float *h = &(*hidden)[(size_t)t * info.hidden];
+        h[0] = std::sin(3.14159265f * u), h[1] = u, h[2] = u * u, h[3] = 1.0f;
+      }
+      return true;
+    }
+  };
+  /* An archive of `files` (name, text) in `dir`, the platform's kind (zip on Windows), and its path. */
+  auto r149_archive = [](const std::string &dir, const std::vector<std::pair<std::string, std::string>> &files) {
+    const std::string src = fs::join(dir, "src");
+    fs::make_dirs(src);
+    for (const auto &f : files) fs::write_file(fs::join(src, f.first), f.second);
+    const std::string path = fs::join(dir, ai::archive_name());
+    std::vector<std::string> argv;
+#ifdef _WIN32
+    const char *root = std::getenv("SystemRoot");
+    argv = {fs::join(fs::join(root ? root : "C:\\Windows", "System32"), "tar.exe"), "-a", "-cf", path, "-C", src};
+#else
+    argv = {"tar", "-czf", path, "-C", src};
+#endif
+    for (const auto &f : files) argv.push_back(f.first);
+    sys::run_program(argv);
+    return path;
+  };
+  test("ai download: refused when it doesn't match its checksum; an install that can't run is removed again; without it, AI Inbetween says how to get it", [&] {
+    const std::string dir = fs::join(test_dir(), "r149");
+    const std::string install = fs::join(dir, "install");
+    set_env("BLENDITY_AI_DIR", install);
+    std::string e;
+    ai::remove(e);
+    const std::string archive = r149_archive(dir, {{"inbetween.json", "{\"offsets\": [], \"parents\": [], \"styles\": [\"walk\"], \"ctx\": 10}"},
+                                                   {"inbetween.onnx", "not a model"}});
+    fs::write_file(archive + ".sha256", std::string(64, '0') + "  " + ai::archive_name() + "\n");
+    Editor ed;
+    r34_open(ed);
+    ed.command("ai install " + archive);  // (the checksum beside it doesn't match: refused, nothing unpacked)
+    for (int i = 0; i < 2000 && ed.ai_chore_busy_for_test(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    const bool refused = !fs::exists(fs::join(install, "inbetween.onnx"));
+    fs::remove_file(archive + ".sha256");
+    ed.command("ai install " + archive);  // (no checksum: unpacked, but there is no ONNX Runtime in it - removed again)
+    for (int i = 0; i < 2000 && ed.ai_chore_busy_for_test(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    const bool removed = !fs::exists(fs::join(install, "inbetween.onnx")) && !ai::install_problem().empty();
+    ed.command("assist on ai");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("A rig");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("ai span 0 10");
+    const bool nothing = !ed.ai_busy_for_test() && !ed.ai_ghost_for_test();
+    std::printf("    a wrong checksum refused: %s; an install that can't run removed: %s; without it nothing made: %s ('%s')\n", refused ? "yes" : "no",
+                removed ? "yes" : "no", nothing ? "yes" : "no", ai::install_problem().c_str());
+    CHECK(refused && removed && nothing);
+    /* An archive holding anything but the download's own files: refused before anything is unpacked. */
+    const std::string odd = r149_archive(fs::join(dir, "odd"), {{"inbetween.onnx", "x"}, {"evil.txt", "not ours"}});
+    ed.command("ai install " + odd);
+    for (int i = 0; i < 2000 && ed.ai_chore_busy_for_test(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    const bool foreign = !fs::exists(fs::join(install, "evil.txt")) && !fs::exists(fs::join(install + ".new", "evil.txt"));
+    std::printf("    an archive with a file of another kind refused, nothing unpacked: %s\n", foreign ? "yes" : "no");
+    CHECK(foreign);
+    set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));
+  });
+  /* With a real install (BLENDITY_AI_TEST_INSTALL: an archive tools/inbetween/package.py built, unpacked): the
+   * network loaded through ONNX Runtime, 60 frames timed. Skipped where there is none (CI). */
+  test("ai download: a real install loads ONNX Runtime and makes 60 frames in under 100 ms on the CPU (skipped without one)", [&] {
+    const char *real = std::getenv("BLENDITY_AI_TEST_INSTALL");
+    if (!real || !*real) return (void)std::printf("    (no BLENDITY_AI_TEST_INSTALL: skipped)\n");
+    set_env("BLENDITY_AI_DIR", real);
+    std::string e;
+    double ms = 0, best = 1e9;
+    bool ok = true;
+    for (int i = 0; i < 4 && ok; i++) ok = ai::probe(e, &ms), best = std::min(best, ms);  // (the first run warms up)
+    std::printf("    ONNX Runtime: %s, 60 frames in %.1f ms\n", ok ? "loaded" : e.c_str(), best);
+    CHECK(ok && best < 100.0);
+    set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));
+  });
+  /* ---------------------------------------------------------------- round 150: AI inbetweening in the Animation window (task 0130) */
+  /* A person with a clip: keys on the hips' height and a thigh's turn at frames 0, 10, 40 and 50. */
+  auto r150_person = [](Editor &ed) {
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    fs::remove_file(fs::join(fs::join(std::getenv("BLENDITY_PROJECT"), "Assets/AI"), rig->name + ".aihead"));  // (no fit from an earlier run)
+    ed.mark_changed_for_test("A person");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("anim new Span");
+    for (int f : {0, 10, 40, 50}) {
+      ed.command(strprintf("anim key Hips Position 1 %d %g", f, 0.95 + 0.02 * (f % 20 == 0)));
+      ed.command(strprintf("anim key LeftUpperLeg Rotation 0 %d %g", f, f == 10 ? 30.0 : f == 40 ? -20.0 : 0.0));
+    }
+    ed.step_frame_headless();
+    return rig;
+  };
+  auto r150_wait = [](Editor &ed) {
+    for (int i = 0; i < 400 && ed.ai_busy_for_test(); i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      ed.step_frame_headless();
+    }
+    ed.step_frame_headless();
+  };
+  test("ai inbetween: only the span between the keys is made - its ends meet them, every other key untouched; the same seed the same keys; Apply undone whole", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    fake->bump = 0.1f;
+    ed.ai_set_runtime_for_test(fake);
+    r150_person(ed);
+    ed.command("ai span 10 40");  // (off: refused)
+    const bool off = fake->calls == 0;
+    ed.command("assist on ai");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    AnimationClip before = *clip;
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    AnimationClip made = ed.ai_result_for_test();
+    const AnimTrack *hy = made.find("Hips", "Position", 1);
+    const AnimTrack *hy0 = before.find("Hips", "Position", 1);
+    /* Outside the span and its ends: the very same keys. */
+    bool outside = hy && hy0;
+    for (const AnimTrack &t0 : before.tracks) {
+      const AnimTrack *t = const_cast<AnimationClip &>(made).find(t0.path, t0.property, t0.axis);
+      for (const AnimKey &k : t0.keys)
+        if (k.frame <= 10.01f || k.frame >= 39.99f) outside = outside && t && t->key_at(k.frame) >= 0 && std::fabs(t->keys[(size_t)t->key_at(k.frame)].value - k.value) < 1e-5f;
+    }
+    int inside = 0;
+    for (int f = 11; hy && f < 40; f++) inside += hy->key_at((float)f) >= 0;
+    const float lift = hy && hy0 ? hy->sample(25.0f) - hy0->sample(25.0f) : 0.0f;
+    /* The same seed again: the same keys. */
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    AnimationClip second = ed.ai_result_for_test();
+    const AnimTrack *again = second.find("Hips", "Position", 1);
+    bool same = again && hy && again->keys.size() == hy->keys.size();
+    for (size_t i = 0; same && i < hy->keys.size(); i++) same = std::fabs(again->keys[i].value - hy->keys[i].value) < 1e-6f;
+    /* Apply, then undo: the clip as it was. */
+    ed.command("ai apply");
+    ed.step_frame_headless();
+    const bool applied = ed.anim_clip_for_test()->find("Hips", "Position", 1)->key_at(25.0f) >= 0;
+    ed.command("undo");
+    ed.step_frame_headless();
+    const AnimTrack *u = ed.anim_clip_for_test()->find("Hips", "Position", 1);
+    const bool undone = u && u->keys.size() == hy0->keys.size() && u->key_at(25.0f) < 0;
+    /* (0.1 of the model's metres, scaled to this rig's legs: about 0.11 m) */
+    std::printf("    off: refused %s; %d of 29 frames inside keyed, the hips %.3f m higher mid-span (the stand-in's lift); outside untouched: %s; "
+                "same seed same keys: %s; applied %s, undone whole %s\n",
+                off ? "yes" : "no", inside, lift, outside ? "yes" : "no", same ? "yes" : "no", applied ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(off && inside == 29 && lift > 0.07f && lift < 0.15f && outside && same && applied && undone);
+  });
+  /* With the real model (BLENDITY_AI_TEST_INSTALL): a walk's middle 29 frames taken out and made again come closer to
+   * the walk than the keys' own interpolation does - the feet, hands and head. Skipped without one (CI). */
+  test("ai inbetween with the real model: a walk's middle made again is closer to the walk than the keys' interpolation (skipped without one)", [&] {
+    const char *real = std::getenv("BLENDITY_AI_TEST_INSTALL");
+    if (!real || !*real) return (void)std::printf("    (no BLENDITY_AI_TEST_INSTALL: skipped)\n");
+    set_env("BLENDITY_AI_DIR", real);
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("A person");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("assist on walk");
+    ed.command("assist on ai");
+    ed.command("anim new Walk");
+    ed.command("walk cycle walk 1.4 3 travel");
+    ed.step_frame_headless();
+    AnimationClip walk = *ed.anim_clip_for_test();
+    const int from = 20, to = 50;
+    /* The keys inside the span deleted: what the keys' interpolation gives there. */
+    AnimationClip holed = walk;
+    for (AnimTrack &t : holed.tracks)
+      t.keys.erase(std::remove_if(t.keys.begin(), t.keys.end(), [&](const AnimKey &k) { return k.frame > from + 0.01f && k.frame < to - 0.01f; }), t.keys.end());
+    *ed.anim_clip_for_test() = holed;
+    ed.anim_clip_for_test()->touch();
+    ed.command("ai style walk");
+    ed.command(strprintf("ai span %d %d", from, to));
+    r150_wait(ed);
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    std::vector<GameObject *> ends{g.legs[0].foot, g.legs[1].foot, g.arms[0].hand, g.arms[1].hand, g.head};
+    auto places = [&](const AnimationClip &c) {
+      std::vector<Vec3> p;
+      body::for_each_frame(ed.scene(), *rig, c, from + 1, to - 1, [&](int) {
+        for (GameObject *e : ends) p.push_back(e->world_position());
+      });
+      return p;
+    };
+    const std::vector<Vec3> truth = places(walk), lerp = places(holed), net = places(ed.ai_result_for_test());
+    double el = 0, en = 0;
+    for (size_t i = 0; i < truth.size() && i < net.size(); i++) el += length(lerp[i] - truth[i]), en += length(net[i] - truth[i]);
+    el /= std::max<size_t>(1, truth.size()), en /= std::max<size_t>(1, truth.size());
+    std::printf("    a walk's frames %d-%d made again: the feet, hands and head %.1f cm from the walk on average; the keys' interpolation %.1f cm\n",
+                from + 1, to - 1, en * 100.0, el * 100.0);
+    CHECK(ed.ai_ghost_for_test() && en < el);
+    set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));
+  });
+  test("ai inbetween: the curves outside the span keep their shape; a yaw keyed past 180 degrees is met without a spin; another character's clip never gets it", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    ed.ai_set_runtime_for_test(fake);
+    GameObject *rig = r150_person(ed);
+    ed.command("assist on ai");
+    /* Not a peak at the ends (an Auto slope there would follow the new keys inside), and the hips turning 200 degrees. */
+    for (int f : {0, 10, 40, 50}) ed.command(strprintf("anim key Hips Position 1 %d %g", f, 0.90 + 0.05 * f / 10.0 * (f > 10 ? 0.5 : 1.0)));
+    ed.command("anim key Hips Rotation 1 10 0");
+    ed.command("anim key Hips Rotation 1 40 200");
+    ed.step_frame_headless();
+    AnimationClip before = *ed.anim_clip_for_test();
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    AnimationClip made = ed.ai_result_for_test();
+    const AnimTrack *b = before.find("Hips", "Position", 1), *a = made.find("Hips", "Position", 1);
+    float outside = 0.0f;
+    for (float f : {2.5f, 5.0f, 7.5f, 42.5f, 45.0f, 47.5f}) outside = std::max(outside, std::fabs(a->sample(f) - b->sample(f)));
+    const AnimTrack *yaw = made.find("Hips", "Rotation", 1);
+    float jump = 0.0f;
+    for (float f = 10.0f; f < 40.0f; f += 1.0f) jump = std::max(jump, std::fabs(yaw->sample(f + 1.0f) - yaw->sample(f)));
+    /* Another character selected: Apply refused, its clip untouched. */
+    GameObject *other = create_rig(ed.scene(), false, Vec3(25.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("Another");
+    ed.command("select " + other->name);
+    ed.step_frame_headless();
+    ed.command("anim new Other");
+    ed.command("anim key Hips Position 1 0 0.9");
+    ed.step_frame_headless();
+    const size_t tracks = ed.anim_clip_for_test()->tracks.size();
+    ed.command("ai apply");
+    ed.step_frame_headless();
+    const bool kept = ed.anim_clip_for_test()->tracks.size() == tracks && ed.anim_clip_for_test()->name != before.name;
+    std::printf("    outside the span the hips' curve moved at most %.6f m; the yaw's largest step inside %.1f degrees (0 to 200 over 30 frames); "
+                "another character's clip untouched by Apply: %s\n", outside, jump, kept ? "yes" : "no");
+    CHECK(outside < 1e-4f && jump < 12.0f && kept);
+    (void)rig;
+  });
+  test("ai inbetween: refused for four legs, a span past the clip's end, and an answer that isn't numbers", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    ed.ai_set_runtime_for_test(fake);
+    r150_person(ed);
+    ed.command("assist on ai");
+    ed.command("ai span 40 400");
+    r150_wait(ed);
+    const bool past = !ed.ai_ghost_for_test() && fake->calls == 0;
+    fake->bump = std::numeric_limits<float>::quiet_NaN();
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    const bool nan = !ed.ai_ghost_for_test() && fake->calls == 1;
+    Editor dog_ed;
+    dog_ed.ai_set_runtime_for_test(std::make_shared<R149Fake>());
+    r34_open(dog_ed);
+    GameObject *dog = create_rig(dog_ed.scene(), true, Vec3(20.0f, 0.0f, 0.0f));
+    dog_ed.mark_changed_for_test("A dog");
+    dog_ed.command("select " + dog->name);
+    dog_ed.step_frame_headless();
+    dog_ed.command("anim new Dog");
+    dog_ed.command("anim key Hips Position 1 0 0.5");
+    dog_ed.command("anim key Hips Position 1 20 0.5");
+    dog_ed.command("assist on ai");
+    dog_ed.command("ai span 0 20");
+    r150_wait(dog_ed);
+    const bool four = !dog_ed.ai_ghost_for_test() && !dog_ed.ai_busy_for_test();
+    std::printf("    refused: a span past the end %s, a NaN answer %s, a four-legged rig %s\n", past ? "yes" : "no", nan ? "yes" : "no", four ? "yes" : "no");
+    CHECK(past && nan && four);
+  });
+  test("ai inbetween: a person's pose goes to the model's skeleton and back unchanged (mirrored, faced, scaled, the rest poses aligned)", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    ed.ai_set_runtime_for_test(fake);
+    GameObject *rig = r150_person(ed);
+    ed.command("assist on ai");
+    /* Both ends one pose (frame 10's: the thigh turned 30 degrees): what the stand-in hands back (that pose
+     * throughout) must come out as exactly that pose on every made frame. */
+    ed.command("anim key LeftUpperLeg Rotation 0 40 30");
+    ed.command("anim key Hips Position 1 40 0.95");
+    ed.step_frame_headless();
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    std::vector<std::pair<GameObject *, Quat>> at10;
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    body::for_each_frame(ed.scene(), *rig, *clip, 10, 10, [&](int) {
+      for (GameObject *b : {g.hips, g.legs[0].upper, g.legs[0].lower, g.legs[1].upper, g.spine.empty() ? g.hips : g.spine[0], g.arms[0].upper})
+        at10.push_back({b, b->world_rotation()});
+    });
+    float worst = 0.0f;
+    AnimationClip made = ed.ai_result_for_test();
+    body::for_each_frame(ed.scene(), *rig, made, 25, 25, [&](int) {
+      for (const auto &b : at10) {
+        const Quat d = b.first->world_rotation() * b.second.conjugate();
+        worst = std::max(worst, 2.0f * std::acos(std::min(1.0f, std::fabs(d.w))) * 57.29578f);
+      }
+    });
+    std::printf("    the pose through the model's skeleton and back: at most %.3f degrees off\n", worst);
+    CHECK(ed.ai_ghost_for_test() && worst < 0.5f);
+  });
+  /* ---------------------------------------------------------------- round 151: fine-tuning on your own clips (task 0131) */
+  test("ai fine-tune: fitted to the character's clips it misses them less; saved beside the project; off, the shipped model again; Stop keeps the last fit", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    fake->bump = 0.1f;  // (the stand-in's habit the clips don't have: a fit should learn it away)
+    ed.ai_set_runtime_for_test(fake);
+    GameObject *rig = r150_person(ed);
+    ed.command("assist on ai");
+    ed.command("assist on walk");
+    ed.command("anim new Walk");
+    ed.command("walk cycle walk 1.4 3 travel");  // (a second clip of this person: a walk)
+    ed.step_frame_headless();
+    auto four_keys = [&] {  // (r150_person's keys, in the current clip)
+      for (int f : {0, 10, 40, 50}) {
+        ed.command("anim key Hips Position 1 " + std::to_string(f) + (f % 20 == 0 ? " 0.97" : " 0.95"));
+        ed.command("anim key LeftUpperLeg Rotation 0 " + std::to_string(f) + (f == 10 ? " 30" : f == 40 ? " -20" : " 0"));
+      }
+      ed.step_frame_headless();
+    };
+    auto wait_tune = [&] {
+      for (int i = 0; i < 2000 && ed.ai_tuning_for_test(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ed.step_frame_headless();
+      }
+    };
+    /* A span made by the shipped model first (the stand-in's lift), then the fit, then the span again with it and
+     * without: off, exactly the shipped model's answer. */
+    auto lift = [&] {
+      ed.command("ai span 10 40");
+      r150_wait(ed);
+      AnimationClip made = ed.ai_result_for_test();
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      const AnimTrack *a = made.find("Hips", "Position", 1), *b = clip ? clip->find("Hips", "Position", 1) : nullptr;
+      return a && b ? a->sample(25.0f) - b->sample(25.0f) : 99.0f;
+    };
+    ed.command("anim new Check");
+    four_keys();
+    const float shipped = lift();
+    ed.command("ai finetune");
+    wait_tune();
+    const ai::Head fitted = ed.ai_head_for_test();
+    const std::string file = fs::join(fs::join(std::getenv("BLENDITY_PROJECT"), "Assets/AI"), rig->name + ".aihead");
+    const bool saved = fs::exists(file);
+    const float with = lift();
+    ed.command("ai finetune off");
+    const float without = lift();
+    ed.command("ai finetune on");
+    /* Stop at once: the fit already made stays. */
+    std::string text0;
+    fs::read_file(file, text0);
+    ed.command("ai finetune");
+    ed.command("ai finetune stop");
+    wait_tune();
+    std::string text1;
+    fs::read_file(file, text1);
+    std::printf("    fitted on %d windows: their RMS error %.5f before, %.5f after; saved: %s; a made span's lift %.4f m by the shipped model, %.4f m with "
+                "the fit, %.4f m with it off; stopped at once, the last fit kept: %s\n",
+                fitted.windows, fitted.before, fitted.after, saved ? "yes" : "no", shipped, with, without, text0 == text1 && ed.ai_head_for_test().valid() ? "yes" : "no");
+    CHECK(fitted.valid() && fitted.windows > 20 && fitted.after < fitted.before && saved);
+    CHECK(std::fabs(without - shipped) < 1e-6f && std::fabs(with - shipped) > 1e-4f && text0 == text1 && ed.ai_head_for_test().valid());
+    fs::remove_file(file);  // (the next run starts without a fit)
+  });
+  /* ---------------------------------------------------------------- round 152: written up (task 0132) */
+  test("learn: the automatic walking lesson switches its three tools on; the AI inbetweening lesson asks for a span (and, not installed, says how to get it)", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const bool walking = r146_try(ed, "Switch the three walking tools on and list the assistants");
+    const bool three = ed.assist_on(Editor::Assist::Walk) && ed.assist_on(Editor::Assist::Footsteps) && ed.assist_on(Editor::Assist::Locomotion);
+    Editor ai_ed;
+    ai_ed.init_headless(1400, 900);
+    const bool found = r146_try(ai_ed, "A person with two keys 40 frames apart");
+    AnimationClipPtr clip = ai_ed.anim_clip_for_test();
+    const AnimTrack *hy = clip ? clip->find("Hips", "Position", 1) : nullptr;
+    std::printf("    walking lesson: the three tools on %s; AI lesson: the switch %s, %zu keys to fill between, a span made without the download: %s\n",
+                three ? "yes" : "no", ai_ed.assist_on(Editor::Assist::Ai) ? "on" : "off", hy ? hy->keys.size() : (size_t)0,
+                ai_ed.ai_ghost_for_test() || ai_ed.ai_busy_for_test() ? "yes" : "no");
+    CHECK(walking && three && found && ai_ed.assist_on(Editor::Assist::Ai) && hy && hy->keys.size() == 2 && !ai_ed.ai_ghost_for_test() && !ai_ed.ai_busy_for_test());
     Locomotion::live = false;
   });
 }

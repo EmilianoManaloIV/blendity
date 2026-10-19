@@ -10,3 +10,8 @@ dist/
 Screenshots/*.png
 Renders/
 Assets/**/*.bak
+
+# The inbetweening model's training environment and runs (task 0128): build-time only
+tools/inbetween/.venv/
+tools/inbetween/runs/
+tools/inbetween/__pycache__/

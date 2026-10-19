@@ -65,6 +65,7 @@ void Editor::draw_assist_settings() {
     if (u.checkbox(box, on)) assist_set((Assist)i, on);
     u.label({box.right() + u.px(6), row.y, u.px(160), row.h}, kAssists[i].name);
     u.tooltip(kAssists[i].help);
+    if ((Assist)i == Assist::Ai) draw_ai_settings(row);  // (its download's state and Install / Remove, on its row)
   }
 }
 
@@ -74,6 +75,8 @@ void Editor::assist_set(Assist a, bool on) {
   Armature::show_body_mass = assist_[(int)Assist::Physics];
   Locomotion::live = assist_[(int)Assist::Locomotion];
   if (a == Assist::Locomotion && on && playing_) play_ground_ = locomotion::ground_for(*scene_);  // (switched on in Play)
+  if (a == Assist::Ai && on) ai_switched_on();  // (the download offered, the first time)
+  if (a == Assist::Ai && !on) ai_.ghost = false, ai_.poses.clear();
   if (!on && a == Assist::Physics) {  // (what it showed goes with it)
     body_.ghost = false, body_.ghost_bones.clear(), body_.show_com = false;
     body_.solve.reset();

@@ -83,6 +83,7 @@ Editor::Editor() = default;
 Editor::~Editor() {
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
+  ai_shutdown();  // (a fit stopped and the AI workers waited for: task 0131)
   procedural_texture_clear_previews();  // a drag cut short (a test, a lost mouse-up) doesn't outlive the editor
   if (window_) destroy_window(window_);
 }
@@ -509,6 +510,7 @@ void Editor::frame(std::vector<Event> &events) {
   step_render_animation();
   poll_updates();
   poll_moonray();
+  poll_ai();
   body_poll();
   step_bake();
 
@@ -3217,6 +3219,7 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "body") return body_command(t);
   if (c == "spring") return spring_command(t);
   if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)
+  if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
   if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
   if (c == "walk") return walk_command(t);          // walk cycle | set | save | load | presets (task 0125)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
@@ -4140,7 +4143,7 @@ void Editor::draw_dialogs() {
   auto &u = ui_;
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
   const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
-                    dialog_ == Dialog::MoonRay;
+                    dialog_ == Dialog::MoonRay || dialog_ == Dialog::Ai;
   int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
@@ -4250,6 +4253,10 @@ void Editor::draw_dialogs() {
         title("MoonRay, an optional render engine");
         draw_moonray_dialog(close);
         break;
+      case Dialog::Ai:
+        title("AI Inbetweening, an optional download");
+        draw_ai_dialog(close);
+        break;
       case Dialog::About: {
         title("About Blendity");
         const char *lines[] = {"Blendity - a Unity-style editor built on Blender's modeling ideas.",
@@ -4339,6 +4346,7 @@ void Editor::load_prefs() {
     if (!v.empty() && v.back() == '\r') v.pop_back();
     if (moonray_pref(k, v)) continue;
     if (assist_pref(k, v)) continue;
+    if (ai_pref(k, v)) continue;
     if (k == "ui_scale") ui_scale_pref_ = (float)std::atof(v.c_str());
     else if (k == "theme") set_theme(v, false);
     else if (k == "layout" && !v.empty()) dock_reset(v);
@@ -4441,6 +4449,7 @@ void Editor::save_prefs() {
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
   s += assist_prefs_text();
+  s += ai_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\n", viewport_device_, other_views_follow_ ? 1 : 0,
                  simpler_while_moving_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,

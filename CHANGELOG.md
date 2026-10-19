@@ -2,6 +2,143 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 152): automatic walking and AI inbetweening written up (task 0132)
+
+**Asked:** the plan's write-up.
+
+**Added**
+- Learn: "Automatic walking: which tool when" (Walk Cycle, Footsteps, Locomotion) and "AI inbetweening: the motion
+  between two keys", each with a Try-it and questions.
+- README, ARCHITECTURE, USABILITY; ADR 0046; the licences of the optional download (ONNX Runtime's MIT notice, the CMU
+  database's credit) and `extern/onnxruntime/`.
+
+**Checked**
+- A new test (round 152) runs both lessons' Try-its.
+- Unit checks (rounds 148-152 in one chain): Windows 10,881, 0 failed (826 tests); the whole suite in render-cache
+  verify mode: 10,882, 0 failed, 0 stale pictures. Linux with libraries: 10,617, 0 failed. Sanitizer build: 10,495,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures.
+- With a real install (`BLENDITY_AI_TEST_INSTALL`): Windows 60 frames in 3.1 ms; Linux under the sanitizers 4.2 ms,
+  no reports; on both the walk's middle made again 9.3 cm from the walk, the keys' interpolation 14.5 cm.
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 151): fine-tuning on your own clips (task 0131)
+
+**Added**
+- **Fit to Clips** (`ai finetune`):
+  - every clip of the project that animates the character (about three minutes at most) is sampled, then fitted on
+    a worker with progress and Stop;
+  - a correction of the network's last layer, solved exactly (ridge regression), saved as
+    `Assets/AI/<character>.aihead` and used for that character's spans;
+  - `ai finetune off | on` goes back to the shipped model and returns to the fit.
+- ONNX Runtime's standard build has no on-device training (its training API is null in 1.31.0), so the plan's training
+  API became a fit of the last layer in Blendity's own code (ADR 0046).
+
+**Checked**
+- A new test (round 151) with a stand-in network:
+  - the fit lowers the RMS error on the clips it was fitted to;
+  - off, a made span is exactly the shipped model's;
+  - Stop keeps the last fit.
+- Unit checks: with round 152's (one chain for rounds 148-152; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 150): AI inbetweening in the Animation window (task 0130)
+
+**Added**
+- **AI Inbetween** (the Animation window, with the switch on and the download installed):
+  - makes the span between the keys around the playhead in a style (walk, run, jump, fall, crawl, combat,
+    acrobatic, other), on a worker, shown as a purple ghost (grey once the keys change);
+  - Variation, and Apply as one undo step;
+  - `ai span [from to] | style | styles | variation | apply | off`.
+- `ai::make_request` and `ai::apply`:
+  - the rig mapped onto the model's skeleton (mirrored, faced, scaled by the legs, each bone's rest direction aligned
+    to the data's), a 60 fps clip resampled to the model's 30;
+  - only the frames strictly between the keys keyed, the keys at the ends kept with their outer slopes frozen;
+  - a turn keyed whole turns away spread over the span.
+
+**Fixed after review**
+- **Clips told apart only by their version:** Apply could write one character's span into another's clip. A span now
+  knows its clip and character.
+- **The ends' Auto slopes followed the new keys** and bent the curves outside the span. They are frozen now.
+- **A yaw keyed past 180 degrees** spun round on the last frame. It is spread over the span now.
+- **Fine-tuning kept every window in memory.** It now uses running sums, capped at about 4,000 windows and three
+  minutes of clips.
+- **Work on the editor's thread:** check, install and loading the runtime now run on workers, and the model's
+  description is read once.
+- **Installs:**
+  - an archive's members are checked before unpacking, into a staging folder moved into place;
+  - removing deletes only the install's own files;
+  - the model's output size is checked.
+- **Other fixes:**
+  - the hands', head's and toes' rest alignment;
+  - Variation's seed sticking;
+  - a span past the clip's end refused;
+  - the AI workers waited for on closing.
+
+**Checked**
+- New tests (round 150), with a stand-in network:
+  - only the span is made (29 of 29 frames), its ends and every key outside untouched;
+  - the curves outside the span move 0.000000 m; a 200 degree yaw is met in steps of 6.7 degrees at most;
+  - another character's clip is never written;
+  - the same seed gives the same keys; Apply is undone whole;
+  - four legs, a span past the end and a NaN answer are refused;
+  - a pose goes to the model's skeleton and back to 0.000 degrees.
+- With the real model (where `BLENDITY_AI_TEST_INSTALL` names an install; skipped on CI): a walk's middle 29 frames
+  made again are 9.3 cm from the walk, the keys' interpolation 14.5 cm.
+- Unit checks: with round 152's (one chain for rounds 148-152; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 149): the AI download, optional as MoonRay (task 0129)
+
+**Added**
+- **The download:** `tools/inbetween/package.py` builds `blendity-ai-<platform>-ai-v1` with a `.sha256` each, from
+  Microsoft's ONNX Runtime 1.31.0 (MIT) and the trained model: Windows 23.6 MB, Linux 28.0 MB, macOS on Apple silicon
+  29.3 MB. Publishing them is the user's call.
+- **In Blendity:**
+  - the AI dialog, offered once when the switch is first turned on (never at startup);
+  - Preferences > Animation Assistants: Install / Remove;
+  - `ai status | install [archive] | remove | check`.
+- ONNX Runtime is loaded with LoadLibrary or dlopen through its C API only when used, so the base build has no
+  dependency on it.
+
+**Checked**
+- New tests (round 149):
+  - a wrong checksum is refused;
+  - an install that can't run is removed again;
+  - an archive holding a foreign file is refused;
+  - without the download, AI Inbetween says how to get it.
+- With a real install: ONNX Runtime loads and makes 60 frames in 3.1 ms.
+- Unit checks: with round 152's (one chain for rounds 148-152; there).
+- Stress: `editor`, `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 148): the inbetweening network trained on CMU, GO (task 0128, ADR 0046)
+
+**Asked:** the plan's AI inbetweening, trained on CMU motion capture. The user approved the downloads (PyTorch,
+NumPy, ONNX, onnxruntime; the CMU database).
+
+**Added**
+- `tools/inbetween/` (build-time only):
+  - `cmu.py`: the CMU database (2,503 clips, 10.5 hours) on one 22-joint skeleton at 30 fps, labelled by style;
+  - `model.py`, `train.py`: a 4.9M-parameter transformer correcting interpolation;
+  - `export.py`: ONNX with its last features, any window length;
+  - `styles_eval.py`; `package.py`.
+- The data and the Python environment stay outside the repository (`.venv/` and `runs/` git-ignored).
+
+**Checked**
+- **On the held-out subjects:** the joints' mean error, interpolation against the network:
+
+  | Gap | Interpolation | Network |
+  |---|---|---|
+  | 15 frames | 2.7 cm | 2.0 cm |
+  | 30 frames | 5.7 cm | 4.0 cm |
+  | 60 frames | 10.2 cm | 7.2 cm |
+  | 120 frames | 16.8 cm | 13.1 cm |
+
+- **By style:** walk 62% better, jump 53%, acrobatic 40%, combat 35%, fall 20%, other 18%.
+- **Foot sliding:** worse than interpolation past two seconds, recorded.
+- **Speed:** 60 frames in 3 ms on the CPU. **GO.**
+- **Fixed on the way:** the first export fixed the window's length inside attention (every other span failed in
+  Blendity). The encoder is written out for export, and the export is checked at gaps of 1, 29 and 120 frames.
+
 ## 2026-10-18 (round 147): Locomotion, walking live in Play (task 0127)
 
 **Asked:** the plan's "both baked into clips and live in Play" (round 145's question).

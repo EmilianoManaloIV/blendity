@@ -503,6 +503,7 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
              "A walking or running cycle made from the rig with the Rigging window's Walk Cycle settings (a preset and its numbers):\n"
              "keys on the hips, the feet's IK targets, spine and arms, feet never sliding. Ordinary keys, one undo step."))
     walk_generate();
+  if (assist_on(Assist::Ai)) draw_ai_toolbar(x, y, bh);
   if (!assist_on(Assist::Physics)) return;  // (Preferences > Animation Assistants: the physics tools off)
   if (button(u.px(118), "Center of Mass", body_.show_com,
              "Physics (Cascadeur's center of mass): the body's center of mass over the whole clip in the Scene view, where it is\n"
