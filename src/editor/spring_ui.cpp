@@ -238,6 +238,7 @@ void Editor::draw_spring_section(ui::Layout &lay, GameObject *root, GameObject *
 /* spring find [all] | apply | tick <bone> on|off | label <bone> hair|ear|tail|cloth|none | add <bone> [label] |
  * remove <bone> | ignore <bone> | unignore <bone> | bake | list */
 void Editor::spring_command(const std::vector<std::string> &t) {
+  if (!assist_require(Assist::Physics)) return;
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "list";
   if (sub == "find") return spring_find(t.size() > 2 && to_lower(t[2]) == "all");
   if (sub == "apply") return spring_apply();

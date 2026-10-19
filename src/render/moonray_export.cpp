@@ -369,6 +369,8 @@ bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &
   if (!fs::make_dirs(dir) && !fs::is_dir(dir)) return error = "can't make " + dir, false;
   rep.scene_path = fs::join(dir, "scene.rdla");
   rep.image_path = fs::join(dir, "frame.exr");
+  rep.progress_path = fs::join(dir, "progress.exr");
+  fs::remove_file(rep.progress_path);  // (the last render's: the new one starts empty)
   fs::remove_file(rep.image_path);
   Writer w;
   Textures tx;
@@ -482,12 +484,14 @@ bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &
   w.line("RenderOutput(\"beauty\") {");
   w.line("    [\"result\"] = \"beauty\",");
   w.line("    [\"file_name\"] = " + quote(path(rep.image_path)) + ",");
+  w.line("    [\"checkpoint_file_name\"] = " + quote(path(rep.progress_path)) + ",");
   w.line("    [\"compression\"] = \"none\",");
   w.line("    [\"channel_format\"] = \"float\",");
   w.line("}");
   w.line("RenderOutput(\"alpha\") {");
   w.line("    [\"result\"] = \"alpha\",");
   w.line("    [\"file_name\"] = " + quote(path(rep.image_path)) + ",");
+  w.line("    [\"checkpoint_file_name\"] = " + quote(path(rep.progress_path)) + ",");
   w.line("    [\"compression\"] = \"none\",");
   w.line("    [\"channel_format\"] = \"float\",");
   w.line("}");
@@ -501,6 +505,13 @@ bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &
   w.line(strprintf("    [\"max_depth\"] = %d,", std::max(1, sc.max_bounces)));
   w.line("    [\"lights_visible_in_camera\"] = false,");
   w.line("    [\"scene_scale\"] = 1,");  // (Blendity's unit is a metre; MoonRay's default is a centimetre)
+  /* The image as it fills in: a checkpoint after every quality step (about a second), which the Render panel shows. */
+  w.line("    [\"checkpoint_active\"] = true,");
+  w.line("    [\"checkpoint_mode\"] = 1,");  // (quality steps, not minutes)
+  w.line("    [\"checkpoint_quality_steps\"] = 1,");
+  w.line("    [\"checkpoint_start_sample\"] = 1,");
+  /* Its default image (scene.exr, unused: our RenderOutputs are the image) in our folder, not wherever MoonRay ran from. */
+  w.line("    [\"output_file\"] = " + quote(path(fs::join(fs::parent(rep.image_path), "scene.exr"))) + ",");
   w.line("}");
   if (!fs::write_file(rep.scene_path, w.out)) return error = "can't write " + rep.scene_path, false;
   return true;

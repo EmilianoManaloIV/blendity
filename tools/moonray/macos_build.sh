@@ -33,6 +33,8 @@ case "$1" in
     ;;
   moonray)
     rm -rf "$M/installs/openmoonray"  # (the dependencies' cache may hold a MoonRay from an earlier run)
+    # (Arras' telemetry overlay includes <freetype/freetype.h>, which lives under include/freetype2: not on its path)
+    export CPATH="$M/installs/include/freetype2${CPATH:+:$CPATH}"
     cd openmoonray
     cmake --preset macos-release -DMOONRAY_USE_OPTIX=NO -DBUILD_QT_APPS=NO
     cmake --build --preset macos-release -- -jobs "$(sysctl -n hw.ncpu)"

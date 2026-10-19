@@ -1,6 +1,6 @@
 # 0042: The body for physics in animation: masses from the skin, corrections written as keys
 
-- **Status:** accepted (tasks 0115-0117; the user asked for "body simulation for animation like in Cascadeur" and chose
+- **Status:** accepted (tasks 0115-0117; built on by 0118-0123; the user asked for "body simulation for animation like in Cascadeur" and chose
   the center of mass and ballistics, the full AutoPhysics solve, secondary motion, an active ragdoll and AutoPosing)
 - **Date:** 2026-10-18
 - **Requirements:** R-13

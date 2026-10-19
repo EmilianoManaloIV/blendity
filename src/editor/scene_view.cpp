@@ -140,6 +140,7 @@ void Editor::draw_scene_view(const Recti &r) {
   if (!piloting) {
     draw_scene_icons(view);
     draw_origins(view);
+    draw_footprint_frames(view);
     draw_guides(view);
     draw_zfight_overlay(view);
     draw_overlap_overlay(view);
@@ -607,6 +608,8 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
 
 void Editor::render_overlays(const Recti &) {
   draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
+  draw_footprint_soles();  // (task 0126)
+  draw_ai_overlay();       // (task 0130)
   /* Wireframes. */
   bool all_wire = shading_ == Shading::Wireframe || shading_ == Shading::ShadedWireframe;
   scene_->for_each([&](GameObject &g) {
@@ -1636,6 +1639,8 @@ bool Editor::gizmo_update(const Recti &view) {
   /* Start drag. */
   if (drag_ != Drag::Gizmo && gizmo_hot_ >= 0 && in.pressed[0] && !in.alt()) {
     drag_ = Drag::Gizmo;
+    autopose_.bone = 0;  // (a drag cut short before - a modal opened - starts AutoPosing afresh, from the pose now)
+    autopose_.start.clear();
     gizmo_axis_ = gizmo_hot_;
     gizmo_press_x_ = in.mx;
     gizmo_press_y_ = in.my;
@@ -1799,7 +1804,9 @@ bool Editor::gizmo_update(const Recti &view) {
       }
       else if (co)
         apply_points([&](Vec3 s) { return s + delta; });
-      else
+      else if (gizmo_starts_.size() == 1 && autopose_gizmo(gizmo_starts_[0].id, gizmo_starts_[0].pos + delta)) {
+        /* (AutoPosing: the whole body posed so the bone gets there) */
+      } else
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) g->set_world_position(s.pos + delta);
     }
@@ -1906,6 +1913,7 @@ bool Editor::gizmo_update(const Recti &view) {
     if (!in.down[0]) {
       drag_ = Drag::None;
       gizmo_axis_ = -1;
+      if (autopose_.bone) autopose_end();  // (the pose keyed at the playhead: the same undo step as the drag)
       /* Faces dropped onto another face of the mesh merge into it. */
       if (edit_mode_ && auto_fuse_ && elem_ == EditElement::Face)
         if (MeshPtr *mp = edit_mesh_ptr())

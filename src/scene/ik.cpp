@@ -349,7 +349,7 @@ GameObject *create_rig(Scene &s, bool quadruped, Vec3 at) {
 
 /* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L", plain
  * "UpperArm.R" / "Left Forearm"): side 0 left, 1 right; limb 0 upper leg, 1 lower leg, 2 upper arm, 3 lower arm. */
-static bool limb_of(const std::string &raw, int &side, int &limb) {
+bool limb_of(const std::string &raw, int &side, int &limb) {
   std::string n = to_lower(raw);
   const size_t colon = n.rfind(':');
   if (colon != std::string::npos) n = n.substr(colon + 1);  // a namespace (mixamorig:)

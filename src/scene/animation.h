@@ -57,6 +57,16 @@ struct AnimationClip {
     bool manual = false;
   };
   std::vector<Contact> contacts;
+  /* The active ragdoll's events (task 0121): an impulse on a bone at a frame (N s, world), the motors off or on from a
+   * frame (a fall, a recovery). */
+  struct RagdollEvent {
+    enum Kind { Impulse = 0, MotorsOff = 1, MotorsOn = 2 };
+    int kind = Impulse;
+    float frame = 0.0f;
+    std::string bone;  // (Impulse)
+    Vec3 impulse;
+  };
+  std::vector<RagdollEvent> ragdoll;
   uint64_t version = 1;  // bumped by every edit (saving, undo snapshots)
   void touch() { version++; }
   float end_frame() const;  // the length, or the last key if later

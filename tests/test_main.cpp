@@ -35,6 +35,12 @@
 #include "../src/scene/autophysics.h"
 #include "../src/core/qp.h"
 #include "../src/scene/spring_bones.h"
+#include "../src/scene/ragdoll.h"
+#include "../src/scene/autopose.h"
+#include "../src/scene/gait.h"
+#include "../src/scene/footsteps.h"
+#include "../src/scene/locomotion.h"
+#include "../src/scene/inbetween.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
@@ -302,7 +308,8 @@ static std::string test_exr_plain(int w, int h, const std::vector<float> &rgba, 
 /* `blendity_tests --fake-moonray -in scene.rdla`: stands in for MoonRay (tasks 0112-0114). It reads the scene's size
  * and its RenderOutput's file name, prints MoonRay's progress, and writes an uncompressed float EXR of one colour
  * (0.5, 0.25, 0.125; alpha 1, or 0 on the left half when the scene hides its background). BLENDITY_FAKE_MOONRAY=slow
- * takes 20 s; =fail exits 3. */
+ * takes 20 s; =fail exits 3; =progress first writes a checkpoint at half the brightness (its checkpoint_file_name),
+ * then prints progress for 1.5 s before the final image. */
 static int fake_moonray(int argc, char **argv) {
   std::string in, text;
   for (int i = 2; i + 1 < argc; i++)
@@ -338,14 +345,25 @@ static int fake_moonray(int argc, char **argv) {
   }
   if (w <= 0 || h <= 0 || out.empty()) return 4;
   const bool hide = text.find("\"force off\"") != std::string::npos;
-  std::vector<float> px((size_t)w * h * 4);
-  for (int y = 0; y < h; y++)
-    for (int x = 0; x < w; x++) {
-      float *p = &px[((size_t)y * w + x) * 4];
-      const float a = hide && x < w / 2 ? 0.0f : 1.0f;
-      p[0] = 0.5f * a, p[1] = 0.25f * a, p[2] = 0.125f * a, p[3] = a;
+  auto image = [&](float k) {
+    std::vector<float> px((size_t)w * h * 4);
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        float *p = &px[((size_t)y * w + x) * 4];
+        const float a = hide && x < w / 2 ? 0.0f : 1.0f;
+        p[0] = 0.5f * a * k, p[1] = 0.25f * a * k, p[2] = 0.125f * a * k, p[3] = a;
+      }
+    return test_exr_plain(w, h, px);
+  };
+  if (m == "progress") {  // (a checkpoint, then the render going on a while: the editor shows the checkpoint meanwhile)
+    if (!fs::write_file(value("checkpoint_file_name"), image(0.5f))) return 6;
+    for (int k = 0; k < 15; k++) {
+      std::printf("  [+] Rendering [%-20s] %.1f%%\r", "==========", 50.0 + k);
+      std::fflush(stdout);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-  if (!fs::write_file(out, test_exr_plain(w, h, px))) return 5;
+  }
+  if (!fs::write_file(out, image(1.0f))) return 5;
   std::printf("\nWrote %s\n", out.c_str());
   return 0;
 }
@@ -366,6 +384,7 @@ int main(int argc, char **argv) {
   Log::echo_stdout = false;
   set_env("BLENDITY_PROJECT", "");  // the scratch project
   set_env("BLENDITY_TRASH", "");
+  set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));  // (never the user's AI download: task 0129)
   /* Assets a test makes before any editor exists (clips, materials) go into the scratch project too: with no asset
    * root a relative path is the folder the tests run from - a real project's Assets (task 0081). */
   set_asset_root(std::getenv("BLENDITY_PROJECT"));
@@ -32380,6 +32399,32 @@ static void round81_tests() {
     std::printf("    orthographic: '%s'\n", ed.render_status_for_test().substr(0, 40).c_str());
     CHECK(ed.render_status_for_test().find("MoonRay") == std::string::npos);
   });
+  test("moonray in F12: the image fills in - MoonRay's checkpoint shown while it renders, then the final image", [] {
+    Editor ed;
+    r34_open(ed);
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    in.root = "stand-in";
+    in.version = "test";
+    in.launcher = {test_program(), "--fake-moonray"};
+    ed.moonray_set_for_test(in);
+    ed.command("engine moonray");
+    ed.scene().render.width = 64, ed.scene().render.height = 36, ed.scene().render.percent = 100, ed.scene().render.samples = 2;
+    set_env("BLENDITY_FAKE_MOONRAY", "progress");
+    ed.command("render");
+    /* While it renders: the checkpoint (half as bright) in the Render panel. */
+    float during = -1.0f;
+    for (int k = 0; k < 3000 && ed.rendering_for_test() && during < 0.0f; k++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      ed.step_frame_headless();
+      if (ed.rendering_for_test() && ed.render_linear_for_test().size() >= 3) during = ed.render_linear_for_test()[0];
+    }
+    for (int k = 0; k < 4000 && ed.rendering_for_test(); k++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    set_env("BLENDITY_FAKE_MOONRAY", "");
+    const float after = ed.render_linear_for_test().size() >= 3 ? ed.render_linear_for_test()[0] : -1.0f;
+    std::printf("    red while rendering %.3f (the checkpoint), when done %.3f; '%s'\n", during, after, ed.render_status_for_test().substr(0, 40).c_str());
+    CHECK(std::fabs(during - 0.25f) < 1e-3f && std::fabs(after - 0.5f) < 1e-3f);
+  });
   /* ---------------------------------------------------------------- round 136: MoonRay checked against the real renderer (task 0113) */
   test("moonray export: a texture goes as a tiled, mip-mapped EXR (MoonRay takes nothing else) - every level's tiles where the table says, down to one pixel of the image's mean; made once while its source is unchanged", [] {
     struct Parsed {
@@ -33655,5 +33700,1608 @@ static void round81_tests() {
     GameObject *tail = back.find_by_name("Tail1"), *ear = back.find_by_name("Ear_Left_1");
     const SpringBone *sb = tail ? tail->get<SpringBone>() : nullptr;
     CHECK(sb && sb->label == 2 && std::fabs(sb->stiffness - 0.42f) < 1e-6f && ear && ear->get<Bone>()->spring_ignored);
+  });
+  /* ---------------------------------------------------------------- round 140: the active ragdoll (task 0121, ADR 0044) */
+  /* Round 137's two-box body (Lower 25 kg, Upper 50 kg, standing 2 m) with Upper tipping 60 degrees about z over a second. */
+  auto r140_clip = [] {
+    AnimationClip clip;
+    clip.frame_rate = 30.0f;
+    clip.length = 60.0f;
+    for (int f = 0; f <= 60; f++) clip.track("Lower/Upper", "Rotation", 2).set_key((float)f, f <= 30 ? 2.0f * f : 60.0f, AnimLinear);
+    return clip;
+  };
+  test("ragdoll: at full strength the motors follow the clip within a few degrees; limp from frame 15 it falls and comes to rest on the ground", [&] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    const AnimationClip clip = r140_clip();
+    body::FlightResult res;
+    std::string error;
+    ragdoll::Report rep;
+    const bool ok = ragdoll::simulate(r.s, *r.rig, clip, b, ragdoll::Settings(), res, error, &rep);
+    std::printf("    strong: %s, %d bodies, %d frames in %.0f ms; the largest difference from the clip %.1f degrees; %zu keys\n", ok ? "simulated" : error.c_str(),
+                rep.bodies, rep.frames, rep.ms, rep.max_angle, res.keys);
+    CHECK(ok && rep.bodies == 2 && rep.max_angle < 8.0f && res.keys > 0);
+    AnimationClip limp = clip;
+    limp.ragdoll.push_back({AnimationClip::RagdollEvent::MotorsOff, 15.0f, "", Vec3(0.0f)});  // (tipped 30 degrees by then: it goes over)
+    body::FlightResult fell;
+    CHECK(ragdoll::simulate(r.s, *r.rig, limp, b, ragdoll::Settings(), fell, error, &rep));
+    const std::vector<Vec3> c = body::com_trajectory(r.s, *r.rig, fell.corrected, b, 0.0f, 60.0f, 61);
+    std::printf("    limp from frame 15: the center of mass from %.3f m to %.3f m high; its last step %.5f m\n", c.front().y, c.back().y, length(c[60] - c[59]));
+    CHECK(c.back().y < c.front().y - 0.3f && length(c[60] - c[59]) < 2e-3f && c.back().y > 0.0f);
+  });
+  test("ragdoll: an impulse on a bone moves that bone most; the same clip simulates to the same keys; events are saved with the clip", [&] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    AnimationClip calm = r140_clip(), hit = r140_clip();
+    hit.ragdoll.push_back({AnimationClip::RagdollEvent::Impulse, 10.0f, "Upper", Vec3(0, 0, 150.0f)});
+    body::FlightResult a, h, again;
+    std::string error;
+    CHECK(ragdoll::simulate(r.s, *r.rig, calm, b, ragdoll::Settings(), a, error) && ragdoll::simulate(r.s, *r.rig, hit, b, ragdoll::Settings(), h, error) &&
+          ragdoll::simulate(r.s, *r.rig, hit, b, ragdoll::Settings(), again, error));
+    /* Each bone's middle in the world two frames after the hit, with the hit and without. */
+    auto middles = [&](const body::FlightResult &x) {
+      std::vector<Vec3> m;
+      body::for_each_frame(r.s, *r.rig, x.corrected, 12, 12, [&](int) {
+        for (GameObject *g : {r.lower, r.upper}) m.push_back((g->world_position() + body::bone_tip(*g)) * 0.5f);
+      });
+      return m;
+    };
+    const std::vector<Vec3> ma = middles(a), mh = middles(h);
+    const float lower = length(mh[0] - ma[0]), upper = length(mh[1] - ma[1]);
+    float same = 0;
+    for (const AnimTrack &t : h.corrected.tracks)
+      if (const AnimTrack *u = again.corrected.find(t.path, t.property, t.axis))
+        for (int f = 0; f <= 60; f++) same = std::max(same, std::fabs(t.sample((float)f) - u->sample((float)f)));
+    std::printf("    two frames after the hit: Upper's middle moved %.3f m, Lower's %.3f m; run twice: the largest difference %.6f\n", upper, lower, same);
+    CHECK(upper > 0.01f && upper > lower && same < 1e-4f);
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(hit), back) && back.ragdoll.size() == 1 && back.ragdoll[0].bone == "Upper" &&
+          std::fabs(back.ragdoll[0].impulse.z - 150.0f) < 1e-4f && back.ragdoll[0].frame == 10.0f);
+  });
+  test("ragdoll (review): a weaker body follows less; a hit on the hips knocks the body back even at full strength; an absurd impulse leaves finite keys", [&] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    R136Body r;
+    const body::Body b = body::build(r.s, *r.rig, 75.0f);
+    const AnimationClip clip = r140_clip();
+    std::string error;
+    float angle[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      ragdoll::Settings s;
+      s.strength = k ? 0.2f : 1.0f;
+      body::FlightResult res;
+      ragdoll::Report rep;
+      CHECK(ragdoll::simulate(r.s, *r.rig, clip, b, s, res, error, &rep));
+      angle[k] = rep.max_angle;
+    }
+    AnimationClip hit = clip;
+    hit.ragdoll.push_back({AnimationClip::RagdollEvent::Impulse, 10.0f, "Lower", Vec3(200.0f, 0, 0)});
+    body::FlightResult calm, knocked;
+    CHECK(ragdoll::simulate(r.s, *r.rig, clip, b, ragdoll::Settings(), calm, error) && ragdoll::simulate(r.s, *r.rig, hit, b, ragdoll::Settings(), knocked, error));
+    auto hips_x = [](body::FlightResult &x, float f) {
+      const AnimTrack *t = x.corrected.find("Lower", "Position", 0);
+      return t ? t->sample(f) : 0.0f;
+    };
+    const float back = hips_x(knocked, 14.0f) - hips_x(calm, 14.0f);
+    AnimationClip wild = clip;
+    wild.ragdoll.push_back({AnimationClip::RagdollEvent::Impulse, 5.0f, "Upper", Vec3(1e12f, 0, 0)});
+    body::FlightResult w;
+    const bool ok = ragdoll::simulate(r.s, *r.rig, wild, b, ragdoll::Settings(), w, error);
+    bool finite = true;
+    for (const AnimTrack &t : w.corrected.tracks)
+      for (const AnimKey &k : t.keys) finite = finite && std::isfinite(k.value);
+    std::printf("    the largest difference from the clip: %.1f degrees at full strength, %.1f at 0.2; a hit on the hips moved them %.3f m; an absurd hit: %s, %s keys\n",
+                angle[0], angle[1], back, ok ? "simulated" : error.c_str(), finite ? "finite" : "NOT FINITE");
+    CHECK(angle[1] > angle[0] + 2.0f && back > 0.02f && finite);
+  });
+  test("ragdoll in the editor: events by the console, simulated on a worker, shown, Apply one undo step", [] {
+    if (!ragdoll::available()) return (void)std::printf("    skipped (Jolt: Blender's libraries)\n");
+    Editor ed;
+    r34_open(ed);
+    Scene &s = ed.scene();
+    GameObject *rig = s.create("Rig");
+    rig->add<Armature>();
+    GameObject *lower = s.create("Lower", rig);
+    lower->add<Bone>();
+    GameObject *upper = s.create("Upper", lower);
+    upper->set_local_position({0, 1, 0});
+    upper->add<Bone>()->rest_position = {0, 1, 0};
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select Rig");
+    ed.command("anim new Fall");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    clip->frame_rate = 30.0f;
+    clip->length = 30.0f;
+    clip->track("Lower", "Rotation", 2).set_key(0.0f, 0.0f, AnimLinear);
+    clip->touch();
+    ed.step_frame_headless();
+    ed.command("body ragdoll limp 5");
+    ed.step_frame_headless();
+    const bool event = ed.anim_clip_for_test() && ed.anim_clip_for_test()->ragdoll.size() == 1;
+    ed.command("body ragdoll show");
+    const bool started = ed.body_solving_for_test();
+    const auto t0 = std::chrono::steady_clock::now();
+    while (ed.body_solving_for_test() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60)) ed.step_frame_headless();
+    const bool shown = ed.body_ghost_for_test();
+    ed.command("body ragdoll apply");
+    ed.step_frame_headless();
+    AnimationClipPtr c2 = ed.anim_clip_for_test();
+    const AnimTrack *up = c2 ? c2->find("Lower/Upper", "Rotation", 0) : nullptr;
+    ed.command("undo");
+    ed.step_frame_headless();
+    AnimationClipPtr c3 = ed.anim_clip_for_test();
+    const bool undone = c3 && c3->find("Lower/Upper", "Rotation", 0) == nullptr;
+    std::printf("    the event in the clip: %s; simulated on a worker: %s; shown: %s; applied: %s; undone: %s\n", event ? "yes" : "no", started ? "yes" : "no",
+                shown ? "yes" : "no", up ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(event && started && shown && up && undone);
+  });
+  /* ---------------------------------------------------------------- round 141: AutoPosing (task 0122) */
+  /* GameObject > Rig > Humanoid's person (1.7 m, IK on the hands and feet), weighed with capsules. */
+  auto r141_pose_of = [](GameObject &arm) {
+    std::vector<std::pair<GameObject *, Quat>> out;
+    std::vector<GameObject *> st{&arm};
+    while (!st.empty()) {
+      GameObject *g = st.back();
+      st.pop_back();
+      for (GameObject *c : g->children) st.push_back(c);
+      if (g->get<Bone>()) out.push_back({g, g->local().rotation});
+    }
+    return out;
+  };
+  auto r141_angle = [](Quat a, Quat b) {
+    const Quat d = normalize(a * b.conjugate());
+    return 2.0f * std::acos(std::min(1.0f, std::fabs(d.w))) * 57.2957795f;
+  };
+  test("autopose: a dragged hand reaches a target in reach, the pinned feet stay, every joint within its limit, the rest of the body barely moved", [&] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const body::Body b = body::build(s, *rig, 75.0f);
+    GameObject *hand = s.find_by_name("LeftHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    const auto before = r141_pose_of(*rig);
+    const Vec3 lf0 = lf->world_position(), rf0 = rf->world_position(), to = hand->world_position() + Vec3(0.15f, 0.3f, 0.25f);
+    const autopose::Result r = autopose::solve(*rig, {{hand, to, 1.0f}}, {lf, rf}, &b);
+    float worst = 0, head = 0;
+    for (const auto &p : before) {
+      const float a = r141_angle(p.first->local().rotation, p.second);
+      worst = std::max(worst, a);
+      if (p.first->name == "Head") head = a;
+    }
+    std::printf("    %zu joints, %d iterations, %.2f ms: the hand %.2f mm off, the feet %.2f mm; the largest turn %.1f degrees, the head's %.1f; balance %.1f cm\n",
+                r.bones, r.iterations, r.ms, r.error * 1000.0f, r.pin_error * 1000.0f, worst, head, r.balance * 100.0f);
+    CHECK(r.error < 0.01f && length(lf->world_position() - lf0) < 0.005f && length(rf->world_position() - rf0) < 0.005f);
+    CHECK(worst <= 75.0f + 0.5f && head < 10.0f && r.ms < 16.0f);  // (live while dragging: under a frame)
+  });
+  test("autopose: balance keeps the center of mass over the feet when the head is pushed forward; out of reach the arm points at the target, nothing breaks", [&] {
+    float off[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f));
+      const body::Body b = body::build(s, *rig, 75.0f);
+      GameObject *head = s.find_by_name("Head"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+      autopose::Settings st;
+      st.balance = k == 0;
+      const autopose::Result r = autopose::solve(*rig, {{head, head->world_position() + Vec3(0, -0.1f, 0.35f), 1.0f}}, {lf, rf}, &b, st);
+      std::vector<ArmatureBone> now;
+      armature_bones(*rig, now);
+      const Vec3 c = body::state(b, now).com, mid = (lf->world_position() + rf->world_position()) * 0.5f;
+      off[k] = std::sqrt((c.x - mid.x) * (c.x - mid.x) + (c.z - mid.z) * (c.z - mid.z));
+      (void)r;
+    }
+    std::printf("    head forward: the center of mass %.1f cm from over the feet with balance, %.1f cm without\n", off[0] * 100.0f, off[1] * 100.0f);
+    CHECK(off[0] < 0.6f * off[1]);
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const body::Body b = body::build(s, *rig, 75.0f);
+    GameObject *hand = s.find_by_name("LeftHand"), *ua = s.find_by_name("LeftUpperArm"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    const Vec3 lf0 = lf->world_position(), far = Vec3(-5.0f, 1.5f, 0.0f);
+    const autopose::Result r = autopose::solve(*rig, {{hand, far, 1.0f}}, {lf, rf}, &b);
+    const Vec3 arm = normalize(hand->world_position() - ua->world_position()), want = normalize(far - ua->world_position());
+    bool finite = true;
+    for (const auto &p : r141_pose_of(*rig)) finite = finite && std::isfinite(p.first->local().rotation.w);
+    std::printf("    5 m away: %.2f m short (said), the arm %.1f degrees off the target's direction, the foot %.2f mm, all finite: %s\n", r.error,
+                std::acos(std::min(1.0f, dot(arm, want))) * 57.2957795f, length(lf->world_position() - lf0) * 1000.0f, finite ? "yes" : "NO");
+    /* (a 5 m pull leans the hips to their 30 cm limit and the legs to theirs: the feet within 2 cm then; a reach within
+     * the body's holds them to a millimetre, above) */
+    CHECK(finite && r.error > 3.0f && dot(arm, want) > 0.9f && length(lf->world_position() - lf0) < 0.02f);
+  });
+  test("autopose (review): the hips dragged down crouch the body - the feet stay down and flat, the knees bend forward, not sideways", [&] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const body::Body b = body::build(s, *rig, 75.0f);
+    GameObject *hips = s.find_by_name("Hips"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot"), *knee = s.find_by_name("LeftLowerLeg");
+    const Vec3 lf0 = lf->world_position(), rf0 = rf->world_position(), knee0 = knee->world_position();
+    const Quat lq0 = lf->world_rotation();
+    const autopose::Result r = autopose::solve(*rig, {{hips, hips->world_position() + Vec3(0, -0.25f, 0), 1.0f}}, {lf, rf}, &b);
+    const Vec3 dk = knee->world_position() - knee0;
+    const Quat dq = normalize(lf->world_rotation() * lq0.conjugate());
+    const float foot_turn = 2.0f * std::acos(std::min(1.0f, std::fabs(dq.w))) * 57.2957795f;
+    std::printf("    hips 25 cm down: %.1f mm off; the feet %.2f mm and %.2f degrees; the knee moved (%.3f, %.3f, %.3f)\n", r.error * 1000.0f,
+                std::max(length(lf->world_position() - lf0), length(rf->world_position() - rf0)) * 1000.0f, foot_turn, dk.x, dk.y, dk.z);
+    CHECK(r.error < 0.01f && length(lf->world_position() - lf0) < 0.005f && length(rf->world_position() - rf0) < 0.005f && foot_turn < 1.0f);
+    CHECK(dk.z > 0.03f && std::fabs(dk.x) < 0.5f * dk.z);  // (forward, the way the knee already bends - the rig faces +Z)
+  });
+  test("autopose in the editor: a drag poses the body, keys it at the playhead (one undo step); IK targets follow; a locked hand stays", [&] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Pose");
+    ed.step_frame_headless();
+    ed.command("autopose on");
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    /* (within the arm's reach: with the other hand locked the chest can't turn to help) */
+    const Vec3 to = hand->world_position() + Vec3(0.15f, 0.2f, 0.1f), rh0 = ed.scene().find_by_name("RightHand")->world_position();
+    ed.command("autopose lock RightHand");
+    ed.command(strprintf("autopose drag LeftHand %f %f %f", to.x, to.y, to.z));
+    const Vec3 elbow = ed.scene().find_by_name("LeftLowerArm")->world_position();
+    auto dbg = [&](const char *when) {
+      const Vec3 h = ed.scene().find_by_name("Hips")->world_position();
+      std::printf("    DEBUG %s: hand %.3f off, hips (%.3f %.3f %.3f)\n", when, length(ed.scene().find_by_name("LeftHand")->world_position() - to), h.x, h.y, h.z);
+    };
+    dbg("after drag");
+    ed.step_frame_headless();  // (IK solves on the pose: its target and pole moved with it, nothing pulls back)
+    dbg("after IK");
+    Scene &s = ed.scene();
+    const float elbow_kept = length(s.find_by_name("LeftLowerArm")->world_position() - elbow);
+    const float reached = length(s.find_by_name("LeftHand")->world_position() - to), kept = length(s.find_by_name("RightHand")->world_position() - rh0);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    /* (IK turns the arm: its target is what's keyed, and IK poses the arm from it) */
+    const std::string arm_path = clip ? anim_path(*rig, *s.find_by_name("LeftHandIK")) : "";
+    const bool keyed = clip && clip->find(arm_path, "Position", 0) != nullptr;
+    ed.command("undo");
+    ed.step_frame_headless();
+    AnimationClipPtr c2 = ed.anim_clip_for_test();
+    const bool undone = c2 && c2->find(arm_path, "Position", 0) == nullptr;
+    std::printf("    the hand %.1f mm from the target after IK, the elbow %.1f mm from where AutoPose put it; the locked hand moved %.1f mm; keyed: %s; "
+                "undone in one step: %s\n", reached * 1000.0f, elbow_kept * 1000.0f, kept * 1000.0f, keyed ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(reached < 0.02f && elbow_kept < 0.02f && kept < 0.01f && keyed && undone);
+  });
+  /* ---------------------------------------------------------------- round 142: physics for animation written up (task 0123) */
+  test("learn: the physics lesson's Try it makes a person jump in straight lines, finds its contacts and shows the flight corrected", [] {
+    std::string cmds;
+    for (int i = 0; i < lesson_count() && cmds.empty(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find("| A person jumping in straight lines");
+      const size_t start = at == std::string::npos ? std::string::npos : body.rfind("! cmd:", at);
+      if (start != std::string::npos) cmds = body.substr(start + 6, at - start - 6);
+    }
+    CHECK(!cmds.empty());
+    Editor ed;
+    ed.init_headless(1400, 900);
+    size_t a = 0;
+    while (a <= cmds.size()) {  // (as the Learn tab runs them: ';'-separated console commands)
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const size_t contacts = clip ? clip->contacts.size() : 0;
+    const body::FlightResult &fr = ed.body_result_for_test();
+    std::printf("    %zu contacts found; the flight shown: %s, %zu flight(s), up to %.2f m changed\n", contacts, ed.body_ghost_for_test() ? "yes" : "no",
+                fr.flights.size(), fr.flights.empty() ? 0.0f : fr.flights[0].shift);
+    CHECK(contacts >= 2 && ed.body_ghost_for_test() && fr.flights.size() == 1 && fr.flights[0].shift > 0.05f);
+  });
+  /* ---------------------------------------------------------------- round 144: animation assistants and the rig read for walking (task 0124) */
+  test("assistants: the physics tools on and the rest off at first; a switched-off one does nothing and says how to turn it on; kept in the preferences", [] {
+    const std::string prefs = fs::join(test_dir(), "r144_prefs.txt");
+    fs::remove_file(prefs);
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      const bool first = ed.assist_on(Editor::Assist::Physics) && !ed.assist_on(Editor::Assist::Walk) && !ed.assist_on(Editor::Assist::Footsteps) &&
+                         !ed.assist_on(Editor::Assist::Locomotion) && !ed.assist_on(Editor::Assist::Ai);
+      ed.command("assist off physics");
+      ed.command("body show on");     // (refused: off)
+      ed.command("autopose on");      // (refused: off)
+      const bool refused = !ed.body_show_com_for_test() && !ed.autopose_on_for_test();
+      for (int f = 0; f < 3; f++) ed.step_frame_headless();  // (the windows draw without them: no crash)
+      ed.command("assist on walk");
+      ed.command("assist on nonsense");  // (warned, nothing changes)
+      ed.save_prefs_for_test();
+      std::printf("    at first: physics on, the rest off: %s; physics off refuses body / autopose: %s\n", first ? "yes" : "no", refused ? "yes" : "no");
+      CHECK(first && refused);
+    }
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.load_prefs_for_test();
+      CHECK(!ed.assist_on(Editor::Assist::Physics) && ed.assist_on(Editor::Assist::Walk) && !ed.assist_on(Editor::Assist::Ai));
+      ed.command("assist on physics");
+      ed.command("body show on");
+      CHECK(ed.assist_on(Editor::Assist::Physics) && ed.body_show_com_for_test());
+    }
+    fs::remove_file(prefs);
+  });
+  test("gait: the humanoid and quadruped rigs read for walking - legs, feet, sides, IK controls, hips, spine, head and measures", [] {
+    {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f));
+      const gait::Rig r = gait::analyse(s, *rig);
+      std::printf("    humanoid: %s; %zu legs (%s %s), %zu arms, hips %s, head %s, %zu spine bones; hip height %.3f, leg %.3f, stance %.3f\n",
+                  r.valid() ? "ok" : r.problem.c_str(), r.legs.size(), r.legs.size() > 0 ? r.legs[0].upper->name.c_str() : "-",
+                  r.legs.size() > 1 ? r.legs[1].upper->name.c_str() : "-", r.arms.size(), r.hips ? r.hips->name.c_str() : "-",
+                  r.head ? r.head->name.c_str() : "-", r.spine.size(), r.hip_height, r.leg_length, r.stance_width);
+      CHECK(r.valid() && !r.quadruped && r.legs.size() == 2 && r.arms.size() == 2);
+      CHECK(r.legs[0].side == 0 && r.legs[1].side == 1 && r.legs[0].foot && r.legs[0].foot->name == "LeftFoot" && r.legs[0].ik_target &&
+            r.legs[0].ik_target->name == "LeftFootIK");
+      CHECK(r.hips && r.hips->name == "Hips" && r.head && r.head->name == "Head" && r.spine.size() == 3);
+      CHECK(std::fabs(r.leg_length - 0.88f) < 0.02f && r.hip_height > 0.85f && r.stance_width > 0.15f);
+    }
+    {
+      Scene s;
+      GameObject *rig = create_rig(s, true, Vec3(0.0f));
+      const gait::Rig r = gait::analyse(s, *rig);
+      int front = 0;
+      for (const gait::Leg &l : r.legs) front += l.front;
+      std::printf("    quadruped: %s; %zu legs, %d front, first %s\n", r.valid() ? "ok" : r.problem.c_str(), r.legs.size(), front,
+                  r.legs.empty() ? "-" : r.legs[0].upper->name.c_str());
+      CHECK(r.valid() && r.quadruped && r.legs.size() == 4 && front == 2 && r.legs[0].front && r.legs[0].upper->name.find("Front") != std::string::npos);
+    }
+  });
+  test("gait: Mixamo and Rigify names, an unnamed stick figure by its shape; a rig without legs or with one is refused with why", [&] {
+    auto stick = [&](Scene &s, const std::vector<std::string> &names, bool second_leg = true) {
+      /* hips at 1 m, a spine and head, legs (upper, lower, foot) and arms (upper, lower, hand) - named as given */
+      GameObject *arm = s.create("Rig");
+      arm->add<Armature>();
+      const Quat down = Quat::euler({180, 0, 0}), out_l = Quat::euler({0, 0, 90}), out_r = Quat::euler({0, 0, -90});
+      GameObject *hips = r139_bone(s, names[0], arm, {0, 1, 0}, Quat(), 0.1f);
+      GameObject *spine = r139_bone(s, names[1], hips, {0, 0.1f, 0}, Quat(), 0.3f);
+      r139_bone(s, names[2], spine, {0, 0.3f, 0}, Quat(), 0.2f);
+      for (int side = 0; side < (second_leg ? 2 : 1); side++) {
+        const float x = side ? 0.1f : -0.1f;
+        GameObject *up = r139_bone(s, names[3 + side * 3], hips, {x, 0, 0}, down, 0.45f);
+        GameObject *lo = r139_bone(s, names[4 + side * 3], up, {0, 0.45f, 0}, Quat(), 0.43f);
+        r139_bone(s, names[5 + side * 3], lo, {0, 0.43f, 0}, Quat::euler({-90, 0, 0}), 0.12f);
+        GameObject *ua = r139_bone(s, names[9 + side * 3], spine, {x * 1.5f, 0.25f, 0}, side ? out_r : out_l, 0.28f);
+        GameObject *la = r139_bone(s, names[10 + side * 3], ua, {0, 0.28f, 0}, Quat(), 0.25f);
+        r139_bone(s, names[11 + side * 3], la, {0, 0.25f, 0}, Quat(), 0.08f);
+      }
+      return arm;
+    };
+    const std::vector<std::string> mixamo = {"mixamorig:Hips", "mixamorig:Spine", "mixamorig:Head", "mixamorig:LeftUpLeg", "mixamorig:LeftLeg",
+                                             "mixamorig:LeftFoot", "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:RightFoot",
+                                             "mixamorig:LeftArm", "mixamorig:LeftForeArm", "mixamorig:LeftHand", "mixamorig:RightArm",
+                                             "mixamorig:RightForeArm", "mixamorig:RightHand"};
+    const std::vector<std::string> rigify = {"spine", "spine.001", "head", "thigh.L", "shin.L", "foot.L", "thigh.R", "shin.R", "foot.R",
+                                             "upper_arm.L", "forearm.L", "hand.L", "upper_arm.R", "forearm.R", "hand.R"};
+    std::vector<std::string> unnamed;
+    for (int i = 0; i < 15; i++) unnamed.push_back(i ? strprintf("Bone.%03d", i) : std::string("Bone"));
+    int ok = 0;
+    const std::vector<std::string> *sets[3] = {&mixamo, &rigify, &unnamed};
+    for (const std::vector<std::string> *names : sets) {
+      Scene s;
+      GameObject *arm = stick(s, *names);
+      const gait::Rig r = gait::analyse(s, *arm);
+      const bool legs = r.valid() && r.legs.size() == 2 && r.legs[0].side == 0 && r.legs[1].side == 1 && r.legs[0].foot && r.hips &&
+                        r.hips->name == (*names)[0];
+      std::printf("    %-16s %s: %zu legs, %zu arms, hips %s, left foot %s\n", (*names)[3].c_str(), r.valid() ? "ok" : r.problem.c_str(), r.legs.size(),
+                  r.arms.size(), r.hips ? r.hips->name.c_str() : "-", r.legs.empty() || !r.legs[0].foot ? "-" : r.legs[0].foot->name.c_str());
+      ok += legs;
+    }
+    CHECK(ok == 3);
+    Scene one;
+    const gait::Rig r1 = gait::analyse(one, *stick(one, mixamo, false));
+    Scene none;
+    GameObject *bare = none.create("Rig");
+    bare->add<Armature>();
+    r139_bone(none, "Lonely", bare, {0, 1, 0});
+    const gait::Rig r0 = gait::analyse(none, *bare);
+    std::printf("    one leg: '%s'; no legs: '%s'\n", r1.problem.c_str(), r0.problem.c_str());
+    CHECK(!r1.valid() && !r0.valid() && !r1.problem.empty() && !r0.problem.empty());
+  });
+  /* ---------------------------------------------------------------- round 145: Walk Cycle, the procedural gait (task 0125) */
+  /* The humanoid rig walking: `gen` generates into `clip` and returns each frame's ankles (the feet's heads) as keyed. */
+  struct R145Walk {
+    Scene s;
+    GameObject *rig = nullptr;
+    gait::Rig g;
+    AnimationClip clip;
+    std::vector<std::vector<Vec3>> ankles;  // [frame][leg]
+    std::vector<std::vector<Vec3>> heels, toes;  // [frame][leg]: the sole's back and front, where the foot rolls about
+    int frames = 0;
+  };
+  auto r145_walk = [](R145Walk &w, const char *preset, bool in_place, int cycles = 2, bool quadruped = false) {
+    w.rig = create_rig(w.s, quadruped, Vec3(0.0f));
+    w.g = gait::analyse(w.s, *w.rig);
+    gait::WalkSettings ws;
+    gait::preset(preset, w.g, ws.style);
+    ws.in_place = in_place, ws.cycles = cycles;
+    std::string error;
+    w.frames = gait::generate(w.s, *w.rig, w.g, ws, AnimationClip(), w.clip, error);
+    if (!w.frames) std::printf("    %s\n", error.c_str());
+    body::for_each_frame(w.s, *w.rig, w.clip, 0, std::max(0, w.frames - 1), [&](int) {
+      std::vector<Vec3> a, h, t;
+      const Vec3 up(0, 1, 0), fwd = normalize(Vec3(w.g.forward.x, 0.0f, w.g.forward.z));
+      for (const gait::Leg &l : w.g.legs) {
+        const Vec3 at = l.foot->world_position();
+        const Quat turn = l.foot->world_rotation() * l.rest_foot.conjugate();  // (the foot's turn from its rest)
+        a.push_back(at);
+        h.push_back(at + turn.rotate(up * -w.g.sole));
+        t.push_back(at + turn.rotate(fwd * l.foot_length - up * w.g.sole));
+      }
+      w.ankles.push_back(a), w.heels.push_back(h), w.toes.push_back(t);
+    });
+  };
+  test("walk cycle: a planted foot stays put (no sliding); a treadmill cycle loops; the keys are on the rig's own controls", [&] {
+    R145Walk w;
+    r145_walk(w, "walk", false);
+    /* A planted foot rolls - about its heel as it lands, its toes as it leaves - so the ankle rises; what must not move
+     * is the part on the ground: every planted frame has its heel or its toes where they are mid-stance (foot flat). */
+    float slide = 0;
+    int planted = 0;
+    for (const AnimationClip::Contact &k : w.clip.contacts) {
+      const size_t leg = k.bone == w.g.legs[0].lower->name ? 0 : 1, mid = (size_t)((k.from + k.to) * 0.5f);
+      if (mid >= w.ankles.size()) continue;
+      for (int f = (int)k.from; f <= (int)k.to && f < (int)w.ankles.size(); f++, planted++)
+        slide = std::max(slide, std::min(length(w.heels[(size_t)f][leg] - w.heels[mid][leg]), length(w.toes[(size_t)f][leg] - w.toes[mid][leg])));
+    }
+    const bool on_controls = w.clip.find("LeftFootIK", "Position", 2) && w.clip.find("Hips", "Position", 1) && !w.clip.find("LeftUpperLeg", "Rotation", 0);
+    std::printf("    travelling walk: %d frames, %zu contacts, %d planted frames, the most a planted heel or toe moved %.3f mm; keyed on the IK targets: %s\n",
+                w.frames, w.clip.contacts.size(), planted, slide * 1000.0f, on_controls ? "yes" : "no");
+    CHECK(w.frames > 20 && w.clip.contacts.size() >= 4 && slide < 1e-3f && on_controls);
+    R145Walk loop;
+    r145_walk(loop, "walk", true);
+    float seam = 0;
+    for (size_t i = 0; i < loop.g.legs.size(); i++) seam = std::max(seam, length(loop.ankles.back()[i] - loop.ankles.front()[i]));
+    const float drift = length(loop.ankles[loop.ankles.size() / 8][0] - loop.ankles[0][0]);  // (a quarter of a cycle on)
+    std::printf("    treadmill: the last frame's ankles %.4f mm from the first's; a quarter cycle on the left ankle %.3f m away (it moves under the body)\n",
+                seam * 1000.0f, drift);
+    CHECK(seam < 1e-3f && drift > 0.05f);
+  });
+  test("walk cycle: stride and cadence scale with the leg (Froude); a run has both feet up, a walk never; a trot moves diagonal pairs together", [&] {
+    Scene s;
+    GameObject *small = create_rig(s, false, Vec3(0.0f)), *big = create_rig(s, false, Vec3(5, 0, 0));
+    big->set_local_scale({2, 2, 2});
+    const gait::Rig a = gait::analyse(s, *small), b = gait::analyse(s, *big);
+    gait::Style walk;
+    gait::preset("walk", a, walk);
+    const gait::Cycle ca = gait::cycle_of(a, walk), cb = gait::cycle_of(b, walk);
+    std::printf("    a %.2f m leg: %.2f m cycles at %.2f m/s every %.2f s; a %.2f m leg: %.2f m at %.2f m/s every %.2f s\n", a.leg_length, ca.length, ca.speed,
+                ca.period, b.leg_length, cb.length, cb.speed, cb.period);
+    CHECK(std::fabs(cb.length / ca.length - 2.0f) < 0.02f && std::fabs(cb.period / ca.period - std::sqrt(2.0f)) < 0.02f);
+    auto airborne = [&](const char *name) {
+      gait::Style st;
+      gait::preset(name, a, st);
+      const gait::Cycle c = gait::cycle_of(a, st);
+      int up = 0;
+      for (int k = 0; k < 200; k++) {
+        const gait::Pose p = gait::pose_at(a, st, c.period * k / 200.0f, true);
+        bool any = false;
+        for (uint8_t d : p.down) any = any || d;
+        up += !any;
+      }
+      return up;
+    };
+    const int run = airborne("run"), walked = airborne("walk");
+    Scene q;
+    GameObject *dog = create_rig(q, true, Vec3(0.0f));
+    const gait::Rig d = gait::analyse(q, *dog);
+    gait::Style trot;
+    gait::preset("trot", d, trot);
+    int together = 0, apart = 0;
+    for (int k = 0; k < 100; k++) {
+      const gait::Pose p = gait::pose_at(d, trot, gait::cycle_of(d, trot).period * k / 100.0f, true);
+      together += p.down[0] == p.down[3] && p.down[1] == p.down[2];  // (front left with hind right, front right with hind left)
+      apart += p.down[0] != p.down[1];
+    }
+    std::printf("    airborne samples of 200: run %d, walk %d; trot: diagonals together %d of 100, the front pair apart %d\n", run, walked, together, apart);
+    CHECK(run > 10 && walked == 0 && together == 100 && apart > 50);
+  });
+  test("walk cycle: presets for two and four legs, blended by weight, saved as .gait text; the quadruped walks; AutoPhysics barely changes a walk", [&] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    const gait::Rig g = gait::analyse(s, *rig);
+    int ok = 0;
+    for (const std::string &n : gait::preset_names(false)) {
+      gait::Style st;
+      ok += gait::preset(n, g, st);
+    }
+    gait::Style w, r, back;
+    gait::preset("walk", g, w), gait::preset("run", g, r);
+    const gait::Style mid = gait::blend(w, r, 0.25f);
+    CHECK(ok == 5 && std::fabs(mid.speed - (w.speed + (r.speed - w.speed) * 0.25f)) < 1e-5f);
+    CHECK(gait::style_from_text(gait::style_text(mid), back) && std::fabs(back.duty - mid.duty) < 1e-5f && back.name == mid.name);
+    CHECK(!gait::style_from_text("nonsense", back));
+    R145Walk dog;
+    r145_walk(dog, "walk", false, 2, true);
+    std::printf("    quadruped walk: %d frames, %zu contacts\n", dog.frames, dog.clip.contacts.size());
+    CHECK(dog.frames > 20 && dog.clip.contacts.size() >= 8);
+    R145Walk walk;
+    r145_walk(walk, "walk", false);
+    const body::Body b = body::build(walk.s, *walk.rig, 75.0f);
+    body::FlightResult res;
+    std::string error;
+    const bool solved = body::autophysics(walk.s, *walk.rig, walk.clip, b, body::AutoPhysicsSettings(), res, error);
+    std::printf("    AutoPhysics on the generated walk: %s, the body moved up to %.1f mm\n", solved ? "solved" : error.c_str(), solved ? res.flights[0].shift * 1000.0f : 0.0f);
+    /* (a few centimetres, spread over the walk: the pelvis goes forward at one speed, where a real walk slows over each
+     * planted foot and speeds up between - physics evens that out) */
+    CHECK(solved && res.flights[0].shift < 0.06f);
+  });
+  test("walk cycle in the editor: refused while switched off; on, a run is keyed into the character's clip as ordinary keys - edited by hand, undone in one step", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk cycle walk");  // (off: refused)
+    const bool refused = ed.anim_clip_for_test() == nullptr;
+    ed.command("assist on walk");
+    ed.command("window Rigging");
+    ed.step_frame_headless();  // (the Walk Cycle section draws)
+    ed.command("walk cycle run 4.2 2 inplace");
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *hips = clip ? clip->find("Hips", "Position", 1) : nullptr;
+    const size_t keys = hips ? hips->keys.size() : 0, contacts = clip ? clip->contacts.size() : 0;
+    /* By hand, after: a key moved like any other. */
+    ed.command("anim key Hips Position 1 3 1.5");
+    ed.step_frame_headless();
+    const AnimTrack *edited = ed.anim_clip_for_test() ? ed.anim_clip_for_test()->find("Hips", "Position", 1) : nullptr;
+    const bool hand = edited && std::fabs(edited->sample(3.0f) - 1.5f) < 1e-4f;
+    ed.command("undo");  // (the hand edit)
+    ed.step_frame_headless();
+    ed.command("undo");  // (the whole cycle)
+    ed.step_frame_headless();
+    AnimationClipPtr after = ed.anim_clip_for_test();
+    const bool undone = !after || !after->find("Hips", "Position", 1) || after->find("Hips", "Position", 1)->keys.empty();
+    std::printf("    off: refused %s; on: %zu keys on the hips' height, %zu contacts; a hand edit kept: %s; undone in one step: %s\n", refused ? "yes" : "no", keys,
+                contacts, hand ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(refused && keys > 20 && contacts >= 4 && hand && undone);
+  });
+  test("learn: the Walk Cycle lesson's Try it switches the assistant on and makes a person walk two cycles forward", [] {
+    std::string cmds;
+    for (int i = 0; i < lesson_count() && cmds.empty(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find("| A person walking two cycles forward");
+      const size_t start = at == std::string::npos ? std::string::npos : body.rfind("! cmd:", at);
+      if (start != std::string::npos) cmds = body.substr(start + 6, at - start - 6);
+    }
+    CHECK(!cmds.empty());
+    Editor ed;
+    ed.init_headless(1400, 900);
+    size_t a = 0;
+    while (a <= cmds.size()) {
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    ed.step_frame_headless();
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *z = clip ? clip->find("Hips", "Position", 2) : nullptr;
+    const float went = z && !z->keys.empty() ? z->keys.back().value - z->keys.front().value : 0.0f;
+    std::printf("    the walk assistant %s; the hips went %.2f m forward over %zu keys\n", ed.assist_on(Editor::Assist::Walk) ? "on" : "off", went,
+                z ? z->keys.size() : 0);
+    CHECK(ed.assist_on(Editor::Assist::Walk) && went > 1.5f);
+  });
+  test("walk cycle: the toes and heels never go through the floor; the hands swing through their IK targets; a rig facing -Z walks its own way", [&] {
+    R145Walk w;
+    r145_walk(w, "walk", false);
+    float floor = 1e9f, lowest = 1e9f;
+    for (size_t i = 0; i < w.g.legs.size(); i++) floor = std::min(floor, w.heels[0][i].y);  // (both feet planted at the start)
+    for (size_t f = 0; f < w.toes.size(); f++)
+      for (size_t i = 0; i < w.g.legs.size(); i++) lowest = std::min(lowest, std::min(w.toes[f][i].y, w.heels[f][i].y));
+    /* The hands: their IK targets keyed (else the arm IK would pull them back to rest), the hand swinging along the walk. */
+    const AnimTrack *hand_ik = w.clip.find("LeftHandIK", "Position", 2);
+    GameObject *hand = w.s.find_by_name("LeftHand");
+    float lo = 1e9f, hi = -1e9f;
+    body::for_each_frame(w.s, *w.rig, w.clip, 0, w.frames - 1, [&](int) {
+      const float rel = hand->world_position().z - w.g.hips->world_position().z;  // (relative to the body, which travels)
+      lo = std::min(lo, rel), hi = std::max(hi, rel);
+    });
+    std::printf("    the soles' lowest point %.2f mm below the floor; the left hand IK keyed: %s, the hand swings %.0f mm fore and aft\n",
+                (floor - lowest) * 1000.0f, hand_ik ? "yes" : "no", (hi - lo) * 1000.0f);
+    CHECK(floor - lowest < 1e-3f && hand_ik && hi - lo > 0.08f);
+    /* Turned round: the walk goes the way the feet point, not +Z. */
+    R145Walk back;
+    back.rig = create_rig(back.s, false, Vec3(0.0f));
+    back.rig->set_local_rotation(Quat::axis_angle(Vec3(0, 1, 0), 3.14159265f));
+    back.g = gait::analyse(back.s, *back.rig);
+    gait::WalkSettings ws;
+    gait::preset("walk", back.g, ws.style);
+    ws.in_place = false;
+    std::string error;
+    back.frames = gait::generate(back.s, *back.rig, back.g, ws, AnimationClip(), back.clip, error);
+    float z0 = 0, z1 = 0;
+    body::for_each_frame(back.s, *back.rig, back.clip, 0, back.frames - 1, [&](int f) {
+      const float z = back.g.hips->world_position().z;
+      if (f == 0) z0 = z;
+      z1 = z;
+    });
+    std::printf("    turned round: forward (%.2f, %.2f, %.2f); the hips went %.2f m along z\n", back.g.forward.x, back.g.forward.y, back.g.forward.z, z1 - z0);
+    CHECK(back.g.forward.z < -0.9f && z1 - z0 < -1.0f);
+  });
+  test("walk cycle in the editor: `walk set` changes one number and keeps the rest; a walk that can't be made leaves no clip behind", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("assist on walk");
+    ed.command("walk set lift 0.2");
+    ed.command("walk set duty 0.7");
+    const gait::Style s = ed.walk_settings_for_test().style;
+    const bool kept = std::fabs(s.lift - 0.2f) < 1e-5f && std::fabs(s.duty - 0.7f) < 1e-5f;
+    /* 64 cycles at a crawl: over the 4,000-frame limit - refused, and the character still has no clip. */
+    ed.command("walk cycle walk 0.05 64");
+    ed.step_frame_headless();
+    const bool none = ed.anim_clip_for_test() == nullptr;
+    std::printf("    after two `walk set`s: lift %.2f, duty %.2f; the refused walk left a clip: %s\n", s.lift, s.duty, none ? "no" : "yes");
+    CHECK(kept && none);
+  });
+  /* ---------------------------------------------------------------- round 146: footsteps along a path (task 0126) */
+  /* A curve object through `pts` (a poly path: straight between its points). */
+  auto r146_path = [](Scene &s, const std::vector<Vec3> &pts) {
+    GameObject *g = s.create("Path");
+    Curve *cv = g->add<Curve>();
+    cv->type = 1;
+    for (Vec3 p : pts) cv->points.push_back({p, 0.0f, 1.0f});
+    return g;
+  };
+  /* The planned walk keyed, and each frame's ankles, heels and toes (as R145Walk's). */
+  struct R146Steps {
+    Scene s;
+    GameObject *rig = nullptr;
+    gait::Rig g;
+    gait::Style style;
+    steps::Plan plan;
+    AnimationClip clip;
+    int frames = 0;
+    std::vector<std::vector<Vec3>> ankles, heels, toes;
+  };
+  auto r146_walk = [](R146Steps &w, const CurvePath &path, const std::function<bool(Vec3, Vec3 &, Vec3 &)> &ground = nullptr) {
+    w.g = gait::analyse(w.s, *w.rig);
+    gait::preset("walk", w.g, w.style);
+    w.plan = steps::plan(w.g, w.style, path, 30.0f, ground);
+    std::string error;
+    w.frames = steps::walk(w.s, *w.rig, w.g, w.style, w.plan, 30.0f, AnimationClip(), w.clip, error);
+    if (!w.frames) std::printf("    %s\n", error.c_str());
+    body::for_each_frame(w.s, *w.rig, w.clip, 0, std::max(0, w.frames - 1), [&](int) {
+      std::vector<Vec3> a, h, t;
+      for (const gait::Leg &l : w.g.legs) {
+        const Vec3 at = l.foot->world_position();
+        const Quat turn = l.foot->world_rotation() * l.rest_foot.conjugate();
+        const Vec3 fwd = turn.rotate(normalize(Vec3(w.g.forward.x, 0.0f, w.g.forward.z)));
+        a.push_back(at);
+        h.push_back(at + turn.rotate(Vec3(0, -w.g.sole, 0)));
+        t.push_back(at + fwd * l.foot_length + turn.rotate(Vec3(0, -w.g.sole, 0)));
+      }
+      w.ankles.push_back(a), w.heels.push_back(h), w.toes.push_back(t);
+    });
+  };
+  test("footsteps: along a straight path every foot lands on its print, planted feet never slide, the first and last steps are short", [&] {
+    R146Steps w;
+    w.rig = create_rig(w.s, false, Vec3(0.0f));
+    GameObject *p = r146_path(w.s, {Vec3(0, 0, 0), Vec3(0, 0, 5)});
+    r146_walk(w, sample_curve(*p->curve(), p->world_matrix()));
+    /* Mid-stance (the foot flat): the ankle on the print. */
+    float miss = 0;
+    int landed = 0;
+    for (size_t i = 2; i + 1 < w.plan.prints.size(); i++) {
+      const steps::Plan::Print &pr = w.plan.prints[i];
+      float next = (float)w.frames;
+      for (size_t j = i + 1; j < w.plan.prints.size(); j++)
+        if (w.plan.prints[j].side == pr.side) { next = w.plan.prints[j].frame; break; }
+      const int mid = (int)std::lround(pr.frame + (next - pr.frame) * 0.3f);
+      if (mid >= (int)w.ankles.size()) continue;
+      miss = std::max(miss, length(w.ankles[(size_t)mid][(size_t)pr.side] - pr.pos)), landed++;
+    }
+    /* A planted foot's heel or toes still (as Walk Cycle's). */
+    float slide = 0;
+    for (const AnimationClip::Contact &k : w.clip.contacts) {
+      const size_t leg = k.bone == w.g.legs[0].lower->name ? 0 : 1, mid = (size_t)((k.from + k.to) * 0.5f);
+      if (mid >= w.ankles.size()) continue;
+      for (int f = (int)k.from; f <= (int)k.to && f < (int)w.ankles.size(); f++)
+        slide = std::max(slide, std::min(length(w.heels[(size_t)f][leg] - w.heels[mid][leg]), length(w.toes[(size_t)f][leg] - w.toes[mid][leg])));
+    }
+    std::vector<float> step;
+    for (size_t i = 2; i < w.plan.prints.size(); i++) step.push_back(w.plan.prints[i].pos.z - w.plan.prints[i - 2].pos.z);
+    const float first = step.front(), last = step.back(), middle = step[step.size() / 2];
+    std::printf("    %zu prints over %d frames: %d landed within %.3f mm; planted feet moved %.3f mm; steps first %.2f, middle %.2f, last %.2f m\n",
+                w.plan.prints.size(), w.frames, landed, miss * 1000.0f, slide * 1000.0f, first, middle, last);
+    CHECK(landed >= 6 && miss < 1e-3f && slide < 1e-3f);
+    CHECK(first < 0.7f * middle && last < 0.9f * middle && std::fabs(w.plan.prints.back().pos.z - 5.0f) < 0.01f);
+  });
+  test("footsteps: on a curve the inner foot takes the shorter steps and the feet never cross; box stairs put every print on a step, the body rising", [&] {
+    R146Steps w;
+    w.rig = create_rig(w.s, false, Vec3(0.0f));
+    /* A quarter circle of radius 2 turning left: the rig walks +Z with its right +X, so about (-2, 0, 0). */
+    std::vector<Vec3> arc;
+    for (int i = 0; i <= 16; i++) {
+      const float a = 3.14159265f * 0.5f * i / 16.0f;
+      arc.push_back(Vec3(2.0f * std::cos(a) - 2.0f, 0.0f, 2.0f * std::sin(a)));
+    }
+    GameObject *p = r146_path(w.s, arc);
+    r146_walk(w, sample_curve(*p->curve(), p->world_matrix()));
+    float inner = 0, outer = 0;
+    int ni = 0, no = 0, crossed = 0;
+    const int left = 0;  // (side 0: the left foot)
+    for (size_t i = 2; i < w.plan.prints.size(); i++) {
+      const steps::Plan::Print &a = w.plan.prints[i - 2], &b = w.plan.prints[i];
+      if (a.side != b.side) continue;
+      const float d = length(b.pos - a.pos);
+      if (b.side == left) inner += d, ni++;
+      else outer += d, no++;
+    }
+    for (const steps::Plan::Print &pr : w.plan.prints) {
+      const float r = length(Vec3(pr.pos.x + 2.0f, 0.0f, pr.pos.z));  // (from the turn's centre)
+      crossed += pr.side == left ? r > 2.0f : r < 2.0f;
+    }
+    inner /= std::max(1, ni), outer /= std::max(1, no);
+    std::printf("    a left turn: the inner (left) foot's steps %.2f m, the outer's %.2f m; prints on the wrong side %d\n", inner, outer, crossed);
+    CHECK(inner < outer * 0.95f && crossed == 0);
+    /* Stairs: six boxes, 15 cm rises and 40 cm goings, walked up along +Z. */
+    Editor ed;
+    r34_open(ed);
+    std::vector<float> tops;
+    for (int k = 0; k < 6; k++) {
+      ed.command("create Cube");
+      GameObject *c = ed.active_object_for_test();
+      const float h = 0.15f * (k + 1);
+      c->set_local_scale({2.0f, h, 0.4f});
+      c->set_world_position(Vec3(20.0f, h * 0.5f, 1.2f + 0.4f * k));
+      tops.push_back(h);
+    }
+    tops.push_back(0.0f);  // (the floor before the stairs)
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));  // (away from the sample scene's objects)
+    GameObject *path = r146_path(ed.scene(), {Vec3(20, 0, 0), Vec3(20, 0, 3.2f)});
+    ed.mark_changed_for_test("Stairs");
+    ed.command("assist on footsteps");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk path " + path->name);
+    ed.step_frame_headless();
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    int prints = 0, on_step = 0;
+    float highest = 0;
+    for (const auto &o : ed.scene().objects()) {
+      if (!o->get<Footprint>()) continue;
+      prints++;
+      const float ground = o->world_position().y - g.sole;
+      for (float t : tops) on_step += std::fabs(ground - t) < 1e-3f;
+      highest = std::max(highest, ground);
+    }
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *hy = clip ? clip->find("Hips", "Position", 1) : nullptr;
+    const float rise = hy && !hy->keys.empty() ? hy->keys.back().value - hy->keys.front().value : 0.0f;
+    std::printf("    stairs: %d prints, %d on a step's top or the floor, the highest at %.2f m; the hips rose %.2f m (%zu keys)\n", prints, on_step, highest, rise,
+                hy ? hy->keys.size() : (size_t)0);
+    CHECK(prints >= 8 && on_step == prints && highest > 0.6f && rise > 0.6f);
+  });
+  test("footsteps in the editor: refused while off; a print moved by hand survives Re-plan and Update walks it; one undo step; saved with the scene", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));  // (away from the sample scene's objects)
+    GameObject *path = ed.scene().create("Walkway");
+    Curve *cv = path->add<Curve>();
+    cv->type = 1;
+    cv->points.push_back({Vec3(20, 0, 0), 0.0f, 1.0f}), cv->points.push_back({Vec3(20, 0, 4), 0.0f, 1.0f});
+    ed.mark_changed_for_test("Add the rig and path");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk path Walkway");  // (off: refused)
+    auto count = [&] {
+      int n = 0;
+      for (const auto &o : ed.scene().objects()) n += o->get<Footprint>() != nullptr;
+      return n;
+    };
+    const bool refused = count() == 0 && !ed.anim_clip_for_test();
+    ed.command("assist on footsteps");
+    ed.command("walk path Walkway");
+    ed.step_frame_headless();
+    const int made = count();
+    /* A print moved 10 cm sideways by hand (selected: Update and Re-plan find the character from it). */
+    GameObject *moved = nullptr;
+    for (const auto &o : ed.scene().objects())
+      if (const Footprint *f = o->get<Footprint>(); f && f->side == 0 && f->frame > 20.0f && !moved) moved = o.get();
+    const std::string name = moved ? moved->name : "";
+    const Vec3 to = moved ? moved->world_position() + Vec3(0.1f, 0.0f, 0.0f) : Vec3();
+    if (moved) moved->set_world_position(to);
+    ed.mark_changed_for_test("Move a print");
+    ed.command("select " + name);
+    ed.step_frame_headless();
+    /* Before the Re-plan: the left foot's keys and every print's place (undo must bring back exactly these). */
+    auto foot_keys = [&] {
+      std::vector<float> v;
+      AnimationClipPtr c = ed.anim_clip_for_test();
+      if (const AnimTrack *t = c ? c->find("LeftFootIK", "Position", 0) : nullptr)
+        for (const auto &k : t->keys) v.push_back(k.value);
+      return v;
+    };
+    auto places = [&] {
+      std::vector<Vec3> v;
+      for (const auto &o : ed.scene().objects())
+        if (o->get<Footprint>()) v.push_back(o->world_position());
+      return v;
+    };
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    const std::vector<float> keys_before = foot_keys();
+    const std::vector<Vec3> places_before = places();
+    ed.command("select " + name);
+    ed.step_frame_headless();
+    ed.command("walk steps replan");
+    ed.step_frame_headless();
+    const bool replanned_keys = foot_keys() != keys_before;  // (the left foot now walks to the moved print)
+    GameObject *after = ed.scene().find_by_name(name);
+    const bool kept = after && length(after->world_position() - to) < 1e-4f;
+    /* The walk follows it: at that print's mid-stance the left ankle is over the moved print. */
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    float off = 1e9f;
+    if (after) {
+      const int f = (int)std::lround(after->get<Footprint>()->frame) + 6;  // (past the toes coming down: the foot flat)
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      if (clip) body::for_each_frame(ed.scene(), *rig, *clip, f, f, [&](int) { off = length(g.legs[0].foot->world_position() - to); });
+    }
+    /* Undo: the whole Re-plan in one step - the keys and every print as they were before it. */
+    ed.command("undo");
+    ed.step_frame_headless();
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    const std::vector<Vec3> places_after = places();
+    bool same = places_after.size() == places_before.size();
+    for (size_t i = 0; same && i < places_after.size(); i++) same = length(places_after[i] - places_before[i]) < 1e-5f;
+    const bool one_step = replanned_keys && same && foot_keys() == keys_before && count() == made;
+    /* Saved and loaded: the prints and their numbers. */
+    Scene back;
+    std::string error;
+    const bool loaded = load_scene_text(save_scene_text(ed.scene()), back, error);
+    int prints = 0;
+    float moved_planned = 0;
+    for (const auto &o : back.objects())
+      if (const Footprint *f = o->get<Footprint>()) {
+        prints++;
+        if (o->name == name) moved_planned = length(f->planned - to);
+      }
+    std::printf("    off: refused %s; %d prints made; the moved one kept by Re-plan: %s, the ankle %.1f mm from it; undone in one step: %s; "
+                "after save and load %d prints, the moved one still 'moved' (%.0f mm from where it was planned)\n",
+                refused ? "yes" : "no", made, kept ? "yes" : "no", off * 1000.0f, one_step ? "yes" : "no", prints, moved_planned * 1000.0f);
+    CHECK(refused && made >= 6 && kept && off < 0.01f && one_step);
+    CHECK(loaded && prints == made && std::fabs(moved_planned - 0.1f) < 1e-3f);
+  });
+  test("footsteps: a print dragged far is still reached; a print only turned is the animator's too; a faster style keeps the moved prints; two characters with one name refused", [&] {
+    /* Far: a print 0.8 m out to the side - the pelvis goes towards it, the foot lands on it. */
+    R146Steps w;
+    w.rig = create_rig(w.s, false, Vec3(0.0f));
+    GameObject *p = r146_path(w.s, {Vec3(0, 0, 0), Vec3(0, 0, 4)});
+    r146_walk(w, sample_curve(*p->curve(), p->world_matrix()));
+    steps::Plan far = w.plan;
+    size_t k = 0;
+    for (size_t i = 2; i < far.prints.size() && !k; i++)
+      if (far.prints[i].side == 0 && far.prints[i].frame > 30.0f) k = i;
+    far.prints[k].pos.x -= 0.8f;  // (the left foot's side: further out)
+    AnimationClip out;
+    std::string error;
+    const int frames = steps::walk(w.s, *w.rig, w.g, w.style, far, 30.0f, AnimationClip(), out, error);
+    float miss = 1e9f;
+    const int mid = (int)std::lround(far.prints[k].frame) + 6;
+    if (frames) body::for_each_frame(w.s, *w.rig, out, mid, mid, [&](int) { miss = length(w.g.legs[0].foot->world_position() - far.prints[k].pos); });
+    /* In the editor: one print only turned 30 degrees, another moved; then a faster style and Re-plan. */
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    GameObject *path = ed.scene().create("Walkway");
+    Curve *cv = path->add<Curve>();
+    cv->type = 1;
+    cv->points.push_back({Vec3(20, 0, 0), 0.0f, 1.0f}), cv->points.push_back({Vec3(20, 0, 5), 0.0f, 1.0f});
+    ed.mark_changed_for_test("Add the rig and path");
+    ed.command("assist on footsteps");
+    ed.command("assist on walk");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("walk path Walkway");
+    ed.step_frame_headless();
+    GameObject *turned = nullptr, *moved = nullptr;
+    for (const auto &o : ed.scene().objects()) {
+      const Footprint *f = o->get<Footprint>();
+      if (!f || f->frame < 20.0f) continue;
+      if (!turned && f->side == 1) turned = o.get();
+      else if (!moved && f->side == 0) moved = o.get();
+    }
+    const Quat turn = turned ? Quat::axis_angle(Vec3(0, 1, 0), 0.5236f) * turned->world_rotation() : Quat();
+    const Vec3 to = moved ? moved->world_position() + Vec3(-0.12f, 0.0f, 0.05f) : Vec3();
+    if (turned) turned->set_world_rotation(turn);
+    if (moved) moved->set_world_position(to);
+    ed.mark_changed_for_test("Turn and move prints");
+    ed.command("walk set speed 1.8");  // (a faster style: every frame moves)
+    ed.command("walk steps replan");
+    ed.step_frame_headless();
+    bool turn_kept = false, move_kept = false;
+    for (const auto &o : ed.scene().objects()) {
+      if (!o->get<Footprint>()) continue;
+      const Quat q = o->world_rotation();
+      turn_kept = turn_kept || std::fabs(q.x * turn.x + q.y * turn.y + q.z * turn.z + q.w * turn.w) > 0.9999f;
+      move_kept = move_kept || length(o->world_position() - to) < 1e-4f;
+    }
+    /* Two objects named as the character: refused, nothing made. */
+    Editor twin;
+    r34_open(twin);
+    GameObject *a = create_rig(twin.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    GameObject *b = create_rig(twin.scene(), false, Vec3(25.0f, 0.0f, 0.0f));
+    b->name = a->name;
+    GameObject *tp = twin.scene().create("Walkway");
+    tp->add<Curve>()->type = 1;
+    tp->curve()->points.push_back({Vec3(20, 0, 0), 0.0f, 1.0f}), tp->curve()->points.push_back({Vec3(20, 0, 4), 0.0f, 1.0f});
+    twin.mark_changed_for_test("Twins");
+    twin.command("assist on footsteps");
+    twin.command("select " + a->name);  // (the first of the two)
+    twin.step_frame_headless();
+    twin.command("walk path Walkway");
+    int twin_prints = 0;
+    for (const auto &o : twin.scene().objects()) twin_prints += o->get<Footprint>() != nullptr;
+    std::printf("    a print 0.8 m out: the foot lands %.1f mm from it; after a faster style and Re-plan the turned print kept: %s, the moved one: %s; "
+                "two characters named alike: %d prints made\n",
+                miss * 1000.0f, turn_kept ? "yes" : "no", move_kept ? "yes" : "no", twin_prints);
+    CHECK(frames && miss < 0.01f && turn_kept && move_kept && twin_prints == 0);
+  });
+  /* A lesson's Try-it run as Learn runs it: the commands before `caption`, one by one. */
+  auto r146_try = [](Editor &ed, const char *caption) {
+    std::string cmds;
+    for (int i = 0; i < lesson_count() && cmds.empty(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find(std::string("| ") + caption);
+      const size_t start = at == std::string::npos ? std::string::npos : body.rfind("! cmd:", at);
+      if (start != std::string::npos) cmds = body.substr(start + 6, at - start - 6);
+    }
+    size_t a = 0;
+    while (!cmds.empty() && a <= cmds.size()) {
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      ed.step_frame_headless();
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    return !cmds.empty();
+  };
+  test("learn: the Footsteps lesson's Try it switches the assistant on and walks a person along a path on its footprints", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const bool found = r146_try(ed, "A person walking along a path on its footprints");
+    int prints = 0;
+    for (const auto &o : ed.scene().objects()) prints += o->get<Footprint>() != nullptr;
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    the footsteps assistant %s; %d prints, %zu contacts in the clip\n", ed.assist_on(Editor::Assist::Footsteps) ? "on" : "off", prints,
+                clip ? clip->contacts.size() : (size_t)0);
+    CHECK(found && ed.assist_on(Editor::Assist::Footsteps) && prints >= 4 && clip && clip->contacts.size() >= 3);
+  });
+  /* ---------------------------------------------------------------- round 147: Locomotion in Play (task 0127) */
+  /* A person with Locomotion, played by hand: `keys` says which keys are down at each time; each frame the scene's
+   * components update (moving the object), Locomotion steps and IK solves, as the Play loop does. */
+  struct R147Play {
+    Scene *s = nullptr;
+    GameObject *rig = nullptr;
+    Locomotion *lc = nullptr;
+    GroundGrid ground;
+    float t = 0.0f, cost = 0.0f;
+    int frames = 0;
+  };
+  auto r147_start = [](R147Play &p, Scene &s, Vec3 at = Vec3(0.0f)) {
+    p.s = &s;
+    p.rig = create_rig(s, false, at);
+    p.lc = p.rig->add<Locomotion>();
+    p.ground = locomotion::ground_for(s);
+    PlayContext ctx;
+    s.start(ctx);
+  };
+  auto r147_run = [](R147Play &p, float seconds, const std::function<bool(int key)> &keys, const std::function<void()> &each = nullptr) {
+    const float dt = 1.0f / 60.0f;
+    for (int i = 0; i < (int)std::lround(seconds / dt); i++) {
+      PlayContext ctx;
+      ctx.dt = dt, ctx.time = p.t, ctx.key_down = keys;
+      p.s->update(ctx);
+      locomotion::step(*p.s, dt, p.ground);
+      solve_constraints(*p.s);
+      p.t += dt, p.cost += p.lc->cost_ms_, p.frames++;
+      if (each) each();
+    }
+  };
+  auto key_is = [](std::vector<int> down) { return [down](int k) { return std::find(down.begin(), down.end(), k) != down.end(); }; };
+  test("locomotion: W walks the person forward at the walk speed with planted feet that never slide, its stride the Walk Cycle's", [&] {
+    Locomotion::live = true;
+    Scene s;
+    R147Play p;
+    r147_start(p, s);
+    /* A planted foot: where it was when it landed, every frame it stays down. */
+    std::vector<Vec3> landed(2);
+    std::vector<uint8_t> was(2, 1);
+    std::vector<std::vector<float>> plants(2);
+    float slide = 0;
+    r147_run(p, 3.0f, key_is({platform::KEY_W}), [&] {
+      for (size_t i = 0; i < 2; i++) {
+        const bool down = p.lc->legs_[i].down;
+        const Vec3 a = p.lc->rig_.legs[i].foot->world_position();
+        if (down && !was[i]) landed[i] = a, plants[i].push_back(a.z);
+        else if (down && plants[i].size()) slide = std::max(slide, length(a - landed[i]));
+        was[i] = down;
+      }
+    });
+    const float went = p.rig->world_position().z;
+    float stride = 0;
+    int n = 0;
+    for (const auto &z : plants)
+      for (size_t k = 2; k < z.size(); k++) stride += z[k] - z[k - 1], n++;  // (from the second step: the first starts from standing)
+    stride /= std::max(1, n);
+    gait::Style w;
+    gait::preset("walk", p.lc->rig_, w);
+    w.speed = 1.4f / std::sqrt(p.lc->rig_.leg_length / 0.9f);
+    const float cycle = gait::cycle_of(p.lc->rig_, w).length;
+    std::printf("    3 s of W: %.2f m forward (%.2f expected), planted feet moved at most %.3f mm; a stride %.3f m, Walk Cycle's %.3f m; %.3f ms a frame\n",
+                went, 1.4f * (3.0f - 0.175f), slide * 1000.0f, stride, cycle, p.cost / p.frames);
+    CHECK(std::fabs(went - 1.4f * (3.0f - 0.175f)) < 0.05f && slide < 1e-3f && n >= 2 && std::fabs(stride / cycle - 1.0f) < 0.05f);
+    CHECK(p.cost / p.frames < 0.2f);
+    Locomotion::live = false;
+  });
+  test("locomotion: turning leans the body into the turn; letting go of W stops within a step, both feet down and still", [&] {
+    Locomotion::live = true;
+    Scene s;
+    R147Play p;
+    r147_start(p, s);
+    p.lc->turn_speed = 90.0f;
+    r147_run(p, 1.5f, key_is({platform::KEY_W, platform::KEY_SHIFT}));
+    float lean = 0;  // (the hips' up leaning towards the turn's inside - right, turning with D - in degrees)
+    r147_run(p, 1.0f, key_is({platform::KEY_W, platform::KEY_SHIFT, platform::KEY_D}), [&] {
+      const Vec3 up = p.lc->rig_.hips->world_rotation().rotate(Vec3(0, 1, 0)) , right = p.rig->world_rotation().rotate(Vec3(1, 0, 0));
+      lean = std::asin(std::max(-1.0f, std::min(1.0f, dot(up, right)))) * 57.29578f;
+    });
+    /* Let go: slowing at the acceleration (3.5 m/s at 4 m/s a second: 0.875 s), the step under way finished, then
+     * standing - within the slowing and one more step (a walk's cycle). */
+    const float released = p.t;
+    float stood = -1.0f;
+    r147_run(p, 2.5f, key_is({}), [&] {
+      if (stood < 0.0f && p.lc->speed_ == 0.0f && p.lc->legs_[0].down && p.lc->legs_[1].down) stood = p.t - released;
+    });
+    const Vec3 a0 = p.lc->rig_.legs[0].foot->world_position(), b0 = p.lc->rig_.legs[1].foot->world_position(), r0 = p.rig->world_position();
+    r147_run(p, 0.5f, key_is({}));
+    const float still = std::max(length(p.lc->rig_.legs[0].foot->world_position() - a0), length(p.lc->rig_.legs[1].foot->world_position() - b0));
+    gait::Style w;
+    gait::preset("walk", p.lc->rig_, w);
+    const float limit = 3.5f / 4.0f + gait::cycle_of(p.lc->rig_, w).period;
+    std::printf("    running in a right turn the hips lean %.1f degrees into it; let go, standing with both feet down after %.2f s (at most %.2f); "
+                "then the feet move %.3f mm in 0.5 s, the body %.3f mm\n",
+                lean, stood, limit, still * 1000.0f, length(p.rig->world_position() - r0) * 1000.0f);
+    CHECK(lean > 3.0f && stood > 0.0f && stood < limit && still < 1e-3f && length(p.rig->world_position() - r0) < 1e-3f);
+    /* Four legs: a dog walking (its feet never all down at once while it walks) stops too. */
+    Scene ds;
+    R147Play dog;
+    dog.s = &ds;
+    dog.rig = create_rig(ds, true, Vec3(0.0f));
+    dog.lc = dog.rig->add<Locomotion>();
+    PlayContext dctx;
+    ds.start(dctx);
+    r147_run(dog, 2.0f, key_is({platform::KEY_W}));
+    r147_run(dog, 2.5f, key_is({}));
+    bool all = true;
+    for (const Locomotion::Leg &l : dog.lc->legs_) all = all && l.down;
+    const float phase = dog.lc->phase_;
+    r147_run(dog, 0.5f, key_is({}));
+    std::printf("    a dog let go: all four feet down %s, its gait %s\n", all ? "yes" : "no", dog.lc->phase_ == phase ? "stopped" : "still stepping");
+    CHECK(dog.lc->legs_.size() == 4 && all && dog.lc->phase_ == phase);
+    Locomotion::live = false;
+  });
+  test("locomotion: up a ramp every foot lands on its surface; switched off (the assistant) the keys move nothing", [&] {
+    Locomotion::live = true;
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");  // (a 10 degree ramp, 8 m long, rising along +Z from z = 1)
+    GameObject *ramp = ed.active_object_for_test();
+    const float a = 10.0f * 3.14159265f / 180.0f;
+    ramp->set_local_scale({3.0f, 0.2f, 8.0f});
+    ramp->set_local_rotation(Quat::axis_angle(Vec3(1, 0, 0), -a));
+    ramp->set_world_position(Vec3(0.0f, 4.0f * std::sin(a) - 0.1f * std::cos(a), 1.0f + 4.0f * std::cos(a)));
+    ed.step_frame_headless();
+    R147Play p;
+    r147_start(p, ed.scene());
+    float worst = 0;
+    int landings = 0;
+    std::vector<uint8_t> was(2, 1);
+    r147_run(p, 4.0f, key_is({platform::KEY_W}), [&] {
+      for (size_t i = 0; i < 2; i++) {
+        const bool down = p.lc->legs_[i].down;
+        if (down && !was[i]) {
+          const Vec3 at = p.lc->legs_[i].plant;
+          SceneHit hit;
+          const bool on = scene_raycast(ed.scene(), at + Vec3(0, 1, 0), Vec3(0, -1, 0), 3.0f, hit, [&](const GameObject &g) { return ed.scene().is_ancestor(p.rig, &g) || &g == p.rig; });
+          if (on) worst = std::max(worst, std::fabs(at.y - p.lc->rig_.sole - hit.point.y)), landings++;  // (the ramp's: before it, no floor)
+        }
+        was[i] = down;
+      }
+    });
+    const float climbed = p.rig->world_position().y;
+    std::printf("    up the ramp: %d landings, each within %.1f mm of the surface under it; the body climbed %.2f m\n", landings, worst * 1000.0f, climbed);
+    CHECK(landings >= 6 && worst < 0.01f && climbed > 0.3f);
+    /* A prop in the hand: a script moves it and Locomotion leaves it be; destroyed in Play, nothing breaks. */
+    Scene ps;
+    R147Play q;
+    r147_start(q, ps);
+    GameObject *sword = ps.create("Sword", ps.find_by_name("LeftHand"));
+    r147_run(q, 0.5f, key_is({platform::KEY_W}));
+    sword->set_local_position(Vec3(0.0f, 0.3f, 0.0f));
+    r147_run(q, 0.2f, key_is({platform::KEY_W}));
+    const bool left_be = length(sword->local().position - Vec3(0.0f, 0.3f, 0.0f)) < 1e-6f;
+    ps.destroy(sword);
+    r147_run(q, 0.5f, key_is({platform::KEY_W}));
+    Locomotion::live = false;
+    /* Switched off, through the editor's Play: a script's wish moves nothing - not the object, not a bone. */
+    Editor eo;
+    r34_open(eo);
+    GameObject *person = create_rig(eo.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    person->add<Locomotion>();
+    const std::string who = person->name;
+    eo.mark_changed_for_test("A person with Locomotion");
+    eo.command("assist off locomotion");
+    eo.command("play");
+    GameObject *pr = eo.scene().find_by_name(who);
+    std::vector<std::pair<GameObject *, Transform>> before;
+    std::vector<GameObject *> stack{pr};
+    while (!stack.empty()) {
+      GameObject *g = stack.back();
+      stack.pop_back();
+      before.push_back({g, g->local()});
+      for (GameObject *c : g->children) stack.push_back(c);
+    }
+    if (Locomotion *l = pr->get<Locomotion>()) l->set_move(Vec3(0, 0, 1.4f));
+    for (int i = 0; i < 30; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      eo.step_frame_headless();
+    }
+    int changed = 0;
+    for (const auto &b : before)
+      changed += length(b.first->local().position - b.second.position) > 1e-6f || std::fabs(b.first->local().rotation.x * b.second.rotation.x + b.first->local().rotation.y * b.second.rotation.y + b.first->local().rotation.z * b.second.rotation.z + b.first->local().rotation.w * b.second.rotation.w) < 0.999999f;
+    eo.command("stop");
+    eo.step_frame_headless();
+    std::printf("    a prop the script moved left where it put it: %s (then destroyed in Play: no crash); the assistant off, in Play %d of %zu objects moved\n",
+                left_be ? "yes" : "no", changed, before.size());
+    CHECK(left_be && changed == 0);
+  });
+  test("learn: the Locomotion lesson's Try it gives a person Locomotion; in the editor's Play a script's set_move walks it, its legs stepping", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const bool found = r146_try(ed, "A person with Locomotion");
+    std::string name;
+    for (const auto &o : ed.scene().objects())
+      if (o->get<Locomotion>()) name = o->name;
+    const bool has = !name.empty();
+    ed.command("play");
+    Locomotion *lc = nullptr;
+    for (const auto &o : ed.scene().objects())
+      if (Locomotion *l = o->get<Locomotion>()) lc = l;
+    if (lc) lc->set_move(Vec3(0, 0, 1.4f));
+    float went = 0.0f;
+    int landings = 0;
+    bool was = true;
+    for (int i = 0; i < 400 && lc && (went < 1.0f || landings < 2); i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));  // (Play runs on the clock)
+      ed.step_frame_headless();
+      went = lc->owner->world_position().z;
+      if (!lc->legs_.empty()) {
+        if (lc->legs_[0].down && !was) landings++;
+        was = lc->legs_[0].down;
+      }
+    }
+    ed.command("stop");
+    ed.step_frame_headless();
+    GameObject *back = has ? ed.scene().find_by_name(name) : nullptr;  // (Stop puts the scene back as it was)
+    std::printf("    the locomotion assistant %s, the component on the person: %s; in Play it went %.2f m, the left foot landing %d times; after Stop back at %.2f\n",
+                ed.assist_on(Editor::Assist::Locomotion) ? "on" : "off", has ? "yes" : "no", went, landings, back ? back->world_position().z : -1.0f);
+    CHECK(found && has && ed.assist_on(Editor::Assist::Locomotion) && went >= 1.0f && landings >= 2);
+    Locomotion::live = false;
+  });
+  /* ---------------------------------------------------------------- round 149: the AI download (task 0129) */
+  /* The model's skeleton (tools/inbetween/cmu.py's, from the CMU data) and a stand-in for the network: the interpolation
+   * it is given, the hips lifted by `bump` metres mid-span (so the tests see the span made), counted. */
+  struct R149Fake : ai::Runtime {
+    float bump = 0.0f;
+    int calls = 0;
+    R149Fake() {
+      const float o[22][3] = {{0.000f, 0.000f, 0.000f}, {0.090f, -0.096f, 0.047f}, {0.135f, -0.371f, 0.000f}, {0.144f, -0.396f, 0.000f}, {0.010f, -0.026f, 0.110f},
+                              {-0.088f, -0.096f, 0.047f}, {-0.136f, -0.375f, 0.000f}, {-0.144f, -0.395f, 0.000f}, {-0.012f, -0.032f, 0.112f}, {0.000f, 0.000f, 0.000f},
+                              {0.000f, 0.114f, -0.008f}, {0.001f, 0.114f, 0.001f}, {0.001f, 0.115f, 0.005f}, {0.001f, 0.188f, -0.004f}, {0.001f, 0.115f, 0.005f},
+                              {0.181f, 0.067f, -0.006f}, {0.283f, 0.000f, 0.000f}, {0.189f, 0.000f, 0.000f}, {0.001f, 0.115f, 0.005f}, {-0.178f, 0.068f, -0.009f},
+                              {-0.287f, 0.000f, 0.000f}, {-0.189f, 0.000f, 0.000f}};
+      for (const auto &v : o) info.offsets.push_back(Vec3(v[0], v[1], v[2]));
+      info.parents = {-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12, 11, 14, 15, 16, 11, 18, 19, 20};
+      info.styles = {"walk", "run", "jump", "fall", "crawl", "combat", "acrobatic", "other"};
+      info.hidden = 4;
+    }
+    bool run(const std::vector<float> &frames, const std::vector<float> &known, int, int W, std::vector<float> &out, std::string &,
+             std::vector<float> *hidden) override {
+      calls++;
+      out = frames;
+      int first = -1, last = -1;
+      for (int t = 0; t < W; t++)
+        if (known[(size_t)t] == 0.0f) last = t, first = first < 0 ? t : first;
+      for (int t = first; first >= 0 && t <= last; t++) out[(size_t)t * ai::kFeatures + 1] += bump * std::sin(3.14159265f * (float)(t - first + 1) / (float)(last - first + 2));
+      if (!hidden) return true;
+      /* Its "last features": where each frame is in the span (enough for a fit to learn the lift away). */
+      hidden->assign((size_t)W * info.hidden, 0.0f);
+      for (int t = first; first >= 0 && t <= last; t++) {
+        const float u = (float)(t - first + 1) / (float)(last - first + 2);
+        float *h = &(*hidden)[(size_t)t * info.hidden];
+        h[0] = std::sin(3.14159265f * u), h[1] = u, h[2] = u * u, h[3] = 1.0f;
+      }
+      return true;
+    }
+  };
+  /* An archive of `files` (name, text) in `dir`, the platform's kind (zip on Windows), and its path. */
+  auto r149_archive = [](const std::string &dir, const std::vector<std::pair<std::string, std::string>> &files) {
+    const std::string src = fs::join(dir, "src");
+    fs::make_dirs(src);
+    for (const auto &f : files) fs::write_file(fs::join(src, f.first), f.second);
+    const std::string path = fs::join(dir, ai::archive_name());
+    std::vector<std::string> argv;
+#ifdef _WIN32
+    const char *root = std::getenv("SystemRoot");
+    argv = {fs::join(fs::join(root ? root : "C:\\Windows", "System32"), "tar.exe"), "-a", "-cf", path, "-C", src};
+#else
+    argv = {"tar", "-czf", path, "-C", src};
+#endif
+    for (const auto &f : files) argv.push_back(f.first);
+    sys::run_program(argv);
+    return path;
+  };
+  test("ai download: refused when it doesn't match its checksum; an install that can't run is removed again; without it, AI Inbetween says how to get it", [&] {
+    const std::string dir = fs::join(test_dir(), "r149");
+    const std::string install = fs::join(dir, "install");
+    set_env("BLENDITY_AI_DIR", install);
+    std::string e;
+    ai::remove(e);
+    const std::string archive = r149_archive(dir, {{"inbetween.json", "{\"offsets\": [], \"parents\": [], \"styles\": [\"walk\"], \"ctx\": 10}"},
+                                                   {"inbetween.onnx", "not a model"}});
+    fs::write_file(archive + ".sha256", std::string(64, '0') + "  " + ai::archive_name() + "\n");
+    Editor ed;
+    r34_open(ed);
+    ed.command("ai install " + archive);  // (the checksum beside it doesn't match: refused, nothing unpacked)
+    for (int i = 0; i < 2000 && ed.ai_chore_busy_for_test(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    const bool refused = !fs::exists(fs::join(install, "inbetween.onnx"));
+    fs::remove_file(archive + ".sha256");
+    ed.command("ai install " + archive);  // (no checksum: unpacked, but there is no ONNX Runtime in it - removed again)
+    for (int i = 0; i < 2000 && ed.ai_chore_busy_for_test(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    const bool removed = !fs::exists(fs::join(install, "inbetween.onnx")) && !ai::install_problem().empty();
+    ed.command("assist on ai");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("A rig");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("ai span 0 10");
+    const bool nothing = !ed.ai_busy_for_test() && !ed.ai_ghost_for_test();
+    std::printf("    a wrong checksum refused: %s; an install that can't run removed: %s; without it nothing made: %s ('%s')\n", refused ? "yes" : "no",
+                removed ? "yes" : "no", nothing ? "yes" : "no", ai::install_problem().c_str());
+    CHECK(refused && removed && nothing);
+    /* An archive holding anything but the download's own files: refused before anything is unpacked. */
+    const std::string odd = r149_archive(fs::join(dir, "odd"), {{"inbetween.onnx", "x"}, {"evil.txt", "not ours"}});
+    ed.command("ai install " + odd);
+    for (int i = 0; i < 2000 && ed.ai_chore_busy_for_test(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(2)), ed.step_frame_headless();
+    const bool foreign = !fs::exists(fs::join(install, "evil.txt")) && !fs::exists(fs::join(install + ".new", "evil.txt"));
+    std::printf("    an archive with a file of another kind refused, nothing unpacked: %s\n", foreign ? "yes" : "no");
+    CHECK(foreign);
+    set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));
+  });
+  /* With a real install (BLENDITY_AI_TEST_INSTALL: an archive tools/inbetween/package.py built, unpacked): the
+   * network loaded through ONNX Runtime, 60 frames timed. Skipped where there is none (CI). */
+  test("ai download: a real install loads ONNX Runtime and makes 60 frames in under 100 ms on the CPU (skipped without one)", [&] {
+    const char *real = std::getenv("BLENDITY_AI_TEST_INSTALL");
+    if (!real || !*real) return (void)std::printf("    (no BLENDITY_AI_TEST_INSTALL: skipped)\n");
+    set_env("BLENDITY_AI_DIR", real);
+    std::string e;
+    double ms = 0, best = 1e9;
+    bool ok = true;
+    for (int i = 0; i < 4 && ok; i++) ok = ai::probe(e, &ms), best = std::min(best, ms);  // (the first run warms up)
+    std::printf("    ONNX Runtime: %s, 60 frames in %.1f ms\n", ok ? "loaded" : e.c_str(), best);
+    CHECK(ok && best < 100.0);
+    set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));
+  });
+  /* ---------------------------------------------------------------- round 150: AI inbetweening in the Animation window (task 0130) */
+  /* A person with a clip: keys on the hips' height and a thigh's turn at frames 0, 10, 40 and 50. */
+  auto r150_person = [](Editor &ed) {
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    fs::remove_file(fs::join(fs::join(std::getenv("BLENDITY_PROJECT"), "Assets/AI"), rig->name + ".aihead"));  // (no fit from an earlier run)
+    ed.mark_changed_for_test("A person");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("anim new Span");
+    for (int f : {0, 10, 40, 50}) {
+      ed.command(strprintf("anim key Hips Position 1 %d %g", f, 0.95 + 0.02 * (f % 20 == 0)));
+      ed.command(strprintf("anim key LeftUpperLeg Rotation 0 %d %g", f, f == 10 ? 30.0 : f == 40 ? -20.0 : 0.0));
+    }
+    ed.step_frame_headless();
+    return rig;
+  };
+  auto r150_wait = [](Editor &ed) {
+    for (int i = 0; i < 400 && ed.ai_busy_for_test(); i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      ed.step_frame_headless();
+    }
+    ed.step_frame_headless();
+  };
+  test("ai inbetween: only the span between the keys is made - its ends meet them, every other key untouched; the same seed the same keys; Apply undone whole", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    fake->bump = 0.1f;
+    ed.ai_set_runtime_for_test(fake);
+    r150_person(ed);
+    ed.command("ai span 10 40");  // (off: refused)
+    const bool off = fake->calls == 0;
+    ed.command("assist on ai");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    AnimationClip before = *clip;
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    AnimationClip made = ed.ai_result_for_test();
+    const AnimTrack *hy = made.find("Hips", "Position", 1);
+    const AnimTrack *hy0 = before.find("Hips", "Position", 1);
+    /* Outside the span and its ends: the very same keys. */
+    bool outside = hy && hy0;
+    for (const AnimTrack &t0 : before.tracks) {
+      const AnimTrack *t = const_cast<AnimationClip &>(made).find(t0.path, t0.property, t0.axis);
+      for (const AnimKey &k : t0.keys)
+        if (k.frame <= 10.01f || k.frame >= 39.99f) outside = outside && t && t->key_at(k.frame) >= 0 && std::fabs(t->keys[(size_t)t->key_at(k.frame)].value - k.value) < 1e-5f;
+    }
+    int inside = 0;
+    for (int f = 11; hy && f < 40; f++) inside += hy->key_at((float)f) >= 0;
+    const float lift = hy && hy0 ? hy->sample(25.0f) - hy0->sample(25.0f) : 0.0f;
+    /* The same seed again: the same keys. */
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    AnimationClip second = ed.ai_result_for_test();
+    const AnimTrack *again = second.find("Hips", "Position", 1);
+    bool same = again && hy && again->keys.size() == hy->keys.size();
+    for (size_t i = 0; same && i < hy->keys.size(); i++) same = std::fabs(again->keys[i].value - hy->keys[i].value) < 1e-6f;
+    /* Apply, then undo: the clip as it was. */
+    ed.command("ai apply");
+    ed.step_frame_headless();
+    const bool applied = ed.anim_clip_for_test()->find("Hips", "Position", 1)->key_at(25.0f) >= 0;
+    ed.command("undo");
+    ed.step_frame_headless();
+    const AnimTrack *u = ed.anim_clip_for_test()->find("Hips", "Position", 1);
+    const bool undone = u && u->keys.size() == hy0->keys.size() && u->key_at(25.0f) < 0;
+    /* (0.1 of the model's metres, scaled to this rig's legs: about 0.11 m) */
+    std::printf("    off: refused %s; %d of 29 frames inside keyed, the hips %.3f m higher mid-span (the stand-in's lift); outside untouched: %s; "
+                "same seed same keys: %s; applied %s, undone whole %s\n",
+                off ? "yes" : "no", inside, lift, outside ? "yes" : "no", same ? "yes" : "no", applied ? "yes" : "no", undone ? "yes" : "no");
+    CHECK(off && inside == 29 && lift > 0.07f && lift < 0.15f && outside && same && applied && undone);
+  });
+  /* With the real model (BLENDITY_AI_TEST_INSTALL): a walk's middle 29 frames taken out and made again come closer to
+   * the walk than the keys' own interpolation does - the feet, hands and head. Skipped without one (CI). */
+  test("ai inbetween with the real model: a walk's middle made again is closer to the walk than the keys' interpolation (skipped without one)", [&] {
+    const char *real = std::getenv("BLENDITY_AI_TEST_INSTALL");
+    if (!real || !*real) return (void)std::printf("    (no BLENDITY_AI_TEST_INSTALL: skipped)\n");
+    set_env("BLENDITY_AI_DIR", real);
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(20.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("A person");
+    ed.command("select " + rig->name);
+    ed.step_frame_headless();
+    ed.command("assist on walk");
+    ed.command("assist on ai");
+    ed.command("anim new Walk");
+    ed.command("walk cycle walk 1.4 3 travel");
+    ed.step_frame_headless();
+    AnimationClip walk = *ed.anim_clip_for_test();
+    const int from = 20, to = 50;
+    /* The keys inside the span deleted: what the keys' interpolation gives there. */
+    AnimationClip holed = walk;
+    for (AnimTrack &t : holed.tracks)
+      t.keys.erase(std::remove_if(t.keys.begin(), t.keys.end(), [&](const AnimKey &k) { return k.frame > from + 0.01f && k.frame < to - 0.01f; }), t.keys.end());
+    *ed.anim_clip_for_test() = holed;
+    ed.anim_clip_for_test()->touch();
+    ed.command("ai style walk");
+    ed.command(strprintf("ai span %d %d", from, to));
+    r150_wait(ed);
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    std::vector<GameObject *> ends{g.legs[0].foot, g.legs[1].foot, g.arms[0].hand, g.arms[1].hand, g.head};
+    auto places = [&](const AnimationClip &c) {
+      std::vector<Vec3> p;
+      body::for_each_frame(ed.scene(), *rig, c, from + 1, to - 1, [&](int) {
+        for (GameObject *e : ends) p.push_back(e->world_position());
+      });
+      return p;
+    };
+    const std::vector<Vec3> truth = places(walk), lerp = places(holed), net = places(ed.ai_result_for_test());
+    double el = 0, en = 0;
+    for (size_t i = 0; i < truth.size() && i < net.size(); i++) el += length(lerp[i] - truth[i]), en += length(net[i] - truth[i]);
+    el /= std::max<size_t>(1, truth.size()), en /= std::max<size_t>(1, truth.size());
+    std::printf("    a walk's frames %d-%d made again: the feet, hands and head %.1f cm from the walk on average; the keys' interpolation %.1f cm\n",
+                from + 1, to - 1, en * 100.0, el * 100.0);
+    CHECK(ed.ai_ghost_for_test() && en < el);
+    set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));
+  });
+  test("ai inbetween: the curves outside the span keep their shape; a yaw keyed past 180 degrees is met without a spin; another character's clip never gets it", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    ed.ai_set_runtime_for_test(fake);
+    GameObject *rig = r150_person(ed);
+    ed.command("assist on ai");
+    /* Not a peak at the ends (an Auto slope there would follow the new keys inside), and the hips turning 200 degrees. */
+    for (int f : {0, 10, 40, 50}) ed.command(strprintf("anim key Hips Position 1 %d %g", f, 0.90 + 0.05 * f / 10.0 * (f > 10 ? 0.5 : 1.0)));
+    ed.command("anim key Hips Rotation 1 10 0");
+    ed.command("anim key Hips Rotation 1 40 200");
+    ed.step_frame_headless();
+    AnimationClip before = *ed.anim_clip_for_test();
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    AnimationClip made = ed.ai_result_for_test();
+    const AnimTrack *b = before.find("Hips", "Position", 1), *a = made.find("Hips", "Position", 1);
+    float outside = 0.0f;
+    for (float f : {2.5f, 5.0f, 7.5f, 42.5f, 45.0f, 47.5f}) outside = std::max(outside, std::fabs(a->sample(f) - b->sample(f)));
+    const AnimTrack *yaw = made.find("Hips", "Rotation", 1);
+    float jump = 0.0f;
+    for (float f = 10.0f; f < 40.0f; f += 1.0f) jump = std::max(jump, std::fabs(yaw->sample(f + 1.0f) - yaw->sample(f)));
+    /* Another character selected: Apply refused, its clip untouched. */
+    GameObject *other = create_rig(ed.scene(), false, Vec3(25.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("Another");
+    ed.command("select " + other->name);
+    ed.step_frame_headless();
+    ed.command("anim new Other");
+    ed.command("anim key Hips Position 1 0 0.9");
+    ed.step_frame_headless();
+    const size_t tracks = ed.anim_clip_for_test()->tracks.size();
+    ed.command("ai apply");
+    ed.step_frame_headless();
+    const bool kept = ed.anim_clip_for_test()->tracks.size() == tracks && ed.anim_clip_for_test()->name != before.name;
+    std::printf("    outside the span the hips' curve moved at most %.6f m; the yaw's largest step inside %.1f degrees (0 to 200 over 30 frames); "
+                "another character's clip untouched by Apply: %s\n", outside, jump, kept ? "yes" : "no");
+    CHECK(outside < 1e-4f && jump < 12.0f && kept);
+    (void)rig;
+  });
+  test("ai inbetween: refused for four legs, a span past the clip's end, and an answer that isn't numbers", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    ed.ai_set_runtime_for_test(fake);
+    r150_person(ed);
+    ed.command("assist on ai");
+    ed.command("ai span 40 400");
+    r150_wait(ed);
+    const bool past = !ed.ai_ghost_for_test() && fake->calls == 0;
+    fake->bump = std::numeric_limits<float>::quiet_NaN();
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    const bool nan = !ed.ai_ghost_for_test() && fake->calls == 1;
+    Editor dog_ed;
+    dog_ed.ai_set_runtime_for_test(std::make_shared<R149Fake>());
+    r34_open(dog_ed);
+    GameObject *dog = create_rig(dog_ed.scene(), true, Vec3(20.0f, 0.0f, 0.0f));
+    dog_ed.mark_changed_for_test("A dog");
+    dog_ed.command("select " + dog->name);
+    dog_ed.step_frame_headless();
+    dog_ed.command("anim new Dog");
+    dog_ed.command("anim key Hips Position 1 0 0.5");
+    dog_ed.command("anim key Hips Position 1 20 0.5");
+    dog_ed.command("assist on ai");
+    dog_ed.command("ai span 0 20");
+    r150_wait(dog_ed);
+    const bool four = !dog_ed.ai_ghost_for_test() && !dog_ed.ai_busy_for_test();
+    std::printf("    refused: a span past the end %s, a NaN answer %s, a four-legged rig %s\n", past ? "yes" : "no", nan ? "yes" : "no", four ? "yes" : "no");
+    CHECK(past && nan && four);
+  });
+  test("ai inbetween: a person's pose goes to the model's skeleton and back unchanged (mirrored, faced, scaled, the rest poses aligned)", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    ed.ai_set_runtime_for_test(fake);
+    GameObject *rig = r150_person(ed);
+    ed.command("assist on ai");
+    /* Both ends one pose (frame 10's: the thigh turned 30 degrees): what the stand-in hands back (that pose
+     * throughout) must come out as exactly that pose on every made frame. */
+    ed.command("anim key LeftUpperLeg Rotation 0 40 30");
+    ed.command("anim key Hips Position 1 40 0.95");
+    ed.step_frame_headless();
+    ed.command("ai span 10 40");
+    r150_wait(ed);
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    std::vector<std::pair<GameObject *, Quat>> at10;
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    body::for_each_frame(ed.scene(), *rig, *clip, 10, 10, [&](int) {
+      for (GameObject *b : {g.hips, g.legs[0].upper, g.legs[0].lower, g.legs[1].upper, g.spine.empty() ? g.hips : g.spine[0], g.arms[0].upper})
+        at10.push_back({b, b->world_rotation()});
+    });
+    float worst = 0.0f;
+    AnimationClip made = ed.ai_result_for_test();
+    body::for_each_frame(ed.scene(), *rig, made, 25, 25, [&](int) {
+      for (const auto &b : at10) {
+        const Quat d = b.first->world_rotation() * b.second.conjugate();
+        worst = std::max(worst, 2.0f * std::acos(std::min(1.0f, std::fabs(d.w))) * 57.29578f);
+      }
+    });
+    std::printf("    the pose through the model's skeleton and back: at most %.3f degrees off\n", worst);
+    CHECK(ed.ai_ghost_for_test() && worst < 0.5f);
+  });
+  /* ---------------------------------------------------------------- round 151: fine-tuning on your own clips (task 0131) */
+  test("ai fine-tune: fitted to the character's clips it misses them less; saved beside the project; off, the shipped model again; Stop keeps the last fit", [&] {
+    Editor ed;
+    auto fake = std::make_shared<R149Fake>();
+    fake->bump = 0.1f;  // (the stand-in's habit the clips don't have: a fit should learn it away)
+    ed.ai_set_runtime_for_test(fake);
+    GameObject *rig = r150_person(ed);
+    ed.command("assist on ai");
+    ed.command("assist on walk");
+    ed.command("anim new Walk");
+    ed.command("walk cycle walk 1.4 3 travel");  // (a second clip of this person: a walk)
+    ed.step_frame_headless();
+    auto four_keys = [&] {  // (r150_person's keys, in the current clip)
+      for (int f : {0, 10, 40, 50}) {
+        ed.command("anim key Hips Position 1 " + std::to_string(f) + (f % 20 == 0 ? " 0.97" : " 0.95"));
+        ed.command("anim key LeftUpperLeg Rotation 0 " + std::to_string(f) + (f == 10 ? " 30" : f == 40 ? " -20" : " 0"));
+      }
+      ed.step_frame_headless();
+    };
+    auto wait_tune = [&] {
+      for (int i = 0; i < 2000 && ed.ai_tuning_for_test(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ed.step_frame_headless();
+      }
+    };
+    /* A span made by the shipped model first (the stand-in's lift), then the fit, then the span again with it and
+     * without: off, exactly the shipped model's answer. */
+    auto lift = [&] {
+      ed.command("ai span 10 40");
+      r150_wait(ed);
+      AnimationClip made = ed.ai_result_for_test();
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      const AnimTrack *a = made.find("Hips", "Position", 1), *b = clip ? clip->find("Hips", "Position", 1) : nullptr;
+      return a && b ? a->sample(25.0f) - b->sample(25.0f) : 99.0f;
+    };
+    ed.command("anim new Check");
+    four_keys();
+    const float shipped = lift();
+    ed.command("ai finetune");
+    wait_tune();
+    const ai::Head fitted = ed.ai_head_for_test();
+    const std::string file = fs::join(fs::join(std::getenv("BLENDITY_PROJECT"), "Assets/AI"), rig->name + ".aihead");
+    const bool saved = fs::exists(file);
+    const float with = lift();
+    ed.command("ai finetune off");
+    const float without = lift();
+    ed.command("ai finetune on");
+    /* Stop at once: the fit already made stays. */
+    std::string text0;
+    fs::read_file(file, text0);
+    ed.command("ai finetune");
+    ed.command("ai finetune stop");
+    wait_tune();
+    std::string text1;
+    fs::read_file(file, text1);
+    std::printf("    fitted on %d windows: their RMS error %.5f before, %.5f after; saved: %s; a made span's lift %.4f m by the shipped model, %.4f m with "
+                "the fit, %.4f m with it off; stopped at once, the last fit kept: %s\n",
+                fitted.windows, fitted.before, fitted.after, saved ? "yes" : "no", shipped, with, without, text0 == text1 && ed.ai_head_for_test().valid() ? "yes" : "no");
+    CHECK(fitted.valid() && fitted.windows > 20 && fitted.after < fitted.before && saved);
+    CHECK(std::fabs(without - shipped) < 1e-6f && std::fabs(with - shipped) > 1e-4f && text0 == text1 && ed.ai_head_for_test().valid());
+    fs::remove_file(file);  // (the next run starts without a fit)
+  });
+  /* ---------------------------------------------------------------- round 152: written up (task 0132) */
+  test("learn: the automatic walking lesson switches its three tools on; the AI inbetweening lesson asks for a span (and, not installed, says how to get it)", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const bool walking = r146_try(ed, "Switch the three walking tools on and list the assistants");
+    const bool three = ed.assist_on(Editor::Assist::Walk) && ed.assist_on(Editor::Assist::Footsteps) && ed.assist_on(Editor::Assist::Locomotion);
+    Editor ai_ed;
+    ai_ed.init_headless(1400, 900);
+    const bool found = r146_try(ai_ed, "A person with two keys 40 frames apart");
+    AnimationClipPtr clip = ai_ed.anim_clip_for_test();
+    const AnimTrack *hy = clip ? clip->find("Hips", "Position", 1) : nullptr;
+    std::printf("    walking lesson: the three tools on %s; AI lesson: the switch %s, %zu keys to fill between, a span made without the download: %s\n",
+                three ? "yes" : "no", ai_ed.assist_on(Editor::Assist::Ai) ? "on" : "off", hy ? hy->keys.size() : (size_t)0,
+                ai_ed.ai_ghost_for_test() || ai_ed.ai_busy_for_test() ? "yes" : "no");
+    CHECK(walking && three && found && ai_ed.assist_on(Editor::Assist::Ai) && hy && hy->keys.size() == 2 && !ai_ed.ai_ghost_for_test() && !ai_ed.ai_busy_for_test());
+    Locomotion::live = false;
   });
 }
