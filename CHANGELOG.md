@@ -2,6 +2,86 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-18 (round 155): shape keys (task 0135, ADR 0047)
+
+**Asked:** round 154's MMD question: its faces, and VRM's and many FBX faces, are shape keys.
+
+**Added**
+- **Shape keys** (blend shapes, morph targets, vertex morphs): named offsets on a mesh, weighted per renderer.
+  - The MeshRenderer's BlendShape sliders, animatable as `MeshRenderer.BlendShape/<name>`.
+  - Added to the basis before every modifier (the skin bends an expression with the head), on the fast deform path,
+    so an animated face doesn't rebuild the mesh.
+  - Saved with the scene (sparsely), the weights by their exact names.
+  - Carried through edits that add or renumber vertices (subdivide, triangulate, extrude), as vertex groups are.
+  - Edit Mode shows the basis being edited. Apply Modifiers refuses a mesh with keys, as Blender does, rather than
+    adding them twice.
+- **Imports:** FBX blend shapes and glTF morph targets with their names and values.
+- **Console:** `shape list | add <name> [amount] | set <name> <weight> | remove <name>`.
+- **Learn:** "Shape keys: faces and morphs".
+
+**Checked**
+- New tests (round 155):
+  - a weight of 0.5 adds exactly half (0 error), the mesh itself when none is in use;
+  - saved and loaded; a clip's track at frame 5 of 10 gives 0.5;
+  - a key on a bone turned 90 degrees turns with it (1e-7);
+  - Blender's FBX and GLB keys, the 0.5 m lift and the value 0.3 come in;
+  - the lesson's Try-it;
+  - a changing weight deforms the same mesh again (no copy per frame); Edit Mode's cage is the basis;
+  - Apply Modifiers refused with keys;
+  - keys kept through a triangulate and a subdivide, every old vertex with its offset (0 error);
+  - "Smile Left" and "Smile_Left" saved apart; a damaged key line (a count past any integer, an index past the mesh)
+    loads without harm.
+- **Fixed while checking:** the views keyed their pictures on the meshes without the shape keys' weights, so after
+  `shape set` the Scene view could show the shape from before (render-cache verify mode found it, in the lesson's
+  Try-it). `GameObject::evaluated_keys` now mixes them in, as `evaluated_mesh` does.
+- Unit checks: Windows 10,907, 0 failed (841 tests); render-cache verify mode: one stale picture (above), and after
+  the fix 10,908, 0 failed, 0 stale pictures. Linux with libraries: 10,643, 0 failed. Sanitizer build: 10,521,
+  0 failed, no reports. `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`,
+  `pushpull`, `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-18 (round 154): materials made and applied on import (task 0134, ADR 0047)
+
+**Asked:** "When importing external fbx models, can the program auto create a material and apply it. Furthermore,
+make the program be able to handle mmd models as well. Feel free to implement other rigged character formats as
+needed." The user chose full MMD support, VRM, FBX/glTF animations, BVH and Collada, materials as .mat assets, and
+synthetic test files (tasks 0134-0142).
+
+**Added**
+- **Every import makes `.mat` assets** in `Assets/Materials/<model>/`, applied to the model. An edited one is kept on
+  re-import.
+- **Textures:**
+  - copied into `Assets/Textures/<model>/`, including the ones packed inside an FBX (they were dropped);
+  - a link to another machine's path found by name beside the model, in its `.fbm`, `textures` or `images` folder;
+  - a bare material given the texture set beside it by name (`Body_BaseColor`, `T_Body_N`, `_ORM`...).
+- **Maps:** gloss, smoothness and packed maps (glTF's metallic-roughness, which wasn't read at all, Unity's
+  metallic-smoothness, Unreal's ORM) are split into the maps Blendity reads.
+- **Materials:** every mesh gets one; FBX transparency and double-sided are read.
+- **Two models of one name** (every Sketchfab download is `scene.gltf`) get folders of their own
+  (`Materials/scene 2/`); importing the same one again reuses its folder. A texture or embedded image sharing a name
+  with another gets its own file.
+- **Matching by name is careful:** a single-letter suffix (`_d`, `_n`, `_r`) counts only in a set of two maps or more
+  (`Hand_R.png` is not roughness); a folder's only set goes only to materials the import made, never over a file's
+  own flat colours.
+- **File > Import** from outside the project copies the model in, as dropping it does. The console has
+  `import <file>`.
+- **The FBX exporter's Embed Textures:** the images go inside the file, as Blender's do.
+- **Learn:** "Importing models: their materials made for you".
+
+**Checked**
+- New tests (round 154):
+  - Blender's FBX with embedded textures comes in textured (red 204);
+  - its GLB's packed map split exactly: roughness 64, metallic 255;
+  - a moved link found, a texture set matched by name, a gloss map inverted (63);
+  - every STL mesh gets a material;
+  - Blendity's embedded FBX reads back with its image deleted;
+  - `Skin.mat` made and used, and an edit to it kept on re-import;
+  - two models called `r154twin.obj` imported into two folders, each its own texture (red 255, blue), the first
+    imported again into its own;
+  - flat Red and Blue kept beside an unrelated texture; an `.mtl` in a subfolder finds its texture there;
+  - a packed map split once for every material using it; two embedded `diffuse.png` kept apart;
+  - the tests' import cache in a scratch home.
+- Checked with round 155's chain (see its entry).
+
 ## 2026-10-18 (round 153): MoonRay's image fills in while it renders
 
 **Asked:** "Why does MoonRay doesn't seem to render?" It did: a 1280x720 frame at 128 samples takes about a minute,

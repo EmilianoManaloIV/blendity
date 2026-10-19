@@ -17,8 +17,9 @@ bool model_extension_supported(const std::string &ext) {
   return ext == ".obj" || ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".stl" || ext == ".ply" || ext == ".usda";
 }
 
-bool import_model(const std::string &path, ImportResult &out) {
-  std::string ext = fs::extension(path);
+namespace {
+bool import_by_format(const std::string &path, ImportResult &out) {
+  const std::string ext = fs::extension(path);
   if (ext == ".obj") return import_obj_file(path, out);
   if (ext == ".fbx") return import_fbx_file(path, out);
   if (ext == ".glb" || ext == ".gltf") return import_gltf_file(path, out);
@@ -27,6 +28,14 @@ bool import_model(const std::string &path, ImportResult &out) {
   if (ext == ".usda" || ext == ".usd") return import_usda_file(path, out);
   out.error = "unsupported model format " + ext;
   return false;
+}
+}  // namespace
+
+bool import_model(const std::string &path, ImportResult &out) {
+  out.source = path;
+  if (!import_by_format(path, out)) return false;
+  complete_materials(out);  // (task 0134: every mesh a material; texture sets found by name)
+  return true;
 }
 
 /* ===================================================================== */
@@ -67,11 +76,12 @@ std::string mtl_map_path(const std::string &args) {
 
 TextureRef texture_ref(const std::string &dir, const std::string &file, bool non_color, ImportResult &out) {
   if (file.empty()) return {};
-  std::string f = file;
-  for (char &c : f)
-    if (c == '\\') c = '/';
-  std::string abs = fs::exists(f) ? f : fs::join(dir, f);
-  if (!fs::exists(abs)) abs = fs::join(dir, fs::filename(f));  // common: absolute path from another machine
+  if (out.source.empty()) out.source = fs::join(dir, "model");  // (a reader called on its own)
+  /* Relative to the file that links it first (an .mtl in a subfolder), else found: the link, beside the model, its .fbm
+   * or textures folder. */
+  const std::string beside = fs::join(dir, file);
+  const bool absolute = !file.empty() && (file[0] == '/' || file[0] == '\\' || (file.size() > 1 && file[1] == ':'));
+  const std::string abs = !absolute && fs::exists(beside) ? beside : find_texture(out, file);
   out.textures.push_back(abs);
   return TextureRef{abs, non_color};
 }
@@ -291,7 +301,28 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
 
 static std::string ustr(const ufbx_string &s) { return std::string(s.data, s.length); }
 
+/* A blend-shape channel's full shape as a shape key (task 0135): offsets mirrored and through the geometry transform,
+ * like the vertices; named without Maya's "blendShape1." prefix. No name: nothing to make. */
+static ShapeKey fbx_shape_key(const ufbx_blend_deformer *bd, const ufbx_blend_channel *ch, const ufbx_matrix &g, size_t verts) {
+  const ufbx_blend_shape *sh = ch->target_shape ? ch->target_shape : ch->keyframes.count ? ch->keyframes.data[ch->keyframes.count - 1].shape : nullptr;
+  if (!sh) return {};
+  ShapeKey k;
+  k.name = ustr(ch->name).empty() ? ustr(sh->name) : ustr(ch->name);
+  const std::string prefix = ustr(bd->name) + ".";
+  if (k.name.size() > prefix.size() && k.name.compare(0, prefix.size(), prefix) == 0) k.name = k.name.substr(prefix.size());
+  k.delta.assign(verts, Vec3(0.0f));
+  for (size_t oi = 0; oi < sh->num_offsets && oi < sh->offset_vertices.count && oi < sh->position_offsets.count; oi++) {
+    const uint32_t v = sh->offset_vertices.data[oi];
+    const ufbx_vec3 d = sh->position_offsets.data[oi];
+    if (v >= k.delta.size()) continue;
+    k.delta[v] = {-(float)(g.m00 * d.x + g.m01 * d.y + g.m02 * d.z), (float)(g.m10 * d.x + g.m11 * d.y + g.m12 * d.z),
+                  (float)(g.m20 * d.x + g.m21 * d.y + g.m22 * d.z)};
+  }
+  return k;
+}
+
 bool import_fbx_file(const std::string &path, ImportResult &out) {
+  if (out.source.empty()) out.source = path;
   ufbx_load_opts opts{};
   /* ufbx brings any file to right-handed Y-up (Z-up Blender files stand up);
    * then X is mirrored here, which is exactly what Unity's importer does (and
@@ -322,6 +353,13 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
       std::string f = ustr(mp.texture->filename);
       std::string abs = ustr(mp.texture->absolute_filename);
       std::string rel = ustr(mp.texture->relative_filename);
+      /* Embedded in the file (Blender's Embed Textures, Mixamo's downloads): written out, used from there. */
+      const ufbx_blob &content = mp.texture->content;
+      const std::string inside = save_embedded(!rel.empty() ? rel : !f.empty() ? f : ustr(mp.texture->name) + ".png", content.data, content.size, out);
+      if (!inside.empty()) {
+        out.textures.push_back(inside);
+        return TextureRef{inside, non_color};
+      }
       std::string pick = !abs.empty() && fs::exists(abs) ? abs : (!rel.empty() ? fs::join(dir, rel) : f);
       return texture_ref(dir, pick, non_color, out);
     };
@@ -332,6 +370,10 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
     m->base_map = texfile(fm->pbr.base_color, false);
     if (m->base_map.empty()) m->base_map = texfile(fm->fbx.diffuse_color, false);
     m->roughness_map = texfile(fm->pbr.roughness, true);
+    if (!m->roughness_map.empty() && fm->features.roughness_as_glossiness.enabled) {  // (a gloss map: inverted into roughness)
+      const std::string inv = derive_channel(m->roughness_map.path, 0, true, "rough", out);
+      if (!inv.empty()) m->roughness_map.path = inv, out.textures.push_back(inv);
+    }
     m->metallic_map = texfile(fm->pbr.metalness, true);
     m->normal_map = texfile(fm->fbx.normal_map, true);
     m->emission_map = texfile(fm->fbx.emission_color, false);
@@ -339,6 +381,11 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
       color(fm->fbx.emission_color, m->emission);
       m->emission_strength = (float)fm->fbx.emission_factor.value_real;
     }
+    if (fm->pbr.opacity.has_value && fm->pbr.opacity.value_real < 0.999) {  // (FBX transparency, as Blender reads it)
+      m->alpha = clampf((float)fm->pbr.opacity.value_real, 0, 1);
+      m->surface = (int)MaterialSurface::Transparent;
+    }
+    if (fm->features.double_sided.enabled) m->double_sided = true;
     mats[fm] = m;
     out.materials.push_back(m);
   }
@@ -407,6 +454,15 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
         int slot = fi < fm->face_material.count ? (int)fm->face_material.data[fi] : 0;
         m->add_face(fv.data(), fv.size(), has_uv ? fuv.data() : nullptr, slot);
       }
+      /* Blend shapes (task 0135): each channel a shape key, its weight onto the renderer. */
+      for (size_t bi = 0; bi < fm->blend_deformers.count; bi++)
+        for (size_t ci = 0; ci < fm->blend_deformers.data[bi]->channels.count; ci++) {
+          const ufbx_blend_channel *ch = fm->blend_deformers.data[bi]->channels.data[ci];
+          ShapeKey k = fbx_shape_key(fm->blend_deformers.data[bi], ch, g, m->vert_count());
+          if (k.name.empty() || m->find_shape(k.name) >= 0) continue;
+          node.shape_weights.push_back({k.name, (float)ch->weight});
+          m->shape_keys.push_back(std::move(k));
+        }
       /* A skin (task 0047): a vertex group per cluster, named after its bone's node. */
       for (size_t si = 0; si < fm->skin_deformers.count; si++) {
         const ufbx_skin_deformer *sk = fm->skin_deformers.data[si];
@@ -521,6 +577,7 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
       g->add<MeshFilter>()->mesh = n.mesh;
       auto *mr = g->add<MeshRenderer>();
       mr->materials = n.materials;
+      mr->shape_weights = n.shape_weights;
       if (mr->materials.empty()) mr->materials.push_back(make_material(n.name, Vec3(0.8f)));
     }
     made[i] = g;

@@ -2888,6 +2888,14 @@ void Editor::mesh_op(const std::string &op) {
       continue;
     }
     if (op == "apply_modifiers") {
+      bool modified = false;
+      for (const auto &c : g->components) modified = modified || c->is_modifier();
+      if (!modified) continue;
+      /* Blender's rule: shape keys are offsets of this mesh's vertices, which a modifier's result doesn't share. */
+      if (!mf->mesh->shape_keys.empty()) {
+        Log::warn("Apply Modifiers: '%s' has shape keys (remove them first: shape remove <name>)", g->name.c_str());
+        continue;
+      }
       const Mesh *ev = g->evaluated_mesh();
       if (ev == mf->mesh.get()) continue;
       mf->mesh = std::make_shared<Mesh>(*ev);
@@ -3220,7 +3228,13 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "spring") return spring_command(t);
   if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)
   if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
+  if (c == "import" && t.size() > 1) {  // import <model file>: as dropped onto the window (copied into Assets)
+    std::string p;
+    for (size_t i = 1; i < t.size(); i++) p += (i > 1 ? " " : "") + t[i];
+    return import_model_file(p, true);
+  }
   if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
+  if (c == "shape") return shape_command(t);        // shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135)
   if (c == "walk") return walk_command(t);          // walk cycle | set | save | load | presets (task 0125)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
   if (c == "feel") {  // feel <Unity|Unreal|Blender|Maya>: keys and Scene view navigation together (task 0063)
@@ -4564,6 +4578,7 @@ void Editor::carry_vertex_groups(const Scene &before) {
     const GameObject *old = before.find(g.id);
     const MeshFilter *of = old ? old->mesh_filter() : nullptr;
     const Mesh *om = of && of->mesh && of->mesh.get() != mf->mesh.get() ? of->mesh.get() : nullptr;
+    carry_shape_keys(mf->mesh, om);
     /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
      * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
     if (mf->mesh->groups_fit()) return;
@@ -4573,6 +4588,17 @@ void Editor::carry_vertex_groups(const Scene &before) {
       for (VertexGroup &vg : m.vertex_groups) vg.weights.resize(m.vert_count(), 0.0f);  // nothing to carry from: fit the sizes
     m.touch();
   });
+}
+
+/* Shape keys (task 0135) after an edit: no operator carries them, so any edit that renumbered the vertices (even to
+ * the same count: a delete and an add) gets them from the mesh before, by position. A move keeps them as they are. */
+void Editor::carry_shape_keys(MeshPtr &mesh, const Mesh *before) {
+  if (!before || before->shape_keys.empty()) return;
+  /* The same faces on the same vertices: the edit moved vertices or changed the keys themselves (shape add, remove). */
+  if (mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before) && meshops::shape_keys_fit(*mesh)) return;
+  Mesh &m = *mesh_make_mutable(mesh);
+  meshops::transfer_shape_keys(*before, m);
+  m.touch();
 }
 
 bool Editor::vgroup_op(const std::string &verb, const std::string &name_in, const std::string &arg2, float weight) {

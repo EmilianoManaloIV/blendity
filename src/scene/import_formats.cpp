@@ -92,6 +92,8 @@ void weld_exact(Mesh &m) {
       bool same = true;
       for (const VertexGroup &g : m.vertex_groups)
         if (g.weights.size() == m.vert_count() && g.weights[i] != g.weights[first[k]]) same = false;
+      for (const ShapeKey &s : m.shape_keys)  // (and with the same shape keys: a mouth's corners must part)
+        if (s.delta.size() == m.vert_count() && !(s.delta[i] == s.delta[first[k]])) same = false;
       if (same) {
         found = k;
         break;
@@ -118,12 +120,20 @@ void weld_exact(Mesh &m) {
       if (!set[remap[i]]) w[remap[i]] = g.weights[i], set[remap[i]] = 1;
     g.weights = std::move(w);
   }
+  std::vector<ShapeKey> shapes = m.shape_keys;  // (renumbered as the vertices: a welded vertex keeps the first copy's)
+  for (ShapeKey &s : shapes) {
+    std::vector<Vec3> d(kept.size(), Vec3(0.0f));
+    for (size_t i = 0; i < remap.size() && s.delta.size() == m.vert_count(); i++)
+      if (first[remap[i]] == i) d[remap[i]] = s.delta[i];
+    s.delta = std::move(d);
+  }
   m.positions = kept;
   for (uint32_t &v : m.corner_verts) v = remap[v];
   /* Triangles that collapsed (degenerate in the file) would break topology tools. */
   Mesh clean;
   clean.positions = m.positions;
   clean.vertex_groups = std::move(groups);
+  clean.shape_keys = std::move(shapes);
   clean.smooth = m.smooth;
   clean.smooth_angle = m.smooth_angle;
   clean.name = m.name;
@@ -184,6 +194,7 @@ std::string uri_decode(const std::string &s) {
 /* ===================================================================== */
 
 bool import_gltf_file(const std::string &path, ImportResult &out) {
+  if (out.source.empty()) out.source = path;
   std::string data;
   if (!fs::read_file(path, data)) {
     out.error = "cannot read " + path;
@@ -316,6 +327,13 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     m->metallic = clampf((float)pbr["metallicFactor"].number(1.0), 0, 1);
     m->roughness = clampf((float)pbr["roughnessFactor"].number(1.0), 0, 1);
     m->base_map = texture(pbr["baseColorTexture"], false);
+    /* glTF packs roughness in green and metallic in blue; Blendity reads each map's red: split into two (task 0134). */
+    const TextureRef mr = texture(pbr["metallicRoughnessTexture"], true);
+    if (!mr.empty()) {
+      const std::string rough = derive_channel(mr.path, 1, false, "rough", out), metal = derive_channel(mr.path, 2, false, "metal", out);
+      if (!rough.empty()) m->roughness_map = TextureRef{rough, true}, out.textures.push_back(rough);
+      if (!metal.empty()) m->metallic_map = TextureRef{metal, true}, out.textures.push_back(metal);
+    }
     m->normal_map = texture(jm["normalTexture"], true);
     m->emission_map = texture(jm["emissiveTexture"], false);
     if (jm["emissiveFactor"].size() >= 3) {
@@ -393,6 +411,22 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
             }
       }
       for (VertexGroup &vg : m->vertex_groups) vg.weights.resize(m->vert_count(), 0.0f);
+      /* Morph targets (task 0135): the k-th target's POSITION offsets into shape key k, named by the mesh's
+       * extras.targetNames (Blender writes them), mirrored like the vertices. */
+      const Json &targets = pr["targets"];
+      for (size_t ti = 0; ti < targets.size(); ti++) {
+        if (m->shape_keys.size() <= ti) {
+          const Json &names = jm["extras"]["targetNames"];
+          m->shape_keys.push_back({ti < names.size() && !names[ti].str.empty() ? names[ti].str : "Key " + std::to_string(ti + 1), {}});
+        }
+        ShapeKey &k = m->shape_keys[ti];
+        k.delta.resize(m->vert_count(), Vec3(0.0f));
+        int dc = 0;
+        const std::vector<float> d = read_accessor(targets[ti]["POSITION"].integer(), dc);
+        if (dc == 3 && d.size() >= nv * 3)
+          for (size_t i = 0; i < nv; i++) k.delta[base + i] = from_y_up({d[i * 3], d[i * 3 + 1], d[i * 3 + 2]});
+      }
+      for (ShapeKey &k : m->shape_keys) k.delta.resize(m->vert_count(), Vec3(0.0f));
       int slot = (int)slots.size();
       const int mi = pr["material"].integer();
       MaterialPtr mp = mi >= 0 && mi < (int)mats.size() ? mats[(size_t)mi] : nullptr;
@@ -459,6 +493,9 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     if (mi >= 0 && mi < (int)meshes.size()) {
       node.mesh = meshes[(size_t)mi];
       node.materials = mesh_mats[(size_t)mi];
+      /* The morph weights: the node's, else the mesh's defaults (task 0135). */
+      const Json &w = n["weights"].size() ? n["weights"] : doc["meshes"][(size_t)mi]["weights"];
+      for (size_t k = 0; k < node.mesh->shape_keys.size() && k < w.size(); k++) node.shape_weights.push_back({node.mesh->shape_keys[k].name, (float)w[k].number()});
     }
     node_index[(size_t)ni] = (int)out.nodes.size();
     out.nodes.push_back(std::move(node));

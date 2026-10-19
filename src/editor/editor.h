@@ -1325,6 +1325,7 @@ class Editor {
   /* After an edit (at the undo commit): meshes whose vertex count changed get their groups back from the snapshot
    * before the edit, by position (ADR 0024). */
   void carry_vertex_groups(const Scene &before);
+  void carry_shape_keys(MeshPtr &mesh, const Mesh *before);
   /* Weight Paint mode (task 0046, weight_paint.cpp). */
   bool set_weight_paint(bool on);
   bool wp_update(const Recti &view);  // the brush owns the mouse
@@ -1827,6 +1828,14 @@ class Editor {
   const std::vector<std::string> &image_assets();
   std::vector<MaterialPtr> scene_materials();
   void import_model_file(const std::string &path, bool copy_into_assets);
+  size_t import_material_assets(ImportResult &r, const std::string &model);
+  bool inside_assets(const std::string &path) const;
+  void shape_command(const std::vector<std::string> &t);
+  std::string copy_model_into_assets(const std::string &path);
+  std::string import_folder(const std::vector<std::string> &sources, const std::string &stem);
+  bool import_folder_matches(const std::string &dir, const std::vector<std::string> &sources) const;
+  bool import_folder_reused(const std::vector<std::string> &sources, const std::string &stem) const;
+  void copy_import_textures(const ImportResult &r, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map);
   void assign_texture_to_selection(const std::string &asset_path);
   void assign_material_to_faces(int slot);
   void spawn_stress_grid(int count, const std::string &kind);

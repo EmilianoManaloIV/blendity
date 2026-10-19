@@ -12,6 +12,29 @@
 
 namespace bl {
 
+namespace {
+/* A file name from a material or model name: letters, digits, spaces, - _ . ( ) kept, anything else _. */
+std::string safe_file_name(const std::string &name) {
+  std::string s;
+  for (char c : name) s += std::isalnum((unsigned char)c) || c == ' ' || c == '-' || c == '_' || c == '.' || c == '(' || c == ')' || (unsigned char)c >= 0x80 ? c : '_';
+  while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
+  return s.empty() ? std::string("Material") : s;
+}
+
+bool same_file_content(const std::string &a, const std::string &b) {
+  std::string x, y;
+  return fs::read_file(a, x) && fs::read_file(b, y) && x == y;
+}
+
+/* `dir/name`, or `dir/name 2.ext`... when another file of that name is there already. */
+std::string free_name(const std::string &dir, const std::string &file, const std::vector<std::string> &taken) {
+  std::string p = fs::join(dir, file);
+  for (int k = 2; fs::exists(p) || std::find(taken.begin(), taken.end(), p) != taken.end(); k++)
+    p = fs::join(dir, fs::stem(file) + " " + std::to_string(k) + fs::extension(file));
+  return p;
+}
+}  // namespace
+
 const std::vector<std::string> &Editor::image_assets() {
   if (ui_.time - image_assets_time_ < 3.0) return image_assets_;
   image_assets_time_ = ui_.time;
@@ -47,28 +70,15 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
     Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
     return;
   }
-  /* Unity copies imported files into Assets: model -> Assets/Meshes,
-   * referenced textures -> Assets/Textures, and materials point at the copies. */
+  /* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
+   * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
+   * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). */
   std::unordered_map<std::string, std::string> tex_map;
-  if (copy_into_assets) {
-    std::string mesh_dir = fs::join(assets_dir_, "Meshes"), tex_dir = fs::join(assets_dir_, "Textures");
-    fs::make_dirs(mesh_dir);
-    std::string dst = fs::join(mesh_dir, fs::filename(path));
-    if (fs::normalize(dst) != fs::normalize(path)) fs::copy_file(path, dst);
-    std::string ext = fs::extension(path);
-    if (ext == ".obj" || ext == ".gltf") {
-      /* Bring the .mtl (OBJ) or the .bin buffer (glTF) along too. */
-      std::string side = fs::join(fs::parent(path), fs::stem(path) + (ext == ".obj" ? ".mtl" : ".bin"));
-      if (fs::exists(side)) fs::copy_file(side, fs::join(mesh_dir, fs::filename(side)));
-    }
-    for (const std::string &tp : r.textures) {
-      if (!fs::exists(tp) || tex_map.count(tp)) continue;
-      fs::make_dirs(tex_dir);
-      std::string td = fs::join(tex_dir, fs::filename(tp));
-      if (fs::normalize(td) != fs::normalize(tp)) fs::copy_file(tp, td);
-      tex_map[tp] = make_asset_relative(td);
-    }
-  }
+  std::vector<std::string> sources{path};
+  if (copy_into_assets || !inside_assets(path)) sources.push_back(copy_model_into_assets(path));
+  const bool again = import_folder_reused(sources, fs::stem(path));
+  const std::string model = import_folder(sources, fs::stem(path));
+  copy_import_textures(r, model, again, tex_map);
   auto fix = [&](TextureRef &ref) {
     if (ref.empty()) return;
     auto it = tex_map.find(ref.path);
@@ -81,6 +91,7 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
       fix(*ref);
     }
   }
+  const size_t made = import_material_assets(r, model);
   GameObject *root = instantiate_import(*scene_, r, fs::stem(path), nullptr);
   if (root) {
     root->set_world_position(cam_.pivot);
@@ -91,7 +102,162 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   image_assets_time_ = -100;
   invalidate_material_textures();
   Log::info("Imported %s: %s in %.0f ms", fs::filename(path).c_str(), r.summary.c_str(), t.ms());
+  if (made) Log::info("Materials: %zu in Assets/Materials/%s (an edited one is kept when the model is imported again)", made, model.c_str());
+  for (const std::string &n : r.notes) Log::info("Import: %s", n.c_str());
   if (missing) Log::warn("%zu texture reference(s) could not be found next to the model", missing);
+}
+
+/* shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135): the selected object's shape keys.
+ * add makes a key pushing every vertex out along its normal by `amount` (0.1 m): an inflate morph to animate. */
+void Editor::shape_command(const std::vector<std::string> &t) {
+  GameObject *g = active_object();
+  MeshFilter *mf = g ? g->mesh_filter() : nullptr;
+  if (!mf || !mf->mesh) return Log::warn("shape: select an object with a mesh");
+  const std::string sub = t.size() > 1 ? to_lower(t[1]) : "list";
+  MeshRenderer *mr = g->get<MeshRenderer>();
+  if (sub == "list") {
+    if (mf->mesh->shape_keys.empty()) return Log::info("%s has no shape keys (shape add <name>)", g->name.c_str());
+    for (const ShapeKey &k : mf->mesh->shape_keys)
+      Log::info("  %-24s %.3f%s", k.name.c_str(), mr ? mr->shape_weight(k.name) : 0.0f, k.delta.size() == mf->mesh->vert_count() ? "" : " (the mesh was edited since: off)");
+    return;
+  }
+  if (t.size() < 3) return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  const std::string name = t[2];
+  if (sub == "set") {
+    if (!mr) mr = g->add<MeshRenderer>();
+    mr->set_shape_weight(name, t.size() > 3 ? (float)std::atof(t[3].c_str()) : 1.0f);
+    return mark_changed("Shape Key Weight");
+  }
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  if (sub == "remove") {
+    const int i = m.find_shape(name);
+    if (i < 0) return Log::warn("shape: no key '%s'", name.c_str());
+    m.shape_keys.erase(m.shape_keys.begin() + i);
+    m.touch();
+    return mark_changed("Remove Shape Key");
+  }
+  if (sub != "add") return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  if (m.find_shape(name) >= 0) return Log::warn("shape: '%s' is there already", name.c_str());
+  const float amount = t.size() > 3 ? (float)std::atof(t[3].c_str()) : 0.1f;
+  const std::vector<Vec3> n = meshops::vertex_normals(m);
+  ShapeKey k{name, std::vector<Vec3>(m.vert_count(), Vec3(0.0f))};
+  for (size_t i = 0; i < k.delta.size() && i < n.size(); i++) k.delta[i] = n[i] * amount;
+  m.shape_keys.push_back(std::move(k));
+  m.touch();
+  if (!mr) g->add<MeshRenderer>();
+  mark_changed("Add Shape Key");
+  Log::info("Shape key '%s' on %s: its weight in the Inspector (MeshRenderer > BlendShape/%s), animatable", name.c_str(), g->name.c_str(), name.c_str());
+}
+
+/* A file in the project's Assets already. */
+bool Editor::inside_assets(const std::string &path) const {
+  const std::string a = to_lower(fs::normalize(assets_dir_)), p = to_lower(fs::normalize(path));
+  return p.size() > a.size() && p.compare(0, a.size(), a) == 0 && (p[a.size()] == '/' || p[a.size()] == '\\');
+}
+
+/* The model file into Assets/Meshes, with its .mtl (OBJ) or .bin (glTF) beside it; where it went. A different model
+ * of the same name there already (every Sketchfab download is scene.gltf) puts this one in a folder of its own,
+ * Meshes/<name> 2/, so the file still finds its .bin by the name it gives it. */
+std::string Editor::copy_model_into_assets(const std::string &path) {
+  std::string mesh_dir = fs::join(assets_dir_, "Meshes");
+  std::string dst = fs::join(mesh_dir, fs::filename(path));
+  for (int k = 2; fs::exists(dst) && fs::normalize(dst) != fs::normalize(path) && !same_file_content(dst, path); k++) {
+    mesh_dir = fs::join(fs::join(assets_dir_, "Meshes"), fs::stem(path) + " " + std::to_string(k));
+    dst = fs::join(mesh_dir, fs::filename(path));
+  }
+  fs::make_dirs(mesh_dir);
+  if (fs::normalize(dst) != fs::normalize(path)) fs::copy_file(path, dst);
+  const std::string ext = fs::extension(path);
+  if (ext != ".obj" && ext != ".gltf") return dst;
+  const std::string side = fs::join(fs::parent(path), fs::stem(path) + (ext == ".obj" ? ".mtl" : ".bin"));
+  if (fs::exists(side)) fs::copy_file(side, fs::join(mesh_dir, fs::filename(side)));
+  return dst;
+}
+
+/* The folder name under Assets/Materials and Assets/Textures for a model's import: its name, or "<name> 2"... when
+ * that folder came from another model of the same name. Each folder lists the files it was imported from
+ * (.import-source), so importing the same model again reuses its folder - and the .mat files edited since. */
+std::string Editor::import_folder(const std::vector<std::string> &sources, const std::string &stem) {
+  const std::string base = safe_file_name(stem);
+  std::string name = base;
+  for (int k = 2; k < 1000; k++) {
+    const std::string dir = fs::join(fs::join(assets_dir_, "Materials"), name);
+    if (!fs::exists(dir) || import_folder_matches(dir, sources)) break;
+    name = base + " " + std::to_string(k);
+  }
+  const std::string dir = fs::join(fs::join(assets_dir_, "Materials"), name), marker = fs::join(dir, ".import-source");
+  std::string text;
+  fs::read_file(marker, text);
+  for (const std::string &s : sources)
+    if (!import_folder_matches(dir, {s})) text += to_lower(fs::normalize(s)) + "\n";
+  fs::make_dirs(dir);
+  fs::write_file(marker, text);
+  return name;
+}
+
+bool Editor::import_folder_matches(const std::string &dir, const std::vector<std::string> &sources) const {
+  std::string text;
+  if (!fs::read_file(fs::join(dir, ".import-source"), text)) return false;
+  for (const std::string &s : sources)
+    if (("\n" + text).find("\n" + to_lower(fs::normalize(s)) + "\n") != std::string::npos) return true;
+  return false;
+}
+
+/* Whether this model was imported before (its folder is there): its textures are kept as they are then. */
+bool Editor::import_folder_reused(const std::vector<std::string> &sources, const std::string &stem) const {
+  const std::string base = safe_file_name(stem);
+  for (int k = 1; k < 1000; k++) {
+    const std::string dir = fs::join(fs::join(assets_dir_, "Materials"), k == 1 ? base : base + " " + std::to_string(k));
+    if (!fs::exists(dir)) return false;
+    if (import_folder_matches(dir, sources)) return true;
+  }
+  return false;
+}
+
+/* Textures outside the project into Assets/Textures/<folder>/: two of one name get two files ("body 2.png"); a texture
+ * from an earlier import of this model is kept (it may have been edited, as the .mat files are). */
+void Editor::copy_import_textures(const ImportResult &r, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map) {
+  const std::string tex_dir = fs::join(fs::join(assets_dir_, "Textures"), folder);
+  std::vector<std::string> taken;
+  for (const std::string &tp : r.textures) {
+    if (!fs::exists(tp) || tex_map.count(tp) || inside_assets(tp)) continue;
+    fs::make_dirs(tex_dir);
+    const std::string same = fs::join(tex_dir, fs::filename(tp));
+    const bool keep = again && fs::exists(same) && std::find(taken.begin(), taken.end(), same) == taken.end();
+    const std::string td = keep || (fs::exists(same) && same_file_content(same, tp)) ? same : free_name(tex_dir, fs::filename(tp), taken);
+    if (td != same || !fs::exists(td)) fs::copy_file(tp, td);
+    taken.push_back(td);
+    tex_map[tp] = make_asset_relative(td);
+  }
+}
+
+/* Unity's Extract Materials, on import (task 0134): every material of the model as Assets/Materials/<model>/<name>.mat,
+ * the model's renderers using those assets. A .mat already there (an earlier import, maybe edited since) is used as it
+ * is, never overwritten. The count made or reused. */
+size_t Editor::import_material_assets(ImportResult &r, const std::string &model) {
+  std::unordered_map<const Material *, MaterialPtr> asset_of;
+  std::unordered_set<std::string> names;
+  for (const MaterialPtr &m : r.materials) {
+    if (!m || asset_of.count(m.get())) continue;
+    std::string base = safe_file_name(m->name.empty() ? model : m->name), name = base;
+    for (int k = 2; names.count(to_lower(name)); k++) name = base + " " + std::to_string(k);  // (two of one name)
+    names.insert(to_lower(name));
+    const std::string rel = "Assets/Materials/" + safe_file_name(model) + "/" + name + ".mat";
+    MaterialPtr a = fs::exists(resolve_asset_path(rel)) ? material_asset(rel) : nullptr;
+    if (!a) {
+      fs::make_dirs(fs::parent(resolve_asset_path(rel)));
+      a = create_material_asset(*m, rel);
+    }
+    if (a) asset_of[m.get()] = a;
+  }
+  auto swap = [&](MaterialPtr &m) {
+    const auto it = m ? asset_of.find(m.get()) : asset_of.end();
+    if (it != asset_of.end()) m = it->second;
+  };
+  for (ImportedNode &n : r.nodes)
+    for (MaterialPtr &m : n.materials) swap(m);
+  for (MaterialPtr &m : r.materials) swap(m);
+  return asset_of.size();
 }
 
 void Editor::assign_texture_to_selection(const std::string &asset_path) {

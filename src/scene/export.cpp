@@ -86,6 +86,10 @@ void ExportOptions::reflect(Reflector &r) {
       r.help("Texels per side of the baked images (256 to 4096).");
     }
   }
+  if (materials && f == ExportFormat::FBX && !ascii) {
+    r.field("Embed Textures", embed_textures);
+    r.help("The texture images inside the .fbx, so the file carries everything (Blender: Path Mode Copy, Embed Textures).");
+  }
   if (f == ExportFormat::STL || f == ExportFormat::PLY || f == ExportFormat::FBX) {
     r.field("ASCII", ascii);
     r.help(f == ExportFormat::FBX ? "Text FBX. Unity, Autodesk tools and Blender 5.2's new FBX importer read it; Blender's classic\n"
@@ -417,7 +421,7 @@ namespace {
 /* One FBX record: a name, typed properties and child records - the
  * document model both encodings share (Blender: io_scene_fbx/encode_bin.py). */
 struct FbxProp {
-  char type = 'I';  // I L D S, or arrays i d
+  char type = 'I';  // I L D S R (raw bytes), or arrays i d
   int64_t i = 0;
   double d = 0;
   std::string s;
@@ -444,6 +448,7 @@ struct FbxNode {
   FbxNode &L(int64_t v) { prop('L').i = v; return *this; }
   FbxNode &D(double v) { prop('D').d = v; return *this; }
   FbxNode &S(const std::string &v) { prop('S').s = v; return *this; }
+  FbxNode &R(const std::string &bytes) { prop('R').s = bytes; return *this; }
   FbxNode &ia(std::vector<int32_t> v) { prop('i').ia = std::move(v); return *this; }
   FbxNode &da(std::vector<double> v) { prop('d').da = std::move(v); return *this; }
   /* Properties70 entry: P: "name", "type", "label", "flags", values... */
@@ -469,6 +474,7 @@ void fbx_write_binary(std::string &out, const FbxNode &n, bool is_last) {
       case 'L': put<int64_t>(out, p.i); break;
       case 'D': put<double>(out, p.d); break;
       case 'S':
+      case 'R':
         put<uint32_t>(out, (uint32_t)p.s.size());
         out += p.s;
         break;
@@ -748,6 +754,8 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
     v.add("UseMipMap").I(0);
     v.add("Filename").S(t.abs);
     v.add("RelativeFilename").S(t.rel);
+    std::string bytes;  // (Embed Textures: the image inside the file, as Blender writes it; binary only)
+    if (o.embed_textures && !o.ascii && fs::read_file(t.abs, bytes)) v.add("Content").R(bytes);
     FbxNode &x = objs.add("Texture").L(t.tex).S(fbx_name(t.name, "Texture")).S("");
     x.add("Type").S("TextureVideoClip");
     x.add("Version").I(202);

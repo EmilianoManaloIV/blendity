@@ -154,6 +154,20 @@ void MeshRenderer::reflect(Reflector &r) {
   r.field("Show in Renders", show_in_renders);
   r.help("Off: the Game view and rendered images leave the object out, as Blender does for Boolean cutters\n"
          "(Object > Visibility > Renders).");
+  /* Shape keys (task 0135): files and hashes keep the weights as a list (whatever order the components come in, a
+   * key's exact name); the Inspector and clips get a slider per key of the mesh (BlendShape/<name>). */
+  if (r.serializing()) r.weight_list("Shape Weights", shape_weights);
+  const MeshFilter *mf = owner && !r.serializing() ? owner->mesh_filter() : nullptr;
+  const Mesh *mesh = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  for (size_t i = 0; mesh && i < mesh->shape_keys.size(); i++) {
+    const std::string field = "BlendShape/" + mesh->shape_keys[i].name;
+    float w = shape_weight(mesh->shape_keys[i].name);
+    const float before = w;
+    r.field(field.c_str(), w, 0.01f, 0.0f, 1.0f);
+    if (i == 0) r.help("The mesh's shape keys (blend shapes, morphs): how much of each is added to the basis, before the skin\n"
+                       "deforms it. Animatable (Add Property > MeshRenderer > BlendShape/...).");
+    if (w != before) set_shape_weight(mesh->shape_keys[i].name, w);
+  }
   r.field("Contribute GI", contribute_gi);
   r.help("Part of baked lighting (Unity: Static > Contribute Global Illumination). It bounces light onto the\n"
          "others and gets a lightmap when you press Generate Lighting (Window > Lighting). Leave it off for\n"
@@ -1581,6 +1595,7 @@ namespace {
 struct HashReflector : Reflector {
   bool all_fields() const override { return true; }
   bool hashing() const override { return true; }
+  bool serializing() const override { return true; }
   uint64_t h = 1469598103934665603ull;
   /* A byte at a time, and it stays that way: the lights' and the world's hashes are part of
    * lightmap_scene_key, saved with every bake (a new formula would mark them all out of date). */
@@ -1609,6 +1624,12 @@ struct HashReflector : Reflector {
       const void *p = m.get();
       mix(&p, sizeof(p));
       if (m) mix(&m->version, 8);
+    }
+  }
+  void weight_list(const char *, std::vector<std::pair<std::string, float>> &list) override {
+    for (auto &[name, w] : list) {
+      mix(name.data(), name.size());
+      mix(&w, 4);
     }
   }
 };
@@ -1766,6 +1787,9 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
     mix(out[kind], mf->mesh->version);
     mix(out[kind], (uint64_t)kind);
   }
+  /* The shape keys' weights (task 0135): renders and the viewport show them, Edit Mode's cage the basis. */
+  if (const uint64_t sh = shape_key_hash(*mf->mesh, get<MeshRenderer>()))
+    for (int kind = 0; kind < 2; kind++) mix(out[kind], sh);
   for (auto &c : components) {
     if (!c->is_modifier()) continue;
     const bool on[3] = {c->enabled, c->show_in_render, c->enabled && c->show_in_editmode};
@@ -1832,6 +1856,11 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
+  /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
+   * Edit Mode's cage (kind 2) shows the basis it edits, as Blender does. */
+  const MeshRenderer *shaping = kind == 2 ? nullptr : get<MeshRenderer>();
+  const uint64_t shape_hash = shape_key_hash(*mf->mesh, shaping);
+  const bool shaped = shape_hash != 0;
   auto on = [kind](const Component &c) {
     return c.is_modifier() && (kind == 1 ? c.show_in_render : c.enabled && (kind == 0 || c.show_in_editmode));
   };
@@ -1851,7 +1880,12 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     mix(c.modifier_dependency_hash());
     if (i + 1 == split) head_key = key;
   }
-  if (!any) return mf->mesh.get();
+  /* The weights are part of the head when a modifier runs before the tail; otherwise the keys are added on the
+   * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
+  if (shaped && any_head) head_key = (head_key ^ shape_hash) * 1099511628211ull;
+  if (shaped) mix(shape_hash);
+  if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
+  if (!any && !shaped) return mf->mesh.get();
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
@@ -1859,6 +1893,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   };
   if (!any_tail) {
     auto m = std::make_shared<Mesh>(*mf->mesh);
+    apply_shape_keys(*mf->mesh, shaping, m->positions);
+    m->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
     run(*m, 0, components.size());
     m->touch();
     eval_mesh_[kind] = m;
@@ -1871,6 +1907,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   if (any_head) {
     if (!eval_head_[kind] || eval_head_key_[kind] != head_key) {
       auto h = std::make_shared<Mesh>(*mf->mesh);
+      apply_shape_keys(*mf->mesh, shaping, h->positions);
+      h->shape_keys.clear();
       run(*h, 0, split);
       h->touch();
       eval_head_[kind] = h;
@@ -1889,6 +1927,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
     const uint64_t v = m->version;
     m->positions = head->positions;
+    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions);  // (no head: the basis shaped here)
     m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
     run(*m, split, components.size());
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
@@ -1899,6 +1938,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   }
   else {
     m = std::make_shared<Mesh>(*head);
+    if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions);
+    m->shape_keys.clear();
     run(*m, split, components.size());
     m->touch();
   }

@@ -79,6 +79,9 @@ struct Reflector {
   virtual void texture(const char *name, TextureRef &t) { text(name, t.path); }
   /* Material slots (Unity MeshRenderer.materials / Blender material slots). */
   virtual void material_list(const char *, std::vector<MaterialPtr> &) {}
+  /* Named weights (a renderer's shape keys, task 0135): files and hashing see the whole list, by exact name; the
+   * Inspector and clips see a slider per key of the mesh instead. */
+  virtual void weight_list(const char *, std::vector<std::pair<std::string, float>> &) {}
   /* Another material by its .mat asset path (an axis material's Top / Side / Bottom, ADR 0018). Files, undo and
    * hashing see the path as text; the Inspector draws a material picker. */
   virtual void material_ref(const char *name, std::string &asset_path) { text(name, asset_path); }
@@ -97,6 +100,8 @@ struct Reflector {
   /* True for the change-detection hash (render caches): fields that only change what is drawn over a picture
    * (a camera's composition guides) leave it alone, so toggling them doesn't re-render. */
   virtual bool hashing() const { return false; }
+  /* True for files and hashes, which read and write lists whole (weight_list) rather than one field per entry. */
+  virtual bool serializing() const { return false; }
 };
 
 struct PlayContext {
@@ -202,6 +207,11 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
   float scale_in_lightmap = 1.0f;
   bool generate_lightmap_uvs = true;
   int receive_gi = 0;  // a Contribute GI object's indirect light: 0 Lightmaps, 1 Light Probes (others always probes)
+  /* The mesh's shape keys' weights (task 0135), by name (Unity: the Skinned Mesh Renderer's BlendShapes; Blender: the
+   * keys' values): 0 none of it, 1 all; animatable as MeshRenderer.BlendShape/<name>. */
+  std::vector<std::pair<std::string, float>> shape_weights;
+  float shape_weight(const std::string &name) const;
+  void set_shape_weight(const std::string &name, float w);
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();

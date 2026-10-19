@@ -12,6 +12,7 @@
 #include "mesh.h"
 #include "scene.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,7 @@ struct ImportedNode {
    * own space and Blendity's axes. It becomes the Bone's rest; the saved transform stays as the pose. */
   bool has_bind = false;
   Mat4 bind_world;
+  std::vector<std::pair<std::string, float>> shape_weights;  // the mesh's shape keys' weights as the file left them (task 0135)
 };
 
 /* A file's right-handed matrix in Blendity's axes: the X mirror on both sides (S M S, S = diag(-1, 1, 1, 1)). */
@@ -54,6 +56,14 @@ struct ImportResult {
   std::vector<ImportedSkin> skins;
   std::string error;
   std::string summary;
+  std::string source;               // the model file (its folder is where textures are looked for)
+  std::vector<std::string> notes;   // what the import did or couldn't (textures found by name, maps split, ...)
+  /* Work kept for the rest of the import (task 0134): the texture folders' files listed once, each channel split once,
+   * the images written to the cache (two embedded "diffuse.png" of different content get two names). */
+  bool listed = false;
+  std::vector<std::string> listing;
+  std::map<std::string, std::string> derived;
+  std::vector<std::string> written;
 };
 
 bool import_model(const std::string &path, ImportResult &out);
@@ -64,6 +74,18 @@ bool import_stl_file(const std::string &path, ImportResult &out);   // Z up, lik
 bool import_ply_file(const std::string &path, ImportResult &out);   // Z up, like Blender writes it
 bool import_usda_file(const std::string &path, ImportResult &out);  // text USD; the stage says its up axis
 bool model_extension_supported(const std::string &ext);
+
+/* ---- Materials made on import (task 0134, import_materials.cpp) ---- */
+/* A texture a file links: the link, beside the model, in its .fbm, textures or images folder, by name in any case. */
+std::string find_texture(ImportResult &r, const std::string &file);
+/* An image inside the model file (FBX content, glTF buffer) written to the import cache; its path ("" if none). */
+std::string save_embedded(const std::string &name, const void *data, size_t size, ImportResult &r);
+/* One channel of an image as a grey image of its own (inverted: a gloss map into roughness), in the import cache. */
+std::string derive_channel(const std::string &src, int channel, bool invert, const std::string &tag, ImportResult &r);
+std::string import_cache_dir(const ImportResult &r);
+/* After any import: a material for every mesh without one, and texture sets beside the model matched by name
+ * (Body_BaseColor, T_Body_N, ...) onto the materials the file left without textures. */
+void complete_materials(ImportResult &r);
 
 /* Creates GameObjects for an import result under `parent` (may be null). */
 GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent);

@@ -24,6 +24,20 @@ struct VertexGroup {
   std::vector<float> weights;
 };
 
+/* A shape key (Blender) / blend shape (Unity, FBX) / morph target (glTF) / vertex morph (MMD), task 0135: a named
+ * offset of every vertex from the basis; a renderer's weight adds that much of it, before any modifier (the skin
+ * included). Sparse in files, dense here. A key whose size isn't the vertex count (the mesh's topology edited since)
+ * is skipped. */
+struct ShapeKey {
+  std::string name;
+  std::vector<Vec3> delta;  // one per vertex
+};
+
+struct MeshRenderer;
+/* The renderer's shape keys on `positions` (the basis's), and a hash of the weights in use (0: none). */
+void apply_shape_keys(const struct Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions);
+uint64_t shape_key_hash(const struct Mesh &m, const MeshRenderer *mr);
+
 struct Mesh {
   std::string name = "Mesh";
   std::vector<Vec3> positions;
@@ -59,6 +73,8 @@ struct Mesh {
    * the editor (and the modifier stack) then carry them over from the mesh before by position
    * (meshops::transfer_vertex_groups). */
   std::vector<VertexGroup> vertex_groups;
+  std::vector<ShapeKey> shape_keys;  // (task 0135)
+  int find_shape(const std::string &name) const;
   int find_group(const std::string &group) const;
   bool groups_fit() const;               // every group has one weight per vertex
   void copy_vertex_weights(uint32_t from);  // a weight for a vertex just added as a copy of `from`
@@ -372,6 +388,9 @@ void apply_group_map(const GroupTransferMap &map, const Mesh &from, Mesh &to);
  * vertex where one of from's was takes its weights, any other the weights interpolated at the nearest point of from's
  * surface (a new mid-edge vertex gets the average of the edge's ends). */
 void transfer_vertex_groups(const Mesh &from, Mesh &to);
+/* Shape keys likewise (task 0135): carried across an edit that renumbered or added vertices, offsets interpolated. */
+bool shape_keys_fit(const Mesh &m);
+void transfer_shape_keys(const Mesh &from, Mesh &to);
 /* Uniform Laplacian smoothing (blender/source/blender/modifiers/intern/MOD_smooth.cc). */
 void smooth_laplacian(Mesh &m, float factor, int iterations, const std::vector<uint8_t> *vert_mask = nullptr);
 /* Moves vertices along their normals by random amounts (for stress tests / noise). */

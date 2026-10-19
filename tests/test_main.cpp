@@ -35304,4 +35304,361 @@ static void round81_tests() {
     CHECK(walking && three && found && ai_ed.assist_on(Editor::Assist::Ai) && hy && hy->keys.size() == 2 && !ai_ed.ai_ghost_for_test() && !ai_ed.ai_busy_for_test());
     Locomotion::live = false;
   });
+  /* ---------------------------------------------------------------- round 154: materials made on import (task 0134) */
+  /* Imports write extracted and split images under ~/.blendity/cache: a scratch home from here on, never the user's. */
+  set_env("USERPROFILE", fs::join(test_dir(), "home"));
+  set_env("HOME", fs::join(test_dir(), "home"));
+  /* A 4 x 4 PNG of one colour (0xAARRGGBB), and the red of an image's first pixel (0..255; -1 if it can't be read). */
+  auto r154_png = [](const std::string &path, uint32_t argb) {
+    std::vector<uint32_t> px(16, argb);
+    fs::make_dirs(fs::parent(path));
+    return write_png(path, px.data(), 4, 4, 4, true);
+  };
+  auto r154_red = [](const std::string &path) {
+    Bitmap bm;
+    std::string e;
+    if (!load_image(path, bm, e) || bm.width <= 0) return -1;
+    return bm.is_float ? (int)std::lround(bm.rgbaf[0] * 255.0f) : (int)bm.rgba8[0];
+  };
+  test("import materials: Blender's FBX with its textures inside and its GLB with a packed metallic-roughness map come in textured", [&] {
+    ImportResult fbx, glb;
+    const bool a = import_model("tests/fixtures/embedded_quad.fbx", fbx), b = import_model("tests/fixtures/embedded_quad.glb", glb);
+    auto first = [](const ImportResult &r) { return r.materials.empty() ? Material() : *r.materials[0]; };
+    const Material mf = first(fbx), mg = first(glb);
+    const int fred = r154_red(mf.base_map.path), gred = r154_red(mg.base_map.path);
+    const int rough = r154_red(mg.roughness_map.path), metal = r154_red(mg.metallic_map.path);
+    std::printf("    FBX: '%s' base map %s (red %d); GLB: base red %d, roughness map %d (0.25 = 64), metallic map %d\n", mf.name.c_str(),
+                fs::filename(mf.base_map.path).c_str(), fred, gred, rough, metal);
+    CHECK(a && b && fred > 180 && gred > 180 && std::abs(rough - 64) <= 2 && metal >= 253);
+  });
+  test("import materials: a link to another machine's path is found in the model's textures folder; a texture set by name fills a bare material", [&] {
+    const std::string dir = fs::join(test_dir(), "r154_find");
+    r154_png(fs::join(dir, "textures/brick.png"), 0xFF3366CCu);
+    /* An OBJ whose library points at C:/elsewhere, and a second material with no textures but a set beside it. */
+    fs::write_file(fs::join(dir, "wall.mtl"), "newmtl Brick\nKd 1 1 1\nmap_Kd C:/elsewhere/art/brick.png\nnewmtl Body\nKd 0.8 0.8 0.8\n");
+    fs::write_file(fs::join(dir, "wall.obj"), "mtllib wall.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+                                              "usemtl Brick\nf 1/1 2/2 3/3\nusemtl Body\nf 1/1 3/3 4/4\n");
+    r154_png(fs::join(dir, "Body_BaseColor.png"), 0xFFCC2222u);
+    r154_png(fs::join(dir, "Body_Normal.png"), 0xFF8080FFu);
+    r154_png(fs::join(dir, "Body_Smoothness.png"), 0xFFC0C0C0u);  // (0.75 smooth: 0.25 rough once inverted)
+    ImportResult r;
+    CHECK(import_model(fs::join(dir, "wall.obj"), r));
+    MaterialPtr brick, body;
+    for (const MaterialPtr &m : r.materials) (m->name == "Brick" ? brick : body) = m;
+    const bool found = brick && fs::filename(brick->base_map.path) == "brick.png" && fs::exists(brick->base_map.path);
+    const int rough = body ? r154_red(body->roughness_map.path) : -1;
+    std::printf("    the moved link: %s; Body: base %s, normal %s, roughness from smoothness %d (63 expected); notes: %zu\n",
+                found ? brick->base_map.path.c_str() : "not found", body ? fs::filename(body->base_map.path).c_str() : "-",
+                body ? fs::filename(body->normal_map.path).c_str() : "-", rough, r.notes.size());
+    CHECK(found && body && fs::filename(body->base_map.path) == "Body_BaseColor.png" && fs::filename(body->normal_map.path) == "Body_Normal.png" &&
+          std::abs(rough - 63) <= 2);
+    /* A model without materials (STL): every mesh one, named after it. */
+    const std::string stl = fs::join(dir, "part.stl");
+    Mesh cube = *primitives::cube();
+    ExportItem it;
+    it.name = "Part", it.mesh = &cube;
+    fs::write_file(stl, export_stl({it}, ExportOptions()));
+    ImportResult rs;
+    CHECK(import_model(stl, rs) && !rs.nodes.empty());
+    bool every = true;
+    for (const ImportedNode &n : rs.nodes) every = every && (!n.mesh || !n.materials.empty());
+    CHECK(every && !rs.materials.empty());
+  });
+  test("import materials: Blendity's FBX with Embed Textures carries its image; imported into the project the materials become .mat assets, an edited one kept on re-import", [&] {
+    const std::string dir = fs::join(test_dir(), "r154_embed");
+    const std::string tex = fs::join(dir, "skin.png");
+    r154_png(tex, 0xFF20C040u);
+    Mesh quad = *primitives::cube();
+    MaterialPtr m = make_material("Skin", Vec3(1.0f));
+    m->base_map = TextureRef{tex, false};
+    ExportItem it;
+    it.name = "Creature", it.mesh = &quad, it.materials = {m};
+    ExportOptions o;
+    o.embed_textures = true, o.texture_dir = dir;
+    const std::string fbx = fs::join(dir, "creature.fbx");
+    fs::write_file(fbx, export_fbx({it}, o));
+    fs::remove_file(tex);  // (only the copy inside the file is left)
+    ImportResult r;
+    CHECK(import_model(fbx, r) && !r.materials.empty());
+    const int green = r.materials.empty() ? -1 : (r154_red(r.materials[0]->base_map.path) >= 0 ? 1 : -1);
+    /* Into the project, as dropped: Assets/Materials/creature/Skin.mat, the renderer using it. */
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + fbx);
+    ed.step_frame_headless();
+    const std::string mat = fs::join(std::getenv("BLENDITY_PROJECT"), "Assets/Materials/creature/Skin.mat");
+    MaterialPtr used;
+    ed.scene().for_each([&](GameObject &g) {
+      if (MeshRenderer *mr = g.get<MeshRenderer>(); mr && !mr->materials.empty() && !used && mr->materials[0] && mr->materials[0]->name == "Skin") used = mr->materials[0];
+    });
+    const bool asset = used && !used->asset_path.empty() && fs::exists(mat) && fs::exists(resolve_asset_path(used->base_map.path));
+    /* Edited (its colour), then the model imported again: the edit stays. */
+    if (used) used->base_color = Vec3(0.1f, 0.2f, 0.9f), used->touch();
+    save_dirty_material_assets();
+    ed.command("import " + fbx);
+    ed.step_frame_headless();
+    std::string text;
+    fs::read_file(mat, text);
+    MaterialPtr again = material_asset("Assets/Materials/creature/Skin.mat");
+    std::printf("    the embedded image read back: %s; Skin.mat made and used: %s; after an edit and a re-import its colour %.2f %.2f %.2f\n",
+                green > 0 ? "yes" : "no", asset ? "yes" : "no", again ? again->base_color.x : -1.0f, again ? again->base_color.y : -1.0f,
+                again ? again->base_color.z : -1.0f);
+    CHECK(green > 0 && asset && again && std::fabs(again->base_color.z - 0.9f) < 1e-3f);
+  });
+  test("import materials: two models of one name get folders of their own; importing one again reuses its folder", [&] {
+    const std::string a = fs::join(test_dir(), "r154_twin_a"), b = fs::join(test_dir(), "r154_twin_b");
+    for (const char *d : {"Assets/Materials/r154twin", "Assets/Materials/r154twin 2", "Assets/Materials/r154twin 3", "Assets/Meshes/r154twin.obj",
+                          "Assets/Meshes/r154twin 2", "Assets/Textures/r154twin", "Assets/Textures/r154twin 2"})
+      if (fs::exists(fs::join(std::getenv("BLENDITY_PROJECT"), d))) fs::move_to_trash(fs::join(std::getenv("BLENDITY_PROJECT"), d));
+    const char *obj = "mtllib r154twin.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nusemtl Material\nf 1/1 2/2 3/3\n";
+    fs::make_dirs(a), fs::make_dirs(b);
+    fs::write_file(fs::join(a, "r154twin.obj"), obj);
+    fs::write_file(fs::join(b, "r154twin.obj"), std::string(obj) + "v 0 0 1\n");  // (another model: other contents)
+    fs::write_file(fs::join(a, "r154twin.mtl"), "newmtl Material\nKd 1 0 0\nmap_Kd diffuse.png\n");
+    fs::write_file(fs::join(b, "r154twin.mtl"), "newmtl Material\nKd 0 0 1\nmap_Kd diffuse.png\n");
+    r154_png(fs::join(a, "diffuse.png"), 0xFFFF0000u);
+    r154_png(fs::join(b, "diffuse.png"), 0xFF0000FFu);
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + fs::join(a, "r154twin.obj"));
+    ed.command("import " + fs::join(b, "r154twin.obj"));
+    ed.command("import " + fs::join(a, "r154twin.obj"));  // (the first again)
+    ed.step_frame_headless();
+    const std::string p = std::getenv("BLENDITY_PROJECT");
+    MaterialPtr ma = material_asset("Assets/Materials/r154twin/Material.mat"), mb = material_asset("Assets/Materials/r154twin 2/Material.mat");
+    const int ra = ma ? r154_red(resolve_asset_path(ma->base_map.path)) : -1, rb = mb ? r154_red(resolve_asset_path(mb->base_map.path)) : -1;
+    const bool meshes = fs::exists(fs::join(p, "Assets/Meshes/r154twin.obj")) && fs::exists(fs::join(p, "Assets/Meshes/r154twin 2/r154twin.obj"));
+    const bool third = fs::exists(fs::join(p, "Assets/Materials/r154twin 3"));
+    std::printf("    first: red %d (%s); second: red %d (%s); both models in Meshes: %s; a third folder: %s\n", ra, ma ? ma->base_map.path.c_str() : "-", rb,
+                mb ? mb->base_map.path.c_str() : "-", meshes ? "yes" : "no", third ? "yes" : "no");
+    CHECK(ma && mb && ra > 250 && rb == 0 && meshes && !third);
+  });
+  test("import materials: the file's own flat colours keep them beside an unrelated texture; Hand_R is not a roughness map; an .mtl's subfolder texture is found", [&] {
+    const std::string dir = fs::join(test_dir(), "r154_flat");
+    fs::make_dirs(fs::join(dir, "mat"));
+    fs::write_file(fs::join(dir, "mat/flat.mtl"), "newmtl Red\nKd 1 0 0\nnewmtl Blue\nKd 0 0 1\nnewmtl Logo\nKd 1 1 1\nmap_Kd logo.png\n");
+    fs::write_file(fs::join(dir, "flat.obj"), "mtllib mat/flat.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nusemtl Red\nf 1 2 3\nusemtl Blue\nf 1 3 4\n"
+                                              "usemtl Logo\nf 2 3 4\n");
+    r154_png(fs::join(dir, "mat/logo.png"), 0xFF00FF00u);
+    r154_png(fs::join(dir, "Rock_d.png"), 0xFF777777u);  // (one image named by a letter: not a set)
+    r154_png(fs::join(dir, "Stone_BaseColor.png"), 0xFF777777u);  // (a set by name, matching no material)
+    r154_png(fs::join(dir, "Hand_R.png"), 0xFF777777u);
+    ImportResult r;
+    CHECK(import_model(fs::join(dir, "flat.obj"), r));
+    MaterialPtr red, blue, logo;
+    for (const MaterialPtr &m : r.materials) (m->name == "Red" ? red : m->name == "Blue" ? blue : logo) = m;
+    const bool flat = red && blue && red->base_map.empty() && blue->base_map.empty() && red->base_color.x > 0.99f && blue->base_color.z > 0.99f &&
+                      red->roughness_map.empty();
+    const bool sub = logo && fs::normalize(logo->base_map.path) == fs::normalize(fs::join(dir, "mat/logo.png"));
+    std::printf("    Red and Blue untextured, their colours kept: %s; the logo from mat/: %s (%s)\n", flat ? "yes" : "no", sub ? "yes" : "no",
+                logo ? logo->base_map.path.c_str() : "-");
+    CHECK(flat && sub);
+    /* An STL's own material (the import made it) still takes a folder's only set. */
+    const std::string stl = fs::join(dir, "only/part.stl");
+    Mesh cube = *primitives::cube();
+    ExportItem it;
+    it.name = "Part", it.mesh = &cube;
+    fs::make_dirs(fs::parent(stl));
+    fs::write_file(stl, export_stl({it}, ExportOptions()));
+    r154_png(fs::join(dir, "only/Rock_d.png"), 0xFF777777u);
+    r154_png(fs::join(dir, "only/Rock_n.png"), 0xFF8080FFu);  // (two letters of one name: a set)
+    ImportResult rs;
+    CHECK(import_model(stl, rs) && !rs.materials.empty());
+    std::printf("    the STL's material: base %s, normal %s\n", fs::filename(rs.materials[0]->base_map.path).c_str(), fs::filename(rs.materials[0]->normal_map.path).c_str());
+    CHECK(fs::filename(rs.materials[0]->base_map.path) == "Rock_d.png" && fs::filename(rs.materials[0]->normal_map.path) == "Rock_n.png");
+  });
+  test("import materials: a packed map is split once for all the materials using it; two embedded images of one name stay two", [&] {
+    const std::string dir = fs::join(test_dir(), "r154_memo");
+    r154_png(fs::join(dir, "packed.png"), 0xFF10C0F0u);
+    ImportResult r;
+    r.source = fs::join(dir, "model.fbx");
+    const std::string g1 = derive_channel(fs::join(dir, "packed.png"), 1, false, "rough", r), g2 = derive_channel(fs::join(dir, "packed.png"), 1, false, "rough", r);
+    const std::string x = save_embedded("body/diffuse.png", "AAAA", 4, r), y = save_embedded("head/diffuse.png", "BBBB", 4, r), z = save_embedded("body/diffuse.png", "AAAA", 4, r);
+    std::printf("    split twice: one file (%s), %zu note(s); embedded: %s, %s, the first again %s\n", fs::filename(g1).c_str(), r.notes.size(),
+                fs::filename(x).c_str(), fs::filename(y).c_str(), fs::filename(z).c_str());
+    CHECK(!g1.empty() && g1 == g2 && r.notes.size() == 1 && r154_red(g1) == 0xC0 && x != y && x == z && !x.empty() && !y.empty());
+    CHECK(fs::parent(g1).find(fs::join(test_dir(), "home")) == 0);  // (the scratch home, never the user's)
+  });
+  /* ---------------------------------------------------------------- round 155: shape keys (task 0135) */
+  test("shape keys: a weight adds exactly that much of the key; none in use, the mesh itself; saved and loaded with the scene; animated by a clip", [&] {
+    Scene s;
+    MeshPtr cube = std::make_shared<Mesh>(*primitives::cube());
+    ShapeKey k{"Smile", std::vector<Vec3>(cube->vert_count(), Vec3(0.0f))};
+    k.delta[0] = Vec3(0.0f, 0.4f, 0.0f), k.delta[3] = Vec3(0.2f, 0.0f, 0.0f);
+    cube->shape_keys.push_back(k);
+    cube->touch();
+    GameObject *g = s.create("Head");
+    g->add<MeshFilter>()->mesh = cube;
+    MeshRenderer *mr = g->add<MeshRenderer>();
+    const bool plain = g->evaluated_mesh() == cube.get();
+    mr->set_shape_weight("Smile", 0.5f);
+    const Mesh *e = g->evaluated_mesh();
+    const float d0 = length(e->positions[0] - (cube->positions[0] + Vec3(0.0f, 0.2f, 0.0f))), d3 = length(e->positions[3] - (cube->positions[3] + Vec3(0.1f, 0.0f, 0.0f)));
+    float others = 0.0f;
+    for (size_t i = 1; i < e->vert_count(); i++)
+      if (i != 3) others = std::max(others, length(e->positions[i] - cube->positions[i]));
+    /* Saved and loaded: the key (sparse) and the weight. */
+    Scene back;
+    std::string error;
+    const bool loaded = load_scene_text(save_scene_text(s), back, error);
+    GameObject *bg = back.find_by_name("Head");
+    const MeshRenderer *bmr = bg ? bg->get<MeshRenderer>() : nullptr;
+    const MeshFilter *bmf = bg ? bg->get<MeshFilter>() : nullptr;
+    const bool kept = bmr && bmf && bmf->mesh && bmf->mesh->find_shape("Smile") == 0 && std::fabs(bmr->shape_weight("Smile") - 0.5f) < 1e-6f &&
+                      length(bmf->mesh->shape_keys[0].delta[0] - Vec3(0.0f, 0.4f, 0.0f)) < 1e-6f;
+    /* A clip's BlendShape track: 0 at frame 0, 1 at frame 10; at frame 5 half of it. */
+    AnimationClip clip;
+    clip.track("", "MeshRenderer.BlendShape/Smile", 0).set_key(0.0f, 0.0f, AnimLinear);
+    clip.track("", "MeshRenderer.BlendShape/Smile", 0).set_key(10.0f, 1.0f, AnimLinear);
+    apply_clip(clip, *g, 5.0f);
+    const float animated = mr->shape_weight("Smile");
+    const float moved = length(g->evaluated_mesh()->positions[0] - cube->positions[0]);
+    std::printf("    unweighted: the mesh itself %s; at 0.5 off by %g and %g, others moved %g; saved and loaded: %s; animated to %.3f, the vertex up %.3f m\n",
+                plain ? "yes" : "no", d0, d3, others, loaded && kept ? "yes" : "no", animated, moved);
+    CHECK(plain && d0 < 1e-6f && d3 < 1e-6f && others < 1e-6f && loaded && kept && std::fabs(animated - 0.5f) < 1e-5f && std::fabs(moved - 0.2f) < 1e-5f);
+  });
+  test("shape keys: added before the skin, so a key moves with the bone that carries it", [&] {
+    R69Rig t;
+    MeshRenderer *mr = t.tube->add<MeshRenderer>();
+    ShapeKey k{"Bulge", std::vector<Vec3>(t.base->vert_count(), Vec3(0.0f))};
+    for (size_t i = 0; i < t.base->vert_count(); i++)
+      if (t.base->positions[i].y > 1.65f) k.delta[i] = Vec3(0.1f, 0.0f, 0.0f);  // (the top rings, all the upper bone's)
+    t.base->shape_keys.push_back(k);
+    t.base->touch();
+    const Quat q = Quat::axis_angle({0, 0, 1}, kPi * 0.5f);
+    t.upper->set_local_rotation(q);
+    std::vector<Vec3> without = t.tube->evaluated_mesh()->positions;
+    mr->set_shape_weight("Bulge", 1.0f);
+    const Mesh *with = t.tube->evaluated_mesh();
+    float worst = 0.0f;
+    int n = 0;
+    for (size_t i = 0; i < t.base->vert_count(); i++) {
+      if (t.base->positions[i].y <= 1.65f) continue;
+      worst = std::max(worst, length((with->positions[i] - without[i]) - q.rotate(Vec3(0.1f, 0.0f, 0.0f)))), n++;
+    }
+    std::printf("    %d vertices: the key's offset turned with the bone, off by at most %g\n", n, worst);
+    CHECK(n > 0 && worst < 1e-4f);
+  });
+  test("shape keys: Blender's FBX and GLB come in with their keys, offsets and values", [&] {
+    for (const char *file : {"tests/fixtures/shapes_quad.fbx", "tests/fixtures/shapes_quad.glb"}) {
+      ImportResult r;
+      const bool ok = import_model(file, r);
+      const ImportedNode *face = nullptr;
+      for (const ImportedNode &n : r.nodes)
+        if (n.mesh && !n.mesh->shape_keys.empty()) face = &n;
+      const int up = face ? face->mesh->find_shape("Up") : -1, wide = face ? face->mesh->find_shape("Wide") : -1;
+      float lift = 0.0f;
+      if (up >= 0)
+        for (const Vec3 &d : face->mesh->shape_keys[(size_t)up].delta)  // (in the world: the node's turn and scale - FBX's Z-up on the node)
+          lift = std::max(lift, face->rotation.rotate(Vec3(d.x * face->scale.x, d.y * face->scale.y, d.z * face->scale.z)).y);
+      float w = -1.0f;
+      for (const auto &sw : face ? face->shape_weights : std::vector<std::pair<std::string, float>>()) if (sw.first == "Up") w = sw.second;
+      std::printf("    %s: keys %zu (Up %d, Wide %d); Up lifts %.3f m; its value %.2f\n", fs::filename(file).c_str(), face ? face->mesh->shape_keys.size() : 0,
+                  up, wide, lift, w);
+      CHECK(ok && face && up >= 0 && wide >= 0 && std::fabs(lift - 0.5f) < 1e-3f && std::fabs(w - 0.3f) < 1e-3f);
+    }
+  });
+  test("shape keys: a changing weight deforms the same mesh again; Edit Mode shows the basis; the evaluated mesh carries no keys", [&] {
+    Scene s;
+    MeshPtr cube = std::make_shared<Mesh>(*primitives::cube());
+    ShapeKey k{"Up", std::vector<Vec3>(cube->vert_count(), Vec3(0.0f, 1.0f, 0.0f))};
+    cube->shape_keys.push_back(k);
+    cube->touch();
+    GameObject *g = s.create("Box");
+    g->add<MeshFilter>()->mesh = cube;
+    MeshRenderer *mr = g->add<MeshRenderer>();
+    mr->set_shape_weight("Up", 0.3f);
+    const Mesh *e1 = g->evaluated_mesh();
+    const uint64_t v1 = e1->version;
+    mr->set_shape_weight("Up", 0.6f);
+    const Mesh *e2 = g->evaluated_mesh();
+    const bool again = e1 == e2 && e2->version == v1 && std::fabs(e2->positions[0].y - (cube->positions[0].y + 0.6f)) < 1e-6f;
+    const bool basis = g->evaluated_mesh(2) == cube.get();
+    std::printf("    the same mesh deformed again: %s; Edit Mode's cage the basis: %s; keys on the evaluated mesh: %zu\n", again ? "yes" : "no",
+                basis ? "yes" : "no", e2->shape_keys.size());
+    CHECK(again && basis && e2->shape_keys.empty());
+  });
+  test("shape keys: Apply Modifiers refuses a mesh with keys (Blender's rule) rather than adding them twice", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");
+    ed.command("shape add Puff 0.1");
+    ed.command("shape set Puff 1");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<MeshFilter>());
+    g->add<TriangulateModifier>();
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    ed.command("meshop apply_modifiers");
+    const bool refused = g->get<MeshFilter>()->mesh == before && g->get<TriangulateModifier>();
+    std::printf("    refused, the modifier and the key kept: %s\n", refused ? "yes" : "no");
+    CHECK(refused && g->get<MeshFilter>()->mesh->find_shape("Puff") == 0);
+  });
+  test("shape keys: kept through an edit that adds or renumbers vertices, each vertex with its offset", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");
+    ed.command("shape add Puff 0.1");
+    ed.step_frame_headless();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<MeshFilter>());
+    const Mesh before = *g->get<MeshFilter>()->mesh;
+    auto worst_kept = [&](const Mesh &m) {  // each vertex where one was before: that one's offset
+      float worst = -1.0f;
+      for (size_t i = 0; i < m.vert_count() && meshops::shape_keys_fit(m) && !m.shape_keys.empty(); i++)
+        for (size_t j = 0; j < before.vert_count(); j++)
+          if (length(m.positions[i] - before.positions[j]) < 1e-6f) worst = std::max(worst, length(m.shape_keys[0].delta[i] - before.shape_keys[0].delta[j]));
+      return worst;
+    };
+    ed.command("meshop triangulate");
+    ed.step_frame_headless();
+    ed.command("meshop subdivide_simple");
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    const float w = worst_kept(m);
+    std::printf("    %zu vertices (from %zu), keys fit: %s, the old vertices' offsets off by %g\n", m.vert_count(), before.vert_count(),
+                meshops::shape_keys_fit(m) ? "yes" : "no", w);
+    CHECK(m.vert_count() > before.vert_count() && meshops::shape_keys_fit(m) && m.find_shape("Puff") == 0 && w >= 0.0f && w < 1e-5f);
+  });
+  test("shape keys: weights saved by their exact names whatever the components' order; a damaged key line loads without harm", [&] {
+    Scene s;
+    MeshPtr cube = std::make_shared<Mesh>(*primitives::cube());
+    for (const char *n : {"Smile Left", "Smile_Left"}) cube->shape_keys.push_back({n, std::vector<Vec3>(cube->vert_count(), Vec3(0.0f, 0.1f, 0.0f))});
+    cube->touch();
+    GameObject *g = s.create("Face");
+    MeshRenderer *mr = g->add<MeshRenderer>();  // (before the MeshFilter)
+    g->add<MeshFilter>()->mesh = cube;
+    mr->set_shape_weight("Smile Left", 0.25f);
+    mr->set_shape_weight("Smile_Left", 0.75f);
+    std::string text = save_scene_text(s);
+    Scene back;
+    std::string error;
+    const bool loaded = load_scene_text(text, back, error);
+    const MeshRenderer *bmr = back.find_by_name("Face") ? back.find_by_name("Face")->get<MeshRenderer>() : nullptr;
+    const float a = bmr ? bmr->shape_weight("Smile Left") : -1.0f, b = bmr ? bmr->shape_weight("Smile_Left") : -1.0f;
+    /* A key line with a count too large for any integer and an index past every vertex. */
+    const size_t at = text.find("sk \"Smile Left\"");
+    const size_t end = at == std::string::npos ? at : text.find('\n', at);
+    if (end != std::string::npos) text.replace(at, end - at, "sk \"Smile Left\" 99999999999999999999999 4294967296000 1 2 3 1 0 0.5 0 -7 1 1 1");
+    Scene bad;
+    const bool survived = load_scene_text(text, bad, error);
+    const GameObject *bg = bad.find_by_name("Face");
+    const MeshFilter *bmf = bg ? bg->get<MeshFilter>() : nullptr;
+    const int ki = bmf && bmf->mesh ? bmf->mesh->find_shape("Smile Left") : -1;
+    const bool sane = ki >= 0 && std::fabs(bmf->mesh->shape_keys[(size_t)ki].delta[1].y - 0.5f) < 1e-6f && length(bmf->mesh->shape_keys[(size_t)ki].delta[0]) == 0.0f;
+    std::printf("    loaded %.2f and %.2f; the damaged line: loaded %s, its one good offset kept %s\n", a, b, survived ? "yes" : "no", sane ? "yes" : "no");
+    CHECK(loaded && std::fabs(a - 0.25f) < 1e-6f && std::fabs(b - 0.75f) < 1e-6f && survived && sane);
+  });
+  test("learn: the Shape keys lesson's Try it makes a sphere with a key half applied, its surface pushed out 0.1 m", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const bool found = r146_try(ed, "A sphere with a shape key \"Puff\", half applied");
+    GameObject *g = ed.active_object_for_test();
+    const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+    const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+    float out = 0.0f;
+    if (mf && mf->mesh && g->evaluated_mesh())
+      for (size_t i = 0; i < mf->mesh->vert_count(); i++) out = std::max(out, length(g->evaluated_mesh()->positions[i] - mf->mesh->positions[i]));
+    std::printf("    key: %s, weight %.2f, the surface moved %.3f m\n", mf && mf->mesh && mf->mesh->find_shape("Puff") >= 0 ? "yes" : "no", mr ? mr->shape_weight("Puff") : -1.0f, out);
+    CHECK(found && mr && std::fabs(mr->shape_weight("Puff") - 0.5f) < 1e-6f && std::fabs(out - 0.1f) < 1e-3f);
+  });
 }
