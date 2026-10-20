@@ -119,7 +119,10 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
     for (AnimTrack &t : clip.tracks) {
       const auto it = node_of_path.find(t.path);
       if (it != node_of_path.end() && objects[(size_t)it->second]) t.path = anim_path(*root, *objects[(size_t)it->second]);
+      else if (it != node_of_path.end()) t.keys.clear();  // (a folded end bone's track: nothing to move)
     }
+    /* Tracks with no keys dropped: the folded nodes' (cleared above) and any a reader left empty. */
+    clip.tracks.erase(std::remove_if(clip.tracks.begin(), clip.tracks.end(), [](const AnimTrack &t) { return t.keys.empty(); }), clip.tracks.end());
     const std::string rel = save_imported_clip(*root, clip, model, i == 0);
     if (!rel.empty()) clip_paths.push_back(rel);
     else Log::warn("Import: the clip '%s' couldn't be written under Assets/Animations/%s", clip.name.c_str(), model.c_str());

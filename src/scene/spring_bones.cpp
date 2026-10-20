@@ -143,7 +143,7 @@ std::vector<Capsule> body_capsules(GameObject &armature) {
     for (GameObject *c : g->children) stack.push_back(c);
     const Bone *b = g->get<Bone>();
     if (!b || b->length <= 1e-4f || std::binary_search(chains.begin(), chains.end(), g)) continue;
-    out.push_back({g->world_position(), tip_of(*g), b->length / 7.0f});
+    out.push_back({g->world_position(), tip_of(*g), length(tip_of(*g) - g->world_position()) / 7.0f});  // (in metres: the length is in the bone's units)
   }
   return out;
 }

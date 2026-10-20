@@ -25,8 +25,13 @@
 - **Textures are looked for** beside the model, in its `.fbm`, `textures` and `images` folders, by name in any letter
   case.
 - **Texture sets are matched by name** (`<name>_BaseColor`, `_Normal`, `_Roughness`, `_Metallic`, `_Emissive`,
-  `_Gloss`/`_Smoothness`, `_MetallicSmoothness`, `_ORM`) onto materials the file left without textures. Packed and
-  inverted maps are split into the red-channel maps Blendity reads.
+  `_Gloss`/`_Smoothness`, `_MetallicSmoothness`, `_ORM`, two-word forms like `Base_color` and `Normal_OpenGL`, sizes
+  dropped) onto materials the file left without textures. Packed and inverted maps are split into the red-channel
+  maps Blendity reads. The finder (task 0143) reads the folders around the model - its own three levels down and the
+  folders beside it two levels down, never Downloads, Desktop, a home folder or a drive root - and pairs each bare
+  material with the set its name (or its meshes' names) is likeliest to own: the same key, one inside the other, or
+  the share of words in common, with the best above 0.6 taken, a 1:1 leftover paired by best, and the pairing said in
+  the import's notes so a wrong guess is one Inspector slot to change.
 - **Shape keys live on the mesh** (named offsets of every vertex), their weights on the MeshRenderer by name (Unity's
   blend-shape weights).
   - They are added to the basis before every modifier, so the skin bends an expression with the head.
@@ -46,6 +51,11 @@
 - **A model's own animations become clips** (`Assets/Animations/<model>/<clip>.anim`, the first on the root's
   Animation component): FBX stacks sampled a frame at a time at the file's rate, glTF samplers at their own keys with
   rotation baked, BVH rows at 1 / Frame Time. Rotations are keyed as Euler angles each nearest the frame before.
+- **Bone lengths are in a bone's own units** (so a bone drawn through a scaled armature stays where its child is), and
+  a leaf bone's default is given in metres (half its parent's world length, else 10 cm) divided by the bone's world
+  unit; weightless end bones (`_end`, `_End`, `.end`, ` End`: Blender's leaves, Mixamo's `HeadTop_End`, BVH's end
+  sites, VRoid's spring tails) fold into their parents' tails (task 0144). Tools wanting metres measure the bone in
+  the world (`bone_tail`), never its `length` alone.
 - **Motions become ordinary clips** (`Assets/Animations/<character>/<motion>.anim`, 30 fps for MMD), the motion file
   copied in beside its clip. MMD keys a bone as a turn in its rest frame, so a key becomes the local rotation
   `R_parent^-1 · C(q) · R_bone` (R: the rests relative to the root, C: MMD's space turned half a turn about Y) and the

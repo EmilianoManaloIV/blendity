@@ -300,7 +300,7 @@ std::string unique_name(Scene &s, const std::string &base) {
 
 /* IK on a two-bone limb whose end is `lower`: a target at its tip, a pole off its bend along `pole_dir`. */
 void add_limb_ik(Scene &s, GameObject *root, GameObject *lower, const std::string &target_name, const std::string &pole_name, Vec3 pole_dir) {
-  const float len = std::max(0.05f, lower->get<Bone>()->length);
+  const float len = std::max(0.05f, length(bone_tail(*lower) - lower->world_position()));  // (metres: a scaled armature's bone units aren't)
   GameObject *t = make_empty(s, unique_name(s, target_name), root, bone_tail(*lower));  // a second rig's targets are its own
   GameObject *p = make_empty(s, unique_name(s, pole_name), root, lower->world_position() + pole_dir * (len * 1.5f));
   /* Drawn as controls (task 0067): the target a box, the pole a diamond, coloured by side. */

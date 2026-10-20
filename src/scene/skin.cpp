@@ -50,6 +50,12 @@ bool rigid(const Mat4 &m) {
 
 }  // namespace
 
+float bone_world_unit(const GameObject &bone) {
+  const Mat4 &w = bone.world_matrix();
+  const float unit = length(w.point(Vec3(0, 1, 0)) - w.point(Vec3(0.0f)));
+  return unit > 1e-8f && std::isfinite(unit) ? unit : 1.0f;
+}
+
 Quat slerp(Quat a, Quat b, float t) {
   float c = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
   if (c < 0.0f) b = {-b.x, -b.y, -b.z, -b.w}, c = -c;  // the short way round

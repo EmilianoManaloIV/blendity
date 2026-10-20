@@ -35333,7 +35333,7 @@ static void round81_tests() {
     CHECK(a && b && fred > 180 && gred > 180 && std::abs(rough - 64) <= 2 && metal >= 253);
   });
   test("import materials: a link to another machine's path is found in the model's textures folder; a texture set by name fills a bare material", [&] {
-    const std::string dir = fs::join(test_dir(), "r154_find");
+    const std::string dir = fs::join(fs::join(test_dir(), "r154_find"), "model");  // (two deep: the folders beside are this test's)
     r154_png(fs::join(dir, "textures/brick.png"), 0xFF3366CCu);
     /* An OBJ whose library points at C:/elsewhere, and a second material with no textures but a set beside it. */
     fs::write_file(fs::join(dir, "wall.mtl"), "newmtl Brick\nKd 1 1 1\nmap_Kd C:/elsewhere/art/brick.png\nnewmtl Body\nKd 0.8 0.8 0.8\n");
@@ -35366,7 +35366,7 @@ static void round81_tests() {
     CHECK(every && !rs.materials.empty());
   });
   test("import materials: Blendity's FBX with Embed Textures carries its image; imported into the project the materials become .mat assets, an edited one kept on re-import", [&] {
-    const std::string dir = fs::join(test_dir(), "r154_embed");
+    const std::string dir = fs::join(fs::join(test_dir(), "r154_embed"), "model");
     const std::string tex = fs::join(dir, "skin.png");
     r154_png(tex, 0xFF20C040u);
     Mesh quad = *primitives::cube();
@@ -35407,7 +35407,7 @@ static void round81_tests() {
     CHECK(green > 0 && asset && again && std::fabs(again->base_color.z - 0.9f) < 1e-3f);
   });
   test("import materials: two models of one name get folders of their own; importing one again reuses its folder", [&] {
-    const std::string a = fs::join(test_dir(), "r154_twin_a"), b = fs::join(test_dir(), "r154_twin_b");
+    const std::string a = fs::join(fs::join(test_dir(), "r154_twin"), "a"), b = fs::join(fs::join(test_dir(), "r154_twin"), "b");
     for (const char *d : {"Assets/Materials/r154twin", "Assets/Materials/r154twin 2", "Assets/Materials/r154twin 3", "Assets/Meshes/r154twin.obj",
                           "Assets/Meshes/r154twin 2", "Assets/Textures/r154twin", "Assets/Textures/r154twin 2"})
       if (fs::exists(fs::join(std::getenv("BLENDITY_PROJECT"), d))) fs::move_to_trash(fs::join(std::getenv("BLENDITY_PROJECT"), d));
@@ -35435,7 +35435,7 @@ static void round81_tests() {
     CHECK(ma && mb && ra > 250 && rb == 0 && meshes && !third);
   });
   test("import materials: the file's own flat colours keep them beside an unrelated texture; Hand_R is not a roughness map; an .mtl's subfolder texture is found", [&] {
-    const std::string dir = fs::join(test_dir(), "r154_flat");
+    const std::string dir = fs::join(fs::join(test_dir(), "r154_flat"), "model");
     fs::make_dirs(fs::join(dir, "mat"));
     fs::write_file(fs::join(dir, "mat/flat.mtl"), "newmtl Red\nKd 1 0 0\nnewmtl Blue\nKd 0 0 1\nnewmtl Logo\nKd 1 1 1\nmap_Kd logo.png\n");
     fs::write_file(fs::join(dir, "flat.obj"), "mtllib mat/flat.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nusemtl Red\nf 1 2 3\nusemtl Blue\nf 1 3 4\n"
@@ -36754,5 +36754,240 @@ static void round81_tests() {
                 outward ? "yes" : "no", r.clips.size(), r.clips.empty() ? 0.0f : r.clips[0].length, at.x, at.y, at.z, turned / kDeg2Rad);
     CHECK(outward && r.clips.size() == 1 && std::fabs(r.clips[0].length - 24.0f) < 0.5f && std::fabs(at.x + 2.0f) < 1e-4f && std::fabs(at.y) < 1e-4f &&
           std::fabs(turned - 90.0f * kDeg2Rad) < 0.1f * kDeg2Rad);
+  });
+  /* ---------------------------------------------------------------- round 162: the texture finder (task 0143) */
+  auto r162_png = [](const std::string &path, uint32_t argb) {
+    std::vector<uint32_t> px(16, argb);
+    fs::make_dirs(fs::parent(path));
+    return write_png(path, px.data(), 4, 4, 4, true);
+  };
+  auto r162_red = [](const std::string &path) {
+    Bitmap bm;
+    std::string e;
+    if (path.empty() || !load_image(path, bm, e) || bm.width <= 0) return -1;
+    return bm.is_float ? (int)std::lround(bm.rgbaf[0] * 255.0f) : (int)bm.rgba8[0];
+  };
+  /* An OBJ with materials RobeA, RobeB and Trim, in Sketchfab's layout: the model in source/, the textures beside it in
+   * textures/, named with two-word kinds. */
+  auto r162_robe = [&](const std::string &root) {
+    fs::make_dirs(fs::join(root, "source"));
+    fs::write_file(fs::join(root, "source/robe.mtl"), "newmtl RobeA\nKd 0.8 0.8 0.8\nnewmtl RobeB\nKd 0.8 0.8 0.8\nnewmtl Trim\nKd 0.9 0.8 0.2\n");
+    fs::write_file(fs::join(root, "source/robe.obj"), "mtllib robe.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+                                                       "usemtl RobeA\nf 1/1 2/2 3/3\nusemtl RobeB\nf 1/1 3/3 4/4\nusemtl Trim\nf 2/2 3/3 4/4\n");
+    r162_png(fs::join(root, "textures/RobeA_Base_color.png"), 0xFFCC2222u);
+    r162_png(fs::join(root, "textures/RobeB_Base_Color.png"), 0xFF2222CCu);
+    r162_png(fs::join(root, "textures/RobeB_Normal_OpenGL.png"), 0xFF8080FFu);
+    r162_png(fs::join(root, "textures/RobeB_Roughness_map.png"), 0xFF404040u);
+    r162_png(fs::join(root, "textures/RobeB_AO.png"), 0xFFFFFFFFu);
+    return fs::join(root, "source/robe.obj");
+  };
+  test("texture finder: Sketchfab's layout (source/ beside textures/) and two-word map names: RobeA and RobeB textured with their normal and roughness, Trim's own colour kept, the AO map reported", [&] {
+    const std::string file = r162_robe(fs::join(test_dir(), "r162_robe"));
+    ImportResult r;
+    CHECK(import_model(file, r));
+    MaterialPtr a, b, trim;
+    for (const MaterialPtr &m : r.materials) (m->name == "RobeA" ? a : m->name == "RobeB" ? b : trim) = m;
+    const int ra = a ? r162_red(a->base_map.path) : -1, rb = b ? r162_red(b->base_map.path) : -1;
+    std::string notes;
+    for (const std::string &n : r.notes) notes += "\n      " + n;
+    std::printf("    RobeA red %d (%s); RobeB red %d (%s), normal %s, roughness %s; Trim map '%s', colour %.1f %.1f %.1f; notes:%s\n", ra,
+                a ? fs::filename(a->base_map.path).c_str() : "-", rb, b ? fs::filename(b->base_map.path).c_str() : "-", b ? fs::filename(b->normal_map.path).c_str() : "-",
+                b ? fs::filename(b->roughness_map.path).c_str() : "-", trim ? trim->base_map.path.c_str() : "-", trim ? trim->base_color.x : 0.0f, trim ? trim->base_color.y : 0.0f,
+                trim ? trim->base_color.z : 0.0f, notes.c_str());
+    bool ao_noted = false;
+    for (const std::string &n : r.notes) ao_noted = ao_noted || (n.find("RobeB_AO.png") != std::string::npos && n.find("no slot") != std::string::npos);
+    CHECK(a && b && trim && ra > 180 && rb < 60 && fs::filename(b->normal_map.path) == "RobeB_Normal_OpenGL.png" && fs::filename(b->roughness_map.path) == "RobeB_Roughness_map.png");
+    CHECK(trim->base_map.empty() && std::fabs(trim->base_color.x - 0.9f) < 1e-5f && ao_noted);
+    /* The user's folder, made synthetic: materials CarmenB, CarmenF, CarmenH and OL with textures/Carmen{B,F,H}_Base_color.png. */
+    const std::string carmen = fs::join(test_dir(), "r162_carmen");
+    fs::make_dirs(fs::join(carmen, "source"));
+    fs::write_file(fs::join(carmen, "source/carmen.mtl"), "newmtl CarmenB\nKd 0.8 0.8 0.8\nnewmtl CarmenF\nKd 0.8 0.8 0.8\nnewmtl CarmenH\nKd 0.8 0.8 0.8\nnewmtl OL\nKd 0 0 0\n");
+    fs::write_file(fs::join(carmen, "source/carmen.obj"), "mtllib carmen.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nusemtl CarmenB\nf 1 2 3\nusemtl CarmenF\nf 1 3 4\nusemtl CarmenH\nf 2 3 4\nusemtl OL\nf 1 2 4\n");
+    for (const char *n : {"CarmenB", "CarmenF", "CarmenH"}) r162_png(fs::join(carmen, std::string("textures/") + n + "_Base_color.png"), 0xFFCC2222u);
+    ImportResult rc;
+    CHECK(import_model(fs::join(carmen, "source/carmen.obj"), rc));
+    int textured = 0;
+    bool ol_bare = false;
+    for (const MaterialPtr &m : rc.materials) {
+      if (m->name == "OL") ol_bare = m->base_map.empty();
+      else textured += fs::filename(m->base_map.path) == m->name + "_Base_color.png";
+    }
+    std::printf("    Carmen: %d of 3 textured with their own file, OL bare %s\n", textured, ol_bare ? "yes" : "no");
+    CHECK(textured == 3 && ol_bare);
+  });
+  test("texture finder: a Unity Textures folder full of .meta files is read; a set of only a height map leaves its material bare and is reported; Wood_01 and Rock_01 don't pair; Arm doesn't take Armor's set", [&] {
+    const std::string dir = fs::join(fs::join(test_dir(), "r162_edge"), "model");
+    fs::make_dirs(fs::join(dir, "Textures"));
+    fs::write_file(fs::join(dir, "set.mtl"), "newmtl Crate\nKd 0.8 0.8 0.8\nnewmtl Mountain\nKd 0.8 0.8 0.8\nnewmtl Wood_01\nKd 0.8 0.8 0.8\nnewmtl Rock_01\nKd 0.8 0.8 0.8\nnewmtl Arm\nKd 0.8 0.8 0.8\n");
+    fs::write_file(fs::join(dir, "set.obj"), "mtllib set.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 2 0 0\nusemtl Crate\nf 1 2 3\nusemtl Mountain\nf 1 3 4\nusemtl Wood_01\nf 2 3 4\nusemtl Rock_01\nf 1 2 4\nusemtl Arm\nf 2 5 3\n");
+    for (int i = 0; i < 60; i++) fs::write_file(fs::join(dir, strprintf("Textures/file%02d.png.meta", i)), "meta");  // (Unity's sidecars)
+    r162_png(fs::join(dir, "Textures/Crate_BaseColor.png"), 0xFFCC2222u);
+    r162_png(fs::join(dir, "Textures/Mountain_Height.png"), 0xFF777777u);
+    r162_png(fs::join(dir, "Textures/Timber_BaseColor.png"), 0xFF996633u);  // (one set left for Wood_01 and Rock_01: no likeness, no pair)
+    r162_png(fs::join(dir, "Textures/Armor_BaseColor.png"), 0xFF888899u);
+    ImportResult r;
+    CHECK(import_model(fs::join(dir, "set.obj"), r));
+    std::map<std::string, std::string> maps;
+    for (const MaterialPtr &m : r.materials) maps[m->name] = fs::filename(m->base_map.path);
+    std::string notes;
+    for (const std::string &n : r.notes) notes += "\n      " + n;
+    bool height_noted = false, mountain_bare_noted = false;
+    for (const std::string &n : r.notes) {
+      height_noted = height_noted || (n.find("Mountain_Height.png") != std::string::npos && n.find("no slot") != std::string::npos);
+      mountain_bare_noted = mountain_bare_noted || (n.find("no texture found") != std::string::npos && n.find("Mountain") != std::string::npos);
+    }
+    std::printf("    Crate '%s', Mountain '%s', Wood_01 '%s', Rock_01 '%s', Arm '%s'; notes:%s\n", maps["Crate"].c_str(), maps["Mountain"].c_str(), maps["Wood_01"].c_str(),
+                maps["Rock_01"].c_str(), maps["Arm"].c_str(), notes.c_str());
+    CHECK(maps["Crate"] == "Crate_BaseColor.png" && maps["Mountain"].empty() && maps["Wood_01"].empty() && maps["Rock_01"].empty() && maps["Arm"].empty());
+    CHECK(height_noted && mountain_bare_noted);
+  });
+  /* ---------------------------------------------------------------- round 163: bone lengths on import (task 0144) */
+  /* A glTF written by the test, as Blender's FBX export lays a rig out: an armature node scaled x100 holding a chain
+   * Upper (1 cm up in its units: 1 m), Lower, and two leaves - "Lower_end" (Blender's leaf bone) and "Tip" (a real end
+   * bone with no child); a triangle skinned to the chain so the joints are bones. */
+  auto r163_gltf = [](const std::string &path) {
+    R156Bin bin;
+    bin.v3({0, 0, 0}), bin.v3({0.1f, 0, 0}), bin.v3({0, 0.1f, 0});  // positions: 36 bytes
+    bin.u16(0), bin.u16(1), bin.u16(2), bin.u16(0);                   // indices: 6 (+2 pad): 8
+    for (int v = 0; v < 3; v++) bin.u8(0), bin.u8(1), bin.u8(0), bin.u8(0);  // joints (Upper, Lower): 12 at 44
+    for (int v = 0; v < 3; v++) bin.f(0.5f), bin.f(0.5f), bin.f(0), bin.f(0);  // weights: 48 at 56
+    static const char *const b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string enc;
+    const std::string &d = bin.s;
+    for (size_t i = 0; i < d.size(); i += 3) {
+      const uint32_t n = (uint32_t)(uint8_t)d[i] << 16 | (i + 1 < d.size() ? (uint32_t)(uint8_t)d[i + 1] << 8 : 0) | (i + 2 < d.size() ? (uint32_t)(uint8_t)d[i + 2] : 0);
+      enc += b64[n >> 18 & 63], enc += b64[n >> 12 & 63];
+      enc += i + 1 < d.size() ? b64[n >> 6 & 63] : '=';
+      enc += i + 2 < d.size() ? b64[n & 63] : '=';
+    }
+    const std::string json = R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0,5]}],
+"nodes":[{"name":"Armature","scale":[100,100,100],"children":[1]},{"name":"Upper","translation":[0,0,0],"children":[2]},
+{"name":"Lower","translation":[0,0.01,0],"children":[3,4,6]},{"name":"Lower_end","translation":[0,0.005,0]},{"name":"Tip","translation":[0.002,0,0]},
+{"name":"Tri","mesh":0,"skin":0},{"name":"mixamorig:HeadTop_End","translation":[0,0.003,0]}],
+"skins":[{"joints":[1,2,3,4,6]}],
+"meshes":[{"name":"Tri","primitives":[{"attributes":{"POSITION":0,"JOINTS_0":2,"WEIGHTS_0":3},"indices":1}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[0.1,0.1,0]},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"},
+{"bufferView":2,"componentType":5121,"count":3,"type":"VEC4"},{"bufferView":3,"componentType":5126,"count":3,"type":"VEC4"}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6},{"buffer":0,"byteOffset":44,"byteLength":12},{"buffer":0,"byteOffset":56,"byteLength":48}],
+"buffers":[{"byteLength":104,"uri":"data:application/octet-stream;base64,)" + enc + R"("}]})";
+    fs::make_dirs(fs::parent(path));
+    fs::write_file(path, json);
+  };
+  auto r163_world_length = [](const GameObject &g) {
+    const Bone *b = g.get<Bone>();
+    return b ? length(g.world_matrix().point(Vec3(0, b->length, 0)) - g.world_position()) : -1.0f;
+  };
+  test("bone lengths: under an armature scaled x100 a leaf bone is 10 cm in the world, not 10 m; Blender's \"_end\" leaf becomes its parent's tail", [&] {
+    const std::string file = fs::join(fs::join(test_dir(), "r163"), "scaled.gltf");
+    r163_gltf(file);
+    ImportResult r;
+    const bool ok = import_model(file, r);
+    CHECK(ok);
+    if (!ok) return (void)std::printf("    %s\n", r.error.c_str());
+    Scene s;
+    instantiate_import(s, r, "scaled", nullptr);
+    GameObject *upper = s.find_by_name("Upper"), *lower = s.find_by_name("Lower"), *tip = s.find_by_name("Tip"), *end = s.find_by_name("Lower_end");
+    CHECK(upper && lower && tip && !end && !s.find_by_name("mixamorig:HeadTop_End"));  // (Mixamo's "_End" folds too)
+    if (!upper || !lower || !tip) return;
+    const float lu = r163_world_length(*upper), ll = r163_world_length(*lower), lt = r163_world_length(*tip);
+    bool noted = false;
+    for (const std::string &n : r.notes) noted = noted || n.find("end bone") != std::string::npos;
+    std::printf("    world lengths: Upper %.3f m (to Lower), Lower %.3f m (to its folded _end), Tip %.3f m (half its parent's); the fold noted: %s\n", lu, ll, lt, noted ? "yes" : "no");
+    CHECK(std::fabs(lu - 1.0f) < 1e-3f && std::fabs(ll - 0.5f) < 1e-3f && std::fabs(lt - 0.25f) < 1e-3f && noted);
+  });
+  test("bone lengths: Blender's FBX and GLB rigs have no bone longer than their chain and no leaf longer than half its parent; a leaf's tail still drags", [&] {
+    for (const char *file : {"tests/fixtures/rig_tube.fbx", "tests/fixtures/rig_tube.glb", "tests/fixtures/anim_arm.fbx", "tests/fixtures/anim_arm.glb"}) {
+      ImportResult r;
+      CHECK(import_model(file, r));
+      Scene s;
+      instantiate_import(s, r, "rig", nullptr);
+      float longest = 0.0f, leaf_longest = 0.0f;
+      int bones = 0, leaves = 0;
+      bool half = true;  // (every leaf at most half its parent, and at least a centimetre)
+      s.for_each([&](GameObject &g) {
+        if (!g.get<Bone>()) return;
+        bones++;
+        bool has_bone_child = false;
+        for (GameObject *c : g.children) has_bone_child = has_bone_child || c->get<Bone>();
+        const float l = r163_world_length(g);
+        longest = std::max(longest, l);
+        if (has_bone_child) return;
+        leaves++, leaf_longest = std::max(leaf_longest, l);
+        if (g.parent && g.parent->get<Bone>()) half = half && l <= 0.5f * r163_world_length(*g.parent) + 1e-4f && l >= 0.01f;
+      });
+      std::printf("    %s: %d bones (%d leaves), the longest %.3f m, the longest leaf %.3f m, every leaf at most half its parent: %s\n", fs::filename(file).c_str(), bones, leaves,
+                  longest, leaf_longest, half ? "yes" : "no");
+      CHECK(bones >= 2 && longest < 1.5f && leaf_longest < 0.6f && leaf_longest > 0.02f && half);
+    }
+    /* A dragged tail keeps metres: the leaf of the scaled rig set to 0.3 m reads 0.3 m. */
+    const std::string file = fs::join(fs::join(test_dir(), "r163"), "scaled.gltf");
+    Editor ed;
+    r34_open(ed);
+    ImportResult r;
+    CHECK(import_model(file, r));
+    GameObject *root = instantiate_import(ed.scene(), r, "scaled", nullptr);
+    GameObject *tip = ed.scene().find_by_name("Tip");
+    if (root && tip) {
+      ed.set_bone_ends(*tip, tip->world_position(), tip->world_position() + Vec3(0, 0.3f, 0), nullptr);
+      std::printf("    a leaf's tail dragged to 0.3 m away reads %.3f m\n", r163_world_length(*tip));
+      CHECK(std::fabs(r163_world_length(*tip) - 0.3f) < 1e-3f);
+    }
+  });
+  test("texture finder: names that say the same thing match (Body and T_character_body_2k_BaseColor); a lone image like Hand_R does not; loose in a folder called Downloads nothing beyond the model's own folder is read", [&] {
+    /* (a) Similarity: materials Body and Hand; sets T_character_body_2k (a size word dropped) and a lone Hand_R.png. (The
+     * model two folders deep: the folders beside its parent are other tests'.) */
+    const std::string dir = fs::join(fs::join(test_dir(), "r162_sim"), "model");
+    fs::make_dirs(dir);
+    fs::write_file(fs::join(dir, "figure.mtl"), "newmtl Body\nKd 0.8 0.8 0.8\nnewmtl Hand\nKd 0.8 0.8 0.8\n");
+    fs::write_file(fs::join(dir, "figure.obj"), "mtllib figure.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nusemtl Body\nf 1 2 3\nusemtl Hand\nf 1 3 4\n");
+    r162_png(fs::join(dir, "T_character_body_2k_BaseColor.png"), 0xFFCC2222u);
+    r162_png(fs::join(dir, "T_character_body_2k_Normal.png"), 0xFF8080FFu);
+    r162_png(fs::join(dir, "Hand_R.png"), 0xFF777777u);
+    ImportResult r;
+    CHECK(import_model(fs::join(dir, "figure.obj"), r));
+    MaterialPtr body, hand;
+    for (const MaterialPtr &m : r.materials) (m->name == "Body" ? body : hand) = m;
+    std::printf("    Body: %s (normal %s); Hand: '%s'\n", body ? fs::filename(body->base_map.path).c_str() : "-", body ? fs::filename(body->normal_map.path).c_str() : "-",
+                hand ? hand->base_map.path.c_str() : "-");
+    CHECK(body && fs::filename(body->base_map.path) == "T_character_body_2k_BaseColor.png" && fs::filename(body->normal_map.path) == "T_character_body_2k_Normal.png");
+    CHECK(hand && hand->base_map.empty() && hand->roughness_map.empty());
+    /* (b) Loose in "Downloads": a model there takes textures beside it, none from the folders around. */
+    const std::string downloads = fs::join(fs::join(test_dir(), "r162_crawl"), "Downloads");
+    fs::make_dirs(fs::join(downloads, "stuff"));
+    fs::make_dirs(fs::join(fs::join(test_dir(), "r162_crawl"), "other"));
+    fs::write_file(fs::join(downloads, "loose.mtl"), "newmtl Body\nKd 0.8 0.8 0.8\n");
+    fs::write_file(fs::join(downloads, "loose.obj"), "mtllib loose.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nusemtl Body\nf 1 2 3\n");
+    r162_png(fs::join(downloads, "stuff/Body_BaseColor.png"), 0xFFCC2222u);
+    r162_png(fs::join(fs::join(test_dir(), "r162_crawl"), "other/Body_BaseColor.png"), 0xFFCC2222u);
+    ImportResult rl;
+    CHECK(import_model(fs::join(downloads, "loose.obj"), rl) && !rl.materials.empty());
+    const bool none = rl.materials[0]->base_map.empty();
+    std::printf("    loose in Downloads: %s\n", none ? "nothing taken from the folders around" : rl.materials[0]->base_map.path.c_str());
+    CHECK(none);
+    /* ...and the same model in a folder of its own under Downloads reads that folder's tree (textures/ in it), not the
+     * other folders under Downloads (stuff/). */
+    const std::string own = fs::join(downloads, "model");
+    fs::make_dirs(own);
+    fs::copy_file(fs::join(downloads, "loose.obj"), fs::join(own, "loose.obj"));
+    fs::copy_file(fs::join(downloads, "loose.mtl"), fs::join(own, "loose.mtl"));
+    r162_png(fs::join(own, "textures/Body_Base_color.png"), 0xFFCC2222u);
+    ImportResult ro;
+    CHECK(import_model(fs::join(own, "loose.obj"), ro) && !ro.materials.empty());
+    std::printf("    in its own folder under Downloads: %s\n", fs::filename(ro.materials[0]->base_map.path).c_str());
+    CHECK(fs::filename(ro.materials[0]->base_map.path) == "Body_Base_color.png");
+  });
+  test("texture finder: dropped into the editor, the robe's textures from textures/ are copied into Assets/Textures/robe/ and its .mat files use them", [&] {
+    const std::string file = r162_robe(fs::join(test_dir(), "r162_editor"));
+    for (const char *d : {"Assets/Materials/robe", "Assets/Textures/robe"})
+      if (fs::exists(fs::join(scratch_project(), d))) fs::move_to_trash(fs::join(scratch_project(), d));  // (an earlier run's)
+    Editor ed;
+    r34_open(ed);
+    ed.command("import " + file);
+    ed.step_frame_headless();
+    MaterialPtr a = material_asset("Assets/Materials/robe/RobeA.mat"), b = material_asset("Assets/Materials/robe/RobeB.mat");
+    const bool copied = a && b && a->base_map.path == "Assets/Textures/robe/RobeA_Base_color.png" && fs::exists(resolve_asset_path(a->base_map.path)) &&
+                        b->normal_map.path == "Assets/Textures/robe/RobeB_Normal_OpenGL.png" && fs::exists(resolve_asset_path(b->normal_map.path));
+    std::printf("    RobeA.mat: %s; RobeB.mat normal: %s\n", a ? a->base_map.path.c_str() : "-", b ? b->normal_map.path.c_str() : "-");
+    CHECK(copied);
   });
 }

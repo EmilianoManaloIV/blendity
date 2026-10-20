@@ -38,6 +38,7 @@ struct ImportedNode {
   Mat4 bind_world;
   std::vector<std::pair<std::string, float>> shape_weights;  // the mesh's shape keys' weights as the file left them (task 0135)
   float length = 0.0f;  // a bone's length when the file says it (MMD: to its tail); 0: to its first child
+  bool folded = false;  // an end bone folded into its parent's tail (task 0144): no object is made for it
 };
 
 /* Rig parts beyond the bones (task 0136), on nodes by index. IK on a chain's end bone (its tip reaches the target);
@@ -91,6 +92,8 @@ struct ImportResult {
    * the images written to the cache (two embedded "diffuse.png" of different content get two names). */
   bool listed = false;
   std::vector<std::string> listing;
+  std::vector<int> listing_distance;  // each image's distance from the model's folder (task 0143)
+  std::vector<char> listing_beside;   // ...and whether it lies in a folder beside the model's, not its own tree
   std::map<std::string, std::string> derived;
   std::vector<std::string> written;
 };
@@ -141,7 +144,13 @@ std::string import_cache_dir(const ImportResult &r);
  * (Body_BaseColor, T_Body_N, ...) onto the materials the file left without textures. */
 void complete_materials(ImportResult &r);
 
-/* Creates GameObjects for an import result under `parent` (may be null). `made`: the object of each node. */
+/* End bones folded into their parents (task 0144): a weightless leaf named "<bone>_end" / "_End" / "_END" / ".end" /
+ * " End" / " end" (Blender's FBX leaf bones, Mixamo's HeadTop_End, BVH's end sites, VRoid's spring tails): the
+ * parent's length reaches it and no object is made for it. The count. */
+size_t fold_end_bones(ImportResult &r);
+/* Creates GameObjects for an import result under `parent` (may be null). `made`: the object of each node (null for a
+ * folded end bone). Bones get their lengths: to their first child, else in metres (a tenth of a metre, or half the
+ * parent's) whatever the armature's scale. */
 GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::string &root_name, GameObject *parent, std::vector<GameObject *> *made = nullptr);
 /* A node's path below the import's root, as anim_path names it (a single node is the root itself: ""). The clips'
  * tracks are made with these; the editor rewrites them onto the objects made (an armature renamed for uniqueness). */

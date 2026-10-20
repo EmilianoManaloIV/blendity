@@ -46,9 +46,7 @@ void Editor::set_bone_ends(GameObject &g, Vec3 head, Vec3 tail, const Quat *base
   g.set_world_position(head);
   g.set_world_rotation(normalize(rotation_between(y, d / len) * rot));
   /* The length is in the bone's own units: a scaled armature (a 0.01 FBX import) has world lengths 100 times smaller. */
-  const Mat4 &w = g.world_matrix();
-  const float unit = length(w.point(Vec3(0, 1, 0)) - w.point(Vec3(0.0f)));
-  b->length = unit > 1e-8f ? len / unit : len;
+  b->length = len / bone_world_unit(g);
   for (const Kept &k : kids) {
     k.obj->set_world_position(k.pos);
     k.obj->set_world_rotation(k.rot);

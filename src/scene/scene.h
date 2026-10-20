@@ -988,6 +988,9 @@ struct BoneSegment;  // skin_weights.h
 /* Each deforming bone of the modifier's armature at rest, head to tail, in the mesh's space (task 0057). */
 bool skin_bone_segments(const SkinModifier &s, std::vector<BoneSegment> &out, std::string *error = nullptr);
 Quat slerp(Quat a, Quat b, float t);  // skin.cpp
+/* How long one unit of a bone's length is in the world: its world scale along its +Y (a Blender FBX armature is scaled
+ * x100 or x0.01, and a bone's `length` is in its own units). 1 when the matrix is degenerate (task 0144). */
+float bone_world_unit(const GameObject &bone);  // skin.cpp
 
 /* Blender: Inverse Kinematics bone constraint (task 0048). On a chain's end bone: the chain turns so the end's tip
  * reaches the target object; two bones are solved exactly in the pole's plane, longer chains by CCD (ik.cpp). */

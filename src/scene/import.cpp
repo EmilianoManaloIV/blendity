@@ -43,7 +43,36 @@ bool import_model(const std::string &path, ImportResult &out) {
   out.source = path;
   if (!import_by_format(path, out)) return false;
   complete_materials(out);  // (task 0134: every mesh a material; texture sets found by name)
+  if (const size_t folded = fold_end_bones(out)) out.notes.push_back(strprintf("%zu end bone(s) folded into their parents' tails", folded));
   return true;
+}
+
+size_t fold_end_bones(ImportResult &r) {
+  auto is_end_name = [](const std::string &n) {
+    for (const char *suffix : {"_end", ".end", " End", "_End", " end", "_END"}) {
+      const size_t l = std::strlen(suffix);
+      if (n.size() > l && n.compare(n.size() - l, l, suffix) == 0) return true;
+    }
+    return false;
+  };
+  std::vector<int> children(r.nodes.size(), 0);
+  for (const ImportedNode &n : r.nodes)
+    if (n.parent >= 0 && (size_t)n.parent < r.nodes.size()) children[(size_t)n.parent]++;
+  size_t folded = 0;
+  for (size_t i = 0; i < r.nodes.size(); i++) {
+    ImportedNode &n = r.nodes[i];
+    if (!n.is_bone || n.mesh || children[i] || n.parent < 0 || !r.nodes[(size_t)n.parent].is_bone || !is_end_name(n.name)) continue;
+    bool weighted = false;  // (a leaf some vertices follow is a bone, whatever its name)
+    for (const ImportedSkin &sk : r.skins) {
+      const Mesh *m = sk.mesh_node >= 0 && (size_t)sk.mesh_node < r.nodes.size() ? r.nodes[(size_t)sk.mesh_node].mesh.get() : nullptr;
+      const int gi = m ? m->find_group(n.name) : -1;
+      weighted = weighted || (gi >= 0 && std::any_of(m->vertex_groups[(size_t)gi].weights.begin(), m->vertex_groups[(size_t)gi].weights.end(), [](float w) { return w > 0.0f; }));
+    }
+    if (weighted) continue;
+    n.folded = true;
+    folded++;
+  }
+  return folded;
 }
 
 /* ===================================================================== */
@@ -614,6 +643,7 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
   std::vector<GameObject *> made(r.nodes.size(), nullptr);
   for (size_t i = 0; i < r.nodes.size(); i++) {
     const ImportedNode &n = r.nodes[i];
+    if (n.folded) continue;
     GameObject *g = scene.create(root ? n.name : root_name, root ? root : parent);
     Transform t;
     t.position = n.position;
@@ -651,10 +681,20 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
     }
     return rest_world[(size_t)i];
   };
+  std::vector<Vec3> rest_local(r.nodes.size(), Vec3(0.0f));  // each bone's rest position in its parent (a folded leaf's too)
   for (size_t i = 0; i < r.nodes.size(); i++) {
-    if (!r.nodes[i].is_bone || !made[i]) continue;
-    Bone *b = made[i]->add<Bone>();
     const ImportedNode &n = r.nodes[i];
+    if (!n.is_bone || (!made[i] && !n.folded)) continue;
+    rest_local[i] = n.position;
+    if (n.has_bind) {
+      const Mat4 parent_rest = n.parent >= 0 ? at_rest(n.parent) : Mat4::identity();
+      if (std::fabs(dot(cross(parent_rest.column(0), parent_rest.column(1)), parent_rest.column(2))) > 1e-12f) {
+        const Vec3 p = (parent_rest.inverse() * n.bind_world).translation();
+        if (finite_bits(p.x) && finite_bits(p.y) && finite_bits(p.z)) rest_local[i] = p;
+      }
+    }
+    if (!made[i]) continue;
+    Bone *b = made[i]->add<Bone>();
     if (n.has_bind) {
       const Mat4 parent_rest = n.parent >= 0 ? at_rest(n.parent) : Mat4::identity();
       const float det = dot(cross(parent_rest.column(0), parent_rest.column(1)), parent_rest.column(2));
@@ -672,15 +712,31 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
     else
       b->set_rest(made[i]->local());
   }
-  /* Long enough to reach the first child joint, at rest. */
-  for (size_t i = 0; i < r.nodes.size(); i++) {
-    Bone *b = r.nodes[i].is_bone && made[i] ? made[i]->get<Bone>() : nullptr;
-    if (!b) continue;
+  /* Long enough to reach the first child joint at rest (a folded end bone counts: it is the tail); a bone with no
+   * child below it gets a length in metres whatever the armature's scale - half its parent's, else 10 cm - since its
+   * `length` is in its own units (a Blender FBX armature is scaled x100: 0.1 of those would be 10 m). Parents first. */
+  std::vector<size_t> order;
+  for (size_t i = 0; i < r.nodes.size(); i++)
+    if (r.nodes[i].is_bone && made[i]) order.push_back(i);
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    int da = 0, db = 0;
+    for (int p = r.nodes[a].parent; p >= 0 && da < 100000; p = r.nodes[(size_t)p].parent) da++;
+    for (int p = r.nodes[b].parent; p >= 0 && db < 100000; p = r.nodes[(size_t)p].parent) db++;
+    return da < db;
+  });
+  for (size_t i : order) {
+    Bone *b = made[i]->get<Bone>();
     float len = r.nodes[i].length;
     for (size_t c = 0; c < r.nodes.size() && len <= 0.0f; c++)
-      if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone && made[c])
-        if (const Bone *cb = made[c]->get<Bone>()) len = std::max(len, length(cb->rest_position));
-    b->length = len > 1e-4f ? len : 0.1f;
+      if (r.nodes[c].parent == (int)i && r.nodes[c].is_bone && (made[c] || r.nodes[c].folded)) len = std::max(len, length(rest_local[c]));
+    if (len > 1e-4f) {
+      b->length = len;
+      continue;
+    }
+    const int p = r.nodes[i].parent;
+    const Bone *pb = p >= 0 && made[(size_t)p] ? made[(size_t)p]->get<Bone>() : nullptr;
+    const float metres = pb ? std::max(0.01f, 0.5f * pb->length * bone_world_unit(*made[(size_t)p])) : 0.1f;
+    b->length = metres / bone_world_unit(*made[i]);
   }
   for (const ImportedSkin &sk : r.skins) {
     if (sk.mesh_node < 0 || sk.mesh_node >= (int)made.size() || !made[(size_t)sk.mesh_node] || sk.joints.empty()) continue;

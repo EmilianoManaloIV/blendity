@@ -2,6 +2,81 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-19 (round 163): bone handles the right size on import (task 0144, ADR 0047)
+
+**Asked:** the Carmen import's bone handles looked huge: "is there a way to fix that when we import any model format?"
+
+**Fixed**
+- A bone's length is in its own units, and a leaf bone (no bone below it) got a default of 0.1 of them. Blender's FBX
+  export scales the armature x100 and writes an `_end` leaf under every chain, so each became a 10 m spike (and
+  under a x0.01 armature bones vanished). Now a leaf's length is in metres whatever the scale: half its parent's,
+  else 10 cm.
+- Weightless end bones are folded into their parents: Blender's `_end` leaves (`Eye.L_end`, `HairBase.006_end`...),
+  Mixamo's `HeadTop_End`, BVH's end sites, VRoid's `_end` spring tails: the parent's tail reaches them and no object
+  is made for them. The Console says how many. Every format goes through the same code (MMD gives its own tails;
+  a Collada leaf with no end site takes the metres default).
+- A baked clip's "this number never moves" test allowed a millionth of a degree; on macOS the angles read back from
+  quaternions jitter by more, so a turning bone got two extra flat tracks (#109's macOS run). A thousandth of a
+  degree now, a hundredth of a millimetre for moves.
+- Three tools read a bone's length as metres (the spring chains' collision radius, Add IK's pole distance, the body's
+  capsules): under a scaled armature they were a hundred times off; they measure the bone in the world now.
+
+**Checked**
+- New tests (round 163): a glTF with an armature scaled x100: Upper 1 m to Lower, Lower 0.5 m to its folded `_end`,
+  Tip 25 cm (half its parent's), the fold noted; Blender's four rig fixtures: no bone longer than its chain, no leaf
+  longer than half its parent nor shorter than 2 cm; a leaf's tail dragged to 0.3 m reads 0.3 m.
+- The Rigging, IK, skin and spring groups unchanged; after the review every leaf is checked against half its parent
+  and Mixamo's `HeadTop_End` folds.
+- Unit checks (rounds 162-163 together): Windows 11,014, 0 failed (865 tests); render-cache verify mode 11,015,
+  0 failed, 0 stale pictures. Linux with libraries: 10,750, 0 failed. Sanitizer build: 10,628, 0 failed, no reports.
+  `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`,
+  `modifiers_ngon`, `editor_render`: 0 problems, no change.
+- The user's folder, imported headless by the rebuilt app: CarmenB, CarmenF and CarmenH textured from `textures/`,
+  OL bare, 16 end bones folded, the handles the size of the bones.
+
+## 2026-10-19 (round 162): the texture finder (task 0143, ADR 0047)
+
+**Asked:** a Sketchfab download (`carmen-limbus-company/source/CarmenSF.fbx` with `textures/Carmen{B,F,H}_Base_color.png`)
+came in untextured: "why isn't the textures importing?", and then "a system where this can automatically find relevant
+textures in a folder, so that I don't have to look for them and import them manually".
+
+**Fixed**
+- The FBX links no textures at all, and the matcher of round 154 looked only in the model's own folder (`source/`)
+  and read `CarmenB_Base_color` as a map called "color" of `CarmenB_Base`, never `CarmenB`.
+
+**Added**
+- **The texture finder:** every import looks through the folders around the model - its own folder and three levels
+  below, then the folders beside it two levels down (Sketchfab's `source/` + `textures/`, Unity packages); never
+  into Downloads, Desktop, Documents, a home folder or a drive root, and not into folders full of other files; at
+  most 2,000 images.
+- **Names read as people write them:** two-word kinds (`Base_color`, `Normal_OpenGL`, `Roughness_map`,
+  `Metallic_Smoothness`), sizes and tiles dropped (`_2k`, `_4096`, `.1001`), AO / opacity / height maps recognised
+  (and reported: Blendity has no slot for them).
+- **Pairing by likeness:** each bare material is scored against every set (the same name; one inside the other;
+  the words they share) through its own name and its meshes'; the best above 0.6 wins, nearest folder first. When
+  as many materials as sets are left and each has its own best, they pair by that; a lone material with a lone set
+  always does.
+- **The Console says** which file went to which material and from where, what stayed bare, what was seen but not
+  used, and that a wrong guess is one slot to change in the Inspector.
+- **Learn:** the "Importing models" lesson says so.
+
+**Checked**
+- New tests (round 162):
+  - Sketchfab's layout with two-word names: RobeA and RobeB textured (RobeB's normal and roughness too), Trim's own
+    colour kept, the AO map reported;
+  - `Body` pairs with `T_character_body_2k_BaseColor` (and its normal); `Hand_R.png` alone textures nothing;
+  - a model loose in a folder called Downloads takes nothing from the folders around it; in a folder of its own
+    under Downloads it looks around as usual;
+  - dropped into the editor: the textures copied into `Assets/Textures/robe/`, the `.mat` files using them.
+- Round 154's tests unchanged (the moved link, the lone `Rock_d`, `Hand_R`, the flat colours).
+- After the review: a Unity Textures folder of `.meta` sidecars is read; a height-only set leaves its material bare
+  and is reported; `Wood_01` and `Rock_01` don't pair; `Arm` doesn't take `Armor`'s set; the user's folder made
+  synthetic (CarmenB/F/H textured, OL bare).
+- **Fixed on review:** a Unity texture folder (one `.meta` a texture) was skipped as "a folder of other files"; the
+  crawl had no bound on folder listings (a library on a slow disk could stall the drop: now 400 listings or 150 ms);
+  a set of only AO or height maps could "win" a material and leave it bare without a word.
+- Checked with round 163's chain (see its entry).
+
 ## 2026-10-19 (round 161): Collada (task 0141, ADR 0047)
 
 **Asked:** round 154's "other rigged character formats": Collada, what Blender, Maya, SketchUp and Mixamo export.
