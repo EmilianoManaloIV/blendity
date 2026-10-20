@@ -671,10 +671,10 @@ void read_animations(Dae &d, ImportResult &out, const std::string &clip_name) {
       rx.push_back(last.x), ry.push_back(last.y), rz.push_back(last.z);
       end = std::max(end, t);
     }
-    auto varies = [](const std::vector<float> &vals) { return std::any_of(vals.begin(), vals.end(), [&](float x) { return std::fabs(x - vals[0]) > 1e-6f; }); };
+    auto varies = [](const std::vector<float> &vals, float tol) { return std::any_of(vals.begin(), vals.end(), [&](float x) { return std::fabs(x - vals[0]) > tol; }); };
     const std::string path = node_path(out, in);
     auto put = [&](const char *property, int axis, const std::vector<float> &vals, float tolerance) {
-      if (!varies(vals)) return;
+      if (!varies(vals, tolerance * 0.1f)) return;  // (a number that never moves: no track; angles jitter by float noise)
       std::vector<AnimKey> k(vals.size());
       for (size_t i = 0; i < vals.size(); i++) k[i].frame = frames[i], k[i].value = vals[i], k[i].interp = AnimLinear;
       reduce_keys(k, tolerance);

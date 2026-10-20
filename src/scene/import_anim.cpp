@@ -43,8 +43,10 @@ std::vector<AnimKey> linear_keys(const std::vector<float> &frames, const std::ve
  * the object's rest angles. */
 void bake_transform(AnimationClip &clip, const std::string &path, const std::vector<float> &frames, const std::vector<Vec3> &pos, const std::vector<Quat> &rot,
                     const std::vector<Vec3> &scl, Vec3 rest_euler) {
-  auto varies = [](const std::vector<float> &v) {
-    return std::any_of(v.begin(), v.end(), [&](float x) { return std::fabs(x - v[0]) > 1e-6f; });
+  /* A number that never moves gets no track: a thousandth of a degree, a hundredth of a millimetre (an angle read
+   * back from a quaternion jitters by more than float noise from one machine to another). */
+  auto varies = [](const std::vector<float> &v, float tol) {
+    return std::any_of(v.begin(), v.end(), [&](float x) { return std::fabs(x - v[0]) > tol; });
   };
   std::vector<Vec3> eul;
   Vec3 last = rest_euler;
@@ -52,9 +54,9 @@ void bake_transform(AnimationClip &clip, const std::string &path, const std::vec
   for (int a = 0; a < 3; a++) {
     std::vector<float> p, s, e;
     for (size_t k = 0; k < frames.size(); k++) p.push_back(pos[k][a]), s.push_back(scl[k][a]), e.push_back(eul[k][a]);
-    if (varies(p)) clip.track(path, "Position", a).keys = reduced(linear_keys(frames, p), kPosTol);
-    if (varies(s)) clip.track(path, "Scale", a).keys = reduced(linear_keys(frames, s), kPosTol);
-    if (varies(e)) clip.track(path, "Rotation", a).keys = reduced(linear_keys(frames, e), kAngleTol);
+    if (varies(p, 1e-5f)) clip.track(path, "Position", a).keys = reduced(linear_keys(frames, p), kPosTol);
+    if (varies(s, 1e-5f)) clip.track(path, "Scale", a).keys = reduced(linear_keys(frames, s), kPosTol);
+    if (varies(e, 1e-3f)) clip.track(path, "Rotation", a).keys = reduced(linear_keys(frames, e), kAngleTol);
   }
 }
 

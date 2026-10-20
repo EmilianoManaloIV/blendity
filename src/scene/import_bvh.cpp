@@ -237,9 +237,9 @@ bool import_bvh_file(const std::string &path, ImportResult &out) {
       px[f] = p.x, py[f] = p.y, pz[f] = p.z;
       moves = moves || (any && length(p - out.nodes[first + i].position) > 1e-6f);
     }
-    auto varies = [](const std::vector<float> &v) { return std::any_of(v.begin(), v.end(), [&](float x) { return std::fabs(x - v[0]) > 1e-6f; }); };
+    auto varies = [](const std::vector<float> &v, float tol) { return std::any_of(v.begin(), v.end(), [&](float x) { return std::fabs(x - v[0]) > tol; }); };
     auto put = [&](const char *property, int axis, const std::vector<float> &v, float tolerance) {
-      if (!varies(v)) return;
+      if (!varies(v, tolerance * 0.1f)) return;  // (a number that never moves: no track; angles jitter by float noise)
       std::vector<AnimKey> k(frames);
       for (size_t f = 0; f < frames; f++) k[f].frame = fr[f], k[f].value = v[f], k[f].interp = AnimLinear;
       reduce_keys(k, tolerance);
