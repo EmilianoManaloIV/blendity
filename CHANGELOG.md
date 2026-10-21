@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 173): the anime pass written up (task 0151)
+
+**Asked:** the anime pass (tasks 0145-0155) documented in one place.
+
+**Added**
+- `docs/tasks/0151-anime-pass-write-up.md`: every task of the pass with its round and PR, where the code lives,
+  the research and what was taken from it, the short path through the tools.
+- ADR 0048 and ADR 0049 gain their References sections (Arc System Works GDC 2015, HoYoverse's face maps, VRM
+  MToon, Pixar's procedural patterns; Jakobsen 2001, Kugelstadt & Schoemer 2016, Macklin 2016 / 2019, Daviet
+  2023, Akyuerek & Sahillioglu 2025).
+
+**Checked**
+- Docs only: the docs test (the manual's chapters and Learn citations) and the suite unchanged.
+- The docs test (the manual's chapters and Learn citations): 5 checks, 0 failed; the suite as round 172's.
+
 ## 2026-10-21 (round 172): soft tissue, the Jiggle modifier, hair rigged from its mesh (task 0153, ADR 0049)
 
 **Asked:** realistic hair and soft-tissue physics for Spring Bones, research based. This round: the soft tissue and

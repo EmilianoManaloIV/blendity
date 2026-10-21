@@ -48,6 +48,14 @@ soft, and one key light.
 - **Light wrap** remaps the signed N.L before the clamp and the shadow test, so the terminator moves while a cast
   shadow and the far side stay dark; MMD's ramps, read at half N.L plus half, are a full wrap.
 
+## References
+- Arc System Works, Junya C. Motomura, "GuiltyGearXrd's Art Style: The X Factor Between 2D and 3D", GDC 2015.
+- HoYoverse's face shadow maps (the "SDF face" of Genshin Impact and later titles; community write-ups of the
+  technique: a map swept by the light's angle round the head's up axis).
+- VRM 1.0, MToon (shade texture, rim, outline); MMD's toon images.
+- Pixar Animation Studios, "Procedural stylized patterns in Elemental", 2023 (flat tones with a line).
+- Blender's NPR practice: Data Transfer of normals from a proxy, the inverted-hull outline.
+
 ## Consequences
 - Old scenes look the same: every new field defaults to the old behaviour, and a style is applied only when picked.
 - A .mat grows ten fields; files and the hash see them through `Material::reflect` like the rest.

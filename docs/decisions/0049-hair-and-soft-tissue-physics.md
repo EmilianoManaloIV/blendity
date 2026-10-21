@@ -54,6 +54,18 @@ following the root - is had more cheaply.
   a ground plane for strands (the body's capsules suffice for a character), a "Show Colliders" overlay (the
   Scene view's bone icons stay; a follow-up if asked).
 
+## References
+- T. Jakobsen, "Advanced Character Physics", GDC 2001 (verlet, constraints by projection).
+- T. Kugelstadt, E. Schoemer, "Position and Orientation Based Cosserat Rods", SCA 2016 (bend-twist with a rest
+  shape: the bend constraint here is its position-only simplification).
+- M. Macklin et al., "XPBD: Position-Based Simulation of Compliant Constrained Dynamics", 2016; "Small Steps in
+  Physics Simulation", SCA 2019 (substeps over iterations).
+- G. Daviet, "Interactive Hair Simulation on the GPU Using ADMM", SIGGRAPH 2023 (strand contacts in a grid).
+- O. Akyuerek, Y. Sahillioglu, "Real-Time Secondary Animation with Spring Decomposed Skinning", CGF 2025 (the
+  Jiggle modifier is its one-handle case).
+- VRM 1.0, VRMC_springBone (stiffness, drag, gravity, hit spheres); games' jiggle bones (acceleration-driven lag,
+  a cone, a counter-scale for volume).
+
 ## Consequences
 - Old chains behave as before: `bend` 0, `root_to_tip` 0 and `wind` 1 with no Wind component give the old pull;
   the label defaults set the new values only when a label is applied again. Bakes stay deterministic (no clock in
