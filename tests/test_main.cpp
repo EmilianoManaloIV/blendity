@@ -33420,12 +33420,14 @@ static void round81_tests() {
   };
   test("spring bones: a bone's name says whether it is the body's or hair, an ear, a tail or cloth (Mixamo, Unity, Rigify, VRM, Japanese rigs)", [] {
     const char *body[] = {"mixamorig:LeftUpLeg", "mixamorig:LeftHandIndex1", "mixamorig:HeadTop_End", "LeftUpperLeg", "DEF-thigh.L", "Spine2",
-                          "RightToeBase", "J_Bip_C_Head", "jaw", "Eye_L", "ForeArm.R"};
+                          "RightToeBase", "J_Bip_C_Head", "jaw", "Eye_L", "ForeArm.R", "Chest", "Hips", "UpperChest", "mixamorig:Spine1"};
     struct S {
       const char *name;
       int label;
     } sec[] = {{"J_Sec_Hair1_03", 0}, {"Ponytail1", 0}, {"tail.002", 2}, {"Mimi_L", 1}, {"Skirt_Front_01", 3}, {"HairFront", 0}, {"Ear.L.001", 1},
-               {"Cape2", 3}, {"shippo_1", 2}, {"kami_back", 0}, {"J_Sec_L_Bust1", 0}, {"Bip001 Ponytail1", 0}};
+               {"Cape2", 3}, {"shippo_1", 2}, {"kami_back", 0}, {"J_Sec_L_Bust1", 4}, {"Bip001 Ponytail1", 0},
+               {"Breast_L", 4}, {"chest_jiggle", 4}, {"Belly", 4}, {"ThighSoft.L", 4}, {"\xe5\xb7\xa6\xe8\x83\xb8", 4},  // (soft tissue, task 0153: 左胸)
+               {"\xe5\xb0\xbb\xe5\xb0\xbe", 2}, {"\xe8\x83\xb8\xe3\x83\xaa\xe3\x83\x9c\xe3\x83\xb3", 3}};  // (尻尾 a tail, 胸リボン a ribbon: not soft)
     const char *neither[] = {"Bone.003", "Earring", "Thing", "Detail1"};
     int wrong = 0;
     for (const char *n : body) wrong += !spring::is_body_bone(n) || spring::secondary_label(n) >= 0;
@@ -39141,5 +39143,416 @@ static void round81_tests() {
     }
     std::printf("    swung a metre along X (the first bone leaning up to %.2f back along X): the bones' lengths within %.4f %%, the joints never further from the curl's 40 degrees than %.1f and %.1f\n", lean, worst * 100.0f, angle[0], angle[1]);
     CHECK(worst < 1e-3f && lean > 0.1f && std::fabs(angle[0] - 40.0f) < 10.0f && std::fabs(angle[1] - 40.0f) < 10.0f);
+  });
+
+  /* ---------------------------------------------------------------- round 172: soft tissue, the Jiggle modifier, hair rigged from its mesh (task 0153, ADR 0049) */
+  test("soft tissue: a Soft bone on a running body trails its acceleration within its cone, keeps its volume, rests within a second, and its settings save", [&] {
+    /* A chest bone up from the hips, a bust bone 10 cm forward off it; the hips bob 5 cm at 3 Hz (a run) for two
+     * seconds, then stand. */
+    auto run = [&](float lag, float limit_deg, float &trail, float &worst_angle, float &worst_volume, float &rest_after, Scene *keep) {
+      Scene local;
+      Scene &s = keep ? *keep : local;
+      GameObject *root = s.create("Rig");
+      root->add<Armature>();
+      GameObject *hip = r139_bone(s, "Hips", root, {0, 1, 0}, Quat(), 0.2f);
+      GameObject *chest = r139_bone(s, "Chest", hip, {0, 0.2f, 0}, Quat(), 0.3f);
+      GameObject *bust = r139_bone(s, "Bust_L", chest, {0.1f, 0.2f, 0.05f}, Quat::euler({90, 0, 0}), 0.1f);  // (+Y turned to +Z: forward)
+      spring::add(*bust, 4);
+      SpringBone &sb = *bust->get<SpringBone>();
+      CHECK(sb.label == 4 && std::fabs(sb.lag - 0.5f) < 1e-6f && std::fabs(sb.limit - 25.0f) < 1e-6f && std::fabs(sb.volume - 1.0f) < 1e-6f && sb.wind == 0.0f);
+      sb.lag = lag, sb.limit = limit_deg, sb.collide = false;
+      trail = 0.0f, worst_angle = 0.0f, worst_volume = 0.0f, rest_after = 0.0f;
+      const Vec3 fwd(0.0f, 0.0f, 1.0f);
+      for (int f = 0; f < 240; f++) {
+        const float t = f / 60.0f;
+        const float y = t < 2.0f ? 1.0f + 0.05f * std::sin(2.0f * kPi * 3.0f * t) : 1.0f;
+        hip->set_local_position({0, y, 0});
+        spring::step(s, 1.0f / 60.0f);
+        const Vec3 head = bust->world_position(), tip = tip_world(bust), target = head + fwd * 0.1f;
+        const Vec3 d = tip - head;
+        const float angle = std::acos(std::max(-1.0f, std::min(1.0f, dot(normalize(d), fwd)))) * 180.0f / kPi;
+        const Vec3 sc = bust->local().scale;
+        if (t < 2.0f) trail = std::max(trail, length(tip - target)), worst_angle = std::max(worst_angle, angle), worst_volume = std::max(worst_volume, std::fabs(sc.x * sc.y * sc.z - 1.0f));
+        if (t >= 3.0f) rest_after = std::max(rest_after, length(tip - target));
+      }
+    };
+    float trail = 0, angle = 0, volume = 0, rest = 0, trail_narrow = 0, angle_narrow = 0, v2 = 0, r2 = 0;
+    Scene saved;
+    run(0.5f, 25.0f, trail, angle, volume, rest, &saved);
+    run(1.0f, 5.0f, trail_narrow, angle_narrow, v2, r2, nullptr);
+    /* A landing: the hips drop 10 cm over three frames and stop; the tissue thrown down past where the spring's own
+     * lag takes it, by Lag (the bob's velocity lag hides the acceleration term in a peak-distance measure). */
+    auto landing = [&](float lag) {
+      R139Tail t;
+      t.root = t.s.create("Rig");
+      t.root->add<Armature>();
+      t.hip = r139_bone(t.s, "Hips", t.root, {0, 1, 0}, Quat(), 0.2f);
+      GameObject *chest = r139_bone(t.s, "Chest", t.hip, {0, 0.2f, 0}, Quat(), 0.3f);
+      GameObject *bust = r139_bone(t.s, "Bust_L", chest, {0.1f, 0.2f, 0.05f}, Quat::euler({90, 0, 0}), 0.1f);
+      spring::add(*bust, 4);
+      bust->get<SpringBone>()->lag = lag;
+      float down = 0.0f;
+      for (int f = 0; f < 90; f++) {
+        const float y = f < 30 ? 1.0f : f < 33 ? 1.0f - (f - 29) * 0.1f / 3.0f : 0.9f;
+        t.hip->set_local_position({0, y, 0});
+        spring::step(t.s, 1.0f / 60.0f);
+        if (f >= 33) down = std::max(down, (bust->world_position().y + 0.0f) - tip_world(bust).y);
+      }
+      return down;
+    };
+    const float thrown = landing(0.5f), thrown0 = landing(0.0f);
+    std::printf("    a bust bone on a 3 Hz run: swings up to %.1f degrees (limit 25; limit 5: %.1f), the scales' product off by %.2f %%, %.2f mm from its place a second after the run stops; "
+                "a landing throws it %.1f mm down (Lag 0: %.1f mm)\n",
+                angle, angle_narrow, volume * 100.0f, rest * 1000.0f, thrown * 1000.0f, thrown0 * 1000.0f);
+    CHECK(thrown > thrown0 + 0.003f && angle <= 26.0f && angle_narrow <= 6.0f && trail_narrow > 0.002f && volume < 0.01f && rest < 0.001f);
+    (void)trail;
+    /* The scales back to 1 when the springs are reset; the settings saved and loaded. */
+    spring::reset(saved);
+    const Vec3 sc = saved.find_by_name("Bust_L")->local().scale;
+    CHECK(std::fabs(sc.x - 1.0f) < 1e-5f && std::fabs(sc.y - 1.0f) < 1e-5f && std::fabs(sc.z - 1.0f) < 1e-5f);
+    SpringBone &sb = *saved.find_by_name("Bust_L")->get<SpringBone>();
+    sb.lag = 0.7f, sb.limit = 12.0f, sb.volume = 0.4f;
+    Scene back;
+    std::string error;
+    CHECK(load_scene_text(save_scene_text(saved), back, error));
+    const SpringBone *bs = back.find_by_name("Bust_L") ? back.find_by_name("Bust_L")->get<SpringBone>() : nullptr;
+    CHECK(bs && bs->label == 4 && std::fabs(bs->lag - 0.7f) < 1e-6f && std::fabs(bs->limit - 12.0f) < 1e-6f && std::fabs(bs->volume - 0.4f) < 1e-6f);
+  });
+
+  test("soft tissue: a Jiggle modifier moves its vertex group with the body's acceleration, within its limit, and nothing outside the group", [&] {
+    Scene s;
+    GameObject *box = s.create("Box");
+    MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+    std::vector<float> w(m->vert_count(), 0.0f);
+    for (size_t v = 0; v < m->vert_count(); v++) w[v] = m->positions[v].y > 0.0f ? 1.0f : 0.0f;  // (the top half jiggles)
+    m->vertex_groups.push_back({"Soft", w});
+    m->touch();
+    box->add<MeshFilter>()->mesh = m;
+    JiggleModifier *j = box->add<JiggleModifier>();
+    j->vertex_group = "Soft", j->lag = 1.0f, j->limit = 0.03f;
+    spring::reset(s);
+    float moved_top = 0.0f, moved_bottom = 0.0f, rest = 0.0f;
+    for (int f = 0; f < 240; f++) {
+      const float t = f / 60.0f;
+      box->set_local_position({0, t < 1.0f ? 0.2f * std::sin(2.0f * kPi * 4.0f * t) : 0.0f, 0});
+      spring::step(s, 1.0f / 60.0f);
+      const Mesh *e = box->evaluated_mesh();
+      if (!e || e->vert_count() != m->vert_count()) break;
+      for (size_t v = 0; v < m->vert_count(); v++) {
+        const float d = length(e->positions[v] - m->positions[v]);
+        if (t < 1.0f) (w[v] > 0.0f ? moved_top : moved_bottom) = std::max(w[v] > 0.0f ? moved_top : moved_bottom, d);
+        if (t >= 2.0f) rest = std::max(rest, d);
+      }
+    }
+    std::printf("    the box shaken at 4 Hz: the top half moved up to %.1f mm (limit 30), the bottom %.2f mm; %.2f mm a second after it stops\n", moved_top * 1000.0f, moved_bottom * 1000.0f,
+                rest * 1000.0f);
+    CHECK(moved_top > 0.002f && moved_top <= 0.0301f && moved_bottom < 1e-6f && rest < 0.001f);
+  });
+
+  test("hair rig: twelve hair cards become twelve chains of three spring bones under a hair rig, the mesh skinned to them with weights summing to one, and undo removes all", [&] {
+    Editor ed;
+    r34_open(ed);
+    /* Twelve cards round a scalp at y = 1, each a strip of three quads hanging outward and down to y = 0.6. */
+    MeshPtr hair = std::make_shared<Mesh>();
+    for (int c = 0; c < 12; c++) {
+      const float a = c * 2.0f * kPi / 12.0f;
+      const Vec3 out(std::cos(a), 0.0f, std::sin(a)), side(-std::sin(a) * 0.02f, 0.0f, std::cos(a) * 0.02f);
+      uint32_t first = (uint32_t)hair->vert_count();
+      for (int r = 0; r < 4; r++) {
+        const Vec3 p = out * (0.1f + 0.03f * r) + Vec3(0.0f, 1.0f - 0.1333f * r, 0.0f);
+        hair->add_vert(p - side);
+        hair->add_vert(p + side);
+      }
+      for (int r = 0; r < 3; r++) hair->add_face({first + 2 * r, first + 2 * r + 1, first + 2 * r + 3, first + 2 * r + 2});
+    }
+    hair->touch();
+    GameObject *obj = ed.scene().create("Hair");
+    obj->add<MeshFilter>()->mesh = hair;
+    obj->add<MeshRenderer>();
+    ed.mark_changed_for_test("Hair Mesh");  // (an undo step with the mesh in place: the rig's undo lands here)
+    ed.command("select Hair");
+    ed.step_frame_headless();
+    ed.command("hair rig");
+    ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Hair Hair Rig");
+    int chains = 0, bones = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!rig) return;
+      for (GameObject *p = g.parent; p; p = p->parent)
+        if (p == rig) {
+          bones += g.get<Bone>() != nullptr;
+          chains += g.get<SpringBone>() != nullptr;
+        }
+    });
+    obj = ed.scene().find_by_name("Hair");
+    const SkinModifier *sk = obj ? obj->get<SkinModifier>() : nullptr;
+    const Mesh *hm = obj && obj->mesh_filter() ? obj->mesh_filter()->mesh.get() : nullptr;
+    float worst_sum = 0.0f;
+    size_t groups = 0;
+    if (hm) {
+      groups = hm->vertex_groups.size();
+      for (size_t v = 0; v < hm->vert_count(); v++) {
+        float sum = 0.0f;
+        for (const VertexGroup &g : hm->vertex_groups)
+          if (g.weights.size() == hm->vert_count()) sum += g.weights[v];
+        worst_sum = std::max(worst_sum, std::fabs(sum - 1.0f));
+      }
+    }
+    std::printf("    hair rig: %d chains, %d bones, %zu vertex groups, the weights' sums within %.4f of 1\n", chains, bones, groups, worst_sum);
+    CHECK(rig && chains == 12 && bones == 36 && sk && sk->object == "Hair Hair Rig" && groups == 36 && worst_sum < 1e-3f);
+    const SpringBone *one = ed.scene().find_by_name("Hair Hair1_1") ? ed.scene().find_by_name("Hair Hair1_1")->get<SpringBone>() : nullptr;
+    CHECK(one && one->label == 0 && spring::chain_bones(*ed.scene().find_by_name("Hair Hair1_1")).size() == 3);
+    ed.command("undo");
+    ed.step_frame_headless();
+    obj = ed.scene().find_by_name("Hair");
+    std::printf("    after undo: the rig %s, the mesh %s, its skin %s, %zu vertex groups\n", ed.scene().find_by_name("Hair Hair Rig") ? "still there" : "gone", obj ? "there" : "GONE",
+                obj && obj->get<SkinModifier>() ? "still there" : "gone", obj && obj->mesh_filter() && obj->mesh_filter()->mesh ? obj->mesh_filter()->mesh->vertex_groups.size() : (size_t)0);
+    CHECK(!ed.scene().find_by_name("Hair Hair Rig") && obj && !obj->get<SkinModifier>() && obj->mesh_filter()->mesh->vertex_groups.empty());
+    /* One shell (a cube) cut into four locks of two bones. */
+    ed.command("create Cube");
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.command("hair rig 4 2");
+    ed.step_frame_headless();
+    int cube_chains = 0;
+    ed.scene().for_each([&](GameObject &g) { cube_chains += g.get<SpringBone>() != nullptr && g.name.rfind("Cube Hair", 0) == 0 && spring::chain_bones(g).size() == 2; });
+    CHECK(ed.scene().find_by_name("Cube Hair Rig") && cube_chains == 4);
+  });
+
+  test("hair rig: a skinned hair mesh hangs its rig under the character's head bone (scaled rig: the bones still end at the tips), the body's groups go, a posed head refuses, more cards than locks merge", [&] {
+    Editor ed;
+    r34_open(ed);
+    auto cards = [&](int count) {
+      MeshPtr hair = std::make_shared<Mesh>();
+      for (int c = 0; c < count; c++) {
+        const float a = c * 2.0f * kPi / count;
+        const Vec3 out(std::cos(a), 0.0f, std::sin(a)), side(-std::sin(a) * 0.01f, 0.0f, std::cos(a) * 0.01f);
+        uint32_t first = (uint32_t)hair->vert_count();
+        for (int r = 0; r < 4; r++) {
+          const Vec3 p = out * (0.1f + 0.03f * r) + Vec3(0.0f, 1.0f - 0.1333f * r, 0.0f);
+          hair->add_vert(p - side);
+          hair->add_vert(p + side);
+        }
+        for (int r = 0; r < 3; r++) hair->add_face({first + 2 * r, first + 2 * r + 1, first + 2 * r + 3, first + 2 * r + 2});
+      }
+      hair->touch();
+      return hair;
+    };
+    /* A body with a Head bone, the rig scaled by 2 (an FBX's centimetres); the hair mesh skinned to it. */
+    GameObject *body = ed.scene().create("Body");
+    body->add<Armature>();
+    body->set_local_scale(Vec3(2.0f));
+    GameObject *head = r139_bone(ed.scene(), "Head", body, {0, 0.4f, 0}, Quat(), 0.1f);  // (at y 0.8 in the world, 0.2 m long)
+    MeshPtr hair = cards(12);
+    hair->vertex_groups.push_back({"Head", std::vector<float>(hair->vert_count(), 1.0f)});
+    GameObject *obj = ed.scene().create("Hair");
+    obj->add<MeshFilter>()->mesh = hair;
+    obj->add<MeshRenderer>();
+    obj->add<SkinModifier>()->object = "Body";
+    ed.mark_changed_for_test("Skinned Hair");
+    ed.command("select Hair");
+    ed.step_frame_headless();
+    /* Posed: refused. */
+    head->set_local_rotation(Quat::euler({0, 30, 0}));
+    ed.command("hair rig");
+    ed.step_frame_headless();
+    const bool refused = !ed.scene().find_by_name("Hair Hair Rig");
+    head->set_local_rotation(Quat());
+    ed.command("hair rig");
+    ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Hair Hair Rig");
+    obj = ed.scene().find_by_name("Hair");
+    const Mesh *hm = obj && obj->mesh_filter() ? obj->mesh_filter()->mesh.get() : nullptr;
+    const SkinModifier *sk = obj ? obj->get<SkinModifier>() : nullptr;
+    float worst_sum = 0.0f, tip_off = 0.0f;
+    bool head_group = false;
+    if (hm) {
+      for (const VertexGroup &g : hm->vertex_groups) head_group = head_group || g.name == "Head";
+      for (size_t v = 0; v < hm->vert_count(); v++) {
+        float sum = 0.0f;
+        for (const VertexGroup &g : hm->vertex_groups) sum += g.weights[v];
+        worst_sum = std::max(worst_sum, std::fabs(sum - 1.0f));
+      }
+    }
+    /* Each chain's last bone ends at its card's lowest vertex (the lengths in the bones' own units under the scaled rig). */
+    int chains = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!g.get<SpringBone>() || g.name.rfind("Hair Hair", 0) != 0) return;
+      chains++;
+      const std::vector<GameObject *> run = spring::chain_bones(g);
+      const Vec3 tip = tip_world(run.back());
+      float nearest = 1e9f;
+      for (const Vec3 &p : hm->positions) nearest = std::min(nearest, length(p - tip));
+      tip_off = std::max(tip_off, nearest);
+    });
+    const std::vector<spring::Collider> caps = spring::body_colliders(*spring::chain_armature(*ed.scene().find_by_name("Hair Hair1_1")));
+    std::printf("    skinned hair: posed head %s; the rig under %s, %d chains, the Head group %s, %zu groups, the weights' sums within %.4f of 1, the chains' tips within %.4f m of a vertex, %zu body capsules seen from a hair bone\n",
+                refused ? "refused" : "RIGGED", rig && rig->parent ? rig->parent->name.c_str() : "nothing", chains, head_group ? "still there" : "gone", hm ? hm->vertex_groups.size() : (size_t)0, worst_sum,
+                tip_off, caps.size());
+    CHECK(refused && rig && rig->parent == ed.scene().find_by_name("Head") && chains == 12 && sk && sk->object == "Hair Hair Rig" && !head_group && hm->vertex_groups.size() == 36 && worst_sum < 1e-3f &&
+          tip_off < 0.01f && caps.size() == 1);
+    /* Forty cards into eight locks. */
+    GameObject *many = ed.scene().create("Mane");
+    many->add<MeshFilter>()->mesh = cards(40);
+    many->add<MeshRenderer>();
+    ed.mark_changed_for_test("Mane");
+    ed.command("select Mane");
+    ed.step_frame_headless();
+    ed.command("hair rig 8 3");
+    ed.step_frame_headless();
+    int mane_chains = 0;
+    ed.scene().for_each([&](GameObject &g) { mane_chains += g.get<SpringBone>() != nullptr && g.name.rfind("Mane Hair", 0) == 0; });
+    CHECK(ed.scene().find_by_name("Mane Hair Rig") && mane_chains == 8);
+  });
+
+  test("soft tissue: a body already moving when Play starts gives no kick, a two-bone soft chain stretches only its last bone, the stretch is baked as scale keys, Volume 0 lets the volume change, and 100 chains of 3 bones step under 0.5 ms", [&] {
+    /* A bust bone forward off a chest; the hips moving at a steady 1 m/s from the first frame: the trail in the first
+     * quarter second no more than the steady one (no kick from a speed read as an acceleration). */
+    auto bust_rig = [&](Scene &s, int bones, float volume) {
+      GameObject *root = s.create("Rig");
+      root->add<Armature>();
+      GameObject *hip = r139_bone(s, "Hips", root, {0, 1, 0}, Quat(), 0.2f);
+      GameObject *chest = r139_bone(s, "Chest", hip, {0, 0.2f, 0}, Quat(), 0.3f);
+      GameObject *bust = r139_bone(s, "Bust_L", chest, {0.1f, 0.2f, 0.05f}, Quat::euler({90, 0, 0}), 0.1f);
+      if (bones > 1) r139_bone(s, "Bust_L2", bust, {0, 0.1f, 0}, Quat(), 0.05f);
+      spring::add(*bust, 4);
+      bust->get<SpringBone>()->volume = volume;
+      return hip;
+    };
+    {
+      auto early_off = [&](float lag) {
+        Scene s;
+        GameObject *hip = bust_rig(s, 1, 1.0f);
+        GameObject *bust = s.find_by_name("Bust_L");
+        bust->get<SpringBone>()->lag = lag;
+        float early = 0.0f;
+        for (int f = 0; f < 15; f++) {
+          hip->set_local_position({f / 60.0f, 1, 0});
+          spring::step(s, 1.0f / 60.0f);
+          early = std::max(early, length(tip_world(bust) - (bust->world_position() + Vec3(0.0f, 0.0f, 0.1f))));
+        }
+        return early;
+      };
+      const float with = early_off(1.0f), without = early_off(0.0f);
+      std::printf("    a body moving at 1 m/s from the first frame: the bust %.1f mm off in the first quarter second with Lag 1, %.1f mm with Lag 0 (no kick from a speed read as an acceleration)\n",
+                  with * 1000.0f, without * 1000.0f);
+      CHECK(with < without + 0.001f);
+    }
+    /* Two bones: the first keeps its scale, the last carries the stretch; a bake writes that stretch as Scale keys. */
+    {
+      Scene s;
+      GameObject *hip = bust_rig(s, 2, 1.0f);
+      GameObject *b1 = s.find_by_name("Bust_L"), *b2 = s.find_by_name("Bust_L2");
+      float first_off = 0.0f, last_off = 0.0f, stretched = 0.0f;
+      for (int f = 0; f < 120; f++) {
+        const float t = f / 60.0f;
+        hip->set_local_position({0, 1, 0.05f * std::sin(2.0f * kPi * 3.0f * t)});  // (bobbing along the bone: it stretches)
+        spring::step(s, 1.0f / 60.0f);
+        const Vec3 s1 = b1->local().scale, s2 = b2->local().scale;
+        first_off = std::max(first_off, std::fabs(s1.x * s1.y * s1.z - 1.0f) + std::fabs(s1.y - 1.0f));
+        last_off = std::max(last_off, std::fabs(s2.x * s2.y * s2.z - 1.0f));
+        stretched = std::max(stretched, std::fabs(s2.y - 1.0f));
+      }
+      AnimationClip clip;
+      clip.frame_rate = 60.0f;
+      for (int f = 0; f <= 60; f += 2) clip.track("Hips", "Position", 2).set_key((float)f, 0.05f * std::sin(2.0f * kPi * 3.0f * f / 60.0f), AnimLinear);
+      AnimationClip baked;
+      const size_t keys = spring::bake(s, *s.find_by_name("Rig"), clip, baked);
+      float baked_stretch = 0.0f;
+      int scale_tracks = 0;
+      for (const AnimTrack &t : baked.tracks) {
+        if (t.property != "Scale") continue;
+        scale_tracks++;
+        for (const AnimKey &k : t.keys) baked_stretch = std::max(baked_stretch, std::fabs(k.value - 1.0f));
+      }
+      std::printf("    two bones bobbing along them: the first bone's scale off by %.4f, the last's product off by %.4f, stretched up to %.1f %%; baked: %zu keys, %d Scale tracks, the stretch up to %.1f %%\n",
+                  first_off, last_off, stretched * 100.0f, keys, scale_tracks, baked_stretch * 100.0f);
+      CHECK(first_off < 1e-5f && last_off < 0.01f && stretched > 0.002f && scale_tracks == 3 && baked_stretch > 0.002f);
+      const Vec3 after = b2->local().scale;
+      CHECK(std::fabs(after.y - 1.0f) < 1e-5f);  // (the bake gives the stretch back)
+    }
+    /* Volume 0: the bone stretches without narrowing, so the product of its scales moves with the stretch. */
+    {
+      Scene s;
+      GameObject *hip = bust_rig(s, 1, 0.0f);
+      GameObject *b = s.find_by_name("Bust_L");
+      float product_off = 0.0f, across_off = 0.0f;
+      for (int f = 0; f < 120; f++) {
+        hip->set_local_position({0, 1, 0.05f * std::sin(2.0f * kPi * 3.0f * f / 60.0f)});
+        spring::step(s, 1.0f / 60.0f);
+        const Vec3 sc = b->local().scale;
+        product_off = std::max(product_off, std::fabs(sc.x * sc.y * sc.z - 1.0f)), across_off = std::max(across_off, std::fabs(sc.x - 1.0f));
+      }
+      std::printf("    Volume 0: the product of the scales off by up to %.4f, the width off by %.5f\n", product_off, across_off);
+      CHECK(product_off > 0.002f && across_off < 1e-6f);
+    }
+    /* A hundred chains (a dense hairstyle: strands 4 cm apart with 2 cm radii, touching) of three bones, and of ten:
+     * a frame's step with hair's defaults (separate, collide). */
+    auto frame_ms = [&](int bones, double *plain, double *with_collision) {
+      Scene s;
+      GameObject *root = s.create("Rig");
+      root->add<Armature>();
+      GameObject *hip = r139_bone(s, "Hips", root, {0, 1, 0}, Quat(), 0.2f);
+      for (int c = 0; c < 100; c++) {
+        r139_run(s, "Strand" + std::to_string(c), hip, bones, {0.04f * (c % 10), 0.2f, 0.04f * (c / 10)}, Quat::euler({180, 0, 0}), 0.05f);
+        spring::add(*s.find_by_name("Strand" + std::to_string(c) + "1"), 0);
+      }
+      auto run = [&](bool separate, bool collide) {
+        for (const auto &o : s.objects())
+          if (SpringBone *sb = o->get<SpringBone>()) sb->separate = separate, sb->collide = collide;
+        for (int f = 0; f < 10; f++) spring::step(s, 1.0f / 60.0f);  // (warm)
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int f = 0; f < 60; f++) {
+          hip->set_local_position({0.01f * f, 1, 0});
+          spring::step(s, 1.0f / 60.0f);
+        }
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 60.0;
+      };
+      *plain = run(false, false), *with_collision = run(false, true);
+      return run(true, true);
+    };
+    double p3 = 0, c3 = 0, p10 = 0, c10 = 0;
+    const double ms3 = frame_ms(3, &p3, &c3), ms10 = frame_ms(10, &p10, &c10);
+    std::printf("    100 chains of 3 bones: %.3f ms a frame plain, %.3f with collision, %.3f with separation too; of 10 bones: %.3f, %.3f, %.3f\n", p3, c3, ms3, p10, c10, ms10);
+#if defined(NDEBUG) && !defined(__SANITIZE_ADDRESS__)
+    CHECK(ms3 < 0.5 && ms10 < 5.0);  // (a timing check: release builds only, as the suite's others)
+#endif
+  });
+
+  test("soft tissue: a Jiggle modifier evaluated for the Scene and the Game view at one clock applies the same offset, and a half-weighted vertex moves half as far", [&] {
+    Scene s;
+    GameObject *box = s.create("Box");
+    MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+    std::vector<float> w(m->vert_count(), 0.0f);
+    int half = -1;
+    for (size_t v = 0; v < m->vert_count(); v++)
+      if (m->positions[v].y > 0.0f) w[v] = half < 0 ? 0.5f : 1.0f, half = half < 0 ? (int)v : half;
+    m->vertex_groups.push_back({"Soft", w});
+    m->touch();
+    box->add<MeshFilter>()->mesh = m;
+    JiggleModifier *j = box->add<JiggleModifier>();
+    j->vertex_group = "Soft", j->lag = 1.0f, j->limit = 0.03f;
+    spring::reset(s);
+    float moved[2] = {0.0f, 0.0f}, half_ratio = -1.0f, differ = 0.0f;
+    for (int f = 0; f < 60; f++) {
+      box->set_local_position({0, 0.2f * std::sin(2.0f * kPi * 4.0f * f / 60.0f), 0});
+      spring::step(s, 1.0f / 60.0f);
+      const Mesh *e0 = box->evaluated_mesh(0), *e1 = box->evaluated_mesh(1);
+      if (!e0 || !e1) break;
+      for (size_t v = 0; v < m->vert_count(); v++) {
+        const float d0 = length(e0->positions[v] - m->positions[v]), d1 = length(e1->positions[v] - m->positions[v]);
+        if (w[v] == 1.0f) moved[0] = std::max(moved[0], d0), moved[1] = std::max(moved[1], d1);
+        differ = std::max(differ, std::fabs(d0 - d1));
+        if ((int)v == half && d0 > 0.005f) {
+          float full = 0.0f;
+          for (size_t u = 0; u < m->vert_count(); u++)
+            if (w[u] == 1.0f) full = std::max(full, length(e0->positions[u] - m->positions[u]));
+          half_ratio = d0 / full;
+        }
+      }
+    }
+    std::printf("    the Scene view's mesh moved up to %.1f mm, the Game view's %.1f mm (differing by %.4f mm); the half-weighted vertex moved %.2f of a full one\n", moved[0] * 1000.0f,
+                moved[1] * 1000.0f, differ * 1000.0f, half_ratio);
+    CHECK(moved[0] > 0.005f && moved[1] > 0.005f && differ < 1e-6f && std::fabs(half_ratio - 0.5f) < 0.1f);
   });
 }

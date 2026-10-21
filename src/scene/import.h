@@ -123,7 +123,7 @@ void vrm_complete(const Json &doc, const std::vector<int> &node_index, const std
 /* MMD's standard bone names in the words Blendity's rig tools read ("左ひざ" -> "LeftLeg"); any other name as it is.
  * Motions (.vmd) name bones in Japanese: the same mapping finds them. */
 std::string mmd_bone_name(const std::string &japanese);
-int mmd_spring_label(const std::string &name);  // hair, ear, tail or cloth from a physics bone's name
+int mmd_spring_label(const std::string &name);  // hair, ear, tail, cloth or soft tissue from a physics bone's name
 /* Welds vertices at identical positions with the same weights and shape keys (STL, glTF and MMD split them), and the
  * same normal when `normals` (one a vertex) is given: a hard edge stays split. */
 void weld_exact(Mesh &m, const std::vector<Vec3> *normals = nullptr);

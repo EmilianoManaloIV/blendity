@@ -161,7 +161,10 @@ void Editor::draw_rigging_window(const Recti &r) {
            root != nullptr, [this, root] { armature_pose(root, true); }},
           {"Anime Face Normals", "A sphere proxy fitted to the head and a Normal Transfer modifier reading it, so the face shades like a ball\n"
                                  "(anime's flat face; task 0149). Console: facenormals.",
-           mf != nullptr, [this, mesh_obj] { add_face_normals(mesh_obj); }}},
+           mf != nullptr, [this, mesh_obj] { add_face_normals(mesh_obj); }},
+          {"Rig Hair from Mesh", "The mesh's loose parts (hair cards, up to 64), or one shell cut into eight locks, each a chain of three bones\n"
+                                 "from the scalp with Spring Bones, the mesh skinned to them (task 0153). Console: hair rig [locks] [bones].",
+           mf != nullptr, [this, mesh_obj] { rig_hair_from_mesh(mesh_obj, 0, 3); }}},
          2);
     if (root)
       if (Armature *arm = root->get<Armature>()) {

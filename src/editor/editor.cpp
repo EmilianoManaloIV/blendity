@@ -498,6 +498,7 @@ void Editor::frame(std::vector<Event> &events) {
   if (play_dt > 0.0f && assist_on(Assist::Locomotion)) locomotion::step(*scene_, play_dt, play_ground_);
   if (solve_constraints(*scene_)) ui_.redraw = true;
   if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
+  else if (play_dt > 0.0f) spring::tick(*scene_, play_dt);  // (the simulated clock still runs: the Jiggle modifier reads it; task 0153)
   if (cam_.update(now)) ui_.redraw = true;
   update_camera_focus();
   /* Live preview: re-render the preview when anything it depends on changes
@@ -3247,6 +3248,221 @@ GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
   return proxy;
 }
 
+namespace {
+/* A head bone by its name: the whole word "head" (not Forehead or Headphones) or MMD's 頭. */
+bool head_named(const std::string &name) {
+  if (name.find("\xe9\xa0\xad") != std::string::npos) return true;  // 頭
+  for (const std::string &w : spring::name_words(name))
+    if (w == "head") return true;
+  return false;
+}
+/* The head bone of the armature a skin is bound to (the first found), or null. */
+GameObject *head_bone_of(Scene &scene, const SkinModifier *sk) {
+  GameObject *root = sk ? scene.find_by_name(sk->object) : nullptr;
+  if (!root) return nullptr;
+  std::vector<GameObject *> stack{root};
+  while (!stack.empty()) {
+    GameObject *g = stack.back();
+    stack.pop_back();
+    for (GameObject *c : g->children) stack.push_back(c);
+    if (g->get<Bone>() && head_named(g->name)) return g;
+  }
+  return nullptr;
+}
+/* True while a bone or a bone above it is off its rest pose (a rig placed against it would float once it returns). */
+bool posed(const GameObject *g) {
+  for (; g && g->get<Bone>(); g = g->parent) {
+    const Bone &b = *g->get<Bone>();
+    const Quat q = g->local().rotation, r = b.rest_rotation;
+    if (length(g->local().position - b.rest_position) > 1e-4f || std::fabs(q.x * r.x + q.y * r.y + q.z * r.z + q.w * r.w) < 0.99999f) return true;
+  }
+  return false;
+}
+/* Which lock each vertex is in (-1 none) and how many locks: the loose parts (hair cards) when there are no more of
+ * them than `cards_cap`, else each card in the sector round the scalp its highest vertex falls in (`cards_cap` of
+ * them); one shell cut into `sectors`. */
+struct HairLocks {
+  std::vector<int> vert_lock;
+  size_t count = 0;
+};
+HairLocks assign_locks(const Mesh &m, Vec3 centre, int cards_cap, int sectors) {
+  HairLocks out;
+  out.vert_lock.assign(m.vert_count(), -1);
+  auto sector_of = [&](Vec3 p, int n) {
+    const float a = std::atan2(p.z - centre.z, p.x - centre.x);
+    return std::min(n - 1, (int)std::floor((a + kPi) / (2.0f * kPi) * (float)n));
+  };
+  std::vector<int> face_part;
+  const size_t parts = meshops::loose_parts(m, face_part);
+  if (parts < 2) {
+    for (size_t v = 0; v < m.vert_count(); v++) out.vert_lock[v] = sector_of(m.positions[v], sectors);
+    out.count = (size_t)sectors;
+    return out;
+  }
+  std::vector<int> part_of(m.vert_count(), -1);
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) part_of[m.corner_verts[k]] = face_part[f];
+  if (parts <= (size_t)cards_cap) {
+    out.vert_lock = part_of, out.count = parts;
+    return out;
+  }
+  std::vector<Vec3> top(parts, Vec3(0.0f, -1e30f, 0.0f));
+  for (size_t v = 0; v < m.vert_count(); v++)
+    if (part_of[v] >= 0 && m.positions[v].y > top[(size_t)part_of[v]].y) top[(size_t)part_of[v]] = m.positions[v];
+  for (size_t v = 0; v < m.vert_count(); v++)
+    if (part_of[v] >= 0) out.vert_lock[v] = sector_of(top[(size_t)part_of[v]], cards_cap);
+  out.count = (size_t)cards_cap;
+  return out;
+}
+/* A lock's joints: its vertex nearest the scalp point first, then the centroids of `bones - 1` slices along the line to
+ * its farthest vertex, then that vertex. */
+std::vector<Vec3> lock_joints(const std::vector<Vec3> &pts, Vec3 scalp, int bones) {
+  size_t root = 0;
+  for (size_t i = 1; i < pts.size(); i++)
+    if (length(pts[i] - scalp) < length(pts[root] - scalp)) root = i;
+  size_t tip = root;
+  for (size_t i = 0; i < pts.size(); i++)
+    if (length(pts[i] - pts[root]) > length(pts[tip] - pts[root])) tip = i;
+  const Vec3 axis = pts[tip] - pts[root];
+  const float len2 = std::max(1e-12f, dot(axis, axis));
+  std::vector<Vec3> joints{pts[root]};
+  for (int k = 1; k < bones; k++) {
+    const float at = (float)k / (float)bones;
+    Vec3 sum(0.0f);
+    int count = 0;
+    for (const Vec3 &p : pts) {
+      const float t = dot(p - pts[root], axis) / len2;
+      if (std::fabs(t - at) < 0.5f / (float)bones) sum = sum + p, count++;
+    }
+    joints.push_back(count > 0 ? sum * (1.0f / (float)count) : pts[root] + axis * at);
+  }
+  joints.push_back(pts[tip]);
+  return joints;
+}
+/* One lock's chain of bones under the rig, joint to joint (a joint pair too close for a bone is skipped), the length
+ * in the bone's own units; the first bone, or null when none was made. */
+struct HairLock {
+  std::vector<Vec3> joints;  // world
+  std::vector<GameObject *> bones;
+};
+GameObject *build_lock_chain(Scene &scene, GameObject *rig, const std::string &prefix, size_t l, HairLock &lock) {
+  GameObject *parent = rig, *first = nullptr;
+  for (size_t k = 0; k + 1 < lock.joints.size(); k++) {
+    const Vec3 d = lock.joints[k + 1] - lock.joints[k];
+    if (length(d) <= 1e-5f) continue;
+    GameObject *g = scene.create(strprintf("%s Hair%zu_%zu", prefix.c_str(), l + 1, k + 1), parent);
+    g->set_local_position(parent->world_matrix().inverse().point(lock.joints[k]));
+    g->set_world_rotation(rotation_between(Vec3(0.0f, 1.0f, 0.0f), normalize(d)));
+    Bone *b = g->add<Bone>();
+    b->length = length(g->world_matrix().inverse().dir(d));  // (a scaled armature above: the length in the bone's units)
+    b->set_rest(g->local());
+    lock.bones.push_back(g);
+    if (!first) first = g;
+    parent = g;
+  }
+  return first;
+}
+/* The mesh skinned to the hair rig: each vertex to its own lock's bones by where it lies along the lock (between the
+ * two nearest joints), the sums 1; the groups of the armature the mesh was skinned to before go (the rig hangs from
+ * its head now). */
+void bind_hair_skin(Scene &scene, GameObject &mesh_obj, Mesh &m, const HairLocks &hl, const std::vector<HairLock> &made, const std::string &rig_name) {
+  SkinModifier *sk = mesh_obj.get<SkinModifier>();
+  if (sk) {
+    if (GameObject *old = scene.find_by_name(sk->object)) {
+      std::vector<ArmatureBone> bs;
+      armature_bones(*old, bs);
+      for (const ArmatureBone &ab : bs) {
+        const int gi = m.find_group(ab.object->name);
+        if (gi >= 0) m.vertex_groups.erase(m.vertex_groups.begin() + gi);
+      }
+    }
+  }
+  else sk = mesh_obj.add<SkinModifier>();
+  sk->object = rig_name;
+  std::vector<std::vector<int>> group_of(made.size());  // each lock's bones' groups
+  for (size_t l = 0; l < made.size(); l++)
+    for (GameObject *b : made[l].bones) {
+      group_of[l].push_back((int)m.vertex_groups.size());
+      m.vertex_groups.push_back({b->name, std::vector<float>(m.vert_count(), 0.0f)});
+    }
+  const Mat4 world = mesh_obj.world_matrix();
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    const int l = hl.vert_lock[v];
+    if (l < 0 || (size_t)l >= made.size() || made[(size_t)l].bones.empty()) continue;
+    const HairLock &lk = made[(size_t)l];
+    const size_t nb = lk.bones.size();
+    const Vec3 axis = lk.joints.back() - lk.joints[0];
+    const float t = dot(world.point(m.positions[v]) - lk.joints[0], axis) / std::max(1e-12f, dot(axis, axis));
+    const float tb = std::max(0.0f, std::min((float)nb - 1e-4f, t * (float)nb));
+    const size_t k = (size_t)tb;
+    const float f = tb - (float)k;
+    m.vertex_groups[(size_t)group_of[(size_t)l][k]].weights[v] += k + 1 < nb ? 1.0f - f : 1.0f;
+    if (k + 1 < nb) m.vertex_groups[(size_t)group_of[(size_t)l][k + 1]].weights[v] += f;
+  }
+  m.touch();
+}
+}  // namespace
+
+/* Rig Hair from Mesh (task 0153): see editor.h. */
+int Editor::rig_hair_from_mesh(GameObject *mesh_obj, int locks, int bones) {
+  MeshFilter *mf = mesh_obj ? mesh_obj->mesh_filter() : nullptr;
+  if (!mf || !mf->mesh || mf->mesh->face_count() == 0) {
+    Log::warn("Rig Hair from Mesh: select a mesh with faces");
+    return 0;
+  }
+  /* No lock count: every card its own lock (up to 64), a shell cut into eight. */
+  const int cards_cap = locks > 0 ? std::min(64, locks) : 64, sectors = locks > 0 ? std::min(64, locks) : 8;
+  bones = std::max(1, std::min(16, bones));
+  const Mesh &m = *mf->mesh;
+  AABB box;
+  for (const Vec3 &p : m.positions) box.add(p);
+  const Vec3 centre = box.center(), scalp(centre.x, box.max.y, centre.z);
+  const HairLocks hl = assign_locks(m, centre, cards_cap, sectors);
+  /* The hair armature hangs under the character's head bone when the mesh is skinned to one, so it follows the head. */
+  const SkinModifier *sk = mesh_obj->get<SkinModifier>();
+  GameObject *under = head_bone_of(*scene_, sk);
+  if (sk && !under) {
+    Log::warn("Rig Hair from Mesh: %s is skinned to %s, which has no bone named like a head (head, Head, 頭): name one, or rig the hair before skinning it", mesh_obj->name.c_str(),
+              sk->object.c_str());
+    return 0;
+  }
+  if (under && posed(under)) {
+    Log::warn("Rig Hair from Mesh: put the character in its rest pose first (Rigging > Reset Pose), so the rig sits on the skull when the head returns to it");
+    return 0;
+  }
+  const Mat4 world = mesh_obj->world_matrix();
+  std::vector<std::vector<Vec3>> lock_pts(hl.count);
+  for (size_t v = 0; v < m.vert_count(); v++)
+    if (hl.vert_lock[v] >= 0) lock_pts[(size_t)hl.vert_lock[v]].push_back(world.point(m.positions[v]));
+  std::string name = mesh_obj->name + " Hair Rig";
+  for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("%s Hair Rig.%03d", mesh_obj->name.c_str(), k);
+  GameObject *rig = scene_->create(name, under ? under : mesh_obj->parent);
+  rig->add<Armature>();
+  const Vec3 scalp_w = world.point(scalp);
+  rig->set_local_position(under ? under->world_matrix().inverse().point(scalp_w) : scalp_w);
+  std::vector<HairLock> made(hl.count);
+  int chains = 0;
+  for (size_t l = 0; l < hl.count; l++) {
+    if (lock_pts[l].size() < 2) continue;
+    made[l].joints = lock_joints(lock_pts[l], scalp_w, bones);
+    GameObject *first = build_lock_chain(*scene_, rig, mesh_obj->name, l, made[l]);
+    if (!first) continue;
+    spring::add(*first, 0);
+    chains++;
+  }
+  if (!chains) {
+    scene_->destroy(rig);
+    Log::warn("Rig Hair from Mesh: no lock long enough for a bone");
+    return 0;
+  }
+  bind_hair_skin(*scene_, *mesh_obj, *mesh_make_mutable(mf->mesh), hl, made, name);
+  mark_changed("Rig Hair from Mesh");
+  Log::info("Rig Hair from Mesh: %d lock(s) of up to %d bone(s) under %s%s, the mesh skinned to them, Spring Bones on each", chains, bones, name.c_str(),
+            under ? (" (under " + under->name + ")").c_str() : "");
+  return chains;
+}
+
+
 /* toonstyle <style> (task 0148): a toon style's preset on every selected material (the Materials window's selection
  * while it is open, else the selected objects' materials), making each a Toon material. One undo step. */
 void Editor::toonstyle_command(const std::string &name) {
@@ -3531,6 +3747,12 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "customnormals") {  // customnormals clear|show: the selected meshes' own shading normals (task 0149)
     customnormals_command(t.size() > 1 ? t[1] : "show");
+    return;
+  }
+  if (c == "hair") {  // hair rig [locks] [bones]: chains of spring bones from the selected hair mesh (task 0153)
+    if (t.size() < 2 || to_lower(t[1]) != "rig") Log::warn("hair rig [locks] [bones]");
+    else if (GameObject *mesh_obj = rig_mesh()) rig_hair_from_mesh(mesh_obj, t.size() > 2 ? std::atoi(t[2].c_str()) : 0, t.size() > 3 ? std::atoi(t[3].c_str()) : 3);
+    else Log::warn("hair rig: select a mesh");
     return;
   }
   if (c == "facenormals") {  // facenormals: a head proxy and a Normal Transfer on the selected mesh (task 0149)

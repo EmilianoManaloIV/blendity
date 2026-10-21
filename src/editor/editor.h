@@ -1779,6 +1779,11 @@ class Editor {
    * mesh) and a Normal Transfer modifier reading it, so the face shades like a ball. Console: facenormals. */
   GameObject *add_face_normals(GameObject *mesh_obj);
   void customnormals_command(const std::string &verb);  // customnormals clear|show: the selected meshes' own normals (task 0149)
+  /* Rig Hair from Mesh (task 0153): the mesh's loose parts (hair cards) - or one shell split into `locks` sectors - each
+   * a chain of `bones` bones from the scalp to the tip under a new hair armature (under the character's head bone when
+   * the mesh is skinned to one), the mesh skinned to it, Spring Bones on every chain; one undo step. The chains made.
+   * Console: hair rig [locks] [bones]. */
+  int rig_hair_from_mesh(GameObject *mesh_obj, int locks, int bones);  // locks 0: every card its own (up to 64), a shell in eight
   /* animemat <Anime Leaves|Grass|Wall|Windows|Roof|Sky|Clouds|Rock|Water> (task 0150): the preset's texture asset and a
    * Toon material reading it (a Cutout for the cards) on the selected objects. */
   MaterialPtr animemat_command(const std::string &preset);

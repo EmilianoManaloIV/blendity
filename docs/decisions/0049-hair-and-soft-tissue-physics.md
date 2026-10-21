@@ -36,12 +36,20 @@ following the root - is had more cheaply.
 - **Soft tissue is the fifth label, "Soft"** (round 172): a single bone (or a short chain) whose tip is a damped
   spring-mass driven by the bone's animated **acceleration** (it trails the body's acceleration, not its position:
   a run makes it bounce, a slow walk hardly), limited to a cone about the animated direction, with **volume** kept
-  by a counter-scale on the bone as the tip stretches or squashes. Breast, thigh, hip, belly bones are found by
-  name (VRM's `J_Sec_L_Bust`, MMD's 胸 / 尻, Rigify's and game rigs' words) and get Soft defaults. A **Jiggle**
-  deform modifier does the same for a mesh without such bones: a vertex group's centroid as the spring, its
-  vertices moved by weight.
-- **Hair rigged from its mesh** (round 172): hair cards or a shell split into locks, a chain per lock from the scalp
-  bone to the tip, the mesh skinned to it by distance along the chain, springs added - one undo step.
+  by a counter-scale on the bone as the tip stretches or squashes (on a chain's last bone: a non-uniform scale on
+  a parent shears what hangs below it; a bake writes it as Scale keys). The spring is the chain's Stiffness and
+  Damping; `lag` is the share of the acceleration trailed (the verlet tips trail the position on their own). Soft
+  chains don't collide by default: the torso's fitted capsule would sit on them. Breast, thigh, hip, belly bones
+  are found by name (VRM's `J_Sec_L_Bust`, MMD's 胸 / 尻 / 太もも after its tails and ribbons, Rigify's and game
+  rigs' words) and get Soft defaults. A **Jiggle** deform modifier does the same for a mesh without such bones: a
+  vertex group's centre as the spring, every vertex moved by the offset and the stack masking it by the group. It
+  runs on the scene's simulated clock (Play, whether or not the Physics assistant is on) and is not baked into
+  clips: a jiggle in a render comes from the Play-time step, not from keys.
+- **Hair rigged from its mesh** (round 172): hair cards (each its own lock, up to 64; more are merged into sectors
+  by their roots) or a shell cut into eight sectors, a chain per lock from the scalp to the tip, each vertex
+  weighted to its own lock's two nearest joints, springs added - one undo step. A mesh skinned to a character
+  hangs its rig under the head bone (found by the whole word "head" or 頭), in the rest pose only, and the hair's
+  chains collide with the character's body (a chain's armature is the outermost above it).
 - Out: a true Cosserat twist constraint (the roll follows the root instead), self-collision inside one strand,
   a ground plane for strands (the body's capsules suffice for a character), a "Show Colliders" overlay (the
   Scene view's bone icons stay; a follow-up if asked).

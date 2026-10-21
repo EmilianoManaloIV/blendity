@@ -82,6 +82,9 @@ void register_builtin_components() {
   reg<DisplaceModifier>("Mesh", "Pushes vertices along their normals by a noise texture.", "Displace modifier (procedural texture)");
   reg<SimpleDeformModifier>("Mesh", "Twists, bends, tapers or stretches the mesh along an axis.", "Simple Deform modifier");
   reg<CastModifier>("Mesh", "Pulls the mesh towards a sphere, cylinder or box.", "Cast modifier");
+  reg<JiggleModifier>("Mesh", "Skin jiggle without bones: a vertex group's vertices trail the body's acceleration on a damped spring\n"
+                              "(a breast, a belly on a rig with no such bones; task 0153). Runs in Play.",
+                      "Jiggle (Wiggle Bones / jiggle physics add-ons)");
   reg<SkinModifier>("Mesh", "Moves the mesh with an armature's bones: each vertex by the bones its vertex groups are named after.",
                     "Armature modifier (Vertex Groups)");
   reg<Bone>("Rigging", "A bone of a skeleton: a skin moves the vertices of the vertex group named after it.", "Bone (in an Armature)");

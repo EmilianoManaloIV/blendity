@@ -689,6 +689,36 @@ struct NormalTransferModifier : ComponentBase<NormalTransferModifier> {
   bool unique() const override { return false; }
 };
 
+/* Skin jiggle without bones (task 0153): a vertex group's vertices moved together by a damped spring on the group's
+ * centre, driven by the centre's acceleration (the tissue trails a landing, a step), as a jiggle bone would move them;
+ * for meshes whose rig has no such bones. It runs on the simulated clock (Play, spring::step), so it rests in the
+ * editor. */
+struct JiggleModifier : ComponentBase<JiggleModifier> {
+  static constexpr const char *kName = "JiggleModifier";
+  std::string vertex_group;
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  float stiffness = 0.5f;  // 0..1: how fast it returns
+  float damping = 0.3f;    // 0..1: how fast the bounce dies
+  float lag = 0.5f;        // 0..1: how much of the body's acceleration it trails
+  float limit = 0.05f;     // metres: how far it may move
+  /* Runtime (not saved): the group's centre and speed a step ago, the offset and its speed, the clock it was stepped
+   * at, and how much is known (1 the centre, 2 its speed too: no kick on the first steps). */
+  mutable Vec3 centre_prev, vel_prev, offset, offset_vel;
+  mutable double clock_prev = -1.0;
+  mutable int primed = 0;
+  void step_spring(Vec3 centre, double clock) const;  // spring_bones.cpp
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;                 // spring_bones.cpp
+  uint64_t modifier_dependency_hash() const override;  // spring_bones.cpp
+  bool unique() const override { return false; }
+};
+
 struct MirrorModifier : ComponentBase<MirrorModifier> {
   static constexpr const char *kName = "MirrorModifier";
   bool x = true, y = false, z = false;

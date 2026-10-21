@@ -2,6 +2,71 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 172): soft tissue, the Jiggle modifier, hair rigged from its mesh (task 0153, ADR 0049)
+
+**Asked:** realistic hair and soft-tissue physics for Spring Bones, research based. This round: the soft tissue and
+the hair rig.
+
+**Added**
+- **Soft**, a fifth Spring Bones label for a single bone (a breast, a thigh, a belly): the bone trails the body's
+  **acceleration** by **Lag** (a landing throws it down, a step up; a slow walk hardly moves it), Stiffness pulls
+  it back and Damping settles it, **Limit** keeps it within a cone (degrees) about the animation's direction, and
+  **Volume** narrows it across as it stretches along its length (the product of the scales stays 1), the stretch
+  given back when Play stops or a bake ends. Found by name: breast / bust / boob / belly / stomach / butt / glute,
+  a thigh / hip / chest / cheek with jiggle / soft / phys / dyn / spring / sec / bounce, MMD's 胸 / 尻 / 太もも,
+  VRM's `J_Sec_L_Bust` (it read as hair before). `spring add <bone> soft`, `spring label <bone> soft`.
+- **Jiggle**, a deform modifier (Add Component > Mesh) for a mesh whose rig has no such bones: a vertex group's
+  vertices trail the body's acceleration together on a damped spring (Springiness, Damping, Lag, a Limit in
+  metres), stepped on the simulated clock (Play), still in the editor.
+- **Rig Hair from Mesh** (the Rigging window's Skeleton buttons; `hair rig [locks] [bones]`): the selected mesh's
+  loose parts (hair cards) - or one shell cut into locks round its upright axis - each a chain of bones from the
+  scalp to the tip under a new hair armature (under the character's head bone when the mesh is skinned to one, so
+  it follows the head), the mesh skinned to the chains, Spring Bones (hair) on each; one undo step.
+- The lessons "Soft tissue: breasts, thighs and bellies that move" and "Rig hair from its mesh", after Strands.
+
+**Changed after the review**
+- The Jiggle modifier evaluated for the Scene and the Game view at one clock applies one offset (it reset itself on
+  the second evaluation), moves every vertex by the offset and lets the stack scale it by the group (it squared the
+  weights), stops when its group is missing, and runs on the clock whether or not the Physics assistant is on;
+  Springiness is Stiffness, as on a chain. It isn't baked into clips (said in its help).
+- Soft tissue: the acceleration is known from the third step, not read from a speed on the second (a body already
+  moving when Play starts gave a kick); a teleport forgets it; the stretch and its counter-scale go on a chain's
+  last bone only (a non-uniform scale on a parent shears what hangs below it), the scale base is re-taken when
+  the animation or the Inspector sets it, a chain relabelled or taken off gives its scale back, and a bake writes
+  the stretch as Scale keys. Soft chains don't collide by default (the torso's capsule pushed them off their
+  pose). The cone picks a side for a bone pointing straight back. Lag / Limit / Volume show for Soft only.
+- The names: 尻尾 is a tail and 胸リボン a ribbon before 尻 and 胸 are soft; Chest, Hips, UpperChest stay the body's;
+  MMD's Japanese physics bones get the soft label at import too.
+- Rig Hair from Mesh: every card its own lock (up to 64; a count given merges them into that many sectors by their
+  roots), a shell into eight; bone lengths in the bones' own units under a scaled armature; a posed head refuses
+  (the rig would float when it returns to rest); a skinned mesh with no head bone refuses; the old armature's
+  groups go when the skin moves to the rig; each vertex is weighted to its own lock's two nearest joints (the
+  envelope bind weighted a card to its neighbours' bones); bone names carry the mesh's name; the head is found by
+  the whole word (not Forehead) or 頭. A hair rig under a head bone collides with the character's body (the
+  chain's armature is the outermost).
+- Speed: the body-bone name test is cached (every chain walk split every bone's name into words: 3 ms a frame for
+  a thousand bones), each chain is walked once a step, the separation pass works cell by cell on a sorted array
+  (each pair once, by squared distance) over a dense grid of the tips' box. 100 chains of 3 bones, strands touching: 0.4 ms a
+  frame with separation and collision; of 10 bones: 1.7 ms.
+
+**Checked**
+- New tests (round 172): a bust bone on a 3 Hz run trailing its acceleration by over 2 mm more than with Lag 0,
+  within 25 degrees (and within 5 with Limit 5), the scales' product within 1 % of 1, at rest within 1 mm a second
+  after the run stops, the scales back to 1 on reset, Lag / Limit / Volume saved; a Jiggle on a cube's top half
+  moving it up to its 30 mm limit under a 4 Hz shake, the bottom half not at all, at rest a second after; twelve
+  hair cards rigged as twelve chains of three bones under a hair rig with 36 vertex groups whose weights sum to 1,
+  undone in one step, and a cube cut into four locks of two bones; the soft names (Breast_L, chest_jiggle, Belly,
+  ThighSoft.L, 左胸, J_Sec_L_Bust1; 尻尾 a tail, 胸リボン cloth, Chest and Hips the body's); a landing throwing a
+  bust bone 3 mm further down with Lag 0.5 than with 0, no kick from a body already moving, a two-bone chain
+  stretching only its last bone and the bake's Scale keys, Volume 0 changing the volume, 100 chains of 3 bones
+  under 0.5 ms; the Jiggle the same for both views and half as far on a half weight; a skinned hair mesh rigged
+  under a scaled character's Head bone with the body's group gone and the body's capsule seen, a posed head
+  refused, forty cards merged into eight locks.
+- Unit checks (round 172): Windows 11,369, 0 failed (905 tests); render-cache verify mode 11,370, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,100, 0 failed. Sanitizer build: 10,976, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 171): strands - bend, root to tip, wind, colliders fitted to the skin, separation (task 0153, ADR 0049)
 
 **Asked:** realistic hair and soft-tissue physics for Spring Bones, research based. This round: the strands.

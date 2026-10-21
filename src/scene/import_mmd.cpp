@@ -454,6 +454,7 @@ int mmd_spring_label(const std::string &name) {
   if (has({"耳"})) return 1;
   if (has({"尻尾", "しっぽ", "尾"})) return 2;
   if (has({"スカート", "裾", "袖", "リボン", "ネクタイ", "服", "コート", "マント", "スカーフ", "フリル"})) return 3;
+  if (has({"胸", "尻", "太もも"})) return 4;  // (soft tissue, task 0153: after the tail and the cloth - 尻尾, 胸リボン)
   return 0;  // (hair: what most MMD physics is)
 }
 

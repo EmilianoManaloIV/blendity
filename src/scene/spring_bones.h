@@ -24,7 +24,7 @@ namespace bl {
 /* On a chain's first bone. */
 struct SpringBone : ComponentBase<SpringBone> {
   static constexpr const char *kName = "SpringBone";
-  int label = 0;            // 0 hair, 1 ear, 2 tail, 3 cloth (spring::kLabels): what the defaults were for
+  int label = 0;            // 0 hair, 1 ear, 2 tail, 3 cloth, 4 soft (spring::kLabels): what the defaults were for
   float stiffness = 0.15f;  // 0 free .. 1 rigid: how strongly each bone returns to its animated direction (per 1/60 s)
   float damping = 0.15f;    // 0 .. 1: the speed lost per 1/60 s
   float gravity = 1.0f;     // times g
@@ -35,13 +35,24 @@ struct SpringBone : ComponentBase<SpringBone> {
   float root_to_tip = 0.0f;  // 0..1: how much the pull toward the animation fades toward the tip (1: the tip swings free)
   float wind = 1.0f;         // how much a Wind component moves the chain (0: not at all)
   bool separate = false;     // kept apart from other chains by its radius (a ponytail's strands don't pass through each other)
+  /* Soft tissue (label 4, task 0153): a jiggle on a single bone (a breast, a thigh, a belly) driven by the body's
+   * acceleration, not its position: the tissue trails a jump or a landing and settles by Stiffness and Damping. */
+  float lag = 0.5f;      // 0..1: how much of the body's acceleration the tissue trails
+  float limit = 25.0f;   // degrees: how far the bone may swing from where the animation puts it
+  float volume = 1.0f;   // 0..1: as the bone stretches along its length it narrows across it, keeping its volume
   /* Runtime (not saved): each bone's tip and where it was a step ago; the pose the animation last gave. */
   std::vector<Vec3> tip, prev;
   std::vector<Quat> base;   // each bone's local rotation as the animation (or the rest) has it
   std::vector<Quat> wrote;  // what the last step set (unchanged since: the animation didn't touch it)
+  std::vector<Vec3> base_scale, wrote_scale;  // each bone's local scale before the soft tissue's stretch, and the stretch last written (soft)
+  std::vector<Vec3> tprev, tvel;   // the animated tips a step ago and their speed (soft: the acceleration they trail)
+  int soft_primed = 0;             // 0 nothing known, 1 the tips' places, 2 their speed too (soft: no kick on the first steps)
   Vec3 anchor;              // where the chain started last step (a jump far past it: started afresh)
   void reflect(Reflector &r) override;
-  void reset_state() { tip.clear(), prev.clear(), base.clear(), wrote.clear(); }
+  void reset_state() {
+    tip.clear(), prev.clear(), base.clear(), wrote.clear(), base_scale.clear(), wrote_scale.clear(), tprev.clear(), tvel.clear();
+    soft_primed = 0;
+  }
 };
 
 /* A wind (task 0153): along the object's forward (+Z), or away from its position when spherical; a strength in m/s,
@@ -65,14 +76,28 @@ struct Collider {
   float r;
 };
 std::vector<Collider> body_colliders(GameObject &armature);  // (the radii cached per armature by the skinned meshes' versions)
+/* The armature a chain's bones collide against: the outermost one above the bone (a hair rig nested under a head
+ * bone belongs to the character's). */
+GameObject *chain_armature(GameObject &bone);
 
-extern const char *const kLabels[4];  // "Hair", "Ear", "Tail", "Cloth"
-/* A label's settings (stiffness, damping, gravity, radius; bend, root to tip, separate - task 0153). */
+extern const char *const kLabels[5];  // "Hair", "Ear", "Tail", "Cloth", "Soft"
+/* A label's settings (stiffness, damping, gravity, radius; bend, root to tip, separate; lag, limit, volume - task 0153). */
 void apply_defaults(SpringBone &s, int label);
+/* The scene's simulated seconds since Play started (what the wind's noise and the Jiggle modifier read; task 0153);
+ * `tick` advances it without stepping the springs (Play with the Physics assistant off: the Jiggle modifier still
+ * runs). */
+double sim_time(const Scene &scene);
+void tick(Scene &scene, float dt);
+/* A soft chain's bones back to their scale before the stretch (before the chain is taken off or relabelled). */
+void unstretch(SpringBone &s, GameObject &first);
+/* A name split into lower-case words (camelCase, digits and separators split it; a "mixamorig:" namespace dropped). */
+std::vector<std::string> name_words(const std::string &raw);
+void mix_hash(uint64_t &h, const void *data, size_t n);  // FNV-1a over bytes
 
 /* What a bone is by its name: part of the body (spine, limbs, hands, feet, fingers, toes, head, eyes, jaw), a
- * secondary part (label 0-3), or neither (-1 both). Names are split into words (camelCase, digits, separators;
- * "mixamorig:" and similar namespaces dropped): "LeftUpLeg", "J_Sec_Hair1_03", "tail.002", "Mimi_L". */
+ * secondary part (label 0-4: soft tissue by breast / bust / belly / butt, a thigh or hip or chest with jiggle or soft,
+ * MMD's 胸 / 尻 / 太もも, VRM's J_Sec_L_Bust), or neither (-1 both). Names are split into words (camelCase, digits,
+ * separators; "mixamorig:" and similar namespaces dropped): "LeftUpLeg", "J_Sec_Hair1_03", "tail.002", "Mimi_L". */
 bool is_body_bone(const std::string &name);
 int secondary_label(const std::string &name);  // -1 when the name says nothing
 
