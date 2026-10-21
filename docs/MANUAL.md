@@ -461,7 +461,10 @@ clip, blend seconds) jump to a clip in Play, blending from the pose of the momen
 ## 10. Files: import and export
 
 **Import** (File > Import Model, or drop files on the window): OBJ + MTL, FBX, glTF, STL, PLY and USD text; their
-materials and textures come along, and rigged files come with their skeletons and skins.
+materials and textures come along, and rigged files come with their skeletons and skins. The model is shown first in
+the Import Preview (Preferences > Import turns it off): its shading switchable before anything is written - As
+Imported, PBR, or a toon style over the file's materials - and an Outline switch; Import writes it, Cancel nothing.
+The console's `import <file> [asis|pbr|classic|guiltygear|soft|painterly|manga]` imports at once with that shading.
 
 **Export** (File > Export): every mesh format Blender 5.2 exports - OBJ, FBX (binary or ASCII), glTF (.glb or
 .gltf), STL, PLY, USD - with Blender's options (Selected Only, Apply Modifiers, Scale, Up Axis, Triangulate...).

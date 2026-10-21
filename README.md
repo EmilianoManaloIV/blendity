@@ -133,8 +133,8 @@ everything):
 - **Texturing & Materials** - Principled materials and material assets, layered **procedural textures**, axis
   materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
   map, inner lines and hatching, custom normals from a head proxy, hold frames on 2s / 3s), anime background
-  generators (leaves, grass, walls, windows, roofs, sky, clouds, rocks, water; cards cut out by their cover), texture
-  baking.
+  generators (leaves, grass, walls, windows, roofs, sky, clouds, rocks, water; cards cut out by their cover), an
+  import preview with the shading switchable before anything lands in the project, texture baking.
 - **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps, probe volumes and voxel realtime GI;
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
@@ -211,7 +211,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (11300 unit checks in 892 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (11337 unit checks in 894 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

@@ -2,6 +2,46 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 170): the import preview with switchable shading (task 0152)
+
+**Asked:** a preview when importing a model, with the shading switchable before anything lands in the project, so an
+anime character arrives looking like one.
+
+**Added**
+- **Import Preview:** a dropped or opened model is read and shown in a dialog first - on a slow turntable (drag to
+  turn it) under the editor's light, drawn by the CPU rasterizer (every material, painted maps included), with the
+  import's summary and notes - and nothing is written until Import. The **Shading** row applies one look to every
+  material of the model: As Imported (what the file made: MToon, MMD's toon), PBR, or a toon style (Classic, Guilty
+  Gear, Soft Anime, Painterly, Manga) over the file's materials, their maps kept; **Outline** puts a line of the
+  given width on every mesh. Import writes the model, its textures and the .mat files with that look, and the
+  objects with their outlines; Cancel writes nothing.
+- **Preferences > Import:** "Preview before importing" (off: the model comes in at once, as before; headless runs
+  never show it) and the shading the preview opens with.
+- **Console:** `import <file> [asis|pbr|classic|guiltygear|soft|painterly|manga]` imports at once with that shading
+  (scripts and tests); without the word, the dialog when the preference is on.
+- The Importing lesson gains "Importing: preview the look".
+
+**Changed after the review**
+- A look chosen at import rewrites a model's existing .mat files (As Imported keeps what was edited); several files
+  dropped at once take their turns; the Outline switch reaches a file's own outlines; the turntable turns by the
+  clock in 2-degree render steps, lit from its own camera; `soft` and the two-word style names work on the console;
+  a file with no mesh imports at once; meshes without a material are shaded too; the views and the preview build
+  their draw items with one pair of helpers.
+
+**Checked**
+- New tests (round 170): `import <glb> guiltygear` writing a .mat with Guilty Gear's fields, then `pbr` and `asis`
+  rewriting it; the shading words; the dialog opening without writing a file or adding an object, its picture lit,
+  the preference's shading applied, the Shading row's buttons switching the preview's materials (Guilty Gear, PBR,
+  As Imported with the file's colour back), the Outline checkbox, Cancel leaving no trace, Import with Guilty Gear and
+  an outline giving the objects, the .mat and the Outline; a re-import rewriting the .mat with the look (As Imported
+  keeping it); `soft` and `guilty gear`; the preference's round trip and clamp; the plain import opening the dialog
+  with the preference on, a second file waiting, the popup clicked away as a Cancel, the preference off importing at
+  once.
+- Unit checks (round 170): Windows 11,337, 0 failed (894 tests); render-cache verify mode 11,338, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,068, 0 failed. Sanitizer build: 10,945, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 169): procedural anime textures (task 0150)
 
 **Asked:** "procedural textures for anime backgrounds": foliage (leaves, grass), buildings (walls, windows, roofs), sky

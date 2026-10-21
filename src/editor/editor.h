@@ -251,6 +251,14 @@ struct DeleteQuestion {
   std::function<void()> on_delete, on_close;  // on_close: answered either way, or clicked away
 };
 
+/* The import preview's shadings (task 0152): As Imported, PBR, then the toon styles (from toon_style_names, so a new
+ * style joins by itself); a console word's index (asis, pbr, a style's name in any spelling, soft, gg), -1 for none. */
+const std::vector<std::string> &import_shading_names();
+int import_shading_index(const std::string &word);
+/* What finish_import does about outlines: the file's own (none from the preview), none at all, or one of this
+ * width on every mesh. */
+enum class ImportOutline { Keep, Off, Set };
+
 /* The Animation window's state (task 0059): which clip, the playhead, Preview and Record, the selected keys. */
 struct AnimEditorState {
   uint64_t root = 0;  // the object last animated (its Animation component's clip is edited)
@@ -680,6 +688,19 @@ class Editor {
   }
   const ui::Context &ui_for_test() const { return ui_; }
   bool first_run_dialog_for_test() const { return dialog_ == Dialog::FirstRunTier; }
+  /* The import preview's (task 0152). */
+  bool import_preview_open_for_test() const { return ipv_.open; }
+  bool begin_import_preview_for_test(const std::string &path) { return begin_import_preview(path, true) && ipv_.open; }
+  void import_preview_force_for_test(bool on) { ipv_force_ = on; }  // (headless runs never open the dialog unless asked)
+  bool import_preview_pref_for_test() const { return import_preview_pref_; }
+  int import_shading_pref_for_test() const { return import_shading_pref_; }
+  size_t import_preview_queue_for_test() const { return ipv_queue_.size(); }
+  void close_dialog_for_test() { dialog_ = Dialog::None; }  // (as a click outside the popup)
+  Scene *import_preview_scene_for_test() { return ipv_.scene.get(); }
+  const ImportResult &import_preview_result_for_test() const { return ipv_.result; }
+  const Image &import_preview_image_for_test() const { return ipv_img_; }
+  void import_preview_pref_for_test(bool on, int shading) { import_preview_pref_ = on, import_shading_pref_ = shading; }
+  void import_preview_outline_for_test(bool on, float width) { import_preview_outline(on, width); }
   /* The rows of a frame to present: runs of 16-row bands whose pixels differ from `bands` (the hashes of the last
    * frame presented, updated here); every row when `all` or the size changed (task 0084). */
   static std::vector<std::pair<int, int>> changed_rows(const uint32_t *px, int width, int height, std::vector<uint64_t> &bands, bool all);
@@ -1875,7 +1896,50 @@ class Editor {
   const std::vector<std::string> &image_assets();
   std::vector<MaterialPtr> scene_materials();
   void import_model_file(const std::string &path, bool copy_into_assets);
-  size_t import_material_assets(ImportResult &r, const std::string &model);
+  /* The import preview (task 0152): the model read and instantiated into a scene of its own, shown in a dialog with
+   * its shading switchable (the file's materials, PBR, a toon style) and an outline, before anything lands under
+   * Assets; Import then finishes as a plain import does, with the chosen materials. */
+  struct ImportPreview {
+    bool open = false;
+    std::string path;
+    bool copy_into_assets = true;
+    ImportResult result;                 // its materials are the preview scene's (and the import's)
+    std::vector<std::string> originals;  // the file's materials as text, to start again from under another shading
+    std::unique_ptr<Scene> scene;
+    int shading = 0;  // 0 As Imported, 1 PBR, 2.. the toon styles (Classic, Guilty Gear, Soft Anime, Painterly, Manga)
+    bool outline = false, outline_touched = false;  // (untouched: the file's own outlines come in as they are)
+    float outline_width = 0.01f;
+    float yaw = 30.0f;  // the turntable, degrees
+    bool turning = true, dragging = false;
+    int drag_x = 0;
+    double last_time = 0.0;  // the turntable turns by the clock, not the frame rate
+    uint64_t version = 0;    // bumped by every change of the materials or the outlines
+    /* What the last picture was drawn for. */
+    struct Key {
+      int yaw_q = -1, w = 0, h = 0, shading = 0, width_q = 0;
+      uint64_t version = 0;
+      bool outline = false;
+      bool operator==(const Key &o) const { return yaw_q == o.yaw_q && w == o.w && h == o.h && shading == o.shading && width_q == o.width_q && version == o.version && outline == o.outline; }
+    } key;
+  };
+  /* The model read and shown; false when there is nothing to preview (no mesh: a motion-only file) and the caller
+   * imports at once. A failed read is said and counts as handled (true). With a preview open, the file waits its turn. */
+  bool begin_import_preview(const std::string &path, bool copy_into_assets);
+  void apply_import_shading(std::vector<MaterialPtr> &mats, const std::vector<std::string> &originals, int shading);
+  void import_preview_outline(bool on, float width);
+  void render_import_preview(int w, int h);
+  void finish_import_preview(bool do_import);  // Import, or Cancel (the preview scene goes either way; the next queued file opens)
+  void draw_import_preview_dialog(const std::function<void()> &close);
+  void draw_ipv_picture();
+  void draw_ipv_shading_row();
+  void draw_ipv_outline_row();
+  void import_with_shading(const std::string &path, bool copy_into_assets, int shading);  // the console's import <file> <shading>
+  void finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
+                     bool rewrite_materials);
+  /* The draw items a view and the import preview share (task 0152): a mesh's, and its toon outline's hull. */
+  DrawItem mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing);
+  bool outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &out);
+  size_t import_material_assets(ImportResult &r, const std::string &model, bool rewrite);  // rewrite: existing .mat files take the import's fields (task 0152)
   bool inside_assets(const std::string &path) const;
   void shape_command(const std::vector<std::string> &t);
   std::string copy_model_into_assets(const std::string &path);
@@ -2407,6 +2471,14 @@ class Editor {
   double live_preview_time_ = -100;
   Image cam_preview_img_;
   RenderTarget cam_preview_rt_;
+  ImportPreview ipv_;  // (task 0152)
+  std::vector<std::pair<std::string, bool>> ipv_queue_;  // files dropped while a preview is open, each with copy_into_assets
+  bool ipv_force_ = false;
+  Image ipv_img_;
+  RenderTarget ipv_rt_;
+  Renderer3D ipv_r3d_;
+  bool import_preview_pref_ = true;  // Preferences > Import: the preview before importing; the shading it opens with
+  int import_shading_pref_ = 0;
   /* Camera filters: the internal-resolution image and target (render_camera); the Scene view
    * shows the main camera's filters when scene_filters_ is on. */
   FilterTarget scene_ft_, game_ft_, preview_ft_, render_ft_;  // one per view that can be filtered
@@ -2759,7 +2831,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview } dialog_ = Dialog::None;
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
   struct UpdateCheck {

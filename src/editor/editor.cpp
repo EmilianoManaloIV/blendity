@@ -3476,9 +3476,13 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "spring") return spring_command(t);
   if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)
   if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
-  if (c == "import" && t.size() > 1) {  // import <model file>: as dropped onto the window (copied into Assets)
+  if (c == "import" && t.size() > 1) {  // import <model file> [asis|pbr|classic|guiltygear|soft|painterly|manga]: as dropped (copied into Assets); a shading word imports at once with it (task 0152)
+    int shading = t.size() > 3 ? import_shading_index(t[t.size() - 2] + " " + t.back()) : -1;  // ("guilty gear", "soft anime")
+    size_t words = shading >= 0 ? 2 : 0;
+    if (shading < 0 && t.size() > 2) shading = import_shading_index(t.back()), words = shading >= 0 ? 1 : 0;
     std::string p;
-    for (size_t i = 1; i < t.size(); i++) p += (i > 1 ? " " : "") + t[i];
+    for (size_t i = 1; i + words < t.size(); i++) p += (i > 1 ? " " : "") + t[i];
+    if (shading >= 0) return import_with_shading(p, true, shading);
     return import_model_file(p, true);
   }
   if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
@@ -4431,6 +4435,7 @@ static void scan_files(const std::string &dir, const std::string &ext, std::vect
 static int g_dialog_shown = 0;  // which dialog has had its popup opened
 
 void Editor::draw_dialogs() {
+  if (ipv_.open && dialog_ != Dialog::ImportPreview) finish_import_preview(false);  // (the preview clicked away: as Cancel, task 0152)
   if (dialog_ == Dialog::None) {
     g_dialog_shown = 0;
     return;
@@ -4439,7 +4444,7 @@ void Editor::draw_dialogs() {
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
   const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
                     dialog_ == Dialog::MoonRay || dialog_ == Dialog::Ai;
-  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : wide ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (g_dialog_shown == (int)dialog_) {  // was open and got closed by a click outside
@@ -4507,6 +4512,10 @@ void Editor::draw_dialogs() {
         }
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
+        break;
+      }
+      case Dialog::ImportPreview: {
+        draw_import_preview_dialog(close);
         break;
       }
       case Dialog::Export: {
@@ -4606,6 +4615,20 @@ void Editor::draw_dialogs() {
         draw_assist_settings();
         draw_performance_settings(nullptr);
         draw_keymap_settings();
+        /* (After the keymap: its preset list opens below its field, and a row above would push the field down until the
+         * list had to open upward - task 0152.) */
+        Recti ri = u.popup_row(u.row_h() + u.px(4));  // (task 0152)
+        u.label({ri.x + u.px(12), ri.y, u.px(140), ri.h}, "Import");
+        if (u.checkbox({ri.x + u.px(160), ri.y + u.px(2), ri.h - u.px(4), ri.h - u.px(4)}, import_preview_pref_)) save_prefs();
+        u.label({ri.x + u.px(160) + ri.h, ri.y, u.px(160), ri.h}, "Preview before importing");
+        u.tooltip("A dropped or opened model is shown first, with its shading switchable (the file's, PBR, a toon style) and an\n"
+                  "outline; Import then writes it into Assets. Off: it comes in at once, as before.");
+        {
+          std::vector<const char *> names;
+          for (const std::string &n : import_shading_names()) names.push_back(n.c_str());
+          if (u.combo(u.id("pref_import_shading"), {ri.x + u.px(360), ri.y + u.px(2), u.px(150), ri.h - u.px(4)}, import_shading_pref_, names.data(), (int)names.size())) save_prefs();
+          u.tooltip("The shading the preview opens with.");
+        }
         Recti b = u.popup_row(u.row_h() + u.px(10));
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Close")) close();
         break;
@@ -4656,6 +4679,8 @@ void Editor::load_prefs() {
     else if (k == "ffmpeg") ffmpeg_path_ = v;
     else if (k == "update_check") update_check_ = v != "0";
     else if (k == "update_previews") update_previews_ = v != "0";
+    else if (k == "import_preview") import_preview_pref_ = v != "0";  // (task 0152)
+    else if (k == "import_shading") import_shading_pref_ = std::max(0, std::min((int)import_shading_names().size() - 1, std::atoi(v.c_str())));
     else if (k == "update_last") update_last_check_ = std::atof(v.c_str());
     else if (k == "update_skip") update_skip_ = v;
     else if (k == "use_libs") use_libs_ = v != "0";
@@ -4758,6 +4783,7 @@ void Editor::save_prefs() {
                  simpler_while_moving_ ? 1 : 0);
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
+  s += strprintf("import_preview=%d\nimport_shading=%d\n", import_preview_pref_ ? 1 : 0, import_shading_pref_);  // (task 0152)
   s += strprintf("use_libs=%d\nlibs_never_ask=%d\nlibs_last=%.0f\n", use_libs_ ? 1 : 0, libs_never_ask_ ? 1 : 0, libs_last_check_);
   s += strprintf("moonray_never_ask=%d\nmoonray_last=%.0f\nmoonray_folder=%s\nmoonray_installed=%d\n", mr_never_ask_ ? 1 : 0, mr_last_ask_,
                  mr_folder_.c_str(), mr_installed_ ? 1 : 0);

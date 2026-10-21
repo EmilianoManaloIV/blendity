@@ -24,6 +24,9 @@ namespace bl {
 /* Scene -> render data                                                   */
 /* ===================================================================== */
 
+/* An object's scale as one number (the mean of its axes), for a thickness given in metres. */
+static float world_scale_of(const Mat4 &w) { return (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f; }
+
 static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
   for (auto &m : mats)
     if (m && (!m->normal_map.empty() || (m->shading_model == 1 && m->toon_hair_highlight))) return true;  // (the hair band runs across the strands: task 0148)
@@ -47,50 +50,62 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
-    DrawItem it;
-    it.mesh = want_tangents && needs_tangents(mr->materials) ? &m->render_mesh_tangents(editing) : &m->render_mesh(editing);
-    it.model = g.world_matrix();
-    const Material &mat0 = *mr->material(0);
-    it.albedo = mat0.base_color;
-    it.specular = mat0.specular * 0.5f;
-    it.unlit = mat0.unlit;
-    it.double_sided = editing;
-    for (auto &mp : mr->materials)
-      if (mp && mp->double_sided) it.double_sided = true;
-    it.materials = &mr->materials;
-    it.receive_shadows = mr->receive_shadows;
-    it.id = (uint32_t)g.id;
+    DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
     if (!editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_)) attach_lightmap(g, *m, it);  // not under the headlight
     it.use_probes = !editing && !it.lightmap && (game || scene_lighting_);
     it.realtime_lm = !editing && mr->contribute_gi && mr->receive_gi == 0 && (game || scene_lighting_);
     items.push_back(it);
-    /* Toon outlines (ADR 0020): the inverted hull as its own item, back faces always culled (not in Edit Mode). */
-    if (!editing)
-      if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
-        const Outline &ol = *static_cast<const Outline *>(oc);
-        const Mat4 &w = it.model;
-        const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
-        /* The line's width by the object's distance from this view's eye (task 0149); a scaled shell keeps its own
-         * slot, so a path tracer holding the plain one isn't left with a freed mesh. */
-        const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
-        const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale) : 1.0f;
-        const int slot = (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0);
-        if (const Mesh *shell = ol.shell(*m, scale, slot, tscale)) {
-          DrawItem o;
-          o.mesh = &shell->render_mesh();
-          o.model = it.model;
-          o.albedo = ol.materials()[0]->base_color;  // (NaN-free)
-          o.unlit = true;
-          o.materials = &ol.materials();
-          o.receive_shadows = false;
-          o.always_cull = true;
-          o.id = it.id;
-          items.push_back(o);
-        }
-      }
+    if (editing) return;  // (no outline over the cage)
+    /* The line's width by the object's distance from this view's eye (task 0149); a scaled shell keeps its own slot,
+     * so a path tracer holding the plain one isn't left with a freed mesh. */
+    const Component *oc = g.find_role(Component::RenderRole::Outline);
+    if (!oc || !oc->enabled) return;
+    const Outline &ol = *static_cast<const Outline *>(oc);
+    const float scale = world_scale_of(it.model);
+    const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
+    const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale) : 1.0f;
+    DrawItem o;
+    if (outline_draw_item(g, *m, it, (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0), tscale, o)) items.push_back(o);
   });
   return items;
+}
+
+/* A mesh's draw item as every view builds it (the import preview too, task 0152). */
+DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing) {
+  DrawItem it;
+  it.mesh = want_tangents && needs_tangents(mr.materials) ? &m.render_mesh_tangents(editing) : &m.render_mesh(editing);
+  it.model = g.world_matrix();
+  const Material &mat0 = *mr.material(0);
+  it.albedo = mat0.base_color;
+  it.specular = mat0.specular * 0.5f;
+  it.unlit = mat0.unlit;
+  it.double_sided = editing;
+  for (auto &mp : mr.materials)
+    if (mp && mp->double_sided) it.double_sided = true;
+  it.materials = &mr.materials;
+  it.receive_shadows = mr.receive_shadows;
+  it.id = (uint32_t)g.id;
+  return it;
+}
+
+/* Toon outlines (ADR 0020): the inverted hull as its own item, back faces always culled. False without a hull. */
+bool Editor::outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &o) {
+  const Component *oc = g.find_role(Component::RenderRole::Outline);
+  if (!oc || !oc->enabled) return false;
+  const Outline &ol = *static_cast<const Outline *>(oc);
+  const Mesh *shell = ol.shell(m, world_scale_of(it.model), slot, thickness_scale);
+  if (!shell) return false;
+  o = DrawItem();
+  o.mesh = &shell->render_mesh();
+  o.model = it.model;
+  o.albedo = ol.materials()[0]->base_color;  // (NaN-free)
+  o.unlit = true;
+  o.materials = &ol.materials();
+  o.receive_shadows = false;
+  o.always_cull = true;
+  o.id = it.id;
+  return true;
 }
 
 /* A Light component as the renderers see it (all four types, temperature applied). */

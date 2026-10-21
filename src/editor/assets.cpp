@@ -75,12 +75,55 @@ std::vector<MaterialPtr> Editor::scene_materials() {
 
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion: onto a character)
+  if (import_preview_pref_ && (ipv_force_ || !headless_) && begin_import_preview(path, copy_into_assets)) return;  // (task 0152: the dialog first)
   ScopedTimer t;
   ImportResult r;
   if (!import_model(path, r)) {
     Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
     return;
   }
+  finish_import(path, copy_into_assets, r, t, ImportOutline::Keep, 0.0f, false);
+}
+
+static bool import_meshes_with_materials(ImportResult &r);  // (below, with the preview)
+
+/* The console's import <file> <shading> (task 0152): the shading applied and the import finished at once, no dialog. */
+void Editor::import_with_shading(const std::string &path, bool copy_into_assets, int shading) {
+  if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion has no materials to shade)
+  ScopedTimer t;
+  ImportResult r;
+  if (!import_model(path, r)) {
+    Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
+    return;
+  }
+  import_meshes_with_materials(r);
+  std::vector<std::string> originals;
+  for (const MaterialPtr &m : r.materials) originals.push_back(m ? save_material_text(*m) : std::string());
+  apply_import_shading(r.materials, originals, shading);
+  finish_import(path, copy_into_assets, r, t, ImportOutline::Keep, 0.0f, shading != 0);
+}
+
+/* The preview's Outline switch on the imported objects: the file's own left alone, every outline removed, or one of
+ * this width on every mesh (over a file's own). */
+static void import_outlines(const std::vector<GameObject *> &objects, ImportOutline mode, float width) {
+  if (mode == ImportOutline::Keep) return;
+  for (GameObject *g : objects) {
+    if (!g || !g->get<MeshRenderer>()) continue;
+    Outline *ol = g->get<Outline>();
+    if (mode == ImportOutline::Off) {
+      if (ol) g->remove_component(ol);
+      continue;
+    }
+    if (!ol) ol = g->add<Outline>();
+    ol->thickness = width;
+    ol->world_space = true;
+  }
+}
+
+/* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets,
+ * the .mat files, the objects (an Outline on each mesh when `outline_width` is set), the clips. */
+void Editor::finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
+                           bool rewrite_materials) {
   /* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
    * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
    * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). */
@@ -103,13 +146,14 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
       fix(*ref);
     }
   }
-  const size_t made = import_material_assets(r, model);
+  const size_t made = import_material_assets(r, model, rewrite_materials);
   std::vector<GameObject *> objects;
   GameObject *root = instantiate_import(*scene_, r, fs::stem(path), nullptr, &objects);
   if (root) {
     root->set_world_position(cam_.pivot);
     select(root->id);
   }
+  import_outlines(objects, outline, outline_width);  // (the preview's Outline switch, task 0152)
   /* Its animations as clips (task 0139), the first playing on the root. The tracks name the nodes; the objects made
    * may differ (an armature renamed for uniqueness): each path is rewritten onto its object. */
   std::vector<std::string> clip_paths;
@@ -159,6 +203,279 @@ GameObject *Editor::motion_target() {
   for (GameObject *g : scene_->roots)
     if (has_rig(*g)) only = g, count++;
   return count == 1 ? only : nullptr;
+}
+
+/* ---------------------------------------------------------------- the import preview (task 0152) */
+
+const std::vector<std::string> &import_shading_names() {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> n = {"As Imported", "PBR"};
+    for (const std::string &style : toon_style_names()) n.push_back(style);
+    return n;
+  }();
+  return names;
+}
+int import_shading_index(const std::string &word) {
+  std::string w = to_lower(word);
+  w.erase(std::remove(w.begin(), w.end(), ' '), w.end());
+  if (w == "asis" || w == "asimported" || w == "file") return 0;
+  if (w == "pbr") return 1;
+  if (w == "soft") return 2 + toon_style_index("Soft Anime");  // (the short forms the console help lists)
+  if (w == "gg" || w == "guilty") return 2 + toon_style_index("Guilty Gear");
+  const int style = toon_style_index(word);
+  return style >= 0 ? 2 + style : -1;
+}
+
+/* The file's materials under a shading: each starts again from the text the file gave (so a style picked earlier is
+ * undone), then PBR's model or a toon style's preset over it - the maps stay the file's (an MToon shade map stays
+ * under Soft Anime). The preview scene and the import share these materials. */
+void Editor::apply_import_shading(std::vector<MaterialPtr> &mats, const std::vector<std::string> &originals, int shading) {
+  for (size_t i = 0; i < mats.size() && i < originals.size(); i++) {
+    const MaterialPtr &m = mats[i];
+    if (!m || originals[i].empty()) continue;
+    load_material_text(originals[i], *m);
+    if (shading == 1) m->shading_model = 0;
+    else if (shading >= 2) apply_toon_style(*m, shading - 2);
+    m->touch();
+  }
+}
+
+/* Every mesh node gets a material of its own in `r` (the instantiation would make one outside the list, which no
+ * shading could reach); true when any node has a mesh at all. */
+static bool import_meshes_with_materials(ImportResult &r) {
+  bool any = false;
+  for (ImportedNode &n : r.nodes) {
+    if (!n.mesh) continue;
+    any = true;
+    if (!n.materials.empty()) continue;
+    MaterialPtr m = make_material(n.name, Vec3(0.8f));
+    n.materials.push_back(m);
+    r.materials.push_back(m);
+  }
+  return any;
+}
+
+bool Editor::begin_import_preview(const std::string &path, bool copy_into_assets) {
+  if (ipv_.open) {  // one at a time: this one waits for Import or Cancel
+    ipv_queue_.push_back({path, copy_into_assets});
+    Log::info("Import: %s waits for the preview of %s", fs::filename(path).c_str(), fs::filename(ipv_.path).c_str());
+    return true;
+  }
+  ImportResult r;
+  if (!import_model(path, r)) {
+    Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
+    return true;
+  }
+  if (!import_meshes_with_materials(r)) return false;  // nothing to look at (a motion-only file): the plain import
+  ipv_ = ImportPreview();
+  ImportPreview &pv = ipv_;
+  pv.open = true;
+  pv.path = path;
+  pv.copy_into_assets = copy_into_assets;
+  pv.result = std::move(r);
+  for (const MaterialPtr &m : pv.result.materials) pv.originals.push_back(m ? save_material_text(*m) : std::string());
+  pv.scene = std::make_unique<Scene>();
+  instantiate_import(*pv.scene, pv.result, fs::stem(path), nullptr, nullptr);
+  /* The file's own outlines (an MMD model's) as the switch's starting state. */
+  pv.scene->for_each([&](GameObject &g) {
+    if (const Outline *ol = g.get<Outline>()) pv.outline = true, pv.outline_width = ol->thickness;
+  });
+  pv.shading = std::max(0, std::min((int)import_shading_names().size() - 1, import_shading_pref_));
+  if (pv.shading != 0) apply_import_shading(pv.result.materials, pv.originals, pv.shading);
+  pv.last_time = now_seconds();
+  dialog_ = Dialog::ImportPreview;
+  return true;
+}
+
+void Editor::import_preview_outline(bool on, float width) {
+  ImportPreview &pv = ipv_;
+  pv.outline = on;
+  pv.outline_touched = true;
+  pv.outline_width = finite_bits(width) ? std::max(0.0005f, std::min(1.0f, width)) : 0.01f;
+  pv.version++;
+  if (!pv.scene) return;
+  pv.scene->for_each([&](GameObject &g) {
+    if (!g.get<MeshRenderer>()) return;
+    Outline *ol = g.get<Outline>();
+    if (!on) {
+      if (ol) g.remove_component(ol);
+      return;
+    }
+    if (!ol) ol = g.add<Outline>();
+    ol->thickness = pv.outline_width;
+    ol->world_space = true;
+  });
+}
+
+/* The preview's picture: the model on a turntable, lit from the preview's own camera, drawn by the CPU rasterizer
+ * (every material, painted maps included) into its own image; drawn again only when something it shows changed
+ * (the turn in 2-degree steps, so a spin isn't a render every frame). */
+void Editor::render_import_preview(int w, int h) {
+  ImportPreview &pv = ipv_;
+  if (!pv.scene || w < 8 || h < 8) return;
+  ImportPreview::Key key;
+  key.yaw_q = (int)std::lround(pv.yaw / 2.0f);
+  key.w = w, key.h = h, key.shading = pv.shading, key.version = pv.version, key.outline = pv.outline;
+  key.width_q = (int)std::lround(pv.outline_width * 1000.0f);
+  if (key == pv.key && ipv_img_.width == w && ipv_img_.height == h) return;
+  pv.key = key;
+  AABB b;
+  pv.scene->for_each([&](GameObject &g) {
+    if (g.get<MeshRenderer>()) b.add(g.world_bounds());
+  });
+  if (!b.valid()) b.add(Vec3(-0.5f)), b.add(Vec3(0.5f));
+  const Vec3 c = b.center();
+  const float rad = std::max(0.05f, length(b.extent()));
+  const Quat q = Quat::euler(Vec3(15.0f, (float)(key.yaw_q * 2), 0.0f));
+  const Vec3 eye = c - q.rotate(Vec3(0, 0, 1)) * (rad * 2.4f);
+  const Mat4 v = Mat4::look_at(eye, c, Vec3(0, 1, 0)), p = Mat4::perspective(40.0f * kDeg2Rad, w / (float)h, rad * 0.05f, rad * 10.0f);
+  ipv_img_.resize(w, h);
+  ipv_rt_.attach(ipv_img_, {0, 0, w, h});
+  /* The headlight from the preview's camera, a little above and to its right, so the turn never shows a back-lit side;
+   * plain tone mapping (the scene's view transform and exposure are the scene's, not the file's). */
+  LightingEnv env = make_lighting(eye, false, true);
+  if (!env.lights.empty()) env.lights[0].direction = normalize(q.rotate(Vec3(0.2f, -0.3f, 1.0f)));
+  env.view_transform = ViewTransform::Standard;
+  env.exposure = 0.0f;
+  std::vector<DrawItem> items;
+  pv.scene->for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    const MeshFilter *mf = g.get<MeshFilter>();
+    if (!g.active_in_hierarchy() || !mr || !mr->enabled || !mf || !mf->mesh) return;
+    const Mesh *m = g.evaluated_mesh(1);
+    if (!m) return;
+    items.push_back(mesh_draw_item(g, *m, *mr, true, false));
+    DrawItem o;
+    if (outline_draw_item(g, *m, items.back(), 1, 1.0f, o)) items.push_back(o);
+  });
+  RasterOptions opt;  // (the defaults, not the Scene view's debug and overlay options)
+  opt.shade = ShadeMode::Deferred;
+  ipv_r3d_.begin(&ipv_rt_, v, p, env, opt);
+  ipv_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
+  for (const DrawItem &it : items) ipv_r3d_.add(it);
+  ipv_r3d_.flush();
+}
+
+void Editor::finish_import_preview(bool do_import) {
+  ImportPreview &pv = ipv_;
+  if (!pv.open) return;
+  if (do_import) {
+    ScopedTimer t;
+    const ImportOutline outline = !pv.outline_touched ? ImportOutline::Keep : pv.outline ? ImportOutline::Set : ImportOutline::Off;
+    finish_import(pv.path, pv.copy_into_assets, pv.result, t, outline, pv.outline_width, pv.shading != 0);
+  }
+  else Log::info("Import of %s cancelled: nothing was written", fs::filename(pv.path).c_str());
+  ipv_ = ImportPreview();
+  ipv_img_ = Image();
+  if (dialog_ == Dialog::ImportPreview) dialog_ = Dialog::None;
+  if (ipv_queue_.empty()) return;
+  const std::pair<std::string, bool> next = ipv_queue_.front();  // the next dropped file's turn
+  ipv_queue_.erase(ipv_queue_.begin());
+  import_model_file(next.first, next.second);
+}
+
+void Editor::draw_import_preview_dialog(const std::function<void()> &close) {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  if (!pv.open) {
+    close();
+    return;
+  }
+  {
+    Recti r = u.popup_row(u.row_h() + u.px(6));
+    u.label({r.x + u.px(10), r.y, r.w, r.h}, "Import " + fs::filename(pv.path), u.theme.text_bright);
+    u.canvas.hline(r.x, r.right(), r.bottom() - 1, u.theme.separator);
+  }
+  draw_ipv_picture();
+  auto line = [&](const std::string &text, uint32_t color) {
+    const Recti r = u.popup_row();
+    u.label({r.x + u.px(10), r.y, r.w - u.px(20), r.h}, text, color);
+  };
+  line(pv.result.summary, u.theme.text);
+  for (size_t i = 0; i < pv.result.notes.size() && i < 5; i++) line(pv.result.notes[i], u.theme.text_dim);
+  if (pv.result.notes.size() > 5) line(strprintf("... and %zu more notes (the Console lists them after the import)", pv.result.notes.size() - 5), u.theme.text_dim);
+  draw_ipv_shading_row();
+  draw_ipv_outline_row();
+  const Recti b = u.popup_row(u.row_h() + u.px(10));
+  const Recti ok{b.right() - u.px(180), b.y + u.px(4), u.px(80), b.h - u.px(8)}, cancel{b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)};
+  if (u.record_buttons) u.button_rects["ipv:Import"] = ok, u.button_rects["ipv:Cancel"] = cancel;
+  if (u.button(ok, "Import")) {
+    finish_import_preview(true);
+    close();
+    return;
+  }
+  if (u.button(cancel, "Cancel")) {
+    finish_import_preview(false);
+    close();
+  }
+}
+
+/* The picture: turning on its own (30 degrees a second, by the clock) until dragged, then where the drag left it. */
+void Editor::draw_ipv_picture() {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  const int ph = std::min(u.px(300), fb_.height / 3);  // (a short window keeps the buttons below in reach)
+  Recti row = u.popup_row(ph + u.px(8));
+  const Recti pic{row.x + u.px(10), row.y + u.px(4), row.w - u.px(20), ph};
+  if (u.hovered(pic) && u.in.down[0]) {
+    if (pv.dragging) pv.yaw += (u.in.mx - pv.drag_x) * 0.5f;
+    pv.dragging = true;
+    pv.turning = false;
+  }
+  else pv.dragging = false;
+  pv.drag_x = u.in.mx;
+  const double now = now_seconds();
+  if (pv.turning) pv.yaw += (float)std::min(0.25, std::max(0.0, now - pv.last_time)) * 30.0f;
+  pv.last_time = now;
+  pv.yaw = std::fmod(pv.yaw + 360.0f, 360.0f);
+  render_import_preview(pic.w, pic.h);
+  if (ipv_img_.width == pic.w && ipv_img_.height == pic.h) {  // (a picture of another size: nothing drawn this frame)
+    Image *fb = u.canvas.target();
+    const Recti dst = pic.intersect(u.canvas.clip());
+    for (int y = dst.y; y < dst.bottom(); y++) std::memcpy(fb->row(y) + dst.x, ipv_img_.row(y - pic.y) + (dst.x - pic.x), sizeof(uint32_t) * (size_t)std::max(0, dst.w));
+  }
+  u.tooltip("Drag to turn the model.");
+  if (pv.turning) u.redraw = true;
+}
+
+/* The shading: every material of the preview under one of them. */
+void Editor::draw_ipv_shading_row() {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  const Recti r = u.popup_row(u.row_h() + u.px(6));
+  u.label({r.x + u.px(10), r.y, u.px(70), r.h}, "Shading");
+  const std::vector<std::string> &names = import_shading_names();
+  int x = r.x + u.px(80);
+  for (size_t i = 0; i < names.size(); i++) {
+    const int bw = u.font.text_width(names[i]) + u.px(14);
+    const Recti br{x, r.y + u.px(2), bw, r.h - u.px(4)};
+    if (u.record_buttons) u.button_rects["ipv:" + names[i]] = br;
+    if (u.button(br, names[i], pv.shading == (int)i) && pv.shading != (int)i) {
+      pv.shading = (int)i;
+      apply_import_shading(pv.result.materials, pv.originals, (int)i);
+      pv.version++;
+    }
+    x += bw + u.px(4);
+  }
+  u.tooltip("How every material of the model is shaded: as the file made it, PBR, or a toon style over the file's\n"
+            "materials (their maps stay). The .mat files are written with this (existing ones too, unless As Imported);\n"
+            "the Materials window edits them after.");
+}
+
+void Editor::draw_ipv_outline_row() {
+  auto &u = ui_;
+  ImportPreview &pv = ipv_;
+  const Recti r = u.popup_row(u.row_h() + u.px(6));
+  bool on = pv.outline;
+  const Recti cb{r.x + u.px(10), r.y + u.px(2), r.h - u.px(4), r.h - u.px(4)};
+  if (u.record_buttons) u.button_rects["ipv:Outline"] = cb;
+  const bool toggled = u.checkbox(cb, on);
+  u.label({cb.right() + u.px(6), r.y, u.px(70), r.h}, "Outline");
+  float width = pv.outline_width;
+  const bool changed = u.float_field(u.id("ipv_outline_width"), {r.x + u.px(110), r.y + u.px(2), u.px(90), r.h - u.px(4)}, width, 0.001f, 0.0005f, 1.0f, "%.3f m");
+  if (toggled || changed) import_preview_outline(on, width);
+  u.tooltip("A toon outline (the inverted hull) on every mesh, this thick in metres. Untouched, a file's own outlines (an\n"
+            "MMD model's) come in as they are.");
 }
 
 /* A motion file (task 0137: MMD's .vmd) onto a character: Assets/Animations/<character>/<motion>.anim, played by the
@@ -329,7 +646,7 @@ void Editor::copy_import_textures(const ImportResult &r, const std::string &fold
 /* Unity's Extract Materials, on import (task 0134): every material of the model as Assets/Materials/<model>/<name>.mat,
  * the model's renderers using those assets. A .mat already there (an earlier import, maybe edited since) is used as it
  * is, never overwritten. The count made or reused. */
-size_t Editor::import_material_assets(ImportResult &r, const std::string &model) {
+size_t Editor::import_material_assets(ImportResult &r, const std::string &model, bool rewrite) {
   std::unordered_map<const Material *, MaterialPtr> asset_of;
   std::unordered_set<std::string> names;
   for (const MaterialPtr &m : r.materials) {
@@ -339,6 +656,11 @@ size_t Editor::import_material_assets(ImportResult &r, const std::string &model)
     names.insert(to_lower(name));
     const std::string rel = "Assets/Materials/" + safe_file_name(model) + "/" + name + ".mat";
     MaterialPtr a = fs::exists(resolve_asset_path(rel)) ? material_asset(rel) : nullptr;
+    if (a && rewrite) {
+      /* A look chosen at import (task 0152) lands in the existing file too; As Imported keeps what was edited. */
+      load_material_text(save_material_text(*m), *a);
+      a->touch();
+    }
     if (!a) {
       fs::make_dirs(fs::parent(resolve_asset_path(rel)));
       a = create_material_asset(*m, rel);

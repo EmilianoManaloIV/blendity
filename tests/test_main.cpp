@@ -38707,4 +38707,180 @@ static void round81_tests() {
       CHECK(same > 180);
     }
   });
+
+  /* ---------------------------------------------------------------- round 170: the import preview (task 0152) */
+  /* A cube with a material, as a .glb file in the test folder; its .mat files land under Assets/Materials/<stem>. */
+  auto r170_glb = [](const char *stem) {
+    const std::string dir = fs::join(test_dir(), "r170");
+    fs::make_dirs(dir);
+    MaterialPtr mat = make_material("Skin", Vec3(0.9f, 0.7f, 0.6f));
+    MeshPtr cube = primitives::cube();
+    ExportItem it;
+    it.name = stem;
+    it.mesh = cube.get();
+    it.world = Mat4::identity();
+    it.materials = {mat};
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    const std::string path = fs::join(dir, std::string(stem) + ".glb");
+    std::ofstream f(path, std::ios::binary);
+    f.write(glb.data(), (std::streamsize)glb.size());
+    return path;
+  };
+  auto r170_mats = [](const char *stem) {  // the .mat files an import of <stem> wrote
+    std::vector<std::string> out;
+    const std::string dir = resolve_asset_path(std::string("Assets/Materials/") + stem);
+    for (const DirEntry &de : fs::list(dir))
+      if (fs::extension(de.name) == ".mat") out.push_back(fs::join(dir, de.name));
+    return out;
+  };
+  auto r170_clear = [](const char *stem) {
+    for (const DirEntry &de : fs::list(resolve_asset_path(std::string("Assets/Materials/") + stem))) std::remove(fs::join(resolve_asset_path(std::string("Assets/Materials/") + stem), de.name).c_str());
+    std::remove(resolve_asset_path(std::string("Assets/Meshes/") + stem + ".glb").c_str());
+  };
+  test("import preview: import <file> <shading> writes the .mat files in that shading at once - Guilty Gear's fields, PBR, the file's own", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.import_preview_pref_for_test(true, 0);  // (a shading word skips the dialog whatever the preference)
+    const std::string path = r170_glb("r170a");
+    r170_clear("r170a");
+    ed.command("import " + path + " guiltygear");
+    ed.step_frame_headless();
+    std::vector<std::string> mats = r170_mats("r170a");
+    CHECK(!ed.import_preview_open_for_test() && mats.size() == 1 && ed.scene().find_by_name("r170a"));
+    Material m;
+    std::string text;
+    CHECK(!mats.empty() && fs::read_file(mats[0], text) && load_material_text(text, m));
+    std::printf("    guiltygear: %zu .mat file(s); shading %d, style %d, key light only %d\n", mats.size(), m.shading_model, m.toon_style, (int)m.toon_key_light_only);
+    CHECK(m.shading_model == 1 && m.toon_style == 1 && m.toon_key_light_only);
+    r170_clear("r170a");  // (an import again keeps the .mat files that exist: a fresh folder for each look)
+    ed.command("import " + path + " pbr");
+    ed.step_frame_headless();
+    mats = r170_mats("r170a");
+    CHECK(!mats.empty() && fs::read_file(mats[0], text) && load_material_text(text, m) && m.shading_model == 0);
+    r170_clear("r170a");
+    ed.command("import " + path + " asis");
+    ed.step_frame_headless();
+    mats = r170_mats("r170a");
+    CHECK(!mats.empty() && fs::read_file(mats[0], text) && load_material_text(text, m) && m.shading_model == 0 && m.toon_style == 0);
+    CHECK(import_shading_index("Soft Anime") == 4 && import_shading_index("softanime") == 4 && import_shading_index("soft") == 4 && import_shading_index("gg") == 3 &&
+          import_shading_index("PBR") == 1 && import_shading_index("asis") == 0 && import_shading_index("hero.fbx") == -1);
+    /* A look chosen at import rewrites the .mat files that exist (As Imported keeps them); two console words. */
+    ed.command("import " + path + " guilty gear");
+    ed.step_frame_headless();
+    mats = r170_mats("r170a");
+    CHECK(mats.size() == 1 && fs::read_file(mats[0], text) && load_material_text(text, m) && m.toon_style == 1);
+    ed.command("import " + path + " soft");
+    ed.step_frame_headless();
+    mats = r170_mats("r170a");
+    CHECK(mats.size() == 1 && fs::read_file(mats[0], text) && load_material_text(text, m) && m.toon_style == 2 && m.shading_model == 1);
+    ed.command("import " + path + " asis");
+    ed.step_frame_headless();
+    mats = r170_mats("r170a");
+    CHECK(mats.size() == 1 && fs::read_file(mats[0], text) && load_material_text(text, m) && m.toon_style == 2);  // (kept: As Imported doesn't rewrite)
+    /* The preferences round trip and their clamp. */
+    const std::string prefs = fs::join(test_dir(), "r170_prefs.txt");
+    std::remove(prefs.c_str());
+    {
+      Editor e2;
+      e2.init_headless(320, 200);
+      e2.prefs_for_test(prefs);  // (after init: it sets the path the editor would use)
+      e2.import_preview_pref_for_test(false, 99);
+      e2.save_prefs_for_test();
+    }
+    std::string ptext;
+    CHECK(fs::read_file(prefs, ptext) && ptext.find("import_preview=0") != std::string::npos && ptext.find("import_shading=99") != std::string::npos);
+    {
+      Editor e3;
+      e3.init_headless(320, 200);
+      e3.prefs_for_test(prefs);
+      e3.load_prefs_for_test();
+      CHECK(!e3.import_preview_pref_for_test() && e3.import_shading_pref_for_test() == (int)import_shading_names().size() - 1);  // (clamped on reading)
+    }
+    std::remove(prefs.c_str());
+    r170_clear("r170a");
+  });
+
+  test("import preview: the dialog shows the model without writing anything, its Shading row and Outline switch change the preview, Cancel leaves no trace, Import writes the chosen look", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    const std::string path = r170_glb("r170b");
+    r170_clear("r170b");
+    ed.import_preview_pref_for_test(true, 4);  // (opens with Soft Anime)
+    const size_t objects_before = ed.scene().object_count();
+    CHECK(ed.begin_import_preview_for_test(path));
+    r34_steps(ed, 3);
+    CHECK(ed.import_preview_open_for_test() && r170_mats("r170b").empty() && ed.scene().object_count() == objects_before);
+    const ImportResult &r = ed.import_preview_result_for_test();
+    CHECK(!r.materials.empty() && r.materials[0]->shading_model == 1 && r.materials[0]->toon_style == 2);  // the preference's Soft Anime
+    const Image &img = ed.import_preview_image_for_test();
+    /* The model in the middle of the picture: its pixel isn't the sky's (the corners are). */
+    const uint32_t centre = img.pixels.empty() ? 0 : img.pixels[(size_t)(img.height / 2) * img.width + img.width / 2], corner = img.pixels.empty() ? 0 : img.pixels[2 * (size_t)img.width + 2];
+    std::printf("    the preview: %d x %d, centre %06X, corner %06X; %zu material(s), %zu note(s)\n", img.width, img.height, centre & 0xFFFFFF, corner & 0xFFFFFF,
+                r.materials.size(), r.notes.size());
+    CHECK(img.width > 100 && (centre & 0xFFFFFF) != (corner & 0xFFFFFF));
+    CHECK(r166_click(ed, "ipv:Guilty Gear", 0));
+    CHECK(r.materials[0]->toon_style == 1 && r.materials[0]->toon_key_light_only);
+    CHECK(r166_click(ed, "ipv:PBR", 0));
+    CHECK(r.materials[0]->shading_model == 0);
+    CHECK(r166_click(ed, "ipv:As Imported", 0));
+    CHECK(r.materials[0]->shading_model == 0 && r.materials[0]->toon_style == 0 && std::fabs(r.materials[0]->base_color.x - 0.9f) < 0.01f);
+    CHECK(r166_click(ed, "ipv:Outline", 0));  // the checkbox
+    size_t outlined = 0;
+    ed.import_preview_scene_for_test()->for_each([&](GameObject &g) { outlined += g.get<Outline>() != nullptr; });
+    CHECK(outlined == 1);
+    CHECK(r166_click(ed, "ipv:Outline", 0));
+    outlined = 0;
+    ed.import_preview_scene_for_test()->for_each([&](GameObject &g) { outlined += g.get<Outline>() != nullptr; });
+    CHECK(outlined == 0);
+    ed.import_preview_outline_for_test(true, 0.02f);
+    CHECK(r166_click(ed, "ipv:Cancel", 0));
+    CHECK(!ed.import_preview_open_for_test() && r170_mats("r170b").empty() && ed.scene().object_count() == objects_before && !ed.scene().find_by_name("r170b"));
+    /* Again: Guilty Gear, an outline, Import. */
+    CHECK(ed.begin_import_preview_for_test(path));
+    r34_steps(ed, 2);
+    CHECK(r166_click(ed, "ipv:Guilty Gear", 0));
+    ed.import_preview_outline_for_test(true, 0.02f);
+    CHECK(r166_click(ed, "ipv:Import", 0));
+    r34_steps(ed, 1);
+    GameObject *root = ed.scene().find_by_name("r170b");
+    std::vector<std::string> mats = r170_mats("r170b");
+    Material m;
+    std::string text;
+    CHECK(!ed.import_preview_open_for_test() && root && mats.size() == 1 && fs::read_file(mats[0], text) && load_material_text(text, m) && m.toon_style == 1);
+    size_t outlines = 0, meshes = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!g.get<MeshRenderer>()) return;
+      for (GameObject *a = &g; a; a = a->parent)
+        if (a == root) meshes++, outlines += g.get<Outline>() != nullptr;
+    });
+    std::printf("    imported: %zu mesh(es) under the root, %zu with an Outline\n", meshes, outlines);
+    CHECK(meshes == 1 && outlines == 1);
+    /* The preference: on, the console's plain import opens the dialog (forced past the headless gate); off, it comes
+     * in at once. A second file while the preview is open waits its turn; the popup clicked away is a Cancel. */
+    r170_clear("r170b");
+    ed.command("select Main Camera");
+    ed.import_preview_force_for_test(true);
+    ed.import_preview_pref_for_test(true, 0);
+    const std::string path2 = r170_glb("r170c");
+    r170_clear("r170c");
+    ed.command("import " + path);
+    ed.command("import " + path2);
+    r34_steps(ed, 2);
+    CHECK(ed.import_preview_open_for_test() && ed.import_preview_queue_for_test() == 1 && r170_mats("r170b").empty());
+    ed.close_dialog_for_test();  // (as a click outside the popup)
+    r34_steps(ed, 2);
+    std::printf("    after the click-away: preview %s, queue %zu, r170b files %zu\n", ed.import_preview_open_for_test() ? "open (the next file)" : "closed",
+                ed.import_preview_queue_for_test(), r170_mats("r170b").size());
+    CHECK(ed.import_preview_open_for_test() && ed.import_preview_queue_for_test() == 0 && r170_mats("r170b").empty() && ed.import_preview_result_for_test().nodes.size() > 0);
+    CHECK(r166_click(ed, "ipv:Cancel", 0));
+    CHECK(!ed.import_preview_open_for_test() && r170_mats("r170c").empty());
+    ed.import_preview_pref_for_test(false, 0);
+    ed.command("import " + path);
+    ed.step_frame_headless();
+    CHECK(!ed.import_preview_open_for_test() && r170_mats("r170b").size() == 1);
+    ed.import_preview_force_for_test(false);
+    r170_clear("r170b");
+    r170_clear("r170c");
+  });
 }

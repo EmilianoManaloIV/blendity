@@ -348,6 +348,19 @@ A shape key (Blender's name; Unity says blend shape, glTF morph target, MMD vert
 ! cmd:create Sphere; shape add Puff 0.2; shape set Puff 0.5 | A sphere with a shape key "Puff", half applied (see MeshRenderer > BlendShape/Puff)
 ? Why are shape keys added before the skin rather than after? | So the expression is bent with the bones: a smile keyed on the face turns with the head instead of staying where the face was at rest.
 ? An imported face has 50 keys. Does every frame cost 50 times as much? | Only the keys with a weight above 0 are added.
+# Importing: preview the look
+A model dropped onto the window (or opened with File > Import) is shown first, in the Import Preview (task 0152): the
+model on a slow turntable (drag to turn it) lit from the preview's own camera, with the import's notes beside it - what the
+file held, which textures were found. The Shading row decides how every material comes in before anything is
+written: As Imported (what the file made: a VRM's MToon, an MMD's toon), PBR, or a toon style - Classic, Guilty
+Gear, Soft Anime, Painterly, Manga - over the file's materials (their maps stay). Outline puts a line on every mesh.
+Import writes the model, its textures and the .mat files with that shading into Assets (a model imported before gets
+its existing .mat files rewritten with the look, unless As Imported); Cancel writes nothing. Several files dropped at
+once take their turns, one preview after another.
+Preferences > Import turns the preview off (the model comes in at once, as before) and sets the shading it opens
+with. From the console, import <file> <shading> skips the dialog: import Assets/Meshes/hero.fbx guiltygear.
+? Why pick a toon style at import rather than afterwards? | The .mat files are written with it, so every copy of the model and every scene that uses them has the look from the start; the Materials window changes them later all at once.
+! cmd:window Project | Open the Project window: drop a model onto the Scene view to see the Import Preview
 # MMD models: PMX and PMD
 MikuMikuDance characters (.pmx, and the older .pmd) import like any model: drop one onto the window. MMD measures in units of 8 cm and faces its characters the other way, so the model comes in scaled to metres and turned to face +Z like every other character. Its bones point at their tails, and the standard ones get the names Blendity's rig tools read (左ひざ becomes LeftLeg, 頭 Head), so Walk Cycle, Add IK and the physics tools find the legs, spine and head. Hair, skirt and accessory bones keep their own names. The legs' IK comes with it (an IKConstraint on each knee, aimed at the foot's IK bone, with a pole in front of the knee). Bones MMD simulates (hair, skirts, ribbons) become Spring Bones chains. Faces (vertex and group morphs) become shape keys under their Japanese names. Materials are Toon-shaded with MMD's colours, textures and toon ramp, and the model's edge becomes an Outline. Bone, UV and material morphs, and bones that copy another's turn (twist and eye helpers), are listed in the Console as not carried over.
 ! cmd:window Project | Open the Project window: drop a .pmx or .pmd there or onto the Scene view
