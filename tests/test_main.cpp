@@ -17682,10 +17682,15 @@ static void round44_tests() {
     double sum = 0, worst = 0;
     size_t n = 0;
     const int x0 = (int)(u0 * side), x1 = (int)(u1 * side), y0 = (int)(v0 * side), y1 = (int)(v1 * side);
+    /* Only the brightly lit top (the sky is off): half the chart's peak, whatever the light's units (task 0155 made
+     * a panel's light fall as the inverse square, so an absolute cut let the dim sides in with their larger noise). */
+    float peak = 0.0f;
+    for (int y = y0; y <= y1 && y < fin.height; y++)
+      for (int x = x0; x <= x1 && x < fin.width; x++) peak = std::max(peak, fin.texels[(size_t)y * fin.width + x].x);
     for (int y = y0; y <= y1 && y < fin.height; y++)
       for (int x = x0; x <= x1 && x < fin.width; x++) {
         const float a = first.texels[(size_t)y * fin.width + x].x, b = fin.texels[(size_t)y * fin.width + x].x;
-        if (b < 1.0f) continue;  // only the brightly lit top (the sky is off)
+        if (b < 0.5f * peak) continue;
         const double rel = std::fabs(a - b) / b;
         sum += rel, worst = std::max(worst, rel), n++;
       }
