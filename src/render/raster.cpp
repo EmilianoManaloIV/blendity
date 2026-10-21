@@ -633,7 +633,13 @@ void Renderer3D::flush() {
   normal_mats_.resize(n_items);
   js.parallel_for((int64_t)n_items, 64, [&](int64_t i0, int64_t i1) {
     for (int64_t i = i0; i < i1; i++)
-      if (visible[i]) normal_mats_[i] = items_[i].model.inverse().transposed();
+      if (visible[i]) {
+        const Mat4 inv = items_[i].model.inverse();
+        normal_mats_[i] = inv.transposed();
+        const Vec3 lk = inv.dir(toon_key_L_);  // (task 0149: the face shadow map reads the key light in the object's space)
+        const float len = length(lk);
+        items_[i].local_key = finite_bits(len) && len > 1e-12f ? lk / len : Vec3(0, 1, 0);
+      }
   });
   /* Clip-space and screen positions (and Gouraud vertex colours) for
    * vertices [b, e). The perspective divide happens once per vertex here
@@ -1857,7 +1863,9 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
       float vis = 1.0f;
       if (ndl > 0 && (int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
         vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
-      const float lit = std::max(ndl, 0.0f) * vis * std::min(fall, 1.0f);
+      /* The face shadow map (task 0149) gives the key light's lit term instead of N.L. */
+      const float face = (int)li == toon_key_ ? toon_face_lit(*s.toon, s, it.local_key) : -1.0f;
+      const float lit = (face >= 0.0f ? face : std::max(ndl, 0.0f) * vis) * std::min(fall, 1.0f);  // (the map is the face's shadow: no cast shadow on top)
       const int key = s.toon->toon_key_light_only ? toon_key_ : -1;
       lo += (key >= 0 && (int)li != key ? toon_fill(s, lit) : shade_toon(s, n, V, L, lit)) * l.color * l.intensity;
       continue;

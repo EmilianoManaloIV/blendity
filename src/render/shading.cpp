@@ -51,6 +51,7 @@ bool material_uniform(const Material &m, const Material::Resolved &tx) {
   if (m.axis_mode != 0 || m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) return false;
   /* The painted toon maps and the hair's strands vary over the surface too (task 0148); the ramp alone doesn't. */
   if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight)) return false;
+  if (m.shading_model == 1 && (tx.face_shadow || tx.line || tx.hatch)) return false;  // (task 0149)
   return !tx.base && !tx.metallic && !tx.roughness && !tx.emission && !tx.normal;
 }
 
@@ -94,6 +95,7 @@ Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit) {
    * a VRoid avatar's shade texture is often its base texture, which the tint then darkens); without one the base
    * colour takes the tone. */
   Vec3 c = s.has_shade ? lerp(s.toon_shade * m.toon_shadow, s.albedo, q) : s.albedo * tone;
+  c = lerp(c * s.toon_shadow_mul, c, q);  // the inner lines and the hatching in the shadow tones (task 0149)
   if (m.toon_specular_size > 0.0f && q > 0.0f && s.toon_spec_mask > 0.0f) {
     /* A hard spot where N.H is near 1: size 1 reaches N.H = 0.8. For hair, a band where the half vector is square
      * to the strands (Kajiya-Kay: the sheen runs across the hair, wherever the normal points). */
@@ -118,6 +120,22 @@ Vec3 toon_rim(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 key_L) {
   const float f = 1.0f - std::max(0.0f, dot(n, V)), e = 1.0f - clampf(m.toon_rim_width, 0.0f, 1.0f);
   const float w = clampf(m.toon_softness, 0.0f, 0.5f) + 0.02f;
   return m.toon_rim * (axis_step(e - w, e + w, f) * m.toon_rim_strength * clampf(s.toon_rim_mask, 0.0f, 1.0f));
+}
+
+float toon_face_lit(const Material &m, const SurfaceSample &s, Vec3 local_L) {
+  if (s.face_sdf < 0.0f) return -1.0f;
+  Vec3 fwd(0, 0, 1), right(1, 0, 0);
+  if (m.face_forward == 1) fwd = Vec3(0, 0, -1), right = Vec3(-1, 0, 0);
+  else if (m.face_forward == 2) fwd = Vec3(1, 0, 0), right = Vec3(0, 0, -1);
+  else if (m.face_forward == 3) fwd = Vec3(-1, 0, 0), right = Vec3(0, 0, 1);
+  /* The light's direction round the face's up axis: straight above or below has no side, so the face is lit. */
+  const Vec3 l(local_L.x, 0.0f, local_L.z);
+  const float len = length(l);
+  if (!finite_bits(len) || !(len > 1e-6f)) return 1.0f;
+  const float thr = std::acos(clampf(dot(l / len, fwd), -1.0f, 1.0f)) / kPi;
+  const float sdf = dot(l, right) >= 0.0f ? s.face_sdf : s.face_sdf_mirror;
+  const float soft = clampf(finite_bits(m.face_shadow_softness) ? m.face_shadow_softness : 0.0f, 0.0f, 0.5f);
+  return axis_step(thr - soft, thr + soft, sdf);
 }
 
 int toon_key_light(const std::vector<RenderLight> &lights, Vec3 *L) {
@@ -368,6 +386,23 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     if (tx.toon_rim_mask) s.toon_rim_mask = sample_image(tx.toon_rim_mask).x;
     if (!finite_bits(s.toon_bias)) s.toon_bias = 0.5f;  // (a float map's NaN: neutral)
     s.toon_ramp = tx.toon_ramp.get();
+    /* The 2D look (task 0149): the face shadow map at the UV and at its mirror (the light's side picks one), the inner
+     * lines into the colour (or the shadow tones), the hatching tiled over the UVs into the shadow tones. */
+    if (tx.face_shadow) {
+      s.face_sdf = tex_sample(tx.face_shadow, uv, 0.0f, m, sp.tex).x;
+      s.face_sdf_mirror = tex_sample(tx.face_shadow, {1.0f - uv.x, uv.y}, 0.0f, m, sp.tex).x;
+      if (!finite_bits(s.face_sdf)) s.face_sdf = 0.0f;
+      if (!finite_bits(s.face_sdf_mirror)) s.face_sdf_mirror = 0.0f;
+    }
+    if (tx.line) {
+      const Vec3 l = sample_image(tx.line).xyz();
+      if (m.line_only_shadow) s.toon_shadow_mul = s.toon_shadow_mul * l;
+      else s.albedo = s.albedo * l;
+    }
+    if (tx.hatch) {
+      const float sc = finite_bits(m.hatch_scale) && m.hatch_scale > 0.0f ? m.hatch_scale : 1.0f;
+      s.toon_shadow_mul = s.toon_shadow_mul * tx.hatch->sample({uv.x * sc, uv.y * sc}, 0.0f, TexWrap::Repeat, TexFilter::Linear).x;
+    }
     /* The strands run along V (hair cards and unwraps are laid out that way): the bitangent. */
     s.toon_strand = cross(sp.normal, sp.tangent.xyz()) * sp.tangent.w;
     s.toon_has_tangent = sp.has_tangent;

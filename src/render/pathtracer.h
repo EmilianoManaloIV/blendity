@@ -325,6 +325,7 @@ class PathTracer {
   bool see_through_ = false;  // any Cutout / Transparent / Glass material (shadow rays must look closer)
   std::vector<Mat4> normal_mats_;
   std::vector<RenderLight> lights_;
+  std::vector<Vec3> local_keys_;  // the key light's direction in each object's space (task 0149: the face shadow map)
   int toon_key_ = -1;         // task 0148: the key light among lights_ (the brightest sun), found at build
   Vec3 toon_key_L_{0, 1, 0};  // the direction toward it (up without one)
   Environment env_;

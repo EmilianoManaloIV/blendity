@@ -915,6 +915,14 @@ class Editor {
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
+  /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
+   * per metre at one metre; off between views (exports, bakes: the plain thickness). */
+  struct OutlineView {
+    bool on = false;
+    Vec3 eye;
+    float px_per_m = 0.0f;
+    bool ortho = false;  // an orthographic view: the width on screen doesn't depend on the distance
+  } outline_view_;
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
@@ -1352,6 +1360,7 @@ class Editor {
    * before the edit, by position (ADR 0024). */
   void carry_vertex_groups(const Scene &before);
   void carry_shape_keys(MeshPtr &mesh, const Mesh *before);
+  void carry_custom_normals(MeshPtr &mesh, const Mesh *before);  // (task 0149: as shape keys, by position)
   /* Weight Paint mode (task 0046, weight_paint.cpp). */
   bool set_weight_paint(bool on);
   bool wp_update(const Recti &view);  // the brush owns the mouse
@@ -1745,6 +1754,10 @@ class Editor {
   size_t apply_material_edits(const std::vector<FieldEdit> &edits, const Material *source, const std::vector<MaterialPtr> &targets);
   void matset_command(const std::vector<std::string> &t, const std::string &line);  // matset <Field> <value>: the selected materials
   void toonstyle_command(const std::string &name);  // toonstyle <style>: the selected materials' toon preset (task 0148)
+  /* Anime face normals (task 0149): a sphere proxy fitted to the head (the Head vertex group, else the top of the
+   * mesh) and a Normal Transfer modifier reading it, so the face shades like a ball. Console: facenormals. */
+  GameObject *add_face_normals(GameObject *mesh_obj);
+  void customnormals_command(const std::string &verb);  // customnormals clear|show: the selected meshes' own normals (task 0149)
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();

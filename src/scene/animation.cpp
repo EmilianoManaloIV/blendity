@@ -532,6 +532,12 @@ void Animation::reflect(Reflector &r) {
   static const char *kWrap[] = {"Loop", "Once", "Ping Pong", "Clamp Forever"};
   r.enumeration("Wrap", wrap, kWrap, 4);
   r.help("At the clip's end: start again, stop on the last frame, play back and forth, or hold the last frame.");
+  static const char *kHold[] = {"1s", "2s", "3s", "4s"};
+  int h = std::max(0, std::min(3, hold - 1));
+  r.enumeration("Hold", h, kHold, 4);
+  r.help("Animation on 2s or 3s (task 0149): the pose changes every 2 or 3 frames of the clip, as hand-drawn animation is\n"
+         "shot, while the camera and the rest of the scene move every frame. Renders hold the same frames.");
+  hold = h + 1;
 }
 
 void Animation::start(PlayContext &) {
@@ -547,7 +553,7 @@ void Animation::update(PlayContext &ctx) {
   if (!c) return;
   time += ctx.dt * speed;
   const int w = wrap == 0 && !c->loop ? 1 : wrap;  // a clip that doesn't loop holds its end under Loop
-  apply_clip(*c, *owner, wrap_frame(time * c->frame_rate, c->end_frame(), w));
+  apply_clip(*c, *owner, hold_frame(wrap_frame(time * c->frame_rate, c->end_frame(), w), hold));
 }
 
 }  // namespace bl

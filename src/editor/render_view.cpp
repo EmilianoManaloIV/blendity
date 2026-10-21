@@ -71,7 +71,12 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
         const Outline &ol = *static_cast<const Outline *>(oc);
         const Mat4 &w = it.model;
         const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
-        if (const Mesh *shell = ol.shell(*m, scale, game ? 1 : 0)) {
+        /* The line's width by the object's distance from this view's eye (task 0149); a scaled shell keeps its own
+         * slot, so a path tracer holding the plain one isn't left with a freed mesh. */
+        const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
+        const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale) : 1.0f;
+        const int slot = (game ? 1 : 0) + (tscale != 1.0f ? 4 : 0);
+        if (const Mesh *shell = ol.shell(*m, scale, slot, tscale)) {
           DrawItem o;
           o.mesh = &shell->render_mesh();
           o.model = it.model;
@@ -508,7 +513,9 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
                              bool scene_lights, const Camera *cam, const FilterStack *filters) {
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
+  outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
   std::vector<DrawItem> items = collect_items(game, true);
+  outline_view_.on = false;
   /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
   const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
   const bool shadows = scene_lights && scene_->render.shadows;

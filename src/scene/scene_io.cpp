@@ -355,6 +355,12 @@ std::string save_scene_text(const Scene &scene) {
       for (float w : vg.weights) os << ' ' << F{w};
       os << '\n';
     }
+    /* Custom normals (task 0149): one per vertex. */
+    if (m.custom_normals_fit()) {
+      os << "cn";
+      for (const Vec3 &n : m.custom_normals) os << ' ' << F{n.x} << ' ' << F{n.y} << ' ' << F{n.z};
+      os << '\n';
+    }
     /* Shape keys (task 0135): a name, how many vertices move, then each one's index and offset (only those). */
     for (const ShapeKey &k : m.shape_keys) {
       if (k.delta.size() != m.vert_count()) continue;
@@ -606,6 +612,25 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
             if (idx < nv && finite_bits(x) && finite_bits(y) && finite_bits(z)) k.delta[idx] = Vec3(x, y, z);
           }
           if (!k.name.empty() && m->find_shape(k.name) < 0) m->shape_keys.push_back(std::move(k));
+        }
+        else if (line.substr(0, 3) == "cn ") {  // custom normals (task 0149): x y z per vertex
+          const char *q = line.data() + 3;
+          char *e = nullptr;
+          std::vector<Vec3> cn;
+          for (;;) {
+            Vec3 n;
+            n.x = std::strtof(q, &e);
+            if (e == q) break;
+            q = e;
+            n.y = std::strtof(q, &e);
+            if (e == q) break;
+            q = e;
+            n.z = std::strtof(q, &e);
+            if (e == q) break;
+            q = e;
+            cn.push_back(n);
+          }
+          if (cn.size() == m->vert_count()) m->custom_normals = std::move(cn);
         }
         else if (line.substr(0, 10) == "seamsharp ") m->seams_sharp = true;
         else if (line.substr(0, 6) == "angle ") {

@@ -200,6 +200,24 @@ void Material::reflect(Reflector &r) {
       r.help("Where the rim may show (black: never).");
       r.field("Toon Flat Ambient", toon_flat_ambient);
       r.help("The sky's light as one flat tone, so only the lights shade the form.");
+      /* The 2D look (task 0149). */
+      r.texture("Face Shadow Map", face_shadow_map);
+      r.help("An anime face's shadow by the key light's angle instead of its bumps (the SDF sweep of HoYo's characters):\n"
+             "where the map is lighter than the light's angle round the face (0 from the front, 1 from behind) the face\n"
+             "is lit; the map is mirrored for a light on the other side. The Textures window's Face Shadow generator\n"
+             "makes the plain sweep; paint the nose's and brow's shapes into it.");
+      r.field("Face Shadow Softness", face_shadow_softness, 0.005f, 0.0f, 0.5f);
+      static const char *fwd[] = {"+Z", "-Z", "+X", "-X"};
+      r.enumeration("Face Forward", face_forward, fwd, 4);
+      r.help("The way the face looks in the object's own axes (VRM and most glTF characters: +Z; MMD: -Z).");
+      r.texture("Line Map", line_map);
+      r.help("Inner contour lines (the folds of a sleeve, the eyelids) multiplied into the colour: white is no line.");
+      r.field("Lines Only In Shadow", line_only_shadow);
+      r.help("The lines show only in the shadow tones (Guilty Gear's inner lines fade where the light falls).");
+      r.texture("Hatch Map", hatch_map);
+      r.help("A hatching pattern shown in the shadow tones (white: no stroke), tiled Hatch Scale times over the UVs; the\n"
+             "Textures window's Stripes generator makes a plain one. Manga's shadow hatching, per material.");
+      r.field("Hatch Scale", hatch_scale, 0.1f, 0.1f, 100.0f);
     }
     r.group_end();
   }
@@ -263,6 +281,9 @@ const Material::Resolved &Material::textures() const {
   resolved_.toon_bias = load(toon ? TextureRef{toon_shadow_bias_map.path, true} : none);
   resolved_.toon_specular = load(toon ? TextureRef{toon_specular_map.path, true} : none);
   resolved_.toon_rim_mask = load(toon ? TextureRef{toon_rim_map.path, true} : none);
+  resolved_.face_shadow = load(toon ? TextureRef{face_shadow_map.path, true} : none);  // (task 0149)
+  resolved_.line = load(toon ? line_map : none);
+  resolved_.hatch = load(toon ? TextureRef{hatch_map.path, true} : none);
   /* An axis material's sub-materials, resolved here with their textures (ADR 0018). One level: a sub-material that is
    * itself an axis material is used plainly; this material itself means its own maps. */
   for (int k = 0; k < 4; k++) {

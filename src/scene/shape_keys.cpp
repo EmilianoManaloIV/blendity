@@ -84,6 +84,26 @@ void transfer_shape_keys(const Mesh &from, Mesh &to) {
   to.shape_keys = std::move(out);
 }
 
+void transfer_custom_normals(const Mesh &from, Mesh &to) {
+  if (!from.custom_normals_fit()) {
+    to.custom_normals.clear();  // nothing to carry
+    return;
+  }
+  GroupTransferMap map;
+  group_transfer_map(from, to, map);
+  const size_t nv = to.vert_count();
+  std::vector<Vec3> out = vertex_normals(to);  // (a vertex the old surface doesn't reach - a joined mesh's - keeps its own smooth normal)
+  for (size_t v = 0; v < nv && v * 3 + 2 < map.src.size(); v++) {
+    const uint32_t *s = &map.src[v * 3];
+    if (s[0] >= from.custom_normals.size() || s[1] >= from.custom_normals.size() || s[2] >= from.custom_normals.size()) continue;
+    const Vec3 b = map.bary[v];
+    const Vec3 n = from.custom_normals[s[0]] * b.x + from.custom_normals[s[1]] * b.y + from.custom_normals[s[2]] * b.z;
+    const float len = length(n);
+    if (finite_bits(len) && len > 1e-12f) out[v] = n / len;
+  }
+  to.custom_normals = std::move(out);
+}
+
 }  // namespace meshops
 
 }  // namespace bl

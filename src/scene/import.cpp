@@ -548,6 +548,27 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
         }
         if (sk->clusters.count) skinned.push_back(n);
       }
+      /* The file's normals (task 0149): per index in FBX, one per vertex when every corner of the vertex agrees (a
+       * hard edge's corners disagree: a zero, and keep_file_normals leaves such a mesh alone), through the geometry's
+       * normal matrix and mirrored like the positions; kept when they differ from the recomputed ones. */
+      if (fm->vertex_normal.exists) {
+        const ufbx_matrix gn = ufbx_matrix_for_normals(&g);
+        std::vector<Vec3> fn(m->vert_count(), Vec3(0.0f));
+        std::vector<uint8_t> seen(m->vert_count(), 0);
+        for (size_t fi = 0; fi < fm->faces.count; fi++) {
+          const ufbx_face f = fm->faces.data[fi];
+          for (uint32_t k = 0; k < f.num_indices; k++) {
+            const uint32_t ix = f.index_begin + k, vi = fm->vertex_indices.data[ix];
+            if (vi >= fn.size()) continue;
+            const ufbx_vec3 nv3 = ufbx_get_vertex_vec3(&fm->vertex_normal, ix);
+            const Vec3 n = normalize(Vec3(-(float)(gn.m00 * nv3.x + gn.m01 * nv3.y + gn.m02 * nv3.z), (float)(gn.m10 * nv3.x + gn.m11 * nv3.y + gn.m12 * nv3.z),
+                                          (float)(gn.m20 * nv3.x + gn.m21 * nv3.y + gn.m22 * nv3.z)));
+            if (!seen[vi]) fn[vi] = n, seen[vi] = 1;
+            else if (dot(fn[vi], n) < 0.9999f) fn[vi] = Vec3(0.0f);  // a split
+          }
+        }
+        if (keep_file_normals(*m, fn)) out.notes.push_back(m->name + ": the file's own normals kept as custom normals (they differ from the recomputed ones)");
+      }
       m->smooth = true;
       m->smooth_angle = 60.0f;  // keep hard edges of imported hard-surface models
       m->sync_attributes();

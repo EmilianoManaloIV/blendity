@@ -553,13 +553,25 @@ struct Outline : ComponentBase<Outline> {
   float thickness = 0.02f;  // metres (World Space) or the object's own units
   bool world_space = true;
   Vec3 color{0.02f, 0.02f, 0.03f};
+  /* Task 0149: a vertex group scaling the line's width per vertex (Guilty Gear's painted line width; empty: 1
+   * everywhere), a fade with the distance (the line thinner far away: thickness / (1 + fade x metres)), and the
+   * line's width on screen kept between min and max pixels (0: no limit) - by the object's distance, in the views. */
+  std::string thickness_group;
+  float distance_fade = 0.0f;
+  float min_pixels = 0.0f, max_pixels = 0.0f;
   void reflect(Reflector &r) override;
   RenderRole render_role() const override { return RenderRole::Outline; }
   /* The shell of this (evaluated) mesh for an object of this world scale, cached; null when nothing to draw. slot:
    * which use (the evaluated mesh's kind 0..2, 3 exports): each keeps its own, so a path tracer still holding one
-   * view's shell isn't left with a freed mesh when another view builds its own. */
-  static constexpr int kShellSlots = 4;
-  const Mesh *shell(const Mesh &src, float world_scale, int slot = 0) const;
+   * view's shell isn't left with a freed mesh when another view builds its own. thickness_scale: the view's scale
+   * for the distance (outline_distance_scale). */
+  static constexpr int kShellSlots = 6;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones)
+  const Mesh *shell(const Mesh &src, float world_scale, int slot = 0, float thickness_scale = 1.0f) const;
+  /* The scale of the thickness for an object `distance` metres from the eye, with `px_per_m` pixels per metre at
+   * one metre (half the view's height times the projection's focal term; an orthographic view passes distance 1):
+   * the fade, then the pixel limits, in 2 % steps. `world_scale`: the object's, for a thickness in its own units.
+   * 1 with no eye (exports, bakes). */
+  float outline_distance_scale(float distance, float px_per_m, float world_scale = 1.0f) const;
   /* Its one material: unlit, the colour, casts no shadow, an outline hull. */
   const std::vector<MaterialPtr> &materials() const;
 
@@ -568,6 +580,7 @@ struct Outline : ComponentBase<Outline> {
     MeshPtr mesh;
     uint64_t serial = 0;
     float offset = -1.0f;
+    std::string group;  // the thickness group it was built with (task 0149)
   };
   mutable ShellCache shells_[kShellSlots];
   mutable std::vector<MaterialPtr> mats_;
@@ -635,6 +648,44 @@ struct SmoothModifier : ComponentBase<SmoothModifier> {
   bool is_modifier() const override { return true; }
   bool is_deform_only() const override { return true; }
   void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+
+/* The 2D look's normals (task 0149, ADR 0048): both write the evaluated mesh's custom normals and move nothing.
+ * Smooth Normals: each vertex's normal averaged with its neighbours' N times (an anime face loses its bumps' shading
+ * while keeping its shape); Normal Transfer: the normals of a proxy's surface (a sphere or capsule round the head,
+ * Blender's Data Transfer trick) at the nearest point. */
+struct SmoothNormalsModifier : ComponentBase<SmoothNormalsModifier> {
+  static constexpr const char *kName = "SmoothNormalsModifier";
+  std::string vertex_group;
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  float factor = 1.0f;
+  int iterations = 6;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;
+  bool unique() const override { return false; }
+};
+struct NormalTransferModifier : ComponentBase<NormalTransferModifier> {
+  static constexpr const char *kName = "NormalTransferModifier";
+  std::string object;  // the proxy, by name
+  std::string vertex_group;
+  bool invert_group = false;
+  const std::string *limit_group(bool &invert) const override {
+    invert = invert_group;
+    return &vertex_group;
+  }
+  float blend = 1.0f;
+  void reflect(Reflector &r) override;
+  bool is_modifier() const override { return true; }
+  bool is_deform_only() const override { return true; }
+  void modify(Mesh &m) const override;
+  uint64_t modifier_dependency_hash() const override;
   bool unique() const override { return false; }
 };
 

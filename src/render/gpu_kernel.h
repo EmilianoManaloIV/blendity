@@ -50,8 +50,8 @@ struct Material {
   vec4 toon1;       // shadow colour, specular size
   vec4 toon2;       // rim colour x strength, rim width
   ivec4 tex2;       // task 0148: the toon ramp, shade, shadow bias and specular maps (-1: none)
-  ivec4 tex3;       // the rim mask, hair highlight, rim side (0 both, 1 lit, 2 shadow), key light only
-  vec4 toon3;       // the specular colour, the light wrap
+  ivec4 tex3;       // the rim mask; bits: hair highlight (1), rim side (2-3: 0 both, 1 lit, 2 shadow), key light only (8), face forward (16-32), lines only in shadow (64); task 0149: the face map id | hatch map id << 16 (0xFFFF none); the line map id | hatch scale x 64 << 16
+  vec4 toon3;       // the specular colour, the light wrap (color2.w: the face shadow's softness)
 };
 struct Light { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; };  // a: dir/pos + type (0 sun, 1 point, 2 spot, 3 area); b: colour, intensity; c: range, spot cos outer / inner, disk; d: direction, width; e: right, height
 struct MeshLight { uint obj; uint prim; float area; float power; };
@@ -72,6 +72,7 @@ layout(std430, binding = 0) readonly buffer Params {
   mat4 retro_vp;    // a camera filter's view-projection (task 0032)
   vec4 retro;       // affine UVs, screen door, internal width, height (0: off)
   vec4 key_light;   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
+  vec4 misc;        // task 0149: x the toon map reads (8; a uniform so the loop isn't unrolled into eight fetches)
 } P;
 layout(std430, binding = 1) buffer Accum { vec4 accum[]; };
 layout(std430, binding = 2) buffer Aux { vec4 aux[]; };  // albedo [0, n), normal + depth [n, 2n)
@@ -178,7 +179,7 @@ struct SurfacePoint {
 struct Sample { vec3 albedo; float metallic; float roughness; float specular; float alpha; vec3 emission; vec3 normal; bool unlit; };
 /* The toon maps at a point (task 0148), kept out of Sample: Sample is copied at every inlined call, and a bigger one
  * put the kernel past SPIR-V's id limit. */
-struct ToonIn { vec3 shade; bool has_shade; float bias; float spec_mask; float rim_mask; vec3 tangent; bool has_tangent; };
+struct ToonIn { vec3 shade; bool has_shade; float bias; float spec_mask; float rim_mask; vec3 tangent; bool has_tangent; vec3 shadow_mul; vec3 line; float face_lit; };
 
 int material_index(Instance ins, uint slot) {
   if (ins.info.y == 0u) return 0;  // the default material is uploaded first
@@ -310,19 +311,46 @@ vec4 map_fetch(int t, vec2 uv, int wrap) {
   TexInfo ti = texinfo[t];
   return tex_fetch(t, int(floor(uv.x * float(ti.w))), int(floor((1.0 - uv.y) * float(ti.h))), wrap);
 }
-void toon_maps(Material m, SurfacePoint sp, inout ToonIn t) {
+/* The face shadow (task 0149), as shading.cpp's toon_face_lit: the key light's direction in the object's space round
+ * the face's up axis against the map (its mirror for the other side). -1: no map. Once per hit (the key light is one
+ * direction a frame), not per light: the kernel sits at SPIR-V's id bound. */
+float toon_face_lit(Material m, vec2 face, vec3 ll) {
+  if (face.x < 0.0) return -1.0;
+  int f = (m.tex3.y >> 4) & 3;
+  vec3 fwd = f == 1 ? vec3(0.0, 0.0, -1.0) : f == 2 ? vec3(1.0, 0.0, 0.0) : f == 3 ? vec3(-1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
+  vec3 rt = f == 1 ? vec3(-1.0, 0.0, 0.0) : f == 2 ? vec3(0.0, 0.0, -1.0) : f == 3 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+  vec3 l = vec3(ll.x, 0.0, ll.z);
+  float len = length(l);
+  if (!(len > 1e-6)) return 1.0;
+  l /= len;
+  float thr = acos(clamp(dot(l, fwd), -1.0, 1.0)) / PI;
+  float sdf = dot(l, rt) >= 0.0 ? face.x : face.y;
+  return axis_step(thr - m.color2.w, thr + m.color2.w, sdf);
+}
+void toon_maps(Material m, SurfacePoint sp, vec3 local_key, inout ToonIn t) {
   t.tangent = cross(sp.normal, sp.tangent.xyz) * sp.tangent.w;  // the strands run along V: the bitangent
   t.has_tangent = sp.has_tangent;
   vec2 uv = vec2(sp.uv.x * m.tiling.x + m.offset.x, sp.uv.y * m.tiling.y + m.offset.y);
-  int ids[4] = int[4](m.tex2.y, m.tex2.z, m.tex2.w, m.tex3.x);  // (one fetch call site, in a loop)
-  for (int k = 0; k < 4; k++) {
+  /* Task 0149 adds the face shadow map (at the UV and at its mirror), the line map and the hatching (tiled). */
+  vec2 face = vec2(-1.0);
+  int face_id = (m.tex3.z & 0xFFFF) == 0xFFFF ? -1 : (m.tex3.z & 0xFFFF), hatch_id = ((m.tex3.z >> 16) & 0xFFFF) == 0xFFFF ? -1 : ((m.tex3.z >> 16) & 0xFFFF);
+  int line_id = (m.tex3.w & 0xFFFF) == 0xFFFF ? -1 : (m.tex3.w & 0xFFFF);
+  float hatch_scale = float((m.tex3.w >> 16) & 0xFFFF) / 64.0;
+  int ids[8] = int[8](m.tex2.y, m.tex2.z, m.tex2.w, m.tex3.x, face_id, face_id, line_id, hatch_id);  // (one fetch call site, in a loop)
+  for (int k = 0; k < int(P.misc.x); k++) {
     if (ids[k] < 0) continue;
-    vec4 c = map_fetch(ids[k], uv, m.flags.y);
+    vec2 q = k == 5 ? vec2(1.0 - uv.x, uv.y) : k == 7 ? uv * hatch_scale : uv;
+    vec4 c = map_fetch(ids[k], q, k == 7 ? 0 : m.flags.y);
     if (k == 0) { t.shade = c.xyz; t.has_shade = true; }
     else if (k == 1) t.bias = isnan(c.x) ? 0.5 : c.x;
     else if (k == 2) t.spec_mask = c.x;
-    else t.rim_mask = c.x;
+    else if (k == 3) t.rim_mask = c.x;
+    else if (k == 4) face.x = isnan(c.x) ? 0.0 : c.x;
+    else if (k == 5) face.y = isnan(c.x) ? 0.0 : c.x;
+    else if (k == 6) { if ((m.tex3.y & 64) != 0) t.shadow_mul *= c.xyz; else t.line = c.xyz; }
+    else t.shadow_mul *= c.x;
   }
+  t.face_lit = toon_face_lit(m, face, local_key);
 }
 
 Sample evaluate_material(Material m, SurfacePoint sp) {
@@ -563,10 +591,11 @@ vec3 shade_toon(Material m, Sample s, ToonIn t, vec3 n, vec3 V, vec3 L, float li
     tone = mix(m.toon1.xyz, vec3(1.0), q);
   }
   vec3 c = t.has_shade ? mix(t.shade * m.toon1.xyz, s.albedo, q) : s.albedo * tone;
+  c = mix(c * t.shadow_mul, c, q);  // the inner lines and the hatching in the shadow tones (task 0149)
   if (m.toon1.w > 0.0 && q > 0.0 && t.spec_mask > 0.0) {
     vec3 H = normalize(V + L);
     float nh = dot(n, H);
-    if (m.tex3.y != 0 && t.has_tangent) {
+    if ((m.tex3.y & 1) != 0 && t.has_tangent) {
       float th = dot(normalize(t.tangent), H);
       nh = sqrt(max(0.0, 1.0 - th * th));
     }
@@ -578,7 +607,8 @@ vec3 shade_toon(Material m, Sample s, ToonIn t, vec3 n, vec3 V, vec3 L, float li
 vec3 toon_rim(Material m, ToonIn t, vec3 n, vec3 V, vec3 keyL) {
   if (m.toon2.w <= 0.0 || t.rim_mask <= 0.0) return vec3(0.0);
   float ndl = dot(n, keyL);
-  if ((m.tex3.z == 1 && ndl <= 0.0) || (m.tex3.z == 2 && ndl > 0.0)) return vec3(0.0);
+  int side = (m.tex3.y >> 1) & 3;
+  if ((side == 1 && ndl <= 0.0) || (side == 2 && ndl > 0.0)) return vec3(0.0);
   float f = 1.0 - max(0.0, dot(n, V)), e = 1.0 - m.toon2.w, w = m.toon0.y + 0.02;
   return m.toon2.xyz * (axis_step(e - w, e + w, f) * clamp(t.rim_mask, 0.0, 1.0));
 }
@@ -734,9 +764,10 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     bool toon_here = toon && bounce == 0 && camera_path;  // tones and rim where the eye sees it; elsewhere Lambert
     vec3 toon_keyL = P.key_light.xyz;  // the key light (task 0148), found on the CPU
     int toon_key = int(P.key_light.w);
-    ToonIn tin = ToonIn(vec3(0.0), false, 0.5, 1.0, 1.0, vec3(0.0), false);
+    ToonIn tin = ToonIn(vec3(0.0), false, 0.5, 1.0, 1.0, vec3(0.0), false, vec3(1.0), vec3(1.0), -1.0);
     if (toon_here) {
-      toon_maps(m, sp, tin);
+      toon_maps(m, sp, (insts[h.obj].to_local * vec4(toon_keyL, 0.0)).xyz, tin);  // (task 0149: the key light in the object's space, for the face shadow map)
+      s.albedo *= tin.line;  // (the line map into the colour; only in shadow it went into shadow_mul)
       vec3 c = beta * toon_rim(m, tin, n, V, toon_keyL);
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
@@ -812,14 +843,16 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
        * pushed the optimiser past SPIR-V's id limit. A toon surface's dark side takes the shadow colour unlit. */
       float ndl = dot(n, dir);
       if (toon_here && m.toon3.w > 0.0) ndl = (ndl + m.toon3.w) / (1.0 + m.toon3.w);  // light wrap (task 0148): the terminator moves
+      float face = toon_here && li == toon_key ? tin.face_lit : -1.0;  // (task 0149: the face shadow map's lit term for the key light)
       bool facing = ndl > 0.0 && dot(sp.geo_normal, dir) > 0.0;
       if (power <= 0.0 || (!toon_here && !facing)) continue;
       vec3 Tr = facing ? transmittance(origin, dir, dist) : vec3(0.0);
       float vis = max(Tr.x, max(Tr.y, Tr.z));
       if (!toon_here && vis <= 0.0) continue;
       float fall = l.b.w > 0.0 ? min(1.0, centre_fall >= 0.0 ? centre_fall : power / (l.b.w * PI)) : 0.0;  // range, spot cone, an area's centre: banded too
-      bool fill = toon_here && m.tex3.w != 0 && toon_key >= 0 && li != toon_key;  // (task 0148: the other lights add smooth fill)
-      vec3 c = toon_here ? beta * (fill ? s.albedo * max(0.0, max(ndl, 0.0) * vis * fall) : shade_toon(m, s, tin, n, V, dir, max(ndl, 0.0) * vis * fall)) * l.b.xyz * l.b.w
+      bool fill = toon_here && (m.tex3.y & 8) != 0 && toon_key >= 0 && li != toon_key;  // (task 0148: the other lights add smooth fill)
+      float tlit = (face >= 0.0 ? face : max(ndl, 0.0) * vis) * fall;  // (the map is the face's shadow: no shadow ray on top)
+      vec3 c = toon_here ? beta * (fill ? s.albedo * max(0.0, tlit) : shade_toon(m, s, tin, n, V, dir, tlit)) * l.b.xyz * l.b.w
                          : beta * bsdf_any(toon, s, n, V, dir) * l.b.xyz * Tr * power;
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;

@@ -106,6 +106,10 @@ bool import_stl_file(const std::string &path, ImportResult &out);   // Z up, lik
 bool import_ply_file(const std::string &path, ImportResult &out);   // Z up, like Blender writes it
 bool import_usda_file(const std::string &path, ImportResult &out);  // text USD; the stage says its up axis
 bool import_pmx_file(const std::string &path, ImportResult &out);   // .pmx and .pmd (import_mmd.cpp)
+/* The file's own vertex normals (task 0149): kept as the mesh's custom normals when they differ from the recomputed
+ * ones (an artist's edited normals: an anime face's); a plain export that stored the smooth normals carries no copy.
+ * True when kept. (import_formats.cpp) */
+bool keep_file_normals(Mesh &m, const std::vector<Vec3> &file_normals);
 bool import_bvh_file(const std::string &path, ImportResult &out);   // the joints as bones, the motion as a clip (import_bvh.cpp)
 bool import_dae_file(const std::string &path, ImportResult &out);   // Collada: geometry, materials, skins, nodes, animations (import_dae.cpp)
 /* VRM (task 0138, import_vrm.cpp): what the extension adds to a glTF. Called by the glTF reader with its node map

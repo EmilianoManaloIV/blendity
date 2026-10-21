@@ -79,6 +79,10 @@ struct SurfaceSample {
   const Texture *toon_ramp = nullptr;
   Vec3 toon_strand;  // the hair's direction (V of the UVs: the bitangent), for the hair highlight
   bool toon_has_tangent = false;
+  /* The 2D look (task 0149): what multiplies the shadow tones (the inner lines when only in shadow, the hatching), and
+   * the face shadow map at the point and at its mirror (-1: no map). */
+  Vec3 toon_shadow_mul{1.0f, 1.0f, 1.0f};
+  float face_sdf = -1.0f, face_sdf_mirror = -1.0f;
 };
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
@@ -106,6 +110,10 @@ Vec3 toon_rim(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 key_L);
  * (up when there is none). With Toon Key Light Only, only it bands the tones. */
 struct RenderLight;  // raster.h
 int toon_key_light(const std::vector<RenderLight> &lights, Vec3 *L = nullptr);
+/* The face shadow (task 0149): the key light's direction in the object's space `local_L`, projected round the face's
+ * up axis, gives an angle (0 from the front, 1 from behind); the map's value at the point (its mirror when the light
+ * is on the face's other side) above it means lit. The lit term in place of N.L, or -1 when the sample has no map. */
+float toon_face_lit(const Material &m, const SurfaceSample &s, Vec3 local_L);
 /* A fill light's share on a toon surface (Key Light Only): smooth Lambert in the toon's units. */
 inline Vec3 toon_fill(const SurfaceSample &s, float lit) { return s.albedo * std::max(0.0f, lit); }
 /* Light wrap (task 0148): the signed N.L remapped so the light reaches round the form - before the clamp, the shadow

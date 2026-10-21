@@ -158,7 +158,10 @@ void Editor::draw_rigging_window(const Recti &r) {
           {"Reset Pose", "Every bone back to its rest (Blender: Pose > Clear Transform > All). Console: armature reset.", root != nullptr,
            [this, root] { armature_pose(root, false); }},
           {"Apply as Rest", "This pose becomes the rest pose; skins show the mesh unposed in it (Blender: Apply > Pose as Rest Pose).",
-           root != nullptr, [this, root] { armature_pose(root, true); }}},
+           root != nullptr, [this, root] { armature_pose(root, true); }},
+          {"Anime Face Normals", "A sphere proxy fitted to the head and a Normal Transfer modifier reading it, so the face shades like a ball\n"
+                                 "(anime's flat face; task 0149). Console: facenormals.",
+           mf != nullptr, [this, mesh_obj] { add_face_normals(mesh_obj); }}},
          2);
     if (root)
       if (Armature *arm = root->get<Armature>()) {

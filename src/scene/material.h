@@ -106,6 +106,14 @@ struct Material {
   TextureRef toon_rim_map;            // where the rim may show (black: never)
   bool toon_key_light_only = false;   // only the brightest sun bands the tones; other lights add smooth fill
   float toon_wrap = 0.0f;             // light wrap: N.L remapped so the lit side reaches round the form (softer figures)
+  /* The 2D look (task 0149, ADR 0048): a face shadow map, inner lines and hatching, read by every renderer. */
+  TextureRef face_shadow_map;         // a face's shadow by the key light's angle (the SDF sweep of anime faces): where the map is above the angle's threshold the face is lit, instead of N.L; mirrored for the other side
+  float face_shadow_softness = 0.02f; // how soft the face shadow's edge is
+  int face_forward = 0;               // the face's forward axis in the object: 0 +Z, 1 -Z, 2 +X, 3 -X
+  TextureRef line_map;                // inner contour lines multiplied into the colour (white: none)
+  bool line_only_shadow = false;      // the lines only in the shadow tones
+  TextureRef hatch_map;               // hatching in the shadow tones, tiled Hatch Scale times over the UVs (white: none)
+  float hatch_scale = 8.0f;
   /* An outline's inverted hull (the Outline component's own material, not saved): the path tracers show only its
    * front faces, to camera rays, as the rasterizer's back-face culling does. */
   bool outline_hull = false;
@@ -121,6 +129,7 @@ struct Material {
   struct Resolved {
     TexturePtr base, metallic, roughness, normal, emission;
     TexturePtr toon_ramp, shade, toon_bias, toon_specular, toon_rim_mask;  // the toon maps (task 0148)
+    TexturePtr face_shadow, line, hatch;                                   // the 2D look's maps (task 0149)
     /* A slot naming a procedural texture's output with Live Shading on (task 0031): its live snapshot and which
      * output (0 albedo, 1 normal, 2 roughness, 3 height), in the order base, metallic, roughness, normal,
      * emission. The rasterizer evaluates it per pixel up close. */

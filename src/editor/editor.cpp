@@ -3119,6 +3119,84 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
   return sr.done && !sr.bad;
 }
 
+/* Anime Face Normals (task 0149): a sphere proxy fitted to the head and a Normal Transfer reading it, placed before a
+ * Skin modifier (the transfer runs once in the rest pose and the skin turns the normals with the bones). */
+void Editor::customnormals_command(const std::string &verb) {
+  size_t meshes = 0, with = 0;
+  for (GameObject *g : selected_objects(false)) {
+    MeshFilter *mf = g->mesh_filter();
+    if (!mf || !mf->mesh) continue;
+    meshes++;
+    if (!mf->mesh->custom_normals_fit()) continue;
+    with++;
+    if (verb != "clear") continue;
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    m.custom_normals.clear();
+    m.touch();
+  }
+  if (!meshes) {
+    Log::warn("customnormals: select a mesh");
+    return;
+  }
+  if (verb == "clear") {
+    if (with) mark_changed("Clear Custom Normals");
+    Log::info("customnormals: cleared on %zu of %zu mesh(es) (the smooth angle and sharp edges shade them again)", with, meshes);
+    return;
+  }
+  Log::info("customnormals: %zu of %zu selected mesh(es) carry their own shading normals (customnormals clear removes them)", with, meshes);
+}
+
+GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
+  MeshFilter *mf = mesh_obj ? mesh_obj->mesh_filter() : nullptr;
+  if (!mf || !mf->mesh || mf->mesh->vert_count() == 0) {
+    Log::warn("Anime Face Normals: the object has no mesh");
+    return nullptr;
+  }
+  const Mesh &m = *mf->mesh;
+  /* The head: the vertices a Head group weights (over a half), else the top sixth of the mesh. */
+  int head = -1;
+  for (size_t g = 0; g < m.vertex_groups.size() && head < 0; g++) {
+    std::string n = m.vertex_groups[g].name;
+    for (char &ch : n) ch = (char)std::tolower((unsigned char)ch);
+    if (n.find("head") != std::string::npos && n.find("end") == std::string::npos && n.find("top") == std::string::npos && m.vertex_groups[g].weights.size() == m.vert_count())
+      head = (int)g;
+  }
+  AABB all;
+  for (const Vec3 &p : m.positions) all.add(p);
+  AABB hb;
+  for (size_t i = 0; i < m.positions.size(); i++) {
+    const bool in = head >= 0 ? m.vertex_groups[(size_t)head].weights[i] > 0.5f : m.positions[i].y >= all.max.y - (all.max.y - all.min.y) / 6.0f;
+    if (in) hb.add(m.positions[i]);
+  }
+  if (!hb.valid()) hb = all;
+  const Vec3 ext = hb.extent();  // (half the head's size each way)
+  const float radius = std::max(1e-3f, std::max(ext.x, std::max(ext.y, ext.z)));
+  std::string group = head >= 0 ? m.vertex_groups[(size_t)head].name : std::string();
+  /* The proxy: a sphere of that size at the head's centre, in the mesh's own space (its child), with no renderer. */
+  std::string name = mesh_obj->name + " Face Normals";
+  for (int k = 1; scene_->find_by_name(name); k++) name = strprintf("%s Face Normals.%03d", mesh_obj->name.c_str(), k);
+  GameObject *proxy = scene_->create(name, mesh_obj);
+  proxy->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 16, 12);  // (a few hundred triangles: the transfer's search is brute force)
+  proxy->set_local_position(hb.center());
+  proxy->set_local_scale(Vec3(radius));
+  NormalTransferModifier *nt = mesh_obj->add<NormalTransferModifier>();
+  nt->object = name;
+  nt->vertex_group = group;
+  /* Before the skin: the transfer runs once in the rest pose, the skin turns the normals with the head bone. */
+  auto &comps = mesh_obj->components;
+  for (size_t i = 0; i + 1 < comps.size(); i++)
+    if (dynamic_cast<SkinModifier *>(comps[i].get())) {
+      std::unique_ptr<Component> moved = std::move(comps.back());
+      comps.pop_back();
+      comps.insert(comps.begin() + (std::ptrdiff_t)i, std::move(moved));
+      break;
+    }
+  mark_changed("Anime Face Normals");
+  Log::info("Anime Face Normals: %s (radius %.3f%s) and a Normal Transfer on %s", name.c_str(), radius, group.empty() ? "" : (", group " + group).c_str(),
+            mesh_obj->name.c_str());
+  return proxy;
+}
+
 /* toonstyle <style> (task 0148): a toon style's preset on every selected material (the Materials window's selection
  * while it is open, else the selected objects' materials), making each a Toon material. One undo step. */
 void Editor::toonstyle_command(const std::string &name) {
@@ -3389,6 +3467,16 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "matset") {
     matset_command(t, line);
+    return;
+  }
+  if (c == "customnormals") {  // customnormals clear|show: the selected meshes' own shading normals (task 0149)
+    customnormals_command(t.size() > 1 ? t[1] : "show");
+    return;
+  }
+  if (c == "facenormals") {  // facenormals: a head proxy and a Normal Transfer on the selected mesh (task 0149)
+    GameObject *mesh_obj = rig_mesh();
+    if (!mesh_obj) Log::warn("facenormals: select a mesh");
+    else add_face_normals(mesh_obj);
     return;
   }
   if (c == "toonstyle") {  // toonstyle <Classic|Guilty Gear|Soft Anime|Painterly|Manga>: the selected materials (task 0148)
@@ -4725,6 +4813,7 @@ void Editor::carry_vertex_groups(const Scene &before) {
     const MeshFilter *of = old ? old->mesh_filter() : nullptr;
     const Mesh *om = of && of->mesh && of->mesh.get() != mf->mesh.get() ? of->mesh.get() : nullptr;
     carry_shape_keys(mf->mesh, om);
+    carry_custom_normals(mf->mesh, om);
     /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
      * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
     if (mf->mesh->groups_fit()) return;
@@ -4744,6 +4833,15 @@ void Editor::carry_shape_keys(MeshPtr &mesh, const Mesh *before) {
   if (mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before) && meshops::shape_keys_fit(*mesh)) return;
   Mesh &m = *mesh_make_mutable(mesh);
   meshops::transfer_shape_keys(*before, m);
+  m.touch();
+}
+
+/* Custom normals (task 0149) after an edit: a move keeps them; a renumbering gets them from the mesh before, by position. */
+void Editor::carry_custom_normals(MeshPtr &mesh, const Mesh *before) {
+  if (!before || before->custom_normals.empty()) return;
+  if (mesh->custom_normals_fit() && mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before)) return;
+  Mesh &m = *mesh_make_mutable(mesh);
+  meshops::transfer_custom_normals(*before, m);
   m.touch();
 }
 

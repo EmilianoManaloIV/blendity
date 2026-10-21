@@ -37972,6 +37972,11 @@ static void round81_tests() {
       Editor ed;
       r50_open(ed);
       ed.record_buttons_for_test(true);
+      {  // (an earlier run's files: newmat with a taken name makes a numbered copy, and the grid would push B out of view)
+        const std::string dir = fs::join(scratch_project(), "Assets/Materials");
+        for (const DirEntry &de : fs::list(dir))
+          if (de.name.size() > 3 && de.name.rfind("R167", 0) == 0 && fs::extension(de.name) == ".mat") std::remove(fs::join(dir, de.name).c_str());
+      }
       for (const char *n : {"R167A", "R167B"}) ed.command(std::string("newmat ") + n);
       MaterialPtr a = material_asset("Assets/Materials/R167A.mat"), b = material_asset("Assets/Materials/R167B.mat");
       CHECK(a && b);
@@ -37989,7 +37994,8 @@ static void round81_tests() {
           ed.step_frame_headless({m}), ed.step_frame_headless({d}), ed.step_frame_headless({u}), ed.step_frame_headless();
           return true;
         };
-        CHECK(click("mat:R167A", 0) && click("mat:R167B", platform::MOD_CTRL));
+        CHECK(click("mat:R167A", 0));
+        CHECK(click("mat:R167B", platform::MOD_CTRL));
         ed.command("toonstyle Guilty Gear");
         std::printf("    toonstyle on two selected materials: A style %d bands %d key-only %d, B style %d bands %d key-only %d\n", a->toon_style, a->toon_bands,
                     (int)a->toon_key_light_only, b->toon_style, b->toon_bands, (int)b->toon_key_light_only);
@@ -38047,5 +38053,463 @@ static void round81_tests() {
     std::printf("    the Scene view on the card against the CPU: mean difference %.2f %% over %zu pixels (%zu red-spot pixels)\n", diff * 100.0, n, toon_px);
     CHECK(n > 1000 && diff < 0.02);
     ed.viewport_device_for_test(1);
+  });
+
+  /* ---------------------------------------------------------------- round 168: the 2D look (task 0149, ADR 0048) */
+  test("the 2D look: custom normals - every corner takes its vertex's own normal, saved and loaded with the scene, carried onto another mesh by position, kept through a glTF round trip; a file's smooth-but-not-edited or split normals are left alone; customnormals clear", [] {
+    MeshPtr cube = std::make_shared<Mesh>(*primitives::cube());
+    const Vec3 tilt = normalize(Vec3(0.3f, 1.0f, 0.2f));
+    cube->custom_normals.assign(cube->vert_count(), tilt);
+    cube->touch();
+    float worst = 1.0f;
+    for (const Vec3 &n : cube->render_mesh().normals) worst = std::min(worst, dot(n, tilt));
+    CHECK(worst > 0.999f);  // (the cube's own flat normals replaced at every corner)
+    /* With the scene. */
+    Scene s;
+    GameObject *g = s.create("CN");
+    g->add<MeshFilter>()->mesh = cube;
+    Scene back;
+    std::string error;
+    CHECK(load_scene_text(save_scene_text(s), back, error));
+    GameObject *bg = back.find_by_name("CN");
+    const MeshFilter *bmf = bg ? bg->get<MeshFilter>() : nullptr;
+    float back_worst = bmf && bmf->mesh && bmf->mesh->custom_normals_fit() ? 1.0f : -1.0f;
+    if (back_worst > 0.0f)
+      for (const Vec3 &n : bmf->mesh->custom_normals) back_worst = std::min(back_worst, dot(n, tilt));
+    std::printf("    saved and loaded: %zu custom normals, the worst within %.4f of the tilt\n", bmf && bmf->mesh ? bmf->mesh->custom_normals.size() : (size_t)0, back_worst);
+    CHECK(back_worst > 0.999f);
+    /* Onto a sphere, by position on the cube's surface. */
+    Mesh sphere = *primitives::uv_sphere(0.5f, 8, 6);
+    meshops::transfer_custom_normals(*cube, sphere);
+    float sw = sphere.custom_normals_fit() ? 1.0f : -1.0f;
+    for (size_t i = 0; sw > 0.0f && i < sphere.custom_normals.size(); i++) sw = std::min(sw, dot(sphere.custom_normals[i], tilt));
+    CHECK(sw > 0.99f);
+    /* The glTF round trip: the exporter writes the custom normals, the importer keeps them (they differ from the
+     * recomputed ones) and says so. */
+    ExportItem it;
+    it.name = "CN";
+    it.mesh = cube.get();
+    it.world = Mat4::identity();
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    const std::string dir = fs::join(test_dir(), "r168");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "cn.glb");
+    {
+      std::ofstream f(path, std::ios::binary);
+      f.write(glb.data(), (std::streamsize)glb.size());
+    }
+    ImportResult res;
+    const bool ok = import_gltf_file(path, res);
+    const Mesh *im = ok && !res.nodes.empty() ? res.nodes[0].mesh.get() : nullptr;
+    float iw = im && im->custom_normals_fit() ? 1.0f : -1.0f;
+    for (size_t i = 0; iw > 0.0f && i < im->custom_normals.size(); i++) iw = std::min(iw, dot(im->custom_normals[i], tilt));
+    bool noted = false;
+    for (const std::string &n : res.notes) noted = noted || n.find("custom normals") != std::string::npos;
+    std::printf("    glTF: %s, %zu vertices, custom normals %s (worst %.4f), note %s\n", ok ? "imported" : res.error.c_str(), im ? im->vert_count() : (size_t)0,
+                im && im->custom_normals_fit() ? "kept" : "none", iw, noted ? "yes" : "no");
+    CHECK(ok && im && iw > 0.99f && noted);
+    /* The file's normals are kept only when they differ: a plain export carries no copy; an exporter's angle-weighted
+     * normals (a stretched box's differ from Blendity's area-weighted ones) are no edit either; a zero (a hard edge's
+     * split copies, a primitive without normals) leaves the mesh alone. */
+    Mesh plain = *primitives::cube();
+    CHECK(!keep_file_normals(plain, meshops::vertex_normals(plain)) && plain.custom_normals.empty());
+    Mesh box = *primitives::cube();
+    for (Vec3 &p : box.positions) p.z *= 4.0f;
+    box.touch();
+    std::vector<Vec3> angle(box.vert_count(), Vec3(0.0f));
+    for (size_t f = 0; f < box.face_count(); f++) {  // (angle-weighted: each face's normal by its angle at the corner, 90 degrees on a box)
+      const uint32_t *v = box.face_verts(f);
+      for (uint32_t c = 0; c < box.face_size(f); c++) angle[v[c]] += box.face_normal(f);
+    }
+    for (Vec3 &n : angle) n = normalize(n);
+    float apart = 1.0f;
+    for (size_t i = 0; i < angle.size(); i++) apart = std::min(apart, dot(angle[i], meshops::vertex_normals(box)[i]));
+    std::printf("    a 1 x 1 x 4 box: angle-weighted and area-weighted normals agree to cos %.3f, and neither counts as an edit\n", apart);
+    CHECK(apart < 0.999f && !keep_file_normals(box, angle) && box.custom_normals.empty());
+    std::vector<Vec3> split = meshops::vertex_normals(plain);
+    split[0] = Vec3(0.0f);
+    CHECK(!keep_file_normals(plain, split));
+    std::vector<Vec3> turned = meshops::vertex_normals(plain);
+    for (Vec3 &n : turned) n = Quat::euler(Vec3(0.0f, 30.0f, 0.0f)).rotate(n);
+    CHECK(keep_file_normals(plain, turned) && plain.custom_normals_fit());
+    /* A flat-shaded glTF cube (split normals) still welds to 8 vertices and keeps none. */
+    MeshPtr flat = std::make_shared<Mesh>(*primitives::cube());
+    ExportItem fit;
+    fit.name = "Flat";
+    fit.mesh = flat.get();
+    fit.world = Mat4::identity();
+    const std::string fpath = fs::join(dir, "flat.glb");
+    {
+      const std::string fglb = export_gltf({fit}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+      std::ofstream f(fpath, std::ios::binary);
+      f.write(fglb.data(), (std::streamsize)fglb.size());
+    }
+    ImportResult fres;
+    const bool fok = import_gltf_file(fpath, fres);
+    const Mesh *fm = fok && !fres.nodes.empty() ? fres.nodes[0].mesh.get() : nullptr;
+    std::printf("    a flat cube's glTF: %zu vertices, custom normals %s\n", fm ? fm->vert_count() : (size_t)0, fm && fm->custom_normals_fit() ? "kept" : "none");
+    CHECK(fm && fm->vert_count() == 8 && !fm->custom_normals_fit());
+    /* The way back: customnormals clear on the selected mesh, one undo step. */
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    GameObject *cg = ed.scene().find_by_name("Cube");
+    {
+      Mesh &cm = *mesh_make_mutable(cg->mesh_filter()->mesh);
+      cm.custom_normals.assign(cm.vert_count(), tilt);
+      cm.touch();
+    }
+    ed.mark_changed_for_test("R168 normals");
+    ed.step_frame_headless();
+    ed.command("customnormals clear");
+    CHECK(!cg->mesh_filter()->mesh->custom_normals_fit());
+    ed.step_frame_headless();
+    ed.command("undo");
+    cg = ed.scene().find_by_name("Cube");
+    CHECK(cg && cg->mesh_filter()->mesh->custom_normals_fit());
+  });
+
+  test("the 2D look: Smooth Normals averages the shading normals (a vertex group limits it) and moves nothing; Normal Transfer reads a proxy's normals, follows the proxy; Anime Face Normals adds the proxy and the modifier, undone together", [] {
+    /* A bumped sphere: its pole pushed out, so its neighbours' normals splay. Smoothing brings adjacent normals closer. */
+    auto bumped = [] {
+      MeshPtr m = std::make_shared<Mesh>(*primitives::uv_sphere(0.5f, 16, 12));
+      size_t top = 0;
+      for (size_t i = 1; i < m->vert_count(); i++)
+        if (m->positions[i].y > m->positions[top].y) top = i;
+      m->positions[top].y += 0.3f;
+      m->touch();
+      return m;
+    };
+    auto worst_edge = [](const Mesh &m, const std::vector<Vec3> &n) {
+      float worst = 1.0f;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const uint32_t *v = m.face_verts(f);
+        const uint32_t k = m.face_size(f);
+        for (uint32_t c = 0; c < k; c++) worst = std::min(worst, dot(n[v[c]], n[v[(c + 1) % k]]));
+      }
+      return worst;
+    };
+    Scene s;
+    GameObject *a = s.create("A");
+    MeshPtr ma = bumped();
+    a->add<MeshFilter>()->mesh = ma;
+    SmoothNormalsModifier *sm = a->add<SmoothNormalsModifier>();
+    sm->iterations = 10;
+    const Mesh *ea = a->evaluated_mesh();
+    const float before = worst_edge(*ma, meshops::vertex_normals(*ma)), after = ea && ea->custom_normals_fit() ? worst_edge(*ea, ea->custom_normals) : -2.0f;
+    float moved = 0.0f;
+    for (size_t i = 0; ea && i < ea->vert_count() && i < ma->vert_count(); i++) moved = std::max(moved, length(ea->positions[i] - ma->positions[i]));
+    std::printf("    Smooth Normals: the sharpest edge's normals at cos %.3f before, %.3f after; vertices moved %g\n", before, after, moved);
+    CHECK(after > before + 0.05f && moved == 0.0f);
+    /* Limited to the top half: the bottom's normals stay the mesh's own. */
+    GameObject *b = s.create("B");
+    MeshPtr mb = bumped();
+    std::vector<float> w(mb->vert_count());
+    for (size_t i = 0; i < w.size(); i++) w[i] = mb->positions[i].y > 0.0f ? 1.0f : 0.0f;
+    mb->vertex_groups.push_back({"Top", w});
+    mb->touch();
+    b->add<MeshFilter>()->mesh = mb;
+    SmoothNormalsModifier *sb = b->add<SmoothNormalsModifier>();
+    sb->iterations = 10;
+    sb->vertex_group = "Top";
+    const Mesh *eb = b->evaluated_mesh();
+    const std::vector<Vec3> own = meshops::vertex_normals(*mb);
+    float bottom = eb && eb->custom_normals_fit() ? 1.0f : -1.0f;
+    for (size_t i = 0; bottom > 0.0f && i < own.size(); i++)
+      if (mb->positions[i].y < 0.0f) bottom = std::min(bottom, dot(eb->custom_normals[i], own[i]));
+    CHECK(bottom > 0.9999f);
+    /* Normal Transfer: a cube reading a sphere's normals shades like the sphere (radial normals); the sphere moved,
+     * the normals follow. */
+    GameObject *box = s.create("Box");
+    box->add<MeshFilter>()->mesh = std::make_shared<Mesh>(*primitives::cube());
+    GameObject *ball = s.create("Ball");
+    ball->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 32, 24);
+    NormalTransferModifier *nt = box->add<NormalTransferModifier>();
+    nt->object = "Ball";
+    const Mesh *eb2 = box->evaluated_mesh();
+    float radial = eb2 && eb2->custom_normals_fit() ? 1.0f : -1.0f;
+    for (size_t i = 0; radial > 0.0f && i < eb2->vert_count(); i++) radial = std::min(radial, dot(eb2->custom_normals[i], normalize(eb2->positions[i])));
+    ball->set_local_position({0.5f, 0.0f, 0.0f});
+    const Mesh *eb3 = box->evaluated_mesh();
+    float shifted = eb3 && eb3->custom_normals_fit() ? 1.0f : -1.0f;
+    for (size_t i = 0; shifted > 0.0f && i < eb3->vert_count(); i++) shifted = std::min(shifted, dot(eb3->custom_normals[i], normalize(eb3->positions[i])));
+    std::printf("    Normal Transfer: the cube's normals radial within cos %.3f; the ball moved, the worst %.3f\n", radial, shifted);
+    CHECK(radial > 0.97f && shifted < 0.9f);
+    /* The Rigging window's button (the console's facenormals): a proxy without a renderer, the modifier reading it. */
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    ed.command("facenormals");
+    ed.step_frame_headless();
+    GameObject *cube = ed.scene().find_by_name("Cube"), *proxy = ed.scene().find_by_name("Cube Face Normals");
+    const NormalTransferModifier *cnt = cube ? cube->get<NormalTransferModifier>() : nullptr;
+    CHECK(proxy && proxy->get<MeshFilter>() && !proxy->get<MeshRenderer>() && proxy->parent == cube);
+    CHECK(cnt && cnt->object == "Cube Face Normals" && cube->evaluated_mesh() && cube->evaluated_mesh()->custom_normals_fit());
+    ed.command("undo");
+    ed.step_frame_headless();
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(!ed.scene().find_by_name("Cube Face Normals") && cube && !cube->get<NormalTransferModifier>());
+    /* Evaluated again with fewer iterations, the normals un-smooth (the modifier starts from the mesh's own, not
+     * from its last result); Blend 0.5 twice is still half way. */
+    sm->iterations = 1;
+    a->mark_dirty();
+    const Mesh *ea1 = a->evaluated_mesh();
+    const float after1 = ea1 && ea1->custom_normals_fit() ? worst_edge(*ea1, ea1->custom_normals) : -2.0f;
+    nt->blend = 0.5f;
+    ball->set_local_position({0.0f, 0.0f, 0.0f});
+    const Mesh *h1 = box->evaluated_mesh();
+    const Vec3 half_once = h1 && h1->custom_normals_fit() ? h1->custom_normals[0] : Vec3(0.0f);
+    ball->set_local_position({0.0f, 0.0f, 1e-3f});
+    ball->set_local_position({0.0f, 0.0f, 0.0f});
+    const Mesh *h2 = box->evaluated_mesh();
+    const Vec3 half_twice = h2 && h2->custom_normals_fit() ? h2->custom_normals[0] : Vec3(1.0f);
+    std::printf("    Smooth Normals at 1 iteration after 10: cos %.3f (10 gave %.3f); Blend 0.5 evaluated twice moves by %g\n", after1, after, length(half_twice - half_once));
+    CHECK(after1 < after - 0.02f && length(half_twice - half_once) < 1e-5f);
+    /* A skinned mesh turns its custom normals with the bone: a cube on one bone turned 90 degrees. */
+    Scene ss;
+    GameObject *rig = ss.create("Rig");
+    rig->add<Armature>();
+    GameObject *bone = ss.create("B", rig);
+    bone->add<Bone>()->rest_position = {0, 0, 0};
+    MeshPtr sc = std::make_shared<Mesh>(*primitives::cube());
+    sc->vertex_groups.push_back({"B", std::vector<float>(sc->vert_count(), 1.0f)});
+    const Vec3 tilt = normalize(Vec3(1.0f, 0.2f, 0.0f));
+    sc->custom_normals.assign(sc->vert_count(), tilt);
+    sc->touch();
+    GameObject *skinned = ss.create("Skinned");
+    skinned->add<MeshFilter>()->mesh = sc;
+    skinned->add<SkinModifier>()->object = "Rig";
+    const Quat q = Quat::euler(Vec3(0.0f, 90.0f, 0.0f));
+    bone->set_local_rotation(q);
+    const Mesh *es = skinned->evaluated_mesh();
+    const float turned = es && es->custom_normals_fit() ? dot(es->custom_normals[0], q.rotate(tilt)) : -1.0f;
+    const float moved_too = es ? dot(normalize(es->positions[0]), q.rotate(normalize(sc->positions[0]))) : -1.0f;
+    std::printf("    skinned: the custom normal turned with the bone to cos %.4f (the vertex %.4f)\n", turned, moved_too);
+    CHECK(turned > 0.999f && moved_too > 0.999f);
+  });
+
+  test("the 2D look: the face shadow map lights by the key light's angle instead of the bumps - the unit, the Face Shadow generator, a sphere lit all over from the front and all shadow from behind in the rasterizer and the path tracers", [] {
+    Material m;
+    m.shading_model = 1;
+    m.face_shadow_softness = 0.0f;
+    SurfaceSample s;
+    s.toon = &m;
+    s.face_sdf = 0.3f, s.face_sdf_mirror = 0.7f;
+    CHECK(toon_face_lit(m, s, {0, 0, 1}) == 1.0f && toon_face_lit(m, s, {0, 0, -1}) == 0.0f);  // from the front: all lit; from behind: all shadow
+    CHECK(toon_face_lit(m, s, {1, 0, 0}) == 0.0f && toon_face_lit(m, s, {-1, 0, 0}) == 1.0f);  // from the right: this point's 0.3 under the 0.5 threshold; from the left: its mirror's 0.7
+    CHECK(toon_face_lit(m, s, {0, 1, 0}) == 1.0f);  // straight above: no side
+    m.face_forward = 1;
+    CHECK(toon_face_lit(m, s, {0, 0, -1}) == 1.0f);  // a -Z face
+    s.face_sdf = -1.0f;
+    CHECK(toon_face_lit(m, s, {0, 0, 1}) < 0.0f);  // no map
+    /* The generator: a sweep from the far edge to the near one. */
+    std::unique_ptr<TextureLayer> gen = create_texture_layer("Face Shadow");
+    CHECK(gen != nullptr);
+    if (!gen) return;
+    LayerContext ctx;
+    const float l = gen->sample(0.1f, 0.5f, ctx).height, c = gen->sample(0.5f, 0.5f, ctx).height, r = gen->sample(0.9f, 0.5f, ctx).height;
+    std::printf("    the generator across the face: %.2f %.2f %.2f\n", l, c, r);
+    CHECK(l < c && c < r && gen->sample(0.0f, 0.5f, ctx).height < 0.01f && gen->sample(1.0f, 0.5f, ctx).height > 0.9f);
+    /* A sphere with the sweep as its face shadow map: the sun from the front lights every pixel one tone (the far
+     * side too, which N.L would shade); from behind every pixel is the shadow tone. */
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    g->set_local_rotation(Quat());
+    ProceduralTexturePtr pt = ed.new_texture_asset_for_test("Bricks");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    pt->layers.clear();
+    pt->layers.push_back(create_texture_layer("Face Shadow"));
+    pt->live_shading = false;
+    pt->touch();
+    MaterialPtr mat = g->get<MeshRenderer>()->materials[0];
+    mat->face_shadow_map.path = pt->asset_path + "#albedo";
+    mat->face_shadow_softness = 0.0f;
+    mat->touch();
+    GameObject *sun = nullptr;
+    ed.scene().for_each([&](GameObject &o) {
+      if (const Light *lt = o.get<Light>(); lt && lt->type == 0 && !sun) sun = &o;
+    });
+    CHECK(sun != nullptr);
+    if (!sun) return;
+    auto mean_lum = [](const Image &img, int *tones_out) {
+      int solid = 0;
+      const auto tones = r60_colours(img, &solid);
+      double sum = 0.0;
+      int main_tones = 0;
+      for (const auto &c : tones) {
+        sum += r60_lum(c.first) * c.second;
+        if (c.second * 20 >= solid) main_tones++;
+      }
+      if (tones_out) *tones_out = main_tones;
+      return solid ? sum / solid : 0.0;
+    };
+    auto shine = [&](float yaw) {  // the sun turned about Y: 180 shines along -Z (from the sphere's front, +Z), 0 along +Z (from behind)
+      sun->set_local_rotation(Quat::euler(Vec3(0.0f, yaw, 0.0f)));
+      ed.mark_changed_for_test("R168 sun");
+      ed.step_frame_headless();
+    };
+    /* Without the map first: the camera (at -Z) sees the sphere's far side when the sun shines from +Z (the
+     * shadow tone) and its near side when the sun shines from -Z (the lit tone). */
+    const std::string face_path = mat->face_shadow_map.path;
+    mat->face_shadow_map.path.clear(), mat->touch();
+    int t0 = 0;
+    shine(180.0f);
+    const double plain_dark = mean_lum(r57_render(ed, "Rasterized", true), &t0);
+    shine(0.0f);
+    const double plain_lit = mean_lum(r57_render(ed, "Rasterized", true), &t0);
+    mat->face_shadow_map.path = face_path, mat->touch();
+    int tf = 0, tb = 0;
+    shine(180.0f);
+    const Image front = r57_render(ed, "Rasterized", true);
+    const double lf = mean_lum(front, &tf);
+    shine(0.0f);
+    const Image behind = r57_render(ed, "Rasterized", true);
+    const double lb = mean_lum(behind, &tb);
+    std::printf("    rasterizer: N.L alone %.3f dark / %.3f lit; with the map, the sun from the face's front: %d tone(s), mean luminance %.3f; from behind %d tone(s), %.3f\n",
+                plain_dark, plain_lit, tf, lf, tb, lb);
+    CHECK(plain_lit > plain_dark + 0.1 && tf == 1 && tb == 1 && std::fabs(lf - plain_lit) < 0.03 && std::fabs(lb - plain_dark) < 0.03);
+    /* The path tracers the same. */
+    shine(180.0f);
+    ed.command("set Render.Samples 32");
+    const Image cpu = r57_render(ed, "Path", true);
+    int tc = 0;
+    const double lc = mean_lum(cpu, &tc);
+    std::printf("    CPU path tracer from the front: %d tone(s), mean luminance %.3f\n", tc, lc);
+    CHECK(tc == 1 && std::fabs(lc - lf) < 0.08);
+    shine(0.0f);
+    int tcb = 0;
+    const double lcb = mean_lum(r57_render(ed, "Path", true), &tcb);
+    std::printf("    CPU path tracer from behind: %d tone(s), mean luminance %.3f\n", tcb, lcb);
+    CHECK(tcb == 1 && std::fabs(lcb - lb) < 0.08);
+    shine(180.0f);
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const Image gpu_img = r57_render(ed, "Path", true);
+      double diff = 0.0;
+      int n = 0;
+      for (size_t i = 0; i < cpu.pixels.size() && i < gpu_img.pixels.size(); i++) {
+        if ((cpu.pixels[i] >> 24) != 255) continue;
+        for (int ch = 0; ch < 3; ch++) diff += std::abs((int)(cpu.pixels[i] >> (ch * 8) & 255) - (int)(gpu_img.pixels[i] >> (ch * 8) & 255));
+        n++;
+      }
+      diff /= std::max(1, n) * 3.0 * 255.0;
+      std::printf("    GPU vs CPU: mean difference %.2f %% (device %s; error '%s')\n", diff * 100.0, ed.render_device_for_test().c_str(), ed.render_gpu_error_for_test().c_str());
+      CHECK(diff < 0.03 && ed.render_gpu_error_for_test().empty());
+      ed.command("device cpu");
+    }
+  });
+
+  test("the 2D look: inner lines darken the colour (or only the shadow tones), hatching the shadow tones; the Outline's thickness group, distance fade and pixel limits", [] {
+    Material m;
+    m.shading_model = 1, m.toon_bands = 1, m.toon_softness = 0.0f, m.toon_threshold = 0.5f, m.toon_shadow = Vec3(0.5f), m.toon_specular_size = 0.0f;
+    SurfaceSample s;
+    s.albedo = Vec3(0.8f), s.toon = &m;
+    s.toon_shadow_mul = Vec3(0.5f);
+    const Vec3 n(0, 0, 1);
+    const Vec3 lit = shade_toon(s, n, n, n, 1.0f), shadow = shade_toon(s, n, n, n, 0.2f);
+    CHECK(std::fabs(lit.x - 0.8f) < 1e-4f && std::fabs(shadow.x - 0.2f) < 1e-4f);  // (0.8 x 0.5 shadow x 0.5 hatching)
+    /* The maps at a point: a mid-grey line map halves the colour (sRGB grey 128: 0.21 linear), only in shadow it goes
+     * into the shadow multiplier; a mid-grey hatch map (data) into the shadow multiplier. */
+    const std::string dir = fs::join(test_dir(), "r168");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> grey(16, 0xFF808080u);
+    const std::string png = fs::join(dir, "grey.png");
+    CHECK(write_png(png, grey.data(), 4, 4, 4, false));
+    SurfacePoint sp;
+    sp.normal = sp.geo_normal = n;
+    sp.uv = {0.5f, 0.5f};
+    Material lm;
+    lm.shading_model = 1;
+    lm.line_map = TextureRef{png, false};
+    const SurfaceSample a = evaluate_material(lm, sp);
+    lm.line_only_shadow = true;
+    lm.touch();
+    const SurfaceSample b = evaluate_material(lm, sp);
+    Material hm;
+    hm.shading_model = 1;
+    hm.hatch_map = TextureRef{png, true};
+    hm.hatch_scale = 4.0f;
+    const SurfaceSample c = evaluate_material(hm, sp);
+    std::printf("    line map: colour %.3f (only in shadow: colour %.3f, shadow x %.3f); hatch map: shadow x %.3f\n", a.albedo.x, b.albedo.x, b.toon_shadow_mul.x, c.toon_shadow_mul.x);
+    CHECK(a.albedo.x < 0.3f && std::fabs(b.albedo.x - 0.8f) < 1e-4f && b.toon_shadow_mul.x < 0.3f && std::fabs(c.toon_shadow_mul.x - 0.5f) < 0.02f);
+    /* The Outline: the group scales the width per vertex (0: no line); the distance scale. */
+    Outline ol;
+    ol.thickness = 0.1f;
+    ol.thickness_group = "Lines";
+    MeshPtr cube = std::make_shared<Mesh>(*primitives::cube());
+    std::vector<float> w(cube->vert_count());
+    for (size_t i = 0; i < w.size(); i++) w[i] = cube->positions[i].y > 0.0f ? 1.0f : 0.0f;
+    cube->vertex_groups.push_back({"Lines", w});
+    cube->touch();
+    const Mesh *sh = ol.shell(*cube, 1.0f, 0);
+    float top = 0.0f, bottom = 0.0f;
+    for (size_t i = 0; sh && i < sh->vert_count(); i++) (cube->positions[i].y > 0.0f ? top : bottom) = std::max(cube->positions[i].y > 0.0f ? top : bottom, length(sh->positions[i] - cube->positions[i]));
+    std::printf("    the shell stands out %.3f on top (weight 1), %.3f below (weight 0)\n", top, bottom);
+    CHECK(sh && std::fabs(top - 0.1f) < 1e-4f && bottom == 0.0f);
+    ol.thickness_group.clear();
+    const Mesh *all = ol.shell(*cube, 1.0f, 0);
+    float low = 1.0f;
+    for (size_t i = 0; all && i < all->vert_count(); i++) low = std::min(low, length(all->positions[i] - cube->positions[i]));
+    CHECK(all && std::fabs(low - 0.1f) < 1e-4f);  // (a new shell: the group is part of the cache's key)
+    CHECK(ol.outline_distance_scale(3.0f, 300.0f) == 1.0f);
+    ol.distance_fade = 1.0f;
+    CHECK(std::fabs(ol.outline_distance_scale(3.0f, 300.0f) - 0.25f) < 0.003f);  // (within a 2 % step)
+    ol.distance_fade = 0.0f;
+    ol.min_pixels = 4.0f;
+    CHECK(std::fabs(ol.outline_distance_scale(30.0f, 300.0f) - 4.0f) < 0.05f);  // 0.1 m at 30 m is 1 pixel: four times (within a 2 % step)
+    ol.max_pixels = 0.5f;
+    CHECK(std::fabs(ol.outline_distance_scale(1.0f, 300.0f) - 0.5f / 30.0f) < 0.0003f);  // 30 pixels at 1 m: a sixtieth (within a 2 % step)
+    CHECK(ol.outline_distance_scale(0.0f, 300.0f) == 1.0f && ol.outline_distance_scale(3.0f, 0.0f) == 1.0f);
+    ol.min_pixels = ol.max_pixels = 0.0f, ol.distance_fade = 1.0f;
+    CHECK(std::fabs(ol.outline_distance_scale(3.0f, 300.0f) - 0.25f) < 0.01f && ol.outline_distance_scale(3.0f, 300.0f) == ol.outline_distance_scale(3.02f, 300.0f));  // (2 % steps)
+    ol.distance_fade = 0.0f, ol.max_pixels = 1.0f, ol.world_space = false;  // thickness 0.1 in the object's units, the object 3 x: 0.3 m = 90 px at 1 m
+    CHECK(std::fabs(ol.outline_distance_scale(1.0f, 300.0f, 3.0f) - 1.0f / 90.0f) < 1e-4f);
+  });
+
+  test("the 2D look: an Animation on 2s changes its pose every other frame, on 3s every third, while the frames go on; Hold is saved with the scene", [] {
+    std::remove(resolve_asset_path("Assets/Animations/R168Hold.anim").c_str());
+    AnimationClipPtr c = create_clip_asset("Assets/Animations/R168Hold.anim", "R168Hold");
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->frame_rate = 24.0f;
+    c->track("", "Position", 0).set_key(0.0f, 0.0f, AnimLinear);
+    c->track("", "Position", 0).set_key(24.0f, 24.0f, AnimLinear);
+    auto distinct = [&](int hold) {
+      Scene s;
+      GameObject *g = s.create("Held");
+      Animation *an = g->add<Animation>();
+      an->clip = c->asset_path;
+      an->hold = hold;
+      PlayContext ctx;
+      ctx.scene = &s;
+      an->start(ctx);
+      ctx.dt = 1.0f / 24.0f;
+      std::set<int> seen;
+      for (int k = 0; k < 23; k++) {
+        an->update(ctx);
+        seen.insert((int)std::lround(g->local().position.x * 1000.0f));
+      }
+      return (int)seen.size();
+    };
+    const int on1 = distinct(1), on2 = distinct(2), on3 = distinct(3);
+    std::printf("    23 frames: %d poses on 1s, %d on 2s, %d on 3s\n", on1, on2, on3);
+    CHECK(on1 == 23 && on2 == 12 && on3 == 8);
+    CHECK(hold_frame(7.0f, 2) == 6.0f && hold_frame(7.0f, 3) == 6.0f && hold_frame(7.0f, 1) == 7.0f);
+    CHECK(hold_frame(1.9999f, 2) == 2.0f);  // (a float frame just under the multiple is that frame)
+    CHECK(hold_frame_from(3.0f, 3.0f, 2) == 3.0f && hold_frame_from(3.0f, 4.0f, 2) == 3.0f && hold_frame_from(3.0f, 5.0f, 2) == 5.0f);  // (a render range held from its first frame)
+    Scene s;
+    s.create("Held")->add<Animation>()->hold = 3;
+    Scene back;
+    std::string error;
+    CHECK(load_scene_text(save_scene_text(s), back, error));
+    const GameObject *bg = back.find_by_name("Held");
+    CHECK(bg && bg->get<Animation>() && bg->get<Animation>()->hold == 3);
+    std::remove(resolve_asset_path("Assets/Animations/R168Hold.anim").c_str());
   });
 }

@@ -517,6 +517,31 @@ struct GradientLayer : TextureLayerBase<GradientLayer> {
   }
 };
 
+/* A face shadow map's plain sweep (task 0149): the value at u is the light angle (0 front, 1 behind) at which that
+ * column goes into shadow - the far side first, the near cheek last, bent round the nose's line. Paint over it. */
+struct FaceShadowLayer : TextureLayerBase<FaceShadowLayer> {
+  static constexpr const char *kName = "Face Shadow";
+  float nose = 0.5f;   // where the face's centre line is in U
+  float curve = 0.3f;  // how much the sweep bends down the face (the chin's shadow arrives earlier)
+  void reflect(Reflector &r) override {
+    r.field("Center", nose, 0.01f, 0.0f, 1.0f);
+    r.help("Where the face's centre line is in the UVs (0.5 for a symmetric unwrap).");
+    r.field("Curve", curve, 0.01f, 0.0f, 1.0f);
+    r.help("How much the shadow's edge bends: 0 a straight sweep, more the chin and brow going into shadow before the cheek.");
+  }
+  LayerSample sample(float u_in, float v_in, const LayerContext &) const override {
+    const float u = clampf(u_in, 0.0f, 1.0f), v = clampf(v_in, 0.0f, 1.0f), c = clampf(fin(nose, 0.5f), 0.01f, 0.99f);
+    /* Across: 0 at the far edge, 0.5 at the centre line, 1 at the near edge (the light on the right, +U). */
+    const float across = u < c ? 0.5f * u / c : 0.5f + 0.5f * (u - c) / (1.0f - c);
+    const float bend = clampf(fin(curve, 0.3f), 0.0f, 1.0f) * 0.25f * (1.0f - std::cos(v * 2.0f * kPi)) * 0.5f;  // the rows' middle lags, the top and bottom lead
+    const float t = clampf(across - bend, 0.0f, 1.0f);
+    LayerSample s;
+    s.albedo = Vec3(t);
+    s.height = t;
+    s.rough = 0.5f;
+    return s;
+  }
+};
 /* A toon shadow ramp (task 0148): tones from the shadow colour (left) to the lit one (right), stepped at the
  * threshold and spread evenly above it, each step as soft as asked - the image a Toon material's Toon Ramp reads by
  * how lit a point is. Vertical too (bottom dark, top lit), so either way of reading it agrees. */
@@ -1037,6 +1062,8 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Gradient", "Generators", "A linear, radial or mirrored gradient between two colours.", make<GradientLayer>},
       {"Toon Ramp", "Generators", "A toon shadow ramp: 2 to 5 tones from the shadow colour to the lit one, hard or soft (a Toon material's Toon Ramp).",
        make<ToonRampLayer>},
+      {"Face Shadow", "Generators", "A face shadow sweep (a Toon material's Face Shadow Map): the shadow crosses the face from the far side as the light turns.",
+       make<FaceShadowLayer>},
       {"Image", "Generators", "An image file, tiled.", make<ImageLayer>},
       {"Blur", "Filters", "A box blur of the planes, wrapping at the edges.", make<BlurLayer>},
       {"Levels", "Filters", "Black and white points and a gamma.", make<LevelsLayer>},

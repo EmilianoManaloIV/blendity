@@ -52,7 +52,7 @@ const char *material_unsupported(const Material &m) {
     if (tx.live[k]) return "a live procedural texture";
   /* Task 0148: the toon maps are read per pixel in the lighting pass, which has no UVs; a hair highlight needs the
    * tangent there. Those materials draw on the CPU. */
-  if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight))
+  if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight || tx.face_shadow || tx.line || tx.hatch))
     return "a toon material with painted maps or a hair highlight";
   return nullptr;
 }

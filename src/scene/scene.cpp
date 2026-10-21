@@ -13,9 +13,11 @@
 #include "spring_bones.h"  // (SpringBone's registration)
 #include "footsteps.h"     // (Footprint's and Footsteps')
 #include "locomotion.h"    // (Locomotion's)
+#include "../core/jobs.h"  // (NormalTransferModifier's search)
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -65,6 +67,9 @@ void register_builtin_components() {
   reg<SubdivisionSurface>("Mesh", "Non-destructive Catmull-Clark subdivision applied before rendering.",
                           "Subdivision Surface modifier");
   reg<SmoothModifier>("Mesh", "Non-destructive Laplacian smoothing applied before rendering.", "Smooth modifier");
+  reg<SmoothNormalsModifier>("Mesh", "Shading normals smoothed over the surface (the anime face: its shape stays, its bumps stop shading).", "Smooth Normals modifier");
+  reg<NormalTransferModifier>("Mesh", "Shading normals taken from a proxy object's surface (a sphere round the head: Blender's Data Transfer trick).",
+                              "Normal Transfer modifier");
   reg<MirrorModifier>("Mesh", "Mirrors the mesh across its local X / Y / Z planes.", "Mirror modifier");
   reg<ArrayModifier>("Mesh", "Repeats the mesh with an offset.", "Array modifier");
   reg<SolidifyModifier>("Mesh", "Gives surfaces thickness (a shell with rim faces).", "Solidify modifier (Simple)");
@@ -1261,15 +1266,47 @@ void Outline::reflect(Reflector &r) {
   r.color("Color", color);
   r.help("The line's colour. (The shell is the inverted hull: seen from behind, an open surface such as a plane shows\n"
          "it as a sheet; it suits closed meshes.)");
+  r.text("Thickness Group", thickness_group);
+  r.help("A vertex group scaling the width per vertex (task 0149; Guilty Gear paints it): 1 the full width, 0 no line\n"
+         "there (inside the mouth, where the hair meets the scalp). Empty: the full width everywhere.");
+  r.field("Distance Fade", distance_fade, 0.01f, 0.0f, 10.0f);
+  r.help("The line thinner far away: the thickness divided by 1 + this x the metres to the eye (0: the same everywhere).");
+  r.field("Min Pixels", min_pixels, 0.1f, 0.0f, 64.0f);
+  r.field("Max Pixels", max_pixels, 0.1f, 0.0f, 64.0f);
+  r.help("The line's width on screen kept between these, by the object's distance (0: no limit) - a constant line\n"
+         "whatever the zoom, in the views and raster renders.");
 }
 
-const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
+float Outline::outline_distance_scale(float distance, float px_per_m, float world_scale) const {
+  if (!finite_bits(distance) || !(distance > 1e-4f) || !finite_bits(px_per_m) || !(px_per_m > 0.0f)) return 1.0f;
+  float scale = 1.0f;
+  const float fade = finite_bits(distance_fade) ? std::max(0.0f, distance_fade) : 0.0f;
+  if (fade > 0.0f) scale /= 1.0f + fade * distance;
+  /* The line's width in metres: the thickness, times the object's scale when it is in the object's units. */
+  float base = finite_bits(thickness) ? std::max(0.0f, thickness) : 0.0f;
+  if (!world_space && finite_bits(world_scale) && world_scale > 0.0f) base *= world_scale;
+  if (!(base > 0.0f)) return scale;
+  const float px = base * scale * px_per_m / distance;  // the line's width on screen, in pixels
+  const float lo = finite_bits(min_pixels) ? std::max(0.0f, min_pixels) : 0.0f, hi = finite_bits(max_pixels) ? std::max(0.0f, max_pixels) : 0.0f;
+  float want = px;
+  if (lo > 0.0f) want = std::max(want, lo);
+  if (hi > 0.0f) want = std::min(want, hi);  // (the maximum wins when the two cross)
+  if (want != px && px > 0.0f) scale *= want / px;
+  if (!finite_bits(scale) || !(scale > 0.0f)) return 1.0f;
+  /* In 2 % steps, so an orbiting camera doesn't rebuild the shell every frame (a rebuild frees the last one). */
+  return std::exp(std::round(std::log(scale) / std::log(1.02f)) * std::log(1.02f));
+}
+
+const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float thickness_scale) const {
   const float s = world_space ? (finite_bits(world_scale) && world_scale > 1e-6f ? world_scale : 1.0f) : 1.0f;
-  const float offset = thickness / s;
+  const float offset = thickness / s * (finite_bits(thickness_scale) && thickness_scale > 0.0f ? thickness_scale : 1.0f);
   if (!(offset > 0.0f) || !finite_bits(offset) || src.face_count() == 0) return nullptr;
   ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
   const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
-  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset) return c.mesh.get();
+  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset && c.group == thickness_group) return c.mesh.get();
+  /* The per-vertex width (task 0149): the thickness group's weight, 1 without one (or one the mesh hasn't). */
+  const int gi = thickness_group.empty() ? -1 : src.find_group(thickness_group);
+  const std::vector<float> *gw = gi >= 0 && src.vertex_groups[(size_t)gi].weights.size() == src.positions.size() ? &src.vertex_groups[(size_t)gi].weights : nullptr;
   /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
   std::vector<Vec3> vn(src.positions.size(), Vec3(0.0f));
   for (size_t f = 0; f < src.face_count(); f++) {
@@ -1287,7 +1324,8 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
   for (size_t i = 0; i < src.positions.size(); i++) {
     const float len = length(vn[i]);
     const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
-    m->positions.push_back(src.positions[i] + d * offset);
+    const float w = gw ? clampf(finite_bits((*gw)[i]) ? (*gw)[i] : 0.0f, 0.0f, 1.0f) : 1.0f;
+    m->positions.push_back(src.positions[i] + d * (offset * w));
   }
   std::vector<uint32_t> rev;
   for (size_t f = 0; f < src.face_count(); f++) {
@@ -1300,6 +1338,7 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot) const {
   c.mesh = m;
   c.serial = serial;
   c.offset = offset;
+  c.group = thickness_group;
   return c.mesh.get();
 }
 
@@ -1372,6 +1411,164 @@ void SmoothModifier::reflect(Reflector &r) {
   reflect_group_limit(r, vertex_group, invert_group);
 }
 void SmoothModifier::modify(Mesh &m) const { meshops::smooth_laplacian(m, factor, iterations); }
+
+/* The vertex group's weight per vertex (1 everywhere without one), inverted when asked; a NaN weight counts as 0. */
+static std::vector<float> group_weights_of(const Mesh &m, const std::string &group, bool invert) {
+  std::vector<float> w(m.vert_count(), 1.0f);
+  const int gi = group.empty() ? -1 : m.find_group(group);
+  if (gi >= 0 && m.vertex_groups[(size_t)gi].weights.size() == m.vert_count())
+    for (size_t i = 0; i < w.size(); i++) {
+      const float raw = m.vertex_groups[(size_t)gi].weights[i];
+      const float g = clampf(finite_bits(raw) ? raw : 0.0f, 0.0f, 1.0f);
+      w[i] = invert ? 1.0f - g : g;
+    }
+  return w;
+}
+/* `a` turned toward `b` by t, unit length; `a` when the blend has no length (opposite normals at t = 0.5). */
+static Vec3 blend_normal(Vec3 a, Vec3 b, float t) {
+  const Vec3 n = lerp(a, b, t);
+  const float len = length(n);
+  return finite_bits(len) && len > 1e-6f ? n / len : a;
+}
+/* The closest point of the triangle ABC to p, as barycentric weights of B and C (Ericson, Real-Time Collision
+ * Detection 5.1.5): each early return is one region of the plane - a vertex, an edge or the inside. */
+static void closest_point_on_triangle(Vec3 p, Vec3 A, Vec3 Bv, Vec3 C, float &u, float &v) {
+  const Vec3 ab = Bv - A, ac = C - A, ap = p - A;
+  const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+  u = 0, v = 0;
+  if (d1 <= 0.0f && d2 <= 0.0f) return;  // A
+  const Vec3 bp = p - Bv;
+  const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+  if (d3 >= 0.0f && d4 <= d3) {  // B
+    u = 1;
+    return;
+  }
+  const float vc = d1 * d4 - d3 * d2;
+  if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {  // on AB
+    u = d1 / (d1 - d3);
+    return;
+  }
+  const Vec3 cp = p - C;
+  const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+  if (d6 >= 0.0f && d5 <= d6) {  // C
+    v = 1;
+    return;
+  }
+  const float vb = d5 * d2 - d1 * d6;
+  if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {  // on AC
+    v = d2 / (d2 - d6);
+    return;
+  }
+  const float va = d3 * d6 - d5 * d4;
+  if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {  // on BC
+    const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    u = 1 - w, v = w;
+    return;
+  }
+  const float denom = 1.0f / (va + vb + vc);  // inside
+  u = vb * denom, v = vc * denom;
+}
+
+void SmoothNormalsModifier::reflect(Reflector &r) {
+  r.field("Factor", factor, 0.01f, 0.0f, 1.0f);
+  r.help("How far each vertex's normal moves toward its neighbours' average, each iteration (1: all the way).");
+  r.field("Iterations", iterations, 0, 100);
+  reflect_group_limit(r, vertex_group, invert_group);
+}
+void SmoothNormalsModifier::modify(Mesh &m) const {
+  const size_t nv = m.vert_count();
+  if (!nv) return;
+  std::vector<Vec3> n = m.custom_normals_fit() ? m.custom_normals : meshops::vertex_normals(m);
+  const std::vector<Vec3> start = n;
+  /* The neighbours along the faces' edges. */
+  std::vector<std::vector<uint32_t>> adj(nv);
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const uint32_t k = m.face_size(f);
+    for (uint32_t c = 0; c < k; c++) {
+      const uint32_t a = v[c], b = v[(c + 1) % k];
+      if (a < nv && b < nv) adj[a].push_back(b), adj[b].push_back(a);
+    }
+  }
+  const float k = clampf(factor, 0.0f, 1.0f);
+  std::vector<Vec3> next(nv);
+  for (int it = 0; it < std::max(0, std::min(iterations, 100)); it++) {
+    for (size_t i = 0; i < nv; i++) {
+      Vec3 sum(0.0f);
+      for (uint32_t j : adj[i]) sum += n[j];
+      const float len = length(sum);
+      next[i] = adj[i].empty() || !(len > 1e-12f) ? n[i] : blend_normal(n[i], sum / len, k);
+    }
+    n.swap(next);
+  }
+  const std::vector<float> w = group_weights_of(m, vertex_group, invert_group);
+  m.custom_normals.resize(nv);
+  for (size_t i = 0; i < nv; i++) m.custom_normals[i] = blend_normal(start[i], n[i], w[i]);
+}
+
+static const GameObject *proxy_target(const Component &c, const std::string &name) {
+  if (!c.owner || !c.owner->scene || name.empty()) return nullptr;
+  const GameObject *t = c.owner->scene->find_by_name(name);
+  return t && t != c.owner && t->evaluated_mesh() ? t : nullptr;
+}
+void NormalTransferModifier::reflect(Reflector &r) {
+  r.object("Proxy", object, "MeshFilter");
+  r.help("The object whose surface gives the normals: a sphere round a head makes a face shade like a ball (anime's\n"
+         "flat face), a capsule a limb. Rigging > Anime Face Normals adds one fitted to the mesh.");
+  r.field("Blend", blend, 0.01f, 0.0f, 1.0f);
+  r.help("How far the normals go from the mesh's own to the proxy's (1: all the way).");
+  reflect_group_limit(r, vertex_group, invert_group);
+}
+void NormalTransferModifier::modify(Mesh &m) const {
+  const GameObject *t = proxy_target(*this, object);
+  if (!t || !owner) return;
+  const Mesh &pm = *t->evaluated_mesh();
+  const RenderMesh &prm = pm.render_mesh();  // (its own vertices and shading normals: the triangles index these)
+  if (prm.indices.size() < 3 || prm.normals.size() != prm.positions.size()) return;
+  /* The proxy's triangles in the owner's own space (both world matrices known), so the nearest point is found there. */
+  const Mat4 to_owner = owner->world_matrix().inverse() * t->world_matrix();
+  const Mat4 nm = to_owner.inverse().transposed();
+  std::vector<Vec3> pp(prm.positions.size()), pnn(prm.positions.size());
+  for (size_t i = 0; i < pp.size(); i++) pp[i] = to_owner.point(prm.positions[i]), pnn[i] = normalize(nm.dir(prm.normals[i]));
+  const size_t nv = m.vert_count();
+  std::vector<Vec3> own = m.custom_normals_fit() ? m.custom_normals : meshops::vertex_normals(m);
+  const std::vector<float> w = group_weights_of(m, vertex_group, invert_group);
+  const float k = clampf(blend, 0.0f, 1.0f);
+  m.custom_normals.resize(nv);
+  /* Each vertex: the nearest point on the proxy's triangles, the normal interpolated there. A brute-force search:
+   * the proxy is a few hundred triangles (Anime Face Normals makes a 16 x 12 sphere) and the modifier runs once per
+   * edit, before a skin (the skin turns the normals with the bones), so no spatial structure is worth its upkeep. */
+  JobSystem::global().parallel_for((int64_t)nv, 256, [&](int64_t a, int64_t b) {
+    for (int64_t vi = a; vi < b; vi++) {
+      const Vec3 p = m.positions[(size_t)vi];
+      float best = std::numeric_limits<float>::max();
+      Vec3 bn = own[(size_t)vi];
+      for (size_t tri = 0; tri + 2 < prm.indices.size(); tri += 3) {
+        const uint32_t i0 = prm.indices[tri], i1 = prm.indices[tri + 1], i2 = prm.indices[tri + 2];
+        if (i0 >= pp.size() || i1 >= pp.size() || i2 >= pp.size()) continue;
+        float u, v;
+        closest_point_on_triangle(p, pp[i0], pp[i1], pp[i2], u, v);
+        const Vec3 q = pp[i0] + (pp[i1] - pp[i0]) * u + (pp[i2] - pp[i0]) * v;
+        const float d = dot(q - p, q - p);
+        if (d < best) best = d, bn = pnn[i0] * (1 - u - v) + pnn[i1] * u + pnn[i2] * v;
+      }
+      const float len = length(bn);
+      m.custom_normals[(size_t)vi] = blend_normal(own[(size_t)vi], finite_bits(len) && len > 1e-12f ? bn / len : own[(size_t)vi], k * w[(size_t)vi]);
+    }
+  });
+}
+uint64_t NormalTransferModifier::modifier_dependency_hash() const {
+  const GameObject *t = proxy_target(*this, object);
+  if (!t || !owner) return 0;
+  uint64_t h = t->evaluated_mesh()->version * 1099511628211ull;
+  const Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
+  for (int i = 0; i < 16; i++) {
+    uint32_t b;
+    std::memcpy(&b, &rel.m[i], 4);
+    h = (h ^ b) * 1099511628211ull;
+  }
+  return h;
+}
 
 void MirrorModifier::reflect(Reflector &r) {
   r.field("Axis X", x);
@@ -2006,6 +2203,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
     const uint64_t v = m->version;
     m->positions = head->positions;
+    m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions);  // (no head: the basis shaped here)
     m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
     run(*m, split, components.size());

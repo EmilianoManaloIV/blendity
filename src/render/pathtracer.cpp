@@ -170,7 +170,14 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   toon_key_ = toon_key_light(lights_, &toon_key_L_);
   env_ = env;
   normal_mats_.clear();
-  for (const PTObject &ob : objects_) normal_mats_.push_back(ob.model.inverse().transposed());
+  local_keys_.clear();
+  for (const PTObject &ob : objects_) {
+    const Mat4 inv = ob.model.inverse();
+    normal_mats_.push_back(inv.transposed());
+    const Vec3 lk = inv.dir(toon_key_L_);
+    const float len = length(lk);
+    local_keys_.push_back(finite_bits(len) && len > 1e-12f ? lk / len : Vec3(0, 1, 0));
+  }
   /* GPU devices first: one without ray tracing hardware traverses Blendity's
    * own BVH, so that is built even when the CPU uses Embree. */
   gpu_error_.clear();
@@ -1007,8 +1014,10 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
           rays++;
           Tr = transmittance({origin, dir}, dist);
         }
-        const float lit = std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z}) * fall;
-        const bool fill = s.toon->toon_key_light_only && toon_key_ >= 0 && (int)(&l - &lights_[0]) != toon_key_;  // (task 0148: the other lights add smooth fill)
+        const int li_idx = (int)(&l - &lights_[0]);
+        const float face = li_idx == toon_key_ && h.object < local_keys_.size() ? toon_face_lit(*s.toon, s, local_keys_[h.object]) : -1.0f;  // (task 0149)
+        const float lit = (face >= 0.0f ? face : std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z})) * fall;  // (the map is the face's shadow: no shadow ray on top)
+        const bool fill = s.toon->toon_key_light_only && toon_key_ >= 0 && li_idx != toon_key_;  // (task 0148: the other lights add smooth fill)
         const Vec3 Lo = (fill ? toon_fill(s, lit) : shade_toon(s, n, V, dir, lit)) * l.color * l.intensity;
         add(beta * Lo);
         record_nee(Lo);
@@ -1984,7 +1993,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     float par[4] = {m.metallic, m.roughness, m.specular, m.ior};
     float til[4] = {m.tiling.x, m.tiling.y, m.tiling.z, m.alpha_clip};
     float off[4] = {m.offset.x, m.offset.y, m.offset.z, m.procedural_scale};
-    float c2[4] = {m.procedural_color2.x, m.procedural_color2.y, m.procedural_color2.z, 0};
+    float c2[4] = {m.procedural_color2.x, m.procedural_color2.y, m.procedural_color2.z,
+                   clampf(finite_bits(m.face_shadow_softness) ? m.face_shadow_softness : 0.0f, 0.0f, 0.5f)};  // (w: the face shadow's softness, task 0149)
     std::memcpy(g.base_color, base, 16);
     std::memcpy(g.emission, em, 16);
     std::memcpy(g.params, par, 16);
@@ -2019,9 +2029,17 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     g.tex2[2] = toon_maps ? texture(tx.toon_bias) : -1;
     g.tex2[3] = toon_maps ? texture(tx.toon_specular) : -1;
     g.tex3[0] = toon_maps ? texture(tx.toon_rim_mask) : -1;
-    g.tex3[1] = m.toon_hair_highlight ? 1 : 0;
-    g.tex3[2] = m.toon_rim_side;
-    g.tex3[3] = m.toon_key_light_only ? 1 : 0;
+    /* The flags and the 2D look's maps packed (task 0149; see gpu_device.h). */
+    g.tex3[1] = (m.toon_hair_highlight ? 1 : 0) | ((std::max(0, std::min(2, m.toon_rim_side)) & 3) << 1) | (m.toon_key_light_only ? 8 : 0) |
+                ((std::max(0, std::min(3, m.face_forward)) & 3) << 4) | (m.line_only_shadow ? 64 : 0);
+    auto id16 = [&](const TexturePtr &t) -> uint32_t {
+      const int32_t id = toon_maps ? texture(t) : -1;
+      return id < 0 || id >= 0xFFFF ? 0xFFFFu : (uint32_t)id;
+    };
+    const float hs = finite_bits(m.hatch_scale) && m.hatch_scale > 0.0f ? m.hatch_scale : 1.0f;
+    const uint32_t packed2 = id16(tx.face_shadow) | (id16(tx.hatch) << 16), packed3 = id16(tx.line) | ((uint32_t)std::lround(clampf(hs * 64.0f, 1.0f, 65535.0f)) << 16);
+    std::memcpy(&g.tex3[2], &packed2, 4);  // (built unsigned: a shift into the sign bit)
+    std::memcpy(&g.tex3[3], &packed3, 4);
     const float t3[4] = {m.toon_specular_color.x, m.toon_specular_color.y, m.toon_specular_color.z, clampf(m.toon_wrap, 0.0f, 1.0f)};
     std::memcpy(g.toon3, t3, 16);
     s.materials.push_back(g);
@@ -2143,6 +2161,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   p.env_i[0] = (int32_t)env_.mode;
   p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
   p.key_light[0] = toon_key_L_.x, p.key_light[1] = toon_key_L_.y, p.key_light[2] = toon_key_L_.z, p.key_light[3] = (float)toon_key_;  // (task 0148)
+  p.misc[0] = 8.0f, p.misc[1] = p.misc[2] = p.misc[3] = 0.0f;  // (task 0149: the kernel's toon map reads)
   p.env_f[0] = env_.strength;
   p.env_f[1] = env_.rotation;
   auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };

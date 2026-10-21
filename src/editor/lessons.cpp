@@ -754,6 +754,23 @@ with painted maps or a hair highlight draws on the CPU.
 ? Several lights on a toon character band its tones into a mess. Which field fixes it? | Toon Key Light Only: the brightest sun bands the tones, the other lights add smooth fill.
 ! cmd:select Sphere; material Toon; component Outline | Make the Sphere toon-shaded with an outline
 ! cmd:select Sphere; material Toon; matset ToonThreshold 0.4 | Set the toon threshold on the Sphere's materials from the console
+# The 2D look: normals, the face shadow, inner lines, hold frames
+A drawn character has no bumps: its face is one tone with a shadow that sweeps across as the light turns. Blendity gets
+there four ways (task 0149). Custom normals: a mesh can carry its own shading normals (an FBX or glTF whose normals an
+artist edited keeps them; the Smooth Normals modifier averages them over the surface so a nose stops casting its own
+shading; the Normal Transfer modifier reads them off a proxy - a sphere round the head, Blender's Data Transfer
+trick - which Rigging > Anime Face Normals adds, fitted to the Head group). The face shadow map: a Toon material's
+Face Shadow Map is read by the key light's angle round the head instead of N.L (HoYo's SDF faces); the Textures
+window's Face Shadow generator makes the plain sweep to paint over. Inner lines and hatching: a Line Map multiplies
+contour lines into the colour (or only into the shadow tones), a Hatch Map tiles strokes into the shadow. The Outline
+component's Thickness Group paints the line's width, Distance Fade thins it far away, Min and Max Pixels keep it
+constant on screen. And Hold: an Animation or Sequencer on 2s or 3s changes pose every second or third frame while the
+camera moves every frame, as hand-drawn animation is shot; renders hold the same frames.
+! cmd:select Sphere; component SmoothNormalsModifier | Smooth the Sphere's shading normals
+! cmd:select Sphere; facenormals | Add a head proxy and a Normal Transfer to the Sphere
+! cmd:select Sphere; material Toon; component Outline; set Outline.DistanceFade 0.5 | A toon outline that thins with distance
+? Why does a drawn face have one tone while a scanned one has many? | Its shading follows a smooth shape (a ball), not its bumps: smoothed or transferred normals give the model the same.
+? What does Hold 2s do to the camera? | Nothing: only the held object's clip changes pose every other frame; the camera and the rest move every frame.
 # Baking textures for other programs
 Procedural textures, axis materials and Box mapping are computed by Blendity's shaders; another program only understands images on UVs. Object > Bake Textures lays the object out on new UVs (Smart UV Project and Pack Islands, as the lightmapper does) and evaluates its materials at every texel into four images: albedo, roughness, metallic and a normal map. Blender does the same with Cycles' Bake panel, Unity users with Substance's baker. The export option Bake Textures does it on copies for OBJ, FBX and glTF, leaving the scene alone.
 ? Why can't a Mirror modifier be baked in place? | The images go on the base mesh's UVs, and the mirrored half shares them: it would repeat the base's images. Apply the modifier first, or export with Bake Textures, which bakes what it exports.

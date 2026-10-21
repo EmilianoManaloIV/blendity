@@ -1498,7 +1498,8 @@ void Editor::draw_inspector(const Recti &r) {
                                          {"Solidify", "SolidifyModifier"},     {"Subdivision Surface", "SubdivisionSurface"},
                                          {"Triangulate", "TriangulateModifier"}, {"Wireframe", "WireframeModifier"}};
         static const Item kDeform[] = {{"Cast", "CastModifier"}, {"Curve", "CurveModifier"}, {"Displace", "DisplaceModifier"}, {"Lattice", "LatticeModifier"}, {"Mesh Deform", "MeshDeformModifier"}, {"Armature (Skin)", "SkinModifier"},
-                                       {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"}};
+                                       {"Simple Deform", "SimpleDeformModifier"}, {"Smooth", "SmoothModifier"},
+                                       {"Smooth Normals", "SmoothNormalsModifier"}, {"Normal Transfer", "NormalTransferModifier"}};
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);
           for (size_t i = 0; i < n; i++) {

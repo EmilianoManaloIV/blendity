@@ -121,8 +121,19 @@ void Editor::step_render_animation() {
   }
   if (ranim_.frame > ranim_.last) return finish_render_animation();
   if (!ranim_.started) {
-    if (ranim_.source == 1) seq_set_frame((float)ranim_.frame);
-    else anim_set_frame((float)ranim_.frame);
+    /* Held frames (task 0149): the sequence's or the clip's root's Hold, as Play shows them. */
+    if (ranim_.source == 1) {
+      int hold = 1;
+      scene_->for_each([&](GameObject &g) {
+        if (const Sequencer *sq = g.get<Sequencer>(); sq && sq->enabled && hold == 1) hold = sq->hold;
+      });
+      seq_set_frame(hold_frame_from((float)ranim_.first, (float)ranim_.frame, hold));
+    }
+    else {
+      GameObject *root = anim_root();
+      const Animation *an = root ? root->get<Animation>() : nullptr;
+      anim_set_frame(hold_frame_from((float)ranim_.first, (float)ranim_.frame, an ? an->hold : 1));
+    }
     start_final_render(false, false);
     ranim_.started = true;
   }

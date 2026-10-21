@@ -110,6 +110,7 @@ struct Sequencer : ComponentBase<Sequencer> {
   bool play_automatically = true;
   float speed = 1.0f;
   int wrap = 0;  // Loop, Once
+  int hold = 1;  // on 1s, 2s or 3s (task 0149): the timeline's frame held to multiples of this
   float time = 0.0f;  // seconds into the timeline (Play only)
   bool playing = false;
   /* A jump's blend: from the values of the moment to the sequence's own over blend_total seconds (by key only: the

@@ -53,5 +53,40 @@ soft, and one key light.
 - A .mat grows ten fields; files and the hash see them through `Material::reflect` like the rest.
 - Watch: a ramp's luminance stands in for the band level when a shade map is set with it; a ramp that isn't
   monotone gives odd shade blends (the ramp is meant to run dark to light).
-- Task 0149 builds on this: custom normals, a face shadow (SDF) map, inner lines and hatching, animation on 2s/3s -
-  recorded here when they land.
+- Task 0149 (round 168) builds on this; its decisions:
+  - **Custom normals are per vertex, not per corner.** An anime face's edited normals are smooth by nature (one
+    direction per vertex is what a Smooth Normals or Normal Transfer modifier produces and what a proxy transfer
+    gives); per-corner normals would double the data for the hard-edge case that these meshes don't have, and a
+    vertex array carries through edits the way shape keys do (by position). They replace `corner_normals`' result
+    at every corner; `update_in_place` refuses so a build keeps them.
+  - **A file's normals are kept only when they differ** from the recomputed ones (over 1 % of the vertices by a
+    degree): a plain export stores the smooth normals Blendity would compute, and keeping a copy would freeze the
+    shading against later edits for nothing.
+  - **The face shadow is driven by the key light alone** (the brightest sun, as Key Light Only picks it), in the
+    object's own space (`DrawItem::local_key`, `PathTracer::local_keys_`, the kernel's `to_local`): a face map is
+    painted for one light, and the key light is one direction a frame, so the GPU kernel computes the term once per
+    hit. Other lights shade the face by N.L as before. The map is read at the UV and at its mirror, the light's side
+    picking one (HoYo's convention: painted for the light on the right).
+  - **Lines and hatching are a multiplier on the shadow tones** (`SurfaceSample::toon_shadow_mul`), applied after the
+    tone and before the highlight: one field carries both, the lines going into the colour instead when not limited
+    to the shadow. Hatching is over the UVs, not the screen, so it stays with the character and reaches the path
+    tracers.
+  - **Hold frames quantise the clip's time, not the scene's:** the camera and other objects move every frame, which is
+    what hand-drawn animation shot on 2s looks like (the drawings change every other frame under a moving camera).
+    The renderer holds the same frames by quantising the frame it poses, from the range's first frame.
+  - **The skin turns custom normals with the bones** (the blended rotation of the dual quaternions, or the matrices'
+    directions), so a Normal Transfer runs once in the rest pose, before the skin (Anime Face Normals places it
+    there), and a posed face keeps its flat shading. The other deformers (Lattice, Cast, Displace, Simple Deform,
+    Curve) leave custom normals as they are: a bent mesh with custom normals shades as if unbent - watch.
+  - **The face shadow map takes no cast shadow on top:** the map is the face's shadow (HoYo's faces do the same); a
+    hand in front of the face doesn't darken it for the key light - watch, and a Shadow Bias Map is the painter's
+    answer. Other lights shade the face by N.L with their shadows as before.
+  - **A file's normals count as an edit only when they are smooth** (no vertex whose corners disagree: a hard edge's
+    split normals aren't one normal per vertex, and the smooth angle gives a better result for them) and differ from
+    both the area-weighted and the angle-weighted recomputed normals by two degrees on over 1 % of the vertices
+    (exporters weight by angle, Blendity by area; neither is an artist's edit). The glTF weld is unchanged (hard
+    edges weld and the smooth angle makes them). `customnormals clear` is the way back.
+  - **Custom normals keep the in-place update path** (every corner takes its vertex's own again, no face sums), so
+    Edit Mode drags and skinned frames stay cheap. The GPU kernel's `Material` struct did not grow: the new map ids
+    and flags are packed into `tex3` bits and `color2.w`, because every by-value copy of the struct costs SPIR-V ids
+    and the kernel sits at the bound.

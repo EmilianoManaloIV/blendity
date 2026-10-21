@@ -2,6 +2,61 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 168): the 2D look - custom normals, a face shadow map, inner lines and hatching, hold frames (task 0149, ADR 0048)
+
+**Asked:** renders that "look more 2D while posed in 3D", research-based: shadow control with smooth normals, a face
+shadow map, inner lines and hatching, animation on 2s and 3s.
+
+**Added**
+- **Custom normals:** a mesh can carry its own shading normals, one per vertex, which replace the smooth / flat /
+  sharp-edge normals at every corner; saved with the mesh, carried through edits by position as shape keys are. An
+  FBX or glTF whose normals an artist edited keeps them (when over 1 % differ from the recomputed ones by a degree;
+  the import says so); exports write them as they are.
+- **Smooth Normals and Normal Transfer modifiers** (Add Component > Mesh): the shading normals averaged over the
+  surface N times (an anime face keeps its shape and loses its bumps' shading), or taken from a proxy object's
+  surface at the nearest point (a sphere round the head: Blender's Data Transfer trick), both limited by a vertex
+  group and moving no vertex. **Rigging > Anime Face Normals** (console `facenormals`) adds a sphere proxy fitted to
+  the Head group (or the top of the mesh), without a renderer, and the modifier reading it.
+- **Face Shadow Map** on a toon material: the key light's angle round the face (0 from the front, 1 from behind)
+  read against the map decides the lit side instead of N.L - HoYo's SDF faces; the map is mirrored for a light on
+  the other side; Face Shadow Softness and Face Forward (+Z, -Z, +X, -X: VRM faces +Z, MMD -Z). The Textures window's
+  **Face Shadow** generator makes the plain sweep to paint over. The same in the rasterized views, F12 raster and
+  both path tracers (the GPU viewport hands it to the CPU like the other painted maps).
+- **Line Map** (inner contour lines multiplied into the colour, or only into the shadow tones with Lines Only In
+  Shadow) and **Hatch Map** with Hatch Scale (strokes tiled over the UVs, shown in the shadow tones).
+- **Outline:** Thickness Group (a vertex group scaling the line's width per vertex, Guilty Gear's painted line width),
+  Distance Fade (thinner far away) and Min / Max Pixels (the width kept between them on screen, by the object's
+  distance, in the views and raster renders).
+- **Hold** on the Animation and Sequencer components: 1s, 2s, 3s or 4s - the pose changes every so many frames while
+  the camera and the rest of the scene move every frame; Render Animation holds the same frames (from the range's
+  first frame).
+- Console `customnormals show|clear` (the way back from kept or transferred normals). A Skin modifier turns custom
+  normals with its bones; the face shadow map takes no cast shadow on top (the map is the face's shadow); a file's
+  normals are kept only when they are smooth and differ from both the area- and the angle-weighted recomputed ones
+  (ADR 0048's notes).
+
+**Changed after the review**
+- Normal Transfer reads the proxy's render mesh (its own vertices and shading normals), with the closest-point
+  search extracted; a normal modifier starts from the head's normals on every evaluation (it compounded); Anime Face
+  Normals places the modifier before the Skin and makes a 16 x 12 proxy; the Outline's distance scale moves in 2 %
+  steps, has its own shell slots per view (a path tracer kept a freed shell otherwise), honours an orthographic view
+  and an object-unit thickness; the hold's float frame rounds up at 1e-4; the GPU material's packed ids are built
+  unsigned; the FBX reader turns normals by the geometry's normal matrix.
+- The Learn tab's Materials lesson gains "The 2D look".
+
+**Checked**
+- New tests (round 168): custom normals at every corner, saved and loaded, transferred by position, through a glTF
+  round trip with the note, the file's normals kept only when they differ; Smooth Normals closing the sharpest edge
+  and moving nothing, limited by a group; Normal Transfer radial from a sphere and following it; `facenormals` and its
+  undo; `toon_face_lit`'s six cases and the generator's sweep; a sphere one lit tone from the front and one shadow tone
+  from behind in the rasterizer, the CPU path tracer and the GPU's; the shadow multiplier, a grey line map (both ways)
+  and a hatch map at a point; the Outline's group, cache key and distance scale; 23 frames on 1s / 2s / 3s; Hold saved.
+- Unit checks (round 168): Windows 11,236, 0 failed (890 tests); render-cache verify mode 11,237, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,967, 0 failed. Sanitizer build: 10,845, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change (the
+  glTF weld is as before; custom normals touch no geometry).
+
 ## 2026-10-21 (round 167): toon styles (task 0148, ADR 0048)
 
 **Asked:** "Is there any way to add more toon shading details in good engine" - "The Guilty Gear / Arc System Works

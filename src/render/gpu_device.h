@@ -52,6 +52,7 @@ struct GParams {
   float retro_vp[16];   // a camera filter's view-projection (task 0032)
   float retro[4];       // affine UVs, screen door, internal width, height (0: off)
   float key_light[4];   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
+  float misc[4];        // task 0149: x the toon map reads (8)
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };
@@ -74,6 +75,10 @@ struct GMaterial {
   float toon0[4], toon1[4], toon2[4];
   int32_t tex2[4], tex3[4];
   float toon3[4];
+  /* Task 0149 packs into tex3 (the kernel's Material must not grow: every copy of it costs SPIR-V ids): tex3[1] the
+   * flag bits (hair 1, rim side 2-3, key light only 8, face forward 16-32, lines only in shadow 64), tex3[2] the face
+   * map id | the hatch map id << 16 (0xFFFF: none), tex3[3] the line map id | the hatch scale x 64 << 16; the face
+   * shadow's softness in color2[3]. */
 };
 struct GLight { float a[4], b[4], c[4], d[4], e[4]; };  // see gpu_kernel.h Light
 struct GMeshLight { uint32_t obj, prim; float area, power; };

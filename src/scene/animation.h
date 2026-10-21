@@ -6,6 +6,7 @@
 
 #include "scene.h"
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -106,6 +107,11 @@ void reduce_keys(std::vector<AnimKey> &keys, float tolerance);
 float best_frame_rate(const std::vector<float> &times);
 /* A time in frames, wrapped: 0 Loop, 1 Once (holds the end), 2 Ping Pong, 3 Clamp Forever. */
 float wrap_frame(float frame, float end, int wrap);
+/* Animation on 2s or 3s (task 0149): the frame held to multiples of `hold` (1: every frame; 2: a new pose every other
+ * frame, as hand-drawn animation is shot). */
+inline float hold_frame(float frame, int hold) { return hold > 1 ? std::floor(frame / (float)hold + 1e-4f) * (float)hold : frame; }  // (+1e-4: 1.9999 frames is frame 2)
+/* A render range's frame held from the range's first frame, so a range starting at 3 on 2s shows 3, 3, 5, 5. */
+inline float hold_frame_from(float first, float frame, int hold) { return first + hold_frame(frame - first, hold); }
 
 /* Unity's legacy Animation component: plays its clip in Play. */
 struct Animation : ComponentBase<Animation> {
@@ -114,6 +120,7 @@ struct Animation : ComponentBase<Animation> {
   bool play_automatically = true;
   float speed = 1.0f;
   int wrap = 0;  // Loop, Once, Ping Pong, Clamp Forever
+  int hold = 1;  // on 1s, 2s or 3s (task 0149): the pose changes every hold frames of the clip, the rest of the scene moves on
   float time = 0.0f;  // seconds since it started (Play only)
   bool playing = false;
   void reflect(Reflector &r) override;

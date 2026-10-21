@@ -193,6 +193,7 @@ struct DrawItem {
   bool realtime_lm = false;
   Vec3 highlight_color{1.0f, 0.55f, 0.1f};
   bool always_cull = false;  // an outline's inverted hull (ADR 0020): back faces culled whatever the view's setting
+  Vec3 local_key{0, 1, 0};   // the key light's direction in the item's own space (task 0149: the face shadow map), set by the renderer
   /* Gouraud mode: a colour per render vertex instead of albedo (Weight Paint's weight colours, task 0046). */
   const std::vector<Vec3> *vertex_colors = nullptr;
 };

@@ -167,6 +167,16 @@ std::vector<Vec3> split_normals(const Mesh &m) {
       }
   };
   auto sharp = [&](uint32_t a, uint32_t b) { return m.is_sharp(a, b) || (m.seams_sharp && m.is_seam(a, b)); };
+  if (m.custom_normals_fit()) {  // custom normals (task 0149): the artist's shading normals go out as they are
+    std::vector<Vec3> cn(m.corner_count());
+    for (size_t f = 0; f < nf; f++)
+      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
+        const Vec3 n = m.custom_normals[m.corner_verts[c]];
+        const float len = length(n);
+        cn[c] = finite_bits(len) && len > 1e-12f ? n / len : fn[f];
+      }
+    return cn;
+  }
   std::vector<Vec3> out(m.corner_count());
   std::vector<uint32_t> fan;
   for (size_t f = 0; f < nf; f++)
@@ -221,9 +231,18 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     m.sharp_edges = src.sharp_edges;
     m.seams = src.seams;
     m.seams_sharp = src.seams_sharp;
+    m.custom_normals = src.custom_normals;  // (task 0149: written as they are)
     m.sync_attributes();
     if (o.triangulate) meshops::triangulate(m);
     for (Vec3 &v : m.positions) v = to_out(it.world.point(v), up) * o.scale;
+    if (m.custom_normals.size() == m.positions.size()) {  // (task 0149: turned with the positions, by the inverse transpose)
+      const Mat4 nm = it.world.inverse().transposed();
+      for (Vec3 &n : m.custom_normals) {
+        const Vec3 t = to_out(nm.dir(n), up);
+        const float len = length(t);
+        n = finite_bits(len) && len > 1e-12f ? t / len : Vec3(0.0f);
+      }
+    }
     /* Mirroring flips handedness: reverse every polygon so it still faces out. */
     const bool uv = m.has_uvs();
     for (size_t f = 0; f < m.face_count(); f++) {
