@@ -1744,6 +1744,7 @@ class Editor {
   void draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const std::vector<MaterialPtr> *others = nullptr);
   size_t apply_material_edits(const std::vector<FieldEdit> &edits, const Material *source, const std::vector<MaterialPtr> &targets);
   void matset_command(const std::vector<std::string> &t, const std::string &line);  // matset <Field> <value>: the selected materials
+  void toonstyle_command(const std::string &name);  // toonstyle <style>: the selected materials' toon preset (task 0148)
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();

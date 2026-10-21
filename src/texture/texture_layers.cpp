@@ -517,6 +517,48 @@ struct GradientLayer : TextureLayerBase<GradientLayer> {
   }
 };
 
+/* A toon shadow ramp (task 0148): tones from the shadow colour (left) to the lit one (right), stepped at the
+ * threshold and spread evenly above it, each step as soft as asked - the image a Toon material's Toon Ramp reads by
+ * how lit a point is. Vertical too (bottom dark, top lit), so either way of reading it agrees. */
+struct ToonRampLayer : TextureLayerBase<ToonRampLayer> {
+  static constexpr const char *kName = "Toon Ramp";
+  int tones = 2;
+  float threshold = 0.5f, softness = 0.0f;
+  Vec3 shadow{0.55f, 0.5f, 0.68f}, lit{1.0f, 1.0f, 1.0f};
+  void reflect(Reflector &r) override {
+    r.field("Tones", tones, 2, 5);
+    r.help("How many tones, the shadow included (2: classic cel).");
+    r.field("Threshold", threshold, 0.01f, 0.0f, 0.95f);
+    r.help("Where the shadow ends (how lit a point must be).");
+    r.field("Softness", softness, 0.005f, 0.0f, 0.5f);
+    r.help("How soft each step is (0: hard).");
+    r.color("Shadow", shadow);
+    r.color("Lit", lit);
+  }
+  LayerSample sample(float u_in, float v_in, const LayerContext &) const override {
+    const float u = clampf(u_in, 0.0f, 1.0f);
+    (void)v_in;  // a plain horizontal ramp (left dark, right lit), the same in every row: read at (lit, lit) it gives the tone at lit
+    const float t = u;
+    const int n = cnt(tones, 2, 5) - 1;
+    const float th = clampf(fin(threshold, 0.5f), 0.0f, 0.95f), w = clampf(fin(softness, 0.0f), 0.0f, 0.5f);
+    float q = 0.0f;
+    for (int k = 0; k < n; k++) {
+      const float e = th + (float)k * (1.0f - th) / (float)n;
+      const float lo = e - w, hi = e + w;
+      q += hi - lo < 1e-5f ? (t >= lo ? 1.0f : 0.0f) : [&] {
+        const float x = clampf((t - lo) / (hi - lo), 0.0f, 1.0f);
+        return x * x * (3.0f - 2.0f * x);
+      }();
+    }
+    q /= (float)n;
+    LayerSample s;
+    s.albedo = lerp(fin3(shadow, Vec3(0.5f)), fin3(lit, Vec3(1.0f)), q);
+    s.height = q;
+    s.rough = 0.5f;
+    return s;
+  }
+};
+
 struct ImageLayer : TextureLayerBase<ImageLayer> {
   static constexpr const char *kName = "Image";
   TextureRef image;
@@ -993,6 +1035,8 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
       {"Checker", "Generators", "A checkerboard.", make<CheckerLayer>},
       {"Stripes", "Generators", "Stripes of a given width.", make<StripesLayer>},
       {"Gradient", "Generators", "A linear, radial or mirrored gradient between two colours.", make<GradientLayer>},
+      {"Toon Ramp", "Generators", "A toon shadow ramp: 2 to 5 tones from the shadow colour to the lit one, hard or soft (a Toon material's Toon Ramp).",
+       make<ToonRampLayer>},
       {"Image", "Generators", "An image file, tiled.", make<ImageLayer>},
       {"Blur", "Filters", "A box blur of the planes, wrapping at the edges.", make<BlurLayer>},
       {"Levels", "Filters", "Black and white points and a gamma.", make<LevelsLayer>},

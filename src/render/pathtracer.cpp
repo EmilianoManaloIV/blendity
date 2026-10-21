@@ -167,6 +167,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
         if (mp) mp->textures();  // resolved here, not by the tracing threads (Material::textures)
       }
   lights_ = lights;
+  toon_key_ = toon_key_light(lights_, &toon_key_L_);
   env_ = env;
   normal_mats_.clear();
   for (const PTObject &ob : objects_) normal_mats_.push_back(ob.model.inverse().transposed());
@@ -904,7 +905,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
     /* Toon (ADR 0020) where the eye sees the surface: its tones and rim. Elsewhere (bounces, bakes) it is Lambert. */
     const bool toon_here = s.toon && bounce == 0 && camera_path;
-    if (toon_here) add(beta * toon_rim(*s.toon, n, V));
+    if (toon_here) add(beta * toon_rim(s, n, V, toon_key_L_));
 
     /* BSDF sampling setup (one-sample MIS between the diffuse and GGX lobes),
      * needed before direct lighting: light-sample MIS weights use the same pdf. */
@@ -1000,13 +1001,15 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         if (power <= 0 || !(l.intensity > 0.0f)) continue;
         /* Range, the spot cone; an area light at its centre (as the views band it: per-sample values would blur the bands). */
         const float fall = std::min(1.0f, l.type == RenderLight::Area ? light_falloff(l, sp.position, dir) : power / (l.intensity * kPi));
-        const float ndl = dot(n, dir);
+        const float ndl = toon_wrap_ndl(*s.toon, dot(n, dir));  // (the light wrap moves the terminator)
         Vec3 Tr(0.0f);
         if (ndl > 0 && dot(sp.geo_normal, dir) > 0) {
           rays++;
           Tr = transmittance({origin, dir}, dist);
         }
-        const Vec3 Lo = shade_toon(s, n, V, dir, std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z}) * fall) * l.color * l.intensity;
+        const float lit = std::max(ndl, 0.0f) * std::max({Tr.x, Tr.y, Tr.z}) * fall;
+        const bool fill = s.toon->toon_key_light_only && toon_key_ >= 0 && (int)(&l - &lights_[0]) != toon_key_;  // (task 0148: the other lights add smooth fill)
+        const Vec3 Lo = (fill ? toon_fill(s, lit) : shade_toon(s, n, V, dir, lit)) * l.color * l.intensity;
         add(beta * Lo);
         record_nee(Lo);
         continue;
@@ -2008,6 +2011,19 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     std::memcpy(g.toon0, t0, 16);
     std::memcpy(g.toon1, t1, 16);
     std::memcpy(g.toon2, t2, 16);
+    /* Task 0148: the toon maps (a Toon material's; a PBR one's stale paths stay off the card), the spot's colour, the
+     * wrap, the hair highlight, the rim's side, the key light. */
+    const bool toon_maps = m.shading_model == 1;
+    g.tex2[0] = toon_maps ? texture(tx.toon_ramp) : -1;
+    g.tex2[1] = toon_maps ? texture(tx.shade) : -1;
+    g.tex2[2] = toon_maps ? texture(tx.toon_bias) : -1;
+    g.tex2[3] = toon_maps ? texture(tx.toon_specular) : -1;
+    g.tex3[0] = toon_maps ? texture(tx.toon_rim_mask) : -1;
+    g.tex3[1] = m.toon_hair_highlight ? 1 : 0;
+    g.tex3[2] = m.toon_rim_side;
+    g.tex3[3] = m.toon_key_light_only ? 1 : 0;
+    const float t3[4] = {m.toon_specular_color.x, m.toon_specular_color.y, m.toon_specular_color.z, clampf(m.toon_wrap, 0.0f, 1.0f)};
+    std::memcpy(g.toon3, t3, 16);
     s.materials.push_back(g);
   };
   material(*default_material(), false);  // index 0
@@ -2126,6 +2142,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   p.counts[3] = own_bvh ? (int32_t)tlas_.size() : 0;
   p.env_i[0] = (int32_t)env_.mode;
   p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
+  p.key_light[0] = toon_key_L_.x, p.key_light[1] = toon_key_L_.y, p.key_light[2] = toon_key_L_.z, p.key_light[3] = (float)toon_key_;  // (task 0148)
   p.env_f[0] = env_.strength;
   p.env_f[1] = env_.rotation;
   auto v4 = [](float *d, Vec3 v) { d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = 0; };

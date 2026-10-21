@@ -94,6 +94,18 @@ struct Material {
   float toon_rim_width = 0.0f;       // 0: no rim light
   float toon_rim_strength = 0.5f;
   bool toon_flat_ambient = true;     // the sky's light one flat tone (no gradient across the shape)
+  /* Toon styles (task 0148, ADR 0048): painted control and more looks, the same in every renderer. */
+  int toon_style = 0;                 // the preset last picked: 0 Classic, 1 Guilty Gear, 2 Soft Anime, 3 Painterly, 4 Manga (a start: every field stays editable)
+  TextureRef toon_ramp_map;           // a shadow ramp: its colour at U = how lit (V too, up: bottom dark, top lit) instead of bands, threshold, softness and the shadow colour
+  TextureRef shade_map;               // the shadow side's own albedo (MToon's shade texture: the hand-painted shadow of anime art)
+  TextureRef toon_shadow_bias_map;    // painted shadow control: 0.5 is neutral, white pushes a point into the light, black into shadow (Guilty Gear's vertex colour)
+  TextureRef toon_specular_map;       // where the highlight spot may appear (black: never)
+  Vec3 toon_specular_color{1, 1, 1};  // the spot's colour
+  bool toon_hair_highlight = false;   // the spot as a band across the hair's tangent (Kajiya-Kay's sheen)
+  int toon_rim_side = 0;              // the rim: 0 all round the silhouette, 1 the lit side only, 2 the shadow side only
+  TextureRef toon_rim_map;            // where the rim may show (black: never)
+  bool toon_key_light_only = false;   // only the brightest sun bands the tones; other lights add smooth fill
+  float toon_wrap = 0.0f;             // light wrap: N.L remapped so the lit side reaches round the form (softer figures)
   /* An outline's inverted hull (the Outline component's own material, not saved): the path tracers show only its
    * front faces, to camera rays, as the rasterizer's back-face culling does. */
   bool outline_hull = false;
@@ -108,6 +120,7 @@ struct Material {
   /* Resolved textures (cached; reloaded when the path or file changes). */
   struct Resolved {
     TexturePtr base, metallic, roughness, normal, emission;
+    TexturePtr toon_ramp, shade, toon_bias, toon_specular, toon_rim_mask;  // the toon maps (task 0148)
     /* A slot naming a procedural texture's output with Live Shading on (task 0031): its live snapshot and which
      * output (0 albedo, 1 normal, 2 roughness, 3 height), in the order base, metallic, roughness, normal,
      * emission. The rasterizer evaluates it per pixel up close. */
@@ -135,6 +148,11 @@ const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
  * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */
 const std::vector<std::string> &material_presets();
 MaterialPtr make_material_preset(const std::string &preset);
+/* Toon styles (task 0148): Classic, Guilty Gear, Soft Anime, Painterly, Manga. Applying one sets the toon fields
+ * (not the maps) and records which; every field stays editable afterwards. -1 for an unknown name. */
+const std::vector<std::string> &toon_style_names();
+int toon_style_index(const std::string &name);  // any case or spacing ("guiltygear")
+void apply_toon_style(Material &m, int style);
 
 /* Root used to resolve relative texture paths (the project folder). */
 void set_asset_root(const std::string &dir);

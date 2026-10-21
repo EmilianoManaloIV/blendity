@@ -49,6 +49,9 @@ struct Material {
   vec4 toon0;       // toon (flags.w bit 1, ADR 0020): bands, softness, threshold, specular smoothness
   vec4 toon1;       // shadow colour, specular size
   vec4 toon2;       // rim colour x strength, rim width
+  ivec4 tex2;       // task 0148: the toon ramp, shade, shadow bias and specular maps (-1: none)
+  ivec4 tex3;       // the rim mask, hair highlight, rim side (0 both, 1 lit, 2 shadow), key light only
+  vec4 toon3;       // the specular colour, the light wrap
 };
 struct Light { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; };  // a: dir/pos + type (0 sun, 1 point, 2 spot, 3 area); b: colour, intensity; c: range, spot cos outer / inner, disk; d: direction, width; e: right, height
 struct MeshLight { uint obj; uint prim; float area; float power; };
@@ -68,6 +71,7 @@ layout(std430, binding = 0) readonly buffer Params {
   vec4 background;  // a camera's Solid Color for camera rays (w: on)
   mat4 retro_vp;    // a camera filter's view-projection (task 0032)
   vec4 retro;       // affine UVs, screen door, internal width, height (0: off)
+  vec4 key_light;   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
 } P;
 layout(std430, binding = 1) buffer Accum { vec4 accum[]; };
 layout(std430, binding = 2) buffer Aux { vec4 aux[]; };  // albedo [0, n), normal + depth [n, 2n)
@@ -172,6 +176,9 @@ struct SurfacePoint {
   vec3 bmin, bmax;
 };
 struct Sample { vec3 albedo; float metallic; float roughness; float specular; float alpha; vec3 emission; vec3 normal; bool unlit; };
+/* The toon maps at a point (task 0148), kept out of Sample: Sample is copied at every inlined call, and a bigger one
+ * put the kernel past SPIR-V's id limit. */
+struct ToonIn { vec3 shade; bool has_shade; float bias; float spec_mask; float rim_mask; vec3 tangent; bool has_tangent; };
 
 int material_index(Instance ins, uint slot) {
   if (ins.info.y == 0u) return 0;  // the default material is uploaded first
@@ -295,6 +302,29 @@ float axis_step(float e0, float e1, float x) {
   float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
 }
+/* The toon maps at the point (task 0148), read by UV (a toon character is UV-mapped; the triplanar paths of msample,
+ * inlined four times over, pushed the kernel past SPIR-V's id limit) - once, where the camera path shades a toon
+ * surface. The CPU reads them with the material's mapping; a Box-mapped toon material differs there. */
+/* The nearest texel at a UV (one tex_fetch: tex_sample's five, inlined, pushed the kernel past SPIR-V's id bound). */
+vec4 map_fetch(int t, vec2 uv, int wrap) {
+  TexInfo ti = texinfo[t];
+  return tex_fetch(t, int(floor(uv.x * float(ti.w))), int(floor((1.0 - uv.y) * float(ti.h))), wrap);
+}
+void toon_maps(Material m, SurfacePoint sp, inout ToonIn t) {
+  t.tangent = cross(sp.normal, sp.tangent.xyz) * sp.tangent.w;  // the strands run along V: the bitangent
+  t.has_tangent = sp.has_tangent;
+  vec2 uv = vec2(sp.uv.x * m.tiling.x + m.offset.x, sp.uv.y * m.tiling.y + m.offset.y);
+  int ids[4] = int[4](m.tex2.y, m.tex2.z, m.tex2.w, m.tex3.x);  // (one fetch call site, in a loop)
+  for (int k = 0; k < 4; k++) {
+    if (ids[k] < 0) continue;
+    vec4 c = map_fetch(ids[k], uv, m.flags.y);
+    if (k == 0) { t.shade = c.xyz; t.has_shade = true; }
+    else if (k == 1) t.bias = isnan(c.x) ? 0.5 : c.x;
+    else if (k == 2) t.spec_mask = c.x;
+    else t.rim_mask = c.x;
+  }
+}
+
 Sample evaluate_material(Material m, SurfacePoint sp) {
   int mode = int(m.axis.w + 0.5);
   if (mode == 0) return evaluate_plain(m, sp, false);
@@ -515,20 +545,44 @@ float toon_level(Material m, float lit) {
   }
   return q / float(bands);
 }
-vec3 shade_toon(Material m, Sample s, vec3 n, vec3 V, vec3 L, float lit) {
-  float q = toon_level(m, lit);
-  vec3 c = s.albedo * mix(m.toon1.xyz, vec3(1.0), q);
-  if (m.toon1.w > 0.0 && q > 0.0) {
-    float nh = dot(n, normalize(V + L)), e = 1.0 - 0.2 * m.toon1.w, w = 0.1 * m.toon0.w;
-    c += mix(vec3(1.0), s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * s.specular);
+/* Task 0148: the wrap and the painted bias before the tones; the ramp or the bands; the shade map; the spot where its
+ * map allows, as a band across the tangent for hair - as shading.cpp's shade_toon. */
+vec3 shade_toon(Material m, Sample s, ToonIn t, vec3 n, vec3 V, vec3 L, float lit) {
+  /* The bias before the tones (the wrap went onto N.L in the loop); the ramp read at (lit, lit) with v up, its nearest
+   * texel; the shade map tinted by the shadow colour - as shading.cpp's shade_toon. */
+  lit = clamp(lit + (clamp(t.bias, 0.0, 1.0) - 0.5) * 2.0, 0.0, 1.0);
+  if (isnan(lit)) lit = 0.0;
+  float q;
+  vec3 tone;
+  if (m.tex2.x >= 0) {
+    tone = map_fetch(m.tex2.x, vec2(lit, lit), 1).xyz;
+    q = clamp(dot(tone, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+  }
+  else {
+    q = toon_level(m, lit);
+    tone = mix(m.toon1.xyz, vec3(1.0), q);
+  }
+  vec3 c = t.has_shade ? mix(t.shade * m.toon1.xyz, s.albedo, q) : s.albedo * tone;
+  if (m.toon1.w > 0.0 && q > 0.0 && t.spec_mask > 0.0) {
+    vec3 H = normalize(V + L);
+    float nh = dot(n, H);
+    if (m.tex3.y != 0 && t.has_tangent) {
+      float th = dot(normalize(t.tangent), H);
+      nh = sqrt(max(0.0, 1.0 - th * th));
+    }
+    float e = 1.0 - 0.2 * m.toon1.w, w = 0.1 * m.toon0.w;
+    c += mix(m.toon3.xyz, s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * s.specular * clamp(t.spec_mask, 0.0, 1.0));
   }
   return c;
 }
-vec3 toon_rim(Material m, vec3 n, vec3 V) {
-  if (m.toon2.w <= 0.0) return vec3(0.0);
+vec3 toon_rim(Material m, ToonIn t, vec3 n, vec3 V, vec3 keyL) {
+  if (m.toon2.w <= 0.0 || t.rim_mask <= 0.0) return vec3(0.0);
+  float ndl = dot(n, keyL);
+  if ((m.tex3.z == 1 && ndl <= 0.0) || (m.tex3.z == 2 && ndl > 0.0)) return vec3(0.0);
   float f = 1.0 - max(0.0, dot(n, V)), e = 1.0 - m.toon2.w, w = m.toon0.y + 0.02;
-  return m.toon2.xyz * axis_step(e - w, e + w, f);
+  return m.toon2.xyz * (axis_step(e - w, e + w, f) * clamp(t.rim_mask, 0.0, 1.0));
 }
+
 vec3 bsdf_any(bool toon, Sample s, vec3 n, vec3 V, vec3 L) { return toon ? s.albedo * (max(0.0, dot(n, L)) / PI) : brdf_eval(s, n, V, L); }
 
 /* PathTracer::transmittance: through cutout holes and transparent surfaces. */
@@ -678,8 +732,12 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     }
     vec3 origin = sp.position + sp.geo_normal * (1e-4 + h.t * 1e-5);
     bool toon_here = toon && bounce == 0 && camera_path;  // tones and rim where the eye sees it; elsewhere Lambert
+    vec3 toon_keyL = P.key_light.xyz;  // the key light (task 0148), found on the CPU
+    int toon_key = int(P.key_light.w);
+    ToonIn tin = ToonIn(vec3(0.0), false, 0.5, 1.0, 1.0, vec3(0.0), false);
     if (toon_here) {
-      vec3 c = beta * toon_rim(m, n, V);
+      toon_maps(m, sp, tin);
+      vec3 c = beta * toon_rim(m, tin, n, V, toon_keyL);
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
     }
@@ -753,13 +811,15 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       /* One shadow ray for both models: transmittance inlines the material evaluation, and a second call site
        * pushed the optimiser past SPIR-V's id limit. A toon surface's dark side takes the shadow colour unlit. */
       float ndl = dot(n, dir);
+      if (toon_here && m.toon3.w > 0.0) ndl = (ndl + m.toon3.w) / (1.0 + m.toon3.w);  // light wrap (task 0148): the terminator moves
       bool facing = ndl > 0.0 && dot(sp.geo_normal, dir) > 0.0;
       if (power <= 0.0 || (!toon_here && !facing)) continue;
       vec3 Tr = facing ? transmittance(origin, dir, dist) : vec3(0.0);
       float vis = max(Tr.x, max(Tr.y, Tr.z));
       if (!toon_here && vis <= 0.0) continue;
       float fall = l.b.w > 0.0 ? min(1.0, centre_fall >= 0.0 ? centre_fall : power / (l.b.w * PI)) : 0.0;  // range, spot cone, an area's centre: banded too
-      vec3 c = toon_here ? beta * shade_toon(m, s, n, V, dir, max(ndl, 0.0) * vis * fall) * l.b.xyz * l.b.w
+      bool fill = toon_here && m.tex3.w != 0 && toon_key >= 0 && li != toon_key;  // (task 0148: the other lights add smooth fill)
+      vec3 c = toon_here ? beta * (fill ? s.albedo * max(0.0, max(ndl, 0.0) * vis * fall) : shade_toon(m, s, tin, n, V, dir, max(ndl, 0.0) * vis * fall)) * l.b.xyz * l.b.w
                          : beta * bsdf_any(toon, s, n, V, dir) * l.b.xyz * Tr * power;
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;

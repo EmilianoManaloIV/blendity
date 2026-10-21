@@ -534,7 +534,14 @@ MaterialPtr make_mmd_material(const MmdMaterial &mt, const std::string &dir, Imp
   }
   Vec3 shadow;
   const std::string toon = toon_file(mt, dir);
-  if (!toon.empty() && toon_shadow_of(toon, shadow, memo)) m->toon_shadow = shadow;
+  if (!toon.empty() && toon_shadow_of(toon, shadow, memo)) {
+    /* The ramp itself as the material's Toon Ramp (task 0148: MMD's ramps run lit at the top, shadow at the bottom,
+     * which the ramp reads), its bottom row kept as the shadow colour for anything that reads only that. */
+    m->toon_shadow = shadow;
+    m->toon_ramp_map = TextureRef{toon, false};
+    m->toon_wrap = 1.0f;  // MMD reads its ramp at v = 0.5 - 0.5 N.L (the middle row is the terminator): a full light wrap gives exactly that
+    if (std::find(out.textures.begin(), out.textures.end(), toon) == out.textures.end()) out.textures.push_back(toon);
+  }
   else if (!mt.toon.empty() || mt.shared_toon >= 0) missing_toons++;
   return m;
 }

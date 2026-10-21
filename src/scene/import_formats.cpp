@@ -581,7 +581,7 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
   const bool vrm = vrm_present(doc);  // (task 0138: the humanoid's names before the skins take them for the groups)
   if (vrm) vrm_name_bones(doc, node_index, out);
   skins_and_bones();
-  if (vrm) vrm_complete(doc, node_index, meshes, mats, out);
+  if (vrm) vrm_complete(doc, node_index, meshes, mats, image_paths, out);
   gltf_import_clips(doc, node_index, read_accessor, out);  // (task 0139)
   out.summary = strprintf("%zu node(s), %zu vertices, %zu faces, %zu material(s)", out.nodes.size(), verts, faces, out.materials.size());
   return true;

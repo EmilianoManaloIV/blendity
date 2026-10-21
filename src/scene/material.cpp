@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <cmath>
+#include <cctype>
 
 namespace bl {
 
@@ -150,6 +151,12 @@ void Material::reflect(Reflector &r) {
          "for the black lines.");
   if (r.all_fields() || shading_model == 1) {
     if (r.group("Toon", true)) {
+      static const char *styles[] = {"Classic", "Guilty Gear", "Soft Anime", "Painterly", "Manga"};
+      r.enumeration("Toon Style", toon_style, styles, 5);
+      r.help("A starting point (task 0148): picking one sets the fields below - Classic: two tones with a soft rim; Guilty\n"
+             "Gear: a hard two-tone, the key light alone, a painted highlight (Arc System Works' look); Soft Anime: three\n"
+             "tones with light wrap and a lit-side rim; Painterly: four soft tones; Manga: a hard grey two-tone. Every\n"
+             "field stays editable afterwards; the maps are yours.");
       r.field("Toon Bands", toon_bands, 1, 8);
       r.help("How many lit tones above the shadow (1: two-tone cel shading).");
       r.field("Toon Softness", toon_softness, 0.005f, 0.0f, 0.5f);
@@ -158,12 +165,39 @@ void Material::reflect(Reflector &r) {
       r.help("Where light turns into shadow (the light's angle, shadows included).");
       r.color("Toon Shadow Color", toon_shadow);
       r.help("The shadow side's colour, times the base colour (a cool tint reads as anime shading).");
+      r.texture("Toon Ramp", toon_ramp_map);
+      r.help("A shadow ramp instead of the bands, threshold, softness and shadow colour: its colour at U = how lit the point\n"
+             "is (left dark, right lit; or a vertical ramp, bottom dark, top lit), times the base colour. The Textures\n"
+             "window's Toon Ramp generator makes 2, 3 and 4-tone ramps; MMD's toon images land here.");
+      r.texture("Shade Map", shade_map);
+      r.help("The shadow side's own picture (MToon's shade texture, the hand-painted shadow of anime art), tinted by the\n"
+             "Toon Shadow Color: where the surface is in shadow this shows instead of the base colour darkened.");
+      r.texture("Shadow Bias Map", toon_shadow_bias_map);
+      r.help("Painted shadow control (Guilty Gear's vertex colours): grey is neutral, white keeps a point lit however the\n"
+             "light falls, black keeps it in shadow (under the chin, inside the hair).");
+      r.field("Toon Light Wrap", toon_wrap, 0.01f, 0.0f, 1.0f);
+      r.help("Lets the light reach round the form before the tones step (0: none; 0.3: a softer figure).");
+      r.field("Toon Key Light Only", toon_key_light_only);
+      r.help("Only the brightest sun bands the tones; other lights add smooth fill (several banding lights look like a\n"
+             "disco ball). Anime has one key light.");
       r.field("Toon Specular Size", toon_specular_size, 0.01f, 0.0f, 1.0f);
       r.field("Toon Specular Smoothness", toon_specular_smooth, 0.005f, 0.0f, 0.5f);
+      r.color("Toon Specular Color", toon_specular_color);
+      r.texture("Toon Specular Map", toon_specular_map);
+      r.help("Where the highlight spot may appear (black: never): paint it where a painter would (the nose, the shoulders).");
+      r.field("Toon Hair Highlight", toon_hair_highlight);
+      r.help("The spot as a band across the hair's direction (the classic sheen of anime hair); the strands run along V of\n"
+             "the UVs, as hair cards are laid out.");
       r.color("Toon Rim Color", toon_rim);
       r.field("Toon Rim Width", toon_rim_width, 0.01f, 0.0f, 1.0f);
       r.help("A light edge around the silhouette (0: none).");
       r.field("Toon Rim Strength", toon_rim_strength, 0.01f, 0.0f, 10.0f);
+      static const char *sides[] = {"Both Sides", "Lit Side", "Shadow Side"};
+      r.enumeration("Toon Rim Side", toon_rim_side, sides, 3);
+      r.help("Where the rim shows: all round, only where the key light falls (a backlight's edge), or only in the shadow\n"
+             "(bounce light from behind).");
+      r.texture("Toon Rim Map", toon_rim_map);
+      r.help("Where the rim may show (black: never).");
       r.field("Toon Flat Ambient", toon_flat_ambient);
       r.help("The sky's light as one flat tone, so only the lights shade the form.");
     }
@@ -220,6 +254,15 @@ const Material::Resolved &Material::textures() const {
   resolved_.roughness = load(roughness_map);
   resolved_.normal = load(TextureRef{normal_map.path, true});
   resolved_.emission = load(emission_map);
+  /* The toon maps (task 0148): the ramp and the shade map are colours, the rest data; a PBR material's stale paths
+   * aren't loaded. */
+  const TextureRef none;
+  const bool toon = shading_model == 1;
+  resolved_.toon_ramp = load(toon ? toon_ramp_map : none);
+  resolved_.shade = load(toon ? shade_map : none);
+  resolved_.toon_bias = load(toon ? TextureRef{toon_shadow_bias_map.path, true} : none);
+  resolved_.toon_specular = load(toon ? TextureRef{toon_specular_map.path, true} : none);
+  resolved_.toon_rim_mask = load(toon ? TextureRef{toon_rim_map.path, true} : none);
   /* An axis material's sub-materials, resolved here with their textures (ADR 0018). One level: a sub-material that is
    * itself an axis material is used plainly; this material itself means its own maps. */
   for (int k = 0; k < 4; k++) {
@@ -304,6 +347,64 @@ MaterialPtr make_material_preset(const std::string &preset) {
     m->toon_rim_strength = 0.35f;
   }
   return m;
+}
+
+const std::vector<std::string> &toon_style_names() {
+  static const std::vector<std::string> names = {"Classic", "Guilty Gear", "Soft Anime", "Painterly", "Manga"};
+  return names;
+}
+
+int toon_style_index(const std::string &name) {
+  auto key = [](const std::string &v) {
+    std::string k;
+    for (char c : v)
+      if (std::isalnum((unsigned char)c)) k += (char)std::tolower((unsigned char)c);
+    return k;
+  };
+  const std::vector<std::string> &names = toon_style_names();
+  for (size_t i = 0; i < names.size(); i++)
+    if (key(names[i]) == key(name)) return (int)i;
+  return -1;
+}
+
+/* The styles (ADR 0048). Guilty Gear after Arc System Works' GDC 2015 talk: a hard two-tone, the key light alone,
+ * no rim, the highlight where it is painted; Soft Anime the softer TV look; Painterly a few soft tones with the
+ * sky's gradient; Manga a hard grey two-tone (its hatching comes with task 0149). */
+void apply_toon_style(Material &m, int style) {
+  if (style < 0 || style >= (int)toon_style_names().size()) return;
+  m.shading_model = 1;
+  m.toon_style = style;
+  m.toon_specular_color = Vec3(1.0f);
+  m.toon_hair_highlight = false;
+  m.toon_rim_side = 0;
+  switch (style) {
+    case 0:  // Classic: the preset of ADR 0020
+      m.toon_bands = 1, m.toon_softness = 0.02f, m.toon_threshold = 0.15f, m.toon_shadow = {0.55f, 0.5f, 0.68f};
+      m.toon_specular_size = 0.15f, m.toon_specular_smooth = 0.05f, m.toon_rim_width = 0.25f, m.toon_rim_strength = 0.35f;
+      m.toon_flat_ambient = true, m.toon_wrap = 0.0f, m.toon_key_light_only = false;
+      break;
+    case 1:  // Guilty Gear
+      m.toon_bands = 1, m.toon_softness = 0.0f, m.toon_threshold = 0.5f, m.toon_shadow = {0.62f, 0.55f, 0.7f};
+      m.toon_specular_size = 0.3f, m.toon_specular_smooth = 0.0f, m.toon_rim_width = 0.0f, m.toon_rim_strength = 0.0f;
+      m.toon_flat_ambient = true, m.toon_wrap = 0.0f, m.toon_key_light_only = true;
+      break;
+    case 2:  // Soft Anime
+      m.toon_bands = 3, m.toon_softness = 0.08f, m.toon_threshold = 0.3f, m.toon_shadow = {0.7f, 0.62f, 0.78f};
+      m.toon_specular_size = 0.1f, m.toon_specular_smooth = 0.1f, m.toon_rim_width = 0.2f, m.toon_rim_strength = 0.3f, m.toon_rim_side = 1;
+      m.toon_flat_ambient = true, m.toon_wrap = 0.3f, m.toon_key_light_only = true;
+      break;
+    case 3:  // Painterly
+      m.toon_bands = 4, m.toon_softness = 0.15f, m.toon_threshold = 0.2f, m.toon_shadow = {0.6f, 0.55f, 0.65f};
+      m.toon_specular_size = 0.0f, m.toon_specular_smooth = 0.2f, m.toon_rim_width = 0.0f, m.toon_rim_strength = 0.0f;
+      m.toon_flat_ambient = false, m.toon_wrap = 0.15f, m.toon_key_light_only = false;
+      break;
+    default:  // Manga
+      m.toon_bands = 1, m.toon_softness = 0.0f, m.toon_threshold = 0.45f, m.toon_shadow = {0.35f, 0.35f, 0.35f};
+      m.toon_specular_size = 0.0f, m.toon_specular_smooth = 0.0f, m.toon_rim_width = 0.0f, m.toon_rim_strength = 0.0f;
+      m.toon_flat_ambient = true, m.toon_wrap = 0.0f, m.toon_key_light_only = true;
+      break;
+  }
+  m.touch();
 }
 
 const MaterialPtr &default_material() {

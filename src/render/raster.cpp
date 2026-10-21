@@ -62,6 +62,7 @@ void Renderer3D::begin(RenderTarget *rt, const Mat4 &view, const Mat4 &proj, con
   vp_ = proj * view;
   inv_vp_ = vp_.inverse();
   env_ = env;
+  toon_key_ = toon_key_light(env_.lights, &toon_key_L_);
   opt_ = opt;
   opt_.tile_size = std::max(8, opt_.tile_size);
   stats_ = {};
@@ -1840,7 +1841,8 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
     if (s.toon) {
       /* Toon (ADR 0020): N.L x the shadow x the falloff (range, spot cone, an area's facing), in tones; the dark side
-       * takes the shadow colour. As the path tracers' light sampling. */
+       * takes the shadow colour. As the path tracers' light sampling. With Key Light Only (task 0148) the brightest
+       * sun alone bands; the others add smooth fill. */
       Vec3 L;
       float fall = 1.0f;
       if (l.type == RenderLight::Directional) L = -l.direction;
@@ -1851,11 +1853,13 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
         fall = light_falloff(l, sp.position, L);
       }
       if (!(fall > 0.0f) || !(l.intensity > 0.0f)) continue;
-      const float ndl = dot(n, L);
+      const float ndl = toon_wrap_ndl(*s.toon, dot(n, L));  // (the light wrap moves the terminator)
       float vis = 1.0f;
       if (ndl > 0 && (int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
         vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
-      lo += shade_toon(s, n, V, L, std::max(ndl, 0.0f) * vis * std::min(fall, 1.0f)) * l.color * l.intensity;
+      const float lit = std::max(ndl, 0.0f) * vis * std::min(fall, 1.0f);
+      const int key = s.toon->toon_key_light_only ? toon_key_ : -1;
+      lo += (key >= 0 && (int)li != key ? toon_fill(s, lit) : shade_toon(s, n, V, L, lit)) * l.color * l.intensity;
       continue;
     }
     Vec3 L;
@@ -1933,7 +1937,7 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
     }
     else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
     else amb = env.irradiance(n);
-    return lo + amb * s.albedo + toon_rim(*s.toon, n, V) + s.emission;
+    return lo + amb * s.albedo + toon_rim(s, n, V, toon_key_L_) + s.emission;
   }
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;

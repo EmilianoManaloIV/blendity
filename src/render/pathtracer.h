@@ -325,6 +325,8 @@ class PathTracer {
   bool see_through_ = false;  // any Cutout / Transparent / Glass material (shadow rays must look closer)
   std::vector<Mat4> normal_mats_;
   std::vector<RenderLight> lights_;
+  int toon_key_ = -1;         // task 0148: the key light among lights_ (the brightest sun), found at build
+  Vec3 toon_key_L_{0, 1, 0};  // the direction toward it (up without one)
   Environment env_;
   std::unordered_map<const RenderMesh *, std::unique_ptr<Blas>> blas_cache_;
   std::vector<Instance> instances_;  // top-level BVH order

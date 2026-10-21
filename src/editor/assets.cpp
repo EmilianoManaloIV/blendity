@@ -97,7 +97,8 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   };
   size_t missing = 0;
   for (auto &m : r.materials) {
-    for (TextureRef *ref : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map}) {
+    for (TextureRef *ref : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
+                            &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map}) {
       if (!ref->empty() && !fs::exists(resolve_asset_path(ref->path)) && !fs::exists(ref->path)) missing++;
       fix(*ref);
     }

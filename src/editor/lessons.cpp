@@ -737,6 +737,21 @@ lines and paper; Anime is one too: ink lines, a little saturation and a soft blo
 and the parts (Halftone, Line Art, Paper...) are still there as effects for stacks of your own. Line Art draws
 creases where the surface turns more than an angle, so a cube's edges get lines and a smooth sphere only its
 outline.
+# Toon styles
+Toon Style (the top of a material's Toon group) is a starting point: Classic is the two-tone with a soft rim; Guilty
+Gear is Arc System Works' look - a hard two-tone, the key light alone banding the tones, no rim, the highlight only
+where its map is painted; Soft Anime has three tones with Light Wrap (the light reaching round the form) and a rim on
+the lit side; Painterly four soft tones under the sky's gradient; Manga a hard grey two-tone. Every field stays yours
+afterwards. The painted controls come from the same studio practice: a Shadow Bias Map (white keeps a point lit,
+black in shadow, grey neutral - under the chin, inside the hair), a Toon Specular Map (where the spot may show), a
+Toon Rim Map, a Shade Map (the shadow side's own picture, as VRM's MToon paints it), and a Toon Ramp (the tones as an
+image, made by the Textures window's Toon Ramp generator; MMD's toon images land here). Toon Hair Highlight turns the
+spot into the band across the hair that anime draws. Toon Key Light Only keeps several lights from banding like a
+disco ball: the brightest sun bands, the others fill smoothly. The GPU viewport draws the plain settings; a material
+with painted maps or a hair highlight draws on the CPU.
+! cmd:select Sphere; material Toon; toonstyle Guilty Gear | Give the Sphere the Guilty Gear toon style
+! cmd:select Sphere; material Toon; toonstyle Soft Anime; matset ToonWrap 0.4 | The Soft Anime style with more light wrap
+? Several lights on a toon character band its tones into a mess. Which field fixes it? | Toon Key Light Only: the brightest sun bands the tones, the other lights add smooth fill.
 ! cmd:select Sphere; material Toon; component Outline | Make the Sphere toon-shaded with an outline
 ! cmd:select Sphere; material Toon; matset ToonThreshold 0.4 | Set the toon threshold on the Sphere's materials from the console
 # Baking textures for other programs

@@ -138,7 +138,9 @@ struct Inst {
   vec4 toon0;    // task 0102: bands, softness, threshold, specular smoothness
   vec4 toon1;    // shadow colour, specular size
   vec4 toon2;    // rim colour, rim width
-  vec4 toon3;    // rim strength, flat ambient
+  vec4 toon3;    // rim strength, flat ambient, light wrap, key light only (task 0148)
+  vec4 toon4;    // task 0148: specular colour, rim side
+  ivec4 toon5;   // task 0148: the Toon Ramp's texture (-1: the bands)
 };
 layout(std430, set = 0, binding = 1) readonly buffer Instances { Inst inst[]; };
 const uint F_UNLIT = 1u, F_RECEIVE = 2u, F_CAST = 4u, F_DOUBLE = 8u, F_TOON = 64u;
@@ -672,17 +674,29 @@ float toon_level(Inst I, float lit) {
   return q / float(bands);
 }
 vec3 shade_toon(Inst I, vec3 albedo, float metallic, float specular, vec3 n, vec3 V, vec3 L, float lit) {
-  float q = toon_level(I, lit);
-  vec3 c = albedo * mix(I.toon1.rgb, vec3(1.0), q);
+  float q;
+  vec3 c;
+  if (I.toon5.x >= 0) {  // task 0148: the ramp, read at (lit, lit) with v up (its nearest texel)
+    vec3 tone = tex_sample(I.toon5.x, vec2(lit, lit), 0.0, 1, 1).rgb;  // (Extend, Linear)
+    q = clamp(dot(tone, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    c = albedo * tone;
+  }
+  else {
+    q = toon_level(I, lit);
+    c = albedo * mix(I.toon1.rgb, vec3(1.0), q);
+  }
   if (I.toon1.w > 0.0 && q > 0.0) {
     float nh = dot(n, normalize(V + L)), e = 1.0 - 0.2 * clamp(I.toon1.w, 0.0, 1.0);
     float w = 0.1 * clamp(I.toon0.w, 0.0, 0.5);
-    c += mix(vec3(1.0), albedo, metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * specular);
+    c += mix(I.toon4.rgb, albedo, metallic) * (axis_step(e - w, e + w, nh) * q * 2.0 * specular);
   }
   return c;
 }
-vec3 toon_rim(Inst I, vec3 n, vec3 V) {
+vec3 toon_rim(Inst I, vec3 n, vec3 V, vec3 keyL) {
   if (!(I.toon2.w > 0.0) || !(I.toon3.x > 0.0)) return vec3(0.0);
+  float ndl = dot(n, keyL);
+  int side = int(I.toon4.w + 0.5);
+  if ((side == 1 && ndl <= 0.0) || (side == 2 && ndl > 0.0)) return vec3(0.0);
   float f = 1.0 - max(0.0, dot(n, V)), e = 1.0 - clamp(I.toon2.w, 0.0, 1.0);
   float w = clamp(I.toon0.y, 0.0, 0.5) + 0.02;
   return I.toon2.rgb * (axis_step(e - w, e + w, f) * I.toon3.x);
@@ -784,6 +798,16 @@ void main() {
   bool receive = (flags & F_RECEIVE) != 0u;
   if ((flags & F_TOON) != 0u) {  // (Renderer3D::light_surface's toon branch, then light_finish's)
     Inst I = inst[texelFetch(g_inst, px, 0).r];
+    /* The key light (task 0148): the brightest sun; with Key Light Only, the one that bands. */
+    int key = -1;
+    float key_power = -1.0;
+    vec3 keyL = vec3(0.0, 1.0, 0.0);
+    for (int li = 0; li < count; li++) {
+      Light l = lights[li];
+      if (int(l.pos_type.w) != 0) continue;
+      float p = l.color.w * dot(l.color.rgb, vec3(0.2126, 0.7152, 0.0722));
+      if (p > key_power && p > 0.0) { key_power = p; key = li; keyL = -l.dir_range.xyz; }
+    }
     for (int li = 0; li < count; li++) {
       Light l = lights[li];
       vec3 L;
@@ -797,11 +821,15 @@ void main() {
       }
       if (!(fall > 0.0) || !(l.color.w > 0.0)) continue;
       float ndl = dot(n, L), vis = 1.0;
+      float wrap = clamp(I.toon3.z, 0.0, 1.0);  // task 0148: light wrap on N.L, so the terminator moves
+      if (wrap > 0.0) ndl = (ndl + wrap) / (1.0 + wrap);
       if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
-      lo += shade_toon(I, albedo, metallic, specular, n, V, L, max(ndl, 0.0) * vis * min(fall, 1.0)) * l.color.rgb * l.color.w;
+      float lit = max(ndl, 0.0) * vis * min(fall, 1.0);
+      bool fill = I.toon3.w > 0.5 && key >= 0 && li != key;
+      lo += (fill ? albedo * lit : shade_toon(I, albedo, metallic, specular, n, V, L, lit)) * l.color.rgb * l.color.w;
     }
     vec3 amb = I.toon3.y > 0.5 ? (irradiance(vec3(0.0, 1.0, 0.0)) + irradiance(vec3(0.0, -1.0, 0.0))) * 0.5 : irradiance(n);
-    o_color = display(lo + amb * albedo + toon_rim(I, n, V) + emission);
+    o_color = display(lo + amb * albedo + toon_rim(I, n, V, keyL) + emission);
     return;
   }
   for (int li = 0; li < count; li++) {
@@ -869,7 +897,8 @@ struct InstGpu {
   float tiling[4], offset[4], color2[4];
   int32_t tex0[4], tex1[4], tex2[4];
   float bmin[4], bmax[4];
-  float toon0[4], toon1[4], toon2[4], toon3[4];
+  float toon0[4], toon1[4], toon2[4], toon3[4], toon4[4];
+  int32_t toon5[4];
 };
 
 /* The CPU's matrices are left-handed with y up and depth 0..1; Vulkan's clip space has y down. */
@@ -1766,8 +1795,10 @@ class VulkanRaster final : public Raster {
     const float t0[4] = {(float)s.toon_bands, s.toon_softness, s.toon_threshold, s.toon_specular_smooth};
     const float t1[4] = {s.toon_shadow[0], s.toon_shadow[1], s.toon_shadow[2], s.toon_specular_size};
     const float t2[4] = {s.toon_rim[0], s.toon_rim[1], s.toon_rim[2], s.toon_rim_width};
-    const float t3[4] = {s.toon_rim_strength, s.toon_flat_ambient ? 1.0f : 0.0f, 0.0f, 0.0f};
-    std::memcpy(d.toon0, t0, 16), std::memcpy(d.toon1, t1, 16), std::memcpy(d.toon2, t2, 16), std::memcpy(d.toon3, t3, 16);
+    const float t3[4] = {s.toon_rim_strength, s.toon_flat_ambient ? 1.0f : 0.0f, s.toon_wrap, s.toon_key_light_only ? 1.0f : 0.0f};
+    const float t4[4] = {s.toon_specular_color[0], s.toon_specular_color[1], s.toon_specular_color[2], (float)s.toon_rim_side};
+    std::memcpy(d.toon0, t0, 16), std::memcpy(d.toon1, t1, 16), std::memcpy(d.toon2, t2, 16), std::memcpy(d.toon3, t3, 16), std::memcpy(d.toon4, t4, 16);
+    d.toon5[0] = s.toon_ramp, d.toon5[1] = d.toon5[2] = d.toon5[3] = 0;
   }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {

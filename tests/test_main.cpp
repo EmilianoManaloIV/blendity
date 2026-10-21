@@ -21392,12 +21392,14 @@ static void round60_tests() {
     m.toon_rim_width = 0.3f;
     m.toon_rim_strength = 1.0f;
     m.toon_rim = Vec3(1.0f, 0.5f, 0.25f);
-    const Vec3 V(0, 0, 1);
-    CHECK(length(toon_rim(m, V, V)) == 0.0f);
-    const Vec3 edge = toon_rim(m, normalize(Vec3(1, 0, 0.05f)), V);
+    SurfaceSample s;  // (task 0148: the rim reads the material through the sample, with its mask and the key light's side)
+    s.toon = &m;
+    const Vec3 V(0, 0, 1), key(0, 1, 0);
+    CHECK(length(toon_rim(s, V, V, key)) == 0.0f);
+    const Vec3 edge = toon_rim(s, normalize(Vec3(1, 0, 0.05f)), V, key);
     CHECK(edge.x > 0.9f && std::fabs(edge.y - 0.5f * edge.x) < 1e-4f);
     m.toon_rim_width = 0.0f;
-    CHECK(length(toon_rim(m, normalize(Vec3(1, 0, 0.05f)), V)) == 0.0f);
+    CHECK(length(toon_rim(s, normalize(Vec3(1, 0, 0.05f)), V, key)) == 0.0f);
   });
 
   test("toon: a rasterized toon sphere takes exactly its Toon Bands tones (plus the shadow); PBR shades smoothly", [] {
@@ -35973,6 +35975,7 @@ static void round81_tests() {
       CHECK(std::fabs(lift - 0.08f) < 1e-5f && std::fabs(half - 0.04f) < 1e-5f && mt.name == "肌" && mt.shading_model == 1 &&
             std::fabs(mt.base_color.x - 1.0f) < 1e-5f && std::fabs(mt.base_color.z - 0.7f) < 1e-5f && fs::filename(mt.base_map.path) == "skin.png" &&
             fs::exists(mt.base_map.path) && std::fabs(mt.toon_shadow.x - 0x66 / 255.0f) < 0.01f && o && std::fabs(o->thickness - 0.006f) < 1e-5f);
+      CHECK(fs::filename(mt.toon_ramp_map.path) == "toon.png" && mt.toon_wrap == 1.0f);  // (task 0148: the ramp itself as the Toon Ramp, read at MMD's half N.L + half)
     }
   });
   test("mmd: a PMD character (Shift-JIS names, morphs by the base's list) comes in as its PMX twin", [&] {
@@ -36338,10 +36341,11 @@ static void round81_tests() {
 {"buffer":0,"byteOffset":80,"byteLength":64},{"buffer":0,"byteOffset":144,"byteLength":48},{"buffer":0,"byteOffset":192,"byteLength":48},
 {"buffer":0,"byteOffset":240,"byteLength":384}],
 "buffers":[{"byteLength":624}],
+"images":[{"uri":"shade.png"}],"textures":[{"source":0}],
 "materials":[{"name":"Skin","pbrMetallicRoughness":{"baseColorFactor":[1,0.9,0.8,1]}%s}],
 "extensionsUsed":[%s],"extensions":{%s}})",
         lx, hz,
-        v1 ? R"(,"extensions":{"VRMC_materials_mtoon":{"shadeColorFactor":[0.5,0.45,0.4],"shadingToonyFactor":0.9,"outlineWidthMode":"worldCoordinates",
+        v1 ? R"(,"extensions":{"VRMC_materials_mtoon":{"shadeColorFactor":[0.5,0.45,0.4],"shadingToonyFactor":0.9,"shadeMultiplyTexture":{"index":0},"outlineWidthMode":"worldCoordinates",
 "outlineWidthFactor":0.005,"outlineColorFactor":[0.1,0,0]}})" : "",
         v1 ? R"("VRMC_vrm","VRMC_springBone","VRMC_materials_mtoon")" : R"("VRM")",
         v1 ? R"("VRMC_vrm":{"specVersion":"1.0","meta":{"name":"Test VRM","authors":["Tests"],"licenseUrl":"https://vrm.dev/licenses/1.0/"},
@@ -36354,7 +36358,7 @@ static void round81_tests() {
 "blendShapeMaster":{"blendShapeGroups":[{"name":"A","presetName":"a","binds":[{"mesh":0,"index":0,"weight":100}]},
 {"name":"Blink","presetName":"blink","binds":[{"mesh":0,"index":1,"weight":50}]}]},
 "secondaryAnimation":{"boneGroups":[{"comment":"hair","stiffiness":2,"gravityPower":0.5,"dragForce":0.4,"hitRadius":0.03,"bones":[6]}]},
-"materialProperties":[{"name":"Skin","shader":"VRM/MToon","floatProperties":{"_ShadeToony":0.9,"_OutlineWidthMode":1,"_OutlineWidth":0.5},
+"materialProperties":[{"name":"Skin","shader":"VRM/MToon","floatProperties":{"_ShadeToony":0.9,"_OutlineWidthMode":1,"_OutlineWidth":0.5},"textureProperties":{"_ShadeTexture":0},
 "vectorProperties":{"_ShadeColor":[0.5,0.45,0.4,1],"_OutlineColor":[0.1,0,0,1]}}]})");
     while (json.size() % 4) json += ' ';
     R156Bin glb;
@@ -36394,10 +36398,11 @@ static void round81_tests() {
       GameObject *head = s.find_by_name("Head");
       if (head) head->set_local_position(head->local().position + Vec3(0.0f, 0.3f, 0.0f));
       const float followed = m && face && head ? face->evaluated_mesh()->positions[0].y - m->positions[0].y : 0.0f;
-      /* 0.x colours are sRGB (Unity's), 1.0's linear: the shade ratio differs. */
-      const Vec3 shade(0.5f, 0.45f, 0.4f), base(1.0f, 0.9f, 0.8f);
+      /* 0.x colours are sRGB (Unity's), 1.0's linear. With a shade texture the shade colour is its tint, held as it is
+       * (task 0148), not as a ratio to the base colour. */
+      const Vec3 shade(0.5f, 0.45f, 0.4f);
       Vec3 want_shadow;
-      for (int k = 0; k < 3; k++) want_shadow[k] = (v1 ? shade[k] : srgb_to_linear(shade[k])) / base[k];
+      for (int k = 0; k < 3; k++) want_shadow[k] = v1 ? shade[k] : srgb_to_linear(shade[k]);
       const float want_outline_r = v1 ? 0.1f : srgb_to_linear(0.1f);
       std::printf("    %s: bones named %s; the left leg at x %.2f, the hair at z %.2f; %s lifts %.3f, blink drops %.3f; the face's normal z %.2f; spring %s (stiffness %.2f, damping %.2f, gravity %.2f, radius %.3f); material toon %d shadow %.2f %.2f %.2f; outline %.4f (%.2f %.0f %.0f); meta %s; at rest off by %g, the head lifted 0.3: the face by %.3f\n",
                   v1 ? "1.0" : "0.x", named ? "yes" : "no", upleg ? upleg->world_position().x : 0.0f, hair ? hair->world_position().z : 0.0f, v1 ? "aa" : "a", lift, drop, fn.z,
@@ -36410,6 +36415,9 @@ static void round81_tests() {
       CHECK(sb && std::fabs(sb->stiffness - 0.5f) < 1e-6f && std::fabs(sb->damping - 0.4f) < 1e-6f && std::fabs(sb->gravity - 0.5f) < 1e-6f && std::fabs(sb->radius - 0.03f) < 1e-6f);
       CHECK(mt && mt->shading_model == 1 && length(mt->toon_shadow - want_shadow) < 2e-3f && o && std::fabs(o->thickness - 0.005f) < 1e-6f &&
             std::fabs(o->color.x - want_outline_r) < 1e-4f && meta);
+      /* MToon's shade texture is the Shade Map (task 0148): the image file beside the model. */
+      std::printf("    shade map: %s\n", mt ? mt->shade_map.path.c_str() : "-");
+      CHECK(mt && fs::filename(mt->shade_map.path) == "shade.png" && !mt->shade_map.non_color);
     }
   });
   test("vrm: dropped into the editor, an avatar gets its .mat (Toon) and its outline; the lesson's Try-it opens the Project window", [&] {
@@ -37668,5 +37676,376 @@ static void round81_tests() {
     r166_type(ed, f, "2");
     std::printf("    Project window, three .mat files: A %d, B %d, C %d, D (not selected) %d\n", ma->toon_bands, mb->toon_bands, mc->toon_bands, md->toon_bands);
     CHECK(ma->toon_bands == 2 && mb->toon_bands == 2 && mc->toon_bands == 2 && md->toon_bands == 1);
+  });
+  /* ---------------------------------------------------------------- round 167: toon styles (task 0148, ADR 0048) */
+  /* A small texture from colours (linear, so the samples come back as given): w x h, row by row from the top. */
+  auto r167_tex = [](int w, int h, const std::vector<Vec3> &px) {
+    Bitmap bm;
+    bm.width = w, bm.height = h;
+    for (const Vec3 &c : px)
+      for (int k = 0; k < 4; k++) bm.rgba8.push_back((uint8_t)std::lround(clampf(k == 3 ? 1.0f : c[k], 0.0f, 1.0f) * 255.0f));
+    auto t = std::make_shared<Texture>();
+    t->build(bm, false);
+    return TexturePtr(t);
+  };
+  test("toon styles: each style sets its fields (the maps kept), by name in any spelling; toonstyle on the selected objects' materials undoes as one step; a .mat keeps the new fields", [] {
+    Material m;
+    m.shade_map.path = "Assets/Textures/face_shade.png";
+    apply_toon_style(m, 1);
+    CHECK(m.shading_model == 1 && m.toon_style == 1 && m.toon_bands == 1 && m.toon_softness == 0.0f && m.toon_key_light_only && m.toon_rim_width == 0.0f &&
+          m.toon_specular_size > 0.0f && m.shade_map.path == "Assets/Textures/face_shade.png");
+    apply_toon_style(m, 2);
+    CHECK(m.toon_style == 2 && m.toon_bands == 3 && std::fabs(m.toon_wrap - 0.3f) < 1e-6f && m.toon_rim_side == 1 && m.toon_rim_width > 0.0f);
+    apply_toon_style(m, 3);
+    CHECK(m.toon_style == 3 && m.toon_bands == 4 && !m.toon_flat_ambient && !m.toon_key_light_only);
+    apply_toon_style(m, 4);
+    CHECK(m.toon_style == 4 && m.toon_bands == 1 && std::fabs(m.toon_shadow.x - m.toon_shadow.z) < 1e-6f && m.toon_specular_size == 0.0f);
+    apply_toon_style(m, 0);
+    CHECK(m.toon_style == 0 && m.toon_bands == 1 && std::fabs(m.toon_threshold - 0.15f) < 1e-6f && std::fabs(m.toon_rim_width - 0.25f) < 1e-6f);
+    CHECK(toon_style_index("guiltygear") == 1 && toon_style_index("Soft anime") == 2 && toon_style_index("PAINTERLY") == 3 && toon_style_index("nope") == -1);
+    /* The console on the selected objects' materials, one undo step (a frame between the commands: a frame's changes
+     * are one step). */
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");
+    ed.command("select Cube");
+    ed.command("material Toon");
+    ed.step_frame_headless();
+    MaterialPtr cm = ed.scene().find_by_name("Cube")->get<MeshRenderer>()->materials[0];
+    ed.command("toonstyle Painterly");
+    CHECK(cm->toon_style == 3 && cm->toon_bands == 4);
+    ed.command("toonstyle Nope");  // a warning, no change
+    CHECK(cm->toon_style == 3);
+    ed.step_frame_headless();
+    ed.command("undo");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    MeshRenderer *cmr = cube ? cube->get<MeshRenderer>() : nullptr;
+    CHECK(cmr && !cmr->materials.empty());
+    if (!cmr || cmr->materials.empty()) return;
+    cm = cmr->materials[0];
+    std::printf("    after undo: style %d, bands %d\n", cm->toon_style, cm->toon_bands);
+    CHECK(cm->shading_model == 1 && cm->toon_style == 0 && cm->toon_bands == 1);  // (the Toon preset stays: only the style's step went)
+    /* The .mat round trip. */
+    Material w;
+    w.shading_model = 1, w.toon_style = 2, w.toon_wrap = 0.3f, w.toon_rim_side = 2, w.toon_hair_highlight = true, w.toon_key_light_only = true;
+    w.toon_specular_color = Vec3(1.0f, 0.2f, 0.1f);
+    w.shade_map.path = "Assets/Textures/shade.png", w.toon_ramp_map.path = "Assets/Textures/Ramp.ptex#albedo", w.toon_shadow_bias_map.path = "Assets/Textures/bias.png";
+    w.toon_specular_map.path = "Assets/Textures/spec.png", w.toon_rim_map.path = "Assets/Textures/rim.png";
+    Material back;
+    CHECK(load_material_text(save_material_text(w), back));
+    CHECK(back.toon_style == 2 && std::fabs(back.toon_wrap - 0.3f) < 1e-6f && back.toon_rim_side == 2 && back.toon_hair_highlight && back.toon_key_light_only &&
+          std::fabs(back.toon_specular_color.y - 0.2f) < 1e-6f && back.shade_map.path == "Assets/Textures/shade.png" &&
+          back.toon_ramp_map.path == "Assets/Textures/Ramp.ptex#albedo" && back.toon_shadow_bias_map.path == "Assets/Textures/bias.png" &&
+          back.toon_specular_map.path == "Assets/Textures/spec.png" && back.toon_rim_map.path == "Assets/Textures/rim.png");
+  });
+
+  test("toon styles: the shared shading - the shade map, the painted bias, light wrap, the ramp (horizontal or vertical), the specular's colour, map and hair band, the rim's side and mask, the key light", [&] {
+    Material m;
+    m.shading_model = 1, m.toon_bands = 1, m.toon_softness = 0.0f, m.toon_threshold = 0.5f, m.toon_shadow = Vec3(0.5f);
+    m.toon_specular_size = 0.3f, m.toon_specular_smooth = 0.0f, m.toon_specular_color = Vec3(1.0f, 0.0f, 0.0f);
+    m.toon_rim_width = 0.3f, m.toon_rim_strength = 1.0f, m.toon_rim = Vec3(1.0f);
+    SurfaceSample s;
+    s.albedo = Vec3(0.8f), s.specular = 0.5f, s.metallic = 0.0f, s.toon = &m;
+    const Vec3 n(0, 0, 1), V(0, 0, 1), L(0, 0, 1);
+    /* The tones and the spot's colour. */
+    Vec3 lit = shade_toon(s, n, V, L, 1.0f), shadow = shade_toon(s, n, V, L, 0.2f);
+    std::printf("    lit %.2f %.2f %.2f (a red spot on grey), shadow %.2f %.2f %.2f\n", lit.x, lit.y, lit.z, shadow.x, shadow.y, shadow.z);
+    CHECK(lit.x > lit.y + 0.5f && std::fabs(lit.y - 0.8f) < 1e-4f && std::fabs(shadow.x - 0.4f) < 1e-4f);
+    s.toon_spec_mask = 0.0f;
+    CHECK(length(shade_toon(s, n, V, L, 1.0f) - Vec3(0.8f)) < 1e-4f);  // no spot where the map says none
+    s.toon_spec_mask = 1.0f;
+    /* The painted bias: white keeps a shadowed point lit, black puts a lit one in shadow. */
+    s.toon_bias = 1.0f;
+    CHECK(std::fabs(shade_toon(s, n, V, L, 0.2f).y - 0.8f) < 1e-4f);
+    s.toon_bias = 0.0f;
+    CHECK(std::fabs(shade_toon(s, n, V, L, 1.0f).y - 0.4f) < 1e-4f);
+    s.toon_bias = 0.5f;
+    /* The shade map is the shadow side itself, tinted by the shadow colour (0.5 here). */
+    s.has_shade = true, s.toon_shade = Vec3(0.1f, 0.2f, 0.3f);
+    CHECK(length(shade_toon(s, n, V, L, 0.2f) - Vec3(0.05f, 0.1f, 0.15f)) < 1e-4f && std::fabs(shade_toon(s, n, V, L, 1.0f).y - 0.8f) < 1e-4f);
+    s.has_shade = false;
+    /* Light wrap remaps the signed N.L before the clamp (the callers' step): 0.3 reaches 0.53 (lit at threshold 0.5),
+     * -1 (the back) stays in shadow, so a cast shadow and the far side keep the shadow tone. */
+    m.toon_wrap = 0.5f;
+    CHECK(std::fabs(toon_wrap_ndl(m, 0.3f) - 0.8f / 1.5f) < 1e-4f && toon_wrap_ndl(m, -1.0f) < 0.0f);
+    CHECK(std::fabs(shade_toon(s, n, V, L, std::max(0.0f, toon_wrap_ndl(m, -1.0f))).y - 0.4f) < 1e-4f);
+    m.toon_wrap = 0.0f;
+    CHECK(std::fabs(toon_wrap_ndl(m, 0.3f) - 0.3f) < 1e-6f);
+    /* A ramp: horizontal (left dark, right lit) and vertical (bottom dark, top lit) read the same. */
+    const TexturePtr horizontal = r167_tex(4, 1, {Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)});
+    const TexturePtr vertical = r167_tex(1, 4, {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(1, 0, 0), Vec3(1, 0, 0)});
+    m.toon_specular_size = 0.0f;
+    for (const TexturePtr &ramp : {horizontal, vertical}) {
+      s.toon_ramp = ramp.get();
+      const Vec3 dark = shade_toon(s, n, V, L, 0.1f), bright = shade_toon(s, n, V, L, 0.9f);
+      std::printf("    %s ramp: dark %.2f %.2f %.2f, bright %.2f %.2f %.2f\n", ramp == horizontal ? "horizontal" : "vertical", dark.x, dark.y, dark.z, bright.x, bright.y, bright.z);
+      CHECK(dark.x > 0.7f && dark.y < 0.1f && bright.y > 0.7f && bright.x < 0.1f);
+    }
+    s.toon_ramp = nullptr;
+    /* The hair highlight: a band where the half vector is square to the strands (V of the UVs). */
+    m.toon_specular_size = 0.3f, m.toon_hair_highlight = true;
+    s.toon_has_tangent = true;
+    s.toon_strand = Vec3(1, 0, 0);
+    CHECK(shade_toon(s, n, V, L, 1.0f).x > 1.2f);  // square to the half vector: the sheen
+    s.toon_strand = Vec3(0, 0, 1);
+    CHECK(std::fabs(shade_toon(s, n, V, L, 1.0f).x - 0.8f) < 1e-4f);  // along it: none
+    m.toon_hair_highlight = false;
+    /* The rim: its side against the key light, its mask. */
+    const Vec3 edge(1, 0, 0);  // the silhouette: square to the eye
+    for (int side = 0; side < 3; side++) {
+      m.toon_rim_side = side;
+      const bool lit_side = toon_rim(s, edge, V, Vec3(1, 0, 0)).x > 0.5f, shadow_side = toon_rim(s, edge, V, Vec3(-1, 0, 0)).x > 0.5f;
+      std::printf("    rim side %d: on the lit side %d, on the shadow side %d\n", side, (int)lit_side, (int)shadow_side);
+      CHECK(lit_side == (side != 2) && shadow_side == (side != 1));
+    }
+    m.toon_rim_side = 0;
+    s.toon_rim_mask = 0.0f;
+    CHECK(toon_rim(s, edge, V, Vec3(1, 0, 0)).x == 0.0f);
+    /* The key light: the brightest sun. */
+    RenderLight point, weak, strong;
+    point.type = RenderLight::Point, point.intensity = 10.0f;
+    weak.type = RenderLight::Directional, weak.intensity = 0.5f, weak.direction = normalize(Vec3(1, -1, 0));
+    strong.type = RenderLight::Directional, strong.intensity = 2.0f, strong.direction = normalize(Vec3(0, -1, 1));
+    Vec3 key_L;
+    CHECK(toon_key_light({point, weak, strong}, &key_L) == 2 && length(key_L - normalize(Vec3(0, 1, -1))) < 1e-5f);
+    CHECK(toon_key_light({point}, &key_L) == -1 && key_L.y > 0.99f);
+    RenderLight dark = weak;
+    dark.intensity = 0.0f;
+    CHECK(toon_key_light({point, dark}, &key_L) == -1);  // (a sun that gives no light isn't the key)
+  });
+
+  test("toon styles: light wrap lights more of a sphere and the rasterizer, the CPU path tracer (and the GPU's) agree on the tones; Key Light Only keeps a second light from banding", [] {
+    Editor ed;
+    GameObject *g = r60_open(ed, 1);
+    if (!g) return;
+    MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+    auto lit_share = [&](const Image &img) {
+      int solid = 0;
+      const auto tones = r60_colours(img, &solid);
+      float best = 0.0f;
+      int lit_px = 0;
+      for (const auto &c : tones) best = std::max(best, r60_lum(c.first));
+      for (const auto &c : tones)
+        if (r60_lum(c.first) > best - 0.05f) lit_px += c.second;
+      return solid ? (double)lit_px / solid : 0.0;
+    };
+    m->toon_threshold = 0.5f, m->touch();  // (the shadow a wide band, so the wrap has room to move its edge)
+    ed.mark_changed_for_test("R167 threshold");
+    ed.step_frame_headless();
+    const double plain = lit_share(r57_render(ed, "Rasterized", true));
+    m->toon_wrap = 0.5f, m->touch();
+    ed.mark_changed_for_test("R167 wrap");
+    ed.step_frame_headless();
+    const Image raster = r57_render(ed, "Rasterized", true);
+    const double wrapped = lit_share(raster);
+    std::printf("    the lit tone's share of the sphere: %.1f %% plain, %.1f %% with wrap 0.5\n", plain * 100.0, wrapped * 100.0);
+    CHECK(wrapped > plain + 0.1 && wrapped < 0.85);  // (more lit, but the far side keeps its shadow)
+    /* The path tracer bands the same (each tone's share within 4 %), the GPU's the CPU's. */
+    int solid = 0;
+    const auto tones = r60_colours(raster, &solid);
+    std::vector<float> lum;
+    for (const auto &c : tones)
+      if (c.second * 50 >= solid) lum.push_back(r60_lum(c.first));
+    auto shares = [&](const Image &img) {
+      std::vector<double> sh(lum.size(), 0.0);
+      int n = 0;
+      for (uint32_t c : img.pixels) {
+        if ((c >> 24) != 255 || lum.empty()) continue;
+        const float l = r60_lum(c);
+        size_t best = 0;
+        for (size_t k = 1; k < lum.size(); k++)
+          if (std::fabs(lum[k] - l) < std::fabs(lum[best] - l)) best = k;
+        sh[best] += 1.0, n++;
+      }
+      for (double &x : sh) x /= std::max(1, n);
+      return sh;
+    };
+    ed.command("set Render.Samples 64");
+    const Image cpu = r57_render(ed, "Path", true);
+    const auto a = shares(raster), b = shares(cpu);
+    double worst = 0.0;
+    for (size_t k = 0; k < a.size(); k++) worst = std::max(worst, std::fabs(a[k] - b[k]));
+    std::printf("    with wrap: %zu tones, the largest share difference raster / CPU trace %.1f %%\n", lum.size(), worst * 100.0);
+    CHECK(lum.size() >= 2 && worst < 0.04);
+    auto mean_diff = [](const Image &x, const Image &y) {
+      double diff = 0.0;
+      int n = 0;
+      for (size_t i = 0; i < x.pixels.size() && i < y.pixels.size(); i++) {
+        if ((x.pixels[i] >> 24) != 255) continue;
+        for (int ch = 0; ch < 3; ch++) diff += std::abs((int)(x.pixels[i] >> (ch * 8) & 255) - (int)(y.pixels[i] >> (ch * 8) & 255));
+        n++;
+      }
+      return diff / (std::max(1, n) * 3.0 * 255.0);
+    };
+    if (gpu::available()) {
+      ed.command("device gpu");
+      const double d = mean_diff(cpu, r57_render(ed, "Path", true));
+      std::printf("    GPU vs CPU with wrap: mean difference %.2f %% (device %s; error '%s')\n", d * 100.0, ed.render_device_for_test().c_str(), ed.render_gpu_error_for_test().c_str());
+      CHECK(d < 0.03 && ed.render_gpu_error_for_test().empty());
+      ed.command("device cpu");
+    }
+    /* A second light, strong and from the side: it bands too, unless Key Light Only, when it fills smoothly - the same
+     * in the rasterizer and the path tracer. */
+    ed.command("create Point Light");
+    GameObject *pl = ed.scene().find_by_name("Point Light");
+    CHECK(pl != nullptr);
+    if (!pl) return;
+    pl->set_world_position({4.0f, 1.0f, 0.0f});
+    pl->get<Light>()->intensity = 3.0f;
+    pl->get<Light>()->range = 20.0f;
+    ed.mark_changed_for_test("R167 fill");
+    ed.step_frame_headless();
+    const Image banded = r57_render(ed, "Rasterized", true);
+    m->toon_key_light_only = true, m->touch();
+    ed.mark_changed_for_test("R167 key only");
+    ed.step_frame_headless();
+    const Image keyed = r57_render(ed, "Rasterized", true);
+    const double changed = mean_diff(banded, keyed), agree = mean_diff(keyed, r57_render(ed, "Path", true));
+    std::printf("    key light only: the picture changes by %.1f %%; rasterizer vs path tracer %.1f %%\n", changed * 100.0, agree * 100.0);
+    CHECK(changed > 0.01 && agree < 0.04);
+  });
+
+  test("toon styles: the Toon Ramp generator steps at its threshold, and a material reading its output gets exactly those tones; MMD's toon image reads lit at the top", [&] {
+    std::unique_ptr<TextureLayer> ramp = create_texture_layer("Toon Ramp");
+    CHECK(ramp != nullptr);
+    if (!ramp) return;
+    LayerContext ctx;
+    const LayerSample dark = ramp->sample(0.2f, 0.5f, ctx), bright = ramp->sample(0.8f, 0.5f, ctx), top = ramp->sample(0.8f, 0.05f, ctx), bottom = ramp->sample(0.8f, 0.95f, ctx);
+    std::printf("    the generator: left %.2f, right %.2f, top %.2f, bottom %.2f (height = how lit)\n", dark.height, bright.height, top.height, bottom.height);
+    CHECK(dark.height < 0.01f && bright.height > 0.99f && std::fabs(top.height - bottom.height) < 1e-6f);  // (a horizontal ramp: the same in every row)
+    /* A texture asset of one Toon Ramp layer as a sphere's ramp: two tones, nothing else. */
+    Editor ed;
+    GameObject *g = r60_open(ed, 3);  // (three bands without the ramp: with it, the ramp's two)
+    if (!g) return;
+    ProceduralTexturePtr pt = ed.new_texture_asset_for_test("Bricks");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    pt->layers.clear();
+    pt->layers.push_back(create_texture_layer("Toon Ramp"));
+    pt->live_shading = false;  // (a live-shaded texture's output is read per pixel by the base slot only)
+    pt->touch();
+    MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+    m->toon_ramp_map.path = pt->asset_path + "#albedo";
+    m->touch();
+    ed.mark_changed_for_test("R167 ramp");
+    ed.step_frame_headless();
+    {
+      const Material::Resolved &tx = m->textures();
+      std::printf("    the ramp resolved: %s", tx.toon_ramp ? strprintf("%d x %d;", tx.toon_ramp->width, tx.toon_ramp->height).c_str() : "none");
+      for (float l : {0.1f, 0.9f})
+        if (tx.toon_ramp) {
+          const Vec4 c = tx.toon_ramp->sample({l, l}, 0.0f, TexWrap::Extend, TexFilter::Linear);
+          std::printf(" lit %.1f -> %.2f %.2f %.2f;", l, c.x, c.y, c.z);
+        }
+      std::printf("\n");
+      CHECK(tx.toon_ramp && tx.toon_ramp->sample({0.1f, 0.1f}, 0.0f, TexWrap::Extend, TexFilter::Linear).x < 0.6f &&
+            tx.toon_ramp->sample({0.9f, 0.9f}, 0.0f, TexWrap::Extend, TexFilter::Linear).x > 0.95f);
+    }
+    int solid = 0;
+    const auto tones = r60_colours(r57_render(ed, "Rasterized", true), &solid);
+    int main_tones = 0, covered = 0;
+    for (const auto &c : tones)
+      if (c.second * 50 >= solid) main_tones++, covered += c.second;
+    std::printf("    with the ramp: %d tones cover %.1f %% of the sphere\n", main_tones, solid ? 100.0 * covered / solid : 0.0);
+    CHECK(main_tones == 2 && covered > solid * 0.95);
+    /* MMD's toon image (white above a violet bottom row) as a vertical ramp: lit is white, shadow the violet. */
+    const std::string dir = fs::join(test_dir(), "r167_mmd");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> toon(16, 0xFFFFFFFFu);
+    for (int x = 0; x < 4; x++) toon[12 + x] = 0xFF664D80u;  // (the bottom row)
+    CHECK(write_png(fs::join(dir, "toon.png"), toon.data(), 4, 4, 4, false));
+    Material mm;
+    mm.shading_model = 1;
+    mm.toon_ramp_map = TextureRef{fs::join(dir, "toon.png"), false};
+    const Material::Resolved &tx = mm.textures();
+    CHECK(tx.toon_ramp != nullptr);
+    if (!tx.toon_ramp) return;
+    SurfaceSample s;
+    s.albedo = Vec3(1.0f), s.toon = &mm, s.toon_ramp = tx.toon_ramp.get();
+    const Vec3 n(0, 0, 1);
+    const Vec3 lit = shade_toon(s, n, n, n, 1.0f), shadow = shade_toon(s, n, n, n, 0.0f);
+    std::printf("    MMD ramp: lit %.2f %.2f %.2f, shadow %.2f %.2f %.2f\n", lit.x, lit.y, lit.z, shadow.x, shadow.y, shadow.z);
+    CHECK(lit.y > 0.95f && shadow.y < 0.5f && shadow.z > shadow.y);
+  });
+  test("toon styles: the GPU viewport draws the plain settings (wrap, a lit-side rim, the spot's colour, Key Light Only, a Toon Ramp) as the CPU does; toonstyle lands on every material selected in the Materials window", [] {
+    {
+      Editor ed;
+      r50_open(ed);
+      ed.record_buttons_for_test(true);
+      for (const char *n : {"R167A", "R167B"}) ed.command(std::string("newmat ") + n);
+      MaterialPtr a = material_asset("Assets/Materials/R167A.mat"), b = material_asset("Assets/Materials/R167B.mat");
+      CHECK(a && b);
+      if (a && b) {
+        ed.command("window Materials");
+        ed.set_material_search_for_test("R167");
+        r34_steps(ed, 3);
+        auto click = [&](const std::string &key, int mods) {
+          Recti r;
+          if (!ed.button_rect_for_test(key, r)) return false;
+          platform::Event m, d, u;
+          m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+          m.x = d.x = u.x = r.x + r.w / 2, m.y = d.y = u.y = r.y + r.h / 2;
+          m.mods = d.mods = u.mods = mods;
+          ed.step_frame_headless({m}), ed.step_frame_headless({d}), ed.step_frame_headless({u}), ed.step_frame_headless();
+          return true;
+        };
+        CHECK(click("mat:R167A", 0) && click("mat:R167B", platform::MOD_CTRL));
+        ed.command("toonstyle Guilty Gear");
+        std::printf("    toonstyle on two selected materials: A style %d bands %d key-only %d, B style %d bands %d key-only %d\n", a->toon_style, a->toon_bands,
+                    (int)a->toon_key_light_only, b->toon_style, b->toon_bands, (int)b->toon_key_light_only);
+        CHECK(a->toon_style == 1 && b->toon_style == 1 && a->toon_bands == 1 && b->toon_bands == 1 && a->toon_key_light_only && b->toon_key_light_only);
+      }
+    }
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: the viewport comparison skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Sphere");
+    ed.command("select Sphere");
+    ed.command("material Toon");
+    ed.command("create Point Light");
+    GameObject *sphere = ed.scene().find_by_name("Sphere"), *pl = ed.scene().find_by_name("Point Light");
+    CHECK(sphere && pl);
+    if (!sphere || !pl) return;
+    sphere->set_world_position({0.0f, 1.0f, 0.0f});
+    pl->set_world_position({3.0f, 1.5f, 0.0f});
+    pl->get<Light>()->intensity = 3.0f;
+    MaterialPtr m = sphere->get<MeshRenderer>()->materials[0];
+    ProceduralTexturePtr pt = ed.new_texture_asset_for_test("Bricks");
+    CHECK(pt != nullptr);
+    if (!pt) return;
+    pt->layers.clear();
+    pt->layers.push_back(create_texture_layer("Toon Ramp"));
+    pt->live_shading = false;
+    pt->touch();
+    m->toon_wrap = 0.4f, m->toon_rim_side = 1, m->toon_rim_width = 0.3f, m->toon_rim_strength = 0.8f, m->toon_specular_size = 0.4f;
+    m->toon_specular_color = Vec3(1.0f, 0.2f, 0.2f), m->toon_key_light_only = true;
+    m->toon_ramp_map.path = pt->asset_path + "#albedo";
+    m->touch();
+    ed.command("camera 0 1.2 3.5 0 1 0");
+    ed.mark_changed_for_test("R167 gpu");
+    r34_steps(ed, 3);
+    auto draw = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {  // (a change, then back: the view draws again on the device asked for)
+        sphere->set_local_position({0.0f, k ? 1.0f : 1.0001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    const std::vector<uint32_t> cpu = draw(1), gpu = draw(2);
+    double diff = 0.0;
+    size_t n = 0, toon_px = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size(); i++) {
+      for (int ch = 0; ch < 3; ch++) diff += std::abs((int)(cpu[i] >> (ch * 8) & 255) - (int)(gpu[i] >> (ch * 8) & 255));
+      n++;
+      toon_px += ((cpu[i] >> 16) & 255) > 100 && ((cpu[i] >> 8) & 255) < 90;  // the spot's red
+    }
+    diff /= std::max<size_t>(1, n) * 3.0 * 255.0;
+    std::printf("    the Scene view on the card against the CPU: mean difference %.2f %% over %zu pixels (%zu red-spot pixels)\n", diff * 100.0, n, toon_px);
+    CHECK(n > 1000 && diff < 0.02);
+    ed.viewport_device_for_test(1);
   });
 }

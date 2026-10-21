@@ -362,6 +362,8 @@ class Renderer3D {
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;
   LightingEnv env_;
+  int toon_key_ = -1;             // task 0148: the key light (the brightest sun) of this frame's lights, found once in begin()
+  Vec3 toon_key_L_{0, 1, 0};      // the direction toward it (up without one)
   RasterOptions opt_;
   RasterStats stats_;
   std::vector<DrawItem> items_;

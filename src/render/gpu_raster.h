@@ -71,6 +71,12 @@ struct RasterInstance {
   float toon_shadow[3] = {0.55f, 0.5f, 0.68f}, toon_rim[3] = {1, 1, 1};
   float toon_rim_width = 0.0f, toon_rim_strength = 0.5f;
   bool toon_flat_ambient = true;
+  /* Task 0148: the spot's colour, the light wrap, the rim's side (0 both, 1 lit, 2 shadow), the key light alone banding.
+   * (A toon material with painted maps or a hair highlight draws on the CPU: the lighting pass has no UVs.) */
+  float toon_specular_color[3] = {1, 1, 1}, toon_wrap = 0.0f;
+  int toon_rim_side = 0;
+  bool toon_key_light_only = false;
+  int32_t toon_ramp = -1;  // the Toon Ramp's texture (add_texture's id; -1: the bands): read in the lighting pass by how lit
 };
 
 /* The Edit Mode cage (task 0100), drawn over the picture as the CPU draws its overlay lines and dots

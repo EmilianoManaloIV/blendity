@@ -50,6 +50,10 @@ const char *material_unsupported(const Material &m) {
   const Material::Resolved &tx = m.textures();
   for (int k = 0; k < 5; k++)
     if (tx.live[k]) return "a live procedural texture";
+  /* Task 0148: the toon maps are read per pixel in the lighting pass, which has no UVs; a hair highlight needs the
+   * tangent there. Those materials draw on the CPU. */
+  if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight))
+    return "a toon material with painted maps or a hair highlight";
   return nullptr;
 }
 
@@ -156,6 +160,10 @@ void raster_toon(gpu::RasterInstance &in, const Material &m) {
   in.toon_rim_width = m.toon_rim_width;
   in.toon_rim_strength = m.toon_rim_strength;
   in.toon_flat_ambient = m.toon_flat_ambient;
+  set3(in.toon_specular_color, m.toon_specular_color);
+  in.toon_wrap = clean(m.toon_wrap, 0.0f, 1.0f);
+  in.toon_rim_side = m.toon_rim_side;
+  in.toon_key_light_only = m.toon_key_light_only;
 }
 
 /* An object (one material's part of it) as the GPU draws it: a plain material sampled once (the same everywhere but
@@ -170,7 +178,11 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   in.metal_spec[1] = s.specular;
   set3(in.emission, s.emission);
   if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
-  if (m.shading_model == 1) raster_toon(in, m);
+  if (m.shading_model == 1) {
+    raster_toon(in, m);
+    const TexturePtr &ramp = m.textures().toon_ramp;
+    in.toon_ramp = ramp ? tex(ramp) : -1;  // (the ramp needs no UVs: the lighting pass reads it by how lit)
+  }
   in.flags = 0;
   if (s.unlit) in.flags |= gpu::RasterInstance::Unlit;
   if (it.receive_shadows) in.flags |= gpu::RasterInstance::ReceiveShadows;

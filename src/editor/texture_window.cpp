@@ -139,7 +139,8 @@ size_t Editor::materials_using_texture(const ProceduralTexturePtr &t) {
   std::unordered_set<const Material *> users;
   auto check = [&](const Material *m) {
     if (!m) return;
-    for (const TextureRef *map : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map})
+    for (const TextureRef *map : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
+                                  &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map})
       if (map->path.compare(0, prefix.size(), prefix) == 0) users.insert(m);
   };
   slots_using([&](const MaterialPtr &m) {

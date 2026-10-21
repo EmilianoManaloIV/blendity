@@ -71,6 +71,14 @@ struct SurfaceSample {
   Vec3 normal;  // after normal mapping
   bool unlit = false;
   const Material *toon = nullptr;  // a Toon material (ADR 0020): lights shade it through shade_toon
+  /* The toon maps at this point (task 0148): the shadow side's own albedo, the painted shadow bias (0.5 neutral), the
+   * highlight's and the rim's masks, the ramp (sampled per light by how lit), and the tangent for a hair highlight. */
+  Vec3 toon_shade;
+  bool has_shade = false;
+  float toon_bias = 0.5f, toon_spec_mask = 1.0f, toon_rim_mask = 1.0f;
+  const Texture *toon_ramp = nullptr;
+  Vec3 toon_strand;  // the hair's direction (V of the UVs: the bitangent), for the hair highlight
+  bool toon_has_tangent = false;
 };
 
 SurfaceSample evaluate_material(const Material &m, const SurfacePoint &sp);
@@ -87,11 +95,26 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
 /* How lit a toon surface is, 0 (the shadow tone) to 1, in `toon_bands` steps: lit = N.L x visibility. */
 float toon_level(const Material &m, float lit);
 /* A toon surface's light toward the eye from one light, per unit of the light's colour x intensity (Unity's
- * convention: intensity 1 lights a white surface white): the albedo from the shadow colour to full by the tone,
- * plus the highlight spot. s.toon must be set. */
+ * convention: intensity 1 lights a white surface white): the albedo from the shadow colour (or the shade map) to
+ * full by the tone - the bands, or the ramp - after the light wrap and the painted bias, plus the highlight spot
+ * where its map allows (a band across the tangent for hair). s.toon must be set. */
 Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit);
-/* The rim light at the silhouette (added once, not per light). */
-Vec3 toon_rim(const Material &m, Vec3 n, Vec3 V);
+/* The rim light at the silhouette (added once, not per light), on the side the material asks for relative to the
+ * key light's direction `key_L` (toward the light), where its mask allows. */
+Vec3 toon_rim(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 key_L);
+/* The key light (task 0148): the brightest directional light's index, -1 without one; `L` the direction toward it
+ * (up when there is none). With Toon Key Light Only, only it bands the tones. */
+struct RenderLight;  // raster.h
+int toon_key_light(const std::vector<RenderLight> &lights, Vec3 *L = nullptr);
+/* A fill light's share on a toon surface (Key Light Only): smooth Lambert in the toon's units. */
+inline Vec3 toon_fill(const SurfaceSample &s, float lit) { return s.albedo * std::max(0.0f, lit); }
+/* Light wrap (task 0148): the signed N.L remapped so the light reaches round the form - before the clamp, the shadow
+ * lookup and the falloff, so the terminator moves and a cast shadow stays dark. Every renderer's light loop takes
+ * N.L through this for a toon surface. */
+inline float toon_wrap_ndl(const Material &m, float ndl) {
+  const float w = finite_bits(m.toon_wrap) ? std::max(0.0f, std::min(1.0f, m.toon_wrap)) : 0.0f;
+  return w > 0.0f ? (ndl + w) / (1.0f + w) : ndl;
+}
 
 /* --- BRDF --- */
 Vec3 fresnel_f0(const SurfaceSample &s);

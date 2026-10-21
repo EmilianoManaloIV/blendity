@@ -178,8 +178,27 @@ struct OutlineSpec {
   Vec3 color;
 };
 
+/* A glTF texture index as a file (the reader's image list), "" when it isn't one. */
+std::string texture_file(const Json &doc, int ti, const std::vector<std::string> &images) {
+  if (ti < 0) return {};
+  const int src = doc["textures"][(size_t)ti]["source"].integer();
+  return src >= 0 && src < (int)images.size() ? images[(size_t)src] : std::string();
+}
+
+/* MToon's shade texture is the shadow side's own picture: Blendity's Shade Map (task 0148), tinted by the Toon Shadow
+ * Color - which then holds MToon's shade colour itself, not its ratio to the base colour (a VRoid avatar's shade
+ * texture is usually its base texture; the colour alone darkens it). */
+void shade_texture(Material &m, const std::string &file, Vec3 shade_color, ImportResult &out, int &shades) {
+  if (file.empty()) return;
+  m.shade_map = TextureRef{file, false};
+  m.toon_shadow = shade_color;
+  if (std::find(out.textures.begin(), out.textures.end(), file) == out.textures.end()) out.textures.push_back(file);
+  shades++;
+}
+
 /* 0.x: a materialProperties entry per glTF material, with MToon's shader and its named properties. */
-void materials0(const Json &vrm, const std::vector<MaterialPtr> &mats, std::vector<OutlineSpec> &outlines, int &toon) {
+void materials0(const Json &doc, const Json &vrm, const std::vector<MaterialPtr> &mats, const std::vector<std::string> &images, std::vector<OutlineSpec> &outlines,
+                ImportResult &out, int &toon, int &shades) {
   const Json &props = vrm["materialProperties"];
   for (size_t i = 0; i < mats.size() && i < props.size(); i++) {
     const Json &p = props[i];
@@ -189,7 +208,9 @@ void materials0(const Json &vrm, const std::vector<MaterialPtr> &mats, std::vect
     if (shader.find("Unlit") != std::string::npos) m.unlit = true;
     if (shader != "VRM/MToon") continue;
     toon++;
-    toon_from(m, srgb(rgb(v["_ShadeColor"], Vec3(0.97f, 0.81f, 0.86f))), (float)f["_ShadeToony"].number(0.9), (float)f["_ShadeShift"].number(0.0));  // (the specs' defaults)
+    const Vec3 shade0 = srgb(rgb(v["_ShadeColor"], Vec3(0.97f, 0.81f, 0.86f)));  // (the spec's default)
+    toon_from(m, shade0, (float)f["_ShadeToony"].number(0.9), (float)f["_ShadeShift"].number(0.0));
+    shade_texture(m, texture_file(doc, p["textureProperties"]["_ShadeTexture"].integer(), images), shade0, out, shades);
     const int blend = (int)f["_BlendMode"].number(0);
     if (blend == 1) m.surface = (int)MaterialSurface::Cutout, m.alpha_clip = (float)f["_Cutoff"].number(0.5);
     else if (blend >= 2) m.surface = (int)MaterialSurface::Transparent;
@@ -202,7 +223,8 @@ void materials0(const Json &vrm, const std::vector<MaterialPtr> &mats, std::vect
 }
 
 /* 1.0: each material's VRMC_materials_mtoon extension. */
-void materials1(const Json &doc, const std::vector<MaterialPtr> &mats, std::vector<OutlineSpec> &outlines, int &toon) {
+void materials1(const Json &doc, const std::vector<MaterialPtr> &mats, const std::vector<std::string> &images, std::vector<OutlineSpec> &outlines, ImportResult &out,
+                int &toon, int &shades) {
   const Json &jm = doc["materials"];
   for (size_t i = 0; i < mats.size() && i < jm.size(); i++) {
     Material &m = *mats[i];
@@ -212,6 +234,7 @@ void materials1(const Json &doc, const std::vector<MaterialPtr> &mats, std::vect
     if (t.type != Json::Obj) continue;
     toon++;
     toon_from(m, rgb(t["shadeColorFactor"], Vec3(0.0f)), (float)t["shadingToonyFactor"].number(0.9), (float)t["shadingShiftFactor"].number(0.0));
+    shade_texture(m, texture_file(doc, t["shadeMultiplyTexture"]["index"].integer(), images), rgb(t["shadeColorFactor"], Vec3(1.0f)), out, shades);  // (with a texture, the spec's default colour is white)
     const std::string mode = t["outlineWidthMode"].str;
     if (mode.empty() || mode == "none") continue;
     outlines[i].width = mode == "worldCoordinates" ? (float)t["outlineWidthFactor"].number(0.0) : 0.003f;
@@ -273,21 +296,23 @@ void vrm_name_bones(const Json &doc, const std::vector<int> &node_index, ImportR
   }
 }
 
-void vrm_complete(const Json &doc, const std::vector<int> &node_index, const std::vector<MeshPtr> &meshes, const std::vector<MaterialPtr> &mats, ImportResult &out) {
+void vrm_complete(const Json &doc, const std::vector<int> &node_index, const std::vector<MeshPtr> &meshes, const std::vector<MaterialPtr> &mats,
+                  const std::vector<std::string> &images, ImportResult &out) {
   const bool v1 = vrm1(doc).type == Json::Obj;
-  int expressions = 0, toon = 0;
+  int expressions = 0, toon = 0, shades = 0;
   if (v1) expressions1(vrm1(doc), node_index, out, expressions);
   else expressions0(vrm0(doc), meshes, out, expressions);
   if (v1) springs1(doc, node_index, out);
   else springs0(vrm0(doc), node_index, out);
   std::vector<OutlineSpec> outlines(mats.size());
-  if (v1) materials1(doc, mats, outlines, toon);
-  else materials0(vrm0(doc), mats, outlines, toon);
+  if (v1) materials1(doc, mats, images, outlines, out, toon, shades);
+  else materials0(doc, vrm0(doc), mats, images, outlines, out, toon, shades);
   outlines_onto_nodes(mats, outlines, out);
   if (!v1) face_forward(out);
   meta_note(v1 ? vrm1(doc)["meta"] : vrm0(doc)["meta"], v1, out);
   out.notes.push_back(strprintf("VRM %s: %d expression(s) as shape keys, %zu spring chain(s) (a 1.0 chain follows the bones below its first joint), %d MToon material(s)%s",
-                                v1 ? "1.0" : "0.x", expressions, out.springs.size(), toon, toon ? " (shade textures and rim light not carried over)" : ""));
+                                v1 ? "1.0" : "0.x", expressions, out.springs.size(), toon,
+                                toon ? strprintf(" (%d shade texture(s) as Shade Maps; rim light not carried over)", shades).c_str() : ""));
 }
 
 }  // namespace bl

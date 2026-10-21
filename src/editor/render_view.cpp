@@ -26,7 +26,7 @@ namespace bl {
 
 static bool needs_tangents(const std::vector<MaterialPtr> &mats) {
   for (auto &m : mats)
-    if (m && !m->normal_map.empty()) return true;
+    if (m && (!m->normal_map.empty() || (m->shading_model == 1 && m->toon_hair_highlight))) return true;  // (the hair band runs across the strands: task 0148)
   return false;
 }
 

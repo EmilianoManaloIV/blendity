@@ -115,7 +115,7 @@ struct Json;
 bool vrm_present(const Json &doc);
 void vrm_name_bones(const Json &doc, const std::vector<int> &node_index, ImportResult &out);
 void vrm_complete(const Json &doc, const std::vector<int> &node_index, const std::vector<MeshPtr> &meshes, const std::vector<MaterialPtr> &materials,
-                  ImportResult &out);
+                  const std::vector<std::string> &image_paths, ImportResult &out);  // image_paths: the glTF's images as files (task 0148: MToon's shade texture)
 /* MMD's standard bone names in the words Blendity's rig tools read ("左ひざ" -> "LeftLeg"); any other name as it is.
  * Motions (.vmd) name bones in Japanese: the same mapping finds them. */
 std::string mmd_bone_name(const std::string &japanese);

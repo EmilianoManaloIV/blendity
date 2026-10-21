@@ -3119,6 +3119,32 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
   return sr.done && !sr.bad;
 }
 
+/* toonstyle <style> (task 0148): a toon style's preset on every selected material (the Materials window's selection
+ * while it is open, else the selected objects' materials), making each a Toon material. One undo step. */
+void Editor::toonstyle_command(const std::string &name) {
+  const int style = toon_style_index(name);
+  if (style < 0) {
+    std::string names;
+    for (const std::string &s : toon_style_names()) names += (names.empty() ? "" : ", ") + s;
+    Log::warn("toonstyle: %s", names.c_str());
+    return;
+  }
+  const bool from_window = dock_find(WindowKind::Materials) != nullptr && !material_multi_.items.empty();
+  std::vector<MaterialPtr> targets = from_window ? material_multi_.items : std::vector<MaterialPtr>();
+  if (!from_window)
+    for (GameObject *g : selected_objects(false))
+      if (auto *mr = g->get<MeshRenderer>())
+        for (const MaterialPtr &m : mr->materials)
+          if (m && std::find(targets.begin(), targets.end(), m) == targets.end()) targets.push_back(m);
+  if (targets.empty()) {
+    Log::warn("toonstyle: no material selected (select some in the Materials window, or objects that use them)");
+    return;
+  }
+  for (const MaterialPtr &m : targets) apply_toon_style(*m, style);
+  mark_changed("Toon Style " + toon_style_names()[(size_t)style]);
+  Log::info("Toon style %s on %zu material(s)", toon_style_names()[(size_t)style].c_str(), targets.size());
+}
+
 /* matset <Field> <value...> (task 0147): the field on every selected material - the Materials window's selection,
  * else the selected objects' materials - where it applies (a toon field reaches the toon ones). One undo step. */
 void Editor::matset_command(const std::vector<std::string> &t, const std::string &line) {
@@ -3365,6 +3391,12 @@ void Editor::run_console_command(const std::string &line) {
     matset_command(t, line);
     return;
   }
+  if (c == "toonstyle") {  // toonstyle <Classic|Guilty Gear|Soft Anime|Painterly|Manga>: the selected materials (task 0148)
+    std::string name;
+    for (size_t i = 1; i < t.size(); i++) name += (i > 1 ? " " : "") + t[i];
+    toonstyle_command(name);
+    return;
+  }
   if (c == "weightpaint" || c == "wpbrush" || c == "wpfalloff" || c == "wpmirror" || c == "wpfront" || c == "wpstroke" || c == "wpnormalize" ||
       c == "wpclean") {
     weight_paint_command(t);
@@ -3402,6 +3434,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
     Log::info("  overlay list | all|bones|controls|icons|points|origins|footprints|outline|grid|gizmos|stats [on|off] (the Scene view's layers)");
     Log::info("  matset <Field> <value> (the selected materials, where the field applies: matset ToonThreshold 0.4)");
+    Log::info("  toonstyle <Classic|Guilty Gear|Soft Anime|Painterly|Manga> (the selected materials' toon preset)");
     Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] [inpaint|envelope], skin transfer <body> [mesh] (rigging)");
     Log::info("  autorig humanoid|quadruped, autorig mark <marker> <x> <y> <z>, autorig build|cancel (the marker auto-rig)");
     Log::info("  anim new|key|interp|frame|preview|record|play|stop (the Animation window); manual (the user manual)");

@@ -49,6 +49,8 @@ static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &t
 
 bool material_uniform(const Material &m, const Material::Resolved &tx) {
   if (m.axis_mode != 0 || m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) return false;
+  /* The painted toon maps and the hair's strands vary over the surface too (task 0148); the ramp alone doesn't. */
+  if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight)) return false;
   return !tx.base && !tx.metallic && !tx.roughness && !tx.emission && !tx.normal;
 }
 
@@ -72,22 +74,63 @@ float toon_level(const Material &m, float lit) {
 
 Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit) {
   const Material &m = *s.toon;
-  const float q = toon_level(m, lit);
-  Vec3 c = s.albedo * lerp(m.toon_shadow, Vec3(1.0f), q);
-  if (m.toon_specular_size > 0.0f && q > 0.0f) {
-    /* A hard spot where N.H is near 1: size 1 reaches N.H = 0.8. */
-    const float nh = dot(n, normalize(V + L)), e = 1.0f - 0.2f * clampf(m.toon_specular_size, 0.0f, 1.0f);
+  /* The painted bias (0.5 neutral: +-1 moves a point fully into the light or the shadow) before the tones; the light
+   * wrap was applied to N.L by the caller (toon_wrap_ndl). A NaN from a float map: the shadow. */
+  lit = clampf(lit + (clampf(s.toon_bias, 0.0f, 1.0f) - 0.5f) * 2.0f, 0.0f, 1.0f);
+  if (!finite_bits(lit)) lit = 0.0f;
+  float q;
+  Vec3 tone;
+  if (s.toon_ramp) {
+    /* The ramp: its colour at how lit (U; V the same, up: a vertical ramp with its shadow at the bottom reads too). */
+    const Vec4 r = s.toon_ramp->sample({lit, lit}, 0.0f, TexWrap::Extend, TexFilter::Linear);
+    tone = r.xyz();
+    q = clampf(0.2126f * tone.x + 0.7152f * tone.y + 0.0722f * tone.z, 0.0f, 1.0f);
+  }
+  else {
+    q = toon_level(m, lit);
+    tone = lerp(m.toon_shadow, Vec3(1.0f), q);
+  }
+  /* The shade map is the shadow side's own picture, tinted by the shadow colour (MToon's shade colour x shade texture;
+   * a VRoid avatar's shade texture is often its base texture, which the tint then darkens); without one the base
+   * colour takes the tone. */
+  Vec3 c = s.has_shade ? lerp(s.toon_shade * m.toon_shadow, s.albedo, q) : s.albedo * tone;
+  if (m.toon_specular_size > 0.0f && q > 0.0f && s.toon_spec_mask > 0.0f) {
+    /* A hard spot where N.H is near 1: size 1 reaches N.H = 0.8. For hair, a band where the half vector is square
+     * to the strands (Kajiya-Kay: the sheen runs across the hair, wherever the normal points). */
+    const Vec3 H = normalize(V + L);
+    float nh = dot(n, H);
+    if (m.toon_hair_highlight && s.toon_has_tangent) {
+      const float th = dot(normalize(s.toon_strand), H);
+      nh = std::sqrt(std::max(0.0f, 1.0f - th * th));
+    }
+    const float e = 1.0f - 0.2f * clampf(m.toon_specular_size, 0.0f, 1.0f);
     const float w = 0.1f * clampf(m.toon_specular_smooth, 0.0f, 0.5f);
-    c += lerp(Vec3(1.0f), s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0f * s.specular);
+    c += lerp(m.toon_specular_color, s.albedo, s.metallic) * (axis_step(e - w, e + w, nh) * q * 2.0f * s.specular * clampf(s.toon_spec_mask, 0.0f, 1.0f));
   }
   return c;
 }
 
-Vec3 toon_rim(const Material &m, Vec3 n, Vec3 V) {
-  if (!(m.toon_rim_width > 0.0f) || !(m.toon_rim_strength > 0.0f)) return Vec3(0.0f);
+Vec3 toon_rim(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 key_L) {
+  const Material &m = *s.toon;
+  if (!(m.toon_rim_width > 0.0f) || !(m.toon_rim_strength > 0.0f) || !(s.toon_rim_mask > 0.0f)) return Vec3(0.0f);
+  const float ndl = dot(n, key_L);
+  if ((m.toon_rim_side == 1 && ndl <= 0.0f) || (m.toon_rim_side == 2 && ndl > 0.0f)) return Vec3(0.0f);
   const float f = 1.0f - std::max(0.0f, dot(n, V)), e = 1.0f - clampf(m.toon_rim_width, 0.0f, 1.0f);
   const float w = clampf(m.toon_softness, 0.0f, 0.5f) + 0.02f;
-  return m.toon_rim * (axis_step(e - w, e + w, f) * m.toon_rim_strength);
+  return m.toon_rim * (axis_step(e - w, e + w, f) * m.toon_rim_strength * clampf(s.toon_rim_mask, 0.0f, 1.0f));
+}
+
+int toon_key_light(const std::vector<RenderLight> &lights, Vec3 *L) {
+  int best = -1;
+  float power = 0.0f;  // (a sun that gives no light isn't the key: with Key Light Only nothing would band)
+  for (size_t i = 0; i < lights.size(); i++) {
+    const RenderLight &l = lights[i];
+    if (l.type != RenderLight::Directional) continue;
+    const float p = l.intensity * (0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z);
+    if (p > power) power = p, best = (int)i;
+  }
+  if (L) *L = best >= 0 ? normalize(-lights[(size_t)best].direction) : Vec3(0, 1, 0);
+  return best;
 }
 
 static SurfaceSample evaluate_any(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
@@ -314,6 +357,21 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
   if (tx.roughness) s.roughness *= sample_slot(2, tx.roughness).x;
   s.emission = m.emission * m.emission_strength;
   if (tx.emission) s.emission = s.emission * sample_slot(4, tx.emission).xyz();
+  /* The toon maps (task 0148), read at the same point as the others (no live snapshots: the first five slots'). */
+  if (m.shading_model == 1) {
+    if (tx.shade) {
+      s.toon_shade = sample_image(tx.shade).xyz();
+      s.has_shade = true;
+    }
+    if (tx.toon_bias) s.toon_bias = sample_image(tx.toon_bias).x;
+    if (tx.toon_specular) s.toon_spec_mask = sample_image(tx.toon_specular).x;
+    if (tx.toon_rim_mask) s.toon_rim_mask = sample_image(tx.toon_rim_mask).x;
+    if (!finite_bits(s.toon_bias)) s.toon_bias = 0.5f;  // (a float map's NaN: neutral)
+    s.toon_ramp = tx.toon_ramp.get();
+    /* The strands run along V (hair cards and unwraps are laid out that way): the bitangent. */
+    s.toon_strand = cross(sp.normal, sp.tangent.xyz()) * sp.tangent.w;
+    s.toon_has_tangent = sp.has_tangent;
+  }
   /* Tangent-space normal map (OpenGL / Blender convention, +Y up). */
   if (tx.normal && sp.has_tangent && m.normal_strength > 0) {
     Vec4 nm = sample_slot(3, tx.normal);

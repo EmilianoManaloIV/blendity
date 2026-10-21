@@ -2,6 +2,45 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 167): toon styles (task 0148, ADR 0048)
+
+**Asked:** "Is there any way to add more toon shading details in good engine" - "The Guilty Gear / Arc System Works
+is a really good baseline. I want different options of toon shading to get versatility in style."
+
+**Added**
+- **Toon styles:** a Toon Style field at the top of a material's Toon group - Classic, Guilty Gear (Arc System Works'
+  hard two-tone, the key light alone, the highlight where it is painted, no rim), Soft Anime (three tones, light
+  wrap, a lit-side rim), Painterly (four soft tones under the sky's gradient), Manga (a hard grey two-tone). Picking
+  one sets the fields; every field stays editable and the maps are yours. Console `toonstyle <style>` on the
+  selected materials; with several selected, the style lands on all of them.
+- **Painted control**, as the studios do it, through textures: a Shadow Bias Map (grey neutral, white keeps a point
+  lit, black in shadow), a Toon Specular Map (where the spot may show) with the spot's own colour, a Toon Rim Map and
+  a rim that shows on the lit side, the shadow side or both of the key light, and a Shade Map - the shadow side's own
+  picture (VRM's MToon shade texture now comes in).
+- **A Toon Ramp** instead of the bands: an image read by how lit the point is (left dark, right lit, or bottom dark,
+  top lit), made by the Textures window's new Toon Ramp generator (2 to 5 tones, hard or soft); MMD's toon images
+  land there.
+- **Toon Hair Highlight** turns the spot into the band across the hair that anime draws; **Toon Light Wrap** lets
+  the light reach round the form before the tones step; **Toon Key Light Only** keeps several lights from banding
+  like a disco ball: the brightest sun bands, the others fill smoothly.
+- All of it the same in the rasterized views, F12 raster, the CPU and GPU path tracers; the GPU viewport draws the
+  plain settings and the ramp, and hands a material with painted maps or a hair highlight to the CPU, saying so (a
+  VRM avatar with a shade texture draws on the CPU there; MMD models stay on the card). A lesson section "Toon
+  styles" with Try-its.
+
+**Checked**
+- New tests (round 167): each style's fields, names in any spelling, `toonstyle` undone as one step, a .mat keeping
+  every field; the shared shading (the spot's colour and map, the bias's ends, the shade map, the wrap, horizontal
+  and vertical ramps, the hair band, the rim's sides and mask, the key light); on a sphere wrap 0.5 grows the lit
+  share by over 10 %, the rasterizer and the CPU path tracer share the tones within 4 % (the GPU's within 3 % of the
+  CPU's), a second light bands unless Key Light Only (rasterizer and path tracer within 4 %); the Toon Ramp
+  generator's steps and a material reading it showing exactly two tones; MMD's ramp reading lit at the top; VRM's
+  shade texture in Shade Map; MMD's ramp in Toon Ramp.
+- Unit checks (round 167): Windows 11,182, 0 failed (885 tests); render-cache verify mode 11,183, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,914, 0 failed. Sanitizer build: 10,792, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 166): multi-edit materials (task 0147)
 
 **Asked:** "add the ability to multi-edit materials if they share the same properties (such as shading model). For
@@ -97,7 +136,9 @@ with physical falloff.
   intensity 1; the Light's help says so.
 - Task 0030's references rewritten for the new integrand: the exact term within 1 % of a million-sample Monte Carlo
   over thirteen placements (strips, discs, 30 cm below a 10 m light), the rasterizer within 10 % of the path tracer,
-  the bake within 5 %; task 0022's bake noise and the toon-under-area-light shares unchanged.
+  the bake within 5 %; task 0022's bake noise and the toon-under-area-light shares unchanged. Task 0022's Preview
+  Lighting test cuts its "lit top" at half the chart's peak instead of an absolute value (the brighter panel let the
+  dim sides in with their larger noise: macOS CI).
 - Checked with round 166's chain (see its entry).
 
 ## 2026-10-19 (round 163): bone handles the right size on import (task 0144, ADR 0047)

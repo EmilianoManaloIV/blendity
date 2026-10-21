@@ -6,6 +6,7 @@
 #include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
+#include <cstring>
 #include "../core/jobs.h"
 #include "../research/research.h"
 
@@ -552,6 +553,7 @@ struct InspectorReflector : Reflector {
     u.label(label_rect(row), n);
     if (u.combo(fid(n), field_rect(row), v, opts, count)) {
       record(FieldEdit::Enum, n).i_new = v;
+      if (material && std::strcmp(n, "Toon Style") == 0) apply_toon_style(*material, v);  // (task 0148: the preset's fields, picked again too)
       changed = true;
     }
   }
@@ -2618,6 +2620,7 @@ size_t Editor::apply_material_edits(const std::vector<FieldEdit> &edits, const M
       if (fe.kind == FieldEdit::Text && fe.name == "Name") continue;  // a name is the material's own (its file's): renaming all would collide
       ApplyEditReflector a(fe, (int)i, (int)targets.size(), false);
       t->reflect(a);
+      if (a.applied && fe.kind == FieldEdit::Enum && fe.name == "Toon Style") apply_toon_style(*t, fe.i_new);  // the preset's fields on each (task 0148)
       took = took || a.applied;
     }
     if (!took) continue;

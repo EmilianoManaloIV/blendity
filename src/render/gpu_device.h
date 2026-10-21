@@ -51,6 +51,7 @@ struct GParams {
   float background[4];  // a camera's Solid Color for camera rays (w: on)
   float retro_vp[16];   // a camera filter's view-projection (task 0032)
   float retro[4];       // affine UVs, screen door, internal width, height (0: off)
+  float key_light[4];   // task 0148: the direction toward the key light (the brightest sun), its index (-1: none)
 };
 struct GNode { float bmin[3]; uint32_t left; float bmax[3]; uint32_t count; };
 struct GTri { float v0[4], e1[4], e2[4]; };
@@ -68,8 +69,11 @@ struct GMaterial {
   int32_t axis_i[4];  // its Top, Side, Bottom, High in this table (-1: its own maps; High -1: no band)
   float axis2[4];     // task 0040: noise amount, 1 / noise scale, high start, high half-width
   /* Toon (ADR 0020; flags[3] bit 1): bands, softness, threshold, specular smoothness; shadow colour, specular
-   * size; rim colour x strength, rim width. */
+   * size; rim colour x strength, rim width. Task 0148: tex2 the ramp, shade, bias and specular maps; tex3 the rim
+   * mask, hair highlight, rim side, key light only; toon3 the specular colour and the light wrap. */
   float toon0[4], toon1[4], toon2[4];
+  int32_t tex2[4], tex3[4];
+  float toon3[4];
 };
 struct GLight { float a[4], b[4], c[4], d[4], e[4]; };  // see gpu_kernel.h Light
 struct GMeshLight { uint32_t obj, prim; float area, power; };
