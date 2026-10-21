@@ -2,6 +2,53 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 169): procedural anime textures (task 0150)
+
+**Asked:** "procedural textures for anime backgrounds": foliage (leaves, grass), buildings (walls, windows, roofs), sky
+and clouds, ground and water.
+
+**Added**
+- **Nine generators** in the Textures window, drawn as a background painter draws - two or three flat tones and a
+  line, no gradients: Leaves (clusters of leaf shapes with a lit top, a shaded underside and a dark rim), Grass
+  (blades from the bottom in three tones), Plaster (one tone with soft patches of a second and a few cracks), Window
+  Grid (frames, lit and dark glass, a wall tone), Roof Tiles (overlapping rows with a shadow band and lines), Sky
+  Gradient (zenith to horizon, a sun's disc and glow), Clouds (a white top over a flat shaded underside, an outline),
+  Rocks (stones lit on their upper left with a ground line between) and Water (one tone with bent highlight lines).
+  Every tone is a colour field; all repeat in the tile (Grass and Sky Gradient are cards: across only).
+- **Alpha From Cover** on a texture: the albedo image's alpha is what the cards cover, in the image and in live
+  shading. The cards (Leaves, Grass, Clouds) cover only their shapes and write that cover into a cover plane of
+  their own (stacked cards add up; Warp and Tile move it with the colour; Mask by Height and Use Mask keep the mask
+  as before), so a Cutout material shows holes between the leaves: a foliage card, a cloud over the sky (ADR 0017's
+  amendment).
+- **Presets** Anime Leaves, Anime Grass, Anime Wall, Anime Windows, Anime Roof, Anime Sky, Anime Clouds, Anime Rock and
+  Anime Water (the Textures window's New list, `newtex <name> <preset>`), each with its tile size and no normal map.
+- **`animemat <preset>`** on the console: the preset's texture asset and a flat-toned Toon material reading it (a
+  double-sided Cutout for a card) on the selected objects, one undo step.
+- The Textures lesson gains "Anime backgrounds: procedural textures".
+
+**Changed after the review**
+- The cover left the mask plane for its own (a second card replaced the first's cover, a Mask by Height above a card
+  replaced the alpha, a card's Use Mask read its own cover, Warp and Tile moved the colour but not the cover, and
+  live shading reset it); a card's colour lands everywhere so the cut has no grey fringe; Roof Tiles rounds its rows
+  up to an even number (an odd count broke the stagger one tile over); the Sky Gradient's sun reaches round the
+  seam; a Plaster crack is one edge between two cells, not a cell's outline; Grass leans no further than the scan
+  looks; the Voronoi, Plaster and Rocks generators share one cell scan; `animemat` makes nothing when nothing with a
+  MeshRenderer is selected; the texture's hand-written copy carries its output switches (a preset without a normal
+  map got one back as an asset).
+
+**Checked**
+- New tests (round 169): each generator deterministic, periodic one tile over (the cards across only; Roof Tiles with
+  odd rows and a sun at the sky's seam too), at most four tones over what it covers (the Window Grid's six are three
+  pairs), covering over a tenth of the tile; each preset's layer and card flag; a leaf card's albedo with clear and
+  solid texels (none clear with the flag off); `animemat Anime Leaves` on a Quad giving a Cutout toon material with
+  holes between the leaves at sampled points, an unknown preset warning, undo, nothing made without a selection; the
+  texture copy keeping its switches and hash; live shading's alpha agreeing with the image's; two cards adding up; a
+  card's Use Mask reading the mask below; a Tile moving the cover with the colour in the image and the live path.
+- Unit checks (round 169): Windows 11,300, 0 failed (892 tests); render-cache verify mode 11,301, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,031, 0 failed. Sanitizer build: 10,909 (one timing check at 0.204 ms a frame against its 0.2 limit, with a Windows build running beside it; it now skips sanitizer builds like the suite's other timing checks), 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 168): the 2D look - custom normals, a face shadow map, inner lines and hatching, hold frames (task 0149, ADR 0048)
 
 **Asked:** renders that "look more 2D while posed in 3D", research-based: shadow control with smooth normals, a face

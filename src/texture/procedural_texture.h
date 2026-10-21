@@ -22,6 +22,11 @@ struct TexPlanes {
   int w = 0, h = 0;
   std::vector<float> height, rough, mask;
   std::vector<Vec3> albedo;
+  /* The cover plane (task 0150): what the cards (Leaves, Grass, Clouds: generators with the Alpha target) cover -
+   * the first card sets it, later cards add to it, Warp and Tile move it with the colour; the albedo image's alpha
+   * with Alpha From Cover. Apart from the mask, which Mask by Height shapes for the layers above it. */
+  std::vector<float> alpha;
+  bool alpha_written = false;
   void reset(int width, int height_);
   size_t size() const { return (size_t)w * h; }
   /* Wrapped texel reads (every generator is periodic in the tile; filters that read neighbours wrap too). */
@@ -50,6 +55,8 @@ struct LayerSample {
 struct TexPoint {
   float height = 0.5f, rough = 0.5f, mask = 1.0f;
   Vec3 albedo{0.5f, 0.5f, 0.5f};
+  float alpha = 1.0f;  // the cover plane at the point (task 0150)
+  bool alpha_written = false;
 };
 
 /* What a neighbourhood filter keeps from the set-resolution evaluation so it can be applied at a point (live
@@ -69,7 +76,7 @@ struct LayerAux {
 };
 
 enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, HeightMin };
-enum LayerTarget { TargetAlbedo = 1, TargetHeight = 2, TargetRoughness = 4, TargetMask = 8 };
+enum LayerTarget { TargetAlbedo = 1, TargetHeight = 2, TargetRoughness = 4, TargetMask = 8, TargetAlpha = 16 };  // (Alpha: a card's cover into the cover plane, task 0150)
 
 struct TextureLayer {
   bool enabled = true;
@@ -133,6 +140,7 @@ struct ProceduralTexture {
    * normal, roughness 1 so the material's own Roughness rules, mid height) while the layers still compute the
    * height inside: a Color Ramp from the height colours the albedo without the bricks also bumping the surface. */
   bool use_normal = true, use_roughness = true, use_height = true;
+  bool alpha_from_cover = false;  // the albedo image's alpha is the cover plane (task 0150: a foliage card's cutout from a Leaves generator's cover)
   bool output_on(int which) const {
     return which == 1 ? use_normal : which == 2 ? use_roughness : which == 3 ? use_height : true;
   }
@@ -171,6 +179,7 @@ class LiveTexture {
   int height() const { return h_; }
   uint64_t hash() const { return hash_; }
   bool output_on(int which) const { return tex_.output_on(which); }  // the texture's Normal / Roughness / Height Map switches
+  bool alpha_from_cover() const { return tex_.alpha_from_cover; }       // (task 0150: the albedo's alpha is the cover plane)
 
  private:
   /* height_only: just the layers that change the height (or the mask the height layers fade by), for the

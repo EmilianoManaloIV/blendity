@@ -3119,8 +3119,56 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
   return sr.done && !sr.bad;
 }
 
-/* Anime Face Normals (task 0149): a sphere proxy fitted to the head and a Normal Transfer reading it, placed before a
- * Skin modifier (the transfer runs once in the rest pose and the skin turns the normals with the bones). */
+/* animemat <preset> (task 0150): the anime preset's texture asset (a new .ptex each time, as newtex makes one; undo
+ * takes the material back and leaves the file, as newtex's stays) and a flat-toned Toon material reading it in the
+ * selected objects' first slot - a double-sided Cutout for a card. Nothing selected: nothing made. One undo step. */
+MaterialPtr Editor::animemat_command(const std::string &preset_in) {
+  std::string preset = to_lower(preset_in);
+  if (preset.rfind("anime ", 0) != 0) preset = "anime " + preset;  // ("leaves" is "Anime Leaves")
+  std::string name;
+  for (const std::string &p : texture_preset_names())
+    if (to_lower(p) == preset) {
+      name = p;
+      break;
+    }
+  if (name.empty()) {
+    Log::warn("animemat: Anime Leaves, Grass, Wall, Windows, Roof, Sky, Clouds, Rock or Water");
+    return nullptr;
+  }
+  std::vector<MeshRenderer *> targets;
+  for (GameObject *g : selected_objects(false))
+    if (MeshRenderer *mr = g->get<MeshRenderer>()) targets.push_back(mr);
+  if (targets.empty()) {
+    Log::warn("animemat: select objects with a MeshRenderer first");
+    return nullptr;
+  }
+  ProceduralTexturePtr tex = new_texture_asset(name);
+  if (!tex) return nullptr;
+  /* A toon material in flat tones reading the texture's albedo; a card (leaves, grass, clouds) cuts out by its alpha. */
+  MaterialPtr m = make_material_preset("Toon");
+  m->name = name;
+  m->base_map = TextureRef{tex->asset_path + "#albedo", false};
+  m->toon_bands = 1;
+  m->toon_softness = 0.0f;
+  m->toon_specular_size = 0.0f;
+  m->toon_rim_width = 0.0f;
+  if (tex->alpha_from_cover) {
+    m->surface = (int)MaterialSurface::Cutout;
+    m->alpha_clip = 0.5f;
+    m->double_sided = true;
+  }
+  m->touch();
+  for (MeshRenderer *mr : targets) {
+    if (mr->materials.empty()) mr->materials.resize(1);
+    mr->materials[0] = m;
+  }
+  mark_changed("Anime Material " + name);
+  Log::info("animemat: %s (%s) on %zu object(s)", name.c_str(), tex->asset_path.c_str(), targets.size());
+  return m;
+}
+
+/* customnormals clear|show (task 0149): the selected meshes' own shading normals, cleared (the smooth angle and the
+ * sharp edges shade them again) or counted. */
 void Editor::customnormals_command(const std::string &verb) {
   size_t meshes = 0, with = 0;
   for (GameObject *g : selected_objects(false)) {
@@ -3146,6 +3194,8 @@ void Editor::customnormals_command(const std::string &verb) {
   Log::info("customnormals: %zu of %zu selected mesh(es) carry their own shading normals (customnormals clear removes them)", with, meshes);
 }
 
+/* Anime Face Normals (task 0149): a sphere proxy fitted to the head and a Normal Transfer reading it, placed before a
+ * Skin modifier (the transfer runs once in the rest pose and the skin turns the normals with the bones). */
 GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
   MeshFilter *mf = mesh_obj ? mesh_obj->mesh_filter() : nullptr;
   if (!mf || !mf->mesh || mf->mesh->vert_count() == 0) {
@@ -3467,6 +3517,12 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "matset") {
     matset_command(t, line);
+    return;
+  }
+  if (c == "animemat") {  // animemat <Anime preset>: the texture and a toon material on the selection (task 0150)
+    std::string preset;
+    for (size_t i = 1; i < t.size(); i++) preset += (i > 1 ? " " : "") + t[i];
+    animemat_command(preset);
     return;
   }
   if (c == "customnormals") {  // customnormals clear|show: the selected meshes' own shading normals (task 0149)

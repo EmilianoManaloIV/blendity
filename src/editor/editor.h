@@ -1758,6 +1758,9 @@ class Editor {
    * mesh) and a Normal Transfer modifier reading it, so the face shades like a ball. Console: facenormals. */
   GameObject *add_face_normals(GameObject *mesh_obj);
   void customnormals_command(const std::string &verb);  // customnormals clear|show: the selected meshes' own normals (task 0149)
+  /* animemat <Anime Leaves|Grass|Wall|Windows|Roof|Sky|Clouds|Rock|Water> (task 0150): the preset's texture asset and a
+   * Toon material reading it (a Cutout for the cards) on the selected objects. */
+  MaterialPtr animemat_command(const std::string &preset);
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();

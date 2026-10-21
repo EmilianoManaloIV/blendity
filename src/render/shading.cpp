@@ -265,7 +265,7 @@ struct LiveMemo {
         return Vec4(hit->n.x * 0.5f + 0.5f, hit->n.y * 0.5f + 0.5f, hit->n.z * 0.5f + 0.5f, 1.0f);
       case 2: return Vec4(hit->p.rough, hit->p.rough, hit->p.rough, 1.0f);
       case 3: return Vec4(hit->p.height, hit->p.height, hit->p.height, 1.0f);
-      default: return Vec4(hit->p.albedo.x, hit->p.albedo.y, hit->p.albedo.z, 1.0f);
+      default: return Vec4(hit->p.albedo.x, hit->p.albedo.y, hit->p.albedo.z, t.alpha_from_cover() ? clampf(hit->p.alpha, 0.0f, 1.0f) : 1.0f);
     }
   }
 };

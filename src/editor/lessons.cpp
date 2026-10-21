@@ -713,6 +713,22 @@ Drag images onto the window: they're copied to Assets/Textures and, if an object
 A procedural texture knows its real size: Physical Size is the metres one tile covers (bricks 2 m, a wood floor 2 m). A material using it tiles by its inverse, so 2 m is Tiling 0.5: one tile every two metres whatever the object's size, as SketchUp's textures keep their size. Change Physical Size and every material in the scene using that texture follows, in one undo step. A material whose Tiling you set by hand keeps it: Blendity sees that it no longer matches the old size.
 ? A Bricks texture of Physical Size 2 m is changed to 4 m. What Tiling do the materials using it get? | 0.25: one tile every 4 metres.
 ! cmd:newtex BigBricks Bricks; create Cube; settex BigBricks PhysicalSize 4 | Make a brick texture and set its tile to 4 m (put it on the Cube from the Textures window to see it)
+# Anime backgrounds: procedural textures
+A background painter works in two or three flat tones with a line: the leaves are a lit tone, a shade tone and a dark
+rim, the wall one tone with a patch of another and a crack or two, the clouds a white top over a flat blue-grey
+underside. The Textures window's generators Leaves, Grass, Plaster, Window Grid, Roof Tiles, Sky Gradient, Clouds,
+Rocks and Water draw that way (task 0150), each with its tones as colours, and the presets Anime Leaves, Anime
+Grass, Anime Wall, Anime Windows, Anime Roof, Anime Sky, Anime Clouds, Anime Rock and Anime Water set one up with a
+sensible tile size. The cards - leaves, grass, clouds - cover only their shapes: with the texture's Alpha From Cover
+on, the albedo's alpha is that cover (stacked cards add up; Warp and Tile move it with the colour), and a Cutout
+material shows holes between the leaves (a foliage card, a bush of three crossed quads, a cloud over the sky).
+`animemat <preset>` on the console does it in one step: a new texture asset and a flat-toned Toon material (a Cutout
+for a card) in the selected objects' first material slot; undo takes the material back and leaves the texture file,
+as newtex's stays.
+! cmd:create Quad; select Quad; animemat Anime Leaves | A leaf card: a Quad with the Anime Leaves texture cut out
+! cmd:create Cube; select Cube; animemat Anime Windows | A building block with the Anime Windows texture
+! cmd:newtex Sky Anime Sky | An anime sky texture (put it on a backdrop plane from the Textures window)
+? Why do the anime generators avoid gradients? | A toon material steps the light into few tones; a texture with few tones keeps the picture flat and drawn, as the painter's would be.
 # Terrain: grass on top, dirt on the slopes, snow up high
 An axis material (Axis Mode: World) takes a Top, Side and Bottom material by how steep the surface is, projected
 without UVs, so a cliff's top is grassy and its face dirt or rock. Axis High adds a material above a height (High

@@ -42,6 +42,27 @@ inline float periodic_fbm(float u, float v, float scale, int octaves, float roug
   return fbm_noise(p, cnt(octaves, 1, 8), clampf(roughness, 0.0f, 1.0f)) * 0.5f + 0.5f;
 }
 
+/* The nearest and second-nearest jittered cell centres round (sx, sy) in an N x N periodic grid (Voronoi's F1 and F2),
+ * with the nearest's position and both cells' ids: the Voronoi, Plaster and Rocks generators share it. */
+struct CellHit {
+  float d1 = 1e9f, d2 = 1e9f, px = 0.0f, py = 0.0f;
+  uint32_t a = 0, b = 0, a2 = 0, b2 = 0;
+};
+inline CellHit voronoi_cells(float sx, float sy, int N, float jitter, uint32_t seed) {
+  const int cx = (int)std::floor(sx), cy = (int)std::floor(sy);
+  CellHit h;
+  for (int oy = -1; oy <= 1; oy++)
+    for (int ox = -1; ox <= 1; ox++) {
+      const int gx = cx + ox, gy = cy + oy;
+      const uint32_t wx = (uint32_t)wrapi(gx, N), wy = (uint32_t)wrapi(gy, N);  // periodic cells
+      const float px = gx + 0.5f + (texture_rand(wx, wy, seed) - 0.5f) * jitter, py = gy + 0.5f + (texture_rand(wx, wy, seed + 1u) - 0.5f) * jitter;
+      const float d = std::sqrt((sx - px) * (sx - px) + (sy - py) * (sy - py));
+      if (d < h.d1) h.d2 = h.d1, h.a2 = h.a, h.b2 = h.b, h.d1 = d, h.a = wx, h.b = wy, h.px = px, h.py = py;
+      else if (d < h.d2) h.d2 = d, h.a2 = wx, h.b2 = wy;
+    }
+  return h;
+}
+
 /* Wrapping box filters, separable with running sums: O(1) per texel whatever the radius. */
 template<class T> void box_mean(const std::vector<T> &src, std::vector<T> &dst, int w, int h, int r) {
   std::vector<T> tmp(src.size());
@@ -370,20 +391,9 @@ struct VoronoiLayer : TextureLayerBase<VoronoiLayer> {
   }
   LayerSample sample(float u, float v, const LayerContext &c) const override {
     const int N = cnt(cells, 1, 256);
-    const float sx = u * N, sy = v * N;
-    const int cx = (int)std::floor(sx), cy = (int)std::floor(sy);
-    const float rnd = clampf(fin(randomness, 1.0f), 0.0f, 1.0f);
-    float d1 = 1e9f, d2 = 1e9f;
-    uint32_t best_a = 0, best_b = 0;
-    for (int oy = -1; oy <= 1; oy++)
-      for (int ox = -1; ox <= 1; ox++) {
-        const int gx = cx + ox, gy = cy + oy;
-        const uint32_t wx = (uint32_t)wrapi(gx, N), wy = (uint32_t)wrapi(gy, N);  // periodic cells
-        const float px = gx + 0.5f + (texture_rand(wx, wy, c.seed) - 0.5f) * rnd, py = gy + 0.5f + (texture_rand(wx, wy, c.seed + 1u) - 0.5f) * rnd;
-        const float d = std::sqrt((sx - px) * (sx - px) + (sy - py) * (sy - py));
-        if (d < d1) d2 = d1, d1 = d, best_a = wx, best_b = wy;
-        else if (d < d2) d2 = d;
-      }
+    const CellHit h = voronoi_cells(u * N, v * N, N, clampf(fin(randomness, 1.0f), 0.0f, 1.0f), c.seed);
+    const float d1 = h.d1, d2 = h.d2;
+    const uint32_t best_a = h.a, best_b = h.b;
     LayerSample s;
     const float e = clampf(fin(edge, 0.04f), 0.0f, 0.5f);  // in cell units
     if (0.5f * (d2 - d1) < e * 0.5f) {
@@ -824,12 +834,12 @@ struct InvertLayer : TextureLayerBase<InvertLayer> {
 
 /* Copies of only the planes a layer reads and writes (a full copy of four planes is 400 MB at 4096²). */
 struct PlaneCopy {
-  std::vector<float> h, r;
+  std::vector<float> h, r, al;
   std::vector<Vec3> a;
   PlaneCopy(const TexPlanes &p, bool wh, bool wr, bool wa) {
     if (wh) h = p.height;
     if (wr) r = p.rough;
-    if (wa) a = p.albedo;
+    if (wa) a = p.albedo, al = p.alpha;  // (the cover moves with the colour, task 0150)
   }
 };
 
@@ -853,7 +863,7 @@ struct WarpLayer : TextureLayerBase<WarpLayer> {
       const size_t j = (size_t)p.wrap_y((int)std::lround(y + dy * p.h)) * p.w + p.wrap_x((int)std::lround(x + dx * p.w));
       if (wh) p.height[i] = lerpf(p.height[i], src.h[j], k);
       if (wr) p.rough[i] = lerpf(p.rough[i], src.r[j], k);
-      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k);
+      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k), p.alpha[i] = lerpf(p.alpha[i], src.al[j], k);
     });
   }
   /* At a point: the layers below read at the pushed point itself (the planes take the nearest texel). */
@@ -886,7 +896,7 @@ struct TileLayer : TextureLayerBase<TileLayer> {
       const size_t j = (size_t)p.wrap_y((int)std::floor((y + 0.5f) * ny)) * p.w + p.wrap_x((int)std::floor((x + 0.5f) * nx));
       if (wh) p.height[i] = lerpf(p.height[i], src.h[j], k);
       if (wr) p.rough[i] = lerpf(p.rough[i], src.r[j], k);
-      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k);
+      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k), p.alpha[i] = lerpf(p.alpha[i], src.al[j], k);
     });
   }
   bool remap(float &u, float &v, const LayerContext &) const override {
@@ -1037,6 +1047,396 @@ struct MaskByHeightLayer : TextureLayerBase<MaskByHeightLayer> {
   }
 };
 
+
+/* ---------------------------------------------------------------- the anime background generators (task 0150) */
+/* Each draws in two or three flat tones with a line colour, as a background painter does: no gradients, so a toon
+ * material's tones stay few; all periodic in the tile (the cards - Grass, Sky Gradient - in U only). */
+
+/* Leaves: clusters of leaf shapes (an ellipse per cell, turned at random), a lit top and a shaded underside with a
+ * dark rim; between them nothing (cover 0: a foliage card cuts out) or a background colour. */
+struct LeavesLayer : TextureLayerBase<LeavesLayer> {
+  static constexpr const char *kName = "Leaves";
+  int cells = 10;
+  float size = 0.9f, rim = 0.12f;
+  bool cutout = true;
+  Vec3 lit{0.45f, 0.72f, 0.3f}, shade{0.2f, 0.42f, 0.2f}, line{0.08f, 0.2f, 0.1f}, back{0.14f, 0.3f, 0.16f};
+  LeavesLayer() { targets = TargetAlbedo | TargetHeight | TargetRoughness | TargetAlpha; }
+  void reflect(Reflector &r) override {
+    r.field("Cells", cells, 2, 64);
+    r.help("Leaves across the tile (one per cell, turned at random).");
+    r.field("Size", size, 0.01f, 0.2f, 1.6f);
+    r.help("A leaf's length as a fraction of its cell (over 1: the leaves overlap into a canopy).");
+    r.field("Rim", rim, 0.01f, 0.0f, 0.5f);
+    r.help("The dark edge's width as a fraction of the leaf.");
+    r.field("Cutout", cutout);
+    r.help("Nothing between the leaves (with the texture's Alpha From Cover a Cutout material shows holes there); off:\n"
+           "the Background colour.");
+    r.color("Lit", lit);
+    r.color("Shade", shade);
+    r.color("Line", line);
+    r.color("Background", back);
+  }
+  LayerSample sample(float u, float v, const LayerContext &c) const override {
+    const int N = cnt(cells, 2, 64);
+    const float sx = u * N, sy = v * N, L = clampf(fin(size, 0.9f), 0.2f, 1.6f) * 0.5f, W = L * 0.5f;
+    const int cx = (int)std::floor(sx), cy = (int)std::floor(sy);
+    float best = 1e9f, best_y = 0.0f;
+    uint32_t best_id = 0;
+    for (int oy = -1; oy <= 1; oy++)
+      for (int ox = -1; ox <= 1; ox++) {
+        const int gx = cx + ox, gy = cy + oy;
+        const uint32_t wx = (uint32_t)wrapi(gx, N), wy = (uint32_t)wrapi(gy, N);
+        const float px = gx + 0.5f + (texture_rand(wx, wy, c.seed) - 0.5f) * 0.6f, py = gy + 0.5f + (texture_rand(wx, wy, c.seed + 1u) - 0.5f) * 0.6f;
+        const float ang = texture_rand(wx, wy, c.seed + 2u) * kPi, ca = std::cos(ang), sa = std::sin(ang);
+        const float dx = sx - px, dy = sy - py, lx = dx * ca + dy * sa, ly = -dx * sa + dy * ca;  // along the leaf, across it
+        const float r = std::sqrt((lx / L) * (lx / L) + (ly / W) * (ly / W));  // 1 at the edge
+        if (r < best) best = r, best_y = ly / W, best_id = wx * 131u + wy;
+      }
+    LayerSample s;
+    if (best > 1.0f) {
+      s.albedo = fin3(back, Vec3(0.14f, 0.3f, 0.16f));
+      s.height = 0.0f;
+      s.rough = 0.8f;
+      s.cover = cutout ? 0.0f : 1.0f;
+      return s;
+    }
+    const float rw = clampf(fin(rim, 0.12f), 0.0f, 0.5f);
+    const bool upper = best_y + (texture_rand(best_id, 7u, c.seed) - 0.5f) * 0.6f > 0.0f;  // the lit half, each leaf's own way round
+    s.albedo = best > 1.0f - rw ? fin3(line, Vec3(0.08f, 0.2f, 0.1f)) : upper ? fin3(lit, Vec3(0.45f, 0.72f, 0.3f)) : fin3(shade, Vec3(0.2f, 0.42f, 0.2f));
+    s.height = 0.4f + 0.6f * (1.0f - best);
+    s.rough = 0.6f;
+    return s;
+  }
+};
+
+/* Grass: blades from the bottom of the tile, each a thin triangle leaning a little, three tones (base, blade, tip
+ * highlight); nothing between them (a grass card cuts out). Periodic across, a card up and down. */
+struct GrassLayer : TextureLayerBase<GrassLayer> {
+  static constexpr const char *kName = "Grass";
+  int blades = 24;
+  float height = 0.8f, lean = 0.3f;
+  bool cutout = true;
+  Vec3 lit{0.5f, 0.78f, 0.3f}, shade{0.22f, 0.45f, 0.18f}, tip{0.78f, 0.92f, 0.45f}, back{0.16f, 0.3f, 0.14f};
+  GrassLayer() { targets = TargetAlbedo | TargetHeight | TargetRoughness | TargetAlpha; }
+  void reflect(Reflector &r) override {
+    r.field("Blades", blades, 2, 256);
+    r.help("Blade columns across the tile (three blades each).");
+    r.field("Height", height, 0.01f, 0.1f, 1.0f);
+    r.help("The tallest blade as a fraction of the tile's height.");
+    r.field("Lean", lean, 0.01f, 0.0f, 0.8f);
+    r.help("How far a blade's tip leans sideways (as far as the neighbouring column reaches).");
+    r.field("Cutout", cutout);
+    r.help("Nothing between the blades (a grass card with Alpha From Cover); off: the Background colour.");
+    r.color("Lit", lit);
+    r.color("Shade", shade);
+    r.color("Tip", tip);
+    r.color("Background", back);
+  }
+  LayerSample sample(float u, float v, const LayerContext &c) const override {
+    const int N = cnt(blades, 2, 256);
+    const float sx = u * N, from_bottom = 1.0f - (v - std::floor(v));  // 0 at the bottom row, 1 at the top
+    const int cx = (int)std::floor(sx);
+    const float hmax = clampf(fin(height, 0.8f), 0.1f, 1.0f), ln = clampf(fin(lean, 0.3f), 0.0f, 0.8f);  // (0.8: a tip stays within the neighbouring column the scan looks at)
+    float best_t = -1.0f;
+    for (int ox = -1; ox <= 1; ox++)
+      for (uint32_t k = 0; k < 3; k++) {
+        const int gx = cx + ox;
+        const uint32_t wx = (uint32_t)wrapi(gx, N);
+        const float base = gx + texture_rand(wx, k, c.seed), h = hmax * (0.5f + 0.5f * texture_rand(wx, k, c.seed + 1u));
+        const float t = from_bottom / h;  // 0 at the base, 1 at the tip
+        if (t < 0.0f || t > 1.0f) continue;
+        const float centre = base + (texture_rand(wx, k, c.seed + 2u) - 0.5f) * 2.0f * ln * t * t, half = 0.18f * (1.0f - t) + 0.01f;
+        if (std::fabs(sx - centre) <= half && t > best_t) best_t = t;
+      }
+    LayerSample s;
+    if (best_t < 0.0f) {
+      s.albedo = fin3(back, Vec3(0.16f, 0.3f, 0.14f));
+      s.height = 0.0f;
+      s.rough = 0.8f;
+      s.cover = cutout ? 0.0f : 1.0f;
+      return s;
+    }
+    s.albedo = best_t > 0.85f ? fin3(tip, Vec3(0.78f, 0.92f, 0.45f)) : best_t > 0.45f ? fin3(lit, Vec3(0.5f, 0.78f, 0.3f)) : fin3(shade, Vec3(0.22f, 0.45f, 0.18f));
+    s.height = 0.3f + 0.7f * best_t;
+    s.rough = 0.6f;
+    return s;
+  }
+};
+
+/* Plaster: one flat tone with a faint second tone in patches and a few thin cracks (some Voronoi edges). */
+struct PlasterLayer : TextureLayerBase<PlasterLayer> {
+  static constexpr const char *kName = "Plaster";
+  int cells = 6;
+  float cracks = 0.3f, crack_width = 0.01f, stain = 0.5f;
+  Vec3 color{0.86f, 0.82f, 0.74f}, color2{0.78f, 0.74f, 0.66f}, line{0.35f, 0.3f, 0.26f};
+  void reflect(Reflector &r) override {
+    r.field("Cells", cells, 2, 64);
+    r.help("The crack network's cells across the tile.");
+    r.field("Cracks", cracks, 0.01f, 0.0f, 1.0f);
+    r.help("The share of the cells' edges that are cracks (0: a plain wall).");
+    r.field("Crack Width", crack_width, 0.002f, 0.0f, 0.1f);
+    r.field("Stain", stain, 0.01f, 0.0f, 1.0f);
+    r.help("How much of the wall takes the second tone, in soft patches.");
+    r.color("Color", color);
+    r.color("Color 2", color2);
+    r.color("Line", line);
+  }
+  LayerSample sample(float u, float v, const LayerContext &c) const override {
+    const int N = cnt(cells, 2, 64);
+    const CellHit h = voronoi_cells(u * N, v * N, N, 1.0f, c.seed);
+    LayerSample s;
+    const float cw = clampf(fin(crack_width, 0.01f), 0.0f, 0.1f) * N, share = clampf(fin(cracks, 0.3f), 0.0f, 1.0f);
+    /* A crack is one edge between two cells (hashed by both ids, in a fixed order), not a cell's whole outline. */
+    const uint32_t ia = h.a * 977u + h.b, ib = h.a2 * 977u + h.b2;
+    const bool cracked = texture_rand(std::min(ia, ib), std::max(ia, ib), c.seed + 5u) < share && h.d2 - h.d1 < cw;
+    const float patch = periodic_fbm(u, v, 3.0f, 3, 0.5f, c.seed);
+    const bool second = patch < clampf(fin(stain, 0.5f), 0.0f, 1.0f) * 0.5f + 0.25f;
+    s.albedo = cracked ? fin3(line, Vec3(0.35f, 0.3f, 0.26f)) : second ? fin3(color2, Vec3(0.78f, 0.74f, 0.66f)) : fin3(color, Vec3(0.86f, 0.82f, 0.74f));
+    s.height = cracked ? 0.3f : 0.6f;
+    s.rough = 0.9f;
+    return s;
+  }
+};
+
+/* Window Grid: rows of windows in a wall, a frame round each, lit or dark glass (a share lit), the lit glass a
+ * lighter upper pane. */
+struct WindowGridLayer : TextureLayerBase<WindowGridLayer> {
+  static constexpr const char *kName = "Window Grid";
+  int rows = 4, columns = 6;
+  float window = 0.55f, frame = 0.08f, lit_share = 0.4f;
+  Vec3 wall{0.75f, 0.7f, 0.62f}, frame_color{0.3f, 0.28f, 0.26f}, glass{0.3f, 0.42f, 0.55f}, lit{0.95f, 0.85f, 0.55f};
+  void reflect(Reflector &r) override {
+    r.field("Rows", rows, 1, 64);
+    r.field("Columns", columns, 1, 64);
+    r.field("Window", window, 0.01f, 0.1f, 0.95f);
+    r.help("A window's width and height as a fraction of its cell.");
+    r.field("Frame", frame, 0.005f, 0.0f, 0.4f);
+    r.help("The frame's width as a fraction of the window.");
+    r.field("Lit Share", lit_share, 0.01f, 0.0f, 1.0f);
+    r.help("The share of windows lit from inside (an evening street).");
+    r.color("Wall", wall);
+    r.color("Frame", frame_color);
+    r.color("Glass", glass);
+    r.color("Lit Glass", lit);
+  }
+  LayerSample sample(float u, float v, const LayerContext &c) const override {
+    const int R = cnt(rows, 1, 64), C = cnt(columns, 1, 64);
+    const float sx = u * C, sy = v * R;
+    const int cx = (int)std::floor(sx), cy = (int)std::floor(sy);
+    const float fx = sx - cx - 0.5f, fy = sy - cy - 0.5f;  // -0.5..0.5 in the cell
+    const float half = 0.5f * clampf(fin(window, 0.55f), 0.1f, 0.95f), fw = clampf(fin(frame, 0.08f), 0.0f, 0.4f) * half * 2.0f;
+    LayerSample s;
+    s.rough = 0.8f;
+    if (std::fabs(fx) > half || std::fabs(fy) > half) {
+      s.albedo = fin3(wall, Vec3(0.75f, 0.7f, 0.62f));
+      s.height = 0.6f;
+      return s;
+    }
+    const bool on_frame = std::fabs(fx) > half - fw || std::fabs(fy) > half - fw || std::fabs(fx) < fw * 0.5f || std::fabs(fy) < fw * 0.5f;  // the frame and its cross bars
+    if (on_frame) {
+      s.albedo = fin3(frame_color, Vec3(0.3f, 0.28f, 0.26f));
+      s.height = 0.5f;
+      return s;
+    }
+    const bool is_lit = texture_rand((uint32_t)wrapi(cx, C), (uint32_t)wrapi(cy, R), c.seed) < clampf(fin(lit_share, 0.4f), 0.0f, 1.0f);
+    const Vec3 g = is_lit ? fin3(lit, Vec3(0.95f, 0.85f, 0.55f)) : fin3(glass, Vec3(0.3f, 0.42f, 0.55f));
+    s.albedo = fy < 0.0f ? g : g * 0.8f;  // the lower pane a shade darker (a reflection line painters draw)
+    s.height = 0.4f;
+    s.rough = 0.1f;
+    return s;
+  }
+};
+
+/* Roof Tiles: rows of overlapping tiles, every other row offset by half a tile, each with a rounded bottom edge, a
+ * shadow band where the row above overlaps and a line between neighbours. */
+struct RoofTilesLayer : TextureLayerBase<RoofTilesLayer> {
+  static constexpr const char *kName = "Roof Tiles";
+  int rows = 6, columns = 8;
+  float overlap = 0.3f, line_width = 0.04f;
+  Vec3 color{0.55f, 0.32f, 0.26f}, shade{0.34f, 0.2f, 0.17f}, line{0.18f, 0.1f, 0.09f};
+  void reflect(Reflector &r) override {
+    r.field("Rows", rows, 1, 64);
+    r.help("Rows of tiles down the tile (rounded up to an even number, so the stagger repeats).");
+    r.field("Columns", columns, 1, 64);
+    r.field("Overlap", overlap, 0.01f, 0.0f, 0.6f);
+    r.help("The shadow band under each row, as a fraction of a tile's height.");
+    r.field("Line Width", line_width, 0.005f, 0.0f, 0.2f);
+    r.color("Color", color);
+    r.color("Shade", shade);
+    r.color("Line", line);
+  }
+  LayerSample sample(float u, float v, const LayerContext &) const override {
+    const int R = round_up(cnt(rows, 1, 64), 2), C = cnt(columns, 1, 64);  // (even rows: the stagger repeats one tile over)
+    const float sy = v * R;
+    const int cy = (int)std::floor(sy);
+    const float sx = u * C + ((wrapi(cy, R) & 1) ? 0.5f : 0.0f);
+    const int cx = (int)std::floor(sx);
+    const float fx = sx - cx, fy = sy - cy;  // 0..1 in the tile, fy down the tile
+    const float lw = clampf(fin(line_width, 0.04f), 0.0f, 0.2f), ov = clampf(fin(overlap, 0.3f), 0.0f, 0.6f);
+    /* The rounded bottom edge: a half circle's arc reaching the tile's bottom at its middle. */
+    const float arc = 1.0f - 0.25f * (1.0f - std::cos((fx - 0.5f) * 2.0f * kPi));
+    LayerSample s;
+    s.rough = 0.8f;
+    if (fx < lw || fx > 1.0f - lw || fy > arc) {  // a line between neighbours; below the arc the next row's tile shows its shadow band
+      s.albedo = fy > arc ? fin3(shade, Vec3(0.34f, 0.2f, 0.17f)) : fin3(line, Vec3(0.18f, 0.1f, 0.09f));
+      s.height = 0.3f;
+      return s;
+    }
+    s.albedo = fy < ov ? fin3(shade, Vec3(0.34f, 0.2f, 0.17f)) : fin3(color, Vec3(0.55f, 0.32f, 0.26f));
+    s.height = fy < ov ? 0.5f : 0.7f;
+    return s;
+  }
+};
+
+/* Sky Gradient: the zenith's colour at the top to the horizon's at the bottom, a sun's glow if asked. A card: it
+ * doesn't tile up and down. */
+struct SkyGradientLayer : TextureLayerBase<SkyGradientLayer> {
+  static constexpr const char *kName = "Sky Gradient";
+  float horizon = 0.7f, sun = 0.0f, sun_u = 0.7f, sun_v = 0.3f;
+  Vec3 top{0.25f, 0.5f, 0.9f}, bottom{0.75f, 0.88f, 0.98f}, sun_color{1.0f, 0.95f, 0.75f};
+  void reflect(Reflector &r) override {
+    r.field("Horizon", horizon, 0.01f, 0.05f, 1.0f);
+    r.help("Where the bottom colour is reached, down the tile (0.7: the lower third is the horizon's tone).");
+    r.field("Sun", sun, 0.01f, 0.0f, 0.5f);
+    r.help("A sun's glow radius as a fraction of the tile (0: none).");
+    r.field("Sun U", sun_u, 0.01f, 0.0f, 1.0f);
+    r.field("Sun V", sun_v, 0.01f, 0.0f, 1.0f);
+    r.color("Top", top);
+    r.color("Bottom", bottom);
+    r.color("Sun Color", sun_color);
+  }
+  LayerSample sample(float u, float v, const LayerContext &) const override {
+    const float vv = v - std::floor(v), uu = u - std::floor(u);
+    const float t = smooth(0.0f, clampf(fin(horizon, 0.7f), 0.05f, 1.0f), vv);
+    LayerSample s;
+    s.albedo = lerp(fin3(top, Vec3(0.25f, 0.5f, 0.9f)), fin3(bottom, Vec3(0.75f, 0.88f, 0.98f)), t);
+    const float sr = clampf(fin(sun, 0.0f), 0.0f, 0.5f);
+    if (sr > 0.0f) {
+      const float su = clampf(fin(sun_u, 0.7f), 0.0f, 1.0f), sv = clampf(fin(sun_v, 0.3f), 0.0f, 1.0f);
+      float du = std::fabs(uu - su);
+      du = std::min(du, 1.0f - du);  // (across, the card tiles: a sun near the seam reaches round it)
+      const float d = std::sqrt(du * du + (vv - sv) * (vv - sv));
+      if (d < sr) s.albedo = d < sr * 0.4f ? fin3(sun_color, Vec3(1.0f, 0.95f, 0.75f)) : lerp(s.albedo, fin3(sun_color, Vec3(1.0f, 0.95f, 0.75f)), 0.5f);  // a disc and one ring of glow
+    }
+    s.height = 0.5f;
+    s.rough = 1.0f;
+    return s;
+  }
+};
+
+/* Clouds: bold cumulus shapes from thresholded noise, a lit top and a flat shaded underside, an outline; nothing
+ * between them (a cloud card cuts out) or the sky colour. */
+struct CloudsLayer : TextureLayerBase<CloudsLayer> {
+  static constexpr const char *kName = "Clouds";
+  float scale = 3.0f, amount = 0.45f, shade_depth = 0.06f;
+  bool cutout = true, outline = true;
+  Vec3 lit{1.0f, 1.0f, 1.0f}, shade{0.72f, 0.78f, 0.88f}, line{0.55f, 0.62f, 0.75f}, sky{0.45f, 0.68f, 0.95f};
+  CloudsLayer() { targets = TargetAlbedo | TargetHeight | TargetRoughness | TargetAlpha; }
+  void reflect(Reflector &r) override {
+    r.field("Scale", scale, 0.1f, 0.5f, 20.0f);
+    r.help("Cloud lumps across the tile.");
+    r.field("Cover", amount, 0.01f, 0.0f, 1.0f);
+    r.help("How much of the sky the clouds cover.");
+    r.field("Shade Depth", shade_depth, 0.005f, 0.0f, 0.3f);
+    r.help("How far up from a cloud's underside the flat shadow reaches.");
+    r.field("Cutout", cutout);
+    r.help("Nothing between the clouds (a cloud card with Alpha From Cover); off: the Sky colour.");
+    r.field("Outline", outline);
+    r.color("Lit", lit);
+    r.color("Shade", shade);
+    r.color("Line", line);
+    r.color("Sky", sky);
+  }
+  LayerSample sample(float u, float v, const LayerContext &c) const override {
+    const float sc = clampf(fin(scale, 3.0f), 0.5f, 20.0f), thr = 1.0f - clampf(fin(amount, 0.45f), 0.0f, 1.0f) * 0.6f - 0.2f;
+    const float n = periodic_fbm(u, v, sc, 4, 0.55f, c.seed);
+    LayerSample s;
+    if (n < thr) {
+      s.albedo = fin3(sky, Vec3(0.45f, 0.68f, 0.95f));
+      s.height = 0.0f;
+      s.rough = 1.0f;
+      s.cover = cutout ? 0.0f : 1.0f;
+      return s;
+    }
+    const float depth = clampf(fin(shade_depth, 0.06f), 0.0f, 0.3f);
+    const float below = periodic_fbm(u, v + depth, sc, 4, 0.55f, c.seed);  // (v runs down: the point below this one)
+    const bool underside = below < thr;  // the cloud ends just under here: its flat shadow
+    const bool edge = outline && n < thr + 0.025f;
+    s.albedo = edge ? fin3(line, Vec3(0.55f, 0.62f, 0.75f)) : underside ? fin3(shade, Vec3(0.72f, 0.78f, 0.88f)) : fin3(lit, Vec3(1.0f));
+    s.height = 0.5f + 0.5f * clampf((n - thr) * 3.0f, 0.0f, 1.0f);
+    s.rough = 1.0f;
+    return s;
+  }
+};
+
+/* Rocks: stones as Voronoi cells with a ground line between them, each lit on its upper left and shaded on its
+ * lower right (a painter's one key light). */
+struct RocksLayer : TextureLayerBase<RocksLayer> {
+  static constexpr const char *kName = "Rocks";
+  int cells = 7;
+  float gap = 0.06f, randomness = 0.8f;
+  Vec3 lit{0.62f, 0.58f, 0.52f}, shade{0.4f, 0.37f, 0.34f}, line{0.2f, 0.18f, 0.16f};
+  void reflect(Reflector &r) override {
+    r.field("Cells", cells, 1, 64);
+    r.field("Gap", gap, 0.005f, 0.0f, 0.3f);
+    r.help("The ground showing between stones, as a fraction of a cell.");
+    r.field("Randomness", randomness, 0.01f, 0.0f, 1.0f);
+    r.color("Lit", lit);
+    r.color("Shade", shade);
+    r.color("Line", line);
+  }
+  LayerSample sample(float u, float v, const LayerContext &c) const override {
+    const int N = cnt(cells, 1, 64);
+    const float sx = u * N, sy = v * N;
+    const CellHit h = voronoi_cells(sx, sy, N, clampf(fin(randomness, 0.8f), 0.0f, 1.0f), c.seed);
+    const float d1 = h.d1, d2 = h.d2, bx = h.px, by = h.py;
+    LayerSample s;
+    const float g = clampf(fin(gap, 0.06f), 0.0f, 0.3f);
+    if (d2 - d1 < g) {
+      s.albedo = fin3(line, Vec3(0.2f, 0.18f, 0.16f));
+      s.height = 0.1f;
+      s.rough = 0.9f;
+      return s;
+    }
+    const bool up_left = (sx - bx) + (sy - by) < 0.0f;  // the key light from the upper left
+    s.albedo = up_left ? fin3(lit, Vec3(0.62f, 0.58f, 0.52f)) : fin3(shade, Vec3(0.4f, 0.37f, 0.34f));
+    s.height = 0.5f + 0.5f * clampf(1.0f - d1, 0.0f, 1.0f);
+    s.rough = 0.8f;
+    return s;
+  }
+};
+
+/* Water: one tone with thin highlight lines where ripples catch the light, bent by noise. */
+struct WaterLayer : TextureLayerBase<WaterLayer> {
+  static constexpr const char *kName = "Water";
+  int ripples = 10;
+  float width = 0.08f, distortion = 0.4f;
+  Vec3 color{0.2f, 0.45f, 0.75f}, highlight{0.85f, 0.95f, 1.0f}, deep{0.12f, 0.3f, 0.55f};
+  void reflect(Reflector &r) override {
+    r.field("Ripples", ripples, 1, 128);
+    r.help("Ripple rows across the tile.");
+    r.field("Width", width, 0.005f, 0.0f, 0.5f);
+    r.help("A highlight line's width as a fraction of a ripple.");
+    r.field("Distortion", distortion, 0.01f, 0.0f, 2.0f);
+    r.color("Color", color);
+    r.color("Highlight", highlight);
+    r.color("Deep", deep);
+  }
+  LayerSample sample(float u, float v, const LayerContext &c) const override {
+    const int R = cnt(ripples, 1, 128);
+    const float dist = clampf(fin(distortion, 0.4f), 0.0f, 2.0f) * (periodic_fbm(u, v, 2.0f, 3, 0.5f, c.seed) - 0.5f);
+    const float t = fract(v * R + dist * 2.0f + 0.3f * std::sin(u * 2.0f * kPi * 2.0f));  // the ripple rows, bent
+    const float w = clampf(fin(width, 0.08f), 0.0f, 0.5f);
+    const bool line = t < w && periodic_fbm(u + 0.37f, v, 4.0f, 2, 0.5f, c.seed + 3u) > 0.45f;  // broken lines, not rings
+    const bool darker = periodic_fbm(u, v, 1.5f, 2, 0.5f, c.seed + 9u) < 0.42f;
+    LayerSample s;
+    s.albedo = line ? fin3(highlight, Vec3(0.85f, 0.95f, 1.0f)) : darker ? fin3(deep, Vec3(0.12f, 0.3f, 0.55f)) : fin3(color, Vec3(0.2f, 0.45f, 0.75f));
+    s.height = line ? 0.6f : 0.5f;
+    s.rough = 0.05f;
+    return s;
+  }
+};
+
 template<class T> std::unique_ptr<TextureLayer> make() { return std::make_unique<T>(); }
 
 }  // namespace
@@ -1064,6 +1464,15 @@ const std::vector<TextureLayerInfo> &texture_layer_infos() {
        make<ToonRampLayer>},
       {"Face Shadow", "Generators", "A face shadow sweep (a Toon material's Face Shadow Map): the shadow crosses the face from the far side as the light turns.",
        make<FaceShadowLayer>},
+      {"Leaves", "Generators", "Anime leaves: clusters of flat-toned leaf shapes with a dark rim; a foliage card when cut out (task 0150).", make<LeavesLayer>},
+      {"Grass", "Generators", "Anime grass: blades from the bottom in three tones; a grass card when cut out (across only).", make<GrassLayer>},
+      {"Plaster", "Generators", "An anime wall: one flat tone with soft patches of a second and a few thin cracks.", make<PlasterLayer>},
+      {"Window Grid", "Generators", "A building's windows: frames, lit and dark glass, a wall tone between.", make<WindowGridLayer>},
+      {"Roof Tiles", "Generators", "Rows of overlapping roof tiles with a shadow band under each row and a line between neighbours.", make<RoofTilesLayer>},
+      {"Sky Gradient", "Generators", "A sky from the zenith's colour to the horizon's, with a sun's disc and glow if asked (across only).", make<SkyGradientLayer>},
+      {"Clouds", "Generators", "Bold anime clouds: a lit top, a flat shaded underside, an outline; a cloud card when cut out.", make<CloudsLayer>},
+      {"Rocks", "Generators", "Stones with a ground line between them, each lit on its upper left (a path, a wall).", make<RocksLayer>},
+      {"Water", "Generators", "Water in one tone with thin bent highlight lines where the ripples catch the light.", make<WaterLayer>},
       {"Image", "Generators", "An image file, tiled.", make<ImageLayer>},
       {"Blur", "Filters", "A box blur of the planes, wrapping at the edges.", make<BlurLayer>},
       {"Levels", "Filters", "Black and white points and a gamma.", make<LevelsLayer>},
