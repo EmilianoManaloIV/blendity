@@ -135,6 +135,7 @@ void register_builtin_components() {
                "hull). Pair it with a Toon material.",
                "Blender: Solidify (Flip Normals) + an outline material; Goo Engine's outlines");
   reg<Rotator>("Scripts", "Spins the object while in Play mode.", "A driver or keyframed rotation");
+  reg<Wind>("Scripts", "A wind along this object's forward (or away from it): spring chains - hair, cloth, tails - move in it (task 0153).", "Blender's Wind force field");
   reg<Oscillator>("Scripts", "Moves the object back and forth while in Play mode.", "Noise / cycles F-Curve modifier");
   reg<PlayerController>("Scripts", "WASD / arrow keys move this object in Play mode.",
                         "No direct equivalent (Blender removed its game engine in 2.80)");

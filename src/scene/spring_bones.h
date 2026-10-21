@@ -30,6 +30,11 @@ struct SpringBone : ComponentBase<SpringBone> {
   float gravity = 1.0f;     // times g
   float radius = 0.02f;     // metres: how far the chain keeps from the body's bones
   bool collide = true;
+  /* Task 0153 (ADR 0049): the strand's own shape and its surroundings. */
+  float bend = 0.0f;         // 0..1: how strongly each bone keeps its angle to the one before it (a curl holds its shape)
+  float root_to_tip = 0.0f;  // 0..1: how much the pull toward the animation fades toward the tip (1: the tip swings free)
+  float wind = 1.0f;         // how much a Wind component moves the chain (0: not at all)
+  bool separate = false;     // kept apart from other chains by its radius (a ponytail's strands don't pass through each other)
   /* Runtime (not saved): each bone's tip and where it was a step ago; the pose the animation last gave. */
   std::vector<Vec3> tip, prev;
   std::vector<Quat> base;   // each bone's local rotation as the animation (or the rest) has it
@@ -39,10 +44,30 @@ struct SpringBone : ComponentBase<SpringBone> {
   void reset_state() { tip.clear(), prev.clear(), base.clear(), wrote.clear(); }
 };
 
+/* A wind (task 0153): along the object's forward (+Z), or away from its position when spherical; a strength in m/s,
+ * turbulence (eddies by place and time) and gusts (the strength breathing over seconds) from periodic noise of the
+ * simulated time, so a bake comes out the same twice. Spring chains feel it by their `wind`. */
+struct Wind : ComponentBase<Wind> {
+  static constexpr const char *kName = "Wind";
+  float strength = 3.0f;    // m/s
+  float turbulence = 0.3f;  // 0..1: eddies as a share of the strength
+  float gusts = 0.3f;       // 0..1: the strength rising and falling by this share
+  bool spherical = false;   // away from the object (a fan) instead of along its forward; no falloff with distance
+  void reflect(Reflector &r) override;
+};
+
 namespace spring {
 
+/* A body bone's collider: a capsule from its head to its tip, its radius fitted to the skin (task 0153) - the vertices
+ * its vertex group moves, measured from the bone in the rest pose - or a seventh of its length without a skin. */
+struct Collider {
+  Vec3 a, b;
+  float r;
+};
+std::vector<Collider> body_colliders(GameObject &armature);  // (the radii cached per armature by the skinned meshes' versions)
+
 extern const char *const kLabels[4];  // "Hair", "Ear", "Tail", "Cloth"
-/* A label's settings (stiffness, damping, gravity, radius). */
+/* A label's settings (stiffness, damping, gravity, radius; bend, root to tip, separate - task 0153). */
 void apply_defaults(SpringBone &s, int label);
 
 /* What a bone is by its name: part of the body (spine, limbs, hands, feet, fingers, toes, head, eyes, jaw), a

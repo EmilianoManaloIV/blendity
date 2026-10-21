@@ -38883,4 +38883,263 @@ static void round81_tests() {
     r170_clear("r170b");
     r170_clear("r170c");
   });
+
+  /* ---------------------------------------------------------------- round 171: strands - bend, root to tip, wind, fitted colliders, separation (task 0153, ADR 0049) */
+  /* A chain's tip after `frames` steps, the hips moving +x at `speed` for the first `moving` frames; the chain's spring
+   * set up by `tune` first. */
+  auto r171_tip_after = [&](R139Tail &t, const std::function<void(SpringBone &)> &tune, int frames, int moving, float speed) {
+    r139_tail(t);
+    tune(*t.tail1->get<SpringBone>());
+    Vec3 tip(0.0f);
+    for (int f = 0; f < frames; f++) {
+      const float x = std::min(f, moving) * (speed / 60.0f);
+      t.hip->set_local_position({x, 1, 0});
+      spring::step(t.s, 1.0f / 60.0f);
+      tip = tip_world(t.tip);
+    }
+    return tip;
+  };
+  test("strands: Bend holds a curled chain's shape under gravity while 0 lets it hang straight; Root To Tip frees the tip while the root keeps following", [&] {
+    /* A chain curled 40 degrees at each joint: with bend 1 and no pull it keeps the curl; with bend 0 it hangs straight. */
+    auto curled = [&](float bend, Vec3 &curled_tip, Vec3 &straight_tip) {
+      R139Tail t;
+      r139_tail(t);
+      for (const char *n : {"Tail2", "Tail3"}) t.s.find_by_name(n)->set_local_rotation(Quat::euler({40.0f, 0.0f, 0.0f}));
+      curled_tip = tip_world(t.tip);
+      straight_tip = t.hip->world_position() + Vec3(0.0f, -0.6f, 0.0f);
+      SpringBone &sb = *t.tail1->get<SpringBone>();
+      sb.stiffness = 0.0f, sb.bend = bend, sb.damping = 0.3f, sb.gravity = 1.0f, sb.collide = false;
+      for (int f = 0; f < 240; f++) spring::step(t.s, 1.0f / 60.0f);
+      return tip_world(t.tip);
+    };
+    Vec3 ct, st;
+    const Vec3 held = curled(1.0f, ct, st), hung = curled(0.0f, ct, st);
+    const float apart = length(ct - st);
+    std::printf("    curled chain: bend 1 ends %.3f m from the curl's tip, bend 0 %.3f m from straight down (the two %.3f m apart)\n", length(held - ct), length(hung - st), apart);
+    CHECK(apart > 0.1f && length(held - ct) < 0.1f * apart && length(hung - st) < 0.02f * 0.6f);
+    /* Root To Tip: the tip lags more with 1 than with 0 under the same move; the first bone's tip lags alike. */
+    auto lag_of = [&](float r2t, float &first_bone_lag) {
+      R139Tail t;
+      r139_tail(t);
+      SpringBone &sb = *t.tail1->get<SpringBone>();
+      sb.stiffness = 0.5f, sb.root_to_tip = r2t, sb.bend = 0.0f, sb.collide = false;
+      float lag = 0.0f;
+      first_bone_lag = 0.0f;
+      for (int f = 0; f < 30; f++) {
+        const float x = f * (2.0f / 60.0f);
+        t.hip->set_local_position({x, 1, 0});
+        spring::step(t.s, 1.0f / 60.0f);
+        lag = std::max(lag, x - tip_world(t.tip).x);
+        first_bone_lag = std::max(first_bone_lag, x - tip_world(t.tail1).x);
+      }
+      return lag;
+    };
+    float fb0 = 0.0f, fb1 = 0.0f;
+    const float lag0 = lag_of(0.0f, fb0), lag1 = lag_of(1.0f, fb1);
+    std::printf("    root to tip 0: the tip lags %.3f m (the first bone %.3f); 1: %.3f m (the first bone %.3f)\n", lag0, fb0, lag1, fb1);
+    CHECK(lag1 > lag0 * 1.2f && std::fabs(fb1 - fb0) < 0.15f * std::max(fb0, 1e-3f));
+  });
+
+  test("strands: a Wind deflects a hanging chain by its strength and the chain's Wind, turbulence makes it stir, and a bake with wind is the same twice", [&] {
+    auto deflection = [&](float strength, float chain_wind, float turbulence, float *stir) {
+      R139Tail t;
+      r139_tail(t);
+      GameObject *w = t.s.create("Breeze");
+      Wind *wind = w->add<Wind>();
+      wind->strength = strength, wind->turbulence = turbulence, wind->gusts = 0.0f;
+      w->set_local_rotation(Quat::euler({0.0f, 90.0f, 0.0f}));  // (forward +Z turned to +X)
+      SpringBone &sb = *t.tail1->get<SpringBone>();
+      sb.wind = chain_wind, sb.stiffness = 0.1f, sb.collide = false;
+      spring::reset(t.s);
+      std::vector<float> xs;
+      for (int f = 0; f < 240; f++) {
+        spring::step(t.s, 1.0f / 60.0f);
+        if (f >= 120) xs.push_back(tip_world(t.tip).x);
+      }
+      double mean = 0.0, var = 0.0;
+      for (float x : xs) mean += x;
+      mean /= std::max<size_t>(1, xs.size());
+      for (float x : xs) var += (x - mean) * (x - mean);
+      if (stir) *stir = (float)std::sqrt(var / std::max<size_t>(1, xs.size()));
+      return (float)mean;
+    };
+    float stir_steady = 0.0f, stir_turbulent = 0.0f;
+    const float blown = deflection(5.0f, 1.0f, 0.0f, &stir_steady), calm = deflection(0.0f, 1.0f, 0.0f, nullptr), deaf = deflection(5.0f, 0.0f, 0.0f, nullptr),
+                stirred = deflection(5.0f, 1.0f, 1.0f, &stir_turbulent);
+    std::printf("    5 m/s: the tip %.3f m downwind (steady, stirring %.4f m); 0 m/s %.4f m; the chain's Wind 0 %.4f m; turbulent %.3f m, stirring %.4f m\n", blown, stir_steady, calm, deaf,
+                stirred, stir_turbulent);
+    CHECK(blown > 0.05f && std::fabs(calm) < 0.005f && std::fabs(deaf) < 0.005f && stir_turbulent > 0.001f && stir_turbulent > 3.0f * stir_steady);
+    /* A bake under the wind: the same keys twice (the wind's time is the simulated time, reset by the bake). */
+    R139Tail t;
+    r139_tail(t);
+    GameObject *w = t.s.create("Breeze");
+    Wind *wind = w->add<Wind>();
+    wind->strength = 4.0f, wind->turbulence = 0.8f, wind->gusts = 0.5f;
+    AnimationClip clip;
+    clip.frame_rate = 60.0f;
+    clip.track("Hips", "Position", 0).set_key(0.0f, 0.0f, AnimLinear);
+    clip.track("Hips", "Position", 0).set_key(60.0f, 1.0f, AnimLinear);
+    AnimationClip a, b;
+    const size_t ka = spring::bake(t.s, *t.root, clip, a), kb = spring::bake(t.s, *t.root, clip, b);
+    bool same = ka == kb && a.tracks.size() == b.tracks.size();
+    for (size_t i = 0; same && i < a.tracks.size(); i++) {
+      same = a.tracks[i].keys.size() == b.tracks[i].keys.size();
+      for (size_t k = 0; same && k < a.tracks[i].keys.size(); k++) same = a.tracks[i].keys[k].value == b.tracks[i].keys[k].value;
+    }
+    std::printf("    baked twice under the wind: %zu and %zu keys, %s\n", ka, kb, same ? "the same" : "DIFFERENT");
+    CHECK(ka > 0 && same);
+  });
+
+  test("strands: a body bone's collider is as wide as the skin it moves (a seventh of the length without one), and a chain hanging into the skin rests outside it", [&] {
+    Scene s;
+    GameObject *root = s.create("Rig");
+    root->add<Armature>();
+    GameObject *tube_bone = r139_bone(s, "Tube", root, {0, 0, 0}, Quat(), 1.0f);  // (a metre up the Y axis)
+    const float without = spring::body_colliders(*root).empty() ? -1.0f : spring::body_colliders(*root)[0].r;
+    /* A tube of radius 0.2 m around it, skinned to it. */
+    MeshPtr tube = std::make_shared<Mesh>();
+    const int rings = 11, seg = 16;
+    for (int r = 0; r < rings; r++)
+      for (int k = 0; k < seg; k++) {
+        const float a = k * 2.0f * kPi / seg;
+        tube->add_vert({0.2f * std::cos(a), r * 0.1f, 0.2f * std::sin(a)});
+      }
+    for (int r = 0; r + 1 < rings; r++)
+      for (int k = 0; k < seg; k++) {
+        const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+        tube->add_face({a, a + seg, b + seg, b});
+      }
+    tube->vertex_groups.push_back({"Tube", std::vector<float>(tube->vert_count(), 1.0f)});
+    tube->touch();
+    GameObject *skin = s.create("Skin");
+    skin->add<MeshFilter>()->mesh = tube;
+    skin->add<SkinModifier>()->object = "Rig";
+    float fitted = -1.0f;
+    for (const spring::Collider &c : spring::body_colliders(*root)) fitted = c.r;
+    std::printf("    the Tube bone's collider: %.3f m without a skin (a seventh), %.3f m fitted to the 0.2 m tube\n", without, fitted);
+    CHECK(std::fabs(without - 1.0f / 7.0f) < 1e-3f && std::fabs(fitted - 0.2f) < 0.02f);
+    /* A chain from a point 0.1 m off the axis, hanging down into the tube: kept outside the fitted radius. */
+    GameObject *hip = r139_bone(s, "Hips", root, {0.1f, 1.3f, 0.0f}, Quat(), 0.05f);
+    GameObject *tip = r139_run(s, "Hair", hip, 3, {0, 0, 0}, Quat::euler({180, 0, 0}), 0.2f);
+    GameObject *hair1 = s.find_by_name("Hair1");
+    spring::add(*hair1, 0);
+    hair1->get<SpringBone>()->radius = 0.01f;
+    hair1->get<SpringBone>()->separate = false;
+    for (int f = 0; f < 240; f++) spring::step(s, 1.0f / 60.0f);
+    const Vec3 p = tip_world(tip);
+    const float off_axis = std::sqrt(p.x * p.x + p.z * p.z);
+    std::printf("    the hair's tip %.3f m from the tube's axis (the tube 0.200 + the chain's 0.010)\n", off_axis);
+    CHECK(off_axis >= 0.2f + 0.01f - 5e-3f);
+    (void)tube_bone;
+  });
+
+  test("strands: Separate keeps two chains apart by their radii, the same hang at 30, 60 and 144 frames a second with bend, wind and separation on, and no NaN after a thousand jerks", [&] {
+    /* Two strands 1 cm apart, radius 2 cm each: strand A's animation leans 30 degrees across B (lean), or both hang
+     * straight as laid out (no lean). With no stiffness both fall straight, 1 cm apart; Separate keeps them their
+     * radii apart only where the animation itself has them further apart than that. */
+    auto apart_after = [&](bool separate, bool lean, float stiffness) {
+      Scene s;
+      GameObject *root = s.create("Rig");
+      root->add<Armature>();
+      GameObject *tips[2];
+      for (int k = 0; k < 2; k++) {
+        GameObject *hip = r139_bone(s, k ? "HipsB" : "HipsA", root, {k * 0.01f, 1.0f, 0.0f}, Quat(), 0.05f);
+        tips[k] = r139_run(s, k ? "StrandB" : "StrandA", hip, 3, {0, 0, 0}, Quat::euler({lean && k == 0 ? 150.0f : 180.0f, 0, 0}), 0.2f);
+        GameObject *first = s.find_by_name(k ? "StrandB1" : "StrandA1");
+        spring::add(*first, 0);
+        SpringBone &sb = *first->get<SpringBone>();
+        sb.radius = 0.02f, sb.separate = separate, sb.collide = false, sb.stiffness = stiffness, sb.bend = 0.0f;
+      }
+      for (int f = 0; f < 120; f++) spring::step(s, 1.0f / 60.0f);
+      return length(tip_world(tips[0]) - tip_world(tips[1]));
+    };
+    const float kept = apart_after(true, true, 0.0f), free = apart_after(false, true, 0.0f), laid = apart_after(true, false, 1.0f);
+    std::printf("    two strands 1 cm apart with radius 2 cm, one leaning across the other: %.3f m apart with Separate, %.3f m without; laid out straight: %.3f m\n", kept, free, laid);
+    CHECK(kept >= 0.035f && free < 0.015f && laid < 0.015f);
+    /* The frame rates. */
+    float past[3] = {0, 0, 0};
+    const float rates[3] = {30.0f, 60.0f, 144.0f};
+    for (int k = 0; k < 3; k++) {
+      R139Tail t;
+      r139_tail(t);
+      GameObject *w = t.s.create("Breeze");
+      w->add<Wind>()->strength = 2.0f;
+      SpringBone &sb = *t.tail1->get<SpringBone>();
+      sb.bend = 0.5f, sb.root_to_tip = 0.5f, sb.separate = true;
+      spring::reset(t.s);
+      const float dt = 1.0f / rates[k];
+      for (float time = 0; time < 3.0f; time += dt) {
+        const float x = std::min(time, 0.5f) * 2.0f;
+        t.hip->set_local_position({x, 1, 0});
+        spring::step(t.s, dt);
+        if (time > 0.5f) past[k] = std::max(past[k], tip_world(t.tip).x - x);
+      }
+    }
+    std::printf("    swung past: %.4f m at 30, %.4f at 60, %.4f at 144 frames a second\n", past[0], past[1], past[2]);
+    CHECK(past[1] > 0.005f && std::fabs(past[0] - past[1]) < 0.25f * past[1] && std::fabs(past[2] - past[1]) < 0.25f * past[1]);
+    /* A thousand jerks of up to 10 m under a wind: every tip finite. */
+    R139Tail t;
+    r139_tail(t);
+    t.s.create("Breeze")->add<Wind>()->strength = 6.0f;
+    SpringBone &sb = *t.tail1->get<SpringBone>();
+    sb.bend = 0.7f, sb.separate = true;
+    bool finite = true;
+    for (int f = 0; f < 1000 && finite; f++) {
+      const Vec3 p((texture_rand((uint32_t)f, 1u, 171u) - 0.5f) * 20.0f, 1.0f + (texture_rand((uint32_t)f, 2u, 171u) - 0.5f) * 20.0f, (texture_rand((uint32_t)f, 3u, 171u) - 0.5f) * 20.0f);
+      t.hip->set_local_position(p);
+      spring::step(t.s, 1.0f / 60.0f);
+      const Vec3 q = tip_world(t.tip);
+      finite = std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z);
+    }
+    CHECK(finite);
+    /* The settings and a Wind survive saving and loading. */
+    sb.wind = 0.5f, sb.root_to_tip = 0.25f;
+    Wind &wf = *t.s.find_by_name("Breeze")->get<Wind>();
+    wf.turbulence = 0.35f, wf.gusts = 0.45f, wf.spherical = true;
+    Scene back;
+    std::string error;
+    CHECK(load_scene_text(save_scene_text(t.s), back, error));
+    const GameObject *b1 = back.find_by_name("Tail1"), *bw = back.find_by_name("Breeze");
+    const SpringBone *bs = b1 ? b1->get<SpringBone>() : nullptr;
+    const Wind *ww = bw ? bw->get<Wind>() : nullptr;
+    CHECK(bs && std::fabs(bs->bend - 0.7f) < 1e-6f && bs->separate && std::fabs(bs->wind - 0.5f) < 1e-6f && std::fabs(bs->root_to_tip - 0.25f) < 1e-6f && ww &&
+          std::fabs(ww->strength - 6.0f) < 1e-6f && std::fabs(ww->turbulence - 0.35f) < 1e-6f && std::fabs(ww->gusts - 0.45f) < 1e-6f && ww->spherical);
+    /* The hair label's defaults set the new fields. */
+    SpringBone hair;
+    spring::apply_defaults(hair, 0);
+    CHECK(std::fabs(hair.bend - 0.2f) < 1e-6f && std::fabs(hair.root_to_tip - 0.6f) < 1e-6f && hair.separate && std::fabs(hair.wind - 1.0f) < 1e-6f);
+  });
+
+  test("strands: the bones keep their lengths within 0.1 % under a move with bend on, and a curl holds its angle swung out of its plane", [&] {
+    /* The chain curled 40 degrees at each joint about X (the curl lies in the YZ plane), bend 1, no pull; the hips
+     * swung a metre along X over the first second - the swing takes the chain out of the curl's plane. The joint
+     * angles stay at the curl's, where a world-space turn would have flattened them; the lengths stay. */
+    R139Tail t;
+    r139_tail(t);
+    for (const char *n : {"Tail2", "Tail3"}) t.s.find_by_name(n)->set_local_rotation(Quat::euler({40.0f, 0.0f, 0.0f}));
+    SpringBone &sb = *t.tail1->get<SpringBone>();
+    sb.stiffness = 0.0f, sb.bend = 1.0f, sb.damping = 0.3f, sb.gravity = 1.0f, sb.collide = false;
+    GameObject *b[3] = {t.tail1, t.s.find_by_name("Tail2"), t.tip};
+    auto joints = [&](Vec3 *p) {  // the three bones' heads and the last tip
+      for (int i = 0; i < 3; i++) p[i] = b[i]->world_position();
+      p[3] = tip_world(t.tip);
+    };
+    Vec3 p0[4], p[4];
+    joints(p0);
+    float worst = 0.0f, lean = 0.0f, angle[2] = {40.0f, 40.0f};  // (the joint angles furthest from the curl's over the swing, from the tenth frame)
+    for (int f = 0; f < 240; f++) {
+      t.hip->set_local_position({std::min(f, 60) / 60.0f, 1, 0});
+      spring::step(t.s, 1.0f / 60.0f);
+      joints(p);
+      for (int i = 0; i < 3; i++) worst = std::max(worst, std::fabs(length(p[i + 1] - p[i]) - length(p0[i + 1] - p0[i])) / length(p0[i + 1] - p0[i]));
+      lean = std::max(lean, -normalize(p[1] - p[0]).x);
+      for (int i = 0; i < 2 && f >= 10; i++) {
+        const Vec3 d0 = normalize(p[i + 1] - p[i]), d1 = normalize(p[i + 2] - p[i + 1]);
+        const float a = std::acos(std::max(-1.0f, std::min(1.0f, dot(d0, d1)))) * 180.0f / kPi;
+        if (std::fabs(a - 40.0f) > std::fabs(angle[i] - 40.0f)) angle[i] = a;
+      }
+    }
+    std::printf("    swung a metre along X (the first bone leaning up to %.2f back along X): the bones' lengths within %.4f %%, the joints never further from the curl's 40 degrees than %.1f and %.1f\n", lean, worst * 100.0f, angle[0], angle[1]);
+    CHECK(worst < 1e-3f && lean > 0.1f && std::fabs(angle[0] - 40.0f) < 10.0f && std::fabs(angle[1] - 40.0f) < 10.0f);
+  });
 }

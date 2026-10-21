@@ -385,6 +385,14 @@ the mouse, click to keep it. IK targets are boxes and poles diamonds, coloured b
 yellow); Rigging > FK Controls puts circles on bones to turn them by. Remove IK and Remove FK Controls take them away.
 A character made with GameObject > Armature or the auto-rig lives under one root ("Robot Rig"), as Unity imports one.
 
+**Spring Bones** (Rigging window, with a bone selected; or on an imported character automatically by the bones'
+names) make hair, ears, tails and cloth strips swing after the animation: Stiffness pulls a chain back to its pose,
+Damping settles it, Gravity hangs it, Radius and Collide keep it outside the body's bones, whose capsules are as wide
+as the skin each bone moves. Bend holds each bone's animated angle to the one before it (a curl keeps its shape),
+Root To Tip frees the tips while the root follows, Separate keeps a chain apart from the others (a ponytail's
+strands), and a Wind component (Add Component > Scripts: strength in m/s along the object's forward or away from it,
+turbulence, gusts) blows every chain by its own Wind. Bake writes the swing into a clip, the same twice.
+
 **Use cases:** game characters and creatures; posed renders; clothing and armour for an existing rig.
 
 > Learn: *Modifiers vs Components > Vertex groups, Weight painting, Bones and skins, Automatic weights by inpainting,

@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 171): strands - bend, root to tip, wind, colliders fitted to the skin, separation (task 0153, ADR 0049)
+
+**Asked:** realistic hair and soft-tissue physics for Spring Bones, research based. This round: the strands.
+
+**Added**
+- **Bend** on a Spring Bones chain: each bone keeps its animated angle to the one before it, by this much - a curl
+  keeps its shape, a strand bends where it was bent (0: the old behaviour, a curl straightens). **Root To Tip**: the
+  pull toward the animation fades toward the tip, so long hair's tips swing free while the root follows.
+- **Wind**, a component (Add Component > Scripts): a wind along the object's forward (or away from it, Spherical) of
+  a strength in m/s, with turbulence (eddies by place and time) and gusts (the strength breathing over seconds) from
+  periodic noise of the simulated time, so a bake comes out the same twice. A chain's **Wind** scales its response.
+- **Colliders fitted to the skin:** a body bone's capsule is as wide as the vertices its vertex group moves (the 85th
+  percentile of their distances from the bone in the rest pose, from the skinned meshes bound to the armature),
+  cached per armature until a mesh changes; a seventh of the length without a skin, as before. A skirt rests on a
+  thigh's real width.
+- **Separate:** a chain is kept apart from other chains by its Radius (every stepped chain's tips in a uniform grid,
+  two rounds of pushing apart and putting the lengths back), so a ponytail's strands and a skirt's pleats don't pass
+  through each other.
+- The labels' defaults set the new fields (hair: bend 0.2, the tips free, apart; an ear stiffer; a tail its curve;
+  cloth free and apart); old chains keep the old behaviour (bend 0, root to tip 0, wind 1, no Wind in the scene).
+- The Learn tab's lesson "Strands: a curl that holds, wind, the body's real width", after Spring Bones.
+
+**Changed after the review**
+- The bend held a world-space turn, so a curl unwound once the chain swung out of its animated plane: the animated
+  angle is carried through the simulated bone's own swing now, and not held after a bone of no length. Root To Tip
+  fades by the length along the chain, not the bone count. Separate never pushes strands further apart than the
+  animation laid them (hair roots are closer than their radii), skips a NaN tip, and the body's collision runs again
+  after it. The fitted radii pick one bone per vertex in one pass (ties to the lower group), take the narrowest skin
+  per bone (a hair shell skinned to the head doesn't widen it), match a skin's armature the way the skin does, and
+  are keyed by the bones' rest, names and lengths, the skins' ids, mesh versions and relative matrices (an undo or a
+  rest edit refreshes them). The wind's clock is per scene and a bake runs its own; the drag converges at any step;
+  the gusts are worked out once a substep.
+
+**Checked**
+- New tests (round 171): a curled chain holding its curl with bend 1 and hanging straight with 0; root to tip 1 lagging
+  the tip more while the first bone lags alike; a 5 m/s wind deflecting a chain by over 5 cm, nothing at 0 m/s or with
+  the chain's Wind 0, turbulence stirring it, a bake under the wind the same twice; a 0.2 m tube's bone fitted to
+  0.2 m (a seventh without the skin) and a chain resting outside it; two strands kept apart by their radii; the same
+  swing at 30, 60 and 144 fps with bend, wind and separation on; no NaN after a thousand 10 m jerks; the settings and
+  the Wind saved and loaded; the lengths within 0.1 % under a move with bend; a curl held out of its plane; strands
+  laid out closer than their radii staying as laid out; the hair label's defaults.
+- Unit checks (round 171): Windows 11,350, 0 failed (899 tests); render-cache verify mode 11,351, 0 failed, 0 stale
+  pictures. Linux with libraries: 11,081, 0 failed. Sanitizer build: 10,958, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 170): the import preview with switchable shading (task 0152)
 
 **Asked:** a preview when importing a model, with the shading switchable before anything lands in the project, so an
