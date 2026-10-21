@@ -3030,7 +3030,8 @@ struct SetFieldReflector : Reflector {
   std::vector<std::string> names;  // pass 1: every field
   std::string target;              // pass 2: the field to set
   bool done = false;
-  bool all_fields() const override { return true; }
+  bool all = true;  // every field, or only the ones shown (matset: a toon field reaches toon materials only)
+  bool all_fields() const override { return all; }
   bool hit(const char *n) {
     if (target.empty()) {
       names.push_back(n);
@@ -3040,11 +3041,21 @@ struct SetFieldReflector : Reflector {
     done = true;
     return true;
   }
+  /* A number, or an expression from the field's own value (+=0.1, *=2, as the Inspector takes); one that isn't a
+   * number sets nothing and says so. */
+  bool number(float current, double &out) {
+    if (ui::eval_number(value, out, current)) return true;
+    bad = true;
+    return false;
+  }
+  bool bad = false;
   void field(const char *n, float &v, float, float mn, float mx) override {
-    if (hit(n)) v = std::max(mn, std::min(mx, (float)std::atof(value.c_str())));
+    double d;
+    if (hit(n) && number(v, d)) v = std::max(mn, std::min(mx, (float)d));
   }
   void field(const char *n, int &v, int mn, int mx) override {
-    if (hit(n)) v = std::max(mn, std::min(mx, std::atoi(value.c_str())));
+    double d;
+    if (hit(n) && number((float)v, d)) v = std::max(mn, std::min(mx, (int)std::lround(d)));
   }
   void field(const char *n, bool &v) override {
     if (hit(n)) v = value == "1" || field_key(value) == "true" || field_key(value) == "on";
@@ -3090,6 +3101,103 @@ void Editor::views_command(const std::string &what, const std::string &value) {
   Log::info("Other views follow drags: %s", other_views_follow_ ? "on" : "off (they catch up on release)");
 }
 
+/* Finds the field (its key exactly, else the first whose key starts with it) and sets it. */
+static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflector &)> &reflect) {
+  sr.target.clear();
+  sr.names.clear();
+  sr.done = false;
+  reflect(sr);
+  for (int pass = 0; pass < 2 && sr.target.empty(); pass++)
+    for (const std::string &n : sr.names)
+      if (pass == 0 ? field_key(n) == sr.key : field_key(n).rfind(sr.key, 0) == 0) {
+        sr.target = n;
+        break;
+      }
+  if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
+  reflect(sr);
+  if (sr.bad) Log::warn("set %s: '%s' isn't a number (a number, or +=1, *=2 from its own value)", sr.target.c_str(), sr.value.c_str());
+  return sr.done && !sr.bad;
+}
+
+/* matset <Field> <value...> (task 0147): the field on every selected material - the Materials window's selection,
+ * else the selected objects' materials - where it applies (a toon field reaches the toon ones). One undo step. */
+void Editor::matset_command(const std::vector<std::string> &t, const std::string &line) {
+  if (t.size() < 3) {
+    Log::warn("matset <Field> <value> (e.g. matset ToonThreshold 0.4): the selected materials");
+    return;
+  }
+  /* The Materials window's selection while the window is open (it keeps its selection when closed), else the
+   * selected objects' materials. */
+  const bool from_window = dock_find(WindowKind::Materials) != nullptr && !material_multi_.items.empty();
+  std::vector<MaterialPtr> targets = from_window ? material_multi_.items : std::vector<MaterialPtr>();
+  if (!from_window)
+    for (GameObject *g : selected_objects(false))
+      if (auto *mr = g->get<MeshRenderer>())
+        for (const MaterialPtr &m : mr->materials)
+          if (m && std::find(targets.begin(), targets.end(), m) == targets.end()) targets.push_back(m);
+  if (targets.empty()) {
+    Log::warn("matset: no material selected (select some in the Materials window, or objects that use them)");
+    return;
+  }
+  const std::string key = field_key(t[1]);
+  if (key == "name") {
+    Log::warn("matset: a name is each material's own (its file's); rename them one at a time");
+    return;
+  }
+  /* One field for all of them: the exact name shown on any of them, else the first whose key starts with it - never a
+   * different field per material. */
+  SetFieldReflector sr;
+  sr.all = false;
+  sr.key = key;
+  std::vector<std::string> shown;
+  for (const MaterialPtr &m : targets) {
+    sr.target.clear(), sr.names.clear();
+    m->reflect(sr);
+    for (const std::string &nm : sr.names)
+      if (std::find(shown.begin(), shown.end(), nm) == shown.end()) shown.push_back(nm);
+  }
+  std::string field;
+  for (int pass = 0; pass < 2 && field.empty(); pass++)
+    for (const std::string &nm : shown)
+      if (pass == 0 ? field_key(nm) == key : field_key(nm).rfind(key, 0) == 0) {
+        field = nm;
+        break;
+      }
+  if (field.empty()) {
+    sr.all = true;  // is it a field at all, hidden on all of them (a toon field on PBR materials)?
+    sr.target.clear(), sr.names.clear();
+    targets[0]->reflect(sr);
+    bool exists = false;
+    for (const std::string &nm : sr.names) exists = exists || field_key(nm) == key || field_key(nm).rfind(key, 0) == 0;
+    if (exists) Log::warn("matset: '%s' isn't shown on any selected material (a toon field needs Shading Model Toon, an axis field an Axis Mode)", t[1].c_str());
+    else Log::warn("matset: no material field '%s'", t[1].c_str());
+    return;
+  }
+  const size_t at = line.find(t[2], line.find(t[1], t[0].size()) + t[1].size());
+  sr.all = false;
+  sr.value = at == std::string::npos ? "" : line.substr(at);
+  size_t n = 0;
+  for (const MaterialPtr &m : targets) {
+    sr.target = field;
+    sr.done = false;
+    sr.bad = false;
+    m->reflect(sr);
+    if (sr.bad) {
+      Log::warn("matset %s: '%s' isn't a number (a number, or +=1, *=2 from each one's own value)", field.c_str(), sr.value.c_str());
+      return;
+    }
+    if (!sr.done) continue;
+    m->touch();
+    n++;
+  }
+  if (!n) {
+    Log::warn("matset: '%s' isn't shown on any selected material", field.c_str());
+    return;
+  }
+  mark_changed(strprintf("Set %s on %zu Materials", field.c_str(), n));
+  Log::info("matset %s: %zu of the %zu %s", field.c_str(), n, targets.size(), from_window ? "selected in the Materials window" : "selected objects' materials");
+}
+
 bool Editor::set_field_command(const std::string &path, const std::string &value) {
   size_t dot = path.find('.');
   if (dot == std::string::npos) {
@@ -3100,21 +3208,7 @@ bool Editor::set_field_command(const std::string &path, const std::string &value
   SetFieldReflector sr;
   sr.key = field_key(path.substr(dot + 1));
   sr.value = value;
-  auto apply = [&](const std::function<void(Reflector &)> &reflect) {
-    sr.target.clear();
-    sr.names.clear();
-    sr.done = false;
-    reflect(sr);
-    for (int pass = 0; pass < 2 && sr.target.empty(); pass++)
-      for (const std::string &n : sr.names)
-        if (pass == 0 ? field_key(n) == sr.key : field_key(n).rfind(sr.key, 0) == 0) {
-          sr.target = n;
-          break;
-        }
-    if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
-    reflect(sr);
-    return sr.done;
-  };
+  auto apply = [&](const std::function<void(Reflector &)> &reflect) { return set_field_on(sr, reflect); };
   int n = 0;
   if (owner == "render") n += apply([&](Reflector &r) { scene_->render.reflect(r); });
   else if (owner == "world") n += apply([&](Reflector &r) { scene_->environment.reflect(r); });
@@ -3263,6 +3357,14 @@ void Editor::run_console_command(const std::string &line) {
     rig_command(t);
     return;
   }
+  if (c == "overlay") {
+    overlay_command(t);
+    return;
+  }
+  if (c == "matset") {
+    matset_command(t, line);
+    return;
+  }
   if (c == "weightpaint" || c == "wpbrush" || c == "wpfalloff" || c == "wpmirror" || c == "wpfront" || c == "wpstroke" || c == "wpnormalize" ||
       c == "wpclean") {
     weight_paint_command(t);
@@ -3298,6 +3400,8 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  set <Component>.<Field> <value> (e.g. set Camera.FStop 1.4, set Render.Samples 64), origin <bounds|median|surface|volume|bottom|selection|pivot|geometry|point x y z>");
     Log::info("  curve|points add|move|delete|select <object> [index] [x y z] (a Curve's or Lattice's points), create Curve: Bezier|Circle|Path, create Lattice");
     Log::info("  meshdeform bind|unbind [object] (a Mesh Deform modifier's cage)");
+    Log::info("  overlay list | all|bones|controls|icons|points|origins|footprints|outline|grid|gizmos|stats [on|off] (the Scene view's layers)");
+    Log::info("  matset <Field> <value> (the selected materials, where the field applies: matset ToonThreshold 0.4)");
     Log::info("  bone add <parent> [length], armature reset|apply [root], skin bind [object] [inpaint|envelope], skin transfer <body> [mesh] (rigging)");
     Log::info("  autorig humanoid|quadruped, autorig mark <marker> <x> <y> <z>, autorig build|cancel (the marker auto-rig)");
     Log::info("  anim new|key|interp|frame|preview|record|play|stop (the Animation window); manual (the user manual)");
@@ -4367,6 +4471,11 @@ void Editor::load_prefs() {
     else if (k == "lesson") lesson_ = std::atoi(v.c_str());
     else if (k == "lessons_done") for (auto &s : split_ws(v)) lessons_done_.insert(std::atoi(s.c_str()));
     else if (k == "grid") show_grid_ = v == "1";
+    else if (k == "overlays_off") {  // the layers hidden last time (task 0146)
+      for (const std::string &w : split_ws(v))
+        for (const OverlayLayer &l : overlay_layers())
+          if (w == l.key) *l.flag = false;
+    }
     else if (k == "ffmpeg") ffmpeg_path_ = v;
     else if (k == "update_check") update_check_ = v != "0";
     else if (k == "update_previews") update_previews_ = v != "0";
@@ -4459,6 +4568,10 @@ void Editor::save_prefs() {
                             always_redraw_ ? 1 : 0, auto_smooth_ ? 1 : 0, auto_smooth_angle_, keymap_preset_.c_str(),
                             keymap_overrides_text().c_str(), draw_global_axes_ ? "global" : "local", scene_filters_ ? 1 : 0, quality_tier_,
                             view_scale_, cpu_threads_, tier_shadow_cap_, tier_gi_rays_cap_, tier_rsm_cap_);
+  std::string overlays_off;
+  for (const OverlayLayer &l : overlay_layers())
+    if (!*l.flag) overlays_off += std::string(overlays_off.empty() ? "" : " ") + l.key;
+  s += "overlays_off=" + overlays_off + "\n";
   s += strprintf("workspace=%s\nfocus=%u\nalltools=%d\nfeel=%s\ntheme=%s\n", workspace_.c_str(), (unsigned)focus_, show_all_tools_ ? 1 : 0,
                  kEditorFeels[(int)nav_style_], theme_name_.c_str());
   s += "ffmpeg=" + ffmpeg_path_ + "\n";

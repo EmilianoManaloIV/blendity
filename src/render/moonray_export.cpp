@@ -244,8 +244,9 @@ bool mesh_geometry(Writer &w, const std::string &name, const RenderMesh &rm, con
   return true;
 }
 
-/* A light (brightness matched to Blendity's path tracer at 1 m: it gives intensity x pi of irradiance there, shaped by
- * Unity's range curve; MoonRay's fall off physically). "" for a light that gives none. */
+/* A light. Point and spot lights are matched to Blendity's path tracer at 1 m (intensity x pi of irradiance there,
+ * shaped by Unity's range curve; MoonRay's fall off physically); an area light is an emissive plane of radiance
+ * intensity x pi in both (task 0155). "" for a light that gives none. */
 std::string light(const RenderLight &l, size_t i, const ExportScene &sc, std::string &name) {
   const float I = l.intensity * kPiF;  // (the irradiance it gives, facing it)
   if (!(I > 0.0f) || !finite3(l.position) || !finite3(l.direction)) return "";
@@ -262,7 +263,9 @@ std::string light(const RenderLight &l, size_t i, const ExportScene &sc, std::st
     d += "    [\"angular_extent\"] = " + lua_number(sc.sun_angle_deg) + ",\n";
     return d + "}\n";
   }
-  const float f = range_at_1m(l);
+  /* An area light is an emissive plane of radiance intensity x pi (task 0155): MoonRay's rect and disk lights take
+   * that radiance as it is; the Range window isn't exported. Point and spot lights are matched at 1 m. */
+  const float f = l.type == RenderLight::Area ? 1.0f : range_at_1m(l);
   if (!(f > 0.0f)) return "";  // (a Range of a metre or less: nothing at the distance they are matched at; noted)
   if (l.type == RenderLight::Area) {
     const float w = std::max(1e-3f, l.width), h = std::max(1e-3f, l.height);
@@ -270,12 +273,12 @@ std::string light(const RenderLight &l, size_t i, const ExportScene &sc, std::st
       const float r = 0.5f * std::sqrt(w * h);
       head("DiskLight", light_frame(l.position, l.direction, l.right));
       d += "    [\"radius\"] = " + lua_number(r) + ",\n";
-      d += "    [\"intensity\"] = " + lua_number(I * f / (kPiF * r * r)) + ",\n";
+      d += "    [\"intensity\"] = " + lua_number(I) + ",\n";
     }
     else {
       head("RectLight", light_frame(l.position, l.direction, l.right));
       d += "    [\"width\"] = " + lua_number(w) + ",\n    [\"height\"] = " + lua_number(h) + ",\n";
-      d += "    [\"intensity\"] = " + lua_number(I * f / (w * h)) + ",\n";
+      d += "    [\"intensity\"] = " + lua_number(I) + ",\n";
     }
     d += "    [\"normalized\"] = false,\n    [\"apply_scene_scale\"] = false,\n";
     return d + "}\n";
@@ -441,13 +444,20 @@ bool export_scene(const ExportScene &sc, const std::string &dir, const PathMap &
   }
   rep.lights = light_names.size();
   for (const RenderLight &l : sc.lights)
-    if (l.type != RenderLight::Directional && l.intensity > 0.0f && !(range_at_1m(l) > 0.0f)) {
-      rep.notes.push_back("a point, spot or area light with a Range of 1 m or less isn't sent (MoonRay's are matched at 1 m)");
+    if (l.type == RenderLight::Point || l.type == RenderLight::Spot) {
+      if (l.intensity > 0.0f && !(range_at_1m(l) > 0.0f)) {
+        rep.notes.push_back("a point or spot light with a Range of 1 m or less isn't sent (MoonRay's are matched at 1 m)");
+        break;
+      }
+    }
+  for (const RenderLight &l : sc.lights)
+    if (l.type == RenderLight::Point || l.type == RenderLight::Spot) {
+      rep.notes.push_back("point and spot lights fade physically in MoonRay (brightness matched at 1 m), not by their Range");
       break;
     }
   for (const RenderLight &l : sc.lights)
-    if (l.type != RenderLight::Directional) {
-      rep.notes.push_back("point, spot and area lights fade physically in MoonRay (brightness matched at 1 m), not by their Range");
+    if (l.type == RenderLight::Area) {
+      rep.notes.push_back("area lights carry their radiance (intensity x pi); their Range window isn't sent, MoonRay's fall off without an end");
       break;
     }
   w.out += mat_defs;

@@ -991,12 +991,15 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         dist = length(d);
         if (dist < 1e-5f) continue;
         dir = d / dist;
-        power *= light_falloff(l, sp.position, dir);  // range, spot cone, area facing
+        /* Range and the spot cone; an area light's point as an emissive plane's (task 0155): its facing, the inverse
+         * square from it, the Range window, times the panel's area (the point was drawn uniformly over it). */
+        power *= l.type == RenderLight::Area ? area_light_area(l) * area_light_falloff(l, p, sp.position) : light_falloff(l, sp.position, dir);
       }
       if (toon_here) {
         /* Toon: N.L x visibility x the falloff in tones; the dark side takes the shadow colour (no shadow ray). */
         if (power <= 0 || !(l.intensity > 0.0f)) continue;
-        const float fall = std::min(1.0f, power / (l.intensity * kPi));  // range, spot cone, an area's facing
+        /* Range, the spot cone; an area light at its centre (as the views band it: per-sample values would blur the bands). */
+        const float fall = std::min(1.0f, l.type == RenderLight::Area ? light_falloff(l, sp.position, dir) : power / (l.intensity * kPi));
         const float ndl = dot(n, dir);
         Vec3 Tr(0.0f);
         if (ndl > 0 && dot(sp.geo_normal, dir) > 0) {

@@ -699,6 +699,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       Light l = lights[li];
       vec3 dir;
       float dist = 1e30, power = l.b.w * PI;
+      float centre_fall = -1.0;  // an area light's falloff at its centre: the toon bands take it (as the views do)
       if (l.a.w < 0.5) {
         vec3 cdir = -l.a.xyz, ct3, cb3;
         onb(cdir, ct3, cb3);
@@ -726,15 +727,28 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
         dist = length(dd);
         if (dist < 1e-5) continue;
         dir = dd / dist;
-        /* As light_falloff on the CPU: range, the spot cone, an area's facing. */
-        float f = saturate1(1.0 - length(l.a.xyz - sp.position) / max(1e-3, l.c.x));
-        power *= f * f;
         float c = -dot(l.d.xyz, dir);
-        if (l.a.w > 1.5 && l.a.w < 2.5) {
-          float t = l.c.z - l.c.y > 1e-6 ? saturate1((c - l.c.y) / (l.c.z - l.c.y)) : (c >= l.c.y ? 1.0 : 0.0);
-          power *= t * t * (3.0 - 2.0 * t);
+        if (l.a.w > 2.5) {
+          /* As area_light_falloff on the CPU (task 0155): an emissive plane's point - its facing, the inverse
+           * square (no nearer than 1 cm), the Range as a window. */
+          vec3 dq = sp.position - p;
+          float r2 = dot(dq, dq), rr = r2 / max(1e-6, l.c.x * l.c.x);
+          float w = saturate1(1.0 - rr * rr);
+          float area = max(1e-4, abs(l.d.w * l.e.w) * (l.c.w > 0.5 ? 0.78539816 : 1.0));  // the panel's area (an ellipse's pi / 4)
+          power *= area * max(c, 0.0) * w * w / max(r2, 1e-4);
+          vec3 dc = sp.position - l.a.xyz;
+          float r2c = dot(dc, dc), rrc = r2c / max(1e-6, l.c.x * l.c.x), wc = saturate1(1.0 - rrc * rrc);
+          centre_fall = area * max(dot(l.d.xyz, dc) / max(sqrt(r2c), 1e-6), 0.0) * wc * wc / max(r2c, 1e-4);
         }
-        else if (l.a.w > 2.5) power *= max(c, 0.0);
+        else {
+          /* As light_falloff on the CPU: range, the spot cone. */
+          float f = saturate1(1.0 - length(l.a.xyz - sp.position) / max(1e-3, l.c.x));
+          power *= f * f;
+          if (l.a.w > 1.5) {
+            float t = l.c.z - l.c.y > 1e-6 ? saturate1((c - l.c.y) / (l.c.z - l.c.y)) : (c >= l.c.y ? 1.0 : 0.0);
+            power *= t * t * (3.0 - 2.0 * t);
+          }
+        }
       }
       /* One shadow ray for both models: transmittance inlines the material evaluation, and a second call site
        * pushed the optimiser past SPIR-V's id limit. A toon surface's dark side takes the shadow colour unlit. */
@@ -744,7 +758,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       vec3 Tr = facing ? transmittance(origin, dir, dist) : vec3(0.0);
       float vis = max(Tr.x, max(Tr.y, Tr.z));
       if (!toon_here && vis <= 0.0) continue;
-      float fall = l.b.w > 0.0 ? min(1.0, power / (l.b.w * PI)) : 0.0;  // range, spot cone, an area's facing: banded too
+      float fall = l.b.w > 0.0 ? min(1.0, centre_fall >= 0.0 ? centre_fall : power / (l.b.w * PI)) : 0.0;  // range, spot cone, an area's centre: banded too
       vec3 c = toon_here ? beta * shade_toon(m, s, n, V, dir, max(ndl, 0.0) * vis * fall) * l.b.xyz * l.b.w
                          : beta * bsdf_any(toon, s, n, V, dir) * l.b.xyz * Tr * power;
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }

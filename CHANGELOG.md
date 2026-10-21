@@ -2,6 +2,104 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-21 (round 166): multi-edit materials (task 0147)
+
+**Asked:** "add the ability to multi-edit materials if they share the same properties (such as shading model). For
+example I can modify toon threshold universally amongst selected materials."
+
+**Added**
+- **Editing several materials at once** (Unity's multi-object editing, for materials): select several in the
+  Materials window (Ctrl-click, Shift for a range), several `.mat` files in the Project window, or several objects
+  in the Scene, and a change made in the fields reaches every one of them that has the field - a Toon Threshold
+  lands on the toon materials and leaves a PBR one alone, an axis field on the axis ones, Shading Model on all (that
+  is how a set is converted). A dash marks a field whose values differ (hover it to see the active one's); what you
+  type lands on all; `+=0.1` or `*=2` moves each from its own value. One undo step; the edited assets are written
+  back. Console: `matset <Field> <value>` on the selection. The anime lesson says so, with a Try-it.
+
+**Checked**
+- New tests (round 166): three toon materials and a PBR one selected in the Materials window: Toon Bands typed 3
+  lands on the three, not the PBR one; `+=1` moves each from its own value; the differing fields are named;
+  `matset ToonThreshold 0.4` reaches the three, `matset ShadingModel 1` all four, an unknown field warns; the `.mat`
+  file on disk holds the values. Three objects selected (two toon, one PBR): Toon Bands typed in the active one's
+  Inspector reaches the other toon object's material, not the PBR one, and one undo takes it back on both; `matset`
+  on the selected objects the same.
+- Unit checks (rounds 164-166 together): Windows 11,126, 0 failed (880 tests); render-cache verify mode 11,127,
+  0 failed, 0 stale pictures. Linux with libraries: 10,862, 0 failed. Sanitizer build: 10,740, 0 failed, no reports.
+  `editor_fuzz` in verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`,
+  `modifiers_ngon`, `editor_render`: 0 problems, no change.
+
+## 2026-10-21 (round 165): Inspector drop-downs, overlay layers, Anime and Manga as one effect each (tasks 0145, 0146, 0154)
+
+**Asked:** "For the guides in the camera, have a drop down stack so it doesn't occupy too much of the inspector's
+camera tab"; "the ability to hide certain objects like bone controls so I can see the mesh without too much
+overstimulation ... I can hide the bone layer, but can still see IK/FK handles"; "For the camera 'Anime' and 'Manga'
+filter. Make its own separate filters not a group composite and make it one unit."
+
+**Added**
+- **Drop-downs in the Inspector** (task 0145): a component's fields can sit under a foldout header, closed or open,
+  that only the Inspector sees - files, undo, the hash, `set` and clips read the fields as before. The camera's
+  Composition Guides are one closed drop-down now; a material's Toon fields sit in a Toon group and the axis ones in
+  Axis Material.
+- **Overlay layers** (task 0146): an Overlays menu in the Scene view's bar (Blender's Overlays popover) with a check
+  per layer - Bones, Rig Controls (IK / FK handles), Light & Camera Icons, Curve & Lattice Points, Object Origins,
+  Footprints & Contacts, Selection Outline, Grid, Gizmos, Statistics - and All Overlays. Hide the bones and keep the
+  rig controls to pose a character by its handles while seeing its mesh. A hidden layer isn't clicked either (a click
+  lands on what is behind), the bones' head and tail handles go with their layer, the Hierarchy and the gizmo still
+  work on anything. Console `overlay list | all|<layer> [on|off]`; the choice is kept in the preferences. A lesson:
+  "Overlays: See the Mesh, Hide the Rig".
+- **Anime and Manga as single effects** (task 0154): the Looks menu adds one Anime effect (Lines, Line Color, Line
+  Thickness, Crease Angle, Saturation, Contrast, Bloom, Bloom Threshold) or one Manga effect (Grayscale, Tones, Dots,
+  Dot Cell, Dot Contrast, Lines, Line Thickness, Paper) instead of three or four. Each draws exactly what the stack it
+  replaces drew (the parts run inside it), so a scene saved with the old composite looks the same, and the parts stay
+  effects of their own for stacks of your own.
+
+**Checked**
+- New tests (round 165): the camera's Composition Guides header is there and closed, `set Camera.Thirds` lands, the
+  file keeps it, the render hash ignores it, a click opens it (the Add Filter button below moves down by 12 rows) and
+  another closes it; a Toon material shows an open Toon group and a closed Axis Material group, a PBR one no Toon
+  group, and a plain reader still sees both groups' fields. A humanoid rig: a click on a bone selects it; Bones off:
+  the handles vanish, the same click selects what is behind, the console still selects it, the rig controls stay;
+  all off / all on; icons off: a click on the sun's icon selects nothing; the menu's Bones row turns the layer off
+  and closes; the preferences keep `overlays_off=bones`. Anime against the old Line Art + Color Grading + Bloom stack
+  and Manga against Grayscale + Halftone + Line Art + Paper: the largest channel difference 0; Lines off and Tones 3
+  change the picture; the effects save and load; the old composite loads as four effects; the registry table test
+  covers both.
+- Checked with round 166's chain (see its entry).
+
+## 2026-10-21 (round 164): area lights as emissive planes (task 0155, ADR 0050)
+
+**Asked:** "The area light is still treated like a point light. The area light needs to act like a planar mesh using
+an emissive material that has varying intensity." Chosen: the path-traced renders and the lightmap bakes / probes,
+with physical falloff.
+
+**Changed**
+- **An area light is a glowing panel now.** Every renderer already sampled its rectangle or disc, but its brightness
+  was Unity's range curve from the light's centre, with no inverse square from the points of its surface - so a wide
+  panel close to a floor lit it like a lamp at its middle. Now each point of the panel sends light with its facing
+  cosine and the inverse square of its distance, exactly what a quad with an emissive material gives (a test renders
+  the two side by side: the same floor within 3 %). `Intensity` is how brightly the panel glows per square metre (an
+  emissive material of strength pi x Intensity gives the same light), so a bigger panel gives more light; a 1 x 1 m
+  panel a couple of metres from a wall gives about what it gave before.
+- **Range is a window, not the falloff:** the light fades to nothing at Range (Unreal's window) and falls as the
+  inverse square before it. Point and spot lights keep their curve.
+- The path tracers (CPU and GPU), the rasterized views' exact term, the lightmaps (the shadow rays weigh each point of
+  the light by its own falloff), the probes and MoonRay's export (the panel's radiance as it is) all take the one
+  formula; a surface touching the panel stays finite (the inverse square stops at 1 cm).
+- **Scenes lit by area lights change on purpose:** a 1 m panel 3 m away gives about a quarter of what it gave, the
+  same panel 30 cm away about five times more, and a 10 m panel ten times a 1 m one (it gave the same). Raise or
+  lower old scenes' area-light intensities to taste.
+
+**Checked**
+- New tests (round 164): a 20 cm panel 1 m up gives albedo x intensity x its area, 2 m up a quarter; a 10 x 10 m
+  panel 3.5 m up against a 10 x 10 m emissive quad and the exact term, under the centre and 3 m out; the falloff past
+  the panel's edge has no step; a floor 10 cm under a panel matches the exact term and a millimetre under it stays
+  finite; Range 4 m ends at 4 m and is within 2 % of unlimited at 1 m; MoonRay's RectLight intensity is pi for
+  intensity 1; the Light's help says so.
+- Task 0030's references rewritten for the new integrand: the exact term within 1 % of a million-sample Monte Carlo
+  over thirteen placements (strips, discs, 30 cm below a 10 m light), the rasterizer within 10 % of the path tracer,
+  the bake within 5 %; task 0022's bake noise and the toon-under-area-light shares unchanged.
+- Checked with round 166's chain (see its entry).
+
 ## 2026-10-19 (round 163): bone handles the right size on import (task 0144, ADR 0047)
 
 **Asked:** the Carmen import's bone handles looked huge: "is there a way to fix that when we import any model format?"

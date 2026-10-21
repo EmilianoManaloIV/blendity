@@ -109,58 +109,65 @@ void Material::reflect(Reflector &r) {
   r.field("Double Sided", double_sided);
   r.field("Unlit", unlit);
   r.field("Cast Shadows", cast_shadows);
-  static const char *axis_modes[] = {"Off", "World", "Local"};
-  r.enumeration("Axis Mode", axis_mode, axis_modes, 3);
-  r.help("Axis material: surfaces facing up use the Top material, steep ones Side, downward ones Bottom, projected\n"
-         "without UVs. World: up is the world's (grass stays on top however the object turns); Local: the object's.");
-  if (r.all_fields() || axis_mode != 0) {
-    r.material_ref("Axis Top", axis_top);
-    r.material_ref("Axis Side", axis_side);
-    r.material_ref("Axis Bottom", axis_bottom);
-    r.help("Material assets (.mat); empty uses this material's own maps for that part.");
-    r.field("Axis Angle", axis_angle, 0.5f, 0.0f, 90.0f);
-    r.help("Degrees from straight up where Top turns into Side.");
-    r.field("Axis Blend", axis_blend, 0.01f, 0.0f, 1.0f);
-    r.help("How wide the transition is (0: a hard edge).");
-    r.field("Axis Scale", axis_scale, 0.05f, 0.01f, 1000.0f);
-    r.help("Metres one texture tile covers in the projection.");
-    r.material_ref("Axis High", axis_high);
-    r.help("A material for everything above High Start, whatever the slope (snow on peaks, rock up high). Empty: none.");
-    if (r.all_fields() || !axis_high.empty()) {
-      r.field("High Start", axis_high_start, 0.1f, -100000.0f, 100000.0f);
-      r.help("The height in metres where Axis High begins (World mode: the world's; Local: the object's own).");
-      r.field("High Blend", axis_high_blend, 0.05f, 0.0f, 10000.0f);
-      r.help("Metres over which it fades in, each side of High Start.");
-    }
-    r.field("Axis Noise", axis_noise, 0.01f, 0.0f, 1.0f);
-    r.help("Breaks up the borders (grass to dirt, and the high band's) with noise, so they wander like real ground.");
-    if (r.all_fields() || axis_noise > 0.0f) {
-      r.field("Noise Scale", axis_noise_scale, 0.05f, 0.01f, 10000.0f);
-      r.help("Metres between the border's bumps.");
+  /* The axis and toon fields in drop-downs (task 0145), so a plain material's Inspector stays short. */
+  if (r.group("Axis Material", axis_mode != 0)) {
+    static const char *axis_modes[] = {"Off", "World", "Local"};
+    r.enumeration("Axis Mode", axis_mode, axis_modes, 3);
+    r.help("Axis material: surfaces facing up use the Top material, steep ones Side, downward ones Bottom, projected\n"
+           "without UVs. World: up is the world's (grass stays on top however the object turns); Local: the object's.");
+    if (r.all_fields() || axis_mode != 0) {
+      r.material_ref("Axis Top", axis_top);
+      r.material_ref("Axis Side", axis_side);
+      r.material_ref("Axis Bottom", axis_bottom);
+      r.help("Material assets (.mat); empty uses this material's own maps for that part.");
+      r.field("Axis Angle", axis_angle, 0.5f, 0.0f, 90.0f);
+      r.help("Degrees from straight up where Top turns into Side.");
+      r.field("Axis Blend", axis_blend, 0.01f, 0.0f, 1.0f);
+      r.help("How wide the transition is (0: a hard edge).");
+      r.field("Axis Scale", axis_scale, 0.05f, 0.01f, 1000.0f);
+      r.help("Metres one texture tile covers in the projection.");
+      r.material_ref("Axis High", axis_high);
+      r.help("A material for everything above High Start, whatever the slope (snow on peaks, rock up high). Empty: none.");
+      if (r.all_fields() || !axis_high.empty()) {
+        r.field("High Start", axis_high_start, 0.1f, -100000.0f, 100000.0f);
+        r.help("The height in metres where Axis High begins (World mode: the world's; Local: the object's own).");
+        r.field("High Blend", axis_high_blend, 0.05f, 0.0f, 10000.0f);
+        r.help("Metres over which it fades in, each side of High Start.");
+      }
+      r.field("Axis Noise", axis_noise, 0.01f, 0.0f, 1.0f);
+      r.help("Breaks up the borders (grass to dirt, and the high band's) with noise, so they wander like real ground.");
+      if (r.all_fields() || axis_noise > 0.0f) {
+        r.field("Noise Scale", axis_noise_scale, 0.05f, 0.01f, 10000.0f);
+        r.help("Metres between the border's bumps.");
+      }
     }
   }
+  r.group_end();
   static const char *models[] = {"PBR (Principled)", "Toon (Cel)"};
   r.enumeration("Shading Model", shading_model, models, 2);
   r.help("Toon: the anime / cel look (Goo Engine; Blender: Shader to RGB + Color Ramp) - light in flat tones with a\n"
          "hard edge, a shadow colour, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
          "for the black lines.");
   if (r.all_fields() || shading_model == 1) {
-    r.field("Toon Bands", toon_bands, 1, 8);
-    r.help("How many lit tones above the shadow (1: two-tone cel shading).");
-    r.field("Toon Softness", toon_softness, 0.005f, 0.0f, 0.5f);
-    r.help("How soft each tone's edge is (0: a hard line).");
-    r.field("Toon Threshold", toon_threshold, 0.01f, 0.0f, 0.95f);
-    r.help("Where light turns into shadow (the light's angle, shadows included).");
-    r.color("Toon Shadow Color", toon_shadow);
-    r.help("The shadow side's colour, times the base colour (a cool tint reads as anime shading).");
-    r.field("Toon Specular Size", toon_specular_size, 0.01f, 0.0f, 1.0f);
-    r.field("Toon Specular Smoothness", toon_specular_smooth, 0.005f, 0.0f, 0.5f);
-    r.color("Toon Rim Color", toon_rim);
-    r.field("Toon Rim Width", toon_rim_width, 0.01f, 0.0f, 1.0f);
-    r.help("A light edge around the silhouette (0: none).");
-    r.field("Toon Rim Strength", toon_rim_strength, 0.01f, 0.0f, 10.0f);
-    r.field("Toon Flat Ambient", toon_flat_ambient);
-    r.help("The sky's light as one flat tone, so only the lights shade the form.");
+    if (r.group("Toon", true)) {
+      r.field("Toon Bands", toon_bands, 1, 8);
+      r.help("How many lit tones above the shadow (1: two-tone cel shading).");
+      r.field("Toon Softness", toon_softness, 0.005f, 0.0f, 0.5f);
+      r.help("How soft each tone's edge is (0: a hard line).");
+      r.field("Toon Threshold", toon_threshold, 0.01f, 0.0f, 0.95f);
+      r.help("Where light turns into shadow (the light's angle, shadows included).");
+      r.color("Toon Shadow Color", toon_shadow);
+      r.help("The shadow side's colour, times the base colour (a cool tint reads as anime shading).");
+      r.field("Toon Specular Size", toon_specular_size, 0.01f, 0.0f, 1.0f);
+      r.field("Toon Specular Smoothness", toon_specular_smooth, 0.005f, 0.0f, 0.5f);
+      r.color("Toon Rim Color", toon_rim);
+      r.field("Toon Rim Width", toon_rim_width, 0.01f, 0.0f, 1.0f);
+      r.help("A light edge around the silhouette (0: none).");
+      r.field("Toon Rim Strength", toon_rim_strength, 0.01f, 0.0f, 10.0f);
+      r.field("Toon Flat Ambient", toon_flat_ambient);
+      r.help("The sky's light as one flat tone, so only the lights shade the form.");
+    }
+    r.group_end();
   }
 }
 

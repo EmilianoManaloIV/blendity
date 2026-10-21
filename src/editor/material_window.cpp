@@ -294,7 +294,7 @@ void Editor::draw_materials_window(const Recti &r) {
   u.label(head, material_selected_->name + (material_selected_->asset_path.empty() ? "  (scene material)" : "  (" + material_selected_->asset_path + ")"),
           u.theme.text_bright);
   u.push_id((uint64_t)(uintptr_t)material_selected_.get());
-  draw_material_fields(lay, material_selected_);
+  draw_material_fields(lay, material_selected_, material_multi_.items.size() > 1 ? &material_multi_.items : nullptr);  // several selected: all of them (task 0147)
   u.pop_id();
   content_h = lay.y + eoff - ed.y + u.px(20);
   u.end_scroll();

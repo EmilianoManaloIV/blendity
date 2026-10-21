@@ -2722,7 +2722,7 @@ static void test_shading_cost(Report &rep, const Options &o) {
     rep.note(strprintf("Task 0040's target: with height and noise, every point near a border, under 2.5x a plain one per point: %s.",
                        h_ms < 2.5 * p2_ms ? "met" : "NOT MET"));
   }
-  /* Area lights (task 0030): the rasterizer integrates a light's whole surface per pixel (area_light_cosine);
+  /* Area lights (task 0030): the rasterizer integrates a light's whole surface per pixel (area_light_irradiance);
    * its cost per call for the cases a scene meets, and what that is for a 1080p view on every thread. */
   {
     rep.table({"area light per pixel (1 thread)", "ns / call", "1080p ms on all threads"});
@@ -2748,7 +2748,7 @@ static void test_shading_cost(Report &rep, const Options &o) {
       l.disk = c.disk;
       const int N = 200000;
       const double ms = time_ms([&] {
-        for (int i = 0; i < N; i++) sink += area_light_cosine(l, c.p + Vec3((i & 63) * 0.01f, 0, (i >> 6 & 63) * 0.01f), c.n);
+        for (int i = 0; i < N; i++) sink += area_light_irradiance(l, c.p + Vec3((i & 63) * 0.01f, 0, (i >> 6 & 63) * 0.01f), c.n);
       });
       const double ns = ms * 1e6 / N;
       rep.row({c.name, f1(ns), f2(ns * 1920.0 * 1080.0 / 1e6 / threads)});

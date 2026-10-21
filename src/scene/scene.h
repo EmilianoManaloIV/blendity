@@ -75,6 +75,14 @@ struct Reflector {
   virtual void mesh(const char *name, MeshPtr &m) = 0;
   /* Help text for the previous field (shown as an Inspector tooltip). */
   virtual void help(const char *) {}
+  /* A collapsible group of fields (task 0145): the Inspector draws a foldout row and skips the fields while it is
+   * closed; every other reader (files, undo, hashing, `set`, clips) sees them and gets true. Each group() is paired
+   * with a group_end(), whatever it returned. */
+  virtual bool group(const char *name, bool open_by_default = true) {
+    (void)name, (void)open_by_default;
+    return true;
+  }
+  virtual void group_end() {}
   /* Texture slot: path + colour space. Defaults to a plain text field. */
   virtual void texture(const char *name, TextureRef &t) { text(name, t.path); }
   /* Material slots (Unity MeshRenderer.materials / Blender material slots). */
@@ -462,7 +470,7 @@ struct SharpenEffect : FilterEffectBase<SharpenEffect> {
   void contribute(FilterStack &stack) const override;
 };
 
-/* Anime and manga looks (task 0039). Sizes in pixels at 1080p. */
+/* Anime and manga effects (task 0039). Sizes in pixels at 1080p. */
 struct HalftoneEffect : FilterEffectBase<HalftoneEffect> {
   static constexpr const char *kName = "Halftone";
   float cell = 8.0f, angle = 45.0f, contrast = 1.0f;
@@ -503,7 +511,27 @@ struct ColorRampEffect : FilterEffectBase<ColorRampEffect> {
   void reflect(Reflector &r) override;
   void contribute(FilterStack &stack) const override;
 };
-/* Ready-made stacks (task 0039): "Anime" and "Manga", appended to a camera's filters. False for an unknown name. */
+/* The Anime and Manga looks as single effects (task 0154): one row in the stack with one set of fields, running
+ * the passes the Looks menu once appended as three or four effects (Line Art + Color Grading + Bloom; Grayscale +
+ * Halftone + Line Art + Paper). Those parts stay effects of their own, so older scenes' stacks still load. */
+struct AnimeEffect : FilterEffectBase<AnimeEffect> {
+  static constexpr const char *kName = "Anime";
+  bool lines = true;
+  Vec3 line_color{0, 0, 0};
+  float line_thickness = 1.2f, crease_angle = 50.0f, saturation = 0.15f, contrast = 0.08f, bloom = 0.25f, bloom_threshold = 1.2f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+struct MangaEffect : FilterEffectBase<MangaEffect> {
+  static constexpr const char *kName = "Manga";
+  bool grayscale = true, dots = true, lines = true;
+  int tones = 0;  // 0: smooth greys; 2-8: flat tones before the dots
+  float dot_cell = 6.0f, dot_contrast = 1.2f, line_thickness = 1.5f, paper = 0.35f;
+  void reflect(Reflector &r) override;
+  void contribute(FilterStack &stack) const override;
+};
+/* Ready-made looks (task 0039): "Anime" and "Manga", appended to a camera's filters - since task 0154 one effect
+ * each. False for an unknown name. */
 const std::vector<std::string> &filter_looks();
 bool apply_filter_look(CameraFilters &cf, const std::string &name);
 

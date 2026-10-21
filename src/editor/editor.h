@@ -337,6 +337,8 @@ struct SkinWeightJob {
   ~SkinWeightJob();
 };
 
+struct FieldEdit;  // an Inspector edit (panels.cpp), applied to other objects and materials
+
 /* A multi-selection in a list of assets (task 0053): the Hierarchy's clicks (Ctrl toggles, Shift selects the range
  * from the last click in the order shown, Ctrl+Shift adds that range, a plain click selects one), Ctrl+A all shown. */
 template<class T> struct MultiSelect {
@@ -528,6 +530,17 @@ class Editor {
     auto it = game_guides_rects_.find(key);
     return it == game_guides_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
   }
+  /* Tests: the Scene view's Overlays button ("button") and its menu's rows by label (task 0146). */
+  Recti overlay_rect_for_test(const std::string &key) const {
+    auto it = overlay_rects_.find(key);
+    return it == overlay_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
+  }
+  bool overlay_shown_for_test(const std::string &key);
+  /* Tests: an Inspector foldout's state by its key ("grp_Toon" for a group, task 0145); false when never drawn. */
+  bool foldout_open_for_test(const std::string &key) const {
+    auto it = foldouts_.find(key);
+    return it != foldouts_.end() && it->second;
+  }
   Recti pilot_frame() const {
     GameObject *g = pilot_cam_ ? scene_->find(pilot_cam_) : nullptr;
     const Camera *c = g ? g->get<Camera>() : nullptr;
@@ -574,6 +587,11 @@ class Editor {
     return o;
   }
   void select_project_file_for_test(const std::string &p) { project_selected_ = p; }
+  void select_project_files_for_test(const std::vector<std::string> &paths) {  // several, as Ctrl-clicks leave them (no object selected)
+    project_multi_.items = paths;
+    project_selected_ = paths.empty() ? std::string() : paths.back();
+    clear_selection();
+  }
   bool uv_gizmo_for_test(Vec2 &centre, float &arm) const {
     if (!uv_gizmo_valid_) return false;
     centre = uv_gizmo_centre_;
@@ -623,6 +641,13 @@ class Editor {
   void ask_delete_material_for_test(const MaterialPtr &m) { material_selected_ = material_delete_ = m; }
   bool material_delete_pending() const { return material_delete_ != nullptr || !material_delete_many_.empty(); }
   size_t materials_selected_for_test() const { return material_multi_.items.size(); }
+  /* The fields whose values differ between `source` and any of `targets` that shows them (task 0147: the Inspector
+   * draws those as a dash). Public for the tests. */
+  std::set<std::string> mixed_material_fields(const Material *source, const std::vector<MaterialPtr> &targets);
+  struct MixedCache {  // (the comparison reflects every target: once per change, not per frame)
+    uint64_t key = 0;
+    std::set<std::string> fields;
+  } mixed_cache_;
   bool material_is_selected_for_test(const std::string &name) const {
     for (const MaterialPtr &m : material_multi_.items)
       if (m && m->name == name) return true;
@@ -948,6 +973,7 @@ class Editor {
   void draw_bone(const GameObject &g, const Bone &b);  // Blender's octahedral bone (task 0047)
   /* Rigging (task 0047): bone add <parent> [length], armature reset|apply [root], skin bind [object]. */
   void rig_command(const std::vector<std::string> &t);
+  void overlay_command(const std::vector<std::string> &t);  // the Scene view's overlay layers (task 0146)
   bool armature_pose(GameObject *root, bool apply_as_rest);  // Reset Pose (false) / Apply as Rest (true)
   enum class SkinBind { Inpaint, Envelope };
   bool skin_bind(GameObject *g, SkinBind how = SkinBind::Inpaint);
@@ -1713,7 +1739,11 @@ class Editor {
   std::string import_dir_;  // the folder the last import came from
   void draw_export_options();  // panels.cpp
   void draw_edit_tools(ui::Layout &lay);
-  void draw_material_fields(ui::Layout &lay, const MaterialPtr &m);  // panels.cpp: Edit Mode tools (Inspector and Modeling Tools)
+  /* A material's fields; with `others` (several selected, task 0147) an edit reaches every one of them that shows the
+   * field, and fields whose values differ draw a dash. */
+  void draw_material_fields(ui::Layout &lay, const MaterialPtr &m, const std::vector<MaterialPtr> *others = nullptr);
+  size_t apply_material_edits(const std::vector<FieldEdit> &edits, const Material *source, const std::vector<MaterialPtr> &targets);
+  void matset_command(const std::vector<std::string> &t, const std::string &line);  // matset <Field> <value>: the selected materials
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
   void duplicate_selected();
@@ -1978,6 +2008,18 @@ class Editor {
   Recti scene_rect_;
   Shading shading_ = Shading::Shaded;
   bool scene_lighting_ = true, show_grid_ = true, show_gizmos_ = true, show_stats_ = true;
+  /* The Scene view's overlay layers (task 0146): bones, rig controls, light and camera icons, curve and lattice
+   * points, origins, footprints and the selection outline, each hidden on its own (Blender's Overlays popover), so
+   * a rigged character can be seen as its mesh with the IK handles still in reach. The three above are layers too. */
+  bool show_bones_ = true, show_rig_controls_ = true, show_icons_ = true, show_points_ = true, show_origins_ = true, show_footprints_ = true,
+       show_outline_ = true;
+  struct OverlayLayer {
+    const char *key, *label, *help;
+    bool *flag;
+  };
+  std::vector<OverlayLayer> overlay_layers();  // every layer in menu order (the grid, gizmos and statistics last)
+  void draw_overlays_menu();
+  std::map<std::string, Recti> overlay_rects_;  // the Overlays button ("button") and its rows by label (tests)
   RasterOptions raster_opt_;
   RasterStats scene_stats_, game_stats_;
   enum class Drag { None, Fly, Orbit, Pan, Zoom, Gizmo, Box, ViewTool, AltClick } drag_ = Drag::None;  // AltClick: Blender's Alt+click, the view still

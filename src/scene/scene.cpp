@@ -400,7 +400,8 @@ void Light::reflect(Reflector &r) {
   static const char *types[] = {"Directional", "Point", "Spot", "Area"};
   r.enumeration("Type", type, types, 4);
   r.help("Directional: the sun, parallel rays. Point: all directions from a point. Spot: a cone along the light's\n"
-         "forward (blue) axis. Area: a rectangle or disc that lights its front, with soft shadows when path traced.\n"
+         "forward (blue) axis. Area: a glowing rectangle or disc that lights its front from its whole surface, like a\n"
+         "quad with an emissive material: the inverse square from every point of it, soft shadows when path traced.\n"
          "Unity: Light Type. Blender: Sun / Point / Spot / Area.");
   if (type == 2 || all) {
     r.field("Spot Angle", spot_angle, 0.5f, 1.0f, 179.0f);
@@ -425,7 +426,12 @@ void Light::reflect(Reflector &r) {
            "5500 noon sun, 6500 overcast sky (white), 9000+ blue sky in shade.");
   }
   r.field("Intensity", intensity, 0.01f, 0.0f, 8.0f);
+  if (type == 3 || all)
+    r.help("How brightly the panel glows, per square metre: a quad with an emissive material of strength 3.14 x this\n"
+           "(pi times) gives the same light, so a bigger panel gives more light and softer shadows.");
   if (r.all_fields() || type != 0) r.field("Range", range, 0.05f, 0.01f, 1000.0f);
+  if (type == 3 || all) r.help("Where an area light's light ends: it falls as the inverse square and fades out to nothing at Range.");
+  else if (type != 0 || all) r.help("How far the light reaches (Unity's falloff: nothing beyond Range).");
   static const char *light_modes[] = {"Realtime", "Mixed", "Baked"};
   r.enumeration("Mode", mode, light_modes, 3);
   r.help("Unity's Light Mode. Realtime: lit every frame, not in baked lighting. Mixed: realtime light and shadows,\n"
@@ -561,6 +567,11 @@ void Camera::reflect(Reflector &r) {
 
 void Camera::reflect_guides(Reflector &r) {
   const bool all = r.all_fields();
+  /* One drop-down in the Inspector (task 0145), closed until wanted: the guides are a dozen rows. */
+  if (!r.group("Composition Guides", false)) {
+    r.group_end();
+    return;
+  }
   r.field("Show Guides", show_guides);
   r.help("Composition guides over what this camera sees in the Game view, the Camera Preview and while piloting\n"
          "(never in renders). Blender: Camera > Viewport Display > Composition Guides. Game view: the Guides menu.");
@@ -591,6 +602,7 @@ void Camera::reflect_guides(Reflector &r) {
     }
     r.color_alpha("Guide Color", guide_color, "Guide Opacity", guide_opacity);
   }
+  r.group_end();
 }
 
 float Camera::image_aspect(float render_aspect) const {
@@ -677,6 +689,10 @@ const std::vector<FilterEffectInfo> &filter_effect_infos() {
       {LineArtEffect::kName, "Stylize", "Ink lines on silhouettes, where objects meet, and on creases sharper than an angle (a manga / anime line).",
        [] { return std::make_unique<LineArtEffect>(); }},
       {PaperEffect::kName, "Stylize", "A paper texture under the picture: blotches, fibres and grain.", [] { return std::make_unique<PaperEffect>(); }},
+      {AnimeEffect::kName, "Stylize", "The anime look in one effect: ink lines on silhouettes and creases, a little more saturation and contrast, a soft bloom.",
+       [] { return std::make_unique<AnimeEffect>(); }},
+      {MangaEffect::kName, "Stylize", "A printed manga page in one effect: greys, halftone dots, ink lines and paper.",
+       [] { return std::make_unique<MangaEffect>(); }},
       {BloomEffect::kName, "Bloom & glow", "Light brighter than a threshold spills into the pixels around it: glowing lights, emissive materials, sun glints.",
        [] { return std::make_unique<BloomEffect>(); }},
   };
@@ -702,6 +718,8 @@ struct PrefixReflector : Reflector {
   std::string prefix;
   PrefixReflector(Reflector &r, std::string p) : in(r), prefix(std::move(p)) {}
   std::string n(const char *name) const { return prefix + name; }
+  bool group(const char *name, bool open) override { return in.group(name, open); }
+  void group_end() override { in.group_end(); }
   void field(const char *name, float &v, float speed, float mn, float mx) override { in.field(n(name).c_str(), v, speed, mn, mx); }
   void field(const char *name, int &v, int mn, int mx) override { in.field(n(name).c_str(), v, mn, mx); }
   void samples(const char *name, int &v, int mn, int mx) override { in.samples(n(name).c_str(), v, mn, mx); }
@@ -1156,20 +1174,81 @@ const std::vector<std::string> &filter_looks() {
 
 bool apply_filter_look(CameraFilters &cf, const std::string &name_in) {
   const std::string name = to_lower(name_in);
-  if (name == "anime") {
-    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.2f, l->crease_angle = 50.0f;
-    if (auto *g = dynamic_cast<ColorGradingEffect *>(cf.add(ColorGradingEffect::kName))) g->saturation = 0.15f, g->contrast = 0.08f;
-    if (auto *b = dynamic_cast<BloomEffect *>(cf.add(BloomEffect::kName))) b->intensity = 0.25f, b->threshold = 1.2f;
-    return true;
-  }
-  if (name == "manga") {
-    cf.add(GrayscaleEffect::kName);
-    if (auto *h = dynamic_cast<HalftoneEffect *>(cf.add(HalftoneEffect::kName))) h->cell = 6.0f, h->contrast = 1.2f;
-    if (auto *l = dynamic_cast<LineArtEffect *>(cf.add(LineArtEffect::kName))) l->thickness = 1.5f;
-    cf.add(PaperEffect::kName);
-    return true;
-  }
+  /* One effect each (task 0154); until then a look was three or four effects appended, which older scenes still hold. */
+  if (name == "anime") return cf.add(AnimeEffect::kName) != nullptr;
+  if (name == "manga") return cf.add(MangaEffect::kName) != nullptr;
   return false;
+}
+
+void AnimeEffect::reflect(Reflector &r) {
+  r.field("Lines", lines);
+  r.help("Ink lines on silhouettes, where objects meet, and on creases sharper than Crease Angle.");
+  if (r.all_fields() || lines) {
+    r.color("Line Color", line_color);
+    r.field("Line Thickness", line_thickness, 0.05f, 0.5f, 8.0f);
+    r.field("Crease Angle", crease_angle, 0.5f, 1.0f, 179.0f);
+  }
+  r.field("Saturation", saturation, 0.01f, -1.0f, 1.0f);
+  r.help("A little more colour (0: unchanged; 1: twice as vivid).");
+  r.field("Contrast", contrast, 0.01f, -1.0f, 1.0f);
+  r.field("Bloom", bloom, 0.01f, 0.0f, 100.0f);
+  r.help("The soft glow round bright things (0: none).");
+  if (r.all_fields() || bloom > 0.0f) r.field("Bloom Threshold", bloom_threshold, 0.01f, 0.0f, 1000.0f);
+}
+/* The parts' own passes, so the one effect draws exactly what the three did. */
+void AnimeEffect::contribute(FilterStack &s) const {
+  if (lines) {
+    LineArtEffect l;
+    l.color = line_color, l.thickness = line_thickness, l.crease_angle = crease_angle;
+    l.contribute(s);
+  }
+  ColorGradingEffect g;
+  g.saturation = saturation, g.contrast = contrast;
+  g.contribute(s);
+  if (bloom > 0.0f) {
+    BloomEffect b;
+    b.intensity = bloom, b.threshold = bloom_threshold;
+    b.contribute(s);
+  }
+}
+
+void MangaEffect::reflect(Reflector &r) {
+  r.field("Grayscale", grayscale);
+  r.field("Tones", tones, 0, 8);
+  r.help("0: smooth greys. 2 to 8: that many flat tones (screentone steps) before the dots.");
+  r.field("Dots", dots);
+  if (r.all_fields() || dots) {
+    r.field("Dot Cell", dot_cell, 0.1f, 2.0f, 128.0f);
+    r.help("Dot spacing in pixels at 1080p (the same look at any resolution).");
+    r.field("Dot Contrast", dot_contrast, 0.01f, 0.0f, 8.0f);
+  }
+  r.field("Lines", lines);
+  if (r.all_fields() || lines) r.field("Line Thickness", line_thickness, 0.05f, 0.5f, 8.0f);
+  r.field("Paper", paper, 0.01f, 0.0f, 1.0f);
+  r.help("How much of the paper's grain shows through (0: none).");
+}
+void MangaEffect::contribute(FilterStack &s) const {
+  if (grayscale) GrayscaleEffect().contribute(s);
+  if (tones >= 2) {
+    PosterizeEffect p;
+    p.levels = tones;
+    p.contribute(s);
+  }
+  if (dots) {
+    HalftoneEffect h;
+    h.cell = dot_cell, h.contrast = dot_contrast;
+    h.contribute(s);
+  }
+  if (lines) {
+    LineArtEffect l;
+    l.thickness = line_thickness;
+    l.contribute(s);
+  }
+  if (paper > 0.0f) {
+    PaperEffect p;
+    p.strength = paper;
+    p.contribute(s);
+  }
 }
 
 void Rotator::reflect(Reflector &r) { r.field("Degrees Per Second", degrees_per_second); }

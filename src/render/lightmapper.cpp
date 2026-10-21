@@ -350,14 +350,14 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       continue;
     }
     if (l.type == RenderLight::Area) {
-      /* An area light: its unshadowed light computed (area_light_cosine, no noise), times the share of it
-       * the shadow rays find unblocked, each ray weighted by its cosines (a ratio estimator: Heitz et al.
-       * 2018, "Combining Analytic Direct Illumination and Stochastic Shadows"). Open surfaces come out exact;
-       * only penumbrae are sampled. The rays go to a jittered grid over the light (stratified), shifted by
-       * a random offset per texel (Cranley-Patterson rotation). The range falloff is the centre's, as in
-       * the path tracer and the rasterizer (task 0030: taking it at each random point made a 10 m light's
-       * maps blotchy, its falloff varying tenfold across the light). */
-      const float unshadowed = area_light_cosine(l, o, n) * light_range_falloff(l, t.position);
+      /* An area light: its unshadowed light computed (area_light_irradiance, no noise), times the share of it
+       * the shadow rays find unblocked, each ray weighted by what its point of the light sends (the cosines,
+       * the inverse square: a ratio estimator, Heitz et al. 2018, "Combining Analytic Direct Illumination and
+       * Stochastic Shadows"). Open surfaces come out exact; only penumbrae are sampled. The rays go to a
+       * jittered grid over the light (stratified), shifted by a random offset per texel (Cranley-Patterson
+       * rotation). Since task 0155 the light is an emissive plane: each point's own falloff (the near part of
+       * a wide light weighs more), the noise kept down by the exact unshadowed term. */
+      const float unshadowed = area_light_irradiance(l, o, n);
       if (!(unshadowed > 0.0f)) continue;
       const int ns = std::max(1, s_.direct_samples);
       const int nx = std::max(1, (int)std::ceil(std::sqrt((double)ns)));
@@ -367,11 +367,11 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       for (int k = 0; k < ns; k++) {
         const float a = std::fmod(((k % nx) + rnd01(rng)) / (float)nx + sx, 1.0f) - 0.5f;
         const float b = std::fmod(((k / nx) + rnd01(rng)) / (float)ny + sy, 1.0f) - 0.5f;
-        const Vec3 dvec = area_light_point(l, a, b) - o;
+        const Vec3 q = area_light_point(l, a, b), dvec = q - o;
         const float dist = length(dvec);
         if (!(dist > 1e-5f)) continue;
         const Vec3 L = dvec / dist;
-        const float w = dot(n, L) * -dot(l.direction, L);
+        const float w = dot(n, L) * area_light_falloff(l, q, o);
         if (!(w > 0.0f) || dot(n, L) <= 0.0f) continue;
         rays++;
         wsum += w;

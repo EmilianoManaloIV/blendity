@@ -276,26 +276,31 @@ static inline void quad_tan(float t, float &tan_t, float &sec2) {
   sec2 = rc * rc;
 }
 
-float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n) {
+float area_light_irradiance(const RenderLight &l, Vec3 p, Vec3 n) {
   /* In the light's own metres: U along right (width W), V along up (height H). The quantity is
-   *   mean over the light of max(0, n.L) * max(0, facing) = (1 / area) * integral of max(0, n.d) * h / |d|^2,
-   * d = q - p, h = the light's facing distance dir.(p - pos), the same for every point of the light. */
+   *   the integral over the light of max(0, n.L) * area_light_falloff = integral of max(0, n.d) * h * w / |d|^4,
+   * d = q - p, h = the light's facing distance dir.(p - pos), the same for every point of the light, w the Range
+   * window and |d|^2 no smaller than 1e-4 (task 0155: an emissive plane, the inverse square from each point). */
   const Vec3 up = normalize(cross(l.direction, l.right));
   const float W = std::fabs(l.width), H = std::fabs(l.height);
   const Vec3 rel = p - l.position;
   const float h = dot(l.direction, rel);  // > 0: p in front of the light
   if (!finite_bits(h) || !finite_bits(W) || !finite_bits(H) || !(h > 0.0f)) return 0.0f;
   const float c0 = -dot(n, rel), al = dot(n, l.right), be = dot(n, up);  // n.d = c0 + al U + be V
-  if (!(W * H > 1e-10f)) {  // no size (a zero scale): the centre, as a point
+  if (!(W * H * (l.disk ? 0.25f * kPi : 1.0f) > 1e-4f)) {  // under a square centimetre (a zero scale): the centre, as a point of the smallest area, as the path tracers take it
     const float dl = length(rel);
-    return dl > 1e-6f ? std::max(0.0f, c0 / dl) * (h / dl) : 0.0f;
+    return dl > 1e-6f ? area_light_area(l) * std::max(0.0f, c0 / dl) * area_light_falloff(l, l.position, p) : 0.0f;
   }
   const float fu = dot(l.right, rel), fv = dot(up, rel), h2 = h * h;
+  const float range = l.range > 1e-3f ? l.range : 1e-3f, inv_range2 = 1.0f / (range * range);
   auto f = [&](float U, float V) {
     const float g = c0 + al * U + be * V;
     if (!(g > 0.0f)) return 0.0f;
     const float u = U - fu, v = V - fv;
-    return g * h / (h2 + u * u + v * v);
+    const float r2 = h2 + u * u + v * v, rr = r2 * inv_range2;
+    float w = 1.0f - rr * rr;
+    w = w > 0.0f ? w * w : 0.0f;
+    return g * h * w / (r2 * (r2 > 1e-4f ? r2 : 1e-4f));
   };
   float sum = 0.0f;
   /* Within a quarter of its size from a large light the falloff is sharp: more points there only. */
@@ -357,7 +362,7 @@ float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n) {
         sum += wo * row;
       }
     }
-    return sum / (W * H);
+    return sum;  // (the integral: the quadrature's weights are in metres)
   }
   /* An ellipse: rays from its centre at evenly spaced angles (periodic: few are needed), each ray's part in
    * front of the horizon (n.d is linear along it) integrated by Gauss in the area fraction r^2. */
@@ -381,10 +386,10 @@ float area_light_cosine(const RenderLight &l, Vec3 p, Vec3 n) {
       sum += (s1 - s0) * g.w[a] * f(r * du, r * dv);
     }
   }
-  return sum / na;  // the area fraction already integrates to 1 over r^2 in [0, 1] and the angles average
+  return sum / na * area_light_area(l);  // the mean (the area fraction integrates to 1 over r^2 in [0, 1], the angles average) times the area
 }
 
-Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing) {
+Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing, Vec3 *point) {
   const Vec3 up = normalize(cross(l.direction, l.right));
   Vec3 q = p - l.direction * dot(p - l.position, l.direction);  // p projected onto the light's plane
   const float denom = dot(R, l.direction);
@@ -408,7 +413,9 @@ Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing
     x = clampf(x, -hw, hw);
     y = clampf(y, -hh, hh);
   }
-  Vec3 L = l.position + l.right * x + up * y - p;
+  const Vec3 rep = l.position + l.right * x + up * y;
+  if (point) *point = rep;
+  Vec3 L = rep - p;
   const float dl = length(L);
   L = dl > 1e-6f ? L / dl : -l.direction;
   facing = std::max(0.0f, -dot(l.direction, L));
@@ -426,17 +433,17 @@ static inline Vec3 shade(const LightingEnv &env, Vec3 albedo, float specular, Ve
     float atten = l.intensity;
     if (l.type == RenderLight::Area) {
       /* The whole surface of the light (not its centre: large lights light faces turned from it). */
-      atten *= light_range_falloff(l, wp);
       if (atten <= 0.0f) continue;
-      diff += l.color * (atten * area_light_cosine(l, wp, n));
+      diff += l.color * (atten * area_light_irradiance(l, wp, n));
       if (specular > 0) {
         float c;
-        L = area_light_specular_dir(l, wp, n * (2.0f * dot(n, v)) - v, c);
+        Vec3 q;
+        L = area_light_specular_dir(l, wp, n * (2.0f * dot(n, v)) - v, c, &q);
         if (dot(n, L) > 0.0f) {
           Vec3 h = normalize(L + v);
           float nh = std::max(0.0f, dot(n, h));
           float s = nh * nh; s *= s; s *= s; s *= s; s *= s;
-          spec += l.color * (s * specular * atten * c);
+          spec += l.color * (s * specular * atten * std::min(2.0f * kPi, area_light_area(l) * area_light_falloff(l, q, wp)));  // (at most the hemisphere)
         }
       }
       continue;
@@ -1854,23 +1861,26 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     Vec3 L;
     float atten = l.intensity * kPi;  // Unity convention: intensity 1 = albedo * N.L
     if (l.type == RenderLight::Area) {
-      /* Diffuse from the light's whole surface (area_light_cosine: what the path tracer converges to,
+      /* Diffuse from the light's whole surface (area_light_irradiance: what the path tracer converges to,
        * unshadowed), the specular from its representative point with the lobe widened by the light's size
-       * and renormalised (Karis 2013, "Real Shading in Unreal Engine 4"). */
-      atten *= light_range_falloff(l, sp.position);
+       * and renormalised (Karis 2013, "Real Shading in Unreal Engine 4"), its strength the centre's falloff. */
       if (atten <= 0.0f) continue;
-      const float dcos = area_light_cosine(l, sp.position, n);
+      const float dcos = area_light_irradiance(l, sp.position, n);
       float c;
-      const Vec3 Lr = area_light_specular_dir(l, sp.position, n * (2.0f * dot(n, V)) - V, c);
+      Vec3 q;
+      const Vec3 Lr = area_light_specular_dir(l, sp.position, n * (2.0f * dot(n, V)) - V, c, &q);
+      /* What the representative point sends (its own inverse square): no more than the whole hemisphere's worth, so a
+       * glossy floor a hand under a wide panel doesn't flare past its diffuse. */
+      const float cfall = std::min(2.0f * kPi, area_light_area(l) * area_light_falloff(l, q, sp.position));
       /* The lobe at the original roughness toward the representative point, scaled by (a / a')^2 where a'
-       * is the roughness widened by the light's apparent size: the energy the wider lobe would spread
-       * (Karis's normalisation; widening the lobe as well would count it twice). */
+       * is the roughness widened by the light's apparent size at that point: the energy the wider lobe would
+       * spread (Karis's normalisation; widening the lobe as well would count it twice). */
       const float a = std::max(s.roughness * s.roughness, 0.002f);
       const float radius = std::sqrt(std::fabs(l.width * l.height) / kPi);
-      const float a2 = std::min(1.0f, a + radius / (2.0f * std::max(1e-3f, length(l.position - sp.position))));
+      const float a2 = std::min(1.0f, a + radius / (2.0f * std::max(1e-3f, length(q - sp.position))));
       Vec3 dpart, spart;
       brdf_eval_parts(s, n, V, Lr, dpart, spart);
-      lo += (dpart * dcos + spart * (c * (a / a2) * (a / a2))) * l.color * atten;
+      lo += (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color * atten;
       continue;
     }
     if (l.type == RenderLight::Directional) L = -l.direction;

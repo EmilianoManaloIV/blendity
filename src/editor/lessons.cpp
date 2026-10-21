@@ -462,7 +462,7 @@ The Camera's Pick Focus Point button is an eyedropper. Click a surface in the Sc
 ! cmd:select Main Camera; pickfocus | Pick the Main Camera's focus point (then click a surface)
 ! cmd:select Main Camera; set Camera.PhysicalCamera 1; set Camera.DepthOfField 1; set Camera.FStop 1.4; camerapreview rendered | Make the Main Camera physical with a shallow depth of field and preview it
 # Composition guides
-Show Guides (Camera inspector, or the Game view's Guides menu) draws lines over what the camera sees, never into the render. The rule of thirds splits the frame into a three by three grid: a horizon on one of the horizontal lines and a subject where two lines cross usually reads better than one dead centre. The golden ratio does the same at 0.382 and 0.618. The golden and harmonious triangles lay a diagonal across the frame with lines from the other two corners (square to the diagonal for the golden ones, to the golden section of the far edge for the harmonious ones), for compositions built on diagonals. Title Safe and Action Safe mark the margins a television might crop (Blender's defaults: Title Safe 10 % across and 5 % down, Action Safe 3.5 % both ways, of half the frame on each side).
+Show Guides (the Camera inspector's Composition Guides drop-down, or the Game view's Guides menu) draws lines over what the camera sees, never into the render. The rule of thirds splits the frame into a three by three grid: a horizon on one of the horizontal lines and a subject where two lines cross usually reads better than one dead centre. The golden ratio does the same at 0.382 and 0.618. The golden and harmonious triangles lay a diagonal across the frame with lines from the other two corners (square to the diagonal for the golden ones, to the golden section of the far edge for the harmonious ones), for compositions built on diagonals. Title Safe and Action Safe mark the margins a television might crop (Blender's defaults: Title Safe 10 % across and 5 % down, Action Safe 3.5 % both ways, of half the frame on each side).
 ! cmd:select Main Camera; guides thirds on; window Game | Show the Main Camera's rule-of-thirds guides in the Game view
 # Depth precision
 Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits close to the near plane, so a tiny near clip value causes z-fighting in the distance. Keep Near as large as you can.
@@ -470,6 +470,22 @@ Perspective projection stores depth non-linearly (FoCG 8.4). Most precision sits
 > [GEA2] 11.2 Lights, Camera, Action!
 ? Why does setting Near to 0.0001 make distant surfaces flicker? | Depth precision is spread non-linearly between the near and far planes. A very small near value leaves almost no precision far away, so surfaces at similar depths fight (z-fighting).
 ! window:Game | Show the Game view
+)"},
+    {"Overlays: See the Mesh, Hide the Rig", "The Scene view's overlay layers", R"(
+A rigged character in the Scene view is its mesh under a thicket of bones, control shapes, icons and outlines.
+The Overlays menu in the Scene view's bar (Blender: the Overlays popover; Unity: the Gizmos menu) turns each layer
+off on its own: Bones, Rig Controls (the IK and FK handles), Light & Camera Icons, Curve & Lattice Points, Object
+Origins, Footprints & Contacts, Selection Outline, Grid, Gizmos and Statistics. Hide the bones and keep the rig
+controls, and you see the mesh while you still pose it by its handles; All Overlays shows or hides the lot. A hidden
+layer can't be clicked either: with the bones off, a click lands on the mesh behind them, and the bones' head and
+tail handles stay away too. The Hierarchy still selects anything, and the gizmo still moves it. The choice is
+remembered between sessions.
+! cmd:overlay bones off; overlay icons off | Hide the bones and the light and camera icons
+! cmd:overlay all on | Show every overlay again
+# From the console
+overlay list prints each layer's state; overlay <layer> on|off sets one and overlay all on|off the lot - the same
+names as the menu: bones, controls, icons, points, origins, footprints, outline, grid, gizmos, stats.
+? You want to see a character's skin while dragging its IK targets. Which layers do you turn off? | Bones (and perhaps Selection Outline); Rig Controls stay on, so the IK handles are still drawn and can be dragged.
 )"},
     {"How This Editor Renders", "A software rasterizer you can read", R"(
 Unity and Blender draw with the GPU: Unity's render pipelines, and Blender's EEVEE or Workbench through its draw manager (Cycles is a path tracer). Blendity has no GPU dependency, so it implements the classic pipeline on the CPU, in src/render/raster.cpp:
@@ -510,7 +526,7 @@ Blendity's MeshRenderer uses the classic shading model: Lambertian diffuse, a Bl
 | Bulb | Point (Range) | Point | Point
 | Cone | Spot (Spot Angle, Inner Spot Angle) | Spot (Size, Blend) | Spot
 | Panel | Area (Rectangle / Disc, Width, Height) | Area | Area (HDRP / baked)
-A spot light lights a cone along its forward axis and fades between the inner and outer angles. An area light lights only the side its arrow points to. In path-traced renders it is sampled across its whole surface, so its shadows are soft: the larger the panel, the softer they get. Real lights have a colour temperature. Tick Use Color Temperature and the colour is tinted like a black body at that many kelvin. The tint runs warm to cool: 1900 K is candlelight, 2700 K a bulb, 5500 K noon sun and 6500 K white, while 10000 K and above is the blue of shade.
+A spot light lights a cone along its forward axis and fades between the inner and outer angles. An area light is a glowing panel: it lights only the side its arrow points to, from every point of its surface, with the inverse square of the distance from each - the same light a quad with an emissive material of strength pi x Intensity gives, so Width and Height make it give more light, and softer shadows. Its Range is where it fades out, not how it falls. In path-traced renders it is sampled across its whole surface, so its shadows are soft: the larger the panel, the softer they get; the views, lightmaps and probes compute the same light exactly. Real lights have a colour temperature. Tick Use Color Temperature and the colour is tinted like a black body at that many kelvin. The tint runs warm to cool: 1900 K is candlelight, 2700 K a bulb, 5500 K noon sun and 6500 K white, while 10000 K and above is the blue of shade.
 @ blender/intern/cycles/kernel/light/spot.h, blender/intern/cycles/kernel/light/area.h
 @ blender/intern/cycles/kernel/svm/blackbody.h
 ! cmd:create Spot Light; set Light.UseColorTemperature 1; set Light.Temperature 2700 | Add a warm spot light above the scene
@@ -709,11 +725,20 @@ Ramp (Goo Engine builds it in); Unity with a toon shader. In Blendity set a mate
 pick the Toon preset): Toon Bands sets how many lit tones, Threshold where light turns to shadow, Shadow Color the
 dark side's tint, and a rim light can outline the silhouette from inside. Add an Outline component for the lines:
 a slightly larger copy of the mesh, turned inside out, so only its rim shows round the object (the inverted
-hull). Both show in the views, F12 renders on the CPU and GPU, and exports. For the printed-page look, a camera's
-Add Filter > Looks > Manga stacks Grayscale, Halftone dots, Line Art and Paper; Anime adds Line Art, a little
-saturation and a soft Bloom. Line Art draws creases where the surface turns more than an angle, so a cube's edges
-get lines and a smooth sphere only its outline.
+hull). Both show in the views, F12 renders on the CPU and GPU, and exports. The material's Toon fields sit in a
+Toon drop-down of the Inspector (and the Axis Material ones in theirs), opened by its header. Select several
+materials in the Materials window (Ctrl-click, Shift for a range) and a change reaches every one of them that has
+the field: a Toon Threshold lands on the toon ones and leaves a PBR one alone, Shading Model converts them all; a
+dash marks a field whose values differ, and +=0.1 moves each from its own value. The same with several objects
+selected in the Scene (their materials in the same slot) or several .mat files in the Project window. Console:
+matset ToonThreshold 0.4 on the selection. For the printed-page
+look, a camera's Add Filter > Looks > Manga is one effect: greys (with flat Tones if you like), halftone dots, ink
+lines and paper; Anime is one too: ink lines, a little saturation and a soft bloom. Each has its own few fields,
+and the parts (Halftone, Line Art, Paper...) are still there as effects for stacks of your own. Line Art draws
+creases where the surface turns more than an angle, so a cube's edges get lines and a smooth sphere only its
+outline.
 ! cmd:select Sphere; material Toon; component Outline | Make the Sphere toon-shaded with an outline
+! cmd:select Sphere; material Toon; matset ToonThreshold 0.4 | Set the toon threshold on the Sphere's materials from the console
 # Baking textures for other programs
 Procedural textures, axis materials and Box mapping are computed by Blendity's shaders; another program only understands images on UVs. Object > Bake Textures lays the object out on new UVs (Smart UV Project and Pack Islands, as the lightmapper does) and evaluates its materials at every texel into four images: albedo, roughness, metallic and a normal map. Blender does the same with Cycles' Bake panel, Unity users with Substance's baker. The export option Bake Textures does it on copies for OBJ, FBX and glTF, leaving the scene alone.
 ? Why can't a Mirror modifier be baked in place? | The images go on the base mesh's UVs, and the mirrored half shares them: it would repeat the base's images. Apply the modifier first, or export with Bake Textures, which bakes what it exports.

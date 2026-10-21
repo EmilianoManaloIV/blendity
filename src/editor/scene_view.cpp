@@ -139,8 +139,8 @@ void Editor::draw_scene_view(const Recti &r) {
   const bool piloting = piloted_camera() != nullptr;
   if (!piloting) {
     draw_scene_icons(view);
-    draw_origins(view);
-    draw_footprint_frames(view);
+    if (show_origins_) draw_origins(view);
+    if (show_footprints_) draw_footprint_frames(view);
     draw_guides(view);
     draw_zfight_overlay(view);
     draw_overlap_overlay(view);
@@ -213,6 +213,17 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   x += h + u.px(2);
   if (u.icon_button({x, y, h, h}, Icon::Chart, show_stats_, "Statistics overlay (Blender: Overlays > Statistics).")) show_stats_ = !show_stats_;
   x += h + u.px(2);
+  /* The overlay layers (task 0146): a menu of checks, the icons beside it the quick toggles for three of them. */
+  Recti ovr{x, y, u.px(78), h};
+  overlay_rects_["button"] = ovr;
+  bool every = true;
+  for (const OverlayLayer &l : overlay_layers()) every = every && *l.flag;
+  if (u.button(ovr, "Overlays", !every)) u.open_popup(u.id("scene_overlays"), {ovr.x, ovr.bottom(), ovr.w, 0});
+  u.tooltip("Which overlays the Scene view draws: bones, rig controls, light and camera icons, curve and lattice points,\n"
+            "origins, footprints, the selection outline, grid, gizmos and statistics (Blender: the Overlays popover).\n"
+            "Hide the bones to see a character's mesh with its IK handles still there. Console: overlay <layer> on|off.");
+  u.popup(u.id("scene_overlays"), u.px(250), [this] { draw_overlays_menu(); });
+  x += ovr.w + u.px(2);
   if (u.icon_button({x, y, h, h}, Icon::Camera, scene_filters_,
                     "Camera filters: show the Main Camera's filters (e.g. Retro Console Filter) in the Shaded view.\n"
                     "Console: filters on / off."))
@@ -231,6 +242,73 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
   u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
   (void)x;
+}
+
+/* overlay list | overlay all [on|off] | overlay <bones|controls|icons|points|origins|footprints|outline|grid|gizmos|stats>
+ * [on|off|toggle]: the Scene view's overlay layers (task 0146). Its own function: the command chain in
+ * run_console_command is at MSVC's nesting limit. */
+void Editor::overlay_command(const std::vector<std::string> &t) {
+  auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  const std::string what = to_lower(arg(1, "list")), v = to_lower(arg(2, "toggle"));
+  std::vector<OverlayLayer> layers = overlay_layers();
+  if (what == "list") {
+    for (const OverlayLayer &l : layers) Log::info("  %-10s %s  %s", l.key, *l.flag ? "on " : "off", l.label);
+    return;
+  }
+  const bool on = v == "on" || v == "1" || v == "true", off_ = v == "off" || v == "0" || v == "false";
+  if (!on && !off_ && v != "toggle") {
+    Log::warn("overlay %s: on, off or toggle", what.c_str());
+    return;
+  }
+  bool every = true;  // "all" alone: on unless all are on already (the menu's All Overlays)
+  for (const OverlayLayer &l : layers) every = every && *l.flag;
+  std::string set;
+  for (const OverlayLayer &l : layers)
+    if (what == "all" || what == l.key) {
+      *l.flag = on ? true : off_ ? false : what == "all" ? !every : !*l.flag;
+      set += std::string(set.empty() ? "" : ", ") + l.key + (*l.flag ? " on" : " off");
+    }
+  if (set.empty()) Log::warn("overlay: all, bones, controls, icons, points, origins, footprints, outline, grid, gizmos, stats or list");
+  else Log::info("Overlays: %s", set.c_str());
+}
+
+std::vector<Editor::OverlayLayer> Editor::overlay_layers() {
+  return {{"bones", "Bones", "The armatures' bones (an Armature's own Show Bones hides one rig). Hidden bones can't be clicked or dragged.", &show_bones_},
+          {"controls", "Rig Controls (IK / FK handles)", "The rig's control shapes: IK targets, poles and FK handles, posed by dragging.", &show_rig_controls_},
+          {"icons", "Light & Camera Icons", "The icons that stand for lights and cameras (clicked to select them).", &show_icons_},
+          {"points", "Curve & Lattice Points", "Curves, lattices and the active one's control points.", &show_points_},
+          {"origins", "Object Origins", "The dot at each selected object's origin.", &show_origins_},
+          {"footprints", "Footprints & Contacts", "The Footsteps tool's soles and frames, and where feet touch the ground.", &show_footprints_},
+          {"outline", "Selection Outline", "The orange outline round the selected objects (children lighter).", &show_outline_},
+          {"grid", "Grid", "The floor grid and its axes.", &show_grid_},
+          {"gizmos", "Gizmos", "The transform handles and the Camera Preview.", &show_gizmos_},
+          {"stats", "Statistics", "Object, vertex, face and timing counts in the corner.", &show_stats_}};
+}
+
+/* The Overlays menu (task 0146): All Overlays, then one check per layer. Runs at the frame's end, as popups do. */
+void Editor::draw_overlays_menu() {
+  auto &u = ui_;
+  std::vector<OverlayLayer> layers = overlay_layers();
+  bool every = true;
+  for (const OverlayLayer &l : layers) every = every && *l.flag;
+  const bool all_clicked = u.menu_item("All Overlays", nullptr, every);
+  overlay_rects_["All Overlays"] = u.last_widget();
+  u.tooltip("Every layer on; click again to hide them all (the picture alone).");
+  if (all_clicked)
+    for (const OverlayLayer &l : layers) *l.flag = !every;
+  u.menu_separator();
+  for (const OverlayLayer &l : layers) {
+    const bool clicked = u.menu_item(l.label, nullptr, *l.flag);
+    overlay_rects_[l.label] = u.last_widget();
+    u.tooltip(l.help);
+    if (clicked) *l.flag = !*l.flag;
+  }
+}
+
+bool Editor::overlay_shown_for_test(const std::string &key) {
+  for (const OverlayLayer &l : overlay_layers())
+    if (key == l.key) return *l.flag;
+  return false;
 }
 
 /* Which navigation a press in the Scene view starts, by the editor's feel (task 0063), and the button that holds it:
@@ -608,7 +686,7 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
 
 void Editor::render_overlays(const Recti &) {
   draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
-  draw_footprint_soles();  // (task 0126)
+  if (show_footprints_) draw_footprint_soles();  // (task 0126)
   draw_ai_overlay();       // (task 0130)
   /* Wireframes. */
   bool all_wire = shading_ == Shading::Wireframe || shading_ == Shading::ShadedWireframe;
@@ -658,7 +736,7 @@ void Editor::render_overlays(const Recti &) {
   }
 
   /* Selection outline (orange, children lighter), Unity & Blender style. */
-  if (!edit_mode_ && !selection_.empty() && shading_ != Shading::Wireframe) {
+  if (show_outline_ && !edit_mode_ && !selection_.empty() && shading_ != Shading::Wireframe) {
     std::vector<uint32_t> sel, kids;
     std::function<void(GameObject *)> add_kids = [&](GameObject *g) {
       for (GameObject *c : g->children) { kids.push_back((uint32_t)c->id); add_kids(c); }
@@ -763,7 +841,7 @@ void Editor::draw_control_points(const Recti &view, const GameObject &g, const C
 bool Editor::point_pick(const Recti &view, int mx, int my, int mode) {
   GameObject *g = active_object();
   const Component *pc = g && is_selected(g->id) ? g->point_source() : nullptr;
-  if (!pc || edit_mode_) return false;
+  if (!pc || edit_mode_ || !show_points_) return false;  // (the layer off: not drawn, not picked - task 0146)
   int hit = -1;
   float best = (float)ui_.px(9);
   for (int i = 0; i < pc->control_point_count(); i++) {
@@ -827,14 +905,16 @@ void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
   ik_bones_frame_ = ik_driven_bones();
   scene_->for_each([&](GameObject &g) {
-    if (const Component *bc = g.find_role(Component::RenderRole::Bone); bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
-    if (RigControl::live.load(std::memory_order_relaxed) && g.active_in_hierarchy())
+    /* Each kind on its own overlay layer (task 0146). */
+    if (const Component *bc = show_bones_ ? g.find_role(Component::RenderRole::Bone) : nullptr; bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
+    if (show_rig_controls_ && RigControl::live.load(std::memory_order_relaxed) && g.active_in_hierarchy())
       if (const RigControl *rc = g.get<RigControl>()) draw_rig_control(g, *rc);
-    if (const Component *pc = g.point_source(); pc && g.active_in_hierarchy()) {
+    if (const Component *pc = show_points_ ? g.point_source() : nullptr; pc && g.active_in_hierarchy()) {
       if (const Curve *cv = g.curve()) draw_curve(g, *cv);
       if (const Lattice *lt = g.lattice()) draw_lattice(g, *lt);
       if (g.id == active_ && !edit_mode_) draw_control_points(view, g, *pc);
     }
+    if (!show_icons_) return;
     auto *l = g.light();  // (the role lookups first: every object, every frame)
     auto *c = g.camera();
     if ((!l && !c) || !g.active_in_hierarchy()) return;
@@ -1283,11 +1363,11 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
       return;
     }
   }
-  /* Icon gizmos first (lights & cameras have no pixels in the id buffer). */
+  /* Icon gizmos first (lights & cameras have no pixels in the id buffer); a hidden layer isn't picked (task 0146). */
   uint64_t hit = 0;
   float best = (float)ui_.px(14);
   scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy() || (!g.get<Light>() && !g.get<Camera>())) return;
+    if (!show_icons_ || !g.active_in_hierarchy() || (!g.get<Light>() && !g.get<Camera>())) return;
     Vec2 sp;
     float z;
     if (!scene_r3d_.project(g.world_position(), sp, z)) return;
@@ -1312,7 +1392,7 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     const Component *bc = g.find_role(Component::RenderRole::Bone);
-    if (bc && bone_armature(g) && !bone_armature(g)->show_bones) bc = nullptr;  // hidden bones aren't picked
+    if (bc && (!show_bones_ || (bone_armature(g) && !bone_armature(g)->show_bones))) bc = nullptr;  // hidden bones aren't picked (the layer or the armature's own switch)
     if (bc) {  // a bone by its line (task 0047)
       const Bone &bn = *static_cast<const Bone *>(bc);
       const Mat4 &bw = g.world_matrix();
@@ -1327,11 +1407,11 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
         if (dist < best) best = dist, hit = g.id;
       }
     }
-    if (const RigControl *rc = RigControl::live.load(std::memory_order_relaxed) ? g.get<RigControl>() : nullptr) {  // a control by its wire (task 0067)
+    if (const RigControl *rc = show_rig_controls_ && RigControl::live.load(std::memory_order_relaxed) ? g.get<RigControl>() : nullptr) {  // a control by its wire (task 0067)
       const float d = rig_control_distance(view, g, *rc, mx, my) * 0.5f;  // (a control near a bone wins: animators grab controls)
       if (d < best) best = d, hit = g.id;
     }
-    if (const Lattice *lt = g.lattice()) {  // a lattice by its cage (task 0043)
+    if (const Lattice *lt = show_points_ ? g.lattice() : nullptr) {  // a lattice by its cage (task 0043)
       const Mat4 &lw = g.world_matrix();
       const int n = lt->control_point_count(), nu = lt->points_u, nv = lt->points_v;
       auto seg = [&](Vec3 a, Vec3 b) {
@@ -1354,7 +1434,7 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
         if (iw + 1 < nw && end(iu, nu) && end(iv, nv)) seg(lt->control_point(i), lt->control_point(i + nu * nv));
       }
     }
-    if (const Curve *cv = g.curve()) {  // a curve by its line (task 0042)
+    if (const Curve *cv = show_points_ ? g.curve() : nullptr) {  // a curve by its line (task 0042)
       const CurvePath &path = cv->local_path();
       const Mat4 &cw = g.world_matrix();
       const size_t n = path.pos.size();

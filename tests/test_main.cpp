@@ -10944,6 +10944,9 @@ static void round31_tests() {
         {"Line Art", "CreaseAngle", "60", [](FilterEffect *e) { return (double)static_cast<LineArtEffect *>(e)->crease_angle; }, 60},
         {"Paper", "Strength", "0.6", [](FilterEffect *e) { return (double)static_cast<PaperEffect *>(e)->strength; }, 0.6},
         {"Color Ramp", "Stops", "4", [](FilterEffect *e) { return (double)static_cast<ColorRampEffect *>(e)->stops; }, 4},
+        /* The Anime and Manga looks as single effects (task 0154). */
+        {"Anime", "LineThickness", "2", [](FilterEffect *e) { return (double)static_cast<AnimeEffect *>(e)->line_thickness; }, 2},
+        {"Manga", "DotCell", "9", [](FilterEffect *e) { return (double)static_cast<MangaEffect *>(e)->dot_cell; }, 9},
         /* The other categories' effects go through the same paths (they had their own copies of this test). */
         {"Retro Console", "Width", "100", [](FilterEffect *e) { return (double)static_cast<RetroConsoleFilter *>(e)->width; }, 100},
         {"Bloom", "Threshold", "2.5", [](FilterEffect *e) { return (double)static_cast<BloomEffect *>(e)->threshold; }, 2.5},
@@ -10960,7 +10963,7 @@ static void round31_tests() {
       auto e = create_filter_effect(c.name);
       CHECK(e && std::string(e->type_name()) == c.name);
     }
-    CHECK(per_cat["Color"] == 5 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 8);
+    CHECK(per_cat["Color"] == 5 && per_cat["Lens"] == 4 && per_cat["Stylize"] == 10);
     CHECK(per_cat["Retro Console"] == 1 && per_cat["Bloom & glow"] == 1);
     CHECK(filter_effect_infos().size() == cases.size());  // a new effect type gets a row here
     {  // menu order is grouped by category (a category is one run)
@@ -19318,8 +19321,9 @@ RenderLight r52_big_light(bool disk = false, float w = 10.0f, float h = 10.0f) {
   return l;
 }
 
-/* The path tracer's estimate without shadows, converged: the mean of max(0, n.L) max(0, facing) over uniform
- * random points of the light. */
+/* The path tracer's estimate without shadows, converged: the integral of max(0, n.L) x area_light_falloff (the
+ * facing, the inverse square, the Range window: task 0155) over the light - its area times the mean over uniform
+ * random points. */
 double r52_reference(const RenderLight &l, Vec3 p, Vec3 n, int samples = 1000000) {
   uint32_t s = 12345;
   auto rnd = [&] {
@@ -19335,12 +19339,12 @@ double r52_reference(const RenderLight &l, Vec3 p, Vec3 n, int samples = 1000000
       b = rr * std::sin(ph);
     }
     const Vec3 up = cross(l.direction, l.right);
-    Vec3 L = l.position + l.right * (a * l.width) + up * (b * l.height) - p;
-    L = normalize(L);
-    const float ndl = dot(n, L), c = -dot(l.direction, L);
-    if (ndl > 0 && c > 0) sum += ndl * c;
+    const Vec3 q = l.position + l.right * (a * l.width) + up * (b * l.height);
+    const Vec3 L = normalize(q - p);
+    const float ndl = dot(n, L);
+    if (ndl > 0) sum += ndl * area_light_falloff(l, q, p);
   }
-  return sum / samples;
+  return sum / samples * area_light_area(l);
 }
 
 static void round52_tests() {
@@ -19366,20 +19370,22 @@ static void round52_tests() {
                           {"a disk light 0.5 m below, tilted", {1.0f, 3.0f, 1.0f}, normalize(Vec3(-0.4f, 1, 0.1f)), true, 10, 10}};
     for (const Case &c : cases) {
       const RenderLight l = r52_big_light(c.disk, c.w, c.h);
-      const double ref = r52_reference(l, c.p, c.n), got = area_light_cosine(l, c.p, c.n);
+      const double ref = r52_reference(l, c.p, c.n), got = area_light_irradiance(l, c.p, c.n);
       std::printf("    %s: %.4f (reference %.4f)\n", c.name, got, ref);
       CHECK(std::fabs(got - ref) <= 0.01 * ref + 1e-4);
     }
     /* Turned away, behind the light, NaN: nothing. */
     const RenderLight l = r52_big_light();
-    CHECK(area_light_cosine(l, {0, 5, 0}, {0, 1, 0}) == 0.0f);
-    CHECK(area_light_cosine(l, {0, 0, 0}, {0, -1, 0}) == 0.0f);
+    CHECK(area_light_irradiance(l, {0, 5, 0}, {0, 1, 0}) == 0.0f);
+    CHECK(area_light_irradiance(l, {0, 0, 0}, {0, -1, 0}) == 0.0f);
     const float nan = std::numeric_limits<float>::quiet_NaN();
-    CHECK(area_light_cosine(l, {nan, 0, 0}, {0, 1, 0}) == 0.0f);
-    /* No size (an object scaled to 0 on an axis): the centre, as a point, as the path tracer does. */
+    CHECK(area_light_irradiance(l, {nan, 0, 0}, {0, 1, 0}) == 0.0f);
+    /* No size (an object scaled to 0 on an axis): the centre, as a point, as the path tracer does (3.5 m up:
+     * the inverse square and the window, task 0155). */
     const RenderLight z = r52_big_light(false, 0.0f, 0.0f);
-    const float pz = area_light_cosine(z, {0, 0, 0}, {0, 1, 0});
-    CHECK(std::fabs(pz - 1.0f) < 1e-4f);
+    const float pz = area_light_irradiance(z, {0, 0, 0}, {0, 1, 0});
+    const float window = std::pow(1.0f - std::pow(3.5f / 10.0f, 4.0f), 2.0f);  // Range 10 at 3.5 m
+    CHECK(std::fabs(pz - 1e-4f * window / (3.5f * 3.5f)) < 1e-8f);  // a square centimetre's worth, facing, over r^2
   });
 
   test("area light: a 10 m light lights a cube's side in the rasterizer (it was black), as the path tracer does", [] {
@@ -19535,7 +19541,7 @@ static void round52_tests() {
     /* The floor's centre against the path tracer's converged estimate (the lightmap holds what albedo multiplies). */
     Vec3 centre;
     CHECK(r35_sample(d, 1, *floor, Mat4::identity(), {0.05f, 0, 0.05f}, centre));
-    const double want = l.intensity * r52_reference(l, {0.05f, 0, 0.05f}, {0, 1, 0}) * light_range_falloff(l, {0.05f, 0, 0.05f});
+    const double want = l.intensity * r52_reference(l, {0.05f, 0, 0.05f}, {0, 1, 0});
     std::printf("    centre %.4f, path tracer %.4f\n", centre.x, want);
     CHECK(std::fabs(centre.x - want) < 0.05 * want);
   });
@@ -21917,7 +21923,7 @@ static void round61_tests() {
     std::remove(resolve_asset_path("Assets/Textures/R61Maps.ptex").c_str());
   });
 
-  test("anime filters: the Anime and Manga looks add their effects in order, one undo step removes them, and a scene keeps them", [] {
+  test("anime filters: the Anime and Manga looks add one effect each (task 0154), one undo step removes it, and a scene keeps it", [] {
     Editor ed;
     r57_open(ed);
     ed.step_frame_headless();  // r57_open's settings as their own undo step (not merged with the look's)
@@ -21925,15 +21931,14 @@ static void round61_tests() {
     ed.command("filter look Manga");
     GameObject *cam = ed.scene().find_by_name("Main Camera");
     CameraFilters *cf = cam ? cam->get<CameraFilters>() : nullptr;
-    CHECK(cf && cf->effects.size() == 4);
-    if (!cf || cf->effects.size() != 4) return;
-    CHECK(std::string(cf->effects[0]->type_name()) == GrayscaleEffect::kName && std::string(cf->effects[1]->type_name()) == HalftoneEffect::kName &&
-          std::string(cf->effects[2]->type_name()) == LineArtEffect::kName && std::string(cf->effects[3]->type_name()) == PaperEffect::kName);
+    CHECK(cf && cf->effects.size() == 1);
+    if (!cf || cf->effects.size() != 1) return;
+    CHECK(std::string(cf->effects[0]->type_name()) == MangaEffect::kName);
     Scene back;
     std::string err;
     CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
     GameObject *bc = back.find_by_name("Main Camera");
-    CHECK(bc && bc->get<CameraFilters>() && bc->get<CameraFilters>()->effects.size() == 4);
+    CHECK(bc && bc->get<CameraFilters>() && bc->get<CameraFilters>()->effects.size() == 1);
     ed.step_frame_headless();
     ed.command("undo");
     cam = ed.scene().find_by_name("Main Camera");
@@ -21942,12 +21947,12 @@ static void round61_tests() {
     ed.command("filter look Anime");
     cam = ed.scene().find_by_name("Main Camera");
     cf = cam->get<CameraFilters>();
-    CHECK(cf && cf->effects.size() == 3 && std::string(cf->effects[0]->type_name()) == LineArtEffect::kName);
+    CHECK(cf && cf->effects.size() == 1 && std::string(cf->effects[0]->type_name()) == AnimeEffect::kName);
     /* The look renders. (NaN and huge fields: the stress section `filters` fuzzes every effect.) */
     const Image &img = r57_render(ed, "Rasterized", false);
     CHECK(img.width == 160);
     ed.command("filter look Comic");  // unknown: a warning, nothing added
-    CHECK(cam->get<CameraFilters>()->effects.size() == 3);
+    CHECK(cam->get<CameraFilters>()->effects.size() == 1);
     ed.command("select Directional Light");  // and no empty stack on an object that had none
     ed.command("filter look Comic");
     GameObject *sun = ed.scene().find_by_name("Directional Light");
@@ -36989,5 +36994,668 @@ static void round81_tests() {
                         b->normal_map.path == "Assets/Textures/robe/RobeB_Normal_OpenGL.png" && fs::exists(resolve_asset_path(b->normal_map.path));
     std::printf("    RobeA.mat: %s; RobeB.mat normal: %s\n", a ? a->base_map.path.c_str() : "-", b ? b->normal_map.path.c_str() : "-");
     CHECK(copied);
+  });
+  /* ---------------------------------------------------------------- round 164: area lights as emissive planes (task 0155, ADR 0050) */
+  /* A Lambertian floor's radiance at a point, path traced with direct light only, under either an area light or a quad
+   * with an emissive material of the same radiance (intensity x pi over its area), seen from the side under the panel. */
+  auto r164_floor = [](const RenderLight *light, bool emissive_quad, float w, float y, float I, Vec3 at, int samples) {
+    auto floor = primitives::quad(40.0f);
+    std::vector<MaterialPtr> mats = {make_material("floor", Vec3(0.8f))};
+    mats[0]->specular = 0.0f;
+    mats[0]->roughness = 1.0f;
+    auto panel = primitives::quad(w);
+    std::vector<MaterialPtr> pmats = {make_material("panel", Vec3(0.0f))};
+    pmats[0]->emission = Vec3(1.0f);
+    pmats[0]->emission_strength = I * kPi;  // the panel's radiance: intensity x pi
+    Environment black;
+    black.mode = Environment::Color;
+    black.color = Vec3(0.0f);
+    PathTracer pt;
+    PTSettings st;
+    st.denoise = false;
+    st.use_embree = false;
+    st.max_bounces = 1;  // (a bounce, so an emissive quad found by BSDF sampling counts too: the light samples are MIS-weighted against it)
+    pt.set_settings(st);
+    std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::rotate(Quat::euler({90, 0, 0})), &mats}};  // facing +Y
+    if (emissive_quad) objs.push_back({&panel->render_mesh_tangents(), Mat4::translate({0, y, 0}) * Mat4::rotate(Quat::euler({-90, 0, 0})), &pmats});  // facing -Y
+    std::vector<RenderLight> lights;
+    if (light) lights.push_back(*light);
+    pt.build(objs, lights, black);
+    /* Seen from the side under the panel (an emissive quad is geometry), or from above through it when it is too low. */
+    const Vec3 eye = y > 0.5f ? at + Vec3(2.0f, 0.8f, 0.0f) : at + Vec3(0.0f, 2.0f, 0.0f);
+    pt.set_camera(Mat4::look_at(eye, at, y > 0.5f ? Vec3(0, 1, 0) : Vec3(0, 0, 1)), Mat4::perspective(1.0f * kDeg2Rad, 1, 0.1f, 100), 4, 4);
+    pt.render(1e9, samples);
+    const auto rgb = pt.linear_rgb(false);
+    float v = 0;
+    for (int i = 0; i < 16; i++) v += rgb[(size_t)i * 3 + 1] / 16.0f;
+    return v;
+  };
+  auto r164_light = [](float w, float h, float y, float I, float range) {
+    RenderLight l = r52_big_light(false, w, h);
+    l.position = {0, y, 0};
+    l.intensity = I;
+    l.range = range;
+    return l;
+  };
+  test("area light: a 1 m panel 1 m above the floor lights it by its radiance times its area (albedo x intensity x area over the square of the distance), 2 m up a quarter of it", [&] {
+    /* A 20 cm panel: small against its distance, so the floor gets albedo x intensity x 0.04 / r^2 (the cosines 1). */
+    const RenderLight one = r164_light(0.2f, 0.2f, 1.0f, 2.0f, 1000.0f), two = r164_light(0.2f, 0.2f, 2.0f, 2.0f, 1000.0f);
+    const float a = r164_floor(&one, false, 0.2f, 1.0f, 2.0f, {0, 0, 0}, 1024), b = r164_floor(&two, false, 0.2f, 2.0f, 2.0f, {0, 0, 0}, 1024);
+    std::printf("    1 m: %.4f (0.8 x 2 x 0.04 = 0.064 expected), 2 m: %.4f (a quarter: 0.016)\n", a, b);
+    CHECK(std::fabs(a - 0.064f) < 0.0025f);
+    CHECK(std::fabs(b - 0.016f) < 0.0006f);
+    /* The analytic term says the same (the views, lightmaps and probes take it). */
+    CHECK(std::fabs(0.8f * 2.0f * area_light_irradiance(one, {0, 0, 0}, {0, 1, 0}) - 0.064f) < 0.001f);
+  });
+
+  test("area light: a 10 x 10 m panel 3.5 m up lights the floor as a 10 x 10 m quad of an emissive material does - the path tracer, the exact term and the quad agree", [&] {
+    const RenderLight l = r164_light(10.0f, 10.0f, 3.5f, 2.0f, 1000.0f);
+    const float traced = r164_floor(&l, false, 10.0f, 3.5f, 2.0f, {0, 0, 0}, 4096);
+    const float quad = r164_floor(nullptr, true, 10.0f, 3.5f, 2.0f, {0, 0, 0}, 4096);
+    const float exact = 0.8f * 2.0f * area_light_irradiance(l, {0, 0, 0}, {0, 1, 0});
+    std::printf("    floor centre: area light %.4f, emissive quad %.4f, the exact term %.4f\n", traced, quad, exact);
+    CHECK(traced > 0.05f);
+    CHECK(std::fabs(traced - exact) < 0.03f * exact);
+    CHECK(std::fabs(quad - traced) < 0.03f * traced);
+    /* Off centre too (3 m out, under the panel). */
+    const float t2 = r164_floor(&l, false, 10.0f, 3.5f, 2.0f, {3, 0, 0}, 4096), q2 = r164_floor(nullptr, true, 10.0f, 3.5f, 2.0f, {3, 0, 0}, 4096);
+    const float e2 = 0.8f * 2.0f * area_light_irradiance(l, {3, 0, 0}, {0, 1, 0});
+    std::printf("    3 m out: area light %.4f, emissive quad %.4f, the exact term %.4f\n", t2, q2, e2);
+    CHECK(std::fabs(q2 - t2) < 0.03f * t2 && std::fabs(e2 - t2) < 0.03f * t2);
+  });
+
+  test("area light: the floor under a panel's edge is dimmer than under its centre and brighter than beyond it, with no step", [&] {
+    const RenderLight l = r164_light(10.0f, 10.0f, 3.5f, 2.0f, 1000.0f);
+    float prev = 1e9f;
+    bool ok = true;
+    for (float x : {0.0f, 2.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}) {
+      const float v = area_light_irradiance(l, {x, 0, 0}, {0, 1, 0});
+      std::printf("    x = %4.1f m: %.4f\n", x, v);
+      ok = ok && v < prev && v > 0.0f && (prev > 1e8f || v > 0.5f * prev);  // falling, never off, never by more than half from one metre to the next
+      prev = v;
+    }
+    CHECK(ok);
+  });
+
+  test("area light: a floor 10 cm under a panel gets nearly pi times its radiance (the path tracer and the exact term agree), and a millimetre under it stays finite", [&] {
+    const RenderLight l = r164_light(1.0f, 1.0f, 0.1f, 2.0f, 1000.0f);  // the floor 10 cm below a 1 m panel
+    const float exact = area_light_irradiance(l, {0, 0, 0}, {0, 1, 0});
+    const float traced = r164_floor(&l, false, 1.0f, 0.1f, 2.0f, {0, 0, 0}, 4096);
+    std::printf("    10 cm under a 1 m panel: exact %.4f (a plane touching an endless panel: pi), path traced %.4f (0.8 x 2 x exact = %.4f)\n", exact, traced, 1.6f * exact);
+    CHECK(exact > 0.8f * kPi && exact < kPi);
+    CHECK(std::fabs(traced - 1.6f * exact) < 0.05f * 1.6f * exact);
+    /* A millimetre under it: the inverse square stops at 1 cm, so the maths stays finite (at most the area over 1e-4). */
+    const RenderLight mm = r164_light(1.0f, 1.0f, 0.001f, 2.0f, 1000.0f);
+    const float near = area_light_irradiance(mm, {0, 0, 0}, {0, 1, 0}), near_traced = r164_floor(&mm, false, 1.0f, 0.001f, 2.0f, {0, 0, 0}, 256);
+    std::printf("    a millimetre under it: exact %.4f, path traced %.4f\n", near, near_traced);
+    CHECK(finite_bits(near) && near <= 1e4f && finite_bits(near_traced) && near_traced <= 1.6e4f);
+  });
+
+  test("area light: Range is a window - nothing beyond it, within 2 % of an unlimited light at a quarter of it", [&] {
+    const RenderLight r4 = r164_light(1.0f, 1.0f, 0.0f, 2.0f, 4.0f), big = r164_light(1.0f, 1.0f, 0.0f, 2.0f, 1000.0f);
+    const float beyond = area_light_falloff(r4, r4.position, {0, -5, 0}), at_edge = area_light_falloff(r4, r4.position, {0, -4, 0});
+    const float near4 = area_light_irradiance(r4, {0, -1, 0}, {0, 1, 0}), near_big = area_light_irradiance(big, {0, -1, 0}, {0, 1, 0});
+    std::printf("    Range 4: at 5 m %.4f, at 4 m %.4f; at 1 m %.4f (unlimited %.4f)\n", beyond, at_edge, near4, near_big);
+    CHECK(beyond == 0.0f && at_edge == 0.0f);
+    CHECK(near4 > 0.98f * near_big && near4 <= near_big);  // (the panel's corners are 1.2 m away: the window there 0.983)
+  });
+
+  test("area light: the Light's Range help and the lesson say what Range does now; MoonRay takes the panel's radiance as it is", [] {
+    Light l;
+    l.type = 3;
+    struct Helps : Reflector {
+      std::string last, range_help, intensity_help;
+      void field(const char *n, float &, float, float, float) override { last = n; }
+      void field(const char *n, int &, int, int) override { last = n; }
+      void field(const char *n, bool &) override { last = n; }
+      void field(const char *n, Vec3 &) override { last = n; }
+      void color(const char *n, Vec3 &) override { last = n; }
+      void enumeration(const char *n, int &, const char *const *, int) override { last = n; }
+      void text(const char *n, std::string &) override { last = n; }
+      void mesh(const char *n, MeshPtr &) override { last = n; }
+      void help(const char *h) override {
+        if (last == "Range") range_help = h;
+        if (last == "Intensity") intensity_help = h;
+      }
+    } hr;
+    l.reflect(hr);
+    CHECK(hr.range_help.find("inverse square") != std::string::npos && hr.intensity_help.find("emissive material") != std::string::npos);
+    RenderLight rl = r52_big_light(false, 2.0f, 1.0f);
+    rl.intensity = 1.0f;
+    rl.range = 10.0f;
+    moonray::ExportScene sc;
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.0f);
+    sc.lights = {rl};
+    sc.world = &env;
+    sc.world_map_width = 16;
+    sc.view = Mat4::trs({0, 1, -5}, Quat::euler({0, 0, 0}), {1, 1, 1}).inverse();
+    sc.proj = Mat4::perspective(60.0f * kDeg2Rad, 16.0f / 9.0f, 0.1f, 100.0f);
+    sc.width = 16, sc.height = 9, sc.samples = 1;
+    const std::string dir = fs::join(fs::temp_dir(), "blendity-test-r164-moonray");
+    moonray::ExportReport rep;
+    std::string error, text;
+    CHECK(moonray::export_scene(sc, dir, [](const std::string &p) { return p; }, rep, error));
+    fs::read_file(rep.scene_path, text);
+    const size_t rl_at = text.find("RectLight(");
+    const size_t at = rl_at == std::string::npos ? rl_at : text.find("[\"intensity\"] = ", rl_at);
+    CHECK(at != std::string::npos);
+    if (at != std::string::npos) {
+      const float v = std::strtof(text.c_str() + at + 16, nullptr);
+      std::printf("    MoonRay RectLight intensity %.4f (pi: the radiance of a panel of intensity 1, whatever its size)\n", v);
+      CHECK_NEAR(v, kPi, 1e-3);
+    }
+  });
+  /* ---------------------------------------------------------------- round 165: Inspector groups (task 0145) */
+  test("inspector groups: the camera's Composition Guides are one closed drop-down, opened by its header; `set`, saving and the hash see the fields regardless", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Main Camera");
+    ed.command("guides thirds off");
+    ed.command("guides show on");    // (the guides' rows show inside the group only while Show Guides is on)
+    ed.command("filter add Bloom");  // (a filter stack below the camera: its Add Filter button marks where the rows below end up)
+    r34_steps(ed, 2);
+    const Recti hdr = ed.inspector_menu_rect_for_test("group:Composition Guides");
+    CHECK(hdr.w > 0);
+    CHECK(!ed.foldout_open_for_test("grp_Composition Guides"));
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    Camera *c = cam ? cam->get<Camera>() : nullptr;
+    CHECK(c && !c->guide_thirds);
+    if (!c || hdr.w <= 0) return;
+    /* Closed: the console's `set` still reaches a guide, the file keeps it, the render hash ignores it (as before). */
+    const uint64_t h0 = hash_component(*c);
+    ed.command("set Camera.Thirds 1");
+    CHECK(c->guide_thirds && hash_component(*c) == h0);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    GameObject *bc = back.find_by_name("Main Camera");
+    CHECK(bc && bc->get<Camera>() && bc->get<Camera>()->guide_thirds);
+    /* The header opens it (the rows below move down) and closes it again. */
+    const Recti filters_before = ed.inspector_menu_rect_for_test("add_filter");
+    r34_click(ed, hdr.x + hdr.w / 2, hdr.y + hdr.h / 2);
+    r34_steps(ed, 1);
+    CHECK(ed.foldout_open_for_test("grp_Composition Guides"));
+    const Recti filters_after = ed.inspector_menu_rect_for_test("add_filter");
+    std::printf("    the camera's Add Filter button: y %d closed, %d open\n", filters_before.y, filters_after.y);
+    CHECK(filters_before.w > 0 && filters_after.y > filters_before.y + ed.ui_for_test().row_h() * 5);
+    const Recti hdr2 = ed.inspector_menu_rect_for_test("group:Composition Guides");
+    r34_click(ed, hdr2.x + hdr2.w / 2, hdr2.y + hdr2.h / 2);
+    r34_steps(ed, 1);
+    CHECK(!ed.foldout_open_for_test("grp_Composition Guides"));
+  });
+
+  test("inspector groups: a material's Toon fields sit in a Toon group (open) and the axis ones in Axis Material (closed), shown only when the model is Toon", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    const bool toon_before = ed.inspector_menu_rect_for_test("group:Toon").w > 0;
+    ed.command("material Toon");
+    r34_steps(ed, 2);
+    const Recti toon = ed.inspector_menu_rect_for_test("group:Toon"), axis = ed.inspector_menu_rect_for_test("group:Axis Material");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    MeshRenderer *mr = cube ? cube->get<MeshRenderer>() : nullptr;
+    CHECK(mr && !mr->materials.empty() && mr->materials[0]->shading_model == 1);
+    if (!mr || mr->materials.empty()) return;
+    const std::string key = "grp_" + std::to_string((uintptr_t)mr->materials[0].get());  // (a material's groups keep their state per material)
+    std::printf("    Toon group before the preset: %s; after: Toon %s (open %d), Axis Material %s (open %d)\n", toon_before ? "shown" : "absent",
+                toon.w > 0 ? "shown" : "absent", (int)ed.foldout_open_for_test(key + "Toon"), axis.w > 0 ? "shown" : "absent",
+                (int)ed.foldout_open_for_test(key + "Axis Material"));
+    CHECK(!toon_before && toon.w > 0 && axis.w > 0);
+    CHECK(ed.foldout_open_for_test(key + "Toon") && !ed.foldout_open_for_test(key + "Axis Material"));
+    /* An axis material of its own opens its Axis Material group (the state is per material, so a plain one seen
+     * first doesn't close it for the rest). */
+    ed.command("create Sphere");
+    ed.command("select Sphere");
+    ed.command("material Toon");
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    MaterialPtr sm = sphere && sphere->get<MeshRenderer>() && !sphere->get<MeshRenderer>()->materials.empty() ? sphere->get<MeshRenderer>()->materials[0] : nullptr;
+    CHECK(sm != nullptr);
+    if (!sm) return;
+    sm->axis_mode = 1, sm->touch();
+    r34_steps(ed, 2);
+    CHECK(ed.foldout_open_for_test("grp_" + std::to_string((uintptr_t)sm.get()) + "Axis Material"));
+    /* Every other reader sees the grouped fields. */
+    struct Seen : Reflector {
+      std::vector<std::string> names;
+      void field(const char *n, float &, float, float, float) override { names.push_back(n); }
+      void field(const char *n, int &, int, int) override { names.push_back(n); }
+      void field(const char *n, bool &) override { names.push_back(n); }
+      void field(const char *n, Vec3 &) override { names.push_back(n); }
+      void color(const char *n, Vec3 &) override { names.push_back(n); }
+      void enumeration(const char *n, int &, const char *const *, int) override { names.push_back(n); }
+      void text(const char *n, std::string &) override { names.push_back(n); }
+      void mesh(const char *n, MeshPtr &) override { names.push_back(n); }
+    } seen;
+    mr->materials[0]->reflect(seen);
+    const bool threshold = std::find(seen.names.begin(), seen.names.end(), "Toon Threshold") != seen.names.end();
+    const bool axis_mode = std::find(seen.names.begin(), seen.names.end(), "Axis Mode") != seen.names.end();
+    CHECK(threshold && axis_mode);
+  });
+
+  /* ---------------------------------------------------------------- round 165: overlay layers (task 0146) */
+  auto r165_rig = [](Editor &ed) {
+    r34_open(ed);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.scene().find_by_name("Humanoid");
+    if (rig) rig->set_world_position({0, 0, 3.0f});
+    ed.command("camera 0 1.2 9 0 0.8 3");
+    ed.mark_changed_for_test("R165 setup");
+    r34_steps(ed, 2);
+    return rig;
+  };
+  auto r165_bone_mid = [](Editor &ed, const char *name, int &x, int &y) {
+    GameObject *b = ed.scene().find_by_name(name);
+    if (!b || !b->get<Bone>()) return false;
+    return ed.screen_of_for_test((ed.bone_head(*b) + ed.bone_tail(*b)) * 0.5f, x, y);
+  };
+  test("overlays: with the Bones layer off a click on a bone selects nothing and its handles aren't drawn, while the rig controls stay; all off / all on restores every layer", [&] {
+    Editor ed;
+    GameObject *rig = r165_rig(ed);
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    int x = 0, y = 0;
+    CHECK(r165_bone_mid(ed, "RightLowerLeg", x, y));
+    ed.command("select Main Camera");  // (something else selected: the click must change it)
+    r34_steps(ed, 1);
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
+    std::printf("    bones on: clicking the shin selects %s\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "nothing");
+    CHECK(ed.active_object_for_test() == shin);
+    ed.record_buttons_for_test(true);
+    r34_steps(ed, 1);
+    Recti hr;
+    const bool handles_on = ed.button_rect_for_test("bone_tail", hr);
+    ed.command("overlay bones off");
+    CHECK(!ed.overlay_shown_for_test("bones") && ed.overlay_shown_for_test("controls"));
+    r34_steps(ed, 1);
+    const bool handles_off = ed.button_rect_for_test("bone_tail", hr);
+    std::printf("    the selected bone's tail handle: drawn %d with the layer on, %d with it off\n", (int)handles_on, (int)handles_off);
+    CHECK(handles_on && !handles_off);
+    ed.command("select Main Camera");  // (something else selected: the click must change it)
+    r34_steps(ed, 1);
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    std::printf("    bones off: clicking where the shin is selects %s\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "nothing");
+    CHECK(ed.active_object_for_test() != shin);
+    /* The Hierarchy (the console) still selects it. */
+    ed.command("select RightLowerLeg");
+    CHECK(ed.active_object_for_test() == shin);
+    /* All off, all on. */
+    ed.command("overlay all off");
+    bool any = false;
+    for (const char *k : {"bones", "controls", "icons", "points", "origins", "footprints", "outline", "grid", "gizmos", "stats"}) any = any || ed.overlay_shown_for_test(k);
+    CHECK(!any);
+    ed.command("overlay all on");
+    bool all = true;
+    for (const char *k : {"bones", "controls", "icons", "points", "origins", "footprints", "outline", "grid", "gizmos", "stats"}) all = all && ed.overlay_shown_for_test(k);
+    CHECK(all);
+    ed.command("overlay nothing off");  // unknown: a warning, no change
+    ed.command("overlay bones maybe");  // not on, off or toggle: a warning, no change
+    CHECK(ed.overlay_shown_for_test("bones"));
+    ed.command("overlay bones off");
+    ed.command("overlay all");  // some off: all on (the menu's All Overlays)
+    CHECK(ed.overlay_shown_for_test("bones") && ed.overlay_shown_for_test("stats"));
+    ed.command("overlay all");  // all on: all off
+    CHECK(!ed.overlay_shown_for_test("bones") && !ed.overlay_shown_for_test("grid"));
+    ed.command("overlay all on");
+  });
+
+  test("overlays: with the Light & Camera Icons layer off a click on a light's icon selects nothing; the Overlays menu toggles a layer and the choice survives the preferences", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("camera 0 1.2 9 0 0.8 3");
+    r34_steps(ed, 2);
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    CHECK(sun != nullptr);
+    if (!sun) return;
+    int x = 0, y = 0;
+    CHECK(ed.screen_of_for_test(sun->world_position(), x, y));
+    ed.command("select Main Camera");  // (something else selected: the click must change it)
+    r34_steps(ed, 1);
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.active_object_for_test() == sun);
+    ed.command("overlay icons off");
+    ed.command("select Main Camera");  // (something else selected: the click must change it)
+    r34_steps(ed, 1);
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    std::printf("    icons off: clicking the sun's icon selects %s\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "nothing");
+    CHECK(ed.active_object_for_test() != sun);
+    ed.command("overlay icons on");
+    /* The menu: the Overlays button, then the Bones row. */
+    ed.record_buttons_for_test(true);
+    r34_steps(ed, 1);
+    const Recti btn = ed.overlay_rect_for_test("button");
+    CHECK(btn.w > 0);
+    if (btn.w <= 0) return;
+    r34_click(ed, btn.x + btn.w / 2, btn.y + btn.h / 2);
+    r34_steps(ed, 1);
+    const Recti row = ed.overlay_rect_for_test("Bones");
+    CHECK(row.w > 0);
+    if (row.w <= 0) return;
+    r34_click(ed, row.x + row.w / 2, row.y + row.h / 2);
+    r34_steps(ed, 1);
+    std::printf("    the menu's Bones row clicked: bones %d, the menu %s\n", (int)ed.overlay_shown_for_test("bones"), ed.popup_count_for_test() ? "still open" : "closed");
+    CHECK(!ed.overlay_shown_for_test("bones") && ed.popup_count_for_test() == 0);
+    /* Remembered: saved with the preferences (a scratch file), read back. */
+    const std::string prefs = fs::join(test_dir(), "r165_prefs.txt");
+    ed.prefs_for_test(prefs);
+    ed.save_prefs_for_test();
+    ed.command("overlay bones on");
+    ed.load_prefs_for_test();
+    CHECK(!ed.overlay_shown_for_test("bones"));
+    std::string text;
+    fs::read_file(prefs, text);
+    CHECK(text.find("overlays_off=bones") != std::string::npos);
+    /* The keys written after it are still read (a dangling else once stopped the reader there: the review). */
+    fs::write_file(prefs, "overlays_off=bones\nstats=0\n");
+    ed.command("overlay stats on");
+    ed.load_prefs_for_test();
+    CHECK(!ed.overlay_shown_for_test("bones") && !ed.overlay_shown_for_test("stats"));
+    ed.command("overlay all on");
+  });
+
+  /* ---------------------------------------------------------------- round 165: Anime and Manga as single effects (task 0154) */
+  auto r165_max_diff = [](const Image &a, const Image &b) {
+    int worst = 0;
+    if (a.pixels.size() != b.pixels.size()) return 255;
+    for (size_t i = 0; i < a.pixels.size(); i++)
+      for (int s = 0; s < 24; s += 8) worst = std::max(worst, std::abs((int)((a.pixels[i] >> s) & 255) - (int)((b.pixels[i] >> s) & 255)));
+    return worst;
+  };
+  test("anime filters: the Anime effect draws what the old Line Art + Color Grading + Bloom stack drew (within a step of 255), and its fields change the picture", [&] {
+    Editor one;
+    r57_open(one);
+    one.command("select Main Camera");
+    one.command("filter look Anime");
+    const Image a = r57_render(one, "Rasterized", false);
+    Editor two;
+    r57_open(two);
+    two.command("select Main Camera");
+    two.command("filter add Line Art");
+    two.command("set CameraFilters.E0Thickness 1.2");
+    two.command("set CameraFilters.E0CreaseAngle 50");
+    two.command("filter add Color Grading");
+    two.command("set CameraFilters.E1Saturation 0.15");
+    two.command("set CameraFilters.E1Contrast 0.08");
+    two.command("filter add Bloom");
+    two.command("set CameraFilters.E2Intensity 0.25");
+    two.command("set CameraFilters.E2Threshold 1.2");
+    const Image b = r57_render(two, "Rasterized", false);
+    const int d = r165_max_diff(a, b);
+    std::printf("    Anime against the three-effect stack: the largest channel difference %d\n", d);
+    CHECK(a.width == 160 && d <= 1);
+    one.command("set CameraFilters.E0Lines 0");
+    const Image c = r57_render(one, "Rasterized", false);
+    CHECK(r165_max_diff(a, c) > 1);
+    /* Saved and loaded with its fields. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(one.scene()), back, err));
+    GameObject *bc = back.find_by_name("Main Camera");
+    CameraFilters *cf = bc ? bc->get<CameraFilters>() : nullptr;
+    CHECK(cf && cf->effects.size() == 1 && std::string(cf->effects[0]->type_name()) == AnimeEffect::kName && !static_cast<AnimeEffect *>(cf->effects[0].get())->lines);
+  });
+
+  test("anime filters: the Manga effect draws what the old Grayscale + Halftone + Line Art + Paper stack drew, Tones posterises, and the old composite stack still loads and renders", [&] {
+    Editor one;
+    r57_open(one);
+    one.command("select Main Camera");
+    one.command("filter look Manga");
+    const Image a = r57_render(one, "Rasterized", false);
+    Editor two;
+    r57_open(two);
+    two.command("select Main Camera");
+    two.command("filter add Grayscale / Sepia");
+    two.command("filter add Halftone");
+    two.command("set CameraFilters.E1CellSize 6");
+    two.command("set CameraFilters.E1Contrast 1.2");
+    two.command("filter add Line Art");
+    two.command("set CameraFilters.E2Thickness 1.5");
+    two.command("filter add Paper");
+    const Image b = r57_render(two, "Rasterized", false);
+    const int d = r165_max_diff(a, b);
+    std::printf("    Manga against the four-effect stack: the largest channel difference %d\n", d);
+    CHECK(a.width == 160 && d <= 1);
+    one.command("set CameraFilters.E0Tones 3");
+    const Image c = r57_render(one, "Rasterized", false);
+    CHECK(r165_max_diff(a, c) > 1);
+    /* The old composite (a scene saved before task 0154) loads as its four effects (and rendered above, as `b`). */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(two.scene()), back, err));
+    GameObject *cam = back.find_by_name("Main Camera");
+    CameraFilters *cf = cam ? cam->get<CameraFilters>() : nullptr;
+    CHECK(cf && cf->effects.size() == 4 && std::string(cf->effects[1]->type_name()) == HalftoneEffect::kName);
+  });
+  /* ---------------------------------------------------------------- round 166: multi-edit materials (task 0147) */
+  /* A number field clicked, typed over and committed with Enter (the Inspector's and the Materials window's). */
+  auto r166_type = [](Editor &ed, const Recti &f, const std::string &text) {
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y, int key = 0) {
+      platform::Event e;
+      e.type = t;
+      e.x = x;
+      e.y = y;
+      e.key = key;
+      return e;
+    };
+    const int x = f.x + f.w / 2, y = f.y + f.h / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+    ed.step_frame_headless({ev(ET::KeyDown, x, y, platform::KEY_A)});  // a click selects the text; type over it
+    std::vector<platform::Event> typed;
+    for (char c : text) {
+      platform::Event t = ev(ET::Text, x, y);
+      t.codepoint = (uint32_t)c;
+      typed.push_back(t);
+    }
+    ed.step_frame_headless(typed);
+    ed.step_frame_headless({ev(ET::KeyDown, x, y, platform::KEY_ENTER)});
+    ed.step_frame_headless({ev(ET::KeyUp, x, y, platform::KEY_ENTER)});
+    ed.step_frame_headless();
+  };
+  /* A field's rect, scrolled into its window (the material's fields run past the bottom): the wheel over the window's
+   * lower part until the rect is inside it. */
+  auto r166_field = [](Editor &ed, const std::string &key, WindowKind win) {
+    const Recti w = ed.window_rect_for_test(win);
+    for (int tries = 0; tries < 60; tries++) {
+      Recti f;
+      if (!ed.button_rect_for_test(key, f)) {
+        ed.step_frame_headless();
+        continue;
+      }
+      if (f.y >= w.y && f.y + f.h <= w.bottom()) return f;
+      platform::Event mv, wheel;
+      mv.type = platform::EventType::MouseMove;
+      wheel.type = platform::EventType::Wheel;
+      mv.x = wheel.x = f.x;
+      mv.y = wheel.y = w.bottom() - ed.ui_for_test().px(30);
+      wheel.wheel_y = f.y > w.bottom() ? -3.0f : 3.0f;
+      ed.step_frame_headless({mv});
+      ed.step_frame_headless({wheel});
+      ed.step_frame_headless();
+    }
+    std::printf("    '%s' never came into view\n", key.c_str());
+    return Recti{0, 0, 0, 0};
+  };
+  auto r166_click = [](Editor &ed, const std::string &key, int mods) {
+    Recti b;
+    if (!ed.button_rect_for_test(key, b)) {
+      std::printf("    no '%s'\n", key.c_str());
+      return false;
+    }
+    const int x = b.x + b.w / 2, y = b.y + b.h / 2;
+    platform::Event m, d, u;
+    m.type = platform::EventType::MouseMove, d.type = platform::EventType::MouseDown, u.type = platform::EventType::MouseUp;
+    m.x = d.x = u.x = x, m.y = d.y = u.y = y;
+    m.mods = d.mods = u.mods = mods;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({d});
+    ed.step_frame_headless({u});
+    ed.step_frame_headless();
+    return true;
+  };
+  test("multi-edit materials: three toon materials and a PBR one selected in the Materials window - Toon Bands typed once lands on the three, +=1 moves each, a dash marks a differing field, matset from the console, the .mat files follow", [&] {
+    {  // (an earlier run's files)
+      const std::string dir = fs::join(scratch_project(), "Assets/Materials");
+      for (const DirEntry &de : fs::list(dir))
+        if (de.name.size() > 3 && de.name.rfind("R166", 0) == 0 && fs::extension(de.name) == ".mat") std::remove(fs::join(dir, de.name).c_str());
+    }
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    for (const char *n : {"R166A", "R166B", "R166C", "R166D"}) ed.command(std::string("newmat ") + n);
+    MaterialPtr ma = material_asset("Assets/Materials/R166A.mat"), mb = material_asset("Assets/Materials/R166B.mat"),
+                mc = material_asset("Assets/Materials/R166C.mat"), md = material_asset("Assets/Materials/R166D.mat");
+    CHECK(ma && mb && mc && md);
+    if (!ma || !mb || !mc || !md) return;
+    for (const MaterialPtr &m : {ma, mb, mc}) m->shading_model = 1, m->toon_bands = 1, m->touch();
+    md->shading_model = 0, md->toon_bands = 1, md->touch();
+    ed.command("window Materials");
+    ed.set_material_search_for_test("R166");  // (the scratch project holds every test's materials: only these four in the grid)
+    r34_steps(ed, 3);
+    /* D first, A last: the window edits the last clicked one, and it must be a toon material to show the field. */
+    CHECK(r166_click(ed, "mat:R166D", 0) && r166_click(ed, "mat:R166B", platform::MOD_CTRL) && r166_click(ed, "mat:R166C", platform::MOD_CTRL) &&
+          r166_click(ed, "mat:R166A", platform::MOD_CTRL));
+    CHECK(ed.materials_selected_for_test() == 4);
+    r34_steps(ed, 2);
+    Recti f = r166_field(ed, "field:Toon Bands", WindowKind::Materials);
+    CHECK(f.w > 0);
+    if (f.w <= 0) return;
+    r166_type(ed, f, "3");
+    std::printf("    Toon Bands typed 3: A %d, B %d, C %d, D (PBR) %d\n", ma->toon_bands, mb->toon_bands, mc->toon_bands, md->toon_bands);
+    CHECK(ma->toon_bands == 3 && mb->toon_bands == 3 && mc->toon_bands == 3 && md->toon_bands == 1);
+    /* A relative edit moves each from its own value. */
+    mb->toon_bands = 5, mb->touch();
+    r34_steps(ed, 1);
+    f = r166_field(ed, "field:Toon Bands", WindowKind::Materials);
+    r166_type(ed, f, "+=1");
+    std::printf("    then +=1: A %d, B %d, C %d, D %d\n", ma->toon_bands, mb->toon_bands, mc->toon_bands, md->toon_bands);
+    CHECK(ma->toon_bands == 4 && mb->toon_bands == 6 && mc->toon_bands == 4 && md->toon_bands == 1);
+    /* The fields whose values differ (the dash): Toon Bands now, Toon Threshold once one is changed. */
+    const std::vector<MaterialPtr> all = {ma, mb, mc, md};
+    std::set<std::string> mixed = ed.mixed_material_fields(ma.get(), all);
+    CHECK(mixed.count("Toon Bands") && !mixed.count("Toon Threshold") && mixed.count("Shading Model"));  // (D is PBR: Shading Model differs)
+    mc->toon_threshold = 0.3f, mc->touch();
+    mixed = ed.mixed_material_fields(ma.get(), all);
+    CHECK(mixed.count("Toon Threshold"));
+    /* (Undo of a material asset's edit is what it was: the scene's snapshot, not the asset library's - the object test
+     * below checks undo on scene materials.) */
+    /* The console: the Materials window's selection, where the field applies. */
+    ed.command("matset ToonThreshold 0.4");
+    std::printf("    matset ToonThreshold 0.4: A %.2f, B %.2f, C %.2f, D (PBR) %.2f\n", ma->toon_threshold, mb->toon_threshold, mc->toon_threshold, md->toon_threshold);
+    CHECK(std::fabs(ma->toon_threshold - 0.4f) < 1e-5f && std::fabs(mb->toon_threshold - 0.4f) < 1e-5f && std::fabs(mc->toon_threshold - 0.4f) < 1e-5f &&
+          std::fabs(md->toon_threshold - 0.4f) > 1e-3f);
+    ed.command("matset ShadingModel 1");  // (shown on every material: converts the PBR one too)
+    CHECK(md->shading_model == 1);
+    const int bands_before[4] = {ma->toon_bands, mb->toon_bands, mc->toon_bands, md->toon_bands};
+    ed.command("matset NoSuchField 1");  // a warning, nothing changed
+    ed.command("matset ToonThreshold abc");  // not a number: a warning, nothing changed
+    CHECK(ma->toon_bands == bands_before[0] && mb->toon_bands == bands_before[1] && mc->toon_bands == bands_before[2] && md->toon_bands == bands_before[3]);
+    CHECK(std::fabs(ma->toon_threshold - 0.4f) < 1e-5f && md->shading_model == 1);
+    /* A relative value moves each from its own; a name is never set on all. */
+    mb->toon_threshold = 0.2f, mb->touch();
+    ed.command("matset ToonThreshold +=0.1");
+    std::printf("    matset ToonThreshold +=0.1: A %.2f, B %.2f\n", ma->toon_threshold, mb->toon_threshold);
+    CHECK(std::fabs(ma->toon_threshold - 0.5f) < 1e-5f && std::fabs(mb->toon_threshold - 0.3f) < 1e-5f);
+    ed.command("matset Name Renamed");
+    CHECK(ma->name == "R166A" && mb->name == "R166B" && md->name == "R166D");
+    /* The files follow (edited assets are written back). */
+    r34_steps(ed, 4);
+    std::string text;
+    fs::read_file(resolve_asset_path("Assets/Materials/R166C.mat"), text);
+    Material fresh;
+    const bool loaded = load_material_text(text, fresh);
+    std::printf("    R166C.mat on disk: Toon Bands %d (in memory %d), Toon Threshold %.2f\n", fresh.toon_bands, mc->toon_bands, fresh.toon_threshold);
+    CHECK(loaded && fresh.toon_bands == mc->toon_bands && std::fabs(fresh.toon_threshold - mc->toon_threshold) < 1e-5f);
+  });
+
+  test("multi-edit materials: two objects selected - a toon edit in the active one's Inspector reaches the other's material in the same slot; a PBR object's stays", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("create Cube");
+    ed.command("create Sphere");
+    ed.command("create Plane");
+    ed.command("select Cube");
+    ed.command("material Toon");
+    ed.command("select Sphere");
+    ed.command("material Toon");
+    ed.command("select Plane");
+    ed.command("material Metal");
+    GameObject *cube = ed.scene().find_by_name("Cube"), *sphere = ed.scene().find_by_name("Sphere"), *plane = ed.scene().find_by_name("Plane");
+    CHECK(cube && sphere && plane);
+    if (!cube || !sphere || !plane) return;
+    const MaterialPtr mc = cube->get<MeshRenderer>()->materials[0], ms = sphere->get<MeshRenderer>()->materials[0], mp = plane->get<MeshRenderer>()->materials[0];
+    CHECK(mc && ms && mp && mc != ms && mc->shading_model == 1 && ms->shading_model == 1 && mp->shading_model == 0);
+    if (!mc || !ms || !mp) return;
+    const int plane_bands = mp->toon_bands, cube_bands = mc->toon_bands;
+    ed.command("select Plane");
+    ed.command("selectadd Sphere");
+    ed.command("selectadd Cube");  // the active one
+    ed.record_buttons_for_test(true);
+    r34_steps(ed, 3);
+    const Recti f = r166_field(ed, "field:Toon Bands", WindowKind::Inspector);
+    CHECK(f.w > 0);
+    if (f.w <= 0) return;
+    r166_type(ed, f, "4");
+    std::printf("    Toon Bands 4 on the Cube (%d): Sphere %d, Plane (PBR) %d\n", mc->toon_bands, ms->toon_bands, mp->toon_bands);
+    CHECK(mc->toon_bands == 4 && ms->toon_bands == 4 && mp->toon_bands == plane_bands);
+    /* One undo step takes it back on both (scene materials live in the scene's snapshot). */
+    ed.command("undo");
+    r34_steps(ed, 1);
+    {
+      GameObject *c2 = ed.scene().find_by_name("Cube"), *s2 = ed.scene().find_by_name("Sphere");
+      const int cb = c2 ? c2->get<MeshRenderer>()->materials[0]->toon_bands : -1, sb = s2 ? s2->get<MeshRenderer>()->materials[0]->toon_bands : -1;
+      std::printf("    after undo: Cube %d, Sphere %d (before the edit %d)\n", cb, sb, cube_bands);
+      CHECK(cb == cube_bands && sb == cube_bands);
+      ed.command("redo");
+    }
+    /* matset with objects selected: their materials. */
+    ed.command("matset ToonSoftness 0.1");
+    CHECK(std::fabs(mc->toon_softness - 0.1f) < 1e-5f && std::fabs(ms->toon_softness - 0.1f) < 1e-5f && std::fabs(mp->toon_softness - 0.1f) > 1e-3f);
+  });
+  test("multi-edit materials: a value typed that the active material already holds still lands on the others (the dash hid theirs); several .mat files selected in the Project window edit together", [&] {
+    Editor ed;
+    r50_open(ed);
+    ed.record_buttons_for_test(true);
+    MaterialPtr ma = material_asset("Assets/Materials/R166A.mat"), mb = material_asset("Assets/Materials/R166B.mat"),
+                mc = material_asset("Assets/Materials/R166C.mat"), md = material_asset("Assets/Materials/R166D.mat");
+    CHECK(ma && mb && mc && md);
+    if (!ma || !mb || !mc || !md) return;
+    for (const MaterialPtr &m : {ma, mb, mc}) m->shading_model = 1, m->touch();
+    ma->toon_bands = 3, mb->toon_bands = 1, mc->toon_bands = 5;
+    md->shading_model = 0, md->toon_bands = 1, md->touch();
+    ed.command("window Materials");
+    ed.set_material_search_for_test("R166");
+    r34_steps(ed, 3);
+    CHECK(r166_click(ed, "mat:R166B", 0) && r166_click(ed, "mat:R166C", platform::MOD_CTRL) && r166_click(ed, "mat:R166A", platform::MOD_CTRL));
+    r34_steps(ed, 2);
+    Recti f = r166_field(ed, "field:Toon Bands", WindowKind::Materials);
+    CHECK(f.w > 0);
+    if (f.w <= 0) return;
+    r166_type(ed, f, "3");  // A's own value
+    std::printf("    3 typed over the dash (A already 3): A %d, B %d, C %d\n", ma->toon_bands, mb->toon_bands, mc->toon_bands);
+    CHECK(ma->toon_bands == 3 && mb->toon_bands == 3 && mc->toon_bands == 3);
+    /* The Project window: three .mat files selected, the Inspector edits them together. */
+    ed.command("window Project");
+    const std::string mdir = resolve_asset_path("Assets/Materials");  // (the window keeps a selection only among the files it shows)
+    ed.project_open_folder_for_test(mdir, "R166");
+    ed.select_project_files_for_test({fs::join(mdir, "R166B.mat"), fs::join(mdir, "R166C.mat"), fs::join(mdir, "R166A.mat")});
+    r34_steps(ed, 3);
+    CHECK(ed.project_selected_count_for_test() == 3);
+    f = r166_field(ed, "field:Toon Bands", WindowKind::Inspector);
+    CHECK(f.w > 0);
+    if (f.w <= 0) return;
+    r166_type(ed, f, "2");
+    std::printf("    Project window, three .mat files: A %d, B %d, C %d, D (not selected) %d\n", ma->toon_bands, mb->toon_bands, mc->toon_bands, md->toon_bands);
+    CHECK(ma->toon_bands == 2 && mb->toon_bands == 2 && mc->toon_bands == 2 && md->toon_bands == 1);
   });
 }
