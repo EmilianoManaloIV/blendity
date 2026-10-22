@@ -609,6 +609,7 @@ Blendity takes a snapshot of the scene graph after each completed action: a gizm
 @ blender/source/blender/editors/undo
 ? Why doesn't moving an object require copying its 1-million-vertex mesh into the undo history? | The snapshot only copies the object (its transform and components). The mesh is shared by pointer and copied only if someone edits it.
 ? You extrude three faces of a 50k-face mesh. How many times is the mesh copied, and where does the Profiler show what the operator itself cost? | Once: the mesh before the operator is the undo step's own pointer, which nothing writes, and the operator works on one copy of it (task 0165). The Profiler's "Edit Mode: operator / mesh writes / overlap check" row shows the operator's own time - the rest of the frame is the render meshes rebuilt and the views redrawn.
+? You extrude three faces and undo. What is selected afterwards? | The three faces you extruded: undo gives back the mesh and the Edit Mode selection it had before the operator, as Blender does; redo gives back the extruded faces' selection (task 0167).
 ? Select More on a big mesh: which views draw again, and why does the shadow map stay? | Only the Scene view, whose cage shows the selection. A selection operator changes the selection and nothing else - the mesh is not copied, so the shadow map and the Game view see the same mesh and keep their pictures (task 0166). With the views on the card, the card tints the selected faces itself from a bit per triangle.
 )"},
     {"Performance and Stress Testing", "Finding limits and efficiencies", R"(

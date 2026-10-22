@@ -1950,6 +1950,34 @@ static void tests_round186() {
   });
 }
 
+/* Round 187 (task 0167): undo gives back Edit Mode's selection. */
+static void tests_round187() {
+  test("undo gives back Edit Mode's selection: after an extrude of three faces, undo selects the three faces again (the mesh as it was, its selection as it was), redo the extruded ones", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("edit face");
+    ed.command("fsel 1 2 3");
+    ed.step_frame_headless();
+    const std::vector<uint8_t> before = ed.face_sel_for_test();
+    ed.command("editop extrude");
+    ed.step_frame_headless();
+    const std::vector<uint8_t> after = ed.face_sel_for_test();
+    const size_t faces_after = after.size();
+    ed.command("undo");
+    ed.step_frame_headless();
+    std::printf("    the cube: %zu faces with 3 selected; after the extrude %zu faces, %zu selected; undo: %zu faces, %zu selected\n", before.size(),
+                faces_after, (size_t)std::count(after.begin(), after.end(), 1), ed.face_sel_for_test().size(),
+                (size_t)std::count(ed.face_sel_for_test().begin(), ed.face_sel_for_test().end(), 1));
+    CHECK(faces_after > before.size());
+    CHECK(ed.face_sel_for_test() == before);
+    ed.command("redo");
+    ed.step_frame_headless();
+    CHECK(ed.face_sel_for_test() == after);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -1969,5 +1997,6 @@ void run_editor_tests() {
   tests_round165_208();
   tests_round185();
   tests_round186();
+  tests_round187();
   coverage_tests();
 }

@@ -1395,7 +1395,28 @@ static void test_editor_render(Report &rep, const Options &o) {
                  ed.step_frame_headless();
                },
                [&] { ed.command("editop extrude"); });
-    edit_frame(("Undo after it" + on).c_str(), 3, [&] {}, [&] { ed.command("undo"); });
+    /* (Task 0167: each rep undoes one extrude it made itself; before, three undos in a row undid the extrude, the
+     * selection step and the Edit Mode entry - three different frames.) */
+    edit_frame(("Undo of an extrude" + on).c_str(), 3,
+               [&] {
+                 ed.command("fsel 100 101 102");
+                 ed.step_frame_headless();
+                 ed.command("editop extrude");
+                 for (int i = 0; i < 2; i++) ed.step_frame_headless();
+               },
+               [&] { ed.command("undo"); });
+    edit_frame(("Redo of it" + on).c_str(), 3,
+               [&] {
+                 ed.command("fsel 100 101 102");
+                 ed.step_frame_headless();
+                 ed.command("editop extrude");
+                 for (int i = 0; i < 2; i++) ed.step_frame_headless();
+                 ed.command("undo");
+                 for (int i = 0; i < 2; i++) ed.step_frame_headless();
+               },
+               [&] { ed.command("redo"); });
+    ed.command("undo");  // (back to the sphere as it was, for the selection row)
+    ed.step_frame_headless();
     edit_frame(("A selection operator after the undo (Select More)" + on).c_str(), 2, [&] {}, [&] { ed.command("edittool select_more"); });
   }
   ed.viewport_device_for_test(1);

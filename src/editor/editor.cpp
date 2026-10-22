@@ -1649,6 +1649,29 @@ void Editor::settle_meshes() {
   if (any) ui_.redraw = true;
 }
 
+EditSelection Editor::edit_selection() const {
+  EditSelection e;
+  if (!edit_mode_) return e;
+  e.obj = edit_obj_;
+  e.verts = vert_sel_, e.faces = face_sel_;
+  e.edges.assign(edge_sel_.begin(), edge_sel_.end());
+  return e;
+}
+
+/* The first change since the last undo step: the selection as it is now is the one the step gives back. */
+void Editor::note_edit_selection_before() {
+  if (!pending_change_) edit_sel_before_ = edit_selection();
+}
+
+/* A state's Edit Mode selection back, when it is the edited object's and fits its mesh (else the selection stays). */
+void Editor::restore_edit_selection(const EditSelection &e) {
+  if (!edit_mode_ || e.obj == 0 || e.obj != edit_obj_) return;
+  const MeshPtr *mp = edit_mesh_ptr();
+  if (!mp || !*mp || e.verts.size() != (*mp)->vert_count() || e.faces.size() != (*mp)->face_count()) return;
+  vert_sel_ = e.verts, face_sel_ = e.faces;
+  edge_sel_ = std::unordered_set<uint64_t>(e.edges.begin(), e.edges.end());
+}
+
 void Editor::commit_undo() {
   if (!pending_change_) return;
   settle_meshes();
@@ -1658,6 +1681,8 @@ void Editor::commit_undo() {
   s.selection = selection_;
   s.active = active_;
   s.label = pending_label_;
+  s.edit_sel = std::move(edit_sel_before_);
+  edit_sel_before_ = EditSelection{};
   s.textures = std::move(texture_before_);
   texture_before_.clear();
   s.clips = std::move(clip_before_);
@@ -1726,6 +1751,7 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   cur.selection = selection_;
   cur.active = active_;
   cur.label = s.label;
+  cur.edit_sel = edit_selection();
   restore_texture_texts(s.textures, &cur.textures);
   restore_clip_texts(s.clips, &cur.clips);
   into.push_back(std::move(cur));
@@ -1740,6 +1766,7 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   anim_clip_changed();
   seq_drag_cancel();
   stable_ = scene_->clone();
+  restore_edit_selection(s.edit_sel);
   if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
   prune_selection();
   scene_dirty_ = true;

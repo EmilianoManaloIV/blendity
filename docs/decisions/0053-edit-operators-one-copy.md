@@ -48,3 +48,14 @@ frame first (its task doc has the probe's lines):
   `edit_selection_faces`.
 - The condition "when can Auto Smooth apply" is one predicate, `Editor::auto_smooth_applies`, used before the
   operator and after it.
+
+## Amendment (task 0167): undo's frame, and why its pictures aren't reused yet
+The roadmap's "undo steps sharing unchanged arrays" was already ADR 0003's behaviour (`undo` is 0.1 ms); an undo's
+cost is its frame, every view and the shadow map drawn again. View caches two pictures deep were built and taken
+out: a restored snapshot never matches its earlier key, because `Scene::clone` gives it a new serial and copies its
+materials, and `scene_render_hash` / `object_render_hash` hash the serial and the material pointers. Reusing an
+earlier state's picture needs keys by content for both (a material's reflected values, the scene's identity apart
+from its serial) and, for the Scene view, its depth and id planes kept with each picture - verify mode showed an
+older picture over newer planes picks the wrong object. That is a change to every render cache's key (ADR 0009) and
+is left for its own task. Undo now gives back Edit Mode's selection as it was before the operator (Blender's
+behaviour).

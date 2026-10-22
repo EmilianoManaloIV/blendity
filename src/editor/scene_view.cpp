@@ -1486,6 +1486,7 @@ static bool needs_selected_faces(const std::string &op) {
 
 void Editor::begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp) {
   ProfileScope prof{prof_.ms_edit_op, {}};  // (run_last_op's own scope counts only the re-runs)
+  note_edit_selection_before();
   const Mesh &m = *mp;
   /* In edge mode the tools read exactly the selected edges. */
   const std::unordered_set<uint64_t> edges = edge_sel_;
@@ -1724,6 +1725,7 @@ void Editor::select_op(const std::string &op, GameObject &g, const Mesh &m) {
 /* The operators that aren't redoable: on a mutable copy of the mesh (shared with the undo step until now). */
 void Editor::edit_op_rest(const std::string &op, GameObject &g_ref, MeshPtr &mp) {
   GameObject *g = &g_ref;
+  note_edit_selection_before();
   ProfileScope prof{prof_.ms_edit_op, {}};
   Mesh &m = *mesh_make_mutable(mp);
   struct AutoSmooth {

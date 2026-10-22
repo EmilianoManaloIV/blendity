@@ -2,6 +2,41 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 187): undo measured honestly, and it gives back Edit Mode's selection (task 0167, ADR 0053 amended)
+
+**Asked:** the roadmap's "undo steps sharing unchanged arrays" (each undo ≤ 10 ms, was 30-38).
+
+**Measured first** (the task doc): the undo stack already shares meshes by pointer (ADR 0003) - a scene clone is
+0.02 ms and `undo` itself 0.1 ms. An undo's cost is its frame: every view and the shadow map drawn again. The stress
+row "Undo after it" averaged three different undos (the extrude, the selection step, the Edit Mode entry), so its
+21-25 ms was not an undo's frame.
+
+**Tried and not kept:** view caches two pictures deep (and four shadow maps), so an undo would copy the pictures of
+the state before. A restored snapshot never matched its earlier key: `Scene::clone` gives the snapshot a new serial
+and copies its materials, and the keys hash both. Keys by content for the scene's identity and its materials would
+touch every render cache's exact-picture rule (ADR 0009); ADR 0053's amendment records it as the next step. The
+first build also showed that a cached Scene view picture must carry its depth and id planes (picking reads them):
+verify mode caught the older picture over the newer planes.
+
+**Changed**
+- Undo gives back Edit Mode's selection as it was before the operator, as Blender does; redo the operator's. It
+  stayed as the operator left it, sized for the bigger mesh.
+- The stress rows "Undo of an extrude" (each rep undoes an extrude it made itself) and "Redo of it" replace "Undo
+  after it"; `tools/bench_table.py` reads the new row into Pass 13.
+
+**Measured**
+- The stress rows with the views on the CPU: "Undo of an extrude" 27.7 ms a frame (the frame after 2.0), "Redo of it" 21.0 ms (the frame after 1.9); the old row "Undo after it" - three different undos averaged - was 25.5 ms with the frame after 15.3.
+- The stress rows with the views on the GPU: "Undo of an extrude" 11.0 ms a frame (the frame after 1.7), "Redo of it" 10.8 ms (the frame after 1.8); the old row "Undo after it" - three different undos averaged - was 11.6 ms with the frame after 7.5.
+- The probe before this task (task 0165's): one undo's frame 12.5 ms on the CPU - the Scene view 7.9 ms, the shadow map 3.9, the Game view 3.4 - with `undo` itself 0.1 ms. Blender 5.2.2's row: 16.4 ms (PERFORMANCE.md Pass 13).
+
+**Checked**
+- After an extrude of three faces, undo selects the three faces again and redo the extruded ones
+  (tests/test_editor.cpp).
+- Unit checks (round 187): Windows 11,283, 0 failed (926 tests); render-cache verify mode 11,284, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,945, 0 failed. Sanitizer build: 10,825, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 186): a selection changes the selection, not the mesh (task 0166)
 
 **Asked:** the roadmap's "selection changes redraw flags, not the view" (Select More on 50k faces 55-68 ms against

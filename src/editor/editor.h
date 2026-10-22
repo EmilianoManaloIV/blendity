@@ -434,10 +434,17 @@ template<class T> struct MultiSelect {
 /* The selection's colours in the Scene view (Unity's orange; a child of the selection a browner one). */
 inline constexpr uint32_t kSelectOrange = Color::hex(0xF7941D), kChildOrange = Color::hex(0xC28A4A);
 
+/* Edit Mode's selection at a state (task 0167): what undo gives back with the mesh, as Blender does. */
+struct EditSelection {
+  uint64_t obj = 0;  // 0: none recorded
+  std::vector<uint8_t> verts, faces;
+  std::vector<uint64_t> edges;
+};
 struct UndoState {
   std::unique_ptr<Scene> scene;
   std::vector<uint64_t> selection;
   uint64_t active = 0;
+  EditSelection edit_sel;  // Edit Mode's selection at this state (task 0167)
   std::string label;
   std::vector<std::pair<std::string, std::string>> textures;  // texture assets' texts at this state (path, text)
   std::vector<std::pair<std::string, std::string>> clips;     // animation clips' texts likewise (task 0059)
@@ -2137,6 +2144,10 @@ class Editor {
 
  private:
   bool pending_change_ = false;
+  EditSelection edit_sel_before_;  // Edit Mode's selection before the pending change (task 0167: the undo step's)
+  EditSelection edit_selection() const;
+  void note_edit_selection_before();          // before an Edit Mode operator changes the mesh
+  void restore_edit_selection(const EditSelection &e);
   std::string pending_label_;
 
   /* ---- play mode ---- */
