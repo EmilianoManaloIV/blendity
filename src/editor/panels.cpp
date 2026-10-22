@@ -1926,7 +1926,7 @@ void Editor::draw_profiler(const Recti &r) {
     stat("Between frames (last second)", strprintf("%.1f ms on average, 95%% within %.1f ms", mean, gaps[p95]));
   }
   stat("Draw items / scene hashes", strprintf("%.2f ms / %.2f ms (%llu)", fp.ms_collect, fp.ms_hash, (unsigned long long)fp.scene_hashes));
-  stat("Edit Mode: mesh writes / overlap check", strprintf("%.2f ms / %.2f ms", fp.ms_edit_apply, fp.ms_overlap));
+  stat("Edit Mode: operator / mesh writes / overlap check", strprintf("%.2f ms / %.2f ms / %.2f ms", fp.ms_edit_op, fp.ms_edit_apply, fp.ms_overlap));
   stat("Lighting key / snapping", strprintf("%.2f ms (%llu) / %.2f ms", fp.ms_lighting_key, (unsigned long long)fp.lightmap_key_hashes, fp.ms_snap_pick));
   const MeshCounts &mc = mesh_last_;
   stat("Mesh copies / render meshes built / moved in place",

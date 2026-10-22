@@ -1395,7 +1395,7 @@ void Editor::edit_select_all(bool sel) {
  * on a flat-shaded mesh turns on smooth shading by angle - curves look round,
  * hard edges stay hard. Meshes shaded per face are left as they are. */
 void Editor::auto_smooth_after(Mesh *m, size_t before) {
-  if (!auto_smooth_ || !m || m->smooth || !m->face_smooth.empty()) return;
+  if (!m || !auto_smooth_applies(*m)) return;
   if (meshops::shallow_edges(*m, auto_smooth_angle_) <= before) return;
   meshops::shade_auto_smooth(*m, auto_smooth_angle_);
   /* Still the last operator's result (shading is part of it): a modal Bevel / Inset carries on. */
@@ -1417,20 +1417,16 @@ void Editor::edit_op(const std::string &op_in) {
     return;
   }
   MeshPtr &mp = *edit_mesh_ptr();
-  Mesh &m = *mesh_make_mutable(mp);
-  struct AutoSmooth {
-    Editor &ed;
-    size_t before;
-    ~AutoSmooth() {
-      if (MeshPtr *p = ed.edit_mesh_ptr())
-        if (*p) ed.auto_smooth_after(p->get(), before);
-    }
-  } auto_smooth{*this, auto_smooth_ ? meshops::shallow_edges(m, auto_smooth_angle_) : (size_t)-1};
+  if (edit_op_redoable(op)) {
+    begin_redoable_op(op, *g, mp);
+    return;
+  }
+  edit_op_rest(op, *g, mp);
+}
+
+size_t Editor::edit_selection_faces(const Mesh &m) {
   vert_sel_.resize(m.vert_count(), 0);
   face_sel_.resize(m.face_count(), 0);
-  /* In edge mode the tools read exactly the selected edges. */
-  const std::unordered_set<uint64_t> edges = edge_sel_;
-  meshops::EdgeSelectionScope scope(elem_ == EditElement::Edge ? &edges : nullptr);
   if (elem_ == EditElement::Edge) verts_from_edges();
   else if (elem_ != EditElement::Face) {
     /* Derive faces from vertices like Blender does when switching modes. */
@@ -1440,58 +1436,117 @@ void Editor::edit_op(const std::string &op_in) {
       face_sel_[f] = all;
     }
   }
-  size_t nsel = std::count(face_sel_.begin(), face_sel_.end(), 1);
-  if (edit_op_redoable(op)) {
-    if ((op == "extrude" || op == "inset" || op == "push_through" || op == "push_pull" || op == "poke" || op == "extrude_individual" || op == "grid" ||
-         op == "array" || op == "taper" || op == "recess" || op == "shell" || op == "draft") &&
-        !nsel) {
-      /* (Merge by Distance works on everything when nothing is selected.) */
-      Log::warn("Select faces first (press 3 for face mode)");
-      return;
-    }
-    LastOp L;
-    L.op = op;
-    L.obj = g->id;
-    L.before = std::make_shared<Mesh>(m);
-    L.vsel = vert_sel_;
-    L.fsel = face_sel_;
-    L.esel = edges;
-    L.elem = elem_;
-    L.fuse = auto_fuse_;
-    if (op == "extrude") L.amount = extrude_dist_;
-    else if (op == "merge_distance") {
-      L.amount = merge_dist_;
-      L.individual = false;  // F9: Unselected
-    }
-    else if (op == "inset") {
-      L.individual = inset_individual_;
-      L.amount = inset_individual_ ? inset_amount_ : inset_thickness_;
-    }
-    else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; L.clamp = bevel_clamp_; L.profile = bevel_profile_; }
-    else if (op == "bridge") L.segments = bridge_segments_;
-    else if (op == "subdivide_edges") L.segments = subdivide_cuts_;
-    else if (op == "loopcut") { L.segments = loop_cuts_; L.amount = loop_slide_; }
-    else if (op == "smooth") L.amount = smooth_factor_;
-    else if (op == "poke") L.amount = 0.0f;
-    else if (op == "extrude_individual") L.amount = extrude_dist_;
-    else if (op == "shrink_fatten") L.amount = 0.1f;
-    else if (op == "to_sphere") L.amount = 1.0f;
-    else if (op == "randomize") { L.amount = 0.05f; L.segments = 1; }
-    else if (op == "push_pull") {
-      L.amount = pp_last_distance_ != 0 ? pp_last_distance_ : extrude_dist_;
-      L.individual = pp_individual_;
-    }
-    else if (op == "grid") { L.segments = grid_cols_; L.count = grid_rows_; }
-    else if (op == "pipe") { L.amount = pipe_radius_; L.segments = pipe_sides_; }
-    else if (op == "array") { L.count = array_count_; L.amount = array_spacing_; L.axis = array_axis_; }
-    else if (op == "taper") { L.amount = taper_distance_; L.amount2 = taper_scale_; }
-    else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
-    else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
-    else if (op == "draft") L.amount = draft_angle_;
-    last_op_ = std::move(L);
-    run_last_op(true);
+  return (size_t)std::count(face_sel_.begin(), face_sel_.end(), 1);
+}
+
+bool Editor::auto_smooth_applies(const Mesh &m) const {
+  /* Auto Smooth is for a mesh shaded flat as a whole: one already smooth, or shaded per face by the user, is left alone. */
+  return auto_smooth_ && !m.smooth && m.face_smooth.empty();
+}
+
+size_t Editor::shallow_before(const Mesh &m) const {
+  /* The count costs about 4 ms on 50k faces (23 before task 0165), so it is only taken when it can decide anything. */
+  return auto_smooth_applies(m) ? meshops::shallow_edges(m, auto_smooth_angle_) : (size_t)-1;
+}
+
+void Editor::note_shallow_before(LastOp &L) const {
+  L.shallow_before = shallow_before(*L.before);
+  L.shallow_angle = auto_smooth_angle_;
+  L.shallow_on = auto_smooth_;
+}
+
+size_t Editor::shallow_before_of(const LastOp &L) const {
+  /* The count noted when the operator ran, unless Auto Smooth's settings changed since (an F9 re-run after
+   * `autosmooth on 60`): then it is taken again, so a re-run never compares against another angle's count. */
+  const bool same = L.shallow_angle == auto_smooth_angle_ && L.shallow_on == auto_smooth_;
+  return same ? L.shallow_before : shallow_before(*L.before);
+}
+
+/* The mesh before the operator stays as it is - the pointer the undo step holds, never written (copy-on-write, ADR
+ * 0003) - and run_last_op copies it once for the result. Before task 0165 the operator copied the mesh three times
+ * (a mutable copy, the `before` copy, the copy run_last_op works on). */
+/* Whether an operator needs selected faces (Merge by Distance works on everything when nothing is selected). */
+static bool needs_selected_faces(const std::string &op) {
+  return op == "extrude" || op == "inset" || op == "push_through" || op == "push_pull" || op == "poke" || op == "extrude_individual" || op == "grid" ||
+         op == "array" || op == "taper" || op == "recess" || op == "shell" || op == "draft";
+}
+
+void Editor::begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp) {
+  ProfileScope prof{prof_.ms_edit_op, {}};  // (run_last_op's own scope counts only the re-runs)
+  const Mesh &m = *mp;
+  /* In edge mode the tools read exactly the selected edges. */
+  const std::unordered_set<uint64_t> edges = edge_sel_;
+  const size_t nsel = edit_selection_faces(m);
+  if (needs_selected_faces(op) && !nsel) {
+    Log::warn("Select faces first (press 3 for face mode)");
     return;
   }
+  LastOp L;
+  L.op = op;
+  L.obj = g.id;
+  L.before = mp;
+  note_shallow_before(L);
+  L.vsel = vert_sel_;
+  L.fsel = face_sel_;
+  L.esel = edges;
+  L.elem = elem_;
+  L.fuse = auto_fuse_;
+  fill_last_op_settings(L, op);
+  last_op_ = std::move(L);
+  run_last_op(true);
+}
+
+/* The tool settings the operator starts from (F9 adjusts them afterwards). */
+void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
+  if (op == "extrude") L.amount = extrude_dist_;
+  else if (op == "merge_distance") {
+    L.amount = merge_dist_;
+    L.individual = false;  // F9: Unselected
+  }
+  else if (op == "inset") {
+    L.individual = inset_individual_;
+    L.amount = inset_individual_ ? inset_amount_ : inset_thickness_;
+  }
+  else if (op == "bevel") { L.amount = bevel_width_; L.segments = bevel_segments_; L.clamp = bevel_clamp_; L.profile = bevel_profile_; }
+  else if (op == "bridge") L.segments = bridge_segments_;
+  else if (op == "subdivide_edges") L.segments = subdivide_cuts_;
+  else if (op == "loopcut") { L.segments = loop_cuts_; L.amount = loop_slide_; }
+  else if (op == "smooth") L.amount = smooth_factor_;
+  else if (op == "poke") L.amount = 0.0f;
+  else if (op == "extrude_individual") L.amount = extrude_dist_;
+  else if (op == "shrink_fatten") L.amount = 0.1f;
+  else if (op == "to_sphere") L.amount = 1.0f;
+  else if (op == "randomize") { L.amount = 0.05f; L.segments = 1; }
+  else if (op == "push_pull") {
+    L.amount = pp_last_distance_ != 0 ? pp_last_distance_ : extrude_dist_;
+    L.individual = pp_individual_;
+  }
+  else if (op == "grid") { L.segments = grid_cols_; L.count = grid_rows_; }
+  else if (op == "pipe") { L.amount = pipe_radius_; L.segments = pipe_sides_; }
+  else if (op == "array") { L.count = array_count_; L.amount = array_spacing_; L.axis = array_axis_; }
+  else if (op == "taper") { L.amount = taper_distance_; L.amount2 = taper_scale_; }
+  else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
+  else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
+  else if (op == "draft") L.amount = draft_angle_;
+}
+
+/* The operators that aren't redoable: on a mutable copy of the mesh (shared with the undo step until now). */
+void Editor::edit_op_rest(const std::string &op, GameObject &g_ref, MeshPtr &mp) {
+  GameObject *g = &g_ref;
+  ProfileScope prof{prof_.ms_edit_op, {}};
+  Mesh &m = *mesh_make_mutable(mp);
+  struct AutoSmooth {
+    Editor &ed;
+    size_t before;
+    ~AutoSmooth() {
+      if (MeshPtr *p = ed.edit_mesh_ptr())
+        if (*p) ed.auto_smooth_after(p->get(), before);
+    }
+  } auto_smooth{*this, shallow_before(m)};
+  /* In edge mode the tools read exactly the selected edges. */
+  const std::unordered_set<uint64_t> edges = edge_sel_;
+  meshops::EdgeSelectionScope scope(elem_ == EditElement::Edge ? &edges : nullptr);
+  const size_t nsel = edit_selection_faces(m);
   if (op == "dissolve" || op == "connect" || op == "collapse") {
     size_t n = op == "dissolve" ? meshops::dissolve_edges(m, vert_sel_)
                : op == "connect" ? meshops::connect_vertices(m, vert_sel_)
@@ -2476,17 +2531,20 @@ void Editor::run_last_op(bool first) {
     L.op.clear();
     return;
   }
-  /* Start again from the mesh as it was before the operator. */
-  mf->mesh = std::make_shared<Mesh>(*L.before);
+  double unused = 0;
+  ProfileScope prof{first ? unused : prof_.ms_edit_op, {}};  // (a first run is timed by begin_redoable_op, which includes it)
+  /* Start again from the mesh as it was before the operator: the one copy an operator makes (task 0165). */
+  mf->mesh = mesh_copy(*L.before);
   Mesh &m = *mf->mesh;
   struct AutoSmooth {
     Editor &ed;
     MeshFilter *mf;
+    const Mesh *shared;  // the mesh before the operator: a failed re-run puts it back, and it is never written
     size_t before;
     ~AutoSmooth() {
-      if (mf->mesh) ed.auto_smooth_after(mf->mesh.get(), before);
+      if (mf->mesh && mf->mesh.get() != shared) ed.auto_smooth_after(mf->mesh.get(), before);
     }
-  } auto_smooth{*this, mf, auto_smooth_ ? meshops::shallow_edges(*L.before, auto_smooth_angle_) : (size_t)-1};
+  } auto_smooth{*this, mf, L.before.get(), shallow_before_of(L)};
   m.version = L.before->version + 1 + (++redo_serial_);  // never reuse an old version number
   vert_sel_ = L.vsel;
   face_sel_ = L.fsel;
@@ -2624,7 +2682,9 @@ void Editor::run_last_op(bool first) {
     else meshops::randomize(m, vert_sel_, L.amount, (uint32_t)std::max(1, L.segments));
   }
   if (!ok) {
-    mf->mesh = L.before;  // back to the untouched mesh (copied on the next edit)
+    /* Back to the untouched mesh, as a copy (task 0165): the very pointer would bring back an earlier render-cache key
+     * whose picture was drawn with state the key doesn't hold (verify mode found it after an Esc). */
+    mf->mesh = mesh_copy(*L.before);
     vert_sel_ = L.vsel;
     face_sel_ = L.fsel;
     Log::warn("%s", err.c_str());
@@ -2952,7 +3012,7 @@ void Editor::modal_finish(bool keep) {
   /* Cancelled: the mesh as it was, and no undo step left behind. */
   LastOp &L = last_op_;
   if (GameObject *g = scene_->find(L.obj))
-    if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = L.before;
+    if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = mesh_copy(*L.before);  // (a copy: see run_last_op's failure)
   vert_sel_ = L.vsel;
   face_sel_ = L.fsel;
   edge_sel_ = L.esel;
@@ -3217,6 +3277,7 @@ void Editor::pushpull_finish() {
   L.op = "push_pull";
   L.obj = pp_.obj;
   L.before = pp_.before;
+  note_shallow_before(L);
   L.fsel = pp_.fsel;
   L.vsel.assign(pp_.before->vert_count(), 0);
   L.elem = EditElement::Face;

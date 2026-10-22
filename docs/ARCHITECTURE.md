@@ -57,7 +57,8 @@ value changes. `mark_changed` turns the edit into one undo step (a scene clone s
 
 ## Key invariants
 - **Copy-on-write meshes** (ADR 0003): `mesh_make_mutable` before writing; re-read `MeshPtr` after an
-  edit; every change `touch()`es the mesh so version-keyed caches refresh.
+  edit; every change `touch()`es the mesh so version-keyed caches refresh. A redoable operator's `LastOp::before`
+  is the undo step's pointer, never written: `run_last_op` makes the operator's one copy (ADR 0053).
 - **Edit Mode selections** are vectors indexed like the mesh (`vert_sel_`, `face_sel_`) plus a set of edge
   keys (`edge_sel_`); any operator that renumbers faces or vertices must rebuild them.
 - **Adjustable operations** re-run from `before`; anything that changes the result after it was recorded

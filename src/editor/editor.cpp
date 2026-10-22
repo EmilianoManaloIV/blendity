@@ -1668,8 +1668,11 @@ void Editor::commit_undo() {
      * objects and its texture texts. */
     s.scene->for_each([&](GameObject &g) {
       s.bytes += 600;  // an object and its components, about (stress `memory`)
-      if (const MeshFilter *mf = g.mesh_filter())
-        if (mf->mesh && mf->mesh.use_count() == 1) s.bytes += mf->mesh->memory_bytes();
+      const MeshFilter *mf = g.mesh_filter();
+      if (!mf || !mf->mesh) return;
+      /* The last operator's `before` shares the step's mesh without owning it (task 0165): the step still pays. */
+      const long others = mf->mesh == last_op_.before ? 1 : 0;
+      if (mf->mesh.use_count() - others == 1) s.bytes += mf->mesh->memory_bytes();
     });
   }
   for (const auto &t : s.textures) s.bytes += t.first.size() + t.second.size();

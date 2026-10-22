@@ -1175,7 +1175,7 @@ static void tests_round109() {
     Recti r;
     CHECK(ed.button_rect_for_test("Between frames (last second)", r));
     CHECK(ed.button_rect_for_test("Mesh copies / render meshes built / moved in place", r));
-    CHECK(ed.button_rect_for_test("Edit Mode: mesh writes / overlap check", r));
+    CHECK(ed.button_rect_for_test("Edit Mode: operator / mesh writes / overlap check", r));
   });
 }
 
@@ -1826,6 +1826,72 @@ static void coverage_tests() {
   });
 }
 
+/* Round 185 (task 0165): an operator copies the mesh once; the mesh before it is the undo step's own pointer. */
+static void tests_round185() {
+  test("an operator copies the mesh once: an extrude on the 50k-face sphere makes one mesh copy (the mesh before it stays the undo step's very pointer, which undo gives back), redo re-applies it, and the Profiler counts the operator's own time", [&] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *big = ed.scene().create("Big Sphere");
+    big->set_local_position({0, 2, -8});
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 256, 196);
+    big->get<MeshFilter>()->mesh->smooth = false;  // (shaded flat: Auto Smooth's count is taken, once)
+    big->add<MeshRenderer>();
+    ed.mark_changed_for_test("Big Sphere");  // (the sphere's creation is an undo step: the next one is the extrude's)
+    ed.command("select Big Sphere");
+    ed.command("edit vertex");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();  // (the edits committed: the undo step shares the mesh)
+    /* (The overlap check on a worker holds the mesh while it runs: the step would look shared and its bytes uncounted.) */
+    for (int i = 0; i < 600 && ed.overlap_pending_for_test(); i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      ed.step_frame_headless();
+    }
+    const Mesh *before = big->get<MeshFilter>()->mesh.get();
+    const size_t faces0 = before->face_count();
+    ed.command("fsel 100 101 102");
+    ed.step_frame_headless();
+    CHECK(big->get<MeshFilter>()->mesh.get() == before);  // (a selection copies nothing)
+    const MeshCounts c0 = mesh_counts();
+    const FrameProfile p0 = ed.frame_profile_totals();
+    ed.command("editop extrude");
+    const MeshCounts c1 = mesh_counts() - c0;
+    ed.step_frame_headless();  // (the frame's profile is summed at its end)
+    const FrameProfile p1 = ed.frame_profile_totals();
+    const size_t faces1 = big->get<MeshFilter>()->mesh->face_count();
+    std::printf("    extrude three faces of %zu: %llu mesh copies (%.1f ms), the operator %.1f ms, %zu faces after\n", faces0,
+                (unsigned long long)c1.copies, c1.ms_copies, p1.ms_edit_op - p0.ms_edit_op, faces1);
+    CHECK(c1.copies == 1);
+    CHECK(faces1 > faces0);
+    CHECK(big->get<MeshFilter>()->mesh.get() != before);
+    CHECK(p1.ms_edit_op > p0.ms_edit_op);
+    CHECK(ed.last_op_valid_for_test());
+    ed.step_frame_headless();
+    /* The undo step holds the mesh before the operator although the operator's `before` shares it: the budget counts it. */
+    std::printf("    the undo stack: %zu bytes, the mesh %zu\n", ed.undo_bytes(), before->memory_bytes());
+    CHECK(ed.undo_bytes() >= before->memory_bytes());
+    /* F9's re-run: one copy again, the shared mesh as it was. */
+    const uint64_t before_version = before->version;
+    const MeshCounts c2 = mesh_counts();
+    ed.command("redo amount 0.3");
+    const MeshCounts c3 = mesh_counts() - c2;
+    std::printf("    redo amount 0.3: %llu mesh copies, %zu faces\n", (unsigned long long)c3.copies, big->get<MeshFilter>()->mesh->face_count());
+    CHECK(c3.copies == 1);
+    CHECK(before->version == before_version && before->face_count() == faces0 && !before->smooth);
+    CHECK(big->get<MeshFilter>()->mesh->face_count() == faces1);
+    ed.step_frame_headless();
+    ed.command("undo");
+    const GameObject *again = ed.scene().find_by_name("Big Sphere");
+    if (again && again->get<MeshFilter>()->mesh->face_count() != faces0) {  // (F9's adjustment was its own step)
+      ed.command("undo");
+      again = ed.scene().find_by_name("Big Sphere");
+    }
+    CHECK(again && again->get<MeshFilter>()->mesh.get() == before);  // the very mesh, not a copy of it
+    CHECK(again && again->get<MeshFilter>()->mesh->face_count() == faces0);
+    ed.command("redo");
+    again = ed.scene().find_by_name("Big Sphere");
+    CHECK(again && again->get<MeshFilter>()->mesh->face_count() == faces1);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -1843,5 +1909,6 @@ void run_editor_tests() {
   tests_round142();
   tests_round165();
   tests_round165_208();
+  tests_round185();
   coverage_tests();
 }

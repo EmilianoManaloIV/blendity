@@ -1338,8 +1338,8 @@ static void test_editor_render(Report &rep, const Options &o) {
   /* Task 0107 (pass 12's baseline): the frames that aren't drags - entering Edit Mode with the mesh's caches cold, an
    * operator, an undo - each frame's parts: the overlap check, the mesh's builds, the uploads to the card. */
   auto edit_frame = [&](const char *what, int reps, const std::function<void()> &before, const std::function<void()> &act) {
-    double total = 0, overlap = 0, builds = 0, edges = 0, next = 0;
-    uint64_t checks = 0, nbuilds = 0, uploads = 0;
+    double total = 0, overlap = 0, builds = 0, edges = 0, next = 0, op = 0, copies = 0;
+    uint64_t checks = 0, nbuilds = 0, uploads = 0, ncopies = 0;
     for (int r = 0; r < reps; r++) {
       before();
       const FrameProfile p0 = ed.frame_profile_totals();
@@ -1357,11 +1357,14 @@ static void test_editor_render(Report &rep, const Options &o) {
       nbuilds += c1.full_builds;
       edges += c1.ms_edges;
       uploads += p1.gpu_mesh_uploads - p0.gpu_mesh_uploads;
+      op += p1.ms_edit_op - p0.ms_edit_op;
+      copies += c1.ms_copies;
+      ncopies += c1.copies;
     }
     const double r = reps;
-    rep.note(strprintf("%s: %.1f ms (the overlap check %.1f ms, %.1f of them; render meshes built %.1f ms, %.1f of them; edge table %.1f ms; "
+    rep.note(strprintf("%s: %.1f ms (the operator itself %.1f ms; mesh copies in the frame %.1f of %.1f ms; the overlap check %.1f ms, %.1f of them; render meshes built %.1f ms, %.1f of them; edge table %.1f ms; "
                        "meshes sent to the card whole %.1f); the frame after %.1f ms.",
-                       what, total / r, overlap / r, checks / r, builds / r, nbuilds / r, edges / r, uploads / r, next / r));
+                       what, total / r, op / r, ncopies / r, copies / r, overlap / r, checks / r, builds / r, nbuilds / r, edges / r, uploads / r, next / r));
   };
   for (int device : {1, 2}) {
     ed.viewport_device_for_test(device);

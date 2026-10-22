@@ -7399,6 +7399,51 @@ static void tests_round132() {
   });
 }
 
+/* Round 185 (task 0165): shallow_edges from a sorted edge table gives the hash map's count. */
+static size_t r185_shallow_reference(const Mesh &m, float angle_deg) {
+  std::unordered_map<uint64_t, std::pair<int, int>> ef;
+  for (size_t f = 0; f < m.face_count(); f++)
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      auto &e = ef.emplace(Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]), std::make_pair(-1, -1)).first->second;
+      (e.first < 0 ? e.first : e.second) = (int)f;
+    }
+  const float lo = std::cos(1.0f * kDeg2Rad), hi = std::cos(angle_deg * kDeg2Rad);
+  size_t n = 0;
+  for (auto &kv : ef) {
+    if (kv.second.second < 0) continue;
+    const float c = dot(normalize(m.face_normal((size_t)kv.second.first)), normalize(m.face_normal((size_t)kv.second.second)));
+    if (c < lo && c > hi) n++;
+  }
+  return n;
+}
+
+static void tests_round185() {
+  test("shallow_edges from a sorted edge table counts what the hash map did on a cube (none), a 12-sided cylinder (its sides) and a sphere; an edge shared by three faces is counted once (the pair compared may differ from the hash map's)", [&] {
+    const MeshPtr cube = primitives::cube(), cyl = primitives::cylinder(0.5f, 2.0f, 12), ball = primitives::uv_sphere(0.5f, 16, 8);
+    CHECK(meshops::shallow_edges(*cube, 30.0f) == 0);
+    CHECK(meshops::shallow_edges(*cube, 30.0f) == r185_shallow_reference(*cube, 30.0f));
+    const size_t sides = meshops::shallow_edges(*cyl, 35.0f);
+    std::printf("    the 12-sided cylinder: %zu shallow edges at 35 degrees (12 sides 30 degrees apart), the sphere %zu of %zu edges\n", sides,
+                meshops::shallow_edges(*ball, 30.0f), ball->edge_count());
+    CHECK(sides == 12);
+    CHECK(sides == r185_shallow_reference(*cyl, 35.0f));
+    CHECK(meshops::shallow_edges(*ball, 30.0f) == r185_shallow_reference(*ball, 30.0f));
+    CHECK(meshops::shallow_edges(*ball, 30.0f) > 0);
+    /* Three faces on one edge (0-1): a fan of 20 degrees each side of the middle one. */
+    Mesh m;
+    m.add_vert({0, 0, 0});
+    m.add_vert({1, 0, 0});
+    m.add_vert({0.5f, 1, 0});
+    m.add_vert({0.5f, std::cos(20.0f * kDeg2Rad), std::sin(20.0f * kDeg2Rad)});
+    m.add_vert({0.5f, std::cos(20.0f * kDeg2Rad), -std::sin(20.0f * kDeg2Rad)});
+    m.add_face({0, 1, 2});
+    m.add_face({0, 1, 3});
+    m.add_face({0, 1, 4});
+    CHECK(meshops::shallow_edges(m, 30.0f) == 1);
+    CHECK(meshops::shallow_edges(m, 30.0f) == r185_shallow_reference(m, 30.0f));
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -7427,4 +7472,5 @@ void run_modeling_tests() {
   tests_round113();
   tests_round116();
   tests_round132();
+  tests_round185();
 }

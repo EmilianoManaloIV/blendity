@@ -608,6 +608,7 @@ Blendity takes a snapshot of the scene graph after each completed action: a gizm
 @ blender/source/blender/blenlib/BLI_implicit_sharing.hh
 @ blender/source/blender/editors/undo
 ? Why doesn't moving an object require copying its 1-million-vertex mesh into the undo history? | The snapshot only copies the object (its transform and components). The mesh is shared by pointer and copied only if someone edits it.
+? You extrude three faces of a 50k-face mesh. How many times is the mesh copied, and where does the Profiler show what the operator itself cost? | Once: the mesh before the operator is the undo step's own pointer, which nothing writes, and the operator works on one copy of it (task 0165). The Profiler's "Edit Mode: operator / mesh writes / overlap check" row shows the operator's own time - the rest of the frame is the render meshes rebuilt and the views redrawn.
 )"},
     {"Performance and Stress Testing", "Finding limits and efficiencies", R"(
 Every engine has a profiler: Unity's Profiler window, and Blender's statistics overlay and --debug timings. Blendity has a Profiler window and a separate headless program, blendity_stress, that pushes each subsystem until it breaks a time budget. It then writes a report to stress/results/.

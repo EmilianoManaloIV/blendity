@@ -261,6 +261,9 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | A view on the card waited for the GPU twice a frame - once for its picture, once for the copy out - so the card sat idle between them. | A view is one submission: the copies out are recorded behind the frame's passes (task 0160, ADR 0051). |
 | An F12 render or the Camera Preview used the card only inside the editor's slice of each frame (40 ms / 12 ms), waited for every submission, and blocked the UI for the slice: the card was busy a fifth of the render's time and the editor felt slow. | The cards render on their own threads between frames, two submissions in flight; the editor polls for a few milliseconds a frame (task 0161, ADR 0052). |
 | Moving one object or editing one material with the Camera Preview on the card re-sent the whole scene to it, buffer by buffer. | The scene's sections are hashed and only the changed one goes up - the instances, the materials or the lights - and a whole upload sends its buffers in one submission (task 0162). |
+| A scene with an area light, or an object with a cutout material, drew its views on the CPU even with the card chosen, and nothing said why. | Area lights and cutouts draw on the card as on the CPU; the Profiler's GPU block names each view slot's remaining fallback reason (task 0163). |
+| Backing away from a Toon material with painted maps showed moire in the hatching, a sparkling face shadow and band edges, a dotted outline. | Every map reads at the pixel's lod, a band edge is one antialiased pixel at any distance, procedurals fade under a pixel, a new outline keeps a pixel (task 0164, ADR 0048 amended). |
+| An Extrude, Inset or Bevel on a 50k-face mesh took a tenth of a second before anything drew. | The operator itself is under 10 ms (was 60): one mesh copy instead of three, Auto Smooth's count taken once and only when it can matter, from a sorted edge table (task 0165, ADR 0053). |
 
 ## Still worth doing
 

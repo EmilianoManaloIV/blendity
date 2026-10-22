@@ -2,6 +2,53 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 185): Edit Mode operators without the wasted work (task 0165, ADR 0053)
+
+**Asked:** the roadmap's "Edit Mode operators without a whole-mesh copy" (Extrude on 50k faces 96-118 ms against
+Blender's 32.6 ms).
+
+**Measured first** (the task doc has the probe): the command `editop extrude` was 60 ms on the 50k-face sphere, of
+which Auto Smooth's shallow-edge count 23 ms taken twice (47 ms), three whole-mesh copies 10.5 ms, the extrude
+itself 1 ms; the frame after it 38 ms (both render meshes rebuilt 13 ms, the shadow map and the views redrawn). A
+whole copy is 3.5 ms, and an extrude writes every array, so the planned per-array copy-on-write would have copied
+them all anyway: ADR 0053 records the decision against it, with the arithmetic.
+
+**Changed**
+- A redoable operator (Extrude, Inset, Bevel, F9's family) keeps the mesh before it as the undo step's own pointer -
+  never written, copy-on-write guards every edit - and `run_last_op` makes the one copy it works on (three copies
+  before: a mutable one, the `before` one, the working one). A cancelled modal gives the pointer back; undo
+  restores the very mesh.
+- Auto Smooth's shallow-edge count is taken once per operator (`LastOp::shallow_before`, reused by F9) and only
+  when it can decide anything (`Editor::shallow_before`: not for a mesh already smooth or shaded per face), and
+  `shallow_edges` works from a sorted (edge, face) table with each face normal computed once (a hash map over
+  200k edge ends and two normals per edge before): 23 ms to about 4 ms on 50k faces.
+- `edit_op` is the common start, `begin_redoable_op` and `edit_op_rest`; the selection flush is
+  `edit_selection_faces`.
+- An operator cancelled with Esc (or one that fails) gives back a copy of the mesh before it, not the undo step's
+  very pointer: the pointer brought back an earlier render-cache key whose picture had been drawn with state the key
+  doesn't hold (verify mode found a stale Scene view picture after an Esc; the key's gap is ADR 0053's follow-up).
+- `FrameProfile::ms_edit_op` - the operator's own time inside the command that ran it - in the Profiler's "Edit
+  Mode: operator / mesh writes / overlap check" row and the stress edit_frame notes (the operator itself, its mesh
+  copies).
+- The roadmap's 0167 ("undo steps sharing unchanged arrays") is already how ADR 0003 works - the undo stack shares
+  meshes by pointer and a scene clone is 0.02 ms - so its round goes to the undo frame's own cost instead.
+
+**Measured**
+- The stress row "An operator: extrude three faces" with the views on the CPU: 48.9 ms a frame, was 130.6 (the operator itself 7.8 ms, mesh copies in the frame 1.0 of 3.4 ms; the frame after 2.2 ms, was 2.2).
+- The stress row "An operator: extrude three faces" with the views on the GPU: 48.5 ms a frame, was 115.3 (the operator itself 7.3 ms, mesh copies in the frame 1.0 of 3.4 ms; the frame after 2.0 ms, was 2.1).
+- The probe before this task (the task doc): the command alone 60 ms (Auto Smooth's count 23 ms twice, three copies 10.5 ms), the frame after it 38 ms; after: the command 6.9 ms with one copy of 3.5 ms, the frame after unchanged (the render meshes rebuilt 13.5 ms, the shadow map and the views). Blender 5.2.2's row: 32.6 ms (PERFORMANCE.md Pass 13).
+
+**Checked**
+- An extrude of three faces on the 50k-face sphere makes one mesh copy; the mesh before it is the very pointer
+  undo gives back, and redo re-applies it; the Profiler counts the operator's own time (tests/test_editor.cpp).
+  `shallow_edges` counts what the hash map did on a cube (none), a 12-sided cylinder (its 12 sides), a sphere, and
+  an edge shared by three faces counted once (tests/test_modeling.cpp); Auto Smooth still shades a bevelled cube
+  smooth and leaves a per-face-shaded one alone (the round 142 test).
+- Unit checks (round 185): Windows 11,248, 0 failed (922 tests); render-cache verify mode 11,249, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,916, 0 failed. Sanitizer build: 10,796, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 184): no artifacts at distance for Toon materials (task 0164, ADR 0048 amended)
 
 **Asked:** "artifacts when backing away from a Toon material with painted maps".

@@ -127,6 +127,9 @@ struct FrameProfile {
    * the overlapping-vertices check, the "Lighting out of date" key, snapping's searches, gathering the views'
    * draw items (render meshes built on the way included) and the scene hashes - and how often the costly ones ran. */
   double ms_edit_apply = 0, ms_overlap = 0, ms_lighting_key = 0, ms_snap_pick = 0, ms_collect = 0, ms_hash = 0;
+  /* Task 0165: an Edit Mode operator's own time - its one mesh copy, the operation, the selection flushed, Auto
+   * Smooth's check - inside the command that ran it (not a view's time). */
+  double ms_edit_op = 0;
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
@@ -156,6 +159,7 @@ struct FrameProfile {
     views_held += o.views_held, cheap_shadows += o.cheap_shadows;
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
+    ms_edit_op += o.ms_edit_op;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
@@ -1590,6 +1594,7 @@ class Editor {
   void edges_from_verts();  // edge_sel_ = edges with both ends selected
   void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
   void edit_op(const std::string &op);
+  void edit_op_rest(const std::string &op, GameObject &g, MeshPtr &mp);  // the operators that aren't redoable (task 0165)
   void edit_tool(const std::string &op);  // edit_op, if the current selection mode offers it
   bool edit_op_available(const std::string &op) const;
   /* Nearest visible edge to the mouse (edge mode / loop select / loop cut). */
@@ -1605,7 +1610,11 @@ class Editor {
   struct LastOp {
     std::string op;  // empty = none
     uint64_t obj = 0;
+    /* The mesh as it was: shared with the undo step and never written (task 0165) - run_last_op copies it once. */
     MeshPtr before;
+    size_t shallow_before = (size_t)-1;  // Auto Smooth's shallow-edge count of `before`, (size_t)-1 when it can't apply
+    float shallow_angle = 0;              // ... and the settings it was taken under (a re-run checks them: shallow_before_of)
+    bool shallow_on = false;
     const Mesh *result = nullptr;  // the mesh it produced (panel hides once anything else edits it)
     uint64_t result_version = 0;
     std::vector<uint8_t> vsel, fsel;
@@ -1629,6 +1638,17 @@ class Editor {
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
+  /* A redoable operator's start (task 0165): the selection flushed, LastOp filled from the mesh as it is, run_last_op. */
+  void begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp);
+  /* The faces an operator reads, from the vertices or the edges in those modes; how many are selected. */
+  size_t edit_selection_faces(const Mesh &m);
+  /* Whether Auto Smooth may shade a mesh after an operator: on, and the mesh shaded flat as a whole. */
+  bool auto_smooth_applies(const Mesh &m) const;
+  /* Auto Smooth's shallow-edge count of a mesh an operator is about to change, (size_t)-1 when it can't apply. */
+  size_t shallow_before(const Mesh &m) const;
+  void fill_last_op_settings(LastOp &L, const std::string &op) const;  // the tool settings an operator starts from
+  void note_shallow_before(LastOp &L) const;        // the count of L.before with the settings it was taken under
+  size_t shallow_before_of(const LastOp &L) const;  // that count, or a fresh one when the settings changed since
   bool last_op_valid();
   void settle_meshes();
   /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
