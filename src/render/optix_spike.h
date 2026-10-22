@@ -37,7 +37,8 @@ struct OptixFrameIn {
 
 class OptixTracer {
  public:
-  /* The build has OptiX (the SDKs were there); devices the CUDA driver lists (none without NVIDIA's driver). */
+  /* The build has OptiX (its headers were there; task 0169: the PTX is committed) and BLENDITY_NO_OPTIX isn't 1;
+   * devices the CUDA driver lists (none without NVIDIA's driver). */
   static bool compiled_in();
   static std::vector<std::string> devices(std::string *error);
   static std::unique_ptr<OptixTracer> create(int cuda_device, std::string *error);
@@ -51,5 +52,9 @@ class OptixTracer {
   virtual bool read(std::vector<float> &rgb, std::string *error) = 0;
   virtual const std::string &name() const = 0;
 };
+
+/* One line for `gpu list` (task 0169): "OptiX: not in this build", "OptiX: turned off (BLENDITY_NO_OPTIX=1)",
+ * "OptiX: no driver (why)" or "OptiX: <n> device(s): <names>". */
+std::string optix_status();
 
 }  // namespace bl::gpu

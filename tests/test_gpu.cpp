@@ -1839,6 +1839,61 @@ static void tests_round186() {
   });
 }
 
+/* Round 189 (task 0169, ADR 0054): shipping OptiX. */
+#if __has_include("../src/render/optix/optix_kernel_ptx.h")
+#  include "../src/render/optix/optix_kernel_ptx.h"
+#  define R189_HAVE_PTX 1
+#endif
+/* FNV-1a 64 over a file's text with its line ends as LF (what tools/ptx_compile.cpp hashes), or false. */
+static bool r189_hash(const std::string &path, uint64_t &h) {
+  std::string text;
+  if (!fs::read_file(path, text)) return false;
+  for (char c : text) {
+    if (c == '\r') continue;
+    h ^= (unsigned char)c;
+    h *= 0x100000001b3ull;
+  }
+  return true;
+}
+static void tests_round189() {
+  test("OptiX ships as committed PTX: its header's hash matches optix_kernel.cu and optix_params.h (run tools/optix_ptx_embed.bat after changing them)", [&] {
+#if defined(R189_HAVE_PTX)
+    uint64_t h = 0xcbf29ce484222325ull;
+    const bool read = r189_hash("src/render/optix_kernel.cu", h) && r189_hash("src/render/optix_params.h", h);
+    if (!read) {
+      std::printf("    (the sources aren't beside the tests: run from the blendity folder)\n");
+      return;
+    }
+    std::printf("    the committed PTX: %zu bytes from OptiX %d; its hash %016llx, the sources' %016llx\n", sizeof(optix_kernel_ptx), (int)BL_OPTIX_PTX_OPTIX_VERSION,
+                (unsigned long long)BL_OPTIX_PTX_SOURCE_HASH, (unsigned long long)h);
+    CHECK(h == BL_OPTIX_PTX_SOURCE_HASH);
+    CHECK(sizeof(optix_kernel_ptx) > 1000 && BL_OPTIX_PTX_OPTIX_VERSION >= 70000);
+#else
+    CHECK(false);  // (the header is committed: src/render/optix/optix_kernel_ptx.h)
+#endif
+  });
+  test("OptiX's state: `gpu list` names it (in the build, its driver, its cards), and BLENDITY_NO_OPTIX=1 turns it off at run time", [&] {
+    const std::string on = gpu::optix_status();
+    std::printf("    %s\n", on.c_str());
+    CHECK(on.rfind("OptiX: ", 0) == 0);
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("gpu list");  // (logs the Vulkan cards and the line above)
+    const char *was = std::getenv("BLENDITY_NO_OPTIX");
+    const std::string before = was ? was : "";
+    set_env("BLENDITY_NO_OPTIX", "1");
+    const std::string off = gpu::optix_status();
+    const bool compiled = gpu::OptixTracer::compiled_in();
+    std::string why;
+    const bool made = gpu::OptixTracer::create(0, &why) != nullptr;
+    set_env("BLENDITY_NO_OPTIX", before);
+    CHECK(!made);
+    std::printf("    with BLENDITY_NO_OPTIX=1: %s; compiled in: %s\n", off.c_str(), compiled ? "yes" : "no");
+    CHECK(!compiled);
+    CHECK(off == "OptiX: turned off (BLENDITY_NO_OPTIX=1)" || off == "OptiX: not in this build");
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -1851,4 +1906,5 @@ void run_gpu_tests() {
   tests_round182();
   tests_round183();
   tests_round186();
+  tests_round189();
 }

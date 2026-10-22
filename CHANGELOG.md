@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 189): OptiX ships - committed PTX, NVIDIA's headers at build, the driver at run time (task 0169, ADR 0054)
+
+**Asked:** OptiX "as seamless as Blender's Cycles", shipped by embedding PTX compiled on the user's PC.
+
+**Changed**
+- The OptiX kernel's PTX is committed (`src/render/optix/optix_kernel_ptx.h`: 34,373 bytes from OptiX 9.1.0, with
+  the FNV-1a hash of `optix_kernel.cu` and `optix_params.h` and the OptiX version). `tools/optix_ptx_embed.bat`
+  writes it on a machine with the CUDA Toolkit and the SDK (`tools/ptx_compile.cpp --header=`); a unit test fails
+  when the kernel changes without it.
+- A build needs only OptiX's host headers now, no CUDA Toolkit: `OPTIX_ROOT_DIR`, NVIDIA's ProgramData folder, or -
+  only with `BLENDITY_FETCH_OPTIX=1` - NVIDIA's public `optix-dev` headers cloned at `v9.1.0` into `build/optix/sdk`
+  (taken from NVIDIA under NVIDIA's terms; nothing NVIDIA's is committed but the PTX built from Blendity's kernel).
+  `build.bat` and `build.sh` (Linux) both; CI's Windows and Linux jobs and the release workflow set the switch, so
+  the installers carry the OptiX device (ADR 0037's "never" ends).
+- `BLENDITY_NO_OPTIX=1` also turns OptiX off at run time; the console's `gpu list` names every card Vulkan sees and
+  OptiX's state (not in this build, turned off, no driver and why, or its devices).
+- The fetch path is written but has not been run on this PC (it downloads); CI runs it.
+
+**Measured**
+- The committed PTX: 34,373 bytes from OptiX 9.1.0 (the header 114 KB of text); its hash matches the sources.
+- A Windows build with `CUDA_PATH` empty (no CUDA Toolkit) and the SDK's headers from ProgramData: OptiX built in,
+  `gpu list` names the RTX 4070 SUPER and the RTX 3060 Ti.
+- The Linux build (WSL, `OPTIX_ROOT_DIR` at the Windows SDK's headers): OptiX built in from the committed PTX, and
+  through WSL's NVIDIA driver the same two devices; the OptiX tests pass there.
+- Not run here: the fetch of NVIDIA's `optix-dev` headers (`BLENDITY_FETCH_OPTIX=1`: it downloads; CI runs it).
+
+**Checked**
+- The committed PTX's hash matches the kernel's sources; `gpu list`'s OptiX line names the RTX 4070 SUPER and the
+  RTX 3060 Ti here; `BLENDITY_NO_OPTIX=1` turns it off at run time (tests/test_gpu.cpp).
+- Unit checks (round 189): Windows 11,299, 0 failed (931 tests); render-cache verify mode 11,300, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,961, 0 failed. Sanitizer build: 10,841, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 188): hair as mass-weighted XPBD rods - film feel, not jello (task 0168, ADR 0049 amended)
 
 **Asked:** hair physics "stiff and jello-like"; Blender-hair-dynamics / film feel, research based, for hair and other

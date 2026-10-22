@@ -1603,6 +1603,7 @@ class Editor {
   void edges_from_verts();  // edge_sel_ = edges with both ends selected
   void verts_from_edges();  // vert_sel_ / face_sel_ from edge_sel_
   void edit_op(const std::string &op);
+  void gpu_list();  // `gpu list`: the cards Vulkan sees and OptiX's state (task 0169)
   void edit_op_rest(const std::string &op, GameObject &g, MeshPtr &mp);  // the operators that aren't redoable (task 0165)
   void select_op(const std::string &op, GameObject &g, const Mesh &m);   // the selection-only operators, on the shared mesh (task 0166)
   void select_similar_op(const std::string &op, const Mesh &m);

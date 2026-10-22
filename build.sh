@@ -102,6 +102,32 @@ else
   echo "[blendity] Dependency-free build (no $LIBDIR: bash packaging/fetch_blender_libs.sh $LIBPLAT fetches them)"
 fi
 
+# --- NVIDIA OptiX (task 0169, ADR 0054) ----------------------------------------------------------------------
+# The kernel's PTX is committed (src/render/optix/optix_kernel_ptx.h), so a build needs only OptiX's host headers:
+# OPTIX_ROOT_DIR, or - only when BLENDITY_FETCH_OPTIX=1 (CI) - NVIDIA's public optix-dev headers at a pinned tag,
+# fetched into build/optix/sdk (the builder takes them from NVIDIA under NVIDIA's terms; nothing NVIDIA's is
+# committed). At run time only NVIDIA's driver is needed (libcuda and libnvoptix, loaded by cuew and optixInit).
+# Linux only (macOS has no NVIDIA driver); BLENDITY_NO_OPTIX=1 leaves it out.
+OPTIX_SRC=""
+OPTIX_DEV_TAG=v9.1.0  # (the same tag as build.bat's and the committed PTX's OptiX version: change them together)
+if [ "$OS" = "Linux" ] && [ "${BLENDITY_NO_OPTIX:-0}" != 1 ] && [ -f src/render/optix/optix_kernel_ptx.h ]; then
+  if [ -z "${OPTIX_ROOT_DIR:-}" ] && [ "${BLENDITY_FETCH_OPTIX:-0}" = 1 ] && [ ! -f build/optix/sdk/include/optix.h ]; then
+    git clone --quiet --depth 1 --branch "$OPTIX_DEV_TAG" https://github.com/NVIDIA/optix-dev.git build/optix/sdk || echo "[blendity] Fetching NVIDIA's OptiX headers $OPTIX_DEV_TAG failed"
+  fi
+  if [ -z "${OPTIX_ROOT_DIR:-}" ] && [ -f build/optix/sdk/include/optix.h ]; then OPTIX_ROOT_DIR="$PWD/build/optix/sdk"; fi
+  if [ -f "${OPTIX_ROOT_DIR:-/nonexistent}/include/optix.h" ]; then
+    FLAGS="$FLAGS -DBL_WITH_OPTIX -I$OPTIX_ROOT_DIR/include -Isrc/render/optix -Iextern/cuew/include"
+    OPTIX_SRC="extern/cuew/src/cuew.c"
+    LIBS="$LIBS -ldl"
+    echo "[blendity] With NVIDIA OptiX: its headers from $OPTIX_ROOT_DIR, the kernel from src/render/optix"
+  fi
+  # A build that asked for the fetch (CI, the release) must have OptiX: else it would ship without it, quietly.
+  if [ -z "$OPTIX_SRC" ] && [ "${BLENDITY_FETCH_OPTIX:-0}" = 1 ]; then
+    echo "[blendity] BLENDITY_FETCH_OPTIX=1 but OptiX isn't built in (no headers): stopping"
+    exit 1
+  fi
+fi
+
 OBJ="build/obj_${CONFIG}_$(echo "$OS" | tr '[:upper:]' '[:lower:]')$([ "$USE_LIBS" = 1 ] && echo _libs || true)"
 mkdir -p "$OBJ" "$OUT"
 # License texts and notices travel with the binaries (licenses/README.md).
@@ -113,7 +139,7 @@ if [ "$(cat "$OBJ/flags.txt" 2>/dev/null)" != "$CXX $FLAGS" ]; then
   echo "$CXX $FLAGS" > "$OBJ/flags.txt"
 fi
 
-LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC"
+LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC $OPTIX_SRC"
 # Blender's libc_compat: the -ffast-math math symbols newer glibc dropped that its prebuilt static codecs (FFmpeg's
 # x265) still call (Linux only; empty elsewhere).
 [ "$USE_LIBS" = 1 ] && [ "$OS" != "Darwin" ] && LIB_SRC="$LIB_SRC extern/libc_compat/libc_compat.c"
@@ -122,13 +148,13 @@ compile() {  # src -> object path (only rebuilds when the source or any header i
   local src="$1"
   local obj="$OBJ/$(echo "$src" | tr '/' '_').o"
   local newest_header
-  newest_header="$(ls -t src/*/*.h extern/*.hh | head -1)"
+  newest_header="$(ls -t src/*/*.h src/*/*/*.h extern/*.hh 2>/dev/null | head -1)"  # (src/render/optix/: the committed PTX)
   if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
     local extra=""
     case "$src" in *.mm) extra="-fobjc-arc" ;; esac
     echo "  compiling $src"
     case "$src" in
-      *.c) ${CC:-cc} -O2 -c "$src" -o "$obj" ;;  # ufbx is C99
+      *.c) ${CC:-cc} -O2 -Iextern/cuew/include -c "$src" -o "$obj" ;;  # ufbx is C99 (cuew too, task 0169)
       *) $CXX $FLAGS $extra -c "$src" -o "$obj" ;;
     esac
   fi

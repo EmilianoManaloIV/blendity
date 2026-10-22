@@ -11,6 +11,8 @@
 #include "../core/launch.h"
 #include "../core/releases.h"
 #include "../deps/deps.h"
+#include "../render/gpu_device.h"
+#include "../render/optix_spike.h"
 #include "../research/research.h"
 #include <algorithm>
 #include <cmath>
@@ -655,6 +657,10 @@ void Editor::run_console_command(const std::string &line) {
   Log::info("> %s", line.c_str());
   const std::string &c = t[0];
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
+  if (c == "gpu" && arg(1, "") == "list") {  // (task 0169; up here: the chain below is at MSVC's nesting limit)
+    gpu_list();
+    return;
+  }
   if (c == "layout") {
     /* layout <name> | layout save <name> | layout delete <name> (task 0055); a raw dock string still works */
     const std::string rest = line.substr(line.find(' ') + 1);
@@ -807,7 +813,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
     Log::info("  screenshot [file.png], bench [frames], lesson <n>, references, window <name>, tool <move|rotate|...>,");
     Log::info("  edit [vertex|edge|face|off] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
-    Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation),");
+    Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation), gpu list,");
     Log::info("  material <Solid|Transparent|Cutout|Glass|Frosted Glass|Metal|Emissive|Unlit>, preview (quick render),");
     Log::info("  vsel <verts...>, editop <extrude|inset|bevel|bridge|push_through|fuse|subdivide_edges|connect|dissolve|collapse|fill|merge_center|recalc_normals|loopcut|select_loop|delete>,");
     Log::info("  loopcuts <n> [slide], proportional <on|off> [radius], component <Name>, applymods, uv <op>, seam <verts...>, libs");
@@ -1656,6 +1662,15 @@ void Editor::run_console_command(const std::string &line) {
     else Log::info("bench GPU busy: the views are on the CPU (Preferences > Viewport Device: GPU to measure the card)");
   }
   else Log::warn("Unknown command '%s' (type help)", c.c_str());
+}
+
+/* `gpu list` (task 0169): every card Vulkan sees, then OptiX's state - in the build, turned off, its driver, its cards. */
+void Editor::gpu_list() {
+  const std::vector<gpu::DeviceInfo> &devs = gpu::devices();
+  if (devs.empty()) Log::info("Vulkan: %s", gpu::status().c_str());
+  for (const gpu::DeviceInfo &d : devs)
+    Log::info("Vulkan %d: %s (%s, %llu MB, ray tracing %s)", d.index, d.name.c_str(), d.type.c_str(), (unsigned long long)d.memory_mb, d.hardware_rt ? "yes" : "no");
+  Log::info("%s", gpu::optix_status().c_str());
 }
 
 }  // namespace bl

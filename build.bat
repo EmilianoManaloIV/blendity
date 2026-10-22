@@ -71,19 +71,26 @@ rem ABI settings the libraries were built with (blender\build_files\build_enviro
 set LIBDEFS=%LIBDEFS% /DIMATH_DLL /DOPENEXR_DLL /DMANIFOLD_PAR=1 /DJPH_SHARED_LIBRARY /DJPH_FLOATING_POINT_EXCEPTIONS_ENABLED /DJPH_DOUBLE_PRECISION /DJPH_CROSS_PLATFORM_DETERMINISTIC /DJPH_USE_CPU_COMPUTE /DJPH_OBJECT_STREAM /DJPH_USE_SSE4_1 /DJPH_USE_SSE4_2
 :libs_done
 
-rem --- NVIDIA OptiX (optional, task 0097's spike; ADR 0037) ---------------------
-rem Only when this machine has the CUDA Toolkit (CUDA_PATH: NVRTC and bin2c) and the OptiX SDK's headers
-rem (OPTIX_ROOT_DIR, or the newest "OptiX SDK *" NVIDIA installs under ProgramData). Neither is shipped: the kernel
-rem is compiled to PTX here and built in, and at run time only NVIDIA's driver is needed. BLENDITY_NO_OPTIX=1 leaves
-rem it out (CI and the installers build without it, as without the SDKs). The kernel goes to PTX through NVRTC
-rem (tools\ptx_compile.cpp): nvcc runs the C++ compiler's own headers through CUDA's front end, and CUDA 12.8's can't
-rem parse Visual Studio 2026's.
+rem --- NVIDIA OptiX (task 0169, ADR 0054; ADR 0037 before it) --------------------------------------------
+rem The kernel's PTX is committed (src\render\optix\optix_kernel_ptx.h, written by tools\optix_ptx_embed.bat), so a
+rem build needs only OptiX's host headers: OPTIX_ROOT_DIR, the newest "OptiX SDK *" NVIDIA installs under ProgramData,
+rem or - only when BLENDITY_FETCH_OPTIX=1 (CI) - NVIDIA's public optix-dev headers at a pinned tag, fetched into
+rem build\optix\sdk (the builder takes them from NVIDIA under NVIDIA's terms; nothing NVIDIA's is committed). At run
+rem time only NVIDIA's driver is needed. BLENDITY_NO_OPTIX=1 leaves it out. Without the committed header, a machine
+rem with the CUDA Toolkit compiles the kernel itself as before (tools\ptx_compile.cpp through NVRTC).
 set USE_OPTIX=0
+set OPTIX_DEV_TAG=v9.1.0
+rem (the same tag as build.sh's OPTIX_DEV_TAG and the committed PTX's OptiX version: change them together)
 if "%BLENDITY_NO_OPTIX%"=="1" goto optix_done
-rem (Installers never carry it: what they ship stays Blendity's own and Blender's libraries.)
-if /i "%TARGET%"=="installer" goto optix_done
 rem Without OPTIX_ROOT_DIR, the most recently installed SDK under NVIDIA's default folder.
 if "%OPTIX_ROOT_DIR%"=="" for /f "delims=" %%o in ('dir /b /ad /o-d "%ProgramData%\NVIDIA Corporation\OptiX SDK *" 2^>nul') do if not defined OPTIX_ROOT_DIR set "OPTIX_ROOT_DIR=%ProgramData%\NVIDIA Corporation\%%o"
+if "%OPTIX_ROOT_DIR%"=="" if "%BLENDITY_FETCH_OPTIX%"=="1" if not exist build\optix\sdk\include\optix.h git clone --quiet --depth 1 --branch %OPTIX_DEV_TAG% https://github.com/NVIDIA/optix-dev.git build\optix\sdk || echo [blendity] Fetching NVIDIA's OptiX headers %OPTIX_DEV_TAG% failed
+if "%OPTIX_ROOT_DIR%"=="" if exist build\optix\sdk\include\optix.h set "OPTIX_ROOT_DIR=%CD%\build\optix\sdk"
+if not exist "%OPTIX_ROOT_DIR%\include\optix.h" goto optix_done
+if exist src\render\optix\optix_kernel_ptx.h (
+  set "OPTIX_PTX_DIR=src\render\optix"
+  goto optix_on
+)
 if not exist "%CUDA_PATH%\bin\bin2c.exe" goto optix_done
 if not exist "%CUDA_PATH%\lib\x64\nvrtc.lib" goto optix_done
 if not exist "%OPTIX_ROOT_DIR%\include\optix.h" goto optix_done
@@ -105,13 +112,20 @@ if errorlevel 1 (
   echo [blendity] bin2c couldn't embed the OptiX kernel: building without OptiX
   goto optix_done
 )
+set "OPTIX_PTX_DIR=build\optix"
+:optix_on
 set USE_OPTIX=1
 set LIBDEFS=%LIBDEFS% /DBL_WITH_OPTIX
 rem (optixInit finds the driver's OptiX through the registry and the device manager)
 set LIBLINK=%LIBLINK% advapi32.lib cfgmgr32.lib
-set LIBINC=%LIBINC% /I"%OPTIX_ROOT_DIR%\include" /Ibuild\optix /Iextern\cuew\include
-echo [blendity] With NVIDIA OptiX from %OPTIX_ROOT_DIR%
+set LIBINC=%LIBINC% /I"%OPTIX_ROOT_DIR%\include" /I%OPTIX_PTX_DIR% /Iextern\cuew\include
+echo [blendity] With NVIDIA OptiX: its headers from %OPTIX_ROOT_DIR%, the kernel from %OPTIX_PTX_DIR%
 :optix_done
+rem A build that asked for the fetch (CI, the release) must have OptiX: else it would ship without it, quietly.
+if "%BLENDITY_FETCH_OPTIX%"=="1" if not "%USE_OPTIX%"=="1" if not "%BLENDITY_NO_OPTIX%"=="1" (
+  echo [blendity] BLENDITY_FETCH_OPTIX=1 but OptiX isn't built in ^(no headers^): stopping
+  exit /b 1
+)
 
 rem The build's identity (task 0079): VERSION's number, and CI's release tag (BLENDITY_BUILD) or "dev".
 set /p BL_VERSION_NUMBER=<VERSION

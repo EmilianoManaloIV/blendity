@@ -4,6 +4,7 @@
 #include "../core/core.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 #if defined(BL_WITH_OPTIX)
@@ -14,7 +15,13 @@
 #  include <optix.h>
 #  include <optix_stubs.h>
 #  include <optix_function_table_definition.h>
-#  include "optix_kernel_ptx.h"  // the PTX build.bat made with NVRTC (tools/ptx_compile.cpp) and bin2c
+#  include "optix_kernel_ptx.h"  // the committed PTX (src/render/optix, tools/optix_ptx_embed.bat; or build.bat's own with CUDA)
+#  if defined(BL_OPTIX_PTX_OPTIX_VERSION)
+/* The host headers must be the OptiX the PTX was built against (task 0169): another SDK's function table and structs
+ * with this PTX would fail at run time, or worse. */
+static_assert(OPTIX_VERSION == BL_OPTIX_PTX_OPTIX_VERSION, "OptiX's host headers aren't the committed PTX's version: use the pinned "
+                                                          "headers (BLENDITY_FETCH_OPTIX=1, build.bat's OPTIX_DEV_TAG) or run tools/optix_ptx_embed.bat");
+#  endif
 #  include "optix_params.h"
 #endif
 
@@ -24,7 +31,7 @@ namespace bl::gpu {
 
 bool OptixTracer::compiled_in() { return false; }
 std::vector<std::string> OptixTracer::devices(std::string *error) {
-  if (error) *error = "this build has no OptiX (the CUDA Toolkit and the OptiX SDK weren't there when it was built)";
+  if (error) *error = "this build has no OptiX (OptiX's headers weren't there when it was built)";
   return {};
 }
 std::unique_ptr<OptixTracer> OptixTracer::create(int, std::string *error) {
@@ -313,10 +320,18 @@ class OptixTracerImpl final : public OptixTracer {
 
 }  // namespace
 
-bool OptixTracer::compiled_in() { return true; }
+bool OptixTracer::compiled_in() {
+  /* BLENDITY_NO_OPTIX=1 at run time too (task 0169): an OptiX build behaves as one without it. */
+  const char *off = std::getenv("BLENDITY_NO_OPTIX");
+  return !(off && std::string(off) == "1");
+}
 
 std::vector<std::string> OptixTracer::devices(std::string *error) {
   std::vector<std::string> out;
+  if (!compiled_in()) {
+    if (error) *error = "OptiX turned off (BLENDITY_NO_OPTIX=1)";
+    return out;
+  }
   int n = 0;
   if (!cuda_ready(error) || cuDeviceGetCount(&n) != CUDA_SUCCESS) return out;
   for (int i = 0; i < n; i++) {
@@ -329,6 +344,10 @@ std::vector<std::string> OptixTracer::devices(std::string *error) {
 }
 
 std::unique_ptr<OptixTracer> OptixTracer::create(int device, std::string *error) {
+  if (!compiled_in()) {
+    if (error) *error = "OptiX turned off (BLENDITY_NO_OPTIX=1)";
+    return nullptr;
+  }
   if (!cuda_ready(error)) return nullptr;
   auto t = std::make_unique<OptixTracerImpl>();
   if (!t->init(device, error)) return nullptr;
@@ -337,4 +356,19 @@ std::unique_ptr<OptixTracer> OptixTracer::create(int device, std::string *error)
 
 #endif
 
+std::string optix_status() {
+#if defined(BL_WITH_OPTIX)
+  const bool built = true;
+#else
+  const bool built = false;
+#endif
+  if (!built) return "OptiX: not in this build";
+  if (!OptixTracer::compiled_in()) return "OptiX: turned off (BLENDITY_NO_OPTIX=1)";
+  std::string err;
+  const std::vector<std::string> devs = OptixTracer::devices(&err);
+  if (devs.empty()) return "OptiX: no driver (" + (err.empty() ? std::string("no NVIDIA device") : err) + ")";
+  std::string line = "OptiX: " + std::to_string(devs.size()) + " device(s):";
+  for (const std::string &d : devs) line += " " + d + ";";
+  return line;
+}
 }  // namespace bl::gpu

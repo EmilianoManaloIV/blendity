@@ -1,5 +1,6 @@
-NVIDIA OptiX: optix_stubs.h and optix_function_table_definition.h (OptiX SDK), compiled into builds made with
-the OptiX SDK (task 0097, ADR 0037). Their licence:
+NVIDIA OptiX: optix_stubs.h and optix_function_table_definition.h (OptiX SDK / NVIDIA's optix-dev headers),
+compiled into builds with OptiX's headers - the Windows and Linux installers since task 0169 (ADR 0054). Their
+licence:
 
 SPDX-FileCopyrightText: Copyright (c) 2019 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause
