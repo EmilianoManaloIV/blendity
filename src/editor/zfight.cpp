@@ -244,16 +244,8 @@ uint64_t Editor::overlap_shorter(const Mesh &m, const std::pair<uint64_t, uint64
 
 /* What a check's answer depends on: the topology, eps and every position (bit for bit). */
 static uint64_t overlap_key(const Mesh &m, float eps) {
-  uint64_t h = 1469598103934665603ull ^ m.topology_serial();
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis ^ m.topology_serial();
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   mix(&eps, sizeof(eps));
   const size_t n = m.positions.size();
   mix(&n, sizeof(n));

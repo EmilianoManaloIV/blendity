@@ -1,0 +1,14 @@
+# tools/
+
+What is here, and what is local-only.
+
+| Tool | What it does | Run |
+|---|---|---|
+| `test_coverage_map.py` | Every console command, keymap action and window against the tests that exercise it (task 0177, ADR 0056); `--check` fails on an empty entry | `python tools/test_coverage_map.py` from `blendity/` |
+| `clean.bat` | Removes `build\`, the stress reports a run wrote (restoring `latest.md`), the inbetweening model's `.venv`; `--all` removes `dist\` and the model's training runs too | `tools\clean.bat` |
+| `ptx_compile.cpp` | NVRTC driver that compiles the OptiX kernel to PTX (`build.bat` builds and runs it when `CUDA_PATH` and `OPTIX_ROOT_DIR` are set; task 0097) | by `build.bat` |
+| `inbetween/` | The AI inbetweening model's training and export (task 0128): `train.py`, `export_onnx.py`; `.venv/` and `runs/` are local-only (in `.gitignore`) | see `inbetween/README.md` |
+| `moonray/` | `clone.sh` and `linux_build.sh`: fetch and build MoonRay on Linux for the bridge (tasks 0112-0114) | by hand, see docs/tasks/0112 |
+
+Local-only, never committed: `inbetween/.venv/`, `inbetween/runs/`, `__pycache__/`, `build/`, `dist/`, the stress
+reports beside `stress/results/latest.md`. `tools\clean.bat` removes them.

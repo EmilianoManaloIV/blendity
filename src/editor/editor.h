@@ -415,6 +415,9 @@ template<class T> struct MultiSelect {
   }
 };
 
+/* The selection's colours in the Scene view (Unity's orange; a child of the selection a browner one). */
+inline constexpr uint32_t kSelectOrange = Color::hex(0xF7941D), kChildOrange = Color::hex(0xC28A4A);
+
 struct UndoState {
   std::unique_ptr<Scene> scene;
   std::vector<uint64_t> selection;
@@ -1745,6 +1748,7 @@ class Editor {
   void commit_undo();
   void undo();
   void redo();
+  void restore_state(UndoState s, std::vector<UndoState> &into, const char *verb);  // (what undo and redo share)
   void new_scene();
   bool open_scene(const std::string &path);
   void save_scene_cmd(bool save_as);
@@ -1896,6 +1900,14 @@ class Editor {
   bool origin_hover_ = false;  // the Inspector's Origin row is in use: the Scene view previews the new origin
   bool origin_target(const GameObject &g, int mode, Vec3 world_point, Vec3 &c) const;
   void draw_origins(const Recti &view);
+  /* A grid of buttons, `per` to a row, a disabled one drawn flat with its label dimmed (the Rigging and Tools windows). */
+  struct GridButton {
+    std::string label, tip;
+    bool enabled;
+    std::function<void()> fn;
+  };
+  void button_grid(ui::Layout &lay, const std::vector<GridButton> &bs, int per);
+  bool project_to_view(const Recti &view, Vec3 p, Vec2 &s);  // a world point to the view's pixels; false behind the camera
   uint64_t focus_pick_cam_ = 0;  // a Camera waiting for its focus point, or a Light for its target (eyedroppers)
   void aim_light(GameObject &g, Vec3 target);
   bool focus_pick_update(const Recti &view);

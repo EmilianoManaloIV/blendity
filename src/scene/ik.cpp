@@ -172,10 +172,8 @@ static bool solve_one(IKConstraint &ik) {
   /* The inputs: the target, the pole, where the chain hangs from, the bones' own transforms and lengths, the settings.
    * The bones' rotations are in it as the solve left them, so a Reset Pose or an undo that turns them solves again. */
   auto inputs = [&]() {
-    uint64_t key = 1469598103934665603ull;
-    auto mix = [&](const void *p, size_t n) {
-      for (size_t i = 0; i < n; i++) key = (key ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-    };
+    uint64_t key = kFnvBasis;
+    auto mix = [&](const void *p, size_t n) { key = fnv1a(p, n, key); };
     mix(&T, sizeof(T));
     if (pole) {
       const Vec3 P = pole->world_position();

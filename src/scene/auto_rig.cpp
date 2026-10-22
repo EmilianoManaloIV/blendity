@@ -42,14 +42,6 @@ const std::vector<RigMarker> &rig_markers(RigKind kind) {
   return kind == RigKind::Humanoid ? humanoid : quadruped;
 }
 
-void mirror_markers(RigKind kind, MarkerMap &m, float middle_x) {
-  for (const RigMarker &k : rig_markers(kind)) {
-    if (!k.mirror || m.count(k.mirror) || !m.count(k.name)) continue;
-    const Vec3 p = m.at(k.name);
-    m[k.mirror] = Vec3(2.0f * middle_x - p.x, p.y, p.z);
-  }
-}
-
 bool markers_complete(RigKind kind, const MarkerMap &m, std::string *missing) {
   for (const RigMarker &k : rig_markers(kind)) {
     if (m.count(k.name)) continue;

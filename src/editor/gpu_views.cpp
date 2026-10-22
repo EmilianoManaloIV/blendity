@@ -616,16 +616,8 @@ static bool changed_runs(const std::vector<T> &now, const std::vector<T> &before
 
 /* What the cage's edge colours depend on (cage_edge_color), hashed as scene_view_key hashes the selection. */
 uint64_t Editor::cage_edges_key(const Mesh &m) const {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const uint64_t head[5] = {m.uid.v, m.topology_serial(), (uint64_t)elem_, ngon_mode_ ? m.version : 0, ngon_mode_ ? m.deform_version : 0};
   mix(head, sizeof(head));
   mix(vert_sel_.data(), vert_sel_.size());

@@ -168,7 +168,7 @@ if /i not "%TARGET%"=="all" goto done
 
 :tests
 echo [blendity] Building unit tests (%CONFIG%)...
-cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_tests.exe %LIBSRC% tests\test_main.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
+cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_tests.exe %LIBSRC% tests\*.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 goto done
 

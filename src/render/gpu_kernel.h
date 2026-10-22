@@ -128,7 +128,6 @@ void onb(vec3 n, out vec3 t, out vec3 b) {
   t = vec3(1.0 + sgn * n.x * n.x * a, sgn * bb, -sgn * n.x);
   b = vec3(bb, sgn + n.y * n.y * a, -n.y);
 }
-vec3 safe_normalize(vec3 v) { float l = length(v); return l > 0.0 ? v / l : vec3(0.0); }
 
 /* ------------------------------------------------------------- textures */
 float srgb_to_linear(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }

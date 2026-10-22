@@ -22,7 +22,6 @@ inline float fin(float v, float d) { return finite_bits(v) && std::fabs(v) < 1e3
 inline int cnt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 inline int round_up(int v, int k) { return (v + k - 1) / k * k; }
 inline int wrapi(int v, int n) { return ((v % n) + n) % n; }
-inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 inline float fract(float v) { return v - std::floor(v); }
 inline float smooth(float e0, float e1, float x) {
   const float t = clampf((x - e0) / std::max(1e-6f, e1 - e0), 0.0f, 1.0f);

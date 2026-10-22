@@ -40,14 +40,10 @@ uint64_t Editor::lightmap_hash_of(const GameObject &g, const Mesh &m) { return l
 /* What the baked lighting depends on: the contributing objects (shape, place, material colours),
  * the Baked and Mixed lights, the world and the lighting settings. Different from the bake's = out of date. */
 uint64_t Editor::lightmap_scene_key() {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
+  uint64_t h = kFnvBasisLegacy;  // (saved with every bake: a new value would mark them all out of date)
+  auto mix = [&](uint64_t v) { h = hash_mix(h, v); };
   auto mixf = [&](const float *p, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-      uint32_t b;
-      std::memcpy(&b, p + i, 4);
-      mix(b);
-    }
+    for (size_t i = 0; i < n; i++) h = mix_float(h, p[i]);
   };
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
@@ -496,12 +492,12 @@ void Editor::update_probes_live() {
       probes_ = ProbeVolumeData{};
       return;
     }
-    uint64_t key = 1469598103934665603ull;
+    uint64_t key = kFnvBasis;
     const float f[8] = {vol.min.x, vol.min.y, vol.min.z, vol.max.x, vol.max.y, vol.max.z, ls.probe_min_spacing, ls.probe_max_spacing};
     for (float v : f) {
       uint32_t b;
       std::memcpy(&b, &v, 4);
-      key = (key ^ b) * 1099511628211ull;
+      key = (key ^ b) * kFnvPrime;
     }
     if (key != probe_layout_key_) {
       std::vector<AABB> boxes;
@@ -515,15 +511,15 @@ void Editor::update_probes_live() {
     }
   }
   if (probes_.empty()) return;
-  uint64_t key = 1469598103934665603ull;
-  for (const VoxelGIState &st : vgi_) key = (key ^ (st.grid.key + st.assembled * 31 + st.rsm_key * 131)) * 1099511628211ull;
+  uint64_t key = kFnvBasis;
+  for (const VoxelGIState &st : vgi_) key = (key ^ (st.grid.key + st.assembled * 31 + st.rsm_key * 131)) * kFnvPrime;
   key ^= (hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) ^ env_key_ * 31) * 1031;  // (a Sky follows the sun)
   const float gp[7] = {ls.gi_radius, ls.gi_intensity, (float)ls.gi_rays, (float)ls.gi_resolution, (float)ls.gi_bounce, (float)ls.gi_sky_occlusion,
                        (float)ls.gi_device};
   for (float v : gp) {
     uint32_t b;
     std::memcpy(&b, &v, 4);
-    key = (key ^ b) * 1099511628211ull;
+    key = (key ^ b) * kFnvPrime;
   }
   if (key != probe_live_key_) {
     probe_live_key_ = key;
@@ -591,12 +587,12 @@ void Editor::update_realtime_lightmaps() {
   const uint64_t env_hash = hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }) ^ env_key_ * 31;  // (a Sky follows the sun)
   for (VoxelGIState &st : vgi_) {
     if (!st.grid.valid() || st.rtlm.layout_key == 0) continue;
-    uint64_t key = (st.grid.key + st.assembled * 31 + st.rsm_key * 131) * 1099511628211ull ^ env_hash * 1031 ^ (uint64_t)ls.gi_device << 60;  // (a new device gathers again)
+    uint64_t key = (st.grid.key + st.assembled * 31 + st.rsm_key * 131) * kFnvPrime ^ env_hash * 1031 ^ (uint64_t)ls.gi_device << 60;  // (a new device gathers again)
     const float gp[6] = {ls.gi_radius, ls.gi_intensity, (float)ls.gi_rays, (float)ls.gi_resolution, (float)ls.gi_bounce, (float)ls.gi_sky_occlusion};
     for (float v : gp) {
       uint32_t b;
       std::memcpy(&b, &v, 4);
-      key = (key ^ b) * 1099511628211ull;
+      key = (key ^ b) * kFnvPrime;
     }
     VoxelGiGpu *gpu = st.rtlm.pass_done && key == st.rtlm.gather_key ? nullptr : gi_gpu(st);
     std::string gerr;
@@ -650,11 +646,8 @@ void Editor::lighting_update() {
 /* What frozen Realtime GI depends on: every drawn object's place and shape, the lights, the world and the
  * GI settings. */
 uint64_t Editor::frozen_lighting_key() {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     const auto *mr = g.get<MeshRenderer>();

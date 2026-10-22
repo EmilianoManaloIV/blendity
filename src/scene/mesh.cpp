@@ -288,8 +288,8 @@ uint64_t Mesh::Uid::next() noexcept {
 
 /* This mesh's shape now (its id, version and deform version mixed): what both its render caches share. */
 static uint64_t shape_key(uint64_t uid, uint64_t version, uint64_t deform) {
-  uint64_t k = 1469598103934665603ull;
-  for (uint64_t v : {uid, version, deform}) k = (k ^ v) * 1099511628211ull, k ^= k >> 31;
+  uint64_t k = kFnvBasis;
+  for (uint64_t v : {uid, version, deform}) k = (k ^ v) * kFnvPrime, k ^= k >> 31;
   return k ? k : 1;
 }
 
@@ -1000,8 +1000,8 @@ void Mesh::render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnorm
       std::memcpy(b + 1, &k.nx, 4); std::memcpy(b + 2, &k.ny, 4); std::memcpy(b + 3, &k.nz, 4);
       std::memcpy(b + 4, &k.u, 4); std::memcpy(b + 5, &k.w, 4);
       b[0] = k.v;
-      uint64_t h = 1469598103934665603ull;
-      for (uint32_t x : b) { h ^= x; h *= 1099511628211ull; }
+      uint64_t h = kFnvBasis;
+      for (uint32_t x : b) { h ^= x; h *= kFnvPrime; }
       return (size_t)h;
     }
   };

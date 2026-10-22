@@ -29,15 +29,15 @@ void MeshRenderer::set_shape_weight(const std::string &name, float w) {
 
 uint64_t shape_key_hash(const Mesh &m, const MeshRenderer *mr) {
   if (!mr || m.shape_keys.empty()) return 0;
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   bool any = false;
   for (const ShapeKey &k : m.shape_keys) {
     const float w = mr->shape_weight(k.name);
     if (w == 0.0f || k.delta.size() != m.positions.size()) continue;
     uint32_t bits;
     std::memcpy(&bits, &w, 4);
-    for (char c : k.name) h = (h ^ (uint8_t)c) * 1099511628211ull;
-    h = (h ^ bits) * 1099511628211ull;
+    for (char c : k.name) h = (h ^ (uint8_t)c) * kFnvPrime;
+    h = (h ^ bits) * kFnvPrime;
     any = true;
   }
   return any ? h : 0;

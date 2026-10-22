@@ -298,10 +298,8 @@ std::vector<uint32_t> compile_kernel(bool ray_query, std::string *error) {
   std::string src;
   for (const char *part : kernel_source_parts) src += part;
   /* The key covers the source, the variant and the compiler options. */
-  uint64_t key = 1469598103934665603ull;
-  auto mix = [&](const char *p, size_t n) {
-    for (size_t i = 0; i < n; i++) key = (key ^ (uint8_t)p[i]) * 1099511628211ull;
-  };
+  uint64_t key = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { key = fnv1a(p, n, key); };
   const char *opts = ray_query ? "v1 vk1.2 spv1.4 size ray_query" : "v1 vk1.2 spv1.4 size";
   mix(src.data(), src.size());
   mix(opts, std::strlen(opts));
@@ -921,11 +919,7 @@ class VulkanRenderer final : public Renderer {
 
   /* The file is the driver's data, then its length, an FNV-1a hash and a tag: a torn or truncated file (the
    * driver must get exactly what it gave) is ignored. True with the trailer removed. */
-  static uint64_t fnv64(const char *p, size_t n) {
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)p[i]) * 1099511628211ull;
-    return h;
-  }
+  static uint64_t fnv64(const char *p, size_t n) { return fnv1a(p, n); }
   static bool strip_pipeline_trailer(std::string &blob) {
     if (blob.size() < 16) return false;
     const size_t body = blob.size() - 16;
@@ -1044,11 +1038,10 @@ namespace {
 std::vector<uint32_t> compile_glsl(const std::string &src, shaderc_shader_kind kind, std::string *error) {
   static std::mutex &m = *new std::mutex;
   static std::map<uint64_t, std::vector<uint32_t>> &mem = *new std::map<uint64_t, std::vector<uint32_t>>;
-  uint64_t key = 1469598103934665603ull;
-  for (char c : src) key = (key ^ (uint8_t)c) * 1099511628211ull;
+  uint64_t key = fnv1a(src.data(), src.size());
   const char *opts = "compute v1 vk1.2 spv1.4 performance";
-  for (const char *p = opts; *p; p++) key = (key ^ (uint8_t)*p) * 1099511628211ull;
-  if (kind != shaderc_compute_shader) key = (key ^ (uint64_t)(kind + 1)) * 1099511628211ull;  // (the compute key as before)
+  key = fnv1a_str(opts, key);
+  if (kind != shaderc_compute_shader) key = (key ^ (uint64_t)(kind + 1)) * kFnvPrime;  // (the compute key as before)
   std::lock_guard<std::mutex> lock(m);
   std::vector<uint32_t> &out = mem[key];
   if (!out.empty()) return out;

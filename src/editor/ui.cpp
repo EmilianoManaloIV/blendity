@@ -128,14 +128,12 @@ void Context::end_frame() {
 }
 
 Id Context::id(const char *label) const {
-  uint64_t h = id_stack_.empty() ? 1469598103934665603ull : id_stack_.back();
-  for (const char *p = label; *p; p++) { h ^= (uint8_t)*p; h *= 1099511628211ull; }
+  const uint64_t h = fnv1a_str(label, id_stack_.empty() ? kFnvBasis : id_stack_.back());
   return h ? h : 1;
 }
 
 Id Context::id(uint64_t n) const {
-  uint64_t h = id_stack_.empty() ? 1469598103934665603ull : id_stack_.back();
-  for (int i = 0; i < 8; i++) { h ^= (n >> (i * 8)) & 255; h *= 1099511628211ull; }
+  const uint64_t h = fnv1a(&n, 8, id_stack_.empty() ? kFnvBasis : id_stack_.back());
   return h ? h : 1;
 }
 

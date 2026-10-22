@@ -294,10 +294,8 @@ std::vector<Vec3> com_trajectory(Scene &scene, GameObject &anim_root, const Anim
 }
 
 uint64_t body_key(const Scene &scene, const GameObject &armature) {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   /* The bones: each one's rest and length, whether it deforms, and where the armature stands. */
   std::vector<ArmatureBone> bones;
   armature_bones(armature, bones);

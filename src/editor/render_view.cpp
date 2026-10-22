@@ -178,10 +178,8 @@ void Editor::update_environment() {
       if (l->enabled && l->type == 0 && g.active_in_hierarchy()) sun = -normalize(g.world_rotation().rotate({0, 0, 1}));
   });
   /* Cache key: everything the baked environment depends on. */
-  uint64_t key = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) { key ^= ((const uint8_t *)p)[i]; key *= 1099511628211ull; }
-  };
+  uint64_t key = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { key = fnv1a(p, n, key); };
   mix(&es.mode, 4);
   mix(&es.turbidity, 4);
   mix(&es.ground_albedo, 4);
@@ -217,16 +215,8 @@ void Editor::update_environment() {
  * everything that can change on its own (the evaluated-mesh keys with their modifiers, the light, the
  * probe volume) is hashed every time. `memo` false hashes everything from scratch (the tests compare). */
 uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {  // 8 bytes a step: it runs for every view, every frame
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };  // 8 bytes a step: it runs for every view, every frame
   /* One pass over the components: a virtual call each instead of a dynamic_cast per type. */
   MeshRenderer *mr = nullptr;
   Light *l = nullptr;
@@ -252,14 +242,14 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
             (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
             (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41;
     if (mr->enabled) {
-      materials_key = 1469598103934665603ull;
+      materials_key = kFnvBasis;
       for (auto &mp : mr->materials) {  // a material's version is an input of every object using it
-        materials_key = (materials_key ^ (uint64_t)(uintptr_t)mp.get()) * 1099511628211ull;
-        materials_key = (materials_key ^ (mp ? mp->version : 0)) * 1099511628211ull;
+        materials_key = (materials_key ^ (uint64_t)(uintptr_t)mp.get()) * kFnvPrime;
+        materials_key = (materials_key ^ (mp ? mp->version : 0)) * kFnvPrime;
         if (mp && mp->axis_mode != 0)  // an axis material's parts as resolved (what is rendered; ADR 0018, one level)
           for (const MaterialPtr &part : mp->textures().axis) {
-            materials_key = (materials_key ^ (uint64_t)(uintptr_t)part.get()) * 1099511628211ull;
-            materials_key = (materials_key ^ (part ? part->version : 0)) * 1099511628211ull;
+            materials_key = (materials_key ^ (uint64_t)(uintptr_t)part.get()) * kFnvPrime;
+            materials_key = (materials_key ^ (part ? part->version : 0)) * kFnvPrime;
           }
       }
     }
@@ -317,16 +307,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
 uint64_t Editor::scene_render_hash(bool memo) {
   ProfileScope prof{prof_.ms_hash, {}};
   prof_.scene_hashes++;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     const uint64_t oh = object_render_hash(g, memo);
@@ -387,19 +369,11 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   std::vector<const DrawItem *> caster_ptrs;  // copied into `casters` only when the map is rendered
   std::vector<uint64_t> caster_keys, motion_keys;
   AABB bounds;
-  auto mixer = [](uint64_t &key, const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      key = (key ^ v) * 1099511628211ull;
-      key ^= key >> 29;
-    }
-  };
+  auto mixer = [](uint64_t &key, const void *p, size_t n) { key = mix_bytes(key, p, n); };
   /* What the map depends on: each caster's triangles (the render mesh's serial: a new one whenever it is rebuilt),
    * placement and materials' surface type and Cast Shadows (see-through surfaces cast none; a colour doesn't matter),
    * the light's direction and the resolution. */
-  uint64_t key = 1469598103934665603ull;
+  uint64_t key = kFnvBasis;
   bool cacheable = true;
   for (const DrawItem &it : items) {
     bool casts = false;
@@ -411,7 +385,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     caster_ptrs.push_back(&it);
     bounds.add(it.mesh->bounds.transformed(it.model));
     if (it.mesh->serial == 0) cacheable = false;
-    uint64_t ck = 1469598103934665603ull ^ it.id;
+    uint64_t ck = kFnvBasis ^ it.id;
     mixer(ck, it.model.m, sizeof(float) * 16);
     motion_keys.push_back(ck);  // what makes it "moving": its placement
     /* Its shape (task 0088): the Scene view's flat Edit Mode cache and the Game view's smooth one share it, so the two
@@ -490,7 +464,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   std::vector<DrawItem> casters;
   if (cacheable && n_moving > 0 && n_moving < caster_ptrs.size()) {
     /* The still casters' layer (drawn again only when they or the frame change), then the moving ones over it. */
-    uint64_t skey = 1469598103934665603ull;
+    uint64_t skey = kFnvBasis;
     mixer(skey, &dir, sizeof(Vec3));
     mixer(skey, &res, sizeof(int));
     mixer(skey, &frame, sizeof(AABB));
@@ -654,11 +628,11 @@ static std::vector<uint32_t> over_black(const std::vector<uint32_t> &px) {
 const FilterStack &Editor::camera_filters(const GameObject *owner) {
   static const FilterStack none;
   if (!owner) return none;
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   for (const auto &c : owner->components)
     if (c->render_role() == Component::RenderRole::CameraFilter) {
       const uint64_t fh = hash_component(*c) ^ (uint64_t)c->enabled;
-      h = (h ^ fh) * 1099511628211ull;
+      h = (h ^ fh) * kFnvPrime;
     }
   FilterCacheEntry &e = filter_cache_[owner->id];  // (trimmed between frames, never here: callers hold references)
   if (!e.valid || e.hash != h) {
@@ -901,10 +875,8 @@ static void retro_for_trace(const FilterStack &fs, const Mat4 &v, const Mat4 &p,
       for (int k = 0; k < 6; k++) outside = outside || out[k] == 8;
       if (outside) continue;
     }
-    uint64_t key = 1469598103934665603ull;
-    auto mix = [&](const void *d, size_t n) {
-      for (size_t i = 0; i < n; i++) key = (key ^ ((const uint8_t *)d)[i]) * 1099511628211ull;
-    };
+    uint64_t key = kFnvBasis;
+    auto mix = [&](const void *d, size_t n) { key = fnv1a(d, n, key); };
     const void *src = it.mesh;
     mix(&src, sizeof(src));
     mix(&it.mesh->serial, sizeof(it.mesh->serial));
@@ -1426,7 +1398,7 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam, uint64
     for (float f : w.m) {
       uint32_t b;
       std::memcpy(&b, &f, 4);
-      h = (h ^ b) * 1099511628211ull;
+      h = (h ^ b) * kFnvPrime;
     }
   }
   h ^= hash_reflect([this](Reflector &r) { scene_->render.reflect_raster(r); }) * 31;  // the path tracer's settings don't redraw a view
@@ -1445,15 +1417,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
   vgi_updates_++;
   vgi_last_ = game ? 1 : 0;
   VoxelGIState &vgi = vgi_[vgi_last_];
-  auto mix = [](uint64_t &h, const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  auto mix = [](uint64_t &h, const void *p, size_t n) { h = mix_bytes(h, p, n); };
   /* Occluders: what casts a shadow (as the shadow map's casters), but not see-through surfaces. */
   std::vector<const DrawItem *> occ;
   AABB bounds;
@@ -1517,7 +1481,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
     }
   const int rsm_res = std::max(32, std::min(tier_rsm_cap_ > 0 && !final_render_ ? tier_rsm_cap_ : 2048, ls.gi_rsm_resolution));
   if (ls.gi_bounce && sun) {
-    uint64_t key = 1469598103934665603ull;
+    uint64_t key = kFnvBasis;
     for (const DrawItem *it : occ) {
       mix(key, &it->mesh->serial, 8);
       mix(key, it->model.m, sizeof(it->model.m));
@@ -1568,7 +1532,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
    * resolution changes (unwrapped UVs are kept per object); update_realtime_lightmaps() fills them. */
   const float rres = finite_bits(ls.realtime_resolution) ? std::max(0.0f, std::min(100.0f, ls.realtime_resolution)) : 2.0f;
   if (rres > 0.0f) {
-    uint64_t lkey = 1469598103934665603ull;
+    uint64_t lkey = kFnvBasis;
     mix(lkey, &rres, sizeof(float));
     mix(lkey, &scene_ident_, 8);  // another scene's objects can share ids
     for (const DrawItem &it : items) {
@@ -1618,7 +1582,7 @@ void Editor::note_render_cache_mismatch() { g_cache_mismatches++; }
 uint64_t Editor::frame_scene_hash(uint64_t *scene_hash) {
   uint64_t h = scene_render_hash();
   if (scene_hash) *scene_hash = h;
-  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull, h ^= h >> 29; };
+  auto mix = [&](uint64_t v) { h = hash_mix(h, v); };
   mix(hash_reflect([this](Reflector &r) { scene_->render.reflect_raster(r); }));  // (not the path tracer's settings)
   mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
   mix(hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }));  // baked and realtime GI settings
@@ -1630,15 +1594,7 @@ uint64_t Editor::frame_scene_hash(uint64_t *scene_hash) {
 uint64_t Editor::scene_view_key(const Recti &view) {
   uint64_t scene_hash = 0;
   uint64_t h = frame_scene_hash(&scene_hash);
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const float aspect = view.w / (float)std::max(1, view.h);
   const Mat4 v = cam_.view(), p = cam_.proj(aspect);
   mix(&view, sizeof(view));

@@ -318,8 +318,8 @@ void apply_set(const Set &s, Material &m, ImportResult &r, std::vector<std::stri
 
 /* ~/.blendity/cache/import/<model>-<hash of its full path>: two models called scene.gltf never share one. */
 std::string import_cache_dir(const ImportResult &r) {
-  uint64_t h = 1469598103934665603ull;
-  for (char c : lower(fs::normalize(r.source))) h = (h ^ (uint8_t)c) * 1099511628211ull;
+  const std::string path = lower(fs::normalize(r.source));
+  const uint64_t h = fnv1a(path.data(), path.size());
   return fs::join(fs::join(fs::join(fs::home_dir(), ".blendity"), fs::join("cache", "import")), strprintf("%s-%08x", fs::stem(r.source).c_str(), (unsigned)(h ^ h >> 32)));
 }
 

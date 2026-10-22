@@ -4,6 +4,8 @@
 //  ch. 7 "Resources and the File System", ch. 10.1 "Logging and Tracing".)
 #pragma once
 
+#include "hash.h"
+
 #include <chrono>
 #include <cstdint>
 #include <cstdio>

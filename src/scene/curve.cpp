@@ -171,16 +171,8 @@ void CurvePath::at(float s, Vec3 &p, Vec3 &t, Vec3 &n, float &r) const {
 }
 
 uint64_t Curve::content_key() const {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {  // 8 bytes a step
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };  // 8 bytes a step
   const int head[3] = {type, closed ? 1 : 0, resolution};
   mix(head, sizeof(head));
   const uint64_t n = points.size();
@@ -217,10 +209,8 @@ static uint64_t curve_dependency(const Component &c, const std::string &name, bo
   const Curve *cv = nullptr;
   const GameObject *t = curve_target(c, name, &cv);
   if (!t) return 0;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   const Mat4 rel = c.owner->world_matrix().inverse() * t->world_matrix();
   if (length_only) {
     float g[9];

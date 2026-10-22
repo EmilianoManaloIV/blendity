@@ -273,9 +273,8 @@ size_t retarget_sequence_clips(const std::string &from_in, const std::string &to
 /* FNV-1a over the path, a separator, the property and the axis (a 64-bit clash between two numbers of one character is
  * not a worry). */
 uint64_t anim_value_key(const std::string &path, const std::string &property, int axis) {
-  uint64_t h = 14695981039346656037ull;
-  auto mix = [&](unsigned char c) { h = (h ^ c) * 1099511628211ull; };
-  for (char c : path) mix((unsigned char)c);
+  uint64_t h = fnv1a(path.data(), path.size());
+  auto mix = [&](unsigned char c) { h = (h ^ c) * kFnvPrime; };
   mix(0x1f);
   for (char c : property) mix((unsigned char)c);
   mix(0x1f);
@@ -320,14 +319,6 @@ const float *AnimValues::get(const std::string &path, const std::string &propert
 float blend_anim_value(const std::string &property, float a, float b, float t) {
   if (property == "Rotation") b = a + (b - a - 360.0f * std::round((b - a) / 360.0f));  // (the shorter way round)
   return a + (b - a) * t;
-}
-
-void sample_clip_values(const AnimationClip &clip, float frame, AnimValues &out) {
-  for (const AnimTrack &t : clip.tracks) {
-    if (t.keys.empty()) continue;
-    const float v = t.sample(frame);
-    if (std::isfinite(v)) out.set(t, v);
-  }
 }
 
 namespace {

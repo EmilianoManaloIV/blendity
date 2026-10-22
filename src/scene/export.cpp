@@ -299,10 +299,7 @@ struct SplitKey {
 };
 struct SplitKeyHash {
   size_t operator()(const SplitKey &k) const {
-    uint64_t h = 1469598103934665603ull;
-    const unsigned char *b = reinterpret_cast<const unsigned char *>(&k);
-    for (size_t i = 0; i < sizeof(SplitKey); i++) h = (h ^ b[i]) * 1099511628211ull;
-    return (size_t)h;
+    return (size_t)fnv1a(&k, sizeof(SplitKey));
   }
 };
 

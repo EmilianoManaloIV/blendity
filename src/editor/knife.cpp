@@ -201,13 +201,7 @@ bool Editor::knife_update(const Recti &view) {
 void Editor::knife_draw(const Recti &view) {
   if (!knife_.active) return;
   auto &u = ui_;
-  auto to_screen = [&](Vec3 p, Vec2 &s) {
-    float z;
-    if (!scene_r3d_.project(p, s, z)) return false;
-    s.x += view.x;
-    s.y += view.y;
-    return true;
-  };
+  auto to_screen = [&](Vec3 p, Vec2 &s) { return project_to_view(view, p, s); };
   u.canvas.push_clip(view);
   const KnifePoint hit = scene_hovered_ ? knife_hit(view, u.in.mx, u.in.my) : KnifePoint{};
   Vec2 s0, s1;

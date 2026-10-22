@@ -20,7 +20,8 @@ src/
 └── app/        main()
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
-tests/          blendity_tests   - unit checks (5,710 on Windows with Blender's libraries)
+tests/          blendity_tests   - unit checks, one file a subsystem (test_<group>.cpp, test_common.h; --group runs one)
+tools/          the coverage map, clean.bat, the PTX compiler, the inbetweening model's training (tools/README.md)
 ```
 
 ## System overview
@@ -30,7 +31,7 @@ library built from `src/`: `Blendity` (the editor), `blendity_tests` and `blendi
 
 | Layer | Owns | Depends on |
 |---|---|---|
-| `core` | math (Unity's left-handed, Y-up conventions), logging, filesystem, jobs (TBB or own pool), CPU features | - |
+| `core` | math (Unity's left-handed, Y-up conventions), hashes (`hash.h`: FNV-1a and the per-frame mixer), logging, filesystem, jobs (TBB or own pool), CPU features | - |
 | `platform` | one window, input events, clipboard, file dialogs (Win32 / X11 / Cocoa) | core |
 | `image` | codecs, mipmapped textures | core |
 | `scene` | `Mesh` (Blender's corner-based layout) and `meshops` operators, UVs, materials, modifiers, `GameObject` / components, scene and model IO | core, image |
@@ -147,7 +148,7 @@ The baseline target is plain x86-64 (Linux builds with Blender's libraries use S
 | `scene/scene_io.cpp` | Text scene format (tolerant of unknown fields), OBJ with axis conversion | `blenloader/intern/writefile.cc`, `io/wavefront_obj` | YAML scenes, model importer |
 | `editor/ui.*` | Immediate-mode widgets, popups, menus, tooltips | `editors/interface` | IMGUI (`EditorGUILayout`) |
 | `editor/editor.cpp` dock tree | Tabs, split/merge areas, layout presets | `editors/screen` (areas, workspaces) | Docking, Layouts |
-| `editor/scene_view.cpp` | Navigation, gizmos, picking, Edit Mode | `editors/space_view3d/view3d_navigate_*.cc`, `view3d_select.cc`, `editors/transform`, `editors/gizmo_library` | Scene view, handles |
+| `editor/scene_view.cpp` (+ `scene_pick.cpp`, `scene_overlays.cpp`; the console in `editor_commands.cpp`) | Navigation, gizmos, picking, Edit Mode | `editors/space_view3d/view3d_navigate_*.cc`, `view3d_select.cc`, `editors/transform`, `editors/gizmo_library` | Scene view, handles |
 | `draw_hierarchy` | Tree, reparent by drag, rename, search | `editors/space_outliner` | Hierarchy |
 | `draw_inspector` | Component editing | `editors/space_buttons` | Inspector |
 | `draw_project` | Assets folder browser | `editors/space_file` | Project |

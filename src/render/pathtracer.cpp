@@ -2212,9 +2212,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
 void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids) {
   const size_t n = (size_t)std::max(0, w_) * std::max(0, h_);
   /* The key: this build, the camera and the size. */
-  uint64_t key = 1469598103934665603ull ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
-  const uint8_t *b = reinterpret_cast<const uint8_t *>(inv_vp_.m);
-  for (size_t i = 0; i < sizeof(inv_vp_.m); i++) key = (key ^ b[i]) * 1099511628211ull;
+  uint64_t key = kFnvBasis ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
+  key = fnv1a(inv_vp_.m, sizeof(inv_vp_.m), key);
   if (key != centre_key_ || centre_dist_.size() != n) {
     centre_dist_.assign(n, 1e6f);
     centre_ids_.assign(n, 0u);

@@ -20,16 +20,8 @@ namespace bl {
 /* --------------------------------------------------------------- hashing */
 
 uint64_t lightmap_mesh_hash(const Mesh &m) {
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i += 8) {
-      uint64_t v = 0;
-      std::memcpy(&v, b + i, std::min<size_t>(8, n - i));
-      h = (h ^ v) * 1099511628211ull;
-      h ^= h >> 29;
-    }
-  };
+  uint64_t h = kFnvBasisLegacy;  // (part of the key saved with a bake)
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   mix(m.positions.data(), m.positions.size() * sizeof(Vec3));
   mix(m.corner_verts.data(), m.corner_verts.size() * sizeof(uint32_t));
   mix(m.face_offsets.data(), m.face_offsets.size() * sizeof(uint32_t));
@@ -46,12 +38,7 @@ uint64_t lightmap_mesh_hash(const Mesh &m) {
 
 uint64_t lightmap_placed_hash(uint64_t mesh_hash, const Mat4 &model) {
   uint64_t h = mesh_hash * 0x9E3779B97F4A7C15ull + 0x632BE59BD9B4E019ull;
-  for (float f : model.m) {
-    uint32_t b;
-    std::memcpy(&b, &f, 4);
-    h = (h ^ b) * 1099511628211ull;
-    h ^= h >> 29;
-  }
+  for (float f : model.m) h = mix_float(h, f);
   return h ? h : 1;
 }
 
@@ -84,14 +71,6 @@ inline float rnd01(uint32_t &s) {
   s ^= s >> 17;
   s ^= s << 5;
   return (s >> 8) * (1.0f / 16777216.0f);
-}
-inline uint32_t hash32(uint32_t x) {
-  x ^= x >> 16;
-  x *= 0x7feb352du;
-  x ^= x >> 15;
-  x *= 0x846ca68bu;
-  x ^= x >> 16;
-  return x ? x : 1u;
 }
 inline void basis(Vec3 n, Vec3 &t, Vec3 &b) {
   t = std::fabs(n.x) > 0.9f ? normalize(cross(n, Vec3(0, 1, 0))) : normalize(cross(n, Vec3(1, 0, 0)));

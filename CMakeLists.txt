@@ -221,7 +221,8 @@ endif()
 add_executable(blendity_stress stress/stress_main.cpp)
 target_link_libraries(blendity_stress PRIVATE blendity_engine)
 
-add_executable(blendity_tests tests/test_main.cpp)
+file(GLOB BLENDITY_TEST_SOURCES CONFIGURE_DEPENDS tests/*.cpp)
+add_executable(blendity_tests ${BLENDITY_TEST_SOURCES})
 target_link_libraries(blendity_tests PRIVATE blendity_engine)
 
 enable_testing()

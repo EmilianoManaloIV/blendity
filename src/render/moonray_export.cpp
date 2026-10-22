@@ -120,8 +120,7 @@ std::string image_map(const TextureRef &t, const Material &m, bool normal, Vec3 
   const std::string source_key = file + (data ? "|data" : "|colour");
   std::string &tex_file = tx.files[source_key];
   if (tex_file.empty()) {
-    uint64_t hsh = 1469598103934665603ull;  // (FNV-1a)
-    for (char ch : source_key) hsh = (hsh ^ (unsigned char)ch) * 1099511628211ull;
+    const uint64_t hsh = fnv1a(source_key.data(), source_key.size());
     tex_file = fs::join(tx.dir, strprintf("tex-%016llx.exr", (unsigned long long)hsh));
     rep.texture_jobs.push_back({file, tex_file, data});
   }

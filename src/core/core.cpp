@@ -269,6 +269,19 @@ std::string normalize(const std::string &path) {
   return ec ? path : S(p);
 }
 
+/* Tests: BLENDITY_TRASH names a scratch folder that stands in for the user's Trash (`used` says it did). */
+static bool move_to_test_trash(const std::string &path, std::string *error, bool &used) {
+  const char *dir = std::getenv("BLENDITY_TRASH");
+  used = dir && *dir;
+  if (!used) return false;
+  make_dirs(dir);
+  std::string target = join(dir, filename(normalize(path)));
+  for (int i = 2; exists(target); i++) target = join(dir, strprintf("%s.%d", filename(normalize(path)).c_str(), i));
+  if (move(path, target)) return true;
+  if (error) *error = "could not move it to BLENDITY_TRASH";
+  return false;
+}
+
 #ifdef _WIN32
 static std::wstring widen(const std::string &s) {
   int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -293,16 +306,8 @@ bool move_to_trash(const std::string &path, std::string *error) {
     if (error) *error = "not found";
     return false;
   }
-  if (const char *dir = std::getenv("BLENDITY_TRASH")) {  // tests: a scratch folder instead of the user's Trash
-    if (*dir) {
-      make_dirs(dir);
-      std::string target = join(dir, filename(normalize(path)));
-      for (int i = 2; exists(target); i++) target = join(dir, strprintf("%s.%d", filename(normalize(path)).c_str(), i));
-      if (move(path, target)) return true;
-      if (error) *error = "could not move it to BLENDITY_TRASH";
-      return false;
-    }
-  }
+  bool used;
+  if (const bool ok = move_to_test_trash(path, error, used); used) return ok;
   /* SHFileOperation with FOF_ALLOWUNDO: the Recycle Bin (double-NUL-terminated path). */
   std::wstring w = widen(normalize(path));
   for (auto &c : w)
@@ -353,16 +358,8 @@ bool move_to_trash(const std::string &path, std::string *error) {
     if (error) *error = "not found";
     return false;
   }
-  if (const char *dir = std::getenv("BLENDITY_TRASH")) {  // tests: a scratch folder instead of the user's Trash
-    if (*dir) {
-      make_dirs(dir);
-      std::string target = join(dir, filename(normalize(path)));
-      for (int i = 2; exists(target); i++) target = join(dir, strprintf("%s.%d", filename(normalize(path)).c_str(), i));
-      if (move(path, target)) return true;
-      if (error) *error = "could not move it to BLENDITY_TRASH";
-      return false;
-    }
-  }
+  bool used;
+  if (const bool ok = move_to_test_trash(path, error, used); used) return ok;
 #  ifdef __APPLE__
   const std::string files = join(home_dir(), ".Trash"), info;
 #  else

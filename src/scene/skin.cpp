@@ -155,10 +155,8 @@ static const GameObject *armature_target(const SkinModifier &s) {
 uint64_t SkinModifier::modifier_dependency_hash() const {
   const GameObject *root = armature_target(*this);
   if (!root) return 0;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   const Armature &a = *root->get<Armature>();
   const int head[2] = {a.deform, a.rest_position ? 1 : 0};
   mix(head, sizeof(head));

@@ -1564,12 +1564,12 @@ void NormalTransferModifier::modify(Mesh &m) const {
 uint64_t NormalTransferModifier::modifier_dependency_hash() const {
   const GameObject *t = proxy_target(*this, object);
   if (!t || !owner) return 0;
-  uint64_t h = t->evaluated_mesh()->version * 1099511628211ull;
+  uint64_t h = t->evaluated_mesh()->version * kFnvPrime;
   const Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
   for (int i = 0; i < 16; i++) {
     uint32_t b;
     std::memcpy(&b, &rel.m[i], 4);
-    h = (h ^ b) * 1099511628211ull;
+    h = (h ^ b) * kFnvPrime;
   }
   return h;
 }
@@ -1746,10 +1746,8 @@ uint64_t BooleanModifier::modifier_dependency_hash() const {
   const Mesh *tm = nullptr;
   const GameObject *t = boolean_target(*this, &tm);
   if (!t) return 0;
-  uint64_t h = 1469598103934665603ull;
-  auto mix = [&](const void *p, size_t n) {
-    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull;
-  };
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   /* Relative placement + the cutter's mesh: moving either object re-cuts. */
   Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
   mix(rel.m, sizeof(rel.m));
@@ -1876,12 +1874,12 @@ struct HashReflector : Reflector {
   bool all_fields() const override { return true; }
   bool hashing() const override { return true; }
   bool serializing() const override { return true; }
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasisLegacy;
   /* A byte at a time, and it stays that way: the lights' and the world's hashes are part of
    * lightmap_scene_key, saved with every bake (a new formula would mark them all out of date). */
   void mix(const void *p, size_t n) {
     auto *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= kFnvPrime; }
   }
   void field(const char *, float &v, float, float, float) override { mix(&v, 4); }
   void field(const char *, int &v, int, int) override { mix(&v, 4); }
@@ -2041,8 +2039,8 @@ uint64_t GameObject::evaluated_key(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return 0;
-  uint64_t key = 1469598103934665603ull;
-  auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  uint64_t key = kFnvBasis;
+  auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
   mix((uint64_t)kind);
@@ -2060,9 +2058,9 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
     out[0] = out[1] = out[2] = 0;
     return;
   }
-  auto mix = [](uint64_t &key, uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  auto mix = [](uint64_t &key, uint64_t v) { key = (key ^ v) * kFnvPrime; };
   for (int kind = 0; kind < 3; kind++) {  // the same prefix as evaluated_key(kind)
-    out[kind] = 1469598103934665603ull;
+    out[kind] = kFnvBasis;
     mix(out[kind], (uint64_t)(uintptr_t)mf->mesh.get());
     mix(out[kind], mf->mesh->version);
     mix(out[kind], (uint64_t)kind);
@@ -2131,9 +2129,9 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 2));
   auto *mf = mesh_filter();
   if (!mf || !mf->mesh) return nullptr;
-  uint64_t key = 1469598103934665603ull;
+  uint64_t key = kFnvBasis;
   bool any = false;
-  auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
+  auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
   mix(mf->mesh->version);
   /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
@@ -2162,7 +2160,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   }
   /* The weights are part of the head when a modifier runs before the tail; otherwise the keys are added on the
    * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
-  if (shaped && any_head) head_key = (head_key ^ shape_hash) * 1099511628211ull;
+  if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime;
   if (shaped) mix(shape_hash);
   if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
   if (!any && !shaped) return mf->mesh.get();

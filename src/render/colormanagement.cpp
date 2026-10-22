@@ -138,7 +138,6 @@ const ViewLut *lut(int view) {
 }  // namespace
 
 bool available() { return state().ok; }
-std::string config_path() { return state().path; }
 const std::vector<std::string> &views() { return state().views; }
 
 int view_index(const std::string &name) {

@@ -128,26 +128,7 @@ void Editor::draw_rigging_window(const Recti &r) {
     if (u.hovered(h) && u.in.pressed[0]) open = !open;
     return open;
   };
-  struct B {
-    std::string label, tip;
-    bool enabled;
-    std::function<void()> fn;
-  };
-  auto grid = [&](const std::vector<B> &bs, int per) {
-    for (size_t i = 0; i < bs.size(); i += (size_t)per) {
-      Recti row = lay.row(u.row_h() + u.px(2));
-      const int bw = (row.w - u.px(4) * (per + 1)) / per;
-      for (size_t k = i; k < std::min(bs.size(), i + (size_t)per); k++) {
-        Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
-        if (!bs[k].enabled) {
-          u.frame(br, u.theme.strip, u.theme.border, u.px(3));
-          u.label(br, bs[k].label, u.theme.text_dim, ui::Align::Center);
-        }
-        else if (u.button(br, bs[k].label)) bs[k].fn();
-        u.tooltip(bs[k].tip);
-      }
-    }
-  };
+  auto grid = [&](const std::vector<GridButton> &bs, int per) { button_grid(lay, bs, per); };
   if (section("Skeleton")) {
     /* (The buttons act on the objects themselves, not by name: two imported characters share bone names.) */
     grid({{"Add Armature", "A root and one bone; a selected mesh is bound to it (Blender: Add > Armature).", true, [this] { create_object("Armature"); }},

@@ -567,8 +567,8 @@ size_t select_coplanar(const Mesh &m, std::vector<uint8_t> &face_sel, float angl
     out[3] = (int64_t)std::max(-9e15, std::min(9e15, dd));
   };
   auto key = [](const int64_t c[4]) {
-    uint64_t h = 1469598103934665603ull;
-    for (int i = 0; i < 4; i++) h = (h ^ (uint64_t)c[i]) * 1099511628211ull;
+    uint64_t h = kFnvBasis;
+    for (int i = 0; i < 4; i++) h = (h ^ (uint64_t)c[i]) * kFnvPrime;
     return h;
   };
   std::unordered_map<uint64_t, std::vector<uint32_t>> grid;

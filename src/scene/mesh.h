@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -582,6 +583,8 @@ bool follow(Mesh &m, size_t face, std::string *error = nullptr);
 /* UModeler's Follow with picked edges: the face swept along `path` (a chain of vertices, any edges
  * of the mesh) where it is, from its end nearest the face (SketchUp's Follow Me). The path is kept. */
 bool follow_path(Mesh &m, size_t face, const std::vector<uint32_t> &path, std::string *error = nullptr);
+/* The vertices of an open chain of wire edges (each vertex's neighbours in `nb`) from `start` to its other end. */
+std::vector<uint32_t> walk_wire_path(const std::unordered_map<uint32_t, std::vector<uint32_t>> &nb, uint32_t start);
 /* Hard-surface tools (mesh_tools5.cpp). */
 size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows);  // quads cut into a grid; returns quads cut
 bool pipe(Mesh &m, const std::vector<uint32_t> &path, float radius, int sides, std::string *error = nullptr);

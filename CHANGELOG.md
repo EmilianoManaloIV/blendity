@@ -2,6 +2,96 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 177): one test per behaviour, timings to stress; the suite in files; dead code out (task 0177, ADR 0056)
+
+**Asked:** "check on unneeded tests and remove them. Compact the code-base as needed" (and chose: one test per
+behaviour, timings to stress).
+
+**Measured first**
+- The suite on a quiet machine: 910 tests, 11,406 checks, 204.6 s of test time; 23 tests over a second took
+  124.1 s of it. The slowest was task 0157's find (the software-BVH kernel on the CPU, 70 s: fixed there); then the
+  240-file MMD fuzz (10.2 s), a 3 s pretend GPU open (6.8 s), every truncation of a probe-volume file (3.8 s), a
+  render-cache script the stress fuzz already runs (3.3 s). The "Materials previews" guess for the 13 s material
+  tests of round 174's run was wrong: alone they take 0.8 s (a build was running beside that suite).
+
+**Changed**
+- **The suite is one file a subsystem** (`tests/test_modeling.cpp`, `test_render.cpp`, `test_lighting.cpp`,
+  `test_gpu.cpp`, `test_assets.cpp`, `test_animation.cpp`, `test_physics.cpp`, `test_editor.cpp`; the harness and the
+  helpers several rounds share in `tests/test_common.h`; `test_main.cpp` runs them): `blendity_tests --group render`
+  runs one, `--list-groups` names them; eight translation units build side by side (a test build: 55 s on 32 threads, was 58).
+- **Trimmed:** the MMD fuzz keeps 24 of its 240 damaged files (the 240 are a stress `codecs` row, the synthetic
+  models in `tests/fixtures/synthetic_mmd.h`); the probe-volume sweep keeps every 8th truncation and 30 of 150
+  corruptions (the whole sweep a stress `probes` row); the GPU-opening pretend delays are 1 s and 0.6 s (were 3 and
+  1.5); the four pacing tests are one.
+- **Removed:** the GPU view spike's two tests (ADR 0036 holds the verdict; stress `gpu_raster` still measures route
+  (B)), the OptiX picture test (stress `gpu_optix`'s row), the 30-action render-cache script (stress `editor_fuzz`
+  runs 6,000 frames in verify mode), and the four `NDEBUG` timing checks (the overlap check's 3x, AutoPhysics' 5 s,
+  Locomotion's 0.2 ms, 100 spring chains' 1 ms), which are stress rows now (`modeling`, `physics`, `animation`),
+  each with its target beside the number.
+- **Added:** `tools/test_coverage_map.py` lists every console command, keymap action and window against the tests
+  that exercise it (259 entries; `--check` fails on an empty one); the 72 it found empty got two tests: every
+  keymap action id through `run_action` (a renamed or dropped id is caught) and the console commands no test drove
+  (`samples`, `world`, `scale`, `threads`, `proportional`, `loopcuts`, `selectall`, `subdivide`, `seam`, `focus`,
+  `export`, `exportoptions`, `screenshot`, `deleteasset`, `alignview`, `droponsurface`, `guidesfromedges`, `raster`,
+  `surfacealign`, the printing ones).
+- **Code:** `core/hash.h` (one FNV-1a, one 8-bytes-a-step mixer, `hash32`) replaces the hash loops written out in
+  33 files - with the mistyped FNV basis corrected, except in the three places a bake saves the key, which keep the
+  old constant on purpose, so every bake stays valid (a test pins the two saved keys); the corrected basis renames
+  the GPU kernel's cache file (one recompile, 19 s), the pipeline cache's trailer (rewritten once), the import
+  cache folders (`~/.blendity/cache/import`, re-made once) and MoonRay's converted texture names (re-converted
+  once); `closest_on_segment` and the 2D segment distance in `core/math.h` (four copies gone);
+  `clampf01` and a second `lerpf` gone; `config_path`, `mirror_markers`, `sample_clip_values` and the GLSL
+  `safe_normalize` deleted (never called); `is_bone` / `bone_children` and `bone_armature` once (`scene.h`); the
+  Jolt layer classes once (`scene/physics_jolt_layers.h`); `move_to_trash`'s test-folder prefix once; undo and
+  redo through one `restore_state`; the button grid of the Rigging and Tools windows once (`button_grid`); the
+  `to_screen` lambdas through `project_to_view`; the closed-loop walk of the mesh tools and Follow's wire-path walk
+  once. `editor.cpp`'s console (the `set` reflector, the command handlers, `run_console_command`) is
+  `editor_commands.cpp`; `scene_view.cpp`'s picking is `scene_pick.cpp` and its overlays and icons
+  `scene_overlays.cpp`. `tools/clean.bat` and `tools/README.md`.
+- Not done, and why: the Vulkan boilerplate `gpu_device.cpp` and `gpu_raster.cpp` share (tasks 0160 / 0161
+  restructure both), the rasterizer's duplicated triangle setup (hot code), the OptiX spike (Stack 5 turns it into
+  the device). The plan's "1,000 lines fewer in src" was an estimate: the duplication scan found nothing over 17
+  lines in two places, and the moves are neutral, so src is 137 lines smaller (the hash loops, the helpers
+  and the dead code), with the tests' files the same size as the one file was.
+
+**Changed after the review**
+- The GPU pipeline-cache test forged its foreign file's trailer with the old basis, so the trailer check refused it
+  before the header check it was testing could (the trailer uses the new hash now); the shared test helpers are
+  `inline` (nine translation units include them: GCC warned on every unused `static` one); the coverage map reads
+  test bodies without their titles and comments, matches a command only as an argument and an action only as a whole
+  id (`manual`, which opens the browser, is listed as not driven by tests); the F12 test waits for the render and
+  checks its picture; the keymap test covers every id, including `file.save`, `mode.edit_toggle`, the three
+  `transform.*` and `lighting.update`, and checks a drawing began after a `draw.*` id (`run_action` says yes to any
+  of them); a test pins the two keys a bake saves (`lightmap_mesh_hash`, `lightmap_placed_hash`) to their values, so
+  a later change to the mixers can't mark every bake out of date, and hash.h's comment says so; `mix` is `hash_mix`
+  (the name meant lerp elsewhere); `walk_wire_path` takes a const map; `bone_armature` is declared once;
+  `button_grid` lives in tools_window.cpp; the empty round-121 group is gone; the stress rows are functions
+  (`mmd_damage_row`, `probe_file_damage_row`, `spring_chain_row`, `autophysics_row`, `locomotion_row`), the Euler
+  residual's unit corrected to body weights; `sequence.cpp`'s FNV loop uses the header; the spring test's 100-chain
+  timing loop went with its check (the row has it); `tools/clean.bat` keeps the training runs unless `--all`; the
+  task doc drops two claims the tree didn't hold (the toolbar button was left as it is; `merge_by_distance_naive`
+  stays in src, it shares `finish_merge`); the CHANGELOG says which caches the corrected basis refreshes once.
+  Noted, not changed: `closest_on_segment` passes a NaN through where two of the old copies clamped it to the far end
+  (their callers guard against non-finite input).
+
+**Checked**
+- The suite: 908 tests, 11,144 checks, 117.4 s of test time (was 204.6 s; the target 160 s); the check
+  count down by 272 - more than the plan's 60, and almost all of it one behaviour: the probe-volume sweep
+  asserted at every truncation point (349 checks, now 30 for the same behaviour), then the GPU view spike (11),
+  the render-cache script (4), the four timing checks (4), the OptiX picture (2); the MMD fuzz and the pacing
+  merge change nothing; the two coverage tests add 85. The stress run grows by the new rows: 32.6 s (codecs 1.0 s, probes
+  29 s, physics 0.4 s, animation 0.1 s, modeling 0.7 s).
+- `tools/test_coverage_map.py --check`: 259 entries, none empty.
+- The new rows' first numbers (this machine): 240 damaged MMD files in 1.0 s (66 refused, 174 imported, no bad
+  mesh); a 4 MB ProbeVolume.bin cut at 4,603 points (none accepted) and corrupted 150 ways (all loaded and
+  sampled safely); 100 spring chains of 3 bones 0.27 / 0.31 / 0.41 ms a frame (target 1.0), of 10 bones
+  1.05 / 1.20 / 1.70 ms a frame (target 5.0); AutoPhysics' jump 278 ms (target 1,000), the run 307 ms; Locomotion 0.017 ms a frame (target
+  0.2); the overlap check 14.1x its reference on 50k faces (target 3x).
+- Unit checks (round 177): Windows 11,144, 0 failed (908 tests); render-cache verify mode 11,145, 0 failed, 0 stale
+  pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-21 (round 176): the Wind gizmo and icons for the effectors (task 0158)
 
 **Asked:** a gizmo for the Wind component, as task 0153's spec left out.

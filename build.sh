@@ -137,15 +137,18 @@ export -f compile
 export CXX FLAGS OBJ
 
 echo "[blendity] Compiling ($CONFIG, $OS, $JOBS jobs)..."
-ALL_SRC="$LIB_SRC src/app/main.cpp stress/stress_main.cpp tests/test_main.cpp"
+TEST_SRC="$(ls tests/*.cpp)"
+ALL_SRC="$LIB_SRC src/app/main.cpp stress/stress_main.cpp $TEST_SRC"
 echo $ALL_SRC | tr ' ' '\n' | xargs -P "$JOBS" -I{} bash -c 'compile "$@"' _ {}
 
 lib_objs() {
   for s in $LIB_SRC; do printf '%s ' "$OBJ/$(echo "$s" | tr '/' '_').o"; done
 }
-link() {  # main-source output-name
+link() {  # main-sources output-name
   echo "[blendity] Linking $2"
-  $CXX $FLAGS $(lib_objs) "$OBJ/$(echo "$1" | tr '/' '_').o" -o "$OUT/$2" $LIBS
+  local objs=""
+  for s in $1; do objs="$objs $OBJ/$(echo "$s" | tr '/' '_').o"; done
+  $CXX $FLAGS $(lib_objs) $objs -o "$OUT/$2" $LIBS
 }
 
 case "$TARGET" in
@@ -155,7 +158,7 @@ case "$TARGET" in
   stress|all) link stress/stress_main.cpp blendity_stress ;;
 esac
 case "$TARGET" in
-  tests|all) link tests/test_main.cpp blendity_tests ;;
+  tests|all) link "$TEST_SRC" blendity_tests ;;
 esac
 
 if [ "$USE_LIBS" = 1 ]; then

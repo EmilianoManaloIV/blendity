@@ -163,15 +163,6 @@ bool has_any(const std::string &raw, const char *const *list) {
 }
 bool soft_words(const std::vector<std::string> &ws) { return any_of_words(ws, kSoftWords) || (any_of_words(ws, kSoftPartWords) && any_of_words(ws, kSoftTagWords)); }
 
-bool is_bone(const GameObject *g) { return g && g->get<Bone>(); }
-
-std::vector<GameObject *> bone_children(const GameObject &g) {
-  std::vector<GameObject *> out;
-  for (GameObject *c : g.children)
-    if (is_bone(c)) out.push_back(c);
-  return out;
-}
-
 bool forks(const GameObject &g) { return bone_children(g).size() >= 2; }
 
 void collect_chains(GameObject &g, std::vector<GameObject *> &out) {
@@ -192,12 +183,6 @@ Vec3 tip_of(const GameObject &b) {
   return b.world_matrix().point(Vec3(0.0f, bone ? bone->length : 0.0f, 0.0f));
 }
 
-/* The point of the segment ab nearest p. */
-Vec3 closest_on_segment(Vec3 p, Vec3 a, Vec3 b) {
-  const Vec3 ab = b - a;
-  const float t = std::max(0.0f, std::min(1.0f, dot(p - a, ab) / std::max(1e-12f, dot(ab, ab))));
-  return a + ab * t;
-}
 /* A tip pushed out of every capsule it is inside, by the chain's radius on top of the capsule's. */
 void push_out_of_capsules(Vec3 &tip, const std::vector<Collider> &caps, float radius) {
   for (const Collider &c : caps) {
@@ -233,15 +218,12 @@ std::vector<std::pair<GameObject *, const Mesh *>> skins_of(GameObject &armature
   return skins;
 }
 }  // namespace
-void mix_hash(uint64_t &h, const void *data, size_t n) {
-  const uint8_t *b = (const uint8_t *)data;
-  for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
-}
+void mix_hash(uint64_t &h, const void *data, size_t n) { h = fnv1a(data, n, h); }
 namespace {
 /* What the fitted radii depend on: the bones (their ids, names, rest matrices and lengths), each skin's id, mesh
  * (its version and its positions' version) and its matrix relative to the armature. */
 uint64_t fitted_key(GameObject &armature, const std::vector<ArmatureBone> &bones, const std::vector<std::pair<GameObject *, const Mesh *>> &skins) {
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   const Mat4 inv = armature.world_matrix().inverse();
   for (const ArmatureBone &ab : bones) {
     const float len = ab.bone ? ab.bone->length : 0.0f;
@@ -1044,7 +1026,7 @@ void JiggleModifier::modify(Mesh &m) const {
 /* Stepped again whenever the simulated clock moves (Play) or the object moves. */
 uint64_t JiggleModifier::modifier_dependency_hash() const {
   if (!owner || !owner->scene) return 0;
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = kFnvBasis;
   const double t = spring::sim_time(*owner->scene);
   spring::mix_hash(h, &t, sizeof(t));
   spring::mix_hash(h, owner->world_matrix().m, sizeof(float) * 16);

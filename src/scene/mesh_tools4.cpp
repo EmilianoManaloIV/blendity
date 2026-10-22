@@ -103,17 +103,23 @@ bool follow(Mesh &m, size_t face, std::string *error) {
   for (auto &kv : nb)
     if (kv.second.size() == 1 && length(m.positions[kv.first] - c) < best) best = length(m.positions[kv.first] - c), start = kv.first;
   if (start == UINT32_MAX) return fail("the path must be an open line of wire edges");
+  return follow_impl(m, face, walk_wire_path(nb, start), true, error);
+}
+
+std::vector<uint32_t> walk_wire_path(const std::unordered_map<uint32_t, std::vector<uint32_t>> &nb, uint32_t start) {
   std::vector<uint32_t> path = {start};
   for (uint32_t prev = UINT32_MAX, cur = start;;) {
     uint32_t next = UINT32_MAX;
-    for (uint32_t w : nb[cur])
+    const auto it = nb.find(cur);
+    if (it == nb.end()) break;
+    for (uint32_t w : it->second)
       if (w != prev) next = w;
     if (next == UINT32_MAX || std::find(path.begin(), path.end(), next) != path.end()) break;
     path.push_back(next);
     prev = cur;
     cur = next;
   }
-  return follow_impl(m, face, path, true, error);
+  return path;
 }
 
 /* The sweep along the path where it is: a path of the mesh's own edges (UModeler: pick the edges)

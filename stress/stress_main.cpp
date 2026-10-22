@@ -36,6 +36,8 @@
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
+#include "../src/scene/autophysics.h"
+#include "../tests/fixtures/synthetic_mmd.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1961,6 +1963,44 @@ static void test_vgi(Report &rep, const Options &o) {
 }
 
 /* Probe volumes (task 0014): placement, bake, live updates and per-pixel sampling. */
+static void probe_file_damage_row(Report &rep, const ProbeVolumeData &d) {
+/* A saved ProbeVolume.bin cut at every point of its header and corrupted 150 ways: refused, or loaded and safe to
+ * sample (task 0177: the unit test keeps every 8th cut and 30 corruptions). */
+  std::error_code tmp_ec;
+  const std::string path = (std::filesystem::temp_directory_path(tmp_ec) / "blendity_stress_probes.bin").string();
+  std::string err, good;
+  if (d.save(path, err) && fs::read_file(path, good) && good.size() > 200) {
+    ProbeVolumeData x;
+    int accepted = 0, cuts = 0, loaded = 0, refused = 0, bad_samples = 0;
+    ScopedTimer t;
+    for (size_t len = 1; len < good.size(); len += (len < 400 ? 1 : 997)) {
+      fs::write_file(path, good.substr(0, len));
+      cuts++;
+      if (x.load(path, err)) accepted++;
+    }
+    uint32_t rng = 31u;
+    auto f01 = [&] { rng = rng * 1664525u + 1013904223u; return (rng >> 8) * (1.0f / 16777216.0f); };
+    for (int i = 0; i < 150; i++) {
+      std::string bad = good;
+      for (int k = 0; k < 1 + (i % 4); k++) bad[(size_t)(f01() * (float)(bad.size() - 1))] = (char)(int)(f01() * 255.0f);
+      fs::write_file(path, bad);
+      if (!x.load(path, err)) {
+        refused++;
+        continue;
+      }
+      loaded++;
+      for (int k = 0; k < 40; k++) {
+        Vec3 o;
+        const Vec3 p(f01() * 12.0f - 6.0f, f01() * 7.0f - 3.0f, f01() * 12.0f - 6.0f);
+        if (x.sample(p, Vec3(0, 1, 0), Vec3(0.3f), k & 1, o) && !std::isfinite(o.x + o.y + o.z)) bad_samples++;
+      }
+    }
+    rep.table({"damaged ProbeVolume.bin", "truncations", "accepted", "corruptions refused", "loaded and sampled", "bad samples", "ms"});
+    rep.row({format_bytes(good.size()), std::to_string(cuts), std::to_string(accepted), std::to_string(refused), std::to_string(loaded), std::to_string(bad_samples), f1(t.ms())});
+    std::remove(path.c_str());
+  }
+}
+
 static void test_probes(Report &rep, const Options &o) {
   rep.title("Probe volumes (Adaptive Probe Volume style)",
             "Spheres and cubes on a 40 m floor under the sky with a Baked sun; probes 1 m apart near geometry, up to 27 m in open space.");
@@ -2087,6 +2127,7 @@ static void test_probes(Report &rep, const Options &o) {
     runs++;
   }
   rep.note(strprintf("Odd volumes and spacings (NaN / infinite / negative / zero / huge): %d runs, %d problems.", runs, problems));
+  probe_file_damage_row(rep, d);
 }
 
 /* Baked lighting (task 0012): what a bake costs as the scene grows, and what a lightmap costs to shade. */
@@ -3044,6 +3085,40 @@ static void test_texture_bake(Report &rep, const Options &o) {
   std::printf("  -> Texture bake: %d problems\n", problems_total);
 }
 
+static void mmd_damage_row(Report &rep, const std::string &dir) {
+/* Damaged MMD models (task 0177: the unit test keeps 24 of these 240): the synthetic PMX and PMD cut anywhere or with
+ * bytes flipped, each imported or refused without harm. */
+  uint32_t rng = 156;
+  auto next = [&](uint32_t n) { rng = rng * 1664525u + 1013904223u; return (size_t)((rng >> 8) % n); };
+  int refused = 0, imported = 0, problems = 0;
+  ScopedTimer t;
+  for (const std::string &whole : {r156_pmx(R156Opts()), r156_pmd()}) {
+    const std::string ext = whole[0] == 'P' && whole[1] == 'M' && whole[2] == 'X' ? ".pmx" : ".pmd";
+    for (int k = 0; k < 120; k++) {
+      std::string d = whole;
+      if (k < 60) d.resize(next((uint32_t)d.size()));
+      else
+        for (int f = 0; f < 4; f++) d[next((uint32_t)d.size())] = (char)next(256);
+      const std::string file = fs::join(dir, "damaged" + ext);
+      fs::write_file(file, d);
+      ImportResult r;
+      if (!import_model(file, r)) {
+        refused++;
+        continue;
+      }
+      imported++;
+      Scene s;
+      instantiate_import(s, r, "Bad", nullptr);
+      s.for_each([&](GameObject &g) {
+        const Mesh *m = g.evaluated_mesh();
+        if (m && !m->positions.empty() && !std::isfinite(m->positions[0].x)) problems++;
+      });
+    }
+  }
+  rep.table({"damaged MMD files", "refused", "imported", "problems", "ms"});
+  rep.row({"240 (cut anywhere, 4 bytes flipped)", std::to_string(refused), std::to_string(imported), std::to_string(problems), f1(t.ms())});
+}
+
 static void test_codecs(Report &rep, const Options &o) {
   rep.title("Image codecs and scene compression",
             "Decoding a 3840x2160 photo-like image (gradients + noise) with Blendity's own decoders vs Blender's libjpeg-turbo "
@@ -3092,6 +3167,7 @@ static void test_codecs(Report &rep, const Options &o) {
     rep.row({strprintf("%zu objects", s.object_count()), format_bytes(text.size()), format_bytes(packed.size()),
              f1((double)text.size() / packed.size()) + "x", f1(save_ms), f1(load_ms)});
   }
+  mmd_damage_row(rep, dir);
 }
 
 static void test_gpu_devices(Report &rep, const Options &o) {
@@ -3157,6 +3233,79 @@ static void test_gpu_devices(Report &rep, const Options &o) {
            "without seams (Cycles splits work across devices the same way). The unit tests check each device against the CPU.");
 }
 
+static void spring_chain_row(Report &rep) {
+/* A hundred spring chains (a dense hairstyle: strands 4 cm apart with 2 cm radii, touching) of three bones, and of
+ * ten: a frame's step plain, with collision, with separation too (task 0177: the unit test prints these, this row
+ * keeps them). */
+  auto bone = [](Scene &s, const std::string &name, GameObject *parent, Vec3 pos, Quat rot, float len) {
+    GameObject *g = s.create(name, parent);
+    g->set_local_position(pos);
+    g->set_local_rotation(rot);
+    Bone *b = g->add<Bone>();
+    b->length = len;
+    b->rest_position = pos;
+    b->rest_rotation = rot;
+    return g;
+  };
+  auto frame_ms = [&](int bones, double *plain, double *with_collision) {
+    Scene s;
+    GameObject *root = s.create("Rig");
+    root->add<Armature>();
+    GameObject *hip = bone(s, "Hips", root, {0, 1, 0}, Quat(), 0.2f);
+    for (int c = 0; c < 100; c++) {
+      GameObject *g = hip;
+      for (int i = 1; i <= bones; i++)
+        g = bone(s, "Strand" + std::to_string(c) + std::to_string(i), g, i == 1 ? Vec3(0.04f * (c % 10), 0.2f, 0.04f * (c / 10)) : Vec3(0, 0.05f, 0),
+                 i == 1 ? Quat::euler({180, 0, 0}) : Quat(), 0.05f);
+      spring::add(*s.find_by_name("Strand" + std::to_string(c) + "1"), 0);
+    }
+    auto run = [&](bool separate, bool collide) {
+      for (const auto &o : s.objects())
+        if (SpringBone *sb = o->get<SpringBone>()) sb->separate = separate, sb->collide = collide;
+      for (int f = 0; f < 10; f++) spring::step(s, 1.0f / 60.0f);  // (warm)
+      ScopedTimer t;
+      for (int f = 0; f < 60; f++) {
+        hip->set_local_position({0.01f * f, 1, 0});
+        spring::step(s, 1.0f / 60.0f);
+      }
+      return t.ms() / 60.0;
+    };
+    *plain = run(false, false), *with_collision = run(false, true);
+    return run(true, true);
+  };
+  rep.table({"spring chains (100)", "plain ms / frame", "with collision", "with separation too", "target"});
+  for (int bones : {3, 10}) {
+    double p = 0, c = 0;
+    const double all = frame_ms(bones, &p, &c);
+    rep.row({std::to_string(bones) + " bones", strprintf("%.3f", p), strprintf("%.3f", c), strprintf("%.3f", all), bones == 3 ? "1.0" : "5.0"});
+  }
+}
+
+static void autophysics_row(Report &rep) {
+/* AutoPhysics' centroidal solve (task 0118): a jump and a run as an animator keys them, 100 frames at 30 fps
+ * (task 0177: the unit test checks the laws hold; the time is here). */
+  auto smooth = [](float t) { t = std::min(1.0f, std::max(0.0f, t)); return t * t * (3.0f - 2.0f * t); };
+  body::CentroidalInput jump, run;
+  for (int k = 0; k < 100; k++) {
+    float y = 1.0f, z = 0.0f;
+    if (k < 40) y = 1.0f - 0.15f * std::sin(3.14159f * smooth((k - 25) / 15.0f)), z = 0.1f * smooth((k - 30) / 10.0f);
+    else if (k < 60) y = std::max(0.95f, 0.95f + 0.35f * std::sin(3.14159f * (k - 40) / 20.0f)), z = 0.1f + 0.5f * (k - 40) / 20.0f;
+    else y = 1.0f - 0.15f * std::sin(3.14159f * smooth((k - 60) / 25.0f)), z = 0.6f + 0.1f * smooth((k - 60) / 10.0f);
+    jump.com.push_back({0.0f, y, z});
+    run.com.push_back({0.0f, 0.95f + 0.03f * std::cos(2.0f * 3.14159f * k / 12.0f), 3.0f * k / 30.0f});
+  }
+  jump.contacts = {{{-0.12f, 0, 0.1f}, 0, 39}, {{0.12f, 0, 0.1f}, 0, 39}, {{-0.12f, 0, 0.7f}, 60, 99}, {{0.12f, 0, 0.7f}, 60, 99}};
+  for (int s = 0; s * 12 < 100; s++) {
+    const int from = s * 12, to = std::min(99, s * 12 + 7);
+    run.contacts.push_back({{s % 2 ? 0.1f : -0.1f, 0.0f, 3.0f * (from + to) * 0.5f / 30.0f}, from, to});
+  }
+  rep.table({"AutoPhysics clip (100 frames)", "solved", "passes", "steps", "Newton residual (g)", "Euler residual (m g)", "ms", "target ms"});
+  for (auto [name, in] : {std::pair<const char *, body::CentroidalInput *>{"a jump", &jump}, {"a run", &run}}) {
+    const body::CentroidalResult r = body::solve_centroidal(*in);
+    rep.row({name, r.solved ? "yes" : "no", std::to_string(r.passes), std::to_string(r.iterations), strprintf("%.1e", r.linear_residual), strprintf("%.1e", r.angular_residual), f1(r.ms), "1000"});
+  }
+}
+
 static void test_physics(Report &rep, const Options &o) {
   rep.title("Physics: Blendity's sphere physics vs Jolt",
             "N rigid boxes dropped in a pile onto a plane; average ms per 60 Hz frame over 2 simulated seconds. Blendity's "
@@ -3191,6 +3340,8 @@ static void test_physics(Report &rep, const Options &o) {
     rep.row({std::to_string(n), ms[0] < 0 ? "(skipped)" : f2(ms[0]), ms[1] < 0 ? "-" : f2(ms[1]),
              ms[0] > 0 && ms[1] > 0 ? f1(ms[0] / ms[1]) + "x" : "-"});
   }
+  spring_chain_row(rep);
+  autophysics_row(rep);
 }
 
 static void test_modeling_tools(Report &rep, const Options &o) {
@@ -3214,6 +3365,23 @@ static void test_modeling_tools(Report &rep, const Options &o) {
     Mesh mi = m;
     double mr = time_ms([&] { meshops::mirror(mi, true, false, false, 0.001f); });
     rep.row({"mirror X (merge)", num((double)mi.face_count()), f1(mr)});
+  }
+  /* The overlap check (task 0132): the fast check against the O(n^2)-ish reference on a 50k-face sphere whose seam
+   * doubles its vertices (task 0177: the unit test checks they agree; the speed-up is here, about 15x on 32 threads). */
+  {
+    MeshPtr big = primitives::uv_sphere(1.0f, 256, 196);
+    double fast_ms = 0, ref_ms = 0;
+    size_t nv = 0, ne = 0;
+    for (int k = 0; k < 2; k++) {
+      ScopedTimer tf;
+      nv = meshops::overlapping_vertices(*big).size(), ne = meshops::overlapping_edges(*big).size();
+      fast_ms = tf.ms();
+      ScopedTimer tr;
+      (void)meshops::overlapping_vertices_reference(*big), (void)meshops::overlapping_edges_reference(*big);
+      ref_ms = tr.ms();
+    }
+    rep.table({"overlap check", "faces", "doubled vertices", "doubled edges", "fast ms", "reference ms", "speed-up", "target"});
+    rep.row({"50k-face UV sphere", num((double)big->face_count()), std::to_string(nv), std::to_string(ne), f1(fast_ms), f1(ref_ms), f1(ref_ms / std::max(1e-6, fast_ms)) + "x", "3x"});
   }
 }
 
@@ -3792,6 +3960,33 @@ static void test_skin_weights_stress(Report &rep, const Options &o) {
 
 /* Keyframe animation (task 0059): sampling and applying a clip of 200 tracks (rotations of 67 bones, Auto keys) once a
  * frame. Target: at most 0.2 ms. */
+static void locomotion_row(Report &rep) {
+/* Locomotion in Play (task 0127): a person walking forward for 3 s under W, the component's own step time a frame
+ * (task 0177: the unit test checks the walk; its budget of 0.2 ms is this row). */
+  const bool was_live = Locomotion::live;
+  Locomotion::live = true;
+  Scene s;
+  GameObject *rig = create_rig(s, false, Vec3(0.0f));
+  Locomotion *lc = rig->add<Locomotion>();
+  const GroundGrid ground = locomotion::ground_for(s);
+  PlayContext start;
+  s.start(start);
+  const float dt = 1.0f / 60.0f;
+  float t = 0.0f, cost = 0.0f, worst = 0.0f;
+  int frames = 0;
+  for (int i = 0; i < 180; i++) {
+    PlayContext ctx;
+    ctx.dt = dt, ctx.time = t, ctx.key_down = [](int k) { return k == platform::KEY_W; };
+    s.update(ctx);
+    locomotion::step(s, dt, ground);
+    solve_constraints(s);
+    t += dt, cost += lc->cost_ms_, worst = std::max(worst, lc->cost_ms_), frames++;
+  }
+  Locomotion::live = was_live;
+  rep.table({"Locomotion (W for 3 s)", "frames", "ms / frame", "worst frame ms", "walked (m)", "target ms"});
+  rep.row({"a humanoid rig", std::to_string(frames), strprintf("%.3f", cost / frames), strprintf("%.3f", worst), f2(rig->world_position().z), "0.2"});
+}
+
 static void test_animation_stress(Report &rep, const Options &o) {
   rep.title("Keyframe animation (task 0059)",
             "A chain of bones under a root, each turned by three Euler tracks with keys every 10 frames (Auto), applied with "
@@ -3852,6 +4047,7 @@ static void test_animation_stress(Report &rep, const Options &o) {
     std::remove(resolve_asset_path(cp).c_str());
     forget_clip_assets(cp);
   }
+  locomotion_row(rep);
 }
 
 static void test_vgroups_stress(Report &rep, const Options &o) {

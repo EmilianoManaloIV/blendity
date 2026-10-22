@@ -1330,6 +1330,21 @@ class GameObject {
   friend class Scene;
 };
 
+/* The armature a bone belongs to (the nearest Armature up from it, itself included). */
+inline const Armature *bone_armature(const GameObject &g) {
+  for (const GameObject *p = &g; p; p = p->parent)
+    if (const Armature *a = p->get<Armature>()) return a;
+  return nullptr;
+}
+inline bool is_bone(const GameObject *g) { return g && g->get<Bone>(); }
+/* The bones among an object's children (task 0177: the gait and the spring bones had their own). */
+inline std::vector<GameObject *> bone_children(const GameObject &g) {
+  std::vector<GameObject *> out;
+  for (GameObject *c : g.children)
+    if (is_bone(c)) out.push_back(c);
+  return out;
+}
+
 /* ----------------------------------------------------------------- Scene */
 
 /* Blender: World properties. Unity: Lighting window > Environment. */

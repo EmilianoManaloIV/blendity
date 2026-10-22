@@ -90,7 +90,6 @@ struct AnimValues {
 uint64_t anim_value_key(const std::string &path, const std::string &property, int axis);
 /* Rotation (Euler degrees) blends the shorter way round each axis; anything else linearly. */
 float blend_anim_value(const std::string &property, float a, float b, float t);
-void sample_clip_values(const AnimationClip &clip, float frame, AnimValues &out);
 /* The sequence at `frame`: per track bottom-up, the instances there (two overlapping: crossfaded), the higher tracks'
  * numbers replacing the lower ones'. */
 void sample_sequence(const Sequence &s, float frame, AnimValues &out, const Scene *scene = nullptr);  // (scene: bars' targets found in it)

@@ -11,6 +11,24 @@ namespace bl {
 
 using ui::Icon;
 
+/* A grid of buttons, `per` to a row, a disabled one drawn flat with its label dimmed (the Rigging window too). */
+void Editor::button_grid(ui::Layout &lay, const std::vector<GridButton> &bs, int per) {
+  auto &u = ui_;
+  for (size_t i = 0; i < bs.size(); i += (size_t)per) {
+    Recti row = lay.row(u.row_h() + u.px(2));
+    const int bw = (row.w - u.px(4) * (per + 1)) / per;
+    for (size_t k = i; k < std::min(bs.size(), i + (size_t)per); k++) {
+      Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
+      if (!bs[k].enabled) {
+        u.frame(br, u.theme.strip, u.theme.border, u.px(3));
+        u.label(br, bs[k].label, u.theme.text_dim, ui::Align::Center);
+      }
+      else if (u.button(br, bs[k].label)) bs[k].fn();
+      u.tooltip(bs[k].tip);
+    }
+  }
+}
+
 void Editor::draw_tools_window(const Recti &r) {
   auto &u = ui_;
   if (u.hovered(r) && u.in.pressed[0]) focused_ = WindowKind::Tools;
@@ -59,30 +77,9 @@ void Editor::draw_tools_window(const Recti &r) {
     if (u.hovered(h) && u.in.pressed[0]) open = !open;
     return open;
   };
-  /* A grid of buttons, `per` to a row. */
-  struct B {
-    std::string label;
-    std::string tip;
-    bool enabled;
-    std::function<void()> fn;
-  };
-  auto grid = [&](const std::vector<B> &bs, int per) {
-    for (size_t i = 0; i < bs.size(); i += (size_t)per) {
-      Recti row = lay.row(u.row_h() + u.px(2));
-      const int bw = (row.w - u.px(4) * (per + 1)) / per;
-      for (size_t k = i; k < std::min(bs.size(), i + (size_t)per); k++) {
-        Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
-        if (!bs[k].enabled) {
-          u.frame(br, u.theme.strip, u.theme.border, u.px(3));
-          u.label(br, bs[k].label, u.theme.text_dim, ui::Align::Center);
-        }
-        else if (u.button(br, bs[k].label)) bs[k].fn();
-        u.tooltip(bs[k].tip);
-      }
-    }
-  };
+  auto grid = [&](const std::vector<GridButton> &bs, int per) { button_grid(lay, bs, per); };
   if (section("Create", FocusCreate)) {
-    std::vector<B> prims, shapes;
+    std::vector<GridButton> prims, shapes;
     for (const char *k : {"Cube", "Sphere", "Cylinder", "Plane"})
       prims.push_back({k, std::string("GameObject > 3D Object > ") + k, true, [this, k] { create_object(k); }});
     for (int k = 0; k < kShapeCount; k++)
@@ -94,7 +91,7 @@ void Editor::draw_tools_window(const Recti &r) {
     grid(shapes, 4);
   }
   if (section("Draw", FocusDraw)) {
-    std::vector<B> bs;
+    std::vector<GridButton> bs;
     for (int k = 0; k < kDrawShapeCount; k++)
       bs.push_back({kDrawShapes[k], k == 5 ? "A construction line through two points: drawing snaps to it, to where guides cross and to its\n"
                                              "direction (Plasticity's lines, SketchUp's guides). Not part of the mesh."
@@ -169,7 +166,7 @@ void Editor::draw_tools_window(const Recti &r) {
   }
   if (section("Object", FocusObject)) {
     const bool two = selection_.size() > 1;
-    std::vector<B> bs = {
+    std::vector<GridButton> bs = {
         {edit_mode_ ? "Exit Edit Mode" : "Edit Mode", "Tab", mesh || edit_mode_, [this] {
            if (edit_mode_) exit_edit_mode();
            else enter_edit_mode();
@@ -213,7 +210,7 @@ void Editor::draw_tools_window(const Recti &r) {
   if (section("Check: Z-Fighting", FocusCheck)) draw_zfight_panel(lay);
   if (section("Check: Overlapping Vertices & Edges", FocusCheck)) draw_overlap_panel(lay);
   if (section("UV", FocusUV)) {
-    std::vector<B> bs = {
+    std::vector<GridButton> bs = {
         {"Unwrap", "Unwrap along the seams (U).", mesh, [this] { uv_op("unwrap"); }},
         {"Smart UV", "Smart UV Project: no seams needed.", mesh, [this] { uv_op("smart"); }},
         {"Cube Project", "Each face projected along its main axis.", mesh, [this] { uv_op("cube"); }},

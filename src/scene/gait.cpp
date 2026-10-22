@@ -12,15 +12,6 @@ namespace {
 
 const float kPiG = 3.14159265f;
 
-bool is_bone(const GameObject *g) { return g && g->get<Bone>(); }
-
-std::vector<GameObject *> bone_children(const GameObject &g) {
-  std::vector<GameObject *> out;
-  for (GameObject *c : g.children)
-    if (is_bone(c)) out.push_back(c);
-  return out;
-}
-
 bool has_word(const std::string &name, const char *w) { return to_lower(name).find(w) != std::string::npos; }
 
 /* The next bone down a limb: a child named for it (a toe, not a heel helper), else the one furthest from the parent's
