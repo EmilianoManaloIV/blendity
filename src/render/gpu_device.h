@@ -124,6 +124,15 @@ class Renderer {
   virtual void clear() = 0;
   /* Renders samples [first, first + count) and waits for them. */
   virtual bool render(int first_sample, int count, std::string *error) = 0;
+  /* Task 0161 (ADR 0052): the same without waiting - up to two submissions in flight (a third waits for the
+   * oldest first); wait_oldest() returns when the oldest in flight has finished (false when nothing is),
+   * wait_all() when every one has. in_flight() counts them. Only one thread may drive a device. */
+  virtual bool submit(int first_sample, int count, std::string *error) { return render(first_sample, count, error); }
+  virtual bool wait_oldest(std::string *error) { (void)error; return true; }  // (a device without flights: submit() waited already)
+  virtual bool wait_all(std::string *error) { (void)error; return true; }
+  virtual int in_flight() const { return 0; }
+  /* The card's own time of the submissions that finished since the last take (-1 without timestamps). */
+  virtual double take_busy_ms() { return -1.0; }
   /* Accumulated sums (4 floats per pixel): the colour after every render call,
    * albedo and normal + depth only when the denoiser needs them. */
   virtual void download_accum(std::vector<float> &accum) = 0;

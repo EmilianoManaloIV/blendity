@@ -259,6 +259,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 | How to do things was spread over a long README, a lighting guide and the Learn tab. | One manual by stage of the work, with examples (docs/MANUAL.md, Help > Open Manual); the README is a short front page. |
 | Rendering felt slow and "CPU and GPU usage look low", but nothing showed what the card itself did: the frame profile held only how long a frame spent in the GPU path, and the Profiler not even that. | The Profiler's GPU block reads the card's own clock: the views' pass times, the read-back, the wait, the busy share of the frame, and a running render's busy / wait (task 0159). |
 | A view on the card waited for the GPU twice a frame - once for its picture, once for the copy out - so the card sat idle between them. | A view is one submission: the copies out are recorded behind the frame's passes (task 0160, ADR 0051). |
+| An F12 render or the Camera Preview used the card only inside the editor's slice of each frame (40 ms / 12 ms), waited for every submission, and blocked the UI for the slice: the card was busy a fifth of the render's time and the editor felt slow. | The cards render on their own threads between frames, two submissions in flight; the editor polls for a few milliseconds a frame (task 0161, ADR 0052). |
 
 ## Still worth doing
 

@@ -1070,6 +1070,7 @@ void Editor::start_final_render(bool preview, bool open_window) {
   render_alpha_lin_.clear();
   render_transparent_ = rs.transparent;
   render_start_ = now_seconds();
+  render_resolved_samples_ = -1;  // (task 0161: the next frame resolves whatever the tracer holds)
   render_has_result_ = true;
   if (open_window) dock_open(WindowKind::Render);
   render_filters_ = camera_filters(cam ? owner : nullptr);
@@ -1164,7 +1165,8 @@ void Editor::start_final_render(bool preview, bool open_window) {
 std::string Editor::render_gpu_busy_text() const {
   const PTStats &s = final_pt_.stats();
   if (s.gpu_busy_ms < 0.0 || render_time_ <= 0.0) return "";
-  return strprintf("; GPU busy %.0f %% of the render's wall time", 100.0 * std::min(1.0, s.gpu_busy_ms / (render_time_ * 1000.0)));
+  const double cards = (double)std::max<size_t>(1, s.gpu_samples.size());  // (the busy is every card's, summed: a share per card)
+  return strprintf("; GPU busy %.0f %% of the render's wall time (%s)", 100.0 * s.gpu_busy_ms / (render_time_ * 1000.0 * cards), cards > 1 ? "a card's average" : "one card");
 }
 
 void Editor::step_final_render() {
@@ -1174,13 +1176,20 @@ void Editor::step_final_render() {
   int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
   if (final_pt_.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there
     render_start_ = now_seconds();
+    render_resolved_samples_ = -1;  // (task 0161: the next frame resolves whatever the tracer holds)
     render_status_ = strprintf("%s: %s", render_preview_ ? "Preview" : "Path tracing", final_pt_.device_summary().c_str());
     Log::info("%s", render_status_.c_str());
   }
-  int done = final_pt_.render(40.0, target);
+  /* The CPU's slice, or with cards at work (task 0161, ADR 0052) a short wait: they render between frames. */
+  int done = final_pt_.render(final_pt_.gpu_async() ? 4.0 : 40.0, target);
   render_time_ = now_seconds() - render_start_;
   bool finished = done >= target;
-  resolve_final_render(finished);
+  /* Task 0161: the picture can only change when the tracer merged new samples (the cards' sums arrive every merge
+   * interval); a frame that merged nothing keeps the resolved image and stays short. */
+  if (finished || final_pt_.samples() != render_resolved_samples_) {
+    resolve_final_render(finished);
+    render_resolved_samples_ = final_pt_.samples();
+  }
   /* Samples per second, and how they were shared when several devices render. */
   std::string split;
   if (!final_pt_.stats().gpu_samples.empty()) {
@@ -1773,7 +1782,7 @@ void Editor::draw_camera_preview(const Recti &view) {
     if (traced_img.width != tw || traced_img.height != th) traced_img.resize(tw, th);
     const int target = std::max(1, rs.preview_samples);
     if (!cam_preview_done_) {
-      int done = cam_preview_pt_.render(12.0, target);
+      int done = cam_preview_pt_.render(cam_preview_pt_.gpu_async() ? 2.0 : 12.0, target);  // (task 0161: the cards work between frames)
       if (done >= target) {
         std::vector<float> lin = cam_preview_pt_.linear_rgb(rs.denoise);
         cam_preview_pt_.resolve_rgb(lin, traced_img.pixels.data(), tw);
@@ -1941,6 +1950,7 @@ bool Editor::start_render_sequence(const std::string &dir_in) {
 void Editor::stop_render_sequence() {
   if (seq_.active) {
     if (rendering_) rendering_ = false;
+    final_pt_.pause();  // (task 0161: the cards stop too)
     Log::info("Render Camera Sequence stopped after %zu of %zu", seq_.written.size(), seq_.cams.size());
   }
   seq_.active = false;

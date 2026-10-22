@@ -2,6 +2,52 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-10-22 (round 181): the path tracer off the main thread, two submissions in flight (task 0161, ADR 0052)
+
+**Asked:** "feels slower", "CPU and GPU usage look low" - task 0159 measured a card 99 % busy inside each submission
+and 21 % busy over an F12 render: the path tracer ran the cards only inside the editor's 40 ms slice a frame and
+waited for every submission.
+
+**Changed**
+- A worker thread per card, for the life of its slot: it idles until a render starts, claims chunks of whole
+  samples from the shared counter (the guided self-scheduling stays; the chunk cap halves to 50 ms from task 0051's
+  100 ms, so a pause waits for at most two of them) and keeps two submissions in flight on its device
+  (`Renderer::submit`, `wait_oldest`, `wait_all`, `take_busy_ms`: two command buffers, fences and timestamp pairs;
+  `render()` is submit then wait). It downloads the card's sums into a host copy when a merge is wanted (its flights
+  drained first) and when it stops. Each slot's state is under one lock, a slot counts as active from the start so
+  a poll never sees the cards idle before they wake, and the stats are the main thread's alone.
+- `PathTracer::render()` polls: it starts the workers toward the target if needed (the counter restarts from the
+  cards' finished counts), renders the CPU's own samples for the budget when the CPU is a device, waits what is
+  left of the budget for the cards, takes the counts, merges the host copies when due. The editor passes 4 ms for
+  F12 and 2 ms for the Camera Preview when cards work and resolves F12's picture only when samples were merged, so
+  the frame stays quick (6-8 ms headless; the frame that merges and resolves the 1280x720 picture about 12 ms more)
+  and the cards render between frames; the CPU-only path is unchanged.
+- `pause()` before anything touches a device or the sums (reset, set_settings, set_params, uploads, sync,
+  merge_aux, the editor's Stop and the sequence / animation stops, the destructor): the workers' claims stop, every
+  submission in flight finishes, the workers idle. A slot that leaves has its worker stopped by its own quit flag.
+  The merge counts the samples its copies hold, so the picture is always a consistent average; a reset clears the
+  host copies with the sums.
+- The test hook `BLENDITY_GPU_FAKE_SLOW=<ms>` makes every submission take that long on the worker's side.
+- The lesson "Combined rendering" gains "The cards work between frames".
+
+**Measured (RTX 4070 SUPER, docs/PERFORMANCE.md Pass 13)**
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (compute, Blendity BVH): 122.1 samples/s (was 122.9); the card busy 100.0 % (1037.6 of 1037.6 ms) inside its submissions (was 99.8 % (1034.1 of 1035.9 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 4070 SUPER (ray tracing hardware): 799.9 samples/s (was 821.0); the card busy 100.0 % (149.9 of 149.9 ms) inside its submissions (was 99.5 % (149.6 of 150.5 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 3060 Ti (compute, Blendity BVH): 62.0 samples/s (was 62.9); the card busy 100.0 % (2050.8 of 2051.0 ms) inside its submissions (was 99.8 % (2022.9 of 2026.2 ms)).
+- Path tracing the stress gpu scene at 1280x720, NVIDIA GeForce RTX 3060 Ti (ray tracing hardware): 402.7 samples/s (was 411.8); the card busy 100.0 % (304.2 of 304.2 ms) inside its submissions (was 99.6 % (302.8 of 303.9 ms)).
+- Path tracing the stress gpu scene at 1280x720, All GPUs: 1020.9 samples/s (was 1043.5); the card busy 100.0 % (218.8 of 218.9 ms) inside its submissions (was 99.2 % (221.8 of 223.7 ms)).
+- Path tracing the stress gpu scene at 1280x720, CPU + all GPUs: 1081.7 samples/s (was 1079.8); the card busy 98.9 % (200.1 of 202.4 ms) inside its submissions (was 99.1 % (205.1 of 207.1 ms)).
+- F12 of the default scene from the editor's frame loop (headless, GPU Compute with both cards): the cards busy 49 % of the render's wall time, was 41-43 % (82-85 % with the two cards' busy summed, as task 0159 reported it); 2048 samples in 0.6 s, was 0.7 s.
+
+**Checked**
+- With a 30 ms card, twenty polls each return in under 10 ms while it renders, the render completes with every
+  sample, pause() mid-render returns within 150 ms; the editor's F12 on that card keeps twenty frames under 10 ms
+  each and finishes; the GPU Compute pictures still match the CPU's (tests/test_gpu.cpp).
+- Unit checks (round 181): Windows 11,166, 0 failed (913 tests); render-cache verify mode 11,167, 2 failed in the full run (the GPU-opening frame
+  budget and the pipeline-cache test, both under the chain's build load; each passes alone), 0 stale pictures. Linux with libraries: 10,878, 0 failed. Sanitizer build: 10,758, 0 failed, no reports. `editor_fuzz` in
+  verify mode: 6,000 frames, no crash, 0 stale pictures. Stress `editor`, `pushpull`, `modifiers_ngon`,
+  `editor_render`: 0 problems, 394 results with faces newly on top of each other in `pushpull`, no change.
+
 ## 2026-10-22 (round 180): a GPU view in one submission (task 0160, ADR 0051)
 
 **Asked:** the roadmap's "views in one submission, read-back double-buffered", after task 0159 showed the card busy

@@ -2643,6 +2643,7 @@ class Editor {
   uint64_t cam_preview_pt_hash_ = 0;
   bool cam_preview_done_ = false;
   double render_start_ = 0, render_time_ = 0;
+  int render_resolved_samples_ = -1;  // (task 0161: the sample count the shown F12 picture was resolved from)
   std::string render_status_;
   float render_zoom_ = 0;  // 0 = fit
   Vec2 render_pan_;

@@ -1845,7 +1845,8 @@ void Editor::draw_profiler_gpu_tracer(const char *what, const PTStats &s, double
     return;
   }
   stat(key, strprintf("%.0f ms / %.0f ms", s.gpu_busy_ms, s.gpu_wait_ms));
-  if (wall_ms > 0.0) stat(strprintf("%s: GPU busy over %s", what, of_what), strprintf("%.0f %% of %.0f ms", 100.0 * std::min(1.0, s.gpu_busy_ms / wall_ms), wall_ms));
+  const double cards = (double)std::max<size_t>(1, s.gpu_samples.size());  // (the busy is every card's, summed: a share per card)
+  if (wall_ms > 0.0) stat(strprintf("%s: GPU busy over %s%s", what, of_what, cards > 1 ? " (a card's average)" : ""), strprintf("%.0f %% of %.0f ms", 100.0 * s.gpu_busy_ms / (wall_ms * cards), wall_ms));
 }
 
 void Editor::draw_profiler(const Recti &r) {
@@ -2094,6 +2095,7 @@ void Editor::draw_render_window(const Recti &r) {
                       scene_->render.preview_percent, scene_->render.preview_samples));
   if (u.button({b.x + 2 * (bw + u.px(4)), b.y, bw, b.h}, "Stop", false, Icon::Pause) && rendering_) {
     rendering_ = false;
+    final_pt_.pause();  // (task 0161: the cards stop too)
     resolve_final_render(true);
     render_status_ += "  (stopped)";
   }

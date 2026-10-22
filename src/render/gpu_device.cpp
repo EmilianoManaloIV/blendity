@@ -436,6 +436,11 @@ class VulkanRenderer final : public Renderer {
     f_.vkAllocateCommandBuffers(dev_, &cai, &cmd_);
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     f_.vkCreateFence(dev_, &fci, nullptr, &fence_);
+    for (Flight &fl : flights_) {  // (task 0161: the two render submissions that may be in flight)
+      f_.vkAllocateCommandBuffers(dev_, &cai, &fl.cmd);
+      f_.vkCreateFence(dev_, &fci, nullptr, &fl.fence);
+    }
+    if (const char *e = std::getenv("BLENDITY_GPU_FAKE_SLOW")) fake_slow_ms_ = std::max(0.0, std::atof(e));
     create_timestamps(g);
     stats_.device_ms = open_timer.ms();
     return create_pipeline(err);
@@ -456,20 +461,26 @@ class VulkanRenderer final : public Renderer {
     ts_mask_ = qs[qfam_].timestampValidBits >= 64 ? ~0ull : (1ull << qs[qfam_].timestampValidBits) - 1;  // (a shorter counter wraps: the difference is taken in its width)
     VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    qpi.queryCount = 2;
+    qpi.queryCount = 2 * kFlights;  // (two a submission in flight, task 0161)
     if (f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_) != VK_SUCCESS) timestamps_ = false;
   }
-  void stamp(uint32_t i, VkPipelineStageFlagBits stage) {
-    if (timestamps_) f_.vkCmdWriteTimestamp(cmd_, stage, queries_, i);
+  void stamp(VkCommandBuffer cmd, uint32_t i, VkPipelineStageFlagBits stage) {
+    if (timestamps_) f_.vkCmdWriteTimestamp(cmd, stage, queries_, i);
   }
-  void read_gpu_time() {
-    last_gpu_ms_ = -1.0;
+  /* A finished submission's time from its two queries (-1 without timestamps). Two flights overlap on the card -
+   * the second's first stamp is written while the first still runs - so the time is taken from where the last one
+   * ended: the union, never counted twice. */
+  double gpu_time_of(uint32_t first_query) {
     uint64_t t[2] = {0, 0};
-    if (!timestamps_ || f_.vkGetQueryPoolResults(dev_, queries_, 0, 2, sizeof(t), t, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
-    last_gpu_ms_ = (double)((t[1] - t[0]) & ts_mask_) * ts_period_ns_ * 1e-6;
+    if (!timestamps_ || f_.vkGetQueryPoolResults(dev_, queries_, first_query, 2, sizeof(t), t, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return -1.0;
+    const uint64_t start = ((last_end_ticks_ - t[0]) & ts_mask_) < (ts_mask_ >> 1) ? last_end_ticks_ : t[0];  // (the later of the two on a wrapping clock)
+    const uint64_t busy = ((t[1] - start) & ts_mask_) < (ts_mask_ >> 1) ? (t[1] - start) & ts_mask_ : 0;
+    last_end_ticks_ = t[1];
+    return (double)busy * ts_period_ns_ * 1e-6;
   }
 
   bool upload(const Scene &s, std::string *err) override {
+    wait_all(nullptr);
     f_.vkDeviceWaitIdle(dev_);
     for (int i = 3; i < 16; i++) free_buffer(bufs_[i]);  // 0-2: params and pixel buffers
     free_accel();
@@ -521,46 +532,105 @@ class VulkanRenderer final : public Renderer {
   }
 
   void clear() override {
+    wait_all(nullptr);
     begin();
     f_.vkCmdFillBuffer(cmd_, bufs_[1].buf, 0, VK_WHOLE_SIZE, 0);
     f_.vkCmdFillBuffer(cmd_, bufs_[2].buf, 0, VK_WHOLE_SIZE, 0);
     submit_wait();
   }
 
+  /* render() is submit() then wait_all(): one submission, waited for, its card time in last_gpu_ms(). */
   bool render(int first, int count, std::string *err) override {
+    if (!submit(first, count, err) || !wait_all(err)) return false;
+    last_gpu_ms_ = take_busy_ms();
+    return true;
+  }
+
+  /* Task 0161: the samples' dispatches recorded into the next free flight and submitted without waiting; the flight
+   * used two submissions ago is waited for first when both are busy. */
+  bool submit(int first, int count, std::string *err) override {
     if (!pipeline_ || pixels_ == 0) {
       if (err) *err = "GPU not ready";
       return false;
     }
-    begin();
-    if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 2);
-    stamp(0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
-    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
-    const uint32_t gx = (uint32_t)(scene_params_.size[0] + 7) / 8, gy = (uint32_t)(scene_params_.size[1] + 7) / 8;
-    /* Task 0105: up to kSamplesPerDispatch samples a dispatch, summed in registers: the accumulation and the
-     * denoiser's planes are read and written once for them, not once a sample (~200 MB a sample at 1080p). */
-    constexpr int kSamplesPerDispatch = 8;
-    for (int i = 0; i < count; i += kSamplesPerDispatch) {
-      const int pc[2] = {first + i, std::min(kSamplesPerDispatch, count - i)};
-      f_.vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, pc);
-      f_.vkCmdDispatch(cmd_, gx, gy, 1);
-      VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-      mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-      mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-      f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    if (in_flight_ >= kFlights && !wait_oldest(err)) return false;
+    Flight &fl = flights_[next_flight_];
+    const uint32_t q = 2 * (uint32_t)next_flight_;
+    f_.vkResetCommandBuffer(fl.cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    f_.vkBeginCommandBuffer(fl.cmd, &bi);
+    if (timestamps_) f_.vkCmdResetQueryPool(fl.cmd, queries_, q, 2);
+    stamp(fl.cmd, q, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+    record_samples(fl.cmd, first, count);
+    stamp(fl.cmd, q + 1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    f_.vkEndCommandBuffer(fl.cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &fl.cmd;
+    f_.vkResetFences(dev_, 1, &fl.fence);
+    if (f_.vkQueueSubmit(queue_, 1, &si, fl.fence) != VK_SUCCESS) {
+      if (err) *err = info_.name + ": the GPU refused the samples";
+      return false;
     }
-    stamp(1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-    if (!submit_wait()) {
+    fl.query = q;
+    fl.pending = true;
+    next_flight_ = (next_flight_ + 1) % kFlights;
+    in_flight_++;
+    return true;
+  }
+
+  /* The oldest submission in flight: waited for, its time taken into the busy sum. */
+  bool wait_oldest(std::string *err) override {
+    if (in_flight_ == 0) return false;
+    const int oldest = (next_flight_ + kFlights - in_flight_) % kFlights;
+    Flight &fl = flights_[oldest];
+    if (fake_slow_ms_ > 0.0) std::this_thread::sleep_for(std::chrono::microseconds((long long)(fake_slow_ms_ * 1000.0)));  // (the test hook: a slow card)
+    const bool ok = f_.vkWaitForFences(dev_, 1, &fl.fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    fl.pending = false;
+    in_flight_--;
+    if (!ok) {
       if (err) *err = info_.name + ": the GPU stopped responding (device lost)";
       return false;
     }
-    read_gpu_time();
+    const double ms = gpu_time_of(fl.query);
+    if (ms >= 0.0) busy_acc_ = std::max(0.0, busy_acc_) + ms;
     return true;
   }
+  bool wait_all(std::string *err) override {
+    while (in_flight_ > 0)
+      if (!wait_oldest(err)) return false;
+    return true;
+  }
+  int in_flight() const override { return in_flight_; }
+  double take_busy_ms() override {
+    const double b = busy_acc_;
+    busy_acc_ = -1.0;
+    return b;
+  }
+
+  /* The samples' dispatches (task 0105: up to kSamplesPerDispatch samples a dispatch, summed in registers: the
+   * accumulation and the denoiser's planes are read and written once for them, not once a sample). */
+  void record_samples(VkCommandBuffer cmd, int first, int count) {
+    f_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+    f_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
+    const uint32_t gx = (uint32_t)(scene_params_.size[0] + 7) / 8, gy = (uint32_t)(scene_params_.size[1] + 7) / 8;
+    constexpr int kSamplesPerDispatch = 8;
+    for (int i = 0; i < count; i += kSamplesPerDispatch) {
+      const int pc[2] = {first + i, std::min(kSamplesPerDispatch, count - i)};
+      f_.vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, pc);
+      f_.vkCmdDispatch(cmd, gx, gy, 1);
+      VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+      mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+      mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+      f_.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+  }
+
   double last_gpu_ms() const override { return last_gpu_ms_; }
 
   void download_accum(std::vector<float> &accum) override {
+    wait_all(nullptr);  // (nothing may be writing the sums)
     begin();
     VkBufferCopy c{0, 0, pixels_ * 16};
     f_.vkCmdCopyBuffer(cmd_, bufs_[1].buf, readback_.buf, 1, &c);
@@ -570,6 +640,7 @@ class VulkanRenderer final : public Renderer {
     accum.assign(p, p + pixels_ * 4);
   }
   void download_aux(std::vector<float> &albedo, std::vector<float> &normal_depth, std::vector<float> *coverage) override {
+    wait_all(nullptr);
     begin();
     VkBufferCopy c{0, pixels_ * 16, pixels_ * 48};
     f_.vkCmdCopyBuffer(cmd_, bufs_[2].buf, readback_.buf, 1, &c);
@@ -616,7 +687,20 @@ class VulkanRenderer final : public Renderer {
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
-  VkQueryPool queries_ = VK_NULL_HANDLE;  // task 0159: two timestamps round a render's dispatches
+  /* Task 0161: the render submissions in flight, each its own command buffer, fence and pair of timestamps. */
+  static constexpr int kFlights = 2;
+  struct Flight {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    uint32_t query = 0;
+    bool pending = false;
+  };
+  Flight flights_[kFlights];
+  int next_flight_ = 0, in_flight_ = 0;
+  double busy_acc_ = -1.0;
+  double fake_slow_ms_ = 0.0;
+  uint64_t last_end_ticks_ = 0;  // (the card's clock where the last finished submission ended)
+  VkQueryPool queries_ = VK_NULL_HANDLE;  // task 0159: two timestamps round a render's dispatches (two pairs since task 0161)
   bool timestamps_ = false;
   float ts_period_ns_ = 0.0f;
   double last_gpu_ms_ = -1.0;
@@ -1005,6 +1089,8 @@ class VulkanRenderer final : public Renderer {
     if (set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, set_layout_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
     if (fence_) f_.vkDestroyFence(dev_, fence_, nullptr);
+    for (Flight &fl : flights_)
+      if (fl.fence) f_.vkDestroyFence(dev_, fl.fence, nullptr);
     if (queries_) f_.vkDestroyQueryPool(dev_, queries_, nullptr);
     if (pool_) f_.vkDestroyCommandPool(dev_, pool_, nullptr);
     f_.vkDestroyDevice(dev_, nullptr);

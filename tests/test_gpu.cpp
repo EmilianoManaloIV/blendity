@@ -1365,6 +1365,118 @@ static void tests_round180() {
   });
 }
 
+static void tests_round181() {
+  test("path tracer off the main thread: with a card that takes 30 ms a submission (the test hook), twenty polls each return in under 10 ms while it renders, the render completes with every sample, and pause() mid-render returns within 150 ms (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    gpu::drop_ready_renderers_for_test();  // (a device opened before the hook would not sleep)
+    set_env("BLENDITY_GPU_FAKE_SLOW", "30");
+    auto sphere = primitives::uv_sphere(0.5f, 16, 8);
+    std::vector<MaterialPtr> mats = {make_material("Grey", Vec3(0.5f))};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0.5f, 0.5f, 0.5f};
+    double worst_poll = 0.0, pause_ms = 0.0;
+    int done = 0, polls = 0;
+    {
+      PathTracer pt;
+      PTSettings st;
+      st.use_cpu = false;
+      st.gpus = {0};
+      st.denoise = false;
+      pt.set_settings(st);
+      pt.build({{&sphere->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+      pt.set_camera(Mat4::look_at({0, 1, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 50), 64, 64);
+      CHECK(pt.gpu_async());
+      ScopedTimer total;
+      while (done < 64 && total.ms() < 20000.0) {
+        ScopedTimer call;
+        done = pt.render(4.0, 64);
+        if (polls < 20) worst_poll = std::max(worst_poll, call.ms());
+        polls++;
+      }
+      std::printf("    %d samples after %d polls in %.0f ms; the slowest of the first twenty polls %.1f ms\n", done, polls, total.ms(), worst_poll);
+      CHECK(done == 64);
+      CHECK(worst_poll < 10.0);
+      /* A second render stopped early: pause waits for what is in flight (two 30 ms submissions at most) and the sums. */
+      pt.set_camera(Mat4::look_at({0, 1, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 50), 64, 64);
+      ScopedTimer going;
+      int begun = 0;
+      while (begun == 0 && going.ms() < 5000.0) {  // (polls until the card has a chunk done: then two more are in flight)
+        pt.render(4.0, 4000);
+        for (int n : pt.stats().gpu_samples) begun += n;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      ScopedTimer p;
+      pt.pause();
+      pause_ms = p.ms();
+      std::printf("    pause() mid-render: %.1f ms\n", pause_ms);
+      CHECK(pause_ms < 150.0);
+      int on_card = 0;
+      for (int n : pt.stats().gpu_samples) on_card += n;
+      std::printf("    %d samples finished on the card when paused\n", on_card);
+      CHECK(on_card > 0 && on_card < 4000);
+    }
+    set_env("BLENDITY_GPU_FAKE_SLOW", "");
+    gpu::drop_ready_renderers_for_test();  // (a spare opened under the hook would sleep for the next test)
+  });
+
+  test("path tracer off the main thread: the editor's F12 on a slow card (the test hook) keeps twenty frames short while the render goes on - under 10 ms but for the ones that merge and resolve the picture - and finishes (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    gpu::drop_ready_renderers_for_test();
+    set_env("BLENDITY_GPU_FAKE_SLOW", "30");
+    {
+      Editor ed;
+      r34_open(ed);
+      ed.command("engine path");
+      ed.command("device gpu");
+      ed.command("samples 400");
+      ed.command("render");
+      ScopedTimer total;
+      bool on_card = false;
+      while (!on_card && total.ms() < 20000.0) {  // (the device opens on a worker; the CPU traces meanwhile)
+        ed.step_frame_headless();
+        on_card = ed.render_status_for_test().find("GPU") != std::string::npos && ed.render_status_for_test().find("starting") == std::string::npos;
+        if (!ed.rendering_for_test()) ed.command("render");
+      }
+      CHECK(on_card);
+      for (int i = 0; i < 5 && ed.rendering_for_test(); i++) ed.step_frame_headless();  // (the card settles: its upload and the first merge)
+      double worst = 0.0;
+      int frames = 0;
+      std::string times;
+      while (ed.rendering_for_test() && frames < 20 && total.ms() < 30000.0) {
+        ScopedTimer f;
+        ed.step_frame_headless();
+        if (!ed.rendering_for_test()) break;  // (the finishing frame denoises and resolves: not a poll)
+        worst = std::max(worst, f.ms());
+        times += strprintf("%.1f ", f.ms());
+        frames++;
+      }
+      int quick = 0;
+      for (size_t at = 0; at < times.size();) {  // (the frames under 10 ms)
+        const size_t sp = times.find(' ', at);
+        quick += std::atof(times.substr(at, sp - at).c_str()) < 10.0 ? 1 : 0;
+        at = sp == std::string::npos ? times.size() : sp + 1;
+      }
+      std::printf("    frames: %s(%d of them under 10 ms; a frame that merges new samples resolves the 1280x720 picture, about 12 ms more)\n", times.c_str(), quick);
+      while (ed.rendering_for_test() && total.ms() < 40000.0) ed.step_frame_headless();
+      std::printf("    %d frames measured, the slowest %.1f ms; %s\n", frames, worst, ed.render_status_for_test().c_str());
+      CHECK(frames == 20 && quick >= 16 && worst < 30.0);
+      CHECK(!ed.rendering_for_test());
+    }
+    set_env("BLENDITY_GPU_FAKE_SLOW", "");
+    for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    gpu::drop_ready_renderers_for_test();
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -1373,4 +1485,5 @@ void run_gpu_tests() {
   tests_round130();
   tests_round179();
   tests_round180();
+  tests_round181();
 }

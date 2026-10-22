@@ -183,6 +183,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   gpu_error_.clear();
   if (!settings_.gpus.empty() && gpu::available()) sync_gpus();
   else {
+    stop_all_workers();  // (task 0161: a slot's worker ends before the slot goes)
     gpus_.clear();
     parked_gpus_.clear();
     gpu_starting_ = false;  // back on the CPU: nothing to wait for
@@ -559,6 +560,13 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
 }
 
 void PathTracer::reset() {
+  pause();
+  for (auto &g : gpus_) {  // (task 0161: the host copies of the sums go with them)
+    std::lock_guard<std::mutex> lock(g->host_mutex);
+    g->host_accum.clear();
+    g->host_samples = 0;
+    g->host_fresh = false;
+  }
   samples_ = 0;
   stats_.max_submit_ms = 0;
   stats_.gpu_busy_ms = -1, stats_.gpu_wait_ms = 0;
@@ -1835,6 +1843,7 @@ void PathTracer::sync_gpus() {
   std::vector<int> want;
   for (int i : settings_.gpus)
     if (i >= 0 && i < (int)devs.size() && std::find(want.begin(), want.end(), i) == want.end()) want.push_back(i);
+  pause();  // (task 0161: no worker touches a device while the slots change)
   /* Devices set aside because the last scene didn't fit them (task 0051) come back for this one. */
   for (auto &g : parked_gpus_) gpus_.push_back(std::move(g));
   parked_gpus_.clear();
@@ -1844,7 +1853,10 @@ void PathTracer::sync_gpus() {
     bool keep = std::find(want.begin(), want.end(), s.index) != want.end() &&
                 s.hw_rt == (settings_.gpu_hardware_rt && devs[(size_t)s.index].hardware_rt);
     if (keep) k++;
-    else gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+    else {
+      stop_worker(s);
+      gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
+    }
   }
   /* Opened in parallel: on a cold driver cache, building each device's
    * pipeline takes seconds. */
@@ -2276,6 +2288,7 @@ bool PathTracer::adopt_ready_gpus() {
 
 void PathTracer::upload_gpus() {
   if (gpus_.empty()) return;
+  pause();
   ScopedTimer t;
   gpu::Scene gs;
   uint64_t vram = 0;  // the smallest card's: one scene is uploaded to every GPU (a card reporting none is skipped)
@@ -2310,6 +2323,7 @@ void PathTracer::upload_gpus() {
     }
     gpu_error_ += (gpu_error_.empty() ? "" : "; ") + err;
     Log::warn("GPU %s dropped: %s", gpus_[k]->r->info().name.c_str(), err.c_str());
+    stop_worker(*gpus_[k]);
     gpus_.erase(gpus_.begin() + (std::ptrdiff_t)k);
   }
   stats_.bvh_build_ms += t.ms();
@@ -2410,6 +2424,8 @@ std::vector<float> PathTracer::coverage() {
 
 void PathTracer::merge_aux() {
   if (aux_merged_ || gpus_.empty()) return;
+  pause();
+  if (samples_ != done_total_) merge_gpus();  // (the colour sums and the planes at the same sample count)
   const size_t n = (size_t)w_ * h_;
   std::vector<std::vector<float>> ga(gpus_.size()), gn(gpus_.size()), gc(gpus_.size());
   for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_aux(ga[k], gn[k], &gc[k]);
@@ -2467,117 +2483,338 @@ int PathTracer::render(double budget_ms, int max_samples) {
   }
   if (w_ <= 0 || h_ <= 0) return samples_;
   if (done_total_ >= max_samples) {
+    pause();
     if (samples_ < done_total_) merge_gpus();  // finished: show everything
     return done_total_;
   }
-  /* Every device claims whole samples of the frame from one counter until the
-   * target or the time budget is reached; their sums are added afterwards
-   * (an average of independent samples, so no seams between devices). */
+  /* Every device claims whole samples of the frame from one counter until the target is reached; their sums are
+   * added afterwards (an average of independent samples, so no seams between devices). The cards' threads keep
+   * going between calls (task 0161): this call feeds the CPU's own samples, or waits a little, then merges. */
   ScopedTimer t;
-  std::atomic<int> next{done_total_};
-  std::atomic<bool> any{false};
-  std::vector<std::thread> threads;
-  std::mutex err_mutex;
-  std::vector<size_t> failed;
-  for (size_t k = 0; k < gpus_.size(); k++)
-    threads.emplace_back([&, k] {
-      GpuSlot &g = *gpus_[k];
-      for (;;) {
-        double left = budget_ms - t.ms();
-        if (left <= 0 && any.load()) break;
-        /* Guided self-scheduling: claim half of this device's fair share of
-         * what is left (by measured speed), so chunks shrink toward the end
-         * and fast and slow devices finish together. Never more than fits
-         * the time budget. */
-        int n = 1;
-        if (g.ms_per_sample > 0) {
-          double rate = 1.0 / g.ms_per_sample, total = settings_.use_cpu && cpu_ms_per_sample_ > 0 ? 1.0 / cpu_ms_per_sample_ : 0.0;
-          for (auto &o : gpus_) total += o->ms_per_sample > 0 ? 1.0 / o->ms_per_sample : rate;
-          double share = (max_samples - next.load()) * rate / std::max(total, 1e-9) * 0.5;
-          /* And no submission over 100 ms: a slow card (a GTX 1050 Ti tracing in software) given 64 samples of a big
-           * frame at once would pass Windows' 2 s driver timeout, which resets the GPU (task 0051). */
-          n = (int)std::max(1.0, std::min({64.0, share, left > 0 ? left / g.ms_per_sample : 1.0, 100.0 / g.ms_per_sample}));
-        }
-        int first = next.fetch_add(n);
-        if (first >= max_samples) break;
-        n = std::min(n, max_samples - first);
-        ScopedTimer bt;
-        std::string err;
-        if (!g.r->render(first, n, &err)) {
-          std::lock_guard<std::mutex> lock(err_mutex);
-          gpu_error_ = err;
-          failed.push_back(k);
-          break;
-        }
-        const double submit_ms = bt.ms(), busy_ms = g.r->last_gpu_ms();
-        {
-          std::lock_guard<std::mutex> lock(err_mutex);
-          stats_.max_submit_ms = std::max(stats_.max_submit_ms, submit_ms);
-          if (busy_ms >= 0.0) {  // (task 0159: the card's own time, and the call's rest as the wait)
-            stats_.gpu_busy_ms = std::max(0.0, stats_.gpu_busy_ms) + busy_ms;
-            stats_.gpu_wait_ms += std::max(0.0, submit_ms - busy_ms);
-          }
-        }
-        double ms = submit_ms / n;
-        g.ms_per_sample = g.ms_per_sample > 0 ? g.ms_per_sample * 0.5 + ms * 0.5 : ms;
-        g.samples += n;
-        any = true;
-      }
-    });
-  if (settings_.use_cpu) {
-    /* The CPU renders one sample per pass; it stops at the budget like the
-     * GPUs, and doesn't take a sample when the GPUs would finish everything
-     * left before it could finish that one (everyone would wait for it). */
-    for (;;) {
-      if (t.ms() >= budget_ms && any.load()) break;
-      if (cpu_ms_per_sample_ > 0) {
-        double gpu_rate = 0;  // samples per ms, all GPUs
-        for (auto &g : gpus_) gpu_rate += g->ms_per_sample > 0 ? 1.0 / g->ms_per_sample : 0.0;
-        int remaining = max_samples - next.load();
-        if (gpu_rate > 0 && remaining < cpu_ms_per_sample_ * gpu_rate) break;
-      }
-      int before = cpu_samples_;
-      ScopedTimer ct;
-      render_cpu(0.0, max_samples, &next);  // one pass (budget 0 = stop after it)
-      if (cpu_samples_ == before) break;
-      double ms = ct.ms();
-      cpu_ms_per_sample_ = cpu_ms_per_sample_ > 0 ? cpu_ms_per_sample_ * 0.5 + ms * 0.5 : ms;
-      any = true;
-    }
-  }
-  for (auto &th : threads) th.join();
-  /* A device that failed (driver reset, out of memory) leaves; the others go on.
-   * Its partial sums are dropped with it, so the average stays consistent. */
-  std::sort(failed.begin(), failed.end());
-  for (size_t k = failed.size(); k-- > 0;) {
-    Log::warn("GPU %s stopped: %s", gpus_[failed[k]]->r->info().name.c_str(), gpu_error_.c_str());
-    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)failed[k]);
-  }
-  done_total_ = cpu_samples_;
-  stats_.gpu_samples.clear();
-  for (auto &g : gpus_) {
-    done_total_ += g->samples;
-    stats_.gpu_samples.push_back(g->samples);
-  }
-  stats_.cpu_samples = cpu_samples_;
-  /* Reading the GPUs back costs time, so the picture is merged only when it
-   * is shown: at the end, at first, and every merge interval in between. */
-  if (done_total_ >= max_samples || samples_ == 0 || merge_clock_.ms() >= settings_.merge_interval_ms) merge_gpus();
+  start_workers(max_samples);
+  if (settings_.use_cpu) render_cpu_beside_gpus(budget_ms, max_samples);
+  wait_for_workers(std::max(0.0, budget_ms - t.ms()));  // (with the CPU beside: the cards' last chunks, so a long budget ends with every sample done)
+  gather_workers(max_samples);
   stats_.render_ms += t.ms();
   return done_total_;
 }
 
-/* The CPU's colour sums plus each GPU's (read back). Albedo and normals are
- * only needed by the denoiser, so they merge on demand (merge_aux). */
+/* The CPU renders one sample per pass; it stops at the budget like the GPUs, and doesn't take a sample when the
+ * GPUs would finish everything left before it could finish that one (everyone would wait for it). */
+void PathTracer::render_cpu_beside_gpus(double budget_ms, int max_samples) {
+  ScopedTimer t;
+  for (;;) {
+    if (t.ms() >= budget_ms && cpu_samples_ > 0) break;
+    if (next_sample_.load() >= max_samples) break;
+    if (cpu_ms_per_sample_ > 0) {
+      double gpu_rate = 0;  // samples per ms, all GPUs
+      {
+        std::lock_guard<std::mutex> lock(work_mutex_);
+        for (auto &g : gpus_) gpu_rate += g->ms_per_sample > 0 ? 1.0 / g->ms_per_sample : 0.0;
+      }
+      const int remaining = max_samples - next_sample_.load();
+      if (gpu_rate > 0 && remaining < cpu_ms_per_sample_ * gpu_rate) break;
+    }
+    const int before = cpu_samples_;
+    ScopedTimer ct;
+    render_cpu(0.0, max_samples, &next_sample_);  // one pass (budget 0 = stop after it)
+    if (cpu_samples_ == before) break;
+    const double ms = ct.ms();
+    std::lock_guard<std::mutex> lock(work_mutex_);  // (the workers read the rate)
+    cpu_ms_per_sample_ = cpu_ms_per_sample_ > 0 ? cpu_ms_per_sample_ * 0.5 + ms * 0.5 : ms;
+  }
+}
+
+/* At most the budget, or until every card's worker idles. A budget under 8 ms is a poll and returns at once: a
+ * condition variable's timed wait rounds a few milliseconds up to the scheduler's tick on Windows (15.6 ms), and
+ * the editor's pacer paces its frame itself. */
+void PathTracer::wait_for_workers(double budget_ms) {
+  if (budget_ms < 8.0) return;
+  std::unique_lock<std::mutex> lock(work_mutex_);
+  idle_cv_.wait_for(lock, std::chrono::microseconds((long long)(budget_ms * 1000.0)), [&] { return workers_idle_locked(); });
+}
+
+/* (Under work_mutex_.) */
+int PathTracer::finished_samples_locked() const {
+  int n = cpu_samples_;
+  for (const auto &g : gpus_) n += g->samples;
+  return n;
+}
+bool PathTracer::workers_idle_locked() const {
+  for (const auto &g : gpus_)
+    if (g->active) return false;
+  return true;
+}
+
+/* What the cards have finished: the counts and times into the stats, a device that failed set aside, a merge when
+ * due. */
+void PathTracer::gather_workers(int max_samples) {
+  std::vector<size_t> failed;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    stats_.gpu_samples.clear();
+    for (size_t k = 0; k < gpus_.size(); k++) {
+      GpuSlot &g = *gpus_[k];
+      if (g.failed) failed.push_back(k);
+      stats_.gpu_samples.push_back(g.samples);
+      stats_.max_submit_ms = std::max(stats_.max_submit_ms, g.max_submit_ms);
+      if (g.busy_ms > 0.0 || g.wait_ms > 0.0) {  // (task 0159: the cards' own time, and the rest of the wait)
+        stats_.gpu_busy_ms = std::max(0.0, stats_.gpu_busy_ms) + g.busy_ms;
+        stats_.gpu_wait_ms += g.wait_ms;
+      }
+      g.busy_ms = g.wait_ms = 0.0;
+    }
+    done_total_ = finished_samples_locked();
+    stats_.cpu_samples = cpu_samples_;
+  }
+  if (!failed.empty()) drop_failed_gpus(failed);
+  const bool finished = done_total_ >= max_samples;
+  if (finished) pause();
+  /* Reading the GPUs back costs time, so the picture is merged only when it is shown: at the end, at first, and
+   * every merge interval in between. The workers download their sums when asked; the merge takes the copies made. */
+  if (!finished && samples_ != 0 && merge_clock_.ms() < settings_.merge_interval_ms) return;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    for (auto &g : gpus_) g->merge_wanted = true;
+  }
+  merge_gpus();
+}
+
+/* A device that failed (driver reset, out of memory) leaves; the others go on. Its partial sums are dropped with
+ * it, so the average stays consistent. */
+void PathTracer::drop_failed_gpus(const std::vector<size_t> &failed) {
+  pause();
+  for (size_t k = failed.size(); k-- > 0;) {
+    GpuSlot &g = *gpus_[failed[k]];
+    gpu_error_ = g.error;
+    Log::warn("GPU %s stopped: %s", g.r->info().name.c_str(), g.error.c_str());
+    stop_worker(g);
+    gpus_.erase(gpus_.begin() + (std::ptrdiff_t)failed[k]);
+  }
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  done_total_ = finished_samples_locked();
+}
+
+/* The cards' workers started toward `max_samples` (a worker lives as long as its slot; it idles between renders).
+ * Every able slot counts as active from here, so a poll never sees them idle before they wake. */
+void PathTracer::start_workers(int max_samples) {
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    target_samples_ = max_samples;
+    if (!workers_go_) next_sample_ = finished_samples_locked();  // (nothing in flight: the counter starts from what is done)
+    workers_go_ = true;
+    for (auto &g : gpus_) {
+      if (g->failed || next_sample_.load() >= max_samples) continue;  // (nothing left to claim: a finished card stays idle)
+      g->active = true;
+      if (!g->worker.joinable()) g->worker = std::thread([this, s = g.get()] { worker_loop(*s); });
+    }
+  }
+  work_cv_.notify_all();
+}
+
+/* Everything the cards had in flight finished and their workers idle: the device and the sums are the caller's. */
+void PathTracer::pause() {
+  std::unique_lock<std::mutex> lock(work_mutex_);
+  workers_go_ = false;
+  idle_cv_.wait(lock, [&] { return workers_idle_locked(); });
+  done_total_ = finished_samples_locked();
+  stats_.gpu_samples.clear();
+  for (auto &g : gpus_) stats_.gpu_samples.push_back(g->samples);
+}
+
+/* A slot's worker ended (its own quit flag; the others sleep on) before the slot goes. */
+void PathTracer::stop_worker(GpuSlot &g) {
+  if (!g.worker.joinable()) return;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    g.quit = true;
+  }
+  work_cv_.notify_all();
+  g.worker.join();
+}
+void PathTracer::stop_all_workers() {
+  pause();
+  for (auto &g : gpus_) stop_worker(*g);
+  for (auto &g : parked_gpus_) stop_worker(*g);
+}
+
+void PathTracer::set_settings(const PTSettings &s) {
+  pause();  // (the workers read the settings)
+  settings_ = s;
+}
+
+PathTracer::~PathTracer() { stop_all_workers(); }
+
+/* Guided self-scheduling: claim half of this device's fair share of what is left (by measured speed), so chunks
+ * shrink toward the end and fast and slow devices finish together. And no chunk over 50 ms: a slow card (a GTX
+ * 1050 Ti tracing in software) given 64 samples of a big frame at once would pass Windows' 2 s driver timeout, which
+ * resets the GPU (task 0051, a 100 ms cap), and a pause - a camera move, a stop - waits for the two chunks in flight
+ * (task 0161: halved for that). */
+int PathTracer::worker_chunk(const GpuSlot &g) {
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  if (g.ms_per_sample <= 0) return 1;
+  const double rate = 1.0 / g.ms_per_sample;
+  double total = settings_.use_cpu && cpu_ms_per_sample_ > 0 ? 1.0 / cpu_ms_per_sample_ : 0.0;
+  for (const auto &o : gpus_) total += o->ms_per_sample > 0 ? 1.0 / o->ms_per_sample : rate;
+  const double share = (target_samples_ - next_sample_.load()) * rate / std::max(total, 1e-9) * 0.5;
+  return (int)std::max(1.0, std::min({64.0, share, 50.0 / g.ms_per_sample}));
+}
+
+/* A chunk claimed and submitted (two may be in flight); false when nothing is left or the card failed. */
+bool PathTracer::worker_submit_chunk(GpuSlot &g, int &n) {
+  n = worker_chunk(g);
+  int target;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    target = target_samples_;
+  }
+  /* The claim as a compare-and-swap: the counter never passes the target (a card that finds nothing left claims
+   * nothing, and a raised target starts where the last one ended). */
+  int first = next_sample_.load();
+  for (;;) {
+    if (first >= target) return false;
+    n = std::min(n, target - first);
+    if (next_sample_.compare_exchange_weak(first, first + n)) break;
+  }
+  std::string err;
+  if (g.r->submit(first, n, &err)) return true;
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  g.error = err;
+  g.failed = true;
+  return false;
+}
+
+/* The oldest submission waited for: its samples counted, its time into the slot's sums (task 0159: the card's own
+ * time from its timestamps, the rest of the wall time as the wait). */
+void PathTracer::worker_finish_oldest(GpuSlot &g, int n) {
+  ScopedTimer wt;
+  std::string err;
+  const bool ok = g.r->wait_oldest(&err);
+  const double wall = wt.ms(), busy = g.r->take_busy_ms();
+  std::lock_guard<std::mutex> lock(work_mutex_);
+  if (!ok) {
+    g.error = err;
+    g.failed = true;
+    return;
+  }
+  g.max_submit_ms = std::max(g.max_submit_ms, wall);
+  if (busy >= 0.0) {
+    g.busy_ms += busy;
+    g.wait_ms += std::max(0.0, wall - busy);
+  }
+  const double ms = std::max(wall, busy) / std::max(1, n);
+  g.ms_per_sample = g.ms_per_sample > 0 ? g.ms_per_sample * 0.5 + ms * 0.5 : ms;
+  g.samples += n;
+}
+
+/* Every chunk in flight finished. */
+void PathTracer::worker_drain(GpuSlot &g, std::vector<int> &flight) {
+  while (!flight.empty()) {
+    worker_finish_oldest(g, flight.front());
+    flight.erase(flight.begin());
+  }
+}
+
+/* The card's sums into the host copy the main thread merges from (its in-flight work waited for first). */
+void PathTracer::worker_download(GpuSlot &g) {
+  g.r->wait_all(nullptr);
+  std::vector<float> sums;
+  g.r->download_accum(sums);
+  int samples;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    samples = g.samples;
+    g.merge_wanted = false;
+  }
+  std::lock_guard<std::mutex> lock(g.host_mutex);
+  g.host_accum.swap(sums);
+  g.host_samples = samples;
+  g.host_fresh = true;
+}
+
+/* One render's worth on a card: chunks claimed and kept two in flight until the target, a stop or a failure; the
+ * sums downloaded when a merge is wanted and when it stops. */
+void PathTracer::worker_render(GpuSlot &g) {
+  std::vector<int> flight;  // the chunk sizes in flight, oldest first
+  for (;;) {
+    bool go, merge, failed;
+    {
+      std::lock_guard<std::mutex> lock(work_mutex_);
+      go = workers_go_ && !g.quit;
+      merge = g.merge_wanted;
+      failed = g.failed;
+    }
+    if (!go || failed) break;
+    if (merge) {  // (a merge is due: the flights drained, the sums copied out, then on)
+      worker_drain(g, flight);
+      worker_download(g);
+      continue;
+    }
+    int n = 0;
+    if (flight.size() < 2 && worker_submit_chunk(g, n)) {
+      flight.push_back(n);
+      continue;
+    }
+    if (flight.empty()) break;  // (nothing left to claim and nothing in flight: done)
+    worker_finish_oldest(g, flight.front());
+    flight.erase(flight.begin());
+  }
+  worker_drain(g, flight);
+  bool failed;
+  {
+    std::lock_guard<std::mutex> lock(work_mutex_);
+    failed = g.failed;
+  }
+  if (!failed) worker_download(g);
+}
+
+/* A card's worker: idle until asked, a render, idle again; it ends on its slot's quit. */
+void PathTracer::worker_loop(GpuSlot &g) {
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lock(work_mutex_);
+      work_cv_.wait(lock, [&] { return g.quit || g.active; });  // (active is the main thread's word; a pause between the start and this wake leaves go off, and the render loop returns at once)
+      if (g.quit) {
+        g.active = false;
+        idle_cv_.notify_all();
+        return;
+      }
+    }
+    worker_render(g);
+    {
+      std::lock_guard<std::mutex> lock(work_mutex_);
+      g.active = false;
+      if (workers_idle_locked() && next_sample_.load() >= target_samples_) workers_go_ = false;  // (done: the next render() starts anew)
+    }
+    idle_cv_.notify_all();
+  }
+}
+
+/* The CPU's colour sums plus each GPU's (the host copies its worker downloaded; an idle card's sums taken now when
+ * its copy is stale). Albedo and normals are only needed by the denoiser, so they merge on demand (merge_aux). */
 void PathTracer::merge_gpus() {
   const size_t n = (size_t)w_ * h_;
   std::vector<std::vector<float>> gsum(gpus_.size());
-  for (size_t k = 0; k < gpus_.size(); k++) gpus_[k]->r->download_accum(gsum[k]);
+  int merged = cpu_samples_;
+  for (size_t k = 0; k < gpus_.size(); k++) {
+    GpuSlot &g = *gpus_[k];
+    bool take_now;
+    {
+      std::lock_guard<std::mutex> lock(work_mutex_);
+      take_now = !workers_go_ && !g.active && !g.host_fresh && !g.failed;  // (idle for good until the next start: the main thread may drive the device)
+    }
+    if (take_now) worker_download(g);
+    std::lock_guard<std::mutex> lock(g.host_mutex);
+    gsum[k] = g.host_accum;
+    merged += g.host_samples;
+    g.host_fresh = false;
+  }
   JobSystem::global().parallel_for((int64_t)n, 16384, [&](int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) {
       Vec3 c = cpu_accum_[i];
       float ld = cpu_last_dist_[i];
       for (const auto &g : gsum) {
+        if (g.size() < n * 4) continue;  // (a card that has not downloaded yet)
         c += Vec3(g[i * 4], g[i * 4 + 1], g[i * 4 + 2]);
         if (g[i * 4 + 3] > 0.0f) ld = g[i * 4 + 3];  // a GPU's last hitting sample (accum's w)
       }
@@ -2586,7 +2823,7 @@ void PathTracer::merge_gpus() {
     }
   });
   aux_merged_ = false;
-  samples_ = done_total_;
+  samples_ = merged;  // (what the picture holds: the CPU's and each card's downloaded sums)
   merge_clock_ = ScopedTimer();
 }
 

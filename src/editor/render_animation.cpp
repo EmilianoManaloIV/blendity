@@ -103,6 +103,7 @@ void Editor::stop_render_animation() {
   if (!ranim_.active) return;
   ranim_.active = false;
   if (rendering_) rendering_ = false;
+  final_pt_.pause();  // (task 0161: the cards stop too)
   if (ranim_.source == 1) seq_set_preview(false);
   else anim_set_preview(false);
   invalidate_project_listing();

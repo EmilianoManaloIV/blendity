@@ -24,8 +24,10 @@
 #include "shading.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -127,7 +129,7 @@ class PathTracer {
   /* Scene input (world space). Environment and lights are copied. */
   void build(const std::vector<PTObject> &objects, const std::vector<RenderLight> &lights, const Environment &env);
   void set_camera(const Mat4 &view, const Mat4 &proj, int width, int height, const PTLens &lens = PTLens());
-  void set_settings(const PTSettings &s) { settings_ = s; }
+  void set_settings(const PTSettings &s);  // (pauses the cards' workers first: they read the settings)
   const PTSettings &settings() const { return settings_; }
   /* What the camera sees first through each pixel's centre (no jitter, no lens), as the rasterizer's depth and id
    * planes hold it: the distance along that ray (1e6 for the sky) and the object's id (0 for the sky). Traced once
@@ -137,8 +139,16 @@ class PathTracer {
   void reset();
 
   /* Adds samples for up to `budget_ms` (at least one full sample pass).
-   * Returns the number of completed samples per pixel. */
+   * Returns the number of completed samples per pixel. With GPUs (task 0161, ADR 0052) the cards work on their
+   * own threads between calls: the call starts them toward max_samples, renders the CPU's own samples for the
+   * budget when the CPU is a device, else waits at most the budget for the cards, merges what they have finished
+   * when a merge is due, and returns the samples finished so far. */
   int render(double budget_ms, int max_samples);
+  /* The cards' threads stopped (their submissions finished); the stats and sums settled. Called before anything
+   * that touches a device or the sums; cheap when nothing runs. */
+  void pause();
+  bool gpu_async() const { return !gpus_.empty(); }  // (the cards work between render() calls)
+  ~PathTracer();
   int samples() const { return samples_; }
   int width() const { return w_; }
   int height() const { return h_; }
@@ -282,9 +292,43 @@ class PathTracer {
     std::unique_ptr<gpu::Renderer> r;
     int index = 0;
     bool hw_rt = false;
-    int samples = 0;
+    /* Task 0161 (ADR 0052): the card's worker thread and its state. Under work_mutex_: samples, ms_per_sample,
+     * failed, error, active, merge_wanted, quit and the timing sums; under host_mutex: the host copy of the sums. */
+    int samples = 0;         // finished on the card
     double ms_per_sample = 0;
+    std::thread worker;
+    bool active = false;     // in its render loop (counted from start_workers, so a poll never sees it idle before it wakes)
+    bool merge_wanted = false;
+    bool quit = false;
+    bool failed = false;
+    std::string error;
+    double busy_ms = 0, wait_ms = 0, max_submit_ms = 0;  // since the last gather (the stats are the main thread's)
+    std::vector<float> host_accum;  // the card's sums as last downloaded
+    int host_samples = 0;           // how many samples host_accum holds
+    bool host_fresh = false;
+    std::mutex host_mutex;
   };
+  void start_workers(int max_samples);
+  void stop_worker(GpuSlot &g);
+  void stop_all_workers();
+  void render_cpu_beside_gpus(double budget_ms, int max_samples);
+  void wait_for_workers(double budget_ms);
+  void gather_workers(int max_samples);
+  void drop_failed_gpus(const std::vector<size_t> &failed);
+  int finished_samples_locked() const;
+  bool workers_idle_locked() const;
+  void worker_loop(GpuSlot &g);
+  void worker_render(GpuSlot &g);
+  bool worker_submit_chunk(GpuSlot &g, int &n);
+  void worker_finish_oldest(GpuSlot &g, int n);
+  void worker_drain(GpuSlot &g, std::vector<int> &flight);
+  void worker_download(GpuSlot &g);
+  int worker_chunk(const GpuSlot &g);
+  std::atomic<int> next_sample_{0};
+  int target_samples_ = 0;      // (under work_mutex_)
+  bool workers_go_ = false;     // (under work_mutex_)
+  std::mutex work_mutex_;
+  std::condition_variable work_cv_, idle_cv_;
   std::vector<std::unique_ptr<GpuSlot>> gpus_;
   mutable std::unique_ptr<gpu::Renderer> bake_gpu_;  // gpu_gather's device, and the build its scene came from
   mutable int bake_gpu_index_ = -1;
